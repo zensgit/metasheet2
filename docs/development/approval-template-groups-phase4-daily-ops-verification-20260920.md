@@ -654,3 +654,161 @@ python3 -c "print(open(F,'rb').read().count(b'\\x00'))"   # 必须 0
 4. 平铺模板列表非 org 作用域(后端既有性质)—— 登记为观察,未改。
 5. 合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— **全部未做,仍需 owner 逐条授权**。
 
+
+---
+
+## 11. 第 4 轮验证(对齐 `impl-gate-A5-daily-ops-round3-20260921.md`:1 P1 / 1 P2 / 3 P3,以及 `verify-a5-r3-three-p2-after-push-20260921.md` 的 (2) 与两条 LATENT)
+
+> **仍是 PROPOSED 候选件。** 未合并、未 undraft、未开 PR、未 ratify。下面每个数字都逐字抄自本机输出。
+> 本轮起点 head = 门审 head `c3ea127b12a95cc04db7628a0689af4f25d8c1b1`(`git rev-parse origin/feat/approval-template-groups-phase4-daily-ops` 逐字核对)。
+
+| 项 | 值 |
+|---|---|
+| 工作树 | `…/scratchpad/a5r4-fix`(`git worktree add --detach`;5 处 `node_modules` 软链自 canonical) |
+| 一次性库 | `metasheet2_a5r4_20260921`(`createdb -U postgres -O ms2testbed`;`current_database()` / `current_user=ms2testbed` / `rolsuper=f` 已 psql 核验) |
+| 连接串变量 | `.github/workflows/*.yml` 共 212 命中 / 3 个变量(`DATABASE_URL` 224、`ATTENDANCE_TEST_DATABASE_URL` 3、`SMOKE_DATABASE_URL` 1);三者**全部** export 指向该库;三个 `package.json` 零命中 |
+| 迁移 | `EXIT=0`,**413** 条 `was executed successfully`;`permission denied\|42501\|must be owner\|must be superuser` **零命中** |
+| 真后端 / Vite / 浏览器 | `:3411`(`NODE_ENV=development`)/ 修复头 `:5283`、r3 头 `:5284` / **自起 headless chromium(playwright 1.57),未用会话共享的 MCP 浏览器** |
+| 未触碰 | peer 工作树 `a5r3-impl` / `a5r3b-impl` / `a5r4-impl` 一个都没动 |
+
+### 11.1 改了什么(3 个源文件 + 5 个 spec + 2 个 MD;零新增文件)
+
+| 文件 | 改动 |
+|---|---|
+| `apps/web/src/approvals/templateStore.ts` | `loadTemplates` 加请求代数 + 身份签名,三出口各自守卫,返回 `ApprovalTemplateListOutcome`(`applied` / `failed` / `superseded`) |
+| `apps/web/src/composables/authPrincipal.ts` | `readAuthSessionSignature` 由模块私有改为**导出**(store 与监听器必须读同一个函数) |
+| `apps/web/src/views/approval/TemplateCenterView.vue` | `loadData().settle` 改为只认 `outcome === 'applied'`;删除页面层 `flatListGeneration`(机制已下沉,该守卫无可达输入);错误横幅 `:closable="!flatListStale"` |
+| `tests/approvalTemplateCenterCategory.spec.ts` | +18 条用例(6 条组件级 / 9 条 store 级 / 3 条 `onAuthSessionSwitch`);store mock 的 `loadTemplates` 默认解析值改为 `'applied'`;api mock 补 `listTemplates`/`getTemplate`/`getTemplateVersion`(真 store 经 `vi.importActual` 载入时要用);`ElAlert` stub 透出 `data-closable` |
+| `tests/approval-e2e-lifecycle.spec.ts` / `approval-e2e-permissions.spec.ts` / `approvalTemplateGovernance.spec.ts` / `templateCenterI18n.spec.ts` | 同一处 mock 默认解析值 `undefined → 'applied'` |
+
+### 11.2 新增用例(18 条,全部落在**既有**文件;零新文件 ⇒ 零 CI 接线改动)
+
+**组件级(6 条)** —— `(③ FLAT) an error left in the SHARED store slot …` / `(③ FLAT, failure exit) …` / `(③ FLAT, superseded exit) …` / `(② M-F) … exactly ONCE` / `(① M-J) …` / `(① M-K) …`
+
+**store 级(9 条,对真 `templateStore`,经 `vi.importActual` 绕开本文件的 store mock)** —— 2 条正控 + `(③ success exit)` / `(③ catch exit)` / `(③ finally exit)` + 3 条 `(① identity)` + 1 条「同主体换发令牌仍被作废」
+
+> 为什么必须对**真** store:5 个组件 spec 把 `templateStore` 整体换成 `vi.fn().mockResolvedValue(...)`,其 `error`/`loading` 是两个手驱 ref——store 的 catch 与 finally 出口在这些机具里**不是没测到,是测不到**。这 9 条是它们第一次被执行。
+
+**`onAuthSessionSwitch`(3 条)** —— 正控 + 「通知与延后读之间被拆卸 ⇒ 不得触发」+ 「被同一次通知里的另一个监听器拆卸 ⇒ 不得触发」。门审 M-D 的机械理由是 `grep -rln 'onAuthSessionSwitch' apps/web/tests/` **零文件**;本轮起不再为零。
+
+### 11.3 Mutation 台账 —— 本轮 8 条新探针 + r1/r2/r2b/r3 **全部按原编号重跑**
+
+规程:`cp` 备份到 `…/scratchpad/a5r4-backups/mutbak/` → 改坏 → 跑 → `cp` 还原 → `cmp` 校验。**零 `git checkout --` / 零 `reset --hard` / 零 `stash`。** 基线 = 6 个文件 **118 passed**。
+
+> **机具事故与其处置(如实记,不藏)**:第一版还原脚本按**basename** 在 `apps/web/src` 下找同名文件回写,而 `src` 下有**三个** `api.ts`(`utils/` `approvals/` `data-sources/`),于是把 `approvals/api.ts` 的内容盖到了另外两个上,随后一轮读数(22 failed)是污染读数、已作废。还原用的是整树 `cp` 备份 + `cmp` 校验(**没有**用 `git checkout --`),脚本改为显式相对路径白名单后基线复现 118 passed,全部探针重跑。第二起:macOS 文件系统大小写不敏感,`m_Mi.py` 与 `m_MI.py` 是同一个文件,r2 的 `M-a/M-c/M-e/M-f/M-g/M-h/M-i` 一批实际跑的是 r3 的 `M-A/M-C/M-E/M-F/M-G/M-H/M-I`;发现后按大小写无歧义的文件名全部重跑,下表是重跑后的读数。
+
+#### (a) 本轮 8 条新探针(P1 修法自身的承重证明)
+
+| 探针 | 改坏了什么 | 结果 | 红在哪 |
+|---|---|---|---|
+| **M-B′** | `loadData().settle` 的 `outcome === 'applied'` 条件删掉(任何结局都放下 stale) | **2 failed** | `(③ FLAT, failure exit)` / `(③ FLAT, superseded exit)` |
+| **M-B-old** | settle 换回第 3 轮的 `if (!store.error)` | **2 failed** | `(③ FLAT)` 共享槽位那条 / `(③ FLAT, superseded exit)` |
+| **M-B-S** | store 成功出口的 `if (!isCurrent()) return 'superseded'` 删掉 | **4 failed** | `(③ success exit)` / `(③ finally exit)` / 两条 `(① identity)` |
+| **M-B-C** | store 失败出口的同一行删掉 | **2 failed** | `(③ catch exit)` / 一条 `(① identity)` |
+| **M-B-F** | store `finally` 的 `if (isLatest())` 改成无条件 | **1 failed** | `(③ finally exit)` |
+| **M-B-SIG** | `isCurrent()` 退化成 `isLatest()`(丢掉身份签名) | **3 failed** | 三条 `(① identity)` |
+| **M-B-FSIG** | `finally` 的守卫改成 `isCurrent()`(把身份也算进去) | **1 failed** | `(① identity) …but that read still RELEASES loading` —— 即 §7.1 表里那条「转圈停不下来」 |
+| **M-CLOSABLE** | `:closable="!flatListStale"` 改回 `true` | **1 failed** | `(③ FLAT, failure exit)` 的 `data-closable` 断言 |
+
+#### (b) r1 / r2 / r2b / r3 全部前轮探针重跑 —— **零回退,且 5 个幸存者归零**
+
+| 轮次 | 探针 | 本轮结果 |
+|---|---|---|
+| r1 | M1 / M2 / M3 / M4 / M4b / M5 / M6 / M6b / M7 / M7b / M7c / M7d | 2 / 1 / 1 / 2 / 4 / 1 / 1 / 1 / 5 / 18 / 7 / 21 failed —— **12 条全承重** |
+| r1 | M8 / M8b / M9 | **NOT RUN**(后端真库探针;本分支后端零改动,见 §11.7-3) |
+| r2 | M-a / M-a2 / M-c / M-d / M-e / M-f / M-g / M-h / M-i | 5 / 2 / 3 / 1 / 1 / 1 / 1 / 1 / 2 failed —— **9 条全承重** |
+| r2 | M-b / M-b2 | **118 passed(存活)** —— 与 r2 门审自己的判定一致(「可辩护地 inert」),非本轮回退 |
+| r2b | M-n / M-o / M-p / M-q / M-r / M-s | 3 / 2 / 1 / 1 / 1 / 2 failed —— **6 条全承重** |
+| r3 | M-A / M-C / M-E / M-F / M-G / M-I / M-J / M-K / M-D | 4 / 1 / 1 / 1 / 2 / 13 / 1 / 1 / 2 failed —— **9 条全承重(M-D / M-F / M-J / M-K 由幸存转承重)** |
+| r3 | M-B | 机制已下沉到 store,该行不复存在;承重点变四个(M-B′ / M-B-S / M-B-C / M-B-F,上表) |
+| r3 | **M-H** | **118 passed(仍存活)** —— 唯一幸存者,已披露不可达(设计 MD §7.4),**正控 M-G 同函数失败分支 ⇒ 2 failed**,证明 `settle` 本身被用例驱动 |
+
+⇒ 门审点名的 **11 探针幸存者(M-B / M-D / M-F / M-J / M-K,加已披露的 M-H)**:前五条全部归零;M-H 按门审结论保留为 P3,并第一次配上正控。
+
+### 11.4 真后端 + 自起 headless chromium —— ③ 的红/绿对照(**真 500**,非 `route.abort`、非伪造响应)
+
+故障注入是**服务端**的:`ALTER TABLE approval_templates RENAME TO approval_templates_parked`,让被作废的那次读在数据库层真的 500,随后重命名回来。浏览器侧**唯一**的拦截是对平铺列表读的**计时闸**(`route.continue()` 透传,从不伪造 status/body/失败;`section=` 的读一律直通),且每一组都配了**同脚本同拦截、只去掉故障**的对照组——门审 §C-3 证明过「拦截本身会污染观测」,这两组对照就是为这一条准备的。
+
+```
+########## r3 头 c3ea127b12(未修)—— 真 500
+[mount] rows=2 alert=""            [grouped] switcher=1
+[HELD flat-read #1] status=published&page=1&pageSize=10     ← org-alpha,压住
+[HELD flat-read #2] status=published&page=1&pageSize=10     ← org-beta,压住
+  server-side approval-template list now FAILS (table renamed away)
+  server-side approval-template list healed
+[FLAT VIEW — r3head-real500] rows=0 alert="API error: 500 Internal Server Error Reload" pager=0
+  VERDICT: *** BLANK FLAT LIST *** | stale error banner shown: true
+
+########## r3 头 c3ea127b12 —— 对照组(同脚本同拦截,无故障)
+[FLAT VIEW — r3head-control]  rows=2 alert="" pager=0   VERDICT: rows rendered | banner: false
+
+########## 本轮修复头 —— 同一脚本、同一真 500
+[FLAT VIEW — fixed-real500]   rows=2 alert="" pager=0   VERDICT: rows rendered | banner: false
+
+########## 本轮修复头 —— 对照组
+[FLAT VIEW — fixed-control]   rows=2 alert="" pager=0   VERDICT: rows rendered | banner: false
+```
+
+⇒ 空白**不是**拦截造成的(两组对照都正常),是被作废的那次读**失败**造成的(仅在未修头上出现),且在本轮修复头上消失。
+
+**边界 ①②④ 同批重放(修复头,真后端,零浏览器拦截)**
+
+```
+① 合格身份:rows=2                     ① 分组视图:switcher=1
+② 切 org 前:ALPHA-ONLY-GROUP=true  BETA-ONLY-GROUP=false
+② 切到 org-beta:ALPHA-ONLY-GROUP=false BETA-ONLY-GROUP=true  switcher=1
+② 切后平铺面:rows=2  alert=""
+① 登出后:switcher=0 retry=0                    (入口消失、无错误残留 = 正确渲染)
+① 单 org 成员(验收 J 正控):switcher=0
+④ 服务端 session-orgs 真失败:{"success":false,…,"code":"SESSION_ORGS_UNAVAILABLE"}
+④-a 真失败时:retry=1 switcher=1     ④-b 治愈 + 点重试后:switcher=1 retry=0
+   user_orgs restored: 3 rows
+```
+
+### 11.5 P3-2 的机械复核(本轮新库,逐字输出)
+
+```
+templates under org-ALPHA token:  total=2 ['A5R4 Template Two', 'A5R4 Template One']
+templates under org-BETA  token:  total=2 ['A5R4 Template Two', 'A5R4 Template One']   ← 逐字相同
+groups under org-ALPHA: [{"id":"atg_a5r4_alpha","orgId":"org-alpha","name":"ALPHA-ONLY-GROUP",…}]
+groups under org-BETA : [{"id":"atg_a5r4_beta","orgId":"org-beta","name":"BETA-ONLY-GROUP",…}]
+information_schema: approval_templates.org_id 命中 0   |   approval_template_groups.org_id 命中 1
+```
+
+⇒ 平铺面在本后端**没有可保护的对象**。**是否执行 fix option 0(删机制)交 owner**,理由与边界见设计 MD §7.3。**本轮不删机制。**
+
+### 11.6 静态门 / 全量实跑 / census(数字逐字抄自输出)
+
+| 门 | 结果 |
+|---|---|
+| `vue-tsc -b --force` | **恰 1 条** `error TS`:`vite.config.ts(28,29): error TS2769`;`git diff 288530a0cd HEAD -- apps/web/vite.config.ts` **为空**(与 main 同形的既有环境项,非本 lane 引入) |
+| `vite build` | `built in 12.81s`,`BUILD_EXIT=0` |
+| `packages/core-backend` `tsc --noEmit` | `TSC_EXIT=0` |
+| 5 个被触碰 spec + `SessionOrgSwitcher` | **118 passed (118)**(门审起点为 100) |
+| + 9 个邻居 spec(`templateCenterI18n` / `approvalTemplateGovernance` / `approval-e2e-permissions` / `approval-e2e-lifecycle` / `approvalNavDelegationEntry` / `templateGalleryFilter` / `categoryCandidateInput` / `approvalRecentTemplates` / `useAuth`) | **15 files / 337 passed (337)** |
+| required `exec` 巨行(**恰 1 条**,405 token,直跑) | **473 files / 7357 passed (7357)**,`EXEC_EXIT=0`(门审起点自述 7339;+18 = 本轮新增用例数,逐字对上) |
+| `run-required-web-tests.sh` 全脚本 | `EXIT=1`,唯一失败仍是 `multitable-recovery-archive-modal.spec.ts > … durable request identity cannot be saved`;**在未修改的 r3 头整树备份上单跑同样 `1 failed | 53 passed (54)`** ⇒ 既有,非本轮回退 |
+| CI 文件 / s6a pin / plugin-tests.yml / 迁移 / 端点 / flag / DDL | **字节不变**:`git diff --name-only 288530a0cd HEAD -- .github packages scripts` = 0;`apps/web/scripts/run-required-web-tests.sh` 与 base 零差异;零新增文件 |
+| 提交历史 `Bin` 扫描 | 新历史 `288530a0cd..HEAD` 每个提交 **0** 命中;旧历史同一扫描 `dec28f0595` / `7204c94cce` 各 **1** |
+
+**P3-3 的压平证明(逐字可复核)**
+
+| 项 | 值 |
+|---|---|
+| 压平点(本轮改动之前的最后一个提交) | `d487b74f55898dd9a75367a518bdf8ec0665585b` |
+| `git rev-parse c3ea127b12…^{tree}` | `d1da65e3e25f0c9dbcf6f98f1e9faa076d4d0be3` |
+| `git rev-parse d487b74f55…^{tree}` | `d1da65e3e25f0c9dbcf6f98f1e9faa076d4d0be3`(**相同**) |
+| `git diff c3ea127b12… d487b74f55…` | **0 行** |
+| `#5878 e90d16c90f58a58789a6acd589df362aaa2c2f42` | `git merge-base --is-ancestor` → **真**(对本轮 HEAD) |
+
+重建后的五个提交:`d545824bf4`(feat,含折回的 NUL 移除 + `disposed` 修复,`authPrincipal.ts | 73 ++++` 文本 diff)、`8970214b2b`(test)、`971b36c8ae`(docs)、`d6c02f71b1`(docs,原 `7204c94cce` 的 MD 部分)、`d487b74f55`(docs)。作者/日期沿用原提交。
+
+### 11.7 本轮未做 / 交 owner(不藏)
+
+1. **`verify-a5-r3-three-p2-after-push-20260921.md` §1.4-R(跨标签页未被通知的令牌替换)**:两个子组件的 `isCurrent()` 仍然只比代数、不核 token。本轮**未改**——该验证件自己写明这是合同级取舍(补 token 核对 vs 放宽 `useAuth` 的 `explicitTransition` 闸)。平铺面这一侧本轮起有身份签名兜底,子组件侧**没有**。**交 owner。**
+2. **同件 §3.4(LATENT)**:`useSessionOrg` 订阅**裸** `onAuthPrincipalChange`、宿主订阅 `onAuthSessionSwitch`,两者对「非切换的漏斗运行」判断不一致。本轮**未改**,判据不一致仍在。**交 owner。**
+3. **r1 的 M8 / M8b / M9**(后端真库探针)本轮 **NOT RUN**:它们针对后端 `isWellFormedUuid` / unlink 调用点 / P2-2 后端消息串,本分支后端零改动;跑它们需要另跑后端真库套件,本轮未跑。**登记,不用前几轮结果填充。**
+4. **r1 21 条验收判据里的 15 条**(C0–C5 / D2 / D3 / D4 / D4b / D5 / D5b / D7)本轮 **NOT RUN**;本轮真浏览器只跑 ①②③④ 与 P3-2 复核。
+5. 多标签页直接写 `localStorage` 那一支的**浏览器**重放、生产 PG15 轴 / musl-collation 轴、`run-required-web-tests.sh` 其余段落 —— **NOT RUN**。
+6. **M-H 仍存活**(设计 MD §7.4);按门审结论保留为 P3,配正控,不补测。
+7. 合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— **全部未做,仍需 owner 逐条授权**。本件不含任何「已裁 / 已 ratify」的记述。
