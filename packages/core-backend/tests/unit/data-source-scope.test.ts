@@ -250,6 +250,21 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
     expect(() => m.assertAccess('ds1', 'alice')).toThrow(/not found/)
   })
 
+  it('removeDataSource has no force bypass (owner ruling 2026-09-20 ①): a referenced source keeps its scope entry whatever options are sent', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(pgConfig('ds-held'), { ownerId: 'alice' })
+    vi.spyOn(m, 'countExternalSystemReferences').mockResolvedValue(1)
+    const legacyOptions = { force: true } as unknown as { hardDelete?: boolean }
+    await expect(m.removeDataSource('ds-held', legacyOptions)).rejects.toMatchObject({
+      status: 409,
+      code: 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS',
+      details: { referenceCount: 1 },
+    })
+    // scope (and therefore owner attribution + access) survives the refused delete intact
+    expect(m.getScope('ds-held')).toMatchObject({ ownerId: 'alice' })
+    expect(() => m.assertAccess('ds-held', 'alice')).not.toThrow()
+  })
+
   it('loadFromDatabase populates per-record ownership from the DB row', async () => {
     const m = new DataSourceManager()
     await m.initialize(fakeDb([dbRecord('a1', 'alice', null), dbRecord('b1', 'bob', 'ws-b')]) as never)

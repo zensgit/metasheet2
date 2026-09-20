@@ -29,7 +29,31 @@ export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_
 // integration external system's canonical connection_id or attributable legacy
 // config.dataSourceId refuses a plain delete with this code.
 export const DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE = 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS'
-export const DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE = 'DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY'
+// The foreign key that re-points integration_external_systems.connection_id at data_sources(live_id)
+// (migration zzzz20260920120000). A soft delete of a source that still has a canonical binding is
+// refused by PostgreSQL on THIS constraint (SQLSTATE 23503) — the database backstop behind the
+// owner's ruling (2026-09-20, ①) that a referenced source cannot be deleted and force is retired.
+export const DATA_SOURCE_LIVE_CONNECTION_FK = 'fk_integration_external_systems_live_connection_id'
+// The constraint the same column carried BEFORE that migration (connection_id -> data_sources(id),
+// ON DELETE RESTRICT). A hard delete against a not-yet-migrated schema fails on it with the same
+// meaning, so both names are read as "still referenced".
+const DATA_SOURCE_LEGACY_CONNECTION_FK = 'fk_integration_external_systems_connection_id'
+
+/**
+ * Is this driver error the binding foreign key refusing a data-source delete?
+ * SQLSTATE first (23503 = foreign_key_violation; stable across server locales), constraint
+ * name second (pg reports it as `constraint`; a driver that omits it is accepted, because no
+ * other RESTRICT/NO ACTION foreign key targets data_sources — the two other referencing
+ * tables, data_source_connections and data_source_query_logs, are ON DELETE CASCADE).
+ * Never reads the message text: on a zh_CN PostgreSQL the English prose is not there.
+ */
+export function isLiveConnectionFkViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const { code, constraint } = error as { code?: unknown; constraint?: unknown }
+  if (code !== '23503') return false
+  if (typeof constraint !== 'string' || constraint.length === 0) return true
+  return constraint === DATA_SOURCE_LIVE_CONNECTION_FK || constraint === DATA_SOURCE_LEGACY_CONNECTION_FK
+}
 // Durable-first delete (PERM-04): the soft/hard delete row write failed, so the delete did NOT
 // happen — neither in memory nor on disk. Values-free by construction: the driver's text (host,
 // port, database, login) stays in the log; the client gets this code and a fixed sentence.
@@ -939,9 +963,10 @@ export class DataSourceManager extends EventEmitter {
    *
    * The order is now:
    *   ① referential check — refuse (coded 409) while an integration external
-   *      system still references this source, unless the caller carries the
-   *      route's already-authorized `force` break. Runs before ANY mutation,
-   *      and while `scopes` still holds the owner that
+   *      system still references this source. There is NO bypass: the former
+   *      `force` option was retired by the owner's ruling (2026-09-20, ①) —
+   *      a referenced source is not deletable, the caller unbinds first. Runs
+   *      before ANY mutation, and while `scopes` still holds the owner that
    *      countExternalSystemReferences attributes against. Since W7-B it shares
    *      ONE TRANSACTION with the persist step, opened by a `FOR UPDATE` on
    *      the source row - see the block comment at the call site for the
@@ -958,22 +983,28 @@ export class DataSourceManager extends EventEmitter {
    *      gone durably AND in memory, and rolling the delete back for a leaked
    *      socket would resurrect exactly the ghost this fix removes.
    *
-   * `force` is NOT a new escape hatch: the route still decides it (platform
-   * admins only, audited — routes/data-sources.ts DELETE). The manager re-runs
-   * the count itself rather than trusting a caller-supplied number, so a direct
-   * (non-route) caller cannot dangle a reference by skipping the check.
+   * No `force` option exists any more (it used to skip the count for a
+   * route-authorized platform-admin break). Any extra option key is ignored;
+   * the count ALWAYS runs, so a direct (non-route) caller — or an old route
+   * build — cannot dangle a reference. Behind the application check, the
+   * database refuses the same delete on `DATA_SOURCE_LIVE_CONNECTION_FK`
+   * (23503), which this method also maps to the same 409.
    */
-  async removeDataSource(id: string, options?: { hardDelete?: boolean; force?: boolean }): Promise<void> {
+  async removeDataSource(id: string, options?: { hardDelete?: boolean }): Promise<void> {
     const adapter = this.adapters.get(id)
     if (!adapter) {
       throw new Error(`Data source with id '${id}' not found`)
     }
 
-    // The 409 the referential check raises. Built once so the transactional and
-    // the memory-only path cannot drift apart.
-    const referencedRefusal = (referenceCount: number) => Object.assign(
+    // The 409 the referential check raises. Built once so the transactional, the
+    // database-backstop and the memory-only path cannot drift apart.
+    // `referenceCount` is null when the refusal came from the foreign key: the
+    // transaction is already aborted at that point, so the count is not known.
+    const referencedRefusal = (referenceCount: number | null) => Object.assign(
       new Error(
-        `Data source '${id}' is referenced by ${referenceCount} external system(s) and deleting it would leave dangling references. A platform admin may repeat the request with force=true to break the reference deliberately.`
+        referenceCount === null
+          ? `Data source '${id}' is still referenced by at least one external system (the database refused the delete on its binding foreign key); unbind it first — 请先解绑引用它的外部系统。Deleting a referenced source is refused; force=true is no longer accepted.`
+          : `Data source '${id}' is referenced by ${referenceCount} external system(s); unbind them first — 请先解绑 ${referenceCount} 个外部系统。Deleting a referenced source is refused; force=true is no longer accepted.`
       ),
       {
         status: 409,
@@ -1001,12 +1032,17 @@ export class DataSourceManager extends EventEmitter {
     //     bind to commit, then COUNTS it and refuses 409. THIS ordering is what
     //     this transaction closes (PR-A).
     //   * delete in flight, then bind  -> the bind WAITS for the delete to
-    //     commit, but today's FK re-check then still PASSES: a soft delete
-    //     changes no key column, so the referenced row is still "there" for the
-    //     FK. Closing this ordering needs the FK re-pointed at a live-only key
-    //     (PR-B, a migration that also changes what `force` can do, and is
-    //     therefore held for the owner's ruling). Do NOT read this block as
-    //     "concurrent delete isolation is complete".
+    //     commit; since PR-B (migration zzzz20260920120000) the FK references
+    //     `data_sources(live_id)`, a STORED generated column that is NULL once
+    //     `deleted_at` is set, so the resumed bind fails its FK re-check
+    //     (23503 on DATA_SOURCE_LIVE_CONNECTION_FK) and no dangling row lands.
+    //     The same constraint refuses the soft delete itself while a canonical
+    //     binding exists — the database backstop for a count this transaction
+    //     somehow did not see; `catch` below maps that 23503 to the same 409.
+    //   Closed for the CANONICAL shape (connection_id) only. The legacy shape
+    //   (connection_id IS NULL + config.dataSourceId) has no FK and is covered
+    //   by the FOR UPDATE half alone; do NOT read this block as "concurrent
+    //   delete isolation is complete for every shape".
     //
     // ISOLATION: READ COMMITTED (PostgreSQL's default, which is what this
     // deployment runs). The half that IS closed does not rely on a stricter
@@ -1034,10 +1070,9 @@ export class DataSourceManager extends EventEmitter {
             .forUpdate()
             .execute()
 
-          if (options?.force !== true) {
-            const referenceCount = await this.countExternalSystemReferences(id, trx)
-            if (referenceCount > 0) throw referencedRefusal(referenceCount)
-          }
+          // ALWAYS counted — there is no force bypass (owner ruling 2026-09-20 ①).
+          const referenceCount = await this.countExternalSystemReferences(id, trx)
+          if (referenceCount > 0) throw referencedRefusal(referenceCount)
 
           if (options?.hardDelete) {
             await trx
@@ -1062,6 +1097,17 @@ export class DataSourceManager extends EventEmitter {
         if ((err as { code?: string } | null)?.code === DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE) {
           throw err
         }
+        // DATABASE BACKSTOP (PR-B): the soft/hard delete itself violated the
+        // binding foreign key — a canonical reference exists that the count did
+        // not see. Judged by SQLSTATE 23503 first (the driver's prose is locale
+        // dependent: a zh_CN server never emits the English sentence) and by the
+        // constraint name second. This is the same DECISION
+        // as the counted 409, so it surfaces as the same code, not as the 500.
+        // Any OTHER 23503 (another table's constraint) stays a persistence
+        // failure and is translated below.
+        if (isLiveConnectionFkViolation(err)) {
+          throw referencedRefusal(null)
+        }
         // Cause to the log ONLY — a kysely/driver failure embeds host, port,
         // database and login. The client gets a fixed sentence and the id it
         // already supplied. The transaction rolled back, so nothing partial
@@ -1074,10 +1120,11 @@ export class DataSourceManager extends EventEmitter {
           { status: 500, code: DATA_SOURCE_DELETE_NOT_PERSISTED_CODE }
         )
       }
-    } else if (options?.force !== true) {
+    } else {
       // Memory-only manager: nothing is persisted, so nothing can hold a
       // reference and the count is 0 by construction. Kept so the call (and its
-      // contract) survives for a manager that is later given a db.
+      // contract) survives for a manager that is later given a db. No force
+      // bypass here either.
       const referenceCount = await this.countExternalSystemReferences(id)
       if (referenceCount > 0) throw referencedRefusal(referenceCount)
     }
