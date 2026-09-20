@@ -445,8 +445,12 @@ describe('ApprovalTemplateGroupsPanel — daily-ops fixes (P2-1 / P2-2 / P2-4)',
 
     // The archived row moved to the tail, exactly where the server puts it.
     expect(renderedOrder()).toEqual(['atg_2', 'atg_1'])
+    // NIT-B (round 3): the row id is stable for every row and the STATE is its own attribute, so
+    // this asserts the archived state without the row leaving the `…-item` population.
     expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-testid'))
-      .toBe('approval-template-groups-item-archived')
+      .toBe('approval-template-groups-item')
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-archived')).toBe('true')
+    expect(el.querySelectorAll('[data-testid="approval-template-groups-item"]').length).toBe(2)
     // One re-read, not a re-read per render.
     expect(listCalls).toBe(listCallsBeforeArchive + 1)
   })
@@ -503,6 +507,8 @@ describe('ApprovalTemplateGroupsPanel — daily-ops fixes (P2-1 / P2-2 / P2-4)',
     expect(renderedOrder()).toEqual(['atg_1', 'atg_3'])
     expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-testid'))
       .toBe('approval-template-groups-item')
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-archived')).toBe('false')
+    expect(el.querySelector('[data-group-id="atg_3"]')!.getAttribute('data-archived')).toBe('true')
     // One re-read, not a re-read per render.
     expect(listCalls).toBe(listCallsBeforeUnarchive + 1)
   })
@@ -674,5 +680,144 @@ describe('ApprovalTemplateGroupsPanel — request algebra guard (rapid org switc
 
     expect(container!.textContent).toContain('Fresh Org Group')
     expect(container!.textContent).not.toContain('Stale Org Group')
+  })
+
+  // ── Boundary ③ of the round-3 acceptance: the guard has THREE exits, one per way a superseded
+  // call can still act, and round 2b measured that only the first of them was driven by any case
+  // (M-p / M-q / M-r / M-s all survived). The case above drives the post-await SUCCESS exit; the
+  // two below drive the CATCH exit and the FINALLY exit. Each one delays the stale request and
+  // lets it take a different way out, and each asserts the specific damage that exit can do.
+
+  it('(③ catch exit) a stale loadGroups() FAILURE landing after a newer one must not post the previous org\'s error over the new org\'s list', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    const rejecters: Array<(err: Error) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve, reject) => { resolvers.push(resolve); rejecters.push(reject) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+    expect(resolvers.length).toBe(1)
+    resolvers[0](jsonResponse(200, EMPTY_LIST))
+    await settle()
+
+    const stale = panelRef.value!.loadGroups() // the org being switched AWAY from
+    const fresh = panelRef.value!.loadGroups() // the org just switched TO
+    await settle(1)
+    expect(resolvers.length).toBe(3)
+
+    // The new org answers first and renders. THEN the abandoned org's request fails.
+    resolvers[2](jsonResponse(200, { groups: [group('atg_fresh', 'org-b', 'Fresh Org Group')] }))
+    await settle()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    rejecters[1](new Error('boom'))
+    await Promise.all([stale, fresh])
+    await settle()
+
+    // The panel's success path writes `groups`/`sessionOrgBlocked` and never clears `loadError`,
+    // so a stale error banner would sit on top of the new org's data until the next successful
+    // load — indefinitely, since nothing re-reads on its own.
+    expect(container!.querySelector('[data-testid="approval-template-groups-load-error"]')).toBeNull()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('boom')
+  })
+
+  it('(③ finally exit) a stale loadGroups() settling while the newer one is STILL in flight must not clear the newer request\'s loading state', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve) => { resolvers.push(resolve) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+    resolvers[0](jsonResponse(200, EMPTY_LIST))
+    await settle()
+    // Positive control for the selector this case asserts the ABSENCE of: with nothing loading
+    // and no groups, the "no groups yet" row IS rendered here.
+    expect(container!.querySelector('.approval-template-groups-panel__empty')).not.toBeNull()
+
+    const stale = panelRef.value!.loadGroups()
+    const fresh = panelRef.value!.loadGroups()
+    await settle(1)
+    expect(resolvers.length).toBe(3)
+
+    // Only the ABANDONED org's request answers. The current org's is still on the wire.
+    resolvers[1](jsonResponse(200, { groups: [group('atg_stale', 'org-a', 'Stale Org Group')] }))
+    await stale
+    await settle()
+
+    // Still loading — so the empty row must NOT be back. Without the guard on the `finally`, the
+    // stale call lowers `loading` and the panel renders "no groups yet" as a settled answer for
+    // an organization it has not heard from yet.
+    expect(container!.querySelector('.approval-template-groups-panel__empty')).toBeNull()
+    expect(container!.textContent).not.toContain('Stale Org Group')
+
+    resolvers[2](jsonResponse(200, { groups: [group('atg_fresh', 'org-b', 'Fresh Org Group')] }))
+    await fresh
+    await settle()
+    expect(container!.textContent).toContain('Fresh Org Group')
+  })
+
+  // ── Boundary ① at the component that OWNS the state ────────────────────────────────────────
+  // The page clears what the page owns; this panel's groups, error banner and in-flight load are
+  // the panel's own and are cleared here, by the same funnel. Without this, an admin who signs in
+  // as somebody else keeps looking at the previous account's group list until something re-reads.
+  it('(①) an external principal change drops this panel\'s rendered groups, and the load it had in flight cannot commit afterwards', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve) => { resolvers.push(resolve) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({ setup() { return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef }) } })
+    app.mount(container)
+    await settle()
+    resolvers[0](jsonResponse(200, { groups: [group('atg_a', 'org-a', 'Previous Account Group')] }))
+    await settle()
+    expect(container!.textContent).toContain('Previous Account Group')
+
+    // A second read for the SAME (previous) account is on the wire when the account changes.
+    const inFlight = panelRef.value!.loadGroups()
+    await settle(1)
+    expect(resolvers.length).toBe(2)
+
+    useAuth().setToken(jwt('org-z'))
+    await settle()
+
+    // Cleared, not merely marked dirty: nothing from the previous account is still rendered.
+    expect(container!.textContent).not.toContain('Previous Account Group')
+
+    // The read issued under the previous account now answers. It must not repaint that account's
+    // groups into the new account's panel — the same request algebra the rapid-switch cases use,
+    // driven here by an identity change instead of an organization change.
+    resolvers[1](jsonResponse(200, { groups: [group('atg_a', 'org-a', 'Previous Account Group')] }))
+    await inFlight
+    await settle()
+    expect(container!.textContent).not.toContain('Previous Account Group')
+    expect(container!.querySelector('[data-testid="approval-template-groups-load-error"]')).toBeNull()
   })
 })

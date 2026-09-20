@@ -77,11 +77,18 @@
       class="approval-template-groups-panel__list"
       data-testid="approval-template-groups-list"
     >
+      <!-- NIT-B (round-1 gate, carried through round 2 and 2b) — ONE stable `data-testid` for
+           every row plus a separate state attribute, rather than a `data-testid` whose VALUE
+           encodes the state. A conditional test id makes "how many rows are there" unanswerable
+           with a single selector and makes a row silently vanish from any query written against
+           the other branch; `[data-archived="true"]` narrows to the archived ones without taking
+           the row out of the row population. -->
       <li
         v-for="group in groups"
         :key="group.id"
         :data-group-id="group.id"
-        :data-testid="group.archivedAt ? 'approval-template-groups-item-archived' : 'approval-template-groups-item'"
+        data-testid="approval-template-groups-item"
+        :data-archived="group.archivedAt ? 'true' : 'false'"
         class="approval-template-groups-panel__item"
         :class="{ 'approval-template-groups-panel__item--archived': group.archivedAt }"
       >
@@ -161,8 +168,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, onScopeDispose, ref } from 'vue'
 import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { useSessionOrg } from '../../composables/useSessionOrg'
 import {
   ApprovalApiError,
@@ -234,6 +242,9 @@ const actionBusyId = ref<string | null>(null)
 // one of the five is ever in flight, and at most one can be waiting on a session org.
 // Stays empty while hosted: the host replays `loadGroups()` itself after a successful switch.
 let pendingRetry: (() => Promise<void>) | null = null
+// True for exactly the window in which THIS panel's own switcher is driving the transition (see
+// the principal-reset listener below for why the two cases must be told apart).
+let ownSwitchInFlight = false
 
 function handleSessionOrgRequired(retry: () => Promise<void>): void {
   sessionOrgBlocked.value = true
@@ -283,6 +294,46 @@ async function loadGroups(): Promise<void> {
     if (isCurrent()) loading.value = false
   }
 }
+
+// Organization context lifecycle (impl-gate-A5-daily-ops-round2b-20260921.md, boundaries ① and
+// ④) — every ref above is the answer for ONE principal in ONE organization: this org's groups,
+// this org's error banner, this admin's half-typed new-group name, this panel's "blocked on a
+// session-org choice" flag and the one action it was going to replay. `useAuth`'s single
+// session-reset funnel announces every transition through `onAuthPrincipalChange` (sign-out, a
+// different account signing in, a token refresh after the same account's rights changed, another
+// tab's explicit switch, and this page's own organization switch), so the panel drops its own
+// derived state at the moment the session it was derived from stops being the current one — the
+// same thing `useSessionOrg` does for the organization list, applied to what this panel owns.
+//
+// The `loadGeneration++` is not bookkeeping: it is what makes a load ISSUED for the previous
+// principal unable to act when it lands. Without it that load's three exits are all live against
+// the new principal — its success would repaint the previous organization's groups, its catch
+// would post the previous organization's error banner or (on a 403) report a session-org
+// requirement and re-open the page entry on behalf of a session that no longer exists, and its
+// finally would clear a loading flag belonging to a request that is still in flight. `loading` is
+// set false here for the same reason in reverse: an in-flight load can no longer reach its own
+// `finally`, so nobody else would ever lower it.
+const stopPrincipalReset = onAuthSessionSwitch(() => {
+  loadGeneration++
+  groups.value = []
+  loadError.value = ''
+  sessionOrgBlocked.value = false
+  loading.value = false
+  // The one exception: this panel's OWN switcher is mid-switch. That transition exists precisely
+  // to replay the action it blocked — the replay handle is `pendingRetry`, and for a blocked
+  // CREATE the replay re-reads the admin's typed name, so the in-progress work has to survive
+  // that one transition. Any OTHER transition is a different session: the previous session's
+  // pending replay, half-typed group name and open rename must not follow the admin into it.
+  if (!ownSwitchInFlight) {
+    pendingRetry = null
+    creating.value = false
+    actionBusyId.value = null
+    renamingId.value = null
+    renameValue.value = ''
+    newGroupName.value = ''
+  }
+})
+onScopeDispose(stopPrincipalReset)
 
 async function onCreate(): Promise<void> {
   const name = newGroupName.value.trim()
@@ -406,7 +457,13 @@ async function onUnarchive(group: ApprovalTemplateGroupDTO): Promise<void> {
 }
 
 async function onSessionOrgChange(orgId: string): Promise<void> {
-  const ok = await switchSessionOrg(orgId)
+  ownSwitchInFlight = true
+  let ok = false
+  try {
+    ok = await switchSessionOrg(orgId)
+  } finally {
+    ownSwitchInFlight = false
+  }
   if (!ok) return
   sessionOrgBlocked.value = false
   const retry = pendingRetry
