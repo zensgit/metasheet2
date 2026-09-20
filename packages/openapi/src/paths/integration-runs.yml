@@ -1,0 +1,88 @@
+paths:
+  # SC-04 single-run read. Contract for the plugin route added in #5887
+  # (plugins/plugin-integration-core/lib/http-routes.cjs, handler `runsGet`). The list route
+  # GET /api/integration/runs is intentionally NOT contracted in this slice — it predates this
+  # file and adding it would widen the change beyond the single read it documents.
+  /api/integration/runs/{runId}:
+    get:
+      summary: Get one integration pipeline run
+      description: >-
+        Read-only single-run read, scoped by (tenantId, workspaceId, runId). The tenant is
+        resolved from the verified session claim; `tenantId` may be echoed as a query
+        parameter but must MATCH the caller's own tenant (a mismatch is 403), so this
+        parameter cannot widen scope. Another tenant's run id and a run id that does not
+        exist return the SAME details-free 404 — the route is not a cross-tenant existence
+        oracle. No write, replay or retry is performed.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: runId
+          required: true
+          description: Pipeline run id.
+          schema: { type: string }
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: >-
+            Workspace scope. Omitted means the null workspace — the same normalization the
+            list route applies, so a run written under the null workspace is read back there.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data: { $ref: '#/components/schemas/IntegrationPipelineRun' }
+        '400':
+          description: runId missing from the path
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                run_id_required:
+                  value:
+                    ok: false
+                    error:
+                      code: RUN_ID_REQUIRED
+                      message: runId is required
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >-
+            Run not visible in the caller's (tenant, workspace) scope. Identical body for a
+            non-existent id and another tenant's id; carries no `details`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                run_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: RUN_NOT_FOUND
+                      message: pipeline run not found
+        '501':
+          description: >-
+            The host's pipeline registry does not implement the single-run read
+            (optional-method wiring older than this route).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                run_read_not_implemented:
+                  value:
+                    ok: false
+                    error:
+                      code: RUN_READ_NOT_IMPLEMENTED
+                      message: Run read is not implemented

@@ -717,6 +717,27 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     return rows.map(rowToPipelineRun)
   }
 
+  // SC-04: single-run read, the same shape as getPipeline. The WHERE carries all three scope keys
+  // (tenant_id, workspace_id, id) so another tenant's run id and a non-existent id take the SAME
+  // path: one selectOne miss → PipelineNotFoundError (→ 404 via inferHttpStatus's /NotFound/
+  // branch). workspaceId normalizes to null exactly as listPipelineRuns does (scopeWhere), so a
+  // run written under the null workspace is read back under the null workspace — no widening.
+  // Projection is rowToPipelineRun, identical to the list route; no provenance_events join.
+  async function getPipelineRun(input) {
+    const tenantId = requiredString(input?.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input?.workspaceId)
+    const id = requiredString(input?.id, 'id')
+    const row = await db.selectOne(RUNS_TABLE, {
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      id,
+    })
+    if (!row) {
+      throw new PipelineNotFoundError('pipeline run not found', { id, tenantId, workspaceId })
+    }
+    return rowToPipelineRun(row)
+  }
+
   // DF-N2-2c: read-only cross-run provenance timeline for one rowId. SELECTs the
   // migration-060 view (no write). The optional run-time window is pushed into
   // the DB range predicate before limit/offset so a page cannot be filled by
@@ -799,6 +820,7 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
     createPipelineRun,
     updatePipelineRun,
     listPipelineRuns,
+    getPipelineRun,
     listProvenanceByRow,
     abandonStaleRuns,
   }

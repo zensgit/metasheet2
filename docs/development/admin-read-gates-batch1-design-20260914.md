@@ -47,6 +47,7 @@
 
 - 不动 `/dlq` 的写端点（`POST /dlq/:id/retry`、`DELETE /dlq/:id`、`POST /dlq/retry-all`、`POST /dlq/cleanup`）——它们本来就有 `requireSafetyCheck` / `protectAdminOperation`。
 - 不动 #5678 盘点里的批次 2/3（health / shards / queues / ratelimits / safety / slo）——那批要先定"运维只读角色 vs 平台管理员"的口径，不在本 PR。
+  - **口径已定（2026-09-20）**：批次 2（PR #5884）按"默认前进 + 24h 异步否决"取推荐值 **统一用 `requireAdminRole()`**，理由与否决代价见 `admin-read-gates-batch2-design-20260920.md` 的「决策：运维只读角色 vs 平台管理员」（`Decision: Ratified-by-default-2026-09-20`）。批次 3（本行的后续）沿用同一口径，见 `admin-read-gates-batch3-design-20260920.md`。
 - 不动 `protection-rules.ts` 的四条写端点（#5677 已做）、限流器实现、身份来源。
 - 不动 `src/index.ts`、不动任何挂载点、不动 `dlqService` / `protectionRuleService` 的实现与 SQL。
 - 没有为了"让读更宽"而放松任何东西：本 PR 只收紧，三条端点之外的授权面一律未动。

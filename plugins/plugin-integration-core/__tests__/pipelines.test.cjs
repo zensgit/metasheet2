@@ -396,6 +396,54 @@ async function main() {
   assert.equal(runs.length, 1)
   assert.equal(runs[0].id, 'id_4')
 
+  // --- 8c. SC-04: getPipelineRun — single-run read, same projection as list ---------------
+  const singleRun = await registry.getPipelineRun({ tenantId: 'tenant_1', workspaceId: null, id: 'id_4' })
+  assert.equal(singleRun.id, 'id_4')
+  assert.equal(singleRun.status, 'succeeded')
+  assert.deepEqual(singleRun, runs[0], 'getPipelineRun projects the same rowToPipelineRun shape as listPipelineRuns')
+  const singleRunSelect = db.calls.filter(call => call[0] === 'selectOne' && call[1] === 'integration_runs').pop()
+  assert.deepEqual(singleRunSelect[2], { tenant_id: 'tenant_1', workspace_id: null, id: 'id_4' },
+    'getPipelineRun WHERE carries all three scope keys (tenant_id, workspace_id, id)')
+
+  // workspaceId omitted / '' normalizes to null, exactly like list (scopeWhere) — no widening
+  await registry.getPipelineRun({ tenantId: 'tenant_1', id: 'id_4' })
+  const omittedWsSelect = db.calls.filter(call => call[0] === 'selectOne' && call[1] === 'integration_runs').pop()
+  assert.equal(omittedWsSelect[2].workspace_id, null, 'omitted workspaceId is pinned to null in the WHERE')
+  assert.ok('workspace_id' in omittedWsSelect[2], 'workspace_id key is present (null), never dropped from the WHERE')
+
+  // another tenant's id and a non-existent id both miss the three-key WHERE → PipelineNotFoundError
+  let runNotFound = null
+  try {
+    await registry.getPipelineRun({ tenantId: 'tenant_other', workspaceId: null, id: 'id_4' })
+  } catch (error) {
+    runNotFound = error
+  }
+  assert.ok(runNotFound instanceof PipelineNotFoundError, 'foreign-tenant run id throws not found')
+  const foreignSelect = db.calls.filter(call => call[0] === 'selectOne' && call[1] === 'integration_runs').pop()
+  assert.equal(foreignSelect[2].tenant_id, 'tenant_other', 'the lookup was scoped to the caller tenant')
+
+  let runMissing = null
+  try {
+    await registry.getPipelineRun({ tenantId: 'tenant_1', workspaceId: null, id: 'id_missing' })
+  } catch (error) {
+    runMissing = error
+  }
+  assert.ok(runMissing instanceof PipelineNotFoundError, 'missing run id throws not found')
+  assert.equal(runMissing.name, runNotFound.name, 'foreign-tenant and missing ids raise the same error class')
+
+  // input validation: id and tenantId are required (short-circuits before any db call)
+  const selectOneCountBefore = db.calls.filter(call => call[0] === 'selectOne').length
+  for (const badInput of [{ tenantId: 'tenant_1', workspaceId: null }, { workspaceId: null, id: 'id_4' }, undefined]) {
+    let bad = null
+    try {
+      await registry.getPipelineRun(badInput)
+    } catch (error) {
+      bad = error
+    }
+    assert.ok(bad instanceof PipelineValidationError, `getPipelineRun rejects ${JSON.stringify(badInput)} before the db`)
+  }
+  assert.equal(db.calls.filter(call => call[0] === 'selectOne').length, selectOneCountBefore, 'validation failures issue no selectOne')
+
   let badCounter = null
   try {
     await registry.updatePipelineRun({
