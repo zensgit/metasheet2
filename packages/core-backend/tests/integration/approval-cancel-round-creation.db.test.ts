@@ -1669,28 +1669,31 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(seatRows.rows.length).toBe(2)
   })
 
-  it('§2-G3 第三句 正控 P12(a) (G-4) — 已披露缺口变成数据:legacy POST /:id/approve 写的 approve 行没有 nodeKey,join 落空,该席位**不被还原**(= 今天的行为,失败方向永远不是更宽的席位)', async () => {
+  it('§2-G3 第三句 负控 P12(a) (G-4) — legacy POST /:id/approve 写的 approve 行没有 nodeKey,该行无法归属到节点席位 ⇒ **阻断**(409 SEAT_INELIGIBLE / delegate_not_seat / 零行),**谁都没停权**也照样阻断', async () => {
     const fixture = await delegatedApprovedOriginal('g3dlg-legacy', { approveVia: 'legacy' })
 
     const service = new ApprovalProductService()
-    const dto = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
-    createdApprovalIds.add(dto.id)
-    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
-      fixture.documentId,
-    ])
-    expect(roundRows.rows.length).toBe(1)
-    createdRoundIds.add(roundRows.rows[0].id)
-
-    const seatRows = await pool().query<{ assignee_id: string }>(
-      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
-      [dto.id],
-    )
-    // MEASURED on a real DB 2026-09-20 (验证 MD Part N §N4), not predicted: the seat stays the
-    // DELEGATEE, because the legacy route's approve row carries no `nodeKey` for the join to match.
-    // This case is the disclosed gap's positive control — if a later change ever restores this seat
-    // to A, this assertion goes red and the gap has to be re-registered rather than drift shut.
-    expect(seatRows.rows.map((row) => row.assignee_id)).toEqual([fixture.delegateeD])
-    expect(seatRows.rows.map((row) => row.assignee_id)).not.toContain(fixture.delegatorA)
+    let thrown: unknown
+    try {
+      const unexpected = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
+      await registerUnexpectedlyCreatedRound(fixture.documentId, unexpected.id)
+    } catch (error) {
+      thrown = error
+    }
+    // OWNER RULING 2026-09-20, verbatim: 「原主体无法可靠还原…则阻断,不静默回退给历史被委托人」.
+    // 裁决前这一腿 MEASURED 的答案是席位 `[D]` —— 即被委托人 D 留在席位上,正是被禁止的那个回退。
+    // 它不再是「已登记缺口的钉子」,而是缺口**被关掉的方向**的钉子;`reason` 的值说明阻断的是
+    // 「行无法归属」而不是「某个人失格」—— 本腿里没有任何人被停权。
+    expect(thrown, 'creation must BLOCK, not fall back to the historical delegatee').toBeTruthy()
+    const failure = thrown as { statusCode?: number; code?: string; message?: string; details?: Record<string, unknown> }
+    expect(failure.statusCode).toBe(409)
+    expect(failure.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
+    expect(failure.details).toEqual({ ineligibleCount: 1, reasons: ['delegate_not_seat'] })
+    for (const person of [fixture.delegatorA, fixture.delegateeD]) {
+      expect(JSON.stringify(failure.details)).not.toContain(person)
+      expect(String(failure.message)).not.toContain(person)
+    }
+    await expectZeroCancelRoundRows(fixture.documentId)
   })
 
   /**
@@ -1816,123 +1819,438 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
   })
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
-  // 硬化轮(2026-09-20,门审 `impl-gate-C-slice1-g3-reading-a-round1-20260920.md` P2-1)。
+  // OWNER RULING 2026-09-20 — 读法 (a) 定案,原话逐字:
+  //   「席位回原审批主体,并重验当前资格。原主体无法可靠还原或已失格则阻断,不静默回退给历史被委托人;
+  //    补多人委托同一人的反例。」
   //
-  // 已登记的 legacy 缺口此前三处都只刻画了**席位身份**(「永远不会给出更宽的席位」),从未写出它的
-  // **后果**:legacy 语料上席位停在 D,于是 G3 **第三句**(资格不成立 ⇒ 阻断并提示管理员)根本没有
-  // 跑在读法 (a) 认定的席位持有人 A 身上 —— 原审批人 A 已停权的单据,轮次照开。
-  // 覆盖上这一格此前是**空的**:11 条腿走的是对角线(5 种委托状态都在 actions 路径测席位,
-  // 2 条离职腿都在 actions 路径测阻断),compound 格(legacy 写入路径 × 席位持有人资格失效)零用例。
+  // 本节此前(候选 head `cc897234eb`)钉的是**相反的**答案:legacy 语料上「不阻断、席位 [D]」被写成
+  // 「已登记缺口的钉子」。裁决把那条缺口的处置从**登记**改成**阻断**,所以这些腿不是被放宽,而是被
+  // **翻面**:同一组夹具,断言从「创建成功、席位 [D]」改成「409 阻断、零行、D 不在任何席位里」。
   //
-  // 三条腿把这一格钉成数据。承重的是 **P13(a)**:
-  //   · N7(a) / N8(a) 断言的是**今天的真实答案**(不阻断、席位 [D]),它们是已登记缺口的钉子,
-  //     **不是期望行为** —— 将来若有人把这条修好(fallback 或 fail-closed),它们会红,缺口必须
-  //     **重新登记而不是静默关闭**;
-  //   · P13(a) 断言 legacy 语料上停权**被委托人 D** 仍然 409 阻断、零行。它**实测反驳**了门审 P2-1
-  //     的那句前提「资格闸对 legacy 语料本来就不起作用」:闸在这条语料上**被跑到了、也确实阻断**,
-  //     它只是跑在**未被还原的 actor** 身上,而不是读法 (a) 认定的席位持有人 A。
-  //     写清它不是什么(不把没跑过的 mutation 当判据):`assertCancelRoundSeatsEligibleInTxn`
-  //     只有一个调用点,**不存在可以单独 neuter 的「legacy 臂」**;把整个闸 neuter 掉会连
-  //     N1/N2/N4/N5(a) 一起红。该 mutation(记 M-C)**本轮 NOT RUN**,所以这里不对「闸被 neuter 后
-  //     谁会红」作任何断言;门审那句「把它 neuter 掉,70 条一条不红」同样**未经证实**,留给下一轮。
+  // 阻断的谓词(实现侧 `ApprovalProductService.createCancelRoundInstance`,逐 approve 行求值):
+  //   · 行有 `nodeKey`,该 (instance, node, actor) 上 `delegatedFrom` 恰好 1 个 ⇒ 席位 = 该原主体;
+  //   · 行有 `nodeKey`,0 个 ⇒ 席位 = actor 本人;
+  //   · 行有 `nodeKey`,>1 个 ⇒ `seat_unresolvable`(需节点再入改写委托,**本轮未构造**);
+  //   · 行**无** `nodeKey`,该 actor 在本实例上有 **>1** 个不同 `delegatedFrom` ⇒ `seat_unresolvable`
+  //     (= owner 点名的「多人委托同一人」反例,`N9(a)` 实测);
+  //   · 行**无** `nodeKey`,恰好 1 个 ⇒ `delegate_not_seat`(`N7(a)`/`N8(a)`/`P12(a)`/`P13(a)`);
+  //   · 行**无** `nodeKey`,0 个 ⇒ 席位 = actor 本人 —— **爆炸半径的闸门**,`P19(a)` 钉住:
+  //     legacy 路由写的 approve 行本来就**全都**没有 `nodeKey`,若少了这一臂,全仓每一张历史 legacy
+  //     单据都会变成 409。这一臂是本节里唯一能把「修好了」和「把所有人都锁死了」区分开的腿。
   //
-  // 为什么本轮**不**实现 fallback(无 `nodeKey` 时退回 instance 级匹配):它不是「补上缺口」,而是
-  // 用一种错换另一种错,且换到哪一种**取决于语料**——
-  //   · 两个节点都走 legacy(D 在节点 1 代理 A、在节点 2 有自己的席位,两条 approve 行都无 `nodeKey`):
-  //     今天答 `[D]`(1 席),fallback 答 `[A]`(1 席)—— D 自己那份席位被折给 A,人不对,数还是错的;
-  //   · 混合语料(节点 1 legacy、节点 2 actions):今天答 `[D]`(1 席),fallback 答 `{A, D}`(2 席)
-  //     —— 这一格 fallback 反而是对的。
-  // 两种错的取舍是语义裁决,属 owner;fail-closed(存在 `delegatedFrom` 的 user assignment 而 approve
-  // 行缺 `nodeKey` ⇒ 拒绝)要新错误码,须先进锁 §14.3,同样属 owner。本轮的处置是**照实登记 + 覆盖**,
-  // 不是替 owner 选一种。(上面两格的读数是**推演**,本轮未构造 —— 标 NOT CONSTRUCTED,不当实测引用。)
+  // 定级纪律:`ineligibleCount` 在阻断臂上数的是**行**不是人(不可归属的行没有人可数),
+  // `reasons` 仍然是**类别**、永不含人。
   // ══════════════════════════════════════════════════════════════════════════════════════════════
 
+  type CancelRoundAttempt = {
+    thrown: unknown
+    seats: string[]
+    documentId: string
+  }
+
   /**
-   * Opens a cancel round on a LEGACY-corpus delegated original after deactivating ONE named person,
-   * and returns the seats the round actually got. Shared by N7(a)/N8(a) so the two legs differ in
-   * exactly one predicate (the delegation state), not in fixture plumbing.
-   *
-   * A round that IS created writes rows; they are registered here (NOT through
-   * `registerUnexpectedlyCreatedRound`, which is for negative controls whose creation was supposed
-   * to fail) — the §N5 fixture-residue chain (FK abort → surviving `approval_delegations` → a later
-   * file's `toEqual({A: D})` red) starts with exactly this kind of unregistered row.
+   * Opens (or fails to open) a cancel round for an already-built original and reports BOTH outcomes
+   * without deciding which one is right — every leg below states its own expectation. A creation that
+   * unexpectedly SUCCEEDS still wrote rows, so they are registered here: the §N5 fixture-residue chain
+   * (FK abort → surviving `approval_delegations` → a later file's `toEqual({A: D})` red) starts with
+   * exactly this kind of unregistered row.
    */
-  async function legacySeatsAfterDeactivating(
+  async function attemptCancelRound(documentId: string, requesterId: string): Promise<CancelRoundAttempt> {
+    const service = new ApprovalProductService()
+    let thrown: unknown
+    let seats: string[] = []
+    try {
+      const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+      createdApprovalIds.add(dto.id)
+      const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+        documentId,
+      ])
+      for (const row of roundRows.rows) createdRoundIds.add(row.id)
+      const seatRows = await pool().query<{ assignee_id: string }>(
+        `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+        [dto.id],
+      )
+      seats = seatRows.rows.map((row) => row.assignee_id)
+    } catch (error) {
+      thrown = error
+    }
+    return { thrown, seats, documentId }
+  }
+
+  /**
+   * Asserts the ruling's blocking shape on an attempt: 409 `CANCEL_ROUND_SEAT_INELIGIBLE` with exactly
+   * the expected values-free `details`, zero rows, and — the half that makes it the RULING's assertion
+   * rather than a generic 409 — nobody named in the payload.
+   */
+  async function expectSeatBlock(
+    attempt: CancelRoundAttempt,
+    expected: { ineligibleCount: number; reasons: string[] },
+    peopleThatMustNotLeak: string[],
+  ): Promise<void> {
+    expect(attempt.thrown, 'creation must BLOCK, not open a round').toBeTruthy()
+    const failure = attempt.thrown as {
+      statusCode?: number
+      code?: string
+      message?: string
+      details?: Record<string, unknown>
+    }
+    expect(failure.statusCode).toBe(409)
+    expect(failure.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
+    expect(failure.details).toEqual(expected)
+    for (const person of peopleThatMustNotLeak) {
+      expect(JSON.stringify(failure.details)).not.toContain(person)
+      expect(String(failure.message)).not.toContain(person)
+    }
+    await expectZeroCancelRoundRows(attempt.documentId)
+  }
+
+  /**
+   * A legacy-corpus delegated original with ONE named person deactivated. Shared by N7(a)/N8(a) so the
+   * two legs differ in exactly one predicate (the delegation state), not in fixture plumbing.
+   */
+  async function legacyAttemptAfterDeactivating(
     label: string,
     who: 'delegatorA' | 'delegateeD',
     leg: DelegationLegState = 'valid',
-  ): Promise<{ seats: string[]; delegatorA: string; delegateeD: string; documentId: string }> {
+  ): Promise<CancelRoundAttempt & { delegatorA: string; delegateeD: string }> {
     const fixture = await delegatedApprovedOriginal(label, { approveVia: 'legacy' })
     await applyDelegationLeg(fixture.delegationId, leg, fixture.templateId)
     const target = who === 'delegatorA' ? fixture.delegatorA : fixture.delegateeD
     const deactivated = await pool().query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [target])
     expect(deactivated.rowCount).toBe(1)
-    // 反向正控:确认停权真的落在库里(而不是被某个 upsert 覆盖回去)。少了这一句,下面的
-    // 「没抛异常」可以因为「根本没停成」而平凡成立 —— 那是无效 mutation 的同族。
-    const stillInactive = await pool().query<{ is_active: boolean }>(
-      `SELECT is_active FROM users WHERE id = $1`,
-      [target],
-    )
-    expect(stillInactive.rows[0]?.is_active).toBe(false)
-
-    const service = new ApprovalProductService()
-    const dto = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
-    createdApprovalIds.add(dto.id)
-    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
-      fixture.documentId,
+    // 反向正控:确认停权真的落在库里(而不是被某个 upsert 覆盖回去)。少了这一句,下面关于资格的
+    // 断言可以因为「根本没停成」而平凡成立 —— 那是无效 mutation 的同族。
+    const stillInactive = await pool().query<{ is_active: boolean }>(`SELECT is_active FROM users WHERE id = $1`, [
+      target,
     ])
-    expect(roundRows.rows.length).toBe(1)
-    createdRoundIds.add(roundRows.rows[0].id)
-    const seatRows = await pool().query<{ assignee_id: string }>(
-      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
-      [dto.id],
-    )
+    expect(stillInactive.rows[0]?.is_active).toBe(false)
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    return { ...attempt, delegatorA: fixture.delegatorA, delegateeD: fixture.delegateeD }
+  }
+
+  it('§2-G3 第三句 负控 N7(a) — legacy 语料 × 停权「原审批主体 A」⇒ **阻断**(409 SEAT_INELIGIBLE / delegate_not_seat / 零行),不静默把席位留给历史被委托人 D', async () => {
+    const attempt = await legacyAttemptAfterDeactivating('g3dlg-lgcygA', 'delegatorA')
+    // 裁决前这一腿钉的是「创建成功、席位 [D]」。现在它钉相反的答案,并且 reason 说明**为什么**:
+    // 不是「A 不在职」(A 根本没被解析出来),而是这条 approve 行无法归属到节点席位。
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['delegate_not_seat'] }, [
+      attempt.delegatorA,
+      attempt.delegateeD,
+    ])
+    expect(attempt.seats, 'a blocked creation seats nobody').toEqual([])
+  })
+
+  it('§2-G3 第三句 负控 N8(a) — legacy 语料 × 委托**已撤销** × 停权「原审批主体 A」⇒ 同样阻断,委托状态不改变答案', async () => {
+    const attempt = await legacyAttemptAfterDeactivating('g3dlg-lgcygR', 'delegatorA', 'revoked')
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['delegate_not_seat'] }, [
+      attempt.delegatorA,
+      attempt.delegateeD,
+    ])
+    expect(attempt.seats).toEqual([])
+    // 判别力的上限,写明而不是让它看起来比实际更强:读法 (a) **根本不读**活的委托行
+    // (`resolveActiveDelegationMap` 在这条路径上零调用),所以这一腿与 N7(a) 的差别落在一个
+    // **被测代码从不触碰的字段**上。它不是独立的第二个 oracle;它钉的是锁文里最刺眼的那一格
+    // 现在的答案:委托已撤销、原主体已离职 ⇒ **没有人**拿到撤销轮的决定权,轮次开不出来。
+  })
+
+  it('§2-G3 第三句 负控 P13(a)(承重)— legacy 语料 × 停权「被委托人 D」:阻断的 reason 是 delegate_not_seat 而**不是** inactive —— D 从来没被坐下,所以资格闸没有在他身上跑', async () => {
+    const attempt = await legacyAttemptAfterDeactivating('g3dlg-lgcygD', 'delegateeD')
+    // 这条腿承的是**归因**:裁决前它答 `reasons: ['inactive']`(D 被坐下、被资格闸拒),
+    // 现在答 `['delegate_not_seat']`。两个 reason 分别对应「谁被坐下」的两种答案,所以它是
+    // 「席位到底给了谁」的判别腿 —— 把阻断退回「席位 [D]」的 mutation 下,它会红。
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['delegate_not_seat'] }, [
+      attempt.delegatorA,
+      attempt.delegateeD,
+    ])
+    expect(attempt.seats).toEqual([])
+  })
+
+  // ── owner 点名的反例组:多人委托同一人 ──────────────────────────────────────────────────────────
+
+  type MultiDelegatorShape = 'two_nodes' | 'cosign_all_delegated' | 'cosign_mixed'
+
+  /**
+   * 多人委托同一人。Two (or three) DIFFERENT delegators all delegate to the SAME person D, and D is
+   * the only human who ever presses a button.
+   *
+   * `two_nodes`: `approval_a` names A, `approval_b` names B, both substituted to D. This is the shape
+   * that produces TWO distinct `delegatedFrom` values for ONE actor on ONE instance — the input the
+   * ruling's 「无法可靠还原」 arm is about. `approveVia: 'mixed'` sends node 1 through the template
+   * runtime (so node 2's assignment is created at all — the legacy route approves the WHOLE instance
+   * in one call and would never reach node 2) and node 2 through the legacy route, which is the only
+   * production writer that emits an approve row with no `nodeKey`.
+   *
+   * `cosign_all_delegated` / `cosign_mixed`: ONE `approvalMode: 'all'` node naming three people.
+   * MEASURED, and the reason these legs pin numbers rather than assert a design: `pushResolved` dedups
+   * on `user:<delegatee>`, so A→D, B→D, C→D collapses to a SINGLE assignment carrying only the FIRST
+   * delegator's provenance. The 会签 threshold is therefore already 1 (not 3) when the ORIGINAL is
+   * created — that collapse happens in the resolver, not in the cancel-round restore, and no evidence
+   * of B's and C's seats survives anywhere for the restore to read. See the design MD §3.4 open item.
+   */
+  async function multiDelegatorOriginal(
+    label: string,
+    shape: MultiDelegatorShape,
+    approveVia: 'actions' | 'mixed',
+  ): Promise<{
+    documentId: string
+    requesterId: string
+    delegators: string[]
+    ownApprover: string | null
+    delegateeD: string
+  }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-mreq-${suffix}`
+    const delegatorA = `wi4-mdlA-${suffix}`
+    const delegatorB = `wi4-mdlB-${suffix}`
+    const thirdPerson = `wi4-mdlC-${suffix}`
+    const delegateeD = `wi4-mdlD-${suffix}`
+    const adminId = `wi4-madm-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await authToken(baseUrl, delegatorA)
+    await authToken(baseUrl, delegatorB)
+    const tokenC = await authToken(baseUrl, thirdPerson)
+    const tokenD = await authToken(baseUrl, delegateeD)
+
+    // `cosign_mixed` leaves the third person UNDELEGATED — that is what makes it the leg where the
+    // restored seat set has two members from two different mechanisms.
+    const delegatorsOfD =
+      shape === 'two_nodes'
+        ? [delegatorA, delegatorB]
+        : shape === 'cosign_all_delegated'
+          ? [delegatorA, delegatorB, thirdPerson]
+          : [delegatorA, delegatorB]
+    for (const [index, delegator] of delegatorsOfD.entries()) {
+      const delegationId = `wi4-mdeleg${index}-${suffix}`
+      createdDelegationIds.add(delegationId)
+      await pool().query(
+        `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+         VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+        [delegationId, delegator, delegateeD],
+      )
+    }
+
+    const graph =
+      shape === 'two_nodes'
+        ? {
+            nodes: [
+              { key: 'start', type: 'start', config: {} },
+              {
+                key: 'approval_a',
+                type: 'approval',
+                config: { assigneeType: 'user', assigneeIds: [delegatorA], approvalMode: 'single' },
+              },
+              {
+                key: 'approval_b',
+                type: 'approval',
+                config: { assigneeType: 'user', assigneeIds: [delegatorB], approvalMode: 'single' },
+              },
+              { key: 'end', type: 'end', config: {} },
+            ],
+            edges: [
+              { key: 'e-s-a', source: 'start', target: 'approval_a' },
+              { key: 'e-a-b', source: 'approval_a', target: 'approval_b' },
+              { key: 'e-b-end', source: 'approval_b', target: 'end' },
+            ],
+          }
+        : {
+            nodes: [
+              { key: 'start', type: 'start', config: {} },
+              {
+                key: 'approval_a',
+                type: 'approval',
+                config: {
+                  assigneeType: 'user',
+                  assigneeIds: [delegatorA, delegatorB, thirdPerson],
+                  approvalMode: 'all',
+                },
+              },
+              { key: 'end', type: 'end', config: {} },
+            ],
+            edges: [
+              { key: 'e-s-a', source: 'start', target: 'approval_a' },
+              { key: 'e-a-end', source: 'approval_a', target: 'end' },
+            ],
+          }
+
+    const templateId = await publishGraphTemplate(adminToken, graph as ReturnType<typeof oneNodeGraph>, label)
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    if (shape === 'two_nodes') {
+      const first = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(first.status, await first.clone().text()).toBe(200)
+      if (approveVia === 'mixed') {
+        const versionRow = await pool().query<{ version: number }>(
+          `SELECT version FROM approval_instances WHERE id = $1`,
+          [documentId],
+        )
+        const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
+          method: 'POST',
+          body: { version: versionRow.rows[0].version },
+        })
+        expect(legacy.status, await legacy.clone().text()).toBe(200)
+      } else {
+        const second = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(second.status, await second.clone().text()).toBe(200)
+      }
+    } else {
+      const byD = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(byD.status, await byD.clone().text()).toBe(200)
+      if (shape === 'cosign_mixed') {
+        const byC = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenC, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(byC.status, await byC.clone().text()).toBe(200)
+      }
+    }
+
+    const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(status.rows[0]?.status, 'the ORIGINAL must be genuinely approved before any cancel round').toBe('approved')
     return {
-      seats: seatRows.rows.map((row) => row.assignee_id),
-      delegatorA: fixture.delegatorA,
-      delegateeD: fixture.delegateeD,
-      documentId: fixture.documentId,
+      documentId,
+      requesterId,
+      delegators: delegatorsOfD,
+      ownApprover: shape === 'cosign_mixed' ? thirdPerson : null,
+      delegateeD,
     }
   }
 
-  it('§2-G3 第三句 负控 N7(a) (P2-1) — compound 格 ①:legacy 语料 × 停权「原审批人 A」⇒ 今天**不阻断**,轮次照开、席位 [D];G3 第三句在这条语料上对 A 整条不执行(已登记缺口的钉子,不是期望行为)', async () => {
-    const { seats, delegatorA, delegateeD } = await legacySeatsAfterDeactivating('g3dlg-lgcygA', 'delegatorA')
-    // 今天的真实答案,逐字:创建成功(上面的 helper 没有 try/catch,抛了就直接红),席位是 D。
-    expect(seats).toEqual([delegateeD])
-    expect(seats).not.toContain(delegatorA)
+  it('§2-G3 第三句 正控 P16(a) — 多人委托同一人(A→D、B→D,两节点都走模板运行时):两席**各自**还原回 A 和 B,D 不占席位、不重复,会签人数仍是 2', async () => {
+    const fixture = await multiDelegatorOriginal('g3dlg-multi2', 'two_nodes', 'actions')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'both rows carry a nodeKey and map to exactly one delegator each ⇒ resolvable').toBeFalsy()
+    // `wi4-mdlA-…` < `wi4-mdlB-…`,ORDER BY 固定顺序,无需在这里再排。
+    expect(attempt.seats).toEqual([fixture.delegators[0], fixture.delegators[1]])
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
+    // 明写成计数:「一个人替两个人批」折成一席,就是会签门槛被悄悄减半 —— 正是本节要防的那一格。
+    expect(attempt.seats.length).toBe(2)
+    expect(new Set(attempt.seats).size, 'no duplicate seat for the same subject').toBe(2)
   })
 
-  it('§2-G3 第三句 负控 N8(a) (P2-1) — compound 格 ②:legacy 语料 × 委托**已撤销** × 停权「原审批人 A」⇒ 仍然不阻断、席位仍是 D', async () => {
-    const { seats, delegatorA, delegateeD } = await legacySeatsAfterDeactivating('g3dlg-lgcygR', 'delegatorA', 'revoked')
-    expect(seats).toEqual([delegateeD])
-    expect(seats).not.toContain(delegatorA)
-    // 判别力的上限,写明而不是让它看起来比实际更强:读法 (a) **根本不读**活的委托行
-    // (`resolveActiveDelegationMap` 在这条路径上零调用),所以这一腿与 N7(a) 的差别落在一个
-    // **被测代码从不触碰的字段**上。它不是独立的第二个 oracle,它钉的是锁文里最刺眼的那一格:
-    // 委托**已撤销**、委托人**已离职**,被委托人 D 仍然拿到撤销轮的决定权。
+  it('§2-G3 第三句 负控 N9(a) — owner 点名的反例:多人委托同一人 × legacy 行(A→D、B→D,节点 2 走 legacy 路由)⇒ 该行有两个候选原主体,**阻断**(seat_unresolvable),既不猜 A/B 也不回退 D', async () => {
+    const fixture = await multiDelegatorOriginal('g3dlg-multiL', 'two_nodes', 'mixed')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // 裁决前实测的答案是 `[A, D]`(节点 1 还原成 A、节点 2 的 legacy 行把 D 留下)—— 恰好是
+    // 「静默回退给历史被委托人」。现在这一行不可归属 ⇒ 整张单据阻断。
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
+      ...fixture.delegators,
+      fixture.delegateeD,
+    ])
+    expect(attempt.seats).toEqual([])
   })
 
-  it('§2-G3 第三句 负控 P13(a) (P2-1,承重) — legacy 语料上资格闸**没有**被整条跳过:停权「被委托人 D」(= 未被还原的 actor)仍然 409 CANCEL_ROUND_SEAT_INELIGIBLE、零行', async () => {
-    const fixture = await delegatedApprovedOriginal('g3dlg-lgcygD', { approveVia: 'legacy' })
-    const deactivated = await pool().query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [fixture.delegateeD])
+  it('§2-G3 第三句 负控 N10(a) — 多人委托同一人 × 原主体 A 已停权 ⇒ 阻断(reasons: [inactive]),**不**回退给 D;另一位原主体 B 仍在职也救不了这张单据(阻断不过滤)', async () => {
+    const fixture = await multiDelegatorOriginal('g3dlg-multiX', 'two_nodes', 'actions')
+    const deactivated = await pool().query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [fixture.delegators[0]])
     expect(deactivated.rowCount).toBe(1)
+    const stillInactive = await pool().query<{ is_active: boolean }>(`SELECT is_active FROM users WHERE id = $1`, [
+      fixture.delegators[0],
+    ])
+    expect(stillInactive.rows[0]?.is_active).toBe(false)
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // `ineligibleCount: 1` 而不是 2:B 仍然合格。数到 2 说明还原把两席都指向了同一个人。
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['inactive'] }, [
+      ...fixture.delegators,
+      fixture.delegateeD,
+    ])
+    expect(attempt.seats).toEqual([])
+  })
 
-    const service = new ApprovalProductService()
-    let thrown: unknown
-    try {
-      const unexpected = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
-      await registerUnexpectedlyCreatedRound(fixture.documentId, unexpected.id)
-    } catch (error) {
-      thrown = error
-    }
-    expect(thrown).toBeTruthy()
-    const failure = thrown as { statusCode?: number; code?: string; message?: string; details?: Record<string, unknown> }
-    expect(failure.statusCode).toBe(409)
-    expect(failure.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
-    expect(failure.details).toEqual({ ineligibleCount: 1, reasons: ['inactive'] })
-    expect(JSON.stringify(failure.details)).not.toContain(fixture.delegateeD)
-    expect(String(failure.message)).not.toContain(fixture.delegateeD)
-    await expectZeroCancelRoundRows(fixture.documentId)
+  it('§2-G3 第三句 正控 P17(a) — 三人委托同一人的**会签**场景:席位数是今天实测的 1(解析器在建单时就把三席折成一席,只留第一位委托人的 provenance),不是 3;折叠发生在 pushResolved,不在还原', async () => {
+    const fixture = await multiDelegatorOriginal('g3dlg-cosign3', 'cosign_all_delegated', 'actions')
+    // 先把**折叠本身**测成数据,而不是从席位数倒推:原单上只剩一条 user assignment。
+    const originalSeats = await pool().query<{ assignee_id: string; delegated_from: string | null }>(
+      `SELECT assignee_id, metadata->>'delegatedFrom' AS delegated_from
+         FROM approval_assignments WHERE instance_id = $1 AND assignment_type = 'user' ORDER BY assignee_id`,
+      [fixture.documentId],
+    )
+    expect(originalSeats.rows).toEqual([{ assignee_id: fixture.delegateeD, delegated_from: fixture.delegators[0] }])
+
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegators[0]])
+    expect(attempt.seats.length).toBe(1)
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
+    // 这一腿**不主张**「1 是对的」。它把一条本轮无法修的事实钉成数据:B、C 的席位在建单那一刻
+    // 就不存在了,审计轨迹里没有任何东西能让撤销轮还原出他们 —— 所以这不是 `seat_unresolvable`
+    // (没有两个候选,只有一个),阻断谓词对它零判别力。登记在设计 MD §3.4,属 owner。
+  })
+
+  it('§2-G3 第三句 正控 P18(a) — 会签节点上「两人委托同一人 + 第三人自己批」:席位是 {A, C} 两人(A 由还原得到、C 是本人),D 不在里面;B 的席位在建单时已被折掉', async () => {
+    const fixture = await multiDelegatorOriginal('g3dlg-cosignM', 'cosign_mixed', 'actions')
+    expect(fixture.ownApprover).toBeTruthy()
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown).toBeFalsy()
+    // 两条 approve 行同节点、同 nodeKey:D 的那条有 `delegatedFrom = A` ⇒ 还原成 A;
+    // C 的那条没有 ⇒ 保持 C。这是「同一节点内 delegated 与 own 两种席位并存」的唯一一腿。
+    expect(attempt.seats).toEqual([fixture.delegators[0], fixture.ownApprover as string].sort())
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
+    expect(attempt.seats).not.toContain(fixture.delegators[1])
+    expect(attempt.seats.length).toBe(2)
+  })
+
+  it('§2-G3 第三句 正控 P19(a)(爆炸半径闸门)— legacy 语料但**从来没有过委托**:席位是本人 A、201 照常创建。阻断只针对「无法归属的被委托行」,不是「所有无 nodeKey 的行」', async () => {
+    const suffix = `g3dlg-lgcyplain-${TS}`
+    const requesterId = `wi4-preq-${suffix}`
+    const approverA = `wi4-papr-${suffix}`
+    const adminId = `wi4-padm-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    const tokenA = await authToken(baseUrl, approverA)
+    const templateId = await publishOneNodeTemplate(adminToken, approverA, 'lgcyplain')
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+    const versionRow = await pool().query<{ version: number }>(
+      `SELECT version FROM approval_instances WHERE id = $1`,
+      [documentId],
+    )
+    const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenA, {
+      method: 'POST',
+      body: { version: versionRow.rows[0].version },
+    })
+    expect(legacy.status, await legacy.clone().text()).toBe(200)
+    // 这一腿的前提,断言而不是假设:approve 行确实**没有** nodeKey(否则它测的就不是 legacy 语料),
+    // 且这张单据上确实**没有**任何带 `delegatedFrom` 的席位。
+    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+      [documentId],
+    )
+    expect(records.rows).toEqual([{ actor_id: approverA, node_key: null }])
+    const delegatedRows = await pool().query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_assignments
+        WHERE instance_id = $1 AND metadata->>'delegatedFrom' IS NOT NULL`,
+      [documentId],
+    )
+    expect(delegatedRows.rows[0].count).toBe('0')
+
+    const attempt = await attemptCancelRound(documentId, requesterId)
+    expect(attempt.thrown, 'the whole pre-delegation legacy corpus must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([approverA])
   })
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
