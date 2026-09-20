@@ -101,7 +101,7 @@ const refCountQueriedIds: string[] = []
 const groupedRefQueries: Array<{ kind: 'canonical' | 'legacy'; ids: string[] }> = []
 
 function fakeDb() {
-  return {
+  const executor = {
     selectFrom: (table: string) => {
       if (table === 'integration_external_systems') {
         const captured: Array<{ lhs: unknown; op: unknown; value: unknown }> = []
@@ -166,7 +166,9 @@ function fakeDb() {
         }
         return b
       }
-      const b = { selectAll: () => b, where: () => b, execute: async () => [] }
+      // data_sources: loadFromDatabase's selectAll chain, and (W7-B) removeDataSource's
+      // `SELECT id ... FOR UPDATE` lock step at the head of its transaction.
+      const b = { selectAll: () => b, select: () => b, forUpdate: () => b, where: () => b, execute: async () => [] }
       return b
     },
     insertInto: () => {
@@ -181,6 +183,15 @@ function fakeDb() {
       const b = { where: () => b, execute: async () => [] }
       return b
     },
+  }
+  return {
+    ...executor,
+    // W7-B: the delete guard's check + write run inside one transaction; the trx handed to
+    // the callback is this same builder set. Statement ORDER is pinned in
+    // data-source-remove-ordering.test.ts; this matrix pins WHO may delete WHAT.
+    transaction: () => ({
+      execute: async <T>(cb: (trx: typeof executor) => Promise<T>): Promise<T> => cb(executor),
+    }),
   }
 }
 
