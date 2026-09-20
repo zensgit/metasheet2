@@ -185,6 +185,8 @@ ERROR:  update or delete on table "data_sources" violates foreign key constraint
 
 裁决前 PR-B 不开工；本刀与三个选项都兼容。
 
+> **已裁（2026-09-20）：① 取消 force。** PR-B 据此落地：`zzzz20260920120000_data_source_live_id_binding_lock.ts` + manager/route 去 force + 插件侧 23503→409 映射。见 `data-source-live-id-fk-binding-lock-design-20260920.md`。
+
 ---
 
 ## 7. 覆盖矩阵（写 `connection_id` / `config.dataSourceId` 的入口逐个标注）

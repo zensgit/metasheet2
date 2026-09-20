@@ -20,7 +20,6 @@ import { Logger } from '../core/logger'
 import {
   c6WriteTargetQueryDisabledMessage,
   DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
-  DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE,
   DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
   isGenericQueryDisabledConfig,
@@ -859,12 +858,20 @@ export function dataSourcesRouter(): Router {
    * DELETE /api/data-sources/:id
    * Remove a data source configuration.
    *
-   * Referential guard: a source referenced by any
-   * integration_external_systems.config->>'dataSourceId' refuses deletion
-   * with a coded 409 naming the reference COUNT (never the referencing
-   * config), so an external system's binding cannot be silently dangled.
-   * `?force=true` (platform-admin only) breaks the reference deliberately
-   * and is audited as such. The check is server-side, before removal.
+   * Referential guard: a source referenced by any integration external system
+   * (canonical connection_id, or an owner-attributed legacy config.dataSourceId)
+   * refuses deletion with a coded 409 naming the reference COUNT (never the
+   * referencing config), so an external system's binding cannot be silently
+   * dangled. There is NO force bypass (owner ruling 2026-09-20, ①): a
+   * `?force=true` query is ignored for every tier — admins included — and the
+   * answer is the same 409; the operator unbinds the external systems first.
+   * The former admin-only-force 403 code no longer exists.
+   *
+   * Three layers, outermost first: this ADVISORY pre-count on the autocommit
+   * connection (shapes the 409 with the count), the manager's own count inside
+   * its FOR UPDATE delete transaction (the gate), and the database's
+   * live-connection foreign key, which refuses the soft delete itself while a
+   * canonical binding exists (mapped by the manager to the same 409).
    */
   router.delete('/api/data-sources/:id', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     try {
@@ -872,7 +879,7 @@ export function dataSourcesRouter(): Router {
       const id = req.params.id
       const actor = resolveActor(req)
       // Access first: a non-owner non-admin gets the uniform 404 before any
-      // referential detail (force=true included) can leak existence.
+      // referential detail can leak existence.
       manager.assertAccess(id, actor)
 
       // Get config before removal for audit
@@ -881,35 +888,21 @@ export function dataSourcesRouter(): Router {
       const ownerId = manager.getScope(id)?.ownerId
 
       const referenceCount = await manager.countExternalSystemReferences(id)
-      const forceRequested = String(req.query.force ?? '') === 'true'
-      const forcedReferenceBreak = referenceCount > 0 && forceRequested
       if (referenceCount > 0) {
-        if (forceRequested && actor.platformAdmin !== true) {
-          return res.status(403).json({
-            ok: false,
-            error: {
-              code: DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE,
-              message: `force=true is restricted to platform admins; data source '${id}' remains referenced by ${referenceCount} external system(s)`
-            }
-          })
-        }
-        if (!forceRequested) {
-          return res.status(409).json({
-            ok: false,
-            error: {
-              code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
-              message: `Data source '${id}' is referenced by ${referenceCount} external system(s) (integration_external_systems.config.dataSourceId) and deleting it would leave dangling references. A platform admin may repeat the request with force=true to break the reference deliberately.`,
-              details: { referenceCount }
-            }
-          })
-        }
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+            message: `Data source '${id}' is referenced by ${referenceCount} external system(s); unbind them first — 请先解绑 ${referenceCount} 个外部系统。Deleting a referenced source is refused; force=true is no longer accepted.`,
+            details: { referenceCount }
+          }
+        })
       }
 
       // Durable-first removal (PERM-04): the manager writes the row FIRST and only then
-      // clears memory, and it re-runs the referential count itself. `force` is forwarded
-      // ONLY for a break this route already authorized (references present AND platform
-      // admin) — never as a blanket bypass of the manager's own check.
-      await manager.removeDataSource(id, { force: forcedReferenceBreak })
+      // clears memory, and it re-runs the referential count itself inside its transaction.
+      // Nothing from the request can relax that check.
+      await manager.removeDataSource(id)
 
       await auditLog({
         actorId: req.user?.id?.toString(),
@@ -920,8 +913,7 @@ export function dataSourcesRouter(): Router {
         meta: {
           ...sanitizeConfig(config),
           ownerId,
-          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {}),
-          ...(forcedReferenceBreak ? { forcedReferenceBreak: true, referenceCount } : {})
+          ...(isCrossOwnerAdminAction(actor, ownerId) ? { crossOwnerAdmin: true } : {})
         }
       })
 
@@ -936,12 +928,22 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
-      // The manager's own durable-first refusals (referential 409 on a TOCTOU race, and the
-      // values-free DATA_SOURCE_DELETE_NOT_PERSISTED when the row write fails) keep their code
-      // and status instead of collapsing into a generic 500 that reads like a partial delete.
+      // The manager's own durable-first refusals (referential 409 on a TOCTOU race or from the
+      // database's live-connection FK, and the values-free DATA_SOURCE_DELETE_NOT_PERSISTED when
+      // the row write fails) keep their code and status instead of collapsing into a generic 500
+      // that reads like a partial delete. The referential 409 also keeps its `details`
+      // (`referenceCount`, a number or null) so the client sees the same shape as the pre-count's.
       const coded = codedGateRefusal(error)
       if (coded) {
-        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+        const details = (error as { details?: unknown }).details
+        return res.status(coded.status).json({
+          ok: false,
+          error: {
+            code: coded.code,
+            message: coded.message,
+            ...(details && typeof details === 'object' ? { details } : {})
+          }
+        })
       }
       return res.status(500).json({
         ok: false,

@@ -21,6 +21,13 @@
  * mutation probes (see the verification doc): drop `.forUpdate()`, count on `this.db`
  * instead of `trx`, hoist the count above the transaction, write before counting, or
  * translate the 409 into the 500 — each turns exactly the assertion built for it red.
+ *
+ * W7-B PR-B (owner ruling 2026-09-20 ①): `force` is RETIRED. The count runs on EVERY delete —
+ * an extra `{ force: true }` option changes nothing — and the database's live-connection FK
+ * (migration zzzz20260920120000) is the backstop: a 23503 on that constraint raised by the
+ * soft delete itself is mapped to the same 409, never to the 500. Mutation probes: re-wrap the
+ * count in `if (options?.force !== true)` and the force tests go red; drop the 23503 mapping
+ * and the backstop test reads a 500.
  */
 import express from 'express'
 import request from 'supertest'
@@ -43,6 +50,7 @@ vi.mock('../../src/rbac/namespace-admission', () => ({
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 import {
   DATA_SOURCE_DELETE_NOT_PERSISTED_CODE,
+  DATA_SOURCE_LIVE_CONNECTION_FK,
   DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
 } from '../../src/data-adapters/DataSourceManager'
@@ -52,6 +60,18 @@ import { usePinnedServer } from '../utils/pinned-server'
 // A driver failure's own text is what must NEVER reach the client (it embeds host,
 // port, database and login). The fake db throws exactly this shape.
 const DRIVER_POISON = 'Login failed for user "svc_plm" at 10.10.52.16:5432 (db=plm_prod)'
+
+/**
+ * What `pg` raises when the soft delete trips the PR-B live-connection foreign key on a zh_CN
+ * server: SQLSTATE + constraint name are stable; the prose is not English. A mapping keyed on
+ * the SQLSTATE sees this; one keyed on "violates foreign key constraint" does not.
+ */
+function fkViolation(): Error {
+  return Object.assign(
+    new Error('在 "data_sources" 上更新或删除违反了在 "integration_external_systems" 上的外键约束 (db=plm_prod)'),
+    { code: '23503', constraint: DATA_SOURCE_LIVE_CONNECTION_FK, table: 'integration_external_systems' },
+  )
+}
 
 interface RefRow {
   connectionId?: string | null
@@ -72,7 +92,14 @@ interface Harness {
   rows: Map<string, Record<string, unknown>>
   refs: RefRow[]
   control: {
-    failDataSourceWrite: boolean
+    /**
+     * `true`: the delete write fails like a dead connection (08006, driver prose).
+     * `'fk'`: the delete write is refused by PostgreSQL's live-connection foreign key
+     * (23503 on fk_integration_external_systems_live_connection_id) — the PR-B database
+     * backstop. Its message is deliberately the zh_CN server's, so a mapping that read the
+     * English prose instead of the SQLSTATE would miss it.
+     */
+    failDataSourceWrite: boolean | 'fk'
     failRefCount: false | 'undefined_table' | 'other'
     /** Observer invoked at the moment the data_sources delete write executes. */
     onDataSourceWrite: (() => void) | null
@@ -250,6 +277,7 @@ function makeHarness(): Harness {
               writes.push('soft-delete:' + String(whereId))
               ops.push(`soft-delete:${table}:${String(whereId)}@${tag}`)
               control.onDataSourceWrite?.()
+              if (control.failDataSourceWrite === 'fk') throw fkViolation()
               if (control.failDataSourceWrite) throw Object.assign(new Error(DRIVER_POISON), { code: '08006' })
             }
             if (whereId != null && view.has(whereId)) view.set(whereId, { ...view.get(whereId), ...setObj })
@@ -270,6 +298,7 @@ function makeHarness(): Harness {
             writes.push('hard-delete:' + String(whereId))
             ops.push(`hard-delete:${table}:${String(whereId)}@${tag}`)
             control.onDataSourceWrite?.()
+            if (control.failDataSourceWrite === 'fk') throw fkViolation()
             if (control.failDataSourceWrite) throw Object.assign(new Error(DRIVER_POISON), { code: '08006' })
             if (whereId != null) view.delete(whereId)
             return []
@@ -533,17 +562,78 @@ describe('removeDataSource — the referential check runs before ANY mutation', 
     expect(harness2.writes).toEqual([])
   })
 
-  it('force=true (the route-authorized break) skips the check and reaches the db write', async () => {
+  it('force is RETIRED (owner ruling ①): `{ force: true }` changes nothing — same 409, no write, memory unchanged', async () => {
     const harness = makeHarness()
     const { m } = await managerWith('ds-forced', harness)
     harness.refs.push({ connectionId: 'ds-forced' })
 
-    await expect(m.removeDataSource('ds-forced', { force: true })).resolves.toBeUndefined()
-    expect(harness.writes).toEqual(['soft-delete:ds-forced'])
-    expect(inMemory(m, 'ds-forced')).toBe(false)
-    expect(harness.rows.get('ds-forced')).toMatchObject({ is_active: false })
-    // (W7-B) force skips the COUNT, never the LOCK: the row is still taken FOR UPDATE first.
-    expect(harness.ops).toEqual(['for-update:data_sources:ds-forced@trx', 'soft-delete:data_sources:ds-forced@trx'])
+    // The option no longer exists on the signature; an old caller that still sends it is
+    // exercised through a loose cast so the test proves the RUNTIME ignores it.
+    const legacyOptions = { force: true } as unknown as { hardDelete?: boolean }
+    await expect(m.removeDataSource('ds-forced', legacyOptions)).rejects.toMatchObject({
+      status: 409,
+      code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+      details: { referenceCount: 1 },
+    })
+    expect(harness.writes).toEqual([])
+    expect(inMemory(m, 'ds-forced')).toBe(true)
+    expectRowAlive(harness, 'ds-forced')
+    // The count RAN (force used to skip exactly this step), inside the transaction, after the lock.
+    expect(harness.ops).toEqual(['for-update:data_sources:ds-forced@trx', 'count:canonical:ds-forced@trx', 'count:legacy:ds-forced@trx'])
+    expect(harness.transactions.map((t) => t.committed)).toEqual([false])
+  })
+
+  it('the 409 copy tells the operator to UNBIND first and no longer advertises force', async () => {
+    const harness = makeHarness()
+    const { m } = await managerWith('ds-copy', harness)
+    harness.refs.push({ connectionId: 'ds-copy' }, { connectionId: 'ds-copy' }, { connectionId: 'ds-copy' })
+    const error = await m.removeDataSource('ds-copy').then(() => null, (e: unknown) => e as Error)
+    expect(error?.message).toContain('请先解绑 3 个外部系统')
+    expect(error?.message).toContain('unbind them first')
+    expect(error?.message).not.toMatch(/repeat the request with force=true/)
+  })
+
+  it('DATABASE BACKSTOP (PR-B): the soft delete refused by the live-connection FK (23503) => the SAME 409, rolled back, memory unchanged', async () => {
+    const harness = makeHarness()
+    const { m } = await managerWith('ds-fk', harness)
+    // The count saw nothing (no rows in `refs`) — this is the case the count cannot catch and
+    // only the database can: the UPDATE of data_sources trips the FK re-pointed at live_id.
+    harness.control.failDataSourceWrite = 'fk'
+
+    const error = await m.removeDataSource('ds-fk').then(
+      () => null,
+      (e: unknown) => e as { code?: string; status?: number; message?: string; details?: unknown },
+    )
+    expect(error?.status).toBe(409)
+    expect(error?.code).toBe(DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE)
+    // the count is unknown on this path (the transaction is already aborted) — say so, honestly
+    expect(error?.details).toEqual({ referenceCount: null })
+    expect(error?.message).toContain('请先解绑')
+    // the driver's prose (with its db name) never reaches the caller
+    expect(error?.message).not.toContain('plm_prod')
+    expect(error?.message).not.toContain('外键约束')
+
+    // the UPDATE was issued (this is the database refusing, not the count) and then rolled back
+    expect(harness.ops).toEqual(['for-update:data_sources:ds-fk@trx', 'count:canonical:ds-fk@trx', 'count:legacy:ds-fk@trx', 'soft-delete:data_sources:ds-fk@trx'])
+    expect(harness.transactions.map((t) => t.committed)).toEqual([false])
+    expectRowAlive(harness, 'ds-fk')
+    expect(inMemory(m, 'ds-fk')).toBe(true)
+    expect(poolHas(m, 'ds-fk')).toBe(true)
+    expect(m.getScope('ds-fk')).toMatchObject({ ownerId: 'alice' })
+  })
+
+  it('a 23503 from some OTHER constraint is still a persistence failure (values-free 500), not a referential 409', async () => {
+    const harness = makeHarness()
+    const { m } = await managerWith('ds-fk-other', harness)
+    harness.control.onDataSourceWrite = () => {
+      throw Object.assign(new Error(DRIVER_POISON), { code: '23503', constraint: 'fk_some_other_table_source_id' })
+    }
+    await expect(m.removeDataSource('ds-fk-other')).rejects.toMatchObject({
+      status: 500,
+      code: DATA_SOURCE_DELETE_NOT_PERSISTED_CODE,
+    })
+    expectRowAlive(harness, 'ds-fk-other')
+    expect(inMemory(m, 'ds-fk-other')).toBe(true)
   })
 
   it('a non-42P01 reference-count failure fails CLOSED: no write, no memory change', async () => {
@@ -683,10 +773,15 @@ describe('removeDataSource — W7-B: referential check and soft delete in ONE tr
     expect(inMemory(m, 'mem-ref')).toBe(true)
     expect(m.getScope('mem-ref')).toMatchObject({ ownerId: 'alice' })
 
-    // (c) force still bypasses the count on the memory-only path too
-    await expect(m.removeDataSource('mem-ref', { force: true })).resolves.toBeUndefined()
-    expect(count).toHaveBeenCalledTimes(1)
-    expect(inMemory(m, 'mem-ref')).toBe(false)
+    // (c) force is retired on the memory-only path too: the count still runs and still refuses
+    const legacyOptions = { force: true } as unknown as { hardDelete?: boolean }
+    await expect(m.removeDataSource('mem-ref', legacyOptions)).rejects.toMatchObject({
+      status: 409,
+      code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+      details: { referenceCount: 3 },
+    })
+    expect(count).toHaveBeenCalledTimes(2)
+    expect(inMemory(m, 'mem-ref')).toBe(true)
   })
 
   it('a write failure INSIDE the transaction rolls back the staged row and surfaces the values-free 500', async () => {
@@ -766,9 +861,9 @@ describe('DELETE /api/data-sources/:id — a failed delete is reported as a fail
     expect(routeHarness.rows.get(ID)).toMatchObject({ is_active: false })
     expect((await as(OWNER).get('/api/data-sources/' + ID)).status).toBe(404)
     // (W7-B) through the real route: the route's own ADVISORY pre-count (routes/data-sources.ts
-    // DELETE, used to shape the 403/409 message and the force audit) still runs on the
-    // autocommit connection, and is NOT what gates the delete — the manager re-counts INSIDE
-    // the transaction, after the lock. Both are visible, in this order.
+    // DELETE, used to shape the 409 message with its count) still runs on the autocommit
+    // connection, and is NOT what gates the delete — the manager re-counts INSIDE the
+    // transaction, after the lock. Both are visible, in this order.
     expect(routeHarness.ops.slice(opsBefore)).toEqual([
       `count:canonical:${ID}@db`,
       `count:legacy:${ID}@db`,
