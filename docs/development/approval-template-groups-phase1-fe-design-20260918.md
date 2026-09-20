@@ -150,7 +150,7 @@
 
 | 本文出处 | 原句(摘要) | 合流分支上的求值 |
 |---|---|---|
-| §2 表「最小面板」行、§5 表「挂载点」行 | 挂载点 `TemplateCenterView.vue:60` `<ApprovalTemplateGroupsPanel v-if="canManageTemplates" :tr="tr" />` | **挂载条件被收窄**(合流分支上):`canManageTemplates` **且** `viewMode === 'grouped'` **且** 管理员点开了「管理分组 / Manage groups」披露开关。`tr` 的传递方式、面板自身的任何行为、验收 J 的整条 403→选择器→重试流**一字未改**(`ApprovalTemplateGroupsPanel.spec.ts` 3/3 仍绿,面板的 `onMounted(loadGroups)` 仍在)。 |
+| §2 表「最小面板」行、§5 表「挂载点」行 | 挂载点 `TemplateCenterView.vue:60` `<ApprovalTemplateGroupsPanel v-if="canManageTemplates" :tr="tr" />` | **挂载条件被收窄**(合流分支上):`canManageTemplates` **且** `viewMode === 'grouped'` **且** 管理员点开了「管理分组 / Manage groups」披露开关。`tr` 的传递方式、面板自身的任何行为、**组件级**验收 J 的整条 403→选择器→重试流**一字未改**(`ApprovalTemplateGroupsPanel.spec.ts` 3/3 仍绿,面板的 `onMounted(loadGroups)` 仍在)。**但页面级入口被收窄了**:合流前是「管理员打开模板中心页即触发 403 ⇒ 选择器自动出现」,合流后要先切分组视图、再点开「管理分组」,且第一跳会先撞上分节视图那条不读 `.code` 的通用错误。这条收窄按「另造更窄同类物 = 合同变更」升 owner 裁,记为 phase-3 设计 MD §8.4 的 **D3-1**,本分支不替 owner 决定。 |
 | §5 表「三处既有 spec 的 mock 接缝补丁」行 | 「面板现在**无条件**挂载在 `canManageTemplates` 为真时……三份既有 spec 的替换式 `vi.mock` 缺三项 ⇒ `onMounted` 抛未捕获异常」 | 「无条件」这半句在合流分支上**不再成立**;三处补丁**保留不删**(它们无害,且任何一条未来的分组视图用例会重新需要它们),三份 spec 在合流分支上全绿。补丁的**理由**因此从「必须」降级为「防御性」——这是措辞求值,不是把补丁判为多余。 |
 | §2 表「共享 `SessionOrgSwitcher`」/ 验收 J 相关各行 | 验收 J 由本面板独占承载 | **仍然成立**。合流把 `listApprovalTemplateGroups` 统一到本切片的 `getApprovalJson`/`ApprovalApiError` 路径上,正是为了不让 `.code` 分支变成死码(phase-3 设计 MD §8.2)。 |
 | §5 `tr` 函数签名对齐行(`TemplateCenterView.vue:312`) | `tr` 供两个新组件复用 | **仍然成立**,行号在合流分支上位移。 |
