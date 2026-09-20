@@ -545,6 +545,14 @@ export interface UnifiedApprovalDTO {
    * not deny.
    */
   canDecideCurrentNode?: boolean
+  /**
+   * P3-2(a) design-lock 2026-09-12 — navigation-only handle to the viewer's OWN
+   * approval-projection sheet in the multitable product, or `null` when there is nothing to
+   * link to (fail-closed: no template, not a participant, or any server-side resolution
+   * failure). Render the entry ONLY when this is present, and navigate with EXACTLY these ids
+   * — never re-derive a sheetId from `templateId`, never guess a `viewId`.
+   */
+  projectionEntry?: { sheetId: string; viewId: string } | null
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`

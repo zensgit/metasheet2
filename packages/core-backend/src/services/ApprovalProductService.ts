@@ -169,7 +169,10 @@ import { enqueueApprovalEventIfDurable } from '../multitable/automation-producer
 import { isDurableDeliveryEnabled } from '../multitable/automation-durable-delivery'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
-import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
+import {
+  getApprovalRecordProjectionService,
+  resolveApprovalProjectionEntryForViewer,
+} from '../multitable/approval-record-projection-service'
 import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
 import {
   sortRecordLinkSubmitCandidates,
@@ -11408,6 +11411,19 @@ export class ApprovalProductService {
       viewerUserId: viewerUserId ?? null,
       viewerRoles: viewerRoles ?? null,
     })
+    // P3-1 fix — same bug class as the `nodeOperations` carrier documented at the top of this
+    // method (`nodeOperations` EVAPORATED after the member's first successful action because this
+    // dispatch-verb DTO omitted it while the detail read populated it): this method builds the DTO
+    // EVERY dispatch verb branch returns, and the FE store (`apps/web/src/approvals/store.ts`)
+    // overwrites `activeApproval` with it. `ApprovalBridgeService.getApproval` populates
+    // `projectionEntry` on its detail-read DTO; this product-service DTO did not, so the P3-2(a)
+    // navigation entry vanished after approve/reject until a full reload. Populated HERE too, from
+    // the SAME canonical resolver (`resolveApprovalProjectionEntryForViewer`) — never re-derived.
+    dto.projectionEntry = await resolveApprovalProjectionEntryForViewer(
+      (sqlText: string, params?: unknown[]) => pool!.query(sqlText, params),
+      row.template_id,
+      viewerUserId,
+    )
     return dto
   }
 
