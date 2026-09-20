@@ -94,6 +94,17 @@ on:
       - 'apps/web/tests/SessionOrgSwitcher.spec.ts'
       - 'apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts'
       - 'apps/web/tests/approvalTemplateGroupsClient.spec.ts'
+      # A-4 (approval form grouping design lock v2.13 §6 phase 3, 2026-09-20): the grouped-view
+      # half of the same two-point pair as the A-2 entries directly above, added for exactly the
+      # same reason and with exactly the same standing — `approvalTemplateCenterSections.spec.ts`
+      # was already on `run-required-web-tests.sh`'s single exec line (the REQUIRED half, via
+      # web-tests.yml) but absent from this advisory/targeted workflow, so an edit to
+      # `TemplateGroupSections.vue` triggered no targeted run. `TemplateGroupSections.vue` also now
+      # carries the page-level half of acceptance J (a 403 `SESSION_ORG_REQUIRED` on its mount-time
+      # load routes into the same shared `SessionOrgSwitcher.vue` listed above), which is why it
+      # belongs on the same filter as the panel rather than on a filter of its own.
+      - 'apps/web/src/views/approval/TemplateGroupSections.vue'
+      - 'apps/web/tests/approvalTemplateCenterSections.spec.ts'
       - 'apps/web/src/views/approval/TemplateCenterView.vue'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
@@ -512,6 +523,17 @@ on:
       - 'apps/web/tests/SessionOrgSwitcher.spec.ts'
       - 'apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts'
       - 'apps/web/tests/approvalTemplateGroupsClient.spec.ts'
+      # A-4 (approval form grouping design lock v2.13 §6 phase 3, 2026-09-20): the grouped-view
+      # half of the same two-point pair as the A-2 entries directly above, added for exactly the
+      # same reason and with exactly the same standing — `approvalTemplateCenterSections.spec.ts`
+      # was already on `run-required-web-tests.sh`'s single exec line (the REQUIRED half, via
+      # web-tests.yml) but absent from this advisory/targeted workflow, so an edit to
+      # `TemplateGroupSections.vue` triggered no targeted run. `TemplateGroupSections.vue` also now
+      # carries the page-level half of acceptance J (a 403 `SESSION_ORG_REQUIRED` on its mount-time
+      # load routes into the same shared `SessionOrgSwitcher.vue` listed above), which is why it
+      # belongs on the same filter as the panel rather than on a filter of its own.
+      - 'apps/web/src/views/approval/TemplateGroupSections.vue'
+      - 'apps/web/tests/approvalTemplateCenterSections.spec.ts'
       - 'apps/web/src/views/approval/DelegationSettingsView.vue'
       - 'apps/web/src/views/approval/MyDelegationView.vue'
       - 'apps/web/src/components/layout/PageShell.vue'
@@ -1023,4 +1045,14 @@ jobs:
         # (pre-existing, untouched by this change: `approval-record-link`/
         # `approval-record-link-picker`, `approval-center`/`approval-center-master-detail`/
         # `approval-center-detail-pane-controller`).
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry categoryCandidateInput templateDetailI18n SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel --reporter=dot
+        # A-4 (same lock, §6 phase 3 grouped view, 2026-09-20): ONE token added,
+        # `approvalTemplateCenterSections` — closes the A-4 half of the same two-point gap
+        # (`paths:` above), pairing this targeted workflow with the token that was already on
+        # run-required-web-tests.sh's exec line. It matches exactly one file
+        # (`apps/web/tests/approvalTemplateCenterSections.spec.ts`). Bidirectional substring scan
+        # re-run over this exact command (106 before, 107 after; note the pre-existing duplicate
+        # tokens on this line mean 104 DISTINCT after): the new token is a substring of none of the
+        # 106 pre-existing ones, and none of the 106 is a substring of it — in particular the
+        # neighbouring `approvalTemplateCenterCategory` diverges right after
+        # `approvalTemplateCenter`, so neither collects the other's file.
+        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry categoryCandidateInput templateDetailI18n SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel approvalTemplateCenterSections --reporter=dot
