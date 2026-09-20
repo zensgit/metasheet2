@@ -191,7 +191,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, onScopeDispose, ref } from 'vue'
 import type {
   ApprovalTemplateGroupReorderResultDTO,
   ApprovalTemplateListItemDTO,
@@ -207,6 +207,7 @@ import {
   unlinkApprovalTemplateFromGroup,
 } from '../../approvals/api'
 import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { useSessionOrg } from '../../composables/useSessionOrg'
 import { useLocale } from '../../composables/useLocale'
 import { ZH, EN } from './templateCenterLabels'
@@ -279,6 +280,9 @@ const showSessionOrgSwitcher = computed(() => sessionOrgBlocked.value && session
 // registers here (see the scope note above), so a single slot
 // is enough — no queue needed. Stays empty while hosted: the host replays `loadAll()` itself.
 let pendingRetry: (() => Promise<void>) | null = null
+// True for exactly the window in which THIS view's own switcher is driving the transition (see
+// the principal-reset listener below for why the two cases must be told apart).
+let ownSwitchInFlight = false
 
 function handleSessionOrgRequired(retry: () => Promise<void>): void {
   sessionOrgBlocked.value = true
@@ -294,7 +298,13 @@ function handleSessionOrgRequired(retry: () => Promise<void>): void {
 }
 
 async function onSessionOrgChange(orgId: string): Promise<void> {
-  const ok = await switchSessionOrg(orgId)
+  ownSwitchInFlight = true
+  let ok = false
+  try {
+    ok = await switchSessionOrg(orgId)
+  } finally {
+    ownSwitchInFlight = false
+  }
   if (!ok) return
   sessionOrgBlocked.value = false
   const retry = pendingRetry
@@ -439,6 +449,27 @@ async function loadAll(): Promise<void> {
     if (isCurrent()) loadingGroups.value = false
   }
 }
+
+// Organization context lifecycle (impl-gate-A5-daily-ops-round2b-20260921.md, boundaries ① and
+// ④) — sibling of `ApprovalTemplateGroupsPanel.vue`'s reset; see its comment for the full
+// rationale. Everything here is one organization's rendered sections, its per-section cursors and
+// its inline reorder/move errors, all resolved under one principal. The `loadGeneration++` is
+// what stops a `loadAll()` issued for the previous principal from committing its sections,
+// posting its error, reporting a session-org requirement for a session that is gone, or clearing
+// the loading flag of a request that is still in flight.
+const stopPrincipalReset = onAuthSessionSwitch(() => {
+  loadGeneration++
+  sections.value = []
+  loadError.value = null
+  reorderError.value = null
+  moveError.value = null
+  sessionOrgBlocked.value = false
+  // Same carve-out as the panel's: this view's OWN switcher is mid-switch precisely so that the
+  // blocked load can be replayed; every other transition drops the handle.
+  if (!ownSwitchInFlight) pendingRetry = null
+  loadingGroups.value = false
+})
+onScopeDispose(stopPrincipalReset)
 
 async function loadMore(section: SectionState): Promise<void> {
   try {

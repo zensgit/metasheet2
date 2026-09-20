@@ -1162,4 +1162,113 @@ describe('TemplateGroupSections — request algebra guard (rapid org switch)', (
     expect(container!.textContent).toContain('Fresh Org Group')
     expect(container!.textContent).not.toContain('Stale Org Group')
   })
+
+  // ── Boundary ③ of the round-3 acceptance — sibling of `ApprovalTemplateGroupsPanel.spec.ts`'s
+  // pair. `loadAll()`'s guard has three exits and the case above drives only the first; these two
+  // delay the stale request into its CATCH and into its FINALLY respectively.
+
+  it('(③ catch exit) a stale loadAll() FAILURE landing after a newer one must not replace the new org\'s sections with the previous org\'s error', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    const rejecters: Array<(err: Error) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve, reject) => {
+        resolvers.push(resolve)
+        rejecters.push(reject)
+      }),
+    )
+
+    await mountView()
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([])
+    await flushUi()
+
+    const stale = sectionsRef.value!.loadAll() // the org being switched AWAY from
+    const fresh = sectionsRef.value!.loadAll() // the org just switched TO
+    await flushUi(1)
+    expect(resolvers.length).toBe(3)
+
+    // The new org answers first and renders; THEN the abandoned org's request fails.
+    resolvers[2]([group({ id: 'atg_fresh', name: 'Fresh Org Group', sortOrder: 1 })])
+    await flushUi()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    rejecters[1](new Error('stale org boom'))
+    await Promise.all([stale, fresh])
+    await flushUi()
+
+    // The error branch also does `sections.value = []`, so an unguarded stale failure does not
+    // merely add a banner — it wipes the organization the admin is actually looking at.
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('stale org boom')
+  })
+
+  it('(③ finally exit) a stale loadAll() settling while the newer one is STILL in flight must not clear the newer request\'s loading state', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve) => { resolvers.push(resolve) }),
+    )
+
+    await mountView()
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([])
+    await flushUi()
+    // Positive control for the selector asserted below: once a load has settled, the loading
+    // state is GONE, so its presence later is genuinely "still loading" and not a leftover.
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).toBeNull()
+
+    const stale = sectionsRef.value!.loadAll()
+    const fresh = sectionsRef.value!.loadAll()
+    await flushUi(1)
+    expect(resolvers.length).toBe(3)
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).not.toBeNull()
+
+    // Only the ABANDONED org's request answers. The current org's is still on the wire.
+    resolvers[1]([group({ id: 'atg_stale', name: 'Stale Org Group', sortOrder: 1 })])
+    await stale
+    await flushUi()
+
+    // Without the guard on the `finally`, the stale call lowers `loadingGroups` and this view
+    // drops out of its loading state into the (empty) settled render for an organization it has
+    // not heard from yet.
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).not.toBeNull()
+    expect(container!.textContent).not.toContain('Stale Org Group')
+
+    resolvers[2]([group({ id: 'atg_fresh', name: 'Fresh Org Group', sortOrder: 1 })])
+    await fresh
+    await flushUi()
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).toBeNull()
+    expect(container!.textContent).toContain('Fresh Org Group')
+  })
+
+  // ── Boundary ① at the component that OWNS the state ────────────────────────────────────────
+  // Sibling of `ApprovalTemplateGroupsPanel.spec.ts`'s case. The sections are this view's own
+  // per-organization state; a change of identity must drop them, and the read that was already on
+  // the wire for the previous identity must not be able to paint them back.
+  it('(①) an external principal change drops the rendered sections, and the load in flight for the previous identity cannot commit afterwards', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve) => { resolvers.push(resolve) }),
+    )
+
+    await mountView()
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([group({ id: 'atg_a', name: 'Previous Identity Group', sortOrder: 1 })])
+    await flushUi()
+    expect(container!.textContent).toContain('Previous Identity Group')
+
+    const inFlight = sectionsRef.value!.loadAll()
+    await flushUi(1)
+    expect(resolvers.length).toBe(2)
+
+    useAuth().setToken(`header.${btoa(JSON.stringify({ userId: 'other', tenantId: 'org-z', exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`)
+    await flushUi(4)
+
+    expect(container!.textContent).not.toContain('Previous Identity Group')
+
+    resolvers[1]([group({ id: 'atg_a', name: 'Previous Identity Group', sortOrder: 1 })])
+    await inFlight
+    await flushUi()
+    expect(container!.textContent).not.toContain('Previous Identity Group')
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+  })
 })

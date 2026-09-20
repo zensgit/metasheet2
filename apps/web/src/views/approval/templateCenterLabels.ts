@@ -72,6 +72,9 @@ export const ZH = {
   groupItemMoveError: '移动表单分组失败',
   // A-2 x A-4 merge convergence (2026-09-20) — disclosure toggle for A-2's group MANAGEMENT panel
   // inside the grouped view. See TemplateCenterView.vue's `template-center__group-manager` block.
+  // ④ of the round-2b gate's organization-context lifecycle boundary — a FAILED session-orgs
+  // lookup must stay recoverable rather than latch the entry off for the lifetime of the view.
+  sessionOrgsRetry: '重新加载组织列表',
   groupManagerShow: '管理分组',
   groupManagerHide: '收起分组管理',
 } as const
@@ -131,6 +134,7 @@ export const EN: Record<keyof typeof ZH, string> = {
   groupItemMovePlaceholder: 'Move to...',
   groupItemMoveLabel: 'Move template to group',
   groupItemMoveError: 'Failed to move template',
+  sessionOrgsRetry: 'Reload organization list',
   groupManagerShow: 'Manage groups',
   groupManagerHide: 'Hide group manager',
 }

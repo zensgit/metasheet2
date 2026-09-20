@@ -1151,5 +1151,457 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     // the sign-out case: `orgs` was cleared synchronously by the reset funnel, so `hasMultipleOrgs`
     // is false and (with `sessionOrgRequiredSeen` never having fired) the entry is gone.
     expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+
+    // ROUND 3 — the half this case was missing. Round 2b flagged that asserting only the clearing
+    // pinned the round-2 defect (P2-D) as though it were the specification: the entry went and
+    // never came back for anyone. The CLEAR is only the first state of the lifecycle; the new
+    // account is still a multi-org admin, so the page must re-ask for ITS organizations and the
+    // entry must return without a reload.
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+  })
+
+  // ═══ ROUND 3 — organization context lifecycle ═════════════════════════════════════════════
+  //
+  // Round 2b (impl-gate-A5-daily-ops-round2b-20260921.md) found that rounds 1-2 shipped only the
+  // FIRST state of this lifecycle. The entry was fetched once per mounted component and the
+  // clearing on a principal change was pinned as if it were the whole story, so the page ended up
+  // with a one-way latch: any principal change this page did not perform, and any failed lookup,
+  // removed the entry until a full reload (P2-D); the flat gallery kept rendering an organization
+  // the admin had already left (P3-E); and only one of the request guard's three exits was ever
+  // driven (P3-F).
+  //
+  // The four boundaries below are the round-3 acceptance, one describe-block section each:
+  //   ① external identity change — sign-out, a DIFFERENT account, and the SAME account's rights
+  //      changing — clears the old organization and its data first, then re-determines
+  //      eligibility. "Always reachable" is scoped to identities that are still ELIGIBLE;
+  //      disappearing after sign-out or a loss of eligibility is the CORRECT rendering.
+  //   ② every data view stays in step — after an organization switch the flat gallery re-reads
+  //      too, and the previous organization's rows are never shown as this one's answer.
+  //   ③ (in the two component specs) the request guard's three exits.
+  //   ④ a failed lookup is recoverable, and a superseded request takes no recovery action.
+
+  // The `name` column is a bare `prop` column, and the ElTable stub at the top of this file only
+  // renders columns that have a default SLOT — so a row's identity is asserted through its
+  // category tag (`template-center-row-category`), which does have one, plus the row count.
+  const lifecycleTemplate = (id: string, marker: string) => ({
+    id,
+    name: marker,
+    description: null,
+    category: marker,
+    status: 'published' as const,
+    visibilityScope: { type: 'all' as const, ids: [] },
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+  })
+
+  const lifecycleGroup = (id: string, orgId: string, name: string) => ({
+    id,
+    orgId,
+    name,
+    sortOrder: 1,
+    createdBy: 'actor',
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+    archivedAt: null,
+  })
+
+  /** Same shape as `jwt` above, with the USER id under the caller's control. */
+  const jwtFor = (userId: string, org: string, serial = 1) =>
+    `header.${btoa(JSON.stringify({ userId, tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 + serial }))}.signature`
+
+  async function enterFlatView() {
+    ;(container!.querySelector('[data-testid="template-center-view-mode-flat"]') as HTMLButtonElement).click()
+    await flushUi(4)
+  }
+
+  // ── ① external identity change ──────────────────────────────────────────────────────────────
+
+  it('(① sign-out) clears the previous account\'s organization list AND its grouped/flat data, leaves no error behind, and re-asks nothing', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue(['请假'])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([lifecycleGroup('atg_a', 'org-a', 'Org A Group')])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    // Positive control for the flat assertion at the end: the previous account's row IS rendered
+    // here, through the one column the table stub actually paints.
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org A Template')
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+    expect(container!.textContent).toContain('Org A Group')
+
+    useAuth().clearToken()
+    await flushUi(10)
+
+    // Entry gone — the CORRECT rendering for an identity that is no longer eligible, not a bug.
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    // ...and gone WITHOUT an error residue: no switcher error hint, no retry control, no group
+    // error banner. A signed-out page that shows "could not load organizations" is answering a
+    // question nobody asked.
+    expect(container!.querySelector('[data-testid="template-center-session-orgs-retry"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-template-groups-load-error"]')).toBeNull()
+    // The previous account's DATA is gone too, in both view modes — not just its org list.
+    expect(container!.textContent).not.toContain('Org A Group')
+    await enterFlatView()
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(0)
+    expect(container!.textContent).not.toContain('Org A Template')
+    // The store itself still physically holds the signed-out account's row — nothing else in the
+    // app re-reads it — so this is the page refusing to RENDER it, not the store emptying.
+    expect(mockTemplates.value.map((t: { id: string }) => t.id)).toEqual(['tpl_a'])
+    // Nothing was re-asked for a principal that no longer exists.
+    expect(sessionOrgsCalls).toBe(1)
+  })
+
+  it('(① different account) re-asks for the NEW account\'s organizations; the entry comes back for it and carries none of the previous account\'s options', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwtFor('actorA', 'org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return sessionOrgsCalls === 1
+          ? jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+          : jsonResponse(200, { success: true, data: { orgs: ['org-c', 'org-d'], currentOrgId: 'org-c' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    const before = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    expect(Array.from(before.options).some((o) => o.value === 'org-a')).toBe(true)
+
+    useAuth().setToken(jwtFor('actorB', 'org-c'))
+    await flushUi(10)
+
+    expect(sessionOrgsCalls).toBe(2)
+    const after = container!.querySelectorAll('select[name="sessionOrgId"]')
+    expect(after.length).toBe(1)
+    const options = Array.from((after[0] as HTMLSelectElement).options).map((o) => o.value)
+    expect(options).toContain('org-c')
+    // Not a merge and not a leftover: the previous account's memberships are not offered to this
+    // one even though the list looks structurally identical.
+    expect(options).not.toContain('org-a')
+    expect(options).not.toContain('org-b')
+  })
+
+  it('(① same account, rights change) losing the second organization re-asks and takes the entry away — no stale list, no error', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwtFor('actor', 'org-a', 1))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        // The SAME person, re-issued a token after their membership was revoked server-side.
+        return sessionOrgsCalls === 1
+          ? jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+          : jsonResponse(200, { success: true, data: { orgs: ['org-a'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+
+    // A refresh for the SAME subject: `getAuthPrincipalKey()` is deliberately stable across this
+    // (it is subject-keyed), which is exactly why the re-ask cannot be conditioned on the key
+    // alone — the reset funnel's notification is the half that sees this one.
+    useAuth().setToken(jwtFor('actor', 'org-a', 2))
+    await flushUi(10)
+
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    expect(container!.querySelector('[data-testid="template-center-session-orgs-retry"]')).toBeNull()
+  })
+
+  it('(① same account, rights change) GAINING a second organization brings the entry back without a reload', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwtFor('actor', 'org-a', 1))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return sessionOrgsCalls === 1
+          ? jsonResponse(200, { success: true, data: { orgs: ['org-a'], currentOrgId: 'org-a' } })
+          : jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    // Single-org member: acceptance J's positive control holds on entry.
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+
+    useAuth().setToken(jwtFor('actor', 'org-a', 2))
+    await flushUi(10)
+
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+  })
+
+  it('(① another tab) a token swapped with NO notification at all is caught by the principal-keyed claim on the next entry into the grouped view', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwtFor('actorA', 'org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+
+    // Written STRAIGHT to storage, bypassing `useAuth`'s setters entirely — the shape another
+    // browsing context produces, and the one `authPrincipal.ts` says the notification cannot see
+    // ("A principal swap that bypasses `useAuth`'s setters ... produces no notification at all,
+    // so a per-principal cache must ALSO key on `getAuthPrincipalKey()`"). Nothing fires here.
+    localStorage.setItem('auth_token', jwtFor('actorB', 'org-c'))
+    localStorage.setItem('jwt', jwtFor('actorB', 'org-c'))
+    await flushUi(4)
+    expect(sessionOrgsCalls).toBe(1)
+
+    // Re-entering the grouped view re-evaluates the claim against the CURRENT principal key,
+    // which is now a different subject — so the answer held for the previous one is not reused.
+    await enterFlatView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(2)
+  })
+
+  // ── ② every data view stays in step ─────────────────────────────────────────────────────────
+
+  it('(②) switching organization re-reads the FLAT gallery and the category list, not only the grouped surfaces', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwt('org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    const templatesBefore = loadTemplatesSpy.mock.calls.length
+    const categoriesBefore = listTemplateCategoriesSpy.mock.calls.length
+    const groupsBefore = listApprovalTemplateGroupsSpy.mock.calls.length
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(10)
+
+    // The grouped surfaces were already re-read before this round; the flat ones are the fix.
+    expect(listApprovalTemplateGroupsSpy.mock.calls.length).toBeGreaterThan(groupsBefore)
+    expect(loadTemplatesSpy.mock.calls.length).toBeGreaterThan(templatesBefore)
+    expect(listTemplateCategoriesSpy.mock.calls.length).toBeGreaterThan(categoriesBefore)
+    // The page's OWN switch must not also re-ask for the organization list: the composable
+    // restores the membership list itself across its own switch.
+    expect(sessionOrgsCalls).toBe(1)
+  })
+
+  it('(②) while the new organization\'s template list is in flight the flat surfaces show their empty state, never the previous organization\'s rows', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org A Template')
+    await enterGroupedView()
+    await flushUi(8)
+
+    // The new organization's list read hangs — the real window this boundary is about.
+    let releaseNewOrgList: (() => void) | null = null
+    loadTemplatesSpy.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        releaseNewOrgList = () => {
+          mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+          resolve()
+        }
+      }),
+    )
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(10)
+    await enterFlatView()
+
+    // The store still physically holds org A's row (nothing else re-reads it), so this is exactly
+    // the "old organization's data presented as the new organization's answer" case.
+    expect(mockTemplates.value.map((t: { id: string }) => t.id)).toEqual(['tpl_a'])
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(0)
+    expect(container!.textContent).not.toContain('Org A Template')
+
+    releaseNewOrgList!()
+    await flushUi(8)
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org B Template')
+  })
+
+  // ── ④ a failed lookup is recoverable ────────────────────────────────────────────────────────
+
+  it('(④) a FAILED organization-list lookup offers a retry, and the retry re-asks and brings the entry up', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwt('org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return sessionOrgsCalls === 1
+          ? jsonResponse(500, { success: false })
+          : jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+
+    expect(sessionOrgsCalls).toBe(1)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    const retry = container!.querySelector('[data-testid="template-center-session-orgs-retry"]') as HTMLButtonElement
+    expect(retry).not.toBeNull()
+
+    retry.click()
+    await flushUi(10)
+
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+    expect(container!.querySelector('[data-testid="template-center-session-orgs-retry"]')).toBeNull()
+  })
+
+  it('(④) after a failed lookup, simply re-entering the grouped view re-asks — the entry is not latched off for the lifetime of the view', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwt('org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return sessionOrgsCalls === 1
+          ? jsonResponse(500, { success: false })
+          : jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+
+    await enterFlatView()
+    await enterGroupedView()
+    await flushUi(8)
+
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+  })
+
+  it('(④) a request issued for the PREVIOUS identity that lands with a 403 afterwards triggers no recovery action for the new one', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    const api = await import('../src/approvals/api')
+    // The sections view's mount-time `loadAll()` for account A never settles until we say so.
+    let rejectStaleGroups: ((err: Error) => void) | null = null
+    listApprovalTemplateGroupsSpy.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectStaleGroups = reject }),
+    )
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwtFor('actorA', 'org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return sessionOrgsCalls === 1
+          // Account A is a multi-org admin...
+          ? jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+          // ...account B is NOT: exactly one organization, so B is not eligible for the entry.
+          : jsonResponse(200, { success: true, data: { orgs: ['org-solo'], currentOrgId: 'org-solo' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+
+    useAuth().setToken(jwtFor('actorB', 'org-solo'))
+    await flushUi(10)
+    expect(sessionOrgsCalls).toBe(2)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+
+    // NOW account A's abandoned request fails the way an unbound session fails. Its catch branch
+    // is the recovery path: it reports SESSION_ORG_REQUIRED to the host, which opens the entry
+    // and asks for organizations. Doing that on behalf of a session that is gone would put a
+    // switcher in front of an identity that is not eligible for one — and account B's own
+    // (single-org) list is loaded, so the component-level gate would NOT hide it.
+    const staleError = sessionOrgRequiredError(api.ApprovalApiError as unknown as new (m: string) => Error)
+    rejectStaleGroups!(staleError)
+    await flushUi(10)
+
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
   })
 })
