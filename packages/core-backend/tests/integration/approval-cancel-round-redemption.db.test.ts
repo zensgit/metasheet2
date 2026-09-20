@@ -3920,6 +3920,15 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
         { method: 'POST', body: { action: 'approve' } },
       )
       expect(expiredApprove.status, await expiredApprove.clone().text()).toBe(200)
+      // P2-1 (gate round1 20260920): the expired/blocked closure's `cancelRoundCloseReason` is
+      // written by `getApproval`'s COMMIT-then-reload path and has NO second assignment point on
+      // this response — unlike `cancellationOutcome`, which `dispatchAction` also spreads onto the
+      // response independently of the projection. Deleting the shared-reader `Object.assign` (M-A)
+      // left the whole suite green until this assertion existed; it is the only line in this file
+      // with discriminating power over that projection on the ACTION-RESPONSE surface.
+      expect(
+        (JSON.parse(await expiredApprove.clone().text()) as Record<string, unknown>).cancelRoundCloseReason,
+      ).toBe('round_expired')
 
       // ── (b) business refusal ⇒ `business_blocked:<code>`
       const blockedSuffix = `projblk-${TS}`
@@ -3939,6 +3948,9 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
           { method: 'POST', body: { action: 'approve' } },
         )
         expect(blockedApprove.status, await blockedApprove.clone().text()).toBe(200)
+        // P2-1, blocked half: same discriminating-power argument as the expired half above.
+        expect(await blockedApprove.clone().text())
+          .toContain('"cancelRoundCloseReason":"business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED"')
       } finally {
         blockedStub.stop()
       }

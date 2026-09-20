@@ -380,10 +380,19 @@ export interface CancelRoundReadProjectionV1 {
 /**
  * THE ONE durable-read query, shared by BOTH `getApproval` implementations
  * (`ApprovalBridgeService`'s — the one `GET /api/approvals/:id` actually calls — and
- * `ApprovalProductService`'s, which builds every ACTION response). Two copies of this SQL is
- * exactly how the two surfaces would drift into disagreeing about what a refresh shows, and the FE
+ * `ApprovalProductService`'s, which builds every ACTION response). Calling the identical query from
+ * both sites means these two callers cannot drift from EACH OTHER IN PROJECTION RULES (same SQL,
+ * same params — though not in ROW SET, which a write between the two calls can still change); it does
+ * NOT mean every surface that shows this data agrees for the same reason — `/history`
+ * (`routes/approval-history.ts`) runs its OWN, differently-scoped query (per-row, paginated,
+ * filtered) and never calls this function. What keeps `/history` and this reader's answer aligned
+ * today is a CONSTRUCTIVE property of the domain, not shared SQL: a round produces AT MOST ONE
+ * carrier row (the redeemed-approve row, or the system-closure row), so the two differently-scoped
+ * queries have nothing left to disagree about — this eliminates PROJECTION-RULE drift between the
+ * two `getApproval` callers, not row-set drift between every reader of cancel-round history. The FE
  * store publishes an action response into the slot the detail read fills, so a field present on one
- * and absent on the other flips to `undefined` the moment someone acts.
+ * `getApproval` implementation and absent on the other flips to `undefined` the moment someone acts
+ * — which is why the two callers, specifically, must stay byte-identical.
  *
  * ⚠️ NOT a bare `metadata` projection: two key paths are asked of the DB, and each value is then
  * REBUILT field by field by the projectors above. `cancelRoundBlockDetail` (free text) and every
@@ -392,8 +401,11 @@ export interface CancelRoundReadProjectionV1 {
  *
  * UNCONDITIONAL, deliberately — no second 「is this a cancel round」 predicate. Such a predicate
  * would not be the writer's, and its failure mode is SILENT ABSENCE, which is the exact defect
- * shape this closes. The predicate is the KEY's presence, answered by the DB over
- * `idx_approval_records_instance`; a non-cancel-round instance simply matches no row.
+ * shape this closes. The predicate is the KEY's presence; `idx_approval_records_instance` covers the
+ * `instance_id` equality this query filters on (confirmed present in the migration), but which plan
+ * the query actually gets at production cardinality has not been measured here — an empty table
+ * plans a sequential scan regardless of the index. A non-cancel-round instance simply matches no
+ * row, however the planner gets there.
  *
  * ONE row: a round produces at most one carrier — the approve row on the redeemed path, or the
  * system-closure row on the expired/blocked path — and those are mutually exclusive outcomes of

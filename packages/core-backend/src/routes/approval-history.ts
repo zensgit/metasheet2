@@ -210,7 +210,7 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       // Lock-9 FE read-half companion + the owner's 2026-09-20 ruling on the cancel-round durable
       // read — every metadata projection here is a SINGLE JSONB KEY PATH, never `metadata` itself.
       // THREE key paths now (`attachmentIds`, `cancellationOutcome`, `cancelRoundCloseReason`), and
-      // the list is exhaustive at this head: no other metadata key is asked of the DB, so the
+      // the list is exhaustive at this head: no other metadata key is projected, so the
       // internal ones (`w4ActorPosture`, `parallelCancelledAssignees`, `cancelRoundBlockDetail`,
       // `approvalThreshold`, `channel`/`cardDeliveryId`, …) cannot reach a client from this route
       // even if the map below were wrong. This changes neither the WHERE clause (S2's pointer-row
