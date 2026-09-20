@@ -67,7 +67,7 @@ import { randomUUID, createHash } from 'crypto'
 import { AiProviderClient } from './ai-provider-client'
 import { runShortcutCore, type PoolLike, type ShortcutRequestContext } from './ai-bulk-shared'
 import type { AiUsageQueryFn } from './ai-usage-ledger'
-import { loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
+import { describeLivenessLookupError, loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
 import type { WorkflowJobStatus, WorkflowJobSuspendReason } from '../multitable/workflow-job-contract'
 import type { QueueService } from '../types/plugin'
 
@@ -843,28 +843,6 @@ export async function cancelBulkJob(
 
 // ── Sheet liveness (soft delete, #5832) ─────────────────────────────────────
 
-const LOOKUP_ERROR_CLASS_SHAPE = /^[A-Za-z_$][\w$]{0,63}$/
-const LOOKUP_ERROR_CODE_SHAPE = /^[0-9A-Z_]{2,32}$/
-
-/**
- * Values-free description of a failed liveness lookup, for the log line: the constructor name and,
- * when identifier-shaped, the driver `code` (a SQLSTATE such as `57014`, or an errno such as
- * `ECONNREFUSED`). Never `message` / `detail` / `hint`, which can carry connection details or values.
- * Same shape as `describeLookupError` in multitable/automation-service.ts; not imported from there so
- * the worker does not pull the whole automation module graph in for two regexes.
- */
-function describeLivenessLookupError(err: unknown): { errorClass: string; errorCode?: string } {
-  let errorClass: string = typeof err
-  if (err instanceof Error) {
-    const ctorName = (err as { constructor?: { name?: unknown } }).constructor?.name
-    errorClass = typeof ctorName === 'string' && LOOKUP_ERROR_CLASS_SHAPE.test(ctorName)
-      ? ctorName
-      : LOOKUP_ERROR_CLASS_SHAPE.test(err.name) ? err.name : 'Error'
-  }
-  const code = err !== null && typeof err === 'object' ? (err as { code?: unknown }).code : undefined
-  return typeof code === 'string' && LOOKUP_ERROR_CODE_SHAPE.test(code) ? { errorClass, errorCode: code } : { errorClass }
-}
-
 /**
  * SHEET LIVENESS for the generate loop (#5832). The plan holds prompts that were assembled from the
  * sheet's record content when the job started, so nothing downstream of this loop reads the sheet
@@ -1073,7 +1051,8 @@ export class BulkFillJobService {
       // reservation, so it grows with concurrent AI use. Narrowing it does not need a lock held across
       // the provider call: re-checking liveness inside runShortcutCore after the reservation and right
       // before `aiClient.complete` would leave the lock wait outside the window (ai-bulk-shared.ts,
-      // not changed here). The inline bulk-preview loop has no per-row check at all (#5838).
+      // not changed here, so the residual window is the same on both lanes). The inline bulk-preview
+      // loop now makes the same per-row check (#5838, routes/multitable-ai.ts `bulkPreviewSheetIsLive`).
       if (!(await jobSheetIsLive(query, jobId, plan.sheetId))) {
         await markRemainingPendingNotGenerated(query, jobId)
         await setHeaderProgress(query, jobId, generated, settledCost)

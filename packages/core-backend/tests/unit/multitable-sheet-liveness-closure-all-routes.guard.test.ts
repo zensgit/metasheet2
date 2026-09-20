@@ -181,6 +181,24 @@ function vettedGuardsFor(file: string, sf: ScannedRouteFile['sourceFile']): Map<
   return vetted
 }
 
+/**
+ * Helpers whose liveness refusal stops an in-request EGRESS LOOP instead of answering the request —
+ * BY NAME, never by omission. Each one is asked between two outbound provider calls whether the request
+ * may keep sending, so its refusal reports `false` to its caller (fail-closed) rather than a status;
+ * that the caller then leaves the loop, uncharged, is proven separately (here: inlineBulkLivenessProblems
+ * pins the `break`, and the tied behaviour test shows the provider is called exactly once).
+ */
+const EGRESS_STOP_HELPERS: Record<string, { helpers: string[]; reason: string }> = {
+  'routes/multitable-ai.ts': {
+    helpers: ['bulkPreviewSheetIsLive'],
+    reason: '#5838 — the INLINE bulk-preview loop sends one row of record content per provider call for as '
+      + 'long as the request lives; this helper is its per-row liveness question. Answering 404 from inside it '
+      + 'would be wrong: the rows already generated are CHARGED and cached, so the request answers 200 with '
+      + 'that partial (capped) and refuses only the remainder. When the stop lands before the first provider '
+      + 'call there is no such spend, and the CALLER re-reads the verdict and answers the 404 after the loop.',
+  },
+}
+
 function optionsFor(file: string): AnalyzeOptions {
   const vetted = vettedGuardsFor(file, scan(file).sourceFile)
   return {
@@ -189,6 +207,7 @@ function optionsFor(file: string): AnalyzeOptions {
     preGateCalls: new Set(Object.keys(PRE_GATE_CALLS)),
     requireOrder: true,
     gateFirst: true,
+    egressStops: new Set(EGRESS_STOP_HELPERS[file]?.helpers ?? []),
   }
 }
 
@@ -544,7 +563,7 @@ function readBulkWorkerBehaviour(): string[] {
 const PROVIDER_CHOKE = 'runShortcutCore'
 const ITERATION_METHODS = new Set(['map', 'forEach', 'flatMap', 'reduce', 'reduceRight', 'filter', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex'])
 /** Calls that re-establish sheet liveness (any of them inside the loop flips a GAP entry to "no longer true"). */
-const LIVENESS_CALLS = new Set(['loadSheetLiveness', 'assertSheetLive', 'jobSheetIsLive', 'loadSheetRow', 'requireRecordReadable', ...LIVENESS_CARRYING_RESOLVERS])
+const LIVENESS_CALLS = new Set(['loadSheetLiveness', 'assertSheetLive', 'jobSheetIsLive', 'bulkPreviewSheetIsLive', 'loadSheetRow', 'requireRecordReadable', ...LIVENESS_CARRYING_RESOLVERS])
 
 interface ProviderLoop {
   /** `<file under src/> <route key>` for a route handler, else `<file> <enclosing function name>`. */
@@ -630,6 +649,301 @@ function providerLoopsOf(rel: string, scanned: ScannedRouteFile): ProviderLoop[]
   return [...loops.values()]
 }
 
+// ── The inline bulk-preview loop (#5838) ────────────────────────────────────
+
+/**
+ * #5838 — the SAME class as #5832 on the OTHER lane. `POST …/ai/shortcut/bulk-preview` refuses a
+ * non-live sheet once at entry, then (at or below the inline cap) loops over the gated rows calling the
+ * provider choke inside that one request, for minutes; nothing downstream of the loop reads
+ * `meta_sheets` again. The loop must therefore ask the shared helper (multitable/sheet-liveness.ts
+ * `loadSheetLiveness`) about THIS sheet before EVERY provider call, and stop on anything but proof that
+ * it is live.
+ *
+ * What is pinned, mirroring the worker's check above (same reasons, same failure modes):
+ *  · the helper is the SHARED one, imported from multitable/sheet-liveness, bound once, never written;
+ *  · the stop sits in the ONE loop that feeds the choke, BEFORE the call, and ends the loop (`break`)
+ *    after recording the row it stopped on as UNCHARGED (`skipped`) and marking the run partial;
+ *  · `bulkPreviewSheetIsLive` asks (query, sheetId), fails CLOSED on a throw, refuses everything that is
+ *    not `'live'` (so `absent` stops too), and has exactly one way to answer true;
+ *  · nothing rebinds what the lookup reads or what the refusal tests.
+ * The behaviour those lines produce is pinned separately (inlineBulkBehaviourProblems).
+ */
+const INLINE_BULK_FILE = 'routes/multitable-ai.ts'
+const INLINE_BULK_GATE = '!(await bulkPreviewSheetIsLive(query, sheetId))'
+const INLINE_BULK_LOOKUP = 'liveness = await loadSheetLiveness(query, sheetId)'
+const INLINE_BULK_LOOP = 'generationCandidates'
+
+function inlineBulkLivenessProblems(source: string): string[] {
+  const sf = scanRouteSource(INLINE_BULK_FILE, source).sourceFile
+  const text = (node: ts.Node) => codeOf(node, sf)
+  const lastIs = (node: ts.Statement | undefined, expected: string) => !!node && ts.isBlock(node)
+    && node.statements.length > 0 && text(node.statements[node.statements.length - 1]!) === expected
+  const problems: string[] = []
+
+  const imported = namedImports(sf).get('loadSheetLiveness')
+  if (!imported || imported.imported !== 'loadSheetLiveness' || resolveImport(INLINE_BULK_FILE, imported.module) !== 'multitable/sheet-liveness.ts') {
+    problems.push('loadSheetLiveness must be imported from multitable/sheet-liveness')
+  }
+  // Module-wide: the helper and the gate are each bound exactly once and never reassigned.
+  const moduleDecls = declaredNames(sf)
+  for (const name of ['loadSheetLiveness', 'bulkPreviewSheetIsLive']) {
+    const count = moduleDecls.filter((d) => d.name === name).length
+    if (count !== 1) problems.push(`module: \`${name}\` must be bound exactly once (found ${count}) — a second binding can shadow it`)
+  }
+  for (const w of writtenNames(sf).filter((x) => x.name === 'loadSheetLiveness' || x.name === 'bulkPreviewSheetIsLive')) {
+    problems.push(`module: \`${w.name}\` must never be written (\`${text(w.node)}\`)`)
+  }
+  // ONE call site, and it is the pinned loop stop below. The scanner excuses this helper from answering
+  // 403/404/410 (EGRESS_STOP_HELPERS) because it stops a send loop instead of answering the request;
+  // that excuse is granted against the ONE caller proven here. A second caller would be excused too, and
+  // nothing in the scanner would prove IT leaves anything — so the second caller must red here.
+  const callSites = callSitesNamed(sf, new Set(['bulkPreviewSheetIsLive'])).filter((c) => c.receiver === '')
+  if (callSites.length !== 1) {
+    problems.push(`module: \`bulkPreviewSheetIsLive\` must be called exactly once — the generation loop’s stop (found ${callSites.length} call site(s); `
+      + 'each one is excused from answering a status, and only the pinned one is proven to stop anything)')
+  }
+
+  // The ONE loop that feeds the provider choke row by row (the route has a second loop over the same
+  // candidates — the async job's seeding loop — which sends nothing, so the choke is the discriminator).
+  const loops: ts.ForOfStatement[] = []
+  const findLoops = (node: ts.Node): void => {
+    if (ts.isForOfStatement(node) && text(node.expression) === INLINE_BULK_LOOP && callsAny(node, new Set([PROVIDER_CHOKE]))) loops.push(node)
+    ts.forEachChild(node, findLoops)
+  }
+  findLoops(sf)
+  const loop = loops.length === 1 ? loops[0]! : null
+  const loopBody = loop && ts.isBlock(loop.statement) ? loop.statement.statements : null
+  if (!loopBody) return [...problems, `bulk-preview: expected exactly one \`for (… of ${INLINE_BULK_LOOP}) { … }\` that calls ${PROVIDER_CHOKE}, found ${loops.length}`]
+
+  const sendAt = loopBody.findIndex((st) => /\brunShortcutCore\(/.test(text(st)))
+  if (sendAt < 0) problems.push('the generation loop no longer calls runShortcutCore — re-derive what this check protects')
+  const gateAt = loopBody.findIndex((st) => ts.isIfStatement(st) && text(st.expression) === INLINE_BULK_GATE)
+  if (gateAt < 0) {
+    problems.push(`the generation loop must stop on \`if (${INLINE_BULK_GATE})\` as a direct statement of its body`)
+  } else {
+    const stop = loopBody[gateAt] as ts.IfStatement
+    if (stop.elseStatement || !lastIs(stop.thenStatement, 'break;')) problems.push('the liveness stop must end in `break` (and have no else)')
+    const stopCode = text(stop.thenStatement)
+    if (!/\bskipped\.push\(\{ recordId, reason: 'sheet_not_live' \}\)/.test(stopCode)) {
+      problems.push("the liveness stop must record the row it stopped on as skipped (UNCHARGED): `skipped.push({ recordId, reason: 'sheet_not_live' })`")
+    }
+    if (!/\bpaused = true\b/.test(stopCode)) problems.push('the liveness stop must mark the run partial (`paused = true` → the response’s `capped`)')
+    if (sendAt >= 0 && gateAt > sendAt) problems.push('the liveness stop must come BEFORE the provider call in the loop body')
+  }
+
+  // Inside the handler that owns the loop: what the check reads is bound once and never rewritten.
+  let handler: ts.Node | undefined = loop!.parent
+  while (handler && !isFnNode(handler)) handler = handler.parent
+  if (!handler) return [...problems, 'bulk-preview: the generation loop has no enclosing function']
+  const handlerNames = ['query', 'sheetId', 'bulkPreviewSheetIsLive', 'loadSheetLiveness']
+  for (const name of ['query', 'sheetId']) {
+    const count = declaredNames(handler).filter((d) => d.name === name).length
+    if (count !== 1) problems.push(`the bulk-preview handler: \`${name}\` must be declared exactly once (found ${count})`)
+  }
+  for (const d of declaredNames(handler).filter((x) => handlerNames.includes(x.name) && x.name !== 'query' && x.name !== 'sheetId')) {
+    problems.push(`the bulk-preview handler: \`${d.name}\` must not be re-declared (\`${text(d.decl)}\`)`)
+  }
+  for (const w of writtenNames(handler).filter((x) => handlerNames.includes(x.name))) {
+    problems.push(`the bulk-preview handler: \`${w.name}\` must never be written (\`${text(w.node)}\`)`)
+  }
+
+  const gates = findFunctionsNamed(sf, 'bulkPreviewSheetIsLive')
+  const gate = gates.length === 1 && ts.isFunctionDeclaration(gates[0]!) && gates[0]!.parent === sf ? gates[0]! : null
+  const gateBody = gate?.body && ts.isBlock(gate.body) ? gate.body.statements : null
+  if (!gate || !gateBody) return [...problems, `bulkPreviewSheetIsLive: expected 1 top-level function declaration with a block body, found ${gates.length} definition(s)`]
+  // The loop passes sheetId SECOND: the second parameter is what the lookup asks about.
+  if (paramNames(gate) !== 'query, sheetId') problems.push(`bulkPreviewSheetIsLive: parameters must be exactly (query, sheetId), found (${paramNames(gate)})`)
+  // Exactly four statements, in this order, adjacent: nothing can run between the lookup and the refusal.
+  const [declSt, trySt, refuseSt] = gateBody
+  if (gateBody.length !== 4 || !declSt || text(declSt) !== 'let liveness: SheetLiveness;') {
+    problems.push(`bulkPreviewSheetIsLive: the body must be exactly \`let liveness: SheetLiveness\`, the guarded lookup, the refusal, \`return true\` — adjacent, nothing in between (found ${gateBody.length} statements)`)
+  }
+  const lookup = trySt && ts.isTryStatement(trySt) && trySt.tryBlock.statements.length === 1 ? trySt.tryBlock.statements[0]! : null
+  if (!trySt || !ts.isTryStatement(trySt) || !lookup || text(lookup) !== `${INLINE_BULK_LOOKUP};`
+    || !trySt.catchClause || !lastIs(trySt.catchClause.block, 'return false;') || trySt.finallyBlock) {
+    problems.push('bulkPreviewSheetIsLive: `loadSheetLiveness(query, sheetId)` must run in a try whose catch answers false (fail-closed), as the second statement')
+  }
+  if (!refuseSt || !ts.isIfStatement(refuseSt) || text(refuseSt.expression) !== 'liveness !== \'live\''
+    || refuseSt.elseStatement || !lastIs(refuseSt.thenStatement, 'return false;')) {
+    problems.push('bulkPreviewSheetIsLive: `if (liveness !== \'live\') { …; return false }` must follow the lookup, as the third statement')
+  }
+  // Nothing rebinds what the lookup reads or what the refusal tests.
+  const gateNames = ['query', 'sheetId', 'liveness', 'loadSheetLiveness']
+  const redeclared = declaredNames(gate).filter((d) => gateNames.includes(d.name)
+    && !(ts.isParameter(d.decl) && d.decl.parent === gate) && !(declSt && d.decl.parent?.parent === declSt))
+  for (const d of redeclared) problems.push(`bulkPreviewSheetIsLive: \`${d.name}\` must not be re-declared (\`${text(d.decl)}\`)`)
+  const lookupWrite = lookup && ts.isExpressionStatement(lookup) ? unwrapParens(lookup.expression) : null
+  for (const w of writtenNames(gate).filter((x) => gateNames.includes(x.name) && x.node !== lookupWrite)) {
+    problems.push(`bulkPreviewSheetIsLive: \`${w.name}\` may only be written by the lookup (\`${text(w.node)}\`)`)
+  }
+  const returnsTrue: ts.ReturnStatement[] = []
+  const collect = (node: ts.Node): void => {
+    if (ts.isReturnStatement(node) && node.expression && text(node.expression) !== 'false') returnsTrue.push(node)
+    if (node === gate || !isFnNode(node)) ts.forEachChild(node, collect)
+  }
+  collect(gate)
+  if (returnsTrue.length !== 1 || returnsTrue[0] !== gateBody[gateBody.length - 1] || text(returnsTrue[0]!) !== 'return true;') {
+    problems.push('bulkPreviewSheetIsLive: the only non-false answer must be its final `return true`')
+  }
+  return problems
+}
+
+/**
+ * #5838 BEHAVIOUR TIE — the twin of the worker's. The tree check above proves the shape of the stop;
+ * what the stop DOES (the provider is called exactly once when the sheet is deleted mid-request,
+ * `absent` and a failed lookup stop too, the already-generated partial is still returned) is proven by
+ * driving the REAL router over HTTP in tests/unit/multitable-ai-bulk-preview-sheet-liveness.test.ts.
+ * That file must exist, build the real route module (never a stand-in, never a mocked liveness module),
+ * go through the pinned server (#4154: `request(app)` is banned in tests/unit), run in the unit job and
+ * keep every case, none skipped or focused.
+ */
+const INLINE_BULK_BEHAVIOUR_TEST = 'multitable-ai-bulk-preview-sheet-liveness.test.ts'
+const INLINE_BULK_BEHAVIOUR_CASES = [
+  'LIVE sheet:',
+  'sheet DELETED while row 1 is generating:',
+  'sheet row GONE (absent) mid-run:',
+  'liveness LOOKUP FAILS before row 2:',
+  'sheet deleted BEFORE the request:',
+  'sheet DELETED before the FIRST provider call:',
+]
+const INLINE_BULK_ROUTE_MODULE = '../../src/routes/multitable-ai'
+/**
+ * The load-bearing ASSERTIONS, per case — not just its title. A presence proof (titles + wiring) stays
+ * green when every `expect(…)` is deleted, and the ledger entry would rest on the shape proof alone;
+ * these are the lines that make the behaviour half mean something. Matched against the case body
+ * PRINTED FROM THE TREE with comments removed, so prose can never satisfy one.
+ */
+const INLINE_BULK_BEHAVIOUR_ASSERTIONS: Array<{ prefix: string; must: string[] }> = [
+  {
+    prefix: 'sheet DELETED while row 1 is generating:',
+    must: [
+      'expect(provider.fetchFn).toHaveBeenCalledTimes(1)',
+      "expect(res.body.skipped).toEqual([{ recordId: 'rec_2', reason: 'sheet_not_live' }])",
+    ],
+  },
+  {
+    prefix: 'LIVE sheet:',
+    must: [
+      'expect(provider.fetchFn).toHaveBeenCalledTimes(3)',
+      'expect(env.world.livenessAsked).toHaveLength(1 + ROW_IDS.length + ROW_IDS.length)',
+    ],
+  },
+  {
+    // ZERO-SPEND stop: nothing generated, nothing charged → the module rule stands and the request is
+    // refused, not answered 200 with an empty partial.
+    prefix: 'sheet DELETED before the FIRST provider call:',
+    must: [
+      'expect(provider.fetchFn).not.toHaveBeenCalled()',
+      'expect(res.status).toBe(404)',
+      "expect(res.body.error.code).toBe('SHEET_DELETED')",
+    ],
+  },
+]
+
+function inlineBulkBehaviourProblems(testSource: string | null, vitestConfig: string): string[] {
+  if (testSource === null) return [`tests/unit/${INLINE_BULK_BEHAVIOUR_TEST} is missing`]
+  const normalized = normalizeEol(testSource)
+  const sf = ts.createSourceFile(INLINE_BULK_BEHAVIOUR_TEST, normalized, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const problems: string[] = []
+  const titles: string[] = []
+  /** Case body, printed from the tree (comments removed) and whitespace-collapsed. */
+  const bodies = new Map<string, string>()
+  const collapse = (s: string) => s.replace(/\s+/g, ' ').trim()
+  let routerImported = false
+  let routerBuilt = false
+  let pinnedServerUsed = false
+  let pinnedTransport = false
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression
+      const first = node.arguments[0]
+      if (ts.isIdentifier(callee) && (callee.text === 'it' || callee.text === 'test') && first && ts.isStringLiteralLike(first)) {
+        titles.push(first.text)
+        const body = node.arguments[1]
+        if (body && isFnNode(body)) bodies.set(first.text, collapse(codeOf(body, sf)))
+      }
+      if (ts.isIdentifier(callee) && TEST_SKIP_ALIASES.has(callee.text)) problems.push(`${callee.text}(…) skips or focuses a case`)
+      // The router: `createMultitableAiRoutes` DESTRUCTURED off an import of the real module, on the
+      // tree — and actually CALLED. A module path that survives only in a comment proves nothing (the
+      // sibling guard learned that from a restore route "guarded" by its own docblock).
+      if (callee.kind === ts.SyntaxKind.ImportKeyword && first && ts.isStringLiteralLike(first) && first.text === INLINE_BULK_ROUTE_MODULE) {
+        let holder: ts.Node = node.parent
+        while (ts.isAwaitExpression(holder) || ts.isParenthesizedExpression(holder)) holder = holder.parent
+        if (ts.isVariableDeclaration(holder) && ts.isObjectBindingPattern(holder.name)) {
+          for (const el of holder.name.elements) {
+            const imported = el.propertyName && ts.isIdentifier(el.propertyName) ? el.propertyName.text
+              : ts.isIdentifier(el.name) ? el.name.text : ''
+            if (imported === 'createMultitableAiRoutes' && ts.isIdentifier(el.name) && el.name.text === 'createMultitableAiRoutes') routerImported = true
+          }
+        }
+      }
+      if (ts.isIdentifier(callee) && callee.text === 'createMultitableAiRoutes') routerBuilt = true
+      if (ts.isIdentifier(callee) && callee.text === 'usePinnedServer' && node.arguments.length === 0) pinnedServerUsed = true
+      if (ts.isIdentifier(callee) && callee.text === 'request') {
+        // #4154: `request(app)` re-listens per request. The transport must be the pinned base URL.
+        if (first && ts.isIdentifier(first)) problems.push(`request(${first.text}) — #4154 bans an app-mode supertest call in tests/unit`)
+        if (first && ts.isCallExpression(first) && collapse(codeOf(first, sf)) === 'pinned.url()') pinnedTransport = true
+      }
+      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+        if (TEST_CALLEES.has(callee.expression.text) && TEST_MODIFIERS.has(callee.name.text)) {
+          problems.push(`${callee.expression.text}.${callee.name.text}(…) is not allowed here — every case runs, unconditionally`)
+        }
+        if (callee.expression.text === 'vi' && /^(do)?(un)?mock$/i.test(callee.name.text)) {
+          problems.push(`vi.${callee.name.text}(…) — the behaviour test drives the real route and the real provider choke`)
+        }
+      }
+    }
+    // A static `import { createMultitableAiRoutes } from '…/multitable-ai'` counts too.
+    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier) && node.moduleSpecifier.text === INLINE_BULK_ROUTE_MODULE
+      && !node.importClause?.isTypeOnly && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
+      for (const el of node.importClause.namedBindings.elements) {
+        const imported = el.propertyName?.text ?? el.name.text
+        if (imported === 'createMultitableAiRoutes' && el.name.text === 'createMultitableAiRoutes') routerImported = true
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(sf)
+  if (!routerImported || !routerBuilt) {
+    problems.push(`the real router must be built here: createMultitableAiRoutes imported from ${INLINE_BULK_ROUTE_MODULE} and called`)
+  }
+  if (!pinnedServerUsed || !pinnedTransport) {
+    problems.push('the route must be driven over the pinned server (#4154): usePinnedServer() + request(pinned.url()), never request(app)')
+  }
+  for (const prefix of INLINE_BULK_BEHAVIOUR_CASES) {
+    const n = titles.filter((t) => t.startsWith(prefix)).length
+    if (n !== 1) problems.push(`case "${prefix}…": expected exactly one it(…), found ${n}`)
+  }
+  for (const { prefix, must } of INLINE_BULK_BEHAVIOUR_ASSERTIONS) {
+    const title = titles.find((t) => t.startsWith(prefix))
+    const body = title === undefined ? undefined : bodies.get(title)
+    if (body === undefined) continue // the missing/duplicated case is already reported above
+    for (const assertion of must) {
+      if (!body.includes(collapse(assertion))) problems.push(`case "${prefix}…" must assert \`${assertion}\` — without it the case proves nothing`)
+    }
+  }
+  if (vitestConfig.includes(INLINE_BULK_BEHAVIOUR_TEST.replace(/\.test\.ts$/, ''))) {
+    problems.push(`vitest.config.ts mentions ${INLINE_BULK_BEHAVIOUR_TEST} — it must run in the unit job`)
+  }
+  return problems
+}
+
+/** Self-test seam for the two #5838 proofs, exactly as `bulkWorkerInputs` is for #5832. */
+const inlineBulkInputs: { route?: string; behaviour?: string | null } = {}
+
+function inlineBulkSourceProblems(): string[] {
+  return inlineBulkLivenessProblems(inlineBulkInputs.route ?? readSource(INLINE_BULK_FILE))
+}
+
+function readInlineBulkBehaviour(): string[] {
+  const path = join(__dirname, INLINE_BULK_BEHAVIOUR_TEST)
+  const onDisk = () => (existsSync(path) ? readFileSync(path, 'utf8') : null)
+  return inlineBulkBehaviourProblems(
+    inlineBulkInputs.behaviour !== undefined ? inlineBulkInputs.behaviour : onDisk(),
+    readFileSync(join(__dirname, '../../vitest.config.ts'), 'utf8'),
+  )
+}
+
 const PROVIDER_LOOPS: Record<string, { reason: string; stillTrue: (loop: ProviderLoop) => boolean }> = {
   'services/ai-bulk-job-service.ts runGeneratePhase': {
     reason: 'FIXED (#5832) — the async bulk-fill job worker sends one prompt per row long after the start route’s '
@@ -641,12 +955,17 @@ const PROVIDER_LOOPS: Record<string, { reason: string; stillTrue: (loop: Provide
       && readBulkWorkerBehaviour().length === 0,
   },
   'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview': {
-    reason: 'GAP — tracked in #5838 — the INLINE bulk-preview path (at most MULTITABLE_AI_BULK_MAX_ROWS generatable '
-      + 'rows) refuses a non-live sheet once at entry, then loops over the rows calling runShortcutCore without asking '
-      + 'again, so a sheet soft-deleted during the request keeps sending its remaining rows’ record content to the '
-      + 'provider. Same class as #5832, different lane; this route file is not edited by the #5832 change. When the '
-      + 'loop re-checks liveness this entry stops being true: replace it with a proof like the worker’s.',
-    stillTrue: (loop) => !loop.asksLiveness,
+    reason: 'FIXED (#5838) — the INLINE bulk-preview path (at most MULTITABLE_AI_BULK_MAX_ROWS generatable rows) '
+      + 'refused a non-live sheet once at entry and then looped over the rows calling runShortcutCore without asking '
+      + 'again, so a sheet soft-deleted during the request kept sending its remaining rows’ record content to the '
+      + 'provider — the same class as #5832 on the synchronous lane. It now asks loadSheetLiveness about THIS sheet '
+      + 'before every provider call (bulkPreviewSheetIsLive) and stops on anything but proof of a live sheet, '
+      + 'returning the already-generated partial as capped — or, when nothing was generated or charged, refusing '
+      + 'outright (shape proven by inlineBulkLivenessProblems, behaviour by the tied behaviour test, '
+      + 'inlineBulkBehaviourProblems).',
+    stillTrue: (loop) => loop.asksLiveness
+      && inlineBulkSourceProblems().length === 0
+      && readInlineBulkBehaviour().length === 0,
   },
 }
 
@@ -1495,6 +1814,152 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(thrown.violations).toEqual([])
   })
 
+  it('EGRESS-STOP self-test (#5838): a per-row liveness helper may answer `false` instead of a status — only when it is NAMED, and only fail-closed', () => {
+    const helperWith = (refusal: string) => [
+      'async function sheetStillLive(query, sheetId) {',
+      '  let liveness',
+      '  try { liveness = await loadSheetLiveness(query, sheetId) } catch (err) { console.error("lookup failed", describeIt(err)); return false }',
+      `  ${refusal}`,
+      '  return true',
+      '}',
+    ]
+    const FALSE_REFUSAL = "if (liveness !== 'live') { console.warn('not live', { reason: 'sheet_deleted' }); return false }"
+    const loop = [
+      '    const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, req.params.sheetId)',
+      "    if (!capabilities.canRead) return res.status(403).json({ code: 'FORBIDDEN' })",
+      "    if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)",
+      '    for (const row of rows) {',
+      '      if (!(await sheetStillLive(query, req.params.sheetId))) { skipped.push(row.id); paused = true; break }',
+      '      await runShortcutCore(client, ctx, row.prompt)',
+      '    }',
+      '    return res.json({ rows, capped: paused })',
+    ]
+    const analyze = (refusal: string, named = true) => {
+      const { h, s } = fixtureHandler([
+        ...helperWith(refusal),
+        'export function build(router) {',
+        "  router.post('/sheets/:sheetId/x', async (req, res) => {",
+        ...loop,
+        '  })',
+        '}',
+      ])
+      return analyzeHandler(h, s.sourceFile, named
+        ? { ...ROUTE_TEST_OPTIONS, egressStops: new Set(['sheetStillLive']) }
+        : ROUTE_TEST_OPTIONS)
+    }
+    // Named: a log line then `return false` is a refusal — the caller's `break` is what stops the sending.
+    expect(analyze(FALSE_REFUSAL).violations).toEqual([])
+    // …and the excuse buys the helper NOTHING as a liveness proof: the route still proves liveness with
+    // its own entry resolver, and the listed helper never appears as a source.
+    expect(analyze(FALSE_REFUSAL).sources).toEqual(['resolver resolveSheetReadableCapabilities'])
+    // NOT named: the loosening is not available by default — every other route refusal still answers.
+    expect(analyze(FALSE_REFUSAL, false).violations.join('\n')).toMatch(/refusal branch does not answer 403\/404\/410/)
+    // Named but fail-OPEN, or silent, or refusing with a value the caller reads as "keep going".
+    expect(analyze("if (liveness !== 'live') { console.warn('not live'); return true }").violations.join('\n'))
+      .toMatch(/must end in `return false`/)
+    expect(analyze("if (liveness !== 'live') { console.warn('not live') }").violations.join('\n'))
+      .toMatch(/never refuses on the liveness it binds|must end in `return false`/)
+    // Named but CONDITIONALLY fail-open: "keep sending" on exactly the verdict the guard exists for,
+    // with a trailing `return false` as cover. Checking only the branch's last statement accepts this.
+    expect(analyze("if (liveness !== 'live') { if (liveness === 'deleted') { return true } console.warn('not live'); return false }").violations.join('\n'))
+      .toMatch(/must end in `return false` and return nothing else/)
+    expect(analyze("if (liveness !== 'live') { if (liveness === 'absent') return; return false }").violations.join('\n'))
+      .toMatch(/must end in `return false` and return nothing else/)
+    // Named but the refusal itself goes back to the database (a refusal only answers).
+    expect(analyze("if (liveness !== 'live') { await query('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]); return false }").violations.join('\n'))
+      .toMatch(/refusal branch awaits or calls a data source/)
+    // The naming is per helper, not per file: a second helper in the same file still must answer.
+    const { h, s } = fixtureHandler([
+      ...helperWith(FALSE_REFUSAL),
+      'async function otherGate(req, res, sheetId) {',
+      '  const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, q, sheetId)',
+      "  if (!capabilities.canRead) { res.status(403).json({ code: 'FORBIDDEN' }); return null }",
+      "  if (sheetLiveness !== 'live') { console.warn('not live'); return null }",
+      '  return capabilities',
+      '}',
+      'export function build(router) {',
+      "  router.post('/sheets/:sheetId/x', async (req, res) => {",
+      '    const auth = await otherGate(req, res, req.params.sheetId)',
+      '    if (!auth) return',
+      ...loop,
+      '  })',
+      '}',
+    ])
+    expect(analyzeHandler(h, s.sourceFile, { ...ROUTE_TEST_OPTIONS, egressStops: new Set(['sheetStillLive']) }).violations.join('\n'))
+      .toMatch(/^otherGate: .*refusal branch does not answer 403\/404\/410/m)
+    // A SECOND handler in the listed file adopts the helper as its own gate — the natural next edit once
+    // the name is in the table. It must NOT be counted GUARDED by it: the helper is excused from
+    // answering, so a route resting on it answers 200 on a deleted sheet with no status, no
+    // SHEET_DELETED code and no restore hint. Its `false` is a stop signal, never a refusal.
+    const adopted = fixtureHandler([
+      ...helperWith(FALSE_REFUSAL),
+      'export function build(router) {',
+      "  router.get('/sheets/:sheetId/y', async (req, res) => {",
+      '    if (!(await sheetStillLive(query, req.params.sheetId))) { return res.json({ ok: true, rows: [] }) }',
+      '    return res.json({ ok: true, rows: await loadRows(query, req.params.sheetId) })',
+      '  })',
+      '}',
+    ], 'GET /sheets/:sheetId/y')
+    expect(analyzeHandler(adopted.h, adopted.s.sourceFile, { ...ROUTE_TEST_OPTIONS, egressStops: new Set(['sheetStillLive']) }).sources)
+      .toEqual([])
+    // Without the excuse the same file reds outright (the helper would have to answer a status), so the
+    // struck source is the ONLY thing standing between the excuse and a silently guarded 200.
+    expect(analyzeHandler(adopted.h, adopted.s.sourceFile, ROUTE_TEST_OPTIONS).violations.join('\n'))
+      .toMatch(/^sheetStillLive: .*refusal branch does not answer 403\/404\/410/m)
+    // …and a RELAY does not launder it either. One hop (`relay` returns the helper's verdict) or two
+    // (`relay2` returns the relay's): nothing about the answer changed, so neither may become the
+    // route's liveness proof. A single-pass strike would still count the two-hop route GUARDED.
+    const relayed = (key: string) => {
+      const { h: rh, s: rs } = fixtureHandler([
+        ...helperWith(FALSE_REFUSAL),
+        // relay2 is declared BEFORE the relay it rests on, so the outer relay2 can only be struck on a
+        // LATER pass than relay: a single-pass strike leaves the two-hop route "guarded".
+        'async function relay2(query, sheetId) {',
+        '  if (!(await relay(query, sheetId))) { return false }',
+        '  return true',
+        '}',
+        'async function relay(query, sheetId) {',
+        '  if (!(await sheetStillLive(query, sheetId))) { return false }',
+        '  return true',
+        '}',
+        'export function build(router) {',
+        "  router.get('/sheets/:sheetId/one-hop', async (req, res) => {",
+        '    if (!(await relay(query, req.params.sheetId))) { return res.json({ ok: true, rows: [] }) }',
+        '    return res.json({ ok: true, rows: await loadRows(query, req.params.sheetId) })',
+        '  })',
+        "  router.get('/sheets/:sheetId/two-hop', async (req, res) => {",
+        '    if (!(await relay2(query, req.params.sheetId))) { return res.json({ ok: true, rows: [] }) }',
+        '    return res.json({ ok: true, rows: await loadRows(query, req.params.sheetId) })',
+        '  })',
+        '}',
+      ], key)
+      return analyzeHandler(rh, rs.sourceFile, { ...ROUTE_TEST_OPTIONS, egressStops: new Set(['sheetStillLive']) }).sources
+    }
+    expect(relayed('GET /sheets/:sheetId/one-hop')).toEqual([])
+    expect(relayed('GET /sheets/:sheetId/two-hop')).toEqual([])
+    // A helper that relays the stop AND asks a real, answering source stays a genuine gate — the strike
+    // removes questions that answer nothing, never a refusal that does.
+    const { h: mh, s: ms } = fixtureHandler([
+      ...helperWith(FALSE_REFUSAL),
+      'async function mixedGate(req, res, sheetId) {',
+      '  const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)',
+      "  if (!capabilities.canRead) { res.status(403).json({ code: 'FORBIDDEN' }); return null }",
+      "  if (sheetLiveness !== 'live') { sendSheetNotLive(res, sheetLiveness); return null }",
+      '  if (!(await sheetStillLive(query, sheetId))) { return null }',
+      '  return capabilities',
+      '}',
+      'export function build(router) {',
+      "  router.get('/sheets/:sheetId/mixed', async (req, res) => {",
+      '    const auth = await mixedGate(req, res, req.params.sheetId)',
+      '    if (!auth) return',
+      '    return res.json({ ok: true, rows: await loadRows(query, req.params.sheetId) })',
+      '  })',
+      '}',
+    ], 'GET /sheets/:sheetId/mixed')
+    expect(analyzeHandler(mh, ms.sourceFile, { ...ROUTE_TEST_OPTIONS, egressStops: new Set(['sheetStillLive']) }).sources)
+      .toEqual(['gate-helper mixedGate'])
+  })
+
   it('route collection self-test: fails closed on every registration shape (J7 route chains, J8 mounts, J9d no text filter, J10 dynamic verbs, J12 child-id routes)', () => {
     const s = scanRouteSource('routes/zz-fixture.ts', [
       "import { Router } from 'express'",
@@ -1598,13 +2063,28 @@ describe('sheet-liveness closure over EVERY route file', () => {
         ...Object.entries(c.unaddressed?.named ?? {}).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e]),
       ]),
       ...Object.entries(OPAQUE_REGISTRATIONS).flatMap(([file, entries]) => Object.entries(entries).map(([k, e]): [string, { reason: string }] => [`${file} ${k}`, e])),
+      // The EGRESS-STOP table is an exemption table like the others — it excuses a helper's liveness
+      // refusal from answering 403/404/410 — so its reasons are swept here too. Left out, an entry
+      // could be added with `reason: ''`: no justification, no issue, no tied caller proof, still green.
+      ...Object.entries(EGRESS_STOP_HELPERS).map(([file, e]): [string, { reason: string }] => [`EGRESS_STOP_HELPERS ${file}`, e]),
     ]
     expect(reasons.flatMap(([key, entry]) => reasonProblems(key, entry))).toEqual([])
+    // A thin/empty reason on an EGRESS_STOP_HELPERS entry reds exactly as it does on the others.
+    expect(reasonProblems('EGRESS_STOP_HELPERS routes/whatever.ts', { reason: '' }).join('\n')).toMatch(/reason missing or too thin/)
+    // …and every listed helper must BE a top-level function of the file it is listed under, so the
+    // excuse cannot be granted to a name that does not exist (or has moved).
+    for (const [file, entry] of Object.entries(EGRESS_STOP_HELPERS)) {
+      for (const helper of entry.helpers) {
+        const defs = findFunctionsNamed(scan(file).sourceFile, helper)
+        expect(defs.length, `EGRESS_STOP_HELPERS ${file}: no function named ${helper}`).toBe(1)
+      }
+    }
     // 12 after #5831 part A closed the six comment-id GAPs (GUARDED now, see COMMENT-ID ROUTES); 10 after
     // part B closed the inbox and unread-count GAPs (FILTERED now, see INBOX SCOPE); 9 after #5844 closed the
-    // requireRecordReadable order GAP on main. A branch that closes another GAP lowers this floor by the
-    // number it removes (#5843, which closes the #5832 GAP, takes it to 8).
-    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(9)
+    // requireRecordReadable order GAP on main; 8 after this branch closed the #5838 inline bulk-preview GAP
+    // (FIXED now, see PROVIDER_LOOPS). A branch that closes another GAP lowers this floor by the number it
+    // removes.
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(8)
   })
 
   it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {
@@ -2038,6 +2518,18 @@ describe('sheet-liveness closure over EVERY route file', () => {
     const cancelCheck = "      if (!isGeneratingBulkJobStatus(await readJobStatus(query, jobId))) {\n"
     expect(source).toContain(cancelCheck)
     expect(redFor(withoutStop.replace(cancelCheck, `${stop![0].slice(1)}${cancelCheck}`))).toMatch(/follow the per-row cancel/)
+    // the per-row cancel check DELETED outright — the needle's own bite, re-proven after #5891
+    // (#5838) was merged into this branch (that merge left the worker loop alone; it only swapped
+    // this file's private describeLivenessLookupError for the shared one). With nothing left in the
+    // loop body that asks `readJobStatus(query, jobId)`, the structural cancel finder above has no
+    // statement to order against and the guard reds. Re-pointing the needle at the #5842 predicate
+    // therefore did not cost this assertion its teeth (and a future re-point that stops matching the
+    // loop reds on the `toContain` one line above).
+    const cancelBlock = /\n( *)if \(!isGeneratingBulkJobStatus\(await readJobStatus\(query, jobId\)\)\) \{\n[\s\S]*?\n\1\}\n/.exec(source)
+    expect(cancelBlock, 'the per-row cancel check must be locatable for the self-test').not.toBeNull()
+    const withoutCancel = source.replace(cancelBlock![0], '\n')
+    expect(withoutCancel).not.toContain(cancelCheck)
+    expect(redFor(withoutCancel)).toMatch(/follow the per-row cancel/)
     // asks about another id
     expect(redFor(source.replace('jobSheetIsLive(query, jobId, plan.sheetId)', 'jobSheetIsLive(query, jobId, plan.fieldId)'))).toMatch(/must stop on/)
     // stops without leaving the active state
@@ -2157,25 +2649,175 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(verdicts()).toEqual([true, true])
   })
 
+  it('#5838: the inline bulk-preview loop stops on a non-live sheet before every provider call', () => {
+    const source = normalizeEol(readSource(INLINE_BULK_FILE))
+    expect(inlineBulkLivenessProblems(source)).toEqual([])
+
+    // Sharpness: each way the fix could quietly rot is caught (mutated in memory, never on disk).
+    const stop = /\n( *)if \(!\(await bulkPreviewSheetIsLive\(query, sheetId\)\)\) \{\n[\s\S]*?\n\1\}\n/.exec(source)
+    expect(stop, 'the stop block must be locatable for the self-test').not.toBeNull()
+    const withoutStop = source.replace(stop![0], '\n')
+    const send = '        const outcome = await runShortcutCore(\n'
+    expect(source.split(send).length - 1).toBe(1)
+    expect(source).toContain('      for (const cand of generationCandidates) {\n')
+    const redFor = (mutated: string) => inlineBulkLivenessProblems(mutated).join('\n')
+    const swap = (from: string, to: string, src = source) => {
+      expect(src.split(from).length - 1, `self-test needle must occur exactly once: ${JSON.stringify(from)}`).toBe(1)
+      return src.replace(from, () => to)
+    }
+    // no check at all (the #5838 bug itself)
+    expect(redFor(withoutStop)).toMatch(/must stop on/)
+    // checked once, before the loop
+    const loopHead = '      for (const cand of generationCandidates) {\n        const recordId = cand.recordId\n'
+    expect(redFor(swap(loopHead, `${stop![0].slice(1)}${loopHead}`, withoutStop))).toMatch(/must stop on/)
+    // checked AFTER the provider call (the row that pays for the delete is the one already sent)
+    const afterSend = "        if (outcome.kind === 'charged') {\n"
+    expect(redFor(swap(afterSend, `${stop![0].slice(1)}${afterSend}`, withoutStop))).toMatch(/BEFORE the provider call/)
+    // the stop stops being a stop: the remaining rows are still sent / the row is silently dropped /
+    // the caller is told the run was complete
+    const stopBody = "          skipped.push({ recordId, reason: 'sheet_not_live' })\n          paused = true\n          break\n"
+    expect(redFor(swap(stopBody, stopBody.replace('          break\n', '          continue\n')))).toMatch(/must end in `break`/)
+    expect(redFor(swap(stopBody, stopBody.replace("          skipped.push({ recordId, reason: 'sheet_not_live' })\n", '')))).toMatch(/must record the row it stopped on/)
+    expect(redFor(swap(stopBody, stopBody.replace('          paused = true\n', '')))).toMatch(/must mark the run partial/)
+    // asks about another id
+    expect(redFor(swap('bulkPreviewSheetIsLive(query, sheetId)', 'bulkPreviewSheetIsLive(query, fieldId)'))).toMatch(/must stop on/)
+    // fail-open on a lookup error
+    expect(redFor(source.replace(/(\} catch \(err\) \{[\s\S]*?)return false\n/, '$1return true\n'))).toMatch(/catch answers false/)
+    // only `deleted` refused (`absent` would keep sending)
+    expect(redFor(swap("  if (liveness !== 'live') {", "  if (liveness === 'deleted') {"))).toMatch(/must follow the lookup/)
+    // a second way to answer true
+    expect(redFor(swap('    liveness = await loadSheetLiveness(query, sheetId)\n', "    liveness = await loadSheetLiveness(query, sheetId)\n    if (liveness === 'absent') return true\n")))
+      .toMatch(/must run in a try|only non-false answer/)
+    // a different liveness helper spelling
+    expect(redFor(swap("import { describeLivenessLookupError, loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'", "import { describeLivenessLookupError, loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness-copy'")))
+      .toMatch(/must be imported from multitable\/sheet-liveness/)
+    // a statement between the lookup and the refusal overrides the verdict
+    const refusal = "  if (liveness !== 'live') {\n"
+    expect(redFor(swap(refusal, `  liveness = 'live'\n${refusal}`))).toMatch(/nothing in between/)
+    expect(redFor(swap(refusal, `  liveness = 'live'\n${refusal}`))).toMatch(/`liveness` may only be written by the lookup/)
+    // the lookup is pointed at an always-live stub, in the gate and in the handler
+    expect(redFor(swap('  let liveness: SheetLiveness\n', '  let liveness: SheetLiveness\n  query = async () => ({ rows: [{ deleted_at: null }] })\n')))
+      .toMatch(/`query` may only be written by the lookup/)
+    expect(redFor(swap(loopHead, `      query = (async () => ({ rows: [{ deleted_at: null }] })) as any\n${loopHead}`)))
+      .toMatch(/the bulk-preview handler: `query` must never be written/)
+    // the sheet the loop asks about is rewritten before the check
+    expect(redFor(swap(loopHead, `      sheetId = cand.recordId\n${loopHead}`))).toMatch(/the bulk-preview handler: `sheetId` must never be written/)
+    // a shadowing re-declaration in the handler
+    expect(redFor(swap(loopHead, `      const sheetId = 'other'\n${loopHead}`))).toMatch(/`sheetId` must be declared exactly once/)
+    // parameters swapped / not plain
+    const signature = 'async function bulkPreviewSheetIsLive(query: QueryFn, sheetId: string)'
+    expect(redFor(swap(signature, 'async function bulkPreviewSheetIsLive(sheetId: string, query: QueryFn)'))).toMatch(/parameters must be exactly \(query, sheetId\)/)
+    expect(redFor(swap(signature, "async function bulkPreviewSheetIsLive(query: QueryFn, sheetId: string = 'sheet')"))).toMatch(/parameters must be exactly/)
+    // a second binding of the helper, or the helper reassigned elsewhere in the module
+    expect(redFor(`${source}\nfunction loadSheetLiveness() { return 'live' }\n`)).toMatch(/`loadSheetLiveness` must be bound exactly once/)
+    expect(redFor(`${source}\nexport function hijack() { (bulkPreviewSheetIsLive as any) = async () => true }\n`)).toMatch(/`bulkPreviewSheetIsLive` must never be written/)
+    const asArrow = source.replace(/async function bulkPreviewSheetIsLive\(([^)]*)\): Promise<boolean> \{/, 'const bulkPreviewSheetIsLive = async ($1): Promise<boolean> => {')
+    expect(asArrow).not.toBe(source)
+    expect(redFor(asArrow)).toMatch(/expected 1 top-level function declaration/)
+    // the send leaves the loop entirely → there is no loop to guard, and the ledger says so
+    expect(redFor(swap(send, '        const outcome = await runShortcutCoreRenamed(\n'))).toMatch(/expected exactly one `for \(… of generationCandidates\)/)
+    // A SECOND caller of the excused helper: EGRESS_STOP_HELPERS excuses the helper from answering a
+    // status for every caller in the file, and only this one call site is proven to stop anything.
+    expect(redFor(`${source}\nexport async function peek(query: QueryFn, sheetId: string) { return bulkPreviewSheetIsLive(query, sheetId) }\n`))
+      .toMatch(/must be called exactly once/)
+  })
+
+  it('#5838 BEHAVIOUR TIE: the inline behaviour test exists, drives the real route over the pinned server, and keeps every case', () => {
+    expect(readInlineBulkBehaviour()).toEqual([])
+    const path = join(__dirname, INLINE_BULK_BEHAVIOUR_TEST)
+    const text = normalizeEol(readFileSync(path, 'utf8'))
+    const config = normalizeEol(readFileSync(join(__dirname, '../../vitest.config.ts'), 'utf8'))
+    const red = (src: string | null, cfg = config) => inlineBulkBehaviourProblems(src, cfg).join('\n')
+    const swap = (from: string, to: string) => {
+      expect(text.split(from).length - 1, `self-test needle must occur exactly once: ${JSON.stringify(from)}`).toBe(1)
+      return text.replace(from, () => to)
+    }
+    const deletedCase = "  it('sheet DELETED while row 1 is generating:"
+    expect(red(null)).toMatch(/is missing/)
+    expect(red(swap(deletedCase, "  it.skip('sheet DELETED while row 1 is generating:"))).toMatch(/it\.skip\(…\) is not allowed/)
+    expect(red(swap(deletedCase, "  xit('sheet DELETED while row 1 is generating:"))).toMatch(/xit\(…\) skips or focuses/)
+    expect(red(swap("  it('LIVE sheet:", "  it.only('LIVE sheet:"))).toMatch(/it\.only\(…\) is not allowed/)
+    expect(red(swap("describe('AI inline bulk-preview", "describe.skip('AI inline bulk-preview"))).toMatch(/describe\.skip\(…\) is not allowed/)
+    expect(red(swap("  it('sheet row GONE (absent) mid-run:", "  it('sheet row GONE mid-run:"))).toMatch(/case "sheet row GONE \(absent\) mid-run:…": expected exactly one it\(…\), found 0/)
+    expect(red(swap("  it('liveness LOOKUP FAILS before row 2:", "  it('LIVE sheet: twice"))).toMatch(/case "LIVE sheet:…": expected exactly one it\(…\), found 2/)
+    expect(red(swap("import { afterEach,", "vi.mock('../../src/multitable/sheet-liveness')\nimport { afterEach,"))).toMatch(/vi\.mock\(…\)/)
+    expect(red(swap("await import('../../src/routes/multitable-ai')", "await import('./fake-multitable-ai')"))).toMatch(/the real router must be built here/)
+    // PROSE must not satisfy it: a stand-in router with the real module path kept in a COMMENT is the
+    // shape a raw-text check accepts. (The sibling guard once had a restore route "guarded" by its
+    // own docblock — this binding is on the tree, so the comment buys nothing.)
+    expect(red(swap("await import('../../src/routes/multitable-ai')", "await import('./fake-multitable-ai') // '../../src/routes/multitable-ai'")))
+      .toMatch(/the real router must be built here/)
+    // …nor may the router be imported and never built.
+    expect(red(swap('createMultitableAiRoutes({ fetchFn:', 'buildNothing({ fetchFn:'))).toMatch(/the real router must be built here/)
+    expect(red(swap('request(pinned.url())', 'request(app)'))).toMatch(/pinned server/)
+    expect(red(swap('request(pinned.url())', 'request(app)'))).toMatch(/#4154 bans an app-mode supertest call/)
+    // GUTTED ASSERTIONS: every title, the router, the transport and the config entry stay — only the
+    // load-bearing `expect`s go. A presence proof stays green on this; the ledger must not.
+    const drop = (needle: RegExp) => {
+      expect(needle.test(text), `self-test needle must occur: ${needle}`).toBe(true)
+      return text.replace(new RegExp(needle.source, 'g'), 'void 0')
+    }
+    expect(red(drop(/expect\(provider\.fetchFn\)\.toHaveBeenCalledTimes\(1\)/)))
+      .toMatch(/case "sheet DELETED while row 1 is generating:…" must assert/)
+    expect(red(drop(/expect\(env\.world\.livenessAsked\)\.toHaveLength\(1 \+ ROW_IDS\.length \+ ROW_IDS\.length\)/)))
+      .toMatch(/case "LIVE sheet:…" must assert/)
+    expect(red(drop(/expect\(res\.body\.error\.code\)\.toBe\('SHEET_DELETED'\)/)))
+      .toMatch(/case "sheet DELETED before the FIRST provider call:…" must assert/)
+    expect(red(drop(/expect\(provider\.fetchFn\)\.not\.toHaveBeenCalled\(\)/)))
+      .toMatch(/case "sheet DELETED before the FIRST provider call:…" must assert/)
+    expect(red(text, config.replace("exclude: [\n", `exclude: [\n      'tests/unit/${INLINE_BULK_BEHAVIOUR_TEST}',\n`))).toMatch(/vitest\.config\.ts mentions/)
+  })
+
+  it('#5838: the inline bulk-preview ledger entry falls when EITHER proof falls (shape or behaviour)', () => {
+    const inlineKey = 'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview'
+    const inlineLoop = allFacts().flatMap((f) => f.providerLoops).find((l) => l.key === inlineKey)
+    expect(inlineLoop, `${inlineKey} must be discovered`).toBeDefined()
+    const verdict = () => PROVIDER_LOOPS[inlineKey]!.stillTrue(inlineLoop!)
+    expect(verdict()).toBe(true)
+
+    const route = normalizeEol(readSource(INLINE_BULK_FILE))
+    const behaviour = normalizeEol(readFileSync(join(__dirname, INLINE_BULK_BEHAVIOUR_TEST), 'utf8'))
+    // Shape: the verdict is overridden between the lookup and the refusal (the loop still "asks").
+    const rebound = route.replace('  let liveness: SheetLiveness\n', "  let liveness: SheetLiveness\n  liveness = 'live'\n")
+    // Behaviour: the case that proves the provider is called exactly once stops running.
+    const skipped = behaviour.replace("  it('sheet DELETED while row 1 is generating:", "  it.skip('sheet DELETED while row 1 is generating:")
+    expect(rebound).not.toBe(route)
+    expect(skipped).not.toBe(behaviour)
+    try {
+      inlineBulkInputs.route = rebound
+      expect(verdict(), 'route shape broken').toBe(false)
+      delete inlineBulkInputs.route
+      inlineBulkInputs.behaviour = skipped
+      expect(verdict(), 'behaviour case skipped').toBe(false)
+      inlineBulkInputs.behaviour = null
+      expect(verdict(), 'behaviour test missing').toBe(false)
+    } finally {
+      delete inlineBulkInputs.route
+      delete inlineBulkInputs.behaviour
+    }
+    expect(verdict()).toBe(true)
+  })
+
   it('PROVIDER LOOPS: every loop under src/ that sends rows to the model is named — fixed with a proof, or a tracked GAP (#5832, #5838)', () => {
     const facts = allFacts()
     const found = facts.flatMap((f) => f.providerLoops)
     expect(providerLoopProblems(facts)).toEqual([])
     expect(found.map((l) => l.key).sort()).toEqual(Object.keys(PROVIDER_LOOPS).sort())
-    // Still true today: the worker asks, the inline bulk-preview loop does not.
+    // Still true today: BOTH lanes ask before every provider call (#5832 async, #5838 inline).
     expect(Object.fromEntries(found.map((l) => [l.key, l.asksLiveness]))).toEqual({
       'services/ai-bulk-job-service.ts runGeneratePhase': true,
-      'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview': false,
+      'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview': true,
     })
 
-    // Sharpness, in memory: the ledger reds when a loop is fixed, added, unnamed or loses its proof.
+    // Sharpness, in memory: the ledger reds when a loop loses its check, is added, unnamed or dead.
     const withSource = (rel: string, mutated: string) => facts.map((f) => (f.rel === rel ? factsOf(rel, mutated) : f))
     const inline = normalizeEol(readSource('routes/multitable-ai.ts'))
     const inlineSend = '        const outcome = await runShortcutCore(\n'
     expect(inline.split(inlineSend).length - 1).toBe(1)
-    // the inline loop starts re-checking liveness → the GAP entry is no longer true (replace it with a proof)
-    const fixed = inline.replace(inlineSend, () => `        if ((await loadSheetLiveness(query, sheetId)) !== 'live') break\n${inlineSend}`)
-    expect(providerLoopProblems(withSource('routes/multitable-ai.ts', fixed)).join('\n'))
+    // the inline loop loses its per-row check → its entry reds (as the worker's does below)
+    const inlineBlind = inline.replace(/\n( *)if \(!\(await bulkPreviewSheetIsLive\(query, sheetId\)\)\) \{\n[\s\S]*?\n\1\}\n/, '\n')
+    expect(inlineBlind).not.toBe(inline)
+    expect(providerLoopProblems(withSource('routes/multitable-ai.ts', inlineBlind)).join('\n'))
       .toMatch(/bulk-preview: the fact this entry rests on is no longer true/)
     // a second provider loop appears in a route → not named
     const doubled = inline.replace("  router.post('/sheets/:sheetId/ai/shortcut/bulk-commit',", () => [
@@ -2200,14 +2842,20 @@ describe('sheet-liveness closure over EVERY route file', () => {
     const unlooped = inline.replace(inlineSend, () => '        const outcome = await runShortcutCoreRenamed(\n')
     expect(providerLoopProblems(withSource('routes/multitable-ai.ts', unlooped)).join('\n'))
       .toMatch(/bulk-preview: expected exactly one provider loop, found 0/)
-    // a GAP entry must name its tracker
-    expect(providerLoopProblems(facts, {
+    // a future GAP entry must name its tracker (no entry is a GAP today — the rule is pinned anyway)
+    const inlineKey = 'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview'
+    expect(Object.values(PROVIDER_LOOPS).some((e) => /\bGAP\b/.test(e.reason))).toBe(false)
+    const asGap = (tracker: string) => providerLoopProblems(facts, {
       ...PROVIDER_LOOPS,
-      'routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview': {
-        ...PROVIDER_LOOPS['routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview']!,
-        reason: PROVIDER_LOOPS['routes/multitable-ai.ts POST /sheets/:sheetId/ai/shortcut/bulk-preview']!.reason.replace('tracked in #5838', 'tracked in #TBD'),
+      [inlineKey]: {
+        ...PROVIDER_LOOPS[inlineKey]!,
+        reason: `GAP — tracked in ${tracker} — the inline bulk-preview loop sends each row's record content to the `
+          + 'provider and would not ask again if this check were ever removed; this is the shape such an entry takes.',
       },
-    }).join('\n')).toMatch(/TBD/)
+    }).join('\n')
+    expect(asGap('#TBD')).toMatch(/TBD/)
+    expect(asGap('nobody')).toMatch(/every GAP must name its issue/)
+    expect(asGap('#5838')).toEqual('')
   })
 
   it('PROVIDER LOOPS self-test: every loop shape around the choke or a same-file sender is found; a liveness call inside the loop is seen', () => {

@@ -25,8 +25,26 @@ describe('meta-ai-bulk-labels — distinct state copy', () => {
     expect(aiBulkLabel('aibulk.quotaNote', true)).toContain('不会退还')
   })
 
+  it('#5838 the sheet-liveness partial notice is its OWN copy — the generic one gives two instructions that both refuse', () => {
+    for (const zh of [false, true]) {
+      const generic = aiBulkLabel('aibulk.partialNotice', zh)
+      const notLive = aiBulkLabel('aibulk.partialNoticeSheetNotLive', zh)
+      expect(notLive).not.toBe(generic)
+      // Neither leaks a row count (hidden-row oracle guard).
+      expect(notLive).not.toMatch(/\d/)
+    }
+    // The generic advice — write, then re-run — is exactly what fails on a table that is gone
+    // (commit → 404 SHEET_DELETED, re-run → refused at the entry gate), so it must not appear.
+    expect(aiBulkLabel('aibulk.partialNotice', false)).toContain('run AI fill again to continue with the rest')
+    expect(aiBulkLabel('aibulk.partialNoticeSheetNotLive', false)).not.toContain('Write these results, then run AI fill again')
+    expect(aiBulkLabel('aibulk.partialNoticeSheetNotLive', false)).toContain('could not be confirmed available')
+    expect(aiBulkLabel('aibulk.partialNoticeSheetNotLive', false)).toContain('restore it first')
+    expect(aiBulkLabel('aibulk.partialNoticeSheetNotLive', true)).toContain('无法确认数据表可用')
+    expect(aiBulkLabel('aibulk.partialNoticeSheetNotLive', true)).toContain('请先恢复')
+  })
+
   it('every SKIPPED reason (UNCHARGED) maps to a DISTINCT label, never collapsed', () => {
-    const reasons = ['skipped_no_perm', 'rate_limited_before_call', 'blocked_before_call', 'generation_failed_before_usage', 'unsafe_input']
+    const reasons = ['skipped_no_perm', 'rate_limited_before_call', 'blocked_before_call', 'generation_failed_before_usage', 'unsafe_input', 'sheet_not_live']
     const en = reasons.map((r) => aiBulkSkippedReason(r, false))
     // All distinct (no two skipped reasons share copy).
     expect(new Set(en).size).toBe(reasons.length)
@@ -35,6 +53,16 @@ describe('meta-ai-bulk-labels — distinct state copy', () => {
     expect(aiBulkSkippedReason('generation_failed_before_usage', false)).toContain('not charged')
     // zh coverage + raw fallback for an unknown reason.
     expect(aiBulkSkippedReason('skipped_no_perm', true)).toBe('无写入权限')
+    // #5838: a table that stops being confirmable mid-batch stops the send; the rows not reached are
+    // UNCHARGED. The server reports ONE reason for three verdicts (deleted / row gone / the liveness
+    // lookup itself failed, all fail-closed), so this copy states what is known — that availability
+    // could not be confirmed — and must NOT assert a deletion: a DB blip on a LIVE table would
+    // otherwise tell the user it was deleted and argue against the one action that works, a re-run.
+    expect(aiBulkSkippedReason('sheet_not_live', false)).toContain('could not be confirmed available')
+    expect(aiBulkSkippedReason('sheet_not_live', true)).toContain('无法确认数据表可用')
+    for (const zh of [false, true]) {
+      expect(aiBulkSkippedReason('sheet_not_live', zh)).not.toMatch(/\bdeleted\b|no longer available|已删除|已不可用/)
+    }
     expect(aiBulkSkippedReason('weird_new_reason', false)).toBe('weird_new_reason')
   })
 
