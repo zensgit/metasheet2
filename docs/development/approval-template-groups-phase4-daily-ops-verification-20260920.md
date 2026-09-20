@@ -788,7 +788,8 @@ information_schema: approval_templates.org_id 命中 0   |   approval_template_g
 | + 9 个邻居 spec(`templateCenterI18n` / `approvalTemplateGovernance` / `approval-e2e-permissions` / `approval-e2e-lifecycle` / `approvalNavDelegationEntry` / `templateGalleryFilter` / `categoryCandidateInput` / `approvalRecentTemplates` / `useAuth`) | **15 files / 337 passed (337)** |
 | required `exec` 巨行(**恰 1 条**,405 token,直跑) | **473 files / 7357 passed (7357)**,`EXEC_EXIT=0`(门审起点自述 7339;+18 = 本轮新增用例数,逐字对上) |
 | `run-required-web-tests.sh` 全脚本 | `EXIT=1`,唯一失败仍是 `multitable-recovery-archive-modal.spec.ts > … durable request identity cannot be saved`;**在未修改的 r3 头整树备份上单跑同样 `1 failed | 53 passed (54)`** ⇒ 既有,非本轮回退 |
-| CI 文件 / s6a pin / plugin-tests.yml / 迁移 / 端点 / flag / DDL | **字节不变**:`git diff --name-only 288530a0cd HEAD -- .github packages scripts` = 0;`apps/web/scripts/run-required-web-tests.sh` 与 base 零差异;零新增文件 |
+| s6a pin / `plugin-tests.yml` / `packages` / `scripts` / 迁移 / 端点 / flag / DDL | **字节不变**;`apps/web/scripts/run-required-web-tests.sh` 与 base 零差异;零新增文件 |
+| **`approval-web-guard.yml` 的 `paths:` —— 本轮改了 1 个条目 × 2 处,见下** | 见 §11.6-a |
 | 提交历史 `Bin` 扫描 | 新历史 `288530a0cd..HEAD` 每个提交 **0** 命中;旧历史同一扫描 `dec28f0595` / `7204c94cce` 各 **1** |
 
 **P3-3 的压平证明(逐字可复核)**
@@ -803,6 +804,32 @@ information_schema: approval_templates.org_id 命中 0   |   approval_template_g
 
 重建后的五个提交:`d545824bf4`(feat,含折回的 NUL 移除 + `disposed` 修复,`authPrincipal.ts | 73 ++++` 文本 diff)、`8970214b2b`(test)、`971b36c8ae`(docs)、`d6c02f71b1`(docs,原 `7204c94cce` 的 MD 部分)、`d487b74f55`(docs)。作者/日期沿用原提交。
 
+### 11.6-a 本轮唯一的 CI 改动:把 `templateStore.ts` 加进 `approval-web-guard.yml` 的 `paths:`
+
+**为什么不能沿用 r3 门审的接线结论**:r3 门审核过「`paths` 逐条覆盖本次 10 个代码/测试文件」,但
+`apps/web/src/approvals/templateStore.ts` **不在 r3 的改动集里**(`verify-a5-r3-three-p2-after-push-20260921.md`
+§2.1 逐字写明它「不在其中」),所以那条结论**不可能覆盖它**。本轮机械复核(`git show <head>:…yml` 解析 YAML):
+
+```
+patch 前:pull_request.paths 268 条 / push.paths 256 条,'apps/web/src/approvals/templateStore.ts' → False（两处）
+patch 后:pull_request.paths 269 条 / push.paths 257 条,同一键 → True（两处）
+         authPrincipal.ts / TemplateCenterView.vue / approvalTemplateCenterCategory.spec.ts → True（两处,本来就在）
+```
+
+**这不是本候选件今天的门洞**:`paths` 是析取,本 PR 还动了 `authPrincipal.ts`、`TemplateCenterView.vue`
+和四个已列出的 spec,所以 guard 今天照样触发。它决定的是**明天**:store 的三出口现在是这条修法唯一的承重
+证明,而那 9 条用例只在 `approvalTemplateCenterCategory.spec.ts` 里;若只动 `templateStore.ts` 的一次改动
+不触发这条 workflow,它们一条都不会跑。「闸已存在但不覆盖你这条路」正是这种形状。
+
+**为什么改的是 `approval-web-guard.yml` 而不是别的**:它就是这批 spec 的门;`plugin-tests.yml`
+逐字未动(s6a pin 不受影响)。机械核对:全仓**没有任何测试**读取或哈希 `approval-web-guard.yml`
+(`grep -rln 'approval-web-guard' packages/core-backend/tests` 零命中;`apps/web/tests` 的 8 处命中全是注释),
+所以这次增行不会触发任何 census 断言。该 workflow 的 `vitest run` 过滤串本来就含
+`approvalTemplateCenterCategory` token,无需改。
+
+⇒ 本轮 CI 改动 = **1 个 path 条目,写进两个 `paths:` 列表,共 12 行(含说明注释)**,已在此逐字披露;
+不再声称「零 CI 改动」。
+
 ### 11.7 本轮未做 / 交 owner(不藏)
 
 1. **`verify-a5-r3-three-p2-after-push-20260921.md` §1.4-R(跨标签页未被通知的令牌替换)**:两个子组件的 `isCurrent()` 仍然只比代数、不核 token。本轮**未改**——该验证件自己写明这是合同级取舍(补 token 核对 vs 放宽 `useAuth` 的 `explicitTransition` 闸)。平铺面这一侧本轮起有身份签名兜底,子组件侧**没有**。**交 owner。**
@@ -811,4 +838,6 @@ information_schema: approval_templates.org_id 命中 0   |   approval_template_g
 4. **r1 21 条验收判据里的 15 条**(C0–C5 / D2 / D3 / D4 / D4b / D5 / D5b / D7)本轮 **NOT RUN**;本轮真浏览器只跑 ①②③④ 与 P3-2 复核。
 5. 多标签页直接写 `localStorage` 那一支的**浏览器**重放、生产 PG15 轴 / musl-collation 轴、`run-required-web-tests.sh` 其余段落 —— **NOT RUN**。
 6. **M-H 仍存活**(设计 MD §7.4);按门审结论保留为 P3,配正控,不补测。
-7. 合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— **全部未做,仍需 owner 逐条授权**。本件不含任何「已裁 / 已 ratify」的记述。
+7. **`approval-web-guard.yml` 之外的门未逐条复核**:本轮只核了这一条 workflow 的 `paths` 是否覆盖
+   `templateStore.ts`,没有把仓里其余 workflow 的 path filter 对本轮改动集再做一次全量普查。**登记。**
+8. 合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— **全部未做,仍需 owner 逐条授权**。本件不含任何「已裁 / 已 ratify」的记述。
