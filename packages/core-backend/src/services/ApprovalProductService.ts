@@ -450,11 +450,14 @@ function deriveCancelRoundRoundPolicy(metadata: Record<string, unknown>): Cancel
  *     · arm 1 (MEASURED, 负控 `N9(a)`): a legacy-corpus row (no `metadata.nodeKey`) whose actor held
  *       delegated seats from TWO DIFFERENT delegators on the same instance — i.e. the owner's own
  *       「多人委托同一人」 counter-example, written through the shipped legacy route.
- *     · arm 2 (NOT CONSTRUCTED this round, disclosed): two assignment rows with the SAME
- *       `(instance, node_key, assignee)` and DIFFERENT `delegatedFrom`. `idx_approval_assignments_
- *       active_unique` is partial (`WHERE is_active = true`), so this needs a node RE-ENTRY that
- *       rewrites the delegation between epochs. It shares this member with arm 1 rather than getting
- *       an untested member of its own; the design MD §3.4 carries the open registration.
+ *     · arm 2 (CONSTRUCTED as of gate round 3 P2-1, 负控 `N17(a)` — FIXTURE-LEVEL, end-to-end
+ *       re-entry still NOT walked): two assignment rows with the SAME `(instance, node_key,
+ *       assignee)` and DIFFERENT `delegatedFrom`. `idx_approval_assignments_active_unique` is
+ *       partial (`WHERE is_active = true`), so the shape needs a node RE-ENTRY that rewrites the
+ *       delegation between epochs; `N17(a)` seeds exactly that residue with an INSERT and measures
+ *       the block (mutation M-vi reds it and nothing else). It shares this member with arm 1 rather
+ *       than getting an untested member of its own; the design MD §3.4 keeps the registration OPEN
+ *       for the half that is still a judgement call — whether BLOCK is the answer this cell WANTS.
  * - `delegate_not_seat` — an `approve` row cannot be attributed to a node (no `metadata.nodeKey`) AND
  *   its actor held exactly one delegated seat on this instance. Seating the actor would seat the
  *   HISTORICAL DELEGATEE, which the ruling forbids in as many words; restoring to that one delegator
@@ -8749,9 +8752,15 @@ export class ApprovalProductService {
       //                                     "that node carries a role seat" is a fact about the NODE
       //                                     and is caller-nameable; "this actor is in that role" is a
       //                                     fact about the ACTOR and is not — see CORROBORATION;
-      //   · `node_seat_row_count`        — how many assignment rows of ANY type that node carries on
-      //                                     this instance. The seat BUDGET the credential is checked
-      //                                     against (see CARDINALITY below);
+      //   · `delegated_seat_nodes`       — the nodes at which THIS ACTOR holds a DELEGATED user seat
+      //                                     on this instance. Same row set as `instance_delegators`
+      //                                     below (byte-identical WHERE, plus one clause), selecting
+      //                                     the NODE instead of the delegator and dropping the
+      //                                     pre-migration rows whose `node_key` is NULL —
+      //                                     `approval_assignments.node_key` IS nullable in the live
+      //                                     schema (`\d approval_assignments`: no NOT NULL), so that
+      //                                     filter is not a no-op and the legacy NULL-node corpus is
+      //                                     deliberately outside conjunct (3);
       //   · `instance_delegators`        — delegators for this actor ANYWHERE on this instance.
       //
       // CORROBORATION — why the node set is no longer filtered to `delegatedFrom IS NOT NULL`.
@@ -8782,9 +8791,25 @@ export class ApprovalProductService {
       //   · FORGERY2 — the actor is NOT in that role and never decided that node (a third person did):
       //     naming it was enough to be seated, which falsified this comment's own earlier claim that
       //     「the actor decided it through that seat」. 负控 `N15(a)`.
-      // The arm therefore now requires BOTH halves of a server-side credential, and blocks (never
-      // falls back to the actor) when either is missing — owner ruling 2026-09-20,「原主体无法可靠还原
-      // …则阻断,不静默回退给历史被委托人」:
+      // GATE ROUND 4 REOPENED THIS ARM: the two halves above were a CAPABILITY, not an OCCUPANCY.
+      // 「this actor could hold a seat there」 (membership) ∧ 「the node's rows fit its seat BUDGET」
+      // (cardinality) is satisfied by a 或签 role node configured with two role ids: it lands TWO
+      // seat rows and needs ONE approve row, so the budget carries a permanent spare cell, and the
+      // gate reproduced the round-3 reading verbatim on a real DB (FORGERY4: `seats=[D]`, A lost,
+      // 会签 2 → 1, zero block; FORGERY3: `seats=[D, E]`, A lost). The arm therefore now requires
+      // THREE conjuncts, and blocks (never falls back to the actor) when ANY is missing — owner
+      // ruling 2026-09-20,「原主体无法可靠还原…则阻断,不静默回退给历史被委托人」.
+      //
+      // WHAT THIS IS, NAMED HONESTLY — it is 方案 (b)「预算换唯一占位」AS IMPLEMENTED, and it is NOT
+      // the gate's literal wording of (b)(「角色席位 + 该 actor 是**唯一**满足成员身份的人」). That
+      // literal predicate is a property of the DIRECTORY, not of the document: 「D is the only holder
+      // of `admin`」 is false in any deployment with two admins, so it would block the honest role-node
+      // corpus wholesale — the `8b29b4a2ce` failure mode the gate warns about in the same paragraph —
+      // and it does NOT block FORGERY3 either, because there the delegatee IS a genuine, and possibly
+      // sole, member of the node's OTHER role seat. Conjunct (3) below is therefore MY construction,
+      // not the gate's text. 「另造更窄/更宽同类物 = 合同变更」 is a registered house rule, so the
+      // divergence is flagged for owner in the design MD (§3.4) rather than shipped as if it were the
+      // reviewed wording. EVERYTHING HERE REMAINS A CANDIDATE: owner has not ruled reading (a).
       //   (1) MEMBERSHIP — `node_actor_role_seat_count >= 1`: at least one of that node's non-user
       //       seats names a role THIS ACTOR HOLDS ACCORDING TO A SERVER-WRITTEN RECORD. Reconstructed
       //       from `user_roles.role_id` ∪ `users.role`, which is the persisted substrate the token's
@@ -8800,26 +8825,57 @@ export class ApprovalProductService {
       //       no production path writes it), so fixtures are made production-shaped instead
       //       (正控 `P22(a)` now seeds the membership row; its twin 负控 `N16(a)` keeps the strictness
       //       cost pinned as data rather than as prose);
-      //   (2) CARDINALITY — the node's approve rows must fit in the node's SEAT BUDGET, i.e. the
-      //       number of non-sentinel `approve` rows naming that node must not exceed the number of
-      //       assignment rows that node carries. Membership alone does not close FORGERY, where the
-      //       actor IS a genuine member of the role and simply settles TWO rows onto a ONE-seat node.
-      //       Counted over ALL assignment rows (not just non-user ones) because 加签 adds user rows to
-      //       a node, and over all EPOCHS because node re-entry (`dispatchAction`'s `return` branch,
-      //       `adminJump`, node timeout) inserts a fresh assignment row per activation — so budget and
-      //       approve rows grow together. CENSUS BEFORE LANDING (the gate made this a precondition):
-      //       capturing every INSERT of the seven `approval-cancel-round-*.db.test.ts` files' corpora
-      //       gave 60 (instance, node) groups, of which 58 are within budget (8 × 2 rows/2 seats,
-      //       48 + 2 × 1 row/1 seat). Exactly TWO are over budget and BOTH are the deliberately
-      //       dishonest fixtures — `N11(a)`'s made-up node (1 row / 0 seats) and `P21(a)`'s legacy
-      //       rename (2 rows / 1 seat) — and `P21(a)` is settled by the USER-seat arm above, which
-      //       this conjunct deliberately does NOT police (that residual stays owner-registered). The
-      //       honest role-node groups are the 1-row/1-seat ones. The count is taken in
+      //   (2) OCCUPANCY CAPACITY — THIS ACTOR's own approve rows at that node must fit the seats
+      //       THIS ACTOR could occupy there (`node_actor_role_seat_count`). A seat is occupied ONCE:
+      //       one person cannot settle two rows through one role seat. This REPLACES the previous
+      //       cut's node-wide seat BUDGET (`node_seat_row_count` — every assignment row of any type,
+      //       now deleted, token census re-taken in the verification MD), which gate round 4 measured
+      //       to be the capability/occupancy confusion itself: the budget counted seats NOBODY in this
+      //       row's actor position could fill, so a two-role-id 或签 node handed the forger a spare
+      //       grid cell. Counting per (actor, node) removes the spare — surplus created by ANOTHER
+      //       person's seat is no longer spendable by this actor. The count is still taken in
       //       TypeScript AFTER the sentinel drop, never in SQL: `isSystemSentinelActor` is the shared
       //       TS predicate, and a SQL `COUNT(*)` would re-spell it (and would re-open G6-1 by counting
-      //       auto-approval rows into the budget).
-      // Neither half is 「metadata in the body is forbidden」: 正控 `P20(a)` still sends the TRUE
+      //       auto-approval rows into a person's capacity). WITNESSES: 负控 `N20(a)` is the ISOLATING
+      //       one (the actor settles their delegated node honestly AND decides the role node, then
+      //       files ONE EXTRA legacy row naming that same role node ⇒ (1) and (3) both hold, only this
+      //       conjunct blocks); 负控 `N14(a)` / `N18(a)` also red here, but (3) blocks them too — that
+      //       OVERLAP is recorded in the mutation grid instead of being claimed as isolation.
+      //   (3) SETTLEMENT — every node at which this actor holds a DELEGATED user seat must carry a
+      //       decision record of its own (`delegated_seat_nodes` ⊆ the nodes some `approve` row names).
+      //       (1) and (2) are both facts about the FORGER; NEITHER notices that the DELEGATOR's seat
+      //       has disappeared. Gate round 4's FORGERY3 is exactly that shape: a third person honestly
+      //       decides the role node, the delegatee IS a genuine member of the node's OTHER role seat,
+      //       and their single legacy row names the role node — (1) and (2) both pass and A's seat is
+      //       silently gone (`seats=[D, E]`, MEASURED). This conjunct asks the ruling's own question
+      //       directly — 「原审批主体还原得了吗」 — and blocks when the node the actor stood in for has
+      //       no decision at all to restore from. ISOLATING witness: 负控 `N19(a)`.
+      //       SCOPE, deliberately: evaluated ONLY inside this non-user arm. The USER-seat arms above
+      //       keep their own answers (`P21(a)`'s registered residual included), and the entire
+      //       no-delegation corpus never reaches here at all (正控 `P19(a)`).
+      //       WEAK FORM ON PURPOSE — 「that node has SOME decision record」, not 「this actor's own row
+      //       settles that seat」. The strong form would also block honest documents where the seat was
+      //       legitimately never exercised BY THE DELEGATEE: a 或签 sibling won by somebody else, a
+      //       `transfer` that moved the seat on, a node re-entry that rewrote it, an admin jump that
+      //       skipped it. Its price is a REGISTERED RESIDUAL WITH A LEG, not prose: a THIRD PARTY's
+      //       row naming that node satisfies it, and this arm then seats the delegatee anyway —
+      //       负控 `P27(a)` pins that answer as data. Closing it needs (c) (the legacy route writing
+      //       its own `nodeKey`), which is an owner call on a shipped endpoint's contract.
+      //       Sentinel (`system:`) rows DO count as a decision record here: an auto-approved node WAS
+      //       decided and there is nothing to restore, so counting them keeps G6-1's corpus cancellable
+      //       (正控 `P10(a)` / 负控 `N6(a)`). Conjunct (2)'s capacity count, by contrast, is taken
+      //       AFTER the sentinel drop — a sentinel never occupies a person's seat. Two different
+      //       questions over two different populations, written out so the next reader does not take
+      //       one for a copy of the other.
+      // None of the three is 「metadata in the body is forbidden」: 正控 `P20(a)` still sends the TRUE
       // `nodeKey` down the legacy route and still gets the honest restore.
+      //
+      // CENSUS — the round-3 precondition, RE-EVALUATED rather than voided (the previous reading was
+      // 60 (instance, node) budget groups, 58 within budget; that predicate no longer exists, so the
+      // number is not carried forward as if it still measured something). The successor census is per
+      // (actor, node) and is taken MECHANICALLY off the corpus the seven real-DB files leave in the
+      // database, plus the isolation legs above; it is recorded in the verification MD §O5/§O6 at this
+      // head, not asserted here.
       //
       // REGISTERED GAP, not a claim of coverage — `source_queue` SEATS CANNOT SATISFY HALF (1).
       // A `source_queue` row's `assignee_id` is a PERMISSION/queue token (`ApprovalBridgeService`
@@ -8849,7 +8905,7 @@ export class ApprovalProductService {
         node_key: string | null
         node_actor_user_seats: (string | null)[] | null
         node_actor_role_seat_count: number | null
-        node_seat_row_count: number | null
+        delegated_seat_nodes: (string | null)[] | null
         instance_delegators: (string | null)[] | null
       }>(
         `SELECT r.actor_id AS actor_id,
@@ -8873,9 +8929,15 @@ export class ApprovalProductService {
                        SELECT 1 FROM users u
                         WHERE u.id = r.actor_id AND u.role = a.assignee_id
                      ))::int AS node_actor_role_seat_count,
-                (SELECT COUNT(*) FROM approval_assignments a
+                ARRAY(
+                  SELECT DISTINCT a.node_key
+                    FROM approval_assignments a
                    WHERE a.instance_id = r.instance_id
-                     AND a.node_key = r.metadata->>'nodeKey')::int AS node_seat_row_count,
+                     AND a.assignee_id = r.actor_id
+                     AND a.assignment_type = 'user'
+                     AND a.metadata->>'delegatedFrom' IS NOT NULL
+                     AND a.node_key IS NOT NULL
+                ) AS delegated_seat_nodes,
                 ARRAY(
                   SELECT DISTINCT a.metadata->>'delegatedFrom'
                     FROM approval_assignments a
@@ -8918,19 +8980,31 @@ export class ApprovalProductService {
       let unseatableRowCount = 0
       const asDelegatorList = (value: (string | null)[] | null): string[] =>
         (value ?? []).filter((id): id is string => typeof id === 'string' && id.length > 0)
-      // CARDINALITY pre-pass — how many HUMAN `approve` rows name each node. Taken here, in
-      // TypeScript and AFTER the same `isSystemSentinelActor` drop the loop applies, so the budget
-      // check below shares the repo's ONE sentinel predicate instead of re-spelling it in SQL (a SQL
-      // `COUNT(*)` would also count `system:auto-approval` rows into the budget and re-open G6-1:
-      // every auto-approved document would spend budget it never occupied). Rows with no `nodeKey`
-      // are not counted — they are settled by the `delegate_not_seat` / `seat_unresolvable` arms
-      // above, which never consult a node budget.
-      const nodeApproveRowCounts = new Map<string, number>()
+      // OCCUPANCY pre-pass — ONE walk, TWO populations, and they are deliberately not the same one:
+      //   · `actorNodeApproveRowCounts` — how many HUMAN `approve` rows THIS ACTOR wrote at each node.
+      //     Conjunct (2)'s left-hand side. Taken here, in TypeScript and AFTER the same
+      //     `isSystemSentinelActor` drop the loop applies, so it shares the repo's ONE sentinel
+      //     predicate instead of re-spelling it in SQL (a SQL `COUNT(*)` would count
+      //     `system:auto-approval` rows into a person's capacity and re-open G6-1). Keyed per
+      //     (actor, node) — NOT per node — because a seat surplus another person's seat rows create
+      //     must not be spendable by this actor (gate round 4 §1, FORGERY3 / FORGERY4);
+      //   · `nodesWithDecisionRecord` — which nodes carry ANY `approve` record, SENTINELS INCLUDED.
+      //     Conjunct (3)'s right-hand side. An auto-approved node WAS decided; there is nothing left
+      //     to restore there, and dropping sentinels from this set would turn G6-1's corpus back into
+      //     permanently un-cancellable documents.
+      // Rows with no `nodeKey` enter NEITHER: they are settled by the `delegate_not_seat` /
+      // `seat_unresolvable` arms above, which consult no node accounting at all (正控 `P19(a)`).
+      const actorNodeApproveRowCounts = new Map<string, number>()
+      const nodesWithDecisionRecord = new Set<string>()
+      const actorNodeKey = (actorId: string, nodeKey: string): string => `${actorId}\u0000${nodeKey}`
       for (const row of approverRows.rows) {
         const actorId = typeof row.actor_id === 'string' ? row.actor_id : ''
-        if (actorId.length === 0 || isSystemSentinelActor(actorId)) continue
+        if (actorId.length === 0) continue
         if (typeof row.node_key !== 'string' || row.node_key.length === 0) continue
-        nodeApproveRowCounts.set(row.node_key, (nodeApproveRowCounts.get(row.node_key) ?? 0) + 1)
+        nodesWithDecisionRecord.add(row.node_key)
+        if (isSystemSentinelActor(actorId)) continue
+        const key = actorNodeKey(actorId, row.node_key)
+        actorNodeApproveRowCounts.set(key, (actorNodeApproveRowCounts.get(key) ?? 0) + 1)
       }
       for (const row of approverRows.rows) {
         const actorId = typeof row.actor_id === 'string' ? row.actor_id : ''
@@ -8975,8 +9049,10 @@ export class ApprovalProductService {
         if (actorUserSeats.length > 1) {
           // Two different `delegatedFrom` values for one (instance, node, assignee): no unique
           // 原审批主体. Needs a node RE-ENTRY that rewrote the delegation between epochs
-          // (`idx_approval_assignments_active_unique` is partial on `is_active = true`), so this arm
-          // is NOT CONSTRUCTED this round; it shares this member rather than getting an untested one.
+          // (`idx_approval_assignments_active_unique` is partial on `is_active = true`). CONSTRUCTED
+          // as of gate round 3 P2-1 — 负控 `N17(a)` seeds that residue and measures the block; the
+          // seeding is FIXTURE-level, the end-to-end re-entry is still NOT walked. It shares this
+          // reason member rather than getting an untested one.
           unseatableRowCount += 1
           unseatableReasons.add('seat_unresolvable')
           continue
@@ -8994,27 +9070,44 @@ export class ApprovalProductService {
         // really occupied one here there is nothing to restore and seating them is the honest
         // answer (正控 `P22(a)`). But 「really occupied one」 must come from SERVER-WRITTEN records,
         // never from the row's own caller-supplied `nodeKey` — both halves, or BLOCK:
-        const nodeSeatBudget = row.node_seat_row_count ?? 0
-        const nodeApproveRows = nodeApproveRowCounts.get(row.node_key) ?? 0
-        if ((row.node_actor_role_seat_count ?? 0) > 0 && nodeApproveRows <= nodeSeatBudget) {
+        const actorSeatsAtNode = row.node_actor_role_seat_count ?? 0
+        const actorRowsAtNode = actorNodeApproveRowCounts.get(actorNodeKey(actorId, row.node_key)) ?? 0
+        // Conjunct (3)'s evaluation: the nodes this actor stood in for at which NOTHING was ever
+        // decided. Non-empty means the DELEGATOR's seat has no record to be restored from, whatever
+        // this row says about itself.
+        const unsettledDelegatedSeatNodes = (row.delegated_seat_nodes ?? []).filter(
+          (nodeKey): nodeKey is string =>
+            typeof nodeKey === 'string' && nodeKey.length > 0 && !nodesWithDecisionRecord.has(nodeKey),
+        )
+        if (
+          actorSeatsAtNode > 0 &&
+          actorRowsAtNode <= actorSeatsAtNode &&
+          unsettledDelegatedSeatNodes.length === 0
+        ) {
           // (1) MEMBERSHIP: one of that node's non-user seats names a role this actor holds per
-          //     `user_roles` / `users.role`, and (2) CARDINALITY: that node's human approve rows
-          //     still fit its seat rows. 负控 `N15(a)` witnesses (1) — a non-member naming the node
-          //     while a third party actually decided it; 负控 `N14(a)` witnesses (2) — a genuine
-          //     member settling TWO rows onto a ONE-seat node, which would drop 会签 from 2 to 1 and
-          //     lose the delegator's seat entirely.
+          //     `user_roles` / `users.role` (负控 `N15(a)` / `N16(a)`);
+          // (2) OCCUPANCY CAPACITY: this actor's own rows at that node fit the seats THIS ACTOR
+          //     could occupy there — a seat is filled once (负控 `N20(a)`, isolating);
+          // (3) SETTLEMENT: every node this actor held a DELEGATED seat at carries a decision of its
+          //     own, so the ruling's 原审批主体 is still restorable (负控 `N19(a)`, isolating).
           seatIds.push(actorId)
           continue
         }
         // Everything else is a NAME WITHOUT EVIDENCE ⇒ BLOCK — one member, one reason value, no new
-        // error code. The four ways to get here, all MEASURED by a leg of their own:
+        // error code. The ways to get here, each MEASURED by a leg of its own:
         //   · the node does not exist on this instance at all (负控 `N11(a)`, the forged key, a live
         //     bypass before corroboration existed);
         //   · it is somebody ELSE's user node, which naming does not make this actor's (负控 `N13(a)`);
         //   · it carries non-user seats but NONE of them names a role this actor holds per a
-        //     server-written record (负控 `N15(a)` — FORGERY2: a third person decided it);
-        //   · it carries such a seat, but the node's human approve rows no longer fit its seat rows
-        //     (负控 `N14(a)` — FORGERY: two rows folded onto a one-seat node).
+        //     server-written record (负控 `N15(a)` — FORGERY2: a third person decided it; 负控
+        //     `N16(a)` — the same document with the membership record absent, the strictness cost);
+        //   · it carries such a seat, but this actor already spent it — more of their own rows name
+        //     the node than they could ever occupy there (负控 `N14(a)` / `N18(a)` — FORGERY /
+        //     FORGERY4, two rows folded onto one occupiable seat; 负控 `N20(a)` — the isolating
+        //     variant where only this conjunct blocks);
+        //   · the actor stood in for a node that NOTHING decided, so the delegator's seat is gone
+        //     whatever this row claims (负控 `N19(a)` — FORGERY3; also `N14(a)` / `N18(a)`, which
+        //     are over-determined and are recorded as such, not as isolation).
         unseatableRowCount += 1
         unseatableReasons.add('seat_unresolvable')
       }

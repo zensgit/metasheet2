@@ -4532,7 +4532,13 @@ git grep -c '<token>' <head> -- docs/ packages/core-backend/tests/     # 允许 
 
 ### Mutation 网格(每个单点隔离;`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` identical)
 
-备份基准 sha256 `920c8152b5bcfd9843c253bdb416f3d365af51589f13407249936f39ded36e48`(本轮**改动后**的文件)。
+备份基准 sha256 `920c8152b5bcfd9843c253bdb416f3d365af51589f13407249936f39ded36e48`。
+**门审第 4 轮 NIT(求值,不作废整节)**:这个数的对象是**代码提交 `c92ebc0eeb` / `ecd90c8c83`**,
+**不是**那一轮的交付 head —— 其后的 `f05f7f6c03` 又动了 src(+15/−1,**全部是注释**),
+交付 head 上的 sha256 是 `237de2342640dbbd69b8921128f26e2a84fbaa64f749c21832891eae1038ecae`。
+**网格读数不因此失效**(那次改动不含可执行语句,且门审在交付 head 上独立重跑八格、读数逐条一致),
+**失效的只有「这个数属于交付 head」这一句**。本轮的网格改用「对象 = 文件内容 + 复核命令」写法,
+见 §O8.4。
 **M-i…M-vi 沿用门审第 3 轮的编号并全部重跑(不回退),M-vii / M-viii 是本轮新加的两条合取专用格**:
 
 | # | 改动 | 实测红 | 判定 |
@@ -4621,3 +4627,150 @@ blob sha256 = `237de2342640dbbd69b8921128f26e2a84fbaa64f749c21832891eae1038ecae`
 ⇒ **不为缺表加一条今天不可达、且没有腿的分支**(那会是本仓「另造更窄同类物 / 未测守卫」的同族)。
 **若将来 C-2 给它接上 HTTP、或出现一条不跑 RBAC 迁移的部署**,这条论证的第 3/4 条就失效,
 必须在那一轮重新求值 —— 判据写在这里,不靠记忆。
+
+---
+
+# Part O-R5. 门审第 4 轮修复(2026-09-21):凭据从 **capability(预算)** 换成 **occupancy(占位)**
+
+> **一切仍是候选。** owner 未裁读法 (a),也未在 §3.5.4 的 (a)/(b)/(c) 里点名。
+> 本节**不写**「已裁 / 已 ratify」。全部读数来自本地实跑,**本分支零 PR ⇒ CI 从未在本 head 上跑过**。
+
+## O8.0 取证基线
+
+| 项 | 值 |
+|---|---|
+| 入口 head(门审第 4 轮审的对象) | `b01c9cb80955aa50c003a51649fff9b97718dd81` |
+| 工作树 | `…/scratchpad/wt-c1a-r3`(detached,一次性;`node_modules` 9 处软链自 canonical) |
+| 一次性库 | `metasheet2_c1_a_r3_20260921`(`createdb -U postgres -O ms2testbed`,owner `rolsuper=f`);迁移 **EXIT=0**,**415 张 BASE TABLE**;每次跑前 `psql` 核 `current_database()` |
+| 连接串变量普查 | `grep -n 'DATABASE_URL' .github/workflows/*.yml` + `packages/core-backend/src/config*.ts` ⇒ 后端只读 **`DATABASE_URL`** 一个连接串变量(另有 `PGPOOL_MAX` / `PG*_TIMEOUT`,非连接串);已 export 指向一次性库 |
+| 改动 | **3 文件**:`ApprovalProductService.ts`(+203/−…)、`approval-cancel-round-creation.db.test.ts`(+390/−…)、design MD。零新文件、零迁移、零路由、零 `package.json` / workflow 改动 |
+| `ApprovalProductService.ts` sha256(全部 mutation 还原后复核) | **`dd8ac5406ff282be101586888ec94f5a6b40b78dd75272e09a3344a195531571`** |
+| `approval-cancel-round-creation.db.test.ts` sha256 | **`4606e16de830492bc9bd05bdad52ca723f2386fd128f73c3aaacdaa25e9e4f93`** |
+
+## O8.1 修了什么(逐条对门审第 4 轮)
+
+| 门审条目 | 本轮处置 |
+|---|---|
+| **P1** 凭据是 capability 不是 occupancy(FORGERY3 / FORGERY4 复现) | **改谓词**:删 `node_seat_row_count`(节点预算),换 **按 actor 的占位容量** + 新增 **结算** 合取。设计 MD §3.5 是请示与选项表;**与门审 (b) 字面写法的分岔已单列(§3.5.3),升 owner 裁** |
+| **P2** 新残留只有散文没有腿 | **六条新腿**:`N18(a)`(FORGERY4)、`N19(a)`(FORGERY3)、`N20(a)`(容量隔离)、`P25(a)` / `P26(a)`(诚实兄弟 / 门槛见证)、`P27(a)`(**本轮修法新造的残留**,钉今天的答案) |
+| **P3** 三处「NOT CONSTRUCTED this round」在交付 head 上已为假 | 三处**逐条求值**(不作废整节):`ApprovalProductService.ts` 的两处注释改成「CONSTRUCTED as of gate round 3 P2-1,**夹具级**,端到端重入仍未走」;design MD 那条把**理由 ①** 标失效、**理由 ② 保留 OPERATIVE**,整条仍 **OPEN** |
+| **NIT** 网格 sha 钉在上一个代码提交 | 旧行改成「对象 = `c92ebc0eeb`/`ecd90c8c83`,交付 head 是 `237de234…`,失效的只有归属那一句」;本轮网格改用「文件内容 sha + 复核命令」(§O8.4) |
+| §1.5 方向 A 三条未构造富余来源 | **逐条求值**,见设计 MD §3.5.6:transfer / add_sign **结构上不可能**再进新谓词(`buildTransferAssignments` / `buildAddSignAssignments` 的 `assignmentType` 是 `'user'` 字面量,`ApprovalGraphExecutor.ts:1219` / `:1248`+`:1256`);**节点重入仍然成立 ⇒ 明示 NOT CONSTRUCTED + 理由 + 风险方向 + 归 (c) 根治** |
+| §14.3「零新码」 | **PASS**:零新错误码、零新 `reasons` 值(仍是既有 `seat_unresolvable` / `CANCEL_ROUND_SEAT_INELIGIBLE`)、`details` 形状不变 |
+
+## O8.2 新腿与**判别力**(逐条反转:同样的腿跑在**修复前**的实现上)
+
+`cp` 备份 → 换回 `b01c9cb809` 原状的 `ApprovalProductService.ts` → 只跑六条新腿 → `cp` 还原 → `cmp` identical。
+`-t` **正则已转义**(`-t 'N1[89]\(a\)|N20\(a\)|P2[567]\(a\)'`),并**断言选中条数**:
+新实现上 `6 passed | 50 skipped`(不是 `0 selected` 的假绿)。
+
+| 腿 | 形状 | 新实现 | **修复前实现** |
+|---|---|---|---|
+| **`N18(a)`** FORGERY4 | 或签角色节点 2 席;D 是 `admin` 真成员,legacy 行也报该节点 | **阻断**(409 / `seat_unresolvable` / `ineligibleCount: 2` / 零行) | **红** —— 不阻断(门审实测 `seats=[D]`) |
+| **`N19(a)`** FORGERY3 | E 诚实按角色节点;D 是**另一条** role id(`auditor`)真成员,只报名字 | **阻断**(`ineligibleCount: 1`) | **红** —— 不阻断(门审实测 `seats=[D, E]`) |
+| **`N20(a)`** 容量隔离 | D 诚实结掉两个节点,再**多发一条** legacy 行报同一角色节点 | **阻断**(`ineligibleCount: 2`) | **红** —— 不阻断 |
+| `P25(a)` HONEST4 | 同 `N18(a)` 但第二行诚实 | `[A, D]` **两席** | 绿(诚实腿,两侧同答) |
+| `P26(a)` 三节点诚实 | D 按角色节点 + D 结 A 的节点 + E 按自己的节点 | `[A, D, E]` **三席** | 绿 |
+| `P27(a)` **新残留** | 第三人 E 走 legacy 把 `nodeKey` 报成 **A 的节点** | `[D, E]`,**A 丢**、不阻断 | 绿(两侧同答 ⇒ 它钉的是残留,不是修法) |
+
+**`N19(a)` 的答案是「阻断」,不是 `[A, E]` —— 这是与任务书字面要求的分岔,明写在这里。**
+门审 §1.2 的裁决要求原话是「**应阻断或还原到 A**」。还原到 A 需要从一条**没有任何凭据**的行里
+猜出它结的是哪个节点;同形的「一个委托人 + 行不可归属」在本文件里早已由 `delegate_not_seat` 臂
+判成**阻断**(`P12(a)`/`N7(a)`/`N8(a)`/`P13(a)`),再猜一次就是两套判据打架。
+`[A, E]` 的门槛参照物由诚实兄弟腿 **`P24(a)`** 提供,配对方式与 `N14(a)`/`P23(a)` 完全一致。
+
+## O8.3 套件(全部在一次性库上,`EXPECT_DB=1`)
+
+| 跑 | 命令 | 结果 |
+|---|---|---|
+| 七件真库件 | `vitest --config vitest.integration.config.ts run tests/integration/approval-cancel-round-*.db.test.ts`(逐件列出) | **7 files / 98 passed / 0 failed**(门审第 4 轮 92 ⇒ **+6**,= 六条新腿) |
+| 创建件单跑(网格基线) | 同上,仅 `-creation` | **1 file / 56 passed**(92 轮的 50 ⇒ +6) |
+| 两个邻居件 | `approval-delegation-seam.db.test.ts` + `approval-revoke-terminal-guard.db.test.ts` | **2 files / 7 passed / 0 failed** |
+| `tsc` | `npx tsc --noEmit -p tsconfig.json` | **EXIT 0**,**0 行输出** |
+| 全量 | `CI=true DATABASE_URL=… npx vitest run` | **1124 files / 1115 passed / 8 failed / 1 skipped**;**16722 tests / 16674 passed / 22 failed / 5 skipped** |
+
+**全量 8 件失败逐件除名**(机械核:`grep -cE 'FAIL.*cancel-round'` = **0**):
+
+| 文件 | 原因 | 与本分支相关? |
+|---|---|---|
+| `approval-node-timeout-effects.test.ts` | 本环境既有(第 1–4 轮同读数) | **0** |
+| `approval-wp1-parallel-gateway.api.test.ts` | 同上 | **0** |
+| `approval-amount-total-check.api.test.ts` | dev-token fetch 无响应,0 跑 | **0** |
+| `multitable-oapi2a-comments-write-realdb.test.ts` | 同上 | **0** |
+| `sealed-export-s6a-runtime-authority.db.test.ts` / `-grant-repair` / `-authority-row-lock` | `permission denied to create role` | **0** —— 任务硬约束(库 owner `ms2testbed` 非超级) |
+| `multitable-l5wire-checkpoint-activation-realdb.test.ts`(**比门审第 4 轮多出的第 8 件**) | 全量里 `expected 409 to be 200`,那条腿本身是**故意构造的死锁序竞态**;**单跑 27/27 全绿** ⇒ 并行/共享库 flake | **0** —— 本分支 diff 对 multitable **零触碰** |
+
+## O8.4 Mutation 网格(**九格**:七格重跑 + 一格**失效求值** + 两格新增)
+
+**基准对象与复核命令**(不给要背的常数,给命令):
+`git show <本轮 src 提交>:packages/core-backend/src/services/ApprovalProductService.ts | shasum -a 256`
+⇒ **`dd8ac5406ff282be101586888ec94f5a6b40b78dd75272e09a3344a195531571`**。
+本轮**只有一次 src 改动**;其后若再有纯文档提交,这个数**仍然有效**,因为它是**文件内容**的 sha,
+不是 commit 的 sha —— 这正是门审第 4 轮 NIT 点名的那条纪律。
+流程:`cp` 备份 → 单点改 → 跑整件 → `cp` 还原;**九格跑完 `cmp` identical、`git status --short` 无残留**。
+每格都记录 `diff` 行数(**有效 mutation 的证明**:锚点命中且文件真的变了)。
+红的腿**由脚本从失败行里抽取**(取 `正控/负控` 后面的第一个 token),不是手抄。
+
+| # | 改动 | `diff` 行 | **实测红** | 与门审第 4 轮对比 |
+|---|---|---|---|---|
+| **M-i** | `delegate_not_seat` 臂 → 坐下 actor | 3 | **4 红**:`N7(a) N8(a) P12(a) P13(a)` | 逐条一致,不回退 |
+| **M-ii** | 多委托人 × 无 `nodeKey` 臂 → 坐下 actor | 3 | **1 红**:只有 `N9(a)` | 一致 |
+| **M-iii** | 末尾「名字无凭据」臂 → 坐下 actor | 3 | **8 红**:`N11 N13 N14 N15 N16 N18 N19 N20`(均 `(a)`) | 门审 5 红 ⇒ **加宽**(三条新负控也落在这条臂上) |
+| **M-iv** | 删「从无被委托席位 ⇒ 本人」早退 | 2 | **3 红**:`P15(a) P19(a) P27(a)` | 门审 2 红 ⇒ 加宽(`P27(a)` 的 E 正是靠这条早退坐下的) |
+| **M-v** | 非 user 席位臂整条关掉(`false &&`) | 1 | **5 红**:`P22(a) P23(a) P25(a) P26(a) P27(a)` | 门审 2 红 ⇒ 加宽;「不得阻断诚实单据」方向仍被钉住 |
+| **M-vi** | `actorUserSeats.length > 1` 臂 → 坐下 actor | 3 | **1 红**:只有 `N17(a)` | 一致(第 3 轮 P2-1 仍然关闭) |
+| **M-vii** | 删 SQL 成员身份 `EXISTS` | 8 | **2 红**:`N16(a) N20(a)` | 门审是 `N15(a) N16(a)`。**集合变了,不是数字变了**:`N15(a)` 现在被结算合取**过定**(删了成员身份它照样阻断),而 `N20(a)` 变成新的承重腿。成员身份那一半**仍然有腿** |
+| **M-viii** | ~~基数合取恒真(`nodeApproveRows <= nodeSeatBudget + 99`)~~ | — | **失效求值:它的被测对象 `nodeSeatBudget` 本轮已删除,这一格不可复跑**。旧读数留档:**1 红 = `N14(a)`**。失效的是「这一格还能跑」,**不是**「基数那一半从未被测过」 | 见下面两条继任格 |
+| **M-viii′**(继任)| **占位容量**合取恒真(`actorRowsAtNode <= actorSeatsAtNode + 99`) | 2 | **1 红**:只有 **`N20(a)`** | 新格,**隔离成立** |
+| **M-ix**(新)| **结算**合取恒真(`unsettledDelegatedSeatNodes.length >= 0`) | 2 | **1 红**:只有 **`N19(a)`** | 新格,**隔离成立** |
+
+**三条合取互不掩护**:M-vii / M-viii′ / M-ix 三格各自只红各自的隔离腿,没有一条合取是空转的。
+**过定的腿被写成过定**:`N14(a)` / `N18(a)` 被容量与结算**两条**合取同时判死,所以它们在
+M-viii′ / M-ix 下都**不红** —— 台账按实测归因,不把它们当成任一合取的独立 oracle。
+
+## O8.5 存量普查(继任普查:**按 (actor, node)**,机械取自语料,不是手数)
+
+门审第 3 轮把「落地前先普查」列为前置条件,门审第 4 轮的普查(60 组 / 58 在预算内)测的是
+**已被删除的**谓词,因此**不向前结转**(它的读数留档,但不再声称仍在测什么)。
+继任普查在同一个一次性库上取:把 `-creation` 件的 `afterAll` 清理**临时**改成 `CENSUS_KEEP_CORPUS=1`
+时跳过(`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` identical),让语料留在库里,再用一条 SQL 把三条合取
+**逐 (instance, actor, node) 组**求值。
+
+**人口边界(机械核,不是推断)**:七件里**只有 `-creation` 件写 `approval_delegations`**
+(`git grep -ln approval_delegations -- 七件` ⇒ 1 命中),其余六件的每个 actor 的
+`instance_delegators` 恒为空 ⇒ 全部走「无被委托席位 ⇒ 本人」早退臂,**根本到不了本修法的作用面**。
+两个邻居件里 `approval-delegation-seam` 有委托但**不调用** `createCancelRoundInstance`。
+
+| 分组 | 组数 |
+|---|---|
+| (instance, actor, node) 组总数 | **72** |
+| 早退臂(该 actor 在本单无被委托席位) | **28** |
+| user 席位臂 | **31** |
+| **非 user 席位臂(本修法唯一作用面)** | **13** |
+
+13 组在三条合取下的逐级通过数:**成员身份 9 → +容量 6 → +结算 5**(⇒ 5 组放行、8 组阻断)。
+分布(`rows_at_node` / `actorSeatsAtNode` / `unsettledNodes` / 组数):
+
+| 该 actor 在该节点的 approve 行 | 该 actor 够得着的席位 | 未结算的被委托节点 | 组数 | 判定 |
+|---|---|---|---|---|
+| 1 | 0 | 0 | 2 | 阻断(**只**因成员身份)—— `N13(a)` / `N16(a)` 形 |
+| 1 | 0 | 1 | 2 | 阻断(成员身份 ∧ 结算,过定)—— `N15(a)` 形 |
+| 1 | 1 | 0 | **5** | **放行**(诚实语料)—— `P22/P23/P25/P26/P27(a)` 形 |
+| 1 | 1 | 1 | 1 | 阻断(**只**因结算)—— **`N19(a)`** |
+| 2 | 1 | 0 | 1 | 阻断(**只**因容量)—— **`N20(a)`** |
+| 2 | 1 | 1 | 2 | 阻断(容量 ∧ 结算,过定)—— `N14(a)` / `N18(a)` |
+
+**误伤面的正面证据**:诚实语料的 5 组**全部**落在 `1 行 / 1 席 / 0 未结算` 这一格 ——
+也就是说本轮的收紧**没有**把任何一条诚实腿判成不可撤销(`P22/P23/P24/P25/P26` 全绿即此)。
+**作用域选择的代价也被量了**:若把结算合取改成**全局**求值(而不是只在非 user 臂内),
+31 组 user 席位臂里会有 **1 组**改变答案 —— 这就是把它留在臂内的理由,写成数字而不是判断。
+
+## O8.6 本轮**没有**验的(如实列)
+
+- **生产语料普查**(「legacy 行 × 委托 × 多 role id 节点」在生产库的规模)—— 需要生产库,不在授权内。本节所有「可构造」一律**不写成「现网必然存在」**。
+- **节点重入的端到端夹具**(设计 MD §3.5.6 的第三行)—— NOT CONSTRUCTED,理由与风险方向已写。
+- **逐提交重放(rebase)到 C-2 / 投影候选** —— 未跑(与前几轮一致);本轮只算三方 `merge-tree`。
+- **G3 half B(组织单元)** —— 未实现,本轮不判。
+- **`R7-M2` / `R7-M3` / `M-A` / `M-B` / `M-C` / `M-F`** —— 他轮实跑,本轮 diff 未触碰其判别点,未复跑。
+- **CI** —— 本分支零 PR,本 head 上 CI 从未跑过;§O8.3 全部是本地实跑。
+
