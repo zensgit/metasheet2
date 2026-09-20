@@ -454,7 +454,7 @@ apps/web/src/composables/useSessionOrg.ts
 | 三线共用 #1 | `*-ci-wiring` 闭世界 | 未收口,见 §9/§13.5,披露维持 |
 | 三线共用 #2 | `vitest.config.ts:42-45` 惯例覆盖需 PR body 写明 | 已在 `vitest.config.ts` 对应位置写入覆盖说明注释(§3 已记),PR body 需重申 |
 | 三线共用 #3 | s6a 重钉 | 已重钉且现场核对匹配(§13.4);合并前时效性披露见 §4/§9 |
-| 三线共用 #4 | 错误码不得降级成裸 HTTP 状态 | **机械前置动作(impl-gate-A-slice1-round4-20260918.md §2 P2-2 收口后新增,写在本行最前,任何一轮新增/删除用例后必须先跑再改数字)**:重跑 `scripts/dev/atg-verification-recount.sh`(脚本源码见该路径本身,不在本文档内重复粘贴;亦可手动逐条跑 §14.1 的三条命令),把输出原样贴回本行,不得手抄或沿用旧数字。**修复轮 1(2026-09-18,见 §18)重算,替换本行原「全部 10 个码逐条都有断言」的过强全称句——gate `impl-gate-A-slice1-round1-20260918.md` P2-4 机械计数(4 码零命中)证伪了原句,原句已撤回。修复轮 5(2026-09-18,见 §22)对本行第二次重算——gate `impl-gate-A-slice1-round2-20260918.md` P2-1 机械计数(在修复轮 4 新增两条裸 403 之后,本行未同步重算)证伪了当时的 15/13/2/`:492,497` 那组数字。gate `impl-gate-A-slice1-round4-20260918.md` P2-2 发现本行在修复轮 4(单一提交 `03ee9f4bb`,新增 P1-3 与 §2(c) 两条用例)落地后第三次未同步重算——这是同一失效的第三次发生。第 6 轮门审修复轮(2026-09-18,见 §25)第四次重算——本轮新增的 lifecycle `§2(d)` 用例(pin manager ⊄ guard 的真库回归,见 §2 P2-1)引入了第 6 个裸 `toBe(403)`,把 STATUS_COUNT/差额从 19/4 推到 **20/5**;`error.code).toBe(...)` 断言数不变,仍是 **15** 处(`§2(d)` 断言的是 `.error === 'Insufficient permissions'` 这个裸字符串,不是 `.error.code`,与 F 用例同族,不是一个新的专用码)。** 机械核对(现场 grep,非目测,第 6 轮修复轮现场重跑):两文件负例状态断言(`.status).toBe(4xx|500)`)共 **20** 处(`grep -noE "\.status\)\.toBe\((40[0-9]|500)\)" approval-template-groups-lifecycle.db.test.ts approval-template-groups-serialization.db.test.ts | wc -l`),配对的 `error.code).toBe(...)` 断言共 **15** 处(同一命令把 `\.status\)\.toBe` 换成 `error\.code\)\.toBe\('[A-Z_]+'\)`)——**逐行核对差额的 5 处**(`grep -n "toBe(403)" approval-template-groups-lifecycle.db.test.ts`)是 F 用例四个(**锚点改用符号 + 近似行号,理由同 §3.1**:`createAsNobody`/`listAsNobody`/`archiveAsNobody`/`linkAsNobody`,本 §14.1 重跑现场值 `:538,543,555,562`)加上新增的 `§2(d)` 一个(`:756`,同一原因:命中的是 `rbacGuardAny` 的裸拒绝)对非管理员/非授权主体的五个 403(第 6 个 `toBe(403)` 在 A‴(iii) 的 `noTenantRes` 处,~415,与 `SESSION_ORG_REQUIRED` 配对,不计入差额);这五处**不是**本锁引入的专用码之一,命中的是仓内既有、本锁未改动的共享中间件 `rbacGuardAny`(`src/rbac/rbac.ts:172-175`),该中间件对全仓所有路由(含 `/api/approval-templates` 自身)一律返回裸 `{ error: 'Insufficient permissions' }`(无 `code` 字段)——不在补充清单 #4「本锁错误码」的适用范围内。**逐码核对**(命令 `grep -oE "error\.code\)\.toBe\('<CODE>'\)" 两文件 | wc -l` 逐码跑,§3.3 设计 MD 的 10 个码全表 + 本轮新增的第 11 个码,数字与第 5 轮相比未变——本轮未新增/删除任何 `error.code` 断言):`GROUP_NOT_FOUND` 1、`GROUP_ARCHIVED` 1、`GROUP_NAME_TAKEN` 3、`GROUP_NOT_ARCHIVED` **1**(修复轮 1 新增,此前 **0**——§18)、`GROUP_SORT_CONFLICT` 1、`ORG_ID_NOT_ACCEPTED` 2、`SESSION_ORG_REQUIRED` 1、`GROUP_NAME_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_GROUP_ID_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_ACTOR_REQUIRED` **0**(仍无断言——`resolveApprovalActorId` 只在 `authenticate` 中间件已放行之后才被调用,触发它要求一个已验签但 `user.id`/`userId`/`sub` 三者皆缺的 token,本文件的 `tok()` helper 经 `/api/auth/dev-token` 铸造,不产出这种 token;记为「无断言,理由:本测试 harness 内不可达」,不当作遗漏補)、**`GROUP_NAME_UNSUPPORTED` 1**(回流修复新增,§3.3 设计 MD 全表尚未列这个码——见 P3-1,请求形状映射码,非锁文 ratify 码)。**(表外,不计入下面 11/10 分母)`APPROVAL_TEMPLATE_NOT_FOUND` 现 **2**(此前 **1**——§18.1 的 §2(b) 首次引入;§2(c) 新增第二处命中,复用同一码,非新码)。**11 码中 10 码有 `error.code` 断言、1 码(`APPROVAL_ACTOR_REQUIRED`)harness 内不可达而无断言。** mutation 台账(§15/§18/§25)每条红也均以「专用码不等」或「状态不等」精确报告,未见任何一条只查裸状态码就断言通过。 |
+| 三线共用 #4 | 错误码不得降级成裸 HTTP 状态 | **⚠️ 第五次重算(2026-09-20,勘误 3 候选第 2 轮修复,见 §29):本格下面一切具体数字与行号均已失效,以 §14.1 末尾贴入的脚本输出为准 —— 20/15/5 与 `:538,543,555,562` / `:756` / `:606` 全部过期。**只有数字与行号失效**,本格关于「裸 403 命中的是共享中间件 `rbacGuardAny`,不在本锁错误码适用范围」以及「`APPROVAL_ACTOR_REQUIRED` 在本 harness 内不可达」的两条**定性论证仍然 OPERATIVE**。另:勘误 3 候选第 1 轮把「纯 CJK ⇒ 400 `GROUP_NAME_UNSUPPORTED`」用例改成了正向用例(§27.4),**当时未同步重算本格** —— 这是同一失效的第四次发生,本轮一并补上。** **机械前置动作(impl-gate-A-slice1-round4-20260918.md §2 P2-2 收口后新增,写在本行最前,任何一轮新增/删除用例后必须先跑再改数字)**:重跑 `scripts/dev/atg-verification-recount.sh`(脚本源码见该路径本身,不在本文档内重复粘贴;亦可手动逐条跑 §14.1 的三条命令),把输出原样贴回本行,不得手抄或沿用旧数字。**修复轮 1(2026-09-18,见 §18)重算,替换本行原「全部 10 个码逐条都有断言」的过强全称句——gate `impl-gate-A-slice1-round1-20260918.md` P2-4 机械计数(4 码零命中)证伪了原句,原句已撤回。修复轮 5(2026-09-18,见 §22)对本行第二次重算——gate `impl-gate-A-slice1-round2-20260918.md` P2-1 机械计数(在修复轮 4 新增两条裸 403 之后,本行未同步重算)证伪了当时的 15/13/2/`:492,497` 那组数字。gate `impl-gate-A-slice1-round4-20260918.md` P2-2 发现本行在修复轮 4(单一提交 `03ee9f4bb`,新增 P1-3 与 §2(c) 两条用例)落地后第三次未同步重算——这是同一失效的第三次发生。第 6 轮门审修复轮(2026-09-18,见 §25)第四次重算——本轮新增的 lifecycle `§2(d)` 用例(pin manager ⊄ guard 的真库回归,见 §2 P2-1)引入了第 6 个裸 `toBe(403)`,把 STATUS_COUNT/差额从 19/4 推到 **20/5**;`error.code).toBe(...)` 断言数不变,仍是 **15** 处(`§2(d)` 断言的是 `.error === 'Insufficient permissions'` 这个裸字符串,不是 `.error.code`,与 F 用例同族,不是一个新的专用码)。** 机械核对(现场 grep,非目测,第 6 轮修复轮现场重跑):两文件负例状态断言(`.status).toBe(4xx|500)`)共 **20** 处(`grep -noE "\.status\)\.toBe\((40[0-9]|500)\)" approval-template-groups-lifecycle.db.test.ts approval-template-groups-serialization.db.test.ts | wc -l`),配对的 `error.code).toBe(...)` 断言共 **15** 处(同一命令把 `\.status\)\.toBe` 换成 `error\.code\)\.toBe\('[A-Z_]+'\)`)——**逐行核对差额的 5 处**(`grep -n "toBe(403)" approval-template-groups-lifecycle.db.test.ts`)是 F 用例四个(**锚点改用符号 + 近似行号,理由同 §3.1**:`createAsNobody`/`listAsNobody`/`archiveAsNobody`/`linkAsNobody`,本 §14.1 重跑现场值 `:538,543,555,562`)加上新增的 `§2(d)` 一个(`:756`,同一原因:命中的是 `rbacGuardAny` 的裸拒绝)对非管理员/非授权主体的五个 403(第 6 个 `toBe(403)` 在 A‴(iii) 的 `noTenantRes` 处,~415,与 `SESSION_ORG_REQUIRED` 配对,不计入差额);这五处**不是**本锁引入的专用码之一,命中的是仓内既有、本锁未改动的共享中间件 `rbacGuardAny`(`src/rbac/rbac.ts:172-175`),该中间件对全仓所有路由(含 `/api/approval-templates` 自身)一律返回裸 `{ error: 'Insufficient permissions' }`(无 `code` 字段)——不在补充清单 #4「本锁错误码」的适用范围内。**逐码核对**(命令 `grep -oE "error\.code\)\.toBe\('<CODE>'\)" 两文件 | wc -l` 逐码跑,§3.3 设计 MD 的 10 个码全表 + 本轮新增的第 11 个码,数字与第 5 轮相比未变——本轮未新增/删除任何 `error.code` 断言):`GROUP_NOT_FOUND` 1、`GROUP_ARCHIVED` 1、`GROUP_NAME_TAKEN` 3、`GROUP_NOT_ARCHIVED` **1**(修复轮 1 新增,此前 **0**——§18)、`GROUP_SORT_CONFLICT` 1、`ORG_ID_NOT_ACCEPTED` 2、`SESSION_ORG_REQUIRED` 1、`GROUP_NAME_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_GROUP_ID_REQUIRED` **1**(修复轮 1 新增,此前 **0**)、`APPROVAL_ACTOR_REQUIRED` **0**(仍无断言——`resolveApprovalActorId` 只在 `authenticate` 中间件已放行之后才被调用,触发它要求一个已验签但 `user.id`/`userId`/`sub` 三者皆缺的 token,本文件的 `tok()` helper 经 `/api/auth/dev-token` 铸造,不产出这种 token;记为「无断言,理由:本测试 harness 内不可达」,不当作遗漏補)、**`GROUP_NAME_UNSUPPORTED` 1**(回流修复新增,§3.3 设计 MD 全表尚未列这个码——见 P3-1,请求形状映射码,非锁文 ratify 码)。**(表外,不计入下面 11/10 分母)`APPROVAL_TEMPLATE_NOT_FOUND` 现 **2**(此前 **1**——§18.1 的 §2(b) 首次引入;§2(c) 新增第二处命中,复用同一码,非新码)。**11 码中 10 码有 `error.code` 断言、1 码(`APPROVAL_ACTOR_REQUIRED`)harness 内不可达而无断言。** mutation 台账(§15/§18/§25)每条红也均以「专用码不等」或「状态不等」精确报告,未见任何一条只查裸状态码就断言通过。 |
 | lane A #5 | J/C 的「未知 `section=` ⇒ 400」挪分期 3 请示 | 已在设计 MD §1.2/§6 与 A‴ 测试注释(`:391-392`,原 `:386-387` +5)双重记录,owner 尚未回应,不阻塞本切片 |
 | lane A #6 | 「1 落地」求值 = Draft PR 过门审 | 已按此定义推进(目标文档亦如此记录),本 MD 不重复裁决 |
 | lane A #7 | 前端 spec 位置 `apps/web/tests/` | 不适用——本切片零前端改动(§13.6),留给 A-2 核对 |
@@ -536,6 +536,122 @@ approval-template-groups-lifecycle.db.test.ts:724:    expect((await hiddenRes.js
 ```
 
 **结论**:计数现为 **20/15/5**(此前 `19/15/4`,变化来自本轮新增的 `§2(d)` 用例——见 §14 三线共用 #4 与 §25.4),**11 码中 10 码有断言不变**(本轮未新增/删除任何 `error.code` 断言);§14 表格正文里的行号已按本次重跑更新为「符号 + 近似行号」(F 用例四格 `~538/543/555/562`、新增的 `§2(d)` 一格 `~756`,A‴(iii) `~415`),不再钉裸数字——下一次任何人再往这两个文件里插代码,数字会再漂移,但这次不需要重新证明「哪几处该改」,直接重跑这个脚本、把上面这段代码块换成新输出即可(**本节自 P3-3 收口起,「换上新输出」意味着替换从 `$ bash scripts/dev/atg-verification-recount.sh` 到 `how to use this output` 结尾的整段,不得再删节任何一节**)。
+
+
+#### 14.1-R2 第五次机械重算(2026-09-20,勘误 3 候选第 2 轮修复后;脚本输出**原样**贴入,未手抄、未删节)
+
+触发条件(脚本自己的使用说明第 3 条):本轮新增 4 个 `it()`、新增一个**新错误码** `GROUP_NAME_TOO_LONG`。
+
+```
+$ bash scripts/dev/atg-verification-recount.sh
+=== command 1: negative status assertions (.status).toBe(4xx|500)) across both files ===
+$ grep -noE "\.status\)\.toBe\((40[0-9]|500)\)" approval-template-groups-lifecycle.db.test.ts approval-template-groups-serialization.db.test.ts | wc -l
+22
+
+=== command 2: paired error.code assertions across both files ===
+$ grep -noE "error\.code\)\.toBe\('[A-Z_]+'\)" approval-template-groups-lifecycle.db.test.ts approval-template-groups-serialization.db.test.ts | wc -l
+21
+
+=== derived: difference (bare-403 assertions not paired with a code) ===
+1
+
+=== command 3: every toBe(403) line number in approval-template-groups-lifecycle.db.test.ts ===
+$ grep -n "toBe(403)" approval-template-groups-lifecycle.db.test.ts
+415:    expect(noTenantRes.status).toBe(403)
+538:    expect(createAsNobody.status).toBe(403)
+543:    expect(listAsNobody.status).toBe(403)
+555:    expect(archiveAsNobody.status).toBe(403)
+562:    expect(linkAsNobody.status).toBe(403)
+1240:    expect(groupRes.status).toBe(403)
+
+=== per-code breakdown: every error.code).toBe('CODE') hit, both files, with line numbers ===
+approval-template-groups-lifecycle.db.test.ts:282:error.code).toBe('GROUP_NAME_TAKEN')
+approval-template-groups-lifecycle.db.test.ts:361:error.code).toBe('GROUP_NOT_FOUND')
+approval-template-groups-lifecycle.db.test.ts:387:error.code).toBe('ORG_ID_NOT_ACCEPTED')
+approval-template-groups-lifecycle.db.test.ts:390:error.code).toBe('ORG_ID_NOT_ACCEPTED')
+approval-template-groups-lifecycle.db.test.ts:416:error.code).toBe('SESSION_ORG_REQUIRED')
+approval-template-groups-lifecycle.db.test.ts:444:error.code).toBe('GROUP_ARCHIVED')
+approval-template-groups-lifecycle.db.test.ts:577:error.code).toBe('GROUP_NAME_REQUIRED')
+approval-template-groups-lifecycle.db.test.ts:582:error.code).toBe('APPROVAL_GROUP_ID_REQUIRED')
+approval-template-groups-lifecycle.db.test.ts:776:error.code).toBe('GROUP_NAME_REQUIRED')
+approval-template-groups-lifecycle.db.test.ts:831:error.code).toBe('GROUP_NAME_REQUIRED')
+approval-template-groups-lifecycle.db.test.ts:880:error.code).toBe('GROUP_NAME_REQUIRED')
+approval-template-groups-lifecycle.db.test.ts:1006:error.code).toBe('GROUP_NAME_TOO_LONG')
+approval-template-groups-lifecycle.db.test.ts:1016:error.code).toBe('GROUP_NAME_TOO_LONG')
+approval-template-groups-lifecycle.db.test.ts:1024:error.code).toBe('GROUP_NAME_TOO_LONG')
+approval-template-groups-lifecycle.db.test.ts:1032:error.code).toBe('GROUP_NAME_TAKEN')
+approval-template-groups-lifecycle.db.test.ts:1164:error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+approval-template-groups-lifecycle.db.test.ts:1208:error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+approval-template-groups-lifecycle.db.test.ts:1306:error.code).toBe('GROUP_NOT_ARCHIVED')
+approval-template-groups-lifecycle.db.test.ts:1324:error.code).toBe('GROUP_NAME_TAKEN')
+approval-template-groups-lifecycle.db.test.ts:1335:error.code).toBe('GROUP_NAME_TAKEN')
+approval-template-groups-serialization.db.test.ts:326:error.code).toBe('GROUP_SORT_CONFLICT')
+
+=== per-code counts (sorted, most-frequent first) ===
+   4 'GROUP_NAME_TAKEN'
+   4 'GROUP_NAME_REQUIRED'
+   3 'GROUP_NAME_TOO_LONG'
+   2 'ORG_ID_NOT_ACCEPTED'
+   2 'APPROVAL_TEMPLATE_NOT_FOUND'
+   1 'SESSION_ORG_REQUIRED'
+   1 'GROUP_SORT_CONFLICT'
+   1 'GROUP_NOT_FOUND'
+   1 'GROUP_NOT_ARCHIVED'
+   1 'GROUP_ARCHIVED'
+   1 'APPROVAL_GROUP_ID_REQUIRED'
+
+=== off-table code check: APPROVAL_TEMPLATE_NOT_FOUND (reused, not one of design MD §3.3's ratified codes) ===
+approval-template-groups-lifecycle.db.test.ts:1164:    expect((await res.json()).error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+approval-template-groups-lifecycle.db.test.ts:1208:    expect((await hiddenRes.json()).error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+
+=== how to use this output ===
+1. STATUS_COUNT / CODE_COUNT / their difference -> §14 三线共用 #4's "共 N 处" / "共 N 处" / "差额 N 处" numbers.
+2. The toBe(403) line list -> the "F 用例" line-number citation (last line is usually the
+   A'''(iii) noTenantRes 403, paired with SESSION_ORG_REQUIRED, NOT part of the F-block diff).
+3. The per-code counts -> the "逐码核对" list. Any code present in this output but NOT in
+   design MD §3.3's error-code table is a NEW code this round — call it out by name (see
+   P3-1 in impl-gate-A-slice1-round4-20260918.md for the convention) and update the design MD
+   table separately; do not silently fold it into the existing 10/9 (or whatever the current
+   denominator is) without updating the fraction.
+4. APPROVAL_TEMPLATE_NOT_FOUND is intentionally off-table (a link-visibility 404 reusing an
+   existing code, not a ratified template-groups code) — track it in its own sentence, not in
+   the N/M in-table fraction.
+```
+
+**逐条求值(按脚本「how to use this output」四步)**
+
+1. **STATUS_COUNT / CODE_COUNT / 差额 = 22 / 21 / 1**(上一次记录的是 20 / 15 / 5)。
+2. **`toBe(403)` 行号**:`415`(A‴(iii) `noTenantRes`,与 `SESSION_ORG_REQUIRED` 配对,**不计入**差额)、`538` / `543` / `555` / `562`(F 用例四个)、`1240`(`§2(d)`,原 `:756`,被本轮新增的用例整体下推)。命中的仍是仓内共享中间件 `rbacGuardAny` 的裸 `{ error: 'Insufficient permissions' }`,**不是**本锁的专用码——该定性结论未变。
+3. **新码,按脚本要求点名不静默并入**:**`GROUP_NAME_TOO_LONG`,3 处断言**(`:1006` / `:1016` / `:1024`)。设计 MD §3.3 的错误码表**已在本轮同步新增该行**(含 255 的推导与残留),不是悄悄折进旧分母。
+4. **`APPROVAL_TEMPLATE_NOT_FOUND` 仍是表外**(2 处,`:1164` / `:1208`),按脚本第 4 条单独记,不进 N/M 分数。
+
+**本轮必须点名的两处「零断言」**
+
+- **`GROUP_NAME_UNSUPPORTED` 现在是 0 处 `error.code` 断言**(`grep -c "GROUP_NAME_UNSUPPORTED"` 在 lifecycle 文件里是 2,但两处**都是注释**:`:617` / `:754`)。原因是勘误 3 候选第 1 轮把「纯 CJK ⇒ 400 `GROUP_NAME_UNSUPPORTED`」改成了正向用例(§27.4)——**候选下这个码对 `name` 本来就不该再可达**,所以这是预期结果、不是覆盖退化;但它当时**没有**回来重算本节,属于同一失效的第四次发生,现予补记。该码的两个 `org_id` 臂仍然可达,只是本套件不练它们的 `error.code`(它们练的是直连 SQL 的 23514,见 §28.3 用例 4)。
+- **`APPROVAL_ACTOR_REQUIRED` 仍是 0 处**,理由未变(本 harness 的 `tok()` 经 `/api/auth/dev-token` 铸造,产不出「已验签但 `user.id`/`userId`/`sub` 三者皆缺」的 token),记为「无断言,理由:harness 内不可达」。
+
+**⚠️ 这个普查自己的窄处(必须披露,不能让下一轮把它当成完备计数)**
+
+脚本的两条正则是 `\.status\)\.toBe\(...\)` 与 `error\.code\)\.toBe\('...'\)` —— 它们要求 `)` **紧跟**在 `.status` / `error.code` 之后,因此**看不见**两种写法,而本轮新增的断言大量使用第一种:
+
+```
+$ grep -noE "\.status(,[^)]*)?\)\.toBe\((40[0-9]|500)\)" 两文件 | wc -l
+27                                  # 放宽到带 message 形参后:27,脚本口径是 22
+
+$ grep -noE "error\.code(,[^)]*)?\)\.toBe\('[A-Z_]+'\)" 两文件 | wc -l
+22                                  # 同上:22,脚本口径是 21
+
+$ grep -noE "\.status,[^)]*\)\.toBe\((40[0-9]|500)\)" approval-template-groups-lifecycle.db.test.ts
+750:.status, `status for ${label}`).toBe(400)
+879:.status, 'rename to U+3164 HANGUL FILLER').toBe(400)
+1004:.status, '256 code points is OVER the cap').toBe(400)
+1015:.status, 'btree-overflowing name must be a typed 400, not an opaque 500').toBe(400)
+1031:.status, 'cap is applied to the TRIMMED name').toBe(409)
+```
+
+第二种写法是本轮新引入的**收集成数组再一次比较**(`:852` 的 `expect(observed).toEqual(… -> 400 GROUP_NAME_REQUIRED)`、以及 P3-7 表驱动用例的两个数组断言):它们一次断言 9 个 / 10 个值的状态与错误码,但**两条正则都数不到**。
+
+⇒ **脚本口径 22/21/1 是下界,不是全量**。按 `feedback_single_definition_does_not_make_a_narrow_predicate_correct`:复用规范谓词会忠实继承其狭窄。本轮**不改脚本**(改它属于另一件事,且会让本轮与历次输出不可比),而是把这条窄处写成披露 + 上面三条放宽后的命令与输出,供门审与下一轮取用。**补充清单 #4 的实质结论不受影响**:差额里的裸状态断言仍然只有 `rbacGuardAny` 那一族,本轮新增的每一条状态断言都配了 `error.code`(或配在同一个数组元素里)。
 
 ## 15. Mutation 台账(每条:备份 → 改 → 跑 → 还原 → cmp;全部在 `metasheet2_lock_a` 上现场执行)
 
@@ -2220,6 +2336,12 @@ PG:`PostgreSQL 15.17 (Homebrew, aarch64)`。
 ### 29.7 本轮明确**没有**做的事
 
 未合并、未 undraft、未开/动 PR、未动 `origin/main`、未改任何已 ratify 锁文正文(`reviews/` 下 `*lock*` 只读)、未向 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_main` / `metasheet_testbed_todo_20260920` 或任何共享·staging·prod 库应用迁移、未删除任何不是本轮创建的 worktree/库/文件、未扩 owner 提案的十码位枚举集、未新造 `GROUP_NAME_UNSUPPORTED` 之外的既有码的替代品(新增的只有 `GROUP_NAME_TOO_LONG`,任务书点名)。`mapGroupConstraintError` 的 23514 分支与 `NONBLANK_CHECK_CONSTRAINTS` 的 `atg_name_nonblank` 成员**保留未删**(删它仍是未经 owner 确认的映射面收窄)。
+
+**本轮另外三条主动披露(不修,写出来供门审取用)**
+
+1. **`incompressibleName()` 用 `Math.random()`** —— P3-1 用例里那条「直连 SQL 仍可撞 `54000`」的 RESIDUE 断言,输入是**随机**的 2000 个 CJK 码点(≈6000 字节,对 btree 的 2704 字节上限有约 2.2 倍余量,pglz 压不动随机数据)。余量足够宽,不预期 flake;但**万一 CI 红,那一次的输入是不可复现的**。本轮不改这个 helper(固定种子会让「不可压缩」这件事变成写死的假设);记为已知的非确定性输入。
+2. **`GROUP_NAME_TOO_LONG` 是一个新的公开错误码,本分支上零前端消费方** —— 本轮 diff **0 个 `apps/web` 文件**,前端不会对它做任何特殊呈现(落到通用错误提示)。与 §27.9 的前瞻披露同形:这是**前瞻耦合点**,不是被漏掉的合同新增,A-2/A-3 接前端时需要一并处理。
+3. **本次补跑 §14.1 之后,代码文件逐字节未动** —— `git diff <上一提交> -- packages/` 为空,即 §29.5 的真库/tsc/全量数字仍然对应当前树;本次补跑只改了 `docs/`。
 
 **给 owner 的三个待裁点**:
 1. **可见字符规则的两条排除项**(`Default_Ignorable_Code_Point` + U+2800)—— 这是候选在 owner 提案之外**新增的判据**,请连同勘误 3 一并裁;
