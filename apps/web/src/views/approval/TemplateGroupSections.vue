@@ -367,7 +367,24 @@ async function fetchPage(token: string, page: number): Promise<{ data: ApprovalT
   })
 }
 
+// Request-algebra guard (impl-gate-A5-daily-ops-round2-20260920.md, additional load-bearing
+// scenario (ii)): `loadAll()` is re-invoked on every session-org switch (`TemplateCenterView
+// .onPageSessionOrgChange` calls `groupSectionsRef.value?.loadAll()` after each successful
+// switch), and it had NO guard against two overlapping calls settling out of order. Two rapid
+// switches (A, then B before A's reload has returned) fire two `loadAll()` calls back to back; if
+// the org-A call's network round trip happens to finish AFTER the org-B call's, its response was
+// a STALE answer for an org the admin has already left, and unconditionally assigning
+// `sections.value`/`loadError.value`/`sessionOrgBlocked.value` from it would silently roll the
+// screen back to org A's groups while the switcher itself still shows org B selected.
+// `loadGeneration` is bumped by every call; each call captures its OWN number and only commits
+// its result while that number is still the LATEST one issued — a later call always wins over an
+// earlier one, regardless of which settles first. `ApprovalTemplateGroupsPanel.vue`'s sibling
+// `loadGroups()` carries the identical guard for the identical reason (same page, same trigger).
+let loadGeneration = 0
+
 async function loadAll(): Promise<void> {
+  const generation = ++loadGeneration
+  const isCurrent = () => generation === loadGeneration
   loadingGroups.value = true
   loadError.value = null
   try {
@@ -404,9 +421,11 @@ async function loadAll(): Promise<void> {
         } satisfies SectionState
       }),
     )
+    if (!isCurrent()) return // a newer loadAll() has since been issued — this answer is stale.
     sections.value = loaded.filter((s) => s.alwaysShow || s.total > 0)
     sessionOrgBlocked.value = false
   } catch (e: any) {
+    if (!isCurrent()) return
     // See the D3-1 block above. The selector replaces the generic error on THIS code only; every
     // other failure keeps the existing top-level error state verbatim.
     if (e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED') {
@@ -417,7 +436,7 @@ async function loadAll(): Promise<void> {
     loadError.value = e?.message ?? t.value.groupSectionsLoadError
     sections.value = []
   } finally {
-    loadingGroups.value = false
+    if (isCurrent()) loadingGroups.value = false
   }
 }
 

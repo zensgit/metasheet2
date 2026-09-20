@@ -324,3 +324,121 @@ FAIL P1-A: with the 管理分组 panel EXPANDED …                       Assert
 ### 8.8 一句话说明:英文文案里为什么有中文
 
 P3-2 的英文串带 `请假Leave` 这个例子。这不是翻译漏进了 EN 槽:`GROUP_NAME_UNSUPPORTED` 只在名字**一个 ASCII 字母/数字/符号都没有**时才触发,看到这句话的人此刻输入的就是纯 CJK 名,举一个**在他自己的名字上加一个字符就能通过**的例子比举 `Leave` 更能解释规则。中英两串举同一个例子,语义一致。
+
+---
+
+## 9. 第 3 轮修复(对齐 `impl-gate-A5-daily-ops-round2-20260920.md` 的 P2-C / P3-D / NIT-A / NIT-B / 记录级过强声明)
+
+**PROPOSED — 未过门审,未 ratify。候选实现,一切裁决交 owner / 下一轮门审。**
+
+- 被修基线 head:`0d2c99487e4982f59ba33c8d8e8216b6ec6bed3c`(round-2 被审 head,round-2 门审 CLEAR 的 5 个提交原样保留,本轮只在其上新增)
+- 工作树:`…/scratchpad/a5-fix-d1`(`git worktree add --detach`;`node_modules` / `apps/web/node_modules` / `packages/core-backend/node_modules` 三处软链自 canonical)
+- 库:`metasheet2_a5r2b_20260921`(`createdb -U postgres -O ms2testbed`;`psql` 核 `current_database()=metasheet2_a5r2b_20260921`、`current_user=ms2testbed`、`rolsuper=f`)
+- 连接串变量普查(跑真库前):`grep -n 'DATABASE_URL' .github/workflows/*.yml` = 212 命中,全部是 CI 内联串;`package.json`/`packages/core-backend/package.json`/`apps/web/package.json` 零命中——只 export 这一个变量,指向上面这个一次性库
+
+### 9.0 记录级勘误(先于其余条目——它更正的是「怎么读下面每一条」)
+
+round-2 门审的 §7 NOTE 指出:实现者(round-2 实现代理)在自己的完成回复里写过一句**绝对断言**——「Mutation 21 条全部承重(round-1 的 15 条含 M8b/M9 全部重跑,M2 由存活转红;本轮新增 6 条)」。**这句话不在本文件里**(§8.3 的台账本身一直是逐条列表,每行都单独标了「承重 ✅」)——它出现在实现代理当轮回复给调用方的纯文本里,门审读取会话记录时把它当作记录级声明一并核验并证伪。为避免同一句话被后续轮次继续引用,这里把它逐字撤回并按门审 round 2 §5.5/§7 的**实测**结果登记(不手写新数字,数字抄自 `impl-gate-A5-daily-ops-round2-20260920.md`):
+
+> **撤回**:「Mutation 21 条全部承重」——这句话说的是**实现者自己在 round-2 时的内部台账**(该轮验证 MD §8.3,15 条 round-1 探针复跑 + 6 条新探针),不是独立门审的结果,且用词是不受限定的绝对断言。round-2 门审对同一批修复**独立**重跑/新增了 **26** 个探针(门审自己的命名,与实现者 §8.3 的 `M1…M9`/`R1…R7` 命名不是同一套编号——两套探针在意图上重叠但不是同一批,下表一律用门审 `impl-gate-A5-daily-ops-round2-20260920.md` §5.5 的原始命名,不换算、不新编号),其中 **3** 个门审第一次运行时存活(测试全绿、mutation 未被捕获),另有 **2** 个门审判定为「可辩护地 inert」(不计入失败,但也不计入「承重」)。
+
+| 分类 | 数量 | 探针(门审命名,原样抄自 `impl-gate-A5-daily-ops-round2-20260920.md` §5.5) | 处置(本轮) |
+|---|---|---|---|
+| 承重 ✅ | 21 | 本轮新增 6 个:M-a / M-a2 / M-c / M-d / M-g / M-i;round-1 探针复跑 15 个(门审重述命名):M1 / M2 / M3 / M4 / M4b / M5 / M6 / M6b / M7 / M7b / M7c / M7d / M8 / M8b / M9 | 无需处置,原样成立 |
+| 存活(未测守卫)❌ | 3 | M-e / M-f / M-h | 本轮 §9.1/§9.2 逐条补测,补完后 M-e/M-f/M-h 均已重跑变红(见下) |
+| 可辩护地 inert | 2 | M-b / M-b2 | 门审已给出理由(hosted 子组件的 `orgs` 无读者);本轮未新增覆盖,原样登记为已知、可辩护的冗余防御,不计入「承重」分母 |
+
+**这份 21/3/2 的分类本身也不是本轮新写的数字**——逐字抄自门审报告 §5.5「26 个探针:21 个承重,3 个存活(M-e/M-f/M-h),2 个可辩护地 inert(M-b/M-b2)」。实现者自己那套 `M1…M9`/`R1…R7`(§8.3)命名的探针与门审这 26 个探针不是同一份清单的两种写法,不作字面对应;需要复核实现者那份台账时,应回 round-2 验证 MD 自己的 §8.3,而不是拿这里的门审命名去反查。
+
+**这不是指控隐瞒**——round-2 门审自己的措辞也是如此(「这不是指控隐瞒;按本仓『对抗审主要抓过强声明』的判据,被证伪的完成声明本身要单列」)。处置方式是**逐条列表 + 分类**,不是补一个新的总数断言。
+
+### 9.1 P2-C——`sessionOrgRequiredSeen` 可见性机制补两条判别用例
+
+- **file:line(被测代码,零改动)**:`apps/web/src/views/approval/TemplateCenterView.vue:555-558`(`showPageSessionOrgSwitcher = pageSessionOrgHasMultiple.value || sessionOrgRequiredSeen.value`)、置位方 `notifySessionOrgRequired()`(同文件)
+- **新增用例**:`apps/web/tests/approvalTemplateCenterCategory.spec.ts`——`P2-C: an unbound multi-org admin whose session-orgs lookup ALSO fails still gets exactly one switcher, in its error state`(`GET /api/auth/session-orgs` 500 + 分节视图的 group 调用 403 `SESSION_ORG_REQUIRED` 同时发生)
+- **断言**:恰 1 个 `[data-testid="session-org-switcher"]`;它是**失败态**而非可用下拉——`select.disabled===true`、零个真实 org `<option>`、`.session-org-switcher__hint--error` 节点存在
+- **mutation 实测(`cp` 备份 → 改坏 → 跑 → `cp` 还原 → `cmp` 校验,零 `git checkout --`)**:
+  ```
+  M-e(去掉第二析取项 `|| sessionOrgRequiredSeen.value`) → 1 failed: expected +0 to be 1
+  M-f(notifySessionOrgRequired 换成 no-op)              → 1 failed: expected +0 to be 1
+  ```
+  两条均由 round-2 门审记录的「76 passed(存活)」变为**本轮红**。还原后 `cmp` 两次均 OK。
+
+### 9.2 P3-D——解档侧补镜像用例
+
+- **file:line(被测代码,零改动)**:`apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue`(`onUnarchive` 内紧随 `emit('changed')` 的 `await loadGroups()`)
+- **新增用例**:`apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts`——`P3-D: unarchiving re-reads the list so the rendered order is the server's, not the pre-unarchive one`(镜像既有 P3-3 归档用例,角色对调)。夹具:两个已归档分组,`atg_3` 归档时间**晚于** `atg_1`(服务端 `archived_at DESC` ⇒ 初始渲染顺序 `[atg_3, atg_1]`);解档 `atg_1` 后服务端顺序变为 `[atg_1(active), atg_3(archived)]`——原地 swap 不会重排,只有真的重读才会
+- **mutation 实测**:
+  ```
+  M-h(删 onUnarchive 的 await loadGroups()) → 1 failed: 期望 ['atg_1','atg_3'],实得 ['atg_3','atg_1']
+  ```
+  由 round-2 门审记录的「76 passed(存活)」变为**本轮红**。还原后 `cmp` OK。
+
+### 9.3 NIT-A——文案改为与 CHECK 一致的表述
+
+- **file:line**:`apps/web/src/approvals/api.ts`(`GROUP_NAME_UNSUPPORTED` 条目,round-2 头行号 `:1291-1293`)
+- **改法**:`Latin letter` → `letter (A–Z)`;中文「拉丁字母」→「英文字母（A–Z）」。`[!-~]`(ASCII 33–126)覆盖的字母子集恰是 A–Z,不再暗示 `Ñ`/`é` 这类非 ASCII 拉丁字母也算数(门审 §7 NIT-A 的反例:`'Ñ' ~ '[!-~]'` 为假)。不采用后端内部的逐字措辞「ASCII letter」——保持产品语言,不引入新术语。
+- **回归**:`approvalTemplateGroupsClient.spec.ts` 与 `ApprovalTemplateGroupsPanel.spec.ts` 里钉住这段文案的用例只断言 `/at least one/i` 与 `请假Leave` 子串,均未断言过 `Latin`,故文案改动零红——已实跑确认(见 §9.5 五文件合跑数字)。
+
+### 9.4 NIT-B——条件式 `data-testid` 处置
+
+**处置:维持不改,正式登记(不是遗漏)。** `ApprovalTemplateGroupsPanel.vue:84` 的 `:data-testid="group.archivedAt ? 'approval-template-groups-item-archived' : 'approval-template-groups-item'"` 本轮**未改动**。理由与 round-1/round-2 门审的登记一致且未过期:
+1. 这条件式收窄本身是 P2-1(归档视觉区分)存在的**原因**,不是副作用——两个不同的 testid 正是 D2/D3 真浏览器判据与 P2-1 用例（本文件 `'P2-1: an archived group is visually distinct...'`）引用的锚点；
+2. 改成「统一 testid + `data-archived` 属性」会动到已经过 round-1/round-2 两轮门审 CLEAR 的判据面，属于**独立的卫生（hygiene）切片**，不在本轮 P2-C/P3-D/NIT-A/记录级四项授权范围内；
+3. round-2 门审自己的处置是「仍开放,不重复计分」——本轮不升级、不降级这一判定,只是把它从「隐含维持」改成本节里的**显式登记**，供下一轮门审或 owner 直接引用，不必每轮重新说明。
+
+若 owner 之后要收口这条 NIT，需要单独一个切片，并重新走一遍 P2-1 相关用例的门审。
+
+### 9.5 补充：两组承重场景用例(vitest 层，真浏览器留给门审）
+
+审阅方在 P2-C/P3-D/NIT 之外，额外要求补两组防回归用例——这两组本身不是"新发现"，而是把已经存在、但此前从未在 vitest 层被固化的两条不变量钉下来：
+
+**(i) 退出登录 / 换账号后，host 的组织上下文被清理**
+
+- 机制（零新代码——`useSessionOrg.ts` 属设计锁 §2「不动」文件，本身已经这样做）：`useAuth.setToken`/`clearToken` 统一经 `resetSessionBootstrap` 调 `notifyAuthPrincipalChange()`；`useSessionOrg` 在其 `onAuthPrincipalChange` 回调里把 `orgs`/`currentOrgId`/`errorMessage` 清空。`TemplateCenterView` 的 `pageSessionOrg` 是该 composable 的页面级单实例（P1-A），因此这个清理对 host 同样生效。
+- **新增用例**（`apps/web/tests/approvalTemplateCenterCategory.spec.ts`）：
+  - `(i) signing out clears the host's session-org list — nothing from the previous account is left rendered`
+  - `(i) switching accounts clears the host's session-org list before the new account's own load lands`
+- **判据**：两条都是硬断言（非条件式）——`clearToken()`/对新账号 `setToken()` 之后，`container.querySelectorAll('[data-testid="session-org-switcher"]').length` 必须为 `0`（`hasMultipleOrgs` 因 `orgs` 被清空而转假，且本场景 `sessionOrgRequiredSeen` 从未被置真）。
+- 这两条是**回归哨兵**：`useSessionOrg.ts` 本身受锁保护不能改，风险点在于未来有人在 `TemplateCenterView.vue` 里另开一条不经过该 composable 的缓存路径（例如把 `orgs` 快照进本地变量）——真出现这种改法，这两条用例会先变红。
+
+**(ii) 快速连续切换两次 org，旧请求晚到不得覆盖新 org 的分组结果**
+
+- **发现**：`TemplateGroupSections.vue` 的 `loadAll()` 与 `ApprovalTemplateGroupsPanel.vue` 的 `loadGroups()` 此前都**没有**请求代数（generation/token）守卫——`TemplateCenterView.onPageSessionOrgChange` 在每次成功切换后都会分别调用二者一次；若管理员快速连续切换两次 org，两次调用的网络往返可能乱序完成，后完成的（可能是先发出、对应"已经离开"的旧 org）会无条件覆盖 `sections.value`/`groups.value`，即使它已经不是当前选中的 org。
+- **实现方式（先红后绿）**：在两个函数里各加一个模块级自增计数器 `loadGeneration`；每次调用在入口 `const generation = ++loadGeneration`，并定义 `isCurrent = () => generation === loadGeneration`；成功分支在写 `sections.value`/`groups.value`（以及 `sessionOrgBlocked.value`/`loadError.value`）前先 `if (!isCurrent()) return`；`catch` 分支同样先判断（含 `SESSION_ORG_REQUIRED` 分支——一个过期请求的 403 不应该去顶替一个已经成功的新请求的状态）；`finally` 里的 `loading.value = false` 也只在 `isCurrent()` 时执行，防止旧请求的 finally 抢先关闭一个仍在进行的新请求的 loading 态。**后发出的调用永远最终获胜，不论谁先返回**——不是简单的"取最后一个 resolve"，是"取代数上最新的那一次调用"。
+- **file:line**：`apps/web/src/views/approval/TemplateGroupSections.vue`（`loadGeneration` + `loadAll()`，紧邻 `fetchPage` 之后）；`apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue`（`loadGeneration` + `loadGroups()`，紧邻 `handleSessionOrgRequired` 之后）
+- **新增用例**：
+  - `apps/web/tests/approvalTemplateCenterSections.spec.ts` → `TemplateGroupSections — request algebra guard (rapid org switch)` → `(ii) a stale loadAll() answer that arrives AFTER a newer one must not overwrite the newer org's rendered sections`
+  - `apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts` → `ApprovalTemplateGroupsPanel — request algebra guard (rapid org switch)` → `(ii) a stale loadGroups() answer that arrives AFTER a newer one must not overwrite the newer org's rendered list`
+  两条用例都手工控制两次调用各自底层 promise 的 resolve 时机（先发出的后 resolve，模拟真实网络乱序），断言最终渲染内容只包含"新 org"的分组名，不包含"旧 org"的。
+- **先红后绿实测**（`cp` 备份 → 还原到 round-2 head 的写法 → 跑 → `cp` 还原 → `cmp` 校验）：
+  ```
+  TemplateGroupSections（无守卫）:      1 failed — expected '...' to contain 'Fresh Org Group'（实际渲染的是 'Stale Org Group'）
+  ApprovalTemplateGroupsPanel（无守卫）: 1 failed — expected '...' to contain 'Fresh Org Group'（实际渲染的是 'Stale Org Group'）
+  ```
+  两处补上守卫后各自变绿；两个文件的既有用例（sections 25/25、panel 12/12）在加守卫后逐一复跑，零回归。
+
+### 9.6 全量实跑(数字逐字抄自输出)
+
+| 门 | 结果 |
+|---|---|
+| 5 个被点名的 FE spec 合跑(category / sections / panel / client / SessionOrgSwitcher) | **5 files / 82 passed (82)**(round-2 记录的同五文件基线 76 → 本轮 6 条新用例：P2-C ×1、(i) ×2、P3-D ×1、(ii) ×2 = 82) |
+| `apps/web`:`npx vue-tsc --noEmit -p tsconfig.app.json` | **EXIT=0** |
+| `packages/core-backend`:`npx tsc --noEmit` | **EXIT=0** |
+| `apps/web`:`npx vite build` | **EXIT=0**(`✓ built in 13.46s`;既有 chunk-size 警告与本轮无关) |
+| `run-required-web-tests.sh` 结尾那条 `exec` 巨行(与脚本逐字同形,直接抽取执行) | **EXIT=0;Test Files 473 passed (473);Tests 7322 passed (7322)**(round-2 记录 473/7316,+6 = 本轮新增用例数,逐条对得上) |
+| 真库四个 group 文件合跑(`metasheet2_a5r2b_20260921`,`vitest --config vitest.integration.config.ts`,与 `plugin-tests.yml:1669-1672` 同形) | **4 files / 41 passed (41)**(与 round-2 记录一致——本轮零后端行为改动，只改了一段注释级措辞判据以外的前端文案与两处前端 mutation 守卫) |
+
+### 9.7 CI / s6a / 爆炸半径 census(对 round-2 head 逐文件)
+
+- `git diff --stat 0d2c99487e -- .github/workflows/plugin-tests.yml .github/workflows/approval-web-guard.yml .github/workflows/attendance-web-guard.yml apps/web/vitest.config.ts packages/core-backend/vitest.config.ts apps/web/scripts/run-required-web-tests.sh package.json apps/web/package.json packages/core-backend/src/db/migrations/` → **空**（九个 CI 钉文件 + 迁移目录字节不变）
+- **零新增文件**——本轮六个改动全部落在 round-2 已经改过的既有六个文件（`api.ts` / `TemplateGroupSections.vue` / `ApprovalTemplateGroupsPanel.vue` / 三个既有 spec）之内，不需要新 spec token，不触 s6a pin，不需要考勤四道 census 钉
+- 锁文正文（`approval-form-group-entity-design-lock-draft-20260916.md`）未触碰；`useSessionOrg.ts` 与 `views/attendance/AttendanceSessionOrgSwitcher.vue` 逐字节未动（本轮的 mutation 校验虽然临时改写过 `useSessionOrg.ts` 以外的文件用于红绿对照，从未改写过这两个文件本身；(i) 的两条用例完全不需要改写它们即可验证——它们验证的是已有行为，不是新写的行为）
+
+### 9.8 未做 / 交 owner（本轮新增）
+
+- §9.4（NIT-B）的收口本身——本轮只登记disposition，不实现
+- §9.0 撤回的「全部承重」断言之外，round-2 门审 §7 记录的 `sessionOrgRequiredSeen` 一旦置真永不复位的记录级事实——本轮**未处理**（不在 P2-C/P3-D/NIT-A/NIT-B/记录级四项授权范围内，门审自己也只是"建议在补测里钉住"，未升级为阻断项）
+- round-2 §9 交 owner 的三条（P2-5 持久 vs 反应式形状 OPEN、被挡住写动作不自动重放的产品决策、§3.2 管理面板 UI 未列入锁文分期清单）——本轮未触碰这些讨论，原样沿用 round-2 的登记
+
+一切仍是**候选**，不构成"已裁 / 已 ratify"；本节记录的红绿与数字均可复核（分支 `feat/approval-template-groups-phase4-daily-ops`）。

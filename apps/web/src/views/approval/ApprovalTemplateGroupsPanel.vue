@@ -253,20 +253,34 @@ function handleSessionOrgRequired(retry: () => Promise<void>): void {
   void loadSessionOrgs()
 }
 
+// Request-algebra guard (impl-gate-A5-daily-ops-round2-20260920.md, additional load-bearing
+// scenario (ii)) — sibling of `TemplateGroupSections.vue`'s `loadAll()` guard (see its comment for
+// the full rationale): the host replays `loadGroups()` on every successful session-org switch
+// (`TemplateCenterView.onPageSessionOrgChange`), so two rapid switches can have this panel's two
+// `loadGroups()` calls in flight together. Without a generation check, whichever call's network
+// round trip happens to finish LAST wins — even when it was fired FIRST, for the org the admin has
+// already switched away from — and would silently roll the panel's list back to the stale org.
+let loadGeneration = 0
+
 async function loadGroups(): Promise<void> {
+  const generation = ++loadGeneration
+  const isCurrent = () => generation === loadGeneration
   loading.value = true
   loadError.value = ''
   try {
-    groups.value = await listApprovalTemplateGroups()
+    const result = await listApprovalTemplateGroups()
+    if (!isCurrent()) return // a newer loadGroups() has since been issued — this answer is stale.
+    groups.value = result
     sessionOrgBlocked.value = false
   } catch (err) {
+    if (!isCurrent()) return
     if (err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED') {
       handleSessionOrgRequired(loadGroups)
       return
     }
     loadError.value = describeApprovalTemplateGroupError(err, props.tr)
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
