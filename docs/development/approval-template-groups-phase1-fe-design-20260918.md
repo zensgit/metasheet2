@@ -138,3 +138,23 @@
 2. **补充清单 #6**:分期门「1 落地」的求值(门审通过 vs 已合并)——DDL Draft-only 是永久约束,字面「落地」永不发生 ⇒ 请示 owner 定义为「Draft PR 过门审」。本设计 MD 与目标文档一致,按「Draft PR 过门审」口径撰写,但这仍是**请示中**,不是 owner 已确认的定义。
 
 本切片没有引入新的、超出上述两条已披露请示的 owner 裁决问题。
+
+---
+
+## A-2 × A-4 合流求值(2026-09-20,分支 `feat/approval-template-groups-phase3-sections-on-a2`)
+
+> 本节**不属于 #5854 的交付**,也**没有改动 `feat/approval-template-groups-phase1-fe` 这条分支**。
+> 按 owner 定的合并顺序 **#5854 → #5878 → #5866**,A-4 在 A-2 之上重放时改了本切片的一处挂载条件;
+> 按「失效标记要求值,不作废整节」的规矩,受影响的句子逐句标在下面,本文其余部分原样有效。
+> 取舍与理由写在 `approval-template-groups-phase3-sections-design-20260918.md` §8。
+
+| 本文出处 | 原句(摘要) | 合流分支上的求值 |
+|---|---|---|
+| §2 表「最小面板」行、§5 表「挂载点」行 | 挂载点 `TemplateCenterView.vue:60` `<ApprovalTemplateGroupsPanel v-if="canManageTemplates" :tr="tr" />` | **挂载条件被收窄**(合流分支上):`canManageTemplates` **且** `viewMode === 'grouped'` **且** 管理员点开了「管理分组 / Manage groups」披露开关。`tr` 的传递方式、面板自身的任何行为、验收 J 的整条 403→选择器→重试流**一字未改**(`ApprovalTemplateGroupsPanel.spec.ts` 3/3 仍绿,面板的 `onMounted(loadGroups)` 仍在)。 |
+| §5 表「三处既有 spec 的 mock 接缝补丁」行 | 「面板现在**无条件**挂载在 `canManageTemplates` 为真时……三份既有 spec 的替换式 `vi.mock` 缺三项 ⇒ `onMounted` 抛未捕获异常」 | 「无条件」这半句在合流分支上**不再成立**;三处补丁**保留不删**(它们无害,且任何一条未来的分组视图用例会重新需要它们),三份 spec 在合流分支上全绿。补丁的**理由**因此从「必须」降级为「防御性」——这是措辞求值,不是把补丁判为多余。 |
+| §2 表「共享 `SessionOrgSwitcher`」/ 验收 J 相关各行 | 验收 J 由本面板独占承载 | **仍然成立**。合流把 `listApprovalTemplateGroups` 统一到本切片的 `getApprovalJson`/`ApprovalApiError` 路径上,正是为了不让 `.code` 分支变成死码(phase-3 设计 MD §8.2)。 |
+| §5 `tr` 函数签名对齐行(`TemplateCenterView.vue:312`) | `tr` 供两个新组件复用 | **仍然成立**,行号在合流分支上位移。 |
+
+**为什么改的是本切片的挂载条件而不是 A-4 的不变量**:A-4 的 I6(「扁平表的分类标签绝不触发分组联查」)是**锁文 §3 的不变量**,
+改写它要 owner 裁;而本面板「恒挂在平铺视图」只是 A-2 单独交付时的入口位置选择(A-4 落地后分组视图才是分组的主场)。
+详见 phase-3 设计 MD §8.4 的三条理由与主从关系表。
