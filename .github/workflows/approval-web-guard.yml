@@ -425,6 +425,17 @@ on:
       # can serve one account's answer to the next, which is the defect this surface exists to
       # prevent — so both belong in this filter alongside the module that consumes them.
       - 'apps/web/src/composables/authPrincipal.ts'
+      # A-5 日常操作收口 round 4 (2026-09-21): the approval-template LIST STORE. The template
+      # center's flat surfaces do not own the rows, the total, the error or the loading flag they
+      # render — `approvals/templateStore.ts` does, and round 4 moved the request algebra (request
+      # generation + the session signature the read was issued under) into it, because a page-local
+      # generation cannot stop an older read from overwriting a slot the page does not own.
+      # The nine cases that drive that store's three exits are the ONLY coverage those exits have
+      # anywhere (the five component specs replace this module with a `vi.fn()` whose error/loading
+      # are hand-driven refs, so its catch and finally exits are unreachable from them); they live
+      # in `approvalTemplateCenterCategory.spec.ts`, already listed above. Without this path a change
+      # touching only this file would not run them.
+      - 'apps/web/src/approvals/templateStore.ts'
       - 'apps/web/src/composables/useAuth.ts'
       # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
       # transition and guards a late answer with a generation. A change to it can leave a mounted
@@ -838,6 +849,17 @@ on:
       # can serve one account's answer to the next, which is the defect this surface exists to
       # prevent — so both belong in this filter alongside the module that consumes them.
       - 'apps/web/src/composables/authPrincipal.ts'
+      # A-5 日常操作收口 round 4 (2026-09-21): the approval-template LIST STORE. The template
+      # center's flat surfaces do not own the rows, the total, the error or the loading flag they
+      # render — `approvals/templateStore.ts` does, and round 4 moved the request algebra (request
+      # generation + the session signature the read was issued under) into it, because a page-local
+      # generation cannot stop an older read from overwriting a slot the page does not own.
+      # The nine cases that drive that store's three exits are the ONLY coverage those exits have
+      # anywhere (the five component specs replace this module with a `vi.fn()` whose error/loading
+      # are hand-driven refs, so its catch and finally exits are unreachable from them); they live
+      # in `approvalTemplateCenterCategory.spec.ts`, already listed above. Without this path a change
+      # touching only this file would not run them.
+      - 'apps/web/src/approvals/templateStore.ts'
       - 'apps/web/src/composables/useAuth.ts'
       # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
       # transition and guards a late answer with a generation. A change to it can leave a mounted
