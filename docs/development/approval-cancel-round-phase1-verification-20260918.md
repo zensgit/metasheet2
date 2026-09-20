@@ -4185,7 +4185,9 @@ error: update or delete on table "approval_instances" violates foreign key const
   - **顺带(交 C-2 线)**:候选 README `## 9` 第 8 步把「`SELECT DISTINCT actor_id FROM approval_records`
     在 C-2 全文必须仍是**恰好 1 处**」当成「冲突有没有解反方向」的判据。该字面量在候选 head 上实测
     `grep -c` = **0**(新查询根本不含该串),在 phase2 head 上 = **1**;照此判据执行的人会把 0 读成「解反了」。
-    判据须换成对**新查询**的正向锚点:`COALESCE(a.metadata->>'delegatedFrom', r.actor_id)` ——
+    判据须换成对**新查询**的正向锚点 ——(**2026-09-20 二次勘误:这条锚点本身也已失效**,
+    owner 裁决后席位查询被整段重写,该字面量在 C-1 head 上同样是 0 处;**现行判据见本文件 §O6**)
+    `COALESCE(a.metadata->>'delegatedFrom', r.actor_id)` ——
     候选 head 实测 **1** 处、phase2 head 实测 **0** 处。README 已同步勘误。
 - **没有**合并、未 undraft、未开 PR、未改任何锁文、未对任何共享库应用迁移。
 
@@ -4328,7 +4330,8 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 - C-2 锚点(实测,phase2 head `6a40f0121a36d7e54fde98088ca68212653403bf`):
   `merge-base` = **`b8b71539a6…`**;`--is-ancestor b8b71539a6… phase2` = **YES**;
   `merge-tree --write-tree` = **EXIT 0**,树 **`c5e376b6a385b316e9e102a05d5088e153e808a0`**;
-  正向锚点 `COALESCE(a.metadata->>'delegatedFrom', r.actor_id)` 在候选 head **1** 处 / phase2 head **0** 处;
+  正向锚点 `COALESCE(a.metadata->>'delegatedFrom', r.actor_id)` 在**当时的**候选 head **1** 处 / phase2 head **0** 处
+  (**已被 §O6 取代**:owner 裁决后席位查询整段重写,该字面量在当前 C-1 head 上是 **0** 处 ⇒ 零判别力);
   旧字面量 `SELECT DISTINCT actor_id FROM approval_records` 在候选 head **0** 处 / phase2 head **1** 处。
   **三方合并实测干净;逐提交重放(rebase)本轮未实跑** —— 两句分开写,不合并。
 
@@ -4542,3 +4545,64 @@ legacy `POST /:id/approve` 把请求体的 `metadata` **逐字**写进 `approval
   于是委托邻居套件的 `approval-delegation-seam` 第一次跑**红了一条**。
   `DELETE ... WHERE id LIKE 'pbdl%'`(**只删我自己插的 16 行**,表回 **0 行**)之后重跑 **47/47 全绿**。
   这正是本仓 §N5 那条残留链的同族,**是我犯的,不是候选的语义问题** —— 记在这里而不是删掉。
+
+## O6. C-2 锚点重测(**本轮必须重写的一条:旧的正向锚点现在恒为 0**)
+
+> **求值标记(勿整节作废)。** 本节**取代** §N6 与 Part N-H §NH6 里关于 C-2 的**锚点与树 SHA**;
+> 那两处的其余结论(「C-2 已坐在 C-1 基线之上」「三方合并实测干净」「逐提交重放未实跑」)
+> 在本 head 上**重测仍然成立**,保持 OPERATIVE。
+
+**先说为什么必须重写,而不是补个数字。** §N6 / README §9-8 给 C-2 的判据是:
+「解完冲突之后跑正向锚点 `COALESCE(a.metadata->>'delegatedFrom', r.actor_id)`,在 C-2 全文必须**恰好 1 处**」。
+那条锚点是**候选第一版**席位查询的字面量。裁决落地后席位查询被整段重写,**本 head 的 `ApprovalProductService.ts`
+里该字面量是 0 处**(机械核,见下表)。照旧判据执行的人,在一次**完全正确**的重放之后会读到 **0**,
+只能得出「解反了」—— 这正是那条判据当初被写出来要防的那个失效,**它自己现在犯了同一个错**。
+(同族:旧的旧判据 `SELECT DISTINCT actor_id FROM approval_records` 也早已在 C-1 侧归零,§N6 已勘误过一次;
+**一个会随实现变化的字面量做锚点,就会需要第二次、第三次勘误** —— 所以下面同时给出「怎么核」和
+「锚点失效时该怎么办」,而不是只换一个新字面量。)
+
+### O6.1 机械核(`git grep -c`,对象是 commit,不是工作树)
+
+C-1 head = `8b29b4a2ce6b90d7fc49a052538dc713e12da224`;phase2 head = `6a40f0121a36d7e54fde98088ca68212653403bf`。
+以下全部限定在 `packages/core-backend/src/services/ApprovalProductService.ts`:
+
+| 字面量 | C-1 head | phase2 head | 判定 |
+|---|---|---|---|
+| `SELECT DISTINCT actor_id FROM approval_records`(**最早**的判据) | **0** | **1**(`:8808`) | 早已失效,§N6 勘误过 |
+| `COALESCE(a.metadata->>'delegatedFrom', r.actor_id)`(**§N6 / README §9-8 现行判据**) | **0** | **0** | **本轮失效** —— 两头都是 0,零判别力 |
+| `node_actor_user_seats` | **4** | **0** | **新判据** |
+| `node_non_user_seat_count` | **4** | **0** | **新判据** |
+| `instance_delegators` | **4** | **0** | **新判据** |
+
+三个新 token 在 C-1 head 的**整棵树**上都只出现在这一个文件里(`git grep -c <tok> <head>` 各命中 **1 个文件**),
+所以它们不会被测试文件或文档的引用稀释。
+
+### O6.2 C-2 重放后的判据(**取代** §N6 / README §9-8 的那一条)
+
+1. **正向**:`node_actor_user_seats`、`node_non_user_seat_count`、`instance_delegators` 三个 token
+   在 C-2 的 `ApprovalProductService.ts` 里必须**各出现 4 次**,且都落在 `createCancelRoundInstance` 体内。
+2. **反向**:`SELECT DISTINCT actor_id FROM approval_records` 必须**归 0**(phase2 侧那 1 处就是被覆盖的目标)。
+   —— 正反两条一起,才能区分「合上了」与「把 C-1 的新代码丢了」;只有正向那条时,
+   一次「两边都保留」的错误解法照样绿。
+3. **锚点失效时怎么办(写出来,免得下一个人再补一次勘误)**:这三个 token 是**标识符**不是 SQL 字面量,
+   但它们**仍然会随实现改名**。核对前先在**当时的 C-1 head** 上重跑 O6.1 那张表拿到当时的真值,
+   **不要**照抄本节的数字;若三个 token 在 C-1 head 上也归 0,说明席位推导又被重写了,
+   **应当重新推导锚点而不是判 C-2 解反了**。
+
+### O6.3 合并事实(本 head 重测,取代 §NH6 的树 SHA)
+
+| 项 | 实测(C-1 head `8b29b4a2ce…`) |
+|---|---|
+| `git merge-base --is-ancestor b8b71539a6… origin/feat/approval-cancel-round-phase2` | **YES** |
+| `git merge-base <C-1 head> <phase2 head>` | **`b8b71539a6a89e51331e2e4874f994498df15c55`** |
+| `git merge-tree --write-tree <C-1 head> <phase2 head>` | **EXIT 0**,树 **`805e6ca2cf6561a526cd0883512be3e56f122682`** |
+
+**这个树 SHA 按构造随 C-1 head 变化**(§NH6 漏钉 head 已经造成过一次下游误读,门审第 2 轮 P3-A)。
+它**只对 `8b29b4a2ce…` 有效**;C-1 head 一动就必须重算,**不要**拿本节的值去核别的 head。
+**三方合并干净 ≠ 逐提交重放干净**:rebase **本轮仍未实跑**,两句分开写。
+
+### O6.4 非版本化工作件的同步(门审第 2 轮 P3-B)
+
+`~/.claude/projects/<proj>/soak-working/c1-delegation-candidates-20260920/README.md` **不在 git 下**,
+任何门 / CI / reviewer 都取不到它。它的 §9-8 带着同一条已失效的 `COALESCE` 判据;本轮已就地勘误,
+**但承重的一份是本节** —— 引用时以本节为准,README 只当本地便签。
