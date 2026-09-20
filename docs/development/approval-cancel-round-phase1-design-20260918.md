@@ -388,8 +388,8 @@ even though the person cannot log in.
 |---|---|---|---|
 | 1a | 分句一:「重新验证当前资格(**在职**…)」 | **SHIPPED** (half A) | `assertCancelRoundSeatsEligibleInTxn`;`§2-G3 正控 P1` / `负控 N1` / `负控 N2` |
 | 1b | 分句一:「…**仍在该组织单元**」 | **OPEN** (half B) — 未实现、已登记 | 常驻 `正控 P2`(`org_id IS NULL` 的原单不被拒) |
-| 2 | 分句二:「历史委托不自动成为当前授权」 | **OPEN(读法未裁)+ 候选 (a) PROPOSED 已落在本分支** | 独立验证 §2.2 四腿逐字相同;本轮 11 条真库用例 + 两条 mutation(见验证 MD Part N) |
-| 3 | 分句三:「资格不成立的席位 ⇒ 阻断并提示管理员」 | **SHIPPED**(阻断,永不过滤) | `负控 N1/N2` 的零行断言;mutation R7-M3 |
+| 2 | 分句二:「历史委托不自动成为当前授权」 | **OPEN(读法未裁)+ 候选 (a) PROPOSED 已落在本分支** | 独立验证 §2.2 四腿逐字相同;**16 条**真库用例 + 两条 mutation(见验证 MD Part N / Part N-H) |
+| 3 | 分句三:「资格不成立的席位 ⇒ 阻断并提示管理员」 | **SHIPPED**(阻断,永不过滤)—— 但在**读法 (a) 的语义下**它只对**被实际坐下的人**生效:legacy 无 `nodeKey` 语料上席位停在 D,该句因此对原审批人 A **不执行**(缺口已登记,见下方 §3.4 第一条的 ITS CONSEQUENCE) | `负控 N1/N2` 的零行断言;mutation R7-M3;legacy 臂 `负控 N7(a)/N8(a)/P13(a)` |
 
 分句二那一行是本次新增的一行:在此之前它既不在 SHIPPED 一侧、也不在 OPEN 清单上,而同一条款的组织半边
 (half B,上表 1b)一直被明文登记 —— 同条款内处置不对称本身就是披露缺口(独立验证 §8 把它记为 P2,
@@ -419,12 +419,19 @@ eligibility rule here would be the narrower-lookalike this slice already refuses
 **Behaviour delta, stated rather than discovered later** (the BEFORE column is measured, independent
 verification 2026-09-19 §2.2; the AFTER column is measured on this branch, 验证 MD Part N):
 
-| scenario | before | after, IF reading (a) is ruled |
-|---|---|---|
-| delegation still active | seat = delegatee | seat = **delegator** |
-| delegation revoked / expired / out of scope / exactly in scope | seat = delegatee | seat = **delegator** |
-| DELEGATOR deactivated | creation succeeds | **409 `CANCEL_ROUND_SEAT_INELIGIBLE`, zero rows** |
-| DELEGATEE deactivated | 409, zero rows | **creation succeeds**, seat = delegator |
+**这张表的每一行都是 `actions` 语料的读数**(approve 行带 `nodeKey`)。
+**legacy `POST /:id/approve` 语料(approve 行无 `nodeKey`)上,四行里有三行答案不同** —— 实测:
+第 1 行 `P12(a)` 席位 = **被委托人**(不是委托人);第 3 行 `N7(a)`/`N8(a)` **创建成功、席位 `[D]`**
+(不是 409);第 4 行 `P13(a)` 仍是 **409、零行**(闸跑在未被还原的 actor 上)。
+`语料` 这一维**必须和表一起读**,否则照表查这张表的人在 P2-1 正针对的那个语料上会得到相反的答案;
+成因与处置见下方「**NOT closed by the candidate**」第一条的 `ITS CONSEQUENCE`。
+
+| scenario(actions 语料) | before | after, IF reading (a) is ruled | legacy 无 `nodeKey` 语料(实测) |
+|---|---|---|---|
+| delegation still active | seat = delegatee | seat = **delegator** | seat = **delegatee**(`P12(a)`) |
+| delegation revoked / expired / out of scope / exactly in scope | seat = delegatee | seat = **delegator** | revoked 腿实测 seat = **delegatee**(`N8(a)`);其余三腿本轮未在此语料构造 |
+| DELEGATOR deactivated | creation succeeds | **409 `CANCEL_ROUND_SEAT_INELIGIBLE`, zero rows** | **creation succeeds**, seat = **delegatee**(`N7(a)` / `N8(a)`) |
+| DELEGATEE deactivated | 409, zero rows | **creation succeeds**, seat = delegator | **409, zero rows**(`P13(a)`) |
 
 Reading (a) answers 「原审批人」 uniformly, so a still-valid delegation does NOT route the cancel
 round to the delegatee. That is a consequence of the cancel round's own snapshot carrying no
@@ -442,6 +449,23 @@ contract and is not implemented here.
   for that row. MEASURED, not predicted (验证 MD Part N §N4): a document approved through that route
   under an active delegation seats the DELEGATEE. The failure direction is deliberate (never a wider
   seat), and the alternative — an instance-wide match — would mis-fold the sibling-seat case above.
+
+  **ITS CONSEQUENCE(硬化轮 2026-09-20 补写,门审 `impl-gate-C-slice1-g3-reading-a-round1` P2-1)。**
+  上面那句只刻画了**席位身份**,从未陈述**后果**。后果是:席位停在被委托人 D ⇒ G3 **第三句**
+  (资格不成立 ⇒ 阻断并提示管理员)在这条语料上**根本没有跑在读法 (a) 认定的席位持有人 A 身上**,
+  **原审批人 A 已停权的单据照样可以开轮**。资格闸本身在这条语料上**没有被跳过**(停权**被委托人 D**
+  仍然 409 阻断),它只是指向了未被还原的 actor。三条常驻腿把这一格钉成数据 ——
+  `负控 N7(a)`(legacy × 停权 A ⇒ 不阻断、席位 `[D]`)、`负控 N8(a)`(再叠「委托已撤销」⇒ 同上)、
+  `负控 P13(a)`(legacy × 停权 D ⇒ 409 `CANCEL_ROUND_SEAT_INELIGIBLE`、零行)。
+  前两条断言的是**今天的真实答案**,不是期望行为:缺口若被关上它们会红,必须**重新登记而不是静默关闭**。
+
+  **为什么本轮不替 owner 关掉它。** 两条可能的修法都改变合同:
+  (i) `nodeKey IS NULL` 时退回 instance 级匹配 —— 它不是「补上缺口」,而是**用一种错换另一种错**,
+  且换到哪一种**取决于语料**:两个节点都走 legacy 时它把 D 自己的兄弟席位折给 A(人错、数仍错),
+  混合语料时它反而给出正确的两席。(两格均为**推演,本轮 NOT CONSTRUCTED**,不作实测引用。)
+  (ii) 对「存在 `delegatedFrom` 的 user assignment 而 approve 行缺 `nodeKey`」fail-closed —— 需新错误码,
+  须先进锁 §14.3。两者都属 owner 裁决,本轮的处置是**照实登记 + 覆盖**。
+
   The writers that DO carry `nodeKey` were read individually: the template-runtime dispatch's
   `insertApprovalRecord` callers and `insertAutoApprovalEvents`. `ApprovalBridgeService`'s writer
   does not, but bridge instances never pass through `createApproval` and so carry no `delegatedFrom`
@@ -450,11 +474,49 @@ contract and is not implemented here.
   Delegation substitutes only `assignmentType === 'user'` seats, so a document approved by A through
   a role node AND by D as A's delegate at a user node has two seats before and one after the restore
   — a genuine reduction of the 会签 threshold. The block-never-filter invariant covers INELIGIBLE
-  seats, not this same-person merge. Owner call; not decided here, and not covered by a test.
+  seats, not this same-person merge. Owner call; **not decided here**.
+  **硬化轮 2026-09-20(门审 P3-2):不再是「零用例」。** `正控 P15(a)` 钉的是**今天的答案** ——
+  角色节点由 A 本人批、user 节点由代理 D 批 ⇒ 还原后两条 approve 行同指 A ⇒ 席位 **2 → 1**
+  (撤销节点是 `approvalMode: 'all'`,所以这就是会签门槛的下降)。该腿**不预判裁决**,理由与 `P12(a)`
+  同构:owner 尚未裁的取舍,先把「今天的答案是什么」钉成数据;裁决之后该腿或被改写或被移除,
+  但不会是「悄悄变了而没人发现」。
 - **Re-entered nodes.** `entry_epoch` is out of the join by design (above), so a node re-entered
   after a reject→resubmit can carry several delegated assignment rows for the same
   `(instance, node_key, assignee)`. Not measured in this round; recorded as the known mirror of the
   collapse risk rather than claimed absent.
+
+  **硬化轮 2026-09-20 —— 这条登记 KEPT OPEN,并说明为什么一条看似充分的普查不足以关掉它。**
+  门审 §P3-1 提议用三行普查(`delegatedFrom` 唯一写入方 = `ApprovalAssigneeResolver.pushResolved`;
+  `resolveActiveDelegationMap` 生产调用点唯一 = `ApprovalProductService.ts:7947`;解析器纯函数,
+  全文 `await` 0 / `async` 0 / `.query(` 0)推出「对固定 `(instance, node_key)` 解析出的原审批人、
+  因而 `delegatedFrom`,跨 epoch 恒定 ⇒ 膨胀不可达」。**三行普查本身在本轮复核属实**(逐条重跑,读数相同),
+  **但它的推论有一个洞**,而且洞就开在本节下一条登记的那个兄弟界面上:
+  `ApprovalAssigneeResolver.ts` 自己的文档写着 —— `prior_node_approver`(Lock-1 §K3)是
+  **「the one kind whose input is caller-supplied at activation rather than create-frozen」**。
+  也就是说在 15 种 assignee 源里,**至少这一种的输入不是创建时冻结的**:它读的是节点激活时由调用方现算的
+  `priorNodeApprovers`(来源是活的 `approval_records`)。对这种节点,「跨 epoch 恒定」的前提不成立。
+  (解析器另有一个 late-bound 输入 `getEffectiveSamePersonPolicy`,但它不产出 `delegatedFrom`,
+  本条不依赖它;点出来是为了不把「只有一个 late-bound 输入」写成断言。)
+  因此本节不写「膨胀不可达」,只写:**普查没有证明不可达**,洞在 §K3。
+  一条构造草图(**UNVERIFIED / NOT CONSTRUCTED THIS ROUND**,写出来是为了让后来者能便宜地攻击它):
+  两个委托人 A1、A2 都委托给同一个 D;A1/A2 只能经**角色席位**成为 actor(委托只替换
+  `assignmentType === 'user'` 的席位,见 `pushResolved` 的 `if (assignmentType === 'user')`——
+  这是整条草图最承重的一步);下游 §K3 节点按审计行顺序解析出 [A1, A2] 并 dedup 成一个 D 席位,
+  `delegatedFrom` 取**第一个**;若 return 之后第二轮的批准顺序相反,同一 `(instance, node_key, D)`
+  就会留下 `delegatedFrom` 分别为 A1 与 A2 的两行 —— 一条 approve 行 join 到两行 ⇒ 席位集合膨胀。
+  本轮未构造、未实测,故本条**保持 OPEN**,不按已证伪处理,也不按已证实处理。
+- **`loadPriorNodeApproverDeciders`(Lock-1 §K3)—— 读法 (a) 是否外推到这个兄弟界面?**
+  **OPEN,与 half B 同等待遇:未实现、已登记,由 owner 裁。**
+  候选自己的注释点名了这个兄弟界面:仓内有**两处**从同一份 `approval_records(action='approve')`
+  推导席位,两处共用同一个 `isSystemSentinelActor` 哨兵谓词,**但只有撤销轮这一处做委托还原**。
+  受影响的消费点:`prior_node_approver` 源、admin-jump、timeout-jump、常规派发 —— 它们今天仍把席位
+  给**被委托人 D**。
+  **建议(仍待 owner 裁):不外推。** 理由是一条站得住的区分:`prior_node_approver` 发生在**同一个实例内**,
+  冻结的委托映射**仍然在生效**,D 此刻就是 A 在**这张单据**上的履职代理;而撤销轮是**新实例**,
+  冻结映射不适用。这个区分是**语义裁决**,候选既没作它也没登记它 —— 本轮补登记,不代裁。
+  今天的答案已被钉成数据:`正控 P14(a)` 在**同一张单据**上同时求值两个界面 ——
+  §K3 节点的席位是 **D**(`delegatedFrom` 为空、`resolvedFrom.kind = 'prior_node_approver'`),
+  撤销轮的席位是 **{A, D}**。若 owner 裁定**外推**,候选即为**部分应用**,须同 PR 改两处,而该腿会红并点名自己。
 - **G3 half B (组织单元)** remains OPEN exactly as registered above.
 
 

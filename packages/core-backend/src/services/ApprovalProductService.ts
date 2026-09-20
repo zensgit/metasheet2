@@ -8661,6 +8661,20 @@ export class ApprovalProductService {
       // then misses and `COALESCE` keeps the actor — that seat is NOT restored to its delegator. This is
       // registered in the design MD §3.4 rather than papered over with an instance-wide match, which
       // would mis-fold the sibling-seat case above.
+      //
+      // ITS CONSEQUENCE, stated here rather than left to be discovered (gate round 1 of reading (a),
+      // P2-1): the sentence above only describes WHO gets the seat. Because the seat stays on the
+      // DELEGATEE for this corpus, the G3 FIRST/THIRD sentence re-qualification below
+      // (`assertCancelRoundSeatsEligibleInTxn`) runs on the delegatee, NOT on the person reading (a)
+      // says holds the seat — so a document whose ORIGINAL APPROVER has since been deactivated still
+      // opens a cancel round here. The gate is not skipped on this corpus (deactivating the DELEGATEE
+      // still blocks — 负控 `P13(a)`); it is simply pointed at the un-restored actor. Both halves are
+      // pinned as resident legs in `approval-cancel-round-creation.db.test.ts`
+      // (`N7(a)` / `N8(a)` / `P13(a)`): they assert TODAY's answer, so closing this gap turns them RED
+      // and the gap must be re-registered rather than drifting shut. Closing it is an OWNER call — a
+      // `nodeKey IS NULL` instance-wide fallback swaps one wrong answer for another depending on the
+      // corpus (it folds a delegatee's OWN sibling seat into the delegator when BOTH rows came through
+      // the legacy route), and a fail-closed refusal needs a new error code, i.e. lock §14.3 first.
       const approverRows = await client.query<{ actor_id: string }>(
         `SELECT DISTINCT COALESCE(a.metadata->>'delegatedFrom', r.actor_id) AS actor_id
            FROM approval_records r
