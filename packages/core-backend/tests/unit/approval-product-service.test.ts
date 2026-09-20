@@ -8604,3 +8604,90 @@ describe('ApprovalProductService', () => {
     })
   })
 })
+
+// Gate round1 20260920 NIT-1: `business_refused.code` is accepted by
+// `takeBusinessRefusal` (`attendance/w4c3b-request-operation-boundary.ts`) with only a
+// `typeof string && length > 0` check — no charset constraint, because a charset regex
+// would silently drop a legitimate code and `AttendanceRequestOperationBusinessRefusalV1
+// .code` has no charset property to check against. That is safe ONLY because today's
+// codomain is a CLOSED, single-element set. This pins the census as data, not as an
+// argument: it fails the moment a second production constructor of the LITERAL code
+// appears anywhere under `plugins/` or `packages/*/src/`, forcing a re-review of the
+// close-reason projection's domain-closure assumption (§6 of the gate report) rather than
+// letting a second producer slip in silently.
+//
+// The pattern below deliberately requires a QUOTED code literal immediately after
+// `kind: 'business_refused'` — `takeBusinessRefusal`'s own pass-through construction
+// (`w4c3b-request-operation-boundary.ts:616`, `{ kind: 'business_refused' as const,
+// code: result.code, ... }`) also spells `kind: 'business_refused'` but forwards an
+// IDENTIFIER (`result.code`), never mints a literal, and must NOT count as a second
+// producer — it is the boundary the report names, not a duplicate mint site.
+describe('business_refused production-constructor census (gate round1 NIT-1)', () => {
+  const path = require('path') as typeof import('path')
+  const fs = require('fs') as typeof import('fs')
+
+  // Resolved off this file's own location, never `process.cwd()` — this suite's worktree
+  // symlinks `node_modules` in from elsewhere, so a naive walk must explicitly refuse to
+  // follow it rather than relying on cwd happening to be the repo root.
+  const repoRoot = path.resolve(__dirname, '../../../..')
+  const SCAN_ROOTS = [
+    path.join(repoRoot, 'plugins'),
+    path.join(repoRoot, 'packages', 'core-backend', 'src'),
+  ]
+  const SKIP_DIR_NAMES = new Set(['node_modules', 'dist', '.git', 'coverage', 'tests', '__tests__'])
+  const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
+  // Requires a QUOTED literal for `code:` right after `kind: 'business_refused'` (an
+  // optional `as const` tolerated in between) — an identifier (`code: result.code`) does
+  // NOT match, so a pass-through/validator that only forwards an already-minted code is
+  // correctly excluded. `s` (dotall) lets the two fields span a line break.
+  const CONSTRUCTOR_PATTERN = /kind:\s*['"]business_refused['"](?:\s*as\s*const)?\s*,\s*code:\s*(['"])((?:(?!\1).)*)\1/gs
+
+  function walk(dir: string, out: string[]): void {
+    let entries: import('fs').Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (SKIP_DIR_NAMES.has(entry.name)) continue
+      const full = path.join(dir, entry.name)
+      if (entry.isSymbolicLink()) continue // node_modules is symlinked in this worktree
+      if (entry.isDirectory()) {
+        walk(full, out)
+      } else if (SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+        out.push(full)
+      }
+    }
+  }
+
+  it('has exactly one production constructor of `business_refused` that MINTS a literal ' +
+    'code, and that literal is the sole known value — a second constructor MUST re-open ' +
+    'the close-reason projection domain-closure review, not pass silently', () => {
+    const files: string[] = []
+    for (const root of SCAN_ROOTS) walk(root, files)
+    expect(files.length).toBeGreaterThan(0) // sanity: the walk actually found source files
+    // Per-root sanity, not just the total: if EITHER root silently resolved to nothing (the
+    // `walk` try/catch swallows a missing/unreadable directory), the sole real producer could
+    // vanish along with it and this test would go red on a bare `0`, indistinguishable from
+    // "the census broke" rather than "a root disappeared". Each root must contribute >=1 file.
+    for (const root of SCAN_ROOTS) {
+      const inRoot = files.filter((f) => f.startsWith(root + path.sep))
+      expect(inRoot.length, `scan root contributed no files (missing/unreadable?): ${root}`)
+        .toBeGreaterThan(0)
+    }
+
+    const hits: Array<{ file: string; code: string }> = []
+    for (const file of files) {
+      const content = fs.readFileSync(file, 'utf8')
+      let match: RegExpExecArray | null
+      CONSTRUCTOR_PATTERN.lastIndex = 0
+      while ((match = CONSTRUCTOR_PATTERN.exec(content))) {
+        hits.push({ file, code: match[2] })
+      }
+    }
+
+    expect(hits, JSON.stringify(hits, null, 2)).toHaveLength(1)
+    expect(hits[0].code).toBe('ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
+  })
+})

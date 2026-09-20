@@ -1036,6 +1036,17 @@ export class ApprovalBridgeService {
     // tempting second narrowing: `workflow_key` is MUTABLE on an existing row (this corpus's own
     // fixtures re-key instances with a bare UPDATE), and a read gated on a mutable column fails by
     // SILENT ABSENCE — the exact defect shape this change exists to close.
+    // ⚠️ ASYMMETRY (gate round1 P3-2, OWNER-OPEN — not yet ruled on): `ApprovalProductService
+    // .getApproval`'s call to the SAME shared reader below has NO matching `isPlmId` guard; it runs
+    // unconditionally. That is not a correctness gap today — a `plm:`-mirror instance's
+    // `approval_records` rows are written by this service's own `insertApprovalRecord`, and no
+    // cancel-round writer ever attaches either whitelisted key to one, so the product-service side's
+    // extra query also matches zero rows, just without the short-circuit. Deleting THIS guard (M-F)
+    // leaves the whole redemption suite green: it is uncovered by construction, not by omission. The
+    // choice between (a) adding the same guard on the product-service side for textual symmetry with
+    // the claim two paragraphs above, or (b) dropping it here too and rewriting this branch as a bare
+    // performance short-circuit rather than an architectural one, is left to the owner — this
+    // comment documents the asymmetry that exists today; it does not resolve it.
     if (dto && !isPlmId(id)) {
       Object.assign(dto, await readCancelRoundDurableProjectionV1(
         (text, values) => pool!.query(text, values),
