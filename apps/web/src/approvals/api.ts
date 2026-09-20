@@ -401,17 +401,29 @@ export async function listTemplateCategories(): Promise<string[]> {
   return Array.isArray(payload?.data) ? payload.data : []
 }
 
-/**
- * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 3 (A-4). Lists this
- * org's template groups (`GET /api/approval-template-groups`, org resolved server-side from
- * `authenticatedTenantId` per §2 "org 从哪来" — nothing to pass here). Read-gated on
- * `approvals:read` only (I7) — every reader sees the group list, not just template managers.
- */
-export async function listApprovalTemplateGroups(): Promise<ApprovalTemplateGroupDTO[]> {
-  if (USE_MOCK) return []
-  const payload = await apiGet<{ groups?: ApprovalTemplateGroupDTO[] }>('/api/approval-template-groups')
-  return Array.isArray(payload?.groups) ? payload.groups : []
-}
+// ---------------------------------------------------------------------------
+// A-2 × A-4 merge convergence (this branch, 2026-09-20) — `listApprovalTemplateGroups`,
+// `linkApprovalTemplateToGroup` and `unlinkApprovalTemplateFromGroup` were each implemented TWICE
+// in this file after the two lanes were stacked: once here (A-4, `apiGet`/`apiPost`/`apiFetch`,
+// bare `Error`, `USE_MOCK` short-circuit) and once in the §6 phase 1 group block further down
+// (A-2, `getApprovalJson`/`postApprovalJson`/`deleteApprovalJson`, `ApprovalApiError` with
+// `.code`). git's three-way merge never flagged it — the two blocks sit in different regions of
+// the file — but `vue-tsc` (TS2323/TS2393) and esbuild ("Multiple exports with the same name")
+// both hard-fail, which is what took the combined tree's build down.
+//
+// The three duplicates are now defined ONCE, in the phase 1 block below, on A-2's typed path:
+// acceptance J (multi-org member → 403 `SESSION_ORG_REQUIRED` → shared session-org selector →
+// retry) branches on `err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED'` in
+// `ApprovalTemplateGroupsPanel.vue:135/:155`, and A-4's wrapper threw a bare
+// `Error('API error: …')` with no `code` at all, so keeping A-4's version would have turned that
+// whole retry flow into dead code with no test able to see it. `TemplateGroupSections.vue`'s own
+// catch sites read only `message`, so they are unaffected by the widening.
+//
+// Only `listTemplatesBySection` and `reorderApprovalTemplateGroups` below are A-4-only (no A-2
+// counterpart) and therefore keep their original bodies, `USE_MOCK` branch included. See the
+// phase-3 design MD's "A-2 × A-4 合流" section for the full disposition, including why the
+// three converged functions deliberately do NOT get a `USE_MOCK` branch.
+// ---------------------------------------------------------------------------
 
 /**
  * Approval form grouping lock v2.13 §4 acceptance row C — one of the three `section=` token
@@ -463,35 +475,6 @@ export async function reorderApprovalTemplateGroups(
     { groupIds },
   )
   return Array.isArray(payload?.groups) ? payload.groups : []
-}
-
-/**
- * Approval form grouping lock v2.13 §2 "挂接(首次与重新)是同一条原子 upsert" — link (or re-link) a
- * template to a group; the route always 201s on success and 404s `GROUP_NOT_FOUND` / 409s
- * `GROUP_ARCHIVED` on the stale-target races `TemplateGroupSections.vue`'s move-to-group control
- * surfaces inline (same non-blocking-error convention as `reorderApprovalTemplateGroups` above —
- * neither wrapper here parses the response body's error code, only `apiPost`'s generic
- * `API error: <status> <statusText>` message, matching every other write call in this file).
- */
-export async function linkApprovalTemplateToGroup(templateId: string, groupId: string): Promise<void> {
-  if (USE_MOCK) return
-  await apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/group`, { groupId })
-}
-
-/**
- * Approval form grouping lock v2.13 §2 "解除关联...是一条独立 UPDATE" — idempotent 204 whether the
- * template was linked, already unlinked, or never linked at all (acceptance H). No `apiDelete`
- * helper exists in `utils/api.ts` (every other write in this file is a POST), so this calls
- * `apiFetch` directly with `method: 'DELETE'` and never attempts to parse the empty 204 body.
- */
-export async function unlinkApprovalTemplateFromGroup(templateId: string): Promise<void> {
-  if (USE_MOCK) return
-  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}/group`, {
-    method: 'DELETE',
-  })
-  if (!response.ok) {
-    throw new Error(`API error: ${response.status} ${response.statusText}`)
-  }
 }
 
 /**
@@ -1207,16 +1190,16 @@ async function deleteApprovalJson(path: string): Promise<void> {
 // snake_case columns) — this file does not re-derive the shape.
 // ---------------------------------------------------------------------------
 
-export interface ApprovalTemplateGroupDTO {
-  id: string
-  orgId: string
-  name: string
-  sortOrder: number | null
-  createdBy: string
-  createdAt: string
-  updatedAt: string
-  archivedAt: string | null
-}
+// A-2 × A-4 merge convergence: `ApprovalTemplateGroupDTO` had TWO homes — A-4's
+// `src/types/approval.ts:629` (imported at the top of this file) and A-2's byte-identical local
+// `export interface` right here, which is TS2440 ("Import declaration conflicts with local
+// declaration"). Single home is `src/types/approval.ts`, next to every other approval DTO; the
+// local copy is deleted and the name re-exported from here so A-2's consumer
+// (`ApprovalTemplateGroupsPanel.vue:88`, `import { …, type ApprovalTemplateGroupDTO } from
+// '../../approvals/api'`) keeps resolving without changing its import path. The two declarations
+// were field-for-field identical (id/orgId/name/sortOrder/createdBy/createdAt/updatedAt/
+// archivedAt), so this is a pure de-duplication, not a shape change.
+export type { ApprovalTemplateGroupDTO }
 
 export interface ApprovalTemplateGroupLinkDTO {
   orgId: string
@@ -1254,6 +1237,17 @@ export type ApprovalTemplateGroupErrorCode =
   | 'APPROVAL_TEMPLATE_GROUP_LINK_FAILED'
   | 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED'
 
+/**
+ * Lists this org's template groups (`GET /api/approval-template-groups`; org resolved server-side
+ * from `authenticatedTenantId` per §2 "org 从哪来" — nothing to pass here). Read-gated on
+ * `approvals:read` only (I7) — every reader sees the group list, not just template managers
+ * (A-4's docstring for the implementation this one absorbed).
+ *
+ * Callers: `ApprovalTemplateGroupsPanel.vue` (A-2, management entry) and
+ * `TemplateGroupSections.vue` (A-4, grouped view). Failure throws `ApprovalApiError` — the panel
+ * branches on `.code === 'SESSION_ORG_REQUIRED'` (acceptance J); the sections view reads only
+ * `.message`, so both callers are served by this one implementation.
+ */
 export async function listApprovalTemplateGroups(): Promise<ApprovalTemplateGroupDTO[]> {
   const data = await getApprovalJson<{ groups: ApprovalTemplateGroupDTO[] }>('/api/approval-template-groups')
   return data.groups
@@ -1294,7 +1288,11 @@ export async function unarchiveApprovalTemplateGroup(groupId: string): Promise<A
   return data.group
 }
 
-// Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success.
+// Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success; 404
+// `GROUP_NOT_FOUND` / 409 `GROUP_ARCHIVED` on the stale-target races `TemplateGroupSections.vue`'s
+// move-to-group control surfaces inline (A-4's note for the implementation this one absorbed).
+// The `ApprovalTemplateGroupLinkDTO` return is WIDER than A-4's `Promise<void>`: assignable, and
+// `TemplateGroupSections.vue` ignores the value, so absorbing A-4's call sites costs nothing.
 export async function linkApprovalTemplateToGroup(
   templateId: string,
   groupId: string,
@@ -1307,7 +1305,9 @@ export async function linkApprovalTemplateToGroup(
 }
 
 // Unlink is idempotent 204 (acceptance H) whether the template was linked, already unlinked, or
-// never linked at all — no body to return.
+// never linked at all — no body to return. `deleteApprovalJson` never parses the empty 204 body
+// and surfaces a failure through `approvalRequestError` (A-4's absorbed implementation called
+// `apiFetch` directly and threw a bare `Error`).
 export async function unlinkApprovalTemplateFromGroup(templateId: string): Promise<void> {
   await deleteApprovalJson(`/api/approval-templates/${encodeURIComponent(templateId)}/group`)
 }
