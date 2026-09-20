@@ -2343,14 +2343,11 @@ U+115F match_LNPS= true  cats= L,Lo      ← HANGUL CHOSEONG FILLER 是 Lo
 
 ⇒ **照字面实现会让 7 个里的 3 个继续 201 入库**,而任务书同时要求「7 个码点各加一条应用层 400 用例」—— 两条要求互斥。这条冲突有**行为级证据**,不是读文档读出来的:见 §29.6 的 **M-2**(把谓词换成裸 `/[\p{L}\p{N}\p{P}\p{S}]/u`,U+2800 / U+3164 / U+115F 三行立刻变回 `201 CREATED`)。
 
-**落地取舍(请 owner 连同勘误一并裁)**:保留 `\p{L}\p{N}\p{P}\p{S}` 作为正向主类,再**排除两件东西**:
+**落地取舍(请 owner 连同勘误一并裁;本节写于第 2 轮,是历史决策记录)**:保留 `\p{L}\p{N}\p{P}\p{S}` 作为正向主类,并排除相应的不可见码点;**具体排除项本节不再转抄**,以 `packages/core-backend/src/services/approval-template-group-name-rule.ts` 的 `isVisibleCodePoint` 为准 —— 本节写下时是两项(`Default_Ignorable_Code_Point` + U+2800),第 4 轮起已扩为四条合取 + `BLANK_GLYPH_CODE_POINTS` 56 成员显式表,现行清单见 §31.2 / §31.6 第 1 项。
 
-1. `\p{Default_Ignorable_Code_Point}` —— Unicode **自己的属性**,不是本文件维护的清单,覆盖 U+00AD / U+180E / U+034F / U+FE0F / U+3164 / U+115F / U+1160 / U+061C / U+2065 / 变体选择符与 tag 区;
-2. **U+2800** —— 它**不是** default-ignorable,是本谓词里**唯一一个显式例外**。
+**残留写成残留,不写成闭合**:除排除项(现行清单见 §31.2,本节不再转抄)外,任何「general category 属 L/N/P/S 但在某些字体下渲染为空白」的码位仍会被接受。本规则**不声称**对「一切不可见」闭合;它声称拒绝 (i) JS `\s` 全集、(ii) DB 裁剪集、(iii) 每一个 default-ignorable 码位、(iv) 只由 Mark/Control/Separator 构成的名字、(v) 排除项清单覆盖的码位 —— 每一条都有经生产路由的断言。
 
-**残留写成残留,不写成闭合**:除 U+2800 外,任何「general category 属 L/N/P/S 但在某些字体下渲染为空白」的码位仍会被接受。本规则**不声称**对「一切不可见」闭合;它声称拒绝 (i) JS `\s` 全集、(ii) DB 裁剪集、(iii) 每一个 default-ignorable 码位、(iv) 只由 Mark/Control/Separator 构成的名字、(v) U+2800 —— 每一条都有经生产路由的断言。
-
-> **⚠️ 失效标记(第 2 轮门审 P3-2 / 第 3 轮修复,求值而非作废整节)。** 上一句的**前半**(谓词拒绝这五类)**仍然成立**,由构造保证:(iii) 是写在模式里的 Unicode 属性,(iv) 由「必须落在 L/N/P/S」直接推出。**失效的是最后一个分句**「每一条都有经生产路由的断言」——(iii)(iv) 是无穷类,任何套件都不可能逐一断言。本节其余判据(两条排除项、残留写法、M-2 证据)**不受影响,仍然 OPERATIVE**。套件实际经生产路由提交并观察到 400 的码点清单、以及为两条排除项各自造的见证用例,见 §30.3。
+> **⚠️ 失效标记(第 2 轮门审 P3-2 / 第 3 轮修复,求值而非作废整节;第 6 轮补做逐句求值)。** 上一句的**前半**(谓词拒绝这五类)**仍然成立**,由构造保证:(iii) 是写在模式里的 Unicode 属性,(iv) 由「必须落在 L/N/P/S」直接推出。**失效的是最后一个分句**「每一条都有经生产路由的断言」——(iii)(iv) 是无穷类,任何套件都不可能逐一断言。本节其余判据里,**M-2 证据仍然 OPERATIVE**(它是行为级红/绿观测,不描述排除项的数量或拼写);**「两条排除项」与「残留写成残留」这两句的具体拼写已被 §31.2 的四条合取 + `BLANK_GLYPH_CODE_POINTS` 56 成员显式表取代,本节不再转抄,现行清单以该处为准**。套件实际经生产路由提交并观察到 400 的码点清单、以及为(当时)两条排除项各自造的见证用例,见 §30.3(该清单本身未过期,过期的只是「排除项一共几条、怎么拼」这句话)。
 
 ### 29.2 应用层规则(`ApprovalTemplateGroupService.ts`)
 
@@ -2463,7 +2460,7 @@ PG:`PostgreSQL 15.17 (Homebrew, aarch64)`。
 3. **本次补跑 §14.1 之后,代码文件逐字节未动** —— `git diff <上一提交> -- packages/` 为空,即 §29.5 的真库/tsc/全量数字仍然对应当前树;本次补跑只改了 `docs/`。
 
 **给 owner 的三个待裁点**:
-1. **可见字符规则的两条排除项**(`Default_Ignorable_Code_Point` + U+2800)—— 这是候选在 owner 提案之外**新增的判据**,请连同勘误 3 一并裁;
+1. **可见字符规则的排除项**(本节写下时是「两件东西」`Default_Ignorable_Code_Point` + U+2800;**已被 §31.6 第 1 项取代** —— 现行是四条合取 + `BLANK_GLYPH_CODE_POINTS` 56 成员显式表,本条不再转抄清单)—— 这是候选在 owner 提案之外**新增的判据**,请连同勘误 3 一并裁,现行待裁点以 §31.6 为准;
 2. **255 码点长度上限** —— 锁 §2 无此条款,是新增;
 3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动,但响应体文案变了。
 
@@ -2596,7 +2593,7 @@ PG:`PostgreSQL 15.17 (Homebrew) on aarch64-apple-darwin25.2.0`。
 
 **待裁点(前三条是第 2 轮的,原样结转;第四条是本轮新增)**:
 
-1. **可见字符规则的两条排除项**(`Default_Ignorable_Code_Point` + U+2800)—— owner 提案之外的新增判据。**本轮变化**:这两条现在各有一个**会变红的见证用例**(§30.5 的 MUT-R3-D / MUT-R3-E),不再只有探针证据。
+1. **可见字符规则的排除项**(现行清单见 §31.2 之四条合取 + `BLANK_GLYPH_CODE_POINTS` 56 成员显式表,本条不再转抄为「两件东西」)—— owner 提案之外的新增判据。**本轮(第 3 轮)原述**:这两条各有一个会变红的见证用例(§30.5 的 MUT-R3-D / MUT-R3-E),不再只有探针证据。**⚠️ 失效标记(第 4 轮求值,见 §31.5 `:2703` 一行,求值而非作废整节)**:MUT-R3-D 那半句(`Default_Ignorable_Code_Point` 的见证)对**当前树为假**——第 4 轮把四个 Hangul filler 全部并入 `BLANK_GLYPH_CODE_POINTS`,`U+FE0F U+3164 U+FE0F` 这一行现在由两条合取共同拒绝,不再是该排除项单独的见证。MUT-R3-E(U+2800 例外)那半句**仍真**。现行待裁点见 §31.6 第 1 项。
 2. **255 码点长度上限** —— 锁 §2 无此条款,是新增。
 3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动,响应体文案变了。
 4. **【新】长度闸的度量对象从「裁剪后」改成「提交值」** —— 这是一条**行为变化**,不是纯内部重构:提交 259 码点、裁剪后 255 的名字,第 2 轮接受(或按同名 409),第 3 轮是 400 `GROUP_NAME_TOO_LONG`。它随第 2 项(上限本身)一起裁,但**单独列出**,因为即便 owner 接受 255 这个数,「量哪个值」仍是一个独立的取舍。
@@ -2620,20 +2617,13 @@ PG:`PostgreSQL 15.17 (Homebrew) on aarch64-apple-darwin25.2.0`。
 
 owner 的探针跑在自己的机器上、没有数据库,所以它**只能重新手打**谓词——而手打的那一份和线上那一份可以不一致,本轮就是这么发生的。因此:
 
-- 新文件 `packages/core-backend/src/services/approval-template-group-name-rule.ts`,**零运行时 import**(不碰 pg、不碰 express)。裁剪集、`BLANK_GLYPH_SET`、四条合取、长度上限、`classifyGroupName` 全在这里,**单一出处**。
+- 新文件 `packages/core-backend/src/services/approval-template-group-name-rule.ts`,**零运行时 import**(不碰 pg、不碰 express)。裁剪集、`BLANK_GLYPH_CODE_POINTS`、四条合取、长度上限、`classifyGroupName` 全在这里,**单一出处**。
 - `ApprovalTemplateGroupService.ts` 的 `requireName` 改为调用 `classifyGroupName` 并把 verdict 翻成 `ServiceError`;**行为逐字不变**(真库 31/31 + 序列化 10/10 全绿,见 §31.4)。
 - 真库套件与新增的无库单测**同 import 这一个模块**;`NAME_EDGE_TRIM_CLASS` / `NAME_EDGE_TRIM_CODE_POINT_SET` 的导出面从 service 挪到规则模块,消费方不变。
 
-### 31.2 显式谓词(与实现逐字同源)
+### 31.2 显式谓词(单一权威出处,本节不转抄表达式)
 
-```
-visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}]
-             ∧ cp ∉ \p{Default_Ignorable_Code_Point}
-             ∧ cp ∉ BLANK_GLYPH_CODE_POINTS
-             ∧ cp ∉ \p{White_Space}
-```
-
-名字被接受 ⟺ 经边缘裁剪后**至少含一个** `visible` 为真的码点(长度闸在最前,读**提交值**)。
+谓词见 `packages/core-backend/src/services/approval-template-group-name-rule.ts`(模块头注释 + `isVisibleCodePoint`,两者逐行相同);其逐字副本只允许存在于该文件与 PR body 两处(PR body 副本标注「逐字抽取自 …@<sha>,以文件为准」并保持 `cmp` 一致),本节及其余设计/验证 MD 一律只引用、不转抄表达式。名字被接受 ⟺ 经边缘裁剪后**至少含一个** `visible` 为真的码点(长度闸在最前,读**提交值**)。
 
 `BLANK_GLYPH_CODE_POINTS` **显式列出 56 个成员**(与 DI 重叠的也显式列,防属性表版本差异):`U+2800`、Hangul filler 家族 `U+115F / U+1160 / U+3164 / U+FFA0`、`U+3000`、`U+180E`、`U+200B–U+200F`、`U+2028–U+202F`、`U+2060–U+206F`、`U+FEFF`、`U+FE00–U+FE0F`、`U+034F`、`U+00AD`、`U+061C`。
 
@@ -2703,12 +2693,13 @@ exit 0
 | §30.5 的 MUT-R3-D(`U+FE0F U+3164 U+FE0F` 见证 `Default_Ignorable`) | 「只翻自己那一行」 | 对 head `ddc934fb63` **仍真**;**对当前树为假** —— 本轮把四个 Hangul filler 也写进了枚举表,于是该行由两条合取共同拒绝(MUT-R4-B 实测全绿)。已在测试文件该夹具注释处贴出更正 |
 | §30.5 的 MUT-R3-E(`U+FE0F U+2800 U+FE0F` 见证 U+2800) | 「只翻自己那一行」 | **仍真**,本轮以 MUT-R4-A 重新实测确认 |
 
-### 31.6 待裁点(第 2/3 轮三条原样结转,本轮新增三条)
+### 31.6 待裁点(第 2/3 轮结转项见下表 1-4,本轮新增三条)
 
 1. **可见字符规则的排除项** —— 现在是**四条合取的显式写法**,其中 DI 与 White_Space 今天冗余(§31.2 实测)。owner 若只想要「必要的那两条」,删 DI/White_Space 今天零行为变化,但会失去对未来 Unicode 新增码点的自动覆盖。
 2. **255 码点长度上限** —— 锁 §2 无此条款,新增。
 3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动。
 4. **长度闸度量「提交值」而非「裁剪后」** —— 行为变化,随第 2 项一起裁但单独列。
 5. **【新】`BLANK_GLYPH_CODE_POINTS` 这张 56 成员的显式表** —— 它把「不可见」从一个纯属性判断变成了「属性 ∪ 人工清单」。好处是 owner 点名的码点在代码里看得见、属性表版本变化不会静默放行;代价是清单要人维护,且**采纳它会让 `Default_Ignorable_Code_Point` 合取失去独立见证(冗余)——这是设计取舍,不是覆盖缺口**(§31.2:MUT-R4-B 全绿已判定为设计结果,非漏洞)。**是否采用「枚举 + 属性」而不是「纯属性」,请 owner 裁。**
-6. **【新】新增无库单测文件 + `scripts/dev/probe-group-name-rule.mjs` + `scripts/dev/README.md`** —— 单测进的是 always-on 的 `test (20.x)` lane(`pnpm --filter @metasheet/core-backend test`),**已实测它确实在全量里跑**:日志里 `✓ tests/unit/approval-group-name-rule.test.ts (12 tests)`,且 `vitest.config.ts` 的排除表不含它;**负控**:直接点名那个真库文件跑会得到 `No test files found`,证明真库文件确实被这条 lane 排除、单测不是它的替身。**未改 `plugin-tests.yml`,s6a 钉不受影响 —— 这条不是读文件清单读出来的,是机械核过的**:在本 head 上跑 `computePackageProvenancePinSet(repoRoot)` 并与 `s6a-package-provenance-pins.json` 逐字节比较,结果 `true`(全组一致)。
+6. **【新】新增无库单测文件 + `scripts/dev/probe-group-name-rule.mjs` + `scripts/dev/README.md`** —— 单测进的是 always-on 的 `test (20.x)` lane(`pnpm --filter @metasheet/core-backend test`),**已实测它确实在全量里跑**:日志里 `✓ tests/unit/approval-group-name-rule.test.ts (12 tests)`,且 `vitest.config.ts` 的排除表不含它;**负控**:直接点名那个真库文件跑会得到 `No test files found`,证明真库文件确实被这条 lane 排除、单测不是它的替身。**本轮未改 `plugin-tests.yml`,s6a 钉不受影响 —— 这条不是读文件清单读出来的,是机械核过的**:在本 head 上跑 `computePackageProvenancePinSet(repoRoot)` 并与 `s6a-package-provenance-pins.json` 逐字节比较,结果 `true`(全组一致)。
 7. **【新,只登记】两个真库文件的 anti-skip-green 哨兵在它们真正运行的那条 lane 里是 `it.skip`** —— `grep -rn EXPECT_DB .github/workflows/plugin-tests.yml` 计数为 0,而另外 7+ 条 realdb workflow 都设了 `EXPECT_DB: '1'`;该 lane 今天靠 `plugin-tests.yml` 硬编码 `DATABASE_URL` 兜底,后果有界。**本轮之前就在**(`baa086ae90`),不是本轮引入。**这条属于 A-1(#5852)的作用域,不塞进本候选修**——本项只做登记,请 owner 在 #5852 一并处理(给该 step 补 `EXPECT_DB: '1'`)。
+8. **【第 6 轮记录修复,只登记】非 required 的 `test (18.x)` job 曾在本候选的第 5 轮门审 head 上观察到红**——门审逐查根因**与本分支无关**:红在仓内既有的 `verify-recovery-manual-checkpoint.mts:2039`,拆卸期 `pg_stat_activity` 计数断言期望 0 实得 1(自有合成集群拆卸时 backend 未回收,典型 settle race);本候选改动的文件集里零个落在 `scripts/` 或该 `.mts`,同一 step 在更早的 head 上是 SUCCESS。`test (18.x)` **不在 required 清单**,required 的 `test (20.x)` 不受影响。本项只做登记,不在本候选修(修法建议:把该断言从一次性 `strictEqual` 改成带超时的轮询,另开 PR 处理)。

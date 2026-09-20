@@ -17,7 +17,10 @@
  * owner never has to re-type a character class again.
  *
  * THE PREDICATE, STATED EXPLICITLY (this comment and `isVisibleCodePoint` below are line-for-line
- * the same rule; there is no second spelling anywhere):
+ * the same rule. This header and the candidate pull request's body are the only two places that
+ * spell the predicate out — the PR body's copy is labeled as a verbatim extract from this file and
+ * is kept byte-identical to it. Every other document (design MD, verification MD) references this
+ * file by name and does not re-transcribe the expression):
  *
  *     visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}]
  *                  ∧ cp ∉ \p{Default_Ignorable_Code_Point}
@@ -42,8 +45,10 @@
  *   - `∉ Default_Ignorable_Code_Point` — REDUNDANT TODAY, and this file previously claimed
  *     otherwise. Measured: `L/N/P/S ∧ Default_Ignorable` is exactly the four Hangul fillers
  *     {U+115F, U+1160, U+3164, U+FFA0}, and all four are enumerated in `BLANK_GLYPH_CODE_POINTS`,
- *     so deleting this conjunct leaves both group suites green (mutation MUT-R4-B:
- *     31/31 real-DB, 12/12 unit). It is KEPT because it is the only conjunct that covers a
+ *     so deleting this conjunct leaves both group suites green (mutation MUT-R4-B; the measured
+ *     pass counts are not hand-copied here — see verification MD §31.4/§31.5, which also flags that
+ *     the local `EXPECT_DB=1` count and the CI-lane sentinel count are two different denominators).
+ *     It is KEPT because it is the only conjunct that covers a
  *     default-ignorable code point a FUTURE Unicode version adds, with no code change — the
  *     enumeration cannot do that. Stated as redundancy rather than as strength: a gate that finds
  *     MUT-R4-B green must be able to read here that this is the designed outcome, not a hole.

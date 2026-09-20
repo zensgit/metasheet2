@@ -23,8 +23,9 @@
  *                    (diagnostic only — the rule itself never reads a category NAME);
  *   - `defaultIgnorable` is MEASURED via `\p{Default_Ignorable_Code_Point}` by the rule module, not
  *                    asserted from a list in a document;
- *   - `visible`      is the rule module's own `isVisibleCodePoint` — the predicate
- *                    `cp ∈ [L N P S] ∧ cp ∉ DI ∧ cp ∉ BLANK_GLYPH_SET ∧ cp ∉ White_Space`;
+ *   - `visible`      is the rule module's own `isVisibleCodePoint`; this file does not re-transcribe
+ *                    the predicate (its only two verbatim copies are that module's header comment
+ *                    and the candidate PR body, labeled as a verbatim extract of it);
  *   - `verdict`      is the STAGE that decides a name made of exactly that code point, because
  *                    `visible=false` alone does not say WHICH half of the two-layer rule rejected
  *                    it: `trimmed-to-empty` (the edge trim emptied the name — true for U+2800,
