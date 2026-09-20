@@ -442,3 +442,199 @@ round-2 门审的 §7 NOTE 指出:实现者(round-2 实现代理)在自己的完
 - round-2 §9 交 owner 的三条（P2-5 持久 vs 反应式形状 OPEN、被挡住写动作不自动重放的产品决策、§3.2 管理面板 UI 未列入锁文分期清单）——本轮未触碰这些讨论，原样沿用 round-2 的登记
 
 一切仍是**候选**，不构成"已裁 / 已 ratify"；本节记录的红绿与数字均可复核（分支 `feat/approval-template-groups-phase4-daily-ops`）。
+
+---
+
+## 10. 第 3 轮验证(对齐 `impl-gate-A5-daily-ops-round2b-20260921.md`:P2-D / P3-E / P3-F / NIT-B / NIT-C)
+
+> 起点 head(门审对象)= `288530a0cdc17067910994e758a705e631bff5b7`。设计见设计 MD §6「组织上下文生命周期」。
+> **一切是候选**:未裁、未 ratify、未合并、未开 PR、未 undraft。
+> 本节的「未做」逐条给理由,**前两轮的结果只作历史证据,不填充本轮未执行项**。
+
+### 10.1 改了什么(6 个源文件 + 3 个 spec + 2 个 MD;零新增文件)
+
+| 文件 | 改动 |
+|---|---|
+| `apps/web/src/composables/authPrincipal.ts` | 新增 `onAuthSessionSwitch` + 内部 `readAuthSessionSignature`。**延后一个微任务再读签名**:`useAuth.setToken`/`clearToken` 先发通知后写存储,通知那一刻读到的是离场会话 |
+| `apps/web/src/views/approval/TemplateCenterView.vue` | 闩锁 → principal-keyed claim(失败即丢弃);`onAuthSessionSwitch` 生命周期监听(清理同步 / 重取延后一 tick);`flatListStale` + `visibleTemplates`;`loadData`/`loadCategories`/`loadRecentTemplates` 请求代数;`reloadOrgScopedSurfaces()`(分节/面板/平铺/分类/最近使用);重试控件;`onPageSessionOrgChange` 的 own-switch 窗口;过强注释改写 |
+| `apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue` | 自有 principal 重置(含 `loadGeneration++`)+ own-switch 例外(保 `pendingRetry`/草稿,重放才成立);NIT-B 固定 `data-testid` + `data-archived` |
+| `apps/web/src/views/approval/TemplateGroupSections.vue` | 同上(无草稿态) |
+| `apps/web/src/views/approval/templateCenterLabels.ts` | 重试控件文案(ZH/EN) |
+| `apps/web/src/approvals/api.ts` | NIT-C 文案 |
+| 3 个 spec | 17 条新用例(§10.2);两条 NIT-B 断言改写 + 一条 NIT-C 断言 |
+
+### 10.2 新增用例(17 条,全部落在既有文件;用例名逐字对应 ①-④)
+
+**① 外部身份变化 —— `apps/web/tests/approvalTemplateCenterCategory.spec.ts`**
+
+| 用例 | file:line |
+|---|---|
+| `(① sign-out) clears the previous account's organization list AND its grouped/flat data, leaves no error behind, and re-asks nothing` | `apps/web/tests/approvalTemplateCenterCategory.spec.ts:1225` |
+| `(① different account) re-asks for the NEW account's organizations; the entry comes back for it and carries none of the previous account's options` | `:1275` |
+| `(① same account, rights change) losing the second organization re-asks and takes the entry away — no stale list, no error` | `:1311` |
+| `(① same account, rights change) GAINING a second organization brings the entry back without a reload` | `:1344` |
+| `(① another tab) a token swapped with NO notification at all is caught by the principal-keyed claim on the next entry into the grouped view` | `:1373` |
+| `(①) a "blocked on a session-org choice" state does not carry over to the next identity — acceptance J's control holds for a single-org successor` | `:1409` |
+| `(①) an external principal change drops this panel's rendered groups, and the load it had in flight cannot commit afterwards` | `apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts:785` |
+| `(①) an external principal change drops the rendered sections, and the load in flight for the previous identity cannot commit afterwards` | `apps/web/tests/approvalTemplateCenterSections.spec.ts:1247` |
+| 既有 `(i) switching accounts …`(r2)**被补强**:不再只断言清空,追加 `sessionOrgsCalls === 2` 与「入口回来」 | `apps/web/tests/approvalTemplateCenterCategory.spec.ts:1129` |
+
+**② 所有数据视图同步**
+
+| 用例 | file:line |
+|---|---|
+| `(②) switching organization re-reads the FLAT gallery and the category list, not only the grouped surfaces`(并断言本页自己切换**不多发** session-orgs,且再次进入分组视图仍不发) | `apps/web/tests/approvalTemplateCenterCategory.spec.ts:1451` |
+| `(②) while the new organization's template list is in flight the flat surfaces show their empty state, never the previous organization's rows`(注入延迟;期间断言 `[data-el-row]` 为 0 且 store **仍持有**旧行 ⇒ 证的是「拒绝渲染」而不是「store 空了」) | `:1495` |
+
+**③ 异步三出口**
+
+| 用例 | file:line |
+|---|---|
+| `(③ catch exit) a stale loadGroups() FAILURE landing after a newer one must not post the previous org's error over the new org's list` | `apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts:691` |
+| `(③ finally exit) a stale loadGroups() settling while the newer one is STILL in flight must not clear the newer request's loading state`(带正控:竞态前空行**在场**) | `:735` |
+| `(③ catch exit) a stale loadAll() FAILURE landing after a newer one must not replace the new org's sections with the previous org's error` | `apps/web/tests/approvalTemplateCenterSections.spec.ts:1170` |
+| `(③ finally exit) a stale loadAll() settling while the newer one is STILL in flight must not clear the newer request's loading state`(带正控:结算后 loading 态**不在场**) | `:1205` |
+| (成功出口 = r2 既有的两条 `(ii) …`,本轮未动) | — |
+
+**④ 失败可恢复**
+
+| 用例 | file:line |
+|---|---|
+| `(④) a FAILED organization-list lookup offers a retry, and the retry re-asks and brings the entry up` | `apps/web/tests/approvalTemplateCenterCategory.spec.ts:1549` |
+| `(④) after a failed lookup, simply re-entering the grouped view re-asks — the entry is not latched off for the lifetime of the view` | `:1582` |
+| `(④) a request issued for the PREVIOUS identity that lands with a 403 afterwards triggers no recovery action for the new one` | `:1611` |
+
+### 10.3 Mutation 台账 —— 本轮 15 条新探针 + r1/r2/r2b 全部重跑(零回退)
+
+> 规程:`cp` 备份到 `~/.claude/projects/<proj>/reviews/a5r3b-mutbak/` → 改坏 → **`cmp` 确认文件真的变了**(防无效 mutation)→ 跑 → 记 → `cp` 还原 → `cmp` 校验。全程零 `git checkout --` / `reset --hard` / `stash drop`;结束 `git status --porcelain` 为空。
+
+#### (a) 本轮新代码的 15 条探针
+
+| # | 目标 | 改法 | 结果 | 判定 |
+|---|---|---|---|---|
+| **M-p** | panel `loadGroups` 的 `finally { if (isCurrent()) … }` | 改成无条件 | **1 failed / 14 passed**,红在 `(③ finally exit)`:`expected <li …> to be null` | 承重 ✅ **P3-F 的一角关闭** |
+| **M-q** | sections `loadAll` 的 `finally` 同上 | 同上 | **1 failed / 27 passed**,红在 `(③ finally exit)`:`expected null not to be null` | 承重 ✅ |
+| **M-r** | panel `catch` 的 `if (!isCurrent()) return` | 删 | **1 failed / 14 passed**,红在 `(③ catch exit)`:`expected <p role="alert" …> to be null` | 承重 ✅ |
+| **M-s** | sections `catch` 的 `if (!isCurrent()) return` | 删 | **1 failed / 27 passed**,红在 `(③ catch exit)`:`expected <div …> to be null` | 承重 ✅ |
+| **M-t** | host claim 的 keying + 复位一并换回布尔闩锁 | `if (mutRequested) return` | **8 failed**(全部 ① / ④ 用例) | 承重 ✅ **P2-D 关闭** |
+| **M-t2**(窄化) | 只去掉 keying(`if (pageSessionOrgsClaim) return`),保留监听器复位 | 同上 | **1 failed**,恰好红在 `(① another tab)` | 承重 ✅(keying 单独有判别力) |
+| **M-u** | 整个 `onAuthSessionSwitch` 监听体换成 no-op | 早 return | **7 failed**(①×5 / ②×1 / ④×1) | 承重 ✅ |
+| **M-v** | settle 里的「失败丢弃 claim」 | 删那一行 | **2 failed**,两条 ④ 重试用例 | 承重 ✅ |
+| **M-w** | `visibleTemplates` 的陈旧闸 | 恒返回 `store.templates` | **2 failed**(① sign-out / ② in-flight) | 承重 ✅ **P3-E 的渲染侧** |
+| **M-x** | `reloadOrgScopedSurfaces` 去掉平铺三件 | 只留两个分组面 | **2 failed**(两条 ②) | 承重 ✅ **P3-E 的重读侧** |
+| **M-y** | sections 重置里的 `loadGeneration++` | 删 | **1 failed**,红在 sections 的 `(①)` | 承重 ✅ |
+| **M-ab** | panel 重置里的 `loadGeneration++` | 删 | **1 failed**,红在 panel 的 `(①)` | 承重 ✅ |
+| **M-ac** | panel 重置里的 `groups.value = []` | 删 | **1 failed**,红在 panel 的 `(①)` | 承重 ✅ |
+| **M-z** | `onAuthSessionSwitch` 的微任务延后 | 改成通知时立即读签名 | **8 failed**(三个 spec 全部 ① + ② + ④) | 承重 ✅ |
+| **M-aa** | 重试控件 `v-if="pageSessionOrgsFailed"` | → `false` | **1 failed**,红在 ④ 重试用例 | 承重 ✅ |
+| **M-ad** | claim 的 own-switch 重钥 | 一律置 null | **1 failed**,红在 `(②) switching organization …` 的「再次进入不重发」断言 | 承重 ✅ |
+| **M-ae** | 监听器里的 `sessionOrgRequiredSeen.value = false` | 删 | **1 failed**,红在 `(①) a "blocked on a session-org choice" …` | 承重 ✅ |
+| **M-nitc** | NIT-C 文案 | 换回 `letter (A–Z)` / `英文字母（A–Z）` | **1 failed**,红在 `approvalTemplateGroupsClient.spec.ts` 的 `not.toMatch(/A\s*[–-]\s*Z/)` | 承重 ✅ |
+
+**未找到判别输入、登记为纵深防御(不算进承重分母)**:host settle 的 claim 身份比对(设计 MD §6.4 b)、`loadCategories` / `loadRecentTemplates` 的代数守卫。理由:`useSessionOrg.loadSessionOrgs` 自己的代数守卫已在上游压住陈旧答案的错误写入,单独中和它们造不出可见差异。**不声称承重**。
+
+#### (b) r1 / r2 / r2b 全部前轮探针重跑 —— **零回退**
+
+| 探针(前轮编号) | 本 head 结果 | 红在哪 |
+|---|---|---|
+| M-e | 1 failed | `P2-C: an unbound multi-org admin whose session-orgs lookup ALSO fails …` |
+| M-f | 1 failed | 同上 |
+| M-c(`provide` 删除) | 3 failed | 两条 P1-A + 本轮 `(①) blocked-state …` |
+| M-d(`useId` 写死) | 1 failed | `SessionOrgSwitcher.spec.ts > two instances … distinct select ids` |
+| M7(`hasMultipleOrgs` → `length > 0`) | 3 failed | 验收 J 正控 + 本轮两条「权限变化」 |
+| M7b(`watch(viewMode)` 不取数) | ≥3 failed | 已绑定入口 / 切换重读 / `(i) signing out` |
+| M7c(切换后两处分组重读删) | ≥3 failed | 切换重读 / P1-A / 本轮 `(②) …FLAT gallery…` |
+| M7d(切换器 `v-if` → false) | ≥3 failed | 三条入口用例 |
+| M-a / M-a2(子组件 `&& sessionOrgHost === null`) | 3 / 2 failed | P1-A 与 hosted 用例 |
+| M1 / M2 / M3(分节分页三分支) | 2 / 1 / 1 failed | P2-3 三条(M2 = r1 存活项,仍承重) |
+| M4 / M4b / M5 / M6 / M6b | 2 / 3 / 1 / 1 / 1 failed | P2-1 / P2-4 / P2-2 各自判据 |
+| M-g / M-h(归档 / 解档重读) | 1 / 1 failed | P3-3 / P3-D |
+| M-i(P3-2 文案换回无规则句) | 2 failed | 客户端映射 + 面板渲染 |
+| **M8 / M8b / M9(后端,真库)** | 各 **1 failed / 18 passed / 1 skipped** | P3-1 typed 400 ×2、P1-3 CJK 名 400 |
+
+### 10.4 真后端 + 自起 headless chromium(**未使用会话共享的 MCP 浏览器**)
+
+**台**:一次性库 `metasheet2_a5r3b_20260921`(`-O ms2testbed`,`rolsuper = f`;`psql` 核 `current_database()` = 该库),`DATABASE_URL` / `ATTENDANCE_TEST_DATABASE_URL` / `KANBAN_DB` / `PGUSER` / `PGDATABASE` / `PGHOST` 全部指向它(发包前已按硬约束 `grep -n 'DATABASE_URL' .github/workflows/*.yml` 与各 `package.json` 做连接串变量普查);后端 `tsx src/index.ts` on :7801;前端 `vite` on :5231 代理 `/api` → :7801;`globalThis.__APPROVAL_MOCK__ = false`(`api.ts:36-38` 自己写明的 Playwright 钩子)让审批面走真网络;playwright chromium headless,自起自关。
+
+种子:`multi-admin`(org-alpha + org-beta 两条 `user_orgs` 活跃)、`solo-member`(仅 org-alpha);每个 org 各一个分组(`Alpha Group One` / `Beta Group One`)与一个模板。
+
+| 观测 | 输出(逐字) | 对应边界 |
+|---|---|---|
+| B0 挂载 | `mount list reqs = 2` `["/api/approval-templates?page=1&pageSize=10","/api/approval-templates/categories"]`;`flat switchers = 0` | 平铺无常驻切换器 |
+| B1 进分组 | `grouped switchers = 1`;`options = ["org-alpha","org-beta"]`;`shows Alpha grp = true` | 入口可达 |
+| B2 切到 org-beta | `switchers after = 1`;`shows Beta grp = true`;`shows Alpha grp = false`;**`flat-list reqs = 3`(含一条裸 `?page=1&pageSize=10`)**;`category reqs = 2`;**`session-orgs reqs = 0`** | ② 平铺重读 + own-switch 不多问组织 |
+| C0→C1→C2 在途窗口 | `flat rows at mount = 2` → **`flat rows IN FLIGHT = 0`** → `flat rows AFTER = 2`(用 `page.route` 卡住切换后的 `?page=` 响应) | ② 不把旧组织数据当新结果 |
+| B3 同账号失权(库里置 `is_active=false` 再换发同主体令牌) | `session-orgs reqs = 1`;`switchers = 0`;`retry control = 0`;`sections error = 0` | ① 失权 ⇒ 入口消失且无错误残留 |
+| B4 同账号复权 | `session-orgs reqs = 1`;`switchers = 1`;`options = ["org-alpha","org-beta"]` | ① 仍具资格 ⇒ 无刷新回来 |
+| B5 登出 | `switchers = 0`;`retry = 0`;`sections error = 0`;`panel error = 0`;**`session-orgs reqs = 0`**;`shows any org grp = false` | ① 登出 ⇒ 消失、不重问、无错误 |
+| D1 组织列表 500 | `session-orgs reqs = 1`;`switchers = 0`;**`retry control = 1`** | ④ 失败可见且可区分于「无资格」 |
+| D2 点重试 | `session-orgs reqs = 1`;`switchers after retry = 1`;`retry control = 0`;`options = ["org-alpha","org-beta"]` | ④ 可恢复,非永久闩锁 |
+| E1 换成单 org 账号 | `session-orgs reqs = 1`;`switchers = 0`;`retry = 0`;`sections error = 0`;`shows Beta grp = false`;`shows Alpha grp = true`(solo-member **本就是** org-alpha 成员,这是它自己 org 的新读,正确) | ① 换账号 |
+| 控制台 | `CONSOLE ERRORS = 1`,唯一一条是 D1 故意注入的 500 | — |
+
+截图:`/tmp/a5r3b-browser/{b1,b2,b3-rights-change,b4-regained,b5-signed-out,c1-inflight,c2-after,d1-failed-lookup,d2-after-retry,e1-other-account}.png`。
+
+**真浏览器 NOT RUN(逐条给理由,不用前两轮结果填充)**:
+1. **③ 三出口**:需要把两个重叠请求分别卡在成功 / 失败 / finally 三种落地顺序上,真浏览器里没有可靠的「让第一个请求晚于第二个但先进 finally」的构造点;留在 vitest 用可控 resolver 驱动(§10.2 四条用例 + M-p/M-q/M-r/M-s 四条 mutation)。**登记为 NOT RUN,不推论**。
+2. **「平铺行换成另一批」**:本地真后端的模板列表**不是 org 作用域的**(两个 org 读到同一批模板,已实测),这是本切片之外的既有后端性质。因此真浏览器能证「会重读」+「窗口期不显示旧行」,**证不出「行内容换了」**。登记,不夸大。
+3. **相位 C / D 的 21 条 r1 判据**:本轮未重跑,理由与 r2b 相同(未触碰其代码路径)。前两轮结果只作历史证据。
+
+### 10.5 静态检查与全量实跑(数字逐字抄自输出)
+
+```
+# 5 个被触碰 spec
+Test Files  5 passed (5)
+      Tests  99 passed (99)        # 起点 head 为 82 ⇒ +17
+
+# 邻居 5 个(templateCenterI18n / approvalTemplateGovernance / useSessionOrg /
+#            AttendanceSessionOrgSwitcher / approval-e2e-permissions)
+Test Files  5 passed (5)
+      Tests  75 passed (75)
+
+# required 门真正承重的那条 exec 巨行(五个相关 spec 的 token 全在该行上)
+EXECLINE_EXIT=0
+Test Files  473 passed (473)
+      Tests  7339 passed (7339)     # r1 记录为 473 / 7307
+
+# vue-tsc -b --force
+VUE_TSC_EXIT=0 ; `error TS` 计数 = 1 ,唯一一条 = vite.config.ts(28,29) TS2769
+  → 归因:`git diff --quiet origin/main HEAD -- apps/web/vite.config.ts` = 0(与 main 逐字相同)
+  → 本轮 6 个被改的 src 文件在 vue-tsc 输出里 0 命中
+
+# vite build
+VITE_BUILD_EXIT=0 ,✓ built in 12.10s
+
+# packages/core-backend tsc --noEmit
+error TS 计数 = 0
+
+# 真库(一次性库,非超级 owner)
+Test Files  3 passed (3)
+      Tests  28 passed | 3 skipped (31)
+```
+
+**required 全脚本(`run-required-web-tests.sh`)本地 EXIT=1 —— 原因是一条与本轮无关的既有失败,已机械取证**:
+
+- 失败项:`tests/multitable-recovery-archive-modal.spec.ts > ManualArchiveCapture > does not submit when durable request identity cannot be saved`(`:161:29`,`expect(ctx.capture).not.toHaveBeenCalled()`)。
+- 该文件不 import 本轮改过的任何模块(`grep -nE 'authPrincipal|useAuth|TemplateCenterView|TemplateGroupSections|ApprovalTemplateGroupsPanel|approvals/api|templateCenterLabels'` 零命中)。
+- 在**门审起点 head `288530a0cd`** 的独立检出上单跑:**同一条用例、同样 `1 failed | 53 passed (54)`**。
+- 在 **`origin/main`(`5edf4c3e17d3608fa4513b5ffd801142da026dcf`)** 的同一检出上单跑:**同样 `1 failed | 53 passed (54)`**。
+- ⇒ 既有条件(本机环境,main 的 required CI 现为绿),**不是本轮回退**,本轮不在其范围内修它。脚本 `set -euo pipefail` 在该块处终止,所以它后面的那条 `exec` 巨行由本轮**单独实跑**(上方 `EXECLINE_EXIT=0`,473/7339)。
+
+### 10.6 CI / 爆炸半径 census(对本轮 head 逐条机械复核)
+
+| 门 | 结果 | 证据 |
+|---|---|---|
+| 锁 v2.13 §2「考勤原文件与 `useSessionOrg.ts` 不动」 | **PASS** | `git diff --quiet e90d16c90f HEAD -- apps/web/src/composables/useSessionOrg.ts` = 0;`… -- apps/web/src/views/attendance/AttendanceSessionOrgSwitcher.vue` = 0 |
+| 锁外新能力 | **零** | 零新端点 / 零新路由 / 零新 flag / 零 DDL / 零迁移;新增的唯一跨模块导出是 `onAuthSessionSwitch`(设计 MD §6.7-3 登记) |
+| CI 文件 / s6a pin / plugin-tests.yml | **字节不变** | `git diff --name-only 288530a0cd HEAD -- .github packages scripts` = 0 个文件 |
+| required exec 行 | **恰 1 条**,五个相关 spec 的 token 全在该行上 | `grep -c '^exec npx vitest'` = 1 |
+| 新增文件 | **零**(17 条用例全部落在既有 spec) | `git diff --name-only --diff-filter=A` 仅两个既有 MD 之外无新文件 |
+
+### 10.7 本轮未做 / 交 owner(不藏)
+
+1. 真浏览器的 ③ 与「平铺行换批」两项 —— §10.4 已逐条登记为 NOT RUN 并给理由。
+2. host settle 身份比对、`loadCategories`/`loadRecentTemplates` 代数守卫 —— 纵深防御,无判别输入,**不声称承重**。
+3. `multitable-recovery-archive-modal.spec.ts` 的既有失败 —— 已取证为 main 上同形,不在本轮范围。
+4. 平铺模板列表非 org 作用域(后端既有性质)—— 登记为观察,未改。
+5. 合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— **全部未做,仍需 owner 逐条授权**。
+
