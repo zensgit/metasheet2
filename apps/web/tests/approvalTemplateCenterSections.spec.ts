@@ -32,7 +32,7 @@
  * leaving the row exactly where it was.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, defineComponent, h, nextTick, provide, ref, type App as VueApp } from 'vue'
 import { ApprovalApiError } from '../src/approvals/api'
 import { useAuth } from '../src/composables/useAuth'
 import { useLocale } from '../src/composables/useLocale'
@@ -762,6 +762,79 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     // of every page the section ever had.
     expect(listTemplatesBySectionSpy.mock.calls.length).toBe(fetchCountBeforeMove + 1)
   })
+
+  // P2-B (impl-gate-A5-daily-ops-round1-20260920.md): of `applyItemMove`'s three post-move
+  // branches, the two above cover "target already complete" and "source already paginated". The
+  // THIRD — target already paginated — shipped with no case at all, and the gate's mutation M2
+  // (revert `:582` to the pre-fix `target.hasMore = target.items.length < target.total`) survived
+  // the whole 22-case file. The mirror of the source test does NOT discriminate it: with page 1 =
+  // 10 of 11 and one row moved in, the pre-fix line also computes `hasMore = 10 < 12 = true` and
+  // the rendered count is `12` either way. The two observables that separate them are the target's
+  // page-1 REFRESH REQUEST (fix: exactly one; pre-fix: none) and the server's post-move page 1
+  // actually being RENDERED (fix: the moved row is in it; pre-fix: the stale ten rows stand).
+  it('P2-3 (target, already-paginated case): moving INTO an already-paginated section re-reads its loaded range instead of guessing where the new row landed', async () => {
+    const purchasePage1 = Array.from({ length: 10 }, (_, i) => template(`tpl_P${i}`, `Purchase ${i}`))
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_leave', name: 'Leave', sortOrder: 1 }),
+      group({ id: 'atg_purchase', name: 'Purchase', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      // Source: one row, complete — so the source side contributes ZERO requests and every
+      // request counted below belongs to the target branch under test.
+      if (section === 'group:atg_leave') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      // Target: 10 of 11 loaded before the move — `hasMore` true, i.e. ALREADY paginated.
+      if (section === 'group:atg_purchase') {
+        if (page === 1) return Promise.resolve({ data: purchasePage1, total: 11 })
+        throw new Error(`unexpected page ${page} requested for group:atg_purchase`)
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    // Pre-state sanity: the target really is in the paginated branch. If it were complete, the
+    // sibling case above would be the one exercised and this test would assert nothing new.
+    expect(
+      container!.querySelector('[data-testid="template-group-section-more-group:atg_purchase"]'),
+    ).not.toBeNull()
+    const fetchCountBeforeMove = listTemplatesBySectionSpy.mock.calls.length
+
+    // After the move the backend's page 1 for this bucket CHANGES: the moved row sorts into it and
+    // pushes the old page 1's last row down to page 2. A client cannot derive that from a local
+    // `total` bump — which is exactly why the fix re-reads the loaded range.
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      if (section === 'group:atg_leave') return Promise.resolve({ data: [], total: 0 })
+      if (section === 'group:atg_purchase') {
+        if (page === 1) {
+          return Promise.resolve({ data: [template('tpl_1', 'Row 1'), ...purchasePage1.slice(0, 9)], total: 12 })
+        }
+        throw new Error(`unexpected page ${page} requested for group:atg_purchase`)
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_purchase')
+
+    const purchaseSection = container!.querySelector('[data-testid="template-group-section-group:atg_purchase"]')!
+    // (1) The moved row is RENDERED inside the target, not merely counted.
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-item-tpl_1"]')).not.toBeNull()
+    // (2) Exactly one extra round-trip, and it is the target's page 1.
+    expect(listTemplatesBySectionSpy.mock.calls.length).toBe(fetchCountBeforeMove + 1)
+    expect(listTemplatesBySectionSpy.mock.calls.at(-1)![0]).toMatchObject({
+      section: 'group:atg_purchase',
+      page: 1,
+    })
+    // (3) Count, rendered rows and the remaining-rows affordance all agree with the server after
+    //     the refresh: 12 in the bucket, 10 loaded, more genuinely available.
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim()).toBe('12')
+    expect(purchaseSection.querySelectorAll('[data-testid^="template-group-section-item-"]').length).toBe(10)
+    expect(
+      container!.querySelector('[data-testid="template-group-section-more-group:atg_purchase"]'),
+    ).not.toBeNull()
+  })
 })
 
 /**
@@ -886,5 +959,130 @@ describe('TemplateGroupSections — acceptance J page-level entry (design lock v
     expect(error!.textContent).toContain('模板分组服务暂不可用')
     // The reactive-not-proactive rule: no session-org lookup is made for a non-J failure.
     expect(httpMocks.apiFetch).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * P1-A (impl-gate-A5-daily-ops-round1-20260920.md) — HOSTED mode.
+ *
+ * Every case above mounts this view standalone, where it keeps its own `useSessionOrg()` instance,
+ * draws its own switcher and replays its own blocked `loadAll()` (the D3-1 block below pins that
+ * whole loop, and acceptance J's "remove the handling of that code" mutation is red there). Inside
+ * TemplateCenterView a host now provides the page's single instance, and this view must then draw
+ * NOTHING of its own — a second live `useSessionOrg()` instance is not a cosmetic duplicate: the
+ * composable's `onAuthPrincipalChange` empties `orgs` on every instance that did not perform the
+ * switch, so a real browser measured the page dropping to ZERO switchers when the admin happened
+ * to use the sections view's copy instead of the page's.
+ */
+describe('TemplateGroupSections — hosted session-org entry (P1-A)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  let notifySessionOrgRequired: ReturnType<typeof vi.fn>
+  const sectionsRef = ref<{ loadAll: () => Promise<void> } | null>(null)
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    useAuth().setToken(
+      `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: 'org-a', exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`,
+    )
+    listApprovalTemplateGroupsSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockReset()
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    httpMocks.apiFetch.mockReset()
+    httpMocks.apiFetch.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/auth/session-orgs')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } }),
+        }
+      }
+      throw new Error(`unexpected call: ${path}`)
+    })
+    notifySessionOrgRequired = vi.fn()
+    sectionsRef.value = null
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountHosted() {
+    const { default: TemplateGroupSections } = await import('../src/views/approval/TemplateGroupSections.vue')
+    const { SessionOrgHostKey } = await import('../src/components/SessionOrgSwitcher.vue')
+    const { useSessionOrg } = await import('../src/composables/useSessionOrg')
+    const Host = defineComponent({
+      setup() {
+        // The real composable — the host's single instance, exactly as TemplateCenterView builds
+        // it, plus the host's own one fetch of the org list. Populating `orgs` is what makes "this
+        // view draws no switcher" discriminating: `SessionOrgSwitcher`'s own `v-if` hides it while
+        // `orgs` is empty, so a view that FAILED to defer would still render nothing here and the
+        // case would pass vacuously.
+        const sessionOrg = useSessionOrg()
+        void sessionOrg.loadSessionOrgs()
+        provide(SessionOrgHostKey, { sessionOrg, notifySessionOrgRequired })
+        return () => h(TemplateGroupSections as any, { ref: sectionsRef, onSelect: vi.fn() })
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  function sessionOrgRequired(): ApprovalApiError {
+    return new ApprovalApiError(
+      'An authenticated session organization is required',
+      403,
+      'SESSION_ORG_REQUIRED',
+    )
+  }
+
+  it('a 403 SESSION_ORG_REQUIRED draws NO switcher here, makes no session-org lookup of its own, and reports the code to the host exactly once', async () => {
+    listApprovalTemplateGroupsSpy.mockRejectedValue(sessionOrgRequired())
+
+    await mountHosted()
+
+    const sessionOrgLookups = () =>
+      httpMocks.apiFetch.mock.calls.filter(([path]) => String(path).startsWith('/api/auth/session-org')).length
+    // Sanity: the host's instance holds two orgs, so anything that rendered a switcher here would
+    // actually be visible (the component hides itself while `orgs` is empty).
+    expect(sessionOrgLookups()).toBe(1)
+
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    expect(notifySessionOrgRequired).toHaveBeenCalledTimes(1)
+    // No SECOND lookup: the one `/api/auth/session-orgs` call belongs to the host.
+    expect(sessionOrgLookups()).toBe(1)
+    // The generic load error is NOT what is shown for this code — that regression is what D3-1
+    // fixed and it must survive hosting.
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+  })
+
+  it('the host replaying loadAll() after its switch brings the sections back', async () => {
+    listApprovalTemplateGroupsSpy.mockRejectedValueOnce(sessionOrgRequired())
+    listApprovalTemplateGroupsSpy.mockResolvedValue([group({ id: 'atg_a', name: 'Group A', sortOrder: 1 })])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) =>
+      section === 'group:atg_a'
+        ? Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+        : Promise.resolve({ data: [], total: 0 }),
+    )
+
+    await mountHosted()
+    expect(container!.querySelector('[data-testid="template-group-section-group:atg_a"]')).toBeNull()
+
+    // This is literally what TemplateCenterView.onPageSessionOrgChange calls on a successful switch.
+    await sectionsRef.value!.loadAll()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="template-group-section-group:atg_a"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="template-group-section-item-tpl_1"]')).not.toBeNull()
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
   })
 })
