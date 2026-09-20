@@ -33,6 +33,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
+import { ApprovalApiError } from '../src/approvals/api'
+import { useAuth } from '../src/composables/useAuth'
 import { useLocale } from '../src/composables/useLocale'
 import type { ApprovalTemplateGroupDTO, ApprovalTemplateGroupReorderResultDTO } from '../src/types/approval'
 
@@ -43,14 +45,43 @@ const reorderApprovalTemplateGroupsSpy = vi.fn<[string[]], Promise<ApprovalTempl
 const linkApprovalTemplateToGroupSpy = vi.fn<[string, string], Promise<void>>()
 const unlinkApprovalTemplateFromGroupSpy = vi.fn<[string], Promise<void>>()
 
-vi.mock('../src/approvals/api', () => ({
-  listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
-  listTemplateCategories: () => listTemplateCategoriesSpy(),
-  listTemplatesBySection: (params: unknown) => listTemplatesBySectionSpy(params),
-  linkApprovalTemplateToGroup: (templateId: string, groupId: string) =>
-    linkApprovalTemplateToGroupSpy(templateId, groupId),
-  unlinkApprovalTemplateFromGroup: (templateId: string) => unlinkApprovalTemplateFromGroupSpy(templateId),
-  reorderApprovalTemplateGroups: (groupIds: string[]) => reorderApprovalTemplateGroupsSpy(groupIds),
+// D3-1 (gate `impl-gate-A4-on-A2-merge-fix-round1-20260920.md` §6, 2026-09-20): `ApprovalApiError`
+// is re-exported from the REAL module rather than hand-rolled here. The component branches on
+// `err instanceof ApprovalApiError`, which is a class-IDENTITY check — a look-alike class defined
+// in this factory would make the branch pass against a shape this file invented, not against the
+// class `approvals/api.ts` actually throws. `importActual` keeps the two the same object; the
+// `.code`-carrying contract of that class is separately pinned, on the real fetch path, by
+// `approvalTemplateGroupsClient.spec.ts`'s 403 cases.
+vi.mock('../src/approvals/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+  return {
+    ApprovalApiError: actual.ApprovalApiError,
+    listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
+    listTemplateCategories: () => listTemplateCategoriesSpy(),
+    listTemplatesBySection: (params: unknown) => listTemplatesBySectionSpy(params),
+    linkApprovalTemplateToGroup: (templateId: string, groupId: string) =>
+      linkApprovalTemplateToGroupSpy(templateId, groupId),
+    unlinkApprovalTemplateFromGroup: (templateId: string) => unlinkApprovalTemplateFromGroupSpy(templateId),
+    reorderApprovalTemplateGroups: (groupIds: string[]) => reorderApprovalTemplateGroupsSpy(groupIds),
+  }
+})
+
+// The session-org half of acceptance J runs through the REAL `useSessionOrg`/`useAuth`
+// composables (same seam `ApprovalTemplateGroupsPanel.spec.ts` uses for the A-2 half) — only the
+// shared HTTP module is stubbed, so the D3-1 case below exercises the component's own branch and
+// the composable's own request/replay wiring rather than a mocked composable. `apiGet`/`apiPost`
+// are stubbed too because `importActual` above loads the real `approvals/api.ts`, which imports
+// all three from this module; nothing in this file routes through them.
+const httpMocks = vi.hoisted(() => ({
+  apiFetch: vi.fn(),
+  apiGet: vi.fn(),
+  apiPost: vi.fn(),
+}))
+vi.mock('../src/utils/api', () => ({
+  apiFetch: httpMocks.apiFetch,
+  apiGet: httpMocks.apiGet,
+  apiPost: httpMocks.apiPost,
+  getApiBase: () => '',
 }))
 
 function group(overrides: Partial<ApprovalTemplateGroupDTO>): ApprovalTemplateGroupDTO {
@@ -620,5 +651,130 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     item.click()
     await flushUi()
     expect(selectSpy).toHaveBeenCalledWith('tpl_1')
+  })
+})
+
+/**
+ * D3-1 (gate `impl-gate-A4-on-A2-merge-fix-round1-20260920.md` §6 owner item, 2026-09-20) —
+ * acceptance J's PAGE-LEVEL entry, which the A-2 × A-4 convergence had narrowed.
+ *
+ * Component-level acceptance J never regressed (`ApprovalTemplateGroupsPanel.spec.ts` covers the
+ * panel's own 403 → selector → retry loop). What the convergence changed is the FIRST hop: after
+ * the merge the grouped view became the primary surface and the A-2 panel a disclosure-gated
+ * manager, so a multi-org member who had not picked a session organization hit
+ * `TemplateGroupSections`'s generic `loadError` string first and had to find 「管理分组」 on their
+ * own to reach the selector. These cases pin the reinstated first-hop path.
+ *
+ * Isolation note: this block drives the REAL `useSessionOrg`/`useAuth` composables over the stubbed
+ * `apiFetch` (see the module mocks at the top), so a mutation of the component's own
+ * `SESSION_ORG_REQUIRED` branch is what these cases are sensitive to — not a mocked composable's
+ * say-so.
+ */
+describe('TemplateGroupSections — acceptance J page-level entry (design lock v2.13 §4 / §2)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const jwt = (org: string) =>
+    `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+
+  const jsonResponse = (status: number, body: unknown) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  })
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    localStorage.clear()
+    listApprovalTemplateGroupsSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockReset()
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    httpMocks.apiFetch.mockReset()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: TemplateGroupSections } = await import('../src/views/approval/TemplateGroupSections.vue')
+    app = createApp(defineComponent({ setup: () => () => h(TemplateGroupSections as any, {}) }))
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Drains both the api await chain and Vue's scheduler across macrotask turns — `flushUi`'s
+  // microtask-only loop is empirically short of the session-org switch settling (same reason
+  // `ApprovalTemplateGroupsPanel.spec.ts` has its own `settle`).
+  async function settle(rounds = 6) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  it('a 403 SESSION_ORG_REQUIRED on the first load shows the shared selector instead of the generic error, and picking an org replays the blocked load', async () => {
+    useAuth().setToken(jwt('org-a'))
+    let listAttempts = 0
+    listApprovalTemplateGroupsSpy.mockImplementation(async () => {
+      listAttempts += 1
+      if (listAttempts === 1) {
+        throw new ApprovalApiError('An authenticated session organization is required', 403, 'SESSION_ORG_REQUIRED')
+      }
+      return [group({ id: 'atg_a', name: '法务组', sortOrder: 1 })]
+    })
+    httpMocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/auth/session-orgs') {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+      }
+      if (path === '/api/auth/session-org' && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    await mountView()
+    await settle()
+
+    // First hop: selector present, and the generic top-level error NOT rendered in its place.
+    expect(listAttempts).toBe(1)
+    expect(container!.querySelector('[data-testid="session-org-switcher"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+    expect(container!.textContent).not.toContain('法务组')
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle(8)
+
+    expect(listAttempts).toBe(2)
+    expect(container!.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    expect(container!.textContent).toContain('法务组')
+  })
+
+  it('a single-org member never sees the selector, and any OTHER failure still renders the generic error', async () => {
+    // Two negative controls in one case, both aimed at the branch this slice added: it must key on
+    // the CODE, not on "a load failed" (which would put the selector in front of every outage) and
+    // not on "the view mounted" (which would show it to single-org members, contradicting §4 J).
+    useAuth().setToken(jwt('org-a'))
+    listApprovalTemplateGroupsSpy.mockRejectedValueOnce(new ApprovalApiError('模板分组服务暂不可用', 503, 'UPSTREAM_UNAVAILABLE'))
+
+    await mountView()
+    await settle()
+
+    expect(container!.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    const error = container!.querySelector('[data-testid="template-group-sections-error"]')
+    expect(error).not.toBeNull()
+    expect(error!.textContent).toContain('模板分组服务暂不可用')
+    // The reactive-not-proactive rule: no session-org lookup is made for a non-J failure.
+    expect(httpMocks.apiFetch).not.toHaveBeenCalled()
   })
 })
