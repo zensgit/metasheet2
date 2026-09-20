@@ -672,7 +672,7 @@ EXIT=2        # 错误条数:1,且就是这一条
 | 1 `apps/web` 类型 | `npx vue-tsc -b` | **只剩** `vite.config.ts(28,29) TS2769` 一条,与 §15.3 的 `origin/main` 基线**逐字相同**;13 条合流引入的错误全部消失 |
 | 2 `apps/web` 构建 | `npx vite build` | **exit 0**,`✓ built in 38.73s`(报告里 esbuild 的 6 条 `Multiple exports with the same name` 全部消失) |
 | 3 required web lane | `bash -e apps/web/scripts/run-required-web-tests.sh` | **exit 1**,但死在**与两条 lane 无关的、`origin/main` 自身就红的**一条上 —— 见 §15.5 |
-| 4 两条 lane 定向 spec | `npx vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel approvalTemplateCenterSections approvalTemplateCenterCategory templateCenterI18n approvalTemplateGovernance` | **8 files / 63 tests 全绿**(报告 Tree B2 是 1 failed \| 62 passed,那一条红就是 P2-1) |
+| 4 两条 lane 定向 spec | `npx vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel approvalTemplateCenterSections approvalTemplateCenterCategory templateCenterI18n approvalTemplateGovernance` | **8 files / 65 tests 全绿**(报告 Tree B2 同一组命令是 `Test Files 1 failed \| 7 passed (8)` / `Tests 1 failed \| 62 passed (63)`,那一条红就是 P2-1;本分支 65 = 报告的 63 + 本轮在 `approvalTemplateCenterCategory.spec.ts` 新增的 2 条分组视图用例,该文件因此由 8 条变 10 条) |
 | 5 后端 | `npx tsc --noEmit -p tsconfig.json`(core-backend) | **exit 0,零错** |
 | 6 CI 两点接线 | `node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs` | **12/12 pass** |
 | 7 s6a 封包指纹 | `node plugins/…/sealed-export-package-provenance.test.cjs` | **OK**(pin 在重放中每次撞到都按当时的 `plugin-tests.yml` 重算,最终值 `6af0690a3cb93891e1158d79d95ee325bdf5bbae42df09760932367e2ede264c` 与文件实测 sha256 相等) |
