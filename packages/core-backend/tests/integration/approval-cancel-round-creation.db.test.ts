@@ -2350,6 +2350,167 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // 两条都属 owner,已登记进设计 MD §3.4。将来若被修好,这条腿会红并点名自己。
   })
 
+  /**
+   * 正控 `P22(a)` / 负控 `N13(a)` 的共同夹具:一个**既是别人的代理、又自己决定别的节点**的人。
+   *
+   * `siblingNode: 'role'` —— `approval_role` 是 `assigneeType: 'role'`,席位行是 `(type='role',
+   * assignee_id='admin')`,**没有任何一行 `assignee_id = D`**;`approval_user` 是 A 的席位、被委托替换成 D。
+   * D 两个节点都亲自按,**全程 `/actions`,不碰 legacy 路由**。这是 `P22(a)`。
+   *
+   * `siblingNode: 'otherUser'` —— `approval_b` 是**第三人 E** 的 user 席位。D 在 `approval_a` 是 A 的代理,
+   * 然后走 **legacy** 路由把整单批掉、并把 `nodeKey` 报成 `approval_b`(E 的节点)。这是 `N13(a)`:
+   * 「凭据」不能是「这个节点在本单上存在」,否则指着别人的节点就能脱身。
+   */
+  async function delegateAlsoDecidesSiblingNode(
+    label: string,
+    siblingNode: 'role' | 'otherUser',
+  ): Promise<{ documentId: string; requesterId: string; delegatorA: string; delegateeD: string; otherUserE: string }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-xreq-${suffix}`
+    const delegatorA = `wi4-xdlA-${suffix}`
+    const delegateeD = `wi4-xdlD-${suffix}`
+    const otherUserE = `wi4-xothE-${suffix}`
+    const adminId = `wi4-xadm-${suffix}`
+    const delegationId = `wi4-xdeleg-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await authToken(baseUrl, delegatorA)
+    await authToken(baseUrl, otherUserE)
+    const tokenD = await authToken(baseUrl, delegateeD)
+
+    createdDelegationIds.add(delegationId)
+    await pool().query(
+      `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+       VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+      [delegationId, delegatorA, delegateeD],
+    )
+
+    const siblingKey = siblingNode === 'role' ? 'approval_role' : 'approval_b'
+    const siblingConfig =
+      siblingNode === 'role'
+        ? // `roles=admin` is on every token this file mints, and `assignmentMatchesActor` matches a
+          // ROLE seat on `actorRoles.includes(assignee_id)` — the same legacy shape `P15(a)` uses.
+          { assigneeType: 'role', assigneeIds: ['admin'], approvalMode: 'single' }
+        : { assigneeType: 'user', assigneeIds: [otherUserE], approvalMode: 'single' }
+
+    const templateId = await publishGraphTemplate(
+      adminToken,
+      {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_a',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: [delegatorA], approvalMode: 'single' },
+          },
+          { key: siblingKey, type: 'approval', config: siblingConfig },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-a', source: 'start', target: 'approval_a' },
+          { key: 'e-a-x', source: 'approval_a', target: siblingKey },
+          { key: 'e-x-end', source: siblingKey, target: 'end' },
+        ],
+      } as unknown as ReturnType<typeof oneNodeGraph>,
+      label,
+    )
+
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    const first = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(first.status, `approval_a: ${await first.clone().text()}`).toBe(200)
+
+    if (siblingNode === 'role') {
+      const second = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(second.status, `approval_role: ${await second.clone().text()}`).toBe(200)
+    } else {
+      // D is NOT the seat holder at `approval_b`. The legacy route does not consult seats at all —
+      // it locks any pending `platform` instance by id — which is precisely why the `nodeKey` it
+      // copies out of the body cannot be taken as evidence of anything.
+      const versionRow = await pool().query<{ version: number }>(
+        `SELECT version FROM approval_instances WHERE id = $1`,
+        [documentId],
+      )
+      const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
+        method: 'POST',
+        body: { version: versionRow.rows[0].version, metadata: { nodeKey: 'approval_b' } },
+      })
+      expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
+    }
+
+    // 正控先行,逐条:两个节点的席位形状必须是这条腿说的那样,否则断言可以因为别的原因平凡成立。
+    const seats = await pool().query<{ node_key: string | null; assignment_type: string; assignee_id: string; df: string | null }>(
+      `SELECT node_key, assignment_type, assignee_id, metadata->>'delegatedFrom' AS df
+         FROM approval_assignments WHERE instance_id = $1 ORDER BY node_key`,
+      [documentId],
+    )
+    expect(seats.rows).toEqual(
+      siblingNode === 'role'
+        ? [
+            { node_key: 'approval_a', assignment_type: 'user', assignee_id: delegateeD, df: delegatorA },
+            { node_key: 'approval_role', assignment_type: 'role', assignee_id: 'admin', df: null },
+          ]
+        : [
+            { node_key: 'approval_a', assignment_type: 'user', assignee_id: delegateeD, df: delegatorA },
+            { node_key: 'approval_b', assignment_type: 'user', assignee_id: otherUserE, df: null },
+          ],
+    )
+    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
+      [documentId],
+    )
+    // 两条 approve 行都由 D 写、都带一个**真实存在于本单**的 nodeKey —— 两条腿的差别只在那个节点
+    // 是不是 D 自己够得着的席位。
+    expect(records.rows).toEqual([
+      { actor_id: delegateeD, node_key: 'approval_a' },
+      { actor_id: delegateeD, node_key: siblingKey },
+    ])
+    const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(status.rows[0]?.status).toBe('approved')
+    return { documentId, requesterId, delegatorA, delegateeD, otherUserE }
+  }
+
+  it('§2-G3 第三句 正控 P22(a)(凭据修法的**反向**闸门,第二次自我推翻的见证)— 同一个人「在角色节点亲自决定」+「在 user 节点是 A 的代理」,**全程 /actions、不碰 legacy**:席位是 {A, D} 两人、201。凭据判据不得把这种诚实单据判成永久不可撤销', async () => {
+    const fixture = await delegateAlsoDecidesSiblingNode('g3dlg-rolesib', 'role')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // 凭据修法的**第一版**在这里 MEASURED 为 409 `seat_unresolvable`、零行 —— 一张完全诚实的单据变成
+    // 永久开不出撤销轮。根因:角色节点的席位行 `assignee_id` 是**角色**不是人,所以「nodeKey 必须命中
+    // 该 actor 自己的 user 行」对它恒为假。委托替换只动 `assignmentType === 'user'` 的席位
+    // (`ApprovalAssigneeResolver.pushResolved`),所以非 user 席位**没有东西可还原**,也就不构成脱身路径。
+    expect(attempt.thrown, 'an honest /actions-only document must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD])
+    expect(attempt.seats.length).toBe(2)
+  })
+
+  it('§2-G3 第三句 负控 N13(a) — 放宽不等于放开:D 走 legacy 把 nodeKey 报成**第三人 E 的 user 节点**(该节点在本单上确实存在)⇒ 仍然 409 seat_unresolvable、零行。凭据不是「这个节点存在」,是「这个 actor 在那里真有席位」', async () => {
+    const fixture = await delegateAlsoDecidesSiblingNode('g3dlg-othersib', 'otherUser')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
+      fixture.delegatorA,
+      fixture.delegateeD,
+      fixture.otherUserE,
+    ])
+    expect(attempt.seats).toEqual([])
+    // 这条腿与 P22(a) 只差**兄弟节点的席位类型**(role vs 另一个人的 user)。少了它,P22(a) 的放宽
+    // 可能只是「有第二个节点就放行」;有了它,放宽被钉死在「非 user 席位才放行」这一格上。
+  })
+
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // 硬化轮 P2-3 —— 被候选自己点名的**兄弟界面**:`loadPriorNodeApproverDeciders`(Lock-1 §K3)
   // 同样从 `approval_records(action='approve')` 推导席位、同样丢哨兵(共用 `isSystemSentinelActor`),
