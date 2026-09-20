@@ -6,7 +6,7 @@ import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './au
 import { explicitSessionOrg } from '../composables/authPrincipal'
 import { clearExplicitSessionOrg } from './explicitSessionOrg'
 import { createNetworkUnavailableError } from './networkErrors'
-import { sendDelete } from '../api/delete-fallback'
+import { sendDelete } from './delete-fallback'
 
 // Vite environment type declaration
 declare global {
@@ -40,7 +40,7 @@ export interface ApiFetchOptions extends RequestInit {
   omitHeaders?: readonly string[]
   /**
    * Send a DELETE as a literal DELETE with no POST+override fallback. Reserved for the transport
-   * probe (api/delete-fallback.ts `probeDeleteTransport`), which must observe the native verb.
+   * probe (utils/delete-fallback.ts `probeDeleteTransport`), which must observe the native verb.
    */
   bypassDeleteFallback?: boolean
 }
@@ -250,7 +250,7 @@ function handlePasswordChangeRequired(path: string): void {
  *    window would turn every open tab into a retry storm against a backend that just
  *    came up.
  *
- * 3. DELETE TRANSPORT FALLBACK (api/delete-fallback.ts). A customer egress silently
+ * 3. DELETE TRANSPORT FALLBACK (utils/delete-fallback.ts). A customer egress silently
  *    drops HTTP DELETE (2026-09-14). Every DELETE is dispatched through `sendDelete`:
  *    in 'override' mode it leaves as POST + `X-HTTP-Method-Override: DELETE`; in
  *    'native' mode a network-level failure (no response) buys exactly ONE retry as

@@ -4,7 +4,14 @@ import { useAuth } from '../src/composables/useAuth'
 import { getAuthPrincipalKey } from '../src/composables/authPrincipal'
 import { createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { NETWORK_UNAVAILABLE, networkUnavailableMessage } from '../src/utils/networkErrors'
-import { getDeleteTransport, resetDeleteTransportForTests } from '../src/api/delete-fallback'
+import { getDeleteTransport, resetDeleteTransportForTests } from '../src/utils/delete-fallback'
+
+/** A fetch-mock response that carries (or omits) the server's override receipt header. */
+function httpResponse(status: number, opts: { receipt?: boolean } = {}): Response {
+  const headers = new Headers()
+  if (opts.receipt) headers.set('X-Method-Overridden', 'DELETE')
+  return { ok: status >= 200 && status < 300, status, statusText: String(status), headers } as unknown as Response
+}
 
 describe('apiFetch', () => {
   const store: Record<string, string> = {}
@@ -351,7 +358,7 @@ describe('apiFetch', () => {
       const caught = await settled as Error & { code?: string }
       expect(caught.code).toBe(NETWORK_UNAVAILABLE)
       // Exactly two wire attempts: the native DELETE, then the one POST+override fallback
-      // (api/delete-fallback.ts). Deletes are idempotent, so that single replay is safe; the
+      // (utils/delete-fallback.ts). Deletes are idempotent, so that single replay is safe; the
       // 1200/3500ms backoff loop still never applies to DELETE.
       expect(fetchMock).toHaveBeenCalledTimes(2)
       expect(fetchMock.mock.calls[0][1].method).toBe('DELETE')
@@ -363,6 +370,40 @@ describe('apiFetch', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('DELETE-fallback: the POST+override retry is only accepted with the server receipt', async () => {
+    // The retry reaches something that answers 200 WITHOUT `X-Method-Overridden` — i.e. a hop stripped
+    // the header, or a same-path POST twin handled it. apiFetch must not hand that back as a
+    // successful delete.
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(transportFailure())
+      .mockResolvedValueOnce(httpResponse(200))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const caught = await apiFetch('/api/comments/c1/reactions', {
+      method: 'DELETE',
+      suppressUnauthorizedRedirect: true,
+    }).then(() => null, (error: unknown) => error) as Error & { code?: string }
+
+    expect(caught?.code).toBe('DELETE_TRANSPORT_UNCONFIRMED')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(getDeleteTransport()).toBe('override-unavailable')
+  })
+
+  it('DELETE-fallback: a receipt-carrying retry IS accepted and latches the tunnel', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(transportFailure())
+      .mockResolvedValueOnce(httpResponse(200, { receipt: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await apiFetch('/api/multitable/records/rec_1', {
+      method: 'DELETE',
+      suppressUnauthorizedRedirect: true,
+    })
+
+    expect(response.status).toBe(200)
+    expect(getDeleteTransport()).toBe('override')
   })
 
   it('DELETE-fallback: a DELETE that gets an HTTP response (404) is returned as-is, no second attempt', async () => {

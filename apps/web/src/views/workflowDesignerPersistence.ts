@@ -1,4 +1,4 @@
-import { sendDelete } from '../api/delete-fallback'
+import { sendDelete } from '../utils/delete-fallback'
 import { useAuth } from '../composables/useAuth'
 import type { WorkflowHubRouteState } from './workflowHubQueryState'
 
@@ -274,7 +274,7 @@ async function requestJson(path: string, init: RequestInit = {}) {
     },
   }
   // This helper talks to `fetch` directly (not utils/api.ts), so its one DELETE must opt into the
-  // session's DELETE transport fallback explicitly (api/delete-fallback.ts).
+  // session's DELETE transport fallback explicitly (utils/delete-fallback.ts).
   const response = String(init.method || 'GET').toUpperCase() === 'DELETE'
     ? await sendDelete((url, i) => fetch(url, i), path, request)
     : await fetch(path, request)

@@ -21,11 +21,22 @@
  *     DELETE by a header: the allowlist decision was made for a POST.
  *
  * `req.methodOverride = 'DELETE'` is set so audit/log hooks can record that the DELETE arrived through
- * the tunnel (values-free: the marker is the verb name only).
+ * the tunnel (values-free: the marker is the verb name only), and the RESPONSE carries
+ * `X-Method-Overridden: DELETE` as a receipt.
+ *
+ * WHY THE RECEIPT HEADER EXISTS. Without it a client in override mode cannot distinguish "the server
+ * rewrote my POST into the DELETE I meant" from "a proxy stripped my override header and a same-path
+ * POST twin handled the request". That is not hypothetical: `DELETE /api/comments/:id/reactions`
+ * (routes/comments.ts) has a POST twin on the SAME path that ADDS a reaction — the exact inversion of
+ * the caller's intent, answered 2xx. The web client refuses any 2xx/3xx override response that does
+ * not carry this receipt (apps/web/src/utils/delete-fallback.ts). It is set on the REQUEST path, before
+ * `next()`, so it is present whatever the route then answers (200, 404, 500).
  */
 import type { NextFunction, Request, Response } from 'express'
 
 export const METHOD_OVERRIDE_HEADER = 'x-http-method-override'
+/** Response receipt: proof that THIS server performed the rewrite. */
+export const METHOD_OVERRIDDEN_HEADER = 'X-Method-Overridden'
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -42,19 +53,30 @@ function headerValue(raw: unknown): string {
   return typeof raw === 'string' ? raw.trim().toUpperCase() : ''
 }
 
+/**
+ * The HEADER CLAIM alone: 'DELETE' when the override header carries exactly that value, whatever the
+ * request method is and whether or not authentication has run. Used by the pre-auth request log,
+ * which must not (and cannot) decide whether the rewrite will be applied. NEVER use this to gate a
+ * rewrite — `resolveMethodOverride` is the decision.
+ */
+export function readMethodOverrideHeader(req: Pick<Request, 'headers'>): 'DELETE' | null {
+  return headerValue(req.headers[METHOD_OVERRIDE_HEADER]) === 'DELETE' ? 'DELETE' : null
+}
+
 /** Pure decision, exported so the unit spec can pin the accept set without a server. */
 export function resolveMethodOverride(req: Pick<Request, 'method' | 'headers' | 'user'>): 'DELETE' | null {
   if (req.method !== 'POST') return null
   if (!req.user) return null
-  const value = headerValue(req.headers[METHOD_OVERRIDE_HEADER])
-  return value === 'DELETE' ? 'DELETE' : null
+  return readMethodOverrideHeader(req)
 }
 
-export function methodOverrideMiddleware(req: Request, _res: Response, next: NextFunction): void {
+export function methodOverrideMiddleware(req: Request, res: Response, next: NextFunction): void {
   const override = resolveMethodOverride(req)
   if (override) {
     req.method = override
     req.methodOverride = override
+    // Receipt, set before the route runs so it survives any status the route answers with.
+    res.setHeader(METHOD_OVERRIDDEN_HEADER, override)
   }
   next()
 }
