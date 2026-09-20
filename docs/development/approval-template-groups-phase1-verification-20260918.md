@@ -2357,7 +2357,7 @@ U+115F match_LNPS= true  cats= L,Lo      ← HANGUL CHOSEONG FILLER 是 Lo
 | 部分 | 内容 | 位置 |
 |---|---|---|
 | (1) 边缘裁剪(**装饰性**) | `String.prototype.trim` 的集合(JS `\s`)∪ `U+200B/200C/200D/2060` ∪ `U+00AD/180E/034F/2800/3164/115F/1160`。仍是 DB 裁剪集的**严格超集**,所以本函数返回的任何名字**按构造**满足 CHECK。**故意不裁**变体选择符 U+FE00–U+FE0F:裁了会把尾部 emoji 的呈现改写(`'报销☺️'` → `'报销☺'`);它们由 (2) 拒绝 | `ApprovalTemplateGroupService.ts` `NAME_EDGE_TRIM_CLASS` / `NAME_EDGE_TRIM_PATTERN`(**第 3 轮改实现不改集合**:符号现为 `NAME_EDGE_TRIM_CODE_POINTS` + `trimNameEdges` 线性扫描,`NAME_EDGE_TRIM_CLASS` 只作为被扫描比对的**规格**保留;成员集逐个码点等价,见 §30.2) |
-| (2) 可见字符要求(**承重**) | 裁剪后必须含至少一个字符,**既**在 `\p{L}\p{N}\p{P}\p{S}`,**又**不在 `\p{Default_Ignorable_Code_Point}` 且不是 `U+2800`。否则 400 `GROUP_NAME_REQUIRED` | `NAME_INVISIBLE_CLASS` / `NAME_VISIBLE_CHAR_PATTERN` |
+| (2) 可见字符要求(**承重**) | 裁剪后必须含至少一个 `visible(cp)` 为真的字符;谓词以 `packages/core-backend/src/services/approval-template-group-name-rule.ts` 为准,本表不再转抄谓词表达式。否则 400 `GROUP_NAME_REQUIRED` | `NAME_INVISIBLE_CLASS` / `NAME_VISIBLE_CHAR_PATTERN` |
 | (3) 长度上限 | `GROUP_NAME_MAX_LENGTH = 255`,按**码点**计(与 PG `char_length` 同口径),在任何 DB 往返**之前**判;超限 400 `GROUP_NAME_TOO_LONG`,`details` 带 `maxLength` / `actualLength`。**⚠️ 第 3 轮修复改了两处**:① 计数不再用 `[...s].length`(会为每个码点分配一个数组元素),改成 `countCodePoints` 的索引循环;② 这个闸**移到了裁剪与可见字符判定之前**,读的是**提交值**而不是裁剪后的值 —— 这是一条行为变化,见 §30.2 | `GROUP_NAME_MAX_LENGTH` / `countCodePoints` / `requireName` |
 
 **255 是怎么来的(P3-1 的「读列定义」在这里落空,必须说清)**:任务书说「读迁移里列定义决定字符数上限」——**该列是 `text`,没有长度上限可读**。所以这个上限是**应用层的候选决定**,用两条可核事实**推导**而不是发明:
@@ -2703,11 +2703,12 @@ exit 0
 | §30.5 的 MUT-R3-D(`U+FE0F U+3164 U+FE0F` 见证 `Default_Ignorable`) | 「只翻自己那一行」 | 对 head `ddc934fb63` **仍真**;**对当前树为假** —— 本轮把四个 Hangul filler 也写进了枚举表,于是该行由两条合取共同拒绝(MUT-R4-B 实测全绿)。已在测试文件该夹具注释处贴出更正 |
 | §30.5 的 MUT-R3-E(`U+FE0F U+2800 U+FE0F` 见证 U+2800) | 「只翻自己那一行」 | **仍真**,本轮以 MUT-R4-A 重新实测确认 |
 
-### 31.6 待裁点(第 2/3 轮三条原样结转,本轮新增两条)
+### 31.6 待裁点(第 2/3 轮三条原样结转,本轮新增三条)
 
 1. **可见字符规则的排除项** —— 现在是**四条合取的显式写法**,其中 DI 与 White_Space 今天冗余(§31.2 实测)。owner 若只想要「必要的那两条」,删 DI/White_Space 今天零行为变化,但会失去对未来 Unicode 新增码点的自动覆盖。
 2. **255 码点长度上限** —— 锁 §2 无此条款,新增。
 3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动。
 4. **长度闸度量「提交值」而非「裁剪后」** —— 行为变化,随第 2 项一起裁但单独列。
-5. **【新】`BLANK_GLYPH_CODE_POINTS` 这张 56 成员的显式表** —— 它把「不可见」从一个纯属性判断变成了「属性 ∪ 人工清单」。好处是 owner 点名的码点在代码里看得见、属性表版本变化不会静默放行;代价是清单要人维护,且它让 DI 合取变成冗余(§31.2)。**是否采用「枚举 + 属性」而不是「纯属性」,请 owner 裁。**
+5. **【新】`BLANK_GLYPH_CODE_POINTS` 这张 56 成员的显式表** —— 它把「不可见」从一个纯属性判断变成了「属性 ∪ 人工清单」。好处是 owner 点名的码点在代码里看得见、属性表版本变化不会静默放行;代价是清单要人维护,且**采纳它会让 `Default_Ignorable_Code_Point` 合取失去独立见证(冗余)——这是设计取舍,不是覆盖缺口**(§31.2:MUT-R4-B 全绿已判定为设计结果,非漏洞)。**是否采用「枚举 + 属性」而不是「纯属性」,请 owner 裁。**
 6. **【新】新增无库单测文件 + `scripts/dev/probe-group-name-rule.mjs` + `scripts/dev/README.md`** —— 单测进的是 always-on 的 `test (20.x)` lane(`pnpm --filter @metasheet/core-backend test`),**已实测它确实在全量里跑**:日志里 `✓ tests/unit/approval-group-name-rule.test.ts (12 tests)`,且 `vitest.config.ts` 的排除表不含它;**负控**:直接点名那个真库文件跑会得到 `No test files found`,证明真库文件确实被这条 lane 排除、单测不是它的替身。**未改 `plugin-tests.yml`,s6a 钉不受影响 —— 这条不是读文件清单读出来的,是机械核过的**:在本 head 上跑 `computePackageProvenancePinSet(repoRoot)` 并与 `s6a-package-provenance-pins.json` 逐字节比较,结果 `true`(全组一致)。
+7. **【新,只登记】两个真库文件的 anti-skip-green 哨兵在它们真正运行的那条 lane 里是 `it.skip`** —— `grep -rn EXPECT_DB .github/workflows/plugin-tests.yml` 计数为 0,而另外 7+ 条 realdb workflow 都设了 `EXPECT_DB: '1'`;该 lane 今天靠 `plugin-tests.yml` 硬编码 `DATABASE_URL` 兜底,后果有界。**本轮之前就在**(`baa086ae90`),不是本轮引入。**这条属于 A-1(#5852)的作用域,不塞进本候选修**——本项只做登记,请 owner 在 #5852 一并处理(给该 step 补 `EXPECT_DB: '1'`)。
