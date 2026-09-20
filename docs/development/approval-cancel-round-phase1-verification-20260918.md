@@ -4123,7 +4123,9 @@ AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
 
 四条声明 mutation 的红腿并集仍是 **12 / 13**(N7 对席位谓词零判别力,用例名里已写明);
 新增两腿把红腿并集扩到 **14 / 15**(P17(b) 只被 X-2 覆盖,不被那四条覆盖 —— 这正是它存在的理由)。
-每条 mutation 的 anchor 命中数实测 = 1;每条跑完 `cp` 还原 + `cmp` identical。
+**五条**有锚点的 mutation(G-2b / G-2c / G-3 / X-1 / X-2)每条的 anchor 命中数实测 = 1;
+**M-B1 没有锚点** —— 它是整份源文件 `cp` 成基线副本,不是文本替换,所以那一行不适用「命中数 = 1」。
+六条每条跑完都 `cp` 还原 + `cmp` identical。
 
 #### N.8.4 C-2 文本合并实测(P3-1)
 
@@ -4176,6 +4178,27 @@ DELETE …; SELECT count(*) FROM approval_delegations;         -- 0
 (`ApprovalDelegationConfig.createDelegation:83-85` 与 `.updateDelegation:250-253`,都是
 `scopeTemplateId?.trim() || null` + 显式 400;该文件另外两条 UPDATE 只翻 `active`)。
 **结论不变,理由换了**;源码注释、设计 MD、§N.6 三处已同步改写。
+
+#### N.8.6bis 两条新腿的**前提条件**,登记清楚(本轮实测,不留给下一轮重新发现)
+
+1. **角色席位是靠 token claim 解析的,不是靠 `user_roles` 行。** P16(b) 是本文件里第一条依赖**角色**席位的腿
+   (既有的腿都直接点名用户 id):A 之所以能批那个 `assigneeType:'role'` 节点,靠的是本文件 `authToken` 铸的
+   `roles=admin` claim,库里**没有**给 A 插 `user_roles` 行。这条路径有开关:`RBAC_TOKEN_TRUST`。
+   **本轮逐条核过它在 CI 里的取值**:
+   - `vitest.integration.config.ts` 的 `setupFiles` 是 `tests/setup.integration.ts`,后者在**进程内直接赋值**
+     `process.env.RBAC_TOKEN_TRUST = 'true'`(不是读环境变量再决定),所以用这份 config 跑的一切都在 trust 开启下跑。
+   - required lane 的 `approval-real-db-integration` 步骤(`plugin-tests.yml`,本文件七件就挂在这一步)
+     **只**设 `DATABASE_URL`,不设 `RBAC_TOKEN_TRUST`。
+   - 全仓把它设成 `'false'` 的 workflow 步骤只有一处 —— elearning V0.1 auth/tenant/RBAC gate,
+     它用的是**另一份** config(`vitest.elearning-pilot-auth.config.ts`)与另一份 setup,与本文件无关。
+   - 另一处 off 开关是**测试本地的** helper `withoutTokenClaimTrust`
+     (`approval-can-decide-current-node.db.test.ts:178-187`,临时改 env 再还原),不影响本文件。
+   ⇒ **结论**:本腿在 required lane 里与本地读数同姿态。若将来有人把这一步的 trust 关掉,
+   修法是先例自己的那条(给 A 插一行 `user_roles`),但那会让本文件成为一张它今天**不写**的表的写入方,
+   要连带过 DML 表分类普查钉 —— 不在本轮做,登记在此。
+2. **P16(b) 断言的是席位集合,不是门槛本身。** 「会签门槛由 2 降到 1」是从「撤销轮节点是 `approvalMode:'all'`」
+   推导出来的,而那个 mode 由撤销轮的专用已发布定义(种子)决定,**本腿没有断言它**。
+   若种子把 mode 改了,P16(b) 仍会绿而那句推导会失真。**这是一条已知的推导缺口**,不是已闭合的断言。
 
 #### N.8.7 本轮**没有**做、没有主张的
 
