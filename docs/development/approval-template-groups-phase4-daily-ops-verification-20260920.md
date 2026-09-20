@@ -207,23 +207,25 @@ AssertionError: expected "spy" to not be called at all, but actually been called
 |---|---|---|
 | `approvalTemplateCenterCategory.spec.ts` | `P1-A: an UNBOUND multi-org admin on the first grouped hop gets exactly ONE switcher, with a unique select id` | 门审点名缺的 (c) 人群;`querySelectorAll` 计数,不用 `querySelector` |
 | 同上 | `P1-A: switching from EVERY rendered switcher instance leaves the page entry in place…` | 实例数**运行时发现**后逐个遍历、每轮重挂;这正是门审要求的「遍历每个实例」 |
+| 同上 | `P1-A: with the 管理分组 panel EXPANDED it is still exactly one switcher…` | 门审 §4 写成**未实测推论**的那格(展开面板应出现第三个);本轮把它变成被测配置,不继承推论 |
 | `approvalTemplateCenterSections.spec.ts` | `P2-3 (target, already-paginated case)…` | **P2-B**;判别点=目标 page 1 刷新请求 + 被移入行真的渲染 |
 | 同上 | 两条 hosted 用例(不渲染自己的切换器 / host 重放 `loadAll()` 后分节回来) | P1-A 的 child 侧契约 |
 | `ApprovalTemplateGroupsPanel.spec.ts` | `P3-3: archiving re-reads the list so the rendered order is the server's…` | P3-3 |
 | 同上 | hosted 用例(上报 host、不画控件、不发第二次 session-org 请求、host 重放后列表回来) | P1-A 的面板侧契约 + 门审关心的「列表会不会卡在隐藏态」 |
 | `SessionOrgSwitcher.spec.ts` | `two instances on one page get distinct select ids, each paired with its OWN label` | `useId()` 的判别配置(**一个实例的集合里断言唯一性是空转**) |
 
-### 8.3 先红后绿 / mutation 台账(19 条,全部 `cp` 备份 → 改坏 → 跑 → `cp` 还原 → `cmp` 校验;零 `git checkout --` / `reset --hard`)
+### 8.3 先红后绿 / mutation 台账(21 条 = 第 1 轮 15 条全部重跑 + 本轮新增 6 条,全部 `cp` 备份 → 改坏 → 跑 → `cp` 还原 → `cmp` 校验;零 `git checkout --` / `reset --hard`)
 
 **(a) 先红:新用例对第 1 轮实现的判别力**(把四个源文件逐字还原成 `beec0b8c7e` 的内容,只留新用例):
 
 ```
-FAIL P1-A: an UNBOUND multi-org admin … exactly ONE switcher   AssertionError: expected 2 to be 1
-FAIL P1-A: switching from EVERY rendered switcher instance …   AssertionError: expected +0 to be 1
+FAIL P1-A: an UNBOUND multi-org admin … exactly ONE switcher       AssertionError: expected 2 to be 1
+FAIL P1-A: switching from EVERY rendered switcher instance …       AssertionError: expected +0 to be 1
+FAIL P1-A: with the 管理分组 panel EXPANDED …                       AssertionError: expected 3 to be 1
  Test Files  1 failed (1)
-      Tests  2 failed | 13 passed (15)
+      Tests  3 failed | 13 passed (16)
 ```
-——与门审真浏览器实测的 `switchers=2` / `nth=1 ⇒ count=0` **逐字同形**。还原后 `cmp` 四个文件全部一致。
+——前两条与门审真浏览器实测的 `switchers=2` / `nth=1 ⇒ count=0` **逐字同形**;第三条把门审 §4 那句「**推论,本轮未实测**……应当出现第三个」变成**实测值 3**。还原后 `cmp` 四个文件全部一致。
 
 **(b) 台账**(`Tests` 行逐字抄自输出;探针名带 `'` 的是第 1 轮探针按新代码形状的**重述**,不是原字面):
 
@@ -242,6 +244,8 @@ FAIL P1-A: switching from EVERY rendered switcher instance …   AssertionError:
 | M7c′ | 删切换成功后的两处重读 | 2 failed / 13 passed (15) | 承重 ✅ |
 | M7d′ | 页面切换器门 → `false` | 4 failed / 11 passed (15) | 承重 ✅ |
 | M8 | `isWellFormedUuid` → `return true \|\|` | 1 failed / 19 passed (20)(真库) | 承重 ✅ |
+| M8b | 仅 unlink 调用点 → `if (false)` | 1 failed / 19 passed (20)(真库) | 承重 ✅ |
+| M9 | 后端 `mapGroupConstraintError` 消息换回内部黑话原句 | 1 failed / 19 passed (20)(真库) | 承重 ✅ |
 | R1 | 分节视图:删 host 分支 | 1 failed / 39 passed (40) | 承重 ✅ |
 | R2 | 分节视图:host 模式下照画切换器 | 2 failed / 13 passed (15)(category);1 failed / 24 passed (25)(sections 自身) | 承重 ✅ |
 | R3 | 面板:删 host 分支 | 1 failed / 10 passed (11) | 承重 ✅ |
@@ -258,17 +262,18 @@ FAIL P1-A: switching from EVERY rendered switcher instance …   AssertionError:
 
 | 门 | 结果 |
 |---|---|
-| 六个相关前端 spec 合跑(category / sections / panel / client / SessionOrgSwitcher / templateCenterI18n) | **6 files / 93 tests 全绿**(第 1 轮同样六文件基线 85 → 本轮 8 条新用例全部落在其中) |
-| `run-required-web-tests.sh` 结尾那条 `exec` 巨行(400 token,与脚本逐字同形) | **EXIT=0;Test Files 473 passed (473);Tests 7315 passed (7315)**(第 1 轮 473/7307,+8 = 本轮新增用例数) |
+| 六个相关前端 spec 合跑(category / sections / panel / client / SessionOrgSwitcher / templateCenterI18n) | **6 files / 94 tests 全绿**(第 1 轮同样六文件基线 85 → 本轮 9 条新用例全部落在其中) |
+| `run-required-web-tests.sh` 结尾那条 `exec` 巨行(400 token,与脚本逐字同形) | **EXIT=0;Test Files 473 passed (473);Tests 7316 passed (7316)**(第 1 轮 473/7307,+9 = 本轮新增用例数) |
 | `scripts/dev/atg-exec-line-post-rebase-check.sh` | Check 1 PASS(恰一条 exec 行)/ Check 2 PASS(400 token 全唯一) |
 | 六个 token 仍在 exec 行上 | `approvalTemplateCenterCategory` / `SessionOrgSwitcher.spec.ts` / `approvalTemplateGroupsClient` / `ApprovalTemplateGroupsPanel` / `approvalTemplateCenterSections` / `templateCenterI18n` 全部 OK |
 | 真库 `approval-template-groups-lifecycle.db.test.ts`(`vitest --config vitest.integration.config.ts`,与 `plugin-tests.yml:1669` 同形) | **1 file / 20 passed (20)** |
 | 真库四个 groups 文件合跑(lifecycle + serialization + sections + reorder) | **4 files / 41 passed (41)** |
 | `apps/web`:`npx vue-tsc --noEmit -p tsconfig.app.json` | **EXIT=0** |
+| `apps/web`:`npx vue-tsc -b`(第 1 轮用的那条,solution 范围) | **EXIT=2,恰 1 条错误**:`vite.config.ts(28,29): error TS2769`,与第 1 轮记录**同一条**;`git diff --stat origin/main HEAD -- apps/web/vite.config.ts` 为空(该文件与 main 逐字节相同)⇒ 环境项,非本 lane 引入 |
 | `apps/web`:`npx vite build` | **EXIT=0**(`✓ built in 13.91s`) |
 | `packages/core-backend`:`npx tsc --noEmit` | **EXIT=0** |
 
-> `vue-tsc` 说明:第 1 轮记录的 `vite.config.ts(28,29) TS2769` 是 `npx vue-tsc -b`(整个 solution,含 `tsconfig.node.json`)的产物;本轮按门审 §5.6 的形状跑 `-p tsconfig.app.json`,**EXIT=0,零错误**,`vite.config.ts` 本轮同样零改动。两条记录不矛盾,是两个不同的 project 范围。
+> `vue-tsc` 说明:两条都**实跑**了,不是靠论证调和。`-p tsconfig.app.json`(门审 §5.6 的形状)EXIT=0 零错误;`-b`(第 1 轮的形状,含 `tsconfig.node.json`)EXIT=2 且**只有**第 1 轮记录的同一条 `vite.config.ts(28,29) TS2769`——`vite.config.ts` 与 `origin/main` 逐字节相同,本 lane 零改动。两个 project 范围各自的实测值都在上表里。
 
 ### 8.5 CI / s6a / 爆炸半径 census(对第 1 轮 head 逐文件)
 
@@ -284,4 +289,38 @@ FAIL P1-A: switching from EVERY rendered switcher instance …   AssertionError:
 
 - 设计 MD §5.4 的 OPEN(持久 vs 反应式形状)——本轮给它加了一个输入,**未替 owner 定性**
 - NIT-1(`data-testid` 闭世界收窄)未处理,理由见设计 MD §5.3
-- 真浏览器复跑**未做**:本轮把门审的真浏览器 A/B 判据(`switchers=2` / `nth=1 ⇒ count=0`)在 vitest 里逐字复现为先红后绿(§8.3(a)),但那不等于真浏览器复验。若门审要求 E 相位重跑,需要一次新的 headless chromium 跑(后端 + vite + 一次性 UI 库),**本轮未跑,不作任何真浏览器断言**
+- 真浏览器相位 E **已跑**(见 §8.7);C/D 两个相位**未**重跑——本轮未触碰它们打的代码(P2-B 是纯用例,P3-3 只加一次列表重读),它们的真浏览器状态仍以门审 round 1 的记录为准,本轮对它们**不作新的真浏览器断言**
+
+### 8.7 真浏览器相位 E(自起 headless chromium,**未使用会话共享的 MCP 浏览器**)
+
+| 项 | 值 |
+|---|---|
+| 浏览器 | `playwright@1.57.0`,绝对路径 `require` 自仓库 pnpm store,`chromium.launch({ headless: true })` |
+| 驱动脚本 | `soak-working/a5-round2-20260920/e-phase.mjs` |
+| UI 库 | `metasheet2_a5r2_ui_20260920`(另一个一次性库,`createdb -U postgres -O ms2testbed`,413 迁移 EXIT=0,零 42501) |
+| 后端 / 前端 | `PORT=7803` tsx 起 `src/index.ts` 打该库 / `vite --port 8903 --strictPort`,`VITE_API_URL=http://127.0.0.1:7803` |
+| 夹具 | `POST /api/auth/register` 建一个管理员,SQL 置 `role='admin', is_admin=true`,`user_orgs` 插 **两** 行(`org-alpha`/`org-beta`,`is_active=true`)⇒ 服务端实测:`GET /api/auth/session-orgs` 返回 2 个 org、`currentOrgId=null`,`GET /api/approval-template-groups` 与 `GET /api/approval-templates?section=…` **真的 403 `SESSION_ORG_REQUIRED`** —— 即锁文 §2 点名的「多 org 成员默认没有绑定 org」那个人群,不是模拟出来的 |
+| 负控 | `addInitScript(window.__APPROVAL_MOCK__ = false)` + 计 `section=` 请求条数 |
+
+**负控第一次就抓到了一个真问题,登记**:首版脚本**没有**设 `__APPROVAL_MOCK__`,而 `approvals/api.ts:39-40` 在 `import.meta.env.DEV` 下**默认走 mock**(`listTemplatesBySection` 直接 `return { data: [], total: 0 }`)。当时分节确实渲染出来了、判据全绿,但 `section=` 计数是 **0** —— 也就是那一版的分节渲染根本没碰后端。加上 override 后 `section=1`。**这正是「被触发≠被验证」**:如果不把 `section=` 计数当成评分判据而只当注释,那一版会作为「真浏览器全绿」交上去。
+
+**结果(每格 = 本 head vs 第 1 轮 head `beec0b8c7e`,同一套库/后端/前端,只换那 4 个前端源文件)**
+
+| 判据 | 本 head | 第 1 轮 head |
+|---|---|---|
+| **E1** 未绑定多 org 首次进分组视图,恰 1 个切换器 | **PASS** `switchers=1 selects=1 dup#ids=0` | **FAIL** `switchers=2 dup#ids=1` |
+| **E1b** 每个 select 的 id 非空、唯一、且与**自己的** label 恰一一配对 | **PASS** `labelled=1/1` | **FAIL** `labelled=0/2`(两个控件共用写死 id,`<label for>` 只绑第一个 ⇒ 第二个的标签失联) |
+| **E1(管理分组面板展开)** | **PASS** `switchers=1 panel=true` | **FAIL** `switchers=3 dup#ids=2 labelled=0/3` ⬅ 门审 §4 那句「**推论,本轮未实测**……应当出现第三个」**现在是实测值 3** |
+| **E4[nth=0]** 从第 0 个实例切换后入口仍在 | **PASS** `before=1 after=1` | PASS `before=2 after=1`(第 1 轮唯一赢的那条路径) |
+| **E4[nth=1]** 从第 1 个实例切换后入口仍在 | **N/A(只有一个实例)** | **FAIL** `before=2 after=0` ⬅ 门审 P1-A 的自毁,逐字复现 |
+| **E4[nth=2]**(面板展开时的第三个) | **N/A** | **FAIL** `before=3 after=0`,且 `panelList=false`(面板列表还卡在被抑制态) |
+| **E4** 切换后被挡住的分组视图确实被重放(无错误态) | **PASS**(每格) | PASS |
+| **E3** 负控:真后端流量 + mock 关闭(`section=` 请求真的发出) | **PASS** `session-org=4 groups=8 section=1 403s=6` | PASS `session-org=18 groups=14 section=2 403s=10` |
+
+**相位小计**:本 head `plain` **5 PASS / 0 FAIL**、`mgr`(面板展开)**7 PASS / 0 FAIL**;第 1 轮 head `plain` **4 PASS / 3 FAIL**、`mgr` **8 PASS / 5 FAIL**。
+
+证据(截图 + 每格 JSON + 逐请求 net 日志 + 驱动脚本)存于 `soak-working/a5-round2-20260920/`,共 37 个文件;`round1src-` 前缀的是第 1 轮 head 的那两次,无前缀的是本 head 的那两次。
+
+### 8.8 一句话说明:英文文案里为什么有中文
+
+P3-2 的英文串带 `请假Leave` 这个例子。这不是翻译漏进了 EN 槽:`GROUP_NAME_UNSUPPORTED` 只在名字**一个 ASCII 字母/数字/符号都没有**时才触发,看到这句话的人此刻输入的就是纯 CJK 名,举一个**在他自己的名字上加一个字符就能通过**的例子比举 `Leave` 更能解释规则。中英两串举同一个例子,语义一致。
