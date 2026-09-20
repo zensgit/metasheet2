@@ -21,6 +21,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { useAuth } from '../src/composables/useAuth'
 import { useLocale } from '../src/composables/useLocale'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
@@ -699,5 +700,159 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
 
     expect(cloneTemplateSpy).toHaveBeenCalledTimes(1)
     expect(pushSpy).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md) — once a multi-org admin has
+ * SELECTED a session organization, the reactive `SessionOrgSwitcher` instances inside
+ * `ApprovalTemplateGroupsPanel.vue`/`TemplateGroupSections.vue` disappear for good (they only
+ * ever show themselves on a 403 `SESSION_ORG_REQUIRED`, and a bound `authenticatedTenantId` means
+ * that code never comes back) — the acceptance report's finding: to switch to a DIFFERENT org, a
+ * multi-org admin had to leave the approvals module entirely and use the attendance page's
+ * always-visible switcher. This adds a THIRD, independent, persistent switcher — same shared
+ * `SessionOrgSwitcher` component, own `useSessionOrg()` instance — that stays up in the grouped
+ * view once a session org is bound, satisfying lock §2's "首期必须……提供 session-org 选择入口"
+ * more completely without touching either reactive instance's own contract.
+ *
+ * Advisor-flagged gate on scope: lock §4 acceptance J's positive control is "a single-org member
+ * never sees the selector" — a persistent switcher visible unconditionally (attendance's own
+ * literal behaviour) would make that FALSE at the page level for this new surface. Gated on
+ * `useSessionOrg().hasMultipleOrgs` instead: for a single-org member `GET /api/auth/session-orgs`
+ * returns exactly one org, so the switcher never renders — J's control stays true for this surface
+ * too. This is a documented, deliberate ONE-CONJUNCT divergence from "same shape as the attendance
+ * page" (see the design MD's lock-coverage matrix), not a silent narrowing.
+ */
+describe('TemplateCenterView — P2-5: persistent session-org entry in the grouped view', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const jwt = (org: string) =>
+    `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+
+  function jsonResponse(status: number, body: unknown) {
+    return { ok: status >= 200 && status < 300, status, json: async () => body }
+  }
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    mockTemplates.value = []
+    mockLoading.value = false
+    mockError.value = null
+    mockTotal.value = 0
+    loadTemplatesSpy.mockClear()
+    loadTemplatesSpy.mockResolvedValue(undefined)
+    listTemplateCategoriesSpy.mockClear()
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listApprovalTemplateGroupsSpy.mockClear()
+    listTemplatesBySectionSpy.mockClear()
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: TemplateCenterView } = await import('../src/views/approval/TemplateCenterView.vue')
+    const Host = defineComponent({
+      setup() {
+        return () => h(TemplateCenterView as any)
+      },
+    })
+    app = createApp(Host)
+    app.component('ElTabs', ElTabs)
+    app.component('ElTabPane', ElTabPane)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.component('ElPagination', ElPagination)
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElEmpty', ElEmpty)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  async function enterGroupedView() {
+    ;(container!.querySelector('[data-testid="template-center-view-mode-grouped"]') as HTMLButtonElement).click()
+    await flushUi()
+  }
+
+  it('a multi-org admin with an ALREADY-BOUND session org sees a persistent switcher in the grouped view', async () => {
+    useAuth().setToken(jwt('org-a'))
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+
+    // Neither reactive instance is up (no 403 ever happened — the org is already bound).
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+    const switcher = container!.querySelector('[data-testid="session-org-switcher"]')
+    expect(switcher).not.toBeNull()
+  })
+
+  it('a SINGLE-org member never sees the persistent switcher, in flat OR grouped view (acceptance J\'s positive control, restated for this new surface)', async () => {
+    useAuth().setToken(jwt('org-solo'))
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-solo'], currentOrgId: 'org-solo' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    expect(container!.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+
+    await enterGroupedView()
+    await flushUi(8)
+    expect(container!.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+  })
+
+  it('switching org through the persistent switcher re-reads the grouped view', async () => {
+    useAuth().setToken(jwt('org-a'))
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+
+    const readsBeforeSwitch = listApprovalTemplateGroupsSpy.mock.calls.length
+    const select = container!.querySelector(
+      '[data-testid="session-org-switcher"] select[name="sessionOrgId"]',
+    ) as HTMLSelectElement
+    expect(select).not.toBeNull()
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+
+    expect(listApprovalTemplateGroupsSpy.mock.calls.length).toBeGreaterThan(readsBeforeSwitch)
   })
 })
