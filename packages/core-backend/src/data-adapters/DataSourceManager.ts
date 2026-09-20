@@ -653,15 +653,25 @@ export class DataSourceManager extends EventEmitter {
    *   fail-open.
    * - Any OTHER query failure propagates — the delete does not happen.
    */
-  async countExternalSystemReferences(id: string): Promise<number> {
-    if (!this.db) return 0
+  async countExternalSystemReferences(
+    id: string,
+    // W7-B: the EXECUTOR this count runs on. Omitted (every pre-existing caller
+    // and every existing test) === `this.db`, byte-identical to before.
+    // `removeDataSource` passes its OPEN TRANSACTION so the count and the soft
+    // delete observe the same snapshot under the same `FOR UPDATE` row lock: a
+    // count taken on a SECOND connection cannot wait for a concurrent bind, so
+    // the delete would commit on top of a reference it never saw.
+    executor?: Kysely<unknown>
+  ): Promise<number> {
+    const db = executor ?? this.db
+    if (!db) return 0
     const ownerId = this.scopes.get(id)?.ownerId
     // No known owner scope → nothing can be attributed to it. (Route callers
     // sit behind assertAccess, so the scope exists on every real delete path.)
     if (ownerId === undefined) return 0
     let canonicalCount: number
     try {
-      const canonicalRows = await this.db
+      const canonicalRows = await db
         .selectFrom('integration_external_systems' as never)
         .select(sql<number>`count(*)::int`.as('count') as never)
         .where('connection_id' as never, '=', id as never)
@@ -676,7 +686,7 @@ export class DataSourceManager extends EventEmitter {
       throw err
     }
 
-    const legacyRows = await this.db
+    const legacyRows = await db
       .selectFrom('integration_external_systems' as never)
       .select(sql<number>`count(*)::int`.as('count') as never)
       .where('connection_id' as never, 'is', null as never)
@@ -932,7 +942,11 @@ export class DataSourceManager extends EventEmitter {
    *      system still references this source, unless the caller carries the
    *      route's already-authorized `force` break. Runs before ANY mutation,
    *      and while `scopes` still holds the owner that
-   *      countExternalSystemReferences attributes against.
+   *      countExternalSystemReferences attributes against. Since W7-B it shares
+   *      ONE TRANSACTION with the persist step, opened by a `FOR UPDATE` on
+   *      the source row - see the block comment at the call site for the
+   *      two-sided lock protocol and why the binding side participates
+   *      through the foreign key rather than a SELECT of its own.
    *   ② persist the (soft|hard) delete. A failure THROWS a coded, values-free
    *      refusal — the driver's own text (host/port/database/login) goes to the
    *      log only — and no in-memory byte has been touched yet.
@@ -955,46 +969,103 @@ export class DataSourceManager extends EventEmitter {
       throw new Error(`Data source with id '${id}' not found`)
     }
 
-    // ① REFERENTIAL CHECK — before any mutation, in memory or durable.
-    if (options?.force !== true) {
-      const referenceCount = await this.countExternalSystemReferences(id)
-      if (referenceCount > 0) {
-        throw Object.assign(
-          new Error(
-            `Data source '${id}' is referenced by ${referenceCount} external system(s) and deleting it would leave dangling references. A platform admin may repeat the request with force=true to break the reference deliberately.`
-          ),
-          {
-            status: 409,
-            code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
-            details: { referenceCount }
-          }
-        )
+    // The 409 the referential check raises. Built once so the transactional and
+    // the memory-only path cannot drift apart.
+    const referencedRefusal = (referenceCount: number) => Object.assign(
+      new Error(
+        `Data source '${id}' is referenced by ${referenceCount} external system(s) and deleting it would leave dangling references. A platform admin may repeat the request with force=true to break the reference deliberately.`
+      ),
+      {
+        status: 409,
+        code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+        details: { referenceCount }
       }
-    }
+    )
 
-    // ② DURABLE WRITE FIRST — soft delete (or hard delete if specified).
+    // ①+② ONE TRANSACTION (W7-B). #5784 made the delete durable-FIRST but left
+    // check and write in two autocommit statements, so a bind that committed in
+    // between produced a reference to an already-deleted source. They are now a
+    // single transaction whose FIRST act is to take the source row's lock:
+    //
+    //   SELECT ... FROM data_sources WHERE id = $1 FOR UPDATE
+    //
+    // LOCK ORDER (identical on both sides, so the protocol cannot deadlock):
+    // data_sources row FIRST, integration_external_systems SECOND. The binding
+    // side takes the data_sources lock too — not by writing its own SELECT (the
+    // plugin's db helper is scoped to `integration_*` and must not be widened to
+    // reach data_sources), but because the FK
+    // `fk_integration_external_systems_connection_id` makes PostgreSQL take a
+    // KEY SHARE lock on the referenced row inside the INSERT/UPDATE's own
+    // transaction. FOR UPDATE conflicts with KEY SHARE, so:
+    //   * bind in flight, then delete  -> the delete's FOR UPDATE WAITS for the
+    //     bind to commit, then COUNTS it and refuses 409. THIS ordering is what
+    //     this transaction closes (PR-A).
+    //   * delete in flight, then bind  -> the bind WAITS for the delete to
+    //     commit, but today's FK re-check then still PASSES: a soft delete
+    //     changes no key column, so the referenced row is still "there" for the
+    //     FK. Closing this ordering needs the FK re-pointed at a live-only key
+    //     (PR-B, a migration that also changes what `force` can do, and is
+    //     therefore held for the owner's ruling). Do NOT read this block as
+    //     "concurrent delete isolation is complete".
+    //
+    // ISOLATION: READ COMMITTED (PostgreSQL's default, which is what this
+    // deployment runs). The half that IS closed does not rely on a stricter
+    // level — it rests on the row lock, which is explicit locking, not snapshot
+    // semantics. Under READ COMMITTED the count statement takes a fresh
+    // snapshot AFTER the FOR UPDATE returns, so it sees exactly the binds that
+    // committed while it waited.
+    //
+    // 42P01 INSIDE the transaction: countExternalSystemReferences still maps a
+    // missing referencing table to 0, but PostgreSQL has already aborted the
+    // transaction at that point, so the UPDATE that follows fails (25P02) and
+    // the delete surfaces as the values-free 500 below — fail-CLOSED, not the
+    // fail-open the autocommit path had. Migration 057 creates the table in
+    // every deployment, so this is a posture note, not a live path.
     if (this.db) {
       try {
-        if (options?.hardDelete) {
-          await this.db
-            .deleteFrom('data_sources' as never)
+        await this.db.transaction().execute(async (trx) => {
+          // Lock step 1. Soft-deleted rows are not re-locked: `removeDataSource`
+          // is reached only for a source still present in memory, and a row that
+          // is already deleted has nothing left to protect.
+          await trx
+            .selectFrom('data_sources' as never)
+            .select('id' as never)
             .where('id' as never, '=', id as never)
+            .forUpdate()
             .execute()
-        } else {
-          await this.db
-            .updateTable('data_sources' as never)
-            .set({
-              deleted_at: new Date(),
-              is_active: false,
-              updated_at: new Date()
-            } as never)
-            .where('id' as never, '=', id as never)
-            .execute()
-        }
+
+          if (options?.force !== true) {
+            const referenceCount = await this.countExternalSystemReferences(id, trx)
+            if (referenceCount > 0) throw referencedRefusal(referenceCount)
+          }
+
+          if (options?.hardDelete) {
+            await trx
+              .deleteFrom('data_sources' as never)
+              .where('id' as never, '=', id as never)
+              .execute()
+          } else {
+            await trx
+              .updateTable('data_sources' as never)
+              .set({
+                deleted_at: new Date(),
+                is_active: false,
+                updated_at: new Date()
+              } as never)
+              .where('id' as never, '=', id as never)
+              .execute()
+          }
+        })
       } catch (err) {
+        // The referential 409 is a DECISION, not a persistence failure: it must
+        // reach the client as itself. Only an uncoded failure is translated.
+        if ((err as { code?: string } | null)?.code === DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE) {
+          throw err
+        }
         // Cause to the log ONLY — a kysely/driver failure embeds host, port,
         // database and login. The client gets a fixed sentence and the id it
-        // already supplied.
+        // already supplied. The transaction rolled back, so nothing partial
+        // survived and no in-memory byte has been touched yet.
         console.warn(`[DataSourceManager] Failed to delete from database: ${id}`, err)
         throw Object.assign(
           new Error(
@@ -1003,6 +1074,12 @@ export class DataSourceManager extends EventEmitter {
           { status: 500, code: DATA_SOURCE_DELETE_NOT_PERSISTED_CODE }
         )
       }
+    } else if (options?.force !== true) {
+      // Memory-only manager: nothing is persisted, so nothing can hold a
+      // reference and the count is 0 by construction. Kept so the call (and its
+      // contract) survives for a manager that is later given a db.
+      const referenceCount = await this.countExternalSystemReferences(id)
+      if (referenceCount > 0) throw referencedRefusal(referenceCount)
     }
 
     // ③ in-memory state only after the row is durably gone.

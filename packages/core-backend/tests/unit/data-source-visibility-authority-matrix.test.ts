@@ -101,7 +101,15 @@ const refCountQueriedIds: string[] = []
 const groupedRefQueries: Array<{ kind: 'canonical' | 'legacy'; ids: string[] }> = []
 
 function fakeDb() {
-  return {
+  // Table-strict: only data_sources (+ integration_external_systems on selectFrom) is
+  // modelled; any other table name is a harness error. The lock's table name is pinned in
+  // data-source-remove-ordering.test.ts; this matrix only refuses drift.
+  function onlyDataSources(verb: string, table: string): void {
+    if (table !== 'data_sources') {
+      throw new Error(`fake db: ${verb}(${JSON.stringify(table)}) — the stand-in models only data_sources`)
+    }
+  }
+  const executor = {
     selectFrom: (table: string) => {
       if (table === 'integration_external_systems') {
         const captured: Array<{ lhs: unknown; op: unknown; value: unknown }> = []
@@ -166,21 +174,36 @@ function fakeDb() {
         }
         return b
       }
-      const b = { selectAll: () => b, where: () => b, execute: async () => [] }
+      // data_sources: loadFromDatabase's selectAll chain, and (W7-B) removeDataSource's
+      // `SELECT id ... FOR UPDATE` lock step at the head of its transaction.
+      onlyDataSources('selectFrom', table)
+      const b = { selectAll: () => b, select: () => b, forUpdate: () => b, where: () => b, execute: async () => [] }
       return b
     },
-    insertInto: () => {
+    insertInto: (table: string) => {
+      onlyDataSources('insertInto', table)
       const b = { values: () => b, onConflict: () => b, execute: async () => [] }
       return b
     },
-    updateTable: () => {
+    updateTable: (table: string) => {
+      onlyDataSources('updateTable', table)
       const b = { set: () => b, where: () => b, execute: async () => [] }
       return b
     },
-    deleteFrom: () => {
+    deleteFrom: (table: string) => {
+      onlyDataSources('deleteFrom', table)
       const b = { where: () => b, execute: async () => [] }
       return b
     },
+  }
+  return {
+    ...executor,
+    // W7-B: the delete guard's check + write run inside one transaction; the trx handed to
+    // the callback is this same builder set. Statement ORDER is pinned in
+    // data-source-remove-ordering.test.ts; this matrix pins WHO may delete WHAT.
+    transaction: () => ({
+      execute: async <T>(cb: (trx: typeof executor) => Promise<T>): Promise<T> => cb(executor),
+    }),
   }
 }
 
