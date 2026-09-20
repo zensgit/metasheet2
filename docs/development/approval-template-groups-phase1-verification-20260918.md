@@ -2237,13 +2237,15 @@ U+115F match_LNPS= true  cats= L,Lo      ← HANGUL CHOSEONG FILLER 是 Lo
 
 **残留写成残留,不写成闭合**:除 U+2800 外,任何「general category 属 L/N/P/S 但在某些字体下渲染为空白」的码位仍会被接受。本规则**不声称**对「一切不可见」闭合;它声称拒绝 (i) JS `\s` 全集、(ii) DB 裁剪集、(iii) 每一个 default-ignorable 码位、(iv) 只由 Mark/Control/Separator 构成的名字、(v) U+2800 —— 每一条都有经生产路由的断言。
 
+> **⚠️ 失效标记(第 2 轮门审 P3-2 / 第 3 轮修复,求值而非作废整节)。** 上一句的**前半**(谓词拒绝这五类)**仍然成立**,由构造保证:(iii) 是写在模式里的 Unicode 属性,(iv) 由「必须落在 L/N/P/S」直接推出。**失效的是最后一个分句**「每一条都有经生产路由的断言」——(iii)(iv) 是无穷类,任何套件都不可能逐一断言。本节其余判据(两条排除项、残留写法、M-2 证据)**不受影响,仍然 OPERATIVE**。套件实际经生产路由提交并观察到 400 的码点清单、以及为两条排除项各自造的见证用例,见 §30.3。
+
 ### 29.2 应用层规则(`ApprovalTemplateGroupService.ts`)
 
 | 部分 | 内容 | 位置 |
 |---|---|---|
-| (1) 边缘裁剪(**装饰性**) | `String.prototype.trim` 的集合(JS `\s`)∪ `U+200B/200C/200D/2060` ∪ `U+00AD/180E/034F/2800/3164/115F/1160`。仍是 DB 裁剪集的**严格超集**,所以本函数返回的任何名字**按构造**满足 CHECK。**故意不裁**变体选择符 U+FE00–U+FE0F:裁了会把尾部 emoji 的呈现改写(`'报销☺️'` → `'报销☺'`);它们由 (2) 拒绝 | `ApprovalTemplateGroupService.ts` `NAME_EDGE_TRIM_CLASS` / `NAME_EDGE_TRIM_PATTERN` |
+| (1) 边缘裁剪(**装饰性**) | `String.prototype.trim` 的集合(JS `\s`)∪ `U+200B/200C/200D/2060` ∪ `U+00AD/180E/034F/2800/3164/115F/1160`。仍是 DB 裁剪集的**严格超集**,所以本函数返回的任何名字**按构造**满足 CHECK。**故意不裁**变体选择符 U+FE00–U+FE0F:裁了会把尾部 emoji 的呈现改写(`'报销☺️'` → `'报销☺'`);它们由 (2) 拒绝 | `ApprovalTemplateGroupService.ts` `NAME_EDGE_TRIM_CLASS` / `NAME_EDGE_TRIM_PATTERN`(**第 3 轮改实现不改集合**:符号现为 `NAME_EDGE_TRIM_CODE_POINTS` + `trimNameEdges` 线性扫描,`NAME_EDGE_TRIM_CLASS` 只作为被扫描比对的**规格**保留;成员集逐个码点等价,见 §30.2) |
 | (2) 可见字符要求(**承重**) | 裁剪后必须含至少一个字符,**既**在 `\p{L}\p{N}\p{P}\p{S}`,**又**不在 `\p{Default_Ignorable_Code_Point}` 且不是 `U+2800`。否则 400 `GROUP_NAME_REQUIRED` | `NAME_INVISIBLE_CLASS` / `NAME_VISIBLE_CHAR_PATTERN` |
-| (3) 长度上限 | `GROUP_NAME_MAX_LENGTH = 255`,按**码点**计(`[...s].length`,与 PG `char_length` 同口径),在任何 DB 往返**之前**判;超限 400 `GROUP_NAME_TOO_LONG`,`details` 带 `maxLength` / `actualLength` | `GROUP_NAME_MAX_LENGTH` / `requireName` |
+| (3) 长度上限 | `GROUP_NAME_MAX_LENGTH = 255`,按**码点**计(与 PG `char_length` 同口径),在任何 DB 往返**之前**判;超限 400 `GROUP_NAME_TOO_LONG`,`details` 带 `maxLength` / `actualLength`。**⚠️ 第 3 轮修复改了两处**:① 计数不再用 `[...s].length`(会为每个码点分配一个数组元素),改成 `countCodePoints` 的索引循环;② 这个闸**移到了裁剪与可见字符判定之前**,读的是**提交值**而不是裁剪后的值 —— 这是一条行为变化,见 §30.2 | `GROUP_NAME_MAX_LENGTH` / `countCodePoints` / `requireName` |
 
 **255 是怎么来的(P3-1 的「读列定义」在这里落空,必须说清)**:任务书说「读迁移里列定义决定字符数上限」——**该列是 `text`,没有长度上限可读**。所以这个上限是**应用层的候选决定**,用两条可核事实**推导**而不是发明:
 1. **仓内先例**:人工输入的显示名在本仓的惯例是 `varchar(255)`(`roles.name` / `permissions.name` / `views.name` …,`20250924190000_create_rbac_tables.ts:10` 等);
@@ -2306,6 +2308,8 @@ $ npx vitest --config vitest.integration.config.ts run \
 
 **34 passed / 2 skipped(36)**,不是「36/36 全绿」—— 那 2 条是 `itIfExpectDb` 的 anti-skip-green 哨兵(未置 `EXPECT_DB` 时是 skip)。上一轮同一份清单是 **30 passed / 2 skipped(32)**,本轮 **+4 个 `it`**。
 
+> **⚠️ 失效标记(第 3 轮修复)。** 这三个数字是 head `88bc46486eb99870d91237e2b9aeca53aa9d58d4` 的现场输出,**对那个 head 仍然为真**,但**不再描述当前树** —— 第 3 轮加了 3 个 `it`。当前数字在 §30.4,**以那里的现场输出为准**;本行不手改数字(`feedback_record_fix_rounds_only_delete_never_handwrite_numbers`)。同理下面 `CI=true pnpm … test` 的全量数字也按 §30.4 重读。
+
 ```
 $ pnpm --filter @metasheet/core-backend type-check
   EXIT=0
@@ -2329,6 +2333,8 @@ PG:`PostgreSQL 15.17 (Homebrew, aarch64)`。
 | **M-3**(删长度闸) | 删掉 `requireName` 里的 `GROUP_NAME_MAX_LENGTH` 分支 | `AssertionError: 256 code points is OVER the cap: expected 201 to be 400`(`- 400 / + 201`) | `1 failed / 24 passed / 1 skipped (26)` | `cmp` IDENTICAL |
 | **M-4**(per-member 判别力,P3-7) | 迁移裁剪集里**只删** `chr(65279)`(U+FEFF),其余九个保留;`dropdb`+`createdb`+重跑迁移 | 两条红,归因由构造确定:① 表驱动用例的数组 diff **只有一行变** `"U+FEFF BYTE ORDER MARK -> 23514 atg_name_nonblank"` → `"U+FEFF BYTE ORDER MARK -> ACCEPTED"`,另外九个成员原样;② 原有用例 3 的 `promise resolved "Result{ command: 'INSERT', …}" instead of rejecting` | `2 failed / 23 passed / 1 skipped (26)` | `cmp` IDENTICAL |
 
+> **⚠️ 失效标记(第 3 轮修复,逐条求值)。** 上表四条 mutation 的**结论**(可见字符守卫承重 / 任务书字面谓词不够 / 长度闸承重 / 裁剪集 per-member 承重)**全部仍然成立**;失效的只是 **M-1 与 M-2 那两个数组 diff 的行数**:NEITHER-SET 夹具在第 3 轮从 9 行增加到 11 行(新增两行见证用例),所以「九行全变」「(9)」这些**计数**是 head `88bc46486e` 的事实,不是当前树的。当前树下同形 mutation 的逐行观测在 §30.5(MUT1-R3 / MUT-R3-D / MUT-R3-E),现场跑出,不是把旧数字加二。M-3 / M-4 的观测不受影响。
+
 **M-2 是本轮最重要的一条**:它是「任务书点名的谓词单独用不够」这句话的**行为级证据**,不是我读 Unicode 表得出的论断。**M-4 的边界**:它隔离验证的是十个成员中的 **U+FEFF** 这一个;但与第 1 轮不同,表驱动用例现在给**每个成员**都带了独立的、会出现在数组 diff 里的标签,所以「哪个成员不再承重」是**可读的事实**而不是推断 —— 第 1 轮 P3-7 的残留(其余九个没有独立断言)由此关闭,剩下的只是「没有对每个成员各跑一次 mutation」这一条成本残留。
 
 每条 mutation 都先用 `diff` 证明文件**真的变了**(不是无效 mutation),红的**原因**逐条核过(不是 setup 失败),还原后 `cmp` 对服务与迁移两个文件均**逐字节一致**。
@@ -2347,3 +2353,121 @@ PG:`PostgreSQL 15.17 (Homebrew, aarch64)`。
 1. **可见字符规则的两条排除项**(`Default_Ignorable_Code_Point` + U+2800)—— 这是候选在 owner 提案之外**新增的判据**,请连同勘误 3 一并裁;
 2. **255 码点长度上限** —— 锁 §2 无此条款,是新增;
 3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动,但响应体文案变了。
+
+
+---
+
+## 30. 勘误 3 候选 —— 第 3 轮修复(2026-09-20,仍待 owner 确认)
+
+**状态先于证据:勘误 3 依旧是 CANDIDATE / PROPOSED,未 ratify、未授权、未合并、未 undraft、未向任何共享/staging/prod 库应用迁移。** 本节全部是**技术验证**,不构成 ratify、合并或迁移应用的许可。真库证据来自本轮自建的一次性库 `metasheet2_namerule_r3_20260920`(owner 角色 `ms2testbed`,`rolsuper=false`),用完即 `dropdb`。
+
+修的是 `impl-gate-A-slice1-name-rule-candidate-round2-20260920.md` 的 **1 P1 + 3 P3**(该报告对 head `88bc46486eb99870d91237e2b9aeca53aa9d58d4` 判 CHANGES-REQUESTED)。该报告同时确认第 1 轮的 1 P2 + 7 P3 **全部真闭合**,本轮未动那八条的实现。
+
+### 30.1 P1-1 —— 边缘裁剪的复杂度
+
+第 2 轮把边缘裁剪写成 `new RegExp('^[类]+|[类]+$', 'gu')`。**带量词、锚在 `$` 的重复**在不匹配时要从每一个起始位置重试一遍,所以对「可见字符 + 长裁剪类串 + 可见字符」这种形状,代价随**提交长度的平方**增长;而第 2 轮新增的 255 长度闸写在 `.replace(正则)` **之后**,对它零缓解。`express.json` 的 10mb 上限意味着这个长度由调用方决定。
+
+本轮的修法是**两个彼此独立的改动,每一个单独就能闭合它**——两个都留下,作为纵深:
+
+1. **裁剪改成线性扫描**。`trimNameEdges` 用索引循环从两端向内走,成员判定是 `Set.has`;没有模式,也就无从回溯。**成员集逐字未变**:`NAME_EDGE_TRIM_CLASS`(第 2 轮那个字符类)作为**规格**保留下来,新增用例把它与实现用的码点集合在 **0..0x10FFFF 全区间逐个码点**比对,`mismatches = []`。所以「集合没变,变的只是写法」是机械核过的事实,不是注释里的声明。
+2. **长度闸移到最前面**。`requireName` 现在先用 `countCodePoints`(索引循环,不用 `[...s].length` —— 那会为每个码点分配一个数组元素)数**提交值**的码点数,超过 `GROUP_NAME_MAX_LENGTH` 直接 400 `GROUP_NAME_TOO_LONG`;裁剪与可见字符判定都排在它后面,于是这两步永远不会走超过 255 个码点。`details.actualLength` 仍是**完整的真实计数**(不短路),不是「至少 N」。
+
+`NAME_VISIBLE_CHAR_PATTERN` 本身**未改**:它是「负向前瞻 + 单个字符类」,没有任何量词,引擎每次尝试前进一个位置,不存在可回溯的重复。
+
+### 30.2 这带来一条行为变化(单独列为 owner 待裁点,不并进第 2 轮那条)
+
+第 2 轮的上限量的是**裁剪后**的名字,所以 `U+200B U+3000 + <255 可见> + U+FEFF U+2060`(提交 259 码点、裁剪后 255)是**被接受**的。第 3 轮的上限量**提交值**,同一个输入现在是 400 `GROUP_NAME_TOO_LONG`,`details.actualLength = 259`。
+
+**裁剪本身没有被跳过**,这一点单独钉住:一个 251 码点的名字先建好,再用同样四个填充字符包起来提交(255 码点,**在上限之内**)——它照旧被裁回 251,撞上同名唯一索引,得到 **409 `GROUP_NAME_TAKEN`**。两个方向都在用例里,因为只留一个的话,「上限挪了位置」和「裁剪不跑了」在观测上是同一个样子。
+
+第 2 轮用例里那句「cap is applied to the TRIMMED name / 409」的断言**已被本轮改写**,改写处写明了它被取代。这条行为变化是 owner 的 **待裁点 4**(见 §30.7)。
+
+### 30.3 P3-1 / P3-2 / P3-3 —— 三条全称句改枚举 + 两条排除项各自补见证
+
+| 门审条目 | 处置 | 落点 |
+|---|---|---|
+| **P3-1**(迁移注释「400s **every** value in (a) and (b) … for **every one of them**」) | **已修**:改成「**实测清单 + 推导残留**」。经生产路由提交并观测到 400 的:(a) 族只有 U+00A0;(b) 族全部七个 + 四个由它们拼出的混合名;本 CHECK 自己十个成员里的 U+0020 / TAB / LF / U+3000 / U+200B / U+FEFF。(a) 族其余的 U+000B / U+000C / U+1680 / U+2000–U+200A / U+202F / U+205F / U+2028 / U+2029 **写明是由谓词推出、不是测出来的**(它们都在 `String.prototype.trim` 的集合里,而裁剪集含该集合 —— 这层包含关系本身由 §30.1 的全区间扫描用例机械断言) | 迁移 `atg_name_nonblank` 上方注释块 |
+| **P3-2**(服务层「(iii) **every** default-ignorable …(iv) **every** M/C/Z-only name … **each of which** the real-DB suite asserts」) | **已修**:把「谓词按构造闭合这五类」和「套件实际断言了哪些」**拆成两句**,后者列出真实提交过的码点清单,并明说 (iii)(iv) 是无穷类、任何套件都不可能逐一断言 | 服务层 `requireName` 文档注释 (2) |
+| **P3-3**(NIT:9 行 NEITHER-SET 里 8 行其实由边缘裁剪兜住,不是被称作「load-bearing half」的可见字符规则) | **已修,并且不止改注释**:注释按实测重写(哪一行由哪一半关掉);同时补了**两行**新夹具,把 owner 那两条待裁的排除项各自变成有见证的断言 —— 第 2 轮之后 U+2800 / U+3164 / U+115F 都进了裁剪集,任何**边缘位置**的实例都被 (1) 先吃掉,于是 (iii) 和 (v) 两条排除项在套件里**只有探针证据、没有用例证据**。新两行把被排除的码点夹在两个 U+FE0F 之间(U+FE0F 不在裁剪集,边缘不动),让它留在**内部**走到 (2):`U+FE0F U+3164 U+FE0F` 见证 `Default_Ignorable_Code_Point`,`U+FE0F U+2800 U+FE0F` 见证 U+2800 例外。§30.5 的 MUT-R3-D / MUT-R3-E 证明**各自只翻自己那一行** | 测试文件 `NEITHER_SET_INVISIBLES` 夹具及其上方注释 |
+
+> **U+FE0F 的准确说法(顺带纠正第 2 轮的一处含糊)**:U+FE0F 之所以被 (2) 拒,是因为它的 general category 是 `Mn`,**正类 `\p{L}\p{N}\p{P}\p{S}` 就已经不收它**,并不是靠 default-ignorable 那条排除项。这也是为什么单独一行 U+FE0F **不能**给排除项 (iii) 当见证,必须另造上面那两行。
+
+### 30.4 真库与全量数字(现场执行,不是抄的)
+
+```
+$ createdb -U postgres -O ms2testbed metasheet2_namerule_r3_20260920     # rolsuper=false
+$ DATABASE_URL=postgres://ms2testbed@localhost:5432/metasheet2_namerule_r3_20260920 pnpm run db:migrate
+  ... zzzz20260918090000_create_approval_template_groups was executed successfully ...
+  EXIT=0        # 非超级角色全量迁移,零 42501
+
+# CI 那份清单、CI 那个调用形状(workflow 不设 EXPECT_DB)
+$ npx vitest run --config vitest.integration.config.ts \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=dot
+ Test Files  2 passed (2)
+      Tests  37 passed | 2 skipped (39)
+
+# 同一份清单,置 EXPECT_DB=1(哨兵不再 skip)
+      Tests  39 passed (39)
+
+$ pnpm --filter @metasheet/core-backend type-check
+  EXIT=0
+
+$ CI=true pnpm --filter @metasheet/core-backend test
+ Test Files  947 passed | 175 skipped (1122)
+      Tests  15091 passed | 1609 skipped (16700)
+  EXIT=0
+
+$ node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
+  sealed-export-package-provenance.test.cjs OK      EXIT=0
+
+$ scripts/dev/atg-verification-recount.sh
+  负向状态断言 22 / 配对 error.code 断言 22 / 差额 0
+```
+
+**37 passed / 2 skipped(39)**:那 2 条仍是 `itIfExpectDb` 的 anti-skip-green 哨兵(CI 的真库步骤不设 `EXPECT_DB`)。上一轮同一份清单是 **34 passed / 2 skipped(36)**,本轮 **+3 个 `it`**(全区间等价扫描 / 直接计时 / 经路由计时)。
+
+**本轮新增的路由计时用例写成普通 `it`,不是 `itIfExpectDb`** —— 这是故意的:`plugin-tests.yml` 的真库步骤里 `grep -c EXPECT_DB` = 0,写成 `itIfExpectDb` 会在 CI 里 skip-green。本文件的 DB 闸是 `describeIfDatabase`,`itIfExpectDb` 只留给那条哨兵。
+
+`plugin-tests.yml` 本轮**未改**,所以 s6a 的 `pluginTestsWorkflow` 钉**不需要重算**(上式 EXIT=0 即为核对)。
+
+PG:`PostgreSQL 15.17 (Homebrew) on aarch64-apple-darwin25.2.0`。
+
+### 30.5 mutation 台账(`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`,六条全部自跑)
+
+两个改动**各自单独就能闭合 P1-1**,所以单靠一条路由计时用例分不清哪一半承重 —— 那正是「无效 mutation 看起来像没用的测试」的形状。因此每一半各有自己的 oracle,下表逐条写明**谁在什么改动下变红**:
+
+| 探针 | 改动 | 观察到的红(**原文**) | 数字 | 还原 |
+|---|---|---|---|---|
+| **MUT-R3-A**(计时断言的负控:证明这条断言真的在看钟) | 直接计时用例的 `CEILING_MS` 200 → 0.0001 | `AssertionError: visible + run + visible took 0.1ms, ceiling 0.0001ms (timings: visible + run + visible -> 0.1ms): expected 0.05316699999957564 to be less than 0.0001` | `1 failed / 28 skipped (29)` | `cmp` IDENTICAL |
+| **MUT-R3-B**(只退回裁剪,保留长度闸) | `trimNameEdges` 改回 `value.replace(new RegExp('^[类]+|[类]+$','gu'), '')` | `AssertionError: visible + run + visible took 16860.6ms, ceiling 200ms (timings: visible + run + visible -> 16860.6ms): expected 16860.559332999997 to be less than 200` | `1 failed / 2 passed / 26 skipped (29)` —— **路由计时用例仍绿**(长度闸单独就够),全区间等价用例仍绿 | `cmp` IDENTICAL |
+| **MUT-R3-C**(把 `requireName` 整体换回第 2 轮实现:正则裁剪在前、长度闸在后) | 见改动名 | ① 路由计时:`AssertionError: visible + run + visible took 16533.3ms through the route, ceiling 2000ms: expected 16533.322792 to be less than 2000`;② 顺序:`AssertionError: the cap reads the SUBMITTED value, not the trimmed one: expected 409 to be 400` | ① `1 failed / 2 passed / 26 skipped (29)`(直接计时用例仍绿 —— `trimNameEdges` 没被改);② `1 failed / 28 skipped (29)` | `cmp` IDENTICAL |
+| **MUT1-R3**(第 2 轮 MUT1 在新夹具上重跑) | `requireName`:`if (!trimmed || !NAME_VISIBLE_CHAR_PATTERN.test(trimmed))` → `if (!trimmed)` | `expected [ …(11) ] to deeply equal [ …(11) ]`,**11 行里恰好 3 行翻**:`U+FE0F VARIATION SELECTOR-16`、`U+FE0F + INTERNAL U+3164 + U+FE0F`、`U+FE0F + INTERNAL U+2800 + U+FE0F` 三行 `-> 201 CREATED`;其余 8 行仍 400 | `1 failed / 28 skipped (29)` | `cmp` IDENTICAL |
+| **MUT-R3-D**(删 (iii) 排除项) | `NAME_INVISIBLE_CLASS` 去掉 `\p{Default_Ignorable_Code_Point}` | 数组 diff **只有一行变**:`U+FE0F + INTERNAL U+3164 + U+FE0F … -> 201 CREATED` | `1 failed / 28 skipped (29)` | `cmp` IDENTICAL |
+| **MUT-R3-E**(删 (v) 例外) | `NAME_INVISIBLE_CLASS` 去掉 `\u2800` | 数组 diff **只有一行变**:`U+FE0F + INTERNAL U+2800 + U+FE0F … -> 201 CREATED` | `1 failed / 28 skipped (29)` | `cmp` IDENTICAL |
+
+**MUT1-R3 的读法**:它证明可见字符判定**承重**(有行变红),同时把 P3-3 那句话变成实测 —— 11 行里只有 3 行真的走到 (2),其余 8 行是被边缘裁剪关掉的。**MUT-R3-B 与 MUT-R3-C 合起来**才是「两半各自承重」的证据:B 只红直接计时用例、C 只红路由计时与顺序用例。
+
+每条 mutation 都先 `grep` 确认文件**真的变了**(不是无效 mutation),红的**原因**逐条核过(不是 setup 失败),还原后 `cmp` 对服务与测试两个文件均**逐字节一致**。
+
+### 30.6 对 §29 的逐句求值(失效标记贴在那句话上,不作废整节)
+
+| §29 的句子 | 第 3 轮求值 | 处置 |
+|---|---|---|
+| §29.1 末「(i)–(v) …**每一条都有经生产路由的断言**」 | 前半(谓词拒绝这五类)**仍真**;最后一个分句**假**(无穷类) | 已在原处贴失效标记 + 指向 §30.3 |
+| §29.2 (1) 行的位置列 `NAME_EDGE_TRIM_PATTERN` | 符号**已变**(`NAME_EDGE_TRIM_CODE_POINTS` + `trimNameEdges`);**集合未变** | 已在原处标注 |
+| §29.2 (3) 行「按码点计(`[...s].length`)…在任何 DB 往返之前判」 | 「在 DB 往返之前」**仍真**;`[...s].length` 与「裁剪后再判」**已变** | 已在原处标注 |
+| §29.5「34 passed / 2 skipped(36)」及全量数字 | 对 head `88bc46486e` **仍真**,不描述当前树 | 已标注,当前数字见 §30.4,**未手改旧数字** |
+| §29.6 M-1 / M-2 的「九行全变 / (9)」 | **结论仍真**,**计数已过期**(夹具 9 → 11 行) | 已标注,当前逐行观测见 §30.5 |
+| §29.6 M-3 / M-4、§29.3 全部、§29.4 的 P2-1/P3-1..P3-7 处置 | **未受影响,仍 OPERATIVE** | 不动 |
+
+### 30.7 本轮明确**没有**做的事,与给 owner 的**四**个待裁点
+
+未合并、未 undraft、未开/动 PR、未动 `origin/main`、未改任何已 ratify 锁文正文、未向 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_*` 或任何共享·staging·prod 库应用迁移、未删除任何不是本轮创建的 worktree/库/文件、未扩 owner 提案的十码位枚举集、未改任何错误码、未改 `plugin-tests.yml`、未改 `NAME_VISIBLE_CHAR_PATTERN` 的谓词本体。
+
+**待裁点(前三条是第 2 轮的,原样结转;第四条是本轮新增)**:
+
+1. **可见字符规则的两条排除项**(`Default_Ignorable_Code_Point` + U+2800)—— owner 提案之外的新增判据。**本轮变化**:这两条现在各有一个**会变红的见证用例**(§30.5 的 MUT-R3-D / MUT-R3-E),不再只有探针证据。
+2. **255 码点长度上限** —— 锁 §2 无此条款,是新增。
+3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动,响应体文案变了。
+4. **【新】长度闸的度量对象从「裁剪后」改成「提交值」** —— 这是一条**行为变化**,不是纯内部重构:提交 259 码点、裁剪后 255 的名字,第 2 轮接受(或按同名 409),第 3 轮是 400 `GROUP_NAME_TOO_LONG`。它随第 2 项(上限本身)一起裁,但**单独列出**,因为即便 owner 接受 255 这个数,「量哪个值」仍是一个独立的取舍。
