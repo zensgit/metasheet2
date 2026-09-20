@@ -597,6 +597,10 @@ Test Files  5 passed (5)
 EXECLINE_EXIT=0
 Test Files  473 passed (473)
       Tests  7339 passed (7339)     # r1 记录为 473 / 7307
+# 该行共跑 3 次(NUL 修复前 1 次、修复后 2 次),三次的 473 / 7339 逐字相同。
+# 修复后的第一次 EXIT=134:全部 473 文件 / 7339 条报告 passed **之后**,node worker 在
+# `cjsPreparseModuleExports` 抛 Abort trap: 6 —— 是 ESM loader 的进程级崩溃(本机内存压力),
+# 零测试失败;紧接着的重跑 EXIT=0、零 abort。如实登记为环境 flake,不算作红,也不据此声称绿。
 
 # vue-tsc -b --force
 VUE_TSC_EXIT=0 ; `error TS` 计数 = 1 ,唯一一条 = vite.config.ts(28,29) TS2769
