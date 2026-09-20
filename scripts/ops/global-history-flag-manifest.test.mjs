@@ -81,6 +81,13 @@ const NON_GH_EXACT = new Set([
   // 被这条 `MULTITABLE_[A-Z_0-9]+` grep 当成 flag 抓到。列在这里等于声明「不得要求它出现在
   // GLOBAL_HISTORY_FLAG_MANIFEST 里」，而不是把它注册成 flag。
   'MULTITABLE_CUSTOM_TEMPLATES_TABLE',
+  // 「使用模板」去重账本的表名常量(#5861)，不是环境开关：它是
+  // db/migrations/zzzz20260919140000_create_multitable_template_install_ledger.ts 导出的表名字面量，
+  // 没有任何一处从 process.env 读它（那条去重路径一个 env 开关都没有：窗口、锁等待上限、清理条数
+  // 都是源码常量，见 multitable/template-install-dedupe.ts 的 TEMPLATE_INSTALL_* 导出）。
+  // 与上面的 MULTITABLE_CUSTOM_TEMPLATES_TABLE 同形，被这条 `MULTITABLE_[A-Z_0-9]+` grep 抓到。
+  // 列在这里等于声明「不得要求它出现在 GLOBAL_HISTORY_FLAG_MANIFEST 里」，而不是把它注册成 flag。
+  'MULTITABLE_TEMPLATE_INSTALL_LEDGER_TABLE',
   'MULTITABLE_CAPABILITY_KEYS', // capability registry
   'MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE', // cross-base mirror write (separate line)
   'MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE', // P0-S S3: provisioning destructive-reconcile guard mode (refuse[default]|overwrite|observe|preserve) — not a Global-History/recovery flag

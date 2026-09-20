@@ -14,7 +14,10 @@
 export function handleTemplateInstallDedupeSql(
   normalizedSql: string,
 ): { rows: any[]; rowCount?: number } | null {
-  if (normalizedSql.includes('pg_advisory_xact_lock')) return { rows: [{}] }
+  // 锁语句是 `SELECT pg_try_advisory_xact_lock(...) AS locked`,回的是一行一列的 boolean;
+  // 少了 `locked` 这一列,被测代码会**立刻抛**(而不是默默退避到等待上限),
+  // 所以这里必须真的把列名写出来。
+  if (normalizedSql.includes('advisory_xact_lock')) return { rows: [{ locked: true }] }
   if (normalizedSql.includes('meta_multitable_template_installs')) return { rows: [], rowCount: 0 }
   return null
 }

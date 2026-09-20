@@ -28,6 +28,11 @@ import { sql } from 'kysely'
  * 只存结构(模板定义 + 新建出来的 base/sheet/field/view 元数据),不含任何记录值 ——
  * 安装本身一行记录都不写。
  *
+ * base_id / sheet_ids:重放**前**要核对的东西。用户删掉一个多余的模板 Base 的唯一产品路径是
+ * 删掉里面那张表(软删 meta_sheets.deleted_at),Base 行会原地留下;只核对 base_id 就会把一条
+ * 指向已软删表的 201 重放回去。所以这里连**那次安装建出来的每一个 sheet id**一起记下来,
+ * 读侧要求 base 与全部 sheet 都还 deleted_at IS NULL 才敢重放,否则删账本行、真的再装一次。
+ *
  * installed_at:窗口起点。过期行由安装路径顺手清理(DELETE ... WHERE installed_at < now() - 窗口),
  * 所以这张表的稳态行数 ≈ 窗口内的安装次数,不会无界增长。
  */
@@ -43,9 +48,17 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       template_id text NOT NULL,
       workspace_id text,
       base_id text NOT NULL,
+      sheet_ids text[] NOT NULL DEFAULT '{}',
       response jsonb NOT NULL,
       installed_at timestamptz NOT NULL DEFAULT now()
     )
+  `.execute(db)
+
+  // 上面是 IF NOT EXISTS:若这台机器已经跑过本迁移的早期草稿(表已存在、没有 sheet_ids),
+  // CREATE 会整条跳过,列就永远补不上。补一条幂等 ALTER —— 只动本迁移自己建的这张表。
+  await sql`
+    ALTER TABLE meta_multitable_template_installs
+      ADD COLUMN IF NOT EXISTS sheet_ids text[] NOT NULL DEFAULT '{}'
   `.execute(db)
 
   // 过期清理走这个索引(DELETE ... WHERE installed_at < ...)。
