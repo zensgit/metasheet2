@@ -382,6 +382,8 @@ round-2 门审的 §7 NOTE 指出:实现者(round-2 实现代理)在自己的完
 
 ### 9.4 NIT-B——条件式 `data-testid` 处置
 
+> **【第 3 轮失效标记 — 只作用于本段的状态断言】** 下面这句「本轮**未改动**」在第 3 轮**不再成立**:条件式 `data-testid` 已改为固定 `approval-template-groups-item` + `:data-archived`(设计 MD §6.6,验证 MD §10.1/§10.2)。本段其余内容——为什么 round-1/round-2 判它可以缓、以及缓的代价——**仍然 OPERATIVE**,它们正是第 3 轮决定动它的理由。
+
 **处置:维持不改,正式登记(不是遗漏)。** `ApprovalTemplateGroupsPanel.vue:84` 的 `:data-testid="group.archivedAt ? 'approval-template-groups-item-archived' : 'approval-template-groups-item'"` 本轮**未改动**。理由与 round-1/round-2 门审的登记一致且未过期:
 1. 这条件式收窄本身是 P2-1(归档视觉区分)存在的**原因**,不是副作用——两个不同的 testid 正是 D2/D3 真浏览器判据与 P2-1 用例（本文件 `'P2-1: an archived group is visually distinct...'`）引用的锚点；
 2. 改成「统一 testid + `data-archived` 属性」会动到已经过 round-1/round-2 两轮门审 CLEAR 的判据面，属于**独立的卫生（hygiene）切片**，不在本轮 P2-C/P3-D/NIT-A/记录级四项授权范围内；
@@ -611,6 +613,16 @@ error TS 计数 = 0
 Test Files  3 passed (3)
       Tests  28 passed | 3 skipped (31)
 ```
+
+**字节级闸(本轮新加,因为本轮差点漏掉它)**:
+
+```
+# 每个被改的源文件都必须是 git 眼里的 TEXT,不是 Bin
+git diff --stat <base> <head> -- <每个被改文件>        # 出现 `Bin` 或 `Binary files … differ` 即红
+python3 -c "print(open(F,'rb').read().count(b'\\x00'))"   # 必须 0
+```
+
+**第一次 push(`0f30f3d2ef`)在这一条上是红的**:`readAuthSessionSignature` 的模板串分隔符被写成了**裸 NUL**(U+0000)。它是合法字符串字面量,所以 `vue-tsc` / `vite build` / 7339 条用例**全绿**、一条都发现不了;但 `git diff --stat` 给出 `apps/web/src/composables/authPrincipal.ts | Bin 6672 -> 9624 bytes`,`git diff` 给出 `Binary files a/… and b/… differ` —— 门审会拿到一个**读不出内容的 diff**,secret-scan 也会跳过该文件(`finding_raw_nul_in_domain_constants`)。修法不改行为(签名只做相等比较):`return JSON.stringify([key, readStoredToken()])`,不再引入任何分隔字符。修后该文件 NUL 计数 = 0、`git diff` 正常渲染为文本。
 
 **required 全脚本(`run-required-web-tests.sh`)本地 EXIT=1 —— 原因是一条与本轮无关的既有失败,已机械取证**:
 
