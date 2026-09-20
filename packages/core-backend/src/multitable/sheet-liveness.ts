@@ -128,3 +128,33 @@ export async function assertSheetLive(query: LivenessQuery, sheetId: string): Pr
   if (liveness === 'live') return
   throw new SheetNotLiveError(sheetId, liveness)
 }
+
+/**
+ * Shapes a driver error may take on the way into a log line, and nothing else: an identifier-shaped
+ * constructor name, and an identifier-shaped `code` (a SQLSTATE such as `57014`, or an errno such as
+ * `ECONNREFUSED`).
+ */
+const LOOKUP_ERROR_CLASS_SHAPE = /^[A-Za-z_$][\w$]{0,63}$/
+const LOOKUP_ERROR_CODE_SHAPE = /^[0-9A-Z_]{2,32}$/
+
+/**
+ * Values-free description of a FAILED liveness lookup, for the log line of a caller that fails closed.
+ *
+ * It lives beside {@link loadSheetLiveness} because every fail-closed caller of that lookup needs the
+ * same line and must not be tempted to log the error itself: `message` / `detail` / `hint` can carry
+ * connection strings and row values, so only the constructor name and a code-shaped `code` come out.
+ * Shared by the async bulk-fill worker (#5832, services/ai-bulk-job-service.ts `jobSheetIsLive`) and
+ * the inline bulk-preview loop (#5838, routes/multitable-ai.ts), so the two lanes cannot drift into
+ * two different ideas of what is safe to print.
+ */
+export function describeLivenessLookupError(err: unknown): { errorClass: string; errorCode?: string } {
+  let errorClass: string = typeof err
+  if (err instanceof Error) {
+    const ctorName = (err as { constructor?: { name?: unknown } }).constructor?.name
+    errorClass = typeof ctorName === 'string' && LOOKUP_ERROR_CLASS_SHAPE.test(ctorName)
+      ? ctorName
+      : LOOKUP_ERROR_CLASS_SHAPE.test(err.name) ? err.name : 'Error'
+  }
+  const code = err !== null && typeof err === 'object' ? (err as { code?: unknown }).code : undefined
+  return typeof code === 'string' && LOOKUP_ERROR_CODE_SHAPE.test(code) ? { errorClass, errorCode: code } : { errorClass }
+}

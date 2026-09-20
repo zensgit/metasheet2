@@ -54,11 +54,14 @@ export type MetaAiBulkLabelKey =
   | 'aibulk.reasonBlocked'
   | 'aibulk.reasonGenFailed'
   | 'aibulk.reasonUnsafe'
+  | 'aibulk.reasonSheetNotLive'
   // Distinct failure reasons (CHARGED, non-confirmable)
   | 'aibulk.reasonProviderError'
   | 'aibulk.reasonCacheFailed'
-  // Partial-preview (capped:true) notice
+  // Partial-preview (capped:true) notice — and its #5838 variant, for the one cause whose next step
+  // is NOT "write these, then re-run" (both refuse on a table that is gone).
   | 'aibulk.partialNotice'
+  | 'aibulk.partialNoticeSheetNotLive'
   // Empty preview
   | 'aibulk.emptyConfirmable'
   // Confirm step
@@ -157,12 +160,25 @@ const LABELS: Record<MetaAiBulkLabelKey, LocaleText> = {
   'aibulk.reasonBlocked': { en: 'AI unavailable — re-run later', zh: 'AI 暂不可用——稍后重试' },
   'aibulk.reasonGenFailed': { en: 'Generation failed (not charged)', zh: '生成失败（未扣费）' },
   'aibulk.reasonUnsafe': { en: 'Content blocked (secret-shaped) — not sent', zh: '内容被拦截（疑似密钥）——未发送' },
+  // #5838: the table could not be CONFIRMED available while the batch was running — the rest was never
+  // sent. The server fails closed on three different verdicts (deleted / row gone / the liveness lookup
+  // itself failed) and reports one reason, so this copy must not ASSERT a deletion: a DB blip on a live
+  // table would otherwise tell the user their table was deleted and talk them out of the one action
+  // that works (re-run). "Could not be confirmed" is true of all three.
+  'aibulk.reasonSheetNotLive': { en: 'Table could not be confirmed available — the rest was not sent', zh: '无法确认数据表可用——其余行未发送' },
   'aibulk.reasonProviderError': { en: 'Provider error after charge', zh: '扣费后模型出错' },
   'aibulk.reasonCacheFailed': { en: 'Result lost after charge', zh: '扣费后结果丢失' },
   // capped:true — partial preview; NO count (hidden-row oracle guard).
   'aibulk.partialNotice': {
     en: 'Preview stopped early — some in-scope rows were not previewed yet. Write these results, then run AI fill again to continue with the rest.',
     zh: '预览提前结束——范围内仍有部分行未预览。可先写入这些结果，再次运行 AI 填充以继续处理其余行。',
+  },
+  // #5838: capped:true because the TABLE stopped being confirmable, not because a quota ran out. The
+  // generic notice above sends the user to do two things that both refuse on a table that is gone
+  // (write → 404 SHEET_DELETED, re-run → refused at the entry gate), so this replaces it.
+  'aibulk.partialNoticeSheetNotLive': {
+    en: 'Preview stopped early — the table could not be confirmed available while this batch was running, so the remaining rows were never sent. These results are already charged, but they can only be written while the table is available: if it was deleted, restore it first; otherwise run AI fill again.',
+    zh: '预览提前结束——本次批量运行期间无法确认数据表可用，其余行未发送。下方结果已扣费，但只有在数据表可用时才能写入：如果它已被删除，请先恢复；否则请再次运行 AI 填充。',
   },
   'aibulk.emptyConfirmable': {
     en: 'No rows are ready to write. See skipped/failed rows below for why.',
@@ -249,6 +265,8 @@ export function aiBulkSkippedReason(reason: string, isZh: boolean): string {
       return aiBulkLabel('aibulk.reasonGenFailed', isZh)
     case 'unsafe_input':
       return aiBulkLabel('aibulk.reasonUnsafe', isZh)
+    case 'sheet_not_live':
+      return aiBulkLabel('aibulk.reasonSheetNotLive', isZh)
     default:
       return reason
   }

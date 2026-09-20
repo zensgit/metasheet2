@@ -49,6 +49,7 @@ import { eventBus } from '../integration/events/event-bus'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { ensureRecordWriteAllowed, resolveSheetCapabilities, resolveSheetReadableCapabilities } from '../multitable/permission-service'
 import { sendSheetNotLive } from '../multitable/sheet-refusals'
+import { describeLivenessLookupError, loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
 import { loadFieldsForSheet, tryResolveView } from '../multitable/loaders'
 import {
   insertBulkPreviewCacheRow,
@@ -949,6 +950,22 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
 
       for (const cand of generationCandidates) {
         const recordId = cand.recordId
+        // #5838: re-check THIS sheet before EVERY provider call — the entry gate proved it live once,
+        // and this loop can keep sending its record content outbound for minutes afterwards. Not live,
+        // or the lookup failed (fail-closed) → send nothing more. The verdict is the inline twin of the
+        // worker's (#5832): the rows already generated are KEPT (charged, cached, committable once the
+        // sheet is live again — bulk-commit refuses a non-live sheet on its own), this row and every
+        // un-reached row are UNCHARGED and never sent, and the partial comes back `capped: true` — an
+        // outright refusal here would hide a real, already-settled spend from the caller. When there is
+        // NO such spend (the stop landed on the first row) the partial has nothing to protect and the
+        // request is refused instead — see the zero-spend block after this loop.
+        // RESIDUAL WINDOW: a delete committing after this check answers live still lets THIS row out;
+        // it spans runShortcutCore's quota-reservation transaction (same note as the worker's).
+        if (!(await bulkPreviewSheetIsLive(query, sheetId))) {
+          skipped.push({ recordId, reason: 'sheet_not_live' })
+          paused = true
+          break
+        }
         const captured = { version: cand.version, data: cand.data }
         // Mask + assemble: unreadable source fields NEVER enter the prompt.
         const prompt = assembleMaskedPrompt(config, patchContext, captured.data)
@@ -1041,6 +1058,22 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
           // but DO NOT pause (other rows may be clean).
           skipped.push({ recordId, reason: 'unsafe_input' })
           continue
+        }
+      }
+
+      // ZERO-SPEND liveness stop (#5838): the partial above exists for ONE reason — an outright refusal
+      // would hide an already-settled spend. When the loop stopped on its FIRST row there is no such
+      // spend (nothing generated, nothing charged, nothing cached), so the module rule stands and this
+      // answers the 404 the entry gate would have: `deleted` keeps its restore hint, `absent` stays
+      // NOT_FOUND. The verdict is re-read rather than inferred from the loop's bare `false`, because
+      // that `false` is fail-closed and collapses "the sheet is gone" with "the lookup failed" — and a
+      // LIVE sheet must never be told it was deleted. A still-failing lookup throws into the 500 below:
+      // no spend is at stake here, so an error is the honest answer.
+      if (paused && rows.length === 0 && failures.length === 0 && settledCost === 0
+        && skipped.some((entry) => entry.reason === 'sheet_not_live')) {
+        const stopLiveness = await loadSheetLiveness(query, sheetId)
+        if (stopLiveness !== 'live') {
+          return sendSheetNotLive(res, stopLiveness)
         }
       }
 
@@ -1723,6 +1756,49 @@ function resolvePersistedShortcutConfig(
     return { error: `Persisted aiShortcut config is invalid: ${parsed.error}`, httpStatus: 400, code: 'VALIDATION_ERROR' }
   }
   return { config: parsed.config }
+}
+
+/**
+ * SHEET LIVENESS for the INLINE bulk-preview loop (#5838) — the same question the async worker asks
+ * (services/ai-bulk-job-service.ts `jobSheetIsLive`, #5832), on the other lane.
+ *
+ * Why the entry gate is not enough: bulk-preview refuses a non-live sheet ONCE, then loops over up to
+ * `MULTITABLE_AI_BULK_MAX_ROWS` rows (default 200, operator-raisable) sending each row's record content
+ * to the provider, one request at a time, for as long as the HTTP request lives (per-row timeout up to
+ * 60s). Nothing downstream of that loop reads `meta_sheets` again — the captured row data is already in
+ * memory and `runShortcutCore` only addresses the usage ledger by id — so a sheet soft-deleted during
+ * the request kept sending every remaining row's content outbound. Same class as #5832, same fix.
+ *
+ * Returns true ONLY on positive proof that the sheet is live:
+ *  · `deleted` → false. The point of the fix.
+ *  · `absent`  → false. The route proved the sheet live at entry, so `absent` here means the
+ *    `meta_sheets` row disappeared mid-request; the captured prompts would still go out.
+ *  · lookup THROWS → false (FAIL-CLOSED), matching the worker: on an egress path a failed lookup is
+ *    not proof of a live sheet, and the cost of stopping is small and recoverable — the rows already
+ *    generated stay charged, cached and committable (once the sheet is live again), the caller gets
+ *    them as a partial (`capped`), and the un-reached rows are UNCHARGED and can be re-run.
+ * Logged values-free through the shared describer (never `message` / `detail`, which can carry
+ * connection details or row values).
+ */
+async function bulkPreviewSheetIsLive(query: QueryFn, sheetId: string): Promise<boolean> {
+  let liveness: SheetLiveness
+  try {
+    liveness = await loadSheetLiveness(query, sheetId)
+  } catch (err) {
+    console.error(
+      '[multitable-ai] bulk-preview: sheet liveness lookup failed; stopping generation before the next provider call (fail-closed, #5838)',
+      { reason: 'liveness_lookup_failed', ...describeLivenessLookupError(err) },
+    )
+    return false
+  }
+  if (liveness !== 'live') {
+    console.warn(
+      '[multitable-ai] bulk-preview: the sheet is not live; stopping generation before the next provider call (#5838)',
+      { reason: liveness === 'deleted' ? 'sheet_deleted' : 'sheet_absent' },
+    )
+    return false
+  }
+  return true
 }
 
 async function readRecordOnce(
