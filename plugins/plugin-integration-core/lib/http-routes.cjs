@@ -6485,6 +6485,10 @@ function requireStockPreparationAudit() {
         action.target,
         projectNo,
       )
+      // #5860 one sheet = one project: the large-BOM lane never plans through `computeDryRun`, so the
+      // table-level foreign-project guard is called here the same way the existence probe above is —
+      // after the project-scoped read, before the plan. 409 TARGET_SHEET_FOREIGN_PROJECT, values-free.
+      await tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows(getMultitableRecordsApi(), action.target, projectNo)
       const diagnostics = duplicateExpandedKeyDiagnosticsForRows(
         job.artifact && Array.isArray(job.artifact.rows) ? job.artifact.rows : [],
       )
@@ -6565,6 +6569,13 @@ function requireStockPreparationAudit() {
       // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
       // checkpoint job that would write to it exists.
       await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
+      // #5860 at approval as well: a foreign project's active rows that landed between plan and
+      // approval refuse here, before a checkpoint job that would write next to them exists.
+      await tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows(
+        getMultitableRecordsApi(),
+        snapshotAction.target,
+        expansionJob.parameters && expansionJob.parameters.projectNo,
+      )
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -6611,14 +6622,25 @@ function requireStockPreparationAudit() {
       // 目标表字段存在性探针 per chunk, against the STORED expansion job's snapshot (the target this
       // checkpoint job writes — `pendingJob.target` is copied from it). A chunk runs as its own HTTP
       // request, so a column deleted mid-run stops the next chunk instead of writing around it.
+      const runExpansionJob = await loadLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        jobId,
+      })
+      const runSnapshotAction = assertStockPreparationTargetReady(runExpansionJob.actionSnapshot)
       await tableActionInternals.assertTargetFieldsExist(
-        assertStockPreparationTargetReady((await loadLargeBomBackgroundExpansionJob({
-          storage: context.storage,
-          ...routeScope,
-          actionId,
-          jobId,
-        })).actionSnapshot),
+        runSnapshotAction,
         targetFieldExistenceForTenant(routeScope.tenantId),
+      )
+      // #5860 per chunk as well. RUN is also the resume path of a failed/paused job, so another
+      // project's rows can land between START and a later chunk; a chunk that would write next to
+      // them refuses here (409, values-free), before the apply gate and before the chunk write — the
+      // job is left exactly as it was (its stored state is not advanced by a refused request).
+      await tableActionInternals.assertTargetSheetHoldsNoForeignActiveRows(
+        getMultitableRecordsApi(),
+        runSnapshotAction.target,
+        runExpansionJob.parameters && runExpansionJob.parameters.projectNo,
       )
       // FOS-4b-3-prod P2: the large-BOM checkpoint apply funnels through here. Shared apply gate before any
       // write — no production policy → sandbox gate (canonical rejected, fail-closed); a configured

@@ -58,6 +58,19 @@ afterEach(() => {
 })
 
 describe('recovery archive application composition', () => {
+  it('forwards only explicitly configured immutable manual capture policy', async () => {
+    const manualCapture = { keyId: 'synthetic-key', keyRowVersion: '1', leaseSeconds: 60, expiresAfterSeconds: 600 }
+    const composition = { ...fakeComposition(fakeProviders()), manualCapture }
+    const app = createRecoveryArchiveApplication(() => composition, () => fakeDatabaseRuntime().runtime, ENABLED_ENV)
+    expect(app.routerOptions?.recoveryArchiveManualPolicy).toEqual(manualCapture)
+    manualCapture.leaseSeconds = 1
+    expect(app.routerOptions?.recoveryArchiveManualPolicy?.leaseSeconds).toBe(60)
+    expect(Object.isFrozen(app.routerOptions?.recoveryArchiveManualPolicy)).toBe(true)
+    await app.stopWorker()
+    expect(() => createRecoveryArchiveApplication(() => ({ ...composition,
+      manualCapture: { ...manualCapture, expiresAfterSeconds: 0 } }), () => fakeDatabaseRuntime().runtime, ENABLED_ENV))
+      .toThrow('RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED')
+  })
   it('makes stop-before-start terminal without creating a worker', async () => {
     const application = createRecoveryArchiveApplication(
       () => fakeComposition(fakeProviders()), () => fakeDatabaseRuntime().runtime, ENABLED_ENV,

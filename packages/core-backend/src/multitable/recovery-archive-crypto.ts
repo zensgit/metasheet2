@@ -24,6 +24,7 @@
  */
 
 import { createCipheriv, createDecipheriv, createHash } from "node:crypto";
+import { recoveryArchiveAttachmentNonceIdentity, sealRecoveryArchiveAttachment, type SealedArchiveAttachment } from './recovery-archive-attachment-crypto';
 import { resolveLocalArchiveCustody, type LocalArchiveCustodyAdmission } from "./recovery-local-custody";
 
 import {
@@ -959,7 +960,7 @@ export interface RecoveryArchiveNonceReservation {
   dekFingerprint: string;
   nonceHex: string;
   generationId: string;
-  sectionName: RecoveryArchiveSectionName;
+  sectionName: RecoveryArchiveSectionName | `attachment:${string}`;
   aeadAlgorithm: RecoveryArchiveAeadAlgorithm;
   formatVersion: number;
 }
@@ -1042,6 +1043,12 @@ function assertDekSource(source: unknown): RecoveryArchiveDekSource {
 }
 
 export interface RecoveryArchiveReserveThenSealInput {
+  attachments?: readonly {
+    attachmentId: string;
+    sourceVersion: string;
+    plaintext: Uint8Array;
+    nonce: Uint8Array;
+  }[];
   /** Generation binding WITHOUT key material identity: the fingerprint is derived, not supplied. */
   binding: Omit<
     RecoveryArchiveCryptoBinding,
@@ -1138,6 +1145,9 @@ function snapshotRecoveryArchiveReserveBinding(
 }
 
 export interface RecoveryArchiveReserveThenSealResult {
+  sealedAttachments?: readonly (SealedArchiveAttachment & {
+    attachmentId: string; sourceVersion: string; plaintextSha256: string; sizeBytes: number;
+  })[];
   /** Binding passed to every sealer call; only the default sealer proves it entered the AEAD AAD. */
   binding: Readonly<RecoveryArchiveCryptoBinding>;
   dekFingerprint: string;
@@ -1218,6 +1228,22 @@ export async function reserveThenSealRecoveryArchiveSections(
 
   // A format-v1 archive_snapshot is all ten sections in order, one nonce each - never a subset.
   assertRecoveryArchiveV1SnapshotPlan(plans);
+  if (input.attachments !== undefined && !Array.isArray(input.attachments)) fail('RECOVERY_ARCHIVE_CRYPTO_INVALID_SECTION_PLAN');
+  const attachmentIds = new Set<string>();
+  const attachments = (input.attachments ?? []).map((item) => {
+    if (!item || typeof item.attachmentId !== 'string' || !item.attachmentId.trim()
+      || typeof item.sourceVersion !== 'string' || !item.sourceVersion.trim()
+      || !(item.plaintext instanceof Uint8Array) || !(item.nonce instanceof Uint8Array)
+      || attachmentIds.has(item.attachmentId)) fail('RECOVERY_ARCHIVE_CRYPTO_INVALID_SECTION_PLAN');
+    attachmentIds.add(item.attachmentId);
+    const nonce = Buffer.from(item.nonce);
+    const nonceHex = toRecoveryArchiveNonceHex(nonce);
+    if (seenNonces.has(nonceHex)) fail('RECOVERY_ARCHIVE_CRYPTO_DUPLICATE_NONCE_IN_BATCH');
+    seenNonces.add(nonceHex);
+    const plaintext = Buffer.from(item.plaintext);
+    return { attachmentId: item.attachmentId, sourceVersion: item.sourceVersion, nonce, nonceHex,
+      plaintext, plaintextSha256: recoveryArchivePlaintextSha256(plaintext) };
+  });
   const dekSource = assertDekSource(input.dekSource);
 
   // Entry check: refuse before a single KMS verb if a transaction is already open.
@@ -1269,6 +1295,11 @@ export async function reserveThenSealRecoveryArchiveSections(
         formatVersion: sealedBinding.formatVersion,
       }),
     );
+    for (const attachment of attachments) reservations.push({
+      dekFingerprint: sealedBinding.dekFingerprint, nonceHex: attachment.nonceHex,
+      generationId: sealedBinding.generationId, sectionName: recoveryArchiveAttachmentNonceIdentity(attachment.attachmentId),
+      aeadAlgorithm: sealedBinding.aeadAlgorithm, formatVersion: sealedBinding.formatVersion,
+    });
 
     // THE ORDERING GUARANTEE. Nothing below this line may move above it: reservation is durable
     // before the first byte is encrypted, so a refusal leaves no ciphertext to reuse a nonce with.
@@ -1297,6 +1328,15 @@ export async function reserveThenSealRecoveryArchiveSections(
         ),
       );
     }
+
+    const sealedAttachments = attachments.map((attachment) => ({
+      attachmentId: attachment.attachmentId, sourceVersion: attachment.sourceVersion,
+      plaintextSha256: attachment.plaintextSha256, sizeBytes: attachment.plaintext.length,
+      ...sealRecoveryArchiveAttachment({ binding: { generation: sealedBinding,
+        attachmentId: attachment.attachmentId, sourceVersion: attachment.sourceVersion,
+        plaintextSha256: attachment.plaintextSha256 }, dek: generationDek!.dek,
+        nonce: attachment.nonce, plaintext: attachment.plaintext }),
+    }));
 
     if (input.uploadSealedSection) {
       for (const sealed of sealedSections) {
@@ -1328,9 +1368,11 @@ export async function reserveThenSealRecoveryArchiveSections(
       },
       reservations,
       sealedSections,
+      ...(attachments.length ? { sealedAttachments } : {}),
     });
   } finally {
     // Every exit - success, refusal, adapter throw, reservation refusal, seal or provider failure.
     scrubRecoveryArchiveDek(generationDek?.dek);
+    for (const attachment of attachments) attachment.plaintext.fill(0);
   }
 }

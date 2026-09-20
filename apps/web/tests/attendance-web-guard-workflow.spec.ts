@@ -175,6 +175,17 @@ describe('attendance web guard workflow contract', () => {
     }
   })
 
+  it('keeps attendance task-home badge and group-access specs in the classifier and targeted run list', () => {
+    const targetedRun = targetedRunCommand(workflow)
+    for (const spec of [
+      'attendanceAdminTaskHomeStatus',
+      'attendanceAdminTaskHomeAccess',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
+
   it('keeps employee 常用 icon specs in the classifier and targeted run list', () => {
     const targetedRun = targetedRunCommand(workflow)
     for (const spec of [

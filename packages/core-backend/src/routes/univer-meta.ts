@@ -76,7 +76,12 @@ import {
   createRecoveryAuthorizationStabilizer,
   createRecoveryPlanAuthorization,
 } from '../multitable/recovery-plan-authorization'
-import { bindRecoveryArchiveWorkerAuthorization } from '../multitable/recovery-archive-worker-authorization'
+import { bindRecoveryArchiveWorkerAuthorization, bindRecoveryArchiveScopeAuthorization } from '../multitable/recovery-archive-worker-authorization'
+import { bindRecoveryArchiveManualContinuation, bindRecoveryArchiveManualObjectUpload, bindRecoveryArchiveManualManifestUpload } from '../multitable/recovery-archive-manual-continuation'
+import { bindRecoveryArchiveManualFinalization } from '../multitable/recovery-archive-manual-finalization'
+import { bindRecoveryArchiveManualCommand } from '../multitable/recovery-archive-manual-command'
+import { bindRecoveryArchiveManualAdmission, bindRecoveryArchiveManualSourceRecheck, type RecoveryArchiveManualAdmissionPolicy } from '../multitable/recovery-archive-manual-admission'
+import type { RecoveryArchivePreparedUploadInput } from '../multitable/recovery-archive-prepared-upload'
 import { bindRecoveryArchiveDerivedProcessor, runRecoveryArchiveDerivedTransaction } from '../multitable/recovery-archive-derived-processor'
 import type { RecoveryArchiveDerivedWork } from '../multitable/recovery-archive-derived-effects'
 import {
@@ -7251,6 +7256,62 @@ const runRecoveryPostCommitSideEffects = async (
   return { yjsRecordIds: [...new Set(yjsRecordIds)] }
 }
 
+/** Internal reservation admission uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualAdmission(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'], policy: RecoveryArchiveManualAdmissionPolicy,
+) {
+  return bindRecoveryArchiveManualAdmission(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), policy)
+}
+
+/** Internal manual continuation uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualSourceRecheck(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualSourceRecheck(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
+}
+
+/** Internal manual continuation uses canonical fresh authority; no capture route is exposed. */
+export function createRecoveryArchiveManualContinuation(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualContinuation(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
+}
+
+export function createRecoveryArchiveManualObjectUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  input: Parameters<typeof bindRecoveryArchiveManualObjectUpload>[2],
+) {
+  return bindRecoveryArchiveManualObjectUpload(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), input)
+}
+
+export function createRecoveryArchiveManualManifestUpload(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'],
+  input: Parameters<typeof bindRecoveryArchiveManualManifestUpload>[2],
+) {
+  return bindRecoveryArchiveManualManifestUpload(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), input)
+}
+
+export function createRecoveryArchiveManualFinalization(transaction: RecoveryArchivePreparedUploadInput['transaction']) {
+  return bindRecoveryArchiveManualFinalization(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
+}
+
+export function createRecoveryArchiveManualCommand(
+  transaction: RecoveryArchivePreparedUploadInput['transaction'], runtime: RecoveryArchivePreviewRuntime,
+  policy?: RecoveryArchiveManualAdmissionPolicy,
+) {
+  return bindRecoveryArchiveManualCommand(transaction, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ), runtime, policy, (storageKey) => getAttachmentStorageService().readContentAddressed(storageKey))
+}
+
 /** Production worker authorization uses the same conservative read policy as HTTP recovery. */
 export function createRecoveryArchiveWorkerAuthorization() {
   return bindRecoveryArchiveWorkerAuthorization((query, sheetId, authority) => (
@@ -7671,6 +7732,7 @@ export interface UniverMetaRouterOptions {
   readonly recoveryArchiveDatabaseRuntime?: RecoveryArchiveRouterDatabaseRuntime
   readonly recoveryArchiveAuditedReplayHorizonMs?: number
   readonly recoveryArchiveAsyncResumeHorizonMs?: number
+  readonly recoveryArchiveManualPolicy?: RecoveryArchiveManualAdmissionPolicy
 }
 
 export interface RecoveryArchiveRouterDatabaseRuntime {
@@ -12520,9 +12582,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   router.post('/sheets/:sheetId/reset-preview', (req: Request, res: Response) => handleExactAnchorPreview(req, res, 'reset'))
   router.post('/sheets/:sheetId/reset-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'reset'))
 
+  const manualCapture = options.recoveryArchiveRuntime
+    ? createRecoveryArchiveManualCommand(recoveryArchiveRestoreTransaction, options.recoveryArchiveRuntime,
+        options.recoveryArchiveManualPolicy)
+    : undefined
   registerRecoveryArchiveRestoreOwnerRoutes(router, {
     resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
     service: {
+      captureManual: manualCapture && options.recoveryArchiveManualPolicy
+        ? (context, requestId) => manualCapture.capture({ workspaceId: context.workspaceId, baseId: context.baseId,
+            sheetId: context.sheetId, actorId: context.actorId, requestId }) : undefined,
+      readManual: manualCapture
+        ? (context, requestId) => manualCapture.read({ workspaceId: context.workspaceId, baseId: context.baseId,
+            sheetId: context.sheetId, actorId: context.actorId, requestId }) : undefined,
       preview: options.recoveryArchiveRuntime
         ? (context, input) => previewRecoveryArchive(
             recoveryArchiveCatalogTransaction,
@@ -18581,6 +18653,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // `blob_purged_at` for the compensating sweep.
       await deleteAttachmentBinaryShared({
         storage,
+        transaction: pool.transaction.bind(pool),
         storageFileId: attachmentRow.storageFileId,
         storagePath: attachmentRow.storagePath,
         query: pool.query.bind(pool),

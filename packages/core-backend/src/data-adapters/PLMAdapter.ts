@@ -15,6 +15,59 @@ function redactUrlUserinfo(text: string): string {
   return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/gi, '$1<redacted>@')
 }
 
+/**
+ * #5648 F01 ①a (error surface): the userinfo run of a CONFIGURED base URL, extracted WITHOUT
+ * parsing. `new URL()` is unusable here by construction -- the URLs that reach this helper are
+ * exactly the ones the platform URL parser rejects, and that rejection is what produced the error
+ * text we are about to scrub. Rule: everything between `://` and the LAST '@' of the authority-ish
+ * head. Query/fragment are cut off first (a bare '@' there is legal and common) -- but only when
+ * the cut head still holds an '@'; otherwise the whole head is used, so a password containing '?'
+ * or '#' is still captured (#5691 review, F1).
+ *
+ * Deliberately over-inclusive: a base URL that carries '@' in its PATH and no credentials at all
+ * loses its host to `<redacted>` inside error text. That costs a little diagnosability; missing one
+ * character of a password costs a plaintext credential. Error text only -- never call this on a URL
+ * that is about to be requested.
+ */
+function extractUrlUserinfo(rawUrl: unknown): string {
+  const raw = typeof rawUrl === 'string' ? rawUrl : ''
+  const schemeEnd = raw.indexOf('://')
+  if (schemeEnd < 0) return ''
+  const whole = raw.slice(schemeEnd + 3)
+  const preCut = whole.split(/[?#]/)[0]
+  // Prefer the pre-cut head (a bare '@' inside query/fragment is legal and common). Fall back to the
+  // WHOLE head when the pre-cut swallowed the '@': a password that itself contains '?' or '#' would
+  // otherwise yield '' here and the value layer would silently do nothing (#5691 review, F1).
+  const head = preCut.includes('@') ? preCut : whole
+  const at = head.lastIndexOf('@')
+  return at > 0 ? head.slice(0, at) : ''
+}
+
+/**
+ * #5648 F01 ①a: scrub an ERROR TEXT before it reaches a log sink, a `QueryResult.error`, or a new
+ * Error. Node's `fetch` throws at Request-construction time for a URL carrying credentials, and the
+ * TypeError message embeds that URL VERBATIM -- i.e. the plaintext password:
+ *   "Request cannot be constructed from a URL that includes credentials: http://u:pw@host/..."
+ *   "Failed to parse URL from http://u:pw@host/..."   (the slash-in-password variant)
+ *
+ * Two layers, because one is provably not enough:
+ *   1. VALUE layer -- replace the literal userinfo run of the URLs this adapter itself handed to
+ *      fetch. Shape-independent, so it covers the passwords `redactUrlUserinfo` CANNOT match: a
+ *      space or a '/' inside the password terminates that regex's `[^/\s]*` run, no '@' follows,
+ *      the pattern does not match at all and the password survives verbatim. Both shapes are
+ *      pinned in tests/unit/plm-adapter-fetch-error-redaction.test.ts.
+ *   2. SHAPE layer -- `redactUrlUserinfo` for any OTHER URL in the text (an upstream `detail` that
+ *      echoes a redirect target, a proxy hop, ...), which the value layer knows nothing about.
+ */
+function redactErrorText(text: string, ...configuredUrls: unknown[]): string {
+  let out = text
+  for (const rawUrl of configuredUrls) {
+    const userinfo = extractUrlUserinfo(rawUrl)
+    if (userinfo) out = out.split(userinfo).join('<redacted>')
+  }
+  return redactUrlUserinfo(out)
+}
+
 export interface PLMProduct {
   id: string
   name: string
@@ -999,6 +1052,11 @@ export class PLMAdapter extends HTTPAdapter {
   private authTokenExpiresAt = 0;
   private authTokenPromise: Promise<string | null> | null = null;
   private authBufferMs = 60_000;
+  // #5648 F01 ①a: the TYPE NAME of the last fetchYuantusToken() transport failure (e.g. 'TypeError'),
+  // or null when the last attempt actually reached the server. Values-free on purpose: the error's
+  // message carries the request URL verbatim, i.e. the plaintext password when the base URL embeds
+  // userinfo, so only the class name is ever kept. Read by connect() to pick a non-misleading warning.
+  private lastTokenFetchFailureKind: string | null = null;
   private yuantusItemType = 'Part';
   private yuantusCredentials: {
     username: string;
@@ -1121,7 +1179,19 @@ export class PLMAdapter extends HTTPAdapter {
         if (needsRefresh) {
           const refreshed = await this.fetchYuantusToken()
           if (!refreshed) {
-            this.logger.warn('PLM Yuantus login failed; check PLM_USERNAME/PLM_PASSWORD/PLM_TENANT_ID/PLM_ORG_ID')
+            // #5648 F01 ①a: tell the two failures apart. "The request never left the process"
+            // (fetch rejects a base URL that embeds credentials, DNS/connect failure, ...) used to
+            // print the SAME warning as "the server rejected the credentials", sending the operator
+            // after PLM_USERNAME/PLM_PASSWORD when those were never even transmitted. Values-free:
+            // the error TYPE name only -- its message quotes the URL verbatim, password included.
+            if (this.lastTokenFetchFailureKind) {
+              this.logger.warn(
+                `PLM Yuantus login request did not reach the server (${this.lastTokenFetchFailureKind}); the credentials were NOT verified. ` +
+                'Check the PLM base URL shape (fetch rejects URLs that embed credentials, i.e. scheme://user:pass@host) and network reachability.'
+              )
+            } else {
+              this.logger.warn('PLM Yuantus login failed; check PLM_USERNAME/PLM_PASSWORD/PLM_TENANT_ID/PLM_ORG_ID')
+            }
           }
         }
       } else if (this.authToken && this.authTokenExpiresAt <= Date.now() + this.authBufferMs) {
@@ -1146,7 +1216,8 @@ export class PLMAdapter extends HTTPAdapter {
 
     // #5648 F01 (adjacent, logging only): a base URL may carry userinfo (scheme://user:pass@host);
     // strip it before it reaches the log sink. No semantic change — the URL used to connect is untouched.
-    this.logger.info(`PLM Adapter connecting to ${redactUrlUserinfo(String(this.config.connection.url ?? ''))}`);
+    // #5691 review (F2): value layer too -- a password with a space or '/' defeats the shape regex alone.
+    this.logger.info(`PLM Adapter connecting to ${this.redactErrorText(String(this.config.connection.url ?? ''))}`);
     await super.connect();
     // #5648 F02: the instance-held Bearer token is wired onto the axios client inside onConnect() (see
     // below) — i.e. in the same synchronous segment where HTTPAdapter.connect() flips `connected`,
@@ -1281,6 +1352,15 @@ export class PLMAdapter extends HTTPAdapter {
     return Date.now() + 55 * 60 * 1000
   }
 
+  /**
+   * #5648 F01 ①a: scrub an error text against THIS source's configured URLs -- both fields, because
+   * the fetch legs build their request from `connection.baseURL || connection.url` and either may be
+   * the one carrying userinfo.
+   */
+  private redactErrorText(text: string): string {
+    return redactErrorText(text, this.config.connection.baseURL, this.config.connection.url)
+  }
+
   private async getYuantusToken(): Promise<string | null> {
     if (this.authToken && this.authTokenExpiresAt > Date.now() + this.authBufferMs) {
       return this.authToken
@@ -1301,6 +1381,9 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   private async fetchYuantusToken(): Promise<string | null> {
+    // #5648 F01 ①a: clear first, so the early returns below cannot leave a stale kind behind and
+    // mislabel connect()'s warning as a transport failure.
+    this.lastTokenFetchFailureKind = null
     const baseUrl = this.config.connection.baseURL || this.config.connection.url
     if (!baseUrl) return null
     const { username, password, tenantId, orgId } = this.yuantusCredentials || {}
@@ -1329,7 +1412,12 @@ export class PLMAdapter extends HTTPAdapter {
         return data.access_token
       }
       return null
-    } catch (_err) {
+    } catch (err) {
+      // #5648 F01 ①a: `fetch` throws HERE at Request-construction time when baseUrl embeds userinfo,
+      // and that TypeError's message quotes the URL verbatim -- the plaintext password. Keep the
+      // TYPE NAME only; the message never reaches any sink from this leg (structurally, not by
+      // scrubbing). Return value is unchanged: a failed login is still a silent `null` to callers.
+      this.lastTokenFetchFailureKind = err instanceof Error ? err.name : typeof err
       return null
     }
   }
@@ -2634,7 +2722,16 @@ export class PLMAdapter extends HTTPAdapter {
         body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
       })
     } catch (err) {
-      return { data: [], error: err instanceof Error ? err : new Error(String(err)) }
+      // #5648 F01 ①a: this catch also sees Request-CONSTRUCTION failures, and Node puts the request
+      // URL verbatim into that TypeError's message (and the raw URL into `cause.input` for the
+      // "Failed to parse URL" variant) -- the plaintext password whenever the base URL embeds
+      // userinfo. Hand back a FRESH Error carrying scrubbed text plus the error type name: never the
+      // original object, never `cause` (both re-leak). Envelope semantics are unchanged -- this leg
+      // only ever produces transport errors, which carry no `.response`, so the discussion relays'
+      // providerErrorStatus() still reads null and still degrades to a generic 502.
+      const kind = err instanceof Error ? err.name : typeof err
+      const detail = this.redactErrorText(err instanceof Error ? err.message : String(err))
+      return { data: [], error: new Error(`PLM discussion request failed (${kind}): ${detail}`) }
     }
 
     let payload: unknown
@@ -2648,8 +2745,13 @@ export class PLMAdapter extends HTTPAdapter {
       const detail = payload && typeof payload === 'object' && 'detail' in (payload as Record<string, unknown>)
         ? (payload as Record<string, unknown>).detail
         : undefined
+      // #5648 F01 ①a: `detail` is upstream-controlled text that some gateways build by echoing the
+      // request URL back ("cannot proxy http://user:pass@host/..."), so it gets the same scrub on
+      // its way into an Error message. A no-op for every detail that holds no URL userinfo. The raw
+      // `response.data` below is deliberately left alone: it is provider payload, not our URL, and
+      // reshaping it would change what consumers read off the error.
       const message = typeof detail === 'string'
-        ? detail
+        ? this.redactErrorText(detail)
         : `PLM discussion request failed with status ${response.status}`
       return {
         data: [],

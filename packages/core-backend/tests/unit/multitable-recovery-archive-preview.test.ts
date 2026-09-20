@@ -419,6 +419,39 @@ describe('Time Machine recovery archive preview authority', () => {
     expect(dependencies.readRecoveryArchiveCompleteSectionState).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['whole_sheet', false, 'unsupported_attachments'],
+    ['selected_records', false, 'unsupported_attachments'],
+    ['selected_fields', false, null],
+    ['whole_sheet', true, null],
+  ] as const)('reports attachment differences without broadening restore (%s, same=%s)', async (kind, same, blockedReason) => {
+    dependencies.readRecoveryArchiveCompleteSectionState.mockResolvedValue({
+      records: new Map([[RECORD_ID, { ...targetRecords.get(RECORD_ID)!, data: { [FIELD_ID]: 'archived', files: ['att-old'] } }]]), links: [],
+    })
+    dependencies.loadLiveByIdForPreview.mockResolvedValue({ ok: true,
+      liveById: new Map([[RECORD_ID, { data: { [FIELD_ID]: 'live', files: [same ? 'att-old' : 'att-new'] }, version: 7 }]]),
+    })
+    dependencies.loadFieldSurfaceForPreview.mockResolvedValue({
+      fieldIds: new Set([FIELD_ID, 'files']),
+      fieldById: new Map([[FIELD_ID, { type: 'text' }], ['files', { type: 'attachment' }]]),
+      rawTypeById: new Map([[FIELD_ID, 'text'], ['files', 'attachment']]), writableLinkFieldIds: new Set(),
+    })
+    if (kind === 'selected_records') dependencies.buildPreviewPlanDetails.mockReturnValue({
+      summary: summary({ reverts: [], effectiveWriteCount: 0 }),
+      plan: { reverts: [], resurrects: [], createdAfterAnchor: [], deletedAtAnchorLiveNow: [] },
+      revertWrites: [], deleteRecordIds: [],
+    })
+    const fixture = queryFixture()
+    const scope = kind === 'whole_sheet' ? { kind } : kind === 'selected_fields'
+      ? { kind, recordIds: [RECORD_ID], fieldIds: [FIELD_ID] } : { kind, recordIds: [RECORD_ID] }
+    const result = await previewRecoveryArchive(makeTransaction(fixture.query, { inTransaction: false }), fixture.query, runtime, makeInput({ scope }))
+    expect(result.blockedReason).toBe(blockedReason)
+    if (blockedReason) {
+      expect(result.executable).toBe(false)
+      expect(result.previewIdentity).toBeNull()
+    }
+  })
+
   it('does not mint a token for no-op, schema-drift, or resurrection plans', async () => {
     for (const [blockedReason, blockedSummary] of [
       ['no_changes', summary({ reverts: [], effectiveWriteCount: 0 })],

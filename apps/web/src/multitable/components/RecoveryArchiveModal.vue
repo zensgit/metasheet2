@@ -22,6 +22,11 @@
         </header>
 
         <div class="archive-recovery__body">
+          <ManualArchiveCapture
+            v-if="jobDiscoveryResolved && !job && captureArchive && readCapture"
+            :sheet-id="sheetId" :sheet-name="sheetName" :is-zh="isZh"
+            :capture="captureArchive" :read="readCapture" @completed="recheckArchive"
+          />
           <p v-if="jobDiscoveryLoading" class="archive-recovery__state" data-test="archive-recovery-discovery-loading">{{ l('loading') }}</p>
           <p v-else-if="jobDiscoveryError" class="archive-recovery__state archive-recovery__state--error" data-test="archive-recovery-discovery-error">{{ jobDiscoveryError }}</p>
           <p v-else-if="!job && catalogLoading" class="archive-recovery__state" data-test="archive-recovery-loading">{{ l('loading') }}</p>
@@ -176,9 +181,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RefreshRight } from '@element-plus/icons-vue'
+import ManualArchiveCapture from './ManualArchiveCapture.vue'
 
 import type {
   RecoveryArchiveCatalogEntry,
+  RecoveryArchiveCaptureStatus,
   RecoveryArchiveCatalogPage,
   RecoveryArchiveExecuteResult,
   RecoveryArchiveJobPage,
@@ -200,6 +207,9 @@ const JOB_POLL_MS = 2_000
 const props = defineProps<{
   visible: boolean
   sheetId: string
+  sheetName?: string
+  captureArchive?: (sheetId: string, requestId: string) => Promise<RecoveryArchiveCaptureStatus>
+  readCapture?: (sheetId: string, requestId: string) => Promise<RecoveryArchiveCaptureStatus>
   isZh: boolean
   fields: RecoveryArchiveFieldOption[]
   selectedRecordIds: string[]
@@ -307,7 +317,7 @@ function l(key: string): string {
     preview: '生成预览', previewing: '正在生成预览…', changes: '写入变更', reverts: '回退记录', resurrections: '恢复记录',
     deletions: '删除记录', kept: '保留后建记录', drift: '架构漂移', asyncRequired: '变更量超过同步上限，将作为可恢复的后台作业执行。',
     startingJob: '正在创建作业…', startJob: '创建恢复作业', executing: '正在执行…', execute: '执行恢复', blocked: '服务器未允许执行此预览。',
-    no_changes: '当前状态没有需要恢复的变更。', schema_drift: '当前架构与归档恢复点不兼容。', inbound_unprovable: '关联完整性无法证明，服务器拒绝执行。',
+    no_changes: '当前状态没有需要恢复的变更。', unsupported_attachments: '所选范围包含附件变更，当前暂不支持恢复附件。未执行恢复。', schema_drift: '当前架构与归档恢复点不兼容。', inbound_unprovable: '关联完整性无法证明，服务器拒绝执行。',
     async_plan_required: '需要后台恢复作业。', runtimeUnavailable: '归档恢复当前不可用。', forbidden: '没有归档恢复权限。', notFound: '恢复点或作业不存在。',
     disabled: '归档恢复尚未启用。', serviceNotReady: '归档恢复服务尚未就绪。', scopeUnavailable: '当前表的归档恢复范围尚未配置。',
     dataUnavailable: '归档恢复数据暂时不可用。', unauthenticated: '请重新登录后访问归档恢复。', recheck: '重新检查归档恢复',
@@ -323,7 +333,7 @@ function l(key: string): string {
     preview: 'Preview', previewing: 'Preparing preview…', changes: 'Write changes', reverts: 'Records reverted', resurrections: 'Records restored',
     deletions: 'Records deleted', kept: 'Later records kept', drift: 'Schema drift', asyncRequired: 'This change exceeds the synchronous limit and will run as a resumable background job.',
     startingJob: 'Starting job…', startJob: 'Start recovery job', executing: 'Executing…', execute: 'Execute recovery', blocked: 'The server did not allow this preview.',
-    no_changes: 'There are no changes to recover.', schema_drift: 'The current schema is incompatible with this archive point.', inbound_unprovable: 'Link integrity cannot be proven, so the server refused execution.',
+    no_changes: 'There are no changes to recover.', unsupported_attachments: 'The selection contains attachment changes. Attachment recovery is not supported yet. No recovery was performed.', schema_drift: 'The current schema is incompatible with this archive point.', inbound_unprovable: 'Link integrity cannot be proven, so the server refused execution.',
     async_plan_required: 'A background recovery job is required.', runtimeUnavailable: 'Archive recovery is currently unavailable.', forbidden: 'You do not have archive recovery permission.', notFound: 'The recovery point or job was not found.',
     disabled: 'Archive recovery is not enabled.', serviceNotReady: 'The archive recovery service is not ready.', scopeUnavailable: 'Archive recovery scope is not configured for this sheet.',
     dataUnavailable: 'Archive recovery data is currently unavailable.', unauthenticated: 'Sign in again to access archive recovery.', recheck: 'Check archive recovery again',
@@ -344,7 +354,7 @@ function blockedLabel(reason: RecoveryArchivePreview['blockedReason']): string {
 }
 
 function coverageLabel(value: string): string {
-  return props.isZh ? `${value} 条覆盖记录` : `${value} covered records`
+  return props.isZh ? `${value} 项归档证据` : `${value} archive evidence entries`
 }
 
 function formatTime(value: string): string {

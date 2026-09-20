@@ -497,6 +497,9 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // Absent also means the expander applies ITS default (`DEFAULT_ROOT_SELECTION`, 老系统规则),
     // which is the owner's ruling; a deployment that needs the pre-F1c root set writes
     // `rootSelection: { enabled: false }` HERE and it now actually reaches both lanes.
+    // #5862: `sheetMetalMatch` / `sheetMetalRequiresMainPrefix` ride the SAME block — the whole
+    // normalized object is stored and forwarded, so a new key needs no new wire here or in the
+    // large-BOM lane; it needs the expander's normalizer to know it (and to refuse a misspelling).
     ...(rootSelection ? { rootSelection } : {}),
   }
 }
@@ -512,6 +515,8 @@ function normalizeStockPreparationActionConfig(input = {}) {
  *
  * The expander's own error class is translated to this module's 422 config error so a bad deploy
  * config fails where an operator can see it (config time) with the code every other bad key uses.
+ * #5862: that vocabulary now includes `sheetMetalMatch` ('endsWith' | 'contains') and
+ * `sheetMetalRequiresMainPrefix`, and the block is a CLOSED key set — an unknown key is a 422 too.
  */
 function normalizeActionRootSelection(input) {
   if (input === undefined || input === null) return undefined
@@ -991,6 +996,106 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
   throw new StockPreparationTableActionError(422, 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE', 'existing stock-preparation rows exceeded maxPages', {
     maxPages,
   })
+}
+
+// #5860 option A — ONE SHEET = ONE PROJECT, enforced at the table level.
+//
+// `readExistingStockPreparationRows` above is project-scoped by design (its filter is the projectNo
+// field), so `missingFromPlmPolicy=mark_inactive` only ever sweeps rows of the SAME project. A pull of
+// project B into a sheet that already holds project A therefore leaves A's rows `active=true` and the
+// fill views (sorted by parentComponentCode) show A first. This guard looks at the rows the
+// project-scoped read cannot see: ACTIVE rows whose projectNo differs from `parameters.projectNo`.
+//
+// BOUNDED READ, SAME BOUNDS, SAME TRUNCATION POLICY AS THE PROJECT-SCOPED READ. The scan pages the
+// WHOLE sheet, unfiltered (the records API only speaks equality, so "projectNo != X" cannot be pushed
+// down, and an `active = 'true'` text-equality filter would miss the 1 / "1" / "yes" / "y" values the
+// fill view reads as true — see `stockPreparationRowIsActive`), with the SAME page limit / maxPages,
+// and when the bound is hit:
+//   * >= 1 foreign active row already seen -> refuse with TARGET_SHEET_FOREIGN_PROJECT and
+//     `scanTruncated: true` (a partial scan that saw one foreign row is proof enough);
+//   * 0 foreign rows seen -> refuse with TABLE_ACTION_EXISTING_ROWS_TOO_LARGE exactly like the
+//     project-scoped read does at its own bound. That read never tolerates truncation (it throws
+//     rather than plan off a partial set), so this one does not either: there is no ALLOW-on-truncation
+//     branch, and `scanTruncated` only ever travels on a refusal.
+//
+// VALUES-FREE. The details carry two integers and an optional boolean — never a project number, never a
+// row value.
+//
+// WHAT COUNTS AS ACTIVE is the FILL VIEW's reading, not the planner's: the view's `active` filter goes
+// through `toComparableBoolean` (packages/core-backend/src/routes/univer-meta.ts, ~:2836), and the
+// automation `update_record` bare UPDATE can store any of the shapes it accepts. The helper below is
+// that rule set copied verbatim, so the rows this guard counts are exactly the rows the customer sees.
+//
+// WHAT COUNTS AS THE SAME PROJECT is RAW exact equality with `parameters.projectNo` — the same text
+// equality the project-scoped read pushes down as SQL. A stored "P-001 " is NOT "P-001" to that read
+// (mark_inactive will never sweep it), so it is foreign here too; trimming would open exactly the hole
+// the guard exists to close.
+function stockPreparationRowIsActive(value) {
+  // Copied from toComparableBoolean (univer-meta.ts): null/undefined -> null; boolean as is; number
+  // -> !== 0; string -> trim+lower: '' -> null, true/1/yes/y -> true, false/0/no/n -> false, any other
+  // non-empty string -> true; anything else -> Boolean(value). Only a strict `true` is active here.
+  if (value === null || value === undefined) return false
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase()
+    if (s === '') return false
+    if (s === 'true' || s === '1' || s === 'yes' || s === 'y') return true
+    if (s === 'false' || s === '0' || s === 'no' || s === 'n') return false
+    return true
+  }
+  return Boolean(value)
+}
+
+async function assertTargetSheetHoldsNoForeignActiveRows(recordsApi, target, projectNo, options = {}) {
+  const api = ensureRecordsApi(recordsApi)
+  const limit = positiveInteger(options.limit, 'existingRows.limit', DEFAULT_EXISTING_ROWS_PAGE_LIMIT)
+  const maxPages = positiveInteger(options.maxPages, 'existingRows.maxPages', DEFAULT_EXISTING_ROWS_MAX_PAGES)
+  const filters = {}
+  const foreignProjects = new Set()
+  let foreignActiveRowCount = 0
+  let scanTruncated = true
+  for (let page = 0; page < maxPages; page += 1) {
+    const offset = page * limit
+    const pageRows = await api.queryRecords({
+      sheetId: target.sheetId,
+      filters,
+      limit,
+      offset,
+    })
+    if (!Array.isArray(pageRows)) {
+      throw new StockPreparationTableActionError(500, 'TABLE_ACTION_RECORDS_API_INVALID', 'queryRecords must return an array')
+    }
+    for (const raw of pageRows) {
+      const row = unmapRecordFields(raw, target.fieldIdMap)
+      if (!stockPreparationRowIsActive(row.active)) continue
+      if (row.projectNo === projectNo) continue
+      foreignActiveRowCount += 1
+      foreignProjects.add(typeof row.projectNo === 'string' ? row.projectNo : JSON.stringify(row.projectNo === undefined ? null : row.projectNo))
+    }
+    if (pageRows.length < limit) {
+      scanTruncated = false
+      break
+    }
+  }
+  if (foreignActiveRowCount > 0) {
+    throw new StockPreparationTableActionError(
+      409,
+      'TARGET_SHEET_FOREIGN_PROJECT',
+      '目标表已包含其他项目的有效行，请为新项目新建备料表',
+      {
+        foreignProjectCount: foreignProjects.size,
+        foreignActiveRowCount,
+        ...(scanTruncated ? { scanTruncated: true } : {}),
+      },
+    )
+  }
+  if (scanTruncated) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_EXISTING_ROWS_TOO_LARGE', 'existing stock-preparation rows exceeded maxPages', {
+      maxPages,
+      scan: 'foreign_project',
+    })
+  }
 }
 
 // ── #4160: logical-key <-> physical fieldId translation, bound to the ONE records entry point ──────
@@ -1844,6 +1949,10 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping, b2aSchemaContract }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
+  // #5860: one sheet = one project. BEFORE the plan (dry-run) and, because apply recomputes this very
+  // dry-run before its first write, BEFORE any write on the apply path. Sits after the project-scoped
+  // read so the first records read stays the project read every caller and test already pins.
+  await assertTargetSheetHoldsNoForeignActiveRows(recordsApi, action.target, parameters.projectNo)
   const duplicateDiagnostics = duplicateExpandedKeyDiagnosticsForRows(expansion.rows)
   let conflictPolicyReview = buildConflictPolicyReview({
     diagnostics: duplicateDiagnostics,
@@ -2326,6 +2435,11 @@ async function applyStockPreparationAction(input = {}) {
   // keeping "everything that plans through computeDryRun is probed" a property of computeDryRun
   // itself rather than of whoever calls it.
   await assertTargetFieldsExist(action, input.targetFieldExistence)
+  // #5860, same treatment: a foreign project's rows that landed between plan and apply refuse here,
+  // BEFORE the single-use token is burned, so the operator who creates a fresh sheet (or sweeps the
+  // other project) can still apply the plan they proved. The call inside `computeDryRun` runs once
+  // more a moment later for the same reason the existence probe does.
+  await assertTargetSheetHoldsNoForeignActiveRows(input.recordsApi, action.target, parameters.projectNo)
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
@@ -2468,6 +2582,8 @@ module.exports = {
     normalizeActionExtensionFieldIds,
     plmSystemFieldIds,
     readExistingStockPreparationRows,
+    assertTargetSheetHoldsNoForeignActiveRows,
+    stockPreparationRowIsActive,
     stableStringify,
     targetFieldMapHasExplicitBindings,
     unmapRecordFields,

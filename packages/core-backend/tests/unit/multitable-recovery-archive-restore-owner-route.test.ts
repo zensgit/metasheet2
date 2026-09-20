@@ -1,6 +1,6 @@
 import express from 'express'
 import request from 'supertest'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   RecoveryArchiveCatalogError,
@@ -25,6 +25,7 @@ import { usePinnedServer } from '../utils/pinned-server'
 const JOB_ID = '11111111-1111-4111-8111-111111111111'
 const SHEET_ID = 'sheet-owner-route'
 const pinned = usePinnedServer()
+afterEach(() => vi.unstubAllEnvs())
 
 const context: RecoveryArchiveRestoreOwnerContext = {
   workspaceId: 'workspace-owner-route',
@@ -129,6 +130,89 @@ function previewResult(
     ...overrides,
   }
 }
+
+describe('manual archive command routes', () => {
+  const captureManual = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['captureManual']>>()
+  const readManual = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['readManual']>>()
+  const url = `/api/multitable/sheets/${SHEET_ID}/recovery-archive/captures`
+  const status = { requestId: JOB_ID, generationId: '33333333-3333-4333-8333-333333333333', state: 'recoverable' as const }
+  beforeEach(() => {
+    vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
+    vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
+    resolveContext.mockReset().mockResolvedValue({ ok: true, context })
+    captureManual.mockReset().mockResolvedValue(status)
+    readManual.mockReset().mockResolvedValue(status)
+    makeApp({ captureManual, readManual })
+  })
+  it('uses only the resolved identity and request id, with closed durable status projection', async () => {
+    captureManual.mockResolvedValue({ ...status, internalPath: 'private-sentinel' } as typeof status)
+    const response = await request(pinned.url()).post(url).send({ requestId: JOB_ID })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ ok: true, data: status })
+    expect(captureManual).toHaveBeenCalledWith(context, JOB_ID)
+    const reread = await request(pinned.url()).get(`${url}/${JOB_ID}`)
+    expect(reread.status).toBe(200)
+    expect(reread.body).toEqual({ ok: true, data: status })
+    expect(readManual).toHaveBeenCalledWith(context, JOB_ID)
+  })
+  it('reports pending without inventing a completed archive', async () => {
+    captureManual.mockResolvedValue({ ...status, state: 'pending' })
+    const response = await request(pinned.url()).post(url).send({ requestId: JOB_ID })
+    expect(response.status).toBe(202)
+    expect(response.body).toEqual({ ok: true, data: { ...status, state: 'pending' } })
+  })
+  it.each(['actorId', 'workspaceId', 'baseId', 'sheetId', 'generationId', 'leaseSeconds', 'keyId', 'rows', 'manifest'])('rejects client authority %s before resolving scope', async key => {
+    const response = await request(pinned.url()).post(url).send({ requestId: JOB_ID, [key]: 'hostile-value' })
+    expect(response.status).toBe(400)
+    expect(resolveContext).not.toHaveBeenCalled()
+    expect(captureManual).not.toHaveBeenCalled()
+    expect(response.text).not.toContain('hostile-value')
+  })
+  it.each(['', 'TRUE', 'false'])('does no manual work when the archive flag is %s', async value => {
+    vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', value)
+    expect((await request(pinned.url()).post(url).send({ requestId: JOB_ID })).status).toBe(503)
+    expect((await request(pinned.url()).get(`${url}/${JOB_ID}`)).status).toBe(503)
+    expect(captureManual).not.toHaveBeenCalled()
+    expect(readManual).not.toHaveBeenCalled()
+  })
+  it.each([401, 403, 404] as const)('preserves canonical scope refusal %s', async code => {
+    resolveContext.mockResolvedValue({ ok: false, status: code, code: code === 401 ? 'UNAUTHENTICATED' : code === 403 ? 'FORBIDDEN' : 'NOT_FOUND' })
+    expect((await request(pinned.url()).post(url).send({ requestId: JOB_ID })).status).toBe(code)
+    expect((await request(pinned.url()).get(`${url}/${JOB_ID}`)).status).toBe(code)
+    expect(captureManual).not.toHaveBeenCalled()
+    expect(readManual).not.toHaveBeenCalled()
+  })
+  it('fails closed without configured manual policy/service and refuses aliases in query', async () => {
+    makeApp({ captureManual: undefined, readManual })
+    expect((await request(pinned.url()).post(url).send({ requestId: JOB_ID })).status).toBe(503)
+    expect((await request(pinned.url()).get(`${url}/${JOB_ID}?actorId=forged`)).status).toBe(400)
+    expect(readManual).not.toHaveBeenCalled()
+  })
+  it('maps replay conflict and unknown storage failures without values', async () => {
+    captureManual.mockRejectedValueOnce(new Error('RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT'))
+    expect((await request(pinned.url()).post(url).send({ requestId: JOB_ID })).status).toBe(409)
+    captureManual.mockRejectedValueOnce(new Error('customer-path-secret'))
+    const response = await request(pinned.url()).post(url).send({ requestId: JOB_ID })
+    expect(response.status).toBe(503)
+    expect(response.body.error.code).toBe('RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE')
+    expect(response.text).not.toContain('customer-path-secret')
+  })
+  it('exposes only the exact supported attachment diagnostic, never provider text', async () => {
+    captureManual.mockRejectedValueOnce(new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE'))
+    const response = await request(pinned.url()).post(url).send({ requestId: JOB_ID })
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ ok: false, error: {
+      code: 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE',
+      message: 'Manual archives containing attachments are not yet available.',
+    } })
+    captureManual.mockRejectedValueOnce(new Error('RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE private-provider-value'))
+    const unknown = await request(pinned.url()).post(url).send({ requestId: JOB_ID })
+    expect(unknown.status).toBe(503)
+    expect(unknown.body).toEqual({ ok: false, error: {
+      code: 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE', message: 'Manual archive capture is unavailable.',
+    } })
+  })
+})
 
 describe('Time Machine D5 owner routes', () => {
   beforeEach(() => {

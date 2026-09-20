@@ -8,6 +8,7 @@ import { createRecoveryArchiveFileStoreProvider } from './recovery-archive-file-
 import { isRecoveryArchiveRestoreWorkerEnabled } from './recovery-archive-restore-worker'
 import { createLocalCustodySession } from './recovery-local-custody'
 import { createLocalCustodyStore, type LocalCustodyReceipt } from './recovery-local-custody-store'
+import { snapshotRecoveryArchiveManualPolicy, type RecoveryArchiveManualAdmissionPolicy } from './recovery-archive-manual-admission'
 
 export interface RecoveryLocalStartupConfig {
   archivePath: string
@@ -23,6 +24,7 @@ export interface RecoveryLocalStartupConfig {
   replayHorizonMs: number
   sweepLimit: number
   maxChunksPerRun: number
+  manualCapture?: RecoveryArchiveManualAdmissionPolicy
 }
 
 const REFUSED = 'RECOVERY_LOCAL_STARTUP_REFUSED'
@@ -37,7 +39,13 @@ function closed(value: unknown, keys: string[]): value is Record<string, unknown
 }
 
 export function parseRecoveryLocalStartupConfig(value: unknown): Readonly<RecoveryLocalStartupConfig> {
-  if (!closed(value, CONFIG_KEYS)) refuse()
+  const withManual = Boolean(value && typeof value === 'object' && Object.hasOwn(value, 'manualCapture'))
+  if (!closed(value, withManual ? [...CONFIG_KEYS, 'manualCapture'] : CONFIG_KEYS)) refuse()
+  let manualCapture: Readonly<RecoveryArchiveManualAdmissionPolicy> | undefined
+  if (withManual) {
+    try { manualCapture = snapshotRecoveryArchiveManualPolicy(value.manualCapture as RecoveryArchiveManualAdmissionPolicy) }
+    catch { refuse() }
+  }
   for (const key of ['archivePath', 'custodyPath'] as const) {
     if (typeof value[key] !== 'string' || !path.isAbsolute(value[key])) refuse()
   }
@@ -55,7 +63,8 @@ export function parseRecoveryLocalStartupConfig(value: unknown): Readonly<Recove
     || typeof value.receipt.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.receipt.sha256)
     || !Number.isSafeInteger(value.receipt.size) || (value.receipt.size as number) < 1
     || (value.receipt.size as number) > 16_384) refuse()
-  return Object.freeze({ ...value, receipt: Object.freeze({ ...value.receipt }) }) as unknown as Readonly<RecoveryLocalStartupConfig>
+  return Object.freeze({ ...value, receipt: Object.freeze({ ...value.receipt }),
+    ...(manualCapture ? { manualCapture } : {}) }) as unknown as Readonly<RecoveryLocalStartupConfig>
 }
 
 /** Operator-owned, nonsecret configuration; never provisions or repairs storage. */
@@ -121,6 +130,7 @@ export async function prepareRecoveryLocalStartup(input: {
       auditedReplayHorizonMs: config.auditedReplayHorizonMs,
       asyncResumeHorizonMs: config.asyncResumeHorizonMs,
       workerIntervalMs: config.workerIntervalMs,
+      ...(config.manualCapture ? { manualCapture: config.manualCapture } : {}),
       worker: Object.freeze({
         ...createRecoveryArchiveWorkerCallbacks(database),
         leaseMs: config.leaseMs, replayHorizonMs: config.replayHorizonMs,

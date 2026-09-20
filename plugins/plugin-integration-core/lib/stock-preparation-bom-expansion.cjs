@@ -784,8 +784,34 @@ const DEFAULT_ROOT_SELECTION = Object.freeze({
   mainDrawingPrefix: 'J',
   mainDrawingSuffix: '-00',
   sheetMetalSuffixes: Object.freeze(['-A', '-B']),
+  // #5862 — how `sheetMetalSuffixes` is matched against a drawing number. `endsWith` is the老系统
+  // reading (the list really is a suffix list); `contains` is the customer's stated rule (「图号含
+  // -A/-B/-C/-D」), under which the list is a TOKEN list and a token hits anywhere AFTER the first
+  // character (a code that merely STARTS with the token is not a hit). Total order of the two
+  // shape checks is fixed by `hasSheetMetalShape`: 总图 first, so a 总图 is never also 钣金.
+  sheetMetalMatch: 'endsWith',
+  // #5862 — whether a 钣金 code must also start with `mainDrawingPrefix`. `true` is the老系统
+  // reading (钣金 = `J…-A`); `false` lets a deployment whose 钣金 numbers do not share the 总图
+  // prefix still name them by token.
+  sheetMetalRequiresMainPrefix: true,
   dropDashDescendants: true,
 })
+
+const ROOT_SELECTION_SHEET_METAL_MATCH_MODES = Object.freeze(['endsWith', 'contains'])
+
+// THE CLOSED KEY SET of a `rootSelection` block. A key outside it is refused rather than ignored: the
+// block is deploy config that is snapshotted and hashed, and an ignored misspelling
+// (`sheetMetalMatchMode`, `sheetMetalSuffix`) would store a rule the expander never runs — the same
+// "the stored config must not lie about what runs" argument the action normalizer makes.
+const ROOT_SELECTION_KEYS = Object.freeze([
+  'enabled',
+  'mainDrawingPrefix',
+  'mainDrawingSuffix',
+  'sheetMetalSuffixes',
+  'sheetMetalMatch',
+  'sheetMetalRequiresMainPrefix',
+  'dropDashDescendants',
+])
 
 function optionalStringList(input, field) {
   if (input === undefined || input === null) return undefined
@@ -820,14 +846,28 @@ function normalizeRootSelection(input) {
   if (!isPlainObject(input)) {
     throw new StockPreparationBomExpansionError('rootSelection must be an object', { field: 'rootSelection' })
   }
+  for (const key of Object.keys(input)) {
+    if (!ROOT_SELECTION_KEYS.includes(key)) {
+      throw new StockPreparationBomExpansionError(`rootSelection.${key} is not a recognized key`, { field: `rootSelection.${key}` })
+    }
+  }
   const prefix = optionalRuleToken(input.mainDrawingPrefix, 'rootSelection.mainDrawingPrefix', { allowEmpty: true })
   const suffix = optionalRuleToken(input.mainDrawingSuffix, 'rootSelection.mainDrawingSuffix')
   const sheetMetal = optionalStringList(input.sheetMetalSuffixes, 'rootSelection.sheetMetalSuffixes')
+  const sheetMetalMatch = optionalRuleToken(input.sheetMetalMatch, 'rootSelection.sheetMetalMatch')
+  if (sheetMetalMatch !== undefined && !ROOT_SELECTION_SHEET_METAL_MATCH_MODES.includes(sheetMetalMatch)) {
+    throw new StockPreparationBomExpansionError(
+      `rootSelection.sheetMetalMatch must be one of ${ROOT_SELECTION_SHEET_METAL_MATCH_MODES.join(', ')}`,
+      { field: 'rootSelection.sheetMetalMatch' },
+    )
+  }
   return Object.freeze({
     enabled: optionalBoolean(input.enabled, 'rootSelection.enabled', DEFAULT_ROOT_SELECTION.enabled),
     mainDrawingPrefix: prefix === undefined ? DEFAULT_ROOT_SELECTION.mainDrawingPrefix : prefix,
     mainDrawingSuffix: suffix === undefined ? DEFAULT_ROOT_SELECTION.mainDrawingSuffix : suffix,
     sheetMetalSuffixes: Object.freeze(sheetMetal === undefined ? [...DEFAULT_ROOT_SELECTION.sheetMetalSuffixes] : sheetMetal),
+    sheetMetalMatch: sheetMetalMatch === undefined ? DEFAULT_ROOT_SELECTION.sheetMetalMatch : sheetMetalMatch,
+    sheetMetalRequiresMainPrefix: optionalBoolean(input.sheetMetalRequiresMainPrefix, 'rootSelection.sheetMetalRequiresMainPrefix', DEFAULT_ROOT_SELECTION.sheetMetalRequiresMainPrefix),
     dropDashDescendants: optionalBoolean(input.dropDashDescendants, 'rootSelection.dropDashDescendants', DEFAULT_ROOT_SELECTION.dropDashDescendants),
   })
 }
@@ -838,10 +878,20 @@ function hasMainDrawingShape(code, rules) {
   return text.startsWith(rules.mainDrawingPrefix) && text.endsWith(rules.mainDrawingSuffix)
 }
 
+// ORDER IS THE CONTRACT: the 总图 shape is checked FIRST and wins. Under `endsWith` the two shapes
+// could not overlap (a code cannot end with both `-00` and `-A`), so the old body never had to say
+// so; under `contains` they can (`J1-A-00` contains `-A`), and a 总图 that also counted as 钣金 would
+// survive root selection as a 钣金 root even when a newer version of the same 总图 superseded it.
 function hasSheetMetalShape(code, rules) {
   const text = toKey(code)
   if (text === null) return false
-  if (!text.startsWith(rules.mainDrawingPrefix)) return false
+  if (hasMainDrawingShape(text, rules)) return false
+  if (rules.sheetMetalRequiresMainPrefix !== false && !text.startsWith(rules.mainDrawingPrefix)) return false
+  if (rules.sheetMetalMatch === 'contains') {
+    // A hit must sit AFTER the first character: `-A` at index 0 is a code that starts with the token,
+    // which the customer's rule (「图号含 -A」 — a segment separator followed by the letter) does not mean.
+    return rules.sheetMetalSuffixes.some((token) => text.indexOf(token, 1) > 0)
+  }
   return rules.sheetMetalSuffixes.some((suffix) => text.endsWith(suffix))
 }
 
@@ -902,11 +952,19 @@ function dashHierarchyRelationship(code1, code2) {
  * 展开出来(那正是老系统剔除它的理由:它已经是别人的子级)。
  */
 function selectOrderRootCandidates(candidates, rules) {
-  if (!rules || rules.enabled !== true) return { selected: candidates.slice(), droppedCount: 0 }
+  if (!rules || rules.enabled !== true) {
+    return { selected: candidates.slice(), droppedCount: 0, report: makeRootSelectionReport({ mode: 'disabled' }) }
+  }
   const mains = candidates.filter((candidate) => hasMainDrawingShape(candidate.componentCode, rules))
   if (mains.length === 0) {
     // 无总图:全部订单行当根,但互为 dash 层级关系的,把作为子级的那条剔除。
-    if (rules.dropDashDescendants !== true) return { selected: candidates.slice(), droppedCount: 0 }
+    if (rules.dropDashDescendants !== true) {
+      return {
+        selected: candidates.slice(),
+        droppedCount: 0,
+        report: makeRootSelectionReport({ mode: 'no_main_drawing', selectedCount: candidates.length }),
+      }
+    }
     const dropped = new Set()
     for (let i = 0; i < candidates.length; i += 1) {
       for (let j = 0; j < candidates.length; j += 1) {
@@ -920,7 +978,12 @@ function selectOrderRootCandidates(candidates, rules) {
       }
     }
     const selected = candidates.filter((_, index) => !dropped.has(index))
-    return { selected, droppedCount: candidates.length - selected.length }
+    const droppedCount = candidates.length - selected.length
+    return {
+      selected,
+      droppedCount,
+      report: makeRootSelectionReport({ mode: 'no_main_drawing', selectedCount: selected.length, dashDescendantsDropped: droppedCount }),
+    }
   }
   // 有总图:钣金件全要 + 总图只要版本最高的那一张(老系统 `Stream.max`,并列时取先到的那条)。
   let best = mains[0]
@@ -928,11 +991,53 @@ function selectOrderRootCandidates(candidates, rules) {
     if (compareSourceVersion(candidate.sourceVersion, best.sourceVersion) > 0) best = candidate
   }
   const keep = new Set([best])
+  let sheetMetalRoots = 0
   for (const candidate of candidates) {
-    if (hasSheetMetalShape(candidate.componentCode, rules)) keep.add(candidate)
+    // `hasSheetMetalShape` is false for every 总图 (see its header), so a superseded 总图 version
+    // can never sneak back in here as a 钣金 root, whatever the match mode.
+    if (hasSheetMetalShape(candidate.componentCode, rules)) {
+      keep.add(candidate)
+      sheetMetalRoots += 1
+    }
   }
   const selected = candidates.filter((candidate) => keep.has(candidate))
-  return { selected, droppedCount: candidates.length - selected.length }
+  const droppedCount = candidates.length - selected.length
+  return {
+    selected,
+    droppedCount,
+    report: makeRootSelectionReport({
+      mode: 'main_drawing',
+      mainDrawingCandidates: mains.length,
+      sheetMetalRoots,
+      // Superseded 总图 versions are dropped too but are NOT "other": they are `mainDrawingCandidates - 1`.
+      otherCandidatesDropped: droppedCount - (mains.length - 1),
+    }),
+  }
+}
+
+/**
+ * #5862 — VALUES-FREE 根选择报告:一个模式 token、四个整数、若干 flag token。没有图号、没有名称。
+ *
+ * 它回答的是操作员在 dry-run 里最常问的那一句「为什么根是这几条」:有没有认出总图、认出了几张
+ * 钣金、剔了几条、有没有可疑形状(一张总图配两张以上钣金 / 有总图却一张钣金都没有 / 没总图却
+ * 多根)。flag 只是提示,不阻断 —— 「可疑」在一家工厂是常态,在另一家是错配,那是配置的事。
+ */
+function makeRootSelectionReport({ mode, mainDrawingCandidates = 0, sheetMetalRoots = 0, otherCandidatesDropped = 0, dashDescendantsDropped = 0, selectedCount = 0 }) {
+  const flags = []
+  if (mode === 'main_drawing') {
+    if (sheetMetalRoots > 1) flags.push('multipleSheetMetalRoots')
+    if (sheetMetalRoots === 0) flags.push('sheetMetalRootMissing')
+  } else if (mode === 'no_main_drawing' && selectedCount > 1) {
+    flags.push('noMainDrawingMultipleRoots')
+  }
+  return {
+    mode,
+    mainDrawingCandidates,
+    sheetMetalRoots,
+    otherCandidatesDropped,
+    dashDescendantsDropped,
+    flags,
+  }
 }
 
 /**
@@ -1219,7 +1324,7 @@ function truncatedRowErrorTypes(rowErrorTruncation) {
   return Object.keys(rowErrorTruncation.rowErrorTypeCounts || {})
 }
 
-function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree, rowErrorTruncation, duplicateSiblingsCollapsed, rootsFilteredOut }) {
+function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree, rowErrorTruncation, duplicateSiblingsCollapsed, rootsFilteredOut, rootSelectionReport }) {
   const summary = {
     projectNoPresent,
     matchField,
@@ -1271,7 +1376,22 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
   if (Number.isFinite(rootsFilteredOut) && rootsFilteredOut > 0) {
     summary.rootsFilteredOut = rootsFilteredOut
   }
+  // #5862 — the根选择 report, VALUES-FREE (mode / flag tokens and four integers). Mounted whenever
+  // the expander ran root selection (mode `disabled` included: "the rule is off" is itself the
+  // answer to 「为什么根是这几条」). Appended last so no conditional block above moves.
+  if (isPlainObject(rootSelectionReport)) summary.rootSelectionReport = cloneRootSelectionReport(rootSelectionReport)
   return summary
+}
+
+function cloneRootSelectionReport(report) {
+  return {
+    mode: report.mode,
+    mainDrawingCandidates: Number(report.mainDrawingCandidates || 0),
+    sheetMetalRoots: Number(report.sheetMetalRoots || 0),
+    otherCandidatesDropped: Number(report.otherCandidatesDropped || 0),
+    dashDescendantsDropped: Number(report.dashDescendantsDropped || 0),
+    flags: Array.isArray(report.flags) ? report.flags.filter((flag) => typeof flag === 'string') : [],
+  }
 }
 
 // THE ROW-PRODUCTION BOUNDARY.
@@ -1496,6 +1616,7 @@ async function expandPlmProjectBom(input = {}) {
   // F1c counters — values-free, reported through `makeSummary`'s two conditional keys.
   let duplicateSiblingsCollapsed = 0
   let rootsFilteredOut = 0
+  let rootSelectionReport
   const rows = []
   // Zeroed the moment the block is enabled — so "enabled" and "the summary carries subtree counts"
   // are the same fact on every exit path, including `not_found` and an entry-read failure. Stays
@@ -2025,6 +2146,7 @@ async function expandPlmProjectBom(input = {}) {
   // PHASE 2 — 老系统根选择。PURE: no read, no row, just which candidates survive.
   const rootSelectionResult = selectOrderRootCandidates(rootCandidates, rootSelection)
   rootsFilteredOut = rootSelectionResult.droppedCount
+  rootSelectionReport = rootSelectionResult.report
 
   // PHASE 3 — expansion, in candidate (read) order. Byte-identical to the pre-F1c loop body.
   try {
@@ -2188,6 +2310,7 @@ async function expandPlmProjectBom(input = {}) {
       rowErrorTruncation: rowErrorTruncation(),
       duplicateSiblingsCollapsed,
       rootsFilteredOut,
+      rootSelectionReport,
     }),
   }
 }
@@ -2354,6 +2477,12 @@ function summarizeBomExpansionForEvidence(result = {}) {
   if (Number.isFinite(summary.rootsFilteredOut) && summary.rootsFilteredOut > 0) {
     evidence.rootsFilteredOut = Number(summary.rootsFilteredOut)
   }
+  // #5862 — the根选择 report rides the same allow-list projection (this is the ONLY way onto
+  // dry-run evidence, see above). Re-projected field by field, never spread: a future key on the
+  // summary object must be named here to reach evidence. VALUES-FREE by construction.
+  if (isPlainObject(summary.rootSelectionReport)) {
+    evidence.rootSelectionReport = cloneRootSelectionReport(summary.rootSelectionReport)
+  }
   return evidence
 }
 
@@ -2378,6 +2507,8 @@ module.exports = {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   DEFAULT_ROOT_SELECTION,
+  ROOT_SELECTION_KEYS,
+  ROOT_SELECTION_SHEET_METAL_MATCH_MODES,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
   // PUBLIC because the根选择 rules are DEPLOY CONFIG, not an internal: the action-config normalizer
@@ -2414,6 +2545,9 @@ module.exports = {
     // 同父去重键。它们不做 IO,所以「老系统这条规则在这里是什么行为」可以不起适配器就钉住。
     // (`normalizeRootSelection` 已在上面公开导出 —— 它是配置契约的一部分,不只是测试钩子。)
     selectOrderRootCandidates,
+    hasMainDrawingShape,
+    hasSheetMetalShape,
+    makeRootSelectionReport,
     dashHierarchyRelationship,
     compareSourceVersion,
     splitNameAndSpec,

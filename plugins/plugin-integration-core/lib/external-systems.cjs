@@ -606,6 +606,67 @@ function createExternalSystemRegistry({
     })
   }
 
+  // MIN-PR2-i: A ROLLBACK-ELIGIBLE LEGACY BINDING MAY NOT BE RE-POINTED WHILE STAYING LEGACY.
+  //
+  // docs/integration-consolidation-minimal-plan-20260901.md:214 — "已标记可回退的 legacy Binding 若
+  // 修改 `config.dataSourceId`，必须在同一次写入中提供 `connectionId` 并转为 canonical;不得允许旧指针
+  // 在 legacy 状态下静默改指向。"
+  //
+  // WHAT IT CLOSES. On an existing row `requestedConnectionId` inherits `existing.connection_id`
+  // unless the caller passes `connectionId` explicitly, and `baseRow` copies
+  // `legacy_connection_fallback_eligible` over verbatim. So a row in the rollback shape
+  // (connection_id NULL + marker TRUE) accepted a brand-new `config.dataSourceId`, kept the marker,
+  // skipped the whole canonical branch below (`connectionId !== null` is false) and went on
+  // resolving through `resolveLegacy` — against a DIFFERENT connection than the cutover recorded,
+  // with no canonical proof and no trace that the binding had moved.
+  //
+  // WHY REFUSE INSTEAD OF AUTO-CONVERTING. Converting would have to GUESS the canonical id from the
+  // legacy pointer — the inference the cutover migration only dared make where a server-stamped
+  // owner matched the connection's owner — and it is irreversible from this API
+  // (`requestedConnectionId` refuses to clear `connectionId` afterwards). Refusing keeps the choice
+  // with the operator, who re-issues the same write carrying `connectionId`.
+  //
+  // WHERE IT SITS. AFTER `resolveUpdatedConfig`, i.e. after the legacy pointer's own owner check, so
+  // a non-owner still gets the binder's uniform "not found" and cannot use this refusal to learn
+  // that a row exists in the legacy state. Both are pure validation, so a refusal still writes
+  // nothing.
+  //
+  // WHAT IT DOES NOT TOUCH:
+  //   * INSERTS — a new binding has no stored pointer to move and is canonical-only already;
+  //   * kinds other than `data-source:sql-readonly` (`data-source:sql-write-gated`, http, erp:*) —
+  //     they carry no `connection_id` at all, and `requestedConnectionId` REJECTS `connectionId` for
+  //     them, so a kind-blind guard would freeze their pointer with no remedy available;
+  //   * rows whose marker is FALSE — a canonical row that never went through the cutover keeps its
+  //     pre-existing refusal (the resolver's CONNECTION_BINDING_MISMATCH on a disagreeing dual
+  //     reference);
+  //   * re-asserting the SAME pointer, which is what the bridge picker serializes on every rename;
+  //   * CLEARING the pointer (`{ dataSourceId: null }`), which de-points rather than re-points: the
+  //     binding then resolves to nothing (`CONNECTION_LEGACY_POINTER_REQUIRED`) instead of to
+  //     somewhere else. Clear-then-set is still caught, because an empty stored pointer is still a
+  //     difference from the non-empty one being written.
+  function assertLegacyBindingRepointCarriesCanonicalConnection(existing, normalized) {
+    if (normalized.kind !== SQL_READONLY_SOURCE_KIND) return
+    if (!existing || existing.legacy_connection_fallback_eligible !== true) return
+    // An explicit `connectionId` IS the remedy: that write goes through
+    // `validateCanonicalConnectionBinding` below and converts the row.
+    if (normalized.connectionId !== undefined && normalized.connectionId !== null) return
+    if (!isPlainObject(normalized.config)) return
+    if (!Object.prototype.hasOwnProperty.call(normalized.config, 'dataSourceId')) return
+    const requested = typeof normalized.config.dataSourceId === 'string'
+      ? normalized.config.dataSourceId.trim()
+      : ''
+    if (!requested) return
+    const stored = isPlainObject(existing.config) && typeof existing.config.dataSourceId === 'string'
+      ? existing.config.dataSourceId.trim()
+      : ''
+    if (requested === stored) return
+    throw new ExternalSystemValidationError(
+      // Values-free: names the rule and the remedy, echoes neither pointer, neither scope nor the id.
+      'a rollback-eligible legacy binding cannot change its data source pointer without providing connectionId in the same write',
+      { field: 'connectionId', code: 'LEGACY_BINDING_DATASOURCE_CHANGE_REQUIRES_CONNECTION_ID' },
+    )
+  }
+
   async function upsertExternalSystem(input) {
     const normalized = normalizeExternalSystemInput(input)
     const existing = await findExisting(normalized)
@@ -665,6 +726,21 @@ function createExternalSystemRegistry({
       if (input.config === undefined) updateRow.config = existing.config
       else updateRow.config = await resolveUpdatedConfig(existing, updateRow.config, input)
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
+      assertLegacyBindingRepointCarriesCanonicalConnection(existing, normalized)
+      // The other half of the same rule: a write that DOES carry `connectionId` for a
+      // rollback-eligible row is an explicit canonical (re)bind, proven a few lines below through
+      // `validateCanonicalConnectionBinding`. Retiring the marker in that same write is what makes
+      // the binding canonical rather than "canonical id written, still resolving as legacy"; it only
+      // ever NARROWS the row (it can no longer take `resolveLegacy`), and the pointer drop below
+      // follows from it, so marker FALSE never coexists with a stored legacy pointer.
+      if (
+        normalized.kind === SQL_READONLY_SOURCE_KIND
+        && existing.legacy_connection_fallback_eligible === true
+        && normalized.connectionId !== undefined
+        && normalized.connectionId !== null
+      ) {
+        updateRow.legacy_connection_fallback_eligible = false
+      }
       if (normalized.kind === SQL_READONLY_SOURCE_KIND && connectionId !== null) {
         const reassertsConnection = normalized.connectionId !== undefined
           || (isPlainObject(input.config) && Object.prototype.hasOwnProperty.call(input.config, 'dataSourceId'))
@@ -677,7 +753,11 @@ function createExternalSystemRegistry({
         // Rows created after cutover are canonical-only. An old picker may still submit the
         // compatibility alias, but it must not re-introduce the legacy storage shape. Migrated
         // rows keep their pointer because the explicit fallback marker is their rollback proof.
-        if (existing.legacy_connection_fallback_eligible !== true) {
+        // Reads the marker AS THIS WRITE LEAVES IT, not `existing.`: a row converted a few lines
+        // above is canonical from this write onwards, so it sheds the pointer in the same write
+        // instead of persisting the one shape (marker FALSE + legacy pointer) neither resolver
+        // branch is written for.
+        if (updateRow.legacy_connection_fallback_eligible !== true) {
           updateRow.config = withoutLegacyDataSourcePointer(updateRow.config)
         }
         // ATTRIBUTION LAST, on the whole canonical branch (migrated rows included — they resolve
