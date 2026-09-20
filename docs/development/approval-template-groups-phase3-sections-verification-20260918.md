@@ -858,8 +858,8 @@ tests/IntegrationRunDetail.spec.ts            (9 tests)
 
 | # | 探针 | 预期 | 实测 | 结论 |
 |---|---|---|---|---|
-| **MA** | `api.ts` `listTemplatesBySection` 在 `USE_MOCK` 行**之下**插 `return {data:[],total:0}` | 对应用例红 | 定向：`1 failed \| 9 passed (10)`，红的正是 `listTemplatesBySection` 那条；**CI 活 exec 行全量：`1 failed \| 7283 passed (7284)`** | P2-1 **闭合**：门审轮同一探针（M1b）全量 **472 files / 7273 tests 全绿**，现在红 |
-| **MB** | 同法掏空 `reorderApprovalTemplateGroups` | 对应用例红 | 定向：`1 failed \| 9 passed (10)` | 第二个函数同样承重 |
+| **MA** | `api.ts` `listTemplatesBySection` 在 `USE_MOCK` 行**之下**插 `return {data:[],total:0}` | 对应用例红 | 定向：`1 failed \| 9 passed (10)`，红的正是 `listTemplatesBySection` 那条；**CI 活 exec 行全量：`1 failed \| 7283 passed (7284)`** | P2-1 的第一个函数**闭合**。**分母说明**：MA 的全量跑在 D3-1 的两条用例写出来之前，所以基数是 **7284 = 最终 7286 − 2**，与 §16.1 的 7286 不矛盾。对照组是门审轮的 **M1b**（同族但更宽：M1b 同时掏空两个函数），当时全量 **472 files / 7273 tests 全绿** |
+| **MB** | 同法掏空 `reorderApprovalTemplateGroups` | 对应用例红 | 定向：`1 failed \| 9 passed (10)`；**CI 活 exec 行全量（单独实测，非从 MA 推断）：`1 failed \| 7285 passed (7286)`** | 第二个函数同样承重，分母与 §16.1 一致 |
 | **MC** | `TemplateGroupSections.vue` 的 D3-1 分支改成 `if (false && …)`（回到合流后的旧形态） | 新 J 用例红、负控绿 | `1 failed \| 19 passed (20)`，红的只有「403 → 选择器 → 重放」那条 | D3-1 正向断言**承重** |
 | **MD** | 同一处改成 `if (true \|\| …)`（对任何失败都弹选择器） | 负控红 | `2 failed \| 18 passed (20)`：新增的「单 org / 非 J 失败仍走通用错误」+ 既有的「fetch 失败渲染顶层错误态」 | 分支**按 code 判而不是按「失败了」判**,有判别力 |
 
