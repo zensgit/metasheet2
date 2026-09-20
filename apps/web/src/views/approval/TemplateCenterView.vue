@@ -290,7 +290,33 @@
            invariant ("the flat table's category tag never triggers a group-linkage lookup",
            asserted in approvalTemplateCenterCategory.spec.ts) literally true after the merge
            rather than rewritten: the assertion is unchanged from A-4's head. See the phase-3
-           design MD's "A-2 x A-4 合流" section. -->
+           design MD's "A-2 x A-4 合流" section.
+
+           P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md, daily-ops fix round) — a
+           THIRD, independent `SessionOrgSwitcher` instance, persistent for the lifetime of the
+           grouped view rather than reactive-to-403 like the panel's and the sections view's own
+           (D3-1). Lock §2 "首期必须……提供 session-org 选择入口" is satisfied by the reactive
+           instances only up to the FIRST successful load; once `authenticatedTenantId` is bound
+           that code never returns, so a multi-org admin who wants to switch to a DIFFERENT org
+           had no in-module path (finding P2-5) and had to leave for the attendance page's
+           always-visible switcher. Gated on `hasMultipleOrgs` (own `useSessionOrg()` instance,
+           `useSessionOrgs()` called once on entering the grouped view) rather than mirroring
+           attendance's UNconditional visibility literally — a single-org member's session-orgs
+           call returns exactly one org, so this stays invisible for them, preserving acceptance
+           J's "single-org member never sees a selector" positive control for this new surface too
+           (attendance itself does not have this guard; this is a one-conjunct, documented
+           divergence — see design MD lock-coverage matrix). NOT a replacement for either reactive
+           instance: those still own the two 403 flows load-bearing for J and D3-1 unchanged. -->
+      <SessionOrgSwitcher
+        v-if="pageSessionOrgHasMultiple"
+        :tr="tr"
+        :orgs="pageSessionOrgs"
+        :model-value="pageSessionOrgSelectedId"
+        :loading="pageSessionOrgLoading"
+        :switching="pageSessionOrgSwitching"
+        :error-message="pageSessionOrgError"
+        @change="onPageSessionOrgChange"
+      />
       <div v-if="canManageTemplates" class="template-center__group-manager">
         <el-button
           size="small"
@@ -302,6 +328,7 @@
         </el-button>
         <ApprovalTemplateGroupsPanel
           v-if="showGroupManager"
+          ref="groupsPanelRef"
           :tr="tr"
           @changed="handleGroupsChanged"
         />
@@ -334,7 +361,9 @@ import StatusTag from '../../components/status/StatusTag.vue'
 import EmptyState from '../../components/status/EmptyState.vue'
 import ApprovalTemplateGroupsPanel from './ApprovalTemplateGroupsPanel.vue'
 import TemplateGroupSections from './TemplateGroupSections.vue'
-import { ref, computed, onMounted } from 'vue'
+import SessionOrgSwitcher from '../../components/SessionOrgSwitcher.vue'
+import { useSessionOrg } from '../../composables/useSessionOrg'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -468,12 +497,49 @@ function handleSectionItemSelect(templateId: string) {
 // for why (I6 in the flat view, single group fetch on the default grouped render).
 const showGroupManager = ref(false)
 const groupSectionsRef = ref<InstanceType<typeof TemplateGroupSections> | null>(null)
+const groupsPanelRef = ref<InstanceType<typeof ApprovalTemplateGroupsPanel> | null>(null)
 
 // The manager mutated the org's groups (create). The sections view owns the rendered group order,
 // so it — not the panel — is the surface that must re-read; `loadAll` is the same entry point the
 // sections view runs on mount (it already `defineExpose`s it).
 function handleGroupsChanged() {
   void groupSectionsRef.value?.loadAll()
+}
+
+// P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md) — own `useSessionOrg()` instance for
+// the persistent switcher (see template comment). Deliberately NOT shared with either reactive
+// instance inside the panel/sections view: each of those three surfaces already keeps its own
+// composable instance (§8.4 of the phase-3 design MD: "没有把分组列表上提到父组件共享一份 state" —
+// same established convention, extended to a third surface rather than broken for it).
+const {
+  orgs: pageSessionOrgs,
+  selectedOrgId: pageSessionOrgSelectedId,
+  hasMultipleOrgs: pageSessionOrgHasMultiple,
+  loading: pageSessionOrgLoading,
+  switching: pageSessionOrgSwitching,
+  errorMessage: pageSessionOrgError,
+  loadSessionOrgs: loadPageSessionOrgs,
+  switchSessionOrg: switchPageSessionOrg,
+} = useSessionOrg()
+
+// Fetched once on FIRST entry into the grouped view (not on every toggle back into it, and not in
+// the flat view at all — `loadSessionOrgs()` is a no-op for a caller with no stored token, so this
+// is inert wherever nothing is logged in, same as the reactive instances' own fire-and-forget call).
+let pageSessionOrgsRequested = false
+watch(viewMode, (mode) => {
+  if (mode === 'grouped' && !pageSessionOrgsRequested) {
+    pageSessionOrgsRequested = true
+    void loadPageSessionOrgs()
+  }
+})
+
+async function onPageSessionOrgChange(orgId: string): Promise<void> {
+  const ok = await switchPageSessionOrg(orgId)
+  if (!ok) return
+  // Re-read every surface that reads this org's data — same "tell the parent to re-read" rule
+  // `handleGroupsChanged` already follows (no shared reactive store between these surfaces).
+  void groupSectionsRef.value?.loadAll()
+  void groupsPanelRef.value?.loadGroups()
 }
 
 function startApproval(templateId: string) {
