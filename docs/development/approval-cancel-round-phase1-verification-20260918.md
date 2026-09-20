@@ -4010,7 +4010,13 @@ origin/main                                                  → clean
 # Part N — §2-G3 第三句 候选读法 (a) 的第一次真库落地与实跑(2026-09-20)
 
 **状态:候选 PROPOSED,读法未裁。** 本 Part 记录的是「候选补丁 `reading-a` 被应用到分支上、第一次
-编译 + 真库跑通」这件事本身的读数,**不是** owner 已裁读法 (a) 的记录。锁文正文未改、设计 MD 里
+编译 + 真库跑通」这件事本身的读数,**不是** owner 已裁读法 (a) 的记录。
+
+> **求值标记(2026-09-20 硬化轮,勿整节作废)。** 本 Part 的**计数类读数**(七件套 70、`-creation` 28、
+> 「11 条腿」、src `+41/−1`、两条 mutation 的 9/2 与 2/9)是**第一次实跑那个 head** 的读数,在**当前 head**
+> 上已被 **Part N-H** 的重测取代 —— 逐条对照见 §NH5。本 Part 的**非计数结论**(§N2 的逐腿判别力说明、
+> §N3 的承重归因、§N4 的缺口实测方向、§N5 的夹具修法)**仍然 OPERATIVE**;§N4 的结论在硬化轮被**补全**
+> (补了「后果」那一半),不是被推翻;§N6 的 C-2 一条被**逐条勘误**(见该条)。锁文正文未改、设计 MD 里
 half C 仍登记为 OPEN(§3.4),PR 未开、未合并、未 undraft。
 
 - **分支**:`feat/approval-cancel-round-phase1-g3-reading-a`,基线 head
@@ -4104,6 +4110,12 @@ N6(a) 的判别力同理写明:它区分 A 与 D 的方式是**两者都不成�
 席位),已经写成常驻正控 `P12(a)`:将来若有人让这条被还原成 A,这条断言会红,缺口必须重新登记而不是
 静默关闭。
 
+**后果那一半(硬化轮 2026-09-20 补写,门审 P2-1;本段此前只写了席位身份)。** 席位停在 D 意味着
+G3 **第三句**的资格闸跑的是 D,**不是读法 (a) 认定的席位持有人 A** —— 因此**原审批人 A 已停权的单据,
+在这条语料上轮次照开**。闸本身没有被跳过:停权**被委托人 D** 仍然 409 阻断。三条读数(本 head 实测,
+见 Part N-H §NH2):`N7(a)` legacy × 停权 A ⇒ **不抛、201、席位 `[D]`**;`N8(a)` 再叠「委托已撤销」⇒ 同上;
+`P13(a)` legacy × 停权 D ⇒ **409 `CANCEL_ROUND_SEAT_INELIGIBLE`、`details={ineligibleCount:1,reasons:['inactive']}`、零行**。
+
 同一轮也把 README §6.2 的 G-3 建成了腿(`P11(a)`,兄弟席位),**实测 `{A, D}` 两人**;
 配合 M-B 的红,这条合取的取舍(不用 instance 级匹配)第一次有了读数而不是论证。
 
@@ -4139,10 +4151,187 @@ error: update or delete on table "approval_instances" violates foreign key const
   候选片段原文建议「删去 OPEN 条目」,本轮**不采纳**:读法未裁之前删掉一条 RATIFIED 条款的 OPEN 登记,
   就是把 owner 没做的决定洗成既成事实。两者并存,OPEN 在上、候选在下。
 - **没有**实现读法 (b) / (a′) / 报告 §7 的 (b′)(失效即阻断 + 新错误码),也没有改 §14.3 出口表。
-- **没有**测 §4.2 披露的「同一个人既有角色席位又有被委托的 user 席位 ⇒ 席位数塌缩」;它是设计层取舍,
-  交 owner,已在设计 MD 登记。
+- ~~**没有**测 §4.2 披露的「同一个人既有角色席位又有被委托的 user 席位 ⇒ 席位数塌缩」~~
+  —— **2026-09-20 硬化轮已补(门审 P3-2)**:`正控 P15(a)` 钉今天的答案(席位 **2 → 1**),**不预判裁决**;
+  取舍本身仍是设计层的,**仍交 owner**,设计 MD §3.4 的登记保持 OPEN。
 - **没有**测再入节点(`entry_epoch` 故意不在 join 里)会不会让同一 `(instance, node_key, assignee)`
   出现多行委托 assignment 而使席位集合**膨胀**;已按「已知镜像风险」登记,不声称不存在。
+  **2026-09-20 硬化轮:本条 KEPT OPEN,并驳回了一个把它关掉的提议。** 门审 §P3-1 用三行普查推出
+  「膨胀不可达」。三行普查本轮复核**属实**(逐条重跑,见 §NH4),**但推论有洞**:
+  `ApprovalAssigneeResolver.ts` 自己的文档写明 `prior_node_approver`(Lock-1 §K3)是
+  **「the one kind whose input is caller-supplied at activation rather than create-frozen」** ——
+  15 种源里**至少这一种**的输入不是创建时冻结的,「跨 epoch 恒定」的前提对它不成立。
+  故本轮**不写「不可达」**,只写「**普查没有证明不可达**,洞在 §K3」;构造草图见设计 MD §3.4 同条,
+  标 **UNVERIFIED / NOT CONSTRUCTED THIS ROUND**。
 - **没有**跑 required `test (20.x)` 全量清单(本轮只跑七件套 + 委托六件 + `tsc`)。
-- **没有**动 C-2:C-2 的 rebase 与重跑仍欠,且按候选 README §8 它一定会在同一段代码上冲突。
+- **没有**动 C-2。**本条 2026-09-20 硬化轮勘误(门审 P2-2:原文三处全部过期/不成立,逐条改写为实测)。**
+  原文为:「C-2 的 rebase 与重跑仍欠,且按候选 README §8 它一定会在同一段代码上冲突。」
+  - **锚点错**:候选 README 的 `## 8` 是「本次交付**不**解除验证报告 §8 的 P2 阻塞」,与冲突无关;
+    冲突说法在该 README `## 5` 与 `## 9` 第 8 步。(本分支基线提交 `b8b71539a6` 正是一次锚点勘误,同族复发。)
+  - **祖先前提已过期**:实测 `git merge-base --is-ancestor b8b71539a6… origin/feat/approval-cancel-round-phase2`
+    → **YES**;`git merge-base origin/feat/approval-cancel-round-phase2 6a81b6779b…` = **`b8b71539a6…`**。
+    C-2 **已经**坐在当前 C-1 基线之上。
+  - **「一定会冲突」未经证实**:实测 `git merge-tree --write-tree <C-1 head> origin/feat/approval-cancel-round-phase2`
+    → **EXIT 0**,干净树 `c5e376b6a385b316e9e102a05d5088e153e808a0`(测于 phase2 head `6a40f0121a…`)。
+  - **两句必须分开写,不能合并成一句**:**三方合并实测干净**;**逐提交重放(rebase)本轮未实跑**。
+    `merge-tree` EXIT 0 **不蕴含** rebase 干净 —— 把两者合并成一句,与被勘误的「一定会冲突」是同一种过强声明。
+  - **仍欠的是 rebase 后的重跑**,不是冲突解决。
+  - **顺带(交 C-2 线)**:候选 README `## 9` 第 8 步把「`SELECT DISTINCT actor_id FROM approval_records`
+    在 C-2 全文必须仍是**恰好 1 处**」当成「冲突有没有解反方向」的判据。该字面量在候选 head 上实测
+    `grep -c` = **0**(新查询根本不含该串),在 phase2 head 上 = **1**;照此判据执行的人会把 0 读成「解反了」。
+    判据须换成对**新查询**的正向锚点:`COALESCE(a.metadata->>'delegatedFrom', r.actor_id)` ——
+    候选 head 实测 **1** 处、phase2 head 实测 **0** 处。README 已同步勘误。
 - **没有**合并、未 undraft、未开 PR、未改任何锁文、未对任何共享库应用迁移。
+
+---
+
+# Part N-H — 读法 (a) 候选的**硬化轮**(2026-09-20,门审第 1 轮 P2/P3 结清)
+
+**状态:候选仍是 PROPOSED,读法仍未裁。** 本 Part 记录的是「把门审
+`impl-gate-C-slice1-g3-reading-a-round1-20260920.md` 的 **3 个 P2 + 2 个 P3** 做完」这件事的读数。
+未合并、未 undraft、未开 PR、未改锁文正文、未对任何共享/staging/生产库应用迁移。
+
+- **基线 head(硬化前)**:`6a81b6779bc5180971e32ca104f92b58dd789fc9`(= `origin/feat/approval-cancel-round-phase1-g3-reading-a`,fetch 后逐字核对)。
+- **工作树**:一次性 detached 树,`node_modules` 软链 canonical;**库**:一次性私有库
+  `metasheet2_c1_deleg_a_h_20260920`(owner `ms2testbed`,**非超级**),`createdb` → 全量迁移
+  **414/414 EXIT=0** → **415 张 BASE TABLE** → 本轮全部跑动 → 收尾 `dropdb`。
+- **纪律**:全程 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`;**未用** `git checkout -- <path>` /
+  `reset --hard` / `stash`;未动任何别人的工作树/库。
+
+## NH1. 五条 P2/P3 的处置(逐条)
+
+| 门审项 | 处置 | 落点 |
+|---|---|---|
+| **P2-1a** 三处只写席位身份、没写后果 | **补写后果**(三处) | `ApprovalProductService.ts` seat 查询上方注释的 `ITS CONSEQUENCE` 段;设计 MD §3.4 第一条的 `ITS CONSEQUENCE`;本文件 §N4 的「后果那一半」 |
+| **P2-1b** compound 格零覆盖 | **加三条常驻腿** | `负控 N7(a)` / `负控 N8(a)` / `负控 P13(a)`(`approval-cancel-round-creation.db.test.ts`) |
+| **P2-2** §N6 对 C-2 的三句过期 | **逐条改写为实测** | 本文件 §N6 该条(锚点 / 祖先 / 「合并干净 ≠ 重放干净」拆成两句);候选 README §5 §9-8 同步勘误 |
+| **P2-3** 兄弟界面未求值未登记 | **登记 + 正控用例** | 设计 MD §3.4 新增一条 OPEN(与 half B 同等待遇);`正控 P14(a)` |
+| **P3-2** 席位塌缩零用例 | **加一条钉今天行为的腿** | `正控 P15(a)`;设计 MD §3.4 该条改写 |
+| **P3-1** 「再入节点膨胀」建议关掉 | **不采纳,KEPT OPEN**(普查属实,推论有洞) | 设计 MD §3.4 该条 + 本文件 §N6 该条 |
+
+**P2-1 的处置为什么是「登记 + 覆盖」而不是「实现 fallback」**,写在设计 MD §3.4 第一条:
+`nodeKey IS NULL` 时退回 instance 级匹配**不是补上缺口,而是用一种错换另一种错,且换到哪一种取决于语料**
+(两节点都走 legacy ⇒ 把 D 自己的兄弟席位折给 A;混合语料 ⇒ 反而给出正确的两席;**两格均为推演,
+本轮 NOT CONSTRUCTED**);fail-closed 则需新错误码、须先进锁 §14.3。两者都属 owner 裁决。
+本轮**未新增任何错误码**(§NH6 机械核)。
+
+## NH2. 五条新腿的构造与实测读数
+
+| 用例 | 构造(全部走生产路由,不手改表) | 实测 |
+|---|---|---|
+| `负控 N7(a)` | legacy `POST /:id/approve` 批(approve 行无 `nodeKey`)+ `UPDATE users SET is_active=FALSE` 停权**原审批人 A** | **不抛,轮次创建成功,席位 `[D]`** |
+| `负控 N8(a)` | 同上 + 委托 `active=FALSE`(已撤销) | **不抛,轮次创建成功,席位 `[D]`** |
+| `负控 P13(a)` | legacy 批 + 停权**被委托人 D**(= 未被还原的 actor) | **409 `CANCEL_ROUND_SEAT_INELIGIBLE`,`details={ineligibleCount:1,reasons:['inactive']}`,零行,values-free** |
+| `正控 P14(a)` | `approval_a`(A,被委托给 D)→ `approval_b`(Lock-1 §K3 `prior_node_approver` 引用 `approval_a`),D 两处都批 | 兄弟界面席位 **`[D]`**(`delegatedFrom` 为空、`resolvedFrom.kind='prior_node_approver'`,**无还原**);同一张单据的撤销轮席位 **`{A, D}`** |
+| `正控 P15(a)` | `approval_role`(`assigneeType:'role'`,角色 `admin`,**A 本人**批)→ `approval_user`(A,被委托给 D,**D** 批) | 撤销轮席位 **`[A]`**,**1 席**(基线为 `{A, D}` 两席) |
+
+**N7/N8/P13 的定位,写明而不是含糊**:N7/N8 断言的是**今天的真实答案**,是**已登记缺口的钉子,不是期望行为**;
+缺口若被关上它们会红,缺口必须**重新登记而不是静默关闭**(`P12(a)` 自己写的纪律,只是此前没覆盖到资格臂)。
+承重的是 **P13(a)**,而它承的是**反驳**:门审 P2-1 的前提句是「资格闸对 legacy 语料**本来就不起作用**」,
+`P13(a)` 实测 **409、零行** ⇒ 闸在这条语料上**被跑到了、也确实阻断**,只是跑在**未被还原的 actor** 身上,
+而不是读法 (a) 认定的席位持有人 A。**这一句的边界照实写**:`assertCancelRoundSeatsEligibleInTxn`
+只有一个调用点,**不存在可以单独 neuter 的「legacy 臂」**;把整个闸 neuter 掉会连 `N1/N2/N4/N5(a)` 一起红。
+该 mutation(记 **M-C**)**本轮 NOT RUN**,所以本报告**不对**「闸被 neuter 之后谁会红」作任何断言;
+门审自己那句「把它 neuter 掉,**70 条一条不红**」同样**未经证实**(表面上与 `N1/N2/N5(a)` 的 409 断言相抵触),
+**留给下一轮实测**,本轮不据此加强也不据此削弱 P2-1 的定级。
+
+**N8(a) 判别力的上限,照实写**:读法 (a) **根本不读**活的委托行(这条路径上 `resolveActiveDelegationMap`
+零调用),所以 N8 与 N7 的差别落在一个**被测代码从不触碰的字段**上。它**不是**独立的第二个 oracle;
+它钉的是锁文里最刺眼的那一格 —— 委托**已撤销**、委托人**已离职**,被委托人 D 仍然拿到撤销轮的决定权。
+
+**P14(a) 的归因**:结构上它是 `P11(a)` 的兄弟(两节点 + 一条委托),因此在 M-B 下与 `P11(a)` **同向红**;
+它**不是** `node_key` 合取的独立证据(见 §NH3 台账)。
+**它测到的与它被用来支持的,分开写**:该腿**实测**的是「§K3 节点的席位 = 实际决定人 D,`delegatedFrom` 为空、
+`resolvedFrom.kind = 'prior_node_approver'`,没有任何还原发生」;而「同实例内冻结映射仍在生效、
+D 就是 A 在这张单据上的履职代理」是**建议不外推的理由**(语义判断),**不是**这条断言测到的东西 ——
+D 本人不是委托人,所以 `delegatedFrom` 为空**也可以**被读成「映射在这条路径上压根没被查」。
+理由归理由,读数归读数,owner 裁的是前者。
+
+## NH3. 判别力(逐条反转 → 贴红)与 mutation 台账(**重测,非转抄**)
+
+**判别力**:把 `-creation` 文件**复制**成一次性文件(**不改被测文件**),对**本轮 5 条新腿各反转一处**核心断言。
+机械核:`diff` 恰好 **10 行 = 5 对**(每条新 `it()` 正好一处,无遗漏无重复)。
+
+| 反转 | 读数 |
+|---|---|
+| `N7(a)`:`toEqual([delegateeD])` → `([delegatorA])` | **FAIL** `expected [ Array(1) ] to deeply equal [ Array(1) ]` |
+| `N8(a)`:同上 | **FAIL** 同形 |
+| `P13(a)`:`expect(thrown).toBeTruthy()` → `toBeFalsy()` | **FAIL** `expected ServiceError: A previous approver of this… to be falsy` |
+| `P14(a)`:`toEqual([delegatorA, delegateeD])` → `([delegateeD])` | **FAIL** `expected [ …(2) ] to deeply equal [ Array(1) ]` |
+| `P15(a)`:`toEqual([delegatorA])` → `([delegatorA, delegateeD])` | **FAIL** `expected [ Array(1) ] to deeply equal [ …(2) ]` |
+
+- 反转组:**5 failed / 28 passed(33)**,逐条按用例名点名 ⇒ **5/5 全红,零条空转**。
+- 控制组(未反转,同 head):**16 passed / 17 skipped(33)**。
+- 一次性反转文件跑完立即删除;跑后 `select count(*) from approval_delegations` = **0**。
+
+**Mutation(两条都**按门审 §5 的定义重跑**,不沿用 11 腿时代的 9/2 与 2/9)。**
+备份基准 sha256 `6b6ac5320de96cd2e6372f4fcb37f8aa4b6335ddae871dc1649d2a082db94d2a`
+(= 本轮注释补写**之后**的 `ApprovalProductService.ts`;补写**之前**为 `12bf4926…`,与门审报告 §5 逐字相符)。
+每条施加后先 `diff` 确认**真的变了**(不做无效 mutation),跑完 `cp` 还原并 `cmp` **identical**。
+
+| Mutation | 内容(机械核) | 预测 | 实测(`-creation` 全文件 33 条) |
+|---|---|---|---|
+| **M-A** | 整条 seat 查询退回基线 `SELECT DISTINCT actor_id …`(`diff` 10 行 = 9 换 1) | 11 红 / 5 绿 | **11 failed / 22 passed**;红的是 `P4 P5 P6 P7 N5 P8 P9 P11 P10 P14 P15`,绿的是 `P12 N6 N7 N8 P13` —— **与预测逐条相符** |
+| **M-B** | **只删** `AND a.node_key = r.metadata->>'nodeKey'` 一行(`diff` 恰好 1 行) | 6 红 / 10 绿 | **6 failed / 27 passed**;红的是 `P11 P12 N7 N8 P13 P14` —— **与预测逐条相符** |
+
+**两条 mutation 下本轮新腿的如实归因**:
+- **M-A**:`N7/N8/P13` **不红**。原因与 `P12(a)` 同构 —— 它们断言的就是 legacy 语料上**今天的行为**,
+  而基线在同一格给同一答案。**这三条在 M-A 下是非回归守卫,不是承重 oracle**,不能拿 M-A 的红来给它们背书。
+  `P14/P15` **红**,承重。
+- **M-B**:`N7/N8/P13` **全红**,原因是删掉该合取后 legacy 那条 approve 行**反而被还原成 A** ——
+  即「缺口被意外关上」,正是这三条钉子被设计来捕捉的事件。`P14` 与 `P11` 同向红(D 自己的席位被折给 A)。
+  `P15` **不红**(它的两条 approve 行里,角色那条的 actor 是 A 本人,本来就没有可 join 的 user 委托行)。
+
+## NH4. 普查复核(门审 §P3-1 的三行,逐条重跑)
+
+| 普查 | 门审读数 | 本轮重跑 |
+|---|---|---|
+| `delegatedFrom` 全仓写入方 | 唯一 `ApprovalAssigneeResolver.pushResolved` | `git grep -c` @src:`routes/approvals.ts` **2**、`ApprovalAssigneeResolver.ts` **4**、`ApprovalDelegationConfig.ts` **7**、`ApprovalProductService.ts` **8**、`types/approval-product.ts` **3** —— 与门审一致 |
+| `resolveActiveDelegationMap` 生产调用点 | 唯一 `ApprovalProductService.ts:7947` | 命中 4 处:定义 `ApprovalDelegations.ts:33`、`import` `APS:137`、**调用 `APS:7947`(唯一)**、迁移文件里一句注释 —— 与门审一致 |
+| 解析器纯函数 | `await` 0 / `async` 0 / `.query(` 0 | **0 / 0 / 0** —— 与门审一致 |
+
+**三行属实,但推论「膨胀不可达」不成立地被得出**:见 §N6 该条与设计 MD §3.4 —— `prior_node_approver`
+(Lock-1 §K3)按 `ApprovalAssigneeResolver.ts` 自己的文档是 **the one kind whose input is caller-supplied
+at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提不成立。本轮**不写「不可达」**,
+只写「**普查没有证明不可达**」,并给出一条 **UNVERIFIED / NOT CONSTRUCTED THIS ROUND** 的构造草图。
+
+## NH5. 本 head 的全部计数(逐条重测;Part N 的对应计数**由此取代**)
+
+| 项 | Part N(第一次实跑) | **本 head(硬化后)** |
+|---|---|---|
+| C-1 七件真库套件 | 7 files / **70** passed | 7 files / **75** passed / 0 failed |
+| `-creation` 单件 | 28 | **33** |
+| `§2-G3 第三句` 过滤 | 11 passed / 17 skipped | **16 passed / 17 skipped(33)** |
+| 委托邻居套件 | 6 files / 39 passed | **7 files / 54 passed / 0 failed**(六件 + `approval-prior-node-approver.db.test.ts`,因 P14 新触及该界面) |
+| `tsc --noEmit -p tsconfig.json` | EXIT=0 | **EXIT=0,零输出** |
+| 测试文件的类型核(仓内 tsconfig `exclude` 掉 `**/*.test.ts`,故另用一次性等价配置) | 288 error,本文件 0 | 一次性配置(`include` 加 `types/**/*` 与本测试文件、去掉 test 排除):共 **146 error**,**本文件 0**;146 条全部落在**其它**测试文件(`src/**/__tests__/**` 等),与本轮改动无关 |
+| src diff vs 切片基线 `b8b71539a6` | +41 / −1 | **+55 / −1** |
+| src diff vs 候选 head `6a81b6779b` | — | **+14 / −0,其中非注释行 0** ⇒ **相对候选零行为变化** |
+| 测试件 diff vs `b8b71539a6` | +651 | **+1088** |
+
+## NH6. 出口表(锁 §14.3)与 C-2 锚点:机械核
+
+- src diff 的 `+` 行里:大写错误码字面量 **0**;`throw` / `ServiceError` / `Error(` **0**(`grep -cE`)。
+  ⇒ **未新增出口、未新增错误码,§14.3 无需改动。**(P2-1 若将来走 fail-closed 修法会新增错误码,**那时**必须先进 §14.3 —— 属 owner。)
+- C-2 锚点(实测,phase2 head `6a40f0121a36d7e54fde98088ca68212653403bf`):
+  `merge-base` = **`b8b71539a6…`**;`--is-ancestor b8b71539a6… phase2` = **YES**;
+  `merge-tree --write-tree` = **EXIT 0**,树 **`c5e376b6a385b316e9e102a05d5088e153e808a0`**;
+  正向锚点 `COALESCE(a.metadata->>'delegatedFrom', r.actor_id)` 在候选 head **1** 处 / phase2 head **0** 处;
+  旧字面量 `SELECT DISTINCT actor_id FROM approval_records` 在候选 head **0** 处 / phase2 head **1** 处。
+  **三方合并实测干净;逐提交重放(rebase)本轮未实跑** —— 两句分开写,不合并。
+
+## NH7. 本轮**没有**做的(如实列)
+
+- **没有**裁读法;设计 MD §3.4 的 `G3 half C` 仍是 OPEN,候选仍以 PROPOSED 挂在其下。
+- **没有**实现 P2-1 的任何一种行为性修法(instance 级 fallback / fail-closed),理由见 §NH1;
+  **没有**新增错误码,**没有**改锁文正文。
+- **没有**实现读法 (b) / (a′) / (b′)。
+- **没有**外推读法 (a) 到 `loadPriorNodeApproverDeciders`(登记为 OPEN,交 owner)。
+- **没有**构造「再入节点 × §K3 ⇒ 席位膨胀」的证人(草图标 UNVERIFIED)。
+- **没有**跑 **M-C**(把 `assertCancelRoundSeatsEligibleInTxn` 整条 neuter)。因此本报告**不**声称
+  「闸被 neuter 之后哪几条会红」,也**不**替门审那句「把它 neuter 掉,70 条一条不红」背书或证伪。
+- **没有**跑门审 §6 那组 `CI=true` core-backend 全量(它的 1124 files / 1115 passed / 8 failed 读数)。
+  ⇒ **本轮的读数集合不足以按门审 §9「在同一 head 上重跑 §3/§4/§5/§6 四组」直接重裁**:
+  §3/§4/§5 已重测(见上),**§6 只跑了 14 件真库套件 + `tsc`,未跑全量**。重裁前需补这一组。
+- **没有**跑 required `test (20.x)` 全量清单(本轮跑七件套 + 委托邻居七件 + `tsc`)。
+- **没有**合并、未 undraft、未开 PR、未对任何共享/staging/生产库应用迁移、未删任何不是本轮自己建的东西。
