@@ -191,7 +191,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import type {
   ApprovalTemplateGroupReorderResultDTO,
   ApprovalTemplateListItemDTO,
@@ -206,7 +206,7 @@ import {
   reorderApprovalTemplateGroups,
   unlinkApprovalTemplateFromGroup,
 } from '../../approvals/api'
-import SessionOrgSwitcher from '../../components/SessionOrgSwitcher.vue'
+import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
 import { useSessionOrg } from '../../composables/useSessionOrg'
 import { useLocale } from '../../composables/useLocale'
 import { ZH, EN } from './templateCenterLabels'
@@ -249,6 +249,15 @@ const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 // on those paths is `approvalTemplateAdminGuard` (I7), a different condition that the selector
 // cannot fix. This is the named D3-1 change, not a narrower sibling of the panel's contract: the
 // panel covers load + create because create is ITS first write; this view has no create.
+// P1-A (impl-gate-A5-daily-ops-round1-20260920.md) — when this view is mounted inside
+// TemplateCenterView, the PAGE owns the one `useSessionOrg()` instance, the one rendered switcher
+// and the replay; this view only reports "I am blocked on SESSION_ORG_REQUIRED". Mounted with no
+// host (its own spec, or any other future host) `inject` returns `null` and everything below
+// behaves exactly as it did before — its own instance, its own switcher, its own retry slot. See
+// `SessionOrgSwitcher.vue`'s `SessionOrgHost` doc comment for why a second live instance on one
+// page is not a cosmetic duplicate but a state-destroying one.
+const sessionOrgHost = inject(SessionOrgHostKey, null)
+
 const {
   orgs,
   // `selectedOrgId` (not the raw `currentOrgId`) — the composable normalizes `null` to `''`, which
@@ -259,17 +268,26 @@ const {
   errorMessage: sessionOrgError,
   loadSessionOrgs,
   switchSessionOrg,
-} = useSessionOrg()
+} = sessionOrgHost?.sessionOrg ?? useSessionOrg()
 
-const showSessionOrgSwitcher = ref(false)
+// "This view's own load is blocked on a session-org choice" — it also suppresses the section list
+// (which is empty in that state) regardless of who renders the control.
+const sessionOrgBlocked = ref(false)
+// Whether THIS view draws the control. Never while hosted: the page draws exactly one.
+const showSessionOrgSwitcher = computed(() => sessionOrgBlocked.value && sessionOrgHost === null)
 // The one blocked call to replay once the session-org switch resolves. Only `loadAll()` ever
 // registers here (see the scope note above), so a single slot
-// is enough — no queue needed.
+// is enough — no queue needed. Stays empty while hosted: the host replays `loadAll()` itself.
 let pendingRetry: (() => Promise<void>) | null = null
 
 function handleSessionOrgRequired(retry: () => Promise<void>): void {
+  sessionOrgBlocked.value = true
+  if (sessionOrgHost) {
+    pendingRetry = null
+    sessionOrgHost.notifySessionOrgRequired()
+    return
+  }
   pendingRetry = retry
-  showSessionOrgSwitcher.value = true
   // Fire-and-forget: populates the switcher's `orgs` list. A rejection here only leaves the
   // switcher's own `errorMessage` set; it must never throw back into the caller's catch.
   void loadSessionOrgs()
@@ -278,7 +296,7 @@ function handleSessionOrgRequired(retry: () => Promise<void>): void {
 async function onSessionOrgChange(orgId: string): Promise<void> {
   const ok = await switchSessionOrg(orgId)
   if (!ok) return
-  showSessionOrgSwitcher.value = false
+  sessionOrgBlocked.value = false
   const retry = pendingRetry
   pendingRetry = null
   if (retry) await retry()
@@ -387,7 +405,7 @@ async function loadAll(): Promise<void> {
       }),
     )
     sections.value = loaded.filter((s) => s.alwaysShow || s.total > 0)
-    showSessionOrgSwitcher.value = false
+    sessionOrgBlocked.value = false
   } catch (e: any) {
     // See the D3-1 block above. The selector replaces the generic error on THIS code only; every
     // other failure keeps the existing top-level error state verbatim.

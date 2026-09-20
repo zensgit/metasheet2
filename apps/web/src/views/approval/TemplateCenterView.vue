@@ -292,23 +292,41 @@
            rather than rewritten: the assertion is unchanged from A-4's head. See the phase-3
            design MD's "A-2 x A-4 合流" section.
 
-           P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md, daily-ops fix round) — a
-           THIRD, independent `SessionOrgSwitcher` instance, persistent for the lifetime of the
-           grouped view rather than reactive-to-403 like the panel's and the sections view's own
-           (D3-1). Lock §2 "首期必须……提供 session-org 选择入口" is satisfied by the reactive
-           instances only up to the FIRST successful load; once `authenticatedTenantId` is bound
-           that code never returns, so a multi-org admin who wants to switch to a DIFFERENT org
-           had no in-module path (finding P2-5) and had to leave for the attendance page's
-           always-visible switcher. Gated on `hasMultipleOrgs` (own `useSessionOrg()` instance,
-           `useSessionOrgs()` called once on entering the grouped view) rather than mirroring
-           attendance's UNconditional visibility literally — a single-org member's session-orgs
-           call returns exactly one org, so this stays invisible for them, preserving acceptance
-           J's "single-org member never sees a selector" positive control for this new surface too
-           (attendance itself does not have this guard; this is a one-conjunct, documented
-           divergence — see design MD lock-coverage matrix). NOT a replacement for either reactive
-           instance: those still own the two 403 flows load-bearing for J and D3-1 unchanged. -->
+           P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md) + P1-A
+           (impl-gate-A5-daily-ops-round1-20260920.md, round 2) — the page's ONE session-org
+           entry, persistent for the lifetime of the grouped view rather than reactive-to-403 like
+           the panel's and the sections view's own used to be (D3-1). Lock §2 "首期必须……提供
+           session-org 选择入口" is satisfied by a reactive instance only up to the FIRST successful
+           load; once `authenticatedTenantId` is bound that code never returns, so a multi-org admin
+           who wants to switch to a DIFFERENT org had no in-module path (finding P2-5) and had to
+           leave for the attendance page's always-visible switcher.
+
+           Round 1 of this slice shipped this as a THIRD, INDEPENDENT `useSessionOrg()` instance
+           beside the panel's and the sections view's. A real browser measured what that costs: on
+           the first grouped hop as an unbound multi-org admin BOTH this one and the sections
+           view's rendered — two indistinguishable controls — and switching through the sections
+           view's one left the page with ZERO switchers, because `useSessionOrg`'s
+           `onAuthPrincipalChange` empties `orgs` on every OTHER instance and only the switching
+           instance restores itself. This view now owns the single instance for the whole page and
+           hands it down through `provide(SessionOrgHostKey)`; the panel and the sections view
+           consume it and render no switcher of their own while hosted (they keep their standalone
+           behaviour verbatim when mounted with no host). See `SessionOrgSwitcher.vue`'s
+           `SessionOrgHost` doc comment for why one instance per page is the only available fix
+           (`useSessionOrg.ts` is not editable — design lock §2).
+
+           Visibility is `hasMultipleOrgs || sessionOrgRequiredSeen`, not attendance's
+           UNconditional render. First disjunct: a single-org member's session-orgs call returns
+           exactly one org, so this stays invisible for them, preserving acceptance J's "single-org
+           member never sees a selector" positive control for this surface (attendance itself has
+           no such guard; a one-conjunct, documented divergence — see the design MD's lock-coverage
+           matrix). Second disjunct: it reproduces the pre-existing REACTIVE rule verbatim rather
+           than widening it — before this round a child that took a 403 `SESSION_ORG_REQUIRED`
+           rendered `<SessionOrgSwitcher>` itself, whose own `v-if="loading || orgs.length > 0 ||
+           errorMessage"` decided whether anything appeared; now the child reports the code up and
+           this instance renders under exactly that same component-level gate. J's control does not
+           rest on this `v-if` — it rests on a single-org member never RECEIVING the code. -->
       <SessionOrgSwitcher
-        v-if="pageSessionOrgHasMultiple"
+        v-if="showPageSessionOrgSwitcher"
         :tr="tr"
         :orgs="pageSessionOrgs"
         :model-value="pageSessionOrgSelectedId"
@@ -361,9 +379,9 @@ import StatusTag from '../../components/status/StatusTag.vue'
 import EmptyState from '../../components/status/EmptyState.vue'
 import ApprovalTemplateGroupsPanel from './ApprovalTemplateGroupsPanel.vue'
 import TemplateGroupSections from './TemplateGroupSections.vue'
-import SessionOrgSwitcher from '../../components/SessionOrgSwitcher.vue'
+import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
 import { useSessionOrg } from '../../composables/useSessionOrg'
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, provide, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -506,11 +524,21 @@ function handleGroupsChanged() {
   void groupSectionsRef.value?.loadAll()
 }
 
-// P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md) — own `useSessionOrg()` instance for
-// the persistent switcher (see template comment). Deliberately NOT shared with either reactive
-// instance inside the panel/sections view: each of those three surfaces already keeps its own
-// composable instance (§8.4 of the phase-3 design MD: "没有把分组列表上提到父组件共享一份 state" —
-// same established convention, extended to a third surface rather than broken for it).
+// P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md) + P1-A
+// (impl-gate-A5-daily-ops-round1-20260920.md) — THE page's session-org state. Exactly one
+// `useSessionOrg()` instance exists for this page and it lives here; the panel and the sections
+// view inject it (`provide(SessionOrgHostKey)` below) instead of constructing their own.
+//
+// Round 1 of this slice followed the phase-3 design MD §8.4 convention ("没有把分组列表上提到父组件
+// 共享一份 state") and gave this surface its own third instance. That convention is about the GROUP
+// LIST — per-surface copies of a list are independent and each surface's spec pins its own fetch
+// count. Session-org identity is not list data: `switchSessionOrg` remints the auth token, and
+// `useSessionOrg`'s `onAuthPrincipalChange` handler then clears `orgs`/`currentOrgId` on every
+// instance, with only the switching one restoring itself. Copies of that state are therefore not
+// independent — they actively destroy each other (measured in a real browser: switching through
+// the sections view's instance left the page with zero switchers until a full reload). §8.4 was
+// never a faithful precedent for it.
+const pageSessionOrg = useSessionOrg()
 const {
   orgs: pageSessionOrgs,
   selectedOrgId: pageSessionOrgSelectedId,
@@ -520,24 +548,53 @@ const {
   errorMessage: pageSessionOrgError,
   loadSessionOrgs: loadPageSessionOrgs,
   switchSessionOrg: switchPageSessionOrg,
-} = useSessionOrg()
+} = pageSessionOrg
+
+// Set when a hosted child reports a 403 `SESSION_ORG_REQUIRED`. See the template comment: this is
+// the pre-existing reactive visibility rule relocated from the children, not a widening of it.
+const sessionOrgRequiredSeen = ref(false)
+const showPageSessionOrgSwitcher = computed(
+  () => pageSessionOrgHasMultiple.value || sessionOrgRequiredSeen.value,
+)
 
 // Fetched once on FIRST entry into the grouped view (not on every toggle back into it, and not in
 // the flat view at all — `loadSessionOrgs()` is a no-op for a caller with no stored token, so this
-// is inert wherever nothing is logged in, same as the reactive instances' own fire-and-forget call).
+// is inert wherever nothing is logged in, same as the reactive instances' own fire-and-forget call
+// used to be). NIT-2 of the round-1 gate, registered rather than left implicit: this one call IS
+// proactive, unlike the "reactive-not-proactive" rule `approvalTemplateCenterSections.spec.ts`
+// pins for the SECTIONS view (that rule is about not looking up session orgs on a NON-J failure,
+// and it still holds — the sections view makes no session-org call at all now). The page-level
+// entry cannot be reactive: its whole purpose is to exist when nothing has failed.
 let pageSessionOrgsRequested = false
+function ensurePageSessionOrgsLoaded(): void {
+  if (pageSessionOrgsRequested) return
+  pageSessionOrgsRequested = true
+  void loadPageSessionOrgs()
+}
+
 watch(viewMode, (mode) => {
-  if (mode === 'grouped' && !pageSessionOrgsRequested) {
-    pageSessionOrgsRequested = true
-    void loadPageSessionOrgs()
-  }
+  if (mode === 'grouped') ensurePageSessionOrgsLoaded()
 })
+
+// A hosted child (panel / sections view) took a 403 `SESSION_ORG_REQUIRED`. The host owns the
+// fetch, the rendered control and the replay; the child only reports that it is blocked.
+function notifySessionOrgRequired(): void {
+  sessionOrgRequiredSeen.value = true
+  ensurePageSessionOrgsLoaded()
+}
+
+provide(SessionOrgHostKey, { sessionOrg: pageSessionOrg, notifySessionOrgRequired })
 
 async function onPageSessionOrgChange(orgId: string): Promise<void> {
   const ok = await switchPageSessionOrg(orgId)
   if (!ok) return
   // Re-read every surface that reads this org's data — same "tell the parent to re-read" rule
-  // `handleGroupsChanged` already follows (no shared reactive store between these surfaces).
+  // `handleGroupsChanged` already follows. This is also the replay for whatever a hosted child was
+  // blocked on: both children's blocked entry point is their own load (`loadAll` / `loadGroups`),
+  // and both clear their "blocked on session org" flag when that load succeeds. The panel's other
+  // blockable actions (create / rename / archive / unarchive) are deliberately NOT auto-replayed
+  // into a freshly-switched organization — re-running a write against a different org without the
+  // admin asking again is a hazard, not a convenience; the admin re-submits.
   void groupSectionsRef.value?.loadAll()
   void groupsPanelRef.value?.loadGroups()
 }
