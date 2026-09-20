@@ -4,7 +4,7 @@ import { useAuth } from '../src/composables/useAuth'
 import { getAuthPrincipalKey } from '../src/composables/authPrincipal'
 import { createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import { NETWORK_UNAVAILABLE, networkUnavailableMessage } from '../src/utils/networkErrors'
-import { getDeleteTransport, resetDeleteTransportForTests } from '../src/utils/delete-fallback'
+import { getDeleteTransport, probeDeleteTransport, resetDeleteTransportForTests } from '../src/utils/delete-fallback'
 
 /** A fetch-mock response that carries (or omits) the server's override receipt header. */
 function httpResponse(status: number, opts: { receipt?: boolean } = {}): Response {
@@ -435,6 +435,81 @@ describe('apiFetch', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock.mock.calls[0][1].method).toBe('DELETE')
     expect(getDeleteTransport()).toBe('native')
+  })
+
+  /**
+   * THE PROBE'S TUNNEL LEG, COMPOSED WITH THE REAL `apiFetch` — i.e. main.ts's lambda verbatim.
+   *
+   * Refuter finding, CONFIRMED red before the fix. `withOverride` (utils/delete-fallback.ts) hands
+   * apiFetch a **Headers instance**, and apiFetch used to merge headers with an OBJECT SPREAD, which
+   * yields `{}` for that shape (no own enumerable properties). The override header therefore never
+   * went on the wire: the server saw a plain `POST /api/method-probe`, answered without a receipt,
+   * and the probe latched 'override-unavailable' — which also forbids `sendDelete`'s one-shot retry
+   * (delete-fallback.ts) for the rest of the session. In the customer's condition (native DELETE
+   * dropped) that turned the fix into a no-op AND was worse than shipping no probe at all.
+   *
+   * Every OTHER probe test injects a mock `baseFetch` (tests/delete-fallback.spec.ts), so this is the
+   * only place the two modules are composed the way production composes them.
+   */
+  it('DELETE-fallback: the probe tunnel leg keeps X-HTTP-Method-Override THROUGH apiFetch and latches on the receipt', async () => {
+    store.tenantId = 'tenant_42'
+    store.auth_token = 'token-abc'
+    const fetchMock = vi.fn()
+      // Leg 1: the native DELETE gets no response — the customer's condition.
+      .mockRejectedValueOnce(transportFailure())
+      // Leg 2: the tunnel IS honoured by this server (receipt present).
+      .mockResolvedValueOnce(httpResponse(200, { receipt: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const mode = await probeDeleteTransport((url, init) =>
+      apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[0][1].method).toBe('DELETE')
+    // Leg 1 is a literal DELETE: it may not carry the override claim, or it would not measure DELETE.
+    expect((fetchMock.mock.calls[0][1].headers as Headers).get('X-HTTP-Method-Override')).toBeNull()
+    expect(fetchMock.mock.calls[1][1].method).toBe('POST')
+    // The one bit the whole fallback turns on. It must survive apiFetch's header merge.
+    expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('DELETE')
+    // ...and the merge may not drop the auth headers apiFetch itself injects either.
+    expect((fetchMock.mock.calls[1][1].headers as Headers).get('Authorization')).toBe('Bearer token-abc')
+    expect((fetchMock.mock.calls[1][1].headers as Headers).get('x-tenant-id')).toBe('tenant_42')
+    expect(mode).toBe('override')
+    expect(getDeleteTransport()).toBe('override')
+  })
+
+  it('DELETE-fallback: through apiFetch, a tunnel leg answered WITHOUT a receipt still latches override-unavailable', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(transportFailure())
+      .mockResolvedValueOnce(httpResponse(404))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const mode = await probeDeleteTransport((url, init) =>
+      apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
+
+    // Negative control for the test above: the header DID go out (call 1), so 'override-unavailable'
+    // here is the server's verdict on the tunnel, not the client losing its own header.
+    expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('DELETE')
+    expect(mode).toBe('override-unavailable')
+  })
+
+  it('apiFetch merges a Headers INSTANCE the caller passes (object-spreading one silently yields {})', async () => {
+    store.auth_token = 'token-abc'
+    const fetchMock = vi.fn().mockResolvedValue(httpResponse(200))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const callerHeaders = new Headers({ 'X-Custom': 'kept', Authorization: 'Bearer caller-wins' })
+    await apiFetch('/api/multitable/records', {
+      method: 'POST',
+      body: JSON.stringify({}),
+      headers: callerHeaders,
+      suppressUnauthorizedRedirect: true,
+    })
+
+    const sent = fetchMock.mock.calls[0][1].headers as Headers
+    expect(sent.get('X-Custom')).toBe('kept')
+    // Caller-wins precedence is preserved (the object spread had it too).
+    expect(sent.get('Authorization')).toBe('Bearer caller-wins')
   })
 
   it.each(['POST', 'PUT', 'PATCH'])('F4-B: a %s is NOT retried either', async method => {

@@ -1778,10 +1778,15 @@ export class MetaSheetServer {
     //     prepare/preview/upload/commit buckets on `req.method === 'POST'`; rewriting to DELETE before
     //     it ran would have made `POST /api/attendance/import/commit` + override consume NO limiter
     //     token while the 50 MB import JSON parser still ran. The attendance audit record likewise
-    //     keeps the verb that actually arrived on the wire.
-    // Nothing between the gate and here reads `req.method`: `correlationContextEnrichmentMiddleware`
-    // keys on user/tenant only, and the tenant ALS wrapper keys on `req.user.tenantId` (both asserted
-    // in the spec). Any future method-keyed guard must be mounted ABOVE this line.
+    //     keeps the verb that actually arrived on the wire, and carries `meta.request.methodOverride`
+    //     so a tunnelled delete is still findable as a delete.
+    // WHO READS `req.method` IN THIS WINDOW — stated exactly, because "nothing does" was false:
+    // `attendanceAuditMiddleware` and `attendanceSecurityMiddleware` BOTH do, deliberately (the
+    // limiter is the whole reason for this mount position). Their reads are allow-listed line by
+    // line in the spec, so a NEW verb-keyed read there is caught rather than silently permitted.
+    // Nothing ELSE does: `correlationContextEnrichmentMiddleware` keys on user/tenant only and the
+    // tenant ALS wrapper keys on `req.user.tenantId` (both asserted in the spec). Any future
+    // method-keyed guard must be mounted ABOVE this line.
     this.app.use(methodOverrideMiddleware)
 
     // 健康检查

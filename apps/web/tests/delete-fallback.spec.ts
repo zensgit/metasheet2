@@ -477,17 +477,33 @@ describe('delete-fallback', () => {
  *   (stock-prep), the whole module graph died, and the page rendered nothing at all — reproduced
  *   locally as `#app` innerHTML length 0 and `__STOCK_PREP_READY__` never true.
  *
- * SCOPE — deliberately not "no directory named api anywhere under src". `src/multitable/api/` already
- * exists and is reached by four harness graphs (approval-form-builder-mounted, cf-reactions,
- * grouped-windowing, record-history-restore); those lanes are green because none of them installs the
- * `**\/api/**` glob. Widening the claim would make this spec red about code this PR does not own. What
- * this pins instead is the exact hazardous pairing: the harnesses whose lane DOES install that glob
- * may not reach an `api/` module. The list of such harnesses is derived from the verification sources
- * on every run, so a new `**\/api/**` lane is covered the day it lands rather than the day it breaks.
+ * WHAT IS PINNED, and why it is DERIVED rather than a list of known-bad spellings. The first version
+ * of this guard recognised the single literal string `'**\/api/**'` and only followed `*-harness.html`
+ * references. The same hazard installed as `'**\/api/**\/*'`, as a RegExp, through a local `const`, or
+ * by a spec that drives the REAL app instead of a harness html would have produced an empty offender
+ * map and a green guard — the 2026-09-18 outage, undetected. So the hazard itself is derived:
+ *
+ *   for every verification source that installs route stubs, take the entry it drives (the harness
+ *   module behind the `*-harness.html` it navigates to, or `src/main.ts` when it navigates into the
+ *   real app), walk that entry's module graph, turn each module into the URL Vite dev serves it at,
+ *   and flag any module URL that one of that lane's own route stubs MATCHES.
+ *
+ * SELECTIVE vs CATCH-ALL. A stub that also matches the lane's own ENTRY module (e.g. `'**\/*'` in
+ * attendance-group-context-r2.spec.ts) cannot be the hazard: if it swallowed module URLs the page
+ * could not boot at all, so its handler necessarily continues them (asserted, not assumed — the
+ * cluster must contain a `route.continue(`). Only SELECTIVE stubs — ones that pick out some modules
+ * and not the entry — can kill a module graph while the lane still appears to run.
+ *
+ * NO SCOPE EXEMPTION IS NEEDED any more. `src/multitable/api/` is reached by several harness graphs
+ * (approval-form-builder-mounted, cf-reactions, grouped-windowing, record-history-restore) and those
+ * lanes stay green on their own merits: their stubs (`'**\/api/approval-templates/directory/**'` and
+ * friends) do not match `/src/multitable/api/client.ts`. The earlier "api dir" heuristic needed prose
+ * to excuse them; matching the actual stub against the actual module URL does not.
  */
-describe('browser-lane module-path hazard: `**/api/**` route stubs swallow src modules under an `api/` dir', () => {
+describe('browser-lane module-path hazard: a lane\'s own route stubs must not match its own modules', () => {
   const WEB = resolve(__dirname, '..')
   const VERIFICATION = join(WEB, 'verification')
+  const APP_ENTRY = join(WEB, 'src/main.ts')
 
   function resolveImport(fromFile: string, spec: string): string | null {
     if (!spec.startsWith('.')) return null
@@ -522,49 +538,348 @@ describe('browser-lane module-path hazard: `**/api/**` route stubs swallow src m
     return [...seen]
   }
 
-  const apiDirOffenders = (graph: string[]): string[] =>
-    graph.map((f) => relative(WEB, f).split(sep).join('/')).filter((r) => /(^|\/)api\//.test(r))
+  const webRel = (file: string): string => relative(WEB, file).split(sep).join('/')
+  /** Vite dev serves `apps/web` as its root, so every module is fetched at `/<path under apps/web>`. */
+  const devUrl = (file: string): string => `/${webRel(file)}`
 
-  /** Harness entrypoints reachable from a verification source that installs the `**\/api/**` glob. */
-  function harnessesBehindTheGlob(): string[] {
-    const found = new Set<string>()
-    for (const name of readdirSync(VERIFICATION)) {
-      if (!name.endsWith('.ts')) continue
-      const file = join(VERIFICATION, name)
-      // The glob and the `goto` can live in different files (stock-prep keeps both in its fixtures
-      // module), so search each source together with its own relative-import closure.
-      const cluster = importGraph(file).filter((f) => f.startsWith(VERIFICATION))
-      const text = cluster.map((f) => readFileSync(f, 'utf8')).join('\n')
-      if (!/route\(\s*['"`]\*\*\/api\/\*\*['"`]/.test(text)) continue
-      for (const m of text.matchAll(/([A-Za-z0-9-]+-harness)\.html/g)) {
-        const entry = join(VERIFICATION, `${m[1]}.ts`)
-        if (existsSync(entry)) found.add(entry)
+  /**
+   * PLAYWRIGHT'S OWN glob→regex, ported statement for statement from
+   * `playwright-core/lib/utils/isomorphic/urlMatch.js` -> `globToRegexPattern` (v1.57.0, the version
+   * this workspace resolves). Ported rather than imported because `playwright-core` is a transitive
+   * dependency and is NOT hoisted into `apps/web`'s resolution root under pnpm, so an import here
+   * would fail at resolve time in the vitest lane.
+   *
+   * It is a PORT and not an approximation because the approximation was the bug: the first version
+   * of this helper expanded every `**` to `.*`, which made the perfectly legal spelling
+   * `'**\/api/**\/*'` FAIL to match `/src/api/delete-fallback.ts` — the detector was blind to a real
+   * spelling of the very hazard it exists for (caught by the synthetic case below, which was red).
+   * Playwright's actual rule: a `**` followed by `/` may match ZERO segments — `((.+/)|)` when it
+   * also follows a `/`, `(.*\/)` at the start — and `?`, `[`, `]`, `,` outside `{}` are LITERALS,
+   * not wildcards. (The `\` in that pattern is this comment escaping its own terminator, the very
+   * trap documented on `stripComments` below.)
+   */
+  const GLOB_ESCAPED = new Set(['$', '^', '+', '.', '*', '(', ')', '|', '\\', '?', '{', '}', '[', ']'])
+
+  function globToRegExp(glob: string): RegExp {
+    const tokens = ['^']
+    let inGroup = false
+    for (let i = 0; i < glob.length; i += 1) {
+      const c = glob[i]
+      if (c === '\\' && i + 1 < glob.length) {
+        i += 1
+        const escaped = glob[i]
+        tokens.push(GLOB_ESCAPED.has(escaped) ? `\\${escaped}` : escaped)
+        continue
       }
+      if (c === '*') {
+        const charBefore = glob[i - 1]
+        let starCount = 1
+        while (glob[i + 1] === '*') { starCount += 1; i += 1 }
+        if (starCount > 1 && glob[i + 1] === '/') {
+          tokens.push(charBefore === '/' ? '((.+/)|)' : '(.*/)')
+          i += 1
+        } else if (starCount > 1) {
+          tokens.push('(.*)')
+        } else {
+          tokens.push('([^/]*)')
+        }
+        continue
+      }
+      if (c === '{') { inGroup = true; tokens.push('('); continue }
+      if (c === '}') { inGroup = false; tokens.push(')'); continue }
+      if (c === ',') { tokens.push(inGroup ? '|' : '\\,'); continue }
+      tokens.push(GLOB_ESCAPED.has(c) ? `\\${c}` : c)
     }
-    return [...found].sort()
+    tokens.push('$')
+    return new RegExp(tokens.join(''))
   }
 
-  it('utils/api.ts — in EVERY harness graph — reaches no module under an `api/` directory', () => {
+  interface Stub { readonly raw: string; matches(url: string): boolean }
+
+  /**
+   * Characters after which a `/` starts a REGEX literal rather than a division. Standard JS
+   * heuristic; `''` covers start-of-input.
+   */
+  const REGEX_ALLOWED_AFTER = new Set([
+    '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '^', '~', '<', '>', '',
+  ])
+
+  /**
+   * A comment stripper that KNOWS ABOUT STRINGS — and it has to, for a reason that is the whole
+   * subject of this guard: the hazard being hunted is spelled `'**\/api/**'`, and that glob CONTAINS
+   * the two characters `/` `*`. The obvious one-liner
+   *
+   *     text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+   *
+   * therefore treats the middle of the glob as a block-comment OPENER and deletes everything up to
+   * the next `*\/` anywhere in the file. Measured on this very tree (scratch probe, both strippers
+   * over apps/web/verification): it rewrote `'**\/api/**\/*'` into `'**\/api*'`, and it swallowed
+   * whole `page.route(` calls — `approval-canvas-sole-surface.spec.ts` 4 -> 2 and
+   * `approval-form-builder-mounted-matrix.spec.ts` 5 -> 3. A guard whose parser eats the calls it is
+   * supposed to inspect reports an empty offender map and passes. So: walk the text; skip string,
+   * template and regex literals with their escapes; treat `//` and `/*` as comments only OUTSIDE
+   * them. (`.route(` mentions that really are prose — two harness headers — are still removed, which
+   * is the point.)
+   */
+  function stripComments(text: string): string {
+    let out = ''
+    let i = 0
+    let prev = ''
+    const emit = (chunk: string): void => {
+      out += chunk
+      const trimmed = chunk.trimEnd()
+      if (trimmed) prev = trimmed[trimmed.length - 1]
+    }
+    while (i < text.length) {
+      const c = text[i]
+      const next = text[i + 1]
+      if (c === '/' && next === '/') {
+        while (i < text.length && text[i] !== '\n') i += 1
+        continue
+      }
+      if (c === '/' && next === '*') {
+        i += 2
+        while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1
+        i += 2
+        continue
+      }
+      if (c === "'" || c === '"' || c === '`') {
+        let j = i + 1
+        while (j < text.length) {
+          if (text[j] === '\\') { j += 2; continue }
+          if (text[j] === c) { j += 1; break }
+          j += 1
+        }
+        emit(text.slice(i, j))
+        i = j
+        continue
+      }
+      if (c === '/' && REGEX_ALLOWED_AFTER.has(prev)) {
+        let j = i + 1
+        let inClass = false
+        let closed = false
+        while (j < text.length && text[j] !== '\n') {
+          if (text[j] === '\\') { j += 2; continue }
+          if (text[j] === '[') inClass = true
+          else if (text[j] === ']') inClass = false
+          else if (text[j] === '/' && !inClass) { j += 1; closed = true; break }
+          j += 1
+        }
+        if (closed) {
+          while (j < text.length && /[a-z]/.test(text[j])) j += 1
+          emit(text.slice(i, j))
+          i = j
+          continue
+        }
+      }
+      emit(c)
+      i += 1
+    }
+    return out
+  }
+
+  /** String-valued `const`/`let` bindings, so `const API = '**\/api/**'; page.route(API, ...)` resolves. */
+  function stringConsts(text: string): Map<string, string> {
+    const map = new Map<string, string>()
+    for (const m of text.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(['"`])([^'"`\n]*)\2/g)) {
+      map.set(m[1], m[3])
+    }
+    return map
+  }
+
+  /**
+   * Every `page.route(` / `context.route(` first argument in `text`, as a URL matcher: string glob,
+   * RegExp literal, or identifier resolved through the local consts. Exported shape so the synthetic
+   * positive control below runs THIS parser, not a copy of it.
+   */
+  function parseRouteStubs(text: string): { stubs: Stub[]; unresolved: string[]; total: number } {
+    const clean = stripComments(text)
+    const total = [...clean.matchAll(/\.route\(/g)].length
+    const stubs: Stub[] = []
+    const unresolved: string[] = []
+    const consts = stringConsts(clean)
+    for (const m of clean.matchAll(/\.route\(\s*(\/(?:[^/\\\n]|\\.)+\/[gimsuy]*|(['"`])[^'"`\n]*\2|[A-Za-z_$][\w$]*)\s*,/g)) {
+      const raw = m[1]
+      if (raw.startsWith('/')) {
+        const last = raw.lastIndexOf('/')
+        const re = new RegExp(raw.slice(1, last), raw.slice(last + 1).replace(/[gy]/g, ''))
+        stubs.push({ raw, matches: (url) => re.test(url) })
+        continue
+      }
+      const literal = /^(['"`])([\s\S]*)\1$/.exec(raw)
+      const glob = literal ? literal[2] : consts.get(raw)
+      if (glob === undefined) { unresolved.push(raw); continue }
+      const re = globToRegExp(glob)
+      // Playwright matches a glob against the FULL url string; a glob that does not start with `*`
+      // is first resolved against `baseURL` (`resolveGlobBase`, same module as the port above), and
+      // every lane here sets `baseURL: http://127.0.0.1:<port>`. A module is therefore tested both
+      // bare (`/src/x.ts`) and origin-prefixed. Testing both is deliberately a SUPERSET: it can only
+      // make this guard stricter, never blind. Ceiling, stated: the port number is not modelled, so
+      // a stub that pins a literal port is approximated by this one.
+      stubs.push({ raw: glob, matches: (url) => re.test(url) || re.test(`http://127.0.0.1:4321${url}`) })
+    }
+    return { stubs, unresolved, total }
+  }
+
+  interface Lane {
+    readonly source: string
+    readonly entry: string
+    readonly entryUrl: string
+    readonly moduleUrls: string[]
+    readonly stubs: Stub[]
+    readonly hasContinue: boolean
+  }
+
+  /**
+   * THE HAZARD ITSELF — pure, so the synthetic control and the real tree go through one code path.
+   * A stub matching the lane's own entry module is a catch-all (see the header) and is skipped.
+   */
+  function laneHazards(lane: Lane): string[] {
+    const hits: string[] = []
+    for (const stub of lane.stubs) {
+      if (stub.matches(lane.entryUrl)) {
+        // Non-vacuity of the skip: a catch-all that did NOT continue would blank the page.
+        expect(lane.hasContinue).toBe(true)
+        continue
+      }
+      for (const url of lane.moduleUrls) {
+        if (stub.matches(url)) hits.push(`${stub.raw} swallows ${url}`)
+      }
+    }
+    return hits
+  }
+
+  /** The entries a verification source drives: harness modules it navigates to, else the real app. */
+  function entriesOf(text: string): string[] {
+    const clean = stripComments(text)
+    const consts = stringConsts(clean)
+    const found = new Set<string>()
+    for (const m of clean.matchAll(/\.goto\(\s*(`[^`]*`|(['"])[^'"\n]*\2|[A-Za-z_$][\w$]*)/g)) {
+      const raw = m[1]
+      const target = /^[A-Za-z_$]/.test(raw) ? consts.get(raw) : raw.slice(1, -1)
+      if (target === undefined) continue
+      const harness = /([A-Za-z0-9-]+-harness)\.html/.exec(target)
+      if (harness) {
+        const entry = join(VERIFICATION, `${harness[1]}.ts`)
+        if (existsSync(entry)) found.add(entry)
+      } else if (target.startsWith('/')) {
+        // Navigates into the real app (attendance-group-context-r2 does this): the lane's module
+        // graph is the whole app, not a harness. Without this fallback such a lane contributed
+        // nothing at all to the old guard.
+        found.add(APP_ENTRY)
+      }
+    }
+    // A harness html referenced without a literal goto (indirect navigation helper) still counts.
+    for (const m of clean.matchAll(/([A-Za-z0-9-]+-harness)\.html/g)) {
+      const entry = join(VERIFICATION, `${m[1]}.ts`)
+      if (existsSync(entry)) found.add(entry)
+    }
+    return [...found]
+  }
+
+  /** Every (verification source x entry it drives) pair that installs route stubs, read off disk. */
+  function derivedLanes(): Lane[] {
+    const lanes: Lane[] = []
+    for (const name of readdirSync(VERIFICATION)) {
+      if (!name.endsWith('.ts')) continue
+      // The stub and the `goto` can live in different files (stock-prep keeps both in its fixtures
+      // module), so read each source together with its own relative-import closure.
+      const cluster = importGraph(join(VERIFICATION, name)).filter((f) => f.startsWith(VERIFICATION))
+      const text = cluster.map((f) => readFileSync(f, 'utf8')).join('\n')
+      const { stubs, unresolved, total } = parseRouteStubs(text)
+      if (!stubs.length) continue
+      // A stub the parser cannot read is a hole in the derivation, not a pass.
+      expect({ source: name, unresolved }).toEqual({ source: name, unresolved: [] })
+      expect({ source: name, parsed: stubs.length }).toEqual({ source: name, parsed: total })
+      const hasContinue = /\.continue\(/.test(text)
+      for (const entry of entriesOf(text)) {
+        lanes.push({
+          source: name,
+          entry: webRel(entry),
+          entryUrl: devUrl(entry),
+          moduleUrls: importGraph(entry).map(devUrl),
+          stubs,
+          hasContinue,
+        })
+      }
+    }
+    return lanes
+  }
+
+  it('the detector fires on every spelling of the hazard (synthetic lanes, no disk)', () => {
+    const lane = (source: string, moduleUrls: string[]): Omit<Lane, 'stubs'> => ({
+      source,
+      entry: 'verification/x-harness.ts',
+      entryUrl: '/verification/x-harness.ts',
+      moduleUrls,
+      hasContinue: true,
+    })
+    const SWALLOWED = ['/src/utils/api.ts', '/src/api/delete-fallback.ts']
+    // The four spellings the literal-matching first version of this guard could not see.
+    const spellings = [
+      "page.route('**/api/**', handler)",
+      "page.route('**/api/**/*', handler)",
+      'page.route(/\\/api\\//, handler)',
+      "const API_GLOB = '**/api/**'\npage.route(API_GLOB, handler)",
+    ]
+    for (const source of spellings) {
+      const { stubs, unresolved } = parseRouteStubs(source)
+      expect({ source, unresolved, stubs: stubs.length }).toEqual({ source, unresolved: [], stubs: 1 })
+      expect(laneHazards({ ...lane(source, SWALLOWED), stubs })).toEqual([
+        expect.stringContaining('/src/api/delete-fallback.ts'),
+      ])
+      // ...and does not fire when the same lane has no module under an `api/` path.
+      expect(laneHazards({ ...lane(source, ['/src/utils/api.ts']), stubs })).toEqual([])
+    }
+    // A catch-all is skipped: it matches the entry module itself, so the lane could not boot unless
+    // its handler continues module URLs.
+    const catchAll = parseRouteStubs("page.route('**/*', handler)").stubs
+    expect(catchAll).toHaveLength(1)
+    expect(laneHazards({ ...lane('catch-all', SWALLOWED), stubs: catchAll })).toEqual([])
+  })
+
+  it('utils/api.ts reaches no module under an `api/` directory', () => {
+    // Narrow by design (refuter finding: the old name promised harness coverage this case never had
+    // — that claim lives in the lane case below). A cheap early warning on the one module graph this
+    // PR owns: `utils/api.ts` is imported by every harness, so an `api/` module here reaches all of
+    // them at once.
     const graph = importGraph(join(WEB, 'src/utils/api.ts'))
     // Positive control: the walk really reached this module, so `offenders === []` is not vacuous.
     expect(graph.some((f) => f.endsWith(`utils${sep}delete-fallback.ts`))).toBe(true)
-    expect(apiDirOffenders(graph)).toEqual([])
+    expect(graph.map(webRel).filter((r) => /(^|\/)api\//.test(r))).toEqual([])
   })
 
-  it('every harness behind a `**/api/**` route stub reaches no module under an `api/` directory', () => {
-    const harnesses = harnessesBehindTheGlob()
-    // Positive controls: the derivation actually found the two lanes that went red, and it did not
-    // silently degrade into "no harnesses, nothing to check".
-    expect(harnesses.length).toBeGreaterThanOrEqual(2)
-    const names = harnesses.map((f) => relative(VERIFICATION, f).split(sep).join('/'))
-    expect(names).toContain('attendance-makeup-request-harness.ts')
-    expect(names).toContain('stock-prep-workbench-harness.ts')
-
+  it('no lane\'s selective route stubs match any module of the entry that lane drives', () => {
+    const lanes = derivedLanes()
     const offenders: Record<string, string[]> = {}
-    for (const harness of harnesses) {
-      const bad = apiDirOffenders(importGraph(harness))
-      if (bad.length) offenders[relative(VERIFICATION, harness).split(sep).join('/')] = bad
+    for (const lane of lanes) {
+      const hits = laneHazards(lane)
+      if (hits.length) offenders[`${lane.source} -> ${lane.entry}`] = hits
     }
     expect(offenders).toEqual({})
+  })
+
+  it('the lanes that went red on 2026-09-18 are still derived (a lane dropping out is a failure)', () => {
+    const lanes = derivedLanes()
+    const sources = [...new Set(lanes.map((l) => l.source))]
+    // Named, so a lane silently disappearing from the derivation is red rather than a quiet pass.
+    // Additions are deliberately NOT pinned: a new lane is already checked by the case above.
+    for (const named of [
+      'attendance-makeup-request.spec.ts',
+      'stock-prep-fixtures.ts',
+      'approval-instance-consistency-race.spec.ts',
+      // Drives the real app rather than a harness html — only present via the APP_ENTRY fallback.
+      'attendance-group-context-r2.spec.ts',
+    ]) {
+      expect(sources).toContain(named)
+      const lane = lanes.find((l) => l.source === named) as Lane
+      // Non-vacuity: both sides of the check have content for this lane.
+      expect(lane.stubs.length).toBeGreaterThan(0)
+      expect(lane.moduleUrls.length).toBeGreaterThan(1)
+    }
+    expect(lanes.find((l) => l.source === 'attendance-group-context-r2.spec.ts')?.entry).toBe('src/main.ts')
+    // The module this PR moved is in the graph of the lane that went red — the whole point.
+    const makeup = lanes.find((l) => l.source === 'attendance-makeup-request.spec.ts') as Lane
+    expect(makeup.moduleUrls).toContain('/src/utils/delete-fallback.ts')
   })
 })

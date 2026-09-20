@@ -16,6 +16,13 @@
  * a failed delete. So every response to an override-sent request must carry the receipt; a 2xx/3xx
  * without it is treated as a transport failure (`DeleteTransportError`), never as success.
  *
+ * BE HONEST ABOUT WHAT THAT BUYS. If a hop strips the REQUEST header, the POST arrives as a plain
+ * POST and the twin handler has already committed by the time any answer comes back — the receipt
+ * check then refuses the 2xx and latches 'override-unavailable', so the user is told and it can
+ * happen at most ONCE per session. Bounded and loud, not impossible. The other direction (the server
+ * SEES the header but does not honour it, e.g. an auth-gate exception) is refused by the server with
+ * 405 and never reaches a handler at all — core-backend middleware/method-override.ts.
+ *
  * SESSION STATE (`deleteTransport`, in memory + sessionStorage under try/catch):
  *   - 'native'               — send DELETE. A network-level failure buys ONE retry as POST+override.
  *   - 'override'             — POST+override from the start; proven working by the probe or by a

@@ -351,9 +351,18 @@ export async function apiFetch(
 ): Promise<Response> {
   const base = getApiBase()
   const { suppressUnauthorizedRedirect = false, omitHeaders = [], bypassDeleteFallback = false, ...requestOptions } = options
-  const headers = new Headers({
-    ...authHeaders(),
-    ...(requestOptions.headers || {}),
+  // `headers` is a HeadersInit: a plain record, `[name, value]` pairs, OR a Headers instance.
+  // OBJECT-SPREADING the last shape yields `{}` — every entry lives behind prototype methods, none
+  // is an own enumerable property — so a caller that handed us a Headers instance had its headers
+  // SILENTLY DROPPED. That is not theoretical: `utils/delete-fallback.ts` builds a Headers instance
+  // in `withOverride`, and main.ts forwards it here for the probe's tunnel leg, so the spread turned
+  // `POST + X-HTTP-Method-Override: DELETE` into a plain POST — no rewrite, no receipt, and the
+  // session latched 'override-unavailable' in exactly the customer condition the fallback exists
+  // for. Normalise through the Headers constructor (it understands all three shapes) and keep the
+  // caller-wins precedence the spread had.
+  const headers = new Headers(authHeaders())
+  new Headers((requestOptions.headers as HeadersInit | undefined) ?? {}).forEach((value, name) => {
+    headers.set(name, value)
   })
   for (const name of omitHeaders) headers.delete(name)
   const body = requestOptions.body

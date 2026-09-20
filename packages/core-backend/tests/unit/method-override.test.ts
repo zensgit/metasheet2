@@ -30,7 +30,14 @@ import { METHOD_PROBE_PATH, methodProbeRouter } from '../../src/routes/method-pr
 import { attendanceSecurityMiddleware } from '../../src/middleware/attendance-production'
 
 const GOOD = 'Bearer good-token'
+/**
+ * A GATE EXCEPTION: the real JWT gate lets whitelisted paths and the OAPI `mst_` method-bound
+ * allowlist through WITHOUT attaching `req.user`. Modelled here so the "claimed but not honoured"
+ * branch is reachable, together with a POST twin on the same path that a fall-through would run.
+ */
+const WHITELISTED = '/api/public/thing'
 let probeHits = 0
+let twinExecuted = 0
 let seenMethods: string[] = []
 
 function buildApp(): Express {
@@ -39,6 +46,8 @@ function buildApp(): Express {
   // Stand-in for the global JWT gate: /api/** requires the bearer; sets req.user on success.
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (!req.path.startsWith('/api/')) return next()
+    // The pass-through shapes: authenticated is NOT asserted and `req.user` stays unset.
+    if (req.path === WHITELISTED) return next()
     if (req.headers.authorization !== GOOD) {
       return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED' } })
     }
@@ -47,6 +56,7 @@ function buildApp(): Express {
   })
   app.use(methodOverrideMiddleware)
   app.use((req, _res, next) => { seenMethods.push(req.method); next() })
+  app.post(WHITELISTED, (_req, res) => { twinExecuted += 1; res.status(201).json({ ok: true, twin: 'POST' }) })
   app.use(methodProbeRouter())
   return app
 }
@@ -55,6 +65,7 @@ const pinned = usePinnedServer()
 
 beforeEach(() => {
   probeHits = 0
+  twinExecuted = 0
   seenMethods = []
   const app = buildApp()
   // Count executions of the DELETE handler: only the probe route answers 200 on that URL.
@@ -140,6 +151,43 @@ describe('method-override middleware + /api/method-probe', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true, method: 'DELETE', overridden: false })
     expect(seenMethods).toEqual(['DELETE'])
+  })
+
+  /**
+   * FAIL CLOSED ON AN UNHONOURED CLAIM (refuter finding).
+   *
+   * The receipt header lets the CLIENT detect that its POST was not rewritten — after the fact. On
+   * a path the gate lets through without `req.user` the server can see the claim itself, and letting
+   * such a POST fall through would run the path's POST twin, which on several paths does the exact
+   * OPPOSITE of the delete (`POST /api/comments/:id/reactions` ADDS what the DELETE removes, 201).
+   * Detection after a committed write is not the same as prevention, so this branch refuses.
+   */
+  it('(f) POST + override on a gate-exception path is REFUSED, and the POST twin never runs', async () => {
+    const res = await request(pinned.url())
+      .post(WHITELISTED)
+      .set('X-HTTP-Method-Override', 'DELETE')
+      .send({ emoji: '👍' })
+    expect(res.status).toBe(405)
+    expect(res.body?.error?.code).toBe('METHOD_OVERRIDE_NOT_HONORED')
+    // The inversion this exists to prevent: the twin did not execute, and nothing downstream ran.
+    expect(twinExecuted).toBe(0)
+    expect(seenMethods).toEqual([])
+    // A refusal is not a rewrite: no receipt may be handed out.
+    expect(res.headers['x-method-overridden']).toBeUndefined()
+  })
+
+  it('(f2) POSITIVE CONTROL: the same POST without the header reaches the twin (the header is what stops it)', async () => {
+    const res = await request(pinned.url()).post(WHITELISTED).send({ emoji: '👍' })
+    expect(res.status).toBe(201)
+    expect(twinExecuted).toBe(1)
+    expect(seenMethods).toEqual(['POST'])
+  })
+
+  it('(f3) the refusal is scoped to POST — a GET carrying the header still just proceeds as a GET', async () => {
+    // A GET cannot be turned into a wrong write by a POST twin, so it is ignored, not refused.
+    const res = await request(pinned.url()).get(WHITELISTED).set('X-HTTP-Method-Override', 'DELETE')
+    expect(res.status).toBe(404)
+    expect(seenMethods).toEqual(['GET'])
   })
 
   it('(e) GET + override header is ignored', async () => {
@@ -241,7 +289,18 @@ describe('index.ts wiring', () => {
     expect(source.split('this.app.use(methodOverrideMiddleware)').length).toBe(2)
   })
 
-  it('nothing mounted between the JWT gate and the override reads req.method', () => {
+  /**
+   * WHAT THIS PINS, stated as narrowly as it is true (refuter finding: the previous name, "nothing
+   * mounted between the JWT gate and the override reads req.method", was FALSE for two of the three
+   * middlewares it itself listed — and the check never opened either of them).
+   *
+   * Two of the three DO read the verb, on purpose: `attendanceSecurityMiddleware`'s `pickLimiter` is
+   * the entire reason the override is mounted below it, and `attendanceAuditMiddleware` captures the
+   * wire verb for the audit row. So the claim is: in that window, the ONLY reads of `req.method` are
+   * the ones allow-listed below, one line each. A new verb-keyed read in attendance-production.ts
+   * turns this red and has to be reviewed against the mount order rather than sliding in.
+   */
+  it('in the gate→override window, req.method is read ONLY by the allow-listed attendance lines', () => {
     const gate = source.indexOf('if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)')
     const override = source.indexOf('this.app.use(methodOverrideMiddleware)')
     // Comments are stripped first: prose about `req.method` (this file's own mount note explains the
@@ -249,9 +308,10 @@ describe('index.ts wiring', () => {
     const window = source.slice(gate, override).replace(/^\s*\/\/.*$/gm, '')
     // Inline middleware in that window (the tenant ALS wrapper) must not key on the verb...
     expect(window).not.toMatch(/req\.method/)
-    // ...and neither may the two imported ones it mounts there.
+    // ...and the imported ones it mounts there are enumerated, then each one is actually opened.
     const mounted = [...window.matchAll(/this\.app\.use\(([A-Za-z]+)/g)].map((m) => m[1])
     expect(mounted).toEqual(['correlationContextEnrichmentMiddleware', 'attendanceAuditMiddleware', 'attendanceSecurityMiddleware'])
+
     const correlation = readFileSync(join(__dirname, '../../src/middleware/correlation.ts'), 'utf8')
     // Just that function's own body — the module also exports an error handler further down that
     // legitimately logs the verb, and it is not mounted in this window.
@@ -260,6 +320,34 @@ describe('index.ts wiring', () => {
     const enrichment = correlation.slice(start, end > start ? end : undefined)
     expect(enrichment).toContain('enrichRequestContext(')
     expect(enrichment).not.toMatch(/req\.method/)
+
+    // The module that hosts BOTH attendance middlewares, read line by line. `req.methodOverride` is
+    // not a verb read (no word boundary after `method`), so the pattern below skips it by itself.
+    const attendance = readFileSync(join(__dirname, '../../src/middleware/attendance-production.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    const reads = attendance.split(/\r?\n/).map((l) => l.trim()).filter((l) => /req\.method\b/.test(l)).sort()
+    expect(reads).toEqual([
+      // attendanceAuditMiddleware: the wire verb, captured ONCE at request time and used for
+      // `action`, `meta.request.method` and the operation label (one row, one verb).
+      'const method = req.method',
+      // shouldLogAuditForRequest: audit VOLUME filter (skip plain reads). Not a routing or
+      // authorisation decision — a tunnelled delete arrives here as POST and is logged either way.
+      "if (req.method !== 'GET') return true",
+      // pickLimiter: the intentional verb-keyed guard. THIS is why the override is mounted below.
+      "if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/commit-async`) && req.method === 'POST') {",
+      "if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/commit`) && req.method === 'POST') {",
+      "if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/prepare`) && req.method === 'POST') {",
+      "if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/preview-async`) && req.method === 'POST') {",
+      "if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/preview`) && req.method === 'POST') {",
+      "if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/upload-artifact`) && req.method === 'POST') {",
+      "if (apiPathEquals(path, `${ATTENDANCE_IMPORT_PREFIX}/upload`) && req.method === 'POST') {",
+      "if (apiPathEquals(path, `${ATTENDANCE_PREFIX}/export`) && req.method === 'GET') {",
+      "if (apiPathHasPrefix(path, ATTENDANCE_ADMIN_PREFIX) && req.method !== 'GET') {",
+      "if (isCsvExportPath(path) && req.method === 'GET') {",
+      // Metric label on a refusal — reporting, no decision.
+      'attendanceRateLimitedTotal.inc({ route: routeLabel, method: req.method })',
+    ].sort())
   })
 
   it('the pre-auth request log records the override CLAIM without rewriting anything', () => {
