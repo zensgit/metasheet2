@@ -2015,6 +2015,8 @@ SELECT encode(convert_to(pg_get_constraintdef(oid),'UTF8'),'hex') FROM pg_constr
 ⇒ byte_equal = t   (IDENTICAL: migration-emitted CHECK == proposal text verbatim)
 ```
 
+**存储态的一条披露(不修,照提案逐字保留)**:因为提案文本用的是 `E' \t\r\n'`,`pg_get_constraintdef` 读回来的约束定义里**含真实的 CR 与 LF 字节**。任何对 `pg_dump` 产物做换行归一(CRLF→LF)的流水线都会**静默地把 CR 从裁剪集里删掉**,而约束名、报错码都不会变。这是选择「逐字照提案」的已知代价,列出来供 owner 连同谓词一并裁;把它改成 `chr(13)` 之类等价写法在字符集上完全一致,但那是**另造一个更窄的同类物**,不是本候选被授权做的事。
+
 **本轮真实事故(记录下来,防止下一次编辑再犯)**:第一版落笔把提案文本写进上方**注释**时用了单反斜杠。JS 模板字面量把 `\t\r\n` 变成真的 TAB/CR/LF,那个 CR/LF **在句子中间结束了 SQL 行注释**,后半句被当成 SQL 解析,`db:migrate` 报 `syntax error at or near "'. A single backslash would be consumed`(PG 侧 `scanner_yyerror`,line 1192)。与该文件里既有的「反引号会提前终止模板」是同一族陷阱;注释里现在写明了这一条,并且**连散文里的反斜杠也一律加倍**。
 
 ### 28.2 应用层镜像(`ApprovalTemplateGroupService.ts` `requireName`)
@@ -2022,6 +2024,8 @@ SELECT encode(convert_to(pg_get_constraintdef(oid),'UTF8'),'hex') FROM pg_constr
 `name.trim()` → `name.replace(/^[\s\u200B\u200C\u200D\u2060]+|[\s\u200B\u200C\u200D\u2060]+$/g, '')`。
 
 JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/CR/LF/U+3000/U+FEFF,**唯独不含** U+200B/200C/200D/2060 —— 正是 P2-1 那一族。补上这四个之后,应用层集合是 DB 集合的**严格超集**,方向是对的:`requireName` 返回的任何名字**按构造**已满足 CHECK,所以纯空白/纯不可见名一律是 400 `GROUP_NAME_REQUIRED`,永远落不到 23514 或 500。
+
+**这条「超集」断言的承重证据是行为,不是源码文本**:§28.3 用例 2 把 DB 集合里的六个值**逐个经生产路由**打进去,断言的是 `error.code === 'GROUP_NAME_REQUIRED'`(不是 23514、不是 500);用例 1 的 padded 名字证明「裁剪」这一半真的发生了。手边还跑过一条 `node -e` 的集合包含检查(DB 集合每个码位都被新 pattern 裁掉),但那条只读**重新敲进 shell 的**正则,是源码文本论证,**不作为承重证据**,只当交叉验证记录。
 
 它是**裁剪**不是**拒绝**(镜像 `btrim` 的语义):`U+200B + 'HR' + U+200B` ⇒ 201,库里存的是 `'HR'`;内部零宽(`'a' + U+200B + 'b'`)原样保留。**已披露的可接受后果**:`'H' + U+200B + 'R'` 与 `'HR'` 在 `uq_atg_org_name_active` 下是两个不同的名字,而渲染起来一模一样 —— 这是选项 (i) 接受内部不可见字符的设计后果,不是缺陷。
 
@@ -2034,7 +2038,8 @@ JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/C
 | 1 | 有可见字符的名字 | `请假` / `休暇申請` / `🎉庆祝` / `'a'+U+200B+'b'` / ASCII 正控 ⇒ **201**,响应体与 DB 读回**逐字节**相同;纯中文改名到另一个纯中文名 ⇒ **200**;`U+200B U+3000 HR-padded-<TS> U+FEFF U+2060` ⇒ **201 且存的是 `HR-padded-<TS>`**(这一条才分得清「裁剪」与「拒绝」两种镜像设计) |
 | 2 | 空白/纯不可见名走**生产路由** | `''` / `' '` / `U+3000` / `U+200B×2` / `U+FEFF` / `TAB+LF` 六个值 ⇒ **400 且 `error.code === 'GROUP_NAME_REQUIRED'`**;该 org 下写入 **0 行**。**钉的是错误码不是状态码** —— 见 M-C。 |
 | 3 | 同样六个值走**直连 SQL** | `INSERT INTO approval_template_groups …` ⇒ **23514 `atg_name_nonblank`**(证明 CHECK 本身承重,不只靠应用层);同一语句形状的**正控**:`报销` ⇒ 成功;**已披露缺口对**:NBSP-only 直插**成功** + 同值走路由 **400 `GROUP_NAME_REQUIRED`** |
-| 4 | 两处 `org_id` CHECK 未变 | `atg_org_nonblank`:`组织` 直插 ⇒ 23514,ASCII org 正控 ⇒ 成功;`atgl_org_nonblank`:同样一负一正(`group_id IS NULL` + `unlinked_at` 非空,让复合 FK 在 MATCH SIMPLE 下不参与,确保被测的就是 org_id 的 CHECK);并从 `pg_constraint` **读活目录**断言两条谓词仍含 `~ '[!-~]'` 且**不含** `btrim` |
+| 3b | rename 路径(与 create 共用 `requireName`) | `PATCH {name: U+200B×2}` ⇒ **400 `GROUP_NAME_REQUIRED`**,且原名字未被改动。「共用同一个 helper」是源码文本断言,这一行把它变成行为断言 |
+| 4 | 两处 `org_id` CHECK 未变 | `atg_org_nonblank`:`组织` 直插 ⇒ 23514,ASCII org 正控 ⇒ 成功;`atgl_org_nonblank`:同样一负一正(`group_id IS NULL` + `unlinked_at` 非空,让复合 FK 在 MATCH SIMPLE 下不参与,确保被测的就是 org_id 的 CHECK);并从 `pg_constraint` **读活目录**断言两条谓词仍含 `~ '[!-~]'` 且**不含** `btrim`。**排序在 JS 里做,不用 SQL `ORDER BY conname`** —— 文本排序依赖 collation,两个约束名恰好在下划线处分叉:macOS Homebrew 的 `en_US.UTF-8`(近似字节序)下 `_`(0x5F)< `l`,`atg_` 在前;glibc 的 `en_US.utf8`(ISO 14651 把标点降到主级之下)比较的是 `atgorgnonblank` vs `atglorgnonblank`,`l` < `o`,两行**反过来**。CI 用 `ankane/setup-postgres`(glibc,PG 14),本地是 Homebrew PG 15 —— 写成 `ORDER BY` 就是一条「本地绿 CI 红」的断言,正是 `finding_prod_pg15_never_tested` 点名的盲区 |
 
 ### 28.4 mutation(cp 备份 → 改 → 重建私有库 → 跑 → cp 还原 → cmp 全部逐字节一致)
 
@@ -2044,8 +2049,22 @@ JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/C
 | **M-B** | 迁移谓词 → `CHECK (true)`(第 8 轮门审自己那条证伪探针,原样重跑) | 用例 3 **红**。1 failed / 21 passed ⇒ **P2-2 关闭**(同一条探针下,上一轮是 29/29 全绿) |
 | **M-C** | `requireName` → 退回裸 `.trim()` | 用例 2 **红**,且红在**错误码**:`expected 'GROUP_NAME_UNSUPPORTED' to be 'GROUP_NAME_REQUIRED'`;用例 1 也红(padded 名字)。**状态码两边都是 400**,所以只断言 status 的写法对这条 mutation 判别力为零 —— 这是本轮特意钉 `error.code` 的原因。2 failed / 20 passed |
 
-还原后 `cmp` 对迁移与服务两个文件均逐字节一致,重跑 **32/32 全绿**。
+| **N-1**(负控,不是 mutation) | 用例 4 的查询强行加 `ORDER BY conname DESC` | **仍绿** —— 证明那条断言在 JS 里 `.sort()` 之后**与 DB 行序无关**,不是「恰好本机 collation 排对了」。这是上面那条 collation 陷阱的行为级闭合 |
 
-### 28.5 本轮明确**没有**做的事
+三条 mutation 与 N-1 **都是在最终版测试文件上重跑的**(修复轮改过测试文件,按「越界盾不护新行」全门重跑,不沿用第一轮的红)。还原后 `cmp` 对迁移与服务两个文件均逐字节一致,重跑 **32/32 全绿**。
+
+### 28.5 为什么是**就地改迁移**而不是新增后续迁移(前提已推导,不是照抄任务书)
+
+`up()` 用的是 `CREATE TABLE IF NOT EXISTS`。这意味着**在任何已经把 `zzzz20260918090000` 记进迁移历史的库里,改过的这份文件什么都不会做** —— 不报错、不告警、旧 CHECK 原封不动。所以「就地改」只有在「该迁移在任何环境都没应用过」成立时才是对的策略,这个前提必须推导,不能承接。
+
+- `git cat-file -e origin/main:packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts` ⇒ **ABSENT on origin/main**(`origin/main = 6ea19e2dea6c1e6dc87f5c0d7635ae6fc4f3e1c6`)。
+- 生产的部署与迁移只由 `docker-build.yml` 手动 dispatch 从 main 走(见 `feedback_deploy_migration_check` / 基础设施记录)⇒ **没有任何已部署环境可能跑过它**。
+- 这与 20260919 探针文档对 #5852 记的 `[DDL: not applied]` 一致。
+
+⇒ 前提成立,就地改是唯一能让生产从不短暂带着错约束的做法。
+
+仓库侧也确认没有**强制**另一条路的守卫:对迁移文件名做全仓 grep(排除 `node_modules`/`.git`),除迁移文件自身外只有 4 处文档引用与 1 处服务层注释,**没有任何 digest/registry/exclude 清单命中**;`MIGRATION_EXCLUDE` 六项里没有它,`SUPERSEDED_LEGACY_SQL_MIGRATIONS` 里没有它,`scripts/ci` 下只有 `lint-sql-migrations.sh`(只扫 `.sql`)与 `validate-migration-exclude.sh`(warn-only 且未接入任何 workflow)。`computePackageProvenancePinSet` 的 s6a 钉不覆盖这些路径 —— 改动前后 `sealed-export-package-provenance.test.cjs` 都 OK,**未重算、未手改任何钉**。
+
+### 28.6 本轮明确**没有**做的事
 
 未合并、未 undraft、未开/动 PR、未动 `origin/main`、未改任何已 ratify 锁文正文(`reviews/` 下的 `*lock*` 文件只读)、未向任何共享/staging/prod 库应用迁移、未删除任何不是本轮创建的 worktree/库/文件。`mapGroupConstraintError` 的 23514 → `GROUP_NAME_UNSUPPORTED` 分支与 `NONBLANK_CHECK_CONSTRAINTS` 里的 `atg_name_nonblank` 成员**保留未删**(与第一版候选同样的理由:删它是一次未经 owner 确认的映射面收窄);该分支的中文 message 现在只对两个 `org_id` 成员准确,**如实披露、不改写** —— 那句话被本文件的 `toContain` 断言冻结成了响应体合同,改它是合同裁决,不是候选该单方面做的事。
