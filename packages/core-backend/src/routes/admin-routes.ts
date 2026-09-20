@@ -75,8 +75,26 @@ const router = Router();
 /**
  * GET /api/admin/safety/status
  * Get SafetyGuard status and pending confirmations
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all. It returns
+ * safetyGuard.isEnabled() and safetyGuard.getPendingCount() (guards/middleware.ts:180), i.e. whether
+ * the platform's destructive-operation brake is switched on right now and how many dangerous
+ * operations are sitting unconfirmed. Both are reconnaissance for the write side of this same
+ * router: "is the brake off?" is exactly what a caller probes before attempting a protected
+ * operation, and the pending count is a live side channel on other admins' in-flight confirmations.
+ * The sibling POST /safety/confirm and POST /safety/enable treat the very same switch as privileged,
+ * so reading it was the odd one out. Gated on platform admin (requireAdminRole: no user or non-admin
+ * -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns
+ * false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20).
+ *
+ * The guard is added HERE, at the single mount point, not inside createSafetyStatusEndpoint():
+ * admin-routes.ts:79 is the factory's only call site in the tree (guards/middleware.ts:180 is the
+ * definition, the rest are docs), so gating at the mount is zero-impact for other callers and keeps
+ * the factory's contract — a synchronous (req, res) => void that reads no request input — intact.
+ * That contract is what tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts:951 rests
+ * on; folding an async guard into the factory would have changed it for no benefit.
  */
-router.get('/safety/status', createSafetyStatusEndpoint());
+router.get('/safety/status', requireAdminRole(), createSafetyStatusEndpoint());
 
 /**
  * POST /api/admin/safety/confirm
@@ -1739,8 +1757,20 @@ router.post(
 /**
  * GET /api/admin/ratelimits
  * Get current rate limiting status
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all. It returns
+ * rateLimiter.getConfig() verbatim — tokensPerSecond, bucketCapacity, cleanupIntervalMs and
+ * bucketIdleTimeoutMs (integration/rate-limiting/token-bucket.ts:302) — plus the global counters
+ * activeBuckets / totalAccepted / totalRejected (token-bucket.ts:257). The configuration is the
+ * exact shape of the platform's throttle: published to any authenticated caller it turns "probe
+ * until throttled" into "read the refill rate and stay one token under it", and bucketIdleTimeoutMs
+ * tells that caller how long to idle so its bucket is reclaimed. activeBuckets is a platform-wide
+ * gauge of how many tenant/user keys are currently active — not this caller's tenant, all of them.
+ * Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/ratelimits', async (req: Request, res: Response) => {
+router.get('/ratelimits', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const rateLimiter = getRateLimiter();
     const globalStats = rateLimiter.getGlobalStats();
@@ -1801,8 +1831,20 @@ router.get('/ratelimits', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/ratelimits/:key
  * Get rate limit status for a specific key (tenant/user)
+ *
+ * SECURITY (issue #5678, batch 3): the strongest exposure in this batch. The bucket key is chosen
+ * by the caller from the path, and the keys this platform actually uses are `tenant:<tenantId>`
+ * (integration/rate-limiting/message-rate-limiter.ts:230). With no authorization, any authenticated
+ * user of any tenant could name ANOTHER tenant's key and get back that tenant's tokensRemaining,
+ * totalAccepted, totalRejected and acceptanceRate — a cross-tenant traffic meter. Even a wrong guess
+ * pays: the `not_tracked` branch versus the stats branch is an existence oracle answering "has this
+ * tenant/user sent anything recently?" one guess at a time, with no rate limit of its own on the
+ * guessing. Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED;
+ * isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the lookup, so the
+ * two branches are indistinguishable to a denied caller.
  */
-router.get('/ratelimits/:key', async (req: Request, res: Response) => {
+router.get('/ratelimits/:key', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { key } = req.params;
     const rateLimiter = getRateLimiter();
@@ -1954,8 +1996,22 @@ router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Res
 /**
  * GET /api/admin/health/summary
  * Get a quick health summary without full details
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all, which after
+ * batch 2 left the /health pair inconsistent — GET /health/detailed and GET /health/subsystem/:name
+ * became admin-only while the summary over the SAME HealthAggregatorService state stayed open. The
+ * summary is coarser but not harmless: status, uptime (i.e. when this process last restarted),
+ * per-status subsystem counts, and the hasWarnings / hasErrors booleans, which are a free polling
+ * channel telling an unprivileged caller exactly when the platform is degraded. Note it is also the
+ * cheapest of the three to hammer — it serves getLastHealth() from cache when one exists
+ * (services/HealthAggregatorService.ts:303) and only falls back to a fresh checkHealth(). Gated on
+ * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
+ * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The 500 branch below still echoes
+ * err.message; redacting that is a separate decision point (see the design note), deliberately not
+ * folded into this "tighten only, change no shape" change.
  */
-router.get('/health/summary', async (req: Request, res: Response) => {
+router.get('/health/summary', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const healthAggregator = getHealthAggregator();
 
