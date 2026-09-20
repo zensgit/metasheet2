@@ -1406,6 +1406,46 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     expect(sessionOrgsCalls).toBe(2)
   })
 
+  it('(①) a "blocked on a session-org choice" state does not carry over to the next identity — acceptance J\'s control holds for a single-org successor', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    const api = await import('../src/approvals/api')
+    // Account A is UNBOUND: every group endpoint fail-closes 403 SESSION_ORG_REQUIRED, which is
+    // what makes the hosted child report up and the page open the entry reactively.
+    let unbound = true
+    listApprovalTemplateGroupsSpy.mockImplementation(async () => {
+      if (unbound) throw sessionOrgRequiredError(api.ApprovalApiError as unknown as new (m: string) => Error)
+      return []
+    })
+    useAuth().setToken(jwtFor('actorA', 'org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return sessionOrgsCalls === 1
+          ? jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+          // Account B belongs to exactly ONE organization.
+          : jsonResponse(200, { success: true, data: { orgs: ['org-solo'], currentOrgId: 'org-solo' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(10)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+
+    unbound = false
+    useAuth().setToken(jwtFor('actorB', 'org-solo'))
+    await flushUi(10)
+
+    expect(sessionOrgsCalls).toBe(2)
+    // B is a single-org member. The page-level visibility rule has TWO disjuncts and only the
+    // first is about eligibility; the second ("a child reported a 403") belonged to A's session
+    // and must not survive it, or J's positive control is false for B through no fault of B's.
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+  })
+
   // ── ② every data view stays in step ─────────────────────────────────────────────────────────
 
   it('(②) switching organization re-reads the FLAT gallery and the category list, not only the grouped surfaces', async () => {
@@ -1442,8 +1482,14 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     expect(loadTemplatesSpy.mock.calls.length).toBeGreaterThan(templatesBefore)
     expect(listTemplateCategoriesSpy.mock.calls.length).toBeGreaterThan(categoriesBefore)
     // The page's OWN switch must not also re-ask for the organization list: the composable
-    // restores the membership list itself across its own switch.
+    // restores the membership list itself across its own switch — so the claim is re-KEYED to the
+    // post-switch principal rather than dropped, and a later re-entry still finds it satisfied.
     expect(sessionOrgsCalls).toBe(1)
+    await enterFlatView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
   })
 
   it('(②) while the new organization\'s template list is in flight the flat surfaces show their empty state, never the previous organization\'s rows', async () => {

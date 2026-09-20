@@ -317,6 +317,12 @@ describe('describeApprovalTemplateGroupError (P2-2 product-copy mapping)', () =>
     // sentence for a name that can never work and for one that only needs a character added.
     expect(text).toMatch(/at least one/i)
     expect(text).toContain('请假Leave')
+    // NIT-C (impl-gate-A5-daily-ops-round2b-20260921.md): the rule it states must not imply a
+    // CASE restriction. `atg_name_nonblank` is `name ~ '[!-~]'`, which accepts `a-z` exactly as
+    // it accepts `A-Z`, so copy written as "letter (A–Z)" / "英文字母（A–Z）" describes a narrower
+    // rule than the server enforces and would tell an admin naming a group "请假leave" that it
+    // will be rejected when it will not.
+    expect(text).not.toMatch(/A\s*[–-]\s*Z/)
   })
 
   it.each([
