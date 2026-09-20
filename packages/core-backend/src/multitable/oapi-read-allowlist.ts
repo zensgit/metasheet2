@@ -16,6 +16,8 @@
  * `comments.ts`) is also allowlisted now and composes `requireScope` with the existing `rbacGuard` =
  * min(token scope, creator RBAC); its per-user surfaces (inbox/unread-count/mention-*) stay deferred.
  */
+import { isIntegrationOapiReadAllowlistRequest } from '../integration/oapi-integration-read-allowlist'
+
 const TOKEN_BEARER_PREFIX = 'Bearer mst_'
 
 /**
@@ -106,13 +108,24 @@ export function isOapiWriteAllowlistRequest(
 }
 
 /**
- * THE single switch the global JWT gate (index.ts) consults: true for any allowlisted OAPI request, read
- * (GET, OAPI-1) or write (method-bound, OAPI-2a). A match lets an `mst_` bearer skip the JWT gate to reach
- * the per-route `apiTokenAuth` + `requireScope`; everything else falls through to a 401.
+ * THE single switch the global JWT gate (index.ts) consults: true for any allowlisted OAPI request —
+ * multitable read (GET, OAPI-1), multitable write (method-bound, OAPI-2a/2b), or integration read
+ * (GET, G44). A match lets an `mst_` bearer skip the JWT gate to reach the guards that authenticate it;
+ * everything else falls through to a 401.
+ *
+ * G44 — the third term is the integration (data-factory) READ surface. It is kept in its own module
+ * (`integration/oapi-integration-read-allowlist.ts`) because its lockstep partner is different in kind:
+ * the multitable terms are paired with per-route `apiTokenAuth` + `requireScope` mounts in
+ * `routes/univer-meta.ts` / `routes/comments.ts`, whereas the integration routes are registered by a
+ * plugin and are guarded by ONE app-level middleware
+ * (`middleware/integration-api-token-gate.ts`, mounted immediately after this gate in index.ts) that
+ * covers the whole `/api/integration` subtree. Read-only there too: that module admits GET only, so no
+ * integration write/run/apply path is reachable by a token through this switch.
  */
 export function isOapiAllowlistRequest(method: string, path: string, authHeader: string | undefined): boolean {
   return (
     isOapiReadAllowlistRequest(method, path, authHeader) ||
-    isOapiWriteAllowlistRequest(method, path, authHeader)
+    isOapiWriteAllowlistRequest(method, path, authHeader) ||
+    isIntegrationOapiReadAllowlistRequest(method, path, authHeader)
   )
 }
