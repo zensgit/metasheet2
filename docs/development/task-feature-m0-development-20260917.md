@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：内容 SHA `bb18b1c642d94c3ef5fb9964eace12f2abc3d885`（闸 §13 第九轮；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。
+- head SHA：内容 SHA 见本轮 SHA-record 提交（闸 §14 第十轮；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
@@ -63,7 +63,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 12 | `docker-build.yml` 对 `docs/**` paths-ignore | `:4-8` | `sed -n '4,8p' .github/workflows/docker-build.yml` | `paths-ignore: docs/**` |
 | 13 | 锁草案含 §0–§15 且 §8 为 N/A 一行 | 锁文件 | `rg -n "^## " docs/development/task-feature-design-lock-20260917.md` | 见 §3 |
 | 14 | 锁草案 §13 含题号 1–39 各恰一次（多重集） | 锁文件 | `python3 -c "import re; from collections import Counter; from pathlib import Path; t=Path('docs/development/task-feature-design-lock-20260917.md').read_text(); nums=[int(n) for n in re.findall(r'\*\*(\d+)\.', t) if 1<=int(n)<=39]; c=Counter(nums); print('unique', len(c), 'multiset', len(nums), 'dupes', dict((k,v) for k,v in c.items() if v>1), 'missing', [i for i in range(1,40) if i not in c])"` | `unique 39 multiset 39 dupes {} missing []`。mutation：副本再插入一个 `**14.` ⇒ `unique 39 multiset 40 dupes {14: 2}` |
-| 15 | §13-9 / §13-10 / §13-11 / §13-12 标未裁，且 §13-5 随落槌 | 四处 slash + §9 表 §13-5 行 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` ； `grep -n -F "§13-5 随 §13-11" …` ； `grep -n "\| §13-5 \|" …` | slash `:9` `:25` `:336` `:496`；§9 仍有 §13-5 行 |
+| 15 | §13-9 / §13-10 / §13-11 / §13-12 标未裁，且 §13-5 随落槌 | 四处 slash + §9 表 §13-5 行 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | slash `:9` `:25` `:337` `:530` |
 
 ---
 
@@ -105,7 +105,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 5. **`hashtext` 数值碰撞 UNCLEAR**：只做字面前缀差。
 6. **§13-9 / §13-10 / §13-11 / §13-12 未裁**（§13-11 不适用默认前进；§13-5 随 §13-11，单独未裁亦阻断 M2）。
 7. **待办中心锁未 ratify**：PendingItem 按交接件临时六字段；R1。
-8. **对抗闸未齐**：第九轮 REJECT（`reviews/gate-task-m0-20260917.md` §13，1 P1 / 9 P2 / 12 P3；第六轮独立审同 head 亦 REJECT）。本轮按 §13 一次改完、不 rebase。不声称 M0 退出门已过。闸方建议 ratify 两层拆分，owner 未裁。
+8. **对抗闸未齐**：第十轮 REJECT（`reviews/gate-task-m0-20260917.md` §14，1 P1 / 11 P2 / 7 P3；第七轮独立审同 head 亦 REJECT）。本轮按 §14 一次改完、不 rebase。不声称 M0 退出门已过。
 9. **飞书 `:21-23` vs 计划 §5-2**：计划把《完成与重启任务》:23 列为 `scope=self|all` 出处之一；锁按闸 P3-1 把 `:21-23` 标 IM 不对标，`:20` 单独支撑创建人完成范围。以闸 P3-1 为准，计划 :23 记偏离。
 10. **`guardPolicy.ts` 行号漂移**：计划写 `:29` / `:77` / `:87-95`；本 SHA `ATTENDANCE_FOCUS_ALLOWED_PATHS` `:34`、`PLM_WORKBENCH_ALLOWED_PREFIXES` `:82`、`KNOWN_REQUIRED_FEATURES` `:100`，`/stock-prep` 无 `requiredFeature` 先例 `:90-99`（普查 §5.2 / §5.3）。
 
@@ -115,7 +115,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 1. **未连生产库**（也未连 staging）。
 2. **未跑真库测试、未跑浏览器、未起 API 服务器**。
-3. **闸未齐**：第九轮 REJECT。本轮按闸 §13 一次改完、不 rebase。
+3. **闸未齐**：第十轮 REJECT。本轮按闸 §14 一次改完、不 rebase。
 4. **§13-9 / §13-10 / §13-11 / §13-12 未裁**（§13-5 随 §13-11）。
 5. 未实现任务 B 纯函数与单测。
 6. 未写迁移、路由、服务、前端（任务 C 禁止）。
@@ -130,60 +130,132 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 ---
 
-## 6. 修复轮（闸 §13 第九轮 1 P1 / 9 P2 / 12 P3）
+## 6. 修复轮（闸 §14 第十轮 1 P1 / 11 P2 / 7 P3）
 
-未改 §13-9 / §13-10 / §13-11 / §13-12（§13-5 随 §13-11）。未合并。不 ratify。任务 B 未起。本轮不 rebase。闸方建议 ratify 两层拆分，owner 未裁，仍按现协议改门表。
+未改 §13-9 / §13-10 / §13-11 / §13-12（§13-5 随 §13-11）。未合并。不 ratify。任务 B 未起。本轮不 rebase。
 
 | finding | 改动 | 命令 | 输出摘录 |
 |---|---|---|---|
-| ① 门 6 P1 | harness 直发 SQL 持锁；禁令不含 harness；计生产返回；cp+cmp；pg_locks 键匹配 | `sed -n '204,211p' packages/core-backend/src/multitable/canonical-sheet-fence.ts` | `fenceWriterEntry` → fence then `:191` |
-| ② 门 16 | 直授/jsonb/只有 write 逐条钉；三层检出；4xx 降级为 8 种 | `sed -n '748p' packages/core-backend/src/auth/AuthService.ts` ； `sed -n '85,96p' …/rbac/service.ts` | `listUserPermissions` 三路 ∪ |
-| ③ 门 7 | 扫描根扩任务域全体；命中==登记三行；NOT RUN 至源码 PR | `grep -n "src/db/task-\*" …design-lock…` | 门 7 正文 |
-| ④ 门 1 | 九项前置+RBAC；422 在 rbac 后；真隔离格；1c 未设门 | `sed -n '101,104p' …/jwt-middleware.ts` | org 写入在 authenticate 内，422 在 handler |
-| ⑤ 门 19 | 四轴网格+格数；探针①②各配正控 | `grep -n "探针①" …` | 门 19 |
-| ⑥ ④ import | 每文件 assert-rbac-optional-off；web 偏离 | `grep -n assert-rbac-optional-off …` | §5.2.1 ④ |
-| ⑦ 门 22 | 后果写死；行为 spec 必须计分 | `sed -n '548,556p' apps/web/src/composables/useAuth.ts` | admin 短路 |
-| ⑧ event_type | P0-A 差集空；词表+索引抄进锁；门 20 无 I/O | 见普查 §8 | `p0a_missing_from_vocab []` |
-| ⑨ fenceWriterEntry | 中间步改回 `:204`；provenance 分层 | `sed -n '244p' …/approval-record-projection-service.ts` | `fenceWriterEntry` |
-| ⑩ P3 | #14 多重集；解析器 AMBIGUOUS_OK/OOB；豁免排除清单行 | 见下 | unique 39/39；AMB_OK 6 AMB_OOB 5 |
-| ⑪ (d) | 同 head 两遍 | 见下 | 路径形 63；裸 `:N` 77 |
+| ① 门 1 P1 | 真隔离先 200+只含 A 非空；B 行 harness SQL；前置适用表；随 §13-10 | `grep -n "真隔离读格" …design-lock…` | `:359` 一带 |
+| ② (d) | drift-exempt 整块排除；每 token ≥1「已漂」；禁 grep -v | 见下 python 排除块 | 六 token 各 hits 1 |
+| ③ 门 5 | 跨时区改为 dueAt 逐字节相同；删显示日期；mutant 红 | `grep -n "逐字节相同" …` | 门 5 |
+| ④ 门 22 | required :1186+:77；焦点 redirect 钉 target；admin 经 useAuth | `sed -n '236p;245p' apps/web/src/router/guardPolicy.ts` | `target: '/attendance'` / `'/plm'` |
+| ⑤ 门 19 | 真相表 TASK_ROLE_ABILITY；45 格；探针① 置反 (角色,能力) | `grep -n TASK_ROLE_ABILITY …` | §6.1 |
+| ⑥ 门 3/4 | assignees[] 或 harness SQL；不调用增删人 API | `grep -n "assignees\[\]" …` | §4.2 / 门 3 |
+| ⑦ §6.4 | 中间步随 P2；flag 关不得作锁序证据 | `sed -n '209p' …/canonical-sheet-fence.ts` | `if (!isWriterFenceEnabled()) return` |
+| ⑧ 门 7 | 根按里程碑；登记导出名 | `grep -n acquireTaskStructureLock …` | 门 7 表 |
+| ⑨ 门 10 | M2 title 四格 vs P2 id/recordId NOT RUN | `grep -n "P2 子集" …` | 门 10 |
+| ⑩ 门 20 | 三形 ERE + 人口≥1 + exit 2 | 门 20 正文 | |
+| ⑪ OPTIONAL | 1d 同措辞；grep 全文唯一 0；计数 3 | `grep -c "process.env.RBAC_OPTIONAL === '1'"` | 3 |
+| ⑫ P3 | 门 21；九项改 12.0 a–i；4xx 全形；parent_* P0-B | `sed -n '1697p' packages/core-backend/src/index.ts` | `express.json({ limit: '10mb' })` |
+| ⑬ (d) 两遍 | 同 head | 见下 | 路径形 65；裸 80 |
 
 ### 机制走查
 
-#### ① 门 6 负控不得破坏连接 1 持锁
+#### ① 门 1
 
-连接 1 取锁路线 = harness `SELECT pg_advisory_xact_lock(hashtext($1))`，参数来自 `taskStructureLockKey`。§6.4 禁令作用域 = 任务域生产源码（登记 helper 三行除外）；harness 不受禁令。mutation 注释 helper 取锁行后连接 1 仍持锁。被计时对象 = 经 helper 的生产结构变更调用返回，不是被删行。证据：`cp` 备份 → 改 → `cmp` 非空 → 跑 → `cp` 恢复。
+正控先于负控：未 mutation 时 200、行集只含 A 且非空，否则「不含 B」无判别力。B 行写路径造不出（org=claim），故 harness SQL；any_role 要 `created_by`、pending 要 assignee 行。§13-1c 仍 owner 裁。读格 DB 授 read+admission。写格 422 必须已过 write 守卫。九项与门 16 共用 §12.0。门 1 随 §13-10 阻断。
 
-`pg_locks`：`classid=(hashtext::bigint>>32)&4294967295`（负 hashtext 时 4294967295）、`objid=hashtext::bigint&4294967295`。等待：`wait_event_type='Lock'` 且 `wait_event='advisory'`。未阻塞零行正控。
-
-另一姿态 / 另一门：门 7 扫的是源码字面量集合，不是运行时 pg_locks。
-
-#### ② 门 16 trust-off 三路 ∪
-
-缺 `user_permissions`/`jsonb` 钉或 `role_permissions` 不只有 write ⇒ `listUserPermissions` 并入 `tasks:read`/`*:*` ⇒ `rbac.ts:78` 先于 `:94/:101` 放行 ⇒ 两姿态 200。§5.1 直授过不了准入是条件句（ns 不在 controlledNamespaces）；门 16 判别格是反例。roles 不在九项 trust-off 前置（`:213` 合取，带 perms 不早返回）。检出三层见锁。4xx 至少 8 种可区分；422 在 rbac 后。
-
-另一姿态 / 另一门：门 2 TRUST=true 要 no-perms；本门 TRUST=false 要 perms 在场。
-
-#### ③–⑪ 其余
-
-门 7 根含 `src/db/task-*`，登记集合 = helper 三行，谓词相等；源码 PR 前 NOT RUN。门 1 真隔离 + 422 归类修正。门 19 四轴；探针① 恢复。门 22 必须计分。event_type P0-A 差集空。`fenceWriterEntry:204`。#14 mutation `**14.` ⇒ multiset 40 dupes {14:2}。解析器 `unique 133 OK 122 OOB 0 AMB 11`（OK 6 / OOB 5）。OPTIONAL `grep -c "RBAC_OPTIONAL === '1'"` = 2。
-
-#### ⑪ §14-4 (d) 两遍（同 head）
-
-路径形 unique **63**。裸 `:N` unique **77**（含 `:748` `:204` `:191` `:244` `:156` `:75-76`）。
-
-路径形头/尾：
+#### ② (d) 每 token（排除 `drift-exempt` 块后含「已漂」）
 
 ```
-.github/workflows/attendance-web-guard.yml:2-3
-…
-useAuth.ts:548-556
-user-activation.ts:77
-vitest.config.ts:1782
+1782 hits 1
+:1069 hits 1
+1763-1777 hits 1
+:1642 hits 1
+AGENTS.md:48-50 hits 1
+guardPolicy.ts:29 hits 1
 ```
 
-裸 `:N` 全集见本轮 `/tmp/r9-d2.txt` 实跑 77 条（`:101` … `:99`）。
+#### ⑪ OPTIONAL
 
-豁免机核排除清单行后仍命中 §5.2 `:29→:34`、§10 `:1642→:1791`、§5.2.1 `:1782`、§5.3 `:1069`。
+`grep -n '全文唯一'` → ZERO。`grep -c "process.env.RBAC_OPTIONAL === '1'"` → **3**。`service.ts` 真用点 `:25/:63/:101`。
+
+#### ⑬ 两遍导出
+
+路径形 unique **65**。裸 `:N` unique **80**（全文如下）：
+
+```
+`:101
+`:105
+`:106-109
+`:1069
+`:108-118
+`:11-38
+`:111
+`:116
+`:117-118
+`:1186
+`:12
+`:120-122
+`:120-168
+`:1277
+`:1288
+`:129
+`:133-135
+`:133-137
+`:136
+`:143-151
+`:144-147
+`:1642
+`:1655
+`:1659
+`:167
+`:168-172
+`:1697
+`:171-176
+`:1763-1777
+`:1782
+`:1785
+`:1797
+`:1812
+`:182-186
+`:191
+`:196-199
+`:200-203
+`:203-243
+`:206
+`:209
+`:211-213
+`:213
+`:234
+`:241
+`:242
+`:244
+`:246
+`:246-252
+`:25
+`:253
+`:277
+`:282-288
+`:302
+`:34
+`:344
+`:345
+`:346
+`:347
+`:387-405
+`:4-8
+`:41
+`:45-47
+`:532-533
+`:54
+`:63
+`:68-70
+`:68-72
+`:71
+`:71-73
+`:74-76
+`:748
+`:75-77
+`:77-83
+`:8
+`:82-85
+`:842-844
+`:91-97
+`:94
+`:96
+`:99
+```
 
 `git merge-base HEAD origin/main` = `bb77ca5f2ce3c2825265ec8877861d367d017ead`。相对 merge-base 仍三份 docs `A`。

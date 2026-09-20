@@ -413,7 +413,7 @@ PY
 | `POST …/leave` | 退出 | `left` |
 | `DELETE /api/tasks/:id` | 删除 | `deleted` |
 
-P0-A 写动作 ⊆ 词表。词表中 P1/P2 词（`attachment_*` `field_value_changed` `list_*` `group_changed` `milestone_*` `dependency_*` `recurrence_*` `parent_*` `commented`）对应路由不在 P0-A，**不是**缺词差集（一次写全 CHECK）。**P0-A 差集空**。
+P0-A 写动作 ⊆ 词表。词表中 **P0-B** 词：`parent_set` / `parent_cleared` / `commented`（子任务设父、评论；不在上表 P0-A 路由）。**P1/P2** 词：`attachment_*` `field_value_changed` `list_*` `group_changed` `milestone_*` `dependency_*` `recurrence_*`。这些对应路由不在 P0-A，**不是**缺词差集（一次写全 CHECK）。**P0-A 差集空**。
 
 复现（词表抄自计划 `:70`）：
 
