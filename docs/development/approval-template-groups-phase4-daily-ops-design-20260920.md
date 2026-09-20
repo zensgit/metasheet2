@@ -83,3 +83,71 @@
 - 每条修复都有至少一个 vitest spec(前端)或真库用例(后端),先红后绿,红色输出贴在验证 MD;
 - 新增测试全部落在**已经在 required web-tests exec 行 / plugin-tests.yml 真库清单里**的既有文件——本轮零新增测试文件,因此不需要新 spec token,也不触碰 s6a 的 `plugin-tests.yml`;
 - `approval-template-groups-lifecycle.db.test.ts` 的新增 `P3-1` 用例 + 一条被本轮文案修复改写的既有断言(`P1-3`,该断言此前 PIN 的正是被修复的那句内部黑话——修复即证伪原断言,已按新文案改写,不是放宽判据)。
+
+---
+
+## 5. 第 2 轮(门审 `impl-gate-A5-daily-ops-round1-20260920.md` CHANGES-REQUESTED 后)
+
+**本节仍是 PROPOSED,未过门审、未 ratify。** 输入:独立 Opus 门审 round 1,判定 **1 P1 / 1 P2 / 3 P3 / 3 NIT**,基线 head `beec0b8c7eca6129647c056216b6255b4634b4dd`。
+
+### 5.0 对第 1 轮陈述的逐句求值(失效标记只让状态断言失效,不作废整节)
+
+| 第 1 轮原句(位置) | 求值 | 处置 |
+|---|---|---|
+| §2 P2-5「新增第三个独立 `useSessionOrg()` 实例(与面板、分节视图各自的实例并列,**不共享 state**——遵循 phase-3 设计 MD §8.4 已经定下的『不把分组列表上提到父组件共享一份 state』惯例的同一理由」 | **SUPERSEDED(且当时的类比本身站不住)**。§8.4 说的是**分组列表**:列表的每份副本互相独立,各消费方的验收行各自钉自己的请求数。session-org 不是列表数据——`switchSessionOrg` 会**重铸 auth token**,`useSessionOrg` 的 `onAuthPrincipalChange` 随即清空**每一个**实例的 `orgs`,只有发起切换的那个把自己恢复回来。所以这两份副本不是独立的,是**互相摧毁**的(真浏览器实测:从分节视图的实例切换后整页零切换器)。§8.4 从来不是这件事的合法先例。 | 本轮改为**本页只有一个** `useSessionOrg()` 实例,经 `provide/inject` 下发 |
+| §2 P2-5「本切片按任务书指令实现持久入口,登记为待 owner 事后确认的实现选择」 | **OPERATIVE**(未变)。持久 vs 反应式的**形状**仍是 owner 未表态的问题 | OPEN 保留,并**新增一个输入**:见 §5.4 |
+| §1 矩阵 P2-5 行「`hasMultipleOrgs` 收窄……保住 §4 验收 J 的正控」 | **OPERATIVE**,但谓词本轮变成 `hasMultipleOrgs \|\| sessionOrgRequiredSeen` | 见 §5.1 对第二个析取项的论证(它**复现**旧的反应式可见规则,不是放宽 J) |
+| §2 P3-1「真库 census 确认 0 行 `approval_templates.id` 不满足该形态,故此校验对任何真实数据都不收窄」 | **部分 SUPERSEDED**。census 本身成立,但它证明的是**已存储值**,不是**可接受的输入形态**。门审 A/B 实测:无连字符形与花括号形在修复前 201/204、修复后 400 ⇒ **确实是一次输入形态收窄** | 见 §5.5(`approvals.ts` 的注释按实测改写,过强声明已逐字撤回) |
+| §2 P2-2「前端映射表返回产品语言双语文案」 | **OPERATIVE 但未闭合**:第 1 轮的文案不含任何规则说明 | 见 §5.6 |
+| §2 P2-4「三个动作成功后都 `emit('changed')`」 | **OPERATIVE**,但不充分:`changed` 只驱动**分节视图**重读,面板自己的列表顺序不跟服务端 | 见 §5.7 |
+| §4「本轮零新增测试文件」 | **OPERATIVE**,第 2 轮同样成立(全部新用例落在既有四个 spec 文件里) | — |
+
+### 5.1 P1-A(阻断)—— 本页只保留一个 `useSessionOrg()` 实例
+
+**缺陷机制(门审已 CONFIRMED,本轮在 vitest 里独立复现)**:`useSessionOrg` 的 `onAuthPrincipalChange` 回调体是 `generation++; orgs.value = []; currentOrgId.value = null`,**每个实例都注册**;`switchSessionOrg` 在调 `auth.setExplicitSessionOrg` 之前把 `memberships` 存下、之后 `orgs.value = memberships` ——所以**只有发起切换的那个实例**能恢复。第一跳(多 org 未绑定)上页面级常驻实例与分节视图的反应式实例同时渲染,管理员点中后者 ⇒ 前者 `orgs` 永久为空 ⇒ `hasMultipleOrgs` 变假 ⇒ 常驻入口消失,且 `pageSessionOrgsRequested` 已为 true 挡住补拉。
+
+**为什么修法只有这一个**:锁文 §2 逐字写「**考勤原文件与 `useSessionOrg.ts` 不动**」。本轮把这句按字面执行(不改一个字节),因此**不能**在 composable 里修 `onAuthPrincipalChange` 的跨实例清空。在「不改 composable」这个约束下,「一页一个实例」不是风格偏好,而是**唯一可用的修法**。
+
+**实现**:
+- `SessionOrgSwitcher.vue` 的普通 `<script lang="ts">` 块新增 `SessionOrgHost` 接口 + `SessionOrgHostKey: InjectionKey<SessionOrgHost>`。**不新建文件**:该文件已经在 `approval-web-guard.yml` 的两处 path 清单里、也有自己的 spec token 在 required exec 行上,新开一个 `.ts` 反而会落在两条 lane 的 path 过滤之外。
+- `TemplateCenterView.vue` 建**唯一**实例并 `provide({ sessionOrg, notifySessionOrgRequired })`。
+- `ApprovalTemplateGroupsPanel.vue` / `TemplateGroupSections.vue`:`const host = inject(SessionOrgHostKey, null)`;`const { … } = host?.sessionOrg ?? useSessionOrg()`。**有 host ⇒ 不调 `useSessionOrg()`**(一页恰一个实例,by construction);**无 host ⇒ 行为与第 1 轮逐字相同**(自己的实例、自己的切换器、自己的重试槽)——这正是让锁文 §4 验收 J 的 mutation(「去掉前端对该码的处理 ⇒ 停在 403」)在它们各自的组件级 spec 里**继续承重**的原因。
+- 职责边界(写死):**host 拥有 fetch、渲染、重放;child 只上报「我被 SESSION_ORG_REQUIRED 挡住了」**。child 在 host 模式下把 `pendingRetry` 清空,由 host 的 `onPageSessionOrgChange` 重放 `loadAll()`/`loadGroups()`。
+- **被丢掉的自动重放是刻意的**:面板的 `onCreate`/`submitRename`/`onArchive`/`onUnarchive` 在 host 模式下**不**自动重提到刚切换过去的组织——把一个写操作自动打到另一个 org 是危险而非便利;管理员自己再提交一次。面板的列表会回来(`loadGroups()` 成功即把 `sessionOrgBlocked` 置 false),这一点由新增用例压住,不是靠论证。
+- 可见性:`v-if="pageSessionOrgHasMultiple || sessionOrgRequiredSeen"`。第二个析取项**复现**第 1 轮就存在的反应式可见规则(此前是 child 自己渲染 `<SessionOrgSwitcher>`,由该组件自身的 `v-if="loading || orgs.length > 0 || errorMessage"` 决定显不显);J 的正控依据是「**单 org 成员永远收不到该码**」,不是这个 `v-if`。
+- `SessionOrgSwitcher.vue` 的写死 DOM id `session-org-switcher-select` 改为 `useId()`(Vue 3.5.24)。该 id 在 `approval-template-groups-phase1-fe-verification-20260918.md` P3-6 里被登记为「今天只有一个宿主,不是活缺陷」——本轮之前那个前提第一次变假(真浏览器 `duplicate#ids=2`)。现在是**按构造**每实例唯一,不再依赖「恰好只有一个宿主」。
+
+### 5.2 P2-B(阻断)—— 目标侧「已分页」分支补判别用例
+
+源码零改动,补的是**用例**。关键:门审建议的「把源侧用例角色对调」这个镜像写法**不判别** —— 目标 page1=10/total=11、移入一行后,修复前的 `target.hasMore = items.length < total` 同样算出 `10 < 12 = true`,计数同样显示 12。真正判别的是两条:①目标 page 1 的**刷新请求**(修复后恰 1 次,修复前 0 次);②服务端 post-move 的 page 1 **真的被渲染出来**(被移入的行出现在目标分节里)。用例按这两条写,mutation M2 当场变红(见验证 MD §8.3)。
+
+### 5.3 三条 NIT 的处置
+
+| NIT | 处置 |
+|---|---|
+| NIT-1 `data-testid` 条件式收窄(归档行不再匹配 `approval-template-groups-item`) | **不改,登记**。改成「通用 testid + `data-archived`」会动到本切片已经通过门审的 P2-1 判据面(`item` / `item-archived` 两个 testid 是 D2/D3 真浏览器判据引用的);属独立卫生切片,交 owner 决定是否另起 |
+| NIT-2 无条件的一次 `/api/auth/session-orgs` 请求与兄弟 spec 的「reactive-not-proactive」惯例相反 | **在代码里逐字点名**(`TemplateCenterView.vue` 的 `ensurePageSessionOrgsLoaded` 注释)。兄弟 spec 钉的是**分节视图**「非 J 失败不查 session-org」,那条现在**更强**地成立:分节视图在 host 模式下**一次 session-org 请求都不发**。页面级入口无法是反应式的——它存在的意义就是「什么都没失败时也在」 |
+| NIT-3 面板单槽注释陈旧(写「只有 loadGroups/onCreate」,实则五个写者) | **已改**(注释改写为五写者 + `actionBusyId`/`creating` 互斥的依据) |
+
+### 5.4 交 owner(本轮新增一个输入,OPEN 不变)
+
+第 1 轮登记的 OPEN(持久 vs 反应式形状)**仍然开着**,本轮给它加一个具体输入:页面级入口与两个反应式入口**不能各自持有 session-org state**(机制见 §5.0 第一行)。本轮的形状是「一个 state + 一个渲染入口 + child 只上报」;若 owner 想要别的形状(例如只保留反应式、或要求 child 也能渲染),`useSessionOrg.ts` 的跨实例清空就必须一起裁——而那个文件锁文写着不动,所以**那是一次锁文层面的裁决,不是实现者的裁量**。
+
+### 5.5 P3-1a —— `approvals.ts` 的过强注释按实测撤回
+
+取门审给的修法①(最小):注释逐字撤回「is not narrower than any real id」,改为如实陈述「**刻意**只接受规范 8-4-4-4-12 形态,PG 自己接受的其它文本形态(无连字符、花括号)一并拒绝」,并把 census 那句**重新定界**为「证明的是已存储值,不是可接受的输入形态——这是两个集合」。谓词**不动**(不取修法②的归一化):产品自己的客户端只回传从这些 API 读到的规范 id,一个 id 一种拼写让端点输入空间与真实调用方一致。
+
+### 5.6 P3-2 —— 产品文案说出规则 + 给一个能通过的例子
+
+`GROUP_NAME_UNSUPPORTED` 的文案改为:`Group names must contain at least one Latin letter, digit or symbol — for example, 请假Leave. Add one and try again.` / `分组名称需至少包含一个拉丁字母、数字或符号,例如「请假Leave」。请补充后重试。` 与后端兜底串(`must include at least one ASCII letter, digit, or symbol character`)同义、无内部术语。**带一个通过例**是刻意的:门审指出「这条文案对零宽垃圾名和正常中文名是同一句,用户无从判断 `请假Leave` 是能建成的」——只说规则不给例子仍然不闭合那半句。该句描述**今天**的行为;若 #5907 放宽名称规则,这句话必须一起改(已在代码注释里点名)。
+
+### 5.7 P3-3 —— 归档/解档后按服务端顺序重读
+
+服务端 `ORDER BY (archived_at IS NOT NULL), sort_order NULLS LAST, archived_at DESC NULLS LAST, name`(`ApprovalTemplateGroupService.ts:222`);归档置 `sort_order = NULL`、解档取 `MAX+1` ⇒ 两个动作都**移动行**。修法取门审给的第一条:`onArchive`/`onUnarchive` 成功后 `await loadGroups()`,让**服务端是唯一排序权威**——本地复排那个四键比较器会是又一个「更窄的同类物」。**重命名不重读**:改名按钮只对**活跃**行渲染,活跃行由唯一非空 `sort_order` 完全定序,`name`(最后一个键)永远轮不到决定它们的顺序。
+
+### 5.8 残留 / 已知代价(登记,不藏)
+
+1. `SessionOrgHostKey` 住在 `SessionOrgSwitcher.vue` 的普通 `<script>` 块里(而不是一个独立模块),理由见 §5.1;代价是这个展示组件现在多了一个非组件导出。
+2. host 模式下 child 的 `pendingRetry` 恒空 ⇒ 被挡住的**写**动作不自动重放(§5.1 已说明为刻意)。
+3. NIT-1 未处理(§5.3)。
+4. 本轮**零新增文件、零 CI 文件改动、零迁移**——`approval-web-guard.yml` / `plugin-tests.yml` / 两个 `vitest.config.ts` / `run-required-web-tests.sh` 字节不变(验证 MD §8.5 机械取证)。
