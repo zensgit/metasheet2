@@ -810,8 +810,9 @@ async function confirmRemove(id: string, name: string, referenceCount?: number):
   // The count is the most recent snapshot of the SAME server fact the delete guard enforces —
   // not a live one. This panel fetches once on mount (below); adding or removing a binding on
   // this same page only mutates local `systems`, so the snapshot can go stale within a session.
-  // When it is > 0 the dialog names it as a likely refusal, not a guaranteed one. Deliberately no
-  // force affordance: force=true is a platform-admin API action this UI does not expose.
+  // When it is > 0 the dialog names it as a likely refusal, not a guaranteed one. No force
+  // affordance: the server has no force path since 2026-09-20 (a referenced source cannot be
+  // deleted; unbind first), so there is nothing to expose.
   if (typeof window !== 'undefined' && !window.confirm(deleteConfirmMessage(name, referenceCount))) return
   if (await store.remove(id)) emit('changed')
 }

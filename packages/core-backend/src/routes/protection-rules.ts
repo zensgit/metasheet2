@@ -5,7 +5,7 @@
  * Provides REST API for protection rule management
  */
 
-import type { Request } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { Router } from 'express';
 import { protectionRuleService } from '../services/ProtectionRuleService';
 import { requireAdminRole } from '../guards/audit-integration';
@@ -40,18 +40,94 @@ const getUserId = (req: Request): string => {
   return String(id);
 };
 
-// Simple in-memory rate limiter: 10 requests per 60s per user+method+path
+// Simple in-memory rate limiter: 10 requests per 60s per user + method + route shape.
+//
+// MEMORY (ADM-18): this Map used to be append-only — the key carried the raw `req.path`, so every
+// distinct `GET /:id` a caller invented opened a new bucket, and nothing ever deleted one. The
+// limiter runs ahead of requireAdminRole (see the ordering note above, kept on purpose), so any
+// authenticated non-admin could grow it without bound with one request per made-up id. Three
+// changes below: the key is narrowed to a fixed set of route shapes, expired buckets are swept
+// lazily, and the bucket count has a hard ceiling.
 const rateLimitStore = new Map<string, number[]>();
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+/** Hard ceiling on distinct buckets held in memory (ADM-18). */
+export const RATE_LIMIT_MAX_KEYS = 10_000;
+/** Sweep at least this often in metered requests, so a steady stream is reclaimed without a timer. */
+const RATE_LIMIT_SWEEP_EVERY_WRITES = 512;
 
-router.use((req, res, next) => {
+let writesSinceSweep = 0;
+let lastSweepAt = 0;
+let lastOverflowWarnAt = 0;
+
+/**
+ * Collapse `req.path` onto this router's own route shapes: '/' (collection), '/:id' (item),
+ * '/evaluate' (the one named action) and '/:other' for anything that matched no route.
+ *
+ * This is a BUCKET-NARROWING change only: paths that used to hold separate quotas now share one,
+ * so a caller can never get MORE requests through than before — `GET /a` and `GET /b` are one
+ * bucket of 10 instead of two. Nothing that was previously limited becomes unlimited, which is
+ * what keeps scripts/verify-sprint2-staging.sh's "11 quick GETs on the collection -> 429" probe
+ * true. It also makes the key space per principal a constant (methods x 4 shapes) instead of
+ * unbounded in caller-chosen ids.
+ */
+function rateLimitRouteShape(path: string): string {
+  const segments = path.split('/').filter(segment => segment.length > 0);
+  if (segments.length === 0) return '/';
+  if (segments.length === 1) return segments[0] === 'evaluate' ? '/evaluate' : '/:id';
+  return '/:other';
+}
+
+/** Drop every bucket whose newest timestamp has fallen out of the window. */
+function sweepExpiredRateLimitKeys(now: number): void {
+  for (const [key, timestamps] of rateLimitStore) {
+    const newest = timestamps[timestamps.length - 1];
+    if (newest === undefined || now - newest >= RATE_LIMIT_WINDOW_MS) {
+      rateLimitStore.delete(key);
+    }
+  }
+  lastSweepAt = now;
+  writesSinceSweep = 0;
+}
+
+export const protectionRulesRateLimit = (req: Request, res: Response, next: NextFunction) => {
+  const now = Date.now();
+  // Lazy reclamation instead of a module-load setInterval (importing this router must not start a
+  // timer); mirrors what MemoryRateLimitStore does in middleware/rate-limiter.ts:45-58, minus the
+  // timer. Whichever trips first: a window has passed, or enough metered requests have accumulated.
+  if (now - lastSweepAt >= RATE_LIMIT_WINDOW_MS || writesSinceSweep >= RATE_LIMIT_SWEEP_EVERY_WRITES) {
+    sweepExpiredRateLimitKeys(now);
+  }
+
   // Bucket by the authenticated principal, falling back to the peer address — never by a header the
   // caller writes, which would let anyone mint a fresh quota per request by changing one string.
   const userId = req.user?.id ? String(req.user.id) : (req.ip || 'unknown');
-  const key = `${userId}:${req.method}:${req.path}`;
-  let timestamps = rateLimitStore.get(key) || [];
-  const now = Date.now();
+  const key = `${userId}:${req.method}:${rateLimitRouteShape(req.path)}`;
+  let timestamps = rateLimitStore.get(key);
+
+  if (timestamps === undefined) {
+    // Only a NEW bucket can grow the map, so the ceiling is checked here and never penalises a
+    // caller that already has one.
+    if (rateLimitStore.size >= RATE_LIMIT_MAX_KEYS) {
+      sweepExpiredRateLimitKeys(now);
+      if (rateLimitStore.size >= RATE_LIMIT_MAX_KEYS) {
+        // Fail OPEN on purpose: this limiter is not the security boundary — requireAdminRole on
+        // every route below is. Refusing traffic or evicting a live bucket to make room would turn
+        // a memory ceiling into an availability bug, so the overflow request is passed through
+        // unmetered and the condition is logged (values-free, once per window).
+        if (now - lastOverflowWarnAt >= RATE_LIMIT_WINDOW_MS) {
+          lastOverflowWarnAt = now;
+          logger.warn('Protection-rules rate-limit table at capacity; passing requests unmetered', {
+            keys: rateLimitStore.size,
+            max_keys: RATE_LIMIT_MAX_KEYS,
+          });
+        }
+        return next();
+      }
+    }
+    timestamps = [];
+  }
+
   // prune
   timestamps = timestamps.filter(ts => now - ts < RATE_LIMIT_WINDOW_MS);
   if (timestamps.length >= RATE_LIMIT_MAX) {
@@ -59,8 +135,27 @@ router.use((req, res, next) => {
   }
   timestamps.push(now);
   rateLimitStore.set(key, timestamps);
+  writesSinceSweep += 1;
   return next();
-});
+};
+
+router.use(protectionRulesRateLimit);
+
+/**
+ * Expose the internal map for testing purposes (mirrors middleware/rate-limiter.ts:75).
+ * Tests read `.size` and call `.clear()`; nothing in src/ may use this.
+ */
+export function _rateLimitStoreForTests(): Map<string, number[]> {
+  return rateLimitStore;
+}
+
+/** Reset the limiter's bookkeeping between tests so sweep state cannot leak across specs. */
+export function _resetRateLimitForTests(): void {
+  rateLimitStore.clear();
+  writesSinceSweep = 0;
+  lastSweepAt = 0;
+  lastOverflowWarnAt = 0;
+}
 
 // Define types for query options
 interface ListRulesOptions {
