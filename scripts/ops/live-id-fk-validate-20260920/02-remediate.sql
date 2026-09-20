@@ -207,6 +207,11 @@ SELECT 'STEP2_CONNECTION_CLEARED' AS step, count(*)::int AS rows FROM upd;
 -- guard skipped: it was re-bound elsewhere, or its target came back to life,
 -- between STEP 0 and STEP 2. (A row deleted meanwhile drops out of the join and
 -- is not counted — nothing was written to it either.)
+-- This also catches the narrow mixed case — a row that passed STEP 1's guard and
+-- then moved before STEP 2 — which would otherwise be left with a receipt that
+-- no longer matches its `connection_id` (and would then fail resolution with
+-- CONNECTION_BINDING_MISMATCH, lib/connection-resolver.cjs:193-200). The STEP 4
+-- abort rolls that receipt back with everything else.
 -- `rows` > 0 makes APPLY=1 abort at STEP 4: re-run 01, then 02 again.
 SELECT 'STEP2_SKIPPED_STALE' AS step,
        count(*)::int AS rows
