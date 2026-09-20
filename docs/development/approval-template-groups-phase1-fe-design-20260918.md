@@ -158,3 +158,17 @@
 **为什么改的是本切片的挂载条件而不是 A-4 的不变量**:A-4 的 I6(「扁平表的分类标签绝不触发分组联查」)是**锁文 §3 的不变量**,
 改写它要 owner 裁;而本面板「恒挂在平铺视图」只是 A-2 单独交付时的入口位置选择(A-4 落地后分组视图才是分组的主场)。
 详见 phase-3 设计 MD §8.4 的三条理由与主从关系表。
+
+#### 第 2 轮(2026-09-20)对上表的再求值 —— D3-1 已实现,但裁决仍未发生
+
+上表「挂载点」行里这半句——「**且第一跳会先撞上分节视图那条不读 `.code` 的通用错误**」——**已不再成立**。
+合流分支第 2 轮把 `TemplateGroupSections.vue` 的 `loadAll()` catch 改成与本面板**同一条分支**
+(`e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED'` → 共享 `SessionOrgSwitcher` → 选 org 后重放被挡的那次加载),
+所以「打开模板中心 → 分组视图」的**第一跳**现在就能到达选择器。
+
+**其余各半句原样成立**:面板自身行为、组件级验收 J、`tr` 传递方式仍一字未改;
+「管理分组」披露开关仍是面板的入口,挂载条件仍是 `canManageTemplates` ∧ `viewMode==='grouped'` ∧ 开关展开。
+
+**这条不是 owner 裁决记录。** owner 就「接受两步入口 vs 把 `SESSION_ORG_REQUIRED` 识别接进分节视图」
+**从未落过字**;第 2 轮只是把后一支实现出来。裁决点仍然开着 —— 详见
+`approval-template-groups-phase3-sections-design-20260918.md` §8.8 的 D3-1 行。

@@ -244,8 +244,11 @@ d302d29569c12cd9d43d16a317c71b955db804b9      # 逐字节相同 ⇒ 切点两侧
 
 A-4 在切点之上有 27 个自己的提交,重放后落地 25 个(2 个因内容已在底座而成为空提交被 git 丢弃:
 A-2 的 exec 行合并已经先做掉了 A-4 的 `fix(ci): collapse duplicated exec lines`,s6a pin 在逐次冲突解决时已重算)。
-机械核对:`git cherry origin/main HEAD` 83 行**全部** `+`(零 `-`,即与 main 零重复);
+机械核对:`git cherry origin/main HEAD` **全部** `+`(零 `-`,即与 main 零重复);
 `origin/main..HEAD` 内部 patch-id 重复数 **0**(A-1 段只出现一次)。
+行数本身不在此处钉死:它随 main 前进、随本分支每一次修复轮自增(写下这句话的提交就会把它 +1),
+所以先前钉的 `83` 在落笔当刻即已过期。**定稿口径 = 对当时的 head 现跑
+`git cherry origin/main <final head> | grep -c '^-'` 必须为 0**,而不是与任何写死的行数比对。
 
 ### 8.2 P1-1 —— 分组客户端收口成单一实现家
 
@@ -260,11 +263,16 @@ A-2 的 exec 行合并已经先做掉了 A-4 的 `fix(ci): collapse duplicated e
 | `listTemplatesBySection` / `reorderApprovalTemplateGroups` | A-4 独有,无 A-2 对手 | — | 原样保留,**含各自的 `USE_MOCK` 分支** |
 
 **为什么保 A-2 版**(这是本次唯一一处「两边契约互斥、必须让一方落空」的取舍):验收 J 的 403 重试流
-(多 org 成员 → `SESSION_ORG_REQUIRED` → 共享选择器 → 重试 → 201)在 `ApprovalTemplateGroupsPanel.vue:135/:155`
-两处 catch 里写的是 `err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED'`;
+(多 org 成员 → `SESSION_ORG_REQUIRED` → 共享选择器 → 重试 → 201)在 `ApprovalTemplateGroupsPanel.vue`
+的 `loadGroups` / `onCreate` 两处 catch 里写的是 `err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED'`
+(此处改用符号锚点:原文写的 `:135/:155` 是从 merge 树的报告里抄来的行号,对本 rebase 树从一开始就是错的);
 A-4 的包装抛的是裸 `Error('API error: <status> <statusText>')`,**没有 `.code` 这个字段**——保 A-4 版
 会把验收 J 的整条重试流变成任何测试都看不见的死码。反方向的代价则是可归零的:
-`TemplateGroupSections.vue` 的 catch 全是 `catch (e: any)` / `catch {}`,只读 `message`,不读 code。
+`TemplateGroupSections.vue` 的 catch 当时全是 `catch (e: any)` / `catch {}`,只读 `message`,不读 code。
+**已于 2026-09-20 第 2 轮修复中变更(门审 D3-1)**:`loadAll()` 的 catch 现在同样判
+`e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED'` 并转入共享选择器,即上面这条
+「反方向代价可归零」的论证只对其余三处 catch(`loadMore` / `moveGroupSection` / `onMoveItem`)继续成立;
+对 `loadAll()` 而言,保 A-2 版已从「代价为零」升级为「必要条件」。详见 §8.8。
 
 ### 8.3 `USE_MOCK` —— 三个收口函数**不**带 mock 短路(明确取舍,非遗漏)
 
@@ -360,3 +368,55 @@ prompt 写「`USE_MOCK` 短路若 A-4 的 spec 需要则以同一 guard 保留�
 `vite build` 通过、`bash -e apps/web/scripts/run-required-web-tests.sh` 退出 0、两条 lane 的 8 个定向 spec 全绿、
 core-backend `tsc --noEmit` 零错。`scripts/dev/atg-exec-line-post-rebase-check.sh` 在本分支 **PASS(exec 行 = 1)**——
 两条 lane 各自 head 上它曾经是红的。
+
+### 8.8 第 2 轮收口(2026-09-20,门审 `impl-gate-A4-on-A2-merge-fix-round1-20260920.md`)
+
+门审判 **DRAFT-READY**,P1 = 0,P2 = 1,P3 = 3,owner 自述项 1。本节逐条记处置;数字与实跑记在验证 MD §16。
+
+| 门审条目 | 处置 | 要点 |
+|---|---|---|
+| **P2-1** A-4 仅存两个客户端函数零线级覆盖 | **已修**(按门审建议 (a)) | `approvalTemplateGroupsClient.spec.ts` 增 2 条用例,覆盖 `listTemplatesBySection` 的查询串与 `reorderApprovalTemplateGroups` 的请求体 / `{groups}` 解包 / 缺键回退。**一处偏离建议的实现细节见下方「(a) 不能照字面复用夹具」。** |
+| **D3-1** 验收 J 页面级入口被收窄 | **已实现**(本 lane 收到的指令是「实现」,**不是** owner 已裁) | `TemplateGroupSections.vue` 的 `loadAll()` catch 改判 `e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED'` → 整段沿用 A-2 面板的机制(选择器 + `loadSessionOrgs()` + 单槽重试 + `switchSessionOrg` 后重放)。**owner 对「两步入口 vs 接进分节视图」的裁决仍未记录**;本轮只是把后者做出来,不代表该裁决已发生。 |
+| **P3-1(a)** 设计 MD `git cherry` = 83 | **已修:删硬数字,不改成新数字** | 该数字自指(写它的提交就把它 +1),任何写死值在落笔当刻即过期 —— 见 §8.1 改后的句子:判据改成「对定稿 head 现跑,`grep -c '^-'` 必须为 0」。 |
+| **P3-1(b)** `ApprovalTemplateGroupsPanel.vue:135/:155` 行号错 | **已修:改符号锚点** | `api.ts` 注释与本文 §8.2 都改成 `loadGroups` / `onCreate` 两处 catch。**不填新行号**:本仓已多次因行号锚点腐烂吃亏,且这两处正是从 merge 树的报告抄进 rebase 树才出的错。 |
+| **P3-2** `approvalTemplateCenterSections` 缺路径过滤点 | **已修** | `approval-web-guard.yml` 的两个 `paths:`(`pull_request` / `push`)各加 `TemplateGroupSections.vue` + `approvalTemplateCenterSections.spec.ts`,并把 token 加进该 workflow 的 vitest 行 —— 整段照 A-2 三个 spec 的先例摆放,含同形的双向子串普查注释。 |
+| **P3-3** `IntegrationRunDetail` 陈旧底座 | **已由 rebase 解决** | 本轮把候选重放到 A-2 的新 head(它已 rebase 到 `origin/main` `123b1d1e54`),`IntegrationRunDetail` 随之回到活 exec 行。解冲突取 **UNION**,三个差集实测为空 —— 见 §8.9。 |
+| **P3-4** exec 行 CI 到达性 | **仍 UNVERIFIED** | 本地仍无法在脚本内跑到第 45 个调用(阻塞点不变、与 `origin/main` 逐字节相同)。关门条件不变:本分支第一次 `web-tests` 绿。 |
+| **P3-5** `vite.config.ts(28,29) TS2769` | **仍是本机环境项** | 本轮复核:`git diff --stat origin/main HEAD -- apps/web/vite.config.ts` 输出 **0 字节**,`vue-tsc -b` 的唯一一条错仍是它。 |
+
+#### (a) P2-1 不能照字面「复用既有真 fetch 夹具」——实测出来的约束
+
+门审建议 (a) 写的是「复用它既有的 `vi.stubGlobal('fetch')` 夹具」。**照字面做会得到两条空转绿的用例**,实测如下:
+
+`api.ts` 的 `USE_MOCK = __APPROVAL_MOCK__ === true || (import.meta.env.DEV && __APPROVAL_MOCK__ !== false)`。
+A-2 的七个 §6 phase-1 函数**没有** `USE_MOCK` 短路(该 spec 文件的抬头注释正是这么写的),所以裸 fetch stub 对它们有效;
+而 `listTemplatesBySection` / `reorderApprovalTemplateGroups` **各自第一行就是 `if (USE_MOCK) return …`**(§8.3 记过这条取舍),
+`DEV` 在 Vitest 下恒 true ⇒ 探针实测 **fetch 调用数 = 0**,函数直接返回 mock 值,URL 根本没被拼出来。
+
+因此这 2 条用例用的是 `__APPROVAL_MOCK__ = false` + `vi.resetModules()` + 动态 `import()`
+(`api.ts` 自己的注释就为「mounted browser harness」写了这条逃生口,仓内先例:
+`apps/web/verification/approval-instance-consistency-race-harness.ts`、`approval-form-builder-mounted-harness.ts`)。
+**连带约束已写进 spec 注释**:动态重导入的模块有**自己的 `ApprovalApiError` 类身份**,所以这 2 条只断言请求与解包,
+绝不对文件顶部静态导入的那个类做 `toBeInstanceOf` —— 错误类契约仍由上面 8 条真 fetch 用例承载。
+
+这不是「另造更窄同类物」:覆盖的是门审点名的同两个函数、同一份文件、同一条 required exec 行;
+偏离的只有「怎么绕过 mock 闸」这一步,而那一步照字面做会使门审要的 mutation 判据(掏空函数 ⇒ 对应用例红)**不可达**。
+
+### 8.9 第 2 轮 rebase 的机械核对(底座 = A-2 新 head)
+
+| 项 | 值 |
+|---|---|
+| A-2 新 head(`gh pr view 5854 --json headRefOid`) | `8d0ecf6b1652892e5f867f5cb97484ee9e00e10d` |
+| 重放命令 | `git rebase --onto 8d0ecf6b16… 4678b01cb6e3ad7ed7179c3a5a44b1fe864f426c` |
+| 冲突 | **1 个 hunk / 1 个文件**:`run-required-web-tests.sh` 的活 exec 行 |
+| 解法 | **token UNION**:保 HEAD(A-2 新 head)侧整段(含 `IntegrationRunDetail` 的 SC-04 注释块),把候选侧独有的 `approvalTemplateCenterSections` 追加到行尾 |
+
+机械断言(口径:`exec npx vitest run` 之后的全部空白分隔字段,减去 `--reporter=dot`;每个 ref 上都先断言 `^exec npx vitest run` 恰 1 行且行尾不是续行符):
+
+- 新活行 **400** 个 token,唯一 **400**
+- `origin/main`.live − 新.live = **空**(`IntegrationRunDetail` 在新活行上,计数 1)
+- A-2 新 head.live − 新.live = **空**
+- A-4 head `879070ef2e`.live − 新.live = **空**
+- 新.live − `origin/main`.live = `{SessionOrgSwitcher.spec.ts, approvalTemplateGroupsClient, ApprovalTemplateGroupsPanel, approvalTemplateCenterSections}`(两 lane 的四个新 token,各 1 次)
+- `git cherry origin/main HEAD`:`-` 行 **0**
+- `git merge-base --is-ancestor 8d0ecf6b16… HEAD` = **YES**(A-2 是逐字节祖先,未被改写);A-2 两份 lane MD 相对底座的 diff **零删除行**(判据:`git diff --numstat 8d0ecf6b16… HEAD -- <两份 phase1-fe MD>` 的第二列全为 0;插入行数随本轮追加的求值小节增长,故不在此钉死)
