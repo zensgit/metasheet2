@@ -17,11 +17,18 @@ import {
 } from '../../src/multitable/automation-approval-template-access'
 import type { QueryFn } from '../../src/multitable/permission-service'
 import type { ApprovalTemplateVisibilityActor } from '../../src/services/ApprovalProductService'
+// ROUND 4: the name rule moved OUT of `ApprovalTemplateGroupService` into a module with zero
+// runtime imports, so `scripts/dev/probe-group-name-rule.mjs` can evaluate it with NO DATABASE and
+// the owner never has to re-type a character class to check it (that re-typing is what produced
+// the 2026-09-20 erratum-3 ruling). The service imports the SAME module; there is one spelling of
+// the rule in the repository. Its pure-computation cases live in
+// `tests/unit/approval-group-name-rule.test.ts`, which runs on the ALWAYS-ON `test (20.x)` lane —
+// this file is DATABASE_URL-gated and therefore cannot be the only home for them.
 import {
   NAME_EDGE_TRIM_CLASS,
   NAME_EDGE_TRIM_CODE_POINT_SET,
   trimNameEdges,
-} from '../../src/services/ApprovalTemplateGroupService'
+} from '../../src/services/approval-template-group-name-rule'
 
 /**
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 real-DB
@@ -657,15 +664,23 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   //     rejected by part (2) — but by its POSITIVE class, not by either exclusion: U+FE0F is
   //     `Mn`, so plain `/[\p{L}\p{N}\p{P}\p{S}]/u` already rejects it. That is why a lone
   //     U+FE0F row CANNOT serve as the witness for exclusion (iii).
-  //   - The last two rows are the ONLY ones that reach part (2)'s two EXCLUSIONS, and each
-  //     reaches exactly one of them. They wrap an excluded codepoint in U+FE0F so the trim
-  //     cannot touch the edges and the excluded codepoint stays INTERNAL:
+  //   - The last two rows are the ONLY ones that reach part (2)'s EXCLUSIONS at all. They wrap an
+  //     excluded codepoint in U+FE0F so the trim cannot touch the edges and the excluded codepoint
+  //     stays INTERNAL:
   //       `U+FE0F U+3164 U+FE0F`  — U+3164 is `Lo` (a visible general category) AND
-  //                                `\p{Default_Ignorable_Code_Point}`. Drop that exclusion and
-  //                                this row alone turns 201.
-  //       `U+FE0F U+2800 U+FE0F`  — U+2800 is `So` and is NOT default-ignorable; it is the ONE
-  //                                explicit exception in the predicate. Drop it and this row
-  //                                alone turns 201.
+  //                                `\p{Default_Ignorable_Code_Point}`.
+  //       `U+FE0F U+2800 U+FE0F`  — U+2800 is `So` and is NOT default-ignorable; it is the one
+  //                                member of `BLANK_GLYPH_CODE_POINTS` no other conjunct covers.
+  //                                Drop the list and THIS row alone turns 201 (measured,
+  //                                MUT-R4-A).
+  //     ROUND-4 CORRECTION. Round 3 ended these two lines with "Drop that exclusion and this row
+  //     alone turns 201" for BOTH rows. That is now false for the U+3164 row, and it is round 4's
+  //     own doing: `BLANK_GLYPH_CODE_POINTS` enumerates the four Hangul fillers, so U+3164 is
+  //     rejected by the list as well as by `Default_Ignorable`, and deleting the
+  //     `Default_Ignorable` conjunct leaves 31/31 here and 12/12 in the unit file green (mutation
+  //     MUT-R4-B). The conjunct is kept as future-proofing, not as a load-bearing guard; which
+  //     conjuncts actually carry behaviour is MEASURED by the NECESSITY case in
+  //     `tests/unit/approval-group-name-rule.test.ts`, not claimed here.
   //     Round 2 had no such row: after the trim set grew to include U+3164/U+115F/U+1160/U+2800,
   //     every EDGE-position instance of those codepoints is consumed by part (1) before part (2)
   //     is reached, so the owner's two pending exclusions (gate round 2 §9 item 1) had probe
@@ -690,6 +705,47 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     },
   ]
 
+
+  // ── Round-4 fixture: the owner's 2026-09-20 erratum-3 ruling
+  //
+  // 「暂缓定案:支持两层规则,但先提交准确字符规则及上述反例测试」, written after an own-machine NO-DB
+  // probe of the rule AS THE DESIGN DOCUMENTS SPELLED IT (`[\p{L}\p{N}\p{P}\p{S}]`) returned `true`
+  // for U+3164 / U+115F / U+2800 — 「字符属于这些类别,不等于可见」. The measurement is right; the
+  // documents were what was wrong (the shipped predicate already excluded Default_Ignorable and
+  // U+2800). Round 4 therefore does three things, of which this fixture is one:
+  //   (1) the predicate is now written as an explicit conjunction in ONE module with no runtime
+  //       imports — `src/services/approval-template-group-name-rule.ts`;
+  //   (2) `scripts/dev/probe-group-name-rule.mjs` evaluates THAT module with no database, so the
+  //       owner's next check imports the rule instead of re-typing it;
+  //   (3) every code point named in the ruling gets its OWN row here, through the real route.
+  //
+  // WHY EACH CODE POINT APPEARS TWICE. Eight of the thirteen are in the EDGE-TRIM set, so a BARE
+  // one-code-point name is emptied by the trim and never reaches the visible-character rule at all
+  // — such a row has zero discriminating power over the predicate the owner asked about
+  // (`feedback_failclosed_doors_cover_for_each_other`). Each row therefore also appears WRAPPED in
+  // U+FE0F, which is deliberately NOT in the trim set, putting the code point in an INTERNAL
+  // position the trim cannot touch. Measured consequence, recorded because it is the whole point:
+  // deleting U+2800 from `BLANK_GLYPH_CODE_POINTS` turns EXACTLY the wrapped U+2800 row 201 and
+  // leaves its bare twin green (mutation MUT-R4-A, verification MD §31).
+  //
+  // `tests/unit/approval-group-name-rule.test.ts` asserts the same thirteen against the rule
+  // module directly, including which CONJUNCT decides each one — a distinction this file cannot
+  // make, because both rejection stages are the same 400 `GROUP_NAME_REQUIRED` over HTTP.
+  const R4_RULING_CODE_POINTS: Array<{ label: string; codePoint: number; provenance: string }> = [
+    { label: 'U+3164 HANGUL FILLER', codePoint: 0x3164, provenance: "owner 2026-09-20" },
+    { label: 'U+115F HANGUL CHOSEONG FILLER', codePoint: 0x115f, provenance: "owner 2026-09-20" },
+    { label: 'U+2800 BRAILLE PATTERN BLANK', codePoint: 0x2800, provenance: "owner 2026-09-20" },
+    { label: 'U+00AD SOFT HYPHEN', codePoint: 0x00ad, provenance: 'gate r1 P2-1' },
+    { label: 'U+180E MONGOLIAN VOWEL SEPARATOR', codePoint: 0x180e, provenance: 'gate r1 P2-1' },
+    { label: 'U+034F COMBINING GRAPHEME JOINER', codePoint: 0x034f, provenance: 'gate r1 P2-1' },
+    { label: 'U+FE0F VARIATION SELECTOR-16', codePoint: 0xfe0f, provenance: 'gate r1 P2-1' },
+    { label: 'U+1160 HANGUL JUNGSEONG FILLER', codePoint: 0x1160, provenance: 'round 4' },
+    { label: 'U+FFA0 HALFWIDTH HANGUL FILLER', codePoint: 0xffa0, provenance: 'round 4' },
+    { label: 'U+3000 IDEOGRAPHIC SPACE', codePoint: 0x3000, provenance: 'round 4' },
+    { label: 'U+061C ARABIC LETTER MARK', codePoint: 0x061c, provenance: 'round 4' },
+    { label: 'U+2062 INVISIBLE TIMES', codePoint: 0x2062, provenance: 'round 4' },
+    { label: 'U+E0001 LANGUAGE TAG', codePoint: 0xe0001, provenance: 'round 4' },
+  ]
   // The migration's trim set, spelled out ONE MEMBER PER ROW. Gate round 1 P3-7: only U+200B had
   // been shown to be load-bearing (by an isolated mutation); the other nine were covered solely
   // by a loop whose assertion is a disjunction at the `it()` level. Each row below is asserted
@@ -922,6 +978,99 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
       [org, okId],
     )
     expect(unchanged.rows[0].name).toBe(`报销 ${TS}`)
+  })
+
+  it('Erratum 3 candidate ROUND-4 (owner ruling 2026-09-20): each code point the ruling names is 400 GROUP_NAME_REQUIRED through the production route — bare AND wrapped so the visible-character rule is actually reached — and zero rows are written', async () => {
+    const org = trackOrg(`atg-nr-r4-${TS}`)
+    const admin = await tok(base, `nr-r4-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    // One array comparison for all 26 submissions (13 bare + 13 wrapped). A per-iteration `expect`
+    // aborts at the first failure and names one row, so a mutation that flips several would be
+    // reported as if it flipped one — and "which code points regressed" is exactly the fact the
+    // owner asked to be able to read off this suite.
+    const observed: string[] = []
+    const expected: string[] = []
+    for (const { label, codePoint } of R4_RULING_CODE_POINTS) {
+      for (const shape of ['bare', 'wrapped in U+FE0F (internal — the trim cannot reach it)'] as const) {
+        const character = String.fromCodePoint(codePoint)
+        const value = shape === 'bare' ? character : `\uFE0F${character}\uFE0F`
+        const res = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: value } })
+        const body = (await res.json()) as { error?: { code?: string } }
+        observed.push(`${label} [${shape}] -> ${res.status} ${body.error?.code ?? 'CREATED'}`)
+        expected.push(`${label} [${shape}] -> 400 GROUP_NAME_REQUIRED`)
+      }
+    }
+    expect(observed).toEqual(expected)
+
+    // The gate's judgement in round 1 had TWO halves — POST 201 *and* the LIST endpoint handing the
+    // invisible row back to the admin console. Both are asserted, not just the status.
+    const list = await httpReq(base, '/api/approval-template-groups', admin)
+    expect(list.status).toBe(200)
+    expect(((await list.json()) as { groups: unknown[] }).groups, 'no invisible-named group may be listed').toHaveLength(0)
+    const written = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM approval_template_groups WHERE org_id = $1`,
+      [org],
+    )
+    expect(written.rows[0].n, 'zero rows written').toBe(0)
+
+    // Positive control on the SAME org and token — otherwise all 26 rows above are consistent with
+    // "the request never reached `requireName`" (which is precisely how gate round 3's own timing
+    // harness first produced 403s that looked like clean data).
+    const ok = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `报销 ${TS}` } })
+    expect(ok.status, 'positive control must create').toBe(201)
+    const okId = ((await ok.json()) as { group: { id: string } }).group.id
+
+    // RENAME leg, on the ONE code point whose rejection depends on the explicit blank-glyph list
+    // rather than on a Unicode property (U+2800, internal so the trim cannot consume it): "both
+    // paths share the rule" is a source-text claim until a rename measures it.
+    const renamed = await httpReq(base, `/api/approval-template-groups/${okId}`, admin, {
+      method: 'PATCH',
+      body: { name: '\uFE0F\u2800\uFE0F' },
+    })
+    expect(renamed.status, 'rename to U+FE0F U+2800 U+FE0F').toBe(400)
+    expect(((await renamed.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_REQUIRED')
+    const unchanged = await query<{ name: string }>(
+      `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+      [org, okId],
+    )
+    expect(unchanged.rows[0].name, 'the rejected rename left the stored name alone').toBe(`报销 ${TS}`)
+  })
+
+  it('Erratum 3 candidate ROUND-4: the six POSITIVE controls the owner named — 请假 / 採購 / 日本語 / 한국어 / 😀 / internal zero-width — all create 201 and read back byte-for-byte', async () => {
+    const org = trackOrg(`atg-nr-r4pos-${TS}`)
+    const admin = await tok(base, `nr-r4pos-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    // 한국어 is the row that separates "Hangul is rejected" from "the Hangul FILLERS are rejected":
+    // U+3164 / U+115F / U+1160 / U+FFA0 are all Hangul-block code points, so a rule that keyed off
+    // the block instead of `Default_Ignorable_Code_Point` would pass every rejection row above and
+    // fail exactly here. 😀 is a surrogate pair — one code point, two UTF-16 units — so it is also
+    // the row that would red if the length gate or the trim's pairing arithmetic regressed.
+    const positives: Array<{ label: string; value: string }> = [
+      { label: '请假 (simplified CJK — the product OWN placeholder text)', value: '请假' },
+      { label: '採購 (traditional CJK)', value: '採購' },
+      { label: '日本語', value: '日本語' },
+      { label: '한국어 (real Hangul syllables, NOT the fillers)', value: '한국어' },
+      { label: '😀 (astral emoji — a surrogate pair)', value: '😀' },
+      { label: 'ASCII around an INTERNAL U+200B zero-width', value: 'a\u200Bb' },
+    ]
+
+    const observed: string[] = []
+    for (const { label, value } of positives) {
+      const res = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: value } })
+      const body = (await res.json()) as { group?: { id: string; name: string } }
+      if (res.status !== 201 || !body.group) {
+        observed.push(`${label} -> ${res.status} REJECTED`)
+        continue
+      }
+      const row = await query<{ name: string }>(
+        `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+        [org, body.group.id],
+      )
+      // Byte-for-byte on the STORED value, not on the response: an internal U+200B dropped
+      // somewhere in the round-trip would satisfy a normalising comparison and fail this one.
+      observed.push(`${label} -> ${res.status} ${row.rows[0]?.name === value ? 'STORED-VERBATIM' : 'MANGLED'}`)
+    }
+    expect(observed).toEqual(positives.map(({ label }) => `${label} -> 201 STORED-VERBATIM`))
   })
 
   it('Erratum 3 candidate v2 RESIDUE, asserted as a residue and not as a rejection: the DB CHECK does NOT reject the NEITHER-SET codepoints — a direct INSERT of each one SUCCEEDS and the row reads back byte-for-byte', async () => {

@@ -48,13 +48,15 @@
  * was refuted by gate round 8 P2-1: `btrim/2`'s default trim set is the ASCII space alone, so an
  * all-zero-width name landed a 201. On THIS candidate branch the `name` arm of
  * `mapGroupConstraintError`'s 23514 mapping is unreachable through the production route (see
- * `requireName`, whose trim set is a strict superset of the DB set) — see that function's doc
- * comment for why the arm is being KEPT (not deleted) until the owner actually confirms.
+ * `requireName`, which delegates to `./approval-template-group-name-rule`, whose edge-trim set is
+ * a strict superset of the DB set) — see `mapGroupConstraintError`'s own doc comment for why the
+ * arm is being KEPT (not deleted) until the owner actually confirms.
  */
 
 import { randomUUID } from 'node:crypto'
 import { query, transaction } from '../db/pg'
 import { ServiceError } from './ApprovalBridgeService'
+import { classifyGroupName } from './approval-template-group-name-rule'
 
 export interface ApprovalTemplateGroupRow {
   id: string
@@ -180,10 +182,11 @@ const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonbla
  *    visible character) passes the CHECK, and a name with no glyph-carrying character is
  *    short-circuited by `requireName` with 400 `GROUP_NAME_REQUIRED` before any DB round-trip.
  *    That is a BOUNDED statement, not a closure claim (gate round 1 P2-1 falsified the previous
- *    unbounded version of this sentence): `requireName`'s trim set is a strict SUPERSET of the
+ *    unbounded version of this sentence): the rule module's edge-trim set is a strict SUPERSET of the
  *    DB's, so nothing it returns can violate the CHECK, and its visible-character requirement
  *    rejects every value the suite exercises — but the predicate carries its own disclosed
- *    residue (U+2800 is the one explicit exception; see `requireName`'s own doc). This branch of
+ *    residue (U+2800 is the one member of `BLANK_GLYPH_CODE_POINTS` that no other conjunct
+ *    already excludes; see `./approval-template-group-name-rule`'s header). This branch of
  *    the `if` below, and `atg_name_nonblank` in the Set above, are being KEPT — not deleted — on
  *    purpose: deleting them would be an unreviewed narrowing of this mapping's surface bundled
  *    into a candidate that has not been confirmed, which is exactly the kind of unilateral call
@@ -249,254 +252,55 @@ function mapGroupConstraintError(error: unknown): unknown {
 // load-bearing, not decorative.
 
 /**
- * Application-layer name rule — Erratum 3 CANDIDATE, REDRAFT v2 + ROUND-2 FIX (PROPOSED
- * 2026-09-20, pending owner confirmation; NOT ratified, NOT authorized, NOT merged).
+ * Application-layer name rule — Erratum 3 CANDIDATE, ROUND-4 REVISION (PROPOSED 2026-09-20,
+ * pending owner confirmation; NOT ratified, NOT authorized, NOT merged).
  *
- * WHY IT CHANGED IN ROUND 2. The REDRAFT v2 version of this function was a pure MIRROR of the
- * migration's `atg_name_nonblank` trim set (JS `\s` plus U+200B/200C/200D/2060) and the code
- * around it claimed that made "a blank/invisible name … a typed 400 `GROUP_NAME_REQUIRED`". Gate
- * round 1 of that candidate (`impl-gate-A-slice1-name-rule-candidate-round1-20260920.md`, P2-1)
- * falsified the QUANTIFIER, not the mirror: seven codepoints that are in NEITHER set — U+00AD,
- * U+180E, U+2800, U+3164, U+034F, U+FE0F, U+115F — went through the real HTTP endpoint with
- * status 201 and came back out of the list endpoint, i.e. a group whose name renders as nothing.
- * A mirror can never fix that, because the thing being mirrored does not cover them either.
- * So the application layer stops being a mirror and becomes the PRIMARY rule, in two parts:
+ * WHAT MOVED IN ROUND 4, AND WHY. The rule itself — length cap, edge trim, "at least one visible
+ * character" — is unchanged in behaviour; it now lives in `./approval-template-group-name-rule`,
+ * a module with ZERO runtime imports, and this file calls it. The reason is the owner's
+ * 2026-09-20 ruling on erratum 3: 「暂缓定案:支持两层规则,但先提交准确字符规则及上述反例测试」,
+ * written after an own-machine NO-DATABASE probe of the rule as the round-3 DOCUMENTS spelled it
+ * (`[\p{L}\p{N}\p{P}\p{S}]`) returned `true` for U+3164 / U+115F / U+2800 —
+ * 「字符属于这些类别,不等于可见」. The owner was right about the prose and the prose was not the
+ * code: the shipped round-3 predicate already excluded `\p{Default_Ignorable_Code_Point}` and
+ * U+2800. The fix for that class of disagreement is not better prose — it is making the rule
+ * IMPORTABLE without a database, so `scripts/dev/probe-group-name-rule.mjs`, the real-DB suite and
+ * this service all evaluate the same function objects. This file therefore no longer spells the
+ * predicate at all; see that module's header for the predicate, its four conjuncts, which of them
+ * can flip a verdict today, and the disclosed non-closure.
  *
- *  (1) EDGE TRIM — cosmetic, and still a strict SUPERSET of the DB trim set. `String.prototype
- *      .trim`'s own set (JS `\s`: space, TAB, CR, LF, VT, FF, U+00A0, U+1680, U+2000-U+200A,
- *      U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF) plus an EXPLICIT invisible set:
- *      U+200B/200C/200D/2060 (the DB set's members JS `\s` does not cover) and U+00AD, U+180E,
- *      U+034F, U+2800, U+3164, U+115F, U+1160 (blank-rendering codepoints — the gate's seven,
- *      plus U+1160 which is U+3164's Jungseong sibling). Because this set contains the DB set,
- *      every string this function RETURNS still satisfies `atg_name_nonblank` by construction.
- *      Variation selectors U+FE00-U+FE0F are deliberately NOT in the trim set: trimming them
- *      would rewrite a trailing emoji's presentation ('报销☺️' → '报销☺'). They cannot make a
- *      name acceptable on their own, because part (2) rejects them.
+ * WHAT THE OWNER'S RULING DOES NOT AUTHORIZE, restated at the call site: the two `org_id` CHECKs
+ * and the migration are untouched by round 4 (`git diff` on the migration file is empty), the lock
+ * text is unchanged, and the rule stays a CANDIDATE.
  *
- *  (2) VISIBLE-CHARACTER REQUIREMENT — the load-bearing half, and deliberately NOT an
- *      enumeration (`feedback_trap_enumeration_does_not_converge`: a reject LIST does not
- *      converge, so the rule is stated positively). The trimmed name must contain at least one
- *      character that is BOTH (a) in `\p{L}\p{N}\p{P}\p{S}` — a general category that can
- *      carry a glyph — AND (b) not in `\p{Default_Ignorable_Code_Point}` and not U+2800.
- *
- *      Both exclusions are MEASURED, not assumed. `/[\p{L}\p{N}\p{P}\p{S}]/u` on its own does
- *      NOT close the gate's seven: three of them carry a visible general category — U+2800
- *      BRAILLE PATTERN BLANK is `So`, U+3164 HANGUL FILLER and U+115F HANGUL CHOSEONG FILLER are
- *      `Lo` — so that class alone ACCEPTS them (probe and output recorded in the verification MD
- *      §29.1). `Default_Ignorable_Code_Point` is a Unicode property, not a list this file
- *      maintains, and it covers U+00AD / U+180E / U+034F / U+FE0F / U+3164 / U+115F / U+1160 /
- *      U+061C / U+2065 / the variation-selector and tag blocks without enumerating any of them.
- *
- *      DISCLOSED RESIDUE, stated as a residue and not as closure: U+2800 is NOT
- *      default-ignorable, so it is the ONE explicit exception in this predicate. Any OTHER
- *      codepoint whose general category is L/N/P/S but which renders blank in some font is still
- *      accepted here. This rule is not claimed to be closed over "everything invisible"; it is
- *      claimed to reject (i) everything JS `\s` covers, (ii) the DB trim set, (iii) every
- *      default-ignorable codepoint, (iv) every Mark/Control/Separator-only name, and (v) U+2800.
- *
- *      THAT LIST DESCRIBES THE PREDICATE, NOT THE TEST SUITE — gate round 2 P3-2. Round 2 ended
- *      the sentence with "each of which the real-DB suite asserts through the production route".
- *      (iii) and (iv) are infinite classes; no suite can assert "each" of them, so that was a
- *      false coverage claim attached to correct behaviour. The predicate IS closed over them by
- *      construction — (iii) is a Unicode property named in the pattern itself, (iv) follows from
- *      requiring a character in L/N/P/S — and that construction is what the claim rests on.
- *      What the suite actually SUBMITS through the production route and observes as 400
- *      `GROUP_NAME_REQUIRED`: the empty string, U+0020, TAB+LF, U+3000, U+200B, U+FEFF, U+00A0,
- *      and eleven NEITHER-SET names built from U+00AD / U+180E / U+2800 / U+3164 / U+034F /
- *      U+FE0F / U+115F. Two of those eleven exist specifically so that exclusions (iii) and (v)
- *      each have a witness of their own: U+FE0F around an INTERNAL U+3164 reaches (iii) and
- *      turns 201 if it is dropped, U+FE0F around an INTERNAL U+2800 does the same for (v).
- *      Everything else in (i)-(v) follows from the predicate, not from a measurement.
- *
- *  (3) LENGTH — `GROUP_NAME_MAX_LENGTH` characters, counted in CODE POINTS (`[...s].length`,
- *      which is how PostgreSQL counts `char_length`), checked BEFORE any DB round-trip. Gate
- *      round 1 P3-1: `uq_atg_org_name_active` is a btree over `(org_id, name)` and a long
- *      incompressible name makes the index tuple exceed btree's 2704-byte maximum, raising
- *      `54000` — a code `mapGroupConstraintError` does not map, so the route's
- *      `handleApprovalsError` turned it into an opaque 500. The column itself is `text`
- *      (UNBOUNDED — there is no column-derived limit to read off the migration), so the cap is an
- *      application-layer CANDIDATE decision, derived rather than invented: 255 is this
- *      repository's standing convention for a human-typed display name (`varchar(255)` on
- *      `roles.name`, `permissions.name`, `views.name`, …), and it is provably clear of the btree
- *      limit — 255 codepoints are at most 1020 UTF-8 bytes, leaving ~1.6 KB of the 2704-byte
- *      index tuple for `org_id` and per-tuple overhead. RESIDUE, disclosed: a pathologically long
- *      `org_id` could still reach 54000, but `org_id` is `req.authenticatedTenantId` (never
- *      caller-supplied), so that is not a route-reachable input. The lock's §2 names no length
- *      clause, so this is an ADDITION awaiting the owner's word with the rest of erratum 3.
- *
- * IT IS A TRIM, NOT A REJECT, for the edges: U+200B + 'HR' + U+200B becomes `'HR'` and is
- * created, exactly as `'  HR  '` already did, and an INTERNAL invisible ('a' + U+200B + 'b',
- * 'a' + U+2800 + 'b') is preserved verbatim — the DB predicate only looks at the edges too.
- * Consequence, accepted and DISCLOSED rather than silently handled: 'H' + U+200B + 'R' and
- * `'HR'` are DIFFERENT names under `uq_atg_org_name_active` while rendering identically. Option
- * (i) accepts internal invisibles by design; gate round 1 P3-5 carries this forward as an open,
- * accepted consequence, not a defect.
- *
- * ASYMMETRY WITH THE DB LAYER, stated as behaviour: an NBSP-only name (U+00A0 — in JS `\s`, NOT
- * in the owner's DB trim set) and each of the gate's seven codepoints are rejected HERE with 400
- * even though a DIRECT SQL insert of the same value SUCCEEDS. That is the disclosed residue of
- * the DB CHECK, measured by the real-DB suite's RESIDUE cases rather than argued; it is not a
- * defect in this function, and it is the reason this function — not the CHECK — is the primary
- * rule.
+ * RESIDUE, carried forward verbatim from round 3 because it is still true: the edge trim is a
+ * TRIM, not a REJECT — U+200B + 'HR' + U+200B becomes `'HR'`, and an INTERNAL invisible
+ * ('a' + U+200B + 'b') is preserved, so 'H' + U+200B + 'R' and `'HR'` are DIFFERENT names under
+ * `uq_atg_org_name_active` while rendering identically (gate round 1 P3-5, an accepted
+ * consequence). And the DB layer is WEAKER than this one: an NBSP-only name, and each blank code
+ * point outside the CHECK's ten-member trim set, is rejected HERE with 400 even though a DIRECT
+ * SQL insert of the same value SUCCEEDS — measured by the suite's RESIDUE cases. That asymmetry is
+ * the reason this function, not the CHECK, is the primary rule.
  */
-/**
- * ROUND-3 FIX (gate round 2 P1-1, `impl-gate-A-slice1-name-rule-candidate-round2-20260920.md`):
- * the edge trim is a LINEAR SCAN, not a regular expression, and the LENGTH gate runs FIRST.
- *
- * Round 2 spelled the trim as `new RegExp('^[CLASS]+|[CLASS]+$', 'gu')`. A greedy repetition
- * anchored at the END has to retry from every start offset whenever the last character is not in
- * the class, so a name shaped `<visible><long run of class members><visible>` cost time QUADRATIC
- * in the submitted length, on a single-threaded event loop, with no bound applied before it. Two
- * independent changes close that, and EACH ONE CLOSES IT ALONE — both are kept, as defence in
- * depth, and each has its own regression case in the real-DB suite (verification MD §30 records
- * which case reds under which half, because a single case could not tell them apart):
- *
- *   (1) `trimNameEdges` walks the string inward from both ends with an index loop and a Set
- *       membership test. It is O(n) and cannot backtrack, because there is no pattern to
- *       backtrack. The trim SET is unchanged from round 2 — the suite asserts the Set against
- *       round 2's character class code point by code point across the whole Unicode range — so
- *       no name that was accepted before is rejected now, and none that was trimmed is kept.
- *   (2) The length gate is applied to the value AS SUBMITTED, ahead of the trim and ahead of the
- *       visible-character class test, so neither of those ever walks more than
- *       `GROUP_NAME_MAX_LENGTH` code points on the accepting path.
- *
- * BEHAVIOUR CHANGE THIS INTRODUCES, stated on its own rather than folded into (2): round 2
- * applied the cap to the TRIMMED name, so `'\u200B\u3000' + <255 visible> + '\uFEFF\u2060'`
- * (259 submitted code points, 255 after trimming) was accepted. It is now a 400
- * `GROUP_NAME_TOO_LONG`, because the cap reads what the caller sent. Trimming is otherwise
- * unaffected: a padded name whose SUBMITTED length is within the cap is still trimmed, and still
- * collides with its untrimmed twin under `uq_atg_org_name_active` (409 `GROUP_NAME_TAKEN`) —
- * the suite pins both directions, so "the cap moved" and "the trim stopped running" cannot be
- * confused for each other. This is an owner decision point ADDITIONAL to the cap itself; it is
- * listed as its own item in the verification MD §30, not merged into the round-2 cap item.
- */
-
-/**
- * The edge-trim set as an EXPLICIT code-point Set — the round-2 character class, enumerated.
- * Membership is a `Set.has`, which is what makes `trimNameEdges` linear.
- *
- * Its members, by provenance (the SET is unchanged from round 2; only its spelling is):
- *   (a) everything `String.prototype.trim` strips — JS `\s`, which already includes the line
- *       terminators: TAB, LF, VT, FF, CR, U+0020, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029,
- *       U+202F, U+205F, U+3000, U+FEFF.
- *   (b) the `atg_name_nonblank` trim-set members JS `\s` does not cover: U+200B, U+200C, U+200D,
- *       U+2060. Because (b) is present, every NON-EMPTY string `trimNameEdges` returns still
- *       satisfies `atg_name_nonblank` by construction — its first and last code points are
- *       outside a superset of the CHECK's own trim set, so the CHECK's `btrim` cannot empty it.
- *       (It can return the empty string, for an all-trim-set input; `requireName` rejects that
- *       with 400 `GROUP_NAME_REQUIRED` before any DB round-trip, so no empty name is offered to
- *       the CHECK.)
- *   (c) the blank-rendering codepoints gate round 1 P2-1 landed as 201 rows: U+00AD, U+180E,
- *       U+034F, U+2800, U+3164, U+115F, plus U+1160 (U+3164's Jungseong sibling). U+FE0F is
- *       deliberately NOT here — trimming it would rewrite a trailing emoji's presentation
- *       ('报销☺️' → '报销☺'); part (2) of the rule rejects an FE0F-only name instead.
- */
-const NAME_EDGE_TRIM_CODE_POINTS: ReadonlySet<number> = new Set<number>([
-  // (a) String.prototype.trim's own set
-  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x00a0, 0x1680,
-  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
-  0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
-  // (b) DB trim-set members JS \s misses
-  0x200b, 0x200c, 0x200d, 0x2060,
-  // (c) gate round 1 P2-1's blank-rendering codepoints + U+1160
-  0x00ad, 0x180e, 0x034f, 0x2800, 0x3164, 0x115f, 0x1160,
-])
-
-/**
- * Round 2's character class, kept ONLY as the specification the Set above is checked against by
- * the suite's equivalence case (it sweeps every code point in 0..0x10FFFF). NOTHING at runtime
- * builds a pattern from it. DO NOT reintroduce a quantifier over it (`[CLASS]+`) — that shape,
- * anchored at `$`, is exactly the round-2 P1.
- */
-export const NAME_EDGE_TRIM_CLASS =
-  '\\s\\u200B\\u200C\\u200D\\u2060\\u00AD\\u180E\\u034F\\u2800\\u3164\\u115F\\u1160'
-
-/** Exported for the equivalence case only; the runtime path reads the Set, never this. */
-export const NAME_EDGE_TRIM_CODE_POINT_SET: ReadonlySet<number> = NAME_EDGE_TRIM_CODE_POINTS
-
-/** Characters that carry no glyph of their own — see part (2) above. U+2800 is the one explicit member. */
-const NAME_INVISIBLE_CLASS = '\\s\\u200B\\u200C\\u200D\\u2060\\u2800\\p{Default_Ignorable_Code_Point}'
-
-/**
- * At least one glyph-carrying character: in L/N/P/S and not invisible. A negative lookahead over
- * a SINGLE character class with no repetition — the engine advances one position per attempt and
- * cannot backtrack into a repetition, so this is linear in the length of the string it is given,
- * and `requireName` only ever gives it a string already bounded by `GROUP_NAME_MAX_LENGTH`.
- */
-const NAME_VISIBLE_CHAR_PATTERN = new RegExp(`(?![${NAME_INVISIBLE_CLASS}])[\\p{L}\\p{N}\\p{P}\\p{S}]`, 'u')
-
-/** Code points, not UTF-16 units — see part (3) above for the derivation. */
-const GROUP_NAME_MAX_LENGTH = 255
-
-/**
- * Code points, counted without materialising an array. `[...s].length` allocates one element per
- * code point, and `express.json`'s 10mb body limit means `s` is caller-controlled in size, so the
- * spread form turns a long name into a multi-million-element allocation before the cap can reject
- * it. This walks UTF-16 units and pairs surrogates, and it counts the WHOLE string: the number
- * that reaches `details.actualLength` is the real length, not a short-circuited "at least".
- */
-function countCodePoints(value: string): number {
-  let count = 0
-  for (let i = 0; i < value.length; i += 1) {
-    const unit = value.charCodeAt(i)
-    if (unit >= 0xd800 && unit <= 0xdbff && i + 1 < value.length) {
-      const next = value.charCodeAt(i + 1)
-      if (next >= 0xdc00 && next <= 0xdfff) i += 1
-    }
-    count += 1
-  }
-  return count
-}
-
-/**
- * Strip `NAME_EDGE_TRIM_CODE_POINTS` members from both ends. Exported so the suite can time it
- * DIRECTLY: the route-level regression case cannot tell the linear trim apart from the length
- * gate, because either one alone keeps the route fast (gate round 2 §2.2's shapes).
- *
- * Surrogate pairs are stepped over as single code points in BOTH directions — no trim-set member
- * is astral today, but a right-to-left scan that read a trailing low surrogate on its own would
- * be doing arithmetic no current case discriminates, which is how a future member becomes a
- * silent mangling bug.
- */
-export function trimNameEdges(value: string): string {
-  let start = 0
-  let end = value.length
-  while (start < end) {
-    const cp = value.codePointAt(start) as number
-    if (!NAME_EDGE_TRIM_CODE_POINTS.has(cp)) break
-    start += cp > 0xffff ? 2 : 1
-  }
-  while (end > start) {
-    let cpStart = end - 1
-    const unit = value.charCodeAt(end - 1)
-    if (unit >= 0xdc00 && unit <= 0xdfff && end - 2 >= start) {
-      const prev = value.charCodeAt(end - 2)
-      if (prev >= 0xd800 && prev <= 0xdbff) cpStart = end - 2
-    }
-    const cp = value.codePointAt(cpStart) as number
-    if (!NAME_EDGE_TRIM_CODE_POINTS.has(cp)) break
-    end = cpStart
-  }
-  return start === 0 && end === value.length ? value : value.slice(start, end)
-}
-
 function requireName(name: unknown): string {
-  const submitted = typeof name === 'string' ? name : ''
-  // LENGTH FIRST (round-3 fix, part 2): bound the input before any per-character rule walks it.
-  const length = countCodePoints(submitted)
-  if (length > GROUP_NAME_MAX_LENGTH) {
+  const verdict = classifyGroupName(name)
+  // Discriminated on `stage`, not on `ok`: this package compiles with `strict: false`, under which
+  // TypeScript does not narrow a union by a boolean-literal discriminant (measured — the `ok`
+  // version failed `tsc --noEmit` with TS2339 on every field of the rejecting members).
+  if (verdict.stage === 'accepted') return verdict.name
+  if (verdict.stage === 'length') {
     throw new ServiceError(
-      `name must be at most ${GROUP_NAME_MAX_LENGTH} characters`,
+      `name must be at most ${verdict.maxLength} characters`,
       400,
       'GROUP_NAME_TOO_LONG',
-      { maxLength: GROUP_NAME_MAX_LENGTH, actualLength: length },
+      { maxLength: verdict.maxLength, actualLength: verdict.actualLength },
     )
   }
-  const trimmed = trimNameEdges(submitted)
-  if (!trimmed || !NAME_VISIBLE_CHAR_PATTERN.test(trimmed)) {
-    throw new ServiceError('name is required', 400, 'GROUP_NAME_REQUIRED')
-  }
-  return trimmed
+  // Both remaining stages — `trimmed-to-empty` and `no-visible-character` — are the SAME public
+  // outcome (400 `GROUP_NAME_REQUIRED`), deliberately: which of the two rejected a name is a
+  // diagnostic for the probe and the suite, not a distinction a caller should be able to observe
+  // and enumerate the trim set from. The code is unchanged from round 3.
+  throw new ServiceError('name is required', 400, 'GROUP_NAME_REQUIRED')
 }
 
 /** Read-only — no lock taken (§2 锁序表: "只读路径不取 L0"). */
