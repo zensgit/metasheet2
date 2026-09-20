@@ -70,6 +70,16 @@
 -->
 <template>
   <div class="template-group-sections" data-testid="template-group-sections">
+    <SessionOrgSwitcher
+      v-if="showSessionOrgSwitcher"
+      :tr="tr"
+      :orgs="orgs"
+      :model-value="selectedOrgId"
+      :loading="sessionOrgLoading"
+      :switching="sessionOrgSwitching"
+      :error-message="sessionOrgError"
+      @change="onSessionOrgChange"
+    />
     <div
       v-if="loadError"
       class="template-group-sections__error"
@@ -188,6 +198,7 @@ import type {
   ApprovalTemplateStatus,
 } from '../../types/approval'
 import {
+  ApprovalApiError,
   linkApprovalTemplateToGroup,
   listApprovalTemplateGroups,
   listTemplateCategories,
@@ -195,6 +206,8 @@ import {
   reorderApprovalTemplateGroups,
   unlinkApprovalTemplateFromGroup,
 } from '../../approvals/api'
+import SessionOrgSwitcher from '../../components/SessionOrgSwitcher.vue'
+import { useSessionOrg } from '../../composables/useSessionOrg'
 import { useLocale } from '../../composables/useLocale'
 import { ZH, EN } from './templateCenterLabels'
 
@@ -211,6 +224,65 @@ const { isZh } = useLocale()
 // names / the `t.value.categoryEmpty` fallback baked in at fetch time), a live locale flip only
 // re-renders the loading/error/empty/"load more" CHROME strings immediately.
 const t = computed(() => (isZh.value ? ZH : EN))
+// `SessionOrgSwitcher` takes the repo-wide `tr(en, zh)` prop shape (the A-2 panel receives one
+// from TemplateCenterView.vue); this file's own label source is the `t` table above, so the
+// adapter is derived from the SAME `isZh` rather than threading a second locale prop in.
+const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
+
+// D3-1 (gate `impl-gate-A4-on-A2-merge-fix-round1-20260920.md` §6, 2026-09-20) — page-level
+// acceptance J (§4). Before this, opening 模板中心 → 分组视图 as a multi-org member who has not
+// picked a session organization ran `loadAll()` into a 403 `SESSION_ORG_REQUIRED` whose only
+// surface here was the generic `loadError` string: the shared selector existed on the page, but
+// only behind 切到分组视图 → 展开「管理分组」, i.e. never on the FIRST hop. The mechanism below is
+// lifted whole from `ApprovalTemplateGroupsPanel.vue` (the A-2 half of acceptance J) — same
+// reactive-not-proactive rule (`loadSessionOrgs()` runs only after a call has actually come back
+// with that code, so a single-org member, whose `authenticatedTenantId` is always minted at login,
+// never sees the selector), same single retry slot, same `switchSessionOrg` → replay-the-blocked-
+// call wiring. `useSessionOrg.ts` and `views/attendance/AttendanceSessionOrgSwitcher.vue` stay
+// untouched (design lock §2, 第 8 轮 P3-b: editing either narrows attendance-web-guard.yml's
+// closed-world census).
+//
+// Scope note, deliberately NOT widened: only `loadAll()` — the mount-time read, i.e. the first hop
+// this view makes — recognizes the code. `loadMore`/`moveGroupSection`/`onMoveItem` keep their
+// existing non-blocking inline errors, because by the time any of them can run, `loadAll()` has
+// already succeeded, which means a session organization is already bound for this session; a 403
+// on those paths is `approvalTemplateAdminGuard` (I7), a different condition that the selector
+// cannot fix. This is the named D3-1 change, not a narrower sibling of the panel's contract: the
+// panel covers load + create because create is ITS first write; this view has no create.
+const {
+  orgs,
+  // `selectedOrgId` (not the raw `currentOrgId`) — the composable normalizes `null` to `''`, which
+  // is what `SessionOrgSwitcher`'s `modelValue: string` prop requires.
+  selectedOrgId,
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  loadSessionOrgs,
+  switchSessionOrg,
+} = useSessionOrg()
+
+const showSessionOrgSwitcher = ref(false)
+// The one blocked call to replay once the session-org switch resolves. Only `loadAll()` ever
+// registers here (see the scope note above) and it self-guards against overlap, so a single slot
+// is enough — no queue needed.
+let pendingRetry: (() => Promise<void>) | null = null
+
+function handleSessionOrgRequired(retry: () => Promise<void>): void {
+  pendingRetry = retry
+  showSessionOrgSwitcher.value = true
+  // Fire-and-forget: populates the switcher's `orgs` list. A rejection here only leaves the
+  // switcher's own `errorMessage` set; it must never throw back into the caller's catch.
+  void loadSessionOrgs()
+}
+
+async function onSessionOrgChange(orgId: string): Promise<void> {
+  const ok = await switchSessionOrg(orgId)
+  if (!ok) return
+  showSessionOrgSwitcher.value = false
+  const retry = pendingRetry
+  pendingRetry = null
+  if (retry) await retry()
+}
 
 interface SectionState {
   token: string
@@ -315,7 +387,15 @@ async function loadAll(): Promise<void> {
       }),
     )
     sections.value = loaded.filter((s) => s.alwaysShow || s.total > 0)
+    showSessionOrgSwitcher.value = false
   } catch (e: any) {
+    // See the D3-1 block above. The selector replaces the generic error on THIS code only; every
+    // other failure keeps the existing top-level error state verbatim.
+    if (e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED') {
+      sections.value = []
+      handleSessionOrgRequired(loadAll)
+      return
+    }
     loadError.value = e?.message ?? t.value.groupSectionsLoadError
     sections.value = []
   } finally {
