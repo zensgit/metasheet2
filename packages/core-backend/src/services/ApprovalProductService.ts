@@ -8634,8 +8634,48 @@ export class ApprovalProductService {
       // Seats (§14.1) — the original document's approvers, read off its own audit trail rather
       // than its (possibly since-deactivated) `approval_assignments` rows, so a reassigned/expired
       // seat cannot silently drop the person who actually approved.
+      //
+      // READING (a) of lock §2-G3's THIRD sentence (lock:74) 「历史委托不自动成为当前授权」: the seat
+      // belongs to the ORIGINAL APPROVER. 委托 is acting-on-behalf-of (履职代理), never a transfer of the
+      // seat itself, so a cancel round re-convenes the person whose authority the original decision was
+      // made under — not the person who happened to hold the delegation at the time.
+      //
+      // The audit trail names the person who pressed the button (the delegatee D). The ONE table that
+      // records WHOSE authority they pressed it under is `approval_assignments.metadata.delegatedFrom`,
+      // written by `ApprovalAssigneeResolver.pushResolved` (the repo's single delegation substitution
+      // point) and KEPT after approve as `is_active = FALSE` audit history — `ApprovalDelegationConfig
+      // .countDelegatedApprovals` already reads exactly this column as a persistent audit fact, with no
+      // `is_active` filter of its own. So the seat query restores D back to the delegator A here, and
+      // NOTHING downstream changes: the same `isSystemSentinelActor` drop, the same zero-human-seat
+      // pre-check and the same `assertCancelRoundSeatsEligibleInTxn` re-qualification (G3's FIRST
+      // sentence, 「重新验证当前资格」) then run on whoever this query decides the seat holder is. That
+      // co-location is the point — ONE eligibility predicate, applied to the person actually seated,
+      // rather than a second delegation-specific gate that would be a narrower lookalike of it.
+      //
+      // JOIN PRECISION: the match is on (instance, node_key, assignee), NOT (instance, assignee). A
+      // delegatee who also holds a seat OF THEIR OWN at another node must keep that seat as their own;
+      // an instance-wide match would fold it into the delegator as well. `node_key` is written on every
+      // assignment row (`insertAssignments`), and `metadata.nodeKey` on every approve record written by
+      // the template-runtime dispatch and by `insertAutoApprovalEvents`. `entry_epoch` is deliberately
+      // NOT part of the join: it is NULL on pre-migration rows, and `NULL = NULL` would turn the whole
+      // restore into a silent no-op for exactly the legacy corpus this method is most likely to meet.
+      //
+      // DISCLOSED GAP (fails to TODAY's behaviour, never to a wider seat): the legacy
+      // `POST /api/approvals/:id/approve` route copies `metadata` verbatim out of the REQUEST BODY
+      // (routes/approvals.ts), so an approve row written there can carry no `nodeKey`; the LEFT JOIN
+      // then misses and `COALESCE` keeps the actor — that seat is NOT restored to its delegator. This is
+      // registered in the design MD §3.4 rather than papered over with an instance-wide match, which
+      // would mis-fold the sibling-seat case above.
       const approverRows = await client.query<{ actor_id: string }>(
-        `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+        `SELECT DISTINCT COALESCE(a.metadata->>'delegatedFrom', r.actor_id) AS actor_id
+           FROM approval_records r
+           LEFT JOIN approval_assignments a
+             ON a.instance_id = r.instance_id
+            AND a.assignee_id = r.actor_id
+            AND a.assignment_type = 'user'
+            AND a.node_key = r.metadata->>'nodeKey'
+            AND a.metadata->>'delegatedFrom' IS NOT NULL
+          WHERE r.instance_id = $1 AND r.action = 'approve'`,
         [documentId],
       )
       // Gate round 6, G6-1 (P1, reproduced on a real DB before the fix): `system:`-namespaced

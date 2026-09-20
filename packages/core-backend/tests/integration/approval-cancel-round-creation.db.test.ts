@@ -136,6 +136,8 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
   const createdApprovalIds = new Set<string>()
   const createdRoundIds = new Set<string>()
   const grantedUserIds = new Set<string>()
+  // Lock §2-G3 第三句 fixtures — `approval_delegations` config rows inserted by this file.
+  const createdDelegationIds = new Set<string>()
 
   const pool = () => poolManager.get()
 
@@ -152,6 +154,21 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
 
   afterAll(async () => {
     try {
+      if (createdDelegationIds.size > 0) {
+        // Lock §2-G3 第三句 fixtures — these are 'all'-scope delegation rows, i.e. GLOBAL config
+        // that substitutes assignees for every later suite naming the same delegator. They are
+        // deleted FIRST, before any FK-entangled table, because MEASURED on 2026-09-20 they are
+        // NOT independent of the deletes below: under mutation G-1 a negative-control leg whose
+        // creation unexpectedly SUCCEEDED left a cancel round behind, the `approval_instances`
+        // DELETE then raised `23503 approval_rounds_document_id_fkey`, the whole cleanup aborted,
+        // and the surviving rows failed `approval-delegation-seam`'s `toEqual({A: D})` in a later
+        // file — the exact fixture-residue family the binding verification report §4 was polluted
+        // by once already. Ordering them first makes the contagious rows survive-proof; the
+        // `registerUnexpectedlyCreatedRound` helper below attacks the same defect from the
+        // other end.
+        await pool().query('DELETE FROM approval_delegations WHERE id = ANY($1::text[])', [[...createdDelegationIds]])
+        createdDelegationIds.clear()
+      }
       const approvalIds = [...createdApprovalIds]
       const roundIds = [...createdRoundIds]
       const templateIds = [...createdTemplateIds]
@@ -1161,6 +1178,640 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       code: 'CANCEL_ROUND_SUITE_UNKNOWN',
       details: { allowedSuites: ['attendance', 'leave', 'other', 'forbidden'] },
     })
+    await expectZeroCancelRoundRows(documentId)
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Lock §2-G3 THIRD sentence (lock:74) 「历史委托不自动成为当前授权」 — READING (a): the seat is the
+  // ORIGINAL APPROVER (委托 = 履职代理, not a transfer of authority).
+  //
+  // Independent verification 2026-09-19 (`verify-c1-lock-g3-delegation-20260919.md`) measured, on a
+  // real DB, that before this change the four delegation states below produce a BYTE-IDENTICAL seat
+  // set (`[D]`, 201) — today's seat derivation never reads the delegation at all. That "identical" IS
+  // the defect, so a single 有效-delegation case would have ZERO discriminating power: all four legs
+  // are required, and they are written as four separate `it()`s so a partial regression names itself.
+  //
+  // Under reading (a) all four legs answer `[A]`. That is deliberate and is NOT an argument for
+  // dropping legs: they do not prove that (a) READS the delegation state (it does not — it reads the
+  // frozen `delegatedFrom` provenance), they prove the seat no longer TRACKS it. The leg that
+  // distinguishes (a) from reading (b) 「委托今天仍有效才给 D」 is P4 below: (a) answers `[A]`,
+  // (b) answers `[D]`.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  type DelegationLegState = 'valid' | 'revoked' | 'expired' | 'scope_mismatch' | 'scope_exact'
+
+  /**
+   * An approved original whose single approval node names A, but whose seat was substituted to D by
+   * an active 'all'-scope delegation at create time — the ONLY way `metadata.delegatedFrom` is ever
+   * written (`ApprovalAssigneeResolver.pushResolved`).
+   *
+   * 正控 §7-1 is inside this helper, not in the individual tests: delegation substitutes ONLY
+   * `assignmentType === 'user'` seats, so a mis-shaped fixture would seat A directly and every
+   * assertion in this group would then pass for the wrong reason (vacuously). The helper therefore
+   * asserts the substitution REALLY happened — seat = D with `delegatedFrom = A` — and that the approve
+   * record names D and never A, which is precisely why the seat query needs the assignments join.
+   */
+  async function delegatedApprovedOriginal(
+    label: string,
+    // `approveVia: 'legacy'` is the G-4 leg (README §2.3, the DISCLOSED gap): the legacy
+    // `POST /api/approvals/:id/approve` route copies `metadata` verbatim out of the REQUEST BODY
+    // (`routes/approvals.ts:2877-2879`), so its approve row carries NO `nodeKey` and the restore
+    // join's `a.node_key = r.metadata->>'nodeKey'` conjunction cannot match. Production-shaped:
+    // the row is written by the shipped route, not hand-edited into the table afterwards.
+    options: { approveVia?: 'actions' | 'legacy' } = {},
+  ): Promise<{
+    documentId: string
+    requesterId: string
+    delegatorA: string
+    delegateeD: string
+    delegationId: string
+    templateId: string
+  }> {
+    const approveVia = options.approveVia ?? 'actions'
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-dreq-${suffix}`
+    const delegatorA = `wi4-delA-${suffix}`
+    const delegateeD = `wi4-delD-${suffix}`
+    const adminId = `wi4-dadm-${suffix}`
+    const delegationId = `wi4-deleg-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    // A never acts in this fixture, but MUST have a directory row: the seat gate (G3 first sentence)
+    // reads `users` and an absent row is `not_found`, which would mask the seat-identity assertion
+    // behind a 409 for an unrelated reason.
+    await authToken(baseUrl, delegatorA)
+    const tokenD = await authToken(baseUrl, delegateeD)
+
+    // Active, in-window, 'all'-scope A → D at CREATE time. `createApproval` freezes the map into
+    // `requester_snapshot.delegations` before the executor resolves the initial state.
+    createdDelegationIds.add(delegationId)
+    await pool().query(
+      `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+       VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+      [delegationId, delegatorA, delegateeD],
+    )
+
+    // The NODE names A. Only the delegation turns the seat into D.
+    const templateId = await publishOneNodeTemplate(adminToken, delegatorA, label)
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    const seatBefore = await pool().query<{
+      assignee_id: string
+      node_key: string | null
+      delegated_from: string | null
+    }>(
+      `SELECT assignee_id, node_key, metadata->>'delegatedFrom' AS delegated_from
+         FROM approval_assignments WHERE instance_id = $1`,
+      [documentId],
+    )
+    expect(seatBefore.rows).toEqual([{ assignee_id: delegateeD, node_key: 'approval_a', delegated_from: delegatorA }])
+
+    if (approveVia === 'legacy') {
+      const versionRow = await pool().query<{ version: number }>(
+        `SELECT version FROM approval_instances WHERE id = $1`,
+        [documentId],
+      )
+      const legacyApprove = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
+        method: 'POST',
+        body: { version: versionRow.rows[0].version },
+      })
+      expect(legacyApprove.status, await legacyApprove.clone().text()).toBe(200)
+      // The leg's OWN precondition, asserted rather than assumed: the legacy route deactivates no
+      // assignment (it only UPDATEs the instance and INSERTs the record), so the delegated row is
+      // still there for the join to match on `(instance, assignee)` and MISS on `node_key`. If a
+      // future change ever deactivates or rewrites it, the seat below would flip to A for a
+      // completely different mechanism and would read as "the disclosed gap closed".
+      const seatAfterLegacy = await pool().query<{ delegated_from: string | null; node_key: string | null }>(
+        `SELECT metadata->>'delegatedFrom' AS delegated_from, node_key
+           FROM approval_assignments WHERE instance_id = $1`,
+        [documentId],
+      )
+      expect(seatAfterLegacy.rows).toEqual([{ delegated_from: delegatorA, node_key: 'approval_a' }])
+    } else {
+      const approveResponse = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approveResponse.status, await approveResponse.clone().text()).toBe(200)
+    }
+
+    // The audit trail the seat query reads names D, and A appears in it nowhere — the provenance the
+    // restore depends on lives ONLY in `approval_assignments`. The `node_key` the row carries is the
+    // leg's own precondition, asserted (not assumed) per writer: the template runtime writes
+    // `approval_a`, the legacy route writes NOTHING at all.
+    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+      [documentId],
+    )
+    expect(records.rows).toEqual([
+      { actor_id: delegateeD, node_key: approveVia === 'legacy' ? null : 'approval_a' },
+    ])
+    const allRecords = await pool().query<{ actor_id: string }>(
+      `SELECT actor_id FROM approval_records WHERE instance_id = $1`,
+      [documentId],
+    )
+    expect(allRecords.rows.some((row) => row.actor_id === delegatorA)).toBe(false)
+
+    const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(status.rows[0]?.status).toBe('approved')
+    return { documentId, requesterId, delegatorA, delegateeD, delegationId, templateId }
+  }
+
+  /**
+   * Moves the (already-used) delegation into the state the leg names. Exactly ONE predicate differs
+   * per leg — a confounded mutation would make the resulting seat set unattributable.
+   *
+   * 跨组织 substitution, disclosed: `approval_delegations` has NO org dimension (`scope ∈ {all,
+   * template}`); a per-org seat predicate is exactly half B of G3 (「仍在该组织单元」), which is OPEN
+   * and owner-gated. The fourth leg is therefore SCOPE MISMATCH — a `scope='template'` row pointing at
+   * a different template, i.e. the templateId-scope trap the verification report named — and not an
+   * invented `user_orgs` fixture.
+   */
+  async function applyDelegationLeg(
+    delegationId: string,
+    leg: DelegationLegState,
+    originalTemplateId: string,
+  ): Promise<void> {
+    const statements: Record<DelegationLegState, { sql: string; params: unknown[] } | null> = {
+      valid: null,
+      revoked: { sql: `UPDATE approval_delegations SET active = FALSE WHERE id = $1`, params: [delegationId] },
+      expired: {
+        sql: `UPDATE approval_delegations SET start_at = NOW() - INTERVAL '2 days', end_at = NOW() - INTERVAL '1 hour' WHERE id = $1`,
+        params: [delegationId],
+      },
+      scope_mismatch: {
+        // `chk_approval_delegations_scope_target`: scope='template' REQUIRES a target. The target is a
+        // template this document was never created from, so `resolveActiveDelegationMap(templateId =
+        // 原单模板)` cannot match it while the row stays `active` and in-window.
+        sql: `UPDATE approval_delegations SET scope = 'template', scope_template_id = $2 WHERE id = $1`,
+        params: [delegationId, '00000000-0000-4000-8000-0000000000aa'],
+      },
+      scope_exact: {
+        // The MIRROR of the leg above: `scope='template'` pointing at THIS document's own template,
+        // still active and in-window — i.e. a delegation that is valid AND in scope by every
+        // predicate `resolveActiveDelegationMap` applies. Reading (b) answers `[D]` here (its
+        // `P11(b)`); reading (a) answers `[A]`, the same as every other leg.
+        //
+        // Stated precisely, because it is the honest limit of this leg under (a): it is NOT
+        // evidence that any templateId scoping was handled correctly, because (a) never calls
+        // `resolveActiveDelegationMap` at all. What it IS: the leg that refutes 「席位跟着今天仍
+        // 然完全有效的委托走」 — today's shipped behaviour answers `[D]` here too, so `[A]` is a
+        // real discrimination against the BEFORE state, not a restatement of the other legs.
+        sql: `UPDATE approval_delegations SET scope = 'template', scope_template_id = $2 WHERE id = $1`,
+        params: [delegationId, originalTemplateId],
+      },
+    }
+    const statement = statements[leg]
+    if (!statement) return
+    const applied = await pool().query(statement.sql, statement.params)
+    expect(applied.rowCount, leg).toBe(1)
+  }
+
+  /**
+   * A negative control whose creation UNEXPECTEDLY succeeds has still written rows, and those rows
+   * are not registered for cleanup by the assertion that is about to fail. Registering them here is
+   * what stops a red run from poisoning the shared DB for every later file (measured: see the
+   * `afterAll` comment above — the unregistered `approval_rounds` row is what raised the FK error
+   * that aborted cleanup entirely).
+   */
+  async function registerUnexpectedlyCreatedRound(documentId: string, createdInstanceId: string): Promise<void> {
+    createdApprovalIds.add(createdInstanceId)
+    const rows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    for (const row of rows.rows) createdRoundIds.add(row.id)
+  }
+
+  /** Opens the cancel round for a delegated original in the named delegation state, returns its seats. */
+  async function cancelRoundSeatsForLeg(
+    label: string,
+    leg: DelegationLegState,
+  ): Promise<{
+    seats: string[]
+    delegatorA: string
+    delegateeD: string
+    documentId: string
+    requesterId: string
+    delegationId: string
+    templateId: string
+  }> {
+    const fixture = await delegatedApprovedOriginal(label)
+    await applyDelegationLeg(fixture.delegationId, leg, fixture.templateId)
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      fixture.documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+    const seatRows = await pool().query<{ assignee_id: string; is_active: boolean }>(
+      `SELECT assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [dto.id],
+    )
+    expect(seatRows.rows.every((row) => row.is_active)).toBe(true)
+    return { seats: seatRows.rows.map((row) => row.assignee_id), ...fixture }
+  }
+
+  it('§2-G3 第三句 正控 P4(a) — 委托仍然有效:席位仍是原审批人 A(委托是履职代理,不是授权转移);这是与读法 (b) 唯一分歧的一腿', async () => {
+    const { seats, delegatorA, delegateeD } = await cancelRoundSeatsForLeg('g3dlg-valid', 'valid')
+    // Discriminating both ways: `[A]` refutes today's shipped behaviour (`[D]`) AND reading (b),
+    // which answers `[D]` for this leg alone.
+    expect(seats).toEqual([delegatorA])
+    expect(seats).not.toContain(delegateeD)
+  })
+
+  it('§2-G3 第三句 正控 P5(a) — 委托已撤销(active = FALSE):席位是 A', async () => {
+    const { seats, delegatorA, delegateeD } = await cancelRoundSeatsForLeg('g3dlg-revoked', 'revoked')
+    expect(seats).toEqual([delegatorA])
+    expect(seats).not.toContain(delegateeD)
+  })
+
+  it('§2-G3 第三句 正控 P6(a) — 委托窗口已过期(end_at 在过去):席位是 A', async () => {
+    const { seats, delegatorA, delegateeD } = await cancelRoundSeatsForLeg('g3dlg-expired', 'expired')
+    expect(seats).toEqual([delegatorA])
+    expect(seats).not.toContain(delegateeD)
+  })
+
+  it('§2-G3 第三句 正控 P7(a) — 委托作用域不覆盖本单模板(scope=template 指向别的模板;跨组织腿的替代物,见 applyDelegationLeg 文档):席位是 A', async () => {
+    const { seats, delegatorA, delegateeD } = await cancelRoundSeatsForLeg('g3dlg-scope', 'scope_mismatch')
+    expect(seats).toEqual([delegatorA])
+    expect(seats).not.toContain(delegateeD)
+  })
+
+  it('§2-G3 第三句 负控 N5(a) — 资格闸的人口跟着席位走:停权「原审批人 A」现在阻断(409 SEAT_INELIGIBLE,零行);实测今天不阻断', async () => {
+    const fixture = await delegatedApprovedOriginal('g3dlg-gateA')
+    const deactivated = await pool().query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [fixture.delegatorA])
+    expect(deactivated.rowCount).toBe(1)
+
+    const service = new ApprovalProductService()
+    let thrown: unknown
+    try {
+      const unexpected = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
+      await registerUnexpectedlyCreatedRound(fixture.documentId, unexpected.id)
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeTruthy()
+    const failure = thrown as { statusCode?: number; code?: string; message?: string; details?: Record<string, unknown> }
+    expect(failure.statusCode).toBe(409)
+    expect(failure.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
+    expect(failure.details).toEqual({ ineligibleCount: 1, reasons: ['inactive'] })
+    // Same values-free posture as N1 — the refusal names a category, never a person.
+    expect(JSON.stringify(failure.details)).not.toContain(fixture.delegatorA)
+    expect(String(failure.message)).not.toContain(fixture.delegatorA)
+    await expectZeroCancelRoundRows(fixture.documentId)
+  })
+
+  it('§2-G3 第三句 正控 P8(a) — 反向不对称:停权「被委托人 D」不再阻断,席位是 A(实测今天正相反:停 D 阻断、停 A 放行)', async () => {
+    const fixture = await delegatedApprovedOriginal('g3dlg-gateD')
+    const deactivated = await pool().query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [fixture.delegateeD])
+    expect(deactivated.rowCount).toBe(1)
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      fixture.documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+    const seatRows = await pool().query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1`,
+      [dto.id],
+    )
+    expect(seatRows.rows.map((row) => row.assignee_id)).toEqual([fixture.delegatorA])
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // 门审用例:候选补丁自带 6 条之外,本轮(2026-09-20,第一次真库实跑)补齐的 5 条腿。
+  //
+  // 三条按门审的腿表补齐,把第三句的席位推导和这条方法**已有的另外两个过滤器**放在同一张单据上
+  // 求值(补丁里没有):作用域正好命中 / 哨兵 / 零席位。
+  // 另两条是 README §2.2 自己点名「**从未被实测**」的那条 `AND a.node_key = r.metadata->>'nodeKey'`
+  // 合取的 **两个相反方向的 oracle** —— 删掉该合取,一条因为多还原而红,另一条因为少还原而红:
+  //   · P11(a) 兄弟席位(D 在节点 1 是 A 的代理、在节点 2 有自己的席位)⇒ 席位必须是 {A, D} 两人;
+  //   · P12(a) legacy 无 `nodeKey` 的 approve 行 ⇒ 席位保持 actor(= 今天的行为,已披露的缺口)。
+  // 这两条在「把整个 join 退回基线」那条 mutation 下的红绿与此处无关,逐条读数以验证 MD Part N 的
+  // mutation 台账为准(实测),不在这里预言。
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  /** Publishes a template with a caller-supplied graph (the shape helpers above are one-node only). */
+  async function publishGraphTemplate(
+    adminToken: string,
+    graph: ReturnType<typeof oneNodeGraph>,
+    label: string,
+  ): Promise<string> {
+    const templateKey = `wi4-creation-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'WI-4 cancel-round creation fixture (delegation legs)',
+        description: 'approval-cancel-round-creation.db.test.ts',
+        formSchema: buildFormSchema(),
+        approvalGraph: graph,
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status, await publishResponse.clone().text()).toBe(200)
+    return template.id
+  }
+
+  it('§2-G3 第三句 正控 P9(a) — 委托作用域**正好命中**本单模板、且今天仍然完全有效:席位仍是 A(读法 (b) 在这一腿答 [D])', async () => {
+    const { seats, delegatorA, delegateeD } = await cancelRoundSeatsForLeg('g3dlg-scopeexact', 'scope_exact')
+    expect(seats).toEqual([delegatorA])
+    expect(seats).not.toContain(delegateeD)
+  })
+
+  /**
+   * An approved original with TWO SEQUENTIAL user nodes: `approval_a` names A (substituted to D by
+   * the delegation) and `approval_b` names D HIMSELF. Both approve rows therefore carry
+   * `actor_id = D`, and only the first of them has a `delegatedFrom` assignment behind it.
+   *
+   * This is the fixture the `node_key` conjunction exists for (README §2.2): without it the join
+   * matches D's OWN seat at `approval_b` against the DELEGATED assignment row at `approval_a`, and
+   * D's own seat is folded into A — one seat where there must be two. 会签门槛真的会被降低。
+   */
+  async function delegatedSiblingSeatOriginal(label: string): Promise<{
+    documentId: string
+    requesterId: string
+    delegatorA: string
+    delegateeD: string
+  }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-sreq-${suffix}`
+    const delegatorA = `wi4-selA-${suffix}`
+    const delegateeD = `wi4-selD-${suffix}`
+    const adminId = `wi4-sadm-${suffix}`
+    const delegationId = `wi4-sdeleg-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await authToken(baseUrl, delegatorA)
+    const tokenD = await authToken(baseUrl, delegateeD)
+
+    createdDelegationIds.add(delegationId)
+    await pool().query(
+      `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+       VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+      [delegationId, delegatorA, delegateeD],
+    )
+
+    const templateId = await publishGraphTemplate(
+      adminToken,
+      {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_a',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: [delegatorA], approvalMode: 'single' },
+          },
+          {
+            key: 'approval_b',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: [delegateeD], approvalMode: 'single' },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-a', source: 'start', target: 'approval_a' },
+          { key: 'e-a-b', source: 'approval_a', target: 'approval_b' },
+          { key: 'e-b-end', source: 'approval_b', target: 'end' },
+        ],
+      } as ReturnType<typeof oneNodeGraph>,
+      label,
+    )
+
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    for (const step of ['approval_a', 'approval_b']) {
+      const approve = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approve.status, `${step}: ${await approve.clone().text()}`).toBe(200)
+    }
+
+    // 正控先行, per-node: the delegated seat and the OWN seat must both exist and must differ in
+    // exactly one property — `metadata.delegatedFrom`. Without this the whole leg could pass because
+    // the second node never produced a seat at all.
+    const seatRows = await pool().query<{ node_key: string | null; assignee_id: string; delegated_from: string | null }>(
+      `SELECT node_key, assignee_id, metadata->>'delegatedFrom' AS delegated_from
+         FROM approval_assignments WHERE instance_id = $1 ORDER BY node_key`,
+      [documentId],
+    )
+    expect(seatRows.rows).toEqual([
+      { node_key: 'approval_a', assignee_id: delegateeD, delegated_from: delegatorA },
+      { node_key: 'approval_b', assignee_id: delegateeD, delegated_from: null },
+    ])
+
+    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY metadata->>'nodeKey'`,
+      [documentId],
+    )
+    expect(records.rows).toEqual([
+      { actor_id: delegateeD, node_key: 'approval_a' },
+      { actor_id: delegateeD, node_key: 'approval_b' },
+    ])
+
+    const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(status.rows[0]?.status).toBe('approved')
+    return { documentId, requesterId, delegatorA, delegateeD }
+  }
+
+  it('§2-G3 第三句 正控 P11(a) (G-3) — node_key 合取的 oracle:D 在节点 1 是 A 的代理、在节点 2 有自己的席位 ⇒ 席位是 {A, D} 两人,D 自己那份不被折算给 A', async () => {
+    const { documentId, requesterId, delegatorA, delegateeD } = await delegatedSiblingSeatOriginal('g3dlg-sibling')
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+
+    const seatRows = await pool().query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [dto.id],
+    )
+    // `wi4-selA-…` < `wi4-selD-…`, so the ORDER BY fixes the expected order without a sort here.
+    expect(seatRows.rows.map((row) => row.assignee_id)).toEqual([delegatorA, delegateeD])
+    // Stated as a count as well: the 会签 threshold on the cancel node is the thing the folded
+    // join would silently halve.
+    expect(seatRows.rows.length).toBe(2)
+  })
+
+  it('§2-G3 第三句 正控 P12(a) (G-4) — 已披露缺口变成数据:legacy POST /:id/approve 写的 approve 行没有 nodeKey,join 落空,该席位**不被还原**(= 今天的行为,失败方向永远不是更宽的席位)', async () => {
+    const fixture = await delegatedApprovedOriginal('g3dlg-legacy', { approveVia: 'legacy' })
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      fixture.documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+
+    const seatRows = await pool().query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [dto.id],
+    )
+    // MEASURED on a real DB 2026-09-20 (验证 MD Part N §N4), not predicted: the seat stays the
+    // DELEGATEE, because the legacy route's approve row carries no `nodeKey` for the join to match.
+    // This case is the disclosed gap's positive control — if a later change ever restores this seat
+    // to A, this assertion goes red and the gap has to be re-registered rather than drift shut.
+    expect(seatRows.rows.map((row) => row.assignee_id)).toEqual([fixture.delegateeD])
+    expect(seatRows.rows.map((row) => row.assignee_id)).not.toContain(fixture.delegatorA)
+  })
+
+  /**
+   * An auto-approved original (one `mergeWithRequester` node ⇒ a `system:auto-approval` sentinel
+   * approve row) whose SECOND node is the delegated one: it names A, and the active delegation
+   * substitutes it to D. `withHuman = false` drops that second node entirely, leaving a document
+   * whose whole approve trail is the sentinel.
+   */
+  async function delegatedAutoApprovalOriginal(
+    label: string,
+    withHuman: boolean,
+  ): Promise<{ documentId: string; requesterId: string; delegatorA: string; delegateeD: string }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-areq-${suffix}`
+    const delegatorA = `wi4-aelA-${suffix}`
+    const delegateeD = `wi4-aelD-${suffix}`
+    const adminId = `wi4-aadm-${suffix}`
+    const delegationId = `wi4-adeleg-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await authToken(baseUrl, delegatorA)
+    const tokenD = await authToken(baseUrl, delegateeD)
+
+    createdDelegationIds.add(delegationId)
+    await pool().query(
+      `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+       VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+      [delegationId, delegatorA, delegateeD],
+    )
+
+    const templateId = await publishAutoApprovalTemplate(adminToken, requesterId, withHuman ? delegatorA : null, label)
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    if (withHuman) {
+      // 正控先行 for this shape too: the human node really is the DELEGATED one before D acts.
+      const seatBefore = await pool().query<{ assignee_id: string; delegated_from: string | null }>(
+        `SELECT assignee_id, metadata->>'delegatedFrom' AS delegated_from
+           FROM approval_assignments WHERE instance_id = $1 AND node_key = 'approval_human'`,
+        [documentId],
+      )
+      expect(seatBefore.rows).toEqual([{ assignee_id: delegateeD, delegated_from: delegatorA }])
+      const approve = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approve.status, await approve.clone().text()).toBe(200)
+    }
+
+    const statusRow = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(statusRow.rows[0]?.status).toBe('approved')
+
+    // The sentinel MUST be in the trail — same anti-vacuity assertion `autoApprovedFixture` makes.
+    const trail = await pool().query<{ actor_id: string }>(
+      `SELECT DISTINCT actor_id FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY actor_id`,
+      [documentId],
+    )
+    const actorIds = trail.rows.map((row) => row.actor_id)
+    expect(actorIds).toContain('system:auto-approval')
+    expect(actorIds).toEqual(withHuman ? ['system:auto-approval', delegateeD].sort() : ['system:auto-approval'])
+    return { documentId, requesterId, delegatorA, delegateeD }
+  }
+
+  it('§2-G3 第三句 正控 P10(a) — 哨兵腿:同一张单据上「哨兵丢弃」与「委托还原」同时生效,席位恰好是 [A](哨兵不进席位、D 不进席位)', async () => {
+    const { documentId, requesterId, delegatorA, delegateeD } = await delegatedAutoApprovalOriginal('g3dlg-sent', true)
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+
+    const seatRows = await pool().query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [dto.id],
+    )
+    const seats = seatRows.rows.map((row) => row.assignee_id)
+    expect(seats).toEqual([delegatorA])
+    expect(seats).not.toContain(delegateeD)
+    expect(seats).not.toContain('system:auto-approval')
+    // The restore runs BEFORE the sentinel drop, so a sentinel can never be COALESCE'd into a
+    // person either — asserted on the snapshot the round actually froze, not only on the seat table.
+    const snapshot = await pool().query<{ requester_snapshot: Record<string, unknown> }>(
+      `SELECT requester_snapshot FROM approval_instances WHERE id = $1`,
+      [dto.id],
+    )
+    expect(JSON.stringify(snapshot.rows[0].requester_snapshot)).not.toContain('system:auto-approval')
+    expect(JSON.stringify(snapshot.rows[0].requester_snapshot)).toContain(delegatorA)
+  })
+
+  it('§2-G3 第三句 负控 N6(a) — 零席位腿:整单由自动化批完(委托行存在但这张单据上没有被委托席位)⇒ 仍是 409 CANCEL_ROUND_NO_ELIGIBLE_APPROVER、零行;还原 join 不会凭空造出一个人类席位', async () => {
+    const { documentId, requesterId, delegatorA, delegateeD } = await delegatedAutoApprovalOriginal('g3dlg-zero', false)
+
+    const service = new ApprovalProductService()
+    let thrown: unknown
+    try {
+      const unexpected = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+      await registerUnexpectedlyCreatedRound(documentId, unexpected.id)
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeTruthy()
+    const failure = thrown as { statusCode?: number; code?: string; message?: string; details?: Record<string, unknown> }
+    expect(failure.statusCode).toBe(409)
+    expect(failure.code).toBe('CANCEL_ROUND_NO_ELIGIBLE_APPROVER')
+    expect(failure.details).toEqual({ reason: 'no_human_approver' })
+    // 判别力,说清楚它是什么不是什么:这一腿区分「席位 = A」与「席位 = D」的方式是**两者都不成立**
+    // —— 任一被坐下,创建都会成功,`thrown` 就是 falsy、零行断言就会红。它 NOT 是还原本身的 oracle。
+    expect(JSON.stringify(failure.details)).not.toContain(delegatorA)
+    expect(JSON.stringify(failure.details)).not.toContain(delegateeD)
     await expectZeroCancelRoundRows(documentId)
   })
 })
