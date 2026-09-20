@@ -40,9 +40,18 @@ CREATE TABLE automation_rules (
   action_config jsonb DEFAULT '{}'::jsonb
 );
 
+-- On this schema there is no `actions` column at all, so toExecutorRule's
+-- fallback (`[{ type: action_type, config: action_config }]` —
+-- automation-service.ts:1187-1190) applies to EVERY row: `action_config` IS the
+-- executed action config here.
 INSERT INTO automation_rules VALUES
+-- narrow + upper bound: `$.url` on a send_webhook config
   ('r-b-legacy', 'sheet-x', 'send_webhook', '{"url": "http://fake-legacy-b.invalid/hook"}'::jsonb),
-  ('r-b-https',  'sheet-x', 'send_webhook', '{"url": "https://fake-secure-b.invalid/hook"}'::jsonb);
+-- neither: https target
+  ('r-b-https',  'sheet-x', 'send_webhook', '{"url": "https://fake-secure-b.invalid/hook"}'::jsonb),
+-- upper bound ONLY (F6): https target, http `callbackUrl` inside the
+-- user-authored body — payload for the receiver, never dialled by this process
+  ('r-b-body',   'sheet-x', 'send_webhook', '{"url": "https://fake-secure-b.invalid/hook", "body": {"callbackUrl": "http://fake-cb-b.invalid/cb"}}'::jsonb);
 
 CREATE TABLE multitable_webhooks (
   id         text PRIMARY KEY,

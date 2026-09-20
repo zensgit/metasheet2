@@ -68,19 +68,26 @@ SQL 原样吸收进来，并加上了 CRED-06/TRG-04 任务要求但设计文档
 文档的盘点 SQL 只给了 `count(*)` 和按 `sheet_id`/`created_by` 分组的计数，没有给出具体
 `id`）。
 
-字段形状确认（为什么不用 `automation_rules.action_config`）：`action_config` 是
+字段形状确认（为什么主查询用 `automation_rules.actions`）：`action_config` 是
 `automation_rules` 表最早的单动作列（`zzzz20260413120000_create_automation_rules.ts:32`），
 后来被 V1 多动作数组列 `actions`（`zzzz20260414100000_extend_automation_rules.ts:27`）取代——
-本 worktree 里 grep `packages/core-backend/src/multitable/automation-executor.ts` 只找到
-`rule.actions` 的读取点（十余处，例如 `:1734`/`:1846`/`:1992`），零处非注释地读取
-`action_config`，所以 TRG-04 的主查询（`02-trg04-http-targets.sql` Q2/Q3）扫的是 `actions`；
-`action_config` 只作为 SUPPLEMENTARY 的 Q4 保留，因为理论上可能有更老、从未被 V1 迁移重新保存
-过的行还留着旧值，但即使有，运行时也不会读到它。
+`packages/core-backend/src/multitable/automation-executor.ts` 里的读取点全是 `rule.actions`
+（十余处，例如 `:1734`/`:1846`/`:1992`），所以 TRG-04 的主查询（`02-trg04-http-targets.sql`
+Q2/Q3）扫的是 `actions`；`action_config` 作为 SUPPLEMENTARY 的 Q4 保留。
+
+> **2026-09-20 更正（F6）**：本节原文写的是"零处非注释地读取 `action_config`……即使有，运行时
+> 也不会读到它"。这句**是错的**，按纪律给行号：`toExecutorRule` 在
+> `packages/core-backend/src/multitable/automation-service.ts:1187-1190` 有一条回退——
+> `rule.actions` 为 NULL 或空数组时，执行器跑的就是
+> `[{ type: rule.action_type, config: rule.action_config }]`，随后同样在
+> `automation-executor.ts:4199` 读 `config.url`。所以 Q4 不是"理论上的陈列品"，它是那批行的
+> **实际**出网目标来源；`02-trg04-http-targets.sql` 的 Q4 注释已同步更正。
 
 **values-free**：两条设计文档都明说这些 URL"can carry credentials"（userinfo、query string
 里的 token），所以 `02-trg04-http-targets.sql` 全文没有一处 `SELECT actions` / `SELECT url`。
-`ILIKE '%"url":"http://%'` 这种文本扫描本身也不需要把整个 JSON 读出来展示——它只是一个过滤
-条件，最终 `SELECT` 列表里只有 `count(*)`、`id`、`sheet_id`、`created_by`、`active`。
+scheme 判定本身也不需要把 JSON 读出来展示——URL 值只出现在 `WHERE` / `EXISTS` 的过滤条件里，
+最终 `SELECT` 列表只有 `count(*)`、`id`、`sheet_id`、`created_by`、`active`，以及 F6 之后新增
+的两个布尔量 `narrow_hit`/`upper_bound_hit`（它们是判定结果，不是值）。
 
 ### ADM-08 → 喂 ADM-07 裁决
 
@@ -175,3 +182,84 @@ CRED-06 是唯一的例外——它引用的 `data-source-secret-keys.ts` 本身
    每个文件末尾输出 `INVENTORY_RESULT … status=complete|incomplete reason=…`：缺列、超时、
    截断一律 `incomplete`，**没有该行即视为不完整**，任何一种都不得解读为零命中。
    键名普查（`01` 的 Q6/Q7）改为 `-v census=1` 显式开启，默认不跑也不外传。
+
+## 复核返修（F6）— 2026-09-20 设计变更：TRG-04 的 HTTP 目标白名单收窄
+
+> **仍未在生产库执行；生产执行需 owner 另行授权。** 本轮同样只做开发侧修正与合成库验证。
+
+F3 把判据从文本扫描换成 JSON 语义匹配，方向对，但那一版的"语义"有两处比实际读取面宽，
+方向都是**高报**——而 TRG-04 的这个数字是 owner 用来判断"能不能合 #5619 / #5649、会不会打断
+现网"的输入，高报比低报更容易把一次本可以直接合的收紧拖成"先去清存量"。
+
+### F6-1 键名白名单：7 个名字里只有 1 个会被读
+
+原白名单（归一化后）：`url` / `weburl` / `webhookurl` / `endpoint` / `endpointurl` /
+`targeturl` / `callbackurl`。逐个核对这两张表的取值路径：
+
+- `url` —— **唯一真读**。规则侧 `executeSendWebhook` 只读 `config.url`
+  （`packages/core-backend/src/multitable/automation-executor.ts:4199`，派发点 `:2591`，
+  模拟路径同一成员 `:1012`），类型契约 `SendWebhookConfig { url, method?, headers?, body?,
+  secret? }` 在 `packages/core-backend/src/multitable/automation-actions.ts:144-151`；前端编辑器
+  只写这一个成员（`apps/web/src/multitable/components/MetaAutomationRuleEditor.vue:504` 的
+  `v-model="action.config.url"`，回填在 `:3801`）。订阅侧读的是 `url` **列**
+  （`packages/core-backend/src/multitable/webhook-service.ts:394`）。
+- `webUrl` / `endpointUrl` / `targetUrl` / `callbackUrl`（含下划线写法）—— 对
+  `packages/` `apps/` `plugins/` 全仓 grep **零命中**，不存在任何写入方或读取方。
+- `endpoint` —— `packages/core-backend/src/multitable/` 下零命中；全仓其它命中都是 HTTP 路由
+  路径一类的用法，不是这两张表里的取值键。
+- `webhookUrl` / `webhook_url` —— 确实存在，但**不在这两张表里**：一是钉钉机器人目标列
+  `dingtalk_group_destinations.webhook_url`（密文存储，且
+  `packages/core-backend/src/integrations/dingtalk/robot.ts:33-55` 强制 https + 固定 host +
+  必带 access_token，**结构上装不下 `http://` 目标**），二是创建 `multitable_webhooks` 行的
+  HTTP 请求体字段（`packages/core-backend/src/routes/api-tokens.ts:55`）——落库后的列名就是
+  `url`，Q5/Q6 已经直接读它。
+
+结论：白名单收敛到 `url` 一个键，且键名匹配改为**大小写敏感**——`config.url` 是 JavaScript
+属性读取，存成 `"URL"` 的成员执行器根本读不到（这种规则今天就以 `Webhook URL is required`
+失败，与守卫无关）。值上的 scheme 判定保持大小写不敏感（URL scheme 本就大小写不敏感）。
+
+### F6-2 `$.**` 递归：假阳性的来源
+
+`jsonb_path_query(actions, '$.**')` 会走到 `config` 下的每一个节点，其中包括
+`send_webhook` 动作里**用户自撰的 `body` 与 `headers`**。`body` 的去向是被
+`JSON.stringify` 后 POST 给 `config.url`（`automation-executor.ts:4205-4216`）——它是给
+**接收方**用的载荷，不是本进程会去拨的地址，#5619/#5649 的守卫也不会拒它。所以
+`body.callbackUrl = "http://…"` 这种再正常不过的回调约定，会被旧判据算成一条"http 出网目标"。
+
+收窄后只匹配执行器真正解引用的 jsonpath：
+
+```
+$[*].config.url
+$[*].config.branches[*].actions[*].config.url
+$[*].config.defaultBranch.actions[*].config.url
+```
+
+**一层嵌套就是全部**，不是省略：`condition_branch` 读 `config.branches[*].actions`
+（`automation-executor.ts:2348`、`:2378`）和 `config.defaultBranch.actions`（`:2342`、
+`:2372-2373`）；`parallel_branch` 读 `config.branches[*].actions`（`:2247`）；保存期校验
+拒绝分支内再嵌分支（`packages/core-backend/src/multitable/automation-service.ts:874`、`:877`
+对 `branches`，`:902`、`:905` 对 `defaultBranch`），因此不存在第三层。旧列 `action_config`
+同一套路径上移一层（`$.url`、`$.branches[*].actions[*].config.url`、
+`$.defaultBranch.actions[*].config.url`），并按 `action_type` 决定用哪一组——因为那一列就是
+那条规则的 `config` 本身。
+
+### F6-3 不丢信息：宽口径降级为并排输出的"参考上界"
+
+收窄只改**默认解读**，不删数字。每个收窄了的查询都保留原 `$.**` + 7 键逻辑，作为显式标注的
+上界列并排输出（`http_rules_upper_bound`、`http_rules_legacy_column_upper_bound`、
+`internal_target_rows_upper_bound`），Q3 的每一行同时带 `narrow_hit` 与 `upper_bound_hit`。
+窄口径恒 ⊆ 上界（`url` 本来就在旧键表里，窄路径也是 `$.**` 所走节点的子集），所以
+**上界 − 窄口径 = "长得像 http 目标、但没有任何代码会读它"**，owner 想单独看这批行，Q3 里有 id。
+
+`multitable_webhooks` 侧（Q5/Q6）没有上界孪生列，因为那里的出网目标是一个专用 `text` 列，
+既没有键名要猜也没有 JSON 要递归——它本来就是窄的。
+
+### F6-4 F4 纪律不退化
+
+Q2（计数）与 Q3（id）的 `hit` CTE 逐字符相同，Q3 用同一组布尔量过滤
+（`WHERE narrow_hit OR upper_bound_hit`）。两条不变量因此可断言，并且确实被断言：
+`count(Q3 rows WHERE narrow_hit) == Q2.http_rules`、`count(Q3 rows) == Q2.http_rules_upper_bound`。
+静态层还额外断言 Q2/Q3 的 CTE 文本相等，防止后人只改一处。
+
+正反例、两种 schema 的实跑数字与三个变异探针见
+`readonly-inventory-http-target-allowlist-narrow-verification-20260920.md`。

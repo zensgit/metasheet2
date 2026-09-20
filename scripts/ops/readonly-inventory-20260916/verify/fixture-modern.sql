@@ -16,6 +16,16 @@
 --   user_roles / user_permissions / role_permissions
 --                                        migrations/033_create_rbac_core.sql:16-18,34-36,43-45
 --
+-- 2026-09-20 (F6): the `automation_rules.actions` rows below were rewritten to
+-- the RUNTIME action shape `{ "type": …, "config": { … } }`. The pre-F6 rows put
+-- `url` directly on the action object, which no code path ever produces —
+-- the editor writes `action.config.url`
+-- (apps/web/src/multitable/components/MetaAutomationRuleEditor.vue:504) and the
+-- executor reads `config.url`
+-- (packages/core-backend/src/multitable/automation-executor.ts:4199). The old
+-- `$.**` sweep matched either shape, so the inaccuracy was invisible; the
+-- narrowed read-path predicate is shape-exact, so the fixture has to be too.
+--
 -- ALL VALUES ARE OBVIOUSLY FAKE (`*.invalid` hosts, `FAKE-NOT-A-REAL-*`
 -- placeholders). There is no real credential material anywhere in this file.
 -- ============================================================================
@@ -51,35 +61,72 @@ CREATE TABLE automation_rules (
 );
 
 INSERT INTO automation_rules VALUES
--- F3 positive 1 — top-level action, plain http
+-- ── NARROW positives: an http:// literal sitting on a jsonpath the executor
+--    actually dereferences. Every one of these breaks when #5619 lands.
+-- N1 — top-level action config (`$[*].config.url`)
   ('r-top', 'sheet-a', 'send_webhook', '{}'::jsonb,
-   '[{"type": "send_webhook", "url": "http://fake-top.invalid/hook"}]'),
--- F3 positive 2 — nested inside a condition_branch's inner actions
+   '[{"type": "send_webhook", "config": {"url": "http://fake-top.invalid/hook"}}]'),
+-- N2 — condition_branch branch-local action
+--      (`$[*].config.branches[*].actions[*].config.url`;
+--       automation-executor.ts:2348, :2378)
   ('r-nested', 'sheet-a', 'condition_branch', '{}'::jsonb,
-   '[{"type": "condition_branch", "branches": [{"actions": [{"type": "send_webhook", "url": "http://fake-nested.invalid/x"}]}]}]'),
--- F3 positive 3 — LAYOUT reversal: written with spaces after the colons, which
---   is also how jsonb renders it back. The old `'%"url":"http://%'` pattern
---   missed this (and would miss the un-spaced input too, since jsonb does not
---   preserve the input layout).
+   '[{"type": "condition_branch", "config": {"branches": [{"key": "b1", "actions": [{"type": "send_webhook", "config": {"url": "http://fake-nested.invalid/x"}}]}]}}]'),
+-- N3 — condition_branch DEFAULT branch
+--      (`$[*].config.defaultBranch.actions[*].config.url`;
+--       automation-executor.ts:2342, :2372-2373)
+  ('r-default', 'sheet-a', 'condition_branch', '{}'::jsonb,
+   '[{"type": "condition_branch", "config": {"branches": [{"key": "b1", "actions": []}], "defaultBranch": {"key": "fallback", "actions": [{"type": "send_webhook", "config": {"url": "http://fake-default.invalid/x"}}]}}}]'),
+-- N4 — LAYOUT reversal: written with spaces after the colons, which is also how
+--      jsonb renders it back. The pre-F3 `'%"url":"http://%'` text pattern
+--      missed this (and would miss the un-spaced input too, since jsonb does not
+--      preserve the input layout).
   ('r-spaced', 'sheet-b', 'send_webhook', '{}'::jsonb,
-   '[ { "type" : "send_webhook" , "url" : "http://fake-spaced.invalid/x" } ]'),
--- F3 positive 4 — CASE reversal on the key and the scheme
+   '[ { "type" : "send_webhook" , "config" : { "url" : "http://fake-spaced.invalid/x" } } ]'),
+-- N5 — VALUE case reversal: `HTTP://`. URL schemes are case-insensitive and
+--      fetch() dials this, so it MUST still be counted.
   ('r-upper', 'sheet-b', 'send_webhook', '{}'::jsonb,
-   '[{"type": "send_webhook", "URL": "HTTP://FAKE-UPPER.invalid/x"}]'),
--- F3 negative 1 — https
+   '[{"type": "send_webhook", "config": {"url": "HTTP://FAKE-UPPER.invalid/x"}}]'),
+-- N6 — internal literal on a read path: counted by Q2 AND by Q7's floor.
+  ('r-internal', 'sheet-b', 'send_webhook', '{}'::jsonb,
+   '[{"type": "send_webhook", "config": {"url": "http://127.0.0.1:9999/hook"}}]'),
+-- ── UPPER-BOUND-ONLY rows (F6): an http:// literal that the `$.**` sweep
+--    counts and the executor never dials. These are the false positives the
+--    narrowing removes; they stay listed in Q3 with narrow_hit = f.
+-- U1 — KEY case reversal. `config.url` is a JavaScript property read
+--      (automation-executor.ts:4199), so a stored `"URL"` member is never read;
+--      such a rule fails with 'Webhook URL is required' today, guard or no guard.
+  ('r-keycase', 'sheet-c', 'send_webhook', '{}'::jsonb,
+   '[{"type": "send_webhook", "config": {"URL": "http://fake-keycase.invalid/x"}}]'),
+-- U2 — THE HEADLINE FALSE POSITIVE: the egress target is https, but the
+--      USER-AUTHORED body carries a `callbackUrl` string. The body is
+--      serialised and POSTed TO config.url (automation-executor.ts:4205-4216);
+--      it is payload for the receiver, not a target this process dials.
+  ('r-body-callback', 'sheet-c', 'send_webhook', '{}'::jsonb,
+   '[{"type": "send_webhook", "config": {"url": "https://fake-secure.invalid/hook", "body": {"callbackUrl": "http://fake-callback.invalid/cb"}}}]'),
+-- ── NEGATIVES: neither narrow nor upper bound may count these.
+-- X1 — https
   ('r-https', 'sheet-b', 'send_webhook', '{}'::jsonb,
-   '[{"type": "send_webhook", "url": "https://fake-secure.invalid/x"}]'),
--- F3 negative 2 — HTTPS upper case (must not be swept in by a sloppy ~* '^http')
+   '[{"type": "send_webhook", "config": {"url": "https://fake-secure.invalid/x"}}]'),
+-- X2 — HTTPS upper case (must not be swept in by a sloppy ~* '^http')
   ('r-https-upper', 'sheet-c', 'send_webhook', '{}'::jsonb,
-   '[{"type": "send_webhook", "url": "HTTPS://FAKE-SECURE.invalid/x"}]'),
--- F3 negative 3 — a DECOY: the literal text `"url":"http://…` inside a
---   non-url string field. The old TEXT pattern counted this row; the JSON
---   semantic predicate does not (it is not a url-keyed member).
+   '[{"type": "send_webhook", "config": {"url": "HTTPS://FAKE-SECURE.invalid/x"}}]'),
+-- X3 — a DECOY: the literal text `"url":"http://…` inside a non-url string
+--      field. The pre-F3 TEXT pattern counted this row; neither the narrow
+--      predicate nor the upper bound does (it is not a url-keyed member).
   ('r-decoy', 'sheet-c', 'send_notification', '{}'::jsonb,
-   '[{"type": "send_notification", "text": "docs say \"url\":\"http://fake-doc.invalid\" is legacy"}]'),
--- legacy single-action column only (actions NULL) — Q4 population
+   '[{"type": "send_notification", "config": {"text": "docs say \"url\":\"http://fake-doc.invalid\" is legacy"}}]'),
+-- ── LEGACY COLUMN rows (Q4). `actions` is NULL, so toExecutorRule falls back to
+--    `[{ type: action_type, config: action_config }]`
+--    (automation-service.ts:1187-1190) and these DO run.
+-- L1 — legacy single send_webhook (`$.url`)
   ('r-legacy', 'sheet-d', 'send_webhook',
-   '{"url": "http://fake-legacy.invalid/hook"}'::jsonb, NULL);
+   '{"url": "http://fake-legacy.invalid/hook"}'::jsonb, NULL),
+-- L2 — legacy condition_branch (`$.branches[*].actions[*].config.url`)
+  ('r-legacy-branch', 'sheet-d', 'condition_branch',
+   '{"branches": [{"key": "b1", "actions": [{"type": "send_webhook", "config": {"url": "http://fake-legacy-branch.invalid/x"}}]}]}'::jsonb, NULL),
+-- L3 — legacy upper-bound-only: https target, http callbackUrl in the body
+  ('r-legacy-body', 'sheet-d', 'send_webhook',
+   '{"url": "https://fake-secure.invalid/hook", "body": {"callbackUrl": "http://fake-legacy-cb.invalid/cb"}}'::jsonb, NULL);
 
 CREATE TABLE multitable_webhooks (
   id         text PRIMARY KEY,

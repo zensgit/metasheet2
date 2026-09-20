@@ -3,8 +3,10 @@
 // ============================================================================
 // LAYER 1 (hermetic, no database): static contract checks on the four pack
 //   files — every file includes _preamble.sql, ends with an INVENTORY_RESULT
-//   statement, contains no write statements, and (F3) no longer carries the
-//   textual `"url":"http://` predicate.
+//   statement, contains no write statements, (F3) no longer carries the
+//   textual `"url":"http://` predicate, and (F6) computes its ACTIONABLE
+//   http:// count from the executor's read paths only, keeping the old `$.**`
+//   sweep alongside as an explicitly-labelled upper bound.
 // LAYER 2 (DATABASE_URL-gated): the full synthetic-PostgreSQL verification —
 //   modern + legacy fixtures, F3/F4 positive+negative cases, and the
 //   abort-⇒-incomplete evidence. Skipped LOUDLY without DATABASE_URL; when
@@ -81,6 +83,82 @@ test('F3: the broken textual http predicate is gone and the semantic one is in',
   assert.match(code, /jsonb_each_text/)
 })
 
+// F6 read paths, transcribed from the code that dereferences them:
+//   automation-executor.ts:4199  (config.url, via the dispatch at :2591)
+//   automation-executor.ts:2348, :2378        (config.branches[*].actions)
+//   automation-executor.ts:2342, :2372-2373   (config.defaultBranch.actions)
+//   automation-executor.ts:2247               (parallel config.branches[*].actions)
+// Save-time validation forbids a third level (automation-service.ts:874, :877,
+// :902, :905), so this list is exhaustive.
+const NARROW_READ_PATHS = [
+  "'$[*].config.url'",
+  "'$[*].config.branches[*].actions[*].config.url'",
+  "'$[*].config.defaultBranch.actions[*].config.url'",
+]
+
+/**
+ * Body of every `EXISTS ( … ) AS <alias>` predicate, matched from the alias
+ * BACKWARDS to its own `EXISTS` (a forward non-greedy scan would run from one
+ * predicate's opening paren into the NEXT predicate's alias and mix the two).
+ */
+function predicateBodies(code, alias) {
+  const bodies = []
+  const re = new RegExp('\\)\\s*AS\\s+' + alias, 'g')
+  let m
+  while ((m = re.exec(code)) !== null) {
+    const start = code.lastIndexOf('EXISTS', m.index)
+    assert.ok(start >= 0, `no EXISTS opens the ${alias} predicate at offset ${m.index}`)
+    bodies.push(code.slice(start, m.index))
+  }
+  return bodies
+}
+
+test('F6: the actionable http predicate matches read paths only; $.** survives as the labelled upper bound', () => {
+  const src = fs.readFileSync(path.join(PACK, '02-trg04-http-targets.sql'), 'utf8')
+  const code = src.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
+
+  for (const p of NARROW_READ_PATHS) {
+    assert.ok(code.includes(p), `narrow predicate must address ${p}`)
+  }
+
+  // Every `narrow_hit` definition must be recursion-free …
+  const narrow = predicateBodies(code, 'narrow_hit')
+  assert.ok(narrow.length >= 3, `expected >=3 narrow_hit predicates, found ${narrow.length}`)
+  for (const body of narrow) {
+    assert.ok(!body.includes('$.**'),
+      'a narrow predicate must not recurse into user-authored body/headers with $.**')
+    assert.ok(!/weburl|webhookurl|endpointurl|targeturl|callbackurl/.test(body),
+      'the never-read key aliases must not be back in the actionable predicate')
+  }
+
+  // … and every `upper_bound_hit` definition must still BE the old wide sweep,
+  // so narrowing never silently drops the number owner used to see.
+  const bound = predicateBodies(code, 'upper_bound_hit')
+  assert.ok(bound.length >= 3, `expected >=3 upper_bound_hit predicates, found ${bound.length}`)
+  for (const body of bound) {
+    assert.ok(body.includes('$.**'), 'the upper bound must keep the wide recursion')
+    assert.ok(body.includes('callbackurl'), 'the upper bound must keep the old key allowlist')
+  }
+
+  // Both numbers must reach the operator.
+  assert.match(code, /AS\s+http_rules,/)
+  assert.match(code, /AS\s+http_rules_upper_bound/)
+})
+
+test('F4 (not regressed): 02-trg04 count and ids come from one identical hit CTE', () => {
+  const src = fs.readFileSync(path.join(PACK, '02-trg04-http-targets.sql'), 'utf8')
+  const code = src.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
+  // Q2 (count) and Q3 (ids) must define the SAME `hit` CTE, character for
+  // character, and Q3 must filter on the CTE's booleans — not on some other
+  // row shape. That is what makes |ids| == count an assertable invariant.
+  const ctes = [...code.matchAll(/WITH hit AS \(([\s\S]*?)\n\)\n/g)].map(m => m[1])
+  const rulesCtes = ctes.filter(c => c.includes('FROM automation_rules ar'))
+  assert.equal(rulesCtes.length, 3, 'Q2 + Q3 + Q4 each define their own hit CTE')
+  assert.equal(rulesCtes[0], rulesCtes[1], 'Q2 and Q3 must share a character-identical hit CTE')
+  assert.match(code, /FROM hit\n WHERE narrow_hit OR upper_bound_hit/,
+    'the id query must filter on the shared CTE booleans')
+})
+
 test('F4: 01-cred06 filters ids on the hit predicate, not on object shape', () => {
   const src = fs.readFileSync(path.join(PACK, '01-cred06-secret-keys.sql'), 'utf8')
   const code = src.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
@@ -111,12 +189,22 @@ if (!DATABASE_URL || !psqlAvailable()) {
       'Point DATABASE_URL at a THROWAWAY local/container Postgres to run it. ***\n'
   )
 } else {
-  test('synthetic PostgreSQL: F3 / F4 / F5 on both schema shapes', async () => {
+  test('synthetic PostgreSQL: F3 / F4 / F5 / F6 on both schema shapes', async () => {
     const r = await verifyAll()
-    // F3 — the repaired predicate finds all four shapes of http target …
-    assert.equal(r.modern.f3.httpRules, 4)
+    // F3 — the repaired predicate finds every shape of http target on a read
+    // path (top level, branch, defaultBranch, spaced layout, HTTP:// value) …
+    assert.equal(r.modern.f3.httpRules, 6)
     // … and the pre-repair textual predicate found NONE of them.
     assert.equal(r.modern.f3.oldHttp, 0)
+    // F6 — the narrowed count is strictly smaller than the wide reading, the
+    // wide reading is still reported (as the upper bound), and the two rows in
+    // the gap are the non-target http:// strings.
+    assert.equal(r.modern.f6.httpRulesBound, 8)
+    assert.equal(r.modern.f6.oldWideHttp, r.modern.f6.httpRulesBound)
+    assert.ok(r.modern.f6.httpRules < r.modern.f6.httpRulesBound)
+    assert.equal(r.modern.f6.listedIds.length, r.modern.f6.httpRulesBound)
+    assert.equal(r.legacy.f6Legacy.legacyCol, 1)
+    assert.equal(r.legacy.f6Legacy.legacyColBound, 2)
     // F4 — ids == count, and the pre-repair id predicate over-listed.
     assert.equal(r.modern.f4.ids.length, r.modern.f4.count)
     assert.ok(r.modern.f4.oldIdRows > r.modern.f4.count)
