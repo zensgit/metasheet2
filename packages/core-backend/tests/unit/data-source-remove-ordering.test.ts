@@ -82,9 +82,13 @@ interface Harness {
   /**
    * W7-B: the ORDERED statement log of everything removeDataSource runs, each entry
    * stamped with the executor it ran on (`@db` autocommit vs `@trx` inside the transaction):
-   *   for-update:<id>@trx  count:canonical:<id>@trx  count:legacy:<id>@trx  soft-delete:<id>@trx
-   * A `select:data_sources` entry (no FOR UPDATE) is what the lock step degrades to if the
+   *   for-update:data_sources:<id>@trx  count:canonical:<id>@trx  count:legacy:<id>@trx
+   *   soft-delete:data_sources:<id>@trx
+   * A `select:data_sources:<id>` entry (no FOR UPDATE) is what the lock step degrades to if the
    * `.forUpdate()` clause is dropped — so the mutation is visible as a different string.
+   * The TABLE NAME rides in every data_sources entry (lock, soft delete, hard delete), and the
+   * fake THROWS for any table it does not model: a lock taken on some other real table
+   * (`selectFrom('integration_runs').forUpdate()`) is not "a lock" — it is a red run.
    */
   ops: string[]
   /** One record per `db.transaction().execute(...)`, in order. */
@@ -153,11 +157,24 @@ function makeHarness(): Harness {
     return b
   }
 
+  /**
+   * The fake is TABLE-STRICT: `data_sources` is the only stateful table it models, so a
+   * statement aimed at any other table name is a harness error, not a silently-answered
+   * query. This is what makes the table name in the `ops` log load-bearing — a build that
+   * locks / updates / deletes some OTHER table cannot reach a green assertion.
+   */
+  function assertKnownTable(verb: string, table: string): void {
+    if (table !== 'data_sources') {
+      throw new Error(`fake db: ${verb}(${JSON.stringify(table)}) — the harness models only data_sources`)
+    }
+  }
+
   /** One full builder set over `view` (the live rows, or a transaction's staged copy). */
   function makeExecutor(tag: ExecutorTag, view: Map<string, Record<string, unknown>>) {
     return {
       selectFrom: (table: string) => {
         if (table === 'integration_external_systems') return refCountBuilder(tag)
+        assertKnownTable('selectFrom', table)
         let whereId: string | undefined
         let lockForUpdate = false
         const b = {
@@ -173,7 +190,7 @@ function makeHarness(): Harness {
           },
           execute: async () => {
             if (whereId != null) {
-              ops.push(`${lockForUpdate ? 'for-update' : 'select:data_sources'}:${whereId}@${tag}`)
+              ops.push(`${lockForUpdate ? 'for-update' : 'select'}:${table}:${whereId}@${tag}`)
               const row = view.get(whereId)
               return row ? [{ id: whereId }] : []
             }
@@ -183,7 +200,8 @@ function makeHarness(): Harness {
         }
         return b
       },
-      insertInto: () => {
+      insertInto: (table: string) => {
+        assertKnownTable('insertInto', table)
         let pending: Record<string, unknown> = {}
         let updateSet: Record<string, unknown> | undefined
         const b = {
@@ -212,7 +230,8 @@ function makeHarness(): Harness {
         }
         return b
       },
-      updateTable: (_table: string) => {
+      updateTable: (table: string) => {
+        assertKnownTable('updateTable', table)
         let setObj: Record<string, unknown> = {}
         let whereId: string | undefined
         const b = {
@@ -229,7 +248,7 @@ function makeHarness(): Harness {
             const isDelete = Object.prototype.hasOwnProperty.call(setObj, 'deleted_at')
             if (isDelete) {
               writes.push('soft-delete:' + String(whereId))
-              ops.push(`soft-delete:${String(whereId)}@${tag}`)
+              ops.push(`soft-delete:${table}:${String(whereId)}@${tag}`)
               control.onDataSourceWrite?.()
               if (control.failDataSourceWrite) throw Object.assign(new Error(DRIVER_POISON), { code: '08006' })
             }
@@ -239,7 +258,8 @@ function makeHarness(): Harness {
         }
         return b
       },
-      deleteFrom: (_table: string) => {
+      deleteFrom: (table: string) => {
+        assertKnownTable('deleteFrom', table)
         let whereId: string | undefined
         const b = {
           where: (_col: unknown, _op: unknown, val: unknown) => {
@@ -248,7 +268,7 @@ function makeHarness(): Harness {
           },
           execute: async () => {
             writes.push('hard-delete:' + String(whereId))
-            ops.push(`hard-delete:${String(whereId)}@${tag}`)
+            ops.push(`hard-delete:${table}:${String(whereId)}@${tag}`)
             control.onDataSourceWrite?.()
             if (control.failDataSourceWrite) throw Object.assign(new Error(DRIVER_POISON), { code: '08006' })
             if (whereId != null) view.delete(whereId)
@@ -364,10 +384,10 @@ describe('removeDataSource — durable write precedes the memory clear (PERM-04)
     expect(harness.transactions).toHaveLength(1)
     expect(harness.transactions[0]?.committed).toBe(false)
     expect(harness.ops).toEqual([
-      'for-update:ds-fail@trx',
+      'for-update:data_sources:ds-fail@trx',
       'count:canonical:ds-fail@trx',
       'count:legacy:ds-fail@trx',
-      'soft-delete:ds-fail@trx',
+      'soft-delete:data_sources:ds-fail@trx',
     ])
   })
 
@@ -424,10 +444,10 @@ describe('removeDataSource — durable write precedes the memory clear (PERM-04)
     // (W7-B) and the whole durable step was ONE committed transaction, in lock order
     expect(harness.transactions).toEqual([{ committed: true, error: undefined }])
     expect(harness.ops).toEqual([
-      'for-update:ds-ok@trx',
+      'for-update:data_sources:ds-ok@trx',
       'count:canonical:ds-ok@trx',
       'count:legacy:ds-ok@trx',
-      'soft-delete:ds-ok@trx',
+      'soft-delete:data_sources:ds-ok@trx',
     ])
 
     // restart: the soft-deleted row is not re-observed
@@ -460,10 +480,10 @@ describe('removeDataSource — durable write precedes the memory clear (PERM-04)
     expect(inMemory(m, 'ds-hard')).toBe(false)
     // (W7-B) hard delete rides the same transaction and the same lock order
     expect(harness.ops).toEqual([
-      'for-update:ds-hard@trx',
+      'for-update:data_sources:ds-hard@trx',
       'count:canonical:ds-hard@trx',
       'count:legacy:ds-hard@trx',
-      'hard-delete:ds-hard@trx',
+      'hard-delete:data_sources:ds-hard@trx',
     ])
     expect(harness.transactions.map((t) => t.committed)).toEqual([true])
   })
@@ -490,7 +510,7 @@ describe('removeDataSource — the referential check runs before ANY mutation', 
     expectRowAlive(harness, 'ds-ref')
     // (W7-B) the refusal was decided INSIDE the transaction, after the lock and
     // before any write; the transaction rolled back carrying the 409 itself.
-    expect(harness.ops).toEqual(['for-update:ds-ref@trx', 'count:canonical:ds-ref@trx', 'count:legacy:ds-ref@trx'])
+    expect(harness.ops).toEqual(['for-update:data_sources:ds-ref@trx', 'count:canonical:ds-ref@trx', 'count:legacy:ds-ref@trx'])
     expect(harness.transactions).toHaveLength(1)
     expect(harness.transactions[0]?.committed).toBe(false)
     expect((harness.transactions[0]?.error as { code?: string })?.code).toBe(DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE)
@@ -523,7 +543,7 @@ describe('removeDataSource — the referential check runs before ANY mutation', 
     expect(inMemory(m, 'ds-forced')).toBe(false)
     expect(harness.rows.get('ds-forced')).toMatchObject({ is_active: false })
     // (W7-B) force skips the COUNT, never the LOCK: the row is still taken FOR UPDATE first.
-    expect(harness.ops).toEqual(['for-update:ds-forced@trx', 'soft-delete:ds-forced@trx'])
+    expect(harness.ops).toEqual(['for-update:data_sources:ds-forced@trx', 'soft-delete:data_sources:ds-forced@trx'])
   })
 
   it('a non-42P01 reference-count failure fails CLOSED: no write, no memory change', async () => {
@@ -544,7 +564,7 @@ describe('removeDataSource — the referential check runs before ANY mutation', 
     expect(error?.status).toBe(500)
     expect(String(error?.message)).not.toContain(DRIVER_POISON)
     expect(harness.transactions.map((t) => t.committed)).toEqual([false])
-    expect(harness.ops).toEqual(['for-update:ds-refboom@trx'])
+    expect(harness.ops).toEqual(['for-update:data_sources:ds-refboom@trx'])
   })
 })
 
@@ -585,8 +605,8 @@ describe('removeDataSource — W7-B: referential check and soft delete in ONE tr
     // and NOTHING of the delete ran outside the transaction
     expect(harness.ops.some((op) => op.endsWith('@db'))).toBe(false)
     // the lock is the FIRST statement, ahead of the first count
-    expect(harness.ops.indexOf('for-update:ds-tx-same@trx')).toBe(0)
-    expect(harness.ops.indexOf('for-update:ds-tx-same@trx')).toBeLessThan(harness.ops.indexOf(counts[0]!))
+    expect(harness.ops.indexOf('for-update:data_sources:ds-tx-same@trx')).toBe(0)
+    expect(harness.ops.indexOf('for-update:data_sources:ds-tx-same@trx')).toBeLessThan(harness.ops.indexOf(counts[0]!))
   })
 
   it('②-sensitivity: a count that IGNORES the executor is visible as @db — the assertion above is not vacuous', async () => {
@@ -608,6 +628,37 @@ describe('removeDataSource — W7-B: referential check and soft delete in ONE tr
     } finally {
       proto.countExternalSystemReferences = original
     }
+  })
+
+  it('④ the lock is taken on data_sources — the ops log names the table, and the fake refuses any other', async () => {
+    const harness = makeHarness()
+    const { m } = await managerWith('ds-tx-table', harness)
+    await m.removeDataSource('ds-tx-table')
+    // the lock entry carries the table name; a lock on any other table would not produce it
+    expect(harness.ops[0]).toBe('for-update:data_sources:ds-tx-table@trx')
+    expect(harness.ops.filter((op) => op.startsWith('for-update:'))).toEqual(['for-update:data_sources:ds-tx-table@trx'])
+    expect(harness.ops.at(-1)).toBe('soft-delete:data_sources:ds-tx-table@trx')
+  })
+
+  it('④-sensitivity: the fake is table-strict — a FOR UPDATE / UPDATE / DELETE aimed at another real table is a thrown harness error', async () => {
+    // Self-check of the lever ④ turns on: if this ever passes for a foreign table, ④ is vacuous.
+    const harness = makeHarness()
+    const db = harness.db as {
+      selectFrom: (t: string) => unknown
+      updateTable: (t: string) => unknown
+      deleteFrom: (t: string) => unknown
+      insertInto: (t: string) => unknown
+    }
+    for (const foreign of ['integration_runs', 'data_source', 'DATA_SOURCES', '']) {
+      expect(() => db.selectFrom(foreign)).toThrow(/models only data_sources/)
+      expect(() => db.updateTable(foreign)).toThrow(/models only data_sources/)
+      expect(() => db.deleteFrom(foreign)).toThrow(/models only data_sources/)
+      expect(() => db.insertInto(foreign)).toThrow(/models only data_sources/)
+    }
+    // and the two tables removeDataSource legitimately touches are answered
+    expect(() => db.selectFrom('data_sources')).not.toThrow()
+    expect(() => db.selectFrom('integration_external_systems')).not.toThrow()
+    expect(harness.ops).toEqual([])
   })
 
   it('③ memory-only manager (no db): the bypass keeps the referential contract without a transaction', async () => {
@@ -721,10 +772,10 @@ describe('DELETE /api/data-sources/:id — a failed delete is reported as a fail
     expect(routeHarness.ops.slice(opsBefore)).toEqual([
       `count:canonical:${ID}@db`,
       `count:legacy:${ID}@db`,
-      `for-update:${ID}@trx`,
+      `for-update:data_sources:${ID}@trx`,
       `count:canonical:${ID}@trx`,
       `count:legacy:${ID}@trx`,
-      `soft-delete:${ID}@trx`,
+      `soft-delete:data_sources:${ID}@trx`,
     ])
   })
 

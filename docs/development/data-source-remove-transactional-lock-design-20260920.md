@@ -156,6 +156,13 @@ ERROR:  insert or update on table "integration_external_systems"
 - `data-source-remove-ordering.test.ts`：把 fake 重构为 `makeExecutor(tag, view)`，`db` 与 `transaction().execute(cb)` 交给回调的 `trx` 是同一套 builder，但每条语句按执行者打标 `@db` / `@trx` 写入有序日志 `ops`；事务对 `rows` 的**暂存副本**操作、回调成功才折回（rollback 是真的）；`transactions[]` 记录每次事务是否提交及其错误。顺序断言由「写库先于清内存」升级为 `for-update → count:canonical → count:legacy → soft-delete`，全部 `@trx`。
 - `data-source-scope.test.ts`、`data-source-visibility-authority-matrix.test.ts`：只加 `transaction()`（回调拿同一套 builder）与 `select()/forUpdate()` 直通；顺序契约只钉在 remove-ordering 一处，避免三处漂移。
 
+**表名也是契约的一维（反驳 r1 补钉）。** 反驳者指出：fake 的 `selectFrom(table)` 只对 `integration_external_systems` 分流、其余一律按 `data_sources` 形态回答，`ops` 日志只有 id 与执行者标签，所以把源码里的锁改成 `selectFrom('integration_runs').forUpdate()` 时三份 spec 全绿——「在 data_sources 行上持 FOR UPDATE」这句标题级保证在「锁的对象」这一维上没被证明（`as never` 让 tsc 也拦不住）。修法：
+
+- 三份 fake 一律**表严格**：`data_sources` 是唯一建模的有状态表，`selectFrom / insertInto / updateTable / deleteFrom` 收到任何别的表名直接抛 `fake db: <verb>("<table>") — … models only data_sources`（`integration_external_systems` 仅在 `selectFrom` 上分流到计数 builder）。
+- remove-ordering 的 `ops` 三类 data_sources 语句都带表名：`for-update:data_sources:<id>@trx`、`soft-delete:data_sources:<id>@trx`、`hard-delete:data_sources:<id>@trx`（无锁退化为 `select:data_sources:<id>`）；全部顺序断言同步改写。
+- 新增 ④「锁取在 data_sources 上」与 ④-敏感性（fake 对 `integration_runs` / 大小写变体 / 空串四个外来表名在四个动词上都抛错，两张合法表不抛）——后者是 ④ 这根杠杆的自检，防止将来有人把 fake 又放宽。
+- 对应的内存级变异 M7/M8/M9（锁 / 软删 / 硬删分别指向 `integration_runs`）见验证记录 §4b；M7 = 反驳者的变异 C，修后 3 个 spec 文件 19 条红。
+
 新增用例：① 事务内计数命中引用 → 409、UPDATE 未发出、事务未提交、行逐字节不变；② 计数用的是同一 `trx`（不是 `this.db`），并附一条「敏感性」用例：在原型上把 executor 丢掉时 fake 必须看见 `@db`；③ 无 db 旁路：无引用 → 清内存；计数（spy）非零 → 409 且调用形参不含 executor；force 仍绕过。
 
 ---

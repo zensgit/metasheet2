@@ -133,12 +133,33 @@ function statefulFakeDb() {
     return b
   }
 
+  // Table-strict: the stand-in models data_sources (+ the reference count's table on
+  // selectFrom) and nothing else, so a statement aimed at another table name is a harness
+  // error rather than a silently-answered query. Statement ORDER and the lock's table
+  // name are pinned in data-source-remove-ordering.test.ts; this only refuses drift.
+  function onlyDataSources(verb: string, table: string): void {
+    if (table !== 'data_sources') {
+      throw new Error(`fake db: ${verb}(${JSON.stringify(table)}) — the stand-in models only data_sources`)
+    }
+  }
   const executor = {
-    selectFrom: (table: string) =>
-      table === 'integration_external_systems' ? refCountBuilder() : selectBuilder(),
-    insertInto: () => insertBuilder(),
-    updateTable: () => updateBuilder(),
-    deleteFrom: () => deleteBuilder(),
+    selectFrom: (table: string) => {
+      if (table === 'integration_external_systems') return refCountBuilder()
+      onlyDataSources('selectFrom', table)
+      return selectBuilder()
+    },
+    insertInto: (table: string) => {
+      onlyDataSources('insertInto', table)
+      return insertBuilder()
+    },
+    updateTable: (table: string) => {
+      onlyDataSources('updateTable', table)
+      return updateBuilder()
+    },
+    deleteFrom: (table: string) => {
+      onlyDataSources('deleteFrom', table)
+      return deleteBuilder()
+    },
   }
 
   return {

@@ -10,8 +10,8 @@
 | 文件 | 变化 |
 |---|---|
 | `packages/core-backend/src/data-adapters/DataSourceManager.ts` | `countExternalSystemReferences(id, executor?)`；`removeDataSource` 引用检查 + 软删/硬删合入一个事务，首句 `FOR UPDATE`；409 按 code 透出；无 db 旁路；块注释明确「时序 A 未关闭 / PR-B 待裁」 |
-| `packages/core-backend/tests/unit/data-source-remove-ordering.test.ts` | fake db 重构为带执行者标签的有序语句日志 + 真回滚的暂存副本 + 事务记录；既有 9 条用例升级为锁序断言；新增 5 条 W7-B 用例 |
-| `packages/core-backend/tests/unit/data-source-scope.test.ts` | fake db 加 `transaction()` 与 `select()/forUpdate()` 直通 |
+| `packages/core-backend/tests/unit/data-source-remove-ordering.test.ts` | fake db 重构为带执行者标签的有序语句日志 + 真回滚的暂存副本 + 事务记录；既有 9 条用例升级为锁序断言；新增 5 条 W7-B 用例。**r2**：fake 表严格（非 `data_sources` 表名抛错），`ops` 三类语句带表名，新增 ④ / ④-敏感性两条 |
+| `packages/core-backend/tests/unit/data-source-scope.test.ts` | fake db 加 `transaction()` 与 `select()/forUpdate()` 直通。**r2**：四个动词表严格 |
 | `packages/core-backend/tests/unit/data-source-visibility-authority-matrix.test.ts` | 同上 |
 | `docs/development/data-source-remove-transactional-lock-{design,verification}-20260920.md` | 本记录 |
 
@@ -60,12 +60,41 @@ pnpm --filter @metasheet/core-backend exec tsc --noEmit
 
 每条新守卫至少被一个变异证明会红；每个变异至少让一个守卫红。M4 的路由层结果同时证明「路由预计数」与「事务内计数」是两道门，删掉后者的透出只影响直接调用 manager 的路径。
 
+## 4b. 反驳 r1 修复：钉住「锁的是哪张表」（2026-09-20 03:30 +08:00）
+
+反驳者的 blocker：把源码 `trx.selectFrom('data_sources' as never)…forUpdate()` 改成 `selectFrom('integration_runs' as never)`（其变异 C），三份 spec 93 条全绿——fake 对未知表名一律按 `data_sources` 形态回答，`ops` 日志不含表名，M0–M6 没有一条覆盖这一维。复核属实（修前在本机重跑变异 C：`Test Files 3 passed / Tests 93 passed`）。
+
+修法（仅测试替身，源码零改动）：
+
+- 三份 fake 一律表严格：`selectFrom / insertInto / updateTable / deleteFrom` 收到非 `data_sources` 表名即抛（`integration_external_systems` 只在 `selectFrom` 上分流到计数 builder）。
+- remove-ordering 的 `ops` 三类 data_sources 语句带表名：`for-update:data_sources:<id>@trx` / `soft-delete:data_sources:<id>@trx` / `hard-delete:data_sources:<id>@trx`；14 处顺序断言字面量同步改写；新增 ④ 与 ④-敏感性两条（17 → 19 条）。
+
+修后基线：三份 spec `Test Files 3 passed (3) / Tests 95 passed (95)`；`tsc --noEmit -p tsconfig.json` exit 0。
+
+变异复跑（同一内存级 transform 配置追加 M7–M9，目标改为反驳者用的三份 spec，未变异 95/95 绿）：
+
+| # | 变异 | 结果 | 变红的守卫（节选） |
+|---|---|---|---|
+| **M7** = 反驳变异 C | 锁语句 `selectFrom('data_sources')` → `selectFrom('integration_runs')`（forUpdate/where/id 不动） | **3 files failed / 19 failed / 76 passed** | remove-ordering 14 条（fake 抛「models only data_sources」，含 ④ 与路由 happy path）；scope 2 条、visibility-matrix 3 条（表严格） |
+| **M8** | 软删 `updateTable('data_sources')` → `updateTable('integration_runs')` | **3 files failed / 15 failed / 80 passed** | 所有走到软删的用例，三份 spec 都红 |
+| **M9** | 硬删 `deleteFrom('data_sources')` → `deleteFrom('integration_runs')` | **1 failed / 94 passed** | 仅 hardDelete 顺序用例（唯一走硬删的路径） |
+| M0 | 不开事务 | 11 failed / 84 passed | 与 r1 同（多出 ④） |
+| M1 | 删 `.forUpdate()` | 9 failed / 86 passed | 同 r1（多出 ④：首项退化为 `select:data_sources:<id>`） |
+| M2 | 计数落到 `this.db` | 6 failed / 89 passed | 同 r1 |
+| M3 | 计数提到事务前 | 9 failed / 86 passed | 同 r1 |
+| M4 | 409 翻成 500 | 3 failed / 92 passed | 同 r1 |
+| M5 | 事务内先写后计数 | 9 failed / 86 passed | 同 r1 |
+| M6 | 删无 db 旁路计数 | 1 failed / 94 passed | 同 r1（仅 ③） |
+
+M7–M9 每条锚点唯一命中；scope / visibility-matrix 在 M7/M8 下也红，说明表严格不只钉在 remove-ordering 一处。M9 只红一条是覆盖面的真实反映：硬删只有一条用例走到，不是漏钉。
+
 ## 5. 卫生检查
 
 ```
 git diff origin/main | grep -cP '\x08'   → 0   （Edit 工具 \b 退格陷阱）
 git diff | grep -cP '\r'                 → 0   （CRLF 噪声）
 git status --short                       → 仅 4 个 M 文件 + 2 个新 docs；变异配置已删除
+r2 复查：git diff origin/main | grep -cP '\x08' → 0；变异配置再次删除，仅 3 个 spec + 2 个 docs 有差异
 ```
 values-free：改动与文档不含主机 / IP / 口令 / appKey / 租户 id；测试里的 `DRIVER_POISON` 是 #5784 既有的**伪造**驱动文案，用来断言它不外泄。
 
