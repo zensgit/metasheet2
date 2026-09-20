@@ -989,7 +989,13 @@ describe('Multitable context API', () => {
   test('logs a failed [multitable.template.install] event for an unknown template', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
-      queryHandler: async () => ({ rows: [], rowCount: 0 }),
+      // #5861: the install route takes `pg_try_advisory_xact_lock(...) AS locked` before anything
+      // else, and the module throws when the query面 does not answer with that boolean column
+      // (a blanket `{ rows: [] }` fake would otherwise look like a lock that is never granted).
+      // The shared neutral handler answers it (lock granted, ledger always empty = never a replay);
+      // everything else still falls through to the blanket empty result this case wants.
+      queryHandler: async (sql) => handleTemplateInstallDedupeSql(sql.replace(/\s+/g, ' ').trim())
+        ?? { rows: [], rowCount: 0 },
     })
 
     const { Logger } = await import('../../src/core/logger')
