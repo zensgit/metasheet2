@@ -128,6 +128,24 @@ vi.mock('../src/approvals/api', () => ({
     id: 'atg_test', orgId: 'org_test', name, sortOrder: 1,
     createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
   }),
+  // P1-A (impl-gate-A5-daily-ops-round1-20260920.md) — the page-level case below DOES mount the
+  // panel (it opens 管理分组), which imports these four as well. Same standing as the three keys
+  // above: present so mounting cannot fail on an undefined import, NOT the thing under test here.
+  // The panel's own error-copy / rename / archive / unarchive contracts are pinned, against the
+  // real module, in `ApprovalTemplateGroupsPanel.spec.ts`.
+  describeApprovalTemplateGroupError: (err: { message?: string } | null) => err?.message ?? '',
+  renameApprovalTemplateGroup: (id: string, name: string) => Promise.resolve({
+    id, orgId: 'org_test', name, sortOrder: 1,
+    createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
+  }),
+  archiveApprovalTemplateGroup: (id: string) => Promise.resolve({
+    id, orgId: 'org_test', name: 'archived', sortOrder: null,
+    createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: '2026-09-20T00:00:00.000Z',
+  }),
+  unarchiveApprovalTemplateGroup: (id: string) => Promise.resolve({
+    id, orgId: 'org_test', name: 'unarchived', sortOrder: 1,
+    createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
+  }),
 }))
 
 // ---------------------------------------------------------------------------
@@ -884,7 +902,10 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
    * same way a real admin reaches it. Remounts from scratch so each instance can be exercised
    * from the same starting state.
    */
-  async function mountUnboundMultiOrgGroupedView(state: { bound: boolean }) {
+  async function mountUnboundMultiOrgGroupedView(
+    state: { bound: boolean },
+    options: { openManager?: boolean } = {},
+  ) {
     if (app) app.unmount()
     if (container) container.remove()
     container = document.createElement('div')
@@ -918,6 +939,12 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     await mountView()
     await enterGroupedView()
     await flushUi(10)
+    if (options.openManager) {
+      ;(container!.querySelector(
+        '[data-testid="template-center-group-manager-toggle"]',
+      ) as HTMLButtonElement).click()
+      await flushUi(10)
+    }
   }
 
   it('P1-A: an UNBOUND multi-org admin on the first grouped hop gets exactly ONE switcher, with a unique select id', async () => {
@@ -970,6 +997,46 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
       // …and the blocked grouped view was actually replayed.
       expect(listApprovalTemplateGroupsSpy.mock.calls.length).toBeGreaterThan(readsBeforeSwitch)
       expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+    }
+  })
+
+  // The round-1 gate wrote this configuration down as an UNMEASURED inference: "(推论,本轮未实测)
+  // 面板自己也持有一个反应式实例,同一机制下管理员若已展开「管理分组」面板,应当出现第三个 ——
+  // 相位 E 两次运行均未展开面板,实测值恒为 2". Both cases above leave `showGroupManager` false,
+  // so the panel is not even mounted in them — which would repeat, in round 2, exactly the miss
+  // round 1 was failed for: exercising only the configuration where the code wins. This case
+  // opens the manager, i.e. it measures the gate's inference instead of inheriting it.
+  it('P1-A: with the 管理分组 panel EXPANDED it is still exactly one switcher, and switching from any instance keeps it', async () => {
+    const state = { bound: false }
+    await mountUnboundMultiOrgGroupedView(state, { openManager: true })
+    // Sanity: the panel really is mounted (otherwise this case degrades into the first one).
+    expect(container!.querySelector('[data-testid="approval-template-groups-panel"]')).not.toBeNull()
+
+    const instanceCount = container!.querySelectorAll('[data-testid="session-org-switcher"]').length
+    expect(instanceCount).toBe(1)
+    const ids = Array.from(
+      container!.querySelectorAll('[data-testid="session-org-switcher"] select[name="sessionOrgId"]'),
+    ).map((select) => (select as HTMLSelectElement).id)
+    expect(new Set(ids).size).toBe(ids.length)
+
+    for (let index = 0; index < instanceCount; index += 1) {
+      if (index > 0) await mountUnboundMultiOrgGroupedView(state, { openManager: true })
+
+      const selects = Array.from(
+        container!.querySelectorAll('[data-testid="session-org-switcher"] select[name="sessionOrgId"]'),
+      ) as HTMLSelectElement[]
+      expect(selects.length).toBe(instanceCount)
+
+      const select = selects[index]
+      select.value = 'org-b'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(10)
+
+      expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(1)
+      // Both hosted surfaces came back: the sections view renders and the panel's list is no
+      // longer suppressed behind its "blocked on a session org" state.
+      expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="approval-template-groups-list"]')).not.toBeNull()
     }
   })
 })
