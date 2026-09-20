@@ -575,6 +575,16 @@ contract and is not implemented here.
   untouched. Widening it back needs either a decision-time role snapshot or the legacy route writing
   `nodeKey` itself; both are owner calls, registered in §3.4.
 
+  **`source_queue` is NOT covered — registered as a gap, not as coverage.** The membership half
+  resolves through `user_roles` / `users.role`, so it can only ever name a ROLE. A `source_queue`
+  seat's `assignee_id` is a permission/queue token (`ApprovalBridgeService` writes e.g.
+  `plm:source-owned`) matched at dispatch against the actor's PERMISSIONS. A document whose approver
+  settled such a node — and who also holds a delegated seat on that instance — therefore BLOCKS
+  rather than being seated. Fail-closed is the ruling's own direction and the population is
+  bridge-written instances, but this is a real narrowing with **no leg behind it today**: do not read
+  the 「role / source_queue」 phrasing above as 「both halves are credentialled」. Widening the
+  credential to permissions is a separate owner call (it needs its own census first).
+
   **Residual that remains, named.** Cardinality is a BUDGET, not an identity: a node whose config
   lists two role ids carries two seat rows, so one spare row of budget exists there, and a forger who
   is genuinely a member of one of those roles would satisfy both halves. `N15(a)` deliberately runs on

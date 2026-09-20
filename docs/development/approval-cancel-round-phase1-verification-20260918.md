@@ -4680,6 +4680,8 @@ git grep -c '<token>' <head> -- docs/ packages/core-backend/tests/     # 允许 
 | **P2-2**(设计 MD `:515-517` 定性不准、且该臂只有散文没有腿)| 整段按实测重写(方向是**拿走别人的席位**、actor **不必**是角色成员、`M-v` 只钉了「不得阻断」一个方向);两个方向现在都有腿 | 设计 MD「The widening's own cost — REWRITTEN」段 + 上面四条新腿 |
 | **P3-1**(§O6.1 的「只出现在这一个文件里」是自指快照)| 换成**路径限定的可复算判据**(`-- packages/core-backend/src/services/`),不再声明「不会被稀释」 | §O6.1 勘误段 |
 | **NIT-1**(§O6.3 的表钉在上一个 head)| §O6.3 打求值标记,数值迁到 §O7.4,并且给**命令**而不是常数 | §O6.3 / §O7.4 |
+| **(本轮自查,非门审条目)`source_queue` 席位**| 成员身份那一半只能命中**角色** id,`source_queue` 的 `assignee_id` 是权限/队列 token(桥写入,dispatch 按**权限**匹配)⇒ 该类单据现在**阻断**。**登记为缺口,不在本轮加宽**(加宽到权限是另一条 owner 裁,且需要自己的普查) | 源码 REGISTERED GAP 段 + 设计 MD;**今天没有腿**,写明 |
+| **(本轮自查)`user_roles` 可达性**| 新 SQL 硬引用 `user_roles`;若该表缺失会把 409 契约答案变成 500。**实测论证见 §O7.5**,结论:不可达,**不加未测分支** | §O7.5 |
 
 ## O7.2 落地前的 ratio 普查(门审点名的前置条件)
 
@@ -4687,18 +4689,30 @@ git grep -c '<token>' <head> -- docs/ packages/core-backend/tests/     # 允许 
 `approval_assignments` 装 **AFTER INSERT 触发器**把每一行镜像进两张 `zz_census_*` 表(因为各套件的
 `afterAll` 会把语料删干净,跑完再查恒为 0 行),然后跑全部七个 `approval-cancel-round-*.db.test.ts`。
 
-读数:**81 条 approve 行 / 142 条 assignment 行 → 60 组 `(instance, node)`**
+**两次读数,分开写(它们的语料不同,不能混用)**:
+
+**(i) 落地前 —— 86 腿语料(门审点名的那次)**:**81 条 approve 行 / 142 条 assignment 行 → 60 组**;
+**58 组在预算内**(8 组 2 行/2 席、50 组 1 行/1 席),**恰好 2 组超预算,且两组都是故意造的不诚实夹具** ——
+`N11(a)` 的不存在节点(1 行 / 0 席)、`P21(a)` 的 legacy 改名(2 行 / 1 席)。
+
+**(ii) 交付 head —— 92 腿语料(含本轮六条新腿,重跑一次)**:**92 条 approve 行 / 160 条 assignment 行 → 69 组**
 
 | 该节点的人类 approve 行数 | 该节点的 assignment 行数 | 组数 | 判定 |
 |---|---|---|---|
-| 2 | 2 | 8 | 预算内(会签节点) |
-| 1 | 1 | 48 + 2 | 预算内(2 组是**角色节点**) |
-| 1 | 0 | 1 | **超预算** —— `N11(a)` 的不存在节点(故意造的) |
-| 2 | 1 | 1 | **超预算** —— `P21(a)` 的 legacy 改名(故意造的) |
+| 1 | 1 | 55 | 预算内(其中 4 组是**角色节点**) |
+| 2 | 2 | 9 | 预算内(会签节点 8 组 + `N15(a)` 的两角色席位节点 1 组) |
+| 1 | 2 | 2 | 预算内(`P24(a)` 的诚实版 + 兄弟) |
+| 2 | 1 | 2 | **超预算** —— `P21(a)` 的 legacy 改名、**`N14(a)` 的伪造**(两条行压在一席上) |
+| 1 | 0 | 1 | **超预算** —— `N11(a)` 的不存在节点 |
 
-**58/60 在预算内,超预算的两组都是故意造的不诚实夹具**;且 `P21(a)` 走的是 **user 席位臂**,本轮基数合取
-**故意不覆盖**它(那条残留仍归 owner,见设计 MD §3.4)。跑完即 `DROP TRIGGER`,census 表留在一次性库里
-随库一起 `dropdb`。
+**66/69 在预算内;超预算的 3 组全部是故意造的不诚实夹具**(机械核:逐组 `actors` 列都是
+`…selfdrop…` / `…g3cred-forgery…` / `…g3dlg-forged…` 三个夹具的 id)。
+`P21(a)` 走的是 **user 席位臂**,本轮基数合取**故意不覆盖**它(那条残留仍归 owner,见设计 MD §3.4);
+`N14(a)` 正是被这条合取挡住的那一组。
+
+**做法**:在一次性库上给 `approval_records` / `approval_assignments` 装 **AFTER INSERT 触发器**把每一行
+镜像进两张 `zz_census_*` 表(因为各套件的 `afterAll` 会把语料删干净,跑完再查恒为 0 行),跑完即
+`DROP TRIGGER`;census 表留在一次性库里随库一起 `dropdb`。
 
 ## O7.3 实测台账(全部在一次性库 `metasheet2_c1_a_r2_20260921` 上;owner `ms2testbed`,非超级)
 
@@ -4736,7 +4750,7 @@ git grep -c '<token>' <head> -- docs/ packages/core-backend/tests/     # 允许 
 | **M-i** | `delegate_not_seat` 臂 → 坐下 actor | **4 红**:`P12(a) N7(a) N8(a) P13(a)` | 与门审读数**逐条一致** |
 | **M-ii** | 多委托人 × 无 `nodeKey` 臂 → 坐下 actor | **1 红**:只有 `N9(a)` | 一致 |
 | **M-iii** | 末尾「名字无凭据」臂 → 坐下 actor | **5 红**:`N11(a) N13(a) N14(a) N15(a) N16(a)` | 门审时 2 红;本轮四条新腿也落在这条臂上 ⇒ 变 5,**不是回退** |
-| **M-iv** | 删「该 actor 从无委托席位 ⇒ 本人」早退 | **2 红**:`P19(a) P15(a)` | 门审时 1 红。多出的 `P15(a)` 是**爆炸半径的证据**:早退关掉后,连无委托的角色审批人也要过凭据 ⇒ 说明凭据**只对持有被委托席位的 actor 生效** |
+| **M-iv** | 删「该 actor 从无委托席位 ⇒ 本人」早退 | **2 红**:`P19(a) P15(a)` | 门审时 1 红。**这条 mutation 实测到的是**:早退一旦关掉,`P15(a)` 那个**无委托**的角色审批人也会去过凭据并被拒。**爆炸半径那句结论(「凭据只对持有被委托席位的 actor 生效」)来自早退臂在代码里的位置(它在凭据之前 `continue`),不是来自这条读数** —— 两句分开写,不让结论借断言的光 |
 | **M-v** | 非 user 席位臂关掉(`if (false && …)`) | **2 红**:`P22(a) P23(a)` | 「不得阻断」方向仍被钉住 |
 | **M-vi** | `actorUserSeats.length > 1` 臂 → 坐下 actor | **1 红**:只有 **`N17(a)`** | **P2-1 关闭**:门审时这里是 0 红(未测守卫) |
 | **M-vii**(新)| 删 SQL 里的成员身份 `EXISTS`(= 退回「该节点有非 user 席位」) | **2 红**:`N15(a) N16(a)` | 成员身份那一半承重且已测 |
@@ -4777,16 +4791,43 @@ git merge-tree --write-tree <C-1 head> <phase2 head>
 栽过的地方)。**树 SHA 不同** —— 它按构造随**任何**提交变化,包括写下它的那一次;因此下面只登记
 「在哪个对象上、用哪条命令、得到什么」,核对时**一律现算**。
 
-**本节所有数值点名的对象**:**代码提交 `c92ebc0eebab7db1e979f9cc34f0cdcbb69d57d6`**
-(= 本轮 `ApprovalProductService.ts` + `approval-cancel-round-creation.db.test.ts` 的那一次提交;
-本文件的 docs-only 提交在它之后,不改 src,所以上表对**交付 head** 同样成立)。
+**本节所有数值点名的对象**:**代码提交 `f05f7f6c035e69477861a0c11605293f64b045c7`**
+(= 本轮最后一次改 `packages/core-backend/src/` 的提交;`ApprovalProductService.ts` 在该提交上的
+blob sha256 = `237de2342640dbbd69b8921128f26e2a84fbaa64f749c21832891eae1038ecae`)。
+本文件的 docs-only 提交在它之后,**不碰 `src/`**,所以上面的 token 表对**交付 head** 同样成立。
 
-| 项 | 实测(对象 = `c92ebc0eeb…`) |
+| 项 | 实测(对象 = `f05f7f6c03…`) |
 |---|---|
 | `git merge-base --is-ancestor b8b71539a6… origin/feat/approval-cancel-round-phase2` | **YES** |
 | `git merge-base <C-1> <C-2>` | **`b8b71539a6a89e51331e2e4874f994498df15c55`** |
-| **C-2** `git merge-tree --write-tree <C-1> 6a40f0121a…` | **EXIT 0**,树 **`3476ebe146fdc49753e0ca3f3de25d08f11edb34`** |
-| **C2F**(`…-phase2-history-projection`,head `616049b711a5f0a57236474ae649fd1af91070a6`)同一命令 | **EXIT 0**,树 **`fdd653247503cc0af28c0f6f03b6888d08617d37`** |
+| **C-2** `git merge-tree --write-tree <C-1> 6a40f0121a…` | **EXIT 0**,树 **`5da51a31924c6605d92ab98454716dd8cc0e8eaf`** |
+| **C2F**(`…-phase2-history-projection`,head `616049b711a5f0a57236474ae649fd1af91070a6`)同一命令 | **EXIT 0**,树 **`29b2c5ca2da1684cbc254fb377f7b9c6cdbc76b6`** |
 
 **C-2 与 C2F 的三方合并在本轮交付的代码 head 上仍然干净。**
+(对照:同两条命令在中间提交 `c92ebc0eeb…` 上是 `3476ebe146…` / `fdd6532475…` ——
+**树 SHA 随每一次提交变化,这正是本节给命令而不给常数的原因**。)
 **三方合并干净 ≠ 逐提交重放干净**:rebase **本轮同样未实跑**,两句分开写。
+
+## O7.5 新依赖的可达性论证(`user_roles` 缺表会不会把 409 变成 500)
+
+凭据的成员身份那一半在**同一条** SQL 里引用了 `user_roles` 与 `users`。Postgres 在**解析期**就会对不存在的
+关系报错,所以「短路」救不了它 —— 缺表 = 整条查询抛错 = 这条路径上一个**新的** 500。本仓又确实有
+「RBAC 表可能缺失」的降级契约(`RBAC_OPTIONAL=1` / `isDatabaseSchemaError` / `rbacDegraded`,
+`rbac/service.ts`),所以这不是假想状态,必须论证而不是「接受并记住」。
+
+**论证四条,全部机械核:**
+
+1. **`users` 本来就是这条路径的硬依赖** —— 席位资格闸在同一个方法里读
+   `SELECT id, is_active, role, activation_status FROM users …`(`ApprovalProductService.ts:571`)。
+   本轮**新增**的依赖只有 `user_roles` 一张表。
+2. **`user_roles` 由核心迁移 `20250924190000_create_rbac_tables.ts` 建,且从未被任何 lane 排除** ——
+   `grep -rn MIGRATION_EXCLUDE .github/workflows/*.yml` 列出的排除集合里
+   `create_rbac_tables` 命中数 = **0**(六个被排除的文件都是 plugin/event-bus/BPMN/gantt/view/user_orgs)。
+3. **唯一设 `RBAC_OPTIONAL=1` 的 lane 是 `observability-e2e.yml`,而它先跑 `db:migrate`**
+   (排除集合同上,不含 RBAC 迁移)⇒ 在那条 lane 上 `user_roles` **存在**。
+4. **`createCancelRoundInstance` 在本 head 上零生产调用方**(无 HTTP 传输层),所以它在那条 lane 上
+   根本不会被调用。
+
+⇒ **不为缺表加一条今天不可达、且没有腿的分支**(那会是本仓「另造更窄同类物 / 未测守卫」的同族)。
+**若将来 C-2 给它接上 HTTP、或出现一条不跑 RBAC 迁移的部署**,这条论证的第 3/4 条就失效,
+必须在那一轮重新求值 —— 判据写在这里,不靠记忆。
