@@ -450,6 +450,62 @@ describe('ApprovalTemplateGroupsPanel — daily-ops fixes (P2-1 / P2-2 / P2-4)',
     // One re-read, not a re-read per render.
     expect(listCalls).toBe(listCallsBeforeArchive + 1)
   })
+
+  // P3-D (impl-gate-A5-daily-ops-round2-20260920.md): P3-3 above covers only the ARCHIVE side of
+  // `replaceGroup`'s in-place-swap gap. Unarchiving moves the row too — the server takes
+  // `sort_order = MAX+1`, landing it at the END of the now-active rows, which is not necessarily
+  // where an in-place splice would leave it. The round-2 gate's M-h mutation (delete `onUnarchive`'s
+  // `await loadGroups()`) survived every one of the five specs' 76 tests green; this is the mirror
+  // of P3-3's archive case that gives that branch discriminating power.
+  //
+  // Fixture: TWO already-archived groups, `atg_3` archived MORE RECENTLY than `atg_1` — the
+  // server's own order (`archived_at DESC NULLS LAST`) therefore renders `atg_3` BEFORE `atg_1`.
+  // Unarchiving `atg_1` (the one that renders LAST) makes an in-place swap and a real re-read
+  // observably different: a swap-in-place leaves `atg_1` sitting exactly where it was — AFTER the
+  // still-archived `atg_3` — while the server re-reads `atg_1` as the only active row, first.
+  it('P3-D: unarchiving re-reads the list so the rendered order is the server\'s, not the pre-unarchive one', async () => {
+    let unarchived = false
+    let listCalls = 0
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        listCalls += 1
+        return jsonResponse(200, {
+          groups: unarchived
+            // Server order after unarchiving: the now-active atg_1 sorts first (active rows
+            // before archived ones), atg_3 stays archived and last.
+            ? [group('atg_1', 'org-a', 'Finance', null), group('atg_3', 'org-a', 'Sales', '2026-09-19T00:00:00.000Z')]
+            // Before: both archived, atg_3 archived MORE RECENTLY so it renders first.
+            : [group('atg_3', 'org-a', 'Sales', '2026-09-19T00:00:00.000Z'), group('atg_1', 'org-a', 'Finance', '2026-09-18T00:00:00.000Z')],
+        })
+      }
+      if (path === '/api/approval-template-groups/atg_1/unarchive' && init?.method === 'POST') {
+        unarchived = true
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance') })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    const renderedOrder = () =>
+      Array.from(el.querySelectorAll('[data-group-id]')).map((node) => node.getAttribute('data-group-id'))
+    expect(renderedOrder()).toEqual(['atg_3', 'atg_1'])
+    const listCallsBeforeUnarchive = listCalls
+
+    ;(el.querySelector(
+      '[data-group-id="atg_1"] [data-testid="approval-template-groups-unarchive-button"]',
+    ) as HTMLButtonElement).click()
+    await settle()
+
+    // The newly-active row moved to the FRONT, exactly where the server puts it — an in-place
+    // swap would have left it stuck after the still-archived atg_3.
+    expect(renderedOrder()).toEqual(['atg_1', 'atg_3'])
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-testid'))
+      .toBe('approval-template-groups-item')
+    // One re-read, not a re-read per render.
+    expect(listCalls).toBe(listCallsBeforeUnarchive + 1)
+  })
 })
 
 /**
@@ -544,5 +600,79 @@ describe('ApprovalTemplateGroupsPanel — hosted session-org entry (P1-A)', () =
     expect(container.querySelector('[data-testid="approval-template-groups-list"]')).not.toBeNull()
     expect(container.textContent).toContain('Legal')
     expect(container.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+  })
+})
+
+/**
+ * (ii) Request-algebra guard (impl-gate-A5-daily-ops-round2-20260920.md, additional load-bearing
+ * scenario) — sibling of `TemplateGroupSections.vue`'s identical case: the host replays THIS
+ * panel's `loadGroups()` too, on the same successful-switch event
+ * (`TemplateCenterView.onPageSessionOrgChange` calls `groupsPanelRef.value?.loadGroups()`
+ * alongside the sections view's `loadAll()`), so the same overlapping-calls race applies here.
+ */
+describe('ApprovalTemplateGroupsPanel — request algebra guard (rapid org switch)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    localStorage.clear()
+    mocks.apiFetch.mockReset()
+    useAuth().setToken(jwt('org-a'))
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.restoreAllMocks()
+  })
+
+  async function settle(rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  it('(ii) a stale loadGroups() answer that arrives AFTER a newer one must not overwrite the newer org\'s rendered list', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve) => { resolvers.push(resolve) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+    // onMounted's own loadGroups() is the first call — let it settle cleanly before the race.
+    expect(resolvers.length).toBe(1)
+    resolvers[0](jsonResponse(200, EMPTY_LIST))
+    await settle()
+
+    // Two rapid successive org switches: TemplateCenterView.onPageSessionOrgChange calls
+    // `loadGroups()` again on EACH switch, before either has necessarily returned.
+    const stale = panelRef.value!.loadGroups() // fired for the org being switched AWAY from
+    const fresh = panelRef.value!.loadGroups() // fired for the org just switched TO
+    await settle(1)
+    expect(resolvers.length).toBe(3)
+
+    // Resolve OUT OF ORDER: the request fired SECOND (the org now current) answers first.
+    resolvers[2](jsonResponse(200, { groups: [group('atg_fresh', 'org-b', 'Fresh Org Group')] }))
+    await settle()
+    resolvers[1](jsonResponse(200, { groups: [group('atg_stale', 'org-a', 'Stale Org Group')] }))
+    await Promise.all([stale, fresh])
+    await settle()
+
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('Stale Org Group')
   })
 })

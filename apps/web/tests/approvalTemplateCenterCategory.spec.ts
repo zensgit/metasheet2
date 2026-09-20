@@ -1035,4 +1035,121 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
       expect(container!.querySelector('[data-testid="approval-template-groups-list"]')).not.toBeNull()
     }
   })
+
+  // ── P2-C (impl-gate-A5-daily-ops-round2-20260920.md) ────────────────────────────────────────
+  // `showPageSessionOrgSwitcher` is `hasMultipleOrgs || sessionOrgRequiredSeen` (TemplateCenterView
+  // .vue:555-557). Every case above reaches the entry through the FIRST disjunct — a successful
+  // `GET /api/auth/session-orgs` returning >1 org. The SECOND disjunct is only exercised when that
+  // lookup itself fails (network error / 500 / malformed payload): `orgs` then never grows past
+  // zero, so `hasMultipleOrgs` can NEVER become true, and the entry can only exist because a hosted
+  // child (here, TemplateGroupSections) took its own 403 SESSION_ORG_REQUIRED and reported it up
+  // via `notifySessionOrgRequired()`. The round-2 gate found this branch completely unexercised:
+  // dropping the second disjunct (M-e) and turning `notifySessionOrgRequired` into a no-op (M-f)
+  // each left every one of the five specs' 76 tests green. Both scenarios are reachable together —
+  // a member's session-orgs call and a hosted child's group call can fail independently — so an
+  // admin in that state must still get an entry (in its own error state, since there is nothing to
+  // pick from) instead of a page with no switcher and no explanation at all.
+  it('P2-C: an unbound multi-org admin whose session-orgs lookup ALSO fails still gets exactly one switcher, in its error state', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+
+    const api = await import('../src/approvals/api')
+    // Every group endpoint 403s SESSION_ORG_REQUIRED — same unbound-admin population as
+    // `mountUnboundMultiOrgGroupedView`, just without a `POST /api/auth/session-org` recovery path
+    // (there is nothing to switch to: the org list itself never loads).
+    listApprovalTemplateGroupsSpy.mockImplementation(async () => {
+      throw sessionOrgRequiredError(api.ApprovalApiError as unknown as new (m: string) => Error)
+    })
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        // The lookup itself fails — `orgs` stays `[]` forever, so `hasMultipleOrgs` never fires.
+        return jsonResponse(500, { success: false })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(10)
+
+    const switchers = container!.querySelectorAll('[data-testid="session-org-switcher"]')
+    expect(switchers.length).toBe(1)
+    // Genuinely the FAILURE state, not a working dropdown that merely has no options loaded yet:
+    // zero organizations offered, the select disabled, and the switcher's own error hint visible.
+    const switcher = switchers[0]
+    const select = switcher.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+    expect(switcher.querySelectorAll('option[value]:not([value=""])').length).toBe(0)
+    expect(switcher.querySelector('.session-org-switcher__hint--error')).not.toBeNull()
+  })
+
+  // ── (i) session context on logout / account switch (round-2 gate, additional load-bearing case)
+  // `useSessionOrg`'s `onAuthPrincipalChange` handler (untouchable — design lock §2, `useSessionOrg
+  // .ts` "不动") already clears `orgs`/`currentOrgId`/`errorMessage` on every transition `useAuth`'s
+  // single reset funnel fires through (`setToken`/`clearToken` → `notifyAuthPrincipalChange()`).
+  // This pins that behaviour AT THE HOST — the actual page-level org list/selection a real admin
+  // would see — for both directions named by the review: signing out entirely, and switching to a
+  // DIFFERENT account without an intervening reload.
+  it('(i) signing out clears the host\'s session-org list — nothing from the previous account is left rendered', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+
+    // The previous account's org list is up and bound.
+    const switcherBefore = container!.querySelector('[data-testid="session-org-switcher"] select[name="sessionOrgId"]') as HTMLSelectElement
+    expect(switcherBefore).not.toBeNull()
+    expect(switcherBefore.options.length).toBeGreaterThan(0)
+    expect(Array.from(switcherBefore.options).some((o) => o.value === 'org-a')).toBe(true)
+
+    useAuth().clearToken()
+    await flushUi(8)
+
+    // `hasMultipleOrgs` reads off `orgs`, which the reset funnel clears to `[]` — with no bound
+    // org and `sessionOrgRequiredSeen` never having been set in this scenario, the entry must
+    // disappear ENTIRELY rather than keep rendering the signed-out-from account's two orgs.
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+  })
+
+  it('(i) switching accounts clears the host\'s session-org list before the new account\'s own load lands', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwt('org-a'))
+    let sessionOrgsCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        sessionOrgsCalls += 1
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    expect(sessionOrgsCalls).toBe(1)
+
+    // A DIFFERENT account signs in — `setToken` again, the same reset funnel `clearToken` uses —
+    // before this page has re-run its own session-orgs fetch for the new principal.
+    useAuth().setToken(jwt('org-z'))
+    await nextTick()
+
+    // The stale account's two-org entry must not still be sitting in the DOM the instant the
+    // principal changes, before anything has re-fetched for the new one — same hard assertion as
+    // the sign-out case: `orgs` was cleared synchronously by the reset funnel, so `hasMultipleOrgs`
+    // is false and (with `sessionOrgRequiredSeen` never having fired) the entry is gone.
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+  })
 })

@@ -1086,3 +1086,80 @@ describe('TemplateGroupSections — hosted session-org entry (P1-A)', () => {
     expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
   })
 })
+
+/**
+ * (ii) Request-algebra guard (impl-gate-A5-daily-ops-round2-20260920.md, additional load-bearing
+ * scenario asked for alongside P2-C/P3-D): `TemplateCenterView.onPageSessionOrgChange` calls
+ * `groupSectionsRef.value?.loadAll()` after EVERY successful switch. Two rapid, back-to-back
+ * switches therefore fire two overlapping `loadAll()` calls — this drives that directly, at the
+ * component level, by controlling exactly when each call's underlying `listApprovalTemplateGroups`
+ * promise settles, rather than trying to race real timers.
+ */
+describe('TemplateGroupSections — request algebra guard (rapid org switch)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  const sectionsRef = ref<{ loadAll: () => Promise<void> } | null>(null)
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    listApprovalTemplateGroupsSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockReset()
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    sectionsRef.value = null
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: TemplateGroupSections } = await import('../src/views/approval/TemplateGroupSections.vue')
+    const Host = defineComponent({
+      setup() {
+        return () => h(TemplateGroupSections as any, { ref: sectionsRef, onSelect: vi.fn() })
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  it('(ii) a stale loadAll() answer that arrives AFTER a newer one must not overwrite the newer org\'s rendered sections', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve) => { resolvers.push(resolve) }),
+    )
+
+    await mountView()
+    // onMounted's own loadAll() is the first call — let it settle cleanly before the race below.
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([])
+    await flushUi()
+
+    // Two rapid successive org switches: TemplateCenterView.onPageSessionOrgChange calls
+    // `loadAll()` again on EACH switch, before either has necessarily returned.
+    const stale = sectionsRef.value!.loadAll() // fired for the org being switched AWAY from
+    const fresh = sectionsRef.value!.loadAll() // fired for the org just switched TO
+    await flushUi(1)
+    expect(resolvers.length).toBe(3)
+
+    // Resolve OUT OF ORDER: the request fired SECOND (the org now current) answers first — a
+    // slower network round trip for the org the admin has already left answers last.
+    resolvers[2]([group({ id: 'atg_fresh', name: 'Fresh Org Group', sortOrder: 1 })])
+    await flushUi()
+    resolvers[1]([group({ id: 'atg_stale', name: 'Stale Org Group', sortOrder: 1 })])
+    await Promise.all([stale, fresh])
+    await flushUi()
+
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('Stale Org Group')
+  })
+})
