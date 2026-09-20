@@ -852,3 +852,20 @@ LANE_EXIT=0
 **自查**:§12.12 的四个自扫 code fence 在本节全部写完之后又各重跑一次,输出与 fence 内所载逐字相同(这四条的输出只含文件名与计数、不含搜索串,所以把输出写进文档不会改变命中数——这正是改用 `uniq -c` 的附带好处)。本轮新增行的数字自扫跑的是 `git diff -U0 ca5d50b71 -- docs/development/approval-template-groups-phase1-fe-verification-20260918.md | grep '^+' | grep -v '^+++' | grep -nE '[0-9]'`,命中行逐条判读,其中两行因找不到能产生该数字的命令而就地删除:处置表「第四次修正 — P3-4」行里转录的两组 `--stat` 插入行数,以及 §12.14 抬头转录的门审票数。**本节不对"其余每一行都有命令"下全称结论**——那正是上一轮被证伪的收尾形状;自扫用的命令写在上面,读者可自行重跑并自行判读。
 
 **本轮未处理、如实披露**:§12.11 的 `git diff --stat b1e5c745f…` code fence 是卫生轮首轮写下的证据,同样是对工作树取的自指 diffstat,其插入行数在此后每一次编辑后都会过期。本轮门审未点名该处,按"只改点名范围"未动它;留给下一轮判定是删除还是改成 `--name-status`。
+
+---
+
+## A-2 × A-4 合流求值(2026-09-20,分支 `feat/approval-template-groups-phase3-sections-on-a2`)
+
+> 与设计 MD 同一条说明:本节**不是 #5854 的交付**,`feat/approval-template-groups-phase1-fe` 分支**未被改动**;
+> 这里只对本文里会被合流分支推翻的**句子**逐条求值,其余数字在 A-2 自己的 head 上仍然成立。
+> 合流侧的完整重跑记在 `approval-template-groups-phase3-sections-verification-20260918.md` §15。
+
+| 本文出处 | 原句(摘要) | 合流分支上的求值 |
+|---|---|---|
+| §8 / §7 「三份既有 spec 在面板无条件挂载后全部 28/28 绿」 | 28/28 绿 | **对 A-2 head 仍然成立**。合流分支上这三份 spec 仍然全绿,但**原因变了**:面板已不在平铺视图挂载,所以它们不再是「挂载后仍绿」,而是「不再挂载」。`approvalTemplateCenterCategory.spec.ts` 在合流分支上是 **10/10**(原 8 条 + 合流新增的 2 条分组视图用例)。 |
+| §12.2 挂载点人口 5 行表(`approvalTemplateCenterCategory` / `approvalTemplateGovernance` / `templateCenterI18n` / `approval-e2e-permissions:565` / `approval-e2e-lifecycle:629`) | 5 份 spec 挂载 `TemplateCenterView` ⇒ 5 次真实挂载面板 | 「挂载 `TemplateCenterView`」这一列**仍然是 5 份**(人口没变);「因此挂载面板」这一步在合流分支上**不再跟随**——五份都停在默认平铺视图,面板一次都不挂。五份在合流分支的 required 探针里全部执行且全绿(phase-3 验证 MD §15.5)。 |
+| §12.5 / §13 的 i18n mutation 台账:「在 `ApprovalTemplateGroupsPanel.vue` 的 create 按钮文案后追加裸中文 ⇒ 两条新守卫**连同一条既有的 `TemplateCenterView` 渲染断言(因为该面板挂载在其下)**一并变红(3 个测试失败)」 | 3 红 | **括号里那半句在合流分支上被实测推翻**:同族注入(裸中文**单独一行**)在合流分支上只红 **1** 条 —— 那条 file-level 守卫 `guard: ApprovalTemplateGroupsPanel.vue has no CJK literal outside a paired tr(en, zh) call`(它读磁盘,与挂载无关,**仍然有判别力**);整页渲染 sweep 不再跟着红。实测记录:phase-3 验证 MD §15.6 M-C3。**覆盖面窄了一条,守卫本身没坏。** |
+| 同上 | —— | **另一条与合流无关的既有弱点**(M-C3 过程中实测):把裸中文追加到**已含 `tr('en','zh')` 调用的同一行**行尾,`templateCenterI18n.spec.ts` **18/18 全绿**——该守卫的白名单粒度是整行。原样披露,本分支不改守卫形状。 |
+| §5.4 「四个生产代码文件 `grep -c "BEGIN\|COMMIT\|…"` 全部为 0」 | 零命中 | **仍然成立**:合流对这四个文件的改动没有引入任何 SQL/连接/锁字样。 |
+| §7 / §12 其余数字(客户端 8 用例、面板 3 用例、`SessionOrgSwitcher` 3 用例) | —— | **全部仍然成立且在合流分支重跑绿**(phase-3 验证 MD §15.4 闸 4:8 文件 / 63 用例全绿)。 |

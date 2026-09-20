@@ -620,3 +620,149 @@ $ git diff --stat aad08d275..1d2a7f903
 - 收尾 `dropdb ms2_a4_p3hygiene_20260919`。
 
 **处置汇总(8 条:CLOSED 4 / DEFERRED 3 / CLOSED-MD 外部文档确认 1)**:#1 CLOSED-MD、#2 CLOSED-测试、#3 DEFERRED-需行为改动、#4 CLOSED-测试、#5 CLOSED-MD、#6 DEFERRED-owner项、#7 CLOSED-MD(外部)、#8 DEFERRED-需行为改动。三条 DEFERRED 均已登记原因与所需的下一步(owner 裁决或需要一次超出本轮范围的生产/workflow 改动),未做任何生产代码或 workflow 改动。
+
+---
+
+## 15. A-2 × A-4 合流验证(2026-09-20,分支 `feat/approval-template-groups-phase3-sections-on-a2`)
+
+> 本节记录 **A-4 重放到 A-2 head 之上** 之后的重跑。**§1–§14 不作废**:那些数字测的是 A-4 在 A-1 之上的 head
+> (`879070ef2e`),在那个 head 上仍然成立;本节测的是另一个 head,两套数字并存,受影响的句子在 §15.7 逐句求值。
+> 设计侧的取舍写在设计 MD §8。合流缺陷来源:`reviews/verify-groups-a2-a4-combined-build-20260920.md`。
+
+### 15.1 底座、重放与机械核对
+
+| 项 | 值 |
+|---|---|
+| 底座(A-2 head,#5854) | `4678b01cb6e3ad7ed7179c3a5a44b1fe864f426c` |
+| 被重放 lane(A-4 head,#5878) | `879070ef2ec11c6d2e8b099b8ca9755b637a5fff` |
+| 重放命令 | `git rebase --onto 4678b01cb6 66f526145c`(切点判据见设计 MD §8.1:两条 lane 的 A-1 段末尾树 `d302d29569` 逐字节相同) |
+| 重放提交数 | 27 个中落地 25 个(2 个因内容已在底座而成空提交被丢弃) |
+| `git cherry origin/main HEAD` | 83 行,**全部 `+`**,零 `-` ⇒ 与 `origin/main`(`123b1d1e54`)零重复 |
+| `origin/main..HEAD` 内部重复 patch-id | **0** ⇒ A-1 段只出现一次 |
+
+### 15.2 合流缺陷在 rebase 路径下的复现(先复现再修,不是直接修)
+
+重放完成、尚未做任何收口时,`apps/web` 的 `vue-tsc -b`:**14 条错误**(exit 1)——
+与报告 §3.1 的 merge 路径**逐行逐列相同**(同样的 `api.ts(11,3)` / `(410,23)` / `(476,23)` / `(487,23)` /
+`(1257,23)` / `(1298,23)` / `(1311,23)`,同样的 TS2440 / TS2323×6 / TS2393×6),外加环境项
+`vite.config.ts(28,29) TS2769`。即 P1-1 **在 merge 与 rebase 两条路径下同形**,不是报告那次合并手法的产物。
+
+日志:`soak-working/d3-groups-merge-20260920/pre-convergence-vuetsc.log`
+
+### 15.3 `vite.config.ts(28,29) TS2769` 的 `origin/main` 基线(报告 §4.4 拒绝断言的那一条,本次补上)
+
+报告只把这条标成「非合流引入 / 环境」,并明写「本次没有在干净安装上复核过 main 的基线」。本次在**同一个工作树、
+同一份软链 `node_modules`**、`git worktree add --detach origin/main` 的干净检出上先跑了一次:
+
+```
+$ cd apps/web && npx vue-tsc -b            # HEAD = origin/main = 123b1d1e54250ba9e96b33dcbb8112cf2fcdf8af
+vite.config.ts(28,29): error TS2769: No overload matches this call.
+EXIT=2        # 错误条数:1,且就是这一条
+```
+
+⇒ 这条错误在 `origin/main` 上就存在,与两条 lane 无关(错误文本点名 pnpm store 里的 `vite@5.4.21` 与 `vite@7.3.6` 两份)。
+**因此 `pnpm type-check` 在本分支仍然非零退出,但错误集合与 `origin/main` 逐字相同**——这是基线相等,不是本分支新引入的红。
+
+日志:`soak-working/d3-groups-merge-20260920/baseline-originmain-vuetsc.log`
+
+### 15.4 收口后的四项闸
+
+| 闸 | 命令 | 结果 |
+|---|---|---|
+| 1 `apps/web` 类型 | `npx vue-tsc -b` | **只剩** `vite.config.ts(28,29) TS2769` 一条,与 §15.3 的 `origin/main` 基线**逐字相同**;13 条合流引入的错误全部消失 |
+| 2 `apps/web` 构建 | `npx vite build` | **exit 0**,`✓ built in 38.73s`(报告里 esbuild 的 6 条 `Multiple exports with the same name` 全部消失) |
+| 3 required web lane | `bash -e apps/web/scripts/run-required-web-tests.sh` | **exit 1**,但死在**与两条 lane 无关的、`origin/main` 自身就红的**一条上 —— 见 §15.5 |
+| 4 两条 lane 定向 spec | `npx vitest run SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel approvalTemplateCenterSections approvalTemplateCenterCategory templateCenterI18n approvalTemplateGovernance` | **8 files / 63 tests 全绿**(报告 Tree B2 是 1 failed \| 62 passed,那一条红就是 P2-1) |
+| 5 后端 | `npx tsc --noEmit -p tsconfig.json`(core-backend) | **exit 0,零错** |
+| 6 CI 两点接线 | `node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs` | **12/12 pass** |
+| 7 s6a 封包指纹 | `node plugins/…/sealed-export-package-provenance.test.cjs` | **OK**(pin 在重放中每次撞到都按当时的 `plugin-tests.yml` 重算,最终值 `6af0690a3cb93891e1158d79d95ee325bdf5bbae42df09760932367e2ede264c` 与文件实测 sha256 相等) |
+| 8 exec 行形状 | `bash scripts/dev/atg-exec-line-post-rebase-check.sh` | **PASS**:`^exec npx vitest run` 恰好 **1** 行,行上 **399** 个 token 互不重复(整行 `run` 之后 400 个字段,其中 1 个是 `--reporter=dot`)(两条 lane 各自 head 上这个脚本此前都是红的) |
+| 9 A-4 闭世界普查 | `npx vitest run approval-member-identity-coverage-enumeration` | **16/16 pass** |
+| 10 审批 CI 覆盖枚举 | `CI=true npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts` | **350/350 pass**(按报告 P1-2 的告诫,这条绿**不**被当作 exec 行覆盖证据,只作回归) |
+
+### 15.5 闸 3 的诚实结论:退出码 1 来自 `origin/main` 自身的一条红,不是合流
+
+`run-required-web-tests.sh` 共有 **19** 条可执行的 `npx vitest run` 调用(全文件 50 行含这个字样,其余 31 行都在注释里)。
+本次运行在**第 9 条**(脚本 `:606`)被 `set -euo pipefail` 打断:
+
+```
+FAIL tests/multitable-recovery-archive-modal.spec.ts > ManualArchiveCapture
+     > does not submit when durable request identity cannot be saved
+AssertionError: expected "spy" to not be called at all, but actually been called 1 times
+Test Files  1 failed | 1 passed (2)      Tests  1 failed | 153 passed (154)
+REQUIRED_WEB_EXIT=1
+```
+
+**归因(实测,不是推断)**:
+
+1. 这个 spec 与它 import 的全部 `src`(`apps/web/src/multitable/**`)在本分支与 `origin/main` **零差异**
+   (`git diff --name-only origin/main HEAD -- apps/web/tests/multitable-recovery-archive-modal.spec.ts apps/web/src/multitable/ …` 输出 0 行);
+2. 在 `origin/main`(`123b1d1e54`)的独立干净工作树里跑**同一条命令**,得到**逐字相同的红**:
+   `Test Files 1 failed | 1 passed (2)` / `Tests 1 failed | 153 passed (154)`。
+   日志:`soak-working/d3-groups-merge-20260920/baseline-originmain-multitable-recovery.log`。
+
+**剩余 10 条调用(含最后那条 `exec` 行)是否也绿**:为了回答这个问题(errexit 让它们在上面那次根本没跑到),
+把脚本复制成一个**未跟踪的探针副本**,只把 `:606` 那一条调用注释掉,其余逐字不动,跑完后删除探针文件
+(`git status` 干净,被测脚本本体一字未改):
+
+```
+PROBE_REQUIRED_EXIT=0          # 18/18 条调用全部执行,全部通过
+最后一条(exec 行):Test Files  472 passed (472)   Tests  7273 passed (7273)
+```
+
+**两条 lane 的 spec 确实被 required lane 收集并执行**(在最后那条 `exec` 行的 472 个文件里各出现 1 次):
+
+| lane | spec 文件 | 在 exec 行那次运行里出现 |
+|---|---|---|
+| A-2 | `tests/SessionOrgSwitcher.spec.ts` | 1 |
+| A-2 | `tests/approvalTemplateGroupsClient.spec.ts` | 1 |
+| A-2 | `tests/ApprovalTemplateGroupsPanel.spec.ts` | 1 |
+| A-4 | `tests/approvalTemplateCenterSections.spec.ts` | 1 |
+
+即报告 P1-2 指出的「A-4 那 18 个 `approvalTemplateCenterSections` 测试在任何 CI lane 上都不会被执行」
+**在本分支已经不成立**:token 在唯一的活 exec 行上,并且实测被执行。
+
+日志:`soak-working/d3-groups-merge-20260920/run-required-web-tests.log`(原样,exit 1)、
+`…/run-required-web-tests-minus-main-red.log`(探针,exit 0)。
+
+### 15.6 Mutation 台账(合流收口专属,三条;全部 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` 字节相同)
+
+| # | 目标 | 注入 | 观测 | 判定 |
+|---|---|---|---|---|
+| M-C1 | 主从关系与 I6 的挂载判据 | 把 `ApprovalTemplateGroupsPanel` 改回「不分 viewMode 恒挂」(合流前的形态) | `approvalTemplateCenterCategory.spec.ts` **3 红**:I6 的 `renders a category tag per row`,加上本轮新增的两条分组视图用例 | **有判别力**;还原后 10/10 绿 |
+| M-C2 | `changed` 事件 → 分节视图重读(P3-1 的状态不同步那一半) | 删掉面板 `onCreate` 里的 `emit('changed')` | `grouped view: creating a group in the manager re-reads the sections view` **红**:`expected 2 to be greater than 2`;其余 9 条绿 | **有判别力**;还原后 10/10 绿 |
+| M-C3 | 挂载点变化对 A-2 i18n 守卫覆盖面的影响(实测,不靠推断) | 在面板模板里**单独起一行**插入裸中文 | `templateCenterI18n.spec.ts` **1 红**,就是那条 file-level 守卫 `guard: ApprovalTemplateGroupsPanel.vue has no CJK literal outside a paired tr(en, zh) call`;整页渲染 sweep **不再**跟着红(面板已不在平铺视图里挂载) | 守卫仍然有效,但**覆盖面窄了一条**,见 §15.7 |
+
+**M-C3 过程中另外实测到的一条既有弱点(与本次改动无关,原样披露不修)**:把裸中文追加到一行**已经含有**
+`tr('English', '中文')` 调用的行尾(第一次探针的形态),`templateCenterI18n.spec.ts` **18/18 全绿**——
+该守卫的白名单粒度是「整行」,所以任何粘在已翻译行尾的散落中文都能逃过。这是 A-2 那条守卫自带的性质
+(`pairedTrCall` 正则逐行判定),不是本次合流引入的;记在这里供 lane/门审处置,本分支不擅自改守卫形状。
+
+### 15.7 §1–§14 受影响句子的逐句求值(不作废整节)
+
+| 出处 | 原句(摘要) | 本分支求值 |
+|---|---|---|
+| §4.1 / §12 / §13 的 `pnpm type-check` 绿 | A-4 自己 head 上 type-check 通过 | **对那个 head 仍然成立,未被推翻**。本分支(底座换成 A-2)上 `vue-tsc` 非零退出,错误集合 = `origin/main` 基线那一条 `vite.config.ts` TS2769(§15.3)。差异来自**环境**(pnpm store 两份 vite)与**底座**,不是 A-4 的改动。 |
+| §4.3 / §12 / §13 的 `run-required-web-tests.sh` 绿 | A-4 head 上该脚本退出 0 | **对那个 head 仍然成立**。本分支上退出 1,死在 `multitable-recovery-archive-modal.spec.ts`——该 spec 在 `origin/main` 上同样红(§15.5 实测),不是合流引入。把那一条调用摘掉的探针里,其余 18 条全绿。 |
+| §6.5 s6a sha256 重钉 | 记的是 A-4 head 上的 pin 值 | **已被本分支重算取代**:`6af0690a3c…`(与合流后的 `plugin-tests.yml` 实测 sha256 相等,`sealed-export-package-provenance.test.cjs` OK)。旧值不是错的,是**另一个 head 的值**。 |
+| §6.6 exec 行新令牌子串碰撞检查 | A-4 head 上的 token 集合 | **重算**:合流后活 exec 行 399 个互不重复的 token,含两条 lane 的 4 个新 token;`atg-exec-line-post-rebase-check.sh` PASS(两条 lane 各自 head 上它都是红的,见报告 P1-2)。 |
+| §14.5(#4)`not.toHaveBeenCalled()` 的同文件正控 | 该正控证明 mock 接线是活的 | **仍然成立且仍然绿**;本轮另外给它加了两条**调用面**用例(§15.6 M-C1 证明有判别力),所以 I6 现在既有 live-binding 正控,也有「谁会去调它」的挂载面反例。 |
+| §14.7(#6)A-2 session-org 未接入 `section=` 读路径 | 标为 DEFERRED-owner 项;当时的理由之一是本分支没有 A-2 的组件 | 见设计 MD §8.5:「没有组件可接」这半句在本分支被推翻(底座就是 A-2);缺口本身**仍然 OPERATIVE**,且合流后 `listApprovalTemplateGroups` 抛的已是带 `.code` 的 `ApprovalApiError`,**接线的前置条件已具备**。仍留 owner 裁,本分支不擅自接。 |
+| §3 验收行 → 测试文件映射 | 全部映射 | **未受影响**:A-4 的 18 个 `approvalTemplateCenterSections` 用例在本分支仍然 18/18 绿,验收行的证据文件一个都没换。 |
+
+### 15.8 未做 / 未验(如实列出)
+
+- **没有建任何数据库、没有对任何库应用迁移**。本节的 10 项闸全部是 FE/vitest 与 `tsc`/node 脚本;
+  四个 `*.db.test.ts` 真库套件**本轮未跑**。理由是实测的零差异,不是推断:
+
+  ```
+  $ git diff --stat 879070ef2e HEAD -- packages/core-backend
+  (无输出)
+  ```
+
+  即整个 `packages/core-backend`(四个真库套件、三个 service、`routes/approvals.ts`、那条迁移在内)
+  在本分支与 A-4 head **逐字节相同**,所以 §2.3 / §13 在处女库上的真库记录对本分支同样适用,不重复消耗一次建库。
+  **这仍然是「未重跑」,不是「已重跑且绿」** —— 谁要把它当验收证据,请读 §2.3/§13 里那个 head 的记录。
+- `pnpm --filter @metasheet/core-backend test` 全量**未跑**;只跑了 `tsc --noEmit`(零错)与两条定向 node 脚本。
+- DEV mock 语义的残留(设计 MD §8.3)**未验**:没有起 dev server 实测分组视图在 DEV 下的表现,结论是读代码得出的。
+- A-2 那条 i18n 守卫的行粒度弱点(§15.6 末)**未修**,原样披露。
