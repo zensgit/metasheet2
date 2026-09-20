@@ -22,6 +22,10 @@
  *    DELETED or ABSENT, and serves the `deleted_at IS NULL` sheet row ONLY for {@link LIVE}. So an
  *    implementation that asks the liveness question about the WRONG id cannot pass the deleted/absent
  *    cases by accident, and a restored row probe still misses on DELETED/ABSENT and reds.
+ * 3. THE LOG CARRIES PARAMETERS. Every entry is an {@link OracleCall} — statement AND `$n` values — so
+ *    the evidence assertion compares WHICH SHEET was asked about, not only the statement text. Asking
+ *    the right questions about the wrong id is an authorization bug, and a text-only log is blind to
+ *    it: the four capability statements are byte-identical whatever id they carry.
  *
  * Callers stay session identities: a `Bearer mst_` token would make oapiScopeGuard refuse an unknown
  * sheet id at MIDDLEWARE level (middleware/api-token-auth.ts), which is a 403 that proves nothing
@@ -117,14 +121,14 @@ export const SHEET_NOT_LIVE_STATUS = ABSENT_REFUSAL.status
  * capability lookup itself issues touches exactly those.
  *
  * The sheet-row probe shape is listed by name, so a restored `loadSheetRow` is caught here as well as
- * by the SQL-log equality.
+ * by the call-log equality.
  */
 export const BEYOND_CAPABILITY =
   /\b(meta_records|meta_fields|field_permissions|record_permissions|conditional_read_rules|row_level_read_permissions_enabled|users|roles|platform_member_groups|multitable_config_revisions|meta_config_revisions)\b|FROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL|\bFOR UPDATE\b|^\s*(INSERT|UPDATE|DELETE)\b/i
 
-/** The entries of a SQL log that went beyond the capability lookup (empty ⇒ nothing leaked). */
-export function beyondCapability(sqlLog: readonly string[]): string[] {
-  return sqlLog.filter((sql) => BEYOND_CAPABILITY.test(sql))
+/** The statements of a call log that went beyond the capability lookup (empty ⇒ nothing leaked). */
+export function beyondCapability(calls: readonly OracleCall[]): string[] {
+  return calls.filter((call) => BEYOND_CAPABILITY.test(call.sql)).map((call) => call.sql)
 }
 
 // ── The fake pool ───────────────────────────────────────────────────────────
@@ -135,6 +139,22 @@ export interface OracleQueryResult {
 }
 
 export type OracleQuery = (sql: string, params?: unknown[]) => Promise<OracleQueryResult>
+
+/**
+ * One query as the pool saw it: the whitespace-normalised statement AND the parameters it carried.
+ *
+ * The parameters are part of the record ON PURPOSE. The four statements `resolveSheetCapabilities`
+ * issues are byte-identical whatever sheet they are about — only `$1` changes — so a TEXT-ONLY log
+ * cannot distinguish `resolveSheetCapabilities(req, query, sheetId)` from the same call made about a
+ * DIFFERENT sheet id. That difference is a real authorization bug (capabilities resolved from another
+ * sheet's scope map, liveness read for another sheet) and it is precisely what rule 2 of the header
+ * claims to catch. Comparing CALLS, not statements, is what makes the claim true for the refused
+ * caller too — whose only other evidence is a status code that is 403 either way.
+ */
+export interface OracleCall {
+  sql: string
+  params: unknown[]
+}
 
 export interface OracleFakePoolOptions {
   /**
@@ -149,13 +169,13 @@ export interface OracleFakePool {
   /** The pool double to hand `poolManager.get()`. */
   pool: { query: OracleQuery; transaction: (fn: (client: { query: OracleQuery }) => Promise<unknown>) => Promise<unknown>; getInternalPool: () => unknown }
   query: OracleQuery
-  /** Every SQL issued since the last {@link reset}, whitespace-normalised. */
-  sqlLog: string[]
+  /** Every call issued since the last {@link reset}: statement (whitespace-normalised) + parameters. */
+  calls: OracleCall[]
   /** Transactions opened since the last {@link reset}. */
   transactions: number
   reset(): void
-  /** The exact SQL list ONE standalone `resolveSheetCapabilities` run produces for this caller/sheet. */
-  capabilitySqlFor(user: OracleIdentity | undefined, sheetId: string): Promise<string[]>
+  /** The exact call list ONE standalone `resolveSheetCapabilities` run produces for this caller/sheet. */
+  capabilityCallsFor(user: OracleIdentity | undefined, sheetId: string): Promise<OracleCall[]>
 }
 
 // Matched against the WHITESPACE-NORMALISED sql, so a multi-line query matches the same shape a
@@ -171,12 +191,13 @@ const DELETED_AT = new Date('2026-09-01T00:00:00.000Z')
 
 export function makeOracleFakePool(options: OracleFakePoolOptions = {}): OracleFakePool {
   // IDENTITY-STABLE: emptied in place, never reassigned, so a suite may hold on to the array.
-  const sqlLog: string[] = []
+  const calls: OracleCall[] = []
   const state = { transactions: 0 }
 
   const query: OracleQuery = async (sql, params = []) => {
     const flat = sql.replace(/\s+/g, ' ').trim()
-    sqlLog.push(flat)
+    // Parameters are COPIED: a caller that reuses one array for several queries must not rewrite history.
+    calls.push({ sql: flat, params: [...params] })
 
     // 1/4 liveness — the one query loadSheetLiveness issues. UNKNOWN ID ⇒ LIVE (see header).
     if (LIVENESS_SQL.test(flat)) {
@@ -217,23 +238,23 @@ export function makeOracleFakePool(options: OracleFakePoolOptions = {}): OracleF
   return {
     pool,
     query,
-    sqlLog,
+    calls,
     get transactions() {
       return state.transactions
     },
     reset() {
-      sqlLog.length = 0
+      calls.length = 0
       state.transactions = 0
     },
-    async capabilitySqlFor(user, sheetId) {
+    async capabilityCallsFor(user, sheetId) {
       // The probe run must leave the caller's log exactly as it found it.
-      const saved = sqlLog.splice(0, sqlLog.length)
+      const saved = calls.splice(0, calls.length)
       try {
         await resolveSheetCapabilities(reqFor(user), query, sheetId)
-        return sqlLog.splice(0, sqlLog.length)
+        return calls.splice(0, calls.length)
       } finally {
-        sqlLog.length = 0
-        sqlLog.push(...saved)
+        calls.length = 0
+        calls.push(...saved)
       }
     },
   }

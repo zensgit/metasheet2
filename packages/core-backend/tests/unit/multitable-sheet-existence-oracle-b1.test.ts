@@ -20,18 +20,24 @@
  * ── What is pinned, per route ─────────────────────────────────────────────────
  *   (a) an authenticated caller with no capability gets 403 with a body STRICTLY EQUAL across live /
  *       soft-deleted / absent, and equal to what `sendForbidden` itself emits;
- *   (b) evidence, not vibes: the SQL that ran IS the capability lookup, byte for byte — so no sheet
- *       row, no field, no record, no write was touched on the way to the refusal;
+ *   (b) evidence, not vibes: the queries that ran ARE the capability lookup — same statements, same
+ *       PARAMETERS, in the same order — so no sheet row, no field, no record, no write was touched on
+ *       the way to the refusal, and the sheet the handler asked about is the sheet in the URL;
  *   (c) nothing else moved: a manager still gets the route's normal 200 on a live sheet, and now gets
  *       404 SHEET_DELETED / 404 NOT_FOUND on a deleted / absent one (the answer the unreachable
  *       liveness line was always meant to give).
  *
  * The fixture (tests/utils/sheet-existence-oracle.ts) answers "live" for any id it does not know as
- * deleted or absent, so a handler that asks about the WRONG id cannot pass (c) by accident.
+ * deleted or absent, so a handler that asks about the WRONG id cannot pass (c) by accident; and its
+ * log carries `$n` parameters, so such a handler cannot pass (b) either — for the REFUSED caller, whose
+ * status code is 403 whichever sheet was consulted, that log is the only witness there is.
  *
  * TRANSPORT: one pinned listener per file + request(url()) — `request(app)` app-mode is banned by
  * tests/unit/supertest-app-mode-tripwire.test.ts (#4154).
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -50,6 +56,7 @@ import {
   SHEET_DELETED_BODY,
   SHEET_IDS,
   SHEET_NOT_LIVE_STATUS,
+  type OracleCall,
   type OracleFakePool,
   type OracleIdentity,
 } from '../utils/sheet-existence-oracle'
@@ -204,6 +211,45 @@ const ROUTES: RouteCase[] = [
   },
 ]
 
+/**
+ * The ELEVEN entries this commit deleted from `EXISTENCE_BEFORE_AUTHORITY_GAP.handlers` in
+ * tests/unit/multitable-sheet-liveness-closure.guard.test.ts.
+ *
+ * Frozen here so "the slice is complete" stops being self-referential. `ROUTES` is compared to this
+ * literal, and this literal to the guard's ledger TEXT: a route silently dropped from `ROUTES`, or
+ * swapped for one that is still on the ledger, now reds instead of passing on its own say-so.
+ * The guard is read as source text — the same way it reads univer-meta.ts — because importing it would
+ * re-run it, and a shared constant would let the ledger and its coverage claim drift together.
+ */
+const B1_SLICE = [
+  'GET /sheets/:sheetId/conditional-rules',
+  'GET /sheets/:sheetId/field-permissions',
+  'GET /sheets/:sheetId/permission-candidates',
+  'GET /sheets/:sheetId/permissions',
+  'GET /sheets/:sheetId/person-fields/:fieldId/directory',
+  'GET /sheets/:sheetId/records/:recordId/permissions',
+  'GET /sheets/:sheetId/row-level-read-deny',
+  'PUT /sheets/:sheetId/conditional-rules',
+  'PUT /sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId',
+  'PUT /sheets/:sheetId/permissions/:subjectType/:subjectId',
+  'PUT /sheets/:sheetId/row-level-read-deny',
+] as const
+
+/** The `handlers: [ … ]` block of the closure guard's existence-oracle ledger, as raw source text. */
+function existenceGapLedgerText(): string {
+  const src = readFileSync(join(__dirname, 'multitable-sheet-liveness-closure.guard.test.ts'), 'utf8')
+  const ledgerAt = src.indexOf('const EXISTENCE_BEFORE_AUTHORITY_GAP')
+  const handlersAt = src.indexOf('handlers: [', ledgerAt)
+  const endAt = src.indexOf('],', handlersAt)
+  expect(
+    Math.min(ledgerAt, handlersAt, endAt),
+    'EXISTENCE_BEFORE_AUTHORITY_GAP.handlers was not found in the closure guard. If the ledger moved or '
+    + 'was renamed, re-point this reader — do not delete the binding: it is what ties the eleven routes '
+    + 'covered below to the eleven entries this PR removed.',
+  ).toBeGreaterThan(-1)
+  return src.slice(handlersAt, endAt)
+}
+
 describe('#5839 B1 — univer-meta sheet-config routes: authority before the sheet row', () => {
   beforeAll(async () => {
     poolManager = (await import('../../src/integration/db/connection-pool')).poolManager
@@ -225,12 +271,25 @@ describe('#5839 B1 — univer-meta sheet-config routes: authority before the she
   const call = async (route: RouteCase, sheetId: string) => {
     oracle.reset()
     const res = await route.send(request(pinned.url()), sheetId)
-    return { res, sql: [...oracle.sqlLog], transactions: oracle.transactions }
+    // Snapshot: `oracle.calls` is emptied in place by the next reset / capability replay.
+    const calls: OracleCall[] = oracle.calls.map((c) => ({ sql: c.sql, params: [...c.params] }))
+    return { res, calls, transactions: oracle.transactions }
   }
 
-  it('the eleven routes of the B1 slice are all covered here', () => {
+  it('the eleven routes covered here are exactly the eleven the GAP ledger no longer lists', () => {
     expect(ROUTES).toHaveLength(11)
     expect(new Set(ROUTES.map((r) => r.name)).size).toBe(11)
+    // What is covered below == the slice this commit closed (not merely "eleven of something").
+    expect([...ROUTES.map((r) => r.name)].sort()).toEqual([...B1_SLICE].sort())
+
+    const ledger = existenceGapLedgerText()
+    // Non-vacuous: the extracted block really is a list of entries, so `not.toContain` is a claim.
+    expect(
+      ledger.split("',").length - 1,
+      'the extracted ledger block holds no entries — the reader is pointed at the wrong text',
+    ).toBeGreaterThan(5)
+    // Covered here ⇒ off the ledger. A re-added entry reds HERE as well as in the guard.
+    for (const name of B1_SLICE) expect(ledger, name).not.toContain(`'${name}'`)
   })
 
   for (const route of ROUTES) {
@@ -251,16 +310,21 @@ describe('#5839 B1 — univer-meta sheet-config routes: authority before the she
         expect(JSON.stringify(answers)).not.toContain('sht_oracle')
       })
 
-      it('(b) evidence: only the capability lookup ran — no sheet row, no entity read, no write', async () => {
+      it('(b) evidence: only the capability lookup ran, about THIS sheet — no sheet row, no entity read, no write', async () => {
         currentUser = OUTSIDER
         for (const sheetId of SHEET_IDS) {
-          const { sql, transactions } = await call(route, sheetId)
-          const capability = await oracle.capabilitySqlFor(OUTSIDER, sheetId)
+          const { calls, transactions } = await call(route, sheetId)
+          const capability = await oracle.capabilityCallsFor(OUTSIDER, sheetId)
           // Non-vacuous: the capability lookup really does query, so `toEqual` below is a claim about
           // WHICH queries ran, not an empty-vs-empty tautology.
-          expect(capability.some((s) => /SELECT deleted_at FROM meta_sheets WHERE id = \$1/.test(s)), sheetId).toBe(true)
-          expect(sql, sheetId).toEqual(capability)
-          expect(beyondCapability(sql), sheetId).toEqual([])
+          expect(capability.some((c) => /SELECT deleted_at FROM meta_sheets WHERE id = \$1/.test(c.sql)), sheetId)
+            .toBe(true)
+          // …and it really does carry the sheet id, so the equality below binds WHICH SHEET was asked
+          // about. Without this the comparison is text-only, and a handler that authorised against a
+          // DIFFERENT sheet would satisfy every assertion in this test.
+          expect(capability.some((c) => c.params.includes(sheetId)), sheetId).toBe(true)
+          expect(calls, sheetId).toEqual(capability)
+          expect(beyondCapability(calls), sheetId).toEqual([])
           expect(transactions, sheetId).toBe(0)
         }
       })
@@ -289,8 +353,8 @@ describe('#5839 B1 — univer-meta sheet-config routes: authority before the she
         // The sheet-row probe is gone for the authorised caller too: the 404 comes from sheetLiveness,
         // so nothing beyond the capability lookup was read and no transaction was opened.
         for (const [state, sheetId, outcome] of [['deleted', DELETED, deleted], ['absent', ABSENT, absent]] as const) {
-          expect(outcome.sql, state).toEqual(await oracle.capabilitySqlFor(MANAGER, sheetId))
-          expect(beyondCapability(outcome.sql), state).toEqual([])
+          expect(outcome.calls, state).toEqual(await oracle.capabilityCallsFor(MANAGER, sheetId))
+          expect(beyondCapability(outcome.calls), state).toEqual([])
           expect(outcome.transactions, state).toBe(0)
         }
         expect(JSON.stringify([deleted.res.body, absent.res.body])).not.toContain('sht_oracle')
