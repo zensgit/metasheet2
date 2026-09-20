@@ -2662,9 +2662,10 @@ visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}]
 
 | 项 | 数字 |
 |---|---|
-| 两个分组真库文件(库 `metasheet2_namerule_r4_20260920`,owner `ms2testbed` 非超级,PG 15.17) | **41 passed / 41**(lifecycle 31 + serialization 10;第 3 轮是 39,本轮 +2 条新用例) |
+| 两个分组真库文件(一次性库,owner `ms2testbed` 非超级,PG 15.17;412 条迁移 exit 0、零 `42501`) | **41 passed / 41**(lifecycle 31 + serialization 10;第 3 轮是 39,本轮 +2 条新用例)。跑过两个一次性库 —— `metasheet2_namerule_r4_20260920`(head `be36725ced`)与 `metasheet2_namerule_r4b_20260920`(最终 head),两次同为 41/41,**用完均已 `dropdb`** |
 | 无库单测 `tests/unit/approval-group-name-rule.test.ts` | **12 passed / 12**,0.3s |
 | `tsc --noEmit -p tsconfig.json`(core-backend) | **exit 0,零输出** |
+| `pnpm type-check`(**CI 那一步的原样命令**,`pnpm -r type-check`) | core-backend 腿 **通过**;`apps/web` 腿 **失败**,`vite.config.ts(28,29): error TS2769` —— **与本轮无关的既存失败,已实测证明**:本分支 `git diff <base>..HEAD -- apps/web` 命中 **0 个文件**,且在**基线 head `ddc934fb63` 的独立工作树**上跑同一条 `vue-tsc -b` 报**逐字相同的错**。本机 `node_modules` 的 vite 版本漂移所致(CI 用 lockfile 干净安装)。**不是本轮引入,也不由本轮修复** |
 | `CI=true pnpm --filter @metasheet/core-backend test` 全量 | **15104 passed / 1609 skipped(16713)**,948 files passed / 175 skipped,exit 0(逐字见 §31.5) |
 | 迁移 diff | **0 行** |
 
@@ -2690,6 +2691,8 @@ exit 0
 | **MUT-R4-A** | 从 `BLANK_GLYPH_CODE_POINTS` 删 `0x2800` | 真库 lifecycle **2 failed / 29 passed**:`U+FE0F + INTERNAL U+2800 + U+FE0F … -> 201 CREATED`、`U+2800 … [wrapped] -> 201 CREATED`,**裸 U+2800 两行照旧 400**;无库单测 **5 failed / 7 passed**(含 NECESSITY 用例:`expected [] to deeply equal [ 'U+2800' ]`)。还原后 `cmp` 通过 |
 | **MUT-R4-B** | 删掉 `&& !isDefaultIgnorable(codePoint)` 整条合取 | 真库 lifecycle **31/31 全绿**,无库单测 **12/12 全绿** ⇒ 该合取今天**冗余**(§31.2 已据此更正模块注释与单测记录方式)。还原后 `cmp` 通过 |
 
+**计时用例的上限是推出来的,不是拍的**(required lane 上贴近实测值的计时断言就是 flake 制造机):线性实现在本机四种形状是 **0.040 / 0.501 / 0.992 / 1.052 ms**,第 2 轮门审量到的**带量词实现**是 **16.10 s**。上限取 **3000ms**,距快侧约 3000×、距慢侧约 5×,两边都留足;若将来有人把量词改回去,这条仍以 5 倍差红。
+
 **对 §28–§30 里文件/符号锚点的逐条求值(失效标记贴在那句话上,不作废整节)**:
 
 | 位置 | 原文锚点 | 第 4 轮求值 |
@@ -2707,4 +2710,4 @@ exit 0
 3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动。
 4. **长度闸度量「提交值」而非「裁剪后」** —— 行为变化,随第 2 项一起裁但单独列。
 5. **【新】`BLANK_GLYPH_CODE_POINTS` 这张 56 成员的显式表** —— 它把「不可见」从一个纯属性判断变成了「属性 ∪ 人工清单」。好处是 owner 点名的码点在代码里看得见、属性表版本变化不会静默放行;代价是清单要人维护,且它让 DI 合取变成冗余(§31.2)。**是否采用「枚举 + 属性」而不是「纯属性」,请 owner 裁。**
-6. **【新】新增无库单测文件 + `scripts/dev/probe-group-name-rule.mjs` + `scripts/dev/README.md`** —— 单测进的是 always-on 的 `test (20.x)` lane(`pnpm --filter @metasheet/core-backend test`),**未改 `plugin-tests.yml`,s6a 钉不受影响**(该钉只哈希固定文件清单,不含 `src/**` 与 `scripts/dev/**`)。
+6. **【新】新增无库单测文件 + `scripts/dev/probe-group-name-rule.mjs` + `scripts/dev/README.md`** —— 单测进的是 always-on 的 `test (20.x)` lane(`pnpm --filter @metasheet/core-backend test`),**已实测它确实在全量里跑**:日志里 `✓ tests/unit/approval-group-name-rule.test.ts (12 tests)`,且 `vitest.config.ts` 的排除表不含它;**负控**:直接点名那个真库文件跑会得到 `No test files found`,证明真库文件确实被这条 lane 排除、单测不是它的替身。**未改 `plugin-tests.yml`,s6a 钉不受影响 —— 这条不是读文件清单读出来的,是机械核过的**:在本 head 上跑 `computePackageProvenancePinSet(repoRoot)` 并与 `s6a-package-provenance-pins.json` 逐字节比较,结果 `true`(全组一致)。
