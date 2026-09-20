@@ -2646,6 +2646,11 @@ item came back to a human instead of ageing out.
 - **It is not an owner ratification.** The lock fixes 必须呈现 and nothing else; the status tokens,
   the two channels and the action-response scope are all implementer defaults, marked 待裁 in the
   type, in the DTO field's doc comment, and here.
+  ⚠️ **SUPERSEDED IN PART, 2026-09-20 (owner ruling).** The 「action-response scope」 half of this
+  bullet is no longer an open default: the owner ruled 「呈现默认值不能替代持久读取能力;修复应白名单
+  投影业务字段,不能直接暴露整个 metadata。」 Both read surfaces now whitelist-project the field
+  (candidate branch `feat/approval-cancel-round-phase2-history-projection`). The rest of this bullet
+  — the status tokens, and 「this is not a ratification」 — is UNCHANGED and still OPERATIVE.
 - **「零行为变化 for every other dispatch」 is narrow and true by construction, not by sweep**:
   `dispatchCancellationOutcome` stays `null` unless a cancel round was actually redeemed, so the
   field is `undefined` and the JSON is byte-identical on every other action. No sweep over all
@@ -3344,8 +3349,13 @@ they are.
   flagged DEFAULT rather than a gap: the status tokens and the two channels
   (`UnifiedApprovalDTO.cancellationOutcome` for the action response, the approve audit row's
   `metadata.cancellationOutcome` for the durable read) are implementer choices marked 「owner 待裁,
-  按默认值」, and `getApproval` does not project the field, so a reload reads it from the history
-  endpoint rather than the DTO. See §3.18.3 and §3.18.7.
+  按默认值」. See §3.18.3 and §3.18.7.
+  ⚠️ **TWO CLAUSES RETRACTED, 2026-09-20.** This sentence used to end 「…and `getApproval` does not
+  project the field, so a reload reads it from the history endpoint rather than the DTO」. Both
+  halves were wrong: an independent verification measured that the history endpoint did NOT carry
+  it either for platform ids (`verify-c2-history-dto-cancellation-outcome-20260920.md` §3.1 — the
+  `metadata` key was absent from the requester's real HTTP read), so there was no reload path at
+  all; and the owner then ruled that there must be one. Both surfaces now whitelist-project it.
 - **`attendance-parity.db.test.ts`** — **RETIRED as a deliverable, and the reason is a provenance
   correction** (§3.15.0): the filename appears **zero** times in the lock
   (`grep -c "attendance-parity" <lock>` → 0); phase-1's design MD `:61-62` mis-attributed it to
