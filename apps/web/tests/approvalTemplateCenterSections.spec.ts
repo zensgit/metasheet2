@@ -514,14 +514,21 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     // Moving changes membership, not either section's already-loaded content — no re-fetch.
     expect(listTemplatesBySectionSpy).toHaveBeenCalledTimes(fetchCountBeforeMove)
 
-    expect(container!.querySelector('[data-testid="template-group-section-item-tpl_1"]')).toBeNull()
+    const sourceSection = container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
+    const targetSection = container!.querySelector('[data-testid="template-group-section-group:atg_b"]')!
+    expect(sourceSection.querySelector('[data-testid="template-group-section-item-tpl_1"]')).toBeNull()
+    // P2-3 fix (groups-daily-ops-real-browser-acceptance-20260920.md): the moved row must now be
+    // RENDERED in the target, not merely counted — the pre-fix version bumped `total` without
+    // ever inserting it into `target.items`, which is exactly the phantom-"load more" defect this
+    // fix closes. `container`-wide absence is no longer the right assertion (the row legitimately
+    // reappears, just under `atg_b`); scoping the two checks to their own sections is what tells
+    // "moved" apart from "vanished".
+    expect(targetSection.querySelector('[data-testid="template-group-section-item-tpl_1"]')).not.toBeNull()
     expect(
-      container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
-        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+      sourceSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
     ).toBe('0')
     expect(
-      container!.querySelector('[data-testid="template-group-section-group:atg_b"]')!
-        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+      targetSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
     ).toBe('1')
   })
 
@@ -651,6 +658,109 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     item.click()
     await flushUi()
     expect(selectSpy).toHaveBeenCalledWith('tpl_1')
+  })
+
+  // ── P2-3 (groups-daily-ops-real-browser-acceptance-20260920.md) ──────────────────────────────
+  // `applyItemMove` used to only bump `target.total` without ever touching `target.items`, so a
+  // target section that already held its COMPLETE row set (the common case: `hasMore` false
+  // because `items.length === total`) went to `items.length < total` = true right after a move —
+  // a phantom "load more" that fetches an out-of-range page and comes back empty forever (P1/P2/P3
+  // in the acceptance report's scenario P). The SAME shape exists symmetrically on the SOURCE side
+  // when it was ALREADY paginated before the move (advisor review, this fix round): decrementing
+  // `total` without knowing the true row now sitting at the freed slot leaves `loadMore`'s
+  // page-number offset pointing past the end.
+  it('P2-3 (target, common case): moving into a section that already holds its full loaded set keeps count === rendered rows and shows no phantom "load more"', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_leave', name: 'Leave', sortOrder: 1 }),
+      group({ id: 'atg_purchase', name: 'Purchase', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'group:atg_leave') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      // Purchase already holds its COMPLETE set: 2 rows loaded, total 2 — `hasMore` is false
+      // before the move (this is the report's exact repro shape).
+      if (section === 'group:atg_purchase') {
+        return Promise.resolve({
+          data: [template('tpl_p1', 'P1'), template('tpl_p2', 'P2')],
+          total: 2,
+        })
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    const fetchCountBeforeMove = listTemplatesBySectionSpy.mock.calls.length
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_purchase')
+
+    const purchaseSection = container!.querySelector('[data-testid="template-group-section-group:atg_purchase"]')!
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim()).toBe('3')
+    // The moved row is actually RENDERED — not just counted — and no "load more" button appears.
+    expect(purchaseSection.querySelectorAll('[data-testid^="template-group-section-item-"]').length).toBe(3)
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-more-group:atg_purchase"]')).toBeNull()
+    // The common case needs zero extra network round-trips — same invariant the sibling "no
+    // re-fetch" test above pins for the already-empty-target case.
+    expect(listTemplatesBySectionSpy.mock.calls.length).toBe(fetchCountBeforeMove)
+
+    // Negative control: clicking "load more" would be exactly the bug (a request against an
+    // out-of-range page that always comes back empty) — assert the button is simply absent rather
+    // than asserting a click is a no-op, which is the stronger, more direct claim.
+  })
+
+  it('P2-3 (source, symmetric case): moving OUT of an already-paginated section re-syncs its loaded range instead of leaving a stale, permanently-empty "load more"', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_leave', name: 'Leave', sortOrder: 1 }),
+      group({ id: 'atg_purchase', name: 'Purchase', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    // Leave starts ALREADY paginated: page 1 has 10 of 11 rows loaded (`hasMore` true) — same
+    // shape as the acceptance report's `Leave` fixture (11 rows, PAGE_SIZE=10).
+    const leavePage1 = Array.from({ length: 10 }, (_, i) => template(`tpl_L${i}`, `Leave ${i}`))
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      if (section === 'group:atg_leave') {
+        if (page === 1) return Promise.resolve({ data: leavePage1, total: 11 })
+        // After the move, the section has shrunk to 10 rows total — an unrefreshed page-1 request
+        // would still legitimately return the SAME 10 rows (minus the moved one, plus whichever
+        // row now fills the tail) — model that as one row fewer, to prove the refresh actually
+        // re-read page 1 rather than reusing stale client state.
+        throw new Error(`unexpected page ${page} requested for group:atg_leave`)
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    expect(
+      container!.querySelector('[data-testid="template-group-section-more-group:atg_leave"]'),
+    ).not.toBeNull()
+    const fetchCountBeforeMove = listTemplatesBySectionSpy.mock.calls.length
+
+    // After the move, the backend's page 1 for this bucket has only 9 rows now (10 - the one that
+    // moved out) and total 10 — modelling "the section shrank below one full page" so the fix's
+    // refresh can be asserted precisely (`hasMore` must flip to false, not stay stuck true).
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      if (section === 'group:atg_leave' && page === 1) {
+        return Promise.resolve({ data: leavePage1.slice(0, 9), total: 9 })
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_L0"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_purchase')
+
+    const leaveSection = container!.querySelector('[data-testid="template-group-section-group:atg_leave"]')!
+    expect(leaveSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim()).toBe('9')
+    expect(leaveSection.querySelectorAll('[data-testid^="template-group-section-item-"]').length).toBe(9)
+    // The section was fully re-synced (9 == 9, no more unfetched rows) — the stale "load more"
+    // from before the move must be gone, not stuck showing forever.
+    expect(container!.querySelector('[data-testid="template-group-section-more-group:atg_leave"]')).toBeNull()
+    // Exactly one refresh round-trip (page 1) — not a silent no-op, and not an unbounded re-fetch
+    // of every page the section ever had.
+    expect(listTemplatesBySectionSpy.mock.calls.length).toBe(fetchCountBeforeMove + 1)
   })
 })
 
