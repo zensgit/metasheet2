@@ -286,33 +286,35 @@ for pathish, spec in uniq:
     if not paths:
         miss += 1
         continue
-    if is_amb:
-        amb += 1
-        amb_files.append((pathish, spec, str(paths[0].relative_to(wt)), len(idx.get(pathlib.Path(pathish).name, []))))
-        continue
     n=len(paths[0].read_text(errors='replace').splitlines())
     bad=False
     for part in spec.split(','):
         a,b = map(int, part.split('-',1)) if '-' in part else (int(part), int(part))
         if a<1 or b>n or a>b:
             bad=True
+    if is_amb:
+        amb += 1
+        tag = 'AMBIGUOUS_OOB' if bad else 'AMBIGUOUS_OK'
+        amb_files.append((tag, pathish, spec, str(paths[0].relative_to(wt)), n, len(idx.get(pathlib.Path(pathish).name, []))))
+        continue
     if bad:
         oob += 1; oob_files.append((pathish, spec, str(paths[0].relative_to(wt)), n))
     else:
         ok += 1
 print('unique', len(uniq), 'OK_IN_RANGE', ok, 'OOB', oob, 'MISSING', miss, 'AMBIGUOUS', amb)
-print('NOTE mutually exclusive: AMBIGUOUS is not also OK/OOB; OOB details printed below in this same run')
+print('NOTE AMBIGUOUS still range-checks the top-scored file as AMBIGUOUS_OK/AMBIGUOUS_OOB; not counted in OK/OOB')
 print('NOTE OK_IN_RANGE means line numbers fit the uniquely resolved file, not that the file is the intended one')
 for row in oob_files:
     print('OOB', row)
 print('oob_total', oob)
 for row in amb_files:
-    print('AMBIGUOUS', row)
+    print(row[0], row[1:])
 print('ambiguous_total', amb)
+print('ambiguous_ok', sum(1 for r in amb_files if r[0]=='AMBIGUOUS_OK'), 'ambiguous_oob', sum(1 for r in amb_files if r[0]=='AMBIGUOUS_OOB'))
 PY
 ```
 
-本 merge-base 实测输出见报告 §6（同一 head 上跑）。分类互斥：AMBIGUOUS 不再兼入 OK/OOB；OOB 明细与 `oob_total` 在同一次运行打印。§5.1 / §5.2 两张表是逐条 `sed -n`。
+本 merge-base 实测输出见报告 §6（同一 head 上跑）。AMBIGUOUS 对顶分解析做范围检查，打 `AMBIGUOUS_OK` / `AMBIGUOUS_OOB`，不计入 OK/OOB。OOB 明细与计数同一次运行。§5.1 / §5.2 两张表是逐条 `sed -n`。
 
 ### 5.1 计划 §8 逐条（新 SHA 必核）
 
@@ -396,7 +398,39 @@ PY
 
 ---
 
-## 8. 本普查未做
+## 8. `event_type` 差集（计划 §2.3 `:72`，M0）
+
+命令：从计划 v5 抽出 §2.3 任务作用域词（`created / title_changed / … / recurrence_spawned`）与 §3 P0-A 写路由，手工对账（仓内尚无 `src/routes/tasks*.ts`，差集以计划正文为输入）。
+
+| P0-A 写路由 | 审计动作 | 词 |
+|---|---|---|
+| `POST /api/tasks` | 创建 | `created` |
+| `PATCH /api/tasks/:id` | 改标题/描述/截止/开始/提醒/模式 | `title_changed` `description_changed` `due_changed` `start_changed` `remind_changed` `completion_mode_changed` |
+| `POST …/complete` | 完成 | `self_completed` `completed` `completed_by_any` |
+| `POST …/reopen` | 重启 | `self_reopened` `reopened` |
+| `PUT …/assignees` | 增删人 | `assignee_added` `assignee_removed` |
+| `PUT …/followers` | 关注 | `follower_added` `follower_removed` |
+| `POST …/leave` | 退出 | `left` |
+| `DELETE /api/tasks/:id` | 删除 | `deleted` |
+
+P0-A 写动作 ⊆ 词表。词表中 P1/P2 词（`attachment_*` `field_value_changed` `list_*` `group_changed` `milestone_*` `dependency_*` `recurrence_*` `parent_*` `commented`）对应路由不在 P0-A，**不是**缺词差集（一次写全 CHECK）。**P0-A 差集空**。
+
+复现（词表抄自计划 `:70`）：
+
+```bash
+python3 -c "
+words='created title_changed description_changed due_changed start_changed remind_changed assignee_added assignee_removed follower_added follower_removed completion_mode_changed self_completed self_reopened completed completed_by_any reopened deleted left parent_set parent_cleared commented attachment_added attachment_removed field_value_changed list_added list_removed group_changed milestone_set milestone_cleared dependency_added dependency_removed recurrence_set recurrence_cleared recurrence_spawned'.split()
+p0a='created title_changed description_changed due_changed start_changed remind_changed completion_mode_changed self_completed completed completed_by_any self_reopened reopened assignee_added assignee_removed follower_added follower_removed left deleted'.split()
+print('p0a_missing_from_vocab', sorted(set(p0a)-set(words)))
+print('vocab_not_in_p0a', len(set(words)-set(p0a)))
+"
+```
+
+输出：`p0a_missing_from_vocab []`；`vocab_not_in_p0a` 为 P1/P2/P0-B 预留词个数。
+
+---
+
+## 9. 本普查未做
 
 - 未连 staging/生产，故生产 `user_orgs` 分布 UNCLEAR。
 - 未跑真库测试、未起浏览器、未起 API 服务器。

@@ -96,7 +96,13 @@ flowchart LR
 
 ### 4.2 表（草案；ratify 前不建）
 
-P0-A：`tasks`（含日期四列 + `time_zone` + 派生 `due_at`；`completion_mode` in `all|any`；`depth` 0..4；软删；`version`）、`task_assignees`（PK `(task_id,user_id)`；零负责人合法；`all` 判定 = `EXISTS(assignee) AND NOT EXISTS(uncompleted)`）、`task_followers`、`task_events`（`event_type` 词表 **已定一次写全 CHECK，来源 计划 v5 §2.3**；新增词 = 新 DDL + owner 合并授权，与 §13-8 一致）。权限码三名 `tasks:read|write|admin` 是建议名（§13-10c **未裁**）；seed 三行是否插入、是否绑 `role_permissions` 见 §13-10，**裁定前不得把三码当已交付**。
+P0-A：`tasks`（含日期四列 + `time_zone` + 派生 `due_at`；`completion_mode` in `all|any`；`depth` 0..4；软删；`version`）、`task_assignees`（PK `(task_id,user_id)`；零负责人合法；**公式** `all` 判定 = `EXISTS(assignee) AND NOT EXISTS(uncompleted)`——零行 ⇒ 公式为假、不判 done。**「创建人 complete ⇒ done」是锁新增**，权威来源 = complete handler 写 `tasks.status='done'`，不经该公式；见 §9 / 门 3 `all×0`）、`task_followers`、`task_events`。
+
+`task_events.event_type` 闭集（**已定一次写全 CHECK，来源 计划 v5 §2.3**；新增词 = 新 DDL + owner 合并授权，与 §13-8 一致）：`created / title_changed / description_changed / due_changed / start_changed / remind_changed / assignee_added / assignee_removed / follower_added / follower_removed / completion_mode_changed / self_completed / self_reopened / completed / completed_by_any / reopened / deleted / left / parent_set / parent_cleared / commented / attachment_added / attachment_removed / field_value_changed / list_added / list_removed / group_changed / milestone_set / milestone_cleared / dependency_added / dependency_removed / recurrence_set / recurrence_cleared / recurrence_spawned`。
+
+`task_list_events.event_type` 闭集（同来源）：`created / renamed / archived / unarchived / owner_transferred / member_added / member_removed / member_role_changed / item_added / item_removed / group_created / group_renamed / group_deleted / field_bound / field_unbound`。
+
+权限码三名 `tasks:read|write|admin` 是建议名（§13-10c **未裁**）；seed 三行是否插入、是否绑 `role_permissions` 见 §13-10，**裁定前不得把三码当已交付**。
 
 P0-B：`task_comments`（照 `zzzz20260822120000_create_approval_comments.ts` 形；无 resolved）。
 
@@ -104,15 +110,15 @@ P1：`task_lists` / `task_list_members` / `task_list_items` / `task_groups` / `t
 
 P2：`task_dependencies` / `task_attachments` + `task_attachment_purge_intents` + row-delete 触发器 / `task_fields` / `task_list_field_bindings` / `task_field_values` / `task_record_projection` PK `(list_id, task_id)` 无 FK。
 
-索引最小集：**已定，来源 计划 v5 §2.2**。不按 `archived_at` 过滤 pending/四视角。
+索引最小集（**已定，来源 计划 v5 §2.2**；建表迁移内一次建全）：`idx_tska_user (task_assignees.user_id)`、`idx_tskf_user (task_followers.user_id)`、`idx_tsk_org_status (tasks.org_id, status) WHERE deleted_at IS NULL`、`idx_tsk_creator (tasks.created_by) WHERE deleted_at IS NULL`、`idx_tsk_parent (tasks.parent_id) WHERE parent_id IS NOT NULL`、`idx_tsk_due (tasks.due_at) WHERE due_time IS NOT NULL AND status='open' AND deleted_at IS NULL`、`idx_tsk_due_date (tasks.due_date) WHERE due_time IS NULL AND status='open' AND deleted_at IS NULL`、`idx_tski_task (task_list_items.task_id)`、`idx_tske_task_time (task_events.task_id, occurred_at DESC)`、`idx_tcmt_task_time (task_comments.task_id, created_at)`；outbox 三条同形。不按 `archived_at` 过滤 pending/四视角。
 
 ### 4.3 org 归属（**已定 1a，来源 计划 v5 §2.4**；其余见 §13-1）
 
 - `tasks.org_id` 来源合同 = `req.authenticatedTenantId`（`packages/core-backend/src/auth/jwt-middleware.ts:101-104` @ 本 SHA）。不用 `req.user.tenantId`（同文件 `:106-109` 会被 `x-tenant-id` 回填）。
-- 写路径：claim 缺失一律 **422**，不 fallback、不写 `'default'`。`deriveApprovalInstanceOrgId` 不得作兜底。
+- 写路径：claim 缺失一律 **422**，不 fallback、不写 `'default'`。产生点在 **handler 内**，位于 `authenticate` + `rbacGuard('tasks', …)` **之后**（缺 org 的已认证且已过 RBAC 的请求才 422）。`deriveApprovalInstanceOrgId` 不得作兜底（门 1 覆盖）。
 - 读路径：`listPendingForUser(userId, orgId)` 与四视角都带 `tasks.org_id = :orgId`；`orgId` 空 ⇒ 空列表 + `degraded: true, reason: 'org_missing'`；谓词抛错 ⇒ `reason: 'predicate_error'`。只有 `org_missing` 触发 session-org 引导。挂载先 `GET /api/tasks/context`。
 - `task_comments` / `task_events` 不设 org 列。
-- 残留披露（任务域不加固，见 §13-1d）。**`RBAC_OPTIONAL` 谓词（全文唯一，后文只引用本句）**：`RBAC_OPTIONAL_ON := (process.env.RBAC_OPTIONAL === '1')`。三读点字面即此：`packages/core-backend/src/rbac/namespace-admission.ts:9`、`packages/core-backend/src/rbac/service.ts:17`（同文件 `:105` 用该点）、`packages/core-backend/src/routes/permissions.ts:21`。`namespace-admission.ts:346` 是降级后果行，不是旗读点。专属 config `env.RBAC_OPTIONAL: ''`、setup 守卫、门 2/13/16 行尾均用同一谓词（为真则抛 / 本门红）。不得另写「未设置」「非空」等第二谓词。`RBAC_TOKEN_TRUST` **三处读点、两条轴**：`packages/core-backend/src/rbac/rbac.ts:12`（**装载期**常量，无 `NODE_ENV` 约束）；`packages/core-backend/src/auth/AuthService.ts:171-175`（**调用期**读，且合取 `NODE_ENV !== 'production'`）；`packages/core-backend/src/security/auth-runtime-config.ts:84`（生产告警 `ignored in production`，不授权）。承重通道见 §5.2.1 ② / 门 16（`AuthService.buildTrustedTokenUser`）。
+- 残留披露（任务域不加固，见 §13-1d）。**`RBAC_OPTIONAL` 谓词（定义唯一；复制处必须逐字 `process.env.RBAC_OPTIONAL === '1'`）**：`RBAC_OPTIONAL_ON := (process.env.RBAC_OPTIONAL === '1')`。机核：`grep -c "RBAC_OPTIONAL === '1'" docs/development/task-feature-design-lock-20260917.md` 等于锁内复制处个数（定义句 + setup 守卫 + assert 文件描述；计划「未设置」已改此谓词，偏离见 §9）。三读点字面即此：`packages/core-backend/src/rbac/namespace-admission.ts:9`、`packages/core-backend/src/rbac/service.ts:17`（同文件 `:105` 用该点）、`packages/core-backend/src/routes/permissions.ts:21`。`namespace-admission.ts:346` 是降级后果行，不是旗读点。专属 config `env.RBAC_OPTIONAL: ''`、setup 守卫、门 2/13/16 行尾均用同一谓词（为真则抛 / 本门红）。`RBAC_TOKEN_TRUST` **三处读点、两条轴**：`packages/core-backend/src/rbac/rbac.ts:12`（**装载期**常量，无 `NODE_ENV` 约束）；`packages/core-backend/src/auth/AuthService.ts:171-175`（**调用期**读，且合取 `NODE_ENV !== 'production'`）；`packages/core-backend/src/security/auth-runtime-config.ts:84`（生产告警 `ignored in production`，不授权）。承重通道见 §5.2.1 ② / 门 16。trust-off 支：`req.user.permissions` 来自 `AuthService.resolveRbacProfile`（`:748` `listUserPermissions`：`user_permissions` ∪ `role_permissions` ∪ `users.permissions` jsonb，再按 admission 过滤）；`rbac.ts:78` 先于 `:94` / `:101`。
 
 ### 4.4 日期与时区（**已定，来源 计划 v5 §2.6**）
 
@@ -139,7 +145,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 ### 5.1 RBAC（结构；豁免集/角色 seed 见 §13-10 **未裁**）
 
-非 admin 可达需要三件事：① `permissions` seed；② 非 admin 角色在 `role_permissions` 带 `tasks:*`；③ `user_namespace_admissions(namespace='tasks', enabled=true)`。**②③ 缺一 403**。① 是 ② 的 FK 前置（`packages/core-backend/src/db/migrations/20250924190000_create_rbac_tables.ts:105-115` 约束名 `role_permissions_permission_code_fkey` `REFERENCES permissions(code) ON DELETE CASCADE`）；无 ① 插 ② ⇒ SQLSTATE **23503**，不是 403；先插再删 ① 则 CASCADE 连 ② 一起删，与「缺②」同格。守卫路径不读 `permissions` 目录表。`user_permissions` 直授与 `users.permissions` jsonb 过不了准入。给 `admin` 绑码零增益。码名 `tasks:read|write|admin` 是 §13-10c **建议**，裁定前不得当已交付。
+非 admin 可达需要三件事：① `permissions` seed；② 非 admin 角色在 `role_permissions` 带 `tasks:*`；③ `user_namespace_admissions(namespace='tasks', enabled=true)`。**②③ 缺一 403**。① 是 ② 的 FK 前置（`packages/core-backend/src/db/migrations/20250924190000_create_rbac_tables.ts:105-115` 约束名 `role_permissions_permission_code_fkey` `REFERENCES permissions(code) ON DELETE CASCADE`）；无 ① 插 ② ⇒ SQLSTATE **23503**，不是 403；先插再删 ① 则 CASCADE 连 ② 一起删，与「缺②」同格。守卫路径不读 `permissions` 目录表。`user_permissions` 直授与 `users.permissions` jsonb **在 `tasks` 不在 `controlledNamespaces` 时**过不了准入（`:345` 先返回 false）。**条件不成立的反例 = 门 16 判别格**：角色已带 `tasks:write` ⇒ namespace 在 `controlledNamespaces`，此时直授或 jsonb 含 `tasks:read` / `*:*` 会在 trust-off 下经 `resolveRbacProfile:748` → `listUserPermissions` 三路 ∪ 后走 `rbac.ts:78`，两姿态同 200。给 `admin` 绑码零增益。码名 `tasks:read|write|admin` 是 §13-10c **建议**，裁定前不得当已交付。
 
 `deriveDelegatedAdminNamespace`（`packages/core-backend/src/rbac/namespace-admission.ts:102-108`，调用点同文件 `:196-199`）把 `*_admin` 角色名（例 `tasks_admin`）派生的 namespace 写入 `controlledNamespaces`。`tasks` 经 `:133-137` + `:11-38` 是受控资源，该通道对任务域为活。查询是 `LEFT JOIN role_permissions`（`:182-186`），零 `role_permissions` 行也成立。
 
@@ -154,7 +160,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 ### 5.2 前端路由与导航（**已定，来源 计划 v5 §4**；§13-37/38/39 缺省按此执行）
 
 - 路由 `/tasks`、`/tasks/:id`；`apps/web/src/router/appRoutes.ts` 懒加载 + `permissions: ['tasks:read']`（码名是 §13-10c **建议**，未裁前这是占位，不是已交付 seed）。
-- **route meta × 权限门耦合（披露，§13-10 落槌前不闭合）**：`guardPolicy.ts:221-225` 的路由权限门**先于**焦点白名单运行；`isRoutePermitted`（`apps/web/src/router/routeAccess.ts:26-31`）对 `meta.permissions` 取 **every**。落槌前：权限快照无 `tasks:read` ⇒ `/tasks` 在默认壳也被 redirect 回家，与「白名单不加 `/tasks`」叠加后的可达性/安全后果**留空**（不把 redirect 当 403 证据）。§11 真机冒烟标前置：§13-10 落槌 **且** 权限快照带该码；未满足不计入 M2 退出。
+- **route meta × 权限门耦合（后果已写死）**：`guardPolicy.ts:221-225` 的路由权限门**先于**焦点白名单运行；`isRoutePermitted`（`apps/web/src/router/routeAccess.ts:26-31`）对 `meta.permissions` 取 **every**。`useAuth.ts:548-556`：`snapshot.isAdmin` 或 `roles.includes('admin')` **短路可达**；非 admin 且快照无 `tasks:read` ⇒ **一律 redirect 回家**，与「路由不存在」同形。计划 `guardPolicy.ts:29` 现为 `:34`（已漂对照）。门 22 行为 spec 计分，**不在** §13-10 阻断名单（§11）。§11 真机冒烟仍标前置：§13-10 落槌 **且** 权限快照带该码；未满足不计入冒烟，但不阻断门 22。
 - **§13-37 缺省**：两张焦点白名单都不加 `/tasks`。入口只加默认壳分支（与 `canUseApprovals` 同形），`attendanceFocused` / `plmWorkbenchFocused` 不渲染。
 - **§13-38 缺省乙**：不加 `requiredFeature: 'tasks'`，不改 `router/types.ts` / `guardPolicy.ts`。`canUseTasks` + `GET /api/tasks/context` 普通 404 渲染「任务功能未启用或当前服务不支持」。**404 不断言 `TASKS_ENABLED` 的值**。推荐不是启用授权。
 - 引导流三触发：context `orgId===null` / 读 `org_missing` / 写 422。`predicate_error` 不进引导。
@@ -172,7 +178,12 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 本 SHA 副作用（必须点名，**不得沿用**）：`packages/core-backend/vitest.integration.config.ts:21` `setupFiles: ['./tests/setup.integration.ts']`；`packages/core-backend/tests/setup.integration.ts:7` `process.env.RBAC_BYPASS = 'true'`，`:8` `process.env.RBAC_TOKEN_TRUST = 'true'`。
 
-真正产生反事实 200 的通道是 `AuthService.buildTrustedTokenUser`（`packages/core-backend/src/auth/AuthService.ts:203-243`）：`trustTokenClaimsEnabled()`（`:171-176`，**调用期**读且合取 `NODE_ENV !== 'production'`）为真时**不读库**，把 token `perms` 写成 `req.user.permissions`（`:234` `permissions,`）与 `perms`（`:242`），由 `packages/core-backend/src/rbac/rbac.ts:77-83` 消费。`rbac.ts:85-91` 与 `:77-83` 共用同一准入合取且 `perms === permissions`，在真实装配下不可能于 `:77-83` 失败后成功 ⇒ `:12` 模块常量**不是**承重读点。专属 config 的理由是：**装载序**确定（config `env` + `setupFiles` 均在模块装载前）+ `PRODUCT_MODE` + 同形先例；不是「模块常量套件顶部改不了」。
+真正产生反事实 200 的通道分两支：
+
+- **trust-on**：`AuthService.buildTrustedTokenUser`（`:203-243`）：`trustTokenClaimsEnabled()`（`:171-176`，**调用期**读且合取 `NODE_ENV !== 'production'`）为真时**不读库**，把 token `perms` 写成 `req.user.permissions`（`:234`）与 `perms`（`:242`），由 `rbac.ts:77-83` 消费。
+- **trust-off**：`:206` 恒 null，走 DB。`req.user.permissions` = `resolveRbacProfile:748` → `listUserPermissions`（`user_permissions` ∪ `role_permissions` ∪ `users.permissions` jsonb，再 admission 过滤）。`rbac.ts:78` 先于 `:94` / `:101` 决定。门 16 判别格必须钉直授/jsonb 为空，否则两姿态同 200。
+
+`rbac.ts:85-91` 与 `:77-83` 共用同一准入合取且 `perms === permissions`，在真实装配下不可能于 `:77-83` 失败后成功 ⇒ `:12` 模块常量**不是**承重读点。专属 config 的理由是：**装载序**确定（config `env` + `setupFiles` 均在模块装载前）+ `PRODUCT_MODE` + 同形先例；不是「模块常量套件顶部改不了」。检出路径三层：① wiring 静态钉 config `RBAC_TOKEN_TRUST: 'false'`；② setup 守卫 `!== 'false'` 则抛；③ 判别格在 TRUST 泄漏时翻转。不得写「只由判别格检出」。
 
 任务鉴权门禁用专属 config，照 `packages/core-backend/vitest.elearning-pilot-auth.config.ts:28-33` 与 `tests/elearning-pilot-auth/setup.ts` 先例：
 
@@ -187,7 +198,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 ③ **点名哪个 required context 真正执行该文件**。独立 lane 只是证据。**(a)/(b) 由 §13-12 裁，本锁不落槌**。db 门 required 格见 §12 门 2/9/13/17 行尾「required 承载: TBD（§13-12 未裁）」。
 
-④ **发现式覆盖枚举（已定，来源 计划 v5 §8-1 ④）**：自建 `task-ci-coverage-enumeration.test.ts`（`readdirSync`）：磁盘 `task-*.db.test.ts` 集合 = `vitest.config.ts` `test.exclude` 中匹配 `^tests/integration/task-.*\.db\.test\.ts$` 的条目 = 证据 lane 文件清单，**三者相等**；各配扫描负控（集合非空、正则未失效，照 `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts:579-581` `tier glob returns a non-zero file count`）。本文件**不**进 `test.exclude`、**不**进任何逐文件 run-list。中间集合不得拿整个 exclude 数组比（本 SHA exclude 行首路径条目 400 / glob 3；naive 数组体引号 456 / 含 `*` 5）。**非空负控自首个 `task-*.db.test.ts` 落地的 PR 起武装**；此前本负控 **NOT RUN**、不计分（空集上 `length > 0` 恒红，无判别力）。
+④ **发现式覆盖枚举（已定，来源 计划 v5 §8-1 ④）**：自建 `task-ci-coverage-enumeration.test.ts`（`readdirSync`）：磁盘 `task-*.db.test.ts` 集合 = `vitest.config.ts` `test.exclude` 中匹配 `^tests/integration/task-.*\.db\.test\.ts$` 的条目 = 证据 lane 文件清单，**三者相等**；**每个磁盘文件源文本含** `assert-rbac-optional-off` import 说明符。各配扫描负控（集合非空、正则未失效，照 `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts:579-581`；删任一文件该 import 行 ⇒ ④ 红）。本文件**不**进 `test.exclude`、**不**进任何逐文件 run-list。中间集合不得拿整个 exclude 数组比（本 SHA exclude 行首路径条目 400 / glob 3；naive 数组体引号 456 / 含 `*` 5）。**非空负控与 import 负控自首个 `task-*.db.test.ts` 落地的 PR 起武装**；此前 **NOT RUN**、不计分（空集上 `length > 0` 恒红，无判别力）。计划 §8-10 写 db/web lane 都断言 OPTIONAL；web lane 无后端三读点，不装该 import（§9 偏离）。
 
 承载：`.github/workflows/plugin-tests.yml` `test` job 的 `Run core-backend tests` 步（本 SHA `:842-844`，`pnpm --filter @metasheet/core-backend test`）。该步**无** `if: matrix.node-version`，矩阵两腿（18.x 与 20.x）都会跑到该文件。**required context 只认 `test (20.x)`**（workflow 自述 `:532-533`；2026-09-19 `gh api repos/zensgit/metasheet2/branches/main/protection` required contexts 含 `test (20.x)`，**不含** `test (18.x)`）。不得把 `test (18.x)` 写成 required 承载的一半。
 
@@ -236,7 +247,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 创建时默认插入 creator 的 assignee 行（同请求可移除）。`all`：所有负责人 `completed_at` 非空且至少一行。零行不判 done。`any`：任一行完成即任务 done。**`any×{0}`**：无 assignee 行 ⇒ any 谓词不能使任务变 done。**零负责人**任务仅创建人可 complete / reopen（计划 v5 §5-7）；创建人 complete ⇒ done（不经 assignee 行）。`all` 模式重启范围 `scope=self|all`（计划 v5 §5-3；语料《完成与重启任务》:35 产品面；:38 为 IM 注，按 :21-23 同法切分、不对标）。可见 ≠ 等我处理：all 模式下我已完成他人未完成 ⇒ 仍 open、在「我负责的」，**不在** pending/红点，记 `self_completed`。
 
-不变量：`status='open' AND completion_mode='any'` ⇒ 不存在非空 `completed_at`。该不变量在 `all`（部分人已 `completed_at`）切到 `any` 的瞬间可被打破，除非切模式事务按 §13-9 重算（any 置同一时刻 / 清零 / 拒绝切换）。§13-9 **未裁**，本不变量在切模式格 **不是已定闭合**；门 3 的**增删人格与切模式格**同受 §13-9 阻断，必须等 §13-9 落槌后才能声称不变量成立。P0 创建后未切模式、未增删人的 any 路径仍受该不变量约束。
+不变量：`status='open' AND completion_mode='any'` ⇒ 不存在非空 `completed_at`。与门 3 `any×n` **同命题**（任一行非空 ⇒ 任务 done，故 open 状态下不存在非空行）。**无独立门**；全称执行点 = 门 3 存活格每次 complete/reopen 后断言该不变量。该不变量在 `all`（部分人已 `completed_at`）切到 `any` 的瞬间可被打破，除非切模式事务按 §13-9 重算（any 置同一时刻 / 清零 / 拒绝切换）。§13-9 **未裁**，本不变量在切模式格 **不是已定闭合**；门 3 的**增删人格与切模式格**同受 §13-9 阻断，必须等 §13-9 落槌后才能声称不变量成立。P0 创建后未切模式、未增删人的 any 路径仍受该不变量约束。
 
 候选（**不是已定**；随 §13-9 落槌，计划 v5 §5-4）：`all→any` 且已有任一 `completed_at` 非空 ⇒ 立即 done。其余 §5-4 三条（删人删行；加人新行 `completed_at NULL`，all 已 done 加人 ⇒ 回 open；any→all 保留各人记录、已 done 维持）同批，本锁不提前抄成已定。
 
@@ -244,16 +255,22 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 `depth` 0..4（含根五层）。无环。设父/转独立双端 `can('edit')` + 同 org；失败 404。父候选排除自身及子孙。父完成不级联子。
 
-### 6.4 锁协议与锁序（**已定，来源 计划 v5 §5-5**）
+### 6.4 锁协议与锁序
+
+**provenance 分层**：键单点与三键字符串 = 计划 v5 §5-5；helper 文件位置与三导出名 = 闸判据（§9 / 报告 §4 登记偏离）。
 
 结构变更按 org 串行化，**取锁后重读**。任务域三把键的取锁写法**唯一**如下，与 §1「`src/tasks/` 无 I/O」共存：
 
 - **键生成**（纯函数、无 I/O）：`packages/core-backend/src/tasks/task-lock-keys.ts` — `taskStructureLockKey(orgId)` / `taskProjectionLockKey(listId, taskId)` / `tasksSchedulerLeaderLockKey()`，分别生成 `task-structure:<orgId>` / `task-projection:<listId>:<taskId>` / `tasks-scheduler:leader`。
-- **取锁**（有 I/O）：`packages/core-backend/src/db/task-advisory-locks.ts`（**位于门 7 扫描根之外**）导出 `acquireTaskStructureLock` / `acquireTaskProjectionLock` / `acquireTasksSchedulerLeaderLock`。三者签名均 `(query, …ids)`，体内 `query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])`，`key` 只来自上一模块。任务域任何其它文件不得手写该 SQL 字面量。
+- **取锁**（有 I/O）：`packages/core-backend/src/db/task-advisory-locks.ts` 导出 `acquireTaskStructureLock` / `acquireTaskProjectionLock` / `acquireTasksSchedulerLeaderLock`。三者签名均 `(query, …ids)`，体内 `query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])`，`key` 只来自上一模块。
 
-顺序：structure → canonical fence → projection。中间步复用 `packages/core-backend/src/multitable/canonical-sheet-fence.ts:55-82`（`canonicalSheetFenceKey` + `acquireCanonicalSheetFence`），**不进**上列三键集合。reconcile **不**在结构锁事务内。调度 leader 不与前两把共存于同一事务。
+**任务域禁令作用域**：`packages/core-backend/src/{tasks,services,routes,multitable,db}` 下任务域源文件不得手写 `pg_advisory_xact_lock(hashtext(` 字面量（登记的 helper 三行除外）。**测试 harness / 门 6 夹具直发 SQL 不受此禁令**（连接 1 持锁路线，见门 6）。
 
-验收：真实路径取锁序列单调为正；故意反序为负控（包装器必须抛）。交叉移动**并发构造**（不是结果式）：两独立连接各开事务；连接 1 取结构锁**不提交**。**正控**（连接 2 仍阻塞）：`pg_stat_activity.wait_event` 为 `Lock`/`advisory`，且 `pg_locks` 对该键有 `granted=false` 行。`pg_blocking_pids(连接1.pid)` 为空只记 sanity，不是正控判别式。**负控**（mutation 目标 = `task-advisory-locks.ts` 内对应导出的取锁行，不是 `task-lock-keys.ts`、也不是 `src/services/task-*.ts`）：连接 1 事务仍开（第三连接**先**断言 `pg_locks` 中 pid1 对该键 `granted=true`）时，连接 2 的取锁语句在有界 deadline 内**返回**，且 `pg_locks` **无**该键 `granted=false` 行。连接 1 提交后连接 2 重读并因无环失败（正路径；负控不依赖这一步）。
+顺序：structure → canonical fence → projection。中间步 = `fenceWriterEntry`（`canonical-sheet-fence.ts:204`；先 `acquireCanonicalSheetFence`，再 `assertNoActiveWriterBlock` `:191`）。审批先例 `approval-record-projection-service.ts:244` 同。该步**不进**上列三键集合。reconcile **不**在结构锁事务内。调度 leader 不与前两把共存于同一事务。
+
+`pg_locks` 键匹配（写死）：`pg_advisory_xact_lock(bigint)` 把键拆成 `classid` = 高 32 位、`objid` = 低 32 位；`hashtext` 为负时 `classid = 4294967295`。等待列名：`pg_stat_activity.wait_event_type = 'Lock'` **且** `wait_event = 'advisory'`。未阻塞时该判别式零行（正控）。
+
+验收：真实路径取锁序列单调为正；故意反序为负控（包装器必须抛）。交叉移动见门 6。
 
 ---
 
@@ -265,6 +282,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 - **deny 查询失败必抛**（已定）。TS/SQL 一致性方案见 §13-11。
 - **任务投影读路径与 deny 加载点**：**未定，挂 §13-11 owner 裁**。候选仅两种：复用 `loadDeniedRecordIds` 的新 sibling / 独立读路径。本锁**不得自行发明**第二条读路径。该函数**不得**照 `packages/core-backend/src/multitable/permission-service.ts:1272-1279` 形吞表缺失错。§13-11 落定前，门 9 在任务线上标 **NOT RUN**。
 - 交互 `canEdit` = 清单级 edit/owner（已定，计划 §7-9）。版本用映射行 `projected_version`，不采用 emit 携带的投影记录 version。
+- **`SYSTEM_SHEET_KINDS`（计划 §7-7）**：`system-sheet-predicate.ts:68-72` 与 `history-trust-checkpoint.ts:82-85` 各自声明同一数组。首个任务投影 PR 必须两处都加 `'task_projection'`，并断言两处集合相等。本锁 **P2 前推迟**（§9）；不在 M2 门表计分。
 
 ---
 
@@ -280,8 +298,8 @@ N/A:本线无媒体轨。
 
 | # | 题 | 状态 |
 |---|---|---|
-| 已定·约束 | 两类非空（§4.1）、日期三规则（§4.4）、锁协议锁序（§6.4）、投影复合键、deny 两族（§6.1 / §7） | 已定，来源计划 v5；ratify 时可改。**两处偏离**：计划无任务域生成 id 四合取 CHECK / 生成格式（`org_id`/`created_by` 只留 `^[!-~]+$`）；① 由运行期合取项改为 FK 前置（§5.1） |
-| 已定·接线 | 两点接线（§5.3）；真库 ① exclude 逐文件字面量；发现式覆盖枚举④（§5.2.1 ④ 三集合谓词；非空负控待首个 db 文件武装）；五段部署链（§5.4）；专属 tasks-auth 形状（§5.2.1 ②；**M2 落文件**；config `RBAC_OPTIONAL: ''` + `TASKS_ENABLED: 'true'`；setup 守卫用 §4.3 `RBAC_OPTIONAL_ON` 谓词） | 已定，来源计划 v5 §8-10 |
+| 已定·约束 | 两类非空（§4.1）、日期三规则（§4.4）、锁协议锁序（§6.4）、投影复合键、deny 两族（§6.1 / §7） | 已定，来源计划 v5；ratify 时可改。**偏离**：计划无任务域生成 id 四合取 CHECK；① 改 FK 前置；**「创建人 complete ⇒ done」是锁新增**（不经 §4.2 `all` 公式）；§6.4 helper 位置/导出名来自闸判据（计划 §5-5 只定键单点）；中间步改回 `fenceWriterEntry`（对齐计划 / 审批 `:244`） |
+| 已定·接线 | 两点接线（§5.3）；真库 ① exclude 逐文件字面量；发现式覆盖枚举④（§5.2.1 ④ 三集合 + OPTIONAL import）；五段部署链（§5.4）；专属 tasks-auth 形状（§5.2.1 ②；**M2 落文件**） | 已定，来源计划 v5 §8-10。**偏离**：计划 §8-10 写 db/web lane 都断言 OPTIONAL；web 无后端三读点，web lane 不装 `assert-rbac-optional-off`。计划「未设置」改为谓词 `=== '1'` |
 | required context 活体 | `test (20.x)` 是否 required | **不是已定冻结**。以 §5.2.1 ④ 带日期的 `gh api …/protection` 实读为准；M2 接线 PR 必须重读 protection，不得抄本锁日期 |
 | 已定·产品缺省 | 导航/引导（§5.2）、PendingItem 五/六键+不带正文、§13-37/38/39 缺省 | 已定，来源计划 v5 |
 | 真库接线②形状 | paths、不加 `branches:`、不声明 `merge_group`（§5.2.1 ②） | **paths 保留时已定**。若 §13-12 裁 (b)，该形状被 (b) 取代，不是本行提前落槌 (b) |
@@ -291,6 +309,9 @@ N/A:本线无媒体轨。
 | §13-12 | 真库测试 required 承载（§5.2.1 ③ 的 (a)/(b)） | **未裁** |
 | §13-11 | 任务投影读路径与 deny 加载点（门 9 前置） | **未裁**；**不适用**「其余 §13 默认前进」 |
 | `TASKS_*` 与 GH manifest | 章程 `AGENTS.md:68` 落地；计划 v5 无此条。正文在 **§10** 与 **§12 门 18**（不是 §13 三十九题之一）。义务推迟到首个引入 `TASKS_*` 源码读的 PR，届时同 PR 扩 `globalHistoryFlagsInSource()` 并补 manifest。本锁**不**把「无需登记」结为已定豁免。 | **未裁**（有期限推迟，不是豁免；无 owner 亲写豁免 comment） |
+| §13-1c | 跨 org 负责人/关注人 | **未设独立验收门**（仅建议；不由门 1 覆盖） |
+| 门 19 投影端 | 计划 `:116` 三端含投影 | **偏离**：§13-5/§13-11 未裁前投影端不算入 |
+| `SYSTEM_SHEET_KINDS` | 计划 §7-7 两处加 `'task_projection'` + 集合相等 | **推迟**到首个任务投影 PR（§7） |
 | 其余 §13 | 建议答案见 §13 | 待 M1 逐条 comment 或默认前进 |
 
 ---
@@ -303,7 +324,7 @@ N/A:本线无媒体轨。
 
   **义务**：推迟到**首个**在 `packages/core-backend/src` 引入 `TASKS_*` 源码读的 PR。该 PR **必须同 PR** 把 `globalHistoryFlagsInSource()` 扩到 `TASKS_*_ENABLED`（或等价源真相）并补 `scripts/ops/global-history-flag-manifest.mjs` 条目。负控见 §12 门 18。M0 源码无 `TASKS_*` 读，本切片不改 `test.mjs`。本锁**删除**「既不登记也无需登排除列表」作为已定陈述。无 owner 亲写豁免 comment 前，不得把该章程义务结为永久豁免。
 - 生产启用是独立 owner 授权，不等于本锁 ratify。
-- 路由挂载：审批段之后（本 SHA `packages/core-backend/src/index.ts:1791` `this.app.use(approvalsRouter({`；上一轮 `:1785` 已漂移）；静态子路径先于 `/:id`。真起服务器打一遍。
+- 路由挂载：审批段之后（本 SHA `packages/core-backend/src/index.ts:1791` `this.app.use(approvalsRouter({`；计划写的 `:1642` / `:1763-1777`、上一轮 `:1785` 均已漂移）。静态子路径先于 `/:id`。真起服务器打一遍。
 
 ---
 
@@ -313,25 +334,25 @@ N/A:本线无媒体轨。
 |---|---|---|---|
 | M0 | 普查 + 本 PROPOSED 锁 | 计划被认可 | 本 PR-0 Draft；39 题建议答案；两轮闸另走 |
 | M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-11 / §13-12 落槌。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2 |
-| M2 | PR-1 实体+最小前端（含 DDL，Draft，不应用不合并） | M1 | 门表（按 §12 尾计分；NOT RUN / 不进计分的门**不得计为通过**；门 9 未解除 NOT RUN 前 M2 **不得退出**）+ 非 admin 真机**冒烟**（只作可达性记录；前置 = §13-10 落槌 **且** 权限快照带 `tasks:read`；未满足不计入退出）+ **独立合并授权 comment** |
+| M2 | PR-1 实体+最小前端（含 DDL，Draft，不应用不合并） | M1 | 门表（按 §12 尾计分；NOT RUN / 不进计分的门**不得计为通过**；门 9 未解除 NOT RUN 前 M2 **不得退出**）+ **门 22 必须计分**（不在 §13-10 阻断名单）+ 非 admin 真机**冒烟**（只作可达性记录；前置 = §13-10 落槌 **且** 权限快照带 `tasks:read`；未满足不计入冒烟）+ **独立合并授权 comment** |
 | M3–M5 | P0-B / P1 / P2 | 上一 PR 合并授权 | 同形 |
 
 ---
 
 ## 12. Ratify 验收门
 
-1. org 写路径无 claim ⇒ 422；读路径 `org_missing` / `predicate_error`；不写 `'default'`。**跨 org 隔离格**（专属 tasks-auth，`TRUST='false'`）：token `tenantId` claim 指向该用户**无**活跃 `user_orgs` 行的 org ⇒ 写 **422** / 读 `org_missing`；对照格同用户有效 org ⇒ **200**。无 claim 格不依赖 trust。本门所在 harness 姿态：跨 org 格 = 专属 config `TRUST='false'`；门 2/13 的 `TRUST='true'` 下 `tenantId` claim 逐字生效（`AuthService.ts:227` 写入 user，`:259-264` 跳过 `:290-294`），不得拿门 2/13 当本隔离格证据。lane env：`RBAC_OPTIONAL_ON` 为真则本门红（§4.3 谓词；执行点同门 16 专属 setup）。
-2. 非 admin：**②③ 齐全 + ① 已作为 FK 前置存在 ⇒ 200**（正控；夹具 `role_id` **不得**以 `_admin` 结尾）。403 格逐字节断言响应体 `{ error: 'Insufficient permissions' }`（`packages/core-backend/src/rbac/rbac.ts:108`）。负控三格：缺 ②、缺 ③，各 **403**；第三格（码面）：角色 `role_permissions` **只有**同 namespace 另一码（建议 `tasks:write`，不得 `tasks:*`）、**无**所需码、admission 行在 ⇒ **403**，拒绝点 `packages/core-backend/src/rbac/service.ts:44-61`（通过 `:345/:347` 后死在码查询，与缺②不同）。第三格钉 token **不带** `perms`（本门跑在 `tests/setup.integration.ts:8` `RBAC_TOKEN_TRUST='true'` 下，带 `perms` 会走 `buildTrustedTokenUser` 写成 `req.user.permissions`/`perms`，码面 403 消失）。与门 16 相反：门 16 在 `TRUST='false'` 下**要** token 带 DB 未授予的 `tasks:read`（inert，`:206` 先于 `:211-213`），以便 TRUST 泄漏时判别格翻成 200；本门在 `TRUST='true'` 下**禁止** perms，否则第三格与正控同形。排除 `*:*`（`rbac.ts:22` `hasPermissionCode`）、`user_permissions` 直授、`users.permissions` jsonb。一格 provisioning 前置：无 ① 插 ② 须**直接 SQL INSERT**（不经 `packages/core-backend/src/routes/roles.ts:381-387` `assertCodesInCatalog`，该处先拦、永不产生 23503），断言 SQLSTATE **23503** 且 `constraint === 'role_permissions_permission_code_fkey'`。**直授+admission 仍 403**：夹具任何角色不带 `tasks:*` 任一码 **且** 无 `_admin` 形角色名；机制 = `controlledNamespaces` 不含 `'tasks'`（`namespace-admission.ts:345` 先于 admission `:347` 返回 false）。码名与 seed 待 §13-10 裁；**§13-10 落槌前本门不进验收计分**（见 §12 尾）。required 承载: TBD（§13-12 未裁）。本门所在 harness 信任姿态：`tests/setup.integration.ts:8` `TRUST='true'`。lane env：`RBAC_OPTIONAL_ON` 为真则本门红。执行点：每个 `tests/integration/task-*.db.test.ts` 描述块之前 `import` `tests/tasks-integration/assert-rbac-optional-off.ts`（文件内 `if (process.env.RBAC_OPTIONAL === '1') throw`）；**不改** `setup.integration.ts`。
+1. org 写路径无 claim ⇒ 422；读路径 `org_missing` / `predicate_error`；不写 `'default'`。两格（无 claim / 跨 org）显式引用门 16 九项前置，并补 RBAC 前置：写格须先过 `rbacGuard('tasks','write')`（422 在 RBAC **之后**的 handler，见 §4.3）。**跨 org 隔离格**（专属 tasks-auth，`TRUST='false'`）：token `tenantId` claim 指向该用户**无**活跃 `user_orgs` 行的 org ⇒ 写 **422** / 读 `org_missing`；对照格同用户有效 org ⇒ **200**。**真隔离格**：同用户 org A 有效，库有 org B 任务行；`GET /api/tasks?view=any_role` 与 `/pending` **不含** B；负控删读谓词 `tasks.org_id = :orgId` 必红。无 claim 格不依赖 trust。本门 harness：跨 org / 真隔离 = 专属 config `TRUST='false'`；门 2/13 的 `TRUST='true'` 下 `tenantId` claim 逐字生效（`AuthService.ts:227`，`:259-264` 跳过 `:290-294`），不得当本门证据。lane env：`RBAC_OPTIONAL_ON` 为真则本门红。`deriveApprovalInstanceOrgId` 不得兜底由本门覆盖；§13-1c 跨 org 负责人/关注人 **未设独立门**（§9）。
+2. 非 admin：**②③ 齐全 + ① 已作为 FK 前置存在 ⇒ 200**（正控；夹具 `role_id` **不得**以 `_admin` 结尾）。403 格逐字节断言响应体 `{ error: 'Insufficient permissions' }`（`packages/core-backend/src/rbac/rbac.ts:108`）。负控三格**各用独立用户**（`listUserPermissions` 按 `userId` 缓存，`RBAC_CACHE_TTL_MS` 默认 60000；禁止三格共用一行用户而不 `invalidateUserPerms`）。缺 ②、缺 ③，各 **403**；第三格（码面）：角色 `role_permissions` **只有**同 namespace 另一码（建议 `tasks:write`，不得 `tasks:*`）、**无**所需码、admission 行在 ⇒ **403**，拒绝点 `packages/core-backend/src/rbac/service.ts:44-61`。第三格钉 token **不带** `perms`（本门 `TRUST='true'`）。与门 16 相反：门 16 在 `TRUST='false'` 下**要** token 带 DB 未授予的 `tasks:read`；本门禁止 perms。排除 `*:*`、`user_permissions` 直授、`users.permissions` jsonb。一格 provisioning 前置：无 ① 插 ② 须**直接 SQL INSERT**，断言 SQLSTATE **23503** 且 `constraint === 'role_permissions_permission_code_fkey'`。**直授+admission 仍 403**：任何角色不带 `tasks:*` 任一码 **且** 无 `_admin` 形角色名；机制 = `controlledNamespaces` 不含 `'tasks'`（`:345`）。码名与 seed 待 §13-10 裁；**§13-10 落槌前本门不进验收计分**。required 承载: TBD（§13-12 未裁）。harness：`setup.integration.ts:8` `TRUST='true'`。lane env：`RBAC_OPTIONAL_ON` 为真则本门红。执行点：每个 `task-*.db.test.ts` import `assert-rbac-optional-off.ts`（`=== '1'` 则抛）；**不改** `setup.integration.ts`。
 3. 完成判定网格。增删人格与切模式格同受 §13-9 **未裁**阻断（见 §6.2）。**存活六格**（创建后未增删人、未切模式）逐格期望：
-   - `all×0`：零 assignee 行 ⇒ 不判 done；仅创建人可 complete/reopen；创建人 complete ⇒ done（不经 assignee 行）。
+   - `all×0`：公式不判 done；仅创建人可 complete/reopen；创建人 complete ⇒ handler 写 `status='done'`（锁新增，§9；不经 §4.2 公式）。
    - `any×0`：any 谓词无行可完成 ⇒ 不判 done；仅创建人可 complete/reopen；创建人 complete ⇒ done。
    - `all×1` / `any×1`：该行 `completed_at` 非空 ⇔ 任务 done。
-   - `all×n`：全部 `completed_at` 非空 ⇔ done；部分完成 ⇒ open + 完成者 `self_completed`。
-   - `any×n`：任一行 `completed_at` 非空 ⇒ done。
-4. 可见 ≠ pending。**反格构造**：`all` 模式、我已完成、至少另一负责人未完成 ⇒ `GET /api/tasks?view=assigned` **含**该任务，`GET /api/tasks/pending` 与 `/pending-count` **不含**，红点不计。正格：我未完成 ⇒ pending 含。
-5. PendingItem：**必须有夹具**，空列表不能单独过门。无截止日：响应恰五键 `source/id/title/href/updatedAt`，无 `dueAt`。有定时：恰六键，`dueAt` = `due_at` 的 ISO-8601 timestamptz（与库列可解析相等）。有全天：恰六键，`dueAt` = `due_date` 在 `tasks.time_zone` 下 23:59:59.999 的瞬时 ISO（§4.4）。`href` = `/tasks/${taskId}`（绝对路径，无 origin、无 query）。两夹具响应体都不含 `description` / `description_rich` 等正文字段。
-6. 树 depth 0..4、无环。交叉移动用 §6.4 并发构造：两独立连接，连接 1 经 `acquireTaskStructureLock` 取结构锁不提交。正控：连接 2 阻塞，`wait_event` 为 `Lock`/`advisory`，`pg_locks` 对该键有 `granted=false` 行。`pg_blocking_pids(pid1)` 空只记 sanity。负控：注释 `packages/core-backend/src/db/task-advisory-locks.ts` 内 `acquireTaskStructureLock` 的取锁行；连接 1 事务仍开（第三连接先断言 `pg_locks` 中 pid1 对该键 `granted=true`）时，连接 2 取锁语句在有界 deadline 内返回且 `pg_locks` 无该键 `granted=false` 行。
-7. 锁键单点 + 锁序正/负控。取锁点已登记为 `src/db/task-advisory-locks.ts` 三导出（§6.4），**不在**扫描根内。扫描根：`packages/core-backend/src/tasks`、`packages/core-backend/src/services/task-*.ts`、`packages/core-backend/src/routes/tasks*.ts`。POSIX ERE：`pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*\(`。谓词：扫描根内命中集合为空（helper 在根外，故「命中集合 == 已登记取锁点集合」在根内退化为空集）。**不**排除 `task-lock-keys.ts`（空排除会掩盖该文件被塞入取锁字面量；keys 文件按 §1 不应匹配本 ERE）。扫描前每个根解析文件数 ≥ 1，计数写进 PR body。钉 **bash** + `find` 计数（不用裸 glob）：`find packages/core-backend/src/tasks -name '*.ts' | wc -l` 等。`grep` exit 2 与 zsh `nomatch` 一律红；零命中时 grep exit 1 后断言 count==0 才算过。正控：同一 ERE 对 `packages/core-backend/src/multitable/approval-record-projection-service.ts` 必命中（本 SHA `:246`）。负控：在扫描根内任一文件插入该字面量后扫描非零 ⇒ 本门红。
+   - `all×n`：**部分完成夹具与门 4 反格共用**（我已完成、至少另一人未完成）⇒ open + 完成者 `self_completed`；全部非空 ⇔ done。
+   - `any×n`：任一行非空 ⇒ done（即 §6.2 不变量的 contrapositive；执行点见 §6.2，不另开门）。
+4. 可见 ≠ pending。**反格构造**（与门 3 `all×n` 部分完成**同一夹具**）：`all` 模式、我已完成、至少另一负责人未完成 ⇒ `GET /api/tasks?view=assigned` **含**该任务，`GET /api/tasks/pending` 与 `/pending-count` **不含**，红点不计。正格：我未完成 ⇒ pending 含。
+5. PendingItem：**必须有夹具**，空列表不能单独过门。无截止日：响应恰五键 `source/id/title/href/updatedAt`，无 `dueAt`。有定时：恰六键，`dueAt` = `due_at` 的 ISO-8601 timestamptz。有全天：恰六键，`dueAt` = `due_date` 在 `tasks.time_zone` 下 23:59:59.999 的瞬时 ISO（§4.4）；**跨时区展示格**：同一 `dueAt`，查看者 UTC+14 与 UTC−10 的**显示日期**都等于 `due_date`（floating）。`href` = `/tasks/${taskId}`（绝对路径，无 origin、无 query；**待办中心锁 ratify 后以该锁为准**）。两夹具响应体都不含正文字段。
+6. 树 depth 0..4、无环。交叉移动：两独立连接各开事务。**连接 1 持锁路线 = 测试 harness 直发** `SELECT pg_advisory_xact_lock(hashtext($1))`（参数 = `taskStructureLockKey(orgId)`），**不**经 `acquireTaskStructureLock`。联立结论：§6.4 禁令只约束任务域生产源码；harness / 本门夹具 SQL 不受禁令，故 mutation helper 取锁行**不破坏**连接 1 持锁。连接 1 不提交。`pg_locks` 键匹配见 §6.4（`classid`/`objid` + 负 hashtext 时 `classid=4294967295`）。**正控**（连接 2 阻塞）：`wait_event_type='Lock'` **且** `wait_event='advisory'`，且 `pg_locks` 对该键有 `granted=false` 行；未阻塞时该判别式**零行**。`pg_blocking_pids(pid1)` 空只记 sanity。**负控**：`cp` 备份 `task-advisory-locks.ts`，注释 `acquireTaskStructureLock` 体内取锁行，`cmp` 证 mutation 已落地（不得 `git checkout --` 还原未提交实现）。被计时对象 = **生产操作**（经 helper 的结构变更调用）在有界 deadline 内**返回**——不计被删的那一行 SQL。此时连接 1 事务仍开（第三连接先断言 pid1 对该键 `granted=true`），`pg_locks` 无该键 `granted=false` 行。测完 `cp` 恢复。
+7. 锁键单点 + 锁序正/负控。扫描根（任务域全体）：`packages/core-backend/src/tasks`、`src/services/task-*`、`src/routes/tasks*`、`src/multitable/task-*`、`src/db/task-*`。POSIX ERE：`pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*\(`。**登记允许集合** = `src/db/task-advisory-locks.ts` 内三导出的取锁行。谓词：命中集合 == 登记集合。扫描前每个根解析文件数 ≥ 1（`find` + bash；grep exit 2 / zsh nomatch 红），计数写进 PR body。正控：同一 ERE 对 `approval-record-projection-service.ts` 必命中（本 SHA `:246`）。负控：在扫描根内登记集合之外插入该字面量 ⇒ 命中集合 ≠ 登记集合，本门红。**自首个任务源码 PR 起武装；此前 NOT RUN 不计分**（根为空时 find=0，无判别力）。
 8. **A 支**（只保留这一支，不混抄 B）：`now=2026-09-15T12:30Z`。夹具任务 `time_zone='Asia/Shanghai'`。定时 `due_time` 非空、`due_at = 2026-09-15T18:00:00Z`。护栏（直接谓词）：夹具 tz 的 `viewerNextMidnight` ≤ 钉死 `due_at` < UTC 的 `viewerNextMidnight`（`15T16:00Z ≤ 18:00Z < 16T00:00Z`，成立）。夹具 tz 与 UTC **本地日期相同属预期**。该 now 下全天两规则与定时 overdue 对两 tz **同值，不计入本负控证据**。正控甲：`x-viewer-time-zone: Not/AZone` ⇒ 与显式传 `Asia/Shanghai` 逐字节相同。正控乙：不带头 ⇒ 同上。负控：fallback 改 `'UTC'` 后两格必红。写入非法 IANA `time_zone` ⇒ **422**。写入/判定侧边界六格（`now=12:30Z`，规则 2 以 Asia/Shanghai `NM=15T16:00Z`）：规则 1 `due_at=12:29:59Z` 真 / `12:30:00Z` 假；规则 2 `15:59:59Z` 真 / `16:00:00Z` 假；规则 3 `due_date=2026-09-14` overdue 真、`2026-09-15` overdue 假但 overdue_or_today 真、`2026-09-16` 皆假。
 9. deny 注错（**§13-11 落定前本门在任务线上 NOT RUN**）。正控：未注错投影读 `status === 200`，可见行非空、被拒行不在。注入点：§13-11 裁定的**任务** deny 加载函数（不是审批 `loadApprovalProjectionDeniedRecordIds`）；该函数**不得**照 `permission-service.ts:1272-1279` 形吞表缺失错。`:1277` rethrow 与 `:1288` 无捕获冒泡是审批路径**先例**，不是本门注入点。负控甲：deny 查询**抛错** ⇒ 整个投影读失败，HTTP **500**。负控乙：deny 集合被注成空集或反相 ⇒ 正控「被拒行不在」断言**必须红**（HTTP 仍 200，属泄漏格）。**禁止**写「注空集 ⇒ 500」。**禁止**仅 `expect(status).not.toBe(200)`。required 承载: TBD（§13-12 未裁）。
 10. 标题正控「备料复核」过（应用层归一后写入）。CHECK `btrim(col) <> ''` 只拦空串。下列四格必须 **422**（应用层 Unicode 归一后空）：`'\t'`、`'  \n '`、U+3000（`'　'`）、零宽（U+200B/U+200C/U+200D/U+FEFF）。id 另两格 422：前导 `_`、尾随 `_`。投影写回端点 `recordId` 解析失败亦 **422**，产生处 = `parseTaskProjectionRecordId`（§7：先剥 `rec_tsk_`，再取剩余串首个 `__`；不匹配即拒绝，不猜 listId）。负控：停掉归一函数（mutation `cp` 备份，不得 `git checkout --`）后空白四格不再 422（CHECK 兜不住）⇒ 该格必须红。`[!-~]` 不在 title/name。
@@ -351,31 +372,33 @@ N/A:本线无媒体轨。
 | 判别格（需 `tasks:read` 的路由） | **403** | **200** |
 | 对照格（需 `tasks:write` 的写路由） | **200** | **200** |
 
-mutation 由**判别格翻转**检出（403→200）；对照格两姿态都是 200，翻转无判别力。与门 2 相反要求的理由：门 2 在 TRUST='true' 下要 **no-perms**，否则第三格被 trust 写成 200、码面 403 消失；本门在 TRUST='false' 下要 **perms 在场**（DB 未授予的 `tasks:read`），否则 TRUST 泄漏时判别格仍 403、与 ② 缺失同形。
+检出路径**三层**（不得写「只由判别格检出」）：① wiring 静态钉 config `RBAC_TOKEN_TRUST: 'false'`；② setup 守卫 `!== 'false'` 则抛；③ 判别格在 TRUST 泄漏时 403→200。对照格两姿态都是 200，翻转无判别力。与门 2 相反：门 2 在 TRUST='true' 下要 **no-perms**；本门在 TRUST='false' 下要 **perms 在场**（DB 未授予的 `tasks:read`）。
 
-两格夹具必须写全 **trust-off 到达写路由 `rbacGuard` 之前**的前置（缺一则自检句失效）。token `roles` claim **非空且不含 `admin`**（否则 `:213` 在 TRUST on 时空集早返回，或 `rbac.ts:69` 短路与对照格同形）。
+两格夹具必须写全 **trust-off 到达写路由 `rbacGuard` 之前**的九项前置（缺一则自检句失效）。`roles` claim 非空且不含 `admin` 是 **TRUST-on 短路前置**（`rbac.ts:69`），**不在**本九项清单（`:213` 是 `roles.length===0 && permissions.length===0` 合取；本门 token 带 perms，空 roles 不早返回）。
 
-1. `users` 行 `is_active` 且 `activation_status='activated'`（`AuthService.ts:273`；`user-activation.ts:77` 谓词 `role === 'disabled'` 或 `is_active === false`，`:78` 只是返回体）。夹具 `role ≠ 'disabled'`。
+1. `users` 行 `is_active` 且 `activation_status='activated'`（`AuthService.ts:273`；`user-activation.ts:77`）。夹具 `role ≠ 'disabled'`。
 2. `user_orgs` 一行 `is_active` 且 `org_id` 等于 token `tenantId` claim（`:387-405`）。
 3. token 不带 `sid`，或带 `sid` 且该会话活跃（`:282-288`）。
 4. 未 revoke（`:277`）。
 5. **对照格必须是写路由**（读路由 `orgId` 空时 degraded 200）。
-6. 专属 config/setup `TASKS_ENABLED='true'`（先例 setup.ts:57-61）。关时 router 工厂 null（§10）⇒ **404**，对照格不可达。
+6. 专属 config/setup `TASKS_ENABLED='true'`（先例 setup.ts:57-61）。关时 404。
 7. 路由已挂载（审批段之后，§10）。
 8. 最小合法请求体（缺字段 4xx 与 403 不同形）。
 9. `must_change_password=false`（`jwt-middleware.ts:83-99` 在 `rbacGuard` 前 403 `PASSWORD_CHANGE_REQUIRED`）。
 
-注记：trust-off 下 `buildTrustedTokenUser:206` 恒 null，claim 只作 `resolveSessionTenantId` 入参。`perms` 惰性，不替代 DB 授码。
+注记：trust-off 下 `:206` 恒 null，claim 只作 `resolveSessionTenantId` 入参。`perms` 惰性。trust-off 下 `req.user.permissions` = `resolveRbacProfile:748` → `listUserPermissions` 三路 ∪。
 
-- **判别格**：非 admin；`user_roles` 一行且 `role_id` 不以 `_admin` 结尾；该角色 `role_permissions` **只有** `tasks:write`、**无** `tasks:read`；admission 行在；① 已 seed 两行；token `sub` 是夹具用户；token 带 `tenantId` claim；token **带** `perms: ['tasks:read']`（DB 未授予；admission 在场）；token `roles` 非空且不含 admin；专属 config 下请求需 `tasks:read` 的路由 ⇒ **403**。
-- **对照格**：同一夹具请求需 `tasks:write` 的**写**路由 ⇒ **200**。token 同样带 `tenantId`、带同一 `perms`/`roles`。
+- **判别格**（缺任一项 ⇒ 两姿态同 200）：非 admin；`user_roles` 一行且 `role_id` 不以 `_admin` 结尾；`role_permissions` **只有** `tasks:write`（无 `tasks:read` / `tasks:*` / `*:*`）；`user_permissions` **无** `tasks:*` / `*:*`；`users.permissions` jsonb **无** `tasks:*` / `*:*`；admission 行在；① 已 seed 两行；token `sub` 是夹具用户；token 带 `tenantId` claim；token **带** `perms: ['tasks:read']`；token `roles` 非空且不含 admin；专属 config 下请求需 `tasks:read` 的路由 ⇒ **403**。
+- **对照格**：同一夹具请求需 `tasks:write` 的**写**路由 ⇒ **200**。
 
-自检：「对照格不是 200 则判别格无效，本门当轮不成立」。对照格非 200 先核上述前置再判门不成立。诊断清单覆盖写路由 `rbacGuard` 前全部 4xx，且响应体必须逐字节可区分：`401` 无效 token；`403` `{ error: { code: 'PASSWORD_CHANGE_REQUIRED' } }`（jwt-middleware）；`403` `{ error: 'Insufficient permissions' }`（rbac）；`422` org 缺失；`404` 未挂载 / flag 关。② 完全缺失且 token 无 perms 的夹具在 TRUST true/false 下同形 403，**不得充当信任面证据**——本门判别格不是该夹具：② 有 write、token 带未授予的 read，信任面由判别格在 TRUST on 时翻成 200 检出。夹具层不得使 `RBAC_OPTIONAL_ON`。不读 `process.env` 过门。**§13-10 落槌前本门不进验收计分**（见 §12 尾）。
+自检：「对照格不是 200 则判别格无效」。对照格非 200 先核九项前置再判门不成立。诊断清单**至少能区分下列 8 种**（响应体逐字节不同；不声称穷尽全部 4xx）：① `401` `{ code:'UNAUTHORIZED', message:'Missing Bearer token' }`（`:156`）；② `401` `{ code:'UNAUTHORIZED', message:'Invalid token' }`（`:75-76` / `:117-118`）；③ `403` `PASSWORD_CHANGE_REQUIRED`；④ `403` `{ error: 'Insufficient permissions' }`；⑤ `404` 未挂载 / flag 关；⑥ `400` `express.json` 体解析失败；⑦ `413` 体过大；⑧ `422` org 缺失（**在 rbacGuard 之后**的 handler，不是「rbac 前 4xx」）。② 完全缺失且 token 无 perms 的夹具在两姿态同形 403，**不得充当信任面证据**。夹具层不得使 `RBAC_OPTIONAL_ON`。**§13-10 落槌前本门不进验收计分**。
 17. 真库接线齐备：①（no-DB 对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped）+ ②（lane 绿后从 verbose 日志读出**收集用例数 == 展开后静态计数**，写进 PR body）+ ④（三集合相等、扫描负控、正则未失效；④ 自身收集数 == 展开后静态计数；承载 `.github/workflows/plugin-tests.yml:842-844`；required 是否含 `test (20.x)` 以 §5.2.1 ④ 带日期实读为准，M2 接线 PR 重读）。④ 非空负控自首个 `task-*.db.test.ts` PR 起武装，此前 **NOT RUN** 不计分。③ 的 required 承载: TBD（§13-12 未裁）。**.each 计数规则**：展开后静态计数 = 无 table 的 `it(` / `test(` 数 + 每个 `it.each` / `test.each` 的表行数（不含表头）。含 `.each` 的文件必须在 PR body 写出展开表行数；未写或收集数 ≠ 展开后计数 ⇒ 本门红。不禁用 `.each`（本 SHA `tests/integration/*.db.test.ts` 260 文件中 13 个使用）。**门 17 只证执行发生，不证行为。**
 18. **首个**在 `packages/core-backend/src` 引入 `TASKS_*` 源码读的 PR 必须同 PR 扩 `globalHistoryFlagsInSource()` 覆盖 `TASKS_*_ENABLED` 并补 `scripts/ops/global-history-flag-manifest.mjs` 条目。负控：删掉该正则扩展（mutation `cp` 备份）后 `pnpm verify:global-history-flag-manifest:test` 必须红。本门在 M0（无源码读）不适用；从该 PR 起适用。
-19. 谓词从属链（计划 v5 §3 `:116`）。正控：同一 fixture 网格，`resolveTaskRoles` 推出的可见性与 `buildTaskScopeCondition` SQL 选出的行集逐格相等。判别力：只改 `buildTaskScopeCondition` 的 assignee 臂一处（mutation `cp`）⇒ `GET /api/tasks?view=assigned`、`GET /api/tasks/pending`、`GET /api/tasks/pending-count` **三端同红**；任一端仍绿 ⇒ 派生链断裂。§13-5 / §13-11 未裁前投影端不算入本门。
+19. 谓词从属链（计划 v5 §3 `:116`）。网格轴：role 子集（至少 `{follower,list-editor}` / `{list-reader,assignee}` / `{creator,assignee}` 三组叠加 + 单角色）、`view ∈ {assigned,following,created,delegated,any_role}`、`completion_mode ∈ {all,any}`、`scope ∈ {all_open,overdue,overdue_or_today,off}`。格数公式写进 PR body；收集用例数 == 格数。正控：同一 fixture 上 `resolveTaskRoles` 可见性与 `buildTaskScopeCondition` 行集逐格相等。探针①（计划 `:116`）：删真相表任一格 ⇒ 路由端 + count/list 端同红（投影端待 §13-11）；正控 = 未删时三端绿。探针②：只改 `buildTaskScopeCondition` 的 assignee 臂一处 ⇒ `GET /api/tasks?view=assigned`、`/pending`、`/pending-count` 三端同红；正控 = 未改时三端绿。§13-5 / §13-11 未裁前投影端不算入本门。计划三端含投影，本锁暂不含，§9 偏离。
+20. `src/tasks/` 无 I/O：`grep -R -E "from '\\.\\./db/" packages/core-backend/src/tasks` 零命中。正控：同命令对 `packages/core-backend/src/approvals` 必命中（`approval-departure-transfer-dispatch.ts`）。自首个 `src/tasks/*.ts` 落地的 PR 起武装；此前 NOT RUN。
+22. `guardPolicy` 行为 spec（**必须计分，不在 §13-10 阻断名单**）。注入 `hasPermission`：对 `tasks:read` 返回 true ⇒ `/tasks` **allow**；返回 false ⇒ **redirect** 回家；各配相反格（true 不得 redirect、false 不得 allow）。焦点互证 spec：入口可见 ⇔ 路由 allow。§13-37 缺省下两侧期望：焦点分支不渲染入口 **且** 焦点模式下 `/tasks` redirect。admin 短路（`useAuth.ts:548-556`）另格：`isAdmin` ⇒ allow，即使 permissions 空。
 
-门 2/9/13/17 行尾的 TBD 未裁前不得声称「门全绿」。**§13-10 落槌前门 2/13/16 整体不进验收计分，M2 不得以 RBAC 家族「无红」作交付证据。** 非 admin 真机冒烟只作可达性记录；前置 = §13-10 落槌 **且** 权限快照带码，未满足不计分（与 §11 M2 退出列一致）。门 3 增删人格与切模式格被 §13-9 **未裁**阻断。门 9 在 §13-11 落定前任务线 **NOT RUN**（未解除前 M2 不得退出）。门 17 ④ 非空负控在首个 `task-*.db.test.ts` 前 **NOT RUN**。门 18 被 §9 `TASKS_*` 行 / §10 有期限推迟阻断（M0 无源码读，不适用）。①②④ 可在 M2 接线 PR 上验。门 16 四件与两格对照等 M2 同 PR 落；对照格非 200 先核 trust-off 前置再判该修法不成立。
+门 2/9/13/17 行尾的 TBD 未裁前不得声称「门全绿」。**§13-10 落槌前门 2/13/16 整体不进验收计分，M2 不得以 RBAC 家族「无红」作交付证据。** 非 admin 真机冒烟只作可达性记录；前置 = §13-10 落槌 **且** 权限快照带码，未满足不计冒烟。**门 22 必须计分。** 门 3 增删人格与切模式格被 §13-9 **未裁**阻断。门 9 在 §13-11 落定前任务线 **NOT RUN**（未解除前 M2 不得退出）。门 7 与门 20 自首个任务源码 PR 起武装，此前 NOT RUN。门 17 ④ 非空负控在首个 `task-*.db.test.ts` 前 **NOT RUN**。门 19 投影端在 §13-5/§13-11 未裁前不算入。门 18 被 §9 `TASKS_*` 行 / §10 有期限推迟阻断（M0 无源码读，不适用）。①②④ 可在 M2 接线 PR 上验。门 16 四件与两格对照等 M2 同 PR 落；对照格非 200 先核九项前置再判该修法不成立。
 
 ---
 
@@ -475,7 +498,14 @@ mutation 由**判别格翻转**检出（403→200）；对照格两姿态都是 
    - (a) `plugin-tests.yml` 行号锚点：本 merge-base 普查 `:302` 为 `:1655`（`approval-comments.db.test.ts`）；origin/main 已漂到 **`:1659`**。`:532-533` / `:842-844` 本 SHA 仍成立，ratify 前重开。
    - (b) s6a pin `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json:90`：本 merge-base `5902a850c3d254c20b0caf330b21da896703648265ae7a588b973f793727a0cf`；origin/main 已漂到 **`b37a589feff9ee45b804ab6936947053f4e813480bd69c7dfd4973f0a4790ba6`**（报告 / 普查必须同步）。
    - (c) 基线 SHA = 当时 `git merge-base HEAD origin/main`；`vitest.config.ts` `'tests/e2e/**'`、`index.ts` `approvalsRouter`、`run-required-web-tests.sh` `exec npx vitest run` 三处行号必须当场 `sed -n` / `grep -n`。
-   - (d) **非穷举**（两遍导出；任一遍漏核不得声称「锚点已全核」）。两遍均逐条 `sed -n` / `grep -n` 重核。本清单 (a)(b)(c) 与两遍导出都不是全量（散文行号、无反引号的 `:N` 不在内）。**刻意保留的漂移引用（机核豁免：不要求该行号在本 SHA 仍承载原语义，只要求锁文仍写明「已漂」）**：计划写的 `vitest.config.ts:1782`、`run-required-web-tests.sh:1069`、`index.ts:1763-1777` / `:1642`、`AGENTS.md:48-50`、`guardPolicy.ts:29/:77/:87-95`。豁免清单可机核：`grep -nE '1782|:1069|1763-1777|:1642|AGENTS.md:48-50|guardPolicy.ts:29' docs/development/task-feature-design-lock-20260917.md` 必须仍命中「已漂」对照句。
+   - (d) **非穷举**（两遍导出；任一遍漏核不得声称「锚点已全核」）。两遍均逐条 `sed -n` / `grep -n` 重核。本清单 (a)(b)(c) 与两遍导出都不是全量（散文行号、无反引号的 `:N` 不在内）。**刻意保留的漂移引用（机核豁免：不要求该行号在本 SHA 仍承载原语义，只要求锁文仍写明「已漂」）**：计划写的 `vitest.config.ts:1782`、`run-required-web-tests.sh:1069`、`index.ts:1763-1777` / `:1642`、`AGENTS.md:48-50`、`guardPolicy.ts:29/:77/:87-95`。豁免机核**排除本清单行自身**：
+
+```bash
+grep -nE '1782|:1069|1763-1777|:1642|AGENTS.md:48-50|guardPolicy.ts:29' docs/development/task-feature-design-lock-20260917.md \
+  | grep -v '刻意保留的漂移引用'
+```
+
+必须仍命中正文「已漂」对照句（§5.2 `guardPolicy.ts:29` 现 `:34`；§10 计划 `:1642` 现 `:1791`；§5.2.1 ① `:1782`；§5.3 `:1069`）。负控：删任一对照句后上式无「已漂」命中 ⇒ 本项红。
 
 ```bash
 LOCK=docs/development/task-feature-design-lock-20260917.md
