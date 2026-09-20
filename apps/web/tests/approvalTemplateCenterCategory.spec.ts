@@ -21,6 +21,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 import { useAuth } from '../src/composables/useAuth'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -50,7 +51,13 @@ const mockTemplates = ref<any[]>([])
 const mockLoading = ref(false)
 const mockError = ref<string | null>(null)
 const mockTotal = ref(0)
-const loadTemplatesSpy = vi.fn().mockResolvedValue(undefined)
+// Resolves 'applied' because that is what the real `templateStore.loadTemplates` resolves when
+// the read it issued is still the current one and it succeeded (`ApprovalTemplateListOutcome`
+// — the other two values are 'failed' and 'superseded'). TemplateCenterView lowers its
+// flat-list stale bit ONLY for 'applied', so a mock resolving `undefined` would be a mock of
+// a contract this store does not have, and every case below that raises the stale bit would
+// be asserting against a store protocol that exists nowhere in production.
+const loadTemplatesSpy = vi.fn().mockResolvedValue('applied')
 
 vi.mock('../src/approvals/templateStore', () => ({
   useApprovalTemplateStore: () => ({
@@ -94,6 +101,14 @@ const cloneTemplateSpy = vi.fn<[string], Promise<any>>().mockResolvedValue({
 // than leaving the import undefined and throwing) so the failure surfaces as a red assertion on
 // the spy, not an unrelated TypeError.
 const listApprovalTemplateGroupsSpy = vi.fn<[], Promise<unknown[]>>().mockResolvedValue([])
+// Round 4 — the REAL `approvals/templateStore` is exercised by the request-algebra describe at the
+// bottom of this file (through `vi.importActual`, which un-mocks the store but leaves ITS `./api`
+// import resolved to this factory). `listTemplates` therefore has to exist here or that import
+// throws before a single assertion runs. It is NOT used by any component test in this file: those
+// keep the replacement store mock above.
+const listTemplatesSpy = vi
+  .fn<[unknown], Promise<{ data: unknown[]; total: number }>>()
+  .mockResolvedValue({ data: [], total: 0 })
 // A-2 x A-4 convergence (2026-09-20) — the grouped-view tests below mount TemplateGroupSections
 // through the view, and it fetches one page per section. Needed on this replacement mock or the
 // sections view's `loadAll` throws "listTemplatesBySection is not a function" into its own catch
@@ -120,6 +135,12 @@ vi.mock('../src/approvals/api', () => ({
   ApprovalApiError: class ApprovalApiError extends Error {},
   listApprovalTemplateGroups: () => listApprovalTemplateGroupsSpy(),
   listTemplatesBySection: (params: unknown) => listTemplatesBySectionSpy(params),
+  // The three the REAL templateStore imports (see `listTemplatesSpy` above). `getTemplate` /
+  // `getTemplateVersion` are never called here; they exist because an ES module mock must carry
+  // every named import of its consumers or the import itself fails.
+  listTemplates: (query: unknown) => listTemplatesSpy(query),
+  getTemplate: (id: string) => Promise.resolve({ id }),
+  getTemplateVersion: (templateId: string, versionId: string) => Promise.resolve({ templateId, versionId }),
   createApprovalTemplateGroup: (name: string) => Promise.resolve({
     id: 'atg_test', orgId: 'org_test', name, sortOrder: 1,
     createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
@@ -345,7 +366,14 @@ const ElAlert = defineComponent({
   name: 'ElAlert',
   props: { title: String, type: String, showIcon: Boolean, closable: Boolean },
   render() {
-    return h('div', { 'data-el-alert': this.type }, this.title)
+    // `data-closable` is mirrored out because round-4 makes the error banner NON-dismissible in
+    // exactly one state (the flat surfaces blanked by a context change whose re-read has not
+    // succeeded), where it carries the only Reload control. The default slot is deliberately still
+    // not rendered: its button label would join every `container.textContent` assertion in this file.
+    return h('div', {
+      'data-el-alert': this.type,
+      'data-closable': String(Boolean(this.closable)),
+    }, this.title)
   },
 })
 
@@ -436,7 +464,7 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
     mockTotal.value = mockTemplates.value.length
 
     loadTemplatesSpy.mockClear()
-    loadTemplatesSpy.mockResolvedValue(undefined)
+    loadTemplatesSpy.mockResolvedValue('applied')
     listTemplateCategoriesSpy.mockClear()
     listTemplateCategoriesSpy.mockResolvedValue(['请假', '采购'])
     listApprovalTemplateGroupsSpy.mockClear()
@@ -755,7 +783,7 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     mockError.value = null
     mockTotal.value = 0
     loadTemplatesSpy.mockClear()
-    loadTemplatesSpy.mockResolvedValue(undefined)
+    loadTemplatesSpy.mockResolvedValue('applied')
     listTemplateCategoriesSpy.mockClear()
     listTemplateCategoriesSpy.mockResolvedValue([])
     listApprovalTemplateGroupsSpy.mockClear()
@@ -1514,10 +1542,10 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
     // The new organization's list read hangs — the real window this boundary is about.
     let releaseNewOrgList: (() => void) | null = null
     loadTemplatesSpy.mockImplementation(
-      () => new Promise<void>((resolve) => {
+      () => new Promise<string>((resolve) => {
         releaseNewOrgList = () => {
           mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
-          resolve()
+          resolve('applied')
         }
       }),
     )
@@ -1649,5 +1677,576 @@ describe('TemplateCenterView — P2-5: persistent session-org entry in the group
 
     expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
     expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+  })
+
+  // ── ③ the three async exits, on the FLAT surfaces ───────────────────────────────────────────
+  //
+  // Round-3 gate C-1 (impl-gate-A5-daily-ops-round3-20260921.md) found the flat settle asking the
+  // SHARED `store.error` slot "did my read succeed?". That slot has no request algebra, so a read
+  // that had already been superseded could answer for the read that was actually current: the
+  // admin switched organization, the abandoned read failed, the new read succeeded — and the table,
+  // the gallery and the pager all rendered EMPTY with the abandoned read's banner on top of them.
+  //
+  // The algebra now lives in the store, at the slots (`templateStore.ts`), and its three exits are
+  // pinned against the REAL store by the "request algebra" describe at the bottom of this file.
+  // What the four cases below pin is the ONE decision this page still owns: the rendered rows are
+  // declared current again only for an answer the store APPLIED. They are deliberately written so
+  // that the old `if (!store.error)` line is red against T1, and so that dropping the
+  // `outcome === 'applied'` condition is red against T2 and T3.
+
+  it('(③ FLAT) an error left in the SHARED store slot by somebody else no longer blanks the organization whose own read succeeded', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+
+    // The new organization's read succeeds — and the shared error slot is dirty when it lands,
+    // exactly as it is when an abandoned read failed a moment earlier. `store.error` is app-wide:
+    // this page is not the only thing that can write it, and it carries no request identity at all.
+    loadTemplatesSpy.mockImplementation(async () => {
+      mockError.value = 'API error: 500 Internal Server Error'
+      mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+      mockTotal.value = 1
+      return 'applied'
+    })
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(12)
+    await enterFlatView()
+
+    // THE regression: rows present, not an empty table sitting on top of rows the store holds.
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org B Template')
+    expect(container!.textContent).not.toContain('Org A Template')
+  })
+
+  it('(③ FLAT, failure exit) when the re-read for the NEW context fails, the flat surfaces stay empty and the banner keeps its Reload control', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    await enterGroupedView()
+    await flushUi(8)
+
+    // The store's failure exit: `error` written, rows left exactly as they were (org A's).
+    loadTemplatesSpy.mockImplementation(async () => {
+      mockError.value = 'API error: 500 Internal Server Error'
+      return 'failed'
+    })
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(12)
+    await enterFlatView()
+
+    // org A's rows are STILL what the store physically holds — and they are not org B's answer,
+    // so the page must not re-expose them. Blank plus an error, never "here is org B: 1 row".
+    expect(mockTemplates.value.map((t: { id: string }) => t.id)).toEqual(['tpl_a'])
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(0)
+    expect(container!.textContent).not.toContain('Org A Template')
+    // ...and the ONE control that can get the admin out of that blank state cannot be dismissed
+    // away, because an empty table with no banner cannot answer "zero templates, or a failed read?".
+    const alert = container!.querySelector('[data-el-alert]')
+    expect(alert).not.toBeNull()
+    expect(alert!.getAttribute('data-closable')).toBe('false')
+
+    // Recoverable: the next successful read declares the rows current and takes the banner with it.
+    loadTemplatesSpy.mockImplementation(async () => {
+      mockError.value = null
+      mockTemplates.value = [lifecycleTemplate('tpl_b', 'Org B Template')]
+      mockTotal.value = 1
+      return 'applied'
+    })
+    ;(container!.querySelector('[data-testid="template-center-category-filter"]') as HTMLSelectElement).value = ''
+    ;(container!.querySelector('[data-testid="template-center-category-filter"]') as HTMLSelectElement)
+      .dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(1)
+    expect(container!.textContent).toContain('Org B Template')
+    expect(container!.querySelector('[data-el-alert]')).toBeNull()
+  })
+
+  it('(③ FLAT, superseded exit) an abandoned read that settles while the new one is still in flight does not declare the rows current', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    mockTemplates.value = [lifecycleTemplate('tpl_a', 'Org A Template')]
+    mockTotal.value = 1
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+
+    // The abandoned read (issued for org A) settles LAST, and the store tells it so: 'superseded'.
+    // The new read never answers at all in this window.
+    let settleAbandoned: ((outcome: string) => void) | null = null
+    const abandoned = new Promise<string>((resolve) => { settleAbandoned = resolve })
+    loadTemplatesSpy.mockImplementationOnce(() => abandoned)
+    loadTemplatesSpy.mockImplementation(() => new Promise<string>(() => {}))
+    // Issue it through a real production entry point (the category filter's own handler), so the
+    // read really is one of this page's own overlapping `loadData()` calls.
+    const filterEl = container!.querySelector('[data-testid="template-center-category-filter"]') as HTMLSelectElement
+    filterEl.value = ''
+    filterEl.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(12)
+    await enterFlatView()
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(0)
+
+    settleAbandoned!('superseded')
+    await flushUi(8)
+
+    // Still blank: 'superseded' means this read learned nothing about the context the page is in.
+    expect(mockTemplates.value.map((t: { id: string }) => t.id)).toEqual(['tpl_a'])
+    expect(container!.querySelectorAll('[data-el-row]').length).toBe(0)
+    expect(container!.textContent).not.toContain('Org A Template')
+  })
+
+  it("(② M-F) the page's OWN organization switch re-reads every org-scoped surface exactly ONCE", async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    useAuth().setToken(jwt('org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: { method?: string }) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      if (String(path).endsWith('/api/auth/session-org') && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected fetch: ${path} ${init?.method}`)
+    }))
+
+    await mountView()
+    await enterGroupedView()
+    await flushUi(8)
+    const templatesBefore = loadTemplatesSpy.mock.calls.length
+    const categoriesBefore = listTemplateCategoriesSpy.mock.calls.length
+    const groupsBefore = listApprovalTemplateGroupsSpy.mock.calls.length
+
+    const select = container!.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(14)
+
+    // A page-owned switch has TWO things that both want to re-read: the principal-change listener
+    // (which fires for it, because the switch remints the token) and `onPageSessionOrgChange`'s own
+    // replay (which is the one that knows whether the switch was ACCEPTED). Exactly one of them may
+    // act, or every surface on this page issues its request twice per switch. `>= 1` would pass
+    // against both; the counts are therefore exact.
+    expect(loadTemplatesSpy.mock.calls.length - templatesBefore).toBe(1)
+    expect(listApprovalTemplateGroupsSpy.mock.calls.length - groupsBefore).toBe(1)
+    // TWO for categories, and the number is written out rather than rounded to ">= 1" because the
+    // two are different surfaces, not a double-dispatch: the host's own `loadCategories()` plus the
+    // section view's `loadAll()`, which reads the same (global, org-agnostic) endpoint for its
+    // section names. Double-dispatching would make this 4.
+    expect(listTemplateCategoriesSpy.mock.calls.length - categoriesBefore).toBe(2)
+  })
+
+  it('(① M-J) a category answer issued for the PREVIOUS identity does not repopulate the dropdown behind the new one', async () => {
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    // The first identity's category read never answers until we say so.
+    let settleStaleCategories: ((v: string[]) => void) | null = null
+    listTemplateCategoriesSpy.mockImplementationOnce(
+      () => new Promise<string[]>((resolve) => { settleStaleCategories = resolve }),
+    )
+    listTemplateCategoriesSpy.mockResolvedValue(['NEW-IDENTITY-CATEGORY'])
+    useAuth().setToken(jwtFor('actorA', 'org-a'))
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await flushUi(4)
+
+    useAuth().setToken(jwtFor('actorB', 'org-c'))
+    await flushUi(10)
+    const filter = () => container!.querySelector('[data-testid="template-center-category-filter"]') as HTMLSelectElement
+    expect(Array.from(filter().options).map((o) => o.textContent?.trim())).toContain('NEW-IDENTITY-CATEGORY')
+
+    settleStaleCategories!(['PREVIOUS-IDENTITY-CATEGORY'])
+    await flushUi(8)
+
+    const labels = Array.from(filter().options).map((o) => (o.textContent ?? '').trim())
+    expect(labels).not.toContain('PREVIOUS-IDENTITY-CATEGORY')
+    expect(labels).toContain('NEW-IDENTITY-CATEGORY')
+  })
+
+  it('(① M-K) a recent-templates answer resolved for the PREVIOUS account does not appear under the new one', async () => {
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    listApprovalTemplateGroupsSpy.mockResolvedValue([])
+    localStorage.removeItem('user')
+    localStorage.setItem('approval-recent-templates:actorA', JSON.stringify([
+      { templateId: 'tpl_stale', name: 'PREVIOUS-ACCOUNT-SHORTCUT', category: null, at: 1 },
+    ]))
+    localStorage.setItem('approval-recent-templates:actorB', JSON.stringify([
+      { templateId: 'tpl_fresh', name: 'NEW-ACCOUNT-SHORTCUT', category: null, at: 2 },
+    ]))
+    useAuth().setToken(jwtFor('actorA', 'org-a'))
+
+    // `loadRecentTemplates` resolves the USER through `useAuth().getCurrentUserId()`, which goes to
+    // `/api/auth/me` when no snapshot is cached. Account A's lookup hangs; account B's answers.
+    let meCalls = 0
+    let settleStaleMe: ((v: unknown) => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (String(path).endsWith('/api/auth/me')) {
+        meCalls += 1
+        // Call 1 is account A's and hangs; every later call is account B's and answers at once.
+        if (meCalls === 1) {
+          return await new Promise((resolve) => { settleStaleMe = resolve as (v: unknown) => void })
+        }
+        return jsonResponse(200, { success: true, data: { user: { id: 'actorB' } } })
+      }
+      if (String(path).endsWith('/api/auth/session-orgs')) {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    }))
+
+    await mountView()
+    await flushUi(4)
+    expect(container!.textContent).not.toContain('PREVIOUS-ACCOUNT-SHORTCUT')
+
+    useAuth().setToken(jwtFor('actorB', 'org-c'))
+    await flushUi(12)
+    expect(container!.textContent).toContain('NEW-ACCOUNT-SHORTCUT')
+
+    settleStaleMe!(jsonResponse(200, { success: true, data: { user: { id: 'actorA' } } }))
+    await flushUi(12)
+
+    expect(container!.textContent).not.toContain('PREVIOUS-ACCOUNT-SHORTCUT')
+    expect(container!.textContent).toContain('NEW-ACCOUNT-SHORTCUT')
+  })
+
+})
+
+/**
+ * Round 4 — REQUEST ALGEBRA AT THE SHARED SLOT (`approvals/templateStore.loadTemplates`).
+ *
+ * Round-3 gate C-1: the flat surfaces' "is what I am rendering current?" decision was wired to the
+ * app-wide `templateStore.error` / `templateStore.loading` refs, which had no request algebra of
+ * any kind — `error` was written by whichever read failed LAST, `templates` by whichever read
+ * returned LAST, and `loading` was cleared unconditionally in a `finally` shared by every
+ * concurrent read. A page-local generation cannot fix that, because the page does not own those
+ * slots; the algebra has to sit where the writes happen. That is what these cases pin, against the
+ * REAL store (`vi.importActual` un-mocks it; its own `./api` import still resolves to this file's
+ * replacement mock, which is why `listTemplates` is a key there).
+ *
+ * The gate's own machinery note applies here and is why this describe exists at all: the five
+ * component specs replace `templateStore` wholesale with a `vi.fn().mockResolvedValue(...)`, so the
+ * store's catch and finally exits were not merely untested — they were UNREACHABLE from any spec.
+ *
+ * Every case is a two-read interleaving with the older read settling LAST, plus a positive control
+ * proving the same fixture with no interleaving does write. Mutating any one of the three exits'
+ * guards (or the identity signature) reddens a named case below; see the round-4 verification MD's
+ * probe table for the mapping.
+ */
+describe('approvals/templateStore — list request algebra (three exits + identity signature)', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  const row = (id: string) => ({
+    id,
+    name: id,
+    description: null,
+    category: null,
+    status: 'published' as const,
+    visibilityScope: { type: 'all' as const, ids: [] },
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+  })
+
+  const tokenFor = (userId: string, serial = 1) =>
+    `header.${btoa(JSON.stringify({ userId, tenantId: 'org-a', exp: Math.floor(Date.now() / 1000) + 60 + serial }))}.signature`
+
+  async function freshStore() {
+    setActivePinia(createPinia())
+    const actual = await vi.importActual<typeof import('../src/approvals/templateStore')>(
+      '../src/approvals/templateStore',
+    )
+    return actual.useApprovalTemplateStore()
+  }
+
+  beforeEach(() => {
+    listTemplatesSpy.mockReset()
+    localStorage.clear()
+    useAuth().setToken(tokenFor('actorA'))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    localStorage.clear()
+  })
+
+  it('(positive control) a read with nothing racing it applies its rows, reports "applied", and clears loading', async () => {
+    const store = await freshStore()
+    listTemplatesSpy.mockResolvedValue({ data: [row('only')], total: 1 })
+    const outcome = await store.loadTemplates({ page: 1 })
+    expect(outcome).toBe('applied')
+    expect(store.templates.map((t: { id: string }) => t.id)).toEqual(['only'])
+    expect(store.total).toBe(1)
+    expect(store.error).toBeNull()
+    expect(store.loading).toBe(false)
+  })
+
+  it('(positive control) a lone FAILING read reports "failed", posts its message and clears loading', async () => {
+    const store = await freshStore()
+    listTemplatesSpy.mockRejectedValue(new Error('API error: 500 Internal Server Error'))
+    const outcome = await store.loadTemplates({ page: 1 })
+    expect(outcome).toBe('failed')
+    expect(store.error).toBe('API error: 500 Internal Server Error')
+    expect(store.loading).toBe(false)
+  })
+
+  it('(③ success exit) an older read that succeeds LAST does not overwrite the newer read\'s rows', async () => {
+    const store = await freshStore()
+    const older = deferred<{ data: unknown[]; total: number }>()
+    const newer = deferred<{ data: unknown[]; total: number }>()
+    listTemplatesSpy.mockImplementationOnce(() => older.promise)
+    listTemplatesSpy.mockImplementationOnce(() => newer.promise)
+
+    const olderCall = store.loadTemplates({ page: 1 })
+    const newerCall = store.loadTemplates({ page: 2 })
+
+    newer.resolve({ data: [row('NEWER')], total: 1 })
+    expect(await newerCall).toBe('applied')
+    older.resolve({ data: [row('OLDER')], total: 99 })
+    expect(await olderCall).toBe('superseded')
+
+    expect(store.templates.map((t: { id: string }) => t.id)).toEqual(['NEWER'])
+    expect(store.total).toBe(1)
+  })
+
+  it('(③ catch exit) an older read that FAILS last does not post its error over the newer read\'s success', async () => {
+    const store = await freshStore()
+    const older = deferred<{ data: unknown[]; total: number }>()
+    const newer = deferred<{ data: unknown[]; total: number }>()
+    listTemplatesSpy.mockImplementationOnce(() => older.promise)
+    listTemplatesSpy.mockImplementationOnce(() => newer.promise)
+
+    const olderCall = store.loadTemplates({ page: 1 })
+    const newerCall = store.loadTemplates({ page: 2 })
+
+    newer.resolve({ data: [row('NEWER')], total: 1 })
+    expect(await newerCall).toBe('applied')
+    older.reject(new Error('API error: 500 Internal Server Error'))
+    expect(await olderCall).toBe('superseded')
+
+    // This is round-3 C-1's (b) and (c) at the source: no banner for a question nobody is asking,
+    // and the rows the current read actually fetched are still there.
+    expect(store.error).toBeNull()
+    expect(store.templates.map((t: { id: string }) => t.id)).toEqual(['NEWER'])
+  })
+
+  it('(③ finally exit) an older read settling does not clear the loading flag the newer read is still holding', async () => {
+    const store = await freshStore()
+    const older = deferred<{ data: unknown[]; total: number }>()
+    const newer = deferred<{ data: unknown[]; total: number }>()
+    listTemplatesSpy.mockImplementationOnce(() => older.promise)
+    listTemplatesSpy.mockImplementationOnce(() => newer.promise)
+
+    const olderCall = store.loadTemplates({ page: 1 })
+    const newerCall = store.loadTemplates({ page: 2 })
+    expect(store.loading).toBe(true)
+
+    older.resolve({ data: [row('OLDER')], total: 99 })
+    expect(await olderCall).toBe('superseded')
+    // The newer read has not answered yet: the spinner belongs to it, and only it may take it down.
+    expect(store.loading).toBe(true)
+
+    newer.resolve({ data: [row('NEWER')], total: 1 })
+    expect(await newerCall).toBe('applied')
+    expect(store.loading).toBe(false)
+  })
+
+  it('(① identity) a read issued for the PREVIOUS session applies nothing when it succeeds after a sign-out', async () => {
+    const store = await freshStore()
+    const inflight = deferred<{ data: unknown[]; total: number }>()
+    listTemplatesSpy.mockImplementationOnce(() => inflight.promise)
+
+    const call = store.loadTemplates({ page: 1 })
+    useAuth().clearToken()
+    inflight.resolve({ data: [row('SIGNED-OUT-ACCOUNTS-ROW')], total: 7 })
+
+    expect(await call).toBe('superseded')
+    expect(store.templates).toEqual([])
+    expect(store.total).toBe(0)
+  })
+
+  it('(① identity) a read issued for the PREVIOUS session posts no error when it fails after a sign-out', async () => {
+    const store = await freshStore()
+    const inflight = deferred<{ data: unknown[]; total: number }>()
+    listTemplatesSpy.mockImplementationOnce(() => inflight.promise)
+
+    const call = store.loadTemplates({ page: 1 })
+    useAuth().clearToken()
+    inflight.reject(new Error('API error: 401 Unauthorized'))
+
+    // Boundary ①: a signed-out page that shows "could not load templates" is answering a question
+    // nobody asked — the identity that asked no longer holds this session.
+    expect(await call).toBe('superseded')
+    expect(store.error).toBeNull()
+  })
+
+  it('(① identity) ...but that read still RELEASES loading, because no successor exists to release it', async () => {
+    const store = await freshStore()
+    const inflight = deferred<{ data: unknown[]; total: number }>()
+    listTemplatesSpy.mockImplementationOnce(() => inflight.promise)
+
+    const call = store.loadTemplates({ page: 1 })
+    expect(store.loading).toBe(true)
+    useAuth().clearToken()
+    inflight.reject(new Error('API error: 401 Unauthorized'))
+    await call
+
+    // `loading` is a one-bit slot owned by the NEWEST read. Gating its release on the identity as
+    // well as on the generation would strand the spinner forever here: nothing else is coming.
+    expect(store.loading).toBe(false)
+  })
+
+  it('(① identity) a read issued before a token re-issue for the SAME subject is still superseded', async () => {
+    const store = await freshStore()
+    const inflight = deferred<{ data: unknown[]; total: number }>()
+    listTemplatesSpy.mockImplementationOnce(() => inflight.promise)
+
+    const call = store.loadTemplates({ page: 1 })
+    // Same `sub`, different token text — `getAuthPrincipalKey()` is deliberately STABLE across
+    // this, so only the signature's token half can see it. That is the half this pins.
+    useAuth().setToken(tokenFor('actorA', 2))
+    inflight.resolve({ data: [row('PRE-REISSUE-ROW')], total: 3 })
+
+    expect(await call).toBe('superseded')
+    expect(store.templates).toEqual([])
+  })
+})
+
+/**
+ * Round 4 — `onAuthSessionSwitch`'s deferred-unsubscribe window.
+ *
+ * The round-3 gate's M-D: deleting the `disposed` flag left all 99 tests green, and
+ * `grep -rln onAuthSessionSwitch apps/web/tests/` returned ZERO files — a guard that a repair
+ * commit added specifically because its author had found a real window, with nothing anywhere in
+ * the repository able to tell whether it still worked.
+ *
+ * The window: the signature comparison is deliberately deferred by one microtask (the reset funnel
+ * notifies BEFORE `localStorage` is written, so reading at notification time would report "nothing
+ * changed" for every sign-in and sign-out). Unsubscribing from the base signal cannot cancel a
+ * microtask that is already queued, so without the flag a torn-down subscriber still runs — and in
+ * this page's case, issues a re-fetch for a component that no longer exists.
+ */
+describe('composables/authPrincipal — onAuthSessionSwitch closes its deferred window on unsubscribe', () => {
+  const tokenFor = (userId: string) =>
+    `header.${btoa(JSON.stringify({ userId, tenantId: 'org-a', exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+
+  beforeEach(() => { localStorage.clear() })
+  afterEach(() => { localStorage.clear() })
+
+  it('(positive control) a real session change notified while subscribed DOES reach the listener', async () => {
+    const { onAuthSessionSwitch, notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    const calls: number[] = []
+    const stop = onAuthSessionSwitch(() => { calls.push(1) })
+    try {
+      localStorage.setItem('auth_token', tokenFor('actorA'))
+      notifyAuthPrincipalChange()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(calls.length).toBe(1)
+    } finally {
+      stop()
+    }
+  })
+
+  it('a subscriber torn down between the notification and the deferred read is NOT called', async () => {
+    const { onAuthSessionSwitch, notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    const calls: number[] = []
+    const stop = onAuthSessionSwitch(() => { calls.push(1) })
+
+    localStorage.setItem('auth_token', tokenFor('actorA'))
+    // The transition is announced...
+    notifyAuthPrincipalChange()
+    // ...and the component unmounts before the queued microtask runs. This is the whole window:
+    // synchronous with respect to the notification, earlier than the deferred signature read.
+    stop()
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(calls.length).toBe(0)
+  })
+
+  it('a subscriber torn down by ANOTHER listener during the same notification is not called either', async () => {
+    const { onAuthSessionSwitch, onAuthPrincipalChange, notifyAuthPrincipalChange } =
+      await import('../src/composables/authPrincipal')
+    const calls: number[] = []
+    // Subscription order matters: the switch subscriber is registered FIRST so that the disposing
+    // listener below runs while the funnel is already iterating its copy of the listener set.
+    const stopSwitch = onAuthSessionSwitch(() => { calls.push(1) })
+    const stopDisposer = onAuthPrincipalChange(() => { stopSwitch() })
+    try {
+      localStorage.setItem('auth_token', tokenFor('actorA'))
+      notifyAuthPrincipalChange()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(calls.length).toBe(0)
+    } finally {
+      stopDisposer()
+      stopSwitch()
+    }
   })
 })
