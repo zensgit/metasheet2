@@ -120,10 +120,15 @@
          `v-if`/`v-else` behaving exactly as before for every spec that never touches viewMode. -->
     <template v-if="viewMode === 'flat'">
     <!-- G-B2-17: admin path unchanged — the management table stays exactly as before. -->
+    <!-- `visibleTemplates`, not `store.templates`: the shared approval-template store is app-wide
+         and holds whatever organization/principal it was last loaded for. See the
+         "organization context lifecycle" block in the script — while this page knows the rows it
+         holds belong to a context we have LEFT, the flat surfaces render empty rather than
+         passing the previous organization's templates off as this one's answer. -->
     <el-table
       v-if="canManageTemplates"
       v-loading="store.loading"
-      :data="store.templates"
+      :data="visibleTemplates"
       class="ms-w-100pct"
       max-height="560"
       stripe
@@ -294,8 +299,14 @@
 
            P2-5 (groups-daily-ops-real-browser-acceptance-20260920.md) + P1-A
            (impl-gate-A5-daily-ops-round1-20260920.md, round 2) — the page's ONE session-org
-           entry, persistent for the lifetime of the grouped view rather than reactive-to-403 like
-           the panel's and the sections view's own used to be (D3-1). Lock §2 "首期必须……提供
+           entry, present for as long as the CURRENT identity is eligible for it rather than
+           reactive-to-403 like the panel's and the sections view's own used to be (D3-1).
+           Rounds 1-2 wrote "persistent for the lifetime of the grouped view"; round 2b disproved
+           that wording (P2-D) and round 3 replaced the mechanism behind it: the entry now follows
+           the principal, so it disappears when the identity holding the session is no longer
+           eligible (signed out, or down to one organization) and comes back when a new eligible
+           identity takes over, without a reload. See the "organization context lifecycle" blocks
+           in the script below. Lock §2 "首期必须……提供
            session-org 选择入口" is satisfied by a reactive instance only up to the FIRST successful
            load; once `authenticatedTenantId` is bound that code never returns, so a multi-org admin
            who wants to switch to a DIFFERENT org had no in-module path (finding P2-5) and had to
@@ -335,6 +346,23 @@
         :error-message="pageSessionOrgError"
         @change="onPageSessionOrgChange"
       />
+      <!-- Boundary ④ — a FAILED organization-list lookup is recoverable, not a latch. Rendered
+           on the failure itself rather than only alongside the switcher: when the lookup fails
+           there IS no switcher (the list is empty, so `hasMultipleOrgs` is false) and a silent
+           disappearance would be byte-identical to "you are a single-org member", i.e. the empty
+           state could not answer "not eligible, or not looked up?". A single-org member whose
+           lookup SUCCEEDS still sees nothing at all — acceptance J's positive control is about
+           that case and is unchanged. -->
+      <button
+        v-if="pageSessionOrgsFailed"
+        type="button"
+        class="template-center__session-orgs-retry"
+        data-testid="template-center-session-orgs-retry"
+        :disabled="pageSessionOrgLoading"
+        @click="retryPageSessionOrgs"
+      >
+        {{ t.sessionOrgsRetry }}
+      </button>
       <div v-if="canManageTemplates" class="template-center__group-manager">
         <el-button
           size="small"
@@ -360,7 +388,7 @@
     </template>
 
     <el-pagination
-      v-if="viewMode === 'flat' && store.total > pageSize"
+      v-if="viewMode === 'flat' && !flatListStale && store.total > pageSize"
       class="template-center__pagination"
       background
       layout="total, prev, pager, next"
@@ -381,7 +409,12 @@ import ApprovalTemplateGroupsPanel from './ApprovalTemplateGroupsPanel.vue'
 import TemplateGroupSections from './TemplateGroupSections.vue'
 import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
 import { useSessionOrg } from '../../composables/useSessionOrg'
-import { ref, computed, onMounted, provide, watch } from 'vue'
+import {
+  getAuthPrincipalKey,
+  onAuthSessionSwitch,
+  readStoredToken,
+} from '../../composables/authPrincipal'
+import { ref, computed, nextTick, onMounted, onScopeDispose, provide, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -431,12 +464,33 @@ const pageSize = ref(10)
 // Approval form grouping lock v2.13 §6 phase 3 (A-4) — additive view-mode toggle, default 'flat'.
 const viewMode = ref<'flat' | 'grouped'>('flat')
 
+// ── Organization context lifecycle, part 1: the FLAT surfaces ───────────────────────────────
+// P3-E (impl-gate-A5-daily-ops-round2b-20260921.md) + boundary ② of the round-3 acceptance
+// ("切组织后平铺画廊也必须重读；请求期间不能把旧组织数据显示为新组织结果").
+//
+// The admin table, the requester gallery and the pagination all read the SHARED approval-template
+// store. That store is app-wide: it holds whatever list was last fetched, for whatever
+// organization and whatever principal was current at the time, and nothing in it notices that
+// this page has since switched organizations or that the account changed. Before this slice the
+// page had no in-page way to change organizations at all, so the flat list could not go stale
+// this way; the new entry created that inconsistency and has to close it.
+//
+// `flatListStale` is this page's own "the rows the store is holding belong to a context we have
+// left". It is raised at the moment the context changes and lowered only by a `loadData()` that
+// (a) is still the LATEST one issued and (b) actually succeeded — a failed re-read must not
+// re-expose the previous organization's rows as though they were this one's. While it is up the
+// flat surfaces render their empty state, which is what ② permits ("请求期间显示 loading/空态"),
+// instead of the previous organization's templates.
+const flatListStale = ref(false)
+let flatListGeneration = 0
+const visibleTemplates = computed(() => (flatListStale.value ? [] : store.templates))
+
 // G-B2-17 — the requester gallery re-filters the current page's templates instantly as
 // categoryFilter/searchText change (no need to wait for handleSearch's Enter/blur), on top of
 // whatever the backend already returned. The admin table below does NOT consume this: it keeps
 // rendering `store.templates` directly, unchanged.
 const visibleGalleryTemplates = computed(() =>
-  filterGalleryTemplates(store.templates, {
+  filterGalleryTemplates(visibleTemplates.value, {
     category: categoryFilter.value,
     search: searchText.value,
   }),
@@ -459,23 +513,42 @@ function formatDate(dateStr: string) {
 }
 
 function loadData() {
-  store.loadTemplates({
-    status: statusTab.value === 'all' ? undefined : statusTab.value,
-    search: searchText.value || undefined,
-    // Wave 2 WP4 slice 1 — only pass `category` when it's a non-empty
-    // selection so the backend filter stays inert for "全部分类".
-    category: categoryFilter.value || undefined,
-    page: currentPage.value,
-    pageSize: pageSize.value,
-  })
+  // Request algebra for the flat list (see the `flatListStale` block above): every call takes the
+  // next generation, and only the latest one is allowed to declare the rendered rows current
+  // again. A slow read issued for an organization the admin has already left therefore cannot
+  // un-blank the table on behalf of the organization it never fetched.
+  const generation = ++flatListGeneration
+  const settle = () => {
+    if (generation !== flatListGeneration) return
+    if (!store.error) flatListStale.value = false
+  }
+  void Promise.resolve(
+    store.loadTemplates({
+      status: statusTab.value === 'all' ? undefined : statusTab.value,
+      search: searchText.value || undefined,
+      // Wave 2 WP4 slice 1 — only pass `category` when it's a non-empty
+      // selection so the backend filter stays inert for "全部分类".
+      category: categoryFilter.value || undefined,
+      page: currentPage.value,
+      pageSize: pageSize.value,
+    }),
+  ).then(settle, settle)
 }
 
+// Same request algebra as `loadData`: the category list is org-scoped chrome, so an answer for an
+// organization the admin has left must not repopulate the dropdown behind a newer read.
+let categoriesGeneration = 0
+
 async function loadCategories() {
+  const generation = ++categoriesGeneration
   try {
-    categories.value = await listTemplateCategories()
+    const next = await listTemplateCategories()
+    if (generation !== categoriesGeneration) return
+    categories.value = next
   } catch (e: any) {
     // Non-fatal: dropdown just stays empty. The rest of the page continues
     // to work without the filter.
+    if (generation !== categoriesGeneration) return
     categories.value = []
   }
 }
@@ -557,7 +630,8 @@ const showPageSessionOrgSwitcher = computed(
   () => pageSessionOrgHasMultiple.value || sessionOrgRequiredSeen.value,
 )
 
-// Fetched once on FIRST entry into the grouped view (not on every toggle back into it, and not in
+// ── Organization context lifecycle, part 2: the session-org REQUEST ─────────────────────────
+// Fetched on FIRST entry into the grouped view (not on every toggle back into it, and not in
 // the flat view at all — `loadSessionOrgs()` is a no-op for a caller with no stored token, so this
 // is inert wherever nothing is logged in, same as the reactive instances' own fire-and-forget call
 // used to be). NIT-2 of the round-1 gate, registered rather than left implicit: this one call IS
@@ -565,11 +639,63 @@ const showPageSessionOrgSwitcher = computed(
 // pins for the SECTIONS view (that rule is about not looking up session orgs on a NON-J failure,
 // and it still holds — the sections view makes no session-org call at all now). The page-level
 // entry cannot be reactive: its whole purpose is to exist when nothing has failed.
-let pageSessionOrgsRequested = false
+//
+// P2-D (impl-gate-A5-daily-ops-round2b-20260921.md) — rounds 1 and 2 spelled "once" as a bare
+// `let requested = false`, which is not "once per context" but "once, ever, for the lifetime of
+// this component instance". Two different things then latched the entry OFF permanently:
+//   • any principal change from OUTSIDE this page (another tab switching organizations, the
+//     session bootstrap's 401 branch clearing the token with no navigation, an invite/DingTalk/
+//     forced-password `setToken`) — `useSessionOrg`'s own `onAuthPrincipalChange` empties `orgs`,
+//     `hasMultipleOrgs` goes false, and nothing ever re-asked;
+//   • a FAILED lookup — the flag was set BEFORE the request, so one 500 removed the entry until
+//     a full page reload.
+// The flag is now a CLAIM: which principal the one outstanding request was made for. It follows
+// the principal (boundary ①) and it is dropped on failure (boundary ④), so the entry is
+// "always reachable" for every identity that is still ELIGIBLE for it, and reachable AGAIN after
+// a transient failure, rather than for the lifetime of one mounted component.
+//
+// The claim is KEYED, not merely reset by the listener, because the two mechanisms cover
+// different populations and `authPrincipal.ts` says so in as many words ("NOT A REPLACEMENT FOR
+// KEYING"): the listener catches every transition this process performs, and the key catches a
+// swap this process was never told about (another tab writing the shared `localStorage` without
+// the explicit-session marker that `useAuth`'s storage listener gates its notification on).
+type PageSessionOrgsClaim = { principal: string | null }
+let pageSessionOrgsClaim: PageSessionOrgsClaim | null = null
+// "The current identity's organization-list lookup failed." Rendered as a retry affordance, and
+// distinct from `pageSessionOrgError` (which `useSessionOrg` also sets for a refused SWITCH).
+// A silent disappearance on failure would make "you are not eligible" and "we could not find out"
+// byte-identical on screen; this keeps them distinguishable and recoverable.
+const pageSessionOrgsFailed = ref(false)
+
 function ensurePageSessionOrgsLoaded(): void {
-  if (pageSessionOrgsRequested) return
-  pageSessionOrgsRequested = true
-  void loadPageSessionOrgs()
+  const principal = getAuthPrincipalKey()
+  if (pageSessionOrgsClaim && pageSessionOrgsClaim.principal === principal) return
+  const claim: PageSessionOrgsClaim = { principal }
+  pageSessionOrgsClaim = claim
+  pageSessionOrgsFailed.value = false
+  const settle = () => {
+    // A superseded request takes NO recovery action of any kind — it neither re-asks nor reopens
+    // the claim its successor is holding (boundary ④, second half). Defensive: `useSessionOrg`'s
+    // own generation guard already suppresses a stale answer's error write, so no input has been
+    // found that makes this line observable on its own; it is registered as defence in depth in
+    // the verification MD rather than claimed as a load-bearing guard.
+    if (pageSessionOrgsClaim !== claim) return
+    if (pageSessionOrgError.value) {
+      // Retryable, NOT latched: drop the claim so the next trigger (re-entering the grouped view,
+      // a hosted child reporting a 403, or the retry control) asks again for this same identity.
+      pageSessionOrgsClaim = null
+      pageSessionOrgsFailed.value = true
+      return
+    }
+    pageSessionOrgsFailed.value = false
+  }
+  void loadPageSessionOrgs().then(settle, settle)
+}
+
+// Boundary ④'s explicit affordance. The claim is already `null` after a failure, so this is just
+// "ask again now" rather than a second code path.
+function retryPageSessionOrgs(): void {
+  ensurePageSessionOrgsLoaded()
 }
 
 watch(viewMode, (mode) => {
@@ -585,8 +711,72 @@ function notifySessionOrgRequired(): void {
 
 provide(SessionOrgHostKey, { sessionOrg: pageSessionOrg, notifySessionOrgRequired })
 
+// ── Organization context lifecycle, part 3: the state machine ───────────────────────────────
+// principal change → CLEAR everything derived from the old context → RE-DETERMINE eligibility →
+// re-fetch for the identity that holds the session now, or stay gone if it holds none.
+//
+// `true` for exactly the window in which THIS page's switcher is driving the transition. The
+// distinction matters because the two transitions need different handling and are otherwise
+// indistinguishable at the listener: `useSessionOrg.switchSessionOrg` captures the membership
+// list before it remints the token and restores it immediately afterwards — synchronously, in the
+// same run as the notification — so the page's own switch needs no organization re-read, only
+// data re-reads. A change from anywhere else leaves the list empty and must be re-asked.
+let pageOwnedSwitchInFlight = false
+
+// Every org-scoped read this page owns, re-issued for whoever holds the session NOW.
+function reloadOrgScopedSurfaces(): void {
+  void groupSectionsRef.value?.loadAll()
+  void groupsPanelRef.value?.loadGroups()
+  loadData()
+  void loadCategories()
+  loadRecentTemplates()
+}
+
+const stopPrincipalLifecycle = onAuthSessionSwitch(() => {
+  // (1) CLEAR — synchronous, so not one frame renders the previous identity's or organization's
+  // data. `useSessionOrg` clears `orgs`/`currentOrgId`/`errorMessage` in its own listener and the
+  // two grouped children clear theirs in theirs; this covers what the PAGE owns.
+  const ownSwitch = pageOwnedSwitchInFlight
+  sessionOrgRequiredSeen.value = false
+  pageSessionOrgsFailed.value = false
+  flatListStale.value = true
+  flatListGeneration++
+  categoriesGeneration++
+  categories.value = []
+  recentTemplatesGeneration++
+  recentTemplates.value = []
+  // (2) RE-KEY the claim. The page's own switch is the same person with the same memberships, so
+  // the restored list is already the right answer for the new key; anything else must re-ask.
+  pageSessionOrgsClaim = ownSwitch ? { principal: getAuthPrincipalKey() } : null
+
+  // (3) RE-DETERMINE ELIGIBILITY and (4) RE-READ, deferred one tick. Subscribers are notified in
+  // subscription order and this host subscribes BEFORE its own children do; a re-read issued here
+  // synchronously would be invalidated by the child's own reset (which bumps the child's request
+  // generation) and would never land. One tick puts every subscriber's clear ahead of every read.
+  void nextTick(() => {
+    // The page's own switch has its own replay in `onPageSessionOrgChange`, which knows whether
+    // the switch was actually accepted; re-reading here too would double every request.
+    if (ownSwitch) return
+    // Signed out: no token, so every one of these reads would be a no-op or a 401. The surfaces
+    // stay cleared and the entry stays gone — with no error banner, which is the correct
+    // rendering of "this identity is not eligible", not a failure to be retried.
+    if (!readStoredToken()) return
+    if (viewMode.value === 'grouped') ensurePageSessionOrgsLoaded()
+    reloadOrgScopedSurfaces()
+  })
+})
+onScopeDispose(stopPrincipalLifecycle)
+
 async function onPageSessionOrgChange(orgId: string): Promise<void> {
-  const ok = await switchPageSessionOrg(orgId)
+  pageOwnedSwitchInFlight = true
+  let ok = false
+  try {
+    ok = await switchPageSessionOrg(orgId)
+  } finally {
+    pageOwnedSwitchInFlight = false
+  }
+  // A REFUSED switch fires no principal change at all, so nothing was cleared and nothing needs
+  // re-reading: the admin is still in the organization they were in.
   if (!ok) return
   // Re-read every surface that reads this org's data — same "tell the parent to re-read" rule
   // `handleGroupsChanged` already follows. This is also the replay for whatever a hosted child was
@@ -595,8 +785,14 @@ async function onPageSessionOrgChange(orgId: string): Promise<void> {
   // blockable actions (create / rename / archive / unarchive) are deliberately NOT auto-replayed
   // into a freshly-switched organization — re-running a write against a different org without the
   // admin asking again is a hazard, not a convenience; the admin re-submits.
-  void groupSectionsRef.value?.loadAll()
-  void groupsPanelRef.value?.loadGroups()
+  //
+  // P3-E / boundary ② — the FLAT surfaces are re-read here too. They read the app-wide template
+  // store, which nothing else re-reads on an organization change, so before this they kept
+  // rendering the organization the admin had just left until a filter change or a reload. Their
+  // rows are already blanked (the principal-change listener above raised `flatListStale` during
+  // the switch), so the window between the switch and the new answer shows an empty state rather
+  // than the old organization's templates.
+  reloadOrgScopedSurfaces()
 }
 
 function startApproval(templateId: string) {
@@ -681,16 +877,26 @@ async function handleUnarchive(row: ApprovalTemplateListItemDTO) {
   }
 }
 
-onMounted(() => {
-  loadData()
-  loadCategories()
-  // B1-08: best-effort — a missing session just means no shortcut row.
+// B1-08: best-effort — a missing session just means no shortcut row. The recent list is keyed by
+// USER id, so it is per-principal data like everything else in the lifecycle block: the previous
+// account's shortcuts must not survive into the next account's page, and the answer to a lookup
+// issued for the previous account must not land on top of the new one's.
+let recentTemplatesGeneration = 0
+function loadRecentTemplates(): void {
+  const generation = ++recentTemplatesGeneration
   void useAuth()
     .getCurrentUserId()
     .then((uid) => {
+      if (generation !== recentTemplatesGeneration) return
       recentTemplates.value = listRecentTemplates(uid)
     })
     .catch(() => {})
+}
+
+onMounted(() => {
+  loadData()
+  loadCategories()
+  loadRecentTemplates()
 })
 </script>
 
@@ -712,6 +918,10 @@ onMounted(() => {
   margin-top: 16px;
   display: flex;
   justify-content: flex-end;
+}
+
+.template-center__session-orgs-retry {
+  margin-bottom: 12px;
 }
 
 .template-center__category-empty {

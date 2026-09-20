@@ -1293,12 +1293,14 @@ const APPROVAL_TEMPLATE_GROUP_ERROR_COPY: Partial<Record<ApprovalTemplateGroupEr
   // WIDER than the CHECK this describes (`atg_name_nonblank CHECK (name ~ '[!-~]')`, ASCII 33-126
   // only) — a name made entirely of non-ASCII Latin letters ('Ñ', 'é') reads as covered by this
   // sentence but is still rejected (`'Ñ' ~ '[!-~]'` is false in the gate's own real-DB probe).
-  // "letter (A–Z)" names exactly the ASCII subset the CHECK accepts and promises nothing beyond
-  // it, while staying product language rather than repeating the backend's own "ASCII letter"
-  // wording verbatim.
+  // NIT-C (round-2b gate): round 2 wrote "letter (A–Z)" / "英文字母（A–Z）", which narrows the
+  // sentence in the OTHER direction — `[!-~]` accepts `a-z` just as it accepts `A-Z`, but a
+  // capitalised range is ordinarily read as a case restriction, so an admin naming a group
+  // "请假leave" could believe it would be rejected. "English letter" / "英文字母" names the same
+  // ASCII subset the CHECK accepts without implying a case, and the worked example is kept.
   GROUP_NAME_UNSUPPORTED: [
-    'Group names must contain at least one letter (A–Z), digit or symbol — for example, 请假Leave. Add one and try again.',
-    '分组名称需至少包含一个英文字母（A–Z）、数字或符号，例如「请假Leave」。请补充后重试。',
+    'Group names must contain at least one English letter, digit or symbol — for example, 请假Leave. Add one and try again.',
+    '分组名称需至少包含一个英文字母、数字或符号，例如「请假Leave」。请补充后重试。',
   ],
   GROUP_NAME_REQUIRED: ['Enter a group name.', '请填写分组名称。'],
   GROUP_NAME_TAKEN: [
