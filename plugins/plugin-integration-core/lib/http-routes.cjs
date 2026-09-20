@@ -272,6 +272,7 @@ const ROUTES = [
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
   ['POST', '/api/integration/staging/install', 'stagingInstall'],
   ['GET', '/api/integration/runs', 'runsList'],
+  ['GET', '/api/integration/runs/:runId', 'runsGet'],
   ['GET', '/api/integration/provenance', 'provenanceByRow'],
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
@@ -9915,6 +9916,41 @@ function requireStockPreparationAudit() {
         limit: asListLimit(query.limit),
         offset: asListOffset(query.offset),
       })))
+    },
+
+    // SC-04: single-run read. Same gate as runsList (requireAccess 'read' → scopedInput →
+    // resolveTenantId, which already carries assertVerifiedTenantClaim). Deliberately NOT wrapped in
+    // resolveOperatorValueScope: that helper is scoped to the stock-prep operator tier and its own
+    // comment excludes the integration:read legacy tier this route belongs to.
+    //
+    // getPipelineRun is intentionally NOT added to the pipelineRegistry requireService list
+    // (optional-method 501, like listProvenanceByRow): adding it would make every host wiring and
+    // every test mock that predates this route fail at mount time.
+    //
+    // 404 is NOT a cross-tenant existence oracle: the registry's WHERE carries tenant_id +
+    // workspace_id + id, so another tenant's run id and a non-existent id are one selectOne miss.
+    // The registry's PipelineNotFoundError.details echoes {id, tenantId, workspaceId} and sendError
+    // passes `details` through — so the miss is re-thrown here as a details-free 404 and the
+    // response body is identical for both cases.
+    async runsGet(req, res) {
+      requireAccess(req, 'read')
+      if (typeof pipelineRegistry.getPipelineRun !== 'function') {
+        throw new HttpRouteError(501, 'RUN_READ_NOT_IMPLEMENTED', 'Run read is not implemented')
+      }
+      const runId = firstString(requestParams(req).runId)
+      if (!runId) {
+        throw new HttpRouteError(400, 'RUN_ID_REQUIRED', 'runId is required')
+      }
+      let run
+      try {
+        run = await pipelineRegistry.getPipelineRun(scopedInput(req, { id: runId }))
+      } catch (error) {
+        if (error && /NotFound/.test(String(error.name))) {
+          throw new HttpRouteError(404, 'RUN_NOT_FOUND', 'pipeline run not found')
+        }
+        throw error
+      }
+      return sendOk(res, run)
     },
 
     // DF-N2-2c: read-only by-rowId provenance timeline (cross-run). Reads the
