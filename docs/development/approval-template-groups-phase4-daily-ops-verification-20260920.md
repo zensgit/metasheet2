@@ -1042,6 +1042,17 @@ git diff --name-only a26d34398d -- .github/ '**/package.json' '**/s6a-package-pr
 | 3 (a) with valid marker | ✅ | **RED** | **RED** | **RED** | ✅ | ✅ |
 | 4 AFTER the switch answered | ✅ | ✅ | ✅ | ✅ | ✅ | **RED** |
 
+> **用例 1 里有一项**故意**不钉的东西,以及它的正控。** 那条用例在「不可读窗口」里**不断言组织列表再问到底发没发出去**:
+> 今天它发不出去(`utils/api.ts:167` 的 `authHeaders()` 读同一份 explicit metadata 且无 try/catch ⇒ 那个窗口里每一次
+> `apiFetch` 都同步抛),而这正是本轮**披露但不修、交 owner** 的那条(设计 MD §9.1 末段)。把「没发出去」写成断言,
+> 就是**把一个 OPEN 缺陷钉成规格** —— 第 2b 轮的 P2-D 在**同一个 spec 文件**里抓的就是这个形状。
+> 改为断言这一页真正欠管理员的东西:**有出路** —— 切换器数 + 重试控件数 `>= 1`。它在三种世界里都成立且都有判别力:
+> 今天(查询失败 ⇒ 0+1)、将来 `api.ts` 被加固后(查询成功 ⇒ 1+0)、以及**第 5 轮 head 与 M-U 下(0+0 ⇒ 红)**。
+> **正控**:`M-aa`(把重试控件的 `v-if` 关成 `false`)⇒ 本用例**变红**,与软化前逐字同一批(`M-aa` 在完整台账里
+> 红的两条 = `(④) a FAILED …` + 本用例,软化前后**计数与名字都没变**)⇒ 这条断言是承重的,不是空转。
+> 同理,完成切换之后那一步的 `sessionOrgsCalls` 用 `>= 2` 而不是 `=== 2`;**重读次数与入口渲染仍是严格等值**
+> (`loadTemplatesSpy` 差值 `=== 2`、`switchers === 1`),因为本 spec 里 store 是 mock 的,这两项不经过 `apiFetch`。
+
 > **「4 条新用例里有几个正控」要说准(门审 NIT-3)**:**一个都没有**。C-1 族的正控仍然是**既存的** `(② M-F)`(本轮 M-F 仍 **2 failed**),C-7 族的正控是第 5 轮新增的 `(C-7 positive control)`。本轮**没有**新增正控,也不把上面 4 条里的任何一条说成正控。
 
 **先红后绿 —— 用例 1 是唯一在 head 上就红的一条,而且它红的方式正是门审在真浏览器里看到的那个异常**(把 `TemplateCenterView.vue` 逐字还原成 head 内容、只留新用例;随后 `cp` 还原 + `cmp` = `RESTORE-CMP-OK`):
@@ -1126,7 +1137,7 @@ Error: SESSION_ORG_REAUTH_REQUIRED
 |---|---|
 | `vue-tsc --noEmit -p tsconfig.app.json` | **EXIT=0,零行输出** |
 | `vue-tsc -b --force` | **EXIT=2,恰 1 个 `error TS`,唯一来源 `vite.config.ts`** —— **与 main 同形,按机械证据而不是复述**:`git diff --stat origin/main a26d34398d -- apps/web/vite.config.ts` = **空**(该文件与 `origin/main` 逐字相同),所以这条错误不可能由本分支引入。第 5 轮 §12.4 已在独立 main 工作树上跑出同一个 `TS2769` / 同一个文件。按任务书「仅允许与 main 同形环境项」登记 |
-| `vite build` | **EXIT=0**,`✓ built in 12.28s`(仅既有 chunk-size 警告) |
+| `vite build` | **EXIT=0**,`✓ built in 12.64s`(仅既有 chunk-size 警告) |
 | `packages/core-backend` `tsc --noEmit` | **EXIT=0,零行输出** |
 
 ### 13.5 required 门真正承重的那条活 `exec` 行 —— 直跑
@@ -1142,7 +1153,7 @@ r5 head 基线:Test Files  473 passed (473)      Tests  7364 passed (7364)      
 Δ = +4 = 本轮新增用例数(§13.2),零既有用例丢失、零既有用例转红。
 ```
 
-收集行(本轮 head,**提交树上的最后一次运行**):`Duration 53.20s (transform 27.14s, setup 2.95s, collect 132.30s, tests 188.68s, environment 86.47s, prepare 17.62s)`。
+收集行(本轮 head,**提交树上的最后一次运行**):`Duration 53.72s (transform 25.46s, setup 2.79s, collect 133.58s, tests 189.15s, environment 86.42s, prepare 17.31s)`。
 
 > **仍不重走 `bash run-required-web-tests.sh` 整脚本**,理由与第 5 轮 §12.5 逐字相同(脚本 `:606` 的预检 spec 在本机 Node 25 下红、`:473` 的 `set -euo pipefail` 就地中止、`:1211` 的 `exec` 到不了;该 spec 在 `origin/main` 同 SHA 上 CI 为绿,本分支对它零改动)。本轮按任务书直跑活 `exec` 行,上表即执行层证据。
 
@@ -1172,3 +1183,18 @@ Test Files  1 failed (1)        Tests  3 failed | 8 passed (11)
 7. **`error` 槽位的跨种类仲裁仍未关闭**(设计 MD §8.2 末段);**M-H 仍存活**(C-5 / P3-1,保持披露);**C-6 / §7.3 的 owner 项原样保留**,本轮无真库步骤、不重新取证、不改措辞。
 8. **门审 NIT-2(`M-P`/`M-R` 与 `M-Q`/`M-S` 红在同一条用例)本轮不拆**,登记 OPEN(设计 MD §9.7)。
 9. **合并 / undraft / 开 PR / 新分支合并 / DDL 应用 —— 全部未做**,仍需 owner 逐条授权。本件不含任何「已裁 / 已 ratify」的记述。
+
+### 13.8 mutation 台账之后的那一次编辑,以及为什么台账仍然绑定(不藏)
+
+§13.3 的 72 条探针跑完之后,本轮**又改过一次**被测文件,必须说清改了什么、以及为什么不需要重跑台账:
+
+1. **注释**:`TemplateCenterView.vue` 里 `tryReadAuthPrincipalKey` 在监听器那一处的说明,原文写「两次读之间**没有**任何能碰
+   storage 的东西」。这句话越界了 —— 语句顺序只能约束**本标签页**做了什么,而**另一个标签页的写**正是推翻第 5 轮
+   「到得了这个监听器的路径都已完成转换」的那个主体。改成只主张能主张的:「本监听器**自己的**语句里没有碰 storage 的」,
+   并明说**正因为跨标签页的写在原则上落得进来,这个调用才是被守住而不是被论证掉的**。
+2. **两条断言软化**(上文方框):`sessionOrgsCalls` 的两处严格等值换成「有出路 `>= 1`」与 `>= 2`。
+
+两项都**不改一行行为**。台账因此仍然绑定:`M-U` 的红来自用例 1 的**第一条**断言(warn 有没有记到),与被软化的两条无关
+——**已逐条复跑核对**(M-U:`1 failed`,只红用例 1;M-aa:`2 failed`,与软化前逐字同一批)。
+`…/scratchpad/a5r6-mutbak/` 在这次编辑之前就已按清理规程删掉,所以**没有**再跑整套台账(也因此不会踩到本轮登记过的
+「`restore()` 会用陈旧 `.orig` 静默回滚」那个机具坑);重跑的是 §13.4 / §13.5 / §13.6 的全部门与全量实跑,数字见上。

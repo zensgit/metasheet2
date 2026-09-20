@@ -902,9 +902,15 @@ const stopPrincipalLifecycle = onAuthSessionSwitch(() => {
   // `tryReadAuthPrincipalKey` rather than the raw read, for the same reason as
   // `ensurePageSessionOrgsLoaded` — with one honest difference: NO INPUT HAS BEEN FOUND THAT MAKES
   // THIS ONE THROW. Reaching it needs `ownSwitch`, and `ownSwitch` needs `currentExplicitSessionOrg()`
-  // to have just read a marker successfully, with nothing between the two reads that can touch
-  // storage. It is registered as defence in depth here and in the verification MD, and is NOT
-  // claimed to be covered by a test.
+  // to have just read a marker successfully; no statement OF THIS LISTENER runs between the two
+  // reads that can touch storage.
+  //
+  // That is the whole of the argument, and it is deliberately not stretched further: statement
+  // ordering inside this listener bounds what THIS tab does, not what another one does, and a
+  // cross-tab write is precisely the agent that falsified round 5's "every path that reaches this
+  // listener has already completed a transition" two functions above. So the call is GUARDED rather
+  // than argued away. It is registered as defence in depth here and in the verification MD, and is
+  // NOT claimed to be covered by a test.
   pageSessionOrgsClaim = ownSwitch ? { principal: tryReadAuthPrincipalKey() } : null
 
   // (3) RE-DETERMINE ELIGIBILITY and (4) RE-READ, deferred one tick. Subscribers are notified in
