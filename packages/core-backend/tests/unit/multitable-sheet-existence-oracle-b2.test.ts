@@ -371,21 +371,61 @@ describe('#5839 B2 — univer-meta field/view/import/summary routes: authority b
     expect(JSON.stringify(res.body)).not.toContain('Sheet not found: sht_oracle')
   })
 
-  // Extra: import-xlsx carries a 401 check BETWEEN the deleted probe's old position and the 403
-  // (`if (!access.userId) return res.status(401)…`) — inert for a session identity, which always has a
-  // userId. Proven here so the route's ordering (auth → liveness) is pinned end to end for an authenticated
-  // caller, not just documented as "inert" in prose.
-  it('import-xlsx — an unauthorized caller with a valid upload body gets the same 403 for all three states', async () => {
+  // Extra: import-xlsx, view-aggregate and records-summary each carry a 401 check
+  // (`if (!access.userId) return res.status(401)…`) that is INERT for a SESSION identity — every
+  // `OracleIdentity` (including OUTSIDER) carries a non-empty `id`, so `!access.userId` is never true for
+  // one. A previous version of this case set `currentUser = OUTSIDER` and claimed to pin the 401 branch
+  // while never actually reaching it (it was a byte-for-byte duplicate of assertion (a) for the same
+  // route). An ANONYMOUS caller — no `req.user` at all — is the only identity that takes the branch, and
+  // is the one this proves: the three sheet states must still be indistinguishable (all 401, same body),
+  // so an unauthenticated caller cannot use this family as an existence oracle either.
+  for (const routeName of [
+    'POST /sheets/:sheetId/import-xlsx',
+    'GET /sheets/:sheetId/view-aggregate',
+    'GET /records-summary',
+  ] as const) {
+    it(`${routeName} — an ANONYMOUS caller (no session) gets the same 401 for live/soft-deleted/absent`, async () => {
+      currentUser = undefined
+      const route = ROUTES.find((r) => r.name === routeName)!
+      const answers: Array<[number, unknown]> = []
+      for (const sheetId of SHEET_IDS) {
+        const { res } = await call(route, sheetId)
+        answers.push([res.status, res.body])
+      }
+      expect(answers[1]).toEqual(answers[0])
+      expect(answers[2]).toEqual(answers[0])
+      expect(answers[0]).toEqual([401, { error: 'Authentication required' }])
+    })
+  }
+
+  // Extra: `GET /sheets/:sheetId/view-aggregate` resolves a SECOND id off its own request — `viewId` — via
+  // a `meta_views` probe that is NOT covered by `EXISTENCE_PROBE`/the GAP ledger (those only match
+  // `meta_sheets` reads). It moved (critic ⑤) from BEFORE the 403 to AFTER it, but nothing in this spec
+  // ever sent a `viewId` before now, so that move had zero coverage: reverting it back to its old,
+  // pre-403 position would leave every case above green. These two pin it the same way the sheet oracle
+  // above is pinned: (d) a refused caller cannot use a real viewId to learn about a sheet it may not read;
+  // (e) an authorised caller gets a values-free 404 for an unknown view, not the old id-echoing message.
+  it('(d) view-aggregate: a refused caller gets the SAME 403 for live/soft-deleted/absent even with a viewId attached', async () => {
     currentUser = OUTSIDER
-    const route = ROUTES.find((r) => r.name === 'POST /sheets/:sheetId/import-xlsx')!
+    const route = ROUTES.find((r) => r.name === 'GET /sheets/:sheetId/view-aggregate')!
     const answers: Array<[number, unknown]> = []
     for (const sheetId of SHEET_IDS) {
-      const { res } = await call(route, sheetId)
+      const res = await request(pinned.url()).get(`/api/multitable/sheets/${sheetId}/view-aggregate?viewId=view_oracle_probe`)
       answers.push([res.status, res.body])
     }
+    // Strictly equal across the three sheet states — a viewId cannot be used to tell them apart.
     expect(answers[1]).toEqual(answers[0])
     expect(answers[2]).toEqual(answers[0])
     expect(answers[0]).toEqual([FORBIDDEN_STATUS, FORBIDDEN])
+    expect(JSON.stringify(answers)).not.toContain('sht_oracle')
+  })
+
+  it('view-aggregate — MANAGER/LIVE with an unknown viewId: values-free 404, not the old id-echoing message', async () => {
+    currentUser = MANAGER
+    const res = await request(pinned.url()).get(`/api/multitable/sheets/${LIVE}/view-aggregate?viewId=view_oracle_unknown`)
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'View not found' } })
+    expect(JSON.stringify(res.body)).not.toContain('view_oracle_unknown')
   })
 
   it('the fixture cannot be satisfied by asking about the wrong sheet id (unknown id ⇒ live)', async () => {
