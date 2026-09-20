@@ -1,0 +1,121 @@
+name: Ops SQL Pack Verify
+
+# Independent CI lane for the read-only SQL packs' own `verify/` self-tests
+# (scripts/ops/readonly-inventory-20260916/verify/ and
+# scripts/ops/live-id-fk-validate-20260920/verify/). Neither pack's verify
+# suite is wired into plugin-tests.yml's matrix real-DB step — both are
+# standalone `node --test` files with a fail-not-skip DATABASE_URL /
+# METASHEET_REAL_DB_TEST_STEP=1 sentinel of their own (see
+# readonly-inventory-pack.test.mjs:173-192 and the equivalent sentinel in
+# live-id-fk-validate-pack.test.mjs:264-273), so they get their own two-lane
+# split instead:
+#
+#   hermetic       — checkout + setup-node only (no pnpm install, no service
+#                    container), same shape as the `contract` job in
+#                    data-source-exposure-inventory.yml:37-48. Runs each
+#                    pack's LAYER 1 static-contract checks; LAYER 2 is
+#                    skipped LOUDLY because DATABASE_URL/
+#                    METASHEET_REAL_DB_TEST_STEP are both absent here on
+#                    purpose — this job must NEVER set
+#                    METASHEET_REAL_DB_TEST_STEP=1, or the suites' own
+#                    fail-not-skip sentinel (see above) turns a missing
+#                    DATABASE_URL into a hard failure instead of a loud skip.
+#   execution-proof — a standalone `postgres:16` service job modelled
+#                    line-for-line on
+#                    approval-s1-evidence-replay-gate-realdb.yml:47-83 (no
+#                    app dependencies — these suites use only Node built-ins
+#                    plus the runner's own `psql`), with a literal
+#                    DATABASE_URL and METASHEET_REAL_DB_TEST_STEP: '1' so a
+#                    missing DB fails rather than silently skip-greens. Both
+#                    packs' `run-verify.mjs` create and drop their own
+#                    throwaway `*_fixture_*` schemas/roles against the
+#                    service's default `postgres` superuser (createFixture /
+#                    checkPermissionDeniedIsIncomplete at
+#                    readonly-inventory-20260916/verify/run-verify.mjs:132,
+#                    139; equivalent in the live-id-fk-validate pack), which
+#                    the postgres:16 official image satisfies out of the box.
+#
+# Not wired into plugin-tests.yml's matrix: that lane's real-DB step is
+# pinned by the ci-realdb-step-contract (a single vitest --config
+# vitest.integration.config.ts invocation of one named suite file — see
+# scripts/ops/ci-realdb-step-contract.mjs), which these `node --test` files
+# cannot join without breaking that contract's (c)/(d) invariants. This
+# workflow is deliberately a sibling lane instead, matching the sibling-lane
+# precedent of multitable-o2-observation-kit(-realdb).yml and
+# approval-s1-evidence-replay-gate(-realdb).yml.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ops-sql-pack-verify.yml'
+      - 'scripts/ops/readonly-inventory-20260916/**'
+      - 'scripts/ops/live-id-fk-validate-20260920/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ops-sql-pack-verify.yml'
+      - 'scripts/ops/readonly-inventory-20260916/**'
+      - 'scripts/ops/live-id-fk-validate-20260920/**'
+
+permissions:
+  contents: read
+
+jobs:
+  hermetic:
+    name: ${{ matrix.pack }} — hermetic layer (no DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        pack:
+          - readonly-inventory-20260916
+          - live-id-fk-validate-20260920
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Run hermetic verify tests (LAYER 1 only; LAYER 2 skips loudly)
+        run: node --test scripts/ops/${{ matrix.pack }}/verify/*.test.mjs
+
+  execution-proof:
+    name: ${{ matrix.pack }} — execution-proof layer (synthetic postgres:16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        pack:
+          - readonly-inventory-20260916
+          - live-id-fk-validate-20260920
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_sqlpack_verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_sqlpack_verify"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_sqlpack_verify
+      # Arms each pack's own fail-not-skip sentinel: in THIS lane a missing
+      # DATABASE_URL (or missing psql) must FAIL, never silently skip the
+      # synthetic-PostgreSQL execution proof.
+      METASHEET_REAL_DB_TEST_STEP: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Run ${{ matrix.pack }} verify tests WITH the execution layer armed
+        run: node --test scripts/ops/${{ matrix.pack }}/verify/*.test.mjs
