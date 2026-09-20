@@ -312,6 +312,11 @@ describe('describeApprovalTemplateGroupError (P2-2 product-copy mapping)', () =>
     expect(text).not.toContain('勘误')
     // Must not be the raw server string either — the whole point is a DIFFERENT, friendlier text.
     expect(text).not.toContain('This value must include at least one ASCII')
+    // P3-2 (impl-gate-A5-daily-ops-round1-20260920.md) — and it must actually SAY the rule, with a
+    // passing example: round 1's replacement text named no rule at all, so the copy was the same
+    // sentence for a name that can never work and for one that only needs a character added.
+    expect(text).toMatch(/at least one/i)
+    expect(text).toContain('请假Leave')
   })
 
   it.each([
