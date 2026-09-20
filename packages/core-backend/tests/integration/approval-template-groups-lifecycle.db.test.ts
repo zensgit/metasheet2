@@ -763,6 +763,13 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     { label: 'U+2060 WORD JOINER', value: '\u2060' },
     { label: 'U+FEFF BYTE ORDER MARK', value: '\uFEFF' },
   ]
+  // NIT (gate round 4, impl-gate-A-slice1-name-rule-candidate-round4-20260920.md, NIT-2): this
+  // fixture has a positive wire assertion per member but no COMPLETENESS assertion against the
+  // live constraint, so a member added only to the migration would not redden any case here. If
+  // `atg_name_nonblank`'s trim set is ever extended, the same PR should also parse
+  // `pg_get_constraintdef('atg_name_nonblank')` and assert its symmetric difference against
+  // DB_TRIM_SET_MEMBERS is empty — the two `org_id` CHECKs below already do this kind of
+  // live-catalog assertion; this fixture does not, because the migration is frozen this round.
 
   /** Random CJK — pglz cannot compress it, so the btree index tuple really does grow. */
   function incompressibleName(chars: number): string {

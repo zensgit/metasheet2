@@ -42,8 +42,8 @@
  *   - `∉ Default_Ignorable_Code_Point` — REDUNDANT TODAY, and this file previously claimed
  *     otherwise. Measured: `L/N/P/S ∧ Default_Ignorable` is exactly the four Hangul fillers
  *     {U+115F, U+1160, U+3164, U+FFA0}, and all four are enumerated in `BLANK_GLYPH_CODE_POINTS`,
- *     so deleting this conjunct leaves every test in the repository green (mutation MUT-R4-B:
- *     31/31 real-DB, 11/11 unit). It is KEPT because it is the only conjunct that covers a
+ *     so deleting this conjunct leaves both group suites green (mutation MUT-R4-B:
+ *     31/31 real-DB, 12/12 unit). It is KEPT because it is the only conjunct that covers a
  *     default-ignorable code point a FUTURE Unicode version adds, with no code change — the
  *     enumeration cannot do that. Stated as redundancy rather than as strength: a gate that finds
  *     MUT-R4-B green must be able to read here that this is the designed outcome, not a hole.
