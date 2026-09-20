@@ -970,6 +970,14 @@ export interface AnalyzeOptions {
    * this is set or `requireOrder` is on.
    */
   refusalReturn?: string
+  /**
+   * Same-file helpers whose liveness refusal stops an IN-REQUEST EGRESS LOOP instead of answering the
+   * request (#5838: the inline AI bulk-preview loop asks before every provider call). Their refusal must
+   * be inert and must end in `return false` — fail-closed for the caller, which is what stops the
+   * sending. NAMED, never inferred: every helper not listed here must still answer 403/404/410, and the
+   * caller side (that a `false` really leaves the loop) is proven where the helper is named.
+   */
+  egressStops?: Set<string>
 }
 
 export interface HandlerAnalysis {
@@ -1174,10 +1182,28 @@ function returnsExactly(stmt: ts.Statement, expected: string, sf: ts.SourceFile)
 const AUTHORITY_REFUSAL = /\b40[13]\b|\bsendForbidden\(|\bsendUnauthorized\(|'FORBIDDEN'|'UNAUTHORIZED'|'UNAUTHENTICATED'/
 const NOT_LIVE_ANSWER = /\bsendSheetNotLive\(|\bstatus\(\s*(?:403|404|410)\s*\)|\bstatus:\s*(?:403|404|410)\b|^\s*throw\b|[;{]\s*throw\b/
 
+/** The refusal branch ends by telling its caller `false` (its last statement, so a log line may precede). */
+function endsWithReturnFalse(branch: ts.Statement, sf: ts.SourceFile): boolean {
+  const last = ts.isBlock(branch) ? branch.statements[branch.statements.length - 1] : branch
+  return !!last && ts.isReturnStatement(last) && !!last.expression && collapsed(codeOf(last.expression, sf)) === 'false'
+}
+
 /** Why the branch of a liveness refusal does not really refuse (null when it does). */
-function refusalBranchProblem(refusal: ts.IfStatement, options: AnalyzeOptions, sf: ts.SourceFile): string | null {
+function refusalBranchProblem(refusal: ts.IfStatement, options: AnalyzeOptions, sf: ts.SourceFile, unitLabel = ''): string | null {
   const branch = refusal.thenStatement
   const text = collapsed(codeOf(branch, sf))
+  if (options.egressStops?.has(unitLabel)) {
+    // An EGRESS-STOP helper, named by the caller's guard (#5838): it is not asked whether to ANSWER the
+    // request — it is asked, between two outbound provider calls, whether the request may keep sending.
+    // Its refusal therefore reports `false` to its caller instead of a status; it must still be inert (a
+    // refusal only answers) and must have no way to report anything else. That the CALLER then leaves
+    // the egress loop is proven where the helper is named, not here.
+    if (!inert(branch, true)) return `its liveness refusal branch awaits or calls a data source (\`${text.slice(0, 80)}\`) — a refusal only answers`
+    if (!endsWithReturnFalse(branch, sf)) {
+      return `its liveness refusal must end in \`return false\` — an egress-stop helper reports the refusal to its caller (\`${text.slice(0, 80)}\`)`
+    }
+    return null
+  }
   if (options.refusalReturn !== undefined) {
     if (returnsExactly(branch, options.refusalReturn, sf)) return null
     return `its liveness refusal does \`${text.slice(0, 80)}\` — it must be exactly \`return ${options.refusalReturn}\``
@@ -1317,7 +1343,7 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
           if (windowRule) {
             // A REFUSAL MUST REFUSE, and nothing but an authority refusal or an inert declaration may run
             // between the binding and it (a write there lands on a deleted sheet).
-            const branch = refusalBranchProblem(refusal.stmt, options, sf)
+            const branch = refusalBranchProblem(refusal.stmt, options, sf, unit.label)
             if (branch) violations.add(`${where}: ${branch}`)
             let holder: ts.Node = site.call.parent
             while (ts.isAwaitExpression(holder) || ts.isParenthesizedExpression(holder) || ts.isAsExpression(holder) || ts.isNonNullExpression(holder)) {

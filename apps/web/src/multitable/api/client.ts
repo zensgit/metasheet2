@@ -1667,7 +1667,8 @@ export interface AiBulkPreviewRow {
  * is heterogeneous: `skipped_no_perm` (not writable — needs a perm change),
  * `rate_limited_before_call` / `blocked_before_call` (transient — a re-run may
  * reach it), `generation_failed_before_usage` (provider failed, no usage),
- * `unsafe_input` (secret-shaped content, not sent).
+ * `unsafe_input` (secret-shaped content, not sent), `sheet_not_live` (#5838: the
+ * table was deleted WHILE the batch ran — the remainder was never sent).
  */
 export interface AiBulkPreviewSkipped {
   recordId: string

@@ -26,7 +26,7 @@ describe('meta-ai-bulk-labels — distinct state copy', () => {
   })
 
   it('every SKIPPED reason (UNCHARGED) maps to a DISTINCT label, never collapsed', () => {
-    const reasons = ['skipped_no_perm', 'rate_limited_before_call', 'blocked_before_call', 'generation_failed_before_usage', 'unsafe_input']
+    const reasons = ['skipped_no_perm', 'rate_limited_before_call', 'blocked_before_call', 'generation_failed_before_usage', 'unsafe_input', 'sheet_not_live']
     const en = reasons.map((r) => aiBulkSkippedReason(r, false))
     // All distinct (no two skipped reasons share copy).
     expect(new Set(en).size).toBe(reasons.length)
@@ -35,6 +35,9 @@ describe('meta-ai-bulk-labels — distinct state copy', () => {
     expect(aiBulkSkippedReason('generation_failed_before_usage', false)).toContain('not charged')
     // zh coverage + raw fallback for an unknown reason.
     expect(aiBulkSkippedReason('skipped_no_perm', true)).toBe('无写入权限')
+    // #5838: a table deleted mid-batch stops the send; the rows not reached are UNCHARGED.
+    expect(aiBulkSkippedReason('sheet_not_live', false)).toContain('no longer available')
+    expect(aiBulkSkippedReason('sheet_not_live', true)).toContain('已不可用')
     expect(aiBulkSkippedReason('weird_new_reason', false)).toBe('weird_new_reason')
   })
 
