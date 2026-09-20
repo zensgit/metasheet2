@@ -34,7 +34,7 @@ function undefinedTableZh(tableName: string): Error {
   return Object.assign(new Error(`关系 "${tableName}" 不存在`), { code: '42P01' })
 }
 
-async function createApp(queryHandler: QueryHandler) {
+async function createApp(queryHandler: QueryHandler, opts?: { livenessError?: () => Error }) {
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -50,6 +50,10 @@ async function createApp(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     // Sheet liveness read (soft delete) — every sheet-addressed route asks first.
     if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
+      // #5839: since the pre-403 `loadSheetRow` probe was removed from these handlers, this liveness
+      // read is the route's FIRST (and, for a refused caller, only) `meta_sheets` touch — so it is the
+      // honest place to simulate a pre-migration database.
+      if (opts?.livenessError) throw opts.livenessError()
       return { rows: [{ deleted_at: null }], rowCount: 1 }
     }
     return queryHandler(sql, params)
@@ -270,12 +274,16 @@ describe('permission-subject hydration + PG locale guards (route level, mock poo
   // getDbNotReadyMessage 也必须先看 SQLSTATE:中文 locale 下缺表散文是「关系 x 不存在」,
   // 英文整句匹配漏判会把 pre-migration 的 DB 变成 500(而不是可自愈的 503 DB_NOT_READY)。
   test('中文 42P01 缺 meta 表 → 503 DB_NOT_READY(不是 500)', async () => {
-    const { app } = await createApp(async (sql) => {
-      if (sql.includes('FROM meta_sheets WHERE id = $1')) throw undefinedTableZh('meta_sheets')
-      const scaffold = sheetScaffold(sql)
-      if (scaffold) return scaffold
-      throw new Error(`Unhandled SQL in test: ${sql}`)
-    })
+    const { app } = await createApp(
+      async (sql) => {
+        if (sql.includes('FROM meta_sheets WHERE id = $1')) throw undefinedTableZh('meta_sheets')
+        const scaffold = sheetScaffold(sql)
+        if (scaffold) return scaffold
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+      // 注入点随路由前移:#5839 拿掉了 403 之前的 loadSheetRow 探测,缺表现在最先撞在存活性读上。
+      { livenessError: () => undefinedTableZh('meta_sheets') },
+    )
 
     pinned.setApp(app)
     const response = await request(pinned.url())
