@@ -4373,8 +4373,8 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 | 工作树 | `…/scratchpad/wt-c1a-owner-a`(`--detach cc897234eb`,一次性;`node_modules` **12 处软链**自 canonical) |
 | 库 | `metasheet2_c1_a_final_20260920`(`createdb -U postgres -O ms2testbed`,owner **非超级**),全量迁移 **EXIT=0**,**415 张 BASE TABLE**;`current_database()` 跑前实测 |
 | 改动文件 | `ApprovalProductService.ts`、`approval-cancel-round-creation.db.test.ts`、design MD、verification MD(本节)。**锁文正文未改** |
-| `ApprovalProductService.ts` sha256(实现后) | `2dbadf477496e9f56830a0e1c8d1176756a5704eaa88336fa3de32321230645e` |
-| `approval-cancel-round-creation.db.test.ts` sha256(实现后) | `f02a19d14fc8b072f45a14394892ddb6567c161d92c4eeb1e1967f1f502411f8` |
+| `ApprovalProductService.ts` sha256(实现后) | `a680a476807f951f64cc2fe955d264ebf401b572945a356e7a841a0d97998da0`(第一版 `2dbadf47…` 已被凭据修法取代,见 O1 的自我推翻) |
+| `approval-cancel-round-creation.db.test.ts` sha256(实现后) | `fd77db21ceebedae60a6d0493141494ad96a85b237b9e60b42290db21449b0a6` |
 | 纪律 | 全程 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`;**未用** `git checkout -- <path>` / `reset --hard` / `stash` |
 
 ## O1. 「无法可靠还原」被写成谓词(不是散文)
@@ -4383,14 +4383,28 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 哨兵不是人,不可能是谁的代理,把它判成「无法还原」会让每一张自动审批过的历史单据变成 409
 (`P10(a)` / `N3` / `N6(a)` 钉住它没有)。
 
-| 行的形状 | 结果 | 钉子 |
+**第一问先问 actor,不问行**:该 actor 在**本实例**上有没有过被委托席位?没有 ⇒ 任何还原都不适用,
+席位 = actor 本人,这一行说什么都无所谓。这是爆炸半径的闸门(`P19(a)`)。有,才往下走:
+
+| 行的形状(actor 在本实例上**有**被委托席位) | 结果 | 钉子 |
 |---|---|---|
-| 有 `nodeKey`;该 `(instance, node, actor)` 的 `delegatedFrom` 恰好 **1** 个 | 席位 = 该原主体 | `P4(a)`–`P9(a)`、`P16(a)` |
-| 有 `nodeKey`;**0** 个 | 席位 = actor 本人 | `P11(a)`、`P18(a)` |
-| 有 `nodeKey`;**>1** 个 | **阻断** `seat_unresolvable` | **NOT CONSTRUCTED**(见 O5) |
-| **无** `nodeKey`;本实例上该 actor 有 **>1** 个不同 `delegatedFrom` | **阻断** `seat_unresolvable` | `N9(a)`(= owner 点名的多人委托同一人反例) |
+| **无** `nodeKey`;该 actor 的不同 `delegatedFrom` **>1** 个 | **阻断** `seat_unresolvable` | `N9(a)`(= owner 点名的多人委托同一人反例) |
 | **无** `nodeKey`;**恰好 1** 个 | **阻断** `delegate_not_seat` | `P12(a)`、`N7(a)`、`N8(a)`、`P13(a)` |
-| **无** `nodeKey`;**0** 个 | 席位 = actor 本人 | `P19(a)`(**爆炸半径闸门**) |
+| 有 `nodeKey`;它命中该 actor 自己的 assignment 行**恰好 1** 条,且该行 `delegatedFrom` 非空 | 席位 = 该原主体 | `P4(a)`–`P9(a)`、`P16(a)`、`P20(a)` |
+| 有 `nodeKey`;命中**恰好 1** 条,且该行 `delegatedFrom` 为空(= 自己的席位) | 席位 = actor 本人 | `P11(a)`、`P18(a)` |
+| 有 `nodeKey`;命中 **0** 条(名字没凭据 / 伪造) | **阻断** `seat_unresolvable` | **`N11(a)`**(审阅发现;**修复前实测可绕过**) |
+| 有 `nodeKey`;命中 **>1** 条(节点再入改写了委托) | **阻断** `seat_unresolvable` | **NOT CONSTRUCTED**(见 O5) |
+| (actor **没有**被委托席位,任何 `nodeKey`) | 席位 = actor 本人 | `P19(a)`(**爆炸半径闸门**) |
+
+**⚠ 本轮的一次自我推翻,记在这里而不是抹掉。** 上面那张表的**第一版**把「行有 `nodeKey`」当成
+「这行属于某个节点席位」的充分条件。这是错的,而且错得可以把**整组阻断**用一个垃圾字符串走过去:
+legacy `POST /:id/approve` 把请求体的 `metadata` **逐字**写进 `approval_records.metadata`,
+所以 `nodeKey` 是**调用方给的**,不是系统写的。**实测(修复前,真库,走 shipped 路由)**:
+发 `{"metadata":{"nodeKey":"totally_made_up_node_that_never_existed"}}` ⇒ **不抛、席位 `[D]`** ——
+裁决明文禁止的那个回退,代价是多打 8 个字。修法是**换判据而不是加过滤**:先问 actor 有没有被委托席位,
+有才要求这个名字**在 assignment 表里有凭据**。`N11(a)` 是那个见证,`P20(a)`(传真实 `nodeKey` ⇒ 席位 `[A]`)
+把红的原因归因到**凭据**而不是「legacy + metadata 一律拒」。
+(这条洞是独立审阅提出、我构造复现后才改的;第一版已 push 的 head `81c2a8f3b6` 带着它。)
 
 出口:**复用既有 `CANCEL_ROUND_SEAT_INELIGIBLE`**,`details = { ineligibleCount, reasons }` 形状不变,
 只扩了 `reasons` 的词汇(+`seat_unresolvable`、+`delegate_not_seat`)。**零新增错误码**,锁 §14.3 无需改。
@@ -4404,13 +4418,18 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 
 | 编号 | 内容 | 实测 |
 |---|---|---|
-| 七件真库套件 | `approval-cancel-round-*.db.test.ts`,`--config vitest.integration.config.ts`,`EXPECT_DB=1` | **7 files / 81 passed / 0 failed**(裁决前 75;+6 = 本轮新腿) |
-| `-creation` 单件 | 同上 | **39 passed**(裁决前 33) |
+| 七件真库套件 | `approval-cancel-round-*.db.test.ts`,`--config vitest.integration.config.ts`,`EXPECT_DB=1` | **7 files / 84 passed / 0 failed**(裁决前 75;+9 = 本轮新腿) |
+| `-creation` 单件 | 同上 | **42 passed**(裁决前 33) |
 | 委托邻居 7 件 | `approval-delegation-api` / `-seam` / `-selfservice`、`approval-departure-transfer`、`approval-node-entry-epoch`、`approval-bulk-reassign`、`approval-prior-node-approver` —— **本轮逐个点名,不写「六件」** | **7 files / 47 passed / 0 failed** |
 | `tsc` | `npx tsc --noEmit -p tsconfig.json` | **EXIT=0,零输出**(注:该 tsconfig `exclude` 了 `**/*.test.ts`,所以它**不**覆盖测试文件 —— 写成读数,不当成「测试也类型检查过了」) |
-| `CI=true` core-backend 全量 | 默认 `vitest.config.ts` | **1124 files / 1113 passed / 10 failed / 1 skipped**;**16722 tests / 16671 passed / 25 failed / 5 skipped** |
+| `CI=true` core-backend 全量(**第一版**,凭据修法之前) | 默认 `vitest.config.ts` | **1124 files / 1113 passed / 10 failed / 1 skipped**;16722 tests / 16671 passed / 25 failed / 5 skipped |
+| `CI=true` core-backend 全量(**本 head**,凭据修法之后) | 同上 | **1124 files / 1116 passed / 7 failed / 1 skipped**;**16722 tests / 16675 passed / 21 failed / 5 skipped** |
 
-**全量那 10 件失败,逐件除名,判据三条而不是两条:**
+**两次全量的失败集合本身会漂移,这件事就是「共享库干扰而非回归」的证据**:第一次的 10 件里,
+`multitable-l4-canonical-fence-realdb` / `-w11-bridge-formula-freshness-realdb` / `-w13-fieldperm-writegate-bridge-realdb`
+三件第二次**根本没红**,而它们第一次也**单跑全绿**。本 head 的 7 件 = 第一次那 10 件减去这三件。
+
+**逐件除名,判据三条而不是两条:**
 
 | 文件 | 判据一:token census(`createCancelRoundInstance\|cancel[._-]?round\|CANCEL_ROUND\|approval_rounds\|delegatedFrom\|approval_delegations\|SEAT_INELIGIBLE\|delegate_not_seat\|seat_unresolvable`) | 判据二:单跑 | 判据三:**在 BASE 源码上重跑**(`cp` 还原到 `cc897234eb` 原状,`git diff --stat` 空) |
 |---|---|---|---|
@@ -4418,9 +4437,9 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 | `approval-node-timeout-effects` | **0** | 仍红 | **BASE 同样红,`11 failed / 2 passed (13)` 逐字相同** |
 | `approval-wp1-parallel-gateway` | **0** | 仍红 | **BASE 同样红** |
 | `multitable-oapi2a-comments-write-realdb` | **0** | 仍红 | **BASE 同样红,`3 failed / 1 passed (4)` 逐字相同** |
-| `multitable-l4-canonical-fence-realdb` | **0** | **单跑全绿** | — (共享库干扰) |
-| `multitable-w11-bridge-formula-freshness-realdb` | **0** | **单跑全绿** | — (同上) |
-| `multitable-w13-fieldperm-writegate-bridge-realdb` | **0** | **单跑全绿** | — (同上) |
+| `multitable-l4-canonical-fence-realdb` | **0** | **单跑全绿** | 第二次全量**未红** ⇒ 共享库干扰 |
+| `multitable-w11-bridge-formula-freshness-realdb` | **0** | **单跑全绿** | 同上 |
+| `multitable-w13-fieldperm-writegate-bridge-realdb` | **0** | **单跑全绿** | 同上 |
 | `sealed-export-s6a-runtime-authority.db` | **0** | `permission denied to create role`(**42501**,日志里 3 次) | 本任务硬约束所致(库 owner `ms2testbed` 非超级) |
 | `sealed-export-s6a-grant-repair.db` | **0** | 同上 | 同上 |
 | `sealed-export-s6a-authority-row-lock.db` | **0** | 同上 | 同上 |
@@ -4440,6 +4459,10 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 **读数:10 failed / 29 passed (39)** —— 红的正是 `P12(a) N7(a) N8(a) P13(a) P16(a) N9(a) N10(a) P17(a) P18(a) P19(a)`,
 **29 条未被触碰的老腿一条不红**(证明反转是定点的,不是把文件弄坏了)。跑完即 `rm`。
 
+**第二轮反转(凭据修法的三条新腿,单独一次)**:`N11(a)` 的 `['seat_unresolvable']` → `['delegate_not_seat']`、
+`P20(a)` 的 `[A]` → `[D]`、`P21(a)` 的 `[A]` → `[D]`。读数 **3 failed / 39 passed (42)**,
+红的正是这三条,其余 39 条不动。
+
 反转的具体内容(每条一处,互不重叠;行号是副本里的):
 `P12/N7/N8/P13` 把 `reasons: ['delegate_not_seat']` → `['inactive']`;
 `N9` 把 `['seat_unresolvable']` → `['delegate_not_seat']`;`N10` 把 `['inactive']` → `['seat_unresolvable']`;
@@ -4456,6 +4479,11 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 | **M-B** | 删 `node_delegators` 子查询里的 `AND a.node_key = r.metadata->>'nodeKey'`(`diff` 恰好 1 行) | **5 failed / 34 passed (39)** —— 红 `P11(a) P16(a) N9(a) N10(a) P14(a)` | `cmp` identical |
 | **M-C** | `assertCancelRoundSeatsEligibleInTxn` 函数体首行插 `return`(`diff` 恰好 1 行) | **10 failed / 32 passed** (`-creation` + `-seat-guards` 两件 42 条) —— 红 `N1 N2 N4 N5(a) P12(a) N7(a) N8(a) P13(a) N9(a) N10(a)`(裁决前这条 mutation 只红 5 条) | `cmp` identical,sha256 回 `2dbadf47…` |
 
+| **M-F**(凭据判据)| 把「命中必须恰好 1 条」退回修复前的「只看被委托行,>1 才拒」(`diff` 2 行) | **1 failed / 41 passed (42)** —— 红**只有** `N11(a)`,即那条伪造 `nodeKey` 的腿 | `cmp` identical,sha256 回 `a680a476…` |
+
+**M-F 证明的事**:凭据判据是**独立承重**的,而且它的红**只落在**伪造腿上 ——
+`P20(a)`(真实 `nodeKey`)在 M-F 下仍然绿,所以这条修法**没有**顺手把合法的 metadata 也拒掉。
+
 **M-D 与 M-E 一起证明的事**:两条阻断臂**各自独立承重**,不是一条判据被写了两遍。
 **M-C 证明的事**:新的阻断走的是**同一个出口**(唯一 throw 站点),neuter 掉它两类 reason 一起失效 ——
 这正是「不另造第二个 throw 站点」这个设计选择的反向证据。
@@ -4466,6 +4494,12 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
   `delegatedFrom`)NOT CONSTRUCTED。** `idx_approval_assignments_active_unique` 是
   `WHERE is_active = true` 的部分唯一索引,造它需要一次真正的节点再入去改写委托。
   该 **reason 值**由 `N9(a)` 的另一条臂实测覆盖;**那条具体分支的行为是按代码推出的,不是实测的** —— 写清楚。
+- **已登记的残留:凭据判据证得了「这个节点该 actor 真的有席位」,证不了「这一行结的就是那个节点」。**
+  被委托人若**同时**在别的节点有自己的席位,可以在走 legacy 时把 `nodeKey` 报成**被委托的**那个节点 ⇒
+  两条行都还原成 A、**他把自己从撤销轮里摘了出去**,会签 2 → 1(诚实同形单据 `P11(a)` 答 `{A, D}`)。
+  **MEASURED,`负控 P21(a)` 钉住**。失败方向是「自己减席」而不是「白拿席位」,且要求该 actor 真的两头都有席位。
+  修它要么让 legacy 路由自己写 `nodeKey`(shipped 端点的合同变更),要么按「席位数 vs approve 行数」对账
+  (会误伤诚实语料)—— 两条都属 owner,本轮**不做**,已登记进设计 MD §3.4。
 - **没有**把裁决外推到 `loadPriorNodeApproverDeciders`(设计 MD §3.4 的 OPEN 登记原样保留;`P14(a)` 仍钉今天的答案)。
 - **没有**修「会签节点上多人委托同一人 ⇒ 建单时席位折叠」(`P17(a)` / `P18(a)` 钉今天的答案,
   新登记进设计 MD §3.4;修它要动 `pushResolved` 的 dedup 键,属 owner)。
