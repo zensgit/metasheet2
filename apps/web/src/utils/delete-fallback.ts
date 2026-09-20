@@ -6,7 +6,7 @@
  * 响应）". The backend accepts `POST` + `X-HTTP-Method-Override: DELETE` (core-backend
  * middleware/method-override.ts, mounted after auth AND after the attendance security guard), answers
  * the rewritten request with the receipt header `X-Method-Overridden: DELETE`, and exposes
- * `DELETE /api/method-probe` (whose body also reports `overridden`).
+ * `DELETE /api/method-probe`.
  *
  * THE RECEIPT IS NOT OPTIONAL — IT IS THE WHOLE SAFETY ARGUMENT. Sending a DELETE as a POST is only
  * safe if the server actually rewrote it. If a hop strips the override header, or the server predates
@@ -27,8 +27,16 @@
  *
  * `probeDeleteTransport(baseFetch)` runs once after login and exercises BOTH transports: native DELETE
  * first; only if that fails at the network level does it try `POST /api/method-probe` + override, and
- * it latches 'override' only when that answer is 2xx AND carries the receipt (header, or body
- * `overridden === true`). Anything else latches 'override-unavailable'.
+ * it latches 'override' on EXACTLY the bit `sendDelete` latches on — `hasOverrideReceipt`. Anything
+ * else latches 'override-unavailable'.
+ *
+ * THE PROBE MAY NOT ACCEPT A WEAKER PROOF THAN `sendDelete` DEMANDS. `/api/method-probe` also reports
+ * `overridden` in its BODY, and an earlier draft of this module let that body alone license the tunnel.
+ * That is unsound: a hop that strips `X-Method-Overridden` from the response strips it from every
+ * delete too, so the probe would promise a tunnel whose every use then failed the receipt gate — one
+ * wasted delete per session, surfaced to the user as an error, for a mode we could have known was
+ * unusable. One bit, one gate: the response header. The body field stays as server-side ops evidence
+ * and is deliberately NOT read here.
  *
  * `baseFetch` is injected so the caller keeps its own transport (utils/api.ts passes the raw `fetch`;
  * specs pass a mock).
@@ -208,19 +216,6 @@ export async function sendDelete(baseFetch: BaseFetch, url: string, init: Reques
   }
 }
 
-function probeSaysOverridden(response: Response, body: unknown): boolean {
-  if (hasOverrideReceipt(response)) return true
-  return Boolean(body && typeof body === 'object' && (body as { overridden?: unknown }).overridden === true)
-}
-
-async function readJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json()
-  } catch {
-    return null
-  }
-}
-
 /**
  * Learn the transport once per session, exercising BOTH paths. Idempotent: a second call while the
  * first is in flight (or after it settled) returns the same promise/result. Never throws.
@@ -263,8 +258,12 @@ export function probeDeleteTransport(baseFetch: BaseFetch, opts: { timeoutMs?: n
         method: 'DELETE',
         signal: controller?.signal ?? undefined,
       }))
-      const body = response.status < 400 ? await readJson(response) : null
-      if (response.status < 400 && probeSaysOverridden(response, body)) {
+      // THE RECEIPT, AND ONLY THE RECEIPT — the same bit `sendDelete` latches on, so the probe can
+      // never license a tunnel a real delete would then refuse. The status is irrelevant here: a
+      // receipt-carrying 404 still proves this server rewrote the POST (the probe route could be
+      // absent while the middleware is present); a 404 WITHOUT one is just express saying "no POST
+      // handler here", which proves nothing.
+      if (hasOverrideReceipt(response)) {
         setDeleteTransport('override')
         return 'override'
       }

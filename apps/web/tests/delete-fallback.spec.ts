@@ -7,7 +7,7 @@
  * of it. Mutation evidence (in-memory, not committed): dropping the `isNetworkLevelFailure` condition
  * in `sendDelete` turns the "404 -> no retry" case red.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -103,11 +103,18 @@ describe('delete-fallback', () => {
       expect(headerOf(tunnel[1], METHOD_OVERRIDE_HEADER)).toBe('DELETE')
     })
 
-    it('native DELETE dropped + tunnel confirmed by the BODY (overridden: true) -> override', async () => {
+    /**
+     * THE PROBE MAY NOT ACCEPT A WEAKER PROOF THAN `sendDelete` DEMANDS. `/api/method-probe` reports
+     * `overridden: true` in its body as well, and an earlier draft latched on that alone. A hop that
+     * strips the response header strips it from every delete too, so the probe would have promised a
+     * tunnel whose very first use then failed the receipt gate. Body-only is NOT confirmation.
+     */
+    it('native DELETE dropped + tunnel says overridden in the BODY but sends NO receipt -> override-unavailable', async () => {
       const baseFetch = vi.fn()
         .mockRejectedValueOnce(transportFailure())
         .mockResolvedValueOnce(response(200, { body: { ok: true, method: 'DELETE', overridden: true } }))
-      expect(await probeDeleteTransport(baseFetch)).toBe('override')
+      expect(await probeDeleteTransport(baseFetch)).toBe('override-unavailable')
+      expect(sessionStorage.getItem(DELETE_TRANSPORT_STORAGE_KEY)).toBe('override-unavailable')
     })
 
     it('native DELETE dropped + tunnel answers 200 WITHOUT confirmation -> override-unavailable', async () => {
@@ -123,6 +130,41 @@ describe('delete-fallback', () => {
         .mockRejectedValueOnce(transportFailure())
         .mockResolvedValueOnce(response(404))
       expect(await probeDeleteTransport(baseFetch)).toBe('override-unavailable')
+    })
+
+    /**
+     * The status is not the bit. A receipt-carrying 404 means THIS server rewrote the POST and the
+     * DELETE route simply is not there (middleware present, probe route absent) — the tunnel is
+     * proven, which is exactly what `sendDelete` concludes from the same header on a 4xx.
+     */
+    it('a receipt-carrying 404 from the tunnel still proves the rewrite -> override', async () => {
+      const baseFetch = vi.fn()
+        .mockRejectedValueOnce(transportFailure())
+        .mockResolvedValueOnce(response(404, { receipt: true }))
+      expect(await probeDeleteTransport(baseFetch)).toBe('override')
+    })
+
+    /**
+     * FIRE-AND-FORGET CONTRACT. `main.ts` calls this as `void probeDeleteTransport(...)` from inside
+     * `router.beforeEach`, after `bootstrapSession()` succeeds (apps/web/src/main.ts:113). A rejected
+     * promise there would be an unhandled rejection on every navigation of a broken session, and any
+     * synchronous throw would break the guard itself and leave the app unrendered. Neither may happen
+     * for ANY baseFetch behaviour — including one that throws before it ever returns a promise.
+     */
+    it('never throws and never rejects, whatever baseFetch does', async () => {
+      const syncThrower = vi.fn(() => { throw new Error('boom') }) as unknown as typeof fetch
+      expect(await probeDeleteTransport(syncThrower as never)).toBe('native')
+
+      resetDeleteTransportForTests()
+      const nonError = vi.fn().mockRejectedValue('a string, not an Error')
+      expect(await probeDeleteTransport(nonError)).toBe('native')
+
+      resetDeleteTransportForTests()
+      // A response object with no usable `headers` at all: `hasOverrideReceipt` must absorb it.
+      const headerless = vi.fn()
+        .mockRejectedValueOnce(transportFailure())
+        .mockResolvedValueOnce({ status: 200 } as unknown as Response)
+      expect(await probeDeleteTransport(headerless)).toBe('override-unavailable')
     })
 
     it('both legs get no response -> nothing learned, mode left at native', async () => {
@@ -425,43 +467,104 @@ describe('delete-fallback', () => {
 })
 
 /**
- * REGRESSION GUARD for the 2026-09-18 attendance-web-guard breakage (6/6 red, see the module header of
- * src/utils/delete-fallback.ts). The verification harnesses abort every unmocked `**\/api/**` request,
- * and Vite serves source modules over HTTP in dev, so ANY module in `utils/api.ts`'s import graph that
- * lives under a directory named `api` is fetched from a URL that glob matches — the abort then takes
- * down the whole graph and every harness renders an empty page. This walks the real graph.
+ * REGRESSION GUARD for the 2026-09-18 browser-lane breakage (attendance-web-guard 6/6 red;
+ * `Stock-prep browser verify` cancelled after ~20 min). See the module header of
+ * src/utils/delete-fallback.ts for the mechanism; in one line:
+ *
+ *   Vite serves every source module over HTTP in dev, so `src/api/delete-fallback.ts` is fetched as
+ *   `/src/api/delete-fallback.ts`. That URL MATCHES the `**\/api/**` glob the verification harnesses
+ *   install to stub HTTP. The unmocked module was aborted (attendance) / answered with a JSON 404
+ *   (stock-prep), the whole module graph died, and the page rendered nothing at all — reproduced
+ *   locally as `#app` innerHTML length 0 and `__STOCK_PREP_READY__` never true.
+ *
+ * SCOPE — deliberately not "no directory named api anywhere under src". `src/multitable/api/` already
+ * exists and is reached by four harness graphs (approval-form-builder-mounted, cf-reactions,
+ * grouped-windowing, record-history-restore); those lanes are green because none of them installs the
+ * `**\/api/**` glob. Widening the claim would make this spec red about code this PR does not own. What
+ * this pins instead is the exact hazardous pairing: the harnesses whose lane DOES install that glob
+ * may not reach an `api/` module. The list of such harnesses is derived from the verification sources
+ * on every run, so a new `**\/api/**` lane is covered the day it lands rather than the day it breaks.
  */
-describe('no module in the utils/api.ts import graph may live under a directory named "api"', () => {
-  const SRC = resolve(__dirname, '../src')
+describe('browser-lane module-path hazard: `**/api/**` route stubs swallow src modules under an `api/` dir', () => {
+  const WEB = resolve(__dirname, '..')
+  const VERIFICATION = join(WEB, 'verification')
 
   function resolveImport(fromFile: string, spec: string): string | null {
     if (!spec.startsWith('.')) return null
     const base = resolve(dirname(fromFile), spec)
-    for (const candidate of [base, `${base}.ts`, join(base, 'index.ts')]) {
-      if (existsSync(candidate) && candidate.endsWith('.ts')) return candidate
+    for (const candidate of [base, `${base}.ts`, `${base}.vue`, join(base, 'index.ts')]) {
+      if (existsSync(candidate) && /\.(ts|vue)$/.test(candidate)) return candidate
     }
     return null
   }
 
-  it('walks the graph and finds no `/api/` segment', () => {
-    const entry = join(SRC, 'utils/api.ts')
+  /** Relative-import closure of `entry`, following `from '...'` and dynamic `import('...')`. */
+  function importGraph(entry: string): string[] {
     const seen = new Set<string>()
     const queue = [entry]
-    const offenders: string[] = []
     while (queue.length) {
       const file = queue.pop() as string
       if (seen.has(file)) continue
       seen.add(file)
-      const rel = relative(SRC, file).split(sep).join('/')
-      if (/(^|\/)api\//.test(rel)) offenders.push(rel)
-      const source = readFileSync(file, 'utf8')
-      for (const m of source.matchAll(/from\s+'([^']+)'/g)) {
-        const next = resolveImport(file, m[1])
-        if (next) queue.push(next)
+      let source: string
+      try {
+        source = readFileSync(file, 'utf8')
+      } catch {
+        continue
+      }
+      for (const pattern of [/from\s+['"]([^'"]+)['"]/g, /import\(\s*['"]([^'"]+)['"]\s*\)/g]) {
+        for (const m of source.matchAll(pattern)) {
+          const next = resolveImport(file, m[1])
+          if (next) queue.push(next)
+        }
       }
     }
-    // Positive control: the walk really reached this module (otherwise the claim would be vacuous).
-    expect([...seen].some((f) => f.endsWith(`delete-fallback.ts`))).toBe(true)
-    expect(offenders).toEqual([])
+    return [...seen]
+  }
+
+  const apiDirOffenders = (graph: string[]): string[] =>
+    graph.map((f) => relative(WEB, f).split(sep).join('/')).filter((r) => /(^|\/)api\//.test(r))
+
+  /** Harness entrypoints reachable from a verification source that installs the `**\/api/**` glob. */
+  function harnessesBehindTheGlob(): string[] {
+    const found = new Set<string>()
+    for (const name of readdirSync(VERIFICATION)) {
+      if (!name.endsWith('.ts')) continue
+      const file = join(VERIFICATION, name)
+      // The glob and the `goto` can live in different files (stock-prep keeps both in its fixtures
+      // module), so search each source together with its own relative-import closure.
+      const cluster = importGraph(file).filter((f) => f.startsWith(VERIFICATION))
+      const text = cluster.map((f) => readFileSync(f, 'utf8')).join('\n')
+      if (!/route\(\s*['"`]\*\*\/api\/\*\*['"`]/.test(text)) continue
+      for (const m of text.matchAll(/([A-Za-z0-9-]+-harness)\.html/g)) {
+        const entry = join(VERIFICATION, `${m[1]}.ts`)
+        if (existsSync(entry)) found.add(entry)
+      }
+    }
+    return [...found].sort()
+  }
+
+  it('utils/api.ts — in EVERY harness graph — reaches no module under an `api/` directory', () => {
+    const graph = importGraph(join(WEB, 'src/utils/api.ts'))
+    // Positive control: the walk really reached this module, so `offenders === []` is not vacuous.
+    expect(graph.some((f) => f.endsWith(`utils${sep}delete-fallback.ts`))).toBe(true)
+    expect(apiDirOffenders(graph)).toEqual([])
+  })
+
+  it('every harness behind a `**/api/**` route stub reaches no module under an `api/` directory', () => {
+    const harnesses = harnessesBehindTheGlob()
+    // Positive controls: the derivation actually found the two lanes that went red, and it did not
+    // silently degrade into "no harnesses, nothing to check".
+    expect(harnesses.length).toBeGreaterThanOrEqual(2)
+    const names = harnesses.map((f) => relative(VERIFICATION, f).split(sep).join('/'))
+    expect(names).toContain('attendance-makeup-request-harness.ts')
+    expect(names).toContain('stock-prep-workbench-harness.ts')
+
+    const offenders: Record<string, string[]> = {}
+    for (const harness of harnesses) {
+      const bad = apiDirOffenders(importGraph(harness))
+      if (bad.length) offenders[relative(VERIFICATION, harness).split(sep).join('/')] = bad
+    }
+    expect(offenders).toEqual({})
   })
 })
