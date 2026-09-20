@@ -2934,6 +2934,87 @@
           "runCreatedAt"
         ]
       },
+      "IntegrationPipelineRun": {
+        "type": "object",
+        "description": "SC-04 pipeline run projection. This is the EXACT shape produced by the plugin's rowToPipelineRun (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/runs) and the single-run read (GET /api/integration/runs/{runId}) — the single read does no extra join, so the two projections cannot drift.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string",
+            "nullable": true
+          },
+          "pipelineId": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Run mode recorded by the runner (e.g. dry-run vs. a real write run)."
+          },
+          "triggeredBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string"
+          },
+          "rowsRead": {
+            "type": "integer"
+          },
+          "rowsCleaned": {
+            "type": "integer"
+          },
+          "rowsWritten": {
+            "type": "integer"
+          },
+          "rowsFailed": {
+            "type": "integer"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "durationMs": {
+            "type": "integer",
+            "nullable": true
+          },
+          "errorSummary": {
+            "type": "string",
+            "nullable": true
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Run detail JSONB as persisted by the runner (e.g. targetWriteSummaries, watermarkAdvanced). Forward-compatible: unknown keys are passed through unchanged. Already sanitized at write time; this read path does NOT re-redact, so nothing secret may be written into it."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "tenantId",
+          "pipelineId",
+          "mode",
+          "status",
+          "rowsRead",
+          "rowsCleaned",
+          "rowsWritten",
+          "rowsFailed"
+        ]
+      },
       "ConnectorActionOperation": {
         "type": "string",
         "description": "DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.",
@@ -31674,6 +31755,136 @@
           },
           "503": {
             "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/integration/runs/{runId}": {
+      "get": {
+        "summary": "Get one integration pipeline run",
+        "description": "Read-only single-run read, scoped by (tenantId, workspaceId, runId). The tenant is resolved from the verified session claim; `tenantId` may be echoed as a query parameter but must MATCH the caller's own tenant (a mismatch is 403), so this parameter cannot widen scope. Another tenant's run id and a run id that does not exist return the SAME details-free 404 — the route is not a cross-tenant existence oracle. No write, replay or retry is performed.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "description": "Pipeline run id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace — the same normalization the list route applies, so a run written under the null workspace is read back there.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/IntegrationPipelineRun"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "runId missing from the path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_id_required": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_ID_REQUIRED",
+                        "message": "runId is required"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_not_found": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_NOT_FOUND",
+                        "message": "pipeline run not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The host's pipeline registry does not implement the single-run read (optional-method wiring older than this route).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_read_not_implemented": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_READ_NOT_IMPLEMENTED",
+                        "message": "Run read is not implemented"
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
