@@ -15,8 +15,23 @@
  * so a regression to that contract fails here too, not just in the heavier real-DB gate — and only
  * THEN asserts the new logging behaviour, so a change that logs but silently alters degradation
  * semantics (the "不改返回值/降级语义" constraint) would be caught by the same test.
+ *
+ * Follow-up (gate report `impl-gate-B1-f2-logging-and-B2-rebase-20260920.md` P3-1/P3-2):
+ * - P3-1: the "throwing logger never blocks degradation" test below spies on `Logger.prototype.
+ *   warn` (the call-site boundary, same technique as every other test here) and makes it throw —
+ *   this is an OR over the two guards the fix adds (assignment-before-log AND the log's own
+ *   try/catch), so it is a defence-in-depth check, not single-axis discrimination between them.
+ * - P3-2: `org` was deleted from the meta object `logSourceFailure` builds; the request's tenant
+ *   now reaches the log ONLY via `Logger`'s own `mergeMeta` (as `tenant_id`), so the "attaches /
+ *   omits the tenant" test below has to look past the call-site spy to observe it — it restores
+ *   the mocked `warn` for that one test and spies one hop further down, at the shared winston
+ *   `Logger.prototype.log` (the level-methods `create-logger.js` builds forward `self.log(level,
+ *   message, mergedMeta)` to; `mergeMeta` has already run by then, unlike the `warn`-level spy the
+ *   other tests use). It also asserts `org` is never fabricated at either boundary — the "省略/不
+ *   虚构" NIT-2 case.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import winston from 'winston'
 
 import { Logger } from '../../src/core/logger'
 import { runWithRequestContext } from '../../src/context/request-context'
@@ -110,17 +125,59 @@ describe('PendingSourceRegistry — per-source catch logging (acceptance finding
     expect(meta.error).toBe('not-an-error')
   })
 
-  it('attaches the request-scoped org (tenant) to the warn when a request context is active, and omits it when none is', async () => {
+  it('never fabricates an `org` field at the call site, and lets the logger\'s own `tenant_id` injection carry the request context (or omit it when none is active) — P3-2', async () => {
     const registry = new PendingSourceRegistry()
     registry.register({ name: 'flaky-source', listPendingForUser: vi.fn().mockRejectedValue(new Error('boom')) })
 
+    // The call-site meta (what `logSourceFailure` itself builds) never has `org` — this is the
+    // "not fabricated" half, observable at the same boundary every other test in this file uses.
     await runWithRequestContext({ correlationId: 'corr-1', tenantId: 'org-42' }, () =>
       registry.listPendingForUser(VIEWER),
     )
-    expect((warnSpy.mock.calls[0][1] as Record<string, unknown>).org).toBe('org-42')
+    expect(warnSpy.mock.calls[0][1]).not.toHaveProperty('org')
 
-    warnSpy.mockClear()
+    // The "attaches / omits" half lives one hop further down, inside `Logger.mergeMeta`, which the
+    // call-site `warn` spy never sees (it fires before `mergeMeta` runs). Restore the real `warn`
+    // implementation for just this assertion and spy on the shared winston `Logger.prototype.log`
+    // instead — every level method (`.warn`, `.info`, …) that `create-logger.js` builds for a
+    // 2-arg call forwards to it as `self.log(level, message, mergedMeta)`, so it's the first place
+    // downstream of the call site where the merged meta (tenant_id included) is observable.
+    warnSpy.mockRestore()
+    const logSpy = vi.spyOn(winston.Logger.prototype, 'log').mockImplementation(() => winston.Logger.prototype)
+
+    await runWithRequestContext({ correlationId: 'corr-2', tenantId: 'org-42' }, () =>
+      registry.listPendingForUser(VIEWER),
+    )
+    expect(logSpy).toHaveBeenCalledTimes(1)
+    const [, , mergedMeta] = logSpy.mock.calls[0] as [string, string, Record<string, unknown>]
+    expect(mergedMeta).not.toHaveProperty('org') // still never fabricated, one hop down too
+    expect(mergedMeta.tenant_id).toBe('org-42') // the logger's OWN injection, not ours
+
+    logSpy.mockClear()
     await registry.listPendingForUser(VIEWER) // no active request context this time
-    expect((warnSpy.mock.calls[0][1] as Record<string, unknown>).org).toBeUndefined()
+    expect(logSpy).toHaveBeenCalledTimes(1)
+    const [, , mergedMetaNoCtx] = logSpy.mock.calls[0] as [string, string, Record<string, unknown>]
+    expect(mergedMetaNoCtx).not.toHaveProperty('org')
+    expect(mergedMetaNoCtx).not.toHaveProperty('tenant_id') // omitted, not fabricated as e.g. '' or null
+
+    logSpy.mockRestore()
+  })
+
+  it('a throwing failure-logger never turns a source outage into an aggregate crash — degradation is written before the (best-effort) log runs — P3-1', async () => {
+    const registry = new PendingSourceRegistry()
+    registry.register({ name: 'flaky-source', listPendingForUser: vi.fn().mockRejectedValue(new Error('boom')) })
+    registry.register({ name: 'healthy-source', listPendingForUser: vi.fn().mockResolvedValue([item('h-3')]) })
+
+    warnSpy.mockImplementation(() => {
+      throw new Error('logging transport exploded')
+    })
+
+    // Must not reject: if `listPendingForUser` propagated the logger's throw, this `await` itself
+    // would throw and fail the test — the assertions below only run if degradation survived it.
+    const result = await registry.listPendingForUser(VIEWER)
+
+    expect(result.sources['flaky-source']).toBe('unavailable')
+    expect(result.sources['healthy-source']).toBe('ok')
+    expect(result.items).toEqual([item('h-3')])
   })
 })

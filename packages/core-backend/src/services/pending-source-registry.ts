@@ -14,7 +14,6 @@
  */
 
 import { Logger } from '../core/logger'
-import { getRequestContext } from '../context/request-context'
 
 export interface PendingItem {
   source: string
@@ -63,18 +62,21 @@ const logger = new Logger('PendingSourceRegistry')
 
 /** Structured, value-free failure signal for a source's fail-closed catch (acceptance finding F-2,
  *  `todo-center-real-browser-acceptance-20260920.md` §6 P2: two bare `catch` blocks below had zero
- *  logging, so a source outage was invisible to the backend). Logs the failing source's name, the
- *  request's org (tenant) when known, and the error's `message`/`code` — never the error's stack or
- *  any query result — so an outage becomes observable without widening what a degraded response can
- *  leak to the client. Purely an operational signal: the fail-closed return shape
- *  (`sources[name] = 'unavailable'`) and every existing degradation assertion are unchanged. */
+ *  logging, so a source outage was invisible to the backend). Logs the failing source's name and
+ *  the error's `message`/`code` — never the error's stack or any query result — so an outage
+ *  becomes observable without widening what a degraded response can leak to the client. The
+ *  request's tenant is NOT duplicated here: `Logger`'s own `mergeMeta` already attaches it as
+ *  `tenant_id` from the same `getRequestContext()` (gate report impl-gate-B1-f2-logging-and-B2-
+ *  rebase-20260920.md P3-2 — a second `org` key here would just be the identical value under a
+ *  second name, free to drift out of sync with the logger's own field later). Purely an
+ *  operational signal: the fail-closed return shape (`sources[name] = 'unavailable'`) and every
+ *  existing degradation assertion are unchanged. */
 function logSourceFailure(op: 'list' | 'count', sourceName: string, error: unknown): void {
   const rawCode = error && typeof error === 'object' && 'code' in error
     ? (error as { code?: unknown }).code
     : undefined
   logger.warn(`Pending source '${sourceName}' failed to ${op} pending items; reporting unavailable`, {
     sourceId: sourceName,
-    org: getRequestContext()?.tenantId,
     error: error instanceof Error ? error.message : String(error),
     code: typeof rawCode === 'string' || typeof rawCode === 'number' ? rawCode : undefined,
   })
@@ -105,9 +107,24 @@ export class PendingSourceRegistry {
         sources[source.name] = 'ok'
       } catch (error) {
         // Fail-closed: this source contributes nothing and is flagged `unavailable`, never folded
-        // into "zero pending" and never allowed to 500 the aggregate response.
-        logSourceFailure('list', source.name, error)
+        // into "zero pending" and never allowed to 500 the aggregate response. This assignment is
+        // the ONLY statement in this catch the fail-closed contract depends on, so it runs before
+        // the (best-effort) failure log, and the log is wrapped in its own try/catch — gate report
+        // impl-gate-B1-f2-logging-and-B2-rebase-20260920.md P3-1: `logSourceFailure` was the only
+        // statement here that can throw, and it ran BEFORE this assignment, so a throw inside it
+        // (e.g. `String(error)` on a hostile `Symbol.toPrimitive`) would have skipped the
+        // assignment entirely and let the exception escape `listPendingForUser` — turning a single
+        // source outage into a 500 for the whole aggregate response, exactly the state
+        // `routes/todo.ts`'s "reaching here means a bug in the aggregation layer, not a source
+        // outage" comment says must never happen.
         sources[source.name] = 'unavailable'
+        try {
+          logSourceFailure('list', source.name, error)
+        } catch {
+          // Logging is a diagnostic nicety; the fail-closed degradation above already happened.
+          // Swallow so an unexpected throw from the logger itself can never turn a per-source
+          // outage into an aggregate 500.
+        }
       }
     }
     return { items, sources }
@@ -126,8 +143,14 @@ export class PendingSourceRegistry {
         }
         sources[source.name] = 'ok'
       } catch (error) {
-        logSourceFailure('count', source.name, error)
+        // Same ordering/wrapping rationale as `listPendingForUser` above (P3-1): the degrading
+        // assignment must not depend on the (best-effort) log succeeding.
         sources[source.name] = 'unavailable'
+        try {
+          logSourceFailure('count', source.name, error)
+        } catch {
+          // See the sibling catch above — logging failures must never escape here.
+        }
       }
     }
     return { count, sources }
