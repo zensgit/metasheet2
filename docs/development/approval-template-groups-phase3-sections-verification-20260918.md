@@ -789,3 +789,99 @@ PROBE_REQUIRED_EXIT=0          # 18/18 条调用全部执行,全部通过
 - `pnpm --filter @metasheet/core-backend test` 全量**未跑**;只跑了 `tsc --noEmit`(零错)与两条定向 node 脚本。
 - DEV mock 语义的残留(设计 MD §8.3)**未验**:没有起 dev server 实测分组视图在 DEV 下的表现,结论是读代码得出的。
 - A-2 那条 i18n 守卫的行粒度弱点(§15.6 末)**未修**,原样披露。
+
+---
+
+## 16. 第 2 轮合流收口的实跑(2026-09-20,门审 `impl-gate-A4-on-A2-merge-fix-round1-20260920.md` 之后)
+
+底座 = A-2 新 head `8d0ecf6b1652892e5f867f5cb97484ee9e00e10d`(#5854 保活 rebase 到 `origin/main` `123b1d1e54250ba9e96b33dcbb8112cf2fcdf8af` 之后)。
+重放前 head `1cb71741bd5cb816bc55251f833cbb3fa23d449b`,`--onto` 切点 `4678b01cb6e3ad7ed7179c3a5a44b1fe864f426c`。
+处置表见设计 MD §8.8,rebase 机械断言见 §8.9。
+
+### 16.1 闸(全部在同一棵干净树上,mutation 之前 / 还原之后)
+
+```
+vue-tsc -b                    exit 2 —— 唯一 1 条错:vite.config.ts(28,29) TS2769
+                                        （git diff --stat origin/main HEAD -- apps/web/vite.config.ts 输出 0 字节 ⇒ 本机环境项，见设计 MD §8.8 P3-5）
+                                        本分支改动的文件（api.ts / TemplateGroupSections.vue / 两份 spec）0 条错
+vite build                    exit 0   ✓ built in 12.67s
+core-backend tsc --noEmit     exit 0   零错、零输出
+s6a pin                       plugin-tests.yml sha256 = 6af0690a3cb93891e1158d79d95ee325bdf5bbae42df09760932367e2ede264c
+                                        = 钉值（逐字相等）；sealed-export-package-provenance.test.cjs 1/1
+approval-template-groups-ci-wiring.test.mjs   12/12
+```
+
+**闸 4 定向 spec（两 lane + category + i18n + governance）**
+
+```
+npx vitest run approvalTemplateCenterSections approvalTemplateCenterCategory templateCenterI18n \
+               approvalTemplateGovernance SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient \
+               ApprovalTemplateGroupsPanel
+Test Files  8 passed (8)
+Tests       69 passed (69)        ← 门审轮的 65 + 本轮 4 条（P2-1 两条 + D3-1 两条）
+```
+
+**闸 3 —— CI 活 exec 行直跑（= `web-tests` 真正跑的那条命令）**
+
+```
+Test Files  473 passed (473)
+Tests       7286 passed (7286)
+```
+
+七个被追踪的 spec 逐条确认被收集并通过（含 `IntegrationRunDetail`，P3-3 的判据）：
+
+```
+tests/SessionOrgSwitcher.spec.ts              (3 tests)
+tests/AttendanceSessionOrgSwitcher.spec.ts    (1 test)   ← token 子串附带命中（既有，非本轮）
+tests/approvalTemplateGroupsClient.spec.ts    (10 tests)
+tests/ApprovalTemplateGroupsPanel.spec.ts     (3 tests)
+tests/approvalTemplateCenterSections.spec.ts  (20 tests)
+tests/approvalTemplateCenterCategory.spec.ts  (10 tests)
+tests/IntegrationRunDetail.spec.ts            (9 tests)
+```
+
+**如实披露一条环境噪声**：第一次跑这条 exec 行时，vitest 已打印完
+`473 passed / 7286 passed` 的汇总之后，node 在 worker 拆卸阶段崩了
+（`FATAL ERROR: v8::ToLocalChecked Empty MaybeLocal` → `node::cjs_lexer::Parse` → `Abort trap: 6`，
+本机 node v25.9.0），使 shell 退出码变成 **134**。同一条命令、同一棵树立刻重跑：**退出码 0**，
+`473 passed / 7286 passed` 逐位相同，无 FATAL。**两次的测试结果一致且全绿**，
+差别只在第一次的进程拆卸崩溃 —— 记在这里而不是抹掉，是因为「退出码非 0」在本仓是必须解释的事。
+（日志里另有一条 `[vitest] There was an error when mocking a module` 打印，出自
+`multitable-chart-load-error.spec.ts` 自己的负例夹具，该文件 4/4 绿，非本轮引入。）
+
+### 16.2 Mutation 台账（4 条；全部 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` 字节相同）
+
+备份：`soak-working/a4a2-fix2-mutbak/`（MA/MB 用 `api.ts.ORIG`；另存 `TemplateGroupSections.vue.ORIG` /
+`approvalTemplateCenterSections.spec.ts.ORIG` 两份**本轮改动前**的原件供审计）。MC/MD 还原用的是本轮改动**之后**的
+干净副本（`/tmp/tgs.CLEAN`），每次还原后 `cmp` 字节相同。每条探针都先断言锚点唯一（`assert s.count(old)==1`）
+并 `grep` 确认文件真的变了 —— 避免无效 mutation 冒充「守卫无判别力」。
+
+| # | 探针 | 预期 | 实测 | 结论 |
+|---|---|---|---|---|
+| **MA** | `api.ts` `listTemplatesBySection` 在 `USE_MOCK` 行**之下**插 `return {data:[],total:0}` | 对应用例红 | 定向：`1 failed \| 9 passed (10)`，红的正是 `listTemplatesBySection` 那条；**CI 活 exec 行全量：`1 failed \| 7283 passed (7284)`** | P2-1 **闭合**：门审轮同一探针（M1b）全量 **472 files / 7273 tests 全绿**，现在红 |
+| **MB** | 同法掏空 `reorderApprovalTemplateGroups` | 对应用例红 | 定向：`1 failed \| 9 passed (10)` | 第二个函数同样承重 |
+| **MC** | `TemplateGroupSections.vue` 的 D3-1 分支改成 `if (false && …)`（回到合流后的旧形态） | 新 J 用例红、负控绿 | `1 failed \| 19 passed (20)`，红的只有「403 → 选择器 → 重放」那条 | D3-1 正向断言**承重** |
+| **MD** | 同一处改成 `if (true \|\| …)`（对任何失败都弹选择器） | 负控红 | `2 failed \| 18 passed (20)`：新增的「单 org / 非 J 失败仍走通用错误」+ 既有的「fetch 失败渲染顶层错误态」 | 分支**按 code 判而不是按「失败了」判**,有判别力 |
+
+**MA 的正控口径**：门审轮已证 `api.ts` 在这套夹具里确实被加载并承重（M1 让 4 条红）。
+本轮 MA/MB 的红进一步把「执行缺席 vs 覆盖缺席」的歧义消掉：现在是**覆盖到位**。
+
+**MA 之前的一条前置实测（决定了 P2-1 的实现形状）**：对 `listTemplatesBySection` 下裸
+`vi.stubGlobal('fetch', …)` 并调用它，探针打印 `fetch calls = 0`；改用
+`__APPROVAL_MOCK__ = false` + `vi.resetModules()` + 动态 `import()` 后，
+`fetch calls = 1`，URL = `http://localhost:3000/api/approval-templates?section=group%3Ax&page=2&pageSize=20`。
+理由与连带约束见设计 MD §8.8 (a)。该探针文件跑完即删（`tests/__probe_usemock.spec.ts`，已 `rm` 并核实不存在）。
+
+### 16.3 还原与工作树卫生
+
+`git status --porcelain` 在每轮 mutation 还原后为**只含本轮真实改动**的状态；
+三份备份（`api.ts.ORIG` / `TemplateGroupSections.vue.ORIG` / `approvalTemplateCenterSections.spec.ts.ORIG`）保留供审计。
+全程 **零** `git checkout -- <path>`、零 `reset --hard`、零 `stash`。
+
+### 16.4 本轮未做 / 未验（如实列出）
+
+- **P3-4 到达性**仍 UNVERIFIED —— 本地 `bash -e` 全量仍在同一个既有环境红处中断，活 exec 行是被单独抽出来跑的。
+- **D3-1 的 owner 裁决仍未记录** —— 本轮实现的是「把 `SESSION_ORG_REQUIRED` 识别接进分节视图」这一支，
+  但 owner 从未就「接受两步入口 vs 接进分节视图」落过字。本节不得被读成「该裁决已发生」。
+- **未跑真库**：本轮零后端改动（`git diff` 对 A-1 四个后端文件为 0 字节沿用门审轮结论，core-backend `tsc` 绿）。
+- **未在真实浏览器验收**：D3-1 的页面级路径只有 jsdom 挂载证据，没有真机走查。
