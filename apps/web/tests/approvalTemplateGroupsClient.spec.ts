@@ -3,6 +3,7 @@ import {
   ApprovalApiError,
   archiveApprovalTemplateGroup,
   createApprovalTemplateGroup,
+  describeApprovalTemplateGroupError,
   linkApprovalTemplateToGroup,
   listApprovalTemplateGroups,
   renameApprovalTemplateGroup,
@@ -284,5 +285,57 @@ describe('approval template sections/reorder client (design lock v2.13 §6 phase
     })
     expect(fallback).toEqual([])
     expect(withoutGroups).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * P2-2 fix (groups-daily-ops-real-browser-acceptance-20260920.md) — `describeApprovalTemplateGroupError`
+ * is the mapping table finding P2-2 asked for: a mapped code renders product-language copy
+ * (`tr(en, zh)`), and the B1-04 "server message verbatim" contract stays intact for everything
+ * else. The tr stub below just tags which half of the tuple it received, so a mis-ordered
+ * `[en, zh]` pair in the table would show up as the wrong tag.
+ */
+describe('describeApprovalTemplateGroupError (P2-2 product-copy mapping)', () => {
+  const tr = (en: string, zh: string): string => `EN:${en}|ZH:${zh}`
+
+  it('a mapped code (GROUP_NAME_UNSUPPORTED) renders product copy, not the raw server message or any internal-jargon terms', () => {
+    const err = new ApprovalApiError(
+      'This value must include at least one ASCII letter, digit, or symbol character.',
+      400,
+      'GROUP_NAME_UNSUPPORTED',
+    )
+    const text = describeApprovalTemplateGroupError(err, tr)
+    expect(text).toContain('EN:')
+    expect(text).toContain('ZH:')
+    expect(text).not.toContain('锁文')
+    expect(text).not.toContain('owner')
+    expect(text).not.toContain('勘误')
+    // Must not be the raw server string either — the whole point is a DIFFERENT, friendlier text.
+    expect(text).not.toContain('This value must include at least one ASCII')
+  })
+
+  it.each([
+    'GROUP_NAME_REQUIRED',
+    'GROUP_NAME_TAKEN',
+    'GROUP_NOT_FOUND',
+    'GROUP_ARCHIVED',
+    'GROUP_NOT_ARCHIVED',
+    'GROUP_SORT_CONFLICT',
+    'APPROVAL_GROUP_ID_REQUIRED',
+  ] as const)('%s is also mapped to non-empty bilingual copy', (code) => {
+    const err = new ApprovalApiError('server says something', 400, code)
+    const text = describeApprovalTemplateGroupError(err, tr)
+    expect(text).toContain('EN:')
+    expect(text).toContain('ZH:')
+  })
+
+  it('an UNMAPPED code (e.g. a *_FAILED fallback) still surfaces the verbatim server message — B1-04 is unchanged for it', () => {
+    const err = new ApprovalApiError('Failed to create approval template group', 500, 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED')
+    expect(describeApprovalTemplateGroupError(err, tr)).toBe('Failed to create approval template group')
+  })
+
+  it('a non-ApprovalApiError still falls back to .message (or String(err))', () => {
+    expect(describeApprovalTemplateGroupError(new Error('plain error'), tr)).toBe('plain error')
+    expect(describeApprovalTemplateGroupError('not an error object', tr)).toBe('not an error object')
   })
 })
