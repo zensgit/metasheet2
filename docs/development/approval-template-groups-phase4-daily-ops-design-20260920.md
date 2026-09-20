@@ -383,7 +383,13 @@ async function loadTemplates(query?): Promise<ApprovalTemplateListOutcome> {
 | (a) | `claim.from === <通知前的签名>` | 窗口里的**第二次**转换不能再被记到一枚已被第一次转换作废的 claim 上 |
 | (b) | `currentExplicitSessionOrg() === claim.to` | 本次转换落到的会话**不是**本页要去的那个组织 ⇒ 不是本页的切换 |
 
-**(b) 为什么是充分的第二半——按机制,不是按断言**:`useAuth.setExplicitSessionOrg` 是**唯一**调用 `resetSessionBootstrap(…, preserveExplicitSession = true)` 的转换(`useAuth.ts:301` → `useAuth.ts:124`),也就是唯一一个会让 `state:'ready'` 的 explicit-session marker**留在原地**的转换。其余每一条 `setToken` / `clearToken` 路径(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)都会清掉 marker,因此它们读回来是「没有 explicit 组织」,**永远匹配不上任何目标**。
+> **勘误(第 6 轮,门审 `impl-gate-A5-daily-ops-round5-20260921.md` C-2)——贴在下面这一段上,只让它的前提失效,不作废本节。**
+> 下段的第一句「`setExplicitSessionOrg` 是**唯一**调用 `resetSessionBootstrap(…, preserveExplicitSession = true)` 的转换」**为假**:机械普查(`git grep -n 'resetSessionBootstrap(' -- apps/web/src`)得到**四处**传 `true`(`useAuth.ts:77` / `:234` / `:249` / `:301`),`:412` 才是唯一不传的。
+> **被它支撑的结论仍然 OPERATIVE**,理由换成读侧的机制,见 §9.2 与下面这一段的改写版。下段原文保留,供审阅者比对。
+
+**(b) 为什么是充分的第二半——按机制,不是按断言(第 6 轮改写版)**:`readExplicitSession`(`utils/explicitSessionOrg.ts:10-28`,判据在 `:17` 与 `:23`)把 marker **绑死在精确的 token 文本**上——它要求 `marker.token === token` **且** `localStorage.auth_token === token` **且** `localStorage.jwt === token`,否则抛。因此任何**换 token** 的转换都让 marker **读不出来**(`currentExplicitSessionOrg()` 把抛降级成 `null`),**与 `clearExplicitSessionOrg()` 有没有跑无关**;marker 也不可能活过它自己的那枚 token。所以 `setToken` / `clearToken` 家族(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)**永远匹配不上任何目标**。
+
+~~**(b) 为什么是充分的第二半——按机制,不是按断言(第 5 轮原文,前提已被证伪)**:`useAuth.setExplicitSessionOrg` 是**唯一**调用 `resetSessionBootstrap(…, preserveExplicitSession = true)` 的转换(`useAuth.ts:301` → `useAuth.ts:124`),也就是唯一一个会让 `state:'ready'` 的 explicit-session marker**留在原地**的转换。其余每一条 `setToken` / `clearToken` 路径(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)都会清掉 marker,因此它们读回来是「没有 explicit 组织」,**永远匹配不上任何目标**。~~
 
 **(b) 挡不住的那一格,以及为什么它不是一条被藏起来的残留**:另一个标签页的切换经 storage 监听器republish 时 marker 是**被保留**的(`useAuth.ts:74-79` 同样传 `preserveExplicitSession = true`)。若那个标签页切到的恰好**就是本页正在请求的组织**,两者在监听器处**确实无法分辨**——这不是实现缺陷,是该处可得信息的上限。所以本轮同时装了第二层:
 
@@ -438,3 +444,132 @@ async function loadTemplates(query?): Promise<ApprovalTemplateListOutcome> {
 | §7.6-7(零新增文件 / 零迁移 / 零端点 / 零 flag / 零 DDL) | **仍然成立**;「零 CI 改动」这一句在第 4 轮已被自己撤回(新增一条 path),**第 5 轮重新成立**:本轮 delta 不含 `.github/` |
 | §7.6-8(③ 已在真浏览器跑过) | **仍然成立**(第 4 轮所做);第 5 轮**未重跑**真浏览器,见验证 MD §12.7 |
 | §6.1 的状态机 | **不作废,追加一条**:§8.1 的「自切宣称必须带身份」。原文「两种转换在监听器处否则无法分辨」这句**部分失效**——在装上身份后,除了「别人切到了本页的同一个目标组织」这一格之外,其余都可分辨;那一格由 §8.1 的兜底条款在 await 的另一侧接住 |
+
+---
+
+## 9. 第 6 轮设计增补(对齐 `impl-gate-A5-daily-ops-round5-20260921.md` 的 0 P1 / 1 P2 / 5 P3 / 4 NIT)
+
+> **状态仍是 PROPOSED 候选件。** 未合并、未 undraft、未开 PR、未 ratify。本节只增,不改写 §1-§8 已写下的判断;凡被第 6 轮取代的**具体句子**,在 §9.8 逐句求值,不作废整节。
+> 起点 head = `a26d34398dbfa132dda4c051e5d6f9db09bb6090`(`git rev-parse origin/feat/approval-template-groups-phase4-daily-ops`,与门审报告抬头逐字一致;门审自己登记过任务书抬头 SHA 指向 `origin/main` 的问题,本节的每条改动都建立在上面那个 40 位 head 上)。
+
+### 9.1 P2(C-1):读主体键**会抛**,而这条路径抛了就会吞掉一次重读
+
+**门审认定的形状(真浏览器实测,不是推演)**:`getAuthPrincipalKey()` 在 explicit metadata 不自洽时**按设计抛**,而 `TemplateCenterView.vue` 的两个调用点(`ensurePageSessionOrgsLoaded` 的第一行、监听器里的 claim 重钥)**都没有 try/catch**。异常从 `nextTick` 回调里抛穿,`redetermineEligibilityAndReload()` 在 `reloadOrgScopedSurfaces()` **之前**中止 ⇒ **这一次重读整个不发**,唯一的痕迹是一个未捕获异常。
+
+**生产者是真的**:另一个标签页的一次组织切换在 `localStorage` 上是**四次分开的写**(barrier marker → `auth_token` → `jwt` → `state:'ready'` marker),每一次都给本页派发一个独立的 `storage` 事件,`useAuth.ts:65-78` 的监听器对每一个符合条件的事件都调一次 `resetSessionBootstrap(...)`。本页因此**确实会**在「marker 与 token 暂时不自洽」的瞬间跑完监听器。
+
+**本轮的生命周期条款(新增一条,写进 §6.1 的状态机而不是替换它)**:
+
+> **「读不出主体键」不是异常,是一种身份状态。** 页面层每一次读主体键都必须经过一个**不抛**的入口;读不到时一律按「这不是本页可以认领的会话」处理,走完整生命周期(清理 → 资格判定 → 重取 / 消失),并**记录一次可观测 warn**,使「这一次通知身份不可读」与「一次普通的会话切换」在日志里可分辨。
+
+**修法落点**(`apps/web/src/views/approval/TemplateCenterView.vue`):
+
+| 落点 | 改法 |
+|---|---|
+| `tryReadAuthPrincipalKey()`(新增,紧邻 `ensurePageSessionOrgsLoaded` 之前) | `try { return getAuthPrincipalKey() } catch { console.warn(…); return UNREADABLE_PRINCIPAL }` |
+| `UNREADABLE_PRINCIPAL`(新增常量) | 见下方「哨兵为什么安全」 |
+| `ensurePageSessionOrgsLoaded()` 第一行 | `getAuthPrincipalKey()` → `tryReadAuthPrincipalKey()`(**这就是门审真浏览器里抛的那一行**;`!ok` 兜底路径与 `retryPageSessionOrgs` / `notifySessionOrgRequired` / `watch(viewMode)` 四个入口都经过它) |
+| 监听器的 claim 重钥 | 同样换成 `tryReadAuthPrincipalKey()`;**并在注释里说清没有找到能让它抛的输入**(见 §9.1 末段) |
+| `currentExplicitSessionOrg()` 的 catch 注释 | 删掉被证伪的可达性断言(原文「Defence in depth, not a load-bearing guard: every path that reaches this listener has already completed a transition.」),改写成准确陈述:**这个 catch 是承重的** |
+
+**哨兵为什么安全 —— 按键空间的形状,不按可达性断言**:`getAuthPrincipalKey()` 的返回只有四种形状 —— `null`、`sub:…`、`token:…`、以及 `JSON.stringify([...])`(即以 `[` 开头的字符串)。`'unreadable-principal'` **不可能**是其中任何一种,因此不可读窗口里装出来的 claim **永远不会**与某个真实身份的 claim 相等 ⇒ 它不可能造成「对真实身份的陈旧短路」,最坏代价是**一次多余的组织列表再问**。选哨兵而不是 `null`,是因为 `null` 是「已登出」这个**真**身份的键。
+
+**监听器那一处按机制是够不到的,如实登记而不是冒充覆盖**:要走到 claim 重钥的 `ownSwitch === true` 分支,必须先让 `claimOwnSwitchTransition` 的判据 (b) 成立,而 (b) 要求 `currentExplicitSessionOrg()` **刚刚成功读出**一个 marker;两次读之间没有任何能改动 `localStorage` 的语句。**本轮未能构造出使该处可观测的输入**,它按「纵深防御、无判别输入」登记(与 §7.4 的 M-H 同样的处置),**不声称有用例覆盖**。
+
+**新发现的同族缺口,不在本轮人口内,按「披露不修」处置**:`apps/web/src/utils/api.ts:167` 的 `authHeaders()` 直接调 `explicitSessionOrg(...)`,同样**没有 try/catch**,所以在同一个不可读窗口里**整个 app 的每一次 `apiFetch` 都会同步抛**。本轮的用例把这条实测出来了(组织列表再问在那个窗口里**发不出去**,页面因此渲染「失败 + 重试」而不是新的下拉框)。本轮**不改 `api.ts`** —— 它是跨全站的共享模块,改它是门审 C-1 修法第 2 项那种「结构性 + 16 调用点普查」的工件,越出本轮点名的人口。**登记为 OPEN,交 owner**。
+
+### 9.2 P3(C-2):「唯一调用 `resetSessionBootstrap(…, true)`」这句绝对断言**为假**
+
+**机械普查(不是阅读)**:`git grep -n 'resetSessionBootstrap(' a26d34398 -- apps/web/src`
+
+```
+useAuth.ts:77   resetSessionBootstrap(true, false, true)    ← storage 监听器
+useAuth.ts:234  resetSessionBootstrap(false, false, true)   ← setToken
+useAuth.ts:249  resetSessionBootstrap(true, true, true)     ← clearToken
+useAuth.ts:301  resetSessionBootstrap(true, false, true)    ← setExplicitSessionOrg
+useAuth.ts:412  resetSessionBootstrap(true)                 ← 唯一不传 true 的
+```
+
+**四处**传 `true`,`setExplicitSessionOrg` 是其中之一而非唯一。§8.1 与代码注释 `:754` 的那句话因此是**用一个假前提推出了一个真结论**;同一提交的验证 MD §12.7-1 又自己写着「`useAuth.ts:74-79` 与 `:301` **都**传 `preserveExplicitSession = true`」——**两份记录件在同一个提交里互相打脸**(仓内房规:「验收判据集合必须自洽」「绝对断言自扫必须机械化」)。
+
+**判据 (b) 真正承重的机制,写在读侧**:`readExplicitSession`(`utils/explicitSessionOrg.ts:10-28`,判据在 `:17` 与 `:23`)把 marker **绑死在精确的 token 文本**上 —— 它要求 `marker.token === token` **且** `localStorage.auth_token === token` **且** `localStorage.jwt === token`,否则抛。因此:
+
+- 任何**换 token** 的转换都让 marker **读不出来**(抛 → `currentExplicitSessionOrg()` 降级成 `null`),**与 `clearExplicitSessionOrg()` 跑没跑无关**;
+- marker **不可能活过它自己的那枚 token**;
+- 所以 `setToken` / `clearToken` 家族(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)**永远匹配不上任何目标**。
+
+**(b) 挡不住的那一格不变**:另一个标签页的切换装的是**绑在新 token 上**的 marker,storage 监听器把它 republish(`useAuth.ts:77`,同一个 `preserveExplicitSession` 标志)。若那个标签页切到的恰好就是本页正在请求的组织,两者在监听器处**确实无法分辨** —— 由 §8.1 的兜底条款在 await 的另一侧接住,结论不变。
+
+**改了哪三处(同一提交,否则自相矛盾仍在)**:代码注释 `TemplateCenterView.vue` 的「WHY THE TARGET ORGANISATION IS A SUFFICIENT SECOND HALF」整段、本设计 MD §8.1 的对应段(见 §9.8 的逐句求值)、验证 MD §12.7-1。**「唯一」二字全部删除。**
+
+### 9.3 P3(C-3):判据 (b) / (a) 的**判别性**用例,以及「外部转换晚于本页切换响应」的变体
+
+**门审指出的形状**:第 5 轮的 3 条 C-1 用例里,外部转换到达的那一刻**都没有一枚 `state:'ready'` 的 marker 站着** —— 用例 1、2 用 `setToken`(从不留 marker),用例 3 的 marker 是**那次被匹配的转换自己装的**。所以没有一条用例能把「(b) 拒绝了一枚有效的竞争 marker」与「根本没有东西可读」分开。
+
+**本轮补的三条(全部先让一枚有效的 `state:'ready'` marker站着再开始)**:
+
+| 用例 | 输入 | 它把什么分开 |
+|---|---|---|
+| **(b) 判别性** | marker 有效且在场,别人切到**别的** org(`org-z`),(a) 满足 | 「(b) 读到了一个不匹配的目标」 vs 「没有东西可读」 |
+| **(a) 带有效 marker** | marker 全程有效;第一次外来切换去 `org-z`((b) 挡),第二次去 `org-b`(**正是本页目标**,(b) 匹配) | 「(a) 看见 claim 已被第一次转换作废」 vs 「(b) 顺手挡掉了」 |
+| **晚于本页响应** | 本页的切换被服务端**拒绝**(403,零 principal 变更),**之后**别人真的把会话切到 `org-b` | 「claim 在本页请求**答复时**被 `finally` 丢掉」 vs 「claim 还站着并吃掉了一次外来转换」 |
+
+第三条是本轮把门审那条**控制**用例升级成**判别性**用例的地方:门审的 `[GATE-V1]` 在所有 claim mutant 下都绿(那时 claim 已被 `finally` 清空),它证不了任何东西;改成「拒绝 + 晚到」之后,`onPageSessionOrgChange` 的 `finally { pageOwnedSwitch = null }` 成为**唯一**把它撑住的语句,探针 **M-V** 中和它即红。
+
+**第四条(C-1 的判别性用例,门审 §剩余 NOT RUN 第 6 条点名「目前零覆盖」)**:用**真的 `storage` 事件**驱动一次「另一标签页切到一半」的转换(barrier marker 已写、两个 token 别名已换、`state:'ready'` 还没发),断言:监听器跑完、**重读照常发出**、warn 记到了、失败被渲染成**可恢复**(重试控件在),而且对方发布最终 marker 之后入口**自己回来**。探针 **M-U**(把不抛入口改回会抛)即红。
+
+### 9.4 P3(C-4):`loadTemplate` / `loadVersion` 的身份丢弃越出 r4 人口 —— **二选一:保留丢弃 + 写明扩展理由与后果**
+
+门审给的两条路是「撤回到 r4 点名的人口」或「在设计 MD 明写扩展理由与『无 replay 所有者』的后果」。**本轮选后者**,理由与代价一起写:
+
+**为什么不撤回**:`isCurrent()` 的身份半边(`signature === readAuthSessionSignature()`)拦的是「**上一个主体**的详情/版本答复落到当前主体的页面上」。撤回它,换来的不是「用户看得见答案」,而是**另一个主体的表单详情被渲染进当前会话**。两害相权,静默的「未找到」优于跨主体串内容;且这一条与第 4 轮给列表读装的是**同一个**判据,撤回会让三个写入方对「答复还算不算数」给出不一致的答案。
+
+**扩展的理由,说准**:r4 的 C-7 点名的人口是「本页两次重叠 `loadData()`」,开的方子是「改注释」**或**「给列表读单开 `listLoading`」。第 5 轮做的是**第三件事** —— 把共享 `loading` 改成跨种类的票,而**票是三个写入方共用的**,所以三个写入方必须在同一层上被描述;只给其中一个装身份判据、另外两个不装,会让 `templateStore.ts:70-93` 那段新注释重新变成一句「注释断言」。扩展是**为了让那段注释是真的**,不是顺手加固。
+
+**后果,一条不藏**:
+
+- **没有 replay 所有者。** `TemplateDetailView.vue` / `ApprovalNewView.vue` / `ApprovalDetailView.vue` **都不订阅** `onAuthSessionSwitch`(三个文件 `git grep` 零命中),所以身份一变,详情/版本读被丢弃之后**没有任何人重发**。
+- **渲染终态是「未找到」,无横幅、无重试。** 丢弃时 `error` 也不写(按设计:那不是当前会话的失败);`TemplateDetailView.vue:740` 于是走 `<el-empty v-else-if="!store.loading">`。共享 `loading` 由共享票正常释放,所以**连 spinner 都不剩**。
+- **可达性是低的,但不是零。** 唯一「原地、同一主体重发 token」的生产者是 `refreshDevToken`,它在 `useAuth.ts:348` 有 `if (import.meta.env.PROD) return null`;其余 `setToken` 调用点(AcceptInvite / DingTalkCallback / ForcePasswordChange / Login ×2)**都会导航离开**。跨标签页的组织切换会换 token,但那条路径上这三个页面同样没有订阅者 —— 也就是说,**今天它们在组织切换后本来就不会自动重读**,身份丢弃没有新造这个洞,只是让它从「显示上一个 org 的详情」变成「显示未找到」。
+- **`error` 的跨种类仲裁仍未关闭**(§8.2 末段),与本条是同一片欠账。
+
+**交 owner 的问题(不替 owner 裁决)**:要不要把「**身份丢弃只装在有 replay 所有者的读上**」立成一条结构性要求 —— 若立,配套动作是给这三个消费页补 `onAuthSessionSwitch` 订阅(**锁外新能力,本轮不做**);若不立,本节就是这条取舍的记录。
+
+### 9.5 C-5 / C-6 的处置(不通胀、不改判)
+
+| 门审项 | 本轮处置 |
+|---|---|
+| **C-5**(= r4 P3-1:`if (pageSessionOrgsClaim !== claim) return` 仍是已披露的不可达守卫) | **保持披露,不补测,不删。** §7.4 整段仍然生效;本轮按原编号重跑 M-H 仍存活,正控 M-G 同集合仍红。 |
+| **C-6**(= r4 P3-2 / §7.3:平铺列表在真后端上不是 org 域数据) | **owner 项原样保留。** 本轮无真库步骤(delta 零后端文件),**不重新取证、不改措辞、不替 owner 裁决**;门审已在其新库上独立复核过,结论不变。 |
+
+### 9.6 本轮明确不做(锁外新能力 / 越出人口,登记 OPEN)
+
+- **不改 `apps/web/src/utils/api.ts`**(§9.1 末段那条同族缺口)。
+- **不给 `authPrincipal` 加共享的 `tryGetAuthPrincipalKey()`,也不做 16 调用点普查** —— 那是门审 C-1 修法第 2 项,是跨模块合同变更。本轮按任务书点名的做法,在**页面层**装一个不抛入口。(另:`adminCapability.ts:92` 与 `useApprovalAdminCapability.ts:43` 这两个本页可达的调用点**本来就各自包了 try/catch**,已机械核过。)
+- **不给三个详情消费页补 `onAuthSessionSwitch` 订阅**(§9.4)。
+- **不给 `error` 槽位加跨种类仲裁,也不给列表读单开 `listLoading`**(§8.2 末段不变)。
+- **不动 `useSessionOrg`**(设计锁 §2 不可编辑),不动子组件的 `isCurrent()` 判据(§11.7-1 / §11.7-2 两条 owner 项不变)。
+- 零新增文件、零迁移、零 DDL、零新端点、零新 flag、零 CI 接线改动。
+
+### 9.7 NIT 的处置
+
+| NIT | 处置 |
+|---|---|
+| 1(MUT-S3 锚点已迁移) | **已登记在案**(第 5 轮验证 MD §12.3 的锚点迁移方框);本轮**又新增两条锚点迁移**(M-T / M-ad),按同样方式登记,见验证 MD §13.3。 |
+| 2(`M-P`/`M-R` 与 `M-Q`/`M-S` 红在同一条用例) | **本轮不拆。** 两个 mutation 各自承重(各自单删各自红),按门审自己的判定「不是缺陷」;拆成两条属于测试重构,不在本轮人口内。**登记为 OPEN。** |
+| 3(「7 条新用例含一个正控」要说准) | **采纳**:本轮新增 4 条用例,其中**没有**新的正控;C-1 族的正控仍然是**既存的** `(② M-F)`(本轮 M-F 仍红),C-7 族的正控是第 5 轮新增的那条。验证 MD §13.2 逐条标注。 |
+| 4(任务书抬头 SHA 连续第三轮有误) | **不是候选件缺陷,本轮无动作。** 本轮任务书抬头的 40 位 SHA 与 `git rev-parse origin/<branch>` **逐字一致**,已核。 |
+
+### 9.8 对 §8.1 / §8.5 的逐句求值(失效标记只让状态断言失效,不作废整节)
+
+| 条目 | 第 6 轮求值 |
+|---|---|
+| §8.1「(b) 为什么是充分的第二半」段的**第一句**(「`setExplicitSessionOrg` 是**唯一**调用 `resetSessionBootstrap(…, preserveExplicitSession = true)` 的转换」) | **失效,本轮改写。** 机械普查为四处(§9.2)。**被它支撑的结论仍然 OPERATIVE**:(b) 仍然充分,理由换成读侧的「marker 与 token 文本严格绑定」。 |
+| §8.1 同段的「其余每一条 `setToken` / `clearToken` 路径都会清掉 marker,因此读回来是『没有 explicit 组织』」 | **结论成立,理由部分失效**:它们读回来是「读不出来(抛)」而不是「清掉了」,而 `currentExplicitSessionOrg()` 把两者都变成 `null`。本轮按机制改写。 |
+| §8.1 的「(b) 挡不住的那一格」+ 兜底条款 | **仍然成立**,本轮未改机制;`useAuth.ts:74-79` 这个引用改写成 `:77`(同一处,行号按本 head 逐字核过)。 |
+| §8.1 两条判据 (a)/(b) 本身 | **仍然成立**,并在本轮**第一次**各自拿到「有效 marker 在场」的判别性输入(§9.3)。 |
+| §8.2(共享票 + 按种类计数 + `error` 未关闭) | **仍然成立**;`loadTemplate` / `loadVersion` 的身份半边在 §9.4 补上了扩展理由与后果,**机制未改一行**。 |
+| §8.3 的三条处置(P3-1 / P3-2 / P3-4) | **仍然成立**(本轮分别对应 §9.5 的 C-5 / C-6,以及验证 MD §13.5 的活 `exec` 行直跑)。 |
+| §8.4「本轮明确不做」 | **仍然成立**,第 6 轮**再加三条**(§9.6 前三行)。 |
+| §8.5 对 §6.7 / §7.6 的逐句求值 | **整表仍然成立**,唯一需要补一句的是 §7.6-3(`readAuthSessionSignature` 被页面层第二次消费):**仍然成立**,且本轮又增加了第三个消费点 —— `tryReadAuthPrincipalKey` 与它共享同一条「读不出来就降级成一个常量」的处置方式。 |
+| §6.1 的状态机 | **不作废,再追加一条**:§9.1 的「读不出主体键是一种身份状态,不是异常」。 |
