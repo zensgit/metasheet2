@@ -73,29 +73,64 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                      -- invisible in every UI. Owner, same day: the earlier bare-btrim suggestion
                      -- does not cover pure-invisible names and must not be carried over as-is.
                      --
-                     -- THIS PREDICATE: btrim with an EXPLICIT trim set = ASCII space/TAB/CR/LF,
-                     -- U+3000 IDEOGRAPHIC SPACE, U+200B/200C/200D zero-width (non-)joiners,
-                     -- U+2060 WORD JOINER, U+FEFF BOM. Deliberately locale-INDEPENDENT (no
-                     -- iswspace/iswalnum, no [[:alnum:]]) so glibc-vs-musl collation behaviour
-                     -- cannot change what it accepts — see finding_prod_pg15_never_tested.
-                     -- KNOWN AND DISCLOSED GAP: the set is the owner's proposal verbatim, so it
-                     -- does NOT include U+00A0 NBSP, U+1680, U+2000-U+200A, U+202F, U+205F,
-                     -- U+2028/9. A direct SQL insert of an NBSP-only name therefore still
-                     -- succeeds; the production route does not let one through because the
-                     -- service layer's requireName strips a SUPERSET (JS backslash-s plus the four
-                     -- zero-widths JS does not strip). Do not read this CHECK on its own as a
-                     -- complete "non-blank" guarantee.
+                     -- THIS PREDICATE: btrim with an EXPLICIT trim set of exactly TEN codepoints
+                     -- = ASCII space/TAB/CR/LF, U+3000 IDEOGRAPHIC SPACE, U+200B/200C/200D
+                     -- zero-width (non-)joiners, U+2060 WORD JOINER, U+FEFF BOM. Deliberately
+                     -- locale-INDEPENDENT (no iswspace/iswalnum, no [[:alnum:]]) so glibc-vs-musl
+                     -- collation behaviour cannot change what it accepts — see
+                     -- finding_prod_pg15_never_tested. The membership of the set is the owner's
+                     -- proposal VERBATIM and this candidate does not extend it; only the SPELLING
+                     -- of the first four members changed in round 2 (see the CR/LF note below),
+                     -- and the ten members are unchanged.
                      --
-                     -- In the TypeScript source the escape-string literal below is written with
-                     -- DOUBLED backslashes so that the text actually handed to PostgreSQL is the
-                     -- proposal byte-for-byte. Same trap as the backtick note further down, and
-                     -- it bit this very comment once: EVERY backslash in this block is inside the
-                     -- sql-tagged template literal, so a single-backslash escape is consumed by
-                     -- JS before PostgreSQL ever sees it. Writing the proposal text here with
-                     -- single backslashes turned them into a real TAB/CR/LF, the CR/LF ENDED this
-                     -- SQL line comment mid-sentence, and the rest of the sentence was parsed as
-                     -- SQL (db:migrate: syntax error at or near the stray quote). Doubled
-                     -- everywhere, including in prose.
+                     -- WHAT THIS CHECK IS, AND IS NOT. It is an ENUMERATED SET plus an EXPLICIT
+                     -- RESIDUE — it is NOT, and must not be described as, a "non-blank"
+                     -- guarantee. Two disjoint families of codepoints are OUTSIDE the set and a
+                     -- direct SQL INSERT of a name made only of them SUCCEEDS:
+                     --   (a) whitespace JS strips but this set does not: U+00A0 NBSP, U+000B VT,
+                     --       U+000C FF, U+1680, U+2000-U+200A, U+202F, U+205F, U+2028, U+2029.
+                     --       (U+000B/U+000C were missing from this list before round 2 — gate
+                     --       round 1 P3-2.)
+                     --   (b) blank-rendering codepoints in NEITHER layer's set, measured landing
+                     --       201 rows through the real HTTP endpoint by gate round 1 P2-1:
+                     --       U+00AD SOFT HYPHEN, U+180E MONGOLIAN VOWEL SEPARATOR, U+2800 BRAILLE
+                     --       PATTERN BLANK, U+3164 HANGUL FILLER, U+034F COMBINING GRAPHEME
+                     --       JOINER, U+FE0F VARIATION SELECTOR-16, U+115F HANGUL CHOSEONG FILLER.
+                     -- Both families are RESIDUE AT THIS LAYER, and the real-DB suite asserts
+                     -- them as such (cases named RESIDUE: direct INSERT succeeds and the row is
+                     -- readable) rather than pretending they are rejected. What closes them is
+                     -- the APPLICATION layer: ApprovalTemplateGroupService.requireName requires
+                     -- at least one glyph-carrying character (in L/N/P/S, not
+                     -- Default_Ignorable_Code_Point, not U+2800) and 400s every value in (a) and
+                     -- (b) before any DB round-trip — asserted through the production route for
+                     -- every one of them. This CHECK is the DEFENCE-IN-DEPTH layer for a direct
+                     -- SQL writer, bounded to its ten members; the primary rule lives in the
+                     -- service.
+                     --
+                     -- SPELLING OF THE FOUR CONTROL/SPACE MEMBERS, ROUND-2 FIX (gate round 1
+                     -- P3-6). The proposal spells them E' <TAB><CR><LF>'. PostgreSQL evaluates
+                     -- that escape string at DDL-parse time and stores the RESULTING characters
+                     -- in the constraint expression, so pg_get_constraintdef() read back REAL
+                     -- 0x09/0x0d/0x0a bytes inside the constraint definition. Any pipeline that
+                     -- normalises line endings in a pg_dump artefact (CRLF -> LF) would then
+                     -- SILENTLY drop CR from the trim set while the constraint name and the error
+                     -- code stayed identical — a change nothing downstream could see. They are
+                     -- therefore written as ' ' || chr(9) || chr(13) || chr(10), the same chr()
+                     -- idiom the proposal already uses for its other six members. The SET is
+                     -- unchanged (same ten codepoints, proved behaviourally by the per-member
+                     -- isolation cases in the real-DB suite); only the spelling is. The
+                     -- verification MD pins the hex of pg_get_constraintdef() and asserts it
+                     -- contains no 0x0d and no 0x0a.
+                     --
+                     -- Backslash trap, kept as a warning for the next edit: every backslash in
+                     -- this block is inside the sql-tagged template literal, so a single-backslash
+                     -- escape is consumed by JS before PostgreSQL ever sees it. An earlier draft
+                     -- wrote the proposal text in THIS COMMENT with single backslashes; JS turned
+                     -- them into a real TAB/CR/LF, the CR/LF ENDED this SQL line comment
+                     -- mid-sentence, and the rest of the sentence was parsed as SQL (db:migrate:
+                     -- syntax error at or near the stray quote). There is no backslash escape
+                     -- left in the predicate after this round's change, which removes the trap at
+                     -- its source rather than documenting around it.
                      --
                      -- atg_org_nonblank above / atgl_org_nonblank below are UNCHANGED by this
                      -- candidate — org_id stays a system/session-derived identifier column, same
@@ -110,8 +145,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                      CONSTRAINT atg_name_nonblank CHECK (
                        btrim(
                          name,
-                         E' \\t\\r\\n' || chr(12288) || chr(8203) || chr(8204) || chr(8205)
-                           || chr(8288) || chr(65279)
+                         ' ' || chr(9) || chr(13) || chr(10) || chr(12288) || chr(8203)
+                           || chr(8204) || chr(8205) || chr(8288) || chr(65279)
                        ) <> ''
                      ),
       -- Nullable: archived groups carry no sort position (paired CHECK below). Assigned by the

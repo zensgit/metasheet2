@@ -1983,6 +1983,19 @@ A-3(分期 3,`?category=`/`/categories`,尚未在本分支落地)的 `classifyBa
 
 ## 28. 勘误 3 候选 REDRAFT v2 的技术验证(2026-09-20,待 owner 确认)
 
+> **逐句求值标记(2026-09-20,第 1 轮门审 `impl-gate-A-slice1-name-rule-candidate-round1-20260920.md` 之后,见 §29)。本节整体**仍然有效**,只有下面点名的句子被求值为假或被替换 —— 不作废整节:**
+>
+> | 本节位置 | 原句 | 求值 | 处置 |
+> |---|---|---|---|
+> | §28.2 第 1 段末 | 「纯空白/纯不可见名**一律**是 400 `GROUP_NAME_REQUIRED`,永远落不到 23514 或 500」 | **假**(门审实测 7 个码位经真实 HTTP 端点 201 入库) | 已在原句处改写为受限断言 + 残留;闭合该缺口的是 §29 的应用层规则 |
+> | §28.2「已披露缺口」段 | 缺口清单 | **不全**(漏 U+000B / U+000C) | 已在原句处补齐 |
+> | §28.3 用例 2 / 用例 3 的标题 | `every blank/invisible-only name` | 量词**为假** | 测试标题已改为「枚举集」措辞,见 §29.4 |
+> | §28.4 末句 | 「重跑 **32/32 全绿**」 | **假**(实为 30 passed / 2 skipped) | 已在原句处改正 |
+> | §28.1 谓词的 `E' \t\r\n'` 写法 | 「逐字照提案」 | **成员集仍逐字**,但**拼写已改** | 四个控制/空格成员改写为 `' ' || chr(9) || chr(13) || chr(10)`,集合不变,见 §29.5 |
+>
+> 本节其余每一句(就地改迁移的前提、s6a 钉不覆盖、locale 无关、两处 `org_id` 逐字未动、M-A/M-B/M-C/N-1 的红绿)**均未被求值为假,仍然 OPERATIVE**。
+
+
 **Erratum 3 仍是 CANDIDATE —— PROPOSED,未 ratify,不是「已授权」。** 本节记录的一切都只是技术验证,不构成 ratify、合并或迁移应用的许可。本分支未开 PR、未合并、未 undraft、未向 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_main` 或任何共享/staging/prod 库应用过任何迁移;全部真库证据来自本次自建的一次性库 `metasheet2_namerule_impl_20260920`(owner 角色 `ms2testbed`,非超级用户),用完即 `dropdb`。
 
 ### 28.0 为什么有 v2:第一版候选被第 8 轮门审证伪
@@ -2023,13 +2036,13 @@ SELECT encode(convert_to(pg_get_constraintdef(oid),'UTF8'),'hex') FROM pg_constr
 
 `name.trim()` → `name.replace(/^[\s\u200B\u200C\u200D\u2060]+|[\s\u200B\u200C\u200D\u2060]+$/g, '')`。
 
-JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/CR/LF/U+3000/U+FEFF,**唯独不含** U+200B/200C/200D/2060 —— 正是 P2-1 那一族。补上这四个之后,应用层集合是 DB 集合的**严格超集**,方向是对的:`requireName` 返回的任何名字**按构造**已满足 CHECK,所以纯空白/纯不可见名一律是 400 `GROUP_NAME_REQUIRED`,永远落不到 23514 或 500。
+JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/CR/LF/U+3000/U+FEFF,**唯独不含** U+200B/200C/200D/2060 —— 正是 P2-1 那一族。补上这四个之后,应用层集合是 DB 集合的**严格超集**,方向是对的:`requireName` 返回的任何名字**按构造**已满足 CHECK,所以 `requireName` 返回的名字**不可能**违反 CHECK。~~所以纯空白/纯不可见名一律是 400 `GROUP_NAME_REQUIRED`,永远落不到 23514 或 500。~~ **⚠️ 这半句(全称量词)经第 1 轮门审实测为假**:两个集合**都不含**的码位两层都不拦 —— U+00AD / U+180E / U+2800 / U+3164 / U+034F / U+FE0F / U+115F 经真实 HTTP 端点 **201 入库**,且列表端点原样返回。正确的受限表述:**「本函数返回的名字按构造满足 CHECK」为真;「任何不可见名都被 400」为假**。闭合该缺口的不是这个镜像,而是 §29 引入的**应用层可见字符规则**(镜像永远补不上:被镜像的集合本身就不含这些码位)。
 
 **这条「超集」断言的承重证据是行为,不是源码文本**:§28.3 用例 2 把 DB 集合里的六个值**逐个经生产路由**打进去,断言的是 `error.code === 'GROUP_NAME_REQUIRED'`(不是 23514、不是 500);用例 1 的 padded 名字证明「裁剪」这一半真的发生了。手边还跑过一条 `node -e` 的集合包含检查(DB 集合每个码位都被新 pattern 裁掉),但那条只读**重新敲进 shell 的**正则,是源码文本论证,**不作为承重证据**,只当交叉验证记录。
 
 它是**裁剪**不是**拒绝**(镜像 `btrim` 的语义):`U+200B + 'HR' + U+200B` ⇒ 201,库里存的是 `'HR'`;内部零宽(`'a' + U+200B + 'b'`)原样保留。**已披露的可接受后果**:`'H' + U+200B + 'R'` 与 `'HR'` 在 `uq_atg_org_name_active` 下是两个不同的名字,而渲染起来一模一样 —— 这是选项 (i) 接受内部不可见字符的设计后果,不是缺陷。
 
-**已披露缺口(写成断言,不写成散文)**:裁剪集逐字照 owner 提案,因此**不含** U+00A0 NBSP、U+1680、U+2000–U+200A、U+202F、U+205F、U+2028/9。直连 SQL 插入 NBSP-only 名字**会成功**;经生产路由则 400(JS `\s` 含 U+00A0)。§28.3 的用例把这一对(直插成功 / 走路由 400)**两半都断言**,所以这条披露是可机核的行为事实,不是会腐烂的散文。
+**已披露缺口(写成断言,不写成散文)**:裁剪集逐字照 owner 提案,因此**不含** U+00A0 NBSP、**U+000B VT、U+000C FF**、U+1680、U+2000–U+200A、U+202F、U+205F、U+2028/9(**U+000B / U+000C 是第 1 轮门审 P3-2 指出的漏列,已补**);也**不含**另一族完全不同的不可见码位 U+00AD / U+180E / U+2800 / U+3164 / U+034F / U+FE0F / U+115F(第 1 轮门审 P2-1,见 §29)。直连 SQL 插入 NBSP-only 名字**会成功**;经生产路由则 400(JS `\s` 含 U+00A0)。§28.3 的用例把这一对(直插成功 / 走路由 400)**两半都断言**,所以这条披露是可机核的行为事实,不是会腐烂的散文。
 
 ### 28.3 真库用例(`approval-template-groups-lifecycle.db.test.ts`,4 个 `it`,替换掉原来那 1 个)
 
@@ -2051,7 +2064,7 @@ JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/C
 
 | **N-1**(负控,不是 mutation) | 用例 4 的查询强行加 `ORDER BY conname DESC` | **仍绿** —— 证明那条断言在 JS 里 `.sort()` 之后**与 DB 行序无关**,不是「恰好本机 collation 排对了」。这是上面那条 collation 陷阱的行为级闭合 |
 
-三条 mutation 与 N-1 **都是在最终版测试文件上重跑的**(修复轮改过测试文件,按「越界盾不护新行」全门重跑,不沿用第一轮的红)。还原后 `cmp` 对迁移与服务两个文件均逐字节一致,重跑 **32/32 全绿**。
+三条 mutation 与 N-1 **都是在最终版测试文件上重跑的**(修复轮改过测试文件,按「越界盾不护新行」全门重跑,不沿用第一轮的红)。还原后 `cmp` 对迁移与服务两个文件均逐字节一致,重跑 **30 passed / 2 skipped(32)**(~~32/32 全绿~~ —— 第 1 轮门审 P3-3:那 2 条是 `itIfExpectDb` 的 anti-skip-green 哨兵,`EXPECT_DB` 未置位时是 skip,**skip 不是 pass**,按 `feedback_被触发≠被验证` 必须分开写)。
 
 ### 28.5 为什么是**就地改迁移**而不是新增后续迁移(前提已推导,不是照抄任务书)
 
@@ -2068,3 +2081,147 @@ JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/C
 ### 28.6 本轮明确**没有**做的事
 
 未合并、未 undraft、未开/动 PR、未动 `origin/main`、未改任何已 ratify 锁文正文(`reviews/` 下的 `*lock*` 文件只读)、未向任何共享/staging/prod 库应用迁移、未删除任何不是本轮创建的 worktree/库/文件。`mapGroupConstraintError` 的 23514 → `GROUP_NAME_UNSUPPORTED` 分支与 `NONBLANK_CHECK_CONSTRAINTS` 里的 `atg_name_nonblank` 成员**保留未删**(与第一版候选同样的理由:删它是一次未经 owner 确认的映射面收窄);该分支的中文 message 现在只对两个 `org_id` 成员准确,**如实披露、不改写** —— 那句话被本文件的 `toContain` 断言冻结成了响应体合同,改它是合同裁决,不是候选该单方面做的事。
+
+---
+
+## 29. 勘误 3 候选 —— 第 2 轮修复(2026-09-20,仍待 owner 确认)
+
+**状态先于证据:勘误 3 依旧是 CANDIDATE / PROPOSED,未 ratify、未授权、未合并、未 undraft、未向任何共享/staging/prod 库应用迁移。** 本节的一切都是**技术验证**,不构成 ratify、合并或迁移应用的许可。全部真库证据来自本轮自建的一次性库 `metasheet2_namerule_r2_20260920`(owner 角色 `ms2testbed`,`rolsuper=f`),用完即 `dropdb`。
+
+修的是 `impl-gate-A-slice1-name-rule-candidate-round1-20260920.md` 的 **1 P2 + 7 P3**(该报告对 head `68fb0e2968e7f67fb0b9623273f372788562a883` 判 NEEDS-FIX)。
+
+### 29.0 两层结构的重新划分(这是本轮的设计变化,请 owner 一并裁)
+
+第 1 轮门审的 P2-1 不是「谓词写错了」,而是**候选写下的话比它做到的事大**:应用层是 DB 裁剪集的**镜像**,而两个集合都不含的码位两层都不拦。镜像永远补不上这个洞 —— 被镜像的东西本身就没有它。所以本轮把两层的**职责**重新划分:
+
+- **(a) 应用层 = 主规则(primary)**。不再是镜像。名字必须含至少一个**可见字符**,否则 400 `GROUP_NAME_REQUIRED`(**错误码沿用既有,不新造**)。
+- **(b) DB 层 = 防线(defence-in-depth)**。谓词**成员集逐字保留** owner 提案的十个码位(**不扩枚举** —— 扩它属于再一次勘误,不是实现者能单方面做的事),但把「任何空白或纯不可见名都 400」的**全称断言**改写为「**枚举集 + 明示残留**」:直连 DB 绕过应用层时,U+00AD / U+180E / U+2800 / U+3164 / U+034F / U+FE0F / U+115F 等**仍然可以入库**,真库用例以 `RESIDUE` 命名**正向断言**这一点,不假装它们被拒。
+
+### 29.1 ⚠️ 主会话给的谓词 `/[\p{L}\p{N}\p{P}\p{S}]/u` 单独用**不够** —— 实测,不是推断
+
+任务书点名用 `/[\p{L}\p{N}\p{P}\p{S}]/u` 判定「可见字符」。落笔前先对门审点名的七个码位求值,结果是**其中三个带着可见的 general category**:
+
+```
+$ node -e '...\p{gc=...} 探针...'
+U+00AD match_LNPS= false cats= C,Cf
+U+180E match_LNPS= false cats= C,Cf
+U+2800 match_LNPS= true  cats= S,So      ← BRAILLE PATTERN BLANK 是 So
+U+3164 match_LNPS= true  cats= L,Lo      ← HANGUL FILLER 是 Lo
+U+034F match_LNPS= false cats= M,Mn
+U+FE0F match_LNPS= false cats= M,Mn
+U+115F match_LNPS= true  cats= L,Lo      ← HANGUL CHOSEONG FILLER 是 Lo
+```
+
+⇒ **照字面实现会让 7 个里的 3 个继续 201 入库**,而任务书同时要求「7 个码点各加一条应用层 400 用例」—— 两条要求互斥。这条冲突有**行为级证据**,不是读文档读出来的:见 §29.6 的 **M-2**(把谓词换成裸 `/[\p{L}\p{N}\p{P}\p{S}]/u`,U+2800 / U+3164 / U+115F 三行立刻变回 `201 CREATED`)。
+
+**落地取舍(请 owner 连同勘误一并裁)**:保留 `\p{L}\p{N}\p{P}\p{S}` 作为正向主类,再**排除两件东西**:
+
+1. `\p{Default_Ignorable_Code_Point}` —— Unicode **自己的属性**,不是本文件维护的清单,覆盖 U+00AD / U+180E / U+034F / U+FE0F / U+3164 / U+115F / U+1160 / U+061C / U+2065 / 变体选择符与 tag 区;
+2. **U+2800** —— 它**不是** default-ignorable,是本谓词里**唯一一个显式例外**。
+
+**残留写成残留,不写成闭合**:除 U+2800 外,任何「general category 属 L/N/P/S 但在某些字体下渲染为空白」的码位仍会被接受。本规则**不声称**对「一切不可见」闭合;它声称拒绝 (i) JS `\s` 全集、(ii) DB 裁剪集、(iii) 每一个 default-ignorable 码位、(iv) 只由 Mark/Control/Separator 构成的名字、(v) U+2800 —— 每一条都有经生产路由的断言。
+
+### 29.2 应用层规则(`ApprovalTemplateGroupService.ts`)
+
+| 部分 | 内容 | 位置 |
+|---|---|---|
+| (1) 边缘裁剪(**装饰性**) | `String.prototype.trim` 的集合(JS `\s`)∪ `U+200B/200C/200D/2060` ∪ `U+00AD/180E/034F/2800/3164/115F/1160`。仍是 DB 裁剪集的**严格超集**,所以本函数返回的任何名字**按构造**满足 CHECK。**故意不裁**变体选择符 U+FE00–U+FE0F:裁了会把尾部 emoji 的呈现改写(`'报销☺️'` → `'报销☺'`);它们由 (2) 拒绝 | `ApprovalTemplateGroupService.ts` `NAME_EDGE_TRIM_CLASS` / `NAME_EDGE_TRIM_PATTERN` |
+| (2) 可见字符要求(**承重**) | 裁剪后必须含至少一个字符,**既**在 `\p{L}\p{N}\p{P}\p{S}`,**又**不在 `\p{Default_Ignorable_Code_Point}` 且不是 `U+2800`。否则 400 `GROUP_NAME_REQUIRED` | `NAME_INVISIBLE_CLASS` / `NAME_VISIBLE_CHAR_PATTERN` |
+| (3) 长度上限 | `GROUP_NAME_MAX_LENGTH = 255`,按**码点**计(`[...s].length`,与 PG `char_length` 同口径),在任何 DB 往返**之前**判;超限 400 `GROUP_NAME_TOO_LONG`,`details` 带 `maxLength` / `actualLength` | `GROUP_NAME_MAX_LENGTH` / `requireName` |
+
+**255 是怎么来的(P3-1 的「读列定义」在这里落空,必须说清)**:任务书说「读迁移里列定义决定字符数上限」——**该列是 `text`,没有长度上限可读**。所以这个上限是**应用层的候选决定**,用两条可核事实**推导**而不是发明:
+1. **仓内先例**:人工输入的显示名在本仓的惯例是 `varchar(255)`(`roles.name` / `permissions.name` / `views.name` …,`20250924190000_create_rbac_tables.ts:10` 等);
+2. **数量级安全**:255 码点最多 1020 UTF-8 字节,`uq_atg_org_name_active` 的 btree 索引元组上限是 2704 字节,余出约 1.6 KB 给 `org_id` 与元组开销。
+
+**残留,明示**:btree 上限本身没动。**直连 SQL** 仍可撞 `54000`(用例里有正向断言);`org_id` 是 `req.authenticatedTenantId`、从不由调用方提供,所以经路由不可达。**锁 §2 没有长度条款,这是一条新增**,与勘误 3 一并等 owner 的话。
+
+### 29.3 DB 层(迁移)
+
+- **成员集逐字未扩**:仍是十个码位。
+- **拼写改了一处(P3-6)**:`E' \t\r\n'` → `' ' || chr(9) || chr(13) || chr(10)`。原因:PG 在 DDL 解析期就把转义串求值,`pg_get_constraintdef()` 读回来的约束定义里含**真实 0x09/0x0d/0x0a 字节**;任何对 `pg_dump` 产物做 CRLF→LF 归一的流水线会**静默地把 CR 从裁剪集里删掉**,而约束名与错误码分毫不变。现场证据:
+
+```
+$ psql -tAc "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='atg_name_nonblank'"
+CHECK ((btrim(name, (((((((((' '::text || chr(9)) || chr(13)) || chr(10)) || chr(12288)) || chr(8203)) || chr(8204)) || chr(8205)) || chr(8288)) || chr(65279))) <> ''::text))
+
+$ psql -tAc "SELECT encode(convert_to(pg_get_constraintdef(oid),'UTF8'),'hex') FROM pg_constraint WHERE conname='atg_name_nonblank'"
+434845434b202828627472696d286e616d652c20282828282828282827202 73a3a74657874207c7c2063687228392929207c7c206368722831332929
+207c7c206368722831302929207c7c206368722831323238382929207c7c2063687228383230332929207c7c2063687228383230342929207c7c2063
+687228383230352929207c7c2063687228383238382929207c7c20636872283635323739292929203c3e2027273a3a746578742929
+
+$ psql -tAc "SELECT 'has_CR='||(position(chr(13) in pg_get_constraintdef(oid))>0)::text
+             ||' has_LF='||(position(chr(10) in pg_get_constraintdef(oid))>0)::text
+             ||' has_TAB='||(position(chr(9) in pg_get_constraintdef(oid))>0)::text
+             FROM pg_constraint WHERE conname='atg_name_nonblank'"
+has_CR=false has_LF=false has_TAB=false
+```
+
+  hex 里 `2720 273a3a` = `' '::`,其后全是 `chr(NN)` 函数调用,**没有任何 0x0d / 0x0a / 0x09 裸字节**。集合等价另有行为证明:十个成员逐个喂给 `btrim(v, <新拼写>)` 全部得空串,可见名 `hr` 不受影响(§29.6 的 M-4 进一步证明每个成员单独承重)。
+
+- **披露改写**:迁移注释里的「KNOWN AND DISCLOSED GAP」段不再自述为「非空白保证」,改成**枚举集 + 两族明示残留**(空白族补上 U+000B/U+000C;另加 Cf/filler 族七个),并写明**闭合这两族的是应用层,不是这条 CHECK**。
+
+### 29.4 逐条处置(门审 1 P2 + 7 P3)
+
+| 门审条目 | 处置 | 落点(符号定位;行号随编辑漂移) |
+|---|---|---|
+| **P2-1** 五处全称断言为假,7 码位经真实 HTTP 201 入库 | **已修**:应用层新增可见字符要求(7/7 现在 400);五处断言全部改写为受限断言 + 明示残留;新增**两个**真库用例把两半都钉成行为 | 服务层 `requireName` / `NAME_VISIBLE_CHAR_PATTERN`;迁移 `atg_name_nonblank` 上方注释块;验证 MD §28.2(就地改写)+ 本节;测试 `…ROUND-2 FIX (gate round 1 P2-1)…` 与 `…RESIDUE…` 两个 `it` |
+| **P3-1** 超长名 → 54000 → 不透明 500 | **已修**:应用层 255 码点上限,400 `GROUP_NAME_TOO_LONG`;新增用例含边界(255 ⇒ 201 / 256 ⇒ 400)、btree 溢出名(⇒ 400 而非 500)、rename 腿、裁剪先于计数;直连 SQL 的 54000 作为 **RESIDUE 正向断言**保留 | 服务层 `GROUP_NAME_MAX_LENGTH` / `requireName`;测试 `…(gate round 1 P3-1)…` |
+| **P3-2** 披露清单漏 U+000B / U+000C | **已修** | 迁移注释 `(a)` 族;验证 MD §28.2「已披露缺口」段 |
+| **P3-3** 「32/32 全绿」实为 30 passed / 2 skipped | **已修**(就地改正,并写明 skip≠pass 的理由) | 验证 MD §28.4 末句 |
+| **P3-4** `GROUP_NAME_UNSUPPORTED` 文案不适用 + 免修理由经核为假 | **已修**:删掉「被 `toContain` 冻结」这条假理由(我自己重跑 `grep -rn "只接受可打印 ASCII" packages apps` ⇒ **唯一命中就是那行源码本身**,无任何测试断言它),并把 message 改成对三个成员**都准确**的表述;**错误码不动**(改码才是公开合同变更) | 服务层 `mapGroupConstraintError` 的 23514 分支 |
+| **P3-5** 内部零宽与唯一索引视觉同形 | **不修,写进披露**(owner 已接受为选项 (i) 的设计后果);本轮补上同族的内部 U+2800 | 服务层 `requireName` 文档注释 |
+| **P3-6** 约束定义含真实 CR/LF 字节 | **已修**,hex 证明见 §29.3 | 迁移谓词 |
+| **P3-7** 裁剪集十个成员只有 U+200B 被隔离证过 | **已修**:新增**表驱动**用例,十个成员各自 (i) 单独作整名 ⇒ 直连 DB 23514、(ii) 单独夹在两个中文之间 ⇒ 经路由 201 且**逐字节存回**;两半都用**收集成数组再一次比较**的写法,红的时候整张矩阵都打印出来 | 测试 `…(gate round 1 P3-7): EACH of the ten trim-set members…` |
+
+### 29.5 真库数字(现场执行,**不是抄的**)
+
+```
+$ createdb -U postgres -O ms2testbed metasheet2_namerule_r2_20260920      # owner rolsuper=f
+$ DATABASE_URL=postgresql://ms2testbed:***@localhost:5432/metasheet2_namerule_r2_20260920 npx tsx src/db/migrate.ts
+  ... zzzz20260918090000_create_approval_template_groups was executed successfully ...
+  EXIT=0      # 非超级角色全量迁移,零 42501
+
+$ npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts --reporter=dot
+ Test Files  2 passed (2)
+      Tests  34 passed | 2 skipped (36)
+```
+
+**34 passed / 2 skipped(36)**,不是「36/36 全绿」—— 那 2 条是 `itIfExpectDb` 的 anti-skip-green 哨兵(未置 `EXPECT_DB` 时是 skip)。上一轮同一份清单是 **30 passed / 2 skipped(32)**,本轮 **+4 个 `it`**。
+
+```
+$ pnpm --filter @metasheet/core-backend type-check
+  EXIT=0
+
+$ CI=true pnpm --filter @metasheet/core-backend test
+ Test Files  947 passed | 175 skipped (1122)
+      Tests  15091 passed | 1609 skipped (16700)
+  EXIT=0
+```
+
+(第一次跑全量时有 46 个**文件级**红,全部是 `Cannot find module 'zod'` 之类 —— 我的 `node_modules` 软链没覆盖 `plugins/*`;补齐后 **EXIT=0、零断言失败**。这是环境缺口,不是候选引入的红,两次输出都留着。)
+
+PG:`PostgreSQL 15.17 (Homebrew, aarch64)`。
+
+### 29.6 mutation 台账(`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`,四条全部自跑)
+
+| 探针 | 改动 | 观察到的红(**原文**) | 数字 | 还原 |
+|---|---|---|---|---|
+| **M-1**(删掉应用层 (a)) | `requireName` 退回第 1 轮的纯镜像:裁剪类退回 `\s\u200B\u200C\u200D\u2060`,删掉 `!NAME_VISIBLE_CHAR_PATTERN.test(trimmed)` | `AssertionError: expected [ …(9) ] to deeply equal [ …(9) ]`,数组 diff **九行全变**:`"U+00AD SOFT HYPHEN -> 400 GROUP_NAME_REQUIRED"` → `"… -> 201 CREATED"`,U+180E / U+2800 / U+3164 / U+034F / U+FE0F / U+115F / U+2800×3 / (U+3164+U+00AD) 同 | `1 failed / 24 passed / 1 skipped (26)` | `cmp` IDENTICAL |
+| **M-2**(把谓词换成任务书字面的裸类) | `NAME_VISIBLE_CHAR_PATTERN` → `/[\p{L}\p{N}\p{P}\p{S}]/u`,裁剪类同时退回第 1 轮 | 同一条用例红,但数组 diff **只有三族变**:`U+2800 BRAILLE PATTERN BLANK -> 201 CREATED`、`U+3164 HANGUL FILLER -> 201 CREATED`、`U+115F HANGUL CHOSEONG FILLER -> 201 CREATED`(以及派生的 `U+2800 x3`、`U+3164 + U+00AD`);U+00AD / U+180E / U+034F / U+FE0F **仍是 400** | `1 failed / 24 passed / 1 skipped (26)` | `cmp` IDENTICAL |
+| **M-3**(删长度闸) | 删掉 `requireName` 里的 `GROUP_NAME_MAX_LENGTH` 分支 | `AssertionError: 256 code points is OVER the cap: expected 201 to be 400`(`- 400 / + 201`) | `1 failed / 24 passed / 1 skipped (26)` | `cmp` IDENTICAL |
+| **M-4**(per-member 判别力,P3-7) | 迁移裁剪集里**只删** `chr(65279)`(U+FEFF),其余九个保留;`dropdb`+`createdb`+重跑迁移 | 两条红,归因由构造确定:① 表驱动用例的数组 diff **只有一行变** `"U+FEFF BYTE ORDER MARK -> 23514 atg_name_nonblank"` → `"U+FEFF BYTE ORDER MARK -> ACCEPTED"`,另外九个成员原样;② 原有用例 3 的 `promise resolved "Result{ command: 'INSERT', …}" instead of rejecting` | `2 failed / 23 passed / 1 skipped (26)` | `cmp` IDENTICAL |
+
+**M-2 是本轮最重要的一条**:它是「任务书点名的谓词单独用不够」这句话的**行为级证据**,不是我读 Unicode 表得出的论断。**M-4 的边界**:它隔离验证的是十个成员中的 **U+FEFF** 这一个;但与第 1 轮不同,表驱动用例现在给**每个成员**都带了独立的、会出现在数组 diff 里的标签,所以「哪个成员不再承重」是**可读的事实**而不是推断 —— 第 1 轮 P3-7 的残留(其余九个没有独立断言)由此关闭,剩下的只是「没有对每个成员各跑一次 mutation」这一条成本残留。
+
+每条 mutation 都先用 `diff` 证明文件**真的变了**(不是无效 mutation),红的**原因**逐条核过(不是 setup 失败),还原后 `cmp` 对服务与迁移两个文件均**逐字节一致**。
+
+### 29.7 本轮明确**没有**做的事
+
+未合并、未 undraft、未开/动 PR、未动 `origin/main`、未改任何已 ratify 锁文正文(`reviews/` 下 `*lock*` 只读)、未向 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_main` / `metasheet_testbed_todo_20260920` 或任何共享·staging·prod 库应用迁移、未删除任何不是本轮创建的 worktree/库/文件、未扩 owner 提案的十码位枚举集、未新造 `GROUP_NAME_UNSUPPORTED` 之外的既有码的替代品(新增的只有 `GROUP_NAME_TOO_LONG`,任务书点名)。`mapGroupConstraintError` 的 23514 分支与 `NONBLANK_CHECK_CONSTRAINTS` 的 `atg_name_nonblank` 成员**保留未删**(删它仍是未经 owner 确认的映射面收窄)。
+
+**给 owner 的三个待裁点**:
+1. **可见字符规则的两条排除项**(`Default_Ignorable_Code_Point` + U+2800)—— 这是候选在 owner 提案之外**新增的判据**,请连同勘误 3 一并裁;
+2. **255 码点长度上限** —— 锁 §2 无此条款,是新增;
+3. **`GROUP_NAME_UNSUPPORTED` 的 message 改写** —— 错误码未动,但响应体文案变了。

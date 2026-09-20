@@ -625,6 +625,57 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     { label: 'TAB + LF', value: '\t\n' },
   ]
 
+  // ── Round-2 fixtures (gate round 1, impl-gate-A-slice1-name-rule-candidate-round1-20260920.md)
+  //
+  // P2-1: seven codepoints that are in NEITHER layer's set went through the REAL HTTP endpoint
+  // with status 201 and came back out of the LIST endpoint — a group whose name renders as
+  // nothing. Three of them (U+2800 `So`, U+3164 and U+115F `Lo`) carry a VISIBLE general
+  // category, so a plain `/[\p{L}\p{N}\p{P}\p{S}]/u` rule does NOT reject them; that is why
+  // `requireName` also excludes `\p{Default_Ignorable_Code_Point}` and U+2800.
+  //
+  // Every one of them is asserted TWICE below, and the two halves say DIFFERENT things:
+  //   - `…NEITHER-SET…400…` — the APPLICATION layer rejects it through the production route.
+  //   - `…RESIDUE…`        — the DB CHECK does NOT: a direct INSERT SUCCEEDS and the row reads
+  //                          back. The candidate does not extend the owner's ten-codepoint set,
+  //                          so this is a disclosed residue and the test says so in its own name
+  //                          rather than pretending the value is rejected at both layers.
+  const NEITHER_SET_INVISIBLES: Array<{ label: string; value: string }> = [
+    { label: 'U+00AD SOFT HYPHEN', value: '\u00AD' },
+    { label: 'U+180E MONGOLIAN VOWEL SEPARATOR', value: '\u180E' },
+    { label: 'U+2800 BRAILLE PATTERN BLANK', value: '\u2800' },
+    { label: 'U+3164 HANGUL FILLER', value: '\u3164' },
+    { label: 'U+034F COMBINING GRAPHEME JOINER', value: '\u034F' },
+    { label: 'U+FE0F VARIATION SELECTOR-16', value: '\uFE0F' },
+    { label: 'U+115F HANGUL CHOSEONG FILLER', value: '\u115F' },
+    { label: 'U+2800 x3 (repeat — a longer all-invisible name is still invisible)', value: '\u2800\u2800\u2800' },
+    { label: 'U+3164 + U+00AD (mixed, both invisible)', value: '\u3164\u00AD' },
+  ]
+
+  // The migration's trim set, spelled out ONE MEMBER PER ROW. Gate round 1 P3-7: only U+200B had
+  // been shown to be load-bearing (by an isolated mutation); the other nine were covered solely
+  // by a loop whose assertion is a disjunction at the `it()` level. Each row below is asserted
+  // ALONE (⇒ 23514) and SANDWICHED between two CJK characters (⇒ 201, stored byte-for-byte), so
+  // removing any single member from the DDL reddens exactly that row's own labelled assertion.
+  const DB_TRIM_SET_MEMBERS: Array<{ label: string; value: string }> = [
+    { label: 'U+0020 SPACE', value: ' ' },
+    { label: 'U+0009 TAB', value: '\t' },
+    { label: 'U+000D CR', value: '\r' },
+    { label: 'U+000A LF', value: '\n' },
+    { label: 'U+3000 IDEOGRAPHIC SPACE', value: '\u3000' },
+    { label: 'U+200B ZERO WIDTH SPACE', value: '\u200B' },
+    { label: 'U+200C ZERO WIDTH NON-JOINER', value: '\u200C' },
+    { label: 'U+200D ZERO WIDTH JOINER', value: '\u200D' },
+    { label: 'U+2060 WORD JOINER', value: '\u2060' },
+    { label: 'U+FEFF BYTE ORDER MARK', value: '\uFEFF' },
+  ]
+
+  /** Random CJK — pglz cannot compress it, so the btree index tuple really does grow. */
+  function incompressibleName(chars: number): string {
+    let out = ''
+    for (let i = 0; i < chars; i += 1) out += String.fromCodePoint(0x4e00 + Math.floor(Math.random() * 0x5000))
+    return out
+  }
+
   it('Erratum 3 candidate v2 (pending owner confirmation): names with at least one visible character — CJK / Japanese / emoji / internal zero-width — create 201 and read back byte-for-byte', async () => {
     const org = trackOrg(`atg-nr-pos-${TS}`)
     const admin = await tok(base, `nr-pos-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
@@ -690,7 +741,7 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect(paddedRow.rows[0].name).toBe(`HR-padded-${TS}`)
   })
 
-  it('Erratum 3 candidate v2: every blank/invisible-only name is 400 GROUP_NAME_REQUIRED through the production route, and writes zero rows', async () => {
+  it('Erratum 3 candidate v2: each of the ENUMERATED blank/invisible names (INVISIBLE_ONLY_NAMES) is 400 GROUP_NAME_REQUIRED through the production route, and writes zero rows', async () => {
     const org = trackOrg(`atg-nr-api-${TS}`)
     const admin = await tok(base, `nr-api-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
 
@@ -730,7 +781,7 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect(unchanged.rows[0].name).toBe(`Rename Probe ${TS}`)
   })
 
-  it('Erratum 3 candidate v2: the DB CHECK itself rejects every blank/invisible-only name — direct INSERT raises 23514 atg_name_nonblank, not merely an app-layer 400', async () => {
+  it('Erratum 3 candidate v2: the DB CHECK itself rejects each member of its OWN ten-codepoint trim set — direct INSERT raises 23514 atg_name_nonblank, not merely an app-layer 400 (bounded to that set; see the RESIDUE case below)', async () => {
     const org = trackOrg(`atg-nr-ddl-${TS}`)
 
     // Bypasses the route and `requireName` entirely — this is the ONLY thing that can show the
@@ -778,6 +829,219 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     })
     expect(nbspRes.status).toBe(400)
     expect(((await nbspRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_REQUIRED')
+  })
+
+  it('Erratum 3 candidate v2 ROUND-2 FIX (gate round 1 P2-1): each NEITHER-SET invisible codepoint is 400 GROUP_NAME_REQUIRED through the production route, and the LIST endpoint stays empty', async () => {
+    const org = trackOrg(`atg-nr-nset-${TS}`)
+    const admin = await tok(base, `nr-nset-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    // Collected into an ARRAY and compared in ONE assertion on purpose. A per-iteration
+    // `expect` aborts the loop at the first failure and names only that value, so a mutation
+    // that changes SEVERAL of these rows would be reported as if it changed one. The array form
+    // prints the whole matrix in the diff, which is what makes "which codepoints regressed" a
+    // readable fact rather than an inference.
+    const observed: string[] = []
+    for (const { label, value } of NEITHER_SET_INVISIBLES) {
+      const res = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: value } })
+      const body = (await res.json()) as { error?: { code?: string } }
+      // The CODE, not just the status: with the pre-round-2 mirror these values were 201, and with
+      // a `/[\p{L}\p{N}\p{P}\p{S}]/u`-only rule three of them (U+2800 `So`, U+3164 / U+115F
+      // `Lo`) would STILL be 201 — which is why this fixture exists as its own list.
+      observed.push(`${label} -> ${res.status} ${body.error?.code ?? 'CREATED'}`)
+    }
+    expect(observed).toEqual(NEITHER_SET_INVISIBLES.map(({ label }) => `${label} -> 400 GROUP_NAME_REQUIRED`))
+
+    // The gate's judgement had TWO halves — POST 201 *and* the LIST endpoint handing the
+    // invisible row back to the admin console. Assert the second half too, not only the first.
+    const list = await httpReq(base, '/api/approval-template-groups', admin)
+    expect(list.status).toBe(200)
+    expect(((await list.json()) as { groups: unknown[] }).groups, 'no invisible-named group may be listed').toHaveLength(0)
+    const written = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM approval_template_groups WHERE org_id = $1`,
+      [org],
+    )
+    expect(written.rows[0].n, 'zero rows written').toBe(0)
+
+    // Positive control on the SAME org and token: the endpoint is reachable and does create, so
+    // the 400s above are not "the request never got there".
+    const ok = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `报销 ${TS}` } })
+    expect(ok.status, 'positive control must create').toBe(201)
+    const okId = ((await ok.json()) as { group: { id: string } }).group.id
+    const listAfter = await httpReq(base, '/api/approval-template-groups', admin)
+    expect(((await listAfter.json()) as { groups: unknown[] }).groups, 'positive control must be listed').toHaveLength(1)
+
+    // RENAME leg on one representative value — "the two paths share `requireName`" is a
+    // source-text claim; this turns it into a behaviour.
+    const renamed = await httpReq(base, `/api/approval-template-groups/${okId}`, admin, {
+      method: 'PATCH',
+      body: { name: '\u3164' },
+    })
+    expect(renamed.status, 'rename to U+3164 HANGUL FILLER').toBe(400)
+    expect(((await renamed.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_REQUIRED')
+    const unchanged = await query<{ name: string }>(
+      `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+      [org, okId],
+    )
+    expect(unchanged.rows[0].name).toBe(`报销 ${TS}`)
+  })
+
+  it('Erratum 3 candidate v2 RESIDUE, asserted as a residue and not as a rejection: the DB CHECK does NOT reject the NEITHER-SET codepoints — a direct INSERT of each one SUCCEEDS and the row reads back byte-for-byte', async () => {
+    const org = trackOrg(`atg-nr-residue-${TS}`)
+
+    // This case exists so the disclosure in the migration comment is a MACHINE-CHECKABLE fact
+    // rather than prose that can rot. The candidate does NOT extend the owner's ten-codepoint
+    // trim set (that set is the proposal verbatim), so a direct SQL writer — anything bypassing
+    // the route — can still land these rows. What closes them for production is the APPLICATION
+    // layer, asserted in the case directly above. If a future round DOES extend the DB set, this
+    // case is the one that must be rewritten, deliberately, rather than quietly staying green.
+    let sortOrder = 1
+    for (const { label, value } of NEITHER_SET_INVISIBLES) {
+      const id = `atg_nr_res_${sortOrder}_${TS}`
+      await expect(
+        query(
+          `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+           VALUES ($1, $2, $3, $4, 'probe')`,
+          [id, org, value, sortOrder],
+        ),
+        `RESIDUE: direct insert of ${label} SUCCEEDS at the DB layer (not extended by this candidate)`,
+      ).resolves.toBeDefined()
+      const row = await query<{ name: string }>(
+        `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+        [org, id],
+      )
+      expect(row.rows[0].name, `RESIDUE: stored name for ${label}`).toBe(value)
+      sortOrder += 1
+    }
+
+    // Negative control on the IDENTICAL statement shape: a member that IS in the ten-codepoint
+    // set is still rejected, so the successes above are not "the CHECK has gone missing".
+    await expect(
+      query(
+        `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+         VALUES ($1, $2, $3, $4, 'probe')`,
+        [`atg_nr_res_ctl_${TS}`, org, '\u200B', 900],
+      ),
+      'negative control: U+200B is in the DB set and must still be rejected',
+    ).rejects.toMatchObject({ code: '23514', constraint: 'atg_name_nonblank' })
+  })
+
+  it('Erratum 3 candidate v2 (gate round 1 P3-7): EACH of the ten trim-set members is load-bearing IN ISOLATION — alone it is 23514, sandwiched between two CJK characters it is 201 and stored byte-for-byte', async () => {
+    const org = trackOrg(`atg-nr-member-${TS}`)
+    const admin = await tok(base, `nr-member-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    // Round 1 closed only U+200B by an isolated mutation (its M-D); the other nine members were
+    // covered by a loop whose `it()`-level verdict is a DISJUNCTION — one rejecting value keeps
+    // the whole case green. Here every member carries its OWN labelled assertion in BOTH
+    // directions, so deleting any single `chr(...)` from the DDL reddens exactly one named row.
+    // Both halves are COLLECTED and compared as arrays, for the same reason as the NEITHER-SET
+    // case above: a per-iteration `expect` stops at the first bad row, and "which members stopped
+    // being load-bearing" is exactly the question this case exists to answer.
+    const aloneObserved: string[] = []
+    const sandwichObserved: string[] = []
+    let sortOrder = 1
+    for (const { label, value } of DB_TRIM_SET_MEMBERS) {
+      try {
+        await query(
+          `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+           VALUES ($1, $2, $3, $4, 'probe')`,
+          [`atg_nr_mem_${sortOrder}_${TS}`, org, value, sortOrder],
+        )
+        aloneObserved.push(`${label} -> ACCEPTED`)
+      } catch (error) {
+        const pgErr = error as { code?: string; constraint?: string }
+        aloneObserved.push(`${label} -> ${pgErr.code} ${pgErr.constraint}`)
+      }
+
+      // Same member, same org, this time INTERNAL. btrim only touches the edges, so it must be
+      // accepted AND stored verbatim — the pair (alone ⇒ reject, internal ⇒ keep) is what
+      // separates "this member is in the trim set" from "this member is banned outright".
+      const sandwiched = `中${value}文${sortOrder}`
+      const res = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: sandwiched } })
+      const created = (await res.json()) as { group?: { id: string; name: string }; error?: { code?: string } }
+      if (res.status !== 201 || !created.group) {
+        sandwichObserved.push(`${label} -> ${res.status} ${created.error?.code ?? 'NO-GROUP'}`)
+      } else {
+        const row = await query<{ name: string }>(
+          `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+          [org, created.group.id],
+        )
+        const verbatim = created.group.name === sandwiched && row.rows[0]?.name === sandwiched
+        sandwichObserved.push(`${label} -> 201 ${verbatim ? 'STORED-VERBATIM' : 'MANGLED'}`)
+      }
+      sortOrder += 1
+    }
+
+    expect(aloneObserved, 'each member ALONE must violate atg_name_nonblank').toEqual(
+      DB_TRIM_SET_MEMBERS.map(({ label }) => `${label} -> 23514 atg_name_nonblank`),
+    )
+    expect(sandwichObserved, 'each member BETWEEN two CJK characters must create and be stored verbatim').toEqual(
+      DB_TRIM_SET_MEMBERS.map(({ label }) => `${label} -> 201 STORED-VERBATIM`),
+    )
+  })
+
+  it('Erratum 3 candidate v2 (gate round 1 P3-1): an over-long name is a typed 400 GROUP_NAME_TOO_LONG at the application layer, never the opaque 500 that a btree 54000 used to produce', async () => {
+    const org = trackOrg(`atg-nr-len-${TS}`)
+    const admin = await tok(base, `nr-len-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    // 255 code points — the cap itself. Boundary ON the limit must still create.
+    const atCap = `L${TS}`.padEnd(255, '龍').slice(0, 255)
+    expect([...atCap].length).toBe(255)
+    const atCapRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: atCap } })
+    expect(atCapRes.status, '255 code points is AT the cap and must create').toBe(201)
+    const atCapId = ((await atCapRes.json()) as { group: { id: string } }).group.id
+    const atCapRow = await query<{ n: number }>(
+      `SELECT char_length(name)::int AS n FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+      [org, atCapId],
+    )
+    // PostgreSQL counts char_length in code points too — the JS-side cap and the stored length
+    // are the same number, not merely "about the same".
+    expect(atCapRow.rows[0].n, 'stored char_length').toBe(255)
+
+    // 256 — one past the cap.
+    const overCap = `${atCap}龍`
+    expect([...overCap].length).toBe(256)
+    const overRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: overCap } })
+    expect(overRes.status, '256 code points is OVER the cap').toBe(400)
+    const overBody = (await overRes.json()) as { error: { code: string; details?: { maxLength?: number; actualLength?: number } } }
+    expect(overBody.error.code).toBe('GROUP_NAME_TOO_LONG')
+    expect(overBody.error.details?.maxLength).toBe(255)
+    expect(overBody.error.details?.actualLength).toBe(256)
+
+    // The value round 1 measured as an opaque 500: an incompressible name long enough to blow the
+    // btree index-tuple limit. It must now be the SAME typed 400 — the assertion is 400
+    // GROUP_NAME_TOO_LONG, not "not a 500", because "not this error" is not an outcome assertion.
+    const huge = incompressibleName(2000)
+    const hugeRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: huge } })
+    expect(hugeRes.status, 'btree-overflowing name must be a typed 400, not an opaque 500').toBe(400)
+    expect(((await hugeRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_TOO_LONG')
+
+    // RENAME shares `requireName`, asserted rather than argued.
+    const renameRes = await httpReq(base, `/api/approval-template-groups/${atCapId}`, admin, {
+      method: 'PATCH',
+      body: { name: overCap },
+    })
+    expect(renameRes.status).toBe(400)
+    expect(((await renameRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_TOO_LONG')
+
+    // The cap is measured AFTER trimming — padding does not eat into it.
+    const padded = `\u200B\u3000${atCap}\uFEFF\u2060`
+    const paddedRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: padded } })
+    // Same trimmed value as `atCap`, which already exists in this org ⇒ 409, NOT 400: the length
+    // check saw 255, not 259. A 400 GROUP_NAME_TOO_LONG here would mean the cap runs before trim.
+    expect(paddedRes.status, 'cap is applied to the TRIMMED name').toBe(409)
+    expect(((await paddedRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_TAKEN')
+
+    // RESIDUE, disclosed: the btree limit itself has not moved. A DIRECT SQL writer can still
+    // reach 54000 — the application cap is what keeps the route away from it, and `org_id` (the
+    // other index column) is `req.authenticatedTenantId`, never caller-supplied.
+    await expect(
+      query(
+        `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+         VALUES ($1, $2, $3, 5000, 'probe')`,
+        [`atg_nr_len_res_${TS}`, org, incompressibleName(2000)],
+      ),
+      'RESIDUE: direct insert of a btree-overflowing name still raises 54000',
+    ).rejects.toMatchObject({ code: '54000' })
   })
 
   it('Erratum 3 candidate v2 leaves both org_id CHECKs exactly as ratified: atg_org_nonblank and atgl_org_nonblank still reject a pure-CJK org_id and still accept an ASCII one', async () => {

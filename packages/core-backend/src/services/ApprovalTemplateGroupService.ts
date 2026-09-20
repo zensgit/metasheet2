@@ -175,11 +175,15 @@ const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonbla
  *    migration as an Erratum 3 CANDIDATE (PROPOSED 2026-09-19/20, pending owner confirmation —
  *    NOT owner-ratified, NOT authorized; see the lock's own "勘误 3" header entry and
  *    `lock-errata-proposed-grouping-v2.13-20260919.md`'s "勘误 3(重拟)" option (i)). As a direct
- *    consequence, the `atg_name_nonblank` member of `NONBLANK_CHECK_CONSTRAINTS` is no longer
- *    reachable for `name` through the production route — a pure-CJK (or any other name with a
- *    visible character) passes the CHECK, and a purely blank/invisible one is short-circuited by
- *    `requireName` with 400 `GROUP_NAME_REQUIRED` before any DB round-trip, because that
- *    function's trim set is a strict SUPERSET of the DB's. This branch of
+ *    consequence, the `atg_name_nonblank` member of `NONBLANK_CHECK_CONSTRAINTS` is not known to
+ *    be reachable for `name` through the production route — a pure-CJK (or any other name with a
+ *    visible character) passes the CHECK, and a name with no glyph-carrying character is
+ *    short-circuited by `requireName` with 400 `GROUP_NAME_REQUIRED` before any DB round-trip.
+ *    That is a BOUNDED statement, not a closure claim (gate round 1 P2-1 falsified the previous
+ *    unbounded version of this sentence): `requireName`'s trim set is a strict SUPERSET of the
+ *    DB's, so nothing it returns can violate the CHECK, and its visible-character requirement
+ *    rejects every value the suite exercises — but the predicate carries its own disclosed
+ *    residue (U+2800 is the one explicit exception; see `requireName`'s own doc). This branch of
  *    the `if` below, and `atg_name_nonblank` in the Set above, are being KEPT — not deleted — on
  *    purpose: deleting them would be an unreviewed narrowing of this mapping's surface bundled
  *    into a candidate that has not been confirmed, which is exactly the kind of unilateral call
@@ -207,17 +211,27 @@ function mapGroupConstraintError(error: unknown): unknown {
     && typeof pgErr.constraint === 'string'
     && NONBLANK_CHECK_CONSTRAINTS.has(pgErr.constraint)
   ) {
-    // `atg_name_nonblank` arm: unreachable for `name` through the production route on this
+    // `atg_name_nonblank` arm: not reachable for `name` through the production route on this
     // branch since Erratum 3 candidate REDRAFT v2 (PROPOSED 2026-09-19/20, pending owner
     // confirmation — see doc comment above). KEPT, not deleted, until the owner actually
     // confirms — do not narrow this Set or this branch as part of the candidate; that would be
-    // an implementer decision the candidate does not license. NOTE on the message below: it is
-    // now accurate only for the two `org_id` arms (whose predicate is still the ratified
-    // printable-ASCII one). Rewriting it would change a response body that this slice's real-DB
-    // suite froze with `toContain` assertions — a public-contract decision this candidate is not
-    // licensed to make, so it is disclosed here and left alone.
+    // an implementer decision the candidate does not license.
+    //
+    // MESSAGE, ROUND-2 FIX (gate round 1 §3 / P3-4). The previous message read '当前锁文 CHECK
+    // 只接受可打印 ASCII,纯中文名待 owner 勘误' and was left in place with the stated reason
+    // that this slice's real-DB suite had "froze[n] [it] with `toContain` assertions". That
+    // reason was FALSE and the gate verified it: no test in this repository asserts that string
+    // (`grep -rn '只接受可打印 ASCII' packages apps` ⇒ the single hit was this source line
+    // itself). An exemption reason that can be checked and found false is worse than no
+    // exemption (`feedback_exemption_reasons_rot_make_them_data`), so the reason is deleted and
+    // the message is corrected instead. The wording below is accurate for ALL THREE members of
+    // `NONBLANK_CHECK_CONSTRAINTS` — the two `org_id` arms (still the ratified printable-ASCII
+    // predicate, still reachable defence-in-depth) and the `name` arm — and it names the
+    // constraint through `details.constraint` rather than guessing which column failed. The
+    // error CODE is unchanged: `GROUP_NAME_UNSUPPORTED` is the shipped code for this mapping and
+    // renaming it would be a public-contract change this candidate is not licensed to make.
     return new ServiceError(
-      '当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误',
+      '名称或组织标识未通过数据库 CHECK 约束(详见 details.constraint)',
       400,
       'GROUP_NAME_UNSUPPORTED',
       { constraint: pgErr.constraint },
@@ -235,34 +249,108 @@ function mapGroupConstraintError(error: unknown): unknown {
 // load-bearing, not decorative.
 
 /**
- * Application-layer mirror of the migration's `atg_name_nonblank` trim set — Erratum 3 CANDIDATE,
- * REDRAFT v2 (PROPOSED 2026-09-19/20, pending owner confirmation; NOT ratified, NOT authorized).
+ * Application-layer name rule — Erratum 3 CANDIDATE, REDRAFT v2 + ROUND-2 FIX (PROPOSED
+ * 2026-09-20, pending owner confirmation; NOT ratified, NOT authorized, NOT merged).
  *
- * The DB-side set is ASCII space/TAB/CR/LF + U+3000 + U+200B/200C/200D + U+2060 + U+FEFF. JS's
- * own `\s` (identical to what `String.prototype.trim` removes) already covers space, TAB, CR, LF,
- * U+3000 and U+FEFF — but NOT U+200B, U+200C, U+200D, U+2060, which is precisely the family gate
- * round 8's P2-1 measured slipping through both layers at once and landing an invisible 201 row.
- * Adding those four here makes this set a strict SUPERSET of the DB set, which is the direction
- * that matters: every name this function returns already satisfies the CHECK by construction, so
- * a blank/invisible name is a typed 400 `GROUP_NAME_REQUIRED` and never a raw 23514 or a 500.
+ * WHY IT CHANGED IN ROUND 2. The REDRAFT v2 version of this function was a pure MIRROR of the
+ * migration's `atg_name_nonblank` trim set (JS `\s` plus U+200B/200C/200D/2060) and the code
+ * around it claimed that made "a blank/invisible name … a typed 400 `GROUP_NAME_REQUIRED`". Gate
+ * round 1 of that candidate (`impl-gate-A-slice1-name-rule-candidate-round1-20260920.md`, P2-1)
+ * falsified the QUANTIFIER, not the mirror: seven codepoints that are in NEITHER set — U+00AD,
+ * U+180E, U+2800, U+3164, U+034F, U+FE0F, U+115F — went through the real HTTP endpoint with
+ * status 201 and came back out of the list endpoint, i.e. a group whose name renders as nothing.
+ * A mirror can never fix that, because the thing being mirrored does not cover them either.
+ * So the application layer stops being a mirror and becomes the PRIMARY rule, in two parts:
  *
- * It is a TRIM, not a reject: a name of U+200B + 'HR' + U+200B becomes `'HR'` and is created, exactly as
- * `'  HR  '` already did, and an INTERNAL zero-width ('a' + U+200B + 'b') is preserved verbatim — the
- * DB predicate only looks at the edges too. Consequence, accepted and disclosed rather than
- * silently handled: 'H' + U+200B + 'R' and `'HR'` are DIFFERENT names under `uq_atg_org_name_active`
- * while rendering identically; option (i) accepts internal invisibles by design.
+ *  (1) EDGE TRIM — cosmetic, and still a strict SUPERSET of the DB trim set. `String.prototype
+ *      .trim`'s own set (JS `\s`: space, TAB, CR, LF, VT, FF, U+00A0, U+1680, U+2000-U+200A,
+ *      U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF) plus an EXPLICIT invisible set:
+ *      U+200B/200C/200D/2060 (the DB set's members JS `\s` does not cover) and U+00AD, U+180E,
+ *      U+034F, U+2800, U+3164, U+115F, U+1160 (blank-rendering codepoints — the gate's seven,
+ *      plus U+1160 which is U+3164's Jungseong sibling). Because this set contains the DB set,
+ *      every string this function RETURNS still satisfies `atg_name_nonblank` by construction.
+ *      Variation selectors U+FE00-U+FE0F are deliberately NOT in the trim set: trimming them
+ *      would rewrite a trailing emoji's presentation ('报销☺️' → '报销☺'). They cannot make a
+ *      name acceptable on their own, because part (2) rejects them.
  *
- * Superset direction, stated as a behaviour rather than an intention: an NBSP-only name (U+00A0,
- * in JS `\s` but NOT in the owner's DB set) is rejected HERE with 400 even though a direct SQL
- * insert of the same value would succeed. That asymmetry is the disclosed gap in the migration's
- * comment; it is not a defect in this function.
+ *  (2) VISIBLE-CHARACTER REQUIREMENT — the load-bearing half, and deliberately NOT an
+ *      enumeration (`feedback_trap_enumeration_does_not_converge`: a reject LIST does not
+ *      converge, so the rule is stated positively). The trimmed name must contain at least one
+ *      character that is BOTH (a) in `\p{L}\p{N}\p{P}\p{S}` — a general category that can
+ *      carry a glyph — AND (b) not in `\p{Default_Ignorable_Code_Point}` and not U+2800.
+ *
+ *      Both exclusions are MEASURED, not assumed. `/[\p{L}\p{N}\p{P}\p{S}]/u` on its own does
+ *      NOT close the gate's seven: three of them carry a visible general category — U+2800
+ *      BRAILLE PATTERN BLANK is `So`, U+3164 HANGUL FILLER and U+115F HANGUL CHOSEONG FILLER are
+ *      `Lo` — so that class alone ACCEPTS them (probe and output recorded in the verification MD
+ *      §29.1). `Default_Ignorable_Code_Point` is a Unicode property, not a list this file
+ *      maintains, and it covers U+00AD / U+180E / U+034F / U+FE0F / U+3164 / U+115F / U+1160 /
+ *      U+061C / U+2065 / the variation-selector and tag blocks without enumerating any of them.
+ *
+ *      DISCLOSED RESIDUE, stated as a residue and not as closure: U+2800 is NOT
+ *      default-ignorable, so it is the ONE explicit exception in this predicate. Any OTHER
+ *      codepoint whose general category is L/N/P/S but which renders blank in some font is still
+ *      accepted here. This rule is not claimed to be closed over "everything invisible"; it is
+ *      claimed to reject (i) everything JS `\s` covers, (ii) the DB trim set, (iii) every
+ *      default-ignorable codepoint, (iv) every Mark/Control/Separator-only name, and (v) U+2800 —
+ *      each of which the real-DB suite asserts through the production route.
+ *
+ *  (3) LENGTH — `GROUP_NAME_MAX_LENGTH` characters, counted in CODE POINTS (`[...s].length`,
+ *      which is how PostgreSQL counts `char_length`), checked BEFORE any DB round-trip. Gate
+ *      round 1 P3-1: `uq_atg_org_name_active` is a btree over `(org_id, name)` and a long
+ *      incompressible name makes the index tuple exceed btree's 2704-byte maximum, raising
+ *      `54000` — a code `mapGroupConstraintError` does not map, so the route's
+ *      `handleApprovalsError` turned it into an opaque 500. The column itself is `text`
+ *      (UNBOUNDED — there is no column-derived limit to read off the migration), so the cap is an
+ *      application-layer CANDIDATE decision, derived rather than invented: 255 is this
+ *      repository's standing convention for a human-typed display name (`varchar(255)` on
+ *      `roles.name`, `permissions.name`, `views.name`, …), and it is provably clear of the btree
+ *      limit — 255 codepoints are at most 1020 UTF-8 bytes, leaving ~1.6 KB of the 2704-byte
+ *      index tuple for `org_id` and per-tuple overhead. RESIDUE, disclosed: a pathologically long
+ *      `org_id` could still reach 54000, but `org_id` is `req.authenticatedTenantId` (never
+ *      caller-supplied), so that is not a route-reachable input. The lock's §2 names no length
+ *      clause, so this is an ADDITION awaiting the owner's word with the rest of erratum 3.
+ *
+ * IT IS A TRIM, NOT A REJECT, for the edges: U+200B + 'HR' + U+200B becomes `'HR'` and is
+ * created, exactly as `'  HR  '` already did, and an INTERNAL invisible ('a' + U+200B + 'b',
+ * 'a' + U+2800 + 'b') is preserved verbatim — the DB predicate only looks at the edges too.
+ * Consequence, accepted and DISCLOSED rather than silently handled: 'H' + U+200B + 'R' and
+ * `'HR'` are DIFFERENT names under `uq_atg_org_name_active` while rendering identically. Option
+ * (i) accepts internal invisibles by design; gate round 1 P3-5 carries this forward as an open,
+ * accepted consequence, not a defect.
+ *
+ * ASYMMETRY WITH THE DB LAYER, stated as behaviour: an NBSP-only name (U+00A0 — in JS `\s`, NOT
+ * in the owner's DB trim set) and each of the gate's seven codepoints are rejected HERE with 400
+ * even though a DIRECT SQL insert of the same value SUCCEEDS. That is the disclosed residue of
+ * the DB CHECK, measured by the real-DB suite's RESIDUE cases rather than argued; it is not a
+ * defect in this function, and it is the reason this function — not the CHECK — is the primary
+ * rule.
  */
-const NAME_EDGE_TRIM_PATTERN = /^[\s\u200B\u200C\u200D\u2060]+|[\s\u200B\u200C\u200D\u2060]+$/g
+const NAME_EDGE_TRIM_CLASS = '\\s\\u200B\\u200C\\u200D\\u2060\\u00AD\\u180E\\u034F\\u2800\\u3164\\u115F\\u1160'
+const NAME_EDGE_TRIM_PATTERN = new RegExp(`^[${NAME_EDGE_TRIM_CLASS}]+|[${NAME_EDGE_TRIM_CLASS}]+$`, 'gu')
+
+/** Characters that carry no glyph of their own — see part (2) above. U+2800 is the one explicit member. */
+const NAME_INVISIBLE_CLASS = '\\s\\u200B\\u200C\\u200D\\u2060\\u2800\\p{Default_Ignorable_Code_Point}'
+
+/** At least one glyph-carrying character: in L/N/P/S and not invisible. */
+const NAME_VISIBLE_CHAR_PATTERN = new RegExp(`(?![${NAME_INVISIBLE_CLASS}])[\\p{L}\\p{N}\\p{P}\\p{S}]`, 'u')
+
+/** Code points, not UTF-16 units — see part (3) above for the derivation. */
+const GROUP_NAME_MAX_LENGTH = 255
 
 function requireName(name: unknown): string {
   const trimmed = typeof name === 'string' ? name.replace(NAME_EDGE_TRIM_PATTERN, '') : ''
-  if (!trimmed) {
+  if (!trimmed || !NAME_VISIBLE_CHAR_PATTERN.test(trimmed)) {
     throw new ServiceError('name is required', 400, 'GROUP_NAME_REQUIRED')
+  }
+  const length = [...trimmed].length
+  if (length > GROUP_NAME_MAX_LENGTH) {
+    throw new ServiceError(
+      `name must be at most ${GROUP_NAME_MAX_LENGTH} characters`,
+      400,
+      'GROUP_NAME_TOO_LONG',
+      { maxLength: GROUP_NAME_MAX_LENGTH, actualLength: length },
+    )
   }
   return trimmed
 }
