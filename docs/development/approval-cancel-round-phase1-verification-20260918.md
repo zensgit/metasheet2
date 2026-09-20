@@ -4004,3 +4004,145 @@ origin/main                                                  → clean
 - 未改锁文正文;未合并;未 undraft;未开 PR;未动 #5851 分支;未动 `origin/main`;未对任何共享 /
   staging / 生产库应用迁移;全程未用 `git stash` / `git checkout -- <path>` / `git reset --hard`;
   只删我自己建的东西。
+
+---
+
+# Part N — §2-G3 第三句 候选读法 (a) 的第一次真库落地与实跑(2026-09-20)
+
+**状态:候选 PROPOSED,读法未裁。** 本 Part 记录的是「候选补丁 `reading-a` 被应用到分支上、第一次
+编译 + 真库跑通」这件事本身的读数,**不是** owner 已裁读法 (a) 的记录。锁文正文未改、设计 MD 里
+half C 仍登记为 OPEN(§3.4),PR 未开、未合并、未 undraft。
+
+- **分支**:`feat/approval-cancel-round-phase1-g3-reading-a`,基线 head
+  `b8b71539a6a89e51331e2e4874f994498df15c55`(= `origin/feat/approval-cancel-round-phase1`,草案 PR #5851)。
+- **候选来源**:`soak-working/c1-delegation-candidates-20260920/reading-a.patch`
+  (`git apply --index` 干净落地,`--stat` = 2 文件 / +291 / −1,与该目录 README §2.1 逐字相符)。
+  候选补丁**自称未编译、未运行**;本轮是它第一次被编译与执行。
+- **库**:一次性私有库 `metasheet2_c1_deleg_a_20260920`(owner `ms2testbed`,非超级),
+  `createdb` → 全量迁移 **414/414,EXIT=0** → 本轮全部跑动 → 收尾 `dropdb`。
+  未对任何共享 / staging / 生产库、也未对 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_*` 动过。
+
+## N1. 跑了什么,数字
+
+| 项 | 命令面 | 读数 |
+|---|---|---|
+| C-1 七件真库套件 | 7 个 `approval-cancel-round-*.db.test.ts`,`EXPECT_DB=1` 同库连跑 | **7 files / 70 tests passed,0 failed** |
+| 委托相关既有套件(`grep approval_delegations` 的集成件) | `approval-delegation-seam` / `-api` / `-selfservice` / `approval-can-decide-current-node` / `approval-departure-transfer` / `approval-route-preview-substrate` | **6 files / 39 tests passed,0 failed** |
+| 类型 | `packages/core-backend` `tsc --noEmit -p tsconfig.json` | **EXIT=0**(仓内 tsconfig `exclude` 掉 `**/*.test.ts`。测试文件另用一次性等价编译选项单独核过:该次调用共 **288 error,其中本文件 0**——288 条全部落在别的文件,因为这次临时调用没有 include 仓内的 `types/**/*` 全局类型扩展,不是本轮改动引入的) |
+| 本条款用例总数 | `approval-cancel-round-creation.db.test.ts` 内 `§2-G3 第三句` | **11 条**(候选补丁自带 6 条 + 本轮补 5 条) |
+
+七件套件的 70 条按文件拆:`-creation` **28**(候选前 17 + 候选 6 + 本轮 5)、`-lock-order-census` 10、
+`-attendance-fk-migration` 11、`-outlet-guards` 7、`-redemption` 6、`-node-timeout-effect` 5、`-seat-guards` 3。
+
+## N2. 11 条腿逐条(每条的断言都能区分「席位 = A」与「席位 = D」)
+
+| 用例 | 构造 | 实测席位 / 结果 |
+|---|---|---|
+| 正控 P4(a) | A→D 委托**仍然有效** | `[A]` — 与读法 (b) 的唯一分歧腿((b) 答 `[D]`) |
+| 正控 P5(a) | 委托已撤销(`active=FALSE`) | `[A]` |
+| 正控 P6(a) | 委托窗口已过期(`end_at` 在过去) | `[A]` |
+| 正控 P7(a) | 作用域不覆盖(`scope='template'` 指向别的模板) | `[A]` |
+| 正控 P9(a) **本轮新增** | 作用域**正好命中**原单模板且仍有效 | `[A]`((b) 在这一腿答 `[D]`) |
+| 负控 N5(a) | 委托有效 + 停权**原审批人 A** | 409 `CANCEL_ROUND_SEAT_INELIGIBLE`,`details = {ineligibleCount:1, reasons:['inactive']}`,零行,values-free |
+| 正控 P8(a) | 委托有效 + 停权**被委托人 D** | 201,席位 `[A]`(与候选前实测正相反) |
+| 正控 P10(a) **本轮新增** | 哨兵腿:自动审批节点(`system:auto-approval`)+ 被委托的人工节点 | 席位恰好 `[A]`;哨兵不在席位、不在 `requester_snapshot` |
+| 负控 N6(a) **本轮新增** | 零席位腿:整单由自动化批完,库里另有一条有效委托行 | 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,`details={reason:'no_human_approver'}`,零行 |
+| 正控 P11(a) **本轮新增** | **G-3**:D 在节点 1 是 A 的代理、在节点 2 有自己的席位(两节点顺序模板) | 席位 `{A, D}` **两人** |
+| 正控 P12(a) **本轮新增** | **G-4**:legacy `POST /api/approvals/:id/approve` 写的 approve 行(metadata 取自请求体,无 `nodeKey`) | 席位 `[D]` —— **不被还原**(见 §N4) |
+
+关于 P9(a) 的判别力,如实写明其上限:读法 (a) **根本不调用** `resolveActiveDelegationMap`,所以
+这一腿的绿**不构成**「templateId 作用域被正确处理」的任何证据;它证的是另一件事——
+「今天完全有效且完全在作用域内的委托,席位也不再跟着它走」,而候选前的实测在这一腿答 `[D]`。
+N6(a) 的判别力同理写明:它区分 A 与 D 的方式是**两者都不成立**(任一被坐下,创建就会成功、
+`thrown` 为假、零行断言会红),它**不是**还原本身的 oracle。
+
+## N3. Mutation 台账(`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`;全程未用 `git checkout --` / `reset --hard`)
+
+备份基准:候选落地后的 `ApprovalProductService.ts`,sha256
+`12bf492615c2e4f205f58b330b03db780ff8e6a1c5384448adf801761bd2c5ce`;
+基线(候选前)副本 sha256 `f35a38d43a6767ef65ce77555e91a80640eddb8554e403353c4d2a25bcefc7ea`
+(= 独立验证报告 §附录记录的同一值,可独立复核)。
+
+**M-A(G-1,任务书点名):把席位推导整段退回基线**(直接 `cp` 基线副本覆盖,不手写 mutant)。
+
+- 读数:**9 failed / 2 passed**(11 条腿)。
+- 红的原文(节选,逐字):
+  - `P4(a)` — `AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]` /
+    `- "wi4-delA-g3dlg-valid-…"` `+ "wi4-delD-g3dlg-valid-…"`
+  - `P11(a)` — `AssertionError: expected [ Array(1) ] to deeply equal [ …(2) ]` /
+    `- "wi4-selA-g3dlg-sibling-…"`(只剩 `"wi4-selD-…"` 一人)
+  - `P10(a)` — `expected [ 'wi4-aelD-g3dlg-sent-…' ] to deeply equal [ 'wi4-aelA-g3dlg-sent-…' ]`
+  - `N5(a)` — `AssertionError: expected undefined to be truthy`(停权 A 在基线下**不阻断**)
+- **没有红的两条,如实点名并说明为什么它们本来就不该红**:
+  - `P12(a)`(legacy 无 `nodeKey`)断言的就是**今天的行为**(席位 = D),基线下自然同值 ⇒ 绿;
+  - `N6(a)`(零席位)在两侧都走同一条零人类席位预检 ⇒ 绿。
+  两条在这条 mutation 下是**非回归守卫**,不是承重 oracle。按本仓口径「mutation 只证承重」,
+  这一句必须写出来,而不是把「新用例全红」当成结论。
+
+**M-B(node_key 合取的独立 mutation;README §2.2 自称该合取从未被实测):只删
+`AND a.node_key = r.metadata->>'nodeKey'` 一行,join 其余不动。**
+
+- 读数:**2 failed / 9 passed** —— 红的恰好是 `P11(a)` 与 `P12(a)`,**方向相反**:
+  - `P11(a)`:`expected [ Array(1) ] to deeply equal [ …(2) ]` —— D 自己在节点 2 的席位被折算给 A,
+    `{A, D}` 塌成 `{A}`,**会签门槛真的降低**;
+  - `P12(a)`:`- "wi4-delD-g3dlg-legacy-…"` `+ "wi4-delA-g3dlg-legacy-…"` —— 没有该合取,
+    legacy 那条无 `nodeKey` 的 approve 行**反而**被还原成 A。
+- 结论:该合取是**承重**的,且它的两个 oracle 在 M-A 下都不红 —— 只跑 M-A **证不了**它。
+  这正是把 G-3 / G-4 单独建腿的理由。
+
+**还原**:两条 mutation 各自跑完立刻 `cp` 还原并 `cmp` **identical**,sha256 回到
+`12bf4926…`;`git status --porcelain` 只剩本轮有意的两份改动。
+
+## N4. G-3 / G-4 实测(无论结果如何,照实)
+
+任务点名要实测「一条 approve 记录 metadata 无 `nodeKey` 的 legacy 行」。**做法是走生产路径,不是手改表**:
+用 legacy `POST /api/approvals/:id/approve` 端点批(该路由的 `metadata` 逐字取自请求体,
+`routes/approvals.ts:2877-2879`,不传即 `{}`),因此那条 approve 行的 `metadata->>'nodeKey'` 是 NULL。
+
+**实测结果:席位 = `[D]`(被委托人),该席位不被还原。** 即候选补丁 README §2.3 披露的缺口,
+在真库上**被证实存在**,而不是停留在注释里的声明。方向上它退化成**候选前的行为**(永远不会给出更宽的
+席位),已经写成常驻正控 `P12(a)`:将来若有人让这条被还原成 A,这条断言会红,缺口必须重新登记而不是
+静默关闭。
+
+同一轮也把 README §6.2 的 G-3 建成了腿(`P11(a)`,兄弟席位),**实测 `{A, D}` 两人**;
+配合 M-B 的红,这条合取的取舍(不用 instance 级匹配)第一次有了读数而不是论证。
+
+## N5. 本轮发现并修掉的一个夹具缺陷(不是候选补丁的语义问题,但会污染共享库)
+
+`-creation` 文件的 `afterAll` 里,`approval_delegations` 的清理原本排在**最后**。M-A 那次红跑里,
+`N5(a)` 的创建在 mutant 下**意外成功**,留下一条没有被登记进 `createdRoundIds` 的撤销轮;
+随后 `DELETE FROM approval_instances` 撞 FK 报错:
+
+```
+error: update or delete on table "approval_instances" violates foreign key constraint
+       "approval_rounds_document_id_fkey" on table "approval_rounds"   (23503)
+```
+
+整个 `afterAll` 就此中断,**11 条 'all'-scope 委托配置行全部留在库里**,随后
+`approval-delegation-seam` 的 `expect(snap?.delegations).toEqual({[DELEGATOR]: DELEGATEE})` 多出
+7 个键而红 —— 正是独立验证报告 §4 自己被污染过的那一族(报告 §6.2 G-6 也点名要求门审确认清理真的跑到)。
+
+两处修法,都在夹具侧,不动被测代码:
+
+1. 委托行的 DELETE **前移到 `afterAll` 的第一条**,与任何 FK 纠缠的表无关 —— 这些行是全局配置,
+   会替换后续任何同名委托人的席位,传染性最强,必须与其它 DELETE 的成败解耦;
+2. 新增 `registerUnexpectedlyCreatedRound(documentId, instanceId)`,负控腿**意外创建成功**时把
+   实例与轮都登记进清理集合(`N5(a)` / `N6(a)` 已接线),从另一端堵同一个洞。
+
+**修完后的复核不是论证而是重跑**:再跑一次 M-A(同样 9 failed / 2 passed),跑完
+`select count(*) from approval_delegations` = **0**;随后委托六件套 **39/39 全绿**。
+
+## N6. 本轮**没有**做的(如实列)
+
+- **没有**裁读法。设计 MD §3.4 的 `G3 half C` 仍是 OPEN 条目,候选只以 PROPOSED 形态挂在它下面;
+  `design-md-fragment-open-registration.md` 那条 OPEN 文本**没有**被候选段落取代——
+  候选片段原文建议「删去 OPEN 条目」,本轮**不采纳**:读法未裁之前删掉一条 RATIFIED 条款的 OPEN 登记,
+  就是把 owner 没做的决定洗成既成事实。两者并存,OPEN 在上、候选在下。
+- **没有**实现读法 (b) / (a′) / 报告 §7 的 (b′)(失效即阻断 + 新错误码),也没有改 §14.3 出口表。
+- **没有**测 §4.2 披露的「同一个人既有角色席位又有被委托的 user 席位 ⇒ 席位数塌缩」;它是设计层取舍,
+  交 owner,已在设计 MD 登记。
+- **没有**测再入节点(`entry_epoch` 故意不在 join 里)会不会让同一 `(instance, node_key, assignee)`
+  出现多行委托 assignment 而使席位集合**膨胀**;已按「已知镜像风险」登记,不声称不存在。
+- **没有**跑 required `test (20.x)` 全量清单(本轮只跑七件套 + 委托六件 + `tsc`)。
+- **没有**动 C-2:C-2 的 rebase 与重跑仍欠,且按候选 README §8 它一定会在同一段代码上冲突。
+- **没有**合并、未 undraft、未开 PR、未改任何锁文、未对任何共享库应用迁移。
