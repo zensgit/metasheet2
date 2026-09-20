@@ -52,6 +52,7 @@
       :reacting-keys="reactingKeys"
       :current-user-id="currentUserId"
       :mention-suggestions="mentionSuggestions"
+      :mention-search="mentionSearch"
       :composer-initial-mentions="composerInitialMentions"
       :mention-candidates="mentionCandidates"
       @submit="(payload: { content: string; mentions: string[] }) => emit('submit', payload)"
@@ -72,7 +73,7 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
-import type { MetaCommentMentionSuggestion, MultitableComment } from '../types'
+import type { MetaCommentMentionSearch, MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { MtIconButton } from '../ui'
 import { commentLabel, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
@@ -105,6 +106,8 @@ withDefaults(defineProps<{
   reactingKeys?: string[]
   currentUserId?: string | null
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   composerInitialMentions?: MetaCommentMentionSuggestion[]
   mentionCandidates?: MentionCandidateInput[]
 }>(), {

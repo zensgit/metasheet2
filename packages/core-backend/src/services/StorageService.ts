@@ -57,7 +57,16 @@ export function resolveWithinBase(basePath: string, key: string): string {
  * module-private. Exporting it is the named prerequisite, not a new capability: no implementation
  * changes, and the only in-repo implementation remains `LocalStorageProvider` below.
  */
+export type ContentAddressedAttachmentSource = {
+  bytes: Buffer
+  immutableVersion: string
+  contentSha256: string
+  sizeBytes: number
+}
+
 export interface StorageProvider {
+  uploadContentAddressed?(file: Buffer, options: UploadOptions): Promise<StorageFile>
+  readContentAddressed?(storageKey: string): Promise<ContentAddressedAttachmentSource>
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
   /** B3-07 §7: write a physical object AT a caller-chosen deterministic storage key — the symmetric
    * write-side counterpart to `downloadByKey`/`deleteByKey`, completing the by-key triple. Unlike
@@ -237,6 +246,26 @@ class LocalStorageProvider implements StorageProvider {
       this.logger.error(`Failed to upload file ${displayName}`, error as Error)
       throw error
     }
+  }
+
+  async uploadContentAddressed(file: Buffer, options: UploadOptions): Promise<StorageFile> {
+    const bytes = Buffer.from(file)
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex')
+    // The identity is fixed before exclusive-create, never discovered from mutable bytes during archive capture.
+    return this.upload(bytes, { ...options, filename: `sha256-${digest}` })
+  }
+
+  async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
+    const match = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sha256-([0-9a-f]{64})$/.exec(storageKey)
+    if (!match) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    let bytes: Buffer
+    try { bytes = await fs.readFile(resolveWithinBase(this.basePath, storageKey)) } catch {
+      throw new Error('ATTACHMENT_SOURCE_UNAVAILABLE')
+    }
+    if (crypto.createHash('sha256').update(bytes).digest('hex') !== match[1]) {
+      throw new Error('ATTACHMENT_SOURCE_DRIFTED')
+    }
+    return { bytes, immutableVersion: `sha256:${match[1]}`, contentSha256: match[1]!, sizeBytes: bytes.length }
   }
 
   // B3-07 §7: key-addressed write. Containment (G2) is asserted exactly as `downloadByKey`/`deleteByKey`
@@ -515,6 +544,19 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
       this.emit('file:error', { operation: 'upload', error })
       throw error
     }
+  }
+
+  async uploadContentAddressed(file: Buffer, options: UploadOptions): Promise<StorageFile> {
+    if (file.length > this.uploadLimit) throw new Error('ATTACHMENT_SOURCE_SIZE_LIMIT')
+    if (!this.provider.uploadContentAddressed) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    const result = await this.provider.uploadContentAddressed(file, options)
+    this.emit('file:uploaded', result)
+    return result
+  }
+
+  async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {
+    if (!this.provider.readContentAddressed) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    return this.provider.readContentAddressed(storageKey)
   }
 
   async download(fileId: string): Promise<Buffer> {

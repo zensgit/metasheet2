@@ -107,6 +107,7 @@ owner 裁决"项目备料页 = 备料工作台新 tab,不另起炉灶":真正新
 **tenantId 必填、fail-closed(不是文档声明单租户就够)**:钉钉目的地 id 是部署级配置,宿主发送时只能证明"这个目的地是管理员管的",证明不了"它属于正在被播报的那个租户"——而一个在两个组织里都活跃的账号 token 不带租户声明,`x-tenant-id` 请求头就能选择用哪个租户身份推进。裁决:handoff 配置文件里 `tenantId` 是**必填**字段;不属于该租户的推进一律返回 **501**,故意与"这个部署根本没配接力"逐字节相同,不让外租户从报错里学到"这里有一条链,只是不是你的"。多租户部署目前**只能服务一条链**(按租户分链是后续工作,见 §6)。
 
 **钉钉群工作通知代打待办**:owner 裁决三方案(A 工作通知冒充待办 / B 单向待办镜像 / C 双向回流)评审一致——A 先上、B 是下一波、C 永不做。本轮交付的正是 A 的底座(`sendDingTalkWorkNotificationActionCard` 群 webhook),终点并行仓库+采购(R5),正文带"(本条由系统发送)"+ 批准人签名(R6)。**没有完成态、没有红点**,这一点必须在 UI 与文档里明说,不能读成"已经是待办"([[beiliao-dingtalk-todo-decision]])。
+  > 纠正（2026-09-16，三读者只读地图）：上面这句与代码不符——已上的 handoff 通知走的是**群机器人 webhook**（`DingTalkGroupDestinationService` / `dingtalk_group_deliveries`，正文带「(本条由系统发送)」），`sendDingTalkWorkNotificationActionCard`（按人工作通知）没有被任何备料路径调用；按人工作通知（A 方案本体）与钉钉待办镜像（B 方案，PR #5772，默认关闭）见 `dingtalk-todo-mirror-b-design-20260916.md`。
 
 ### 2.7 裁决清单
 

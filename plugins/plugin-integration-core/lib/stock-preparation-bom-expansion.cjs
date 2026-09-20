@@ -175,8 +175,9 @@ const MISSING_COMPONENT_DETAIL_LIMIT = 200
 // emits one `manualConfirm` decision — with its own anonymous-hold identity — per entry. So the
 // unbounded array became an unbounded response, an unbounded plan and an unbounded ledger.
 //
-// THE CAP IS ON RETAINED ENTRIES, NOT ON THE COUNTS. Past the limit `addRowError` stops appending
-// but keeps counting, so `rowErrorsTotal` and the per-type totals in `rowErrorTypeCounts` are TRUE
+// THE CAP IS ON RETAINED ENTRIES, NOT ON THE COUNTS. Past the limit the sample stops GROWING while
+// `addRowError` keeps counting (X5 below decides WHICH N entries the sample then holds — the cap
+// itself is unchanged), so `rowErrorsTotal` and the per-type totals in `rowErrorTypeCounts` are TRUE
 // TOTALS and `summary.errorTypes` still names a type whose every occurrence was dropped. An
 // operator reading a truncated expansion learns the real size of the problem; what they lose is the
 // per-position enumeration of a project that was never actionable position-by-position anyway.
@@ -192,6 +193,63 @@ const MISSING_COMPONENT_DETAIL_LIMIT = 200
 // big number: configuration may lower the cap or raise it within reach of the ceiling, never past.
 const ROW_ERROR_LIMIT = 5000
 const ROW_ERROR_LIMIT_CEILING = 20000
+
+// X5 — WHICH entries survive the cap. "The first N that arrived" was not an answer.
+//
+// D-C bounded the array; X4 (#5674) took the truncated SAMPLE out of the dry-run revision hash and
+// left only the overflow facts, so two reads retaining the same N entries in a different ORDER stop
+// being two revisions. Measured afterwards (rowErrorLimit=1, one batch read in two source orders),
+// a 409 survived both: the retained subset was still "whichever positions the source handed back
+// first", so the two dry-runs kept entries of DIFFERENT TYPES. The conflict planner emits one
+// manual_confirm decision per RETAINED entry, so `plan.summary.conflictTypes` came out as
+// [add_missing, invalid_quantity] one way and [add_missing, missing_component] the other. Those are
+// genuinely different plans; no hash recipe may paper over them, and none should. The selection
+// itself had to stop depending on arrival order.
+//
+// SO THE RETAINED SET IS THE N SMALLEST BY ROW IDENTITY, not the first N seen — a classic bounded
+// top-N (`createRowErrorCollector`): fill to N, then compare each later entry against the LARGEST
+// retained one and swap when the newcomer sorts below it. The surviving set is therefore a property
+// of the SET of rowErrors the batch produced, not of the order it produced them in, and the memory
+// bound D-C exists for is untouched: at most N entries are ever held (see the collector's header).
+//
+// THE KEY IS ROW IDENTITY, THEN THE ENTRY'S OWN CONTENT: `type`, then `path`, then
+// `idempotencyKey`, then `componentCode`, with `stableRowErrorContent` breaking ties. No timestamp,
+// no counter, no arrival index — any of those would re-introduce the production order under a
+// different name and this whole guard would be decoration.
+//
+// SCOPE OF THAT SENTENCE, BECAUSE THREE QUARTERS OF THE TUPLE IS EMPTY TODAY. Of the four identity
+// fields only `type` is ever populated: every `addRowError` call site in this module emits
+// `{type, field, depth}` (some with `relation`), and the ext-mapping branch adds
+// `{type, target, sourceColumn, expectedType, depth}` — not one payload carries `path`,
+// `idempotencyKey` or `componentCode`. So on production data the identity half degenerates to the
+// type token and THE CONTENT TIEBREAKER IS THE HALF THAT DOES THE WORK: it is what separates two
+// `invalid_quantity` entries differing only in `depth`, and dropping it would hand the cap back to
+// arrival order for every same-type collision. The other three fields stay declared because a
+// rowError carrying a row identity is a planned shape (the expanded ROW already has both
+// `idempotencyKey` and `path`) and because X4's `rowHashIdentityToken` reads the same token types.
+// `testTheSampleIsOrderBlindWhenTwoDefectsShareAType` pins the working half on a real expansion and
+// pins the key set of the `invalid_quantity` payload ONLY; `missing_component` is pinned by its own
+// `{type, field, depth} and nothing else` case; `ambiguous_component` and the ext-mapping payloads
+// carry no key-set pin today, so a `path` added THERE would not turn any test red — re-read this
+// paragraph before adding one. (The resemblance to X4 is in the TOKEN helper, not in
+// the key: `canonicalHashOrder` orders rowErrors with an identity of `() => ''`, content alone.)
+//
+// ASYMMETRY, DELIBERATE AND NARROW: an expansion that did NOT overflow still reports its rowErrors
+// in TRAVERSAL order — but NOT, as an earlier draft of this comment claimed, because sorting them
+// would move every under-cap deployment's revision. It would not. `stock-preparation-table-actions`
+// hashes the untruncated array through `canonicalHashOrder(expansion.rowErrors, () => '')`, which
+// re-sorts it by content first, so the array's order is ALREADY invisible to the revision (measured
+// on an 11-entry under-cap expansion: sorting changes the array's bytes and leaves the revision
+// hash identical). The two reasons that do hold: (1) `expansion.rowErrors` is what an operator
+// READS out of the dry-run response, and under the cap its order is the order the expander MET the
+// defects — a real diagnostic sequence, and the only place it survives; (2) under the cap the
+// retained set IS the whole set, so no selection is happening and no two reads can differ — sorting
+// would buy no determinism at all, while renumbering the positional `index` that
+// `stock-preparation-expansion-snapshot-mapper.cjs` hands `stampMissingChildLine`. Past the cap the
+// sorted sample DOES renumber that index (deterministically), and the stamped lines' pathKeys move
+// with it — that is the accepted price of determinism, not a contradiction of (2). The determinism
+// this constant is about is only in question once something was dropped.
+const ROW_ERROR_IDENTITY_FIELDS = Object.freeze(['type', 'path', 'idempotencyKey', 'componentCode'])
 
 const FORBIDDEN_PLAN_KEYS = Object.freeze([
   'sql',
@@ -726,8 +784,34 @@ const DEFAULT_ROOT_SELECTION = Object.freeze({
   mainDrawingPrefix: 'J',
   mainDrawingSuffix: '-00',
   sheetMetalSuffixes: Object.freeze(['-A', '-B']),
+  // #5862 — how `sheetMetalSuffixes` is matched against a drawing number. `endsWith` is the老系统
+  // reading (the list really is a suffix list); `contains` is the customer's stated rule (「图号含
+  // -A/-B/-C/-D」), under which the list is a TOKEN list and a token hits anywhere AFTER the first
+  // character (a code that merely STARTS with the token is not a hit). Total order of the two
+  // shape checks is fixed by `hasSheetMetalShape`: 总图 first, so a 总图 is never also 钣金.
+  sheetMetalMatch: 'endsWith',
+  // #5862 — whether a 钣金 code must also start with `mainDrawingPrefix`. `true` is the老系统
+  // reading (钣金 = `J…-A`); `false` lets a deployment whose 钣金 numbers do not share the 总图
+  // prefix still name them by token.
+  sheetMetalRequiresMainPrefix: true,
   dropDashDescendants: true,
 })
+
+const ROOT_SELECTION_SHEET_METAL_MATCH_MODES = Object.freeze(['endsWith', 'contains'])
+
+// THE CLOSED KEY SET of a `rootSelection` block. A key outside it is refused rather than ignored: the
+// block is deploy config that is snapshotted and hashed, and an ignored misspelling
+// (`sheetMetalMatchMode`, `sheetMetalSuffix`) would store a rule the expander never runs — the same
+// "the stored config must not lie about what runs" argument the action normalizer makes.
+const ROOT_SELECTION_KEYS = Object.freeze([
+  'enabled',
+  'mainDrawingPrefix',
+  'mainDrawingSuffix',
+  'sheetMetalSuffixes',
+  'sheetMetalMatch',
+  'sheetMetalRequiresMainPrefix',
+  'dropDashDescendants',
+])
 
 function optionalStringList(input, field) {
   if (input === undefined || input === null) return undefined
@@ -762,14 +846,28 @@ function normalizeRootSelection(input) {
   if (!isPlainObject(input)) {
     throw new StockPreparationBomExpansionError('rootSelection must be an object', { field: 'rootSelection' })
   }
+  for (const key of Object.keys(input)) {
+    if (!ROOT_SELECTION_KEYS.includes(key)) {
+      throw new StockPreparationBomExpansionError(`rootSelection.${key} is not a recognized key`, { field: `rootSelection.${key}` })
+    }
+  }
   const prefix = optionalRuleToken(input.mainDrawingPrefix, 'rootSelection.mainDrawingPrefix', { allowEmpty: true })
   const suffix = optionalRuleToken(input.mainDrawingSuffix, 'rootSelection.mainDrawingSuffix')
   const sheetMetal = optionalStringList(input.sheetMetalSuffixes, 'rootSelection.sheetMetalSuffixes')
+  const sheetMetalMatch = optionalRuleToken(input.sheetMetalMatch, 'rootSelection.sheetMetalMatch')
+  if (sheetMetalMatch !== undefined && !ROOT_SELECTION_SHEET_METAL_MATCH_MODES.includes(sheetMetalMatch)) {
+    throw new StockPreparationBomExpansionError(
+      `rootSelection.sheetMetalMatch must be one of ${ROOT_SELECTION_SHEET_METAL_MATCH_MODES.join(', ')}`,
+      { field: 'rootSelection.sheetMetalMatch' },
+    )
+  }
   return Object.freeze({
     enabled: optionalBoolean(input.enabled, 'rootSelection.enabled', DEFAULT_ROOT_SELECTION.enabled),
     mainDrawingPrefix: prefix === undefined ? DEFAULT_ROOT_SELECTION.mainDrawingPrefix : prefix,
     mainDrawingSuffix: suffix === undefined ? DEFAULT_ROOT_SELECTION.mainDrawingSuffix : suffix,
     sheetMetalSuffixes: Object.freeze(sheetMetal === undefined ? [...DEFAULT_ROOT_SELECTION.sheetMetalSuffixes] : sheetMetal),
+    sheetMetalMatch: sheetMetalMatch === undefined ? DEFAULT_ROOT_SELECTION.sheetMetalMatch : sheetMetalMatch,
+    sheetMetalRequiresMainPrefix: optionalBoolean(input.sheetMetalRequiresMainPrefix, 'rootSelection.sheetMetalRequiresMainPrefix', DEFAULT_ROOT_SELECTION.sheetMetalRequiresMainPrefix),
     dropDashDescendants: optionalBoolean(input.dropDashDescendants, 'rootSelection.dropDashDescendants', DEFAULT_ROOT_SELECTION.dropDashDescendants),
   })
 }
@@ -780,10 +878,20 @@ function hasMainDrawingShape(code, rules) {
   return text.startsWith(rules.mainDrawingPrefix) && text.endsWith(rules.mainDrawingSuffix)
 }
 
+// ORDER IS THE CONTRACT: the 总图 shape is checked FIRST and wins. Under `endsWith` the two shapes
+// could not overlap (a code cannot end with both `-00` and `-A`), so the old body never had to say
+// so; under `contains` they can (`J1-A-00` contains `-A`), and a 总图 that also counted as 钣金 would
+// survive root selection as a 钣金 root even when a newer version of the same 总图 superseded it.
 function hasSheetMetalShape(code, rules) {
   const text = toKey(code)
   if (text === null) return false
-  if (!text.startsWith(rules.mainDrawingPrefix)) return false
+  if (hasMainDrawingShape(text, rules)) return false
+  if (rules.sheetMetalRequiresMainPrefix !== false && !text.startsWith(rules.mainDrawingPrefix)) return false
+  if (rules.sheetMetalMatch === 'contains') {
+    // A hit must sit AFTER the first character: `-A` at index 0 is a code that starts with the token,
+    // which the customer's rule (「图号含 -A」 — a segment separator followed by the letter) does not mean.
+    return rules.sheetMetalSuffixes.some((token) => text.indexOf(token, 1) > 0)
+  }
   return rules.sheetMetalSuffixes.some((suffix) => text.endsWith(suffix))
 }
 
@@ -844,11 +952,19 @@ function dashHierarchyRelationship(code1, code2) {
  * 展开出来(那正是老系统剔除它的理由:它已经是别人的子级)。
  */
 function selectOrderRootCandidates(candidates, rules) {
-  if (!rules || rules.enabled !== true) return { selected: candidates.slice(), droppedCount: 0 }
+  if (!rules || rules.enabled !== true) {
+    return { selected: candidates.slice(), droppedCount: 0, report: makeRootSelectionReport({ mode: 'disabled' }) }
+  }
   const mains = candidates.filter((candidate) => hasMainDrawingShape(candidate.componentCode, rules))
   if (mains.length === 0) {
     // 无总图:全部订单行当根,但互为 dash 层级关系的,把作为子级的那条剔除。
-    if (rules.dropDashDescendants !== true) return { selected: candidates.slice(), droppedCount: 0 }
+    if (rules.dropDashDescendants !== true) {
+      return {
+        selected: candidates.slice(),
+        droppedCount: 0,
+        report: makeRootSelectionReport({ mode: 'no_main_drawing', selectedCount: candidates.length }),
+      }
+    }
     const dropped = new Set()
     for (let i = 0; i < candidates.length; i += 1) {
       for (let j = 0; j < candidates.length; j += 1) {
@@ -862,7 +978,12 @@ function selectOrderRootCandidates(candidates, rules) {
       }
     }
     const selected = candidates.filter((_, index) => !dropped.has(index))
-    return { selected, droppedCount: candidates.length - selected.length }
+    const droppedCount = candidates.length - selected.length
+    return {
+      selected,
+      droppedCount,
+      report: makeRootSelectionReport({ mode: 'no_main_drawing', selectedCount: selected.length, dashDescendantsDropped: droppedCount }),
+    }
   }
   // 有总图:钣金件全要 + 总图只要版本最高的那一张(老系统 `Stream.max`,并列时取先到的那条)。
   let best = mains[0]
@@ -870,11 +991,53 @@ function selectOrderRootCandidates(candidates, rules) {
     if (compareSourceVersion(candidate.sourceVersion, best.sourceVersion) > 0) best = candidate
   }
   const keep = new Set([best])
+  let sheetMetalRoots = 0
   for (const candidate of candidates) {
-    if (hasSheetMetalShape(candidate.componentCode, rules)) keep.add(candidate)
+    // `hasSheetMetalShape` is false for every 总图 (see its header), so a superseded 总图 version
+    // can never sneak back in here as a 钣金 root, whatever the match mode.
+    if (hasSheetMetalShape(candidate.componentCode, rules)) {
+      keep.add(candidate)
+      sheetMetalRoots += 1
+    }
   }
   const selected = candidates.filter((candidate) => keep.has(candidate))
-  return { selected, droppedCount: candidates.length - selected.length }
+  const droppedCount = candidates.length - selected.length
+  return {
+    selected,
+    droppedCount,
+    report: makeRootSelectionReport({
+      mode: 'main_drawing',
+      mainDrawingCandidates: mains.length,
+      sheetMetalRoots,
+      // Superseded 总图 versions are dropped too but are NOT "other": they are `mainDrawingCandidates - 1`.
+      otherCandidatesDropped: droppedCount - (mains.length - 1),
+    }),
+  }
+}
+
+/**
+ * #5862 — VALUES-FREE 根选择报告:一个模式 token、四个整数、若干 flag token。没有图号、没有名称。
+ *
+ * 它回答的是操作员在 dry-run 里最常问的那一句「为什么根是这几条」:有没有认出总图、认出了几张
+ * 钣金、剔了几条、有没有可疑形状(一张总图配两张以上钣金 / 有总图却一张钣金都没有 / 没总图却
+ * 多根)。flag 只是提示,不阻断 —— 「可疑」在一家工厂是常态,在另一家是错配,那是配置的事。
+ */
+function makeRootSelectionReport({ mode, mainDrawingCandidates = 0, sheetMetalRoots = 0, otherCandidatesDropped = 0, dashDescendantsDropped = 0, selectedCount = 0 }) {
+  const flags = []
+  if (mode === 'main_drawing') {
+    if (sheetMetalRoots > 1) flags.push('multipleSheetMetalRoots')
+    if (sheetMetalRoots === 0) flags.push('sheetMetalRootMissing')
+  } else if (mode === 'no_main_drawing' && selectedCount > 1) {
+    flags.push('noMainDrawingMultipleRoots')
+  }
+  return {
+    mode,
+    mainDrawingCandidates,
+    sheetMetalRoots,
+    otherCandidatesDropped,
+    dashDescendantsDropped,
+    flags,
+  }
 }
 
 /**
@@ -1016,6 +1179,120 @@ function subtreeSummaryOf(counters) {
   }
 }
 
+// X5 — the sort key, and nothing but the entry's own identity in it.
+//
+// Scalars only, like X4's `rowHashIdentityToken`: a non-scalar contributes the empty token and the
+// content tiebreaker below is what tells such entries apart. The four fields are joined on U+0000,
+// the smallest code unit there is, so comparing the JOINED strings is the same total order as
+// comparing the tuples (no token can straddle the separator).
+function rowErrorIdentityToken(value) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+function rowErrorSortIdentity(entry) {
+  if (!isPlainObject(entry)) return ''
+  return ROW_ERROR_IDENTITY_FIELDS.map((field) => rowErrorIdentityToken(entry[field])).join('\u0000')
+}
+
+// Key-sorted JSON, so the tiebreaker is the entry's VALUE rather than its key insertion order —
+// `{type, field, depth}` and `{depth, field, type}` are the same rowError and must not compete.
+function stableRowErrorContent(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableRowErrorContent(item)).join(',')}]`
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableRowErrorContent(value[key])}`).join(',')}}`
+  }
+  const encoded = JSON.stringify(value)
+  return encoded === undefined ? 'undefined' : encoded
+}
+
+// Identity first, content second. For the scalar-only payloads this module emits, entries that tie on
+// BOTH are equal VALUES (the content projection serialises Date/Map/Set as '{}', so a non-scalar
+// payload — none exists today — could tie without being equal), so which of them the collector
+// happens to keep cannot change a single byte of what leaves this module.
+function compareRetainedRowErrors(left, right) {
+  if (left.identity !== right.identity) return left.identity < right.identity ? -1 : 1
+  if (left.content !== right.content) return left.content < right.content ? -1 : 1
+  return 0
+}
+
+/**
+ * X5 — THE BOUNDED, ORDER-BLIND rowError sample. See ROW_ERROR_IDENTITY_FIELDS' header for why the
+ * selection could not stay "the first N that arrived".
+ *
+ * THE MEMORY BOUND IS THE POINT AND IT IS STRUCTURAL: `entries` is pushed to only while it is
+ * SHORTER than `capacity`, and every later entry either replaces an existing slot or is dropped on
+ * the spot. There is no second buffer, no "collect then sort", no per-entry bookkeeping outside the
+ * retained set — a 40k-position project past a cap of 5000 holds 5000 decorated entries at its peak
+ * and the other 35k are unreferenced the moment `add` returns. That is the same O(N) ceiling D-C
+ * bought, and a regression to O(M) would be a return of the unbounded response D-C removed.
+ *
+ * The heap is built ONCE, on the first entry that does not fit — i.e. exactly when the expansion
+ * becomes truncated. Until then `entries` is untouched TRAVERSAL order, which is what lets
+ * `finalize` hand an under-cap expansion byte-identically the array it had before X5. Past that
+ * point `entries` is a MAX-heap on the sort key: the root is the worst entry retained, a newcomer
+ * that sorts below it takes its place, and anything else is refused. O(M log N).
+ */
+function createRowErrorCollector(capacity) {
+  const limit = Number.isInteger(capacity) && capacity > 0 ? capacity : ROW_ERROR_LIMIT
+  const entries = []
+  // `true` exactly when something was refused a slot or evicted an incumbent — which is exactly when the expansion is
+  // truncated, i.e. the same condition `rowErrorTruncationOf` reports as `total > retained`. ONE
+  // fact, read here to choose between traversal order and sorted order, so the array's shape and
+  // the summary's `rowErrorsTruncated` can never disagree.
+  let overflowed = false
+  const decorate = (entry) => ({
+    entry,
+    identity: rowErrorSortIdentity(entry),
+    content: stableRowErrorContent(entry),
+  })
+  const siftDown = (from) => {
+    let parent = from
+    for (;;) {
+      const left = parent * 2 + 1
+      if (left >= entries.length) return
+      const right = left + 1
+      const largest = right < entries.length && compareRetainedRowErrors(entries[right], entries[left]) > 0
+        ? right
+        : left
+      if (compareRetainedRowErrors(entries[largest], entries[parent]) <= 0) return
+      const held = entries[parent]
+      entries[parent] = entries[largest]
+      entries[largest] = held
+      parent = largest
+    }
+  }
+  return {
+    add(entry) {
+      if (entries.length < limit) {
+        entries.push(decorate(entry))
+        return
+      }
+      if (!overflowed) {
+        for (let index = Math.floor(entries.length / 2) - 1; index >= 0; index -= 1) siftDown(index)
+        overflowed = true
+      }
+      const candidate = decorate(entry)
+      // `>= 0` keeps the incumbent on a tie: a tie is value-equality (see compareRetainedRowErrors),
+      // so keeping either is the same output, and keeping the incumbent costs no sift.
+      if (compareRetainedRowErrors(candidate, entries[0]) >= 0) return
+      entries[0] = candidate
+      siftDown(0)
+    },
+    size() {
+      return entries.length
+    },
+    // TRAVERSAL order while nothing was dropped (byte-identity with the pre-X5 array), the sorted
+    // top-N once something was. A COPY is sorted, so calling this twice — the failure return
+    // threads the array into both the result and its summary — cannot disturb the heap.
+    finalize() {
+      const retained = overflowed ? entries.slice().sort(compareRetainedRowErrors) : entries
+      return retained.map((decorated) => decorated.entry)
+    },
+  }
+}
+
 /**
  * The D-C overflow stanza, or `undefined` when nothing overflowed.
  *
@@ -1047,7 +1324,7 @@ function truncatedRowErrorTypes(rowErrorTruncation) {
   return Object.keys(rowErrorTruncation.rowErrorTypeCounts || {})
 }
 
-function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree, rowErrorTruncation, duplicateSiblingsCollapsed, rootsFilteredOut }) {
+function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootMatches, maxDepth, maxRows, maxPages, maxReadCount, maxElapsedMs, readStats, errors, rowErrors, subtree, rowErrorTruncation, duplicateSiblingsCollapsed, rootsFilteredOut, rootSelectionReport }) {
   const summary = {
     projectNoPresent,
     matchField,
@@ -1099,7 +1376,22 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
   if (Number.isFinite(rootsFilteredOut) && rootsFilteredOut > 0) {
     summary.rootsFilteredOut = rootsFilteredOut
   }
+  // #5862 — the根选择 report, VALUES-FREE (mode / flag tokens and four integers). Mounted whenever
+  // the expander ran root selection (mode `disabled` included: "the rule is off" is itself the
+  // answer to 「为什么根是这几条」). Appended last so no conditional block above moves.
+  if (isPlainObject(rootSelectionReport)) summary.rootSelectionReport = cloneRootSelectionReport(rootSelectionReport)
   return summary
+}
+
+function cloneRootSelectionReport(report) {
+  return {
+    mode: report.mode,
+    mainDrawingCandidates: Number(report.mainDrawingCandidates || 0),
+    sheetMetalRoots: Number(report.sheetMetalRoots || 0),
+    otherCandidatesDropped: Number(report.otherCandidatesDropped || 0),
+    dashDescendantsDropped: Number(report.dashDescendantsDropped || 0),
+    flags: Array.isArray(report.flags) ? report.flags.filter((flag) => typeof flag === 'string') : [],
+  }
 }
 
 // THE ROW-PRODUCTION BOUNDARY.
@@ -1310,7 +1602,11 @@ async function expandPlmProjectBom(input = {}) {
   }
   const readStats = []
   const errors = []
-  const rowErrors = []
+  // X5. The retained SAMPLE lives here now, not in a bare array: bounded by `rowErrorLimit` exactly
+  // as D-C left it, but the N it keeps are the N smallest by row identity rather than the N that
+  // arrived first. `finalize()` — called once per return path — is what produces the array that
+  // leaves the module (traversal order under the cap, sorted top-N past it).
+  const rowErrorCollector = createRowErrorCollector(options.rowErrorLimit)
   // D-C counters. `rowErrorsTotal` counts EVERY call to `addRowError`, including the ones the cap
   // refused an array slot; `rowErrorTypeTotals` does the same per type. Both are read only through
   // `rowErrorTruncationOf`, which returns `undefined` — and therefore mounts nothing — when the
@@ -1320,6 +1616,7 @@ async function expandPlmProjectBom(input = {}) {
   // F1c counters — values-free, reported through `makeSummary`'s two conditional keys.
   let duplicateSiblingsCollapsed = 0
   let rootsFilteredOut = 0
+  let rootSelectionReport
   const rows = []
   // Zeroed the moment the block is enabled — so "enabled" and "the summary carries subtree counts"
   // are the same fact on every exit path, including `not_found` and an entry-read failure. Stays
@@ -1365,21 +1662,22 @@ async function expandPlmProjectBom(input = {}) {
     // call it "incomplete" when it is specifically "timed out".
     addGlobalError('read_failed', { object, causeClass: safeErrorCode(err), message: err && err.message })
   }
-  // COUNT FIRST, APPEND SECOND (D-C). Every caller keeps being counted; only the array is bounded.
+  // COUNT FIRST, OFFER SECOND (D-C). Every caller keeps being counted; only the SAMPLE is bounded.
   // The type key mirrors `makeSummary`'s `entry.type || entry.code` exactly, so the per-type totals
   // and `errorTypes` can never disagree about what a rowError's type is.
   const addRowError = (error) => {
     rowErrorsTotal += 1
     const type = isPlainObject(error) ? (error.type || error.code) : undefined
     if (type) rowErrorTypeTotals.set(type, (rowErrorTypeTotals.get(type) || 0) + 1)
-    // Deterministic truncation: the array keeps the FIRST `rowErrorLimit` entries in production
-    // order, so the same input produces the same retained prefix and the same revision every time.
-    if (rowErrors.length >= options.rowErrorLimit) return
-    rowErrors.push(error)
+    // X5. The collector decides what the cap keeps — the N smallest by row identity, so the same
+    // SET of rowErrors retains the same N whatever order the source produced them in. The counters
+    // above are updated BEFORE it and unconditionally, so `rowErrorsTotal` / `rowErrorTypeCounts`
+    // stay true totals whether an entry took a slot, replaced one, or was refused.
+    rowErrorCollector.add(error)
   }
   const rowErrorTruncation = () => rowErrorTruncationOf({
     total: rowErrorsTotal,
-    retained: rowErrors.length,
+    retained: rowErrorCollector.size(),
     typeTotals: rowErrorTypeTotals,
   })
   // Deliberately separate from `addRowError`: the two payloads have different audiences and
@@ -1441,6 +1739,9 @@ async function expandPlmProjectBom(input = {}) {
     pathMatches = matchesByField(pathExAttrRows, plan.pathExAttr.matchField, projectNo)
   } catch (err) {
     addReadError(err, plan.pathExAttr.object)
+    // X5: materialised ONCE and threaded on, so the result and the summary built from it are the
+    // same array rather than two independently-sorted copies.
+    const rowErrors = rowErrorCollector.finalize()
     return failureResult({
       projectNoPresent: true,
       matchField: plan.matchField,
@@ -1845,6 +2146,7 @@ async function expandPlmProjectBom(input = {}) {
   // PHASE 2 — 老系统根选择。PURE: no read, no row, just which candidates survive.
   const rootSelectionResult = selectOrderRootCandidates(rootCandidates, rootSelection)
   rootsFilteredOut = rootSelectionResult.droppedCount
+  rootSelectionReport = rootSelectionResult.report
 
   // PHASE 3 — expansion, in candidate (read) order. Byte-identical to the pre-F1c loop body.
   try {
@@ -1978,6 +2280,8 @@ async function expandPlmProjectBom(input = {}) {
   // still a failed project. (Unreachable today — the cap is 5000 and the array fills before it
   // overflows — but the status must follow the truth, not the retained sample.)
   const status = errors.length > 0 || rowErrorsTotal > 0 ? 'failed' : 'expanded'
+  // X5: the retained sample, materialised once for both the result and its summary.
+  const rowErrors = rowErrorCollector.finalize()
   return {
     valid: status === 'expanded',
     status,
@@ -2006,6 +2310,7 @@ async function expandPlmProjectBom(input = {}) {
       rowErrorTruncation: rowErrorTruncation(),
       duplicateSiblingsCollapsed,
       rootsFilteredOut,
+      rootSelectionReport,
     }),
   }
 }
@@ -2172,6 +2477,12 @@ function summarizeBomExpansionForEvidence(result = {}) {
   if (Number.isFinite(summary.rootsFilteredOut) && summary.rootsFilteredOut > 0) {
     evidence.rootsFilteredOut = Number(summary.rootsFilteredOut)
   }
+  // #5862 — the根选择 report rides the same allow-list projection (this is the ONLY way onto
+  // dry-run evidence, see above). Re-projected field by field, never spread: a future key on the
+  // summary object must be named here to reach evidence. VALUES-FREE by construction.
+  if (isPlainObject(summary.rootSelectionReport)) {
+    evidence.rootSelectionReport = cloneRootSelectionReport(summary.rootSelectionReport)
+  }
   return evidence
 }
 
@@ -2196,6 +2507,8 @@ module.exports = {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   DEFAULT_ROOT_SELECTION,
+  ROOT_SELECTION_KEYS,
+  ROOT_SELECTION_SHEET_METAL_MATCH_MODES,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
   // PUBLIC because the根选择 rules are DEPLOY CONFIG, not an internal: the action-config normalizer
@@ -2219,6 +2532,10 @@ module.exports = {
     readField,
     toKey,
     nonNegativeInteger,
+    // X5 — the bounded top-N sample collector, exposed so the memory bound can be asserted DIRECTLY
+    // (feed it M entries, ask its size) instead of only through an expansion's output length, which
+    // a "collect everything then slice" regression would satisfy just as well.
+    createRowErrorCollector,
     // The row-production boundary, exposed so a test can pin what a row CARRIES
     // without standing up an adapter and a whole expansion.
     createRow,
@@ -2228,6 +2545,9 @@ module.exports = {
     // 同父去重键。它们不做 IO,所以「老系统这条规则在这里是什么行为」可以不起适配器就钉住。
     // (`normalizeRootSelection` 已在上面公开导出 —— 它是配置契约的一部分,不只是测试钩子。)
     selectOrderRootCandidates,
+    hasMainDrawingShape,
+    hasSheetMetalShape,
+    makeRootSelectionReport,
     dashHierarchyRelationship,
     compareSourceVersion,
     splitNameAndSpec,

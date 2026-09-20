@@ -6091,9 +6091,36 @@ function isEncryptedSecretValue(value) {
   return typeof value === 'string' && value.startsWith(SECRET_PREFIX)
 }
 
+// Same sentinels / same posture as packages/core-backend/src/security/encrypted-secrets.ts
+// (resolveEncryptionMaterial). This file is CJS and cannot import the TS helper, so the production
+// check is re-stated minimally here; keep the two in sync. Precedent for an in-plugin production
+// gate: plugins/plugin-integration-core/lib/credential-store.cjs:63-71.
+const DEFAULT_INTEGRATION_SECRET_KEY = 'default-key-change-in-production'
+const DEFAULT_INTEGRATION_SECRET_SALT = 'default-salt-change-in-production'
+
 function getIntegrationSecretKey() {
-  const masterKey = process.env.ENCRYPTION_KEY || 'default-key-change-in-production'
-  const salt = Buffer.from(process.env.ENCRYPTION_SALT || 'default-salt-change-in-production')
+  const rawKey = process.env.ENCRYPTION_KEY
+  const rawSalt = process.env.ENCRYPTION_SALT
+  // Trim before comparing, matching auth-runtime-config.ts `isProductionRuntime` (which
+  // encrypted-secrets.ts reuses). A strict === here made NODE_ENV=" production " fail-close in
+  // core-backend while this plugin quietly wrote appSecrets under the built-in default key.
+  if (normalizeTextValue(process.env.NODE_ENV) === 'production') {
+    // values-free: variable names + reason only, never the value.
+    const issues = []
+    const key = normalizeTextValue(rawKey)
+    const salt = normalizeTextValue(rawSalt)
+    if (!key) issues.push('ENCRYPTION_KEY not configured / not set')
+    else if (key === DEFAULT_INTEGRATION_SECRET_KEY) issues.push('ENCRYPTION_KEY uses the built-in default placeholder value')
+    if (!salt) issues.push('ENCRYPTION_SALT not configured / not set')
+    else if (salt === DEFAULT_INTEGRATION_SECRET_SALT) issues.push('ENCRYPTION_SALT uses the built-in default placeholder value')
+    if (issues.length > 0) {
+      throw new Error(`[plugin-attendance] Invalid encryption material for production: ${issues.join('; ')}`)
+    }
+  }
+  // Derivation keeps using the RAW value (not the trimmed one): trimming would change pbkdf2's
+  // output for any deployment whose key has stray whitespace and orphan every stored secret.
+  const masterKey = rawKey || DEFAULT_INTEGRATION_SECRET_KEY
+  const salt = Buffer.from(rawSalt || DEFAULT_INTEGRATION_SECRET_SALT)
   return crypto.pbkdf2Sync(masterKey, salt, SECRET_KEY_ITERATIONS, SECRET_KEY_LENGTH, 'sha256')
 }
 
@@ -16489,6 +16516,17 @@ function isAttendanceReportSyncScheduledTriggerRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED, false)
 }
 
+// B3 item 2 (spec-B3-stock-prep-own-base): opt-out gate for the activate()-time PRELOAD of the
+// attendance report field catalog. Default ON - unset keeps today's behaviour (the catalog object is
+// provisioned and seeded at plugin boot). Setting ATTENDANCE_REPORT_FIELD_CATALOG_SEED=false (trimmed,
+// case-insensitive) skips ONLY that boot preload and logs one values-free info line; the on-demand
+// callers (saveAttendanceReportFormulaField / buildAttendanceReportFieldCatalogResponse) are untouched,
+// so opening a report still provisions the catalog. Read at call time, never at module load, so both
+// branches are exercisable in a single process.
+function isAttendanceReportFieldCatalogSeedEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_REPORT_FIELD_CATALOG_SEED, true)
+}
+
 function confidenceRank(value) {
   if (value === 'high') return 3
   if (value === 'medium') return 2
@@ -24541,6 +24579,10 @@ module.exports = {
   // node 18/20 matrix is the old-ICU oracle that makes the leg discriminating.
   __buildZonedDateForTests: buildZonedDate,
   __getZonedMinutesForTests: getZonedMinutes,
+  // The REAL symbols the DingTalk appSecret write (normalizeIntegrationConfigForStorage) and read
+  // (normalizeIntegrationConfig) go through, so the production encryption-material gate is proven
+  // on the production code path rather than on a copy.
+  __attendanceIntegrationSecretForTests: { getIntegrationSecretKey, encryptIntegrationSecretValue, decryptIntegrationSecretValue },
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
     createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
@@ -24689,6 +24731,7 @@ module.exports = {
     cloneAttendanceReportFieldCategories,
     cloneAttendanceReportFieldDefinitions,
     ensureAttendanceReportFieldCatalog,
+    isAttendanceReportFieldCatalogSeedEnabled,
     getAttendanceRecordReportFieldValue,
     getAttendanceReportFieldCatalogDescriptor,
     getAttendanceReportFieldProjectId,
@@ -25565,6 +25608,51 @@ module.exports = {
         [orgId, groupId, userId]
       )
       return rows.length > 0
+    }
+
+    // ACL slice A (2026-09-17): closed action set for group-manager reads.
+    // Write actions (members mutate, managers mutate, rule edit, fixed-schedule apply)
+    // stay admin-only and MUST NOT be added here without a separate owner decision.
+    const ATTENDANCE_GROUP_MANAGER_ACTIONS = new Set([
+      'view_group',
+      'list_members',
+      'view_team_availability',
+      'fixed_schedule_preview',
+    ])
+
+    async function canManageAttendanceGroup(orgId, userId, groupId, action) {
+      if (!ATTENDANCE_GROUP_MANAGER_ACTIONS.has(action)) return false
+      if (!orgId || !userId || !groupId) return false
+      return userManagesAttendanceGroup(orgId, groupId, userId)
+    }
+
+    async function listManagedAttendanceGroupIds(orgId, userId) {
+      const rows = await db.query(
+        `SELECT group_id
+         FROM attendance_group_managers
+         WHERE org_id = $1
+           AND user_id = $2
+           AND role IN ('owner', 'sub_owner')`,
+        [orgId, userId]
+      )
+      return rows.map((row) => row.group_id).filter(Boolean)
+    }
+
+    async function resolveAttendanceGroupCatalogAccess(orgId, userId) {
+      if (process.env.RBAC_BYPASS === 'true' || await hasAttendanceAdminAccess(userId)) {
+        return { kind: 'org' }
+      }
+      const groupIds = await listManagedAttendanceGroupIds(orgId, userId)
+      if (groupIds.length === 0) return { kind: 'denied' }
+      return { kind: 'managed', groupIds }
+    }
+
+    function respondAttendanceGroupCatalogForbidden(res) {
+      res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+    }
+
+    function respondAttendanceGroupManagerTableMissing(res) {
+      res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
     }
 
     function respondAttendanceSchedulerScopeForbidden(res) {
@@ -44817,7 +44905,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
         })
@@ -44834,29 +44922,85 @@ module.exports = {
         const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!routeActorAccess) return
         const orgId = routeActorAccess.orgId
+        const actorId = routeActorAccess.userId
         const { page, pageSize, offset } = parsePagination(req.query)
 
+        let catalogAccess
         try {
-          const countRows = await db.query(
-            'SELECT COUNT(*)::int AS total FROM attendance_groups WHERE org_id = $1',
-            [orgId]
-          )
+          catalogAccess = await resolveAttendanceGroupCatalogAccess(orgId, actorId)
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            respondAttendanceGroupManagerTableMissing(res)
+            return
+          }
+          logger.error('Attendance group catalog access failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
+          return
+        }
+        if (catalogAccess.kind === 'denied') {
+          respondAttendanceGroupCatalogForbidden(res)
+          return
+        }
+
+        const managedScope = catalogAccess.kind === 'managed'
+
+        try {
+          const countRows = managedScope
+            ? await db.query(
+              `SELECT COUNT(*)::int AS total
+               FROM attendance_groups g
+               WHERE g.org_id = $1
+                 AND g.id IN (
+                   SELECT m.group_id
+                   FROM attendance_group_managers m
+                   WHERE m.org_id = $1
+                     AND m.user_id = $2
+                     AND m.role IN ('owner', 'sub_owner')
+                 )`,
+              [orgId, actorId]
+            )
+            : await db.query(
+              'SELECT COUNT(*)::int AS total FROM attendance_groups WHERE org_id = $1',
+              [orgId]
+            )
           const total = Number(countRows[0]?.total ?? 0)
 
-          const rows = await db.query(
-            `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
-             FROM attendance_groups g
-             LEFT JOIN (
-               SELECT group_id, COUNT(*)::int AS member_count
-               FROM attendance_group_members
-               WHERE org_id = $1
-               GROUP BY group_id
-             ) member_counts ON member_counts.group_id = g.id
-             WHERE g.org_id = $1
-             ORDER BY g.created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [orgId, pageSize, offset]
-          )
+          const rows = managedScope
+            ? await db.query(
+              `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+               FROM attendance_groups g
+               LEFT JOIN (
+                 SELECT group_id, COUNT(*)::int AS member_count
+                 FROM attendance_group_members
+                 WHERE org_id = $1
+                 GROUP BY group_id
+               ) member_counts ON member_counts.group_id = g.id
+               WHERE g.org_id = $1
+                 AND g.id IN (
+                   SELECT m.group_id
+                   FROM attendance_group_managers m
+                   WHERE m.org_id = $1
+                     AND m.user_id = $2
+                     AND m.role IN ('owner', 'sub_owner')
+                 )
+               ORDER BY g.created_at DESC
+               LIMIT $3 OFFSET $4`,
+              [orgId, actorId, pageSize, offset]
+            )
+            : await db.query(
+              `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+               FROM attendance_groups g
+               LEFT JOIN (
+                 SELECT group_id, COUNT(*)::int AS member_count
+                 FROM attendance_group_members
+                 WHERE org_id = $1
+                 GROUP BY group_id
+               ) member_counts ON member_counts.group_id = g.id
+               WHERE g.org_id = $1
+               ORDER BY g.created_at DESC
+               LIMIT $2 OFFSET $3`,
+              [orgId, pageSize, offset]
+            )
 
           res.json({
             ok: true,
@@ -44865,6 +45009,7 @@ module.exports = {
               total,
               page,
               pageSize,
+              scope: managedScope ? 'managed' : 'org',
             },
           })
         } catch (error) {
@@ -44875,19 +45020,38 @@ module.exports = {
           logger.error('Attendance groups fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!actorAccess) return
         const orgId = actorAccess.orgId
+        const actorId = actorAccess.userId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          if (process.env.RBAC_BYPASS !== 'true' && !(await hasAttendanceAdminAccess(actorId))) {
+            const allowed = await canManageAttendanceGroup(orgId, actorId, groupId, 'view_group')
+            if (!allowed) {
+              res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' } })
+              return
+            }
+          }
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            respondAttendanceGroupManagerTableMissing(res)
+            return
+          }
+          logger.error('Attendance group lookup authorization failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
           return
         }
 
@@ -44923,7 +45087,7 @@ module.exports = {
           logger.error('Attendance group lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -50756,10 +50920,14 @@ module.exports = {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
 
-	    try {
-	      await ensureAttendanceReportFieldCatalog(context, DEFAULT_ORG_ID, logger)
-	    } catch (error) {
-	      logger.warn('Attendance report field catalog preload failed', error)
+	    if (isAttendanceReportFieldCatalogSeedEnabled()) {
+	      try {
+	        await ensureAttendanceReportFieldCatalog(context, DEFAULT_ORG_ID, logger)
+	      } catch (error) {
+	        logger.warn('Attendance report field catalog preload failed', error)
+	      }
+	    } else {
+	      logger.info('Attendance report field catalog preload skipped (ATTENDANCE_REPORT_FIELD_CATALOG_SEED=false)')
 	    }
 
     logger.info('Attendance plugin activated')

@@ -402,7 +402,6 @@ async function addDetailFieldAndFillBasics() {
   await mountView()
   ;(container!.querySelector('[data-testid="approval-field-palette-detail"]') as HTMLButtonElement).click()
   await flushUi()
-  setInput('approval-template-key', 'detail_row_key_repro')
   setInput('approval-template-name', '明细子字段行键回归')
   await flushUi()
 }

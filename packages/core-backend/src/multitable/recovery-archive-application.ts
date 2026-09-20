@@ -2,8 +2,10 @@ import type {
   RecoveryArchiveRouterDatabaseRuntime,
   UniverMetaRouterOptions,
 } from '../routes/univer-meta'
-import type { RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
+import type { RecoveryArchiveCustodyInput, RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
+import { resolveLocalArchiveCustody, resolveLocalArchiveCustodyRelease } from './recovery-local-custody'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
+import { snapshotRecoveryArchiveManualPolicy, type RecoveryArchiveManualAdmissionPolicy } from './recovery-archive-manual-admission'
 import type {
   RecoveryArchiveObservability,
   RecoveryArchiveWorkerLifecycle,
@@ -23,6 +25,7 @@ export type RecoveryArchiveApplicationWorkerDependencies = Pick<
   CreateRecoveryArchiveRestoreWorkerInput,
   | 'recheckAuthority'
   | 'apply'
+  | 'processDerivedWork'
   | 'leaseMs'
   | 'replayHorizonMs'
   | 'sweepLimit'
@@ -32,12 +35,13 @@ export type RecoveryArchiveApplicationWorkerDependencies = Pick<
 >
 
 export interface RecoveryArchiveApplicationComposition {
-  readonly keyCustody: RecoveryArchiveKeyCustodyAdapter
+  readonly keyCustody: RecoveryArchiveCustodyInput
   readonly objectStore: RecoveryArchiveObjectStoreProvider
   readonly auditedReplayHorizonMs: number
   readonly asyncResumeHorizonMs: number
   readonly workerIntervalMs: number
   readonly worker: RecoveryArchiveApplicationWorkerDependencies
+  readonly manualCapture?: RecoveryArchiveManualAdmissionPolicy
 }
 
 export type RecoveryArchiveApplicationCompositionFactory = () => RecoveryArchiveApplicationComposition
@@ -46,12 +50,14 @@ export interface RecoveryArchiveApplication {
   readonly routerOptions: UniverMetaRouterOptions | undefined
   startWorker(): void
   stopWorker(): Promise<void>
+  releaseCustody(): void
 }
 
 const COMPOSITION_INVALID = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_INVALID'
 const COMPOSITION_FACTORY_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FACTORY_FAILED'
 const DATABASE_RUNTIME_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_DATABASE_RUNTIME_FAILED'
 const WORKER_BOOT_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED'
+const WORKER_STOPPED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOPPED'
 const WORKER_STOP_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'
 const WORKER_STOP_TIMEOUT_MS = 10_000
 
@@ -70,6 +76,7 @@ export function createRecoveryArchiveApplication(
       routerOptions: undefined,
       startWorker() {},
       async stopWorker() {},
+      releaseCustody() {},
     })
   }
   if (!factory) throw new Error(COMPOSITION_INVALID)
@@ -99,6 +106,7 @@ export function createRecoveryArchiveApplication(
     runtime,
     recheckAuthority: composition.worker.recheckAuthority,
     apply: composition.worker.apply,
+    processDerivedWork: composition.worker.processDerivedWork,
     leaseMs: composition.worker.leaseMs,
     replayHorizonMs: composition.worker.replayHorizonMs,
     sweepLimit: composition.worker.sweepLimit,
@@ -111,16 +119,21 @@ export function createRecoveryArchiveApplication(
     recoveryArchiveDatabaseRuntime: database,
     recoveryArchiveAuditedReplayHorizonMs: composition.auditedReplayHorizonMs,
     recoveryArchiveAsyncResumeHorizonMs: composition.asyncResumeHorizonMs,
+    ...(composition.manualCapture ? { recoveryArchiveManualPolicy: composition.manualCapture } : {}),
   })
-  let workerStarted = false
+  let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
   let workerStop: Promise<void> | null = null
+  let workerDrained = false
+  const releaseCustody = resolveLocalArchiveCustodyRelease(composition.keyCustody)
 
   return Object.freeze({
     routerOptions,
     startWorker() {
-      if (workerStarted) return
-      workerStarted = true
+      if (workerState === 'stopped') throw new Error(WORKER_STOPPED)
+      if (workerState === 'failed') throw new Error(WORKER_BOOT_FAILED)
+      if (workerState === 'started') return
+      workerState = 'started'
       try {
         workerLoop = bootRecoveryArchiveRestoreWorker({
           env: activationEnv,
@@ -128,18 +141,24 @@ export function createRecoveryArchiveApplication(
           createWorker: () => createRecoveryArchiveRestoreWorker(workerInput),
           onResult: (result) => observability?.recordRun(result),
         })
+        if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       } catch {
+        workerState = 'failed'
         throw new Error(WORKER_BOOT_FAILED)
       }
-      if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
       recordLifecycleSafely(observability, 'started')
     },
     async stopWorker() {
+      workerState = 'stopped'
       if (workerStop) return workerStop
-      if (!workerLoop) return
+      if (!workerLoop) {
+        workerDrained = true
+        return
+      }
       const loop = workerLoop
       workerStop = stopRecoveryArchiveWorkerLoop(loop).then(
         () => {
+          workerDrained = true
           recordLifecycleSafely(observability, 'drained')
         },
         (error: unknown) => {
@@ -152,6 +171,10 @@ export function createRecoveryArchiveApplication(
       } finally {
         workerLoop = null
       }
+    },
+    releaseCustody() {
+      if (!workerDrained) throw new Error(WORKER_STOP_FAILED)
+      releaseCustody?.()
     },
   })
 }
@@ -196,12 +219,25 @@ function snapshotComposition(
     asyncResumeHorizonMs: source.asyncResumeHorizonMs,
     workerIntervalMs: source.workerIntervalMs,
     worker: snapshotWorkerDependencies(source.worker),
+    ...(source.manualCapture === undefined ? {} : { manualCapture: snapshotRecoveryArchiveManualPolicy(source.manualCapture) }),
   }
+  if (!composition.keyCustody || typeof composition.keyCustody !== 'object') throw new Error(COMPOSITION_INVALID)
+  // Resolve only authentic local capabilities; preserve the original input and its revocation checks.
+  const custody = resolveLocalArchiveCustody(composition.keyCustody)
+    ?? composition.keyCustody as RecoveryArchiveKeyCustodyAdapter
   if (
-    !composition.keyCustody ||
-    typeof composition.keyCustody !== 'object' ||
+    typeof custody.produceGenerationDek !== 'function' ||
+    typeof custody.unwrapGenerationDek !== 'function' ||
+    typeof custody.deriveDekFingerprint !== 'function' ||
+    typeof custody.macManifestRoot !== 'function' ||
+    typeof custody.verifyManifestRootMac !== 'function' ||
     !composition.objectStore ||
     typeof composition.objectStore !== 'object' ||
+    typeof composition.objectStore.put !== 'function' ||
+    typeof composition.objectStore.get !== 'function' ||
+    typeof composition.objectStore.head !== 'function' ||
+    typeof composition.objectStore.deleteExpired !== 'function' ||
+    typeof composition.objectStore.pin !== 'function' ||
     !Number.isSafeInteger(composition.auditedReplayHorizonMs) ||
     composition.auditedReplayHorizonMs < 0 ||
     !Number.isSafeInteger(composition.asyncResumeHorizonMs) ||
@@ -242,6 +278,7 @@ function snapshotWorkerDependencies(
   const apply = snapshotApplyDependencies(source.apply)
   const worker: RecoveryArchiveApplicationWorkerDependencies = {
     recheckAuthority: source.recheckAuthority,
+    processDerivedWork: source.processDerivedWork,
     apply,
     leaseMs: source.leaseMs,
     replayHorizonMs: source.replayHorizonMs,
@@ -252,6 +289,7 @@ function snapshotWorkerDependencies(
   }
   if (
     typeof worker.recheckAuthority !== 'function' ||
+    typeof worker.processDerivedWork !== 'function' ||
     !Number.isSafeInteger(worker.leaseMs) || worker.leaseMs < 1 ||
     !Number.isSafeInteger(worker.replayHorizonMs) || worker.replayHorizonMs < 0 ||
     (worker.sweepLimit !== undefined &&
@@ -271,6 +309,7 @@ function snapshotApplyDependencies(
 ): RecoveryArchiveApplicationWorkerDependencies['apply'] {
   if (!source || typeof source !== 'object') throw new Error(COMPOSITION_INVALID)
   const onMutationApplied = source.onMutationApplied
+  const afterCommit = source.afterCommit
   const apply: RecoveryArchiveApplicationWorkerDependencies['apply'] = {
     preliminaryFullRead: source.preliminaryFullRead,
     stabilizeAuthorization: source.stabilizeAuthorization,
@@ -279,13 +318,15 @@ function snapshotApplyDependencies(
     ...(onMutationApplied
       ? { onMutationApplied }
       : {}),
+    ...(afterCommit !== undefined ? { afterCommit } : {}),
   }
   if (
     typeof apply.preliminaryFullRead !== 'function' ||
     typeof apply.stabilizeAuthorization !== 'function' ||
     typeof apply.finalLockedFullRead !== 'function' ||
     typeof apply.evaluatePlanAuthorization !== 'function' ||
-    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function')
+    (apply.onMutationApplied !== undefined && typeof apply.onMutationApplied !== 'function') ||
+    (apply.afterCommit !== undefined && typeof apply.afterCommit !== 'function')
   ) {
     throw new Error(COMPOSITION_INVALID)
   }

@@ -1,8 +1,11 @@
+import { enqueueRecoveryArchiveDerivedEffect } from './recovery-archive-derived-effects'
 import {
   acquireMaterializedArchiveAsyncFencesInternal,
   applyMaterializedExactArchiveRecoveryAsyncChunkInternal,
   type MaterializedArchiveAsyncFenceLease,
   type MaterializedArchiveAsyncChunkApplyInput,
+  type ExactAnchorAppliedMutation,
+  type ExactAnchorPlanAuthContext,
 } from './exact-anchor-recovery-execute'
 import type { QueryFn } from './permission-service'
 import {
@@ -37,6 +40,41 @@ import {
   RecoveryArchiveSyncRestoreError,
 } from './recovery-archive-sync-restore'
 
+/** Durable job identity, not an HTTP request or a process-wide actor captured at worker startup. */
+export type RecoveryArchiveWorkerIdentity = Readonly<Pick<
+  RecoveryArchiveRestoreWorkerBinding,
+  'jobId' | 'workspaceId' | 'baseId' | 'sheetId' | 'actorId'
+>>
+
+export interface RecoveryArchiveWorkerApplyCallbacks {
+  readonly preliminaryFullRead: (query: QueryFn, identity: RecoveryArchiveWorkerIdentity) => Promise<boolean>
+  readonly stabilizeAuthorization: (
+    query: QueryFn,
+    context: ExactAnchorPlanAuthContext,
+    identity: RecoveryArchiveWorkerIdentity,
+  ) => Promise<'ready' | 'busy' | 'unavailable'>
+  readonly finalLockedFullRead: (
+    query: QueryFn,
+    lockedScope: Parameters<MaterializedArchiveAsyncChunkApplyInput['finalLockedFullRead']>[1],
+    identity: RecoveryArchiveWorkerIdentity,
+  ) => Promise<boolean>
+  readonly evaluatePlanAuthorization: (
+    query: QueryFn,
+    context: ExactAnchorPlanAuthContext,
+    identity: RecoveryArchiveWorkerIdentity,
+  ) => Promise<boolean>
+  readonly onMutationApplied?: (
+    query: QueryFn,
+    mutation: ExactAnchorAppliedMutation,
+    identity: RecoveryArchiveWorkerIdentity,
+  ) => Promise<void>
+  /** Best-effort effects only. Durable events belong in onMutationApplied's transaction. */
+  readonly afterCommit?: (
+    identity: RecoveryArchiveWorkerIdentity,
+    mutations: readonly ExactAnchorAppliedMutation[],
+  ) => Promise<void>
+}
+
 export interface RecoveryArchiveAsyncRestoreChunkInput {
   readonly transaction: RecoveryArchiveRestoreJobTransaction
   /** Autocommit query used for immutable object materialization and D4 reconstruction. */
@@ -45,9 +83,9 @@ export interface RecoveryArchiveAsyncRestoreChunkInput {
   readonly claim: RecoveryArchiveRestoreJobWorkerClaim
   readonly recheckAuthority: (
     query: RecoveryArchiveRestoreJobQuery,
-    context: { readonly sheetId: string; readonly actorId: string },
+    context: RecoveryArchiveWorkerIdentity,
   ) => Promise<boolean>
-  readonly apply: Omit<MaterializedArchiveAsyncChunkApplyInput, 'sheetId' | 'actorId'>
+  readonly apply: RecoveryArchiveWorkerApplyCallbacks
 }
 
 const facadeLeaseBrand: unique symbol = Symbol('RecoveryArchiveAsyncRestoreFacadeLease')
@@ -79,6 +117,7 @@ function mintRecoveryArchiveAsyncRestoreFacadeLease(
 
 type MaterializedWorkerChunk = {
   readonly binding: RecoveryArchiveRestoreWorkerBinding
+  readonly identity: RecoveryArchiveWorkerIdentity
   readonly planPayload: RecoveryArchiveAsyncPlanPayload
   readonly chunkPayload: RecoveryArchiveAsyncChunkPayload
   readonly targetRecords: Awaited<ReturnType<typeof readRecoveryArchiveCompleteSectionState>>['records']
@@ -94,21 +133,30 @@ export async function executeRecoveryArchiveAsyncRestoreChunk(
   input: RecoveryArchiveAsyncRestoreChunkInput,
 ): Promise<RecoveryArchiveRestoreChunkResult> {
   let fenceLease: MaterializedArchiveAsyncFenceLease | undefined
-  return runRecoveryArchiveRestoreChunk(input.transaction, input.claim, {
+  let identity: RecoveryArchiveWorkerIdentity | undefined
+  const committedMutations: ExactAnchorAppliedMutation[] = []
+  const result = await runRecoveryArchiveRestoreChunk(input.transaction, input.claim, {
     facadeLease: mintRecoveryArchiveAsyncRestoreFacadeLease(input.claim),
     read: input.query,
-    materialize: async (expected) => materializeWorkerChunk(input, expected),
+    materialize: async (expected) => {
+      const materialized = await materializeWorkerChunk(input, expected)
+      identity = admitWorkerChunk(materialized.payload).identity
+      return materialized
+    },
     prelock: async (query, context) => {
       if (context.sheetId !== input.claim.sheetId || context.jobId !== input.claim.jobId) {
         throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_INVALID')
       }
       fenceLease = await acquireMaterializedArchiveAsyncFencesInternal(query, context.sheetId)
     },
-    recheckAuthority: async (query, context) => input.recheckAuthority(query, {
-      sheetId: context.sheetId,
-      actorId: context.actorId,
-    }),
+    recheckAuthority: async (query, context) => {
+      if (!identity || identity.jobId !== context.jobId ||
+        identity.sheetId !== context.sheetId || identity.actorId !== context.actorId) invalidChunk()
+      return input.recheckAuthority(query, identity)
+    },
     apply: async (query, context) => {
+      // A transaction provider may retry its callback; retain facts only from its final attempt.
+      committedMutations.length = 0
       if (!fenceLease) {
         throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_APPLY_INVALID')
       }
@@ -125,11 +173,7 @@ export async function executeRecoveryArchiveAsyncRestoreChunk(
       }
       const result = await applyMaterializedExactArchiveRecoveryAsyncChunkInternal(
         query,
-        {
-          ...input.apply,
-          sheetId: context.sheetId,
-          actorId: context.actorId,
-        },
+        bindWorkerApply(input.apply, materialized.identity, committedMutations),
         {
           fenceLease,
           executionLease: context.executionLease,
@@ -167,6 +211,35 @@ export async function executeRecoveryArchiveAsyncRestoreChunk(
       return result.receipt
     },
   })
+  if (result.kind === 'committed' && identity && input.apply.afterCommit) {
+    try {
+      await input.apply.afterCommit(identity, committedMutations)
+    } catch {
+      console.warn('RECOVERY_ARCHIVE_POST_COMMIT_EFFECT_FAILED')
+    }
+  }
+  return result
+}
+
+function bindWorkerApply(
+  apply: RecoveryArchiveWorkerApplyCallbacks,
+  identity: RecoveryArchiveWorkerIdentity,
+  committedMutations: ExactAnchorAppliedMutation[],
+): MaterializedArchiveAsyncChunkApplyInput {
+  const onMutationApplied = apply.onMutationApplied
+  return {
+    sheetId: identity.sheetId,
+    actorId: identity.actorId,
+    preliminaryFullRead: (query) => apply.preliminaryFullRead(query, identity),
+    stabilizeAuthorization: (query, context) => apply.stabilizeAuthorization(query, context, identity),
+    finalLockedFullRead: (query, scope) => apply.finalLockedFullRead(query, scope, identity),
+    evaluatePlanAuthorization: (query, context) => apply.evaluatePlanAuthorization(query, context, identity),
+    onMutationApplied: async (query, mutation) => {
+      await enqueueRecoveryArchiveDerivedEffect(query, identity, mutation)
+      await onMutationApplied?.(query, mutation, identity)
+      committedMutations.push(mutation)
+    },
+  }
 }
 
 async function materializeWorkerChunk(
@@ -175,6 +248,14 @@ async function materializeWorkerChunk(
 ): Promise<RecoveryArchiveRestoreChunkMaterialized> {
   try {
     const binding = await readRecoveryArchiveRestoreWorkerBinding(input.query, input.claim)
+    if (binding.jobId !== input.claim.jobId || binding.sheetId !== input.claim.sheetId) invalidChunk()
+    const identity: RecoveryArchiveWorkerIdentity = Object.freeze({
+      jobId: binding.jobId,
+      workspaceId: binding.workspaceId,
+      baseId: binding.baseId,
+      sheetId: binding.sheetId,
+      actorId: binding.actorId,
+    })
     const loaded = await loadRecoveryArchiveAsyncPlanByBinding(
       input.runtime.objectStore,
       input.runtime.transactionDepth,
@@ -193,10 +274,7 @@ async function materializeWorkerChunk(
       baseId: binding.baseId,
       sheetId: binding.sheetId,
       generationId: binding.archiveGenerationId,
-      recheckAuthority: async (query) => input.recheckAuthority(query, {
-        sheetId: binding.sheetId,
-        actorId: binding.actorId,
-      }),
+      recheckAuthority: async (query) => input.recheckAuthority(query, identity),
     })
     if (
       archive.keyId !== binding.keyId ||
@@ -216,6 +294,7 @@ async function materializeWorkerChunk(
       objectStore: input.runtime.objectStore,
       manifestObject: archive.manifestObject,
       sectionObjects: archive.sectionObjects,
+      ...(archive.attachmentObjects ? { attachmentObjects: archive.attachmentObjects } : {}),
     })
     const targetRecords = materializeWorkerTargetRecords(
       binding.recoveryMode,
@@ -224,6 +303,7 @@ async function materializeWorkerChunk(
     )
     const payload: MaterializedWorkerChunk = Object.freeze({
       binding,
+      identity,
       planPayload: loaded.payload,
       chunkPayload,
       targetRecords,

@@ -50,6 +50,11 @@ export type WorkbenchLabelKey =
   | 'toast.buttonRunSuccess' | 'toast.buttonRunFailed'
   | 'toast.linkedRecordsUpdateFailed'
   | 'toast.fieldCreateFailed' | 'toast.fieldUpdateFailed' | 'toast.fieldDeleteFailed'
+  // #5707 follow-up: DELETE /api/multitable/fields/:fieldId answers a CODED 409
+  // MANAGED_FIELD_DELETE_REFUSED when the field sits on a plugin-managed sheet. The server prose
+  // is English and values-free; this is the localized copy the field manager shows instead --
+  // picked by CODE, exactly like the sheet-level toast.sheetPluginManaged above.
+  | 'toast.fieldManagedRefused'
   | 'toast.viewCreateFailed' | 'toast.viewUpdateFailed' | 'toast.viewDeleteFailed'
   | 'toast.sheetAccessRefreshFailed'
   | 'toast.sheetCreateBlocked' | 'toast.sheetRefreshFailed' | 'toast.sheetCreateFailed'
@@ -73,6 +78,8 @@ export type WorkbenchLabelKey =
   | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
   | 'confirm.discardContextChanges' | 'confirm.discardRecordChanges'
+  // #5813: the header Comments button ends an in-progress comment edit (see onToggleComments).
+  | 'confirm.discardCommentEdit'
   | 'confirm.pageLeaveBusy' | 'confirm.pageLeaveDirty'
   // B1-S1 D0-A: default confirm copy for a side-effecting button run (used when
   // the button's own confirm.message is blank).
@@ -201,6 +208,12 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.fieldCreateFailed': { en: 'Failed to create field', zh: '创建字段失败' },
   'toast.fieldUpdateFailed': { en: 'Failed to update field', zh: '更新字段失败' },
   'toast.fieldDeleteFailed': { en: 'Failed to delete field', zh: '删除字段失败' },
+  // Values-free on purpose: no plugin id, no sheet/field name, no server prose -- the same
+  // discipline the backend message keeps, so the copy cannot leak what the refusal is about.
+  'toast.fieldManagedRefused': {
+    en: "This table is managed by an application; its fields cannot be deleted here. Use the application's own flow.",
+    zh: '这张表由应用托管，字段不能在这里删除；请通过应用侧流程处理。',
+  },
   'toast.viewCreateFailed': { en: 'Failed to create view', zh: '创建视图失败' },
   'toast.viewUpdateFailed': { en: 'Failed to update view', zh: '更新视图失败' },
   'toast.viewDeleteFailed': { en: 'Failed to delete view', zh: '删除视图失败' },
@@ -246,8 +259,8 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     zh: '该表由系统托管，不能删除。',
   },
   'toast.sheetAlreadyDeleted': {
-    en: 'This sheet was already deleted. An administrator can restore it through the API.',
-    zh: '该数据表已被删除，管理员可通过接口恢复。',
+    en: 'This sheet was already deleted. An authorized administrator can restore it from the recycle bin.',
+    zh: '该数据表已被删除，有权限的管理员可从回收站恢复整表。',
   },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
@@ -263,6 +276,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'confirm.discardRecordChanges': {
     en: 'Discard unsaved record changes?',
     zh: '放弃未保存的记录更改吗？',
+  },
+  'confirm.discardCommentEdit': {
+    en: 'Discard your unsaved edit to this comment?',
+    zh: '放弃对这条评论未保存的修改吗？',
   },
   'confirm.buttonRun': {
     en: 'Run this button action?',
@@ -444,11 +461,11 @@ export function recordNotFound(recordId: string, isZh: boolean): string {
 
 // Sheet-delete confirm (workbench onDeleteSheet). Names the sheet the user is about to delete and
 // states the consequence honestly: records are hidden with the sheet (soft delete), and only an
-// administrator can bring it back through the API — there is no recycle-bin UI in this slice.
+// authorized administrator can bring it back from the sheet recycle bin.
 export function sheetDeleteConfirm(sheetName: string, isZh: boolean): string {
   return isZh
-    ? `删除数据表「${sheetName}」？记录会一并隐藏，可由管理员通过接口恢复。`
-    : `Delete sheet "${sheetName}"? Its records are hidden with it; an administrator can restore it through the API.`
+    ? `删除数据表「${sheetName}」？记录会一并隐藏，有权限的管理员可从回收站恢复整表。`
+    : `Delete sheet "${sheetName}"? Its records are hidden with it; an authorized administrator can restore the table from the recycle bin.`
 }
 
 // Sheet-delete failure copy, chosen by the server's error CODE (the codes are stable contracts;
@@ -463,6 +480,21 @@ export function sheetDeleteErrorMessage(
     case 'SHEET_SYSTEM_MANAGED': return workbenchLabel('toast.sheetSystemManaged', isZh)
     case 'SHEET_DELETED': return workbenchLabel('toast.sheetAlreadyDeleted', isZh)
     default: return error?.message || workbenchLabel('toast.sheetDeleteFailed', isZh)
+  }
+}
+
+// Field-delete failure copy, chosen by the server's error CODE, mirroring sheetDeleteErrorMessage.
+// #5707 made DELETE /api/multitable/fields/:fieldId answer 409 MANAGED_FIELD_DELETE_REFUSED for a
+// field on a plugin-managed sheet; its message is English (and values-free), so surfacing it raw
+// left zh-CN users reading English. Unknown codes keep the previous behaviour: the server's own
+// message when it sent one, else the generic failure toast.
+export function fieldDeleteErrorMessage(
+  error: { code?: string; message?: string } | null | undefined,
+  isZh: boolean,
+): string {
+  switch (error?.code) {
+    case 'MANAGED_FIELD_DELETE_REFUSED': return workbenchLabel('toast.fieldManagedRefused', isZh)
+    default: return error?.message || workbenchLabel('toast.fieldDeleteFailed', isZh)
   }
 }
 

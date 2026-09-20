@@ -1,5 +1,7 @@
 import type { Request, Response, Router } from 'express'
 import { z } from 'zod'
+import type { RecoveryArchiveManualStatus } from '../multitable/recovery-archive-manual-command'
+import { isRecoveryArchiveRestoreWorkerEnabled } from '../multitable/recovery-archive-restore-worker'
 
 import {
   RecoveryArchiveCatalogError,
@@ -25,6 +27,7 @@ import {
 } from '../multitable/recovery-archive-restore-jobs'
 
 const EMPTY_BODY_SCHEMA = z.object({}).strict()
+const MANUAL_BODY_SCHEMA = z.object({ requestId: z.string().regex(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/) }).strict()
 const ACCEPT_BODY_SCHEMA = z.object({
   previewIdentity: z.string().trim().min(1),
 }).strict()
@@ -88,6 +91,8 @@ export type RecoveryArchiveRestoreOwnerContextResolution =
     }
 
 export interface RecoveryArchiveRestoreOwnerService {
+  readonly captureManual?: (context: RecoveryArchiveRestoreOwnerContext, requestId: string) => Promise<RecoveryArchiveManualStatus>
+  readonly readManual?: (context: RecoveryArchiveRestoreOwnerContext, requestId: string) => Promise<RecoveryArchiveManualStatus>
   readonly preview?: (
     context: RecoveryArchiveRestoreOwnerContext,
     input: {
@@ -145,6 +150,34 @@ export function registerRecoveryArchiveRestoreOwnerRoutes(
   router: Router,
   dependencies: RecoveryArchiveRestoreOwnerRouteDependencies,
 ): void {
+  router.post('/sheets/:sheetId/recovery-archive/captures', async (req, res) => {
+    const parsed = MANUAL_BODY_SCHEMA.safeParse(req.body)
+    if (!parsed.success || !hasNoQuery(req)) return sendValidationError(res)
+    const context = await resolveContext(req, res, dependencies)
+    if (!context) return
+    if (!isRecoveryArchiveRestoreWorkerEnabled() || !dependencies.service.captureManual) {
+      return sendError(res, 503, 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE')
+    }
+    try {
+      const result = await dependencies.service.captureManual(context, parsed.data.requestId)
+      return res.status(result.state === 'pending' ? 202 : 200).json({ ok: true, data: projectManualStatus(result) })
+    } catch (error) { return sendManualError(res, error) }
+  })
+
+  router.get('/sheets/:sheetId/recovery-archive/captures/:requestId', async (req, res) => {
+    const parsed = MANUAL_BODY_SCHEMA.safeParse({ requestId: req.params.requestId })
+    if (!parsed.success || !hasNoQuery(req)) return sendValidationError(res)
+    const context = await resolveContext(req, res, dependencies)
+    if (!context) return
+    if (!isRecoveryArchiveRestoreWorkerEnabled() || !dependencies.service.readManual) {
+      return sendError(res, 503, 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE')
+    }
+    try {
+      const result = await dependencies.service.readManual(context, parsed.data.requestId)
+      return res.json({ ok: true, data: projectManualStatus(result) })
+    } catch (error) { return sendManualError(res, error) }
+  })
+
   router.post('/sheets/:sheetId/recovery-archive/preview', async (req, res) => {
     const parsed = PREVIEW_BODY_SCHEMA.safeParse(req.body ?? {})
     if (!parsed.success || !hasNoQuery(req)) return sendValidationError(res)
@@ -326,6 +359,19 @@ export function registerRecoveryArchiveRestoreOwnerRoutes(
   })
 }
 
+function projectManualStatus(result: RecoveryArchiveManualStatus): RecoveryArchiveManualStatus {
+  return { requestId: result.requestId, generationId: result.generationId, state: result.state }
+}
+
+function sendManualError(res: Response, error: unknown) {
+  const code = error instanceof Error ? error.message : ''
+  if (code === 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT') return sendError(res, 409, code)
+  if (code === 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE') return sendError(res, 403, 'FORBIDDEN')
+  if (code === 'RECOVERY_ARCHIVE_MANUAL_NOT_FOUND') return sendError(res, 404, 'NOT_FOUND')
+  if (code === 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE') return sendError(res, 503, code)
+  return sendError(res, 503, 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE')
+}
+
 function parseJobId(req: Request): string | null {
   const parsed = JOB_ID_SCHEMA.safeParse(req.params.jobId)
   return parsed.success ? parsed.data : null
@@ -492,6 +538,12 @@ function messageForErrorCode(code: string): string {
       return 'Archive recovery catalog is unavailable.'
     case 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE':
       return 'Archive recovery runtime is unavailable.'
+    case 'RECOVERY_ARCHIVE_MANUAL_UNAVAILABLE':
+      return 'Manual archive capture is unavailable.'
+    case 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE':
+      return 'Manual archives containing attachments are not yet available.'
+    case 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT':
+      return 'Archive request identity conflicts with its original scope.'
     case 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE':
       return 'Archive recovery scope is unavailable.'
     case 'INTERNAL_ERROR':

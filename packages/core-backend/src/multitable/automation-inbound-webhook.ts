@@ -21,6 +21,9 @@ export type InboundWebhookRejectReason =
   | 'stale_timestamp'
   | 'missing_signature'
   | 'bad_signature'
+  // #5803: the rule's sheet is soft-deleted. Decided only AFTER the signature verified, and answered with
+  // the same uniform 401 as every reason above; the label exists for the metric and the log only.
+  | 'sheet_deleted'
 
 export function inboundWebhookSecret(triggerConfig: Record<string, unknown> | null | undefined): string {
   const secret = triggerConfig && typeof triggerConfig.secret === 'string' ? triggerConfig.secret.trim() : ''

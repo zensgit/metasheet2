@@ -39,7 +39,7 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
       templates.value = result.data
       total.value = result.total
     } catch (e: any) {
-      error.value = e.message ?? '加载审批模板列表失败'
+      error.value = e.message ?? '加载审批表单列表失败'
     } finally {
       loading.value = false
     }
@@ -51,7 +51,7 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
     try {
       activeTemplate.value = await getTemplate(id)
     } catch (e: any) {
-      error.value = e.message ?? '加载审批模板详情失败'
+      error.value = e.message ?? '加载审批表单详情失败'
     } finally {
       loading.value = false
     }
@@ -63,7 +63,7 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
     try {
       activeVersion.value = await getTemplateVersion(templateId, versionId)
     } catch (e: any) {
-      error.value = e.message ?? '加载模板版本失败'
+      error.value = e.message ?? '加载表单版本失败'
     } finally {
       loading.value = false
     }

@@ -45,7 +45,7 @@ export class RecoveryArchiveObjectStoreError extends Error {
   }
 }
 
-class RecoveryArchiveLocalBindingMismatchError extends RecoveryArchiveObjectStoreError {
+export class RecoveryArchiveLocalBindingMismatchError extends RecoveryArchiveObjectStoreError {
   constructor() {
     super('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
   }
@@ -129,6 +129,13 @@ export interface RecoveryArchiveObjectStoreProvider {
 }
 
 export type RecoveryArchiveLocalObjectStoreEnvironment = 'test'
+
+// Concrete providers share admission with the caller-side transaction/result wrapper.
+export {
+  parsePutRequest as validateRecoveryArchiveObjectPutRequest,
+  parseExpectedBinding as validateRecoveryArchiveObjectExpectedBinding,
+  parseDeleteExpiredRequest as validateRecoveryArchiveObjectDeleteExpiredRequest,
+}
 
 interface BoundObject {
   version: string

@@ -462,7 +462,30 @@ async function loadSheetAndFields(
   return { sheet, fields }
 }
 
+/**
+ * Plugin-SDK record read (#5833). Same sheet-liveness contract as patch/create/delete in this file:
+ * a soft-deleted (`deleted_at IS NOT NULL`) or absent sheet throws the same
+ * `MultitableRecordNotFoundError('Sheet not found: …')` BEFORE the record SELECT runs, so a plugin that
+ * resolves a stale sheet id (e.g. after-sales' derived-id fallback) cannot read records back out of a
+ * deleted sheet. Only the liveness half of `loadSheetAndFields` is applied: the zero-fields refusal is a
+ * write precondition and a live field-less sheet keeps its prior read behaviour.
+ */
 export async function getRecord(
+  input: GetMultitableRecordInput,
+): Promise<LoadedMultitableRecord> {
+  const sheet = await loadSheetRow(input.query, input.sheetId, getMultitableRequestMetadataCache()?.sheets)
+  if (!sheet) {
+    throw new MultitableRecordNotFoundError(`Sheet not found: ${input.sheetId}`)
+  }
+  return loadRecordRowForLiveSheet(input)
+}
+
+/**
+ * Raw record read with NO sheet-liveness check. Only for callers that have already proven liveness in
+ * the same flow (`patchRecord` runs `loadSheetAndFields` first); keeps that path's statement sequence
+ * unchanged. Not exported — plugins must go through `getRecord`.
+ */
+async function loadRecordRowForLiveSheet(
   input: GetMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const recordRes = await input.query(
@@ -555,7 +578,8 @@ export async function patchRecord(
     )
   }
 
-  const existing = await getRecord({
+  // Liveness already proven by loadSheetAndFields above in this same flow.
+  const existing = await loadRecordRowForLiveSheet({
     query,
     sheetId: input.sheetId,
     recordId: input.recordId,
@@ -591,7 +615,7 @@ export async function patchRecord(
   )
 
   // W0 slice ② required fix (concurrent-delete fail-closed — recycled from Draft #4216's P1 review):
-  // `existing` above was read via `getRecord` (a plain SELECT, no `FOR UPDATE`) and
+  // `existing` above was read via `loadRecordRowForLiveSheet` (a plain SELECT, no `FOR UPDATE`) and
   // `guardRecordNotLockedForPlugin` likewise takes no row lock — so this UPDATE is the FIRST point in
   // this function that actually locks the row, and a concurrent DELETE of this exact record IS reachable
   // in the window between those reads and this statement (unlike the form-submit EDIT branch fixed in

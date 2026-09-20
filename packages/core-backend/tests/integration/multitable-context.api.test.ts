@@ -209,6 +209,7 @@ describe('Multitable context API', () => {
       canManageAutomation: true,
       canExport: true,
       canSendNotification: false,
+      canSubmitApproval: false,
       pitResetEnabled: false,
       sheetRevertEnabled: false,
       personalViewsEnabled: false,
@@ -409,6 +410,7 @@ describe('Multitable context API', () => {
       canManageAutomation: true,
       canExport: true,
       canSendNotification: true,
+      canSubmitApproval: true,
       pitResetEnabled: false,
       sheetRevertEnabled: false,
       personalViewsEnabled: false,
@@ -1304,6 +1306,7 @@ describe('Multitable context API', () => {
   test('prepares a person field preset by provisioning a people sheet and syncing users', async () => {
     let peopleSheetId = ''
     const fieldIdsByName = new Map<string, string>()
+    const insertedPayloads: Array<Record<string, unknown>> = []
 
     const { app } = await createApp({
       // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
@@ -1337,10 +1340,13 @@ describe('Multitable context API', () => {
           fieldIdsByName.set(fieldName, fieldId)
           return { rows: [], rowCount: 1 }
         }
-        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+        if (sql.includes('FROM users') && sql.includes('is_active = TRUE')) {
+          // #5807: the sync reads only id + name — it must not even ask for email / avatar.
+          expect(sql).not.toMatch(/\bemail\b|\bavatar_url\b/)
           return {
             rows: [
-              { id: 'user_amy', email: 'amy@example.com', name: 'Amy', avatar_url: 'https://cdn.example.com/amy.png' },
+              { id: 'user_amy', name: 'Amy' },
+              { id: 'user_nameless', name: null },
             ],
           }
         }
@@ -1350,13 +1356,7 @@ describe('Multitable context API', () => {
         }
         if (sql.includes('INSERT INTO meta_records')) {
           expect(params?.[1]).toBe(peopleSheetId)
-          const payload = JSON.parse(String(params?.[2] ?? '{}'))
-          expect(payload).toEqual({
-            [fieldIdsByName.get('User ID')!]: 'user_amy',
-            [fieldIdsByName.get('Name')!]: 'Amy',
-            [fieldIdsByName.get('Email')!]: 'amy@example.com',
-            [fieldIdsByName.get('Avatar URL')!]: 'https://cdn.example.com/amy.png',
-          })
+          insertedPayloads.push(JSON.parse(String(params?.[2] ?? '{}')))
           return { rows: [], rowCount: 1 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
@@ -1385,6 +1385,23 @@ describe('Multitable context API', () => {
       limitSingleRecord: true,
       refKind: 'user',
     })
+    // #5807: the four columns are still provisioned, but only User ID + Name are written; a user
+    // without a name is shown by id, never by email.
+    expect([...fieldIdsByName.keys()]).toEqual(['User ID', 'Name', 'Email', 'Avatar URL'])
+    expect(insertedPayloads).toEqual([
+      {
+        [fieldIdsByName.get('User ID')!]: 'user_amy',
+        [fieldIdsByName.get('Name')!]: 'Amy',
+      },
+      {
+        [fieldIdsByName.get('User ID')!]: 'user_nameless',
+        [fieldIdsByName.get('Name')!]: 'user_nameless',
+      },
+    ])
+    for (const payload of insertedPayloads) {
+      expect(payload).not.toHaveProperty([fieldIdsByName.get('Email')!])
+      expect(payload).not.toHaveProperty([fieldIdsByName.get('Avatar URL')!])
+    }
   })
 
   // Native person field (人员, design 2026-06-16): `type:'person'` is now a FIRST-CLASS native

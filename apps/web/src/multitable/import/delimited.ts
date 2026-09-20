@@ -1,5 +1,5 @@
 import type { MetaField } from '../types'
-import { importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
+import { importCancelled, importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 
 export type DelimitedParseResult = {
@@ -15,7 +15,22 @@ export type ImportBuildFailure = {
   fieldName?: string
 }
 
-export type ImportValueResolver = (rawValue: string, field: MetaField) => Promise<unknown | null> | unknown
+/**
+ * #5809 — per-build context handed to a resolver. `signal` aborts when the user cancels the import
+ * while the records are still being built, so a resolver can drop lookups it has only queued.
+ */
+export type ImportResolveContext = { signal?: AbortSignal }
+
+export type ImportValueResolver = ((rawValue: string, field: MetaField, context?: ImportResolveContext) => Promise<unknown | null> | unknown) & {
+  /**
+   * #5809 — optional look-ahead. Called once per build, BEFORE the row loop, with every non-empty raw
+   * value of the field's column (row order, overridden cells left out), so a resolver can queue its
+   * bounded per-token lookups for the whole import instead of one row at a time. Fire-and-forget: it
+   * decides nothing — every cell is still resolved (and fails) through the resolver call itself — and
+   * anything it throws is ignored.
+   */
+  prime?: (rawValues: string[], field: MetaField, context?: ImportResolveContext) => void
+}
 
 export type ImportBuildResult = {
   records: Array<Record<string, unknown>>
@@ -52,6 +67,13 @@ function detectDelimiter(text: string): ',' | '\t' {
 
 function normalizeLookupKey(value: string): string {
   return value.trim().toLowerCase()
+}
+
+/** #5809 — the rejection a cancelled build ends with (same shape bulk-import uses: name `AbortError`). */
+export function createImportAbortError(isZh = false): Error {
+  const error = new Error(importCancelled(isZh))
+  error.name = 'AbortError'
+  return error
 }
 
 export function extractImportTokens(rawValue: string): string[] {
@@ -127,13 +149,26 @@ export async function buildImportedRecords(params: {
   fieldResolvers?: Record<string, ImportValueResolver>
   fieldOverrides?: ImportFieldOverrides
   isZh?: boolean
+  /**
+   * #5809 — aborting it stops the build: no further row is resolved, resolvers receive it (so queued
+   * lookups can be dropped), and the promise rejects with an `AbortError` instead of returning records.
+   */
+  signal?: AbortSignal
 }): Promise<ImportBuildResult> {
-  const { parsedRows, fieldMapping, fields, fieldResolvers = {}, fieldOverrides = {}, isZh = false } = params
+  const { parsedRows, fieldMapping, fields, fieldResolvers = {}, fieldOverrides = {}, isZh = false, signal } = params
   const records: Array<Record<string, unknown>> = []
   const rowIndexes: number[] = []
   const failures: ImportBuildFailure[] = []
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw createImportAbortError(isZh)
+  }
+  const resolveContext: ImportResolveContext | undefined = signal ? { signal } : undefined
+
+  throwIfAborted()
+  primeFieldResolvers({ parsedRows, fieldMapping, fields, fieldResolvers, fieldOverrides, context: resolveContext })
 
   for (const [rowIndex, row] of parsedRows.entries()) {
+    throwIfAborted()
     const data: Record<string, unknown> = {}
     let rowFailure: string | null = null
     let failingField: MetaField | null = null
@@ -169,7 +204,7 @@ export async function buildImportedRecords(params: {
         }
         let resolved: unknown | null
         try {
-          resolved = await resolver(rawValue, field)
+          resolved = await (resolveContext ? resolver(rawValue, field, resolveContext) : resolver(rawValue, field))
         } catch (error: any) {
           rowFailure = error?.message ?? importValueResolveFailed(field.name, rawValue, isPersonField(field) ? 'person' : 'link', isZh)
           failingField = field
@@ -198,5 +233,36 @@ export async function buildImportedRecords(params: {
     }
   }
 
+  // A cancel during the last row (even one whose resolver ignored the signal) still rejects.
+  throwIfAborted()
   return { records, rowIndexes, failures }
+}
+
+function primeFieldResolvers(params: {
+  parsedRows: string[][]
+  fieldMapping: Record<number, string>
+  fields: MetaField[]
+  fieldResolvers: Record<string, ImportValueResolver>
+  fieldOverrides: ImportFieldOverrides
+  context?: ImportResolveContext
+}) {
+  const { parsedRows, fieldMapping, fields, fieldResolvers, fieldOverrides, context } = params
+  for (const [colIdx, fieldId] of Object.entries(fieldMapping)) {
+    if (!fieldId) continue
+    const prime = fieldResolvers[fieldId]?.prime
+    const field = fields.find((candidate) => candidate.id === fieldId)
+    if (!prime || !field || !(isLinkField(field) || isNativePersonField(field))) continue
+    const rawValues: string[] = []
+    for (const [rowIndex, row] of parsedRows.entries()) {
+      if (fieldOverrides[rowIndex]?.[fieldId] !== undefined) continue
+      const rawValue = (row[Number(colIdx)] ?? '').trim()
+      if (rawValue) rawValues.push(rawValue)
+    }
+    if (!rawValues.length) continue
+    try {
+      prime(rawValues, field, context)
+    } catch {
+      // Look-ahead only: the row loop resolves every cell itself.
+    }
+  }
 }

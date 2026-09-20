@@ -29,7 +29,35 @@ export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_
 // integration external system's canonical connection_id or attributable legacy
 // config.dataSourceId refuses a plain delete with this code.
 export const DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE = 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS'
-export const DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE = 'DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY'
+// The foreign key that re-points integration_external_systems.connection_id at data_sources(live_id)
+// (migration zzzz20260920120000). A soft delete of a source that still has a canonical binding is
+// refused by PostgreSQL on THIS constraint (SQLSTATE 23503) — the database backstop behind the
+// owner's ruling (2026-09-20, ①) that a referenced source cannot be deleted and force is retired.
+export const DATA_SOURCE_LIVE_CONNECTION_FK = 'fk_integration_external_systems_live_connection_id'
+// The constraint the same column carried BEFORE that migration (connection_id -> data_sources(id),
+// ON DELETE RESTRICT). A hard delete against a not-yet-migrated schema fails on it with the same
+// meaning, so both names are read as "still referenced".
+const DATA_SOURCE_LEGACY_CONNECTION_FK = 'fk_integration_external_systems_connection_id'
+
+/**
+ * Is this driver error the binding foreign key refusing a data-source delete?
+ * SQLSTATE first (23503 = foreign_key_violation; stable across server locales), constraint
+ * name second (pg reports it as `constraint`; a driver that omits it is accepted, because no
+ * other RESTRICT/NO ACTION foreign key targets data_sources — the two other referencing
+ * tables, data_source_connections and data_source_query_logs, are ON DELETE CASCADE).
+ * Never reads the message text: on a zh_CN PostgreSQL the English prose is not there.
+ */
+export function isLiveConnectionFkViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const { code, constraint } = error as { code?: unknown; constraint?: unknown }
+  if (code !== '23503') return false
+  if (typeof constraint !== 'string' || constraint.length === 0) return true
+  return constraint === DATA_SOURCE_LIVE_CONNECTION_FK || constraint === DATA_SOURCE_LEGACY_CONNECTION_FK
+}
+// Durable-first delete (PERM-04): the soft/hard delete row write failed, so the delete did NOT
+// happen — neither in memory nor on disk. Values-free by construction: the driver's text (host,
+// port, database, login) stays in the log; the client gets this code and a fixed sentence.
+export const DATA_SOURCE_DELETE_NOT_PERSISTED_CODE = 'DATA_SOURCE_DELETE_NOT_PERSISTED'
 
 /**
  * Actor context for data-source access decisions (the authority model).
@@ -649,15 +677,25 @@ export class DataSourceManager extends EventEmitter {
    *   fail-open.
    * - Any OTHER query failure propagates — the delete does not happen.
    */
-  async countExternalSystemReferences(id: string): Promise<number> {
-    if (!this.db) return 0
+  async countExternalSystemReferences(
+    id: string,
+    // W7-B: the EXECUTOR this count runs on. Omitted (every pre-existing caller
+    // and every existing test) === `this.db`, byte-identical to before.
+    // `removeDataSource` passes its OPEN TRANSACTION so the count and the soft
+    // delete observe the same snapshot under the same `FOR UPDATE` row lock: a
+    // count taken on a SECOND connection cannot wait for a concurrent bind, so
+    // the delete would commit on top of a reference it never saw.
+    executor?: Kysely<unknown>
+  ): Promise<number> {
+    const db = executor ?? this.db
+    if (!db) return 0
     const ownerId = this.scopes.get(id)?.ownerId
     // No known owner scope → nothing can be attributed to it. (Route callers
     // sit behind assertAccess, so the scope exists on every real delete path.)
     if (ownerId === undefined) return 0
     let canonicalCount: number
     try {
-      const canonicalRows = await this.db
+      const canonicalRows = await db
         .selectFrom('integration_external_systems' as never)
         .select(sql<number>`count(*)::int`.as('count') as never)
         .where('connection_id' as never, '=', id as never)
@@ -672,7 +710,7 @@ export class DataSourceManager extends EventEmitter {
       throw err
     }
 
-    const legacyRows = await this.db
+    const legacyRows = await db
       .selectFrom('integration_external_systems' as never)
       .select(sql<number>`count(*)::int`.as('count') as never)
       .where('connection_id' as never, 'is', null as never)
@@ -680,6 +718,102 @@ export class DataSourceManager extends EventEmitter {
       .where(sql`config->>'dataSourceOwnerId'` as never, '=', ownerId as never)
       .execute() as Array<{ count: number }>
     return canonicalCount + (legacyRows[0]?.count ?? 0)
+  }
+
+  /**
+   * BATCH form of countExternalSystemReferences: reference counts for MANY ids
+   * in ONE pair of grouped queries (two `GROUP BY` statements total, never one
+   * pair per id). This exists for the LISTING surface, which would otherwise be
+   * N+1; the delete guard keeps calling the singular method, whose fail-closed
+   * posture is what actually gates removal.
+   *
+   * SAME semantics as the singular method, deliberately:
+   * - canonical: rows whose connection_id equals the id;
+   * - legacy: rows with connection_id IS NULL whose config->>'dataSourceId'
+   *   equals the id AND whose server-stamped config->>'dataSourceOwnerId'
+   *   equals THAT id's owner (P2-A owner attribution — a foreign pin must not
+   *   be counted, here just as it is not counted for the delete guard).
+   *
+   * WHY the owner match is applied in TS and not in the WHERE clause: one
+   * grouped query serves many ids, and each id has its OWN owner, so the
+   * predicate is not a single constant. The query therefore groups by the
+   * (dataSourceId, dataSourceOwnerId) PAIR and this method keeps only the
+   * groups whose owner equals the scope owner of that id — arithmetically the
+   * same filter, evaluated once per group instead of once per row. Widening it
+   * to a raw dataSourceId match would re-open P2-A (a stranger's pin inflating
+   * — and, worse, appearing to justify — someone else's reference count).
+   *
+   * `ids` with no known scope get 0 without being queried, matching the
+   * singular method's "no owner scope -> nothing attributable" short-circuit.
+   *
+   * Failure posture matches the singular method: no db -> all zero; SQLSTATE
+   * 42P01 on the FIRST (canonical) query -> all zero (integration schema not
+   * installed); any other failure, and any failure of the second query,
+   * PROPAGATES. Callers that merely DISPLAY the counts must degrade to
+   * "unknown" rather than to 0 — see the listing route.
+   *
+   * Returns a Map keyed by the requested ids only (every requested id is
+   * present). Values are counts; no name, tenant, owner or config of any
+   * referencing row is returned to the caller.
+   */
+  async countExternalSystemReferencesByIds(ids: readonly string[]): Promise<Map<string, number>> {
+    const counts = new Map<string, number>()
+    for (const id of ids) counts.set(id, 0)
+    if (!this.db || counts.size === 0) return counts
+
+    // Only owner-scoped ids can be attributed; unscoped ones stay 0 unqueried.
+    const attributable = [...counts.keys()].filter((id) => this.scopes.get(id)?.ownerId !== undefined)
+    if (attributable.length === 0) return counts
+
+    try {
+      const canonicalRows = await this.db
+        .selectFrom('integration_external_systems' as never)
+        .select([
+          sql<string>`connection_id`.as('reference_id') as never,
+          sql<number>`count(*)::int`.as('count') as never,
+        ] as never)
+        .where('connection_id' as never, 'in', attributable as never)
+        .groupBy('connection_id' as never)
+        .execute() as Array<{ reference_id: string | null; count: number }>
+      for (const row of canonicalRows) {
+        const id = row.reference_id
+        // Never let a row widen the answer beyond what was asked for.
+        if (id === null || id === undefined || !counts.has(id)) continue
+        counts.set(id, (counts.get(id) ?? 0) + (row.count ?? 0))
+      }
+    } catch (err) {
+      // Mirrors the singular method: only the FIRST observation may prove the
+      // referencing layer does not exist, and only via the SQLSTATE.
+      if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return counts
+      throw err
+    }
+
+    const legacyRows = await this.db
+      .selectFrom('integration_external_systems' as never)
+      .select([
+        sql<string>`config->>'dataSourceId'`.as('reference_id') as never,
+        sql<string>`config->>'dataSourceOwnerId'`.as('reference_owner_id') as never,
+        sql<number>`count(*)::int`.as('count') as never,
+      ] as never)
+      .where('connection_id' as never, 'is', null as never)
+      .where(sql`config->>'dataSourceId'` as never, 'in', attributable as never)
+      .groupBy([
+        sql`config->>'dataSourceId'` as never,
+        sql`config->>'dataSourceOwnerId'` as never,
+      ] as never)
+      .execute() as Array<{ reference_id: string | null; reference_owner_id: string | null; count: number }>
+    for (const row of legacyRows) {
+      const id = row.reference_id
+      if (id === null || id === undefined || !counts.has(id)) continue
+      // P2-A: unstamped rows are unattributable and do NOT count; a stamp that
+      // names anyone but this id's owner is a foreign pin and does NOT count.
+      const stamped = row.reference_owner_id
+      if (stamped === null || stamped === undefined) continue
+      if (this.scopes.get(id)?.ownerId !== stamped) continue
+      counts.set(id, (counts.get(id) ?? 0) + (row.count ?? 0))
+    }
+
+    return counts
   }
 
   /**
@@ -816,42 +950,197 @@ export class DataSourceManager extends EventEmitter {
     }
   }
 
+  /**
+   * Remove a data source — DURABLE-FIRST ordering (PERM-04; minimal-plan §5 PR-2
+   * acceptance: "删除失败不会改变内存状态，重启后不会复活").
+   *
+   * The previous order was fail-OPEN: disconnect → drop adapter /
+   * connectionPool / scope → only THEN write the soft delete, whose failure was
+   * swallowed by console.warn. A delete that failed at the database therefore
+   * returned a 200-looking success, stopped answering in-process, and CAME BACK
+   * at the next restart (loadFromDatabase re-observes is_active = true AND
+   * deleted_at IS NULL) — memory and row disagreed in the dangerous direction.
+   *
+   * The order is now:
+   *   ① referential check — refuse (coded 409) while an integration external
+   *      system still references this source. There is NO bypass: the former
+   *      `force` option was retired by the owner's ruling (2026-09-20, ①) —
+   *      a referenced source is not deletable, the caller unbinds first. Runs
+   *      before ANY mutation, and while `scopes` still holds the owner that
+   *      countExternalSystemReferences attributes against. Since W7-B it shares
+   *      ONE TRANSACTION with the persist step, opened by a `FOR UPDATE` on
+   *      the source row - see the block comment at the call site for the
+   *      two-sided lock protocol and why the binding side participates
+   *      through the foreign key rather than a SELECT of its own.
+   *   ② persist the (soft|hard) delete. A failure THROWS a coded, values-free
+   *      refusal — the driver's own text (host/port/database/login) goes to the
+   *      log only — and no in-memory byte has been touched yet.
+   *   ③ only after the durable write committed: drop adapter / connectionPool /
+   *      scope, so memory can no longer outlive or predate the row.
+   *   ④ release the connection LAST, listeners muted first so the adapter's
+   *      'disconnected' event cannot write status back onto the row that was
+   *      just deleted. A disconnect failure is warn-only: the source is already
+   *      gone durably AND in memory, and rolling the delete back for a leaked
+   *      socket would resurrect exactly the ghost this fix removes.
+   *
+   * No `force` option exists any more (it used to skip the count for a
+   * route-authorized platform-admin break). Any extra option key is ignored;
+   * the count ALWAYS runs, so a direct (non-route) caller — or an old route
+   * build — cannot dangle a reference. Behind the application check, the
+   * database refuses the same delete on `DATA_SOURCE_LIVE_CONNECTION_FK`
+   * (23503), which this method also maps to the same 409.
+   */
   async removeDataSource(id: string, options?: { hardDelete?: boolean }): Promise<void> {
     const adapter = this.adapters.get(id)
     if (!adapter) {
       throw new Error(`Data source with id '${id}' not found`)
     }
 
-    if (adapter.isConnected()) {
-      await adapter.disconnect()
+    // The 409 the referential check raises. Built once so the transactional, the
+    // database-backstop and the memory-only path cannot drift apart.
+    // `referenceCount` is null when the refusal came from the foreign key: the
+    // transaction is already aborted at that point, so the count is not known.
+    const referencedRefusal = (referenceCount: number | null) => Object.assign(
+      new Error(
+        referenceCount === null
+          ? `Data source '${id}' is still referenced by at least one external system (the database refused the delete on its binding foreign key); unbind it first — 请先解绑引用它的外部系统。Deleting a referenced source is refused; force=true is no longer accepted.`
+          : `Data source '${id}' is referenced by ${referenceCount} external system(s); unbind them first — 请先解绑 ${referenceCount} 个外部系统。Deleting a referenced source is refused; force=true is no longer accepted.`
+      ),
+      {
+        status: 409,
+        code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+        details: { referenceCount }
+      }
+    )
+
+    // ①+② ONE TRANSACTION (W7-B). #5784 made the delete durable-FIRST but left
+    // check and write in two autocommit statements, so a bind that committed in
+    // between produced a reference to an already-deleted source. They are now a
+    // single transaction whose FIRST act is to take the source row's lock:
+    //
+    //   SELECT ... FROM data_sources WHERE id = $1 FOR UPDATE
+    //
+    // LOCK ORDER (identical on both sides, so the protocol cannot deadlock):
+    // data_sources row FIRST, integration_external_systems SECOND. The binding
+    // side takes the data_sources lock too — not by writing its own SELECT (the
+    // plugin's db helper is scoped to `integration_*` and must not be widened to
+    // reach data_sources), but because the FK
+    // `fk_integration_external_systems_connection_id` makes PostgreSQL take a
+    // KEY SHARE lock on the referenced row inside the INSERT/UPDATE's own
+    // transaction. FOR UPDATE conflicts with KEY SHARE, so:
+    //   * bind in flight, then delete  -> the delete's FOR UPDATE WAITS for the
+    //     bind to commit, then COUNTS it and refuses 409. THIS ordering is what
+    //     this transaction closes (PR-A).
+    //   * delete in flight, then bind  -> the bind WAITS for the delete to
+    //     commit; since PR-B (migration zzzz20260920120000) the FK references
+    //     `data_sources(live_id)`, a STORED generated column that is NULL once
+    //     `deleted_at` is set, so the resumed bind fails its FK re-check
+    //     (23503 on DATA_SOURCE_LIVE_CONNECTION_FK) and no dangling row lands.
+    //     The same constraint refuses the soft delete itself while a canonical
+    //     binding exists — the database backstop for a count this transaction
+    //     somehow did not see; `catch` below maps that 23503 to the same 409.
+    //   Closed for the CANONICAL shape (connection_id) only. The legacy shape
+    //   (connection_id IS NULL + config.dataSourceId) has no FK and is covered
+    //   by the FOR UPDATE half alone; do NOT read this block as "concurrent
+    //   delete isolation is complete for every shape".
+    //
+    // ISOLATION: READ COMMITTED (PostgreSQL's default, which is what this
+    // deployment runs). The half that IS closed does not rely on a stricter
+    // level — it rests on the row lock, which is explicit locking, not snapshot
+    // semantics. Under READ COMMITTED the count statement takes a fresh
+    // snapshot AFTER the FOR UPDATE returns, so it sees exactly the binds that
+    // committed while it waited.
+    //
+    // 42P01 INSIDE the transaction: countExternalSystemReferences still maps a
+    // missing referencing table to 0, but PostgreSQL has already aborted the
+    // transaction at that point, so the UPDATE that follows fails (25P02) and
+    // the delete surfaces as the values-free 500 below — fail-CLOSED, not the
+    // fail-open the autocommit path had. Migration 057 creates the table in
+    // every deployment, so this is a posture note, not a live path.
+    if (this.db) {
+      try {
+        await this.db.transaction().execute(async (trx) => {
+          // Lock step 1. Soft-deleted rows are not re-locked: `removeDataSource`
+          // is reached only for a source still present in memory, and a row that
+          // is already deleted has nothing left to protect.
+          await trx
+            .selectFrom('data_sources' as never)
+            .select('id' as never)
+            .where('id' as never, '=', id as never)
+            .forUpdate()
+            .execute()
+
+          // ALWAYS counted — there is no force bypass (owner ruling 2026-09-20 ①).
+          const referenceCount = await this.countExternalSystemReferences(id, trx)
+          if (referenceCount > 0) throw referencedRefusal(referenceCount)
+
+          if (options?.hardDelete) {
+            await trx
+              .deleteFrom('data_sources' as never)
+              .where('id' as never, '=', id as never)
+              .execute()
+          } else {
+            await trx
+              .updateTable('data_sources' as never)
+              .set({
+                deleted_at: new Date(),
+                is_active: false,
+                updated_at: new Date()
+              } as never)
+              .where('id' as never, '=', id as never)
+              .execute()
+          }
+        })
+      } catch (err) {
+        // The referential 409 is a DECISION, not a persistence failure: it must
+        // reach the client as itself. Only an uncoded failure is translated.
+        if ((err as { code?: string } | null)?.code === DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE) {
+          throw err
+        }
+        // DATABASE BACKSTOP (PR-B): the soft/hard delete itself violated the
+        // binding foreign key — a canonical reference exists that the count did
+        // not see. Judged by SQLSTATE 23503 first (the driver's prose is locale
+        // dependent: a zh_CN server never emits the English sentence) and by the
+        // constraint name second. This is the same DECISION
+        // as the counted 409, so it surfaces as the same code, not as the 500.
+        // Any OTHER 23503 (another table's constraint) stays a persistence
+        // failure and is translated below.
+        if (isLiveConnectionFkViolation(err)) {
+          throw referencedRefusal(null)
+        }
+        // Cause to the log ONLY — a kysely/driver failure embeds host, port,
+        // database and login. The client gets a fixed sentence and the id it
+        // already supplied. The transaction rolled back, so nothing partial
+        // survived and no in-memory byte has been touched yet.
+        console.warn(`[DataSourceManager] Failed to delete from database: ${id}`, err)
+        throw Object.assign(
+          new Error(
+            `Data source '${id}' was not deleted: the deletion could not be persisted. Nothing was changed; retry.`
+          ),
+          { status: 500, code: DATA_SOURCE_DELETE_NOT_PERSISTED_CODE }
+        )
+      }
+    } else {
+      // Memory-only manager: nothing is persisted, so nothing can hold a
+      // reference and the count is 0 by construction. Kept so the call (and its
+      // contract) survives for a manager that is later given a db. No force
+      // bypass here either.
+      const referenceCount = await this.countExternalSystemReferences(id)
+      if (referenceCount > 0) throw referencedRefusal(referenceCount)
     }
 
-    adapter.removeAllListeners()
+    // ③ in-memory state only after the row is durably gone.
     this.adapters.delete(id)
     this.connectionPool.delete(id)
     this.scopes.delete(id)
 
-    // Soft delete from database (or hard delete if specified)
-    if (this.db) {
+    // ④ resource release last, and never a reason to undo ② / ③.
+    adapter.removeAllListeners()
+    if (adapter.isConnected()) {
       try {
-        if (options?.hardDelete) {
-          await this.db
-            .deleteFrom('data_sources' as never)
-            .where('id' as never, '=', id as never)
-            .execute()
-        } else {
-          await this.db
-            .updateTable('data_sources' as never)
-            .set({
-              deleted_at: new Date(),
-              is_active: false,
-              updated_at: new Date()
-            } as never)
-            .where('id' as never, '=', id as never)
-            .execute()
-        }
+        await adapter.disconnect()
       } catch (err) {
-        console.warn(`[DataSourceManager] Failed to delete from database: ${id}`, err)
+        console.warn(`[DataSourceManager] Failed to disconnect removed data source: ${id}`, err)
       }
     }
   }

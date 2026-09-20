@@ -48,6 +48,7 @@ import { poolManager } from '../integration/db/connection-pool'
 import { eventBus } from '../integration/events/event-bus'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { ensureRecordWriteAllowed, resolveSheetCapabilities, resolveSheetReadableCapabilities } from '../multitable/permission-service'
+import { sendSheetNotLive } from '../multitable/sheet-refusals'
 import { loadFieldsForSheet, tryResolveView } from '../multitable/loaders'
 import {
   insertBulkPreviewCacheRow,
@@ -671,7 +672,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const ledgerQuery = pool.query.bind(pool) as AiUsageQueryFn
 
       // ── SHEET-LEVEL gates (ONCE, hoisted) ──────────────────────────────────
-      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
       if (!access.userId) {
         return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
       }
@@ -680,6 +681,12 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
       if (!capabilities.canEditRecord) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      // Sheet liveness, after the capability 403s (no liveness oracle). The per-row read gate below
+      // would omit every row of a soft-deleted sheet, but only AFTER the scope read over its records,
+      // the active-job lookup and the cap/quota decisions — so refuse the whole request here instead.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
 
       const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
@@ -1115,7 +1122,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const query = pool.query.bind(pool) as QueryFn
 
       // ── SHEET-LEVEL gates (ONCE, hoisted; bulk-preview parity) ────────────────
-      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
       if (!access.userId) {
         return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
       }
@@ -1124,6 +1131,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
       if (!capabilities.canEditRecord) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      // Sheet liveness after the 403s (bulk-preview parity): nothing is committed to a soft-deleted sheet.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
 
       const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
@@ -1391,12 +1402,17 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       // Sheet-level gates (bulk-commit parity) — the actor must STILL be able to
       // write the sheet; the per-record re-gate inside commitOneRecord enforces the
       // rest. resolveSheetReadableCapabilities resolves the caller's RBAC.
-      const { access, capabilities, sheetScope } = await resolveSheetReadableCapabilities(req, query, sheetId)
+      const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, sheetId)
       if (!access.userId) {
         return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
       }
       if (!capabilities.canRead || !capabilities.canEditRecord) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      // Sheet liveness after the 403 (bulk-commit parity), BEFORE the job is flipped to running: for a
+      // soft-deleted sheet the job header is left untouched instead of resolving with nothing written.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
       const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
       if (!patchContext) {
@@ -1507,12 +1523,17 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
 
       // Field-authoring gate (sheet-scoped): resolveSheetCapabilities yields the
       // SAME canManageFields primitive the formula field write/dry-run paths use.
-      const { access, capabilities } = await resolveSheetCapabilities(req, query, sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
       if (!access.userId) {
         return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
       }
       if (!capabilities.canManageFields) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'You cannot manage fields on this sheet' } })
+      }
+      // Sheet liveness after the 403: a soft-deleted sheet's schema is not sent to the provider (and no
+      // AI spend is reserved for it).
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
 
       // Schema metadata only — NAMES + TYPES, no record `data[]` (§1.2). Same

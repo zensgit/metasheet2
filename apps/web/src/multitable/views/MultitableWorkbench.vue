@@ -51,7 +51,7 @@
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
-      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
+      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-archive-recovery" @click="showRecoveryArchive = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.archiveRecovery" /></el-icon> {{ isZh ? '归档恢复' : 'Archive recovery' }}</button>
@@ -183,14 +183,14 @@
             </ul>
           </template>
           <footer class="mt-save-tpl__footer">
-            <router-link
+            <RouterLink
               class="mt-save-tpl__link"
               :to="{ name: TemplateCenterRouteName }"
               data-testid="save-sheet-as-template-center-link"
               @click="closeSaveSheetAsTemplate"
             >
               {{ wb('saveTpl.openCenter', isZh) }}
-            </router-link>
+            </RouterLink>
             <MtButton data-action="save-sheet-as-template-done" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.close', isZh) }}</MtButton>
           </footer>
         </div>
@@ -388,7 +388,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -407,6 +407,7 @@
           :button-run-pending="buttonRunPending"
           :fetch-record="fetchLinkedRecordFn"
           :mention-suggestions="commentMentionSuggestions"
+          :mention-search="searchCommentMentions"
           :remote-cursors-by-cell="sheetPresenceState.remoteCursorsByCell.value"
           @cursor-focus="onCellCursorFocus"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
@@ -415,6 +416,7 @@
           @create-record="onAddRecord"
           @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
+          @set-frozen-rows="onSetFrozenRows"
           @set-aggregation="onSetAggregation"
           @toggle-group="onToggleGroup"
           @open-comments="onOpenRecordComments"
@@ -438,6 +440,7 @@
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
+        :can-submit-approval="canSubmitApproval"
         :can-manage-automation="canOpenWorkflowDesigner"
         :field-permissions="effectiveFieldPermissions"
         :row-actions="effectiveRowActions"
@@ -451,6 +454,7 @@
         :ai-shortcut="aiShortcut.state"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
+        :mention-search="searchCommentMentions"
         :comments="commentsState.comments.value"
         :comments-loading="commentsState.loading.value"
         :can-resolve-comments="effectiveRowActions.canComment"
@@ -478,6 +482,7 @@
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
         @run-button="onRunButton"
+        @approval-submitted="onRecordApprovalSubmitted"
         @comment-submit="onSubmitComment" @comment-resolve="onResolveComment" @comment-reply="onReplyToComment" @comment-edit="onEditComment" @comment-delete="onDeleteComment" @comment-cancel-reply="onCancelCommentReply" @comment-cancel-edit="onCancelCommentEdit" @update:comment-draft="commentDraft = $event" @comment-react="onReactToComment" @comment-unreact="onUnreactToComment"
       />
     </div>
@@ -576,10 +581,12 @@
       @confirm="onLinkPickerConfirm"
     />
     <MetaPersonPicker
+      v-if="personPickerVisible || workbench.activeSheetId.value"
       :visible="personPickerVisible"
       :field="personPickerField"
       :sheet-id="workbench.activeSheetId.value"
       :current-value="personPickerCurrentValue"
+      :current-summaries="personPickerCurrentSummaries"
       @close="personPickerVisible = false"
       @confirm="onPersonPickerConfirm"
     />
@@ -615,12 +622,14 @@
       @committed="onBulkFillCommitted"
     />
     <MetaViewManager
+      v-if="showViewManager || workbench.activeSheetId.value"
       :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value" :field-permissions="effectiveFieldPermissions"
       @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />
     <MetaSheetPermissionManager
+      v-if="showPermissionManager || workbench.activeSheetId.value"
       :visible="showPermissionManager"
       :sheet-id="workbench.activeSheetId.value"
       :client="workbench.client"
@@ -637,6 +646,7 @@
          it maintains its own list state in place; only an explicit close does. Closing on every
          update forced users to reopen the modal after each toggle/delete/save. -->
     <MetaAutomationManager
+      v-if="showAutomationManager || workbench.activeSheetId.value"
       :visible="showAutomationManager"
       :sheet-id="workbench.activeSheetId.value"
       :fields="grid.fields.value"
@@ -645,6 +655,7 @@
       @close="showAutomationManager = false"
     />
     <MetaFormShareManager
+      v-if="showFormShareManager || workbench.activeSheetId.value"
       :visible="showFormShareManager"
       :sheet-id="workbench.activeSheetId.value"
       :view-id="workbench.activeViewId.value"
@@ -660,12 +671,12 @@
       @close="showApiTokenManager = false"
     />
 
-    <TrashModal
+    <SheetTrashModal
       :open="showTrash"
-      :sheet-id="workbench.activeSheetId.value"
-      :fields="twoLayerVisibleFields"
+      :base-id="activeBaseId || ''"
+      :client="workbench.client"
       @close="showTrash = false"
-      @restored="onTrashRestored"
+      @restored="onSheetTrashRestored"
     />
 
     <HistoryCenterModal
@@ -676,11 +687,14 @@
       :link-summaries="grid.linkSummaries.value"
       :person-summaries="grid.personSummaries.value"
       :initial-batch-id="historyDeepLinkBatchId"
+      :can-restore-records="caps.canDeleteRecord.value"
       @close="closeHistory"
       @open-record="onHistoryOpenRecord"
+      @restored="onHistoryRecordRestored"
     />
     <MetaConfigHistoryModal
       :visible="configHistory.visible"
+      :scope-key="workbench.activeSheetId.value"
       :items="configHistory.items"
       :loading="configHistory.loading"
       :entity-type="configHistory.entityType"
@@ -693,8 +707,12 @@
       @reverted="onConfigReverted"
     />
     <RecoveryArchiveModal
+      v-if="showRecoveryArchive || workbench.activeSheetId.value"
       :visible="showRecoveryArchive"
       :sheet-id="workbench.activeSheetId.value"
+      :sheet-name="activeSheetExportName"
+      :capture-archive="recoveryArchiveCaptureWire"
+      :read-capture="recoveryArchiveReadCaptureWire"
       :is-zh="isZh"
       :fields="scopedGridFields"
       :selected-record-ids="[...exportSelectedRecordIds]"
@@ -714,8 +732,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
+import { ref, shallowRef, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
@@ -746,11 +764,13 @@ import {
   recordNotFound as fmtRecordNotFound,
   sheetDeleteConfirm as fmtSheetDeleteConfirm,
   sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
+  fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
 } from '../utils/workbench-labels'
-import { recordLabel } from '../utils/meta-record-labels'
+import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
 import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../utils/dialog-meta-refresh'
 import {
   bulkFailure as fmtBulkFailure,
   bulkFailureSamples as fmtBulkFailureSamples,
@@ -765,6 +785,7 @@ import type {
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadContext,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearchResult,
   MetaCommentMentionSuggestion,
   MetaCommentsScope,
   MetaFieldPermission,
@@ -772,6 +793,7 @@ import type {
   MetaFieldCreateType,
   MetaFieldType,
   MetaRecord,
+  MetaRecordApprovalSubmission,
   MetaRowActions,
   MetaViewPermission,
   MetaFieldPermissionEntry,
@@ -827,7 +849,7 @@ import MetaTemplateCard from '../components/MetaTemplateCard.vue'
 import MetaFieldManager from '../components/MetaFieldManager.vue'
 import MetaAiBulkFillDialog from '../components/MetaAiBulkFillDialog.vue'
 import MetaViewManager from '../components/MetaViewManager.vue'
-import TrashModal from '../components/TrashModal.vue'
+import SheetTrashModal from '../components/SheetTrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
 import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
 import RecoveryArchiveModal from '../components/RecoveryArchiveModal.vue'
@@ -853,7 +875,13 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
-import { extractImportTokens, type ImportBuildFailure, type ImportValueResolver } from '../import/delimited'
+import {
+  createImportAbortError,
+  extractImportTokens,
+  type ImportBuildFailure,
+  type ImportResolveContext,
+  type ImportValueResolver,
+} from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
 import {
   MAX_FIELD_NAME_LENGTH,
@@ -868,6 +896,7 @@ import {
   createFieldLimitReached as fmtCreateFieldLimitReached,
   createFieldNameInvalid as fmtCreateFieldNameInvalid,
   createFieldNameTooLong as fmtCreateFieldNameTooLong,
+  importPersonValueTooBroad as fmtImportPersonValueTooBroad,
 } from '../utils/meta-import-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
@@ -877,6 +906,7 @@ import {
 } from '../utils/calendar-holiday-notice'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 import { parseFrozenIds } from '../utils/frozen-columns'
+import { parseFrozenTopRowCount } from '../utils/frozen-rows'
 import {
   parseColumnWidths,
   parseRowDensity,
@@ -983,6 +1013,13 @@ const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEna
 // pitResetEnabled: read straight off the /context capabilities object (`=== true`), never a role fallback,
 // so an old backend, a legacy role-string source or a stale object all fail CLOSED (trash button hidden).
 const canDeleteSheet = computed(() => capabilitySource.value?.canDeleteSheet === true)
+// 记录级送审 (多维表 × 审批 阶段二 §4.2/§5): server-derived `multitable:submit-approval`, read with the
+// SAME shape as canDeleteSheet/pitResetEnabled above — straight off the /context capabilities object
+// (`=== true`), never a role fallback, so an old backend, a legacy role-string source or a stale object
+// all fail CLOSED (送审 entry hidden). `useMultitableCapabilities` exposes the same key for any other
+// consumer (composable-tier contract, see that file); this view deliberately reads the source object so a
+// capability the server has not sent is `undefined`, not a lookup on a partially-shaped capabilities bag.
+const canSubmitApproval = computed(() => capabilitySource.value?.canSubmitApproval === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
@@ -996,6 +1033,10 @@ const onRecoveryDone = async (): Promise<void> => { await grid.reloadCurrentPage
 // D6 archive recovery is a server-led sheet surface. There is no local flag or capability inference:
 // catalog, preview, sync execute, and durable job actions render only the server's current decision.
 const showRecoveryArchive = ref(false)
+const recoveryArchiveCaptureWire = (sheetId: string, requestId: string) =>
+  workbench.client.captureRecoveryArchive(sheetId, requestId)
+const recoveryArchiveReadCaptureWire = (sheetId: string, requestId: string) =>
+  workbench.client.readRecoveryArchiveCapture(sheetId, requestId)
 const recoveryArchiveCatalogWire = (sheetId: string, params?: { cursor?: string; limit?: number }) =>
   workbench.client.listRecoveryArchiveCatalog(sheetId, params)
 const recoveryArchiveListJobsWire = (
@@ -1289,6 +1330,12 @@ const personPickerVisible = ref(false)
 const personPickerField = ref<MetaField | null>(null)
 const personPickerRecordId = ref<string | null>(null)
 const personPickerCurrentValue = ref<unknown>(null)
+// #5781 follow-up: the display names we ALREADY hold for the cell being edited, handed to the picker
+// so its "Selected" chips (and the summaries it echoes back on confirm) are real names. Since #5781
+// the picker's own term-less open fetch returns nothing, so it can no longer learn them itself, and
+// an un-searched assignee would round-trip into the grid as a raw userId. Snapshot (not a computed)
+// so a background refetch mid-dialog cannot swap the set under the open picker.
+const personPickerCurrentSummaries = ref<PersonSummary[]>([])
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
@@ -1416,6 +1463,7 @@ function closeHistory() {
 // T9-R4: config/schema-change history view. The server gates per entity type — the FE renders what it returns
 // (faithful client; no client-side security filtering). The entity-type filter only narrows within the gated set.
 const configHistory = ref<{ visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string }>({ visible: false, items: [], loading: false, entityType: '' })
+let configHistoryGeneration = 0
 const configHistoryLabelOf = (entityId: string): string => {
   const f = scopedAllFields.value.find((x) => x.id === entityId)
   if (f) return f.name
@@ -1423,13 +1471,19 @@ const configHistoryLabelOf = (entityId: string): string => {
   return v?.name ?? entityId
 }
 async function loadConfigHistory(entityType: string) {
+  const baseId = workbench.activeBaseId.value
   const sheetId = workbench.activeSheetId.value
-  if (!sheetId) return
+  if (!sheetId || !configHistory.value.visible) return
+  const generation = ++configHistoryGeneration
+  const isCurrent = () => generation === configHistoryGeneration && configHistory.value.visible
+    && baseId === workbench.activeBaseId.value && sheetId === workbench.activeSheetId.value
   configHistory.value = { ...configHistory.value, loading: true, entityType }
   try {
     const items = await workbench.client.getConfigHistory(sheetId, entityType ? { entityType } : {})
+    if (!isCurrent()) return
     configHistory.value = { ...configHistory.value, loading: false, items }
   } catch (error) {
+    if (!isCurrent()) return
     configHistory.value = { ...configHistory.value, loading: false, items: [] }
     showError((error as Error)?.message ?? recordLabel('record.errorHistoryLoad', isZh.value))
   }
@@ -1459,11 +1513,29 @@ function openConfigHistory() {
   void loadConfigHistory('')
 }
 function onConfigHistoryFilter(entityType: string) { void loadConfigHistory(entityType) }
-function closeConfigHistory() { configHistory.value = { ...configHistory.value, visible: false } }
+function closeConfigHistory() {
+  configHistoryGeneration += 1
+  configHistory.value = { visible: false, items: [], loading: false, entityType: '' }
+}
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  closeConfigHistory,
+  { flush: 'sync' },
+)
 
-// After an undelete, the restored record is back in the sheet → refresh the current page so it appears.
-function onTrashRestored(): void {
-  void grid.reloadCurrentPage()
+function onHistoryRecordRestored(payload: { sheetId: string; recordId: string }): void {
+  if (payload.sheetId === workbench.activeSheetId.value) void grid.reloadCurrentPage()
+}
+async function onSheetTrashRestored(payload: { baseId: string; sheetId: string }): Promise<void> {
+  if (payload.baseId !== workbench.activeBaseId.value) return
+  // Keep a live current sheet selected; recover an empty base through its existing context loader.
+  const sheetId = workbench.activeSheetId.value
+  const ok = sheetId
+    ? await workbench.loadSheetMeta(sheetId)
+    : await workbench.loadBaseContext(payload.baseId, { sheetId: payload.sheetId })
+  if (!ok && payload.baseId === workbench.activeBaseId.value && sheetId === workbench.activeSheetId.value) {
+    showError(wb('toast.sheetRefreshFailed', isZh.value))
+  }
 }
 const fieldPermissionEntries = ref<MetaFieldPermissionEntry[]>([])
 const viewPermissionEntries = ref<MetaViewPermissionEntry[]>([])
@@ -1481,8 +1553,11 @@ const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const recordInspectorRef = ref<InstanceType<typeof MetaRecordInspector> | null>(null)
 const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
+// #5795: NOT a roster any more. The mention-candidate endpoint is search-required and capped, so this
+// only remembers people the mention editors' searches returned on the active sheet (newest first,
+// capped) — a secondary label source for buildEditingMentionSuggestions (the list response's own
+// `mentionLabels` is the primary one, #5808), without a term-less fetch. Cleared on sheet switch.
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
-const commentMentionSuggestionsLoadedForSheetId = ref<string | null>(null)
 const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
@@ -1550,9 +1625,26 @@ const columnWidthOverrides = ref<Record<string, number>>({})
 const collapsedGroupKeys = ref<string[]>([])
 const peopleResolverCache = new Map<string, Promise<ImportValueResolver | null>>()
 const linkResolverCache = new Map<string, Map<string, Promise<string[] | null>>>()
-// Native person (人员) import: resolve tokens (userId / name / email) → USERIDs against the
-// sheet member candidates (member-scoped, NOT the People-sheet recordIds). Keyed by sheetId.
-const nativePersonResolverCache = new Map<string, Promise<ImportValueResolver>>()
+// Native person (人员) import (#5809): one bounded, exact directory lookup per UNIQUE token, keyed by
+// sheet + field + normalized token, so a token repeated across the whole import costs one request.
+const nativePersonTokenCache = new Map<string, Promise<ImportPersonTokenOutcome>>()
+// Legacy person email fallback (#5807 sibling): People-sheet id + active sheet + normalized email.
+const legacyPersonEmailCache = new Map<string, Promise<ImportPersonTokenOutcome>>()
+// Every per-token person lookup of the import path shares this gate (≤ 4 requests in flight).
+const IMPORT_PERSON_LOOKUP_CONCURRENCY = 4
+const runImportPersonLookup = createBoundedLookupRunner(IMPORT_PERSON_LOOKUP_CONCURRENCY)
+// Rows per person lookup — the servers' own ceiling (PERSON_DIRECTORY_MAX_ITEMS /
+// MENTION_CANDIDATES_MAX_ITEMS), stated explicitly so the request never relies on a server default.
+const IMPORT_PERSON_LOOKUP_PAGE_SIZE = 50
+// #5809 refuter round — the longest token a person lookup is sent for. users.id / name / email are
+// TEXT, so this is a policy ceiling, not a schema bound: it sits well above what the app writes (the
+// admin user create/update routes cap a name at 100 characters; RFC 5321 caps an address at 254) and
+// low enough that the request line stays inside common proxy limits (nginx's default 8 KiB) even when
+// every UTF-16 unit percent-encodes to 9 bytes (512 × 9 = 4608). A longer token cannot be one person's
+// id / name / email under that policy, so it counts as "no match" without a request. In practice it is
+// the whole-cell token extractImportTokens adds for a multi-person cell (an exported list of ~200 user
+// ids is ~8 KB and would otherwise 414 at the proxy and fail the whole row).
+const IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH = 512
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
@@ -1592,6 +1684,11 @@ const workbenchReady = ref(false)
 let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
+let dialogMetaVisibilityListener: (() => void) | null = null
+// Cleared on unmount so an idle-deferred callback scheduled during mount, or a dialog-meta refresh
+// that was still in flight, can never fire into a torn-down workbench (or eat a later test's
+// mocked fetch). Declared up here because refreshDialogMeta() below reads it.
+let workbenchAlive = true
 let standaloneFormLoadVersion = 0
 let unsubscribeMentionRealtime: (() => void) | null = null
 
@@ -1616,6 +1713,14 @@ function showSuccess(msg: string, action?: ToastAction) {
 function historyLinkAction(batchId: string | null): ToastAction | undefined {
   if (!batchId) return undefined
   return { label: wb('toast.viewInHistory', isZh.value), onClick: () => openHistoryForBatch(batchId) }
+}
+
+// 记录级送审 (多维表 × 审批 阶段二 §5): the inspector owns the dialog and its own panel refresh; the
+// workbench's whole job here is the toast, so a user who submitted from a drawer that is about to close
+// still sees the server-issued request number. No capability decision is made here — `canSubmitApproval`
+// (passed to the inspector above) already gated the entry, and the route re-enforces it.
+function onRecordApprovalSubmitted(submission: MetaRecordApprovalSubmission): void {
+  showSuccess(recordApprovalSubmittedToast(submission.requestNo, isZh.value))
 }
 
 function ensureCanCreateRecord(): boolean {
@@ -1850,19 +1955,33 @@ const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() =>
     // Native person (人员) OR link (incl. legacy link-backed person). isLinkField no longer
     // matches native person, so include it explicitly.
     if (!isLinkField(field) && !isNativePersonField(field)) continue
-    resolvers[field.id] = async (rawValue, currentField) => {
+    const resolver: ImportValueResolver = async (rawValue, currentField, context) => {
       // Kind-aware switch: native person → USERIDs (member candidates); legacy person → People-sheet
       // recordIds (getPeopleResolver); plain link → linked recordIds.
       if (isNativePersonField(currentField)) {
-        const resolver = await getNativePersonResolver()
-        return resolver(rawValue, currentField)
+        return resolveNativePersonImportValue(rawValue, currentField, context)
       }
       if (isPersonField(currentField)) {
-        const resolver = await getPeopleResolver(currentField)
-        return resolver ? resolver(rawValue, currentField) : null
+        const peopleResolver = await getPeopleResolver(currentField)
+        return peopleResolver ? peopleResolver(rawValue, currentField, context) : null
       }
       return resolveLinkedImportValue(rawValue, currentField)
     }
+    // #5809: queue the person lookups of the WHOLE import up front (still one request per unique
+    // token, still ≤ 4 in flight), so rows are not resolved one lookup at a time. Plain link fields
+    // keep their per-row lookups.
+    resolver.prime = (rawValues, currentField, context) => {
+      if (isNativePersonField(currentField)) {
+        primeNativePersonImport(rawValues, currentField, context)
+        return
+      }
+      if (isPersonField(currentField)) {
+        void getPeopleResolver(currentField)
+          .then((peopleResolver) => peopleResolver?.prime?.(rawValues, currentField, context))
+          .catch(() => undefined)
+      }
+    }
+    resolvers[field.id] = resolver
   }
   return resolvers
 })
@@ -1975,9 +2094,17 @@ const activeEditingComment = computed(() => (
     ? commentsState.comments.value.find((comment) => comment.id === selectedEditingCommentId.value) ?? null
     : null
 ))
-const commentComposerInitialMentions = computed(() => (
-  activeEditingComment.value ? buildEditingMentionSuggestions(activeEditingComment.value) : []
-))
+// #5808: the composer's starting mentions are a SNAPSHOT taken when an edit starts (onEditComment).
+// Deriving them live re-sent a new array whenever `commentMentionSuggestions` changed (every mention
+// search) or the comment list did (realtime), and the composer restarts its selection from each new
+// `initialMentions` — dropping whatever the user had picked or removed since the edit began.
+const editingMentionSnapshot = shallowRef<{ commentId: string; mentions: MetaCommentMentionSuggestion[] } | null>(null)
+const NO_COMPOSER_INITIAL_MENTIONS: MetaCommentMentionSuggestion[] = []
+const commentComposerInitialMentions = computed(() => {
+  const comment = activeEditingComment.value
+  const snapshot = editingMentionSnapshot.value
+  return comment && snapshot?.commentId === comment.id ? snapshot.mentions : NO_COMPOSER_INITIAL_MENTIONS
+})
 const commentInboxBadgeCount = computed(() => commentInboxState.unreadCount.value)
 const sheetPresenceLabel = computed(() => (
   fmtPresenceLabel(sheetPresenceState.activeCollaboratorCount.value, isZh.value)
@@ -2032,20 +2159,37 @@ function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: L
   }
 }
 
+// #5781 follow-up — a raw-id placeholder must never EVICT a display name we already had. `patchCell`
+// does not re-hydrate personSummaries, so whatever this writes is what the grid/drawer show until the
+// next full refetch: an entry that is still `{ id, display: <the id> }` (the picker's fallback for an
+// id it could not resolve) is downgraded to the previously known summary for the same id, if any.
+// Belt-and-braces behind the `currentSummaries` prop: that seam stops the placeholder from being
+// produced, this one stops any future producer's placeholder from overwriting a good name.
+function mergePersonSummaryDisplays(prev: PersonSummary[] | undefined, next: PersonSummary[]): PersonSummary[] {
+  if (!prev?.length) return next
+  const prevById = new Map(prev.map((entry) => [entry.id, entry] as const))
+  return next.map((entry) => {
+    if (entry.display && entry.display !== entry.id) return entry
+    const known = prevById.get(entry.id)
+    return known && known.display && known.display !== entry.id ? known : entry
+  })
+}
+
 // Native person (人员): mirror applyLocalLinkSummaries so a just-picked person shows its display
 // name immediately (grid + drawer) instead of a raw userId until the next refetch.
 function applyLocalPersonSummaries(recordId: string, fieldId: string, summaries: PersonSummary[]) {
+  const gridNext = mergePersonSummaryDisplays(grid.personSummaries.value[recordId]?.[fieldId], summaries)
   grid.personSummaries.value = {
     ...grid.personSummaries.value,
     [recordId]: {
       ...(grid.personSummaries.value[recordId] ?? {}),
-      [fieldId]: summaries,
+      [fieldId]: gridNext,
     },
   }
   if (deepLinkedRecord.value?.id === recordId) {
     deepLinkedRecordPersonSummaries.value = {
       ...deepLinkedRecordPersonSummaries.value,
-      [fieldId]: summaries,
+      [fieldId]: mergePersonSummaryDisplays(deepLinkedRecordPersonSummaries.value[fieldId], summaries),
     }
   }
 }
@@ -2088,20 +2232,45 @@ function formatCommentDraftContent(content: string): string {
   return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
 }
 
-function buildEditingMentionSuggestions(comment: { content: string; mentions: string[] }): MetaCommentMentionSuggestion[] {
+// #5808: a mention id is any non-empty string the create route accepted, so it can be an
+// Object.prototype key ("constructor", "toString", "__proto__"). Only the map's OWN string entries count.
+function ownMentionLabel(labels: Record<string, string> | undefined, mentionId: string): string {
+  if (!labels || !Object.hasOwn(labels, mentionId)) return ''
+  const label: unknown = labels[mentionId]
+  return typeof label === 'string' ? label.trim() : ''
+}
+
+function buildEditingMentionSuggestions(comment: {
+  content: string
+  mentions: string[]
+  mentionLabels?: Record<string, string>
+}): MetaCommentMentionSuggestion[] {
   const byId = new Map<string, MetaCommentMentionSuggestion>()
   for (const token of parseCommentMentionTokens(comment.content)) {
     byId.set(token.id, token)
   }
+  // A token's own label is what the draft text shows (formatCommentDraftContent), so it stays the chip
+  // label — the composer matches chips against the text by label. A remembered search hit only adds
+  // its subtitle; letting it replace the label (e.g. after a rename) unbound the chip from the text.
   for (const suggestion of commentMentionSuggestions.value) {
-    if (byId.has(suggestion.id)) {
-      byId.set(suggestion.id, { ...suggestion })
+    const token = byId.get(suggestion.id)
+    if (token) {
+      byId.set(suggestion.id, { ...suggestion, label: token.label })
     }
   }
+  // #5808: a mention that is not a token in the body (e.g. created through the API with an explicit
+  // `mentions` array) is named by the list response's own `mentionLabels`, else by a person a search
+  // already returned. Nobody to name it: the composer shows a neutral placeholder — never the raw id —
+  // and still keeps the id, so saving the edit does not silently remove the mention.
   for (const mentionId of comment.mentions) {
     if (byId.has(mentionId)) continue
+    const serverLabel = ownMentionLabel(comment.mentionLabels, mentionId)
+    if (serverLabel) {
+      byId.set(mentionId, { id: mentionId, label: serverLabel })
+      continue
+    }
     const suggestion = commentMentionSuggestions.value.find((item) => item.id === mentionId)
-    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: mentionId })
+    byId.set(mentionId, suggestion ? { ...suggestion } : { id: mentionId, label: '', unresolved: true })
   }
   return [...byId.values()]
 }
@@ -2132,6 +2301,136 @@ async function loadAllRecordSummaries(sheetId: string, displayFieldId: string) {
   return { records, displayMap }
 }
 
+// #5809 — what ONE bounded person lookup says about ONE import token.
+type ImportPersonTokenOutcome =
+  | { kind: 'match'; id: string }
+  | { kind: 'none' }
+  | { kind: 'ambiguous' }
+  | { kind: 'too-broad' }
+
+// #5809 — at most `limit` lookups run at once; the rest wait in FIFO order. A lookup whose `signal`
+// is aborted before it starts is dropped (rejected with an AbortError, its task never runs); one that
+// has already started runs to completion.
+function createBoundedLookupRunner(limit: number) {
+  let active = 0
+  const waiting: Array<() => void> = []
+  const release = () => {
+    active -= 1
+    waiting.shift()?.()
+  }
+  return function runLookup<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(createImportAbortError(isZh.value))
+        return
+      }
+      const onAbort = () => {
+        const index = waiting.indexOf(start)
+        if (index < 0) return
+        waiting.splice(index, 1)
+        reject(createImportAbortError(isZh.value))
+      }
+      function start() {
+        signal?.removeEventListener('abort', onAbort)
+        active += 1
+        let pending: Promise<T>
+        try {
+          pending = Promise.resolve(task())
+        } catch (error) {
+          pending = Promise.reject(error)
+        }
+        pending.then(resolve, reject).finally(release)
+      }
+      if (active < limit) {
+        start()
+        return
+      }
+      waiting.push(start)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+}
+
+// #5809 — the tokens of one cell that are worth a person lookup: non-blank and no longer than
+// IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH.
+function importPersonLookupTokens(rawValue: string): string[] {
+  return extractImportTokens(rawValue).filter((token) => {
+    const trimmed = token.trim()
+    return trimmed.length > 0 && trimmed.length <= IMPORT_PERSON_LOOKUP_MAX_TOKEN_LENGTH
+  })
+}
+
+// #5809 — exact matching only: a row counts when its user id, name or email EQUALS the token after
+// trim + case folding; a partial match never resolves. Two or more distinct users ⇒ ambiguous. A
+// clamped answer (`hasMore`) cannot prove that nobody past the ceiling also equals the token, so
+// there only a user-id match (unique by construction) is trusted, and anything else is reported as
+// too broad — never silently as an unknown person.
+function classifyPersonLookupAnswer(
+  token: string,
+  answer: { items: Array<{ userId: string; name: string | null; email: string | null }>; hasMore: boolean },
+): ImportPersonTokenOutcome {
+  const key = normalizeImportLookupKey(token)
+  const exactUserIds = new Set<string>()
+  let matchedById = false
+  for (const item of answer.items) {
+    const byId = normalizeImportLookupKey(item.userId) === key
+    const byName = typeof item.name === 'string' && normalizeImportLookupKey(item.name) === key
+    const byEmail = typeof item.email === 'string' && normalizeImportLookupKey(item.email) === key
+    if (!byId && !byName && !byEmail) continue
+    exactUserIds.add(item.userId)
+    if (byId) matchedById = true
+  }
+  if (exactUserIds.size > 1) return { kind: 'ambiguous' }
+  const only = [...exactUserIds][0]
+  if (only !== undefined && (!answer.hasMore || matchedById)) return { kind: 'match', id: only }
+  return answer.hasMore ? { kind: 'too-broad' } : { kind: 'none' }
+}
+
+const EMAIL_SHAPED_IMPORT_TOKEN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+// #5807 sibling — resolves an email-shaped token the People sheet could not match locally through the
+// comment @-mention directory of the sheet being imported into (GET /api/comments/mention-candidates,
+// gated on comments:read + reading that sheet). It is a request this caller can already send there —
+// term required, at most 50 rows (asked for explicitly) — in the server's `match=exact-email` mode,
+// which only NARROWS the substring search the comment composer uses to rows whose email EQUALS the
+// term: a substring page could be filled by `wangli@…` / `zhangli@…` before the owner of `li@…`.
+// The answer carries no separate email field: a candidate's email is its `subtitle`, or its `label`
+// when it has no subtitle — no name, a name equal to the email, or a name with an EMPTY email (then the
+// label is the name; a server that honours the mode never returns such a row, an older one might).
+// Returns the matched USER id; the caller maps it to a People record through the sheet's own User ID
+// column, so only people already on the People sheet resolve. A 403 (no comment access here) is "not
+// matched", never a load failure, and is remembered like any other miss.
+function lookupLegacyPersonEmail(
+  peopleSheetId: string,
+  sourceSheetId: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ImportPersonTokenOutcome> {
+  const cacheKey = JSON.stringify([peopleSheetId, sourceSheetId, normalizeImportLookupKey(token)])
+  const cached = legacyPersonEmailCache.get(cacheKey)
+  if (cached) return cached
+  const promise = runImportPersonLookup(
+    () => workbench.client.listCommentMentionSuggestions({
+      spreadsheetId: sourceSheetId,
+      q: token.trim(),
+      limit: IMPORT_PERSON_LOOKUP_PAGE_SIZE,
+      match: 'exact-email',
+    }),
+    signal,
+  )
+    .then((answer) => classifyPersonLookupAnswer(token, {
+      items: answer.items.map((item) => ({ userId: item.id, name: null, email: item.subtitle ?? item.label })),
+      hasMore: answer.hasMore,
+    }))
+    .catch((error: unknown): ImportPersonTokenOutcome => {
+      if ((error as { status?: unknown } | null)?.status === 403) return { kind: 'none' }
+      legacyPersonEmailCache.delete(cacheKey)
+      throw error
+    })
+  legacyPersonEmailCache.set(cacheKey, promise)
+  return promise
+}
+
 async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver | null> {
   if (!isPersonField(field)) return null
   const targetSheetId = typeof field.property?.foreignSheetId === 'string' ? field.property.foreignSheetId.trim() : ''
@@ -2149,22 +2448,37 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
     const fallbackAliasFieldId = stringFields.find(
       (targetField) => !emailFieldIds.includes(targetField.id) && !nameFieldIds.includes(targetField.id),
     )?.id
+    const aliasHydrateFieldIds = [
+      ...aliasFieldIds,
+      ...(fallbackAliasFieldId && !aliasFieldIds.includes(fallbackAliasFieldId) ? [fallbackAliasFieldId] : []),
+    ]
+    // The email fallback maps userId → People record through the sheet's own `User ID` column, and
+    // only when that column is one this resolver already reads (the preset sheet's fallback alias) —
+    // it adds no read of its own to the People sheet.
+    const userIdFieldId = stringFields.find(
+      (targetField) => /^user\s*id$/i.test(targetField.name.trim())
+        && [...emailFieldIds, ...nameFieldIds, ...aliasHydrateFieldIds].includes(targetField.id),
+    )?.id
 
     const recordIdLookup = new Map<string, string | null>()
     const emailLookup = new Map<string, string | null>()
     const nameLookup = new Map<string, string | null>()
     const aliasLookup = new Map<string, string | null>()
+    const userIdLookup = new Map<string, string | null>()
 
     async function hydrateLookup(fieldIds: string[], targetLookup: Map<string, string | null>) {
       await Promise.all(fieldIds.map(async (displayFieldId) => {
         const summary = await loadAllRecordSummaries(targetSheetId, displayFieldId)
+        const isUserIdColumn = displayFieldId === userIdFieldId
         for (const record of summary.records ?? []) {
           addPeopleLookupToken(recordIdLookup, record.id, record.id)
           addPeopleLookupToken(targetLookup, record.display, record.id)
+          if (isUserIdColumn) addPeopleLookupToken(userIdLookup, record.display, record.id)
         }
         for (const [recordId, display] of Object.entries(summary.displayMap ?? {})) {
           addPeopleLookupToken(recordIdLookup, recordId, recordId)
           addPeopleLookupToken(targetLookup, display, recordId)
+          if (isUserIdColumn) addPeopleLookupToken(userIdLookup, display, recordId)
         }
       }))
     }
@@ -2172,17 +2486,41 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
     await Promise.all([
       hydrateLookup(emailFieldIds, emailLookup),
       hydrateLookup(nameFieldIds, nameLookup),
-      hydrateLookup(
-        [
-          ...aliasFieldIds,
-          ...(fallbackAliasFieldId && !aliasFieldIds.includes(fallbackAliasFieldId) ? [fallbackAliasFieldId] : []),
-        ],
-        aliasLookup,
-      ),
+      hydrateLookup(aliasHydrateFieldIds, aliasLookup),
     ])
 
-    return async (rawValue: string, currentField?: MetaField) =>
-      resolvePeopleImportValue({
+    const matchedLocally = (key: string) =>
+      recordIdLookup.has(key) || emailLookup.has(key) || nameLookup.has(key) || aliasLookup.has(key)
+
+    const pendingEmailTokens = (rawValue: string) => importPersonLookupTokens(rawValue).filter((token) =>
+      EMAIL_SHAPED_IMPORT_TOKEN.test(token.trim()) && !matchedLocally(normalizeImportLookupKey(token)))
+
+    const resolver: ImportValueResolver = async (rawValue: string, currentField?: MetaField, context?: ImportResolveContext) => {
+      // #5807 sibling: the People sheet no longer carries emails, so an email-shaped token nothing
+      // local matches is looked up once (per token, bounded) and, on an exact hit, recorded in the
+      // email bucket — resolvePeopleImportValue then applies its usual email-first priority to it.
+      let tooBroad = false
+      if (userIdFieldId) {
+        const sourceSheetId = workbench.activeSheetId.value
+        const pending = pendingEmailTokens(rawValue)
+        const outcomes = await Promise.allSettled(
+          pending.map((token) => lookupLegacyPersonEmail(targetSheetId, sourceSheetId, token, context?.signal)),
+        )
+        for (const [index, outcome] of outcomes.entries()) {
+          if (outcome.status === 'rejected') throw outcome.reason
+          const key = normalizeImportLookupKey(pending[index])
+          const result = outcome.value
+          if (result.kind === 'ambiguous') {
+            emailLookup.set(key, null)
+          } else if (result.kind === 'too-broad') {
+            tooBroad = true
+          } else if (result.kind === 'match') {
+            const recordId = userIdLookup.get(normalizeImportLookupKey(result.id))
+            if (recordId !== undefined) emailLookup.set(key, recordId)
+          }
+        }
+      }
+      const resolved = resolvePeopleImportValue({
         rawValue,
         currentField,
         lookups: {
@@ -2193,6 +2531,24 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
         },
         isZh: isZh.value,
       })
+      // A too-broad email is ignored like any other unmatched token when the rest of the cell resolves
+      // (what an unmatched token always did here); it becomes the row's error only when nothing did.
+      if (resolved === null && tooBroad) {
+        throw new Error(fmtImportPersonValueTooBroad(currentField?.name ?? field.name, isZh.value))
+      }
+      return resolved
+    }
+    if (userIdFieldId) {
+      resolver.prime = (rawValues, _currentField, context) => {
+        const sourceSheetId = workbench.activeSheetId.value
+        for (const rawValue of rawValues) {
+          for (const token of pendingEmailTokens(rawValue)) {
+            void lookupLegacyPersonEmail(targetSheetId, sourceSheetId, token, context?.signal).catch(() => undefined)
+          }
+        }
+      }
+    }
+    return resolver
   })().catch((error) => {
     peopleResolverCache.delete(targetSheetId)
     throw error
@@ -2202,60 +2558,74 @@ async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver 
   return promise
 }
 
-// Native person (人员) import resolver — kind-aware switch (NOT resolvePeopleImportValue, which
-// returns People-sheet recordIds). Resolves each token to a member USERID by matching the sheet's
-// permission-candidate users on userId / label (name) / subtitle (email). Member-scoped: only the
-// candidate set the picker offers is resolvable; an unknown token fails the row (no egress).
-async function getNativePersonResolver(): Promise<ImportValueResolver> {
-  const sheetId = workbench.activeSheetId.value
-  const cached = nativePersonResolverCache.get(sheetId)
+function lookupNativePersonToken(
+  sheetId: string,
+  fieldId: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ImportPersonTokenOutcome> {
+  const cacheKey = JSON.stringify([sheetId, fieldId, normalizeImportLookupKey(token)])
+  const cached = nativePersonTokenCache.get(cacheKey)
   if (cached) return cached
-
-  const promise = (async (): Promise<ImportValueResolver> => {
-    const { items } = await workbench.client.listSheetPermissionCandidates(sheetId, { limit: 10000 })
-    const userIdByToken = new Map<string, string | null>()
-    const register = (token: string | null | undefined, userId: string) => {
-      if (!token) return
-      const key = normalizeImportLookupKey(token)
-      if (!key) return
-      const current = userIdByToken.get(key)
-      if (current !== undefined && current !== userId) {
-        userIdByToken.set(key, null) // ambiguous
-        return
-      }
-      userIdByToken.set(key, userId)
-    }
-    for (const item of items) {
-      if (item.subjectType !== 'user' || !item.isActive) continue
-      register(item.subjectId, item.subjectId)
-      register(item.label, item.subjectId)
-      register(item.subtitle ?? undefined, item.subjectId)
-    }
-
-    return async (rawValue: string, currentField?: MetaField): Promise<string[] | null> => {
-      const tokens = extractImportTokens(rawValue)
-      if (!tokens.length) return null
-      const resolved: string[] = []
-      for (const token of tokens) {
-        const key = normalizeImportLookupKey(token)
-        if (!key) continue
-        const match = userIdByToken.get(key)
-        if (match === null) throw new Error(isZh.value ? `匹配到多个人员："${token}"` : `Multiple people match "${token}"`)
-        if (typeof match === 'string') pushUniqueIds(resolved, [match])
-      }
-      if (!resolved.length) return null
-      if (currentField?.property?.limitSingleRecord !== false && resolved.length > 1) {
-        throw new Error(isZh.value ? `人员字段只允许一个人员：${rawValue}` : `Person field only allows one person: ${rawValue}`)
-      }
-      return resolved
-    }
-  })().catch((error) => {
-    nativePersonResolverCache.delete(sheetId)
-    throw error
-  })
-
-  nativePersonResolverCache.set(sheetId, promise)
+  const promise = runImportPersonLookup(
+    () => workbench.client.listPersonFieldDirectory(sheetId, fieldId, { q: token.trim(), match: 'exact' }),
+    signal,
+  )
+    .then((answer) => classifyPersonLookupAnswer(token, answer))
+    .catch((error: unknown) => {
+      // A failed lookup is not cached (the next row / a retry pass asks again) and propagates as-is,
+      // so a 403 reads as the permission refusal it is, not as an unknown person.
+      nativePersonTokenCache.delete(cacheKey)
+      throw error
+    })
+  nativePersonTokenCache.set(cacheKey, promise)
   return promise
+}
+
+// Native person (人员) import resolver — kind-aware switch (NOT resolvePeopleImportValue, which
+// returns People-sheet recordIds). Resolves each token to a member USERID through the field's own
+// directory (GET /sheets/:sheetId/person-fields/:fieldId/directory?match=exact): the same
+// canEditRecord gate as filling the cell, the same candidate set the write validator accepts, at most
+// 50 rows per request, one request per unique token across the import (#5809 — this used to pull the
+// canManageSheetAccess-gated /permission-candidates once, which the server clamps to 50 people).
+// Member-scoped: an unknown token fails the row (no egress).
+async function resolveNativePersonImportValue(
+  rawValue: string,
+  currentField: MetaField,
+  context?: ImportResolveContext,
+): Promise<string[] | null> {
+  const sheetId = workbench.activeSheetId.value
+  const tokens = importPersonLookupTokens(rawValue)
+  if (!tokens.length) return null
+  const outcomes = await Promise.allSettled(
+    tokens.map((token) => lookupNativePersonToken(sheetId, currentField.id, token, context?.signal)),
+  )
+  const resolved: string[] = []
+  // Token order, not completion order, decides which failure a row reports.
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status === 'rejected') throw outcome.reason
+    const token = tokens[index]
+    const result = outcome.value
+    if (result.kind === 'ambiguous') throw new Error(isZh.value ? `匹配到多个人员："${token}"` : `Multiple people match "${token}"`)
+    if (result.kind === 'too-broad') throw new Error(fmtImportPersonValueTooBroad(currentField.name, isZh.value))
+    if (result.kind === 'match') pushUniqueIds(resolved, [result.id])
+  }
+  if (!resolved.length) return null
+  if (currentField?.property?.limitSingleRecord !== false && resolved.length > 1) {
+    throw new Error(isZh.value ? `人员字段只允许一个人员：${rawValue}` : `Person field only allows one person: ${rawValue}`)
+  }
+  return resolved
+}
+
+// #5809 — look-ahead for a native person column: queue the lookup of every unique token of the import
+// (cached, bounded, dropped on cancel). Errors are left to the row that resolves the token.
+function primeNativePersonImport(rawValues: string[], field: MetaField, context?: ImportResolveContext) {
+  const sheetId = workbench.activeSheetId.value
+  for (const rawValue of rawValues) {
+    for (const token of importPersonLookupTokens(rawValue)) {
+      void lookupNativePersonToken(sheetId, field.id, token, context?.signal).catch(() => undefined)
+    }
+  }
 }
 
 async function resolveLinkToken(field: MetaField, token: string): Promise<string[] | null> {
@@ -2363,10 +2733,9 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
       containerType: 'meta_sheet',
       containerId: workbench.activeSheetId.value,
     }
-  await Promise.all([
-    commentsState.loadComments(scope),
-    ensureCommentMentionSuggestions(),
-  ])
+  // #5795: no mention-roster preload here any more — the composer searches as the user types
+  // (searchCommentMentions), so opening a thread issues no term-less candidate request.
+  await commentsState.loadComments(scope)
   highlightedCommentId.value = options?.highlightCommentId ?? null
   if (!selectedCommentFieldId.value && options?.highlightCommentId) {
     const derivedFieldId = resolveCommentThreadFieldId(options.highlightCommentId)
@@ -2399,28 +2768,37 @@ function resolveCommentThreadFieldId(commentId: string): string | null {
   return null
 }
 
-async function ensureCommentMentionSuggestions(force = false) {
-  const sheetId = workbench.activeSheetId.value
-  if (!sheetId) {
-    commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
-    return
-  }
-  if (!force && commentMentionSuggestionsLoadedForSheetId.value === sheetId) return
+// #5795 — server-side @-mention search, handed to every mention editor the workbench hosts (comment
+// composer via the inspector, rich-longText editors via the grid and the inspector's fields panel).
+// The endpoint answers a term-less call with `requiresQuery` (the editors render "type to search")
+// and caps every answer; 20 leaves headroom over the 6 rows an editor shows once already-picked
+// people are excluded. Errors propagate: the editors treat a failed search as "no remote matches".
+const COMMENT_MENTION_SEARCH_LIMIT = 20
+const COMMENT_MENTION_REMEMBERED_MAX = 50
 
-  try {
-    const result = await workbench.client.listCommentMentionSuggestions({
-      spreadsheetId: sheetId,
-      limit: 100,
+function rememberCommentMentionSuggestions(items: MetaCommentMentionSuggestion[]) {
+  const seen = new Set<string>()
+  commentMentionSuggestions.value = [...items, ...commentMentionSuggestions.value]
+    .filter((item) => {
+      if (seen.has(item.id)) return false
+      seen.add(item.id)
+      return true
     })
-    if (workbench.activeSheetId.value !== sheetId) return
-    commentMentionSuggestions.value = result.items
-    commentMentionSuggestionsLoadedForSheetId.value = sheetId
-  } catch {
-    if (workbench.activeSheetId.value !== sheetId) return
-    commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
-  }
+    .slice(0, COMMENT_MENTION_REMEMBERED_MAX)
+}
+
+async function searchCommentMentions(query: string): Promise<MetaCommentMentionSearchResult> {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return { items: [], requiresQuery: false, hasMore: false }
+  const result = await workbench.client.listCommentMentionSuggestions({
+    spreadsheetId: sheetId,
+    q: query,
+    limit: COMMENT_MENTION_SEARCH_LIMIT,
+  })
+  // A sheet switch while the request was in flight: the answer belongs to the old sheet's editors.
+  if (workbench.activeSheetId.value !== sheetId) return { items: [], requiresQuery: false, hasMore: false }
+  if (result.items.length > 0) rememberCommentMentionSuggestions(result.items)
+  return { items: result.items, requiresQuery: result.requiresQuery === true, hasMore: result.hasMore === true }
 }
 
 // Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line "every selectRecord(...,
@@ -3010,6 +3388,8 @@ async function onResolveComment(commentId: string) {
 function onEditComment(commentId: string) {
   const comment = commentsState.comments.value.find((item) => item.id === commentId)
   if (!comment) return
+  // #5808: taken once, here — see commentComposerInitialMentions.
+  editingMentionSnapshot.value = { commentId: comment.id, mentions: buildEditingMentionSuggestions(comment) }
   selectedEditingCommentId.value = comment.id
   selectedReplyCommentId.value = null
   selectedCommentFieldId.value = comment.targetFieldId ?? comment.fieldId ?? null
@@ -3103,6 +3483,8 @@ function openPersonPicker(field: MetaField) {
   personPickerField.value = field
   personPickerRecordId.value = selectedRecordId.value
   personPickerCurrentValue.value = selectedRecordResolved.value?.data[field.id] ?? null
+  // Drawer/form open: same summaries the drawer itself renders from (grid first, deep-record fallback).
+  personPickerCurrentSummaries.value = selectedRecordPersonSummaries.value[field.id] ?? []
   personPickerVisible.value = true
 }
 function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
@@ -3110,6 +3492,8 @@ function onGridPersonPicker(ctx: { recordId: string; field: MetaField }) {
   personPickerField.value = ctx.field
   personPickerRecordId.value = ctx.recordId
   personPickerCurrentValue.value = row?.data[ctx.field.id] ?? null
+  // Grid open: same summaries MetaCellRenderer is displaying for this cell right now.
+  personPickerCurrentSummaries.value = grid.personSummaries.value[ctx.recordId]?.[ctx.field.id] ?? []
   personPickerVisible.value = true
 }
 async function onPersonPickerConfirm(payload: { userIds: string[]; summaries: PersonSummary[] }) {
@@ -3177,12 +3561,16 @@ async function onUpdateField(fieldId: string, input: { name?: string; order?: nu
   } catch (e: any) { showError(e.message ?? wb('toast.fieldUpdateFailed', isZh.value)) }
 }
 
+// #5707 follow-up: the server refuses a field delete on a plugin-managed sheet with a coded 409
+// (MANAGED_FIELD_DELETE_REFUSED) whose message is English. Pick the copy by CODE -- same shape as
+// onDeleteSheet -- so zh-CN users get a Chinese sentence; every other failure still surfaces the
+// server's own message (and the generic toast when it sent none).
 async function onDeleteField(fieldId: string) {
   try {
     await workbench.client.deleteField(fieldId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? wb('toast.fieldDeleteFailed', isZh.value)) }
+  } catch (e: any) { showError(fmtFieldDeleteErrorMessage(e, isZh.value)) }
 }
 
 // --- View management ---
@@ -3237,6 +3625,15 @@ const activeFrozenLeftColumnIds = computed(() => parseFrozenIds(workbench.active
 function onSetFrozen(frozenLeftColumnIds: string[]) {
   void onPersistActiveViewConfig({
     config: { ...(workbench.activeView.value?.config ?? {}), frozenLeftColumnIds },
+  })
+}
+
+// frozen top rows (#5863c) — same opaque-config pattern as frozen columns above; view.config is
+// freeform JSON, so no backend key allowlist to update (see frozen-rows.ts narrowing).
+const activeFrozenTopRowCount = computed(() => parseFrozenTopRowCount(workbench.activeView.value?.config))
+function onSetFrozenRows(frozenTopRowCount: number) {
+  void onPersistActiveViewConfig({
+    config: { ...(workbench.activeView.value?.config ?? {}), frozenTopRowCount },
   })
 }
 
@@ -3573,7 +3970,7 @@ async function onRenameSheet(sheetId: string, name: string) {
 // for the SELECTED sheet when the server-derived `canDeleteSheet` bit is true, and this handler
 // re-checks that bit so a stale rail can never issue the request. Confirm first — the same
 // window.confirm idiom every other destructive prompt in this file uses — with copy that names the
-// sheet and states the consequence (records hidden with it; admin-only API restore, no UI yet).
+// sheet and states the consequence (records hidden with it; lifecycle-authorized recycle-bin restore).
 // Refusals are coded (409 SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED, 404 SHEET_DELETED) and get
 // plain-language toasts by CODE; anything else surfaces the server message or the generic toast.
 //
@@ -3716,9 +4113,17 @@ function onCloseDrawer() {
 // inspector via its own × already discards a comment draft the same way, `hasRecordScopedDrafts`
 // already includes `hasCommentDraft`, see `confirmDiscardRecordChanges`).
 function onToggleComments() {
+  // #5813 final review: this button is reachable from the Details tab too, and while an edit is open
+  // `showComments` is already true, so the inspector stays on Details — dropping the edited text below
+  // would be invisible there. Ask first (non-empty edit only); on cancel nothing changes at all.
+  if (!confirmDiscardCommentEdit()) return
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
+  // #5813 follow-up: ending an active EDIT here must also drop the edited text, as
+  // `onCancelCommentEdit` does — otherwise the composer keeps the body but loses the edit's mention
+  // snapshot, and Send posts it as a NEW comment with `mentions: []`. A new-comment draft is kept.
+  if (selectedEditingCommentId.value) commentDraft.value = ''
   selectedEditingCommentId.value = null
   void commentInboxState.refreshUnreadCount().catch(() => undefined)
 }
@@ -3776,6 +4181,13 @@ function confirmDiscardRecordChanges() {
   return window.confirm(wb('confirm.discardRecordChanges', isZh.value))
 }
 
+// #5813: only an in-progress EDIT with text is at stake (a new-comment draft is kept by
+// `onToggleComments`); `hasRecordScopedDrafts` is not reused because a dirty form alone must not prompt.
+function confirmDiscardCommentEdit() {
+  if (!selectedEditingCommentId.value || !hasCommentDraft.value) return true
+  return window.confirm(wb('confirm.discardCommentEdit', isZh.value))
+}
+
 function discardWorkbenchDraftsForExternalContextChange() {
   formDirty.value = false
   fieldManagerDirty.value = false
@@ -3818,8 +4230,32 @@ function serializeExternalContext(input: { baseId: string; sheetId: string; view
   return `${input.baseId}::${input.sheetId}::${input.viewId}`
 }
 
+// #5750: the incoming baseId is what the embedding host / URL says, while activeBaseId is what the
+// LOADED CONTEXT said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+// ctx.sheet.baseId). Comparing the two verbatim makes this fast path miss forever whenever they
+// spell the same base differently, and a host that re-sends the same context on a timer then
+// re-enters applyExternalContext -- plus the busy / unsaved-draft defer toasts -- every tick.
+// A sheet belongs to exactly one base, so once the ACTIVE sheet is known (from the loaded sheet
+// list) to live in the active base, the requested base id carries nothing the sheet id does not
+// already carry. It is only ignored, never trusted: the caller still requires the sheet id (and the
+// view id) to equal the active one, so a foreign base can never select a sheet through this path,
+// and an unknown active sheet (empty/not-yet-loaded sheet list) keeps the strict comparison.
+function externalContextBaseMatchesWorkbench(inputBaseId: string) {
+  const activeBaseId = workbench.activeBaseId.value ?? ''
+  if (inputBaseId === activeBaseId || !inputBaseId) return true
+  if (!activeBaseId) return false
+  // A base id this workbench KNOWS (it is in the loaded base list) is never a different spelling of
+  // the active base -- it is a real base switch request. Ignoring it would answer 'applied' to a
+  // host that posted only { baseId } (handleNavigateMessage fills sheetId/viewId in from the
+  // current ones) while nothing switched; that request has to go down the normal path and fail
+  // loudly, as it did before this fast path existed.
+  if (bases.value.some((base) => base.id === inputBaseId)) return false
+  const activeSheet = workbench.sheets.value.find((sheet) => sheet.id === (workbench.activeSheetId.value ?? ''))
+  return !!activeSheet && activeSheet.baseId === activeBaseId
+}
+
 function externalContextMatchesWorkbench(input: { baseId: string; sheetId: string; viewId: string }) {
-  return input.baseId === (workbench.activeBaseId.value ?? '') &&
+  return externalContextBaseMatchesWorkbench(input.baseId) &&
     input.sheetId === (workbench.activeSheetId.value ?? '') &&
     input.viewId === (workbench.activeViewId.value ?? '')
 }
@@ -3830,6 +4266,34 @@ function getCurrentExternalContext() {
     sheetId: workbench.activeSheetId.value ?? '',
     viewId: workbench.activeViewId.value ?? '',
   }
+}
+
+// #5750 follow-up (review round 2): which triple an 'applied' result echoes. getCurrentExternalContext()
+// reads the LIVE refs, and every caller below reads them AFTER an await -- loadBaseContext applies the
+// context and only THEN awaits /fields, so a rail click (selectSheet/selectView) or a second overlapping
+// sync can move the active triple inside that window. useMultitableWorkbench documents exactly this hazard
+// and keeps per-sync `inFlightExternalSyncs` so its memo never records another writer's result as this
+// request's; tests/multitable-external-context-sync.spec.ts pins the window as reachable (a sync for
+// sheet_orders resolves true while the rail click's sheet_deals is on screen).
+// So: echo the live triple only when it is still a RESOLUTION OF THIS REQUEST --
+//   - the base the request named is the one in effect (or a spelling of it: the fast-path matcher),
+//   - the sheet the request named is the one in effect,
+//   - the view the request named is in effect, or is not a view this sheet HAS (the dead/renamed view
+//     the loaded context legitimately falls back to views[0] for -- the case this echo change is for).
+// Otherwise this request lost a race: echo the REQUEST, which is what shipped before, so the embed host
+// pins the requested triple and the props watcher carries the frame back to it.
+function resolveAppliedExternalContextEcho(request: { baseId: string; sheetId: string; viewId: string }) {
+  const current = getCurrentExternalContext()
+  if (!externalContextBaseMatchesWorkbench(request.baseId)) return request
+  if (request.sheetId && request.sheetId !== current.sheetId) return request
+  if (
+    request.viewId
+    && request.viewId !== current.viewId
+    && workbench.views.value.some((view) => view.id === request.viewId)
+  ) {
+    return request
+  }
+  return current
 }
 
 async function applyExternalContext(input: { baseId: string; sheetId: string; viewId: string }) {
@@ -3862,8 +4326,16 @@ async function replayPendingExternalContextIfReady() {
   const ok = await applyExternalContext(replay.context)
   emit('external-context-result', ok
     ? {
+      // #5750 follow-up: echo what is ACTUALLY on screen, not what was asked for. The loaded
+      // context decides the active triple (syncContextState overwrites activeBaseId with
+      // ctx.base.id / ctx.sheet.baseId and falls activeViewId back to views[0] when the requested
+      // view is not in ctx.views), so a request naming a dead view applies successfully while the
+      // workbench lands on another view. Echoing the request made the embed host pin that dead
+      // triple into the URL and re-send it forever; the resolved triple round-trips -- but only
+      // when it IS this request's resolution (see resolveAppliedExternalContextEcho). FAILURES keep
+      // echoing the request -- there is no applied context to report for them.
       status: 'applied',
-      context: replay.context,
+      context: resolveAppliedExternalContextEcho(replay.context),
       requestId: replay.requestId,
     }
     : {
@@ -3955,7 +4427,12 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
-  return { status: 'applied', context: nextContext, requestId: options?.requestId }
+  // #5750 follow-up: same as the replay echo above -- report the RESOLVED triple, never the requested
+  // one, whenever what is on screen is this request's own resolution. The fast-path 'applied' return
+  // at the top of this function already reports the live triple (it has just proved the refs equal the
+  // request, synchronously), so a caller could otherwise get two different shapes of 'applied' for the
+  // same context.
+  return { status: 'applied', context: resolveAppliedExternalContextEcho(nextContext), requestId: options?.requestId }
 }
 
 async function onCreateBase(name: string) {
@@ -4624,6 +5101,8 @@ watch(() => grid.conflict.value, (current, previous) => {
 })
 
 async function refreshDialogMeta() {
+  // A background poll must not supersede a pending base-context switch.
+  if (workbench.loading.value) return
   const activeSheetId = workbench.activeSheetId.value
   if (!activeSheetId) return
   if (dialogMetaRefreshInFlight) {
@@ -4634,14 +5113,27 @@ async function refreshDialogMeta() {
   try {
     dialogMetaRefreshQueued = false
     const refreshed = await workbench.loadSheetMeta(activeSheetId)
-    if (refreshed && workbench.activeSheetId.value === activeSheetId) {
-      grid.fields.value = [...propertyVisibleWorkbenchFields.value]
+    // workbenchAlive: this write lands AFTER an await, so a refresh still in flight when the
+    // workbench unmounted must not write into a torn-down grid.
+    if (refreshed && workbenchAlive && workbench.activeSheetId.value === activeSheetId) {
+      // #5743: an unchanged poll no longer replaces workbench.fields, so the computed hands back the
+      // very same field objects — reseating grid.fields anyway would invalidate every grid computed
+      // and re-render the table on each keep-alive tick for nothing.
+      const nextFields = propertyVisibleWorkbenchFields.value
+      const currentFields = grid.fields.value
+      const sameFields = currentFields.length === nextFields.length
+        && currentFields.every((field, index) => field === nextFields[index])
+      if (!sameFields) grid.fields.value = [...nextFields]
     }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
     dialogMetaRefreshInFlight = false
-    const shouldRefresh = Boolean((showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value) && workbench.activeSheetId.value)
+    // workbenchAlive: the dialog refs dialogMetaRefreshWanted() reads survive unmount and the
+    // "sheet changed mid-flight" clause below is true by construction after a teardown that
+    // switched sheets, so without this a refresh in flight during teardown would issue one more
+    // GET /fields + GET /context into a dead component.
+    const shouldRefresh = workbenchAlive && dialogMetaRefreshWanted()
     if (shouldRefresh && (dialogMetaRefreshQueued || workbench.activeSheetId.value !== activeSheetId)) {
       dialogMetaRefreshQueued = false
       void refreshDialogMeta()
@@ -4649,20 +5141,60 @@ async function refreshDialogMeta() {
   }
 }
 
+// Same predicate the watch below uses to arm/disarm the keep-alive — the visibility listener has to
+// re-check it because a dialog can close between a tab being hidden and it coming back.
+function dialogMetaRefreshWanted(): boolean {
+  return Boolean(
+    (showFieldManager.value || showPermissionManager.value || showViewManager.value || showImportModal.value)
+    && workbench.activeSheetId.value,
+  )
+}
+
 function stopDialogMetaRefresh() {
   if (dialogMetaRefreshTimer != null) {
     window.clearInterval(dialogMetaRefreshTimer)
     dialogMetaRefreshTimer = null
   }
+  if (dialogMetaVisibilityListener) {
+    document.removeEventListener('visibilitychange', dialogMetaVisibilityListener)
+    dialogMetaVisibilityListener = null
+  }
   dialogMetaRefreshQueued = false
 }
 
+// #5743 follow-up: a refresh that is NOT an interval tick (dialog open, visibility catch-up) also
+// RESTARTS the cadence. Without the re-arm the interval kept the phase it had before the tab went
+// hidden, so "hidden 20 s -> visible" fired the catch-up and then let the pre-existing tick land a
+// few seconds later: two refreshes inside one 15 s window. The re-arm lives in this helper instead
+// of inline in the listener body so the listener closure identity never changes (the very function
+// object that was added is what stopDialogMetaRefresh must hand removeEventListener), and so at
+// most one interval is ever alive: the previous id is cleared before the new one lands in the same
+// slot stopDialogMetaRefresh reads.
+function armDialogMetaRefreshTimer() {
+  if (dialogMetaRefreshTimer != null) window.clearInterval(dialogMetaRefreshTimer)
+  dialogMetaRefreshTimer = window.setInterval(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    void refreshDialogMeta()
+  }, DIALOG_META_REFRESH_INTERVAL_MS)
+}
+
+// #5743: open → refresh once, then a SLOW keep-alive (15 s), skipped entirely while the tab is
+// hidden and re-fired once the moment it comes back. The old 1200 ms cadence pinned an idle admin
+// tab at ~1 req/s per open dialog forever; the composable's fingerprint check now also keeps an
+// unchanged answer from re-seating sheets/views/fields identities on every tick.
 function startDialogMetaRefresh() {
   stopDialogMetaRefresh()
   void refreshDialogMeta()
-  dialogMetaRefreshTimer = window.setInterval(() => {
-    void refreshDialogMeta()
-  }, 1200)
+  armDialogMetaRefreshTimer()
+  if (typeof document !== 'undefined') {
+    dialogMetaVisibilityListener = () => {
+      if (document.visibilityState === 'hidden') return
+      if (!dialogMetaRefreshWanted()) return
+      void refreshDialogMeta()
+      armDialogMetaRefreshTimer()
+    }
+    document.addEventListener('visibilitychange', dialogMetaVisibilityListener)
+  }
 }
 
 // --- Bulk delete ---
@@ -5091,7 +5623,6 @@ watch(
     unsubscribeMentionRealtime?.()
     unsubscribeMentionRealtime = null
     commentMentionSuggestions.value = []
-    commentMentionSuggestionsLoadedForSheetId.value = null
 
     if (!sheetId) {
       mentionInboxState.clearSummary()
@@ -5099,11 +5630,8 @@ watch(
     }
 
     void mentionInboxState.loadSummary({ spreadsheetId: sheetId })
-    // Mention candidates are NOT loaded eagerly here: the reset above cleared
-    // commentMentionSuggestionsLoadedForSheetId, so the on-demand call inside
-    // loadCommentsForRecord fetches a fresh list the first time a comment
-    // composer actually opens on this sheet. Eager-loading added a request to
-    // every sheet open for a list most sessions never use.
+    // Mention candidates are never loaded as a list (#5795): the endpoint is search-required, and the
+    // mention editors query it through searchCommentMentions as the user types.
     unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
       onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
       onCommentUpdated: mentionInboxState.onRealtimeCommentUpdated,
@@ -5179,10 +5707,6 @@ watch(
     void replayPendingExternalContextIfReady()
   },
 )
-
-// Cleared on unmount so an idle-deferred callback scheduled during mount can
-// never fire into a torn-down workbench (or eat a later test's mocked fetch).
-let workbenchAlive = true
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
@@ -5266,6 +5790,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   workbenchAlive = false
+  closeConfigHistory()
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('resize', syncRailViewportState)
   stopDialogMetaRefresh()

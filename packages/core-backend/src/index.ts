@@ -89,6 +89,7 @@ import {
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
   findObjectView as findProvisionedObjectView,
+  ensureSystemBase as ensureMultitableSystemBase,
   runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
@@ -102,7 +103,7 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
-import { SheetNotLiveError, assertSheetLive } from './multitable/sheet-liveness'
+import { SheetNotLiveError, assertSheetLive, loadSheetLiveness } from './multitable/sheet-liveness'
 import { isRecordReadDeniedForUser, loadRowLevelReadDenyEnabled } from './multitable/permission-service'
 import {
   assertPluginOwnsObject,
@@ -133,6 +134,7 @@ import { startAuditLogPartitionEnsure } from './audit/audit-partition-schedule'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import { startNotificationRetention } from './multitable/notification-retention'
 import {
   approvalAttachmentRefsJsonParser,
   isApprovalAttachmentsEnabled,
@@ -397,6 +399,7 @@ import { automationWebhookJsonParser, createAutomationRoutes } from './routes/au
 import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
+import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -454,6 +457,8 @@ export interface MetaSheetServerOptions {
   readonly host?: string
   readonly pluginDirs?: string[]
   readonly createRecoveryArchiveComposition?: RecoveryArchiveApplicationCompositionFactory
+  readonly startupSignal?: AbortSignal
+  readonly manageProcessSignals?: boolean
 }
 
 // 按项目导出物料 Excel: lazily imports `xlsx` (same lazy-import discipline as routes/univer-meta.ts's
@@ -518,7 +523,7 @@ async function sendStockPreparationHandoffNotification(params: {
   return sendStockPreparationHandoffNotificationToDestinations(service, params)
 }
 
-function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
+export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
   const pool = poolManager.get()
   const query = pool.query.bind(pool) as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']
   const transaction: RecoveryArchiveApplicationDatabaseRuntime['transaction'] = async (work) =>
@@ -561,6 +566,10 @@ export class MetaSheetServer {
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
+  // E(2026-09-12): 通知中心保留期清理。默认关 —— 没配 MULTITABLE_NOTIFICATION_RETENTION_DAYS
+  // 时 startNotificationRetention 返回 no-op,这个句柄就是个空 async 函数,stop 时照调不误。
+  // async 是必须的:stop 要 await 在飞的那一轮 sweep,否则关停会和 pool.end() 赛跑(fix r1-A4)。
+  private stopNotificationRetention?: () => Promise<void>
   private stopApprovalAttachmentWorkers?: () => void | Promise<void>
   private stopElearningMediaWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
@@ -586,7 +595,30 @@ export class MetaSheetServer {
   // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
   // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
   private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
+  /** Record-level submit-for-approval completion sink (eventBus leg + durable consumer share this object). */
+  private recordApprovalCompletionSink:
+    import('./multitable/record-approval-submission-service').RecordApprovalCompletionSink | null = null
+  private recordApprovalCompletionSubscription:
+    import('./multitable/record-approval-submission-service').RecordApprovalCompletionSubscription | null = null
+  private approvalProjectionService:
+    import('./multitable/approval-record-projection-service').ApprovalRecordProjectionService | null = null
+  private approvalProjectionSweepScheduler:
+    import('./services/ApprovalProjectionSweepScheduler').ApprovalProjectionSweepScheduler | null = null
+  /**
+   * DingTalk approval-todo ONE-WAY mirror sink (eventBus leg + durable consumer_key
+   * `dingtalk-todo-mirror` share this object). Built unconditionally — the sink itself is a no-op
+   * while DINGTALK_TODO_MIRROR_ENABLED is not exactly 'true', and the durable registry REQUIRES the
+   * adapter to exist (manifest v3 completeness) regardless of the flag.
+   */
+  private dingtalkTodoMirrorSink:
+    import('./services/dingtalk-todo-mirror-service').DingTalkTodoMirrorSink | null = null
+  private dingtalkTodoMirrorSubscription:
+    import('./services/dingtalk-todo-mirror-service').DingTalkTodoMirrorSubscription | null = null
+  /** Mirror delivery worker interval handle — only ever set when the mirror flag is ON. */
+  private stopDingTalkTodoMirrorWorker?: () => Promise<void>
   private readonly recoveryArchiveApplication: RecoveryArchiveApplication
+  private readonly startupSignal?: AbortSignal
+  private readonly manageProcessSignals: boolean
 
   // IoC Container
   private injector: Injector
@@ -613,6 +645,8 @@ export class MetaSheetServer {
       process.env,
       recoveryArchiveObservability,
     )
+    this.startupSignal = options.startupSignal
+    this.manageProcessSignals = options.manageProcessSignals !== false
 
     // 创建核心API
     const coreAPI = this.createCoreAPI()
@@ -1005,6 +1039,24 @@ export class MetaSheetServer {
               }
             }
             return getProvisionedObjectField({ query: readQuery, projectId, objectId, fieldId })
+          },
+          // B3: plugin-owned system base. Runs in ONE transaction (insert + fail-closed re-read);
+          // the prefix rule is applied by the plugin-scope wrapper in front of this, and every
+          // refusal propagates unwrapped (connection-pool rethrows) so the plugin route sees
+          // `.status` / `.code` on the original error.
+          ensureSystemBase: async ({ baseId, name }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMultitableSystemBase({ query: txQuery, baseId, name })
+            })
           },
         },
         records: {
@@ -1832,6 +1884,9 @@ export class MetaSheetServer {
     this.app.use('/api/multitable', createMultitableAiRoutes({ queue: new QueueServiceImpl() }))
     // B1-a1 button field run endpoint. See routes/multitable-button.ts header.
     this.app.use('/api/multitable', createMultitableButtonRoutes())
+    // Record-level submit-for-approval (multitable x approval phase 2):
+    //   POST/GET /sheets/:sheetId/records/:recordId/approvals. See routes/multitable-record-approvals.ts.
+    this.app.use('/api/multitable', createMultitableRecordApprovalRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
@@ -3293,8 +3348,91 @@ export class MetaSheetServer {
     return this.stopPromise
   }
 
+  private closeHttpServerForShutdown(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        if (!this.httpServer.listening) {
+          resolve()
+          return
+        }
+        this.httpServer.close((error?: Error) => {
+          if (error) {
+            reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
+            return
+          }
+          this.logger.info('HTTP server closed')
+          resolve()
+        })
+      } catch {
+        reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
+      }
+    })
+  }
+
+  private async waitForShutdownBarrier(
+    tasks: Array<Promise<unknown>>,
+    failureCode: string,
+    timeoutMessage: string,
+  ): Promise<void> {
+    let timeout: NodeJS.Timeout | null = null
+    const settled = Promise.allSettled(tasks).then((results) => {
+      if (results.some((result) => result.status === 'rejected')) {
+        throw new Error(failureCode)
+      }
+    })
+    try {
+      await Promise.race([
+        settled,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            this.logger.warn(timeoutMessage)
+            reject(new Error(failureCode))
+          }, 10_000)
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  }
+
+  private observeShutdownTask<T>(task: Promise<T>): Promise<T> {
+    // Some producer drains can reject before the recovery worker finishes and before the shared
+    // allSettled barrier is installed. Observe immediately without changing the original promise,
+    // so the later barrier still sees and propagates the rejection as a values-free failure code.
+    void task.catch(() => undefined)
+    return task
+  }
+
   private async stopOnce(signal: string): Promise<void> {
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
+
+    // Close every approval-completion producer admission synchronously. Their drains run while the
+    // completion listeners remain attached, so a terminal event emitted by already-admitted work is not lost.
+    const approvalProducerDrains: Array<Promise<unknown>> = []
+    approvalProducerDrains.push(this.observeShutdownTask(this.closeHttpServerForShutdown()))
+    approvalProducerDrains.push(this.observeShutdownTask(stopApprovalSlaScheduler()))
+    if (this.automationService) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.automationService.stopProducerAdmissions()))
+    }
+    if (this.approvalProjectionSweepScheduler) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.approvalProjectionSweepScheduler.stop()))
+    }
+    if (this.durableDeliveryLoop) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.durableDeliveryLoop.stop()))
+    }
+    if (this.stopDingTalkTodoMirrorWorker) {
+      approvalProducerDrains.push(this.observeShutdownTask(this.stopDingTalkTodoMirrorWorker()))
+      this.stopDingTalkTodoMirrorWorker = undefined
+    }
+    if (this.dingtalkInteractiveCardStreamWorker) {
+      approvalProducerDrains.push(
+        this.observeShutdownTask(
+          this.dingtalkInteractiveCardStreamWorker.shutdown().then((status) => {
+            if (status.state === 'failed') throw new Error('DINGTALK_CARD_STREAM_DRAIN_FAILED')
+          }),
+        ),
+      )
+    }
 
     try {
       await this.stopElearningMediaWorkers?.()
@@ -3313,6 +3451,44 @@ export class MetaSheetServer {
     } catch {
       recoveryArchiveWorkerStopFailed = true
       this.logger.warn('Recovery archive restore worker stop failed')
+    }
+
+    let approvalCompletionBarrierFailed = false
+    try {
+      await this.waitForShutdownBarrier(
+        approvalProducerDrains,
+        'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+        'Approval completion producer drain timeout',
+      )
+      if (this.automationService) {
+        await this.waitForShutdownBarrier(
+          [this.automationService.drainTransitiveCompletionProducers()],
+          'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+          'Approval completion transitive producer drain timeout',
+        )
+      }
+
+      // No producer can add another completion callback after this point. Detach only IDs owned by
+      // these consumers, then drain callbacks that were admitted before the synchronous detach.
+      this.automationService?.detachCompletionConsumers()
+      this.approvalProjectionService?.unsubscribe(eventBus)
+      this.recordApprovalCompletionSubscription?.detach()
+      this.dingtalkTodoMirrorSubscription?.detach()
+      const approvalSinkDrains: Array<Promise<unknown>> = []
+      if (this.automationService) approvalSinkDrains.push(this.automationService.drainCompletionConsumers())
+      if (this.approvalProjectionService) approvalSinkDrains.push(this.approvalProjectionService.drainCompletionHandlers())
+      if (this.recordApprovalCompletionSubscription) approvalSinkDrains.push(this.recordApprovalCompletionSubscription.drain())
+      if (this.dingtalkTodoMirrorSubscription) approvalSinkDrains.push(this.dingtalkTodoMirrorSubscription.drain())
+      await this.waitForShutdownBarrier(
+        approvalSinkDrains,
+        'APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED',
+        'Approval completion sink drain timeout',
+      )
+      this.automationServiceReady = false
+      setAutomationServiceInstance(null)
+    } catch {
+      approvalCompletionBarrierFailed = true
+      this.logger.warn('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
     }
 
     const shutdownTasks: Promise<void>[] = []
@@ -3334,26 +3510,6 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
-        this.automationService?.shutdown()
-        this.automationServiceReady = false
-        setAutomationServiceInstance(null)
-      } catch (err) {
-        this.logger.warn(`AutomationService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }))
-    // P2 durable-delivery S5: stop the outbox dispatch loop (no-op when the flag was OFF — the handle is null).
-    // A clean stop lets in-flight adapters finish/abort and prevents a claimed row from being abandoned mid-lease.
-    if (this.durableDeliveryLoop) {
-      const loop = this.durableDeliveryLoop
-      this.durableDeliveryLoop = null
-      shutdownTasks.push(
-        loop.stop().catch((err) => {
-          this.logger.warn(`Durable delivery dispatch loop stop error: ${err instanceof Error ? err.message : String(err)}`)
-        }) as Promise<void>,
-      )
-    }
-    shutdownTasks.push(Promise.resolve().then(() => {
-      try {
         this.stopMetaRevisionRetention?.()
         this.stopMultitableAttachmentCleanup?.()
       } catch (err) {
@@ -3372,6 +3528,16 @@ export class MetaSheetServer {
         this.stopMultitableAttachmentBlobPurge?.()
       } catch (err) {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    // This task must settle before pool.end(). The bounded shutdown barrier below clears its timeout on
+    // success and rejects on a real timeout, leaving the pool open instead of reporting a false completion.
+    shutdownTasks.push(Promise.resolve().then(async () => {
+      try {
+        await this.stopNotificationRetention?.()
+        this.stopNotificationRetention = undefined
+      } catch (err) {
+        this.logger.warn(`Notification retention stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
     shutdownTasks.push(Promise.resolve().then(async () => {
@@ -3403,52 +3569,6 @@ export class MetaSheetServer {
       )
     }
 
-    // 0c. Shut down optional DingTalk interactive-card Stream worker
-    if (this.dingtalkInteractiveCardStreamWorker) {
-      shutdownTasks.push(
-        this.dingtalkInteractiveCardStreamWorker.shutdown().catch((err) => {
-          this.logger.warn(`DingTalk interactive-card Stream shutdown error: ${err instanceof Error ? err.message : String(err)}`)
-        }) as Promise<void>,
-      )
-    }
-
-    // 1. Close HTTP server
-    shutdownTasks.push(new Promise<void>((resolve) => {
-      try {
-        if (this.httpServer.listening) {
-          this.httpServer.close((err: Error | undefined) => {
-            if (err) {
-              this.logger.warn(`HTTP server close error: ${err.message}`)
-            } else {
-              this.logger.info('HTTP server closed')
-            }
-            resolve()
-          })
-        } else {
-          resolve()
-        }
-      } catch (err) {
-        this.logger.warn(`HTTP server close error: ${err instanceof Error ? err.message : String(err)}`)
-        resolve()
-      }
-    }))
-
-    // 2. Close database pool only after the restore worker has definitely drained.
-    if (recoveryArchiveWorkerDrained) {
-      shutdownTasks.push((async () => {
-        try {
-          const { pool } = await import('./db/pg')
-          if (pool) {
-            await pool.end()
-            this.logger.info('Database pool closed')
-          }
-        } catch (err) {
-          this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      })())
-    } else {
-      this.logger.warn('Database pool close skipped because recovery archive restore worker did not drain')
-    }
 
     // 3. Unload plugins gracefully
     shutdownTasks.push((async () => {
@@ -3478,14 +3598,6 @@ export class MetaSheetServer {
         this.logger.info('Directory sync scheduler stopped')
       } catch (err) {
         this.logger.warn(`Directory sync scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })())
-
-    shutdownTasks.push((async () => {
-      try {
-        stopApprovalSlaScheduler()
-      } catch (err) {
-        this.logger.warn(`Approval SLA scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 
@@ -3569,17 +3681,37 @@ export class MetaSheetServer {
       }
     })())
 
-    // Wait for all shutdown tasks with timeout
-    await Promise.race([
-      Promise.all(shutdownTasks),
-      new Promise<void>((resolve) => setTimeout(() => {
-        this.logger.warn('Shutdown timeout, forcing exit')
-        resolve()
-      }, 10000)) // 10 second timeout
-    ])
+    await this.waitForShutdownBarrier(
+      shutdownTasks,
+      'SHUTDOWN_TIMEOUT',
+      'Shutdown timeout; database pool left open',
+    )
 
     if (recoveryArchiveWorkerStopFailed) {
       throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    }
+    if (approvalCompletionBarrierFailed) {
+      throw new Error('APPROVAL_COMPLETION_SHUTDOWN_BARRIER_FAILED')
+    }
+    if (!recoveryArchiveWorkerDrained) {
+      throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    }
+
+    // Custody outlives accepted HTTP work as well as worker chunks. Never revoke on a failed drain.
+    try {
+      this.recoveryArchiveApplication.releaseCustody()
+    } catch {
+      throw new Error('RECOVERY_ARCHIVE_CUSTODY_RELEASE_FAILED')
+    }
+
+    try {
+      const { pool } = await import('./db/pg')
+      if (pool) {
+        await pool.end()
+        this.logger.info('Database pool closed')
+      }
+    } catch (err) {
+      this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
     }
 
     this.logger.info('Shutdown complete')
@@ -3589,6 +3721,20 @@ export class MetaSheetServer {
    * 启动服务器
    */
   async start(): Promise<void> {
+    try {
+      await this.startOnce()
+    } catch (error) {
+      try {
+        await this.stop('STARTUP_FAILED')
+      } catch {
+        this.logger.warn('STARTUP_ROLLBACK_FAILED')
+      }
+      throw error
+    }
+  }
+
+  private async startOnce(): Promise<void> {
+    this.assertStartupNotCancelled()
     // IoC: Load configuration
     if (!this.portLocked) {
       try {
@@ -3700,7 +3846,7 @@ export class MetaSheetServer {
       // Roll back the half-built instance. It was never published (no field, no singleton, routes see
       // undefined), so this only reaps whatever the partial init managed to start.
       try {
-        pendingAutomationService?.shutdown()
+        await pendingAutomationService?.shutdown()
       } catch {
         // best-effort rollback — the instance is unpublished either way
       }
@@ -3721,15 +3867,103 @@ export class MetaSheetServer {
         resolveApprovalProjectionSweepLeaderOptions,
         resolveApprovalProjectionSweepIntervalMs,
       } = await import('./services/ApprovalProjectionSweepScheduler')
-      getApprovalRecordProjectionService().subscribe(eventBus)
+      const projectionService = getApprovalRecordProjectionService()
+      projectionService.subscribe(eventBus)
+      this.approvalProjectionService = projectionService
       const projectionSweepLeaderOptions = await resolveApprovalProjectionSweepLeaderOptions()
-      startApprovalProjectionSweepScheduler({
+      this.approvalProjectionSweepScheduler = startApprovalProjectionSweepScheduler({
         leaderOptions: projectionSweepLeaderOptions,
         intervalMs: resolveApprovalProjectionSweepIntervalMs(),
       })
       this.logger.info('Approval record projection initialized')
     } catch (e) {
+      const scheduler = this.approvalProjectionSweepScheduler
+      this.approvalProjectionSweepScheduler = null
+      await scheduler?.stop().catch(() => undefined)
+      this.approvalProjectionService?.unsubscribe(eventBus)
+      await this.approvalProjectionService?.drainCompletionHandlers().catch(() => undefined)
+      this.approvalProjectionService = null
       this.logger.error('Approval record projection initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // Multitable x approval phase 2: the RECORD-LEVEL submit-for-approval completion sink. TWO LEGS, ONE
+    // idempotent handler, exactly like the bridge/projection consumers above: this eventBus subscription
+    // (live when AUTOMATION_DURABLE_DELIVERY_ENABLED is OFF, because `emitApprovalCompletionEvent` returns
+    // early when it is ON) and the durable consumer_key `multitable-record-approval` wired in the
+    // durable-delivery block below (manifest v2). The sink's UPDATE is guarded on `status = 'pending'`, so
+    // a double delivery through both legs cannot double-notify.
+    try {
+      const { createRecordApprovalCompletionSink, createPoolTransactionRunner, subscribeRecordApprovalCompletionBus } = await import(
+        './multitable/record-approval-submission-service'
+      )
+      const recordApprovalPool = poolManager.get()
+      this.recordApprovalCompletionSink = createRecordApprovalCompletionSink(
+        recordApprovalPool.query.bind(recordApprovalPool),
+        // ATOMIC completion: the terminal UPDATE and the requester's notification INSERT share one
+        // transaction. Without it a notification INSERT that fails after the UPDATE committed is lost for
+        // good — the durable retry re-runs the guarded UPDATE, matches zero rows and ACKs.
+        { runInTransaction: createPoolTransactionRunner(recordApprovalPool) },
+      )
+      this.recordApprovalCompletionSubscription = subscribeRecordApprovalCompletionBus(
+        eventBus,
+        this.recordApprovalCompletionSink,
+        (eventType, error) => this.logger.warn(
+          `Record approval completion handler error for ${eventType}: ${error instanceof Error ? error.name : 'unknown'}`,
+        ),
+      )
+      this.logger.info('Record approval completion sink initialized')
+    } catch (e) {
+      this.recordApprovalCompletionSubscription = null
+      this.recordApprovalCompletionSink = null
+      this.logger.error('Record approval completion sink initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // DingTalk approval-todo ONE-WAY mirror (plan B). TWO LEGS, ONE SINK, exactly like the record-approval
+    // consumer above: this eventBus subscription (live when AUTOMATION_DURABLE_DELIVERY_ENABLED is OFF)
+    // and the durable consumer_key `dingtalk-todo-mirror` (manifest v3) wired in the block below. The sink
+    // carries its OWN gate — with DINGTALK_TODO_MIRROR_ENABLED not exactly 'true' every handler returns
+    // before touching the database, so both legs are inert and no ledger row is ever written.
+    //
+    // The delivery WORKER is a different matter: it is the only thing that can talk to DingTalk, so it is
+    // started ONLY when the flag is ON (and never under vitest, like the other interval workers here).
+    try {
+      const { createDingTalkTodoMirrorSink, subscribeDingTalkTodoMirrorBus } = await import(
+        './services/dingtalk-todo-mirror-service'
+      )
+      const todoMirrorPool = poolManager.get()
+      this.dingtalkTodoMirrorSink = createDingTalkTodoMirrorSink(todoMirrorPool.query.bind(todoMirrorPool))
+      this.dingtalkTodoMirrorSubscription = subscribeDingTalkTodoMirrorBus(
+        eventBus,
+        this.dingtalkTodoMirrorSink,
+        (eventType, error) => this.logger.warn(
+          `DingTalk todo mirror handler error for ${eventType}: ${error instanceof Error ? error.name : 'unknown'}`,
+        ),
+      )
+      const { isDingTalkTodoMirrorEnabled } = await import('./integrations/dingtalk/todo-mirror-flag')
+      if (isDingTalkTodoMirrorEnabled() && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+        const { DingTalkTodoMirrorWorker } = await import('./services/dingtalk-todo-mirror-worker')
+        const todoMirrorWorker = new DingTalkTodoMirrorWorker({
+          query: todoMirrorPool.query.bind(todoMirrorPool) as never,
+        })
+        const intervalMs = Math.max(5_000, Number(process.env.DINGTALK_TODO_MIRROR_INTERVAL_MS) || 30_000)
+        const timer = setInterval(() => {
+          todoMirrorWorker.runBatch().catch((err) => {
+            this.logger.warn(`DingTalk todo mirror worker tick error: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        }, intervalMs)
+        timer.unref?.()
+        this.stopDingTalkTodoMirrorWorker = async () => {
+          clearInterval(timer)
+          await todoMirrorWorker.stopAndDrain()
+        }
+        this.logger.info('DingTalk todo mirror worker started (DINGTALK_TODO_MIRROR_ENABLED)')
+      }
+      this.logger.info('DingTalk todo mirror sink initialized')
+    } catch (e) {
+      // Degrade-and-continue is the RIGHT posture here and not a copy-paste: the mirror is an OUTBOUND
+      // convenience with its own ledger — a missing mirror loses no platform state, and the durable
+      // consumer keeps ACKing through the registry entry below.
+      this.logger.error('DingTalk todo mirror initialization failed; continuing in degraded mode', e as Error)
     }
 
     // Bind external data-source manager to DB and load persisted sources (A0)
@@ -3898,10 +4132,31 @@ export class MetaSheetServer {
         this.automationServiceReady && Boolean(this.automationService),
       )
       if (this.automationServiceReady && this.automationService) {
+        const {
+          createRecordApprovalCompletionSink: createRecordApprovalSink,
+          createPoolTransactionRunner: createRecordApprovalTxnRunner,
+        } = await import('./multitable/record-approval-submission-service')
+        const { createDingTalkTodoMirrorSink: createDingTalkTodoMirrorSinkForDurable } = await import(
+          './services/dingtalk-todo-mirror-service'
+        )
+        // Reuse the SAME sink object the eventBus leg subscribed (built above); fall back to a fresh one
+        // only if that init degraded — the durable leg must never be missing its handler (the manifest v2
+        // completeness assertion would abort boot, which is the intended fail-closed outcome).
+        const durablePool = poolManager.get()
+        const recordApprovalSink = this.recordApprovalCompletionSink
+          ?? createRecordApprovalSink(durablePool.query.bind(durablePool), {
+            runInTransaction: createRecordApprovalTxnRunner(durablePool),
+          })
         const handlers = buildDurableConsumerHandlers({
           automationService: this.automationService,
           projectionService: getApprovalRecordProjectionService(),
           webhookService: new WebhookService(kyselyDbDurable),
+          recordApprovalService: recordApprovalSink,
+          // Manifest v3 consumer. Reuse the SAME sink the eventBus leg subscribed; fall back to a fresh
+          // one only if that init degraded — the durable leg must never be missing its handler (the
+          // completeness assertion would abort boot, which is the intended fail-closed outcome).
+          todoMirrorService: this.dingtalkTodoMirrorSink
+            ?? createDingTalkTodoMirrorSinkForDurable(durablePool.query.bind(durablePool)),
         })
         this.durableDeliveryLoop = bootDurableDelivery(poolManager.get(), handlers, {
           onUnknownConsumerKeys: (keys) => this.logger.warn(`Durable delivery: unknown consumer keys parked pending: ${keys.join(', ')}`),
@@ -4112,7 +4367,15 @@ export class MetaSheetServer {
             sheetId,
             userId,
           )
-          return capabilities.canRead
+          if (!capabilities.canRead) return false
+          // SHEET LIVENESS (soft delete). resolveSheetCapabilitiesForUser does not report it, so a
+          // soft-deleted sheet's room stayed joinable. Same `false` as a caller who may not read the
+          // sheet, so the answer is not a liveness oracle. The three sibling checkers below and the Yjs
+          // subscribe checker do the same (closed world: tests/unit/
+          // multitable-sheet-liveness-closure-all-routes.guard.test.ts, "collab auth checkers").
+          const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)
+          if (liveness !== 'live') return false
+          return true
         } catch {
           return false
         }
@@ -4127,6 +4390,9 @@ export class MetaSheetServer {
             userId,
           )
           if (!capabilities.canRead) return false
+          // Liveness before the admin short-circuit: a deleted sheet's comment rooms are closed to all.
+          const liveness = await loadSheetLiveness(query, spreadsheetId)
+          if (liveness !== 'live') return false
           if (isAdminRole) return true
           if (rowId) {
             return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
@@ -4149,6 +4415,9 @@ export class MetaSheetServer {
             userId,
           )
           if (!capabilities.canRead) return false
+          // No mention notification about a comment on a soft-deleted sheet.
+          const liveness = await loadSheetLiveness(query, spreadsheetId)
+          if (liveness !== 'live') return false
           if (isAdminRole) return true
           return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
         } catch {
@@ -4242,6 +4511,10 @@ export class MetaSheetServer {
               sheetId,
               userId,
             )
+            // Soft delete: a deleted sheet's records are not subscribable (the flush below already
+            // refuses writes). Same answer as a caller without read, so not a liveness oracle.
+            const liveness = await loadSheetLiveness(pool.query.bind(pool), sheetId)
+            if (liveness !== 'live') return { canRead: false, canWrite: false }
             // T36-1 review P1: sheet-level canRead is not enough — the doc seeder loads the
             // record's FULL data, so a row-level-denied record (projection non-participant row,
             // or any row-deny-flagged sheet) must not be subscribable at all. DENY-WINS.
@@ -4498,6 +4771,7 @@ export class MetaSheetServer {
 
     this.installGlobalErrorHandler()
 
+    this.assertStartupNotCancelled()
     this.logger.info('Starting HTTP server listen phase...')
     await new Promise<void>((resolve, reject) => {
       const onError = (err: NodeJS.ErrnoException) => {
@@ -4514,6 +4788,7 @@ export class MetaSheetServer {
       this.httpServer.once('error', onError)
       const onListening = () => {
         this.httpServer.off('error', onError)
+        try { this.assertStartupNotCancelled() } catch (error) { reject(error); return }
 
         // If port=0, update port to actual assigned port
         const addr = this.httpServer.address()
@@ -4539,6 +4814,7 @@ export class MetaSheetServer {
     })
 
     try {
+      this.assertStartupNotCancelled()
       // The injected worker is deliberately activated only after the HTTP listener is live.
       this.recoveryArchiveApplication.startWorker()
     } catch (error) {
@@ -4554,10 +4830,11 @@ export class MetaSheetServer {
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })
       this.stopMultitableAttachmentBlobPurge = startMultitableAttachmentBlobPurge({ logger: this.logger })
+      this.stopNotificationRetention = startNotificationRetention({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.
-    if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+    if (this.manageProcessSignals && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))
       process.on('SIGINT', () => this.stopForSignal('SIGINT'))
     }
@@ -4565,6 +4842,10 @@ export class MetaSheetServer {
     if (startElearningMediaWorkers && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopElearningMediaWorkers = startElearningMediaWorkers()
     }
+  }
+
+  private assertStartupNotCancelled(): void {
+    if (this.startupSignal?.aborted || this.stopPromise) throw new Error('SERVER_STARTUP_CANCELLED')
   }
 }
 

@@ -317,7 +317,11 @@ describe('apiFetch', () => {
       // The assertion above is SELF-REFERENTIAL (expectation = the function under test), so it
       // survives any rewrite of the EN copy. Pin the literal too, exactly as the zh case further
       // down does: garbling networkErrors.ts's `en` string must turn this file red.
-      expect(caught.message).toBe('The service is temporarily unavailable. Please try again in a moment.')
+      // P5: `fetch` REJECTED, so there is no response to speak of and the copy must say so.
+      expect(caught.message).toBe('Cannot reach the server (no response received). Check your network connection, or try again later.')
+      // ...and must NOT be the sentence reserved for "the server answered but cannot serve you",
+      // which is what misled the customer on 2026-09-14.
+      expect(caught.message).not.toBe('The service is temporarily unavailable. Please try again in a moment.')
       expect(caught.message).not.toContain('Failed to fetch')
       // Neutral by owner ruling: never announce an upgrade to the customer.
       expect(caught.message.toLowerCase()).not.toContain('upgrad')
@@ -501,7 +505,8 @@ describe('apiFetch', () => {
     }).then(() => null, (error: unknown) => error) as Error
 
     expect(caught.message).toBe(networkUnavailableMessage(true))
-    expect(caught.message).toBe('服务暂时不可用，请稍后重试')
+    expect(caught.message).toBe('无法连接服务器（未收到任何响应），请检查网络或稍后重试')
+    expect(caught.message).not.toBe('服务暂时不可用，请稍后重试')
     expect(caught.message).not.toContain('升级')
     expect(caught.message).not.toContain('Failed to fetch')
   })

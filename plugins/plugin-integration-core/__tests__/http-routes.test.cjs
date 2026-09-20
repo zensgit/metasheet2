@@ -22,6 +22,8 @@ const {
   PLM_STOCK_PREPARATION_ACTION_ID,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+// B3: the base a fresh canonical ensure lands in is DERIVED from the authenticated tenant.
+const { deriveStockPreparationBaseId } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-own-base.cjs'))
 const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
 const { createReadSourceConfigStore, ReadSourceConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
@@ -396,6 +398,16 @@ function createMockServices(overrides = {}) {
       async listPipelineRuns(input) {
         calls.push(['listPipelineRuns', input])
         return [run]
+      },
+      // SC-04: mirrors the real registry — a hit returns the projected run, a miss throws a
+      // PipelineNotFoundError whose details echo the scope. The echo is what the route must strip.
+      async getPipelineRun(input) {
+        calls.push(['getPipelineRun', input])
+        if (input.id === run.id && input.tenantId === run.tenantId) return { ...run }
+        const error = new Error('pipeline run not found')
+        error.name = 'PipelineNotFoundError'
+        error.details = { id: input.id, tenantId: input.tenantId, workspaceId: input.workspaceId }
+        throw error
       },
       async listProvenanceByRow(input) {
         calls.push(['listProvenanceByRow', input])
@@ -3251,6 +3263,145 @@ async function testRunAndDeadLetterRoutes() {
     offset: 2,
   })
 
+  // --- SC-04: GET /api/integration/runs/:runId -------------------------------------------------
+  // happy path: 200, data is the single projected run (not an array), and the registry received
+  // exactly the three scope keys {tenantId, workspaceId, id} — nothing else, no oracle-widening.
+  res = await invoke(routes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(Array.isArray(res.body.data), false, 'single-run read returns an object, not a list')
+  assert.equal(res.body.data.id, 'run_1')
+  assert.equal(res.body.data.pipelineId, 'pipe_1')
+  assert.deepEqual(findCall(calls, 'getPipelineRun')[1], {
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    id: 'run_1',
+  }, 'getPipelineRun receives exactly {tenantId, workspaceId, id}')
+
+  // workspace omitted → resolveWorkspaceId (firstString) yields null at the route boundary and the
+  // registry pins workspace_id = null, exactly as listPipelineRuns does — no widening beyond list.
+  const { calls: nullWsCalls, services: nullWsServices } = createMockServices()
+  const { routes: nullWsRoutes } = mountRoutes(nullWsServices)
+  res = await invoke(nullWsRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(findCall(nullWsCalls, 'getPipelineRun')[1].workspaceId, null,
+    'no workspace hint resolves to null (registry pins workspace_id = null, same as list)')
+  await invoke(nullWsRoutes, 'GET', '/api/integration/runs', { user: READ_USER })
+  assert.equal(findCall(nullWsCalls, 'listPipelineRuns')[1].workspaceId, null,
+    'list resolves the same null workspace for the same request shape (parity, not a new hole)')
+
+  // a missing id and another tenant's id take the SAME path: the registry misses on the
+  // three-key WHERE and the route answers one details-free 404 for both — no existence oracle.
+  const missing = await invoke(routes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_does_not_exist' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertErrorResponse(missing, [404])
+  assert.equal(missing.body.error.code, 'RUN_NOT_FOUND')
+  const missingSerialized = JSON.stringify(missing.body)
+  assert.equal(missingSerialized.includes('tenant_1'), false, '404 body does not echo the tenant')
+  assert.equal(missingSerialized.includes('run_does_not_exist'), false, '404 body does not echo the requested id')
+  assert.equal(missingSerialized.includes('workspace_1'), false, '404 body does not echo the workspace')
+
+  // "another tenant's run": the caller is tenant_1 but the row belongs elsewhere. The mock registry
+  // only hits on (id, tenantId) == (run_1, tenant_1), so pointing the same route at a run that the
+  // caller's tenant does not own yields the byte-identical 404 body as the non-existent id above.
+  const foreignRunServices = createMockServices()
+  foreignRunServices.services.pipelineRegistry.getPipelineRun = async function getPipelineRun(input) {
+    foreignRunServices.calls.push(['getPipelineRun', input])
+    // simulate a row that exists under tenant_other only
+    if (input.id === 'run_foreign' && input.tenantId === 'tenant_other') {
+      return { id: 'run_foreign', tenantId: 'tenant_other', workspaceId: 'workspace_1', pipelineId: 'pipe_1', status: 'succeeded' }
+    }
+    const error = new Error('pipeline run not found')
+    error.name = 'PipelineNotFoundError'
+    error.details = { id: input.id, tenantId: input.tenantId, workspaceId: input.workspaceId }
+    throw error
+  }
+  const { routes: foreignRunRoutes } = mountRoutes(foreignRunServices.services)
+  const foreign = await invoke(foreignRunRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_foreign' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertErrorResponse(foreign, [404])
+  assert.equal(foreign.body.error.code, 'RUN_NOT_FOUND')
+  assert.deepEqual(foreign.body, missing.body, 'foreign-tenant run and non-existent run produce the identical 404 body')
+  assert.equal(findCall(foreignRunServices.calls, 'getPipelineRun')[1].tenantId, 'tenant_1',
+    'the lookup was scoped to the CALLER tenant, not the run owner')
+
+  // an explicit foreign tenantId in the query is refused before the registry (resolveTenantId)
+  const { calls: crossCalls, services: crossServices } = createMockServices()
+  const { routes: crossRoutes } = mountRoutes(crossServices)
+  const cross = await invoke(crossRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(cross, [403])
+  assert.equal(findCalls(crossCalls, 'getPipelineRun').length, 0, 'cross-tenant query never reached the registry')
+
+  // unauthenticated → 401, never reached the registry
+  const { calls: anonCalls, services: anonServices } = createMockServices()
+  const { routes: anonRoutes } = mountRoutes(anonServices)
+  const anon = await invoke(anonRoutes, 'GET', '/api/integration/runs/:runId', { params: { runId: 'run_1' } })
+  assertErrorResponse(anon, [401])
+  assert.equal(anon.body.error.code, 'UNAUTHENTICATED')
+  assert.equal(findCalls(anonCalls, 'getPipelineRun').length, 0, 'unauthenticated read did not reach the registry')
+
+  // a principal without any integration permission → 403, never reached the registry
+  const { calls: noPermCalls, services: noPermServices } = createMockServices()
+  const { routes: noPermRoutes } = mountRoutes(noPermServices)
+  const noPerm = await invoke(noPermRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: { id: 'user_none', tenantId: 'tenant_1', permissions: ['other:read'] },
+    params: { runId: 'run_1' },
+  })
+  assertErrorResponse(noPerm, [403])
+  assert.equal(noPerm.body.error.code, 'FORBIDDEN')
+  assert.equal(findCalls(noPermCalls, 'getPipelineRun').length, 0, 'unauthorized read did not reach the registry')
+
+  // write permission also grants read (same tier ladder as runsList)
+  const { calls: writerCalls, services: writerServices } = createMockServices()
+  const { routes: writerRoutes } = mountRoutes(writerServices)
+  const writer = await invoke(writerRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: WRITE_USER,
+    params: { runId: 'run_1' },
+  })
+  assertOkResponse(writer, 200)
+  assert.equal(findCalls(writerCalls, 'getPipelineRun').length, 1, 'write permission reached the registry')
+
+  // 501 when a host's registry predates getPipelineRun (optional-method, like listProvenanceByRow);
+  // the mount itself must still succeed — the method is NOT in the requireService list.
+  const noGet = createMockServices()
+  delete noGet.services.pipelineRegistry.getPipelineRun
+  const { routes: noGetRoutes, registered: noGetRegistered } = mountRoutes(noGet.services)
+  assert.ok(noGetRegistered.includes('GET /api/integration/runs/:runId'), 'route mounts without getPipelineRun on the registry')
+  const notImpl = await invoke(noGetRoutes, 'GET', '/api/integration/runs/:runId', { user: READ_USER, params: { runId: 'run_1' } })
+  assertErrorResponse(notImpl, [501])
+  assert.equal(notImpl.body.error.code, 'RUN_READ_NOT_IMPLEMENTED')
+  // the 501 is decided AFTER the auth gate: an anonymous caller on the same host still gets 401
+  const notImplAnon = await invoke(noGetRoutes, 'GET', '/api/integration/runs/:runId', { params: { runId: 'run_1' } })
+  assertErrorResponse(notImplAnon, [401])
+
+  // a non-NotFound registry failure is NOT swallowed into a 404 (only NotFound is remapped)
+  const boom = createMockServices()
+  boom.services.pipelineRegistry.getPipelineRun = async function getPipelineRun() {
+    const error = new Error('db unavailable')
+    error.name = 'DataSourceUnavailableError'
+    throw error
+  }
+  const { routes: boomRoutes } = mountRoutes(boom.services)
+  const boomRes = await invoke(boomRoutes, 'GET', '/api/integration/runs/:runId', { user: READ_USER, params: { runId: 'run_1' } })
+  assert.notEqual(boomRes.statusCode, 404, 'non-NotFound registry errors keep their own status')
+  assert.equal(boomRes.body.ok, false)
+
   // limit above MAX_LIST_LIMIT is clamped
   const { calls: largeCalls, services: largeServices } = createMockServices()
   const { routes: largeRoutes } = mountRoutes(largeServices)
@@ -4036,8 +4187,14 @@ function createStockPreparationTargetProvisioningApi({
   sheetExists = false,
   missingFields = [],
   currentOptionsByField = {}, // FOS-4: { [targetFieldId]: [{value,...}] } served by the read-only getObjectField
+  // B3: a CAPABLE host (the shipped one exposes ensureSystemBase). Every ensure route's decision-A
+  // pin below runs against this shape, so a base the route derives is asserted as the derived
+  // value and a base it must not derive (sandbox) is asserted as null ON A HOST THAT COULD.
+  withEnsureSystemBase = true,
+  existingBases = [], // [{ id, owned?: true }] — an owned row makes ensureSystemBase refuse (409)
 } = {}) {
   const calls = []
+  const bases = new Map(existingBases.map((base) => [base.id, { ...base }]))
   let sheet = sheetExists
     ? { id: 'sheet_stock_canonical_private', baseId: 'base_stock', name: 'PLM Stock Preparation Main', description: null }
     : null
@@ -4097,6 +4254,24 @@ function createStockPreparationTargetProvisioningApi({
         order: calls.length,
       }
     },
+  }
+  if (withEnsureSystemBase) {
+    api.ensureSystemBase = async (input) => {
+      calls.push(['ensureSystemBase', clone(input)])
+      const existing = bases.get(input.baseId)
+      if (existing && existing.owned) {
+        throw Object.assign(new Error(`Refusing to adopt multitable base ${input.baseId} as a system base (owned)`), {
+          name: 'MultitableBaseAdoptionError',
+          code: 'MULTITABLE_BASE_ADOPTION_REFUSED',
+          status: 409,
+          baseId: input.baseId,
+          reason: 'owned',
+        })
+      }
+      const created = !existing
+      if (created) bases.set(input.baseId, { id: input.baseId })
+      return { baseId: input.baseId, created }
+    }
   }
   return { api, calls }
 }
@@ -4282,13 +4457,47 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'ensure evidence hides sheet id')
   const ensureCall = findCalls(provisioning.calls, 'ensureObject')[0]
   assert.equal(ensureCall[1].projectId, 'tenant_1:integration-core')
-  assert.equal(ensureCall[1].baseId, null, 'decision A: a request baseId is never forwarded to provisioning (sanitized to null)')
+  // Decision A + B3: no REQUEST value ever becomes the base. The base is DERIVED server-side from
+  // the authenticated tenant (ensureSystemBase first, then ensureObject in that base). Asserted as
+  // the derived value on a capable host — not as null on a host that could not derive.
+  assert.notEqual(ensureCall[1].baseId, null, 'B3: a fresh ensure on a capable host lands in the derived base, not the legacy null')
+  assert.equal(
+    ensureCall[1].baseId,
+    deriveStockPreparationBaseId('tenant_1'),
+    'decision A + B3: the base is derived server-side from the authenticated tenant; no request value becomes it',
+  )
+  const systemBaseCalls = findCalls(provisioning.calls, 'ensureSystemBase')
+  assert.equal(systemBaseCalls.length, 1, 'B3: exactly one ensureSystemBase on a fresh ensure')
+  assert.equal(systemBaseCalls[0][1].baseId, deriveStockPreparationBaseId('tenant_1'))
+  assert.ok(
+    provisioning.calls.findIndex(([name]) => name === 'ensureSystemBase') < provisioning.calls.findIndex(([name]) => name === 'ensureObject'),
+    'B3: the base is ensured BEFORE the table is created in it',
+  )
+  assert.equal(res.body.data.evidence.ownBaseSource, 'derived')
+  assert.equal(res.body.data.evidence.ownBaseCreated, true)
   assert.deepEqual(
     ensureCall[1].descriptor.fields.map((field) => field.id),
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
     'ensure descriptor is manifest-derived',
   )
   assert.equal(records.calls.length, 0, 'ensure route never uses records API')
+
+  // B3 steering leg: a request tenantId (an admin READ allowance elsewhere) is inert on this WRITE —
+  // the derived base is still the PRINCIPAL's.
+  const steeredProvisioning = createStockPreparationTargetProvisioningApi()
+  const steeredMount = mountRoutes(createMockServices().services, {
+    provisioningApi: steeredProvisioning.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(steeredMount.routes, 'POST', '/api/integration/stock-preparation/target/ensure', {
+    user: ADMIN_USER,
+    body: { projectId: 'tenant_other:integration-core', tenantId: 'tenant_other' },
+  })
+  assertOkResponse(res, 201)
+  const steeredEnsure = findCalls(steeredProvisioning.calls, 'ensureObject')[0]
+  assert.equal(steeredEnsure[1].projectId, 'tenant_1:integration-core')
+  assert.equal(steeredEnsure[1].baseId, deriveStockPreparationBaseId('tenant_1'), 'B3: body tenantId/projectId never steer the derived base')
+  assert.notEqual(steeredEnsure[1].baseId, deriveStockPreparationBaseId('tenant_other'))
 
   const existing = createStockPreparationTargetProvisioningApi({ sheetExists: true })
   const existingMount = mountRoutes(createMockServices().services, {
@@ -4384,7 +4593,10 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(JSON.stringify(res.body.data).includes('Casting'), false, 'sandbox route response hides option labels')
   const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
   assert.equal(sandboxEnsureCall[1].projectId, 'tenant_1:integration-core')
+  // Still null on a CAPABLE host (the fake exposes ensureSystemBase): the sandbox route never opts
+  // into own-base resolution, so null is its production value, not a limitation of the fake.
   assert.equal(sandboxEnsureCall[1].baseId, null, 'decision A: a request baseId is never forwarded to provisioning (sanitized to null)')
+  assert.equal(findCalls(sandboxProvisioning.calls, 'ensureSystemBase').length, 0, 'B3: the sandbox route never derives a base')
   assert.equal(sandboxEnsureCall[1].descriptor.id, sandboxObjectId)
   assert.notEqual(sandboxEnsureCall[1].descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
   assert.deepEqual(
@@ -5607,6 +5819,131 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assertOkResponse(res, 200)
   assert.equal(res.body.data.status, 'cancelled')
   assert.equal(res.body.data.authoritative, false)
+}
+
+// #5860 — one sheet = one project on the LARGE-BOM lane. The lane never plans through `computeDryRun`,
+// so the guard is wired by hand into three routes; this test enumerates all three so an unwired one
+// (the RUN route was, in the first round) turns red here rather than in a customer's sheet.
+async function testLargeBomLaneRefusesForeignProjectOnPlanStartAndRun() {
+  const records = createTableActionRecordsApi()
+  const calls = []
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: 'active',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        return createTableActionSourceAdapter(tableActionPlmData(), calls)
+      },
+    },
+  })
+  const mount = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createDurableMemoryStorage(),
+    config: {
+      stockPreparationTableActions: [tableActionConfig()],
+      stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: ['stockPreparationMain'] },
+    },
+  })
+  const FOREIGN_ID = 'foreign_active_row'
+  const foreignRow = () => ({
+    id: FOREIGN_ID,
+    sheetId: 'sheet_stock_configured',
+    version: 1,
+    data: { projectNo: 'P-OTHER', idempotencyKey: 'FOREIGN_KEY', componentSourceId: 'FOREIGN_PART', active: true },
+  })
+  const addForeign = () => { records.rows.push(foreignRow()) }
+  const removeForeign = () => { records.rows.splice(records.rows.findIndex((row) => row.id === FOREIGN_ID), 1) }
+  const writeCount = () => records.calls.filter((call) => call[0] === 'createRecord' || call[0] === 'patchRecord').length
+  const assertForeignRefusal = (res, label) => {
+    assert.equal(res.statusCode, 409, label + ': 409')
+    assert.equal(res.body.error.code, 'TARGET_SHEET_FOREIGN_PROJECT', label + ': code')
+    assert.deepEqual({ ...res.body.error.details }, { foreignProjectCount: 1, foreignActiveRowCount: 1 }, label + ': values-free details')
+    const text = JSON.stringify(res.body)
+    assert.equal(text.includes('P-OTHER') || text.includes('FOREIGN_PART') || text.includes('FOREIGN_KEY'), false, label + ': no row value leaks')
+  }
+
+  let res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+  assertOkResponse(res, 202)
+  const jobId = res.body.data.jobId
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'completed')
+
+  // PLAN
+  addForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertForeignRefusal(res, 'PLAN')
+  assert.equal(writeCount(), 0, 'PLAN refusal writes nothing')
+  removeForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.planRevisionPresent, true, 'control: PLAN succeeds once the foreign row is gone')
+
+  // START (approval)
+  addForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { confirm: {} },
+  })
+  assertForeignRefusal(res, 'START')
+  assert.equal(writeCount(), 0, 'START refusal writes nothing')
+  removeForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+    body: { confirm: {} },
+  })
+  assertOkResponse(res, 202)
+  const applyJobId = res.body.data.jobId
+
+  // RUN (per chunk; also the resume path) — a foreign row that lands AFTER approval still refuses.
+  addForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertForeignRefusal(res, 'RUN')
+  assert.equal(writeCount(), 0, 'RUN refusal writes nothing (no partial chunk)')
+  res = await invoke(mount.routes, 'GET', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'queued', 'RUN refusal leaves the apply job in the state it was in')
+  removeForeign()
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/apply-jobs/:applyJobId/run', {
+    user: WRITE_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, applyJobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'succeeded', 'control: the same apply job runs once the foreign row is gone')
+  assert.ok(writeCount() > 0, 'control: the real run writes')
 }
 
 async function testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount() {
@@ -9245,6 +9582,7 @@ async function main() {
   await testTableActionRoutes()
   await testTableActionMvpPersistRoute()
   await testLargeBomBackgroundExpansionJobRoutes()
+  await testLargeBomLaneRefusesForeignProjectOnPlanStartAndRun()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
   await testLargeBomDurableStorageFailureIsValuesFree()
   await testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn()
@@ -9479,6 +9817,7 @@ async function testStockPreparationStructureWriteSteeringHasNoEffect() {
     ['/api/integration/stock-preparation/sandbox-target/ensure', { label: 'probe' }],
     ['/api/integration/stock-preparation/options/sync', {}],
     ['/api/integration/stock-preparation/mvp/ensure', {}],
+    ['/api/integration/stock-preparation/mvp/repair', {}],
     ['/api/integration/stock-preparation/mvp/options/sync', {}],
     ['/api/integration/field-options/sync', { presetId: 'stock-preparation-v1' }],
   ]
@@ -9526,6 +9865,7 @@ async function testStockPreparationWriteRejectsExplicitBaseId() {
     ['/api/integration/stock-preparation/target/ensure', {}],
     ['/api/integration/stock-preparation/sandbox-target/ensure', { objectId: 'obj1', label: 'x' }],
     ['/api/integration/stock-preparation/mvp/ensure', {}],
+    ['/api/integration/stock-preparation/mvp/repair', {}],
   ]
   for (const [routePath, baseBody] of routesUnderTest) {
     const { services } = createMockServices()

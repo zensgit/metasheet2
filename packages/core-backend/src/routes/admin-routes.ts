@@ -75,8 +75,26 @@ const router = Router();
 /**
  * GET /api/admin/safety/status
  * Get SafetyGuard status and pending confirmations
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all. It returns
+ * safetyGuard.isEnabled() and safetyGuard.getPendingCount() (guards/middleware.ts:180), i.e. whether
+ * the platform's destructive-operation brake is switched on right now and how many dangerous
+ * operations are sitting unconfirmed. Both are reconnaissance for the write side of this same
+ * router: "is the brake off?" is exactly what a caller probes before attempting a protected
+ * operation, and the pending count is a live side channel on other admins' in-flight confirmations.
+ * The sibling POST /safety/confirm and POST /safety/enable treat the very same switch as privileged,
+ * so reading it was the odd one out. Gated on platform admin (requireAdminRole: no user or non-admin
+ * -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns
+ * false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20).
+ *
+ * The guard is added HERE, at the single mount point, not inside createSafetyStatusEndpoint():
+ * admin-routes.ts:79 is the factory's only call site in the tree (guards/middleware.ts:180 is the
+ * definition, the rest are docs), so gating at the mount is zero-impact for other callers and keeps
+ * the factory's contract — a synchronous (req, res) => void that reads no request input — intact.
+ * That contract is what tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts:951 rests
+ * on; folding an async guard into the factory would have changed it for no benefit.
  */
-router.get('/safety/status', createSafetyStatusEndpoint());
+router.get('/safety/status', requireAdminRole(), createSafetyStatusEndpoint());
 
 /**
  * POST /api/admin/safety/confirm
@@ -1396,8 +1414,15 @@ router.get('/yjs/status', requireAdminRole(), async (_req: Request, res: Respons
 /**
  * GET /api/admin/dlq
  * List DLQ messages
+ *
+ * SECURITY (issue #5678, batch 1): this read used to carry no authorization at all. It delegates to
+ * dlqService.list(), which selects from `dead_letter_queue` (DeadLetterQueueService.ts:151) — a
+ * table with no tenant_id column, queried with no tenant predicate — so the response is every failed
+ * message on the platform, `payload` included, to any authenticated caller of any tenant. Gated on
+ * platform admin like its retry/resolve/cleanup siblings (requireAdminRole: no user or non-admin ->
+ * 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed, see guards/audit-integration.ts:113).
  */
-router.get('/dlq', async (req: Request, res: Response) => {
+router.get('/dlq', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { status, topic, limit, offset } = req.query;
     const result = await dlqService.list({
@@ -1481,8 +1506,18 @@ router.delete(
 /**
  * GET /api/admin/shards
  * Get health status of all database shards/pools
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. It returns
+ * poolManager.getPoolStats() plus getMetricsSnapshot() — the name, status, live/idle/waiting
+ * connection counts and last driver error string of every database pool the process holds
+ * (integration/db/connection-pool.ts:302 and :359). Nothing in that shape is tenant-scoped: it is
+ * the platform's database topology and saturation profile, so any authenticated caller of any
+ * tenant could map the shard layout and watch pool pressure. Gated on platform admin like the
+ * sibling admin operations (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/shards', async (req: Request, res: Response) => {
+router.get('/shards', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const stats = await poolManager.getPoolStats();
     const metricsSnapshot = poolManager.getMetricsSnapshot();
@@ -1527,8 +1562,16 @@ router.get('/shards', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/shards/:name
  * Get detailed status of a specific shard
+ *
+ * SECURITY (issue #5678, batch 2): same exposure as GET /shards for one pool, and additionally an
+ * enumeration oracle — the 404 vs 200 split answers "does a shard with this name exist?" one guess
+ * at a time, so an unauthenticated-by-role caller could recover the shard naming scheme even
+ * without listing. Gated on platform admin (requireAdminRole: no user or non-admin -> 403
+ * ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false ->
+ * 403, see guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the
+ * lookup, so the 404/200 distinction is never reached by a denied caller.
  */
-router.get('/shards/:name', async (req: Request, res: Response) => {
+router.get('/shards/:name', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { name } = req.params;
     const stats = await poolManager.getPoolStats();
@@ -1573,8 +1616,18 @@ router.get('/shards/:name', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/queues
  * Get queue statistics (MessageBus + DLQ)
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. It returns the
+ * in-process MessageBus stats (queue depth, exact/pattern subscription counts, pending RPC count)
+ * and, via three dlqService.list() calls, the platform-wide dead-letter totals. Those totals come
+ * from the same untenanted `dead_letter_queue` table that forced the batch-1 gate on GET /dlq
+ * (services/DeadLetterQueueService.ts:151 — no tenant_id column, no tenant predicate), so the
+ * counts are every tenant's failures aggregated, readable by any authenticated caller. Gated on
+ * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
+ * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/queues', async (req: Request, res: Response) => {
+router.get('/queues', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     // Get MessageBus stats
     const messageBusStats = messageBus.getStats();
@@ -1704,8 +1757,20 @@ router.post(
 /**
  * GET /api/admin/ratelimits
  * Get current rate limiting status
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all. It returns
+ * rateLimiter.getConfig() verbatim — tokensPerSecond, bucketCapacity, cleanupIntervalMs and
+ * bucketIdleTimeoutMs (integration/rate-limiting/token-bucket.ts:302) — plus the global counters
+ * activeBuckets / totalAccepted / totalRejected (token-bucket.ts:257). The configuration is the
+ * exact shape of the platform's throttle: published to any authenticated caller it turns "probe
+ * until throttled" into "read the refill rate and stay one token under it", and bucketIdleTimeoutMs
+ * tells that caller how long to idle so its bucket is reclaimed. activeBuckets is a platform-wide
+ * gauge of how many tenant/user keys are currently active — not this caller's tenant, all of them.
+ * Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/ratelimits', async (req: Request, res: Response) => {
+router.get('/ratelimits', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const rateLimiter = getRateLimiter();
     const globalStats = rateLimiter.getGlobalStats();
@@ -1766,8 +1831,20 @@ router.get('/ratelimits', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/ratelimits/:key
  * Get rate limit status for a specific key (tenant/user)
+ *
+ * SECURITY (issue #5678, batch 3): the strongest exposure in this batch. The bucket key is chosen
+ * by the caller from the path, and the keys this platform actually uses are `tenant:<tenantId>`
+ * (integration/rate-limiting/message-rate-limiter.ts:230). With no authorization, any authenticated
+ * user of any tenant could name ANOTHER tenant's key and get back that tenant's tokensRemaining,
+ * totalAccepted, totalRejected and acceptanceRate — a cross-tenant traffic meter. Even a wrong guess
+ * pays: the `not_tracked` branch versus the stats branch is an existence oracle answering "has this
+ * tenant/user sent anything recently?" one guess at a time, with no rate limit of its own on the
+ * guessing. Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED;
+ * isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the lookup, so the
+ * two branches are indistinguishable to a denied caller.
  */
-router.get('/ratelimits/:key', async (req: Request, res: Response) => {
+router.get('/ratelimits/:key', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { key } = req.params;
     const rateLimiter = getRateLimiter();
@@ -1880,8 +1957,18 @@ import { getHealthAggregator } from '../services/HealthAggregatorService';
 /**
  * GET /api/admin/health/detailed
  * Get detailed health status of all subsystems
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. Unlike
+ * GET /health/summary (deliberately left alone in this batch, see the design note), it returns the
+ * FULL per-subsystem payload from HealthAggregatorService.checkHealth()
+ * (services/HealthAggregatorService.ts:209): database, messageBus, plugins, rateLimiting and system
+ * details plus the raw `warnings` and `errors` arrays, which carry failure text produced by the
+ * underlying subsystems. That is platform-level operational state, not tenant state, and any
+ * authenticated caller of any tenant could poll it. Gated on platform admin (requireAdminRole: no
+ * user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool ->
+ * isAdmin returns false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/health/detailed', async (req: Request, res: Response) => {
+router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const healthAggregator = getHealthAggregator();
     const health = await healthAggregator.checkHealth();
@@ -1909,8 +1996,22 @@ router.get('/health/detailed', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/health/summary
  * Get a quick health summary without full details
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all, which after
+ * batch 2 left the /health pair inconsistent — GET /health/detailed and GET /health/subsystem/:name
+ * became admin-only while the summary over the SAME HealthAggregatorService state stayed open. The
+ * summary is coarser but not harmless: status, uptime (i.e. when this process last restarted),
+ * per-status subsystem counts, and the hasWarnings / hasErrors booleans, which are a free polling
+ * channel telling an unprivileged caller exactly when the platform is degraded. Note it is also the
+ * cheapest of the three to hammer — it serves getLastHealth() from cache when one exists
+ * (services/HealthAggregatorService.ts:303) and only falls back to a fresh checkHealth(). Gated on
+ * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
+ * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The 500 branch below still echoes
+ * err.message; redacting that is a separate decision point (see the design note), deliberately not
+ * folded into this "tighten only, change no shape" change.
  */
-router.get('/health/summary', async (req: Request, res: Response) => {
+router.get('/health/summary', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const healthAggregator = getHealthAggregator();
 
@@ -1942,8 +2043,17 @@ router.get('/health/summary', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/health/subsystem/:name
  * Get health status of a specific subsystem
+ *
+ * SECURITY (issue #5678, batch 2): same exposure as GET /health/detailed narrowed to one subsystem
+ * — the handler runs the same checkHealth() and returns that subsystem's detail object verbatim,
+ * so `?name=database` alone hands over the database subsystem's diagnostic shape. The 400 branch
+ * also echoes the whitelist of valid subsystem names, which is a free map of what this deployment
+ * runs. Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED;
+ * isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the name
+ * validation, so a denied caller cannot read the whitelist out of the 400 either.
  */
-router.get('/health/subsystem/:name', async (req: Request, res: Response) => {
+router.get('/health/subsystem/:name', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { name } = req.params;
     const validSubsystems = ['database', 'messageBus', 'plugins', 'rateLimiting', 'system'];

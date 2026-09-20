@@ -910,7 +910,7 @@ describe('Approval E2E Permissions', () => {
 
       expect(loadTemplatesSpy).toHaveBeenCalled()
       const header = container!.querySelector('.template-center__header h1')
-      expect(header?.textContent).toBe('审批模板')
+      expect(header?.textContent).toBe('审批表单')
     })
 
     it('template center has search input', async () => {
@@ -1104,7 +1104,7 @@ describe('Approval E2E Permissions', () => {
       await mountTemplateDetailView()
 
       const backBtn = Array.from(container!.querySelectorAll('button'))
-        .find((b) => b.textContent?.includes('返回模板列表'))
+        .find((b) => b.textContent?.includes('返回表单列表'))
       backBtn!.click()
       await flushUi()
 
@@ -1183,7 +1183,7 @@ describe('Approval E2E Permissions', () => {
       await mountNewView()
 
       const empty = container!.querySelector('[data-el-empty]')
-      expect(empty?.textContent).toContain('未找到审批模板')
+      expect(empty?.textContent).toContain('未找到审批表单')
     })
 
     it('template detail shows empty state when template not found', async () => {
@@ -1193,7 +1193,7 @@ describe('Approval E2E Permissions', () => {
       await mountTemplateDetailView()
 
       const empty = container!.querySelector('[data-el-empty]')
-      expect(empty?.textContent).toContain('未找到模板')
+      expect(empty?.textContent).toContain('未找到表单')
     })
   })
 

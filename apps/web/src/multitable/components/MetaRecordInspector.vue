@@ -212,6 +212,19 @@
           </RouterLink>
           <MtMenuItem v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @select="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtMenuItem>
           <MtMenuItem v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @select="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtMenuItem>
+          <!-- 记录级送审 (多维表 × 审批 阶段二 design §5): the gate is FOUR-fold and every part is load-bearing —
+               `canSubmitApproval` is the server-derived capability (absent ⇒ false ⇒ hidden, fail-closed),
+               and `apiClient`/`sheetId`/`record` are the three things the submit route needs, none of which
+               the deprecated MetaRecordDrawer shell or the frozen router-less specs are guaranteed to pass.
+               The server re-enforces the capability (plus `approvals:write` inside createApproval) — this is
+               an entry-point gate, not the authority. -->
+          <MtMenuItem
+            v-if="canSubmitApproval && apiClient && sheetId && record"
+            class="meta-record-drawer__btn"
+            data-testid="record-inspector-submit-approval"
+            :title="l('record.submitApprovalTitle')"
+            @select="showApprovalSubmit = true"
+          >{{ l('record.submitApproval') }}</MtMenuItem>
           <MtMenuItem v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @select="emit('duplicate')">{{ l('record.duplicate') }}</MtMenuItem>
           <!-- gate P2 (kept verbatim): the danger class anchor stays a stable spec/test anchor even
                though the bespoke `--danger` background rule it once fought is gone in this MtMenuItem
@@ -343,6 +356,7 @@
           :ai-shortcut="aiShortcut"
           :button-run-pending="buttonRunPending"
           :mention-suggestions="mentionSuggestions"
+          :mention-search="mentionSearch"
           :field-errors="fieldErrors"
           @patch="(fieldId, value) => emit('patch', fieldId, value)"
           @ai-preview="(field) => emit('ai-preview', field)"
@@ -360,6 +374,16 @@
           :record="record"
           :fields="fields"
           :field-permissions="fieldPermissions"
+        />
+        <!-- 审批 / Record approvals (阶段二 §5): same self-gating lazy discipline as 数据来源 above — it
+             renders nothing without record+sheetId+apiClient and fetches only on first expand.
+             `refreshToken` is bumped after a successful submit so an OPEN panel re-reads the list from the
+             server (with its server-computed drift + request number) instead of guessing a new row. -->
+        <MetaRecordApprovalPanel
+          :record="record"
+          :sheet-id="sheetId"
+          :api-client="apiClient"
+          :refresh-token="approvalRefreshToken"
         />
       </div>
       <div
@@ -410,7 +434,10 @@
           :reacting-keys="commentReactingKeys"
           :current-user-id="currentUserId"
           :mention-suggestions="mentionSuggestions"
+          :mention-search="mentionSearch"
           :composer-initial-mentions="commentComposerInitialMentions"
+          :composer-mention-selection="commentMentionSelection"
+          @update:composer-mention-selection="onCommentMentionSelection"
           @submit="(payload: { content: string; mentions: string[] }) => emit('comment-submit', payload)"
           @resolve="(commentId: string) => emit('comment-resolve', commentId)"
           @reply="(commentId: string) => emit('comment-reply', commentId)"
@@ -455,6 +482,18 @@
       @close="showRecordPermissions = false"
       @updated="emit('navigate', record!.id)"
     />
+    <!-- 记录级送审 dialog (阶段二 §5.2): a CHILD dialog of this component with its own local open state,
+         exactly like MetaRecordPermissionManager above (same v-if shape, same `client` pass-through) —
+         the workbench owns neither dialog, it only supplies the capability and reacts to the result. -->
+    <MetaRecordApprovalSubmitDialog
+      v-if="canSubmitApproval && record && sheetId && apiClient"
+      :visible="showApprovalSubmit"
+      :sheet-id="sheetId"
+      :record-id="record.id"
+      :client="apiClient"
+      @close="showApprovalSubmit = false"
+      @submitted="onApprovalSubmitted"
+    />
     <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
          LAST — absolute positioning (unchanged, see this element's own style rule) keeps it
          visually pinned to the panel's left edge either way, but DOM order also drives Tab order,
@@ -477,14 +516,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
+import { RouterLink, routerKey } from 'vue-router'
 import type {
   LinkedRecordSummary,
   PersonSummary,
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSearch,
   MetaCommentMentionSuggestion,
   MultitableComment,
   MultitableCommentPresenceSummary,
@@ -492,15 +532,19 @@ import type {
   MetaField,
   MetaRecord,
   MetaRecordContext,
+  MetaRecordApprovalSubmission,
   MetaRecordSubscriptionStatus,
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import type { MetaCommentMentionSelection } from '../../shared/comments/types'
 import { MtButton, MtIconButton, MtMenu, MtMenuItem } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordProvenancePanel from './MetaRecordProvenancePanel.vue'
+import MetaRecordApprovalPanel from './MetaRecordApprovalPanel.vue'
+import MetaRecordApprovalSubmitDialog from './MetaRecordApprovalSubmitDialog.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
 // imported directly here rather than through the old-path re-export shim.
@@ -538,6 +582,10 @@ const props = withDefaults(defineProps<{
   // Gates the drawer's Duplicate button; the server re-enforces it (no FE permission mirror).
   canCreate?: boolean
   canManageAutomation?: boolean
+  /** 记录级送审 (阶段二 §5): server-derived `multitable:submit-approval`. Default false — an older
+   *  backend, the deprecated MetaRecordDrawer shell's own caller, or any harness that omits it gets NO
+   *  送审 entry at all (fail-closed; the route re-enforces it anyway). */
+  canSubmitApproval?: boolean
   fieldPermissions?: Record<string, MetaFieldPermission> | null
   rowActions?: MetaRowActions | null
   commentPresence?: MultitableCommentPresenceSummary | null
@@ -562,6 +610,8 @@ const props = withDefaults(defineProps<{
    *  `commentMentionSuggestions` ref the workbench already threads in for the fields panel, no
    *  second copy. */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /** #5795: server-side mention search (host-bound); forwarded untouched to the mention editors. */
+  mentionSearch?: MetaCommentMentionSearch | null
   // --- W2 S4 (design-lock §2 评论面板 row, §7 S4): comments-tab pass-through props. All sourced
   // from the workbench's existing `commentsState` (useMultitableComments) + `selectedRecordCommentsScope`
   // (server G-8 gated) -- the SAME data the pre-S4 second `<MetaCommentsDrawer>` consumed; only the
@@ -647,6 +697,7 @@ const props = withDefaults(defineProps<{
   inspectorFieldLayout: null,
   fetchRecord: undefined,
   fieldErrors: null,
+  canSubmitApproval: false,
 })
 
 const emit = defineEmits<{
@@ -698,17 +749,31 @@ const emit = defineEmits<{
   (e: 'comment-retry'): void
   (e: 'comment-react', commentId: string, emoji: string): void
   (e: 'comment-unreact', commentId: string, emoji: string): void
+  /** 记录级送审 (阶段二 §5): a submission was created for THIS record. The dialog + the panel refresh are
+   * owned here; this emit exists so the workbench can toast the request number (and, later, do anything
+   * else a sheet-level surface needs) — same "the shell emits, the workbench decides" split as 'restore'. */
+  (e: 'approval-submitted', submission: MetaRecordApprovalSubmission): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 const inboxLabel = computed(() => commentLabel('comment.inbox', isZh.value))
-// See the inbox-link template comment above: `useRouter()` is a plain (non-throwing) `inject()`, so
-// capturing it once here is safe even in the several pre-existing router-less test harnesses that
-// mount this shell.
-const hasRouter = !!useRouter()
+// See the inbox-link template comment above: `inject(routerKey, null)` is a defaulted (non-throwing)
+// `inject()`, so capturing it once here is safe even in the several pre-existing router-less test
+// harnesses that mount this shell.
+const hasRouter = !!inject(routerKey, null)
 
 const showRecordPermissions = ref(false)
+// 记录级送审 (阶段二 §5): local open state for the child submit dialog + the counter that tells the
+// approvals panel to re-read after a successful submit (see both components' own comments).
+const showApprovalSubmit = ref(false)
+const approvalRefreshToken = ref(0)
+
+function onApprovalSubmitted(submission: MetaRecordApprovalSubmission): void {
+  showApprovalSubmit.value = false
+  approvalRefreshToken.value += 1
+  emit('approval-submitted', submission)
+}
 const kebabMenuRef = ref<InstanceType<typeof MtMenu> | null>(null)
 const titleInputRef = ref<HTMLInputElement | null>(null)
 const titleTextRef = ref<HTMLDivElement | null>(null)
@@ -830,6 +895,16 @@ const activeTab = ref<InspectorTab>(resolveDefaultTab())
 watch(() => props.openComments, (isOpen) => {
   if (isOpen) activeTab.value = 'comments'
 })
+
+// #5813: the comments tabpanel is `v-else-if`, so every tab switch unmounts the comment composer. The
+// draft lives in the workbench and survives; the composer's picked (or removed) mentions are kept here,
+// in this always-mounted shell, and handed back when the tab remounts. The composer itself decides
+// whether they still apply (same `initialMentions`, text-bound chips still in the draft), so a send, a
+// record switch or another edit made while the tab was away clears them as it does on the tab.
+const commentMentionSelection = shallowRef<MetaCommentMentionSelection | null>(null)
+function onCommentMentionSelection(value: MetaCommentMentionSelection) {
+  commentMentionSelection.value = value
+}
 const tabRefs = ref<Partial<Record<InspectorTab, HTMLButtonElement | null>>>({})
 const inspectorId = useId()
 
@@ -1278,9 +1353,29 @@ const subscriptionLoading = ref(false)
 const subscriptionError = ref('')
 let subscriptionRequestId = 0
 
-watch(() => props.record, () => {
+// Per-record state must not leak into the next row. The subscription half resets on EVERY replacement
+// (unchanged: a re-read can legitimately carry a new subscription state for the same row, so it is
+// re-fetched by the watcher below).
+//
+// The two CHILD DIALOG flags are the part that was missing. This shell is mounted UNCONDITIONALLY by
+// MultitableWorkbench.vue and NEVER unmounts (see the open/focus section's own comment above) — only
+// `visible` toggles — so a local `ref(false)` here lives for the whole workbench session. Both dialogs
+// are `v-if`-gated on `record` (plus sheetId/apiClient/capability), which means a record vanishing
+// underneath an OPEN dialog — a realtime delete, or the workbench clearing the selection, both of which
+// set `record` to null — DESTROYS the dialog element without its `@close` ever running, and the flag
+// stays `true`. Open the next record and the `v-if` is satisfied again: the dialog springs open unasked,
+// now bound to the NEXT record's id, where a single confirm would 送审 (or re-permission) a record the
+// user never chose. Reset whenever the id actually MOVES, null included.
+//
+// Deliberately NOT on every replacement: the grid hands this shell a fresh `record` object for the same
+// row after any patch/re-read, and slamming a half-filled 送审 form shut on an unrelated background
+// refresh would be its own bug. `next?.id === prev?.id` is the line between the two.
+watch(() => props.record, (next, prev) => {
   recordSubscribed.value = false
   subscriptionError.value = ''
+  if (next?.id === prev?.id) return
+  showApprovalSubmit.value = false
+  showRecordPermissions.value = false
 })
 
 watch(

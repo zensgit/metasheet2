@@ -889,6 +889,7 @@ async function main() {
   await testBridgeEditPreservesFullConfig()
   await testTenantWideScopedReadFallback()
   await testSealedSnapshotAccessorUsesMatchedScope()
+  await testConnectionFkViolationIsATypedConflict()
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
@@ -1461,19 +1462,31 @@ async function testBridgeEditPreservesFullConfig() {
   const unchanged = db.rows.find((row) => row.id === 'sys_bridge')
   assert.equal(unchanged.config.dataSourceId, 'ds-1', 'the refused repoint left the stored pointer alone')
 
-  const repointed = await registry.upsertExternalSystem({
-    tenantId: 'tenant_1',
-    id: 'sys_bridge',
-    name: 'SQL bridge repointed',
-    kind: 'data-source:sql-readonly',
-    role: 'source',
-    status: 'active',
-    principal: 'owner_1',
-    config: { dataSourceId: 'ds-2' },
-  })
-  assert.equal(repointed.config.dataSourceId, 'ds-2', 'an owner may repoint the binding')
-  assert.equal(repointed.config.dataSourceOwnerId, 'owner_1', 're-stamped by the validated principal')
-  assert.equal(repointed.config.schema, 'dbo', 'and a repoint still preserves the rest of the config')
+  // 4b. Proving ownership is necessary but NO LONGER SUFFICIENT on a row that is still marked
+  //     rollback-eligible: this is the shape seeded above (connection_id NULL + marker TRUE), and
+  //     MIN-PR2-i forbids moving its pointer while it stays legacy. The owner's repoint is refused
+  //     until it carries `connectionId`, which converts the row — that conversion, and the rest of
+  //     the invariant, live in __tests__/legacy-binding-canonical-invariant.test.cjs.
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      id: 'sys_bridge',
+      name: 'SQL bridge repointed',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      status: 'active',
+      principal: 'owner_1',
+      config: { dataSourceId: 'ds-2' },
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'LEGACY_BINDING_DATASOURCE_CHANGE_REQUIRES_CONNECTION_ID',
+    'even the owner cannot silently repoint a rollback-eligible legacy binding',
+  )
+  const stillPointed = db.rows.find((row) => row.id === 'sys_bridge')
+  assert.equal(stillPointed.config.dataSourceId, 'ds-1', 'the refused repoint left the stored pointer alone')
+  assert.equal(stillPointed.config.dataSourceOwnerId, 'owner_1', 'and left the stored stamp alone')
+  assert.equal(stillPointed.config.schema, 'dbo', 'and preserved the rest of the config')
+  assert.equal(stillPointed.legacy_connection_fallback_eligible, true, 'and left the marker alone')
 
   // 5. Clearing stays possible and stays explicit: an explicit null releases the pin, and the
   //    orphaned stamp goes with it rather than leaving an un-attributable reference behind.
@@ -1679,4 +1692,116 @@ async function testSealedSnapshotAccessorUsesMatchedScope() {
   assert.equal(sealedContexts[0].workspaceId, 'ws_a', 'an exact match keeps its own workspace scope')
 
   console.log('  external-systems: sealed snapshot accessor uses the matched scope OK')
+}
+
+// ---------------------------------------------------------------------------------------------
+// W7-B PR-B — the binding side's participation in the data-source delete lock protocol IS the
+// foreign key on `connection_id` (now -> data_sources(live_id), core-backend migration
+// zzzz20260920120000). This module never reads data_sources (lib/db.cjs is scoped to
+// integration_* and must stay so); what it owns is the ERROR MAPPING: when PostgreSQL refuses an
+// INSERT/UPDATE because the named source is no longer live, that is SQLSTATE 23503 on a known
+// constraint, and it must reach the client as a stable 409 code, not an untyped 500.
+//
+// Judged by SQLSTATE, not prose: the fake driver error below carries the zh_CN server's message.
+// Mutation probes: drop the `.catch` on insertOne/updateRow (raw error escapes: `instanceof
+// ExternalSystemConflictError` fails); key the mapping on /violates foreign key/ (the zh_CN
+// message no longer matches); map EVERY 23503 (the foreign-constraint control below fails).
+// ---------------------------------------------------------------------------------------------
+async function testConnectionFkViolationIsATypedConflict() {
+  const {
+    EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE_CODE,
+    __internals: { LIVE_CONNECTION_FK, LEGACY_CONNECTION_FK, translateConnectionFkViolation },
+  } = require('../lib/external-systems.cjs')
+  assert.equal(EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE_CODE, 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE')
+  assert.equal(LIVE_CONNECTION_FK, 'fk_integration_external_systems_live_connection_id')
+
+  // What `pg` raises when data_sources(live_id) no longer holds the id: SQLSTATE + constraint are
+  // stable; the message is the server's locale (here zh_CN) and carries a table name — the
+  // mapping must not depend on the former and must not forward the latter.
+  const zhFkViolation = (constraint) => Object.assign(
+    new Error('在 "integration_external_systems" 上插入或更新违反了外键约束 (db=plm_prod)'),
+    { code: '23503', constraint, table: 'integration_external_systems', detail: '键值对(connection_id)=(ds-owned)没有在表"data_sources"中出现' },
+  )
+
+  const credentialStore = createMockCredentialStore()
+  const binder = {
+    async assertReferenceable(dataSourceId, principal) {
+      // The in-memory binder still says "referenceable": the source was live when it was read.
+      // The DATABASE is what knows it died in between — that is the whole point of the FK.
+      if (dataSourceId !== 'ds-owned' || principal !== 'owner_1') {
+        throw new Error(`Data source with id '${dataSourceId}' not found`)
+      }
+    },
+  }
+
+  // --- INSERT branch: the FK refusal becomes a 409-shaped conflict with the stable code --------
+  const insertDb = createMockDb()
+  const rawInsertOne = insertDb.insertOne.bind(insertDb)
+  let insertFailure = null
+  insertDb.insertOne = async (table, row) => {
+    if (insertFailure) { const e = insertFailure; insertFailure = null; throw e }
+    return rawInsertOne(table, row)
+  }
+  const insertRegistry = createExternalSystemRegistry({
+    db: insertDb, credentialStore, idGenerator: () => 'sys_fk_insert', dataSourceBinder: binder,
+  })
+  const bindInput = {
+    tenantId: 'tenant_1',
+    name: 'bind-racing-a-delete',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    connectionId: 'ds-owned',
+    config: { schema: 'dbo' },
+    principal: 'owner_1',
+  }
+  insertFailure = zhFkViolation(LIVE_CONNECTION_FK)
+  const insertError = await insertRegistry.upsertExternalSystem(bindInput).catch((e) => e)
+  assert.ok(insertError instanceof ExternalSystemConflictError,
+    `the live-connection FK refusal on INSERT is a typed conflict, got ${insertError && insertError.name}`)
+  assert.equal(insertError.code, 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE', 'stable wire code (409 via /Conflict/)')
+  assert.equal(insertError.details.code, 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE')
+  assert.equal(insertError.details.field, 'connectionId')
+  assert.equal(insertError.details.constraint, LIVE_CONNECTION_FK)
+  assert.doesNotMatch(insertError.message, /plm_prod|外键约束|ds-owned/, 'the driver prose (db name, key value) never reaches the client')
+  assert.equal(insertDb.rows.length, 0, 'nothing was persisted')
+
+  // --- UPDATE branch (re-bind): same mapping ----------------------------------------------------
+  insertFailure = null
+  const created = await insertRegistry.upsertExternalSystem(bindInput)
+  assert.equal(created.connectionId, 'ds-owned')
+  const rawUpdateRow = insertDb.updateRow.bind(insertDb)
+  let updateFailure = zhFkViolation(LIVE_CONNECTION_FK)
+  insertDb.updateRow = async (table, set, where) => {
+    if (updateFailure) { const e = updateFailure; updateFailure = null; throw e }
+    return rawUpdateRow(table, set, where)
+  }
+  const updateError = await insertRegistry.upsertExternalSystem({
+    ...bindInput, id: created.id, name: 'renamed-while-source-died',
+  }).catch((e) => e)
+  assert.ok(updateError instanceof ExternalSystemConflictError, 'the FK refusal on UPDATE is the same typed conflict')
+  assert.equal(updateError.code, 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE')
+  assert.equal(insertDb.rows[0].name, 'bind-racing-a-delete', 'the row was not renamed')
+
+  // --- the pre-migration constraint name is read the same way -------------------------------
+  const legacy = translateConnectionFkViolation(zhFkViolation(LEGACY_CONNECTION_FK))
+  assert.ok(legacy instanceof ExternalSystemConflictError)
+  assert.equal(legacy.details.constraint, LEGACY_CONNECTION_FK)
+
+  // --- a driver that reports no constraint name is still mapped (no other FK fires on this
+  //     table's writes) ---------------------------------------------------------------------
+  const nameless = translateConnectionFkViolation(Object.assign(new Error('x'), { code: '23503' }))
+  assert.ok(nameless instanceof ExternalSystemConflictError)
+  assert.equal(nameless.details.constraint, null)
+
+  // --- CONTROLS: everything that is NOT this constraint passes through untouched -------------
+  const foreignFk = zhFkViolation('fk_integration_pipelines_source_system_id')
+  assert.equal(translateConnectionFkViolation(foreignFk), foreignFk, 'a 23503 on another constraint is not this conflict')
+  const unique = Object.assign(new Error('duplicate key'), { code: '23505', constraint: LIVE_CONNECTION_FK })
+  assert.equal(translateConnectionFkViolation(unique), unique, 'a different SQLSTATE on the same name is not this conflict')
+  const proseOnly = new Error('insert or update on table "integration_external_systems" violates foreign key constraint "fk_integration_external_systems_live_connection_id"')
+  assert.equal(translateConnectionFkViolation(proseOnly), proseOnly, 'English prose WITHOUT the SQLSTATE is not trusted')
+  assert.equal(translateConnectionFkViolation(null), null)
+  assert.equal(translateConnectionFkViolation(undefined), undefined)
+
+  console.log('  external-systems: connection FK violation (23503) maps to EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE OK')
 }

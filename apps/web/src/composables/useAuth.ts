@@ -390,7 +390,20 @@ export function useAuth() {
     return refreshDevToken()
   }
 
-  async function bootstrapSession(force = false): Promise<SessionBootstrapResult> {
+  /**
+   * `keepSessionOnFailure` IS THE ONLY NEW BEHAVIOUR HERE, and it is opt-in: with the default
+   * (`false`) every branch below is byte-for-byte today's. It exists for
+   * `installPermissionSnapshotRefresh`, a refresh nobody asked for that fires while the user is
+   * sitting in the app: a transient 401/offline answer to THAT request must not sign them out,
+   * must not drop the stored snapshot, and must not poison `sessionCache` into a login redirect
+   * on the next navigation. A user-initiated bootstrap (boot, route guard) still fails exactly
+   * as it does today.
+   */
+  async function bootstrapSession(
+    force = false,
+    options: { keepSessionOnFailure?: boolean } = {},
+  ): Promise<SessionBootstrapResult> {
+    const keepSessionOnFailure = options.keepSessionOnFailure === true
     const existingToken = getToken()
     const startedExplicitRevision = explicitSessionRevision
     const startedExplicit = Boolean(explicitSessionOrg(existingToken))
@@ -440,6 +453,7 @@ export function useAuth() {
 
       if (staleExplicitSession()) return staleResult()
       if (!response) {
+        if (keepSessionOnFailure) return { ok: false, status: 0, payload: null }
         sessionCache = {
           ok: false,
           status: 0,
@@ -457,6 +471,11 @@ export function useAuth() {
 
       if (staleExplicitSession()) return staleResult()
       if (!response.ok) {
+        // Reported, never acted on: no `clearToken()` (which would clear the token, the snapshot
+        // and the tenant hint, and announce a principal change) and no `sessionCache` write
+        // (which would make the next route guard redirect to the login page). The last good
+        // session stays exactly as it was before this background request.
+        if (keepSessionOnFailure) return { ok: false, status: response.status, payload }
         if (response.status === 401) {
           clearToken()
         }
@@ -568,4 +587,132 @@ export function useAuth() {
     getCurrentUser,
     getCurrentUserId,
   }
+}
+
+/*
+ * HOW A TAB THAT IS ALREADY OPEN LEARNS IT WAS GRANTED A PERMISSION.
+ *
+ * Every permission read in this app answers from the snapshot `persistUserSnapshot` writes into
+ * `localStorage` (`getAccessSnapshot`), and that snapshot was written once per page load: the
+ * route guard calls `bootstrapSession()` unforced, which serves `sessionCache` for the rest of
+ * the tab's life. The listeners that already re-read the snapshot on `storage` / `focus`
+ * (`src/approvals/permissions.ts`) therefore had nothing new to read, and an administrator's
+ * grant only surfaced after a page reload. This is the missing writer, not a new permission
+ * model: the server remains the only authority, this just re-asks it.
+ *
+ * WHY `focus` AND NOT ALSO `visibilitychange`: the snapshot consumers in this app listen on
+ * `focus` (plus `storage`); `visibilitychange` is used once, for an unrelated dialog concern in
+ * `multitable/views/MultitableWorkbench.vue`. Binding both would double-fire on every tab
+ * switch for no extra coverage.
+ */
+
+/**
+ * Hard minimum spacing between focus-driven refreshes.
+ *
+ * 60s IS THE SERVER'S OWN NUMBER, not a guess: `listUserPermissions` memoises a user's
+ * permission codes for `RBAC_CACHE_TTL_MS` (default `60000`) in
+ * `packages/core-backend/src/rbac/service.ts`, and `/api/auth/me` re-hydrates through it
+ * (`routes/auth.ts` -> `AuthService.verifyToken` -> `getUserById` -> `resolveRbacProfile`). Two
+ * refreshes inside one TTL window can only return the SAME permission set, so a shorter
+ * interval buys nothing and costs a request per alt-tab. If the server TTL ever changes, this
+ * should follow it.
+ */
+const PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS = 60_000
+
+let permissionSnapshotRefreshBound = false
+let lastPermissionSnapshotRefreshAt = Number.NEGATIVE_INFINITY
+let permissionSnapshotRefreshInFlight = false
+
+function readUserSnapshotEntries(): Record<string, string | null> {
+  const entries: Record<string, string | null> = {}
+  for (const key of USER_SNAPSHOT_KEYS) {
+    try {
+      entries[key] = typeof localStorage === 'undefined' ? null : localStorage.getItem(key)
+    } catch {
+      entries[key] = null
+    }
+  }
+  return entries
+}
+
+/**
+ * Re-emit the `storage` event this document's own write did NOT produce.
+ *
+ * A same-document `localStorage` write notifies other documents only, so without this the
+ * in-tab snapshot listeners would not observe the refreshed permissions until some later focus.
+ * Only genuinely changed keys are announced. Every `storage` listener in this app either filters
+ * on `key` (`useAuth` above, `useLocale`) or re-reads storage idempotently (`usePlmAuthStatus`,
+ * `ElearningAppInstallationSection`, `approvals/permissions`), so this is a notification, never
+ * a new input: it carries no value a listener could not read for itself.
+ */
+function announceUserSnapshotChange(
+  before: Record<string, string | null>,
+  after: Record<string, string | null>,
+): void {
+  if (typeof window === 'undefined' || typeof StorageEvent === 'undefined') return
+  let storageArea: Storage | undefined
+  try {
+    storageArea = typeof Storage !== 'undefined' && typeof localStorage !== 'undefined'
+      && localStorage instanceof Storage
+      ? localStorage
+      : undefined
+  } catch {
+    storageArea = undefined
+  }
+  for (const key of USER_SNAPSHOT_KEYS) {
+    if (before[key] === after[key]) continue
+    try {
+      window.dispatchEvent(new StorageEvent('storage', {
+        key,
+        oldValue: before[key],
+        newValue: after[key],
+        ...(storageArea ? { storageArea } : {}),
+      }))
+    } catch (err) {
+      console.warn('[auth] failed to announce refreshed user snapshot', err)
+    }
+  }
+}
+
+async function refreshUserSnapshotOnFocus(): Promise<void> {
+  // No session: return BEFORE touching `bootstrapSession` at all. Its no-token branch clears the
+  // stored snapshot and announces a principal change, which a background refresh must never do.
+  if (!readStoredToken()) return
+  // `focus` can reach a document that is not actually on screen; a hidden document is not "the
+  // user came back to the tab".
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+  if (permissionSnapshotRefreshInFlight) return
+  const now = Date.now()
+  // Charged at ATTEMPT time, not on success, so a failing or slow server cannot turn rapid
+  // alt-tabbing into a request storm.
+  if (now - lastPermissionSnapshotRefreshAt < PERMISSION_SNAPSHOT_REFRESH_MIN_INTERVAL_MS) return
+  lastPermissionSnapshotRefreshAt = now
+  permissionSnapshotRefreshInFlight = true
+  const before = readUserSnapshotEntries()
+  try {
+    // `keepSessionOnFailure`: a 401 or an offline answer to a refresh the user never asked for
+    // leaves the session exactly as it was. See `bootstrapSession`.
+    const result = await useAuth().bootstrapSession(true, { keepSessionOnFailure: true })
+    if (!result.ok) return
+    announceUserSnapshotChange(before, readUserSnapshotEntries())
+  } catch (err) {
+    console.warn('[auth] permission snapshot refresh failed', err)
+  } finally {
+    permissionSnapshotRefreshInFlight = false
+  }
+}
+
+/**
+ * Bind the focus refresh once per document. Module-level flag, same idiom as
+ * `bindApprovalAccessRefresh` in `src/approvals/permissions.ts`: calling this from several places
+ * (or from a component that mounts many times) still installs exactly one listener and therefore
+ * still produces at most one refresh per interval. Called once from the app entry point; there is
+ * deliberately no uninstall, because the listener lives as long as the document does.
+ */
+export function installPermissionSnapshotRefresh(): void {
+  if (permissionSnapshotRefreshBound || typeof window === 'undefined') return
+  permissionSnapshotRefreshBound = true
+  window.addEventListener('focus', () => {
+    void refreshUserSnapshotOnFocus()
+  })
 }

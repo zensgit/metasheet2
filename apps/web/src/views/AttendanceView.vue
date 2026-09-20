@@ -220,6 +220,17 @@
             @cancel="closeDedicatedOvertimeRequestCard"
             @submit="submitDedicatedOvertimeRequestCard"
           />
+          <AttendanceEmployeeShiftSwapRequestCard
+            v-if="shiftSwapRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :requester-assignments="requesterShiftSwapCardOptions"
+            :counterparty-assignments="counterpartyShiftSwapCardOptions"
+            :has-published-assignments="shiftSwapAssignmentOptions.length > 0"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedShiftSwapRequestCard"
+            @submit="submitDedicatedShiftSwapRequestCard"
+          />
         </template>
         <template #historyFilters>
           <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
@@ -1477,7 +1488,7 @@
               {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
             </button>
           </div>
-          <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
+          <div v-if="adminSurfaceBlocked" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
           <template v-else>
             <div
               v-show="adminTaskHomeOpen"
@@ -4957,8 +4968,8 @@
                       </button>
                     </div>
                   </div>
-                  <div v-if="attendanceGroups.length === 0" class="attendance__empty">
-                    {{ tr('No attendance groups yet. Create one to start configuring members.', '暂无考勤组。先新建一个考勤组，再配置成员。') }}
+                  <div v-if="attendanceGroups.length === 0" class="attendance__empty" data-attendance-group-empty="true">
+                    {{ attendanceGroupEmptyCopy }}
                   </div>
                   <div v-else-if="filteredAttendanceGroups.length === 0" class="attendance__empty">
                     {{ tr('No groups match the current filters.', '当前筛选条件下没有考勤组。') }}
@@ -10167,6 +10178,7 @@ import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspac
 import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
 import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
 import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
+import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
 import {
@@ -10291,6 +10303,16 @@ import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupR
 import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
+  deriveAdminTaskHomeGroupStatus,
+  type AttendanceAdminTaskHomeStatus,
+} from './attendance/attendanceAdminTaskHomeStatus'
+import {
+  attendanceGroupEmptyListCopy,
+  filterAdminTaskHomeGroupsForCatalogScope,
+  resolveAttendanceGroupCatalogScope,
+  type AttendanceGroupCatalogScope,
+} from './attendance/attendanceAdminTaskHomeAccess'
+import {
   applyPayrollSummaryFieldsToConfig,
   buildPayrollSummaryFieldOptionsFromReportFields,
   extractPayrollSummaryFieldCodes,
@@ -10411,6 +10433,7 @@ type AttendanceAdminTaskHomeGroup = {
   key: string
   title: string
   detail: string
+  status?: AttendanceAdminTaskHomeStatus
   actions: AttendanceAdminTaskHomeAction[]
   linkActions: AttendanceAdminTaskHomeLinkAction[]
   buttonActions: AttendanceAdminTaskHomeSectionAction[]
@@ -12126,6 +12149,13 @@ const payrollCycleGenerating = ref(false)
 const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | null>(null)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
+const attendanceGroupCatalogScope = ref<AttendanceGroupCatalogScope>('unknown')
+const adminSurfaceBlocked = computed(() =>
+  adminForbidden.value && attendanceGroupCatalogScope.value !== 'managed',
+)
+const attendanceGroupEmptyCopy = computed(() =>
+  attendanceGroupEmptyListCopy(attendanceGroupCatalogScope.value, tr),
+)
 type AttendanceSchedulerScopeTargets = {
   scheduleGroupIds: string[]
   attendanceGroupIds: string[]
@@ -14953,6 +14983,7 @@ const overviewRequestToolsOpen = ref(false)
 const leaveRequestCardOpen = ref(false)
 const makeupRequestCardOpen = ref(false)
 const overtimeRequestCardOpen = ref(false)
+const shiftSwapRequestCardOpen = ref(false)
 
 const eligibleMakeupAnomalies = computed(() =>
   anomalies.value.filter(item => item.state !== 'pending'),
@@ -15064,6 +15095,7 @@ const routeGroupContextActive = computed(() => Boolean(props.routeGroupContext))
 // (charter §6.2 "暂留父层: section 权限过滤、active id、数据加载").
 const {
   state: setupReadinessState,
+  input: setupReadinessInput,
   steps: setupReadinessSteps,
   summary: setupReadinessSummary,
   needsAttention: setupReadinessNeedsAttention,
@@ -15090,7 +15122,7 @@ const setupSectionActive = computed(() =>
 // surface (wizard section or task home) is on screen and the org changes, and re-opening the
 // task home refreshes when the loaded org no longer matches (org changed while it was closed).
 const setupTaskHomeVisible = computed(() =>
-  showAdmin.value && adminTaskHomeOpen.value && !adminForbidden.value,
+  showAdmin.value && adminTaskHomeOpen.value && !adminSurfaceBlocked.value,
 )
 
 watch(setupSectionActive, (active) => {
@@ -15503,10 +15535,19 @@ function buildAdminTaskHomeGroup(
   }
 }
 
-const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
+const adminTaskHomePeopleGroupsStatusInput = computed(() => ({
+  loadState: setupReadinessState.value,
+  readiness: setupReadinessInput.value,
+  steps: setupReadinessSteps.value,
+}))
+
+const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => {
+  const peopleInput = adminTaskHomePeopleGroupsStatusInput.value
+  const catalog = [
   {
     key: 'daily-operations',
     title: tr('Daily operations', '日常运营'),
+    status: deriveAdminTaskHomeGroupStatus('daily-operations', peopleInput),
     detail: tr(
       'Approvals, anomalies, imports, and audit follow-up.',
       '审批、异常、导入与审计跟进。',
@@ -15554,6 +15595,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'people-groups',
     title: tr('People and attendance groups', '人员与考勤组'),
+    status: deriveAdminTaskHomeGroupStatus('people-groups', peopleInput),
     detail: tr(
       'Groups, members, owners, access, and availability.',
       '考勤组、成员、负责人、权限与可用性。',
@@ -15598,6 +15640,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'work-time-policies',
     title: tr('Work time and policies', '工时与策略'),
+    status: deriveAdminTaskHomeGroupStatus('work-time-policies', peopleInput),
     detail: tr(
       'Shifts, schedules, holidays, rule sets, overtime, and leave policies.',
       '班次、排班、节假日、规则集、加班与请假策略。',
@@ -15639,6 +15682,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'reporting-payroll',
     title: tr('Reporting and payroll', '报表与计薪'),
+    status: deriveAdminTaskHomeGroupStatus('reporting-payroll', peopleInput),
     detail: tr(
       'Import batches, report fields, payroll templates, and payroll cycles.',
       '导入批次、统计字段、计薪模板与计薪周期。',
@@ -15667,7 +15711,10 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
       },
     ],
   },
-].map(buildAdminTaskHomeGroup))
+  ]
+  return filterAdminTaskHomeGroupsForCatalogScope(catalog, attendanceGroupCatalogScope.value)
+    .map(buildAdminTaskHomeGroup)
+})
 
 function shouldShowAdminSection(id: string): boolean {
   return !adminFocusedMode.value || resolvedAdminSectionId() === id
@@ -17295,13 +17342,14 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
     await openDedicatedOvertimeRequestCard()
     return
   }
+  if (action === 'shift_swap') {
+    await openDedicatedShiftSwapRequestCard()
+    return
+  }
   if (leaveRequestCardOpen.value) closeDedicatedLeaveRequestCard()
   if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
   if (overtimeRequestCardOpen.value) closeDedicatedOvertimeRequestCard()
-  if (action === 'shift_swap') {
-    await openQuickRequestDraft('shift_swap')
-    return
-  }
+  if (shiftSwapRequestCardOpen.value) closeDedicatedShiftSwapRequestCard()
   if (action === 'records') {
     await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)
     return
@@ -17313,6 +17361,7 @@ async function openDedicatedLeaveRequestCard(): Promise<void> {
   prepareRequestDraft('leave', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
   makeupRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
   leaveRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17341,17 +17390,6 @@ async function submitDedicatedLeaveRequestCard(): Promise<void> {
   if (statusKind.value !== 'error') closeDedicatedLeaveRequestCard()
 }
 
-async function openQuickRequestDraft(requestType: AttendanceRequest['request_type']): Promise<void> {
-  prepareRequestDraft(requestType, activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
-  setStatus(
-    appendStatusContext(
-      tr(`Request form ready for ${formatRequestType(requestType)}.`, `已为${formatRequestType(requestType)}准备申请表单。`),
-      requestTimezoneContextHint.value,
-    ),
-  )
-  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
-}
-
 function prepareRequestDraft(requestType: AttendanceRequest['request_type'], workDate: string): void {
   const typeChanged = requestForm.requestType !== requestType
   const dateChanged = requestForm.workDate !== workDate
@@ -17378,6 +17416,7 @@ async function openDedicatedMakeupRequestCard(): Promise<void> {
   prepareRequestDraft(draft.requestType, draft.workDate)
   leaveRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
   makeupRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17413,6 +17452,7 @@ async function openDedicatedOvertimeRequestCard(): Promise<void> {
   prepareRequestDraft('overtime', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
   leaveRequestCardOpen.value = false
   makeupRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = false
   overtimeRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17439,6 +17479,39 @@ function closeDedicatedOvertimeRequestCard(): void {
 async function submitDedicatedOvertimeRequestCard(): Promise<void> {
   await submitRequest()
   if (statusKind.value !== 'error') closeDedicatedOvertimeRequestCard()
+}
+
+async function openDedicatedShiftSwapRequestCard(): Promise<void> {
+  prepareRequestDraft('shift_swap', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  leaveRequestCardOpen.value = false
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
+  shiftSwapRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('shift_swap')}.`, `已为${formatRequestType('shift_swap')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-shift-swap-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const requesterField = document.getElementById('attendance-shift-swap-card-requester')
+  if (requesterField instanceof HTMLElement && typeof requesterField.focus === 'function') {
+    requesterField.focus()
+  }
+}
+
+function closeDedicatedShiftSwapRequestCard(): void {
+  shiftSwapRequestCardOpen.value = false
+}
+
+async function submitDedicatedShiftSwapRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedShiftSwapRequestCard()
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
@@ -23786,6 +23859,18 @@ const counterpartyShiftSwapAssignmentOptions = computed(() => {
   )
 })
 
+function toShiftSwapCardOption(item: AttendanceAssignmentItem): { id: string; label: string } {
+  return { id: item.assignment.id, label: formatShiftSwapAssignmentOption(item) }
+}
+
+const requesterShiftSwapCardOptions = computed(() =>
+  requesterShiftSwapAssignmentOptions.value.map(toShiftSwapCardOption),
+)
+
+const counterpartyShiftSwapCardOptions = computed(() =>
+  counterpartyShiftSwapAssignmentOptions.value.map(toShiftSwapCardOption),
+)
+
 function applyTemporaryReplacementDefaults(item: AttendanceAssignmentItem | null): void {
   if (!item) return
   temporaryAssignmentForm.workDate = item.assignment.startDate
@@ -28039,6 +28124,7 @@ async function loadAttendanceGroups() {
     if (generation !== attendanceGroupLoadGeneration) return
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceGroupCatalogScope.value = 'unknown'
       return
     }
     const data = await response.json()
@@ -28047,6 +28133,8 @@ async function loadAttendanceGroups() {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
+    const parsedScope = resolveAttendanceGroupCatalogScope(data.data?.scope)
+    attendanceGroupCatalogScope.value = parsedScope === 'unknown' ? 'org' : parsedScope
     attendanceGroups.value = data.data?.items ?? []
     attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
     if (props.routeGroupContext) {

@@ -2,7 +2,7 @@
   <div id="app">
     <nav class="app-nav" v-if="showNav">
       <div class="nav-brand">
-        <span class="brand-text">{{ brandText }}</span>
+        <router-link :to="brandHomePath" class="brand-text brand-link" data-testid="nav-brand-link">{{ brandText }}</router-link>
       </div>
       <div class="nav-links">
         <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -67,7 +67,10 @@
                  it would be a link that renders for a principal the guard immediately redirects: the
                  "visible but not actionable" failure moved from the page into the navigation. -->
             <router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
-            <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
+            <!-- 整合切片 (2026-09-09): the 外接数据源 nav entry is gone — that page is now the
+                 连接管理 section of 数据工厂 above, and '/data-sources' redirects there. The
+                 zh/en `navLabels.dataSources` entries are kept in both label maps below, but
+                 this shell has no consumer for them any more. -->
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
@@ -123,14 +126,14 @@ import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchT
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
-import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
+import { canReachStockPrepWorkbench } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
 import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
-const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
+const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures, resolveHomePath } = useFeatureFlags()
 const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 setMultitableApiErrorLocaleResolver(() => isZh.value)
@@ -156,12 +159,15 @@ const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
 })
-// O2 / R-11: `/stock-prep` reachability is exactly STOCK_PREP_ROUTE_PERMISSION, the same code the
-// route meta declares and the same one the plugin gates the queue read with. Imported from the
-// shared vocabulary rather than typed inline so the nav link cannot drift from the guard.
+// O2 / R-11: `/stock-prep` reachability is exactly the workbench's own gate — `satisfiesStockPrepAccess`
+// over this principal, via `canReachStockPrepWorkbench` — NOT the app-wide `hasPermission` probe:
+// that probe expands `stock-prep:*` / `*:*` / `:write` and treats `users:write` as admin, none of which
+// the server does, so the link used to render for three principals every panel behind it refuses and to
+// stay hidden from a bare `integration:admin` the server serves in full. The route guard
+// (`buildStockPrepAwarePermissionProbe`) now asks the same question, so nav and guard cannot drift.
 const canUseStockPreparation = computed(() => {
   void route.fullPath
-  return hasPermission(STOCK_PREP_ROUTE_PERMISSION)
+  return canReachStockPrepWorkbench(getAccessSnapshot())
 })
 const canUseApprovals = computed(() => {
   void route.fullPath
@@ -234,6 +240,16 @@ const brandText = computed(() => {
   if (attendanceFocused.value) return navLabels.value.attendance
   if (plmWorkbenchFocused.value) return navLabels.value.plmWorkbench
   return 'MetaSheet'
+})
+
+// Owner request (2026-09-14): the top-left brand is the way back to the landing page. It goes
+// through resolveHomePath() so the two FOCUSED product modes keep their own home ('/attendance' /
+// '/plm') and the router guard still decides reachability. For the ordinary platform mode this is
+// a top-nav entry to '/home' (我的应用) — superseding the #5392 note that '/home' had none.
+const brandHomePath = computed(() => {
+  void attendanceFocused.value
+  void plmWorkbenchFocused.value
+  return resolveHomePath()
 })
 
 const documentTitle = computed(() => resolveRouteDocumentTitle(route.meta, isZh.value))
@@ -346,6 +362,16 @@ html, body {
   font-weight: 600;
   color: var(--ms-color-primary);
   white-space: nowrap;
+}
+
+.brand-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.brand-link:hover,
+.brand-link:focus-visible {
+  text-decoration: underline;
 }
 
 .nav-links {

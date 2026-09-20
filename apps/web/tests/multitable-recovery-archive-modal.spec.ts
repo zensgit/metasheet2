@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 
 import RecoveryArchiveModal from '../src/multitable/components/RecoveryArchiveModal.vue'
+import ManualArchiveCapture from '../src/multitable/components/ManualArchiveCapture.vue'
+import type { RecoveryArchiveCaptureStatus } from '../src/multitable/api/client'
 import type {
   RecoveryArchiveCatalogPage,
   RecoveryArchiveExecuteResult,
@@ -49,7 +51,162 @@ const flush = async () => {
   }
 }
 const q = (selector: string) => document.body.querySelector(selector) as HTMLElement | null
-afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = ''; vi.useRealTimers() })
+afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = ''; sessionStorage.clear(); vi.restoreAllMocks(); vi.useRealTimers() })
+
+function mountManual(over: Partial<InstanceType<typeof ManualArchiveCapture>['$props']> = {}) {
+  const sheet = ref('sheet_1')
+  const capture = vi.fn(async (_sheet: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> => ({ requestId, generationId, state: 'recoverable' }))
+  const read = vi.fn(async (_sheet: string, requestId: string): Promise<RecoveryArchiveCaptureStatus> => ({ requestId, generationId, state: 'pending' }))
+  const completed = vi.fn()
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const app = createApp(defineComponent({ setup: () => () => h(ManualArchiveCapture, {
+    isZh: false, sheetName: 'Projects', capture, read, onCompleted: completed, ...over, sheetId: sheet.value,
+  }) }))
+  app.mount(container)
+  const handle = { unmount: () => app.unmount() }
+  mounted.push(handle)
+  return { capture, read, completed, sheet, unmount: () => {
+    mounted.splice(mounted.indexOf(handle), 1)
+    handle.unmount()
+    container.remove()
+  } }
+}
+
+async function confirmManual() {
+  const checkbox = q('[data-test="manual-archive-confirm"]') as HTMLInputElement
+  checkbox.checked = true
+  checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+  await flush()
+}
+
+describe('ManualArchiveCapture', () => {
+  it.each([
+    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Manual archives containing attachments are not yet available; this archive is incomplete.'],
+    [true, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', '含附件的手动归档尚不可用；本次归档未完成。'],
+    [false, 403, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Your current identity cannot archive this table'],
+    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE_private', 'Archive unavailable; check configuration and retry'],
+  ])('uses exact safe manual diagnostics (%s/%s/%s)', async (isZh, status, code, expected) => {
+    const capture = vi.fn().mockRejectedValue({ status, code, message: 'private-provider-value' })
+    const ctx = mountManual({ isZh, capture })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(q('[data-test="manual-archive-error"]')?.textContent).toBe(expected)
+    expect(document.body.textContent).not.toContain('private-provider-value')
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+    expect(ctx.completed).not.toHaveBeenCalled()
+  })
+  it('requires explicit confirmation and persists identity before POST without restoring data', async () => {
+    const ctx = mountManual()
+    await flush()
+    expect(q('[data-test="manual-archive"]')?.textContent).toContain('Projects')
+    expect((q('[data-test="manual-archive-submit"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(ctx.capture).not.toHaveBeenCalled()
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    const id = sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')
+    expect(ctx.capture.mock.calls).toEqual([['sheet_1', id]])
+    expect(q('[data-test="manual-archive-status"]')?.textContent).toContain('available for recovery')
+    expect(ctx.completed).toHaveBeenCalledTimes(1)
+    expect(q('[data-test="manual-archive-submit"]')).toBeNull()
+    q('[data-test="manual-archive-new"]')!.click()
+    await flush()
+    expect(sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')).toBeNull()
+    expect((q('[data-test="manual-archive-submit"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('reuses the original identity after ambiguous failure and reads it after remount', async () => {
+    const capture = vi.fn().mockRejectedValueOnce(new Error('private-provider-path')).mockImplementation(async (_sheet, requestId) => ({ requestId, generationId, state: 'pending' }))
+    const ctx = mountManual({ capture })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(q('[data-test="manual-archive-error"]')?.textContent).not.toContain('private-provider-path')
+    const id = sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(capture.mock.calls).toEqual([['sheet_1', id], ['sheet_1', id]])
+    ctx.unmount()
+    const fresh = mountManual()
+    await flush()
+    expect(fresh.read.mock.calls).toEqual([['sheet_1', id]])
+    expect(fresh.capture).not.toHaveBeenCalled()
+    expect(fresh.completed).not.toHaveBeenCalled()
+  })
+
+  it('ignores a completed response from the previous sheet', async () => {
+    let finish!: (value: RecoveryArchiveCaptureStatus) => void
+    const capture = vi.fn(() => new Promise<RecoveryArchiveCaptureStatus>((resolve) => { finish = resolve }))
+    const ctx = mountManual({ capture })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    ctx.sheet.value = 'sheet_2'
+    await flush()
+    finish({ requestId: '11111111-1111-4111-8111-111111111111', generationId, state: 'recoverable' })
+    await flush()
+    expect(ctx.completed).not.toHaveBeenCalled()
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+    expect((q('[data-test="manual-archive-submit"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('does not submit when durable request identity cannot be saved', async () => {
+    const ctx = mountManual()
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(ctx.capture).not.toHaveBeenCalled()
+    expect(q('[data-test="manual-archive-error"]')).not.toBeNull()
+  })
+
+  it('does not treat cached identity as completion and discards another actor missing request', async () => {
+    sessionStorage.setItem('metasheet.manual-archive.request:sheet_1', '11111111-1111-4111-8111-111111111111')
+    const read = vi.fn().mockRejectedValue({ status: 404 })
+    const ctx = mountManual({ read })
+    await flush()
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(ctx.completed).not.toHaveBeenCalled()
+    expect(sessionStorage.getItem('metasheet.manual-archive.request:sheet_1')).toBeNull()
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+  })
+
+  it('refreshes catalog once on pending completion, not on every successful reload', async () => {
+    const id = '11111111-1111-4111-8111-111111111111'
+    sessionStorage.setItem('metasheet.manual-archive.request:sheet_1', id)
+    const read = vi.fn().mockResolvedValueOnce({ requestId: id, generationId, state: 'pending' })
+      .mockResolvedValue({ requestId: id, generationId, state: 'recoverable' })
+    const ctx = mountManual({ read })
+    await flush()
+    q('[data-test="manual-archive-refresh"]')!.click()
+    await flush()
+    expect(ctx.completed).toHaveBeenCalledTimes(1)
+    q('[data-test="manual-archive-refresh"]')!.click()
+    await flush()
+    expect(ctx.completed).toHaveBeenCalledTimes(1)
+    ctx.unmount()
+    const fresh = mountManual({ read })
+    await flush()
+    expect(fresh.completed).not.toHaveBeenCalled()
+    expect(q('[data-test="manual-archive-status"]')?.textContent).toContain('available for recovery')
+  })
+
+  it('removes stale recoverable status after authority is revoked on refresh', async () => {
+    const id = '11111111-1111-4111-8111-111111111111'
+    sessionStorage.setItem('metasheet.manual-archive.request:sheet_1', id)
+    const read = vi.fn().mockResolvedValueOnce({ requestId: id, generationId, state: 'recoverable' })
+      .mockRejectedValue({ status: 403 })
+    mountManual({ read })
+    await flush()
+    expect(q('[data-test="manual-archive-status"]')).not.toBeNull()
+    q('[data-test="manual-archive-refresh"]')!.click()
+    await flush()
+    expect(q('[data-test="manual-archive-status"]')).toBeNull()
+    expect(q('[data-test="manual-archive-error"]')?.textContent).toContain('cannot archive')
+  })
+})
 
 function mount(over: Partial<Record<string, unknown>> = {}) {
   const listCatalog = vi.fn(async () => catalog)
@@ -118,6 +275,176 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
 }
 
 describe('RecoveryArchiveModal', () => {
+  it.each([
+    [false, '7 archive evidence entries'],
+    [true, '7 项归档证据'],
+  ])('does not present coverage evidence as business record count (Chinese=%s)', async (isZh, expected) => {
+    mount({ isZh })
+    await flush()
+    expect(q('.archive-recovery__entry-meta')?.textContent).toBe(expected)
+  })
+  it('wires manual completion to catalog rediscovery without starting a restore', async () => {
+    const captureArchive = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))
+    const readCapture = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))
+    const ctx = mount({ captureArchive, readCapture, sheetName: 'Projects' })
+    await flush()
+    await confirmManual()
+    q('[data-test="manual-archive-submit"]')!.click()
+    await flush()
+    expect(captureArchive).toHaveBeenCalledTimes(1)
+    expect(ctx.listCatalog).toHaveBeenCalledTimes(2)
+    expect(ctx.executeArchive).not.toHaveBeenCalled()
+    expect(ctx.acceptJob).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(q('[data-test="manual-archive-status"]')?.textContent).toContain('available for recovery'))
+  })
+  it.each([
+    ['RECOVERY_ARCHIVE_CATALOG_DISABLED', 'Archive recovery is not enabled.'],
+    ['RECOVERY_ARCHIVE_PREVIEW_DISABLED', 'Archive recovery is not enabled.'],
+    ['RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED', 'Archive recovery is not enabled.'],
+    ['RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE', 'The archive recovery service is not ready.'],
+    ['RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE', 'The archive recovery service is not ready.'],
+    ['RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE', 'Archive recovery scope is not configured for this sheet.'],
+    ['RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID', 'Archive recovery data is currently unavailable.'],
+    ['RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID', 'Archive recovery data is currently unavailable.'],
+    ['RECOVERY_ARCHIVE_RESTORE_JOB_PERSISTENCE_INVALID', 'Archive recovery data is currently unavailable.'],
+    ['UNRECOGNIZED_DISABLED', 'Archive recovery is currently unavailable.'],
+  ])('classifies %s without rendering raw server evidence', async (code, expected) => {
+    const props = mount({ listJobs: vi.fn().mockRejectedValue({ status: 503, code, message: 'PRIVATE_PROVIDER_DETAIL' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe(expected)
+    expect(document.body.textContent).not.toContain('PRIVATE_PROVIDER_DETAIL')
+    expect(document.body.textContent).not.toContain(code)
+    expect(props.listCatalog).not.toHaveBeenCalled()
+    expect(props.executeArchive).not.toHaveBeenCalled()
+    expect(props.acceptJob).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [401, 'Sign in again to access archive recovery.'],
+    [403, 'You do not have archive recovery permission.'],
+    [404, 'The recovery point or job was not found.'],
+    [409, 'Recovery state changed. Refresh and try again.'],
+  ])('preserves HTTP %s precedence over an archive diagnostic', async (status, expected) => {
+    mount({ listJobs: vi.fn().mockRejectedValue({ status, code: 'RECOVERY_ARCHIVE_CATALOG_DISABLED' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe(expected)
+  })
+
+  it('does not classify arbitrary code substrings as archive readiness facts', async () => {
+    mount({ listJobs: vi.fn().mockRejectedValue({ code: 'HOST_PRIVATE_UNAVAILABLE', message: 'PRIVATE_PROVIDER_DETAIL' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe('Archive recovery request failed.')
+  })
+
+  it('shows localized disabled copy and an accessible read-only refresh control', async () => {
+    mount({ isZh: true, listJobs: vi.fn().mockRejectedValue({ status: 503, code: 'RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED' }) })
+    await flush()
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe('归档恢复尚未启用。')
+    const refresh = q('[data-test="archive-recovery-recheck"]')!
+    expect(refresh.getAttribute('aria-label')).toBe('重新检查归档恢复')
+    expect(refresh.getAttribute('title')).toBe('重新检查归档恢复')
+  })
+
+  it('rechecks discovery after failure, serializes clicks, and never starts a recovery write', async () => {
+    let resolveRetry!: (value: RecoveryArchiveJobPage) => void
+    const listJobs = vi.fn()
+      .mockRejectedValueOnce({ status: 503, code: 'RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED' })
+      .mockImplementationOnce(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveRetry = resolve }))
+    const props = mount({ listJobs })
+    await flush()
+    const refresh = q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement
+    refresh.click()
+    refresh.click()
+    await flush()
+    expect(refresh.disabled).toBe(true)
+    expect(listJobs).toHaveBeenCalledTimes(2)
+    expect(props.listCatalog).not.toHaveBeenCalled()
+    resolveRetry({ entries: [jobSnapshot('paused_retryable')], nextCursor: null })
+    await flush()
+    expect(q('[data-test="archive-recovery-job-state"]')?.textContent).toBe('Paused and resumable')
+    expect(props.listCatalog).not.toHaveBeenCalled()
+    expect(props.previewArchive).not.toHaveBeenCalled()
+    expect(props.executeArchive).not.toHaveBeenCalled()
+    expect(props.acceptJob).not.toHaveBeenCalled()
+    expect(props.resumeJob).not.toHaveBeenCalled()
+    expect(props.cancelJob).not.toHaveBeenCalled()
+  })
+
+  it('rechecks jobs before retrying a failed catalog and distinguishes an empty result', async () => {
+    const listCatalog = vi.fn().mockRejectedValueOnce({ status: 503, code: 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID' })
+      .mockResolvedValueOnce({ entries: [], nextCursor: null })
+    const props = mount({ listCatalog })
+    await flush()
+    expect(q('[data-test="archive-recovery-catalog-error"]')?.textContent).toBe('Archive recovery data is currently unavailable.')
+    ;(q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).click()
+    await flush()
+    expect(props.listJobs).toHaveBeenCalledTimes(2)
+    expect(listCatalog).toHaveBeenCalledTimes(2)
+    expect(props.listJobs.mock.invocationCallOrder[1]).toBeLessThan(listCatalog.mock.invocationCallOrder[1])
+    expect(q('[data-test="archive-recovery-empty"]')?.textContent).toBe('No archive recovery points are available.')
+    expect(q('[data-test="archive-recovery-catalog-error"]')).toBeFalsy()
+  })
+
+  it('invalidates an executable preview and confirmation before rediscovering a job', async () => {
+    const listJobs = vi.fn().mockResolvedValueOnce({ entries: [], nextCursor: null })
+      .mockResolvedValueOnce({ entries: [jobSnapshot('planned')], nextCursor: null })
+    const props = mount({ listJobs })
+    await flush()
+    ;(q(`[data-test="archive-recovery-entry-${generationId}"]`) as HTMLButtonElement).click()
+    await flush()
+    ;(q('[data-test="archive-recovery-request-preview"]') as HTMLButtonElement).click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    ;(q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).click()
+    await flush()
+    expect(q('[data-test="archive-recovery-execute"]')).toBeFalsy()
+    expect(q('[data-test="archive-recovery-preview-area"]')).toBeFalsy()
+    expect(q('[data-test="archive-recovery-job-state"]')?.textContent).toBe('Queued')
+    expect(props.executeArchive).not.toHaveBeenCalled()
+  })
+
+  it('discards an old refresh reply after switching sheets', async () => {
+    let resolveRetry!: (page: RecoveryArchiveJobPage) => void
+    const listJobs = vi.fn().mockRejectedValueOnce({ status: 503 })
+      .mockImplementationOnce(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveRetry = resolve }))
+      .mockResolvedValue({ entries: [], nextCursor: null })
+    const props = mount({ listJobs })
+    await flush()
+    ;(q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).click()
+    await flush()
+    props.sheetId.value = 'sheet_2'
+    await flush()
+    resolveRetry({ entries: [jobSnapshot('planned')], nextCursor: null })
+    await flush()
+    expect(q('[data-test="archive-recovery-job"]')).toBeFalsy()
+    expect(props.listCatalog).toHaveBeenCalledTimes(1)
+    expect(props.listCatalog).toHaveBeenCalledWith('sheet_2', { limit: 50 })
+    expect(props.acceptJob).not.toHaveBeenCalled()
+  })
+
+  it('ignores a late catalog error after closing and reopens through job discovery', async () => {
+    let rejectCatalog!: (error: unknown) => void
+    const listCatalog = vi.fn().mockImplementationOnce(() => new Promise<RecoveryArchiveCatalogPage>((_resolve, reject) => { rejectCatalog = reject }))
+      .mockResolvedValueOnce({ entries: [], nextCursor: null })
+    const props = mount({ listCatalog })
+    await flush()
+    expect((q('[data-test="archive-recovery-recheck"]') as HTMLButtonElement).disabled).toBe(true)
+    ;(q('.archive-recovery__close') as HTMLButtonElement).click()
+    await flush()
+    rejectCatalog({ status: 503, code: 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID' })
+    await flush()
+    expect(q('[data-test="archive-recovery-catalog-error"]')).toBeFalsy()
+    props.visible.value = false
+    await flush()
+    props.visible.value = true
+    await flush()
+    expect(props.listJobs).toHaveBeenCalledTimes(2)
+    expect(q('[data-test="archive-recovery-empty"]')?.textContent).toBe('No archive recovery points are available.')
+  })
+
   it('rediscovers the newest durable job after a full reload and resumes status polling without an action', async () => {
     vi.useFakeTimers()
     const listJobs = vi.fn(async (): Promise<RecoveryArchiveJobPage> => ({
@@ -470,6 +797,21 @@ describe('RecoveryArchiveModal', () => {
     expect(props.onRefresh).toHaveBeenCalledTimes(1)
     expect(q('[data-test="archive-recovery-job-outcome"]')?.textContent).toContain('Only part of the job was applied')
   })
+
+  it.each([[false, 'Attachment recovery is not supported yet'], [true, '当前暂不支持恢复附件']] as const)(
+    'explains unsupported attachments without offering execution (Chinese=%s)', async (isZh, expected) => {
+      const props = mount({ isZh, previewArchive: vi.fn(async () => ({ ...syncPreview(),
+        executable: false, previewIdentity: null, blockedReason: 'unsupported_attachments' })) })
+      await flush()
+      q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+      await flush()
+      q('[data-test="archive-recovery-request-preview"]')!.click()
+      await flush()
+      expect(q('[data-test="archive-recovery-blocked"]')?.textContent).toContain(expected)
+      expect(q('[data-test="archive-recovery-execute"]')).toBeFalsy()
+      expect(props.executeArchive).not.toHaveBeenCalled()
+    },
+  )
 
   it('does not offer execution when the server withholds the preview identity', async () => {
     const props = mount({ previewArchive: vi.fn(async () => identityMissingPreview()) })

@@ -438,7 +438,10 @@ describe('multitable formula editor', () => {
     expect(renderedTitles).toContain('输入字段名称后可添加')
     // 15 (was 14): r8-B's 放大/缩小 toggle carries a localized title alongside its aria-label.
     expect(renderedTitles).toContain('放大配置区')
-    expect(renderedTitles).toHaveLength(15)
+    // 17 (was 15): feedback B put a drag grip on every field row (2 fields here), each carrying the
+    // localized drag-to-reorder hint. Pin the TEXT, not just the count, for the same reason as above.
+    expect(renderedTitles).toContain('拖动排序')
+    expect(renderedTitles).toHaveLength(17)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(3)
 
     app.unmount()

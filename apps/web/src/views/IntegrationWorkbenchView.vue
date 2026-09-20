@@ -71,6 +71,7 @@
       :is-data-source-bridge-kind="isDataSourceBridgeKind"
       :on-bridge-data-source-change="onBridgeDataSourceChange"
       :bridge-data-sources="bridgeDataSources"
+      :on-data-sources-changed="refreshBridgeDataSourcesAfterPanelChange"
       :bridge-data-source-objects-loading="bridgeDataSourceObjectsLoading"
       :bridge-data-source-object-options="bridgeDataSourceObjectOptions"
       :bridge-data-source-objects-error="bridgeDataSourceObjectsError"
@@ -384,6 +385,11 @@
       :bi="bi"
       :run-row-summaries="runRowSummaries"
       :is-run-expanded="isRunExpanded"
+      :run-detail-id="runDetailId"
+      :run-detail-loading="runDetailLoading"
+      :run-detail-error="runDetailError"
+      :run-detail="runDetail"
+      :run-detail-payload-text="runDetailPayloadText"
       :dead-letter-error-label="deadLetterErrorLabel"
       :dead-letter-error-hint="deadLetterErrorHint"
       :is-dead-letter-replayable="isDeadLetterReplayable"
@@ -397,6 +403,8 @@
       :row-provenance-attrs-summary="rowProvenanceAttrsSummary"
       :refresh-pipeline-observation="refreshPipelineObservation"
       :toggle-run-summaries="toggleRunSummaries"
+      :open-run-detail="openRunDetail"
+      :close-run-detail="closeRunDetail"
       :request-replay="requestReplay"
       :cancel-replay="cancelReplay"
       :replay-dead-letter="replayDeadLetter"
@@ -434,7 +442,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import PageShell from '../components/layout/PageShell.vue'
@@ -442,6 +451,7 @@ import PageHeader from '../components/layout/PageHeader.vue'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
+import { resolveWorkbenchLandingGroupId, WORKBENCH_SECTION_GROUP_IDS } from './integrationWorkbenchLanding'
 import type { DataSourceListItem, DataSourceSchemaInfo, DataSourceTableInfo } from '../data-sources/types'
 import {
   canReadFromSystem,
@@ -460,6 +470,7 @@ import {
   isIntegrationScopedProjectId,
   normalizeIntegrationProjectId,
   getExternalSystemSchema,
+  getIntegrationRun,
   getPlmDataSourceCapabilities,
   installIntegrationStaging,
   integrationApiErrorCode,
@@ -684,20 +695,9 @@ const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
   { id: 'bridge-agent', label: bi('Bridge Agent 观测', 'Bridge Agent'), targetId: 'int-sec-bridge-agent' },
 ])
 
-const sectionGroupIds: Record<string, string> = {
-  'int-sec-hub-overview': 'hub-overview',
-  'int-sec-connection': 'connection',
-  'int-sec-read-source': 'read-source',
-  'int-sec-combination-config': 'combination',
-  'int-sec-combination-run': 'combination',
-  'int-sec-object-template': 'cleaning-mapping',
-  'int-sec-cleaning-dataset': 'cleaning-mapping',
-  'int-sec-cleaning-rules': 'cleaning-mapping',
-  'int-sec-run-push': 'run-push',
-  'int-sec-monitoring': 'monitoring',
-  'int-sec-preview': 'cleaning-mapping',
-  'int-sec-bridge-agent': 'bridge-agent',
-}
+// Shared with the deep-link landing resolver (views/integrationWorkbenchLanding.ts) so a new
+// section can never be observable-but-unlinkable, or linkable-but-unobservable.
+const sectionGroupIds: Readonly<Record<string, string>> = WORKBENCH_SECTION_GROUP_IDS
 
 const activeRailGroupId = ref('hub-overview')
 let workbenchSectionObserver: IntersectionObserver | null = null
@@ -707,6 +707,33 @@ function scrollToRailGroup(group: IntegrationWorkbenchRailGroup): void {
   if (typeof document === 'undefined') return
   document.getElementById(group.targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
+
+// Deep-link landing (整合切片 2026-09-09). `/data-sources` now redirects to
+// `/integrations/workbench#int-sec-connection`, so the workbench has to honour an incoming
+// anchor itself: the sections are all rendered at once, and a browser's native anchor jump is
+// unreliable here because the section content mounts across several async bootstrap ticks.
+//
+// `useRoute()` returns undefined when this view is mounted without a router (several unit
+// specs do exactly that), so every read of it is optional — no router means no deep link,
+// which is the same no-op as an unrecognised anchor.
+const route = useRoute()
+
+function applyWorkbenchLanding(): void {
+  const groupId = resolveWorkbenchLandingGroupId(route)
+  if (!groupId) return
+  const group = railGroups.value.find((candidate) => candidate.id === groupId)
+  if (!group) return
+  scrollToRailGroup(group)
+}
+
+// Re-run while already on the page: clicking a `#int-sec-...` link from inside the workbench
+// changes the hash without remounting, so onMounted alone would never fire again.
+watch(
+  () => [route?.hash, route?.query?.section] as const,
+  () => {
+    void nextTick(applyWorkbenchLanding)
+  },
+)
 
 // 对接总览 -> 连接管理. The overview builds NO editor of its own: it hands the system id back here,
 // and the existing `editConnection` (the same function the inventory row's "编辑" button calls)
@@ -723,6 +750,11 @@ function openConnectionFromOverview(systemId: string): void {
 }
 
 onMounted(() => {
+  // After nextTick so the target section element exists in the DOM to scroll to. Ordered
+  // BEFORE the observer setup below only for readability — the observer's own callback can
+  // still overwrite the highlight later, which is correct: once the operator scrolls, scroll
+  // position is the truth.
+  void nextTick(applyWorkbenchLanding)
   if (typeof document === 'undefined' || typeof IntersectionObserver === 'undefined') return
   const elements = Object.keys(sectionGroupIds)
     .map((id) => document.getElementById(id))
@@ -880,6 +912,17 @@ function deadLetterErrorHint(deadLetter: IntegrationDeadLetter): string | null {
   return integrationErrorCodeHint(deadLetter.errorCode, locale.value)
 }
 const expandedRunIds = ref<Set<string>>(new Set())
+// SC-04 (read-only): single-run detail dialog state. `runDetailId` doubles as the open/closed
+// flag ('' = closed) so there is exactly ONE source of truth for "which run is open" — a separate
+// boolean could disagree with the id after a fast open→open→close sequence. The fetched run is
+// kept apart from `pipelineRuns` so a refresh of the list never silently rewrites the open dialog.
+const runDetailId = ref('')
+const runDetailLoading = ref(false)
+const runDetailError = ref('')
+const runDetail = ref<IntegrationPipelineRun | null>(null)
+// Monotonic request token: a second 详情 click while the first GET is still in flight must not let
+// the slower answer paint over the newer one.
+let runDetailRequestId = 0
 // DF-N2-3 (read-only): per-dead-letter cross-run provenance timeline, fetched lazily
 // on expand by the row's idempotency key (rowId). No write/replay affordance here.
 const expandedDeadLetterProvenanceIds = ref<Set<string>>(new Set())
@@ -955,18 +998,68 @@ const bridgeDataSourceObjectOptions = ref<BridgeDataSourceObjectOption[]>([])
 const bridgeDataSourceObjectsLoading = ref(false)
 const bridgeDataSourceObjectsError = ref('')
 let bridgeDataSourceObjectRequestId = 0
+// F04 — the LIST read's own ticket, the same shape `bridgeDataSourceObjectRequestId` gives the
+// schema read below. Two loads can be in flight at once (a panel change refreshes while the
+// picker's first-open load is still out), and without a ticket the slower one wins by landing
+// last — painting the pre-change list over the post-change one.
+let bridgeDataSourcesRequestId = 0
 const plmCapabilitiesBySystemId = ref<Record<string, PlmIntegrationCapabilitiesResult>>({})
 const plmCapabilitiesLoadingSystemIds = ref<Set<string>>(new Set())
 const isDataSourceBridgeKind = computed(() => connectionDraft.kind === DATA_SOURCE_BRIDGE_KIND)
 
 async function loadBridgeDataSources(): Promise<void> {
   if (bridgeDataSourcesLoaded.value) return
+  const requestId = ++bridgeDataSourcesRequestId
   try {
-    bridgeDataSources.value = await listDataSources()
+    const list = await listDataSources()
+    // Superseded by a newer load — drop this answer entirely (list AND the loaded flag), so the
+    // newer one decides what the picker shows and whether it is allowed to short-circuit.
+    if (requestId !== bridgeDataSourcesRequestId) return
+    bridgeDataSources.value = list
     bridgeDataSourcesLoaded.value = true
   } catch (error) {
+    // Same rule for the failure: a stale error must not overwrite a newer attempt's state.
+    if (requestId !== bridgeDataSourcesRequestId) return
     bridgeDataSourcesError.value = formatWorkbenchConnectionError(error, 'bridge-data-sources')
   }
+}
+
+// The embedded 外接数据源 panel (IntegrationConnectionSection) just created / updated / rotated
+// / deleted a source, so the picker's cached list is stale. `bridgeDataSourcesLoaded` is a
+// first-open optimisation, NOT a refresh policy — clear it so this reload actually happens,
+// and clear the previous attempt's error so a recovered load stops rendering a dead message.
+async function refreshBridgeDataSourcesAfterPanelChange(): Promise<void> {
+  bridgeDataSourcesLoaded.value = false
+  bridgeDataSourcesError.value = ''
+  await loadBridgeDataSources()
+  pruneConnectionDraftDataSourceReference()
+}
+
+/**
+ * 终审 (2026-09-09) — the panel above can also DELETE the very source the draft below references.
+ * Refreshing the list alone left the draft pointing at an id that no longer exists: the picker
+ * still SHOWED the deleted name (the <select> keeps a value with no matching <option>) while the
+ * object list underneath it was whatever the dead source had returned. Saving that draft would
+ * post a dangling connectionId and fail at the server with a 「不存在」 the operator has no way
+ * to connect to what they just did.
+ *
+ * So: clear the reference AND its object selection, and cancel any in-flight schema read
+ * (clearBridgeDataSourceObjects bumps the object ticket). `canSaveConnectionDraft` then reads
+ * false on its own — no separate save-time rule to keep in sync.
+ */
+function pruneConnectionDraftDataSourceReference(): void {
+  // Only ever act on a list this page actually re-read. A FAILED reload keeps the previous list
+  // and sets an error (loadBridgeDataSources above), and throwing away an operator's draft on the
+  // strength of a read that did not land would be a worse bug than the one this fixes.
+  if (!bridgeDataSourcesLoaded.value) return
+  const referenced = connectionDraft.connectionId.trim()
+  if (!referenced) return
+  if (bridgeDataSources.value.some((item) => item.id === referenced)) return
+  connectionDraft.connectionId = ''
+  connectionDraft.dataSourceObject = ''
+  clearBridgeDataSourceObjects()
+  // Values-free: names the situation, not the deleted source's id/host/credentials.
+  setStatus('草稿引用的外接数据源已不在列表里（已删除或不可见），已清空 connectionId 与对象选择；请重新选一个数据源。', 'error')
 }
 
 // Lazy: only fetch the data-source list when the operator actually picks the bridge kind.
@@ -1996,16 +2089,16 @@ function rawErrorMessage(error: unknown): string {
 function friendlyConnectionErrorMessage(message: string): string {
   const text = message || ''
   if (/Data source with id ['"][^'"]+['"] not found|ExternalSystemNotFound|DATA_SOURCE_NOT_FOUND|external system .*not found/i.test(text)) {
-    return '引用的连接或数据源不存在、已删除，或不属于当前账号/工作区；请重新选择 /data-sources 连接并保存。'
+    return '引用的连接或数据源不存在、已删除，或不属于当前账号/工作区；请在上方「外接数据源」面板里确认后重新选择连接并保存。'
   }
   if (/^(?:401|403)(?:\s|$)|DATA_SOURCE_PRINCIPAL_REQUIRED|owner principal|principal required|missing principal|unauthori[sz]ed|forbidden|access denied|permission|无权|权限/i.test(text)) {
-    return '当前账号无权读取该连接或 schema；请确认登录账号、tenant/workspace、以及 /data-sources 权限。'
+    return '当前账号无权读取该连接或 schema；请确认登录账号、tenant/workspace、以及上方「外接数据源」面板的权限。'
   }
   if (/object required|missing object|object not found|table not found|unknown object|unknown table|relation .*does not exist|找不到.*(?:对象|表|视图)/i.test(text)) {
     return '找不到当前对象/表/视图；请重新加载对象列表并选择仍存在的对象。'
   }
   if (/not found|不存在|已删除/i.test(text)) {
-    return '引用的连接或数据源不存在、已删除，或不属于当前账号/工作区；请重新选择 /data-sources 连接并保存。'
+    return '引用的连接或数据源不存在、已删除，或不属于当前账号/工作区；请在上方「外接数据源」面板里确认后重新选择连接并保存。'
   }
   if (/schema blocked|schema unavailable|empty schema|no columns|columns?|schema|列信息/i.test(text)) {
     return '无法读取 schema/列信息；请检查数据源权限、schema 可见性或数据库驱动返回。'
@@ -2031,7 +2124,7 @@ function sqlServerConnectionErrorSummary(message: string): string {
 
 function workbenchConnectionErrorPrefix(context: WorkbenchConnectionErrorContext, side?: WorkbenchSide): string {
   const label = side === 'target' ? '目标' : '来源'
-  if (context === 'bridge-data-sources') return '加载 /data-sources 连接失败'
+  if (context === 'bridge-data-sources') return '加载「外接数据源」连接失败'
   if (context === 'bridge-schema') return '加载 SQL 表/视图失败'
   if (context === 'test') return `${label}连接测试失败`
   if (context === 'schema') return `加载${label} schema 失败`
@@ -3383,6 +3476,71 @@ function toggleRunSummaries(runId: string): void {
   expandedRunIds.value = next
 }
 
+// SC-04 (read-only): one run's detail, fetched on demand from GET /api/integration/runs/:runId.
+// Observation only — no replay/retry/write affordance is added here. The dialog reads the SINGLE
+// read rather than the already-listed row on purpose: the list is capped at 5 and status/finishedAt
+// move after a run starts, so the detail must be able to show state the cached list row predates.
+function closeRunDetail(): void {
+  runDetailId.value = ''
+  runDetail.value = null
+  runDetailError.value = ''
+  runDetailLoading.value = false
+  // Bump the token so an answer still in flight cannot re-open a dialog the user just closed.
+  runDetailRequestId += 1
+}
+
+// Branch on the machine-readable CODE, never on the server's prose: a re-worded message or a
+// backend running under another locale must not make these two states fall through to the raw
+// message (the same failure mode as the PG-locale English-prose guards). Anything else keeps the
+// server message, which parseIntegrationResponse already produced.
+function runDetailErrorCopy(error: unknown): string {
+  const code = integrationApiErrorCode(error)
+  if (code === 'RUN_NOT_FOUND') {
+    return bi(
+      '运行不存在或不可见（可能属于其它租户/工作区，或已被清理）。',
+      'This run does not exist or is not visible in your scope.',
+    )
+  }
+  if (code === 'RUN_READ_NOT_IMPLEMENTED') {
+    return bi(
+      '当前版本未启用单条运行详情读取。',
+      'Single-run detail read is not enabled in this version.',
+    )
+  }
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function openRunDetail(runId: string): Promise<void> {
+  if (!runId) return
+  runDetailRequestId += 1
+  const requestId = runDetailRequestId
+  runDetailId.value = runId
+  runDetail.value = null
+  runDetailError.value = ''
+  runDetailLoading.value = true
+  try {
+    // Same scope the list query used — currentScope() is the single source for both, so the
+    // detail can never be looked up in a workspace the row was not listed under.
+    const run = await getIntegrationRun(runId, currentScope())
+    if (requestId !== runDetailRequestId) return
+    runDetail.value = run
+  } catch (error) {
+    if (requestId !== runDetailRequestId) return
+    runDetailError.value = runDetailErrorCopy(error)
+  } finally {
+    if (requestId === runDetailRequestId) runDetailLoading.value = false
+  }
+}
+
+// details is the run's JSONB as persisted; it is rendered read-only as pretty JSON (the same
+// affordance the row-level results already use) and nothing here can edit or resubmit it.
+// '' means "loaded but carries no detail payload" — the dialog's empty state.
+const runDetailPayloadText = computed(() => {
+  const details = runDetail.value?.details
+  if (!details || typeof details !== 'object' || Object.keys(details).length === 0) return ''
+  return JSON.stringify(details, null, 2)
+})
+
 // DF-N2-3 (read-only): a dead-letter's row (idempotency key) is the only typed rowId
 // in this panel. Expanding fetches that row's cross-run provenance timeline once via
 // the DF-N2-2c by-rowId GET; pipelineId is passed to avoid cross-pipeline key
@@ -4147,7 +4305,16 @@ async function previewPayload(): Promise<void> {
 }
 
 onMounted(() => {
-  void refreshBootstrap()
+  // F01 — landing compensation. The first pass (the other onMounted, above) runs on the mount
+  // tick, when the section a deep link names is still rendering content this read has not
+  // delivered yet, so its offset can move under the scroll. Re-apply ONCE after the read settles.
+  // `.finally` because a failed bootstrap still changes the page's height; refreshBootstrap
+  // handles its own errors and never rejects, so nothing is swallowed here.
+  //
+  // Deliberately NOT a scroll state machine: applyWorkbenchLanding is a no-op unless the route
+  // actually names a landing, so an ordinary visit to /integrations/workbench never scrolls, and
+  // a deep link scrolls to the same target twice rather than to two different places.
+  void refreshBootstrap().finally(() => { void nextTick(applyWorkbenchLanding) })
 })
 
 watch(showAdvancedConnectors, () => {

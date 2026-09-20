@@ -2,20 +2,46 @@ import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { Injector } from '@wendellhu/redi'
-import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
+import {
+  ICommentService,
+  type CommentAddressRecord,
+  type CommentInboxRowDenySheet,
+  type CommentInboxScope,
+  type CommentQueryOptions,
+} from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
 import { apiTokenWriteRateLimit } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { poolManager } from '../integration/db/connection-pool'
-import { loadDeniedRecordIds, loadRowLevelReadDenyEnabled, resolveSheetReadableCapabilities } from '../multitable/permission-service'
+import { resolveRequestAccess, type ResolvedRequestAccess } from '../multitable/access'
+import { isApprovalProjectionBaseId } from '../multitable/approval-projection-constants'
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
+import {
+  canAccessElearningProjectionSheet,
+  loadElearningProjectionSheetOrgMap,
+} from '../multitable/elearning-projection-access'
+import {
+  filterReadableSheetRowsForAccess,
+  loadDeniedRecordIds,
+  loadRowLevelReadDenyEnabled,
+  resolveSheetReadableCapabilities,
+  type QueryFn,
+} from '../multitable/permission-service'
+import { loadSheetLivenessBatch } from '../multitable/sheet-liveness'
+import { sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   CommentAccessError,
   CommentConflictError,
   CommentNotFoundError,
   CommentValidationError,
 } from '../services/CommentService'
+import {
+  MENTION_CANDIDATES_MAX_ITEMS,
+  MENTION_CANDIDATES_MIN_QUERY_LENGTH,
+} from '../services/comment-mention-bounds'
+import type { CommentMentionCandidate } from '../di/identifiers'
 
 const logger = new Logger('CommentsRoutes')
 const DEFAULT_LIMIT = 50
@@ -125,32 +151,235 @@ function respondCommentError(res: Response, error: unknown, fallbackMessage: str
  *
  * SCOPE: this gates the routes that take an explicit `spreadsheetId`/`containerId` (the enumerable,
  * attacker-supplied surface — list/summary/presence/mention-candidates/mention-summary read + create/
- * mark-read/mark-all-read write). NOT gated here (distinct mechanism, tracked as follow-up): the
- * `:commentId`-addressed mutations (patch/delete/read/reactions/resolve — would need a per-comment
- * sheet-id lookup) and the user-scoped cross-sheet `inbox`/`unread-count` aggregates (would need result
- * filtering by the actor's readable-sheet set, not a single-sheet 403).
+ * mark-read/mark-all-read write) and, through `resolveCommentIdContext` (#5831), the `:commentId`-
+ * addressed routes (patch/delete/read/reactions/resolve), which gate on the sheet the COMMENT lives on.
+ * The user-scoped cross-sheet `inbox`/`unread-count` aggregates name no sheet, so they cannot answer
+ * with a single-sheet 403; they are FILTERED instead (#5831 part B, `resolveCommentInboxScope`): only
+ * comments on sheets this gate would let the caller read, that are live, and — on a sheet with row-level
+ * read deny on — on rows the scope CHECKED and found allowed (a row it never checked is left out).
  */
 type CommentReadContext = {
   userId: string
+  /**
+   * #5808: the id `resolveRequestAccess` derived from `req.user` ONLY — empty when there is no
+   * authenticated user. Unlike `userId` it never falls back to the `x-user-id` header, so it is the
+   * only id allowed to decide whose comments get mention labels.
+   */
+  authenticatedUserId: string
   deniedRowIds: Set<string>
 }
 
-async function resolveCommentReadContext(req: Request, res: Response, spreadsheetId: string): Promise<CommentReadContext | null> {
+/**
+ * The one "not permitted" answer of the comment surface. #5831: a comment-id route gives this SAME body
+ * for an unknown comment id, a comment on a sheet the caller cannot read and a comment on a row the
+ * caller is denied, so the comment-id routes answer no "does this comment exist?" question. (This
+ * router's other comment-id input, `parentId` on POST /api/comments, gives one answer for an unknown
+ * parent and a parent outside the caller's record thread — see CommentService.createComment.)
+ */
+const COMMENT_ACCESS_FORBIDDEN_MESSAGE = 'Not permitted to access comments on this sheet'
+
+/**
+ * @param denyScopeRowIds #5831 — when given, the row-level read deny is evaluated for THESE rows only
+ *   (loadDeniedRecordIds' `recordIds` bound), so the returned `deniedRowIds` answers for them alone and
+ *   must not be used as the sheet's deny set. Only the single-comment gate (`resolveCommentIdContext`)
+ *   passes it — a one-comment action must not scan a large sheet's rows. Every sheet-addressed route
+ *   omits it: its list/summary/mark-read filters need the complete set.
+ */
+async function resolveCommentReadContext(
+  req: Request,
+  res: Response,
+  spreadsheetId: string,
+  denyScopeRowIds?: readonly string[],
+): Promise<CommentReadContext | null> {
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
-  const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
+  const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
   if (!capabilities.canRead) {
-    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not permitted to access comments on this sheet' } })
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
+    return null
+  }
+  // Sheet liveness, AFTER the read gate (a caller who may not read the sheet gets the same 403 whether
+  // it is live or soft-deleted — no liveness oracle). Comments are stored by `spreadsheet_id` and never
+  // join `meta_sheets`, so without this every comment route kept reading and writing a DELETED sheet's
+  // threads: list/summary/presence served them, create added new ones. Every sheet-addressed comment
+  // route passes through here. (Sheet-liveness closed world: tests/unit/
+  // multitable-sheet-liveness-closure-all-routes.guard.test.ts.)
+  if (sheetLiveness !== 'live') {
+    sendSheetNotLive(res, sheetLiveness)
     return null
   }
 
   const deniedRowIds = new Set<string>()
   if (!access.isAdminRole && await loadRowLevelReadDenyEnabled(query, spreadsheetId)) {
-    for (const rowId of await loadDeniedRecordIds(query, spreadsheetId, access.userId)) {
+    for (const rowId of await loadDeniedRecordIds(query, spreadsheetId, access.userId, denyScopeRowIds)) {
       deniedRowIds.add(rowId)
     }
   }
-  return { userId: access.userId || getUserId(req), deniedRowIds }
+  return { userId: access.userId || getUserId(req), authenticatedUserId: access.userId || '', deniedRowIds }
+}
+
+type CommentIdContext = CommentReadContext & { address: CommentAddressRecord }
+
+/**
+ * #5831 — the gate of every `:commentId`-addressed route. Those routes name no sheet, so the comment's
+ * OWN sheet (its stored `spreadsheet_id`, never a sheet id from the request) is looked up first and then
+ * put through exactly the sheet-addressed gate above: capability 403, then the liveness 404, then the
+ * row-level read deny.
+ *
+ * NO EXISTENCE ORACLE: an unknown comment id, a comment on a sheet the caller cannot read and a comment
+ * on a row the caller is denied all get the same 403 body. 403 (not 404) because the sheet gate answers a
+ * caller without read access with 403 — and the closed-world guard requires that 403 to come before the
+ * liveness 404 — so an unknown id has to look like that. A caller who CAN read the sheet still learns
+ * that it was deleted (404 SHEET_DELETED), exactly as on the sheet-addressed routes.
+ *
+ * The row deny is evaluated for the comment's own row only (`[address.rowId]`), so the context's
+ * `deniedRowIds` covers that row alone; the comment-id routes never use it as a sheet-wide set.
+ */
+async function resolveCommentIdContext(
+  req: Request,
+  res: Response,
+  commentService: ICommentService,
+  commentId: string,
+): Promise<CommentIdContext | null> {
+  const address = await commentService.getCommentAddress(commentId)
+  if (!address) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
+    return null
+  }
+  const context = await resolveCommentReadContext(req, res, address.spreadsheetId, [address.rowId])
+  if (!context) return null
+  if (isRowDenied(context, address.rowId)) {
+    res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
+    return null
+  }
+  return { ...context, address }
+}
+
+/**
+ * #5831 part B — the readable subset of `liveSheetIds` for the cross-sheet aggregates, by the rule the
+ * sheet gate above applies to ONE sheet (resolveSheetReadableCapabilities → resolveSheetCapabilitiesForAccess),
+ * computed once for the whole set. `filterReadableSheetRowsForAccess` is that rule for a list — the sheet
+ * and base list routes use it: sheet grants over the global codes, approval-projection sheets only for
+ * their participants, e-learning projection sheets only for their org. It lets an ADMIN through before
+ * its e-learning check, which the single-sheet gate does not (restrictElearningProjectionCapabilities
+ * applies to admins too), so for an admin that one check is repeated here with the gate's own two
+ * helpers — otherwise an admin's inbox could list a comment whose `/read` answers 403.
+ */
+async function resolveInboxReadableSheetIds(
+  query: QueryFn,
+  access: ResolvedRequestAccess,
+  liveSheetIds: string[],
+): Promise<string[]> {
+  const readable = (await filterReadableSheetRowsForAccess(query, liveSheetIds.map((id) => ({ id })), access))
+    .map((row) => row.id)
+  if (!access.isAdminRole || readable.length === 0) return readable
+  const elearningOrgBySheet = await loadElearningProjectionSheetOrgMap(query, readable)
+  return readable.filter((id) => !elearningOrgBySheet.has(id)
+    || canAccessElearningProjectionSheet(access, id, elearningOrgBySheet.get(id) ?? null))
+}
+
+/**
+ * #5831 part B — `loadRowLevelReadDenyEnabled` (permission-service) for a SET of sheets in ONE round trip:
+ * the same columns and the same rule (an approval-projection sheet is always row-gated, otherwise the
+ * per-sheet flag), so the inbox and the single-sheet gate agree on which sheets carry the deny. Returns
+ * the subset of `sheetIds` that do. Pre-feature absence of the table/column means "off" everywhere, as in
+ * the single-sheet helper; any other error propagates to the route catch (500, never a serve).
+ */
+async function loadInboxRowDenySheetIds(query: QueryFn, sheetIds: readonly string[]): Promise<string[]> {
+  const ids = [...new Set(sheetIds.filter((id) => typeof id === 'string' && id.length > 0))]
+  if (ids.length === 0) return []
+  try {
+    const result = await query(
+      'SELECT id, row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets WHERE id = ANY($1::text[])',
+      [ids],
+    )
+    const enabled = new Set<string>()
+    for (const row of result.rows as Array<{ id?: unknown; enabled?: unknown; base_id?: unknown } | undefined>) {
+      if (!row || typeof row.id !== 'string') continue
+      if (isApprovalProjectionBaseId(typeof row.base_id === 'string' ? row.base_id : null) || row.enabled === true) {
+        enabled.add(row.id)
+      }
+    }
+    return ids.filter((id) => enabled.has(id))
+  } catch (err) {
+    if (isUndefinedTableError(err, 'meta_sheets') || isUndefinedColumnError(err, 'row_level_read_permissions_enabled')) {
+      return []
+    }
+    throw err
+  }
+}
+
+/**
+ * #5831 part B — WHICH comments the cross-sheet aggregates (GET /api/comments/inbox and GET
+ * /api/comments/unread-count) may list and count for the caller: the ones a comment-id route would let
+ * the same caller act on, so every listed item can be marked read.
+ *
+ *  - IDENTITY: the authenticated user only (`resolveRequestAccess`, i.e. `req.user`), never the
+ *    `x-user-id` header. No authenticated user ⇒ an empty scope: nothing is listed and no query runs.
+ *  - LIVE: sheets whose `meta_sheets` row exists and is not soft-deleted (loadSheetLivenessBatch, the
+ *    batched twin of the gate's loadSheetLiveness). Admins included, as on the sheet-addressed routes.
+ *  - READABLE: resolveInboxReadableSheetIds, the gate's read rule for the whole set.
+ *  - ROW DENY: for a non-admin, every readable live sheet with row-level read deny switched on
+ *    (loadInboxRowDenySheetIds, the batched twin of the gate's loadRowLevelReadDenyEnabled) goes into
+ *    the scope as a row-deny sheet carrying its ALLOWED rows: the rows that hold a candidate comment for
+ *    this caller (listInboxCandidateRowIds — the bound handed to loadDeniedRecordIds, so it never
+ *    evaluates a whole sheet) minus the rows it denies. The service admits a comment on such a sheet
+ *    only on an allowed row, so a comment whose row was never checked here — one that arrived between
+ *    the candidate lookup and the count/page queries — is left out, not let in (a deny list would let
+ *    it in until the next request). Admins skip it, as on the sheet-addressed routes.
+ *
+ * The service applies the scope in SQL, in the WHERE of the COUNT and of the page query (before
+ * LIMIT/OFFSET), so `total`, the unread counts and the pages all agree with what is listed.
+ *
+ * COST, once per request: 1 query for the candidate sheets (the distinct sheets holding a comment by
+ * someone else that the caller has not read or is mentioned in), 1 liveness query, a fixed number of
+ * batched readable-set queries (independent of the number of sheets; one more for an admin), then, for
+ * a non-admin, 1 batched row-deny flag lookup and — only when at least one readable live sheet has row
+ * deny on — 1 query for their candidate rows plus one row-bounded loadDeniedRecordIds per such sheet.
+ */
+async function resolveCommentInboxScope(
+  req: Request,
+  commentService: ICommentService,
+): Promise<{ userId: string; scope: CommentInboxScope }> {
+  const access = await resolveRequestAccess(req)
+  const userId = access.userId
+  if (userId.trim().length === 0) return { userId: '', scope: { sheetIds: [], rowDenySheets: [] } }
+  const pool = poolManager.get()
+  const query = pool.query.bind(pool)
+  const candidateSheetIds = await commentService.listInboxCandidateSheetIds(userId)
+  const liveness = await loadSheetLivenessBatch(query, candidateSheetIds)
+  const liveSheetIds = candidateSheetIds.filter((sheetId) => liveness.get(sheetId) === 'live')
+  const readableSheetIds = await resolveInboxReadableSheetIds(query, access, liveSheetIds)
+  const rowDenySheets: CommentInboxRowDenySheet[] = []
+  if (!access.isAdminRole) {
+    const rowDenySheetIds = await loadInboxRowDenySheetIds(query, readableSheetIds)
+    const candidateRows = rowDenySheetIds.length > 0
+      ? await commentService.listInboxCandidateRowIds(userId, rowDenySheetIds)
+      : new Map<string, string[]>()
+    for (const sheetId of rowDenySheetIds) {
+      // Trimmed like the gate compares them (loadDeniedRecordIds trims its bound; the SQL compares btrim).
+      const rowIds = [...new Set((candidateRows.get(sheetId) ?? []).map((rowId) => rowId.trim()).filter((rowId) => rowId.length > 0))]
+      const denied = rowIds.length > 0 ? await loadDeniedRecordIds(query, sheetId, userId, rowIds) : new Set<string>()
+      rowDenySheets.push({ spreadsheetId: sheetId, allowedRowIds: rowIds.filter((rowId) => !denied.has(rowId)) })
+    }
+  }
+  return { userId, scope: { sheetIds: readableSheetIds, rowDenySheets } }
+}
+
+/** #5840 — the refusal for a mark-all-read that names someone other than the caller. Values-free. */
+const MARK_READ_OTHER_USER_MESSAGE = 'Comments can only be marked read for the signed-in user'
+
+/**
+ * #5808 — whose comments on a list page get `mentionLabels` (see CommentService.getComments). Only an
+ * interactive session caller's own comments, i.e. the comments the edit UI can open: an API-token
+ * request (`apiTokenId`, set by apiTokenAuth) gets none — the token surface cannot reach the mention
+ * search either, so labels there would be a new disclosure — and so does a request without an
+ * authenticated user id.
+ */
+function mentionLabelsAuthorFor(req: Request, context: CommentReadContext): string | undefined {
+  if (typeof req.apiTokenId === 'string' && req.apiTokenId.length > 0) return undefined
+  const authorId = context.authenticatedUserId.trim()
+  return authorId.length > 0 ? authorId : undefined
 }
 
 function isRowDenied(context: CommentReadContext, rowId?: string): boolean {
@@ -164,6 +393,62 @@ function deniedRows(context: CommentReadContext): string[] {
 function filterDeniedRows(rowIds: string[] | undefined, context: CommentReadContext): string[] | undefined {
   if (!rowIds) return undefined
   return rowIds.filter((rowId) => !isRowDenied(context, rowId))
+}
+
+/**
+ * #5795 — the ONE place both @-mention candidate routes apply their disclosure bounds (same three
+ * bounds #5781 put on GET /api/multitable/sheets/:sheetId/person-fields/:fieldId/directory, same
+ * response markers). Called only AFTER the route's existing gates (rbacGuard + the G-8 sheet-read
+ * gate), so a caller that could not read the sheet still gets the same 403 as before.
+ *
+ *  (a) TERM REQUIRED. A term shorter than MENTION_CANDIDATES_MIN_QUERY_LENGTH (after trim) is answered
+ *      with an empty page and `requiresQuery: true`, and the service is NOT called — zero hydration.
+ *      A 200 marker rather than a 400 because the composer asks as soon as the user types a bare `@`;
+ *      the UI renders the marker as "type to search", not as a failure. NOT a narrowing guarantee: a
+ *      one-character term (almost) every row contains (`-` in every UUID-shaped id, `@` in every
+ *      well-formed email address) still matches (almost) everyone, so against a deliberate caller (b)
+ *      is the only per-request bound; (a) removes
+ *      the UI's automatic term-less request (see comment-mention-bounds.ts).
+ *  (b) CEILING. `limit` is clamped to MENTION_CANDIDATES_MAX_ITEMS and the service is asked for ONE
+ *      row past it; `hasMore` is true iff that probe row came back (the queryRecordsWithCursor /
+ *      #5781 convention — no second COUNT query).
+ *  (c) NO DEPLOYMENT-WIDE COUNT. The service no longer computes one; callers report `total` as the
+ *      clamped page size (the #5781 / sibling /permission-candidates convention), never a population.
+ *
+ * ELIGIBILITY IS UNCHANGED: who can be returned for a matching term is still every active user
+ * (CommentService.listMentionCandidates's predicate is untouched). Narrowing that set — e.g. to the
+ * sheet's readers — is a separate change and is NOT done here.
+ *
+ * #5809 — `exactEmail` (GET /api/comments/mention-candidates?match=exact-email) asks the service for
+ * EMAIL EQUALITY instead of the substring search. (a)–(c) apply unchanged — a term is still required
+ * and the ceiling still clamps — and the rows can only be fewer (see CommentService).
+ */
+async function loadBoundedMentionCandidates(
+  commentService: ICommentService,
+  spreadsheetId: string,
+  rawQuery: string | undefined,
+  requestedLimit: number,
+  exactEmail = false,
+): Promise<{
+  items: CommentMentionCandidate[]
+  limit: number
+  query: string
+  hasMore: boolean
+  requiresQuery: boolean
+  minQueryLength: number
+}> {
+  const limit = Math.min(requestedLimit, MENTION_CANDIDATES_MAX_ITEMS)
+  const query = (rawQuery ?? '').trim()
+  if (query.length < MENTION_CANDIDATES_MIN_QUERY_LENGTH) {
+    return { items: [], limit, query: '', hasMore: false, requiresQuery: true, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
+  }
+  const result = await commentService.listMentionCandidates(
+    spreadsheetId,
+    exactEmail ? { q: query, limit: limit + 1, match: 'exact-email' } : { q: query, limit: limit + 1 },
+  )
+  const hasMore = result.items.length > limit
+  const items = hasMore ? result.items.slice(0, limit) : result.items
+  return { items, limit, query, hasMore, requiresQuery: false, minQueryLength: MENTION_CANDIDATES_MIN_QUERY_LENGTH }
 }
 
 export function commentsRouter(injector?: Injector): Router {
@@ -234,6 +519,8 @@ export function commentsRouter(injector?: Injector): Router {
         viewerId: context.userId,
         excludeRowIds: deniedRows(context),
       }
+      const mentionLabelsAuthorId = mentionLabelsAuthorFor(req, context)
+      if (mentionLabelsAuthorId) options.mentionLabelsAuthorId = mentionLabelsAuthorId
       const result = await commentService.getComments(spreadsheetId, options)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {
@@ -256,16 +543,34 @@ export function commentsRouter(injector?: Injector): Router {
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
+    // #5809: opt-in email-equality lookup (legacy person import). Any other `match` value keeps the
+    // substring search exactly as before.
+    const exactEmail = readQueryValue(req.query.match) === 'exact-email'
 
     try {
       const context = await resolveCommentReadContext(req, res, parsed.data.spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate
-      const limit = clampLimit(parsed.data.limit)
-      const result = await commentService.listMentionCandidates(parsed.data.spreadsheetId, {
-        q: parsed.data.q,
-        limit,
+      // #5795: term required, clamped to the ceiling, no deployment-wide count — see
+      // loadBoundedMentionCandidates. `total` is the size of THIS (clamped) page, never a population.
+      const bounded = await loadBoundedMentionCandidates(
+        commentService,
+        parsed.data.spreadsheetId,
+        parsed.data.q,
+        clampLimit(parsed.data.limit),
+        exactEmail,
+      )
+      return res.json({
+        ok: true,
+        data: {
+          items: bounded.items,
+          total: bounded.items.length,
+          limit: bounded.limit,
+          query: bounded.query,
+          hasMore: bounded.hasMore,
+          requiresQuery: bounded.requiresQuery,
+          minQueryLength: bounded.minQueryLength,
+        },
       })
-      return res.json({ ok: true, data: { items: result.items, total: result.total, limit } })
     } catch (error) {
       logger.error('Failed to load comment mention candidates', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load comment mention candidates' } })
@@ -288,7 +593,9 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const limit = clampLimit(parsed.data.limit)
       const offset = clampOffset(parsed.data.offset)
-      const result = await commentService.getInbox(getUserId(req), { limit, offset })
+      // #5831 part B: only readable, live sheets and non-denied rows, filtered before COUNT/LIMIT.
+      const inbox = await resolveCommentInboxScope(req, commentService)
+      const result = await commentService.getInbox(inbox.userId, { limit, offset }, inbox.scope)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {
       logger.error('Failed to load comment inbox', error as Error)
@@ -298,7 +605,9 @@ export function commentsRouter(injector?: Injector): Router {
 
   router.get('/api/comments/unread-count', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     try {
-      const summary = await commentService.getUnreadSummary(getUserId(req))
+      // #5831 part B: counts the same comments the inbox can list (see resolveCommentInboxScope).
+      const inbox = await resolveCommentInboxScope(req, commentService)
+      const summary = await commentService.getUnreadSummary(inbox.userId, inbox.scope)
       return res.json({
         ok: true,
         data: {
@@ -482,6 +791,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       const comment = await commentService.updateComment(commentId, getUserId(req), parsed.data)
       return res.json({ ok: true, data: { comment } })
     } catch (error) {
@@ -497,6 +808,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.deleteComment(commentId, getUserId(req))
       return res.status(204).end()
     } catch (error) {
@@ -512,6 +825,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.markCommentRead(commentId, getUserId(req))
       return res.status(204).end()
     } catch (error) {
@@ -535,6 +850,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.addReaction(commentId, getUserId(req), parsed.data.emoji)
       return res.status(201).json({ ok: true, data: {} })
     } catch (error) {
@@ -554,6 +871,8 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.removeReaction(commentId, getUserId(req), parsed.data.emoji)
       return res.status(204).end()
     } catch (error) {
@@ -589,6 +908,10 @@ export function commentsRouter(injector?: Injector): Router {
     }
 
     try {
+      // #5831 (coordinator decision): resolving needs read access to the comment's live sheet and row
+      // (this gate) plus comments:write (rbacGuard above). A stricter rule is tracked in #5841.
+      const context = await resolveCommentIdContext(req, res, commentService, commentId)
+      if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
       await commentService.resolveComment(commentId)
       return res.status(204).end()
     } catch (error) {
@@ -604,6 +927,12 @@ export function commentsRouter(injector?: Injector): Router {
    *
    * Search for @-mention candidates scoped to a spreadsheet.
    * Query params: q (search string), limit (max 10 by default for composer UX)
+   *
+   * #5795: same bounds as /api/comments/mention-candidates (loadBoundedMentionCandidates) — this route
+   * reads the SAME service behind the SAME gate, so leaving it term-optional would have kept the
+   * roster one request away. No in-repo UI calls it; the additive `limit`/`query`/`hasMore`/
+   * `requiresQuery`/`minQueryLength` fields let an external caller tell "type to search" apart from
+   * "no match".
    */
   router.get('/api/multitable/:spreadsheetId/mention-candidates', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const spreadsheetId = req.params.spreadsheetId?.trim()
@@ -626,18 +955,29 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentReadContext(req, res, spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate
-      const limit = clampLimit(parsed.data.limit ?? 10)
-      const result = await commentService.listMentionCandidates(spreadsheetId, {
-        q: parsed.data.q,
-        limit,
-      })
+      const bounded = await loadBoundedMentionCandidates(
+        commentService,
+        spreadsheetId,
+        parsed.data.q,
+        clampLimit(parsed.data.limit ?? 10),
+      )
       // Map to { userId, displayName } shape expected by the mention composer
-      const items = result.items.map((candidate) => ({
+      const items = bounded.items.map((candidate) => ({
         userId: candidate.id,
         displayName: candidate.label,
         avatarUrl: undefined as string | undefined,
       }))
-      return res.json({ ok: true, data: { items } })
+      return res.json({
+        ok: true,
+        data: {
+          items,
+          limit: bounded.limit,
+          query: bounded.query,
+          hasMore: bounded.hasMore,
+          requiresQuery: bounded.requiresQuery,
+          minQueryLength: bounded.minQueryLength,
+        },
+      })
     } catch (error) {
       logger.error('Failed to load mention candidates', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load mention candidates' } })
@@ -646,9 +986,15 @@ export function commentsRouter(injector?: Injector): Router {
 
   /**
    * POST /api/multitable/:spreadsheetId/comments/mark-all-read
-   * Body: { userId: string }
+   * Body: { userId?: string } — optional and only accepted when it names the signed-in user.
    *
-   * Batch-mark all unread comments in this spreadsheet as read for the user.
+   * Batch-mark all unread comments in this spreadsheet as read for the signed-in user.
+   *
+   * #5840: the body `userId` used to pick WHOSE read state was written, so any comments:write holder who
+   * could read the sheet could clear another user's unread comments (and the row deny applied was the
+   * caller's, not the target's). The write now always targets the caller; a body `userId` naming anyone
+   * else is refused with 403 (an authorization refusal — the request is well-formed but asks to act for
+   * another principal) instead of being silently ignored, so a client relying on it notices.
    */
   router.post('/api/multitable/:spreadsheetId/comments/mark-all-read', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
     const spreadsheetId = req.params.spreadsheetId?.trim()
@@ -667,9 +1013,11 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentReadContext(req, res, spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate
-      // Prefer body userId; fall back to authenticated user
-      const userId = parsed.data.userId?.trim() || context.userId
-      const count = await commentService.markAllCommentsRead(spreadsheetId, userId, deniedRows(context))
+      const requestedUserId = parsed.data.userId?.trim()
+      if (requestedUserId && requestedUserId !== context.userId.trim()) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: MARK_READ_OTHER_USER_MESSAGE } })
+      }
+      const count = await commentService.markAllCommentsRead(spreadsheetId, context.userId, deniedRows(context))
       return res.json({ ok: true, data: { markedRead: count } })
     } catch (error) {
       logger.error('Failed to mark all comments as read', error as Error)

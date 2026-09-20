@@ -2,10 +2,10 @@
   <PageShell width="wide">
     <PageHeader
       class="template-authoring__header"
-      :title="isEditMode ? '编辑审批模板' : '新建审批模板'"
+      :title="isEditMode ? '编辑审批表单' : '新建审批表单'"
       subtitle="分步完成基础信息、表单、流程与发布校验"
       back
-      back-label="返回模板列表"
+      back-label="返回表单列表"
       @back="goBack"
     >
       <template #meta>
@@ -71,7 +71,7 @@
 
     <el-alert
       v-if="!canManageTemplates"
-      title="你没有模板管理权限"
+      title="你没有表单管理权限"
       type="warning"
       show-icon
       :closable="false"
@@ -81,7 +81,7 @@
     <el-alert
       v-if="unsupportedReason"
       :title="unsupportedReason"
-      description="该模板包含当前 MVP 不支持编辑的结构。为避免静默覆盖，页面只允许查看，不能保存。"
+      description="该表单包含当前 MVP 不支持编辑的结构。为避免静默覆盖，页面只允许查看，不能保存。"
       type="warning"
       show-icon
       :closable="false"
@@ -125,7 +125,7 @@
 
     <div v-loading="loading" class="template-authoring__body">
       <div class="template-authoring__workspace">
-        <nav class="template-authoring__steps" aria-label="模板配置步骤">
+        <nav class="template-authoring__steps" aria-label="表单配置步骤">
           <el-button
             v-for="(section, index) in authoringSections"
             :key="section.id"
@@ -169,7 +169,7 @@
       >
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>常用审批模板</strong>
+            <strong>常用审批表单</strong>
             <span class="template-authoring__hint">创建为草稿，发布前可继续调整字段和审批人。</span>
           </div>
         </template>
@@ -191,7 +191,7 @@
               :data-testid="`approval-template-preset-${preset.id}`"
               @click="createFromPreset(preset.id)"
             >
-              使用模板
+              使用表单
             </el-button>
           </div>
         </div>
@@ -203,13 +203,20 @@
         </template>
         <el-form label-position="top" class="template-authoring__grid">
           <el-form-item label="模板 Key">
-            <el-input v-model="draft.key" :disabled="readOnly" data-testid="approval-template-key" />
+            <!-- approval-form-ux-slice1 (20260916 design §1.2): read-only display, not editable by
+                 anyone (`readonly`, not `:disabled`, so the value stays selectable/copyable — see
+                 design §1.2 point 1). Value is seeded at draft-creation time (createSeededTemplateDraft),
+                 never blank. PATCH never sends this field (buildUpdateTemplatePayload). -->
+            <el-input v-model="draft.key" readonly data-testid="approval-template-key" />
           </el-form-item>
           <el-form-item label="模板名称">
             <el-input v-model="draft.name" :disabled="readOnly" data-testid="approval-template-name" />
           </el-form-item>
           <el-form-item label="分类">
-            <el-input
+            <!-- approval-form-ux-slice1 (20260916 design §3): candidate dropdown backed by
+                 GET /api/approval-templates/categories, still a plain free-text field
+                 (allow-create — see CategoryCandidateInput.vue's own doc comment). -->
+            <CategoryCandidateInput
               v-model="draft.category"
               :disabled="readOnly"
               placeholder="如 请假 / 采购 / 报销"
@@ -269,7 +276,7 @@
       <el-card v-show="activeAuthoringSection === 'fields'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
-            <strong>表单设计</strong>
+            <strong>字段设计</strong>
             <div class="template-authoring__form-toolbar">
               <el-button
                 size="small"
@@ -1434,6 +1441,7 @@ import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import CategoryCandidateInput from '../../approvals/components/CategoryCandidateInput.vue'
 import ApprovalFormInlineEditor from '../../approvals/components/ApprovalFormInlineEditor.vue'
 import ApprovalFormBuilder from '../../approvals/components/ApprovalFormBuilder.vue'
 import ApprovalFormPalette from '../../approvals/components/ApprovalFormPalette.vue'
@@ -1459,6 +1467,7 @@ import {
   createEmptyTemplateDraft,
   DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
+  generateTemplateKey,
   graphReadOnlyReason,
   insertStepAt,
   parseIdsText,
@@ -1594,7 +1603,16 @@ const unsupportedReason = ref<string | null>(null)
 // G-1: a COMPLEX (condition/parallel/cc/non-linear) graph renders read-only but is NOT
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
-const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+
+// approval-form-ux-slice1 (20260916 design §1.2 point 3): the key input is now read-only (below),
+// so a brand-new draft must never render with a blank, permanently-uneditable key — seed it at
+// DRAFT-CREATION time, not at save time. `name` is deliberately left blank here (unlike
+// `seedDraftIdentityForSave`, which seeds both): the name input stays a normal editable field the
+// author fills in, and `basicInfoIssues`'s `模板名称必填` badge is UNCHANGED for a new draft.
+function createSeededTemplateDraft(): TemplateAuthoringDraft {
+  return { ...createEmptyTemplateDraft(), key: generateTemplateKey() }
+}
+const draft = ref<TemplateAuthoringDraft>(createSeededTemplateDraft())
 
 // ── F4 production mount (delta §5 F4, FB-D8) ──
 // The hardened Designer 2.0 builder mounts behind the EXISTING `approvalCanvasV2` flag — no new
@@ -1777,10 +1795,10 @@ const authoringSections: Array<{
   label: string
   description: string
 }> = [
-  { id: 'basic', label: '基础信息', description: '名称、范围与模板起点' },
-  { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
+  { id: 'basic', label: '基础信息', description: '名称、可见范围与创建起点' },
+  { id: 'fields', label: '字段设计', description: '字段、校验与显隐规则' },
   { id: 'flow', label: '流程设计', description: '审批人、分支与字段权限' },
-  { id: 'more-settings', label: '更多设置', description: '审批人去重等模板级策略' },
+  { id: 'more-settings', label: '更多设置', description: '审批人去重等流程策略' },
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
@@ -1836,7 +1854,7 @@ const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
 const editRouteLoaded = computed(() => !isEditMode.value || draft.value.templateId === templateId.value)
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value && editRouteLoaded.value)
 const draftStateLabel = computed(() => {
-  if (!isEditMode.value && !isDraftDirty.value) return '新模板'
+  if (!isEditMode.value && !isDraftDirty.value) return '新表单'
   return isDraftDirty.value ? '有未保存更改' : '已保存'
 })
 const authoringFlowNodeCount = computed(() => (
@@ -3871,7 +3889,7 @@ async function loadTemplateForEdit() {
     // TemplateCenterView), but one router.push('/approval-templates/new') from this view would
     // have made it live: a permanently unsaveable new-template page with no error.
     loading.value = false
-    draft.value = createEmptyTemplateDraft()
+    draft.value = createSeededTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
     formFieldFocusLocalId.value = null
@@ -3912,7 +3930,7 @@ async function loadTemplateForEdit() {
     reseedFormBuilderSessionIfActive()
   } catch (error: unknown) {
     if (seq !== templateLoadSeq) return // a superseded load's failure is not THIS route's failure
-    loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '加载审批表单失败')
   } finally {
     if (seq !== templateLoadSeq) {
       // the newer navigation owns loading/hydration state now
@@ -3963,7 +3981,7 @@ async function validate(): Promise<boolean> {
   validationErrors.value = minimum.all
   if (validationErrors.value.length > 0) {
     activeAuthoringSection.value = firstInvalidAuthoringSection(formErrors)
-    ElMessage.warning('请先修正模板配置')
+    ElMessage.warning('请先修正表单配置')
     await nextTick()
     scrollAuthoringTarget(validationSummaryRef.value, true)
     return false
@@ -3977,7 +3995,7 @@ async function persistDraft() {
   // (`'' !== 'tpl_b'`, would fall through to CREATE and mint a duplicate) and stale-after-
   // route-switch (`'tpl_a' !== 'tpl_b'`, would UPDATE the wrong template from tpl_b's URL).
   if (isEditMode.value && draft.value.templateId !== templateId.value) {
-    loadError.value = '模板尚未加载成功，无法保存 — 请刷新重试'
+    loadError.value = '表单尚未加载成功，无法保存 — 请刷新重试'
     return null
   }
   if (!(await validate())) return null
@@ -4009,7 +4027,7 @@ async function persistDraft() {
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     return created
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '保存模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '保存表单失败')
     return null
   } finally {
     saving.value = false
@@ -4035,9 +4053,9 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
-    ElMessage.success('模板草稿已创建')
+    ElMessage.success('表单草稿已创建')
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '创建常用模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '创建常用表单失败')
   } finally {
     creatingPresetId.value = null
   }
@@ -4092,10 +4110,10 @@ async function confirmPublish() {
       policy: policyToPublish,
       ...(note ? { note } : {}),
     })
-    ElMessage.success('模板已发布')
+    ElMessage.success('表单已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: unknown) {
-    loadError.value = describeTemplateAuthoringError(error, '发布模板失败')
+    loadError.value = describeTemplateAuthoringError(error, '发布表单失败')
   } finally {
     publishing.value = false
   }

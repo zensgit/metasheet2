@@ -34,8 +34,13 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
     renders: 0,
     fieldLayout: undefined as { ordered: Array<{ id: string }>; hiddenInView: Array<{ id: string }> } | null | undefined,
     fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
+    // #5795: the server-side mention search the workbench hands the inspector.
+    mentionSearch: undefined as ((query: string) => Promise<{ items: unknown[]; requiresQuery: boolean; hasMore: boolean }>) | undefined,
   },
-  gridStubSeen: { fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined },
+  gridStubSeen: {
+    fetchRecord: undefined as ((recordId: string) => Promise<unknown>) | undefined,
+    mentionSearch: undefined as ((query: string) => Promise<unknown>) | undefined,
+  },
 }))
 // PR-B2 round 2 (2026-09-05, record inspector v3 §1.3): the stub's answer to the workbench's
 // `canAnchorFieldError(recordId, fieldId)` query (the real MetaRecordInspector exposes it via
@@ -47,6 +52,16 @@ const { inspectorStubSeen, gridStubSeen } = vi.hoisted(() => ({
 // workbench must ask about the record the FAILURE belongs to, not whatever is selected by then.
 const { inspectorStubAnchor } = vi.hoisted(() => ({
   inspectorStubAnchor: vi.fn((_recordId: string, _fieldId: string) => true),
+}))
+// #5808: when `enabled`, the MetaRecordInspector stub renders the REAL shared MetaCommentsPanel (and so
+// the real MetaCommentComposer) with the same comment props/emits the real inspector forwards, so the
+// workbench's comment-edit path can be driven end to end. Off by default: every other test keeps the
+// plain stand-in buttons. Reset in the top-level beforeEach.
+// #5813: `realInspector` goes one step further — the stub renders the REAL MetaRecordInspector (and so its
+// real tab bar, which unmounts the comments tabpanel on every switch) instead of the bare panel, inside
+// the same `data-real-comments-panel` wrapper so the #5808 helpers keep working.
+const { inspectorStubRealComments } = vi.hoisted(() => ({
+  inspectorStubRealComments: { enabled: false, realInspector: false },
 }))
 vi.mock('../src/multitable/import/xlsx-mapping', async () => {
   const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
@@ -147,6 +162,8 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getAccessSnapshot: () => authAccessSnapshot,
     getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+    // #5813: read only by the real inspector's provenance section (opt-in `realInspector` harness).
+    hasPermission: () => false,
   }),
 }))
 
@@ -347,14 +364,16 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       // PR-B1 round 2: the grid's own `:fetch-record="fetchLinkedRecordFn"` binding, recorded into
       // `gridStubSeen` so the inspector's binding can be asserted IDENTICAL to it (HI-1).
       fetchRecord: { type: Function, default: undefined },
+      mentionSearch: { type: Function, default: undefined },
     },
     // Record inspector v3 (2026-09-05, PR-A §1.1): `expand-record` added to this stub's emits —
     // `select-record` alone is now a plain cursor move (W2 lock §3.1 erratum) and no longer opens
     // the inspector; tests that need the panel OPEN click the new `data-expand-record` button
     // (mirrors the real grid's row-number icon → `expand-record`).
-    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
+    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change', 'set-frozen-rows'],
     render() {
       gridStubSeen.fetchRecord = this.$props.fetchRecord as typeof gridStubSeen.fetchRecord
+      gridStubSeen.mentionSearch = this.$props.mentionSearch as typeof gridStubSeen.mentionSearch
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
         'data-grid-collapsed-keys': JSON.stringify(this.$props.collapsedGroupKeys ?? []),
@@ -418,6 +437,15 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('open-field-comments', { recordId: 'rec_1', fieldId: 'fld_title' }),
           },
           'open-field-comments',
+        ),
+        // #5863c: row-freeze pin round-trip — mirrors the real grid's per-row pin → set-frozen-rows.
+        h(
+          'button',
+          {
+            'data-set-frozen-rows': '2',
+            onClick: () => this.$emit('set-frozen-rows', 2),
+          },
+          'set-frozen-rows',
         ),
         h(
           'button',
@@ -494,7 +522,10 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
 // comments has no close chrome of its own now, lock §2 "不含它自己的 __header...close 钮"; the two
 // tests that exercised it were removed, see below). Everything else is otherwise unchanged from the
 // pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
-vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', async () => {
+  const { default: RealMetaCommentsPanel } = await import('../src/shared/comments/components/MetaCommentsPanel.vue')
+  const { default: RealMetaRecordInspector } = await vi.importActual<{ default: Component }>('../src/multitable/components/MetaRecordInspector.vue')
+  return {
   default: defineComponent({
     name: 'MetaRecordInspector',
     props: {
@@ -513,14 +544,26 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       commentTargetFieldId: { type: String, default: null },
       highlightedCommentId: { type: String, default: null },
       mentionSuggestions: { type: Array, default: () => [] },
+      mentionSearch: { type: Function, default: undefined },
       // PR-B2 (2026-09-05, record inspector v3 §1.3): declared so the workbench's `:field-errors`
       // binding arrives as a typed prop and is rendered below as the same `[data-test=
       // drawer-field-error][data-field-id]` node the real MetaRecordFieldsPanel renders.
       fieldErrors: { type: Object as PropType<Record<string, string> | null>, default: null },
+      // #5808: the comment-tab props the real inspector forwards to MetaCommentsPanel, declared so the
+      // opt-in real panel below receives them typed (see `inspectorStubRealComments`).
+      comments: { type: Array, default: () => [] },
+      commentDraft: { type: String, default: '' },
+      commentEditingId: { type: String, default: null },
+      commentComposerInitialMentions: { type: Array, default: () => [] },
+      currentUserId: { type: String, default: null },
+      canComment: { type: Boolean, default: false },
+      // #5813: forwarded to the opt-in real inspector (its default tab / later switch to comments).
+      openComments: { type: Boolean, default: false },
     },
     emits: [
       'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
       'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
+      'comment-edit', 'comment-cancel-edit',
       // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the real inspector's copy-link icon
       // emits `copy-link`; the workbench owns the clipboard write (`onCopyRecordLink`). The
       // `data-copy-link` button below is this stub's stand-in for that icon.
@@ -542,6 +585,34 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
       inspectorStubSeen.renders += 1
       inspectorStubSeen.fieldLayout = this.$props.inspectorFieldLayout as typeof inspectorStubSeen.fieldLayout
       inspectorStubSeen.fetchRecord = this.$props.fetchRecord as typeof inspectorStubSeen.fetchRecord
+      inspectorStubSeen.mentionSearch = this.$props.mentionSearch as typeof inspectorStubSeen.mentionSearch
+      if (inspectorStubRealComments.realInspector) {
+        // #5813: stays mounted while hidden, like the real shell at the workbench call site.
+        const shownRecordId = this.$props.visible ? (this.$props.record as { id?: string } | null)?.id ?? '' : ''
+        return h('div', { 'data-real-comments-panel': 'true', 'data-record-drawer': shownRecordId || undefined }, [
+          h(RealMetaRecordInspector, {
+            visible: this.$props.visible,
+            record: this.$props.record,
+            fields: [],
+            canEdit: false,
+            canComment: this.$props.canComment,
+            canDelete: false,
+            comments: this.$props.comments,
+            commentDraft: this.$props.commentDraft,
+            commentEditingId: this.$props.commentEditingId,
+            currentUserId: this.$props.currentUserId,
+            mentionSuggestions: this.$props.mentionSuggestions,
+            mentionSearch: this.$props.mentionSearch,
+            commentComposerInitialMentions: this.$props.commentComposerInitialMentions,
+            openComments: this.$props.openComments,
+            onCommentSubmit: (payload: { content: string; mentions: string[] }) => this.$emit('comment-submit', payload),
+            onCommentEdit: (commentId: string) => this.$emit('comment-edit', commentId),
+            onCommentCancelEdit: () => this.$emit('comment-cancel-edit'),
+            onToggleComments: () => this.$emit('toggle-comments'),
+            'onUpdate:commentDraft': (value: string) => this.$emit('update:comment-draft', value),
+          }),
+        ])
+      }
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
       return h('div', {
@@ -653,10 +724,31 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
           },
           'cancel-reply',
         ),
+        // #5808: same bindings as MetaRecordInspector.vue's own <MetaCommentsPanel> (comments tab).
+        inspectorStubRealComments.enabled
+          ? h('div', { 'data-real-comments-panel': 'true' }, [
+            h(RealMetaCommentsPanel, {
+              comments: this.$props.comments as never,
+              loading: false,
+              canComment: this.$props.canComment,
+              canResolve: false,
+              draft: this.$props.commentDraft,
+              editingCommentId: this.$props.commentEditingId,
+              currentUserId: this.$props.currentUserId,
+              mentionSuggestions: this.$props.mentionSuggestions as never,
+              mentionSearch: this.$props.mentionSearch as never,
+              composerInitialMentions: this.$props.commentComposerInitialMentions as never,
+              onSubmit: (payload: { content: string; mentions: string[] }) => this.$emit('comment-submit', payload),
+              onEdit: (commentId: string) => this.$emit('comment-edit', commentId),
+              'onUpdate:draft': (value: string) => this.$emit('update:comment-draft', value),
+            }),
+          ])
+          : null,
       ])
     },
   }),
-}))
+  }
+})
 vi.mock('../src/multitable/components/MetaMentionPopover.vue', () => ({
   default: defineComponent({
     name: 'MetaMentionPopover',
@@ -1088,6 +1180,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { DIALOG_META_REFRESH_INTERVAL_MS } from '../src/multitable/utils/dialog-meta-refresh'
 import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -1310,6 +1403,8 @@ describe('MultitableWorkbench view wiring', () => {
     inspectorStubSeen.renders = 0
     inspectorStubSeen.fieldLayout = undefined
     inspectorStubSeen.fetchRecord = undefined
+    inspectorStubRealComments.enabled = false
+    inspectorStubRealComments.realInspector = false
     gridStubSeen.fetchRecord = undefined
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -1366,6 +1461,297 @@ describe('MultitableWorkbench view wiring', () => {
     app.mount(container!)
     return Object.assign(hostState, { externalContextResults, workbenchRef })
   }
+
+  // #5750: an embedding host re-sends the same mt:navigate context on a timer (once a second in the
+  // report). The host/URL base id is a slug, while workbench.activeBaseId is whatever the LOADED
+  // context said (useMultitableWorkbench.syncContextState overwrites it with ctx.base.id /
+  // ctx.sheet.baseId) -- so a verbatim comparison of the two can miss forever and every tick
+  // re-enters applyExternalContext (and, when the user is busy or has drafts open, the defer toast).
+  async function replayExternalContextSync(
+    hostState: any,
+    context: { baseId: string; sheetId: string; viewId: string },
+    times: number,
+  ) {
+    const results: Array<{ status: string; context: { baseId: string; sheetId: string; viewId: string } }> = []
+    for (let i = 0; i < times; i += 1) {
+      results.push(await hostState.workbenchRef.requestExternalContextSync(context, { requestId: `req_${i}` }))
+      await flushUi()
+    }
+    return results
+  }
+
+  it('#5750 short-circuits repeated external context syncs whose base id is spelled differently from the loaded base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    // What the first load already wrote into the state: the CONTEXT's base id, not the URL slug.
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    const results = await replayExternalContextSync(
+      hostState,
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      5,
+    )
+
+    expect(workbenchMock.syncExternalContext).not.toHaveBeenCalled()
+    expect(results.map((result) => result.status)).toEqual(['applied', 'applied', 'applied', 'applied', 'applied'])
+    // The echo carries the base the workbench is really on, so the embed host can pin it in the URL.
+    expect(results[0].context).toEqual({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+  })
+
+  it('#5750 keeps syncing when the base id is not the only difference, or when the active sheet is not known to live in the active base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // A different sheet is never ignored, whatever the base id says.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_deals', viewId: 'view_grid' },
+      { requestId: 'req_other_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // Neither is a different view.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_other_view' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(2)
+
+    // And the base id is only ignored when the loaded sheet list PROVES the active sheet lives in
+    // the active base: an unknown active sheet keeps the strict comparison.
+    workbenchMock.sheets.value = []
+    await flushUi()
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_unknown_sheet' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(3)
+  })
+
+  // #5750 review: a host that posts only { baseId } gets sheetId/viewId filled in from the CURRENT
+  // ones (MultitableEmbedHost.handleNavigateMessage), so it lands on exactly the comparison above.
+  // A base id the workbench knows is a real base switch and must never be ignored -- otherwise that
+  // request is answered 'applied' while the frame stays where it was.
+  it('#5750 never ignores a base id that names another KNOWN base', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.activeBaseId.value = 'base_ops'
+    workbenchMock.sheets.value = [{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+
+    // base_sales comes from the listBases() mock -- a known base, same sheet/view as now.
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_known_other_base' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+
+    // An UNKNOWN id for the base the active sheet already lives in is still ignored (that is the
+    // URL-slug case this fast path exists for).
+    await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base-ops-slug', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_slug' },
+    )
+    await flushUi()
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+  })
+
+  // #5750 follow-up: the LOADED context, not the caller, decides the active triple --
+  // useMultitableWorkbench.syncContextState falls activeViewId back to views[0] when the requested
+  // view is not in ctx.views (a deleted/renamed view id in the host's URL is the common case). The
+  // sync SUCCEEDS there, so the request is 'applied' while the workbench sits on another view; an
+  // echo carrying the REQUESTED view hands the embed host a dead triple to pin into the URL and
+  // re-send forever. The echo has to report what is on screen.
+  it('#5750 follow-up echoes the RESOLVED context (dead viewId falls back to views[0]) instead of the requested one', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    // The composable's real view fallback, in mock form.
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view' },
+    )
+    await flushUi()
+
+    // The request still goes out verbatim -- only the ECHO is resolved.
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith({
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_deleted',
+    })
+    expect(workbenchMock.activeViewId.value).toBe('view_grid')
+    expect(result.context.viewId).not.toBe('view_deleted')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view',
+    })
+  })
+
+  // Same resolution for the DEFERRED path: the replay echo (an emitted event, not a return value)
+  // is the only answer a host gets for a request that was parked, so it must resolve too.
+  it('#5750 follow-up echoes the RESOLVED context on the deferred replay path as well', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        const viewExists = workbenchMock.views.value.some((view) => view.id === viewId)
+        workbenchMock.activeViewId.value = viewExists ? (viewId ?? '') : (workbenchMock.views.value[0]?.id ?? '')
+        return true
+      },
+    )
+
+    // Park the request behind an open dirty draft, then clear it so the replay runs.
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-dirty="true"]')!.click()
+    await flushUi()
+
+    const deferred = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_deleted' },
+      { requestId: 'req_dead_view_replay' },
+    )
+    expect(deferred.status).toBe('deferred')
+
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-clean="true"]')!.click()
+    await flushUi()
+
+    expect(hostState.externalContextResults).toContainEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_dead_view_replay',
+    })
+  })
+
+  // #5750 follow-up, review round 2: echoing "what is on screen" is only honest while what is on
+  // screen is still THIS request's resolution. applyExternalContext awaits, and the composable
+  // documents that window as reachable (loadBaseContext applies the context and only then awaits
+  // /fields, so a rail click or a second sync can move the active triple inside it -- pinned green by
+  // tests/multitable-external-context-sync.spec.ts, where a sheet_orders sync resolves true with
+  // sheet_deals on screen). An intruder's triple echoed as 'applied' would make the embed host pin
+  // the sheet the host never asked for and drop the navigation while reporting success.
+  it('#5750 follow-up echoes the REQUEST, not the intruding triple, when another sheet lands during the apply', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        // This sync's own application...
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        // ...then the rail click that lands inside the /fields await window.
+        workbenchMock.selectSheet('sheet_orders')
+        workbenchMock.selectView('view_grid')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      { requestId: 'req_raced_sheet' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeSheetId.value).toBe('sheet_orders')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_people', viewId: 'view_people' },
+      requestId: 'req_raced_sheet',
+    })
+  })
+
+  // Same race, one level finer: the intruder stays on the sheet and only changes the VIEW. The view
+  // the request named EXISTS here, so the views[0] fallback cannot explain the difference -- someone
+  // else moved, and the echo must not report their view as this request's result.
+  it('#5750 follow-up echoes the REQUEST when a concurrent writer switches to another existing view', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectView('view_timeline')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_raced_view' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeViewId.value).toBe('view_timeline')
+    // view_gallery is a real view of this sheet, so nothing about it licenses the swap.
+    expect(workbenchMock.views.value.some((view) => view.id === 'view_gallery')).toBe(true)
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      requestId: 'req_raced_view',
+    })
+  })
+
+  // ...and the base half. A host that posts only { baseId } has the sheet/view filled in from the
+  // current ones, so a base switch that is stomped back leaves a triple whose sheet AND view still
+  // match the request -- only the base gives the race away.
+  it('#5750 follow-up echoes the REQUEST when the base switch is stomped back by another writer', async () => {
+    const hostState = mountWorkbench({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid' })
+    await flushUi()
+    workbenchMock.syncExternalContext.mockClear()
+    workbenchMock.syncExternalContext.mockImplementation(
+      async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+        workbenchMock.activeBaseId.value = baseId ?? ''
+        workbenchMock.activeSheetId.value = sheetId ?? ''
+        workbenchMock.activeViewId.value = viewId ?? ''
+        await Promise.resolve()
+        workbenchMock.selectBase('base_ops')
+        return true
+      },
+    )
+
+    const result = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      { requestId: 'req_raced_base' },
+    )
+    await flushUi()
+
+    expect(workbenchMock.activeBaseId.value).toBe('base_ops')
+    expect(result).toEqual({
+      status: 'applied',
+      context: { baseId: 'base_sales', sheetId: 'sheet_orders', viewId: 'view_grid' },
+      requestId: 'req_raced_base',
+    })
+  })
 
   it('filters property-hidden fields from manager surfaces while keeping view-hidden fields configurable', async () => {
     workbenchMock.fields.value = [
@@ -2498,18 +2884,638 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
-  it('loads comment mention suggestions for the active sheet when opening comments', async () => {
+  // #5795: the mention-candidate endpoint is search-required, so opening a thread must NOT fetch a
+  // term-less roster any more; instead the workbench hands every mention editor a search bound to the
+  // active sheet (the SAME function to the grid and the inspector), and remembers what it returned.
+  it('opens comments without a term-less mention request and wires a sheet-bound mention search', async () => {
     mountWorkbench()
     await flushUi()
 
     container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
     await flushUi()
 
-    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledWith({
-      spreadsheetId: 'sheet_orders',
-      limit: 100,
+    expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-mention-suggestions-count="0"]')).not.toBeNull()
+    const search = inspectorStubSeen.mentionSearch
+    expect(typeof search).toBe('function')
+    expect(gridStubSeen.mentionSearch).toBe(search)
+
+    // An empty term is asked of the server, whose `requiresQuery` marker is passed through untouched.
+    workbenchMock.client.listCommentMentionSuggestions.mockResolvedValueOnce({
+      items: [], total: 0, limit: 20, query: '', hasMore: false, requiresQuery: true, minQueryLength: 1,
     })
+    await expect(search!('')).resolves.toEqual({ items: [], requiresQuery: true, hasMore: false })
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenLastCalledWith({
+      spreadsheetId: 'sheet_orders',
+      q: '',
+      limit: 20,
+    })
+
+    // A real term returns the matches and remembers them (labels of picked people stay resolvable).
+    const found = await search!('ja')
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenLastCalledWith({
+      spreadsheetId: 'sheet_orders',
+      q: 'ja',
+      limit: 20,
+    })
+    expect(found).toEqual({
+      items: [{ id: 'user_jamie', label: 'Jamie', subtitle: 'jamie@example.com' }],
+      requiresQuery: false,
+      hasMore: false,
+    })
+    await flushUi()
     expect(container!.querySelector('[data-mention-suggestions-count="1"]')).not.toBeNull()
+  })
+
+  // #5808: an old comment whose mentions are NOT `@[label](id)` tokens in its body (e.g. created via the
+  // API with an explicit `mentions` array). Since #5795 there is no roster to find their names in, so
+  // the list response carries `mentionLabels`; a mention nobody could name must still survive the edit.
+  // Driven through the REAL MetaCommentsPanel + MetaCommentComposer (see inspectorStubRealComments).
+  describe('#5808 editing a comment keeps mentions that are not tokens in its body', () => {
+    const MENTION_SEARCH_SETTLE_MS = 220
+
+    function composerChipLabels(): string[] {
+      return Array.from(container!.querySelectorAll('.meta-comment-composer__mention-chip span:first-child'))
+        .map((node) => node.textContent?.trim() ?? '')
+    }
+
+    async function openEditOf(comment: Record<string, unknown>) {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+      await flushUi()
+      commentsStateMock.comments.value = [comment]
+      await flushUi()
+      const editButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+        .find((button) => button.textContent?.trim() === 'Edit')
+      expect(editButton).toBeTruthy()
+      editButton!.click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')
+      expect(textarea).not.toBeNull()
+      return textarea!
+    }
+
+    async function typeInto(textarea: HTMLTextAreaElement, value: string) {
+      textarea.value = value
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+
+    async function submitComposer() {
+      container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__submit')!.click()
+      await flushUi()
+    }
+
+    it('shows the server label or a neutral placeholder, and a keystroke + save keeps both ids', async () => {
+      const textarea = await openEditOf({
+        id: 'comment_api_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Please double-check the totals',
+        mentions: ['user_fake_robin', 'user_fake_gone'],
+        mentionLabels: { user_fake_robin: 'Robin Example' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      expect(textarea.value).toBe('Please double-check the totals')
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+      const composer = container!.querySelector('[data-real-comments-panel] .meta-comment-composer')!
+      expect(composer.textContent).not.toContain('user_fake_gone')
+      expect(composer.textContent).not.toContain('user_fake_robin')
+
+      await typeInto(textarea, 'Please double-check the totals!')
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_1', {
+        content: 'Please double-check the totals!',
+        mentions: ['user_fake_robin', 'user_fake_gone'],
+      })
+      // resolving a label never issues a mention search
+      expect(workbenchMock.client.listCommentMentionSuggestions).not.toHaveBeenCalled()
+    })
+
+    it('a body token keeps its own label even when a remembered search hit names the same id differently', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+      await flushUi()
+      // a search remembers `user_jamie` as "Jamie" (the default client mock)
+      await inspectorStubSeen.mentionSearch!('ja')
+      await flushUi()
+      commentsStateMock.comments.value = [{
+        id: 'comment_token_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: '@[J. Example](user_jamie) hi',
+        mentions: ['user_jamie'],
+        mentionLabels: { user_jamie: 'Jamie' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      }]
+      await flushUi()
+      Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+        .find((button) => button.textContent?.trim() === 'Edit')!
+        .click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')!
+      expect(textarea.value).toBe('@J. Example hi')
+      expect(composerChipLabels()).toEqual(['@J. Example'])
+
+      await typeInto(textarea, '@J. Example hi!')
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_token_1', {
+        content: '@[J. Example](user_jamie) hi!',
+        mentions: ['user_jamie'],
+      })
+    })
+
+    it('a mention picked during the edit survives later searches (the edit starts from a snapshot)', async () => {
+      const textarea = await openEditOf({
+        id: 'comment_api_2',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Totals',
+        mentions: ['user_fake_robin'],
+        mentionLabels: { user_fake_robin: 'Robin Example' },
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      await typeInto(textarea, 'Totals @ja')
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      const suggestion = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__suggestion')
+      expect(suggestion?.textContent).toContain('Jamie')
+      suggestion!.click()
+      await flushUi()
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Jamie'])
+
+      // a second search refreshes the workbench's remembered-people cache
+      await typeInto(textarea, `${textarea.value}@jo`)
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledTimes(2)
+      expect(composerChipLabels()).toEqual(['@Robin Example', '@Jamie'])
+
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_2', {
+        content: 'Totals @[Jamie](user_jamie) @jo',
+        mentions: ['user_fake_robin', 'user_jamie'],
+      })
+    })
+
+    it('mention ids that are Object.prototype keys open the edit and are kept under a placeholder', async () => {
+      // an own non-string value and an inherited string are not labels either (read by own string key only)
+      const labels = Object.assign(Object.create({ user_fake_inherited: 'Fake Inherited' }), { user_fake_numeric: 42 })
+      const textarea = await openEditOf({
+        id: 'comment_proto_1',
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content: 'Odd ids',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+        mentionLabels: labels,
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+      expect(textarea.value).toBe('Odd ids')
+      expect(composerChipLabels()).toEqual(Array(5).fill('@Unknown user'))
+
+      await typeInto(textarea, 'Odd ids!')
+      await submitComposer()
+      expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_proto_1', {
+        content: 'Odd ids!',
+        mentions: ['constructor', 'toString', '__proto__', 'user_fake_inherited', 'user_fake_numeric'],
+      })
+    })
+
+    // Fix round: a person picked for one NEW comment must not be mentioned again by the next one. The
+    // workbench clears the draft after a send and on a record switch but keeps passing the same empty
+    // `initialMentions`, so only the composer can drop the picked chip.
+    async function openNewCommentOn(recordId: string) {
+      container!.querySelector<HTMLButtonElement>(`[data-open-comments="${recordId}"]`)!.click()
+      await flushUi()
+      const textarea = container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] textarea')
+      expect(textarea).not.toBeNull()
+      return textarea!
+    }
+
+    async function pickJamie(textarea: HTMLTextAreaElement) {
+      await typeInto(textarea, '@ja')
+      await new Promise((resolve) => setTimeout(resolve, MENTION_SEARCH_SETTLE_MS))
+      await flushUi()
+      const suggestion = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-comment-composer__suggestion')
+      expect(suggestion?.textContent).toContain('Jamie')
+      suggestion!.click()
+      await flushUi()
+      expect(composerChipLabels()).toEqual(['@Jamie'])
+    }
+
+    it('after sending a comment that mentions someone, the next comment mentions nobody', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+        targetId: 'rec_1',
+        content: '@[Jamie](user_jamie)',
+        mentions: ['user_jamie'],
+      }))
+      expect(textarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(textarea, 'thanks everyone')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(2)
+      expect(addCommentSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        targetId: 'rec_1',
+        content: 'thanks everyone',
+        mentions: [],
+      }))
+    })
+
+    it('a person picked on one record is not mentioned by a note sent on the next record', async () => {
+      inspectorStubRealComments.enabled = true
+      mountWorkbench()
+      await flushUi()
+      const textarea = await openNewCommentOn('rec_1')
+      await pickJamie(textarea)
+
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const nextTextarea = await openNewCommentOn('rec_2')
+      const confirmMessages = confirmSpy.mock.calls.map((call) => call[0])
+      confirmSpy.mockRestore()
+      expect(confirmMessages).toEqual(['Discard unsaved record changes?'])
+      expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+      expect(nextTextarea.value).toBe('')
+      expect(composerChipLabels()).toEqual([])
+
+      await typeInto(nextTextarea, 'note for record two')
+      await submitComposer()
+      expect(addCommentSpy).toHaveBeenCalledTimes(1)
+      expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+        targetId: 'rec_2',
+        content: 'note for record two',
+        mentions: [],
+      }))
+    })
+
+    // #5813: the REAL inspector unmounts its comments tabpanel on every tab switch; the picked (or
+    // removed) mentions must come back with the tab, and still be cleared by a send / record switch /
+    // another edit — including one that happens while the comments tab is away.
+    describe('#5813 switching inspector tabs keeps the picked and removed mentions', () => {
+      const DISCARD_COMMENT_EDIT_PROMPT = 'Discard your unsaved edit to this comment?'
+
+      function inspectorTab(label: string): HTMLButtonElement {
+        const tab = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] [role="tab"]'))
+          .find((button) => button.textContent?.trim() === label)
+        expect(tab).toBeTruthy()
+        return tab!
+      }
+
+      function composerTextarea(): HTMLTextAreaElement | null {
+        return container!.querySelector<HTMLTextAreaElement>('[data-real-comments-panel] .meta-comment-composer textarea')
+      }
+
+      async function switchToTab(label: string) {
+        inspectorTab(label).click()
+        await flushUi()
+      }
+
+      async function roundTripTabs(): Promise<HTMLTextAreaElement> {
+        await switchToTab('Details')
+        expect(composerTextarea()).toBeNull()
+        await switchToTab('Comments')
+        const textarea = composerTextarea()
+        expect(textarea).not.toBeNull()
+        return textarea!
+      }
+
+      async function mountRealInspector() {
+        inspectorStubRealComments.enabled = true
+        inspectorStubRealComments.realInspector = true
+        mountWorkbench()
+        await flushUi()
+      }
+
+      async function removeChip(label: string) {
+        const chip = Array.from(container!.querySelectorAll<HTMLButtonElement>('.meta-comment-composer__mention-chip'))
+          .find((button) => button.querySelector('span')?.textContent?.trim() === label)
+        expect(chip).toBeTruthy()
+        chip!.click()
+        await flushUi()
+      }
+
+      async function openEditInRealInspector(comment: Record<string, unknown>) {
+        commentsStateMock.comments.value = [...(commentsStateMock.comments.value as unknown[]), comment] as never
+        await flushUi()
+        const editButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-real-comments-panel] .meta-comments-drawer__reply'))
+          .filter((button) => button.textContent?.trim() === 'Edit')
+          .at(-1)
+        expect(editButton).toBeTruthy()
+        editButton!.click()
+        await flushUi()
+      }
+
+      const apiComment = (id: string, content: string, mentions: string[], mentionLabels: Record<string, string>) => ({
+        id,
+        containerId: 'sheet_orders',
+        targetId: 'rec_1',
+        authorId: 'user_1',
+        content,
+        mentions,
+        mentionLabels,
+        resolved: false,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })
+
+      it('new comment: a person picked before a tab switch is still mentioned after it', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+
+        const textarea = await roundTripTabs()
+        expect(textarea.value).toBe('@Jamie ')
+        expect(composerChipLabels()).toEqual(['@Jamie'])
+
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({
+          targetId: 'rec_1',
+          content: '@[Jamie](user_jamie)',
+          mentions: ['user_jamie'],
+        }))
+
+        // after the send, the next comment mentions nobody — tab switch or not
+        expect(composerChipLabels()).toEqual([])
+        const next = await roundTripTabs()
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(next, 'thanks everyone')
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({
+          content: 'thanks everyone',
+          mentions: [],
+        }))
+      })
+
+      it('edit: a mention removed before a tab switch stays removed and is not saved', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          'comment_api_5813',
+          'Please double-check the totals',
+          ['user_fake_robin', 'user_fake_gone'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Unknown user'])
+        await removeChip('@Robin Example')
+        expect(composerChipLabels()).toEqual(['@Unknown user'])
+
+        const textarea = await roundTripTabs()
+        expect(textarea.value).toBe('Please double-check the totals')
+        expect(composerChipLabels()).toEqual(['@Unknown user'])
+
+        await typeInto(textarea, 'Please double-check the totals!')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+        expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_api_5813', {
+          content: 'Please double-check the totals!',
+          mentions: ['user_fake_gone'],
+        })
+      })
+
+      it("edit: opening a different comment after a tab switch starts from that comment's mentions", async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_a', 'First', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        await removeChip('@Robin Example')
+        expect(composerChipLabels()).toEqual([])
+        await roundTripTabs()
+        expect(composerChipLabels()).toEqual([])
+
+        await openEditInRealInspector(apiComment('comment_b', 'Second', ['user_fake_robin', 'user_fake_sam'], {
+          user_fake_robin: 'Robin Example',
+          user_fake_sam: 'Sam Example',
+        }))
+        expect(composerTextarea()!.value).toBe('Second')
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
+        await roundTripTabs()
+        expect(composerChipLabels()).toEqual(['@Robin Example', '@Sam Example'])
+      })
+
+      it('edit: the header Comments button ends the edit and clears its text, so no mention-less copy is sent', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          'comment_toggle_5813',
+          'Hi @[Robin Example](user_fake_robin)',
+          ['user_fake_robin'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerTextarea()!.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+
+        const headerCommentsButton = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')
+        expect(headerCommentsButton).toBeTruthy()
+        // the edit has text, so dropping it is confirmed first (accepted here)
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        try {
+          headerCommentsButton!.click()
+          await flushUi()
+          expect(confirmSpy.mock.calls).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+        } finally {
+          confirmSpy.mockRestore()
+        }
+
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      // #5813 final review: the header Comments button is also reachable from the Details tab, where
+      // the inspector does not switch back to Comments (the edit already set `openComments`), so the
+      // edited text must not vanish there without a question.
+      async function pressHeaderCommentsAnswering(answer: boolean): Promise<unknown[][]> {
+        const headerCommentsButton = container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')
+        expect(headerCommentsButton).toBeTruthy()
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(answer)
+        try {
+          headerCommentsButton!.click()
+          await flushUi()
+          return confirmSpy.mock.calls.map((call) => [...call])
+        } finally {
+          confirmSpy.mockRestore()
+        }
+      }
+
+      async function openMentionEditThenGoToDetails(id: string) {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment(
+          id,
+          'Hi @[Robin Example](user_fake_robin)',
+          ['user_fake_robin'],
+          { user_fake_robin: 'Robin Example' },
+        ))
+        expect(composerTextarea()!.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await switchToTab('Details')
+        expect(composerTextarea()).toBeNull()
+      }
+
+      it('edit, from Details: cancelling the header Comments prompt keeps the edit, its text and its mention', async () => {
+        await openMentionEditThenGoToDetails('comment_keep_5813')
+
+        expect(await pressHeaderCommentsAnswering(false)).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('Hi @Robin Example')
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await typeInto(textarea, 'Hi @Robin Example, thanks')
+        await submitComposer()
+        expect(addCommentSpy).not.toHaveBeenCalled()
+        expect(commentsStateMock.updateComment).toHaveBeenCalledTimes(1)
+        expect(commentsStateMock.updateComment).toHaveBeenCalledWith('comment_keep_5813', {
+          content: 'Hi @[Robin Example](user_fake_robin), thanks',
+          mentions: ['user_fake_robin'],
+        })
+      })
+
+      it('edit, from Details: accepting the header Comments prompt drops the edit, and the next send is a new comment', async () => {
+        await openMentionEditThenGoToDetails('comment_drop_5813')
+
+        expect(await pressHeaderCommentsAnswering(true)).toEqual([[DISCARD_COMMENT_EDIT_PROMPT]])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledTimes(1)
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      it('edit with an emptied text: the header Comments button ends it without asking', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_empty_5813', 'Totals', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        await typeInto(composerTextarea()!, '   ')
+        await switchToTab('Details')
+
+        expect(await pressHeaderCommentsAnswering(false)).toEqual([])
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_1',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+
+      it('new comment: the header Comments button keeps an unsent draft and its picked mention', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+
+        // nothing is discarded on this path, so nothing is asked
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+        try {
+          container!.querySelector<HTMLButtonElement>('[data-real-comments-panel] .meta-record-drawer__btn--comment')!.click()
+          await flushUi()
+          expect(confirmSpy).not.toHaveBeenCalled()
+        } finally {
+          confirmSpy.mockRestore()
+        }
+
+        expect(composerTextarea()!.value).toBe('@Jamie ')
+        expect(composerChipLabels()).toEqual(['@Jamie'])
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          content: '@[Jamie](user_jamie)',
+          mentions: ['user_jamie'],
+        }))
+      })
+
+      it('a pick made before leaving the tab is not mentioned on the next record, switched to while the tab was away', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await pickJamie(composerTextarea()!)
+        await switchToTab('Details')
+
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+        await flushUi()
+        confirmSpy.mockRestore()
+        expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeTruthy()
+
+        await switchToTab('Comments')
+        const textarea = composerTextarea()!
+        expect(textarea.value).toBe('')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(textarea, 'note for record two')
+        await submitComposer()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_2',
+          content: 'note for record two',
+          mentions: [],
+        }))
+      })
+
+      it('an edit ended by a record switch while the tab was away does not carry its mentions into a new comment', async () => {
+        await mountRealInspector()
+        await openNewCommentOn('rec_1')
+        await openEditInRealInspector(apiComment('comment_c', 'Totals', ['user_fake_robin'], { user_fake_robin: 'Robin Example' }))
+        expect(composerChipLabels()).toEqual(['@Robin Example'])
+        await switchToTab('Details')
+
+        const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+        container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_2"]')!.click()
+        await flushUi()
+        confirmSpy.mockRestore()
+
+        await switchToTab('Comments')
+        expect(composerChipLabels()).toEqual([])
+        await typeInto(composerTextarea()!, 'fresh note')
+        await submitComposer()
+        expect(commentsStateMock.updateComment).not.toHaveBeenCalled()
+        expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+          targetId: 'rec_2',
+          content: 'fresh note',
+          mentions: [],
+        }))
+      })
+    })
   })
 
   it('applies route-provided fieldId when opening a deep-linked comment thread', async () => {
@@ -2672,6 +3678,8 @@ describe('MultitableWorkbench view wiring', () => {
     expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
   })
 
+  // #5743: same contract (refresh while open, silence after close), slower clock — the cadence now
+  // comes from DIALOG_META_REFRESH_INTERVAL_MS instead of a hard-coded 1200 ms.
   it('refreshes sheet metadata while the view manager is open and stops after close', async () => {
     vi.useFakeTimers()
     mountWorkbench()
@@ -2686,7 +3694,7 @@ describe('MultitableWorkbench view wiring', () => {
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(1)
     expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_orders')
 
-    await vi.advanceTimersByTimeAsync(1200)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
@@ -2696,7 +3704,7 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
     workbenchMock.loadSheetMeta.mockClear()
 
-    await vi.advanceTimersByTimeAsync(2400)
+    await vi.advanceTimersByTimeAsync(DIALOG_META_REFRESH_INTERVAL_MS * 2)
     await flushUi()
 
     expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
@@ -2959,6 +3967,19 @@ describe('MultitableWorkbench view wiring', () => {
       expect(workbenchMock.loadSheetMeta).toHaveBeenCalled()
       // optimistic-local: toolbar reflects the new density immediately
       expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('compact')
+    })
+
+    it('#5863c set-frozen-rows: persists frozenTopRowCount AND preserves sibling config keys', async () => {
+      seedGridConfig({ ...SIBLINGS })
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-frozen-rows="2"]')!.click()
+      await flushUi()
+
+      expect(workbenchMock.client.updateView).toHaveBeenCalledTimes(1)
+      const [viewId, body] = workbenchMock.client.updateView.mock.calls[0]
+      expect(viewId).toBe('view_grid')
+      expect(body.config).toEqual({ ...SIBLINGS, frozenTopRowCount: 2 })
     })
 
     it('group collapse: persists scoped {fieldId, fieldIds, collapsedKeys} AND preserves siblings', async () => {

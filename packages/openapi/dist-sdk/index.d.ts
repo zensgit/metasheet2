@@ -7606,13 +7606,15 @@ export interface paths {
         };
         /**
          * List comment mention candidates
-         * @description Returns active user suggestions for multitable comment authoring. The frontend may locally filter the returned candidates while the backend supports optional query narrowing.
+         * @description Returns active user suggestions for multitable comment authoring. Search-required (#5795) - a call without a non-blank `q` returns no items and `requiresQuery` true instead of a user list. By default the term is a literal case-insensitive substring of name, email or id. When `match=exact-email` (#5819) is set, the term is instead matched against the stored email by trimmed, case-insensitive equality - still requires a non-blank `q`, and the returned rows are a subset of what the substring search would return for the same term. `limit` is capped at 50 and `hasMore` reports truncation. `total` is the size of the returned page, not a population count.
          */
         get: {
             parameters: {
                 query: {
                     spreadsheetId: string;
                     q?: string;
+                    /** @description Optional. When set to `exact-email`, switches from substring search to trimmed, case-insensitive email equality (#5819). */
+                    match?: "exact-email";
                     limit?: number;
                 };
                 header?: never;
@@ -8104,12 +8106,15 @@ export interface paths {
         post?: never;
         /**
          * Delete data source
-         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, naming the reference count) while any integration external system's config.dataSourceId references this source. force=true (platform-admin only) breaks the reference deliberately and is audited.
+         * @description Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, details.referenceCount) while any integration external system references this source (canonical connection_id, or an owner-attributed legacy config.dataSourceId). There is no bypass: unbind the external systems first. The check runs inside the delete transaction under a row lock, and the database's foreign key onto data_sources.live_id refuses the soft delete itself while a canonical binding exists (reported as the same 409, with details.referenceCount null).
          */
         delete: {
             parameters: {
                 query?: {
-                    /** @description Platform-admin only — delete even while referenced by external systems. */
+                    /**
+                     * @deprecated
+                     * @description Retired 2026-09-20 (owner ruling: a referenced source cannot be deleted). The server ignores this parameter for every tier, platform admins included, and answers the same 409. Kept only so old clients still validate; do not send it.
+                     */
                     force?: boolean;
                 };
                 header?: never;
@@ -8129,7 +8134,7 @@ export interface paths {
                 };
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Referenced by external systems (reference count in the error body) */
+                /** @description Referenced by external systems (details.referenceCount in the error body; unbind first) */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -9918,6 +9923,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integration/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one integration pipeline run
+         * @description Read-only single-run read, scoped by (tenantId, workspaceId, runId). The tenant is resolved from the verified session claim; `tenantId` may be echoed as a query parameter but must MATCH the caller's own tenant (a mismatch is 403), so this parameter cannot widen scope. Another tenant's run id and a run id that does not exist return the SAME details-free 404 — the route is not a cross-tenant existence oracle. No write, replay or retry is performed.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the list route applies, so a run written under the null workspace is read back there. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipelineRun"];
+                        };
+                    };
+                };
+                /** @description runId missing from the path */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry does not implement the single-run read (optional-method wiring older than this route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -9994,6 +10079,68 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/bases/{baseId}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List restorable deleted tables in a base
+         * @description Requires sheet lifecycle authority and read access. Returns only eligible soft-deleted user tables; managed and system projections are excluded. Authorization is applied before pagination. No total count is exposed. Missing, deleted, and inaccessible bases return 403. The opaque cursor is bound to the base and uses a stable table-id keyset.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                    /** @description Opaque nextCursor from the preceding page of this base. */
+                    cursor?: string;
+                };
+                header?: never;
+                path: {
+                    baseId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Authorized deleted tables, possibly empty. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                sheets: {
+                                    id: string;
+                                    baseId: string;
+                                    name: string;
+                                    description: string | null;
+                                    /** Format: date-time */
+                                    deletedAt: string;
+                                }[];
+                                nextCursor: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -10343,7 +10490,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete a multitable sheet */
+        /**
+         * Soft-delete a multitable sheet
+         * @description Marks the table deleted while retaining its fields, records, and views. It is no longer accessible through live table reads or writes. Authorized users can restore it from the table recycle bin; this is not a record deletion or field deletion.
+         */
         delete: {
             parameters: {
                 query?: never;
@@ -10375,6 +10525,63 @@ export interface paths {
                 404: components["responses"]["NotFound"];
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore a soft-deleted multitable sheet
+         * @description Clears the table deletion marker under the same lifecycle authority as table deletion. Retained fields, records, views, and inbound links become available again. Does not restore an earlier data version or recreate a table that was permanently deleted. Live or missing tables return 404; a concurrent recovery fence returns 409. No feature flag is changed.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Table restored. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                restored: string;
+                                sheet: {
+                                    id: string;
+                                    baseId: string | null;
+                                    name: string;
+                                    description: string | null;
+                                };
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -16480,6 +16687,10 @@ export interface components {
             updatedAt?: string;
             /** @description Mentioned user identifiers parsed from comment content. */
             mentions?: string[];
+            /** @description Display labels for this comment's own mentions, keyed by user id. A label is the user's name, or their email when they have no name (the label the mention search returns, without its email subtitle). Only in GET /api/comments responses to an interactive session caller, only on that caller's own comments, only for active users, and for at most 50 distinct ids per response. Never sent to API-token callers. An id without an entry has no label in this response (inactive or deleted user, no name or email, or beyond the 50-distinct-id ceiling). */
+            mentionLabels?: {
+                [key: string]: string;
+            };
         };
         CommentsListResponse: {
             /** @example true */
@@ -16529,10 +16740,36 @@ export interface components {
             ok?: boolean;
             data?: {
                 items?: components["schemas"]["CommentMentionCandidate"][];
-                /** @example 1 */
+                /**
+                 * @description Number of items in this (clamped) page - never a deployment-wide count.
+                 * @example 1
+                 */
                 total?: number;
-                /** @example 50 */
+                /**
+                 * @description Effective page size after the server ceiling (50).
+                 * @example 50
+                 */
                 limit?: number;
+                /**
+                 * @description The trimmed search term that was applied (empty when `requiresQuery` is true).
+                 * @example jam
+                 */
+                query?: string;
+                /**
+                 * @description True when more candidates matched than this page holds.
+                 * @example false
+                 */
+                hasMore?: boolean;
+                /**
+                 * @description True when the call carried no usable search term; `items` is then empty.
+                 * @example false
+                 */
+                requiresQuery?: boolean;
+                /**
+                 * @description Minimum trimmed search-term length the server accepts.
+                 * @example 1
+                 */
+                minQueryLength?: number;
             };
         };
         CommentUnreadCountResponse: {
@@ -17322,6 +17559,33 @@ export interface components {
              * @description Run creation time; the read-route from/to window bounds whole runs by this field.
              */
             runCreatedAt: string;
+        };
+        /** @description SC-04 pipeline run projection. This is the EXACT shape produced by the plugin's rowToPipelineRun (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/runs) and the single-run read (GET /api/integration/runs/{runId}) — the single read does no extra join, so the two projections cannot drift. */
+        IntegrationPipelineRun: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            pipelineId: string;
+            /** @description Run mode recorded by the runner (e.g. dry-run vs. a real write run). */
+            mode: string;
+            triggeredBy?: string | null;
+            status: string;
+            rowsRead: number;
+            rowsCleaned: number;
+            rowsWritten: number;
+            rowsFailed: number;
+            /** Format: date-time */
+            startedAt?: string | null;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            durationMs?: number | null;
+            errorSummary?: string | null;
+            /** @description Run detail JSONB as persisted by the runner (e.g. targetWriteSummaries, watermarkAdvanced). Forward-compatible: unknown keys are passed through unchanged. Already sanitized at write time; this read path does NOT re-redact, so nothing secret may be written into it. */
+            details?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            createdAt?: string | null;
         };
         /**
          * @description DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.

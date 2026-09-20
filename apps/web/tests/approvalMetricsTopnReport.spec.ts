@@ -221,7 +221,7 @@ describe('ApprovalMetricsView TopN report', () => {
 
     expect(fetchReportSpy).toHaveBeenCalledWith({ limit: 10 })
     expect(container!.textContent).toContain('TopN 最慢实例')
-    expect(container!.textContent).toContain('TopN SLA 风险模板')
+    expect(container!.textContent).toContain('TopN SLA 风险表单')
     expect(container!.textContent).toContain('apr-slow-1')
     expect(container!.textContent).toContain('tmpl-risk-1')
     expect(container!.textContent).toContain('2.00h')

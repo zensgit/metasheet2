@@ -653,6 +653,40 @@ export function canOpenStockPrepHelp(snapshot: StockPrepAccessSnapshot): boolean
   return satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)
 }
 
+/**
+ * WHO MAY REACH `/stock-prep` AT ALL — the ONE predicate the nav link and the route guard now share
+ * with every panel behind them.
+ *
+ * WHY THIS EXISTS. The shell used to ask `useAuth().hasPermission('stock-prep:read')` while
+ * everything inside the page asked `satisfiesStockPrepAccess`. Those two answer DIFFERENTLY, and the
+ * gap was documented rather than closed (`stockPrepPermissionMatrix.spec.ts` F-03's four annotated
+ * rows). It ran in BOTH directions:
+ *
+ *   · `integration:admin` WITHOUT the admin role — a platform admin to the server and to every
+ *     predicate in this file, yet `hasPermission` derives no `stock-prep:read` from it, so the nav
+ *     link was hidden and the guard redirected a principal the server serves in full. That is
+ *     PERMITTED-BUT-HIDDEN, the half of R-11 no gate inside the page can fix.
+ *   · `*:*` on a non-admin role, `stock-prep:*`, `stock-prep:write` — all three are EXPANDED by
+ *     `hasPermission` and all three are refused LITERALLY by the server, so they reached the page
+ *     and found every panel and control empty. That is VISIBLE-BUT-NOT-ACTIONABLE, the other half.
+ *
+ * Pointing the shell at this predicate closes both, and it is not a widening dressed as an
+ * alignment: this is `satisfiesStockPrepAccess` unchanged, so the browser now answers exactly what
+ * `plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs` answers for the same
+ * principal. The three expansion cases become STRICTLY NARROWER (the server already refused them),
+ * and the `integration:admin` case stops hiding a page the server already serves. No principal gains
+ * a byte of data: the route guard is a shell affordance, and every route behind it is gated
+ * server-side by this same ladder.
+ *
+ * DELIBERATELY NOT `hasPermission(STOCK_PREP_ROUTE_PERMISSION)`. The app-wide probe expands
+ * wildcards, derives `:read` from `:write`, and treats `users:write` as admin — three rules the
+ * server does not have. Reintroducing it here restores the divergence this closes, which is what
+ * `StockPreparationWorkspace.spec.ts`'s gate-alignment pin exists to catch.
+ */
+export function canReachStockPrepWorkbench(snapshot: StockPrepAccessSnapshot): boolean {
+  return satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)
+}
+
 /** Resolve one rail item's gate token. The ONLY place a token becomes a permission decision. */
 export function canOpenStockPrepRailItem(
   gate: StockPrepRailGate,

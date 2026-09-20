@@ -1263,6 +1263,26 @@ export async function listIntegrationPipelineRuns(
   return Array.isArray(data) ? data : []
 }
 
+// SC-04 single-run read (GET /api/integration/runs/:runId, plugin handler `runsGet`).
+// Same client (apiFetch) and same error mapping (parseIntegrationResponse → code/status/details
+// on the thrown Error) as listIntegrationPipelineRuns, so callers branch on
+// integrationApiErrorCode(error) — RUN_NOT_FOUND / RUN_READ_NOT_IMPLEMENTED — instead of matching
+// server prose.
+//
+// Scope is passed the SAME way the list passes it: as query params, never as an `x-tenant-id`
+// header. apiFetch attaches the session JWT; the route derives the tenant from the verified claim
+// and 403s when an echoed `tenantId` disagrees, so this cannot widen scope. `workspaceId` MUST be
+// the same value the list query used — the registry's WHERE carries workspace_id, so a run listed
+// under one workspace is a 404 when read back under another.
+export async function getIntegrationRun(
+  runId: string,
+  scope: IntegrationScope = {},
+): Promise<IntegrationPipelineRun> {
+  const suffix = buildQuerySuffix({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/runs/${encodeURIComponent(runId)}${suffix}`)
+  return parseIntegrationResponse<IntegrationPipelineRun>(response)
+}
+
 export async function listIntegrationDeadLetters(
   query: IntegrationPipelineObservationQuery,
 ): Promise<IntegrationDeadLetter[]> {

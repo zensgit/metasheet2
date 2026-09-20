@@ -38,7 +38,11 @@ function mockClient(
   rules: AutomationRule[] = [],
   options: {
     testExecution?: Record<string, unknown> | Promise<Record<string, unknown>>
-    testErrorMessage?: string
+    /**
+     * The test-run route's failure body (#5812 and its follow-up): `{ ok:false, error:{ code, message } }`
+     * with a FIXED, values-free message — the route never echoes raw error text any more.
+     */
+    testError?: { status: number; code: string; message: string }
     groupDeliveryErrorMessage?: string
     personDeliveryErrorMessage?: string
     rulesErrorMessage?: string | null
@@ -121,10 +125,11 @@ function mockClient(
       })
     }
     if (method === 'POST' && url.includes('/automations/') && url.endsWith('/test')) {
-      if (options.testErrorMessage) {
+      if (options.testError) {
+        const { status, code, message } = options.testError
         return new Response(
-          JSON.stringify({ error: options.testErrorMessage }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } },
+          JSON.stringify({ ok: false, error: { code, message } }),
+          { status, headers: { 'Content-Type': 'application/json' } },
         )
       }
       return ok(await (options.testExecution ?? {
@@ -383,13 +388,14 @@ describe('MetaAutomationManager', () => {
       'send_dingtalk_person_message',
     ])
     expect(actionSelect.textContent).toContain('发送通知')
+    expect((container.querySelector('[data-automation-field="notifyRecipientSearch"]') as HTMLInputElement).placeholder).toBe('输入姓名或邮箱搜索')
     expect((container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement).placeholder).toBe('用户 ID，逗号或换行分隔')
     expect((container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement).placeholder).toBe('通知内容')
     // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
     // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
     expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
-    expect(container.querySelectorAll('[placeholder]')).toHaveLength(3) // name + recipients + message
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(4) // name + recipient search + manual recipient ids + message
 
     epSetSelect(actionSelect, 'update_record')
     await nextTick()
@@ -2629,7 +2635,7 @@ describe('MetaAutomationManager', () => {
     expect(container.querySelector('[data-automation-test-status="rule_1"]')?.textContent).toContain('测试运行成功 (32 ms)。')
   })
 
-  it('localizes zh-CN automation test run request failures with raw backend messages', async () => {
+  it('localizes a zh-CN automation test run request failure by its code, not the English backend message', async () => {
     useLocale().setLocale('zh-CN')
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { client } = mockClient([
@@ -2639,7 +2645,7 @@ describe('MetaAutomationManager', () => {
         actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
         actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
       }),
-    ], { testErrorMessage: 'Automation service unavailable' })
+    ], { testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
@@ -2649,7 +2655,8 @@ describe('MetaAutomationManager', () => {
     await flushPromises()
 
     expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
-      .toContain('测试运行请求失败：Automation service unavailable')
+      .toContain('测试运行请求失败：测试运行在服务端失败，请稍后重试。')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).not.toContain('Test run failed')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
   })
 
@@ -2734,7 +2741,7 @@ describe('MetaAutomationManager', () => {
         actionConfig: { userIds: ['user_1'], titleTemplate: 'Ticket {{recordId}}', bodyTemplate: 'Please fill' },
         actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'] } }],
       }),
-    ], { testErrorMessage: 'Automation service unavailable' })
+    ], { testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' } })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
     await flushPromises()
 
@@ -2743,8 +2750,171 @@ describe('MetaAutomationManager', () => {
     ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
     await flushPromises()
 
-    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent).toContain('Automation service unavailable')
+    expect(container.querySelector('[data-field="testRunStatus"]')?.textContent)
+      .toContain('Test run request failed: The test run failed on the server. Try again later.')
     expect(container.querySelector('[data-field="testRunStatus"]')?.getAttribute('data-status')).toBe('failed')
+  })
+
+  // #5817 follow-up: the route answers `{ ok:false, error:{ code, message } }` with FIXED English
+  // messages. The button maps the code to localized copy (TEST_RUN_ERROR_LABELS); it never shows the
+  // server's message for a known code, and never the code itself. The client still carries both.
+  const TYPED_TEST_RUN_REFUSALS = [
+    {
+      // The test button is clickable for a DISABLED rule and the service answers that with this 404 too,
+      // so the copy cannot only say "refresh".
+      testError: { status: 404, code: 'TEST_RUN_RULE_NOT_FOUND', message: 'Automation rule not found or not enabled' },
+      en: 'Test run request failed: The rule was not found or is disabled. Enable it, or refresh and try again.',
+      zh: '测试运行请求失败：规则不存在或已停用。请确认规则已启用，或刷新后重试。',
+    },
+    {
+      testError: {
+        status: 404,
+        code: 'SHEET_DELETED',
+        message: 'This sheet has been deleted. It can be restored with POST /api/multitable/sheets/{sheetId}/restore by an actor with schema authority.',
+      },
+      en: 'Test run request failed: This sheet has been deleted, so the test did not run. Restore the sheet and try again.',
+      zh: '测试运行请求失败：该表已被删除，测试未运行。请先恢复该表后重试。',
+    },
+    {
+      testError: { status: 500, code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+      en: 'Test run request failed: The test run failed on the server. Try again later.',
+      zh: '测试运行请求失败：测试运行在服务端失败，请稍后重试。',
+    },
+    {
+      // A code this build does not know gets the generic label, not the message and not the code.
+      testError: { status: 409, code: 'TEST_RUN_SOMETHING_NEW', message: 'Some new English refusal' },
+      en: 'Test run request failed. Try again later.',
+      zh: '测试运行请求失败，请稍后重试。',
+    },
+  ] as const
+
+  async function clickTestRun(client: MultitableApiClient) {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+    ;(container.querySelector('[data-automation-edit="true"]') as HTMLButtonElement).click()
+    await flushPromises()
+    ;(container.querySelector('[data-action="test"]') as HTMLButtonElement).click()
+    await flushPromises()
+    return container.querySelector('[data-field="testRunStatus"]')
+  }
+
+  for (const refusal of TYPED_TEST_RUN_REFUSALS) {
+    const { testError } = refusal
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} label of a typed ${testError.code} test-run refusal, not its message or code`, async () => {
+        useLocale().setLocale(locale)
+        const { client } = mockClient([fakeRule()], { testError })
+        await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
+          name: 'MultitableApiError',
+          status: testError.status,
+          code: testError.code,
+          message: testError.message,
+        })
+
+        const status = await clickTestRun(client)
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en' ? refusal.en : refusal.zh)
+        expect(text).not.toContain(locale === 'en' ? refusal.zh : refusal.en)
+        expect(text).not.toContain(testError.message)
+        expect(text).not.toContain(testError.code)
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  function clientAnsweringTestRun(response: () => Response) {
+    const { fetchFn } = mockClient([fakeRule()])
+    return new MultitableApiClient({
+      fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
+        ? Promise.resolve(response())
+        : fetchFn(url, init)),
+    })
+  }
+
+  // A gateway / proxy failure carries no code (an nginx HTML page, an empty body): the service is
+  // unavailable, which the button says instead of the generic label.
+  const GATEWAY_FAILURES = [
+    { name: 'an HTML 502', status: 502, body: '<html><body><h1>502 Bad Gateway</h1></body></html>', contentType: 'text/html', code: undefined },
+    { name: 'an empty 503', status: 503, body: '', contentType: 'text/plain', code: undefined },
+    { name: 'a 504 with an empty object', status: 504, body: '{}', contentType: 'application/json', code: undefined },
+    {
+      // A blank code is no code.
+      name: 'a 503 with a blank code',
+      status: 503,
+      body: JSON.stringify({ ok: false, error: { code: ' ', message: '' } }),
+      contentType: 'application/json',
+      code: ' ',
+    },
+  ] as const
+
+  for (const failure of GATEWAY_FAILURES) {
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} service-unavailable label for ${failure.name}`, async () => {
+        useLocale().setLocale(locale)
+        const client = clientAnsweringTestRun(() => new Response(failure.body, {
+          status: failure.status,
+          headers: { 'Content-Type': failure.contentType },
+        }))
+        await expect(client.testAutomationRule('sheet_1', 'rule_1')).rejects.toMatchObject({
+          name: 'MultitableApiError',
+          status: failure.status,
+          code: failure.code,
+        })
+
+        const status = await clickTestRun(client)
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en'
+          ? 'Test run request failed: The service is temporarily unavailable. Try again later.'
+          : '测试运行请求失败：服务暂时不可用，请稍后重试。')
+        expect(text).not.toContain(locale === 'en' ? 'Test run request failed. Try again later.' : '测试运行请求失败，请稍后重试。')
+        expect(text).not.toContain('Bad Gateway')
+        expect(text).not.toContain(String(failure.status))
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  const GENERIC_NOT_UNAVAILABLE = [
+    {
+      // Only the gateway statuses mean "unavailable": a code-less 500 stays generic.
+      name: 'a 500 without a code',
+      response: () => new Response('', { status: 500 }),
+    },
+    {
+      // A code this build does not know stays generic even on a 503.
+      name: 'a 503 with an unknown code',
+      response: () => new Response(
+        JSON.stringify({ ok: false, error: { code: 'TEST_RUN_SOMETHING_NEW', message: 'Some new English refusal' } }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } },
+      ),
+    },
+  ] as const
+
+  for (const answer of GENERIC_NOT_UNAVAILABLE) {
+    for (const locale of ['en', 'zh-CN'] as const) {
+      it(`shows the ${locale} generic label, not service-unavailable, for ${answer.name}`, async () => {
+        useLocale().setLocale(locale)
+        const status = await clickTestRun(clientAnsweringTestRun(answer.response))
+        const text = status?.textContent ?? ''
+        expect(text).toContain(locale === 'en' ? 'Test run request failed. Try again later.' : '测试运行请求失败，请稍后重试。')
+        expect(text).not.toContain(locale === 'en' ? 'temporarily unavailable' : '服务暂时不可用')
+        expect(text).not.toContain('TEST_RUN_SOMETHING_NEW')
+        expect(text).not.toContain('Some new English refusal')
+        expect(status?.getAttribute('data-status')).toBe('failed')
+      })
+    }
+  }
+
+  it('keeps showing a network failure behind the localized prefix', async () => {
+    const { fetchFn } = mockClient([fakeRule()])
+    const client = new MultitableApiClient({
+      fetchFn: (url, init) => (init?.method === 'POST' && url.endsWith('/test')
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : fetchFn(url, init)),
+    })
+    const status = await clickTestRun(client)
+    expect(status?.textContent).toContain('Test run request failed: Failed to fetch')
+    expect(status?.getAttribute('data-status')).toBe('failed')
   })
 
   it('applies DingTalk group presets in the inline create form', async () => {
@@ -3128,5 +3298,55 @@ describe('MetaAutomationManager', () => {
     expect(navigator.clipboard?.writeText).toHaveBeenCalledTimes(1)
     expect(vi.mocked(navigator.clipboard!.writeText).mock.calls[0]?.[0]).toBe('Handle Sample field value')
     expect(container.textContent).toContain('Copied')
+  })
+
+  it('quick form: picks notification recipients by name/email search and saves user ids only', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    const addBtn = container.querySelector('.meta-automation__btn-add') as HTMLButtonElement
+    addBtn.click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Picked recipients'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    const searchInput = container.querySelector('[data-automation-field="notifyRecipientSearch"]') as HTMLInputElement
+    searchInput.value = 'lin'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+    expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'lin', limit: 8 })
+
+    const suggestion = container.querySelector('[data-automation-notify-suggestion="user_1"]') as HTMLButtonElement
+    expect(suggestion).toBeTruthy()
+    expect(suggestion.textContent).toContain('Lin Lan')
+    expect(suggestion.textContent).toContain('lin@example.com')
+    expect(container.querySelector('[data-automation-notify-suggestion="group_1"]')).toBeNull()
+    suggestion.click()
+    await flushPromises()
+
+    const chip = container.querySelector('[data-automation-notify-recipient="user_1"]') as HTMLElement
+    expect(chip.textContent).toContain('Lin Lan')
+    expect(chip.getAttribute('data-automation-notify-recipient-unresolved')).toBeNull()
+    expect((container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement).value).toBe('user_1')
+
+    const msgInput = container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement
+    msgInput.value = 'Hello!'
+    msgInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    expect(postCalls.length).toBe(1)
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    expect(body.actionType).toBe('send_notification')
+    expect(body.actionConfig).toEqual({ userIds: ['user_1'], message: 'Hello!' })
+    expect(JSON.stringify(body)).not.toContain('lin@example.com')
   })
 })

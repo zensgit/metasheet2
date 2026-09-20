@@ -10,6 +10,7 @@ import { fieldTypeLabel } from './meta-core-labels'
 export type MetaManagerLabelKey =
   | 'action.configure' | 'action.conditionalFormatting' | 'action.rename'
   | 'action.moveUp' | 'action.moveDown' | 'action.delete'
+  | 'action.dragToReorder'
   | 'action.confirmRename' | 'action.cancelRename'
   | 'action.cancel' | 'action.reloadLatest' | 'action.dismiss'
   | 'action.add' | 'action.addOption' | 'action.save' | 'action.remove'
@@ -174,6 +175,7 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'action.rename': { en: 'Rename', zh: '重命名' },
   'action.moveUp': { en: 'Move up', zh: '上移' },
   'action.moveDown': { en: 'Move down', zh: '下移' },
+  'action.dragToReorder': { en: 'Drag to reorder', zh: '拖动排序' },
   'action.delete': { en: 'Delete', zh: '删除' },
   'action.confirmRename': { en: 'Confirm rename', zh: '确认重命名' },
   'action.cancelRename': { en: 'Cancel rename', zh: '取消重命名' },

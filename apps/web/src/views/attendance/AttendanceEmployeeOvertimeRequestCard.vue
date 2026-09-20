@@ -2,8 +2,9 @@
   Dedicated employee 加班申请 card.
 
   Display / form-UX only. Writes the same `requestForm` object AttendanceView
-  already submits through POST /api/attendance/requests. Shift-swap stays on
-  the shared collapsed form. First viewport is untouched.
+  already submits through POST /api/attendance/requests. Sister dedicated
+  cards (leave / makeup / overtime / shift-swap) are mutually exclusive.
+  First viewport is untouched.
 
   Duration follows start/end after a manual edit (0.5-hour steps). Existing
   overtime rules (min / rounding / max) stay server-side — this card does not

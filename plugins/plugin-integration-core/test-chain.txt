@@ -37,6 +37,8 @@ node __tests__/db.test.cjs
 node __tests__/external-systems.test.cjs
 node __tests__/external-systems-list-workspace-fallback.test.cjs
 node __tests__/connection-resolver.test.cjs
+node __tests__/legacy-binding-canonical-invariant.test.cjs
+node __tests__/pr1-canonical-legacy-read-equivalence.test.cjs
 node __tests__/adapter-contracts.test.cjs
 node __tests__/provenance-contracts.test.cjs
 node __tests__/connector-action-contracts.test.cjs
@@ -57,6 +59,8 @@ node __tests__/stock-preparation-project-reads.test.cjs
 node __tests__/stock-preparation-erp-material-sync-persist.test.cjs
 node __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs
 node __tests__/stock-preparation-readonly-source-run.test.cjs
+node __tests__/scenario-b-synthetic-bom-source-run.test.cjs
+node __tests__/scenario-b-staging-persist.test.cjs
 node __tests__/stock-preparation-plm-source-persist-bridge.test.cjs
 node __tests__/stock-preparation-snapshot-reads.test.cjs
 node __tests__/stock-preparation-confirm-writes.test.cjs
@@ -70,8 +74,10 @@ node __tests__/stock-preparation-bom-expansion.test.cjs
 node __tests__/stock-preparation-project-subtree-bridge.test.cjs
 node __tests__/stock-preparation-large-bom-jobs.test.cjs
 node __tests__/stock-preparation-conflict-planner.test.cjs
+node __tests__/stock-preparation-foreign-existing-rows-readside.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs
 node __tests__/stock-preparation-confirmation-decisions.test.cjs
+node __tests__/stock-preparation-own-base.test.cjs
 node __tests__/stock-preparation-permission-matrix.test.cjs
 node __tests__/stock-preparation-prep-line-export.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
@@ -89,6 +95,7 @@ node __tests__/b2a-trial-registry.test.cjs
 node __tests__/b2a-trial-registry-wiring.test.cjs
 node __tests__/stock-preparation-pack-install-ledger.test.cjs
 node __tests__/stock-preparation-pack-install-readback.test.cjs
+node __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs
 node __tests__/stock-preparation-pack-sandbox-target.test.cjs
 node __tests__/stock-preparation-customer-pack-routes.test.cjs
 node __tests__/customer-dictionary-leak-guard.test.cjs
@@ -102,6 +109,7 @@ node __tests__/stock-preparation-carry-target-binding.test.cjs
 node __tests__/stock-preparation-suggestion-operators.test.cjs
 node __tests__/stock-preparation-apply-writer.test.cjs
 node __tests__/stock-preparation-table-actions.test.cjs
+node __tests__/stock-preparation-target-field-existence-probe.test.cjs
 node __tests__/stock-preparation-synthetic-sql-fixture.test.cjs
 node __tests__/stock-preparation-mvp-generation.test.cjs
 node __tests__/stock-preparation-snapshot-diff.test.cjs
@@ -219,10 +227,18 @@ node __tests__/stock-preparation-operator-scope-tripwires.test.cjs
 node __tests__/stock-preparation-department-fields-and-write-scoping.test.cjs
 node __tests__/stock-preparation-project-board.test.cjs
 node __tests__/stock-preparation-operator-pull-gate.test.cjs
+node __tests__/stock-preparation-dry-run-target-field-probe-routes.test.cjs
+node __tests__/stock-preparation-mvp-persist-target-field-probe-routes.test.cjs
+node __tests__/stock-preparation-mvp-repair-routes.test.cjs
 node __tests__/stock-preparation-write-scope-reconcile-bounds.test.cjs
+
+# G4/M2 (#5553): adapter-load hard dependency + no credential-stripped fallback.
+# Mutation probe: scripts/g4-m2-mutation-probe.cjs
+node __tests__/integration-g4-m2-adapter-load-hard-dependency.test.cjs
 
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
+# --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---
 node __tests__/sealed-export-s4-generation-kernel.test.cjs
 node __tests__/sealed-export-s4-generation-migration.test.cjs
 node __tests__/sealed-export-sqlserver-sealed-snapshot-profile.test.cjs

@@ -31,6 +31,7 @@ function intersectCapabilities(
     canManageAutomation: requestCapabilities.canManageAutomation && databaseCapabilities.canManageAutomation,
     canExport: requestCapabilities.canExport && databaseCapabilities.canExport,
     canSendNotification: requestCapabilities.canSendNotification && databaseCapabilities.canSendNotification,
+    canSubmitApproval: requestCapabilities.canSubmitApproval && databaseCapabilities.canSubmitApproval,
   }
 }
 
@@ -46,6 +47,7 @@ const DENIED_CAPABILITIES: MultitableCapabilities = {
   canManageAutomation: false,
   canExport: false,
   canSendNotification: false,
+  canSubmitApproval: false,
 }
 
 const AUTHORITY_LOCK_FUNCTION = 'metasheet_try_recovery_authority_user'
@@ -465,7 +467,8 @@ export async function loadDatabaseFreshRecoveryAccess(
     rbac_admin?: unknown
   } | undefined
   if (!user || user.is_active === false || user.role === 'disabled') {
-    return { userId: normalizedUserId, permissions: [], isAdminRole: false }
+    // A surviving sheet assignment must not re-grant authority to an invalid account.
+    return { userId: '', permissions: [], isAdminRole: false }
   }
 
   const permissionResult = await query(
@@ -503,6 +506,23 @@ export type RecoverySheetAuthority = {
   sheetScope?: SheetPermissionScope
 }
 
+/** Database-side recovery authority; callers still enforce full-read and true-delta write policy. */
+export async function resolveDatabaseRecoverySheetAuthority(
+  query: QueryFn,
+  sheetId: string,
+  actorId: string,
+): Promise<RecoverySheetAuthority> {
+  const access = await loadDatabaseFreshRecoveryAccess(query, actorId)
+  if (!access.userId) {
+    return {
+      access,
+      capabilities: DENIED_CAPABILITIES,
+      capabilityOrigin: { source: 'global-rbac', hasSheetAssignments: false },
+    }
+  }
+  return resolveSheetCapabilitiesForAccess(query, sheetId, access)
+}
+
 /**
  * Resolve recovery authority as the intersection of request claims and transaction-fresh database
  * authority. Current sheet-scoped grants are evaluated by the shared policy resolver on both sides;
@@ -522,15 +542,22 @@ export async function resolveRecoverySheetAuthority(
     }
   }
 
-  const databaseAccess = await loadDatabaseFreshRecoveryAccess(query, requestAccess.userId)
-  const [requestResolved, databaseResolved] = await Promise.all([
-    resolveSheetCapabilitiesForAccess(query, sheetId, requestAccess),
-    resolveSheetCapabilitiesForAccess(query, sheetId, databaseAccess),
-  ])
+  const databaseResolved = await resolveDatabaseRecoverySheetAuthority(query, sheetId, requestAccess.userId)
+  const databaseAccess = databaseResolved.access
+  if (!databaseAccess.userId) {
+    return {
+      ...databaseResolved,
+      access: { userId: requestAccess.userId, permissions: [], isAdminRole: false },
+    }
+  }
+  const requestResolved = await resolveSheetCapabilitiesForAccess(query, sheetId, requestAccess)
   const access: ResolvedRequestAccess = {
     userId: requestAccess.userId,
     permissions: databaseAccess.permissions,
     isAdminRole: requestAccess.isAdminRole && databaseAccess.isAdminRole,
+    ...(requestAccess.authenticatedTenantId
+      ? { authenticatedTenantId: requestAccess.authenticatedTenantId }
+      : {}),
   }
   return {
     access,

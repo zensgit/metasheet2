@@ -401,7 +401,10 @@ test('/new promotes its starter flow into Canvas without manufacturing a dirty d
 
   await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toBeVisible()
   await expect(canvasNode(page, 'approval_1')).toHaveAttribute('data-node-type', 'approval')
-  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('新模板')
+  // Re-pinned (approval-form-ux-slice1 remedy, 20260916 gate condition 1): draftStateLabel's
+  // !isEditMode && !isDraftDirty branch now renders '新表单' (TemplateAuthoringView.vue:1857),
+  // not '新模板' — this is the B3 rename, not a regression.
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('新表单')
 
   await canvasNodeSelector(page, 'approval_1').click()
   await page.click('[data-testid="approval-canvas-inspector-rename"]')

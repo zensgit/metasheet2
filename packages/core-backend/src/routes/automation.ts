@@ -31,6 +31,10 @@ import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-co
 import { requireAdminRole } from '../guards/audit-integration'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { resolveSheetCapabilities } from '../multitable/permission-service'
+// The 403 body and the two liveness-404 bodies are a CLIENT CONTRACT (clients switch on
+// `error.code`), so they come from one shared module instead of being hand-copied per route. See
+// multitable/sheet-refusals.ts for the drift those copies used to invite.
+import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import { poolManager } from '../integration/db/connection-pool'
 import {
   INBOUND_WEBHOOK_BODY_LIMIT,
@@ -166,6 +170,83 @@ function toRunView(
   }
 }
 
+/**
+ * #5779 — rule-scoped execution view for the per-rule `/logs` read.
+ *
+ * The route used to serialize the persisted row verbatim, which carries `triggerEvent` (the values of
+ * the record that fired the rule) and `ruleSnapshot` (the rule as configured at run time, action
+ * config included). Those two blobs are a governance/diagnosis surface: the cross-sheet runs API
+ * keeps them behind `requireAdminRole()` AND only emits them on its DETAIL view
+ * (`toRunView(..., { includeSnapshot: true })`). A per-rule log panel has no use for them.
+ *
+ * Why `redactAutomationExecutionForResponse` + two deletes, and NOT `toRunView(e, { includeSnapshot:
+ * false })`: `toRunView` is the A2 runs-API projection — it re-states `status` in the C1
+ * WorkflowJobStatus vocabulary and rewrites `steps` into WorkflowJob views. The rule log panel
+ * (apps/web/src/multitable/components/MetaAutomationLogViewer.vue) filters on the LEGACY
+ * success/failed/skipped values and renders `step.actionType` / `step.durationMs` / `step.output`,
+ * none of which survive that projection. This keeps the pinned flat `AutomationExecution` shape
+ * (and the secret-shape scrubbing the /test route already applies) and drops only the two blobs.
+ */
+function toRuleScopedExecutionView(execution: AutomationExecution): AutomationExecution {
+  // redactAutomationExecutionForResponse returns a NEW object, so these deletes never mutate
+  // the caller's row (and never the persisted one).
+  const view = redactAutomationExecutionForResponse(execution)
+  delete view.triggerEvent
+  delete view.ruleSnapshot
+  return view
+}
+
+/**
+ * Fail-CLOSED refusal for a permission/rule resolution that threw.
+ *
+ * Never echo the raw error message (it can carry DB host/port/user). SQLSTATE is checked FIRST:
+ * PG prose is `lc_messages`-dependent (222 runs a Chinese locale, where `does not exist` never
+ * matches), and only the 503-vs-500 choice depends on it — neither branch admits the caller.
+ */
+function sendFailClosedResolutionError(
+  res: Response,
+  err: unknown,
+  nonTransientCode: string,
+  nonTransientMessage: string,
+) {
+  const raw = err instanceof Error ? err.message : ''
+  const transient = isDbNotReadySqlState(err)
+    || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+  return res.status(transient ? 503 : 500).json({
+    ok: false,
+    error: {
+      code: transient ? 'DB_NOT_READY' : nonTransientCode,
+      message: transient ? 'Service temporarily unavailable' : nonTransientMessage,
+    },
+  })
+}
+
+/**
+ * Transient-DB classification for a failure thrown out of `svc.testRun` ONLY.
+ *
+ * Unlike the permission/sample-record reads above, testRun runs the simulated planner and real
+ * executors, whose own error prose routinely says "unavailable" / "not ready" / "does not exist"
+ * about a target, view or field. Matching English message text here would relabel those as
+ * 503 DB_NOT_READY. So the 503 decision uses only language-independent codes: SQLSTATE
+ * (42P01/42703, connection-exception class 08, 53300 too_many_connections, 57P01-57P03 shutdown/
+ * cannot-connect) and Node socket codes. The single message test is node-pg's own fixed driver
+ * string, anchored at the start, which planner prose does not produce.
+ */
+const TEST_RUN_TRANSIENT_NODE_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN'])
+const TEST_RUN_TRANSIENT_SQLSTATES = new Set(['53300', '57P01', '57P02', '57P03'])
+
+function isTestRunTransientDbError(err: unknown): boolean {
+  if (isDbNotReadySqlState(err)) return true
+  if (!err || typeof err !== 'object') return false
+  const code = (err as { code?: unknown }).code
+  if (typeof code === 'string') {
+    if (TEST_RUN_TRANSIENT_NODE_CODES.has(code)) return true
+    if (TEST_RUN_TRANSIENT_SQLSTATES.has(code)) return true
+    if (/^08[0-9A-Z]{3}$/.test(code)) return true
+  }
+  return err instanceof Error && /^Connection terminated/.test(err.message)
+}
+
 function shouldUsePersistedJobs(
   execution: AutomationExecution,
   jobs: ReturnType<typeof toWorkflowJobView>[] | undefined,
@@ -250,6 +331,109 @@ export function createAutomationRoutes(
     return svc
   }
 
+  /**
+   * #5779 — authorization for the rule-addressed READS (`/logs`, `/stats`).
+   *
+   * THE GAP THIS CLOSES: both routes were registered with a single handler and NO middleware, and the
+   * handler read only `:ruleId` — the `:sheetId` segment was decorative. The log service filters on
+   * `rule_id` alone and `multitable_automation_executions` has no tenant column, so the only layer in
+   * front of them was the global session JWT gate (index.ts), which AUTHENTICATES but does not
+   * AUTHORIZE: any logged-in caller — including one holding NO automation authority anywhere — could
+   * read any rule's execution history, raw `triggerEvent` / `ruleSnapshot` blobs included.
+   *
+   * WHAT IS CLOSED, EXACTLY — deliberately stated narrowly:
+   *   - a caller with no automation capability at all is refused (403, nothing read), and
+   *   - a rule that does not belong to the PATH sheet is refused (404), so `:sheetId` is load-bearing.
+   *
+   * WHAT IS **NOT** CLOSED (residual, and not this route's to close): `canManageAutomation` is a
+   * GLOBAL capability tier — multitable/access.ts `deriveCapabilities()` derives it from the caller's
+   * own permission codes (`workflow:all|write|create|execute`, and via `hasPermission()` also
+   * `workflow:*` / `*:*`) or an admin role. `resolveSheetCapabilities()` narrows that tier by the
+   * caller's per-sheet grants ONLY IF the caller holds grant rows on that sheet:
+   * permission-service.ts `applySheetPermissionScope` returns early on `!scope.hasAssignments`, and
+   * the narrowing line (`canManageAutomation && scope.canWrite`) is reached only below that early
+   * return. So a workflow-capable principal with NO relationship to the sheet keeps the full tier and
+   * reads that rule's history from a sheetId + ruleId pair alone — exactly as that same principal can
+   * already list / PATCH / DELETE the sheet's rules through the sibling routes in
+   * routes/univer-meta.ts, which run this identical composition. Do NOT read the cross-sheet 404
+   * below as tenant isolation: it binds rule -> path-sheet, and nothing more.
+   *
+   * Its inverted corollary, stated plainly rather than left to be discovered: holding a READ-ONLY
+   * share on the sheet makes the caller hold grant rows, which takes the `scope.canWrite` branch and
+   * REFUSES them (403) — strictly less access than the same caller with no relationship at all. Both
+   * halves are the platform composition shared by every automation surface, not something introduced
+   * here, and neither is this route's to change unilaterally: narrowing the no-grant case would 403
+   * every operator on a deployment that keeps no per-sheet grant rows (222 grants through roles), and
+   * widening the read-only case would be a relaxation. Both are pinned as "RESIDUAL SCOPE" tests in
+   * tests/unit/automation-rule-log-read-authz.test.ts so neither can be mistaken for a guarantee.
+   *
+   * BEHAVIOUR CHANGE, disclosed: step 5 also refuses a DELETED rule's history (no rule row -> 404),
+   * which this endpoint used to serve out of the orphaned execution rows. The post-mortem path is
+   * `GET /api/multitable/automation-executions?ruleId=…` (platform-admin only, below); the FE only
+   * ever opens this panel from a live rule card.
+   *
+   * The gate below is the one the sibling rule-scoped reads already run
+   * (`routes/univer-meta.ts` → `/sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries`),
+   * in the SAME order:
+   *   1. resolve capabilities for the PATH sheet (fail-CLOSED if the resolution throws)
+   *   2. `canManageAutomation` — run history is part of the rule-authoring surface
+   *   3. sheet liveness — a soft-deleted/absent sheet is a coded 404, not a 403
+   *   4. service readiness (the pre-existing 503, unchanged)
+   *   5. `rule.sheet_id === :sheetId` — step 2 only proves the capability TIER, and
+   *      `getRule(ruleId)` is not sheet-bound, so a rule owned by another sheet must still 404.
+   *
+   * Returns null when it has already answered the request.
+   */
+  async function authorizeRuleScopedRead(
+    req: Request,
+    res: Response,
+  ): Promise<{ svc: AutomationService; sheetId: string; ruleId: string } | null> {
+    // TRIMMED: `/sheets/%20/automations/<id>/logs` decodes to a truthy single space, which would
+    // otherwise skip this 400 and be answered by the liveness lookup as 'Sheet not found' — two
+    // refusals for one malformed request. Matches the `.trim()` on the /fwb/confirm sibling below.
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId.trim() : ''
+    if (!sheetId || !ruleId) {
+      res.status(400).json({ error: 'sheetId and ruleId are required' })
+      return null
+    }
+
+    try {
+      const pool = poolManager.get()
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        sendForbidden(res)
+        return null
+      }
+      if (sheetLiveness !== 'live') {
+        sendSheetNotLive(res, sheetLiveness)
+        return null
+      }
+    } catch (err) {
+      sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
+      return null
+    }
+
+    const svc = getService(res)
+    if (!svc) return null
+
+    let rule: Awaited<ReturnType<AutomationService['getRule']>>
+    try {
+      rule = await svc.getRule(ruleId)
+    } catch (err) {
+      sendFailClosedResolutionError(res, err, 'RULE_LOOKUP_FAILED', 'Failed to resolve the automation rule')
+      return null
+    }
+    // Values-free and identical for "no such rule" and "rule belongs to another sheet": the refusal
+    // must not become an oracle for rule ids or for the owning sheet.
+    if (!rule || rule.sheet_id !== sheetId) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
+      return null
+    }
+
+    return { svc, sheetId, ruleId }
+  }
+
   // ── T1-2 inbound webhook trigger ───────────────────────────────────────
 
   router.post(
@@ -294,13 +478,18 @@ export function createAutomationRoutes(
     let authoringUserId = ''
     try {
       const pool = poolManager.get()
-      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation || !capabilities.canManageSheetAccess) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
       }
       authoringUserId = access.userId
       if (!authoringUserId) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+      // #5803 follow-up: authority first (no liveness oracle), then liveness — a soft-deleted rule
+      // sheet must not mint a confirmation hash nor write the confirmation audit row.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
     } catch (err) {
       const raw = err instanceof Error ? err.message : ''
@@ -458,6 +647,15 @@ export function createAutomationRoutes(
             error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
           })
         }
+        // The `SELECT base_id FROM meta_sheets` above does not filter deleted_at, so a soft-deleted
+        // update target would otherwise be confirmed. Answered with the route's existing values-free
+        // "target unavailable" body (the PATH sheet is live; SHEET_DELETED would name the wrong one).
+        if (targetAccess.sheetLiveness !== 'live') {
+          return res.status(404).json({
+            ok: false,
+            error: { code: 'FWB_TARGET_UNAVAILABLE', message: 'Target sheet is unavailable' },
+          })
+        }
       }
 
       const fieldResult = await pool.query(
@@ -555,8 +753,10 @@ export function createAutomationRoutes(
   // ── Test run ────────────────────────────────────────────────────────────
 
   router.post('/sheets/:sheetId/automations/:ruleId/test', async (req: Request, res: Response) => {
-    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId : ''
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
+    // TRIMMED like authorizeRuleScopedRead: a whitespace-only segment is a malformed request (400),
+    // not a sheet the liveness lookup below would answer as 'Sheet not found'.
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId.trim() : ''
     if (!sheetId || !ruleId) {
       return res.status(400).json({ error: 'sheetId and ruleId are required' })
     }
@@ -569,27 +769,24 @@ export function createAutomationRoutes(
     // the route additionally makes the safe simulation default authoritative server-side.
     try {
       const pool = poolManager.get()
-      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageAutomation) {
-        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+        return sendForbidden(res)
+      }
+      // #5803 follow-up: capability FIRST, then liveness — same order as authorizeRuleScopedRead, so
+      // an unauthorized caller gets the same 403 for a live and a soft-deleted sheet (no liveness
+      // oracle). A soft-deleted sheet refuses BOTH modes here, before the sample-record read and
+      // before testRun: simulate would otherwise plan against a dead sheet, and real_fire must not
+      // rely on the sample-record read happening to join meta_sheets.
+      if (sheetLiveness !== 'live') {
+        return sendSheetNotLive(res, sheetLiveness)
       }
     } catch (err) {
-      // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through
-      // to an ungated testRun. Review P3: never echo the raw error message (it can carry DB
-      // host/port/user) — surface a generic, values-free message. A connection / not-ready error
-      // is a transient 503; anything else is a 500. Either way the real run never fired.
-      const raw = err instanceof Error ? err.message : ''
-      // SQLSTATE 先判:42P01 缺表 / 42703 缺列在中文 locale 下散文是「关系 x 不存在」/
-      // 「字段 x 不存在」,英文正则匹配不到,pre-migration 的 DB 会被误判成 500 而不是 503。
-      const transient = isDbNotReadySqlState(err)
-        || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
-      return res.status(transient ? 503 : 500).json({
-        ok: false,
-        error: {
-          code: transient ? 'DB_NOT_READY' : 'PERMISSION_CHECK_FAILED',
-          message: transient ? 'Service temporarily unavailable' : 'Failed to resolve permissions',
-        },
-      })
+      // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through to
+      // an ungated testRun. Same responder as the rule-scoped reads: SQLSTATE先判 (42P01/42703 在
+      // 中文 locale 下散文匹配不到) -> 值无关的 503/500,绝不回显原始报错。ONE copy, so the
+      // fail-closed sites in this file cannot drift apart. Either way the real run never fired.
+      return sendFailClosedResolutionError(res, err, 'PERMISSION_CHECK_FAILED', 'Failed to resolve permissions')
     }
 
     const svc = getService(res)
@@ -677,61 +874,68 @@ export function createAutomationRoutes(
       const response = redactAutomationExecutionForResponse(execution)
       return res.json({ ...response, dryRun: rawMode !== 'real_fire' })
     } catch (err) {
+      // Typed rejections carry a fixed, values-free message chosen by the service, and pass through
+      // with their status and code. That includes the rule gate (no rule / rule of another sheet /
+      // disabled rule → one 404 TEST_RUN_RULE_NOT_FOUND, not an oracle for rule ids or the owning
+      // sheet) and the service's own liveness refusal (404 SHEET_DELETED, the same body as the check
+      // above) for a sheet deleted after that check. Refusals are recognised by TYPE, never by text.
       if (err instanceof AutomationTestRunRejectedError) {
         return res.status(err.status).json({ ok: false, error: { code: err.code, message: err.message } })
       }
-      if (rawMode === 'real_fire') {
-        return res.status(500).json({
-          ok: false,
-          error: { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
-        })
-      }
-      const message = err instanceof Error ? err.message : 'Test run failed'
-      const code = message.includes('not found') ? 404 : 500
-      return res.status(code).json({ error: message })
+      // Anything else is values-free for BOTH modes: the thrown message may carry the rule id or a
+      // raw DB error (host/user/SQL), so it is only CLASSIFIED here, never echoed. Code-only
+      // DB-not-ready → 503 (no English prose matching — planner/executor errors say
+      // "unavailable"/"does not exist" about targets), else 500. Same fixed bodies as elsewhere.
+      // A plain Error — even one that reads like the rule gate — is a 500 here.
+      const transient = isTestRunTransientDbError(err)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: transient
+          ? { code: 'DB_NOT_READY', message: 'Service temporarily unavailable' }
+          : { code: 'TEST_RUN_FAILED', message: 'Test run failed' },
+      })
     }
   })
 
   // ── Execution logs ──────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/logs', async (req: Request, res: Response) => {
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
-    if (!ruleId) {
-      return res.status(400).json({ error: 'ruleId is required' })
-    }
-
-    const svc = getService(res)
-    if (!svc) return undefined
+    // #5779: capability → liveness → readiness → rule-owns-this-sheet. Nothing is read before it passes.
+    const authorized = await authorizeRuleScopedRead(req, res)
+    if (!authorized) return undefined
+    const { svc, ruleId } = authorized
 
     try {
       const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 50, 1), 200)
       const executions = await svc.logs.getByRule(ruleId, limit)
-      // Client does parseJson<{ executions: AutomationExecution[] }>(res)
-      return res.json({ executions })
+      // Client does parseJson<{ executions: AutomationExecution[] }>(res) — shape pinned; each row is
+      // the rule-scoped view (no ruleSnapshot / triggerEvent), never the raw persisted row.
+      return res.json({ executions: executions.map(toRuleScopedExecutionView) })
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load logs'
-      return res.status(500).json({ error: message })
+      // VALUES-FREE, like the gate three screens up: a pg/kysely failure carries host, port, role and
+      // SQL text in `err.message`, and this handler used to hand that to the browser verbatim. The
+      // operator keeps the detail server-side.
+      console.error('[automation] rule log read failed:', err)
+      return sendFailClosedResolutionError(res, err, 'LOG_READ_FAILED', 'Failed to load execution logs')
     }
   })
 
   // ── Execution stats ─────────────────────────────────────────────────────
 
   router.get('/sheets/:sheetId/automations/:ruleId/stats', async (req: Request, res: Response) => {
-    const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
-    if (!ruleId) {
-      return res.status(400).json({ error: 'ruleId is required' })
-    }
-
-    const svc = getService(res)
-    if (!svc) return undefined
+    // #5779: same gate as /logs — aggregate counts for a rule are still that rule's history.
+    const authorized = await authorizeRuleScopedRead(req, res)
+    if (!authorized) return undefined
+    const { svc, ruleId } = authorized
 
     try {
       const stats = await svc.logs.getStats(ruleId)
       // Flat shape — client does parseJson<AutomationStats>(res)
       return res.json(stats)
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load stats'
-      return res.status(500).json({ error: message })
+      // VALUES-FREE — same reason as /logs above.
+      console.error('[automation] rule stats read failed:', err)
+      return sendFailClosedResolutionError(res, err, 'STATS_READ_FAILED', 'Failed to load execution stats')
     }
   })
 

@@ -31,6 +31,19 @@ const VALID_STATUSES = new Set(['active', 'inactive', 'error'])
 // MERGES a payload over the stored config, an accepted client value would overwrite the stored
 // stamp and re-attribute somebody else's pin. Stripped at the single normalize choke point.
 const SERVER_OWNED_CONFIG_KEYS = new Set(['dataSourceOwnerId'])
+// The binding side's PARTICIPATION in the data-source delete lock protocol (#5784 ②, PR-B) is the
+// foreign key on `connection_id`, not a SELECT of this module's own: `lib/db.cjs` is scoped to
+// `integration_*` tables and must not be widened to reach `data_sources`. Since core-backend
+// migration zzzz20260920120000 that key references `data_sources(live_id)`, a STORED generated
+// column that is NULL once the source is soft-deleted. So an INSERT/UPDATE that names a deleted
+// source — or one whose delete committed while this write waited on its row lock — is refused by
+// PostgreSQL with SQLSTATE 23503 on THIS constraint. That refusal is a client-visible conflict, not
+// a server fault; `translateConnectionFkViolation` turns it into a stable 409 code.
+const LIVE_CONNECTION_FK = 'fk_integration_external_systems_live_connection_id'
+// The constraint the same column carried before that migration (-> data_sources(id)). Read the
+// same way so a not-yet-migrated schema reports a hard-deleted source identically.
+const LEGACY_CONNECTION_FK = 'fk_integration_external_systems_connection_id'
+const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
 
 class ExternalSystemValidationError extends Error {
   constructor(message, details = {}) {
@@ -60,6 +73,24 @@ class ExternalSystemConflictError extends Error {
     // verbatim, exactly as before.
     if (typeof details.code === 'string' && details.code.trim()) this.code = details.code.trim()
   }
+}
+
+/**
+ * Map the connection foreign key's refusal to a typed conflict; return every other error as-is.
+ * Judged by SQLSTATE first — `23503` is stable across server locales, whereas the English
+ * "violates foreign key constraint" prose never appears on a zh_CN server — and by the constraint
+ * name second (pg reports it as `error.constraint`; a driver that omits it is accepted, because
+ * no other foreign key exists on this table's writes). Values-free: the constraint name is the
+ * only detail carried, never the connection id or the row.
+ */
+function translateConnectionFkViolation(error) {
+  if (!error || typeof error !== 'object' || error.code !== '23503') return error
+  const constraint = typeof error.constraint === 'string' ? error.constraint : ''
+  if (constraint && constraint !== LIVE_CONNECTION_FK && constraint !== LEGACY_CONNECTION_FK) return error
+  return new ExternalSystemConflictError(
+    'the selected connection is not live: the data source it names has been deleted (or its delete committed while this write waited); pick a live connection',
+    { field: 'connectionId', code: CONNECTION_NOT_LIVE_CODE, constraint: constraint || null },
+  )
 }
 
 function requiredString(value, field) {
@@ -606,6 +637,91 @@ function createExternalSystemRegistry({
     })
   }
 
+  // MIN-PR2-i: A ROLLBACK-ELIGIBLE LEGACY BINDING MAY NOT BE RE-POINTED WHILE STAYING LEGACY.
+  //
+  // docs/integration-consolidation-minimal-plan-20260901.md:214 — "已标记可回退的 legacy Binding 若
+  // 修改 `config.dataSourceId`，必须在同一次写入中提供 `connectionId` 并转为 canonical;不得允许旧指针
+  // 在 legacy 状态下静默改指向。"
+  //
+  // WHAT IT CLOSES. On an existing row `requestedConnectionId` inherits `existing.connection_id`
+  // unless the caller passes `connectionId` explicitly, and `baseRow` copies
+  // `legacy_connection_fallback_eligible` over verbatim. So a row in the rollback shape
+  // (connection_id NULL + marker TRUE) accepted a brand-new `config.dataSourceId`, kept the marker,
+  // skipped the whole canonical branch below (`connectionId !== null` is false) and went on
+  // resolving through `resolveLegacy` — against a DIFFERENT connection than the cutover recorded,
+  // with no canonical proof and no trace that the binding had moved.
+  //
+  // WHY REFUSE INSTEAD OF AUTO-CONVERTING. Converting would have to GUESS the canonical id from the
+  // legacy pointer — the inference the cutover migration only dared make where a server-stamped
+  // owner matched the connection's owner — and it is irreversible from this API
+  // (`requestedConnectionId` refuses to clear `connectionId` afterwards). Refusing keeps the choice
+  // with the operator, who re-issues the same write carrying `connectionId`.
+  //
+  // WHERE IT SITS. AFTER `resolveUpdatedConfig`, i.e. after the legacy pointer's own owner check, so
+  // a non-owner still gets the binder's uniform "not found" and cannot use this refusal to learn
+  // that a row exists in the legacy state. Both are pure validation, so a refusal still writes
+  // nothing.
+  //
+  // WHAT IT DOES NOT TOUCH:
+  //   * INSERTS — a new binding has no stored pointer to move and is canonical-only already;
+  //   * kinds other than `data-source:sql-readonly` (`data-source:sql-write-gated`, http, erp:*) —
+  //     they carry no `connection_id` at all, and `requestedConnectionId` REJECTS `connectionId` for
+  //     them, so a kind-blind guard would freeze their pointer with no remedy available;
+  //   * rows whose marker is FALSE — a canonical row that never went through the cutover keeps its
+  //     pre-existing refusal (the resolver's CONNECTION_BINDING_MISMATCH on a disagreeing dual
+  //     reference);
+  //   * re-asserting the SAME pointer, which is what the bridge picker serializes on every rename;
+  //   * CLEARING the pointer (`{ dataSourceId: null }`), which de-points rather than re-points: the
+  //     binding then resolves to nothing (`CONNECTION_LEGACY_POINTER_REQUIRED`) instead of to
+  //     somewhere else. Clear-then-set is still caught, because an empty stored pointer is still a
+  //     difference from the non-empty one being written.
+  function assertLegacyBindingRepointCarriesCanonicalConnection(existing, normalized) {
+    if (normalized.kind !== SQL_READONLY_SOURCE_KIND) return
+    if (!existing || existing.legacy_connection_fallback_eligible !== true) return
+    // An explicit `connectionId` IS the remedy: that write goes through
+    // `validateCanonicalConnectionBinding` below and converts the row.
+    if (normalized.connectionId !== undefined && normalized.connectionId !== null) return
+    if (!isPlainObject(normalized.config)) return
+    if (!Object.prototype.hasOwnProperty.call(normalized.config, 'dataSourceId')) return
+    const requested = typeof normalized.config.dataSourceId === 'string'
+      ? normalized.config.dataSourceId.trim()
+      : ''
+    if (!requested) return
+    const stored = isPlainObject(existing.config) && typeof existing.config.dataSourceId === 'string'
+      ? existing.config.dataSourceId.trim()
+      : ''
+    if (requested === stored) return
+    throw new ExternalSystemValidationError(
+      // Values-free: names the rule and the remedy, echoes neither pointer, neither scope nor the id.
+      'a rollback-eligible legacy binding cannot change its data source pointer without providing connectionId in the same write',
+      { field: 'connectionId', code: 'LEGACY_BINDING_DATASOURCE_CHANGE_REQUIRES_CONNECTION_ID' },
+    )
+  }
+
+  // THE CONNECTION A ROLLBACK-ELIGIBLE ROW CURRENTLY RESOLVES AGAINST ("生效指针").
+  //
+  // The two shapes the cutover leaves behind disagree about WHERE that id is stored:
+  //   * pure legacy  (connection_id NULL,  marker TRUE): it lives in `config.dataSourceId` and
+  //     `resolveLegacy` reads it;
+  //   * migrated     (connection_id SET,   marker TRUE): `resolveCanonical` reads `connection_id`,
+  //     and `config.dataSourceId` survives only as the rollback trail (it must AGREE, or
+  //     connection-resolver.cjs raises CONNECTION_BINDING_MISMATCH).
+  // Canonical wins when both are present, which is exactly the precedence the resolver applies, so
+  // this returns the id the row is being read through TODAY. '' means the row currently points
+  // nowhere (a cleared pointer on a pure-legacy row).
+  //
+  // NOT `config.dataSourceId` ALONE. Comparing the payload against the stored legacy pointer would
+  // leave `connection_id` free to move on a migrated row while the pointer stayed put, minting the
+  // one shape neither resolver branch accepts (canonical id A + legacy pointer B).
+  function effectiveLegacyBindingPointer(existing) {
+    if (!existing) return ''
+    const canonical = typeof existing.connection_id === 'string' ? existing.connection_id.trim() : ''
+    if (canonical) return canonical
+    return isPlainObject(existing.config) && typeof existing.config.dataSourceId === 'string'
+      ? existing.config.dataSourceId.trim()
+      : ''
+  }
+
   async function upsertExternalSystem(input) {
     const normalized = normalizeExternalSystemInput(input)
     const existing = await findExisting(normalized)
@@ -665,6 +781,34 @@ function createExternalSystemRegistry({
       if (input.config === undefined) updateRow.config = existing.config
       else updateRow.config = await resolveUpdatedConfig(existing, updateRow.config, input)
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
+      assertLegacyBindingRepointCarriesCanonicalConnection(existing, normalized)
+      // The other half of the same rule: a write that MOVES a rollback-eligible row's binding to a
+      // DIFFERENT connection is an explicit canonical re-bind, proven a few lines below through
+      // `validateCanonicalConnectionBinding`. Retiring the marker in that same write is what makes
+      // the new binding canonical rather than "canonical id written, still resolving as legacy"; it
+      // only ever NARROWS the row (it can no longer take `resolveLegacy`), and the pointer drop
+      // below follows from it, so marker FALSE never coexists with a stored legacy pointer.
+      //
+      // NARROWED (this PR, #5783 follow-up) TO AN ACTUAL POINTER CHANGE. The condition used to be
+      // "kind + marker TRUE + an explicit non-null `connectionId`", which never looked at whether
+      // the binding moved. The workbench edit form fills its draft from
+      // `system.connectionId || config.dataSourceId` and serializes `connectionId` on EVERY save
+      // (apps/web/src/views/IntegrationWorkbenchView.vue:2309/2325/2445, passed through verbatim by
+      // lib/http-routes.cjs), so a pure RENAME re-asserted the row's OWN current connection and
+      // retired the marker on the spot — and the pointer drop below then deleted
+      // `config.dataSourceId`, silently destroying the rollback trail the cutover deliberately kept.
+      // Re-asserting the id the row already resolves through proves nothing new and moves nothing,
+      // so it now leaves the marker alone; only a write that names a DIFFERENT connection converts.
+      // This RELAXES a guard: see the design note for why the narrowed condition still cannot leave
+      // a row canonical-but-legacy-marked against a connection it does not resolve through.
+      const retiresRollbackMarker = normalized.kind === SQL_READONLY_SOURCE_KIND
+        && existing.legacy_connection_fallback_eligible === true
+        && normalized.connectionId !== undefined
+        && normalized.connectionId !== null
+        && normalized.connectionId !== effectiveLegacyBindingPointer(existing)
+      if (retiresRollbackMarker) {
+        updateRow.legacy_connection_fallback_eligible = false
+      }
       if (normalized.kind === SQL_READONLY_SOURCE_KIND && connectionId !== null) {
         const reassertsConnection = normalized.connectionId !== undefined
           || (isPlainObject(input.config) && Object.prototype.hasOwnProperty.call(input.config, 'dataSourceId'))
@@ -677,7 +821,11 @@ function createExternalSystemRegistry({
         // Rows created after cutover are canonical-only. An old picker may still submit the
         // compatibility alias, but it must not re-introduce the legacy storage shape. Migrated
         // rows keep their pointer because the explicit fallback marker is their rollback proof.
-        if (existing.legacy_connection_fallback_eligible !== true) {
+        // Reads the marker AS THIS WRITE LEAVES IT, not `existing.`: a row converted a few lines
+        // above is canonical from this write onwards, so it sheds the pointer in the same write
+        // instead of persisting the one shape (marker FALSE + legacy pointer) neither resolver
+        // branch is written for.
+        if (updateRow.legacy_connection_fallback_eligible !== true) {
           updateRow.config = withoutLegacyDataSourcePointer(updateRow.config)
         }
         // ATTRIBUTION LAST, on the whole canonical branch (migrated rows included — they resolve
@@ -693,10 +841,13 @@ function createExternalSystemRegistry({
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted
       }
+      // The write that takes the data_sources KEY SHARE lock through the connection FK (see
+      // LIVE_CONNECTION_FK): if the named source is gone by the time the lock is granted, the FK
+      // refuses here and the refusal is a 409, not a 500.
       const rows = await db.updateRow(TABLE, updateRow, {
         ...scopeWhere(normalized),
         id: existing.id,
-      })
+      }).catch((error) => { throw translateConnectionFkViolation(error) })
       const row = Array.isArray(rows) ? rows[0] : rows?.rows?.[0]
       if (!row) {
         throw new ExternalSystemNotFoundError('external system not found during update', {
@@ -735,7 +886,10 @@ function createExternalSystemRegistry({
       config: insertConfig,
       credentials_encrypted: credentialsEncrypted === undefined ? null : credentialsEncrypted,
     }
+    // Same FK participation as the update branch: a bind racing a delete waits on the source's
+    // row lock, then fails its FK re-check against data_sources(live_id) and surfaces as a 409.
     const rows = await db.insertOne(TABLE, insertRow)
+      .catch((error) => { throw translateConnectionFkViolation(error) })
     const row = Array.isArray(rows) ? rows[0] : rows?.rows?.[0]
     return publicRow(credentialStore, row || insertRow)
   }
@@ -1219,9 +1373,13 @@ module.exports = {
   ExternalSystemValidationError,
   ExternalSystemNotFoundError,
   ExternalSystemConflictError,
+  EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE_CODE: CONNECTION_NOT_LIVE_CODE,
   hasPrivateConfigMutation,
   __internals: {
     TABLE,
+    LIVE_CONNECTION_FK,
+    LEGACY_CONNECTION_FK,
+    translateConnectionFkViolation,
     VALID_ROLES,
     VALID_STATUSES,
     detectCredentialFormat,
