@@ -177,8 +177,19 @@ function mapGroupConstraintError(error: unknown): unknown {
     && typeof pgErr.constraint === 'string'
     && NONBLANK_CHECK_CONSTRAINTS.has(pgErr.constraint)
   ) {
+    // P2-2 fix (groups-daily-ops-real-browser-acceptance-20260920.md): this message used to read
+    // "当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误" — internal governance vocabulary
+    // ("锁文"/"owner"/"勘误") that should never reach a product surface, AND inaccurate: the CHECK
+    // is "contains at least one" printable-ASCII character, not "only accepts" printable ASCII
+    // (a name like "请假Leave" satisfies it and stores CJK text fine — see the class doc comment
+    // above / finding P1-2). This string is a defense-in-depth fallback for any caller that does
+    // not have the frontend's code->copy map (`describeApprovalTemplateGroupError` in
+    // `apps/web/src/approvals/api.ts`), which is what the panel now renders instead of this raw
+    // message for `GROUP_NAME_UNSUPPORTED`. Still does not name a fix — this is a request-shape
+    // mapping of a ratified §2 CHECK, not a widening of it; only an owner-approved erratum (#5907)
+    // changes what the CHECK itself accepts.
     return new ServiceError(
-      '当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误',
+      'This value must include at least one ASCII letter, digit, or symbol character.',
       400,
       'GROUP_NAME_UNSUPPORTED',
       { constraint: pgErr.constraint },
