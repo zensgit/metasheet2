@@ -199,7 +199,7 @@ generic HTTP-status-only shape):
 | `CANCEL_ROUND_SUITE_FORBIDDEN` (own class `CancelRoundSuiteForbiddenError extends ServiceError`) | 409 | `metadata.suite === 'forbidden'` on the original instance | lock §14.3 (lock:357, v5.8) — **lock-anchored**, dedicated error class required verbatim |
 | `CANCEL_ROUND_ALREADY_PENDING` | 409 | A `pending` round already exists for this document (pre-check, and the authoritative 23505-translation backstop on `uq_approval_rounds_pending_document`) | lock §5 I3 / §14.1 I3 discipline; erratum — no explicit code named, chosen for symmetry with the constraint it backstops |
 | `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` | 409 | **(a)** every `approve` row on the original carries a `system:` sentinel, so no human seat survives the namespace drop — `details = { reason: 'no_human_approver' }`, a category, never an id (gate round 6, G6-1); **(b)** the graph executor's initial-state resolution does not land on `pending`/the cancel node — no `details` (see §3.4: the "≥1 assignment" leg of (b) is unreachable, because the executor throws `400 APPROVAL_ASSIGNEE_EMPTY` first) | fail-closed backstop per lock §14.1's "NEVER auto-approve, NEVER zero seats" discipline (lock:335 席位 N ≥ 1, lock:337 I″ 至少一个活动席位); erratum. One code, two arms — a fifth code is deliberately NOT minted |
-| `CANCEL_ROUND_SEAT_INELIGIBLE` | 409 | At least one seat could not be re-convened. TWO classes, one code (owner ruling 2026-09-20 — **no new code minted**): (1) **QUALIFICATION** — an attributed subject is refused by the SHARED login gate `evaluateUserAuthenticationGate` (`is_active = FALSE`, `role = 'disabled'`, `activation_status = 'pending_activation'` / not in the closed set, or no `users` row at all) ⇒ `reasons ⊆ {inactive, pending_activation, activation_invalid, not_found}`; (2) **RESOLUTION** — an `approve` row cannot be attributed to a unique 原审批主体 ⇒ `reasons ⊆ {seat_unresolvable, delegate_not_seat}`. `details = { ineligibleCount, reasons }` — categories only, never an id; on the RESOLUTION class `ineligibleCount` counts ROWS (there is no person to count). The admin-facing MESSAGE differs by class: 「restore the account」 for (1), 「review this document」 for (2) — an admin-facing message must not promise a remedy that cannot work. **Judged only on claimed PERSONS**: `system:`-namespaced actors are dropped before attribution, so `reasons: ['not_found']` can no longer mean "a sentinel" (gate round 6, G6-1) and a sentinel row is never judged unattributable | lock §2-G3 (lock:74-76, 「重新验证当前资格…资格不成立的席位 ⇒ 阻断并提示管理员」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19, reason vocabulary extended 2026-09-20 per the owner ruling |
+| `CANCEL_ROUND_SEAT_INELIGIBLE` | 409 | At least one seat could not be re-convened. TWO classes, one code (owner ruling 2026-09-20 — **no new code minted**): (1) **QUALIFICATION** — an attributed subject is refused by the SHARED login gate `evaluateUserAuthenticationGate` (`is_active = FALSE`, `role = 'disabled'`, `activation_status = 'pending_activation'` / not in the closed set, or no `users` row at all) ⇒ `reasons ⊆ {inactive, pending_activation, activation_invalid, not_found}`; (2) **RESOLUTION** — an `approve` row cannot be attributed to a unique 原审批主体 ⇒ `reasons ⊆ {seat_unresolvable, delegate_not_seat}`. `metadata.nodeKey` on a legacy-route row is CALLER-SUPPLIED, so for an actor who held any delegated seat here it is CORROBORATED against `approval_assignments` (it must land on exactly one of that actor's own rows) rather than trusted — 负控 `N11(a)` / 正控 `P20(a)`. `details = { ineligibleCount, reasons }` — categories only, never an id; on the RESOLUTION class `ineligibleCount` counts ROWS (there is no person to count). The admin-facing MESSAGE differs by class: 「restore the account」 for (1), 「review this document」 for (2) — an admin-facing message must not promise a remedy that cannot work. **Judged only on claimed PERSONS**: `system:`-namespaced actors are dropped before attribution, so `reasons: ['not_found']` can no longer mean "a sentinel" (gate round 6, G6-1) and a sentinel row is never judged unattributable | lock §2-G3 (lock:74-76, 「重新验证当前资格…资格不成立的席位 ⇒ 阻断并提示管理员」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19, reason vocabulary extended 2026-09-20 per the owner ruling |
 
 > **实现者勘误,交 owner(2026-09-20)。** 本轮的任务简报另外点名了第三个新 reason 值
 > `original_ineligible`。**没有加**,理由写在这里而不是留给人去发现:「原主体…已失格」这件事,
@@ -403,7 +403,7 @@ even though the person cannot log in.
 |---|---|---|---|
 | 1a | 分句一:「重新验证当前资格(**在职**…)」 | **SHIPPED** (half A) | `assertCancelRoundSeatsEligibleInTxn`;`§2-G3 正控 P1` / `负控 N1` / `负控 N2` |
 | 1b | 分句一:「…**仍在该组织单元**」 | **OPEN** (half B) — 未实现、已登记 | 常驻 `正控 P2`(`org_id IS NULL` 的原单不被拒) |
-| 2 | 分句二:「历史委托不自动成为当前授权」 | **RULED by owner 2026-09-20 —— 读法 (a) + 阻断;已在本分支实现** | 独立验证 §2.2 四腿逐字相同;**22 条**真库用例 + 四条 mutation(M-B/M-C/M-D/M-E,见验证 MD **Part O**;Part N / N-H 的对应读数已被 Part O 取代) |
+| 2 | 分句二:「历史委托不自动成为当前授权」 | **RULED by owner 2026-09-20 —— 读法 (a) + 阻断;已在本分支实现** | 独立验证 §2.2 四腿逐字相同;**25 条**真库用例 + 五条 mutation(M-B/M-C/M-D/M-E/M-F,见验证 MD **Part O**;Part N / N-H 的对应读数已被 Part O 取代) |
 | 3 | 分句三:「资格不成立的席位 ⇒ 阻断并提示管理员」 | **SHIPPED**(阻断,永不过滤)。owner 2026-09-20 裁决把它的**人口**也定死了:席位要么是**被还原的原审批主体**并在他身上求值,要么**根本坐不下**(行不可归属)⇒ 同样阻断。legacy 无 `nodeKey` 语料上「席位停在 D、该句对 A 不执行」的旧状态**已不复存在** | `负控 N1/N2` 的零行断言;mutation R7-M3 与 **M-C**;legacy 臂 `P12(a)/N7(a)/N8(a)/P13(a)`(现在全部断言 **409 零行**);多人委托臂 `N9(a)/N10(a)` |
 
 分句二那一行是本次新增的一行:在此之前它既不在 SHIPPED 一侧、也不在 OPEN 清单上,而同一条款的组织半边
@@ -450,6 +450,9 @@ verification 2026-09-19 §2.2; the AFTER column is measured on this branch, 验�
 | 多人委托同一人(A→D、B→D,两节点) | seat = `[D]`(1 席) | seat = **`{A, B}`**(2 席,`P16(a)`) | **409 / `seat_unresolvable` / 零行**(`N9(a)`) |
 | 多人委托同一人 × A 已停权 | creation succeeds | **409 / `inactive` / 零行**(`N10(a)`),**不**回退给 D | (同上,先被 `seat_unresolvable` 拦住) |
 | legacy 语料但**从来没有过委托** | 201, seat = `[A]` | (不适用) | **201, seat = `[A]`**(`P19(a)`)—— 阻断不外溢到整个历史语料 |
+| legacy 请求体伪造 `metadata.nodeKey` 成不存在的节点 | 201, seat = `[D]`(**修复前实测可绕过整组阻断**) | (不适用) | **409 / `seat_unresolvable` / 零行**(`N11(a)`) |
+| legacy 请求体带**真实**的 `nodeKey` | 201, seat = `[D]` | (不适用) | **201, seat = `[A]`**(`P20(a)`)—— 传真话不是绕过,是把还原做对 |
+| 被委托人用 legacy 给自己的兄弟节点报成被委托节点 | (同形诚实单据 `P11(a)` 答 `{A, D}`) | (不适用) | **201, seat = `[A]`**(`P21(a)`)—— **已登记残留**:他把自己摘了出去,门槛 2→1 |
 
 Reading (a) answers 「原审批人」 uniformly, so a still-valid delegation does NOT route the cancel
 round to the delegatee. That is a consequence of the cancel round's own snapshot carrying no
@@ -467,19 +470,43 @@ contract and is not implemented here.
   and cannot be attributed to a node seat. Up to the ruling the actor simply KEPT the seat, i.e. the
   historical delegatee held it — which the ruling forbids in as many words. The candidate now
   BLOCKS instead:
-  - the row's actor holds **exactly one** delegated seat on this instance ⇒ 409
-    `CANCEL_ROUND_SEAT_INELIGIBLE`, `details.reasons = ['delegate_not_seat']`, zero rows;
-  - the actor holds **two or more different** delegators on this instance (the owner's own
-    「多人委托同一人」 counter-example) ⇒ same code, `reasons = ['seat_unresolvable']`;
   - the actor holds **no** delegated seat on this instance ⇒ the actor IS the subject and is seated
-    normally. **This arm is load-bearing and is pinned by 正控 `P19(a)`**: without it every document
-    ever approved through the legacy route — the entire pre-delegation corpus — would 409.
+    normally, whatever the row says. **This arm is asked FIRST, is load-bearing, and is pinned by
+    正控 `P19(a)`**: without it every document ever approved through the legacy route — the entire
+    pre-delegation corpus — would 409;
+  - the row has **no `nodeKey`** and the actor holds **exactly one** delegated seat here ⇒ 409
+    `CANCEL_ROUND_SEAT_INELIGIBLE`, `details.reasons = ['delegate_not_seat']`, zero rows;
+  - the row has **no `nodeKey`** and the actor holds **two or more different** delegators here (the
+    owner's own 「多人委托同一人」 counter-example) ⇒ same code, `reasons = ['seat_unresolvable']`;
+  - the row **names a node** and the actor holds a delegated seat here ⇒ the name is **CORROBORATED**:
+    it must land on **exactly one** of that actor's own assignment rows, delegated or not. Anything
+    else ⇒ `reasons = ['seat_unresolvable']`.
+
+  **Why corroboration, and not "trust `nodeKey` when it is present" (the first cut of this fix, which
+  was MEASURED to be trivially bypassable).** The legacy route copies the request body's `metadata`
+  verbatim into `approval_records.metadata`, so `nodeKey` there is caller-supplied. Trusting it let any
+  holder of `approvals:act` walk past this entire block by sending
+  `{"metadata":{"nodeKey":"totally_made_up_node"}}` — measured on a real DB: the delegatee was seated
+  and nothing blocked. 负控 `N11(a)` is that witness, now blocking; 正控 `P20(a)` sends the TRUE
+  `nodeKey` down the same route and gets the honest restore, so the rule rejects **names without
+  evidence**, not «metadata in the body».
 
   Restoring to the single known delegator was considered and NOT chosen: the same actor may also
   have approved a seat OF THEIR OWN through the same node-key-less route, so the restore would be a
   guess. Both candidate answers are unsafe ⇒ neither is taken ⇒ BLOCK. The instance-wide fallback
   registered here previously is therefore also closed out: it would have mis-folded the sibling-seat
   case (正控 `P11(a)`).
+
+  **KNOWN RESIDUAL, registered and pinned rather than left to be found (负控 `P21(a)`, MEASURED).**
+  Corroboration proves the named node is one the actor really held; it cannot prove it is the node
+  **this particular row settled**. A delegatee who ALSO owns an un-delegated seat at another node can
+  therefore send the legacy approve naming the **delegated** node: both rows then restore to the
+  delegator and the delegatee **drops out of the cancel round**, taking the 会签 threshold from 2 to 1
+  (`P11(a)`, the honest same-shape document, answers `{A, D}`). The failure direction here is the
+  actor REMOVING themselves, never gaining a seat, and it needs the actor to genuinely hold both seats.
+  Closing it needs either the legacy route to write `nodeKey` itself (a contract change to a shipped
+  endpoint) or a 「seats vs approve rows」 reconciliation (which would misfire on honest corpora) —
+  **both owner calls, neither done here**. `P21(a)` pins today's answer and will go red when it is fixed.
 
   **What this does NOT claim.** It does not make the legacy route write `nodeKey`, and it does not
   give an administrator a way to re-open such a document — the error message says 「review this

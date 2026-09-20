@@ -1218,7 +1218,10 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // (`routes/approvals.ts:2877-2879`), so its approve row carries NO `nodeKey` and the restore
     // join's `a.node_key = r.metadata->>'nodeKey'` conjunction cannot match. Production-shaped:
     // the row is written by the shipped route, not hand-edited into the table afterwards.
-    options: { approveVia?: 'actions' | 'legacy' } = {},
+    // `legacyNodeKey` injects `metadata.nodeKey` into the LEGACY request body. That body is copied
+    // VERBATIM into `approval_records.metadata` by the shipped route, so this is not a hand-edit of
+    // the table — it is exactly what any holder of `approvals:act` can send today.
+    options: { approveVia?: 'actions' | 'legacy'; legacyNodeKey?: string } = {},
   ): Promise<{
     documentId: string
     requesterId: string
@@ -1280,7 +1283,10 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       )
       const legacyApprove = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
         method: 'POST',
-        body: { version: versionRow.rows[0].version },
+        body: {
+          version: versionRow.rows[0].version,
+          ...(options.legacyNodeKey !== undefined ? { metadata: { nodeKey: options.legacyNodeKey } } : {}),
+        },
       })
       expect(legacyApprove.status, await legacyApprove.clone().text()).toBe(200)
       // The leg's OWN precondition, asserted rather than assumed: the legacy route deactivates no
@@ -1312,7 +1318,10 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       [documentId],
     )
     expect(records.rows).toEqual([
-      { actor_id: delegateeD, node_key: approveVia === 'legacy' ? null : 'approval_a' },
+      {
+        actor_id: delegateeD,
+        node_key: approveVia === 'legacy' ? (options.legacyNodeKey ?? null) : 'approval_a',
+      },
     ])
     const allRecords = await pool().query<{ actor_id: string }>(
       `SELECT actor_id FROM approval_records WHERE instance_id = $1`,
@@ -1549,7 +1558,12 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
    * matches D's OWN seat at `approval_b` against the DELEGATED assignment row at `approval_a`, and
    * D's own seat is folded into A — one seat where there must be two. 会签门槛真的会被降低。
    */
-  async function delegatedSiblingSeatOriginal(label: string): Promise<{
+  async function delegatedSiblingSeatOriginal(
+    label: string,
+    // `secondNodeVia: 'legacy'` sends the SECOND node through the legacy route, optionally naming a
+    // `nodeKey` in the request body — the corroboration residual pinned by 负控 `P21(a)`.
+    options: { secondNodeVia?: 'actions' | 'legacy'; legacyNodeKey?: string } = {},
+  ): Promise<{
     documentId: string
     requesterId: string
     delegatorA: string
@@ -1608,12 +1622,30 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     const documentId = ((await create.json()) as { id: string }).id
     createdApprovalIds.add(documentId)
 
-    for (const step of ['approval_a', 'approval_b']) {
-      const approve = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+    const firstApprove = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(firstApprove.status, `approval_a: ${await firstApprove.clone().text()}`).toBe(200)
+    if (options.secondNodeVia === 'legacy') {
+      const versionRow = await pool().query<{ version: number }>(
+        `SELECT version FROM approval_instances WHERE id = $1`,
+        [documentId],
+      )
+      const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
+        method: 'POST',
+        body: {
+          version: versionRow.rows[0].version,
+          ...(options.legacyNodeKey !== undefined ? { metadata: { nodeKey: options.legacyNodeKey } } : {}),
+        },
+      })
+      expect(legacy.status, `approval_b (legacy): ${await legacy.clone().text()}`).toBe(200)
+    } else {
+      const secondApprove = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
         method: 'POST',
         body: { action: 'approve' },
       })
-      expect(approve.status, `${step}: ${await approve.clone().text()}`).toBe(200)
+      expect(secondApprove.status, `approval_b: ${await secondApprove.clone().text()}`).toBe(200)
     }
 
     // 正控先行, per-node: the delegated seat and the OWN seat must both exist and must differ in
@@ -1631,12 +1663,17 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
 
     const records = await pool().query<{ actor_id: string; node_key: string | null }>(
       `SELECT actor_id, metadata->>'nodeKey' AS node_key
-         FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY metadata->>'nodeKey'`,
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
       [documentId],
     )
+    // 每条腿自己的前提,断言而不是假设:第二行的 `nodeKey` 是模板运行时写的 `approval_b`,还是
+    // legacy 路由从请求体逐字搬过来的那个值。两者混淆的话,`P21(a)` 与 `P11(a)` 就分不清了。
     expect(records.rows).toEqual([
       { actor_id: delegateeD, node_key: 'approval_a' },
-      { actor_id: delegateeD, node_key: 'approval_b' },
+      {
+        actor_id: delegateeD,
+        node_key: options.secondNodeVia === 'legacy' ? (options.legacyNodeKey ?? null) : 'approval_b',
+      },
     ])
 
     const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
@@ -2251,6 +2288,66 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     const attempt = await attemptCancelRound(documentId, requesterId)
     expect(attempt.thrown, 'the whole pre-delegation legacy corpus must stay cancellable').toBeFalsy()
     expect(attempt.seats).toEqual([approverA])
+  })
+
+  // ── CORROBORATION:`metadata.nodeKey` 是请求体来的,不能当系统写的用 ───────────────────────────
+  //
+  // **这一组是审阅意见揪出来的、我第一版漏掉的洞,实测复现过才修的。** 第一版把「行有 `nodeKey`」当成
+  // 「这条 approve 行属于某个节点席位」的充分条件,于是**上面整组阻断可以用一个垃圾字符串绕过去**:
+  // legacy `POST /:id/approve` 把请求体的 `metadata` 逐字写进 `approval_records.metadata`,
+  // 任何持 `approvals:act` 的主体发 `{"metadata":{"nodeKey":"totally_made_up_node"}}`,
+  // join 落到一个不存在的节点、`node_delegators` 为空、代码就把 actor 坐下了 ——
+  // **实测(修复前,真库):席位 = `[D]`,零阻断**,即裁决点名禁止的那个回退,只是多打了 8 个字。
+  //
+  // 修法不是「过滤掉没见过的 nodeKey」,而是**换判据**:先问 actor 在**本实例**上有没有过被委托席位;
+  // 有,才要求这行的 `nodeKey` **恰好命中该 actor 自己的一条 assignment 行**(委托的或自己的都算)。
+  // 命中 0 条 ⇒ 名字没有凭据 ⇒ `seat_unresolvable`;命中 >1 条 ⇒ 歧义 ⇒ 同。
+  // 没有被委托席位的 actor 完全不受影响(`P19(a)`)—— 爆炸半径就锁在这里。
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  it('§2-G3 第三句 负控 N11(a)(审阅发现,修复前实测可绕过)— legacy 路由伪造 metadata.nodeKey 成一个**不存在的节点**:不再把 actor 坐下,而是 409 seat_unresolvable、零行', async () => {
+    const fixture = await delegatedApprovedOriginal('g3dlg-forged', {
+      approveVia: 'legacy',
+      legacyNodeKey: 'totally_made_up_node_that_never_existed',
+    })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // 修复前这里 MEASURED 的答案是:不抛、席位 `[D]`。现在:
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
+      fixture.delegatorA,
+      fixture.delegateeD,
+    ])
+    expect(attempt.seats).toEqual([])
+  })
+
+  it('§2-G3 第三句 正控 P20(a) — 反向不对称:同一条 legacy 路由,传**真实的** nodeKey(approval_a)不是绕过,它只是把还原做对了 ⇒ 201、席位 [A];所以修法拒的是「没有凭据的名字」,不是「请求体里带了 metadata」', async () => {
+    const fixture = await delegatedApprovedOriginal('g3dlg-truthy', {
+      approveVia: 'legacy',
+      legacyNodeKey: 'approval_a',
+    })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA])
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
+    // 这一腿与 N11(a) 只差 `legacyNodeKey` 一个字段的值,所以它把 N11(a) 的红归因到**凭据**,
+    // 而不是归因到「legacy + metadata 一律拒」。少了它,N11(a) 可能只是在测一条更粗的规则。
+  })
+
+  it('§2-G3 第三句 负控 P21(a)(**已登记的残留**,钉今天的答案)— 被委托人在自己**真有**席位的兄弟节点上走 legacy、却把 nodeKey 报成**被委托的那个节点**:凭据判据命中 1 条、放行,于是他把自己从撤销轮里摘了出去,会签人数 2 → 1', async () => {
+    const fixture = await delegatedSiblingSeatOriginal('g3dlg-selfdrop', {
+      secondNodeVia: 'legacy',
+      legacyNodeKey: 'approval_a',
+    })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // MEASURED,不是预测。两条 approve 行都被归属到 approval_a ⇒ 都还原成 A ⇒ 去重后 1 席。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA])
+    expect(attempt.seats.length).toBe(1)
+    // **这条腿不主张 1 是对的。** 诚实的同形单据(`P11(a)`,两节点都走模板运行时)答 {A, D} 两席;
+    // 这里 D 通过给自己那条 legacy 行改名,把自己从撤销轮的会签集合里摘掉了 —— 门槛真的降了。
+    // 为什么本轮不修:凭据判据在这条路径上**没有被骗**(D 确实在 approval_a 有一条被委托席位),
+    // 要分辨「这条 legacy 行到底结的是哪个节点」需要的是 legacy 路由自己写 `nodeKey`,
+    // 或者按「actor 的席位数 vs approve 行数」对账 —— 前者是路由的合同变更,后者会误伤诚实语料。
+    // 两条都属 owner,已登记进设计 MD §3.4。将来若被修好,这条腿会红并点名自己。
   })
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
