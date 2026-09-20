@@ -258,6 +258,13 @@ import {
   listMultitableTemplates,
   type MultitableTemplate,
 } from '../multitable/template-library'
+// #5861 —— 「使用模板」的安装去重(同一意图在窗口内只落一个 Base)。
+import {
+  TemplateInstallLedgerUnavailableError,
+  runDeduplicatedTemplateInstall,
+  type TemplateInstallQueryFn,
+  type TemplateInstallScope,
+} from '../multitable/template-install-dedupe'
 import {
   CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
   CUSTOM_TEMPLATE_ID_PREFIX,
@@ -8312,7 +8319,20 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         resolvedTemplate = found
       }
 
-      const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
+      // #5861:安装去重。同一次「安装意图」= (租户, 用户, 模板, 工作区, 请求的 Base 名),
+      // 窗口内(默认 5 分钟)重复安装**不新建**,而是原样重放第一次那条 201 —— 用户拿回的
+      // 就是他刚才想要的那个 Base。租户只取 resolveTemplateTenantId(req)(JWT 的
+      // authenticatedTenantId),不是可被 x-tenant-id 兼容头改写的 req.user.tenantId;
+      // 用户只取鉴权解析出的 access.userId。并发互斥来自安装事务里的
+      // pg_advisory_xact_lock + 账本主键,不是「先查后插」(见 template-install-dedupe.ts)。
+      const installScope: TemplateInstallScope = {
+        tenantId: resolveTemplateTenantId(req),
+        actorId: access.userId,
+        templateId,
+        workspaceId: parsed.data.workspaceId ?? null,
+        baseName: parsed.data.baseName?.trim() || null,
+      }
+      const runInstall = (query: unknown) => installMultitableTemplate({
         query: query as unknown as QueryFn,
         templateId,
         template: resolvedTemplate,
@@ -8320,16 +8340,47 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         ownerId: access.userId,
         workspaceId: parsed.data.workspaceId ?? null,
         idGenerator: (prefix) => buildId(prefix).slice(0, 50),
-      }))
+      })
+
+      let outcome: { replayed: boolean; baseId: string; body: unknown }
+      // 重放时这里保持 null:那条 201 的 sheetId 已经在第一次安装时记过一次日志了。
+      let freshSheetId: string | null = null
+      try {
+        outcome = await pool.transaction(async ({ query }) => runDeduplicatedTemplateInstall({
+          query: query as unknown as TemplateInstallQueryFn,
+          scope: installScope,
+          install: async () => {
+            const result = await runInstall(query)
+            freshSheetId = result.sheets[0]?.id ?? null
+            return { baseId: result.base.id, body: { ok: true, data: result } }
+          },
+        }))
+      } catch (err) {
+        // 账本表还没迁移 → 退回**改动前**的行为(照常安装,只是不去重),而不是让
+        // 「使用模板」整个挂掉。此路径上一个事务已经回滚,什么都没写。
+        if (!(err instanceof TemplateInstallLedgerUnavailableError)) throw err
+        // 消息故意不带稳定的 `[multitable.template.install]` token —— 下面那条
+        // 结构化 info 事件才是事件面,否则 SOP 的事件名 grep 会把一次安装数成两次。
+        templateInstallLogger.warn('Template install dedupe ledger unavailable; installed without dedupe', {
+          templateId,
+          userId,
+        })
+        const result = await pool.transaction(async ({ query }) => runInstall(query))
+        freshSheetId = result.sheets[0]?.id ?? null
+        outcome = { replayed: false, baseId: result.base.id, body: { ok: true, data: result } }
+      }
 
       templateInstallLogger.info('[multitable.template.install]', {
         templateId,
         ok: true,
         userId,
-        baseId: result.base.id,
-        sheetId: result.sheets[0]?.id ?? null,
+        baseId: outcome.baseId,
+        sheetId: freshSheetId,
+        replayed: outcome.replayed,
       })
-      return res.status(201).json({ ok: true, data: result })
+      // 重放的 body 与第一次逐字节相同(客户端契约不变);只有这个响应头能看出是重放。
+      if (outcome.replayed) res.set('Idempotent-Replayed', 'true')
+      return res.status(201).json(outcome.body)
     } catch (err) {
       let statusCode: number
       let errorCode: string

@@ -1900,6 +1900,9 @@ export class MultitableApiClient implements CommentsApiClient {
   private templatesCacheCustomUnavailable = false
   private templatesGeneration = 0
   private templatesInflight: { promise: Promise<ListTemplatesResult>; generation: number } | null = null
+  // #5861:「使用模板」的在途合并表。key = (模板 id, baseName, workspaceId);
+  // 只在请求在途期间有条目(settle 即删),所以它挡连点、不挡「稍后再装一次」。
+  private readonly installTemplateInflight = new Map<string, Promise<InstallTemplateResult>>()
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -2246,16 +2249,41 @@ export class MultitableApiClient implements CommentsApiClient {
     return data
   }
 
+  /**
+   * #5861 —— 在途合并(前端侧的第二道闸门)。
+   *
+   * 客户在「使用模板」看起来没反应时反复点,装出了 4 个同名 Base。权威的去重在服务端
+   * (同一意图窗口内只落一个 Base);这里只负责让**同一个前端里**并发的重复调用共用一次
+   * 请求:同 (模板, 落点参数) 的调用在前一次还没落地之前返回同一个 promise,请求只发一次。
+   *
+   * 边界:只合并**在途**的调用 —— 上一次 settle(成功或失败)之后 key 立刻从表里删掉,
+   * 所以「装完之后真的想再装一次」不会被前端永久挡住(那由服务端的窗口决定)。
+   * 不做任何重试:重复发送由去重账本负责变得安全,不是由这里制造。
+   */
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
-    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    })
-    const data = await this.parseJson<InstallTemplateResult>(res)
-    // Installing a template creates a base — the cached bases list is stale.
-    this.invalidateBasesCache()
-    return data
+    // JSON 数组做键:每段都带引号+转义,任何分隔符都无法被模板 id / Base 名伪造出来。
+    const inflightKey = JSON.stringify([templateId, input.baseName ?? null, input.workspaceId ?? null])
+    const pending = this.installTemplateInflight.get(inflightKey)
+    if (pending) return pending
+
+    const run = (async () => {
+      const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      })
+      const data = await this.parseJson<InstallTemplateResult>(res)
+      // Installing a template creates a base — the cached bases list is stale.
+      this.invalidateBasesCache()
+      return data
+    })()
+
+    this.installTemplateInflight.set(inflightKey, run)
+    try {
+      return await run
+    } finally {
+      this.installTemplateInflight.delete(inflightKey)
+    }
   }
 
   // S2 — zero-write install simulation (design 20260611 §2.1). Same body
