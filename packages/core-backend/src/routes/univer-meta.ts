@@ -13148,10 +13148,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -13197,10 +13193,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        throw new NotFoundError(`Sheet not found: ${sheetId}`)
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -13999,10 +13991,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -14123,10 +14111,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -14789,10 +14773,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -15443,11 +15423,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       try {
         const pool = poolManager.get()
-        const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-        if (!sheet) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-        }
-
         const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
         if (!access.userId) {
           return res.status(401).json({ error: 'Authentication required' })
@@ -15897,23 +15872,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      let view: SharedMultitableViewConfig | null = null
-      if (viewId) {
-        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
-        if (!view || view.sheetId !== sheetId) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
-        }
-      }
       const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5839 B2 (optional move): the view lookup is a meta_views probe outside the sheet-existence
+      // guard's scope, so it moved to AFTER the authority/liveness checks above (it was previously
+      // between the deleted sheet-row probe and the 403, which would have kept it as an existence
+      // oracle for `viewId` even though the sheet oracle it originally sat next to is now closed).
+      // Its only real consumer (view?.hiddenFieldIds) is further down, so nothing between the old and
+      // new position dereferences `view`. Message is values-free (no id echoed back).
+      let view: SharedMultitableViewConfig | null = null
+      if (viewId) {
+        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View not found' } })
+        }
+      }
 
       // max-rows guard: COUNT first, HARD-FAIL (413) with total — never truncate (aggregates must be exact)
       const maxRows = Number(process.env.MULTITABLE_AGGREGATE_MAX_ROWS || '10000')
@@ -18161,12 +18139,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-
-      // Verify sheet exists
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
