@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, h, nextTick, provide, ref, type App as VueApp } from 'vue'
 import { useAuth } from '../src/composables/useAuth'
 import ApprovalTemplateGroupsPanel from '../src/views/approval/ApprovalTemplateGroupsPanel.vue'
+import { SessionOrgHostKey } from '../src/components/SessionOrgSwitcher.vue'
+import { useSessionOrg } from '../src/composables/useSessionOrg'
 
 /**
  * A-2 scope item 4 (approval form grouping design lock v2.13 §4 acceptance J, 2026-09-18):
@@ -280,6 +282,13 @@ describe('ApprovalTemplateGroupsPanel — daily-ops fixes (P2-1 / P2-2 / P2-4)',
     expect(error!.textContent).not.toContain('owner')
     expect(error!.textContent).not.toContain('勘误')
     expect(error!.textContent).not.toContain('This value must include at least one ASCII')
+    // P3-2 (impl-gate-A5-daily-ops-round1-20260920.md): removing the jargon is only half of the
+    // finding. Round 1's copy ("This group name is not supported. Try a different name.") read
+    // identically for a zero-width-junk name and for a normal Chinese one, so an admin could not
+    // tell that 请假Leave WOULD be accepted. The copy must state the rule the server enforces and
+    // show a name that satisfies it.
+    expect(error!.textContent).toMatch(/at least one/i)
+    expect(error!.textContent).toContain('请假Leave')
   })
 
   it('P2-4 rename: submitting a new name PATCHes the group and updates it in place', async () => {
@@ -392,5 +401,148 @@ describe('ApprovalTemplateGroupsPanel — daily-ops fixes (P2-1 / P2-2 / P2-4)',
     await settle()
 
     expect(onChanged).toHaveBeenCalledTimes(1)
+  })
+
+  // P3-3 (impl-gate-A5-daily-ops-round1-20260920.md): archive/unarchive MOVE the row in the
+  // server's order (`ORDER BY (archived_at IS NOT NULL), sort_order NULLS LAST, archived_at DESC
+  // NULLS LAST, name`; archiving nulls `sort_order`, unarchiving takes MAX+1), but round 1 only
+  // swapped the row in place, so a just-archived group stayed sitting among the active ones until
+  // the admin collapsed and reopened the panel. The fix re-reads the list from the server rather
+  // than reimplementing that four-key comparator on the client.
+  it('P3-3: archiving re-reads the list so the rendered order is the server\'s, not the pre-archive one', async () => {
+    let archived = false
+    let listCalls = 0
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        listCalls += 1
+        // The server's own ordering: active rows first, archived rows last.
+        return jsonResponse(200, {
+          groups: archived
+            ? [group('atg_2', 'org-a', 'Ops'), group('atg_1', 'org-a', 'Finance', '2026-09-20T00:00:00.000Z')]
+            : [group('atg_1', 'org-a', 'Finance'), group('atg_2', 'org-a', 'Ops')],
+        })
+      }
+      if (path === '/api/approval-template-groups/atg_1/archive' && init?.method === 'POST') {
+        archived = true
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance', '2026-09-20T00:00:00.000Z') })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const el = mount()
+    await settle()
+
+    const renderedOrder = () =>
+      Array.from(el.querySelectorAll('[data-group-id]')).map((node) => node.getAttribute('data-group-id'))
+    expect(renderedOrder()).toEqual(['atg_1', 'atg_2'])
+    const listCallsBeforeArchive = listCalls
+
+    ;(el.querySelector(
+      '[data-group-id="atg_1"] [data-testid="approval-template-groups-archive-button"]',
+    ) as HTMLButtonElement).click()
+    await settle()
+
+    // The archived row moved to the tail, exactly where the server puts it.
+    expect(renderedOrder()).toEqual(['atg_2', 'atg_1'])
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-testid'))
+      .toBe('approval-template-groups-item-archived')
+    // One re-read, not a re-read per render.
+    expect(listCalls).toBe(listCallsBeforeArchive + 1)
+  })
+})
+
+/**
+ * P1-A (impl-gate-A5-daily-ops-round1-20260920.md) — HOSTED mode.
+ *
+ * Standalone (every case above) this panel keeps its own `useSessionOrg()` instance and its own
+ * switcher; that is what acceptance J's mutation is red against. Inside TemplateCenterView the
+ * page provides the ONE instance for the whole page, and this panel must then render no control of
+ * its own — two live instances destroy each other's `orgs` through the composable's
+ * `onAuthPrincipalChange` handler (see `SessionOrgSwitcher.vue`'s `SessionOrgHost` doc comment).
+ */
+describe('ApprovalTemplateGroupsPanel — hosted session-org entry (P1-A)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  async function settle(rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    mocks.apiFetch.mockReset()
+    useAuth().setToken(jwt('org-a'))
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.restoreAllMocks()
+  })
+
+  it('reports the 403 to the host, draws no switcher, adds no second session-org lookup — and its list returns when the host replays loadGroups()', async () => {
+    let bound = false
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        if (!bound) {
+          return jsonResponse(403, {
+            error: { code: 'SESSION_ORG_REQUIRED', message: 'An authenticated session organization is required' },
+          })
+        }
+        return jsonResponse(200, { groups: [group('atg_1', 'org-a', 'Legal')] })
+      }
+      if (path === '/api/auth/session-orgs') {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+    const notifySessionOrgRequired = vi.fn()
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        // The real composable — the host's single instance, as TemplateCenterView builds it, and
+        // the host's own one fetch of the org list. Populating `orgs` here is what makes the
+        // assertions below discriminating: `SessionOrgSwitcher`'s own `v-if` hides it while `orgs`
+        // is empty, so a panel that FAILED to defer would still render nothing and the case would
+        // pass vacuously. With two orgs known, a non-deferring panel renders a second control.
+        const sessionOrg = useSessionOrg()
+        void sessionOrg.loadSessionOrgs()
+        provide(SessionOrgHostKey, { sessionOrg, notifySessionOrgRequired })
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+
+    const sessionOrgLookups = () =>
+      mocks.apiFetch.mock.calls.filter(([path]) => String(path).startsWith('/api/auth/session-org')).length
+    // Sanity: the host's instance really does hold two orgs now, i.e. anything that rendered a
+    // switcher here WOULD be visible.
+    expect(sessionOrgLookups()).toBe(1)
+
+    expect(container.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    expect(notifySessionOrgRequired).toHaveBeenCalledTimes(1)
+    // No SECOND lookup: the host owns that one call, the panel adds none of its own.
+    expect(sessionOrgLookups()).toBe(1)
+    // The list is suppressed while blocked — it is empty, so "No groups yet." would be a lie.
+    expect(container.querySelector('[data-testid="approval-template-groups-list"]')).toBeNull()
+
+    // Exactly what TemplateCenterView.onPageSessionOrgChange calls after a successful switch.
+    bound = true
+    await panelRef.value!.loadGroups()
+    await settle()
+
+    expect(container.querySelector('[data-testid="approval-template-groups-list"]')).not.toBeNull()
+    expect(container.textContent).toContain('Legal')
+    expect(container.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
   })
 })

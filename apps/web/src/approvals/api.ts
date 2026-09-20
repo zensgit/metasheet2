@@ -1279,9 +1279,18 @@ const APPROVAL_TEMPLATE_GROUP_ERROR_COPY: Partial<Record<ApprovalTemplateGroupEr
   // The finding's exact repro (a-02/a-03*.png): a pure-CJK name like "请假"/"采购" — the product's
   // OWN placeholder text — used to render "当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误"
   // straight into the page. Replaced with plain, non-jargon product copy.
+  //
+  // P3-2 (impl-gate-A5-daily-ops-round1-20260920.md): round 1 removed the jargon but said nothing
+  // about the rule, so the copy read identically for a zero-width-junk name and for a normal
+  // Chinese one and an admin could not tell that "请假Leave" WOULD be accepted. It now states the
+  // rule the server actually enforces (`ApprovalTemplateGroupService.mapGroupConstraintError`:
+  // "must include at least one ASCII letter, digit, or symbol character") and carries a worked
+  // example of a name that passes, in product language — no constraint name, no "lock"/"owner".
+  // This describes today's behaviour; if the name rule itself is ever widened (#5907, owner's
+  // call) this sentence is one of the things that has to move with it.
   GROUP_NAME_UNSUPPORTED: [
-    'This group name is not supported. Try a different name.',
-    '组名不符合命名规则，请更换其他名称。',
+    'Group names must contain at least one Latin letter, digit or symbol — for example, 请假Leave. Add one and try again.',
+    '分组名称需至少包含一个拉丁字母、数字或符号，例如「请假Leave」。请补充后重试。',
   ],
   GROUP_NAME_REQUIRED: ['Enter a group name.', '请填写分组名称。'],
   GROUP_NAME_TAKEN: [
