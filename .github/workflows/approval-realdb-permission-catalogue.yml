@@ -89,10 +89,12 @@ jobs:
       # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
       # never a silent skipped-green.
       EXPECT_DB: '1'
-      # The suite registers 4 real users via POST /api/auth/register from one IP; the default
-      # per-IP register limit (DEFAULT_AUTH_RATE_LIMIT_CONFIG.maxRegisterPerIp = 3) would 429 the
-      # 4th. Same override the real-browser acceptance run used for the identical reason
-      # (todo-center-real-browser-acceptance-20260920.md §0 table).
+      # The suite registers 13 real users via POST /api/auth/register from one IP (mechanically
+      # counted: `grep -c 'await registerUser(' the suite file, 20260921); the default per-IP
+      # register limit (DEFAULT_AUTH_RATE_LIMIT_CONFIG.maxRegisterPerIp = 3) would 429 starting at
+      # the 4th. Same override the real-browser acceptance run used for the identical reason
+      # (todo-center-real-browser-acceptance-20260920.md §0 table). This count grows whenever a
+      # case is added to the suite — re-count rather than assume this number stays 13.
       AUTH_REGISTER_MAX_PER_IP: '50'
     steps:
       - name: Checkout repository

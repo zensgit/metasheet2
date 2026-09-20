@@ -30,17 +30,34 @@
  * Shape: the `permissions` insert follows `zzzz20260915121000_add_multitable_submit_approval_permission`
  * (information_schema guard + `ON CONFLICT DO NOTHING`).
  *
+ * NOTE ON DESCRIPTION TEXT: the `permissions` insert is `ON CONFLICT (code) DO NOTHING`, so a
+ * database that already ran an earlier candidate version of this file (e.g. a pre-merge head applied
+ * to a long-lived test/staging DB) keeps that earlier `name`/`description` text forever — a later
+ * wording edit to `APPROVAL_PRODUCT_PERMISSIONS` below does NOT retroactively update the stored row.
+ * Picking up a wording change on such a database needs a manual `UPDATE permissions SET name = …,
+ * description = … WHERE code = 'approvals:read'`. Not applicable to this PR's own one-time throwaway
+ * DBs, each created fresh and dropped after use.
+ *
  * DELIBERATELY NOT DONE BY THIS MIGRATION — no `role_permissions` insert for `approvals:read`. Unlike
  * `zzzz20260630090000_add_approvals_analytics_permission` and
  * `zzzz20260702110000_add_approval_reassign_and_admin_scopes` (which bind their new codes to `admin`),
- * this migration grants NOTHING to ANYONE — it only makes `approvals:read` grantable through the
- * existing admin-operated grant endpoint. Who should hold `approvals:read` by default (all authenticated
- * users? a specific role? nobody, opt-in only?) is an approval-product policy decision that belongs to
- * the owner, the same way `zzzz20260915121000_add_multitable_submit_approval_permission` left
- * `approvals:write` seeding out of its own scope for the identical reason. Because no role binding is
- * added, this migration is a pure catalogue-registration no-op for every existing user's effective
- * permissions — it changes nothing until an admin explicitly grants `approvals:read` to someone through
- * `POST /api/permissions/grant`.
+ * this migration's own `up()` grants NOTHING to ANYONE — it performs no `role_permissions` or
+ * `user_permissions` insert and no bulk-apply. What it DOES do is unblock the catalogue check that
+ * BOTH existing admin-operated grant paths run before they will accept this code:
+ * `assertCodesInCatalog` (`routes/roles.ts:381`) — called from `POST /api/roles` (`:496`) and
+ * `PUT /api/roles/:id` (`:588`) before either writes `role_permissions` — and the equivalent
+ * unrecognized-code check in `routes/permissions.ts:156-164` before `POST /api/permissions/grant`
+ * writes `user_permissions`. So once this migration merges, an admin can grant `approvals:read`
+ * EITHER per-user through `POST /api/permissions/grant`, OR per-role — in a single call, binding it
+ * to every current and future holder of that role at once — through `POST /api/roles` /
+ * `PUT /api/roles/:id`. Which of those two paths gets used, and who should hold `approvals:read` by
+ * default (all authenticated users? a specific role? nobody, opt-in only?), is an approval-product
+ * policy decision that belongs to the owner, the same way
+ * `zzzz20260915121000_add_multitable_submit_approval_permission` left `approvals:write` seeding out
+ * of its own scope for the identical reason. Because this migration's own `up()` adds no role
+ * binding, it is a pure catalogue-registration no-op for every existing user's effective
+ * permissions — it changes nothing until an admin explicitly grants it, through either product path
+ * above.
  *
  * `down()` deletes the `approvals:read` row from `role_permissions`, then `user_permissions`, then
  * `permissions`, in that order. Both `role_permissions.permission_code` and
@@ -49,15 +66,17 @@
  * the final `permissions` DELETE alone would already cascade both rows away; the two explicit DELETEs
  * above it are redundant-by-CASCADE, written out so the row-loss is visible at the call site rather
  * than implicit in a constraint a future reader of this file would otherwise have to go look up.
- * `role_permissions` has no row from this migration's own `up()`, but an admin could have added one
- * out-of-band (a role bound to `approvals:read`) after this code started existing; `user_permissions`
- * rows come from `POST /api/permissions/grant`.
+ * `role_permissions` has no row from this migration's own `up()`; any row that exists came from an
+ * admin's own `POST /api/roles` / `PUT /api/roles/:id` call — the role-permission product endpoints
+ * (`routes/roles.ts:496`/`:588`), the same authorized, audited path `user_permissions` rows come from
+ * (`POST /api/permissions/grant`), not an out-of-band write.
  *
  * DISCLOSURE — rolling this migration back is NOT reversible for grant state: it permanently drops
- * every `role_permissions`/`user_permissions` row for `approvals:read`, whether admin-issued or seeded
- * out-of-band, with no compensation path and no audit trail of what was dropped. Re-running `up()`
+ * every `role_permissions`/`user_permissions` row for `approvals:read`, whether granted per-user or
+ * per-role, with no compensation path and no audit trail of what was dropped. Re-running `up()`
  * re-registers the catalogue row but does not restore who held it — an admin has to re-grant each
- * holder one-by-one through `POST /api/permissions/grant`. Same shape as
+ * holder again, per-user through `POST /api/permissions/grant` or per-role through `POST /api/roles` /
+ * `PUT /api/roles/:id`. Same shape as
  * `zzzz20260915121000_add_multitable_submit_approval_permission`'s `down()`, which has the identical
  * property for `approvals:write`.
  */
