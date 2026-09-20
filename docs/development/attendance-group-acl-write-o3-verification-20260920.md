@@ -7,9 +7,11 @@
 
 ## 1. Verdict
 
-**PASS** for the O3 write slice this PR claims: owner/sub_owner can list/add/remove members of managed groups, read the owner roster, and preview a fixed schedule. Group CRUD, manager promotion, and apply/rebuild/clear stay closed. Slice A list/get, task-home badges, and employee overview did not regress.
+**PASS** locally for the O3 write slice this PR claims: owner/sub_owner can list/add/remove members of managed groups, read the owner roster, and preview a fixed schedule. Group CRUD, manager promotion, and apply/rebuild/clear stay closed. Slice A list/get, task-home badges, and employee overview did not regress.
 
-Not a merge, deploy, or product-acceptance verdict. Fresh exact-head CI on the draft PR is still required.
+GitHub `test (18.x)` / `test (20.x)` on `386c9409c` failed because the gated source-scan still required preview to deny immediately on `!fullAdmin`. That lock is updated to O3 (`canManageAttendanceGroup` + 403-before-404) and apply/rebuild/clear/config remain scheduler-scope. Fresh exact-head CI on this commit is still required.
+
+Not a merge, deploy, or product-acceptance verdict.
 
 ## 2. What was verified
 
@@ -33,9 +35,11 @@ Not a merge, deploy, or product-acceptance verdict. Fresh exact-head CI on the d
 
 ```bash
 pnpm --filter @metasheet/core-backend exec vitest run \
-  tests/unit/attendance-uuid-validation-routes.test.ts
-# Test Files  1 passed (1)
-# Tests  101 passed (101)
+  tests/unit/attendance-uuid-validation-routes.test.ts \
+  tests/unit/attendance-advanced-scheduling-scope.test.ts
+# Test Files  2 passed (2)
+# Tests  108 passed (108)  # 101 route + 7 source-scan; recorded after CI fix
+
 
 pnpm --filter @metasheet/web exec vitest run --watch=false \
   AttendanceAdminTaskHome attendanceAdminTaskHomeStatus attendanceAdminTaskHomeAccess \
@@ -60,6 +64,7 @@ pnpm --filter @metasheet/web exec vitest run --watch=false \
 | POST managers 对 owner 放行 | 红 | OW8：list 200 后 POST 仍 403，无 INSERT |
 | 未知 action / 组 CRUD / apply 当下放 | 红 | owner PUT/DELETE group 403；apply `SCHEDULER_SCOPE_FORBIDDEN` 且无 transaction |
 | preview 对非 manager 放行 | 红 | scheduler-1 403 + 无 `FROM attendance_groups` |
+| 去掉 preview 的 `canManageAttendanceGroup` / 把 apply 接上该谓词 | 红 | `attendance-advanced-scheduling-scope.test.ts` source-scan（CI `test (18.x/20.x)` 在 `386c9409c` 因此红） |
 | 缺表当允许 | 红 | member write 42P01 → 503，无 transaction |
 
 ## 5. 未跑 / 残留

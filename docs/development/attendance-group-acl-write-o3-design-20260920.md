@@ -147,7 +147,7 @@ attendance.group.members.changed
 
 ## 5. 测试计划
 
-进既有 `packages/core-backend/tests/unit/attendance-uuid-validation-routes.test.ts`（`pnpm --filter @metasheet/core-backend test` 会跑）。
+进既有 `packages/core-backend/tests/unit/attendance-uuid-validation-routes.test.ts`，并改 gated source-scan `attendance-advanced-scheduling-scope.test.ts`：preview 锁 `canManageAttendanceGroup(..., 'fixed_schedule_preview')`（403 先于组探测 / preview SQL）；apply/rebuild/clear/config **禁止**出现该谓词，仍走 scheduler-scope assert（`pnpm --filter @metasheet/core-backend test` 会跑）。
 
 | ID | 断言 |
 |---|---|

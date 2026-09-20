@@ -28,14 +28,32 @@ function expectDirectAsyncRoute(method: string, path: string) {
   expect(pluginSource).toMatch(pattern)
 }
 
-function expectTrustedAdminRoute(method: string, path: string) {
+function extractDirectAsyncRoute(method: string, path: string): string {
   const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const pattern = new RegExp(
-    `['"]${method}['"],\\s*\\n\\s*['"]${escaped}['"],\\s*\\n\\s*async \\(req, res\\) => \\{\\s*`
-      + 'const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext\\(req, res\\)\\s*'
-      + 'if \\(!actorAccess\\) return\\s*if \\(!actorAccess\\.fullAdmin\\)',
+    `['"]${method}['"],\\s*\\n\\s*['"]${escaped}['"],\\s*\\n\\s*async \\(req, res\\) => \\{[\\s\\S]*?\\n    \\)`,
   )
-  expect(pluginSource).toMatch(pattern)
+  const match = pluginSource.match(pattern)
+  expect(match, `missing ${method} ${path} async handler`).toBeTruthy()
+  return match![0]
+}
+
+/** O3: preview is fullAdmin or in-group owner/sub_owner; 403-before-404 before group probe / preview SQL. */
+function expectGroupOwnerPreviewRoute(method: string, path: string) {
+  const handler = extractDirectAsyncRoute(method, path)
+  expect(handler).toContain('resolveAttendanceFixedScheduleRouteActorContext')
+  expect(handler).toContain("canManageAttendanceGroup(orgId, actorAccess.userId, groupId, 'fixed_schedule_preview')")
+  expect(handler.indexOf('canManageAttendanceGroup')).toBeGreaterThan(-1)
+  expect(handler.indexOf('canManageAttendanceGroup')).toBeLessThan(handler.indexOf('assertAttendanceGroupInActorOrg'))
+  expect(handler.indexOf('canManageAttendanceGroup')).toBeLessThan(handler.indexOf('buildAttendanceGroupFixedSchedulePreview'))
+}
+
+/** Apply/rebuild/clear/config stay scheduler-scope; must not inherit the O3 group-owner write set. */
+function expectSchedulerScopedFixedScheduleWriteRoute(method: string, path: string, assertFn: string) {
+  const handler = extractDirectAsyncRoute(method, path)
+  expect(handler).toContain('resolveAttendanceFixedScheduleRouteActorContext')
+  expect(handler).toContain(assertFn)
+  expect(handler).not.toContain('canManageAttendanceGroup')
 }
 
 describe('attendance advanced scheduling scope foundation', () => {
@@ -59,10 +77,30 @@ describe('attendance advanced scheduling scope foundation', () => {
       ['DELETE', '/api/attendance/scheduler-scopes/:id'],
     ].forEach(([method, path]) => expectAdminRoute(method, path))
     expect(pluginSource).toContain('SCHEDULER_SCOPE_FORBIDDEN')
-    expectTrustedAdminRoute('POST', '/api/attendance/groups/:id/fixed-schedule/preview')
+    expectGroupOwnerPreviewRoute('POST', '/api/attendance/groups/:id/fixed-schedule/preview')
     expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/apply')
     expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/rebuild')
     expectDirectAsyncRoute('POST', '/api/attendance/groups/:id/fixed-schedule/clear')
+    expectSchedulerScopedFixedScheduleWriteRoute(
+      'POST',
+      '/api/attendance/groups/:id/fixed-schedule/apply',
+      'assertAttendanceGroupFixedScheduleDispatchAllowed',
+    )
+    expectSchedulerScopedFixedScheduleWriteRoute(
+      'POST',
+      '/api/attendance/groups/:id/fixed-schedule/rebuild',
+      'assertAttendanceGroupFixedScheduleRebuildAllowed',
+    )
+    expectSchedulerScopedFixedScheduleWriteRoute(
+      'POST',
+      '/api/attendance/groups/:id/fixed-schedule/clear',
+      'assertAttendanceGroupFixedScheduleClearAllowed',
+    )
+    expectSchedulerScopedFixedScheduleWriteRoute(
+      'PUT',
+      '/api/attendance/groups/:groupId/fixed-schedule/config',
+      'assertAttendanceGroupFixedScheduleDispatchAllowed',
+    )
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/approve')
     expectDirectAsyncRoute('POST', '/api/attendance/requests/:id/reject')
     expectDirectAsyncRoute('GET', '/api/attendance/schedule-groups')
