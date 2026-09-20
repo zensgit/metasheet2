@@ -103,6 +103,36 @@ const DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON = 'unsupported_policy'
 // with '{' and can never produce this prefix. The ledger fences both directions.
 const ANONYMOUS_HOLD_IDENTITY_PREFIX = 'anon-hold:v1:'
 
+// GOV-05 (#5647 方案 (c) 第一刀, 读侧打标). An existing row without an idempotencyKey is one of two
+// things, and until now the planner could not tell them apart: a row the plugin wrote (or a legacy
+// row from before keys existed), or a FOREIGN row that a person put into the managed table through
+// the generic record write (bulk import, manual add, xlsx import, duplicate, form submit). The
+// discriminator is `meta_records.created_by`: the plugin's INSERT (core-backend records.ts) does not
+// name that column, so it is NULL; the REST create (record-service.ts) stamps the actorId. The read
+// side already surfaces it as `record.createdBy` (query-service.ts mapRecordRow), and the ONLY place
+// it was dropped was `unmapRecordFields` in stock-preparation-table-actions.cjs, which projects a
+// record down to its `data`.
+//
+// It rides on a Symbol key, deliberately: (i) it can never be forged from jsonb `data` (a `createdBy`
+// CELL is just another column); (ii) stableStringify / JSON.stringify / Object.keys skip it, so it
+// stays OUT of buildRevision's `existingRows` projection and every outstanding dry-run token keeps
+// matching (a string key would move every revision the moment it was set); (iii) object spread copies
+// own enumerable symbols, so `normalizeRows`' `{ ...row }` copy keeps it.
+//
+// FIRST CUT IS READ-SIDE ONLY: the split below changes the conflictType token and adds two summary
+// counts. Both rows are still `manual_confirm` holds, nothing is written, nothing is deactivated,
+// and `canApply` does not consult holds. `counts` (hashed) gains no key.
+const EXISTING_ROW_CREATED_BY = Symbol.for('metasheet.stock-preparation.existingRow.createdBy')
+const EXISTING_MISSING_KEY_CONFLICT_TYPES = Object.freeze({
+  pluginOrLegacy: 'missing_existing_idempotency_key',
+  foreign: 'foreign_existing_row_missing_idempotency_key',
+})
+
+function isForeignExistingRow(row) {
+  const createdBy = isPlainObject(row) ? row[EXISTING_ROW_CREATED_BY] : undefined
+  return typeof createdBy === 'string' && createdBy.trim() !== ''
+}
+
 // Row-granularity context for the two keyless-ROW families. projectNo is folded
 // in but does NOT count as a discriminator: a row carrying nothing but the
 // project number addresses nothing, and an identity that addresses nothing is
@@ -1465,11 +1495,16 @@ function planStockPreparationConflicts(input = {}) {
       derivedRowIdentity: anonymousRowIdentity('missing_expanded_idempotency_key', row, row.projectNo),
     })
   }
+  const existingRowsMissingKey = { pluginOrLegacy: 0, foreign: 0 }
   for (const row of existing.missing) {
+    // GOV-05: same hold, same source, same identity recipe — only the NAME differs by created_by.
+    const origin = isForeignExistingRow(row) ? 'foreign' : 'pluginOrLegacy'
+    const conflictType = EXISTING_MISSING_KEY_CONFLICT_TYPES[origin]
+    existingRowsMissingKey[origin] += 1
     manualConfirm(decisions, counts, {
-      type: 'missing_existing_idempotency_key',
+      type: conflictType,
       source: 'existing_row',
-      derivedRowIdentity: anonymousRowIdentity('missing_existing_idempotency_key', row, row.projectNo),
+      derivedRowIdentity: anonymousRowIdentity(conflictType, row, row.projectNo),
     })
   }
   for (const rowError of rowErrors) {
@@ -1647,6 +1682,11 @@ function planStockPreparationConflicts(input = {}) {
       humanPreservedFields: humanFields.slice(),
       plmSystemFields: plmFields.slice(),
       conflictTypes: Array.from(new Set(decisions.map((decision) => decision.conflictSummary && decision.conflictSummary.type).filter(Boolean))).sort(),
+      // GOV-05: two counts, NOT in `counts` (which buildRevision hashes) — summary-only, and
+      // spread CONDITIONALLY: a batch with no keyless existing row keeps its whole-plan JSON
+      // byte-identical to the pre-GOV-05 planner (the carry pre-wiring golden and the pack-aware
+      // control digest both pin that). Absent => both counts are zero.
+      ...(existing.missing.length > 0 ? { existingRowsMissingKey: { ...existingRowsMissingKey } } : {}),
       duplicateExpandedKeyDiagnostics: duplicateExpandedKeyDiagnostics(expanded.keyed),
       duplicateExpandedKeyResolution: resolvedExpanded.resolution,
       ...(packAwareOwnership ? { packAwareOwnership } : {}),
@@ -1668,6 +1708,16 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     humanPreservedFields: Array.isArray(summary.humanPreservedFields) ? summary.humanPreservedFields.slice() : [],
     plmSystemFields: Array.isArray(summary.plmSystemFields) ? summary.plmSystemFields.slice() : [],
     conflictTypes: Array.isArray(summary.conflictTypes) ? summary.conflictTypes.slice() : [],
+    // GOV-05: passed through ONLY when the planner produced it, so evidence summarized from an
+    // older plan stays byte-identical.
+    ...(isPlainObject(summary.existingRowsMissingKey)
+      ? {
+          existingRowsMissingKey: {
+            pluginOrLegacy: Number(summary.existingRowsMissingKey.pluginOrLegacy || 0),
+            foreign: Number(summary.existingRowsMissingKey.foreign || 0),
+          },
+        }
+      : {}),
     duplicateExpandedKeyDiagnostics: isPlainObject(summary.duplicateExpandedKeyDiagnostics)
       ? JSON.parse(JSON.stringify(summary.duplicateExpandedKeyDiagnostics))
       : undefined,
@@ -1690,6 +1740,8 @@ module.exports = {
   IDENTITY_FIELD_IDS,
   DENORMALIZED_PLM_FIELD_IDS,
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
+  EXISTING_ROW_CREATED_BY,
+  EXISTING_MISSING_KEY_CONFLICT_TYPES,
   CARRY_PROPOSAL_CONFLICT_TYPE,
   CARRY_PROPOSAL_CONFLICT_SUMMARY,
   CARRY_PROPOSAL_CHANGED_FIELDS,
@@ -1721,6 +1773,7 @@ module.exports = {
     duplicateResolvedKey,
     fieldMapForTemplate,
     groupByKey,
+    isForeignExistingRow,
     normalizeStrategy,
     normalizeIsoTime,
     normalizeComparableValueForField,
