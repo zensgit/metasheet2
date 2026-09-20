@@ -8740,7 +8740,9 @@ export class ApprovalProductService {
       //                                     assignment rows AT THIS ROW'S node (a NULL element means
       //                                     "an un-delegated seat of their own"). EMPTY means this
       //                                     actor never held a USER seat at that node;
-      //   · `node_actor_role_seat_count` — how many NON-user seats (role / source_queue) that node
+      //   · `node_actor_role_seat_count` — how many NON-user seats that node (structurally: role OR
+      //                                     source_queue; in practice ONLY role ever matches — see
+      //                                     the REGISTERED GAP below)
       //                                     carries WHOSE `assignee_id` IS A ROLE THIS ACTOR HOLDS
       //                                     ACCORDING TO A SERVER-SIDE RECORD (`user_roles`, or the
       //                                     `users.role` column). This is the actor-side CREDENTIAL:
@@ -8818,6 +8820,18 @@ export class ApprovalProductService {
       //       auto-approval rows into the budget).
       // Neither half is 「metadata in the body is forbidden」: 正控 `P20(a)` still sends the TRUE
       // `nodeKey` down the legacy route and still gets the honest restore.
+      //
+      // REGISTERED GAP, not a claim of coverage — `source_queue` SEATS CANNOT SATISFY HALF (1).
+      // A `source_queue` row's `assignee_id` is a PERMISSION/queue token (`ApprovalBridgeService`
+      // writes e.g. `plm:source-owned`) and is matched at dispatch against the actor's PERMISSIONS,
+      // not their roles; `user_roles` / `users.role` can never name it. So a document whose approver
+      // settled a `source_queue` node AND who also holds a delegated seat on that instance is now
+      // BLOCKED rather than seated. Fail-closed is the ruling's own direction, and the population is
+      // bridge-written instances, but this is a REAL narrowing and it has no leg — do not read the
+      // 「role / source_queue」 wording above as 「both are credentialled」. Widening half (1) to
+      // permissions is a separate owner call (design MD §3.4), deliberately not taken here.
+      // `dispatchAction` reads no UNIQUE credential for a queue seat either, so a permissions-based
+      // reconstruction would need its own census first.
       //
       // Both `delegatedFrom` sub-selects read `approval_assignments.metadata.delegatedFrom`, written by
       // `ApprovalAssigneeResolver.pushResolved` (the repo's single delegation substitution point) and
