@@ -217,7 +217,14 @@ generic HTTP-status-only shape):
 | `CANCEL_ROUND_SUITE_FORBIDDEN` (own class `CancelRoundSuiteForbiddenError extends ServiceError`) | 409 | `metadata.suite === 'forbidden'` on the original instance | lock §14.3 (lock:357, v5.8) — **lock-anchored**, dedicated error class required verbatim |
 | `CANCEL_ROUND_ALREADY_PENDING` | 409 | A `pending` round already exists for this document (pre-check, and the authoritative 23505-translation backstop on `uq_approval_rounds_pending_document`) | lock §5 I3 / §14.1 I3 discipline; erratum — no explicit code named, chosen for symmetry with the constraint it backstops |
 | `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` | 409 | **(a)** every `approve` row on the original carries a `system:` sentinel, so no human seat survives the namespace drop — `details = { reason: 'no_human_approver' }`, a category, never an id (gate round 6, G6-1); **(b)** the graph executor's initial-state resolution does not land on `pending`/the cancel node — no `details` (see §3.4: the "≥1 assignment" leg of (b) is unreachable, because the executor throws `400 APPROVAL_ASSIGNEE_EMPTY` first) | fail-closed backstop per lock §14.1's "NEVER auto-approve, NEVER zero seats" discipline (lock:335 席位 N ≥ 1, lock:337 I″ 至少一个活动席位); erratum. One code, two arms — a fifth code is deliberately NOT minted |
-| `CANCEL_ROUND_SEAT_INELIGIBLE` | 409 | At least one original approver is no longer eligible to hold a seat, judged by the SHARED login gate `evaluateUserAuthenticationGate` (`is_active = FALSE`, `role = 'disabled'`, `activation_status = 'pending_activation'` / not in the closed set, or no `users` row at all). `details = { ineligibleCount, reasons }` — categories only, never an id. **Judged only on claimed PERSONS**: `system:`-namespaced actors are dropped before this gate runs, so `reasons: ['not_found']` can no longer mean "a sentinel" (gate round 6, G6-1) | lock §2-G3 (lock:74-76, 「重新验证当前资格…资格不成立的席位 ⇒ 阻断并提示管理员」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
+| `CANCEL_ROUND_SEAT_INELIGIBLE` | 409 | At least one seat could not be re-convened. TWO classes, one code (owner ruling 2026-09-20 — **no new code minted**): (1) **QUALIFICATION** — an attributed subject is refused by the SHARED login gate `evaluateUserAuthenticationGate` (`is_active = FALSE`, `role = 'disabled'`, `activation_status = 'pending_activation'` / not in the closed set, or no `users` row at all) ⇒ `reasons ⊆ {inactive, pending_activation, activation_invalid, not_found}`; (2) **RESOLUTION** — an `approve` row cannot be attributed to a unique 原审批主体 ⇒ `reasons ⊆ {seat_unresolvable, delegate_not_seat}`. `details = { ineligibleCount, reasons }` — categories only, never an id; on the RESOLUTION class `ineligibleCount` counts ROWS (there is no person to count). The admin-facing MESSAGE differs by class: 「restore the account」 for (1), 「review this document」 for (2) — an admin-facing message must not promise a remedy that cannot work. **Judged only on claimed PERSONS**: `system:`-namespaced actors are dropped before attribution, so `reasons: ['not_found']` can no longer mean "a sentinel" (gate round 6, G6-1) and a sentinel row is never judged unattributable | lock §2-G3 (lock:74-76, 「重新验证当前资格…资格不成立的席位 ⇒ 阻断并提示管理员」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19, reason vocabulary extended 2026-09-20 per the owner ruling |
+
+> **实现者勘误,交 owner(2026-09-20)。** 本轮的任务简报另外点名了第三个新 reason 值
+> `original_ineligible`。**没有加**,理由写在这里而不是留给人去发现:「原主体…已失格」这件事,
+> 对**还原之后**的主体,已经由上面第 (1) 类的四个成员回答了(`负控 N5(a)` 是它的活证人 —— 停权委托人 A
+> 现在以 `inactive` 阻断)。再加一个同义成员会造出**一个事实两套词汇**,并且丢掉「为什么失格」这半边信息,
+> 正是本仓点名禁止的「另造更窄同类物」。若 owner 要的是「把『失格的是被还原的原主体』这件事也编码进去」,
+> 那是一次**扩宽 `details` 形状**的合同变更(例如加一个 provenance 维),须 owner 亲裁 —— 本轮不做。
 | `CANCEL_ROUND_SUITE_UNKNOWN` | 409 | `metadata.suite` is present but outside the closed set `{attendance, leave, other, forbidden}`. `details = { allowedSuites }` — never the offending value | lock:143 (`suite ∈ {四值}`); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
 | `CANCEL_ROUND_WINDOW_OUT_OF_RANGE` | 409 | `metadata.windowDays` is present but is not an integer in `[0, suite ceiling]`. `details = { suite, ceiling }` — never the offending value | lock:143 (`windowDays ∈ [0, 上限]`, 「由模板管理员在上限内设」); the lock names no code ⇒ **implementer erratum**, added 2026-09-19 |
 | `CANCEL_ROUND_CREATE_FAILED` | 500 | Post-commit read-back of the newly created approval returns nothing (should not happen; defensive) | not a lock condition — implementation defensive branch |
@@ -304,15 +311,21 @@ several conditions hold at once:
    `windowDays = 0`, so this LOCK-ANCHORED code always wins over a window complaint for that suite.
 6. no pending round → else 409 `CANCEL_ROUND_ALREADY_PENDING`
 7. read the seat set off `approval_records(action='approve')`, **dropping `system:`-namespaced
-   sentinel actors** (`:8656`, gate round 6 G6-1 — shared predicate `isSystemSentinelActor`).
-   (**candidate only, NOT part of the ratified order**: on this branch the read is preceded by the
-   PROPOSED reading-(a) delegation restore — see the G3 half C block below. The restore sits between
-   the trail read and the sentinel drop and changes WHO is seated, not the order of any step here;
-   if owner rules against reading (a) it comes out and step 7 is unchanged)
+   sentinel actors** (gate round 6 G6-1 — shared predicate `isSystemSentinelActor`).
+   (**owner-ruled 2026-09-20, reading (a)**: on this branch the sentinel drop runs FIRST and is then
+   followed by the reading-(a) delegation restore, which decides WHO is seated per `approve` ROW and
+   may instead report the row as UNSEATABLE. The two sub-steps are the same step 7 as far as the
+   ratified order is concerned; the drop moved ahead of the attribution because a sentinel row must
+   never be judged 「无法可靠还原」.)
 
-8. **seat set empty after the drop** → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,
-   `details.reason = 'no_human_approver'` (`:8677`, gate round 6 G6-1)
-9. **`assertCancelRoundSeatsEligibleInTxn`** (`:8686`, lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`
+8. **`assertCancelRoundSeatsEligibleInTxn`** (lock §2-G3) → 409 `CANCEL_ROUND_SEAT_INELIGIBLE`.
+   **ORDER CHANGED on this branch (owner ruling 2026-09-20)**: this now precedes the zero-seat
+   answer below, because a document whose every `approve` row is unattributable resolves to ZERO
+   seats and would otherwise be answered `no_human_approver` — false, and the forbidden fallback
+   wearing a different code. With zero unseatable rows the gate's own early exit makes the swap a
+   no-op for every pre-existing corpus (负控 `N3` / `N6(a)` still answer `no_human_approver`).
+9. **seat set empty after the drop and the restore** → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`,
+   `details.reason = 'no_human_approver'` (gate round 6 G6-1)
 10. resolver / initial-state backstop → 409 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER` (no `details`)
 11. first INSERT
 
@@ -361,8 +374,10 @@ even though the person cannot log in.
   (`POST /api/approvals`) and is an owner call; it is deliberately NOT made in this slice. The
   divergence is recorded here rather than laundered into a claim of parity.
 - **Three new error codes** — see §3.1; the lock file is owner-authored and is not edited from here.
-- **G3 half C — 历史委托不自动成为当前授权 (OPEN, owner call; a candidate implementation is PROPOSED
-  below, NOT ruled).** The shipped seat derivation read `approval_records(action='approve').actor_id`
+- **G3 half C — 历史委托不自动成为当前授权 (RULED by owner 2026-09-20 — reading (a) + BLOCK).**
+  **owner 裁决原话,逐字**:「席位回原审批主体,并重验当前资格。原主体无法可靠还原或已失格则阻断,
+  不静默回退给历史被委托人;补多人委托同一人的反例。」 本节以下凡与该句冲突的旧措辞,**以该句为准**;
+  本分支已按它实现,详见本条末尾的「**owner 裁决后的实现**」。**锁文正文未改**(owner 亲写件)。 The shipped seat derivation read `approval_records(action='approve').actor_id`
   verbatim, so when the original document's seat had been produced by a delegation the seat replayed
   onto the cancel round was the DELEGATEE, and today's delegation state was never consulted. Measured
   on a real DB (independent verification 2026-09-19,
@@ -406,16 +421,18 @@ even though the person cannot log in.
 |---|---|---|---|
 | 1a | 分句一:「重新验证当前资格(**在职**…)」 | **SHIPPED** (half A) | `assertCancelRoundSeatsEligibleInTxn`;`§2-G3 正控 P1` / `负控 N1` / `负控 N2` |
 | 1b | 分句一:「…**仍在该组织单元**」 | **OPEN** (half B) — 未实现、已登记 | 常驻 `正控 P2`(`org_id IS NULL` 的原单不被拒) |
-| 2 | 分句二:「历史委托不自动成为当前授权」 | **OPEN(读法未裁)+ 候选 (a) PROPOSED 已落在本分支** | 独立验证 §2.2 四腿逐字相同;**16 条**真库用例 + 两条 mutation(见验证 MD Part N / Part N-H) |
-| 3 | 分句三:「资格不成立的席位 ⇒ 阻断并提示管理员」 | **SHIPPED**(阻断,永不过滤)—— 但在**读法 (a) 的语义下**它只对**被实际坐下的人**生效:legacy 无 `nodeKey` 语料上席位停在 D,该句因此对原审批人 A **不执行**(缺口已登记,见下方 §3.4 第一条的 ITS CONSEQUENCE) | `负控 N1/N2` 的零行断言;mutation R7-M3;legacy 臂 `负控 N7(a)/N8(a)/P13(a)` |
+| 2 | 分句二:「历史委托不自动成为当前授权」 | **RULED by owner 2026-09-20 —— 读法 (a) + 阻断;已在本分支实现** | 独立验证 §2.2 四腿逐字相同;**22 条**真库用例 + 四条 mutation(M-B/M-C/M-D/M-E,见验证 MD **Part O**;Part N / N-H 的对应读数已被 Part O 取代) |
+| 3 | 分句三:「资格不成立的席位 ⇒ 阻断并提示管理员」 | **SHIPPED**(阻断,永不过滤)。owner 2026-09-20 裁决把它的**人口**也定死了:席位要么是**被还原的原审批主体**并在他身上求值,要么**根本坐不下**(行不可归属)⇒ 同样阻断。legacy 无 `nodeKey` 语料上「席位停在 D、该句对 A 不执行」的旧状态**已不复存在** | `负控 N1/N2` 的零行断言;mutation R7-M3 与 **M-C**;legacy 臂 `P12(a)/N7(a)/N8(a)/P13(a)`(现在全部断言 **409 零行**);多人委托臂 `N9(a)/N10(a)` |
 
 分句二那一行是本次新增的一行:在此之前它既不在 SHIPPED 一侧、也不在 OPEN 清单上,而同一条款的组织半边
 (half B,上表 1b)一直被明文登记 —— 同条款内处置不对称本身就是披露缺口(独立验证 §8 把它记为 P2,
 阻塞的是**登记**而非实现)。
 
-**候选实现(PROPOSED,读法 (a);owner 未裁前不得被当成合同)** — `reading-a` 候选补丁已落在
-`feat/approval-cancel-round-phase1-g3-reading-a` 分支上并已真库跑通。它**不是**本切片的已定合同,
-本节其余部分描述的是「若 owner 裁读法 (a),落地后的语义是什么」。
+**实现(owner 2026-09-20 裁定 **读法 (a) + 阻断**;原话逐字:「席位回原审批主体,并重验当前资格。
+原主体无法可靠还原或已失格则阻断,不静默回退给历史被委托人;补多人委托同一人的反例。」)** —
+落在 `feat/approval-cancel-round-phase1-g3-reading-a` 分支上并已真库跑通(验证 MD **Part O**)。
+本节其余部分描述的就是落地后的语义。**锁文正文未改** —— 它是 owner 亲写件;本节是切片设计文档,
+不是锁文,裁决的权威来源是 owner 的原话,不是这段转述。
 
 The seat query restores the delegatee back to the DELEGATOR before anything else runs: 委托 is
 acting-on-behalf-of (履职代理), not a transfer of the seat, so a cancel round re-convenes the person
@@ -437,19 +454,20 @@ eligibility rule here would be the narrower-lookalike this slice already refuses
 **Behaviour delta, stated rather than discovered later** (the BEFORE column is measured, independent
 verification 2026-09-19 §2.2; the AFTER column is measured on this branch, 验证 MD Part N):
 
-**这张表的每一行都是 `actions` 语料的读数**(approve 行带 `nodeKey`)。
-**legacy `POST /:id/approve` 语料(approve 行无 `nodeKey`)上,四行里有三行答案不同** —— 实测:
-第 1 行 `P12(a)` 席位 = **被委托人**(不是委托人);第 3 行 `N7(a)`/`N8(a)` **创建成功、席位 `[D]`**
-(不是 409);第 4 行 `P13(a)` 仍是 **409、零行**(闸跑在未被还原的 actor 上)。
-`语料` 这一维**必须和表一起读**,否则照表查这张表的人在 P2-1 正针对的那个语料上会得到相反的答案;
-成因与处置见下方「**NOT closed by the candidate**」第一条的 `ITS CONSEQUENCE`。
+**语料是一个独立的维度,必须和表一起读**:`actions` 语料的 approve 行带 `nodeKey`,legacy
+`POST /:id/approve` 语料的不带。**owner 2026-09-20 裁决之后,legacy 语料整列的答案变了** —— 那一列
+此前记的是「创建成功、席位 `[D]`」,即裁决明文禁止的 **静默回退给历史被委托人**;现在它一律是 **409 阻断、
+零行**。下表 AFTER 两列全部是本分支上的**实测**读数(验证 MD Part O)。
 
-| scenario(actions 语料) | before | after, IF reading (a) is ruled | legacy 无 `nodeKey` 语料(实测) |
+| scenario | before(实测) | after, reading (a) RULED —— `actions` 语料 | after —— legacy 无 `nodeKey` 语料 |
 |---|---|---|---|
-| delegation still active | seat = delegatee | seat = **delegator** | seat = **delegatee**(`P12(a)`) |
-| delegation revoked / expired / out of scope / exactly in scope | seat = delegatee | seat = **delegator** | revoked 腿实测 seat = **delegatee**(`N8(a)`);其余三腿本轮未在此语料构造 |
-| DELEGATOR deactivated | creation succeeds | **409 `CANCEL_ROUND_SEAT_INELIGIBLE`, zero rows** | **creation succeeds**, seat = **delegatee**(`N7(a)` / `N8(a)`) |
-| DELEGATEE deactivated | 409, zero rows | **creation succeeds**, seat = delegator | **409, zero rows**(`P13(a)`) |
+| delegation still active | seat = delegatee | seat = **delegator**(`P4(a)`) | **409 `SEAT_INELIGIBLE` / `delegate_not_seat` / 零行**(`P12(a)`) |
+| delegation revoked / expired / out of scope / exactly in scope | seat = delegatee | seat = **delegator**(`P5(a)`–`P7(a)`、`P9(a)`) | revoked 腿实测 **409 / `delegate_not_seat`**(`N8(a)`,该腿另叠了「停权 A」);其余三腿未在此语料构造 |
+| DELEGATOR deactivated | creation succeeds | **409 `SEAT_INELIGIBLE` / `inactive` / 零行**(`N5(a)`) | **409 / `delegate_not_seat` / 零行**(`N7(a)`)—— 阻断的理由是行不可归属,不是 A 失格 |
+| DELEGATEE deactivated | 409, zero rows | **creation succeeds**, seat = delegator(`P8(a)`) | **409 / `delegate_not_seat` / 零行**(`P13(a)`)—— reason 不再是 `inactive`:D 从未被坐下 |
+| 多人委托同一人(A→D、B→D,两节点) | seat = `[D]`(1 席) | seat = **`{A, B}`**(2 席,`P16(a)`) | **409 / `seat_unresolvable` / 零行**(`N9(a)`) |
+| 多人委托同一人 × A 已停权 | creation succeeds | **409 / `inactive` / 零行**(`N10(a)`),**不**回退给 D | (同上,先被 `seat_unresolvable` 拦住) |
+| legacy 语料但**从来没有过委托** | 201, seat = `[A]` | (不适用) | **201, seat = `[A]`**(`P19(a)`)—— 阻断不外溢到整个历史语料 |
 
 Reading (a) answers 「原审批人」 uniformly, so a still-valid delegation does NOT route the cancel
 round to the delegatee. That is a consequence of the cancel round's own snapshot carrying no
@@ -461,28 +479,33 @@ contract and is not implemented here.
 
 **NOT closed by the candidate (recorded, not laundered):**
 
-- **Approve rows with no `nodeKey`.** The legacy `POST /api/approvals/:id/approve` route copies
-  `metadata` verbatim out of the request body, so an approve row written there carries no `nodeKey`;
-  the join then misses and the actor keeps the seat un-restored — i.e. the pre-candidate behaviour
-  for that row. MEASURED, not predicted (验证 MD Part N §N4): a document approved through that route
-  under an active delegation seats the DELEGATEE. The failure direction is deliberate (never a wider
-  seat), and the alternative — an instance-wide match — would mis-fold the sibling-seat case above.
+- **Approve rows with no `nodeKey` —— `CLOSED IN THE BLOCKING DIRECTION` by the owner ruling
+  2026-09-20 (was: registered OPEN).** The legacy `POST /api/approvals/:id/approve` route copies
+  `metadata` verbatim out of the request body, so an approve row written there carries no `nodeKey`
+  and cannot be attributed to a node seat. Up to the ruling the actor simply KEPT the seat, i.e. the
+  historical delegatee held it — which the ruling forbids in as many words. The candidate now
+  BLOCKS instead:
+  - the row's actor holds **exactly one** delegated seat on this instance ⇒ 409
+    `CANCEL_ROUND_SEAT_INELIGIBLE`, `details.reasons = ['delegate_not_seat']`, zero rows;
+  - the actor holds **two or more different** delegators on this instance (the owner's own
+    「多人委托同一人」 counter-example) ⇒ same code, `reasons = ['seat_unresolvable']`;
+  - the actor holds **no** delegated seat on this instance ⇒ the actor IS the subject and is seated
+    normally. **This arm is load-bearing and is pinned by 正控 `P19(a)`**: without it every document
+    ever approved through the legacy route — the entire pre-delegation corpus — would 409.
 
-  **ITS CONSEQUENCE(硬化轮 2026-09-20 补写,门审 `impl-gate-C-slice1-g3-reading-a-round1` P2-1)。**
-  上面那句只刻画了**席位身份**,从未陈述**后果**。后果是:席位停在被委托人 D ⇒ G3 **第三句**
-  (资格不成立 ⇒ 阻断并提示管理员)在这条语料上**根本没有跑在读法 (a) 认定的席位持有人 A 身上**,
-  **原审批人 A 已停权的单据照样可以开轮**。资格闸本身在这条语料上**没有被跳过**(停权**被委托人 D**
-  仍然 409 阻断),它只是指向了未被还原的 actor。三条常驻腿把这一格钉成数据 ——
-  `负控 N7(a)`(legacy × 停权 A ⇒ 不阻断、席位 `[D]`)、`负控 N8(a)`(再叠「委托已撤销」⇒ 同上)、
-  `负控 P13(a)`(legacy × 停权 D ⇒ 409 `CANCEL_ROUND_SEAT_INELIGIBLE`、零行)。
-  前两条断言的是**今天的真实答案**,不是期望行为:缺口若被关上它们会红,必须**重新登记而不是静默关闭**。
+  Restoring to the single known delegator was considered and NOT chosen: the same actor may also
+  have approved a seat OF THEIR OWN through the same node-key-less route, so the restore would be a
+  guess. Both candidate answers are unsafe ⇒ neither is taken ⇒ BLOCK. The instance-wide fallback
+  registered here previously is therefore also closed out: it would have mis-folded the sibling-seat
+  case (正控 `P11(a)`).
 
-  **为什么本轮不替 owner 关掉它。** 两条可能的修法都改变合同:
-  (i) `nodeKey IS NULL` 时退回 instance 级匹配 —— 它不是「补上缺口」,而是**用一种错换另一种错**,
-  且换到哪一种**取决于语料**:两个节点都走 legacy 时它把 D 自己的兄弟席位折给 A(人错、数仍错),
-  混合语料时它反而给出正确的两席。(两格均为**推演,本轮 NOT CONSTRUCTED**,不作实测引用。)
-  (ii) 对「存在 `delegatedFrom` 的 user assignment 而 approve 行缺 `nodeKey`」fail-closed —— 需新错误码,
-  须先进锁 §14.3。两者都属 owner 裁决,本轮的处置是**照实登记 + 覆盖**。
+  **What this does NOT claim.** It does not make the legacy route write `nodeKey`, and it does not
+  give an administrator a way to re-open such a document — the error message says 「review this
+  document」 rather than 「restore the account」 precisely because there is no account to restore.
+  A remediation path (backfilling `nodeKey`, or a per-document override) is **NOT in this slice** and
+  is an owner call. **爆炸半径,实测而非估计**:阻断只命中「approve 行无 `nodeKey` **且** 该 actor 在本实例
+  上有委托席位」的单据;`P19(a)` 证明无委托的 legacy 单据照常创建。本仓今天没有针对 legacy 语料 ×
+  委托 的存量普查(需要生产库,不在本轮授权内)—— 这条**写成缺口而不是写成「影响很小」**。
 
   The writers that DO carry `nodeKey` were read individually: the template-runtime dispatch's
   `insertApprovalRecord` callers and `insertAutoApprovalEvents`. `ApprovalBridgeService`'s writer
@@ -523,6 +546,17 @@ contract and is not implemented here.
   `delegatedFrom` 取**第一个**;若 return 之后第二轮的批准顺序相反,同一 `(instance, node_key, D)`
   就会留下 `delegatedFrom` 分别为 A1 与 A2 的两行 —— 一条 approve 行 join 到两行 ⇒ 席位集合膨胀。
   本轮未构造、未实测,故本条**保持 OPEN**,不按已证伪处理,也不按已证实处理。
+
+  **owner 2026-09-20 裁决之后的变化,写清楚它关掉了什么、没关掉什么。** 席位推导现在对
+  「同一 `(instance, node_key, assignee)` 解析出 **>1** 个不同 `delegatedFrom`」的行**阻断**
+  (`reasons = ['seat_unresolvable']`),所以**即使**上面那条草图被构造出来,结果也不再是**席位集合膨胀**,
+  而是 **409 零行**。这把风险方向从「更宽的席位」翻成了「拒绝」。
+  **但本条仍然 OPEN**,理由是两点、都不含糊:① 那条 `>1` 的**具体臂本轮未构造**
+  (`idx_approval_assignments_active_unique` 是 `WHERE is_active = true` 的部分唯一索引,需要一次
+  真正的节点再入去改写委托才能造出两行),所以「它会阻断」是**按代码推出的**,不是实测 ——
+  实测覆盖的是**同一个 reason 值**的另一条臂(`N9(a)`,无 `nodeKey` × 两个委托人);
+  ② 「阻断」本身是不是这一格**想要**的答案,是语义裁决:一次再入把一张本来可撤销的单据变成永久不可撤销,
+  属 owner。
 - **`loadPriorNodeApproverDeciders`(Lock-1 §K3)—— 读法 (a) 是否外推到这个兄弟界面?**
   **OPEN,与 half B 同等待遇:未实现、已登记,由 owner 裁。**
   候选自己的注释点名了这个兄弟界面:仓内有**两处**从同一份 `approval_records(action='approve')`
@@ -535,6 +569,16 @@ contract and is not implemented here.
   今天的答案已被钉成数据:`正控 P14(a)` 在**同一张单据**上同时求值两个界面 ——
   §K3 节点的席位是 **D**(`delegatedFrom` 为空、`resolvedFrom.kind = 'prior_node_approver'`),
   撤销轮的席位是 **{A, D}**。若 owner 裁定**外推**,候选即为**部分应用**,须同 PR 改两处,而该腿会红并点名自己。
+- **会签节点上多人委托给同一人 ⇒ 席位在**建单时**就已折叠(NEW registration, 2026-09-20).**
+  MEASURED(`正控 P17(a)` / `P18(a)`):`ApprovalAssigneeResolver.pushResolved` 用 `user:<delegatee>`
+  做 dedup 键,所以一个 `approvalMode: 'all'` 的三人节点 [A, B, C] 在 A→D、B→D、C→D 全部有效时
+  只产生**一条** assignment(`assignee = D`,`delegatedFrom = 第一位委托人 A`)——
+  **会签门槛在原单被创建的那一刻就从 3 变成了 1**,与撤销轮无关。撤销轮因此只能还原出 `[A]`(1 席);
+  B、C 的席位在审计轨迹里**不留任何痕迹**,还原读不到、也就无从阻断。
+  这**不是** `seat_unresolvable`(没有两个候选,只有一个),阻断谓词对它**零判别力**。
+  处置:**登记,不在本切片修**——修它要动的是 `pushResolved` 的 dedup 键(全仓唯一的委托替换点,
+  爆炸半径覆盖每一条派发路径),属 owner。两条腿钉的是**今天的答案**,若将来被修好它们会红。
+
 - **G3 half B (组织单元)** remains OPEN exactly as registered above.
 
 

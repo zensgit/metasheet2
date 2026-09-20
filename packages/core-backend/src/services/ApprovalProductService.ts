@@ -443,14 +443,63 @@ function deriveCancelRoundRoundPolicy(metadata: Record<string, unknown>): Cancel
  *   as prose: `approval-cancel-round-creation.db.test.ts` reads `pg_constraint` / `information_schema`
  *   LIVE and pins both the allowed value set and the NOT NULL, so relaxing either turns the test red
  *   at exactly the place this member would start mattering.
+ *
+ * OWNER RULING 2026-09-20, reading (a), verbatim: 「席位回原审批主体,并重验当前资格。原主体**无法可靠
+ * 还原**或已失格则**阻断**,**不静默回退给历史被委托人**;补多人委托同一人的反例。」 The first two
+ * members below are that ruling's 「无法可靠还原」 arm — they are RESOLUTION failures (the seat could not
+ * be attributed to a subject at all), not QUALIFICATION failures (the subject was attributed and then
+ * refused). They are listed FIRST because that is the order of the pipeline they fail in, and the
+ * reported `reasons` array is a filter over this constant so the output order is this order:
+ * - `seat_unresolvable` — an `approve` row maps to MORE THAN ONE candidate original subject, so there
+ *   is no unique 原审批主体 to seat. Two arms, and their reachability differs — stated as DATA:
+ *     · arm 1 (MEASURED, 负控 `N9(a)`): a legacy-corpus row (no `metadata.nodeKey`) whose actor held
+ *       delegated seats from TWO DIFFERENT delegators on the same instance — i.e. the owner's own
+ *       「多人委托同一人」 counter-example, written through the shipped legacy route.
+ *     · arm 2 (NOT CONSTRUCTED this round, disclosed): two assignment rows with the SAME
+ *       `(instance, node_key, assignee)` and DIFFERENT `delegatedFrom`. `idx_approval_assignments_
+ *       active_unique` is partial (`WHERE is_active = true`), so this needs a node RE-ENTRY that
+ *       rewrites the delegation between epochs. It shares this member with arm 1 rather than getting
+ *       an untested member of its own; the design MD §3.4 carries the open registration.
+ * - `delegate_not_seat` — an `approve` row cannot be attributed to a node (no `metadata.nodeKey`) AND
+ *   its actor held exactly one delegated seat on this instance. Seating the actor would seat the
+ *   HISTORICAL DELEGATEE, which the ruling forbids in as many words; restoring to that one delegator
+ *   is not 可靠 either, because the same actor may also have approved a seat OF THEIR OWN through the
+ *   same node-key-less route. Covered by 负控 `N7(a)` / `N8(a)` / `P13(a)` / `P12(a)`.
+ *   The narrow-but-load-bearing exclusion: an actor with NO delegated seat on the instance is their
+ *   own subject and is seated normally even without a `nodeKey` — 正控 `P19(a)` pins that, and it is
+ *   what keeps the ENTIRE pre-delegation legacy corpus cancellable.
+ *
+ * The task brief also sketched a third new member, `original_ineligible`. It is deliberately NOT
+ * added: 「原主体…已失格」 is already answered, for the RESTORED subject, by the four qualification
+ * members above (负控 `N5(a)` is its live witness — deactivating the delegator A now blocks with
+ * `inactive`). A fifth synonym would be a second vocabulary for one fact and would lose the WHY,
+ * i.e. the 「另造更窄同类物」 this repo forbids. Flagged for owner in the design MD §3.1.
  */
 const CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS = [
+  'seat_unresolvable',
+  'delegate_not_seat',
   'inactive',
   'pending_activation',
   'activation_invalid',
   'not_found',
 ] as const
 type CancelRoundSeatIneligibilityReason = (typeof CANCEL_ROUND_SEAT_INELIGIBILITY_REASONS)[number]
+
+/**
+ * The 「无法可靠还原」 tally the seat derivation hands to the eligibility gate, so that BOTH arms of the
+ * owner's ruling leave through the SAME exit (`CANCEL_ROUND_SEAT_INELIGIBLE`, §14.3) instead of a
+ * second throw site for one contract code. Counted per `approve` ROW, not per person: an unresolvable
+ * row has no person to count.
+ */
+type CancelRoundUnseatableRows = {
+  count: number
+  reasons: ReadonlySet<CancelRoundSeatIneligibilityReason>
+}
+
+const CANCEL_ROUND_SEAT_RESOLUTION_REASONS: ReadonlySet<CancelRoundSeatIneligibilityReason> = new Set([
+  'seat_unresolvable',
+  'delegate_not_seat',
+])
 
 /**
  * Lock §2-G3 (lock:74-76) — 「撤销:保留原节点的会签/或签语义,但**重新验证当前资格**(在职、仍在该
@@ -504,46 +553,63 @@ type CancelRoundSeatIneligibilityReason = (typeof CANCEL_ROUND_SEAT_INELIGIBILIT
 async function assertCancelRoundSeatsEligibleInTxn(
   client: ApprovalDbClient,
   approverIds: readonly string[],
+  // Owner ruling 2026-09-20 (reading (a)): 「原主体无法可靠还原…则阻断」. The rows the seat derivation
+  // could NOT attribute to a subject arrive here rather than at a second throw site, so this stays the
+  // ONE exit for `CANCEL_ROUND_SEAT_INELIGIBLE`. Defaulted so the other call sites (and every test that
+  // exercises the qualification half alone) are unchanged.
+  unseatable: CancelRoundUnseatableRows = { count: 0, reasons: new Set() },
 ): Promise<void> {
-  if (approverIds.length === 0) return
+  const reasons = new Set<CancelRoundSeatIneligibilityReason>(unseatable.reasons)
+  let ineligibleCount = unseatable.count
   const ids = [...new Set(approverIds)]
-  const directory = await client.query<{
-    id: string
-    is_active: boolean | null
-    role: string | null
-    activation_status: string | null
-  }>(
-    `SELECT id, is_active, role, activation_status FROM users WHERE id = ANY($1::varchar[])`,
-    [ids],
-  )
-  const byId = new Map(directory.rows.map((row) => [row.id, row]))
-  const reasons = new Set<CancelRoundSeatIneligibilityReason>()
-  let ineligibleCount = 0
-  for (const id of ids) {
-    const row = byId.get(id)
-    if (!row) {
-      ineligibleCount += 1
-      reasons.add('not_found')
-      continue
-    }
-    const denial = evaluateUserAuthenticationGate(row)
-    if (!denial) continue
-    ineligibleCount += 1
-    reasons.add(
-      denial.code === ACCOUNT_PENDING_ACTIVATION_CODE
-        ? 'pending_activation'
-        : denial.code === ACCOUNT_ACTIVATION_INVALID_CODE
-          ? 'activation_invalid'
-          : 'inactive',
+  // NOT an early `return` any more: with zero resolvable seats and a non-zero `unseatable.count`,
+  // returning here would let the caller's zero-seat pre-check answer `no_human_approver` — which is
+  // false (there WERE human approvers; their seats could not be attributed) and, worse, is the
+  // 「静默回退」 the ruling forbids wearing a different error code.
+  if (ids.length > 0) {
+    const directory = await client.query<{
+      id: string
+      is_active: boolean | null
+      role: string | null
+      activation_status: string | null
+    }>(
+      `SELECT id, is_active, role, activation_status FROM users WHERE id = ANY($1::varchar[])`,
+      [ids],
     )
+    const byId = new Map(directory.rows.map((row) => [row.id, row]))
+    for (const id of ids) {
+      const row = byId.get(id)
+      if (!row) {
+        ineligibleCount += 1
+        reasons.add('not_found')
+        continue
+      }
+      const denial = evaluateUserAuthenticationGate(row)
+      if (!denial) continue
+      ineligibleCount += 1
+      reasons.add(
+        denial.code === ACCOUNT_PENDING_ACTIVATION_CODE
+          ? 'pending_activation'
+          : denial.code === ACCOUNT_ACTIVATION_INVALID_CODE
+            ? 'activation_invalid'
+            : 'inactive',
+      )
+    }
   }
   if (ineligibleCount === 0) return
-  // The hint says RESTORE, deliberately not "restore or replace": §14.3 #12/#13 reject
+  // The qualification hint says RESTORE, deliberately not "restore or replace": §14.3 #12/#13 reject
   // `bulkReassignApprovals` and `applyApprovalDepartureTransfer` on cancel rounds outright, and
   // §14.2 rejects `transfer`, so replacing the person is not a remedy this system offers. An
   // admin-facing message must not promise an action the contract forbids.
+  //
+  // For the RESOLUTION arm that same rule cuts the other way: there is no account to restore, so
+  // telling an administrator to restore one would promise a remedy that cannot work. The message is
+  // therefore chosen by reason CLASS (both are still values-free — categories, never a person).
+  const hasResolutionFailure = [...reasons].some((reason) => CANCEL_ROUND_SEAT_RESOLUTION_REASONS.has(reason))
   throw new ServiceError(
-    'A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore the account, then retry',
+    hasResolutionFailure
+      ? 'Cancel round could not be started: at least one approval on this document cannot be attributed to the approver whose authority it was made under, so its seat cannot be re-convened — ask an administrator to review this document before retrying'
+      : 'A previous approver of this document is no longer eligible to sit on its cancel round — ask an administrator to restore the account, then retry',
     409,
     'CANCEL_ROUND_SEAT_INELIGIBLE',
     {
@@ -8660,35 +8726,61 @@ export class ApprovalProductService {
       // NOT part of the join: it is NULL on pre-migration rows, and `NULL = NULL` would turn the whole
       // restore into a silent no-op for exactly the legacy corpus this method is most likely to meet.
       //
-      // DISCLOSED GAP (fails to TODAY's behaviour, never to a wider seat): the legacy
-      // `POST /api/approvals/:id/approve` route copies `metadata` verbatim out of the REQUEST BODY
-      // (routes/approvals.ts), so an approve row written there can carry no `nodeKey`; the LEFT JOIN
-      // then misses and `COALESCE` keeps the actor — that seat is NOT restored to its delegator. This is
-      // registered in the design MD §3.4 rather than papered over with an instance-wide match, which
-      // would mis-fold the sibling-seat case above.
+      // 「无法可靠还原 ⇒ 阻断,不静默回退给历史被委托人」 — OWNER RULING 2026-09-20, reading (a),
+      // verbatim: 「席位回原审批主体,并重验当前资格。原主体无法可靠还原或已失格则阻断,不静默回退给
+      // 历史被委托人;补多人委托同一人的反例。」
       //
-      // ITS CONSEQUENCE, stated here rather than left to be discovered (gate round 1 of reading (a),
-      // P2-1): the sentence above only describes WHO gets the seat. Because the seat stays on the
-      // DELEGATEE for this corpus, the G3 FIRST/THIRD sentence re-qualification below
-      // (`assertCancelRoundSeatsEligibleInTxn`) runs on the delegatee, NOT on the person reading (a)
-      // says holds the seat — so a document whose ORIGINAL APPROVER has since been deactivated still
-      // opens a cancel round here. The gate is not skipped on this corpus (deactivating the DELEGATEE
-      // still blocks — 负控 `P13(a)`); it is simply pointed at the un-restored actor. Both halves are
-      // pinned as resident legs in `approval-cancel-round-creation.db.test.ts`
-      // (`N7(a)` / `N8(a)` / `P13(a)`): they assert TODAY's answer, so closing this gap turns them RED
-      // and the gap must be re-registered rather than drifting shut. Closing it is an OWNER call — a
-      // `nodeKey IS NULL` instance-wide fallback swaps one wrong answer for another depending on the
-      // corpus (it folds a delegatee's OWN sibling seat into the delegator when BOTH rows came through
-      // the legacy route), and a fail-closed refusal needs a new error code, i.e. lock §14.3 first.
-      const approverRows = await client.query<{ actor_id: string }>(
-        `SELECT DISTINCT COALESCE(a.metadata->>'delegatedFrom', r.actor_id) AS actor_id
+      // Up to the ruling this site carried a DISCLOSED GAP instead: the legacy
+      // `POST /api/approvals/:id/approve` route copies `metadata` verbatim out of the REQUEST BODY
+      // (routes/approvals.ts), so an approve row written there can carry no `nodeKey`, the node-scoped
+      // join missed, and `COALESCE` KEPT THE ACTOR — i.e. the historical delegatee silently held the
+      // seat, and the re-qualification below ran on them rather than on the subject reading (a) says
+      // holds it. That is precisely the fallback the ruling forbids, so the gap is now CLOSED IN THE
+      // BLOCKING DIRECTION rather than papered over with an instance-wide match (which would mis-fold
+      // the sibling-seat case above) or left open.
+      //
+      // The query therefore stops deciding the seat by itself. It returns, per `approve` row, the two
+      // candidate-delegator sets the decision needs, and the attribution below is explicit:
+      //   · `node_delegators`      — delegators for THIS row's own node (empty when the row has no
+      //                              `nodeKey`, because `a.node_key = NULL` is never true);
+      //   · `instance_delegators`  — delegators for this actor ANYWHERE on this instance.
+      // Both read `approval_assignments.metadata.delegatedFrom`, written by
+      // `ApprovalAssigneeResolver.pushResolved` (the repo's single delegation substitution point) and
+      // KEPT after approve as `is_active = FALSE` audit history — `ApprovalDelegationConfig
+      // .countDelegatedApprovals` already reads exactly this column as a persistent audit fact, with no
+      // `is_active` filter of its own, so neither sub-select adds one either.
+      //
+      // JOIN PRECISION (unchanged): the node-scoped set matches on (instance, node_key, assignee), NOT
+      // (instance, assignee). A delegatee who also holds a seat OF THEIR OWN at another node must keep
+      // that seat as their own (正控 `P11(a)`). `entry_epoch` is deliberately NOT part of the match: it
+      // is NULL on pre-migration rows, and `NULL = NULL` would turn the whole restore into a silent
+      // no-op for exactly the legacy corpus this method is most likely to meet.
+      const approverRows = await client.query<{
+        actor_id: string
+        node_key: string | null
+        node_delegators: (string | null)[] | null
+        instance_delegators: (string | null)[] | null
+      }>(
+        `SELECT r.actor_id AS actor_id,
+                r.metadata->>'nodeKey' AS node_key,
+                ARRAY(
+                  SELECT DISTINCT a.metadata->>'delegatedFrom'
+                    FROM approval_assignments a
+                   WHERE a.instance_id = r.instance_id
+                     AND a.assignee_id = r.actor_id
+                     AND a.assignment_type = 'user'
+                     AND a.node_key = r.metadata->>'nodeKey'
+                     AND a.metadata->>'delegatedFrom' IS NOT NULL
+                ) AS node_delegators,
+                ARRAY(
+                  SELECT DISTINCT a.metadata->>'delegatedFrom'
+                    FROM approval_assignments a
+                   WHERE a.instance_id = r.instance_id
+                     AND a.assignee_id = r.actor_id
+                     AND a.assignment_type = 'user'
+                     AND a.metadata->>'delegatedFrom' IS NOT NULL
+                ) AS instance_delegators
            FROM approval_records r
-           LEFT JOIN approval_assignments a
-             ON a.instance_id = r.instance_id
-            AND a.assignee_id = r.actor_id
-            AND a.assignment_type = 'user'
-            AND a.node_key = r.metadata->>'nodeKey'
-            AND a.metadata->>'delegatedFrom' IS NOT NULL
           WHERE r.instance_id = $1 AND r.action = 'approve'`,
         [documentId],
       )
@@ -8710,9 +8802,61 @@ export class ApprovalProductService {
       // Under `actorMode: 'original_approver'` the auto-approval row carries the ORIGINAL approver's
       // real id, so that person IS kept and IS re-qualified — the drop is namespace-scoped, never
       // "drop every auto-approved node's approver".
-      const approverIds = approverRows.rows
-        .map((row) => row.actor_id)
-        .filter((id): id is string => typeof id === 'string' && id.length > 0 && !isSystemSentinelActor(id))
+      //
+      // The sentinel drop now runs BEFORE attribution rather than after it. That ordering is
+      // load-bearing, not cosmetic: a sentinel row is not a person, so it can never be somebody's
+      // delegate, and judging it 「无法可靠还原」 would turn every auto-approved legacy document into a
+      // 409 (正控 `P10(a)` / 负控 `N3` / `N6(a)` pin that it does not). It is applied to the RESTORED
+      // ids as well, because a `delegatedFrom` value is read out of free-form `metadata` and is not
+      // otherwise constrained to a real person id.
+      const seatIds: string[] = []
+      const unseatableReasons = new Set<CancelRoundSeatIneligibilityReason>()
+      let unseatableRowCount = 0
+      const asDelegatorList = (value: (string | null)[] | null): string[] =>
+        (value ?? []).filter((id): id is string => typeof id === 'string' && id.length > 0)
+      for (const row of approverRows.rows) {
+        const actorId = typeof row.actor_id === 'string' ? row.actor_id : ''
+        if (actorId.length === 0 || isSystemSentinelActor(actorId)) continue
+        if (row.node_key !== null && row.node_key !== undefined) {
+          const nodeDelegators = asDelegatorList(row.node_delegators)
+          if (nodeDelegators.length > 1) {
+            // Two different delegators recorded for ONE (instance, node, assignee) — no unique
+            // 原审批主体 exists. Needs a node re-entry that rewrote the delegation between epochs
+            // (`idx_approval_assignments_active_unique` is partial on `is_active = true`), so it is
+            // NOT CONSTRUCTED this round; the member it reports IS covered, by `N9(a)`'s other arm.
+            unseatableRowCount += 1
+            unseatableReasons.add('seat_unresolvable')
+            continue
+          }
+          seatIds.push(nodeDelegators.length === 1 ? nodeDelegators[0] : actorId)
+          continue
+        }
+        // No `nodeKey` on the row — the legacy `POST /:id/approve` corpus.
+        const instanceDelegators = asDelegatorList(row.instance_delegators)
+        if (instanceDelegators.length > 1) {
+          // 多人委托同一人 (the counter-example the ruling asks for): the actor stood in for two
+          // different subjects on this instance and the row says nothing about which one this
+          // approval was. MEASURED by 负控 `N9(a)`.
+          unseatableRowCount += 1
+          unseatableReasons.add('seat_unresolvable')
+          continue
+        }
+        if (instanceDelegators.length === 1) {
+          // Exactly one known delegation, but the row is not attributable to a node. Restoring anyway
+          // would be a guess — the same actor may also hold a seat of their OWN, approved through the
+          // same node-key-less route — and KEEPING the actor is the 「静默回退给历史被委托人」 the
+          // ruling forbids in as many words. Both answers are unsafe, so neither is chosen: BLOCK.
+          unseatableRowCount += 1
+          unseatableReasons.add('delegate_not_seat')
+          continue
+        }
+        // No delegated seat for this actor anywhere on this instance ⇒ the actor IS the subject and
+        // the restore is a no-op. This is the arm that keeps the whole pre-delegation legacy corpus
+        // cancellable (正控 `P19(a)`); narrowing it to 「no nodeKey ⇒ block」 would 409 every document
+        // ever approved through the legacy route.
+        seatIds.push(actorId)
+      }
+      const approverIds = [...new Set(seatIds)].filter((id) => !isSystemSentinelActor(id))
 
       // Zero HUMAN approvers (every `approve` row on the original was synthetic) is NOT
       // `not_found` — there is nobody to restore. Lock §14.1 ratifies 席位 = 原单的原审批人 with
@@ -8728,6 +8872,25 @@ export class ApprovalProductService {
       // line the fix would answer a bare generic 400 instead of a cancel-round contract code.
       // `details.reason` is a category, never a person — the same values-free posture as
       // `CANCEL_ROUND_SEAT_INELIGIBLE.details.reasons`.
+      //
+      // Lock §2-G3 — re-qualify EVERY seat before any write, under the same `FOR UPDATE` taken
+      // above. BLOCK on failure (never filter-and-continue: the cancel node is `approvalMode:
+      // 'all'`, so dropping a seat would silently lower the co-sign threshold). See the helper's
+      // own doc for what it reuses, why it is wider than the normal path, and what is left OPEN.
+      // Sentinels are already gone by here, so every id this sees is a claimed PERSON.
+      //
+      // ORDER, owner ruling 2026-09-20: this now runs BEFORE the zero-human-seat answer, because the
+      // two are no longer independent. A document whose every `approve` row is UNATTRIBUTABLE resolves
+      // to zero seats, and answering `no_human_approver` there would be false (there were human
+      // approvers) and would re-open the fallback the ruling closes, just wearing another code. With
+      // `unseatableRowCount === 0` the gate's own early exit makes this reordering a no-op for every
+      // pre-existing corpus: the only call that reaches the zero-seat branch with the gate in front of
+      // it is one where the gate returned without throwing.
+      await assertCancelRoundSeatsEligibleInTxn(client, approverIds, {
+        count: unseatableRowCount,
+        reasons: unseatableReasons,
+      })
+
       if (approverIds.length === 0) {
         throw new ServiceError(
           'Cancel round could not be started: this document was approved entirely by automation, so there is no original approver to re-convene',
@@ -8736,13 +8899,6 @@ export class ApprovalProductService {
           { reason: 'no_human_approver' },
         )
       }
-
-      // Lock §2-G3 — re-qualify EVERY seat before any write, under the same `FOR UPDATE` taken
-      // above. BLOCK on failure (never filter-and-continue: the cancel node is `approvalMode:
-      // 'all'`, so dropping a seat would silently lower the co-sign threshold). See the helper's
-      // own doc for what it reuses, why it is wider than the normal path, and what is left OPEN.
-      // Sentinels are already gone by here, so every id this sees is a claimed PERSON.
-      await assertCancelRoundSeatsEligibleInTxn(client, approverIds)
 
       // §14.1 — `requesterSnapshot.id` MUST equal the original requester (the revoke gate at the
       // A4 branch above reads exactly this key); `requesterChoices[CANCEL_ROUND_APPROVAL_NODE_KEY]`
