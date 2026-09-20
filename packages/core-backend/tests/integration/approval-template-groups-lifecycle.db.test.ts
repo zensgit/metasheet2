@@ -582,67 +582,235 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect((await missingGroupId.json()).error.code).toBe('APPROVAL_GROUP_ID_REQUIRED')
   })
 
-  // ── Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation) ────────────────────
-  // `lock-errata-proposed-grouping-v2.13-20260919.md` 勘误 3 / the lock's own "勘误 3" header
-  // entry: NOT owner-ratified, NOT authorized — a single standing question sits with the owner
-  // ("是否批准仅将 name 改为 btrim(name) <> ''、两处 org_id CHECK 保持不变?"). This test exercises
-  // what THIS candidate branch's migration currently does, not a ratified outcome: it supersedes
-  // the design-gate A-3 test that used to live here (`P1-3 (design-gate A-3, 2026-09-18)`, which
-  // asserted a pure-CJK name mapped to 400 `GROUP_NAME_UNSUPPORTED` against the pre-candidate
-  // `atg_name_nonblank CHECK (name ~ '[!-~]')`). Passing this suite is TECHNICAL VERIFICATION of
-  // the candidate only — it is not, and must not be read as, ratification, merge, or migration
-  // application.
+  // ── Erratum 3 CANDIDATE, REDRAFT v2 (PROPOSED 2026-09-19/20, pending owner confirmation) ─────
+  // Source of the predicate under test: `lock-errata-proposed-grouping-v2.13-20260919.md`, section
+  // "勘误 3(重拟)", option (i) — `atg_name_nonblank` becomes
+  //   CHECK (btrim(name, E' \t\r\n' || chr(12288) || chr(8203) || chr(8204) || chr(8205)
+  //                        || chr(8288) || chr(65279)) <> '')
+  // and BOTH `org_id` CHECKs keep the ratified `~ '[!-~]'`. NOT owner-ratified, NOT authorized:
+  // a single standing question sits with the owner. Passing these tests is TECHNICAL VERIFICATION
+  // of the candidate only — not ratification, not merge authorization, not permission to apply the
+  // migration anywhere.
   //
-  // Mutation (recorded in this slice's verification MD §27, not automated here per this suite's
-  // cp-backup/edit/run/restore/cmp convention): reverting the migration's `atg_name_nonblank`
-  // predicate back to `CHECK (name ~ '[!-~]')` in a private rebuilt database turns this test's
-  // first assertion (the CJK create) red (400 `GROUP_NAME_UNSUPPORTED`, not 201).
-  it('Erratum 3 candidate (pending owner confirmation): a pure-CJK group name creates 201 with the name read back verbatim, renames to another CJK name 200, and a blank name is still 400', async () => {
-    const org = trackOrg(`atg-cjk-${TS}`)
-    const admin = await tok(base, `cjk-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+  // Why this replaced the previous candidate's single test: gate round 8 raised two P2s against it.
+  //   P2-1 — candidate v1 (`CHECK (btrim(name) <> '')`) was described as "non-blank, any
+  //          character", but `btrim/2`'s DEFAULT trim set is the ASCII space ALONE, so a name made
+  //          only of U+200B (or U+3000 / TAB / LF / U+FEFF) passed the CHECK. JS `.trim()` does not
+  //          strip U+200B/200C/200D/2060 either, so the zero-width family slipped through BOTH
+  //          layers and landed a 201 row invisible in every UI.
+  //   P2-2 — the candidate's REJECT half had zero coverage: replacing the whole CHECK with
+  //          `CHECK (true)` left 29/29 green.
+  // The three `it()` blocks below close both: the app layer and the DB layer are asserted
+  // SEPARATELY (same values, two paths), so neither can stand in for the other.
+  //
+  // Mutations actually run for this block (cp-backup / edit / rebuilt private DB / run / restore /
+  // cmp — recorded in the verification MD §28, not automated here, matching this suite's existing
+  // convention):
+  //   M-A  migration predicate → bare `btrim(name) <> ''` (candidate v1, i.e. "run the old
+  //        implementation"): the DIRECT-SQL zero-width rows go green-insert, reddening the
+  //        `23514` block. The API block stays green — which is exactly why both exist.
+  //   M-B  migration predicate → `CHECK (true)`: same, reddens the `23514` block (round 8's own
+  //        refutation probe, re-run verbatim so P2-2 closes against the probe that opened it).
+  //   M-C  `requireName` → plain `.trim()`: the API block goes red on the two zero-width rows —
+  //        and it goes red on the ERROR CODE, not the status, because with plain `.trim()` those
+  //        values reach the DB, raise 23514, and `mapGroupConstraintError` maps them to 400
+  //        `GROUP_NAME_UNSUPPORTED`. A status-only assertion would have ZERO discriminating power
+  //        here, so every row below pins `error.code`.
+  const INVISIBLE_ONLY_NAMES: Array<{ label: string; value: string }> = [
+    { label: 'empty string', value: '' },
+    { label: 'one ASCII space', value: ' ' },
+    { label: 'U+3000 IDEOGRAPHIC SPACE', value: '\u3000' },
+    { label: 'two U+200B ZERO WIDTH SPACE', value: '\u200B\u200B' },
+    { label: 'U+FEFF BYTE ORDER MARK', value: '\uFEFF' },
+    { label: 'TAB + LF', value: '\t\n' },
+  ]
 
-    // (1) Pure-CJK create — this product's OWN category placeholder text recommends exactly this
-    // kind of input (`TemplateAuthoringView.vue:221`, "如 请假 / 采购 / 报销").
-    const cjkName = `请假`
-    const cjkRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: cjkName } })
-    expect(cjkRes.status).toBe(201)
-    const cjkBody = (await cjkRes.json()) as { group: { id: string; name: string } }
-    expect(cjkBody.group.name).toBe(cjkName)
-    const cjkRow = await query<{ name: string }>(
-      `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
-      [org, cjkBody.group.id],
+  it('Erratum 3 candidate v2 (pending owner confirmation): names with at least one visible character — CJK / Japanese / emoji / internal zero-width — create 201 and read back byte-for-byte', async () => {
+    const org = trackOrg(`atg-nr-pos-${TS}`)
+    const admin = await tok(base, `nr-pos-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    // 'a' + U+200B + 'b' — an INTERNAL zero-width. The predicate only trims the EDGES, so this is
+    // a legal name and is stored verbatim. Disclosed consequence (not a defect of this test): it
+    // is a DIFFERENT name from 'ab' under `uq_atg_org_name_active` while rendering identically.
+    const internalZeroWidth = 'a\u200Bb'
+    const positives: Array<{ label: string; value: string }> = [
+      { label: 'pure CJK (this product OWN placeholder text, TemplateAuthoringView.vue:221)', value: `请假` },
+      { label: 'Japanese', value: `休暇申請` },
+      { label: 'emoji + CJK', value: `🎉庆祝` },
+      { label: 'ASCII around an internal U+200B', value: internalZeroWidth },
+      { label: 'plain ASCII (positive control — the candidate widens, it never narrows)', value: `HR ${TS}` },
+    ]
+
+    for (const { label, value } of positives) {
+      const res = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: value } })
+      expect(res.status, `create ${label}`).toBe(201)
+      const body = (await res.json()) as { group: { id: string; name: string } }
+      expect(body.group.name, `response name ${label}`).toBe(value)
+      const row = await query<{ name: string }>(
+        `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+        [org, body.group.id],
+      )
+      expect(row.rowCount, `row count ${label}`).toBe(1)
+      // Byte-for-byte, not "looks the same": an internal U+200B silently dropped somewhere in the
+      // round-trip would pass a normalizing comparison and fail this one.
+      expect(row.rows[0].name, `stored name ${label}`).toBe(value)
+    }
+
+    // Rename from one pure-CJK name to a DIFFERENT pure-CJK name — 200, and the NEW name is what
+    // comes back and what is stored (not the old one, not a truncated/mangled one).
+    const renameTarget = await query<{ id: string }>(
+      `SELECT id FROM approval_template_groups WHERE org_id = $1 AND name = $2`,
+      [org, `请假`],
     )
-    expect(cjkRow.rowCount).toBe(1)
-    expect(cjkRow.rows[0].name).toBe(cjkName)
-
-    // (2) Rename to a DIFFERENT CJK name — 200, and the new name is what comes back, not the old
-    // one or a truncated/mangled one.
-    const renamedTo = `培训`
-    const renameRes = await httpReq(base, `/api/approval-template-groups/${cjkBody.group.id}`, admin, {
+    const renameRes = await httpReq(base, `/api/approval-template-groups/${renameTarget.rows[0].id}`, admin, {
       method: 'PATCH',
-      body: { name: renamedTo },
+      body: { name: `培训` },
     })
     expect(renameRes.status).toBe(200)
-    const renameBody = (await renameRes.json()) as { group: { name: string } }
-    expect(renameBody.group.name).toBe(renamedTo)
+    expect(((await renameRes.json()) as { group: { name: string } }).group.name).toBe(`培训`)
     const renamedRow = await query<{ name: string }>(
       `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
-      [org, cjkBody.group.id],
+      [org, renameTarget.rows[0].id],
     )
-    expect(renamedRow.rows[0].name).toBe(renamedTo)
+    expect(renamedRow.rows[0].name).toBe(`培训`)
 
-    // (3) All-whitespace name is still rejected — this is `requireName`'s app-level trim+non-empty
-    // guard (unaffected by the candidate's DDL edit: it runs before any DB round-trip), so a name
-    // that is nothing but blanks is 400 whether or not the CHECK ever loosens further. `btrim` at
-    // the DB layer would reject the same value if it were ever reached directly.
-    const blankRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: '   ' } })
-    expect(blankRes.status).toBe(400)
-    expect((await blankRes.json()).error.code).toBe('GROUP_NAME_REQUIRED')
+    // `requireName` MIRRORS btrim — it TRIMS, it does not reject. This is the case that tells the
+    // two designs apart: a reject-shaped mirror would 400 here.
+    const paddedRes = await httpReq(base, '/api/approval-template-groups', admin, {
+      method: 'POST',
+      body: { name: `\u200B\u3000HR-padded-${TS}\uFEFF\u2060` },
+    })
+    expect(paddedRes.status).toBe(201)
+    const paddedBody = (await paddedRes.json()) as { group: { id: string; name: string } }
+    expect(paddedBody.group.name).toBe(`HR-padded-${TS}`)
+    const paddedRow = await query<{ name: string }>(
+      `SELECT name FROM approval_template_groups WHERE org_id = $1 AND id = $2`,
+      [org, paddedBody.group.id],
+    )
+    expect(paddedRow.rows[0].name).toBe(`HR-padded-${TS}`)
+  })
 
-    // Positive control, carried over from the superseded test: an ASCII name in the same org still
-    // succeeds too — this candidate widens what `name` accepts, it does not narrow anything.
-    const asciiRes = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `HR ${TS}` } })
-    expect(asciiRes.status).toBe(201)
+  it('Erratum 3 candidate v2: every blank/invisible-only name is 400 GROUP_NAME_REQUIRED through the production route, and writes zero rows', async () => {
+    const org = trackOrg(`atg-nr-api-${TS}`)
+    const admin = await tok(base, `nr-api-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+
+    for (const { label, value } of INVISIBLE_ONLY_NAMES) {
+      const res = await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: value } })
+      expect(res.status, `status for ${label}`).toBe(400)
+      const body = (await res.json()) as { error: { code: string } }
+      // `error.code` — NOT the status — is the load-bearing assertion (mutation M-C above): with a
+      // plain `.trim()` mirror the two zero-width rows are ALSO 400, but 400
+      // `GROUP_NAME_UNSUPPORTED` from the DB's 23514, which is precisely the app-layer hole this
+      // candidate's mirror closes.
+      expect(body.error.code, `error code for ${label}`).toBe('GROUP_NAME_REQUIRED')
+    }
+
+    const written = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM approval_template_groups WHERE org_id = $1`,
+      [org],
+    )
+    expect(written.rows[0].n).toBe(0)
+  })
+
+  it('Erratum 3 candidate v2: the DB CHECK itself rejects every blank/invisible-only name — direct INSERT raises 23514 atg_name_nonblank, not merely an app-layer 400', async () => {
+    const org = trackOrg(`atg-nr-ddl-${TS}`)
+
+    // Bypasses the route and `requireName` entirely — this is the ONLY thing that can show the
+    // CHECK is load-bearing rather than decorative (gate round 8 P2-2: with `CHECK (true)` the
+    // whole suite stayed green because no assertion ever touched the reject half).
+    for (const { label, value } of INVISIBLE_ONLY_NAMES) {
+      await expect(
+        query(
+          `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+           VALUES ($1, $2, $3, 1, 'probe')`,
+          [`atg_nr_${label.replace(/[^a-z0-9]+/gi, '_')}_${TS}`, org, value],
+        ),
+        `direct insert of ${label}`,
+      ).rejects.toMatchObject({ code: '23514', constraint: 'atg_name_nonblank' })
+    }
+
+    // Positive control on the SAME statement shape: a pure-CJK name goes in. Without this, an
+    // insert failing for an unrelated reason (wrong column list, NOT NULL, the paired sort CHECK)
+    // would read as a passing test — "not this error" is not an outcome assertion.
+    await expect(
+      query(
+        `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+         VALUES ($1, $2, $3, 1, 'probe')`,
+        [`atg_nr_ok_${TS}`, org, `报销`],
+      ),
+    ).resolves.toBeDefined()
+
+    // DISCLOSED GAP, asserted as behaviour so it cannot rot into stale prose: the trim set is the
+    // owner's proposal verbatim, and U+00A0 NBSP is NOT in it. A direct insert of an NBSP-only
+    // name therefore SUCCEEDS at the DB layer — the CHECK alone is not a complete "non-blank"
+    // guarantee. Production is still safe because `requireName` strips a superset (JS \s contains
+    // U+00A0), which the second half of this assertion pair measures rather than assumes.
+    await expect(
+      query(
+        `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+         VALUES ($1, $2, $3, 2, 'probe')`,
+        [`atg_nr_nbsp_${TS}`, org, '\u00A0'],
+      ),
+    ).resolves.toBeDefined()
+    const nbspAdmin = await tok(base, `nr-nbsp-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: `${org}-route` })
+    trackOrg(`${org}-route`)
+    const nbspRes = await httpReq(base, '/api/approval-template-groups', nbspAdmin, {
+      method: 'POST',
+      body: { name: '\u00A0' },
+    })
+    expect(nbspRes.status).toBe(400)
+    expect(((await nbspRes.json()) as { error: { code: string } }).error.code).toBe('GROUP_NAME_REQUIRED')
+  })
+
+  it('Erratum 3 candidate v2 leaves both org_id CHECKs exactly as ratified: atg_org_nonblank and atgl_org_nonblank still reject a pure-CJK org_id and still accept an ASCII one', async () => {
+    const org = trackOrg(`atg-nr-org-${TS}`)
+    const cjkOrg = `组织`
+    const tpl = await createTemplate(`atg-nr-org-tpl-${TS}`)
+
+    // atg_org_nonblank — negative, then the positive control on the identical statement shape.
+    await expect(
+      query(
+        `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+         VALUES ($1, $2, $3, 1, 'probe')`,
+        [`atg_nr_orgneg_${TS}`, cjkOrg, `Org Check ${TS}`],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'atg_org_nonblank' })
+    const groupRow = await query<{ id: string }>(
+      `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+       VALUES ($1, $2, $3, 1, 'probe') RETURNING id`,
+      [`atg_nr_orgpos_${TS}`, org, `Org Check ${TS}`],
+    )
+    expect(groupRow.rowCount).toBe(1)
+
+    // atgl_org_nonblank — the link row is written with group_id NULL / unlinked_at set so the
+    // composite FK (MATCH SIMPLE) does not participate and the org_id CHECK is unambiguously the
+    // constraint under test.
+    await expect(
+      query(
+        `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at, unlinked_at)
+         VALUES ($1, $2, NULL, 'probe', now(), now())`,
+        [cjkOrg, tpl],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'atgl_org_nonblank' })
+    await expect(
+      query(
+        `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at, unlinked_at)
+         VALUES ($1, $2, NULL, 'probe', now(), now())`,
+        [org, tpl],
+      ),
+    ).resolves.toBeDefined()
+
+    // And the constraint TEXT for both is still the ratified regex — the candidate touches one
+    // predicate, and this reads the live catalog rather than trusting the migration source.
+    const defs = await query<{ conname: string; def: string }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conname IN ('atg_org_nonblank', 'atgl_org_nonblank') ORDER BY conname`,
+    )
+    expect(defs.rows.map((r) => r.conname)).toEqual(['atg_org_nonblank', 'atgl_org_nonblank'])
+    for (const row of defs.rows) {
+      expect(row.def, `${row.conname} predicate`).toContain(`~ '[!-~]'`)
+      expect(row.def, `${row.conname} must not have picked up the name rule`).not.toContain('btrim')
+    }
   })
 
   // ── §2 link-time visibility (ratified, gate P2-1; CORRECTED design-gate A3 §2 Q2/P2-5, 2026-09-18) ─

@@ -61,11 +61,13 @@ DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_ap
 
 **候选列口径**:「候选(2026-09-19,待 owner 确认)」一列标记 Erratum 3 CANDIDATE(`lock-errata-proposed-grouping-v2.13-20260919.md` 勘误 3 / 锁文自己的「勘误 3」抬头条目)对该行的影响——PROPOSED,未 ratify,不是「已授权」;门审通过只证明技术验证通过,不构成 ratify、合并或迁移应用的许可。未点名的行按 v2.13 ratify 原样,不受本候选影响。
 
+**勘误 3 候选已进入 REDRAFT v2(2026-09-20)**:第 8 轮门审 P2-1 证伪了第一版候选谓词 `btrim(name) <> ''`(`btrim/2` 默认裁剪集只有 ASCII 空格,全 U+200B 的名字照样 201 入库);owner 同日原话「我之前建议的简单 `btrim(name)` 也不够覆盖纯不可见字符,应以修订后的名称规则验收,不能直接沿用旧建议」。本表下面凡标「勘误 3 候选」的句子,谓词一律以重拟选项 (i) 为准:`btrim(name, E' \t\r\n' || chr(12288) || chr(8203) || chr(8204) || chr(8205) || chr(8288) || chr(65279)) <> ''`。仍是 PROPOSED,仍未 ratify。
+
 | 约束/列 | 迁移文件行 | 锁文 §2 出处 | 候选(2026-09-19,待 owner 确认) |
 |---|---|---|---|
 | `id text PRIMARY KEY`,`'atg_' + randomUUID()` 由服务层生成 | `:38`(DDL);`ApprovalTemplateGroupService.ts:120-122` `newGroupId()` | §2「`approval_template_groups(id text PK 'atg_…' …)`」 | — 不受影响 |
 | `org_id text NOT NULL CONSTRAINT atg_org_nonblank CHECK (org_id ~ '[!-~]')` | `:39-40` | §2 约束清单「`atg_org_nonblank`」 | — 候选**未改**此行(单列请示明确保持 `org_id` 两处 CHECK 不变) |
-| `name text NOT NULL CONSTRAINT atg_name_nonblank CHECK (btrim(name) <> '')`(**候选**;ratified 原文是 `CHECK (name ~ '[!-~]')`) | `:41-63`(候选分支现状;原 ratified 行号 `:41-42`) | §2 约束清单「`atg_name_nonblank`」——**候选改写此行的谓词**,ratify 对象本身未变 | **是**——候选把该 CHECK 从「可打印 ASCII」改为「非空白(`btrim`)」;单列请示等 owner 亲自确认,`GROUP_NAME_UNSUPPORTED` 的 `name` 分支因此在候选分支上不可达(见服务层 `mapGroupConstraintError` 文档注释) |
+| `name text NOT NULL CONSTRAINT atg_name_nonblank CHECK (btrim(name, E' \t\r\n' \|\| chr(12288) \|\| chr(8203) \|\| chr(8204) \|\| chr(8205) \|\| chr(8288) \|\| chr(65279)) <> '')`(**勘误 3 候选 REDRAFT v2**;ratified 原文是 `CHECK (name ~ '[!-~]')`,第一版候选 `CHECK (btrim(name) <> '')` 已被第 8 轮门审 P2-1 证伪) | 候选分支现状,符号定位:迁移文件内 `CONSTRAINT atg_name_nonblank`(原 ratified 行号 `:41-42`) | §2 约束清单「`atg_name_nonblank`」——**候选改写此行的谓词**,ratify 对象本身未变 | **是**——候选把该 CHECK 从「可打印 ASCII」改为「去掉显式不可见字符集后非空」;单列请示等 owner 亲自确认。应用层 `requireName` 镜像同一字符集(且是其严格超集),所以 `GROUP_NAME_UNSUPPORTED` 的 `name` 分支在候选分支上经生产路由不可达(见服务层 `mapGroupConstraintError` 文档注释);**已披露缺口**:字符集逐字照 owner 提案,不含 U+00A0 等,直连 SQL 插入 NBSP-only 名字仍会成功 |
 | `sort_order int`(可空) | `:45`→候选分支下约 `:66` | §2「序号可空 + 与 archived_at 配对 CHECK」 | — 不受影响 |
 | `CONSTRAINT atg_org_id_uni UNIQUE (org_id, id)`(复合 FK 被引用侧) | `:52`→候选分支下约 `:73` | §2「`atg_org_id_uni`……否则 42830」 | — 不受影响 |
 | `CONSTRAINT atg_sort_unique UNIQUE (org_id, sort_order) DEFERRABLE INITIALLY DEFERRED` | `:58`→候选分支下约 `:79` | §2「`atg_sort_unique`……DEFERRABLE 的三条副作用」 | — 不受影响 |
@@ -143,7 +145,7 @@ $ grep -n "r\.\(get\|post\|patch\|delete\)('/api/approval-template-groups\|r\.\(
 | `GROUP_NAME_REQUIRED` | 400 | `requireName`(`ApprovalTemplateGroupService.ts`,函数 ~198,抛出 ~200),建组/改名 name 为空/纯空白 | 输入形状校验,与本路由已有的 `APPROVAL_GROUP_ID_REQUIRED`/`APPROVAL_ACTOR_REQUIRED` 同级 |
 | `APPROVAL_GROUP_ID_REQUIRED` | 400 | link 端点(`routes/approvals.ts` ~1224),`groupId` 缺失/空白 | 同上 |
 | `APPROVAL_ACTOR_REQUIRED` | 401 | 建组端点 ~1169、link 端点 ~1220,`resolveApprovalActorId` 返回 null | 沿用本路由既有惯例 |
-| `GROUP_NAME_UNSUPPORTED`(**本轮/回流修复新增,impl-gate-A-slice1-round4-20260918.md P3-1 补录——此前本表漏列**) | 400 | `mapGroupConstraintError` 内的 23514 分支(`atg_name_nonblank` CHECK 违例,~178-183),由 `createApprovalTemplateGroup`/`renameApprovalTemplateGroup` 的 catch 触发;`details.constraint` 携带约束名 | **非 ratified 码**——请求形状映射(纯 CJK/不可打印字符名 ⇒ 400 而非裸 500),owner 勘误项见 §3.4(`atg_name_nonblank` CHECK 本身是否改写为 `btrim(name) <> ''`,待 owner 裁决,与本条错误码映射是两件事:后者今天已落地,前者未落地) |
+| `GROUP_NAME_UNSUPPORTED`(**本轮/回流修复新增,impl-gate-A-slice1-round4-20260918.md P3-1 补录——此前本表漏列**;**勘误 3 候选**下,`name` 这一半经生产路由不可达——`requireName` 的裁剪集是 DB 集的严格超集,空白/纯不可见名在任何 DB 往返之前就 400 `GROUP_NAME_REQUIRED`;`org_id` 两个成员不受影响,仍是生效的 defense-in-depth) | 400 | `mapGroupConstraintError` 内的 23514 分支(`atg_name_nonblank` CHECK 违例,符号定位 `mapGroupConstraintError`),由 `createApprovalTemplateGroup`/`renameApprovalTemplateGroup` 的 catch 触发;`details.constraint` 携带约束名 | **非 ratified 码**——请求形状映射(纯 CJK/不可打印字符名 ⇒ 400 而非裸 500),owner 勘误项见 §3.4(`atg_name_nonblank` CHECK 本身是否改写为**勘误 3 候选 REDRAFT v2** 的显式裁剪集 `btrim`——**不是**已被第 8 轮门审 P2-1 证伪的 `btrim(name) <> ''`——待 owner 裁决,与本条错误码映射是两件事:后者今天已落地,前者仍是候选) |
 
 **七个 `handleApprovalsError` 兜底码**(数据库故障/未预期异常时的 500 fallback,不是业务语义码,而是「这条请求处理失败」的通用标签,7 个端点各一个、名字含端点动作;`grep -n "handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP" routes/approvals.ts` 现场核对):
 
@@ -155,9 +157,9 @@ $ grep -n "r\.\(get\|post\|patch\|delete\)('/api/approval-template-groups\|r\.\(
 
 **(1)** `unarchiveApprovalTemplateGroup`(符号定位,~337-391)对「归档一个已经归档的组」没有单独处理——它走的是「找不到该 id 的活跃组行」还是复用 `GROUP_ARCHIVED`?现场读代码:`archiveApprovalTemplateGroup`(~284-336)在锁到组行后检查 `archived_at !== null` ⇒ 抛 `GROUP_ARCHIVED`(~297,409)。锁文 §2/I2 只定义了「归档一个活跃组」的路径,未定义「归档一个已归档组」应返回什么;`ApprovalTemplateGroupService.ts` 文件头注释(`grep -n "this implementer's choice" ApprovalTemplateGroupService.ts`,~34)自陈这是实现者选择复用链接态判到的同名码,而非新码,且验收表没有任何一行练到这个分支。属于**未获锁文文本背书的实现决定**,不是缺陷,列入门审核对项。
 
-**(2)**(owner 裁量桶,与 §23.5 的 `atg_name_nonblank` 勘误请示是**同一枚硬币的两面,但不是同一件事**——见下方区分)`GROUP_NAME_UNSUPPORTED`(§3.3 新表)本身是否应该存在,取决于 owner 对 `atg_name_nonblank CHECK (name ~ '[!-~]')` 的最终裁决:
+**(2)**(owner 裁量桶,与 §23.5 的 `atg_name_nonblank` 勘误请示是**同一枚硬币的两面,但不是同一件事**——见下方区分)`GROUP_NAME_UNSUPPORTED`(§3.3 新表)本身是否应该存在,取决于 owner 对 `atg_name_nonblank CHECK (name ~ '[!-~]')` 的最终裁决(**勘误 3 候选**下三条分支的求值见每条句末):
 - 若 owner **维持**该 CHECK 拒绝非 ASCII/CJK 名字的现状(即认定「组名只能是可打印 ASCII」是有意为之),那么 `GROUP_NAME_UNSUPPORTED` 就是一个**长期存在**的、面向最终用户的合法错误码,§3.3 的分类("请求形状校验码"、非 ratified)成立,不需要改动。
-- 若 owner **采纳**§23.5 的默认建议,把 CHECK 改成 `CHECK (btrim(name) <> '')`(真正表达「非空白」),那么这条 CHECK 将不再对纯 CJK/非 ASCII 名字触发 23514,`GROUP_NAME_UNSUPPORTED` 这整条错误码路径会变成**死代码**(`mapGroupConstraintError` 里的这个分支永远不会被触发,因为 `NONBLANK_CHECK_CONSTRAINTS` 里的约束语义已改变),需要在那次(独立的、含 DDL 的)Draft PR 里一并决定是删除这个分支/错误码,还是保留作为「防御性映射,万一将来 CHECK 又被改回去」。
+- 若 owner **采纳**§23.5 的勘误请示(**勘误 3 候选**;请示文本已按 REDRAFT v2 重拟,谓词为显式裁剪集的 `btrim`,**不是**已被证伪的 `CHECK (btrim(name) <> '')`),那么这条 CHECK 将不再对纯 CJK/非 ASCII 名字触发 23514,`GROUP_NAME_UNSUPPORTED` 这整条错误码路径会变成**死代码**(`mapGroupConstraintError` 里的这个分支永远不会被触发,因为 `NONBLANK_CHECK_CONSTRAINTS` 里的约束语义已改变),需要在那次(独立的、含 DDL 的)Draft PR 里一并决定是删除这个分支/错误码,还是保留作为「防御性映射,万一将来 CHECK 又被改回去」。
 - **两件事的关系**:§23.5 问的是「CHECK 该不该改」(DDL 层面,本切片不做);本条问的是「如果不改 CHECK,`GROUP_NAME_UNSUPPORTED` 这个应对措施本身算不算一个需要 owner 背书的新公开合同」(错误码/API 契约层面,本切片已经落地,行为已经生效)。owner 只需回答 §23.5 一次,本条的答案由那次回答**派生**,不需要单独再问一遍。
 
 ### 3.5 另一处实现者裁量(修复轮补齐,gate P2-1)——挂接可见性的失败形状

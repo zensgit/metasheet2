@@ -1250,6 +1250,19 @@ MD5 (…/ApprovalTemplateGroupService.ts) = f59e76d76070f065e6d214485913fe1a
 
 ### 23.5 owner 勘误请示(原文,来自 A-3 门审 O2,verbatim 转述,本节不擅自采纳)
 
+> **逐句失效标记(第 8 轮门审 P2-3 收口,2026-09-20)。本节不作废** —— 它正是 owner 要读来回答那条请示的材料,整节 void 会让它读不成。只有下列两句失效,其余句子仍 OPERATIVE:
+>
+> | 本节原句 | 在当前 head 上的求值 |
+> |---|---|
+> | 「本轮的修法(§23.2)是请求形状映射,**不触碰 DDL**」 | **已为假**。本分支确实改了 DDL:`atg_name_nonblank` 的谓词被改写为勘误 3 候选。见 §27/§28。 |
+> | 「`atg_name_nonblank` 这条 CHECK 本身在本切片结束时**与 ratify 时逐字相同**」 | **已为假**。同上。两处 `org_id` CHECK(`atg_org_nonblank`/`atgl_org_nonblank`)仍与 ratify 时逐字相同 —— 这一半仍成立,并由 §28 的真库用例正向断言。 |
+>
+> | 本节原句 | 求值 |
+> |---|---|
+> | 「锁 §2 的约束清单是 ratify 对象,只有 owner 能改」 | **仍 OPERATIVE**。本分支上的改动是**候选**,不是采纳;ratify 仍待 owner 亲写一句话。 |
+> | 「若 owner 批准,需要一次新的、独立的、含 DDL 迁移的 Draft PR」 | **仍 OPERATIVE**,且这就是本分支的性质(未开 PR、未合并、未应用)。 |
+> | 请示中被提议的谓词 `CHECK (btrim(name) <> '')` | **已被替换**,不是被作废:第 8 轮门审 P2-1 证伪了它(`btrim/2` 默认裁剪集只有 ASCII 空格);请示按「勘误 3(重拟)」选项 (i) 重拟,谓词见 §28.1。**请示本身仍然开着,等 owner 回答。** |
+
 设计门审 `design-gate-A3-phase2-20260918.md` §5 O2 原文:「`atg_name_nonblank CHECK (name ~ '[!-~]')` 拒绝纯中文名 —— **锁 §2 约束清单勘误**,且是 A-1/#5852 上的活缺陷」,默认值「建议改成 `CHECK (btrim(name) <> '')`;在 owner 裁决前,A-3 按 changesRequired #3 跳过+披露」。
 
 **这是本切片(A-1)未采纳、也不能采纳的一条**:锁 §2 的约束清单是 ratify 对象,只有 owner 能改;本轮的修法(§23.2)是请求形状映射,不触碰 DDL,`atg_name_nonblank` 这条 CHECK 本身在本切片结束时与 ratify 时逐字相同。**待 owner 裁决**:是否将 `CONSTRAINT atg_name_nonblank CHECK (name ~ '[!-~]')` 改为 `CHECK (btrim(name) <> '')`(真正表达「非空白」,不歧视非 ASCII/CJK)——若 owner 批准,需要一次新的、独立的、含 DDL 迁移的 Draft PR(本 worktree/本切片明确不做,按硬规矩不动 DDL、不应用迁移到共享库)。在 owner 勘误落地前,§23.2/§23.3 的 400 映射是**唯一**能做的缓解:仍然拒绝纯中文名,但拒绝的形状从不透明 500 变成携带约束名与勘误提示的 400。
@@ -1834,6 +1847,14 @@ $ git diff --stat a728ed65532918e3726171d0c42f44d6be7e0ba9..HEAD
 
 ## 27. 勘误 3 候选的技术验证(2026-09-19,待 owner 确认)
 
+> **逐句失效标记(2026-09-20)。本节不作废** —— 它是候选 v1 的完整证据记录,门审要据它核对「v1 到底被测了什么、漏了什么」。求值:
+>
+> - 本节所有关于**谓词内容**的句子(`CHECK (btrim(name) <> '')`、「非空白」、27.1/27.4/27.5 里引用该谓词的每一处)**已失效** —— 该谓词被第 8 轮门审 P2-1 证伪并已被 REDRAFT v2 取代,现行谓词见 §28.1。
+> - 本节关于**治理边界**的句子(27.0「不是 ratify/合并/应用的许可」、归属纠正那一段)**仍 OPERATIVE**,§28 照此执行。
+> - 27.2 关于 `mapGroupConstraintError` 分支「保留不删」的处置**仍 OPERATIVE**(§28.5 沿用)。
+> - 27.3 记录的反引号事故**仍 OPERATIVE**,并在 §28.1 又新增了同族的一次反斜杠事故。
+> - 27.5 的 mutation(CHECK 改回 `~ '[!-~]'`)对 v1 有效,但**对 v2 判别力不足**:它只打「接受这一半」。v2 的三条探针见 §28.4,其中 M-A 就是「把旧实现跑一遍」。
+
 ### 27.0 状态声明(先于任何证据)
 
 **Erratum 3 是 CANDIDATE——PROPOSED,未 ratify,不是「已授权」。** 本节记录的一切(下方 27.1-27.7 的迁移/服务层/测试改动与全绿证据)都只是**技术验证**,不构成 ratify、合并或迁移应用的许可,也不是对 §23.5「owner 勘误请示」的自我批准。
@@ -1959,3 +1980,72 @@ A-3(分期 3,`?category=`/`/categories`,尚未在本分支落地)的 `classifyBa
 ### 27.10 提交与推送
 
 （推送前以 `git log --oneline <起点>..HEAD` 现场输出为准,不在此钉 SHA——同一自指问题见 §23.11/§24.7/§25.8/§26.3,本节沿用同一约定。）
+
+## 28. 勘误 3 候选 REDRAFT v2 的技术验证(2026-09-20,待 owner 确认)
+
+**Erratum 3 仍是 CANDIDATE —— PROPOSED,未 ratify,不是「已授权」。** 本节记录的一切都只是技术验证,不构成 ratify、合并或迁移应用的许可。本分支未开 PR、未合并、未 undraft、未向 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_main` 或任何共享/staging/prod 库应用过任何迁移;全部真库证据来自本次自建的一次性库 `metasheet2_namerule_impl_20260920`(owner 角色 `ms2testbed`,非超级用户),用完即 `dropdb`。
+
+### 28.0 为什么有 v2:第一版候选被第 8 轮门审证伪
+
+`impl-gate-A-slice1-round8-20260919.md` 对第一版候选(`CHECK (btrim(name) <> '')`)判 NEEDS-FIX,3 P2:
+
+- **P2-1** —— 该谓词被描述成「非空白(允许任意字符)」,但 PostgreSQL `btrim/2` 的**默认裁剪集只有 ASCII 空格**。全 U+200B(或 U+3000 / TAB / LF / U+FEFF)组成的名字照样过 CHECK;应用层 `requireName` 的 JS `.trim()` 也不裁 U+200B/200C/200D/2060 ⇒ 这一族**同时穿透两道闸**,`POST {name:"<U+200B>"}` 201 入库,得到一个在任何界面都看不见的分组。
+- **P2-2** —— 候选谓词「该拒绝什么」这一半**零测试覆盖**:把整条 CHECK 换成 `CHECK (true)`,29/29 仍全绿。
+- **P2-3** —— §23.5 的两句绝对断言在该 head 上已为假且无失效标记(本轮已收口,见 §23.5 顶部的逐句求值表)。
+
+owner 同日原话:「我之前建议的简单 `btrim(name)` 也不够覆盖纯不可见字符,应以修订后的名称规则验收,不能直接沿用旧建议。」
+
+### 28.1 谓词(逐字照「勘误 3(重拟)」选项 (i))
+
+```
+CONSTRAINT atg_name_nonblank CHECK (
+  btrim(name, E' \t\r\n' || chr(12288) || chr(8203) || chr(8204) || chr(8205)
+                || chr(8288) || chr(65279)) <> ''
+)
+```
+
+裁剪集 = ASCII 空格 / TAB / CR / LF + U+3000 全角空格 + U+200B/200C/200D 零宽(非)连接符 + U+2060 词连接符 + U+FEFF BOM。**locale 无关**(不走 `iswspace`/`[[:alnum:]]`),规避 15-alpine musl 轴。两处 `org_id` CHECK **逐字未动**。
+
+**源码写法的行为级证明(不是论证)**:该谓词写在 `sql\`...\`` 标签模板字面量内部,反斜杠必须**加倍**才能让 PostgreSQL 收到提案的原文。迁移跑完后直接对比两串:
+
+```
+-- A:迁移产出的 CHECK
+SELECT encode(convert_to(pg_get_constraintdef(oid),'UTF8'),'hex') FROM pg_constraint WHERE conname='atg_name_nonblank';
+-- B:把提案文本原样喂给 psql 建的 TEMP 表的同名 CHECK
+⇒ byte_equal = t   (IDENTICAL: migration-emitted CHECK == proposal text verbatim)
+```
+
+**本轮真实事故(记录下来,防止下一次编辑再犯)**:第一版落笔把提案文本写进上方**注释**时用了单反斜杠。JS 模板字面量把 `\t\r\n` 变成真的 TAB/CR/LF,那个 CR/LF **在句子中间结束了 SQL 行注释**,后半句被当成 SQL 解析,`db:migrate` 报 `syntax error at or near "'. A single backslash would be consumed`(PG 侧 `scanner_yyerror`,line 1192)。与该文件里既有的「反引号会提前终止模板」是同一族陷阱;注释里现在写明了这一条,并且**连散文里的反斜杠也一律加倍**。
+
+### 28.2 应用层镜像(`ApprovalTemplateGroupService.ts` `requireName`)
+
+`name.trim()` → `name.replace(/^[\s\u200B\u200C\u200D\u2060]+|[\s\u200B\u200C\u200D\u2060]+$/g, '')`。
+
+JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/CR/LF/U+3000/U+FEFF,**唯独不含** U+200B/200C/200D/2060 —— 正是 P2-1 那一族。补上这四个之后,应用层集合是 DB 集合的**严格超集**,方向是对的:`requireName` 返回的任何名字**按构造**已满足 CHECK,所以纯空白/纯不可见名一律是 400 `GROUP_NAME_REQUIRED`,永远落不到 23514 或 500。
+
+它是**裁剪**不是**拒绝**(镜像 `btrim` 的语义):`U+200B + 'HR' + U+200B` ⇒ 201,库里存的是 `'HR'`;内部零宽(`'a' + U+200B + 'b'`)原样保留。**已披露的可接受后果**:`'H' + U+200B + 'R'` 与 `'HR'` 在 `uq_atg_org_name_active` 下是两个不同的名字,而渲染起来一模一样 —— 这是选项 (i) 接受内部不可见字符的设计后果,不是缺陷。
+
+**已披露缺口(写成断言,不写成散文)**:裁剪集逐字照 owner 提案,因此**不含** U+00A0 NBSP、U+1680、U+2000–U+200A、U+202F、U+205F、U+2028/9。直连 SQL 插入 NBSP-only 名字**会成功**;经生产路由则 400(JS `\s` 含 U+00A0)。§28.3 的用例把这一对(直插成功 / 走路由 400)**两半都断言**,所以这条披露是可机核的行为事实,不是会腐烂的散文。
+
+### 28.3 真库用例(`approval-template-groups-lifecycle.db.test.ts`,4 个 `it`,替换掉原来那 1 个)
+
+| # | 用例 | 断言 |
+|---|---|---|
+| 1 | 有可见字符的名字 | `请假` / `休暇申請` / `🎉庆祝` / `'a'+U+200B+'b'` / ASCII 正控 ⇒ **201**,响应体与 DB 读回**逐字节**相同;纯中文改名到另一个纯中文名 ⇒ **200**;`U+200B U+3000 HR-padded-<TS> U+FEFF U+2060` ⇒ **201 且存的是 `HR-padded-<TS>`**(这一条才分得清「裁剪」与「拒绝」两种镜像设计) |
+| 2 | 空白/纯不可见名走**生产路由** | `''` / `' '` / `U+3000` / `U+200B×2` / `U+FEFF` / `TAB+LF` 六个值 ⇒ **400 且 `error.code === 'GROUP_NAME_REQUIRED'`**;该 org 下写入 **0 行**。**钉的是错误码不是状态码** —— 见 M-C。 |
+| 3 | 同样六个值走**直连 SQL** | `INSERT INTO approval_template_groups …` ⇒ **23514 `atg_name_nonblank`**(证明 CHECK 本身承重,不只靠应用层);同一语句形状的**正控**:`报销` ⇒ 成功;**已披露缺口对**:NBSP-only 直插**成功** + 同值走路由 **400 `GROUP_NAME_REQUIRED`** |
+| 4 | 两处 `org_id` CHECK 未变 | `atg_org_nonblank`:`组织` 直插 ⇒ 23514,ASCII org 正控 ⇒ 成功;`atgl_org_nonblank`:同样一负一正(`group_id IS NULL` + `unlinked_at` 非空,让复合 FK 在 MATCH SIMPLE 下不参与,确保被测的就是 org_id 的 CHECK);并从 `pg_constraint` **读活目录**断言两条谓词仍含 `~ '[!-~]'` 且**不含** `btrim` |
+
+### 28.4 mutation(cp 备份 → 改 → 重建私有库 → 跑 → cp 还原 → cmp 全部逐字节一致)
+
+| 探针 | 改动 | 观察到的红 |
+|---|---|---|
+| **M-A**(= 跑一遍旧实现) | 迁移谓词 → 第一版候选 `btrim(name) <> ''` | 用例 3(直连 SQL)**红**:`promise resolved "Result{ command: 'INSERT' …}" instead of rejecting`。用例 2(走路由)**仍绿** —— 这正是两条必须并存的理由,也正是 P2-1 当初漏出去的机制。1 failed / 21 passed |
+| **M-B** | 迁移谓词 → `CHECK (true)`(第 8 轮门审自己那条证伪探针,原样重跑) | 用例 3 **红**。1 failed / 21 passed ⇒ **P2-2 关闭**(同一条探针下,上一轮是 29/29 全绿) |
+| **M-C** | `requireName` → 退回裸 `.trim()` | 用例 2 **红**,且红在**错误码**:`expected 'GROUP_NAME_UNSUPPORTED' to be 'GROUP_NAME_REQUIRED'`;用例 1 也红(padded 名字)。**状态码两边都是 400**,所以只断言 status 的写法对这条 mutation 判别力为零 —— 这是本轮特意钉 `error.code` 的原因。2 failed / 20 passed |
+
+还原后 `cmp` 对迁移与服务两个文件均逐字节一致,重跑 **32/32 全绿**。
+
+### 28.5 本轮明确**没有**做的事
+
+未合并、未 undraft、未开/动 PR、未动 `origin/main`、未改任何已 ratify 锁文正文(`reviews/` 下的 `*lock*` 文件只读)、未向任何共享/staging/prod 库应用迁移、未删除任何不是本轮创建的 worktree/库/文件。`mapGroupConstraintError` 的 23514 → `GROUP_NAME_UNSUPPORTED` 分支与 `NONBLANK_CHECK_CONSTRAINTS` 里的 `atg_name_nonblank` 成员**保留未删**(与第一版候选同样的理由:删它是一次未经 owner 确认的映射面收窄);该分支的中文 message 现在只对两个 `org_id` 成员准确,**如实披露、不改写** —— 那句话被本文件的 `toContain` 断言冻结成了响应体合同,改它是合同裁决,不是候选该单方面做的事。
