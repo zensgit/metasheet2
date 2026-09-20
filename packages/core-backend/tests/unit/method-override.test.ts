@@ -29,6 +29,7 @@ const authServiceMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
 vi.mock('../../src/auth/AuthService', () => ({ authService: authServiceMock }))
 
 import { usePinnedServer } from '../utils/pinned-server'
+import { Logger } from '../../src/core/logger'
 import { isApiPath } from '../../src/auth/api-path-policy'
 import { isWhitelisted, jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import {
@@ -367,6 +368,8 @@ describe('index.ts wiring', () => {
   const code = stripComments(source)
 
   const GATE_LINE = 'if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)'
+  /** The literal tests/unit/elearning-media-playback-runtime.test.ts:116 searches index.ts for. */
+  const ELEARNING_LOG_ANCHOR = /this\.logger\.info\(\s*`\$\{req\.method\} \$\{req\.path\}`\s*\)/
   const SECURITY_MOUNT = 'this.app.use(attendanceSecurityMiddleware())'
   const OVERRIDE_MOUNT = 'this.app.use(methodOverrideMiddleware)'
 
@@ -411,7 +414,7 @@ describe('index.ts wiring', () => {
    * this test fails HERE, in the suite that owns the change, if anyone interpolates it again.
    */
   it('keeps the request-log literal the e-learning pipeline guard anchors on', () => {
-    const ELEARNING_ANCHOR = /this\.logger\.info\(\s*`\$\{req\.method\} \$\{req\.path\}`\s*\)/
+    const ELEARNING_ANCHOR = ELEARNING_LOG_ANCHOR
     const setupAt = source.search(/private\s+setupMiddleware\s*\(\s*\)\s*:\s*void\s*\{/)
     const setupEndAt = source.search(/private\s+installGlobalErrorHandler\s*\(\s*\)\s*:\s*void\s*\{/)
     expect(setupAt).toBeGreaterThanOrEqual(0)
@@ -490,12 +493,36 @@ describe('index.ts wiring', () => {
     ].sort())
   })
 
-  it('the pre-auth request log records the override CLAIM without rewriting anything', () => {
-    const log = source.slice(source.indexOf('// 请求日志'), source.indexOf('// 全局 JWT'))
-    expect(log).toContain('readMethodOverrideHeader(req)')
-    expect(log).toContain('methodOverride=')
-    // A rewrite here would be a pre-auth rewrite — the one thing this middleware must never do.
-    expect(log).not.toMatch(/req\.method\s*=/)
+  /**
+   * THE PRE-AUTH REQUEST LOG IS NOT OURS TO EDIT, and this PR learned it twice in the same middleware:
+   *   1. interpolating the override claim INTO its template turned the anchor in
+   *      tests/unit/elearning-media-playback-runtime.test.ts into -1 (`expected -1 to be greater than
+   *      4755`) and made the required `test (18.x)` / `test (20.x)` lanes red;
+   *   2. moving the claim into an if/else instead kept that anchor alive but added two `this.logger`
+   *      occurrences whose ancestor-KIND keys nobody had enumerated, so the FROZEN census in
+   *      tests/unit/attendance-w6-group-effective-policy-authorization.test.ts bucketed them UNKNOWN
+   *      and reds (measured: UNKNOWN 2, SAFE 49 != FROZEN_SAFE_COUNT 50).
+   * Both owners live outside this PR's files, which is exactly why the constraint is restated HERE,
+   * in the suite that owns the change that would break them. The claim is logged at the decision
+   * point instead (middleware/method-override.ts), where it can also report the OUTCOME.
+   */
+  it('leaves the pre-auth request log exactly as it found it — one mount, one log call, no override read', () => {
+    const at = code.search(ELEARNING_LOG_ANCHOR)
+    expect(at).toBeGreaterThan(0)
+    const start = code.lastIndexOf('this.app.use(', at)
+    const end = code.indexOf('this.app.use(', at)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(at)
+    // CODE only (comments stripped above), so this file's own prose about `this.logger` cannot
+    // satisfy or break the count.
+    const block = code.slice(start, end)
+    // Exactly the two `this` uses main has here: the mount and the single log call. A branch, a
+    // second logger call, or a marker read adds a key the W6 census never enumerated.
+    expect(block.match(/this\./g)).toHaveLength(2)
+    expect(block).not.toContain('readMethodOverrideHeader')
+    expect(block).not.toContain('methodOverride')
+    // A rewrite here would be a pre-auth rewrite — the one thing this pipeline must never do.
+    expect(block).not.toMatch(/req\.method\s*=/)
   })
 
   it('does NOT carry the dead AuditService marker (that middleware is mounted nowhere)', () => {
@@ -597,5 +624,81 @@ describe('real JWT gate -> real override -> real probe, over a socket', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true, method: 'DELETE', overridden: false })
     expect(res.headers['x-method-overridden']).toBeUndefined()
+  })
+})
+
+/**
+ * THE CLAIM LOG, AT THE DECISION POINT. index.ts's pre-auth request logger cannot carry the override
+ * claim (its literal and its `this`-shape are pinned by two other suites — see the wiring suite
+ * above), so the claim is logged by the middleware that decides, WITH the outcome. On a customer
+ * network that is the fact worth having: a hop that strips the header leaves no HONOURED line, and a
+ * claim that reaches a gate-exception path leaves a REFUSED one.
+ */
+describe('method-override claim logging', () => {
+  it('logs HONOURED on a rewrite and REFUSED on an unhonoured claim — values-free either way', () => {
+    const info = vi.spyOn(Logger.prototype, 'info').mockImplementation(() => {})
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
+    try {
+      const honouredReq = {
+        method: 'POST',
+        path: '/api/multitable/sheets/s1',
+        headers: { 'x-http-method-override': 'DELETE', authorization: 'Bearer super-secret-token' },
+        body: { confidential: 'payload-value' },
+        user: { id: 'u-1' },
+      } as unknown as Request
+      const next = vi.fn()
+      methodOverrideMiddleware(honouredReq, { setHeader: vi.fn() } as unknown as Response, next)
+      expect(next).toHaveBeenCalledTimes(1)
+      const honoured = info.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('method-override'))
+      expect(honoured).toEqual(['method-override HONOURED: POST -> DELETE /api/multitable/sheets/s1'])
+
+      const refusedReq = {
+        method: 'POST',
+        path: '/api/plm-embed/discussion/threads/t1/comments/c1',
+        headers: { 'x-http-method-override': 'delete', authorization: 'Bearer super-secret-token' },
+        body: { confidential: 'payload-value' },
+      } as unknown as Request
+      const json = vi.fn()
+      const refusedNext = vi.fn()
+      methodOverrideMiddleware(
+        refusedReq,
+        { status: vi.fn().mockReturnValue({ json }), setHeader: vi.fn() } as unknown as Response,
+        refusedNext,
+      )
+      expect(refusedNext).not.toHaveBeenCalled()
+      const refused = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('method-override'))
+      expect(refused).toEqual([
+        'method-override REFUSED (claim not honoured, no req.user): POST /api/plm-embed/discussion/threads/t1/comments/c1',
+      ])
+
+      // VALUES-FREE: verb names and the path (already logged for every request) — nothing else.
+      for (const line of [...honoured, ...refused]) {
+        expect(line).not.toContain('payload-value')
+        expect(line).not.toContain('super-secret-token')
+        expect(line).not.toContain('x-http-method-override')
+      }
+    } finally {
+      info.mockRestore()
+      warn.mockRestore()
+    }
+  })
+
+  it('a request with no claim logs nothing at all (the log is not a per-request tax)', () => {
+    const info = vi.spyOn(Logger.prototype, 'info').mockImplementation(() => {})
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
+    try {
+      const next = vi.fn()
+      methodOverrideMiddleware(
+        { method: 'POST', path: '/api/x', headers: {}, user: { id: 'u-1' } } as unknown as Request,
+        { setHeader: vi.fn() } as unknown as Response,
+        next,
+      )
+      expect(next).toHaveBeenCalledTimes(1)
+      expect(info.mock.calls.filter((c) => String(c[0]).includes('method-override'))).toEqual([])
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('method-override'))).toEqual([])
+    } finally {
+      info.mockRestore()
+      warn.mockRestore()
+    }
   })
 })

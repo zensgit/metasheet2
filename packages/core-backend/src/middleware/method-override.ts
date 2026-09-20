@@ -45,6 +45,18 @@
  * server CAN see (header present, rewrite not applied) is refused outright, see above.
  */
 import type { NextFunction, Request, Response } from 'express'
+import { Logger } from '../core/logger'
+
+/**
+ * VALUES-FREE BY CONSTRUCTION: every line below logs the VERB NAMES and the request path only —
+ * never the header's raw text, never a token, never a body. The path is already logged for every
+ * request by the pre-auth request logger in index.ts, so this adds no new exposure; what it adds is
+ * the one fact that logger cannot carry (its text and shape are pinned by the e-learning pipeline
+ * anchor and by the attendance W6 `this`-census): whether an override claim arrived and whether it
+ * was HONOURED. That is exactly what a customer-network diagnosis needs — a hop that strips the
+ * header leaves no 'honoured' line at all.
+ */
+const logger = new Logger('MethodOverride')
 
 export const METHOD_OVERRIDE_HEADER = 'x-http-method-override'
 /** Response receipt: proof that THIS server performed the rewrite. */
@@ -67,9 +79,9 @@ function headerValue(raw: unknown): string {
 
 /**
  * The HEADER CLAIM alone: 'DELETE' when the override header carries exactly that value, whatever the
- * request method is and whether or not authentication has run. Used by the pre-auth request log,
- * which must not (and cannot) decide whether the rewrite will be applied. NEVER use this to gate a
- * rewrite — `resolveMethodOverride` is the decision.
+ * request method is and whether or not authentication has run. Reports what the sender ASKED for,
+ * never whether the rewrite will be applied. NEVER use this to gate a rewrite —
+ * `resolveMethodOverride` is the decision.
  */
 export function readMethodOverrideHeader(req: Pick<Request, 'headers'>): 'DELETE' | null {
   return headerValue(req.headers[METHOD_OVERRIDE_HEADER]) === 'DELETE' ? 'DELETE' : null
@@ -89,6 +101,7 @@ export function methodOverrideMiddleware(req: Request, res: Response, next: Next
     req.methodOverride = override
     // Receipt, set before the route runs so it survives any status the route answers with.
     res.setHeader(METHOD_OVERRIDDEN_HEADER, override)
+    logger.info(`method-override HONOURED: POST -> ${override} ${req.path}`)
     next()
     return
   }
@@ -104,6 +117,7 @@ export function methodOverrideMiddleware(req: Request, res: Response, next: Next
   // Scope, deliberately: POST only. A GET/PUT/PATCH carrying the header cannot be turned into a
   // wrong write by a POST twin, so those stay ignored (the request proceeds as the verb it is).
   if (req.method === 'POST' && readMethodOverrideHeader(req)) {
+    logger.warn(`method-override REFUSED (claim not honoured, no req.user): POST ${req.path}`)
     res.status(405).json({
       ok: false,
       error: {

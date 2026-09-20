@@ -326,7 +326,7 @@ import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
 import { authenticate as authenticateElearningApp } from './middleware/auth'
-import { methodOverrideMiddleware, readMethodOverrideHeader } from './middleware/method-override'
+import { methodOverrideMiddleware } from './middleware/method-override'
 import { methodProbeRouter } from './routes/method-probe'
 import {
   isElearningAssignmentSurfaceEnabled,
@@ -1719,22 +1719,19 @@ export class MetaSheetServer {
       }
     }
 
-    // 请求日志。This runs BEFORE auth and before the method-override rewrite, so `req.method` here is
-    // always the verb that arrived on the wire (a tunnelled delete logs as POST). The override marker
-    // is therefore the CLAIM carried by the header, not proof that the rewrite was applied — the
-    // rewrite decision needs `req.user`, which does not exist yet at this point. Values-free: only the
-    // verb name is logged, never the header's raw text or any payload.
-    // The plain (unclaimed) log line's template is LOAD-BEARING TEXT: another suite
-    // (tests/unit/elearning-media-playback-runtime.test.ts) anchors this pipeline's order on that
-    // exact literal, so the override claim gets its OWN branch instead of being interpolated into
-    // it — interpolating it turned that anchor into -1 and made `test (18.x)/(20.x)` red.
+    // 请求日志。UNCHANGED BY THE METHOD-OVERRIDE WORK, ON PURPOSE — two other suites own this
+    // middleware, its literal AND its shape, and both fail closed:
+    //   - tests/unit/elearning-media-playback-runtime.test.ts locates the request logger by searching
+    //     index.ts for the exact template below and orders the whole pipeline around it. Interpolating
+    //     an override marker into it turned that search into -1 and made `test (18.x)/(20.x)` red.
+    //   - tests/unit/attendance-w6-group-effective-policy-authorization.test.ts partitions every `this`
+    //     use of this assembly scope against a FROZEN key census keyed by ancestor KIND. Wrapping the
+    //     logger call in a branch, or adding a second `this.logger` call here, produces keys nobody
+    //     enumerated, lands in its UNKNOWN bucket and reds it.
+    // So the override CLAIM is logged where the decision is actually made and where it can also record
+    // whether the claim was HONOURED — middleware/method-override.ts — instead of here.
     this.app.use((req, res, next) => {
-      const claimedOverride = readMethodOverrideHeader(req)
-      if (claimedOverride) {
-        this.logger.info(`${req.method} ${req.path} methodOverride=${claimedOverride}`)
-      } else {
-        this.logger.info(`${req.method} ${req.path}`)
-      }
+      this.logger.info(`${req.method} ${req.path}`)
       next()
     })
 
