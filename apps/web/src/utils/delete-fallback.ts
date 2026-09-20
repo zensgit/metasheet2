@@ -27,15 +27,27 @@
  *   - 'native'               — send DELETE. A network-level failure buys ONE retry as POST+override.
  *   - 'override'             — POST+override from the start; proven working by the probe or by a
  *                              receipt-carrying retry.
- *   - 'override-unavailable' — the tunnel was tried and is NOT trustworthy here (no receipt, or the
- *                              override probe itself failed). Behaves like 'native' for sending and
- *                              additionally buys NO further POST retries this session, so a stripped
- *                              header can never be replayed into repeated wrong writes.
+ *   - 'override-unavailable' — a POST+override was ANSWERED WITH SUCCESS (2xx/3xx) that carried no
+ *                              receipt, i.e. something handled it without rewriting it. Behaves like
+ *                              'native' for sending and additionally buys NO further POST retries
+ *                              this session, so a stripped header can never be replayed into
+ *                              repeated wrong writes. Only this one shape latches it: a >= 400 or a
+ *                              dead link decides nothing (see the probe note below).
  *
  * `probeDeleteTransport(baseFetch)` runs once after login and exercises BOTH transports: native DELETE
  * first; only if that fails at the network level does it try `POST /api/method-probe` + override, and
- * it latches 'override' on EXACTLY the bit `sendDelete` latches on — `hasOverrideReceipt`. Anything
- * else latches 'override-unavailable'.
+ * it latches 'override' on EXACTLY the bit `sendDelete` latches on — `hasOverrideReceipt`.
+ *
+ * THE PROBE MAY ALSO NOT CONCLUDE MORE THAN `sendDelete` WOULD. An earlier draft latched
+ * 'override-unavailable' on ANY receipt-less answer, so a 401/403/5xx produced ABOVE this middleware
+ * (the session gate answers 403 `PASSWORD_CHANGE_REQUIRED` to a first login, 401 without a token; a
+ * gateway answers 5xx) disabled the fallback for the whole session — and since 'override-unavailable'
+ * also forbids the one-shot retry, every later delete then failed natively with no attempt at all.
+ * The probe therefore DECIDES on only two things: a receipt (→ 'override') and a receipt-less
+ * 2xx/3xx, which is the dangerous "something answered success to a POST nobody rewrote" shape
+ * (→ 'override-unavailable', exactly what `sendDelete` concludes there). Everything else — any
+ * >= 400, and no response at all on either leg — leaves the mode UNDECIDED, so the next real delete
+ * still buys its single POST retry and can still learn the tunnel from a receipt.
  *
  * THE PROBE MAY NOT ACCEPT A WEAKER PROOF THAN `sendDelete` DEMANDS. `/api/method-probe` also reports
  * `overridden` in its BODY, and an earlier draft of this module let that body alone license the tunnel.
@@ -274,16 +286,30 @@ export function probeDeleteTransport(baseFetch: BaseFetch, opts: { timeoutMs?: n
         setDeleteTransport('override')
         return 'override'
       }
-      // Reached something, but it did not confirm the rewrite (stripped header, old backend, or a
-      // POST twin answering). Never tunnel writes through it.
+      // NO RECEIPT. What may be CONCLUDED from that depends on what the answer proves, and the
+      // standard is exactly the one `sendDelete` applies to its own retry:
+      //   status >= 400 — a REFUSAL. Nothing was written, and the refusal may well have been
+      //     produced ABOVE this middleware and say nothing about the tunnel: the global session gate
+      //     answers 401 without a token and 403 `PASSWORD_CHANGE_REQUIRED` for a first login that
+      //     must change its password (the probe path is not on that whitelist), and a proxy/gateway
+      //     hiccup answers 5xx. Latching here would lock the WHOLE session out of the fallback on a
+      //     pre-auth or transient answer — every later delete would then fail natively with no
+      //     retry. So: decide nothing, leave the mode as it is, and let the next real delete's
+      //     one-shot retry learn from a receipt. (`sendDelete` hands >= 400 back unchanged for the
+      //     same reason.)
+      //   status < 400 — a 2xx/3xx with no receipt is the DANGEROUS shape: something answered
+      //     SUCCESS to a POST that was never rewritten (stripped header, old backend, or a POST twin
+      //     doing the opposite of the delete). Sending real deletes through that could invert the
+      //     user's intent, so the tunnel IS latched off for the session — the same conclusion
+      //     `sendDelete` draws when its retry gets an unconfirmed 2xx.
+      if (response.status >= 400) return getDeleteTransport()
       setDeleteTransport('override-unavailable')
       return 'override-unavailable'
-    } catch (error) {
-      // The tunnel attempt got no response either: the whole link is down, so nothing was learned
-      // about the override. Leave the mode alone rather than burning the fallback for the session.
-      if (isNetworkLevelFailure(error)) return getDeleteTransport()
-      setDeleteTransport('override-unavailable')
-      return 'override-unavailable'
+    } catch {
+      // The tunnel attempt got no response at all (transport failure, our 8s abort, or any other
+      // rejection): it proved nothing about the override, so leave the mode alone rather than
+      // burning the fallback for the session.
+      return getDeleteTransport()
     } finally {
       clearTimeout(timer)
     }

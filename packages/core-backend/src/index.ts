@@ -1724,9 +1724,17 @@ export class MetaSheetServer {
     // is therefore the CLAIM carried by the header, not proof that the rewrite was applied — the
     // rewrite decision needs `req.user`, which does not exist yet at this point. Values-free: only the
     // verb name is logged, never the header's raw text or any payload.
+    // The plain (unclaimed) log line's template is LOAD-BEARING TEXT: another suite
+    // (tests/unit/elearning-media-playback-runtime.test.ts) anchors this pipeline's order on that
+    // exact literal, so the override claim gets its OWN branch instead of being interpolated into
+    // it — interpolating it turned that anchor into -1 and made `test (18.x)/(20.x)` red.
     this.app.use((req, res, next) => {
       const claimedOverride = readMethodOverrideHeader(req)
-      this.logger.info(`${req.method} ${req.path}${claimedOverride ? ` methodOverride=${claimedOverride}` : ''}`)
+      if (claimedOverride) {
+        this.logger.info(`${req.method} ${req.path} methodOverride=${claimedOverride}`)
+      } else {
+        this.logger.info(`${req.method} ${req.path}`)
+      }
       next()
     })
 

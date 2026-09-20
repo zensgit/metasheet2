@@ -19,7 +19,18 @@ vi.hoisted(() => {
   process.env.ATTENDANCE_RATE_LIMIT_IMPORT_COMMIT_PER_MIN = '2'
 })
 
+/**
+ * Token verification is the ONLY thing stubbed for the real-gate suite at the bottom of this file:
+ * `authService.verifyToken` is what `jwtAuthMiddleware` calls, and it talks to Postgres. Everything
+ * else in that suite — the gate middleware, the override middleware, the probe router, the socket —
+ * is the real thing. (Same mock shape as tests/unit/jwt-middleware.test.ts.)
+ */
+const authServiceMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
+vi.mock('../../src/auth/AuthService', () => ({ authService: authServiceMock }))
+
 import { usePinnedServer } from '../utils/pinned-server'
+import { isApiPath } from '../../src/auth/api-path-policy'
+import { isWhitelisted, jwtAuthMiddleware } from '../../src/auth/jwt-middleware'
 import {
   METHOD_OVERRIDDEN_HEADER,
   methodOverrideMiddleware,
@@ -275,18 +286,144 @@ describe('method-override cannot dodge the attendance import rate limiter', () =
   })
 })
 
+/**
+ * A comment stripper that KNOWS ABOUT STRINGS, ported from `apps/web/tests/delete-fallback.spec.ts`
+ * (the two packages cannot share a helper). The naive one-liner
+ * `src.replace(/\/\*[\s\S]*?\*\//g, '')` is NOT usable here: measured on this very index.ts it
+ * treats the `/*` inside string literals as a block-comment opener and deletes to the next `*` `/`
+ * anywhere in the file — 259462 chars -> 151997, and EVERY anchor this suite looks for (the gate
+ * line, both attendance mounts, the override mount) went to -1. A guard whose parser eats the lines
+ * it inspects reports nothing and passes.
+ */
+const REGEX_ALLOWED_AFTER = new Set([
+  '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '^', '~', '<', '>', '',
+])
+
+function stripComments(text: string): string {
+  let out = ''
+  let i = 0
+  let prev = ''
+  const emit = (chunk: string): void => {
+    out += chunk
+    const trimmed = chunk.trimEnd()
+    if (trimmed) prev = trimmed[trimmed.length - 1]
+  }
+  while (i < text.length) {
+    const c = text[i]
+    const next = text[i + 1]
+    if (c === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') i += 1
+      continue
+    }
+    if (c === '/' && next === '*') {
+      i += 2
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1
+      i += 2
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      let j = i + 1
+      while (j < text.length) {
+        if (text[j] === '\\') { j += 2; continue }
+        if (text[j] === c) { j += 1; break }
+        j += 1
+      }
+      emit(text.slice(i, j))
+      i = j
+      continue
+    }
+    if (c === '/' && REGEX_ALLOWED_AFTER.has(prev)) {
+      let j = i + 1
+      let inClass = false
+      let closed = false
+      while (j < text.length && text[j] !== '\n') {
+        if (text[j] === '\\') { j += 2; continue }
+        if (text[j] === '[') inClass = true
+        else if (text[j] === ']') inClass = false
+        else if (text[j] === '/' && !inClass) { j += 1; closed = true; break }
+        j += 1
+      }
+      if (closed) {
+        while (j < text.length && /[a-z]/.test(text[j])) j += 1
+        emit(text.slice(i, j))
+        i = j
+        continue
+      }
+    }
+    emit(c)
+    i += 1
+  }
+  return out
+}
+
 describe('index.ts wiring', () => {
   const source = readFileSync(join(__dirname, '../../src/index.ts'), 'utf8')
+  /**
+   * CODE ONLY. Every ordering claim below is about what index.ts DOES, so the comments come out
+   * first. Refuter finding: on raw text a COMMENTED-OUT mount line still satisfied `indexOf`, so
+   * this suite stayed green with the middleware mounted nowhere. `source` (raw) is kept for the two
+   * tests whose anchors are deliberately comments.
+   */
+  const code = stripComments(source)
+
+  const GATE_LINE = 'if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)'
+  const SECURITY_MOUNT = 'this.app.use(attendanceSecurityMiddleware())'
+  const OVERRIDE_MOUNT = 'this.app.use(methodOverrideMiddleware)'
 
   it('mounts the override AFTER the JWT gate and AFTER the attendance security guard', () => {
-    const gate = source.indexOf('if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)')
-    const security = source.indexOf('this.app.use(attendanceSecurityMiddleware())')
-    const override = source.indexOf('this.app.use(methodOverrideMiddleware)')
+    const gate = code.indexOf(GATE_LINE)
+    const security = code.indexOf(SECURITY_MOUNT)
+    const override = code.indexOf(OVERRIDE_MOUNT)
     expect(gate).toBeGreaterThan(0)
     expect(security).toBeGreaterThan(gate)
     // The whole point of the limiter suite above: the rewrite may not precede a method-keyed guard.
     expect(override).toBeGreaterThan(security)
-    expect(source.split('this.app.use(methodOverrideMiddleware)').length).toBe(2)
+    expect(code.split(OVERRIDE_MOUNT).length).toBe(2)
+  })
+
+  /**
+   * THE STRIPPER IS ITSELF UNDER TEST, in both directions, because everything above rests on it:
+   *   - a commented-out mount must DISAPPEAR (otherwise the order check is prose-satisfiable), and
+   *   - real code must SURVIVE (otherwise the whole suite passes on an empty string).
+   * Both run against this tree's real index.ts, in memory — nothing is written.
+   */
+  it('a COMMENTED-OUT mount cannot satisfy the order check, and real code survives the stripper', () => {
+    // Positive control: the exact text the sabotage below rewrites really is in the file.
+    expect(source).toContain(`\n    ${OVERRIDE_MOUNT}`)
+    const sabotaged = stripComments(source.replace(`\n    ${OVERRIDE_MOUNT}`, `\n    // ${OVERRIDE_MOUNT}`))
+    expect(sabotaged.indexOf(OVERRIDE_MOUNT)).toBe(-1)
+    // ...and the same for a block-commented mount, which is the other way to disable it silently.
+    const blockSabotaged = stripComments(source.replace(`\n    ${OVERRIDE_MOUNT}`, `\n    /* ${OVERRIDE_MOUNT} */`))
+    expect(blockSabotaged.indexOf(OVERRIDE_MOUNT)).toBe(-1)
+    // Survival control: a string literal containing the block-comment opener must not eat the file.
+    expect(code.indexOf(GATE_LINE)).toBeGreaterThan(0)
+    expect(code.indexOf(SECURITY_MOUNT)).toBeGreaterThan(0)
+    expect(code.length).toBeGreaterThan(source.length * 0.5)
+    expect(stripComments(`const glob = '**/api/**'\n${OVERRIDE_MOUNT}\n`)).toContain(OVERRIDE_MOUNT)
+  })
+
+  /**
+   * THE E-LEARNING PIPELINE ANCHOR — this PR broke it once and turned `test (18.x)/(20.x)` red.
+   * `tests/unit/elearning-media-playback-runtime.test.ts:116` locates the request-log middleware by
+   * searching index.ts for this exact template literal, and orders the whole pipeline around it
+   * (`metricsAt < loggerAt < jwtAt`). Interpolating the override claim INTO that template made the
+   * search return -1 (`expected -1 to be greater than 4755`). The claim now lives in its own branch;
+   * this test fails HERE, in the suite that owns the change, if anyone interpolates it again.
+   */
+  it('keeps the request-log literal the e-learning pipeline guard anchors on', () => {
+    const ELEARNING_ANCHOR = /this\.logger\.info\(\s*`\$\{req\.method\} \$\{req\.path\}`\s*\)/
+    const setupAt = source.search(/private\s+setupMiddleware\s*\(\s*\)\s*:\s*void\s*\{/)
+    const setupEndAt = source.search(/private\s+installGlobalErrorHandler\s*\(\s*\)\s*:\s*void\s*\{/)
+    expect(setupAt).toBeGreaterThanOrEqual(0)
+    expect(setupEndAt).toBeGreaterThan(setupAt)
+    const setupSrc = source.slice(setupAt, setupEndAt)
+    const loggerAt = setupSrc.search(ELEARNING_ANCHOR)
+    expect(loggerAt).toBeGreaterThanOrEqual(0)
+    // It must be CODE, not this file's prose about it: the same search on stripped source still hits.
+    expect(stripComments(setupSrc).search(ELEARNING_ANCHOR)).toBeGreaterThanOrEqual(0)
+    // And it sits where that guard needs it: after the metrics middleware, before the JWT gate.
+    expect(loggerAt).toBeGreaterThan(setupSrc.search(/requestMetricsMiddleware/))
+    expect(setupSrc.search(/return\s+jwtAuthMiddleware\s*\(\s*req\s*,\s*res\s*,\s*next\s*\)/)).toBeGreaterThan(loggerAt)
   })
 
   /**
@@ -301,11 +438,14 @@ describe('index.ts wiring', () => {
    * turns this red and has to be reviewed against the mount order rather than sliding in.
    */
   it('in the gate→override window, req.method is read ONLY by the allow-listed attendance lines', () => {
-    const gate = source.indexOf('if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)')
-    const override = source.indexOf('this.app.use(methodOverrideMiddleware)')
-    // Comments are stripped first: prose about `req.method` (this file's own mount note explains the
-    // ordering rule) must not be able to satisfy — or break — a claim about CODE.
-    const window = source.slice(gate, override).replace(/^\s*\/\/.*$/gm, '')
+    const gate = code.indexOf(GATE_LINE)
+    const override = code.indexOf(OVERRIDE_MOUNT)
+    expect(gate).toBeGreaterThan(0)
+    expect(override).toBeGreaterThan(gate)
+    // Comments were stripped first (string-aware, see above): prose about `req.method` — index.ts's
+    // own mount note explains the ordering rule — must not be able to satisfy or break a claim about
+    // CODE, and a commented-out mount must not be able to bound this window either.
+    const window = code.slice(gate, override)
     // Inline middleware in that window (the tenant ALS wrapper) must not key on the verb...
     expect(window).not.toMatch(/req\.method/)
     // ...and the imported ones it mounts there are enumerated, then each one is actually opened.
@@ -323,9 +463,9 @@ describe('index.ts wiring', () => {
 
     // The module that hosts BOTH attendance middlewares, read line by line. `req.methodOverride` is
     // not a verb read (no word boundary after `method`), so the pattern below skips it by itself.
-    const attendance = readFileSync(join(__dirname, '../../src/middleware/attendance-production.ts'), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '')
+    const attendance = stripComments(
+      readFileSync(join(__dirname, '../../src/middleware/attendance-production.ts'), 'utf8'),
+    )
     const reads = attendance.split(/\r?\n/).map((l) => l.trim()).filter((l) => /req\.method\b/.test(l)).sort()
     expect(reads).toEqual([
       // attendanceAuditMiddleware: the wire verb, captured ONCE at request time and used for
@@ -377,5 +517,85 @@ describe('index.ts wiring', () => {
     const probe = source.indexOf('this.app.use(methodProbeRouter())')
     expect(health).toBeGreaterThan(0)
     expect(probe).toBeGreaterThan(health)
+  })
+})
+
+/**
+ * RUNTIME WIRING, not text (judge finding: the gate→override relationship was only ever checked by
+ * an `indexOf` over index.ts). This suite runs the REAL gate middleware (`jwtAuthMiddleware`,
+ * reached exactly the way index.ts reaches it), the REAL override middleware and the REAL probe
+ * router over a REAL socket — `usePinnedServer`, never `request(app)` (#4154). Only
+ * `authService.verifyToken` is stubbed: it is the single step that needs a database.
+ *
+ * The gate closure below is index.ts's; its decisive line and the mount order are pinned as text by
+ * the wiring suite above, so behaviour proven here and the real pipeline cannot drift apart
+ * silently.
+ */
+describe('real JWT gate -> real override -> real probe, over a socket', () => {
+  const realPinned = usePinnedServer()
+  const SESSION = 'Bearer session-token'
+  const MUST_CHANGE = 'Bearer must-change-token'
+
+  beforeEach(() => {
+    authServiceMock.verifyToken.mockReset()
+    authServiceMock.verifyToken.mockImplementation(async (token: string) => {
+      if (token === 'session-token') return { id: 'u-real', tenantId: 't-real', must_change_password: false }
+      if (token === 'must-change-token') return { id: 'u-new', tenantId: 't-real', must_change_password: true }
+      return null
+    })
+    const app = express()
+    app.use(express.json())
+    app.use((req: Request, res: Response, next: NextFunction) => {
+      if (isWhitelisted(req.path)) return next()
+      if (isApiPath(req.path)) return jwtAuthMiddleware(req, res, next)
+      return next()
+    })
+    app.use(methodOverrideMiddleware)
+    app.use(methodProbeRouter())
+    realPinned.setApp(app)
+  })
+
+  it('POST /api/method-probe + X-HTTP-Method-Override: DELETE + a valid session -> 200 with the receipt', async () => {
+    const res = await request(realPinned.url())
+      .post(METHOD_PROBE_PATH)
+      .set('Authorization', SESSION)
+      .set('X-HTTP-Method-Override', 'DELETE')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, method: 'DELETE', overridden: true })
+    expect(res.headers['x-method-overridden']).toBe('DELETE')
+    // The gate really ran (this is what attaches `req.user`, without which nothing is rewritten).
+    expect(authServiceMock.verifyToken).toHaveBeenCalledWith('session-token')
+  })
+
+  it('the very same POST without a session is 401 from the gate and carries no receipt', async () => {
+    const res = await request(realPinned.url())
+      .post(METHOD_PROBE_PATH)
+      .set('X-HTTP-Method-Override', 'DELETE')
+    expect(res.status).toBe(401)
+    expect(res.headers['x-method-overridden']).toBeUndefined()
+  })
+
+  /**
+   * THE SERVER HALF OF THE PROBE-LATCH FINDING. A first login whose password must change is answered
+   * 403 `PASSWORD_CHANGE_REQUIRED` by the gate — ABOVE this middleware, on every /api path including
+   * the probe — so the answer says NOTHING about whether the tunnel works. This test states that
+   * shape (403, no receipt) as a server fact; the client half (that a receipt-less >= 400 must not
+   * latch 'override-unavailable') is pinned in apps/web/tests/delete-fallback.spec.ts.
+   */
+  it('a session that must change its password is 403 at the gate, with no receipt', async () => {
+    const res = await request(realPinned.url())
+      .post(METHOD_PROBE_PATH)
+      .set('Authorization', MUST_CHANGE)
+      .set('X-HTTP-Method-Override', 'DELETE')
+    expect(res.status).toBe(403)
+    expect(res.body?.error?.code).toBe('PASSWORD_CHANGE_REQUIRED')
+    expect(res.headers['x-method-overridden']).toBeUndefined()
+  })
+
+  it('a native DELETE through the same real gate answers identically, minus the receipt', async () => {
+    const res = await request(realPinned.url()).delete(METHOD_PROBE_PATH).set('Authorization', SESSION)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, method: 'DELETE', overridden: false })
+    expect(res.headers['x-method-overridden']).toBeUndefined()
   })
 })

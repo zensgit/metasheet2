@@ -125,11 +125,82 @@ describe('delete-fallback', () => {
       expect(sessionStorage.getItem(DELETE_TRANSPORT_STORAGE_KEY)).toBe('override-unavailable')
     })
 
-    it('native DELETE dropped + tunnel REFUSED (404: no such middleware/route) -> override-unavailable', async () => {
+    /**
+     * THE PROBE MAY NOT CONCLUDE MORE THAN `sendDelete` WOULD (judge finding, CONFIRMED on the
+     * previous head: leg2 = 401/403/404/502 all latched 'override-unavailable').
+     *
+     * A >= 400 is a REFUSAL: nothing was written, and it very often was not even produced by the
+     * override middleware. The global session gate sits ABOVE it and answers 401 without a token and
+     * 403 `PASSWORD_CHANGE_REQUIRED` for a first login that must change its password — and `main.ts`
+     * fires the probe from `router.beforeEach` BEFORE that redirect, so a brand-new user in the
+     * customer network hit exactly this. A gateway hiccup answers 5xx the same way. Latching there
+     * disabled the fallback for the whole session AND forbade the one-shot retry, so every later
+     * delete failed natively with no attempt at all. `sendDelete` hands >= 400 back unchanged and
+     * keeps the mode; the probe must not be stricter than the thing it is a preview of.
+     */
+    it.each([401, 403, 404, 405, 500, 502])(
+      'native DELETE dropped + tunnel answers %s (a refusal, no receipt) -> nothing learned, mode untouched',
+      async (status) => {
+        const baseFetch = vi.fn()
+          .mockRejectedValueOnce(transportFailure())
+          .mockResolvedValueOnce(response(status))
+        expect(await probeDeleteTransport(baseFetch)).toBe('native')
+        expect(getDeleteTransport()).toBe('native')
+        // Nothing may be persisted either: a new tab must not inherit a decision that was not made.
+        expect(sessionStorage.getItem(DELETE_TRANSPORT_STORAGE_KEY)).toBeNull()
+        expect(baseFetch).toHaveBeenCalledTimes(2)
+      },
+    )
+
+    /**
+     * ...and "nothing learned" has to MEAN something: the very next real delete still buys its
+     * single POST+override retry and can still learn the tunnel from a receipt. This is the whole
+     * user-visible consequence of the finding — with the old latch this delete threw after ONE
+     * native attempt and every delete for the rest of the session did too.
+     */
+    it.each([401, 403, 404, 502])(
+      'after a %s probe leg, the next delete STILL retries once as POST+override and can latch override',
+      async (status) => {
+        const probeFetch = vi.fn()
+          .mockRejectedValueOnce(transportFailure())
+          .mockResolvedValueOnce(response(status))
+        expect(await probeDeleteTransport(probeFetch)).toBe('native')
+
+        const baseFetch = vi.fn()
+          .mockRejectedValueOnce(transportFailure())
+          .mockResolvedValueOnce(response(200, { receipt: true }))
+        const res = await sendDelete(baseFetch, '/api/x/1')
+        expect(res.status).toBe(200)
+        expect(baseFetch).toHaveBeenCalledTimes(2)
+        expect(baseFetch.mock.calls[0][1].method).toBe('DELETE')
+        expect(baseFetch.mock.calls[1][1].method).toBe('POST')
+        expect(headerOf(baseFetch.mock.calls[1][1], METHOD_OVERRIDE_HEADER)).toBe('DELETE')
+        expect(getDeleteTransport()).toBe('override')
+      },
+    )
+
+    /**
+     * The one receipt-less shape that IS decided: a 2xx/3xx means something ANSWERED SUCCESS to a
+     * POST nobody rewrote (stripped header, old backend, POST twin). Deletes must never be tunnelled
+     * through that — same conclusion `sendDelete` draws on an unconfirmed 2xx.
+     */
+    it.each([200, 201, 204, 302])(
+      'native DELETE dropped + tunnel answers %s WITHOUT a receipt -> override-unavailable (the dangerous shape)',
+      async (status) => {
+        const baseFetch = vi.fn()
+          .mockRejectedValueOnce(transportFailure())
+          .mockResolvedValueOnce(response(status))
+        expect(await probeDeleteTransport(baseFetch)).toBe('override-unavailable')
+        expect(sessionStorage.getItem(DELETE_TRANSPORT_STORAGE_KEY)).toBe('override-unavailable')
+      },
+    )
+
+    it('a non-network rejection on the TUNNEL leg decides nothing either (no status, no receipt)', async () => {
       const baseFetch = vi.fn()
         .mockRejectedValueOnce(transportFailure())
-        .mockResolvedValueOnce(response(404))
-      expect(await probeDeleteTransport(baseFetch)).toBe('override-unavailable')
+        .mockRejectedValueOnce(new Error('interceptor blew up'))
+      expect(await probeDeleteTransport(baseFetch)).toBe('native')
+      expect(sessionStorage.getItem(DELETE_TRANSPORT_STORAGE_KEY)).toBeNull()
     })
 
     /**

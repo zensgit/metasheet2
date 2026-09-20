@@ -478,20 +478,43 @@ describe('apiFetch', () => {
     expect(getDeleteTransport()).toBe('override')
   })
 
-  it('DELETE-fallback: through apiFetch, a tunnel leg answered WITHOUT a receipt still latches override-unavailable', async () => {
+  it('DELETE-fallback: through apiFetch, a tunnel leg answering 2xx WITHOUT a receipt latches override-unavailable', async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(transportFailure())
-      .mockResolvedValueOnce(httpResponse(404))
+      // A 2xx nobody rewrote: the dangerous shape (a POST twin or a stripped header answered success).
+      .mockResolvedValueOnce(httpResponse(200))
     vi.stubGlobal('fetch', fetchMock)
 
     const mode = await probeDeleteTransport((url, init) =>
       apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
 
-    // Negative control for the test above: the header DID go out (call 1), so 'override-unavailable'
+    // Negative control for the test above: the header DID go out (call 2), so 'override-unavailable'
     // here is the server's verdict on the tunnel, not the client losing its own header.
     expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('DELETE')
     expect(mode).toBe('override-unavailable')
   })
+
+  /**
+   * ...and the other half of the same rule, composed the same production way: a receipt-less >= 400
+   * (the session gate's 401/403, a gateway 5xx, a 404) decides NOTHING. The header still went out,
+   * so this is not the client losing it — it is the client refusing to conclude from a refusal.
+   */
+  it.each([401, 403, 404, 502])(
+    'DELETE-fallback: through apiFetch, a tunnel leg answering %s leaves the transport undecided',
+    async (status) => {
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(transportFailure())
+        .mockResolvedValueOnce(httpResponse(status))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const mode = await probeDeleteTransport((url, init) =>
+        apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
+
+      expect((fetchMock.mock.calls[1][1].headers as Headers).get('X-HTTP-Method-Override')).toBe('DELETE')
+      expect(mode).toBe('native')
+      expect(getDeleteTransport()).toBe('native')
+    },
+  )
 
   it('apiFetch merges a Headers INSTANCE the caller passes (object-spreading one silently yields {})', async () => {
     store.auth_token = 'token-abc'
