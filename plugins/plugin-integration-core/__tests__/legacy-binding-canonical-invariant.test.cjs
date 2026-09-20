@@ -354,6 +354,151 @@ async function testOwnershipStillDecidesFirst() {
   console.log('  legacy-binding-canonical-invariant: ownership still refused first OK')
 }
 
+// ---------------------------------------------------------------------------------------------
+// #5783 FOLLOW-UP — THE MARKER RETIRES ON A POINTER CHANGE, NOT ON A SAVE.
+//
+// The converse half of the rule above used to read "kind + marker TRUE + an explicit non-null
+// `connectionId`" and never asked whether the binding actually moved. The workbench edit form fills
+// its draft from `system.connectionId || config.dataSourceId` and serializes `connectionId` on every
+// save, so a pure RENAME re-asserted the row's own current connection, retired the rollback marker,
+// and (through the pointer drop that follows from a FALSE marker) deleted `config.dataSourceId` —
+// destroying the rollback trail the cutover deliberately kept, with nothing in the request asking
+// for it.
+//
+// The narrowed condition compares the request against the EFFECTIVE pointer — the id the row
+// resolves through today, `connection_id` first and `config.dataSourceId` only when the canonical
+// column is empty — and NOT against the payload's `config.dataSourceId`. Comparing pointers instead
+// would let `connection_id` move on a migrated row while the stored pointer stayed put, minting
+// canonical id A + legacy pointer B, which connection-resolver.cjs:193-200 rejects for good with
+// CONNECTION_BINDING_MISMATCH on every read.
+// ---------------------------------------------------------------------------------------------
+
+// 9. A PURE RENAME that re-asserts the row's own connection keeps the row rollback-eligible and
+//    keeps the pointer. This is the shape the workbench sends on every single save.
+async function testSamePointerSaveDoesNotRetireTheMarker() {
+  const { registry, row } = setup()
+  const updated = await registry.upsertExternalSystem(editPayload({
+    name: 'SQL bridge renamed',
+    connectionId: 'ds-1',
+    config: { dataSourceId: 'ds-1' },
+  }))
+  assert.equal(updated.name, 'SQL bridge renamed')
+  assert.equal(row().name, 'SQL bridge renamed')
+  assert.equal(row().legacy_connection_fallback_eligible, true,
+    're-asserting the connection the row already resolves through is not a re-bind')
+  assert.equal(row().config.dataSourceId, 'ds-1',
+    'and the rollback trail survives the save it was silently deleted by')
+  assert.equal(row().config.schema, 'dbo', 'the rest of the stored config is untouched')
+  assert.equal(row().config.dataSourceOwnerId, 'owner_1')
+
+  // The same save with NO `config` at all (status/name-only edits take this path).
+  await registry.upsertExternalSystem(editPayload({ name: 'SQL bridge again', connectionId: 'ds-1' }))
+  assert.equal(row().name, 'SQL bridge again')
+  assert.equal(row().legacy_connection_fallback_eligible, true)
+  assert.equal(row().config.dataSourceId, 'ds-1')
+  console.log('  legacy-binding-canonical-invariant: same-pointer save keeps the rollback marker OK')
+}
+
+// 10. THE MIGRATED SHAPE (connection_id already set, marker still TRUE): re-asserting that same
+//     canonical id is likewise not a re-bind. The effective pointer is read from `connection_id`
+//     FIRST, so this holds even when the row carries no legacy pointer at all any more.
+async function testMigratedRowSamePointerSaveDoesNotRetireTheMarker() {
+  const { registry, row } = setup({ connection_id: 'ds-1' })
+  await registry.upsertExternalSystem(editPayload({
+    name: 'SQL bridge renamed',
+    connectionId: 'ds-1',
+    config: { dataSourceId: 'ds-1' },
+  }))
+  assert.equal(row().connection_id, 'ds-1')
+  assert.equal(row().legacy_connection_fallback_eligible, true)
+  assert.equal(row().config.dataSourceId, 'ds-1')
+
+  // Canonical column set, stored legacy pointer already gone: the effective pointer still resolves
+  // (from `connection_id`), so a rename still must not retire the marker. Comparing against the
+  // stored `config.dataSourceId` instead would see '' !== 'ds-1' here and retire on a rename.
+  const pointerless = setup({
+    connection_id: 'ds-1',
+    config: { dataSourceOwnerId: 'owner_1', schema: 'dbo' },
+  })
+  await pointerless.registry.upsertExternalSystem(editPayload({ name: 'renamed', connectionId: 'ds-1' }))
+  assert.equal(pointerless.row().name, 'renamed')
+  assert.equal(pointerless.row().legacy_connection_fallback_eligible, true,
+    'the canonical column is the effective pointer when no legacy pointer is stored')
+  console.log('  legacy-binding-canonical-invariant: migrated same-pointer save keeps the marker OK')
+}
+
+// 11. REGRESSION, both shapes: a write that names a DIFFERENT connection still converts the row in
+//     that one write — marker retired, legacy pointer dropped with it.
+async function testPointerChangeStillRetiresTheMarker() {
+  const legacy = setup()
+  await legacy.registry.upsertExternalSystem(editPayload({
+    connectionId: 'ds-2',
+    config: { dataSourceId: 'ds-2' },
+  }))
+  assert.equal(legacy.row().connection_id, 'ds-2')
+  assert.equal(legacy.row().legacy_connection_fallback_eligible, false,
+    'a real re-bind still retires the rollback marker')
+  assert.equal(legacy.row().config.dataSourceId, undefined,
+    'and marker FALSE still never coexists with a stored legacy pointer')
+
+  const migrated = setup({ connection_id: 'ds-1' })
+  await migrated.registry.upsertExternalSystem(editPayload({
+    connectionId: 'ds-2',
+    config: { dataSourceId: 'ds-2' },
+  }))
+  assert.equal(migrated.row().connection_id, 'ds-2')
+  assert.equal(migrated.row().legacy_connection_fallback_eligible, false)
+  assert.equal(migrated.row().config.dataSourceId, undefined)
+  console.log('  legacy-binding-canonical-invariant: a real pointer change still converts OK')
+}
+
+// 12. NO ZOMBIE ROW. A payload that moves `connectionId` but says nothing about `config` would
+//     leave canonical id ds-2 beside the stored legacy pointer ds-1 — the dual reference
+//     connection-resolver.cjs rejects on every read. It is refused BEFORE any write, on both
+//     shapes, so the narrowing cannot be walked around by simply omitting `config`.
+async function testConnectionOnlyRepointCannotMintAZombieRow() {
+  for (const overrides of [{}, { connection_id: 'ds-1' }]) {
+    const { db, registry, row } = setup(overrides)
+    const error = await registry.upsertExternalSystem(editPayload({ connectionId: 'ds-2' }))
+      .then(() => null, (err) => err)
+    assert.ok(error instanceof ExternalSystemValidationError,
+      'a canonical move that leaves the legacy pointer behind must be refused')
+    assert.equal(error.details.code, 'CONNECTION_BINDING_MISMATCH')
+    assert.equal(updateWrites(db), 0, 'and it writes nothing')
+    assert.equal(row().connection_id, overrides.connection_id ?? null)
+    assert.equal(row().config.dataSourceId, 'ds-1')
+    assert.equal(row().legacy_connection_fallback_eligible, true)
+  }
+  console.log('  legacy-binding-canonical-invariant: connection-only re-point cannot mint a zombie OK')
+}
+
+// 13. UNCHANGED BY THIS PR, pinned because the narrowing sits next to it: the two "clears" stay
+//     exactly as #5783 left them.
+//       * `config.dataSourceId: null` de-points a legacy row and is ALLOWED (group 5 above);
+//       * `connectionId: null` on an existing SQL read-only row is REFUSED — the canonical column
+//         has no un-set path through this API, which is why the marker is the only rollback proof
+//         and why deleting it on a rename mattered.
+async function testConnectionIdNullClearSemanticsAreUnchanged() {
+  const { db, registry, row } = setup()
+  const error = await registry.upsertExternalSystem(editPayload({ connectionId: null }))
+    .then(() => null, (err) => err)
+  assert.ok(error instanceof ExternalSystemValidationError)
+  assert.equal(error.details.field, 'connectionId')
+  assert.ok(error.message.includes('cannot clear'))
+  assert.equal(updateWrites(db), 0)
+  assert.equal(row().legacy_connection_fallback_eligible, true)
+  assert.equal(row().config.dataSourceId, 'ds-1')
+
+  // An empty string normalizes to null and lands on the same refusal, so a blank picker cannot
+  // reach the narrowed comparison with a falsy "pointer" either.
+  const blank = await registry.upsertExternalSystem(editPayload({ connectionId: '' }))
+    .then(() => null, (err) => err)
+  assert.ok(blank instanceof ExternalSystemValidationError)
+  assert.equal(blank.details.field, 'connectionId')
+  assert.equal(row().legacy_connection_fallback_eligible, true)
+  console.log('  legacy-binding-canonical-invariant: connectionId clear semantics unchanged OK')
+}
+
 async function main() {
   await testRepointWithoutConnectionIdIsRefused()
   await testMigratedDualReferenceRepointIsRefused()
@@ -363,6 +508,11 @@ async function main() {
   await testCanonicalRowKeepsItsExistingRefusal()
   await testOtherKindsAreUntouched()
   await testOwnershipStillDecidesFirst()
+  await testSamePointerSaveDoesNotRetireTheMarker()
+  await testMigratedRowSamePointerSaveDoesNotRetireTheMarker()
+  await testPointerChangeStillRetiresTheMarker()
+  await testConnectionOnlyRepointCannotMintAZombieRow()
+  await testConnectionIdNullClearSemanticsAreUnchanged()
   console.log('✓ legacy-binding-canonical-invariant: MIN-PR2-i tests passed')
 }
 
