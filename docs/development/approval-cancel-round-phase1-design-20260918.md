@@ -327,6 +327,12 @@ even though the person cannot log in.
 > 实现补丁与本小节同批落在候选分支 `feat/approval-cancel-round-phase1-g3-reading-b`(**裸分支,未开 PR,不合并**),
 > owner 若裁定另一读法((a) 席位一律回 A / (a′) 回 A 后按今天的委托重解析 / (b′) 委托失效即 409 阻断),
 > 本小节整体替换,已落的验收骨架可直接复用。
+>
+> **裁定 (b) 同时触及锁 §14.1(门审第 1 轮点名交给 owner 的一条;此处只披露,不裁)**:读法 (b) 把席位给
+> **delegator A**,而在 §14.1「席位 = 原单的**原审批人**」这条审计轨定义下,A **不是**原审批人 ——
+> `approval_records.actor_id` 里从头到尾没有 A(夹具 `delegatedApprovedOriginal` 自己就断言了这一点)。
+> 读法 (a)「一律回 A」有同样的问题;只有 (b′)「委托失效即阻断」不触碰 §14.1。
+> **本候选不替 owner 解决这一条,只把它从 G3 的裁决里单拎出来,免得它被默默捎带通过。**
 
 **锁 §2-G3(lock:74)三句逐句求值** —— 一句一行,状态互斥,**不用一句的绿去覆盖另一句**:
 
@@ -346,14 +352,34 @@ even though the person cannot log in.
 「今天仍然有效」= `resolveActiveDelegationMap(原单 templateId, now)[delegator] === delegatee` ——
 复用 `createApproval` 提单时冻结的**同一个**解析器(`active` ∧ 窗口覆盖 `now` ∧ 作用域匹配),不另写一份更窄的同类物。
 判据是 `=== delegatee` 而**不是**「delegator 名下还有某条有效委托」:若 delegator 此后改委托给第三人,
-产生这个席位的那份授权已经不在了,席位回到 **delegator**,**不是**那个第三人 —— 把撤销轮交给一个从未参与原决定的人是另一份合同。
+**delegator 的权限今天不再路由到这位被委托人**,席位回到 **delegator**,**不是**那个第三人 ——
+把撤销轮交给一个从未参与原决定的人是另一份合同。
+
+> **措辞勘误(门审第 1 轮 P3-3;只改这一句的写法,不改任何行为)。** 这里原本写的是「产生这个席位的那份授权
+> **已经不在了**」—— 那是**因果**句,而它对下面这一格**不成立**(本轮独立读源码核实,非转抄):
+> `resolveActiveDelegationMap`(`ApprovalDelegations.ts:33-58`)的 SQL 以 `ORDER BY scope` 排序、后写入的覆盖先写入的
+> (`'all' < 'template'`,所以**更具体**的 template 行最后生效),而唯一索引 `uq_approval_delegations_active`
+> (`zzzz20260622060000_create_approval_delegations.ts:48-50`)按 `(delegator, scope, COALESCE(scope_template_id,''))`
+> 分键,**允许**同一个 delegator 同时持有一条 'all' 行与一条 'template' 行。
+> 于是:A→D 的 'all' 行**仍然 active、仍在窗口内**,但 A 另有一条指向**本模板**的 A→E 'template' 行 ⇒ `map[A] = E` ⇒
+> 谓词 `map[A] === D` 为假 ⇒ 席位回 A。**那份授权还在**,只是不再路由到 D。
+> 所以正文用的是**谓词**句而不是因果句。这一格与正控 P9(b) **同向、不是缺陷**,但**零验收覆盖**;
+> 本轮**未构造实跑**(code-derived),按「不确定不通胀」登记在下方「本候选没有关掉的」清单里。
 
 **作用域。** map 读传的是**原单的** `template_id`,绝不是撤销轮自己的专用已发布定义 —— 后者会把支持面悄悄收窄到只剩
 `scope='all'` 行,原模板上的 `scope='template'` 委托一条都匹配不上。`approval_instances.template_id` 可为 NULL,
-NULL 原单以 `''` 解析。**这里的论据是列类型,不是 CHECK 约束**(2026-09-20 对本轮私有库实测 `\d approval_delegations`):
-`scope_template_id` 是 **TEXT**,所以 `''` 按文本绑定、不可能触发 `22P02`;在此之上
-`chk_approval_delegations_scope_target` 保证没有任何 `scope='template'` 行的目标是 `''`,而 `scope='all'` 行忽略该参数 ——
-即「无模板的原单只可能吃到 all-scope 委托」,是显式语义而非继承来的。
+NULL 原单以 `''` 解析。**这里的论据是列类型加两个写入方,不是 CHECK 约束**(2026-09-20 对本轮私有库实测
+`\d approval_delegations`):`scope_template_id` 是 **TEXT**,所以 `''` 按文本绑定、不可能触发 `22P02`;
+`scope='all'` 行忽略该参数;而「没有任何 `scope='template'` 行的目标是 `''`」这半边,靠的是那一列**仅有的两个写入方**
+(`ApprovalDelegationConfig.createDelegation:83-85` 与 `.updateDelegation:250-253`,都是
+`scopeTemplateId?.trim() || null` 归一后对空值显式 400;该文件另外两条语句只翻 `active`),
+**不是** `chk_approval_delegations_scope_target`。
+
+> **论据勘误(门审第 1 轮 NIT-1;结论成立,理由写错了)。** 该 CHECK 的正文是
+> `((scope = 'template') = (scope_template_id IS NOT NULL))`
+> (`zzzz20260622060000_create_approval_delegations.ts:37-38`),而 `''` **IS NOT NULL** —— 它拦不住空串。
+> **本轮实测**(在本轮一次性私有库上手写 `INSERT … ('template','')`):**被接受**,行落库,随后删除、复核表回到 0 行。
+> 上一版的写法(「在此之上 CHECK 保证…」)把一条**没有**执行力的约束当成了保证,本轮改成上面点名的两个写入方。
 **披露**:`createCancelRoundInstance` 并**不**要求原单是模板运行时实例,所以 `template_id IS NULL` 的原单在原理上可达;
 本文件所有夹具都走 `publishOneNodeTemplate`,`template_id` 恒非空,**这条腿没有验收覆盖**。
 
@@ -399,9 +425,32 @@ NULL 原单以 `''` 解析。**这里的论据是列类型,不是 CHECK 约束**
   而 G-3 mutation(删掉 node_key 合取)会让 P14(b) 与 P15(b) **一起**红 —— 兄弟席位腿塌成一人、legacy 腿反被错记。
   写 `nodeKey` 的写入方逐个读过:模板运行时派发的 `insertApprovalRecord` 各调用点、`insertAutoApprovalEvents`。
   `entry_epoch` 刻意不进 JOIN(迁移前旧行上为 NULL,`NULL = NULL` 会让重核对那批语料静默失效)。
-- **同一个人既有角色席位又有被委托的用户席位时,席位数会收缩。** 委托只替换 `assignmentType === 'user'` 的席位,
-  所以「A 通过角色节点批过 + D 作为 A 的(现已失效)代理在用户节点批过」的单据今天两个席位、回退后一个 ——
-  会签门槛确实降低了。「阻断而非过滤」的不变量管的是**不合格**席位,不管这种同一人合并。owner 裁决项,此处不决。
+- **同一个人既有角色席位又有被委托的用户席位时,席位数会收缩(已有读数,不再是散文)。** 委托只替换
+  `assignmentType === 'user'` 的席位,所以「A 通过角色节点批过 + D 作为 A 的(现已失效)代理在用户节点批过」的单据
+  今天两个席位、回退后一个 —— 会签门槛确实降低了。「阻断而非过滤」的不变量管的是**不合格**席位,不管这种同一人合并。
+  **owner 裁决项,此处不决。**
+  **2026-09-20 门审第 1 轮 P2-1 起,这一格有常驻真库读数**:正控 **P16(b)** 钉住席位 = `[A]`(**一席**),
+  而把席位推导整体还原成补丁前基线(mutation M-B1)时同一条夹具给 `[A, D]`(**两席**)—— 撤销轮节点是
+  `approvalMode:'all'`,所以会签门槛同时由 2 降到 1,实际批过第二个节点、今天**完全合格**的 D 在撤销轮里没有一票。
+  **本格**的席位不更宽(A 是两个节点都点名过的人,且照样过 `assertCancelRoundSeatsEligibleInTxn`),失败方向不是越权;
+  但锁 §2-G3 第一句「保留原节点的会签/或签语义」与这一格的张力**是数字,不是措辞**,请 owner 连同读法一并裁。
+  同一条夹具上的正控 **P17(b)** 另钉持久化 `requester_snapshot.requesterChoices[cancel_approval]` **无重复 id**
+  (两个不同的 `(actor, delegatedFrom)` pair 回退到同一个人;去掉席位推导里的 `new Set` 时**只有**这条断言红,
+  席位行数不变 —— 爆炸半径精确地限于这份审计字段)。
+- **同节点跨 epoch 的「自有」席位会被记到委托人名下(门审第 1 轮 P3-2;code-derived,本轮与门审轮**都没有**构造实跑)。**
+  JOIN 的 ON 子句刻意不含 `entry_epoch`(迁移前旧行为 NULL,`NULL = NULL` 会让重核静默失效),且不过滤 `is_active`。
+  于是:D 先以 A 的代理在某节点批过(assignment 带 `delegatedFrom = A`,approve 后以 `is_active = FALSE` 保留)→
+  **同一节点**另一位受理人把席位 transfer 给 D(转派写出的新行**没有** `delegatedFrom`)→ D 在**同一节点**再批一次;
+  两条 approve 行都只能匹配到那条**旧的** delegated assignment,pair 去重后只剩 `(D, A)`,委托失效时席位记给 A,
+  **D 经 transfer 取得的自有参与被抹掉**。源码注释只声明保护「**另一个**节点上自己那份席位」,**同节点**这一格既未声明也未披露 ——
+  现在登记在此,与上面的 legacy `nodeKey` 缺口同列。失败方向是**少一个人**(A 顶替 D),不是更宽的席位。
+  **状态:未实测、未修;要么补一条 transfer 到同节点的腿,要么由 owner 连同读法一并裁。**
+- **'all' 行仍有效、但被更具体的 'template' 行遮蔽的那一格(门审第 1 轮 P3-3;code-derived,未构造实跑)。**
+  见上文「措辞勘误」的整段论证:与 P9(b) 同向、**不是缺陷**,但零验收覆盖;它是**本轮发现的**、正文那句因果措辞不成立的一格,
+  本轮**未**穷举是否还有别的格。
+- **席位顺序不确定(基线继承,门审第 1 轮 NIT-3)。** 席位集合由无 `ORDER BY` 的 `SELECT DISTINCT` 产生,
+  顺序不保证;本候选未改变这一点(基线同形)。**本轮未普查消费方**,所以这里不写「今天没有人依赖它」——
+  只登记「顺序不确定且未被约束」这一事实;若有消费方依赖顺序需另议,**不在本切片内解决**。
 - **哨兵过滤排在重核之后(顺序披露,今天不可达)。** 代码顺序是「先按 provenance 重核 → 再 `isSystemSentinelActor` 丢弃」。
   于是**假如**某条 approve 行的 actor 是 `system:` 哨兵、而同节点又存在一条带 `delegatedFrom` 的 user 型 assignment,
   重核会把它映射成那个人类 delegator,该人类随后通过哨兵过滤而入席 —— 等于从一条合成行里生出一个人类席位。

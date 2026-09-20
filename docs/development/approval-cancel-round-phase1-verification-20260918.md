@@ -3814,9 +3814,11 @@ $ npx tsc --noEmit       → 无输出，EXIT 0（node 20.20.2 / pnpm 10.33.0）
 
 ### N.1 本轮在候选补丁之外**另加**的四腿(全部进同一个测试文件)
 
-> 行数分账:候选 `reading-b.patch` 对该测试文件 **+319**;本轮在其上再 **+328**
-> (四腿 + N.3.1 的 `afterAll` 清理前移),该文件本分支合计 **+647 / −0**;
-> 源文件 `ApprovalProductService.ts` 全部来自候选补丁,**本轮一个字节都没改**(+88 / −5)。
+> 行数分账(**读数钉在 head `8fa9469ccd141016d58b9ff1531eb5be04e4cdce`,即本 §N 首轮落地的那个提交;
+> 2026-09-20 的 hardening 轮在其上又改了这两个文件,增量单独记在 §N.8,不在这里回填**):
+> 候选 `reading-b.patch` 对该测试文件 **+319**;首轮在其上再 **+328**
+> (四腿 + N.3.1 的 `afterAll` 清理前移),该文件在**那个 head 上**合计 **+647 / −0**;
+> 源文件 `ApprovalProductService.ts` 在**那个 head 上**全部来自候选补丁,**首轮一个字节都没改**(+88 / −5)。
 
 候选 README §6.2 点名「门审必须另加、补丁里没有」的四条,本轮全部落成常驻用例:
 
@@ -3844,9 +3846,14 @@ P14(b) 的夹具形状有独立正控(否则红了归因不到 JOIN):断言两�
 | 零席位 | 负控 N7(b)(本轮新增) | 409 `NO_ELIGIBLE_APPROVER` / 零行 ✅ |
 | 资格闸人口跟着席位翻转 | 负控 N5(b) / N6(b) / 正控 P10(b) | 三腿全绿 ✅ |
 | JOIN node_key 合取 | 正控 P14(b)(本轮新增) | 席位 `{A, D}` ✅ |
-| legacy 无 nodeKey 缺口 | 正控 P15(b)(本轮新增) | 席位 `[D]`(= 补丁前行为)✅ |
+| legacy 无 nodeKey 缺口 | 正控 P15(b)(首轮新增) | 席位 `[D]`(= 补丁前行为)✅ |
+| **角色席位 × 失效委托席位(会降低会签门槛的一类格;本轮未证唯一)** | 正控 **P16(b)**(hardening 轮新增,见 §N.8) | 席位 `[A]`,**一席**(基线为 `[A, D]` 两席)✅ |
+| **`new Set` 去重(持久化 `requesterChoices` 无重复 id)** | 正控 **P17(b)**(hardening 轮新增,见 §N.8) | 无重复 ✅ |
 
 ### N.3 套件读数(全部在 `metasheet2_c1_deleg_b_20260920` 上、`EXPECT_DB=1`)
+
+> **这张表的读数钉在 head `8fa9469ccd141016d58b9ff1531eb5be04e4cdce`(hardening 轮之前)。**
+> hardening 轮新增两条腿之后的读数在 §N.8,**不覆盖本表**。
 
 | 人口 | 结果 |
 |---|---|
@@ -4039,6 +4046,12 @@ AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
    并与迁移 `zzzz20260622060000_create_approval_delegations.ts:25` 及 `tests/helpers/approval-schema-bootstrap.ts` 的表定义一致)。
    所以 `original.template_id ?? ''` 传空串**不可能**触发 `22P02`;设计 MD 的论据已从「CHECK 约束」改写成「列类型 + CHECK」,
    因为 CHECK 只管行是否匹配,管不了绑定期的类型转换。
+   > **二次勘误(hardening 轮,门审第 1 轮 NIT-1;见 §N.8)**:上面这句里的「+ CHECK」那半边**也不成立**。
+   > `chk_approval_delegations_scope_target` 是 `((scope = 'template') = (scope_template_id IS NOT NULL))`,
+   > 而 `''` **IS NOT NULL** —— 它拦不住空串。**实测**:在 hardening 轮的一次性私有库上手写
+   > `INSERT … ('template','')` **被接受**(随后删除并复核表回 0 行)。真正把 `''` 挡在那一列外面的是它**仅有的两个写入方**
+   > (`ApprovalDelegationConfig.createDelegation:83-85` / `.updateDelegation:250-253`)。
+   > 设计 MD 与源码注释都已按此改写;**结论(空串只可能吃到 all-scope 行)不变,理由换了**。
 2. **`createCancelRoundInstance` 并不要求原单是模板运行时实例**(方法体内只有 `status='approved'`、请求人、suite、
    pending 轮四道前置),所以 `template_id IS NULL` 的原单在原理上可达;**本文件所有夹具都走 `publishOneNodeTemplate`,
    `template_id` 恒非空,这条腿没有验收覆盖**——已登记进设计 MD,未凭空造夹具。
@@ -4049,7 +4062,132 @@ AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
 - **没有**改任何锁文正文;**没有**新增错误码;**没有**动 §14.3 出口表。
 - **没有**合并、**没有** undraft、**没有**开 PR、**没有**动任何既有 PR 的状态。
 - **没有**对共享 / staging / 生产库或 `metasheet_v2` / `metasheet_test` / `metasheet_testbed_*` 应用迁移。
-- **没有**跑 C-2:候选 README §5 说 C-2 的 rebase 一定会在这段代码上冲突,那是另一轮的活。
+- **没有**跑 C-2 的套件。~~候选 README §5 说 C-2 的 rebase 一定会在这段代码上冲突~~ ——
+  **该转抄句在 hardening 轮被实测证伪,已改写,见 §N.8「C-2 文本合并实测」**:`git merge-tree --write-tree`
+  在点名的两个 head 上 **exit 0、零冲突**。措辞收窄:那是**文本**合并对**那两个 head** 的读数,
+  不是关于两条分支任意版本的一般性结论;**语义**兼容性本轮与 hardening 轮都**未**评估。
 - **没有**碰 `apps/web`;前端同步钉未复核。
 - **没有**在本轮解除 2026-09-19 验证报告 §8 的 P2 阻塞 —— 解除条件里「实现 (i) 并配四项验收」现在有了**候选实现 + 实测验收**,
   但 §8 同时要求 owner **裁定读法**,而那一步仍未发生;本轮把材料备齐,裁决权不在实现侧。
+
+### N.8 hardening 轮(2026-09-20)—— 门审第 1 轮 `impl-gate-C-slice1-g3-reading-b-round1-20260920.md` 的 P2/P3/NIT 处置
+
+**状态仍然是 PROPOSED**:本轮只修门审点名的覆盖缺口与记录级问题,**没有**改任何席位推导逻辑,
+**没有**裁读法,**没有**合并 / undraft / 开 PR / 改锁文正文,**没有**对共享 / staging / 生产库或
+`metasheet_v2` / `metasheet_test` / `metasheet_testbed_*` 应用迁移。
+
+- **被修的 head**:`8fa9469ccd141016d58b9ff1531eb5be04e4cdce`(门审报告逐字点名的那个)。
+- **一次性私有库**:`metasheet2_c1_deleg_b_h_20260920`(owner `ms2testbed`,非超级;`postgres` 只用于 `createdb` / `dropdb`),
+  `pnpm run migrate` 全量迁移一次,跑完 `dropdb`。
+- **一次性 worktree**:`git worktree add --detach` 到上面那个 head;`node_modules` 从 canonical 软链 12 处。
+- 还原**一律** `cp` 备份 → `cmp`;全程**未**用 `git checkout --` / `reset --hard` / `stash drop`。
+
+#### N.8.1 逐条处置
+
+| 门审条目 | 处置 | 落点 |
+|---|---|---|
+| **P2-1**(门审原题措辞:「唯一会降低会签席位数的那格」)降低会签门槛的那一格零覆盖 | **修**:新增常驻正控 **P16(b)**(角色席位 × 失效委托席位),断言席位 = `[A]` 且 `seats.length === 1` | `approval-cancel-round-creation.db.test.ts` |
+| **P2-2** `new Set` 是未测守卫(X-2 下 30/30 全绿) | **修**:同一条夹具上新增常驻正控 **P17(b)**,断言持久化 `requesterChoices[cancel_approval]` **无重复 id**;X-2 现在红 | 同上 |
+| **P3-1** 「C-2 rebase 必在此冲突」是未自核的转抄 | **修**:本轮**自己**跑 `merge-tree`(见 N.8.4),§N.7 那条改写成实测 + 措辞收窄 | §N.7 / §N.8.4 |
+| **P3-2** 同节点跨 epoch 的自有席位被记到委托人名下 | **登记**(未实测、未修):写进设计 MD §3.4「本候选没有关掉的」清单,与 legacy `nodeKey` 缺口同列 | 设计 MD §3.4 |
+| **P3-3** 'all' 行被 'template' 行遮蔽时因果措辞不成立 | **修措辞**:设计 MD 的因果句改成谓词句(「delegator 的权限今天不再路由到这位被委托人」),并把那一格登记为零覆盖、code-derived | 设计 MD §3.4 |
+| **NIT-1** 源码注释的 provenance 说错了守卫 | **修**:源码注释 + 设计 MD + §N.6 三处一起改成「列类型 + 两个写入方」,并**实测**该 CHECK 拦不住空串 | 源码 `:8685` 起 / 设计 MD / §N.6 |
+| **NIT-2** `now: new Date()` 取墙钟 | **无动作**(设计 MD 已显式披露且拒绝合并表述) | — |
+| **NIT-3** 席位顺序非确定 | **登记**(基线继承,未改行为) | 设计 MD §3.4 |
+
+#### N.8.2 两条新腿的判别力(逐条单独反转核心断言,`-t` 只选自己,`cp` 还原后 `cmp` identical)
+
+| 腿 | 反转内容 | 实测 | 还原 |
+|---|---|---|---|
+| **P16(b)** | `expect(seats).toEqual([delegatorA])` → `[delegatorA, delegateeD].sort()` | **RED** `1 failed \| 1 passed \| 30 skipped`;报文 `expected [ Array(1) ] to deeply equal [ …(2) ]` | identical |
+| **P17(b)** | `expect(choices.length).toBe(new Set(choices).size)` → `… .size + 1` | **RED** `1 failed \| 31 skipped`;报文 `expected 1 to be 2` | identical |
+
+> `-t "P16"` 会**同时**选中 P17(b) —— 因为 P17(b) 的用例名里写了「身份由 P16(b) 钉」。
+> 这正好是一条免费的归因控制:反转 P16(b) 时 P17(b) **仍绿**,两腿的 oracle 确实不重叠。
+>
+> **无效 mutation 的防呆,如实记录**:每次改写都先 `assert` 锚点命中数 = 1。重跑 P16(b) 的反转时,
+> 第一次用的短锚点 `expect(seats).toEqual([delegatorA])` 在本文件里**不唯一**(P5/P6/P7(b) 用的是同一行),
+> `assert` 直接抛错、文件**没有被改**,那一跑的 `2 passed | 30 skipped` 因此是**未变异的树**,
+> 不是「变异了但没红」。换成带夹具调用行的唯一锚点后重跑,才是上表里的 RED 读数。
+
+#### N.8.3 Mutation 台账(六条全部本轮重跑;每条跑前实测 `SELECT count(*) FROM approval_delegations` = **0**)
+
+| mutation | 改动 | 门审轮读数(30 腿) | **本轮读数(32 腿)** | 差异 |
+|---|---|---|---|---|
+| **M-B1** | 整份 `ApprovalProductService.ts` 退回基线 `f35a38d4…c7ea` | 8 failed / 22 | **9 failed / 23** | **+P16(b)**;身份 = `{P5, P6, P7, P9, N6, P10, P12, P14, P16}`,P17(b) 仍绿(基线那两个 id 是 A 与 D,本来就不重复) |
+| **G-2b** | `delegationMapNow` 硬写 `{}` | 3 failed | **3 failed**(P4 / P11 / N5) | 不变 |
+| **G-2c** | `templateId: original.template_id ?? ''` → `''` | 1 failed | **1 failed**(只 P11) | 不变(P7 仍绿,作用域判别力的不对称仍成立) |
+| **G-3** | 删 JOIN 的 `AND a.node_key = r.metadata->>'nodeKey'` | 2 failed | **2 failed**(P14 / P15) | 不变 |
+| **X-1** | `map[A] === D` → `map[A] !== undefined` | 1 failed | **1 failed**(只 P9) | 不变 |
+| **X-2** | `...new Set(` → `...Array.from(`(去重失效) | **0 failed / 30 ⇒ 未测守卫** | **1 failed / 31**(只 P17(b)) | **这就是 P2-2 的闭合** |
+
+四条声明 mutation 的红腿并集仍是 **12 / 13**(N7 对席位谓词零判别力,用例名里已写明);
+新增两腿把红腿并集扩到 **14 / 15**(P17(b) 只被 X-2 覆盖,不被那四条覆盖 —— 这正是它存在的理由)。
+每条 mutation 的 anchor 命中数实测 = 1;每条跑完 `cp` 还原 + `cmp` identical。
+
+#### N.8.4 C-2 文本合并实测(P3-1)
+
+```
+$ git rev-parse origin/feat/approval-cancel-round-phase2
+6a40f0121a36d7e54fde98088ca68212653403bf
+$ git merge-tree --write-tree 8fa9469ccd141016d58b9ff1531eb5be04e4cdce 6a40f0121a36d7e54fde98088ca68212653403bf
+7784ee4ff00e0969641e31ee6be366c8fda70ce0
+$ echo $?
+0
+```
+
+**读数**:exit 0,零冲突,产出 tree `7784ee4ff00e0969641e31ee6be366c8fda70ce0`。
+两个 head 的共同 base 是 `b8b71539a6a89e51331e2e4874f994498df15c55`(`git merge-base` 实测)。
+逐 hunk 核对(全部用 `git diff -U0 <base> <head>` 的 base 侧坐标,本轮自己跑,不转抄):
+本候选在 `ApprovalProductService.ts` 的三个 hunk 落在 base 行 **8632 / 8635 / 8654**;
+C-2 在同一文件里离得最近的两个 hunk 落在 base 行 **8606**(插入 2 行)与 **8837**(插入 475 行)——
+**不重叠**。两边都动的另一个文件 `approval-cancel-round-phase1-design-20260918.md` 上,
+C-2 的唯一 hunk 在 base 行 **80**、本候选在 base 行 **322** 之后,同样不重叠。
+
+**措辞收窄(勿读成更强结论)**:
+
+1. 这是**文本**合并对**这两个具名 head** 的读数,不是关于两条分支任意版本的一般性结论。
+2. **语义**兼容性本轮**未**评估 —— C-2 在同一个方法体附近新增了 475 行,语义是否相安无事要由 C-2 自己那轮核。
+3. 上面这条命令跑在 **hardening 提交之前**的 head 上。hardening 轮只动了本候选已经动过的那 4 个文件、
+   且新增位置都在各自文件里离 C-2 的 hunk 更远的地方,但**本提交无法引用自己的 SHA**,
+   所以「hardening 之后的 head × C-2」的重测读数按纪律登记在本轮回执里,不在此处倒签。
+
+#### N.8.5 套件读数(全部在 `metasheet2_c1_deleg_b_h_20260920` 上、`EXPECT_DB=1`、`CI=true`)
+
+| 人口 | hardening 之前(§N.3,head `8fa9469ccd…`) | **本轮读数** |
+|---|---|---|
+| `approval-cancel-round-creation.db.test.ts` | 30 / 30 | **32 passed / 32** |
+| 七个 `approval-cancel-round-*.db.test.ts` 合计(CI `approval-real-db-integration` 步骤同配置) | 72 / 72 | **74 passed / 74** |
+| 六个委托邻居真库件(`approval-departure-transfer` / `-can-decide-current-node` / `-delegation-api` / `-route-preview-substrate` / `-delegation-selfservice` / `-delegation-seam`) | 39 / 39 | **39 passed / 39** |
+| core-backend 全量**无库**套件(`vitest.config.ts`,`CI=true`,不设 `DATABASE_URL`) | 949 文件 / 15113 用例 0 失败 | **Test Files 949 passed \| 175 skipped (1124);Tests 15113 passed \| 1609 skipped (16722);0 failed** |
+| `pnpm exec tsc --noEmit`(core-backend) | exit 0,零输出 | **exit 0,零输出** |
+
+#### N.8.6 NIT-1 的那条实测
+
+```
+INSERT INTO approval_delegations (id, …, scope, scope_template_id, …)
+VALUES ('nit1-empty-target-probe', …, 'template', '', …);   -- INSERT 0 1  ← 被接受
+SELECT id, scope, '['||scope_template_id||']' … ;            -- template | []
+DELETE …; SELECT count(*) FROM approval_delegations;         -- 0
+```
+
+`chk_approval_delegations_scope_target` = `((scope = 'template') = (scope_template_id IS NOT NULL))`,
+`''` IS NOT NULL ⇒ **CHECK 拦不住空串**。真正拦住它的是那一列仅有的两个写入方
+(`ApprovalDelegationConfig.createDelegation:83-85` 与 `.updateDelegation:250-253`,都是
+`scopeTemplateId?.trim() || null` + 显式 400;该文件另外两条 UPDATE 只翻 `active`)。
+**结论不变,理由换了**;源码注释、设计 MD、§N.6 三处已同步改写。
+
+#### N.8.7 本轮**没有**做、没有主张的
+
+- **没有**继承门审报告「这是**唯一**会降低会签席位数的那格」这一唯一性断言。本轮只实测了**一种**构造
+  (角色席位 × 失效委托席位);任何让两条 approve 行回退到同一个人的构造都会产生同样的收缩,
+  **本轮未穷举**,所以用例名与设计 MD 都写成「一类格的一个实测实例」,不写「唯一」。
+
+- **没有**改任何席位推导逻辑:`ApprovalProductService.ts` 本轮的改动**只有注释**(NIT-1 的 provenance 勘误),
+  `git diff` 里零可执行行变化 —— 这也是 M-B1 以外五条 mutation 读数**逐条不变**的原因。
+- **没有**构造 P3-2(同节点跨 epoch)与 P3-3('all' × 'template' 遮蔽)的实跑 —— 两条都按 code-derived 登记进设计 MD,
+  **未实测、未修**,状态写在那里,不在本节里洗白。
+- **没有**裁读法,**没有**碰锁文正文,**没有**新增错误码,**没有**动 §14.3 出口表。
+- **没有**评估 C-2 与本候选的**语义**兼容性。
+- **没有**碰 `apps/web`;前端无关。
+- **没有**动任何不是本轮建的 worktree / 库 / 文件。

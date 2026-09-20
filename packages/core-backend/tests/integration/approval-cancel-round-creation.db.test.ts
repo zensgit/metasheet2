@@ -5,6 +5,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor, ensureLocalUserRow } from '../helpers/approval-schema-bootstrap'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { isCancelRoundInstance, APPROVAL_CANCEL_ROUND_WORKFLOW_KEY } from '../../src/attendance/w4c3b-central-approval-hooks'
+import { CANCEL_ROUND_APPROVAL_NODE_KEY } from '../../src/db/seeds/approval-cancel-round-published-definition'
 
 /**
  * Approval change-request design lock v5.9 §14.1 (WI-4) — `createCancelRoundInstance` real-DB
@@ -1809,5 +1810,231 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // 实测值。委托已撤销,P5(b) 在同样的委托状态下给 [A];本腿给 [D],差别只在这条 approve 行
     // 的 metadata 有没有 nodeKey —— 缺口的边界就是这一格。
     expect(seatRows.rows.map((row) => row.assignee_id)).toEqual([delegateeD])
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // 门审第 1 轮(`impl-gate-C-slice1-g3-reading-b-round1-20260920.md`)P2-1 / P2-2 —— **同一条夹具**
+  // 闭合的两条覆盖缺口,拆成两个 `it()`(与本组上面同一条纪律:局部回归要能自己报出名字)。
+  //
+  // 夹具:节点 1 是**角色**节点(`assigneeType:'role'`, `assigneeIds:['admin']`),A 以角色成员身份批;
+  // 节点 2 点名 A,被那条 'all' 作用域 A→D 委托换成 D,D 批;随后委托 `active = FALSE`。
+  //
+  // **角色节点不是装饰**:委托替换只作用于 `assignmentType === 'user'` 的席位
+  // (`ApprovalAssigneeResolver.pushResolved`),所以在这条 A→D 委托生效期间,**用户**节点点名 A 就会被换成 D;
+  // 「A 自己直接批过一个节点」这件事**只能**由一个不被替换的席位类型(角色)造出来。这正是
+  // 「两个不同的 (actor, delegatedFrom) pair 回退到同一个人」这一格**本轮采用的**构造方式。
+  // **不主张它是唯一构造**:本轮只实测了角色席位这一种不被替换的席位类型,没有穷举别的路径。
+  //
+  // 两条腿的 oracle **不重叠**:
+  //   - P16(b) 钉席位身份与席位数(基线还原 mutation 下红;去掉 `new Set` 下**不**红 —— 下游
+  //     `pushResolved` 的 `seen` 会再去重一次,席位行数不变)。
+  //   - P17(b) 钉持久化快照 `requesterChoices` 无重复 id(去掉 `new Set` 下红;基线还原下**不**红 ——
+  //     基线的两个 id 是 A 与 D,本来就不重复)。
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * `start -> approval_a(角色) -> approval_b(用户) -> end`。
+   *
+   * 与 `sequentialTwoNodeGraph` 分开写、不去给它加参数:P14(b) 的夹具形状因此**逐字不动**,
+   * 本组新腿红/绿都不可能是改了那条共享 builder 造成的。
+   */
+  function roleThenUserTwoNodeGraph(roleId: string, secondApprover: string) {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'approval_a',
+          type: 'approval',
+          config: { assigneeType: 'role', assigneeIds: [roleId], approvalMode: 'single' },
+        },
+        {
+          key: 'approval_b',
+          type: 'approval',
+          config: { assigneeType: 'user', assigneeIds: [secondApprover], approvalMode: 'single' },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'e-s-a', source: 'start', target: 'approval_a' },
+        { key: 'e-a-b', source: 'approval_a', target: 'approval_b' },
+        { key: 'e-b-end', source: 'approval_b', target: 'end' },
+      ],
+    }
+  }
+
+  async function publishRoleThenUserTemplate(
+    adminToken: string,
+    roleId: string,
+    secondApprover: string,
+    label: string,
+  ): Promise<string> {
+    const templateKey = `wi4-creation-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'WI-4 cancel-round creation fixture (role node then user node)',
+        description: 'approval-cancel-round-creation.db.test.ts',
+        formSchema: buildFormSchema(),
+        approvalGraph: roleThenUserTwoNodeGraph(roleId, secondApprover),
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status, await publishResponse.clone().text()).toBe(200)
+    return template.id
+  }
+
+  /**
+   * 建一张「A 的角色席位 + D 的(现已失效的)代理席位」原单,开撤销轮,返回席位与持久化快照里的
+   * `requesterChoices`。
+   *
+   * 夹具形状正控在**断言结果之前**先跑(与 P14(b) 同纪律):若替换没发生、或者角色席位竟然也被替换,
+   * 两条腿都会因为别的原因绿/红,归因不到席位推导本身。
+   *
+   * 登记(`createdApprovalIds` / `createdRoundIds`)全部排在返回之前:本组腿会在 mutation 轮里被刻意
+   * 弄红,而一个没登记的撤销轮会让 `afterAll` 的删除链在 `approval_rounds_document_id_fkey` 上中断
+   * (该文件 `afterAll` 的实测记录),把委托配置行留给后面的套件。
+   */
+  async function roleSeatPlusLapsedDelegateSeatRound(label: string): Promise<{
+    seats: string[]
+    choices: string[]
+    delegatorA: string
+    delegateeD: string
+    documentId: string
+    cancelRoundId: string
+  }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-drureq-${suffix}`
+    const delegatorA = `wi4-drudelA-${suffix}`
+    const delegateeD = `wi4-drudelD-${suffix}`
+    const adminId = `wi4-druadm-${suffix}`
+    const delegationId = `wi4-drudeleg-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    // A 真的要动手批节点 1,所以他这里拿的是**自己**的 token(本文件的 `authToken` 铸的 claim 含
+    // `roles=admin`,节点 1 的角色席位点的就是 'admin')。
+    const tokenA = await authToken(baseUrl, delegatorA)
+    const tokenD = await authToken(baseUrl, delegateeD)
+    await insertActiveDelegation(delegationId, delegatorA, delegateeD)
+
+    const templateId = await publishRoleThenUserTemplate(adminToken, 'admin', delegatorA, label)
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    // 节点 1:角色席位。形状正控 —— 它必须是 role 型、且**没有** delegatedFrom(委托没碰它)。
+    const roleSeat = await pool().query<{
+      assignment_type: string
+      assignee_id: string
+      node_key: string | null
+      delegated_from: string | null
+    }>(
+      `SELECT assignment_type, assignee_id, node_key, metadata->>'delegatedFrom' AS delegated_from
+         FROM approval_assignments WHERE instance_id = $1`,
+      [documentId],
+    )
+    expect(roleSeat.rows).toEqual([
+      { assignment_type: 'role', assignee_id: 'admin', node_key: 'approval_a', delegated_from: null },
+    ])
+
+    const approveA = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenA, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(approveA.status, `approval_a: ${await approveA.clone().text()}`).toBe(200)
+
+    const approveD = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(approveD.status, `approval_b: ${await approveD.clone().text()}`).toBe(200)
+
+    // 形状正控(建议 3 / P14(b) 同款):两个节点的 assignment 类型与 provenance 各是什么,
+    // 两条 approve 行各由谁写、nodeKey 是什么 —— 都断言死,否则本组的红绿归因不到席位推导。
+    const assignments = await pool().query<{
+      node_key: string | null
+      assignment_type: string
+      assignee_id: string
+      delegated_from: string | null
+    }>(
+      `SELECT node_key, assignment_type, assignee_id, metadata->>'delegatedFrom' AS delegated_from
+         FROM approval_assignments WHERE instance_id = $1 ORDER BY node_key`,
+      [documentId],
+    )
+    expect(assignments.rows).toEqual([
+      { node_key: 'approval_a', assignment_type: 'role', assignee_id: 'admin', delegated_from: null },
+      { node_key: 'approval_b', assignment_type: 'user', assignee_id: delegateeD, delegated_from: delegatorA },
+    ])
+    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY node_key`,
+      [documentId],
+    )
+    expect(records.rows).toEqual([
+      { actor_id: delegatorA, node_key: 'approval_a' },
+      { actor_id: delegateeD, node_key: 'approval_b' },
+    ])
+    const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(status.rows[0]?.status).toBe('approved')
+
+    await applyDelegationLeg(delegationId, 'revoked')
+
+    const service = new ApprovalProductService()
+    const dto = await service.createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
+      documentId,
+    ])
+    expect(roundRows.rows.length).toBe(1)
+    createdRoundIds.add(roundRows.rows[0].id)
+
+    const seatRows = await pool().query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [dto.id],
+    )
+    const snapshotRow = await pool().query<{
+      requester_snapshot: { requesterChoices?: Record<string, unknown> } | null
+    }>(`SELECT requester_snapshot FROM approval_instances WHERE id = $1`, [dto.id])
+    // 键路径取自**单一定义** `CANCEL_ROUND_APPROVAL_NODE_KEY`(种子文件导出的那一个),不手抄字面量。
+    const rawChoices = snapshotRow.rows[0]?.requester_snapshot?.requesterChoices?.[CANCEL_ROUND_APPROVAL_NODE_KEY]
+    expect(Array.isArray(rawChoices)).toBe(true)
+    return {
+      seats: seatRows.rows.map((row) => row.assignee_id),
+      choices: rawChoices as string[],
+      delegatorA,
+      delegateeD,
+      documentId,
+      cancelRoundId: dto.id,
+    }
+  }
+
+  it('§2-G3 第三句 正控 P16(b) / 门审 round1 P2-1 —— 读法 (b) 下**会降低会签门槛**的那一类格(同一人的角色席位与失效委托席位合并)的一个**实测实例**,写成读数而不是散文:A 以**角色**成员身份批了节点 1(角色席位不被委托替换),D 以 A 的(随后失效的)代理身份批了节点 2 ⇒ 席位由基线的 {A, D} **两席**收缩成 `[A]` **一席**。撤销轮节点是 `approvalMode:\'all\'`,门槛因此同时由 2 降到 1 —— 实际批过节点 2、且今天**完全合格**的 D 在撤销轮里一票也没有。失败方向不是越权(A 是两个节点都点名过的人,且仍要过资格闸),但锁 §2-G3 第一句「保留原节点的会签/或签语义」与本格的张力是 **owner 裁决项**(设计 MD §3.4 已登记);本腿只把它钉成数字,不主张它已被裁定,**也不主张这是唯一一格** —— 门审第 1 轮把它称作「唯一」,本轮**没有**做穷举,不继承那个唯一性断言', async () => {
+    const { seats, delegatorA, delegateeD } = await roleSeatPlusLapsedDelegateSeatRound('g3dlg-rolemerge')
+    expect(seats).toEqual([delegatorA])
+    expect(seats).not.toContain(delegateeD)
+    // 数字本身就是本腿的产出:一席,不是两席。
+    expect(seats.length).toBe(1)
+  })
+
+  it('§2-G3 第三句 正控 P17(b) / 门审 round1 P2-2 —— `new Set` 去重的判别腿:同一条夹具(角色席位 × 失效委托席位)下,两个不同的 `(actor, delegatedFrom)` pair 双双回退到**同一个人** A,所以持久化的 `requester_snapshot.requesterChoices[cancel_approval]` 必须**无重复 id**。把 `...new Set(` 换成 `...Array.from(`(语法合法、去重失效)时,席位行数**不变**(下游 `pushResolved` 的 `seen` 会再去重一次),红的只有这条快照断言 —— 爆炸半径就精确地限于这份持久化审计字段。本腿**只**断言「无重复」,身份由 P16(b) 钉,两腿判别力因此不重叠', async () => {
+    const { choices, seats } = await roleSeatPlusLapsedDelegateSeatRound('g3dlg-roledup')
+    // 核心断言:无重复。基线还原 mutation 下这里是 [A, D](两个不同的人),照样无重复 ⇒ 本腿对
+    // 基线还原零判别力,只对 `new Set` 有。
+    expect(choices.length).toBe(new Set(choices).size)
+    // 归因控制(对 `new Set` 零判别力):快照里的人就是席位上的人,红的时候能一眼看出红在哪一半。
+    expect([...new Set(choices)].sort()).toEqual([...seats].sort())
   })
 })

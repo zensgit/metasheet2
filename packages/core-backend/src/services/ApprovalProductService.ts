@@ -8679,9 +8679,20 @@ export class ApprovalProductService {
       // SCOPE: it filters `scope='template'` rows by templateId, so it MUST be given the ORIGINAL
       // document's template — never the cancel round's own dedicated published definition, which would
       // silently reduce support to `scope='all'` rows. `ApprovalInstanceRow.template_id` is nullable; a
-      // NULL-template original can only ever match `scope='all'` rows, which `''` expresses exactly (no
-      // `scope='template'` row can carry an empty target — `chk_approval_delegations_scope_target` — and
-      // `scope='all'` rows ignore the parameter).
+      // NULL-template original can only ever match `scope='all'` rows, which `''` expresses exactly:
+      // `scope='all'` rows ignore the parameter, and no `scope='template'` row carries an empty target.
+      //
+      // PROVENANCE ERRATUM (gate round 1, NIT-1 — the conclusion above stands, the reason this comment
+      // used to give for it did not). It named `chk_approval_delegations_scope_target` as what keeps
+      // `''` out. That CHECK is `((scope = 'template') = (scope_template_id IS NOT NULL))`, and `''`
+      // IS NOT NULL — so it does NOT reject an empty target. MEASURED 2026-09-20 on a freshly migrated
+      // private database: a hand-written `INSERT … ('template', '')` is ACCEPTED by that constraint.
+      // What actually keeps `''` out of the column are its only two writers, both of which normalize
+      // `scopeTemplateId?.trim() || null` and then refuse a falsy target with an explicit 400:
+      // `ApprovalDelegationConfig.createDelegation` (:83-85, feeding the INSERT at :100) and
+      // `.updateDelegation` (:250-253, feeding the UPDATE at :264). The two other statements in that
+      // file only flip `active`. Separately, `scope_template_id` is TEXT (not uuid), so binding `''`
+      // cannot raise `22P02` either — that is the column type's guarantee, not the CHECK's.
       //
       // NOT best-effort, unlike `createApproval`'s own delegation read (which warns and continues so a
       // config-table blip can never block a submission): here the map is an AUTHORIZATION input, so a
