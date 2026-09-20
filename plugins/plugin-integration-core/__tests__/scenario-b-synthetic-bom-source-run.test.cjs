@@ -342,15 +342,37 @@ async function testPermissionAndScopeGates() {
 
 // --- 夹具漂移：committed 的 .sql 必须就是生成器的输出 -------------------------------------
 async function testCommittedSqlMatchesGenerator() {
-  const cases = [['01-schema.sql', fixture.schemaSql()], ['02-seed.sql', fixture.seedSql()]]
+  const cases = [
+    ['01-schema.sql', fixture.schemaSql()],
+    ['02-seed.sql', fixture.seedSql()],
+    // v2 种子（对账演练的第二批次）与 01/02 受同一条漂移断言约束 —— 它也是生成物。
+    ['03-seed-v2.sql', fixture.seedSqlV2()],
+  ]
   for (const [name, expected] of cases) {
     const onDisk = fs.readFileSync(path.join(FIXTURE_DIR, name), 'utf8')
     assert.equal(onDisk, expected, `${name} 与生成器输出不一致，跑 node fixtures/scenario-b-synthetic-bom/regenerate.cjs`)
   }
   // 夹具是假数据这件事也要可被证伪，而不是靠 README 里的一句话。
-  const seed = fs.readFileSync(path.join(FIXTURE_DIR, '02-seed.sql'), 'utf8')
-  assert.ok(!/DN_PDM_|Bom_ExAttr|ExAttr\d/i.test(seed), '夹具不得模仿客户 PLM 的真实列名')
-  assert.equal((seed.match(/SYN-/g) || []).length > 100, true)
+  for (const name of ['02-seed.sql', '03-seed-v2.sql']) {
+    const seed = fs.readFileSync(path.join(FIXTURE_DIR, name), 'utf8')
+    assert.ok(!/DN_PDM_|Bom_ExAttr|ExAttr\d/i.test(seed), `${name}: 夹具不得模仿客户 PLM 的真实列名`)
+    assert.equal((seed.match(/SYN-/g) || []).length > 100, true, `${name}: SYN- 前缀`)
+  }
+  // committed 的 03 相对 02 只有四处行级差异（四类变更各一）。这条断言钉的是「v2 不是另一份
+  // 随手改出来的数据」：多改一行、少改一行都会在这里红。
+  const seedRows = (name) => fs.readFileSync(path.join(FIXTURE_DIR, name), 'utf8')
+    .split('\n').filter((line) => line.startsWith('  ('))
+  const v1Rows = seedRows('02-seed.sql')
+  const v2Rows = seedRows('03-seed-v2.sql')
+  assert.equal(v1Rows.length, fixture.ROW_COUNT)
+  assert.equal(v2Rows.length, fixture.ROW_COUNT_V2)
+  // 逐行归一化（去掉行尾的 , / ; 差别）后取对称差：v1 独有 2 行（改数量前 + 替换前 + 被删），
+  // v2 独有 2 行（改数量后 + 替换后 + 新增）—— 即 3 : 3。
+  const bare = (line) => line.replace(/[,;]$/, '')
+  const v1Set = new Set(v1Rows.map(bare))
+  const v2Set = new Set(v2Rows.map(bare))
+  assert.equal([...v1Set].filter((line) => !v2Set.has(line)).length, 3, 'v1 独有恰好 3 行（改数量前/替换前/被删）')
+  assert.equal([...v2Set].filter((line) => !v1Set.has(line)).length, 3, 'v2 独有恰好 3 行（改数量后/替换后/新增）')
 }
 
 async function main() {
