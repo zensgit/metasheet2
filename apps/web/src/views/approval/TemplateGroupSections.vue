@@ -481,16 +481,55 @@ function moveTargetsFor(currentToken: string): { token: string; label: string }[
 }
 
 /**
+ * P2-3 fix (groups-daily-ops-real-browser-acceptance-20260920.md) — re-fetches the pages a section
+ * had ALREADY loaded (1..`section.page`), replacing `items`/`total`/`hasMore` from the server's
+ * current truth. Used only when a section's loaded set is INCOMPLETE at the moment of a move
+ * (`items.length < total`): with page-NUMBER pagination, the exact page a moved row now lands on
+ * (or, symmetrically, which row now backfills the freed slot on the source side) is unknowable
+ * client-side without a round trip — bumping/decrementing the counter alone leaves `total` and
+ * `items.length` disagreeing, and `loadMore`'s next `page = section.page + 1` request can land past
+ * the section's new end (empty response, "load more" never resolves — see the header comment on
+ * `applyItemMove` below and the acceptance report's scenario P). Best-effort: a failed refresh
+ * leaves the section's PRE-refresh state in place (same non-throwing discipline as `loadMore`'s own
+ * catch) rather than degrading the whole view to the top-level error state.
+ */
+async function refreshSectionRange(section: SectionState): Promise<void> {
+  try {
+    let items: ApprovalTemplateListItemDTO[] = []
+    let total = section.total
+    for (let page = 1; page <= section.page; page += 1) {
+      const res = await fetchPage(section.token, page)
+      items = [...items, ...res.data]
+      total = res.total
+    }
+    section.items = items
+    section.total = total
+    section.hasMore = items.length < total
+  } catch {
+    // See doc comment above — best-effort, pre-refresh state stands.
+  }
+}
+
+/**
  * Moves `item` (currently rendered in `section`) to `targetToken` — `unlinkApprovalTemplateFromGroup`
  * for `ungrouped`, `linkApprovalTemplateToGroup` for a `group:<id>` target (the same atomic upsert
  * §2 uses for both first-link and re-link, so this one call covers moving OUT of `ungrouped` /
- * `category:<name>` too). On success the item is removed from `section` locally (no re-fetch of
- * either section — same "position/membership changes, not re-fetched" convention as group-order
- * moves) and, if the target section is currently rendered, its `total`/`hasMore` are bumped (the
- * moved item is NOT inserted into the target's already-loaded `items` — it may not belong on that
- * page; `loadMore`/a future `loadAll()` will surface it). A `category:<name>` section emptied by
- * this move is dropped from `sections` entirely (same 0-total-candidate rule as `loadAll()`). A
- * failed move is a NON-blocking inline error (`moveError`) — the row is left exactly where it was.
+ * `category:<name>` too). On success the item is removed from `section` locally (no re-fetch —
+ * same "position/membership changes, not re-fetched" convention as group-order moves) — UNLESS
+ * `section` was already incomplete (`hasMore` true) at the time of the move, in which case its
+ * loaded range is refreshed (`refreshSectionRange`, P2-3 fix: a page-number offset shift under
+ * concurrent removal cannot be patched by a local counter decrement — see that function's doc
+ * comment). The SAME rule applies to the target, mirrored: if the target section already holds its
+ * COMPLETE loaded set (the common case — most sections fit on one page), the moved item is
+ * inserted directly into `target.items` (zero extra requests, and `total`/`items.length` can never
+ * drift apart because both are updated together); if the target was already paginated, its loaded
+ * range is refreshed instead of guessing where the new row landed. Either way `total`/`hasMore` end
+ * the move in agreement with what is actually rendered — this replaces the PRE-fix behaviour (bump
+ * `target.total` only, never touch `target.items`) that produced a permanently-empty "load more"
+ * whenever the target had already loaded everything it had (acceptance report P1/P2/P3). A
+ * `category:<name>` section emptied by this move is still dropped from `sections` entirely (same
+ * 0-total-candidate rule as `loadAll()`). A failed move is a NON-blocking inline error (`moveError`)
+ * — the row is left exactly where it was; `refreshSectionRange` never throws into this catch.
  */
 async function onMoveItem(
   section: SectionState,
@@ -506,7 +545,7 @@ async function onMoveItem(
     } else {
       await linkApprovalTemplateToGroup(item.id, targetToken.slice(GROUP_TOKEN_PREFIX.length))
     }
-    applyItemMove(section, item, targetToken)
+    await applyItemMove(section, item, targetToken)
   } catch (e: any) {
     moveError.value = e?.message ?? t.value.groupItemMoveError
   } finally {
@@ -514,18 +553,34 @@ async function onMoveItem(
   }
 }
 
-function applyItemMove(section: SectionState, item: ApprovalTemplateListItemDTO, targetToken: string): void {
+async function applyItemMove(
+  section: SectionState,
+  item: ApprovalTemplateListItemDTO,
+  targetToken: string,
+): Promise<void> {
+  const sourceWasComplete = section.items.length >= section.total
   section.items = section.items.filter((i) => i.id !== item.id)
   section.total = Math.max(0, section.total - 1)
-  section.hasMore = section.items.length < section.total
+  if (sourceWasComplete) {
+    // Fewer rows, still the whole set — no request needed.
+    section.hasMore = false
+  } else {
+    await refreshSectionRange(section)
+  }
   if (!section.alwaysShow && section.total === 0) {
     sections.value = sections.value.filter((s) => s.token !== section.token)
   }
 
   const target = sections.value.find((s) => s.token === targetToken)
   if (target) {
+    const targetWasComplete = target.items.length >= target.total
     target.total += 1
-    target.hasMore = target.items.length < target.total
+    if (targetWasComplete) {
+      target.items = [...target.items, item]
+      target.hasMore = false
+    } else {
+      await refreshSectionRange(target)
+    }
   }
 }
 
