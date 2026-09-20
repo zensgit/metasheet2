@@ -10,7 +10,20 @@ Language / 语言: 中文
 
 本文档只做盘点，不改代码、不下加门与否的最终结论——结论列在每条的「建议」里，供 owner 裁决。
 
-## 结论（先读这段）
+## 2026-09-20 更新：13 条里 12 条已加门，只剩 1 条待 #5680
+
+批次 1（#5710）、批次 2（#5884）、批次 3（#5897）已合并，按下表「当前状态」列逐条实读
+`origin/main`（本次 HEAD `1a6663a41`）核对：**13 条里 12 条已在 handler 首位加
+`requireAdminRole()`**，只剩 `GET /slo/status`（现 `admin-routes.ts:1375`）仍无门——不是遗漏，
+是故意留着：设计稿 `admin-read-gates-batch3-design-20260920.md` 记录了 `#5680`（admin-routes
+写路由结构性守卫，本次复核时仍 `OPEN`）用这条端点做反向对照用例（断言"这条无门"），此时给它加门
+会把 `#5680` 钉红；等 `#5680` 合并后需要一行 PR 给 `/slo/status` 补门，并把 `#5680` 里那条反向
+对照改成正向（断言"admin-routes 下再无无门 GET"）。以下「结论」「逐条细节」两节保留 2026-09-12
+盘点时点的原文（当时全部 13 条都还没加门），历史结论不变，只有「当前状态」列反映最新代码。
+下表 file:line 已按当前 `origin/main` 重新实读核对（`admin-routes.ts` 在盘点之后新增了
+`GET /yjs/status`（:1395，已带门，不在本次盘点范围）等端点，导致其余端点行号普遍继续漂移）。
+
+## 结论（先读这段，2026-09-12 原文，历史留存）
 
 - **含业务/敏感 payload 的有 5 条**：`GET /dlq`、`GET /health/detailed`、`GET /health/subsystem/:name`、
   `protection-rules` 的 `GET /` 与 `GET /:id`。这 5 条不是同一档次的风险：
@@ -43,21 +56,24 @@ Language / 语言: 中文
 
 ## 总表
 
-| # | 方法 路径 | file:line | 业务 payload | 跨租户 | 前端调用 | 风险类 | 建议 |
-|---|---|---|---|---|---|---|---|
-| 1 | GET /safety/status | admin-routes.ts:79 | 无 | 否（单例，无租户维度） | 无（0 命中） | 侦察面（低） | 加 requireAdminRole() |
-| 2 | GET /slo/status | admin-routes.ts:1357 | 无 | 否（平台级 Prometheus 聚合） | 无 | 侦察面（低-中） | 加 requireAdminRole() |
-| 3 | GET /dlq | admin-routes.ts:1400 | **有（原始消息体+异常原文，实读确认）** | **是（实读确认，无 tenant_id 列/过滤）** | 无 | **信息泄露（高）** | 加 requireAdminRole()，优先修 |
-| 4 | GET /shards | admin-routes.ts:1485 | 无（含原始驱动错误文本） | 否（DB 连接池是进程级基础设施） | 无 | 侦察面（中）/ 需真库确认错误文本内容 | 加 requireAdminRole() |
-| 5 | GET /shards/:name | admin-routes.ts:1531 | 同上 | 否 | 无 | 同上 | 加 requireAdminRole() |
-| 6 | GET /queues | admin-routes.ts:1577 | 无（仅计数） | 否 | 无 | 侦察面（低） | 加 requireAdminRole() |
-| 7 | GET /ratelimits | admin-routes.ts:1708 | 无 | 否（全局聚合） | 无 | 侦察面（低） | 加 requireAdminRole() |
-| 8 | GET /ratelimits/:key | admin-routes.ts:1770 | 无 | **休眠中的跨租户枚举缺口（推断，未激活）** | 无 | 需接线/真库确认 | 加 requireAdminRole()，且应在重新接线 MessageRateLimiter 前先补门 |
-| 9 | GET /health/detailed | admin-routes.ts:1884 | **有（插件错误文本/metadata + DB 驱动错误文本，实读确认）** | 否（平台级聚合） | 无 | 信息泄露（中）+ 侦察面（高） | 加 requireAdminRole()，优先修（与 /plugins/health 的门形成矛盾） |
-| 10 | GET /health/summary | admin-routes.ts:1913 | 无（仅布尔/百分比） | 否 | 无 | 侦察面（低） | 加 requireAdminRole() |
-| 11 | GET /health/subsystem/:name | admin-routes.ts:1946 | 有限（取 name=plugins/database 时同 #9 对应部分） | 否 | 无 | 信息泄露（中，视 name）/ 侦察面 | 加 requireAdminRole() |
-| 12 | GET /safety/rules (protection-rules.ts `GET /`) | protection-rules.ts:54 | 有限（治理规则 + created_by 身份标识） | 否（表无 tenant_id 列，功能本身全平台单一规则集） | 无（ops 侧仅限流探测，见上） | 信息泄露（低-中） | 加 requireAdminRole() 或等价 rbacGuard('safety-rules','read')，待裁决具体码 |
-| 13 | GET /safety/rules/:id (protection-rules.ts `GET /:id`) | protection-rules.ts:82 | 同上 | 同上 | 无 | 同上 | 同上 |
+file:line 列为 2026-09-12 盘点时点的行号（原文保留）；「当前状态」列为 2026-09-20 复核按
+`origin/main`（HEAD `1a6663a41`）重新实读到的行号与加门状态。
+
+| # | 方法 路径 | file:line（2026-09-12） | 业务 payload | 跨租户 | 前端调用 | 风险类 | 建议 | 当前状态（2026-09-20） |
+|---|---|---|---|---|---|---|---|---|
+| 1 | GET /safety/status | admin-routes.ts:79 | 无 | 否（单例，无租户维度） | 无（0 命中） | 侦察面（低） | 加 requireAdminRole() | **已加门 #5897**（现 admin-routes.ts:97） |
+| 2 | GET /slo/status | admin-routes.ts:1357 | 无 | 否（平台级 Prometheus 聚合） | 无 | 侦察面（低-中） | 加 requireAdminRole() | **待 #5680**（现 admin-routes.ts:1375，仍无门；#5680 用它做反向对照，OPEN 中不能动，见上节） |
+| 3 | GET /dlq | admin-routes.ts:1400 | **有（原始消息体+异常原文，实读确认）** | **是（实读确认，无 tenant_id 列/过滤）** | 无 | **信息泄露（高）** | 加 requireAdminRole()，优先修 | **已加门 #5710**（现 admin-routes.ts:1425） |
+| 4 | GET /shards | admin-routes.ts:1485 | 无（含原始驱动错误文本） | 否（DB 连接池是进程级基础设施） | 无 | 侦察面（中）/ 需真库确认错误文本内容 | 加 requireAdminRole() | **已加门 #5884**（现 admin-routes.ts:1520） |
+| 5 | GET /shards/:name | admin-routes.ts:1531 | 同上 | 否 | 无 | 同上 | 加 requireAdminRole() | **已加门 #5884**（现 admin-routes.ts:1574） |
+| 6 | GET /queues | admin-routes.ts:1577 | 无（仅计数） | 否 | 无 | 侦察面（低） | 加 requireAdminRole() | **已加门 #5884**（现 admin-routes.ts:1630） |
+| 7 | GET /ratelimits | admin-routes.ts:1708 | 无 | 否（全局聚合） | 无 | 侦察面（低） | 加 requireAdminRole() | **已加门 #5897**（现 admin-routes.ts:1773） |
+| 8 | GET /ratelimits/:key | admin-routes.ts:1770 | 无 | **休眠中的跨租户枚举缺口（推断，未激活）** | 无 | 需接线/真库确认 | 加 requireAdminRole()，且应在重新接线 MessageRateLimiter 前先补门 | **已加门 #5897**（现 admin-routes.ts:1847） |
+| 9 | GET /health/detailed | admin-routes.ts:1884 | **有（插件错误文本/metadata + DB 驱动错误文本，实读确认）** | 否（平台级聚合） | 无 | 信息泄露（中）+ 侦察面（高） | 加 requireAdminRole()，优先修（与 /plugins/health 的门形成矛盾） | **已加门 #5884**（现 admin-routes.ts:1971） |
+| 10 | GET /health/summary | admin-routes.ts:1913 | 无（仅布尔/百分比） | 否 | 无 | 侦察面（低） | 加 requireAdminRole() | **已加门 #5897**（现 admin-routes.ts:2014） |
+| 11 | GET /health/subsystem/:name | admin-routes.ts:1946 | 有限（取 name=plugins/database 时同 #9 对应部分） | 否 | 无 | 信息泄露（中，视 name）/ 侦察面 | 加 requireAdminRole() | **已加门 #5884**（现 admin-routes.ts:2056） |
+| 12 | GET /safety/rules (protection-rules.ts `GET /`) | protection-rules.ts:54 | 有限（治理规则 + created_by 身份标识） | 否（表无 tenant_id 列，功能本身全平台单一规则集） | 无（ops 侧仅限流探测，见上） | 信息泄露（低-中） | 加 requireAdminRole() 或等价 rbacGuard('safety-rules','read')，待裁决具体码 | **已加门 #5710**（现 protection-rules.ts:179，用 requireAdminRole()，未采用 rbacGuard 细粒度码） |
+| 13 | GET /safety/rules/:id (protection-rules.ts `GET /:id`) | protection-rules.ts:82 | 同上 | 同上 | 无 | 同上 | 同上 | **已加门 #5710**（现 protection-rules.ts:207） |
 
 挂载与全局门（实读确认，非本次盘点对象，但按任务要求核对）：
 
@@ -72,7 +88,7 @@ Language / 语言: 中文
   **不做任何角色判断**——**「角色不鉴」实读确认**：任何已认证用户，不论角色、不论租户，都能穿过全局门，
   落到 `admin-routes.ts`/`protection-rules.ts` 的 handler；本文档列出的 13 条端点在 handler 层没有第二道拦截。
 
-## 逐条细节
+## 逐条细节（2026-09-12 原文，历史留存；加门状态以上方总表「当前状态」列为准）
 
 ### 1. GET /safety/status — admin-routes.ts:79
 
@@ -287,7 +303,7 @@ Language / 语言: 中文
 - **风险类**：同 #12。
 - **建议**：同 #12。
 
-## 建议分批
+## 建议分批（2026-09-12 原文，历史留存——12/13 已按此分批执行完毕，仅 `/slo/status` 待 #5680）
 
 按「暴露面大小 × 是否已有实读证据」排的一个可能分批方式，供 owner 参考、不代表最终决定：
 
