@@ -667,6 +667,30 @@ function createExternalSystemRegistry({
     )
   }
 
+  // THE CONNECTION A ROLLBACK-ELIGIBLE ROW CURRENTLY RESOLVES AGAINST ("生效指针").
+  //
+  // The two shapes the cutover leaves behind disagree about WHERE that id is stored:
+  //   * pure legacy  (connection_id NULL,  marker TRUE): it lives in `config.dataSourceId` and
+  //     `resolveLegacy` reads it;
+  //   * migrated     (connection_id SET,   marker TRUE): `resolveCanonical` reads `connection_id`,
+  //     and `config.dataSourceId` survives only as the rollback trail (it must AGREE, or
+  //     connection-resolver.cjs raises CONNECTION_BINDING_MISMATCH).
+  // Canonical wins when both are present, which is exactly the precedence the resolver applies, so
+  // this returns the id the row is being read through TODAY. '' means the row currently points
+  // nowhere (a cleared pointer on a pure-legacy row).
+  //
+  // NOT `config.dataSourceId` ALONE. Comparing the payload against the stored legacy pointer would
+  // leave `connection_id` free to move on a migrated row while the pointer stayed put, minting the
+  // one shape neither resolver branch accepts (canonical id A + legacy pointer B).
+  function effectiveLegacyBindingPointer(existing) {
+    if (!existing) return ''
+    const canonical = typeof existing.connection_id === 'string' ? existing.connection_id.trim() : ''
+    if (canonical) return canonical
+    return isPlainObject(existing.config) && typeof existing.config.dataSourceId === 'string'
+      ? existing.config.dataSourceId.trim()
+      : ''
+  }
+
   async function upsertExternalSystem(input) {
     const normalized = normalizeExternalSystemInput(input)
     const existing = await findExisting(normalized)
@@ -727,18 +751,31 @@ function createExternalSystemRegistry({
       else updateRow.config = await resolveUpdatedConfig(existing, updateRow.config, input)
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
       assertLegacyBindingRepointCarriesCanonicalConnection(existing, normalized)
-      // The other half of the same rule: a write that DOES carry `connectionId` for a
-      // rollback-eligible row is an explicit canonical (re)bind, proven a few lines below through
+      // The other half of the same rule: a write that MOVES a rollback-eligible row's binding to a
+      // DIFFERENT connection is an explicit canonical re-bind, proven a few lines below through
       // `validateCanonicalConnectionBinding`. Retiring the marker in that same write is what makes
-      // the binding canonical rather than "canonical id written, still resolving as legacy"; it only
-      // ever NARROWS the row (it can no longer take `resolveLegacy`), and the pointer drop below
-      // follows from it, so marker FALSE never coexists with a stored legacy pointer.
-      if (
-        normalized.kind === SQL_READONLY_SOURCE_KIND
+      // the new binding canonical rather than "canonical id written, still resolving as legacy"; it
+      // only ever NARROWS the row (it can no longer take `resolveLegacy`), and the pointer drop
+      // below follows from it, so marker FALSE never coexists with a stored legacy pointer.
+      //
+      // NARROWED (this PR, #5783 follow-up) TO AN ACTUAL POINTER CHANGE. The condition used to be
+      // "kind + marker TRUE + an explicit non-null `connectionId`", which never looked at whether
+      // the binding moved. The workbench edit form fills its draft from
+      // `system.connectionId || config.dataSourceId` and serializes `connectionId` on EVERY save
+      // (apps/web/src/views/IntegrationWorkbenchView.vue:2309/2325/2445, passed through verbatim by
+      // lib/http-routes.cjs), so a pure RENAME re-asserted the row's OWN current connection and
+      // retired the marker on the spot — and the pointer drop below then deleted
+      // `config.dataSourceId`, silently destroying the rollback trail the cutover deliberately kept.
+      // Re-asserting the id the row already resolves through proves nothing new and moves nothing,
+      // so it now leaves the marker alone; only a write that names a DIFFERENT connection converts.
+      // This RELAXES a guard: see the design note for why the narrowed condition still cannot leave
+      // a row canonical-but-legacy-marked against a connection it does not resolve through.
+      const retiresRollbackMarker = normalized.kind === SQL_READONLY_SOURCE_KIND
         && existing.legacy_connection_fallback_eligible === true
         && normalized.connectionId !== undefined
         && normalized.connectionId !== null
-      ) {
+        && normalized.connectionId !== effectiveLegacyBindingPointer(existing)
+      if (retiresRollbackMarker) {
         updateRow.legacy_connection_fallback_eligible = false
       }
       if (normalized.kind === SQL_READONLY_SOURCE_KIND && connectionId !== null) {
