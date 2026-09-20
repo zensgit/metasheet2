@@ -2604,16 +2604,23 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
    *   · `roleApprover` —— 角色节点由谁走 `/actions` 亲自按(D 自己,或**第三人 E**);
    *   · `secondRow` —— 第二个节点怎么结:`'honest'` 走 `/actions`(行带真实 `nodeKey='approval_a'`),
    *     `'forged'` 走 **legacy** `POST /:id/approve` 并把 `metadata.nodeKey` 报成**角色节点**。
-   *   · `roleAssigneeIds` —— 角色节点的席位行数。两条 role id 会落**两行**席位,于是「预算」有富余,
-   *     基数那一半不再起作用 —— 这正是 `N15(a)` 用来**隔离**成员身份那一半的手段。
+   *   · `roleAssigneeIds` —— 角色节点的席位行数。两条 role id 会落**两行**席位。在**旧**实现里这是
+   *     「预算」富余的来源(`N15(a)` 用它隔离成员身份那一半);在门审第 4 轮它被证明是 P1 的载体
+   *     (FORGERY3 / FORGERY4),所以本轮的凭据不再看节点预算,只看**这个 actor** 够得着的席位数。
+   *   · `membershipFor` —— 谁在库里有哪个角色的成员记录。`roleId` 省略时取 `roleAssigneeIds[0]`;
+   *     FORGERY3 需要把被委托人放进**另一条** role id(`auditor`),所以这个旋钮按 (who, roleId) 对
+   *     取值,而不是只按人取值。
    */
   async function roleNodeFirstOriginal(
     label: string,
     opts: {
       roleApprover: 'delegateeD' | 'otherUserE'
-      secondRow: 'honest' | 'forged'
+      // `'thirdPartyLegacy'` —— 第三人 E(**没有**任何委托)走 legacy 把 `nodeKey` 报成 A 的节点。
+      // 它把 A 的节点「点亮」成有决定记录,于是结算合取(3)被满足 —— 这是本轮修法**新造**的残留,
+      // 由 `P27(a)` 钉成数据。
+      secondRow: 'honest' | 'forged' | 'thirdPartyLegacy'
       roleAssigneeIds?: string[]
-      membershipFor?: Array<'delegateeD' | 'otherUserE'>
+      membershipFor?: Array<{ who: 'delegateeD' | 'otherUserE'; roleId?: string }>
     },
   ): Promise<{
     documentId: string
@@ -2637,8 +2644,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     await authToken(baseUrl, delegatorA)
     const tokenD = await authToken(baseUrl, delegateeD)
     const tokenE = await authToken(baseUrl, otherUserE)
-    for (const who of opts.membershipFor ?? []) {
-      await grantRoleMembership(who === 'delegateeD' ? delegateeD : otherUserE, roleAssigneeIds[0])
+    for (const grant of opts.membershipFor ?? []) {
+      await grantRoleMembership(
+        grant.who === 'delegateeD' ? delegateeD : otherUserE,
+        grant.roleId ?? roleAssigneeIds[0],
+      )
     }
 
     createdDelegationIds.add(delegationId)
@@ -2702,9 +2712,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       )
       // 伪造只用到 shipped 路由的既有行为:legacy `POST /:id/approve` 不查席位,并把请求体的
       // `metadata` 原样写进 `approval_records.metadata`。这里**没有**手工改表。
-      const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
+      const forger = opts.secondRow === 'thirdPartyLegacy' ? tokenE : tokenD
+      const forgedNodeKey = opts.secondRow === 'thirdPartyLegacy' ? 'approval_a' : 'approval_role'
+      const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, forger, {
         method: 'POST',
-        body: { version: versionRow.rows[0].version, metadata: { nodeKey: 'approval_role' } },
+        body: { version: versionRow.rows[0].version, metadata: { nodeKey: forgedNodeKey } },
       })
       expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
     }
@@ -2729,7 +2741,9 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     )
     expect(records.rows).toEqual([
       { actor_id: opts.roleApprover === 'delegateeD' ? delegateeD : otherUserE, node_key: 'approval_role' },
-      { actor_id: delegateeD, node_key: opts.secondRow === 'honest' ? 'approval_a' : 'approval_role' },
+      opts.secondRow === 'thirdPartyLegacy'
+        ? { actor_id: otherUserE, node_key: 'approval_a' }
+        : { actor_id: delegateeD, node_key: opts.secondRow === 'honest' ? 'approval_a' : 'approval_role' },
     ])
     const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
       documentId,
@@ -2742,7 +2756,7 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     const fixture = await roleNodeFirstOriginal('g3cred-honest', {
       roleApprover: 'delegateeD',
       secondRow: 'honest',
-      membershipFor: ['delegateeD'],
+      membershipFor: [{ who: 'delegateeD' }],
     })
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
     expect(attempt.thrown, 'an honest document must stay cancellable').toBeFalsy()
@@ -2754,9 +2768,13 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     const fixture = await roleNodeFirstOriginal('g3cred-forgery', {
       roleApprover: 'delegateeD',
       secondRow: 'forged',
-      membershipFor: ['delegateeD'],
+      membershipFor: [{ who: 'delegateeD' }],
     })
-    // 隔离前置:成员身份那一半在这条腿上**成立**(库里有记录),所以红的只可能是基数那一半。
+    // 隔离前置:成员身份那一半在这条腿上**成立**(库里有记录)。
+    // **门审第 4 轮后的诚实分界**:这条腿现在是**过定**的 —— 占位容量合取(D 两条行压在他够得着的
+    // 一席上)与结算合取(A 的节点一条决定记录都没有)**同时**把它判死。它因此**不是**任一合取的
+    // 隔离见证:容量那一半的隔离腿是 `N20(a)`,结算那一半的是 `N19(a)`。这里写「过定」而不是
+    // 「隔离」,是因为 mutation 网格实测两条都红不动它。
     const membership = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
       [fixture.delegateeD],
@@ -2780,7 +2798,7 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       roleApprover: 'otherUserE',
       secondRow: 'honest',
       roleAssigneeIds: ['admin', 'auditor'],
-      membershipFor: ['otherUserE'],
+      membershipFor: [{ who: 'otherUserE' }],
     })
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
     expect(attempt.thrown, 'an honest document must stay cancellable').toBeFalsy()
@@ -2794,10 +2812,13 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       roleApprover: 'otherUserE',
       secondRow: 'forged',
       roleAssigneeIds: ['admin', 'auditor'],
-      membershipFor: ['otherUserE'],
+      membershipFor: [{ who: 'otherUserE' }],
     })
-    // 隔离前置,两条:① 角色节点有 2 行席位、节点上有 2 条 approve 行 ⇒ **基数那一半通过**,
-    // 所以这条腿红的只可能是成员身份那一半;② D 在库里没有任何角色成员记录。
+    // 隔离前置,两条:① 角色节点有 2 行席位、节点上有 2 条 approve 行 —— 在**旧**实现里这意味着
+    // 「基数预算那一半通过」;门审第 4 轮证明那正是 P1 的载体,本轮已换成**按 actor 的占位容量**,
+    // 而 D 在这条腿上够得着的席位数是 **0**(他不在任何角色里),所以容量那一半也不再是独立的;
+    // ② D 在库里没有任何角色成员记录。**过定**:成员身份与结算两条合取同时判死这条腿,
+    // 隔离见证分别是 `N16(a)`(成员身份)与 `N19(a)`(结算)。
     expect(fixture.roleSeatRows).toBe(2)
     const approveRowsAtRoleNode = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM approval_records
@@ -2824,6 +2845,343 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // **已登记的残留(不在本轮修,写出来而不是装作不存在)**:预算富余是真的 —— 若伪造者**恰好**
     // 是 `auditor` 的成员,两半凭据都会通过。要分辨「这一行结的是哪一席」需要 legacy 路由自己写
     // `nodeKey`(设计 MD §3.4 的 owner 项),本臂的两半都做不到。
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // 门审第 4 轮 P1 —— 凭据从 **capability(预算)** 换成 **occupancy(占位)**(候选方案 (b),owner 未裁)
+  //
+  // 上一版的两半是「这个 actor **能不能**在那里有席位」(成员身份)+「这个**节点**的行数装不装得下」
+  // (预算)。门审在真库上证明预算是**总量**:一个配了两条 role id 的或签角色节点落 2 行席位、只需
+  // 1 条 approve 行,于是**恒有一格富余**,FORGERY3 / FORGERY4 把第 3 轮 P1 的读数一字不差地复现
+  // (A 丢席、会签 2 → 1、零阻断)。本轮把预算换成**按 actor 的占位容量**,并补上第三条合取
+  // 「结算」—— 前两条都是关于**伪造者**的事实,没有一条会注意到**原审批主体的席位不见了**。
+  //
+  // 三条合取,三条**隔离**腿,各自可被单点 mutation 打红:
+  //   · 成员身份 → `N16(a)`(同形诚实单据,唯一差别是库里没有成员记录);
+  //   · 占位容量 → `N20(a)`(诚实结掉委托节点 + 亲自决定角色节点,再**多发一条** legacy 行报同一个
+  //     角色节点:成员身份与结算都成立,只有容量判死它);
+  //   · 结算     → `N19(a)`(= 门审 FORGERY3:第三人诚实决定角色节点,被委托人是**另一条** role id
+  //     的真成员、只把节点名字说出来;成员身份与容量都成立,只有结算判死它)。
+  // 诚实兄弟腿(门槛见证,阻断态 `seats` 恒为 `[]`,「A 不丢 / 门槛不降」只能对着它们读):
+  //   `P25(a)`(两条 role id 的诚实 `[A, D]`)、`P26(a)`(三节点诚实 `[A, D, E]`)、`P24(a)`(`[A, E]`)。
+  // **新残留,带腿不带散文**:结算合取取的是**弱**形式(「那个节点有**某条**决定记录」),所以第三人
+  // 的一条 legacy 行就能把它点亮 —— `P27(a)` 钉今天的答案(`[D, E]`,A 丢)。根治仍是 (c)。
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  it('§2-G3 第三句 正控 P25(a)(门审 HONEST4 / `N18(a)` 的诚实兄弟腿)— 角色节点配**两条** role id、由 D 亲自按(他是其中一条的真成员),D 再诚实地结掉 A 的节点:席位是 {A, D} **两席**。预算富余不再是凭据,但诚实单据照样开得出撤销轮', async () => {
+    const fixture = await roleNodeFirstOriginal('g3cred-honest4', {
+      roleApprover: 'delegateeD',
+      secondRow: 'honest',
+      roleAssigneeIds: ['admin', 'auditor'],
+      membershipFor: [{ who: 'delegateeD' }],
+    })
+    // 前置正控:富余确实存在(2 行席位),所以这条腿不是靠「没有富余」平凡通过的。
+    expect(fixture.roleSeatRows).toBe(2)
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'an honest document must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD])
+    expect(attempt.seats.length).toBe(2)
+  })
+
+  it('§2-G3 第三句 负控 N18(a)(门审第 4 轮 FORGERY4,**承重**)— 或签角色节点配两条 role id(2 席 / 1 条诚实 approve 行,预算恒有一格富余):D 是其中一条的真成员,把自己那条 legacy 行的 nodeKey 也报成角色节点 ⇒ 409 seat_unresolvable、零行。修复前实测 `seats=[D]`、A 完全丢失、会签门槛 2 → 1、零阻断', async () => {
+    const fixture = await roleNodeFirstOriginal('g3cred-forgery4', {
+      roleApprover: 'delegateeD',
+      secondRow: 'forged',
+      roleAssigneeIds: ['admin', 'auditor'],
+      membershipFor: [{ who: 'delegateeD' }],
+    })
+    // 前置正控三条,把「为什么修复前它能穿过去」钉成数据而不是引用门审报告:
+    // ① 节点有 2 行席位;② 节点上有 2 条 approve 行 ⇒ **旧预算判据 2 ≤ 2 成立**;
+    // ③ D 的成员身份有服务端记录 ⇒ 成员身份那一半也成立。两半都过,这就是门审的 FORGERY4。
+    expect(fixture.roleSeatRows).toBe(2)
+    const approveRowsAtRoleNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_role'`,
+      [fixture.documentId],
+    )
+    expect(approveRowsAtRoleNode.rows[0]?.n).toBe('2')
+    const membership = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [fixture.delegateeD],
+    )
+    expect(membership.rows[0]?.n).toBe('1')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    await expectSeatBlock(attempt, { ineligibleCount: 2, reasons: ['seat_unresolvable'] }, [
+      fixture.delegatorA,
+      fixture.delegateeD,
+      fixture.otherUserE,
+    ])
+    expect(attempt.seats).toEqual([])
+    // 「A 不丢」三句分开写(与 `N14(a)` 同一形状):①撤销轮没开成(上面);②原单上 A 的那条委托
+    // 席位行没被改写(夹具内断言);③诚实兄弟腿 `P25(a)` 答 `[A, D]` **两席**,这就是门槛参照物。
+    // **过定**:容量合取与结算合取都判死它,隔离见证分别是 `N20(a)` / `N19(a)`。
+  })
+
+  it('§2-G3 第三句 负控 N19(a)(门审第 4 轮 FORGERY3;**结算合取的隔离见证**)— 角色节点由第三人 E 诚实决定,被委托人 D 是该节点**另一条** role id 的**真**成员、只把节点名字说了出来:成员身份成立、占位容量也成立(1 行 ≤ 1 席),但 A 的节点一条决定记录都没有 ⇒ 原审批主体无从还原 ⇒ 409 seat_unresolvable、零行。修复前实测 `seats=[D, E]`、A 丢失', async () => {
+    const fixture = await roleNodeFirstOriginal('g3cred-forgery3', {
+      roleApprover: 'otherUserE',
+      secondRow: 'forged',
+      roleAssigneeIds: ['admin', 'auditor'],
+      membershipFor: [
+        { who: 'otherUserE' },
+        // FORGERY3 的全部要害:D 是**另一条** role id 的真成员,所以「唯一满足成员身份的人」这条
+        // 门审原话里的判据对他**成立** —— 这也是本实现与门审 (b) 字面写法分岔的地方,已在设计 MD 登记。
+        { who: 'delegateeD', roleId: 'auditor' },
+      ],
+    })
+    // 隔离前置四条 —— 这条腿只有在**前两条合取都通过**时才对结算合取有判别力:
+    // ① 节点 2 行席位;② D 在库里确有 `auditor` 成员记录;③ D 在该节点只有 **1** 条 approve 行
+    // (≤ 他够得着的 1 席 ⇒ 容量合取通过);④ A 的节点 `approval_a` 的 approve 行数为 **0**
+    // (= 结算合取的触发条件)。
+    expect(fixture.roleSeatRows).toBe(2)
+    const membership = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'auditor'`,
+      [fixture.delegateeD],
+    )
+    expect(membership.rows[0]?.n).toBe('1')
+    const actorRowsAtRoleNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2
+          AND metadata->>'nodeKey' = 'approval_role'`,
+      [fixture.documentId, fixture.delegateeD],
+    )
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('1')
+    const rowsAtDelegatedNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_a'`,
+      [fixture.documentId],
+    )
+    expect(rowsAtDelegatedNode.rows[0]?.n).toBe('0')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
+      fixture.delegatorA,
+      fixture.delegateeD,
+      fixture.otherUserE,
+    ])
+    expect(attempt.seats).toEqual([])
+    // **这条腿答的是「阻断」,不是「[A, E]」。** 任务书写的是「FORGERY3 复核 [A, E] 不丢 A」;
+    // 门审 §1.2 的裁决要求原话是「应**阻断或**还原到 A」。还原到 A 需要从一条**没有凭据**的行里猜出
+    // 它结的是哪个节点 —— 同形的「一个委托人 + 行不可归属」在本文件里早已由 `delegate_not_seat` 臂
+    // 判成**阻断**(`P12(a)`/`N7(a)`/`N8(a)`/`P13(a)`),这里再猜一次就是两套判据打架。
+    // `[A, E]` 的门槛参照物是诚实兄弟腿 `P24(a)`,与 `N14(a)`/`P23(a)` 的配对方式完全一致。
+  })
+
+  it('§2-G3 第三句 负控 P27(a)(**本轮修法新造的残留**,钉今天的答案)— 结算合取取的是**弱**形式:第三人 E(没有任何委托)走 legacy 把 nodeKey 报成 **A 的节点**,就把该节点「点亮」成有决定记录;于是 D 的角色行照常放行 ⇒ 席位 `[D, E]`,**A 丢了**、不阻断', async () => {
+    const fixture = await roleNodeFirstOriginal('g3cred-thirdlit', {
+      roleApprover: 'delegateeD',
+      secondRow: 'thirdPartyLegacy',
+      roleAssigneeIds: ['admin', 'auditor'],
+      membershipFor: [{ who: 'delegateeD' }],
+    })
+    // 前置正控:E 在本单上**没有**任何被委托席位(所以他走的是「从无委托席位 ⇒ 本人」那条早退臂),
+    // 且 A 的节点现在确有一条 approve 行(结算合取被满足的原因)。
+    const eDelegatedSeats = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_assignments
+        WHERE instance_id = $1 AND assignee_id = $2 AND metadata->>'delegatedFrom' IS NOT NULL`,
+      [fixture.documentId, fixture.otherUserE],
+    )
+    expect(eDelegatedSeats.rows[0]?.n).toBe('0')
+    const rowsAtDelegatedNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_a'`,
+      [fixture.documentId],
+    )
+    expect(rowsAtDelegatedNode.rows[0]?.n).toBe('1')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // MEASURED,不是预测。**这条腿不主张 `[D, E]` 是对的**:它钉的是弱形式结算合取的代价 ——
+    // 「那个节点被谁决定的」本轮仍然无法从库里分辨,因为 legacy 路由的 `nodeKey` 来自请求体。
+    // 根治仍然是 (c)(让 legacy 路由自己写 `nodeKey`),属 owner 的合同变更,设计 MD §3.4 已登记。
+    // 将来若被修好,这条腿会红并点名自己。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegateeD, fixture.otherUserE])
+    expect(attempt.seats).not.toContain(fixture.delegatorA)
+  })
+
+  /**
+   * `start → approval_role → approval_a → approval_c → end` + 委托 A→D。
+   *
+   * 比 `roleNodeFirstOriginal` 多一个**第三个节点**,唯一目的是给占位容量合取造一条**隔离**腿:
+   * D 先诚实地按掉角色节点、再诚实地以 A 的代理结掉 `approval_a`(于是结算合取**通过**),
+   * 然后在第三个节点上**多发一条** legacy 行、把 nodeKey 报成**角色节点** ——
+   * 成员身份通过、结算通过,只有「一席只能被同一个人占一次」判死它。
+   *   · `closer: 'thirdPartyE'` —— 第三个节点由 E 诚实按掉(正控 `P26(a)`,三席门槛见证);
+   *   · `closer: 'delegateeDForgedRole'` —— D 走 legacy 多报一条角色节点行(负控 `N20(a)`)。
+   */
+  async function roleNodeDelegatedThirdOriginal(
+    label: string,
+    opts: { closer: 'thirdPartyE' | 'delegateeDForgedRole' },
+  ): Promise<{
+    documentId: string
+    requesterId: string
+    delegatorA: string
+    delegateeD: string
+    otherUserE: string
+    roleSeatRows: number
+  }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-r3req-${suffix}`
+    const delegatorA = `wi4-r3A-${suffix}`
+    const delegateeD = `wi4-r3D-${suffix}`
+    const otherUserE = `wi4-r3E-${suffix}`
+    const adminId = `wi4-r3adm-${suffix}`
+    const delegationId = `wi4-r3deleg-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await authToken(baseUrl, delegatorA)
+    const tokenD = await authToken(baseUrl, delegateeD)
+    const tokenE = await authToken(baseUrl, otherUserE)
+    await grantRoleMembership(delegateeD, 'admin')
+
+    createdDelegationIds.add(delegationId)
+    await pool().query(
+      `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+       VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+      [delegationId, delegatorA, delegateeD],
+    )
+
+    const templateId = await publishGraphTemplate(
+      adminToken,
+      {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_role',
+            type: 'approval',
+            config: { assigneeType: 'role', assigneeIds: ['admin', 'auditor'], approvalMode: 'single' },
+          },
+          {
+            key: 'approval_a',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: [delegatorA], approvalMode: 'single' },
+          },
+          {
+            key: 'approval_c',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: [otherUserE], approvalMode: 'single' },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-r', source: 'start', target: 'approval_role' },
+          { key: 'e-r-a', source: 'approval_role', target: 'approval_a' },
+          { key: 'e-a-c', source: 'approval_a', target: 'approval_c' },
+          { key: 'e-c-end', source: 'approval_c', target: 'end' },
+        ],
+      } as unknown as ReturnType<typeof oneNodeGraph>,
+      label,
+    )
+
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    const first = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(first.status, `approval_role: ${await first.clone().text()}`).toBe(200)
+    const second = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(second.status, `approval_a: ${await second.clone().text()}`).toBe(200)
+
+    if (opts.closer === 'thirdPartyE') {
+      const third = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenE, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(third.status, `approval_c: ${await third.clone().text()}`).toBe(200)
+    } else {
+      const versionRow = await pool().query<{ version: number }>(
+        `SELECT version FROM approval_instances WHERE id = $1`,
+        [documentId],
+      )
+      const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
+        method: 'POST',
+        body: { version: versionRow.rows[0].version, metadata: { nodeKey: 'approval_role' } },
+      })
+      expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
+    }
+
+    const seats = await pool().query<{ node_key: string | null; assignment_type: string; assignee_id: string; df: string | null }>(
+      `SELECT node_key, assignment_type, assignee_id, metadata->>'delegatedFrom' AS df
+         FROM approval_assignments WHERE instance_id = $1 ORDER BY node_key, assignee_id`,
+      [documentId],
+    )
+    const roleSeatRows = seats.rows.filter((row) => row.node_key === 'approval_role').length
+    expect(roleSeatRows).toBe(2)
+    expect(seats.rows.filter((row) => row.node_key === 'approval_a')).toEqual([
+      { node_key: 'approval_a', assignment_type: 'user', assignee_id: delegateeD, df: delegatorA },
+    ])
+    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
+      [documentId],
+    )
+    expect(records.rows).toEqual([
+      { actor_id: delegateeD, node_key: 'approval_role' },
+      { actor_id: delegateeD, node_key: 'approval_a' },
+      opts.closer === 'thirdPartyE'
+        ? { actor_id: otherUserE, node_key: 'approval_c' }
+        : { actor_id: delegateeD, node_key: 'approval_role' },
+    ])
+    const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(status.rows[0]?.status).toBe('approved')
+    return { documentId, requesterId, delegatorA, delegateeD, otherUserE, roleSeatRows }
+  }
+
+  it('§2-G3 第三句 正控 P26(a)(`N20(a)` 的诚实兄弟腿 / 三席门槛见证)— 三个节点全部诚实结掉(D 按角色节点 + D 以 A 的代理结 approval_a + E 按自己的节点):席位是 {A, D, E} **三席**', async () => {
+    const fixture = await roleNodeDelegatedThirdOriginal('g3cred-honest5', { closer: 'thirdPartyE' })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'an honest document must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE])
+    expect(attempt.seats.length).toBe(3)
+  })
+
+  it('§2-G3 第三句 负控 N20(a)(**占位容量合取的隔离见证**)— D 诚实地按掉角色节点、也诚实地结掉 A 的节点(结算合取因此通过、成员身份也通过),然后**多发一条** legacy 行把 nodeKey 再报一次角色节点:同一席不能被同一个人占两次 ⇒ 409 seat_unresolvable、零行', async () => {
+    const fixture = await roleNodeDelegatedThirdOriginal('g3cred-forgery5', { closer: 'delegateeDForgedRole' })
+    // 隔离前置三条 —— 只有它们都成立,这条腿才是**容量**那一半的见证:
+    // ① D 有服务端 `admin` 成员记录 ⇒ 成员身份通过;
+    // ② A 的节点 `approval_a` 有 D 的一条诚实 approve 行 ⇒ 结算合取通过(A 还原得回来);
+    // ③ D 在角色节点上有 **2** 条 approve 行,而他够得着的席位只有 **1** 席(`admin`;另一席是
+    //    `auditor`,他不在里面)⇒ 只剩容量那一半能判死它。
+    const membership = await pool().query<{ role_id: string }>(
+      `SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id`,
+      [fixture.delegateeD],
+    )
+    expect(membership.rows.map((row) => row.role_id)).toEqual(['admin'])
+    const rowsAtDelegatedNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2
+          AND metadata->>'nodeKey' = 'approval_a'`,
+      [fixture.documentId, fixture.delegateeD],
+    )
+    expect(rowsAtDelegatedNode.rows[0]?.n).toBe('1')
+    const actorRowsAtRoleNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2
+          AND metadata->>'nodeKey' = 'approval_role'`,
+      [fixture.documentId, fixture.delegateeD],
+    )
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('2')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    await expectSeatBlock(attempt, { ineligibleCount: 2, reasons: ['seat_unresolvable'] }, [
+      fixture.delegatorA,
+      fixture.delegateeD,
+      fixture.otherUserE,
+    ])
+    expect(attempt.seats).toEqual([])
+    // 门槛参照物是诚实兄弟腿 `P26(a)` 的**三席**。注意阻断是**整单**的:D 那条诚实的 `approval_a`
+    // 行本可以把 A 还原回来,但裁决说的是「阻断」而不是「过滤掉坏行继续开」——
+    // 撤销节点是 `approvalMode: 'all'`,丢一席就是悄悄降门槛(`R7-M3` 那一族)。
   })
 
   it('§2-G3 第三句 负控 N17(a)(门审第 3 轮 P2-1:此前的**未测守卫**)— 同一个 (instance, node, assignee) 上出现**两个不同的** delegatedFrom(节点重入在 epoch 之间改写了委托所留下的残留)⇒ 没有唯一的原审批主体 ⇒ 409 seat_unresolvable、零行,既不猜也不回退给 D', async () => {
