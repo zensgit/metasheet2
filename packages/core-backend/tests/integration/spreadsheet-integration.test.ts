@@ -103,6 +103,26 @@ describe('Spreadsheet Integration Tests', () => {
   let formulaEngine: FormulaEngine
   let performanceTracker: PerformanceTracker
 
+  /**
+   * #5828 — every `:sheetId` route now runs loadLiveSpreadsheetSheet first: the parent `spreadsheets`
+   * row (`deleted_at IS NULL`) and then the `sheets` row bound to that parent. Queue those two answers
+   * BEFORE the test's own `mockReturnValueOnce` chain, so the happy paths below still reach their route.
+   */
+  function mockLiveParentSheet(sheet: unknown = BASIC_SHEET): void {
+    const once = (result: unknown) => {
+      const builder: any = {
+        executeTakeFirst: vi.fn().mockResolvedValue(result),
+      }
+      builder.select = vi.fn().mockReturnValue(builder)
+      builder.selectAll = vi.fn().mockReturnValue(builder)
+      builder.where = vi.fn().mockReturnValue(builder)
+      return builder
+    }
+    mockDb.selectFrom
+      .mockReturnValueOnce(once({ id: TEST_IDS.SPREADSHEET_1 }))
+      .mockReturnValueOnce(once(sheet))
+  }
+
   beforeEach(() => {
     // Create mock database and formula engine
     mockDb = createMockDb()
@@ -188,6 +208,7 @@ describe('Spreadsheet Integration Tests', () => {
       }
 
       mockDb.transaction.mockReturnValue(cellUpdateTransactionMock)
+      mockLiveParentSheet()
 
       const cellsUpdate = {
         cells: [
@@ -254,12 +275,6 @@ describe('Spreadsheet Integration Tests', () => {
     })
 
     test('should retrieve sheet cells for a spreadsheet', async () => {
-      const sheetQueryBuilder = vi.fn().mockReturnValue({
-        selectAll: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        executeTakeFirst: vi.fn().mockResolvedValue(BASIC_SHEET)
-      })
-
       const cells = [
         { id: TEST_IDS.CELL_A1, sheet_id: TEST_IDS.SHEET_1, row_index: 0, column_index: 0, value: { value: 'Hello' }, formula: null },
         { id: TEST_IDS.CELL_B1, sheet_id: TEST_IDS.SHEET_1, row_index: 1, column_index: 0, value: { value: 42 }, formula: null },
@@ -273,9 +288,8 @@ describe('Spreadsheet Integration Tests', () => {
         execute: vi.fn().mockResolvedValue(cells)
       })
 
-      mockDb.selectFrom
-        .mockReturnValueOnce(sheetQueryBuilder())
-        .mockReturnValueOnce(cellsQueryBuilder())
+      mockLiveParentSheet(BASIC_SHEET)
+      mockDb.selectFrom.mockReturnValueOnce(cellsQueryBuilder())
 
       const response = await request(app)
         .get(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}/cells`)
@@ -292,12 +306,6 @@ describe('Spreadsheet Integration Tests', () => {
       const existingSheet = { ...BASIC_SHEET, row_count: 10, column_count: 5 }
       const updatedSheet = { ...existingSheet, row_count: 20, column_count: 8 }
 
-      const sheetQueryBuilder = vi.fn().mockReturnValue({
-        selectAll: vi.fn().mockReturnThis(),
-        where: vi.fn().mockReturnThis(),
-        executeTakeFirst: vi.fn().mockResolvedValue(existingSheet)
-      })
-
       const updateBuilder = {
         set: vi.fn().mockReturnThis(),
         where: vi.fn().mockReturnThis(),
@@ -305,7 +313,7 @@ describe('Spreadsheet Integration Tests', () => {
         executeTakeFirstOrThrow: vi.fn().mockResolvedValue(updatedSheet)
       }
 
-      mockDb.selectFrom.mockReturnValueOnce(sheetQueryBuilder())
+      mockLiveParentSheet(existingSheet)
       mockDb.updateTable.mockReturnValueOnce(updateBuilder as any)
 
       const response = await request(app)
@@ -348,6 +356,7 @@ describe('Spreadsheet Integration Tests', () => {
         }
 
         mockDb.transaction.mockReturnValue(transactionMock)
+        mockLiveParentSheet()
 
         return request(app)
           .put(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}/cells`)
@@ -581,6 +590,13 @@ describe('Spreadsheet Integration Tests', () => {
               set: vi.fn().mockReturnThis(),
               where: vi.fn().mockReturnThis(),
               returningAll: vi.fn().mockReturnThis(),
+              // #526 made the cell UPDATE `.executeTakeFirst()` (so a lost optimistic-lock race is a 409,
+              // not a throw); this mock still only answered `executeTakeFirstOrThrow`, so the test was red
+              // on main before #5828 touched it.
+              executeTakeFirst: vi.fn().mockResolvedValue({
+                ...existingCell,
+                value: 'Updated Value'
+              }),
               executeTakeFirstOrThrow: vi.fn().mockResolvedValue({
                 ...existingCell,
                 value: 'Updated Value'
@@ -596,6 +612,7 @@ describe('Spreadsheet Integration Tests', () => {
       }
 
       mockDb.transaction.mockReturnValue(transactionMock)
+      mockLiveParentSheet()
 
       const updateResponse = await request(app)
         .put(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}/cells`)
@@ -663,6 +680,7 @@ describe('Spreadsheet Integration Tests', () => {
       }
 
       mockDb.transaction.mockReturnValue(transactionMock)
+      mockLiveParentSheet()
 
       const end = performanceTracker.start('large_update')
 
@@ -888,6 +906,7 @@ describe('Spreadsheet Integration Tests', () => {
       }
 
       mockDb.transaction.mockReturnValue(transactionMock)
+      mockLiveParentSheet()
 
       const response = await request(app)
         .put(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}/cells`)
@@ -967,6 +986,7 @@ describe('Spreadsheet Integration Tests', () => {
       }
 
       mockDb.transaction.mockReturnValue(transactionMock)
+      mockLiveParentSheet()
 
       const response = await request(app)
         .put(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}/cells`)

@@ -35,7 +35,14 @@
  *       does — a gate whose `null` is ignored does not count;
  *     - the gate runs first: nothing but the named pre-gate calls is awaited before it;
  *     - a per-row refusal (`continue`) or a helper that answers with a value does not stop the handler
- *       and does not count as its guard (the AI bulk routes once looked guarded that way).
+ *       and does not count as its guard (the AI bulk routes once looked guarded that way);
+ *     - LEGACY entities (#5828): `routes/spreadsheets.ts` addresses rows of the legacy `sheets` table,
+ *       which has no `deleted_at` — soft delete lives on the parent `spreadsheets` row, so `meta_sheets`
+ *       never appears and the multitable resolvers do not apply. A kysely
+ *       `selectFrom('<parent>') … .where('id','=',…) … .where('deleted_at','is',null) … .execute*()`
+ *       counts as liveness ONLY in a file whose PARENT_LIVENESS_TABLES entry names that table, so no
+ *       other file's closed world is widened by it. The other half of #5828 — that `:sheetId` belongs to
+ *       `:id` — is not a liveness fact and is asserted in "LEGACY SPREADSHEET SHEETS".
  *  4. POPULATION. Each covered file must yield at least its recorded number of handlers and of
  *     sheet-addressed handlers; the behaviour tests of comments.ts, dashboard.ts and multitable-ai.ts
  *     pin their route tables to the SAME scan (`sheetAddressedRouteKeys`), so a new route reds there
@@ -181,6 +188,18 @@ function vettedGuardsFor(file: string, sf: ScannedRouteFile['sourceFile']): Map<
   return vetted
 }
 
+/**
+ * LEGACY PARENT LIVENESS (#5828). `routes/spreadsheets.ts` addresses rows of the legacy `sheets` table,
+ * which has no `deleted_at` of its own — soft delete lives on its parent `spreadsheets` row. So for THIS
+ * file (and no other; every other file's closed world is untouched) a kysely
+ * `selectFrom('spreadsheets') … .where('id','=',…) … .where('deleted_at','is',null)` IS the liveness of
+ * the sheet the request names. The other half — that `:sheetId` really belongs to `:id` — is not a
+ * liveness fact and is asserted separately in "LEGACY SPREADSHEET SHEETS".
+ */
+const PARENT_LIVENESS_TABLES: Record<string, string[]> = {
+  'routes/spreadsheets.ts': ['spreadsheets'],
+}
+
 function optionsFor(file: string): AnalyzeOptions {
   const vetted = vettedGuardsFor(file, scan(file).sourceFile)
   return {
@@ -189,6 +208,7 @@ function optionsFor(file: string): AnalyzeOptions {
     preGateCalls: new Set(Object.keys(PRE_GATE_CALLS)),
     requireOrder: true,
     gateFirst: true,
+    parentLivenessTables: new Set(PARENT_LIVENESS_TABLES[file] ?? []),
   }
 }
 
@@ -657,11 +677,6 @@ const ownJobGate = (h: RouteHandler) => {
     && !/\b(meta_records|meta_fields|requireRecordReadable|readRecordOnce|resolveSheet\w*Capabilities)\b/.test(everything(h))
 }
 
-const LEGACY_SHEET_GAP = 'GAP — tracked in #5828 — LEGACY spreadsheet API: `:sheetId` names a row of '
-  + 'the legacy `sheets` table (kysely `selectFrom(\'sheets\')`), not `meta_sheets`, so multitable/sheet-liveness.ts '
-  + 'does not apply. But DELETE /api/spreadsheets/:id soft-deletes the parent (`spreadsheets.deleted_at`) and this '
-  + 'handler never checks it, so a soft-deleted spreadsheet'
-
 const LEGACY_PERMISSION_GAP = 'GAP — tracked in #5829 — `:id` is read from / written to '
   + '`spreadsheet_permissions.sheet_id`, the SAME table multitable reads as per-sheet grants '
   + '(permission-service loadSheetPermissionScopeMap). Gated only by rbacGuard(\'spreadsheet-permissions\', …): no '
@@ -879,17 +894,9 @@ const COVERED: Record<string, CoveredFile> = {
       },
     },
   },
-  'routes/spreadsheets.ts': {
-    minHandlers: 9,
-    minInScope: 3,
-    exempt: {
-      'PUT /api/spreadsheets/:id/sheets/:sheetId': { reason: `${LEGACY_SHEET_GAP}’s sheet metadata stays writable.` },
-      'GET /api/spreadsheets/:id/sheets/:sheetId/cells': { reason: `${LEGACY_SHEET_GAP}’s cells stay readable.` },
-      'PUT /api/spreadsheets/:id/sheets/:sheetId/cells': {
-        reason: `${LEGACY_SHEET_GAP}’s cells stay writable — and this handler never binds :sheetId to :id at all.`,
-      },
-    },
-  },
+  // #5828 closed: all three `:sheetId` handlers now gate on loadLiveSpreadsheetSheet — see
+  // "LEGACY SPREADSHEET SHEETS" for the parent-liveness AND the :sheetId → :id binding half.
+  'routes/spreadsheets.ts': { minHandlers: 9, minInScope: 3, exempt: {} },
 }
 
 /** Files whose closed world lives in a sibling guard. */
@@ -1323,6 +1330,30 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(inline('SELECT id FROM meta_sheets s JOIN users u ON u.id = s.owner WHERE s.id = $1 AND u.deleted_at IS NULL', '    if (!found.rows[0]) return').sources).toEqual([])
     expect(inline('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', '    console.log(found)').sources).toEqual([])
     expect(sheetTableLivenessFilter('FROM public.meta_sheets sheet_row WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL')).toBe(true)
+    // PARENT liveness (#5828, LEGACY entities only): a kysely chain on a NAMED parent table, bound by
+    // id and filtered on deleted_at, recognised ONLY when the file's options name that table.
+    const parentOptions: AnalyzeOptions = { ...ROUTE_TEST_OPTIONS, parentLivenessTables: new Set(['spreadsheets']) }
+    const parent = (chain: string, check: string, options: AnalyzeOptions = parentOptions) => {
+      const { h, s } = route([`    const row = await ${chain}`, check, '    await svc.write()'])
+      return analyzeHandler(h, s.sourceFile, options)
+    }
+    const LIVE_CHAIN = "db.selectFrom('spreadsheets').select('id').where('id', '=', req.params.id).where('deleted_at', 'is', null).executeTakeFirst()"
+    expect(parent(LIVE_CHAIN, '    if (!row) return res.status(404).end()').sources)
+      .toEqual(['parent-liveness-query spreadsheets … deleted_at is null'])
+    // …not when the table is not named for the file (every other file's world is unchanged),
+    expect(parent(LIVE_CHAIN, '    if (!row) return res.status(404).end()', ROUTE_TEST_OPTIONS).sources).toEqual([])
+    // …not on another table, not without the deleted_at filter, not without the id binding,
+    expect(parent(LIVE_CHAIN.replace("'spreadsheets'", "'workspaces'"), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    expect(parent(LIVE_CHAIN.replace(".where('deleted_at', 'is', null)", ''), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    expect(parent(LIVE_CHAIN.replace(".where('id', '=', req.params.id)", ''), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    // …not on a chain that was built but never run (no executor),
+    expect(parent(LIVE_CHAIN.replace('.executeTakeFirst()', ''), '    if (!row) return res.status(404).end()').sources).toEqual([])
+    // …and not when its result is ignored. One chain is ONE site (the executor), never one per `.where`.
+    expect(parent(LIVE_CHAIN, '    console.log(row)').sources).toEqual([])
+    expect(parent(LIVE_CHAIN, '    console.log(row)').violations.join('\n')).toMatch(/is not checked by the very next statement/)
+    const single = route([`    const row = await ${LIVE_CHAIN}`, '    if (!row) return res.status(404).end()'])
+    expect(analyzeHandler(single.h, single.s.sourceFile, parentOptions).sources)
+      .toEqual(['parent-liveness-query spreadsheets … deleted_at is null'])
     // DECISION helper: answers with a value, so it does not stop the handler.
     const decision = fixtureHandler([
       'async function perRow(req, id) {',
@@ -1602,9 +1633,10 @@ describe('sheet-liveness closure over EVERY route file', () => {
     expect(reasons.flatMap(([key, entry]) => reasonProblems(key, entry))).toEqual([])
     // 12 after #5831 part A closed the six comment-id GAPs (GUARDED now, see COMMENT-ID ROUTES); 10 after
     // part B closed the inbox and unread-count GAPs (FILTERED now, see INBOX SCOPE); 9 after #5844 closed the
-    // requireRecordReadable order GAP on main. A branch that closes another GAP lowers this floor by the
-    // number it removes (#5843, which closes the #5832 GAP, takes it to 8).
-    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(9)
+    // requireRecordReadable order GAP on main; 6 after #5828 closed the three legacy spreadsheet GAPs
+    // (GUARDED now, see LEGACY SPREADSHEET SHEETS). A branch that closes another GAP lowers this floor by
+    // the number it removes (#5843, which closes the #5832 GAP, takes it to 5).
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(6)
   })
 
   it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {
@@ -1752,6 +1784,48 @@ describe('sheet-liveness closure over EVERY route file', () => {
       const text = readFileSync(join(__dirname, config.behaviourTest!), 'utf8')
       expect(text, `${config.behaviourTest} must assert its route table against the scan`).toContain(`sheetAddressedRouteKeys('${file}')`)
     }
+  })
+
+  it('LEGACY SPREADSHEET SHEETS (#5828): every :sheetId route gates on the PARENT spreadsheet’s liveness and binds :sheetId to :id', () => {
+    const file = 'routes/spreadsheets.ts'
+    const s = scan(file)
+    // Population: exactly these routes address a legacy sheet, and each one is GUARDED by the one gate.
+    const legacy = s.handlers.filter((h) => h.paths.some((p) => p.includes(':sheetId')))
+    expect(legacy.map((h) => h.key).sort()).toEqual([
+      'GET /api/spreadsheets/:id/sheets/:sheetId/cells',
+      'PUT /api/spreadsheets/:id/sheets/:sheetId',
+      'PUT /api/spreadsheets/:id/sheets/:sheetId/cells',
+    ])
+    for (const h of legacy) {
+      expect(addressesASheet(h), h.key).toBe(true)
+      expect(guardOf(file, h), h.key).toBe('gate-helper loadLiveSpreadsheetSheet')
+      expect(analysisOf(file, h).violations, h.key).toEqual([])
+      // The gate is asked about BOTH ids of the path — never :sheetId on its own (the #5828 cross-table
+      // write used `const sheetId = req.params.sheetId` and no :id at all).
+      expect(h.code, h.key).toMatch(/const \{ id, sheetId \} = req\.params;/)
+      expect(h.code, h.key).toMatch(/await loadLiveSpreadsheetSheet\(db, id, sheetId\)/)
+      expect(h.code, h.key).not.toMatch(/req\.params\.sheetId/)
+      // The handler never re-reads the legacy sheet row itself — the gate is the only `sheets` read.
+      expect(h.code, h.key).not.toMatch(/selectFrom\('sheets'\)/)
+    }
+    // No other handler in the file reaches a legacy sheet by an id taken from the REQUEST: exactly one
+    // other handler names a sheet id, and it MINTS one for a row it creates itself beside its parent.
+    const othersNamingASheet = s.handlers.filter((x) => !legacy.includes(x) && /\bsheetId\b/.test(x.code))
+    expect(othersNamingASheet.map((h) => h.key)).toEqual(['POST /api/spreadsheets'])
+    expect(othersNamingASheet[0]!.code).toMatch(/const sheetId = sheet\.id \?\? randomUUID\(\);/)
+    expect(othersNamingASheet[0]!.code).not.toMatch(/req\.params/)
+    // The gate itself: the PARENT row by :id and NOT soft-deleted first (a falsy return, so the caller's
+    // `if (!…)` stops it), then the sheet row by BOTH ids — `sheets` carries no deleted_at of its own.
+    const gate = functionCode(file, 'loadLiveSpreadsheetSheet')
+    expect(gate).toMatch(/^async function loadLiveSpreadsheetSheet\(db: SpreadsheetDb, id: string, sheetId: string\)/)
+    expect(gate).toMatch(/const parent = await db\s*\.selectFrom\('spreadsheets'\)[\s\S]*?\.where\('id', '=', id\)[\s\S]*?\.where\('deleted_at', 'is', null\)[\s\S]*?\.executeTakeFirst\(\);\s*if \(!parent\)\s*return undefined;/)
+    expect(gate).toMatch(/\.selectFrom\('sheets'\)[\s\S]*?\.where\('id', '=', sheetId\)[\s\S]*?\.where\('spreadsheet_id', '=', id\)/)
+    // Fail-closed: the gate answers nothing itself, so a throwing query reaches the caller's catch (500)
+    // instead of being read as "live".
+    expect(gate).not.toMatch(/\bres\b|\bcatch\b/)
+    // The mechanism is named for THIS file only — no other file's world was widened to close #5828.
+    expect(Object.keys(PARENT_LIVENESS_TABLES)).toEqual([file])
+    expect(PARENT_LIVENESS_TABLES[file]).toEqual(['spreadsheets'])
   })
 
   it('COMMENT-ID ROUTES (#5831): gated on the comment’s OWN sheet, through one pre-gate lookup that reads only the comment’s address', () => {
