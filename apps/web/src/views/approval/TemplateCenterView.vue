@@ -92,12 +92,18 @@
       </el-tag>
     </div>
 
+    <!-- `:closable` is false exactly while the flat surfaces are blanked by a context change whose
+         re-read has not succeeded (`flatListStale`). In that state the empty table cannot answer
+         "zero rows, or did the read fail?", and this banner carries the only Reload control for
+         it — dismissing it would strand the page on a blank table with no way back except changing
+         a filter. Everywhere else (an ordinary failure inside a context the page has NOT left, where
+         the previously loaded rows are still on screen) it stays dismissible exactly as before. -->
     <el-alert
       v-if="store.error"
       :title="store.error"
       type="error"
       show-icon
-      :closable="true"
+      :closable="!flatListStale"
       class="template-center__error"
       @close="store.error = null"
     >
@@ -482,7 +488,6 @@ const viewMode = ref<'flat' | 'grouped'>('flat')
 // flat surfaces render their empty state, which is what ② permits ("请求期间显示 loading/空态"),
 // instead of the previous organization's templates.
 const flatListStale = ref(false)
-let flatListGeneration = 0
 const visibleTemplates = computed(() => (flatListStale.value ? [] : store.templates))
 
 // G-B2-17 — the requester gallery re-filters the current page's templates instantly as
@@ -513,15 +518,20 @@ function formatDate(dateStr: string) {
 }
 
 function loadData() {
-  // Request algebra for the flat list (see the `flatListStale` block above): every call takes the
-  // next generation, and only the latest one is allowed to declare the rendered rows current
-  // again. A slow read issued for an organization the admin has already left therefore cannot
-  // un-blank the table on behalf of the organization it never fetched.
-  const generation = ++flatListGeneration
-  const settle = () => {
-    if (generation !== flatListGeneration) return
-    if (!store.error) flatListStale.value = false
-  }
+  // Request algebra for the flat list (see the `flatListStale` block above). The algebra itself
+  // lives in `templateStore.loadTemplates`, NOT here, because the thing that has to be arbitrated
+  // is the shared slot the rows and the error actually live in: a page-local generation can only
+  // decide who may lower this page's stale bit, it cannot stop an older read from overwriting
+  // `store.templates` or from posting its failure into `store.error` (round-3 gate C-1 — the
+  // first version of this settle asked the shared `store.error` "did the read succeed?", so a
+  // superseded read's failure blanked the flat surfaces behind a successful one and left the old
+  // banner on top of them). One algebra, at the slot, keyed by request generation AND by the
+  // session signature the read was issued under.
+  //
+  // What is left here is the only decision this page owns: the rendered rows are declared current
+  // again ONLY for an answer the store actually applied. `failed` and `superseded` both mean this
+  // page learned nothing about the context it asked about, so the flat surfaces keep rendering
+  // their empty state rather than re-exposing the context the admin has left.
   void Promise.resolve(
     store.loadTemplates({
       status: statusTab.value === 'all' ? undefined : statusTab.value,
@@ -532,7 +542,9 @@ function loadData() {
       page: currentPage.value,
       pageSize: pageSize.value,
     }),
-  ).then(settle, settle)
+  ).then((outcome) => {
+    if (outcome === 'applied') flatListStale.value = false
+  }, () => {})
 }
 
 // Same request algebra as `loadData`: the category list is org-scoped chrome, so an answer for an
@@ -740,7 +752,10 @@ const stopPrincipalLifecycle = onAuthSessionSwitch(() => {
   sessionOrgRequiredSeen.value = false
   pageSessionOrgsFailed.value = false
   flatListStale.value = true
-  flatListGeneration++
+  // No flat-list generation bump here: the read in flight is invalidated by the store's own
+  // signature check, which compares the session the read was ISSUED under with the session at the
+  // moment it lands. Bumping a second, page-local counter as well would be a guard with no input
+  // that can reach it — every transition that gets here is, by construction, a signature change.
   categoriesGeneration++
   categories.value = []
   recentTemplatesGeneration++
