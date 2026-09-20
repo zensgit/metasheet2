@@ -10285,9 +10285,11 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Created */
+                /** @description Created. Repeated identical installs inside the server-side dedupe window (same authenticated tenant, user, templateId, workspaceId and baseName) return the FIRST base again instead of creating another one; the body is then byte-identical to the original 201 and only the Idempotent-Replayed header distinguishes the two. */
                 201: {
                     headers: {
+                        /** @description Present with the value `true` only when this 201 replayed an earlier install instead of creating a new base; absent on a fresh install. Ops/gateway signal only — the web client does not read it, and it is not CORS-exposed, so browser JS cannot see it without Access-Control-Expose-Headers. */
+                        "Idempotent-Replayed"?: "true";
                         [name: string]: unknown;
                     };
                     content: {
