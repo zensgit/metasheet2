@@ -1877,6 +1877,38 @@ async function testRootSelectionIsReachableFromTheActionConfig() {
     (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
     '不是对象的 rootSelection 直接拒',
   )
+
+  // #5862 — 新键(钣金匹配方式 / 前缀可选)走同一根线:配置时校验、归一化后留在动作上、到达展开器。
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ rootSelection: { sheetMetalMatchMode: 'contains' } })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details.field === 'rootSelection.sheetMetalMatchMode',
+    '拼错的键在配置时就拒(不是静默忽略)',
+  )
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ rootSelection: { sheetMetalMatch: 'regex' } })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details.field === 'rootSelection.sheetMetalMatch',
+    '非法匹配模式 => 422',
+  )
+  const customer = { mainDrawingPrefix: 'J', mainDrawingSuffix: '-00', sheetMetalSuffixes: ['-A', '-B', '-C', '-D'], sheetMetalMatch: 'contains' }
+  const normalized = normalizeStockPreparationActionConfig(baseAction({ rootSelection: customer }))
+  assert.equal(normalized.rootSelection.sheetMetalMatch, 'contains')
+  assert.equal(normalized.rootSelection.sheetMetalRequiresMainPrefix, true, '没写的键落到老系统默认')
+  // 报告出现在 dry-run 证据里,而且是 values-free 的。
+  const withReport = await dryRunWithRootSelection(customer)
+  assert.deepEqual(withReport.dryRun.evidence.expansion.rootSelectionReport, {
+    mode: 'main_drawing',
+    mainDrawingCandidates: 1,
+    sheetMetalRoots: 0,
+    otherCandidatesDropped: 1,
+    dashDescendantsDropped: 0,
+    flags: ['sheetMetalRootMissing'],
+  })
+  const disabledReport = await dryRunWithRootSelection({ enabled: false })
+  assert.equal(disabledReport.dryRun.evidence.expansion.rootSelectionReport.mode, 'disabled')
 }
 
 // F1c — 同父去重的条数也必须走到 dry-run 证据里,理由同上:`summarizeBomExpansionForEvidence`
