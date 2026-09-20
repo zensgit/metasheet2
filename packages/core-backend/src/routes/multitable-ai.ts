@@ -956,7 +956,9 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         // worker's (#5832): the rows already generated are KEPT (charged, cached, committable once the
         // sheet is live again — bulk-commit refuses a non-live sheet on its own), this row and every
         // un-reached row are UNCHARGED and never sent, and the partial comes back `capped: true` — an
-        // outright refusal here would hide a real, already-settled spend from the caller.
+        // outright refusal here would hide a real, already-settled spend from the caller. When there is
+        // NO such spend (the stop landed on the first row) the partial has nothing to protect and the
+        // request is refused instead — see the zero-spend block after this loop.
         // RESIDUAL WINDOW: a delete committing after this check answers live still lets THIS row out;
         // it spans runShortcutCore's quota-reservation transaction (same note as the worker's).
         if (!(await bulkPreviewSheetIsLive(query, sheetId))) {
@@ -1056,6 +1058,22 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
           // but DO NOT pause (other rows may be clean).
           skipped.push({ recordId, reason: 'unsafe_input' })
           continue
+        }
+      }
+
+      // ZERO-SPEND liveness stop (#5838): the partial above exists for ONE reason — an outright refusal
+      // would hide an already-settled spend. When the loop stopped on its FIRST row there is no such
+      // spend (nothing generated, nothing charged, nothing cached), so the module rule stands and this
+      // answers the 404 the entry gate would have: `deleted` keeps its restore hint, `absent` stays
+      // NOT_FOUND. The verdict is re-read rather than inferred from the loop's bare `false`, because
+      // that `false` is fail-closed and collapses "the sheet is gone" with "the lookup failed" — and a
+      // LIVE sheet must never be told it was deleted. A still-failing lookup throws into the 500 below:
+      // no spend is at stake here, so an error is the honest answer.
+      if (paused && rows.length === 0 && failures.length === 0 && settledCost === 0
+        && skipped.some((entry) => entry.reason === 'sheet_not_live')) {
+        const stopLiveness = await loadSheetLiveness(query, sheetId)
+        if (stopLiveness !== 'live') {
+          return sendSheetNotLive(res, stopLiveness)
         }
       }
 

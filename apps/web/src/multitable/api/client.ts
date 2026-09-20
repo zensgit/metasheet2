@@ -1668,7 +1668,10 @@ export interface AiBulkPreviewRow {
  * `rate_limited_before_call` / `blocked_before_call` (transient — a re-run may
  * reach it), `generation_failed_before_usage` (provider failed, no usage),
  * `unsafe_input` (secret-shaped content, not sent), `sheet_not_live` (#5838: the
- * table was deleted WHILE the batch ran — the remainder was never sent).
+ * table could not be confirmed available WHILE the batch ran — deleted, its row
+ * gone, or the liveness lookup itself failed; the server fails closed on all
+ * three and does not distinguish them here, so copy for this reason must not
+ * ASSERT a deletion).
  */
 export interface AiBulkPreviewSkipped {
   recordId: string
@@ -1694,11 +1697,22 @@ export interface AiBulkPreviewData {
   /** Total settled provider cost (USD) for THIS preview — already charged; shown for cost honesty. */
   settledCost: number
   /**
-   * true → the batch BROKE EARLY (provider/cache error or quota/blocked/
-   * rate-limit hit mid-loop): the preview is PARTIAL, remaining in-scope rows
-   * were not reached. NOT the over-cap path (that is a 400 BULK_SCOPE_TOO_LARGE
-   * which never returns rows). The backend deliberately returns NO total, so the
-   * UI signals incompleteness without a count (hidden-row oracle guard).
+   * true → the batch BROKE EARLY: a provider/cache error, a quota/blocked/
+   * rate-limit hit mid-loop, or (#5838) the TABLE stopping being confirmable
+   * mid-loop. The preview is PARTIAL, remaining in-scope rows were not reached.
+   * NOT the over-cap path (that is a 400 BULK_SCOPE_TOO_LARGE which never
+   * returns rows). The backend deliberately returns NO total, so the UI signals
+   * incompleteness without a count (hidden-row oracle guard).
+   *
+   * `capped` alone does NOT say WHICH cause: the causes differ in what the user
+   * should do next, and only the sheet-liveness one makes "write these, then
+   * re-run" wrong (both refuse on a table that is gone). Read `skipped[].reason`
+   * for `sheet_not_live` before rendering re-run advice. A sheet-liveness stop on
+   * the FIRST row usually does not reach here at all: with nothing generated and
+   * nothing charged the server re-reads the verdict and refuses 404 instead. It
+   * DOES reach here when that re-read comes back live (a transient lookup failure
+   * stopped the batch) — an empty, uncharged partial on a live table, which the
+   * re-run advice does fit.
    */
   capped: boolean
 }

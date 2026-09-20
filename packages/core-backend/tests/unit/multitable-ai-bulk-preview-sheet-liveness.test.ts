@@ -19,6 +19,9 @@
  *    real, already-settled spend from the caller;
  *  · the stopping row is reported `skipped: sheet_not_live` (UNCHARGED, never sent) and the response is
  *    `capped: true` — the partial-preview signal the UI already renders;
+ *  · but when the stop came BEFORE the first provider call there is no spend to keep, so the partial
+ *    justification is empty and the module rule stands: the request is refused 404 (SHEET_DELETED keeps
+ *    its restore hint) instead of answering 200 with `rows: []`;
  *  · the stop is logged values-free: a reason, an error class + driver code, never record content.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -66,6 +69,9 @@ function makeWorld() {
     livenessAsked: [] as unknown[][],
     /** Armed from inside a provider call: the NEXT liveness lookup throws, once. */
     failNextLiveness: false,
+    /** Called with the 1-based number of the liveness lookup ABOUT TO be answered — the seam for a
+     *  delete that commits before the loop's FIRST check, when no row has been generated or charged. */
+    onLiveness: null as null | ((n: number) => void),
     /** in_flight ledger reservations = provider calls that were admitted by the quota. */
     reservations: 0,
     /** Cached outputs, the only thing bulk-commit can ever write. */
@@ -77,6 +83,7 @@ function makeWorld() {
     const sql = rawSql.replace(/\s+/g, ' ').trim()
     if (sql === 'SELECT deleted_at FROM meta_sheets WHERE id = $1') {
       world.livenessAsked.push(params)
+      world.onLiveness?.(world.livenessAsked.length)
       if (world.failNextLiveness) {
         world.failNextLiveness = false
         throw new LookupFailure(LOOKUP_ERROR_TEXT)
@@ -293,6 +300,30 @@ describe('AI inline bulk-preview — sheet liveness before every provider call (
     expect(logged(error)).not.toContain('db-internal.example')
     expect(logged(error)).not.toContain(SHEET_ID)
     expect(logged(error)).not.toContain('confidential-content-of')
+  })
+
+  it('sheet DELETED before the FIRST provider call: nothing was generated, so the request is REFUSED (404), not answered with an empty partial', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await arm()
+    // The generation loop's FIRST liveness check: after the entry gate and the per-row read gates
+    // (same arithmetic the LIVE case pins). Deleting here means the loop breaks on row 1 — zero rows
+    // generated, zero charged, nothing cached — so there is no settled spend a 404 could hide.
+    env.world.onLiveness = (n) => {
+      if (n === 1 + ROW_IDS.length + 1) env.world.sheets.set(SHEET_ID, { deleted_at: new Date('2026-09-19T00:00:00Z') })
+    }
+    const res = await bulkPreview()
+
+    expect(provider.fetchFn).not.toHaveBeenCalled()
+    expect(env.world.reservations).toBe(0)
+    expect(env.world.cached).toEqual([])
+    // The module rule, not a 200 with `rows: []`: `deleted` keeps its actionable restore hint.
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('SHEET_DELETED')
+    expect(res.body.error.message).toContain('restored')
+    // Values-free: the refusal never echoes the id back (no existence oracle).
+    expect(JSON.stringify(res.body)).not.toContain(SHEET_ID)
+    expect(logged(warn)).toContain('sheet_deleted')
+    expect(env.world.unexpected).toEqual([])
   })
 
   it('sheet deleted BEFORE the request: the entry gate answers 404 SHEET_DELETED and nothing is sent', async () => {
