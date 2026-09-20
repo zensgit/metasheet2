@@ -483,14 +483,27 @@ contract and is not implemented here.
   - the row **names a node** and the actor holds a delegated seat here ⇒ the name is **CORROBORATED**:
     - it lands on **exactly one** of that actor's own USER assignment rows ⇒ trust it (restore to that
       row's `delegatedFrom`, or seat the actor when that row is their own un-delegated seat);
-    - it lands on **none**, but the node carries a **non-user** (role / source_queue) seat on this
-      instance ⇒ seat the actor. Delegation substitution only ever touches `assignmentType === 'user'`
-      seats, so a non-user seat has nothing to restore and naming it is not a way to escape a restore.
-      正控 `P22(a)`;
+    - it lands on **none**, but the node carries a **non-user** (role / source_queue) seat **that this
+      actor can be shown, FROM A SERVER-WRITTEN RECORD, to hold** — `user_roles` / `users.role` names
+      one of that node's seat roles — **and** the node's human `approve` rows still fit its assignment
+      rows ⇒ seat the actor. Delegation substitution only ever touches `assignmentType === 'user'`
+      seats, so an occupied non-user seat has nothing to restore. 正控 `P22(a)` / `P23(a)` / `P24(a)`;
+    - it lands on **none**, the node carries non-user seats, but **either** credential half is missing
+      (the actor is in none of those roles — 负控 `N15(a)`; or the node's approve rows no longer fit
+      its seat rows — 负控 `N14(a)`) ⇒ `reasons = ['seat_unresolvable']`. 负控 `N16(a)` pins the cost
+      of the first half on an otherwise honest document whose approver's role exists only in the token;
     - it lands on **none** and the node carries no non-user seat either — the node does not exist on
       this instance, or it is somebody ELSE's user node ⇒ `reasons = ['seat_unresolvable']`.
       负控 `N11(a)` (forged) / `N13(a)` (pointing at a third party's node);
-    - it lands on **more than one** ⇒ `reasons = ['seat_unresolvable']` (node re-entry; NOT CONSTRUCTED).
+    - it lands on **more than one** ⇒ `reasons = ['seat_unresolvable']` (node re-entry rewrote the
+      delegation between epochs). **CONSTRUCTED** as of gate round 3 P2-1: 负控 `N17(a)` seeds the
+      residue a re-entry leaves (an `is_active = FALSE` twin row at the same (instance, node, assignee)
+      with a different `delegatedFrom` — accepted by the schema because
+      `idx_approval_assignments_active_unique` is partial on `is_active = true` and does not include
+      `node_key`) and measures the block. **诚实分界**: that seeding is a FIXTURE-level `INSERT`; the
+      re-entry mechanism itself is in-repo and named (`dispatchAction`'s `return` branch →
+      `bumpNodeActivationSeq` + `insertAssignments`, `adminJump`, node-timeout jump), but an
+      end-to-end walk through it is **still not done**.
 
   **Why corroboration, and not "trust `nodeKey` when it is present" (the first cut of this fix, which
   was MEASURED to be trivially bypassable).** The legacy route copies the request body's `metadata`
@@ -510,11 +523,46 @@ contract and is not implemented here.
   witness; 负控 `N13(a)` shows the widening did not re-open the hole (naming a third party's user node
   still blocks), so the carve-out is pinned to 「non-user seat」 and not to 「a second node exists」.
 
-  **The widening's own cost, stated.** It cannot prove the actor was a MEMBER of that role —
-  `approval_assignments` records only the role id, and membership is judged from the request's `roles`
-  at decision time and never persisted. A delegatee naming a role node that genuinely exists on the
-  instance can therefore be seated as themselves instead of restored. Same family as the residual
-  below (self-seating / self-removal, never taking somebody else's seat); **not fixed here**.
+  **The widening's own cost — REWRITTEN 2026-09-20 after gate round 3 P1/P2-2 MEASURED the previous
+  wording to be wrong, and the arm it described to be defective.** The previous text said the
+  widening could at worst let a delegatee 「be seated as themselves instead of restored」, and filed it
+  as 「same family as the residual below (self-seating / self-removal, **never taking somebody else's
+  seat**)」. **Both halves were false, measured on a real DB:**
+  - the failure direction is **not** self-seating. In the gate's FORGERY the delegatee's legacy row
+    named the ROLE node, both `approve` rows folded onto it, **`A` held no seat at all** and the 会签
+    threshold fell from 2 to 1 — the delegatee took the seat the ruling assigns to A, the opposite
+    direction from `P21(a)`'s self-removal;
+  - the actor did not even have to be in the role. In FORGERY2 a third person decided the role node
+    and the delegatee — not a member, never a decider there — was seated merely by **naming** it,
+    which falsified the implementation comment 「the actor decided it through that seat」.
+  - and it was **prose without a leg**: mutation `M-v` (switching the arm off) reddened only 正控
+    `P22(a)`, i.e. the only pinned direction was 「must not block」. Nothing pinned 「must not seat the
+    delegatee」.
+
+  **What replaced it.** The arm now requires a SERVER-SIDE CREDENTIAL with two halves — membership
+  (`user_roles` / `users.role` names one of that node's seat roles for this actor) and cardinality
+  (the node's human `approve` rows fit its assignment rows) — and BLOCKS when either is missing.
+  Each half has its own negative control and each is uniquely load-bearing under mutation:
+  dropping membership reddens `N15(a)` + `N16(a)`; dropping cardinality reddens `N14(a)`; the
+  honest siblings `P23(a)` / `P24(a)` / `P22(a)` keep the 「2 席」 threshold witnessed, which a
+  blocking leg alone cannot do (a block's seat set is `[]` either way).
+
+  **The credential's own cost, stated (this is a real cost, not a disclaimer).** Membership is read
+  **as it stands today**: decision-time membership is not persisted anywhere in this repo, so 「was in
+  the role then, is not now」 and 「never was」 are the same shape in the database and BOTH block. 负控
+  `N16(a)` is that cost pinned as data on an otherwise completely honest document. Blast radius,
+  measured not estimated: the credential is only ever consulted for an actor who holds a DELEGATED
+  seat somewhere on this instance (the first arm returns before it otherwise), so the entire
+  non-delegation corpus — `P19(a)`, `P15(a)` and every legacy document without a delegation — is
+  untouched. Widening it back needs either a decision-time role snapshot or the legacy route writing
+  `nodeKey` itself; both are owner calls, registered in §3.4.
+
+  **Residual that remains, named.** Cardinality is a BUDGET, not an identity: a node whose config
+  lists two role ids carries two seat rows, so one spare row of budget exists there, and a forger who
+  is genuinely a member of one of those roles would satisfy both halves. `N15(a)` deliberately runs on
+  exactly that spare-budget shape (which is why it isolates the membership half), and its comment
+  names the residual. Closing it needs the same owner call as above — 「which row settled which seat」
+  is not recorded anywhere today.
 
   Restoring to the single known delegator was considered and NOT chosen: the same actor may also
   have approved a seat OF THEIR OWN through the same node-key-less route, so the restore would be a

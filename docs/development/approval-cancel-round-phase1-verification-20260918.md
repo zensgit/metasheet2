@@ -4185,9 +4185,11 @@ at activation rather than create-frozen**,对它「跨 epoch 恒定」的前提�
 | **无** `nodeKey`;**恰好 1** 个 | **阻断** `delegate_not_seat` | `P12(a)`、`N7(a)`、`N8(a)`、`P13(a)` |
 | 有 `nodeKey`;它命中该 actor 自己的 **user** assignment 行**恰好 1** 条,该行 `delegatedFrom` 非空 | 席位 = 该原主体 | `P4(a)`–`P9(a)`、`P16(a)`、`P20(a)` |
 | 有 `nodeKey`;命中**恰好 1** 条,该行 `delegatedFrom` 为空(= 自己的 user 席位) | 席位 = actor 本人 | `P11(a)`、`P18(a)` |
-| 有 `nodeKey`;命中 **0** 条,但该节点在本单上有**非 user 席位**(role / source_queue) | 席位 = actor 本人 | **`P22(a)`**(第二次自我推翻的见证) |
+| 有 `nodeKey`;命中 **0** 条,但该节点的**非 user 席位**里有一条的角色**该 actor 按服务端记录确实在**(`user_roles` / `users.role`),**且**该节点的人类 approve 行数 ≤ 该节点的 assignment 行数 | 席位 = actor 本人 | **`P22(a)`**(第二次自我推翻的见证)、**`P23(a)`**、**`P24(a)`** |
+| 有 `nodeKey`;命中 **0** 条,该节点有非 user 席位,但 actor **不在**其中任何一个角色里 | **阻断** `seat_unresolvable` | **`N15(a)`**(门审 FORGERY2:第三人批的角色节点)、**`N16(a)`**(角色只存在于 dev-token) |
+| 有 `nodeKey`;命中 **0** 条,actor 在角色里,但该节点的 approve 行数 **>** 该节点的 assignment 行数 | **阻断** `seat_unresolvable` | **`N14(a)`**(门审 FORGERY:两条行压在一席上,会签 2→1) |
 | 有 `nodeKey`;命中 **0** 条,且该节点在本单上**没有**非 user 席位(节点不存在,或是别人的 user 节点) | **阻断** `seat_unresolvable` | **`N11(a)`**(伪造节点)、**`N13(a)`**(指着第三人 E 的节点) |
-| 有 `nodeKey`;命中 **>1** 条(节点再入改写了委托) | **阻断** `seat_unresolvable` | **NOT CONSTRUCTED**(见 O5) |
+| 有 `nodeKey`;命中 **>1** 条(节点再入改写了委托) | **阻断** `seat_unresolvable` | **`N17(a)`**(第 3 轮 P2-1 补腿;夹具级 INSERT 造 `is_active=FALSE` 孪生行,端到端未走) |
 | (actor **没有**被委托席位,任何 `nodeKey`) | 席位 = actor 本人 | `P19(a)`(**爆炸半径闸门**) |
 
 **⚠ 本轮的一次自我推翻,记在这里而不是抹掉。** 上面那张表的**第一版**把「行有 `nodeKey`」当成
@@ -4210,10 +4212,49 @@ legacy `POST /:id/approve` 把请求体的 `metadata` **逐字**写进 `approval
 席位决定的,而委托替换**只动 `assignmentType === 'user'` 的席位**(`pushResolved`),非 user 席位
 **没有东西可还原**,也就不构成脱身路径 ⇒ 坐下 actor(`P22(a)`);没有,说明那个节点要么不存在、
 要么是**别人的** user 节点,指着它不等于在那里有席位 ⇒ 阻断(`N13(a)`)。
-**放宽的代价,写清楚**:本判据证不了 actor 真的是那个角色的**成员**(`approval_assignments` 只记角色 id,
-成员关系在决策时刻由 JWT 的 `roles` 判,不落库)。所以被委托人指着**本单上真实存在的角色节点**仍可能
-被按「本人」坐下而不是被还原 —— 与 `P21(a)` 同族的残留,方向同样是「自己留席/自减席」而不是白拿别人的席位,
-**已登记进设计 MD §3.4**。
+
+**⚠ 第三次自我推翻(门审第 3 轮 P1 / P2-2):上一段那条「放宽的代价」写错了,而且被它描述的那一臂
+本身是缺陷。** 旧文的原话是「被委托人指着真实存在的角色节点仍可能被按本人坐下……与 `P21(a)` 同族,
+方向同样是『自己留席/自减席』而不是白拿别人的席位」。**两处都被真库实测证伪:**
+
+- **方向相反。** 门审 FORGERY:被委托人把自己那条 legacy 行的 `nodeKey` 报成**角色节点**,两条 approve
+  行一起折到角色节点上 ⇒ **A 一个席位都没有**、会签门槛 **2 → 1**。他拿走的正是裁决指派给 A 的那一席,
+  与 `P21(a)` 的「把自己摘出去」**方向相反**。
+- **连「在那个角色里」都不需要。** 门审 FORGERY2:角色节点由**第三人 E** 决定,被委托人既不是该角色成员、
+  也从未决定过那个节点,**仅仅说出节点名字**就被坐下了 —— 这直接证伪了实现里那句承重注释
+  (「the actor decided it through that seat」)。
+- **而且它只有散文没有腿。** mutation `M-G`/`M-v`(把这一臂关掉)当时只红 `P22(a)`,即现有覆盖只钉了
+  「**不得阻断**」一个方向,**没有任何用例钉「不得把被委托人坐下」**。
+
+**修法(本轮落地,取最严)**:非 user 席位臂要放行,必须有**服务端凭据的两半**,缺任一半 ⇒ 阻断
+(复用 `seat_unresolvable`,零新码):
+
+1. **成员身份** —— 该节点的非 user 席位里,至少有一条的角色是该 actor 按**服务端写入的记录**持有的
+   (`user_roles.role_id` ∪ `users.role`)。这不是另造判据:生产 token 的 `role` 声明就是从这个底座算出来的
+   (`AuthService.createToken` 签 `role: user.role`,`resolveRbacProfile` 用 `users.role` + `user_roles`);
+   `roles` **数组**声明只有**测试用**的 `GET /api/auth/dev-token` 会铸(`jwt.sign` 站点普查:
+   `AuthService.createToken` 与 `routes/auth.ts` 两处,生产路径零处),所以夹具改成**生产形状**
+   (`P22(a)` 现在往 `user_roles` 写那条成员记录)而不是把凭据做成 fail-open。
+2. **基数** —— 该节点的**人类** approve 行数 ≤ 该节点的 assignment 行数。只有成员身份那一半挡不住
+   FORGERY(那里 D 是**真**成员,只是把两条行压在一席上)。计数在 **TypeScript** 里做、在哨兵丢弃**之后**,
+   不在 SQL 里做(SQL 里重写 `isSystemSentinelActor` 会把自动审批行算进预算,重开 G6-1)。
+
+**落地前的 ratio 普查(门审点名的前置条件,实测)**:在七个 `approval-cancel-round-*.db.test.ts` 的语料上
+用 INSERT 触发器抓全量,得 **60** 组 `(instance, node)`,其中 **58** 组在预算内(8 组 2 行/2 席、
+48 + 2 组 1 行/1 席),**恰好 2 组**超预算且**两组都是故意造的不诚实夹具** —— `N11(a)` 的不存在节点
+(1 行 / 0 席)与 `P21(a)` 的 legacy 改名(2 行 / 1 席);后者走的是 **user 席位臂**,本轮的基数合取
+**故意不管**它(那条残留仍归 owner)。
+
+**凭据的代价,写清楚(这是真代价,不是免责声明)**:成员身份是**当下**读的 —— 决定时刻的成员关系本仓
+今天不落库,所以「当时在、现在不在」与「从来不在」在库里同形,**两者都阻断**。`N16(a)` 就是这条代价钉成
+数据:一张与 `P22(a)` 逐字段同形的诚实单据,只因为 D 的 admin 身份只存在于 dev-token 里而阻断。
+**爆炸半径(实测)**:凭据只对「在本实例上持有被委托席位」的 actor 生效(第一臂先返回),所以整个无委托语料
+(`P19(a)`、`P15(a)` 以及所有没有委托的 legacy 单据)**不受影响**。要放宽,需要「决定时刻角色快照」或
+「legacy 路由自己写 `nodeKey`」,**两条都是 owner 裁**,已登记设计 MD §3.4。
+
+**仍然存在的残留,点名**:基数是**预算**不是身份 —— 角色节点若配了两个角色 id 就有两行席位、预算有富余,
+一个**恰好**是其中某个角色成员的伪造者仍能两半都通过。`N15(a)` 故意跑在这种富余形状上(这正是它能
+**隔离**成员身份那一半的原因),腿内注释点名了这条残留。
 
 出口:**复用既有 `CANCEL_ROUND_SEAT_INELIGIBLE`**,`details = { ineligibleCount, reasons }` 形状不变,
 只扩了 `reasons` 的词汇(+`seat_unresolvable`、+`delegate_not_seat`)。**零新增错误码**,锁 §14.3 无需改。
@@ -4364,13 +4405,25 @@ C-1 head = `8b29b4a2ce6b90d7fc49a052538dc713e12da224`;phase2 head = `6a40f0121a3
 | `node_non_user_seat_count` | **4** | **0** | **新判据** |
 | `instance_delegators` | **4** | **0** | **新判据** |
 
-三个新 token 在 C-1 head 的**整棵树**上都只出现在这一个文件里(`git grep -c <tok> <head>` 各命中 **1 个文件**),
-所以它们不会被测试文件或文档的引用稀释。
+**⚠ 勘误(门审第 3 轮 P3-1):这里原来写的是「三个新 token 在整棵树上只出现在这一个文件里(各命中 1 个
+文件)」—— 那是一句**自指快照**:写下它的那次提交(`61b37fd6ef`)把三个 token 的名字写进了这份 MD,于是
+它一落地就把自己变成假的(实测:各命中 **2** 个文件)。快照换成**可复算判据**,不再写「只有一个文件」:
+
+```
+git grep -c '<token>' <head> -- packages/core-backend/src/services/   # 判据:恰好 1 个文件、各 4 次
+git grep -c '<token>' <head> -- docs/ packages/core-backend/tests/     # 允许 >0:文档/测试引用不参与判据
+```
+
+判据**限定在 `packages/core-backend/src/services/` 路径下**,所以无论这份 MD、README 还是测试文件怎么引用
+这些名字,判据的读数都不变 —— 稀释问题按构造消失,而不是靠一句「不会被稀释」的声明。
+(本轮 token 名字随实现改了,见 §O7.4 的新表;核对**永远**以「当时 head 上现算」为准。)
 
 ### O6.2 C-2 重放后的判据(**取代** §N6 / README §9-8 的那一条)
 
-1. **正向**:`node_actor_user_seats`、`node_non_user_seat_count`、`instance_delegators` 三个 token
-   在 C-2 的 `ApprovalProductService.ts` 里必须**各出现 4 次**,且都落在 `createCancelRoundInstance` 体内。
+1. **正向**:三个 token 在 C-2 的 `ApprovalProductService.ts` 里必须各按 **§O7.4 的表**出现,且都落在
+   `createCancelRoundInstance` 体内。**⚠ 本条的 token 名单在本轮变了**(凭据修法把
+   `node_non_user_seat_count` 换成了 `node_actor_role_seat_count` + `node_seat_row_count`)——
+   这正是本节第 3 条预告的情形:**按当时 head 现算,不照抄**。
 2. **反向**:`SELECT DISTINCT actor_id FROM approval_records` 必须**归 0**(phase2 侧那 1 处就是被覆盖的目标)。
    —— 正反两条一起,才能区分「合上了」与「把 C-1 的新代码丢了」;只有正向那条时,
    一次「两边都保留」的错误解法照样绿。
@@ -4379,7 +4432,11 @@ C-1 head = `8b29b4a2ce6b90d7fc49a052538dc713e12da224`;phase2 head = `6a40f0121a3
    **不要**照抄本节的数字;若三个 token 在 C-1 head 上也归 0,说明席位推导又被重写了,
    **应当重新推导锚点而不是判 C-2 解反了**。
 
-### O6.3 合并事实(本 head 重测,取代 §NH6 的树 SHA)
+### O6.3 合并事实(**已被 §O7.4 取代** —— 本节的表钉在 `8b29b4a2ce`,不是交付 head)
+
+> **求值标记**:本节的**树 SHA 与 head** 已失效(门审第 3 轮 NIT-1:表头写「C-1 head `8b29b4a2ce…`」
+> 而当时的交付 head 是 `61b37fd6ef`;本轮又前进了一次)。**结论性的那两句仍然 OPERATIVE**:
+> 切片基线是 phase2 的祖先、三方合并干净。现行数值见 **§O7.4**,那里给的是**命令**而不是要背的常数。
 
 | 项 | 实测(C-1 head `8b29b4a2ce…`) |
 |---|---|
@@ -4396,3 +4453,130 @@ C-1 head = `8b29b4a2ce6b90d7fc49a052538dc713e12da224`;phase2 head = `6a40f0121a3
 `~/.claude/projects/<proj>/soak-working/c1-delegation-candidates-20260920/README.md` **不在 git 下**,
 任何门 / CI / reviewer 都取不到它。它的 §9-8 带着同一条已失效的 `COALESCE` 判据;本轮已就地勘误,
 **但承重的一份是本节** —— 引用时以本节为准,README 只当本地便签。
+
+---
+
+# Part O-R4. 门审第 3 轮修复(2026-09-20/21):非 user 席位臂的服务端凭据
+
+> **范围**:本节记录 **P1 / P2-1 / P2-2 / P3-1** 的修复与实测。读法 (a) **仍是候选**,owner 未裁;
+> 本轮只把候选做到「不静默回退给历史被委托人」在**所有**语料下成立。**未合并、未 undraft、未开 PR。**
+
+## O7.1 修了什么(逐条对门审)
+
+| 门审条目 | 修法 | 承重腿 |
+|---|---|---|
+| **P1**(裁决未完整实现:非 user 席位臂可被请求体的 `nodeKey` 走过去)| 该臂放行需要**服务端凭据的两半**,缺任一半 ⇒ 阻断(复用 `seat_unresolvable`,**零新码**):①**成员身份**(该节点某条非 user 席位的角色,该 actor 按 `user_roles` / `users.role` 确实持有);②**基数**(该节点的**人类** approve 行数 ≤ 该节点的 assignment 行数,计数在 TS 里、在哨兵丢弃之后) | 负控 `N14(a)`(FORGERY)、`N15(a)`(FORGERY2)、`N16(a)`(严格性代价);正控 `P23(a)` / `P24(a)`(门槛 2 席的见证) |
+| **P2-1**(`actorUserSeats.length > 1` 臂是未测守卫)| 按门审给的配方补腿:`is_active = FALSE` 的孪生席位行、同一 (instance, node, assignee)、不同 `delegatedFrom` | 负控 `N17(a)` —— mutation **M-vi 现在恰好红它一条** |
+| **P2-2**(设计 MD `:515-517` 定性不准、且该臂只有散文没有腿)| 整段按实测重写(方向是**拿走别人的席位**、actor **不必**是角色成员、`M-v` 只钉了「不得阻断」一个方向);两个方向现在都有腿 | 设计 MD「The widening's own cost — REWRITTEN」段 + 上面四条新腿 |
+| **P3-1**(§O6.1 的「只出现在这一个文件里」是自指快照)| 换成**路径限定的可复算判据**(`-- packages/core-backend/src/services/`),不再声明「不会被稀释」 | §O6.1 勘误段 |
+| **NIT-1**(§O6.3 的表钉在上一个 head)| §O6.3 打求值标记,数值迁到 §O7.4,并且给**命令**而不是常数 | §O6.3 / §O7.4 |
+
+## O7.2 落地前的 ratio 普查(门审点名的前置条件)
+
+门审 §1.5 要求「落地前必须先对现有 86 腿核 ratio」。做法:在一次性库上给 `approval_records` /
+`approval_assignments` 装 **AFTER INSERT 触发器**把每一行镜像进两张 `zz_census_*` 表(因为各套件的
+`afterAll` 会把语料删干净,跑完再查恒为 0 行),然后跑全部七个 `approval-cancel-round-*.db.test.ts`。
+
+读数:**81 条 approve 行 / 142 条 assignment 行 → 60 组 `(instance, node)`**
+
+| 该节点的人类 approve 行数 | 该节点的 assignment 行数 | 组数 | 判定 |
+|---|---|---|---|
+| 2 | 2 | 8 | 预算内(会签节点) |
+| 1 | 1 | 48 + 2 | 预算内(2 组是**角色节点**) |
+| 1 | 0 | 1 | **超预算** —— `N11(a)` 的不存在节点(故意造的) |
+| 2 | 1 | 1 | **超预算** —— `P21(a)` 的 legacy 改名(故意造的) |
+
+**58/60 在预算内,超预算的两组都是故意造的不诚实夹具**;且 `P21(a)` 走的是 **user 席位臂**,本轮基数合取
+**故意不覆盖**它(那条残留仍归 owner,见设计 MD §3.4)。跑完即 `DROP TRIGGER`,census 表留在一次性库里
+随库一起 `dropdb`。
+
+## O7.3 实测台账(全部在一次性库 `metasheet2_c1_a_r2_20260921` 上;owner `ms2testbed`,非超级)
+
+### 套件
+
+| 跑 | 命令 | 结果 |
+|---|---|---|
+| 基线(改动前) | 七件 `approval-cancel-round-*.db.test.ts`,`EXPECT_DB=1` | **7 files / 86 passed** —— 与门审第 3 轮读数**逐字相符** |
+| 交付(改动后) | 同上 | **7 files / 92 passed / 0 failed**(86 + 6 条新腿) |
+| 创建件单跑 | 仅 `-creation` | **50 passed**(44 + 6) |
+| 两个邻居件 | `approval-delegation-seam` + `approval-revoke-terminal-guard` | **2 files / 7 passed** |
+| `tsc` | `npx tsc --noEmit -p tsconfig.json` | **EXIT 0**,0 行输出 |
+| 全量 | `CI=true npx vitest run`(core-backend 默认 config) | **1124 files:1115 passed / 8 failed / 1 skipped**;**16722 tests:16674 passed / 22 failed / 5 skipped** |
+
+**全量失败逐件除名**(机械核:`grep -c "FAIL.*cancel-round"` = **0**):
+
+| 文件 | 原因 | 与本分支相关? |
+|---|---|---|
+| `approval-node-timeout-effects.test.ts` | 本环境既有(第 1/2/3 轮同读数) | **0** |
+| `approval-wp1-parallel-gateway.api.test.ts` | 同上 | **0** |
+| `approval-amount-total-check.api.test.ts` | dev-token fetch 无响应 | **0** |
+| `multitable-oapi2a-comments-write-realdb.test.ts` | 同上 | **0** |
+| `sealed-export-s6a-runtime-authority.db.test.ts` | `permission denied to create role` | **0** —— 本任务硬约束所致(库 owner 非超级) |
+| `sealed-export-s6a-grant-repair.db.test.ts` | 同上 | **0** |
+| `sealed-export-s6a-authority-row-lock.db.test.ts` | 同上 | **0** |
+| `multitable-cross-base-link-optin.test.ts`(**比门审第 3 轮多出的第 8 件**)| 全量里首条失败是 `socket hang up` / `ECONNRESET`,后续 409;**单跑 18/18 全绿** ⇒ 并行/共享库 flake | **0** —— 机械核:该文件对 `ApprovalProductService` **零引用** |
+
+### Mutation 网格(每个单点隔离;`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` identical)
+
+备份基准 sha256 `920c8152b5bcfd9843c253bdb416f3d365af51589f13407249936f39ded36e48`(本轮**改动后**的文件)。
+**M-i…M-vi 沿用门审第 3 轮的编号并全部重跑(不回退),M-vii / M-viii 是本轮新加的两条合取专用格**:
+
+| # | 改动 | 实测红 | 判定 |
+|---|---|---|---|
+| **M-i** | `delegate_not_seat` 臂 → 坐下 actor | **4 红**:`P12(a) N7(a) N8(a) P13(a)` | 与门审读数**逐条一致** |
+| **M-ii** | 多委托人 × 无 `nodeKey` 臂 → 坐下 actor | **1 红**:只有 `N9(a)` | 一致 |
+| **M-iii** | 末尾「名字无凭据」臂 → 坐下 actor | **5 红**:`N11(a) N13(a) N14(a) N15(a) N16(a)` | 门审时 2 红;本轮四条新腿也落在这条臂上 ⇒ 变 5,**不是回退** |
+| **M-iv** | 删「该 actor 从无委托席位 ⇒ 本人」早退 | **2 红**:`P19(a) P15(a)` | 门审时 1 红。多出的 `P15(a)` 是**爆炸半径的证据**:早退关掉后,连无委托的角色审批人也要过凭据 ⇒ 说明凭据**只对持有被委托席位的 actor 生效** |
+| **M-v** | 非 user 席位臂关掉(`if (false && …)`) | **2 红**:`P22(a) P23(a)` | 「不得阻断」方向仍被钉住 |
+| **M-vi** | `actorUserSeats.length > 1` 臂 → 坐下 actor | **1 红**:只有 **`N17(a)`** | **P2-1 关闭**:门审时这里是 0 红(未测守卫) |
+| **M-vii**(新)| 删 SQL 里的成员身份 `EXISTS`(= 退回「该节点有非 user 席位」) | **2 红**:`N15(a) N16(a)` | 成员身份那一半承重且已测 |
+| **M-viii**(新)| 基数合取恒真(`nodeApproveRows <= nodeSeatBudget + 99`) | **1 红**:只有 **`N14(a)`** | 基数那一半承重且已测,**与成员身份那一半互相隔离** |
+
+**两条新合取互不掩护**:M-vii 只红成员身份的腿、M-viii 只红基数的腿 —— 这正是
+`N15(a)` 要跑在「角色节点配两个角色 id ⇒ 预算有富余」形状上的原因(否则基数那一半会替它挡住,
+腿就失去对成员身份的判别力)。
+
+### 判别力(逐条反转 → 贴红)
+
+把 `-creation` 复制成一次性 `zz-c1a-r2-inversion-probe.db.test.ts`,对**六条新腿各反转一处核心断言**
+(`diff` 恰好 **12 行** = 6 处):`N14/N15/N16/N17` 的 `['seat_unresolvable']` → `['delegate_not_seat']`、
+`P23(a)` 的 `[A, D]` → `[D]`、`P24(a)` 的 `[A, E]` → `[E]`。
+**读数:6 failed / 44 passed (50)**,红的正是这六条,**44 条未被触碰的老腿一条不红**。跑完即 `rm`,
+交付时 `git status --short` 里没有它。
+
+## O7.4 C-2 锚点与合并事实(在**交付 head** 上重算;给命令,不给要背的常数)
+
+**判据是命令,不是数字** —— 数字只对它下面那一行点名的对象有效:
+
+```
+git grep -c '<token>' <C-1 head> -- packages/core-backend/src/services/
+git merge-tree --write-tree <C-1 head> <phase2 head>
+```
+
+| token(限定 `packages/core-backend/src/services/`) | 实测(见本节末尾点名的 head) |
+|---|---|
+| `node_actor_user_seats` | **1 个文件 / 4 次** |
+| `node_actor_role_seat_count`(**本轮新**) | **1 个文件 / 5 次** |
+| `node_seat_row_count`(**本轮新**) | **1 个文件 / 4 次** |
+| `instance_delegators` | **1 个文件 / 4 次** |
+| `node_non_user_seat_count`(**已被替换**) | **1 个文件 / 1 次** —— 只剩注释里对旧写法的引用,**不再是锚点** |
+| `SELECT DISTINCT actor_id FROM approval_records`(最早的判据) | **0** —— 反向判据:C-2 重放后必须仍是 0 |
+
+**自指,写在明处**:本节的 token 计数是对**代码提交**测的;本文件最后一次提交只改 `docs/`,
+不碰 `ApprovalProductService.ts`,所以上表**不因本节自己的落地而失效**(这正是 §O6.1 那句自指快照
+栽过的地方)。**树 SHA 不同** —— 它按构造随**任何**提交变化,包括写下它的那一次;因此下面只登记
+「在哪个对象上、用哪条命令、得到什么」,核对时**一律现算**。
+
+**本节所有数值点名的对象**:**代码提交 `c92ebc0eebab7db1e979f9cc34f0cdcbb69d57d6`**
+(= 本轮 `ApprovalProductService.ts` + `approval-cancel-round-creation.db.test.ts` 的那一次提交;
+本文件的 docs-only 提交在它之后,不改 src,所以上表对**交付 head** 同样成立)。
+
+| 项 | 实测(对象 = `c92ebc0eeb…`) |
+|---|---|
+| `git merge-base --is-ancestor b8b71539a6… origin/feat/approval-cancel-round-phase2` | **YES** |
+| `git merge-base <C-1> <C-2>` | **`b8b71539a6a89e51331e2e4874f994498df15c55`** |
+| **C-2** `git merge-tree --write-tree <C-1> 6a40f0121a…` | **EXIT 0**,树 **`3476ebe146fdc49753e0ca3f3de25d08f11edb34`** |
+| **C2F**(`…-phase2-history-projection`,head `616049b711a5f0a57236474ae649fd1af91070a6`)同一命令 | **EXIT 0**,树 **`fdd653247503cc0af28c0f6f03b6888d08617d37`** |
+
+**C-2 与 C2F 的三方合并在本轮交付的代码 head 上仍然干净。**
+**三方合并干净 ≠ 逐提交重放干净**:rebase **本轮同样未实跑**,两句分开写。
