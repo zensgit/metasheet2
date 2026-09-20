@@ -661,12 +661,16 @@ contract and is not implemented here.
   「同一 `(instance, node_key, assignee)` 解析出 **>1** 个不同 `delegatedFrom`」的行**阻断**
   (`reasons = ['seat_unresolvable']`),所以**即使**上面那条草图被构造出来,结果也不再是**席位集合膨胀**,
   而是 **409 零行**。这把风险方向从「更宽的席位」翻成了「拒绝」。
-  **但本条仍然 OPEN**,理由是两点、都不含糊:① 那条 `>1` 的**具体臂本轮未构造**
-  (`idx_approval_assignments_active_unique` 是 `WHERE is_active = true` 的部分唯一索引,需要一次
-  真正的节点再入去改写委托才能造出两行),所以「它会阻断」是**按代码推出的**,不是实测 ——
-  实测覆盖的是**同一个 reason 值**的另一条臂(`N9(a)`,无 `nodeKey` × 两个委托人);
+  **但本条仍然 OPEN。理由逐条求值(门审第 4 轮 P3:失效标记要「求值」,不作废整节):**
+  ① ~~那条 `>1` 的具体臂本轮未构造~~ —— **已失效(2026-09-21 复核)**:门审第 3 轮 P2-1 之后,
+  负控 `N17(a)` **已构造并实测**了这条臂(同一 `(instance, node_key, assignee)` 上两个不同的
+  `delegatedFrom`,由夹具 INSERT 播下再入留下的 `is_active = FALSE` 孪生行),mutation `M-vi`
+  独立复跑**只红 `N17(a)` 一条**。**诚实分界**:构造是**夹具级**的,**端到端的节点再入仍未走**
+  (下面那条构造草图仍是 NOT CONSTRUCTED);所以「它会阻断」现在是**实测**,而「再入真的会留下这种
+  残留」仍是按代码推的。本节 `:499` 的 **CONSTRUCTED as of gate round 3 P2-1** 与本条现已一致 ——
+  此前两处自相矛盾,是门审第 4 轮 P3 点名的文档内部矛盾。
   ② 「阻断」本身是不是这一格**想要**的答案,是语义裁决:一次再入把一张本来可撤销的单据变成永久不可撤销,
-  属 owner。
+  属 owner。**理由 ② 未被求值失效,仍然 OPERATIVE —— 本条因此整体保持 OPEN。**
 - **`loadPriorNodeApproverDeciders`(Lock-1 §K3)—— 读法 (a) 是否外推到这个兄弟界面?**
   **OPEN,与 half B 同等待遇:未实现、已登记,由 owner 裁。**
   候选自己的注释点名了这个兄弟界面:仓内有**两处**从同一份 `approval_records(action='approve')`
@@ -781,6 +785,90 @@ any approve-capable site today (all five pass a non-empty id), and the two sites
 literal `'system'` write `action: 'sign'` (`:11877`, `:11896`), which the seat query never reads.
 Recorded here so that a future writer moving `'sign'` to `'approve'`, or passing a blank actor, is
 seen as a re-opening of G6-1 rather than a new mystery.
+
+### 3.5 非 user 席位的凭据:**预算 → 占位**(门审第 4 轮 P1 的落地,候选方案 (b);**owner 未裁**)
+
+> **状态:候选(PROPOSED)。** owner 至今**没有**裁读法 (a),也**没有**在 (a)/(b)/(c) 三条修法里点名。
+> 本节是实现者按主会话选定的 **(b)** 做出来的东西 + 需要 owner 裁的清单,**不是**「已裁」记录。
+
+#### 3.5.1 门审第 4 轮 P1 的根因(实测,不是推断)
+
+上一版凭据是两条合取:**成员身份**(`node_actor_role_seat_count > 0`)∧ **基数**
+(`nodeApproveRows <= nodeSeatBudget`)。门审在真库上证明这是 **capability(能不能)**,不是
+**occupancy(有没有)**:`node_seat_row_count` 数的是该节点**所有**席位行,而一个
+`assigneeType: 'role'` + `assigneeIds: ['admin', 'auditor']` + `approvalMode: 'single'`(或签)
+的节点落 **2 行**席位、只需 **1 条** approve 行 ⇒ **预算恒有一格富余**。两个变体被构造出来:
+
+| 变体 | 形状 | 修复前实测 |
+|---|---|---|
+| **FORGERY4** | 被委托人 D 亲自按角色节点(他是 `admin` 真成员),再把自己那条 legacy 行的 `nodeKey` 也报成角色节点 | `seats=[D]` —— **A 完全丢失**,会签门槛 2 → 1,`thrown=none` |
+| **FORGERY3** | 第三人 E 诚实按角色节点;D 是**另一条** role id(`auditor`)的真成员,只把节点名字说出来 | `seats=[D, E]` —— **A 丢失**,`thrown=none` |
+
+两条都在本轮被做成腿:**`N18(a)`(FORGERY4)/ `N19(a)`(FORGERY3)**,并各配诚实兄弟腿
+(`P25(a)` = `[A, D]` 两席 / `P24(a)` = `[A, E]` 两席)作为门槛参照物。
+**判别力实测**:把这两条腿 + `N20(a)` 放到**修复前的实现**(`b01c9cb809` 原状)上跑,
+**三条全红**(`creation must BLOCK, not open a round: expected undefined to be truthy`);
+诚实兄弟腿 `P25(a)` / `P26(a)` 与残留腿 `P27(a)` 在新旧实现上**都绿** —— 所以红的是修法,不是夹具。
+
+#### 3.5.2 落地的谓词(三条合取,`ApprovalProductService.ts` 的非 user 席位臂)
+
+1. **MEMBERSHIP** —— 该节点至少一条非 user 席位的 `assignee_id` 是该 actor **按服务端记录**持有的角色
+   (`user_roles` ∪ `users.role`)。**未变**。隔离腿 `N16(a)`(+ `N20(a)`,见 M-vii 实测)。
+2. **OCCUPANCY CAPACITY**(取代基数)—— **该 actor 自己**在该节点的 approve 行数
+   ≤ **该 actor 够得着的席位数**(即上面那个 count)。一席只能被同一个人占一次;别人席位造出来的
+   富余**不再能被这个 actor 花掉**。隔离腿 **`N20(a)`**。
+3. **SETTLEMENT**(新增)—— 该 actor 在本实例上持有的**每一个被委托 user 席位**所在的节点,
+   都必须**有一条自己的决定记录**。前两条都是关于**伪造者**的事实,没有一条会注意到
+   **原审批主体的席位不见了**;FORGERY3 正是这一格。隔离腿 **`N19(a)`**。
+   作用域**只在非 user 席位臂内求值**(user 席位臂与无委托早退臂的答案逐字不变)。
+
+#### 3.5.3 **与门审 (b) 字面写法的分岔 —— 必须由 owner 裁,不由我方吞掉**
+
+门审 §1.6 (b) 的原话是「角色席位 + 该 actor 是**唯一**满足成员身份的人」。**本实现没有做那个谓词**,
+理由两条,都可机核:
+
+- **它是目录属性,不是单据属性。**「D 是 `admin` 的唯一持有者」在任何有两个管理员的部署里为假,
+  于是整片诚实角色节点语料会被判成永久不可撤销 —— 正是门审自己在同一段里警告的 `8b29b4a2ce`
+  那一类「误伤诚实单据」。
+- **它也关不掉 FORGERY3。** 那里 D 是 `auditor` 的**真**成员(夹具里甚至是唯一成员),
+  「唯一满足成员身份」对他**成立**,所以字面 (b) 放行,A 照样丢。
+
+因此合取 (3) 是**我方构造**,不是门审点名的那个谓词。本仓有登记条款:
+「**另造更窄/更宽同类物 = 合同变更,须升 owner 裁**」。本节即为该请示;在 owner 就 3.5.4 的选项表
+点名之前,本切片一律按**候选**对待。
+
+#### 3.5.4 三条修法的取舍(**owner 裁**;我方只给可机核的事实)
+
+| 方案 | 做什么 | 代价 / 风险(本轮实测或可机核) | 我方意见 |
+|---|---|---|---|
+| **(a) 明确接受例外** | 保留门审第 4 轮的两半凭据,把 FORGERY3/FORGERY4 登记为已知残留 | 裁决第一句/第三句在一条**可构造**路径上不成立;必须仍然补腿(否则是第 3 轮 P2-2 逐字重演) | 不建议 |
+| **(b) 预算换占位**(本轮落地) | 上面三条合取 | ① 与门审字面 (b) 分岔(§3.5.3);② **新残留**:结算合取取**弱**形式,第三人的一条 legacy 行就能把节点「点亮」⇒ `P27(a)` 实测 `[D, E]`、A 丢;③ 严格性代价见 §3.5.5 | 本轮候选 |
+| **(c) 根因:legacy 路由自己写 `nodeKey`** | 让 `POST /api/approvals/:id/approve` 不再把请求体的 `metadata.nodeKey` 原样入库(服务端自写,或剥掉该键) | **对已上线端点的合同变更**:今天有客户端/桥接写 `metadata` 的自由;需要普查调用方、定迁移与兼容窗口。做了 (c),(b) 的三条合取里有两条不再需要靠猜 | **根因修法。建议 owner 优先考虑,但它超出本切片范围** |
+
+**(c) 为什么是根因**:三条合取全部是在「`nodeKey` 不可信」这个前提下做的补偿。凭据能查的只有
+「这个人**够得着**什么」与「这张单据上**发生过**什么」,**永远查不到**「这一行**结的是哪一席**」——
+因为那条信息在 legacy 路径上从来没有被服务端写下来过。
+
+#### 3.5.5 本轮新增/保留的残留,逐条带腿(散文不算)
+
+| 残留 | 腿 | 今天的答案 |
+|---|---|---|
+| 结算合取的**弱**形式:第三人一条 legacy 行即可点亮节点 | **`P27(a)`**(新) | 不阻断,`seats=[D, E]`,**A 丢**。根治 = (c) |
+| 被委托人在自己**真有**席位的兄弟节点走 legacy、把 `nodeKey` 报成被委托节点 | `P21(a)`(既有) | 不阻断,两行同指 A ⇒ 会签 2 → 1 |
+| 成员身份只看**当前**,不看决定时刻 | `N16(a)`(既有) | 阻断(fail-closed);「当时在角色里、现在不在」与「从来不在」在库里同形 |
+| `source_queue` 席位无法满足成员身份 | **无腿**(登记,见 `ApprovalProductService.ts` 的 REGISTERED GAP) | 阻断;widening 到 permissions 属 owner |
+
+#### 3.5.6 门审 §1.5 方向 A 点名的三条「富余来源」—— 逐条求值(**不是整节作废**)
+
+门审列了三条本轮未构造的预算富余来源。**`node_seat_row_count`(那个预算)已在本轮删除**,
+所以这三条对**旧**谓词的影响自动失效;但它们对**新**谓词(合取 2 的 `actorSeatsAtNode`)是否还成立,
+必须逐条重答而不是随着预算一起作废:
+
+| 来源 | 对新谓词还成立吗 | 证据 |
+|---|---|---|
+| **transfer**(`dispatchAction` 的 `transfer` 分支) | **否 —— 结构上不可能** | 它插的行来自 `ApprovalGraphExecutor.buildTransferAssignments()`,返回值里 `assignmentType: 'user'` 是**字面量**(`ApprovalGraphExecutor.ts:1219`);合取 (2) 只数 `assignment_type <> 'user'` 的行 ⇒ transfer 永远进不了这个计数 |
+| **add_sign**(加签) | **否 —— 结构上不可能** | 同理:`buildAddSignAssignments()` 的返回类型就是 `assignmentType: 'user'`(`ApprovalGraphExecutor.ts:1248` 的类型 + `:1256` 的 `'user' as const`) |
+| **节点重入**(`return` 分支 / `adminJump` / 超时跳转) | **是,仍然成立** | 重入走 `insertAssignments(client, id, resolution.assignments, …)`,而 `resolution.assignments` 对**角色节点**会再落一行 role 席位 ⇒ 同一个成员的 `actorSeatsAtNode` 随重入次数增长。**本轮 NOT CONSTRUCTED,理由**:端到端重入夹具本文件没有,造一条需要 return/adminJump 的完整走位(`N17(a)` 走的是**夹具级 INSERT**,不是端到端)。**风险方向**:重入 N 次的角色节点上,一个成员可以花掉 N 格容量,其中 N−1 格可以是伪造行 —— 前提是他的被委托席位都已结算(否则合取 (3) 先判死)。**登记为 OPEN,归 (c) 根治** |
 
 ## 4. Outlet guards — the lock's §14.3 table, re-derived against this tree
 
