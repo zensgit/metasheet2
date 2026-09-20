@@ -2665,7 +2665,7 @@ visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}]
 | 两个分组真库文件(库 `metasheet2_namerule_r4_20260920`,owner `ms2testbed` 非超级,PG 15.17) | **41 passed / 41**(lifecycle 31 + serialization 10;第 3 轮是 39,本轮 +2 条新用例) |
 | 无库单测 `tests/unit/approval-group-name-rule.test.ts` | **12 passed / 12**,0.3s |
 | `tsc --noEmit -p tsconfig.json`(core-backend) | **exit 0,零输出** |
-| `CI=true pnpm --filter @metasheet/core-backend test` 全量 | **15104 passed / 1609 skipped(16713)**,948 files passed / 175 skipped,exit 0,226.17s(逐字见 §31.5) |
+| `CI=true pnpm --filter @metasheet/core-backend test` 全量 | **15104 passed / 1609 skipped(16713)**,948 files passed / 175 skipped,exit 0(逐字见 §31.5) |
 | 迁移 diff | **0 行** |
 
 ### 31.5 全量与锚点求值
@@ -2675,9 +2675,11 @@ visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}]
 ```
  Test Files  948 passed | 175 skipped (1123)
       Tests  15104 passed | 1609 skipped (16713)
-   Duration  226.17s
+   Duration  129.75s
 exit 0
 ```
+
+**这份输出跑在提交 head `be36725cedc1ee1d113cc6c06eda61d172152661` 上**。此前还有一次跑在本轮最后两处注释/文档改动之前,计数**逐字相同**(只有 `Duration` 是 226.17s —— 冷缓存),所以上表不是把旧数字挪过来的:两次都跑了,这里贴的是**描述当前 head 的那一次**。§31.4 的真库 41/41 与单测 12/12 同样是在该 head 上重跑确认的。
 
 (无 `DATABASE_URL`,所以两个分组真库文件在这条 lane 里 skip —— 它们的数字在 §31.4,由一次性库单独跑出。新增的无库单测**不在** skip 之列,它就是为了进这条 always-on lane 才单独建文件的。)
 
