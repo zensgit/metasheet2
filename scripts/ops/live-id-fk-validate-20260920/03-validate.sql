@@ -68,7 +68,9 @@
 \echo '-- effective lock_timeout for the VALIDATE below:'
 SHOW lock_timeout;
 
-DROP TABLE IF EXISTS h5_validate_result;
+-- pg_temp-qualified on purpose: unqualified, this DROP would resolve through
+-- search_path and could hit a REAL table of that name in the target schema.
+DROP TABLE IF EXISTS pg_temp.h5_validate_result;
 CREATE TEMP TABLE h5_validate_result (
   status        text NOT NULL,
   sqlstate_code text NOT NULL,

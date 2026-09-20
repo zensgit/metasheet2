@@ -9,6 +9,8 @@
 //   * 02's apply gate compares against the exact literal '1' and its default
 //     branch is ROLLBACK;
 //   * 02 writes the rollback receipt BEFORE it clears connection_id;
+//   * both of 02's write steps re-check the snapshot (same target, still
+//     dangling), count the skips and abort APPLY=1 on any of them;
 //   * 03 classifies 23503 and 55P03 by name, sets a lock_timeout, and does NOT
 //     swallow query_canceled or use a catch-all handler;
 //   * verify/migration-5896-up.sql still reproduces every sql`…` statement of
@@ -16,7 +18,7 @@
 //     fixture cannot silently drift away from the migration it stands in for.
 //
 // LAYER 2 (DATABASE_URL-gated): the full synthetic-PostgreSQL verification in
-//   run-verify.mjs — scenarios S1..S11 plus mutants M1/M2/M3. Skipped LOUDLY
+//   run-verify.mjs — scenarios S1..S12 plus mutants M1..M4. Skipped LOUDLY
 //   without DATABASE_URL; when METASHEET_REAL_DB_TEST_STEP=1 a missing
 //   DATABASE_URL or a missing `psql` FAILS instead of skipping (fail-not-skip,
 //   same discipline as scripts/ops/approval-s1-evidence-replay-gate.test.mjs).
@@ -168,6 +170,23 @@ test('02 aborts fail-closed when a row cannot hold a receipt', () => {
   assert.match(body, /\\if :apply_mode\nDO \$\$/, 'the abort guard runs only when actually applying')
 })
 
+test('02 re-checks the snapshot on BOTH write steps and aborts on a stale one', () => {
+  const body = code(pack('02-remediate.sql'))
+  // The snapshot is taken without FOR UPDATE, so each UPDATE must carry the
+  // predicates EPQ re-evaluates when it unblocks behind a concurrent writer.
+  const sameTarget = body.match(/AND es\.connection_id IS NOT DISTINCT FROM d\.target_id/g) || []
+  const stillDangling =
+    body.match(/AND NOT EXISTS \(\s*\n\s*SELECT 1 FROM data_sources ds WHERE ds\.live_id = es\.connection_id/g) || []
+  assert.equal(sameTarget.length, 2, 'STEP 1 and STEP 2 must both re-check the target the snapshot recorded')
+  assert.equal(stillDangling.length, 2, 'STEP 1 and STEP 2 must both re-check that the row is still dangling')
+  assert.ok(
+    !/CREATE TEMP TABLE h5_dangling[\s\S]*?FOR UPDATE/.test(body),
+    'the snapshot must stay a lock-free candidate list — the guard is the predicate, not a row lock',
+  )
+  assert.match(body, /STEP2_SKIPPED_STALE/, 'the skips must be counted and printed, not swallowed')
+  assert.match(body, /REMEDIATE_ABORT reason=stale-snapshot/, 'a stale snapshot must abort APPLY=1')
+})
+
 test('03 classifies 23503 and 55P03 by name and does not swallow anything else', () => {
   const body = code(pack('03-validate.sql'))
   assert.match(body, /VALIDATE CONSTRAINT fk_integration_external_systems_live_connection_id/)
@@ -244,7 +263,7 @@ test('the drift check bites: a fixture that drops the NOT VALID clause is reject
 
 const REQUIRE_DB = process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 
-test('synthetic-PostgreSQL verification (scenarios S1..S11 + mutants M1/M2/M3)', async t => {
+test('synthetic-PostgreSQL verification (scenarios S1..S12 + mutants M1..M4)', async t => {
   if (!process.env.DATABASE_URL) {
     if (REQUIRE_DB) assert.fail('METASHEET_REAL_DB_TEST_STEP=1 but DATABASE_URL is unset')
     t.skip('SKIPPED LOUDLY: set DATABASE_URL to a THROWAWAY database to run layer 2')
@@ -264,4 +283,7 @@ test('synthetic-PostgreSQL verification (scenarios S1..S11 + mutants M1/M2/M3)',
   assert.equal(report.M1.hits, 2)
   assert.equal(report.M2.receipt, '<null>', 'M2 must lose the rollback receipt')
   assert.equal(report.M3.timedOut, true, 'M3 must hang instead of classifying 55P03')
+  assert.equal(report.S12.staleSkipped, 1, 'S12 must skip the concurrently re-bound row')
+  assert.equal(report.M4.connection, '<null>', 'M4 must destroy the live re-binding the guard protects')
+  assert.equal(report.M4.receipt, 'ds-dead-1', 'M4 must stamp the forged receipt the guard prevents')
 })

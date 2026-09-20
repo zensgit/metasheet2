@@ -34,6 +34,12 @@
 //   S11 A binding whose target row is ABSENT from data_sources (not merely
 //       soft-deleted) is classified `target_state=absent`, remediated, and
 //       validated through — with the F4 invariant holding on a mixed set.
+//   S12 A binding RE-BOUND TO A LIVE SOURCE by a second session after 02 took
+//       its snapshot and while STEP 1 was blocked on its row lock keeps its new
+//       `connection_id`: the stale-snapshot guard's EPQ re-check skips it,
+//       STEP 2b counts the skip, and APPLY aborts fail-closed
+//       (`REMEDIATE_ABORT reason=stale-snapshot`) instead of committing a
+//       half-stale remediation with a forged receipt.
 //
 //   M1  MUTANT of 01 whose TOTAL is computed from its own predicate instead of
 //       the shared `hit` CTE: TOTAL becomes 3 while 2 HIT rows are listed, and
@@ -43,6 +49,12 @@
 //       clears the pointers, but `config.dataSourceId` comes back NULL and S4's
 //       receipt assertion goes red — i.e. the rollback evidence is really
 //       produced by that statement and not by something else.
+//   M4  MUTANT of 02 with the stale-snapshot guard removed from STEP 1 and
+//       STEP 2 (i.e. the shape the file had before this fix, whose only
+//       predicate was `es.id = d.key_id`): under exactly S12's race it COMMITS,
+//       NULLs the freshly re-bound `connection_id` and stamps it with a receipt
+//       pointing at the deleted source — no error, no non-zero exit. S12's
+//       assertion goes red against it.
 //   M3  MUTANT of 03 with the effective lock timeout removed: under the same
 //       contention as S8 it produces NO VALIDATE_RESULT line at all before the
 //       harness deadline, so S8's 55P03 classification is real.
@@ -230,7 +242,7 @@ export function dropFixture(schema) {
   try {
     exec(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE application_name IN ('h5-mutant', 'h5-lockholder') AND pid <> pg_backend_pid()`,
+        WHERE application_name IN ('h5-mutant', 'h5-lockholder', 'h5-rebinder') AND pid <> pg_backend_pid()`,
     )
   } catch { /* best effort */ }
   try { exec(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`) } catch { /* best effort */ }
@@ -266,6 +278,54 @@ export function fkValidated(schema) {
                        WHERE conname = 'fk_integration_external_systems_live_connection_id'
                          AND conrelid = to_regclass('integration_external_systems')), '<missing>')`,
   )
+}
+
+/**
+ * Second session: re-bind one dangling binding to a LIVE source and hold the
+ * ROW lock for `holdSeconds` before committing. This is the concurrency the
+ * stale-snapshot guard exists for — 02's snapshot (ACCESS SHARE, no FOR UPDATE)
+ * lists the row while it is still dangling, then STEP 1 blocks on this row lock
+ * and re-checks its qual (EPQ) against the row THIS session committed.
+ * The caller must NOT kill it before it commits — 02 unblocks only when it does.
+ */
+export function rebindConcurrently(schema, { id = 'es-dangle-1', to = 'ds-live', holdSeconds = 8 } = {}) {
+  const child = spawn(PSQL, ['-d', process.env.DATABASE_URL, '--no-psqlrc', '-q'], {
+    env: { ...BASE_ENV, PGAPPNAME: 'h5-rebinder' },
+    stdio: ['pipe', 'ignore', 'ignore'],
+  })
+  child.stdin.end(
+    `SET search_path = "${schema}";
+     BEGIN;
+     UPDATE integration_external_systems SET connection_id = '${to}' WHERE id = '${id}';
+     SELECT pg_sleep(${holdSeconds});
+     COMMIT;\n`,
+  )
+  return {
+    release() {
+      try { child.kill() } catch { /* best effort */ }
+      try {
+        exec(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE application_name = 'h5-rebinder' AND pid <> pg_backend_pid()`,
+        )
+      } catch { /* best effort */ }
+    },
+  }
+}
+
+/** Block until a named session holds the xid lock every writer takes. */
+function waitForWriter(appName, deadlineMs = 15_000) {
+  const until = Date.now() + deadlineMs
+  while (Date.now() < until) {
+    const held = scalar(
+      `SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+        WHERE a.application_name = '${appName}'
+          AND l.locktype = 'transactionid' AND l.mode = 'ExclusiveLock' AND l.granted`,
+    )
+    if (Number(held) > 0) return true
+    sleepSync(100)
+  }
+  return false
 }
 
 /** Hold ACCESS EXCLUSIVE on the fixture's binding table for `seconds`. */
@@ -333,6 +393,15 @@ export function mutate02DropReceipt(src) {
   const re = /WITH upd AS \(\n  UPDATE integration_external_systems es\n     SET config = jsonb_set[\s\S]*?FROM upd;/
   assert.match(src, re, 'M2 anchor (STEP 1 statement) not found in 02-remediate.sql')
   return src.replace(re, "SELECT 'STEP1_RECEIPT_WRITTEN' AS step, 0 AS rows;")
+}
+
+/** M4 — 02 no longer re-checks that the row still holds the snapshot's target. */
+export function mutate02DropStaleGuard(src) {
+  const guard =
+    /\n     AND es\.connection_id IS NOT DISTINCT FROM d\.target_id\n     AND NOT EXISTS \(\n           SELECT 1 FROM data_sources ds WHERE ds\.live_id = es\.connection_id\n         \)/g
+  const found = src.match(guard) || []
+  assert.equal(found.length, 2, 'M4 anchor: the stale-snapshot guard must appear on BOTH STEP 1 and STEP 2')
+  return src.replace(guard, '')
 }
 
 /** M3 — 03 no longer has an effective lock timeout. */
@@ -573,6 +642,89 @@ export function checkAbsentTarget() {
   }
 }
 
+/**
+ * S12 — a row re-bound to a LIVE source while 02 is in flight must survive.
+ * Shape: session B takes the row lock on `es-dangle-1` and re-points it at the
+ * live source, 02 (APPLY=1) snapshots BEFORE that commit — asserted, via
+ * STEP0.dangling == 2 — then blocks on the row lock inside STEP 1. When B
+ * commits, EPQ re-checks 02's qual against the new row version.
+ */
+export function checkConcurrentRebindSkipped() {
+  const schema = createFixture()
+  const rebind = rebindConcurrently(schema, { holdSeconds: 8 })
+  try {
+    assert.ok(waitForWriter('h5-rebinder'), 'the concurrent re-binder never took its row lock')
+    const started = Date.now()
+    const out = runPackFile('02-remediate.sql', schema, ['-v', 'APPLY=1', '-v', 'lock_timeout=30s'], {
+      timeout: 60_000,
+    })
+    const elapsed = Date.now() - started
+    const all = `${out.stdout}\n${out.stderr}`
+
+    // The window was really exercised: 02 waited on the row lock, and its
+    // snapshot predates B's commit.
+    const s0 = stepRow(out.stdout, STEP0)
+    assert.equal(s0.dangling, 2, 'S12 did not exercise the race: 02 snapshotted after the concurrent commit')
+    assert.ok(elapsed > 3_000, `02 should have waited on the row lock, returned in ${elapsed}ms`)
+
+    const steps = stepsByName(out.stdout)
+    assert.equal(steps.STEP1_RECEIPT_WRITTEN, 0, 'the moved row must not get a receipt for its OLD target')
+    assert.equal(steps.STEP2_CONNECTION_CLEARED, 1, 'only the row that did not move may be cleared')
+    assert.equal(steps.STEP2_SKIPPED_STALE, 1, 'the moved row must be counted as a stale skip')
+
+    // Fail-closed: a stale snapshot aborts the whole APPLY.
+    assert.notEqual(out.status, 0, 'APPLY must abort when the snapshot went stale')
+    assert.match(all, /REMEDIATE_ABORT reason=stale-snapshot rows=1/)
+
+    // THE assertion this scenario exists for.
+    assert.equal(
+      connectionOf(schema, 'es-dangle-1'),
+      'ds-live',
+      'a concurrently re-bound connection_id must survive 02',
+    )
+    assert.equal(receiptOf(schema, 'es-dangle-1'), '<null>', 'no rollback receipt may be forged for the old target')
+    assert.equal(danglingCount(schema), 1, 'the aborted transaction leaves the untouched row dangling')
+    return { elapsed, staleSkipped: steps.STEP2_SKIPPED_STALE }
+  } finally {
+    rebind.release()
+    dropFixture(schema)
+  }
+}
+
+/** M4 — the same race with the guard removed in memory. */
+export function mutantM4() {
+  const schema = createFixture()
+  const rebind = rebindConcurrently(schema, { holdSeconds: 8 })
+  try {
+    assert.ok(waitForWriter('h5-rebinder'), 'the concurrent re-binder never took its row lock')
+    const out = runPackSource(
+      mutate02DropStaleGuard(packSource('02-remediate.sql')),
+      schema,
+      ['-v', 'APPLY=1', '-v', 'lock_timeout=30s'],
+      { timeout: 60_000, env: { PGAPPNAME: 'h5-mutant' } },
+    )
+    const s0 = stepRow(out.stdout, STEP0)
+    assert.equal(s0.dangling, 2, 'M4 did not exercise the race: the mutant snapshotted after the concurrent commit')
+    assert.equal(out.status, 0, `M4 committed nothing? exited ${out.status}: ${out.stderr}`)
+    assert.ok(line(out.stdout, 'REMEDIATE_TX=committed'), 'M4 commits silently — that is the defect')
+
+    const connection = connectionOf(schema, 'es-dangle-1')
+    const receipt = receiptOf(schema, 'es-dangle-1')
+    assert.equal(connection, '<null>', 'M4 destroys the live re-binding')
+    assert.equal(receipt, 'ds-dead-1', 'M4 stamps a receipt pointing at the deleted source')
+    assert.throws(
+      () =>
+        assert.equal(connection, 'ds-live', 'a concurrently re-bound connection_id must survive 02'),
+      /must survive 02/,
+      'S12 must go red against M4',
+    )
+    return { connection, receipt }
+  } finally {
+    rebind.release()
+    dropFixture(schema)
+  }
+}
+
 export function checkPreMigrationIncomplete() {
   // S10 — #5896 not applied.
   const schema = createFixture({ migrate: false })
@@ -696,6 +848,7 @@ export function verifyAll() {
   checkPreMigrationIncomplete()
   report.S10 = true
   report.S11 = checkAbsentTarget()
+  report.S12 = checkConcurrentRebindSkipped()
 
   const m1fixture = createFixture()
   try {
@@ -705,6 +858,7 @@ export function verifyAll() {
   }
   report.M2 = mutantM2()
   report.M3 = mutantM3()
+  report.M4 = mutantM4()
 
   return report
 }

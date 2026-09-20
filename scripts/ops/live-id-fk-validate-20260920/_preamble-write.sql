@@ -18,10 +18,15 @@
 --     status. Because 02 wraps everything in a single explicit transaction, an
 --     abort leaves the database untouched: psql disconnects with the
 --     transaction open and the server rolls it back.
---   statement_timeout 120s — a runaway UPDATE cannot pin production. NOTE: a
---     statement timeout is SQLSTATE 57014 `query_canceled`, which 03's
---     classifier deliberately does NOT catch (see 03's header) — it surfaces as
---     an abort with no RESULT line, which the README reads as "unknown, re-run".
+--   statement_timeout 120s (override with `-v statement_timeout=…`) — a runaway
+--     UPDATE cannot pin production. NOTE: a statement timeout is SQLSTATE 57014
+--     `query_canceled`, which 03's classifier deliberately does NOT catch (see
+--     03's header) — it surfaces as an abort with no RESULT line, which the
+--     README reads as "unknown, re-run". On a large table 03's VALIDATE scan can
+--     legitimately exceed 120s, and a plain re-run would then hit the same wall
+--     deterministically; that is what the override is for. Raise it CONSCIOUSLY
+--     (owner call, quiet window) — it is the only thing bounding how long these
+--     files can hold their locks.
 --   lock_timeout 5s (override with `-v lock_timeout=…`) — neither file may sit
 --     in a lock queue behind application traffic. 03 turns the resulting 55P03
 --     into a named outcome instead of a stack trace.
@@ -45,5 +50,9 @@
   SET lock_timeout = '5s';
 \endif
 
-SET statement_timeout = '120s';
+\if :{?statement_timeout}
+  SET statement_timeout = :'statement_timeout';
+\else
+  SET statement_timeout = '120s';
+\endif
 SET idle_in_transaction_session_timeout = '30s';

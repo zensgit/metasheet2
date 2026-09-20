@@ -112,6 +112,34 @@ canonical 绑定的 `config` 里**没有** `dataSourceId`——
 的悬空行不会被处理一半。hermetic 测试用文本位置断言 STEP 1 在 STEP 2 之前；变异 M2
 把 STEP 1 拿掉，证明凭证确实由这条语句产生。
 
+### 快照是候选名单，不是授权（并发重绑）
+
+上面那句只覆盖了「行变成悬空」这个方向。**反方向同样真实**：CTAS 快照只取 ACCESS
+SHARE、不锁目标行（没有 `FOR UPDATE`，是取舍——为这点活在生产表上整事务持行锁代价
+更大），READ COMMITTED 下另一个会话可以在 STEP 1 执行期间把某行重绑到一个**活**源、
+或把它软删的目标恢复回来并提交。两步会在行锁上排队，解锁后由 EPQ 拿新版本重判谓词；
+若谓词只有 `es.id = d.key_id`，它就会把这条刚建立的合法绑定静默置 NULL，并盖上一张
+指向旧（已删）源的假凭证——STEP2.rows 照样等于 STEP0.remediable、STEP3 照样是 0、
+`REMEDIATE_RESULT` 照样干净，**零告警**，而 README 的逆操作会把它恢复到那个已删源
+（且那条 UPDATE 会被新 FK 以 23503 拒绝），新绑定永久丢失。
+
+修法是谓词，不是锁：STEP 1 与 STEP 2 各带
+
+```sql
+AND es.connection_id IS NOT DISTINCT FROM d.target_id
+AND NOT EXISTS (SELECT 1 FROM data_sources ds WHERE ds.live_id = es.connection_id)
+```
+
+EPQ 重判的正是这两条 → 动过的行被跳过。跳过不是静默的：STEP 2b 数出来、
+`REMEDIATE_RESULT` 带 `stale_skipped=N`、`remediated` 已扣掉它们，并且 `APPLY=1` 下
+`STEP2b > 0` 在 STEP 4 抛 `REMEDIATE_ABORT reason=stale-snapshot` 整单回滚（与
+`non-object-config` 同一套 fail-closed 纪律：宁可什么都不改，也不留说不清的中间态）。
+
+证据是真并发，不是文本断言：S12 让第二会话持行锁重绑 `es-dangle-1` 到活源再提交，
+断言 02 确实在行锁上等过（8.0s）、`STEP2_SKIPPED_STALE=1`、整单中止、该行仍指向新的
+活源且没有被写入凭证；M4 把这两条谓词删掉后跑同一场景，02 **成功 COMMIT**，该行
+`connection_id` 变 NULL、`config.dataSourceId` 被盖成 `ds-dead-1` ——守卫不是装饰。
+
 ### 三个刻意的「不做」
 
 - **不删绑定行。** 绑定带着 name / kind / role / capabilities / 凭据，以及下游
@@ -120,10 +148,25 @@ canonical 绑定的 `config` 里**没有** `dataSourceId`——
   ON DELETE RESTRICT）。置空指针是满足外键的最小改动且可逆；删行两样都不是。
 - **不改 `legacy_connection_fallback_eligible`。** 它是服务端持有的切换期证据
   （`zzzz20260902120000_add_integration_connection_binding.ts` 文件头合同），一个悬空
-  指针不构成任何证据。后果是明确的、也是想要的：02 之后这行是「legacy 形状指针 +
-  marker 仍 FALSE」，`plugins/plugin-integration-core/lib/connection-resolver.cjs:206-212`
-  对 marker 非 TRUE 的行直接抛 `CONNECTION_LEGACY_FALLBACK_DENIED`，不会悄悄读一个
-  已删数据源。绑定本来就坏了，这一步只是让它按名字失败。
+  指针不构成任何证据。后果是明确的、也是想要的，但**按 marker 分两条叉**，不是一句话
+  通吃（`connection_id` 置 NULL 后，
+  `plugins/plugin-integration-core/lib/connection-resolver.cjs:269-288` 把这行交给
+  `resolveLegacy`）：
+  - marker=FALSE：第一道门 `connection-resolver.cjs:206-215` 直接拒，
+    `CONNECTION_LEGACY_FALLBACK_DENIED`。
+  - marker=TRUE：第一道门**放行**。这不是边角——
+    `zzzz20260902120000_add_integration_connection_binding.ts:97-106` 的回填是一条
+    UPDATE 同时写 `connection_id` 与 `legacy_connection_fallback_eligible = TRUE`
+    且不删 `config.dataSourceId`，所以这批「指针在 + marker TRUE」的行正是本包要清的
+    主体人群。它们在 legacy 分支更后面失败：指针经与 canonical **同一个** facade 调用
+    解析（`:235` vs `:172`），软删的源对这个 facade 就是「不存在」
+    （`packages/core-backend/src/data-adapters/data-source-plugin-facade.ts:507-513`）
+    → `CONNECTION_LEGACY_UNAVAILABLE`（`:244-250`）；能解析但非 owner-only →
+    `CONNECTION_LEGACY_FALLBACK_DENIED`（`:251-257`）。该分支还额外要求
+    `runAs='user'`（`:217-223`），比 canonical 严格更窄。
+
+  两条叉都不会读通已删源；01 输出的 `legacy_fallback` 列就是「这行落哪条叉」的依据，
+  README 要求 owner 批 APPLY 前先看它。绑定本来就坏了，这一步只是让它按名字失败。
 - **不触发外键复查。** STEP 1 不碰 `connection_id`（PostgreSQL 在引用键列未变时跳过
   RI 检查），STEP 2 置 NULL（MATCH SIMPLE 放行）。所以 02 在这些行当前正违反 NOT
   VALID 约束的情况下照样跑得通——这一点在真 PG 16.9 上验过。
@@ -202,7 +245,8 @@ VALID 建回来，是 schema 改动，同样是 owner 层动作。
   `${sql.lit/raw(...)}`、归一化空白，断言每一条都出现在
   `verify/migration-5896-up.sql` 里。再加一条「防漂移检查本身会咬」的测试：把
   fixture 文本在内存里去掉 `NOT VALID` 子句，断言检查抛错。
-- **LAYER 2 DATABASE_URL 门控**：便携 PG 16.9 上的十一个场景（S1..S11）+ 三个变异，见验证文档。
+- **LAYER 2 DATABASE_URL 门控**：便携 PG 16.9 上的十二个场景（S1..S12）+ 四个变异，见验证文档。
+  其中 S8/S12/M3/M4 是真并发（第二会话持表锁或行锁），不是文本断言。
   没有 `DATABASE_URL` 时**大声跳过**；`METASHEET_REAL_DB_TEST_STEP=1` 时缺库或缺
   `psql` 改为失败（fail-not-skip，对齐
   `scripts/ops/approval-s1-evidence-replay-gate.test.mjs`）。
