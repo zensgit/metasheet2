@@ -403,7 +403,7 @@ even though the person cannot log in.
 |---|---|---|---|
 | 1a | 分句一:「重新验证当前资格(**在职**…)」 | **SHIPPED** (half A) | `assertCancelRoundSeatsEligibleInTxn`;`§2-G3 正控 P1` / `负控 N1` / `负控 N2` |
 | 1b | 分句一:「…**仍在该组织单元**」 | **OPEN** (half B) — 未实现、已登记 | 常驻 `正控 P2`(`org_id IS NULL` 的原单不被拒) |
-| 2 | 分句二:「历史委托不自动成为当前授权」 | **RULED by owner 2026-09-20 —— 读法 (a) + 阻断;已在本分支实现** | 独立验证 §2.2 四腿逐字相同;**25 条**真库用例 + 五条 mutation(M-B/M-C/M-D/M-E/M-F,见验证 MD **Part O**;Part N / N-H 的对应读数已被 Part O 取代) |
+| 2 | 分句二:「历史委托不自动成为当前授权」 | **RULED by owner 2026-09-20 —— 读法 (a) + 阻断;已在本分支实现** | 独立验证 §2.2 四腿逐字相同;**27 条**真库用例 + 七条 mutation(M-B/M-C/M-D/M-E/M-F/M-G/M-H,见验证 MD **Part O**;Part N / N-H 的对应读数已被 Part O 取代) |
 | 3 | 分句三:「资格不成立的席位 ⇒ 阻断并提示管理员」 | **SHIPPED**(阻断,永不过滤)。owner 2026-09-20 裁决把它的**人口**也定死了:席位要么是**被还原的原审批主体**并在他身上求值,要么**根本坐不下**(行不可归属)⇒ 同样阻断。legacy 无 `nodeKey` 语料上「席位停在 D、该句对 A 不执行」的旧状态**已不复存在** | `负控 N1/N2` 的零行断言;mutation R7-M3 与 **M-C**;legacy 臂 `P12(a)/N7(a)/N8(a)/P13(a)`(现在全部断言 **409 零行**);多人委托臂 `N9(a)/N10(a)` |
 
 分句二那一行是本次新增的一行:在此之前它既不在 SHIPPED 一侧、也不在 OPEN 清单上,而同一条款的组织半边
@@ -453,6 +453,8 @@ verification 2026-09-19 §2.2; the AFTER column is measured on this branch, 验�
 | legacy 请求体伪造 `metadata.nodeKey` 成不存在的节点 | 201, seat = `[D]`(**修复前实测可绕过整组阻断**) | (不适用) | **409 / `seat_unresolvable` / 零行**(`N11(a)`) |
 | legacy 请求体带**真实**的 `nodeKey` | 201, seat = `[D]` | (不适用) | **201, seat = `[A]`**(`P20(a)`)—— 传真话不是绕过,是把还原做对 |
 | 被委托人用 legacy 给自己的兄弟节点报成被委托节点 | (同形诚实单据 `P11(a)` 答 `{A, D}`) | (不适用) | **201, seat = `[A]`**(`P21(a)`)—— **已登记残留**:他把自己摘了出去,门槛 2→1 |
+| 同一人「角色节点亲自决定」+「user 节点是 A 的代理」,**全程 `/actions`** | 201, seat = `{A, D}` | **201, seat = `{A, D}`**(`P22(a)`) | (不适用) |
+| D 走 legacy 把 `nodeKey` 报成**第三人 E 的 user 节点**(该节点真实存在) | 201, seat = `[D]` | (不适用) | **409 / `seat_unresolvable` / 零行**(`N13(a)`) |
 
 Reading (a) answers 「原审批人」 uniformly, so a still-valid delegation does NOT route the cancel
 round to the delegatee. That is a consequence of the cancel round's own snapshot carrying no
@@ -479,8 +481,16 @@ contract and is not implemented here.
   - the row has **no `nodeKey`** and the actor holds **two or more different** delegators here (the
     owner's own 「多人委托同一人」 counter-example) ⇒ same code, `reasons = ['seat_unresolvable']`;
   - the row **names a node** and the actor holds a delegated seat here ⇒ the name is **CORROBORATED**:
-    it must land on **exactly one** of that actor's own assignment rows, delegated or not. Anything
-    else ⇒ `reasons = ['seat_unresolvable']`.
+    - it lands on **exactly one** of that actor's own USER assignment rows ⇒ trust it (restore to that
+      row's `delegatedFrom`, or seat the actor when that row is their own un-delegated seat);
+    - it lands on **none**, but the node carries a **non-user** (role / source_queue) seat on this
+      instance ⇒ seat the actor. Delegation substitution only ever touches `assignmentType === 'user'`
+      seats, so a non-user seat has nothing to restore and naming it is not a way to escape a restore.
+      正控 `P22(a)`;
+    - it lands on **none** and the node carries no non-user seat either — the node does not exist on
+      this instance, or it is somebody ELSE's user node ⇒ `reasons = ['seat_unresolvable']`.
+      负控 `N11(a)` (forged) / `N13(a)` (pointing at a third party's node);
+    - it lands on **more than one** ⇒ `reasons = ['seat_unresolvable']` (node re-entry; NOT CONSTRUCTED).
 
   **Why corroboration, and not "trust `nodeKey` when it is present" (the first cut of this fix, which
   was MEASURED to be trivially bypassable).** The legacy route copies the request body's `metadata`
@@ -490,6 +500,21 @@ contract and is not implemented here.
   and nothing blocked. 负控 `N11(a)` is that witness, now blocking; 正控 `P20(a)` sends the TRUE
   `nodeKey` down the same route and gets the honest restore, so the rule rejects **names without
   evidence**, not «metadata in the body».
+
+  **And why corroboration is not 「the actor's own USER rows」 either — that was the fix's own first
+  cut and it MEASURED as a false BLOCK on an honest document.** A person who decides a ROLE node in
+  person and is ALSO somebody's delegate at a user node on the same instance has no user assignment
+  row at the role node (`assignee_id` there is the ROLE), so that document — 100% through `/actions`,
+  no legacy route anywhere — became permanently un-cancellable. That is a REGRESSION against the
+  pre-corroboration commit, which answered `{A, D}`, not a stricter rule. 正控 `P22(a)` is that
+  witness; 负控 `N13(a)` shows the widening did not re-open the hole (naming a third party's user node
+  still blocks), so the carve-out is pinned to 「non-user seat」 and not to 「a second node exists」.
+
+  **The widening's own cost, stated.** It cannot prove the actor was a MEMBER of that role —
+  `approval_assignments` records only the role id, and membership is judged from the request's `roles`
+  at decision time and never persisted. A delegatee naming a role node that genuinely exists on the
+  instance can therefore be seated as themselves instead of restored. Same family as the residual
+  below (self-seating / self-removal, never taking somebody else's seat); **not fixed here**.
 
   Restoring to the single known delegator was considered and NOT chosen: the same actor may also
   have approved a seat OF THEIR OWN through the same node-key-less route, so the restore would be a

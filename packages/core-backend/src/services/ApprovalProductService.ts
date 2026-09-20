@@ -8736,12 +8736,15 @@ export class ApprovalProductService {
       //
       // The query therefore stops deciding the seat by itself. It returns, per `approve` row, the two
       // sets the decision needs, and the attribution below is explicit:
-      //   · `node_seat_delegators` — the DISTINCT `delegatedFrom` of the actor's OWN assignment rows
-      //                              AT THIS ROW'S node, delegated or not (a NULL element means "an
-      //                              un-delegated seat of their own"). EMPTY means the row's `nodeKey`
-      //                              matches NO seat this actor ever held on this instance — which is
-      //                              NOT the same as "no delegation", see CORROBORATION below;
-      //   · `instance_delegators`  — delegators for this actor ANYWHERE on this instance.
+      //   · `node_actor_user_seats`      — the DISTINCT `delegatedFrom` of the actor's OWN **user**
+      //                                     assignment rows AT THIS ROW'S node (a NULL element means
+      //                                     "an un-delegated seat of their own"). EMPTY means this
+      //                                     actor never held a USER seat at that node;
+      //   · `node_non_user_seat_count`   — how many NON-user seats (role, source_queue) that node
+      //                                     carries on this instance. This is what tells "the actor
+      //                                     decided a ROLE node here" apart from "that node does not
+      //                                     exist / belongs to somebody else" — see CORROBORATION;
+      //   · `instance_delegators`        — delegators for this actor ANYWHERE on this instance.
       //
       // CORROBORATION — why the node set is no longer filtered to `delegatedFrom IS NOT NULL`.
       // `metadata` on a legacy `POST /:id/approve` row is copied VERBATIM out of the REQUEST BODY, so
@@ -8749,10 +8752,18 @@ export class ApprovalProductService {
       // rows made an unmatched `nodeKey` indistinguishable from "this actor holds their own seat here",
       // and the whole block could then be walked past by sending `{"metadata":{"nodeKey":"anything"}}`
       // — MEASURED on a real DB before this fix: the delegatee was seated and nothing blocked. The row
-      // must therefore be CORROBORATED against the assignment table rather than trusted: for an actor
-      // who held any delegated seat here, the row's `nodeKey` must land on EXACTLY ONE of that actor's
-      // own assignment rows. 负控 `N11(a)` is the witness; 正控 `P20(a)` shows that supplying the TRUE
-      // `nodeKey` is not a bypass either — it just produces the honest restore.
+      // must therefore be CORROBORATED against the assignment table rather than trusted. 负控 `N11(a)`
+      // is the witness; 正控 `P20(a)` shows that supplying the TRUE `nodeKey` is not a bypass either —
+      // it just produces the honest restore.
+      //
+      // Corroboration is NOT 「the nodeKey must land on one of the actor's own USER rows」, which was
+      // this fix's own first cut and which MEASURED as a false BLOCK on an entirely honest document:
+      // a person who decides a ROLE node in person, and is ALSO somebody's delegate at a user node on
+      // the same instance, has no user assignment row at the role node — `assignee_id` there is the
+      // ROLE — so that document became permanently un-cancellable (正控 `P22(a)` is that witness,
+      // 100% through `/actions`, no legacy route involved). Delegation substitution only ever touches
+      // `assignmentType === 'user'` seats (`ApprovalAssigneeResolver.pushResolved`), so a non-user seat
+      // has nothing to restore and naming it is not a way to escape a restore.
       // Both read `approval_assignments.metadata.delegatedFrom`, written by
       // `ApprovalAssigneeResolver.pushResolved` (the repo's single delegation substitution point) and
       // KEPT after approve as `is_active = FALSE` audit history — `ApprovalDelegationConfig
@@ -8767,7 +8778,8 @@ export class ApprovalProductService {
       const approverRows = await client.query<{
         actor_id: string
         node_key: string | null
-        node_seat_delegators: (string | null)[] | null
+        node_actor_user_seats: (string | null)[] | null
+        node_non_user_seat_count: number | null
         instance_delegators: (string | null)[] | null
       }>(
         `SELECT r.actor_id AS actor_id,
@@ -8779,7 +8791,11 @@ export class ApprovalProductService {
                      AND a.assignee_id = r.actor_id
                      AND a.assignment_type = 'user'
                      AND a.node_key = r.metadata->>'nodeKey'
-                ) AS node_seat_delegators,
+                ) AS node_actor_user_seats,
+                (SELECT COUNT(*) FROM approval_assignments a
+                   WHERE a.instance_id = r.instance_id
+                     AND a.node_key = r.metadata->>'nodeKey'
+                     AND a.assignment_type <> 'user')::int AS node_non_user_seat_count,
                 ARRAY(
                   SELECT DISTINCT a.metadata->>'delegatedFrom'
                     FROM approval_assignments a
@@ -8858,25 +8874,41 @@ export class ApprovalProductService {
           continue
         }
 
-        // The row names a node AND this actor held a delegated seat here, so the name must be
+        // The row names a node AND this actor held a delegated seat somewhere here, so the name must be
         // CORROBORATED against the seats that actually exist (it may have come straight out of a
-        // request body). Exactly one matching assignment row ⇒ trust it; anything else ⇒ BLOCK.
-        const nodeSeats = row.node_seat_delegators ?? []
-        if (nodeSeats.length !== 1) {
-          // `0` — the `nodeKey` matches no seat this actor ever held here: either forged (负控
-          // `N11(a)`, MEASURED) or written by a writer whose node vocabulary this instance does not
-          // share. `>1` — two different `delegatedFrom` values for one (instance, node, assignee),
-          // which needs a node RE-ENTRY that rewrote the delegation between epochs
-          // (`idx_approval_assignments_active_unique` is partial on `is_active = true`); that arm is
-          // NOT CONSTRUCTED this round, and it shares this member rather than getting an untested one.
+        // request body).
+        const actorUserSeats = row.node_actor_user_seats ?? []
+        if (actorUserSeats.length > 1) {
+          // Two different `delegatedFrom` values for one (instance, node, assignee): no unique
+          // 原审批主体. Needs a node RE-ENTRY that rewrote the delegation between epochs
+          // (`idx_approval_assignments_active_unique` is partial on `is_active = true`), so this arm
+          // is NOT CONSTRUCTED this round; it shares this member rather than getting an untested one.
           unseatableRowCount += 1
           unseatableReasons.add('seat_unresolvable')
           continue
         }
-        const delegator = nodeSeats[0]
-        // A NULL element means the one matching seat is the actor's OWN, un-delegated seat at this
-        // node — they are their own subject there (正控 `P11(a)` node 2, `P18(a)`).
-        seatIds.push(typeof delegator === 'string' && delegator.length > 0 ? delegator : actorId)
+        if (actorUserSeats.length === 1) {
+          // A NULL element means the one matching seat is the actor's OWN, un-delegated user seat at
+          // this node — they are their own subject there (正控 `P11(a)` node 2, `P18(a)`).
+          const delegator = actorUserSeats[0]
+          seatIds.push(typeof delegator === 'string' && delegator.length > 0 ? delegator : actorId)
+          continue
+        }
+        // No USER seat of this actor's at that node. Distinguish the two ways that happens, because
+        // one is honest and one is not:
+        if ((row.node_non_user_seat_count ?? 0) > 0) {
+          // The node carries a ROLE (or source_queue) seat on this instance — the actor decided it
+          // through that seat, which delegation substitution never touches, so there is nothing to
+          // restore and nothing to escape. Seat the actor. 正控 `P22(a)`.
+          seatIds.push(actorId)
+          continue
+        }
+        // The node carries no non-user seat and none of this actor's: either it never existed on this
+        // instance at all (负控 `N11(a)`, the forged key, MEASURED as a live bypass before this) or it
+        // is somebody ELSE's user node, which this actor naming it does not make theirs. Both are
+        // names without evidence ⇒ BLOCK.
+        unseatableRowCount += 1
+        unseatableReasons.add('seat_unresolvable')
       }
       const approverIds = [...new Set(seatIds)].filter((id) => !isSystemSentinelActor(id))
 
