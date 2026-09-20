@@ -4765,6 +4765,27 @@ M-viii′ / M-ix 下都**不红** —— 台账按实测归因,不把它们当�
 **作用域选择的代价也被量了**:若把结算合取改成**全局**求值(而不是只在非 user 臂内),
 31 组 user 席位臂里会有 **1 组**改变答案 —— 这就是把它留在臂内的理由,写成数字而不是判断。
 
+## O8.5b C-2 / 投影候选的合并事实(在**交付 head** 上现算;给命令,不给要背的常数)
+
+```
+git merge-tree --write-tree <C-1 head> $(git rev-parse origin/feat/approval-cancel-round-phase2)
+git merge-tree --write-tree <C-1 head> $(git rev-parse origin/feat/approval-cancel-round-phase2-history-projection)
+```
+
+| 项 | 实测(`2026-09-21`,`git fetch origin` 之后) |
+|---|---|
+| 对象(C-1) | `a85f33d194c51f629d705ee18e7f3cea91ed5bb2` —— 本轮**唯一**一次 src 改动的提交;本节所在的这条文档提交**不动 src**,所以 §O8.4 的文件 sha256 仍然有效 |
+| **C-2** `origin/feat/approval-cancel-round-phase2` = `6a40f0121a36d7e54fde98088ca68212653403bf` | **EXIT 0**,树 **`98da4784c9918d0e6571c79a8c1f480a14108ccd`** |
+| **投影候选** `origin/feat/approval-cancel-round-phase2-history-projection` = `458072454e45b82d3d51e1e808ee87bc1d6f1906`(与任务书点名的对象**逐字相符**) | **EXIT 0**,树 **`855023c10dc17a14156e1e1e8c79fd1012a8b71b`** |
+| 切片基线 `b8b71539a6…` 是 C-2 的祖先? | `git merge-base --is-ancestor` ⇒ **YES** |
+| 与 `origin/main` 的 merge-base | `868c8d2b26424fcaa8405661a6999abb17ec6d93` |
+
+**判据是 `EXIT 0`,不是那两串树 SHA。** 树 SHA 对**对象**有效:本文档提交本身会换一个 head,
+在那个 head 上复算仍然 `EXIT 0`,但树是另一对值 —— 所以上表逐行点名了它的对象,而**复核方式是上面那两条命令**。
+这正是门审第 4 轮 NIT 与第 3 轮 NIT-1 同一族纪律:数字只对它下面点名的对象有效。
+
+**三方合并干净 ≠ 逐提交重放干净**:rebase 本轮**同样未实跑**(见 §O8.6)。
+
 ## O8.6 本轮**没有**验的(如实列)
 
 - **生产语料普查**(「legacy 行 × 委托 × 多 role id 节点」在生产库的规模)—— 需要生产库,不在授权内。本节所有「可构造」一律**不写成「现网必然存在」**。
