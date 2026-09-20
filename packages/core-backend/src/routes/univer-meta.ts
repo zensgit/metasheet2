@@ -191,6 +191,8 @@ import {
   SHEET_NOT_FOUND_MESSAGE,
   SheetNotLiveError,
   assertSheetLive,
+  loadSheetLiveness,
+  type SheetLiveness,
 } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
@@ -4528,6 +4530,26 @@ async function tryResolveView(
 // into every new sheet-addressed route (routes/automation.ts most recently, #5779). Both now come
 // from multitable/sheet-refusals.ts so the copies cannot drift: the refusal SHAPE is a client
 // contract (clients switch on `error.code`), not a per-file detail. Call sites are unchanged.
+
+/**
+ * The SAME liveness refusal as `sendSheetNotLive`, for the handlers that cannot touch `res`.
+ *
+ * The record_permissions PUT/DELETE run their whole decision inside `pool.transaction` and return a
+ * typed OUTCOME object; the response is written only after COMMIT (a body written inside the
+ * callback survives a rollback). So they need the refusal as a VALUE, not as a send. The codes and
+ * messages come from `multitable/sheet-liveness.ts` — the same two bodies `sendSheetNotLive` emits,
+ * so the wire shape cannot drift from every other sheet-addressed route.
+ *
+ * Values-free by construction: no sheet id is taken, so none can be echoed back.
+ */
+function sheetNotLiveOutcome(
+  liveness: SheetLiveness,
+): { kind: 'error'; status: number; code: string; message: string } {
+  if (liveness === 'deleted') {
+    return { kind: 'error', status: 404, code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE }
+  }
+  return { kind: 'error', status: 404, code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE }
+}
 
 // ── F21: display-name rename (sheet + base) ────────────────────────────────────
 // The delivery contract (§12/§15 of the multitable application model) says display names are the
@@ -12947,10 +12969,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         })
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
-        const sheet = await loadSheetRow(query, sheetId)
-        if (!sheet) {
-          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
-        }
+        // ORDER (#5839): AUTHORITY FIRST, then existence. The sheet-row probe used to sit here, ahead
+        // of the 403, and answered 404 with the id echoed back — so a signed-in caller this route then
+        // refused could tell a live sheet from a soft-deleted or absent one just by reading the status.
+        // Nothing the capability resolver consumes reads `meta_sheets.deleted_at`, so a caller without
+        // canManageSheetAccess now gets the SAME 403 in all three states.
         const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
           query,
           sheetId,
@@ -12959,6 +12982,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (!capabilities.canManageSheetAccess) {
           return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
         }
+
+        // Liveness AFTER the 403, and it is this route's own check: the resolver above returns
+        // { isAdminRole, capabilities, permissions } — no liveness — so dropping the probe without
+        // this would let a manager write grants onto a soft-deleted sheet (the record rows outlive it).
+        // One PK lookup, inside the transaction, under the advisory lock already held.
+        const sheetLiveness = await loadSheetLiveness(query, sheetId)
+        if (sheetLiveness !== 'live') return sheetNotLiveOutcome(sheetLiveness)
 
         const recordCheck = await query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
         if (recordCheck.rows.length === 0) {
@@ -13044,10 +13074,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         })
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
-        const sheet = await loadSheetRow(query, sheetId)
-        if (!sheet) {
-          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
-        }
+        // ORDER (#5839): same as PUT — authority first, then existence. The pre-403 sheet-row probe
+        // told a caller this route was about to refuse whether the sheet was live, soft-deleted or
+        // never there; the capability inputs do not read `meta_sheets`, so all three now answer 403.
         const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
           query,
           sheetId,
@@ -13056,6 +13085,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (!capabilities.canManageSheetAccess) {
           return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
         }
+
+        // Liveness AFTER the 403 — the resolver has none to give, and a revoke on a deleted sheet
+        // must still refuse rather than quietly edit a sheet that no longer exists.
+        const sheetLiveness = await loadSheetLiveness(query, sheetId)
+        if (sheetLiveness !== 'live') return sheetNotLiveOutcome(sheetLiveness)
 
         const result = await query(
           'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
