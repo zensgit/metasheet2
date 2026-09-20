@@ -88,3 +88,16 @@
 服务替身用 `vi.spyOn` 打在真实单例上，**不**用 `vi.mock` 替换模块（限流器 / SafetyGuard / 健康聚合器被 `src/` 大面积引用）。一个本批特有的坑写在 spec 头：`initAdminRoutes()` 内部会调 `initSafetyGuard()`，它 **destroy 并替换** SafetyGuard 单例（`admin-routes.ts:2146`），所以 SafetyGuard 的 spy 必须在建完 app 之后装——spec 里统一走 `mountApp()` 而不是直接 `pinned.setApp()`。
 
 验证记录与变异自证见 `admin-read-gates-batch3-verification-20260920.md`。
+
+## 残余已清零（追加于 2026-09-20，基线 `origin/main` = `1a6663a41`）
+
+上文「本批明确不动」里唯一被留置的读端点 `GET /slo/status` 已在同日由 `fix/admin-slo-status-gate` 补门，`admin-routes.ts` 下的无门 GET 归零。留置的理由在补门时被重新核了一遍，结论是它从一开始就比实际情况保守：
+
+- 留置写的是「#5680 合入后再动，否则把那个 PR 钉红」。实际情况是 #5680 的分支基于 #5665 而不是 main，它的 CI 跑在自己的分支树上；main 上给 `/slo/status` 加门不会进入 #5680 的任何一次检查。真正的后果只有一个：#5680 rebase 到 main 时，它那条以「存在一条首位无门的 GET」为素材的反向对照不再有素材可指，必须改成正向形式。
+- 因此接力棒的方向也反了过来：原来是「#5680 合入 → 本批闭世界用例变红 → 提醒补门」；现在是「闭世界用例钉死空列表 → #5680 rebase 时必须自己把反向对照改成正向」。这一点写进了 `admin-read-gates-batch3-authz.test.ts` 的文件头。
+
+补门后的形状与本批其余四条逐字一致：`requireAdminRole()` 作为 `/slo/status` 的首位 handler，三态语义不变（见「门的语义」一节），管理员侧响应体零变化。暴露面的描述见 `admin-routes.ts` 该路由上方的 `SECURITY` 注释：`sloService.getSLOStatus()`（`SLOService.ts:122`）聚合的是进程级 prom-client registry，全程没有任何租户谓词，所以加门前任何租户的任何已认证用户都能按需轮询平台自身的错误预算余量与 `healthy / at_risk / violated` 判定。
+
+本批其余残余（`openapi/admin-api.yaml` 全文件缺 `securitySchemes`、500 分支回显 `err.message`）不在该 PR 范围内，仍然是残余。
+
+验证记录与变异自证见 `admin-slo-status-gate-verification-20260920.md`。

@@ -1371,8 +1371,19 @@ router.put(
 /**
  * GET /api/admin/slo/status
  * Get SLO status and error budgets
+ *
+ * SECURITY (issue #5678, batch 3 residual): this read used to carry no authorization at all — the
+ * last ungated GET in this file. It delegates to sloService.getSLOStatus() (SLOService.ts:122),
+ * which aggregates the process-wide prom-client registry with no tenant predicate anywhere, so the
+ * response is the platform's own reliability posture — per-SLO current availability, error-budget
+ * total/consumed/remaining and the healthy/at_risk/violated verdict — to any authenticated caller of
+ * any tenant. That is a free "is the platform hurting right now, and how much budget is left before
+ * it breaches?" oracle, pollable at will. Gated on platform admin like its /dlq, /ratelimits and
+ * /health/summary siblings (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 RBAC_CHECK_FAILED fail-closed; no database pool -> isAdmin() returns false at
+ * rbac/service.ts:20 -> 403, never an open door — see guards/audit-integration.ts:113).
  */
-router.get('/slo/status', async (req: Request, res: Response) => {
+router.get('/slo/status', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const status = await sloService.getSLOStatus();
     res.json({

@@ -1,10 +1,9 @@
 /**
- * issue #5678 (batch 3) — the last four GET routes under /api/admin that carried NO authorization,
- * minus the one held back for an in-flight PR.
+ * issue #5678 (batch 3) — the last five GET routes under /api/admin that carried NO authorization.
  *
  * Batch 1 (#5710) gated GET /api/admin/dlq; batch 2 (#5884) gated /shards, /shards/:name, /queues,
  * /health/detailed and /health/subsystem/:name — see tests/unit/admin-read-gates-batch2-authz.test.ts,
- * whose skeleton this suite follows. Batch 2 left five residuals; this batch closes four of them:
+ * whose skeleton this suite follows. Batch 2 left five residuals; this batch closes all five:
  *
  *   GET /api/admin/safety/status    — is the destructive-operation brake switched on, and how many
  *                                     dangerous operations are sitting unconfirmed right now
@@ -15,18 +14,23 @@
  *                                     caller-chosen keys (`tenant:<id>`, message-rate-limiter.ts:230)
  *   GET /api/admin/health/summary   — the coarse half of the /health pair batch 2 gated: status,
  *                                     uptime, per-status subsystem counts, hasWarnings / hasErrors
+ *   GET /api/admin/slo/status       — the platform's reliability posture: per-SLO current
+ *                                     availability and error budget (total / consumed / remaining /
+ *                                     remaining %) plus the healthy / at_risk / violated verdict
  *
  * Before this change any authenticated user of any tenant, holding no role whatsoever, could read
- * all four. The gate is requireAdminRole() as the FIRST handler on each route, same three-state
+ * all five. The gate is requireAdminRole() as the FIRST handler on each route, same three-state
  * semantics as batches 1 and 2: no user or non-admin -> 403 ADMIN_REQUIRED; the RBAC lookup throwing
  * -> 503 RBAC_CHECK_FAILED (fail-closed); no database pool -> isAdmin() returns false at
  * rbac/service.ts:20 -> 403, never an open door. See guards/audit-integration.ts:113.
  *
- * The fifth residual, GET /slo/status, is deliberately still ungated on this tree: #5680 is OPEN and
- * its structural spec uses that route as its reverse control ("a GET with no admin guard in first
- * position"), so gating it here would red that PR. It is the only ungated GET left in
- * admin-routes.ts, and the sweep at the bottom of this file pins exactly that — so the day #5680
- * merges, the follow-up cannot be forgotten silently: the sweep is what has to be edited.
+ * GET /slo/status was held back when this suite first landed, because #5680 (open, branched off
+ * #5665, not off main) uses that route as its reverse control: "a GET with no admin guard in first
+ * position". Its CI runs on that branch, not on this tree, so gating the route here cannot red it;
+ * what it does mean is that when #5680 rebases onto main it has to turn that reverse control into a
+ * positive one, since there is no longer any ungated GET in admin-routes.ts to point at. The sweep
+ * at the bottom of this file is now a closed-world zero assertion, so a route that regresses — or a
+ * new ungated GET added later — reds it by name rather than slipping through unremarked.
  *
  * /safety/status is gated at its mount point (admin-routes.ts:97) rather than inside
  * createSafetyStatusEndpoint(): that factory has exactly one call site in the tree, and its body is
@@ -72,6 +76,7 @@ import { initAdminRoutes } from '../../src/routes/admin-routes'
 import { getSafetyGuard } from '../../src/guards/SafetyGuard'
 import { getRateLimiter } from '../../src/integration/rate-limiting'
 import { getHealthAggregator } from '../../src/services/HealthAggregatorService'
+import { sloService } from '../../src/services/SLOService'
 
 // Values-free fixtures: synthetic bucket key and counters only, no tenant id, host or credential.
 const BUCKET_KEY = 'tenant-fixture-a'
@@ -106,6 +111,28 @@ function bucketStatsFixture() {
   }
 }
 
+/**
+ * Values-free SLO posture: a synthetic indicator id with a budget deliberately most of the way
+ * spent, so a leak of this payload would be visible as an `at_risk` verdict in the assertions.
+ */
+function sloStatusFixture() {
+  return [
+    {
+      id: 'slo-fixture-availability',
+      name: 'SLO fixture — availability',
+      target: 0.999,
+      currentAvailability: 0.9975,
+      errorBudget: {
+        total: 400,
+        consumed: 340,
+        remaining: 60,
+        remainingPercentage: 15,
+      },
+      status: 'at_risk' as const,
+    },
+  ]
+}
+
 function healthFixture() {
   return {
     status: 'healthy',
@@ -137,6 +164,7 @@ let getGlobalStatsSpy: ReturnType<typeof vi.spyOn>
 let getBucketStatsSpy: ReturnType<typeof vi.spyOn>
 let getLastHealthSpy: ReturnType<typeof vi.spyOn>
 let checkHealthSpy: ReturnType<typeof vi.spyOn>
+let getSLOStatusSpy: ReturnType<typeof vi.spyOn>
 
 function buildApp(user?: { id: string; email?: string }): Express {
   const app = express()
@@ -165,7 +193,7 @@ function mountApp(user?: { id: string; email?: string }): void {
 
 const pinned = usePinnedServer()
 
-/** Every service a denied caller must not have been able to reach through any of the four routes. */
+/** Every service a denied caller must not have been able to reach through any of the five routes. */
 function expectNoServiceReached() {
   expect(isEnabledSpy).not.toHaveBeenCalled()
   expect(pendingCountSpy).not.toHaveBeenCalled()
@@ -174,6 +202,7 @@ function expectNoServiceReached() {
   expect(getBucketStatsSpy).not.toHaveBeenCalled()
   expect(getLastHealthSpy).not.toHaveBeenCalled()
   expect(checkHealthSpy).not.toHaveBeenCalled()
+  expect(getSLOStatusSpy).not.toHaveBeenCalled()
 }
 
 beforeEach(() => {
@@ -194,6 +223,12 @@ beforeEach(() => {
   // cache warmed by another suite.
   getLastHealthSpy = vi.spyOn(aggregator, 'getLastHealth').mockReturnValue(null)
   checkHealthSpy = vi.spyOn(aggregator, 'checkHealth').mockResolvedValue(healthFixture() as never)
+
+  // Memory-level double on the exported singleton admin-routes.ts:29 imports: the real
+  // getSLOStatus() reads the process-wide prom-client registry, which other suites also write to.
+  getSLOStatusSpy = vi
+    .spyOn(sloService, 'getSLOStatus')
+    .mockResolvedValue(sloStatusFixture() as never)
 })
 
 afterEach(() => {
@@ -202,7 +237,7 @@ afterEach(() => {
 })
 
 /**
- * The four routes under test, each with the request that exercises it and the assertion that its
+ * The five routes under test, each with the request that exercises it and the assertion that its
  * success payload really did come from the gated handler.
  */
 const ROUTES: Array<{
@@ -264,6 +299,25 @@ const ROUTES: Array<{
       expect(body.hasWarnings).toBe(false)
       expect(body.hasErrors).toBe(false)
       expect(checkHealthSpy).toHaveBeenCalledTimes(1)
+    },
+  },
+  {
+    label: 'GET /api/admin/slo/status',
+    path: '/api/admin/slo/status',
+    routePath: '/slo/status',
+    expectOk: (body) => {
+      expect(body.success).toBe(true)
+      expect(body.count).toBe(1)
+      const [first] = body.status as Array<{
+        id: string
+        status: string
+        errorBudget: { remainingPercentage: number }
+      }>
+      // Budget posture passed through unchanged — the gate must not have narrowed the admin payload.
+      expect(first.id).toBe('slo-fixture-availability')
+      expect(first.status).toBe('at_risk')
+      expect(first.errorBudget.remainingPercentage).toBe(15)
+      expect(getSLOStatusSpy).toHaveBeenCalledTimes(1)
     },
   },
 ]
@@ -399,7 +453,22 @@ describe('batch 3 gate — cross-route invariants', () => {
     expect(checkHealthSpy).not.toHaveBeenCalled()
   })
 
-  it('all four routes are gated — none of them answers a non-admin with 200', async () => {
+  it('the error-budget posture of /slo/status is not pollable by a non-admin', async () => {
+    // "How much budget is left before the platform breaches its SLO?" was a free oracle for any
+    // authenticated caller of any tenant, and it moves in real time.
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    mountApp({ id: 'u-nonadmin-slo' })
+
+    const res = await request(pinned.url()).get('/api/admin/slo/status').expect(403)
+
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain('errorBudget')
+    expect(serialized).not.toContain('at_risk')
+    expect(serialized).not.toContain('remainingPercentage')
+    expect(getSLOStatusSpy).not.toHaveBeenCalled()
+  })
+
+  it('all five routes are gated — none of them answers a non-admin with 200', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     mountApp({ id: 'u-nonadmin-sweep' })
 
@@ -410,11 +479,11 @@ describe('batch 3 gate — cross-route invariants', () => {
     expectNoServiceReached()
   })
 
-  it('GET /slo/status is the ONLY ungated GET left in admin-routes.ts (residual, see #5680)', async () => {
+  it('admin-routes.ts has no ungated GET left at all (closed world)', async () => {
     // Closed-world sweep over the router itself rather than over a hand-written list: every GET
-    // layer whose first handler does not deny a non-admin is reported. Today exactly one does not,
-    // and it is held back only because #5680 uses it as a reverse control. When #5680 merges and
-    // that route is gated, THIS expectation is what fails — the follow-up cannot be lost silently.
+    // layer whose first handler does not deny a non-admin is reported. The list is now empty, and
+    // it is the empty list that is pinned — a route that loses its guard, or a new GET added
+    // without one, reds this by name instead of slipping in unremarked.
     const router = initAdminRoutes() as unknown as {
       stack?: Array<{
         route?: {
@@ -456,8 +525,6 @@ describe('batch 3 gate — cross-route invariants', () => {
       if (res.statusCode !== 403) ungated.push(item.route.path)
     }
 
-    expect(ungated, `ungated GET routes in admin-routes.ts: ${ungated.join(', ')}`).toEqual([
-      '/slo/status',
-    ])
+    expect(ungated, `ungated GET routes in admin-routes.ts: ${ungated.join(', ')}`).toEqual([])
   })
 })
