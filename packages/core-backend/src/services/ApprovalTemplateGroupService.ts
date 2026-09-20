@@ -39,11 +39,16 @@
  *
  * `GROUP_NAME_UNSUPPORTED` (400, added in the design-gate-A3 回流修复 round, 2026-09-18) is
  * likewise an implementer's request-shape mapping, not a ninth ratified code — see
- * `mapGroupConstraintError`'s doc comment. Erratum 3 is a CANDIDATE (PROPOSED 2026-09-19, pending
- * owner confirmation — NOT owner-ratified, NOT authorized; see the lock's "勘误 3" header entry)
- * that narrows the `name` CHECK's trigger surface to non-blank-via-btrim, leaving the two `org_id`
- * non-blank CHECKs untouched. On THIS candidate branch that means the `name` arm of
- * `mapGroupConstraintError`'s 23514 mapping cannot currently fire — see that function's doc
+ * `mapGroupConstraintError`'s doc comment. Erratum 3 is a CANDIDATE, now in its REDRAFT v2 shape
+ * (PROPOSED 2026-09-19/20, pending owner confirmation — NOT owner-ratified, NOT authorized; see
+ * the lock's "勘误 3" header entry and `lock-errata-proposed-grouping-v2.13-20260919.md`'s
+ * "勘误 3(重拟)" option (i)) that rewrites the `name` CHECK's predicate to an EXPLICIT-trim-set
+ * `btrim(...) <> ''` — ASCII space/TAB/CR/LF plus U+3000, U+200B/200C/200D, U+2060, U+FEFF —
+ * leaving the two `org_id` non-blank CHECKs untouched. Candidate v1 (a bare `btrim(name) <> ''`)
+ * was refuted by gate round 8 P2-1: `btrim/2`'s default trim set is the ASCII space alone, so an
+ * all-zero-width name landed a 201. On THIS candidate branch the `name` arm of
+ * `mapGroupConstraintError`'s 23514 mapping is unreachable through the production route (see
+ * `requireName`, whose trim set is a strict superset of the DB set) — see that function's doc
  * comment for why the arm is being KEPT (not deleted) until the owner actually confirms.
  */
 
@@ -144,10 +149,11 @@ function newGroupId(): string {
  * blank `req.authenticatedTenantId` before any call into this file (§2 "org 从哪来" / A‴) — mapped
  * anyway so any other caller of these exported functions gets a typed 400, not a DB leak.
  *
- * The above describes the state as RATIFIED. On THIS branch, `name`'s CHECK has since been edited
- * to an Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation — see
- * `mapGroupConstraintError`'s doc comment below for the current, accurate status of this Set and
- * the branch that consumes it).
+ * The above describes the state as RATIFIED. On THIS branch, `name`'s CHECK has since been
+ * rewritten as Erratum 3 CANDIDATE REDRAFT v2 (PROPOSED 2026-09-19/20, pending owner confirmation
+ * — see `mapGroupConstraintError`'s doc comment below for the current, accurate status of this
+ * Set and the branch that consumes it). `atg_org_nonblank` / `atgl_org_nonblank` keep the
+ * ratified `~ '[!-~]'` predicate and this Set still maps them.
  */
 const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonblank', 'atgl_org_nonblank'])
 
@@ -161,13 +167,19 @@ const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonbla
  *  - 23514 (check_violation) on one of `NONBLANK_CHECK_CONSTRAINTS` — see the block comment above.
  *    This is a REQUEST-SHAPE mapping, not a loosening of the CHECK: the constraint itself is a
  *    RATIFIED §2 clause and only an owner-approved lock erratum can widen it. This slice's
- *    verification MD's §23.5 "owner 勘误请示" asked to widen `atg_name_nonblank` to
- *    `CHECK (btrim(name) <> '')`; on THIS branch that widening has been applied to the migration
- *    as an Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation — NOT
- *    owner-ratified, NOT authorized; see the lock's own "勘误 3" header entry and
- *    `lock-errata-proposed-grouping-v2.13-20260919.md`). As a direct consequence, the
- *    `atg_name_nonblank` member of `NONBLANK_CHECK_CONSTRAINTS` can no longer actually raise 23514
- *    for `name` — a pure-CJK (or any other non-blank) name now passes that CHECK. This branch of
+ *    verification MD's §23.5 "owner 勘误请示" originally asked to widen `atg_name_nonblank` to a
+ *    bare `CHECK (btrim(name) <> '')`; gate round 8 P2-1 refuted that wording (btrim/2's default
+ *    trim set is the ASCII space alone, so an all-zero-width name still passed), and the erratum
+ *    was redrafted. On THIS branch the REDRAFT v2 predicate — an explicit trim set of ASCII
+ *    space/TAB/CR/LF + U+3000 + U+200B/200C/200D + U+2060 + U+FEFF — has been applied to the
+ *    migration as an Erratum 3 CANDIDATE (PROPOSED 2026-09-19/20, pending owner confirmation —
+ *    NOT owner-ratified, NOT authorized; see the lock's own "勘误 3" header entry and
+ *    `lock-errata-proposed-grouping-v2.13-20260919.md`'s "勘误 3(重拟)" option (i)). As a direct
+ *    consequence, the `atg_name_nonblank` member of `NONBLANK_CHECK_CONSTRAINTS` is no longer
+ *    reachable for `name` through the production route — a pure-CJK (or any other name with a
+ *    visible character) passes the CHECK, and a purely blank/invisible one is short-circuited by
+ *    `requireName` with 400 `GROUP_NAME_REQUIRED` before any DB round-trip, because that
+ *    function's trim set is a strict SUPERSET of the DB's. This branch of
  *    the `if` below, and `atg_name_nonblank` in the Set above, are being KEPT — not deleted — on
  *    purpose: deleting them would be an unreviewed narrowing of this mapping's surface bundled
  *    into a candidate that has not been confirmed, which is exactly the kind of unilateral call
@@ -195,10 +207,15 @@ function mapGroupConstraintError(error: unknown): unknown {
     && typeof pgErr.constraint === 'string'
     && NONBLANK_CHECK_CONSTRAINTS.has(pgErr.constraint)
   ) {
-    // `atg_name_nonblank` arm: unreachable on this branch since Erratum 3 candidate (PROPOSED
-    // 2026-09-19, pending owner confirmation — see doc comment above). KEPT, not deleted, until
-    // the owner actually confirms — do not narrow this Set or this branch as part of the
-    // candidate; that would be an implementer decision the candidate does not license.
+    // `atg_name_nonblank` arm: unreachable for `name` through the production route on this
+    // branch since Erratum 3 candidate REDRAFT v2 (PROPOSED 2026-09-19/20, pending owner
+    // confirmation — see doc comment above). KEPT, not deleted, until the owner actually
+    // confirms — do not narrow this Set or this branch as part of the candidate; that would be
+    // an implementer decision the candidate does not license. NOTE on the message below: it is
+    // now accurate only for the two `org_id` arms (whose predicate is still the ratified
+    // printable-ASCII one). Rewriting it would change a response body that this slice's real-DB
+    // suite froze with `toContain` assertions — a public-contract decision this candidate is not
+    // licensed to make, so it is disclosed here and left alone.
     return new ServiceError(
       '当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误',
       400,
@@ -217,8 +234,33 @@ function mapGroupConstraintError(error: unknown): unknown {
 // ORDER is visible at the call site itself). See file header for why the SET's position is
 // load-bearing, not decorative.
 
+/**
+ * Application-layer mirror of the migration's `atg_name_nonblank` trim set — Erratum 3 CANDIDATE,
+ * REDRAFT v2 (PROPOSED 2026-09-19/20, pending owner confirmation; NOT ratified, NOT authorized).
+ *
+ * The DB-side set is ASCII space/TAB/CR/LF + U+3000 + U+200B/200C/200D + U+2060 + U+FEFF. JS's
+ * own `\s` (identical to what `String.prototype.trim` removes) already covers space, TAB, CR, LF,
+ * U+3000 and U+FEFF — but NOT U+200B, U+200C, U+200D, U+2060, which is precisely the family gate
+ * round 8's P2-1 measured slipping through both layers at once and landing an invisible 201 row.
+ * Adding those four here makes this set a strict SUPERSET of the DB set, which is the direction
+ * that matters: every name this function returns already satisfies the CHECK by construction, so
+ * a blank/invisible name is a typed 400 `GROUP_NAME_REQUIRED` and never a raw 23514 or a 500.
+ *
+ * It is a TRIM, not a reject: a name of U+200B + 'HR' + U+200B becomes `'HR'` and is created, exactly as
+ * `'  HR  '` already did, and an INTERNAL zero-width ('a' + U+200B + 'b') is preserved verbatim — the
+ * DB predicate only looks at the edges too. Consequence, accepted and disclosed rather than
+ * silently handled: 'H' + U+200B + 'R' and `'HR'` are DIFFERENT names under `uq_atg_org_name_active`
+ * while rendering identically; option (i) accepts internal invisibles by design.
+ *
+ * Superset direction, stated as a behaviour rather than an intention: an NBSP-only name (U+00A0,
+ * in JS `\s` but NOT in the owner's DB set) is rejected HERE with 400 even though a direct SQL
+ * insert of the same value would succeed. That asymmetry is the disclosed gap in the migration's
+ * comment; it is not a defect in this function.
+ */
+const NAME_EDGE_TRIM_PATTERN = /^[\s\u200B\u200C\u200D\u2060]+|[\s\u200B\u200C\u200D\u2060]+$/g
+
 function requireName(name: unknown): string {
-  const trimmed = typeof name === 'string' ? name.trim() : ''
+  const trimmed = typeof name === 'string' ? name.replace(NAME_EDGE_TRIM_PATTERN, '') : ''
   if (!trimmed) {
     throw new ServiceError('name is required', 400, 'GROUP_NAME_REQUIRED')
   }
