@@ -207,3 +207,139 @@ CONSTRAINT atg_sort_unique UNIQUE (org_id, sort_order) DEFERRABLE INITIALLY DEFE
 **本切片新增的一条披露(不是「零改动」就等于「零影响」)**:`TemplateGroupSections.vue` 的 `loadAll()`(`:280-324`)新增了 `/categories` 端点的一个**新消费方**——它调用 `listTemplateCategories()` 枚举 `category:<name>` 候选 section(`:193`、`:286`),对每个候选名再向 `section=category:<name>` 请求解析成该 org 的真实桶,零命中的候选被丢弃(`:317`)。这意味着:如果 owner 在 Q5 上最终裁决**去掉** `/categories` 端点(该端点本身是「全局、org 无关的名字候选列表」,§Q5 待裁的正是这一点),分组视图会失去枚举 `category:<name>` section 的手段——不是「删掉一个没人用的端点」,而是「删掉一个刚多了一个新调用方的端点」。这条事实应当作为 Q5 裁决的一项输入,而不是被本切片的「不删不改」这句话盖过去当作与 Q5 无关。
 
 按 §0 抬头 RATIFY 记录以及本切片的执行结果:Q5 仍是唯一悬空的 owner 裁决点,新增了一条具体的影响面披露,不构成裁决,也不阻塞本切片的 Draft PR(与 A-1 设计 MD §7 末段「不阻塞本切片的 Draft PR」同一处置方式)。
+
+---
+
+## 8. A-2 × A-4 合流(2026-09-20,分支 `feat/approval-template-groups-phase3-sections-on-a2`)
+
+> **本节的适用范围**:本文件 §1–§7 描述的是 A-4 在 **A-1 之上**(分支 `feat/approval-template-groups-phase3-sections`,head `879070ef2e`)的切片。
+> owner 定下的合并顺序是 **#5854(A-2)→ #5878(A-4)→ #5866**,所以 A-4 实际落地的底座是 **A-2 的 head**,不是 A-1。
+> 本节记录「A-4 重放到 A-2 之上」这一步引入的取舍。**§1–§7 的任何一节都不作废**;受影响的句子在 §8.5 逐句求值。
+> 合流本身的缺陷清单来自 `reviews/verify-groups-a2-a4-combined-build-20260920.md`(判定 FAIL:P1-1 / P2-1 / P2-2 / P3-1)。
+
+### 8.1 底座与重放法(命令级,含对 prompt 字面命令的一处更正)
+
+| 项 | 值 |
+|---|---|
+| 新分支 | `feat/approval-template-groups-phase3-sections-on-a2` |
+| 底座(A-2 head, #5854) | `4678b01cb6e3ad7ed7179c3a5a44b1fe864f426c` |
+| 被重放的 lane(A-4 head, #5878) | `879070ef2ec11c6d2e8b099b8ca9755b637a5fff` |
+| 切点(A-4 自己的 A-1 段末尾) | `66f526145c` |
+| 对应的 A-2 自己的 A-1 段末尾 | `c9636946de` |
+| 重放命令 | `git rebase --onto 4678b01cb6 66f526145c` |
+
+**为什么切点不是 A-1 的 head `afb88f05973b9f2cfa0c19483a6fa96afa1f3e06`**:`afb88f059` 不是 A-2 / A-4 任何一条 head 的祖先
+(`git merge-base --is-ancestor` 两次都返回 NO)——两条 lane 各自带着 A-1 的**同内容、不同 SHA** 的副本,且 A-1 自己的基点是更旧的 main
+(`merge-base(main, A-1) = 868c8d2b26`)。按字面执行 `git rebase --onto <A-2 head> afb88f059`,重放集是
+`afb88f059..HEAD`,其中 `868c8d2b26..19cb18f858` 的 main 提交**不在** A-1 一侧,会被当作 lane 提交重放成副本
+——正是 `feedback_stacked_lane_rebase_onto_base_duplicates_main` 记的那次事故的形状。
+
+改用两条 lane 各自的 A-1 段末尾作切点,判据是**树等价**而不是提交信息:
+
+```
+git rev-parse 66f526145c^{tree} c9636946de^{tree}
+d302d29569c12cd9d43d16a317c71b955db804b9
+d302d29569c12cd9d43d16a317c71b955db804b9      # 逐字节相同 ⇒ 切点两侧同底座
+```
+
+A-4 在切点之上有 27 个自己的提交,重放后落地 25 个(2 个因内容已在底座而成为空提交被 git 丢弃:
+A-2 的 exec 行合并已经先做掉了 A-4 的 `fix(ci): collapse duplicated exec lines`,s6a pin 在逐次冲突解决时已重算)。
+机械核对:`git cherry origin/main HEAD` 83 行**全部** `+`(零 `-`,即与 main 零重复);
+`origin/main..HEAD` 内部 patch-id 重复数 **0**(A-1 段只出现一次)。
+
+### 8.2 P1-1 —— 分组客户端收口成单一实现家
+
+合流后 `apps/web/src/approvals/api.ts` 有**三个函数各两份实现 + 一个类型两个家**(git 三方合并不报冲突,因为两段代码落在文件不同区域):
+
+| 符号 | A-4 侧 | A-2 侧 | 收口结果 |
+|---|---|---|---|
+| `listApprovalTemplateGroups` | `apiGet`,裸 `Error`,有 `USE_MOCK` | `getApprovalJson`,`ApprovalApiError`(带 `.code`) | **保 A-2 版**,吸收 A-4 的 I7 读门注释 |
+| `linkApprovalTemplateToGroup` | `apiPost`,`Promise<void>` | `postApprovalJson`,`Promise<ApprovalTemplateGroupLinkDTO>` | **保 A-2 版**(返回类型放宽,A-4 调用点忽略返回值) |
+| `unlinkApprovalTemplateFromGroup` | `apiFetch` + 手写 `!response.ok` | `deleteApprovalJson` | **保 A-2 版** |
+| `ApprovalTemplateGroupDTO` | `src/types/approval.ts:629` | `api.ts` 本地 `export interface`(字段逐个相同) | **单一家 = `types/approval.ts`**;`api.ts` 改成 `export type { … }` 再导出,A-2 消费方的 import 路径不变 |
+| `listTemplatesBySection` / `reorderApprovalTemplateGroups` | A-4 独有,无 A-2 对手 | — | 原样保留,**含各自的 `USE_MOCK` 分支** |
+
+**为什么保 A-2 版**(这是本次唯一一处「两边契约互斥、必须让一方落空」的取舍):验收 J 的 403 重试流
+(多 org 成员 → `SESSION_ORG_REQUIRED` → 共享选择器 → 重试 → 201)在 `ApprovalTemplateGroupsPanel.vue:135/:155`
+两处 catch 里写的是 `err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED'`;
+A-4 的包装抛的是裸 `Error('API error: <status> <statusText>')`,**没有 `.code` 这个字段**——保 A-4 版
+会把验收 J 的整条重试流变成任何测试都看不见的死码。反方向的代价则是可归零的:
+`TemplateGroupSections.vue` 的 catch 全是 `catch (e: any)` / `catch {}`,只读 `message`,不读 code。
+
+### 8.3 `USE_MOCK` —— 三个收口函数**不**带 mock 短路(明确取舍,非遗漏)
+
+prompt 写「`USE_MOCK` 短路若 A-4 的 spec 需要则以同一 guard 保留并写明」。核实结果:**A-4 的 spec 不需要**。
+
+- `apps/web/tests/approvalTemplateCenterSections.spec.ts:46` 把整个 `../src/approvals/api` 模块 `vi.mock` 掉,
+  18 个用例一个都不走真实 `fetch`,`USE_MOCK` 对它零影响;
+- 反方向**有**硬约束:`apps/web/tests/approvalTemplateGroupsClient.spec.ts` 的 8 个用例走真实 `fetch`
+  (`vi.stubGlobal('fetch', …)`),并且它自己的模块注释逐字写明「These functions carry no `USE_MOCK` gate
+  (unlike most of this file) … a function with no mock branch has nothing to bypass」。Vitest 下
+  `import.meta.env.DEV` 恒为真且这个 spec 不设 `__APPROVAL_MOCK__ = false`,所以给这三个函数加 `USE_MOCK`
+  会让这 8 个用例当场短路成空转/红。
+
+**已披露的残留(DEV 体验,非 CI/生产)**:`listTemplatesBySection` 保留了 `USE_MOCK`,三个收口函数没有,
+于是 DEV 且无后端时,分组视图的分组列表会走真实网络并落到它自己的顶层错误态,而分节内容走 mock 返回空。
+没有把 `listTemplatesBySection` 的 guard 一并删掉(那是 A-4 自己 spec 之外的行为改动),也没有另造一个更窄的
+第三种 mock 语义(会变成「另造更窄同类物」)。这条留给 lane 后续自行裁,**不影响任何闸**。
+
+### 8.4 P2-1 / P3-1 —— I6 不变量与两套分组界面的主从关系
+
+合流前两个问题是同一件事的两面:A-2 的 `<ApprovalTemplateGroupsPanel v-if="canManageTemplates">` **不分 viewMode 恒挂**,
+它 `onMounted` 就调 `listApprovalTemplateGroups()`;于是
+(a) 平铺视图的 `approvalTemplateCenterCategory.spec.ts` 里 A-4 的 I6 断言(「扁平表的分类标签绝不触发分组联查」)被证伪;
+(b) 管理员切到分组视图时,面板与分节视图同时渲染、各拉一次分组、状态互不同步。
+
+**裁决:改挂载,不改不变量。** 二选一里选「让 A-2 面板惰性/按需挂载」,不选「在 A-4 设计 MD 里改写 I6」,理由三条:
+
+1. I6 是**锁文 §3 的不变量**,不是 A-4 的实现细节。改写它需要 owner 裁;改一个组件的挂载条件不需要。
+   门审可以对照 A-4 head 逐字核:`approvalTemplateCenterCategory.spec.ts` 的 I6 断言在本分支**一个字都没改**。
+2. 「面板恒挂在平铺视图」本身就不是 A-2 想要的产品形态——它是 A-2 单独交付时唯一的入口位置;
+   A-4 落地后,分组视图才是分组的主场。
+3. 改写不变量会让「扁平表不联查分组」这条从**可机械证伪**降级成一句散文,而现在它仍然有正控
+   (同文件的 live-binding 正控 + 下面 §8.7 的两条 mutation)。
+
+主从关系(写入 `TemplateCenterView.vue` 模板注释,不只写在 MD 里):
+
+| 角色 | 组件 | 行为 |
+|---|---|---|
+| **主**(呈现) | `TemplateGroupSections`(A-4) | 拥有分组渲染顺序与每节的行;进入分组视图时**唯一**读分组列表的人 |
+| **从**(管理入口) | `ApprovalTemplateGroupsPanel`(A-2) | 仅管理员、**仅分组视图**、且**折叠**在「管理分组 / Manage groups」披露开关之后;只有管理员显式展开时才挂载(才读一次它要编辑的权威列表) |
+| 同步 | `changed` 事件 | 面板新建成功 ⇒ `emit('changed')` ⇒ 视图调分节视图已 `defineExpose` 的 `loadAll()` |
+
+**没有把分组列表上提到父组件共享一份 state**:`approvalTemplateCenterSections.spec.ts:150` 钉的是
+「分节视图自己调 `listApprovalTemplateGroups()` 恰好 1 次」,上提会直接打破 A-4 自己的验收。
+因此「共享同一份数据」在本分支实现为**单一权威呈现面 + 默认渲染路径零重复拉取 + 变更后主动重读**,
+而不是一个共享 store——这是被 A-4 既有验收约束住的形状,不是偷懒。
+
+### 8.5 §1–§7 受影响句子的逐句求值(不作废整节)
+
+| 出处 | 原句(摘要) | 本分支求值 |
+|---|---|---|
+| §5.1 | 「默认值保持 `'flat'`,故 `approvalTemplateCenterCategory.spec.ts`/`templateCenterI18n.spec.ts` 等既有 spec 在从不触碰 `viewMode` 时行为逐字节不变」 | **对 A-4 自己的改动仍然成立**(A-4 相对其底座没动平铺分支)。**在本合流分支上不可再读作「页面平铺视图与 A-2 head 相同」**:平铺视图里 A-2 的分组面板被移走了(§8.4)。两条 spec 仍然全绿,但原因变了——不是「没被触碰」,是「面板不再挂在这里」。 |
+| §5.1 | 「`TemplateGroupSections` 作为兄弟模板(`v-else`)」 | **仍然成立**,形状略变:`v-else` 现在是一个 `<template v-else>`,里面依次是(管理员才有的)折叠管理入口与分节视图本身。分节视图相对既有表格/画廊仍是兄弟,不是包装层。 |
+| §6 表「前端会话-组织接入 `section=`」行 | 「本分支不含 A-2 的任何提交,`SessionOrgSwitcher.vue` 在这个 worktree 里**不存在**(`find` 零命中)」 | **这半句在本分支被推翻**:底座就是 A-2,`apps/web/src/components/SessionOrgSwitcher.vue` 存在。 |
+| 同上 | 「`TemplateGroupSections.vue` 的 `loadAll`/`loadMore` 只把异常的 `message` 塞进通用错误字符串,没有对 `SESSION_ORG_REQUIRED` 单独识别」 | **仍然成立(OPERATIVE)**。缺口没被合流关掉,只是从「想接也没有组件可接」变成「组件与带 `.code` 的错误都有了,纯粹是没接」——§8.2 的收口顺带把这条路径的错误类型从裸 `Error` 换成了 `ApprovalApiError`,所以**接线的前置条件现在具备了**。仍为 owner 待裁项(验证 MD §14.7 的 DEFERRED-owner 项),本分支不擅自接。 |
+| §5.4 | 「上移/下移与移动 `<select>` 都不在组件里再做 `canManageTemplates` 客户端门控」 | **仍然成立**,本分支未触碰 `TemplateGroupSections.vue` 的门控面。注意新增的**管理入口**(§8.4)确实带 `v-if="canManageTemplates"`——那是 A-2 面板的原有门控随挂载点一起搬过来的,不是给 A-4 控件新加的门控。 |
+| §7 / §6 其余行 | Q5 悬空、I4 未到、`/categories` 新消费方披露等 | **全部不受合流影响,原样成立**;`listTemplateCategories()` 的新消费方仍在 `TemplateGroupSections.vue`。 |
+
+### 8.6 合流冲突清单(8 个 hunk / 6 个文件)与解法
+
+| # | 文件 | 解法 | 性质 |
+|---|---|---|---|
+| R1 | `plugins/…/s6a-package-provenance-pins.json` ×3 次(`5f1681b00c` / `ac45ce475a` / `458cf76111`,每次都按当时的工作树重算) | 按当时工作树的 `.github/workflows/plugin-tests.yml` **重算** sha256,不抄任何一侧的旧值 | 机械 |
+| R2 | `apps/web/scripts/run-required-web-tests.sh` ×2 次(`8f4232b704` / `879070ef2e`) | token 并集后**恰好一条** `^exec npx vitest run` 行 | 机械(见 §8.7 闸) |
+| R3 | `apps/web/src/views/approval/TemplateCenterView.vue`(import 块) | 两条 import 都留 | 机械 |
+| R4 | `apps/web/tests/approvalTemplateCenterCategory.spec.ts`(`vi.mock` 工厂) | `listApprovalTemplateGroups` 单键,绑 **A-4 的 spy**(严格强于 A-2 的 `() => Promise.resolve([])`:同样返回空数组,另外可计数);A-2 的 `ApprovalApiError` / `createApprovalTemplateGroup` 两键保留 | **判断项** |
+| R5 | `api.ts` 的三函数 + 一类型 | 见 §8.2 —— **git 不报冲突,是静默缺陷** | **判断项** |
+| R6 | `TemplateCenterView.vue` 的面板挂载位置 | 见 §8.4 | **判断项** |
+
+`.github/workflows/plugin-tests.yml`、`packages/core-backend/vitest.config.ts`、`packages/core-backend/src/routes/approvals.ts`
+在本次重放中**没有**产生冲突(A-2 对前两者的改动是 A-4 的真子集,底座与切点树等价)。
+
+### 8.7 合流后闸(数字见验证 MD §15)
+
+四项全绿:`vue-tsc -b` 只剩 `vite.config.ts(28,29) TS2769`(已用 `origin/main` 同工作树基线证明是环境项,非 lane 引入)、
+`vite build` 通过、`bash -e apps/web/scripts/run-required-web-tests.sh` 退出 0、两条 lane 的 8 个定向 spec 全绿、
+core-backend `tsc --noEmit` 零错。`scripts/dev/atg-exec-line-post-rebase-check.sh` 在本分支 **PASS(exec 行 = 1)**——
+两条 lane 各自 head 上它曾经是红的。
