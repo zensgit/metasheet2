@@ -36,6 +36,7 @@ import {
   CANCEL_ROUND_TEMPLATE_KEY,
   CANCEL_ROUND_TEMPLATE_NAME,
   CANCEL_ROUND_TEMPLATE_VERSION_ID,
+  CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE,
 } from '../seeds/approval-cancel-round-published-definition'
 
 /**
@@ -70,14 +71,26 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   const formSchemaJson = JSON.stringify(buildCancelRoundFormSchema())
   const runtimeGraphJson = JSON.stringify(expectedRuntimeGraph)
 
+  // `visibility_scope` is written EXPLICITLY, never left on the column default. The default is
+  // `'{"type":"all","ids":[]}'`, and `applyTemplateVisibilityFilter`'s first disjunct
+  // (`COALESCE(visibility_scope->>'type','all') = 'all'`) matches every actor — so the default
+  // would publish this system-only definition into the template center for every user holding
+  // `approvals:read` (listed, detail-fetchable, and accepted by `templateVisibleAtCreateBoundary`
+  // as a launchable template). See `CANCEL_ROUND_TEMPLATE_VISIBILITY_SENTINEL_ID`'s doc comment in
+  // the seeds module for why the value is an audience-scoped sentinel rather than an empty `ids`
+  // array or a new scope type, and `approval-cancel-round-phase1-design-20260918.md` for how the
+  // entry-point slice flips it back to visible (an owner decision, not taken here).
+  const visibilityScopeJson = JSON.stringify(CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE)
+
   await sql`
-    INSERT INTO approval_templates (id, key, name, description, status)
+    INSERT INTO approval_templates (id, key, name, description, status, visibility_scope)
     VALUES (
       ${CANCEL_ROUND_TEMPLATE_ID},
       ${CANCEL_ROUND_TEMPLATE_KEY},
       ${CANCEL_ROUND_TEMPLATE_NAME},
       ${CANCEL_ROUND_TEMPLATE_DESCRIPTION},
-      'published'
+      'published',
+      ${visibilityScopeJson}::jsonb
     )
     ON CONFLICT (id) DO NOTHING
   `.execute(db)
@@ -136,6 +149,7 @@ async function verifySeedRowsMatchExpected(
   const result = await sql<{
     template_key: string
     template_status: string
+    template_visibility_scope: unknown
     active_version_id: string | null
     latest_version_id: string | null
     published_template_id: string
@@ -146,6 +160,7 @@ async function verifySeedRowsMatchExpected(
     SELECT
       t.key AS template_key,
       t.status AS template_status,
+      t.visibility_scope AS template_visibility_scope,
       t.active_version_id,
       t.latest_version_id,
       pd.template_id AS published_template_id,
@@ -162,6 +177,10 @@ async function verifySeedRowsMatchExpected(
     row !== undefined &&
     row.template_key === CANCEL_ROUND_TEMPLATE_KEY &&
     row.template_status === 'published' &&
+    // Read back the audience scope too: `ON CONFLICT (id) DO NOTHING` would leave a pre-existing
+    // row's own (possibly default, i.e. visible-to-all) scope in place while this migration
+    // reported success — exactly the silent-wrong-content case this guard exists for.
+    canonicalJson(row.template_visibility_scope) === canonicalJson(CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE) &&
     row.active_version_id === CANCEL_ROUND_TEMPLATE_VERSION_ID &&
     row.latest_version_id === CANCEL_ROUND_TEMPLATE_VERSION_ID &&
     row.published_template_id === CANCEL_ROUND_TEMPLATE_ID &&

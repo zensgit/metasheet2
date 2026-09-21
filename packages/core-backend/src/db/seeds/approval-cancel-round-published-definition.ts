@@ -78,6 +78,70 @@ export const CANCEL_ROUND_TEMPLATE_ID = '00000000-0000-4000-8000-000000000001'
 export const CANCEL_ROUND_TEMPLATE_VERSION_ID = '00000000-0000-4000-8000-000000000002'
 export const CANCEL_ROUND_PUBLISHED_DEFINITION_ID = '00000000-0000-4000-8000-000000000003'
 
+/**
+ * Sentinel audience id for the seeded template's `approval_templates.visibility_scope`.
+ *
+ * WHY THIS ROW NEEDS A SCOPE AT ALL. `visibility_scope` defaults to `'{"type":"all","ids":[]}'`
+ * (`zzzz20260423162000_add_approval_template_visibility_scope.ts:7`), and
+ * `applyTemplateVisibilityFilter`'s FIRST disjunct is
+ * `COALESCE(visibility_scope->>'type','all') = 'all'` — which matches EVERY actor. Left on the
+ * default, this system-only definition would be a live template-center row for every user holding
+ * `approvals:read`: listed by `listTemplates`, fetchable by `getTemplate`, and accepted by
+ * `templateVisibleAtCreateBoundary` as a template a user may launch an instance from. The module
+ * doc above already says this definition is "不由用户在模板中心创建或编辑" — before this constant
+ * existed, nothing in the data or the code enforced that sentence.
+ *
+ * WHY A SENTINEL ID AND NOT AN EMPTY `ids` ARRAY. Both hide the row identically in SQL (an
+ * audience-scoped disjunct that matches nobody), but an empty array is REJECTED by the write-path
+ * validator `normalizeTemplateVisibilityScope` ("visibilityScope.ids must contain at least one id
+ * for scoped templates", 400 `VALIDATION_ERROR`) — and the authoring FE round-trips this field on
+ * EVERY template save (`apps/web/src/approvals/templateAuthoring.ts`: `buildUpdateTemplatePayload`
+ * -> `buildCreateTemplatePayload` -> `buildVisibilityScope`, seeded from
+ * `template.visibilityScope` by `draftFromTemplate`). An empty array would therefore make the row
+ * permanently un-editable by an authorized template manager, failing an unrelated rename with a
+ * confusing visibility error. A single sentinel id passes the write validator (non-empty, 37 chars
+ * <= the 128-char per-id cap) and so keeps the row editable.
+ *
+ * WHY NOT `type: 'ids'`. That type does not exist: `APPROVAL_TEMPLATE_VISIBILITY_TYPES` is
+ * `{all, dept, role, user}`, the DB CHECK `approval_templates_visibility_scope_shape`
+ * (`zzzz20260423162000:20-28`) enforces the same four, and `readTemplateVisibilityScope` coerces
+ * an unknown type back to `{type:'all'}` in the DTO — so an out-of-set type would be a 23514 on
+ * insert, and (if the CHECK were ever dropped) a DTO that reports "visible to all" while SQL hides
+ * the row. `user` is an EXISTING shipped semantic, not a new one.
+ *
+ * NAMING follows this same filter's own sentinel convention for the empty-input case
+ * (`__approval_template_no_dept__` / `__approval_template_no_role__`).
+ *
+ * RESIDUAL, stated plainly rather than hidden: `users.id` is `TEXT`
+ * (`packages/core-backend/migrations/054_create_users_table.sql:5`), so the invisibility rests on
+ * no real account ever holding this literal id, not on a type-level impossibility. That is the
+ * same residual the two filter-side sentinels above already carry.
+ *
+ * NOT A PERMANENT DECISION. This value is what makes the definition invisible BEFORE the product
+ * entry point is wired. The cancel round's own dedicated creation path does not read
+ * `approval_templates` at all — it is keyed on `CANCEL_ROUND_PUBLISHED_DEFINITION_ID` and
+ * deliberately bypasses `templateVisibleAtCreateBoundary` (that method's own doc comment states
+ * this) — so nothing about the cancel round itself depends on this scope. How to make the
+ * definition visible again when the entry slice lands is written up in
+ * `docs/development/approval-cancel-round-phase1-design-20260918.md`
+ * ("入口切片接线时如何翻回可见") and is an owner decision, not a decision taken here.
+ *
+ * (The dedicated creation path is named by SYMBOL nowhere in this module on purpose: the C-1
+ * dormancy guard `tests/unit/approval-cancel-round-dormancy-unreachable.test.ts` pins the exact
+ * set of PRODUCTION files that mention that symbol in any form, comments included, so that a new
+ * mention forces a human to look. Naming it here would widen that pinned set for a doc comment.)
+ */
+export const CANCEL_ROUND_TEMPLATE_VISIBILITY_SENTINEL_ID = '__approval_cancel_round_system_only__'
+
+/**
+ * The literal `approval_templates.visibility_scope` value the seed migration writes. Shared with
+ * the acceptance test so the assertion and the insert cannot drift into two hand-copied literals.
+ */
+export const CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE: { type: 'user'; ids: string[] } = {
+  type: 'user',
+  ids: [CANCEL_ROUND_TEMPLATE_VISIBILITY_SENTINEL_ID],
+}
+
 const START_NODE_KEY = 'start'
 const END_NODE_KEY = 'end'
 

@@ -1901,6 +1901,17 @@ export default defineConfig({
       // CI-wiring decision was made, so it goes straight into the required step alongside them —
       // see the required step's own header comment for the recompute-the-s6a-pin procedure.)
       'tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts',
+      // Seed-template visibility acceptance for the WI-2/WI-14 published-definition seed
+      // migration: the seeded `approval_templates` row must be invisible to an ordinary
+      // `approvals:read` actor on all three surfaces that consume
+      // `applyTemplateVisibilityFilter` for it (list / detail / create-boundary), with each
+      // negative asserted BYTE-FOR-BYTE against a request for an id (or search token) that
+      // genuinely matches nothing, and each paired with a manager-side positive control.
+      // Real DB + a real running server + real HTTP. Excluded here so `describeIfDatabase`
+      // cannot skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s
+      // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to the
+      // seven cancel-round files above), which arms EXPECT_DB=1.
+      'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
