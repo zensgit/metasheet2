@@ -38,8 +38,9 @@ import { poolManager } from '../../src/integration/db/connection-pool'
  * grant: 403 → grant → 200. That isolates the catalogue-registration fix from every other variable.
  *
  * RUNNING THIS FILE OUTSIDE ITS CI LANE: this file calls `POST /api/auth/register` 13 times
- * (mechanically counted: `grep -c 'await registerUser(' <this file>`, 20260921 — re-count rather
- * than assume this stays 13 as cases are added).
+ * (mechanically counted, 20260921, with block-comment lines stripped first so the count excludes
+ * this note's own text: `grep -v '^\s*\*' <this file> | grep -c 'await registerUser('` — re-count
+ * rather than assume this stays 13 as cases are added).
  * The lane (`.github/workflows/approval-realdb-permission-catalogue.yml`) sets
  * `AUTH_REGISTER_MAX_PER_IP=50` in its job `env:` for exactly that reason. The route's own default
  * (`routes/auth.ts`'s `maxRegisterPerIp`) is 3 per IP per window — running this file locally without

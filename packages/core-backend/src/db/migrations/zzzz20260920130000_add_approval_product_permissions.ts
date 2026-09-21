@@ -66,10 +66,18 @@
  * the final `permissions` DELETE alone would already cascade both rows away; the two explicit DELETEs
  * above it are redundant-by-CASCADE, written out so the row-loss is visible at the call site rather
  * than implicit in a constraint a future reader of this file would otherwise have to go look up.
- * `role_permissions` has no row from this migration's own `up()`; any row that exists came from an
- * admin's own `POST /api/roles` / `PUT /api/roles/:id` call — the role-permission product endpoints
+ * `role_permissions` has no row from this migration's own `up()`. Rows normally come from an admin's
+ * own `POST /api/roles` / `PUT /api/roles/:id` call — the role-permission product endpoints
  * (`routes/roles.ts:496`/`:588`), the same authorized, audited path `user_permissions` rows come from
- * (`POST /api/permissions/grant`), not an out-of-band write.
+ * (`POST /api/permissions/grant`). Other writers exist and are not on that audit trail:
+ * `PluginRbacProvisioningService.applyRoleMatrix` (`services/PluginRbacProvisioningService.ts:122`)
+ * writes plugin-provisioned rows under `${pluginId}:${appId}:${roleSlug}` role ids, reachable without
+ * either endpoint above (it also self-registers the code into `permissions` at `:97-107`, so this
+ * migration's own `down()` is not a durable de-registration against that path either); and a migration
+ * can bind a code to a role directly — the two cited above
+ * (`zzzz20260630090000_add_approvals_analytics_permission`,
+ * `zzzz20260702110000_add_approval_reassign_and_admin_scopes`) do exactly that. This PR does not
+ * change any of those writers, and does not grant `approvals:read` to anyone.
  *
  * DISCLOSURE — rolling this migration back is NOT reversible for grant state: it permanently drops
  * every `role_permissions`/`user_permissions` row for `approvals:read`, whether granted per-user or

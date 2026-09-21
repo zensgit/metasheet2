@@ -41,6 +41,7 @@ on:
       - 'packages/core-backend/tests/integration/approval-permission-catalogue-grant.db.test.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260920130000_add_approval_product_permissions.ts'
       - 'packages/core-backend/src/routes/permissions.ts'
+      - 'packages/core-backend/src/routes/roles.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/rbac/rbac.ts'
       - 'packages/core-backend/src/rbac/service.ts'
@@ -54,6 +55,7 @@ on:
       - 'packages/core-backend/tests/integration/approval-permission-catalogue-grant.db.test.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260920130000_add_approval_product_permissions.ts'
       - 'packages/core-backend/src/routes/permissions.ts'
+      - 'packages/core-backend/src/routes/roles.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/rbac/rbac.ts'
       - 'packages/core-backend/src/rbac/service.ts'
@@ -90,7 +92,9 @@ jobs:
       # never a silent skipped-green.
       EXPECT_DB: '1'
       # The suite registers 13 real users via POST /api/auth/register from one IP (mechanically
-      # counted: `grep -c 'await registerUser(' the suite file, 20260921); the default per-IP
+      # counted, 20260921, from the suite file with ITS OWN block-comment lines stripped first, since
+      # that file's docstring explains this same recipe and would otherwise self-match:
+      # `grep -v '^\s*\*' the suite file | grep -c 'await registerUser('`); the default per-IP
       # register limit (DEFAULT_AUTH_RATE_LIMIT_CONFIG.maxRegisterPerIp = 3) would 429 starting at
       # the 4th. Same override the real-browser acceptance run used for the identical reason
       # (todo-center-real-browser-acceptance-20260920.md §0 table). This count grows whenever a
