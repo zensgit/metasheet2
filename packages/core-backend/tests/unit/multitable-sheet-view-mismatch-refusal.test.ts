@@ -25,19 +25,33 @@
  *     bytes contain any id the request carried. The route table below is asserted to be the same
  *     size as the number of wrapper calls in the source, so an eleventh caller cannot land without
  *     a cell here.
+ *
+ *     NINE of them answer it to ANY authenticated caller: their pairing check runs before any
+ *     authority gate, so the refusal is about the address and identical for a caller that holds
+ *     nothing and for an admin. GET /context is the TENTH and is DIFFERENT, by #5948's design: its
+ *     pairing check sits BEHIND the #5936 authority gate, so a caller with no read grant is refused
+ *     403 first — identically for a foreign view, a missing view and no view at all, with
+ *     `meta_views` never consulted — and only a caller that PASSES the gate sees this 404. #5946
+ *     changes the CLASS of that post-gate answer (it was the handler's generic 500) and nothing
+ *     about the ORDER. Both halves are pinned: the 403 half in the "#5948 order" describe, the 404
+ *     half in the route loop with the MANAGER actor.
  *  2. The three previously-echoing routes no longer answer 409, and no longer carry a `CONFLICT`
  *     code or the resolver's message.
- *  3. THE INVARIANT #5839 B5 left behind: on PATCH /records/:recordId, GET /view and GET /context a
- *     mismatched view answers BYTE-IDENTICALLY whether the named sheet is LIVE, soft-DELETED or
- *     ABSENT. The refusal must not become a new existence oracle — the difference the caller can
- *     observe has to stay on `view.sheetId !== sheetId` alone.
+ *  3. THE INVARIANT #5839 B5 left behind: on PATCH /records/:recordId and GET /view a mismatched view
+ *     answers BYTE-IDENTICALLY whether the named sheet is LIVE, soft-DELETED or ABSENT. The refusal
+ *     must not become a new existence oracle — the difference the caller can observe has to stay on
+ *     `view.sheetId !== sheetId` alone. On GET /context the same statement holds for the caller that
+ *     may NOT know (all three states answer one 403), and is asserted there instead.
  *  4. Attribution: the same request with a view that DOES belong to the named sheet gets a
  *     DIFFERENT answer, so the 404 above is caused by the mismatch and not by the fixture.
- *  5. Structurally: every `resolveMetaSheetId(` in univer-meta.ts is the definition or a call written
- *     in the wrapped form, every wrapped call `return`s on the null it can get back, no
- *     `ConflictError` branch outside a named allow-list echoes `err.message` — and the wrapped form
- *     still names the resolver, so the sheet-liveness closure guard keeps every one of these
- *     handlers (GET /context is in ITS scope for that token alone).
+ *  5. Structurally: every `resolveMetaSheetId(` in univer-meta.ts is the definition, a call written
+ *     in the wrapped form, or THE ONE allow-listed raw call (GET /context's pre-gate `sheetId: null`
+ *     resolution, which cannot throw ConflictError and must stay above the gate); every wrapped call
+ *     `return`s on the null it can get back, checked against ITS OWN binding; no `ConflictError`
+ *     branch outside a named allow-list echoes `err.message`, keyed by the enclosing route or
+ *     FUNCTION rather than by "somewhere above the router" — and the wrapped form still names the
+ *     resolver, so the sheet-liveness closure guard keeps every one of these handlers (GET /context
+ *     is in ITS scope for that token alone, asserted rather than asserted in prose).
  *
  * ── Why the ABSENT body and not a new code ────────────────────────────────────
  * A dedicated code would have to be emitted identically for a live, a soft-deleted and an absent
@@ -52,11 +66,13 @@
  * CALLS the real `sendForbidden` / `sendSheetNotLive` against a capture double — a product body that
  * changes must not leave a hand-typed green copy behind here.
  *
- * Nothing is asserted about the `meta_views` read count: `tryResolveView` memoises a found view in a
- * module-level cache (multitable/loaders.ts), so the second request for the same viewId issues no
- * view read at all. That cache is product behaviour; an assertion resting on it would be a flake.
- * Reach evidence is the EXACT-BODY equality (an express default 404 is HTML and cannot pass it)
- * together with the per-route attribution cell.
+ * `tryResolveView` memoises a found view in a module-level cache (multitable/loaders.ts), so the
+ * SECOND request for the same viewId issues no view read at all. No route cell asserts a read count
+ * for that reason; reach evidence there is the EXACT-BODY equality (an express default 404 is HTML
+ * and cannot pass it) together with the per-route attribution cell. The ONE cell that does assert
+ * "meta_views was never read" — the #5948 order describe — addresses a viewId used nowhere else in
+ * the file, so the cache is cold when it runs, and pairs the assertion with a positive control on
+ * the same id, so a warm cache would red it instead of greening it.
  */
 import express, { type Express, type Response } from 'express'
 import { readFileSync } from 'node:fs'
@@ -65,7 +81,7 @@ import request from 'supertest'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
-import { SHEET_ABSENT_BODY, SHEET_NOT_LIVE_STATUS } from '../utils/sheet-existence-oracle'
+import { FORBIDDEN, FORBIDDEN_STATUS, SHEET_ABSENT_BODY, SHEET_NOT_LIVE_STATUS } from '../utils/sheet-existence-oracle'
 
 // ── ids ───────────────────────────────────────────────────────────────────────
 
@@ -84,13 +100,21 @@ const SHEET_STATES = [SHEET_LIVE, SHEET_DELETED, SHEET_ABSENT] as const
 const VIEW_ELSEWHERE = 'viw_5946_elsewhere'
 /** The control: a view that really does belong to `SHEET_LIVE`. */
 const VIEW_ON_LIVE = 'viw_5946_on_live'
+/**
+ * A SECOND cross-sheet view, addressed by exactly one cell — the one that asserts `meta_views` is
+ * never read for the caller GET /context refuses. `tryResolveView` memoises found views in a
+ * module-level cache (multitable/loaders.ts), so a viewId any earlier cell already resolved issues
+ * no query on a later request and that assertion would pass for the WRONG reason. This id is used
+ * nowhere else in the file, so its cache entry is cold when that cell runs.
+ */
+const VIEW_ELSEWHERE_UNCACHED = 'viw_5946_elsewhere_uncached'
 
 const BASE_ID = 'base_5946'
 const FLD_TEXT = 'fld_5946_text'
 const REC_ON_LIVE = 'rec_5946_on_live'
 
 /** Every id a request carries. No refusal body may contain any of them. */
-const REQUEST_IDS = [...SHEET_STATES, VIEW_ELSEWHERE, VIEW_ON_LIVE] as const
+const REQUEST_IDS = [...SHEET_STATES, VIEW_ELSEWHERE, VIEW_ELSEWHERE_UNCACHED, VIEW_ON_LIVE] as const
 
 // ── the refusal under test ────────────────────────────────────────────────────
 
@@ -128,6 +152,7 @@ const viewRow = (id: string, sheetId: string) => ({
 
 const VIEW_ROWS = new Map<string, ReturnType<typeof viewRow>>([
   [VIEW_ELSEWHERE, viewRow(VIEW_ELSEWHERE, SHEET_OTHER)],
+  [VIEW_ELSEWHERE_UNCACHED, viewRow(VIEW_ELSEWHERE_UNCACHED, SHEET_OTHER)],
   [VIEW_ON_LIVE, viewRow(VIEW_ON_LIVE, SHEET_LIVE)],
 ])
 
@@ -271,8 +296,34 @@ interface RouteCase {
   name: string
   /** True for the three that answered `409 CONFLICT` with the resolver's message before #5946. */
   previouslyEchoed: boolean
+  /**
+   * The actors that REACH the mismatch refusal on this route. Nine routes run the pairing check
+   * before any authority gate, so both actors reach it and the refusal must be identical for both.
+   * GET /context is the exception and the reason is named in `RESTRICTED_REACH` below — #5948 put an
+   * authority gate in FRONT of its pairing check on purpose, so an unauthorised caller never gets
+   * that far. Its 403 is pinned in its own describe rather than dropped.
+   */
+  reachedBy?: ActorId[]
   send: (agent: ReturnType<typeof request>, sheetId: string, viewId: string) => request.Test
 }
+
+/**
+ * The ONE route whose reach is restricted, and why. Kept as data so the self-check cell below can
+ * assert the exception did not spread: a route that quietly grows an authority gate in front of its
+ * refusal has to be added here with a reason.
+ */
+const RESTRICTED_REACH: Record<string, { reachedBy: ActorId[]; why: string }> = {
+  'GET /context': {
+    reachedBy: ['MANAGER'],
+    why: '#5948 moved this handler\'s sheetId+viewId pairing check BEHIND its #5936 authority gate, so a '
+      + 'caller with no read grant is refused 403 before `meta_views` is consulted at all. That order is '
+      + 'the fix for the view→sheet scan oracle and #5946 must not undo it: the values-free 404 is what '
+      + 'a caller that PASSES the gate now sees instead of the old 500. The 403 half is pinned by the '
+      + '"#5948 order" describe below.',
+  },
+}
+
+const reachOf = (route: RouteCase): ActorId[] => route.reachedBy ?? ['OUTSIDER', 'MANAGER']
 
 /**
  * Every wrapped `resolveMetaSheetId` call site in routes/univer-meta.ts, one row each. The structural
@@ -283,6 +334,7 @@ const ROUTES: RouteCase[] = [
   {
     name: 'GET /context',
     previouslyEchoed: false,
+    reachedBy: RESTRICTED_REACH['GET /context'].reachedBy,
     send: (a, sheetId, viewId) => a.get('/api/multitable/context').query({ sheetId, viewId }),
   },
   {
@@ -346,31 +398,47 @@ function expectValuesFree(text: string, label: string) {
 
 describe('#5946 — a viewId that belongs to another sheet is refused values-free on every univer-meta caller', () => {
   describe('the one refusal, on all ten callers', () => {
+    it('self-check: exactly one route has a restricted reach, it is GET /context, and the reason is recorded', () => {
+      const restricted = ROUTES.filter((r) => r.reachedBy).map((r) => r.name)
+      expect(restricted, 'a route grew an authority gate in front of its mismatch refusal without a recorded reason').toEqual(['GET /context'])
+      expect(Object.keys(RESTRICTED_REACH)).toEqual(restricted)
+      expect(RESTRICTED_REACH['GET /context'].why.length).toBeGreaterThan(120)
+      // The nine unrestricted routes really are reached by the actor that holds nothing.
+      for (const route of ROUTES.filter((r) => !r.reachedBy)) {
+        expect(reachOf(route), route.name).toEqual(['OUTSIDER', 'MANAGER'])
+      }
+    })
+
     for (const route of ROUTES) {
-      it(`${route.name}: a cross-sheet viewId answers the values-free absent-sheet 404`, async () => {
-        const res = await route.send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
+      for (const actor of reachOf(route)) {
+        it(`${route.name} (${actor}): a cross-sheet viewId answers the values-free absent-sheet 404`, async () => {
+          const res = await route.send(on(actor), SHEET_LIVE, VIEW_ELSEWHERE)
 
-        expect(res.status, `${route.name} did not answer the shared refusal status`).toBe(MISMATCH_STATUS)
-        expect(res.body, `${route.name} drifted away from sendSheetNotLive(res, 'absent')`).toEqual(MISMATCH_BODY)
-        expectValuesFree(res.text, route.name)
-        // Not the generic 500 the seven uncaught callers used to reach.
-        expect(res.status).not.toBe(500)
-        expect(JSON.stringify(res.body)).not.toContain('INTERNAL_ERROR')
-      })
+          expect(res.status, `${route.name} did not answer the shared refusal status`).toBe(MISMATCH_STATUS)
+          expect(res.body, `${route.name} drifted away from sendSheetNotLive(res, 'absent')`).toEqual(MISMATCH_BODY)
+          expectValuesFree(res.text, route.name)
+          // Not the generic 500 the seven uncaught callers used to reach.
+          expect(res.status).not.toBe(500)
+          expect(JSON.stringify(res.body)).not.toContain('INTERNAL_ERROR')
+        })
+      }
 
-      it(`${route.name}: an ADMIN caller gets the SAME bytes — the refusal is the address, not authority`, async () => {
-        const outsider = await route.send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
-        const manager = await route.send(on('MANAGER'), SHEET_LIVE, VIEW_ELSEWHERE)
+      if (reachOf(route).length > 1) {
+        it(`${route.name}: an ADMIN caller gets the SAME bytes — the refusal is the address, not authority`, async () => {
+          const outsider = await route.send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
+          const manager = await route.send(on('MANAGER'), SHEET_LIVE, VIEW_ELSEWHERE)
 
-        expect(manager.status).toBe(outsider.status)
-        expect(manager.text).toBe(outsider.text)
-        expect(manager.status).toBe(MISMATCH_STATUS)
-        expect(manager.body).toEqual(MISMATCH_BODY)
-      })
+          expect(manager.status).toBe(outsider.status)
+          expect(manager.text).toBe(outsider.text)
+          expect(manager.status).toBe(MISMATCH_STATUS)
+          expect(manager.body).toEqual(MISMATCH_BODY)
+        })
+      }
 
       it(`${route.name}: attribution — the SAME request with a view that DOES belong answers differently`, async () => {
-        const mismatch = await route.send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
-        const matching = await route.send(on('OUTSIDER'), SHEET_LIVE, VIEW_ON_LIVE)
+        const actor = reachOf(route)[0]
+        const mismatch = await route.send(on(actor), SHEET_LIVE, VIEW_ELSEWHERE)
+        const matching = await route.send(on(actor), SHEET_LIVE, VIEW_ON_LIVE)
 
         expect(
           `${matching.status} ${matching.text}`,
@@ -403,11 +471,22 @@ describe('#5946 — a viewId that belongs to another sheet is refused values-fre
   /**
    * THE #5839 INVARIANT, carried forward. B5 case ⑤ pinned it on PATCH /records/:recordId while the
    * answer was a 500; the answer is a 404 now and the promise is unchanged — a mismatch must not let
-   * a caller separate a live sheet from a soft-deleted or an absent one. Asserted on the three routes
-   * named in #5946, byte-for-byte rather than by deep equality: the wire form is what a caller sees.
+   * a caller separate a live sheet from a soft-deleted or an absent one. Asserted byte-for-byte
+   * rather than by deep equality: the wire form is what a caller sees.
+   *
+   * GET /context is NOT in this list, and not because it fails it. #5948 put a liveness refusal in
+   * front of its pairing check for callers that pass the authority gate, so on that route the three
+   * states are separated BEFORE the mismatch is reached — by a gate that already decided the caller
+   * may know. For the caller that may NOT know, the three states are indistinguishable on /context
+   * too, and that is the stronger statement; it is pinned in the "#5948 order" describe below.
    */
   describe('three-way same shape: LIVE / DELETED / ABSENT are indistinguishable through the mismatch', () => {
-    for (const name of ['PATCH /records/:recordId', 'GET /view', 'GET /context']) {
+    it('self-check: the routes listed here run the pairing check before any liveness answer', () => {
+      // If /context ever rejoins this list, this cell says why it left.
+      expect(Object.keys(RESTRICTED_REACH)).toContain('GET /context')
+    })
+
+    for (const name of ['PATCH /records/:recordId', 'GET /view']) {
       it(`${name}: the three sheet states answer byte-identically`, async () => {
         const route = ROUTES.find((r) => r.name === name)!
         const answers: Array<{ sheetId: string; status: number; text: string }> = []
@@ -429,9 +508,107 @@ describe('#5946 — a viewId that belongs to another sheet is refused values-fre
   })
 
   /**
+   * #5948's ORDER, which #5946 changes the CLASS of the answer behind but must not change the POSITION
+   * of. On GET /context the sheetId+viewId pairing check sits BEHIND the authority gate on purpose: a
+   * caller with no read grant must not be able to hold a viewId, sweep candidate sheet ids and read
+   * the view→sheet binding off the status code. If #5946's wrapper were attached to the PRE-gate
+   * resolution instead — or if the pairing check were hoisted back above the gate — a foreign view
+   * would answer 404 where a missing one answers 403, and the scan is back.
+   *
+   * These cells are the ones that red on that mistake, and the reason GET /context is missing from
+   * the three-way describe above.
+   */
+  describe('#5948 order: on GET /context the refusal stays BEHIND the authority gate', () => {
+    const context = ROUTES.find((r) => r.name === 'GET /context')!
+    const VIEW_NOWHERE = 'viw_5946_nowhere'
+
+    it('a caller with no read grant gets the SAME 403 for a foreign view, a missing view and no view at all', async () => {
+      const foreign = await on('OUTSIDER').get('/api/multitable/context').query({ sheetId: SHEET_LIVE, viewId: VIEW_ELSEWHERE })
+      const missing = await on('OUTSIDER').get('/api/multitable/context').query({ sheetId: SHEET_LIVE, viewId: VIEW_NOWHERE })
+      const none = await on('OUTSIDER').get('/api/multitable/context').query({ sheetId: SHEET_LIVE })
+
+      expect(
+        [foreign.status, foreign.text],
+        'an existing foreign view is now distinguishable from a missing one for a caller with no capability — the #5936/#5948 view→sheet scan is back',
+      ).toEqual([missing.status, missing.text])
+      expect([none.status, none.text]).toEqual([missing.status, missing.text])
+      expect([foreign.status, foreign.body]).toEqual([FORBIDDEN_STATUS, FORBIDDEN])
+      expectValuesFree(foreign.text, 'GET /context refused caller')
+      expect(foreign.text).not.toContain(VIEW_NOWHERE)
+    })
+
+    /**
+     * Stronger than the status equality above: for the caller the gate refuses, the server does not
+     * look the view up AT ALL. Uses VIEW_ELSEWHERE_UNCACHED because `tryResolveView` memoises found
+     * views module-wide — with an id an earlier cell already resolved this cell would be green
+     * whatever the handler does. Its cold-cache-ness is asserted, not assumed: the same request from
+     * the actor that PASSES the gate must produce the meta_views read this one must not.
+     */
+    it('meta_views is not consulted at all for the caller the gate refuses', async () => {
+      const refused = await on('OUTSIDER').get('/api/multitable/context').query({ sheetId: SHEET_LIVE, viewId: VIEW_ELSEWHERE_UNCACHED })
+      const refusedReads = sqlLog.filter((s) => /meta_views/i.test(s))
+      expect([refused.status, refused.body]).toEqual([FORBIDDEN_STATUS, FORBIDDEN])
+      expect(
+        refusedReads,
+        'the refused caller made the server read meta_views — the pairing check moved back in front of the gate',
+      ).toEqual([])
+
+      // The control that keeps the cell from passing on a warm cache: the very same viewId, asked by
+      // a caller that gets past the gate, DOES reach meta_views. If this is empty the fixture never
+      // had a lookup to suppress and the assertion above measured nothing.
+      const allowed = await on('MANAGER').get('/api/multitable/context').query({ sheetId: SHEET_LIVE, viewId: VIEW_ELSEWHERE_UNCACHED })
+      expect([allowed.status, allowed.body]).toEqual([MISMATCH_STATUS, MISMATCH_BODY])
+      expect(
+        sqlLog.filter((s) => /meta_views/i.test(s)).length,
+        'no meta_views read happened even for the authorised caller — the cell above proves nothing',
+      ).toBeGreaterThan(0)
+    })
+
+    it('the three sheet states stay indistinguishable for that caller, mismatched view or not', async () => {
+      const answers: string[] = []
+      for (const sheetId of SHEET_STATES) {
+        const res = await context.send(on('OUTSIDER'), sheetId, VIEW_ELSEWHERE)
+        expectValuesFree(res.text, `GET /context refused on ${sheetId}`)
+        answers.push(`${res.status} ${res.text}`)
+      }
+      expect(answers, 'GET /context separates the three sheet states for a caller it refuses').toEqual([answers[0], answers[0], answers[0]])
+      expect(answers[0]).toBe(`${FORBIDDEN_STATUS} ${JSON.stringify(FORBIDDEN)}`)
+    })
+
+    it('a caller that PASSES the gate gets the #5946 values-free 404 — not the 500 #5948 left behind', async () => {
+      const res = await context.send(on('MANAGER'), SHEET_LIVE, VIEW_ELSEWHERE)
+      expect(res.status, JSON.stringify(res.body)).toBe(MISMATCH_STATUS)
+      expect(res.body).toEqual(MISMATCH_BODY)
+      expect(res.status).not.toBe(500)
+      expect(JSON.stringify(res.body)).not.toContain('INTERNAL_ERROR')
+      expectValuesFree(res.text, 'GET /context authorised caller')
+    })
+
+    it('structural: the pairing check sits below the gate, and the pre-gate resolution above it', () => {
+      const start = UNIVER_META_SOURCE.indexOf("router.get('/context'")
+      expect(start).toBeGreaterThan(0)
+      const gate = UNIVER_META_SOURCE.indexOf(CONTEXT_AUTHORITY_GATE, start)
+      const preGate = UNIVER_META_SOURCE.indexOf(CONTEXT_PRE_GATE_CALL, start)
+      const wrapped = UNIVER_META_SOURCE.indexOf(WRAPPED_CALL, start)
+      expect(gate, 'the #5936 authority gate is gone from GET /context').toBeGreaterThan(start)
+      expect(preGate, 'the pre-gate viewId-only resolution is gone').toBeGreaterThan(start)
+      expect(preGate, 'the pre-gate resolution moved BELOW the gate').toBeLessThan(gate)
+      expect(wrapped, 'GET /context no longer wraps its pairing check').toBeGreaterThan(start)
+      expect(wrapped, 'the #5946 refusal was hoisted ABOVE the authority gate — that is the #5948 oracle').toBeGreaterThan(gate)
+    })
+  })
+
+  /**
    * MUTATION PROBES. The cells above measure the refusal; these show they would RED on the two shapes
    * main answered, by rebuilding the module graph with `sendSheetNotLive` swapped in memory
    * (`vi.doMock`) — no file on disk is ever mutated.
+   *
+   * WHAT THEY DO AND DO NOT MEASURE, stated so nobody reads more out of a green: each probe installs
+   * a response and then asserts that the REAL cells' assertions reject it. That makes them probes of
+   * THIS SPEC's discrimination, not of the product — they stay green if the product fix is removed,
+   * because the response they judge is the one they installed. The product's dependence on the
+   * wrapper is measured by the route cells themselves: removing the wrapper's refusal branch reds 37
+   * of them (in-memory source transform, reported with the PR).
    */
   describe('mutation probes: both pre-#5946 shapes would red the cells above', () => {
     async function withRefusal(override: (res: Response) => unknown, run: () => Promise<request.Response>) {
@@ -452,8 +629,15 @@ describe('#5946 — a viewId that belongs to another sheet is refused values-fre
       )
 
       expect(res.status).toBe(500)
-      expect(res.status).not.toBe(MISMATCH_STATUS)
-      expect(res.body).not.toEqual(MISMATCH_BODY)
+      // The point is NOT that the override answered the 500 it was told to — that is a tautology,
+      // and this cell used to consist of three of them. It is that EACH of the real route cell's
+      // assertions, run against this response, THROWS. Asserted one at a time (a single `.toThrow()`
+      // around a block is satisfied by whichever assertion throws first, so it would not notice one
+      // of them going blind). Same shape as the values-free assertion in the sibling probe below.
+      expect(() => expect(res.status).toBe(MISMATCH_STATUS), 'the generic-500 status satisfies the route cell').toThrow()
+      expect(() => expect(res.body).toEqual(MISMATCH_BODY), 'the generic-500 body satisfies the route cell').toThrow()
+      expect(() => expect(res.status).not.toBe(500), 'the route cell stopped refusing the 500 class').toThrow()
+      expect(() => expect(JSON.stringify(res.body)).not.toContain('INTERNAL_ERROR'), 'the route cell stopped refusing INTERNAL_ERROR').toThrow()
     })
 
     it('PROBE (the three): main’s 409 + err.message fails the status, the code AND the values-free assertion', async () => {
@@ -473,9 +657,19 @@ describe('#5946 — a viewId that belongs to another sheet is refused values-fre
     })
 
     it('the probes really restored the product behaviour afterwards', async () => {
-      const res = await ROUTES[0].send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
+      // Checked on a route whose refusal is pre-authority, so the actor cannot be the variable:
+      // ROUTES[0] is GET /context, where an OUTSIDER is refused 403 by #5948's gate long before the
+      // wrapper runs, and a green here would say nothing about the restore.
+      const route = ROUTES.find((r) => !r.reachedBy)!
+      const res = await route.send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
       expect(res.status).toBe(MISMATCH_STATUS)
       expect(res.body).toEqual(MISMATCH_BODY)
+
+      // …and on /context too, with the actor that reaches it.
+      const context = ROUTES.find((r) => r.name === 'GET /context')!
+      const ctx = await context.send(on('MANAGER'), SHEET_LIVE, VIEW_ELSEWHERE)
+      expect(ctx.status).toBe(MISMATCH_STATUS)
+      expect(ctx.body).toEqual(MISMATCH_BODY)
     })
   })
 })
@@ -494,12 +688,30 @@ const UNIVER_META_SOURCE = readFileSync(join(__dirname, '../../src', UNIVER_META
 const WRAPPED_CALL = 'await orRefuseSheetViewMismatch(res, resolveMetaSheetId('
 
 /**
+ * The ONE raw resolver call #5948's order requires: GET /context resolving a viewId that came
+ * WITHOUT a sheetId, above the authority gate. Kept as a literal so the allow-list entry below can
+ * only ever excuse THIS text, and so the cell that pins where it sits can find it.
+ */
+const CONTEXT_PRE_GATE_CALL = 'const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {'
+
+/** The #5936 gate the call above must stay in front of, and the pairing check must stay behind. */
+const CONTEXT_AUTHORITY_GATE = 'if (!canReadWithSheetGrant(baseCapabilities, sheetScope, access.isAdminRole)) return sendForbidden(res)'
+
+/**
  * The ONLY other lines allowed to name the resolver, each with the reason it is not a route caller.
  * Anything else — a handler awaiting the raw resolver — is the 500 (or the id echo) coming back.
  */
 const RAW_RESOLVER_ALLOW_LIST: Record<string, string> = {
   'async function resolveMetaSheetId(':
     'the definition itself; its ConflictError stays, because the class is what the wrapper maps.',
+  [CONTEXT_PRE_GATE_CALL]:
+    'GET /context resolves a viewId WITHOUT a sheetId above its #5936 authority gate, because there is '
+    + 'no other way to learn which sheet the request addresses. It passes `sheetId: null`, and the '
+    + 'resolver throws ConflictError only on the `view.sheetId !== sheetId` comparison — unreachable '
+    + 'with nothing to compare against, so there is no refusal here to improve. Wrapping it anyway '
+    + 'would put a 404 IN FRONT of that gate and hand a caller with no capability the foreign-view / '
+    + 'missing-view distinction #5948 closed. The cell below pins that this exception stays exactly '
+    + 'one line, inside /context, above the gate, and still passing `sheetId: null`.',
 }
 
 /**
@@ -510,34 +722,52 @@ const RAW_RESOLVER_ALLOW_LIST: Record<string, string> = {
  */
 const isCommentLine = (line: string) => /^(\/\/|\/\*|\*)/.test(line)
 
-/** Lines that name the resolver outside the wrapped form and outside the allow-list. */
+/**
+ * Lines that name the resolver outside the wrapped form and outside the allow-list.
+ *
+ * The excused forms are DELETED FROM THE LINE rather than used to drop it: a second, raw call
+ * written on the SAME line as a wrapped one (a compressed line, or a formatter joining two
+ * statements) used to be invisible, because the whole line matched `includes(WRAPPED_CALL)`.
+ * Self-tested below on exactly that shape.
+ */
 function rawResolverOffenders(source: string): string[] {
+  const excuses = [WRAPPED_CALL, ...Object.keys(RAW_RESOLVER_ALLOW_LIST)]
   return source
     .split(/\r?\n/)
     .map((line, i) => ({ line: line.trim(), n: i + 1 }))
     .filter((entry) => !isCommentLine(entry.line))
     .filter((entry) => /resolveMetaSheetId\(/.test(entry.line))
-    .filter((entry) => !entry.line.includes(WRAPPED_CALL))
-    .filter((entry) => !Object.keys(RAW_RESOLVER_ALLOW_LIST).some((allowed) => entry.line.includes(allowed)))
+    .filter((entry) => {
+      const residue = excuses.reduce((acc, excuse) => acc.split(excuse).join(''), entry.line)
+      return /resolveMetaSheetId\(/.test(residue)
+    })
     .map((entry) => `${UNIVER_META_REL}:${entry.n}: ${entry.line}`)
 }
 
 /**
- * `ConflictError` branches that answer with `err.message`, keyed by the route they sit in
- * (`(module scope)` for the helpers above the router).
+ * `ConflictError` branches that answer with `err.message`, keyed by WHERE they sit.
+ *
+ * Above the first `router.` declaration (line ~7858 of a 20k-line file) there is no route to name,
+ * and keying that whole region as one bucket called `(module scope)` made the allow-list excuse
+ * every module-level helper at once — including the wrapper this fix adds. So a module-level branch
+ * is keyed by its ENCLOSING FUNCTION instead, and the allow-list has to name that function.
+ * Self-tested below by inserting a leaky module-level helper.
  */
 function conflictEchoes(source: string): string[] {
   const lines = source.split(/\r?\n/)
   const found: string[] = []
-  let route = '(module scope)'
+  let route = ''
+  let enclosingFn = '(module top level)'
   lines.forEach((line, i) => {
+    const fnDecl = /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/.exec(line)
+    if (fnDecl) enclosingFn = fnDecl[1]
     const decl = /^\s*router\.(get|post|patch|put|delete)\('([^']+)'/.exec(line)
     if (decl) route = `${decl[1]} ${decl[2]}`
     if (isCommentLine(line.trim()) || !/instanceof ConflictError/.test(line)) return
     // Comment lines are dropped from the window too: the removed branches left a note behind that
     // NAMES `err.message`, and a scanner that read it would report a branch that is not there.
     const window = lines.slice(i, i + 4).filter((l) => !isCommentLine(l.trim())).join('\n')
-    if (/err\.message/.test(window)) found.push(route)
+    if (/err\.message/.test(window)) found.push(route || `fn ${enclosingFn}`)
   })
   return found
 }
@@ -547,8 +777,8 @@ function conflictEchoes(source: string): string[] {
  * itself here instead of landing quietly.
  */
 const CONFLICT_ECHO_ALLOW_LIST: Record<string, string> = {
-  '(module scope)':
-    'serializePatchFailure — the PER-RECORD failure payload of POST /patch. No local ConflictError is '
+  'fn serializePatchFailure':
+    'the PER-RECORD failure payload of POST /patch. No local ConflictError is '
     + 'thrown inside that per-record loop (the only two throw sites in the file are resolveMetaSheetId, '
     + 'now wrapped ABOVE the loop, and the POST /sheets insert collision), so this arm is unreachable '
     + 'today; it is named here so a future thrower inside the loop has to confront it.',
@@ -557,13 +787,26 @@ const CONFLICT_ECHO_ALLOW_LIST: Record<string, string> = {
     + 'to create, on a route it is authorised for, so the message tells it nothing it did not send.',
 }
 
-/** Wrapped call sites that do not `return` on the null the wrapper gives back. */
+/**
+ * Wrapped call sites that do not `return` on the null the wrapper gives back.
+ *
+ * The guarded name is DERIVED from each call site's own binding rather than hardcoded to `resolved`:
+ * a site that binds a different name and then leans on a neighbouring site's `if (!resolved) return`
+ * (they can sit within the 8-line window) would otherwise pass while continuing on a sent response.
+ * A call site that binds nothing at all is reported by name-less capture. Self-tested below.
+ */
 function callSitesThatIgnoreNull(source: string): string[] {
   const lines = source.split(/\r?\n/)
   const missing: string[] = []
   lines.forEach((line, i) => {
     if (!line.includes(WRAPPED_CALL)) return
-    if (!/if \(!resolved\) return/.test(lines.slice(i, i + 8).join('\n'))) missing.push(`${UNIVER_META_REL}:${i + 1}`)
+    const bound = /const\s+([A-Za-z0-9_$]+)\s*=\s*await orRefuseSheetViewMismatch\(/.exec(line)
+    if (!bound) {
+      missing.push(`${UNIVER_META_REL}:${i + 1} (result not bound — the null can never be checked)`)
+      return
+    }
+    const guard = new RegExp(`if \\(!${bound[1]}\\) return`)
+    if (!guard.test(lines.slice(i, i + 8).join('\n'))) missing.push(`${UNIVER_META_REL}:${i + 1} (no \`if (!${bound[1]}) return\`)`)
   })
   return missing
 }
@@ -584,6 +827,46 @@ describe('#5946 structural — the wrapped call is the only door', () => {
     const callers = UNIVER_META_SOURCE.split(WRAPPED_CALL).length - 1
     expect(callers, 'a wrapper call site landed without a cell in ROUTES (or a cell lost its route)').toBe(ROUTES.length)
     expect(ROUTES.length).toBe(10)
+    // Counted separately and named, so this cell stays a "10 wrapped sites" statement rather than a
+    // "every resolver call is wrapped" one — which the allow-listed pre-gate call would red forever.
+    // Comment lines are excluded: the wrapper's doc comment quotes the call form while stating the rule.
+    const codeMentions = UNIVER_META_SOURCE
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => !isCommentLine(l))
+      .reduce((n, l) => n + (l.match(/[^A-Za-z0-9_$]?resolveMetaSheetId\(/g) ?? []).length, 0)
+    expect(
+      codeMentions,
+      'the resolver gained or lost a mention in CODE: 1 definition + 10 wrapped call sites + the 1 allow-listed pre-gate /context call',
+    ).toBe(callers + 2)
+  })
+
+  /**
+   * The allow-listed raw call, pinned in place. The allow-list key is a LINE, so on its own it would
+   * excuse that text anywhere in the file; these assertions make it excuse exactly one occurrence,
+   * in GET /context, above the gate, still passing `sheetId: null` — the three properties that make
+   * it safe not to wrap (finding: wrapping it re-opens the #5948 view→sheet scan).
+   */
+  it('the ONE allow-listed raw resolver call is the /context pre-gate viewId-only resolution and nothing else', () => {
+    const occurrences = UNIVER_META_SOURCE.split(CONTEXT_PRE_GATE_CALL).length - 1
+    expect(occurrences, 'the allow-listed raw resolver form appears more than once — the allow-list now excuses an unknown caller').toBe(1)
+
+    const at = UNIVER_META_SOURCE.indexOf(CONTEXT_PRE_GATE_CALL)
+    const contextStart = UNIVER_META_SOURCE.indexOf("router.get('/context'")
+    const contextEnd = UNIVER_META_SOURCE.indexOf('\n  router.', contextStart + 10)
+    const gate = UNIVER_META_SOURCE.indexOf(CONTEXT_AUTHORITY_GATE, contextStart)
+    expect(contextStart).toBeGreaterThan(0)
+    expect(contextEnd).toBeGreaterThan(contextStart)
+    expect(at, 'the allow-listed raw call left GET /context').toBeGreaterThan(contextStart)
+    expect(at, 'the allow-listed raw call left GET /context').toBeLessThan(contextEnd)
+    expect(at, 'the allow-listed raw call sank BELOW the authority gate, where it should be wrapped instead').toBeLessThan(gate)
+
+    // It cannot throw ConflictError: the resolver compares `view.sheetId !== sheetId`, and there is
+    // no sheetId here. If that ever changes, the excuse is void and the call must be wrapped.
+    const args = UNIVER_META_SOURCE.slice(at, at + 200)
+    expect(args, 'the allow-listed raw call now passes a sheetId — its ConflictError became reachable and it must be wrapped').toContain('sheetId: null,')
+
+    expect(RAW_RESOLVER_ALLOW_LIST[CONTEXT_PRE_GATE_CALL]?.length ?? 0, 'the allow-list entry lost its reason').toBeGreaterThan(200)
   })
 
   it('every wrapped call is followed by a `return` on null — no handler continues on a sent refusal', () => {
@@ -592,19 +875,36 @@ describe('#5946 structural — the wrapped call is the only door', () => {
 
   /**
    * The guard this fix must not pay with. `addressesASheet` in
-   * tests/unit/multitable-sheet-liveness-closure.guard.test.ts puts a handler in scope when its body
-   * names `resolveMetaSheetId`; GET /context is in scope for that reason ALONE (it has no
-   * resolveSheetCapabilities call and no `:sheetId` in its path). A wrapper that hid the name behind
-   * `resolveMetaSheetIdOrRefuse(...)` would have silently removed it from that guard's population.
+   * tests/unit/multitable-sheet-liveness-closure.guard.test.ts puts a handler in scope on FOUR
+   * predicates, and for GET /context exactly ONE of them fires — the literal `resolveMetaSheetId`.
+   * That "alone" is asserted here rather than asserted in prose, because #5948 added a
+   * `resolveSheetCapabilitiesForAccess` call to this handler that LOOKS like it would carry the
+   * scope: the guard's pattern is `\bresolveSheetCapabilities\b`, whose trailing boundary fails on
+   * `ForAccess`, so it does not. A wrapper that hid the resolver's name behind
+   * `resolveMetaSheetIdOrRefuse(...)` would therefore STILL silently remove /context from that
+   * guard's population today.
    */
   it('the wrapped form keeps the resolver token in the handler body (closure-guard scope preserved)', () => {
     expect(RESOLVER_TOKEN.test(` ${WRAPPED_CALL} `), 'the wrapped form stopped naming the resolver — the closure guard loses GET /context').toBe(true)
-    const contextHandler = UNIVER_META_SOURCE.slice(
-      UNIVER_META_SOURCE.indexOf("router.get('/context'"),
-      UNIVER_META_SOURCE.indexOf("router.get('/context'") + 4000,
-    )
+    const contextStart = UNIVER_META_SOURCE.indexOf("router.get('/context'")
+    const contextHandler = UNIVER_META_SOURCE.slice(contextStart, UNIVER_META_SOURCE.indexOf('\n  router.', contextStart + 10))
     expect(contextHandler.length).toBeGreaterThan(100)
     expect(RESOLVER_TOKEN.test(contextHandler), 'GET /context no longer names resolveMetaSheetId — it drops out of the closure guard').toBe(true)
+
+    // The other three predicates of that guard, all FALSE for /context. The first is about the PATH
+    // (`h.path.includes(':sheetId')` in the guard), not the body — the body carries the string in a
+    // comment about a different route. Written with character classes instead of `\b` escapes for
+    // the same reason RESOLVER_TOKEN is.
+    const contextPath = /router\.get\('([^']+)'/.exec(UNIVER_META_SOURCE.slice(contextStart))![1]
+    expect(contextPath).toBe('/context')
+    expect(contextPath.includes(':sheetId'), 'GET /context grew a :sheetId path param — restate the claim above').toBe(false)
+    expect(
+      /[^A-Za-z0-9_$](resolveSheetCapabilities|resolveSheetReadableCapabilities)[^A-Za-z0-9_$]/.test(contextHandler),
+      'GET /context now matches the guard\'s capability predicate — restate the claim above',
+    ).toBe(false)
+    expect(/[^A-Za-z0-9_$]requireRecordReadable[^A-Za-z0-9_$]/.test(contextHandler)).toBe(false)
+    // …and the near-miss that makes the check worth having: the call IS there, the pattern misses it.
+    expect(contextHandler.includes('resolveSheetCapabilitiesForAccess'), '#5948\'s gate left GET /context — recheck which predicate carries its scope').toBe(true)
   })
 
   it('no ConflictError branch echoes err.message outside the named allow-list', () => {
@@ -632,6 +932,64 @@ describe('#5946 structural — the wrapped call is the only door', () => {
     expect(rawResolverOffenders(trailing).join('\n')).toMatch(/alsoSneaky/)
 
     expect(rawResolverOffenders(UNIVER_META_SOURCE)).toEqual([])
+  })
+
+  it('self-test: a raw call sharing a LINE with a wrapped one is caught (the excuses are deleted, not the line)', () => {
+    // The shape an earlier version of this scanner could not see: `entry.line.includes(WRAPPED_CALL)`
+    // dropped the whole line, so a second, raw call appended to it was invisible.
+    const wrappedLine = UNIVER_META_SOURCE.split(/\r?\n/).find((l) => l.includes(WRAPPED_CALL))
+    expect(wrappedLine, 'no wrapped call site to build the probe on').toBeTruthy()
+    const sameLine = UNIVER_META_SOURCE.replace(
+      wrappedLine!,
+      `${wrappedLine!} const sameLineSneaky = await resolveMetaSheetId(pool, args)`,
+    )
+    expect(rawResolverOffenders(sameLine).join('\n'), 'a raw call hiding on a wrapped call\'s line is invisible').toMatch(/sameLineSneaky/)
+
+    // Same for the allow-listed line: it excuses ITS text, not everything sharing its line.
+    const allowLine = UNIVER_META_SOURCE.split(/\r?\n/).find((l) => l.includes(CONTEXT_PRE_GATE_CALL))
+    expect(allowLine).toBeTruthy()
+    const nextToAllowed = UNIVER_META_SOURCE.replace(
+      allowLine!,
+      `${allowLine!} const allowSneaky = await resolveMetaSheetId(pool, args)`,
+    )
+    expect(rawResolverOffenders(nextToAllowed).join('\n')).toMatch(/allowSneaky/)
+  })
+
+  it('self-test: a module-level ConflictError echo is caught — the allow-list names one FUNCTION, not a region', () => {
+    // The shape the old `(module scope)` key excused wholesale: any helper above the first `router.`
+    // declaration, ~7800 lines of the file including the #5946 wrapper itself.
+    const anchor = 'async function orRefuseSheetViewMismatch('
+    expect(UNIVER_META_SOURCE).toContain(anchor)
+    const mutated = UNIVER_META_SOURCE.replace(
+      anchor,
+      'function leakyModuleHelper(res: Response, err: unknown) {'
+      + '\n  if (err instanceof ConflictError) {'
+      + "\n    return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })"
+      + '\n  }'
+      + '\n}'
+      + `\n${anchor}`,
+    )
+    expect(conflictEchoes(mutated), 'a module-level echoing branch is invisible to the scanner').toContain('fn leakyModuleHelper')
+    expect(conflictEchoes(mutated).filter((r) => !(r in CONFLICT_ECHO_ALLOW_LIST))).toEqual(['fn leakyModuleHelper'])
+    // And the real file still names exactly the two allow-listed sites.
+    expect(conflictEchoes(UNIVER_META_SOURCE).sort()).toEqual(Object.keys(CONFLICT_ECHO_ALLOW_LIST).sort())
+  })
+
+  it('self-test: a wrapped call that binds a different name cannot borrow a neighbour\'s null check', () => {
+    const lines = UNIVER_META_SOURCE.split(/\r?\n/)
+    const idx = lines.findIndex((l) => l.includes(WRAPPED_CALL) && /const\s+resolved\s*=/.test(l))
+    expect(idx).toBeGreaterThan(0)
+    const renamed = [...lines]
+    renamed[idx] = renamed[idx].replace('const resolved =', 'const borrowed =')
+    expect(
+      callSitesThatIgnoreNull(renamed.join('\n')).join('\n'),
+      'a call site binding another name passes on a neighbouring `if (!resolved) return`',
+    ).toMatch(/borrowed/)
+
+    // A site that binds nothing at all is reported too.
+    const unbound = [...lines]
+    unbound[idx] = unbound[idx].replace(/const\s+resolved\s*=\s*/, '')
+    expect(callSitesThatIgnoreNull(unbound.join('\n')).join('\n')).toMatch(/result not bound/)
   })
 
   it('self-test: a re-added echoing ConflictError branch is caught', () => {

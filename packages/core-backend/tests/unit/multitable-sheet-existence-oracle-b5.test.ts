@@ -757,7 +757,7 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
      * ⑤ THE OTHER pre-authority step, named so the residual list is exhaustive (#5911). When the body
      * carries `sheetId`/`viewId`, `resolveMetaSheetId` runs ABOVE the record probe; a viewId that
      * belongs to a DIFFERENT sheet throws `ConflictError`. That used to have no branch in the catch,
-     * so the caller got the generic 500; since #5946 the call goes through `resolveMetaSheetIdOrRefuse`
+     * so the caller got the generic 500; since #5946 the call goes through `orRefuseSheetViewMismatch`
      * and the answer is the values-free absent-sheet 404. Either way the difference from the 404 an
      * unknown viewId leads to turns on `view.sheetId !== sheetId` ALONE: this cell pins that the three
      * sheet states are still indistinguishable through it, which is what keeps it out of the #5839
