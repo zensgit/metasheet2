@@ -2,7 +2,7 @@
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 service layer.
  *
  * Owns every write to `approval_template_groups` / `approval_template_group_links` (§2 DDL,
- * `zzzz20260918090000_create_approval_template_groups.ts`). Every exported function takes `orgId`
+ * `zzzz20260918090100_create_approval_template_groups.ts`). Every exported function takes `orgId`
  * as an explicit, required, caller-supplied parameter — same convention as
  * `directory/local-directory-org.ts` — this module never reads `req` and never defaults the org;
  * the route layer resolves `orgId` from `req.authenticatedTenantId` ONLY (§2 "org 从哪来" / A‴)
