@@ -73,6 +73,64 @@ let services: AdminRouteServices = {};
 const router = Router();
 
 // ═══════════════════════════════════════════════════════════════════
+// Read-side failure envelope (ADM-05 follow-up)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Stable error code every read-side GET in this router returns on its 500 branch.
+ *
+ * SECURITY (ADM-05 follow-up to #5884 / #5897): batches 2 and 3 gated these reads on platform admin
+ * but deliberately left the 500 bodies alone, recording "redacting that is a separate decision
+ * point" in the route comments. This is that decision. The unhandled-failure branch of every GET
+ * here used to serialize `err.message` straight into the HTTP body, and the errors that actually
+ * reach those branches are driver/infra errors: pg connection failures carry host, port, database
+ * and role in their text (`connect ECONNREFUSED <host>:<port>`, `password authentication failed for
+ * user "<role>"`), Redis and pool errors carry the same shape, and a stack-bearing Error from a
+ * subsystem can carry absolute server paths. A platform admin is trusted — but the HTTP body is not
+ * the right channel for it: it lands in browser devtools, in proxy and CDN access logs, in
+ * screenshots pasted into issues, and in any ops dashboard that renders `error` verbatim. The
+ * operator needs the detail; the wire does not carry it. So the original error keeps going to
+ * logger.error() (message + stack, server side only) and the body carries a stable machine-readable
+ * code plus a fixed human string.
+ *
+ * Shape note: the body keeps `success: false` and keeps `error` a STRING. util/response.ts's
+ * jsonError() was considered and NOT reused here — it emits `{ ok: false, error: { code, message } }`,
+ * a different envelope from the `{ success, error }` one every route in this router and every
+ * existing admin spec reads, so reusing it would turn a redaction into a breaking response-shape
+ * change. `code` is added alongside, which is additive for existing consumers.
+ *
+ * Status codes are unchanged: a 500 stays a 500. Only the body text changes.
+ */
+export const ADMIN_READ_FAILED_CODE = 'ADMIN_READ_FAILED';
+
+/** Fixed, values-free human string. Carries no driver, host, path or identifier. */
+export const ADMIN_READ_FAILED_MESSAGE = '读取失败，详情见服务端日志';
+
+/**
+ * Send the redacted 500 body for a read-side GET, after logging the real error server side.
+ *
+ * @param res      express response
+ * @param context  static, values-free log context (e.g. 'Failed to get detailed health')
+ * @param error    the caught value; its message/stack go to the log, never to the body
+ * @param extra    additional NON-SENSITIVE fields the route already returned on its 500 (e.g. the
+ *                 pluginId the caller itself supplied in the path)
+ */
+function sendAdminReadFailure(
+  res: Response,
+  context: string,
+  error: unknown,
+  extra?: Record<string, unknown>
+): void {
+  logger.error(context, error as Error);
+  res.status(500).json({
+    success: false,
+    code: ADMIN_READ_FAILED_CODE,
+    error: ADMIN_READ_FAILED_MESSAGE,
+    ...(extra ?? {})
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Safety Guard Management
 // ═══════════════════════════════════════════════════════════════════
 
@@ -470,11 +528,7 @@ router.get('/plugins', requireAdminRole(), async (_req: Request, res: Response) 
       list
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to list plugins', error);
   }
 });
 
@@ -517,12 +571,7 @@ router.get('/plugins/:id', requireAdminRole(), async (req: Request, res: Respons
       config: configEntry
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminReadFailure(res, 'Failed to get plugin detail', error, { pluginId: id });
   }
 });
 
@@ -604,12 +653,7 @@ router.get('/plugins/:id/config', requireAdminRole(), async (req: Request, res: 
     const configEntry = await loadPluginConfig(id);
     res.json({ success: true, pluginId: id, config: configEntry });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminReadFailure(res, 'Failed to get plugin config', error, { pluginId: id });
   }
 });
 
@@ -1552,8 +1596,19 @@ router.put(
 /**
  * GET /api/admin/slo/status
  * Get SLO status and error budgets
+ *
+ * SECURITY (issue #5678, batch 3 residual): this read used to carry no authorization at all — the
+ * last ungated GET in this file. It delegates to sloService.getSLOStatus() (SLOService.ts:122),
+ * which aggregates the process-wide prom-client registry with no tenant predicate anywhere, so the
+ * response is the platform's own reliability posture — per-SLO current availability, error-budget
+ * total/consumed/remaining and the healthy/at_risk/violated verdict — to any authenticated caller of
+ * any tenant. That is a free "is the platform hurting right now, and how much budget is left before
+ * it breaches?" oracle, pollable at will. Gated on platform admin like its /dlq, /ratelimits and
+ * /health/summary siblings (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 RBAC_CHECK_FAILED fail-closed; no database pool -> isAdmin() returns false at
+ * rbac/service.ts:20 -> 403, never an open door — see guards/audit-integration.ts:113).
  */
-router.get('/slo/status', async (req: Request, res: Response) => {
+router.get('/slo/status', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const status = await sloService.getSLOStatus();
     res.json({
@@ -1562,10 +1617,7 @@ router.get('/slo/status', async (req: Request, res: Response) => {
       status
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to get SLO status', error);
   }
 });
 
@@ -1617,10 +1669,7 @@ router.get('/dlq', requireAdminRole(), async (req: Request, res: Response) => {
       ...result
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to list DLQ messages', error);
   }
 });
 
@@ -1731,12 +1780,7 @@ router.get('/shards', requireAdminRole(), async (req: Request, res: Response) =>
       metrics: metricsSnapshot
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get shard status', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get shard status', error);
   }
 });
 
@@ -1781,12 +1825,7 @@ router.get('/shards/:name', requireAdminRole(), async (req: Request, res: Respon
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get shard details', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get shard details', error);
   }
 });
 
@@ -1841,12 +1880,7 @@ router.get('/queues', requireAdminRole(), async (req: Request, res: Response) =>
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get queue stats', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get queue stats', error);
   }
 });
 
@@ -2000,12 +2034,7 @@ router.get('/ratelimits', requireAdminRole(), async (req: Request, res: Response
       buckets: showBuckets === 'true' ? buckets : undefined
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get rate limit status', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get rate limit status', error);
   }
 });
 
@@ -2054,12 +2083,7 @@ router.get('/ratelimits/:key', requireAdminRole(), async (req: Request, res: Res
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get rate limit status for key', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get rate limit status for key', error);
   }
 });
 
@@ -2165,12 +2189,7 @@ router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Res
       errors: health.errors
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get detailed health', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get detailed health', error);
   }
 });
 
@@ -2188,9 +2207,9 @@ router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Res
  * (services/HealthAggregatorService.ts:303) and only falls back to a fresh checkHealth(). Gated on
  * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
  * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
- * guards/audit-integration.ts:113 and rbac/service.ts:20). The 500 branch below still echoes
- * err.message; redacting that is a separate decision point (see the design note), deliberately not
- * folded into this "tighten only, change no shape" change.
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The 500 branch below used to echo
+ * err.message; that separate decision point is now closed — it returns ADMIN_READ_FAILED via
+ * sendAdminReadFailure() and the original error goes to the log only (see the helper's note).
  */
 router.get('/health/summary', requireAdminRole(), async (req: Request, res: Response) => {
   try {
@@ -2212,12 +2231,7 @@ router.get('/health/summary', requireAdminRole(), async (req: Request, res: Resp
       hasErrors: health.errors.length > 0
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get health summary', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get health summary', error);
   }
 });
 
@@ -2257,12 +2271,7 @@ router.get('/health/subsystem/:name', requireAdminRole(), async (req: Request, r
       subsystem
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get subsystem health', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get subsystem health', error);
   }
 });
 

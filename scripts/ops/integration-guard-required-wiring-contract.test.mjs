@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
+import { PYTHON_CANDIDATE_LABEL, spawnPythonSync } from './python-interpreter.mjs'
 
 import { GUARDED_PATH_ENTRIES, isPrefixEntry, prefixOf } from './integration-guard-guarded-paths.mjs'
 import { classify, matchesGuardedPath, parseNulDelimited, findMissingRosterEntries } from './integration-guard-classify.mjs'
@@ -503,7 +504,7 @@ const PY_YAML_TO_JSON = [
   "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
   '    sys.exit(3)',
   'try:',
-  '    doc = yaml.safe_load(sys.stdin.read())',
+  '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
   'except Exception as exc:',
   "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
   '    sys.exit(4)',
@@ -521,7 +522,7 @@ const PY_YAML_TO_JSON = [
  * @returns {unknown}
  */
 function parseYamlDocument(wf) {
-  const res = spawnSync('python3', ['-c', PY_YAML_TO_JSON], {
+  const res = spawnPythonSync(['-c', PY_YAML_TO_JSON], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -529,8 +530,9 @@ function parseYamlDocument(wf) {
   })
   if (res.error) {
     throw new Error(
-      `integration-guard required-wiring contract: failing CLOSED — python3 could not be spawned ` +
-        `for the YAML parse (${res.error.message}).`,
+      `integration-guard required-wiring contract: failing CLOSED — no Python interpreter could ` +
+        `be spawned for the YAML parse (tried ${PYTHON_CANDIDATE_LABEL}; last error: ` +
+        `${res.error.message}).`,
     )
   }
   if (res.status !== 0) {

@@ -56,7 +56,16 @@ test('multitable openapi stays aligned with runtime contracts', () => {
 
   assert.ok(paths['/api/multitable/person-fields/prepare']?.post, 'missing person-field prepare endpoint')
   assert.ok(paths['/api/multitable/templates']?.get, 'missing template catalog endpoint')
-  assert.ok(paths['/api/multitable/templates/{templateId}/install']?.post, 'missing template install endpoint')
+  const templateInstall = paths['/api/multitable/templates/{templateId}/install']?.post
+  assert.ok(templateInstall, 'missing template install endpoint')
+  // #5861: the install route is idempotent inside a server-side window, and a replayed 201 is
+  // distinguishable ONLY by this response header (the body is byte-identical to the first 201).
+  // The route sets it at packages/core-backend/src/routes/univer-meta.ts (`res.set('Idempotent-Replayed', 'true')`),
+  // so it is part of the contract and must be declared — otherwise nothing detects its removal.
+  const replayHeader = templateInstall.responses?.['201']?.headers?.['Idempotent-Replayed']
+  assert.ok(replayHeader, 'template install 201 must declare the Idempotent-Replayed header (#5861 dedupe replay signal)')
+  assert.deepEqual(replayHeader.schema, { type: 'string', enum: ['true'] })
+  assert.equal(replayHeader.required, false, 'Idempotent-Replayed is absent on a fresh install')
   assert.ok(paths['/api/multitable/sheets/{sheetId}']?.delete, 'missing sheet delete endpoint')
   const deletedSheets = paths['/api/multitable/bases/{baseId}/trash']?.get
   assert.ok(deletedSheets, 'missing table recycle-bin list endpoint')
