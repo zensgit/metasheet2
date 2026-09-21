@@ -1815,7 +1815,7 @@ export default defineConfig({
       // DB (two raw `pg.Pool` connections). Excluded here so describeIfDatabase cannot
       // skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s required
       // `test (20.x)` "Run approval real-DB integration" step (id `approval-real-db-integration`),
-      // which arms EXPECT_DB=1. (Previously a standalone, non-required
+      // which does not set EXPECT_DB today (arming candidate: PR #5972). (Previously a standalone, non-required
       // `approval-realdb-cancel-round.yml` lane; promoted here and that lane deleted so the same
       // file does not run twice per PR — see the required step's own header comment for the
       // recompute-the-s6a-pin procedure this promotion followed.) This slice covers Q-A only, not
@@ -1829,7 +1829,7 @@ export default defineConfig({
       // in-process. Real DB (poolManager + a real dispatch transaction). Excluded here so
       // `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into
       // `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB integration" step
-      // (sibling entry to the WI-0 census above), which arms EXPECT_DB=1.
+      // (sibling entry to the WI-0 census above), which does not set EXPECT_DB today (arming candidate: PR #5972).
       'tests/integration/approval-cancel-round-creation.db.test.ts',
       // WI-13 cancel-round redemption acceptance, 判据 III ONLY (revoke A4 / reject A7
       // terminating the round row in the same transaction as the instance transition; §5 I3's
@@ -1842,7 +1842,7 @@ export default defineConfig({
       // server exactly like the creation acceptance file). Excluded here so `describeIfDatabase`
       // cannot skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s
       // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to
-      // WI-0/WI-4 above), which arms EXPECT_DB=1.
+      // WI-0/WI-4 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
       'tests/integration/approval-cancel-round-redemption.db.test.ts',
       // §14.3 outlets #12/#13 (lock:373-374) — the two SEAT-WRITE chokepoints
       // (`bulkReassignApprovals`, `applyApprovalDepartureTransfer`): a cancel-round instance's
@@ -1856,7 +1856,7 @@ export default defineConfig({
       // through the running server exactly like the creation/redemption acceptance files).
       // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
       // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
-      // integration" step (sibling entry to WI-0/WI-4/WI-13 above), which arms EXPECT_DB=1.
+      // integration" step (sibling entry to WI-0/WI-4/WI-13 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
       'tests/integration/approval-cancel-round-seat-guards.db.test.ts',
       // WI-3 Q1c package (§14.3 #10/#11, lock:371-372) — the migration's own preflight guard
       // (dangling reference aborts before any constraint exists), the two `atr_*` CHECK
@@ -1869,7 +1869,7 @@ export default defineConfig({
       // this particular migration's non-schema-scoped `pg_constraint` idempotency guards).
       // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
       // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
-      // integration" step (sibling entry to WI-0/WI-4/WI-13/#12-13 above), which arms EXPECT_DB=1.
+      // integration" step (sibling entry to WI-0/WI-4/WI-13/#12-13 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
       'tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts',
       // §14.3 outlets #2/#4/#6/#7/#7′/#8 — the "outlet-guards" file the seat-guards file's own
       // header promised, landed in two slices: #2 (`adminJump`) and #4/#6 (`dispatchAction`'s
@@ -1882,7 +1882,7 @@ export default defineConfig({
       // separate later slice (different oracle shape — see the file's own header). Excluded here
       // so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into
       // `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB integration" step
-      // (sibling entry to WI-0/WI-4/WI-13/#12-13/#10-11 above), which arms EXPECT_DB=1.
+      // (sibling entry to WI-0/WI-4/WI-13/#12-13/#10-11 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
       'tests/integration/approval-cancel-round-outlet-guards.db.test.ts',
       // §14.3 outlet #3 (`applyNodeTimeoutEffect`) — the separate-slice file the outlet-guards
       // file's own header promises: a DIFFERENT oracle shape (a returned scanner outcome, not a
@@ -1895,7 +1895,7 @@ export default defineConfig({
       // reds exactly these two assertions). Excluded here so `describeIfDatabase` cannot
       // skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s required
       // `test (20.x)` "Run approval real-DB integration" step (sibling entry to
-      // WI-0/WI-4/WI-13/#12-13/#10-11/#2-4-6-7-7'-8 above), which arms EXPECT_DB=1. (This file's
+      // WI-0/WI-4/WI-13/#12-13/#10-11/#2-4-6-7-7'-8 above), which does not set EXPECT_DB today (arming candidate: PR #5972). (This file's
       // own siblings above were wired into the now-deleted standalone
       // `approval-realdb-cancel-round.yml` lane first; this file landed after that lane's pending
       // CI-wiring decision was made, so it goes straight into the required step alongside them —
