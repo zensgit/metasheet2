@@ -8646,10 +8646,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       let resolvedBaseId = baseId || null
       let resolvedSheetId = sheetId || null
-      if (resolvedSheetId || viewId) {
+      // A viewId WITHOUT a sheetId is the ONLY resolution that must happen before the gate below:
+      // there is no other way to learn which sheet the request addresses. It reads `meta_views` and
+      // never a sheet row, so it says nothing about the three sheet states the gate hides. The
+      // sheetId+viewId PAIRING check is deliberately deferred to AFTER the gate — see below.
+      if (!resolvedSheetId && viewId) {
         const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
-          sheetId: resolvedSheetId,
-          viewId: viewId || undefined,
+          sheetId: null,
+          viewId,
         })
         resolvedSheetId = resolved.sheetId
       }
@@ -8676,6 +8680,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // never applied. That is a SEPARATE, separately-tracked defect (pinned today as a VACUOUS
       // control in tests/integration/approval-projection-key-parity.db.test.ts); closing it here
       // would be an unrelated behaviour change riding along inside an ordering fix.
+      //
+      // COST, disclosed rather than discovered: this is the Workbench's main load path, and the gate
+      // adds 2 DB round trips for an admin (liveness + this sheet's scope map) and 3 for a non-admin
+      // (+ the approval-projection membership lookup). One of them — loadSheetPermissionScopeMap for
+      // THIS sheet — is issued again ~20 lines below with the same parameters, where the map is
+      // loaded for the whole base sheet list. Seeding that later map from `sheetScope` would remove
+      // the duplicate, but it would also change the parameters of a query sibling specs assert on;
+      // left as a named residual rather than folded into an ordering fix.
       if (resolvedSheetId) {
         const { sheetScope, sheetLiveness } = await resolveSheetCapabilitiesForAccess(
           pool.query.bind(pool),
@@ -8684,6 +8696,20 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         )
         if (!canReadWithSheetGrant(baseCapabilities, sheetScope, access.isAdminRole)) return sendForbidden(res)
         if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      }
+
+      // #5936 (refutation round) — the sheetId+viewId PAIRING check, now BEHIND the gate. It used to
+      // run with the resolution above, and `resolveMetaSheetId` throws ConflictError when the view
+      // EXISTS but belongs to another sheet; this handler's catch maps that to 500. So a caller with
+      // no capability at all could tell an existing foreign view (500) from a non-existent one (403),
+      // and scan a held viewId against candidate sheet ids for the view→sheet binding — a
+      // pre-authority door of the same family as the row read below, on the same handler. Run here,
+      // every caller the gate refuses gets the SAME 403 whatever the viewId is, and `meta_views` is
+      // not even consulted for them. A caller that PASSES the gate sees exactly what it saw before,
+      // including the 500 (a client error mapped to INTERNAL_ERROR — a separate defect, not the remit
+      // of an ordering fix).
+      if (sheetId && viewId) {
+        await resolveMetaSheetId(pool as unknown as { query: QueryFn }, { sheetId, viewId })
       }
 
       const sheetRowResult = resolvedSheetId
@@ -8700,10 +8726,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const sheetRow = (sheetRowResult as any).rows?.[0]
       if (resolvedSheetId && !sheetRow) {
-        // Reachable only if the sheet was soft-deleted BETWEEN the liveness gate above and this read.
-        // Values-free by construction (multitable/sheet-refusals.ts) — the id echo that made this
-        // line the oracle #5936 reports is gone.
-        return sendSheetNotLive(res, 'absent')
+        // Reachable only if the sheet went away BETWEEN the liveness gate above and this read. The
+        // row read filters `s.deleted_at IS NULL`, so its MISS cannot tell soft-deleted from absent:
+        // re-read liveness (one query, on the race path only) so a sheet that is merely in the
+        // recycle bin still answers SHEET_DELETED and the client keeps the restore affordance that
+        // distinct code exists for (multitable/sheet-liveness.ts). Values-free either way
+        // (multitable/sheet-refusals.ts) — the id echo that made this line the oracle #5936 reports
+        // is gone in both branches.
+        const racedLiveness = await loadSheetLiveness(pool.query.bind(pool), resolvedSheetId)
+        return sendSheetNotLive(res, racedLiveness === 'live' ? 'absent' : racedLiveness)
       }
 
       if (!resolvedBaseId) {

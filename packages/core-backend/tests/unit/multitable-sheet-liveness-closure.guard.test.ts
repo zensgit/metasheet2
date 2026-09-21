@@ -185,18 +185,32 @@ const EXEMPT: Record<string, string> = {
  * ledger that cannot see a handler cannot hold it to account. It was found by hand, not by this
  * guard, which is the failure this alternative removes.
  *
- * It is deliberately narrow in three ways, so it flags EXISTENCE probes and not every join that
- * happens to filter a soft delete:
- *   - the alias is CAPTURED and BACK-REFERENCED, so `FROM meta_sheets s … b.deleted_at IS NULL`
+ * It reads the QUESTION — "is the row for the id THIS REQUEST NAMES still there?" — not the table
+ * name, and it is deliberately the same test the all-routes guard already applies to AST-extracted
+ * SQL (`sheetTableLivenessFilter`, tests/utils/sheet-liveness-route-scan.ts:930), rewritten for RAW
+ * SOURCE text. BOTH halves must be present, and each may be spelled bare OR alias-qualified:
+ *   - the ADDRESSED-ID binding `id = $n`, behind a `(?<![.\w])` lookbehind so that `base_id = $1`
+ *     and (under an alias `s`) `r.id = $1` are not read as one. Without it a base-scoped LIST
+ *     (`FROM meta_sheets s WHERE s.base_id = $1 AND s.deleted_at IS NULL`) — which proves nothing
+ *     about the ONE sheet a request addresses — would be reported here as an existence oracle;
+ *   - the soft-delete filter `deleted_at IS NULL`, on the SHEET. When the FROM carries an alias the
+ *     filter may be BACK-REFERENCED to it, so `FROM meta_sheets s … b.deleted_at IS NULL`
  *     (univer-meta.ts's base-liveness filter) and `FROM other_table x … x.deleted_at IS NULL` do
- *     NOT match — the filter has to be on the SHEET the query is reading;
- *   - the span between the two halves is bounded and may not cross a SECOND `FROM … meta_sheets`,
- *     so a match is always one statement, never two spliced together;
- *   - only `FROM` (optionally schema-qualified, optionally `AS`) — not `JOIN`. A joined
- *     `meta_sheets` is normally a row FILTER on another table's rows (`FROM meta_records r JOIN
- *     meta_sheets s …`), not the "is THIS sheet row there?" question this ledger is about.
+ *     NOT match. The BARE spelling is accepted too: `FROM meta_sheets s … WHERE s.id = $1 AND
+ *     deleted_at IS NULL` is valid SQL and this file's own idiom.
+ * Case-insensitive and `\s+`-tolerant (the SQL here is multi-line, and its keyword casing is a style
+ * choice, not a contract), and `FROM`-only — never `JOIN`: a joined `meta_sheets` is a row FILTER on
+ * another table's rows (`FROM meta_records r JOIN meta_sheets s …`), not this ledger's question.
+ *
+ * KNOWN LIMIT, stated instead of claimed away. The span between the halves is bounded (400 chars
+ * each) and may not cross a backtick, a `;`, or a second `FROM`/`JOIN … meta_sheets`. That keeps a
+ * match inside ONE template-literal SQL fragment, so two adjacent statements cannot be spliced into
+ * a GAP that names a handler whose SQL holds no probe at all — at the price of missing a probe
+ * ASSEMBLED from two concatenated template literals. No such shape exists in this file today: the
+ * widening leaves this ledger's found-set unchanged, and adds `GET /context` to it on the UNFIXED
+ * source, which is the only reason to widen it.
  */
-const EXISTENCE_PROBE = /\bawait\s+loadSheet(?:Row|RowShared|Summary)\s*\(|\bFROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL\b|\bFROM\s+(?:\w+\.)?meta_sheets\s+(?:AS\s+)?(\w+)\b(?:(?!FROM\s+(?:\w+\.)?meta_sheets\b)[\s\S]){0,600}?\b\1\.deleted_at\s+IS\s+NULL\b/
+const EXISTENCE_PROBE = /\bawait\s+loadSheet(?:Row|RowShared|Summary)\s*\(|\bFROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL\b|\bFROM\s+(?:\w+\.)?meta_sheets\b(?:\s+(?:AS\s+)?(?!WHERE\b|JOIN\b|LEFT\b|INNER\b|RIGHT\b|FULL\b|CROSS\b|ON\b|ORDER\b|GROUP\b|LIMIT\b|OFFSET\b|UNION\b)(\w+))?(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\1\.)?id\s*=\s*\$\d+(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\1\.)?deleted_at\s+IS\s+NULL\b/i
 /** Where a handler first refuses a caller for lack of authority (the shared record gate refuses inside). */
 const AUTHORITY_REFUSAL = /\.status\(\s*403\s*\)|\bstatus:\s*403\b|\bsend\w*Forbidden\w*\(|\bForbiddenError\b|\brequireRecordReadable\(/
 /** The probe's miss is answered with a 404 by the very next `if`. */
@@ -329,9 +343,13 @@ describe('sheet-liveness closure over univer-meta routes', () => {
    * #5936 — SELF-TEST for the third alternative. `GET /context` asked the existence question with a
    * table ALIAS across four lines and this regex could not see it, so the ledger under-counted and the
    * handler was found by hand instead. These cells are what "the widened probe reads the QUESTION, not
-   * the table name" rests on; drop the back-reference and the three negatives below go green.
+   * the table name" rests on, in both directions: drop the addressed-id binding and the two LIST
+   * negatives go green; drop the back-reference and the three alias negatives go green; let the span
+   * cross a backtick (or a `;`, or a second meta_sheets) and one SPLICE negative goes green per barrier
+   * removed; drop the `i` flag and the lowercase positive goes red; drop `\s+` tolerance and the bare
+   * multi-line positive goes red.
    */
-  it('the probe also reads the ALIASED, multi-line form — and only when the filter is on the sheet itself', () => {
+  it('the probe reads the QUESTION — bare or aliased, one line or four, any case — and only for an ADDRESSED id', () => {
     const cap = "const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, q, sheetId)"
     const refuse = 'if (!capabilities.canRead) return sendForbidden(res)'
     const liveness = "if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)"
@@ -350,18 +368,49 @@ describe('sheet-liveness closure over univer-meta routes', () => {
     // Schema-qualified and `AS`-spelled variants of the same question (both occur in this repo).
     expect(EXISTENCE_PROBE.test('FROM public.meta_sheets sheet_row\n WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL')).toBe(true)
     expect(EXISTENCE_PROBE.test('FROM meta_sheets AS s\n WHERE s.id = $1 AND s.deleted_at IS NULL')).toBe(true)
+    // BARE and MULTI-LINE — univer-meta.ts's other idiom (univer-meta.ts:8180 and :8726 are written
+    // this way). The single-line alternative demands literal single spaces, so it cannot see this.
+    expect(EXISTENCE_PROBE.test('FROM meta_sheets\n WHERE id = $1 AND deleted_at IS NULL')).toBe(true)
+    // ALIASED table, UNQUALIFIED filter — also valid SQL, also this file's idiom (univer-meta.ts:5733).
+    expect(EXISTENCE_PROBE.test('SELECT s.id FROM meta_sheets s WHERE s.id = $1 AND deleted_at IS NULL')).toBe(true)
+    // Lowercase: the same question. Which keyword casing a handler happens to use is not a contract,
+    // and the shared fixture's BEYOND_CAPABILITY has always been case-insensitive — so is this.
+    expect(EXISTENCE_PROBE.test('select s.id from meta_sheets s where s.id = $1 and s.deleted_at is null')).toBe(true)
     // ORDER still decides, exactly as for the two older forms.
     expect(probesExistenceBeforeAuthority([aliased, cap, refuse, liveness].join('\n'))).toBe(true)
     expect(probesExistenceBeforeAuthority([cap, refuse, liveness, aliased].join('\n'))).toBe(false)
 
-    // NEGATIVES — the alias is captured and back-referenced, so the filter must be on the SHEET.
+    // NEGATIVES, (i) the filter must be on the SHEET — the alias is captured and back-referenced.
     const otherTable = 'FROM other_table x\n  LEFT JOIN meta_bases b ON b.id = x.base_id\n WHERE x.id = $1 AND x.deleted_at IS NULL'
     // univer-meta.ts's real base-liveness filter: meta_sheets is aliased `s`, the filter is on `b`.
     const otherAlias = 'FROM meta_sheets s\n  JOIN meta_bases b ON b.id = s.base_id AND b.deleted_at IS NULL'
+    // …including when the SHEET id IS bound: the id half alone is not the question.
+    const otherAliasBound = 'FROM meta_sheets s JOIN meta_bases b ON b.id = s.base_id WHERE s.id = $1 AND b.deleted_at IS NULL'
     const otherEntity = 'FROM meta_bases b WHERE b.id = $1 AND b.deleted_at IS NULL'
     // A JOINed meta_sheets is a row filter on ANOTHER table's rows, not this ledger's question.
     const joined = 'FROM meta_records r\n  JOIN meta_sheets s ON s.id = r.sheet_id\n WHERE r.id = $1 AND s.deleted_at IS NULL'
-    for (const notAProbe of [otherTable, otherAlias, otherEntity, joined]) {
+    // (ii) the query must be bound to the ADDRESSED id. A base-scoped LIST, or an `ANY($1)` batch,
+    // answers "which sheets are live" — nothing about the one sheet a request names — so reporting it
+    // would be a GAP entry no handler could ever clear.
+    const baseList = 'SELECT s.id, s.name FROM meta_sheets s\n WHERE s.base_id = $1 AND s.deleted_at IS NULL\n ORDER BY s.created_at ASC'
+    const anyList = 'SELECT s.id FROM meta_sheets s WHERE s.id = ANY($1::text[]) AND s.deleted_at IS NULL'
+    // (iii) the two halves must belong to ONE SQL fragment. Here they are two separate queries: the
+    // first names a sheet id, the second filters a JOINed sheet's soft delete. Spliced, they would
+    // name a handler whose SQL contains no existence probe at all.
+    const splice = 'const a = await q(`SELECT s.id FROM meta_sheets s WHERE s.id = $1`)\n'
+      + 'const b = await q(`SELECT r.id FROM meta_records r JOIN meta_sheets s ON s.id = r.sheet_id WHERE s.deleted_at IS NULL`)'
+    // The span has TWO independent barriers, so `splice` above (which trips both) cannot tell which
+    // one is load-bearing. One cell per barrier: this splice holds no SECOND meta_sheets, so only the
+    // template-literal boundary stops it…
+    const spliceAdjacent = 'const a = await q(`SELECT s.id FROM meta_sheets s WHERE s.id = $1`)\n'
+      + 'const b = await q(`SELECT c.id FROM meta_comments c WHERE c.sheet_id = $1 AND deleted_at IS NULL`)'
+    // …this one is a single template literal holding two statements, stopped only by the `;`…
+    const spliceStatement = 'FROM meta_sheets s WHERE s.id = $1; SELECT 1 FROM audit_logs WHERE deleted_at IS NULL'
+    // …and this one is ONE statement whose `deleted_at IS NULL` belongs to a SUBSELECT over the base's
+    // other sheets, not to the addressed row (which is read WITHOUT a soft-delete filter, so it is not
+    // an is-it-still-live probe at all). Only the second-meta_sheets bound stops it.
+    const subselect = 'FROM meta_sheets s\n WHERE s.id = $1\n   AND s.base_id IN (SELECT base_id FROM meta_sheets WHERE deleted_at IS NULL)'
+    for (const notAProbe of [otherTable, otherAlias, otherAliasBound, otherEntity, joined, baseList, anyList, splice, spliceAdjacent, spliceStatement, subselect]) {
       expect(EXISTENCE_PROBE.test(notAProbe), notAProbe).toBe(false)
     }
   })

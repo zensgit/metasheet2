@@ -123,15 +123,20 @@ export const SHEET_NOT_LIVE_STATUS = ABSENT_REFUSAL.status
  * The sheet-row probe shape is listed by name, so a restored `loadSheetRow` is caught here as well as
  * by the call-log equality.
  *
- * #5936 added the ALIASED form of that probe (last alternative). `GET /context` reads the sheet row as
+ * #5936 added the probe's OTHER SHAPES (last alternative), written as the same QUESTION the closure
+ * guard's `EXISTENCE_PROBE` asks: `FROM meta_sheets [alias] … id = $n … deleted_at IS NULL`, each half
+ * spelled BARE or ALIAS-QUALIFIED, case-insensitive, multi-line. `GET /context` wrote it
  * `FROM meta_sheets s … WHERE s.id = $1 AND s.deleted_at IS NULL`, which the single-line shape above
- * cannot see — the same blind spot that kept the handler out of the closure guard's ledger. The alias
- * is captured and BACK-REFERENCED (`\3`, because the table list and the write verbs are groups 1 and 2),
- * so a join that filters ANOTHER entity's soft delete — `FROM meta_sheets s JOIN meta_bases b …
- * b.deleted_at IS NULL` — is not mistaken for a sheet-existence probe.
+ * cannot see — the same blind spot that kept the handler out of the closure guard's ledger.
+ *
+ * Two narrowings keep it a PROBE and not "any read of meta_sheets": the ADDRESSED-ID binding is
+ * required (a base-scoped LIST proves nothing about one sheet), and when the FROM carries an alias the
+ * soft-delete filter may be BACK-REFERENCED to it (`\3` — the table list and the write verbs are
+ * groups 1 and 2), so a join that filters ANOTHER entity's soft delete — `FROM meta_sheets s JOIN
+ * meta_bases b … b.deleted_at IS NULL` — is not mistaken for a sheet-existence probe.
  */
 export const BEYOND_CAPABILITY =
-  /\b(meta_records|meta_fields|field_permissions|record_permissions|conditional_read_rules|row_level_read_permissions_enabled|users|roles|platform_member_groups|multitable_config_revisions|meta_config_revisions)\b|FROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL|\bFOR UPDATE\b|^\s*(INSERT|UPDATE|DELETE)\b|FROM (?:\w+\.)?meta_sheets (?:AS )?(\w+)\b(?:(?!FROM (?:\w+\.)?meta_sheets\b)[\s\S]){0,400}?\b\3\.deleted_at IS NULL\b/i
+  /\b(meta_records|meta_fields|field_permissions|record_permissions|conditional_read_rules|row_level_read_permissions_enabled|users|roles|platform_member_groups|multitable_config_revisions|meta_config_revisions)\b|FROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL|\bFOR UPDATE\b|^\s*(INSERT|UPDATE|DELETE)\b|FROM\s+(?:\w+\.)?meta_sheets\b(?:\s+(?:AS\s+)?(?!WHERE\b|JOIN\b|LEFT\b|INNER\b|RIGHT\b|FULL\b|CROSS\b|ON\b|ORDER\b|GROUP\b|LIMIT\b|OFFSET\b|UNION\b)(\w+))?(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\3\.)?id\s*=\s*\$\d+(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\3\.)?deleted_at\s+IS\s+NULL\b/i
 
 /** The statements of a call log that went beyond the capability lookup (empty ⇒ nothing leaked). */
 export function beyondCapability(calls: readonly OracleCall[]): string[] {
@@ -192,13 +197,18 @@ const SCOPE_MAP_SQL = /FROM spreadsheet_permissions sp WHERE sp\.sheet_id = ANY\
 const APPROVAL_PROJECTION_SQL = /SELECT id FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\) AND base_id = \$2/
 const ELEARNING_PROJECTION_SQL = /SELECT sheet_id, org_id FROM \S+ WHERE sheet_id = ANY\(\$1::text\[\]\)/i
 /**
- * The sheet-row EXISTENCE probe, in both shapes it is written in: the single-line one B1/B3/B4 removed,
- * and (#5936) the ALIASED one `GET /context` used — `FROM meta_sheets s … WHERE s.id = $1 AND
- * s.deleted_at IS NULL`. Both are served the same way (a row ONLY for {@link LIVE}), so a probe
- * restored in EITHER shape still misses on DELETED/ABSENT and reds. The alias is back-referenced, so a
- * join that filters a DIFFERENT entity's soft delete is not served as if it were the sheet row.
+ * The sheet-row EXISTENCE probe, in every shape it is written in: the single-line one B1/B3/B4 removed,
+ * and (#5936) the aliased / multi-line / lowercase ones — each half bare or alias-qualified, always
+ * bound to the ADDRESSED id. Every shape is served the same way (a row ONLY for {@link LIVE}), so a
+ * probe restored in ANY of them still misses on DELETED/ABSENT and reds. The alias is back-referenced,
+ * so a join that filters a DIFFERENT entity's soft delete is not served as if it were the sheet row.
+ *
+ * The `id = $n` binding is load-bearing HERE in a second way: this branch runs BEFORE `options.answer`,
+ * so a shape that ALSO matched a base-scoped list (`FROM meta_sheets s WHERE s.base_id = $1 AND
+ * s.deleted_at IS NULL`) would answer `{rows: []}` for a suite's own sheet-list query — silently
+ * shadowing the suite's row supplier instead of serving the oracle.
  */
-const SHEET_ROW_SQL = /FROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL|FROM (?:\w+\.)?meta_sheets (?:AS )?(\w+)\b(?:(?!FROM (?:\w+\.)?meta_sheets\b)[\s\S]){0,400}?\b\1\.deleted_at IS NULL\b/
+const SHEET_ROW_SQL = /FROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL|FROM\s+(?:\w+\.)?meta_sheets\b(?:\s+(?:AS\s+)?(?!WHERE\b|JOIN\b|LEFT\b|INNER\b|RIGHT\b|FULL\b|CROSS\b|ON\b|ORDER\b|GROUP\b|LIMIT\b|OFFSET\b|UNION\b)(\w+))?(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\1\.)?id\s*=\s*\$\d+(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\1\.)?deleted_at\s+IS\s+NULL\b/i
 
 /** The soft-delete timestamp. A fixed instant so a body that ever echoed it would be obvious. */
 const DELETED_AT = new Date('2026-09-01T00:00:00.000Z')
