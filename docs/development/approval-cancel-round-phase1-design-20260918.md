@@ -721,7 +721,7 @@ implementation):
   > **求值标记(候选分支 `feat/approval-cancel-round-phase1-r8`, 2026-09-21)。** 本条的
   > **状态断言**——「no code change made」「`visibility_scope` 取表级默认」「becomes visible to, and
   > launchable by, every user」——在该候选分支上**已失效**:种子迁移现在显式写入一个收窄的
-  > `visibility_scope`,并有真 HTTP 用例把三个消费面钉住(见 §11)。本条其余内容**仍然 OPERATIVE**:
+  > `visibility_scope`,并有真 HTTP 用例把两个消费面钉住(见 §11)。本条其余内容**仍然 OPERATIVE**:
   > (a) 机制描述(默认值 + `applyTemplateVisibilityFilter` 第一条析取支)逐字仍成立,是 §11 那个修法
   > 的依据;(b) 「Whether to narrow … is an **owner decision**」这句**没有**因为候选分支动了代码而作废
   > —— 候选分支选的是一种**既有语义**下的临时收窄,把「接线时翻回可见用哪种机制」原封不动留给 owner
@@ -871,7 +871,7 @@ INSERT 现在**显式**写 `visibility_scope`,取值来自共享常量
 - `GET /api/approval-templates/<种子 id>` 与 `GET /api/approval-templates/<从未存在的 uuid>`
   **状态码与响应体逐字节相同**(404 `APPROVAL_TEMPLATE_NOT_FOUND`);
 - `POST /api/approvals` 以种子 templateId 发起,与以从未存在的 templateId 发起**逐字节相同**(404),
-  且 `approval_instances` 没有对应新行 —— 这一条补上了此前记为「未测边界」的那一项(能否以该模板发起);
+  且 `approval_instances` 没有对应新行;
 - **正控**:同一 token 用一个对**他**可见的模板发起 ⇒ 201(证明上面的 404 不是写权限门在挡);一个
   scope 指向**别人**的模板对他不可见(证明 `user` 支按 actor 自己的 id 匹配);同样三个端点对
   template-manager **仍然**返回种子(既有管理员语义未变)。
