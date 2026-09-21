@@ -43,10 +43,16 @@
  * ONLY here because it can only ever SHRINK an answer: forging the sentinel on your own sheet
  * bounds your own sheet's reads. It must never re-enter the TRUST predicate (`isSystemSheet`).
  *
- * ── Not closed by this cut ───────────────────────────────────────────────────
- * This is a PER-REQUEST ceiling, not a cumulative one (#5795's lesson): a caller willing to vary
- * the sort/filter/search still accumulates. It reduces the surface; it does not close it. The read
- * GATE, the tenant predicate on the roster sync (#5788), and the legacy email scrub stay open.
+ * ── Not closed by this cut, PRICED ───────────────────────────────────────────
+ * This is a PER-REQUEST ceiling, not a cumulative one (#5795's lesson), and the cost of walking it is
+ * small: the window clamps the COUNT and the cursor, never the ORDER, so `sortDir=asc` and
+ * `sortDir=desc` are two disjoint 50-row pages — 100 distinct people in two requests — and
+ * `filter.<fieldId>` / `search` partition the remainder into further disjoint ≤50 pages, i.e. the whole
+ * roster in O(headcount / 50) requests. This cut lowers the RATE and the convenience (one request no
+ * longer yields the sheet, and `displayMap`/`total`/`hasMore` stop handing over the shape of the rest);
+ * it does NOT close enumeration. Closing it needs the read GATE — which is #5807's second cut, not a
+ * quantity bound. The tenant predicate on the roster sync (#5788) and the legacy email scrub stay open
+ * too.
  */
 import type { Response } from 'express'
 
@@ -56,10 +62,13 @@ import { sendForbidden } from './sheet-refusals'
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
 /**
- * The window. Deliberately the SAME number as `PERSON_DIRECTORY_MAX_ITEMS` (the person-directory /
- * permission-candidates / form-share-candidates ceiling) — "one ruler for roster-shaped reads".
- * The two literals live in different modules (this one must not import the route file), so
- * `tests/unit/multitable-people-sheet-read-bound.test.ts` pins them equal.
+ * The window — the ONE literal. `PERSON_DIRECTORY_MAX_ITEMS` (the person-directory /
+ * permission-candidates / form-share-candidates ceiling) is now an ALIAS of this constant rather than
+ * a second literal that happens to agree, so "one ruler for roster-shaped reads" holds by
+ * construction. Consequence, and it cuts the other way too: that UX-facing name is now a SECURITY
+ * bound — raising it widens the People sheet's read window. `routes/univer-meta.ts` says so at the
+ * alias. (A test asserting the alias equals this constant would compare a value with itself and could
+ * never fail, so the suite pins the NUMBER instead.)
  */
 export const PEOPLE_SHEET_READ_MAX_ITEMS = 50
 
@@ -70,8 +79,16 @@ export type PeopleSheetReadBound = {
   readonly maxItems: number
 }
 
-/** The neutral bound — every ordinary sheet. Nothing downstream changes behaviour for it. */
-export const UNBOUNDED_PEOPLE_SHEET_READ: PeopleSheetReadBound = Object.freeze({
+/**
+ * The neutral bound — every ordinary sheet. Nothing downstream changes behaviour for it.
+ *
+ * NOT exported, and neither is the row-shaped classifier below: an exported surface whose only caller
+ * is this module is a promise nobody keeps. Today every call site reaches the bound through
+ * `resolvePeopleSheetReadBound` (one indexed primary-key read) because none of them holds the sheet
+ * row — `resolveSheetReadableCapabilities` hands back capabilities and liveness, not the row. If a
+ * caller ever does carry it down, export the classifier THEN and drop that call site's query.
+ */
+const UNBOUNDED_PEOPLE_SHEET_READ: PeopleSheetReadBound = Object.freeze({
   bounded: false,
   maxItems: PEOPLE_SHEET_READ_MAX_ITEMS,
 })
@@ -81,8 +98,8 @@ const BOUNDED_PEOPLE_SHEET_READ: PeopleSheetReadBound = Object.freeze({
   maxItems: PEOPLE_SHEET_READ_MAX_ITEMS,
 })
 
-/** Pure form — for callers that ALREADY hold the sheet row (no second round trip). */
-export function peopleSheetReadBoundForRow(
+/** Row-shaped classifier — the single decision, shared by the resolver below. */
+function peopleSheetReadBoundForRow(
   row: { system_kind?: unknown; description?: unknown } | null | undefined,
 ): PeopleSheetReadBound {
   return isHiddenSystemSheet(row) ? BOUNDED_PEOPLE_SHEET_READ : UNBOUNDED_PEOPLE_SHEET_READ
@@ -120,6 +137,12 @@ export async function resolvePeopleSheetReadBound(query: QueryFn, sheetId: strin
  * must be given an explicit one. The returned `limit` is never 0 (`0` is falsy and several call
  * sites branch on `if (limit)`, where 0 would read as "unlimited"): a request that starts beyond
  * the window keeps a positive limit and is emptied by `boundEnumeratedRows` after the read.
+ *
+ * `beyondWindow` is that "starts past the window" fact, exposed so a caller whose loader has no
+ * useful LIMIT can skip the read entirely — `loadRecordSummaries` reads and summarizes EVERY row of
+ * the sheet before slicing, so `/records-summary` and `link-options` short-circuit to the empty page
+ * on it instead of doing that work for an answer that is discarded. `GET /view` deliberately does not:
+ * its branches push the clamp into their own SQL, and its post-read chokepoint empties the page anyway.
  */
 export function boundReadWindow(
   bound: PeopleSheetReadBound,

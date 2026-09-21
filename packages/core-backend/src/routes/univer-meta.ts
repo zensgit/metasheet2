@@ -5975,6 +5975,12 @@ const loadFieldsForSheet = loadFieldsForSheetShared
 // #5807: the literal `50` now lives in multitable/people-sheet-read-bound.ts (the People-sheet read
 // window) and this is an ALIAS of it, so the roster-shaped reads of this file and the People sheet's
 // own enumerating reads share ONE number by construction rather than by two literals that agree today.
+//
+// WARNING — raising this is a SECURITY decision, not a UX one. It was a candidate-list ceiling (how
+// many people the picker offers); since the alias it is ALSO the People sheet's read window, so
+// bumping it to make a picker show more people widens what a bare `multitable:read` can take from the
+// roster in one request. Change the window at its definition, deliberately, or give the picker its own
+// literal again — but do not raise this one by reflex.
 export const PERSON_DIRECTORY_MAX_ITEMS = PEOPLE_SHEET_READ_MAX_ITEMS
 export const PERSON_DIRECTORY_MIN_QUERY_LENGTH = 1
 
@@ -10217,6 +10223,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // #5807 — the People-sheet quantity bound applies HERE too, and not as a history nicety: this route
+      // reconstructs the state of the CURRENTLY-LIVE records, so `asOf=<now>` reproduces the LIVE roster
+      // (full `data`, 200 rows a page, `offset` with no upper bound) and `total` is the exact headcount
+      // the window exists to withhold. It was named as a GAP in the first cut and is closed here with the
+      // same ruler as /view: the first window of rows, `total` clamped to it, nothing past it. Resolved
+      // AFTER the 401/403/404 above, so it adds no oracle. Ordinary sheets: byte-identical to before.
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+
       // Scope to CURRENTLY-LIVE records (deleted-since-T are out of v1).
       const liveIds = ((await pool.query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: unknown }>).map((r) => String(r.id))
       if (liveIds.length === 0) return res.json({ ok: true, data: { records: [], total: 0, asOf: asOfIso } })
@@ -10243,7 +10257,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       visible.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)) // stable pagination
       const total = visible.length // post-permission-filter total (LOCK-3)
-      return res.json({ ok: true, data: { records: visible.slice(offset, offset + limit), total, asOf: asOfIso } })
+      // #5807 CHOKEPOINT: truncate the page to the window (an offset past it yields an empty page, never
+      // row 51) and clamp the reported `total`, which would otherwise re-publish the roster's exact
+      // cardinality. `boundEnumeratedRows`/`boundPageMeta` are the identity for every ordinary sheet.
+      const boundedRecords = boundEnumeratedRows(readBound, visible.slice(offset, offset + limit), offset)
+      const boundedTotal = boundPageMeta(readBound, { offset, limit, total, hasMore: false }).total
+      return res.json({ ok: true, data: { records: boundedRecords, total: boundedTotal, asOf: asOfIso } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -18323,14 +18342,20 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         : undefined
-      const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
-        displayFieldId,
-        allowedFieldIds,
-        search,
-        limit: boundedWindow.limit ?? limit,
-        offset: boundedWindow.offset,
-        ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
-      })
+      // #5807: a request that STARTS past the window can only answer the empty page, and
+      // `loadRecordSummaries` reads + summarizes every row of the sheet before it slices — so skip the
+      // read instead of doing that work for an answer that is thrown away. Same shape the chokepoint
+      // below would have produced. Ordinary sheets never take this branch (`beyondWindow` is false).
+      const summary: RecordSummaryPage = boundedWindow.beyondWindow
+        ? { records: [], displayMap: {}, page: { offset: boundedWindow.offset, limit: boundedWindow.limit ?? readBound.maxItems, total: 0, hasMore: false }, displayFieldId: null }
+        : await loadRecordSummaries(pool.query.bind(pool), sheetId, {
+          displayFieldId,
+          allowedFieldIds,
+          search,
+          limit: boundedWindow.limit ?? limit,
+          offset: boundedWindow.offset,
+          ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
+        })
       // #5807 CHOKEPOINT: truncates `records`, REBUILDS `displayMap` from the survivors, clamps
       // `page.total` to the window and never says `hasMore`. Identity for every ordinary sheet.
       const boundedSummary = boundRecordSummaryPage(readBound, summary)
@@ -18477,13 +18502,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), linkConfig.foreignSheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId)
         : undefined
-      const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
-        search,
-        limit: foreignBoundedWindow.limit ?? limit,
-        offset: foreignBoundedWindow.offset,
-        allowedFieldIds: foreignAllowedFieldIds,
-        ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
-      })
+      // #5807: same short-circuit as /records-summary — past the window there is nothing to answer, and
+      // the loader would otherwise read and summarize the whole foreign sheet to produce it.
+      const summary: RecordSummaryPage = foreignBoundedWindow.beyondWindow
+        ? { records: [], displayMap: {}, page: { offset: foreignBoundedWindow.offset, limit: foreignBoundedWindow.limit ?? foreignReadBound.maxItems, total: 0, hasMore: false }, displayFieldId: null }
+        : await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
+          search,
+          limit: foreignBoundedWindow.limit ?? limit,
+          offset: foreignBoundedWindow.offset,
+          allowedFieldIds: foreignAllowedFieldIds,
+          ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
+        })
       // #5807 CHOKEPOINT (same helper as /records-summary, same ruler).
       const boundedSummary = boundRecordSummaryPage(foreignReadBound, summary)
 

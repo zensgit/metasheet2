@@ -74,9 +74,22 @@ interface RecordRow {
   created_at: string
 }
 
+interface ViewRow {
+  id: string
+  sheet_id: string
+  name: string
+  type: string
+  filter_info: unknown
+  sort_info: unknown
+  group_info: unknown
+  hidden_field_ids: unknown
+  config: unknown
+}
+
 interface Store {
   sheets: SheetRow[]
   fields: FieldRow[]
+  views: ViewRow[]
   records: RecordRow[]
   links: Array<{ field_id: string; record_id: string; foreign_record_id: string }>
   /** Every SQL the mock did not recognise — asserted empty-of-meta_records in the suite. */
@@ -182,6 +195,20 @@ function createMockPool(store: Store) {
           .map((f) => ({ ...f, property: structuredClone(f.property) })),
       }
     }
+    if (/FROM meta_views/i.test(text) && /WHERE id = \$1/i.test(text)) {
+      const row = store.views.find((v) => v.id === p(0))
+      return { rows: row ? [{ ...row }] : [] }
+    }
+    // point-in-time reconstructs from the revision log; one `create` revision per row makes every
+    // record EXIST at T with its current data, i.e. `asOf=<now>` reproduces the live roster.
+    if (/FROM meta_record_revisions/i.test(text)) {
+      const ids = (params[2] as string[] | undefined) ?? null
+      return {
+        rows: sortedRecords(store, p(0))
+          .filter((r) => ids === null || ids.includes(r.id))
+          .map((r) => ({ record_id: r.id, action: 'create', snapshot: structuredClone(r.data), version: 1 })),
+      }
+    }
     if (/FROM meta_links/i.test(text)) {
       const fieldIds = (params[0] as string[] | undefined) ?? []
       const recordIds = (params[1] as string[] | undefined) ?? []
@@ -255,6 +282,32 @@ async function buildApp(store: Store, user: { id: string; roles: string[]; perms
   return app
 }
 
+/**
+ * The CHART routes live in `routes/dashboard.ts` but mount at the SAME `/api/multitable` prefix
+ * (src/index.ts), behind the same bare `canRead`. Same store, same actor, different router.
+ */
+async function buildDashboardApp(store: Store, user: { id: string; roles: string[]; perms: string[] } = GLOBAL_READER): Promise<Express> {
+  vi.doMock('../../src/rbac/service', () => ({
+    isAdmin: vi.fn().mockResolvedValue(false),
+    userHasPermission: vi.fn().mockResolvedValue(false),
+    listUserPermissions: vi.fn().mockResolvedValue([]),
+    invalidateUserPerms: vi.fn(),
+    getPermCacheStatus: vi.fn(),
+  }))
+  const { poolManager } = await import('../../src/integration/db/connection-pool')
+  const { dashboardRouter } = await import('../../src/routes/dashboard')
+  vi.spyOn(poolManager, 'get').mockReturnValue(createMockPool(store) as any)
+
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => {
+    ;(req as any).user = { ...user }
+    next()
+  })
+  app.use('/api/multitable', dashboardRouter())
+  return app
+}
+
 const pinned = usePinnedServer()
 
 function api(app: Express) {
@@ -263,13 +316,15 @@ function api(app: Express) {
 }
 
 const FORBIDDEN_BODY = { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } }
+/** `routes/dashboard.ts` has its OWN refusal body; the bound there must be indistinguishable from it. */
+const DASHBOARD_FORBIDDEN_BODY = { error: { code: 'FORBIDDEN', message: 'Forbidden' } }
 
 describe('#5807 — People system sheet read-side quantity bound', () => {
   let store: Store
 
   beforeEach(() => {
     vi.resetModules()
-    store = { sheets: [], fields: [], records: [], links: [], unhandled: [] }
+    store = { sheets: [], fields: [], views: [], records: [], links: [], unhandled: [] }
   })
 
   afterEach(() => {
@@ -333,10 +388,56 @@ describe('#5807 — People system sheet read-side quantity bound', () => {
       expect(res.body.data.page.hasMore).toBe(false)
     })
 
-    it('a searching read is bound as well (the in-memory branch)', async () => {
+    it('a searching read is bound as well (the SQL fast path: search, no view sort/filter)', async () => {
       const res = await api(await buildApp(store)).get('/api/multitable/view').query({ sheetId: PEOPLE_SHEET, limit: '1000', search: 'Fake Person' })
       expect(res.status).toBe(200)
       expect(res.body.data.rows.length).toBeLessThanOrEqual(PEOPLE_SHEET_READ_MAX_ITEMS)
+      expect(res.body.data.page.hasMore).toBe(false)
+    })
+
+    it('a VIEW with a sort rule takes the in-memory branch (whole sheet into memory, then slice) and is still bound', async () => {
+      // The fourth branch: `hasFilterOrSort` routes the request away from the LIMITed SQL into
+      // `SELECT ... FROM meta_records WHERE sheet_id = $1 ORDER BY created_at` with NO limit, sorted in
+      // app memory. It is also "rotate the window by sorting": DESC would otherwise answer the LAST 50.
+      const viewId = 'view_people_sorted'
+      store.views.push({
+        id: viewId,
+        sheet_id: PEOPLE_SHEET,
+        name: 'By name desc',
+        type: 'grid',
+        filter_info: null,
+        sort_info: { rules: [{ fieldId: `fld_name_${PEOPLE_SHEET}`, desc: true }] },
+        group_info: null,
+        hidden_field_ids: null,
+        config: null,
+      })
+      const res = await api(await buildApp(store)).get('/api/multitable/view').query({ sheetId: PEOPLE_SHEET, viewId, limit: '1000' })
+      expect(res.status).toBe(200)
+      expect(res.body.data.rows).toHaveLength(PEOPLE_SHEET_READ_MAX_ITEMS)
+      // PROOF that the in-memory branch really ran: the first row is the SORT's first (`Fake Person 120`,
+      // record index 119), not the sheet's first. A plain page would answer index 000 here.
+      expect(res.body.data.rows[0].id).toBe(`rec_${PEOPLE_SHEET}_119`)
+      expect(res.body.data.rows[0].id).not.toBe(`rec_${PEOPLE_SHEET}_000`)
+      expect(res.body.data.page.hasMore).toBe(false)
+      expect(res.body.data.page.total).toBe(PEOPLE_SHEET_READ_MAX_ITEMS)
+    })
+
+    it('the same sorted view cannot page past the window either', async () => {
+      const viewId = 'view_people_sorted_2'
+      store.views.push({
+        id: viewId,
+        sheet_id: PEOPLE_SHEET,
+        name: 'By name desc',
+        type: 'grid',
+        filter_info: null,
+        sort_info: { rules: [{ fieldId: `fld_name_${PEOPLE_SHEET}`, desc: true }] },
+        group_info: null,
+        hidden_field_ids: null,
+        config: null,
+      })
+      const res = await api(await buildApp(store)).get('/api/multitable/view').query({ sheetId: PEOPLE_SHEET, viewId, limit: '50', offset: '50' })
+      expect(res.status).toBe(200)
+      expect(res.body.data.rows).toHaveLength(0)
       expect(res.body.data.page.hasMore).toBe(false)
     })
   })
@@ -384,6 +485,20 @@ describe('#5807 — People system sheet read-side quantity bound', () => {
       expect(res.body.data.records).toHaveLength(0)
       expect(Object.keys(res.body.data.displayMap)).toHaveLength(0)
       expect(res.body.data.page.hasMore).toBe(false)
+    })
+
+    it('a /records-summary request PAST the window answers empty WITHOUT reading the sheet', async () => {
+      // `loadRecordSummaries` reads and summarizes EVERY row before it slices, so a past-the-window
+      // request used to pay for the whole roster to produce an empty page. `beyondWindow` skips it.
+      const app = await buildApp(store)
+      const { poolManager } = await import('../../src/integration/db/connection-pool')
+      const spy = (poolManager.get() as any).query as ReturnType<typeof vi.fn>
+      const before = spy.mock.calls.filter(([sql]: [string]) => /FROM meta_records/i.test(sql)).length
+      const res = await api(app).get('/api/multitable/records-summary').query({ sheetId: PEOPLE_SHEET, limit: '200', offset: '1000' })
+      expect(res.status).toBe(200)
+      expect(res.body.data.records).toHaveLength(0)
+      const after = spy.mock.calls.filter(([sql]: [string]) => /FROM meta_records/i.test(sql)).length
+      expect(after).toBe(before)
     })
 
     it('link-options for a link field INTO the People sheet is bound by the FOREIGN sheet', async () => {
@@ -444,6 +559,33 @@ describe('#5807 — People system sheet read-side quantity bound', () => {
       expect(JSON.stringify(res.body)).not.toContain(PEOPLE_SHEET)
     })
 
+    it("the CHART preview is the same twin on the same mount and answers dashboard.ts's own 403", async () => {
+      // No saved chart, no authority beyond canRead: the config rides on the body, and one data point
+      // per distinct `Name` IS the roster.
+      const res = await api(await buildDashboardApp(store))
+        .post(`/api/multitable/sheets/${PEOPLE_SHEET}/charts/preview-data`)
+        .send({ name: 'x', type: 'bar', dataSource: { aggregation: { function: 'count' }, groupByFieldId: `fld_name_${PEOPLE_SHEET}` } })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual(DASHBOARD_FORBIDDEN_BODY)
+      expect(JSON.stringify(res.body)).not.toContain(PEOPLE_SHEET)
+    })
+
+    it('a SAVED chart\u2019s data route is refused too (same chokepoint, before the chart is even looked up)', async () => {
+      const res = await api(await buildDashboardApp(store)).get(`/api/multitable/sheets/${PEOPLE_SHEET}/charts/chart_any/data`)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual(DASHBOARD_FORBIDDEN_BODY)
+    })
+
+    it('NO ORACLE on the chart route — an actor without read gets the byte-identical 403', async () => {
+      const body = { name: 'x', type: 'bar', dataSource: { aggregation: { function: 'count' }, groupByFieldId: `fld_name_${PEOPLE_SHEET}` } }
+      const denied = await api(await buildDashboardApp(store, NO_READER))
+        .post(`/api/multitable/sheets/${PEOPLE_SHEET}/charts/preview-data`).send(body)
+      const bound = await api(await buildDashboardApp(store))
+        .post(`/api/multitable/sheets/${PEOPLE_SHEET}/charts/preview-data`).send(body)
+      expect(denied.status).toBe(bound.status)
+      expect(denied.body).toEqual(bound.body)
+    })
+
     it('NO ORACLE — an actor without read gets the byte-identical 403 it always got', async () => {
       const denied = await api(await buildApp(store, NO_READER)).get(`/api/multitable/sheets/${PEOPLE_SHEET}/export-xlsx`)
       const bound = await api(await buildApp(store)).get(`/api/multitable/sheets/${PEOPLE_SHEET}/export-xlsx`)
@@ -480,6 +622,46 @@ describe('#5807 — People system sheet read-side quantity bound', () => {
       const res = await api(await buildApp(store)).get(`/api/multitable/sheets/${SENTINEL_SHEET}/export-xlsx`)
       expect(res.status).toBe(403)
       expect(res.body).toEqual(FORBIDDEN_BODY)
+    })
+  })
+
+  // ── §6 point-in-time (asOf=now IS the live roster) ────────────────────────
+  describe('\u00a76 GET /sheets/:id/point-in-time is bound as well', () => {
+    beforeEach(() => {
+      addRosterSheet(store, sheetRow(PEOPLE_SHEET, {
+        name: 'People',
+        description: SYSTEM_PEOPLE_SHEET_DESCRIPTION,
+        system_kind: 'people_directory',
+      }), ROSTER_SIZE)
+    })
+
+    it('asOf=<now> answers at most the window, and `total` is not the headcount', async () => {
+      const res = await api(await buildApp(store))
+        .get(`/api/multitable/sheets/${PEOPLE_SHEET}/point-in-time`)
+        .query({ asOf: new Date().toISOString(), limit: '200', offset: '0' })
+      expect(res.status).toBe(200)
+      expect(res.body.data.records).toHaveLength(PEOPLE_SHEET_READ_MAX_ITEMS)
+      // The exact cardinality the window exists to withhold.
+      expect(res.body.data.total).toBe(PEOPLE_SHEET_READ_MAX_ITEMS)
+      expect(res.body.data.total).toBeLessThan(ROSTER_SIZE)
+    })
+
+    it('the unbounded `offset` cannot walk past the window', async () => {
+      const res = await api(await buildApp(store))
+        .get(`/api/multitable/sheets/${PEOPLE_SHEET}/point-in-time`)
+        .query({ asOf: new Date().toISOString(), limit: '200', offset: '50' })
+      expect(res.status).toBe(200)
+      expect(res.body.data.records).toHaveLength(0)
+    })
+
+    it('an ORDINARY sheet keeps its full reconstructed page and honest total', async () => {
+      addRosterSheet(store, sheetRow(PLAIN_SHEET, { name: 'Tasks' }), ROSTER_SIZE)
+      const res = await api(await buildApp(store))
+        .get(`/api/multitable/sheets/${PLAIN_SHEET}/point-in-time`)
+        .query({ asOf: new Date().toISOString(), limit: '200', offset: '0' })
+      expect(res.status).toBe(200)
+      expect(res.body.data.records).toHaveLength(ROSTER_SIZE)
+      expect(res.body.data.total).toBe(ROSTER_SIZE)
     })
   })
 
@@ -587,10 +769,24 @@ describe('#5807 — People system sheet read-side quantity bound', () => {
       expect(res.body.data.items[0].display).toContain('Fake Person')
     })
 
-    it('the window is the SAME number as the candidate-interface ceiling (one ruler, two modules)', async () => {
+    it("an ORDINARY sheet's chart preview still computes (the chart chokepoint is People-only)", async () => {
+      const fieldId = addRosterSheet(store, sheetRow(PLAIN_SHEET, { name: 'Tasks' }), 3)
+      const res = await api(await buildDashboardApp(store))
+        .post(`/api/multitable/sheets/${PLAIN_SHEET}/charts/preview-data`)
+        .send({ name: 'x', type: 'bar', dataSource: { aggregation: { function: 'count' }, groupByFieldId: fieldId } })
+      expect(res.status).not.toBe(403)
+      expect(res.status).toBe(200)
+      expect(Array.isArray(res.body.dataPoints)).toBe(true)
+    })
+
+    it('the window is the SAME number as the candidate-interface ceiling (ONE ruler)', async () => {
       const { PERSON_DIRECTORY_MAX_ITEMS } = await import('../../src/routes/univer-meta')
-      expect(PEOPLE_SHEET_READ_MAX_ITEMS).toBe(PERSON_DIRECTORY_MAX_ITEMS)
+      // NOT `expect(PEOPLE_SHEET_READ_MAX_ITEMS).toBe(PERSON_DIRECTORY_MAX_ITEMS)`: since the route
+      // constant became an ALIAS of the window, that assertion compares a value with itself and cannot
+      // fail. Pin the NUMBER on both sides instead — re-introducing a second literal that drifts (or
+      // raising either one) then reds here, which is the property the tautology pretended to have.
       expect(PEOPLE_SHEET_READ_MAX_ITEMS).toBe(50)
+      expect(PERSON_DIRECTORY_MAX_ITEMS).toBe(50)
     })
   })
 })
