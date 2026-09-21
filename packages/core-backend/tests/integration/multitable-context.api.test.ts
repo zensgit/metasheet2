@@ -14,6 +14,7 @@ import {
   losslessRetypeTargets,
 } from '../../src/multitable/field-retype-whitelist'
 import { configRevisionNoop } from './config-revision-mock'
+import { handleTemplateInstallDedupeSql } from '../utils/template-install-dedupe-sql'
 
 type QueryResult = {
   rows: any[]
@@ -738,6 +739,11 @@ describe('Multitable context API', () => {
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params = []) => {
         const normalized = sql.replace(/\s+/g, ' ').trim()
+        // #5861: the install route now also issues the advisory lock + dedupe-ledger
+        // statements. This suite does not test dedupe, so the shared neutral handler
+        // answers them (lock granted, ledger always empty = never a replay).
+        const dedupeSql = handleTemplateInstallDedupeSql(normalized)
+        if (dedupeSql) return dedupeSql
         // S2 conflict pre-check probe (detectTemplateConflicts) — SELECT-only
         // base-id occupancy; sheet/view probes reuse the SELECT handlers below.
         if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_bases') && normalized.includes('WHERE id = $1')) {
@@ -856,6 +862,11 @@ describe('Multitable context API', () => {
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params = []) => {
         const normalized = sql.replace(/\s+/g, ' ').trim()
+        // #5861: the install route now also issues the advisory lock + dedupe-ledger
+        // statements. This suite does not test dedupe, so the shared neutral handler
+        // answers them (lock granted, ledger always empty = never a replay).
+        const dedupeSql = handleTemplateInstallDedupeSql(normalized)
+        if (dedupeSql) return dedupeSql
         // S2 conflict pre-check probe (detectTemplateConflicts) — SELECT-only
         // base-id occupancy; sheet/view probes reuse the SELECT handlers below.
         if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_bases') && normalized.includes('WHERE id = $1')) {
@@ -978,7 +989,13 @@ describe('Multitable context API', () => {
   test('logs a failed [multitable.template.install] event for an unknown template', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
-      queryHandler: async () => ({ rows: [], rowCount: 0 }),
+      // #5861: the install route takes `pg_try_advisory_xact_lock(...) AS locked` before anything
+      // else, and the module throws when the query面 does not answer with that boolean column
+      // (a blanket `{ rows: [] }` fake would otherwise look like a lock that is never granted).
+      // The shared neutral handler answers it (lock granted, ledger always empty = never a replay);
+      // everything else still falls through to the blanket empty result this case wants.
+      queryHandler: async (sql) => handleTemplateInstallDedupeSql(sql.replace(/\s+/g, ' ').trim())
+        ?? { rows: [], rowCount: 0 },
     })
 
     const { Logger } = await import('../../src/core/logger')

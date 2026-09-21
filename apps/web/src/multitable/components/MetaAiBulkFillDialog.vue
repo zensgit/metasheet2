@@ -73,14 +73,16 @@
             </div>
             <p class="ai-bulk__quota-note ai-bulk__quota-note--compact" role="note">{{ l('aibulk.quotaNote') }}</p>
 
-            <!-- Partial (capped) — broke early, NO count (oracle guard). -->
+            <!-- Partial (capped) — broke early, NO count (oracle guard). #5838: when the batch stopped
+                 because the TABLE could not be confirmed available, the generic advice ("write these,
+                 then re-run") is wrong — both refuse on a table that is gone — so the notice differs. -->
             <p
               v-if="ctrl.partial.value"
               class="ai-bulk__alert ai-bulk__alert--warn"
               role="alert"
               data-test="ai-bulk-partial"
             >
-              {{ l('aibulk.partialNotice') }}
+              {{ l(ctrl.stoppedSheetNotLive.value ? 'aibulk.partialNoticeSheetNotLive' : 'aibulk.partialNotice') }}
             </p>
 
             <!-- Confirmable rows — the ONLY selectable rows (masked included, badged). -->

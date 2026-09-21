@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync as readFileSyncRaw } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +10,24 @@ import {
   requireExecutableRealDbStep,
   wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
+
+/**
+ * LINE ENDINGS: every repo source this guard parses is read through this wrapper, which
+ * normalizes CRLF to LF. The guard's parsers and its in-memory mutation fixtures are all
+ * line-oriented over LF-joined literals (`.split('\n')`, `/.*$/`, `"...\n    name: ...\n"`),
+ * and none of those match a line that ends in a carriage return. On a Windows checkout
+ * (`core.autocrlf=true`) that made the whole file read red for a reason unrelated to any
+ * change under test, while CI stayed green. Normalizing at the READ boundary is a no-op on
+ * CI (Linux checkouts are already LF, so `String#replace` returns the identical string), so
+ * this widens nothing: the same bytes are parsed, and every assertion below is unchanged.
+ *
+ * @param {Parameters<typeof readFileSyncRaw>[0]} path
+ * @param {Parameters<typeof readFileSyncRaw>[1]} [encoding]
+ */
+function readFileSync(path, encoding) {
+  const text = readFileSyncRaw(path, encoding)
+  return typeof text === 'string' ? text.replace(/\r\n?/g, '\n') : text
+}
 
 // Time Machine D2-D5 archive authority is DATABASE_URL-gated real-DB proof. Each load-bearing spec must stay in both
 // placements: direct `test.exclude` keeps the no-DB job from skip-greening it, and the exact-id

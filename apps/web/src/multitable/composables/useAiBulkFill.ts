@@ -183,6 +183,13 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
   const failures = computed(() => state.preview?.failures ?? [])
   /** Whether the INLINE preview broke early (partial). NOT the over-cap path (that's a job). */
   const partial = computed(() => state.preview?.capped === true)
+  /**
+   * #5838: the batch stopped because the TABLE could not be confirmed available mid-run, not because a
+   * quota/provider limit was hit. `capped` alone cannot tell the two apart, and the generic partial
+   * advice ("write these, then run AI fill again") is wrong here: a write and a re-run BOTH refuse on a
+   * table that is gone. The distinguishing fact is already on the wire, in the skipped bucket.
+   */
+  const stoppedSheetNotLive = computed(() => skipped.value.some((s) => s.reason === 'sheet_not_live'))
   /** Already-charged cost — inline preview's settledCost, or the job's running settledCost. */
   const settledCost = computed(() => (isJob.value ? state.job?.settledCost ?? 0 : state.preview?.settledCost ?? 0))
 
@@ -521,6 +528,7 @@ export function useAiBulkFill(opts: UseAiBulkFillOptions) {
     skipped,
     failures,
     partial,
+    stoppedSheetNotLive,
     settledCost,
     confirmableCount,
     selectedCount,

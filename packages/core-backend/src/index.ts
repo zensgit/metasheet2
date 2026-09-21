@@ -501,8 +501,11 @@ async function resolveStockPreparationHandoffDingTalkService(): Promise<
 // GROUP-ONLY, and that is a limitation rather than a preference. The group robot webhook is the only
 // DingTalk send path in this repository reachable WITHOUT an automation-rule record context: the
 // person-targeted `sendDingTalkWorkNotification` needs directory_account_links rows plus a
-// per-integration corp-app token that a stock-prep route has no access to, and there is no DingTalk
-// 待办/todo API anywhere in this codebase to ride. So a handoff pings the group; it cannot put a task
+// per-integration corp-app token that a stock-prep route has no access to. A DingTalk 待办/todo API DOES
+// now exist in this codebase (client.ts createDingTalkTodoTask), but it is bound to exactly ONE ledger —
+// the approval-seat one-way mirror (dingtalk_todo_mirrors, DINGTALK_TODO_MIRROR_ENABLED, #5772/#5768) —
+// which fires off an `approval.task_created` event, not off this stock-prep handoff. This 备料接力游标
+// (#5442) fan-out has no per-person todo of its own to ride, so it pings the group; it cannot put a task
 // in one person's DingTalk.
 //
 // This function is the WIRING (resolve the one service, hand it to the fan-out); the loop itself,
