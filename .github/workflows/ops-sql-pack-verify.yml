@@ -51,12 +51,21 @@ on:
       - '.github/workflows/ops-sql-pack-verify.yml'
       - 'scripts/ops/readonly-inventory-20260916/**'
       - 'scripts/ops/live-id-fk-validate-20260920/**'
+      # live-id-fk-validate-pack.test.mjs reads this migration directly (its
+      # own MIGRATION_TS constant, outside the pack's own directory) to check
+      # verify/migration-5896-up.sql hasn't drifted from the migration it
+      # stands in for. Without this line, editing ONLY the migration leaves
+      # that drift check silently un-run — see
+      # scripts/ops/ops-sql-pack-verify-wiring.test.mjs, which derives this
+      # exact dependency from the test source rather than trusting this list.
+      - 'packages/core-backend/src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock.ts'
   push:
     branches: [main]
     paths:
       - '.github/workflows/ops-sql-pack-verify.yml'
       - 'scripts/ops/readonly-inventory-20260916/**'
       - 'scripts/ops/live-id-fk-validate-20260920/**'
+      - 'packages/core-backend/src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock.ts'
 
 permissions:
   contents: read
