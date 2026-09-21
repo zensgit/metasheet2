@@ -73,10 +73,21 @@ function collectSpecFiles(dir: string, base: string): string[] {
 /**
  * Strip whole-line `#` comments, then fold backslash continuations into logical lines.
  *
- * Same algorithm as apps/web/tests/attendance-web-guard-workflow.spec.ts's
- * `requiredLaneExecCommand` and packages/core-backend/tests/unit/
- * required-web-lane-registration-shape.test.ts's `logicalLines` — kept byte-for-byte equivalent
- * on purpose so the three parsers of this one file cannot silently drift apart and disagree.
+ * STALE CLAIM CORRECTED (N-3, independent gate finding 2026-09-22,
+ * `impl-gate-shape-guard-no-trailing-line-20260922.md`): this is NO LONGER the same algorithm as
+ * the other two parsers of this file. Both apps/web/tests/attendance-web-guard-workflow.spec.ts's
+ * `logicalLinesWithLineNumbers` and packages/core-backend/tests/unit/
+ * required-web-lane-registration-shape.test.ts's `logicalLinesWithLineNumbers` were fixed (P2-2,
+ * same gate) to fold in BASH's order — a `#`-prefixed physical line inside a continuation
+ * terminates the logical line there, the way bash's real `\<newline>`-then-comment lexing does —
+ * because the old "strip comments first" order silently glued the tokens on either side of an
+ * in-block `#` into one wrong logical line. THIS copy was deliberately left on the old order: the
+ * P2-2 remedy is to fix the always-on REQUIRED lane's copy (required-web-lane-registration-shape
+ * .test.ts, which now owns the "no non-empty logical line after exec" invariant this file does
+ * not check), and this file's own assertions (dead-token / duplicate-token / own-token-wired) do
+ * not currently exercise any script with an in-block comment — not reachable today, but a THIRD
+ * place a future rebase could reintroduce the P2-2 shape undetected by this file specifically.
+ * Recorded here rather than silently claimed away: three copies exist, only two got the fix.
  */
 function logicalLines(script: string): string[] {
   const out: string[] = []

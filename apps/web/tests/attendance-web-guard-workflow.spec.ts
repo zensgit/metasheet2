@@ -83,18 +83,45 @@ interface LogicalLine {
  * if blank lines survive the fold as visible, empty entries.
  */
 function logicalLinesWithLineNumbers(script: string): LogicalLine[] {
+  // BASH-CORRECT FOLD ORDER (P2-2 fix, independent gate finding 2026-09-22 —
+  // `impl-gate-shape-guard-no-trailing-line-20260922.md`; canonical writeup and empirical bash -x
+  // transcript live in packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts's
+  // PARSING CONTRACT doc comment, which this function now matches). The PREVIOUS version stripped
+  // whole-line `#` comments BEFORE folding continuations — backwards from bash, which removes
+  // `\<newline>` pairs before it ever looks for a comment. A `#`-prefixed physical line landing
+  // INSIDE a continuation block does not vanish under real bash; it starts a comment that
+  // terminates the logical command right there (even when that comment's own physical line ends
+  // in `\`), and the NEXT physical line starts a brand-new logical line. A `#`-prefixed physical
+  // line OUTSIDE any continuation is still fully invisible, same as before.
   const result: LogicalLine[] = []
   let buf: string | null = null
   let bufStart = -1
   const physical = script.split('\n')
   for (let i = 0; i < physical.length; i++) {
     const line = physical[i].replace(/\r$/, '')
-    if (/^\s*#/.test(line)) continue
-    if (buf === null) bufStart = i + 1
+    const isCommentLine = /^\s*#/.test(line)
+    if (buf === null) {
+      if (isCommentLine) continue
+      bufStart = i + 1
+      const trimmedRight = line.replace(/\s+$/, '')
+      const continued = trimmedRight.endsWith('\\')
+      const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
+      if (continued) {
+        buf = body
+      } else {
+        result.push({ line: body, lineNumber: bufStart })
+      }
+      continue
+    }
+    if (isCommentLine) {
+      result.push({ line: buf, lineNumber: bufStart })
+      buf = null
+      continue
+    }
     const trimmedRight = line.replace(/\s+$/, '')
     const continued = trimmedRight.endsWith('\\')
     const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
-    buf = buf === null ? body : `${buf} ${body}`.trim()
+    buf = `${buf} ${body}`.trim()
     if (!continued) {
       result.push({ line: buf, lineNumber: bufStart })
       buf = null
@@ -135,28 +162,23 @@ describe('attendance web guard workflow contract', () => {
    * core-backend shape guard included) while registering zero of its tokens with any CI job: dead
    * weight today, a silent black hole for the next token appended to the wrong copy tomorrow.
    *
-   * The blind spot was structural, not a missed pattern: nothing in this file had ever looked PAST
-   * the exec line. This closes that — the required lane must be the last thing in the script that
-   * says anything at all, once comments are gone and continuations are folded. A blank line or a
-   * `#` comment after it is not "something": both fold to zero-token or absent logical lines here
-   * and stay green (see `logicalLinesWithLineNumbers()`'s doc comment for why blank lines still
-   * appear as entries instead of vanishing).
+   * MOVED (2026-09-22, independent gate finding `impl-gate-shape-guard-no-trailing-line-20260922.md`,
+   * P2-1): the "has no non-empty logical line anywhere after the required lane exec block"
+   * assertion that used to live HERE has been relocated to
+   * packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts, which is the
+   * ALWAYS-ON copy — collected by the required, path-filter-free `test (20.x)` / `test (18.x)`
+   * context on every PR. This file is collected only by `attendance-web-guard.yml`, and that
+   * workflow's changed-file classifier (push `paths` AND the PR `case` block) has zero entries
+   * under `apps/web/scripts/**` — a PR shaped exactly like the incident fix commits this file's
+   * header describes (each touching only `run-required-web-tests.sh`) would classify
+   * `relevant=false` and this spec would not run at all, so a dead block reintroduced by a rebase
+   * would silently pass a second time. `requiredLaneExecCommand()` below still depends on
+   * `logicalLinesWithLineNumbers()`, so that fold was fixed in place for P2-2 (bash-order comment
+   * handling — see its doc comment) even though the trailing-line assertion itself moved out.
+   * The always-on copy is authoritative for that invariant; this file keeps its OTHER,
+   * `attendance-web-guard.yml`-specific assertions (targeted-run wiring, classifier coverage,
+   * session-spec parity) below.
    */
-  it('has no non-empty logical line anywhere after the required lane exec block', () => {
-    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
-    const logical = logicalLinesWithLineNumbers(required)
-    const execIndex = logical.findIndex(entry => /^exec\s+npx\s+vitest\s+run\b/.test(entry.line))
-    expect(execIndex).toBeGreaterThan(-1)
-
-    const offenders = logical
-      .slice(execIndex + 1)
-      .filter(entry => entry.line.trim().length > 0)
-      .map(entry => {
-        const tokens = entry.line.trim().split(/\s+/)
-        return `line ${entry.lineNumber}: ${tokens.length} tokens: ${entry.line.slice(0, 80)}`
-      })
-    expect(offenders).toEqual([])
-  })
 
   it('runs makeup regressions in both unit gates and the dedicated browser lane', () => {
     const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
