@@ -81,6 +81,13 @@ const NON_GH_EXACT = new Set([
   // 被这条 `MULTITABLE_[A-Z_0-9]+` grep 当成 flag 抓到。列在这里等于声明「不得要求它出现在
   // GLOBAL_HISTORY_FLAG_MANIFEST 里」，而不是把它注册成 flag。
   'MULTITABLE_CUSTOM_TEMPLATES_TABLE',
+  // 「使用模板」去重账本的表名常量(#5861)，不是环境开关：它是
+  // db/migrations/zzzz20260919140000_create_multitable_template_install_ledger.ts 导出的表名字面量，
+  // 没有任何一处从 process.env 读它（那条去重路径一个 env 开关都没有：窗口、锁等待上限、清理条数
+  // 都是源码常量，见 multitable/template-install-dedupe.ts 的 TEMPLATE_INSTALL_* 导出）。
+  // 与上面的 MULTITABLE_CUSTOM_TEMPLATES_TABLE 同形，被这条 `MULTITABLE_[A-Z_0-9]+` grep 抓到。
+  // 列在这里等于声明「不得要求它出现在 GLOBAL_HISTORY_FLAG_MANIFEST 里」，而不是把它注册成 flag。
+  'MULTITABLE_TEMPLATE_INSTALL_LEDGER_TABLE',
   'MULTITABLE_CAPABILITY_KEYS', // capability registry
   'MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE', // cross-base mirror write (separate line)
   'MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE', // P0-S S3: provisioning destructive-reconcile guard mode (refuse[default]|overwrite|observe|preserve) — not a Global-History/recovery flag
@@ -124,6 +131,11 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
+  // DingTalk todo-mirror (plan B, #5772/#5768): the CHECK-constraint status vocabulary constant
+  // (migration zzzz20260916120000), not an env var — nobody reads it from process.env. The two real
+  // flags, DINGTALK_TODO_MIRROR_ENABLED and DINGTALK_TODO_MIRROR_INTERVAL_MS, are registered in the
+  // manifest instead.
+  'DINGTALK_TODO_MIRROR_STATUSES',
 ])
 
 function grepFlagTokens(pattern) {
@@ -148,7 +160,14 @@ function globalHistoryFlagsInSource() {
   // E-learning V0.1 flags live in this same operator registry (AGENTS.md: every new env flag).
   // Restrict to *_ENABLED so constant names such as ELEARNING_FLAG_NAMES are not treated as flags.
   const elearning = grepFlagTokens('ELEARNING_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning])].sort()
+  // DingTalk todo-mirror (plan B, #5772/#5768) flags live in this same operator registry (AGENTS.md:
+  // every new env flag). Unlike the elearning family both real flags are needed (ENABLED and the
+  // worker's INTERVAL_MS), so this is NOT restricted to *_ENABLED; DINGTALK_TODO_MIRROR_STATUSES (the
+  // non-flag status-vocabulary constant) is excluded via NON_GH_EXACT instead.
+  const dingtalkTodoMirror = grepFlagTokens('DINGTALK_TODO_MIRROR_[A-Z_0-9]+')
+    .filter((t) => !t.endsWith('_'))
+    .filter((t) => !NON_GH_EXACT.has(t))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
