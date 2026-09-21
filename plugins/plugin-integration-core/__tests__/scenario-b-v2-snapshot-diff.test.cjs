@@ -474,10 +474,16 @@ async function testDiffReadRoutesServeTheSameFourKinds() {
       versionChanged: 0,
       pathChanged: 0,
       missingChildBom: 0,
-      // 已知缺口（写进设计文档的残余）：changeCounts 的词表里**没有** componentCodeChanged /
-      // materialChanged —— 它是指纹分解之前定下的。原位物料替换在这张汇总表上只能以
-      // fingerprintChanged 露头（这里的 2 = 改数量那行 + 替换那行）。逐行读面才点名（见下）。
+      // fingerprintChanged stays the pre-existing sourceFingerprint tally (2 = the quantity-changed
+      // row + the in-place swap row) — componentCodeChanged/materialChanged below are INDEPENDENT
+      // counts over the same rows' changeTypes arrays, not a replacement for it (a row keeps carrying
+      // both SOURCE_FINGERPRINT_CHANGED and COMPONENT_CODE_CHANGED at once; see compareMatchedRows).
       fingerprintChanged: 2,
+      // Q3c: the gap this used to document is closed — the summary now names the in-place component-
+      // code swap by its own key instead of forcing a reviewer into the row-by-row drill-down to learn
+      // WHICH kind of swap it was (see stock-preparation-snapshot-reads.cjs changeCountsFromEvidence).
+      componentCodeChanged: 1,
+      materialChanged: 0,
     })
     assert.equal(diff.body.data.blockingExceptionCount, 0)
 

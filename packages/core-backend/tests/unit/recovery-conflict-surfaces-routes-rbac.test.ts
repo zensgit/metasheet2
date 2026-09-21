@@ -34,6 +34,16 @@ const auditMocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
 }))
 
+// #5829 — routes/spreadsheet-permissions.ts now runs a sheet AUTHORITY + LIVENESS gate before it
+// touches the grant table, and that gate is FAIL-CLOSED: an unstubbed capability lookup answers 403
+// and this file's subject (the 40001 → uniform 409 mapping at the db seam) would never be reached.
+// Stubbing only `resolveSheetCapabilities` keeps the gate's own behaviour out of scope here — it is
+// proven in tests/unit/spreadsheet-permissions-authority-liveness.test.ts — while letting these legs
+// reach the transaction they are about. Everything else in permission-service stays real.
+const permissionServiceMocks = vi.hoisted(() => ({
+  resolveSheetCapabilities: vi.fn(),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,
@@ -49,6 +59,11 @@ vi.mock('../../src/rbac/service', () => ({
 
 vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
+}))
+
+vi.mock('../../src/multitable/permission-service', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/multitable/permission-service')>()),
+  resolveSheetCapabilities: permissionServiceMocks.resolveSheetCapabilities,
 }))
 
 // attendance-admin's module graph (not exercised here) — same seams as the
@@ -155,6 +170,13 @@ beforeEach(() => {
   rbacServiceMocks.invalidateUserPerms.mockReset()
   auditMocks.auditLog.mockReset()
   auditMocks.auditLog.mockResolvedValue(undefined)
+  // #5829 gate satisfied by default: a sheet-access manager acting on a LIVE sheet. Any leg that
+  // wanted a refusal instead would have to say so — and none here does; refusals are that spec's job.
+  permissionServiceMocks.resolveSheetCapabilities.mockReset()
+  permissionServiceMocks.resolveSheetCapabilities.mockResolvedValue({
+    capabilities: { canManageSheetAccess: true },
+    sheetLiveness: 'live',
+  })
 })
 
 describe('routes/roles.ts', () => {

@@ -1416,6 +1416,10 @@ export const STOCK_PREP_DIFF_KIND_PLAIN: Record<string, StockPrepPlainText> = Ob
   pathChanged: Object.freeze({ zh: '在 BOM 里挪了位置', en: 'Moved within the BOM' }),
   missingChildBom: Object.freeze({ zh: '下层 BOM 没拉到', en: 'A child BOM did not come through' }),
   fingerprintChanged: Object.freeze({ zh: '其他内容有改动', en: 'Something else changed' }),
+  // Q3c: fingerprint-decomposition kinds, named separately from the catch-all above (docs/development/
+  // platform-overall-design/stock-prep-change-adjudication-20260901.md).
+  componentCodeChanged: Object.freeze({ zh: '原位换了零件号', en: 'Component code swapped in place' }),
+  materialChanged: Object.freeze({ zh: '原位换了材质', en: 'Material substituted in place' }),
 })
 
 /** Snapshot-diff row review status / diff type. */

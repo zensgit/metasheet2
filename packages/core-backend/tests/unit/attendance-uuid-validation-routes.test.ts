@@ -574,6 +574,16 @@ function attendanceReadOnlyRbacQueryResult(sql: string, params: unknown[] = []) 
   return undefined
 }
 
+function groupManagerProbeResult(
+  sql: string,
+  params: unknown[] = [],
+  options: { userId?: string; groupId?: string; managed?: boolean } = {},
+) {
+  if (!(sql.includes('FROM attendance_group_managers') && sql.includes('SELECT 1'))) return undefined
+  expect(params).toEqual(['default', options.groupId ?? attendanceGroupId, options.userId ?? 'owner-user-1'])
+  return options.managed === false ? [] : [{ ok: 1 }]
+}
+
 function actorContextQueryResult(sql: string) {
   if (sql.includes('SELECT name, role FROM users')) return [{ name: 'Scoped scheduler', role: null }]
   if (sql.includes('FROM attendance_group_members m')) return []
@@ -879,17 +889,33 @@ describe('attendance UUID route validation', () => {
     expect(db.query).not.toHaveBeenCalled()
   })
 
-  it('keeps attendance group member management admin-only in R0', async () => {
-    const { db, routes } = await createHarness('false')
-    const groupId = '00000000-0000-4000-8000-000000000101'
+  it('lets an owner add members of a managed group and emits a values-free change event', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    const groupId = attendanceGroupId
     const ownerUserId = 'owner-user-1'
+    const memberRow = {
+      id: scheduleGroupMemberId,
+      org_id: 'default',
+      group_id: groupId,
+      user_id: 'member-user-2',
+      created_at: '2026-05-30T10:00:00.000Z',
+      updated_at: '2026-05-30T10:00:00.000Z',
+    }
 
-    db.query.mockImplementation(async (sql: string) => {
-      const text = String(sql)
-      if (text.includes('FROM user_roles') && text.includes('role_id = $2')) return []
-      if (text.includes('FROM user_permissions')) return []
-      if (text.includes('JOIN role_permissions')) return []
-      throw new Error(`unexpected SQL: ${text}`)
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: ownerUserId, groupId, managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) {
+        expect(params).toEqual([groupId, 'default'])
+        return [{ id: groupId }]
+      }
+      if (sql.includes('INSERT INTO attendance_group_members')) {
+        expect(params).toEqual(['default', groupId, 'member-user-2'])
+        return [memberRow]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
     })
 
     const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
@@ -898,11 +924,20 @@ describe('attendance UUID route validation', () => {
       user: { id: ownerUserId, orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
-    expect(db.transaction).not.toHaveBeenCalled()
-    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('attendance_group_managers')
-    expect(db.query.mock.calls.map(call => String(call[0])).join('\n')).not.toContain('attendance_group_members')
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: 'member-user-2' }] } })
+    expect(db.transaction).toHaveBeenCalledTimes(1)
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).toContain("role IN ('owner', 'sub_owner')")
+    expect(eventEmit).toHaveBeenCalledWith('attendance.group.members.changed', {
+      orgId: 'default',
+      groupId,
+      actorId: ownerUserId,
+      action: 'add',
+      scope: 'managed',
+      count: 1,
+    })
   })
 
   it('preserves group-manager authorization for the independent team-availability read', async () => {
@@ -1167,6 +1202,256 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
     expect(db.query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('FROM attendance_groups')
+  })
+
+  it('lists members for an owner of that group', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) return [{ total: 1 }]
+      if (sql.includes('SELECT * FROM attendance_group_members')) {
+        return [{
+          id: scheduleGroupMemberId,
+          org_id: 'default',
+          group_id: attendanceGroupId,
+          user_id: 'worker-1',
+          created_at: '2026-05-30T10:00:00.000Z',
+          updated_at: '2026-05-30T10:00:00.000Z',
+        }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id/members', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { total: 1, items: [{ userId: 'worker-1' }] } })
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).toContain('FROM attendance_group_managers')
+  })
+
+  it('returns 403 before 404 on GET members for a group the caller does not manage', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: 'not-a-manager', managed: false })
+      if (probe !== undefined) return probe
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id/members', {
+      params: { id: attendanceGroupId },
+      user: { id: 'not-a-manager', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('FROM attendance_groups')
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('attendance_group_members')
+  })
+
+  it('lets an owner remove a member of a managed group', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+      if (sql.includes('DELETE FROM attendance_group_members')) {
+        expect(params).toEqual(['default', attendanceGroupId, 'worker-1'])
+        return [{ id: scheduleGroupMemberId }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id/members/:userId', {
+      params: { id: attendanceGroupId, userId: 'worker-1' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, data: { id: scheduleGroupMemberId } })
+    expect(eventEmit).toHaveBeenCalledWith('attendance.group.members.changed', {
+      orgId: 'default',
+      groupId: attendanceGroupId,
+      actorId: 'owner-user-1',
+      action: 'remove',
+      scope: 'managed',
+      count: 1,
+    })
+  })
+
+  it('lists the owner roster for a manager of that group without allowing roster writes', async () => {
+    const { db, routes } = await createHarness('false')
+    const managerRow = {
+      id: scheduleGroupMemberId,
+      org_id: 'default',
+      group_id: attendanceGroupId,
+      user_id: 'owner-user-1',
+      role: 'owner',
+      created_by: 'admin-1',
+      created_at: '2026-05-29T22:00:00.000Z',
+      updated_at: '2026-05-29T22:00:00.000Z',
+    }
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+      if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_managers')) return [{ total: 1 }]
+      if (sql.includes('SELECT *') && sql.includes('FROM attendance_group_managers')) return [managerRow]
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const listRes = await invokeRoute(routes, 'GET /api/attendance/groups/:id/managers', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(listRes.statusCode).toBe(200)
+    expect(listRes.body).toMatchObject({ ok: true, data: { total: 1, items: [{ userId: 'owner-user-1', role: 'owner' }] } })
+
+    db.query.mockClear()
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+    const writeRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+      params: { id: attendanceGroupId },
+      body: { userId: 'owner-user-2', role: 'sub_owner' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(writeRes.statusCode).toBe(403)
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('INSERT INTO attendance_group_managers')
+  })
+
+  it('returns 403 before 404 on GET managers for a group the caller does not manage', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: 'not-a-manager', managed: false })
+      if (probe !== undefined) return probe
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'GET /api/attendance/groups/:id/managers', {
+      params: { id: attendanceGroupId },
+      user: { id: 'not-a-manager', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('FROM attendance_groups')
+  })
+
+  it('lets an owner preview a fixed schedule for a managed group without applying it', async () => {
+    const { db, eventEmit, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      const fixedSchedule = fixedScheduleQueryResult(sql)
+      if (fixedSchedule.handled) return fixedSchedule.rows
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/preview', {
+      params: { id: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toMatchObject({ ok: true })
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(eventEmit).not.toHaveBeenCalled()
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).not.toContain('INSERT INTO attendance_shift_assignments')
+  })
+
+  it('keeps group CRUD and fixed-schedule apply admin-or-scheduler-only for a group owner', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const putRes = await invokeRoute(routes, 'PUT /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      body: { name: 'Renamed' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(putRes.statusCode).toBe(403)
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('UPDATE attendance_groups')
+
+    db.query.mockClear()
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+    const deleteRes = await invokeRoute(routes, 'DELETE /api/attendance/groups/:id', {
+      params: { id: attendanceGroupId },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(deleteRes.statusCode).toBe(403)
+    expect(db.query.mock.calls.map(([text]) => String(text)).join('\n')).not.toContain('DELETE FROM attendance_groups')
+
+    db.query.mockClear()
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('SELECT id FROM attendance_groups')) return [{ id: attendanceGroupId }]
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return []
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+    const applyRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/apply', {
+      params: { id: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(applyRes.statusCode).toBe(403)
+    expect(applyRes.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('returns 503 when attendance_group_managers is missing on a scoped member write', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      if (sql.includes('FROM attendance_group_managers')) {
+        const error = new Error('relation "attendance_group_managers" does not exist')
+        ;(error as { code?: string }).code = '42P01'
+        throw error
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+      params: { id: attendanceGroupId },
+      body: { userId: 'member-user-2' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'DB_NOT_READY' } })
+    expect(db.transaction).not.toHaveBeenCalled()
   })
 
   it('returns 503 when attendance_group_managers is missing on scoped group get', async () => {
@@ -4153,11 +4438,13 @@ describe('attendance UUID route validation', () => {
     }
   })
 
-  it('keeps fixed-schedule preview admin-only at runtime before group SQL', async () => {
+  it('keeps fixed-schedule preview closed for a non-manager before group SQL', async () => {
     const { db, eventEmit, routes } = await createHarness('false')
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { userId: 'scheduler-1', managed: false })
+      if (probe !== undefined) return probe
       throw new Error(`unexpected scoped SQL: ${sql}`)
     })
 
@@ -4170,9 +4457,11 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(403)
     expect(res.body).toEqual({
       ok: false,
-      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' },
     })
-    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('attendance_'))).toBe(false)
+    const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+    expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).not.toContain('FROM attendance_groups')
     expect(db.transaction).not.toHaveBeenCalled()
     expect(eventEmit).not.toHaveBeenCalled()
   })

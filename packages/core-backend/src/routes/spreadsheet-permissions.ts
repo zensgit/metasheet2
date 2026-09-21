@@ -1,9 +1,55 @@
+/**
+ * LEGACY spreadsheet-permissions routes — sheet AUTHORITY + sheet LIVENESS (#5829).
+ *
+ * `:id` here is a `meta_sheets` id, not a legacy spreadsheet id. The LIVE schema builder is the kysely
+ * migration src/db/migrations/zzzz20260405190000_create_spreadsheet_permissions.ts:7
+ * (`sheet_id text NOT NULL REFERENCES meta_sheets(id) ON DELETE CASCADE`). The raw-SQL twin
+ * migrations/036_create_spreadsheet_permissions.sql:4 declares the same table `REFERENCES
+ * spreadsheets(id)`, but `036_create_spreadsheet_permissions` is a NO-OP HISTORY MARKER — it is listed
+ * in SUPERSEDED_LEGACY_SQL_MIGRATIONS (src/db/migration-provider.ts:78), as is the migration that would
+ * have created its FK target (`034_create_spreadsheets`, line 76).
+ *
+ * Scoped, not absolute: that hold-down arrived in 36ee32502 (2026-05-12) and is still re-enterable with
+ * `MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL='true'` (migration-provider.ts:266). Every database the
+ * CURRENT provider builds therefore carries the `meta_sheets(id)` shape. The residual class is named
+ * rather than declared empty: a database this repo migrated BEFORE that commit ran 036 first — the
+ * provider merges the kysely and SQL streams into ONE name-keyed record, so '036…' precedes 'zzzz…' —
+ * and carries `REFERENCES spreadsheets(id)`. On such a database multitable's OWN per-sheet grant
+ * writes would already violate that FK; these routes answer such an `:id` as "no live sheet" instead
+ * of claiming the case impossible.
+ *
+ * `spreadsheet_permissions` is exactly the table multitable reads as PER-SHEET grants
+ * (multitable/permission-service.ts loadSheetPermissionScopeMap). That makes these three routes a
+ * second, unguarded door onto the multitable sheet-grant table: they carried only
+ * `rbacGuard('spreadsheet-permissions', …)`, a GLOBAL code, so any holder of it could list / grant /
+ * revoke sheet-level grants on ANY sheet — including a soft-deleted one — without the per-sheet
+ * `canManageSheetAccess` the forward routes require.
+ *
+ * Each handler now runs the same capability/liveness PAIR the forward routes run — routes/univer-meta
+ * .ts:8886-8888 (`GET /sheets/:sheetId/permissions`) and :9155-9157 (`PUT /sheets/:sheetId/permissions/
+ * :subjectType/:subjectId`): `resolveSheetCapabilities` → 403 on `!canManageSheetAccess` → 404 on
+ * `sheetLiveness !== 'live'`.
+ *
+ * As of #5924 (0714f0a3f) the forward routes no longer run a PRE-GATE existence check before
+ * authority: that commit deleted the `loadSheetRow`-before-`resolveSheetCapabilities` step from all
+ * eleven univer-meta.ts table-config routes, these two included. Both doors now run the SAME
+ * capability/liveness pair in the SAME order — this file is neither stricter than nor divergent from
+ * the forward routes on that axis. The two differences that remain are narrower and unrelated to
+ * authority ordering: (1) the forward GET route trims `sheetId` and answers `400 VALIDATION_ERROR` on
+ * an empty result (univer-meta.ts:8879-8882), where this file passes `sheetId` through unnormalised
+ * (see below); (2) the forward PUT route, AFTER the pair, additionally checks that the addressed
+ * subject (a `users` / `roles` / `platform_member_groups` row) exists and answers `404 NOT_FOUND`
+ * echoing the subject id (univer-meta.ts:9163-9187) — a subject-existence oracle visible only to an
+ * already-authorised, live-sheet caller, and out of scope for this file (#5829).
+ */
 import type { Request, Response} from 'express';
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
-import { pool, transaction } from '../db/pg'
+import { pool, query as dbQuery, transaction } from '../db/pg'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
+import { resolveSheetCapabilities } from '../multitable/permission-service'
+import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 
 // Use the global Express.Request type which already includes user property
 type AuthenticatedRequest = Request
@@ -17,10 +63,58 @@ interface PermissionRow {
 // 简易内存：sheetId -> userId -> perms
 const sheetPerms = new Map<string, Map<string, Set<string>>>()
 
+/**
+ * AUTHORITY then LIVENESS on the addressed sheet. Returns true when the handler may proceed; when it
+ * returns false it has ALREADY answered, and the caller must return without touching the table.
+ *
+ * The refusal bodies come from the shared multitable module (multitable/sheet-refusals.ts) rather than
+ * being hand-copied here: that module exists because copies drift (see its header), and this file
+ * writes the same rows the forward routes write. What that buys is exactly ONE definition of the 403 /
+ * SHEET_DELETED / NOT_FOUND bodies — not evidence of a wider divergence: since #5924 (0714f0a3f) the
+ * forward GET/PUT permission routes run the identical capability/liveness pair in the identical order
+ * (see the file header), so this file does not answer any 404 the forward routes wouldn't already
+ * answer at the same point. Both helpers remain values-free — neither takes a sheet id, so neither CAN
+ * echo one back as an existence oracle, unlike the forward PUT route's post-pair subject lookup
+ * (univer-meta.ts:9163-9187).
+ *
+ * `sheetId` is passed through UNNORMALISED, exactly as the list/grant/revoke SQL below binds it: a gate
+ * that trimmed while the write did not would authorise one row key and write another.
+ */
+async function answerUnlessSheetManageable(req: Request, res: Response, sheetId: string): Promise<boolean> {
+  const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, dbQuery, sheetId)
+  if (!capabilities.canManageSheetAccess) {
+    sendForbidden(res)
+    return false
+  }
+  if (sheetLiveness !== 'live') {
+    sendSheetNotLive(res, sheetLiveness)
+    return false
+  }
+  return true
+}
+
+/**
+ * FAIL-CLOSED wrapper. A capability/liveness lookup that throws (pool absent, DB unreachable, a
+ * degraded RBAC read) must never fall through to the grant table — and it answers the SAME 403 a
+ * denial answers, so the failure mode cannot be used to tell "the gate broke" apart from "you may
+ * not", which would hand back the existence signal the order of the checks exists to withhold.
+ */
+async function mayManageSheetAccess(req: Request, res: Response, sheetId: string): Promise<boolean> {
+  try {
+    return await answerUnlessSheetManageable(req, res, sheetId)
+  } catch {
+    sendForbidden(res)
+    return false
+  }
+}
+
 export function spreadsheetPermissionsRouter(): Router {
   const r = Router()
 
   r.get('/api/spreadsheets/:id/permissions', rbacGuard('spreadsheet-permissions', 'read'), async (req: Request, res: Response) => {
+    // #5829: listing WHO holds a grant is an access-MANAGEMENT read, gated exactly as the forward
+    // GET /sheets/:sheetId/permissions is — the global rbac code alone never bought it.
+    if (!(await mayManageSheetAccess(req, res, req.params.id))) return
     if (pool) {
       const { rows } = await pool.query(
         `SELECT user_id, perm_code
@@ -44,6 +138,9 @@ export function spreadsheetPermissionsRouter(): Router {
   })
 
   r.post('/api/spreadsheets/:id/permissions/grant', rbacGuard('spreadsheet-permissions', 'write'), async (req: AuthenticatedRequest, res: Response) => {
+    // #5829: BEFORE the body validation, so a caller without sheet authority gets the identical 403 on
+    // a live, a soft-deleted and an absent sheet — and cannot read the sheet's state out of a 400/404.
+    if (!(await mayManageSheetAccess(req, res, req.params.id))) return
     const userId = req.body?.userId
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })
@@ -95,6 +192,9 @@ export function spreadsheetPermissionsRouter(): Router {
   })
 
   r.post('/api/spreadsheets/:id/permissions/revoke', rbacGuard('spreadsheet-permissions', 'write'), async (req: AuthenticatedRequest, res: Response) => {
+    // #5829: same gate as grant. A revoke on a soft-deleted sheet is destructive in the direction the
+    // restore flow cares about — it silently narrows what a restore brings back.
+    if (!(await mayManageSheetAccess(req, res, req.params.id))) return
     const userId = req.body?.userId
     const perm = req.body?.permission
     if (!userId || !perm) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId and permission required' } })

@@ -48,6 +48,11 @@ export interface StockPreparationSnapshotDiffSummary {
     pathChanged: number
     missingChildBom: number
     fingerprintChanged: number
+    /** Q3a/Q3c: an in-place component-code swap at an unchanged path/parent/version — independent of
+     *  `fingerprintChanged` (a row can carry both at once; see the diff engine's compareMatchedRows). */
+    componentCodeChanged: number
+    /** Q3a/Q3c: an in-place material substitution — independent of `fingerprintChanged`, same reason. */
+    materialChanged: number
   }
   blockingExceptionCount: number
 }
