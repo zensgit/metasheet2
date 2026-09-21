@@ -30,7 +30,10 @@
  * byte-identical, and every future consumer (the generator, the guard, and anything else that
  * needs to read this exec block) imports from here rather than adding a fourth.
  *
- * ROUND 2 (2026-09-22, independent gate review round 1, P1-1 option (a) — owner-selected):
+ * ROUND 2 (2026-09-22, independent gate review round 1, P1-1 option (a) — selected during
+ * implementation, on the round-1 reviewer's own framing that only (a) closes the residual; this is
+ * NOT an owner ruling (`gh pr view 5974 --json comments,reviews` → 0 comments, 0 reviews as of the
+ * round-2 gate review) and option (b) remains a fallback if the owner rules otherwise):
  * `logicalLines`/`execLogicalLine`/`tokensOf` below are UNCHANGED from round 1, byte-for-byte,
  * on purpose — a guard test asserts they stay textually identical to the shape guard's own copy
  * (see `required-web-lane-token-manifest-guard.test.ts`'s cross-copy agreement check), and
@@ -44,9 +47,13 @@
  * P1-1) found the script actually has **19** logical lines matching `\bvitest\s+run\b` after
  * `set -euo pipefail` (line 473) — 18 earlier `npx vitest run …` lines plus the final `exec …`
  * line — carrying **499** distinct tokens total (397 in the exec block, 102 more on the earlier
- * 18 lines, zero overlap), of which **28** were gated by nothing else in the repo (see the design
- * doc §1 for the full census). `allVitestInvocations`/`allVitestTokenLines`/`allVitestTokens`
- * close that: they read all 19 lines, not just the last one.
+ * 18 lines, zero overlap), of which round 1 counted **28** gated by nothing else in the repo. The
+ * round-2 gate review (P2-1) found a SIXTH lane-reading guard (`attendance-web-guard-workflow.spec.ts`)
+ * that the round-1 census missed, which pins 4 more of those 28 (on an early line) plus 3 exec-block
+ * tokens — corrected: **≤24** of the 499 are pinned by NOTHING across the six lane-reading guards
+ * enumerated so far (see the design doc §1 for the full census and the recompute command).
+ * `allVitestInvocations`/`allVitestTokenLines`/`allVitestTokens` close that: they read all 19
+ * lines, not just the last one.
  *
  * Values-free: reads only repo-tracked script text and returns token/line strings.
  */

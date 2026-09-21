@@ -14,11 +14,15 @@
  * (packages/core-backend/tests/unit/required-web-lane-token-manifest-guard.test.ts) that fails
  * when the two sets diverge in either direction.
  *
- * ROUND 2 SCOPE (independent gate review round 1, P1-1, option (a) — owner-selected): round 1
- * covered only the script's final `exec npx vitest run …` line (397 tokens). The review found 18
- * MORE `npx vitest run …` lines earlier in the same script, gated by the same `set -euo pipefail`,
- * carrying 102 more distinct tokens (28 of which no other guard in the repo pins). This generator
- * now unions the token set of ALL 19 gating lines (`allVitestTokens()`,
+ * ROUND 2 SCOPE (independent gate review round 1, P1-1, option (a) — selected during
+ * implementation on the round-1 reviewer's own framing that only (a) closes the residual; NOT an
+ * owner ruling — `gh pr view 5974 --json comments,reviews` → 0 comments, 0 reviews — owner
+ * disposition is pending and option (b) remains a fallback): round 1 covered only the script's
+ * final `exec npx vitest run …` line (397 tokens). The review found 18 MORE `npx vitest run …`
+ * lines earlier in the same script, gated by the same `set -euo pipefail`, carrying 102 more
+ * distinct tokens (round 1 counted 28 pinned by no other guard; round 2's gate review found a
+ * sixth lane-reading guard the census had missed, correcting the residual to ≤24 — see the design
+ * doc §1). This generator now unions the token set of ALL 19 gating lines (`allVitestTokens()`,
  * `scripts/ops/required-web-lane-exec-block.mjs`) — 499 tokens total, not just the exec block's 397.
  *
  * This script only produces/checks the manifest file; it is not itself the guard — CI does not

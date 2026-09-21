@@ -9,8 +9,10 @@
 - Round-1 head (superseded by this round's commit): `4e5e0a5fe90f4c7068da19093f5a00b2a62f9e85`.
 - Independent gate review of round 1 (CHANGES-REQUESTED, 1 P1, 2 P2, 7 P3, 3 NIT):
   `/Users/chouhua/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/impl-gate-H6-token-manifest-guard-round1-20260922.md`.
-  Owner-selected fix for the P1: option (a), widen the parser to all 19 gating lines. See the
-  design doc's ROUND 2 SUMMARY and §10 for the full disposition of every finding.
+  Option (a) was selected during implementation, not by the owner, to widen the parser to all 19
+  gating lines (no owner ruling exists — `gh pr view 5974 --json comments,reviews` → 0 comments, 0
+  reviews). See the design doc's ROUND 2 SUMMARY, §1's round-3 correction, and §10 for the full
+  disposition of every finding, including the round-2 gate review's own P2-1/P2-2/P3/NIT findings.
 - Local worktree: git worktree of the canonical `metasheet2` clone under
   `/private/tmp/claude-501/…/scratchpad/d2-h6-token-manifest`, `node_modules` symlinked from the
   canonical checkout (root, `apps/web`, `packages/core-backend`, `plugins/*`).
@@ -137,14 +139,17 @@ own historical run (which was never observed by this session).
 
 ```
 $ cd packages/core-backend && CI=true npx vitest run required-web-lane --reporter=dot
- ✓ tests/unit/required-web-lane-token-manifest-guard.test.ts (21 tests)
+ ✓ tests/unit/required-web-lane-token-manifest-guard.test.ts (25 tests)
  ✓ tests/unit/required-web-lane-registration-shape.test.ts (18 tests)
  Test Files  2 passed (2)
-      Tests  39 passed (39)
+      Tests  43 passed (43)
 ```
-(18 from `required-web-lane-registration-shape.test.ts`, byte-identical/unedited; 21 from the
-round-2 `required-web-lane-token-manifest-guard.test.ts` — 6 set-equality assertions + 4
-`stripTrailingErrorGuard` unit tests + 11 mutation-self-proof cases, up from round 1's 10.)
+(18 from `required-web-lane-registration-shape.test.ts`, byte-identical/unedited; 25 from
+`required-web-lane-token-manifest-guard.test.ts` — measured this round via
+`awk '/^describe\(/{...} /^  it\(/{c++}...'` over the file: 8 set-equality-group assertions (6 from
+round 2 + round 3's r2-NIT-3 manifest-sortedness and r2-P3-2 third-copy cross-copy checks) + 4
+`stripTrailingErrorGuard` unit tests + 13 mutation-self-proof cases (11 from round 2 + round 3's
+r2-P3-3 `toThrow` positive control and r2-P3-4 `allVitestInvocations`-vs-`logicalLines` agreement).)
 
 ```
 $ cd apps/web && CI=true npx vitest run attendance-web-guard-workflow --reporter=dot
@@ -163,11 +168,15 @@ $ npx vitest run required-web-lane --reporter=verbose   # guard file moved aside
 
 $ npx vitest run required-web-lane --reporter=verbose   # guard file restored
  Test Files  2 passed (2)
-      Tests  39 passed (39)                              # + required-web-lane-token-manifest-guard.test.ts (21)
+      Tests  43 passed (43)                              # + required-web-lane-token-manifest-guard.test.ts (25)
 ```
-**Correction (P3-2):** round-1 design §7 wrote "27→28 tests"; the true round-1 figure was 18→28 (27
-was the unrelated attendance spec's own count leaking into the sentence). Round 2's real number is
-**18→39** (10 round-1 assertions replaced by 21 round-2 ones). The substring filter
+**Correction (r2-P3-1, round 3 — re-broken twice before this):** round-1 design §7 wrote "27→28
+tests"; the true round-1 figure was 18→28 (27 was the unrelated attendance spec's own count leaking
+into the sentence). Round 2 corrected it to 18→39 (10 round-1 assertions replaced by 21 round-2
+ones) but the guard test's OWN header still said "18→28" — the round-2 gate review's P3-1. Round
+3's real, freshly measured number is **18→43** (21 round-2 assertions + round 3's 4 new ones: NIT-3
+manifest sortedness, the third-copy cross-copy check, the exec-count `toThrow` positive control,
+and the `allVitestInvocations`-vs-`logicalLines` agreement check). The substring filter
 `required-web-lane` is applied by vitest to the file list already globbed under `packages/core-
 backend/vitest.config.ts`'s real (default-include, explicit-exclude) config — not a literal path
 handed to a loader — so the file count going 1→2 under an unchanged filter string is mechanical
@@ -197,8 +206,9 @@ $ CI=true npx vitest run approval-ci-coverage-enumeration stock-prep-web-ci-cove
       Tests  372 passed (372)
 ```
 Unedited, unaffected by this PR's changes — re-run after the round-2 widening to confirm no
-collateral effect on the four guards whose union contributes the "192 of 499 already gated" figure
-cited in the design doc §1 / PR body.
+collateral effect on the four guards whose union contributes the base 192-of-499 figure that, with
+the sixth guard's 7 tokens added this round (r2-P2-1), forms the corrected **≥199** already-gated
+bound cited in the design doc §1 / PR body.
 
 ## 5. Numbers (round 2)
 
@@ -220,19 +230,32 @@ above — or `(cited: round-1 gate review)` — taken from
   stock-prep-web-ci-coverage-enumeration + 34 elearning-media-ci-wiring + 4
   network-unavailable-copy-ci-wiring) sums to 195, not 192 — the review's table shows this is a
   union, not a sum (some tokens are pinned by more than one guard), but does not itemize which 3
-  overlap. This round did not re-derive that breakdown; only the union total (192) is used in the
-  design doc and PR body. 279 exec-block tokens newly gated by this PR and 28 earlier-line tokens
-  newly gated with no prior gate at all are likewise cited from the review, consistent with the
-  measured 499/397/102 split above (279 + 28 + 192 = 499).
-- New guard test file: **21** `it()` blocks (6 set-equality assertions + 4 `stripTrailingErrorGuard`
-  unit tests + 11 mutation-self-proof cases including baseline), up from round 1's 10 — **(measured
-  this round: §4a/§4b transcripts)**.
+  overlap. This round did not re-derive that breakdown; only the union total (192) was used, as a
+  cited starting point, in the design doc and PR body.
+  **ROUND 3 correction (r2-P2-1, measured this round — see design doc §1 for the command):** that
+  four-guard enumeration itself missed a fifth/sixth guard,
+  `apps/web/tests/attendance-web-guard-workflow.spec.ts`, which pins 4 more of the "28" tokens
+  (early line 477's `sessionSpecs`) and 3 more of the "279" exec-block tokens
+  (`attendanceEmployeeMakeupRequestCard`, `attendanceEmployeeLeaveRequestCard`,
+  `attendance-selfservice-dashboard` — confirmed absent from all four census guards' source at
+  `origin/main` via `git grep -l -F`, 0 files each). Corrected, as bounds (an exact recount would
+  need re-deriving all four guards' own predicates, not only the sixth guard's 7 tokens): residual
+  `28 − 4 = 24` gives **≤24**; already-gated union `192 + 4 + 3 = 199` gives **≥199**; exec-block
+  newly-gated-by-this-PR `279 − 3 = 276` gives **≤276**. Bounds, not a tighter arithmetic identity,
+  because the three categories are not independently re-verified as exhaustive beyond the six
+  guards enumerated so far.
+- New guard test file: **25** `it()` blocks (8 set-equality-group assertions + 4
+  `stripTrailingErrorGuard` unit tests + 13 mutation-self-proof cases including baseline), up from
+  round 2's 21 (round 3 added r2-NIT-3, r2-P3-2's third-copy check, r2-P3-3, r2-P3-4) and round 1's
+  10 — **(measured this round: §4a/§4b transcripts, and `awk` over the file's `describe`/`it`
+  blocks)**.
 - Existing shape guard: **18** `it()` blocks, unedited (byte-identical to `origin/main`) —
   **(measured this round)**.
 - Existing attendance web-guard workflow spec: **27** tests, unedited (byte-identical) —
   **(measured this round)**.
-- Combined core-backend-side run for this slice's two files: **39/39 passed** (was 28/28 in round
-  1 — the guard file grew, the shape guard did not) — **(measured this round)**.
+- Combined core-backend-side run for this slice's two files: **43/43 passed** (was 39/39 in round
+  2, 28/28 in round 1 — the guard file grew each round, the shape guard did not) — **(measured this
+  round)**.
 - `tsc --noEmit -p .`: exit 0, but vacuous for both `tests/unit/*.test.ts` files (P3-1) —
   **(measured this round: §4c)**.
 - Files changed by this PR (round 2, cumulative over round 1): 4 modified/new code files
@@ -262,3 +285,83 @@ above — or `(cited: round-1 gate review)` — taken from
 3. No DDL, no branch-protection change, no merge, no undraft performed or requested by this PR.
 4. Real CI at this head is NOT RUN as of this document — `gh pr checks 5974` must be re-checked,
    specifically for `test (20.x)`, before any merge decision.
+
+## 7. Round 3 additions (r2 gate review findings) — mutation drill and grep evidence
+
+All mutations in this section: `cp` real file → mutate → run targeted `vitest` → confirm the
+expected result → `cp` the backup back → `cmp` verify restore. `git status --porcelain | wc -l` was
+0 before this section's work and 0 after (only the 5 intended files carry a diff; confirmed with
+`git diff --stat origin/main...HEAD --name-only`).
+
+### 7a. r2-P2-1 recompute — see design doc §1 for the full command and output
+
+Summary of the result (command and full transcript live in the design doc, not duplicated here):
+`node`, importing the real `allVitestTokens`/`execLogicalLine`/`tokensOf` from
+`scripts/ops/required-web-lane-exec-block.mjs`, measures `total=499 exec=397 earlierOnly=102`
+against the real lane script. Extracting `attendance-web-guard-workflow.spec.ts`'s own
+`sessionSpecs` array and its exec-block `for (const spec of [...])` loop (regex extraction, not
+retyped) yields the 4 early tokens and 3 exec tokens named in the design doc; `git grep -l -F
+<token> origin/main -- <the four census guard files>` returns 0 files for each of the 3 exec
+tokens. Arithmetic on these inputs: `28 − 4 = 24` (≤24), `192 + 4 + 3 = 199` (≥199), `279 − 3 = 276`
+(≤276).
+
+### 7b. r2-P2-2 — case-insensitive sweep for the authorship phrase, over every file this PR touches plus the PR body
+
+Swept with a four-alternative, case-insensitive regex pairing "owner" with the verb for making this
+pick (as a hyphenated compound, as two separate words, and as the passive "picked by the owner"
+form), run once over every file `git diff --name-only origin/main...HEAD` lists and once over the
+new PR body text. Both runs: **0 hits.** The exact pattern is deliberately not reproduced
+character-for-character in this paragraph, or in the design doc's matching §10 row, so that
+documenting the check does not itself create a hit the next sweep would have to explain away — the
+pattern is the same one named in this round's fix instructions and in this file's own git history
+(the pre-round-3 diff shows exactly which strings were removed from each of the four `.mjs`/test
+headers and this document's own line 12).
+
+### 7c. r2-P3-2 (cross-copy agreement, third copy) — mutation proof
+
+| Mutation | Command | Result | Restore |
+|---|---|---|---|
+| Broke `token-set-diff.mjs`'s `logicalLines()` join separator (`` `${buf} ${body}` `` → `` `${buf}${body}` ``, diverging from `exec-block.mjs`'s copy) | `CI=true npx vitest run required-web-lane-token-manifest-guard -t "r2-P3-2"` | **RED** — `scripts/ops/required-web-lane-exec-block.mjs's logicalLines() has diverged from required-web-lane-token-set-diff.mjs's copy … — update both.` | `cp` backup back → `cmp` OK |
+| Removed the third copy's documented `label` divergence entirely (made `execLogicalLine` there byte-identical to ours) | same | **RED** on the fixture-sanity check — `expected 'function execLogicalLine(scriptSrc) {…' not to be 'function execLogicalLine(scriptSrc) {…'` — proving that sanity check is itself load-bearing, not vacuous | `cp` backup back → `cmp` OK |
+
+### 7d. r2-P3-3 (positive control for the exec-count throw) — mutation proof
+
+Neutered `execLogicalLine`'s throw condition in `exec-block.mjs` the same way the round-2 gate's D8a
+did (`matches.length !== 1` → `matches.length < 1`):
+```
+$ CI=true npx vitest run required-web-lane-token-manifest-guard -t "r2-P3-3"
+ → expected [Function] to throw an error
+FAIL … r2-P3-3: allVitestInvocations has a POSITIVE control for the "exactly 1 exec logical line" throw …
+```
+Restored via `cp`/`cmp`. Confirms the new `toThrow(/found 2/)` assertion is behaviour-pinned, not
+vacuous.
+
+### 7e. r2-P3-4 (`allVitestInvocations` vs `logicalLines` agreement) — mutation proof
+
+Broke `allVitestInvocations`'s own fold-loop join separator in `exec-block.mjs` (D12-style, same
+mutation the round-2 gate ran against the generator's copy):
+```
+$ CI=true npx vitest run required-web-lane-token-manifest-guard -t "r2-P3-4"
+FAIL … r2-P3-4: allVitestInvocations is not a fourth silently-diverged copy of the comment-strip/fold loop …
+```
+(diff shows every logical line's text collapsed without the joining space). Restored via `cp`/`cmp`.
+
+### 7f. r2-NIT-3 (manifest sortedness) — mutation proof
+
+Swapped the first two non-header token lines in the real committed
+`apps/web/scripts/run-required-web-tests.tokens`:
+```
+$ CI=true npx vitest run required-web-lane-token-manifest-guard -t "r2-NIT-3"
+FAIL … r2-NIT-3: the committed manifest's token lines are sorted case-insensitively …
+```
+Restored via `cp`/`cmp` against a pre-mutation backup.
+
+### 7g. Full suite after all round-3 restores
+
+```
+$ cd packages/core-backend && CI=true npx vitest run required-web-lane --reporter=dot
+ ✓ tests/unit/required-web-lane-token-manifest-guard.test.ts (25 tests)
+ ✓ tests/unit/required-web-lane-registration-shape.test.ts (18 tests)
+ Test Files  2 passed (2)
+      Tests  43 passed (43)
+```
