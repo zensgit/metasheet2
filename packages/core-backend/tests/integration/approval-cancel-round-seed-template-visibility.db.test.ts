@@ -130,7 +130,17 @@ async function rawPost(baseUrl: string, path: string, token: string, body: unkno
 }
 
 /** Walks EVERY page of the template list for one actor — an absence claim taken from page 1 only
- * would be defeated by ordering (`ORDER BY updated_at DESC, id DESC`), not by the filter. */
+ * would be defeated by ordering (`ORDER BY updated_at DESC, id DESC`), not by the filter.
+ *
+ * DEPENDS ON SERIAL FILE EXECUTION for its PRESENCE half only. Offset pagination over a mutable
+ * ordering can drop a row across a page boundary if another writer touches `approval_templates`
+ * mid-sweep; `vitest.integration.config.ts` pins `fileParallelism: false` + `maxConcurrency: 1`, so
+ * no sibling suite runs concurrently with this one today. If that ever changes, the
+ * `toContain(visibleControlId)` control below must become a single `?search=`-scoped request; the
+ * ABSENCE halves are unaffected (a dropped row cannot manufacture a false pass) and the seed's
+ * absence is independently pinned byte-for-byte by the `?search=` and detail-404 tests. The 50-page
+ * cap throws rather than returning a short answer, so a table larger than the cap is a loud failure,
+ * not a silently weakened assertion. */
 async function listAllTemplateIds(baseUrl: string, token: string): Promise<{ ids: string[]; bodies: string[] }> {
   const ids: string[] = []
   const bodies: string[] = []
