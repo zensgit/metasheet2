@@ -20,7 +20,7 @@
    `app.use` 与这一行之间没有任何 admin 中间件；能过全局认证的**任何**用户都能打到 `/api/admin/*`。
 
 2. **router 级也没有角色门。**
-   `admin-routes.ts` 全文只有两处 `router.use`（修前 `:2021`、`:2022`；修后（2026-09-20 rebase 后）`:2377`、`:2378`），都是挂子路由
+   `admin-routes.ts` 全文只有两处 `router.use`（修前 `:2021`、`:2022`；修后（2026-09-20 rebase 后）`:2388`、`:2389`），都是挂子路由
    （`/snapshots` → `snapshot-labels`，`/safety/rules` → `protection-rules`），不是中间件。
 
 3. **`requireSafetyCheck` 内零角色判断。**
@@ -87,7 +87,7 @@
   HIGH / CRITICAL 为真）。也就是说 LOW / MEDIUM 的端点在只有确认层时对任何已认证用户完全敞开。
 - **它是可被自己关掉的。** 确认层的开关本身若只由确认层把守，就构成自引用：一个 LOW 操作能把整层拆掉。
   授权门必须在确认层**之外、之前**。
-- **`allowBypass` 是死配置。** `initAdminRoutes` 在 `:2398` 传
+- **`allowBypass` 是死配置。** `initAdminRoutes` 在 `:2409` 传
   `allowBypass: process.env.NODE_ENV === 'test'`，但 `checkOperation` 全程从不读它
   （全仓仅 `types.ts:126` 声明、`SafetyGuard.ts:35` 默认值、README、这一处赋值）。
   它既没有放大风险，也**不能**被指望为任何保护。
@@ -115,12 +115,12 @@
 | `:1170` | POST | `/metrics/reset` | `RESET_METRICS` | LOW | 仅确认层 | **200 直接执行** |
 | `:1343` | DELETE | `/data/bulk` | `DELETE_DATA` | HIGH | 仅确认层 | 403 + 令牌 |
 | `:1462` | PUT | `/data/bulk` | `BULK_UPDATE` | HIGH | 仅确认层 | 403 + 令牌 |
-| `:1672` | POST | `/dlq/:id/retry` | `BULK_UPDATE` | HIGH | 仅确认层 | 403 + 令牌 |
-| `:1704` | DELETE | `/dlq/:id` | `DELETE_DATA` | HIGH | 仅确认层 | 403 + 令牌 |
-| `:1908` | POST | `/dlq/retry-all` | `BULK_UPDATE` | HIGH | 仅确认层 | 403 + 令牌 |
-| `:1960` | POST | `/dlq/cleanup` | `DELETE_DATA` | HIGH | 仅确认层 | 403 + 令牌 |
-| `:2131` | POST | `/ratelimits/:key/reset` | `RESET_METRICS` | LOW | 仅确认层 | **200 直接执行** |
-| `:2170` | POST | `/ratelimits/reset-all` | `RESET_METRICS` | LOW | 仅确认层 | **200 直接执行** |
+| `:1683` | POST | `/dlq/:id/retry` | `BULK_UPDATE` | HIGH | 仅确认层 | 403 + 令牌 |
+| `:1715` | DELETE | `/dlq/:id` | `DELETE_DATA` | HIGH | 仅确认层 | 403 + 令牌 |
+| `:1919` | POST | `/dlq/retry-all` | `BULK_UPDATE` | HIGH | 仅确认层 | 403 + 令牌 |
+| `:1971` | POST | `/dlq/cleanup` | `DELETE_DATA` | HIGH | 仅确认层 | 403 + 令牌 |
+| `:2142` | POST | `/ratelimits/:key/reset` | `RESET_METRICS` | LOW | 仅确认层 | **200 直接执行** |
+| `:2181` | POST | `/ratelimits/reset-all` | `RESET_METRICS` | LOW | 仅确认层 | **200 直接执行** |
 
 共 12 处。任务点名的是前两条 + 两条 bulk；其余 8 条是按盘点要求「凡是写/破坏性端点一并加门」补的
 ——它们同属「只靠 `requireSafetyCheck` 把关」这一族，其中 `RESET_METRICS` 那三条（`/metrics/reset`、
@@ -128,13 +128,13 @@
 
 ### 2.1 没加门的端点及理由
 
-- **读端点，一律不动**：`GET /safety/status`(`:101`)、`GET /slo/status`(`:1591`)、`GET /dlq`(`:1641`，已被 #5710 补上 `requireAdminRole()`)、
-  `GET /shards`(`:1746`)、`GET /shards/:name`(`:1800`)、`GET /queues`(`:1856`)、`GET /ratelimits`(`:2009`)、
-  `GET /ratelimits/:key`(`:2083`)、`GET /health/detailed|summary|subsystem/:name`(`:2217` / `:2260` / `:2302`)。
+- **读端点，一律不动**：`GET /safety/status`(`:101`)、`GET /slo/status`(`:1602`)、`GET /dlq`(`:1652`)、
+  `GET /shards`(`:1757`)、`GET /shards/:name`(`:1811`)、`GET /queues`(`:1867`)、`GET /ratelimits`(`:2020`)、
+  `GET /ratelimits/:key`(`:2094`)、`GET /health/detailed|summary|subsystem/:name`(`:2228` / `:2271` / `:2313`)。
   任务限定「读端点不动」，本次不改变任何读可见面。
-  **2026-09-20 复核**：这一族读端点如今除 `GET /slo/status`(`:1591`) 外**全部**已由别的 PR（#5710 / #5897 等）
-  补上 `requireAdminRole()`；本 PR 依然一个读端点都没碰。
-- **`POST /health/check`（`:2338`）**：不带 `requireSafetyCheck`、也不带 admin 门。它只调用
+  **2026-09-20 复核**：这一族读端点如今**全部**已由别的 PR（#5710 / #5897 / #5914）补上 `requireAdminRole()` ——
+  `/api/admin` 根 GET 的无门数已经归零；本 PR 依然一个读端点都没碰。
+- **`POST /health/check`（`:2349`）**：不带 `requireSafetyCheck`、也不带 admin 门。它只调用
   `healthAggregator.checkHealth()` 取一次健康快照并返回摘要，不写任何状态——按「写/破坏性」判定
   不属于本次范围，**未加门**。（它仍是一个**任意已认证用户**可触发的探测面——全局 JWT 门挡匿名、不鉴角色，归入残余。）
 - **`POST /plugins/reload-all-unsafe`(`:790`)、`POST /plugins/:id/reload-unsafe`(`:841`)**：
@@ -142,13 +142,13 @@
   （否则 403 `UNSAFE_DISABLED`），再要 `req.user.roles` 含 `'admin'`（否则 403 `ADMIN_REQUIRED`）。
   这条角色判断是读 token 上的 `roles` 数组而非查 `user_roles`，与 `requireAdminRole()` 的口径不同，
   但它**不是**「只靠确认层」的那一族，改它属于另一件事（口径统一），本次不动，列入残余。
-- **同挂载面的子路由 `/safety/rules`（`admin-routes.ts:2378` 挂 `protection-rules.ts`）**：**本段的「零授权门」判断已于 2026-09-20 rebase 时作废，见 §5.3**。
+- **同挂载面的子路由 `/safety/rules`（`admin-routes.ts:2389` 挂 `protection-rules.ts`）**：**本段的「零授权门」判断已于 2026-09-20 rebase 时作废，见 §5.3**。
   09-12 基线上这四条写端点确实零授权门、身份取自可伪造的 `x-user-id` 请求头（`protection-rules.ts:21`、`:113`）；
   2026-09-20 实读，它们首位都是 `requireAdminRole()`（`protection-rules.ts:236 POST /`、`:328 PATCH /:id`、
   `:369 DELETE /:id`、`:392 POST /evaluate`，#5667 / PR #5677 已合）。当时的判断是「先存洞、不是本次回归」；也**不能**用它重开上面 12 条（`SafetyGuard.ts:394`
   只在 `entityType && entityId` 都在时评规则，bulk 的 `getDetails` 不给）。本次不动，另开 issue。
 - **已经有门的**：`/safety/confirm`(`:114`)、`/plugins/*`(`:413 :426 :500 :548 :582 :616 :635`)、
-  `/yjs/status`(`:1611`)，以及走 `protectAdminOperation` 的 `/plugins/:id/reload`、
+  `/yjs/status`(`:1622`)，以及走 `protectAdminOperation` 的 `/plugins/:id/reload`、
   `/plugins/reload-all`、`DELETE /plugins/:id`、`/snapshots/:id/restore`、`DELETE /snapshots/:id`、
   `/snapshots/cleanup`。
 
@@ -194,13 +194,13 @@ admin/cache/clear|admin/metrics/reset|admin/ratelimits|admin/dlq`，命中全部
    本次**刻意不动**：加租户注入属于改写语义，不在「最小、不重构」范围内。
 3. **`data_sources` 仍留在 `validTables` 里**（`:1364` / `:1484` 两份）。是否把它（以及
    `users` / `protection_rules` 等）摘出白名单是 issue **#5655 待用户裁决**的另一个问题，本次不动。
-4. **`POST /health/check`（`:2338`）无角色门**，任意已认证用户可触发的健康探测/放大面（读，不写；匿名被全局 JWT 门挡住）。
+4. **`POST /health/check`（`:2349`）无角色门**，任意已认证用户可触发的健康探测/放大面（读，不写；匿名被全局 JWT 门挡住）。
 5. **`*-unsafe` 两条路由的 admin 判定口径与 `requireAdminRole()` 不一致**（读 token 的 `roles`
    数组 vs 查 `user_roles` 表）。两套口径共存本身是隐患，但需要先确定哪一套是权威，本次不动。
 7. ~~**`/safety/rules` 子路由四条写端点零授权门、身份取自请求头**~~ —— **2026-09-20 作废**：#5667 / PR #5677 已合，
-   四条首位都是 `requireAdminRole()`（见 §5.3）。同段的「12 条无门 GET」也已部分收口：`GET /dlq`（`:1641`）与
-   protection-rules 的两条 GET 由 #5710 补门，`/safety/status`（`:101`）、`/yjs/status`（`:1611`）本就有门。
-   2026-09-20 实读仍无门的读端点见 §5.4。
+   四条首位都是 `requireAdminRole()`（见 §5.3）。同段的「12 条无门 GET」也已**全部**收口：`GET /dlq`（`:1652`）与
+   protection-rules 的两条 GET 由 #5710 补门，`GET /slo/status`（`:1602`）由 #5914 补门，`/safety/status`（`:101`）、
+   `/yjs/status`（`:1622`）本就有门。2026-09-20 实读：根 GET 无门数 = 0，详见 §5.4。
 6. **`allowBypass` 仍是死配置**，留在 `types.ts` / `SafetyGuard.ts` / `initAdminRoutes` 里没人读。
    它今天无害，但是一个会误导读者（以为测试环境会绕过）的悬挂旋钮。
 
@@ -209,14 +209,14 @@ admin/cache/clear|admin/metrics/reset|admin/ratelimits|admin/dlq`，命中全部
 ## 5. 2026-09-20：rebase 到 main 与复核
 
 本 PR（#5665）自 2026-09-12 起挂在 `main` 上未合，其间 `admin-routes.ts` 被 #5710 / #5884 / #5886 /
-#5897 等若干 PR 改动，行号整体下移。本节记录 rebase 事实、行号订正口径，以及**自 09-12 以来事实发生
-变化、导致上文某些判断作废**的地方。上文 §1–§4 的正文行号已就地订正为 rebase 后的行号；
+#5897 等若干 PR 改动，行号整体下移；复核当天 main 又并入了 #5914 / #5916。本节记录 rebase 事实、行号订正口径，以及**自 09-12 以来事实发生
+变化、导致上文某些判断作废**的地方。上文 §1–§4 的正文行号已就地订正为 rebase 后（`ce9ac29cb`）的行号；
 显式标着「修前」的行号是 09-12 基线（`1e98d9d3f`）上的历史值，刻意保留不动。
 
 ### 5.1 rebase 事实
 
 - 起点：`fix/admin-safety-toggle-and-bulk-require-admin` @ `3c79b2059`（09-12 的 PR head）。
-- 目标：`origin/main` @ `36d659c8a`。
+- 目标：`origin/main` @ `ce9ac29cb`（本节写作期间 main 连着并入 #5914 / #5916，已再 rebase 一次并重跑全部证据）。
 - `git rebase origin/main` **无冲突**，三个 commit（代码 / 文档 / 文档收口）原样重放。
 - 代码 diff 与 `3c79b2059` 逐字相同：`git diff --stat` 在 rebase 前后都是
   `admin-routes.ts | 83 ++-`，没有任何一行因 rebase 被改写。
@@ -228,6 +228,11 @@ admin/cache/clear|admin/metrics/reset|admin/ratelimits|admin/dlq`，命中全部
 **22** 条首位是 `requireAdminRole()` 或 `...protectAdminOperation(...)`（后者展开后首位也是
 `requireAdminRole()`），**3** 条无门 —— 正是 §2.1 已登记的那三条（见 §5.4）。
 本 PR 新增的 12 处门在 §2 的表里逐条列出了 rebase 后的行号。
+
+同一口径对着 `origin/main`（`ce9ac29cb`）自己跑一遍作为**修前对照**：25 条写路由里只有
+**10** 条有门、**15** 条无门。15 − 3（永久豁免）= 12，与本 PR 补门的 12 条逐条重合；
+那 12 条在 main 上的首位实测是 `requireSafetyCheck({`（`/safety/enable` 连它都没有，是裸 handler）。
+这条对照同时钉死了「确认层不是授权门」这个判断的**量**：修前根写面无门率 15/25，修后 3/25。
 
 ### 5.3 §2.1 / §4 第 7 条的「`/safety/rules` 零授权门」已作废
 
@@ -243,7 +248,7 @@ admin/cache/clear|admin/metrics/reset|admin/ratelimits|admin/dlq`，命中全部
 
 修它的是 #5667 / PR #5677（已合；#5710 的标题「叠 #5677」是旁证）。`x-user-id` 今天只在
 `protection-rules.ts:20` 的一条历史注释里出现，不再是任何一条路由的身份来源。
-相应地，§4 第 7 条提到的「同 router 还有 12 条无门 GET」也已大部分收口（见 §5.4）。
+相应地，§4 第 7 条提到的「同 router 还有 12 条无门 GET」也已**全部**收口（见 §5.4）。
 
 ### 5.4 2026-09-20 实读：仍然无门的端点（本 PR 依然不碰）
 
@@ -251,13 +256,14 @@ admin/cache/clear|admin/metrics/reset|admin/ratelimits|admin/dlq`，命中全部
 
 | 行 | 方法 | 路径 | 为什么不加中间件门 |
 |---|---|---|---|
-| `:2338` | POST | `/health/check` | 只读探针，不写任何状态（§2.1）；「任意已认证用户可触发的探测面」记在 §4 第 4 条 |
+| `:2349` | POST | `/health/check` | 只读探针，不写任何状态（§2.1）；「任意已认证用户可触发的探测面」记在 §4 第 4 条 |
 | `:790` | POST | `/plugins/reload-all-unsafe` | 自带 in-handler 双门（`ALLOW_UNSAFE_ADMIN` + token 上的 `roles`）；口径不一致记在 §4 第 5 条 |
 | `:841` | POST | `/plugins/:id/reload-unsafe` | 同上 |
 
-**读侧 —— 只剩 1 条**：`GET /slo/status`（`:1591`）。§2.1 当时列的那一族无门 GET
-（`/dlq`、`/shards*`、`/queues`、`/ratelimits*`、`/health/*`、`/safety/status`）已由 #5710 / #5897
-等补上 `requireAdminRole()`。本 PR 一个读端点都没碰，`/slo/status` 也不在本 PR 范围内。
+**读侧 —— 归零**。§2.1 当时列的那一族无门 GET（`/dlq`、`/shards*`、`/queues`、`/ratelimits*`、
+`/health/*`、`/safety/status`）已由 #5710 / #5897 补门；最后一条 `GET /slo/status` 由 #5914 补上
+（`:1602`），同一个 PR 还给子路由 `/snapshots` 补了门。实测 16 条根 GET 全部有门，无门数 = 0。
+本 PR 一个读端点都没碰。
 
 ### 5.5 新增：一条闭世界用例（补 §4 第 1 条残余的一半）
 
@@ -270,9 +276,12 @@ admin 门』的结构性测试」。rebase 时补上了这条，落在同一个 
 - 识别器是 `requireAdminRole()` 闭包的 `toString()` 比对，并带**正反自证**：
   `protectAdminOperation(...)` 展开后首位被认出、`requireSafetyCheck(...)` 与裸中间件不被认出。
 - 另有一条「防空转绿」断言（收集到的写路由数量下界），免得取栈方式失效后静默全绿。
+- **载荷性实测**（验证文档 §8.3 末）：把 `POST /safety/enable` 的门在内存里换成 passthrough 后，
+  这条闭世界用例**本身**会红（不是只有探针里的复制品会红），且只红它与对应的点名用例，
+  其余 23 条不动。
 
 **范围仍然只到根路由**，不含 `router.use('/snapshots', ...)` / `router.use('/safety/rules', ...)`
-（`:2377`、`:2378`）两个子路由挂载点。整棵树（含子路由、含「临时豁免只提示不拦」机制）的结构性
+（`:2388`、`:2389`）两个子路由挂载点。整棵树（含子路由、含「临时豁免只提示不拦」机制）的结构性
 守卫是 PR #5680 的活，本用例与它口径一致（同一个识别器、同三条永久豁免）、范围更窄。
 收窄的理由是边界清晰，**不是**因为子路由今天有洞 —— §5.3 已证它没有。
 
@@ -283,7 +292,7 @@ admin 门』的结构性测试」。rebase 时补上了这条，落在同一个 
 | 1 | `/api/admin` 挂载处无统一角色门 | 仍在。两条根治路径中的「结构性测试」已做一半（根路由，见 §5.5）；挂载处套门仍未做 |
 | 2 | bulk 写/删无租户注入、无字段白名单 | 仍在，本次仍不动 |
 | 3 | `data_sources` 仍在 `validTables`（`:1364` / `:1484`） | 仍在，待裁决 |
-| 4 | `POST /health/check` 无角色门 | 仍在（`:2338`） |
+| 4 | `POST /health/check` 无角色门 | 仍在（`:2349`） |
 | 5 | 两条 `*-unsafe` 的 admin 口径与 `requireAdminRole()` 不一致 | 仍在（`:790` / `:841`） |
-| 6 | `allowBypass` 是死配置（`:2398` 赋值，无人读） | 仍在 |
+| 6 | `allowBypass` 是死配置（`:2409` 赋值，无人读） | 仍在 |
 | 7 | `/safety/rules` 四条写端点零授权门 | **已作废**：#5667 / PR #5677 已合，见 §5.3 |
