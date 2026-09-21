@@ -1,7 +1,7 @@
 // ============================================================================
 // readonly-inventory-pack.test.mjs — `node --test` layer over run-verify.mjs
 // ============================================================================
-// LAYER 1 (hermetic, no database): static contract checks on the four pack
+// LAYER 1 (hermetic, no database): static contract checks on the five pack
 //   files — every file includes _preamble.sql, ends with an INVENTORY_RESULT
 //   statement, contains no write statements, (F3) no longer carries the
 //   textual `"url":"http://` predicate, and (F6) computes its ACTIONABLE
@@ -38,6 +38,7 @@ const FILES = [
   '02-trg04-http-targets.sql',
   '03-adm08-wildcard-permissions.sql',
   '04-adm13-declared-admins.sql',
+  '05-legacy-binding-census.sql',
 ]
 
 // ── LAYER 1 — hermetic ──────────────────────────────────────────────────────

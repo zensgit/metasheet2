@@ -150,6 +150,7 @@ scripts/ops/readonly-inventory-20260916/
 ├── 02-trg04-http-targets.sql
 ├── 03-adm08-wildcard-permissions.sql
 ├── 04-adm13-declared-admins.sql
+├── 05-legacy-binding-census.sql  （2026-09-20 追加：sql-readonly legacy 绑定行普查，接入 verify 静态契约）
 ├── verify/
 │   ├── fixture-modern.sql        （合成新 schema：全假值）
 │   ├── fixture-legacy.sql        （合成旧 schema：缺 actions / is_admin / is_active）

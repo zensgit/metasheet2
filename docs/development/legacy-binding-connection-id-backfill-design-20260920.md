@@ -33,7 +33,7 @@
 | 3 | `b.config->>'dataSourceId' = ds.id` | 指针要解析到一个 `data_sources` 行 |
 | 4 | `b.config->>'dataSourceOwnerId' = ds.owner_id` | 服务端 owner 戳必须等于**那个源**的 owner。删除守卫计 legacy 引用用的就是这对谓词（`packages/core-backend/src/data-adapters/DataSourceManager.ts:713-718`），切换迁移回填也只认这对（`zzzz20260902120000_add_integration_connection_binding.ts:97-106`）。缺了它，一个指向他人源的指针会被提升成 canonical 引用 |
 | 5 | `ds.deleted_at IS NULL` | #5896 后 FK 指向 `live_id`（软删即 NULL）且 `NOT VALID`：每一条 UPDATE 逐行检查，一条指向已软删源的指针就会让整支迁移以 23503 中止。PG 实证：去掉此谓词，`up()` 直接 `23503 fk_integration_external_systems_live_connection_id` |
-| 6 | `ds.tenant_id = b.tenant_id` | canonical 解析器拒绝租户不一致的注册（`plugins/plugin-integration-core/lib/connection-resolver.cjs:113-121`，`CONNECTION_TENANT_MISMATCH`；未证租户的放行只给 legacy 分支 `:258-265`）。`data_sources.tenant_id` 可空、旧行未证前保持 NULL（切换迁移头注释），所以 **NULL 租户的源不回填**（普查报 `tenant-unproven`），不由迁移替 owner 猜 |
+| 6 | `ds.tenant_id = b.tenant_id` | canonical 解析器拒绝租户不一致的注册（`plugins/plugin-integration-core/lib/connection-resolver.cjs:113-121`，`CONNECTION_TENANT_MISMATCH`；对未证租户（源 `tenant_id` 为 NULL）的放行：legacy 分支恒放行（`:258-265`），canonical 分支**只在 `runAs = 'user'` 代跑时**放行（`:184-191` `ownerUserCompatibility`）。迁移不替 owner 猜，所以谓词 6 比解析器更保守——只可能少回填 `tenant-unproven` 一类，不会多放）。`data_sources.tenant_id` 可空、旧行未证前保持 NULL（切换迁移头注释），所以 **NULL 租户的源不回填**（普查报 `tenant-unproven`），不由迁移替 owner 猜 |
 | + | `b.legacy_connection_fallback_eligible IS NOT TRUE` | 标记 TRUE + `connection_id` NULL 是切换迁移**有意的回滚形态**（其幂等条款：「后来把 connection_id 置 NULL 的回滚不会被重放撤销」），并且今天仍能经 `resolveLegacy` 解析（`connection-resolver.cjs:205-263`）。再 canonical 化它等于撤销一次运维决定，所以不动、普查单列。本迁移拿的行恰是**两条解析分支今天都不接受**的行（`resolveLegacy` 在 `:205-216` 拒绝标记 FALSE） |
 
 ## 3. 为什么只回填 sql-readonly（write-gated 明确不回填）
@@ -70,7 +70,7 @@
 
 ## 8. 普查 SQL（八类，含 owner 要的四类）
 
-owner 要求四类（可回填 / 指向软删源 / owner 不匹配 / 非 sql-readonly）。为了让「其余七类为什么不动」每一类都有名字，细分为八个**互斥**类（先匹配先赢，八列之和 == `legacy_rows_total`）：`non-sql-readonly-kind` → `rollback-shape-marker-true` → `pointer-unresolved` → `source-soft-deleted` → `owner-mismatch` → `tenant-unproven` → `tenant-mismatch` → `backfillable`。Q2 计数与 Q3 id 读同一个 `hit` CTE；Q4 按 kind 列非 sql-readonly 指针；Q5 给全表分母；末行 `INVENTORY_RESULT … status=complete classes=8`，缺列则 `incomplete reason=missing-column:…`，并在 `live_id` 缺席时加 `note=data_sources.live_id-absent(#5896-not-applied)`（= 本迁移还不能上）。执行契约与包内其它四份相同（`\ir _preamble.sql`：ON_ERROR_STOP、`default_transaction_read_only = on`、超时）。
+owner 要求四类（可回填 / 指向软删源 / owner 不匹配 / 非 sql-readonly）。为了让「其余七类为什么不动」每一类都有名字，细分为八个**互斥**类（先匹配先赢，八列之和 == `legacy_rows_total`）：`non-sql-readonly-kind` → `rollback-shape-marker-true` → `pointer-unresolved` → `source-soft-deleted` → `owner-mismatch` → `tenant-unproven` → `tenant-mismatch` → `backfillable`。Q2 计数与 Q3 id 读同一个 `hit` CTE；Q4 按 kind 列非 sql-readonly 指针；Q5 给全表分母；末行 `INVENTORY_RESULT … status=complete classes=8`，缺列则 `incomplete reason=missing-column:…`，并在 `live_id` 缺席时加 `note=data_sources.live_id-absent(#5896-not-applied)`（= 本迁移还不能上）。执行契约与包内其它四份相同（`\ir _preamble.sql`：ON_ERROR_STOP、`default_transaction_read_only = on`、超时），并已登记进 `verify/readonly-inventory-pack.test.mjs` 的 `FILES`，受同一组静态契约断言（必须 `\ir _preamble.sql`、必须以自己的 `INVENTORY_RESULT` 收尾、逐行无写语句）覆盖；README §5 清单同步列出。
 
 ## 9. 部署顺序、回滚、不做的事
 

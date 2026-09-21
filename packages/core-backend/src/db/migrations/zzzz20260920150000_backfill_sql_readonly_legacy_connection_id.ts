@@ -7,7 +7,12 @@
  * lib/external-systems.cjs, main @ 5edf4c3e1):
  *   * a NEW sql-readonly binding always writes `connection_id` and drops `config.dataSourceId`
  *     before INSERT (`requestedConnectionId` :547-560, insert branch :862-879, `baseRow` :758) —
- *     so the legacy shape has ZERO creation paths left and is pure residue;
+ *     so the legacy shape has ZERO creation paths left. (It is residue, but one MAINTENANCE path
+ *     exists: a config-only PATCH on a row whose `connection_id` is already NULL skips the canonical
+ *     branch — `existing.connection_id ?? null` :536-537 and the `connectionId !== null` guard :812 —
+ *     so the row keeps its pointer, NULL connection_id and FALSE marker. That path needs a NULL row to
+ *     start from, and a backfilled row is inherited as-is by :537, so it neither creates the legacy
+ *     shape nor reverts this migration's work.)
  *   * every OTHER kind that carries `config.dataSourceId` (`data-source:sql-write-gated`, …) is the
  *     opposite: `requestedConnectionId` REJECTS `connectionId` for them (:526-534) and returns
  *     null, `baseRow` copies that null into `connection_id` (:758) and `updateRow` spreads it on
@@ -32,7 +37,10 @@
  *      correct either way).
  *   6. `ds.tenant_id = b.tenant_id`                          — the canonical resolver refuses a
  *      registration whose tenant differs from the binding's (connection-resolver.cjs
- *      `assertRegistration` :113-121; the unconfirmed-tenant allowance is legacy/user-run only).
+ *      `assertRegistration` :113-121). The unconfirmed-tenant allowance exists on BOTH branches —
+ *      unconditionally in `resolveLegacy` (:258-265) and in `resolveCanonical` only when
+ *      `runAs === 'user'` (:184-191 `ownerUserCompatibility`) — so this predicate is stricter than
+ *      the resolver: it can only leave a `tenant-unproven` row alone, never admit one.
  *      `data_sources.tenant_id` is nullable and pre-existing rows stay NULL until proven
  *      (zzzz20260902120000 header), so a NULL-tenant source is NOT backfilled: the census reports it
  *      as "tenant unproven" for the owner rather than this migration guessing.

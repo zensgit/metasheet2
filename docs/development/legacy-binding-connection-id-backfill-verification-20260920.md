@@ -97,6 +97,18 @@
 | `down-blanket` | `AND b.connection_id = l.connection_id` | 1 failed：down() restores ONLY ledger-recorded rows … |
 | `down-dropif` | `DO $$ … IF NOT EXISTS … DROP TABLE … END $$` → `DROP TABLE IF EXISTS` | 1 failed：down() drops the ledger only when it is empty |
 
+## 6b. 普查文件接入只读盘点包的静态契约（反驳者 blocker 修复，2026-09-21）
+
+反驳者指出 `05-legacy-binding-census.sql` 没登记进 `scripts/ops/readonly-inventory-20260916/verify/readonly-inventory-pack.test.mjs` 的 `FILES`，因此三条 hermetic 契约（必须 `\ir _preamble.sql` / 必须以自己的 `INVENTORY_RESULT` 收尾 / 逐行无写语句）一条都不覆盖它；README §5 清单也没列它。修法各一行：`FILES` 追加 `'05-legacy-binding-census.sql'`，README 清单补一行。
+
+| 项 | 结果 |
+|---|---|
+| `node --test verify/readonly-inventory-pack.test.mjs`（LF 规范化的 scratchpad 副本，无 `DATABASE_URL`） | **8 pass / 0 fail / 1 skipped**（layer 2 按设计大声跳过）；三条契约对五份文件全绿 |
+| 同一命令在 Windows 检出（`core.autocrlf=true`，02 文件为 CRLF） | `F4 (not regressed): 02-trg04 …` 红：`0 !== 3`。**main 检出同样红**，是 `/WITH hit AS \(([\s\S]*?)
+\)
+/` 不认 CRLF 的既有本机假红，与本 PR 无关；CI（Linux, LF）不受影响 |
+| 内存级变异（`w8n-guard-mutation.mjs`，照抄测试正则，不落盘） | 基线 GREEN；`inject UPDATE line` → 写语句命中 1；`strip \ir _preamble.sql` → 前言断言红；`strip INVENTORY_RESULT` → 收尾断言红；`append trailing SELECT 1;` → 末行 `) p;` 断言红。`FILES` 解析结果含 05，即这四种编辑现在都会被挡 |
+
 ## 7. 类型与其它
 
 - `packages/core-backend`：`npx tsc --noEmit -p tsconfig.json` → exit 0（`q5-tsc.log`）。
