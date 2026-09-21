@@ -8,6 +8,13 @@
 - 基线 / 分支点：`origin/main` @ `cd42eaf7455f03dd99021a02c47c42f1f3db6484`
 - 变更文件：3 个（生产 1 + 集成测试 1 + 单元测试 1），**零迁移、零 DDL、零新错误码**
 
+> **round-2（本轮）**：收口独立门审 `impl-gate-H1-activation-race-round1-20260922.md` 的
+> P1-1 / P2-1 / P3-1 / P3-2。本轮**新增**的证据在 §3A（同节点探针 n=30 ×4 变体）、
+> §3B（提交进套件的三向确定性控制）、§3C（2×7 逐站点 mutation）、§4.6（本轮全量跑）；
+> §5 的延迟表被就地**缩小作用域**；§6.3 与 §7 第 9–15 条是本轮新增的 NOT RUN。
+> **§3A 更正了 round-1 与门审共同持有的一个数字错误**：baseline 自己就会丢 arm（3/30），
+> 不是「main 上 0/12」。round-1 的记录一律原样保留、只加标注，不改写。
+
 ---
 
 ## 1. 环境（写进报告的部分，含与 CI 的差）
@@ -20,7 +27,7 @@
 | 包管理 | **未用 pnpm**，直调 `./node_modules/.bin/{tsx,vitest,tsc}` | `pnpm 10.16.1 exec` | `exec` 只做 bin 解析，直调等价；绕开是为了不让本机 pnpm 改写 lockfile |
 | 依赖树 | 工作树 `node_modules` 软链到 canonical（根 / apps/web / packages/core-backend / plugins/*，共 9 条） | `pnpm install --frozen-lockfile` | — |
 | 一次性库 | `metasheet2_h1_20260922`，owner **`ms2testbed`（非超级）**；`postgres` 超级用户**只**用于 `createdb` / `dropdb` | `postgres:postgres@…/metasheet_approval_realdb` | — |
-| 连接串变量 | **只有 `DATABASE_URL`**（`src/integration/db/connection-pool.ts:200` 经 `secretManager.get('DATABASE_URL')` → `SecretManager.ts:19` `process.env[key]`；`migrate.ts` 走同一 `db`）。全仓 `.github/workflows/*.yml` + `package.json` 的连接串变量普查后无第二个 | 同名 | 每次运行前 `psql -tAc "select current_database(), current_user"` 核过 = `metasheet2_h1_20260922 \| ms2testbed` |
+| 连接串变量 | **被测代码只读 `DATABASE_URL`**（`src/integration/db/connection-pool.ts:200` 经 `secretManager.get('DATABASE_URL')` → `SecretManager.ts:19` `process.env[key]`；`migrate.ts` 走同一 `db`）。**round-2 勘误**：本行原写「全仓普查后无第二个」，那是错的 —— `.github/workflows/*.yml` + `package.json` 里共有 **6 个**连接串变量（见 §4.6），round-2 把**每一个**都 export 到一次性库 | 同名 | 每次运行前 `psql -tAc "select current_database(), current_user"` 核过 = `metasheet2_h1_20260922 \| ms2testbed`（round-1）／`metasheet2_h1fix_20260922`、`metasheet2_h1nb_20260922`（round-2） |
 | 迁移排除 | `MIGRATION_EXCLUDE=008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql` | **与 l6a workflow 逐字相同** | — |
 | 并发参数 | `vitest.integration.config.ts` 原样（`pool:'forks'` / `fileParallelism:false` / `maxConcurrency:1`） | 同 | — |
 | `CI=true` | 每次运行都置 | — | — |
@@ -59,6 +66,11 @@
 ---
 
 ## 3. Mutation（判别力证明 + 旧实现回跑）
+
+> **本节是 round-1 的实跑记录，原样保留**（它仍然成立：两条 round-1 用例在 baseline 上确定性红）。
+> round-2 的证据在 §3A / §3B / §3C —— 那里也**更正**了 round-1 与门审共同持有的一个数字错误
+> （「baseline 不会丢 arm」）。round-1 的整体 mutation（5 处一起回退）**无法区分每个站点**，
+> 这个缺口由 §3C 的 2×7 逐站点格子关闭。
 
 本节有**两种**回退，分开记，不混为一谈：
 
@@ -117,6 +129,111 @@ grep -c "void this.emitNodeActivationMetric("   → 0
 `expect(await landedWithin(hook.landed, 15000)).toBe(true)`
 （`:788` / `:824`）—— 如果拦截根本没装上（比如单例不是同一个对象、或 `nodeKey` 打错），
 `landed` 永不 resolve，这条正控先红。两条用例在 B 中都是绿的，即**拦截确实执行了**。
+
+---
+
+## 3A. round-2 —— 同节点再激活探针（n=30 ×4 个生产文件变体）
+
+r1 门审报「baseline 12/12 正确、round-1 head 8/12 丢失、只恢复跳板 5/5 成功」。
+**本轮用同一形状的探针把四个变体各跑 30 次**（一次性库、同一台机器、PG 15.17、Node v25.9.0，
+每次都完整新建实例；读列的时机不是固定 sleep，而是把 `recordNodeDecision` / `recordNodeActivation`
+包成**纯观察者**（同步转调原方法，只在完成时打点），等两者都 settle 后再读）：
+
+模板形状（可发布，走真实 HTTP `POST /api/approval-templates` → `/publish` → `/api/approvals`）：
+
+```
+start → approval_a { approvalType: 'auto_approve' }
+      → approval_c { assignee q, timeout{ afterMinutes:1, effect:'jump', jumpToNodeKey:'approval_a' } }
+      → end
+```
+
+`approval_a` 在创建时自动通过 ⇒ 实例起始停在 `approval_c`；强制超期后
+`applyNodeTimeoutEffect(id,'jump')` 跳回 A，A 再次被跳过 ⇒ 落回 `approval_c`，
+即 `resolution.currentNodeKey === currentNodeKey`。
+
+| 生产文件变体 | 再 arm 成功 | arm 丢失 | n | 观察到的交错 |
+|---|---|---|---|---|
+| baseline `cd42eaf74…` 的 blob（`git diff --stat` 零差异核过） | 27 | **3** | 30 | 27×`D-enter,A-enter,D-exit,A-exit`；3×`…A-exit,D-exit` |
+| round-1 head `ad0a5a75…` | 8 | **22** | 30 | 8×`A-enter,D-enter,D-exit,A-exit`；22×`A-enter,D-enter,A-exit,D-exit` |
+| 只恢复微任务跳板（门审的候选一行） | 19 | **11** | 30 | 19×`D-enter,A-enter,D-exit,A-exit`；11×`…A-exit,D-exit` |
+| **本轮实现（跳板 + 两条路径 await decision 关闭）** | **30** | **0** | 30 | **30×`D-enter,D-exit,A-enter,A-exit`（单一交错）** |
+
+**必须写下来的两条更正**（本文与门审的数字分歧，以本表为准，门审的 n=5 / n=12 被本表取代）：
+
+1. **baseline 自己就丢 3/30**。门审的「main 上 0/12 出错」是小样本。所以这条缺陷**不是纯粹的
+   round-1 回归**，round-1 把发生率从 ~10% 推到 ~73%；本 PR 也**不是**「恢复 main 的形状」，
+   而是关闭一个 baseline 从未关闭的窗口。
+2. **只恢复跳板仍丢 11/30**，比 baseline 差。跳板只把 decision 的派发提前一个微任务，
+   两条事务随后仍在独立连接上竞争同一行的 `SELECT … FOR UPDATE`。
+   **门审「判据是结果」的要求，跳板单独达不到**，这就是本轮同时 await decision 关闭的理由。
+
+探针文件是本轮自建的一次性 vitest 文件，跑完已 `rm`、**未进任何提交**（§8）。
+
+---
+
+## 3B. round-2 —— 提交进套件的判别用例（三向控制，确定性）
+
+`installLateDecisionClose(instanceId, nodeKey, 600ms)`（`approval-dedup-return-round-scoping.db.test.ts`）
+是 `installLateActivationStamp` 的镜像：拦截**第一次**匹配 `(instanceId, nodeKey)` 的
+`recordNodeDecision`，先 `await sleep(600)` 再委托原方法，完成后 resolve `landed`。
+用例在 `applyNodeTimeoutEffect` / return 返回后**先等 `landed`**（可观测落库点，不是固定 sleep）
+再读列，所以它不可能读到「关闭尚未落库」的快照而假绿。
+
+为什么这样就双向确定：decision 被注入固定延迟后，**不 await 它的实现里激活写必然先跑**
+（`added=false` ⇒ 跳过 deadline UPDATE），随后落库的关闭把两列置 NULL —— 确定性红；
+**await 它的实现里激活写必然后跑**（`hasOpen` 为假 ⇒ `added=true` ⇒ 重新 arm）—— 确定性绿。
+
+三向控制（整套件，每次新建库 + 重跑迁移；`cp` 备份 → `git show >` / `cp` 装入变体 → 跑 → `cp` 还原 → `cmp`）：
+
+| 生产文件变体 | Node v25.9.0 | Node v20.20.2 | 红的是哪两条 |
+|---|---|---|---|
+| baseline `cd42eaf74…` 的 blob | `8 failed \| 8 passed (16)` | 未跑（见 §7） | 全部 8 条 H-1 用例 |
+| round-1 head `ad0a5a75…`（= 旧实现正控） | `2 failed \| 14 passed (16)` | `2 failed \| 14 passed (16)` | `H-1 P1-1 GATE (timeout jump)` / `H-1 P1-1 GATE (return branch)` |
+| 只恢复微任务跳板 | `2 failed \| 14 passed (16)` | `2 failed \| 14 passed (16)` | 同上两条 |
+| **本轮实现** | `16 passed (16)` | `16 passed (16)` | — |
+
+旧实现（round-1 head）下两条红的断言**逐字**：
+
+```
+× H-1 P1-1 GATE (timeout jump): a jump that resolves back to the SAME node re-arms its deadline and keeps its breakdown entry
+  → re-activating the SAME node must re-arm its timeout effect, not leave it cleared by the decision close:
+    expected null to be 'jump' // Object.is equality
+
+× H-1 P1-1 GATE (return branch): a return that resolves back to the SAME node re-arms its deadline and keeps its breakdown entry
+  → a return that lands back on the same node must re-arm its timeout effect:
+    expected null to be 'jump' // Object.is equality
+```
+
+**其余 14 条在三个红的变体下全部保持绿** ⇒ 新增的两条 P1 用例是唯一对本轮改动有判别力的断言，
+没有顺带打红别的东西（`feedback_confounded_mutation_needs_isolated_variant_grid`）。
+
+**`:10690`（return 分支）的同节点场景本轮是构造出来并实测的，不是「与 `:9534` 同形状」的推断**：
+门审明写它未复现；本轮用同一张图（返回目标 `approval_a` 是 `auto_approve`，级联落回 `approval_c`）
+把它跑成了一条确定性用例。
+
+---
+
+## 3C. round-2 —— 逐站点 mutation（2×7 格，关闭 r1 门审 P2-1）
+
+方法：每次只把**一行** `await this.` 机械替换成 `void this.`（`python3` 就地改一行，打印改后的行），
+跑整文件，再 `cp` 还原并 `cmp` 核对。**全程未用 `git checkout --` / `reset --hard` / `stash`。**
+
+| # | 站点（本轮 head 行号） | 所在方法 | 未 mutate | 单独 neuter 后 |
+|---|---|---|---|---|
+| 1 | `:8482` `emitNodeActivationMetric` | 管理员 jump | 绿 | **Failed Tests 1** —— `H-1 SITE (admin jump)` |
+| 2 | `:9534` `settleNodeDecisionMetric` | `applyNodeTimeoutEffect` 决策关闭 | 绿 | **Failed Tests 1** —— `H-1 P1-1 GATE (timeout jump)` |
+| 3 | `:9536` `emitNodeActivationMetric` | `applyNodeTimeoutEffect` 再激活 | 绿 | **Failed Tests 2** —— `H-1 SITE (timeout re-activation)` + `H-1 P1-1 GATE (timeout jump)` |
+| 4 | `:10586` `emitNodeActivationMetric` | handler 分支 | 绿 | **Failed Tests 1** —— `H-1 SITE (handler branch)` |
+| 5 | `:10690` `settleNodeDecisionMetric` | `return` 分支决策关闭 | 绿 | **Failed Tests 1** —— `H-1 P1-1 GATE (return branch)` |
+| 6 | `:10692` `emitNodeActivationMetric` | `return` 分支再激活 | 绿 | **Failed Tests 1** —— `H-1 SITE (return branch)` |
+| 7 | `:11266` `emitNodeActivationMetric` | 普通 approve/dispatch | 绿 | **Failed Tests 2** —— `H-1 DISCRIMINATOR` + `H-1 GATE` |
+
+7 次 mutation 后的还原全部 `CMP_IDENTICAL`（脚本逐次打印）。
+
+**交叉命中如实记，不声称「干净隔离」**：第 3 行与第 7 行各打红 2 条。
+第 3 行的交叉是结构性的 —— `H-1 P1-1 GATE (timeout jump)` 在关闭落库后读列，
+若再激活写不被等待，它读到的就是关闭刚置好的 NULL；第 7 行的两条本来就是 round-1 为同一站点写的一对。
+关键结论是**每个站点都有至少一条用例对它有判别力**，round-1「4/5 站点可被 neuter 而全绿」的缺口已关闭。
 
 ---
 
@@ -245,6 +362,30 @@ Test Files  979 passed | 175 skipped (1154)
 
 ---
 
+### 4.6 round-2 全量跑（本轮实现，一次性库 `metasheet2_h1fix_20260922` / `metasheet2_h1nb_20260922`）
+
+| 跑什么 | 命令要点 | 结果 |
+|---|---|---|
+| 目标 lane 套件（与 workflow step 逐字同，除 `pnpm exec` → 直调 bin） | `CI=true EXPECT_DB=1 NODE_ENV=test vitest --config vitest.integration.config.ts run tests/integration/approval-dedup-return-round-scoping.db.test.ts --reporter=verbose` | **`Test Files 1 passed (1)` / `Tests 16 passed (16)`** |
+| **稳定性 15 连跑**（同一套件，本轮用例内含延迟注入，同一次运行里另有 8 条**不**注入的用例） | 同上，`for i in $(seq 1 15)` | **15/15 全绿**（`Tests 16 passed (16)` ×15），零红、零间歇 |
+| Node 20 轴（= CI 的 `node-version: 20.x` 大版本） | 同上，`PATH` 指向 `v20.20.2` | `Tests 16 passed (16)`；三向控制与 v25 逐条一致（§3B） |
+| 邻居（仓内另外读写这两列 / 走被改路径的套件） | `approval-node-sla-remind` + `approval-node-timeout-effects` + `approval-handler-node.db` + `approval-sequential-mode.db` + `approval-metrics-people-teams`，**新建库 + 迁移** | **`Test Files 5 passed (5)` / `Tests 52 passed (52)`** |
+| 默认（无 DB）lane = required `test (18.x)` / `test (20.x)` 的那一步 | `env -u DATABASE_URL -u ATTENDANCE_TEST_DATABASE_URL -u SMOKE_DATABASE_URL -u A_PROVISIONING_DB_URL -u A_RUNTIME_DB_URL -u PGDATABASE -u EXPECT_DB CI=true vitest run` | 退出码 0；**`Test Files 979 passed \| 176 skipped (1155)` / `Tests 15891 passed \| 1616 skipped (17507)`**，零失败 |
+| 该 lane 上 round-1 曾打红的那个文件 | `vitest run tests/unit/approval-product-service.test.ts`（无 DB） | `Test Files 1 passed (1)` / `Tests 184 passed (184)` |
+| `tsc`（src） | `tsc --noEmit -p tsconfig.json` | **退出码 0，零输出** |
+| `tsc`（含本测试文件的一次性 config，因为仓库 `tsconfig.json` 的 `include` 不含 `tests/`） | `tsc --noEmit -p <tmp config>` | **退出码 0，该文件零诊断**；一次性 config 跑完即删 |
+
+**连接串变量普查（本轮重做，不背 round-1 的结论）**：
+`grep -rhno "[A-Z_]*DATABASE_URL\|PGDATABASE\|[A-Z_]*_DB_URL" .github/workflows/*.yml package.json packages/core-backend/package.json | sort -u`
+⇒ 6 个：`A_PROVISIONING_DB_URL` / `A_RUNTIME_DB_URL` / `ATTENDANCE_TEST_DATABASE_URL` /
+`DATABASE_URL` / `PGDATABASE` / `SMOKE_DATABASE_URL`。**每一个**都 export 指向本轮的一次性库；
+每个库建好后 `psql -tAc "select current_database(), current_user"` 核过
+（`metasheet2_h1fix_20260922 | ms2testbed`、`metasheet2_h1nb_20260922 | ms2testbed`）。
+owner `ms2testbed`（非超级），`postgres` 超级用户**只**用于 `createdb` / `dropdb`。
+`metasheet_test` / `metasheet_v2` / `metasheet_testbed_*` 全程零引用。
+
+---
+
 ## 5. 延迟实测（await settle 的代价）
 
 一次性探针（本轮自建的 `h1-latency-probe.test.ts`，**跑完已删、未进提交**）：建一条
@@ -270,6 +411,15 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 
 **这条数据的边界（必须一起读）**：单客户端、串行、本地热池、n=25。
 它**不是**并发压测，**不能**外推到「高并发下也没有回归」—— 见 §7 第 2 条。
+
+> **round-2 作用域更正（重要）**：上表测的是 **approve/dispatch 路径**
+> （`POST /api/approvals/:id/actions` 的 approve），而 approve 路径上 round-2 **没有**新增任何 await
+> （它的决策关闭仍是 fire-and-forget）。**round-2 真正变慢的两条路径 —— `applyNodeTimeoutEffect`
+> 与 `return` 分支 —— 没有延迟数字**，因为本轮没有为它们重做这个探针。
+> 可以从结构上说的只有：那两条路径在响应前各多等**一个**短事务
+> （`BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`），最坏情况由
+> `connectionTimeoutMillis = 10000` / `statement_timeout = 30000` 封顶（设计 MD §7 R5）。
+> **这是一条 NOT RUN，见 §7 第 9 条。**
 
 ---
 
@@ -319,6 +469,14 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 
 PR 仍为 **Draft**。绿不等于被采纳：是否合并由 owner 决定，本代理未 undraft、未请求合并、未改任何锁文正文。
 
+### 6.3 round-2 的 CI —— 尚未运行（NOT RUN，不要把 §6.2 读成本轮的结果）
+
+§6.1 / §6.2 记的是**代码提交 `4b0650b96557001c82f718211c106389cc72e914`（round-1）** 的结果。
+round-2 改了同一个生产文件并在同一个套件里加了 6 条用例，**它自己的 CI 在本文提交时还没有跑**。
+触发面不变（改的两个文件都在 l6a lane 的 `paths:` 里，见 §6 的表），未新增测试文件、
+未改 `plugin-tests.yml`、未改 `vitest.config.ts` 的 `exclude` ⇒ 仍不触发 s6a pin / W7-R10 分类 /
+CI corpus 的任何一钉。**本轮不声称任何 round-2 的 CI 结果**；PG 16 轴与 required 清单由 lane 自己报。
+
 ---
 
 ## 7. NOT RUN / 未声称（逐条）
@@ -338,6 +496,23 @@ PR 仍为 **Draft**。绿不等于被采纳：是否合并由 owner 决定，本
    本地复现、修复、重跑归零的全过程。本文第一版在这里写过一条站不住的免跑理由，已作废并留痕。
 
 8. **未合并、未 undraft、未改锁文正文、未翻任何开关、未部署、未跑任何迁移到非一次性库。**
+
+**round-2 追加的 NOT RUN（逐条）**
+
+9. **两条变慢路径（`applyNodeTimeoutEffect` / `return`）的延迟没有数字。** §5 的表测的是 approve 路径，
+   而 approve 路径本轮零新增 await —— 那张表**不覆盖**本轮的代价，已就地标注。
+10. **round-2 自己的 CI 未跑**（§6.3）。§6.1 / §6.2 的 13/13 与 l6a pass 属于 round-1 的代码提交
+    `4b0650b96557001c82f718211c106389cc72e914`，**不能**当成本轮 head 的结果。
+11. **baseline blob 的整套件跑只做了 Node v25.9.0 一轴**（`8 failed | 8 passed`）。
+    round-1 head 与「只恢复跳板」两个变体在 v25.9.0 与 v20.20.2 **两轴都跑了**。
+12. **同节点探针只在 PG 15.17 上跑**（n=30 ×4 变体）。PG 16 轴本地仍未跑。
+13. **R1（真并发跨请求乱序）仍未构造、未测、未修**；R2（`recordTerminal` 无作用域清空）同上；
+    R5（被 await 的 hook 把 metrics 停顿引入响应时延）是本轮**新增并披露**的残留，未做压测。
+14. **未对 `:10810`（sequential 模式节点内队首推进）构造任何用例。** r1 门审在「观察」里点出
+    该处提交后对**仍停在同一节点**的实例发出 `emitNodeDecisionMetric`，其作用域清空守卫为真、
+    会把进行中节点的 deadline 清掉。那是 baseline 既有、不在本 PR 的 diff 里、**本轮同样未构造复现**，
+    只在此登记以免被当成已处理。
+15. **apps/web 前端套件本轮未跑**（本 PR 不碰前端）。
 
 ---
 
@@ -364,3 +539,28 @@ PR 仍为 **Draft**。绿不等于被采纳：是否合并由 owner 决定，本
 - 登记到 `~/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/soak-working/resource-inventory-20260920.md`。
 
 > 本节刻意把「已执行」与「收尾步骤」分栏：把还没做的清理写成已完成的记录，是一种伪造的证据。
+
+### 8.1 round-2 的资源（同样分栏）
+
+**已执行（过去式）：**
+
+- 一次性 worktree `…/6f6639a7-…/scratchpad/h1-fix`（`git worktree add --detach`，
+  起点 = round-1 head `ad0a5a75d6e14dbc5aa56bb1819418c257ac2a4a`），`node_modules` 从 canonical
+  软链 9 条（根 / apps/web / packages/core-backend / plugins/* 6 条）。
+- 一次性库 **`metasheet2_h1fix_20260922`**（探针、三向控制、逐站点 mutation、15 连跑、Node 20 轴）
+  与 **`metasheet2_h1nb_20260922`**（邻居批次），owner `ms2testbed`（非超级），
+  `postgres` 超级用户只用于 `createdb` / `dropdb`，建后逐个 `psql` 核过 `current_database()`。
+- 临时探针文件 `packages/core-backend/tests/integration/h1-samenode-probe.db.test.ts`：本轮自建，
+  §3A 跑完后 `rm`，**未进任何提交**（`git status --porcelain` 已复核）。
+- 一次性 `tsconfig.h1tests.json`：跑完即删。
+- 源码变体切换全部走 `cp` 备份 / `git show <sha>:<path> >` 装入 + `cp` 还原 + `cmp` 核对
+  （备份目录 `…/scratchpad/h1-bak/`，本轮自建）。**全程未用 `git checkout --` / `reset --hard` / `stash`。**
+- **未 kill 任何进程**；**未删任何不是本轮建的 worktree / 库 / 文件**；**未执行 `git worktree prune`**；
+  **未用任何名字模式批量删除**。
+
+**收尾步骤（本文提交时尚未执行，交付后按名单逐项执行并登记）：**
+
+- 点名全路径移除工作树 `…/6f6639a7-…/scratchpad/h1-fix`（9 条 `node_modules` 软链逐条判 `-L` 再处理）。
+- `dropdb -U postgres metasheet2_h1fix_20260922` 与 `dropdb -U postgres metasheet2_h1nb_20260922`。
+- 备份目录 `…/scratchpad/h1-bak/` 清理。
+- 登记到 `~/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/soak-working/resource-inventory-20260920.md`。
