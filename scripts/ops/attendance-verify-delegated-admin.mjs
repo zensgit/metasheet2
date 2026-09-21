@@ -1,6 +1,9 @@
 import { pathToFileURL } from 'node:url'
 
-import { assertDelegatedAttendanceAdminIdentity } from './attendance-delegated-admin-contract.mjs'
+import {
+  AttendanceDelegatedAdminContractError,
+  assertDelegatedAttendanceAdminIdentity,
+} from './attendance-delegated-admin-contract.mjs'
 
 export async function verifyDelegatedAttendanceAdmin({
   apiBase = process.env.API_BASE,
@@ -9,17 +12,22 @@ export async function verifyDelegatedAttendanceAdmin({
   fetchImpl = fetch,
 } = {}) {
   if (!apiBase || !token || !expectedTenantId) {
-    throw new Error('DELEGATED_ADMIN_INPUT_MISSING')
+    throw new AttendanceDelegatedAdminContractError('DELEGATED_ADMIN_INPUT_MISSING')
   }
 
-  const response = await fetchImpl(`${String(apiBase).replace(/\/+$/, '')}/auth/me`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(15_000),
-  })
+  let response
+  try {
+    response = await fetchImpl(`${String(apiBase).replace(/\/+$/, '')}/auth/me`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch {
+    throw new AttendanceDelegatedAdminContractError('DELEGATED_ADMIN_AUTH_ME_FAILED')
+  }
   const body = await response.json().catch(() => null)
   if (!response.ok || body?.success !== true) {
-    throw new Error('DELEGATED_ADMIN_AUTH_ME_FAILED')
+    throw new AttendanceDelegatedAdminContractError('DELEGATED_ADMIN_AUTH_ME_FAILED')
   }
 
   assertDelegatedAttendanceAdminIdentity({

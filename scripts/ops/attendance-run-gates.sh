@@ -185,6 +185,7 @@ function maybe_run_provision() {
 function run_playwright_production_flow() {
   info "Running Playwright production flow (desktop)..."
   if AUTH_TOKEN="$AUTH_TOKEN" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-production-flow" \
@@ -201,6 +202,7 @@ function run_playwright_production_flow() {
 function run_playwright_full_flow_desktop() {
   info "Running Playwright full flow (focused desktop)..."
   if AUTH_TOKEN="$AUTH_TOKEN" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
@@ -221,6 +223,7 @@ function run_playwright_full_flow_desktop() {
 function run_playwright_full_flow_mobile() {
   info "Running Playwright full flow (focused mobile)..."
   if AUTH_TOKEN="$AUTH_TOKEN" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \

@@ -5,7 +5,11 @@ import {
 } from './attendance-smoke-workdate.mjs'
 import { pathToFileURL } from 'node:url'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './attendance-acceptance-preflight.mjs'
-import { assertDelegatedAttendanceAdminIdentity } from './attendance-delegated-admin-contract.mjs'
+import {
+  AttendanceDelegatedAdminContractError,
+  assertDelegatedAttendanceAdminIdentity,
+} from './attendance-delegated-admin-contract.mjs'
+import { verifyDelegatedAttendanceAdmin } from './attendance-verify-delegated-admin.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -94,6 +98,13 @@ async function refreshAuthToken() {
         return false
       }
       await verifyAcceptanceTokenTenant(apiBase, nextToken)
+      if (requireDelegatedAttendanceAdmin) {
+        await verifyDelegatedAttendanceAdmin({
+          apiBase,
+          token: nextToken,
+          expectedTenantId: process.env.AUTH_EXPECTED_TENANT_ID,
+        })
+      }
       token = nextToken
       return true
     }
@@ -101,6 +112,7 @@ async function refreshAuthToken() {
     return false
   } catch (error) {
     if (error instanceof AcceptanceTenantError) throw error
+    if (error instanceof AttendanceDelegatedAdminContractError) throw error
     log(`WARN: token refresh error: ${(error && error.message) || String(error)}`)
     return false
   }
