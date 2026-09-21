@@ -3118,6 +3118,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // ORDER IS LOAD-BEARING: this stays AHEAD of the seat gate below, so a seatless caller on
         // an attendance-sourced instance keeps receiving the attendance refusal it receives today.
         // Reversing the two would change the error identity on a path that is already refused.
+        // Disclosure: no attendance-sourced instance is in this suite's fixtures, so this ordering
+        // claim has no automated leg here — it is asserted, not test-covered, by this candidate.
         try {
           await assertAttendanceCentralMutationFailClosed(client, instance)
         } catch (error) {
@@ -3337,6 +3339,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // ORDER IS LOAD-BEARING: this stays AHEAD of the seat gate below, so a seatless caller on
         // an attendance-sourced instance keeps receiving the attendance refusal it receives today.
         // Reversing the two would change the error identity on a path that is already refused.
+        // Disclosure: no attendance-sourced instance is in this suite's fixtures, so this ordering
+        // claim has no automated leg here — it is asserted, not test-covered, by this candidate.
         try {
           await assertAttendanceCentralMutationFailClosed(client, instance)
         } catch (error) {
