@@ -197,8 +197,6 @@ const EXISTENCE_BEFORE_AUTHORITY_GAP = {
     + 'non-live sheet after the 403) or move it after the 403, with the values-free SHEET_NOT_FOUND_MESSAGE.',
   handlers: [
     'GET /sheets/:sheetId/config-history',
-    'PATCH /records/:recordId',
-    'POST /views/:viewId/submit',
   ],
 }
 
