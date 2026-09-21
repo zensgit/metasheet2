@@ -191,6 +191,7 @@ import {
   SHEET_NOT_FOUND_MESSAGE,
   SheetNotLiveError,
   assertSheetLive,
+  assertSheetLiveForUpdate,
   loadSheetLiveness,
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
@@ -9213,7 +9214,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // permission-revert execute path holds, so this forward sheet-grant write serializes against a
         // concurrent revert — it cannot interleave between the revert's live-grant re-check and its apply
         // (which would turn a re-checked de-escalation into a net escalation).
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: the SAME statement now also re-reads `deleted_at` and refuses unless the sheet is still
+        // live. The liveness gate above ran on the POOL, before this transaction existed; a soft delete
+        // that committed in between left this row lock FREE, so this transaction took it without waiting
+        // and without seeing the pre-delete row version, and wrote grants onto a dead sheet. The throw
+        // rolls back before the DELETE/INSERT below; the outer catch answers the gate's own 404 body.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT perm_code FROM spreadsheet_permissions
@@ -9288,6 +9295,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
     } catch (err) {
       if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
+      // #5938: the in-transaction liveness re-check (under the row lock) found the sheet gone. Same
+      // values-free body the pre-transaction gate answers, so the window is not an existence oracle.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update sheet permission failed:', err)
@@ -9622,7 +9632,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Never-escalate-under-concurrency (#3389 follow-up): lock the owning sheet row (the SAME lock the
         // permission-revert execute path takes — sheetId is the view's sheet) so this forward view-grant
         // write serializes against a concurrent revert.
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: same statement re-reads `deleted_at` and refuses unless the OWNING sheet is still live —
+        // the lock the pre-transaction gate's verdict relies on is only free of a concurrent soft delete
+        // once it is HELD, so the verdict has to be re-taken here. `meta_view_permissions` rows outlive a
+        // soft-deleted sheet exactly as `spreadsheet_permissions` rows do.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           'SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3',
@@ -9670,6 +9685,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       return res.json({ ok: true, data: { viewId, subjectType, subjectId, permission: parsed.data.permission } })
     } catch (err) {
+      // #5938: in-transaction liveness re-check (under the owning sheet's row lock) refused.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update view permission failed:', err)
@@ -9844,7 +9861,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Never-escalate-under-concurrency (#3389 follow-up): take the SAME meta_sheets row lock the
         // permission-revert execute path holds, so this forward field-grant write serializes against a
         // concurrent revert.
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: same statement re-reads `deleted_at` and refuses unless the sheet is still live. The
+        // pre-transaction gate read liveness on the pool; a soft delete committing between that read and
+        // this lock leaves the lock free, so `field_permissions` writes would land on a dead sheet.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT visible, read_only
@@ -9937,6 +9958,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
     } catch (err) {
       if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
+      // #5938: in-transaction liveness re-check (under the sheet row lock) refused.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update field permission failed:', err)
@@ -10891,7 +10914,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // field permissions) now take this SAME lock (#3389 follow-up), so the serialization is two-sided.
           // (One remaining un-serialized writer: the legacy /api/spreadsheets/:id/permissions grant|revoke route —
           // see the dev-verification honest gaps for the retire-or-lock follow-up.)
-          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+          //
+          // #5938: the lock statement ALSO re-reads `deleted_at` and refuses unless the sheet is still live. The
+          // route's liveness gate ran on the pool before this transaction opened; a soft delete committing in
+          // between leaves the lock free, so the de-escalation would apply to a sheet that no longer exists —
+          // narrowing, invisibly, what a later restore brings back. The throw rolls back before
+          // `applyPermissionDeEscalation`; the outer catch answers the gate's own values-free 404.
+          await assertSheetLiveForUpdate(query, sheetId)
           const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
           const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
           if (!verdict.valid) {
@@ -11060,6 +11089,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
+      // #5938: the permission-revert branch's in-transaction liveness re-check (under the sheet row lock)
+      // found the sheet soft-deleted or gone. Same values-free 404 this route's own gate answers at :10699,
+      // so the TOCTOU window cannot be told apart from "it was already deleted when you asked".
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       // O-2 X2: this route's applyPermissionDeEscalation writes field_permissions and
       // spreadsheet_permissions, BOTH of which carry a recovery-authority trigger that is ARMED from
       // ladder rung L1 onward. Without this line a 40001 raised under a held exclusive lease fell

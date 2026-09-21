@@ -41,6 +41,18 @@
  * subject (a `users` / `roles` / `platform_member_groups` row) exists and answers `404 NOT_FOUND`
  * echoing the subject id (univer-meta.ts:9163-9187) — a subject-existence oracle visible only to an
  * already-authorised, live-sheet caller, and out of scope for this file (#5829).
+ *
+ * ── The gate is not the whole liveness story (#5938) ──────────────────────────
+ * It reads liveness on the POOL, BEFORE the write transaction exists, and a soft delete is a plain
+ * UPDATE in its own transaction. If that delete commits between the gate's read and the write
+ * transaction's `meta_sheets … FOR UPDATE`, the lock is already FREE: the write neither waits for it nor
+ * sees the pre-delete row version, and the grant/revoke lands on a dead sheet. So grant and revoke each
+ * take that lock through `assertSheetLiveForUpdate` — ONE statement that locks the row AND re-reads
+ * `deleted_at` — and refuse, rolling the transaction back before any write, with the SAME values-free
+ * 404 the gate answers. Both doors are fixed together: the forward lock sites (univer-meta.ts PUT
+ * sheet/view/field permissions and the permission-revert execute branch) carry the identical call.
+ * Keeping BOTH the gate and the re-check is deliberate — the gate is what answers 403 before 404, so an
+ * unauthorised caller still cannot read sheet state out of the ordering.
  */
 import type { Request, Response} from 'express';
 import { Router } from 'express'
@@ -49,6 +61,7 @@ import { auditLog } from '../audit/audit'
 import { pool, query as dbQuery, transaction } from '../db/pg'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { resolveSheetCapabilities } from '../multitable/permission-service'
+import { SheetNotLiveError, assertSheetLiveForUpdate } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 
 // Use the global Express.Request type which already includes user property
@@ -150,9 +163,15 @@ export function spreadsheetPermissionsRouter(): Router {
       // grant write serializes against a concurrent revert under ONE lock model. A grant INSERT already blocks on the
       // revert via the FK's implicit FOR KEY SHARE on meta_sheets vs the revert's FOR UPDATE; the explicit lock makes
       // the legacy route UNIFORM with #3402 rather than relying on that implicit FK lock (it does not close a new hole).
+      //
+      // #5938: the lock statement ALSO re-reads `deleted_at`, in the same statement, and refuses unless the sheet is
+      // still live. The pre-transaction gate above reads liveness on the POOL, before this transaction exists; a soft
+      // delete that commits in between leaves the row lock FREE, so this transaction takes it without waiting and
+      // without seeing the pre-delete row version — and wrote the grant onto a dead sheet. The throw rolls the
+      // transaction back before the INSERT, and the catch answers the SAME values-free 404 the gate would have.
       try {
         await transaction(async ({ query }) => {
-          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+          await assertSheetLiveForUpdate(query, req.params.id)
           await query(
             `INSERT INTO spreadsheet_permissions(sheet_id, user_id, subject_type, subject_id, perm_code)
              VALUES ($1, $2, 'user', $2, $3)
@@ -165,6 +184,9 @@ export function spreadsheetPermissionsRouter(): Router {
         // under a held recovery lease is a retryable 409. Every other error rethrows
         // unchanged (the handler had no catch before, so that path is byte-identical).
         if (sendIfRecoveryConflict(res, error)) return
+        // #5938: the sheet died between the gate's read and this transaction's lock. Same body the gate
+        // answers (sendSheetNotLive), so the window cannot be told apart from a plain deleted sheet.
+        if (error instanceof SheetNotLiveError) return void sendSheetNotLive(res, error.liveness)
         throw error
       }
     } else {
@@ -204,9 +226,13 @@ export function spreadsheetPermissionsRouter(): Router {
       // (unlike a grant INSERT) it is NOT FK-serialized against a concurrent permission-revert and could interleave
       // the revert's live-grant re-check and its apply. Take the SAME meta_sheets FOR UPDATE the revert holds so it
       // cannot. (#3402-style: lock the sheet row first, then write.)
+      //
+      // #5938: that lock now re-reads `deleted_at` in the same statement and refuses unless the sheet is still live —
+      // see the grant branch above. A revoke is the direction that matters most here: a DELETE landing on a sheet that
+      // was soft-deleted after the gate read silently narrows what a restore would bring back.
       try {
         await transaction(async ({ query }) => {
-          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [req.params.id])
+          await assertSheetLiveForUpdate(query, req.params.id)
           await query(
             `DELETE FROM spreadsheet_permissions
              WHERE sheet_id = $1
@@ -219,6 +245,8 @@ export function spreadsheetPermissionsRouter(): Router {
       } catch (error) {
         // O2-S2: marker 40001 → retryable 409 (see grant); all else rethrows unchanged.
         if (sendIfRecoveryConflict(res, error)) return
+        // #5938: sheet died inside the TOCTOU window — same values-free 404 as the gate (see grant).
+        if (error instanceof SheetNotLiveError) return void sendSheetNotLive(res, error.liveness)
         throw error
       }
     } else {
