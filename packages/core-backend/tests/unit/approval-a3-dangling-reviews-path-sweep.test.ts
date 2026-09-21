@@ -38,8 +38,11 @@ import { describe, expect, it } from 'vitest'
  *       `ApprovalProductService.ts` citing `` `reviews/设置审批撤销规则.txt:41-43` `` — a DANGLING
  *       reference this repository has never had a `reviews/` directory for, not a real in-repo
  *       target (`impl-gate-aligned-train-subset-round2-20260921.md` P3-1: `git ls-tree -r
- *       origin/main | grep '^reviews/'` ⇒ 0 on main, on r8, and on this branch; C-1's own commit
- *       `ecb3be788` is titled "drop out-of-repo reviews/ path from C-1 ceiling comment"). A
+ *       origin/main | grep '^reviews/'` ⇒ 0 on main, on r8, and on this branch; the commit
+ *       that removed it, titled "drop out-of-repo reviews/ path from C-1 ceiling comment", lands
+ *       on `feat/approval-cancel-round-phase1-r8` — not cited by SHA here, since that branch is
+ *       still unmerged and a squash or rebase would leave a pinned SHA dangling, the same stale
+ *       cross-artifact class this file's own header exists to avoid). A
  *       repo-wide scan would have (correctly) flagged that dangling reference the moment this
  *       branch merged with r8 — each lane alone was green, the merge of the two was not.
  *   (2) Reverted to the repo-wide sweep (`impl-gate-aligned-train-subset-20260921.md` P2-1,
@@ -88,9 +91,15 @@ import { describe, expect, it } from 'vitest'
  * removes exactly 6 of a prior 32-entry list's paths, all A-1-inherited and none A-3-authored:
  * both phase1 `.md` docs, the phase1 migration renamed above, the phase1
  * `approval-template-groups-lifecycle.db.test.ts`, and `scripts/dev/atg-retraction-sweep.sh` /
- * `atg-verification-recount.sh`. Dropping those from THIS list does not un-wire them from CI —
- * each is still `git`-tracked and still runs; they are simply not A-3's own file to freeze a path
- * for.
+ * `atg-verification-recount.sh`. Dropping those from THIS list does not un-wire them from CI, but
+ * "still runs" does not hold uniformly across the six (verified with `git ls-files` plus a grep
+ * of `.github/` and every `package.json`): all six remain `git`-tracked; the phase1 migration and
+ * `approval-template-groups-lifecycle.db.test.ts` still run in CI — the migration via
+ * `migrate.ts`'s directory scan (it loads whatever the migrations folder currently tracks, not a
+ * hand-named file), the test named explicitly at `plugin-tests.yml:1706`; the two phase1 `.md`
+ * docs do not run at all (Markdown), and the two `scripts/dev/atg-*.sh` helpers are
+ * developer-invoked only, with zero references in `.github/` or any `package.json`. None of the
+ * six is A-3's own file to freeze a path for, either way.
  *
  * `A3_OWNED_FILES` is frozen here; update it only via the corrected recipe above, in the same
  * commit that changes A-3's own file set — never hand-edit an entry
@@ -307,6 +316,13 @@ describe('repo guard: no dangling `reviews/`-prefixed path reference in A-3\'s o
   it('DISCRIMINATIVE CONTROL: a dangling reference inside A-3\'s lineage reds the scanned leg; the identical reference outside it does not, because the miss is a scope decision, not a blind detector (fixes P2-2: the previous round\'s control site was already inside the frozen list — `ApprovalTemplateGroupService.ts` is entry #8 above — so it had zero power to distinguish a repo-wide scan from this one; this cell isolates list membership as the only variable)', () => {
     const insideLineage = 'packages/core-backend/src/services/ApprovalTemplateGroupService.ts'
     const outsideLineage = 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+    // Anchor to reality (P2-1): the assertions below only prove the pipeline is discriminative
+    // against a SYNTHETIC list. Without this pair, `A3_OWNED_FILES` later growing to include
+    // `outsideLineage` (or shrinking to drop `insideLineage`) would leave this whole cell green
+    // while the title's central claim — "list membership as the only variable" — goes silently
+    // false, exactly as round 3's neuter proof demonstrated.
+    expect(A3_OWNED_FILES as readonly string[]).toContain(insideLineage)
+    expect(A3_OWNED_FILES as readonly string[]).not.toContain(outsideLineage)
     const injectedLine = `// see \`${TOKEN}design-gate-A3-phase2-20260918.md\` for the writeup\n`
     withDecoyTree(
       {
