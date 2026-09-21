@@ -4,9 +4,16 @@
 Branch: `fix/input-regex-redos-candidates`. Local PostgreSQL 15.17 (Homebrew, aarch64).
 One-shot DB: `metasheet2_h3_20260922` (owner `ms2testbed`, non-superuser); `current_database()` verified before every DB touch. Never pointed at `metasheet_test` / `metasheet_v2` / `metasheet_testbed_*`.
 
-All timings are `process.hrtime`/wall-clock on this machine; absolute ms are
-machine-relative — the **ratios** and the **victim-vs-attacker** contrast are the
+All timings are `process.hrtime`/`performance.now()` wall-clock on this machine; absolute
+ms are machine-relative — the **ratios** and the **victim-vs-attacker** contrast are the
 evidence, not the constants.
+
+**Round 2.** §1–§4 are the round-1 census and finding measurements; an independent gate
+reconciled the §1/§2 denominator 47/47 and reproduced §4.4's numbers, and they are
+unchanged here. §5 has been **rewritten**: round 1's "the fixes work" claim was withdrawn
+after the gate measured the shipped detector refusing six common linear patterns while
+still admitting a 22-second `^(a|a)*$`. §5 now reports what was measured, in both
+directions, plus the mutation table and the differential fuzz. §6 NOT RUN is extended.
 
 ## 1. Denominator hygiene (extraction)
 
@@ -42,7 +49,8 @@ The 47 unresolvable were **hand-read** (class-two hunt). Per-site provenance
 safe", which was **wrong**; a second class-two site, `field-validation-engine.ts:103`,
 was found and is finding L2):
 
-**CONFIRMED live class-two (fixed on branch):**
+**CONFIRMED live class-two (MITIGATED on branch — see design MD §3C/§3D for what that word
+does and does not cover):**
 - `formula/engine.ts:183,326,329,332` — SUBSTITUTE + REGEX*; pattern = user
   formula arg. Finding L1.
 - `multitable/field-validation-engine.ts:103` — `rule.params.regex` from the
@@ -60,8 +68,14 @@ was found and is finding L2):
   config.
 - `sandbox/SafeFunctions.ts:361` — `pattern` (sandbox).
 - `plugins/plugin-attendance/index.cjs:12490` — `new RegExp(pattern, 'i')`.
-- `apps/web/src/views/FormView.vue:650` — `validation.pattern` (FE mirror of L2;
-  single-session).
+- ~~`apps/web/src/views/FormView.vue:650`~~ — RESOLVED in round 2: the FE mirror now routes
+  through `apps/web/src/utils/userRegexGuard.ts` (post-image `FormView.vue:658`), so it
+  agrees with the backend about which values are refused. Design MD §3F.
+
+**MISSED BY THE ROUND-1 SCOPE GLOB (`plugins/*/index.cjs` excludes `plugins/*/lib/**`):**
+- `plugins/plugin-integration-core/lib/validator.cjs` — finding **L3**. Measured 20164ms
+  in-process at a 33-character value; reachability argued, not proven. Design MD §3E.
+  A full re-run over `plugins/**/*.cjs` is NOT done (§6).
 
 **Verified safe (escaping present in source) / low-risk template:**
 - Escaped: `services/ApprovalProductService.ts:3166`,
@@ -173,42 +187,165 @@ write / public form submit. NOTE (recorded): the first probe run used
 (`field-validation-engine.ts:168-171`); corrected, the site fired. This is why the
 "all 47 safe" first-draft claim was false and why this finding was initially missed.
 
-## 5. The fixes work — old implementation vs new, load-bearing assertions
+## 5. What the round-2 guard was measured to do — in both directions
 
-`src/formula/__tests__/regex-safety.test.ts` — **9 tests pass** (7 formula + 2
-field-validation), plus the 87 pre-existing `tests/unit/formula-engine.test.ts` and
-77 pre-existing `tests/unit/field-validation{,-wiring}.test.ts` all still pass
-(`vitest run … --config vitest.config.ts`, `CI=true`) — **no regression**.
+Round 1's heading here read *"The fixes work — old implementation vs new"*. **That claim is
+withdrawn.** It was true only of the one shape the detector happened to catch; an
+independent gate measured the same build refusing six common LINEAR patterns and still
+admitting `^(a|a)*$` at 22437ms. The replacement is a **mitigation**, and the two tables
+below are deliberately separate because they are separate claims.
 
-- The POSITIVE tests assert the previously-catastrophic cases now return `#ERROR!`
-  (L1) / fail validation fast (L2) in <200ms. **The old implementation measured
-  20368ms (L1 dry-run) / 20655ms (L1 stored) / 20545ms (L2 validateRecord) on the
-  identical n=32 case (§4.1/4.2/4.4)** — so the `<200ms` bound is the mutation
-  proof: the pre-fix code fails it by 100×.
-- LINEAR CONTROLS assert legitimate patterns still work: `REGEXMATCH("hello-world",
-  "^[a-z-]+$")→true`, `REGEXREPLACE("a1b2c3","[0-9]","")→"abc"`,
-  `REGEXEXTRACT("id=42","id=([0-9]+)")→"42"`, `SUBSTITUTE("2026-09-22","-","/")→
-  "2026/09/22"`; L2: a benign `^[a-z]+$` rule still validates a 100k value in
-  <100ms, and an ordinary `^[0-9]+$`-vs-`"abc"` failure still reports invalid.
-- SUBSTITUTE correctness: `substituteLiteral("xa+y","a+","Z")→"xZy"` (arg-2 `a+`
-  treated literally; the old regex impl treated it as a quantifier). In-repo
-  SUBSTITUTE dependents (`grep -rn "SUBSTITUTE("`): one existing test + one docs
-  example, both use literal args and still pass — no dependency on the old regex
-  behaviour.
-- Detector unit cases: `hasNestedUnboundedQuantifier` true for `^(a+)+$`,
-  `(?:x+)*`, `(\d+){2,}`; false for `^[a-z0-9-]+$`, `^\d{4}-\d{2}$`, and
-  `[(+*)]+` (char-class contents not mistaken for a quantified group).
+### 5.1 Suites
 
-`tsc --noEmit -p tsconfig.json` clean at every commit state.
+```
+CI=true npx vitest run src/formula/__tests__/regex-safety.test.ts \
+  tests/unit/user-regex-guard-three-copy-parity.test.ts \
+  tests/unit/user-regex-guard-read-parity-fuzz.test.ts \
+  tests/unit/formula-engine.test.ts tests/unit/field-validation.test.ts \
+  tests/unit/field-validation-wiring.test.ts --config vitest.config.ts
+```
+→ `regex-safety` 45, three-copy parity 32, read-parity fuzz 4, formula-engine 87,
+field-validation 72, field-validation-wiring 5.
+
+Full default lane (the config CI's backend job uses), **no DATABASE_URL — the lane's own
+`exclude` list drops every DB-backed integration spec, and this slice's mechanism is
+DB-independent**:
+```
+CI=true npx vitest run --config vitest.config.ts
+→ Test Files  982 passed | 175 skipped (1157)
+        Tests  15966 passed | 1615 skipped (17581)      exit 0
+```
+`plugins/plugin-integration-core`: `node scripts/test-chain.cjs` → **229 suites passed**.
+`packages/core-backend`: `npx tsc --noEmit -p tsconfig.json` → exit 0, no output.
+`apps/web`: `npx vue-tsc --noEmit -p tsconfig.app.json` → exit 0, no output. (`vue-tsc -b`
+additionally type-checks `vite.config.ts` and fails there with a vite 5-vs-7 `PluginOption`
+mismatch in the shared `node_modules`; that file is not in this diff and the failure
+reproduces without it — environmental, recorded rather than hidden.)
+
+### 5.2 FALSE POSITIVES — the six patterns round 1 refused (200 runs each)
+
+Adversarial subject at the ceiling: long member run + failing tail, 10000 characters.
+
+| pattern | refused | worst guarded call | worst SINGLE ladder rung |
+|---|---|---|---|
+| `^\d+(\.\d+)*$` version number | **0 / 200** | 0.49ms | 0.041ms |
+| `^[a-z0-9]+(-[a-z0-9]+)*$` slug | **0 / 200** | 0.55ms | 0.069ms |
+| `^(\w+\.)*\w+$` dotted identifier | **0 / 200** | 0.60ms | 0.044ms |
+| `^[a-z]+(,[a-z]+)*$` comma list | **0 / 200** | 0.54ms | 0.030ms |
+| `^[^@]+@[^@]+(\.[^@]+)+$` e-mail | **0 / 200** | 0.25ms | 0.012ms |
+| `^(/[a-z0-9_-]+)+$` path segments | **0 / 200** | 0.59ms | 0.038ms |
+
+**0 / 1200.** The "worst single rung" column is the load-bearing one: the deciding branch
+is only reachable once a rung crosses `USER_REGEX_PROBE_FLOOR_MS = 2`, and the worst rung
+over the whole ladder for this corpus is 0.069ms — ~29x under it. So for a linear pattern
+the verdict is not timing-dependent at all; the timing branch is never entered.
+
+### 5.3 TRUE POSITIVES — the three catastrophic shapes (200 runs each)
+
+Subject `a`×32 + `!` (n=33). **Unguarded, this exact input was measured at 20545ms** (§4.4).
+
+| pattern | refused | worst guarded call | fitted slope | extrapolated cost | decided at rung |
+|---|---|---|---|---|---|
+| `^(a+)+$` | **200 / 200** | 11.2ms | 12.5 | 1291ms | len 20 |
+| `^(a\|a)*$` — the shape round 1 ADMITTED at 22437ms | **200 / 200** | 13.9ms | 12.5 | 1516ms | len 20 |
+| `^([a-z]\|[a-z])*$` | **200 / 200** | 14.4ms | 12.7 | 1849ms | len 20 |
+
+**600 / 600**, worst 14.4ms, i.e. ~1400x under the unguarded 20545ms on the same input and
+well under the 100ms the task set. Refusal reaches the caller as a distinct message
+(`"…validation pattern is too slow on this value to be evaluated safely"`), never as the
+format-mismatch wording.
+
+**Two numbers that must not be read as one.** "Three named malicious shapes refuse in
+≤14.4ms" (this table) and "the worst ACCEPTED shape at the ceiling costs 90ms" (design MD
+§3.3.1) are different claims about different populations. The second is a polynomial shape
+the slope test deliberately accepts; it is not inside the malicious-shape budget and is not
+meant to be.
+
+### 5.4 READ PARITY — differential fuzz, 100000 pairs
+
+`tests/unit/user-regex-guard-read-parity-fuzz.test.ts`. Seeded (`mulberry32`, seed
+`0x5eed1234`); `H3_FUZZ_ITERATIONS` / `H3_FUZZ_SEED` override. The reference implementation
+is `origin/main`'s `validatePattern` body, inlined because the point is to run the OLD code
+and the old code is no longer in the tree.
+
+| metric | value |
+|---|---|
+| random (pattern, flags, value) pairs compared | **100000** |
+| divergences (verdict differs) | **0** |
+| refusals inside the corpus | **0** |
+| wall clock | 1632ms |
+| second pass through the real `validateRecord`, error text included | 5000 pairs, 0 divergences |
+
+Corpus hygiene is asserted, not assumed: >1000 distinct patterns and >1000 distinct
+subjects per 2000 draws, both `true` and `false` verdicts present in quantity, and the
+corpus is asserted to CONTAIN the `(...)+`-over-a-class shape round 1 refused — otherwise
+"all equal" would be a statement about an empty intersection.
+
+**POSITIVE CONTROL** (without it, "100000 equal" is indistinguishable from comparing
+nothing): an over-ceiling subject is asserted to make the two implementations DISAGREE
+(`true` vs `refused`), and `^(a+)+$` at n=33 is asserted to be refused.
+
+### 5.5 MUTATION TABLE
+
+Every mutation applied in the throwaway worktree by `cp` backup → edit → run → `cp`
+restore → re-run green. **No `git checkout --`, no `reset --hard`, no `stash`.** Suite =
+the three guard files (81 cases). Baseline restored green after every row.
+
+| # | mutation | result | what went red |
+|---|---|---|---|
+| **M1** | delete the subject-length ceiling in `regex-safety.ts` | **3 failed** | over-ceiling refusal (backend + parity table), FE/backend ceiling agreement |
+| **M2** | delete the pattern-length ceiling | **2 failed** | `pattern-length ceiling > refuses an over-length pattern before compiling it` |
+| **M3** | neuter the ladder (iterate an empty rung list) | **12 failed** | every catastrophic-shape refusal, in all three copies |
+| **M4** | drop the final-approach rungs from `userRegexProbeLadder` | **2 failed** | ladder ends at n−1; rung count 60≠63; three-copy ladder equality |
+| **M5** | `REGEXMATCH` bypasses the guard (bare `new RegExp`) | **3 failed** | `#ERROR!` expected, got the 20-second real answer |
+| **M6** | `evaluatePatternRule` bypasses the guard | **4 failed** | refusal message must differ from the format-mismatch message |
+| **M7** | `validator.cjs` bypasses the guard | **2 failed** | plugin refusal 20164.9ms ≥ 2000ms; `PATTERN_NOT_EVALUATED` missing |
+| **M8** | FE copy's ceiling changed to 20000 | **2 failed** | three-copy constant equality; FE verdict diverges |
+| **M9** | `FormView.vue` reverted to `new RegExp(validation.pattern)` | **1 failed** | FE call-site text pin |
+| **M10** | re-introduce round-1-style shape rejection (refuse any `)+` / `)*`) | **29 failed** | the whole false-positive battery + the fuzz corpus |
+| **M11** | fit the ADJACENT rung instead of the dynamic-range anchor | **4 failed** | `selectFitAnchor` unit cases + three-copy anchor equality |
+
+**M11 is recorded with its history, because it is the one that nearly got away.** Against
+the BEHAVIOURAL suite alone the same mutation passed **5 / 5** runs — the failure it
+reintroduces is intermittent (measured: `^(a+)+$` at n=33 accepted, then 22248ms), and an
+intermittent defect cannot be pinned by a behavioural assertion. The anchor rule was
+therefore extracted into an exported pure function `selectFitAnchor` specifically so it
+could be pinned deterministically. The repeat-loop test (20 runs × 3 patterns) is kept as a
+flake-catcher and is labelled in the source as having high but not certain power.
+
+### 5.6 Guard overhead (it is not free)
+
+Per guarded call, measured against the unguarded `new RegExp(p).test(v)`:
+
+| case | subject | unguarded | guarded | rungs |
+|---|---|---|---|---|
+| slug, typical value | 13 | 0.0001ms | 0.0029ms | 11 |
+| e-mail, typical value | 19 | 0.0001ms | 0.0030ms | 17 |
+| anchored class | 2000 | 0.0006ms | 0.0154ms | 56 |
+| anchored class | 10000 | 0.0027ms | 0.0472ms | 63 |
+| slug, adversarial | 10000 | 0.0308ms | 0.4436ms | 63 |
+
+14x–49x relative, 3µs–444µs absolute. The ladder is O(log n) rungs and its cost is bounded
+by a few multiples of `USER_REGEX_PROBE_FLOOR_MS` plus one real call, because it stops at
+the first rung that crosses the floor.
+
+### 5.7 SUBSTITUTE
+
+`substituteLiteral("xa+y","a+","Z") → "xZy"` (arg-2 treated literally; the old regex impl
+treated it as a quantifier). In-repo dependents (`grep -rn "SUBSTITUTE("`): one existing
+test + one docs example, both literal args, both still pass. A stored
+`SUBSTITUTE(x, "[0-9]", "")` in a customer database silently becomes a no-op — owner item,
+design MD §3.4(1).
 
 ## 6. NOT RUN / limitations (explicit)
 
-- **The fix was NOT re-verified at victim latency (OOB).** The finding was proven
-  at victim latency (55s cross-tenant, § 4.3); the fix is proven only in-process
-  (§ 5, sub-ms return). The inference is sound — a sub-ms return means no CPU burn
-  means no event-loop block — but it is an inference, and the P1 criterion lives at
-  the victim request. Not re-run because the worktree was removed; the in-process
-  mutation evidence (20368ms → <200ms on the identical n=32) carries the argument.
+- **The mitigation was NOT re-verified at victim latency (OOB).** The finding was proven at
+  victim latency (55s cross-tenant, § 4.3); the mitigation is measured only in-process
+  (§5.3). The inference — a call that returns in 14ms burns 14ms of CPU and therefore
+  blocks the loop for 14ms — holds **for the inputs in §5.3 and for nothing else**. It does
+  NOT extend to the shapes in design MD §3D: the runway family was measured spending
+  495760ms inside the guard's own ladder, and no victim-latency figure exists for it. Round
+  1 wrote "the inference is sound" without that qualifier; the qualifier is the point.
 - **L2 cross-tenant HTTP proof** — NOT RUN. L2 was proven in-process only (§ 4.4,
   20.5s). It shares L1's shared-event-loop mechanism, so the cross-tenant
   consequence follows by the same argument as § 4.3, but the concurrent victim
@@ -223,10 +360,35 @@ field-validation), plus the 87 pre-existing `tests/unit/formula-engine.test.ts` 
   were microbenchmarked only; reachability is traced or marked UNVERIFIED in the
   design table. No speculative fixes were shipped for UNVERIFIED-reachability
   sites (doctrine: dead-code defect ≠ live vulnerability).
-- **REGEX* guard completeness** — the static detector is PARTIAL by construction
-  (misses alternation-overlap ReDoS such as `(a|a)*`); NOT exhaustively fuzzed
-  against all ReDoS families. The complete fix (RE2 / step budget) is deferred to
-  owner.
+- **Guard completeness** — the static detector is GONE (design MD §3C). The replacement is
+  not exhaustive either and the boundary is enumerated in design MD §3D: cost that is
+  discontinuous in subject length (`^.{64}(a+)+$`, measured 495760ms inside the ladder),
+  probe truncation as a cost proxy rather than a semantic one, machine-relative constants,
+  and a subject ceiling that bounds the subject rather than the cost. **The class is not
+  closed.** The complete fix (RE2 / killable worker / step budget) is deferred to owner.
+- **Census re-run over `plugins/**/*.cjs`** — NOT DONE. L3 was found by following the gate's
+  pointer to one file, not by re-running the extractor over the widened glob. Other
+  `plugins/*/lib/**` sites may exist. Design MD §3.4(7).
+- **L3 end-to-end** — NOT RUN. `plugins/plugin-integration-core/lib/validator.cjs` was
+  measured by direct `require` of the real module. No HTTP request was driven through
+  `POST /api/integration/templates/preview`, and no confirmation was obtained that this
+  plugin is active in the production deployment. Reachability is an argument over the
+  static call graph plus the route table and `requireAccess(req, 'write')`; design MD §3E
+  states exactly how far it goes.
+- **The FE call site is pinned by source text only.** `apps/web`'s spec lane is not a
+  required check and a backend lane cannot execute a Vue SFC, so
+  `FormView.vue` is held by "imports the guard AND does not contain
+  `new RegExp(validation.pattern)`" (mutation M9). The FE guard MODULE is pinned
+  behaviourally (M8). Design MD §3F.
+- **No victim-latency or concurrency measurement of the guard's own cost.** §5.6 is
+  single-process timing. A 444µs guard on a hot write path was not load-tested.
+- **Refusals are unobservable.** No metric, no log line, no counter. If a tenant's
+  legitimate pattern were refused in production, nothing would surface it. Design MD
+  §3.4(8).
+- **CI run-list membership NOT verified.** The three new/changed test files sit in
+  `packages/core-backend`'s default `vitest.config.ts` collection and were run locally; the
+  branch has no PR, so no checks list exists to confirm a required lane actually collects
+  them. "被触发≠被验证" — this must be re-checked when a PR is opened.
 - **Stored-path HTTP chain** (field-create → record-write over HTTP) — the engine
   behaviour was proven by direct calls into the real `evaluateField`/`dryRun`; the
   full HTTP write chain was NOT driven end-to-end.
@@ -237,6 +399,12 @@ field-validation), plus the 87 pre-existing `tests/unit/formula-engine.test.ts` 
   cross-tenant severity class).
 
 ## 7. Reproduction artifacts (scratch, not committed)
-`extract.cjs`, `fuzz-one.cjs`, `runner.cjs`, `controls.cjs`, `run-controls.cjs`,
+
+Round 1: `extract.cjs`, `fuzz-one.cjs`, `runner.cjs`, `controls.cjs`, `run-controls.cjs`,
 `probe-formula.ts`, `probe-dryrun.ts`, `probe-stored.ts`, `probe-validate.ts`, `oob-server.ts`,
 `oob-client.mjs`, plus `h3-sites.json` / `h3-fuzz.json` / `controls-result*.txt`.
+
+Round 2: `soak.cjs` (§5.2/§5.3 tables), `overhead.cjs` (§5.6), `residual.cjs` +
+`residual-one.cjs` (design MD §3D.1), `ladder-trace.cjs` (the §3C.2 diagnosis),
+`mutate.py` + `run-mutations.sh` (§5.5). Everything committed lives in the three test files
+listed in design MD §4; the numbers above are reproducible from them plus the constants.

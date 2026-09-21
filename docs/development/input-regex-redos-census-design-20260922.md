@@ -3,6 +3,16 @@
 **Status: PROPOSED.** Date: 2026-09-22. Base: `origin/main` @ `cd42eaf7455f03dd99021a02c47c42f1f3db6484`.
 Branch: `fix/input-regex-redos-candidates`. Candidate only — not merged, not undrafted, no DDL.
 
+**Round 2.** An independent gate reviewed round 1 at head `71f869e644f2646e46c8075bd79b0aa09bcd73d4`
+and returned CHANGES-REQUESTED: the candidate's static shape detector was measured
+**net-negative** (it refused six extremely common LINEAR patterns, turning each into a
+write-path 422 and a persisted `#ERROR!`, while still admitting a 22-second `^(a|a)*$`).
+Round 2 **deletes the shape detector** and replaces it with two guards that refuse only on
+evidence: a hard subject-length ceiling and a bounded timing ladder. §3C records why the
+shape route was abandoned; §3D records what the replacement still cannot see. Every
+"FIXED" claim from round 1 has been downgraded to a measured statement (§2, §3C, and
+verification MD §5).
+
 ## 0. Scope
 
 Mechanical census of every regular expression evaluated in
@@ -16,6 +26,13 @@ approval template groups name-rule) was measured freezing an unrelated tenant's
 request for 15.01s. That candidate is not on `origin/main`; this census asks
 whether any regex **already on `origin/main`** has the same property against
 user-controlled input.
+
+**Scope correction (round 2).** The round-1 glob `plugins/*/index.cjs` excluded
+`plugins/*/lib/**` and therefore missed a third class-two site,
+`plugins/plugin-integration-core/lib/validator.cjs` (finding **L3**, §3E). The census
+denominator below is the round-1 one and is unchanged for the roots it did cover
+(independently reconciled 47/47 by the gate); L3 is an ADDITION to it, not a correction of
+it. A full re-run over `plugins/**/*.cjs` is NOT done — see §5 NOT RUN.
 
 ### In scope
 - Regex **literals** and `new RegExp(...)` on user input, classified by shape.
@@ -57,8 +74,9 @@ Full site lists for the two multi-site shapes are in § 2.1.
 
 | # | file:line | input source | shape | measured | disposition |
 |---|---|---|---|---|---|
-| **L1** | `formula/engine.ts:330/333/336` (REGEXMATCH/EXTRACT/REPLACE) + `:183` (SUBSTITUTE) | **user supplies the PATTERN** via a formula expression | class-two; nested-quantifier `new RegExp(userStr)` | **20.4s in-process @58-char expr; 55.0s cross-tenant victim GET (OOB)** | **LIVE, CONFIRMED cross-tenant. FIXED on branch (commits 1-2, PROPOSED).** |
-| **L2** | `multitable/field-validation-engine.ts:103` (`validatePattern`) | **user supplies the PATTERN** via a stored `property.validation` rule (uncapped `z.record(z.unknown())`); runs on **every record write and public form submission** (`univer-meta.ts:17526`, `record-service.ts:725`) | class-two; nested-quantifier `new RegExp(rule.params.regex)` `.test` | **20.5s in-process @33-char record value** (benign control 0.1ms) | **LIVE, CONFIRMED. FIXED on branch (commit 5, PROPOSED). Cross-tenant HTTP proof NOT RUN (in-process only); same shared-event-loop mechanism as L1.** |
+| **L1** | pre-image SINKS `formula/engine.ts:326/329/332` (REGEXMATCH/EXTRACT/REPLACE) + `:183` (SUBSTITUTE); post-image REGISTRATIONS `:340/:344/:350` + `:187`, sinks moved into `regex-safety.ts:264/274/346` | **user supplies the PATTERN** via a formula expression | class-two; nested-quantifier `new RegExp(userStr)` | **20.4s in-process @58-char expr; 55.0s cross-tenant victim GET (OOB)** | **LIVE, CONFIRMED cross-tenant. MITIGATED on branch (PROPOSED), not fixed:** the three named catastrophic shapes are refused in ≤14.4ms (600/600 runs) and SUBSTITUTE no longer reaches a regex engine at all; a pattern whose cost is discontinuous in subject length is still not caught (§3D). |
+| **L2** | pre-image SINK `multitable/field-validation-engine.ts:103` (inside `validatePattern:100`); post-image `:112` (`evaluatePatternRule`), `:129` (guarded call), `:192` (the `pattern` case) | **user supplies the PATTERN** via a stored `property.validation` rule (uncapped `z.record(z.unknown())`); runs on **every record write and public form submission** (`univer-meta.ts:17526`, `record-service.ts:725`) | class-two; nested-quantifier `new RegExp(rule.params.regex)` `.test` | **20.5s in-process @33-char record value** (benign control 0.1ms) | **LIVE, CONFIRMED. MITIGATED on branch (PROPOSED), not fixed:** same ladder as L1, plus the subject ceiling this site had no equivalent of (§3B.2). Cross-tenant HTTP proof NOT RUN (in-process only); same shared-event-loop mechanism as L1. |
+| **L3** | pre-image SINK `plugins/plugin-integration-core/lib/validator.cjs:97` (inside `compilePattern`); post-image `:155` (guarded call), `:160` (`PATTERN_NOT_EVALUATED`) | **user supplies the PATTERN** via a pipeline `fieldMapping.validation` rule (`params.regex \| params.pattern \| params.value`) | class-two; `new RegExp(pattern, flags)` `.test` on a record value | **20164ms in-process @33-char value**, measured on the real module through the real `validateValue` (this round, mutation M7) | **LIVE on the code shape; runtime reachability argued but NOT end-to-end proven (§3E). MITIGATED on branch (PROPOSED)** — missed entirely by the round-1 scope glob. |
 | 1 | `attendance/w7-shadow-expected-differences.ts:287` | `ratifiedBy` from W7 expected-shadow roster config | `/[\w-]+\.md\b/` `.test` | ratio 101, 5.1s @1e5 | internal domain config, not HTTP body → UNVERIFIED reachable; no fix |
 | 2 | `data-adapters/DataSourceManager.ts:1252` (+11 copies, § 2.1) | DataSourceManager: data-source config `value`; the other 11 are internal (migrations, integration clients, storage-key builders) | `/\/+$/` `.replace` | ratio 92, 3.1s @1e5 | quadratic; needs ~1e5 `/` chars; **bound not verified at any of the 12 sites → UNVERIFIED**; no fix |
 | 3 | `data-adapters/PLMAdapter.ts:15`, `services/ai-provider-client.ts:55` | adapter error/log text (URL userinfo redaction) | `/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/gi` `.replace` | ratio 97, 5.1s @1e5 | quadratic; input = error text, not direct body; UNVERIFIED; no fix |
@@ -75,10 +93,12 @@ Full site lists for the two multi-site shapes are in § 2.1.
 | 13 | `apps/web/.../automation-log-support-packet.ts:134` (FE), `plugins/plugin-attendance/index.cjs:5858/:22616` | filename seed from `profile.id/source` | `/^-+|-+$/g` `.replace` | ratio 93, 3.2s @1e5 | **UNVERIFIED** (no length bound verified at any of the 3 sites); FE + plugin; no fix |
 | 14 | `apps/web/src/views/plm/plmFilterPresetUtils.ts:186` | filter-preset base64 tail | `/=+$/g` `.replace` | ratio 96, 3.2s @1e5 | **FE → single-session self-DoS**; bounded by preset content |
 
-**Result: 2 live CONFIRMED findings, both class-two (user supplies the pattern),
-both fixed on branch as PROPOSED candidates — L1 formula engine (cross-tenant
-HTTP-proven, 55s) and L2 field-validation pattern rule (in-process 20.5s;
-cross-tenant HTTP NOT RUN but the same shared-event-loop mechanism). 1 site
+**Result: 3 live class-two findings (user supplies the pattern), all three MITIGATED —
+not fixed — on branch as PROPOSED candidates.** L1 formula engine (cross-tenant
+HTTP-proven, 55s), L2 field-validation pattern rule (in-process 20.5s; cross-tenant HTTP
+NOT RUN but the same shared-event-loop mechanism), L3 plugin pipeline validator
+(in-process 20.2s; runtime reachability argued, not proven). "Mitigated" is the precise
+word and §3C/§3D say exactly what it buys and what it does not. 1 site
 verified bounded-before-regex (`univer-meta.ts:5247`, max 255) + 1 FE site bounded
 (`xlsx-mapping.ts:135`, slice 31) — not findings. Several FE sites are
 single-session self-DoS (lower severity, not cross-tenant). The remaining backend
@@ -104,8 +124,11 @@ formula engine (L1); § 3B is the field-validation pattern rule (L2).
 ### 3.1 Mechanism
 `REGEXMATCH(text, pattern)`, `REGEXEXTRACT`, `REGEXREPLACE` compile the
 caller-authored `pattern` string into `new RegExp(String(pattern))`
-(`formula/engine.ts:330/333/336`). `SUBSTITUTE(text, old, new)` compiled `old`
-into `new RegExp(String(old), 'g')` (`:183`). A nested-quantifier pattern such as
+(pre-image sinks `formula/engine.ts:326/329/332`; post-image registrations
+`:340/:344/:350`, with the `new RegExp` itself now inside
+`formula/regex-safety.ts:264/274/346`). `SUBSTITUTE(text, old, new)` compiled `old` into
+`new RegExp(String(old), 'g')` (pre-image sink `:183`); post-image `:187` calls
+`substituteLiteral` and reaches no regex engine at all. A nested-quantifier pattern such as
 `^(a+)+$` (7 characters) is exponential in the subject length; because JS regex
 runs synchronously on the main thread, it blocks the event loop for **every**
 concurrent request, across all tenants.
@@ -125,18 +148,60 @@ concurrent request, across all tenants.
   user with no field-management rights pays the cost on each write. This is the
   more severe variant: unbounded stored pattern, lower-privileged trigger.
 
-### 3.3 Candidate fix (PROPOSED — 2 commits, one per site)
-- **`SUBSTITUTE` → literal replacement** (`substituteLiteral`, split/join, O(n)).
-  This both fixes a spec bug (Excel/Sheets SUBSTITUTE is literal, not regex) and
-  removes the vector — arg-2 never reaches a regex engine. Complete fix for this
-  function.
-- **`REGEX*` → `assessUserPattern` guard**: reject statically-catastrophic
-  patterns (nested unbounded quantifier) and over-length patterns; bound the
-  subject length (`USER_REGEX_MAX_SUBJECT_LEN=5000`) for the O(n²) global-scan
-  case. **PARTIAL**: a static detector cannot catch alternation-overlap ReDoS
-  (`(a|a)*`). The complete fix is a linear-time engine (RE2) or a step budget —
-  an owner/dependency decision. Both REGEX* and SUBSTITUTE changes alter an
-  observable behaviour of the "frozen" formula core, so both are PROPOSED.
+### 3.3 Candidate mitigation (PROPOSED, round 2)
+- **`SUBSTITUTE` → literal replacement** (`substituteLiteral`, `formula/regex-safety.ts:44`,
+  split/join, O(n)). This both fixes a spec bug (Excel/Sheets SUBSTITUTE is literal,
+  not regex) and removes the vector — arg-2 never reaches a regex engine. This IS a
+  complete fix for this function; it is also a behaviour change, see §3.4(1).
+- **`REGEX*` → `runUserRegex`** (`formula/regex-safety.ts:250`), which refuses on two
+  measured criteria and on nothing else:
+  1. **the subject ceiling first** — `USER_REGEX_MAX_SUBJECT_LEN = 10000` (`:80`) and
+     `USER_REGEX_MAX_PATTERN_LEN = 1000` (`:83`), applied before compilation and
+     independent of any caller-side rule list. Derivation in §3.3.1.
+  2. **a bounded timing ladder** — sample the cost of the REAL (pattern, subject) pair at
+     an ascending schedule of truncated subjects (`userRegexProbeLadder`, `:139`), and
+     refuse only when the measured log-log growth exponent exceeds
+     `USER_REGEX_SUPERLINEAR_SLOPE = 2` **and** the extrapolated cost at the real length
+     exceeds `USER_REGEX_PROBE_BUDGET_MS = 100` — both re-measured once before the
+     refusal is returned. A rung below `USER_REGEX_PROBE_FLOOR_MS = 2` decides nothing,
+     and the fit is anchored against a rung at least
+     `USER_REGEX_DECISION_DYNAMIC_RANGE = 8` times cheaper (`selectFitAnchor`, `:185`)
+     rather than the adjacent rung — see §3C.2 for the measurement that forced that.
+  When not refused, `runUserRegex` returns the result of the real regex against the real
+  subject, byte-for-byte what the unguarded code returned (differential fuzz: 100000
+  pairs, 0 divergences — verification MD §5.4).
+
+#### 3.3.1 Why the ceiling is 10000, derived
+
+Two independent constraints meet at the same number.
+
+**(a) Parity, so the ceiling is not a new narrowing for a default-ruled field.**
+`getDefaultValidationRules` (`multitable/field-validation-engine.ts:273`) caps `string` /
+`longText` at `maxLength: 10000`. A field that declares no explicit validation therefore
+already rejects a >10000-character value, so for that population the ceiling changes
+nothing.
+
+**(b) The budget for the shapes the ladder deliberately accepts.** The ladder refuses only
+super-QUADRATIC growth, so a genuinely quadratic pattern is accepted and runs to
+completion; the ceiling is the only thing bounding it. Measured at the ceiling:
+
+| accepted shape | subject | guarded | unguarded |
+|---|---|---|---|
+| `^\s+\|\s+$` `/g` `.replace` | `Z` + 9998 spaces + `Z` | 54ms | 45ms |
+| the zero-width edge-trim precedent `/gu` | `Z` + 9998 U+200B + `Z` | **90ms** | 90ms |
+
+90ms is the worst ACCEPTED shape measured. Cost is quadratic in the ceiling, so 20000
+would be ~360ms. **Stated plainly: 90ms is NOT covered by `USER_REGEX_PROBE_BUDGET_MS`** —
+that constant governs the slope test's extrapolation, not the cost of a polynomial shape
+the slope test deliberately accepts. And no ceiling bounds an exponential pattern; that is
+what the ladder is for, and the two guards are independent on purpose.
+
+**What the ceiling does NOT cover:** a field whose EXPLICIT rule list contains a pattern
+rule but no `maxLength`. Both call sites merge as `explicitRules ?? defaultRules`
+(`routes/univer-meta.ts:17518`, `multitable/record-service.ts:489`) — a REPLACEMENT, not a
+merge — so those fields have no length bound today and a >10000-character value that
+writes successfully on `origin/main` will now be refused. That is a real write-path
+narrowing; it is an owner item (§3.4.6), and the population cannot be censused from here.
 
 **SUBSTITUTE dependents (in-repo):** `grep -rn "SUBSTITUTE("` finds one existing
 test (`tests/unit/formula-engine.test.ts:135`, `SUBSTITUTE("hello world","world",
@@ -161,34 +226,248 @@ record write / any public form submit against that field runs the exponential
 regex on the shared event loop. Measured: **20.5s in-process at a 33-char record
 value**; benign pattern on a 100k value 0.1ms (§ verification MD § 4.4).
 
-### 3B.2 Candidate fix (PROPOSED — commit 5)
-`validatePattern` now calls `assessUserPattern(regex)` before compiling; a
-statically-catastrophic or over-length pattern is rejected and **fails
-validation** — consistent with the existing invalid-regex branch (both return
-`false`). Same PARTIAL caveat as L1 (RE2 is the complete fix). PROPOSED: a field
-with a catastrophic validation pattern now always fails validation (that pattern
-was misconfiguration), an observable behaviour change.
+### 3B.2 Candidate mitigation (PROPOSED, round 2)
+`evaluatePatternRule` (`multitable/field-validation-engine.ts:112`) routes the stored
+regex through the same `runUserRegex`, so this site gets the subject ceiling it never had.
+That matters here specifically: `explicitRules ?? defaultRules` means a field that
+declares a pattern rule has thrown away the built-in `maxLength: 10000`, so before this
+change the record value reaching a stored regex was bounded only by
+`express.json({ limit: '10mb' })`.
+
+**A refusal is NOT reported as a format mismatch.** Round 1 made a refused pattern return
+`false`, which surfaced as the ordinary `"<field> does not match the required format"` —
+byte-identical to a genuine mismatch, so neither the submitting user nor the field
+administrator could tell "this value really is malformed" from "the guard declined to run
+this check". Round 2 pushes a distinct message per refusal kind
+(`describeUserRegexRefusal`, `formula/regex-safety.ts:212`) and deliberately ignores the
+rule's own `message` override for refusals, because that string describes a format
+mismatch and this is not one. The **invalid-regex** branch is unchanged on purpose: it
+predates this slice and keeps returning a plain validation failure.
+
+**Round 1's justification here is withdrawn.** It read: *"a field with a catastrophic
+validation pattern now always fails validation (that pattern was misconfiguration)"*. The
+gate measured six patterns the detector called catastrophic — version numbers, slugs,
+dotted identifiers, comma lists, e-mail, path segments — each of which runs in ≤0.069ms on
+a 10000-character adversarial subject. They were not misconfiguration; the detector was
+wrong. §3C.
+
+**Residual behaviour change (owner item, §3.4.6):** a value over the ceiling now fails the
+write with its own message. See §3.3.1.
+
+## 3C. Why the static shape detector was dropped
+
+Round 1 shipped `hasNestedUnboundedQuantifier` — "a quantified GROUP whose body itself
+carries an unbounded quantifier", i.e. `(a+)+`, `(.*)*`, `(\d+){2,}`. It is deleted. Three
+reasons, in order of weight; all three are measurements, none is an argument from taste.
+
+### 3C.1 It was net-negative: six common linear patterns refused, the named bypass admitted
+
+The predicate does not require AMBIGUITY, so any `(X+)*` / `(X+)+` shape matched it
+regardless of whether the outer iteration is anchored by a separator. Measured on
+10000-character adversarial subjects (long member run + failing tail — the shape that makes
+a genuinely catastrophic pattern explode), through the real `validateRecord`:
+
+| pattern | round 1 | round 2 | worst single ladder rung | guarded call |
+|---|---|---|---|---|
+| `^\d+(\.\d+)*$` version number | **REFUSED** | ACCEPTED | 0.041ms | 0.49ms |
+| `^[a-z0-9]+(-[a-z0-9]+)*$` slug | **REFUSED** | ACCEPTED | 0.069ms | 0.55ms |
+| `^(\w+\.)*\w+$` dotted identifier | **REFUSED** | ACCEPTED | 0.044ms | 0.60ms |
+| `^[a-z]+(,[a-z]+)*$` comma list | **REFUSED** | ACCEPTED | 0.030ms | 0.54ms |
+| `^[^@]+@[^@]+(\.[^@]+)+$` e-mail | **REFUSED** | ACCEPTED | 0.012ms | 0.25ms |
+| `^(/[a-z0-9_-]+)+$` path segments | **REFUSED** | ACCEPTED | 0.038ms | 0.59ms |
+
+Every one of them is LINEAR: the worst single rung over the whole ladder is 0.069ms, ~29x
+under the 2ms floor, so the deciding branch is never entered at all for this corpus. A
+200-run soak over all six refused **0 of 1200**.
+
+What the refusals cost, on `origin/main` behaviour that worked: on the field-validation
+side every record write and every public form submission against such a field returns 422;
+on the formula side `REGEXMATCH("my-valid-slug", "^[a-z0-9]+(-[a-z0-9]+)*$")` returns
+`#ERROR!` and `recalculateRecordFromData` → `applyFencedDerivedDataMerge`
+(`multitable/formula-engine.ts:337` / `:372`) writes that literal string over a previously
+correct derived value in `meta_records.data`.
+
+And what it bought: the gate measured `^(a|a)*$` — two characters longer — still blocking
+**22437ms** on the guarded code. Attacker cost unchanged, victim cost unchanged.
+
+### 3C.2 A shape is not evidence — and the replacement's own first design proved the point
+
+The replacement refuses only on a measured cost curve. That is not automatically safe
+either: the first version of the ladder fitted the growth exponent against the **adjacent**
+rung. Two adjacent rungs at the floor are ~1.3ms and ~2.7ms, and the entire verdict is
+their RATIO, so ordinary scheduling noise on a 1.3ms sample halves the fitted exponent.
+MEASURED: `^(a+)+$` at n=33 was then **intermittently ACCEPTED and ran for 22248ms** — the
+round-1 defect, reintroduced by a different mechanism. The shipped design anchors the fit
+against a rung at least `USER_REGEX_DECISION_DYNAMIC_RANGE = 8` times cheaper
+(`selectFitAnchor`), which makes the fit rest on a ratio jitter cannot manufacture: after
+the change, 600/600 refusals across the three named shapes, worst 14.4ms.
+
+That failure is recorded here rather than quietly fixed because it is the strongest
+available argument for the section's thesis: the difference between the two designs is not
+"static vs dynamic", it is **how much evidence the refusal is required to rest on**.
+
+### 3C.3 The detector was also untestable in the direction that mattered
+
+Round 1's suite asserted only that catastrophic shapes were refused. Nothing asserted that
+a legitimate pattern was NOT refused, so the six-pattern regression could not turn any test
+red — 173/173 green carried no information about it. Round 2's false-positive battery is
+the load-bearing half of the suite, and the fuzz (§5.4 of the verification MD) is its
+generalisation.
+
+## 3D. Residual: what this guard still cannot see
+
+**The class is not closed.** This section is the honest boundary; nothing above should be
+read as closing it.
+
+1. **Cost that is DISCONTINUOUS in subject length.** The ladder samples truncated subjects,
+   so a pattern that hides its blow-up behind a fixed-length runway — `^.{64}(a+)+$` — is
+   flat on every rung shorter than the runway. Measured, `^.{64}(a+)+$` against
+   `x`×64 + `a`×40 + `!` (105 characters, well inside the ceiling): the guard **does**
+   refuse it, but only after **495760ms** burned inside the ladder itself, because the
+   geometric rung step at length 80 → 100 adds 20 characters to the quantified run, i.e.
+   ~2^20 more work in a single rung. Shorter runs of the same family behave: `runway=512`
+   and `runway=4000` at the same k refuse in 239ms / 243ms.
+2. **A probe is a COST proxy, not a semantic one.** `userRegexProbeSubject` keeps the head
+   and the real last 8 characters. A pattern with a literal suffix longer than 8 characters
+   (`^(a+)+TERMINATOR1234$`) would see its probes fail where the real subject matches, so
+   the probe could be catastrophic for a subject the unguarded code handles instantly. The
+   100000-pair differential fuzz found no such case and none of the named patterns has that
+   shape, but it is NOT excluded by construction.
+3. **A timing criterion is machine-relative.** The constants are budgets measured on one
+   machine. A much slower host shifts which rung crosses the floor. The floor, the
+   dynamic-range anchor and the confirm-before-refusing re-measurement are what keep that
+   from turning into refusals of linear patterns (0/1200 measured), but the ladder is not
+   scale-free.
+4. **The subject ceiling bounds the SUBJECT, not the cost.** See §3.3.1(b).
+5. **Round 1's unclosed items stay unclosed.** The formula side still materialises
+   `#ERROR!` through `applyFencedDerivedDataMerge` when a subject is over the ceiling —
+   round 2 removes the FALSE-POSITIVE overwrite (the six patterns), not the over-length
+   one. That is still owner decision §3.4.3.
+
+**The complete fix remains a linear-time engine (RE2) or a killable worker.** Everything
+here is a cost reduction on the reachable blast radius, bought at a measured 0 false
+positives.
+
+## 3E. Live finding L3 — the plugin pipeline validator (missed by the round-1 scope)
+
+`plugins/plugin-integration-core/lib/validator.cjs` compiles a fieldMapping's
+`params.regex | params.pattern | params.value` into `new RegExp(pattern, flags)` and
+`.test()`s a record value. Measured on the real module through the real `validateValue`:
+**20164ms** at a 33-character value with `^(a+)+$` (this round, as mutation M7's control).
+
+**Reachability — argued, and here is exactly how far the argument goes.**
+- Static call graph: `lib/pipeline-runner.cjs:805` (persisted `context.pipeline.fieldMappings`)
+  and `lib/http-routes.cjs:3389` / `:3407`, both inside `buildTemplatePreview`.
+- `buildTemplatePreview` is reached from the route table entry
+  `['POST', '/api/integration/templates/preview', 'templatesPreview']`
+  (`lib/http-routes.cjs:269`), whose handler (`:9758`) calls `requireAccess(req, 'write')`
+  (`:934`) — authenticated principal holding the integration `write` tier; 401/403 otherwise.
+- On that route **both halves come from the same request body**: `fieldMappings[].validation`
+  (the pattern) and `sourceRecord` (the value). One authenticated integration-write
+  principal therefore needs no stored state at all.
+- The plugin ships in the image (`Dockerfile.backend` copies `plugins/` in both stages) and
+  PluginLoader scans that directory at runtime.
+
+**NOT proven:** no end-to-end HTTP run, no confirmation that this plugin is active in the
+production deployment, and no out-of-band victim-latency measurement for this site. Under
+the repo's "dead-code defect ≠ live vulnerability" rule this stays an argued-reachable
+finding, which is why it is mitigated but not escalated above L1/L2.
+
+**Mitigation (PROPOSED):** `lib/user-regex-guard.cjs` — the same guard, same constants,
+held to the TS original by a three-way behavioural pin in the backend's required lane
+(`packages/core-backend/tests/unit/user-regex-guard-three-copy-parity.test.ts`). A refusal
+is reported under its own code `PATTERN_NOT_EVALUATED` (`lib/validator.cjs:160`), never as
+`PATTERN`, for the same reason as §3B.2.
+
+## 3F. The browser mirror
+
+`apps/web/src/views/FormView.vue` ran `new RegExp(validation.pattern).test(value)` with no
+guard (pre-image sink `:650`; post-image guarded call `:658`). Round 1 left it untouched,
+which would have produced a user-visible contradiction: the public form says a slug is fine, the write returns 422 saying the format
+is wrong. Round 2 routes it through `apps/web/src/utils/userRegexGuard.ts`.
+
+**Why a copy and not an import:** `apps/web` has no build or runtime dependency on
+`@metasheet/core-backend` (its vite alias set is `@` → `apps/web/src`; the backend is a
+server bundle). This is the same constraint that forced
+`apps/web/src/utils/permission-match.ts` to mirror
+`packages/core-backend/src/auth/permission-match.ts`. The copy is dependency-free (no Vue,
+no alias, `performance.now()` only) precisely so the backend's required lane can import it
+directly and replay one shared case table through all three copies. `apps/web`'s own spec
+lane is not a required check, so a pin living there would hold nothing.
+
+**Coverage limit, stated:** the backend lane pins the FE **module** behaviourally and the
+FE **call site** only by source text (`FormView.vue` must import the guard and must not
+contain `new RegExp(validation.pattern)`). A required lane cannot execute that SFC.
 
 ### 3.4 Owner decisions
-1. Whether to land the SUBSTITUTE literal-semantics change (behaviour change, but
-   toward spec-correctness; no in-repo dependents — see above).
-2. Which REGEX* / validatePattern strategy: the partial static guard here, RE2, a
-   step budget, or static rejection of all non-trivial user patterns.
-3. Whether to add a length/depth cap on `property.expression` (formula) and
-   `property.validation[].params.regex` (validation) at field write, mirroring the
-   dry-run caps — the write path is the unbounded, lower-privileged trigger for both.
-4. Disposition of the owner-review candidates (rows 6, 8, 9) — confirm/deny
-   reachability, then fix under the same pattern if reachable.
-5. Disposition of the other UNVERIFIED class-two `new RegExp` sites the census did
-   NOT sweep as safe (verification MD § 2): `RedisAdapter.ts:532` (`value.$regex`),
+
+1. Whether to land the SUBSTITUTE literal-semantics change (behaviour change, but toward
+   spec-correctness; no in-repo dependents — see above; a stored
+   `SUBSTITUTE(x, "[0-9]", "")` in a customer DB silently becomes a no-op).
+2. **Which strategy at all.** This round's answer is "measured refusal + ceilings", and
+   §3D says what it leaves open. The alternatives remain RE2, a killable worker, a step
+   budget, or refusing every non-trivial user pattern outright. Landing this does not close
+   the class; it reduces the blast radius at 0 measured false positives.
+3. Whether `#ERROR!` may be materialised by `applyFencedDerivedDataMerge` at all. Round 2
+   removes the false-positive path into it, not the over-length one (§3D.5).
+4. Disposition of the owner-review candidates (rows 6, 8, 9) — confirm/deny reachability,
+   then treat under the same pattern if reachable.
+5. Disposition of the other UNVERIFIED class-two `new RegExp` sites the census did NOT
+   sweep as safe (verification MD § 2): `RedisAdapter.ts:532` (`value.$regex`),
    `ApprovalGraphExecutor.ts:729`, `plugin-config-manager.ts:150` /
    `PluginConfigManager.ts:633`, `APIGateway.ts:640/939`, `SafeFunctions.ts:361`,
-   `plugin-attendance/index.cjs:12490`, and the FE `FormView.vue:650`.
+   `plugin-attendance/index.cjs:12490`. (`FormView.vue` is no longer on this list — §3F.)
+6. **Two write-path narrowings this round introduces, both disclosed rather than absorbed:**
+   (a) a value over `USER_REGEX_MAX_SUBJECT_LEN` on a field whose explicit rule list has a
+   pattern rule but no `maxLength` now fails the write (§3.3.1); (b) the plugin pipeline
+   validator now emits `PATTERN_NOT_EVALUATED`, a code no consumer has seen before.
+   Neither population can be censused from here.
+7. Whether to re-run the census over `plugins/**/*.cjs` (the round-1 glob's blind spot,
+   §3E) before or after landing.
+8. Whether a refusal should be observable — today it is a validation error message and
+   nothing else; there is no metric, no log line, and therefore no way to notice a tenant
+   hitting it.
 
-## 4. Seams (file:line)
-- `packages/core-backend/src/formula/engine.ts:183,330,333,336` — L1 sinks.
-- `packages/core-backend/src/multitable/field-validation-engine.ts:103` — L2 sink.
-- `packages/core-backend/src/formula/regex-safety.ts` — new helper (candidate), shared by L1 + L2.
-- `packages/core-backend/src/routes/univer-meta.ts:452,454-456,13471,13842,16398,16523,17519-17526` — reachability + caps.
-- `packages/core-backend/src/multitable/formula-engine.ts:96,155,339` + `record-service.ts:725` — evaluateField / dryRun / recalc / validateRecord callers.
-- `packages/core-backend/src/multitable/formula-engine.ts:96,155,339` — evaluateField / dryRun / recalc.
+## 4. Seams (file:line — POST-image unless marked, re-pinned mechanically at the end of round 2)
+
+Convention, because round 1 got this wrong (gate P3-1): a "SINK" number points at the
+`new RegExp` line itself; a "registration"/function number points at the declaration. Both
+are given where they differ.
+
+Guard:
+- `packages/core-backend/src/formula/regex-safety.ts` — `substituteLiteral:44`,
+  `USER_REGEX_MAX_SUBJECT_LEN:80`, `USER_REGEX_MAX_PATTERN_LEN:83`,
+  `USER_REGEX_PROBE_FLOOR_MS:93`, `USER_REGEX_PROBE_BUDGET_MS:96`,
+  `USER_REGEX_SUPERLINEAR_SLOPE:99`, `USER_REGEX_DECISION_DYNAMIC_RANGE:109`,
+  `userRegexProbeLadder:139`, `userRegexProbeSubject:165`, `selectFitAnchor:185`,
+  `describeUserRegexRefusal:212`, `runUserRegex:250`.
+- `apps/web/src/utils/userRegexGuard.ts` — mirror; same order, `:24/:27/:30/:33/:36/:39`,
+  `:47`, `:64`, `:84`, `:108`, `:141`.
+- `plugins/plugin-integration-core/lib/user-regex-guard.cjs` — mirror;
+  `:24-:31` constants, `selectFitAnchor:65`, `runUserRegex:99`.
+
+Call sites:
+- `packages/core-backend/src/formula/engine.ts:187` (SUBSTITUTE), `:340` (REGEXMATCH),
+  `:344` (REGEXEXTRACT), `:350` (REGEXREPLACE) — these are the REGISTRATION lines; the
+  pre-image SINK lines were `:183/:326/:329/:332` and the post-image sinks are
+  `regex-safety.ts:264` (validity compile), `:274` (per-rung), `:346` (the real call).
+- `packages/core-backend/src/multitable/field-validation-engine.ts:112`
+  (`evaluatePatternRule`), `:129` (the guarded call), `:192` (the `pattern` case),
+  `:273` (`getDefaultValidationRules`, the parity anchor for the ceiling)
+  — pre-image sink `:103`, inside `validatePattern:100`.
+- `apps/web/src/views/FormView.vue:658` — pre-image sink `:650`.
+- `plugins/plugin-integration-core/lib/validator.cjs:155` (guarded call), `:160`
+  (`PATTERN_NOT_EVALUATED`); callers `lib/pipeline-runner.cjs:805`,
+  `lib/http-routes.cjs:3389,3407`, route table `:269`, handler `:9758`,
+  `requireAccess:934`.
+
+Unchanged context (pre-image = post-image, this slice does not touch them):
+- `packages/core-backend/src/routes/univer-meta.ts:452,454-456,13471,13842,16398,16523,17518-17526` — reachability + caps + the `explicitRules ?? defaultRules` replacement.
+- `packages/core-backend/src/multitable/record-service.ts:489,725`.
+- `packages/core-backend/src/multitable/formula-engine.ts:96,155,337,339,372` — evaluateField / dryRun / recalc / fenced derived merge.
+
+Tests:
+- `packages/core-backend/src/formula/__tests__/regex-safety.test.ts` — 45 cases.
+- `packages/core-backend/tests/unit/user-regex-guard-three-copy-parity.test.ts` — 32 cases.
+- `packages/core-backend/tests/unit/user-regex-guard-read-parity-fuzz.test.ts` — 4 cases,
+  100000 differential pairs.
