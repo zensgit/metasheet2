@@ -18,9 +18,9 @@
  *
  * THE PREDICATE, STATED EXPLICITLY (this comment and `isVisibleCodePoint` below are line-for-line
  * the same rule. This header and the candidate pull request's body are the only two places that
- * spell the predicate out — the PR body's copy is labeled as a verbatim extract from this file and
- * is kept byte-identical to it. Every other document (design MD, verification MD) references this
- * file by name and does not re-transcribe the expression):
+ * spell the predicate out — the PR body's copy is labeled as a verbatim extract from this file.
+ * Every other document (design MD, verification MD) references this file by name and does not
+ * re-transcribe the expression):
  *
  *     visible(cp) := cp ∈ [\p{L}\p{N}\p{P}\p{S}]
  *                  ∧ cp ∉ \p{Default_Ignorable_Code_Point}
