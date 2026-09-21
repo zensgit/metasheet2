@@ -30,6 +30,24 @@
  * byte-identical, and every future consumer (the generator, the guard, and anything else that
  * needs to read this exec block) imports from here rather than adding a fourth.
  *
+ * ROUND 2 (2026-09-22, independent gate review round 1, P1-1 option (a) — owner-selected):
+ * `logicalLines`/`execLogicalLine`/`tokensOf` below are UNCHANGED from round 1, byte-for-byte,
+ * on purpose — a guard test asserts they stay textually identical to the shape guard's own copy
+ * (see `required-web-lane-token-manifest-guard.test.ts`'s cross-copy agreement check), and
+ * widening their *behaviour* would break that assertion for no benefit: the divergence this round
+ * needs (reading MORE than the exec block, and not choking on `|| exit $?` tails) is added as new,
+ * separate exports (`stripTrailingErrorGuard`, `allVitestInvocations`, `allVitestTokenLines`,
+ * `allVitestTokens`) below them instead.
+ *
+ * The round-1 guard covered only the final `exec` line's 397 tokens. The gate review
+ * (`/Users/chouhua/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/impl-gate-H6-token-manifest-guard-round1-20260922.md`,
+ * P1-1) found the script actually has **19** logical lines matching `\bvitest\s+run\b` after
+ * `set -euo pipefail` (line 473) — 18 earlier `npx vitest run …` lines plus the final `exec …`
+ * line — carrying **499** distinct tokens total (397 in the exec block, 102 more on the earlier
+ * 18 lines, zero overlap), of which **28** were gated by nothing else in the repo (see the design
+ * doc §1 for the full census). `allVitestInvocations`/`allVitestTokenLines`/`allVitestTokens`
+ * close that: they read all 19 lines, not just the last one.
+ *
  * Values-free: reads only repo-tracked script text and returns token/line strings.
  */
 
@@ -75,4 +93,108 @@ export function execLogicalLine(scriptSrc) {
 export function tokensOf(logicalLine) {
   const after = logicalLine.replace(/^.*?\bvitest\s+run\b\s*/, '')
   return after.split(/\s+/).filter((token) => token.length > 0 && !token.startsWith('-'))
+}
+
+/**
+ * ROUND 2 — drop a trailing `|| exit $?` shell error-propagation idiom from a logical line BEFORE
+ * tokenizing it.
+ *
+ * Two of the 18 earlier `npx vitest run …` lines (run-required-web-tests.sh:1180, 1183) end
+ * `… --reporter=dot || exit $?` — a guard so an early batch's non-zero exit isn't swallowed by a
+ * later command in the same `set -euo pipefail` script (belt-and-suspenders; `pipefail` already
+ * covers it). `tokensOf()` only drops tokens starting with `-`, so left unstripped this tail
+ * yields three bogus "tokens" — `||`, `exit`, `$?` — none of them a real vitest positional filter.
+ * Applied ONLY at the `allVitestInvocations`-family call sites below, not inside `tokensOf()`
+ * itself: the exec block never carries this idiom (confirmed: it ends in `--reporter=dot` with no
+ * tail), so stripping it there would be a no-op, but leaving `tokensOf()` untouched keeps it
+ * byte-identical to the shape guard's and `token-set-diff.mjs`'s copies for the cross-copy
+ * agreement check.
+ *
+ * Anchored at end-of-string (`$`), not a bare-word replace — a hypothetical positional token
+ * literally named `exit` mid-line (not part of this exact trailing idiom) survives untouched; see
+ * this function's own unit test in `required-web-lane-token-manifest-guard.test.ts`.
+ */
+export function stripTrailingErrorGuard(logicalLine) {
+  return logicalLine.replace(/\s*\|\|\s*exit\s+\$\?\s*$/, '')
+}
+
+/**
+ * ROUND 2 — every logical line in `scriptSrc` that invokes `vitest run` (matches `\bvitest\s+run\b`
+ * — the same substring the round-1 gate review used to enumerate the 19), each carrying the
+ * 1-based source line number its logical line STARTS at (comments stripped first, same as
+ * `logicalLines()`, so a commented-out example like `# `npx vitest run …`` is correctly excluded).
+ *
+ * Deliberately re-implements the comment-strip/continuation-fold loop rather than sharing it with
+ * `logicalLines()` above: `logicalLines()` must stay byte-identical to the other two copies of it
+ * elsewhere in the repo (see the cross-copy agreement check), so it cannot be refactored to also
+ * track line numbers without breaking that assertion. This is the one deliberate exception to
+ * "don't duplicate this parser a fourth time" — the duplication is of the untyped line-splitting
+ * loop only, not of `logicalLines`/`execLogicalLine`/`tokensOf` themselves.
+ *
+ * Every `vitest run` invocation in this script today happens to fall after `set -euo pipefail`
+ * (line 473; the earliest invocation is at line 477) — this function does not itself special-case
+ * that boundary, it is simply true of the current file. See the design doc §1 for the fail-closed
+ * consequence if a future edit ever added one before it (this function would wrongly count it as
+ * gating when it would not be).
+ *
+ * Calls `execLogicalLine(scriptSrc)` first and lets its "exactly one exec logical line" throw
+ * propagate un-widened — that fail-closed property is worth keeping independently of this
+ * widening, not relaxed by it.
+ */
+export function allVitestInvocations(scriptSrc) {
+  execLogicalLine(scriptSrc) // fail closed: still requires exactly one exec logical line to exist
+
+  const kept = []
+  scriptSrc
+    .split('\n')
+    .map((line) => line.replace(/\r$/, ''))
+    .forEach((line, idx) => {
+      if (!/^\s*#/.test(line)) kept.push({ lineNo: idx + 1, text: line })
+    })
+
+  const out = []
+  let buf = null
+  let startLine = null
+  for (const { lineNo, text } of kept) {
+    const trimmedRight = text.replace(/\s+$/, '')
+    const continued = trimmedRight.endsWith('\\')
+    const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
+    if (buf === null) {
+      buf = body
+      startLine = lineNo
+    } else {
+      buf = `${buf} ${body}`.trim()
+    }
+    if (!continued) {
+      out.push({ startLine, text: buf })
+      buf = null
+      startLine = null
+    }
+  }
+  if (buf !== null) out.push({ startLine, text: buf })
+
+  return out.filter((line) => /\bvitest\s+run\b/.test(line.text))
+}
+
+/**
+ * ROUND 2 — token -> sorted array of every 1-based source line number it appears on, across ALL
+ * gating `vitest run` invocations (not just the exec block). `stripTrailingErrorGuard()` is
+ * applied to each invocation's text before `tokensOf()` so the two `|| exit $?`-tailed lines never
+ * contribute `||`/`exit`/`$?` as if they were real tokens.
+ */
+export function allVitestTokenLines(scriptSrc) {
+  const map = new Map()
+  for (const { startLine, text } of allVitestInvocations(scriptSrc)) {
+    for (const token of tokensOf(stripTrailingErrorGuard(text))) {
+      if (!map.has(token)) map.set(token, [])
+      map.get(token).push(startLine)
+    }
+  }
+  for (const lines of map.values()) lines.sort((a, b) => a - b)
+  return map
+}
+
+/** The distinct token SET across ALL 19 gating `vitest run` invocations (union, not just the exec block's 397). */
+export function allVitestTokens(scriptSrc) {
+  return new Set(allVitestTokenLines(scriptSrc).keys())
 }
