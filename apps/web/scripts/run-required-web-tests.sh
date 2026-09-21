@@ -1336,6 +1336,8 @@ exec npx vitest run \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
   approvalTemplateGovernance \
+  approvalTemplateGroupsClient \
+  ApprovalTemplateGroupsPanel \
   approvalTemplateRouteGuard \
   approvalTemplateVersionHistory \
   approvalUserPicker \
@@ -1597,6 +1599,7 @@ exec npx vitest run \
   roleManagementSave \
   routePreviewErrors \
   searchApprovalDirectoryUsers \
+  SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \
   StockPreparationCodeHelp \
@@ -1652,9 +1655,6 @@ exec npx vitest run \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
-  approvalTemplateGroupsClient \
-  ApprovalTemplateGroupsPanel \
-  SessionOrgSwitcher.spec.ts \
   --reporter=dot
   amountAutoSum \
   approval-amount-in-words \
