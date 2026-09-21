@@ -59,7 +59,8 @@
  * commit). A-3's preview/execute/rollback endpoints, batch tables, and CI wiring have since
  * landed (`routes/approvals.ts`, the backfill batch DDL migration, this file's own
  * `classifyBackfillCategory` / `rollbackApprovalTemplateGroupBackfillBatch`) and passed an
- * independent gate review round (`reviews/impl-gate-A3-round1-20260918.md`, 0 P1 / 1 P2 / 7 P3 —
+ * independent gate review round (`impl-gate-A3-round1-20260918.md`, a private review record not
+ * tracked in this repository, 0 P1 / 1 P2 / 7 P3 —
  * disposition tracked in the paired verification MD's §7 (the P2) and §8 (the P3s)):
  *
  * `createApprovalTemplateGroup` / `linkApprovalTemplateToGroup` / `archiveApprovalTemplateGroup`
@@ -749,7 +750,8 @@ export async function unlinkApprovalTemplateFromGroup(
 // ── A-3 backfill ("按现有 category 建组并挂接") — design-gate A3-phase2, W7 preview ─────────────
 //
 // `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §5.2 / P3-3
-// (design-gate changesRequired, `reviews/design-gate-A3-phase2-20260918.md`): preview and (later)
+// (design-gate changesRequired, `design-gate-A3-phase2-20260918.md`, a private review record not
+// tracked in this repository): preview and (later)
 // execute MUST decide "create a new group for this category / attach to an existing one / skip
 // this category entirely" through the SAME function, or the two can silently diverge (preview
 // shows a plan execute would not actually carry out). `classifyBackfillCategory` below is that
@@ -998,8 +1000,9 @@ export async function rollbackApprovalTemplateGroupBackfillBatch(
 
 // ── A-3 backfill — batch list (design-gate A3-phase2, P1-5 / changesRequired #5, 2026-09-18) ────
 // `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §2.1 index / §6.1 endpoint
-// row / §13.1 changesRequired #5 (real-DB M-series gate report, `reviews/design-gate-A3-phase2-
-// 20260918.md`): a `batchId` appears in exactly one other place today — execute's own response —
+// row / §13.1 changesRequired #5 (real-DB M-series gate report `design-gate-A3-phase2-20260918.md`,
+// a private review record not tracked in this repository): a `batchId` appears in exactly one
+// other place today — execute's own response —
 // so an operator whose execute request timed out, or who simply wants to audit what has already
 // been rolled back, had no way to discover a `batchId` to pass to rollback at all. That is an
 // already-shipped reachability gap, not a missing test: §2.1's own comment concedes the batch head

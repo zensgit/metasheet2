@@ -1507,6 +1507,183 @@ $ dropdb -U ms2testbed metasheet2_a3r2_20260921
 ```
 未合并、未 undraft、未开/改 PR、未把迁移应用到任何共享/staging/prod 库、未改锁文正文。一切仍是候选,供下一轮门审核对。
 
+## 14.7 修复轮 2(2026-09-21,回应独立门审 `impl-gate-A3-guarded-down-round2-20260921.md`,裁定 0 P1 / 2 P2 / 3 P3 / 3 NIT)
+
+处女库 `metasheet2_a3r3_20260921`,owner `ms2testbed`(非超级),本机 **PostgreSQL 15.17**(与门审报告的生产轴一致)。连接串普查(本轮亲跑,不沿用上一轮数字):`grep -ohE "[A-Z0-9_]+_URL" .github/workflows/*.yml` + 根/`packages/core-backend` 两个 `package.json` + `process.env.*_URL`(`packages/core-backend/{src,tests}`)合并去重后同为 **8 个** PG 连接串族名——`DATABASE_URL` / `ATTENDANCE_TEST_DATABASE_URL` / `E2E_S6A_PROVISIONING_DB_URL` / `E2E_S6A_RUNTIME_DB_URL` / `SMOKE_DATABASE_URL` / `PG_SUPERUSER_URL` / `SHARD_0_URL` / `SHARD_1_URL`;本轮只 export 了 `DATABASE_URL`,`env | grep -iE "DATABASE|PGHOST|PGDATABASE|PGUSER|PGPASSWORD|_DB_URL"` 在每次命令前核对为空(其余 7 个全程未设置)。每条命令前 `psql -Atc "select current_database(), current_user"` ⇒ `metasheet2_a3r3_20260921|ms2testbed`。
+
+### 14.7.1 P2-A —— 补严格性用例(强制解锁只认字面 `"true"`)
+
+在 case 2(数据齐全拒绝)与 force 正控之间插入一条新用例,循环 `['false', '0', '1', 'TRUE', 'yes', '']`,每个值都断言 `down()` 仍 reject 且头表仍在(不是"抛了就行",是"抛了且没丢数据")。**没有**放在 force 正控之后——那样会读到 force 用例已 DROP 掉的表,`toBeTruthy`/`rejects` 两端都会假红(advisor 复核指出的下线陷阱,采纳)。`""` 保留用于完整性,但不作为判别力证据——G11b(round-2 报告)已证明 `!''` 在 M3 下仍为真值,不解锁;真正判别的是 `'false'`/`'0'`/`'1'`/`'TRUE'`/`'yes'` 五个值。
+
+Mutation(单 token,与门审报告 G11 相同的构造):
+```diff
+-    if (process.env[ATG_BACKFILL_DOWN_FORCE_ENV] !== 'true') {
++    if (!process.env[ATG_BACKFILL_DOWN_FORCE_ENV]) {
+```
+`cp` 备份 → 编辑 → 跑 → `cp` 还原 → `cmp` 逐字节核(全程未用 `git checkout --`)。红,原文逐字:
+```
+ ✗ only the exact string "true" unlocks the force path — "false"/"0"/"1"/"TRUE"/"yes"/"" all
+   stay rejected (strictness axis; round-2 implementation-gate finding P2-A)
+   AssertionError: promise resolved "undefined" instead of rejecting
+   - Expected: [Error: rejected promise]
+   + Received: undefined
+     at tests/integration/approval-template-groups-backfill-down-guard.db.test.ts:213:44
+ ✗ down() with the force env set passes and ACTUALLY drops all three tables (positive control for the case above)
+   AssertionError: expected -1 to be greater than 0
+ Test Files  1 failed (1)
+      Tests  2 failed | 7 passed | 1 skipped (10)
+```
+第一条红就在循环的第一个值(`'false'`)上——具判别力的值确实触发了红,不是靠 `''` 兜底。还原后重跑同一文件:`9 passed | 1 skipped (10)`,与 mutation 前一致。
+
+### 14.7.2 P2-B —— 两点接线 + 自身 CI-wiring 守卫 + allowlist 登记删除 + s6a 重钉(同一提交)
+
+**vitest.config.ts**(no-DB exclude,追加在 batches-list 条目之后、`tests/e2e/**` 之前):新增 `'tests/integration/approval-template-groups-backfill-down-guard.db.test.ts'`,注释点名 P2-B 与其专属 CI-wiring 守卫。
+
+**`.github/workflows/plugin-tests.yml`**——两处、非相邻:
+1. `approval-real-db-integration` 步骤(id 不变)的 whole-file 参数列表,`…batches-list.db.test.ts \` 之后追加 `…down-guard.db.test.ts \`(diff 见下)。
+2. no-DB `test` 作业里追加一条新 step——`A3 backfill-down-guard CI wiring contract`,紧跟在既有 `A3 backfill-batches-list CI wiring contract` 之后,`run: node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs`。
+
+```diff
+@@ 约 :423(no-DB test 作业,新增一条 step)
+       - name: A3 backfill-batches-list CI wiring contract
+         run: node --test scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs
++
++      - name: A3 backfill-down-guard CI wiring contract
++        run: node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
+@@ 约 :1702(approval-real-db-integration 步骤,whole-file 参数列表)
+             tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
++            tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
+```
+`git diff --stat -- .github/workflows/plugin-tests.yml` ⇒ `1 file changed, 11 insertions(+)`。
+
+**新文件** `scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs`——整段复制五个同族守卫里最新的一个(`…batches-list-ci-wiring.test.mjs`)再改名/改字符串(记忆 `feedback_copy_precedent_whole_block_not_item_by_item`:round-1 就是逐条转抄丢了 P2-A 那一条,这次改成整段复制),共用 `ci-realdb-step-contract.mjs` 的 `REAL_DB_STEP_IDS` / `isSuiteWiredInRealDbStep` / `isQuotedInTestExclude` / `realDbStepWholeFileArgs`,三条断言(exclude 存在、real-DB 步骤命中且不在 multitable 步骤下、文件存在于磁盘)。
+
+**allowlist 登记删除**:`packages/core-backend/tests/unit/approval-ci-coverage-allowlist.ts` 里 2026-09-21 那条(`file: '…backfill-down-guard.db.test.ts'`)整条删除——两点接线落地后闭世界普查判它 `covered: true`,登记不再是"刻意豁免",留着会被普查自己的 `console.warn` 点名"不再需要"。
+
+**vitest.integration.config.ts 核实**(advisor 提醒:先核实,不要假设):该文件只有一条 `include: ['tests/integration/**/*.{test,spec}.?(c|m)[jt]s?(x)']` 通配符,**没有**逐文件 include 白名单——`down-guard.db.test.ts` 早已被这条通配符匹配,不需要第三处接线;与五个同族兄弟文件的接线形状一致。
+
+**s6a 重钉**——`node -e` 调 `computePackageProvenancePinSet(repoRoot)` 后 `JSON.stringify(…, null, 2) + '\n'` 整体写回(未手改任何十六进制值),diff:
+```
+$ git diff --stat -- plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+```
+```diff
+-    "pluginTestsWorkflow": "3eff631ff2f7b69aaad12b814bb47c65fd73d6b9d9d9269e2ba9b4cbcc61f52a"
++    "pluginTestsWorkflow": "c5ec4ba6c5ad483e9d7094e9c85ad3e42eafa64ccb51fb5315188f5a1078c48b"
+```
+只有 `runtimeFiles.pluginTestsWorkflow` 这一个值变化——`plugin-tests.yml` 是本轮唯一改动、且被 s6a 钉住的文件;`vitest.config.ts`/allowlist/测试文件均**不在** s6a 钉集合内(核对 `PINNED_RUNTIME_FILES`/`PINNED_EVIDENCE_FILES`/`PINNED_S1..S6_MODULES`/`PINNED_MIGRATIONS`/`PINNED_EXTERNAL_MODULES` 六张表,均无这些路径)。`node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` 与 `…sealed-export-s5-public-export-surface.test.cjs` 重钉后两个都绿。
+
+**两条反向 mutation**(advisor 指出 round-1 的 G20 只证明了"接线前"状态,round-2 必须补"接线后仍会红"的证据,证明两点接线不是装饰):
+```
+$ # M5: 从 plugin-tests.yml 删掉刚加的 whole-file 参数那一行,cp 备份 → 删 → 跑 → cp 还原 → cmp 核
+$ node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
+ ✗ plugin-tests.yml runs the A3 backfill-down-guard suite as a whole file in the directory
+   real-DB step (id: approval-real-db-integration)
+   AssertionError: plugin-tests.yml real-DB step id "approval-real-db-integration" … must run
+   tests/integration/approval-template-groups-backfill-down-guard.db.test.ts as a whole-file vitest arg
+$ unset DATABASE_URL && npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts
+ ✗ T3 … is wired: …/approval-template-groups-backfill-down-guard.db.test.ts
+   Error: … UNCOVERED — excluded from the no-DB job … but NOT wired as a whole-file arg … this
+   suite runs NOWHERE
+# 还原(cmp 核对逐字节相同),两条守卫回绿
+
+$ # M6: 从 vitest.config.ts 删掉刚加的 exclude 条目,cp 备份 → 删 → 跑 → cp 还原 → cmp 核
+$ node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
+ ✗ vitest.config.ts excludes the A3 backfill-down-guard suite from the no-DB job
+   AssertionError: vitest.config.ts must exclude … as a live (non-commented) entry
+# 还原(cmp 核对逐字节相同),守卫回绿
+```
+两条都在**接线落地之后**的树上跑(不是 round-1 的"接线前"状态),证明这不是装饰性改动。
+
+### 14.7.3 P3-a —— 10 处悬空 `reviews/` 引用改写 + 新增全分支机械扫描守卫
+
+10 处(迁移文件 :9、`ApprovalTemplateGroupService.ts` ×3、`backfill-batches-list.db.test.ts` :20、`backfill-schema.db.test.ts` :13、`serialization.db.test.ts` ×2、`vitest.config.ts` :1837〔本轮之前冻结,现随两点接线一并解冻处理〕、`…batches-list-ci-wiring.test.mjs` :16)与迁移文件里 round-1 已修的那一行(:118,含 disclaimer 措辞本身仍带 `reviews/` 字面量)——共 11 处——全部改写为不含字面子串 `reviews/` 的措辞(形如"`<文件名>`,a private review record, not tracked in this repository"),而不是沿用 round-1 :118 的旧措辞(那句本身含 `reviews/` 三个字,advisor 指出照抄会让"零命中"守卫永远不可能通过)。
+
+```
+$ git grep -n "reviews/" -- 'packages/**' 'apps/**' 'plugins/**' 'scripts/**' | grep -v '\.md:'
+(空,exit 1)
+```
+
+新增守卫 `packages/core-backend/tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts`(`approval-*.test.ts` 命名,进入 T4 census 人口,不进 exclude 名单,常驻 required no-DB 作业):`git ls-files -z --cached -- packages apps plugins scripts` 派生域(排除 `.md`),逐文件逐行扫描字面子串 `reviews/`;三条用例(扫描域非空负控、全零命中、decoy 树正控——`withDecoyTree` 同款手法,仿 `source-files-no-raw-control-bytes.test.ts` 的既有约定,不是新发明一套机制)。
+
+```
+$ unset DATABASE_URL && npx vitest run tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts --reporter=verbose
+ ✓ the scanned domain is non-vacuous (scan negative control)
+ ✓ zero tracked non-Markdown file under packages/**, apps/**, plugins/**, scripts/** contains the literal substring "reviews/"
+ ✓ POSITIVE CONTROL: a planted `reviews/`-prefixed reference reds the leg
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+```
+
+### 14.7.4 P3-b —— 设计 MD 的手写行数括注(254 行)删除,未替换成另一个手写数字
+
+`git show 5b663dbe03:packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts | wc -l` = **259**,与验证 MD §14.6.1/§14.6.9 一致,设计 MD `:1147` 原写的"254 行"是错的且已被本轮改动(该文件现已不是 259 行——round 2 又新增了两条用例——所以写死任何数字都会立刻再次过期)。按 `feedback_record_fix_rounds_only_delete_never_handwrite_numbers`:**删除**括注,不写新数字。设计 MD 同一处追加一段"求值"(见 §14.7 引言前的设计 MD 改动本身——本文档不重复设计 MD 原文,只记入本轮 diff 范围)。
+
+### 14.7.5 P3-c —— `not.toMatch(/42P01/)` 空转断言改为对 `err.code` 的正面否定,配同客户端正控;如实标注非独立承重
+
+半应用用例(`:213` 起)把
+```diff
+-        expect((caught as Error).message).not.toMatch(/42P01/)
++        expect((caught as { code?: string } | undefined)?.code).not.toBe('42P01')
+```
+并在其后新增一条独立用例(POSITIVE CONTROL),用**同一个** `migrationDb` Kysely 客户端(不是 `src/db/pg` 的 `query()`——advisor 指出用不同客户端做正控会留一个可被下一轮门审点名的缺口)对一张确实不存在的表跑 `sql\`SELECT count(*) FROM …\`.execute(migrationDb!)`,断言 `.code === '42P01'` 且 `.message` 不含 `42P01`:
+```
+$ DATABASE_URL=… npx vitest --config vitest.integration.config.ts run …down-guard.db.test.ts --reporter=verbose
+ ✓ POSITIVE CONTROL for the .code assertion above: a genuinely-missing relation really does
+   surface SQLSTATE 42P01 in err.code (same Kysely client), never in err.message
+```
+**如实标注,不过度声称**:半应用用例里 `.code` 断言在**当前**代码路径下不是独立承重——`:238` 的 `toMatch(/ATG_BACKFILL_DOWN_BLOCKED/)` 先于它断言,M2 mutation(CASE 单语句形式还原)下 `:238` 先抛错误消息不含该 token 而红,`.code` 那一行根本执行不到。本轮的修法只解决"这条断言曾经永远不可能失败(空转)"这一半问题(P3-c 原始点名的缺陷),把它换成一条**能够**失败的断言,并用正控证明其字段选择正确;它是否会在某个尚未构造出的 mutation 下独立提供判别力,本轮未证明,不作此声称。
+
+### 14.7.6 NIT
+
+- **NIT-a**(用例间状态链,`migrationDb!` 非空断言脆弱):`migrationDb` 的赋值移入 `beforeAll`,消除"必须先跑到某条用例才被赋值"这一源码序依赖。**部分处置,余项披露**:未按报告"可选修法"进一步做到每条用例自行 `up()` 复原到所需形状——报告原话"判别力今天够用",本轮未改变这一点,仍是同一条状态链,只是链的起点不再脆弱。
+- **NIT-b**(每表分列计数从未被断言):case 2(数据齐全)追加 `rejects.toThrow(/batches=1, batch_groups=1, batch_links=1/)`(down() 天然幂等只读,追加第三次调用不产生副作用);半应用用例追加 `toMatch(/batches=1, batch_groups=0, batch_links=0/)`——后者对"`total` 窄化成只算 `batches`"这类 mutation 有独立判别力(前者三个数都是 1,窄化后 `total` 仍 >0,不会被这条轴单独抓到;半应用这条两个子表都是 0,窄化后 `total` 仍是 `batches=1`,判别力来自"消息里报告的具体数字"而不是"是否 reject")。
+- **NIT-c**(措辞:"discover it" 的实际路径是错误信息,不是 `--help`):迁移文件 :139 附近改写,明确"`--help` 供提前阅读的操作者,真正的发现路径是 `ATG_BACKFILL_DOWN_BLOCKED` 错误信息本身(直接点名变量)+ force 分支的 `console.warn`"。行为零改动,纯措辞。
+
+### 14.7.7 回归证据(全部本轮亲跑,处女库 `metasheet2_a3r3_20260921`)
+
+```
+$ npx tsc --noEmit                                                            # exit 0,零输出
+$ npx tsx src/db/migrate.ts --latest && npx tsx src/db/migrate.ts --list      # Applied: 413 / Pending: 0
+$ DATABASE_URL=… npx vitest --config vitest.integration.config.ts run …down-guard.db.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  9 passed | 1 skipped (10)                                        # 原 8 例(7+1 skip)→ 10 例(9+1 skip),+2 为 P2-A/P3-c 两条新用例
+$ DATABASE_URL=… npx vitest --config vitest.integration.config.ts run <8 文件> --reporter=dot
+ Test Files  8 passed (8)
+      Tests  88 passed | 8 skipped (96)                                       # 原 94(86+8 skip)→ 96(88+8 skip),差值 +2 与上一行一致
+$ DATABASE_URL=… npx vitest --config vitest.integration.config.ts run \
+    tests/integration/attendance-w4c0-durable-storage-smoke.db.test.ts \
+    tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts --reporter=dot
+ Test Files  2 passed (2)
+      Tests  8 passed (8)                                                     # 邻居健康,与 round-2 报告 G8 逐字相同
+$ psql … -Atc "select count(*) from approval_templates where key like 'atgbb%' …"   # 三张 phase-2 批次表 + phase-1 组/链接残留全 0
+$ unset DATABASE_URL && npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  352 passed (352)                                                 # 353 → 352:允许清单删 1 条 = -2 条(§5 每条 2 个 it),T4 新增 1 个扫描文件 = +1 条,净 -1,已核对非偶然(见下)
+$ unset DATABASE_URL && npx vitest run tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+$ node --test scripts/ops/*-ci-wiring.test.mjs                                 # 仓根
+ tests 495 / pass 495 / fail 0                                                 # 492 → 495,+3 为新守卫文件自身的三条用例
+$ node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
+ pass 1 / fail 0
+$ node --test plugins/plugin-integration-core/__tests__/sealed-export-s5-public-export-surface.test.cjs
+ pass 1 / fail 0
+$ env -u DATABASE_URL -u EXPECT_DB CI=true npx vitest run --reporter=dot        # core-backend 全量无库
+ Test Files  949 passed | 175 skipped (1124)
+      Tests  15105 passed | 1609 skipped (16714)
+```
+**353 → 352 的算术**(不是猜测,逐条核对):`APPROVAL_CI_COVERAGE_ALLOWLIST` 数组从 4 条降到 3 条,§5"allowlist integrity"每条登记发两个 `it()`(存在性 + why/date 格式),删 1 条 = **-2**;T4 loop 用 `readdirSync` 派生 `tests/unit` 下 `approval-*.test.ts` 文件名,新增的 `approval-a3-dangling-reviews-path-sweep.test.ts` 匹配该模式,自动进入 T4 population,+1 条"is wired: …"= **+1**。净 **-1**(353-2+1=352),与实测的 352 完全吻合,不是巧合也不是回归。
+
+**无库全量套件的一处未追查的偏差,如实披露而非强行对齐**:round-2 门审报告 G22 记录的基线是 `948 passed | 176 skipped (1124)` / `15103 passed | 1617 skipped (16720)`;本轮两次独立重跑(结果确定性一致)测得 `949 passed | 175 skipped (1124)` / `15105 passed | 1609 skipped (16714)`。`949-948=+1` 与 `15105-15103=+2` 可以直接归因于本轮新增的两个文件(`approval-a3-dangling-reviews-path-sweep.test.ts` 3 例 + census 文件净 +1 例,见上;但 census 文件本身不是"新 Test File",只是内部 it 数变化,不贡献"Test Files"计数——因此"+1 Test File"应完全来自新增的 sweep 守卫文件,算术吻合)。**`175` 比预期的 `176`(不变)少 1、`1609` 比预期的 `1617` 少 8**,这两个 skip 数的下降**未被本轮追查**——本仓存在至少 5 个依赖 `process.platform`/外部可执行文件探测的 `skipIf` 门(与本切片无关),差异更可能来自本机环境与门审报告原会话环境的探测结果不同,而不是本轮 diff 引入的行为变化;两次重跑均 **0 failed**,已是本轮判据要求的下限(0 fail),该项差异记为**未裁定的环境噪声**,不作"已排除其它可能性"的强声明。
+
+### 14.7.8 收尾
+
+```
+$ dropdb -U ms2testbed metasheet2_a3r3_20260921
+```
+`git worktree remove --force` 只删本轮自建的一次性 detached 工作树(绝对路径点名);未触碰实现者的 `wt-groups-p2`(@ `866b0d63e5`,落后于本轮基线,未同步)或 `git worktree list` 里的任何其它条目。mutation 还原(M3/M5/M6)全部 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` 逐字节核;全程未使用 `git checkout --` / `git reset --hard` / `git stash drop`。未合并、未 undraft、未开/改 PR、未把迁移应用到任何共享/staging/prod 库、未改锁文正文。资源登记见 `~/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/soak-working/resource-inventory-20260920.md`。一切仍是候选,供下一轮门审核对。
+
 ---
 
 ## 13. P3 卫生轮(2026-09-19)

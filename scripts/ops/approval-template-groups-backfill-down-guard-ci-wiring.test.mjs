@@ -11,21 +11,27 @@ import {
 } from './ci-realdb-step-contract.mjs'
 
 // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3 backfill,
-// batch LIST unit (`listApprovalTemplateGroupBackfillBatches`,
-// `src/services/ApprovalTemplateGroupService.ts`; design-gate P1-5 / changesRequired #5,
-// `design-gate-A3-phase2-20260918.md`, a private review record not tracked in this repository).
-// CI two-point wiring contract (no DB): the list
-// suite proves `created_at DESC` ordering + limit/offset pagination + org scoping + the
-// `rolledBackAt` round trip against real Postgres — meaningless without a DB. It needs BOTH
-// (1) the vitest.config.ts exclude entry (so the no-DB job cannot skip-green it) AND (2) the
-// plugin-tests.yml directory real-DB whole-file step (so a real-DB run actually names it).
-// Removing either point makes those proofs silently never execute while exact-head CI stays
-// green. This source-level guard (no DB) reddens if either point is dropped. It runs in the no-DB
-// `test` job, so it gates every PR. Same per-file dedicated-guard convention as the four sibling
-// backfill suites' own guards (schema / preview / execute / rollback).
+// batch-table DDL `down()` data-retention guard (candidate, not yet ratified — see the migration
+// file's own doc comment for the full provenance chain). Round-2 implementation-gate fix
+// (`impl-gate-A3-guarded-down-round2-20260921.md` P2-B): this suite existed since round 1 but was
+// deliberately left out of both vitest.config.ts's exclude list and this plugin-tests.yml real-DB
+// step — registered instead as a dated, reviewable exemption in
+// `packages/core-backend/tests/unit/approval-ci-coverage-allowlist.ts` — while round 1's own hard
+// constraint required plugin-tests.yml/s6a to stay byte-identical that round. That constraint does
+// not apply to this round, so the deferred two-point wiring lands here, in the same commit as the
+// allowlist exemption's removal and the s6a re-pin, per this repo's new-file census convention.
+// CI two-point wiring contract (no DB): the suite proves the guard fail-closes while any of the
+// three batch tables holds a row, force-unlocks on the exact string "true" only, and does not
+// crash with 42P01 on a fully-missing or half-applied table shape — meaningless without a DB. It
+// needs BOTH (1) the vitest.config.ts exclude entry (so the no-DB job cannot skip-green it) AND
+// (2) the plugin-tests.yml directory real-DB whole-file step (so a real-DB run actually names it).
+// Removing either point makes those proofs silently never execute while exact-head CI stays green.
+// This source-level guard (no DB) reddens if either point is dropped. It runs in the no-DB `test`
+// job, so it gates every PR. Same per-file dedicated-guard convention as the five sibling backfill
+// suites' own guards (schema / preview / execute / rollback / batches-list).
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
-const FILE = 'tests/integration/approval-template-groups-backfill-batches-list.db.test.ts'
+const FILE = 'tests/integration/approval-template-groups-backfill-down-guard.db.test.ts'
 
 // Located by the step's EXACT stable `id:` in plugin-tests.yml — never by its `- name:` title.
 // Title-prefix anchoring was bypassable: an earlier decoy step whose name merely CONTAINS the
@@ -34,7 +40,7 @@ const FILE = 'tests/integration/approval-template-groups-backfill-batches-list.d
 // so membership of the path in a step that can never run no longer passes.
 const STEP_ID = REAL_DB_STEP_IDS.approval
 
-test('vitest.config.ts excludes the A3 backfill-batches-list suite from the no-DB job', () => {
+test('vitest.config.ts excludes the A3 backfill-down-guard suite from the no-DB job', () => {
   const cfg = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
   // Structural check (parses the direct test.exclude array, strips line comments before
   // matching), NOT `cfg.includes(...)` — a plain substring match stays green when the exclude
@@ -46,7 +52,7 @@ test('vitest.config.ts excludes the A3 backfill-batches-list suite from the no-D
   )
 })
 
-test('plugin-tests.yml runs the A3 backfill-batches-list suite as a whole file in the directory real-DB step (id: approval-real-db-integration)', () => {
+test('plugin-tests.yml runs the A3 backfill-down-guard suite as a whole file in the directory real-DB step (id: approval-real-db-integration)', () => {
   const wf = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
   assert.ok(
     isSuiteWiredInRealDbStep(wf, STEP_ID, FILE),
@@ -61,7 +67,7 @@ test('plugin-tests.yml runs the A3 backfill-batches-list suite as a whole file i
   )
 })
 
-test('the A3 backfill-batches-list suite file exists on disk', () => {
+test('the A3 backfill-down-guard suite file exists on disk', () => {
   // Third point: both wiring texts can stay intact while the suite is renamed/deleted — vitest
   // exits 0 on an unmatched path argument, so CI stays green and the proof never runs.
   assert.ok(
