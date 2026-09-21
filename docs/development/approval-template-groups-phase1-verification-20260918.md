@@ -2094,7 +2094,7 @@ $ git diff --stat a728ed65532918e3726171d0c42f44d6be7e0ba9..HEAD
 
 ### 27.1 迁移改动(候选,DDL 未应用到任何共享/staging/生产库)
 
-`packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts`:`atg_name_nonblank` 的谓词由 `CHECK (name ~ '[!-~]')` 改为 `CHECK (btrim(name) <> '')`(现场行号 `:63`);`atg_org_nonblank`(`:40`)与 `atgl_org_nonblank`(`:101`)两处 **不变**。列上方的多行注释按 27.0 的措辞重写为「Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation …NOT owner-ratified, NOT authorized)」,并记录了一个本轮修复的真实事故:该注释块位于 `sql\`...\`` 标签模板字面量内部,更早一版注释里内嵌了反引号(用反引号包住标识符,如常规 JSDoc 注释的写法)——这在模板字面量内部会提前终止字符串,`tsx`/`esbuild` 转译时报 `Expected ";" but found "lock"`(实测,现场复现见下方 27.3);已改为不含任何反引号字符的写法,并在注释里加了一句显式提醒,防止未来编辑再引入同一个错误。
+`packages/core-backend/src/db/migrations/zzzz20260918090100_create_approval_template_groups.ts`:`atg_name_nonblank` 的谓词由 `CHECK (name ~ '[!-~]')` 改为 `CHECK (btrim(name) <> '')`(现场行号 `:63`);`atg_org_nonblank`(`:40`)与 `atgl_org_nonblank`(`:101`)两处 **不变**。列上方的多行注释按 27.0 的措辞重写为「Erratum 3 CANDIDATE (PROPOSED 2026-09-19, pending owner confirmation …NOT owner-ratified, NOT authorized)」,并记录了一个本轮修复的真实事故:该注释块位于 `sql\`...\`` 标签模板字面量内部,更早一版注释里内嵌了反引号(用反引号包住标识符,如常规 JSDoc 注释的写法)——这在模板字面量内部会提前终止字符串,`tsx`/`esbuild` 转译时报 `Expected ";" but found "lock"`(实测,现场复现见下方 27.3);已改为不含任何反引号字符的写法,并在注释里加了一句显式提醒,防止未来编辑再引入同一个错误。
 
 ### 27.2 服务层改动(候选,零行为收窄)
 
@@ -2298,6 +2298,7 @@ JS 的 `\s` 与 `String.prototype.trim` 的裁剪集相同,已覆盖空格/TAB/C
 ### 28.5 为什么是**就地改迁移**而不是新增后续迁移(前提已推导,不是照抄任务书)
 
 `up()` 用的是 `CREATE TABLE IF NOT EXISTS`。这意味着**在任何已经把 `zzzz20260918090000` 记进迁移历史的库里,改过的这份文件什么都不会做** —— 不报错、不告警、旧 CHECK 原封不动。所以「就地改」只有在「该迁移在任何环境都没应用过」成立时才是对的策略,这个前提必须推导,不能承接。
+> **20260921 F1 改名后求值(不改上文论证,只加求值)**:上文论证的前提是「该迁移文件从未被任何环境记录过」，这在改名前后都成立且不受影响——改名不是「让一个已记录的迁移变成没记录」，而是换了一个从未出现在任何 ledger 里的新名字（`zzzz20260918090100_create_approval_template_groups.ts`）。因此上文「就地改是安全的」这个结论的**机制**变了（不再是靠 `CREATE TABLE IF NOT EXISTS` 的幂等重跑吸收一次内容变更，而是一个全新迁移名的首次执行），但**结论不变**：本迁移在 `origin/main` 上依旧 `ABSENT`（见下一条 `git cat-file -e` 证据，命令与结果对着的是改名前的文件名，是那次探测的既成记录，未改），本 PR 依旧 Draft、未合并、未应用到任何共享/staging/生产库，`up()` 仍是 `CREATE TABLE IF NOT EXISTS`——所以即便某个假设的环境曾经跑过旧文件名（已知没有），改名后重跑新文件名也只是多一条 ledger 行，不会双写、不会报错。
 
 - `git cat-file -e origin/main:packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts` ⇒ **ABSENT on origin/main**(`origin/main = 6ea19e2dea6c1e6dc87f5c0d7635ae6fc4f3e1c6`)。
 - 生产的部署与迁移只由 `docker-build.yml` 手动 dispatch 从 main 走(见 `feedback_deploy_migration_check` / 基础设施记录)⇒ **没有任何已部署环境可能跑过它**。
