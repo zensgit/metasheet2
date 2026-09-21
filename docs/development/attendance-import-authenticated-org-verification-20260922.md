@@ -104,7 +104,7 @@ node --test \
   scripts/ops/attendance-delegated-admin-contract.test.mjs \
   scripts/ops/attendance-prod-auth-fallback-workflow-contract.test.mjs \
   scripts/ops/attendance-verifier-contract.test.mjs
-# PASS: 41/41
+# PASS: 44/44 at implementation head d20b04d7d
 
 NODE_PATH=/Users/chouhua/Downloads/Github/metasheet2/node_modules \
   node --test scripts/ops/attendance-acceptance-wiring.test.mjs
@@ -122,6 +122,16 @@ Mutation: remove the explicit role=admin rejection.
 Result: 0/2 matching tests passed; both platform-admin refusal legs failed.
 Restore: performed with apply_patch; focused suite returned 41/41 PASS.
 ```
+
+Independent Grok 4.6 review of the superseded first implementation head
+`e5912b61b` found one P1: each API/browser verifier may refresh its bearer after
+the runner-level posture check, while the old refresh path proved only tenant
+equality. A same-tenant platform-admin refresh could therefore become the
+actual exercise principal. Head `d20b04d7d` closes this by rechecking the full
+delegated posture before adopting every refreshed token, by making delegated
+contract failures non-recoverable, and by adding one refreshed-platform-admin
+negative for each of the three consumers. A fresh independent exact-head gate
+on `d20b04d7d` remains required.
 
 The strict workflow now requires the tenant-bound delegated-admin contract,
 and `attendance-run-gates.sh` executes the read-only `/auth/me` verifier before
