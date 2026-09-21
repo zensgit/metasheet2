@@ -12,6 +12,36 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Current-main Replay Investigation (2026-09-21)
+
+Local merge `45458ad0c21a5d0d7bd743855c240d175927a420` has ordered parents
+`afa50aee84fdc92f8b4de8ab625b4be1469accd7` and
+`cd42eaf7455f03dd99021a02c47c42f1f3db6484`. Only
+`scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs` needed manual resolution:
+retain spawnSync plus main's readFileSyncRaw/CRLF-normalizing wrapper. Other
+paths auto-merged. Wiring 41/41, archive Web 161/161 and core type-check passed.
+Diff-check against the second parent passed; first-parent diff includes inherited
+main whitespace warnings, not modified to hide them.
+
+The first full browser run failed after a 1440 gallery check on a generic
+API_REQUEST_FAILED event. Earlier archive capture/restore and attachment download
+assertions passed. The log did not identify the request; this failure remains
+unattributed and is not classified as a harmless cancellation or product defect.
+Log: `/private/tmp/tm-cd42-replay-browser.log`. Owned DB/connections and cluster
+were cleaned despite failure.
+
+Diagnostic-only child `e1cc7eb052f935dc0f4d67808b31912a9de1a3aa` retains
+the same strict zero-failed-request assertion and records synthetic request method,
+pathname (no query/host) and ABORTED versus TRANSPORT enum. No exception allowlist
+or product behavior change. Two complete browser runs passed with these bytes:
+`/private/tmp/tm-cd42-browser-diagnostic.log` (before commit) and
+`/private/tmp/tm-e1cc-browser-repeat.log` (clean exact e1cc head). Both cover
+32 migration replay gates, historical 47/59/127, desktop/mobile component and
+application attachment restoration/gallery, and stage arbitration/drain; owned
+DB/connections/storage/cluster cleanup succeeded. These passes do not establish
+the first failure's cause. Do not claim its root-cause closure or remote CI for
+this local-only replay. Prior afa50 remote terminal green is historical only.
+
 ## CI Backend Drain Fix (2026-09-20)
 
 Follow-up code: `494009d93dee52c64e581110fa4cade1b14440a4`, tree
