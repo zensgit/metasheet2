@@ -70,7 +70,11 @@ let sheetAdminGrantOn: string | null = null
 
 function answerFor(sql: string, params: unknown[]): { rows: unknown[]; rowCount: number } {
   const text = collapse(sql)
-  if (/^SELECT deleted_at FROM meta_sheets WHERE id = \$1$/i.test(text)) {
+  // BOTH forms of the liveness read answer from the SAME sheet table: the gate's pool-level read, and
+  // the in-transaction `FOR UPDATE` re-check the write paths take (#5938). A fake that answered only the
+  // unlocked form would report every live sheet as absent once inside the transaction, and the control
+  // leg ("an authorised caller succeeds on a LIVE sheet") would fail for a fixture reason.
+  if (/^SELECT deleted_at FROM meta_sheets WHERE id = \$1(?: FOR UPDATE)?$/i.test(text)) {
     const id = params[0]
     if (id === LIVE_SHEET || id === OTHER_LIVE_SHEET) return { rows: [{ deleted_at: null }], rowCount: 1 }
     if (id === DELETED_SHEET) return { rows: [{ deleted_at: '2026-09-01T00:00:00.000Z' }], rowCount: 1 }

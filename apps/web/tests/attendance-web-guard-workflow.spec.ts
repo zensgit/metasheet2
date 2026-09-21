@@ -51,10 +51,58 @@ function targetedRunCommand(source: string): string {
     .join('\n')
 }
 
+/**
+ * The required lane's `exec npx vitest run …` as ONE logical command line.
+ *
+ * Q8 (2026-09-21): that invocation is no longer a single physical line — it is one token per line,
+ * backslash-continued and alphabetised, so that concurrent spec-adding branches stop conflicting
+ * pairwise on one 11 KB line. A `line.startsWith('exec npx vitest run ')` parse now matches only
+ * the header, whose sole "token" is the continuation backslash, and would report every attendance
+ * spec below as unregistered. So: strip whole-line `#` comments (the script carries a lot of prose
+ * naming files it does NOT run), join continuations, then take the exec line.
+ *
+ * Asserted-not-assumed: this throws rather than returning '' if the shape is not what it claims, so
+ * a future rewrite cannot quietly turn the `toContain` checks below into assertions about ''.
+ */
+function requiredLaneExecCommand(script: string): string {
+  const logical: string[] = []
+  let buf: string | null = null
+  for (const raw of script.split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    if (/^\s*#/.test(line)) continue
+    const trimmedRight = line.replace(/\s+$/, '')
+    const continued = trimmedRight.endsWith('\\')
+    const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
+    buf = buf === null ? body : `${buf} ${body}`.trim()
+    if (!continued) {
+      logical.push(buf)
+      buf = null
+    }
+  }
+  if (buf !== null) logical.push(buf)
+
+  const execLines = logical.filter(line => /^exec\s+npx\s+vitest\s+run\b/.test(line))
+  if (execLines.length !== 1) {
+    throw new Error(`run-required-web-tests.sh must have exactly one exec vitest invocation, found ${execLines.length}`)
+  }
+  return execLines[0]
+}
+
 describe('attendance web guard workflow contract', () => {
+  it('parses the required lane as one exec logical line, not one physical line', () => {
+    // Pins the parsing contract the assertion below depends on, and shows why it changed: the
+    // physical-line form yields nothing usable against the current file.
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    const command = requiredLaneExecCommand(required)
+    expect(command.split(/\s+/).length).toBeGreaterThan(300)
+
+    const physical = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
+    expect(physical.slice('exec npx vitest run '.length).trim()).toBe('\\')
+  })
+
   it('runs makeup regressions in both unit gates and the dedicated browser lane', () => {
     const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
-    const requiredCommand = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
+    const requiredCommand = requiredLaneExecCommand(required)
     for (const spec of ['attendanceEmployeeMakeupRequestCard', 'attendanceEmployeeLeaveRequestCard', 'attendance-selfservice-dashboard']) {
       expect(requiredCommand.split(/\s+/)).toContain(spec)
       expect(targetedRunCommand(workflow).split(/\s+/)).toContain(spec)

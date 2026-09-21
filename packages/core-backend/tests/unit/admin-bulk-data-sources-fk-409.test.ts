@@ -38,6 +38,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type Express } from 'express'
 import request from 'supertest'
+import { isAdmin } from '../../src/rbac/service'
 import { usePinnedServer } from '../utils/pinned-server'
 
 // ── the fake kysely handle ────────────────────────────────────────────────────
@@ -133,6 +134,20 @@ vi.mock('../../src/db/kysely', () => ({
 vi.mock('../../src/db/pg', () => ({ pool: null }))
 vi.mock('../../src/services/SnapshotService', () => ({}))
 vi.mock('../../src/audit/audit', () => ({}))
+/**
+ * RBAC double, same literal shape as tests/unit/admin-dlq-read-authz.test.ts:28-30 and
+ * admin-read-gates-batch3-authz.test.ts:83-85. The fixture principal below is already named
+ * 'admin-fixture'; this stub only makes that stated identity effective, it does not widen anything.
+ *
+ * Why it is needed here: requireAdminRole() (guards/audit-integration.ts:148) calls
+ * `isAdmin(user.id)`, and rbac/service.ts:19 defaults its runner to `query` from src/db/pg — which
+ * the `{ pool: null }` stub above does not export. Without this mock every request under test would
+ * be answered 503 RBAC_CHECK_FAILED by that guard's catch, masking the 409/400/500 boundaries this
+ * suite actually asserts.
+ */
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: vi.fn().mockResolvedValue(true),
+}))
 
 import { initAdminRoutes } from '../../src/routes/admin-routes'
 import { getSafetyGuard } from '../../src/guards/SafetyGuard'
@@ -195,6 +210,11 @@ function mountApp(): void {
 }
 
 beforeEach(() => {
+  // Re-arm inside beforeEach, not only at the vi.mock factory: this suite's afterEach calls
+  // vi.restoreAllMocks(), which strips the factory's mockResolvedValue and would leave isAdmin
+  // returning undefined from the second test onwards — requireAdminRole() then answers 403 and
+  // every 409/400/500 boundary below would be measuring the gate instead of the error mapping.
+  vi.mocked(isAdmin).mockResolvedValue(true)
   state = freshState()
   mountApp()
 })
