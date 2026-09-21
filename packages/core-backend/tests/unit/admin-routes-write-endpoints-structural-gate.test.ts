@@ -26,34 +26,43 @@
  *
  * 这套识别的正反自证在 `describe('识别机制的正反自证')` 里逐条落地：
  *   正：`requireAdminRole()` 的两次调用互相匹配；`protectAdminOperation(...)` 的 **[0]** 匹配
- *       （实读 `audit-integration.ts:260-262`：`protectAdminOperation = [requireAdminRole(), auditSafetyOperation(op)]`
+ *       （实读 `audit-integration.ts:261-263`：`protectAdminOperation = [requireAdminRole(), auditSafetyOperation(op)]`
  *        —— 它**内含** admin 门且在首位，所以 `...protectAdminOperation(x)` 展开后首位仍是门）；
- *       已知有门的 `POST /safety/enable`（`admin-routes.ts:141`）首位匹配。
+ *       已知有门的 `POST /safety/enable`（`admin-routes.ts:214-215`）首位匹配；
+ *       已知有门的**读**路由 `GET /slo/status`（`admin-routes.ts:1646`，#5914 补的门）首位匹配 ——
+ *       这一条证明匹配器不挑方法，认的是函数本身。
  *   反：`protectAdminOperation(...)` 的 **[1]**（审计中间件）不匹配；`requireSafetyCheck({...})` 不匹配
  *       （这正是 #5665 的要害：确认层不是授权门）；裸 `(req,res,next)=>next()` 不匹配；
- *       已知无门的读路由 `GET /slo/status`（`admin-routes.ts:1392`）首位不匹配。
+ *       `undefined` / `null` / 字符串 `'requireAdminRole'` 都不匹配。
  * 也就是说，这个匹配器既不是「谁都认」（反例全不匹配），也不是「谁都不认」（正例全匹配）。
  * 附带一提，「谁都不认」这种退化是**fail-closed** 的：匹配器失灵会让每条写路由都报违规、整片变红，
  * 不会静悄悄放行。
  *
+ * （历史：本文件初版拿「已知**无门**的 `GET /slo/status`」当反例。#5914 把 `/api/admin` 读侧无门 GET
+ *  清零之后那条反例不再成立，2026-09-21 rebase 到 main 时改成上面的正向对照；反例职责由
+ *  `requireSafetyCheck` / 裸中间件 / 非函数继续承担，正反两侧都仍然非空。）
+ *
  * 边界：本文件只管**写方法**（POST/PUT/PATCH/DELETE，外加 `router.all` —— 它同样应答写方法）。
- * 读侧（`GET /dlq`、`/queues`、`/shards*`、`/ratelimits*`、`/slo/status`、`/health/*`、`/safety/status`
- * 等无门 GET）是 #5665 §4 第 7 条登记的另一个面，本文件**不管**。
+ * 读侧是 #5665 §4 第 7 条登记的另一个面，本文件**不管**（#5678 批次 / #5914 已把它收口，但收口与否
+ * 都不影响本文件的判定）。
  *
  * 豁免表分两类，以及为什么必须分
  * ------------------------------
  * 核心不变量只有一条：**无门写路由 ⊆ 豁免表**（没登记的洞 = 红）。刻意**不是**等式。
  *
  * 等式（「豁免表恰等于今天的无门写路由集合」）看着更紧，实际有害：它等价于断言「豁免表里每一条
- * 今天都必须仍然无门」，于是**修洞的 PR 一合并，本 spec 就红**。#5667 / PR #5677（给 /safety/rules
- * 四条补门）与本支互相独立、可能先合 —— 硬红会把两条 PR 耦合成固定合并顺序，组合树验证还会假红。
- * 守卫的职责是拦住新洞，不是给修洞的人设路障。
+ * 今天都必须仍然无门」，于是**修洞的 PR 一合并，本 spec 就红**，两条互相独立的 PR 被强耦合成固定
+ * 合并顺序，组合树验证还会假红。守卫的职责是拦住新洞，不是给修洞的人设路障。
+ * （这不是假想：本文件初版给 `/safety/rules` 四条写路由登记了 `todo:'#5667'` 的临时豁免，
+ *  #5710 把门补上后它们已在 2026-09-21 的 rebase 里删除 —— 子集关系让那次补门零摩擦。）
  *
  * 所以豁免分两类（`Exemption.todo`）：
  *  - **永久豁免**（无 `todo`）：`POST /health/check`、两条 `*-unsafe`。理由是「设计上就不该有中间件门」。
  *    它们要是哪天有门了 = 设计变了 → **硬红**，必须来删豁免。
- *  - **临时豁免**（有 `todo`，如 `#5667`）：已登记、有人在修的洞。门补上了是我们盼着的结果 →
+ *  - **临时豁免**（有 `todo`，填 issue/PR 号）：已登记、有人在修的洞。门补上了是我们盼着的结果 →
  *    **不红**，只用 `console.warn` 点名「这几条豁免已可删除」，让人看得见又不挡合并。
+ *    今天 `TEMPORARY_EXEMPTIONS` 为空（上一批已随 #5710 收口），机制本身由
+ *    `describe('豁免表')` 里的合成用例证明仍然是活代码，不会烂在那儿。
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
@@ -140,6 +149,10 @@ interface Exemption {
    *  - **临时豁免**（填 `todo`）：门补上就是我们盼着的结果。如果这里也硬红，那么修洞的那个 PR
    *    一合并就会把本 spec 打红，两条互相独立的 PR 被强耦合成固定合并顺序，组合树验证还会假红。
    *    所以临时豁免「已可删除」只**提示不拦**（见 `describe('豁免表')` 里那条 console.warn 用例）。
+   *
+   * 今天没有任何临时豁免在册（上一批 `/safety/rules` 四条随 #5710 补门后已删），所以这条分支是
+   * **有意保留的空位**：下一个「已登记、有人在修」的洞直接填 `todo` 即可，不必重新论证机制。
+   * 机制没随之变成死代码 —— `describe('豁免表')` 里的合成用例每次都把这条路径跑一遍。
    */
   todo?: string
 }
@@ -150,7 +163,7 @@ const EXEMPTIONS: readonly Exemption[] = [
     method: 'post',
     path: '/health/check',
     reason:
-      '只读探针：handler（admin-routes.ts:2047-2072）只调用 getHealthAggregator().checkHealth() 取一次快照并回摘要，' +
+      '只读探针：handler（admin-routes.ts:2347-2372）只调用 getHealthAggregator().checkHealth() 取一次快照并回摘要，' +
       '不写任何状态。#5665 设计 §2.1 据此判定它不属于「写/破坏性」面，未加门；' +
       '「任意已认证用户可触发的探测/放大面」记在 §4 残余第 4 条，属读侧、本文件不管。',
   },
@@ -158,7 +171,7 @@ const EXEMPTIONS: readonly Exemption[] = [
     method: 'post',
     path: '/plugins/reload-all-unsafe',
     reason:
-      '自带 in-handler 双门（admin-routes.ts:770-785）：ALLOW_UNSAFE_ADMIN !== "true" → 403 UNSAFE_DISABLED；' +
+      '自带 in-handler 双门（admin-routes.ts:836-851）：ALLOW_UNSAFE_ADMIN !== "true" → 403 UNSAFE_DISABLED；' +
       'req.user.roles 不含 "admin" → 403 ADMIN_REQUIRED。它不属于「只靠确认层」那一族。' +
       '但这条角色判断读的是 token 上的 roles 数组，而 requireAdminRole() 查 user_roles —— ' +
       '两套 admin 口径共存是 #5665 §4 残余第 5 条登记的待统一项，统一之前不强求它换成中间件门。',
@@ -167,45 +180,16 @@ const EXEMPTIONS: readonly Exemption[] = [
     method: 'post',
     path: '/plugins/:id/reload-unsafe',
     reason:
-      '同上，in-handler 双门在 admin-routes.ts:821-836；口径不一致同样记在 #5665 §4 残余第 5 条。',
+      '同上，in-handler 双门在 admin-routes.ts:887-902；口径不一致同样记在 #5665 §4 残余第 5 条。',
   },
 
-  // ---- 子路由 /safety/rules（protection-rules.ts）—— 全部是**临时豁免** ----
-  // 这四条今天是**真的无门**，不是设计如此。#5665 设计 §2.1 / §4 残余第 7 条已登记：
-  //   四条写端点零授权门，且身份取自**可伪造的 `x-user-id` 请求头`**（protection-rules.ts:21、:113）。
-  //   issue #5667 / W4-A 分支 `fix/protection-rules-require-admin-and-identity`（PR #5677）正在修。
-  //
-  // 补门之后这四条豁免就该删掉，但**删豁免这件事不由本 spec 强制**：#5677 与本支互相独立、
-  // 可能先合。若把「临时豁免覆盖了已有门路由」做成硬红，#5677 一合就会把本 spec 打红 ——
-  // 两条独立 PR 被强耦合成固定合并顺序，组合树验证还会假红。所以它们走 `todo` 这一路：
-  // 已可删除时只 console.warn 点名（见 `describe('豁免表')`），不拦合并。
-  {
-    method: 'post',
-    path: '/safety/rules',
-    todo: '#5667',
-    reason: '在修（#5667 / PR #5677）：protection-rules.ts:111 创建规则，零授权门，身份取自 x-user-id 请求头。',
-  },
-  {
-    method: 'patch',
-    path: '/safety/rules/:id',
-    todo: '#5667',
-    reason: '在修（#5667 / PR #5677）：protection-rules.ts:203 改规则，零授权门。',
-  },
-  {
-    method: 'delete',
-    path: '/safety/rules/:id',
-    todo: '#5667',
-    reason: '在修（#5667 / PR #5677）：protection-rules.ts:244 删规则，零授权门。',
-  },
-  {
-    method: 'post',
-    path: '/safety/rules/evaluate',
-    todo: '#5667',
-    reason:
-      '在修（#5667 / PR #5677）：protection-rules.ts:267 触发规则求值，零授权门。' +
-      '（求值本身不落库，但它是 POST 且吃 body，按写方法口径一并登记；若 #5677 判定它只需读权限，' +
-      '这条豁免与理由要一起改。）',
-  },
+  // ---- 子路由 /safety/rules（protection-rules.ts）：曾经有四条临时豁免，已删 ----
+  // 初版给这四条写路由登记了 `todo:'#5667'` 的临时豁免（当时零授权门、身份取自可伪造的
+  // `x-user-id` 请求头）。#5710（合入 #5667 / PR #5677 的修复）已把门补上 ——
+  // 实读 protection-rules.ts:236 / :328 / :369 / :392 首位都是 `requireAdminRole()` ——
+  // 所以 2026-09-21 rebase 到 main 时删掉这四条。它们现在走的是主路径：有门 → 不进 ungated，
+  // 谁把门摘了就会撞上核心不变量（不在豁免表里的无门写路由 = 红）。
+  // 门的存在另由 `describe('子路由挂载面')` 里那条 /safety/rules 用例逐条钉住。
 ]
 
 /** 永久豁免：设计上就不该有中间件门。门补上了 = 设计变了 → 硬红。 */
@@ -215,10 +199,10 @@ const TEMPORARY_EXEMPTIONS = EXEMPTIONS.filter((e) => !!e.todo)
 
 const EXEMPT_KEYS = new Set(EXEMPTIONS.map((e) => `${e.method} ${e.path}`))
 
-/** 子路由挂载点的固定集合 —— 新增子路由必须来这里登记（admin-routes.ts:2086-2087）。 */
+/** 子路由挂载点的固定集合 —— 新增子路由必须来这里登记（admin-routes.ts:2386-2387）。 */
 const EXPECTED_SUB_ROUTER_MOUNTS = ['/snapshots', '/safety/rules'] as const
 
-/** `/api/admin` —— index.ts:1884 的挂载前缀，只用于把失败信息里的路径写成人读的样子。 */
+/** `/api/admin` —— index.ts:1984 的挂载前缀，只用于把失败信息里的路径写成人读的样子。 */
 const ADMIN_MOUNT = '/api/admin'
 
 // --------------------------------------------------------------------------
@@ -371,8 +355,8 @@ function exemptionsCoveringGatedRoutes(exemptions: readonly Exemption[]): Exempt
 let router: Router
 
 beforeAll(() => {
-  // initAdminRoutes 返回的就是 admin-routes.ts 的模块级单例 router（:69 建、:2132 返回），
-  // 也就是 index.ts:1884 真正挂到 `/api/admin` 的那一个 —— 断言这一点，免得将来它变成
+  // initAdminRoutes 返回的就是 admin-routes.ts 的模块级单例 router（:73 建、:2432 返回），
+  // 也就是 index.ts:1984 真正挂到 `/api/admin` 的那一个 —— 断言这一点，免得将来它变成
   // 「每次新建一个」而本守卫却在量一个没人用的对象。
   router = initAdminRoutes({})
   expect(router).toBe(adminRouter)
@@ -388,7 +372,7 @@ describe('识别机制的正反自证', () => {
     const chain = protectAdminOperation(OperationType.FORCE_RELOAD)
     expect(Array.isArray(chain)).toBe(true)
     expect(chain).toHaveLength(2)
-    // 这条就是「protectAdminOperation 内含 admin 门」的实读证据（audit-integration.ts:260-262）。
+    // 这条就是「protectAdminOperation 内含 admin 门」的实读证据（audit-integration.ts:261-263）。
     expect(isAdminGate(chain[0])).toBe(true)
     expect(isAdminGate(chain[1])).toBe(false)
   })
@@ -404,7 +388,7 @@ describe('识别机制的正反自证', () => {
     expect(isAdminGate('requireAdminRole')).toBe(false)
   })
 
-  it('正：已知有门的 POST /safety/enable（admin-routes.ts:141）首位被认出来', () => {
+  it('正：已知有门的 POST /safety/enable（admin-routes.ts:214-215）首位被认出来', () => {
     const route = auditWriteRoutes(router).all.find(
       (r) => r.method === 'post' && r.path === '/safety/enable',
     )
@@ -412,22 +396,34 @@ describe('识别机制的正反自证', () => {
     expect(isAdminGate(route!.firstHandler)).toBe(true)
   })
 
-  it('反：已知无门的读路由 GET /slo/status（admin-routes.ts:1392）首位不被认出来', () => {
-    // 读路由不在写面收集里，这里直接从栈上取，证明匹配器不是「见 handler 就说是门」。
+  // 初版这里是「反：已知**无门**的读路由 GET /slo/status 首位不被认出来」。#5914 给它补了门
+  // （admin-routes.ts:1646），那条反例随之失效 —— 2026-09-21 rebase 到 main 时改成正向对照。
+  // 反例职责没有落空：上面三条（protectAdminOperation[1]、requireSafetyCheck、裸中间件/非函数）
+  // 仍然把「谁都认」这种退化挡在外面。
+  it('正：已知有门的读路由 GET /slo/status（admin-routes.ts:1646，#5914 补的门）首位被认出来', () => {
+    // 读路由不在写面收集里，这里直接从栈上取 —— 顺带证明匹配器认的是**函数本身**，不挑方法：
+    // 同一个 requireAdminRole() 挂在 GET 上照样被认出来。
     const layer = asRouterLike(router).stack.find(
       (l) => l.route?.path === '/slo/status' && l.route.methods.get === true,
     )
     expect(layer, 'GET /slo/status 没找到，取栈方式可能失效了').toBeDefined()
-    expect(isAdminGate(layer!.route!.stack[0]?.handle)).toBe(false)
+    expect(
+      isAdminGate(layer!.route!.stack[0]?.handle),
+      'GET /slo/status 的首位不再是 requireAdminRole() —— #5914 的门被摘了，或取栈方式失效了',
+    ).toBe(true)
   })
 })
 
 describe('结构性保证：每条写路由的首位都是 admin 门', () => {
   it('写路由确实被收集到了（防止「零条写路由」式的空转绿）', () => {
     const { all } = auditWriteRoutes(router)
-    expect(all.length).toBeGreaterThanOrEqual(25)
+    // 2026-09-21 在 main 上实测：写路由共 32 条（admin-routes.ts 本体 25 + /snapshots 3 +
+    // /safety/rules 4），其中 29 条有门、3 条无门（= 三条永久豁免，一条不多一条不少）。
+    // 下限取 30 / 26：比实数低几条，容得下正常的路由收编/下线，但「整片没收集到」「匹配器全失灵」
+    // 这两种空转绿仍然撞红。删路由删到低于下限时，应该来这里连同实测数一起更新，而不是把下限调低了事。
+    expect(all.length).toBeGreaterThanOrEqual(30)
     // 有门的那一族必须非空，否则说明匹配器整体失灵（虽然那种失灵是 fail-closed 的）。
-    expect(all.filter((r) => isAdminGate(r.firstHandler)).length).toBeGreaterThanOrEqual(20)
+    expect(all.filter((r) => isAdminGate(r.firstHandler)).length).toBeGreaterThanOrEqual(26)
   })
 
   it('没有「既无 admin 门、又不在豁免表里」的写路由', () => {
@@ -449,7 +445,7 @@ describe('结构性保证：每条写路由的首位都是 admin 门', () => {
     const PINNED: Array<[WriteMethod, string]> = [
       ['post', '/safety/enable'],
       ['post', '/safety/disable'],
-      ['post', '/safety/confirm'], // 自带 requireAdminRole()（admin-routes.ts:92）—— 直接通过，不需要豁免
+      ['post', '/safety/confirm'], // 自带 requireAdminRole()（admin-routes.ts:166-172）—— 直接通过，不需要豁免
       ['post', '/cache/clear'],
       ['post', '/metrics/reset'],
       ['put', '/data/bulk'],
@@ -489,7 +485,7 @@ describe('豁免表', () => {
     ).toEqual([])
   })
 
-  // 刻意**不**硬红：见 Exemption.todo 的注释。#5667/#5677 与本支互相独立、可能先合，
+  // 刻意**不**硬红：见 Exemption.todo 的注释。修洞的 PR 与本支互相独立、可能先合，
   // 硬红会把两条 PR 耦合成固定合并顺序，并让组合树验证假红。
   it('临时豁免：已可删除的条目只点名提示、不挡合并', () => {
     const removable = exemptionsCoveringGatedRoutes(TEMPORARY_EXEMPTIONS)
@@ -507,6 +503,45 @@ describe('豁免表', () => {
     expect(removable.length).toBeLessThanOrEqual(TEMPORARY_EXEMPTIONS.length)
   })
 
+  // 上面那条用例今天是**空转**的：`TEMPORARY_EXEMPTIONS` 为空（上一批 /safety/rules 四条已随
+  // #5710 补门后删除），`exemptionsCoveringGatedRoutes([])` 恒为 `[]`，`every` 在空数组上恒 true。
+  // 空转的用例会悄悄烂掉：下一个人填了 `todo` 才发现分类逻辑早就不对了。所以这里用**合成豁免**
+  // （不进 EXEMPTIONS、不影响任何真实判定）把「临时 vs 永久」这条分类路径真的跑一遍。
+  it('临时/永久分类机制在临时豁免表为空时仍是活代码（合成豁免自证）', () => {
+    // 前提：今天确实没有临时豁免在册 —— 这条断言让上面那句注释不会变成过期的散文。
+    expect(TEMPORARY_EXEMPTIONS).toEqual([])
+    expect(PERMANENT_EXEMPTIONS.length).toBe(EXEMPTIONS.length)
+
+    // 合成一条「指向今天**有门**路由」的临时豁免 → 必须被认成「已可删除」。
+    const onGated: Exemption = {
+      method: 'post',
+      path: '/safety/enable',
+      todo: '#0',
+      reason: '合成豁免，只用于自证分类逻辑，不进 EXEMPTIONS。',
+    }
+    // 合成一条「指向今天**无门**路由」的临时豁免 → 不该被认成「已可删除」。
+    const onUngated: Exemption = {
+      method: 'post',
+      path: '/health/check',
+      todo: '#0',
+      reason: '合成豁免，只用于自证分类逻辑，不进 EXEMPTIONS。',
+    }
+    expect(exemptionsCoveringGatedRoutes([onGated, onUngated]).map(labelOf)).toEqual([
+      `POST ${ADMIN_MOUNT}/safety/enable`,
+    ])
+
+    // 同一条合成豁免若登记成**永久**（去掉 todo），走的就是硬红那一路：
+    // `describe('豁免表')` 里「永久豁免不得覆盖已经有门的路由」用的正是这个非空清单。
+    const { todo: _todo, ...asPermanent } = onGated
+    expect(exemptionsCoveringGatedRoutes([asPermanent]).map(labelOf)).toEqual([
+      `POST ${ADMIN_MOUNT}/safety/enable`,
+    ])
+
+    // 合成品没有污染真实判定。
+    expect(EXEMPTIONS.some((e) => e.todo === '#0')).toBe(false)
+    expect(auditWriteRoutes(router).violations).toEqual([])
+  })
+
   it('每条豁免都写了理由；临时豁免的 todo 必须是 issue/PR 号', () => {
     for (const e of EXEMPTIONS) {
       expect(e.reason.trim().length, `${e.method} ${e.path} 的豁免没写理由`).toBeGreaterThan(20)
@@ -518,8 +553,9 @@ describe('豁免表', () => {
   })
 
   // 核心不变量：**无门写路由 ⊆ 豁免表**。
-  // 刻意不是等式 —— 等式意味着「豁免表里每一条今天都必须仍然无门」，那等于把
-  // 「谁先合并」写进了断言（#5677 补门后等式立刻不成立）。子集关系才是这条守卫真正要的：
+  // 刻意不是等式 —— 等式意味着「豁免表里每一条今天都必须仍然无门」，那等于把「谁先合并」写进了
+  // 断言。这一点已经被现实检验过：#5710 给 /safety/rules 四条补门后等式立刻不成立，而子集关系
+  // 让本 spec 一路保持绿、补门的 PR 零摩擦合入。子集关系才是这条守卫真正要的：
   // 可以有已经被修好的豁免（多余但无害），不可以有没登记的洞。
   it('无门写路由 ⊆ 豁免表（核心不变量）', () => {
     const { ungated, violations } = auditWriteRoutes(router)
@@ -568,9 +604,10 @@ describe('子路由挂载面', () => {
     }
   })
 
-  // 同样刻意**不**硬判门的有无：#5667/#5677 补门后若这里断言 `false` 就会红，又把两支耦合起来。
-  // 路径集合是稳定事实（硬断言），门的有无只记录 + 提示。
-  it('/safety/rules 子路由（protection-rules.ts）的四条写路由：路径集合固定，门的有无只记录', () => {
+  // 初版这条只**记录**门的有无、不硬判：当时 #5667 / PR #5677 还在飞，硬判会把两支耦合成
+  // 固定合并顺序。#5710 已把那四条门合入 main（实读 protection-rules.ts:236 / :328 / :369 / :392），
+  // 耦合的前提消失了，2026-09-21 rebase 时改成与 /snapshots 同款的硬断言 —— 这四条门从此是回归钉。
+  it('/safety/rules 子路由（protection-rules.ts）的四条写路由都有门（#5710 补，回归钉）', () => {
     const subRoutes = auditWriteRoutes(router).all.filter((r) => r.source === '/safety/rules')
     expect(subRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
       'delete /safety/rules/:id',
@@ -578,17 +615,13 @@ describe('子路由挂载面', () => {
       'post /safety/rules',
       'post /safety/rules/evaluate',
     ])
-    const gated = subRoutes.filter((r) => isAdminGate(r.firstHandler))
-    if (gated.length > 0) {
-      console.warn(
-        `[结构性守卫] /safety/rules 已有 ${gated.length}/4 条写路由补上了 admin 门` +
-          '（#5667 / PR #5677 生效中）：\n' +
-          gated.map((r) => `  - ${r.label}`).join('\n') +
-          '\n四条都补齐后，请把本 spec EXEMPTIONS 里那四条 todo:#5667 的临时豁免删掉。',
-      )
+    for (const r of subRoutes) {
+      expect(
+        isAdminGate(r.firstHandler),
+        `${r.label} 丢了 admin 门（#5710 补的那一族）。若这是有意的设计变更，` +
+          '请连同 EXEMPTIONS 一起改，并写清为什么它不再需要门。',
+      ).toBe(true)
     }
-    // 每条要么有门要么无门 —— 这条只是确保上面的分类没漏人，不对「应该是哪种」表态。
-    expect(gated.length + subRoutes.filter((r) => !isAdminGate(r.firstHandler)).length).toBe(4)
   })
 })
 
@@ -670,12 +703,49 @@ describe('变异自证', () => {
     // 有豁免时零违规、无豁免时违规数 = 无门路由数 —— 两者之差就是豁免表实际挡下的量。
     expect(violations).toEqual([])
     expect(withoutExemptions.length - violations.length).toBe(ungated.length)
-    // 今天豁免表确实在承担工作（>0）。这里用 ungated.length 而不是写死 7：
-    // #5667/#5677 补门后无门路由会减少，写死的数字会假红。全部补齐（归零）时本条会转为
+    // 今天豁免表确实在承担工作（>0）。这里用 ungated.length 而不是写死数字：
+    // 补门后无门路由会减少，写死的数字会假红（#5710 补 /safety/rules 四条时已验证这一点：
+    // 无门写路由从 7 条降到 3 条，本条用例照样绿）。全部补齐（归零）时本条会转为
     // 「豁免表已无事可做」——那时 PERMANENT/TEMPORARY 两条用例会分别硬红/提示，指引删豁免。
     if (EXEMPTIONS.length > 0 && ungated.length === 0) {
       console.warn('[结构性守卫] 全部写路由都已有门，豁免表已无事可做 —— 可以整张删掉了。')
     }
     expect(ungated.length).toBeLessThanOrEqual(EXEMPTIONS.length)
+  })
+
+  // 上面四条变异都在证「开洞会红」。这一条证的是**另一个方向**的信号：永久豁免的理由是
+  // 「设计上就不该有中间件门」，所以它一旦有了门 = 设计变了，必须硬红把人叫回来删豁免。
+  // 没有这条变异，「永久豁免不得覆盖已经有门的路由」那条用例今天是恒绿的（三条永久豁免都真的无门），
+  // 恒绿的断言分不清「机制有效」和「机制失灵」。
+  it('给永久豁免 POST /health/check 装上门 →「永久豁免有门 = 硬红」被触发（设计变更信号有效）', () => {
+    // 变异前：这条永久豁免确实无门，硬红清单为空。
+    expect(exemptionsCoveringGatedRoutes(PERMANENT_EXEMPTIONS)).toEqual([])
+
+    const layer = asRouterLike(router).stack.find(
+      (l) => l.route?.path === '/health/check' && l.route.methods.post === true,
+    )
+    expect(layer, 'POST /health/check 没找到').toBeDefined()
+    const stack = layer!.route!.stack
+    // 内存级变异：在首位插一个**真的** requireAdminRole()（不是带标记的假件），
+    // 模拟「有人给这条只读探针加了中间件门」。
+    const injected = requireAdminRole()
+    stack.splice(0, 0, { handle: injected, method: 'post' })
+    try {
+      expect(isAdminGate(stack[0].handle), '插进去的应该被认成 admin 门').toBe(true)
+      // 这就是「永久豁免不得覆盖已经有门的路由」那条用例会拿到的清单 —— 非空 = 它会红。
+      expect(exemptionsCoveringGatedRoutes(PERMANENT_EXEMPTIONS).map(labelOf)).toEqual([
+        `POST ${ADMIN_MOUNT}/health/check`,
+      ])
+      // 而核心不变量**不**受影响：有门的路由本来就不进 ungated，所以它仍然绿。
+      // 两条信号各司其职：核心不变量管「新开的洞」，永久豁免硬红管「设计悄悄变了」。
+      const { ungated, violations } = auditWriteRoutes(router)
+      expect(violations).toEqual([])
+      expect(ungated.map((r) => r.label)).not.toContain(`POST ${ADMIN_MOUNT}/health/check`)
+    } finally {
+      stack.splice(0, 1)
+    }
+    // 还原后硬红清单重新为空（afterEach 另查 violations）。
+    expect(exemptionsCoveringGatedRoutes(PERMANENT_EXEMPTIONS)).toEqual([])
+    expect(isAdminGate(stack[0].handle)).toBe(false)
   })
 })

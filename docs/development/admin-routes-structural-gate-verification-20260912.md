@@ -1,14 +1,28 @@
 # admin-routes 结构性守卫 —— 验证记录（2026-09-12）
 
 分支：`test/admin-routes-write-endpoints-structural-gate`
-基线：`origin/fix/admin-safety-toggle-and-bulk-require-admin` @ `3c79b2059`
+基线：`origin/main` @ `309b551eb`（2026-09-21 rebase 后）
 设计说明：`docs/development/admin-routes-structural-gate-design-20260912.md`
 
 本文件所有输出均为本机原样粘贴（去掉了 ANSI 颜色码与无关的启动日志行）。
 
+> ## 读法（2026-09-21 加）
+>
+> **§0–§5 是 2026-09-12 初版在基线 `origin/fix/admin-safety-toggle-and-bulk-require-admin` @ `3c79b2059`
+> 上跑出来的历史记录，原样保留，不要拿它当今天的事实。** 那之后 main 前进了：#5665 已合、#5710 给
+> `/safety/rules` 四条补了门、#5914 给 `/slo/status` 与 `/snapshots` 子路由补了读门，所以 §0 的盘点表、
+> §1 的 21 条用例清单、§2.2 的 M4 场景都已经过期（过期的具体位置在各节开头标了）。
+>
+> **今天的事实与实跑输出在 §8「2026-09-21 rebase 到 main 的复核」。** 那一节是 rebase 后重新跑的：
+> 写面盘点、23 个用例全绿、两条新的外部变异（passthrough / 给永久豁免装门）、相邻 spec、tsc。
+
 ---
 
-## 0. 实读盘点：admin 路由树今天的写面
+## 0. 实读盘点：admin 路由树的写面（**2026-09-12 快照，已过期**）
+
+> **过期提示**：本节的行号与 `gate` 列是 `3c79b2059` 上的快照。今天（`origin/main` @ `309b551eb`）
+> 第 29–32 行那四条 `/safety/rules` 已由 #5710 补门、不再是豁免；写面统计从 `32/25/7` 变成
+> `32/29/3`。当前盘点见 §8.1。
 
 从真实 router 对象（`initAdminRoutes({})` 返回的模块单例）上取栈，逐层 dump 得到的写方法清单
 （`gate` 列 = 该方法的首个 handler 是否被识别为 `requireAdminRole()`）：
@@ -80,7 +94,10 @@ requireSafetyCheck matches gate src: false
 
 ---
 
-## 1. 新 spec 全绿（21 个用例）
+## 1. 新 spec 全绿（21 个用例）（**2026-09-12 快照**）
+
+> **过期提示**：今天是 **23** 个用例（rebase 时 `/slo/status` 那条反例改成正向对照，另新增两条：
+> 「临时/永久分类机制……合成豁免自证」与变异「给永久豁免 POST /health/check 装上门」）。当前输出见 §8.2。
 
 ```
 $ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts --reporter=verbose
@@ -121,7 +138,11 @@ $ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts
 并且有一个 `afterEach` 复查「router 还原干净了」。它们证明的是：主断言在被变异的输入上**确实会变红**，
 而不是恒绿。四条见上面 §1 的后四行。
 
-### 2.2 外部变异探针（一次性，跑完即删，不进提交）
+### 2.2 外部变异探针（一次性，跑完即删，不进提交）（**2026-09-12 快照**）
+
+> **过期提示**：M4 当时是「**模拟** #5677 已合并」的预演。#5710 已把那四条门合入 main，
+> 预演变成了实测 —— 2026-09-21 rebase 后在 main 上直接跑出同样的两段 warn，见设计说明 §4.2。
+> 本次另做了两条新的外部变异（passthrough / 给永久豁免装门），见 §8.3。
 
 为了给出「主断言真的会红」的原样输出，生成了四份 spec 变体（改变体、不改被测源码），跑完删除。
 M1/M2/M3 证明「开洞会红」，**M4 证明「修洞不会红」** —— 后者是豁免表改成两类之后新增的关键证据。
@@ -342,9 +363,184 @@ docs/development/admin-routes-structural-gate-verification-20260912.md          
 3. **临时豁免的清理只有可见性、没有强制力** —— 这是为了不把独立 PR 耦合成固定合并顺序而付出的代价：
    一条临时豁免可以在洞修好之后长期留着不删（无害但是噪声），只会持续 `console.warn`。
    要收紧就得引入「到期」概念 + 定期巡检，而不是改回硬红。见设计说明 §7 残余第 7 条。
-3. **`toString()` 同一性的适用边界** —— 它在同一个进程/同一份模块实例内是可靠的。如果将来构建链引入
+4. **`toString()` 同一性的适用边界** —— 它在同一个进程/同一份模块实例内是可靠的。如果将来构建链引入
    对同一模块的重复实例化（两份 `guards/audit-integration`），生产代码挂的门可能来自另一份实例、源文本
    仍相同 → 依然匹配（因为比的是文本不是引用），所以这个方向是安全的。反方向（源文本相同但其实是另一个
    函数）在理论上可能，实际上意味着有人复制粘贴了一份一模一样的门实现 —— 那仍是一个门。
-4. **守卫只覆盖 `admin-routes.ts` 这棵树**，`index.ts:1899-1912` 上另外挂载的
+5. **守卫只覆盖 `admin-routes.ts` 这棵树**，`index.ts` 上另外挂载的
    `/api/admin/directory*`、`/api/admin/canary` 等不在覆盖范围内（设计说明 §7 残余第 3 条）。
+
+（原文里第 3 条出现了两次，2026-09-21 重编号为 3/4/5，内容未改。）
+
+---
+
+## 8. 2026-09-21 rebase 到 main 的复核
+
+初版基线 `3c79b2059` 是 PR #5665 的分支头。#5665 已合入 main（`309b551eb`），所以本支
+`git rebase --onto origin/main 3c79b2059` 到 main 上重跑一遍。三个新增文件（1 spec + 2 docs）
+**零冲突**，`git diff --stat origin/main HEAD` 仍是三个纯新增文件、无路由代码改动。
+
+main 前进带来三件**事实**变化，逐条处理：
+
+| main 上发生了什么 | 对本 spec 的影响 | 处理 |
+|---|---|---|
+| #5914（`ce9ac29cb`）给 `GET /slo/status` 补了 `requireAdminRole()`（`admin-routes.ts:1646`） | 初版那条「已知**无门**的读路由 `/slo/status` 首位不被认出来」的**反向对照必红** | 改成**正向**对照：「已知有门的读路由 `GET /slo/status` 首位被认出来」。反例职责由 `protectAdminOperation(...)[1]` / `requireSafetyCheck(...)` / 裸中间件与非函数继续承担 |
+| #5710（`188be8500`，含 #5667 / PR #5677 的修复）给 `/safety/rules` 四条写路由补了门（`protection-rules.ts:236/328/369/392`） | 四条 `todo:'#5667'` 的**临时豁免已过期**（spec 只 warn 不红，符合设计） | 删掉那四条豁免 + `#5677` 相关叙述；`子路由挂载面` 里那条从「门的有无只记录」改成**硬断言**（耦合前提已消失）；**两类豁免机制本身保留** |
+| #5903 / #5678 批次（admin 读侧 `sendAdminReadFailure` 与读门） | 只动读侧，写路由集合不变 | 无需改动，仅在设计说明 §6 记一笔 |
+
+另外初版的 `path:line` 在 main 上**全部过期**，逐条实读订正（`:141`→`:214-215`、
+`:1392`→`:1646`、`:92`→`:166-172`、`:2047-2072`→`:2347-2372`、`:770-785`→`:836-851`、
+`:821-836`→`:887-902`、`:2086-2087`→`:2386-2387`、`audit-integration.ts:260-262`→`:261-263`、
+`admin-routes.ts:69/:2132`→`:73/:2432`、`index.ts:1884`→`:1984`）。
+
+### 8.1 写面盘点（当前，`origin/main` @ `309b551eb`）
+
+计数仍不是手算的，是把守卫自己的审计函数结果打出来的（一次性探针，跑完还原）：
+
+```
+{ total: 32, gated: 29, ungated: [
+  "POST /api/admin/plugins/reload-all-unsafe",
+  "POST /api/admin/plugins/:id/reload-unsafe",
+  "POST /api/admin/health/check"
+] }
+```
+
+写方法共 **32** 条（`admin-routes.ts` 本体 25 + 子路由 `/snapshots` 3 + `/safety/rules` 4），
+**29** 条有门，**3** 条无门 —— 且这 3 条**恰好**就是豁免表剩下的三条永久豁免，`VIOLATIONS = 0`。
+与 §0 的 09-12 快照相比：`32/25/7` → `32/29/3`，差的 4 条正是 #5710 补门的 `/safety/rules` 那族。
+**没有发现「无门、又不属于已知登记项」的写路由**，本次同样没有需要「回报不修」的新发现。
+
+据此把 `写路由确实被收集到了` 的下限从 `≥25` / 有门 `≥20` 抬到 `≥30` / 有门 `≥26`
+（比实数低几条，容得下正常的路由收编，同时仍拦得住「整片没收集到」「匹配器全失灵」两种空转绿）。
+
+### 8.2 spec 全绿（23 个用例）
+
+```
+$ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts --reporter=verbose
+
+ ✓ ... > 识别机制的正反自证 > 正：requireAdminRole() 的不同调用互相匹配（闭包环境不影响 toString 同一性）
+ ✓ ... > 识别机制的正反自证 > 正：protectAdminOperation(...) 是 [admin 门, 审计]，首位就是门；反：第二位不是门
+ ✓ ... > 识别机制的正反自证 > 反：requireSafetyCheck(...) 不是 admin 门（确认层 ≠ 授权门，#5665 的要害）
+ ✓ ... > 识别机制的正反自证 > 反：裸中间件 / 非函数都不是 admin 门
+ ✓ ... > 识别机制的正反自证 > 正：已知有门的 POST /safety/enable（admin-routes.ts:214-215）首位被认出来
+ ✓ ... > 识别机制的正反自证 > 正：已知有门的读路由 GET /slo/status（admin-routes.ts:1646，#5914 补的门）首位被认出来
+ ✓ ... > 结构性保证：每条写路由的首位都是 admin 门 > 写路由确实被收集到了（防止「零条写路由」式的空转绿）
+ ✓ ... > 结构性保证：每条写路由的首位都是 admin 门 > 没有「既无 admin 门、又不在豁免表里」的写路由
+ ✓ ... > 结构性保证：每条写路由的首位都是 admin 门 > #5665 补门的那一族逐条仍然有门（回归钉）
+ ✓ ... > 豁免表 > 每条豁免都对应一条真实存在的写路由（禁止残留过期豁免）
+ ✓ ... > 豁免表 > 永久豁免不得覆盖已经有门的路由（门补上了 = 设计变了，必须删豁免）
+ ✓ ... > 豁免表 > 临时豁免：已可删除的条目只点名提示、不挡合并
+ ✓ ... > 豁免表 > 临时/永久分类机制在临时豁免表为空时仍是活代码（合成豁免自证）
+ ✓ ... > 豁免表 > 每条豁免都写了理由；临时豁免的 todo 必须是 issue/PR 号
+ ✓ ... > 豁免表 > 无门写路由 ⊆ 豁免表（核心不变量）
+ ✓ ... > 子路由挂载面 > router.use 挂的子路由恰好是固定集合，且没有挂载级中间件
+ ✓ ... > 子路由挂载面 > /snapshots 子路由（snapshot-labels.ts）的三条写路由都有门
+ ✓ ... > 子路由挂载面 > /safety/rules 子路由（protection-rules.ts）的四条写路由都有门（#5710 补，回归钉）
+ ✓ ... > 变异自证 > 摘掉 PUT /data/bulk 的首个 handler（= 去掉 #5665 补的门）→ 红并点名该路由
+ ✓ ... > 变异自证 > 新加一条无门写路由（= §4 残余第 1 条描述的开洞方式）→ 红并点名该路由
+ ✓ ... > 变异自证 > 把门换成 requireSafetyCheck（= #5665 修前的形状）→ 仍然红
+ ✓ ... > 变异自证 > 把豁免表清空 → 今天全部无门写路由都会变成违规（证明豁免表是真的在生效、不是空转）
+ ✓ ... > 变异自证 > 给永久豁免 POST /health/check 装上门 →「永久豁免有门 = 硬红」被触发（设计变更信号有效）
+
+ Test Files  1 passed (1)
+      Tests  23 passed (23)
+```
+
+**零 `console.warn`** —— 四条临时豁免删掉之后，初版那两段「已可删除」提示自然消失。
+
+用例数从 21 变 23 的来由：`/slo/status` 那条由反改正（数量不变），另新增两条 ——
+
+- `豁免表 > 临时/永久分类机制在临时豁免表为空时仍是活代码（合成豁免自证）`：
+  临时豁免表清空后，`临时豁免：已可删除的条目只点名提示` 那条变成恒绿空转
+  （`exemptionsCoveringGatedRoutes([])` 恒为 `[]`，`every` 在空数组上恒 true），分类逻辑烂掉也看不出来。
+  这条用两条**不进 `EXEMPTIONS`** 的合成豁免（一条指向有门的 `POST /safety/enable`、一条指向无门的
+  `POST /health/check`）把分类路径真的跑一遍，并断言合成品没污染真实判定。
+- `变异自证 > 给永久豁免 POST /health/check 装上门 →「永久豁免有门 = 硬红」被触发`：见 §8.3 的 N2。
+
+### 8.3 外部变异（内存级，不改源码、不落盘、不进提交）
+
+初版 M1–M4 是「生成 spec 变体」式的外部变异。本次换成**不动仓库任何文件**的做法：scratchpad 里一份
+vitest `setupFiles` + 一份临时 config，用 `vi.mock(<绝对路径>, importOriginal)` 在被测 spec import 之前
+改掉**生产模块**导出的 router 对象，然后跑**未经修改的 shipped spec**。仓库侧 `git status` 全程干净。
+
+#### N1 —— 把 `PUT /snapshots/:id/tags` 的门换成 passthrough
+
+变异体：`snapshot-labels.ts` 的 `PUT /:id/tags` 首位 handler 换成 `(req,res,next)=>next()`
+（保留链长，只换掉那个函数对象）。
+
+```
+   → 以下写路由的中间件链首位不是 requireAdminRole()/protectAdminOperation(...)，也不在本文件的豁免表里：
+  - PUT /api/admin/snapshots/:id/tags
+
+ FAIL  ... > 结构性保证：每条写路由的首位都是 admin 门 > 没有「既无 admin 门、又不在豁免表里」的写路由
+ FAIL  ... > 豁免表 > 无门写路由 ⊆ 豁免表（核心不变量）
+ FAIL  ... > 豁免表 > 临时/永久分类机制在临时豁免表为空时仍是活代码（合成豁免自证）
+ FAIL  ... > 子路由挂载面 > /snapshots 子路由（snapshot-labels.ts）的三条写路由都有门
+     → PUT /api/admin/snapshots/:id/tags 丢了 admin 门: expected false to be true
+ FAIL  ... > 变异自证 > 摘掉 PUT /data/bulk 的首个 handler（= 去掉 #5665 补的门）→ 红并点名该路由
+     → expected [ 'PUT /api/admin/data/bulk', …(1) ] to deeply equal [ 'PUT /api/admin/data/bulk' ]
+```
+
+红，并**点名 `PUT /api/admin/snapshots/:id/tags`**。注意最后一条：文件内变异用例的 `toEqual` 里
+多出了这条被外部变异打出来的路由 —— 说明它量的确实是同一个活的 router，不是自说自话的快照。
+
+#### N2 —— 给**永久**豁免 `POST /health/check` 装上真的 `requireAdminRole()`
+
+这条证的是**另一个方向**的信号：永久豁免的理由是「设计上就不该有中间件门」，所以它一旦有了门 =
+设计变了，必须硬红把人叫回来删豁免。没有它，`永久豁免不得覆盖已经有门的路由` 那条用例在今天是恒绿的
+（三条永久豁免都真的无门），恒绿的断言分不清「机制有效」和「机制失灵」。
+
+```
+ FAIL  ... > 豁免表 > 永久豁免不得覆盖已经有门的路由（门补上了 = 设计变了，必须删豁免）
+AssertionError: 以下路由已经有 admin 门了，而它们登记的是**永久**豁免（理由是「设计上不该有中间件门」）——
+POST /api/admin/health/check
+门补上说明那个理由不再成立，请从 EXEMPTIONS 里删掉对应条目。: expected [ 'POST /api/admin/health/check' ] to deeply equal []
+
+ FAIL  ... > 豁免表 > 临时/永久分类机制在临时豁免表为空时仍是活代码（合成豁免自证）
+ FAIL  ... > 变异自证 > 给永久豁免 POST /health/check 装上门 →「永久豁免有门 = 硬红」被触发（设计变更信号有效）
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 20 passed (23)
+```
+
+硬红被触发，且**核心不变量（`无门写路由 ⊆ 豁免表`）仍然绿** —— 这正是设计要的分工：
+核心不变量管「新开的洞」，永久豁免硬红管「设计悄悄变了」，两个信号互不遮蔽。
+
+（文件内也补了一条同形的常跑变异 —— §8.2 最后那条 —— 这样这个方向的信号每次 CI 都被验一遍，
+不必依赖一次性的外部探针。）
+
+### 8.4 相邻 spec 未被打断
+
+```
+$ npx vitest run tests/unit/admin-safety-toggle-and-bulk-authz.test.ts \
+    tests/unit/admin-read-gates-batch2-authz.test.ts \
+    tests/unit/admin-read-gates-batch3-authz.test.ts \
+    tests/unit/admin-bulk-data-sources-fk-409.test.ts \
+    tests/unit/require-admin-role-fail-closed.test.ts \
+    tests/unit/admin-routes-write-endpoints-structural-gate.test.ts --reporter=dot
+
+ Test Files  6 passed (6)
+      Tests  135 passed (135)
+```
+
+（`admin-read-gates-batch2/batch3` 与 `require-admin-role-fail-closed` 是 main 上 #5678 批次 / #5914
+之后新增的相邻守卫，初版 §3 的名单里还没有它们。输出里穿插的 `Admin access denied` / `Audit logging
+skipped: no database pool` 日志来自那几个 spec 自己的 fail-closed 用例，不是本次引入的噪声。）
+
+### 8.5 类型检查
+
+```
+$ npx tsc --noEmit        # packages/core-backend
+=== tsc exit: 0 ===
+```
+
+§4 的如实说明仍然成立：`tsconfig.json` 的 `exclude` 含 `"**/*.test.ts"`，包级 tsc 不收 spec。
+本次改动只落在 spec 与两份 docs，没有新增 `src` 侧类型面；spec 自身的类型由 vitest 的 esbuild
+转译期与上面 23/23 的实跑覆盖（初版 §4 那条 ad-hoc tsconfig 的结论未变，本次未重做）。
+
+### 8.6 边界自查
+
+- `tests/unit` 里**零 `request(app)`** —— 本 spec 不发 HTTP 请求，只读 router 结构（#4154 零容忍）。
+- `git diff origin/main` 里**零 `0x08`** 控制字节。
+- 未动 `.github/`、`vitest.config.ts`、任何 pin 文件、任何 `plugins/`、任何路由/守卫源码。
+- 变异全部内存级：两份探针在 scratchpad，跑完即弃，未进仓库，`git status` 全程只有本次要提交的三个文件。
