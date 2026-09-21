@@ -682,8 +682,10 @@ const UNIVER_META_SOURCE = readFileSync(join(__dirname, '../../src', UNIVER_META
 /**
  * THE WRAPPED FORM. Every call to the resolver has to be written exactly like this, so that the
  * refusal is attached to it and the literal `resolveMetaSheetId` stays in the handler body (the
- * sheet-liveness closure guard scopes handlers on that token — a wrapper that hid the name would
- * have dropped GET /context out of ITS scope, paying for this fix with a weaker guard).
+ * sheet-liveness closure guard scopes handlers on that token). On the tree this fix was written
+ * against, BEFORE #5948 merged, a wrapper that hid the name measurably dropped GET /context out
+ * of ITS scope; after #5948 it no longer would. See the closure-scope cell below for the numbers
+ * and for why the shape is kept anyway.
  */
 const WRAPPED_CALL = 'await orRefuseSheetViewMismatch(res, resolveMetaSheetId('
 
@@ -818,6 +820,20 @@ function callSitesThatIgnoreNull(source: string): string[] {
  */
 const RESOLVER_TOKEN = /[^A-Za-z0-9_$]resolveMetaSheetId[^A-Za-z0-9_$]/
 
+/**
+ * The closure guard classifies on CODE, never on prose: it normalizes CRLF and strips comments
+ * before matching (`stripComments` in tests/unit/multitable-sheet-liveness-closure.guard.test.ts,
+ * which exists because a handler was once classified GUARDED by a sentence in its own docblock).
+ * Any cell that counts the token in a handler has to read it the same way: the RAW /context slice
+ * holds FOUR occurrences, two of them comments ABOUT the resolver, so a count taken on the raw
+ * text would survive the deletion of both calls. Replicated rather than imported — the guard is a
+ * spec file and exports nothing — and a copy that drifts from it reds the near-miss assertions in
+ * the same cell.
+ */
+function guardCode(source: string): string {
+  return source.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+
 describe('#5946 structural — the wrapped call is the only door', () => {
   it('every resolveMetaSheetId( call in univer-meta.ts is the definition or a wrapped call site', () => {
     expect(rawResolverOffenders(UNIVER_META_SOURCE), 'a handler awaits the raw resolver: its ConflictError becomes a 500 (or an echoing 409) again').toEqual([])
@@ -880,16 +896,54 @@ describe('#5946 structural — the wrapped call is the only door', () => {
    * That "alone" is asserted here rather than asserted in prose, because #5948 added a
    * `resolveSheetCapabilitiesForAccess` call to this handler that LOOKS like it would carry the
    * scope: the guard's pattern is `\bresolveSheetCapabilities\b`, whose trailing boundary fails on
-   * `ForAccess`, so it does not. A wrapper that hid the resolver's name behind
-   * `resolveMetaSheetIdOrRefuse(...)` would therefore STILL silently remove /context from that
-   * guard's population today.
+   * `ForAccess`, so it does not.
+   *
+   * What a name-hiding `resolveMetaSheetIdOrRefuse(...)` would actually cost, MEASURED by replaying
+   * `addressesASheet` over the whole of univer-meta.ts with every wrapped call rewritten to that
+   * shape:
+   *   - pre-#5948 tree (2435c92ec): 105 handlers, in scope 83 -> 82, LOST ["GET /context"];
+   *   - this tree, #5948 merged:    105 handlers, in scope 83 -> 83, LOST [].
+   * #5948 left GET /context a PRE-gate BARE `resolveMetaSheetId` call — the allow-listed one the
+   * cell above pins — and that call alone now holds the token in the handler body, so the shape of
+   * the wrapper no longer decides /context's membership. The claim is therefore NOT that hiding the
+   * name would drop /context today; it is that the membership must not DEPEND on either the
+   * wrapper's shape or that one pre-gate call. The cell below pins both halves: the token occurs in
+   * this handler's CODE exactly TWICE, and the FIRST of the two is the allow-listed pre-gate call.
+   * Deleting the pre-gate call, or stripping the name from the wrapped call, changes what this cell
+   * reads instead of silently shrinking the guard's population — which is what the bare `.test()`
+   * this replaced allowed: satisfied by the pre-gate call alone, it stayed GREEN under exactly the
+   * args-shaped mutation it claimed to catch.
    */
   it('the wrapped form keeps the resolver token in the handler body (closure-guard scope preserved)', () => {
     expect(RESOLVER_TOKEN.test(` ${WRAPPED_CALL} `), 'the wrapped form stopped naming the resolver — the closure guard loses GET /context').toBe(true)
     const contextStart = UNIVER_META_SOURCE.indexOf("router.get('/context'")
     const contextHandler = UNIVER_META_SOURCE.slice(contextStart, UNIVER_META_SOURCE.indexOf('\n  router.', contextStart + 10))
     expect(contextHandler.length).toBeGreaterThan(100)
-    expect(RESOLVER_TOKEN.test(contextHandler), 'GET /context no longer names resolveMetaSheetId — it drops out of the closure guard').toBe(true)
+
+    // What the guard actually sees, comments stripped: TWO occurrences, in this order —
+    //   1. the allow-listed PRE-gate bare call #5948's order requires (`sheetId: null`), then
+    //   2. the wrapped POST-gate pairing call this fix adds.
+    const contextCode = guardCode(contextHandler)
+    const occurrences = contextCode.match(new RegExp(RESOLVER_TOKEN.source, 'g')) ?? []
+    expect(
+      occurrences.length,
+      'GET /context stopped naming resolveMetaSheetId exactly twice in CODE — recount before trusting its closure-guard membership',
+    ).toBe(2)
+
+    const firstAt = contextCode.search(RESOLVER_TOKEN)
+    const preGateAt = contextCode.indexOf(CONTEXT_PRE_GATE_CALL)
+    const wrappedAt = contextCode.indexOf(WRAPPED_CALL)
+    expect(preGateAt, 'the allow-listed pre-gate call is gone from the CODE of GET /context').toBeGreaterThan(-1)
+    expect(wrappedAt, 'the wrapped pairing call is gone from the CODE of GET /context').toBeGreaterThan(-1)
+    // The FIRST occurrence must fall INSIDE the allow-listed pre-gate statement (RESOLVER_TOKEN
+    // eats the boundary char, so it starts just after that statement begins)…
+    expect(firstAt, 'the FIRST resolver occurrence in GET /context is no longer the allow-listed pre-gate call').toBeGreaterThan(preGateAt)
+    expect(
+      firstAt,
+      'the FIRST resolver occurrence in GET /context is no longer the allow-listed pre-gate call',
+    ).toBeLessThan(preGateAt + CONTEXT_PRE_GATE_CALL.length)
+    // …and the wrapped call must be the SECOND.
+    expect(wrappedAt, 'the wrapped call no longer follows the pre-gate call in GET /context').toBeGreaterThan(preGateAt)
 
     // The other three predicates of that guard, all FALSE for /context. The first is about the PATH
     // (`h.path.includes(':sheetId')` in the guard), not the body — the body carries the string in a

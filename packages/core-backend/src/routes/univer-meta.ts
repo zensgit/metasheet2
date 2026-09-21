@@ -6397,17 +6397,29 @@ async function resolveMetaSheetId(
  * call is the single allow-listed exception in
  * tests/unit/multitable-sheet-view-mismatch-refusal.test.ts, which also pins where it sits.
  *
- * WHY IT TAKES THE PROMISE instead of the resolver's arguments: the univer-meta sheet-liveness
- * closure guard classifies a handler as sheet-addressed by four predicates
- * (tests/unit/multitable-sheet-liveness-closure.guard.test.ts, `addressesASheet`), and for GET
- * /context exactly ONE of them fires: the literal `resolveMetaSheetId` in its body. Its path has no
- * `:sheetId`; it does not call `requireRecordReadable`; and the gate #5948 added calls
- * `resolveSheetCapabilitiesForAccess`, which that guard's `\bresolveSheetCapabilities\b` does NOT
- * match (the boundary fails before `ForAccess`). So a wrapper that swallowed the name —
- * `orRefuseSheetViewMismatch(...)` alone does not match that pattern — would still quietly drop GET
- * /context out of that guard's scope today. Keeping the call itself at the call site keeps every one
- * of these handlers in scope, so this fix cannot pay for a better refusal with a weaker guard. That
- * near-miss is asserted, not asserted-in-prose, by the closure-scope cell of the spec above.
+ * WHY IT TAKES THE PROMISE instead of the resolver's arguments — stated as MEASURED, not as
+ * reasoned. The univer-meta sheet-liveness closure guard classifies a handler as sheet-addressed
+ * by four predicates (tests/unit/multitable-sheet-liveness-closure.guard.test.ts,
+ * `addressesASheet`), and for GET /context exactly ONE of them fires: the literal
+ * `resolveMetaSheetId` in its body. Its path has no `:sheetId`; it does not call
+ * `requireRecordReadable`; and the gate #5948 added calls `resolveSheetCapabilitiesForAccess`,
+ * which that guard's `\bresolveSheetCapabilities\b` does NOT match (the boundary fails before
+ * `ForAccess`).
+ *
+ * What an args-shaped wrapper would actually cost — `addressesASheet` replayed over this whole
+ * file with every `orRefuseSheetViewMismatch(res, resolveMetaSheetId(` rewritten to a
+ * name-swallowing `resolveMetaSheetIdOrRefuse(res, `:
+ *   - pre-#5948 tree (2435c92ec): 105 handlers, in scope 83 -> 82, LOST ["GET /context"];
+ *   - this tree, #5948 merged:    105 handlers, in scope 83 -> 83, LOST [].
+ * The difference IS #5948. Its reorder left GET /context a PRE-gate BARE `resolveMetaSheetId`
+ * call (line 8744 below, the allow-listed one), and that call alone now keeps the token inside
+ * the handler body. So the claim here is NOT that an args-shaped wrapper would still drop GET
+ * /context out of that scope today — measured, it would not. It is that the classification must
+ * not DEPEND on this wrapper's shape: the Promise form keeps the resolver's name at all ten call
+ * sites, so /context's membership holds whether or not that pre-gate call survives a later
+ * refactor, and no rewrite here can quietly shrink the guard's in-scope population. Asserted, not
+ * asserted-in-prose, by the closure-scope cell of the spec above, which pins how many times the
+ * token occurs in that handler's CODE and which of those occurrences is the pre-gate call.
  *
  * Returns `null` AFTER the response has been sent: every call site must `return` on null. A raw
  * `resolveMetaSheetId(` that is NOT wrapped like this is refused by the structural cells of
