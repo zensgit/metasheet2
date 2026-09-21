@@ -32,6 +32,17 @@ import { describe, expect, it } from 'vitest'
  * silent hole would hide. `TEST_PATH_MARKERS` is therefore an asserted-on constant, and the test
  * pins the exact set of excluded files that DO call the method, so a production file that ever
  * starts calling it cannot be waved away as "just a test".
+ *
+ * CENSUS DESIGN UPDATE (this revision): the original design also pinned the exact SET of production
+ * files that so much as MENTION the symbol at all — comments included — on the theory that any new
+ * mention should force a human look. That pin broke on first contact with its own stated purpose: a
+ * true descendant PR (C-2) added two doc-comment mentions with zero behaviour change, and the pin had
+ * no way to distinguish "a new file now calls this" from "a new file's comment now explains why it
+ * doesn't". The census below now counts CALL SITES — `createCancelRoundInstance(` or
+ * `.createCancelRoundInstance`, read from `stripComments` output — not raw mentions: the definition
+ * file must contain exactly one (the definition itself), every other production file must contain
+ * zero. A comment or a quoted string that only NAMES the method is not a call site; string-keyed
+ * dynamic dispatch is still covered separately (see the dedicated assertion below, unchanged).
  */
 
 const REPO_ROOT = join(__dirname, '../../../..')
@@ -126,15 +137,30 @@ function isTestPath(relPath: string): boolean {
  *
  * HONEST LIMIT: this is a text stripper, not a parser. A `//` inside a string literal or a regex,
  * on the same line as and BEFORE an occurrence of the symbol, would strip that occurrence along
- * with the rest of the line — i.e. it can under-report, not only over-report. That is why the
- * RAW-TEXT pin below exists and does not use this function at all: it fixes the exact set of
- * production files that mention the symbol in any form, comments included, so a new mention cannot
- * hide behind a stripper edge case.
+ * with the rest of the line — i.e. it can under-report, not only over-report. Every assertion below
+ * that cares whether the symbol is CALLED (as opposed to merely named) reads its input through this
+ * function for exactly that reason: a doc comment or a `console.log` string that names the method is
+ * not a reachability signal, and must not be able to red this file.
  */
 function stripComments(source: string): string {
   return source
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+}
+
+/**
+ * CALL-SITE FORMS — the two textual shapes through which `createCancelRoundInstance` is actually
+ * reached: a direct invocation (`createCancelRoundInstance(`, covering both `svc.createCancelRoundInstance(...)`
+ * and a bare call after destructuring) or a property access (`.createCancelRoundInstance`, covering
+ * `svc.createCancelRoundInstance` even without an immediate trailing paren — taking a reference to
+ * the method is still a reachability signal worth flagging). Both are anchored with `\b` so a longer
+ * identifier that merely starts with this symbol cannot match. Applied to `stripComments` output only.
+ */
+const CALL_SITE_PATTERN = new RegExp(`(?:\\.${SYMBOL}\\b)|(?:\\b${SYMBOL}\\()`, 'g')
+
+function callSiteCount(strippedCode: string): number {
+  const matches = strippedCode.match(CALL_SITE_PATTERN)
+  return matches ? matches.length : 0
 }
 
 function collectSources(): { production: string[]; tests: string[] } {
@@ -232,22 +258,44 @@ describe('cancel-round creation path is unreachable from production code (C-1 do
     ).toEqual([])
   })
 
-  /**
-   * RAW-TEXT PIN — deliberately reads the unstripped source, so it is independent of `stripComments`
-   * and of every judgement call in it. The five entries below are prose mentions (doc comments,
-   * plus the definition itself in ApprovalProductService.ts); none of the other four is a call. Pinning the SET, not merely "zero calls", means that a new
-   * production file which so much as names the method — in a comment, a string, or code — reds this
-   * and forces a human look, rather than being silently absorbed by a stripper edge case.
-   */
-  it('RAW TEXT: the set of production files mentioning the symbol at all is exactly the known set', () => {
-    const mentions = production.filter((rel) => readRel(rel).includes(SYMBOL)).sort()
-    expect(mentions).toEqual([
-      join('packages', 'core-backend', 'src', 'attendance', 'w4c3b-central-approval-hooks.ts'),
-      join('packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20260918090000_create_approval_rounds.ts'),
-      join('packages', 'core-backend', 'src', 'services', 'ApprovalAssigneeResolver.ts'),
-      join('packages', 'core-backend', 'src', 'services', 'ApprovalProductService.ts'),
-      join('packages', 'core-backend', 'vitest.config.ts'),
-    ])
+  it('POSITIVE CONTROL: the call-site scan detects a real call form', () => {
+    // Property access, with and without an immediate trailing call — both are reachability signals.
+    expect(callSiteCount(`service.${SYMBOL}(documentId, { userId })`)).toBeGreaterThan(0)
+    expect(callSiteCount(`const fn = service.${SYMBOL}`)).toBeGreaterThan(0)
+    // A bare call after destructuring, with no receiver at all.
+    expect(callSiteCount(`${SYMBOL}(documentId)`)).toBeGreaterThan(0)
+    // The definition form itself is a call-site match (it IS the one allowed occurrence).
+    expect(callSiteCount(`async ${SYMBOL}(`)).toBeGreaterThan(0)
+  })
+
+  it('POSITIVE CONTROL: the call-site scan does not count a comment-only mention', () => {
+    const commentedSource = [
+      '/**',
+      ` * See \`${SYMBOL}\` for the creation path this hook feeds.`,
+      ' */',
+      `// also referenced here for context: ${SYMBOL}`,
+      'export const noop = 1',
+    ].join('\n')
+    expect(callSiteCount(stripComments(commentedSource))).toBe(0)
+  })
+
+  it('STATIC: no production file other than the definition file contains a call site of the symbol', () => {
+    const offenders: string[] = []
+    for (const rel of production) {
+      if (rel === DEFINITION_FILE) continue
+      const code = stripComments(readRel(rel))
+      if (callSiteCount(code) > 0) offenders.push(rel)
+    }
+    expect(
+      offenders,
+      `production files contain a call site (${SYMBOL}( or .${SYMBOL}) outside the definition file: ` +
+        JSON.stringify(offenders),
+    ).toEqual([])
+  })
+
+  it('STATIC: the definition file contains exactly one call site, and it is the definition', () => {
+    const code = stripComments(readRel(DEFINITION_FILE))
+    expect(callSiteCount(code)).toBe(1)
   })
 
   it('STATIC: no HTTP route module mentions the method at all', () => {
