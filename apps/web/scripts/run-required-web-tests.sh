@@ -493,9 +493,15 @@ npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/Attendanc
 # for tests/api.spec.ts. Full-path token, per the exactness convention of this block. Enrolment is
 # pinned mechanically by packages/core-backend/tests/unit/network-unavailable-copy-ci-wiring.test.ts,
 # which lives in a lane (`test (18.x)` / `test (20.x)`) that cannot be skipped.
+# DELETE transport fallback (2026-09-18, customer egress drops HTTP DELETE): `tests/delete-fallback.spec.ts`
+# pins src/utils/delete-fallback.ts (probe latches only on a CONFIRMED tunnel; native mode buys ONE POST+override
+# retry and never on an HTTP status; override mode from the start; storage-less operation). Full-path
+# token per this block's convention; no web guard covers utils/api.ts's transport layer, so this
+# always-on lane is its only point. `tests/api.spec.ts` (already here) carries the apiFetch wiring leg.
 npx vitest run \
   tests/AttendanceReportFieldsSection.spec.ts \
   tests/api.spec.ts \
+  tests/delete-fallback.spec.ts \
   tests/attendance-rules-me-contract-sync.spec.ts \
   tests/network-unavailable-copy.spec.ts \
   approval-canvas-commands \

@@ -6,6 +6,7 @@ import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './au
 import { explicitSessionOrg } from '../composables/authPrincipal'
 import { clearExplicitSessionOrg } from './explicitSessionOrg'
 import { createNetworkUnavailableError } from './networkErrors'
+import { sendDelete } from './delete-fallback'
 
 // Vite environment type declaration
 declare global {
@@ -37,6 +38,11 @@ export interface ApiFetchOptions extends RequestInit {
    * the route contract.
    */
   omitHeaders?: readonly string[]
+  /**
+   * Send a DELETE as a literal DELETE with no POST+override fallback. Reserved for the transport
+   * probe (utils/delete-fallback.ts `probeDeleteTransport`), which must observe the native verb.
+   */
+  bypassDeleteFallback?: boolean
 }
 
 function resolveWindowOrigin(): string {
@@ -238,11 +244,19 @@ function handlePasswordChangeRequired(path: string): void {
  *    `apiDefaultErrorMessage` keeps owning that copy.
  *
  * 2. RETRY (idempotent reads only). Only when the caller asked for GET/HEAD with no
- *    body. DELETE/PATCH/POST/PUT are NOT retried even once —
+ *    body. PATCH/POST/PUT are NOT retried even once —
  *    a reset can happen AFTER the server committed the write, so a replay could
  *    double-apply it. Retrying a 5xx RESPONSE is likewise out of scope: an upgrade
  *    window would turn every open tab into a retry storm against a backend that just
  *    came up.
+ *
+ * 3. DELETE TRANSPORT FALLBACK (utils/delete-fallback.ts). A customer egress silently
+ *    drops HTTP DELETE (2026-09-14). Every DELETE is dispatched through `sendDelete`:
+ *    in 'override' mode it leaves as POST + `X-HTTP-Method-Override: DELETE`; in
+ *    'native' mode a network-level failure (no response) buys exactly ONE retry as
+ *    POST+override and flips the session mode. Deletes are idempotent, so that single
+ *    replay is safe; an HTTP status is never retried. The backoff retry loop below
+ *    still does not apply to DELETE.
  *
  * Backoff waits are abortable: a caller that aborts during the pause gets an
  * AbortError immediately, not the copy above (an abort is not an outage).
@@ -298,13 +312,21 @@ function waitUnlessAborted(ms: number, signal: AbortSignal | null | undefined): 
   })
 }
 
-async function fetchWithTransportCopy(url: string, init: RequestInit): Promise<Response> {
+const rawFetch: (url: string, init: RequestInit) => Promise<Response> = (url, init) => fetch(url, init)
+
+function dispatch(url: string, init: RequestInit, bypassDeleteFallback: boolean): Promise<Response> {
+  const method = String(init.method || 'GET').toUpperCase()
+  if (method === 'DELETE' && !bypassDeleteFallback) return sendDelete(rawFetch, url, init)
+  return rawFetch(url, init)
+}
+
+async function fetchWithTransportCopy(url: string, init: RequestInit, bypassDeleteFallback = false): Promise<Response> {
   const signal = init.signal as AbortSignal | null | undefined
   const maxRetries = isIdempotentRead(init) ? NETWORK_RETRY_DELAYS_MS.length : 0
   let attempt = 0
   for (;;) {
     try {
-      return await fetch(url, init)
+      return await dispatch(url, init, bypassDeleteFallback)
     } catch (error) {
       // Aborts and non-transport throws (e.g. a caller-supplied fetch stub raising a
       // domain error) pass through untouched — only the transport literal is rewritten.
@@ -328,10 +350,19 @@ export async function apiFetch(
   options: ApiFetchOptions = {},
 ): Promise<Response> {
   const base = getApiBase()
-  const { suppressUnauthorizedRedirect = false, omitHeaders = [], ...requestOptions } = options
-  const headers = new Headers({
-    ...authHeaders(),
-    ...(requestOptions.headers || {}),
+  const { suppressUnauthorizedRedirect = false, omitHeaders = [], bypassDeleteFallback = false, ...requestOptions } = options
+  // `headers` is a HeadersInit: a plain record, `[name, value]` pairs, OR a Headers instance.
+  // OBJECT-SPREADING the last shape yields `{}` — every entry lives behind prototype methods, none
+  // is an own enumerable property — so a caller that handed us a Headers instance had its headers
+  // SILENTLY DROPPED. That is not theoretical: `utils/delete-fallback.ts` builds a Headers instance
+  // in `withOverride`, and main.ts forwards it here for the probe's tunnel leg, so the spread turned
+  // `POST + X-HTTP-Method-Override: DELETE` into a plain POST — no rewrite, no receipt, and the
+  // session latched 'override-unavailable' in exactly the customer condition the fallback exists
+  // for. Normalise through the Headers constructor (it understands all three shapes) and keep the
+  // caller-wins precedence the spread had.
+  const headers = new Headers(authHeaders())
+  new Headers((requestOptions.headers as HeadersInit | undefined) ?? {}).forEach((value, name) => {
+    headers.set(name, value)
   })
   for (const name of omitHeaders) headers.delete(name)
   const body = requestOptions.body
@@ -343,7 +374,7 @@ export async function apiFetch(
   const response = await fetchWithTransportCopy(`${base}${path}`, {
     ...requestOptions,
     headers,
-  })
+  }, bypassDeleteFallback)
 
   if (response.status === 401 && !suppressUnauthorizedRedirect) {
     handleUnauthorized(path)
