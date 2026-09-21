@@ -225,6 +225,25 @@ describe('todo center view', () => {
     expect(updatedText).toContain('not-a-date')
   })
 
+  // Defensive guard, not a live production path today (`PendingItem.updatedAt` is a required
+  // string): a future source violating that contract at runtime must not render the literal word
+  // "undefined"/"null" — mirrors the class of leak `approvals/detailField.ts`'s `formatDisplayDate`
+  // already guards against for unparseable values.
+  it('renders nothing (not "Updated undefined") if a future source sends a missing updatedAt', async () => {
+    getTodoItemsSpy.mockResolvedValue({
+      items: [
+        { source: 'approval', id: 'missing-updated-at', title: '缺字段单', href: '/approvals/missing-updated-at', updatedAt: undefined as unknown as string },
+      ],
+      sources: { approval: 'ok' },
+    })
+
+    const root = await mountView()
+    const link = root.querySelector('[data-testid="todo-center-item"]')
+    const updatedText = link?.querySelector('[data-testid="todo-center-item-updated-at"]')?.textContent
+    expect(updatedText).toBe('')
+    expect(updatedText).not.toContain('undefined')
+  })
+
   it('renders a view-only pill for actionable:false, and no pill when actionable is absent or true', async () => {
     getTodoItemsSpy.mockResolvedValue({
       items: [
