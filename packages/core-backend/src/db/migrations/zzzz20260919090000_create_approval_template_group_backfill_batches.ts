@@ -114,7 +114,56 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 }
 
+// CANDIDATE, review-requested — see reviews/approval-template-groups-phase2-backfill-ddl-declaration-20260920.md
+// §1.6(b) / R2 / Q4b (not yet ratified; this guard is itself an unratified candidate, not a
+// closed decision). §1.6(b) established that this migration's down() does not undo any business
+// effect: `approval_template_groups` rows created and `approval_template_group_links` rows
+// written by a completed `execute` call survive untouched. The three tables dropped below are the
+// SOLE record of which rows a given batch touched — dropping them after even one successful
+// `execute` destroys the evidence a later manual, per-row compensation would need, while leaving
+// the compensated-for state in place (R2: "「应用过、execute 过、再 down()」是一条不可逆路径").
+//
+// Fail closed while any of the three tables holds a row: refuse the plain rollback, leave all
+// three tables in place (dormant, not dropped), and point at the retention/cleanup decision this
+// is instead of doing it implicitly. Same shape as the existing precedent in this migrations
+// directory (`zzzz20260731120000_w4c3a_import_rollback_foundation.ts`'s `emptySurfaceGuard`), plus
+// an explicit opt-out: set ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP=true (mirrors migrate.ts's
+// ALLOW_DB_RESET gate for --reset) to force the drop anyway. Forcing is a decision to discard the
+// ledger's retention value, not a mechanical unblock — it still does not undo the business effect
+// it can no longer track afterward (§1.6(b) applies exactly the same post-force).
+//
+// `to_regclass` guards each count (same idiom as ...w4c3a_import_rollback_foundation.ts:743/746)
+// so a half-applied `up()` — one or more of the three tables missing — reads as zero rows for the
+// missing table instead of crashing the rollback with 42P01.
+const ATG_BACKFILL_DOWN_FORCE_ENV = 'ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP'
+
+async function atgBackfillTableRowCount(db: Kysely<unknown>, table: string): Promise<number> {
+  const result = await sql.raw(
+    `SELECT CASE WHEN to_regclass('public.${table}') IS NULL THEN 0 ` +
+      `ELSE (SELECT count(*)::int FROM ${table}) END AS n`,
+  ).execute(db)
+  const row = (result.rows[0] ?? {}) as { n?: number | string }
+  return Number(row.n ?? 0)
+}
+
 export async function down(db: Kysely<unknown>): Promise<void> {
+  const batches = await atgBackfillTableRowCount(db, 'approval_template_group_backfill_batches')
+  const groups = await atgBackfillTableRowCount(db, 'approval_template_group_backfill_batch_groups')
+  const links = await atgBackfillTableRowCount(db, 'approval_template_group_backfill_batch_links')
+  const total = batches + groups + links
+
+  if (total > 0 && process.env[ATG_BACKFILL_DOWN_FORCE_ENV] !== 'true') {
+    throw new Error(
+      'ATG_BACKFILL_DOWN_BLOCKED: refusing to drop ' +
+        'approval_template_group_backfill_{batches,batch_groups,batch_links} while data is present ' +
+        `(batches=${batches}, batch_groups=${groups}, batch_links=${links}). Dropping these tables ` +
+        'does NOT undo the groups/links they recorded — it only destroys the ledger a later per-row ' +
+        'compensation would need. This is a data-retention/cleanup decision, not a mechanical ' +
+        `rollback step: set ${ATG_BACKFILL_DOWN_FORCE_ENV}=true to force it, or leave the tables in ` +
+        'place (dormant) and revert application code instead.',
+    )
+  }
+
   // Child tables first — both hold FKs onto the batch head table.
   await sql`DROP TABLE IF EXISTS approval_template_group_backfill_batch_links`.execute(db)
   await sql`DROP TABLE IF EXISTS approval_template_group_backfill_batch_groups`.execute(db)
