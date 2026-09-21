@@ -322,10 +322,11 @@ const CANCEL_ROUND_DEFAULT_SUITE: CancelRoundSuite = 'leave'
 
 /**
  * Lock:143 — the `suite` CEILINGS. The ratified clause `lock:143` is a private owner document,
- * not tracked in this repository (see `docs/development/approval-cancel-round-phase1-design-
- * 20260918.md` §2.4 "Constants and the identity predicate" for this table's contract, its
- * 2026-09-19 rename rationale, and the re-derive-from-source discipline that keeps this comment
- * from pinning a literal that can drift):
+ * not tracked in this repository; its current values are recorded in-repo at
+ * `docs/development/approval-cancel-round-phase1-design-20260918.md` §2.4 "Constants and the
+ * identity predicate" (window ceiling table) alongside this table's contract and its 2026-09-19
+ * rename rationale — if that table and this constant ever disagree, THIS constant is
+ * authoritative and the table is the one that has drifted:
  * `attendance` 180 days, `leave`/`other` 90 days, `forbidden` 0 (lock:143 fixes that suite's window
  * at 0 and §14.3 #14 blocks it at creation before the number matters). Lock:143's
  * `windowDays ∈ [0, 上限]` makes these an ENFORCED UPPER BOUND, not a default — renamed from
