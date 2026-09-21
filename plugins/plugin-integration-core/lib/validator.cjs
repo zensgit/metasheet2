@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 const { getPath } = require('./transform-engine.cjs')
+const { runUserRegex, describeUserRegexRefusal } = require('./user-regex-guard.cjs')
 
 const SUPPORTED_RULES = new Set(['required', 'pattern', 'enum', 'min', 'max'])
 
@@ -85,18 +86,20 @@ function compilePattern(rule) {
   const pattern = ruleValue(rule, ['regex', 'pattern', 'value'])
   const flags = ruleValue(rule, ['flags'])
 
-  if (pattern instanceof RegExp) return { regexp: pattern, error: null }
+  if (pattern instanceof RegExp) {
+    return { regexp: pattern, source: pattern.source, flags: pattern.flags, error: null }
+  }
   if (typeof pattern !== 'string') {
-    return { regexp: null, error: 'pattern rule requires params.regex, params.pattern, or params.value' }
+    return { regexp: null, source: null, flags: null, error: 'pattern rule requires params.regex, params.pattern, or params.value' }
   }
   if (flags !== undefined && typeof flags !== 'string') {
-    return { regexp: null, error: 'pattern flags must be a string' }
+    return { regexp: null, source: null, flags: null, error: 'pattern flags must be a string' }
   }
 
   try {
-    return { regexp: new RegExp(pattern, flags), error: null }
+    return { regexp: new RegExp(pattern, flags), source: pattern, flags, error: null }
   } catch (error) {
-    return { regexp: null, error: error.message }
+    return { regexp: null, source: null, flags: null, error: error.message }
   }
 }
 
@@ -137,13 +140,30 @@ function validateValue(value, rules, field = null) {
         break
       case 'pattern': {
         if (isEmpty(value)) break
-        const { regexp, error } = compilePattern(rule)
+        const { regexp, source, flags, error } = compilePattern(rule)
         if (error) {
           errors.push(makeError(field, rule, 'INVALID_RULE', `${fieldLabel} has invalid pattern rule`, value, { error }))
           break
         }
-        regexp.lastIndex = 0
-        if (!regexp.test(String(value))) {
+        // PROPOSED (H-3, round 2): same guard, same constants as
+        // packages/core-backend/src/formula/regex-safety.ts — a hard subject
+        // ceiling that does not depend on the mapping's own rule list, plus a
+        // bounded timing ladder that refuses only a MEASURED super-quadratic cost
+        // curve. A refusal is reported under its own code, never as PATTERN: a
+        // pipeline operator must be able to tell "the value is malformed" from
+        // "the check declined to run". See lib/user-regex-guard.cjs.
+        const outcome = runUserRegex(source, flags === null ? undefined : flags, String(value), (re, subject) => {
+          re.lastIndex = 0
+          return re.test(subject)
+        })
+        if (outcome.status !== 'ok') {
+          errors.push(makeError(field, rule, 'PATTERN_NOT_EVALUATED', `${fieldLabel} could not be pattern-checked`, value, {
+            reason: describeUserRegexRefusal(outcome.refusal),
+            pattern: String(regexp),
+          }))
+          break
+        }
+        if (!outcome.value) {
           errors.push(makeError(field, rule, 'PATTERN', `${fieldLabel} does not match pattern`, value, {
             pattern: String(regexp),
           }))

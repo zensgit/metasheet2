@@ -465,6 +465,7 @@ import { useRoute } from 'vue-router'
 import type { FormConfig, FormField, FormResponse } from '../types/views'
 import { ViewManager } from '../services/ViewManager'
 import { useAuth } from '../composables/useAuth'
+import { runUserRegex, describeUserRegexRefusal } from '../utils/userRegexGuard'
 
 // Props and route
 const route = useRoute()
@@ -647,8 +648,19 @@ function validateField(field: FormField, value: any): string | null {
       return `${field.label} 不能超过 ${validation.maxLength} 个字符`
     }
     if (validation.pattern) {
-      const regex = new RegExp(validation.pattern)
-      if (!regex.test(value)) {
+      // PROPOSED (H-3, round 2): the public form mirrors the backend's stored
+      // `pattern` rule, so it inherits the same ReDoS exposure (self-DoS in the
+      // submitter's own tab) AND, more importantly, must agree with the backend
+      // about which values are refused — otherwise the form says "ok" and the
+      // write returns 422 with an unrelated wording. Same guard, same constants:
+      // apps/web/src/utils/userRegexGuard.ts, pinned three ways from the
+      // backend's required lane.
+      const outcome = runUserRegex(validation.pattern, undefined, value, (re, subject) => re.test(subject))
+      if (outcome.status !== 'ok') {
+        if (outcome.refusal.kind === 'invalid-pattern') return `${field.label} 格式不正确`
+        return `${field.label}: ${describeUserRegexRefusal(outcome.refusal)}`
+      }
+      if (!outcome.value) {
         return `${field.label} 格式不正确`
       }
     }
