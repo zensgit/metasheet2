@@ -5,8 +5,7 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 /**
- * Repo guard — no tracked, non-Markdown source file under packages/**, apps/**, plugins/**, or
- * scripts/** may reference a `reviews/`-prefixed path.
+ * Repo guard — no A-3-owned, non-Markdown source file may reference a `reviews/`-prefixed path.
  *
  * WHY THIS EXISTS. `impl-gate-A3-guarded-down-round1-20260921.md` P3-4 fixed ONE dangling
  * `reviews/design-gate-A3-phase2-20260918.md` reference (a migration file's provenance comment
@@ -29,99 +28,100 @@ import { describe, expect, it } from 'vitest'
  * review-record filename plus "a private review record, not tracked in this repository", never a
  * sentence built around the token itself).
  *
- * WHY THIS GUARD SCANS THE WHOLE REPO DOMAIN AGAIN (F2 narrowing REVERTED, 20260921, gate report
- * `impl-gate-aligned-train-subset-20260921.md` P2-1, disposition (a)). This guard originally
- * scanned every tracked non-Markdown file under `packages/**`, `apps/**`, `plugins/**`,
- * `scripts/**` via `git ls-files` — the scan implemented below. For one review window it was
- * narrowed instead to a frozen list of A-3's own touched files (`A3_OWNED_FILES`, kept a few
- * paragraphs down as a HISTORICAL COMMENT ONLY — no function in this file reads it any more),
- * because C-1's `feat/approval-cancel-round-phase1-r8` carried a citation at
- * `packages/core-backend/src/services/ApprovalProductService.ts` naming a real, in-repo
- * review-record path (`reviews/设置审批撤销规则.txt`) — not a bug in C-1 — that a repo-wide scan
- * would flag the moment this branch merged with that one. That was a real conflict at the time:
- * on `main` this guard did not exist yet, and on A-3's own branch that citation did not exist, so
- * each lane alone was green while a repo-wide scan on the merge of the two was not.
+ * WHY THIS GUARD'S SCOPE IS A-3's OWN LINEAGE, NOT THE REPO AT LARGE (F2, twice-corrected,
+ * 20260921). This guard's population has moved three times; this paragraph states where it
+ * lands and why, honestly, rather than repeating an earlier version's claim.
  *
- * C-1 r8's own follow-up commit (`ecb3be788`, comment-only, 1 file / +1 / -1, landed alongside
- * this revert) deletes that citation from `ApprovalProductService.ts` rather than moving it to an
- * in-repo target — see the companion fix to that file, which replaces the deleted pointer with an
- * in-repo documentation citation instead of leaving it deleted. Mechanically, as of that commit,
- * and on every tree that merges it: a `git grep` for the literal `reviews/`, restricted to every
- * tracked path with a `src` path component, returns **zero** hits, repo-wide. The one conflict
- * the narrowing existed to avoid therefore no longer exists anywhere
- * it could recur, so the narrowing has nothing left to buy — while it still had a real, measured
- * cost: an isolated injection check (gate report §3.1) planted a dangling `reviews/`-path
- * reference in a production file OUTSIDE `A3_OWNED_FILES` and found the narrowed guard GREEN on
- * it — zero discriminative power against exactly the defect class this guard exists to catch, the
- * moment the offending file is not one A-3 itself happens to have touched. A guard whose scanned
- * population is "the files I already know about" cannot catch a NEW dangling reference in any
- * OTHER file — which is the only kind of dangling reference this guard could ever be needed to
- * catch, since a known one would already have been fixed. The population is therefore reverted to
- * the full repo-wide scan below.
+ *   (1) First narrowed to `A3_OWNED_FILES` (below) because a repo-wide `git ls-files` sweep is a
+ *       hostage to every sibling lane's own, unrelated, legitimate citations: C-1's
+ *       `feat/approval-cancel-round-phase1-r8` carried a code comment at
+ *       `ApprovalProductService.ts` citing `` `reviews/设置审批撤销规则.txt:41-43` `` — a DANGLING
+ *       reference this repository has never had a `reviews/` directory for, not a real in-repo
+ *       target (`impl-gate-aligned-train-subset-round2-20260921.md` P3-1: `git ls-tree -r
+ *       origin/main | grep '^reviews/'` ⇒ 0 on main, on r8, and on this branch; C-1's own commit
+ *       `ecb3be788` is titled "drop out-of-repo reviews/ path from C-1 ceiling comment"). A
+ *       repo-wide scan would have (correctly) flagged that dangling reference the moment this
+ *       branch merged with r8 — each lane alone was green, the merge of the two was not.
+ *   (2) Reverted to the repo-wide sweep (`impl-gate-aligned-train-subset-20260921.md` P2-1,
+ *       disposition (a)) once r8's follow-up commit removed that one citation, on the reasoning
+ *       that the narrowed guard has zero discriminative power against a dangling reference in any
+ *       file A-3 itself has not touched — true as a property of the detector, but the revert
+ *       bought that property at a cost the round that ordered it did not measure.
+ *   (3) Returned here to `A3_OWNED_FILES` because `impl-gate-aligned-train-subset-round2-20260921.
+ *       md` measured that cost and found it not worth paying, twice over:
+ *         - P2-1 (CONFIRMED): the repo-wide sweep's four top-level directories
+ *           (`packages`/`apps`/`plugins`/`scripts`) do not cover `.github/`, so
+ *           `.github/workflows/plugin-tests.yml` — an A-3-owned file, entry #1 of
+ *           `A3_OWNED_FILES`, named in this very file's own WHY-THIS-EXISTS paragraph as one of
+ *           the round-2 defect sites — silently fell out of scope. Proven by injection: the same
+ *           planted line in that file reds the `A3_OWNED_FILES` scan and passes the repo-wide one.
+ *         - P2-3 (CONFIRMED): a repo-wide scan does not stop at this slice. At measurement time,
+ *           11 OTHER `origin/` branches still carried a live, legitimate-for-now `reviews/`
+ *           citation that is each of those lines' own cleanup to make, not this guard's — the
+ *           cancel-round family (nine branches, `ApprovalProductService.ts`) and PR #5703's
+ *           server-form-drafts slice (three files, an entirely different citation family). A
+ *           repo-wide guard reds the required check on any of those lines the moment they rebase
+ *           onto a main this guard has landed on, for a defect A-3 did not introduce and cannot
+ *           fix on another line's behalf.
+ *       This guard's scope is therefore **A-3's own lineage files only**
+ *       (`A3_OWNED_FILES` below) — stated as a scope, not as a claim that no other `reviews/`
+ *       citation exists anywhere in the repository. Other lines' `reviews/` citations are each
+ *       line's own responsibility to clean up on their own schedule; this guard neither asserts
+ *       they do not exist nor needs to. Should a future need arise to catch a dangling `reviews/`
+ *       reference repo-wide, that is a *different*, explicitly repo-wide guard — not a widening of
+ *       this one, which exists to keep A-3's own files clean and would (per P2-3) falsely red on
+ *       other lines' not-yet-cleaned-up citations if widened the same way again.
  *
- * Should some future sibling lane introduce another genuine `reviews/`-prefixed in-repo citation
- * that collides with this scan, THAT is the moment to narrow again — naming the actual
- * conflicting file at the time it actually exists, not preemptively against a conflict that may
- * never recur, and not by resurrecting a list frozen against paths that may since have moved,
- * been renamed, or been deleted.
+ * F2 A-1 CUTPOINT CORRECTION (20260921, `impl-gate-crossstack-guards-f1f2f3-20260921.md` P1-1).
+ * The FIRST narrowing's recipe — `git diff --name-only $(git merge-base <A-3 branch> origin/main)
+ * <A-3 branch>` — was itself wrong. A-1 (`feat/approval-template-groups-phase1`, #5852) has never
+ * been merged into `origin/main`; A-3 carries A-1's ~37 commits directly, not via `origin/main`.
+ * Diffing against `origin/main` therefore walks back through the entire A-1 segment too and
+ * re-absorbs files A-1 (not A-3) authored, including a migration #5907 later renamed on a
+ * different lane descended from A-1 — freezing the old name under that recipe is exactly what
+ * collided with the rename the moment the two lanes combined. THE CORRECTED RECIPE anchors the
+ * diff at the tip of the A-1 segment on this branch, not `origin/main`:
+ * `git diff --name-only 574e97e5b652fb2f9da0a93b9a69bffb3f93dc54..<A-3 branch tip>`. That SHA is
+ * content-level (not subject-level) proven to be the last commit whose content matches A-1's own
+ * copy of the 11 paths A-1's design touches, established independently in
+ * `a-stack-alignment-dry-run-20260921.md` §1. Re-running the recipe against this frozen list
+ * removes exactly 6 of a prior 32-entry list's paths, all A-1-inherited and none A-3-authored:
+ * both phase1 `.md` docs, the phase1 migration renamed above, the phase1
+ * `approval-template-groups-lifecycle.db.test.ts`, and `scripts/dev/atg-retraction-sweep.sh` /
+ * `atg-verification-recount.sh`. Dropping those from THIS list does not un-wire them from CI —
+ * each is still `git`-tracked and still runs; they are simply not A-3's own file to freeze a path
+ * for.
  *
- * `A3_OWNED_FILES` — kept immediately below PURELY as a historical record of which 26 paths that
- * one narrowed review window scanned. It is a comment, not a `const`; nothing in this file reads
- * it, and it is not maintained against renames or deletions:
- *   .github/workflows/plugin-tests.yml
- *   docs/development/approval-template-groups-phase2-backfill-design-20260918.md
- *   docs/development/approval-template-groups-phase2-backfill-rebase-note-20260918.md
- *   docs/development/approval-template-groups-phase2-backfill-verification-20260918.md
- *   packages/core-backend/src/db/migrate.ts
- *   packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts
- *   packages/core-backend/src/routes/approvals.ts
- *   packages/core-backend/src/services/ApprovalTemplateGroupService.ts
- *   packages/core-backend/tests/integration/approval-template-groups-backfill-batches-list.db.test.ts
- *   packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts
- *   packages/core-backend/tests/integration/approval-template-groups-backfill-execute.db.test.ts
- *   packages/core-backend/tests/integration/approval-template-groups-backfill-preview.db.test.ts
- *   packages/core-backend/tests/integration/approval-template-groups-backfill-rollback.db.test.ts
- *   packages/core-backend/tests/integration/approval-template-groups-backfill-schema.db.test.ts
- *   packages/core-backend/tests/integration/approval-template-groups-serialization.db.test.ts
- *   packages/core-backend/tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts
- *   packages/core-backend/tests/unit/approval-template-group-backfill-batch-org-nonblank.test.ts
- *   packages/core-backend/vitest.config.ts
- *   plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json
- *   scripts/dev-bootstrap.sh
- *   scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs
- *   scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
- *   scripts/ops/approval-template-groups-backfill-execute-ci-wiring.test.mjs
- *   scripts/ops/approval-template-groups-backfill-preview-ci-wiring.test.mjs
- *   scripts/ops/approval-template-groups-backfill-rollback-ci-wiring.test.mjs
- *   scripts/ops/approval-template-groups-backfill-schema-ci-wiring.test.mjs
+ * `A3_OWNED_FILES` is frozen here; update it only via the corrected recipe above, in the same
+ * commit that changes A-3's own file set — never hand-edit an entry
+ * (`feedback_record_fix_rounds_only_delete_never_handwrite_numbers`). It is a real `const`, read
+ * by every test below — not a historical comment.
  *
- * ON THE DELETED CITATION'S LINE NUMBER. Three prior documents each asserted a different line
- * number for the (now-deleted) `ApprovalProductService.ts` comment — `:343` in one gate report,
- * `:347` in another and in an earlier revision of this very comment — and mechanical re-derivation
- * against the commit that actually carried the citation showed neither number was ever correct.
- * This comment does not assert a line number for it: C-1 r8's `ecb3be788` deleted the citation
- * outright, so there is no live line left for a citation to be wrong about. The citation is
- * identified here by the commit SHA that removed it, not by a position in a file that no longer
- * contains it.
+ * FAIL CLOSED, NOT FAIL OPEN. If a listed path is no longer tracked (renamed or deleted without
+ * updating this list), the guard THROWS rather than silently shrinking the scanned population —
+ * see `computeScannedDomain` below and its dedicated test. A silently DROPPED entry (the list
+ * still lists it, but it stops being scanned some other way) is a different failure mode, covered
+ * by the two `.github/workflows/plugin-tests.yml`-specific tests below (P2-1 regression guard).
  *
- * SELF-EXEMPTION. This file is itself `.ts`, lives under `packages/**`, and legitimately needs to
- * WRITE the literal token as data — in the constant below, in two `it()` titles, and in a decoy
- * fixture's file content — none of which is a dangling repo-relative path reference to a
- * nonexistent directory (the defect class this guard exists to catch). Committing this file
- * verbatim reds its own first attempt at "zero hits" (verified once, then fixed): the guard must
- * exclude its OWN path, named explicitly via `__filename` (never a pattern — a pattern could hide
- * something else), and the exclusion's necessity plus narrowness are both proven by a dedicated
- * test below, not asserted in a comment.
+ * SELF-EXEMPTION. This file is itself `.ts`, is itself a member of `A3_OWNED_FILES` (A-3 added
+ * it), and legitimately needs to WRITE the literal token as data — in the constant below, in two
+ * `it()` titles, and in a decoy fixture's file content — none of which is a dangling repo-relative
+ * path reference to a nonexistent directory (the defect class this guard exists to catch).
+ * Committing this file verbatim reds its own first attempt at "zero hits" (verified once, then
+ * fixed): the guard must exclude its OWN path, named explicitly via `__filename` (never a pattern
+ * — a pattern could hide something else), and the exclusion's necessity plus narrowness are both
+ * proven by a dedicated test below, not asserted in a comment.
  *
- * SCOPE. Tracked files under `packages/**`, `apps/**`, `plugins/**`, `scripts/**`, excluding
- * `.md` files (Markdown review/design/verification docs legitimately narrate review-record
- * filenames and paths in prose; this guard is about paths a reader might follow expecting an
- * in-repo target, i.e. non-Markdown source/config/test files) and this guard's own file (see
- * SELF-EXEMPTION above). `node_modules` is excluded via `git ls-files` (never walks it).
+ * SCOPE. `A3_OWNED_FILES` (A-3's own touched files), excluding `.md` files (Markdown review/
+ * design/verification docs legitimately narrate review-record filenames and paths in prose; this
+ * guard is about paths a reader might follow expecting an in-repo target, i.e. non-Markdown
+ * source/config/test files) and this guard's own file (see SELF-EXEMPTION above). This is NOT a
+ * directory-tree sweep: a file outside this list, however similar its path or directory, is out
+ * of scope by design (see WHY THIS GUARD'S SCOPE above) — that is a statement about what this
+ * guard checks, not a claim about what exists elsewhere in the repository.
  */
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../')
-const SCAN_DIRS = ['packages', 'apps', 'plugins', 'scripts']
 const TOKEN = ['review', 's', '/'].join('')
 
 /** This guard's own repo-relative path, derived from `__filename` rather than hand-typed, so a
@@ -129,30 +129,84 @@ const TOKEN = ['review', 's', '/'].join('')
  *  the "self-exemption is exactly one file, and is load-bearing" test below reds. */
 const SELF_PATH = path.relative(REPO_ROOT, __filename).split(path.sep).join('/')
 
-/** Domain DERIVED from git, never a hand-maintained list. `exclude` defaults to this guard's own
- *  path (see SELF-EXEMPTION); pass `[]` to get the UNFILTERED domain for the self-exemption test. */
-function trackedNonMarkdownFilesUnder(
-  dirs: readonly string[],
-  root: string = REPO_ROOT,
-  exclude: readonly string[] = [SELF_PATH],
-): string[] {
-  const raw = execFileSync('git', ['ls-files', '-z', '--cached', '--', ...dirs], {
+const A3_OWNED_FILES = [
+  ".github/workflows/plugin-tests.yml",
+  "docs/development/approval-template-groups-phase2-backfill-design-20260918.md",
+  "docs/development/approval-template-groups-phase2-backfill-rebase-note-20260918.md",
+  "docs/development/approval-template-groups-phase2-backfill-verification-20260918.md",
+  "packages/core-backend/src/db/migrate.ts",
+  "packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts",
+  "packages/core-backend/src/routes/approvals.ts",
+  "packages/core-backend/src/services/ApprovalTemplateGroupService.ts",
+  "packages/core-backend/tests/integration/approval-template-groups-backfill-batches-list.db.test.ts",
+  "packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts",
+  "packages/core-backend/tests/integration/approval-template-groups-backfill-execute.db.test.ts",
+  "packages/core-backend/tests/integration/approval-template-groups-backfill-preview.db.test.ts",
+  "packages/core-backend/tests/integration/approval-template-groups-backfill-rollback.db.test.ts",
+  "packages/core-backend/tests/integration/approval-template-groups-backfill-schema.db.test.ts",
+  "packages/core-backend/tests/integration/approval-template-groups-serialization.db.test.ts",
+  "packages/core-backend/tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts",
+  "packages/core-backend/tests/unit/approval-template-group-backfill-batch-org-nonblank.test.ts",
+  "packages/core-backend/vitest.config.ts",
+  "plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json",
+  "scripts/dev-bootstrap.sh",
+  "scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs",
+  "scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs",
+  "scripts/ops/approval-template-groups-backfill-execute-ci-wiring.test.mjs",
+  "scripts/ops/approval-template-groups-backfill-preview-ci-wiring.test.mjs",
+  "scripts/ops/approval-template-groups-backfill-rollback-ci-wiring.test.mjs",
+  "scripts/ops/approval-template-groups-backfill-schema-ci-wiring.test.mjs",
+] as const
+
+/** All paths git currently tracks (cross-check target for `A3_OWNED_FILES` below — the fail-closed
+ *  check needs to know whether every listed path still exists in the tree, not just on disk). */
+function trackedFilesSet(root: string = REPO_ROOT): Set<string> {
+  const raw = execFileSync('git', ['ls-files', '-z', '--cached'], {
     cwd: root,
     maxBuffer: 128 * 1024 * 1024,
   })
-  return raw
-    .toString('utf8')
-    .split('\0')
-    .filter((rel) => rel.length > 0)
+  return new Set(raw.toString('utf8').split('\0').filter((rel) => rel.length > 0))
+}
+
+/**
+ * Derives the scanned domain from an explicit owned-file list and a tracked-files snapshot:
+ * non-Markdown members of `ownedFiles`, minus `exclude`. THROWS if any entry of `ownedFiles` is
+ * absent from `tracked` — a listed path git no longer tracks must fail the run loudly, never
+ * silently shrink the population (fail closed). Parameterised (rather than reading `A3_OWNED_FILES`
+ * and `trackedFilesSet()` directly) so the fail-closed behaviour, the "list is load-bearing"
+ * behaviour, and the discriminative control below can each be exercised against a synthetic list,
+ * without mutating real git state.
+ */
+function computeScannedDomain(
+  ownedFiles: readonly string[],
+  tracked: ReadonlySet<string>,
+  exclude: readonly string[] = [SELF_PATH],
+): string[] {
+  const missing = ownedFiles.filter((rel) => !tracked.has(rel))
+  if (missing.length > 0) {
+    throw new Error(
+      `approval-a3-dangling-reviews-path-sweep: A3_OWNED_FILES lists ${missing.length} path(s) ` +
+        `git no longer tracks — update the list via the frozen-diff recipe in the same commit ` +
+        `that changes A-3's own file set, do not let it silently shrink: ${missing.join(', ')}`,
+    )
+  }
+  return ownedFiles
     .filter((rel) => path.extname(rel).toLowerCase() !== '.md')
     .filter((rel) => !exclude.includes(rel))
+    .slice()
     .sort()
+}
+
+/** `computeScannedDomain` against the real repo's real tracked files — the guard's actual domain. */
+function a3ScannedDomain(exclude: readonly string[] = [SELF_PATH]): string[] {
+  return computeScannedDomain(A3_OWNED_FILES, trackedFilesSet(), exclude)
 }
 
 type Hit = { file: string; line: number; text: string }
 
 /** Lines containing the token, across the given files. Parameterised by root + file list so the
- *  positive control below can exercise THIS function against a decoy tree, not a re-typed copy. */
+ *  discriminative control below can exercise THIS function against a decoy tree, not a re-typed
+ *  copy. */
 function linesContainingToken(files: readonly string[], token: string, root: string = REPO_ROOT): Hit[] {
   const hits: Hit[] = []
   for (const rel of files) {
@@ -173,7 +227,7 @@ function linesContainingToken(files: readonly string[], token: string, root: str
   return hits
 }
 
-/** Writes files into an isolated temp tree that mirrors repo-relative paths, for the positive
+/** Writes files into an isolated temp tree that mirrors repo-relative paths, for the discriminative
  *  control below. Never plants into the real tree. */
 function withDecoyTree(files: Record<string, string>, run: (decoyRoot: string) => void): void {
   const decoyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'reviews-path-guard-decoy-'))
@@ -189,46 +243,102 @@ function withDecoyTree(files: Record<string, string>, run: (decoyRoot: string) =
   }
 }
 
-describe('repo guard: no dangling `reviews/`-prefixed path reference outside Markdown', () => {
-  it('the scanned domain is non-vacuous (scan negative control)', () => {
-    const files = trackedNonMarkdownFilesUnder(SCAN_DIRS)
-    expect(files.length).toBeGreaterThan(1000)
-    expect(files).toContain(
-      'packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts',
+describe('repo guard: no dangling `reviews/`-prefixed path reference in A-3\'s own file set (outside Markdown)', () => {
+  it('the scanned domain is non-vacuous, and is a subset of A-3\'s own file set (scan negative control)', () => {
+    const files = a3ScannedDomain()
+    expect(files.length).toBeGreaterThan(0)
+    expect(files).toContain('packages/core-backend/src/routes/approvals.ts')
+    expect(files.every((f) => (A3_OWNED_FILES as readonly string[]).includes(f))).toBe(true)
+  })
+
+  it('fails closed when a listed path is no longer tracked, instead of silently shrinking', () => {
+    const droppedPath = 'packages/core-backend/src/routes/approvals.ts'
+    const fakeTracked = new Set(
+      (A3_OWNED_FILES as readonly string[]).filter((f) => f !== droppedPath),
     )
+    expect(() => computeScannedDomain(A3_OWNED_FILES, fakeTracked)).toThrow(/no longer tracks/)
+  })
+
+  it('the list is load-bearing: removing a src entry shrinks the scanned domain by exactly one, not zero', () => {
+    const droppedPath = 'packages/core-backend/src/routes/approvals.ts'
+    const tracked = trackedFilesSet()
+    const full = computeScannedDomain(A3_OWNED_FILES, tracked)
+    const reducedOwned = (A3_OWNED_FILES as readonly string[]).filter((f) => f !== droppedPath)
+    const reduced = computeScannedDomain(reducedOwned, tracked)
+    expect(full).toContain(droppedPath)
+    expect(reduced).not.toContain(droppedPath)
+    expect(reduced.length).toBe(full.length - 1)
+  })
+
+  it('the scanned domain includes .github/workflows/plugin-tests.yml (P2-1 regression guard: A-3 owns this CI config file too, and it is the exact file the repo-wide sweep silently dropped)', () => {
+    const files = a3ScannedDomain()
+    expect(files).toContain('.github/workflows/plugin-tests.yml')
+  })
+
+  it('removing .github/workflows/plugin-tests.yml from A3_OWNED_FILES shrinks the scanned domain by exactly one (a silently-dropped CI-config entry must be caught, the same way a silently-dropped src entry already is)', () => {
+    const droppedPath = '.github/workflows/plugin-tests.yml'
+    const tracked = trackedFilesSet()
+    const full = computeScannedDomain(A3_OWNED_FILES, tracked)
+    const reducedOwned = (A3_OWNED_FILES as readonly string[]).filter((f) => f !== droppedPath)
+    const reduced = computeScannedDomain(reducedOwned, tracked)
+    expect(full).toContain(droppedPath)
+    expect(reduced).not.toContain(droppedPath)
+    expect(reduced.length).toBe(full.length - 1)
   })
 
   it('self-exemption is exactly this one file, and is load-bearing (not vestigial)', () => {
     // The exclusion target really exists in the unfiltered domain — not a stale path pointing at
     // nothing (which would make the `exclude` list decorative).
-    const unfiltered = trackedNonMarkdownFilesUnder(SCAN_DIRS, REPO_ROOT, [])
+    const unfiltered = a3ScannedDomain([])
     expect(unfiltered).toContain(SELF_PATH)
     // ...and it genuinely WOULD fail the leg below if not excluded — the exemption removes a real
     // hit, not zero hits it never needed to remove.
     const selfHits = linesContainingToken([SELF_PATH], TOKEN)
     expect(selfHits.length).toBeGreaterThan(0)
     // With the default exclusion applied, this file is gone from the scanned domain.
-    expect(trackedNonMarkdownFilesUnder(SCAN_DIRS)).not.toContain(SELF_PATH)
+    expect(a3ScannedDomain()).not.toContain(SELF_PATH)
   })
 
-  it('zero tracked non-Markdown file (other than this guard itself) under packages/**, apps/**, plugins/**, scripts/** contains the literal substring "review" + "s" + "/"', () => {
-    const hits = linesContainingToken(trackedNonMarkdownFilesUnder(SCAN_DIRS), TOKEN)
+  it('zero file in A-3\'s own scanned domain (other than this guard itself) contains the literal substring "review" + "s" + "/"', () => {
+    const hits = linesContainingToken(a3ScannedDomain(), TOKEN)
     expect(hits).toEqual([])
   })
 
-  it('POSITIVE CONTROL: a planted dangling-reviews-path reference reds the leg', () => {
-    const probe = 'packages/core-backend/src/probe-with-dangling-reviews-path.ts'
+  it('DISCRIMINATIVE CONTROL: a dangling reference inside A-3\'s lineage reds the scanned leg; the identical reference outside it does not, because the miss is a scope decision, not a blind detector (fixes P2-2: the previous round\'s control site was already inside the frozen list — `ApprovalTemplateGroupService.ts` is entry #8 above — so it had zero power to distinguish a repo-wide scan from this one; this cell isolates list membership as the only variable)', () => {
+    const insideLineage = 'packages/core-backend/src/services/ApprovalTemplateGroupService.ts'
+    const outsideLineage = 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+    const injectedLine = `// see \`${TOKEN}design-gate-A3-phase2-20260918.md\` for the writeup\n`
     withDecoyTree(
       {
-        [probe]: `// see \`${TOKEN}some-report.md\` for the full writeup\nexport const X = 1\n`,
-        'packages/core-backend/src/clean.ts':
-          '// see the private review record `some-report.md` (not tracked in this repository)\nexport const Y = 1\n',
+        [insideLineage]: `${injectedLine}export const PROBE_INSIDE = 1\n`,
+        [outsideLineage]: `${injectedLine}export const PROBE_OUTSIDE = 1\n`,
       },
       (decoyRoot) => {
-        const files = [probe, 'packages/core-backend/src/clean.ts']
-        const hits = linesContainingToken(files, TOKEN, decoyRoot)
-        expect(hits.map((h) => h.file)).toEqual([probe])
-        expect(hits[0].line).toBe(1)
+        // Synthetic owned-file list containing ONLY the inside-lineage path: isolates "is this
+        // path in A3_OWNED_FILES" as the one variable that differs between the two files below —
+        // both are otherwise identical (same injected line, same decoy tree, same real repo
+        // paths).
+        const syntheticOwned = [insideLineage] as const
+        const syntheticTracked = new Set([insideLineage, outsideLineage])
+        const scanned = computeScannedDomain(syntheticOwned, syntheticTracked, [])
+        expect(scanned).toEqual([insideLineage])
+
+        // Arm A (inside lineage): the guard's actual domain-then-scan pipeline catches it — RED.
+        const insideResult = linesContainingToken(scanned, TOKEN, decoyRoot)
+        expect(insideResult.map((h) => h.file)).toEqual([insideLineage])
+
+        // Arm B (outside lineage): same file content, but the domain never contains the path, so
+        // the pipeline is GREEN on it — not because the detector is blind, but because the file
+        // is out of scope by design.
+        expect(scanned).not.toContain(outsideLineage)
+        expect(linesContainingToken(scanned, TOKEN, decoyRoot).map((h) => h.file)).not.toContain(
+          outsideLineage,
+        )
+
+        // Discriminator: prove the miss above is a scope decision, not a detector limitation — the
+        // identical function, pointed at the outside-lineage file directly, DOES see the line.
+        const wouldCatchIfInScope = linesContainingToken([outsideLineage], TOKEN, decoyRoot)
+        expect(wouldCatchIfInScope.map((h) => h.file)).toEqual([outsideLineage])
       },
     )
   })
