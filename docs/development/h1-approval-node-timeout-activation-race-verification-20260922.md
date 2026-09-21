@@ -295,7 +295,20 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 
 ### 6.2 修复提交后的 CI
 
-修复提交（§4.5 的单测隔离）push 后的 required check 结果：`__CI2__`
+修复提交 `4b0650b96557001c82f718211c106389cc72e914`（§4.5 的单测隔离）push 后：
+
+| 项 | 结果 |
+|---|---|
+| main 保护要求的 **13 条 required check**（逐条按 `gh api …/branches/main/protection` 的清单核对，不按数量） | **13/13 全部 reported 且 pass** |
+| `test (20.x)` / `test (18.x)`（§4.5 打红过的那两条） | **success / success**；打红的那一步 "Run core-backend tests" 本身也是 `success` |
+| `approval-realdb-l6a-roundscoping`（本 PR 的目标 lane，`postgres:16` + Node 20） | **pass** |
+| PR 上全部 check | 52 pass / 1 skipping / 1 pending（`coverage`，非 required，且不是 fail） |
+
+即 §7 第 1 条的 **PG 16 轴**与第 7 条的**默认无 DB lane**都由 CI 实际执行并通过 ——
+两者都不是本地跑出来的，出处标在这里。
+
+PR 仍为 **Draft**，head `4b0650b96557001c82f718211c106389cc72e914`。绿不等于被采纳：
+是否合并由 owner 决定，本代理未 undraft、未请求合并。
 
 ---
 
