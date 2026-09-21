@@ -10,7 +10,8 @@ import { query, transaction } from '../../src/db/pg'
  * level, not just prose in the design doc.
  *
  * Headline case is design-gate finding M6 / changesRequired #4
- * (`reviews/design-gate-A3-phase2-20260918.md` §2 Q5): the design proposal's ORIGINAL
+ * (`design-gate-A3-phase2-20260918.md`, a private review record not tracked in this repository,
+ * §2 Q5): the design proposal's ORIGINAL
  * `atgbbl_link_fk … ON DELETE NO ACTION` blocked the already-ratified
  * `approval_templates -> approval_template_group_links ON DELETE CASCADE` chain (phase 1,
  * required because 10+ integration suites hard-delete their fixture templates in teardown). The

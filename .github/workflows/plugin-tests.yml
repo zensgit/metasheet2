@@ -422,6 +422,16 @@ jobs:
       - name: A3 backfill-batches-list CI wiring contract
         run: node --test scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs
 
+      # Same slice, batch DDL `down()` data-retention guard (candidate, not yet ratified) — round-2
+      # implementation-gate fix (`impl-gate-A3-guarded-down-round2-20260921.md` P2-B): this suite
+      # existed since round 1 but was deliberately deferred out of both vitest.config.ts (exclude)
+      # and this real-DB step while round 1's own hard constraint required plugin-tests.yml/s6a to
+      # stay byte-identical that round. Wired here (with the allowlist exemption's removal and the
+      # s6a re-pin, same commit). Dropping either point silently disables the fail-closed/strictness/
+      # 42P01-regression proofs.
+      - name: A3 backfill-down-guard CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
+
       # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-a routing-policy CI wiring contract
@@ -1700,6 +1710,7 @@ jobs:
             tests/integration/approval-template-groups-backfill-execute.db.test.ts \
             tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
             tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+            tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
