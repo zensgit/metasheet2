@@ -321,7 +321,7 @@ type CancelRoundSuite = (typeof CANCEL_ROUND_SUITES)[number]
 const CANCEL_ROUND_DEFAULT_SUITE: CancelRoundSuite = 'leave'
 
 /**
- * Lock:143 — the `suite` CEILINGS from the decoded rule page (`reviews/设置审批撤销规则.txt:41-43`):
+ * Lock:143 — the `suite` CEILINGS from the decoded rule page:
  * `attendance` 180 days, `leave`/`other` 90 days, `forbidden` 0 (lock:143 fixes that suite's window
  * at 0 and §14.3 #14 blocks it at creation before the number matters). Lock:143's
  * `windowDays ∈ [0, 上限]` makes these an ENFORCED UPPER BOUND, not a default — renamed from
