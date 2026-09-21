@@ -3861,6 +3861,16 @@ Tests  5 failed | 2 passed (7)
 **残留(不藏)**:`users.id` 是 `TEXT`,哨兵受众 id 的不可命中靠约定而非类型 —— 与
 `applyTemplateVisibilityFilter` 自带的两个哨兵同类。
 
+**本提交的一条行为增量,明写免得日后被当意外发现**:迁移末尾的读回守卫扩到了 `visibility_scope`,
+因此在一个「固定 id 上已存在一行、但该行的 scope 与本迁移期望值不同、且本迁移尚未被记录」的库上,
+`up()` 现在会 `throw`,而此前会通过。这正是该守卫存在的目的(`ON CONFLICT DO NOTHING` 的静默错误),
+保留 UUID 上的碰撞概率也可忽略 —— 但它确实是本次改动带来的一条新 abort 路径,不是零行为变化。
+
+**另一条作用域声明**:新用例的**全分页**遍历只在「存在性」正控那一半依赖文件串行执行
+(`vitest.integration.config.ts` 钉了 `fileParallelism: false` + `maxConcurrency: 1`,本轮已核);
+缺席那一半不受影响(漏读一行造不出假绿),且种子的缺席另有 `?search=` 与详情 404 两条逐字节断言独立钉住。
+该依赖已写进测试文件头。
+
 ### N1-c 迁移侧之二:考勤迁移耦合 — **不改迁移;改为写清部署序 + 交普查包**
 
 按要求**没有**动 `zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts`。改为:
