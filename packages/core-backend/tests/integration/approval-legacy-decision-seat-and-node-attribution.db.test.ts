@@ -489,8 +489,8 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
           // A caller's own unrelated payload. H-5: the shared settlement path builds the audit
           // row's metadata entirely server-side and never forwards the request blob, so these keys
           // are absent from the stored row — the strip is no longer key-scoped, it is total. That
-          // is a NARROWING of this route's published behaviour, recorded in the design MD's
-          // contract-change table.
+          // is a NARROWING of this route's published behaviour, asserted below (both keys absent)
+          // together with a positive control that the server's own keys are still there.
           clientNote: 'keep-me',
           nested: { a: 1 },
         },
@@ -787,7 +787,8 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
     // H-5: `/actions`'s reject arm stamps `nodeKey` and nothing else — a reject is terminal, so
     // there is no later round for a `nodeEntryEpoch` to disambiguate. Routing this door through
     // the same settlement path means its row now has the SAME shape: the forged round key is gone
-    // and no server round key replaces it. Recorded in the design MD's contract-change table.
+    // and no server round key replaces it. The `nodeKey` assertion above is this narrowing's
+    // positive control — the row is not simply empty.
     expect(metadata.nodeEntryEpoch).toBeUndefined()
     expect(metadata.clientNote).toBeUndefined()
     expect(metadata.nested).toBeUndefined()

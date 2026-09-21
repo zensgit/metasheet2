@@ -693,6 +693,19 @@ async function publishApprovalCountsForUsers(
  *
  * The instance row is re-read after the dispatch because `UnifiedApprovalDTO` carries no `version`
  * and the legacy envelope's `data.version` is part of this route's published shape.
+ *
+ * TWO riders are forwarded besides the comment, and both exist because this door publishes
+ * something `/actions` does not:
+ *
+ *   * `expectedVersion` — the optimistic-lock precondition. The caller's `version` was already
+ *     checked under THIS route's lock, but that lock has to be handed back before the call (the
+ *     settlement re-locks the row on a second connection), so without this rider the check would
+ *     be advisory: it would say "your read was current when you read it", not "your decision is
+ *     being applied to the state you read". Passed down, it is re-checked inside the settlement
+ *     transaction, under the lock the write itself is made under.
+ *   * `reason` — this door's own `approval_records.reason` column, which `/reject` collects under a
+ *     400 `APPROVAL_REJECTION_REASON_REQUIRED` and which the shared writer would otherwise leave
+ *     NULL. `null` for `/approve`, which has never had the column.
  */
 async function settleLegacyDecisionThroughSharedPath(
   productService: ApprovalProductService,
@@ -700,6 +713,7 @@ async function settleLegacyDecisionThroughSharedPath(
   action: 'approve' | 'reject',
   comment: string | null,
   actor: { userId: string; userName: string; roles: string[]; ip: string | null; userAgent: string | null },
+  precondition: { expectedVersion: number; reason: string | null },
 ): Promise<{ status: string; version: number }> {
   await productService.dispatchAction(
     id,
@@ -709,6 +723,8 @@ async function settleLegacyDecisionThroughSharedPath(
       // (`nodeKey`, `nodeEntryEpoch`, `nextNodeKey`, `approvalMode`, ...) server-side, and handing
       // it a client blob would re-open the attribution hole the seat/attribution slice just closed.
       ...(comment !== null ? { comment } : {}),
+      expectedVersion: precondition.expectedVersion,
+      ...(precondition.reason !== null ? { reason: precondition.reason } : {}),
     },
     actor,
   )
@@ -744,6 +760,28 @@ function legacyDecisionServiceErrorResponse(error: ServiceError) {
       ...(error.details ? { details: error.details } : {}),
     },
   }
+}
+
+/**
+ * ONE 409 SHAPE per endpoint. The optimistic-lock precondition is now checked in TWO places on
+ * these two routes — this route's own pre-check, under its own `FOR UPDATE` lock, and the shared
+ * settlement path's re-check, under the lock the write is actually made under (see
+ * `ApprovalActionRequest.expectedVersion`) — and BOTH are reachable, which one fires depending on
+ * whether a concurrent decision landed inside the window between them.
+ *
+ * Rendering the second one with the generic mapper above would give this endpoint two different
+ * bodies for one error code (`error.currentVersion` from `approvalVersionConflictResponse` vs
+ * `error.details.currentVersion` from the generic mapper), selected by interleaving. So a version
+ * conflict raised by the settlement is rendered in the SAME envelope this route has always
+ * published for one. `fallbackCurrentVersion` is the version this route read under its own lock,
+ * used only if the service ever raises the code without the detail.
+ */
+function legacyDecisionErrorResponse(error: ServiceError, fallbackCurrentVersion: number) {
+  if (error.code === 'APPROVAL_VERSION_CONFLICT') {
+    const detailed = Number(error.details?.currentVersion)
+    return approvalVersionConflictResponse(Number.isFinite(detailed) ? detailed : fallbackCurrentVersion)
+  }
+  return legacyDecisionServiceErrorResponse(error)
 }
 
 export function approvalsRouter(options?: ApprovalRouterOptions): Router {
@@ -3254,12 +3292,30 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // decide therefore also decides WHICH settlement applies — one definition, not a second,
         // narrower copy.
         //
-        // The lock is released FIRST, on purpose: `dispatchAction` re-locks this same row
-        // `FOR UPDATE` on a SECOND pool connection, so holding ours across the call is a
-        // deterministic self-deadlock, not a race. The cost of letting go is a TOCTOU window on
-        // the `version` precondition checked above — `dispatchAction` re-reads the row under its
-        // own lock and re-checks `status`, so a concurrent decision cannot be double-applied, but
-        // it CAN make the `prevVersion` echoed below stale by one. Recorded, not assumed away.
+        // THE LOCK IS RELEASED FIRST, and this is the slice's one real cost — stated as a clause,
+        // not as a footnote:
+        //
+        //   `dispatchAction` re-locks this same row `FOR UPDATE` on a SECOND pool connection, so
+        //   holding ours across the call is a DETERMINISTIC SELF-DEADLOCK, not a race. We
+        //   therefore hand the connection back before calling it, which means the row is
+        //   UNLOCKED for a window between the checks above and the settlement's own transaction,
+        //   and every precondition this route evaluated above (version, status, attendance, seat)
+        //   was evaluated on a snapshot that another decision may already have replaced.
+        //
+        // What closes the window, per precondition:
+        //   * version — RE-CHECKED inside the settlement transaction, under the settlement's own
+        //     lock, via the `expectedVersion` rider passed below. A concurrent decision that lands
+        //     first makes this call a 409 (same code, same envelope as the pre-check above), not a
+        //     second settlement applied to a state this caller never read.
+        //   * status / seat / round — re-derived by `dispatchAction` from the row it locks itself
+        //     (`status !== 'pending'`, active-assignment admission), so an instance that has since
+        //     ended, or a seat that has since been retired, refuses there.
+        //   * attendance fail-closed — re-run by `guardAttendanceCentralMutationOrThrow` at the
+        //     top of the settlement transaction.
+        //
+        // What is NOT closed, recorded rather than assumed away: the ORDER in which two
+        // simultaneous callers are admitted is the order PostgreSQL grants the row lock, so which
+        // of them gets the 200 and which gets the 409 is not determined by who called first.
         if (seat.seatGated) {
           await client.query('ROLLBACK')
           client.release()
@@ -3278,12 +3334,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
                 ip: req.ip || null,
                 userAgent: req.get('user-agent') || null,
               },
+              // `/approve` has never had a `reason` column of its own — only `/reject` does.
+              { expectedVersion: requestedVersion, reason: null },
             )
           } catch (settlementError) {
             if (settlementError instanceof ServiceError) {
               return res
                 .status(settlementError.statusCode)
-                .json(legacyDecisionServiceErrorResponse(settlementError))
+                .json(legacyDecisionErrorResponse(settlementError, instance.version))
             }
             throw settlementError
           }
@@ -3559,12 +3617,30 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // decide therefore also decides WHICH settlement applies — one definition, not a second,
         // narrower copy.
         //
-        // The lock is released FIRST, on purpose: `dispatchAction` re-locks this same row
-        // `FOR UPDATE` on a SECOND pool connection, so holding ours across the call is a
-        // deterministic self-deadlock, not a race. The cost of letting go is a TOCTOU window on
-        // the `version` precondition checked above — `dispatchAction` re-reads the row under its
-        // own lock and re-checks `status`, so a concurrent decision cannot be double-applied, but
-        // it CAN make the `prevVersion` echoed below stale by one. Recorded, not assumed away.
+        // THE LOCK IS RELEASED FIRST, and this is the slice's one real cost — stated as a clause,
+        // not as a footnote:
+        //
+        //   `dispatchAction` re-locks this same row `FOR UPDATE` on a SECOND pool connection, so
+        //   holding ours across the call is a DETERMINISTIC SELF-DEADLOCK, not a race. We
+        //   therefore hand the connection back before calling it, which means the row is
+        //   UNLOCKED for a window between the checks above and the settlement's own transaction,
+        //   and every precondition this route evaluated above (version, status, attendance, seat)
+        //   was evaluated on a snapshot that another decision may already have replaced.
+        //
+        // What closes the window, per precondition:
+        //   * version — RE-CHECKED inside the settlement transaction, under the settlement's own
+        //     lock, via the `expectedVersion` rider passed below. A concurrent decision that lands
+        //     first makes this call a 409 (same code, same envelope as the pre-check above), not a
+        //     second settlement applied to a state this caller never read.
+        //   * status / seat / round — re-derived by `dispatchAction` from the row it locks itself
+        //     (`status !== 'pending'`, active-assignment admission), so an instance that has since
+        //     ended, or a seat that has since been retired, refuses there.
+        //   * attendance fail-closed — re-run by `guardAttendanceCentralMutationOrThrow` at the
+        //     top of the settlement transaction.
+        //
+        // What is NOT closed, recorded rather than assumed away: the ORDER in which two
+        // simultaneous callers are admitted is the order PostgreSQL grants the row lock, so which
+        // of them gets the 200 and which gets the 409 is not determined by who called first.
         if (seat.seatGated) {
           await client.query('ROLLBACK')
           client.release()
@@ -3583,12 +3659,18 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
                 ip: req.ip || null,
                 userAgent: req.get('user-agent') || null,
               },
+              // `reason` is this door's OWN persisted column, and this door 400s without it
+              // (`APPROVAL_REJECTION_REASON_REQUIRED` above). It is carried into the settlement's
+              // audit insert, in the settlement's own transaction — the same two values the
+              // inline DML below has always written: `comment` = the caller's comment (falling
+              // back to the reason text when they sent only a reason), `reason` = the reason.
+              { expectedVersion: requestedVersion, reason },
             )
           } catch (settlementError) {
             if (settlementError instanceof ServiceError) {
               return res
                 .status(settlementError.statusCode)
-                .json(legacyDecisionServiceErrorResponse(settlementError))
+                .json(legacyDecisionErrorResponse(settlementError, instance.version))
             }
             throw settlementError
           }
