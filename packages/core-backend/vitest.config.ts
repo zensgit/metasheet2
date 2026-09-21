@@ -83,6 +83,15 @@ export default defineConfig({
       // skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-can-decide-current-node.db.test.ts',
+      // Legacy decision endpoints (`POST /api/approvals/:id/approve`, `/reject`) — seat / round /
+      // status admission and SERVER-DERIVED node attribution, asserted alongside the `/actions`
+      // door's verdict for the same caller. Requires real PostgreSQL: the gate runs inside the
+      // route's own transaction, the ROLE arm resolves through AuthService -> `user_roles` (a
+      // false->true flip on one row, claim-trusting fast path off), and every refusal asserts a
+      // zero-row delta read back from `approval_records`. Excluded from the no-DB default job so
+      // `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-legacy-decision-seat.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-legacy-decision-seat-and-node-attribution.db.test.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
