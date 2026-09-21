@@ -1,6 +1,6 @@
 # Attendance import authenticated-organization verification
 
-Status: **SOURCE AUDIT IN PROGRESS / OWNER DECISIONS OPEN / IMPLEMENTATION NOT STARTED**
+Status: **SOURCE AUDIT COMPLETE / OWNER DECISIONS OPEN / STRICT-QA HARDENING IN PROGRESS**
 
 Baseline: `origin/main@cd42eaf7455f03dd99021a02c47c42f1f3db6484`.
 
@@ -24,7 +24,8 @@ worktree `codex/attendance-qa-org-scope-20260921`.
 | #4688 / W4C-3a duplication check | PASS: `9ce340e0f feat(attendance): complete W4C-3a import and rollback (#4688)` is in `origin/main` |
 | Historical #5676 status | Draft branch inspected as hypothesis; not treated as current authorization or transferable gate evidence |
 | Independent adversarial source review | COMPLETE: found the RATIFIED template-preferences conflict, omitted routes and OpenAPI/actor-identity gaps; this revision records them as blockers rather than choosing silently |
-| Runtime edits | NONE |
+| Import runtime edits | NONE |
+| Strict-QA implementation | In progress on isolated branch `codex/attendance-strict-delegated-principal-20260922`; no import runtime behavior changed |
 | Database/staging/flags | NOT RUN / NOT CHANGED |
 
 ## 3. Source trace
@@ -90,13 +91,47 @@ the implementation plan.
 | Missing authenticated tenant | `403`, no default/header fallback | NOT RUN; owner compatibility decision open |
 | Template-preferences request selects another administered org | Preserve or reject only after OD-IA-4 | NOT RUN; RATIFIED contract conflict open |
 | Integration sync selects another org | No claim in this slice | NOT RUN; separate tenancy audit required |
-| Strict smoke uses delegated tenant admin | Full lifecycle succeeds without platform-admin bypass | NOT RUN; current workflow does not prove principal posture |
-| Strict smoke receives platform-admin exercise bearer | Fail before product side effects | NOT RUN; regression test required |
+| Strict smoke uses delegated tenant admin | Full lifecycle succeeds without platform-admin bypass | Contract helper positive control PASS locally; remote/staging lifecycle NOT RUN |
+| Strict smoke receives platform-admin exercise bearer | Fail before product side effects | Focused regression PASS locally; platform-role mutation turns both matching tests red |
 
-## 6. Planned verification commands
+## 6. Verification commands
 
-Commands will be copied from the final touched workflows after implementation;
-the exact list is intentionally not claimed as executed. Expected minimum:
+Strict-QA hardening evidence on implementation worktree baseline
+`cd42eaf7455f03dd99021a02c47c42f1f3db6484`:
+
+```sh
+node --test \
+  scripts/ops/attendance-delegated-admin-contract.test.mjs \
+  scripts/ops/attendance-prod-auth-fallback-workflow-contract.test.mjs \
+  scripts/ops/attendance-verifier-contract.test.mjs
+# PASS: 41/41
+
+NODE_PATH=/Users/chouhua/Downloads/Github/metasheet2/node_modules \
+  node --test scripts/ops/attendance-acceptance-wiring.test.mjs
+# PARTIAL: 9/10 PASS. The remaining validator test could not resolve the
+# worktree-local ajv module. This is NOT counted as a product failure or green.
+
+git diff --check
+# PASS
+```
+
+Mutation evidence:
+
+```text
+Mutation: remove the explicit role=admin rejection.
+Result: 0/2 matching tests passed; both platform-admin refusal legs failed.
+Restore: performed with apply_patch; focused suite returned 41/41 PASS.
+```
+
+The strict workflow now requires the tenant-bound delegated-admin contract,
+and `attendance-run-gates.sh` executes the read-only `/auth/me` verifier before
+API smoke, provisioning or either browser flow. The verifier requires exact
+tenant equality, explicit `attendance:admin`, a true attendance-admin feature
+posture and a non-platform role. A deploy-host fallback may still resolve a
+token, but a platform-admin fallback cannot cross this new business-probe gate.
+
+Import lifecycle commands remain planned until OD-IA-1 through OD-IA-5 are
+resolved. Expected minimum after implementation:
 
 ```sh
 pnpm --filter @metasheet/core-backend exec vitest run <focused unit files>
@@ -124,7 +159,9 @@ Each mutation must turn only its matching regression red, then be fully restored
 
 ## 7. NOT RUN and residuals
 
-- No runtime code or tests were changed.
+- No import runtime code or import lifecycle tests were changed.
+- Strict-QA hardening has focused local evidence but is not yet independently
+  gated; the evidence above is branch-head-scoped only.
 - No PostgreSQL, browser, Windows package, staging, CI or deployment validation
   was run for this draft.
 - No exact-head independent implementation gate exists yet.
