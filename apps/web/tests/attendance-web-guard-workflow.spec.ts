@@ -86,6 +86,36 @@ describe('attendance web guard workflow contract', () => {
     },
   )
 
+  /**
+   * THE MODULE THAT MADE THIS LANE RED MUST SELECT THIS LANE (refuter finding).
+   *
+   * `src/utils/delete-fallback.ts` is imported by `utils/api.ts`, i.e. it is in the module graph of
+   * every harness this lane boots — and on 2026-09-18 a change to it (its directory, then) took the
+   * makeup browser step 6/6 red. The stock-prep lane got a classifier entry for it in the same PR
+   * and this lane did not, so a later PR touching only that module would classify relevant=false,
+   * skip `playwright test --config playwright.attendance-makeup.config.ts` altogether, and land the
+   * red on an unrelated attendance PR afterwards. Both wiring points, same as the session sources.
+   */
+  it('selects the DELETE-transport fallback module in both push and PR classifiers', () => {
+    const path = 'apps/web/src/utils/delete-fallback.ts'
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain(path)
+    const cases = workflow.match(/case "\$path" in([\s\S]*?)\)\s*relevant=true/)?.[1]
+    expect(cases).toBeTruthy()
+    expect(cases!.split(/\|\\?\s*/).map(value => value.trim())).toContain(path)
+    // The lane it unlocks is the one that went red — assert it is still gated on the classifier and
+    // is the browser step, so this pin cannot be satisfied by a lane that no longer runs Playwright.
+    // Select the step that EXECUTES playwright, not merely one whose text contains the config path:
+    // the classifier step's own `run` lists `apps/web/playwright.attendance-makeup.config.ts` as a
+    // path pattern, so a `includes('playwright.attendance-makeup.config.ts')` search finds THAT step
+    // first — it has no `if:` at all, and the assertion read `undefined`.
+    const steps = Object.values((loadYaml(workflow) as { jobs: Record<string, { steps?: Array<{ name?: string; run?: string; if?: string }> }> }).jobs)
+      .flatMap(job => job.steps ?? [])
+    const browser = steps.filter(step => /playwright test --config playwright\.attendance-makeup\.config\.ts/.test(step.run ?? ''))
+    expect(browser).toHaveLength(1)
+    expect(browser[0].if).toBe("steps.changes.outputs.relevant == 'true'")
+  })
+
   it.each(sessionSpecs)('executes the exact session spec in domain and required commands: %s', spec => {
     const doc = loadYaml(workflow) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }> }
     const step = Object.values(doc.jobs).flatMap(job => job.steps)

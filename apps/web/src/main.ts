@@ -19,6 +19,7 @@ import './styles/calendar-source-palette.css'
 // approval/workflow surface set so the no-static-style= gate has a home.
 import './styles/form-layout-utilities.css'
 import App from './App.vue'
+import { probeDeleteTransport } from './utils/delete-fallback'
 import { installPermissionSnapshotRefresh, useAuth } from './composables/useAuth'
 import { resolveAdminRouteRedirect } from './router/adminAccess'
 import { appRoutes } from './router/appRoutes'
@@ -27,6 +28,20 @@ import { ROUTE_PATHS } from './router/types'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { normalizePostLoginRedirect, normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './utils/authRedirect'
+import { apiFetch } from './utils/api'
+
+/**
+ * Once per page session, right after the first authenticated session bootstrap succeeds (login
+ * lands here through the post-login redirect; a reload lands here on its first guarded route):
+ * learn whether HTTP DELETE reaches the server, and — only if it does not — whether the POST+override
+ * tunnel is actually honoured here (utils/delete-fallback.ts exercises BOTH legs). Fire-and-forget: the
+ * probe never throws and navigation must not wait on it. `bypassDeleteFallback` keeps the probe's
+ * native leg a literal DELETE (otherwise apiFetch's own fallback would mask the very failure being
+ * measured); the tunnel leg is already a POST, which that flag does not touch.
+ */
+function scheduleDeleteTransportProbe(): void {
+  void probeDeleteTransport((url, init) => apiFetch(url, { ...init, suppressUnauthorizedRedirect: true, bypassDeleteFallback: true }))
+}
 
 const router = createRouter({
   // Use the Vite base (import.meta.env.BASE_URL, set from `base` in vite.config) so router URLs
@@ -95,6 +110,7 @@ router.beforeEach(async (to, _from, next) => {
           : { path: ROUTE_PATHS.LOGIN, query: { redirect } }
       )
     }
+    scheduleDeleteTransportProbe()
 
     const currentUser = auth.getCurrentUser()
     const mustChangePassword = requiresPasswordChange(currentUser)
