@@ -170,10 +170,8 @@ B-2 自己的一个独立修复轮把本切片同样清理过的死代码块删�
 
 | 断言 | 命令 | 结果 |
 |---|---|---|
-| 新 head | `git rev-parse HEAD` | `2e99240b2206215a6e0b82cc53e5af916b767396` |
 | 新 B-2 是祖先 | `git merge-base --is-ancestor 16703f8cf… HEAD` | YES |
 | #5857/旧 B-2 是祖先 | `git merge-base --is-ancestor 0a6531b80… HEAD` | YES |
-| 与 main 零重复 | `git cherry origin/main HEAD \| grep -c '^-'` / `grep -c '^+'` | `0` / `74` |
 | exec 逻辑行 | `grep -n '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh` | 恰一处，`:1257` |
 | exec 前缀行数 | `grep -c '^exec ' …` | `1` |
 | 文件行数 | `wc -l …` | `1658`（与新 B-2 相同） |

@@ -272,7 +272,7 @@ GRANT  SELECT ON TABLE approval_assignments TO   ms2testbed;   -- 恢复
 1. **`dueAt` 字段在真实浏览器里的"有值渲染"半边 NOT RUN**——今天唯一注册的审批源
    (`approval-pending-source.ts:78-85`) 不产出 `dueAt`（审批实例没有"截止时间"这个概念），本轮没有
    改后端去人为造一个假 `dueAt` 值（那会是伪造数据，违反"不编造值"纪律）。该半边的**代码路径**已经由
-   单元测试 `TodoCenterView.spec.ts:187`（"…dueAt only when the source supplies one" 用例的
+   单元测试 `TodoCenterView.spec.ts:189`（"…dueAt only when the source supplies one" 用例的
    `with-due` 分支）+ mutation 覆盖并证明为 load-bearing（见 §1.1），但**真实浏览器**层面没有一个
    真实业务对象能触发它——如实记录为"产品数据缺口"，交未来某个真正产出 `dueAt` 的来源接入时补上真机
    证据，不作为本切片验收阻塞项。
