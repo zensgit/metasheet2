@@ -8884,34 +8884,68 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         visibleSheetRows.map((row) => String(row.id)),
         access.userId,
       )
-      const readableSheetRows = visibleSheetRows.filter((row) =>
-        canReadWithSheetGrant(
-          baseCapabilities,
-          sheetPermissionScopeMap.get(String(row.id)),
-          access.isAdminRole,
-        ),
+      // Fenced readability — the SAME resolver GET /sheets and GET /bases already route through, so an
+      // approval-projection (or elearning-projection) sibling sheet in this base never surfaces here
+      // for a non-participant, exactly as it never surfaces in those listings. `sheetPermissionScopeMap`
+      // (loaded once, just above) is passed straight through rather than re-loaded: it was already built
+      // over this exact sheet-id set and this exact userId, so a second identical query here would be
+      // pure waste (P2 cost fix — this call and resolveSheetCapabilitiesForAccess below used to each
+      // load their own copy, +2 DB round-trips per request for data already in hand).
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        visibleSheetRows,
+        access,
+        baseCapabilities,
+        sheetPermissionScopeMap,
       )
 
       const effectiveSheetId =
         resolvedSheetId ??
         (typeof readableSheetRows[0]?.id === 'string' ? String(readableSheetRows[0].id) : null)
       if (resolvedSheetId && !readableSheetRows.some((row) => String(row.id) === resolvedSheetId)) {
+        // Anti-oracle, NARROWLY scoped to the projection fence itself — not to "any reason this sheet
+        // isn't in readableSheetRows". `sheetPermissionScopeMap` / `visibleSheetRows` are both built over
+        // resolvedBaseId's sheet list, so a sheetId the fence never touched (wrong base entirely, or the
+        // pre-existing People list-filter sentinel drop in filterVisibleSheetRows) is simply ABSENT from
+        // both — `.get()` would return undefined and read as "allowed by global read", which is not what
+        // happened. Requiring `wasVisibleForThisBase` first keeps those two cases on their pre-existing
+        // 403, so the ONLY behaviour change this fence introduces is the approval/elearning projection
+        // 200→404 flip. Pinned by this file's own "ANTI-ORACLE (control)" test (ordinary sheet, no-grant
+        // actor, still 403) — multitable-sheet-permissions.api.test.ts also asserts the no-grant-403
+        // shape but is excluded from every workflow (vitest.config.ts) and does not run in CI.
+        const wasVisibleForThisBase = visibleSheetRows.some((row) => String(row.id) === resolvedSheetId)
+        const wouldHaveBeenReadableWithoutTheFence = wasVisibleForThisBase && canReadWithSheetGrant(
+          baseCapabilities,
+          sheetPermissionScopeMap.get(resolvedSheetId),
+          access.isAdminRole,
+        )
+        if (wouldHaveBeenReadableWithoutTheFence) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${resolvedSheetId}` } })
+        }
         return sendForbidden(res)
       }
       if (!baseCapabilities.canRead && !effectiveSheetId) {
         return sendForbidden(res)
       }
-      const selectedSheetScope = effectiveSheetId
-        ? sheetPermissionScopeMap.get(effectiveSheetId)
-        : undefined
-      const capabilities = effectiveSheetId
-        ? applyContextSheetSchemaWriteGrant(
-            baseCapabilities,
-            selectedSheetScope,
-            access.isAdminRole,
-          )
-        : baseCapabilities
-      const capabilityOrigin = deriveCapabilityOrigin(
+      // Capability computation defers ENTIRELY to the same fenced resolver every other sheet-addressed
+      // route in this file uses (resolveSheetCapabilitiesForAccess) — not just the readability gate
+      // above, but the actual capability booleans in the response payload, so e.g. a participant on a
+      // projection sheet still gets every write/manage capability denied (system read-model), matching
+      // every other /api/multitable route's contract for that same sheet.
+      // effectiveSheetId is, at this point, guaranteed to be a member of visibleSheetRows (either it's
+      // resolvedSheetId and it just passed the readableSheetRows.some(...) check above — which is a
+      // subset of visibleSheetRows — or it's readableSheetRows[0], same subset). sheetPermissionScopeMap
+      // was loaded over exactly that id set, so passing it through here is a like-for-like substitution,
+      // not a narrower one (see the P2 fix note above the readableSheetRows call).
+      // `skipLiveness: true` (P2-02): this route never reads `.sheetLiveness` off the result below — its
+      // own existence check already ran against `sheetRow` earlier in this handler — so the resolver's
+      // `loadSheetLiveness` query is pure waste here; every other call site keeps loading it.
+      const sheetCapabilityResult = effectiveSheetId
+        ? await resolveSheetCapabilitiesForAccess(pool.query.bind(pool), effectiveSheetId, access, sheetPermissionScopeMap, true)
+        : null
+      const selectedSheetScope = sheetCapabilityResult?.sheetScope
+      const capabilities = sheetCapabilityResult?.capabilities ?? baseCapabilities
+      const capabilityOrigin = sheetCapabilityResult?.capabilityOrigin ?? deriveCapabilityOrigin(
         baseCapabilities,
         capabilities,
         selectedSheetScope,
