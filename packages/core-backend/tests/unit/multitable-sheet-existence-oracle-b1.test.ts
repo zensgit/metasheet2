@@ -284,10 +284,21 @@ describe('#5839 B1 — univer-meta sheet-config routes: authority before the she
 
     const ledger = existenceGapLedgerText()
     // Non-vacuous: the extracted block really is a list of entries, so `not.toContain` is a claim.
+    // The bound is 0, not a magnitude: #5839 closes the ledger one slice at a time (B2 took it from 13
+    // entries to 5), so any "at least N" threshold reds on a CORRECT ledger as soon as the next slice
+    // lands. What must never happen is the reader extracting text with no entries in it at all.
     expect(
       ledger.split("',").length - 1,
       'the extracted ledger block holds no entries — the reader is pointed at the wrong text',
-    ).toBeGreaterThan(5)
+    ).toBeGreaterThan(0)
+    // Positive control for the reader, replacing what the magnitude used to imply: an entry that IS
+    // still on the ledger is found in the extracted text. Without it, "> 0 entries" could be satisfied
+    // by a block this reader mis-sliced out of some other array and every `not.toContain` below would
+    // be vacuous. (When the slice that closes this handler lands, it deletes this line with the entry.)
+    expect(
+      ledger,
+      'the extracted block does not contain a known-still-listed ledger entry — the reader is pointed at the wrong array',
+    ).toContain("'GET /sheets/:sheetId/config-history'")
     // Covered here ⇒ off the ledger. A re-added entry reds HERE as well as in the guard.
     for (const name of B1_SLICE) expect(ledger, name).not.toContain(`'${name}'`)
   })

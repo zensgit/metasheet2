@@ -31,11 +31,13 @@
  * ── What is pinned, per route ─────────────────────────────────────────────────
  *   (a) an authenticated caller with no capability gets 403 with a body STRICTLY EQUAL across live /
  *       soft-deleted / absent, and equal to what `sendForbidden` itself emits;
- *   (b) evidence, not vibes: the SQL that ran IS the capability lookup, byte for byte — so no sheet row, no
- *       field, no record, no write was touched on the way to the refusal;
- *   (b2) self-check: the SQL log is non-empty and its FIRST entry is the capability resolver's own liveness
- *       query — so a middleware-level refusal (e.g. an `oapiScopeGuard` 403 before the handler ever runs)
- *       cannot fake-green assertion (a) by producing the same 403 body without the handler being reached;
+ *   (b) evidence, not vibes: the queries that ran ARE the capability lookup — same statements, same
+ *       PARAMETERS, in the same order — so no sheet row, no field, no record, no write was touched on the
+ *       way to the refusal, and the sheet the handler asked about is the sheet in the URL;
+ *   (b2) self-check: the call log is non-empty and its FIRST entry is the capability resolver's own liveness
+ *       query, carrying the URL's sheet id — so a middleware-level refusal (e.g. an `oapiScopeGuard` 403
+ *       before the handler ever runs) cannot fake-green assertion (a) by producing the same 403 body without
+ *       the handler being reached;
  *   (c) nothing else moved: a manager still gets the route's normal success on a live sheet, and now gets 404
  *       SHEET_DELETED / 404 NOT_FOUND on a deleted / absent one (the answer the unreachable liveness line was
  *       always meant to give).
@@ -47,11 +49,13 @@
  * `oapiScopeGuard` is a no-op without `req.apiTokenId`; `requireScope` `next()`s when `!req.apiTokenScopes`.
  * A `Bearer mst_` token WOULD get refused by `oapiScopeGuard`/`requireScope` at the MIDDLEWARE layer for an
  * unknown sheet id — a 403 that says nothing about the route handler under test (and would make assertion
- * (b2)'s self-check red for the wrong reason: the SQL log would be empty). So every case below carries a
+ * (b2)'s self-check red for the wrong reason: the call log would be empty). So every case below carries a
  * SESSION identity (`req.user`), exactly like #5839 B1.
  *
  * The fixture (tests/utils/sheet-existence-oracle.ts) answers "live" for any id it does not know as deleted
- * or absent, so a handler that asks about the WRONG id cannot pass (c) by accident.
+ * or absent, so a handler that asks about the WRONG id cannot pass (c) by accident; and its log carries `$n`
+ * parameters, so such a handler cannot pass (b) either — for the REFUSED caller, whose status code is 403
+ * whichever sheet was consulted, that log is the only witness there is.
  *
  * TRANSPORT: one pinned listener per file + request(url()) — `request(app)` app-mode is banned by
  * tests/unit/supertest-app-mode-tripwire.test.ts (#4154).
@@ -75,6 +79,7 @@ import {
   SHEET_DELETED_BODY,
   SHEET_IDS,
   SHEET_NOT_LIVE_STATUS,
+  type OracleCall,
   type OracleFakePool,
   type OracleIdentity,
 } from '../utils/sheet-existence-oracle'
@@ -281,7 +286,9 @@ describe('#5839 B2 — univer-meta field/view/import/summary routes: authority b
   const call = async (route: RouteCase, sheetId: string) => {
     oracle.reset()
     const res = await route.send(request(pinned.url()), sheetId)
-    return { res, sql: [...oracle.sqlLog], transactions: oracle.transactions }
+    // Snapshot: `oracle.calls` is emptied in place by the next reset / capability replay.
+    const calls: OracleCall[] = oracle.calls.map((c) => ({ sql: c.sql, params: [...c.params] }))
+    return { res, calls, transactions: oracle.transactions }
   }
 
   it('the eight routes of the B2 slice are all covered here', () => {
@@ -307,25 +314,31 @@ describe('#5839 B2 — univer-meta field/view/import/summary routes: authority b
         expect(JSON.stringify(answers)).not.toContain('sht_oracle')
       })
 
-      it('(b) evidence: only the capability lookup ran — no sheet row, no entity read, no write', async () => {
+      it('(b) evidence: only the capability lookup ran, about THIS sheet — no sheet row, no entity read, no write', async () => {
         currentUser = OUTSIDER
         for (const sheetId of SHEET_IDS) {
-          const { sql, transactions } = await call(route, sheetId)
-          const capability = await oracle.capabilitySqlFor(OUTSIDER, sheetId)
+          const { calls, transactions } = await call(route, sheetId)
+          const capability = await oracle.capabilityCallsFor(OUTSIDER, sheetId)
           // Non-vacuous: the capability lookup really does query, so `toEqual` below is a claim about
           // WHICH queries ran, not an empty-vs-empty tautology.
-          expect(capability.some((s) => LIVENESS_SELF_CHECK_SQL.test(s)), sheetId).toBe(true)
-          expect(sql, sheetId).toEqual(capability)
-          expect(beyondCapability(sql), sheetId).toEqual([])
+          expect(capability.some((c) => LIVENESS_SELF_CHECK_SQL.test(c.sql)), sheetId).toBe(true)
+          // …and it really does carry the sheet id, so the equality below binds WHICH SHEET was asked
+          // about. Without this the comparison is text-only, and a handler that authorised against a
+          // DIFFERENT sheet would satisfy every assertion in this test.
+          expect(capability.some((c) => c.params.includes(sheetId)), sheetId).toBe(true)
+          expect(calls, sheetId).toEqual(capability)
+          expect(beyondCapability(calls), sheetId).toEqual([])
           expect(transactions, sheetId).toBe(0)
         }
       })
 
       it('(b2) self-check: the handler was actually reached — a middleware refusal cannot fake-green (a)', async () => {
         currentUser = OUTSIDER
-        const { sql } = await call(route, LIVE)
-        expect(sql.length).toBeGreaterThan(0)
-        expect(sql[0]).toMatch(LIVENESS_SELF_CHECK_SQL)
+        const { calls } = await call(route, LIVE)
+        expect(calls.length).toBeGreaterThan(0)
+        expect(calls[0]!.sql).toMatch(LIVENESS_SELF_CHECK_SQL)
+        // The first question the handler asked was about the sheet in the URL, not some other id.
+        expect(calls[0]!.params).toContain(LIVE)
       })
 
       it('(c1) manager on a LIVE sheet: the route answers exactly as it did before the probe was removed', async () => {
@@ -349,8 +362,8 @@ describe('#5839 B2 — univer-meta field/view/import/summary routes: authority b
         // The sheet-row probe is gone for the authorised caller too: the 404 comes from sheetLiveness,
         // so nothing beyond the capability lookup was read and no transaction was opened.
         for (const [state, sheetId, outcome] of [['deleted', DELETED, deleted], ['absent', ABSENT, absent]] as const) {
-          expect(outcome.sql, state).toEqual(await oracle.capabilitySqlFor(MANAGER, sheetId))
-          expect(beyondCapability(outcome.sql), state).toEqual([])
+          expect(outcome.calls, state).toEqual(await oracle.capabilityCallsFor(MANAGER, sheetId))
+          expect(beyondCapability(outcome.calls), state).toEqual([])
           expect(outcome.transactions, state).toBe(0)
         }
         expect(JSON.stringify([deleted.res.body, absent.res.body])).not.toContain('sht_oracle')
