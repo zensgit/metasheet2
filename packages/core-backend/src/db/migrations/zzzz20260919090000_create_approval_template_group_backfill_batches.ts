@@ -114,7 +114,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 }
 
-// CANDIDATE, review-requested — see reviews/approval-template-groups-phase2-backfill-ddl-declaration-20260920.md
+// CANDIDATE, review-requested — see the private review record
+// "approval-template-groups-phase2-backfill-ddl-declaration-20260920.md" (not in this repo; it
+// lives in the reviewer's private review-notes tree, not under a repo `reviews/` directory)
 // §1.6(b) / R2 / Q4b (not yet ratified; this guard is itself an unratified candidate, not a
 // closed decision). §1.6(b) established that this migration's down() does not undo any business
 // effect: `approval_template_groups` rows created and `approval_template_group_links` rows
@@ -130,18 +132,31 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 // an explicit opt-out: set ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP=true (mirrors migrate.ts's
 // ALLOW_DB_RESET gate for --reset) to force the drop anyway. Forcing is a decision to discard the
 // ledger's retention value, not a mechanical unblock — it still does not undo the business effect
-// it can no longer track afterward (§1.6(b) applies exactly the same post-force).
+// it can no longer track afterward (§1.6(b) applies exactly the same post-force). Scope note: unlike
+// ALLOW_DB_RESET (read at the migrate.ts CLI boundary and documented in its own --help text), this
+// variable is read inside the migration file itself — a wider surface (any caller of this
+// migration's down(), not just the --reset CLI path) with no CLI-level `--help` mention of its own;
+// registered instead in `migrate.ts --help`'s Notes section so `--rollback`/`--reset` operators can
+// still discover it, and down() logs a console.warn when it takes effect (see below).
 //
-// `to_regclass` guards each count (same idiom as ...w4c3a_import_rollback_foundation.ts:743/746)
-// so a half-applied `up()` — one or more of the three tables missing — reads as zero rows for the
-// missing table instead of crashing the rollback with 42P01.
+// `to_regclass` guards each count with TWO separate statements — first check existence, and only
+// query `count(*)` when the table exists — the same two-statement shape as the precedent this was
+// modeled on (`...w4c3a_import_rollback_foundation.ts:740-767`: a `SELECT to_regclass(...) IS NOT
+// NULL AS exists` statement, then a conditional `SELECT count(*)` in TS only when that came back
+// true). A single `CASE WHEN to_regclass(...) IS NULL THEN 0 ELSE (SELECT count(*) FROM t) END`
+// statement does NOT have this property: Postgres resolves every relation name referenced anywhere
+// in a statement at parse/analyze time, before the CASE branches are ever evaluated, so the `ELSE`
+// branch's table name is looked up even when the `WHEN` guard would make it unreachable — a
+// half-applied `up()` (one or more of the three tables missing) crashes with 42P01 instead of
+// reading as zero rows. This file originally used that single-statement CASE form and did hit the
+// 42P01 it was meant to avoid; the two-statement form below does not, because the second statement
+// is a separate `sql.raw` call issued only when the first one already proved the table exists.
 const ATG_BACKFILL_DOWN_FORCE_ENV = 'ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP'
 
 async function atgBackfillTableRowCount(db: Kysely<unknown>, table: string): Promise<number> {
-  const result = await sql.raw(
-    `SELECT CASE WHEN to_regclass('public.${table}') IS NULL THEN 0 ` +
-      `ELSE (SELECT count(*)::int FROM ${table}) END AS n`,
-  ).execute(db)
+  const reg = await sql.raw(`SELECT to_regclass('public.${table}') IS NOT NULL AS e`).execute(db)
+  if (!Boolean((reg.rows[0] as { e?: boolean } | undefined)?.e)) return 0
+  const result = await sql.raw(`SELECT count(*)::int AS n FROM ${table}`).execute(db)
   const row = (result.rows[0] ?? {}) as { n?: number | string }
   return Number(row.n ?? 0)
 }
@@ -152,15 +167,26 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   const links = await atgBackfillTableRowCount(db, 'approval_template_group_backfill_batch_links')
   const total = batches + groups + links
 
-  if (total > 0 && process.env[ATG_BACKFILL_DOWN_FORCE_ENV] !== 'true') {
-    throw new Error(
-      'ATG_BACKFILL_DOWN_BLOCKED: refusing to drop ' +
+  if (total > 0) {
+    if (process.env[ATG_BACKFILL_DOWN_FORCE_ENV] !== 'true') {
+      throw new Error(
+        'ATG_BACKFILL_DOWN_BLOCKED: refusing to drop ' +
+          'approval_template_group_backfill_{batches,batch_groups,batch_links} while data is present ' +
+          `(batches=${batches}, batch_groups=${groups}, batch_links=${links}). Dropping these tables ` +
+          'does NOT undo the groups/links they recorded — it only destroys the ledger a later per-row ' +
+          'compensation would need. This is a data-retention/cleanup decision, not a mechanical ' +
+          `rollback step: set ${ATG_BACKFILL_DOWN_FORCE_ENV}=true to force it, or leave the tables in ` +
+          'place (dormant) and revert application code instead.',
+      )
+    }
+    // Force path taken: log what is about to be discarded before doing it, so the operator's own
+    // terminal/CI log carries this fact even though the CLI itself (migrate.ts) never reads this
+    // variable and cannot print it for them.
+    console.warn(
+      `${ATG_BACKFILL_DOWN_FORCE_ENV}=true — forcing the drop of ` +
         'approval_template_group_backfill_{batches,batch_groups,batch_links} while data is present ' +
-        `(batches=${batches}, batch_groups=${groups}, batch_links=${links}). Dropping these tables ` +
-        'does NOT undo the groups/links they recorded — it only destroys the ledger a later per-row ' +
-        'compensation would need. This is a data-retention/cleanup decision, not a mechanical ' +
-        `rollback step: set ${ATG_BACKFILL_DOWN_FORCE_ENV}=true to force it, or leave the tables in ` +
-        'place (dormant) and revert application code instead.',
+        `(batches=${batches}, batch_groups=${groups}, batch_links=${links}). This ledger cannot be ` +
+        'recovered after this call returns.',
     )
   }
 
