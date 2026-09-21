@@ -1358,6 +1358,16 @@ export default defineConfig({
       // arms EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
       // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
       'tests/integration/approval-comments.db.test.ts',
+      // P3-3 `approval_form_drafts` — server-side approval form draft storage (owner-gated DDL, not
+      // applied to any shared database). Contract §4 A (user_id-only auth), B (org-mutation
+      // non-leakage, inverted assertion), D (DB-failure safe-degrade), E (per-user row-cap
+      // prune-on-write, self-healing), F (payload-cap two-layer enforcement), plus the empty-draft
+      // DELETE path and the TTL-sweep function. Real DB. Excluded here so describeIfDatabase cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-form-drafts.yml lane, which arms EXPECT_DB=1. NOT
+      // promoted into plugin-tests.yml's required run-list (unlike approval-comments post-#5095) —
+      // that promotion is an explicit OWNER DECISION, flagged in the PR body, not made here.
+      'tests/integration/approval-form-drafts.db.test.ts',
       // Lock-9 approver process attachments — relaxation migration ordering/rollback, bind atomicity
       // (cross-instance refusal, rowCount-equality rollback), staged uploader-only reads, process-
       // scoped caps, GC reuse, and the flag-OFF byte-for-byte no-op (G-12), real DB. Excluded here so

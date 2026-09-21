@@ -2,8 +2,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { formSchemaSignature } from '../src/approvals/formDraft'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+// FIX 3 (gate P2-3) — used ONLY by the real-drift-guard describe block at the end of this file
+// (which temporarily un-mocks '../src/approvals/serverFormDraft') to compute the SAME real
+// signature the view itself computes, rather than a hand-typed literal.
+import { formSchemaSignature } from '../src/approvals/formDraft'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import type { ApprovalGraph, FormField, FormSchema } from '../src/types/approval'
 import { mockPendingApproval, mockPublishedTemplate } from './helpers/approval-test-fixtures'
@@ -180,6 +183,21 @@ vi.mock('../src/approvals/attachmentUpload', async () => {
     uploadApprovalAttachmentsAtomic: (...args: unknown[]) => uploadApprovalAttachmentsAtomicSpy(...(args as [File[], string, string])),
   }
 })
+
+// P3-3: draft storage moved server-side (apps/web/src/approvals/serverFormDraft.ts) — the view no
+// longer touches `window.localStorage` for drafts at all, so the G13 stale-attachment-ref tests
+// below (and any future draft-restore test) drive the RESTORE side through this mock instead of
+// seeding localStorage directly. Defaults to "no draft" (null) so every OTHER test in this file
+// (none of which care about drafts) mounts exactly as before.
+const loadFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => null as Record<string, unknown> | null)
+const saveFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => undefined)
+const clearFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => undefined)
+vi.mock('../src/approvals/serverFormDraft', () => ({
+  loadFormDraftServer: (...args: unknown[]) => loadFormDraftServerSpy(...args),
+  saveFormDraftServer: (...args: unknown[]) => saveFormDraftServerSpy(...args),
+  clearFormDraftServer: (...args: unknown[]) => clearFormDraftServerSpy(...args),
+  listFormDraftsServer: vi.fn(async () => []),
+}))
 
 const mockActiveTemplate = ref<any>(null)
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
@@ -761,12 +779,15 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
       fetchApprovalAttachmentRefsSpy.mockResolvedValue([])
       messageWarningSpy.mockReset()
       messageErrorSpy.mockReset()
-      window.localStorage.clear() // no draft residue between restore tests
+      // P3-3: no draft residue between restore tests (server-backed mock, was localStorage.clear()).
+      loadFormDraftServerSpy.mockReset()
+      loadFormDraftServerSpy.mockResolvedValue(null)
+      saveFormDraftServerSpy.mockClear()
+      clearFormDraftServerSpy.mockClear()
     })
 
     afterEach(() => {
       approvalAttachmentsFlag = false
-      window.localStorage.clear()
     })
 
     function attachmentInput(): HTMLInputElement {
@@ -874,14 +895,465 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     // rather than carry a dangling id into a create the §4.4 bind would reject whole.
     // -----------------------------------------------------------------------
     function seedDraft(proofIds: string[]) {
-      // the signature EXCLUDES attachment fields (formSchemaSignature) — derived from the REAL helper
-      // so this stays correct if the fixture schema changes, instead of a hand-copied literal.
-      const signature = formSchemaSignature(mockActiveTemplate.value.formSchema)
-      window.localStorage.setItem(
-        'approval-form-draft:user_1:tpl_numfields',
-        JSON.stringify({ signature, savedAt: new Date().toISOString(), data: { proof: proofIds } }),
-      )
+      // P3-3: the view now calls `loadFormDraftServer(templateId, expectedSignature)` — mocked to
+      // resolve with this draft's `data` directly (the mock bypasses the server's own signature
+      // comparison, which is exercised separately: the client-side comparison is unchanged pure
+      // logic covered by apps/web/tests/approval-form-draft.test.ts, and the server's OWN signature
+      // function is proven byte-identical to the client's in
+      // packages/core-backend/tests/unit/approval-form-draft-signature-web-parity.test.ts). These
+      // G13 tests are about the attachment-stale-ref restore behavior, not the signature guard.
+      loadFormDraftServerSpy.mockResolvedValueOnce({ proof: proofIds })
     }
+
+    // ---------------------------------------------------------------------
+    // P3-3 arming-order hazard: draft restore used to be a SYNCHRONOUS localStorage read, so the
+    // 800ms autosave watcher could safely arm right after calling it. Now it is an async server
+    // fetch — arming the watcher before that fetch settles would let a user's mid-flight keystrokes
+    // schedule a save (and race the eventual `Object.assign(formData, draft)` from the restore
+    // itself). `ApprovalNewView.vue` awaits `offerDraftRestore()` before setting `draftArmed = true`
+    // — this proves it behaviorally: no save is scheduled while the GET is still pending, and a
+    // save DOES fire once it has settled.
+    // ---------------------------------------------------------------------
+    it('P3-3: the autosave watcher does not arm until the initial draft-restore fetch settles', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        let resolveLoad: (value: Record<string, unknown> | null) => void = () => {}
+        loadFormDraftServerSpy.mockReset()
+        loadFormDraftServerSpy.mockImplementationOnce(() => new Promise((resolve) => { resolveLoad = resolve }))
+
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed while draft GET is pending'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(1000)
+
+        // The restore GET has not resolved yet ⇒ draftArmed is still false ⇒ no save scheduled.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        // Settle the restore (no draft found) and type again — the watcher must be armed NOW.
+        resolveLoad(null)
+        await flushUi()
+        reasonInput!.value = 'typed after settle'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX 8 (gate P3-3, PROBE-D) — the gate confirmed the call sequence `["CLEAR","SAVE"]`:
+    // the 800ms debounced autosave can already have a SAVE timer pending at the moment of submit,
+    // and clearing the draft on submit success does not itself cancel that timer, so it fires
+    // AFTERWARD and resurrects the just-submitted draft. Pre-existing shape (the same race existed
+    // against the old localStorage clear), but P3-3 gives it a bigger blast radius: the
+    // resurrection is now server-side (cross-device, appears in the drafts inbox) and CLEAR/SAVE
+    // are two independently-ordered HTTP requests rather than two synchronous same-tick calls.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX 8: a pending autosave SAVE never lands after a submit-triggered CLEAR (no CLEAR-then-SAVE resurrection)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed just before submit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        // A SAVE is now scheduled (800ms debounce) but has NOT fired yet.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        submitButton().click()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalled() // the submit's own CLEAR fired
+
+        // Advance PAST the 800ms window that would otherwise have fired the pending SAVE.
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy, 'the pending debounced SAVE must have been cancelled by submit, not merely raced').not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('POSITIVE CONTROL for the assertion above: WITHOUT a submit, the identical typing DOES eventually produce a SAVE (proves the harness can detect a real SAVE firing -- the negative result above is not vacuous)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        reasonInput!.value = 'typed, never submitted'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // not yet -- still within the debounce window
+
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled() // the SAME 800ms elapsing, absent a submit, DOES fire the save
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled() // no submit happened -- nothing cleared
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX C (gate2 P3-D): FIX 8 above only closes the PENDING-timer half of the CLEAR/SAVE
+    // race — the debounce timer can already have FIRED (the SAVE issued, its HTTP promise still
+    // unsettled) at the exact moment submit runs. Constructed deterministically (no sleeps): the
+    // save's fetcher promise is held open under our control, so "SAVE issued but not yet settled"
+    // is a real, observable state, not a timing guess.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX C: submit does not issue CLEAR while a debounced SAVE is still in flight (no resurrection via the in-flight-request window)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        let resolveSave: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveSave = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed well before submit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+
+        // Let the 800ms debounce fire -- SAVE is now ISSUED (fetcher called) but its promise is
+        // held open by `resolveSave`, i.e. genuinely IN FLIGHT, not merely scheduled.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled()
+
+        submitButton().click()
+        await flushUi()
+
+        // The old behaviour clears immediately regardless of the in-flight save -- REDS here
+        // under that behaviour. The fix must wait for the in-flight save to settle first.
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while a same-slot SAVE is still in flight -- it can otherwise commit first and the save resurrects the draft on INSERT',
+        ).not.toHaveBeenCalled()
+
+        // Settle the in-flight save -- CLEAR must follow now, and only now.
+        resolveSave()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX C (gate2 P3-D residual #1) -- `discardDraftRestore` used to fire `clearFormDraftServer`
+    // with NO regard for a pending/in-flight autosave at all: the identical race shape the two FIX C
+    // tests above cover for the submit path, gate2 found NOT covered here. Mirrors the submit-path
+    // test immediately above, but through `discardDraftRestore` (the shared
+    // `cancelPendingDraftSaveThenClear` helper is what makes the two paths behave identically here).
+    // NOTE: unlike submit, discard does NOT set `draftArmed = false` (see that helper's own comment
+    // for why) -- so this test must not type AGAIN after clicking discard, or a legitimate fresh
+    // save of the POST-discard content could arm and fire, which would be correct behavior, not a
+    // resurrection, but would confound this assertion.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX C (discard path): discard does not issue CLEAR while a debounced SAVE is still in flight, and no SAVE of the pre-discard content follows the CLEAR', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView() // the restore GET resolves during onMounted -> draftRestoreVisible=true, draftArmed=true
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy() // the restore offer fired
+
+        let resolveSave: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveSave = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed while the restore banner is still up'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+
+        // Let the 800ms debounce fire -- SAVE is now ISSUED but held open by `resolveSave`, i.e.
+        // genuinely IN FLIGHT, not merely scheduled.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled()
+
+        discardBtn!.click()
+        await flushUi()
+
+        // The old behaviour cleared immediately regardless of the in-flight save -- REDS here under
+        // that behaviour.
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while a same-slot SAVE is still in flight at discard time either',
+        ).not.toHaveBeenCalled()
+
+        // Settle the in-flight save -- CLEAR must follow now, and only now. Nothing was typed after
+        // the discard click, so no further save is expected either.
+        resolveSave()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1) // still just the one pre-discard save
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('POSITIVE CONTROL for the discard-path assertion above: WITHOUT discard, the identical typing DOES eventually produce a SAVE (proves the harness can detect a real SAVE firing -- the negative result above is not vacuous)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        reasonInput!.value = 'typed, discard never clicked'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // not yet -- still within the debounce window
+
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled() // the SAME 800ms elapsing, absent a discard, DOES fire the save
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled() // no discard happened -- nothing cleared
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Reviewer-found residual in the FIX C machinery above: `draftSaveInFlight` used to be a
+    // SINGLE slot that each debounced save's `.finally` overwrote/cleared based on `=== this
+    // call's own promise`. That is only correct while at most one save is ever outstanding at a
+    // time -- but two CAN be outstanding at once (typing again 800ms later while the first
+    // save's HTTP request is still on the wire). If the SECOND (later-issued) save's promise
+    // settled BEFORE the first, the old `.finally` nulled the slot while the first save was still
+    // unsettled, and a quiescing caller (submit/discard) reading the slot right then saw "nothing
+    // in flight" and issued its CLEAR immediately -- if the first save's transaction then
+    // committed AFTER that CLEAR had already committed, its INSERT resurrected the draft. Same
+    // resurrection shape FIX C closes for "one save in flight"; this is that window reached
+    // through a second, later-issued save completing first, not through a rejected/late network
+    // response. The earlier "closed for the dominant case" claim in this file's history was too
+    // broad -- it did not cover two in-flight saves settling out of order.
+    //
+    // Fix: `draftSaveInFlight` is now the TAIL of a per-slot promise chain (see
+    // `scheduleDraftSave` in ApprovalNewView.vue) -- a later save is not even ISSUED (its
+    // fetcher not called) until an earlier unsettled one from the same slot has settled, so the
+    // slot always names the chain's true tail and can never be nulled out from under a still-
+    // pending earlier save.
+    //
+    // Both tests below construct the SAME timeline (two debounced saves, the second one
+    // conditionally resolved "early" to mirror the reviewer's reverse-completion repro) and stay
+    // tolerant of EITHER implementation up to the discriminating CLEAR assertion, so a mutation
+    // that reverts the chain back to a plain overwrite reds on that CLEAR assertion specifically
+    // (see this PR's mutation-testing note), not on an incidental earlier assertion.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX (reverse-completion window): submit does not issue CLEAR while an EARLIER debounced SAVE is still unsettled, even after a LATER save from the same slot has also been scheduled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        const resolvers: Array<() => void> = []
+        saveFormDraftServerSpy.mockImplementation(
+          () => new Promise<void>((resolve) => { resolvers.push(resolve) }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // first SAVE issued, held open (unsettled)
+        expect(resolvers.length).toBe(1)
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // second debounce elapses
+
+        // Mirrors "resolve B before A": under the reverted single-slot code a second save IS
+        // already issued here (independent of the first), and settling it "first" is exactly the
+        // reviewer's repro. Under the fix this is a same-tick no-op -- nothing is queued to
+        // resolve yet, because the second save is not issued until the first settles.
+        if (resolvers.length > 1) resolvers[1]()
+        await flushUi()
+
+        submitButton().click()
+        await flushUi()
+
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while an earlier same-slot SAVE is still unsettled, regardless of what order any LATER save from that slot completes in',
+        ).not.toHaveBeenCalled()
+
+        // Drain the chain and confirm CLEAR follows once everything outstanding has settled.
+        resolvers[0]()
+        await flushUi()
+        expect(resolvers.length, 'the second save must eventually be issued once the first settles').toBe(2)
+        resolvers[1]()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(2) // neither save was dropped by the chain
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('P3-3 FIX (reverse-completion window, discard path): discard does not issue CLEAR while an EARLIER debounced SAVE is still unsettled, even after a LATER save from the same slot has also been scheduled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy() // the restore offer fired
+
+        const resolvers: Array<() => void> = []
+        saveFormDraftServerSpy.mockImplementation(
+          () => new Promise<void>((resolve) => { resolvers.push(resolve) }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+        expect(resolvers.length).toBe(1)
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+
+        if (resolvers.length > 1) resolvers[1]() // no-op under the fix -- see the sibling submit-path test above
+        await flushUi()
+
+        discardBtn!.click()
+        await flushUi()
+
+        expect(
+          clearFormDraftServerSpy,
+          'discard must not issue CLEAR while an earlier same-slot SAVE is still unsettled either',
+        ).not.toHaveBeenCalled()
+
+        resolvers[0]()
+        await flushUi()
+        expect(resolvers.length, 'the second save must eventually be issued once the first settles').toBe(2)
+        resolvers[1]()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Order guarantee behind the fix above: the chain does not just make `cancelPendingDraft-
+    // SaveThenClear` wait on the right promise, it also stops a later same-slot save from ever
+    // being ISSUED (its fetcher called) while an earlier one is still unsettled -- proven directly
+    // here via the fetcher's own call count, independent of any CLEAR/submit behaviour.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX (order guarantee): a second debounced SAVE from the same slot is not issued until the earlier one has settled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView()
+
+        let resolveFirst: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveFirst = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1) // the first save IS issued
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // the second debounce elapses
+        expect(
+          saveFormDraftServerSpy,
+          'a second same-slot SAVE must not be issued while an earlier one is still unsettled',
+        ).toHaveBeenCalledTimes(1)
+
+        resolveFirst()
+        await flushUi()
+        expect(saveFormDraftServerSpy, 'once the earlier save settles, the queued one is issued').toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Discard must not permanently disarm autosave (contract note in `cancelPendingDraftSave-
+    // ThenClear`'s own comment: `discardDraftRestore` runs early in the component's lifecycle and
+    // the user is expected to keep filling out the SAME form afterward). This is the "keep typing
+    // after discard" half of that contract -- distinct from the tests above, which only check that
+    // a save PRE-DATING the discard is still respected.
+    //
+    // Types ONCE *before* discard (inside the debounce window, so that edit's own timer is what
+    // discard cancels -- proving the "not disarmed" claim below is about a NEW edit surviving a
+    // real disarm-of-the-old-timer, not merely about autosave that happened to never get armed in
+    // the first place). Without that pre-discard keystroke this test could not tell "discard leaves
+    // autosave armed" apart from "nothing here was ever armed to begin with" -- which is exactly
+    // the distinction that matters, since the one thing this test must catch is `draftArmed = false`
+    // being (re)introduced into `discardDraftRestore`.
+    // -----------------------------------------------------------------------
+    it('discard then keep typing: autosave is not permanently disarmed by a discard', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed just before discard'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // still inside the 800ms debounce window -- a real pending timer exists
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy()
+        discardBtn!.click()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1) // no IN-FLIGHT save at discard time -- CLEAR fires right away
+        // The pre-discard timer was cancelled (FIX 8 behavior, unchanged) -- advancing past its
+        // window must NOT fire the pre-discard save.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        reasonInput!.value = 'typed after discard'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        // Negative control: not yet -- still inside this NEW 800ms debounce window.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        await vi.advanceTimersByTimeAsync(900)
+        // Positive: a discard must not permanently disarm autosave for the rest of the session.
+        expect(
+          saveFormDraftServerSpy,
+          'discard must not permanently disarm autosave for the rest of the session',
+        ).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
 
     it('restore drops GC-swept attachment refs, warns, and keeps the live ones (positive control)', async () => {
       seedDraft(['att_live', 'att_swept'])
@@ -1377,6 +1849,62 @@ describe('ApprovalNewView — B2-13 再次提交 prefill', () => {
     expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
     const payload = submitApprovalSpy.mock.calls[0][0]
     expect(payload.formData).toMatchObject({ reason: '出差报销（第一次）', amount: 3000 })
+  })
+
+  // -------------------------------------------------------------------------------------------
+  // P3-3 (contract §4 G) — CONSTRUCTED RACE, not a stable-state check. With draft restore now an
+  // async server fetch (previously a synchronous localStorage read), the resubmit-prefill fetch
+  // (`getApproval`, also async) and the draft-restore fetch are two independently-timed network
+  // calls; a test that simply awaits both and then asserts is blind to a regression where they run
+  // CONCURRENTLY (a Promise.all-style refactor) instead of `applyResubmitPrefill` being fully
+  // awaited BEFORE `offerDraftRestore` is even attempted. This test makes `getApproval` resolve
+  // SLOWLY and a draft IMMEDIATELY available, and asserts that the draft fetch is not even ATTEMPTED
+  // until after the prefill fetch settles — proving the ordering by observing it mid-flight, not by
+  // inspecting only the final state (where a concurrent implementation could coincidentally look the
+  // same if the draft mock happened to resolve second).
+  // -------------------------------------------------------------------------------------------
+  it('CONSTRUCTED RACE: a slow-resolving resubmit-prefill fetch delays the draft-restore fetch entirely — prefill wins by construction, not by timing luck', async () => {
+    routeQuery = { fromInstance: 'apv_source_race' }
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_resubmit_race',
+      formSchema: formSchemaRequiredReasonAndAmount(),
+    })
+    let resolveGetApproval: (value: unknown) => void = () => {}
+    getApprovalSpy.mockImplementation(
+      () => new Promise((resolve) => { resolveGetApproval = resolve }),
+    )
+    // A draft IS available — if the ordering regresses to "concurrent", this mock resolving first
+    // would let the restore banner win the race.
+    loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'STALE DRAFT — must never win', amount: 1 })
+
+    await mountView()
+
+    // Still mid-flight: getApproval has not resolved yet, so applyResubmitPrefill has not returned.
+    // The draft-restore fetch must not have even STARTED yet — proves strict sequencing, not two
+    // fetches racing where this one simply happened to be slower this run.
+    expect(loadFormDraftServerSpy).not.toHaveBeenCalled()
+    expect(prefillNotice()).toBeNull() // notice not shown yet either — nothing has settled
+
+    resolveGetApproval(
+      mockPendingApproval({
+        id: 'apv_source_race',
+        status: 'rejected',
+        formSnapshot: { reason: '出差报销（race winner）', amount: 4200 },
+      }),
+    )
+    await flushUi()
+
+    // NOW the prefill has landed. Because prefillNoticeVisible is true, offerDraftRestore is
+    // skipped ENTIRELY — the draft fetch must still never have been called.
+    expect(loadFormDraftServerSpy).not.toHaveBeenCalled()
+    expect(prefillNotice()).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-draft-restore-apply"]')).toBeNull()
+
+    submitButton().click()
+    await flushUi()
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    // The prefilled value reached the form; the stale draft's value never did.
+    expect(payload.formData).toMatchObject({ reason: '出差报销（race winner）', amount: 4200 })
   })
 
   it('does not prefill when there is no `fromInstance` query — unchanged behavior', async () => {
@@ -1946,5 +2474,148 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
     const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value)
     expect(values, 'the newer response must be the one that actually rendered').toContain('u_new')
     expect(values, 'the late-arriving OLDER response must be discarded, not appended or applied').not.toContain('u_old')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX 3 (gate P2-3) — restores the view-level drift-guard coverage the P3-3 diff deleted.
+//
+// Before P3-3, `seedDraft()` (the G13 describe block above) wrote a REAL signature — computed by
+// the REAL `formSchemaSignature` — into REAL `window.localStorage`, and the view's then-current
+// `formDraft.ts`-backed `offerDraftRestore` ran the REAL signature comparison against it. So a
+// regression in the comparison itself (not just in the VIEW's handling of whatever the module
+// returns) would have shown up in that test. P3-3's diff replaced the real localStorage write with
+// `vi.mock('../src/approvals/serverFormDraft', ...)` (declared near the top of this file) — the
+// right call for isolating the VIEW's own logic in every OTHER test here, but it means the
+// comparison inside the NEW module (`serverFormDraft.ts:70`) is never exercised by anything that
+// mounts the view; a mocked `loadFormDraftServerSpy` returns whatever a test tells it to,
+// unconditionally, regardless of whether the signatures would really have matched.
+//
+// The two tests below temporarily UN-mock `serverFormDraft.ts` (`vi.doUnmock` +
+// `vi.resetModules()`) and stub only the underlying `fetch` the view's default (uninjected)
+// `apiFetch` call bottoms out in — driving the REAL `loadFormDraftServer`, including its REAL
+// signature comparison, through a REAL mount of `ApprovalNewView.vue`. The mock is restored in
+// `afterEach` (`vi.doMock` + `vi.resetModules()`) so no other test in this file is affected — this
+// block is placed LAST in the file specifically so its `resetModules()` calls (which force a fresh
+// module graph on the NEXT dynamic import, including of unrelated singleton modules like
+// `directoryResolve.ts`) cannot bleed forward into any test that runs after it, because none does.
+// ---------------------------------------------------------------------------
+describe('ApprovalNewView — P3-3 (gate P2-3): real drift-guard comparison, driven end-to-end through a real mount (not the module mock)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: formSchemaWithNumberPropsAndAttachment(),
+    })
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_numfields_1' }))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.unstubAllGlobals()
+    // Restore the file-wide mock for every OTHER describe block (none run after this one, but this
+    // keeps the invariant explicit rather than relying on "nothing else happens to run later").
+    vi.doMock('../src/approvals/serverFormDraft', () => ({
+      loadFormDraftServer: (...args: unknown[]) => loadFormDraftServerSpy(...args),
+      saveFormDraftServer: (...args: unknown[]) => saveFormDraftServerSpy(...args),
+      clearFormDraftServer: (...args: unknown[]) => clearFormDraftServerSpy(...args),
+      listFormDraftsServer: vi.fn(async () => []),
+    }))
+    vi.resetModules()
+  })
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', ElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  /** Stubs `fetch` for the draft GET and returns a promise that resolves once that GET has been
+   *  answered — a REAL `fetch`/`Response.json()` round trip takes more real event-loop turns to
+   *  settle than the synchronous-mock-resolving tests elsewhere in this file (their
+   *  `loadFormDraftServerSpy.mockResolvedValueOnce(...)` settles in one microtask), so tests await
+   *  this signal (plus a couple of `flushUi()` cycles for the resulting DOM update to commit)
+   *  instead of guessing a fixed number of cycles or sleeping a fixed duration. */
+  function stubDraftFetch(draftBody: { signature: string; data: Record<string, unknown> } | null): Promise<void> {
+    let resolveGetAnswered: () => void = () => {}
+    const getAnswered = new Promise<void>((resolve) => {
+      resolveGetAnswered = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url.includes('/api/approvals/form-drafts/tpl_numfields') && method === 'GET') {
+          const body = draftBody
+            ? { data: { draft: { templateId: 'tpl_numfields', signature: draftBody.signature, data: draftBody.data, savedAt: '2026-01-01T00:00:00.000Z' } } }
+            : { data: { draft: null } }
+          const response = new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+          resolveGetAnswered()
+          return response
+        }
+        // Any other call this mount makes while un-mocked (e.g. the best-effort GC DELETE on a
+        // mismatch) — a generic 204/empty-ok response is fine, nothing here asserts on it.
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }),
+    )
+    return getAnswered
+  }
+
+  it('a MATCHING signature (computed by the REAL formSchemaSignature against the CURRENT schema) offers the restore banner with the real draft data', async () => {
+    vi.doUnmock('../src/approvals/serverFormDraft')
+    vi.resetModules()
+    const matchingSignature = formSchemaSignature(mockActiveTemplate.value.formSchema)
+    const getAnswered = stubDraftFetch({ signature: matchingSignature, data: { proof: ['att_real_match'] } })
+
+    await mountView()
+    await getAnswered
+    await flushUi()
+    await flushUi()
+
+    const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+    expect(applyBtn, 'the REAL signature comparison found a MATCH — restore must be offered').toBeTruthy()
+  })
+
+  it('a MISMATCHED signature (real comparison against a schema that has since drifted) does NOT offer the restore banner', async () => {
+    vi.doUnmock('../src/approvals/serverFormDraft')
+    vi.resetModules()
+    const getAnswered = stubDraftFetch({ signature: 'stale-signature-from-a-since-changed-schema', data: { proof: ['att_stale'] } })
+
+    await mountView()
+    await getAnswered
+    await flushUi()
+    await flushUi()
+
+    const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+    expect(applyBtn, 'the REAL signature comparison found a MISMATCH — restore must NOT be offered').toBeNull()
   })
 })
