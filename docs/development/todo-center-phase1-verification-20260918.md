@@ -3434,8 +3434,9 @@ current, and ready for whoever executes the PR-open step next.
 
 ## P3 卫生轮(2026-09-19)— round-3 门审 `impl-gate-B-slice1-round3-20260918.md`(0 P1、0 P2、4 P3、Verdict
 DRAFT-READY)全部 4 条 P3 逐条处置。Base at start of this pass: HEAD =
-`1c08a4ac8feb0e443134ae20af283d836ff30300`(round-3 门审自己审的 head),merge-base 与 `origin/main`
-不变仍为 `89f1ecdee2c3b70205a318074824c834bc6a5c7e`。不重跑或改写上方任何一节(仓内惯例:标句子不作废
+`1c08a4ac8feb0e443134ae20af283d836ff30300`(round-3 门审自己审的 head),此轮的 merge-base 仍为
+`89f1ecdee2c3b70205a318074824c834bc6a5c7e`(`origin/main` 本身在此期间照常推进,不在此断言范围内)。
+不重跑或改写上方任何一节(仓内惯例:标句子不作废
 本节)。本轮硬规矩:生产代码零行为改动——只改了测试文件的 docblock 注释与本 MD,`packages/core-backend/
 src`、`.github/workflows`、任何迁移文件字节未动(§"改动范围核实"逐条实测,见下)。
 
@@ -3447,7 +3448,7 @@ P3"(收敛要求,与 Findings 逐条同构,给出了每条的修法选项)。
 | 编号 | 报告原文(节译一句) | 处置 | 证据 / commit |
 |---|---|---|---|
 | P3-0 | 锁 §5 行 B 点名的 class ② 探针形状落在 registry-stub 的 test 3 上,真实 `pool.query` 读失败的 test 5 用的是 class ①,未披露;报告自己的 MU6(把 test 5 的 viewer 换成 class ②)实测 27/27 绿、与 class ① 结果逐字节相同,判定"无判别力差异,不阻断" | **CLOSED-注释**(取报告建议的选项 (ii):加披露句,不改探针形状——选项 (i) 换形状本身要求"须按锁 §6 重跑整套件",而 MU6 已证明两种形状产出相同结果,加一句注释披露"哪句锁文由哪条用例满足"就能把开放问题讲清楚,风险比改测试内容更小) | `packages/core-backend/tests/todo-center-pending-gate/todo-center-pending-gate.ts` docblock 新增一段以 "**Disclosure (round-3 gate P3-0, ...)**" 开头的段落,原文引锁 §5 行 B 括注 + 指出该括注挂在它前半句"同一机制,合并执行"上、test (3) 就是那次合并执行、test (5) 是 round-2 门审要求的更严追加、并复述 MU6 的实测结果;commit `c7403d4fb` |
-| P3-1 | 门文件 docblock 原 `:117-118`(编辑后行号已变,详见 P3-2 的失效说明)一句绝对断言"A future mutation on `countApprovalPendingForViewer`'s SELECT text alone would find nothing red here"被报告 MU2 机械证伪(打坏该 SELECT 实测 20/27 红,含全部 16 条 A0 与 Judge B 五条里的四条) | **CLOSED-注释** | 同上文件,该句改写为:没有任何用例正向断言 `sources.approval === 'unavailable'` 来守住这条 SELECT 的读失败;打坏它会让 20/27 条因为别的理由变红(详列断言文本),这是"因连带失败被检测到",不是"被正向断言守住";commit `c7403d4fb` |
+| P3-1 | 门文件 docblock 原 `:117-118`(编辑后行号已变,详见 P3-2 的失效说明)一句绝对断言"A future mutation on `countApprovalPendingForViewer`'s SELECT text alone would find nothing red here"被报告 MU2 机械证伪(打坏该 SELECT 实测 20/27 红,含 A0 十六条里的十五条——`?sourceSystem=bogus` 那条断 400,走不到计数查询,幸存——与 Judge B 五条里的四条,以及 Judge C 的跨快照 list+count 用例一条;15+4+1=20) | **CLOSED-注释** | 同上文件,该句改写为:没有任何用例正向断言 `sources.approval === 'unavailable'` 来守住这条 SELECT 的读失败;打坏它会让 20/27 条因为别的理由变红(详列断言文本),这是"因连带失败被检测到",不是"被正向断言守住";commit `c7403d4fb` |
 | P3-2 | 目标文档"§5-row → test file → it() 名"表(报告引用行号 `:1213` 一带)已过期:row B 写"4 个 it"、实测 5 个;A0 行的全部行号整体偏移约 37 行;过期处无任何失效标记 | **CLOSED-MD** | 本文件"§5-row → test file → exact `it()` name → lane"表:(a) 在表前加过期标记段落,点名此表此前用的固定行号会随门文件每轮修复漂移,并给出"先重跑 grep 再信任数字"的指引;(b) row B 原地补一句"FIX-ROUND 5 PASS 增至 5 条"的失效说明 + 5 个 `it` 的当前行号;(c) A0/C/C′/D 行的行号全部按当前 HEAD 重新 `grep -n` 核对更新(A0 describe `:1009`→`:1067`,16 个 `it` 全部同步;C `:1257`→`:1315`;C′ `:1312`→`:1370`);commit(本次 MD 提交,见下方 commit 记录) |
 | P3-3 | 补充清单条目 11("判据 E 与 §3 第 5 条属前端切片 2,首切片 PR body 要写「未做」")标 DISCHARGED,但预写的 PR body 待用文本当时只有三段,没有一段写"未做" | **CLOSED-MD** | 本文件"PR body 待用文本"节新增"段落 4"(判据 E 的代数守卫 + 锁 §3 第 5 条硬约束属 B-2、本切片未做,附理由);开头句"three PR-body obligations" 改为 "four";补充清单条目 11 一行的证据列改指回"段落 4";commit(本次 MD 提交,见下方 commit 记录) |
 
@@ -3467,14 +3468,14 @@ round-3 报告"## 1. Findings"一节新开的条目——round-3 报告自己的
 
 ### 撤回类改动的全分支扫描(retraction sweep)
 
-P3-1 撤回的是门文件 docblock 里一句被证伪的绝对断言(见处置表)。扫描确认该断言原文在整个已跟踪内容
-里零残留(不是只查改动的那一处):
+P3-1 撤回的是门文件 docblock 里一句被证伪的绝对断言(见处置表)。该断言原文在**活的载体**(门文件
+`todo-center-pending-gate.ts`)里 `grep -c` = 0,真删了。全仓 `grep -rn`/`git grep -n` 对这句原文
+本身**不为零**——命中的是本处置表引用它当历史的那一行,以及下面这条扫描命令的命令文本自身(此文档
+每次编辑都会让行号偏移,故此处不钉行数,只留命令供随时重跑):
 
 ```
 $ grep -rn "would find nothing red here" .
-(空,exit 1)
 $ git grep -n "would find nothing red here"
-(空,exit 1)
 ```
 
 ### 改动范围核实(只测试注释 MD,零生产代码 / 零 CI 接线 / 零迁移)
