@@ -255,10 +255,10 @@ describe('#5655 admin 安全开关与 bulk 写/删的授权门', () => {
 //
 // 范围刻意只到**根路由**（`admin-routes.ts` 里 `router.post/put/patch/delete` 直接注册的那些），
 // 不含两个子路由挂载点 `router.use('/snapshots', ...)` / `router.use('/safety/rules', ...)`
-// （admin-routes.ts:2388-2389）。理由是子路由各有自己的 owner 与 spec，把它们拉进本 spec 会把
+// （admin-routes.ts:2386-2387）。理由是子路由各有自己的 owner 与 spec，把它们拉进本 spec 会把
 // 互相独立的 PR 强耦合成固定合并顺序。
 //
-// 2026-09-20 复核：`/safety/rules` 那四条写端点在 2026-09-12 的设计稿里还是「零授权门」，
+// 2026-09-21 复核：`/safety/rules` 那四条写端点在 2026-09-12 的设计稿里还是「零授权门」，
 // 现在已经补上了 —— protection-rules.ts:236 `POST /`、:328 `PATCH /:id`、:369 `DELETE /:id`、
 // :392 `POST /evaluate` 首位都是 `requireAdminRole()`（#5667 / PR #5677 已合，见 #5710 的
 // 「叠 #5677」）。所以今天即便把子路由算进来也不会红；范围仍然收在根路由，是为了让本 spec
@@ -382,7 +382,7 @@ describe('闭世界：admin-routes.ts 根路由的写面没有未登记的无门
   let router: Router
 
   beforeAll(() => {
-    // initAdminRoutes 返回的就是 admin-routes.ts 的模块级单例 router（:73 建、:2391 default 导出），
+    // initAdminRoutes 返回的就是 admin-routes.ts 的模块级单例 router（:73 建、:2389 default 导出），
     // 也就是 index.ts 真正挂到 `/api/admin` 的那一个 —— 断言这一点，免得将来它变成「每次新建一个」
     // 而本用例却在量一个没人用的对象。
     router = initAdminRoutes({})

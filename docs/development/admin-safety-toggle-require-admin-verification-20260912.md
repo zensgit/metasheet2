@@ -353,14 +353,19 @@ $ cd packages/core-backend && npx tsc --noEmit
 
 ---
 
-## 8. 2026-09-20：rebase 到 main 后的复跑与复核
+## 8. 2026-09-20 / 09-21：追平 main 后的复跑与复核
 
 - worktree：`metasheet-wt-w8k`（本轮），不是 09-12 那个 `metasheet-wt-w3g`。
 - 起点 `3c79b2059` → `git rebase origin/main`（当时 `36d659c8a`）**无冲突**，三个 commit 原样重放；
   `admin-routes.ts` 的 diff 与 rebase 前逐字相同（`83 ++-`，无一行被 rebase 改写）。
 - 复核期间 main 又并入 #5914 / #5916，于是**再 rebase 一次**到 `ce9ac29cb`，同样无冲突，
-  代码 diff 仍是逐字相同的 `83 ++-`。本节以下全部证据都是在 `ce9ac29cb` 这个底座上**重跑**的，
-  行号也按它订正。
+  代码 diff 仍是逐字相同的 `83 ++-`。
+- 2026-09-21 会话续跑：main 已走到 `5edf4c3e1`，其间只有 #5903 动过 `admin-routes.ts`
+  （读侧 GET 的 500 分支改调新的 `sendAdminReadFailure`，并在 `:73` 上方新增一段模块级辅助函数）。
+  分支此时已推过远端，改用 `git merge origin/main` 追平，**无冲突**；`git diff --stat origin/main HEAD`
+  仍是 `admin-routes.ts | 83 ++-`，12 处门一行未动。
+  **本节以下全部证据都是在追平 `5edf4c3e1` 之后的合并结果上重跑的**，行号也按它订正
+  （#5903 让 `:73` 以下整体 +58，又在若干 `catch` 体里各减几行，所以不是一个统一偏移）。
 - 本节新增的东西只有一个：spec 里补了一条**闭世界**用例（设计文档 §5.5）。
 
 ### 8.1 spec 复跑 —— 全绿（18 → 25）
@@ -388,9 +393,9 @@ spec 仍然用 `usePinnedServer()` + `request(pinned.url())`，**没有**任何 
 
 ```
 == root writes: 25 ==   (GATED 22 / OPEN 3)
-OPEN   :790  POST /plugins/reload-all-unsafe
-OPEN   :841  POST /plugins/:id/reload-unsafe
-OPEN   :2349 POST /health/check
+OPEN   :834  POST /plugins/reload-all-unsafe
+OPEN   :885  POST /plugins/:id/reload-unsafe
+OPEN   :2347 POST /health/check
 
 == root reads ungated ==
 (read total=16, ungated=0)
@@ -400,7 +405,7 @@ OPEN   :2349 POST /health/check
 当前状态：16 条根 GET **全部有门**，无门数 = 0（`GET /slo/status` 最后一条由 #5914 补上，
 见设计文档 §5.4）。
 
-同一个静态脚本对着 `origin/main`（`ce9ac29cb`）的 `admin-routes.ts` 跑一遍作为**修前对照**：
+同一个静态脚本对着 `origin/main`（`5edf4c3e1`）的 `admin-routes.ts` 跑一遍作为**修前对照**：
 `root writes: 25 (GATED 10 / OPEN 15)` —— 15 条无门写路由 = 豁免那 3 条 + 本 PR 补门的 12 条，
 其中 12 条的首位实测都是 `requireSafetyCheck({`（`/safety/enable` 是裸 handler）。
 本 PR 把无门写路由从 15 降到 3，且降下去的那 12 条与设计 §2 的表逐条对得上。
@@ -442,22 +447,37 @@ OPEN   :2349 POST /health/check
 根本不构成任何阻挡，去掉 admin 门就等于完全敞开。其余 8 条降级成 403 `SAFETY_CHECK_REQUIRED`
 并附一枚可用令牌，也不是授权。
 
-`/safety/enable` 那条同时钉死了闭世界用例的载荷性。上表的「闭世界点名」列量的是探针里那份
-同款审计函数；为了不让「点名」停在自证层面，另做了一次**对真 spec 的变异**：把
-`admin-safety-toggle-and-bulk-authz.test.ts` 原样复制成一份一次性文件（`w8k-mutated-spec.test.ts`，
-跑完即删、未提交），只在 import 之后插一段内存级变异，把 `POST /safety/enable` 那条路由
-`route.stack` 里首位 handler 的 `.handle` 换成 passthrough（源文件零改动，且断言变异命中数恰为 1），
-其余一字不改。结果：
+上表是 2026-09-21 在追平 `5edf4c3e1` 之后的合并结果上**重跑**的，12 行与 09-20 那一轮逐行相同，
+`14 passed (14)` 也一样（#5903 只动读侧 `catch` 体，对写面响应零影响）。
 
-```
- FAIL  w8k-mutated-spec.test.ts > 非 admin > POST /safety/enable → 403 ADMIN_REQUIRED
- FAIL  w8k-mutated-spec.test.ts > 闭世界… > 每条根写路由的中间件链首位都是 requireAdminRole()，否则必须在豁免表里
- Test Files  1 failed (1)
-      Tests  2 failed | 23 passed (25)
-```
+#### 8.3.1 升级：12 条逐条对**真 spec** 变异（不再只对探针里的复制品）
 
-也就是说，去掉 `/safety/enable` 的门时，**真正要合进仓库的那条闭世界用例本身**会红（而不是只有
-探针里的复制品会红），且只红这一条加上对应的点名用例 —— 其余 23 条不动，说明它既有载荷又不过度耦合。
+上表的「闭世界点名」列量的是探针里那份同款审计函数 —— 这仍然是自证。09-20 那一轮只把
+`POST /safety/enable` 一条拿去变异真 spec；09-21 这一轮把 **12 条全部**做了一遍：对
+`admin-safety-toggle-and-bulk-authz.test.ts` 的**原样复制品**（`w8k-mutated-spec.test.ts`，
+跑完即删、未提交）在 import 之后插一段内存级变异，把目标路由 `route.stack` 里首位 handler 的
+`.handle` 换成 passthrough（源文件零改动；命中数不等于 1 就直接抛错，杜绝「变异没落上却全绿」），
+其余一字不改，每条各跑一次 `vitest run`。结果：
+
+| 被换掉门的路由 | 该 spec 变红的用例 | 合计 |
+|---|---|---|
+| POST `/safety/enable` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| POST `/safety/disable` | 点名用例 + 越权整链用例 + 闭世界用例 | 3 failed / 22 passed |
+| POST `/cache/clear` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| POST `/metrics/reset` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| DELETE `/data/bulk` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| PUT `/data/bulk` | 点名用例 + 越权整链用例 + fail-closed 用例 + 闭世界用例 | 4 failed / 21 passed |
+| POST `/dlq/:id/retry` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| DELETE `/dlq/:id` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| POST `/dlq/retry-all` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| POST `/dlq/cleanup` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| POST `/ratelimits/:key/reset` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+| POST `/ratelimits/reset-all` | 点名用例 + 闭世界用例 | 2 failed / 23 passed |
+
+12 条**全部**同时满足两件事：①对应的点名用例红；②**真正要合进仓库的那条闭世界用例本身**红。
+多出来的那几条（`/safety/disable` 的越权整链、`PUT /data/bulk` 的整链与 fail-closed）是这两个
+端点本来就被多条用例覆盖，红得应该。没有一次变异静默全绿，也没有一次把无关用例带红
+（每轮剩下的 21–23 条全绿）—— 说明闭世界用例既有载荷、又不过度耦合。
 
 ### 8.4 相邻 spec 不回归
 
@@ -470,11 +490,15 @@ $ npx vitest run \
     tests/unit/safety-guard-confirm-flow.test.ts \
     tests/unit/require-admin-role-fail-closed.test.ts \
     tests/unit/admin-snapshot-delete-authz.test.ts \
-    tests/unit/admin-dlq-read-authz.test.ts --reporter=dot
+    tests/unit/admin-dlq-read-authz.test.ts \
+    tests/unit/admin-read-error-echo-redaction.test.ts --reporter=dot
 
- Test Files  8 passed (8)
-      Tests  123 passed (123)
+ Test Files  9 passed (9)
+      Tests  141 passed (141)
 ```
+
+（09-21 这一轮把 #5903 新带进来的 `admin-read-error-echo-redaction.test.ts` 也拉进了邻接集 ——
+它和本 PR 改的是同一个文件的不同面，正好互为回归面。）
 
 （输出里的 `error: RBAC check failed` 是 fail-closed 用例**期望内**的日志，不是失败。）
 
@@ -492,21 +516,25 @@ $ npx vitest run \
    `const __w8k_probe: number = "not a number"`，同一条命令立刻报
    `admin-safety-toggle-and-bulk-authz.test.ts(452,7): error TS2322`，退出码 2 —— 证明它确实在
    编译本 spec，那个 0 error 不是「根本没看这个文件」的假绿。探针行随即删除，`git diff` 复核过。
+   （09-21 重跑同样是 0 error / 反证 TS2322。临时配置用 `files: [本 spec, tests/utils/pinned-server.ts]`
+   点名这两个文件，`include` 仍是仓库原来的 `src` / `core` / `types`、`exclude` 仍排除
+   `**/*.test.ts` 与 `**/__tests__/**` —— `files` 不受 `exclude` 影响，所以既看得到本 spec，
+   又不会把 `core/__tests__/cache-registry.test.ts` 那种既有类型债算到本 PR 头上。）
 
 ### 8.6 09-12 以来事实变化的复核（否定性结论都给了 path:line）
 
 - `protection-rules.ts` 四条写端点**不再**零授权门：`:236` / `:328` / `:369` / `:392` 首位都是
   `requireAdminRole()`。设计文档 §2.1 与 §4 第 7 条已就地标注作废并指向 §5.3。
 - `x-user-id` 在 `protection-rules.ts` 里只剩 `:20` 一条历史注释，不再是任何路由的身份来源。
-- `GET /dlq`（`:1652`）等一族读端点已由 #5710 / #5897 补门；最后一条 `GET /slo/status`（`:1602`）
+- `GET /dlq`（`:1693`）等一族读端点已由 #5710 / #5897 补门；最后一条 `GET /slo/status`（`:1646`）
   由 #5914 补门。根 GET 的无门数**现在是 0**（16/16 有门），这是 2026-09-20 二次 rebase 时才成立的
   新事实 —— 一次 rebase 时它还是 1。
 - 设计文档正文里所有指向 `admin-routes.ts` / `index.ts` / `guards/*` / `rbac/service.ts` 的行号
-  已按 `ce9ac29cb` 重新实读订正；标「修前」的历史行号保留。逐条复核过的锚点：
-  `admin-routes.ts` 12 处 `requireAdminRole(),` 实测落在 `:163 :186 :1114 :1170 :1343 :1462 :1683
-  :1715 :1919 :1971 :2142 :2181`（另有 `:114` 是本 PR 之前就有的 `/safety/confirm`），与设计 §2
-  的表逐行一致；`router.use` 两处 `:2388` / `:2389`、`export default router` `:2391`、
-  `allowBypass` 赋值 `:2409`、`validTables` 两份 `:1364` / `:1484`、
+  已按 `5edf4c3e1` 追平后的合并结果重新实读订正；标「修前」的历史行号保留。逐条复核过的锚点：
+  `admin-routes.ts` 12 处 `requireAdminRole(),` 实测落在 `:221 :244 :1158 :1214 :1387 :1506 :1721
+  :1753 :1942 :1994 :2155 :2194`（另有 `:172` 是本 PR 之前就有的 `/safety/confirm`），与设计 §2
+  的表逐行一致；`router.use` 两处 `:2386` / `:2387`、`export default router` `:2389`、
+  `allowBypass` 赋值 `:2407`、`validTables` 两份 `:1408` / `:1528`、
   `protection-rules.ts` 四条写端点 `:236` / `:328` / `:369` / `:392`、
   `audit-integration.ts:113` `requireAdminRole` 与 `:260` `protectAdminOperation`、
   `rbac/service.ts:19` `isAdmin`、`guards/types.ts:126` 与 `guards/SafetyGuard.ts:35` 的
@@ -516,8 +544,8 @@ $ npx vitest run \
 
 - 只在 worktree `metasheet-wt-w8k` 内改动；主检出与其他 `metasheet-*` 目录只读，未触碰。
 - 未合任何 PR、未碰 `main`、未改 `.github/`、未改 `plugins/` 与任何 pin 文件。
-- 三个一次性探针（`w8k-mutation-probe.test.ts`、`w8k-mutated-spec.test.ts`、临时 `tsconfig`）
-  跑完即删，未进入任何提交；静态扫描脚本落在会话 scratchpad，不在仓库内。
-  删后 `git status` 只剩本 PR 自己的改动。
+- 一次性探针（`w8k-mutation-probe.test.ts`、`w8k-mutated-spec.test.ts` 跑了 12 轮、
+  临时 `tsconfig.w8k-spec.json`）跑完即删，未进入任何提交；静态扫描脚本与变异驱动脚本落在
+  会话 scratchpad，不在仓库内。删后 `git status` 只剩本 PR 自己的三个文件。
 - 变异全部内存级，源文件零改动。
 - 未连接任何真实数据库；文档与输出里不含主机 / 账号 / 口令 / 令牌值。
