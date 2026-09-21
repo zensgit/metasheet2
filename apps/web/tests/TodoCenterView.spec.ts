@@ -141,6 +141,29 @@ describe('todo center view', () => {
     expect(group?.querySelector('[data-testid="todo-center-group-empty"]')).toBeNull()
   })
 
+  // H-4 (B-3 polish) — the reworded "could not be checked" copy (real-browser-acceptance-20260920.md
+  // item ③): must not name the internal `PendingSourceRegistry` grouping concept ("来源"/"source")
+  // the way the pre-polish string did, and must render in the requested locale.
+  it('unavailable copy is productized (no internal "source" vocabulary) and locale-aware', async () => {
+    getTodoItemsSpy.mockResolvedValue({ items: [], sources: { approval: 'unavailable' } })
+
+    const rootZh = await mountView()
+    const zhText = groupOf(rootZh, 'approval')?.querySelector('[data-testid="todo-center-group-unavailable"]')?.textContent
+    expect(zhText).toBe('暂时无法查看，请稍后重试')
+    expect(zhText).not.toContain('来源')
+
+    // Unmount before remounting under a different locale — `mountView()` doesn't tear down a prior
+    // instance itself (every other test in this file calls it exactly once).
+    app?.unmount()
+    container?.remove()
+    mocks.isZh = false
+    getTodoItemsSpy.mockResolvedValue({ items: [], sources: { approval: 'unavailable' } })
+    const rootEn = await mountView()
+    const enText = groupOf(rootEn, 'approval')?.querySelector('[data-testid="todo-center-group-unavailable"]')?.textContent
+    expect(enText).toBe("Can't be shown right now — please try again shortly.")
+    expect(enText?.toLowerCase()).not.toContain('source')
+  })
+
   it('mutation guard: a response with an unavailable source among ok sources must still render that source\'s own unavailable group (grouping must come from `sources`, not survive as a shape derivable from `items` alone)', async () => {
     getTodoItemsSpy.mockResolvedValue({
       items: [
@@ -159,6 +182,47 @@ describe('todo center view', () => {
     const commentGroup = groupOf(root, 'comment')
     expect(commentGroup).not.toBeNull()
     expect(commentGroup?.querySelector('[data-testid="todo-center-group-unavailable"]')).not.toBeNull()
+  })
+
+  // F-5 closure (real-browser-acceptance-20260920.md): `updatedAt` (always present) and `dueAt`
+  // (optional) must actually reach the DOM, not just sit unused on `PendingItem`.
+  it('renders updatedAt for every item, and dueAt only when the source supplies one', async () => {
+    getTodoItemsSpy.mockResolvedValue({
+      items: [
+        { source: 'approval', id: 'no-due', title: '无截止单', href: '/approvals/no-due', updatedAt: '2026-09-18T03:04:00.000Z' },
+        { source: 'approval', id: 'with-due', title: '有截止单', href: '/approvals/with-due', updatedAt: '2026-09-18T03:04:00.000Z', dueAt: '2026-09-25T00:00:00.000Z' },
+      ],
+      sources: { approval: 'ok' },
+    })
+
+    const root = await mountView()
+    const links = Array.from(root.querySelectorAll('[data-testid="todo-center-item"]'))
+    const byHref = (href: string) => links.find((el) => el.getAttribute('href') === href)
+
+    const noDue = byHref('/approvals/no-due')
+    expect(noDue?.querySelector('[data-testid="todo-center-item-updated-at"]')?.textContent).toContain('更新于')
+    expect(noDue?.querySelector('[data-testid="todo-center-item-due-at"]')).toBeNull()
+
+    const withDue = byHref('/approvals/with-due')
+    expect(withDue?.querySelector('[data-testid="todo-center-item-updated-at"]')?.textContent).toContain('更新于')
+    expect(withDue?.querySelector('[data-testid="todo-center-item-due-at"]')?.textContent).toContain('截止')
+  })
+
+  it('renders updatedAt/dueAt in English when the locale is en, and passes an unparseable value through unchanged rather than "Invalid Date"', async () => {
+    mocks.isZh = false
+    getTodoItemsSpy.mockResolvedValue({
+      items: [
+        { source: 'approval', id: 'bad-date', title: 'Bad date item', href: '/approvals/bad-date', updatedAt: 'not-a-date' },
+      ],
+      sources: { approval: 'ok' },
+    })
+
+    const root = await mountView()
+    const link = root.querySelector('[data-testid="todo-center-item"]')
+    const updatedText = link?.querySelector('[data-testid="todo-center-item-updated-at"]')?.textContent
+    expect(updatedText).toContain('Updated')
+    expect(updatedText).not.toContain('Invalid Date')
+    expect(updatedText).toContain('not-a-date')
   })
 
   it('renders a view-only pill for actionable:false, and no pill when actionable is absent or true', async () => {

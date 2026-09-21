@@ -28,7 +28,7 @@
           data-testid="todo-center-group-unavailable"
           role="status"
         >
-          {{ isZh ? '该来源暂时无法查询' : 'This source could not be checked right now' }}
+          {{ isZh ? '暂时无法查看，请稍后重试' : "Can't be shown right now — please try again shortly." }}
         </p>
         <p
           v-else-if="group.items.length === 0"
@@ -49,7 +49,13 @@
               class="todo-center__item-link todo-center__item-link--unlinkable"
               data-testid="todo-center-item-unlinkable"
             >
-              <span class="todo-center__item-title">{{ item.title }}</span>
+              <span class="todo-center__item-main">
+                <span class="todo-center__item-title">{{ item.title }}</span>
+                <span class="todo-center__item-meta" data-testid="todo-center-item-meta">
+                  <span data-testid="todo-center-item-updated-at">{{ updatedAtLabel(item.updatedAt) }}</span>
+                  <span v-if="item.dueAt" data-testid="todo-center-item-due-at">{{ dueAtLabel(item.dueAt) }}</span>
+                </span>
+              </span>
               <span
                 v-if="item.actionable === false"
                 class="todo-center__pill todo-center__pill--view-only"
@@ -57,7 +63,20 @@
               >{{ isZh ? '仅查看' : 'View only' }}</span>
             </span>
             <router-link v-else :to="item.href" class="todo-center__item-link" data-testid="todo-center-item">
-              <span class="todo-center__item-title">{{ item.title }}</span>
+              <span class="todo-center__item-main">
+                <span class="todo-center__item-title">{{ item.title }}</span>
+                <!-- F-5 closure (real-browser-acceptance-20260920.md): every item now surfaces its
+                     own `updatedAt` (always present, per `PendingItem`) and `dueAt` (optional —
+                     rendered only when the source supplies one; today no registered source does,
+                     see `approval-pending-source.ts`, so this span is dormant-but-ready, not
+                     dead: the template branch, testid and formatter are exercised by
+                     `TodoCenterView.spec.ts`'s dueAt case even though no live approval item hits
+                     it yet). Values are hard fields off the wire, not derived — no new judgment. -->
+                <span class="todo-center__item-meta" data-testid="todo-center-item-meta">
+                  <span data-testid="todo-center-item-updated-at">{{ updatedAtLabel(item.updatedAt) }}</span>
+                  <span v-if="item.dueAt" data-testid="todo-center-item-due-at">{{ dueAtLabel(item.dueAt) }}</span>
+                </span>
+              </span>
               <!-- 判据 C′: an item the viewer cannot currently act on renders visibly differently
                    from an actionable one (a view-only pill), never the same shape. Absent when the
                    source has no such notion (item.actionable === undefined) — nothing to render. -->
@@ -158,6 +177,20 @@
 // row to render as a link, so a malformed href renders the row INERT (no `<router-link>`, see
 // template) plus a `console.error` so the condition is discoverable — never a link that quietly
 // does nothing on click.
+// H-4 (B-3 polish, 2026-09-22, closes real-browser-acceptance-20260920.md findings F-5/F-6):
+//   * F-5 — each item now renders `updatedAt` (always) and `dueAt` (when the source supplies one;
+//     no registered source does today) instead of only the bare title. See `updatedAtLabel`/
+//     `dueAtLabel` below.
+//   * F-6 — the C′ "view-only" pill's CODE predates this slice (already shipped and unit-tested,
+//     see the mutation-guarded case in `TodoCenterView.spec.ts`); this slice's job was only to
+//     exercise it in a REAL browser, which needed a real seat that is active-and-counted but not
+//     on the current node — no template/script change here, see the verification MD.
+//   * The per-source "could not be checked" copy (`group.status === 'unavailable'` branch below)
+//     was reworded to drop "该来源"/"this source" — the internal `PendingSourceRegistry` grouping
+//     vocabulary — since the group's own heading already names the domain (`sourceLabel()`); the
+//     message itself no longer needs to repeat which internal bucket failed. Same discriminability
+//     contract as before (lock §5 判据 B): still its own paragraph, own `data-testid`, never the
+//     same shape as the zero-items empty state.
 import { onMounted, onUnmounted, ref } from 'vue'
 import { getTodoItems, type PendingItem, type PendingSourceStatus, type TodoItemsResponse } from '../api'
 import { useLocale } from '../../composables/useLocale'
@@ -188,6 +221,32 @@ function isSameOriginRelativeHref(href: string): boolean {
   if (typeof href !== 'string' || href.length === 0) return false
   if (!href.startsWith('/') || href.startsWith('//') || href.startsWith('/\\')) return false
   return !/^\/[^/?#]*:/.test(href)
+}
+
+/**
+ * F-5 closure (real-browser-acceptance-20260920.md): render `item.updatedAt`/`item.dueAt`
+ * (both plain ISO strings off the wire per `PendingItem`, `todo/api.ts`) instead of leaving them
+ * unused. Mirrors the house pattern already used for approval detail dates
+ * (`approvals/detailField.ts`'s `formatDisplayDate`: locale `toLocaleString`, raw value passed
+ * through unchanged rather than surfacing JS's "Invalid Date" string when a value fails to parse)
+ * — not centralized with it because that function is private to its own module and this page is
+ * the only other caller; duplicating the four-line guard is cheaper than exporting a shared util
+ * for one second caller. Locale-aware here (that helper is zh-CN only) since this page already
+ * branches on `isZh` for every other string.
+ */
+function formatItemTimestamp(value: string, locale: string): string {
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(locale)
+}
+
+function updatedAtLabel(value: string): string {
+  const stamp = formatItemTimestamp(value, isZh.value ? 'zh-CN' : 'en-US')
+  return isZh.value ? `更新于 ${stamp}` : `Updated ${stamp}`
+}
+
+function dueAtLabel(value: string): string {
+  const stamp = formatItemTimestamp(value, isZh.value ? 'zh-CN' : 'en-US')
+  return isZh.value ? `截止 ${stamp}` : `Due ${stamp}`
 }
 
 const SOURCE_LABELS_ZH: Record<string, string> = { approval: '审批' }
@@ -365,6 +424,20 @@ defineExpose({ refresh })
 .todo-center__item-link--unlinkable {
   color: var(--el-text-color-secondary, #666);
   cursor: default;
+}
+
+.todo-center__item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.todo-center__item-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #999);
 }
 
 .todo-center__pill {
