@@ -1335,6 +1335,7 @@ exec npx vitest run \
   approvalResubmitButton \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
+  approvalTemplateCenterSections \
   approvalTemplateGovernance \
   approvalTemplateGroupsClient \
   ApprovalTemplateGroupsPanel \
@@ -1655,10 +1656,6 @@ exec npx vitest run \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
-  approvalTemplateCenterSections \
-  approvalTemplateGroupsClient \
-  ApprovalTemplateGroupsPanel \
-  SessionOrgSwitcher.spec.ts \
   --reporter=dot
   amountAutoSum \
   approval-amount-in-words \
