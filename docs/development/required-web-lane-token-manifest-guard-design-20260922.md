@@ -521,3 +521,67 @@ Independent gate review of round 2:
 Real CI at the round-2-reviewed head (`905aac7e7e7535fb1ffb0e0fbdc885dc2e7015aa`) was NOT run by that
 review; `test (20.x)` must be re-checked at the round-3 head before any merge decision (round-2
 gate review §4, merge condition 4 — unchanged by this round).
+
+## 11. Round 4 (2026-09-22) — G1/G2 from the merge-train dry-run v3 gate
+
+Source: `/Users/chouhua/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/reviews/merge-train-dry-run-v3-20260922.md`
+§2 gate 2 (no-DB lane) and §4 (findings table). The dry-run merged this PR's round-3 head
+(`4d196c3d3`) together with 17 other lanes, including the still-OPEN, unmerged
+`test/web-required-script-shape-guard` (#5898, head `22922402d`), onto merge point `a93bea106`
+(kept at `refs/dryrun/mtv3-final`) and ran this guard there under the required lane's real
+`vitest` invocation. Two of its own assertions — and only its own — turned red, on NEITHER lane
+alone: `#5898` alone is green (it does not touch this file's exec-block copy at all — the file
+did not exist on `main` when #5898 was authored); this PR alone is green (verified every round).
+
+### G1 — root cause
+
+`required-web-lane-token-manifest-guard.test.ts`'s "cross-copy agreement" test (P3-6/r2-P3-2)
+diffed `logicalLines`/`execLogicalLine`/`tokensOf`'s NORMALIZED SOURCE TEXT against
+`required-web-lane-registration-shape.test.ts`'s own copy — a check round 1 justified as
+"strictly STRONGER than a behavioural one" (§4 round-1 note, superseded by this section). #5898
+refactors that sibling file's `logicalLines()` into a one-line wrapper —
+`return logicalLinesWithLineNumbers(scriptSrc).map(e => e.line)` — around a NEW
+`logicalLinesWithLineNumbers()` helper, itself also fixing an unrelated bash-comment-folding-order
+bug (#5898's own P2-2 note) that this PR's copy does not have and is not fixing here (see the
+excluded fixture below). Same folded OUTPUT on every practical input; zero bytes of source in
+common with the pre-refactor inline body this guard was pinned to. The strictly-stronger framing
+was correct in isolation but bought that strength at the cost of alarming on a same-behaviour
+refactor with zero actual drift — exactly the false-conflict shape the merge-train dry-run exists
+to surface (see the dry-run's own §4 G1 row).
+
+**Fix**: the three functions' equivalence is now checked by MATERIALIZING each copy's extracted
+source into a real, callable function (`materializeAll()`, `required-web-lane-token-manifest-guard.test.ts`)
+and comparing OUTPUT across a named battery of >=6 fixtures (a bare single line, a backslash
+continuation, a comment before the block, a comment between two already-terminated lines, a dead
+block after `exec`, a blank line before the block) — not source text. `required-web-lane-exec-block.mjs`
+gained its own `logicalLinesWithLineNumbers()` export in the same round (an ADAPTER matching the
+sibling's post-refactor shape, per this PR's own "write an adapter, not a fourth copy" convention
+— §4 item 1 above — not a behaviour change: its own `logicalLines()` output is proved unchanged by
+construction, same filter-then-fold steps in the same order) so the line-number-mapping half of
+the comparison has a same-shaped counterpart once a sibling exports one; on THIS branch alone
+(`required-web-lane-registration-shape.test.ts` not yet carrying #5898) that half is
+feature-detected and skipped, not silently vacuous (the test asserts the detection itself).
+
+One shape is DELIBERATELY EXCLUDED from the "must agree" fixture set: a `#` comment landing INSIDE
+an active backslash continuation. Measured (not assumed): the two documented fold orders disagree
+there — this PR's algorithm (strip all `#` lines, then fold) glues both sides of the comment into
+one logical line, while #5898's bash-order fix flushes the buffer and starts fresh at the comment,
+per real bash semantics. A separate test proves this divergence is real, so the exclusion reads as
+a measured boundary, not an unexplained carve-out.
+
+### G2 — root cause
+
+The M2 mutation-self-proof case hardcoded the exec block's physical start line: `expect(lineMap.get(...)).toEqual([1257])` — `1257` being `main`'s line number for `exec npx vitest run \` at the time round 1 wrote the test. A-2, an unrelated lane in the same dry-run (card 9), inserts 102 comment lines above the exec block, moving that same line to `1359`. The hardcoded literal has no way to track that; the assertion reds even though nothing about the exec block's OWN shape or tokens changed.
+
+**Fix**: the expected line is now PARSED from the real (unmutated) `run-required-web-tests.sh` via
+`allVitestInvocations()` — the same function the rest of this guard already trusts to answer "where
+does the exec block start" — rather than hand-typed. A new discriminating test inserts N (37,
+chosen arbitrarily — independent of any one lane's actual insertion count) comment-only physical
+lines above the exec header and asserts the detected start line moves by exactly N, so a future
+regression back to a hardcoded literal would itself be caught (that test would still pass against
+a hand-typed constant only if N happened to be 0, which it deliberately is not).
+
+### Verification
+
+See the verification doc's own §8 (round 4) for the exact commands and measured before/after
+numbers on both the standalone branch and the `refs/dryrun/mtv3-final` overlay.
