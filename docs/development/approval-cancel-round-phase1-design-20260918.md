@@ -699,6 +699,16 @@ implementation):
   not swept in this slice — left for the pre-PR door review.
 - **Seed-visibility exposure in the template center (gate P2-B) — disclosed here as the deployment
   note the future PR body must carry; no code change made, narrowing decision left to the owner.**
+
+  > **求值标记(候选分支 `feat/approval-cancel-round-phase1-r8`, 2026-09-21)。** 本条的
+  > **状态断言**——「no code change made」「`visibility_scope` 取表级默认」「becomes visible to, and
+  > launchable by, every user」——在该候选分支上**已失效**:种子迁移现在显式写入一个收窄的
+  > `visibility_scope`,并有真 HTTP 用例把三个消费面钉住(见 §11)。本条其余内容**仍然 OPERATIVE**:
+  > (a) 机制描述(默认值 + `applyTemplateVisibilityFilter` 第一条析取支)逐字仍成立,是 §11 那个修法
+  > 的依据;(b) 「Whether to narrow … is an **owner decision**」这句**没有**因为候选分支动了代码而作废
+  > —— 候选分支选的是一种**既有语义**下的临时收窄,把「接线时翻回可见用哪种机制」原封不动留给 owner
+  > (§11 末尾把两条路线都写出来,不选)。下面这一整段保留原文,**不**因为候选分支而改写。
+
   The dedicated seed migration
   (`zzzz20260918100000_seed_approval_cancel_round_published_definition.ts:73-81`) inserts the
   `approval_templates` row via `INSERT INTO approval_templates (id, key, name, description, status)`
@@ -727,3 +737,146 @@ implementation):
 
 Full status of every checklist line (including which of the above are 未做 vs. 已做-with-caveat) is
 in the companion verification document, §10 ("checklist" table).
+
+---
+
+## 10. 部署序与回滚(候选新增,2026-09-21,分支 `feat/approval-cancel-round-phase1-r8`)
+
+本节记录的是**部署耦合**,不是新增设计。它存在的理由:§2.3 的 Q1c 迁移与
+`plugins/plugin-attendance/index.cjs` 的写入侧是**双向硬耦合**,而这一点此前只散落在迁移文件头和
+测试注释里,没有一处把「先部署哪一侧会怎样」写成可执行的部署说明。以下三种失败模式全部在一次性真库上
+实测得到(`metasheet2_c1r8_20260921` / `_pf2`,owner `ms2testbed`,非超级),不是读码推断。
+
+### 10.1 三种失败模式
+
+| # | 部署组合 | Postgres 报错 | 影响面 |
+|---|---|---|---|
+| (c) | **已迁移的库 + 旧(main)代码** | `23514`,约束 `atr_instance_key_pair` | 旧写入不带 `approval_workflow_key`(列存在但写 NULL),而 `approval_instance_id` 恒为刚建的实例 id(非 NULL)⇒ `(approval_instance_id IS NULL) = (approval_workflow_key IS NULL)` 为假 |
+| (b) | **未迁移的库 + 新(合并后)代码** | `42703`,`column "approval_workflow_key" ... does not exist` | 新写入显式列出了尚不存在的列 |
+| (a) | 两侧都对,但被引用的 `approval_instances` 行 `workflow_key IS NULL` | `23503`,约束 `attendance_requests_instance_workflow_fkey` | 复合 FK 在 `(id, workflow_key)` 上找不到对应行 |
+
+**(b) 与 (c) 合起来的结论:代码与三条迁移必须同一次发布,且两侧都不能先行。** 任一方向的部署窗口内,
+考勤请求提交不是概率性退化,而是 100% 失败。
+
+「5 个写入点」是本轮机械点数,不是转抄:`plugins/plugin-attendance/index.cjs` 内
+`approval_workflow_key` 恰好出现 5 次 —— 4 条 `INSERT INTO attendance_requests`(`:33702` / `:33945` /
+`:34221` / `:34507`)加 1 条 `UPDATE`(`:34850`)。同一文件另有 4 条 `UPDATE attendance_requests`
+(`:35250` / `:35627` / `:37952` / `:37968`)不触及这两列,在已迁移库上不受影响。这 5 处的
+`approval_instance_id` 参数取自紧邻上方 `upsertAttendanceApprovalInstance` 新建的实例 id,**恒非
+NULL** —— 这正是 (c) 之所以是 100% 而不是「视数据而定」的原因。
+
+### 10.2 preflight:一行悬空 ⇒ 整批回滚
+
+迁移在建任何约束之前先跑一条计数 SELECT(`LEFT JOIN approval_instances` 上
+`approval_instance_id IS NOT NULL AND (i.id IS NULL OR i.workflow_key IS NULL)`),非 0 即 `throw`。
+实测(`_pf`/`_pf2`):失败后 `kysely_migration` 内该条**没有记录**,四条约束**一条没建**,连
+`ADD COLUMN` 的那一列都不存在 —— 回滚干净,无半应用状态。代价是:**生产里只要存在一行这样的历史数据,
+整条迁移链就地停摆,`migrate` 非零退出,排在其后的所有迁移一并不落。**
+
+### 10.3 preflight 覆盖不到的第四种(本轮新发现,已实测)
+
+一条 `attendance_requests` 行,若其 `approval_instance_id` 指向的实例
+`workflow_key = 'approval.cancel-round'`:
+
+- 它**通过** preflight —— 该谓词只问「悬空」与「键为 NULL」,这行两者都不是,计数返回 `0`;
+- 回填把 `'approval.cancel-round'` 逐字写进新列;
+- 随后 `ADD CONSTRAINT atr_not_cancel_round` 以 **`23514` / `constraint: 'atr_not_cancel_round'`**
+  失败,整批回滚。
+
+实测方式:在一个一次性库上先排除该迁移跑完全量,种入 1 行该形状的数据,再不排除地重跑 `db:migrate`。
+**即:只跑 preflight 自带的那条 SELECT 不足以判定「可以部署」。** 今天这一集合**应当**为空(生产无任何
+路径能造出该 `workflow_key` 的实例,这一判断由候选分支上两件可执行守卫承担),但它在**入口切片接线之后**
+会变成可达集合,因此是接线批次的回归项,不是一次性检查。
+
+给 owner 的只读普查语句(五条 SELECT + 逐条判据 + 非 0 时的处置选项)在
+`c1-attendance-coupling-census-pack-20260921.md`,不在本仓。
+
+### 10.4 回滚必须分三层
+
+1. **代码回滚**:回代码不回迁移 ⇒ 立刻退化成 (c) 的 `23514`。代码回滚必须与迁移回滚同批,或不回滚而
+   向前修。
+2. **迁移回滚**:回迁移不回代码 ⇒ (b) 的 `42703`。另:`down()` DROP 掉新列,已回填的
+   `approval_workflow_key` 随之丢失 —— 可由 `approval_instances.workflow_key` 重新推导,但那是一次新的
+   回填,不是「撤销」。已应用环境的默认姿势仍是保留 schema、向前修。
+3. **业务补偿**:前两层都不恢复窗口期内已失败的考勤提交 —— 那些请求根本没落库。通知与重提属 ops/业务
+   动作,不属代码动作。
+
+---
+
+## 11. 种子模板可见性(候选新增,2026-09-21,分支 `feat/approval-cancel-round-phase1-r8`)
+
+### 11.1 改了什么
+
+`zzzz20260918100000_seed_approval_cancel_round_published_definition.ts` 的 `approval_templates`
+INSERT 现在**显式**写 `visibility_scope`,取值来自共享常量
+`CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE`(`src/db/seeds/approval-cancel-round-published-definition.ts`):
+
+```
+{ "type": "user", "ids": ["__approval_cancel_round_system_only__"] }
+```
+
+迁移末尾的读回守卫同批扩到这一列 —— `ON CONFLICT (id) DO NOTHING` 本来会让一条既存行的(可能是默认的、
+对所有人可见的)scope 原封不动留下而迁移照常报成功,正是该守卫存在的那一类静默错误。
+
+**改的是一条尚未在任何环境应用的迁移正文**,不是新加一条数据迁移。这一点是前提而非可长期依赖的性质:
+三条迁移今天在任何环境都未应用(PR 仍是 Draft);一旦某处已应用,同样的收窄就只能用追加迁移做。
+
+### 11.2 为什么是这个取值(三个被否掉的替代)
+
+| 取值 | 隐藏效果 | 否掉的理由 |
+|---|---|---|
+| 留默认 `{"type":"all","ids":[]}` | 无 | `applyTemplateVisibilityFilter` 第一条析取支 `COALESCE(visibility_scope->>'type','all') = 'all'` 对**每个** actor 命中 |
+| `{"type":"ids","ids":[]}`(先前草案里的写法) | SQL 上确实隐藏 | `ids` **不是**合法取值:`APPROVAL_TEMPLATE_VISIBILITY_TYPES` 是 `{all, dept, role, user}`,库级 CHECK `approval_templates_visibility_scope_shape` 同样只认这四个 ⇒ 插入即 `23514`;且 `readTemplateVisibilityScope` 会把未知 type 归回 `{type:'all'}`,DTO 说「对所有人可见」而 SQL 隐藏,两边打架 |
+| `{"type":"user","ids":[]}`(空集) | 与选中方案同效 | 写路径校验器 `normalizeTemplateVisibilityScope` 对 scoped 模板拒绝空 `ids`(400 `VALIDATION_ERROR`),而编辑端在**每次**模板保存时都回传这个字段(`apps/web/src/approvals/templateAuthoring.ts` 的 `buildUpdateTemplatePayload` → `buildCreateTemplatePayload` → `buildVisibilityScope`,初值由 `draftFromTemplate` 从 `template.visibilityScope` 取)⇒ 该行对有权限的模板管理员**永久不可编辑**,一次无关的改名会以一句看不懂的可见性错误失败 |
+| **`{"type":"user","ids":["__approval_cancel_round_system_only__"]}`(选中)** | 同效 | 通过写路径校验(非空、37 字符 ≤ 128 上限)⇒ 行仍可编辑;`user` 是**既有**已发布语义,不是新造的;哨兵命名沿用同一个过滤器自己的约定(`__approval_template_no_dept__` / `__approval_template_no_role__`) |
+
+**残留,明写不藏:** `users.id` 是 `TEXT`(`packages/core-backend/migrations/054_create_users_table.sql:5`),
+所以「无人命中」靠的是约定而非类型层面的不可能 —— 与该过滤器自带的两个哨兵同一类残留。
+
+### 11.3 为什么这个收窄不影响撤销轮本身
+
+撤销轮专用的创建路径**根本不读 `approval_templates`**:它按 `CANCEL_ROUND_PUBLISHED_DEFINITION_ID`
+定位,并刻意绕开 `templateVisibleAtCreateBoundary` / `applyTemplateVisibilityFilter`(该方法自己的文档
+注释写明了这一点)。因此这条 scope 既不启用也不禁用撤销轮 —— 这正是「今天可以隐藏、接线时再翻回可见」
+成立的原因。
+
+### 11.4 可执行证据
+
+`packages/core-backend/tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts`
+(真库 + 真服务器 + 真 HTTP,7 条):
+
+- 种子行存在,且 `visibility_scope` 逐字等于共享常量(不是 skip:跑在没应用过该迁移的库上会红,而不是
+  空转绿);
+- 普通用户(`approvals:read` / `approvals:act` / `approvals:write`,**非** template-manager)翻完**全部**
+  分页都取不到种子(按 id 与按名各钉一次);
+- `?search=<种子名>` 的响应与 `?search=<恒不匹配的 token>` 的响应**逐字节相同**;
+- `GET /api/approval-templates/<种子 id>` 与 `GET /api/approval-templates/<从未存在的 uuid>`
+  **状态码与响应体逐字节相同**(404 `APPROVAL_TEMPLATE_NOT_FOUND`);
+- `POST /api/approvals` 以种子 templateId 发起,与以从未存在的 templateId 发起**逐字节相同**(404),
+  且 `approval_instances` 没有对应新行 —— 这一条补上了此前记为「未测边界」的那一项(能否以该模板发起);
+- **正控**:同一 token 用一个对**他**可见的模板发起 ⇒ 201(证明上面的 404 不是写权限门在挡);一个
+  scope 指向**别人**的模板对他不可见(证明 `user` 支按 actor 自己的 id 匹配);同样三个端点对
+  template-manager **仍然**返回种子(既有管理员语义未变)。
+
+**变异实测(证明这些断言承重,不是空转):** 把种子行的 `visibility_scope` 改回默认
+`{"type":"all","ids":[]}` 再跑同一文件 ⇒ **7 条里 5 条红**(DB 形状、全分页缺席、`?search=` 字节等同、
+详情 404、创建 404 各红一条),恢复后复绿。该变异同时给出一条**此前未被实测过的事实**:在默认 scope 下,
+一个只持 `approvals:read` + `approvals:write` 的普通用户对种子 templateId 发 `POST /api/approvals`
+并不是被挡住 —— 它一路走到节点解析层(422 `APPROVAL_REQUESTER_CHOICE_REQUIRED`);补上
+`requesterChoices` 后返回 **201**,落下一条 `publishedDefinitionId` 指向该种子定义的真实待办实例。
+需要说明清楚的是:这条实例的 `workflow_key` 是 `'approval-product-template'` 而**不是**
+`'approval.cancel-round'`,因此 `isCancelRoundInstance` 对它为假、九处出口守卫都不适用 —— 它是「用系统
+定义跑出来的普通实例」,属数据形状污染,**不是**守卫被绕过。细节不进 PR body / 提交信息。
+
+### 11.5 接线时如何翻回可见(两条路线,均为 owner 裁决,本文不选)
+
+1. **一条数据迁移**:新加一条迁移,把该行改成目标可见范围,例如
+   `UPDATE approval_templates SET visibility_scope = '{"type":"all","ids":[]}'::jsonb WHERE id = <种子 id>`
+   —— 或改成真正想要的受众(某个角色 / 某些部门),而不是一步跨回「对所有人可见」。优点:状态在库里,
+   一次性、可审计、可回滚(`down()` 写回哨兵)。缺点:不可按环境差异化。
+2. **运行期开关**:在 `listTemplates` / `getTemplate` / 创建边界共用的那层加一个「系统模板」标记与开关
+   位,由配置决定是否对普通用户呈现。优点:可分环境、可灰度、可即时回退。缺点:新增一条常驻判据面,
+   且要同时回答「开关关闭时创建边界是否也拒绝」这个问题,否则两套判据打架。
+
+无论选哪条,接线那一批都必须同时把两件休眠守卫从「零调用方 / reach=0」升级成「恰好 N 个被点名的调用方 /
+只有被点名入口能 reach」,否则守卫要么在接线当天变成永久红,要么被顺手删掉。
