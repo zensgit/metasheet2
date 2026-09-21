@@ -162,6 +162,24 @@ pinned literal here): `CANCEL_ROUND_SUITES` (lock:143's closed four-value domain
 old identifier named it a default, which is exactly the contract the code then failed to keep), and
 `CANCEL_ROUND_DEFAULT_SUITE`.
 
+**Window ceiling table**, pinned as of this document's own head so a reader does not have to run
+the grep above just to learn the three values (if this table and the live constant ever disagree,
+the code is authoritative — re-derive this table via the grep recipe above and update it in the
+same commit that changes the constant; NOTE — this replaces a prior version of the code comment
+that cited a private, out-of-repo owner rule page by name for these three values; that citation is
+retracted as a provenance source here, not because the numbers changed, but because this table is
+now the in-repo record the code comment points to instead):
+
+| suite | ceiling (days) | lock clause | why |
+|---|---|---|---|
+| `attendance` | 180 | lock:143 | closed four-value domain, upper bound per suite |
+| `leave` | 90 | lock:143 | closed four-value domain, upper bound per suite |
+| `other` | 90 | lock:143 | closed four-value domain, upper bound per suite |
+| `forbidden` | 0 | lock:143 | window fixed at 0; `CANCEL_ROUND_SUITE_FORBIDDEN` (lock §14.3 #14, lock:357) blocks instance creation before this number is ever read |
+
+`windowDays ∈ [0, ceiling]` is lock:143's own bound, which is why these are an ENFORCED UPPER
+BOUND rather than a default — see the rename rationale above.
+
 CJS-side mirror (lock's own convention, "插件侧镜像常量…由测试钉逐字相等", lock:338):
 `plugins/plugin-attendance/index.cjs:167` — `const APPROVAL_CANCEL_ROUND_WORKFLOW_KEY =
 'approval.cancel-round'`, pinned byte-identical to the core constant by
