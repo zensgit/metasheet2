@@ -96,7 +96,8 @@ ALTER TABLE integration_external_systems
 **uncovered（已登记，本刀明确不关）：**
 
 - **legacy 形态** `config.dataSourceId`（`connection_id IS NULL`）：没有 FK，`live_id` 机制对它无效。删除侧的计数（P2-A owner 归属戳）+ FOR UPDATE 仍挡住时序 B；时序 A 仍敞开。关闭它需要 legacy 行也带 `connection_id`（#5783 的方向）或单独的 CHECK/触发器，属后续。
-- **其它持 dataSourceId 指针但删除守卫不计数的表**：`integration_stock_prep_source_binding`（079）、read-source-config store 等。它们不在 `countExternalSystemReferences` 里，也没有指向 `data_sources` 的 FK，删除守卫与本 FK 都看不见——既有缺口，非本刀引入。
+- **二阶指针（`external_system_id` / `system_id`）——由外部系统删除守卫计数（后续 PR 已补）**：`integration_stock_prep_source_binding`（079:45 `external_system_id`）、`integration_read_source_configs`（062:27 `system_id`）与 `integration_sealed_export_stock_prep_bindings`（073:19 `external_system_id`）**并不持 `dataSourceId` 指针**（本节早先版本如此描述，属误记，现更正）：它们指向的是**外部系统**，不是 `data_sources`。因此它们既不该出现在 `countExternalSystemReferences` 里，也不该有指向 `data_sources` 的 FK。
+  真正的缺口是**二阶**的：`deleteExternalSystem`（`plugins/plugin-integration-core/lib/external-systems.cjs`）原本只数 `integration_pipelines`，于是外部系统被删后 079/062/073 悬空，其下的数据源引用计数随之归零、跟着可删。现已由外部系统删除守卫计数这三张表（079、062，以及同形的 073 `integration_sealed_export_stock_prep_bindings.external_system_id`）并抛同一个 409 `ExternalSystemConflictError` 关闭；设计/验证见 `docs/development/external-system-delete-secondary-pointer-count-design-20260920.md`。（`data_sources` 这一侧的覆盖矩阵不变——二阶指针从不指向 `data_sources`。）
 - **存量悬空行**：NOT VALID 容忍、原样保留；`VALIDATE CONSTRAINT` 需先清理，属 owner 可见的单独动作。
 - **硬删**：RESTRICT 保护不变；未新增也未削弱。
 - **兜底映射的口径**：`DataSourceManager.ts` 的 `isLiveConnectionFkViolation` 在约束名缺失时把任意 23503 当引用 409，前提是今天没有其它 RESTRICT/NO ACTION FK 指向 `data_sources`（`20251206000001_create_data_sources_table.ts:114/183`、`migrations/040_data_sources.sql` 全部 `ON DELETE CASCADE`，079 明确不建 FK）。这个前提没有绊线；后人若加一条 RESTRICT FK 指向 `data_sources`，需同步收窄该映射（按约束名主判）。

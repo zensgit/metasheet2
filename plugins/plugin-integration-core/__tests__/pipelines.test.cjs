@@ -444,6 +444,87 @@ async function main() {
   }
   assert.equal(db.calls.filter(call => call[0] === 'selectOne').length, selectOneCountBefore, 'validation failures issue no selectOne')
 
+  // --- 8d. Q4a: listProvenanceByRun — per-run timeline off the migration-060 view -----------
+  // The view rows are seeded directly (the SQL unnest itself is locked by migration-sql.test.cjs
+  // and the write→view→read round-trip by df-n2-2c-provenance-read.test.cjs); what THIS block
+  // pins is the registry's WHERE, its ordering and its limit ceiling.
+  db.seed('integration_provenance_by_row', [
+    // deliberately out of event_index order in storage, so an ordering regression is visible
+    { tenant_id: 'tenant_1', workspace_id: null, pipeline_id: 'id_1', run_id: 'id_4', run_mode: 'full', run_status: 'succeeded', run_created_at: '2026-04-24T00:00:00.000Z', event_index: 2, row_id: 'k1', event_type: 'target_write_succeeded', event_at: '2026-04-24T00:00:02.000Z', attrs: {} },
+    { tenant_id: 'tenant_1', workspace_id: null, pipeline_id: 'id_1', run_id: 'id_4', run_mode: 'full', run_status: 'succeeded', run_created_at: '2026-04-24T00:00:00.000Z', event_index: 1, row_id: 'k1', event_type: 'row_cleaned', event_at: '2026-04-24T00:00:01.000Z', attrs: {} },
+    // another run of the SAME tenant — must not leak into the id_4 timeline
+    { tenant_id: 'tenant_1', workspace_id: null, pipeline_id: 'id_1', run_id: 'other_run', run_mode: 'full', run_status: 'failed', run_created_at: '2026-04-24T00:10:00.000Z', event_index: 1, row_id: 'k9', event_type: 'target_write_failed', event_at: '2026-04-24T00:10:01.000Z', attrs: {} },
+    // same run id under ANOTHER tenant — the cross-tenant row this WHERE has to exclude
+    { tenant_id: 'tenant_other', workspace_id: null, pipeline_id: 'id_1', run_id: 'id_4', run_mode: 'full', run_status: 'succeeded', run_created_at: '2026-04-24T00:00:00.000Z', event_index: 1, row_id: 'leak', event_type: 'row_cleaned', event_at: '2026-04-24T00:00:01.000Z', attrs: {} },
+    // same run id under another WORKSPACE of the caller's own tenant — excluded too
+    { tenant_id: 'tenant_1', workspace_id: 'ws_other', pipeline_id: 'id_1', run_id: 'id_4', run_mode: 'full', run_status: 'succeeded', run_created_at: '2026-04-24T00:00:00.000Z', event_index: 1, row_id: 'ws_leak', event_type: 'row_cleaned', event_at: '2026-04-24T00:00:01.000Z', attrs: {} },
+  ])
+
+  const runTimeline = await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4' })
+  assert.deepEqual(runTimeline.map(entry => entry.eventIndex), [1, 2],
+    'listProvenanceByRun returns the run timeline ordered by event_index')
+  assert.deepEqual(runTimeline.map(entry => entry.rowId), ['k1', 'k1'],
+    'only the requested run\'s rows are returned (no other run, no other tenant, no other workspace)')
+  assert.deepEqual(
+    Object.keys(runTimeline[0]).sort(),
+    __internals.PROVENANCE_TIMELINE_ENTRY_FIELDS.slice().sort(),
+    'listProvenanceByRun projects exactly the frozen timeline entry fields (same rowToProvenanceEntry as by-row)',
+  )
+  const byRunSelect = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()
+  assert.deepEqual(byRunSelect[2].where, { tenant_id: 'tenant_1', workspace_id: null, run_id: 'id_4' },
+    'listProvenanceByRun WHERE carries tenant_id + workspace_id + run_id (drop tenant_id and the cross-tenant row leaks)')
+  assert.deepEqual(byRunSelect[2].orderBy, ['event_index', 'ASC'], 'ordered by event_index ASC at the DB')
+  assert.equal(byRunSelect[2].limit, __internals.PROVENANCE_BY_RUN_LIMIT_DEFAULT,
+    'no caller limit → the server-held default page size')
+
+  // omitted workspaceId normalizes to null exactly like the by-row read and the run reads
+  await registry.listProvenanceByRun({ tenantId: 'tenant_1', runId: 'id_4' })
+  const omittedWsByRun = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()
+  assert.equal(omittedWsByRun[2].where.workspace_id, null, 'omitted workspaceId is pinned to null in the WHERE')
+  assert.ok('workspace_id' in omittedWsByRun[2].where, 'workspace_id key is present (null), never dropped')
+
+  // another tenant sees only its own row for the SAME run id — no cross-tenant read
+  const foreignTimeline = await registry.listProvenanceByRun({ tenantId: 'tenant_other', workspaceId: null, runId: 'id_4' })
+  assert.deepEqual(foreignTimeline.map(entry => entry.rowId), ['leak'],
+    'the foreign tenant reads only its own row, never tenant_1\'s events')
+
+  // limit: caller value passes through, above the ceiling it is clamped, junk falls back
+  await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', limit: 5 })
+  assert.equal(db.calls.filter(c => c[0] === 'select' && c[1] === 'integration_provenance_by_row').pop()[2].limit, 5,
+    'a small caller limit passes through unchanged')
+  await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', limit: 100000 })
+  assert.equal(db.calls.filter(c => c[0] === 'select' && c[1] === 'integration_provenance_by_row').pop()[2].limit,
+    __internals.PROVENANCE_BY_RUN_LIMIT_MAX, 'an oversized caller limit is clamped to the ceiling')
+  for (const junk of [0, -1, '50', 1.5, null]) {
+    await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', limit: junk })
+    assert.equal(db.calls.filter(c => c[0] === 'select' && c[1] === 'integration_provenance_by_row').pop()[2].limit,
+      __internals.PROVENANCE_BY_RUN_LIMIT_DEFAULT, `a non-positive-integer limit (${JSON.stringify(junk)}) falls back to the default`)
+  }
+
+  // input validation short-circuits before any db call
+  const provSelectsBefore = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').length
+  for (const badInput of [{ tenantId: 'tenant_1', workspaceId: null }, { workspaceId: null, runId: 'id_4' }, undefined]) {
+    let bad = null
+    try {
+      await registry.listProvenanceByRun(badInput)
+    } catch (error) {
+      bad = error
+    }
+    assert.ok(bad instanceof PipelineValidationError, `listProvenanceByRun rejects ${JSON.stringify(badInput)} before the db`)
+  }
+  assert.equal(db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').length, provSelectsBefore,
+    'validation failures issue no view select')
+
+  // the by-ROW read is untouched: rowId is still mandatory there (Q4a added a route, it did not
+  // widen the existing cross-run read).
+  let byRowMissingRowId = null
+  try {
+    await registry.listProvenanceByRow({ tenantId: 'tenant_1', workspaceId: null })
+  } catch (error) {
+    byRowMissingRowId = error
+  }
+  assert.ok(byRowMissingRowId instanceof PipelineValidationError, 'listProvenanceByRow still requires rowId')
+
   let badCounter = null
   try {
     await registry.updatePipelineRun({
