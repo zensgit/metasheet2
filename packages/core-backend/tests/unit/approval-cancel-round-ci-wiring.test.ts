@@ -13,13 +13,14 @@ import {
 /**
  * Approval cancel-round real-DB CI wiring (lane decision 1, 2026-09-17).
  *
- * WHAT THIS PINS: the seven `approval-cancel-round-*.db.test.ts` suites are (a) excluded from the
+ * WHAT THIS PINS: every `approval-cancel-round-*.db.test.ts` suite listed in
+ * `CANCEL_ROUND_REALDB_FILES` below is (a) excluded from the
  * no-DB `vitest.config.ts` job (so `describeIfDatabase` cannot skip-green them there), and (b)
  * wired as WHOLE-FILE arguments of `plugin-tests.yml`'s required `test (20.x)` "Run approval
  * real-DB integration" step (id `approval-real-db-integration`) — the SAME step id the shared
  * `ci-realdb-step-contract.mjs` module already pins (a)/(b)/(c) executability for (20.x-only
  * matrix leg, a literal `DATABASE_URL`, a real `vitest --config vitest.integration.config.ts`
- * invocation). This test adds only pin (d) — that each of the seven files is actually a whole-file
+ * invocation). This test adds only pin (d) — that each listed file is actually a whole-file
  * argument of that same, already-executable invocation — reusing the shared parser rather than
  * re-deriving step discovery.
  *
@@ -30,7 +31,7 @@ import {
  * (20.x)` contexts. A brand-new file here needs no workflow edit to be collected (same rationale
  * `approval-ci-coverage-enumeration.test.ts`'s own header documents for its own home).
  *
- * WHY THE STANDALONE LANE IS ASSERTED ABSENT: these seven files were previously wired into a
+ * WHY THE STANDALONE LANE IS ASSERTED ABSENT: the first seven of these files were previously wired into a
  * standalone, non-required `.github/workflows/approval-realdb-cancel-round.yml` lane. That lane is
  * DELETED in the same commit that adds these files to the required step — keeping both would run
  * every file twice per PR for zero additional coverage (the explicit reason the lane's own pending
@@ -57,6 +58,11 @@ const PLUGIN_TESTS_WORKFLOW_PATH = join(REPO_ROOT, '.github/workflows/plugin-tes
 const STANDALONE_WORKFLOW_PATH = join(REPO_ROOT, '.github/workflows/approval-realdb-cancel-round.yml')
 const VITEST_CONFIG_PATH = join(REPO_ROOT, 'packages/core-backend/vitest.config.ts')
 
+/**
+ * Every cancel-round real-DB suite. This list is ITERATED by each assertion below, so a new file
+ * appended here is wiring-checked by construction — and a new file NOT appended here gets no
+ * wiring guard at all, which is why adding the file to this array is part of adding the file.
+ */
 const CANCEL_ROUND_REALDB_FILES = [
   'tests/integration/approval-cancel-round-lock-order-census.db.test.ts',
   'tests/integration/approval-cancel-round-creation.db.test.ts',
@@ -65,6 +71,7 @@ const CANCEL_ROUND_REALDB_FILES = [
   'tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts',
   'tests/integration/approval-cancel-round-outlet-guards.db.test.ts',
   'tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts',
+  'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
 ] as const
 
 describe('Approval cancel-round real-DB CI wiring (lane decision 1)', () => {
@@ -86,7 +93,7 @@ describe('Approval cancel-round real-DB CI wiring (lane decision 1)', () => {
     }
   })
 
-  it('the required step lists all seven files exactly once each (no duplicate/mistyped entries)', () => {
+  it('the required step lists every file in CANCEL_ROUND_REALDB_FILES exactly once each (no duplicate/mistyped entries)', () => {
     const wf = readFileSync(PLUGIN_TESTS_WORKFLOW_PATH, 'utf8')
     const args = realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.approval)
     for (const file of CANCEL_ROUND_REALDB_FILES) {
