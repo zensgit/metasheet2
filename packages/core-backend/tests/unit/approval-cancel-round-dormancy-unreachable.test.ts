@@ -64,18 +64,34 @@ import { describe, expect, it } from 'vitest'
  * SCOPE NOTE (intentional, read before extending): a call site is now defined narrowly, matching the
  * gate-approved fix — a `CallExpression` whose callee is either the bare `Identifier` SYMBOL or a
  * `PropertyAccessExpression` named SYMBOL (i.e. `createCancelRoundInstance(...)` or
- * `x.createCancelRoundInstance(...)`). Round 1's text pattern also flagged a bare, uncalled property
- * reference (`const fn = x.createCancelRoundInstance`, no trailing `(`) as a reachability signal —
- * see the POSITIVE CONTROL below that pins this narrowing on purpose so it cannot drift silently.
- * This is a real, reported behavioural narrowing on ONE axis (reference-taking) traded for closing a
- * false-negative on another axis (string-adjacent calls); it has not been separately re-litigated
- * with the reviewer who asked for round 1, and remains open for that reviewer's sign-off.
+ * `x.createCancelRoundInstance(...)`). Round 1's text pattern also flagged two shapes this AST
+ * definition does not: (a) a bare, uncalled property reference (`const fn = x.createCancelRoundInstance`,
+ * no trailing `(`) — see the POSITIVE CONTROL below that pins this narrowing on purpose so it cannot
+ * drift silently; and (b) the symbol named in a `MethodSignature`/interface/type member shape
+ * (`{ createCancelRoundInstance(id: string): T }`) — this is neither a `CallExpression` nor a
+ * `MethodDeclaration`/`FunctionDeclaration`, so `astCensus` counts it as zero of both. (b) is why the
+ * raw "mentions the symbol in code" STATIC assertion below is kept and is LOAD-BEARING, not
+ * redundant — see that note at its call site. These are real, reported behavioural narrowings on the
+ * AST call-site/declaration layer specifically (traded for closing a false-negative on another axis —
+ * string-adjacent calls); they have not been separately re-litigated with the reviewer who asked for
+ * round 1, and remain open for that reviewer's sign-off.
  *
- * RESIDUAL (also reported, not silently left): the STATIC "no production file other than the
- * definition file mentions the symbol in code" assertion below still reads `stripComments` output —
- * it was not part of the P2-1 finding's remit and is unchanged by this revision. It shares
- * `stripComments`' own honest limit and is not a backstop for the failure mode this revision closes;
- * treat it as the older, coarser, still-present raw-mention check that it always was.
+ * LOAD-BEARING, NOT REDUNDANT (corrected after this revision's own probe evidence — do not delete as
+ * a cleanup): the STATIC "no production file other than the definition file mentions the symbol in
+ * code" assertion below still reads `stripComments` output, unchanged by this revision, and it
+ * shares `stripComments`' own honest limit (the exact P2-1 shape can still slip past IT specifically —
+ * measured: the same "a//b" probe that reds the AST call-site assertion leaves THIS one green,
+ * because the whole line is stripped before either check sees it). A prior gate review's NIT-2 called
+ * the call-site assertions "strictly weaker than" this one, i.e. a subset — that relationship no
+ * longer holds now that call sites are AST-detected: this assertion is the ONLY one left that catches
+ * (a) a bare, uncalled property reference (`const fn = x.createCancelRoundInstance`, see the SCOPE
+ * positive control above) and (b) the symbol named in a `MethodSignature`/interface/type member
+ * (`{ createCancelRoundInstance(id: string): T }`) — neither is a `CallExpression` or a
+ * `MethodDeclaration`/`FunctionDeclaration`, so the AST census below counts both as zero. (b) was
+ * found by accident: an early draft of the POSITIVE CONTROL synthetic probes below embedded such a
+ * signature and it turned the raw-mention assertion red for an unrelated reason before the probe was
+ * corrected — see the round-2 write-up.) Keep this assertion; it is covering ground the AST layer
+ * structurally cannot.
  */
 
 const REPO_ROOT = join(__dirname, '../../../..')
@@ -176,8 +192,9 @@ function isTestPath(relPath: string): boolean {
  * literal or a regex, on the same line as and BEFORE an occurrence of the symbol, strips that
  * occurrence along with the rest of the line — i.e. it can under-report, not only over-report. This
  * function is now used ONLY for: the raw "mentions the symbol in code" STATIC assertion (unchanged
- * scope, see the file-header RESIDUAL note), the definition-file mention-count STATIC assertion, the
- * test-path-caller positive control, and the `.vue` fallback census. Every call-site / declaration /
+ * scope, see the file-header LOAD-BEARING note — it is not redundant), the definition-file
+ * mention-count STATIC assertion, the test-path-caller positive control, and the `.vue` fallback
+ * census. Every call-site / declaration /
  * string-dispatch assertion that matters for reachability now reads the real AST instead (see
  * `astCensus` below) for `AST_EXTENSIONS`, and only falls back to this function for `.vue`.
  */
@@ -284,7 +301,14 @@ function censusOf(rel: string, code: string): FileCensus {
   const stripped = stripComments(code)
   return {
     callSites: legacyCallSiteCount(stripped),
-    declarations: 0, // no production `.vue` file declares this backend method
+    // NAMED CARVE-OUT (not silently assumed — `feedback_exemption_reasons_rot_make_them_data`): this
+    // is 0 unconditionally, not measured, because the `.vue` fallback has no declaration/call
+    // distinction (unlike `astCensus`). A backend service method cannot be *declared* inside a
+    // frontend SFC's `<script>` block in this architecture, so the gap is believed inert — but it is
+    // NOT covered by the "no production file other than the definition declares…" STATIC assertion
+    // below for `.vue` files specifically. If a `.vue` file is ever found doing so, this is the line
+    // that is silently wrong, not that assertion.
+    declarations: 0,
     stringDispatch: STRING_DISPATCH_FORMS.some((form) => stripped.includes(form)),
   }
 }
