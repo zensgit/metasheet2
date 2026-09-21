@@ -284,9 +284,10 @@ describe('#5839 B1 — univer-meta sheet-config routes: authority before the she
 
     const ledger = existenceGapLedgerText()
     // Non-vacuous: the extracted block really is a list of entries, so `not.toContain` is a claim.
-    // The bound is 0, not a magnitude: #5839 closes the ledger one slice at a time (B2 took it from 13
-    // entries to 5), so any "at least N" threshold reds on a CORRECT ledger as soon as the next slice
-    // lands. What must never happen is the reader extracting text with no entries in it at all.
+    // The bound is 0, not a magnitude: #5839 closes the ledger one slice at a time (B4 took two off,
+    // then B2 took it from 11 entries to 3), so any "at least N" threshold reds on a CORRECT ledger as
+    // soon as the next slice lands. What must never happen is the reader extracting text with no
+    // entries in it at all.
     expect(
       ledger.split("',").length - 1,
       'the extracted ledger block holds no entries — the reader is pointed at the wrong text',
