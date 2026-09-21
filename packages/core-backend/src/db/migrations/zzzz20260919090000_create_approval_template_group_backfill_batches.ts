@@ -6,8 +6,8 @@ import { sql } from 'kysely'
  * ("backfill by existing category") batch bookkeeping.
  *
  * Provenance: design proposal `docs/development/approval-template-groups-phase2-backfill-design-20260918.md`
- * §2, AS AMENDED by the independent design-gate verdict
- * `reviews/design-gate-A3-phase2-20260918.md` (folded into the proposal's §13.1). The gate found
+ * §2, AS AMENDED by the independent design-gate verdict `design-gate-A3-phase2-20260918.md` (a
+ * private review record, not tracked in this repository, folded into the proposal's §13.1). The gate found
  * one real defect in the proposal's original DDL text (changesRequired #4, real-DB M6): the
  * proposal had `atgbbl_link_fk … ON DELETE NO ACTION`; the CREATE TABLE below already carries the
  * gate's fix (`ON DELETE CASCADE`) — see that constraint's own comment for the deadlock this
@@ -115,8 +115,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 // CANDIDATE, review-requested — see the private review record
-// "approval-template-groups-phase2-backfill-ddl-declaration-20260920.md" (not in this repo; it
-// lives in the reviewer's private review-notes tree, not under a repo `reviews/` directory)
+// "approval-template-groups-phase2-backfill-ddl-declaration-20260920.md" (not tracked anywhere in
+// this repository; it lives in the reviewer's own private review-notes tree)
 // §1.6(b) / R2 / Q4b (not yet ratified; this guard is itself an unratified candidate, not a
 // closed decision). §1.6(b) established that this migration's down() does not undo any business
 // effect: `approval_template_groups` rows created and `approval_template_group_links` rows
@@ -136,8 +136,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 // ALLOW_DB_RESET (read at the migrate.ts CLI boundary and documented in its own --help text), this
 // variable is read inside the migration file itself — a wider surface (any caller of this
 // migration's down(), not just the --reset CLI path) with no CLI-level `--help` mention of its own;
-// registered instead in `migrate.ts --help`'s Notes section so `--rollback`/`--reset` operators can
-// still discover it, and down() logs a console.warn when it takes effect (see below).
+// registered in `migrate.ts --help`'s Notes section for operators who read ahead of time (round-2
+// implementation-gate NIT-c: the ATG_BACKFILL_DOWN_BLOCKED error message itself is the actual
+// discovery path for an operator who has NOT read --help first — it names this variable directly —
+// and down() also logs a console.warn when the force path is taken (see below).
 //
 // `to_regclass` guards each count with TWO separate statements — first check existence, and only
 // query `count(*)` when the table exists — the same two-statement shape as the precedent this was

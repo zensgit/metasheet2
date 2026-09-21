@@ -1,5 +1,5 @@
-import { afterAll, describe, expect, it } from 'vitest'
-import { Kysely, PostgresDialect } from 'kysely'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
 import { query } from '../../src/db/pg'
 import {
@@ -19,7 +19,14 @@ import {
  * `down` directly from a migration file and asserts it "fail-closes BEFORE DDL while any …
  * registry row exists". This file is the batch-tables' own version of that same test, plus the
  * force/empty/up-idempotent/table-existence cases the guard's own doc comment claims:
- *  - data present in all three tables -> down() rejects, before any DROP, tables/rows untouched;
+ *  - data present in all three tables -> down() rejects, before any DROP, tables/rows untouched,
+ *    and the rejection message names the true per-table counts (batches=1, batch_groups=1,
+ *    batch_links=1);
+ *  - the force env var only unlocks the drop on the EXACT string "true" — "false"/"0"/"1"/"TRUE"/
+ *    "yes"/"" must all stay rejected (round-2 implementation-gate finding P2-A: the design doc's
+ *    own four-leg list for this axis was silently dropped when this file was first written; a
+ *    `process.env[X] !== 'true'` -> `!process.env[X]` mutation now reddens on this axis alone,
+ *    where it previously stayed fully green);
  *  - force env set -> down() proceeds and actually drops all three tables (positive control,
  *    proving the Case-1 rejection above was THIS guard and not some other cause);
  *  - all three tables already missing -> down() must NOT crash with 42P01 (this is the guard's
@@ -30,7 +37,12 @@ import {
  *  - half-applied (only the head table exists, the two child tables do not) WITH a row in the
  *    head table -> down() still rejects using the true count, and does so with
  *    ATG_BACKFILL_DOWN_BLOCKED, not 42P01 (proves the missing-table branch returns 0 for the
- *    genuinely-absent child tables while the present table's real count still drives the guard);
+ *    genuinely-absent child tables while the present table's real count still drives the guard).
+ *    The "not 42P01" half is asserted against `err.code`, not `err.message` (round-2
+ *    implementation-gate finding P3-c: node-postgres never puts the SQLSTATE in `.message`, so a
+ *    `.message.not.toMatch(/42P01/)` assertion can never fail and was vacuous) — a same-client
+ *    positive control immediately below that case proves `.code` really does carry '42P01' for a
+ *    genuinely-missing relation, so the negative assertion on `.code` is non-vacuous;
  *  - empty tables (present, zero rows) -> down() passes and actually drops them;
  *  - up() stays idempotent across all of the above DDL churn, and a second up() rebuilds cleanly
  *    after down() ran.
@@ -82,6 +94,15 @@ describeIfDatabase(
     const templateIds: string[] = []
     const orgTags: string[] = []
     const batchIds: string[] = []
+
+    // Round-2 implementation-gate NIT-a: a single shared `migrationDb`, assigned once here rather
+    // than lazily inside the first case that needs one, so every `it()` below (and `afterAll`) can
+    // rely on it being set without a source-order landmine tying it to which case ran first.
+    beforeAll(() => {
+      migrationDb = new Kysely<unknown>({
+        dialect: new PostgresDialect({ pool: new Pool({ connectionString: dbUrl }) }),
+      })
+    })
 
     itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
       expect(process.env.DATABASE_URL).toBeTruthy()
@@ -163,19 +184,45 @@ describeIfDatabase(
         expect(before.every((s) => s.exists)).toBe(true)
         expect(before.every((s) => s.count >= 1)).toBe(true)
 
-        migrationDb = new Kysely<unknown>({
-          dialect: new PostgresDialect({ pool: new Pool({ connectionString: dbUrl }) }),
-        })
-        await expect(down(migrationDb)).rejects.toThrow(/ATG_BACKFILL_DOWN_BLOCKED/)
-        await expect(down(migrationDb)).rejects.toThrow(new RegExp(FORCE_ENV))
+        await expect(down(migrationDb!)).rejects.toThrow(/ATG_BACKFILL_DOWN_BLOCKED/)
+        await expect(down(migrationDb!)).rejects.toThrow(new RegExp(FORCE_ENV))
+        // Round-2 implementation-gate NIT-b: the rejection message's per-table counts are the most
+        // operationally useful part of it (a `total = batches` narrowing that drops the
+        // batch_groups/batch_links terms from the sum would still redden on token-only assertions,
+        // reachability permitting) — assert the exact counts this fixture produces, not just that
+        // SOME error with the right token was thrown.
+        await expect(down(migrationDb!)).rejects.toThrow(/batches=1, batch_groups=1, batch_links=1/)
 
         const after = await Promise.all([snapshot(HEAD), snapshot(GROUPS), snapshot(LINKS)])
         expect(after).toEqual(before) // fail-closed: zero DDL, zero row-count drift
       },
     )
 
+    it(
+      'only the exact string "true" unlocks the force path — "false"/"0"/"1"/"TRUE"/"yes"/"" all ' +
+        'stay rejected (strictness axis; round-2 implementation-gate finding P2-A)',
+      async () => {
+        // Same still-populated fixture the case above left behind (only ever rejects, never
+        // drops), and the case immediately after this one (the force positive control) still
+        // finds `count > 0` on the head table once this loop finishes, because every value here
+        // fails closed and mutates nothing.
+        expect((await snapshot(HEAD)).count).toBeGreaterThan(0)
+        for (const v of ['false', '0', '1', 'TRUE', 'yes', '']) {
+          process.env[FORCE_ENV] = v
+          try {
+            await expect(down(migrationDb!)).rejects.toThrow(/ATG_BACKFILL_DOWN_BLOCKED/)
+          } finally {
+            delete process.env[FORCE_ENV]
+          }
+          const after = await snapshot(HEAD)
+          expect(after.exists).toBe(true)
+          expect(after.count).toBeGreaterThan(0)
+        }
+      },
+    )
+
     it('down() with the force env set passes and ACTUALLY drops all three tables (positive control for the case above)', async () => {
-      // Same, still-populated fixture as the previous case — only the env var changes.
+      // Same, still-populated fixture as the previous cases — only the env var changes.
       expect((await snapshot(HEAD)).count).toBeGreaterThan(0)
       process.env[FORCE_ENV] = 'true'
       try {
@@ -236,9 +283,39 @@ describeIfDatabase(
         }
         expect(caught).toBeInstanceOf(Error)
         expect((caught as Error).message).toMatch(/ATG_BACKFILL_DOWN_BLOCKED/)
-        expect((caught as Error).message).not.toMatch(/42P01/)
+        // Round-2 implementation-gate NIT-b: the true count for the two genuinely-missing child
+        // tables must read as zero, not be skipped/omitted from the message — a `total = batches`
+        // narrowing (dropping the batch_groups/batch_links terms from the sum) would still redden
+        // on the ATG_BACKFILL_DOWN_BLOCKED assertion above alone, so this pins the exact triple.
+        expect((caught as Error).message).toMatch(/batches=1, batch_groups=0, batch_links=0/)
+        // Round-2 implementation-gate P3-c: node-postgres carries the SQLSTATE in `err.code`, never
+        // in `err.message` — see the POSITIVE CONTROL case immediately below, which proves that on
+        // the SAME client. A `.message.not.toMatch(/42P01/)` assertion here can never fail (it
+        // wasn't testing anything); `.code` is the field that actually carries the SQLSTATE this
+        // case means to rule out.
+        expect((caught as { code?: string } | undefined)?.code).not.toBe('42P01')
         // Fail-closed: the head table (the only one that existed) still survives, still 1 row.
         expect((await snapshot(HEAD))).toEqual({ exists: true, count: 1 })
+      },
+    )
+
+    it(
+      'POSITIVE CONTROL for the .code assertion above: a genuinely-missing relation really does ' +
+        'surface SQLSTATE 42P01 in err.code (same Kysely client), never in err.message',
+      async () => {
+        let caught: unknown
+        try {
+          await sql`SELECT count(*) FROM approval_template_group_backfill_definitely_missing_probe_table`.execute(
+            migrationDb!,
+          )
+        } catch (e) {
+          caught = e
+        }
+        expect(caught).toBeInstanceOf(Error)
+        expect((caught as { code?: string }).code).toBe('42P01')
+        // This is exactly the finding the half-applied case's negative assertion above depends on:
+        // the SQLSTATE never appears in the message text, only in `.code`.
+        expect((caught as Error).message).not.toMatch(/42P01/)
       },
     )
 

@@ -78,8 +78,8 @@ import { Client } from 'pg'
  *       regardless of commit state, via `pg_stat_activity`) replaced it. (6)/(7) prove the
  *       STATEMENT SHAPE the fix requires is what execute/rollback actually stall on, NOT the
  *       L1-before-L2 acquisition ordering itself — that needs the two-party 40P01 construction
- *       from `reviews/a3-probe/{execute,rollback}-lockorder-probe.cjs` and remains open (see
- *       design doc remaining).
+ *       from the one-off probe scripts `a3-probe/{execute,rollback}-lockorder-probe.cjs` (private,
+ *       not tracked in this repository) and remains open (see design doc remaining).
  */
 vi.hoisted(() => {
   const base = process.env.DATABASE_URL
@@ -592,8 +592,9 @@ describeIfDatabase('approval template groups — L0 serialization + DEFERRABLE C
   // ── A-3 changesRequired #13 item 3: execute/rollback lock-order format, parking point only ────
   // §13.2's fix for design-gate M2/M3 replaced a PER-CATEGORY/PER-GROUP `id = $2 FOR UPDATE` loop
   // (pre-fix: L1→L2→L1→L2…, deadlocking against a concurrent plain link/unlink request's own
-  // L1→L2 order — `reviews/a3-probe/execute-lockorder-probe.cjs` /
-  // `rollback-lockorder-probe.cjs` demonstrated the pre-fix 40P01) with ONE deterministic
+  // L1→L2 order — the one-off probe scripts `a3-probe/execute-lockorder-probe.cjs` /
+  // `rollback-lockorder-probe.cjs` (private, not tracked in this repository) demonstrated the
+  // pre-fix 40P01) with ONE deterministic
   // `id = ANY($2) ORDER BY id FOR UPDATE` statement that pre-locks EVERY existing group a call
   // touches BEFORE any L2 write. The gate's instruction is to assert the PARKING POINT, not the
   // terminal state.

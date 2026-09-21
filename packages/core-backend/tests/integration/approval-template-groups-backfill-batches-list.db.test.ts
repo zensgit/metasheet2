@@ -17,7 +17,8 @@ import type { ApprovalTemplateVisibilityActor } from '../../src/services/Approva
  *
  * Provenance: `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §2.1 index /
  * §6.1 endpoint row / §13.1 changesRequired #5 — folded verbatim from the independent design-gate
- * verdict's P1-5 finding (`reviews/design-gate-A3-phase2-20260918.md`): before this endpoint
+ * verdict's P1-5 finding (`design-gate-A3-phase2-20260918.md`, a private review record not
+ * tracked in this repository): before this endpoint
  * existed, a `batchId` appeared in exactly one place (execute's own response), so an operator
  * whose execute request timed out — or who simply wants to audit what has already been rolled
  * back — had no way to discover a `batchId` to pass to rollback at all. Sibling to the W7

@@ -1834,7 +1834,8 @@ export default defineConfig({
       // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3
       // ("backfill by existing category") batch-bookkeeping DDL
       // (`zzzz20260919090000_create_approval_template_group_backfill_batches.ts`), amended by the
-      // independent design-gate verdict `reviews/design-gate-A3-phase2-20260918.md` folded into
+      // independent design-gate verdict `design-gate-A3-phase2-20260918.md` (a private review
+      // record, not tracked in this repository) folded into
       // `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §13.
       // Schema-only (exercises the DDL, not the W7/W8/W9 route/service layer, which has since
       // landed — see the sibling `backfill-{preview,execute,rollback}.db.test.ts` suites) but
@@ -1883,6 +1884,20 @@ export default defineConfig({
       // `approval-template-groups-backfill-batches-list-ci-wiring.test.mjs` guard (same convention
       // as the four sibling backfill suites' own guards).
       'tests/integration/approval-template-groups-backfill-batches-list.db.test.ts',
+      // Same slice, `down()` data-retention guard on the batch DDL (candidate, not yet ratified —
+      // see the migration file's own doc comment for the full provenance chain). Round-2
+      // implementation-gate fix (`impl-gate-A3-guarded-down-round2-20260921.md` P2-B): the round-1
+      // guard's own real-DB suite existed but was deliberately left out of both this exclude list
+      // and the plugin-tests.yml real-DB step (registered instead as a dated, reviewable
+      // allowlist exemption in `approval-ci-coverage-allowlist.ts`) while this round's own hard
+      // constraint required plugin-tests.yml/s6a to stay byte-identical. That constraint no
+      // longer applies to THIS round, so the deferred two-point wiring lands here, together with
+      // the allowlist exemption's removal and the s6a re-pin, in one commit per this repo's
+      // new-file census convention. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-down-guard-ci-wiring.test.mjs` guard (same convention
+      // as the five sibling backfill suites' own guards).
+      'tests/integration/approval-template-groups-backfill-down-guard.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
