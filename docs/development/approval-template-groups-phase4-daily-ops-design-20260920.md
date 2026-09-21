@@ -387,7 +387,7 @@ async function loadTemplates(query?): Promise<ApprovalTemplateListOutcome> {
 > 下段的第一句「`setExplicitSessionOrg` 是**唯一**调用 `resetSessionBootstrap(…, preserveExplicitSession = true)` 的转换」**为假**:机械普查(`git grep -n 'resetSessionBootstrap(' -- apps/web/src`)得到**四处**传 `true`(`useAuth.ts:77` / `:234` / `:249` / `:301`),`:412` 才是唯一不传的。
 > **被它支撑的结论仍然 OPERATIVE**,理由换成读侧的机制,见 §9.2 与下面这一段的改写版。下段原文保留,供审阅者比对。
 
-**(b) 为什么是充分的第二半——按机制,不是按断言(第 6 轮改写版)**:`readExplicitSession`(`utils/explicitSessionOrg.ts:10-28`,判据在 `:17` 与 `:23`)把 marker **绑死在精确的 token 文本**上——它要求 `marker.token === token` **且** `localStorage.auth_token === token` **且** `localStorage.jwt === token`,否则抛。因此任何**换 token** 的转换都让 marker **读不出来**(`currentExplicitSessionOrg()` 把抛降级成 `null`),**与 `clearExplicitSessionOrg()` 有没有跑无关**;marker 也不可能活过它自己的那枚 token。所以 `setToken` / `clearToken` 家族(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)**永远匹配不上任何目标**。
+**(b) 为什么是充分的第二半——按机制,不是按断言(第 6 轮改写版)**:`readExplicitSession`(`utils/explicitSessionOrg.ts:10-28`,判据在 `:17` 与 `:23`)把 marker **绑死在精确的 token 文本**上——它要求 `marker.token === token` **且** `localStorage.auth_token === token` **且** `localStorage.jwt === token`,否则抛。因此任何**换 token** 的转换都让 marker **读不出来**(`currentExplicitSessionOrg()` 把抛降级成 `null`);marker 也不可能活过它自己的那枚 token。
 
 ~~**(b) 为什么是充分的第二半——按机制,不是按断言(第 5 轮原文,前提已被证伪)**:`useAuth.setExplicitSessionOrg` 是**唯一**调用 `resetSessionBootstrap(…, preserveExplicitSession = true)` 的转换(`useAuth.ts:301` → `useAuth.ts:124`),也就是唯一一个会让 `state:'ready'` 的 explicit-session marker**留在原地**的转换。其余每一条 `setToken` / `clearToken` 路径(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)都会清掉 marker,因此它们读回来是「没有 explicit 组织」,**永远匹配不上任何目标**。~~
 
@@ -494,9 +494,8 @@ useAuth.ts:412  resetSessionBootstrap(true)                 ← 唯一不传 tru
 
 **判据 (b) 真正承重的机制,写在读侧**:`readExplicitSession`(`utils/explicitSessionOrg.ts:10-28`,判据在 `:17` 与 `:23`)把 marker **绑死在精确的 token 文本**上 —— 它要求 `marker.token === token` **且** `localStorage.auth_token === token` **且** `localStorage.jwt === token`,否则抛。因此:
 
-- 任何**换 token** 的转换都让 marker **读不出来**(抛 → `currentExplicitSessionOrg()` 降级成 `null`),**与 `clearExplicitSessionOrg()` 跑没跑无关**;
+- 任何**换 token** 的转换都让 marker **读不出来**(抛 → `currentExplicitSessionOrg()` 降级成 `null`);
 - marker **不可能活过它自己的那枚 token**;
-- 所以 `setToken` / `clearToken` 家族(邀请接受、钉钉回调、强制改密、dev-token 刷新、`bootstrapSession` 的 401 分支、登出)**永远匹配不上任何目标**。
 
 **(b) 挡不住的那一格不变**:另一个标签页的切换装的是**绑在新 token 上**的 marker,storage 监听器把它 republish(`useAuth.ts:77`,同一个 `preserveExplicitSession` 标志)。若那个标签页切到的恰好就是本页正在请求的组织,两者在监听器处**确实无法分辨** —— 由 §8.1 的兜底条款在 await 的另一侧接住,结论不变。
 
