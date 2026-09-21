@@ -47,4 +47,21 @@ export const APPROVAL_CI_COVERAGE_ALLOWLIST: readonly ApprovalCiCoverageAllowlis
       '"newly-found third red file", left for triage same as the pre-existing quarantine list.',
     date: '2026-08-19',
   },
+  {
+    file: 'packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts',
+    why:
+      'New real-DB test for a CANDIDATE, unratified guard (design MD §23 / migration ' +
+      'zzzz20260919090000_create_approval_template_group_backfill_batches.ts down()) added by ' +
+      'implementation-gate fix round `impl-gate-A3-guarded-down-round1-20260921.md` P2-1. That ' +
+      'same round\'s task explicitly required `.github/workflows/plugin-tests.yml` and the s6a ' +
+      'package-provenance pin to stay byte-identical this round (the guard itself is not merged, ' +
+      'not applied to any shared/staging/prod database). Two-point wiring (vitest.config.ts ' +
+      'exclude + plugin-tests.yml whitelist) plus this file\'s own `*-ci-wiring.test.mjs` guard ' +
+      'and the s6a re-pin it would force are deferred to whichever round actually proposes ' +
+      'merging the candidate guard, per that gate report\'s own P2-1 "修法" suggestion to do both ' +
+      'in one commit rather than re-pin twice. Until then this file is `describeIfDatabase`-gated ' +
+      '(same as every sibling backfill file) so the no-DB required job discovers-and-skips it, ' +
+      'never runs it for real, and never goes red on it.',
+    date: '2026-09-21',
+  },
 ] as const

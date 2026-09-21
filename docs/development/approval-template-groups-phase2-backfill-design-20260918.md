@@ -1095,6 +1095,19 @@ export async function down(db: Kysely<unknown>): Promise<void> {
 3. **"提供显式 force 环境变量或参数才允许,默认拒绝"**:Kysely 的 `down(db: Kysely<unknown>)` 签名由框架的 `Migrator.#migrateDown`(`node_modules/kysely@0.28.8/.../migrator.js:519` 附近,`await migration.down(db)`)钉死,调用方不传第二个参数——**没有"参数"这个选项**,只能走环境变量。命名沿用仓内既有先例 `migrate.ts` 的 `ALLOW_DB_RESET`(命令 `--reset` 专用,见该文件 :113-120)同一形状:`=== 'true'` 严格比较(`=false`/`=0`/空串都不解锁),变量名按它**授权的动作**命名(`…_DROP`,不是按迁移动词 `…_DOWN`)——避免与"允许运行 down 命令"这个更宽的误读混淆:它只放行"数据非空时仍然丢弃这三张表"这一个具体决定,不放行别的。
 4. **"代码回退后保留休眠表与台账"**:这条本节**不写代码**——它描述的是"回退 `routes/approvals.ts`/`ApprovalTemplateGroupService.ts` 里读写这三张表的代码"这个动作(revert 应用代码,不跑 `--rollback`),迁移/表本身不受代码回退触碰,天然保留、天然休眠。这条不需要新代码去"保证"——只需要**不**把它跟"跑 down() 清表"这个另一个独立动作混在一起做。本守卫的存在恰恰是防止后者被误当成前者的默认动作。
 
+**订正(2026-09-21,回应独立门审 `impl-gate-A3-guarded-down-round1-20260921.md` P2-2,记忆 `feedback_asserted_invariant_is_a_bug`/`feedback_source_text_assertions_are_not_behaviour`)**——上面 :1068 那条注释("`to_regclass` 前置守卫……不炸 42P01")与它引用的 :1070-1073 代码块**曾经是假的,不是转述失真,是该轮实测证伪的一条断言**:该门审用 `psql` 直接对缺表执行这句 CASE 语句,得到 `ERROR: relation "…" does not exist`(42P01)——Postgres 在 parse/analyze 阶段解析语句里出现的**每一个**关系名,`CASE … WHEN … THEN 0 ELSE (SELECT count(*) FROM t) END` 的 `ELSE` 分支表名会在这一步就被解析,不等 `WHEN` 分支的运行期判断生效,所以缺表(三表全缺,或本节 §23.6 场景描述的"半应用 up()")时这句 SQL 本身就抛 42P01,不是"读作 0 行"。已改为该门审 §3"修法"逐字给出的两语句结构(先 `SELECT to_regclass('public.${table}') IS NOT NULL AS e`,只有这一步返回真才发第二条 `SELECT count(*) FROM ${table}`),与本节 §23.2 开头就点名的先例 `...w4c3a_import_rollback_foundation.ts:740-767` 实际使用的形状一致(该先例本就是两条独立语句,不是 CASE)——代码现状(file:line 见迁移文件 `down()` 前的注释块与 `atgBackfillTableRowCount` 本体):
+
+```ts
+async function atgBackfillTableRowCount(db: Kysely<unknown>, table: string): Promise<number> {
+  const reg = await sql.raw(`SELECT to_regclass('public.${table}') IS NOT NULL AS e`).execute(db)
+  if (!Boolean((reg.rows[0] as { e?: boolean } | undefined)?.e)) return 0
+  const result = await sql.raw(`SELECT count(*)::int AS n FROM ${table}`).execute(db)
+  const row = (result.rows[0] ?? {}) as { n?: number | string }
+  return Number(row.n ?? 0)
+}
+```
+"不炸 42P01"这句结论**现在是真的**(该门审报告 §3 P2-2 的两个真库用例 + 本轮新增 `approval-template-groups-backfill-down-guard.db.test.ts` 的两条 42P01 回归用例均已验证:三表全缺、半应用〔只剩批次头且有数据〕两种形状,down() 均不抛 42P01),但上面 :1064-1090 的代码块本身是**改动前**的历史快照,保留不改(house style:记录修复轮不手写改历史引文),此订正是它的求值层。同一门审 P3-1 另指出 force 变量(`ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP`)相对 :1095 点名的 `ALLOW_DB_RESET` 先例是一处**加宽**——`ALLOW_DB_RESET` 在 `migrate.ts` 的 CLI 边界读取且登记在其 `--help`;这个变量在迁移文件内部读取,`--help` 原先零提及。已处理:登记进 `migrate.ts --help` 的 Notes 段,并在 force 分支生效时新增一行 `console.warn`(点名变量名与三个计数),迁移文件 down() 前的注释块新增一段"Scope note"记录这处加宽,不是把它悄悄改窄成 CLI 级读取(改变读取位置属于另一层改动,超出本轮门审点名的范围)。
+
 ### 23.3 三张表整体性质不变(§4.1 的延伸,不重复其论证)
 
 守卫按"三表分别计数、任一非零即拒绝"实现,但§4.1 已确立的结论(「这三张表不能分开授权……批准其中一两张而不批第三张,会得到一个不可编译/不可用的形状」)在这里同样成立:down() 守卫是**一个**函数、**一次** owner 授权对象,不因为它按表分别计数就意味着三张表可以分别决定是否受此守卫保护——守卫要么覆盖全部三张(本节现状),要么整体去掉,不存在"只守批次头、子表不守"这种中间形态(子表的行数本来就该随批次头级联清零,分开守卫没有独立意义)。
@@ -1121,10 +1134,16 @@ export async function down(db: Kysely<unknown>): Promise<void> {
 
 ### 23.6 一并求值的两条运维后果(标 [推导],部分已实测)
 
-- **对 `--reset` 的影响(声明 §4.2 R6 的延伸,[推导])**:`migrate.ts --reset` 走 `migrator.migrateTo(NO_MIGRATIONS)`,会从最新迁移逐条往回走。本守卫生效后,任何持有批次数据的库跑 `ALLOW_DB_RESET=true --reset` 会在走到本迁移这一步时**停下**(除非同时也设置了 `ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP=true`)——这是**新增的一个停止点**,`--reset` 原来不会因为这张表有数据而中止。方向是有意的(fail-closed,与本节 23.1 的目标一致),但如实记录:这是一个此前不存在的行为变化,影响面是"任何调用 `--reset` 的调用方",不只是单步 `--rollback`。**本节未新增任何 `--reset` 场景的真库测试**(§23.7 只测了直接调用 `down()` 与部分 `--rollback` CLI 路径,未测 `--reset`),这条推导未经真库验证 `--reset` 这一条具体命令,只是从 `migrateTo(NO_MIGRATIONS)` 的实现逐条应用 `down()` 这一机制类比得出。
+- **对 `--reset` 的影响(声明 §4.2 R6 的延伸,[推导],2026-09-21 已实测——见下方订正)**:`migrate.ts --reset` 走 `migrator.migrateTo(NO_MIGRATIONS)`,会从最新迁移逐条往回走。本守卫生效后,任何持有批次数据的库跑 `ALLOW_DB_RESET=true --reset` 会在走到本迁移这一步时**停下**(除非同时也设置了 `ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP=true`)——这是**新增的一个停止点**,`--reset` 原来不会因为这张表有数据而中止。方向是有意的(fail-closed,与本节 23.1 的目标一致),但如实记录:这是一个此前不存在的行为变化,影响面是"任何调用 `--reset` 的调用方",不只是单步 `--rollback`。~~**本节未新增任何 `--reset` 场景的真库测试**……这条推导未经真库验证~~——**该半句已被下方订正取代,不再成立**。
+
+  **订正(2026-09-21,回应独立门审 `impl-gate-A3-guarded-down-round1-20260921.md` P3-3,记忆 `feedback_supersession_marker_must_evaluate_not_void`——只让"未测/推导"这个状态断言失效,上面"新增停止点"这句结论仍 OPERATIVE,不整节作废)**:该门审 E7 已实测,本轮在独立的一次性库(`metasheet2_a3r2_20260921`)上复现同一构造(手工编辑 `kysely_migration` 让本迁移成为 Migrator 视角下的"最新",批次头插入一行,`ALLOW_DB_RESET=true npx tsx src/db/migrate.ts --reset`,不设 force):**exit 1**,错误就是本迁移的 `ATG_BACKFILL_DOWN_BLOCKED`;`--list` 复核 `Applied` 计数**在这次 --reset 前后不变**(本轮实测为 411,门审 E7 原始环境为 411——两次独立复现数字一致)。这比上面那句"在走到本迁移这一步时停下"的措辞更强,容易被读成"前面的都退了、停在这一步":**实际是整次 `--reset` 被包在 Kysely `Migrator` 的一个事务里(`node_modules/kysely@0.28.8/.../migrator.js:427-431`),一旦任何一步 `down()` 抛错,整个事务回滚——真实结果是「一条迁移都没退」,不是「已经退到这一步的都生效、停在这一步」**。方向仍是有意的(fail-closed 的一个自然推论,不是新缺陷),但下一个读"停下"两个字的人不应该以为前面的迁移已经退掉;后续任何文档/工具如果要描述这个行为,应使用"整次 `--reset` 事务性中止,零迁移回退"而不是"停在这一步"。
 - **force 之后仍然不可逆(残留,重申不是新发现)**:即使设置 force 变量成功丢弃三张表,§1.6(b)/R2 描述的不可逆性**原样成立**——force 只是把"意外丢弃"变成"蓄意丢弃",不会让已丢弃的台账指向的业务效果重新变得可回滚。本守卫解决的是"默认发生 vs 需要一个显式动作才发生"这一层,不解决"发生之后能不能撤销"这一层——后者没有解法,只能靠不发生(即前一层的默认拒绝)来避免,这也是为什么默认值必须是拒绝而不是放行。
 - **意外发现,记录不修复([推导] + 部分实测,详见验证 MD §14.4)**:本次会话在尝试用 CLI `--rollback` 链式回退本迁移之前的两条无关迁移时,发现 `zzzz20260919120000_add_attachment_blob_purge_claim.ts` 的 `down()` 自己在 `migrator.#migrateDown` 已经开起的事务连接上再调用一次 `.transaction()`,被 Kysely 拒绝(`Error: calling the transaction method for a Transaction is not supported`)——这是该文件已有的、与本节改动**完全无关**的既存缺陷(本节零字节改动过该文件),声明 §4.2 R6 描述的"回退这三张表必须先回退两条无关迁移"这条运维耦合,在当前 head 上因为这另一个 bug 而**更严重**:通过 `--rollback` CLI 链式回退目前**走不通**(卡在 `add_attachment_blob_purge_claim` 这一步),只能通过其它手段(如直接 `import { down }` 调用,或先修复那个文件)绕过。这**超出本次派工范围**(派工只点名 A-3 的 down() 守卫),本节如实记录发现、不在这里修复;是否需要单独排期修 `add_attachment_blob_purge_claim.ts` 的这个 bug,留给 owner/下一轮门审判断。
 
 ### 23.7 本步不新增/不触碰
 
 生产代码除 §23.2 点名的一个文件外零改动;未新增/未删除任何 `.ts`/`.mjs`/测试文件;`.github/workflows/plugin-tests.yml`、`vitest.config.ts`、s6a 钉——零改动,未新增 CI 步骤,无需重算 pin。锁文正文——零改动。`up()`——零字节改动。phase-1 迁移文件(`zzzz20260918090000_create_approval_template_groups.ts`)——零改动。真库验证证据见验证 MD §14。
+
+**求值(2026-09-21,记忆 `feedback_asserted_invariant_is_a_bug`——这句只对它描述的那个 commit 仍然为真,不能读成对当前树的断言)**:以上一整段是对**本节改动本身那一步**(commit `59b5cd7ee1`)的如实记录,对那个 commit 逐字仍然成立。修复轮 1(验证 MD §14.6,2026-09-21)在其**之上**又提交了改动,这句话不再描述当前树:`packages/core-backend/src/db/migrate.ts`(新增 --help Notes 段)、`scripts/dev-bootstrap.sh`(两处提示文案)、新文件 `packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts`(254 行)、`packages/core-backend/tests/unit/approval-ci-coverage-allowlist.ts`(新增一条登记)均有改动。`.github/workflows/plugin-tests.yml`/`vitest.config.ts`/s6a 钉这半句——**仍然成立**,修复轮 1 逐文件核对三者字节不变(验证 MD §14.6.9)。`up()`/phase-1 迁移文件——仍然零改动。
+
+
