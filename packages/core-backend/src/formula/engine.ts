@@ -7,7 +7,7 @@ import type { Kysely } from 'kysely'
 import { db as defaultDb } from '../db/db'
 import type { Database } from '../db/types'
 import { Logger } from '../core/logger'
-import { substituteLiteral, assessUserPattern, USER_REGEX_MAX_SUBJECT_LEN } from './regex-safety'
+import { substituteLiteral, runUserRegex } from './regex-safety'
 
 const logger = new Logger('FormulaEngine')
 
@@ -327,33 +327,30 @@ export class FormulaEngine {
       return out.repeat(c)
     })
     this.functions.set('TEXT', (value: unknown, format: unknown) => this.textFormat(value, format))
-    // PROPOSED (H-3): REGEX* compile a caller-authored pattern. A nested-quantifier
-    // pattern (e.g. "^(a+)+$", 7 chars) froze an unrelated tenant for ~55s on the
-    // shared event loop. `assessUserPattern` refuses statically-catastrophic
-    // patterns + over-length patterns; `USER_REGEX_MAX_SUBJECT_LEN` bounds the
-    // O(n^2) global-scan cost. PARTIAL (misses alternation-overlap ReDoS): the
-    // complete fix is a linear-time engine (RE2) — an owner/dependency decision.
-    const guardedUserRegex = (pattern: string, subject: string): RegExp | '#ERROR!' => {
-      if (subject.length > USER_REGEX_MAX_SUBJECT_LEN) return '#ERROR!'
-      if (!assessUserPattern(pattern).safe) return '#ERROR!'
-      try { return new RegExp(pattern) } catch { return '#ERROR!' }
-    }
+    // PROPOSED (H-3, round 2): REGEX* compile a caller-authored pattern. A
+    // nested-quantifier pattern (e.g. "^(a+)+$", 7 chars) froze an unrelated
+    // tenant for ~55s on the shared event loop. `runUserRegex` refuses on
+    // MEASURED evidence only — a hard subject-length ceiling plus a bounded
+    // timing ladder over the actual (pattern, subject) pair — and otherwise
+    // returns exactly what the unguarded call returned. Round 1's static shape
+    // detector was deleted: it refused six common linear patterns (measured
+    // <=0.06ms each) while still admitting a 22-second `^(a|a)*$`.
+    // MITIGATION, not a class fix: a linear-time engine (RE2) or a killable
+    // worker is the complete answer — an owner/dependency decision.
     this.functions.set('REGEXMATCH', (text: unknown, pattern: unknown) => {
-      const s = String(text)
-      const re = guardedUserRegex(String(pattern), s)
-      return re === '#ERROR!' ? '#ERROR!' : re.test(s)
+      const outcome = runUserRegex(String(pattern), undefined, String(text), (re, s) => re.test(s))
+      return outcome.status === 'ok' ? outcome.value : '#ERROR!'
     })
     this.functions.set('REGEXEXTRACT', (text: unknown, pattern: unknown) => {
-      const s = String(text)
-      const re = guardedUserRegex(String(pattern), s)
-      if (re === '#ERROR!') return '#ERROR!'
-      const m = s.match(re); return m ? (m[1] ?? m[0]) : '#VALUE!'
+      const outcome = runUserRegex(String(pattern), undefined, String(text), (re, s) => s.match(re))
+      if (outcome.status !== 'ok') return '#ERROR!'
+      const m = outcome.value
+      return m ? (m[1] ?? m[0]) : '#VALUE!'
     })
     this.functions.set('REGEXREPLACE', (text: unknown, pattern: unknown, replacement: unknown) => {
-      const s = String(text)
-      if (s.length > USER_REGEX_MAX_SUBJECT_LEN) return '#ERROR!'
-      if (!assessUserPattern(String(pattern)).safe) return '#ERROR!'
-      try { return s.replace(new RegExp(String(pattern), 'g'), String(replacement)) } catch { return '#ERROR!' }
+      const replaceWith = String(replacement)
+      const outcome = runUserRegex(String(pattern), 'g', String(text), (re, s) => s.replace(re, replaceWith))
+      return outcome.status === 'ok' ? outcome.value : '#ERROR!'
     })
     // Date / time (reuse the timezone-stable date parse used by WEEKDAY, via coerceDateValue)
     this.functions.set('HOUR', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getHours() : '#VALUE!' })

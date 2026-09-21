@@ -11,7 +11,7 @@ import type {
   FieldValidationRule,
   ValidationResult,
 } from './field-validation'
-import { assessUserPattern } from '../formula/regex-safety'
+import { runUserRegex, describeUserRegexRefusal } from '../formula/regex-safety'
 
 // ---------------------------------------------------------------------------
 // Default messages
@@ -98,24 +98,40 @@ function validateMaxLength(value: unknown, maxLen: number): boolean {
   return len <= maxLen
 }
 
-function validatePattern(value: unknown, regex: string, flags?: string): boolean {
-  if (typeof value !== 'string') return false
-  // PROPOSED (H-3): a stored `pattern` rule compiles this caller-authored regex on
-  // EVERY record write / public form submission. A nested-quantifier pattern
-  // (e.g. "^(a+)+$") was measured blocking the event loop ~20s at a 33-char record
-  // value. Refuse statically-catastrophic / over-length patterns before compiling —
-  // a catastrophic validation pattern is misconfiguration and fails validation,
-  // consistent with the invalid-regex branch below. PARTIAL (misses
-  // alternation-overlap ReDoS); the complete fix is a linear-time engine (RE2).
-  // See docs/development/input-regex-redos-census-*.md.
-  if (!assessUserPattern(regex).safe) return false
-  try {
-    const re = new RegExp(regex, flags)
-    return re.test(value)
-  } catch {
-    // If the regex is invalid, treat as failed validation
-    return false
-  }
+/**
+ * Outcome of a stored `pattern` rule. `refused` is deliberately NOT the same
+ * thing as `matched: false`: round 1 of this slice made a refusal report the
+ * ordinary "does not match the required format" message, which left a field
+ * administrator unable to tell "the value really is malformed" from "the guard
+ * declined to run this check" — byte-identical wording for two different causes.
+ */
+type PatternRuleOutcome =
+  | { kind: 'checked'; matched: boolean }
+  | { kind: 'refused'; reason: string }
+
+function evaluatePatternRule(value: unknown, regex: string, flags?: string): PatternRuleOutcome {
+  if (typeof value !== 'string') return { kind: 'checked', matched: false }
+  // PROPOSED (H-3, round 2): a stored `pattern` rule compiles this caller-authored
+  // regex on EVERY record write / public form submission. A nested-quantifier
+  // pattern (e.g. "^(a+)+$") was measured blocking the event loop ~20s at a
+  // 33-character record value.
+  //
+  // `runUserRegex` applies (a) a hard subject-length ceiling that does NOT depend
+  // on this field's own rule list — the two call sites merge rules as
+  // `explicitRules ?? defaultRules`, a REPLACEMENT, so a field that declares any
+  // explicit validation loses the built-in `maxLength: 10000` and had no length
+  // bound at all; and (b) a bounded timing ladder that refuses only a MEASURED
+  // super-quadratic cost curve. Round 1's static shape detector is deleted: it
+  // refused six common linear patterns (slug / version / dotted identifier /
+  // comma list / e-mail / path segment, each <=0.06ms measured) and still let a
+  // 22-second `^(a|a)*$` through. MITIGATION, not a class fix — see
+  // docs/development/input-regex-redos-census-*.md.
+  const outcome = runUserRegex(regex, flags, value, (re, subject) => re.test(subject))
+  if (outcome.status === 'ok') return { kind: 'checked', matched: outcome.value }
+  // An invalid regex keeps the pre-existing contract (failed validation, ordinary
+  // message); only the capacity refusals get their own wording.
+  if (outcome.refusal.kind === 'invalid-pattern') return { kind: 'checked', matched: false }
+  return { kind: 'refused', reason: describeUserRegexRefusal(outcome.refusal) }
 }
 
 function validateEnum(value: unknown, values: string[]): boolean {
@@ -173,14 +189,27 @@ export function validateFieldValue(
         if (isEmpty(value)) continue
         valid = validateMaxLength(value, Number(params?.value))
         break
-      case 'pattern':
+      case 'pattern': {
         if (isEmpty(value)) continue
-        valid = validatePattern(
+        const outcome = evaluatePatternRule(
           value,
           String(params?.regex ?? ''),
           typeof params?.flags === 'string' ? params.flags : undefined,
         )
+        if (outcome.kind === 'refused') {
+          // Deliberately NOT `rule.message`: that string describes a format
+          // mismatch, and this is not one.
+          errors.push({
+            fieldId,
+            fieldName,
+            rule: rule.type,
+            message: `${fieldName}: ${outcome.reason}`,
+          })
+          continue
+        }
+        valid = outcome.matched
         break
+      }
       case 'enum':
         if (isEmpty(value)) continue
         valid = validateEnum(value, Array.isArray(params?.values) ? params.values as string[] : [])
