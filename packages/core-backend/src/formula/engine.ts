@@ -7,6 +7,7 @@ import type { Kysely } from 'kysely'
 import { db as defaultDb } from '../db/db'
 import type { Database } from '../db/types'
 import { Logger } from '../core/logger'
+import { substituteLiteral } from './regex-safety'
 
 const logger = new Logger('FormulaEngine')
 
@@ -179,8 +180,12 @@ export class FormulaEngine {
     this.functions.set('UPPER', (text: unknown) => String(text).toUpperCase())
     this.functions.set('LOWER', (text: unknown) => String(text).toLowerCase())
     this.functions.set('TRIM', (text: unknown) => String(text).trim())
+    // PROPOSED (H-3): SUBSTITUTE is a LITERAL replacement per Excel/Sheets, not a
+    // regex one. The prior `new RegExp(String(old), 'g')` both mis-implemented the
+    // spec (arg-2 metacharacters were interpreted) and exposed a ReDoS vector on
+    // the shared event loop. `substituteLiteral` (split/join) is O(n) and correct.
     this.functions.set('SUBSTITUTE', (text: unknown, old: unknown, newText: unknown) =>
-      String(text).replace(new RegExp(String(old), 'g'), String(newText))
+      substituteLiteral(String(text), String(old), String(newText))
     )
 
     // Logical functions
