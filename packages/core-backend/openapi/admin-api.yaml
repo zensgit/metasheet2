@@ -154,11 +154,14 @@ paths:
                 $ref: '#/components/schemas/Error'
 
   /safety/enable:
-    # NOTE (2026-09-20 security-schemes audit): admin-routes.ts's POST /safety/enable handler
-    # (router.post('/safety/enable', (req, res) => {...})) has neither requireAdminRole() nor
-    # requireSafetyCheck() — unlike its siblings POST /safety/confirm and POST /safety/disable,
-    # any caller who clears the global JWT gate can flip SafetyGuard back on. No 403 is documented
-    # here because none is actually returned; flagged as a residual finding, not fixed by this PR.
+    # NOTE (2026-09-21, supersedes the 2026-09-20 security-schemes audit note): the gap that note
+    # described — POST /safety/enable carrying neither requireAdminRole() nor requireSafetyCheck(),
+    # so any caller who cleared the global JWT gate could flip SafetyGuard back on — is closed.
+    # requireAdminRole() is now the first handler on this operation and on eleven sibling write
+    # endpoints (safety/disable, cache/clear, metrics/reset, DELETE+PUT data/bulk, the four /dlq
+    # mutations, and the two /ratelimits resets); the 403 below is therefore now real. The /dlq and
+    # /ratelimits paths are not yet described in this file at all (see the header note), so their
+    # gates are only recorded here, not documented as operations.
     post:
       tags:
         - SafetyGuard
@@ -175,6 +178,12 @@ paths:
               example:
                 success: true
                 message: "SafetyGuard enabled"
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
 
   /safety/disable:
     post:
@@ -198,11 +207,25 @@ paths:
                 message: "SafetyGuard disabled"
                 warning: "Safety checks are now bypassed"
         '403':
-          description: Confirmation required
+          description: |
+            Two distinct rejections share this status on this operation. requireAdminRole() runs
+            first and answers AdminError (error: Forbidden, code: ADMIN_REQUIRED) when the caller
+            is authenticated but is not a platform admin; only an admin caller reaches
+            requireSafetyCheck(), which answers SafetyCheckRequired when a safety token is needed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                oneOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
+        '503':
+          description: |
+            requireAdminRole() fails closed: the admin-role lookup itself threw, so the request is
+            refused rather than allowed through (error: ServiceUnavailable, code: RBAC_CHECK_FAILED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /plugins/{id}/reload:
     post:
@@ -968,11 +991,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
         '403':
-          description: Confirmation required
+          description: |
+            Two distinct rejections share this status on this operation. requireAdminRole() runs
+            first and answers AdminError (error: Forbidden, code: ADMIN_REQUIRED) when the caller
+            is authenticated but is not a platform admin; only an admin caller reaches
+            requireSafetyCheck(), which answers SafetyCheckRequired when a safety token is needed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                oneOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
+        '503':
+          description: |
+            requireAdminRole() fails closed: the admin-role lookup itself threw, so the request is
+            refused rather than allowed through (error: ServiceUnavailable, code: RBAC_CHECK_FAILED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /metrics/reset:
     post:
@@ -996,11 +1033,25 @@ paths:
                 message: "Metrics counters reset"
                 warning: "Historical metric data may be lost"
         '403':
-          description: Confirmation required
+          description: |
+            Two distinct rejections share this status on this operation. requireAdminRole() runs
+            first and answers AdminError (error: Forbidden, code: ADMIN_REQUIRED) when the caller
+            is authenticated but is not a platform admin; only an admin caller reaches
+            requireSafetyCheck(), which answers SafetyCheckRequired when a safety token is needed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                oneOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
+        '503':
+          description: |
+            requireAdminRole() fails closed: the admin-role lookup itself threw, so the request is
+            refused rather than allowed through (error: ServiceUnavailable, code: RBAC_CHECK_FAILED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /data/bulk:
     delete:
@@ -1026,11 +1077,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/BulkOperationResponse'
         '403':
-          description: Confirmation required
+          description: |
+            Two distinct rejections share this status on this operation. requireAdminRole() runs
+            first and answers AdminError (error: Forbidden, code: ADMIN_REQUIRED) when the caller
+            is authenticated but is not a platform admin; only an admin caller reaches
+            requireSafetyCheck(), which answers SafetyCheckRequired when a safety token is needed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                oneOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
+        '503':
+          description: |
+            requireAdminRole() fails closed: the admin-role lookup itself threw, so the request is
+            refused rather than allowed through (error: ServiceUnavailable, code: RBAC_CHECK_FAILED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     put:
       tags:
         - Data
@@ -1054,11 +1119,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/BulkOperationResponse'
         '403':
-          description: Confirmation required
+          description: |
+            Two distinct rejections share this status on this operation. requireAdminRole() runs
+            first and answers AdminError (error: Forbidden, code: ADMIN_REQUIRED) when the caller
+            is authenticated but is not a platform admin; only an admin caller reaches
+            requireSafetyCheck(), which answers SafetyCheckRequired when a safety token is needed.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                oneOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
+        '503':
+          description: |
+            requireAdminRole() fails closed: the admin-role lookup itself threw, so the request is
+            refused rather than allowed through (error: ServiceUnavailable, code: RBAC_CHECK_FAILED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
 components:
   securitySchemes:
