@@ -4,6 +4,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
+import { getApprovalMetricsService } from '../../src/services/ApprovalMetricsService'
 
 /**
  * Lock-4 OD-L4-10(a) / Lock-6 L6-A gate A-7 (docs/development/approval-lock4-flow-policies-20260817.md
@@ -671,6 +672,175 @@ describeIfDatabase('Approval dedup round-scoping — a return invalidates pre-re
       )
       expect(afterJump.rows[0]?.status).toBe('pending')
       expect(afterJump.rows[0]?.current_node_key).toBe('approval_e')
+    })
+    // ────────────────────────────────────────────────────────────────────────────────────────────
+    // H-1 — "approval node timeout effect vs the async metrics activation write".
+    //
+    // The node-activation deadline stamp (`ApprovalMetricsService.recordNodeActivation`, the deadline
+    // UPDATE) arms `approval_metrics.current_node_deadline_at` / `current_node_timeout_effect`. Those
+    // two columns are NOT observability-only: they are the SLA scanner's armed state, and
+    // `applyNodeTimeoutEffect` re-reads them `FOR UPDATE` as its scan→fire race guard
+    // (`ApprovalProductService.applyNodeTimeoutEffect`, the
+    // `!armed || Number.isNaN(deadlineMs) || deadlineMs > Date.now() || ... !== scannedEffect` branch).
+    //
+    // Pre-fix that stamp was dispatched fire-and-forget (`safeMetricsCall`, `Promise.resolve().then(fn)`
+    // with no await), so it could still be IN FLIGHT when the action response was already observed and
+    // could land AFTER a later writer had moved those columns — silently overwriting newer state with
+    // `activatedAt + afterMinutes` (always a FUTURE instant) or with NULL. The observable symptom is
+    // `applyNodeTimeoutEffect` returning 'skipped_stale' against a row that was correctly armed overdue.
+    //
+    // The fix is producer-side await-settle: `emitNodeActivationMetric` now returns a promise (which
+    // ALWAYS resolves — failures are still logged and swallowed) and every post-commit call site awaits
+    // it. Both tests below pin that with a DETERMINISTIC interleaving — no timing sweep, no sleep tuning:
+    // the activation stamp is gated behind a fixed delay and the test decides exactly when it lands.
+    const H1_LATE_STAMP_MS = 1200
+
+    type ActivationInput = Parameters<ReturnType<typeof getApprovalMetricsService>['recordNodeActivation']>[0]
+
+    /**
+     * Delay the FIRST `recordNodeActivation` deadline stamp for (instanceId, nodeKey) by `delayMs`,
+     * and expose `landed` — a promise that resolves once that stamp has actually committed.
+     *
+     * Installed as an OWN property on the shared metrics singleton (the same object every
+     * `new ApprovalProductService()` captures through its default constructor argument), so it reaches
+     * the real HTTP action path; `restore()` deletes the own property, putting the prototype method back.
+     * No production test hook, no env switch.
+     */
+    function installLateActivationStamp(instanceId: string, nodeKey: string, delayMs: number): {
+      landed: Promise<void>
+      restore: () => void
+    } {
+      const metrics = getApprovalMetricsService()
+      const original = metrics.recordNodeActivation.bind(metrics)
+      let resolveLanded: () => void = () => {}
+      const landed = new Promise<void>((resolve) => {
+        resolveLanded = resolve
+      })
+      let intercepted = false
+      Object.defineProperty(metrics, 'recordNodeActivation', {
+        configurable: true,
+        writable: true,
+        value: async (input: ActivationInput): Promise<void> => {
+          if (intercepted || input.instanceId !== instanceId || input.nodeKey !== nodeKey) {
+            return original(input)
+          }
+          intercepted = true
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+          await original(input)
+          resolveLanded()
+        },
+      })
+      return {
+        landed,
+        restore: () => {
+          delete (metrics as unknown as Record<string, unknown>).recordNodeActivation
+        },
+      }
+    }
+
+    /** Never hang the suite on `landed` if the stamp is lost — surface it as a failed assertion instead. */
+    async function landedWithin(landed: Promise<void>, ms: number): Promise<boolean> {
+      return await Promise.race([
+        landed.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+      ])
+    }
+
+    it('H-1 DISCRIMINATOR: the node-activation deadline stamp is DURABLE before the action response returns', async () => {
+      const p = `dedup-rs-p-${TS}-h1dur`
+      const q = `dedup-rs-q-${TS}-h1dur`
+      const adminToken = await authToken(baseUrl, `dedup-rs-admin-${TS}-h1dur`)
+      const requesterToken = await authToken(baseUrl, `dedup-rs-req-${TS}-h1dur`)
+      await grantWrite(`dedup-rs-req-${TS}-h1dur`)
+      const pTok = await authToken(baseUrl, p)
+
+      const templateId = await publishGraphTemplate(adminToken, buildBackwardJumpGraph(p, q), { mergeAdjacentApprover: true })
+      const inst = await createApproval(requesterToken, templateId, 'r')
+      expect(inst.currentNodeKey).toBe('approval_a')
+      const act = { p: actor(pTok, inst.id) }
+
+      const hook = installLateActivationStamp(inst.id, 'approval_c', H1_LATE_STAMP_MS)
+      try {
+        // P approves A; B (also P) auto-merges as adjacent -> C, whose node config carries
+        // `timeout: { afterMinutes: 1, effect: 'jump', ... }`. The activation stamp for C is gated
+        // behind H1_LATE_STAMP_MS, so it can only have landed if the request AWAITED it.
+        const afterP1 = await act.p({ action: 'approve', comment: 'P r1' })
+        expect(afterP1.currentNodeKey).toBe('approval_c')
+
+        // Read the armed row with NO polling, NO sleep and NO retry: this is the discriminating
+        // observation. Pre-fix the request returns immediately and both columns are still NULL here
+        // (the stamp is in flight); post-fix the request cannot return until the stamp is durable.
+        const armed = await pool().query<{ current_node_deadline_at: unknown; current_node_timeout_effect: string | null }>(
+          `SELECT current_node_deadline_at, current_node_timeout_effect FROM approval_metrics WHERE instance_id = $1`,
+          [inst.id],
+        )
+        expect(
+          armed.rows[0]?.current_node_timeout_effect,
+          'the activating node\'s timeout effect must be durable by the time the action response returns',
+        ).toBe('jump')
+        expect(
+          armed.rows[0]?.current_node_deadline_at,
+          'the activating node\'s deadline must be durable by the time the action response returns',
+        ).not.toBeNull()
+
+        // Positive control for the harness itself: the interception really fired (otherwise the two
+        // assertions above would pass vacuously on a stamp that was never delayed at all).
+        expect(await landedWithin(hook.landed, 15000), 'the intercepted activation stamp must have run').toBe(true)
+      } finally {
+        hook.restore()
+        await landedWithin(hook.landed, 15000)
+      }
+    })
+
+    it('H-1 GATE: a LATE activation re-stamp does NOT overwrite an already-overdue armed state — the timeout effect still applies', async () => {
+      const p = `dedup-rs-p-${TS}-h1race`
+      const q = `dedup-rs-q-${TS}-h1race`
+      const adminToken = await authToken(baseUrl, `dedup-rs-admin-${TS}-h1race`)
+      const requesterToken = await authToken(baseUrl, `dedup-rs-req-${TS}-h1race`)
+      await grantWrite(`dedup-rs-req-${TS}-h1race`)
+      const pTok = await authToken(baseUrl, p)
+
+      const templateId = await publishGraphTemplate(adminToken, buildBackwardJumpGraph(p, q), { mergeAdjacentApprover: true })
+      const inst = await createApproval(requesterToken, templateId, 'r')
+      expect(inst.currentNodeKey).toBe('approval_a')
+      const act = { p: actor(pTok, inst.id) }
+
+      const hook = installLateActivationStamp(inst.id, 'approval_c', H1_LATE_STAMP_MS)
+      try {
+        const afterP1 = await act.p({ action: 'approve', comment: 'P r1' })
+        expect(afterP1.currentNodeKey).toBe('approval_c')
+
+        // Force C's deadline overdue. `forceDeadlineOverdue`'s stability poll exits after ~200ms —
+        // well inside H1_LATE_STAMP_MS — so pre-fix it exits on the "not armed yet" signature and its
+        // forced UPDATE is written while the activation stamp is STILL IN FLIGHT.
+        await forceDeadlineOverdue(inst.id, 'jump')
+
+        // Pull the activation stamp to ground BEFORE the timeout effect reads the armed row. This
+        // reproduces the CI interleaving deterministically (report §4.2 T2 < T4 < T5): pre-fix the
+        // late stamp lands here and rewrites the deadline to `activatedAt + 60s` (a FUTURE instant),
+        // so the guard's `deadlineMs > Date.now()` disjunct is true and the effect is skipped.
+        // Post-fix the stamp landed inside the action request above, so this is already resolved and
+        // nothing writes those columns between the forced UPDATE and the guard's read.
+        expect(await landedWithin(hook.landed, 15000), 'the intercepted activation stamp must have run').toBe(true)
+
+        const service = new ApprovalProductService()
+        const outcome = await service.applyNodeTimeoutEffect(inst.id, 'jump')
+        expect(
+          outcome,
+          'a late activation re-stamp must not be able to overwrite the armed overdue state and make the timeout effect skip as stale',
+        ).toBe('applied')
+
+        // And the effect really took: the backward jump landed on A, still pending.
+        const afterJump = await pool().query<{ status: string; current_node_key: string | null }>(
+          `SELECT status, current_node_key FROM approval_instances WHERE id = $1`,
+          [inst.id],
+        )
+        expect(afterJump.rows[0]?.status).toBe('pending')
+        expect(afterJump.rows[0]?.current_node_key).toBe('approval_a')
+      } finally {
+        hook.restore()
+        await landedWithin(hook.landed, 15000)
+      }
     })
   })
 })
