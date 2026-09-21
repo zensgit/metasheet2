@@ -91,7 +91,7 @@ OpenAPI 对两条端点**已经**声明了 `403` 响应，所以本条不引入�
 
 | # | 消费者 | file:line | 实例形态 | 影响 |
 |---|---|---|---|---|
-| 1 | `apps/web/src/**` | — | — | **零直调**。`apps/web/src/views/approvalInboxActionPayload.ts` 只构造 `{version, comment/reason}` 载荷，且在 `apps/web/src` 内**零调用方**（只有它自己的定义与 spec）。审批中心 `useApprovalBatchActions.ts:5` 明确走 `/actions` |
+| 1 | `apps/web/src/**` | — | — | **对本次变更的两条端点（`/api/approvals/:id/approve`、`/api/approvals/:id/reject`）零直调**（`grep` 逐条核对；唯一命中在 `apps/web/tests/plmFederationClient.spec.ts:34`，是该文件测试通用重试逻辑用的示例 URL，与生产调用路径无关）。`approvalInboxActionPayload.ts` 的 `resolveApprovalActionVersion` 有一个调用方 `PlmProductView.vue`（`:2907`、`:2971` 两处调用）；但它喂的是 `plmService.approveApproval`/`rejectApproval` → `plmFederationClient` → `POST /api/federation/plm/mutate`（`operation: 'approval_approve'`/`'approval_reject'`），服务端 `routes/federation.ts` 把它转给 `PLMAdapter`，落在外部 Yuantus PLM 自己的接口上，不是本次变更的这两条本地端点。审批中心 `useApprovalBatchActions.ts:5` 明确走 `/actions` |
 | 2 | `plugins/*` | — | — | **零引用**（`git grep "approvals/" -- plugins` 无命中）|
 | 3 | `.github/workflows/observability-e2e.yml` | `:191`, `:197` | `demo-1` | **不受影响**。`src/seeds/seed-approvals.ts:7` 只插 `(id, status, version)` ⇒ `published_definition_id IS NULL` ⇒ 非席位闸 ⇒ §2.3 |
 | 4 | `.github/workflows/observability-strict.yml` | `:460`, `:466` | `demo-1` | 同上 |
@@ -100,6 +100,8 @@ OpenAPI 对两条端点**已经**声明了 `403` 响应，所以本条不引入�
 | 7 | 生成 SDK `packages/openapi/dist-sdk/index.d.ts` | `:631`,`:652`,`:20729`,`:20773` | — | 仅类型声明；仓内**零调用点**。请求 schema 未变（`metadata` 仍是 `additionalProperties: true` 的可选对象），故 SDK 无需重生成 |
 | 8 | `packages/openapi/src/paths/approvals.yml` | `:532-575`, `:576-619` | — | **本轮不改**。两条端点已声明 `403`，本变更不新增响应码；把「`nodeKey` 由服务端推导」写进 description 是纯文档收益，但会连带要求重生成 `dist/`，列为后续项（§8）|
 | 9 | `docs/**` 的 curl 示例（`docs/PR132_CI_FIX_REPORT.md:101` 等）| — | `demo-1` | 历史记录，非可执行消费者；且同属非席位闸形态 |
+| 10 | `scripts/*.insyncdl`（11 个 tracked）+ `packages/core-backend/src/*.insyncdl`（4 个 tracked）| — | — | Insync 同步客户端遗留的半成品下载残件（文件名形如 `.~<hash>!s<hash>-<hash>.insyncdl`）；不是 `.ts`/`.js`/`.sh`，`package.json` 与 `.github/workflows/*` 均无引用。内容含历史 curl / `jfetch` 调用示例（`/api/approvals/test-1/approve`、`/api/approvals/demo-1/approve` 等）及一段本地 mock 路由片段，均为快照文本，非可执行消费者；形态同 #5。是否清理这些残件不属本候选范围 |
+| 11 | `packages/core-backend/tests/unit/approvals-routes.test.ts` | 多处 `.post('/api/approvals/apr-1/approve')` / `.post('/api/approvals/apr-1/reject')` | `apr-1` | 仓内**另一个**受本变更影响的测试消费者，不只 #6 一个（真实路由处理器 + mock pg client）；已实跑通过，见验证 MD §3 |
 
 **边界要写清楚，不要把「仓内枚举为空」说成「没有别的消费者」。** 仓外调用方（移动端、外部集成、
 运维脚本）**无法**用 grep 证明其不存在。对它们的兼容性论证只能是：**新增的拒绝只命中从未持有过
