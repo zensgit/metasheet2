@@ -59,6 +59,10 @@ on:
       - 'packages/core-backend/src/services/approval-seat-authorization.ts'
       - 'packages/core-backend/src/services/approval-actor-roles.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      # The service request contract itself (`ApprovalActionRequest`): the settlement-parity
+      # suite pins two riders declared here (`reason`, `expectedVersion`), so a change to the
+      # contract ALONE — without touching the route or the service — must still run this lane.
+      - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'
@@ -72,6 +76,10 @@ on:
       - 'packages/core-backend/src/services/approval-seat-authorization.ts'
       - 'packages/core-backend/src/services/approval-actor-roles.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      # The service request contract itself (`ApprovalActionRequest`): the settlement-parity
+      # suite pins two riders declared here (`reason`, `expectedVersion`), so a change to the
+      # contract ALONE — without touching the route or the service — must still run this lane.
+      - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'

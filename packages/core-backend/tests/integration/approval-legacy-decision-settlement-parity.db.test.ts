@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
+import { eventBus } from '../../src/integration/events/event-bus'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
@@ -19,10 +20,12 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  *     just decided, so on an `A -> B` graph a seated approver at A could mark the whole instance
  *     `approved` with **B never decided**;
  *   * the settled node's seats stay ACTIVE and the next node's seats are never created;
- *   * no completion event is built, enqueued or emitted, so none of the three completion consumers
+ *   * no completion event is built or emitted, so none of the three completion consumers
  *     (`approval-bridge`, `approval-trigger`, `approval-projection` —
  *     `multitable/automation-routing-manifest.ts`) and none of the record form write-back ever
- *     hears that the instance ended;
+ *     hears that the instance ended. (S6) observes the EMIT itself, in-process, on the bus the
+ *     three consumers subscribe to. It does NOT observe the three consumers reacting — that still
+ *     needs each one's own upstream fixture and is not claimed here;
  *   * no terminal / node-decision metric is recorded, so `approval_metrics` keeps describing the
  *     instance as in flight forever.
  *
@@ -44,6 +47,17 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  * The `(F…)` cases are the forgery family from the seat/attribution slice's own probe, re-run
  * against the settlement path: they are same-family RECONSTRUCTIONS of those probes in this file's
  * fixture vocabulary, not the original fixture, and each one says which shape it stands for.
+ *
+ * ### The ONE field the two doors are allowed to disagree on
+ *
+ * `approval_records.reason` is the legacy `/reject` door's OWN column and `/actions` has never had
+ * anything to write into it (its request carries no `reason`). This door collects the text under a
+ * mandatory 400 (`APPROVAL_REJECTION_REASON_REQUIRED`), so "settle like `/actions`" must not mean
+ * "collect it and drop it". The differential in (P3) therefore carries ONE named carve-out — the
+ * `reason` column of the reject row — and that carve-out is not a blind spot: (S4) pins both halves
+ * of that column ABSOLUTELY with a comment text and a reason text that differ from each other, so
+ * the "both doors regressed to NULL together" failure the differential cannot see is exactly what
+ * (S4) fails on. Nothing else is excluded from the compare.
  *
  * Requires real PostgreSQL: every assertion reads `approval_instances`, `approval_assignments`,
  * `approval_records` or `approval_metrics` back.
@@ -149,6 +163,31 @@ type Snapshot = {
   assignments: Array<Record<string, unknown>>
   records: Array<Record<string, unknown>>
   metrics: Record<string, unknown>
+}
+
+/**
+ * THE ONE CARVE-OUT, named rather than hidden: `approval_records.reason` on a `reject` row.
+ *
+ * * PREDICATE — exactly the rows with `action === 'reject'`, and exactly the key `reason`. Every
+ *   other row keeps its `reason` in the compare (a non-reject row that suddenly grew one is still
+ *   an inequality), and every other key of the reject row stays too.
+ * * WHY — the legacy `/reject` door publishes this column and enforces its presence with a 400
+ *   (`APPROVAL_REJECTION_REASON_REQUIRED`); `/actions` has no `reason` in its request at all, so
+ *   the two doors CANNOT agree here, and a differential that demanded they agree would only be
+ *   satisfiable by dropping the column from the legacy door — which is the defect, not the fix.
+ * * THE INVARIANT THIS MUST NOT HIDE — "both doors regressed to NULL together". (S4) asserts the
+ *   legacy row's `comment` and `reason` by exact, DIFFERENT text, and (P3) asserts both sides of
+ *   this column explicitly at the point the carve-out is applied. Remove the fix and both go red.
+ */
+function withoutRejectReasonColumn(snapshot: Snapshot): Snapshot {
+  return {
+    ...snapshot,
+    records: snapshot.records.map((row) => {
+      if (row.action !== 'reject') return row
+      const { reason: _carvedOut, ...rest } = row
+      return rest
+    }),
+  }
 }
 
 /** Every leaf value in a snapshot — the size of the differential, asserted so it cannot go vacuous. */
@@ -363,9 +402,15 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
         ORDER BY node_key ASC, assignee_id ASC, entry_epoch ASC, id ASC`,
       [instanceId],
     )
+    // `ip_address` / `user_agent` / `target_user_id` are in the projection because they are
+    // WRITTEN by the settlement (the fourth `actor` argument of `insertApprovalRecord`) and the
+    // legacy doors write them too — a door that stopped forwarding the request's origin would be a
+    // silent audit regression that a snapshot without these three columns cannot see. Both sibling
+    // requests in a differential come from the same client, so they are compared raw rather than
+    // normalised: a genuine divergence between the two doors shows up as an inequality.
     const records = await pool().query(
       `SELECT action, actor_id, actor_name, comment, reason, from_status, to_status,
-              from_version, to_version, metadata
+              from_version, to_version, metadata, ip_address, user_agent, target_user_id
          FROM approval_records WHERE instance_id = $1
         ORDER BY occurred_at ASC, id ASC`,
       [instanceId],
@@ -400,6 +445,9 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
           to_status: row.to_status,
           from_version: row.from_version,
           to_version: row.to_version,
+          ip_address: row.ip_address,
+          user_agent: row.user_agent,
+          target_user_id: label(row.target_user_id),
           metadata_keys: Object.keys(metadata).sort(),
           metadata_values: Object.fromEntries(
             Object.keys(metadata).sort().map((key) => [key, label(metadata[key])]),
@@ -485,7 +533,7 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
     // still satisfy `toEqual`. EXACT rather than a floor, because the SIZE of the comparison is
     // itself the claim: if a later change stops writing a metadata key, or adds one, the number
     // moves and a reader is told the compared surface changed instead of silently comparing less.
-    expect(leaves).toBe(52)
+    expect(leaves).toBe(58)
     // And the compared state is the settlement, not an accident of both rows being untouched.
     expect(actions.instance.current_node_key).toBe('approval_b')
   })
@@ -503,12 +551,12 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
     })
 
     expect(legacy).toEqual(actions)
-    expect(leaves).toBe(46)
+    expect(leaves).toBe(52)
     expect(actions.instance.status).toBe('approved')
     expect(actions.metrics.terminal_state).toBe('approved')
   })
 
-  it('(P3) REJECT parity — a rejection ends the instance identically through either door, metrics included', async () => {
+  it('(P3) REJECT parity — a rejection ends the instance identically through either door, metrics included, apart from the legacy door\'s own `reason` column', async () => {
     const approverA = freshId('appr-a')
     const approverB = freshId('appr-b')
     const { legacy, actions, leaves } = await differential({
@@ -525,8 +573,18 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
       awaitTerminal: true,
     })
 
-    expect(legacy).toEqual(actions)
-    expect(leaves).toBe(38)
+    // THE CARVE-OUT, applied here and nowhere else (see `withoutRejectReasonColumn`) — and
+    // immediately paid for by the two absolute assertions below, which say what each door actually
+    // put in the column instead of leaving it unexamined.
+    expect(withoutRejectReasonColumn(legacy)).toEqual(withoutRejectReasonColumn(actions))
+    const legacyReject = legacy.records.find((row) => row.action === 'reject')
+    const actionsReject = actions.records.find((row) => row.action === 'reject')
+    expect(legacyReject).toBeDefined()
+    expect(actionsReject).toBeDefined()
+    // The legacy door KEEPS its column; `/actions` has no field that could fill it.
+    expect(legacyReject?.reason).toBe('no')
+    expect(actionsReject?.reason).toBeNull()
+    expect(leaves).toBe(44)
     expect(actions.instance.status).toBe('rejected')
     expect(actions.metrics.terminal_state).toBe('rejected')
   })
@@ -690,6 +748,224 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
     expect((await instanceRow(created.id)).current_node_key).toBe('approval_b')
   })
 
+  it('(S4) REASON COLUMN — legacy /reject still writes `approval_records.reason`, and it is the REASON text, not a copy of the comment', async () => {
+    const admin = freshId('admin')
+    const requester = freshId('req')
+    const approverA = freshId('appr-a')
+    const approverB = freshId('appr-b')
+    await grantWrite(requester)
+    const adminToken = await authToken(admin, 'admin')
+    const requesterToken = await authToken(requester)
+    const approverAToken = await authToken(approverA)
+
+    const templateId = await publishTemplate(
+      adminToken,
+      twoStepGraph({ assigneeType: 'user', assigneeIds: [approverA] }, { assigneeType: 'user', assigneeIds: [approverB] }),
+      'reject-reason-column',
+    )
+    const created = await createApproval(requesterToken, templateId)
+
+    // THE DISCRIMINATOR: two DIFFERENT texts. `comment` and `reason` are separate optional
+    // properties of this endpoint's published body (`packages/openapi/src/paths/approvals.yml`),
+    // and only when they differ can a row tell "the reason was stored" from "the comment was
+    // stored twice" from "the reason was stored into the comment column and the reason column
+    // left NULL". A single text makes all three indistinguishable.
+    const response = await jsonRequest(baseUrl, `/api/approvals/${created.id}/reject`, approverAToken, {
+      method: 'POST',
+      body: { version: created.version, comment: 'C-TEXT', reason: 'R-TEXT' },
+    })
+    expect(response.status, await response.clone().text()).toBe(200)
+
+    const rows = await pool().query<{ comment: string | null; reason: string | null }>(
+      "SELECT comment, reason FROM approval_records WHERE instance_id = $1 AND action = 'reject'",
+      [created.id],
+    )
+    expect(rows.rows).toHaveLength(1)
+    // ABSOLUTE, by exact text — not a differential. A differential against `/actions` could not
+    // state this claim at all: `/actions` has no `reason` field, so "both doors write NULL" would
+    // satisfy it. This is the case that fails if the column is ever dropped again.
+    expect(rows.rows[0].comment).toBe('C-TEXT')
+    expect(rows.rows[0].reason).toBe('R-TEXT')
+
+    // Vacuity guard only: the rejection really happened, so the row above is a decision row and
+    // not some other audit row that happens to be the only one on the instance.
+    //
+    // DELIBERATELY NOT ASSERTED HERE: the settled post-state (cursor cleared, seats retired,
+    // terminal metric) — (P3), (S1) and (S2) own that. This case is written so it also PASSES on
+    // the PRE-slice implementation, where the legacy door wrote both columns with its own inline
+    // DML: that is what makes it a positive control for the column rather than a second copy of
+    // the settlement assertions. A case that failed on both implementations could not tell "the
+    // column is preserved" from "the door changed in some other way".
+    expect((await instanceRow(created.id)).status).toBe('rejected')
+  })
+
+  it('(S5) CONNECTION HANDBACK — a settled legacy decision releases its pooled client exactly once, asserted rather than left to the runner to notice', async () => {
+    const admin = freshId('admin')
+    const requester = freshId('req')
+    const approverA = freshId('appr-a')
+    const approverB = freshId('appr-b')
+    await grantWrite(requester)
+    const adminToken = await authToken(admin, 'admin')
+    const requesterToken = await authToken(requester)
+    const approverAToken = await authToken(approverA)
+
+    const templateId = await publishTemplate(
+      adminToken,
+      twoStepGraph({ assigneeType: 'user', assigneeIds: [approverA] }, { assigneeType: 'user', assigneeIds: [approverB] }),
+      'handback',
+    )
+    const created = await createApproval(requesterToken, templateId)
+
+    // The settlement branch releases the route's client EARLY (it must: the shared path re-locks
+    // the same row on a second connection) and sets a flag so the `catch`/`finally` below it do not
+    // release it a second time. node-postgres THROWS on a second release — after the response has
+    // already been written, so the client still sees its 200 and every other assertion in this
+    // file stays green. Without this case the guard is detected only by the runner's unhandled-
+    // error accounting, which is an exit code, not a described invariant.
+    const captured: string[] = []
+    const onUnhandledRejection = (reason: unknown) => {
+      captured.push(reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason))
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const response = await jsonRequest(baseUrl, `/api/approvals/${created.id}/approve`, approverAToken, {
+        method: 'POST',
+        body: { version: created.version },
+      })
+      expect(response.status, await response.clone().text()).toBe(200)
+      // The rejection is raised after the response is flushed, so it needs a turn of the loop to
+      // reach the handler. Two macrotask ticks, never a bare assertion on the same tick.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(captured).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+
+    // POSITIVE CONTROL that the settlement really ran on this instance — an empty `captured` on a
+    // call that never reached the settlement branch would be vacuous.
+    expect((await instanceRow(created.id)).current_node_key).toBe('approval_b')
+  })
+
+  it('(S6) COMPLETION EVENT — a terminal legacy /approve EMITS the completion event on the bus the three completion consumers subscribe to', async () => {
+    // PRECONDITION, asserted rather than assumed: `emitApprovalCompletionEvent` returns early when
+    // durable delivery is ON (the in-transaction outbox is the delivery path then, and emitting as
+    // well would double-deliver). This case pins the flag-OFF behaviour, which is the shipped
+    // default; if the flag were on in this lane the assertion below would be measuring nothing, so
+    // the flag is checked first.
+    expect(String(process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED ?? '').trim().toLowerCase()).not.toBe('true')
+
+    const admin = freshId('admin')
+    const requester = freshId('req')
+    const approverA = freshId('appr-a')
+    await grantWrite(requester)
+    const adminToken = await authToken(admin, 'admin')
+    const requesterToken = await authToken(requester)
+    const approverAToken = await authToken(approverA)
+
+    const templateId = await publishTemplate(
+      adminToken,
+      oneStepGraph({ assigneeType: 'user', assigneeIds: [approverA] }),
+      'completion-event',
+    )
+    const created = await createApproval(requesterToken, templateId)
+
+    const received: Array<Record<string, unknown>> = []
+    const subscriptionId = eventBus.subscribe('approval.approved', (event: unknown) => {
+      received.push((event ?? {}) as Record<string, unknown>)
+    })
+    try {
+      const response = await jsonRequest(baseUrl, `/api/approvals/${created.id}/approve`, approverAToken, {
+        method: 'POST',
+        body: { version: created.version },
+      })
+      expect(response.status, await response.clone().text()).toBe(200)
+    } finally {
+      eventBus.unsubscribe(subscriptionId)
+    }
+
+    // The emit is SYNCHRONOUS and pre-response (COMMIT -> metrics -> emit -> DTO -> respond), so
+    // there is nothing to poll for: if the settlement did not emit, this array is empty now.
+    const mine = received.filter((event) => {
+      const approval = event.approval as { instanceId?: string } | undefined
+      return approval?.instanceId === created.id
+    })
+    expect(mine).toHaveLength(1)
+    expect(mine[0].eventType).toBe('approval.approved')
+    const transition = mine[0].transition as { action?: string; toStatus?: string }
+    expect(transition.action).toBe('approve')
+    expect(transition.toStatus).toBe('approved')
+    // SCOPE, stated so this is not read as more than it is: the EMIT is observed. The three
+    // completion consumers (`approval-bridge`, `approval-trigger`, `approval-projection`) and the
+    // record form write-back are NOT observed here — each needs its own upstream fixture.
+  })
+
+  it('(S7) CONCURRENT DOUBLE DECISION — two simultaneous legacy /approve calls carrying the SAME version settle the node exactly once, and the loser gets the one published 409', async () => {
+    const admin = freshId('admin')
+    const requester = freshId('req')
+    const approverA = freshId('appr-a')
+    const approverB = freshId('appr-b')
+    await grantWrite(requester)
+    const adminToken = await authToken(admin, 'admin')
+    const requesterToken = await authToken(requester)
+    const approverAToken = await authToken(approverA)
+
+    // A -> B, so the FIRST decision leaves the instance `pending` at B rather than terminal: the
+    // loser therefore meets the VERSION clause rather than the status clause, whichever of the two
+    // version checks it happens to meet (this route's own pre-check, or the settlement's
+    // `expectedVersion` re-check inside the settlement transaction). A one-node graph would have
+    // made this case pass for the wrong reason (`APPROVAL_STATUS_INVALID`).
+    const templateId = await publishTemplate(
+      adminToken,
+      twoStepGraph({ assigneeType: 'user', assigneeIds: [approverA] }, { assigneeType: 'user', assigneeIds: [approverB] }),
+      'concurrent-double-decision',
+    )
+    const created = await createApproval(requesterToken, templateId)
+
+    const body = { version: created.version, comment: 'ok' }
+    const [first, second] = await Promise.all([
+      jsonRequest(baseUrl, `/api/approvals/${created.id}/approve`, approverAToken, { method: 'POST', body }),
+      jsonRequest(baseUrl, `/api/approvals/${created.id}/approve`, approverAToken, { method: 'POST', body }),
+    ])
+    const outcomes = await Promise.all([first, second].map(async (response) => ({
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    })))
+
+    // THE OUTCOME, which is what a race acceptance is allowed to assert: exactly one winner.
+    // WHICH request wins is the order PostgreSQL grants the row lock and is deliberately NOT
+    // asserted.
+    expect(outcomes.filter((outcome) => outcome.status === 200)).toHaveLength(1)
+    const refused = outcomes.filter((outcome) => outcome.status !== 200)
+    expect(refused).toHaveLength(1)
+    expect(refused[0].status).toBe(409)
+    // ONE 409 SHAPE. Both version checks on this route now answer in the envelope this endpoint
+    // has always published for a version conflict, so this assertion holds without knowing which
+    // of the two fired — and fails if the settlement's refusal is rendered in the generic
+    // `error.details` envelope instead.
+    const error = refused[0].body.error as Record<string, unknown>
+    expect(error.code).toBe('APPROVAL_VERSION_CONFLICT')
+    expect(typeof error.currentVersion).toBe('number')
+    expect(error.details).toBeUndefined()
+
+    // NO DOUBLE SETTLEMENT and NO CORRUPTED CURSOR: one version bump, one approve row, the cursor
+    // on the next node and A's seat retired exactly once.
+    const row = await instanceRow(created.id)
+    expect(row.status).toBe('pending')
+    expect(row.current_node_key).toBe('approval_b')
+    expect(row.version).toBe(created.version + 1)
+    const approveRows = await pool().query<{ n: string }>(
+      "SELECT COUNT(*)::text AS n FROM approval_records WHERE instance_id = $1 AND action = 'approve'",
+      [created.id],
+    )
+    expect(Number(approveRows.rows[0].n)).toBe(1)
+    const activeSeats = await pool().query<{ node_key: string }>(
+      'SELECT node_key FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE',
+      [created.id],
+    )
+    expect(activeSeats.rows.map((seat) => seat.node_key)).toEqual(['approval_b'])
+  })
+
   // ── FORGERY family, re-run against the settlement path ───────────────────────────────────────
 
   it('(F1) a seatless `approvals:act` holder naming the instance\'s OWN current node is still refused before any write', async () => {
@@ -787,7 +1063,13 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
     expect(rows.rows).toHaveLength(1)
     const metadata = rows.rows[0].metadata ?? {}
     expect(metadata.nodeKey).toBe('approval_a')
+    // `not.toBe(99999)` alone cannot tell "the server wrote its own round" from "nobody wrote a
+    // round at all" — a missing key satisfies it. The shape assertion next to it is what makes the
+    // pair discriminating, and `nextNodeKey` is the positive control that the row is not simply
+    // empty. (Same three assertions the sibling seat/attribution suite carries for this shape.)
     expect(metadata.nodeEntryEpoch).not.toBe(99999)
+    expect(Number.isInteger(metadata.nodeEntryEpoch)).toBe(true)
+    expect(metadata.nextNodeKey).toBe('approval_b')
     expect(metadata.smuggled).toBeUndefined()
   })
 
