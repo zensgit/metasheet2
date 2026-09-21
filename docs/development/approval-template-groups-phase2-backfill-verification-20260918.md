@@ -1595,29 +1595,47 @@ $ node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring
 ```
 两条都在**接线落地之后**的树上跑(不是 round-1 的"接线前"状态),证明这不是装饰性改动。
 
+**给接线轮的实操提醒 1(§3 P2-B 原文:"复核相邻文件不依赖这三张表的行")——按枚举关闭,不是按推断关闭**:
+```
+$ git grep -l "approval_template_group_backfill" -- packages/core-backend/tests/integration/
+approval-template-groups-backfill-batches-list.db.test.ts
+approval-template-groups-backfill-down-guard.db.test.ts
+approval-template-groups-backfill-execute.db.test.ts
+approval-template-groups-backfill-preview.db.test.ts
+approval-template-groups-backfill-rollback.db.test.ts
+approval-template-groups-backfill-schema.db.test.ts
+approval-template-groups-serialization.db.test.ts
+```
+`approval-real-db-integration` 步骤里跑 84+ 个文件、共享同一个 `metasheet_test`;down-guard 文件在跑的过程中会 DROP 并重建这三张表。这条 grep 枚举了**全部**引用这三张表名字面量的真库文件——结果是 7 个,**全部**是 A-3 backfill 同族兄弟(含 down-guard 自己),**没有**任何一个是这条 grep 之外的文件。7 个里的 6 个(除 down-guard 自身)已在 §14.7.7 的 8 文件回归里与 down-guard 同批次跑过并核对零残留(§14.7.7 的 `psql` 计数);第 8 个文件(`approval-template-groups-lifecycle.db.test.ts`)不在这份 grep 命中里,说明它不消费这三张表,只是延续既有约定同批次一起跑。故这条实操提醒按**枚举**(不是按抽样或推断)关闭:该步骤里不存在其它依赖这三张表却未被共同验证过的文件。
+
 ### 14.7.3 P3-a —— 10 处悬空 `reviews/` 引用改写 + 新增全分支机械扫描守卫
 
-10 处(迁移文件 :9、`ApprovalTemplateGroupService.ts` ×3、`backfill-batches-list.db.test.ts` :20、`backfill-schema.db.test.ts` :13、`serialization.db.test.ts` ×2、`vitest.config.ts` :1837〔本轮之前冻结,现随两点接线一并解冻处理〕、`…batches-list-ci-wiring.test.mjs` :16)与迁移文件里 round-1 已修的那一行(:118,含 disclaimer 措辞本身仍带 `reviews/` 字面量)——共 11 处——全部改写为不含字面子串 `reviews/` 的措辞(形如"`<文件名>`,a private review record, not tracked in this repository"),而不是沿用 round-1 :118 的旧措辞(那句本身含 `reviews/` 三个字,advisor 指出照抄会让"零命中"守卫永远不可能通过)。
+10 处(迁移文件 :9、`ApprovalTemplateGroupService.ts` ×3、`backfill-batches-list.db.test.ts` :20、`backfill-schema.db.test.ts` :13、`serialization.db.test.ts` ×2、`vitest.config.ts` :1837〔本轮之前冻结,现随两点接线一并解冻处理〕、`…batches-list-ci-wiring.test.mjs` :16)与迁移文件里 round-1 已修的那一行(:118,含 disclaimer 措辞本身仍带 `reviews/` 字面量)——共 11 处——全部改写为不含字面子串 `reviews/` 的措辞(形如"`<文件名>`,a private review record, not tracked in this repository"),而不是沿用 round-1 :118 的旧措辞(那句本身含 `reviews/` 三个字,advisor 指出照抄会让"零命中"守卫永远不可能通过)。改写完成、新增守卫文件之前:
 
 ```
 $ git grep -n "reviews/" -- 'packages/**' 'apps/**' 'plugins/**' 'scripts/**' | grep -v '\.md:'
 (空,exit 1)
 ```
 
-新增守卫 `packages/core-backend/tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts`(`approval-*.test.ts` 命名,进入 T4 census 人口,不进 exclude 名单,常驻 required no-DB 作业):`git ls-files -z --cached -- packages apps plugins scripts` 派生域(排除 `.md`),逐文件逐行扫描字面子串 `reviews/`;三条用例(扫描域非空负控、全零命中、decoy 树正控——`withDecoyTree` 同款手法,仿 `source-files-no-raw-control-bytes.test.ts` 的既有约定,不是新发明一套机制)。
+新增守卫 `packages/core-backend/tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts`(`approval-*.test.ts` 命名,进入 T4 census 人口,不进 exclude 名单,常驻 required no-DB 作业):`git ls-files -z --cached -- packages apps plugins scripts` 派生域(排除 `.md`),逐文件逐行扫描字面子串 `reviews/`(源码里拆成 `['review','s','/'].join('')` 三段拼接,避免这份守卫自己的常量声明也带着连续字面量);decoy 树正控——`withDecoyTree` 同款手法,仿 `source-files-no-raw-control-bytes.test.ts` 的既有约定,不是新发明一套机制。
+
+**自指陷阱,现场发现现场修**:该守卫文件本身是 `.ts`、在 `packages/**` 之下,且其文档注释/常量/两条用例标题/decoy fixture 内容都**必须**把这个词当数据写出来——提交入库后它自己就落进被扫描的域,第一次跑 `git add` 之后重新执行 §14.7.9(见下)的静态三件套时,该守卫的"全零命中"用例**真的红了**(命中自己文件里 4 行),不是假设性风险。修法**不是**把这条腿改弱(比如豁免整个文件),而是仿本仓 census 自身 §6"self-exemption closure"与 NUL 守卫`KNOWN_0X01_CARRIERS`的既有约定:显式排除**这一个**文件(`SELF_PATH`,由 `path.relative(REPO_ROOT, __filename)` 派生,不是手写字符串——文件改名不会留下失效的硬编码路径),并新增一条用例证明该排除**存在必要性**(未排除时这份文件真的会命中 >0 次)且**范围恰好是这一个文件**(排除后确实从扫描域消失)——不是"加一个豁免就完事",是把"豁免是否承重"变成可执行断言。
 
 ```
 $ unset DATABASE_URL && npx vitest run tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts --reporter=verbose
  ✓ the scanned domain is non-vacuous (scan negative control)
- ✓ zero tracked non-Markdown file under packages/**, apps/**, plugins/**, scripts/** contains the literal substring "reviews/"
- ✓ POSITIVE CONTROL: a planted `reviews/`-prefixed reference reds the leg
+ ✓ self-exemption is exactly this one file, and is load-bearing (not vestigial)
+ ✓ zero tracked non-Markdown file (other than this guard itself) under packages/**, apps/**, plugins/**, scripts/** contains the literal substring "review" + "s" + "/"
+ ✓ POSITIVE CONTROL: a planted dangling-reviews-path reference reds the leg
  Test Files  1 passed (1)
-      Tests  3 passed (3)
+      Tests  4 passed (4)
 ```
+
+**如实标注一处"表面矛盾"**:自本文件提交入库那一刻起,一条不带自指豁免的裸 `git grep -n "reviews/" -- … | grep -v '\.md:'` 会在这份守卫自己的文件里命中 4 行(文档注释里逐字讨论这个缺陷类、引用 round-1 已修那行的原文、复述门审报告用过的那条 grep 命令本身)——这**不是**回归,是这份守卫存在的前提(它必须能把这个词当数据讨论)。真正承重的判据是守卫自己的、带自指豁免的扫描逻辑(上面 4/4 绿),不是一条不知道自指豁免存在的裸 grep;下一轮如果只跑裸 grep 复核这条 P3-a,应预期在这一个文件里看到 4 行命中,那是设计如此,不是本轮遗留的缺陷。
 
 ### 14.7.4 P3-b —— 设计 MD 的手写行数括注(254 行)删除,未替换成另一个手写数字
 
-`git show 5b663dbe03:packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts | wc -l` = **259**,与验证 MD §14.6.1/§14.6.9 一致,设计 MD `:1147` 原写的"254 行"是错的且已被本轮改动(该文件现已不是 259 行——round 2 又新增了两条用例——所以写死任何数字都会立刻再次过期)。按 `feedback_record_fix_rounds_only_delete_never_handwrite_numbers`:**删除**括注,不写新数字。设计 MD 同一处追加一段"求值"(见 §14.7 引言前的设计 MD 改动本身——本文档不重复设计 MD 原文,只记入本轮 diff 范围)。
+设计 MD `:1147` 原写的"254 行"与验证 MD §14.6.1/§14.6.9 记录的 259 行不一致,门审报告 P3-b 判定前者是手写且错误的数字。本轮**不再手写任何行数**替换它——即便当场跑 `wc -l` 核对出某个数字,该数字在本轮自己的改动(P2-A/P3-c 又给这份文件新增了两条用例)落地后就已经过期,写下去只是制造下一次"手写数字漂移"。按 `feedback_record_fix_rounds_only_delete_never_handwrite_numbers`:**删除**括注,不写任何新数字(包括不重新验证并写回 259 或任何其它值)。设计 MD 同一处追加一段"求值"记录这一删除动作本身(见 §14.7 引言前的设计 MD 改动——本文档不重复设计 MD 原文,只记入本轮 diff 范围)。
 
 ### 14.7.5 P3-c —— `not.toMatch(/42P01/)` 空转断言改为对 `err.code` 的正面否定,配同客户端正控;如实标注非独立承重
 
@@ -1662,20 +1680,31 @@ $ unset DATABASE_URL && npx vitest run tests/unit/approval-ci-coverage-enumerati
       Tests  352 passed (352)                                                 # 353 → 352:允许清单删 1 条 = -2 条(§5 每条 2 个 it),T4 新增 1 个扫描文件 = +1 条,净 -1,已核对非偶然(见下)
 $ unset DATABASE_URL && npx vitest run tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts --reporter=dot
  Test Files  1 passed (1)
-      Tests  3 passed (3)
+      Tests  4 passed (4)                                                     # 自指陷阱修复后(见 §14.7.3)四条用例,不是最初写的三条
 $ node --test scripts/ops/*-ci-wiring.test.mjs                                 # 仓根
- tests 495 / pass 495 / fail 0                                                 # 492 → 495,+3 为新守卫文件自身的三条用例
+ tests 495 / pass 495 / fail 0                                                 # 492 → 495,+3 为新守卫文件自身的三条用例(不含上面的 sweep 守卫,它不在 scripts/ops/ 下)
 $ node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs
  pass 1 / fail 0
 $ node --test plugins/plugin-integration-core/__tests__/sealed-export-s5-public-export-surface.test.cjs
  pass 1 / fail 0
 $ env -u DATABASE_URL -u EXPECT_DB CI=true npx vitest run --reporter=dot        # core-backend 全量无库
  Test Files  949 passed | 175 skipped (1124)
-      Tests  15105 passed | 1609 skipped (16714)
+      Tests  15106 passed | 1609 skipped (16715)
 ```
-**353 → 352 的算术**(不是猜测,逐条核对):`APPROVAL_CI_COVERAGE_ALLOWLIST` 数组从 4 条降到 3 条,§5"allowlist integrity"每条登记发两个 `it()`(存在性 + why/date 格式),删 1 条 = **-2**;T4 loop 用 `readdirSync` 派生 `tests/unit` 下 `approval-*.test.ts` 文件名,新增的 `approval-a3-dangling-reviews-path-sweep.test.ts` 匹配该模式,自动进入 T4 population,+1 条"is wired: …"= **+1**。净 **-1**(353-2+1=352),与实测的 352 完全吻合,不是巧合也不是回归。
+**353 → 352 的算术**(不是猜测,逐条核对):`APPROVAL_CI_COVERAGE_ALLOWLIST` 数组从 4 条降到 3 条,§5"allowlist integrity"每条登记发两个 `it()`(存在性 + why/date 格式),删 1 条 = **-2**;T4 loop 用 `readdirSync` 派生 `tests/unit` 下 `approval-*.test.ts` 文件名,新增的 `approval-a3-dangling-reviews-path-sweep.test.ts` 匹配该模式,自动进入 T4 population,+1 条"is wired: …"= **+1**(T4 只按文件计一条,与该文件内部有 3 条还是 4 条自己的 `it()` 无关)。净 **-1**(353-2+1=352),与实测的 352 完全吻合,不是巧合也不是回归。
 
-**无库全量套件的一处未追查的偏差,如实披露而非强行对齐**:round-2 门审报告 G22 记录的基线是 `948 passed | 176 skipped (1124)` / `15103 passed | 1617 skipped (16720)`;本轮两次独立重跑(结果确定性一致)测得 `949 passed | 175 skipped (1124)` / `15105 passed | 1609 skipped (16714)`。`949-948=+1` 与 `15105-15103=+2` 可以直接归因于本轮新增的两个文件(`approval-a3-dangling-reviews-path-sweep.test.ts` 3 例 + census 文件净 +1 例,见上;但 census 文件本身不是"新 Test File",只是内部 it 数变化,不贡献"Test Files"计数——因此"+1 Test File"应完全来自新增的 sweep 守卫文件,算术吻合)。**`175` 比预期的 `176`(不变)少 1、`1609` 比预期的 `1617` 少 8**,这两个 skip 数的下降**未被本轮追查**——本仓存在至少 5 个依赖 `process.platform`/外部可执行文件探测的 `skipIf` 门(与本切片无关),差异更可能来自本机环境与门审报告原会话环境的探测结果不同,而不是本轮 diff 引入的行为变化;两次重跑均 **0 failed**,已是本轮判据要求的下限(0 fail),该项差异记为**未裁定的环境噪声**,不作"已排除其它可能性"的强声明。
+**无库全量套件的六个数字,逐一对账到本轮 diff,零残留未解释项**(round-2 门审报告 G22 基线:`948 passed | 176 skipped (1124)` / `15103 passed | 1617 skipped (16720)`)。第一版曾把 skip 数的下降记成"未追查的环境噪声"——那是漏算了一步:**把 down-guard 文件加进 `vitest.config.ts` 的 no-DB exclude 名单后,无库 job 不再收集它**,而 G18 实测它在 baseline 是被收集且整体 skip 的(`1 skipped (1)` / `8 skipped (8)`)。把这一步计入,六个数字全部对账(sweep 守卫自指陷阱修复后从 3 例变成 4 例,下表用的是修复后的最终数字):
+
+| | 计算 | 期望值 | 实测值 |
+|---|---|---|---|
+| Test Files passed | 948 + 1(新 sweep 守卫文件) | 949 | 949 ✓ |
+| Test Files skipped | 176 − 1(down-guard 文件不再被收集) | 175 | 175 ✓ |
+| Test Files 合计 | | 1124 | 1124 ✓ |
+| Tests passed | 15103 + 4(sweep 守卫最终 4 例)− 2(allowlist 删 1 条 ×2 个 it)+ 1(T4 新增 1 条"is wired") | 15106 | 15106 ✓ |
+| Tests skipped | 1617 − 8(down-guard 原 8 例不再被收集,不再计入 skip) | 1609 | 1609 ✓ |
+| Tests 合计 | | 16715 | 16715 ✓ |
+
+六项全部吻合,两次独立重跑结果确定性一致(`0 failed` 双证),不留"环境噪声"这类未裁定项。
 
 ### 14.7.8 收尾
 
