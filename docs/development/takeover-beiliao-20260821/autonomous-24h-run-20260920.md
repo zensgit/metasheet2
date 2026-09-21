@@ -2,7 +2,7 @@
 
 与 `docs/development/takeover-beiliao-20260821/autonomous-36h-run-20260918.md`（PR #5913，草稿）是相邻窗口：#5913 记录第八次 36h 窗口（09-18 18:55 → 09-20 06:55，及其会话恢复后延续到 09-20 18:20 的收尾）自身的执行，本文只记录第九次 24h 窗口（09-20 18:15 起）的授权、执行与产出，两文不重复对方内容。
 
-状态：**未定稿**。窗口 2026-09-21 18:15 CST 结束，撰写时点约 2026-09-21 10:15 CST（`date -u` 核对），窗口尚未结束，仍在推进。本文按账本 `claude-auto24/STATE.md`「## 2026-09-20 18:15 第九次窗口（24h）开始」至文件末尾一段，与 GitHub 现场（`gh pr view` / `gh pr checks`）核对后落笔；已发生的写实，进行中的写「进行中」，未发生的写「待补」。
+状态：**未定稿**。窗口 2026-09-21 18:15 CST 结束，撰写时点约 2026-09-21 12:57 CST（`TZ=UTC-8 date` 核对），窗口尚未结束，仍在推进。本文按账本 `claude-auto24/STATE.md`「## 2026-09-20 18:15 第九次窗口（24h）开始」至文件末尾一段，与 GitHub 现场（`gh pr view` / `gh pr checks`）核对后落笔；已发生的写实，进行中的写「进行中」，未发生的写「待补」。
 
 ---
 
@@ -54,6 +54,27 @@
 | 09-21 10:06 | **会话进程昨晚 20:4x 后退出**（原因未知，约 13h 空转）；所有工作流/监视/心跳随之消失。心跳已重建（`eb51785f`）。现状核实：main 已推进到 `5edf4c3e1`（另一会话夜间合了 #5903/#5914/#5916/#5917/#5920/#5922）；六条工作流用 `resumeFromRunId` 续起：B1merge、W6(#5835)、W7(#5829)、W8(migguard)、5842realdb、B5。222 昨夜部署窗口错过，R59 未做。 |
 | 10:07 | #5873 工作树里已有未推的 `c41866932`（请求日志行还原 main 原文，覆写声明日志下沉到 method-override）+ 合 main `7dabe8083`，脏的是三张车道截图与换行噪音。派第三轮精简收尾 `wf_50045a7f-d23`：禁本地跑浏览器车道（前两轮停摆源头）、还原截图、核对守卫、推送。在飞七条：B1merge、W6、W7、W8、5842realdb、B5、5873r3。 |
 | 10:10 | 心跳：#5873 第三轮 `wf_50045a7f-d23` 因参数被序列化成字符串（代理收到全 `undefined`）ABORT/BLOCK，零改动，已重派。CI 现状：#5924（B1 merge-main）DIRTY（等重跑）、#5921（B4）CLEAN 全绿（等 B1 落地后合 main）、#5915 `test(20.x)` 红（真库 429，修复中）、#5873 `5f60c1bb0` 红（第三轮中）、#5913 草稿 CLEAN。 |
+| 10:18 | **W8 终审 MERGE**（`wf_38f1a060-00a`：反驳咬住「钉住对在只落一个的中间态判红，而这正是当前 main 状态」，修复引入 `PENDING_PAIRS` 分级，终审用真实 `origin/main` 清单探针实证）→ 开 PR。24h 交付文档草稿推送 `7448a5e2f`（189 行）→ 草稿 PR #5930（本文）。 |
+| 10:21 | **B1 合 main 完成 `871b44d2e`**（`wf_58565d4a-0c0`：唯一冲突在账本数组，两侧各保留对方要删的行；账本 28−11−4=13，提交 blob 重数=13；变异放回任一串双向红；终审 11 套件 355/355、MERGE；点名未看路径 `GET /sheets/:sheetId/trash`）。 |
+| 10:31 | **#5915 真库 429 归因推翻**（`wf_ddda204c-281`）：不是 committing 状态未释放，是提交路由 `:1413` 的 E-10 突发限流器（`tenantBurstRpm` 默认 30、按用户 id 60s 固定窗）——集成套件按执行序发出的第 31 个请求恰好命中 commit 调用；修复 `8bf0f1044` 把集成夹具的租户突发预算调高并新增预算门专用测试，未放宽任何拒绝断言；附带发现 stale-claim 回收经 HTTP 不可达，登记待裁。 |
+| 10:37 | **W6 终审 MERGE**（`wf_a65fe7a4-e73`：反驳咬住「已删除提示建议重新开通」与 `ensureSheet` 对软删表必抛矛盾；修复 `0aabe1a3d` 改提示指向恢复 + 21 处路由 catch 译成 409 三态引导）→ 开 PR。 |
+| 10:51 | **#5924（B1）合入 `0714f0a3f`**（28 项 SUCCESS、CLEAN、match-head `871b44d2e`）；派 B4 合 main（账本 13→11）与 B2 `rebase --onto` 移植夹具 API（账本 →5）。 |
+| 10:55 | **#5929（W8 迁移时间戳唯一性守卫）合入 `3ced939ef`**（26 项 SUCCESS、CLEAN、match-head `9c1730408`）。 |
+| 11:00 | **#5873 第三轮终审 MERGE 并合入 `2ab346bf0`**（本轮零源码改动，只推此前未推的提交 + 合 main；真因锁定为第二轮请求日志 if/else 分支多出一个 `this.logger` 造出两个 ancestor-KIND key，冻结清单 50 一字未动；CI 32 项全绿）。客户反馈 #1/#4 至此落主干。 |
+| 11:07 | **#5915（#5842）合入 `8d5b1fdd5`**（30 项 SUCCESS、CLEAN、match-head `8bf0f1044`）；含迁移 `zzzz20260919140000_ai_bulk_job_commit_phase_claim`，上机须先跑 migrate。 |
+| 11:16 | **B2 rebase 终审 MERGE**（`wf_309c0c7f-1f7`：只重放 B2 三提交、账本 13→5、夹具 API 逐参数级移植）→ 开 PR #5935；终审点名未看路径 `GET /context` 别名多行查询绕过 `EXISTENCE_PROBE` 致账本漏计 → 开 issue #5936。**B4 合 main 终审 MERGE**（`wf_b5e04862-de2`：账本 13→11，三批 diff 逐字节存活，变异 A/B/B1/C 全红）。 |
+| 11:21 | 36h 文档（#5913）定稿：11 处待补按 `gh` 现场核实填齐（核查 5/5 ok），合 main 无冲突，等 CI。 |
+| 11:22 | **#5934（W6 #5835）合入 `569042ed3`**（26 项 SUCCESS、CLEAN、match-head `0aabe1a3d`）。本窗口累计已合 9 支。 |
+| 11:29 | **W7（#5829）终审 FIX（仅注释级）**（`wf_f56b277b-1e3`：反驳 8 条全修——删残留 scratch 探针、GAP 下界按当前 main 重算为 2、FK 指向 `meta_sheets` 确认、三路由零调用方；变异 AUTH 5 红 / GATE_ALL 12 红）→ 派 sonnet 注释更正轮。 |
+| 11:38 | **B5 终审 MERGE**（`wf_23c2be3f-723`：反驳 7 条全处置，变异 A/B 各 7 红、C/D/E 各 1 红；`b9c16ff7c`）→ 开 PR #5939。#5839 五批全部有 PR：B1/B3 已合，B2/B4/B5 在 CI，三者同改账本数组，需两轮后落者合 main。 |
+| 11:40 | **W7 注释更正完成 `ff766b731`**（核查 5/5 ok）→ 开 PR。跟进 issue #5937（退役旧版 spreadsheet-permissions 三路由）、#5938（grant/revoke 事务内复检 `deleted_at`）。 |
+| 11:46 | **#5921（B4）合入 `d18e1e03b`**（28 项 SUCCESS、CLEAN、match-head `b19901ab2`）；#5839 已合 B1/B3/B4（17 条）。 |
+| 11:47 | #5913 `test(20.x)` 红判定为运行机抖动（`multitable-automation-dispatch-loop-realdb` 心跳租约毫秒计时断言，与改动无关）→ 已 `gh run rerun --failed`。**W7（#5829）→ PR #5940**。 |
+| 12:16 | **#5864 有回复**（zensgit，2026-09-21T04:12Z，设计审阅非拍板）：语义改为「先保留内容再由用户整理」、组合碰撞整次拒绝、只为实际组合建项、确认凭证绑定完整计划哈希、撤销需完整前镜像等要点 → 派方案 v2 工作流（opus 揉入反馈并按当前 main 核对 → Fable 挑漏 → sonnet 回帖）。 |
+| 12:18 | **#5940（W7 #5829）合入 `e19855765`**（CLEAN、match-head `ff766b731`）。本窗口累计已合 10 支。 |
+| 12:32 | **B2 再合 main 完成 `955172ca4`**（`wf_e5f4c539-ab6`：账本恰 3 条，与 B4 三处逐字节同行同字，diff-of-diffs 逐字相同；终审 MERGE；点名零测试路径）。**#5913（36h 文档）合入 `c5547aad3`**（重跑后 21 项 SUCCESS、CLEAN）。本窗口累计已合 11 支。 |
+| 12:50 | **#5864 v2 已回帖**（issuecomment-5755544758：v1 矩阵作废、写入栅栏与前镜像捕获两 flag 默认关闭 fail-closed、三端点统一 `canManageFields`、多选→单选后置、Time Machine 四测试进 -realdb 车道等 10 处挑漏已吸收）；留 8 个 owner 待答问题，最卡排期的是首批配对范围 + 自动建选项上限。 |
+| 12:56 | 队列 W1–W8 已尽，不空转：新派两条守卫流水线——**#5938**（grant/revoke/PUT permissions 事务内复检 `deleted_at`，`wt-w9-5938`，分支 `fix/sheet-permissions-txn-liveness-recheck`）、**#5936**（`GET /context` 探测先于 403 + `EXISTENCE_PROBE` 扩别名多行，`wt-w10-5936`，分支 `fix/univer-meta-context-existence-oracle`）；均进行中，尚无 PR。 |
 
 本窗口未记录到 reclaude 隧道/网关中断（该类事件出现在窗口 8 段落，见 #5913 §5「环境与流程教训」）；本窗口唯一的网络异常是 20:42 起的 GitHub 直连 TLS 抖动，处置为切换 `gh` 走 `socks5h://127.0.0.1:10808`，未见影响工作流本身。
 
@@ -67,16 +88,16 @@
 | [#5892](https://github.com/zensgit/metasheet2/pull/5892)（Closes #5828） | **已合**（`e3b5b132d`，2026-09-20 20:32:07 CST） | 遗留 `:sheetId` 路由补父表存活守卫，并把 `:sheetId` 绑定到 `:id` | opus 实现 / opus 反驳×2 / opus 修复 / Fable 终审 | 合 main（含 #5891）后：9 支套件 247 passed + 集成 29 passed + tsc 0 + 字节扫描 0；变异：GAP 下限 `>=5→6` 红（恰等 5）、拔掉 `egressStops`/`parentLivenessTables` 接线均红 |
 | [#5893](https://github.com/zensgit/metasheet2/pull/5893)（Closes #5861） | **已合**（`ae500f1a1`，2026-09-20 20:33:12 CST） | 「使用模板」按 (租户,用户,模板,工作区,Base 名) 去重，窗口内重复安装返回同一个 Base | opus 实现 / 两位 hollow 评审 + 协调方 4 条 / opus 修复 / Fable 终审 | 23 例新增测试；变异探针全条红（D4/D4b/D9b/D12/D19/D20 等）；`generate:sdk` 重生成后与提交内容逐字节一致；**含迁移 `zzzz20260919140000_create_multitable_template_install_ledger`，上机须先跑 `migrate`** |
 | [#5919](https://github.com/zensgit/metasheet2/pull/5919)（#5839 B3） | **已合**（`afb4e44a5`，2026-09-20 20:40:05 CST） | 关掉 4 个 univer-meta 处理器（prepare/export-xlsx/dry-run/attachments）的表存在性预言机，补行为级证据 | opus 守卫流水线（实现接手冻结前半成品 / 反驳 / 修复 / Fable 终审） | 新增 `multitable-sheet-existence-oracle-b3.test.ts` 26 cells；相关 13 套件 321 passed；变异逐条红（A_prepare 6红/B_export 8红+1红/C_dryrun 2红/D_attachments 2红+6红）；字节扫描 0 |
-| [#5924](https://github.com/zensgit/metasheet2/pull/5924)（#5839 B1） | **进行中**（OPEN，head `871b44d2e`，mergeState BLOCKED，等 CI） | univer-meta 表配置族 11 条路由权限判定先于表行探测，未授权者对存活/软删/不存在的表同得 403 | opus 守卫流水线（实现 / 反驳 fixture+behavior / 修复 `e73f114c1` / Fable 终审 MERGE） | 终审已判 MERGE（`bb7795c7-a30`）：11 文件 344 测试绿、tsc 0、字节扫描 0；合 main（含 B3 #5919）解一处冲突（账本 28−11−4=13 条，合并后实测 13），等长尾 CI 跑完即可合入 |
-| [#5921](https://github.com/zensgit/metasheet2/pull/5921)（#5839 B4） | **进行中**（OPEN，head `855e5abe2`，mergeState **CLEAN**，等 B1 落地后合 main 重跑） | 记录权限两条事务路由的表存活判定移到权限判定之后，values-free 拒绝 | opus 守卫流水线（反驳 6 条全修 / Fable 终审 MERGE `wf_0a60ccab-bc8`） | 新 spec 9→13 例，8 files/206 tests 全绿、tsc 0、字节扫描 0；变异探针 5 条全红（挪回 403 前→12 红等）；接受一条已定档 RESIDUAL（审批投影 base 内仍可辨 present/absent） |
-| [#5915](https://github.com/zensgit/metasheet2/pull/5915)（Closes #5842） | **进行中**（OPEN，head `a6ffdcd24`，mergeState BLOCKED，`test(20.x)` 红 30m15s） | 批量任务提交阶段独立状态 `committing` + 身份化认领 `commit_claim_id`，取消后不再外发已取消行 | opus（反驳 race/hollow 17 条 8 major）/ Fable 终审 MERGE（`dd5aa9d4a`） | 20 项内存级变异全红、0 存活；本地 125+72 测试绿、tsc 0、vue-tsc 0、字节扫描 0；合 main 后仍绿；**真库集成 CI 红**（commit re-gate stale_reprev 第二次 commitJob 得 429 非 200），第三轮修复中（`5842realdb` 工作流） |
-| [#5873](https://github.com/zensgit/metasheet2/pull/5873) | **进行中**（OPEN，head `5f60c1bb0`，mergeState BLOCKED，`test(18.x)`/`test(20.x)` 红） | DELETE 方法覆写中间件 + 前端 DELETE 传输自动回退（客户出网丢弃 DELETE，客户反馈 #1/#4） | opus 实现 / opus 反驳×2 / Fable 终审（两轮 FIX） | 三条浏览器车道 6/29/17 全绿、web 73、backend 18；第二轮根因定位为浏览器 harness 模块路径命中 `**/api/**` 通配；未推提交 `c41866932` + 合 main `7dabe8083` 待第三轮推送（10:10 心跳：第三轮因代理参数序列化 bug 中止，已重派） |
-| [#5913](https://github.com/zensgit/metasheet2/pull/5913) | **进行中**（OPEN，draft，CLEAN） | 第八次 36h 窗口设计与验证记录草稿（本窗口内开出，内容记录窗口 8） | sonnet 草稿 | 11 处待补，收尾时转正式；与本文互引 |
-| #5839 B2 | **待开 PR**（无 PR 号，堆在 B1 旧 tip `5856d05b3`） | 字段/视图/导入/汇总族 8 条纯删（config-history 摘出） | sonnet 实现 / opus 反驳 / Fable 终审 | 终审曾判 FIX：8 条删除 + 44+ 例自身实（197/197、变异成立），但反驳夹具 API 与 B1 落地后不一致，需 `rebase --onto origin/main 5856d05b3` + 改 6 处夹具 API + 复跑 + 终审（`findings/B2-rebase.json` 已备），等 B1（#5924）落地 |
-| #5839 B5 | **待开 PR**（`wf_23c2be3f-723`，wt-b5-5839，基线 `ce9ac29cb`） | submit + PATCH 提交阶段账本清零批（匿名 401 / 已登录无权限 403 分层） | opus 守卫流水线 | 进行中；只删自己 2 条账本串，清零由最终合 main 轮做 |
-| #5835（W6） | **待开 PR**（`metasheet-wt-w6-5835`） | 售后插件对象表已删时静默回退到推导表 id | opus 守卫流水线（实现 / 反驳 callers+hollow / Fable 终审） | 进行中，`resumeFromRunId` 续跑 |
-| #5829（W7） | **待开 PR**（`wt-w7-5829`） | 旧版 spreadsheet-permissions 三条路由补表存活 + `canManageSheetAccess` | opus 守卫流水线 | 进行中，`resumeFromRunId` 续跑 |
-| 迁移时间戳唯一性守卫（W8） | **待开 PR**（`wt-w8-migguard`） | 迁移时间戳唯一性守卫，允许清单钉住既有 12 组 + #5893/#5915 的 `20260919140000` 对 | sonnet 实现 / opus 反驳 | 进行中，`resumeFromRunId` 续跑 |
+| [#5924](https://github.com/zensgit/metasheet2/pull/5924)（#5839 B1） | **已合**（`0714f0a3f`，2026-09-21 10:50:49 CST） | univer-meta 表配置族 11 条路由权限判定先于表行探测，未授权者对存活/软删/不存在的表同得 403 | opus 守卫流水线（实现 / 反驳 fixture+behavior / 修复 `e73f114c1` / Fable 终审 MERGE） | 终审判 MERGE（`bb7795c7-a30`）后合 main（`871b44d2e`：账本 28−11−4=13，两侧变异互证，点名未看路径 `GET /sheets/:sheetId/trash`）；11 文件 344 测试绿、tsc 0、字节扫描 0；28 项 SUCCESS + CLEAN + match-head `871b44d2e` |
+| [#5921](https://github.com/zensgit/metasheet2/pull/5921)（#5839 B4） | **已合**（`d18e1e03b`，2026-09-21 11:45:45 CST） | 记录权限两条事务路由的表存活判定移到权限判定之后，values-free 拒绝 | opus 守卫流水线（反驳 6 条全修 / Fable 终审 MERGE `wf_0a60ccab-bc8`） | 新 spec 9→13 例，8 files/206 tests 全绿、tsc 0、字节扫描 0；B1 落地后合 main（`wf_b5e04862-de2`：账本 13→11，三批 diff 逐字节存活，变异 A/B/B1/C 全红，13 套 383 绿）；28 项 SUCCESS + CLEAN + match-head `b19901ab2`；接受一条已定档 RESIDUAL（审批投影 base 内仍可辨 present/absent） |
+| [#5915](https://github.com/zensgit/metasheet2/pull/5915)（Closes #5842） | **已合**（`8d5b1fdd5`，2026-09-21 11:07:21 CST） | 批量任务提交阶段独立状态 `committing` + 身份化认领 `commit_claim_id`，取消后不再外发已取消行 | opus（反驳 race/hollow 17 条 8 major）/ Fable 终审 MERGE（`dd5aa9d4a`） | 20 项内存级变异全红、0 存活；本地 125+72 测试绿、tsc 0、vue-tsc 0、字节扫描 0；**真库 429 归因推翻**——非 committing 未释放，是提交路由 E-10 突发限流器（`tenantBurstRpm` 默认 30/60s）在集成套件第 31 个请求命中；修复 `8bf0f1044` 调高夹具突发预算 + 新增预算门专用测试，未放宽拒绝断言；30 项 SUCCESS + CLEAN + match-head `8bf0f1044`；**含迁移 `zzzz20260919140000_ai_bulk_job_commit_phase_claim`，上机须先跑 migrate** |
+| [#5873](https://github.com/zensgit/metasheet2/pull/5873) | **已合**（`2ab346bf0`，2026-09-21 11:00:13 CST） | DELETE 方法覆写中间件 + 前端 DELETE 传输自动回退（客户出网丢弃 DELETE，客户反馈 #1/#4） | opus 实现 / opus 反驳×2 / Fable 终审（三轮：FIX→FIX→MERGE `wf_636e9dc9-55d`） | 第三轮（本窗口）零源码改动，仅补推此前未推的提交 `c41866932`（请求日志行还原 main 原文）+ 合 main `7dabe8083`；终审确认真因是第二轮请求日志 if/else 分支多出一个 `this.logger` 造出两个 ancestor-KIND key，冻结清单未变（50 一字未动）；探针 RED-BEFORE/GREEN-AFTER 数字与 CI 逐位相同；53 个读 `index.ts` 的 spec 批跑无第四条锚；CI 32 项全绿 CLEAN |
+| [#5934](https://github.com/zensgit/metasheet2/pull/5934)（W6，Closes #5835） | **已合**（`569042ed3`，2026-09-21 11:22:41 CST） | 售后插件对象表已删/缺失时改为 fail-closed + 可执行的引导提示 | opus 守卫流水线（实现对脏树 STOP / 反驳 callers+hollow / 修复 `0aabe1a3d` / Fable 终审 MERGE `wf_a65fe7a4-e73`） | 反驳咬住「已删除提示建议重新开通」与 `ensureSheet` 对软删表必抛矛盾；修复把提示改指向恢复、假件测试重写、21 处路由 catch 译成 409 三态引导、扫描器改源码派生闭包；终审四种走样探针均红；26 项 SUCCESS + CLEAN + match-head `0aabe1a3d` |
+| [#5940](https://github.com/zensgit/metasheet2/pull/5940)（W7，#5829） | **已合**（`e19855765`，2026-09-21 12:18:06 CST） | 旧版 `spreadsheet-permissions` 三条路由补表存活 + `canManageSheetAccess` | opus 守卫流水线（反驳 8 条全修 / Fable 终审 FIX 仅注释级 `wf_f56b277b-1e3` / sonnet 注释更正轮 `ff766b731`） | 反驳删残留 scratch 探针、GAP 下界按当前 main 重算为 2、确认 FK 指向 `meta_sheets`（legacy SQL 036 为已废弃标记）、确认三路由无 apps/web/plugins 调用方；变异 AUTH 5 红 / GATE_ALL 12 红；注释更正核查 5/5 ok；26 项全绿（含 1 项 SKIPPED）+ CLEAN + match-head `ff766b731`；跟进 issue #5937（退役旧路由）、#5938（grant/revoke 事务内复检 `deleted_at`） |
+| [#5929](https://github.com/zensgit/metasheet2/pull/5929)（W8，#5912） | **已合**（`3ced939ef`，2026-09-21 10:55:22 CST） | 迁移文件时间戳前缀唯一性守卫——允许清单钉住既有 12 组 + #5893/#5915 的 `20260919140000` 对 | sonnet 实现 / opus 反驳 / Fable 终审 MERGE `wf_38f1a060-00a` | 反驳咬住「钉住对在只落一个的中间态判红，而这正是当前 main 状态」；修复引入 `PENDING_PAIRS`（0/1/2 文件态不红、第三个文件即红）；终审用真实 `origin/main` 清单探针实证；26 项 SUCCESS + CLEAN + match-head `9c1730408` |
+| [#5913](https://github.com/zensgit/metasheet2/pull/5913) | **已合**（`c5547aad3`，2026-09-21 12:32:47 CST） | 第八次 36h 窗口设计与验证记录定稿（内容记录窗口 8 本身，本窗口内完成定稿并合入，不在本文展开，详见 #5913） | sonnet 草稿与定稿 | 11 处待补按 `gh` 现场核实填齐，核查 5/5 ok；`test(20.x)` 首次红判定为运行机抖动（`multitable-automation-dispatch-loop-realdb` 心跳租约毫秒计时断言，与改动无关）已 rerun；重跑后 21 项 SUCCESS + CLEAN |
+| [#5935](https://github.com/zensgit/metasheet2/pull/5935)（#5839 B2） | **进行中**（OPEN，head `955172ca4`，mergeState BLOCKED，等 `test(20.x)` 最后一项） | 字段/视图/导入/汇总族 8 条纯删（config-history 摘出），`rebase --onto` 移植夹具 API | sonnet 实现 / opus 反驳 / Fable 终审 MERGE（rebase 轮 `wf_309c0c7f-1f7`、再合 main 轮 `wf_e5f4c539-ab6`） | rebase 后账本 13→5（夹具 API 逐参数级移植：`sqlLog→calls`、`capabilitySqlFor→capabilityCallsFor`、`beyondCapability` 签名）；B4 落地后再合 main，账本恰 3 条，与 B4 三处逐字节同行同字、diff-of-diffs 逐字相同；7 套 238 绿；终审点名零测试路径（`mst_` token 经 `oapi-scope-guard` 到 B2 路由的软删表由 post-403 liveness 回答）；CI 27 项中 25 项 pass、1 项 skip，仅 `test(20.x)` 1 项 pending |
+| [#5939](https://github.com/zensgit/metasheet2/pull/5939)（#5839 B5） | **进行中**（OPEN，head `b9c16ff7c`，mergeState **DIRTY**，CI 已全绿，等 B2 落地后再合 main） | submit + PATCH 提交阶段账本清零批（匿名 401 / 已登录无权限 403 分层） | opus 守卫流水线（反驳 7 条全处置 / Fable 终审 MERGE `wf_23c2be3f-723`） | 变异 A/B 各 7 红、C/D/E 各 1 红；CI 28 项（含 1 项 SKIPPED）全绿；只删自己 2 条账本串；B2（#5935）落地后需再合 main 一轮完成账本清零（→1，剩 config-history #5910） |
 
 ---
 
@@ -126,15 +147,15 @@ issue #5839（`GET/PUT/POST` 等 univer-meta 多个路由「先查表行回 404 
 
 | 批次 | 内容 | 状态 | 账本变化 |
 |---|---|---|---|
-| B1 | 表配置族 11 条纯删（含夹具 `tests/utils/sheet-existence-oracle.ts`） | 终审 MERGE，PR #5924 待合 main 长尾 CI | 28 → 17 |
-| B2 | 字段/视图/导入/汇总 8 条纯删 | 终审曾判 FIX，因 B1 改夹具 API 需 rebase + 改 6 处 API，**无 PR 号** | 计划 −8 |
+| B1 | 表配置族 11 条纯删（含夹具 `tests/utils/sheet-existence-oracle.ts`） | **已合**，PR #5924，`0714f0a3f`（2026-09-21 10:50:49 CST） | 28 → 17 |
+| B2 | 字段/视图/导入/汇总 8 条纯删（config-history 摘出） | **进行中**，PR #5935，终审 MERGE，rebase 轮 + 再合 main 轮均已完成，等 `test(20.x)` 最后一项 | rebase 后 13 → 5，B4 落地后再合 main → 3 |
 | B3 | 需补/搬拒绝 4 条（prepare/export-xlsx/dry-run/attachments） | **已合**，PR #5919，`afb4e44a5` | 已生效 −4（与 B1 合并后实测 13） |
-| B4 | 事务内记录权限 2 条 | 终审 MERGE，PR #5921（CLEAN，等 B1 落地后合 main 重跑） | 计划 −2 |
-| B5 | submit + PATCH（账本清零批，最后合） | 进行中（`wf_23c2be3f-723`），**无 PR 号** | 计划 −2 |
+| B4 | 事务内记录权限 2 条 | **已合**，PR #5921，`d18e1e03b`（2026-09-21 11:45:45 CST） | 13 → 11（合 main 时点已实测） |
+| B5 | submit + PATCH（账本清零批，最后合） | **进行中**，PR #5939，终审 MERGE，CI 已全绿，mergeState DIRTY，等 B2 落地后再合 main | 计划 −2 |
 
-**后落者合 main 规则**（各 PR 正文一致写明）：B1 先落，其余批次依次 `rebase --onto origin/main <B1 旧 tip>` 或 `git merge origin/main`，保留 main 数组、只删自己那一批的账本字符串，重新核对总数。B3 已实证：合并后 `28 − 11(B1) − 4(B3) = 13`，与合并后实测账本条数逐位相符。
+**后落者合 main 规则**（各 PR 正文一致写明）：B1 先落，其余批次依次 `rebase --onto origin/main <B1 旧 tip>` 或 `git merge origin/main`，保留 main 数组、只删自己那一批的账本字符串，重新核对总数。已实证三例：B3 合并后 `28 − 11(B1) − 4(B3) = 13`（11:16 CST 前）；B4 合 main 时账本 `13 → 11`（11:16 CST，`wf_b5e04862-de2`，与实测账本条数逐位相符）；B2 rebase 后 `13 → 5`，B4 落地后再合 main 一轮，账本恰 3 条（12:32 CST，`wf_e5f4c539-ab6`，与 B4 三处逐字节同行同字）。
 
-**账本清零路径**：五批全部落地后，账本理论剩余 `28 − 11 − 8 − 4 − 2 − 2 = 1`，即唯一保留项 `GET /sheets/:sheetId/config-history`（issue #5910，owner 待裁决是否收窄；本窗口内不动）。issue #5839 本身待五批全部合入 main 后关闭。
+**账本清零路径**：五批全部落地后，账本理论剩余 `28 − 11 − 8 − 4 − 2 − 2 = 1`，即唯一保留项 `GET /sheets/:sheetId/config-history`（issue #5910，owner 待裁决是否收窄；本窗口内不动）。**当前实测**：main 已含 B1+B3+B4（账本 11 条）；B2（#5935）rebase 后自身分支账本 3 条，等最后一项 CI 即可合入 main；B5（#5939）CI 已全绿，等 B2 落地后再合 main 一轮，账本清零至 1（config-history）。issue #5839 本身待五批全部合入 main 后关闭。
 
 ---
 
@@ -144,15 +165,15 @@ issue #5839（`GET/PUT/POST` 等 univer-meta 多个路由「先查表行回 404 
 
 | # | 客户描述 | 对应 issue/PR | 主干状态 | 222 状态 |
 |---|---|---|---|---|
-| 1/4 | 删除整个表/记录/模板报「无法连接服务器」（DELETE 被客户侧丢包） | #5873 | 进行中（评审中，第三轮修复） | 未上 |
+| 1/4 | 删除整个表/记录/模板报「无法连接服务器」（DELETE 被客户侧丢包） | #5873 | **已合**（`2ab346bf0`，2026-09-21 11:00:13 CST） | 未上 |
 | 2 | 自动化「发送通知」测试运行报 NO_RECIPIENTS（编辑器 dirty 时未保存） | #5867 | 已合（窗口前，`b4e728d88`） | 未上 |
 | 3 | 层级 0 根选择规则（图号模式待确认） | #5874 | 已合（窗口前，2026-09-20T00:28:57Z） | 未上 |
 | 5 | 「使用模板」无幂等，重复点击出现多个同名 Base | #5893 | 已合（本窗口，`ae500f1a1`，2026-09-20 20:33:12 CST） | 未上 |
-| 6 | 字段类型只支持文本↔长文本；面板高度不可调 | #5864 | 设计（方案评论已发，issuecomment-5749356499，含 10 条待讨论问题，**未实现**） | 未上 |
+| 6 | 字段类型只支持文本↔长文本；面板高度不可调 | #5864 | 设计（方案 v1 已发 issuecomment-5749356499；owner 已审阅 2026-09-21T04:12Z，语义调整非拍板；方案 v2 已回帖 issuecomment-5755544758，留 8 个 owner 待答问题；**未实现**） | 未上 |
 | 7 | 冻结只有列没有行；冻结列后首行被固定 | #5875 | 已合（窗口前，2026-09-20T00:29:16Z） | 未上 |
 | 8/9 | 换项目号重拉后三个视图仍显示旧项目行 | #5868 | 已合（窗口前，2026-09-18T11:37:16Z） | 未上 |
 
-窗口开始时（18:40 条目）已合 4 条（#2/#3/#7/#8-9），窗口内新增合入 1 条（#5，#5893），评审中 1 条（#1/4，#5873），设计 1 条（#6，#5864 方案已发未实现）。
+窗口开始时（18:40 条目）已合 4 条（#2/#3/#7/#8-9），窗口内新增合入 2 条（#5 #5893、#1/4 #5873）：7 行客户反馈中 6 行已合入主干，剩 1 行（#6，#5864）处于设计阶段，v2 方案已回帖，留 8 个 owner 待答问题（见 §8）。
 
 ---
 
@@ -160,18 +181,18 @@ issue #5839（`GET/PUT/POST` 等 univer-meta 多个路由「先查表行回 404 
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| R59（222 上机） | **未做** | 昨夜 20:4x 会话进程退出，18:00–08:00 部署窗口整段错过；09-21 08:00–18:00 是禁发时段，窗口剩余时间内不再有可用部署窗口 |
-| B2/B5 落地 | 进行中 | B2 需等 #5924（B1）落地后 rebase + 改 6 处夹具 API；B5（`wf_23c2be3f-723`）独立进行中，最后合 |
-| #5915 真库 429 | 进行中 | commit re-gate 用例在真库暴露认领 finish/release 缺口，`5842realdb` 工作流第三轮修复中 |
-| #5873 收尾 | 进行中 | 第三轮 `wf_50045a7f-d23` 首次因代理参数序列化 bug 中止（零改动，已重派）；本地已有未推提交 `c41866932` + 合 main `7dabe8083` |
-| #5924（B1）合 main 长尾 CI | 进行中 | 终审已判 MERGE，等 CI 跑完（10:10 心跳记为 DIRTY，随后复检为 BLOCKED，属波动） |
-| #5921（B4）等 B1 落地后合 main | 进行中 | 当前 CLEAN 全绿，B1 落地前不合并（同改账本数组，避免冲突） |
-| W6/W7/W8 | 进行中 | `resumeFromRunId` 续跑中，均无 PR 号 |
+| R59（222 上机） | **未做** | 本窗口 18:00–08:00 部署时段整段错过（夜间会话进程退出）；09-21 08:00–18:15 是禁发时段，窗口结束前无可用部署窗口，交接给 owner；本窗口合入的 #5893（迁移 `zzzz20260919140000_create_multitable_template_install_ledger`）与 #5915（迁移 `zzzz20260919140000_ai_bulk_job_commit_phase_claim`）均含迁移，上机须先跑 `migrate` |
+| B2（#5935）落地 | 进行中 | 终审已判 MERGE，`test(20.x)` 最后一项待转绿即可合；自身分支账本 3 条 |
+| B5（#5939）落地 | 进行中 | 终审已判 MERGE，CI 已全绿但 mergeState DIRTY，等 B2 落地后再合 main 一轮完成账本清零（→1，剩 config-history #5910） |
+| #5938（grant/revoke TOCTOU） | 进行中 | grant/revoke/PUT permissions 事务内复检 `deleted_at`（#5829 跟进），`wt-w9-5938`，分支 `fix/sheet-permissions-txn-liveness-recheck`，opus 守卫流水线在跑，尚无 PR |
+| #5936（GET /context 存在性预言机） | 进行中 | `GET /context` 别名多行查询绕过 `EXISTENCE_PROBE` 致 #5839 账本漏计，`wt-w10-5936`，分支 `fix/univer-meta-context-existence-oracle`，opus 守卫流水线在跑，尚无 PR |
+| #5864 owner 待答问题 | 待 owner | 方案 v2（issuecomment-5755544758）留 8 个待答问题，具体清单待核（ledger 仅点出最卡排期两项：①首批配对范围、②自动建选项上限） |
+| #5910（config-history 裁决） | 待 owner | #5839 五批全部落地后账本唯一保留项，是否收窄待 owner 裁决，本窗口内不动 |
 
 **owner 待裁决项**（本窗口内新增或复述自 PR 正文，均未由本窗口自行拍板）：
 - #5893：缺表时 fail-open 还是 503；300s 窗口长度（锚 nginx `proxy_read_timeout`，未实测有无余量）；15s 锁等待上限；客户机上跑迁移的时机；真 Postgres 泳道缺失（token 无 `workflow` scope）。
-- #5839：8 项裁决（详见 `scratchpad/5839/plan-r2.md`）——①错误码/消息对客户端可见变更、②submit 公开入口 404→401/403、③config-history (i)/(ii)、④attachments 500→404、⑤PATCH 残留、⑥throw 路径码变、⑦⑧视图侧具名残留。B1 已按①落地（values-free 404）；③（config-history）独立开 issue #5910 待裁。
-- #5864：10 条待讨论问题（第一批配对范围、自动建选项上限、置空 vs 整体拒绝、撤销窗口、谁能跑、预检是否强制、开关默认、面板高度是配置区还是外框、两条 API 缝是否收紧、插件 `ensureFields` 是否同链）。
+- #5839：8 项裁决（详见 `scratchpad/5839/plan-r2.md`）——①错误码/消息对客户端可见变更、②submit 公开入口 404→401/403、③config-history (i)/(ii)、④attachments 500→404、⑤PATCH 残留、⑥throw 路径码变、⑦⑧视图侧具名残留。B1/B3/B4 已合入 main（①按 values-free 404 落地）；B2/B5 终审均已判 MERGE，待 CI/合 main 落地；③（config-history）独立 issue #5910 待裁；⑦⑧视图侧具名残留见 issue #5908；⑤PATCH 残留见 issue #5911；新发现的跟进项 #5936（GET /context 探测先于 403）、#5937（退役旧版 spreadsheet-permissions）、#5938（grant/revoke TOCTOU）均待排期。
+- #5864：v2 方案（issuecomment-5755544758）已把 10 处挑漏吸收进设计（多选→单选后置、写入栅栏与前镜像捕获默认关闭 fail-closed、三端点统一 `canManageFields`、Time Machine 四测试进 -realdb 车道等），留 8 个 owner 待答问题，最卡排期为①首批配对范围、②自动建选项上限，其余具体条目待核。
 
 ---
 
@@ -182,8 +203,9 @@ issue #5839（`GET/PUT/POST` 等 univer-meta 多个路由「先查表行回 404 
 - **浏览器车道本地跑易停摆，交 CI。** #5873 前两轮修复都因本地跑浏览器车道（attendance/stock-prep Playwright harness）而停摆，第三轮精简收尾（`wf_50045a7f-d23`）明确禁止本地跑浏览器车道，改为只做文本/守卫核对后直接推送。
 - **估算时间戳必须先跑 `date`。** 20:22 CST 条目明确记录：此前标注 20:05–20:50 的几条账本时间是估算，实际提前约 25–35 分钟；此后账本条目一律先跑 `date` 再落笔（与 [[clock-drift-run-date-before-writing-times]] 一致）。
 - **GitHub 直连抖动走 socks5。** 20:42 起 GitHub 直连出现 TLS 超时/EOF，`gh` 命令随即切换到 `socks5h://127.0.0.1:10808`；本文撰写时同样按此前缀调用 `gh`（与 [[github-egress-needs-local-proxy]] 一致）。
-- **代理参数序列化可能整体丢参。** #5873 第三轮工作流首次派出时因参数被序列化成字符串（代理收到全 `undefined`）触发 ABORT/BLOCK；代理判断正确（零改动），但暴露了派单通道本身的一个脆弱点，值得在后续窗口留意同类"首句即空"的信号。
+- **代理参数序列化可能整体丢参。** #5873 第三轮工作流首次派出时因参数被序列化成字符串（代理收到全 `undefined`）触发 ABORT/BLOCK；代理判断正确（零改动），但暴露了派单通道本身的一个脆弱点，值得在后续窗口留意同类"首句即空"的信号。10:07 CST 重派后（同一参数结构）第三轮工作流正常执行并于 11:00 CST 推动 #5873 终审 MERGE 合入，说明问题出在单次调用的序列化环节，通道本身未持续故障。
+- **真库集成红不一定是业务逻辑退化，也可能是限流器与测试并发量的耦合。** #5915 的 `test(20.x)` 红最初被归因为 committing 状态未释放；10:31 CST 归因推翻——真正原因是提交路由 `:1413` 的 E-10 突发限流器（`tenantBurstRpm` 默认 30、按用户 id 60s 固定窗），集成套件按执行序发出的第 31 个请求恰好命中 commit 调用；修复只是把集成夹具的租户突发预算调高（`MULTITABLE_AI_TENANT_BURST_RPM=1000`）并新增预算门专用测试，未放宽任何拒绝断言。
 
 ---
 
-*基线：账本 `claude-auto24/STATE.md`「## 2026-09-20 18:15 第九次窗口（24h）开始」至文件末尾（撰写时点约 2026-09-21 10:15 CST）；PR/issue 数据经 `gh pr view/checks`、`gh issue view` 现场核对，均标注截至时点。窗口尚未结束，第 3/8 节列出的进行中项可能在窗口收尾前变化，届时按定稿流程更新本文。*
+*基线：账本 `claude-auto24/STATE.md`「## 2026-09-20 18:15 第九次窗口（24h）开始」至文件末尾（撰写时点约 2026-09-21 12:57 CST）；PR/issue 数据经 `gh pr view/checks`、`gh issue view` 现场核对，均标注截至时点。窗口尚未结束，第 3/8 节列出的进行中项可能在窗口收尾前变化，届时按定稿流程更新本文。*
