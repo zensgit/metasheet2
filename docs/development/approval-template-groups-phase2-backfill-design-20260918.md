@@ -1043,3 +1043,88 @@ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3 EXPECT_DB=1 \
 - changesRequired #16 后半(A-1 回流 #5852)——跨 lane,未变化。
 - §22.3 记录的"任务书转述 vs 门审 #3 原文"分歧——待 owner/下一轮门审核对是否需要对齐任务书措辞,不是代码缺口。
 - §19.4 的"新披露 1"、"新披露 2"——均未变化,原样结转。
+
+---
+
+## 23. 续做步骤 22:down() 数据保留守卫(候选,回应审阅意见 C-1/A-3 附条件,2026-09-21)
+
+> **本节的性质**:这是对 `reviews/approval-template-groups-phase2-backfill-ddl-declaration-20260920.md`(下称"声明")§1.6(b)/R2/Q4b 的**候选**回应——声明本身是"给 owner 做 DDL 授权判断用的声明,不构成任何形式的批准"(声明 §0),本节改动同样**不是 ratify、不是合并、不是应用**,只是把审阅意见里"有批次数据时拒绝普通 down;代码回退后保留休眠表和台账"这条建议做成一份可审的候选实现,供下一轮门审/owner 核对。**不改锁文正文**;三张表本身仍是锁外表(§0/§1.7/§2.7/§3.7),Q1–Q7(§6)一律未裁。
+
+### 23.1 要回应的缺口(声明原文,不转述成别的意思)
+
+- 声明 §1.6(b)(原文,逐字):「`down()` **不撤销任何业务效果**。执行过 execute 之后跑 `down()`,`approval_template_groups` 里新建的组、`approval_template_group_links` 里写入的挂接行**原样留存**,而记录"哪些组是本批次建的 / 哪些挂接是本批次写的"的三张台账表被 `DROP`——**该次 backfill 从此永久不可经端点回滚**,只能人工逐行补偿。」
+- 声明 §5.1 R2(原文,逐字):「`down()` 不撤销业务效果,却删掉唯一能撤销它的台账:执行过 execute 后跑 `down()` ⇒ 该次 backfill 永久不可经端点回滚。」
+- 声明 §6 Q4b(原文,逐字):「是否接受 R2:`down()` 不撤销业务效果,且会删掉唯一能撤销它的台账——即『应用过、execute 过、再 down()』是一条不可逆路径,其后的补偿是逐 org 逐行人工操作,需 owner 逐单授权?」——**这条是非题本节不代 owner 答**;本节只是把「拒绝这条不可逆路径的默认发生」做成候选代码。
+- **审阅意见原文(本次任务的来源,不是本节自己的判断)**:「不建议接受『业务效果留下、台账删掉』……建议:有批次数据时拒绝普通 down;代码回退后保留休眠表和台账。真正删除另走明确的数据保留与清理决策。」
+
+### 23.2 改动本体(逐字 file:line,唯一改动的文件)
+
+`packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts`(`up()` :30–115 未改一字;`down()` 由原来的 4 行 :117–123 扩为 :117–172,新增一个环境变量常量 + 一个辅助函数 + 一段前置守卫,原有 4 条 `DROP` 语句逐字保留、位置不变):
+
+```ts
+// :138  常量名 = 它授权的动作,不是迁移动词
+const ATG_BACKFILL_DOWN_FORCE_ENV = 'ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP'
+
+// :140-147  逐表计数,to_regclass 前置守卫(半应用的 up() 下某表缺失时按 0 算,不炸 42P01)
+async function atgBackfillTableRowCount(db: Kysely<unknown>, table: string): Promise<number> {
+  const result = await sql.raw(
+    `SELECT CASE WHEN to_regclass('public.${table}') IS NULL THEN 0 ` +
+      `ELSE (SELECT count(*)::int FROM ${table}) END AS n`,
+  ).execute(db)
+  const row = (result.rows[0] ?? {}) as { n?: number | string }
+  return Number(row.n ?? 0)
+}
+
+// :149-165  down() 新增的前置守卫段(在任何 DROP 之前;:167 起的 4 条 DROP 逐字未改)
+export async function down(db: Kysely<unknown>): Promise<void> {
+  const batches = await atgBackfillTableRowCount(db, 'approval_template_group_backfill_batches')
+  const groups = await atgBackfillTableRowCount(db, 'approval_template_group_backfill_batch_groups')
+  const links = await atgBackfillTableRowCount(db, 'approval_template_group_backfill_batch_links')
+  const total = batches + groups + links
+
+  if (total > 0 && process.env[ATG_BACKFILL_DOWN_FORCE_ENV] !== 'true') {
+    throw new Error(/* 见 :157-163,点名三个计数 + 数据保留/清理决策 + force 变量名 */)
+  }
+  // …原有 4 条 DROP,位置/语句逐字未变…
+}
+```
+
+**设计取舍(逐条对齐审阅意见,不新造别的形状)**:
+1. **"在任一表有数据时拒绝"**:三张表各自计数后求和(:153 `total`),不是只看批次头——`_batch_groups`/`_batch_links` 理论上不该在批次头为空时有孤儿行(FK `ON DELETE CASCADE`,mig:73/mig:99),但守卫按"任一表"字面逐表计数,不依赖这条 FK 推导成立。
+2. **"抛出带说明的错误,指向数据保留/清理决策"**:错误信息(:156-164)点名三个具体计数、"不撤销业务效果只删台账"这句机制描述、以及"这是数据保留/清理决策,不是机械回滚步骤"这句定性——不是一句裸 `throw new Error('blocked')`。这条信息是**运维事实**(计数、变量名、决策性质),不是"该函数可能被哪些请求以何种方式滥用"这类缺陷细节,写进公开迁移文件是安全的(与仓内先例 `zzzz20260731120000_w4c3a_import_rollback_foundation.ts:756-758` 的 `W4C3A_DOWN_BLOCKED` 错误信息同一性质)。
+3. **"提供显式 force 环境变量或参数才允许,默认拒绝"**:Kysely 的 `down(db: Kysely<unknown>)` 签名由框架的 `Migrator.#migrateDown`(`node_modules/kysely@0.28.8/.../migrator.js:519` 附近,`await migration.down(db)`)钉死,调用方不传第二个参数——**没有"参数"这个选项**,只能走环境变量。命名沿用仓内既有先例 `migrate.ts` 的 `ALLOW_DB_RESET`(命令 `--reset` 专用,见该文件 :113-120)同一形状:`=== 'true'` 严格比较(`=false`/`=0`/空串都不解锁),变量名按它**授权的动作**命名(`…_DROP`,不是按迁移动词 `…_DOWN`)——避免与"允许运行 down 命令"这个更宽的误读混淆:它只放行"数据非空时仍然丢弃这三张表"这一个具体决定,不放行别的。
+4. **"代码回退后保留休眠表与台账"**:这条本节**不写代码**——它描述的是"回退 `routes/approvals.ts`/`ApprovalTemplateGroupService.ts` 里读写这三张表的代码"这个动作(revert 应用代码,不跑 `--rollback`),迁移/表本身不受代码回退触碰,天然保留、天然休眠。这条不需要新代码去"保证"——只需要**不**把它跟"跑 down() 清表"这个另一个独立动作混在一起做。本守卫的存在恰恰是防止后者被误当成前者的默认动作。
+
+### 23.3 三张表整体性质不变(§4.1 的延伸,不重复其论证)
+
+守卫按"三表分别计数、任一非零即拒绝"实现,但§4.1 已确立的结论(「这三张表不能分开授权……批准其中一两张而不批第三张,会得到一个不可编译/不可用的形状」)在这里同样成立:down() 守卫是**一个**函数、**一次** owner 授权对象,不因为它按表分别计数就意味着三张表可以分别决定是否受此守卫保护——守卫要么覆盖全部三张(本节现状),要么整体去掉,不存在"只守批次头、子表不守"这种中间形态(子表的行数本来就该随批次头级联清零,分开守卫没有独立意义)。
+
+### 23.4 交付物登记:设计批准 / 代码合并 / 指定环境应用(三栏分别登记,不互相代表)
+
+> **审阅意见原文**:「设计批准、代码合并、指定环境应用分别记录。」——本表就是那份记录本体。**三栏互不蕴含**:左栏打勾不代表中栏可以推进,中栏打勾不代表右栏可以推进;任何一栏在 owner 亲自写下之前一律是"未登记",不得由本节、门审或下一轮实现自行填成"隐含同意"。
+
+| 表 | 设计批准(owner 是否认可 §2 DDL 形状 + 本节 down() 守卫形状,§6 Q1–Q4 逐题) | 代码合并(该形状对应的代码/迁移是否已合入 `origin/main`) | 指定环境应用(该迁移是否已在某个具体命名的共享/staging/prod 库上 `migrate --latest` 应用) |
+|---|---|---|---|
+| `approval_template_group_backfill_batches`(批次头) | **未登记**——待 owner 答 Q1/Q1a/Q1b(声明 §6) | **未登记**——本分支仍是 Draft PR #5866,未合并(lock:8 现行有效) | **未登记**——声明 §5.2 U1:"未应用于任何共享/staging/prod 库"这一条本身是 [转述],需要有权限的人独立核验,本节不代为核验 |
+| `approval_template_group_backfill_batch_groups` | **未登记**——待 owner 答 Q2/Q2a/Q2b | **未登记**——同上 | **未登记**——同上 |
+| `approval_template_group_backfill_batch_links` | **未登记**——待 owner 答 Q3/Q3a/Q3b/Q3c | **未登记**——同上 | **未登记**——同上 |
+| 本节新增的 `down()` 守卫(23.2) | **未登记**——本身是候选,未过独立门审,遑论 owner 裁决 | **未登记**——同上,本次会话只 push 到 Draft 分支,不开/改/合并 PR | **不适用**(守卫是代码逻辑,不是可单独"应用"的 DDL 对象;它随迁移文件一起进入"代码合并"这一栏的评估范围,不再单列一行应用状态) |
+
+**登记规则(供后续实现/门审沿用,不是一次性的)**:任何一格从"未登记"改成别的状态,必须**点名 owner 的原话或 comment ID**(与记忆 `feedback_ratified_text_may_live_only_in_an_owner_comment`/`feedback_authorization_source_must_be_owner_authored` 同一纪律)——门审报告的"建议接受"、实现者的"已按建议落地"均不能填这张表的任何一格。
+
+### 23.5 授权范围重申:本节只登记三张表,phase-1 两表另记(声明 §0/§6 Q4f,未裁)
+
+- 声明 §0(原文,逐字):「本文只声明**三张锁外表**。但同一条分支……相对 `origin/main` **新增两个迁移文件**……**本分支一旦被应用,落地的是 5 张 `CREATE TABLE`**:phase-1 两张(形状已由锁 §2 ratify)+ 本文的三张(锁外)。phase-1 两张的**形状**有 ratify,但其**应用**同样受 lock:8『不应用』约束,本文不代它请示——见 §6 Q4f。」
+- 声明 §6 Q4f(原文,逐字):「本轮 DDL 授权的**范围**是『**仅三张锁外表**』,还是『**本分支落地时一并创建的 5 张表**(含 phase-1 的 `approval_template_groups` / `approval_template_group_links`)』?若是前者,phase-1 两表的**应用**授权需在 #5852 单列;若是后者,请一并确认 phase-1 两表的应用也在本次授权内。」
+- **本节的立场(不是代 owner 答 Q4f,是明确本节讨论的对象边界)**:本改动的对象边界 = **三张批次表**(23.4 表格四行的前三行);phase-1 的 `approval_template_groups` / `approval_template_group_links` 两张表**不在本节改动范围内**,其 DDL 形状与迁移文件本节零改动(`up()`/`down()` 均未碰 `zzzz20260918090000_create_approval_template_groups.ts`),其"应用"授权状态**另行登记**,按声明 §6 Q4f 的两个分支——**该题本身仍未裁**,本节不假设答案是"前者"还是"后者",只是**如实描述本次改动没有触碰 phase-1 两表**这一件事实,不构成对 Q4f 的回答或预判。
+- **一致性检查**:23.4 表格只列了三张批次表 + 守卫本身共 4 行,没有 phase-1 两表的行——这是刻意的,不是遗漏:把 phase-1 两表也塞进同一张表会造成"这份候选文档在替 Q4f 做主张"的误读,按 §0 的边界声明,那两表的登记应该在它们自己的迁移文件/声明里独立进行(声明原文指向 #5852)。
+
+### 23.6 一并求值的两条运维后果(标 [推导],部分已实测)
+
+- **对 `--reset` 的影响(声明 §4.2 R6 的延伸,[推导])**:`migrate.ts --reset` 走 `migrator.migrateTo(NO_MIGRATIONS)`,会从最新迁移逐条往回走。本守卫生效后,任何持有批次数据的库跑 `ALLOW_DB_RESET=true --reset` 会在走到本迁移这一步时**停下**(除非同时也设置了 `ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP=true`)——这是**新增的一个停止点**,`--reset` 原来不会因为这张表有数据而中止。方向是有意的(fail-closed,与本节 23.1 的目标一致),但如实记录:这是一个此前不存在的行为变化,影响面是"任何调用 `--reset` 的调用方",不只是单步 `--rollback`。**本节未新增任何 `--reset` 场景的真库测试**(§23.7 只测了直接调用 `down()` 与部分 `--rollback` CLI 路径,未测 `--reset`),这条推导未经真库验证 `--reset` 这一条具体命令,只是从 `migrateTo(NO_MIGRATIONS)` 的实现逐条应用 `down()` 这一机制类比得出。
+- **force 之后仍然不可逆(残留,重申不是新发现)**:即使设置 force 变量成功丢弃三张表,§1.6(b)/R2 描述的不可逆性**原样成立**——force 只是把"意外丢弃"变成"蓄意丢弃",不会让已丢弃的台账指向的业务效果重新变得可回滚。本守卫解决的是"默认发生 vs 需要一个显式动作才发生"这一层,不解决"发生之后能不能撤销"这一层——后者没有解法,只能靠不发生(即前一层的默认拒绝)来避免,这也是为什么默认值必须是拒绝而不是放行。
+- **意外发现,记录不修复([推导] + 部分实测,详见验证 MD §14.4)**:本次会话在尝试用 CLI `--rollback` 链式回退本迁移之前的两条无关迁移时,发现 `zzzz20260919120000_add_attachment_blob_purge_claim.ts` 的 `down()` 自己在 `migrator.#migrateDown` 已经开起的事务连接上再调用一次 `.transaction()`,被 Kysely 拒绝(`Error: calling the transaction method for a Transaction is not supported`)——这是该文件已有的、与本节改动**完全无关**的既存缺陷(本节零字节改动过该文件),声明 §4.2 R6 描述的"回退这三张表必须先回退两条无关迁移"这条运维耦合,在当前 head 上因为这另一个 bug 而**更严重**:通过 `--rollback` CLI 链式回退目前**走不通**(卡在 `add_attachment_blob_purge_claim` 这一步),只能通过其它手段(如直接 `import { down }` 调用,或先修复那个文件)绕过。这**超出本次派工范围**(派工只点名 A-3 的 down() 守卫),本节如实记录发现、不在这里修复;是否需要单独排期修 `add_attachment_blob_purge_claim.ts` 的这个 bug,留给 owner/下一轮门审判断。
+
+### 23.7 本步不新增/不触碰
+
+生产代码除 §23.2 点名的一个文件外零改动;未新增/未删除任何 `.ts`/`.mjs`/测试文件;`.github/workflows/plugin-tests.yml`、`vitest.config.ts`、s6a 钉——零改动,未新增 CI 步骤,无需重算 pin。锁文正文——零改动。`up()`——零字节改动。phase-1 迁移文件(`zzzz20260918090000_create_approval_template_groups.ts`)——零改动。真库验证证据见验证 MD §14。

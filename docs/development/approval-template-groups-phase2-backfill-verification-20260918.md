@@ -1177,6 +1177,130 @@ $ DATABASE_URL=postgresql://localhost:5432/metasheet2_lock_a3_r4 EXPECT_DB=1 pnp
 
 ---
 
+## 14. down() 数据保留守卫 —— 候选验证(2026-09-21,回应审阅意见 C-1/A-3 附条件)
+
+配对设计 MD §23。**起点**:`origin/feat/approval-template-groups-phase2-backfill @ 866b0d63e542a6fbefae2b659902f5007fd1a1a9`(worktree,detached HEAD,本节记账时尚未提交本节改动)。**私有库**:`metasheet2_a3down_20260921`,owner `ms2testbed`(非超级用户,`Create DB` 权限,无 Superuser),本次会话用 `dropdb --if-exists && createdb` 起手的处女库,用完 `dropdb`(见收尾)。**产线代码改动范围**:仅 `packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts` 一个文件(`up()` 零字节改动,`down()` 由 4 行扩为 56 行,见设计 MD §23.2)。
+
+**方法论(为什么不只用 CLI `--rollback`)**:Kysely 的 `Migrator.#runMigrations` 在 Postgres 适配器上默认把整次 `migrateDown()` 包进**一个事务**(`node_modules/kysely@0.28.8/.../migrator.js:427-431`:`if (adapter.supportsTransactionalDdl && !this.#props.disableTransactions) return this.#props.db.transaction().execute(run)`)——只观察"CLI 退出码 + 最终库状态",分不清"守卫在任何 DROP 之前就抛错"与"DROP 先跑了、随后事务被回滚撤销"这两种机制是否同一件事。四个用例因此**直接 `import { up, down }` 调用**该迁移文件的导出函数(绕过 Migrator 与它的事务包裹),在每一步之前/之后都现场 `SELECT to_regclass(...)` + `count(*)` 取快照,这样"守卫先于任何写语句执行"是被断言直接观测到的,不是推断的。CLI 级路径作为**补充证据**在 §14.4 单独记录,层级更弱,已如实标注。
+
+### 14.1 建库 + 迁移到最新(含本迁移原样应用一次,确认候选改动不破坏 up())
+
+```
+$ psql -U ms2testbed -d postgres -c "DROP DATABASE IF EXISTS metasheet2_a3down_20260921"
+$ psql -U ms2testbed -d postgres -c "CREATE DATABASE metasheet2_a3down_20260921"
+$ DATABASE_URL=postgresql://ms2testbed@localhost:5432/metasheet2_a3down_20260921 \
+    npx tsx src/db/migrate.ts --latest
+...
+migration "zzzz20260919090000_create_approval_template_group_backfill_batches" was executed successfully
+migration "zzzz20260919120000_add_attachment_blob_purge_claim" was executed successfully
+migration "zzzz20260919130000_extend_archive_nonce_object_identity" was executed successfully
+$ echo $?
+0
+```
+
+413 个迁移全部成功,末尾三条与声明 §0"排序位置"一节描述的顺序逐字一致(本迁移之后还有两条无关迁移,这是设计 MD §23.6 第一条求值的前提)。
+
+### 14.2 四个用例(直接 `import { up, down }` 调用,`.probe-scratch/a3down-probe.ts`,**运行后已删除,不提交**)
+
+脚本结构:每一步之后对三张表各做一次 `to_regclass('public.<table>') IS NOT NULL`(存在性)+ 存在时 `count(*)`(行数),打印 JSON 快照;每条断言显式核对"这一步之前/之后该核对什么",不是只看最终态。
+
+```
+$ DATABASE_URL=postgresql://ms2testbed@localhost:5432/metasheet2_a3down_20260921 \
+    npx tsx .probe-scratch/a3down-probe.ts
+```
+
+| 用例 | 前置条件(现场快照) | 动作 | 断言 | 结果 |
+|---|---|---|---|---|
+| **用例 0 —— up 幂等** | 三张表已存在(§14.1 的 `--latest`),全部 0 行 | 直接调用 `up(db)` 第二次 | 不抛错;三张表调用后仍存在 | **PASS**(`IF NOT EXISTS` 生效,无副作用) |
+| **用例 1 —— 空表 down 通过** | 三张表存在,`{batches:0, groups:0, links:0}` | 直接调用 `down(db)` | 不抛错;调用后三张表 `to_regclass` 均为 `NULL`(真的被 DROP,不是"没抛错但也没做事") | **PASS** |
+| (重建,供用例 2/3 使用) | — | 直接调用 `up(db)`(`down()` 之后的第二次 up,兼验证"down 之后 up 仍能干净重建"这条附加的幂等角度) | 三张表存在,0 行 | **PASS** |
+| **用例 2 —— 有数据 down 拒绝(负控)** | `INSERT INTO approval_template_group_backfill_batches (id, org_id, created_by) VALUES ('atgbb_probe_1','probe-org','probe-actor')` 之后,`{batches:1, groups:0, links:0}` | 直接调用 `down(db)`,**不设** force 环境变量 | ①抛错;②错误信息同时包含 `ATG_BACKFILL_DOWN_BLOCKED` 与 `ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP`(点名代码 + 变量名,不是裸信息);③调用后三张表 `to_regclass` 均非空(表**没有**被 DROP);④调用后三张表行数与调用前逐字节相同(`batches=1, groups=0, links=0`,前后一致) | **PASS ×4**(见下方原始输出) |
+| **用例 3 —— force 后通过(正控)** | 与用例 2 **同一份**未清理的数据夹具(`batches=1` 仍在) | `process.env.ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP='true'` 后再次调用 `down(db)` | ①不抛错;②三张表 `to_regclass` 均变为 `NULL`(真的被 DROP) | **PASS ×2**——**这是正控,不是第四个负面用例**:它证明用例 2 的拒绝是**这个守卫**造成的,不是别的原因(比如连接权限、表被外部锁住)恰好也会让 down 失败;同一份数据、同一次调用,只翻一个环境变量,结果从"拒绝且三表原样保留"变成"通过且三表被丢弃",两次之间除了这个变量没有变化任何前提 |
+
+原始输出(节选,`PASS`/`FAIL` 由脚本内 `assert()` 打印,全部 12 条断言输出 `PASS`,0 条 `FAIL`):
+
+```
+=== Case 2: down() with DATA PRESENT must REJECT (and leave tables/rows untouched) ===
+[snapshot before data-present down()] {"approval_template_group_backfill_batches":{"exists":true,"count":1},"approval_template_group_backfill_batch_groups":{"exists":true,"count":0},"approval_template_group_backfill_batch_links":{"exists":true,"count":0}}
+PASS: Case 2 precondition: exactly one row in batches, zero in the two detail tables
+[snapshot after rejected down()] {"approval_template_group_backfill_batches":{"exists":true,"count":1},"approval_template_group_backfill_batch_groups":{"exists":true,"count":0},"approval_template_group_backfill_batch_links":{"exists":true,"count":0}}
+PASS: Case 2: down() threw when data was present
+PASS: Case 2: error message names the block code and the force env var
+PASS: Case 2: all three tables SURVIVE the rejected down() (not dropped)
+PASS: Case 2: row counts are byte-identical before vs after the rejected down() (batches=1, groups=0, links=0 both times)
+
+=== Case 3 (positive control): same fixture, FORCE env set -> down() must PASS and actually drop ===
+[snapshot after forced down()] {"approval_template_group_backfill_batches":{"exists":false,"count":-1},"approval_template_group_backfill_batch_groups":{"exists":false,"count":-1},"approval_template_group_backfill_batch_links":{"exists":false,"count":-1}}
+PASS: Case 3 (positive control): down() did NOT throw once the force env var was set, same data fixture as Case 2
+PASS: Case 3 (positive control): all three tables ARE dropped under force -- proves the guard (not something else) blocked Case 2
+
+ALL ASSERTIONS PASSED
+```
+
+（`count:-1` 是脚本自己的哨兵值,表示"表不存在,不去 `count(*)`",不是真实行数。）
+
+脚本收尾又调用一次 `up(db)` 把三张表重建为空表,使库回到"迁移已应用、表为空"的常规形状,供 §14.3 的回归套件直接复用同一个库。
+
+### 14.3 回归:`tsc` + 既有 7 文件套件(证明 up() 与其余端点零行为变化)
+
+```
+$ cd packages/core-backend && npx tsc --noEmit
+$ echo $?
+0
+```
+
+```
+$ DATABASE_URL=postgresql://ms2testbed@localhost:5432/metasheet2_a3down_20260921 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts \
+    tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+    --reporter=dot
+...
+ Test Files  7 passed (7)
+      Tests  86 passed (86)
+```
+
+`Test Files 7 passed (7)` / `Tests 86 passed (86)` —— 与 §10.5/§12.5/§13.4 三处记录的既有基线数字**逐字相同**,证明本次改动(仅 `down()`)对 `up()`、preview/execute/rollback/batches-list 四个端点、lifecycle/serialization 两个 A-1 既有文件**零行为变化**。
+
+**本轮未做、如实说明为什么**:未重跑 84 文件 required real-DB 步骤整份——本次改动范围是一个此前**从未被任何生产路径调用过**的函数(`down()` 在声明 §1.5/§1.7/`migrate.ts --rollback`/`--reset` 之外没有生产调用点,84 文件 required 套件本身也不调用它),84 文件全量回归对`down()`这条改动没有增量判别力,§12.5/§13.4 已经在更早的步骤里把它跑过。全量无库套件(`pnpm --filter @metasheet/core-backend test`)同理未重跑。
+
+### 14.4 补充证据(较弱,标注清楚):CLI `--rollback` 路径 + 一个意外发现
+
+在 §14.2 之外,本节额外尝试了"像运维一样,用 CLI 把这三张表连着后面两条无关迁移一起回退"这条路径,对照声明 §4.2 R6("一旦应用,要回退这三张表,必须先回退两条与分组功能完全无关的迁移")。结果:
+
+```
+$ npx tsx src/db/migrate.ts --rollback   # 回退 zzzz20260919130000_extend_archive_nonce_object_identity
+migration "zzzz20260919130000_extend_archive_nonce_object_identity" was executed successfully
+$ npx tsx src/db/migrate.ts --rollback   # 尝试回退 zzzz20260919120000_add_attachment_blob_purge_claim
+failed to execute migration "zzzz20260919120000_add_attachment_blob_purge_claim"
+failed to roll back
+Error: calling the transaction method for a Transaction is not supported
+    at Object.down (.../src/db/migrations/zzzz20260919120000_add_attachment_blob_purge_claim.ts:17:12)
+```
+
+**这不是本节引入的缺陷**:`zzzz20260919120000_add_attachment_blob_purge_claim.ts` 本次会话零字节改动,`git diff` 不含这个文件。它的 `down()` 自己在 Migrator 已经开起的事务连接上又调用一次 `.transaction()`,被 Kysely 拒绝——一个与本节 A-3 守卫完全无关的既有 bug,**恰好**挡在"CLI 链式回退到本迁移"这条路径的中间一步,使得声明 §4.2 R6 描述的运维耦合在当前 head 上**比原文更严重**:不仅要先回退两条无关迁移,其中一条现在**回退不了**(通过 CLI)。已如实记入设计 MD §23.6 第三条,**本节不修复它**——超出本次派工范围(只点名 A-3 的 `down()` 守卫),修复该文件需要独立评估。
+
+**恢复**:`npx tsx src/db/migrate.ts --latest` 把两条无关迁移重新应用回去,`--list` 确认 `Applied: 413 / Pending: 0`,`psql` 确认三张批次表回到 0 行——库恢复到 §14.1 结束时的形状,供后续步骤(如果有)继续使用,或直接进入收尾。
+
+**层级声明**:这条补充证据只走到"CLI 链式回退卡在无关迁移"这一步,**没有**走到"CLI 层面亲测本节守卫拒绝/放行"——§14.2 的直接调用已经在更强的判别力下(绕开事务包裹、逐步快照)覆盖了这一点,§14.4 不重复也不能替代 §14.2 的结论,只作为运维路径现实性的独立佐证登记。
+
+### 14.5 收尾
+
+```
+$ dropdb -U ms2testbed metasheet2_a3down_20260921
+$ psql -U ms2testbed -d postgres -lqt | cut -d'|' -f1 | grep -c metasheet2_a3down_20260921
+0
+```
+
+`.probe-scratch/a3down-probe.ts` 已在写作本节前删除(`git status --short` 只剩 3 个文件的合法编辑:本迁移 + 设计 MD §23 + 本节)。**未做**:合并、undraft、开/改 PR、把迁移应用到任何共享/staging/prod 库、改锁文正文、改 `plugin-tests.yml`/`vitest.config.ts`/s6a 钉。
+
+---
+
 ## 13. P3 卫生轮(2026-09-19)
 
 范围:`impl-gate-A3-round4-20260918.md` 与 `impl-gate-A3-round2-20260918.md` 两份门审报告里**全部**仍开放的 P3(round-3 的 3 条 P3 已在 §12.2–§12.4 全部闭合,round-2 的 6 条 P3 里已有 4 条在 §10.1–§10.4 闭合——见下表,均在本轮之前;本轮新处理的是这两份报告余下未闭合的项)。硬规矩:本轮**生产代码零行为改动**,只允许测试、注释、MD、`scripts/dev`;含 DDL/需要新并发测试/owner 裁决的项只登记不做。
