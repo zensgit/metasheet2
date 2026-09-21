@@ -118,8 +118,10 @@
  * `sources.approval === 'unavailable'` to guard `countApprovalPendingForViewer`'s own SELECT
  * failing — breaking it (round-3 gate `impl-gate-B-slice1-round3-20260918.md` MU2: `approval_reads`
  * renamed to a non-existent table, leaving `whereSql` and the row-version SELECT untouched) turns 20
- * of this file's 27 cases red for OTHER reasons (all sixteen A0 `count`/`unreadCount` assertions plus
- * four of Judge B's five cases — everything that calls the shared count path, via `expected 500 to be
+ * of this file's 27 cases red for OTHER reasons (fifteen of A0's sixteen `count`/`unreadCount`
+ * assertions — `?sourceSystem=bogus` is rejected 400 before reaching the count query, so it
+ * survives — plus four of Judge B's five cases plus Judge C's cross-snapshot list+count case;
+ * 15 + 4 + 1 = 20 — everything that calls the shared count path, via `expected 500 to be
  * 200` / `expected 'unavailable' to be 'ok'` / `expected { approval: 'unavailable' } to deeply equal
  * { approval: 'ok' }`) — that is detection via collateral failure, not a guard via a positive
  * `unavailable` assertion. Judge B's API-layer half is DISCHARGED for the
