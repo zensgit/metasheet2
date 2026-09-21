@@ -49,6 +49,13 @@ import {
 } from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
 import {
+  assignmentMatchesActor,
+  decidableNodeKeysForInstance,
+  decisionDoorIsSeatGated,
+  resolveCanDecideCurrentNode,
+  type SeatedAssignment,
+} from '../services/approval-seat-authorization'
+import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
   evaluateApprovalConditionFormula,
@@ -209,6 +216,13 @@ interface ApprovalInstance {
   // previously untyped-but-present) so `rejectIfCancelRound`'s `{ workflow_key?: ... }` parameter
   // has a real property in common with `ApprovalInstance` (bare structural weak-type check, TS2559).
   workflow_key?: string | null
+  // Columns the legacy decision door's seat mirror reads. Every legacy `/approve` and `/reject`
+  // load is already a `SELECT *` on `approval_instances`, so these arrive at runtime today; they
+  // are typed here (additively, all optional) so `resolveLegacyDecisionSeat` can read them without
+  // a cast. No query changed to obtain them.
+  published_definition_id?: string | null
+  current_node_key?: string | null
+  metadata?: Record<string, unknown> | null
   created_at: Date
   updated_at: Date
 }
@@ -465,6 +479,175 @@ async function listDirectApprovalAssigneeIds(instanceId: string): Promise<string
   return result.rows
     .map((row) => row.assignee_id)
     .filter((userId) => typeof userId === 'string' && userId.trim().length > 0)
+}
+
+/**
+ * The SERVER-DERIVED node attribution + seat verdict the two legacy decision endpoints
+ * (`POST /api/approvals/:id/approve`, `POST /api/approvals/:id/reject`) write with.
+ *
+ * ### What was wrong
+ *
+ * Both legacy endpoints authorized a decision on `authenticate` + `approvals:act` + an optimistic
+ * `version` + `status === 'pending'`, and then wrote the caller's `req.body.metadata` into
+ * `approval_records.metadata` VERBATIM. Nothing checked that the caller held a seat at the node the
+ * instance is actually stopped on, and nothing produced the `nodeKey` the row is filed under — the
+ * caller supplied it. Both facts matter because `approval_records.metadata->>'nodeKey'` is read
+ * back as node ATTRIBUTION by downstream consumers (e.g. `loadPriorNodeApproverDeciders`'s
+ * prior-node decider map). A self-reported key is not attribution: the reader cannot tell a row a
+ * seated approver wrote at their own node from a row anyone holding `approvals:act` wrote while
+ * naming somebody else's node.
+ *
+ * ### What this establishes, and what it does not
+ *
+ * The verdict comes from `resolveCanDecideCurrentNode` — the SAME predicate
+ * `ApprovalProductService.dispatchAction`'s 403 `APPROVAL_ASSIGNMENT_REQUIRED` gate is built from
+ * and the same one the detail DTO ships as `canDecideCurrentNode`, called here rather than
+ * re-derived, so the three cannot drift. Its three clauses are exactly the three the reviewer asked
+ * to see proven, and each is carried by an input, not by a comment:
+ *
+ *   * STATUS — `resolveCanDecideCurrentNode` returns `false` unless `instance.status === 'pending'`
+ *     (the callers also keep their own pre-existing 400 `APPROVAL_STATUS_INVALID` ahead of this, so
+ *     a terminal instance never reaches here and its error identity is unchanged).
+ *   * SEAT — `assignmentMatchesActor` over the instance's assignments: a USER seat whose
+ *     `assignee_id` is the actor, or a ROLE seat whose `assignee_id` is one of the actor's resolved
+ *     roles. A delegated seat is already materialised as a real assignment row at CREATE time, so
+ *     it is covered with no special case; a `'source_queue'` seat matches nothing, here and at the
+ *     door alike.
+ *   * ROUND — the seat must be ACTIVE (`is_active = TRUE`, enforced inside `assignmentMatchesActor`
+ *     and again by this function's own `WHERE`) and must sit at a key in
+ *     `decidableNodeKeysForInstance` — the stored `current_node_key` plus, inside a parallel
+ *     region, the pending branch frontier. A round that has ended has had its assignments
+ *     deactivated and a re-activated node carries a FRESH set, so "an active seat at a decidable
+ *     node key" IS the current round: there is no separate round predicate to add, and none is
+ *     invented here.
+ *
+ * NOT seat-gated instances — a legacy platform row with no `published_definition_id`, or a `plm:`
+ * mirror — keep TODAY'S authorization exactly: `decisionDoorIsSeatGated` is false for them,
+ * `resolveCanDecideCurrentNode` therefore returns `true`, and the endpoints behave as they do now.
+ * That is deliberate: those rows have no assignments to hold a seat in, and `/api/approvals/:id/
+ * actions` does not seat-gate them either (it dispatches them to `ApprovalBridgeService`, which has
+ * no assignment gate at all). Narrowing them here would refuse callers the OTHER door still
+ * accepts — a second, stricter predicate, which is the drift this module exists to prevent.
+ *
+ * Attribution is returned ONLY for a seat-gated instance, and only as the `node_key` of the very
+ * assignment that satisfied the predicate. On a non-seat-gated instance it is `null` — there is no
+ * server-side seat evidence behind any node name, so no node name is written. In BOTH cases the
+ * caller strips the client's own `nodeKey`/`nodeEntryEpoch` keys (see `sanitizeLegacyDecisionMetadata`):
+ * a key the server cannot vouch for is never stored, whether or not the server has one of its own.
+ *
+ * WHAT THIS DOES NOT FIX, stated plainly so the deliverable is not read as "the legacy routes are
+ * now safe": this narrows WHO may drive a legacy decision and WHAT node the resulting row is filed
+ * under. It does not change what the endpoints DO — they still set the instance's terminal status
+ * directly, without node progression, without the executor's completion event, and without waking
+ * the bridge. A seated approver going through legacy `/approve` still strands a template-runtime
+ * instance exactly as before.
+ */
+async function resolveLegacyDecisionSeat(
+  client: { query: typeof pool.query },
+  instance: ApprovalInstance,
+  actorId: string,
+  actorRoles: string[],
+): Promise<{ allowed: boolean; seatGated: boolean; nodeKey: string | null }> {
+  const row = {
+    id: instance.id,
+    status: instance.status,
+    source_system: instance.source_system ?? null,
+    published_definition_id: instance.published_definition_id ?? null,
+    current_node_key: instance.current_node_key ?? null,
+    metadata: instance.metadata ?? null,
+  }
+  const seatGated = decisionDoorIsSeatGated(row)
+  if (!seatGated) {
+    // Same-transaction, same-client read is skipped entirely: there is no seat to resolve, and the
+    // verdict below does not consult assignments for a non-seat-gated row.
+    return {
+      allowed: resolveCanDecideCurrentNode({
+        instance: row,
+        assignments: [],
+        viewerUserId: actorId,
+        viewerRoles: actorRoles,
+      }),
+      seatGated: false,
+      nodeKey: null,
+    }
+  }
+
+  // SAME client as the `SELECT ... FOR UPDATE` above it, so the seat this reads is the seat the
+  // instance row is locked against — never a second connection that could observe a different
+  // round.
+  const assignmentRows = await client.query<SeatedAssignment>(
+    `SELECT node_key, is_active, assignment_type, assignee_id
+       FROM approval_assignments
+      WHERE instance_id = $1 AND is_active = TRUE`,
+    [instance.id],
+  )
+  const assignments = assignmentRows.rows
+  const allowed = resolveCanDecideCurrentNode({
+    instance: row,
+    assignments,
+    viewerUserId: actorId,
+    viewerRoles: actorRoles,
+  })
+  if (!allowed) {
+    return { allowed: false, seatGated: true, nodeKey: null }
+  }
+
+  // The node the verdict came from, derived from the SAME two primitives the predicate is built
+  // out of (`decidableNodeKeysForInstance` + `assignmentMatchesActor`) applied to the SAME rows —
+  // so it is the key of an assignment that actually satisfied the gate, not a second guess at it.
+  const decidableNodeKeys = new Set(decidableNodeKeysForInstance(row.current_node_key, row.metadata))
+  const seat = assignments.find((assignment) => (
+    typeof assignment.node_key === 'string'
+    && decidableNodeKeys.has(assignment.node_key)
+    && assignmentMatchesActor(assignment, actorId, actorRoles)
+  ))
+  if (!seat?.node_key) {
+    // Unreachable by construction (the predicate above returned true for a seat-gated instance
+    // only because some such assignment exists). Fail CLOSED rather than write an unattributed row:
+    // a disagreement between the verdict and the derivation is exactly the drift this guards.
+    return { allowed: false, seatGated: true, nodeKey: null }
+  }
+  return { allowed: true, seatGated: true, nodeKey: seat.node_key }
+}
+
+/**
+ * The node-attribution keys a legacy decision row's metadata may carry. They are SERVER-DERIVED,
+ * never client-supplied: a caller that sends either of them has it dropped (and the drop logged,
+ * values-free — the key NAMES below are a fixed literal set, never the caller's values).
+ *
+ * `nodeEntryEpoch` is stripped alongside `nodeKey` even though this route only ever re-derives it
+ * for a seat-gated instance: the two are read together as one attribution (`nodeKey` says which
+ * node, `nodeEntryEpoch` says which ROUND of it), and leaving the round half client-writable would
+ * let a caller file an honest node key under somebody else's round.
+ */
+const LEGACY_DECISION_SERVER_DERIVED_METADATA_KEYS = ['nodeKey', 'nodeEntryEpoch'] as const
+
+function sanitizeLegacyDecisionMetadata(
+  metadata: Record<string, unknown>,
+  instanceId: string,
+  derived: { nodeKey: string | null; nodeEntryEpoch: number | null },
+): Record<string, unknown> {
+  const dropped: string[] = []
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(metadata)) {
+    if ((LEGACY_DECISION_SERVER_DERIVED_METADATA_KEYS as readonly string[]).includes(key)) {
+      dropped.push(key)
+      continue
+    }
+    sanitized[key] = value
+  }
+  if (dropped.length > 0) {
+    logger.warn(
+      `Legacy approval decision on ${instanceId}: ignored client-supplied server-derived metadata key(s): ${dropped.join(', ')}`,
+    )
+  }
+  if (derived.nodeKey !== null) {
+    sanitized.nodeKey = derived.nodeKey
+  }
+  if (derived.nodeEntryEpoch !== null) {
+    sanitized.nodeEntryEpoch = derived.nodeEntryEpoch
+  }
+  return sanitized
 }
 
 async function publishApprovalCountsForUsers(
@@ -2932,6 +3115,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         }
 
         // P17/P22: attendance instances fail closed before legacy terminal DML.
+        // ORDER IS LOAD-BEARING: this stays AHEAD of the seat gate below, so a seatless caller on
+        // an attendance-sourced instance keeps receiving the attendance refusal it receives today.
+        // Reversing the two would change the error identity on a path that is already refused.
         try {
           await assertAttendanceCentralMutationFailClosed(client, instance)
         } catch (error) {
@@ -2945,6 +3131,28 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           throw error
         }
 
+        // SEAT / ROUND / STATUS — the decision door's own predicate, BEFORE any DML in this
+        // transaction (the two statements above it are SELECT-only), so a refusal leaves zero rows
+        // rather than a rolled-back write. See `resolveLegacyDecisionSeat`.
+        const actorRoles = resolveApprovalActorRoles(req)
+        const seat = await resolveLegacyDecisionSeat(client, instance, userId, actorRoles)
+        if (!seat.allowed) {
+          await client.query('ROLLBACK')
+          // EXISTING code, reused verbatim from `ApprovalProductService.dispatchAction`'s gate
+          // (403 `APPROVAL_ASSIGNMENT_REQUIRED`) — no new error code is minted here. The envelope
+          // is this route's own `{ ok: false, error }` shape, unchanged, and the message is
+          // values-free (no seat list, no node key, no actor id).
+          return res.status(403).json(
+            approvalErrorResponse(
+              'APPROVAL_ASSIGNMENT_REQUIRED',
+              'Approval assignment not found for actor',
+            ),
+          )
+        }
+        // ORDER (F4 (i), owner-named 2026-09-25): the seat gate above runs FIRST, this cancel-round
+        // outlet guard SECOND. A caller with no seat on a cancel-round instance is therefore refused
+        // with the same values-free 403 as on any other instance and learns nothing about the
+        // instance's kind; a seated caller still meets the 409 outlet guard before any DML.
         // Lock §14.3 outlet #7 — this legacy endpoint never checks `isTemplateRuntimeInstance`
         // (that dispatch lives at `:2796-2799`, several hundred lines away) and locks ANY
         // `platform` pending instance by id above, so a cancel-round instance is reachable here.
@@ -2952,6 +3160,19 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // never in the cancel-round allowed set at all — action-independent, so this rejects
         // before the action-specific DML below regardless of which legacy verb the request used.
         rejectIfCancelRound(instance, 'legacy POST /:id/approve')
+        // The ROUND half of the attribution, resolved by the door's OWN resolver
+        // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
+        // `DISTINCT entry_epoch` query, and called ONLY for a seat-gated instance whose node the
+        // actor was just admitted at — so the resolver's "no active assignments" fail-closed branch
+        // is unreachable from here, and a non-seat-gated legacy row (which has no assignments at
+        // all) never reaches it.
+        const nodeEntryEpoch = seat.nodeKey !== null
+          ? await productService.currentNodeEntryEpoch(client, id, seat.nodeKey)
+          : null
+        const attributedMetadata = sanitizeLegacyDecisionMetadata(metadata, id, {
+          nodeKey: seat.nodeKey,
+          nodeEntryEpoch,
+        })
 
         const newVersion = instance.version + 1
 
@@ -2974,7 +3195,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
             instance.status,
             instance.version,
             newVersion,
-            JSON.stringify(metadata),
+            JSON.stringify(attributedMetadata),
             req.ip || null,
             req.get('user-agent') || null,
           ],
@@ -3104,6 +3325,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         }
 
         // P17/P22: attendance instances fail closed before legacy terminal DML.
+        // ORDER IS LOAD-BEARING: this stays AHEAD of the seat gate below, so a seatless caller on
+        // an attendance-sourced instance keeps receiving the attendance refusal it receives today.
+        // Reversing the two would change the error identity on a path that is already refused.
         try {
           await assertAttendanceCentralMutationFailClosed(client, instance)
         } catch (error) {
@@ -3117,6 +3341,28 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           throw error
         }
 
+        // SEAT / ROUND / STATUS — the decision door's own predicate, BEFORE any DML in this
+        // transaction (the two statements above it are SELECT-only), so a refusal leaves zero rows
+        // rather than a rolled-back write. See `resolveLegacyDecisionSeat`.
+        const actorRoles = resolveApprovalActorRoles(req)
+        const seat = await resolveLegacyDecisionSeat(client, instance, userId, actorRoles)
+        if (!seat.allowed) {
+          await client.query('ROLLBACK')
+          // EXISTING code, reused verbatim from `ApprovalProductService.dispatchAction`'s gate
+          // (403 `APPROVAL_ASSIGNMENT_REQUIRED`) — no new error code is minted here. The envelope
+          // is this route's own `{ ok: false, error }` shape, unchanged, and the message is
+          // values-free (no seat list, no node key, no actor id).
+          return res.status(403).json(
+            approvalErrorResponse(
+              'APPROVAL_ASSIGNMENT_REQUIRED',
+              'Approval assignment not found for actor',
+            ),
+          )
+        }
+        // ORDER (F4 (i), owner-named 2026-09-25): the seat gate above runs FIRST, this cancel-round
+        // outlet guard SECOND. A caller with no seat on a cancel-round instance is therefore refused
+        // with the same values-free 403 as on any other instance and learns nothing about the
+        // instance's kind; a seated caller still meets the 409 outlet guard before any DML.
         // Lock §14.3 outlet #7′ — same reachability as #7 above (no `isTemplateRuntimeInstance`
         // check, no action check, locks any `platform` pending instance by id). A cancel-round
         // reject must go through `dispatchAction` because `approval_rounds.outcome` is only
@@ -3124,6 +3370,19 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // instance `rejected` with the round still `pending`, a permanent placeholder that blocks
         // re-issuing a cancel round for the same document (§5 I3 "terminal releases the slot").
         rejectIfCancelRound(instance, 'legacy POST /:id/reject')
+        // The ROUND half of the attribution, resolved by the door's OWN resolver
+        // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
+        // `DISTINCT entry_epoch` query, and called ONLY for a seat-gated instance whose node the
+        // actor was just admitted at — so the resolver's "no active assignments" fail-closed branch
+        // is unreachable from here, and a non-seat-gated legacy row (which has no assignments at
+        // all) never reaches it.
+        const nodeEntryEpoch = seat.nodeKey !== null
+          ? await productService.currentNodeEntryEpoch(client, id, seat.nodeKey)
+          : null
+        const attributedMetadata = sanitizeLegacyDecisionMetadata(metadata, id, {
+          nodeKey: seat.nodeKey,
+          nodeEntryEpoch,
+        })
 
         const newVersion = instance.version + 1
 
@@ -3147,7 +3406,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
             instance.status,
             instance.version,
             newVersion,
-            JSON.stringify(metadata),
+            JSON.stringify(attributedMetadata),
             req.ip || null,
             req.get('user-agent') || null,
           ],
