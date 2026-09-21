@@ -169,11 +169,20 @@ function maybe_run_provision() {
   fi
 
   info "Running access provisioning gate (PROVISION_USER_ID set)..."
-  if API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="employee" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
+  if API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
+    AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
+    USER_ID="$PROVISION_USER_ID" ROLE="employee" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
     >"${OUTPUT_ROOT}/gate-provision-employee.log" 2>&1 \
-    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="approver" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
+    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
+      AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+      REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
+      USER_ID="$PROVISION_USER_ID" ROLE="approver" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
       >"${OUTPUT_ROOT}/gate-provision-approver.log" 2>&1 \
-    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="admin" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
+    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
+      AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+      REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
+      USER_ID="$PROVISION_USER_ID" ROLE="admin" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
       >"${OUTPUT_ROOT}/gate-provision-admin.log" 2>&1; then
     gate_provision="PASS"
     return 0
