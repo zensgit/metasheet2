@@ -329,6 +329,23 @@ Per guarded call, measured against the unguarded `new RegExp(p).test(v)`:
 by a few multiples of `USER_REGEX_PROBE_FLOOR_MS` plus one real call, because it stops at
 the first rung that crosses the floor.
 
+**Per-call is the wrong unit for a finding about event-loop occupancy**, so the aggregate
+shape was measured too: one `validateRecord` over a record carrying 20 pattern-ruled
+fields (the loop that actually runs on a record write).
+
+| record | value length | guarded | unguarded |
+|---|---|---|---|
+| 20 slug fields, typical value | 13 | **0.069ms** | 0.002ms |
+| 20 e-mail fields, typical value | 19 | **0.080ms** | 0.002ms |
+| 20 slug fields, 1000-char value | 1000 | 1.013ms | 0.057ms |
+| 20 slug fields, ceiling-length value | 10000 | 7.895ms | 0.572ms |
+
+At realistic value lengths a 20-field record costs tens of microseconds of guard overhead.
+The ceiling-length row is the honest upper corner: 7.9ms per record, ~14x the unguarded
+0.57ms, and it is the row a bulk path would multiply. **NOT RUN:** no measurement of a
+bulk import / batch-create path (N records x M pattern-ruled fields) and no concurrency
+measurement of the guard's own cost. §6.
+
 ### 5.7 SUBSTITUTE
 
 `substituteLiteral("xa+y","a+","Z") → "xZy"` (arg-2 treated literally; the old regex impl
@@ -382,6 +399,12 @@ design MD §3.4(1).
   behaviourally (M8). Design MD §3F.
 - **No victim-latency or concurrency measurement of the guard's own cost.** §5.6 is
   single-process timing. A 444µs guard on a hot write path was not load-tested.
+- **Bulk write paths NOT measured.** §5.6's aggregate row is one record with 20
+  pattern-ruled fields. An import or batch-create multiplies it by the row count, and that
+  shape — the one that lands back on the same shared single-threaded loop this slice
+  exists to protect — has no number here. At typical value lengths the per-record figure
+  is tens of microseconds, so the concern is bounded rather than absent; at ceiling-length
+  values it is 7.9ms per record.
 - **Refusals are unobservable.** No metric, no log line, no counter. If a tenant's
   legitimate pattern were refused in production, nothing would surface it. Design MD
   §3.4(8).
@@ -404,7 +427,7 @@ Round 1: `extract.cjs`, `fuzz-one.cjs`, `runner.cjs`, `controls.cjs`, `run-contr
 `probe-formula.ts`, `probe-dryrun.ts`, `probe-stored.ts`, `probe-validate.ts`, `oob-server.ts`,
 `oob-client.mjs`, plus `h3-sites.json` / `h3-fuzz.json` / `controls-result*.txt`.
 
-Round 2: `soak.cjs` (§5.2/§5.3 tables), `overhead.cjs` (§5.6), `residual.cjs` +
+Round 2: `soak.cjs` (§5.2/§5.3 tables), `overhead.cjs` + `zzz-h3-measure2.test.ts` (§5.6), `residual.cjs` +
 `residual-one.cjs` (design MD §3D.1), `ladder-trace.cjs` (the §3C.2 diagnosis),
 `mutate.py` + `run-mutations.sh` (§5.5). Everything committed lives in the three test files
 listed in design MD §4; the numbers above are reproducible from them plus the constants.

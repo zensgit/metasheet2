@@ -153,6 +153,24 @@ concurrent request, across all tenants.
   split/join, O(n)). This both fixes a spec bug (Excel/Sheets SUBSTITUTE is literal,
   not regex) and removes the vector — arg-2 never reaches a regex engine. This IS a
   complete fix for this function; it is also a behaviour change, see §3.4(1).
+
+  **No subject ceiling on SUBSTITUTE, and that is a decision, not an oversight.** The
+  ceiling exists to bound backtracking, and after this change arg-2 never reaches a
+  backtracking engine at all: `split/join` is Θ(n) in the text with no super-linear shape
+  available to an attacker. The remaining cost is allocation, and it is measured to be
+  the same order as what `origin/main` already did:
+
+  | text | old-text | new (`split/join`) | `origin/main` (`.replace(/…/g)`) |
+  |---|---|---|---|
+  | 10000 | 1 char | 0.06ms | 0.06ms |
+  | 100000 | 1 char | 0.66ms | 0.50ms |
+  | 1000000 | 1 char | 6.92ms | 5.67ms |
+
+  ~1.2x of the pre-image at 1e6 characters, both linear. Adding a ceiling here would be a
+  NEW refusal of inputs that work on `origin/main` today, bought against a cost curve that
+  is not the one this slice exists to bound — so it is declined on the record rather than
+  added. If the owner wants formula text arguments bounded, that is a separate contract
+  decision about the formula core, not a ReDoS mitigation.
 - **`REGEX*` → `runUserRegex`** (`formula/regex-safety.ts:250`), which refuses on two
   measured criteria and on nothing else:
   1. **the subject ceiling first** — `USER_REGEX_MAX_SUBJECT_LEN = 10000` (`:80`) and
