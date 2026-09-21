@@ -1810,6 +1810,233 @@ components:
           format: date-time
           nullable: true
       required: [id, tenantId, pipelineId, mode, status, rowsRead, rowsCleaned, rowsWritten, rowsFailed]
+    StockPreparationSnapshotBatchSummary:
+      type: object
+      description: >-
+        Q4c: one row of the readonly BOM snapshot-batch LIST (view 2). Exact shape produced by
+        plugin-integration-core's batchSummary
+        (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:201), one per
+        immutable snapshot batch of the business project. Values-free: no drawing number,
+        quantity, unit, path key or timestamp value, only counts/status enums/booleans and the
+        presence of createdAt (never its value).
+      properties:
+        snapshotBatchId:
+          type: string
+          nullable: true
+        snapshotVersion:
+          type: integer
+          description: Defaults to 0 when the stored cell is missing or non-numeric.
+        snapshotStatus:
+          type: string
+          nullable: true
+        syncRunId:
+          type: string
+          nullable: true
+        lineCount:
+          type: integer
+          description: Count of bom_snapshot_line rows linked to this batch.
+        createdAtPresent:
+          type: boolean
+          description: Whether the batch row's createdAt cell is set — never the timestamp itself.
+        incomplete:
+          type: boolean
+          description: >-
+            True when the multi-step persist path (batch row -> lines -> run row) did not
+            finish: zero lines OR no matching run row (isBatchIncomplete,
+            stock-preparation-snapshot-reads.cjs:197). An orphaned batch is never presented as
+            normal.
+      required: [snapshotBatchId, snapshotVersion, snapshotStatus, syncRunId, lineCount, createdAtPresent, incomplete]
+    StockPreparationSnapshotBatchListResult:
+      type: object
+      description: >-
+        Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches
+        (listSnapshotBatches, stock-preparation-snapshot-reads.cjs:228). Batches are ordered
+        newest-first (highest snapshotVersion first; snapshotBatchId breaks ties,
+        orderBatches, same file:215). An unprovisioned batch sheet degrades gracefully to
+        `{ projectId, batchCount: 0, batches: [] }` rather than an error.
+      properties:
+        projectId:
+          type: string
+          description: The (business) projectId the request named, echoed back.
+        batchCount:
+          type: integer
+        batches:
+          type: array
+          items: { $ref: '#/components/schemas/StockPreparationSnapshotBatchSummary' }
+      required: [projectId, batchCount, batches]
+    StockPreparationSnapshotChangeCounts:
+      type: object
+      description: >-
+        Q4c: values-free per-changeType tally over one snapshot-batch diff's evidence
+        (changeCountsFromEvidence, stock-preparation-snapshot-reads.cjs:263). Exactly these 10
+        keys; each defaults to 0 when the engine's evidence carries no rows of that changeType.
+        `componentCodeChanged`/`materialChanged` (added Q3c) are independent of
+        `fingerprintChanged` — a row can carry more than one changeType, so these two do not
+        subtract from it.
+      properties:
+        added: { type: integer }
+        removed: { type: integer }
+        quantityChanged: { type: integer }
+        unitChanged: { type: integer }
+        versionChanged: { type: integer }
+        pathChanged: { type: integer }
+        missingChildBom: { type: integer }
+        fingerprintChanged:
+          type: integer
+          description: Tally of the engine's source_fingerprint_changed changeType.
+        componentCodeChanged:
+          type: integer
+          description: >-
+            In-place component-code swap at an otherwise unchanged path (Q3c fingerprint
+            decomposition); previously only visible folded into fingerprintChanged.
+        materialChanged:
+          type: integer
+          description: >-
+            In-place material substitution at an otherwise unchanged path (Q3c fingerprint
+            decomposition); previously only visible folded into fingerprintChanged.
+      required:
+        - added
+        - removed
+        - quantityChanged
+        - unitChanged
+        - versionChanged
+        - pathChanged
+        - missingChildBom
+        - fingerprintChanged
+        - componentCodeChanged
+        - materialChanged
+    StockPreparationSnapshotDiffResult:
+      type: object
+      description: >-
+        Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff
+        (getSnapshotDiff, stock-preparation-snapshot-reads.cjs:404). Values-free counts-only diff
+        of the named batch against its resolved base (predecessor or caller-chosen). An
+        unprovisioned substrate (no batch/line/exception sheet at all) degrades gracefully to
+        zero counts and a null baseSnapshotBatchId rather than an error.
+      properties:
+        snapshotBatchId:
+          type: string
+        baseSnapshotBatchId:
+          type: string
+          nullable: true
+          description: >-
+            null when no predecessor exists and the caller named none. Otherwise the resolved
+            (auto-picked or caller-chosen and validated) base batch id.
+        changeCounts:
+          $ref: '#/components/schemas/StockPreparationSnapshotChangeCounts'
+        blockingExceptionCount:
+          type: integer
+          description: >-
+            exception_confirmation rows linked to this batch whose stored severity is
+            'blocking'; not filtered by resolution status.
+      required: [snapshotBatchId, baseSnapshotBatchId, changeCounts, blockingExceptionCount]
+    StockPreparationSnapshotDiffRow:
+      type: object
+      description: >-
+        Q4c: one row of the per-row diff browse (view 2 rows). Exact projection produced by
+        projectDiffRow over the engine's makeDiff output, through the closed DIFF_ROW_KEYS
+        allowlist (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:526,
+        :543) — a future engine key can never leak through this route unreviewed. Values-free:
+        handles, enums and sha16-prefixed fingerprints only, never a drawing number, quantity,
+        unit or path key value.
+      properties:
+        diffId:
+          type: string
+          description: Deterministic id (stableDiffId) hashing (base, current, row key).
+        diffType:
+          type: string
+          enum: [added, removed, changed, unchanged, held]
+        reviewStatus:
+          type: string
+          enum: [ready, held]
+          description: >-
+            'held' iff changeTypes includes at least one BLOCKING_CHANGE_TYPES entry
+            (reviewStatusForChangeTypes, stock-preparation-snapshot-diff.cjs:240).
+        changeTypes:
+          type: array
+          items:
+            type: string
+            enum:
+              - added
+              - removed
+              - quantity_changed
+              - unit_changed
+              - version_changed
+              - path_changed
+              - parent_changed
+              - material_changed
+              - component_code_changed
+              - source_fingerprint_changed
+              - invalid_qty
+              - missing_child_bom
+              - duplicate_path_key
+              - missing_path_key
+        reason:
+          type: string
+          description: >-
+            Fixed diagnostic token naming which diff rule produced this row (e.g.
+            matched_path_changed, missing_from_current_snapshot, new_in_current_snapshot,
+            previous_missing_path_key). Closed set today but not asserted stable across engine
+            versions, so left as a free string rather than an enum.
+        rowCount:
+          type: integer
+          description: >-
+            Usually 1 (one source line); >1 only for a duplicate_path_key collision row, where
+            it is the number of raw rows collapsed into this one diagnostic entry.
+        previousSnapshotLineId:
+          type: string
+          nullable: true
+        currentSnapshotLineId:
+          type: string
+          nullable: true
+        keyFingerprint:
+          type: string
+          description: 'sha16:-prefixed non-reversible hash of the row''s match key.'
+        previousPathKeyFingerprint:
+          type: string
+          description: >-
+            sha16:-prefixed hash of the previous row's path key. OMITTED entirely (not null)
+            when there is no previous row or it carries no path key.
+        currentPathKeyFingerprint:
+          type: string
+          description: >-
+            sha16:-prefixed hash of the current row's path key. OMITTED entirely (not null)
+            when there is no current row or it carries no path key.
+      required:
+        - diffId
+        - diffType
+        - reviewStatus
+        - changeTypes
+        - reason
+        - rowCount
+        - previousSnapshotLineId
+        - currentSnapshotLineId
+        - keyFingerprint
+    StockPreparationSnapshotDiffRowsResult:
+      type: object
+      description: >-
+        Q4c: `data` of
+        GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows
+        (listSnapshotDiffRows, stock-preparation-snapshot-reads.cjs:558). Same base-resolution
+        and H-1 completeness-gate semantics as the counts diff; `heldRowCount` is computed over
+        the WHOLE pair BEFORE the optional reviewStatus/diffType filters, so a filtered read
+        keeps that context; `rowCount` is the length of `rows` AFTER filtering.
+      properties:
+        snapshotBatchId:
+          type: string
+        baseSnapshotBatchId:
+          type: string
+          nullable: true
+        rowCount:
+          type: integer
+          description: rows.length after any reviewStatus/diffType filter is applied.
+        heldRowCount:
+          type: integer
+          description: Count of held-reviewStatus rows over the whole pair, before filtering.
+        rows:
+          type: array
+          items: { $ref: '#/components/schemas/StockPreparationSnapshotDiffRow' }
+      required: [snapshotBatchId, baseSnapshotBatchId, rowCount, heldRowCount, rows]
     IntegrationPipelineFieldMapping:
       type: object
       description: >-
