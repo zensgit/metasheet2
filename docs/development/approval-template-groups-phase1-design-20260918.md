@@ -55,7 +55,7 @@
 
 ## 2. 数据模型与约束(每条对锁文 §2 逐行)
 
-DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090000_create_approval_template_groups.ts`(**含 DDL,本 PR 只能 Draft,不应用不合并**)。
+DDL 文件:`packages/core-backend/src/db/migrations/zzzz20260918090100_create_approval_template_groups.ts`(**含 DDL,本 PR 只能 Draft,不应用不合并**)。
 
 ### 2.1 `approval_template_groups`
 
