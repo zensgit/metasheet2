@@ -176,8 +176,27 @@ const EXEMPT: Record<string, string> = {
  * who may not use that sheet whether it is still there — the oracle #5830 removed from
  * `requireRecordReadable`, still present in the route handlers named below. The list is exact and can
  * only shrink: a new handler of this shape reds, and a fixed one must leave.
+ *
+ * ── The third alternative, and why it exists (#5936) ──────────────────────────
+ * The first two alternatives recognise the probe only in its `loadSheetRow(…)` and its EXACT
+ * single-line `FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL` forms. `GET /context` writes
+ * the same question with a TABLE ALIAS, across four lines and behind a LEFT JOIN
+ * (`FROM meta_sheets s … WHERE s.id = $1 AND s.deleted_at IS NULL`), so it matched neither — and a
+ * ledger that cannot see a handler cannot hold it to account. It was found by hand, not by this
+ * guard, which is the failure this alternative removes.
+ *
+ * It is deliberately narrow in three ways, so it flags EXISTENCE probes and not every join that
+ * happens to filter a soft delete:
+ *   - the alias is CAPTURED and BACK-REFERENCED, so `FROM meta_sheets s … b.deleted_at IS NULL`
+ *     (univer-meta.ts's base-liveness filter) and `FROM other_table x … x.deleted_at IS NULL` do
+ *     NOT match — the filter has to be on the SHEET the query is reading;
+ *   - the span between the two halves is bounded and may not cross a SECOND `FROM … meta_sheets`,
+ *     so a match is always one statement, never two spliced together;
+ *   - only `FROM` (optionally schema-qualified, optionally `AS`) — not `JOIN`. A joined
+ *     `meta_sheets` is normally a row FILTER on another table's rows (`FROM meta_records r JOIN
+ *     meta_sheets s …`), not the "is THIS sheet row there?" question this ledger is about.
  */
-const EXISTENCE_PROBE = /\bawait\s+loadSheet(?:Row|RowShared|Summary)\s*\(|\bFROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL\b/
+const EXISTENCE_PROBE = /\bawait\s+loadSheet(?:Row|RowShared|Summary)\s*\(|\bFROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL\b|\bFROM\s+(?:\w+\.)?meta_sheets\s+(?:AS\s+)?(\w+)\b(?:(?!FROM\s+(?:\w+\.)?meta_sheets\b)[\s\S]){0,600}?\b\1\.deleted_at\s+IS\s+NULL\b/
 /** Where a handler first refuses a caller for lack of authority (the shared record gate refuses inside). */
 const AUTHORITY_REFUSAL = /\.status\(\s*403\s*\)|\bstatus:\s*403\b|\bsend\w*Forbidden\w*\(|\bForbiddenError\b|\brequireRecordReadable\(/
 /** The probe's miss is answered with a 404 by the very next `if`. */
@@ -312,6 +331,47 @@ describe('sheet-liveness closure over univer-meta routes', () => {
     expect(PROBE_MISS_IS_404.test(inline.slice(inline.search(EXISTENCE_PROBE)))).toBe(true)
     const soft = "const sheet = await loadSheetRow(q, sheetId)\nif (flag) log()\nif (!sheet) return res.status(404).json({})"
     expect(PROBE_MISS_IS_404.test(soft.slice(soft.search(EXISTENCE_PROBE)))).toBe(false)
+  })
+
+  /**
+   * #5936 — SELF-TEST for the third alternative. `GET /context` asked the existence question with a
+   * table ALIAS across four lines and this regex could not see it, so the ledger under-counted and the
+   * handler was found by hand instead. These cells are what "the widened probe reads the QUESTION, not
+   * the table name" rests on; drop the back-reference and the three negatives below go green.
+   */
+  it('the probe also reads the ALIASED, multi-line form — and only when the filter is on the sheet itself', () => {
+    const cap = "const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, q, sheetId)"
+    const refuse = 'if (!capabilities.canRead) return sendForbidden(res)'
+    const liveness = "if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)"
+    // GET /context's own shape, verbatim in structure: alias + LEFT JOIN + newlines.
+    const aliased = 'const sheetRowResult = await pool.query(\n'
+      + '  `SELECT s.id, s.base_id, s.name, s.description,\n'
+      + '          b.id AS base_ref_id, b.name AS base_name\n'
+      + '     FROM meta_sheets s\n'
+      + '     LEFT JOIN meta_bases b ON b.id = s.base_id\n'
+      + '    WHERE s.id = $1 AND s.deleted_at IS NULL`,\n'
+      + '  [resolvedSheetId],\n'
+      + ')\n'
+      + 'const sheetRow = sheetRowResult.rows[0]\n'
+      + 'if (!sheetRow) return res.status(404).json({})'
+    expect(EXISTENCE_PROBE.test(aliased)).toBe(true)
+    // Schema-qualified and `AS`-spelled variants of the same question (both occur in this repo).
+    expect(EXISTENCE_PROBE.test('FROM public.meta_sheets sheet_row\n WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL')).toBe(true)
+    expect(EXISTENCE_PROBE.test('FROM meta_sheets AS s\n WHERE s.id = $1 AND s.deleted_at IS NULL')).toBe(true)
+    // ORDER still decides, exactly as for the two older forms.
+    expect(probesExistenceBeforeAuthority([aliased, cap, refuse, liveness].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([cap, refuse, liveness, aliased].join('\n'))).toBe(false)
+
+    // NEGATIVES — the alias is captured and back-referenced, so the filter must be on the SHEET.
+    const otherTable = 'FROM other_table x\n  LEFT JOIN meta_bases b ON b.id = x.base_id\n WHERE x.id = $1 AND x.deleted_at IS NULL'
+    // univer-meta.ts's real base-liveness filter: meta_sheets is aliased `s`, the filter is on `b`.
+    const otherAlias = 'FROM meta_sheets s\n  JOIN meta_bases b ON b.id = s.base_id AND b.deleted_at IS NULL'
+    const otherEntity = 'FROM meta_bases b WHERE b.id = $1 AND b.deleted_at IS NULL'
+    // A JOINed meta_sheets is a row filter on ANOTHER table's rows, not this ledger's question.
+    const joined = 'FROM meta_records r\n  JOIN meta_sheets s ON s.id = r.sheet_id\n WHERE r.id = $1 AND s.deleted_at IS NULL'
+    for (const notAProbe of [otherTable, otherAlias, otherEntity, joined]) {
+      expect(EXISTENCE_PROBE.test(notAProbe), notAProbe).toBe(false)
+    }
   })
 
   // THE TRIPWIRE. A refactor that changes the registration STYLE (or a CRLF regression like the one

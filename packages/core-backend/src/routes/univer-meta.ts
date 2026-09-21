@@ -8654,6 +8654,38 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         resolvedSheetId = resolved.sheetId
       }
 
+      // #5936 — AUTHORITY BEFORE EXISTENCE, the #5839 B-series order, on the one univer-meta handler
+      // the closure guard could not see. The aliased sheet-row read below filters `s.deleted_at IS
+      // NULL` and used to answer `404 … Sheet not found: <id>` BEFORE this handler's first
+      // `sendForbidden` (which sits after the base-wide sheet-list load), so a signed-in caller
+      // /context was going to refuse anyway learned which of three things a sheet id was — live
+      // (403), soft-deleted (404) or never real (404) — with the id echoed back. The guard's
+      // EXISTENCE_PROBE recognised only the single-line `FROM meta_sheets WHERE id = $1 AND
+      // deleted_at IS NULL` form, so this handler was silently absent from its ledger; the probe now
+      // recognises the aliased, multi-line form too.
+      //
+      // ORDER ONLY — this gate NARROWS nothing and WIDENS nothing:
+      //   * the 403 predicate is the SAME `canReadWithSheetGrant(baseCapabilities, scope, isAdmin)`
+      //     the readable-rows filter below applies, evaluated against THIS sheet's scope, so every
+      //     caller that reached 200 before still reaches it;
+      //   * the membership check further down (`readableSheetRows.some(...)`, which additionally
+      //     requires the sheet to be listed under its base and not to be a hidden system sheet) is
+      //     untouched and still runs — this gate stands in FRONT of it, never instead of it.
+      // Deliberately NOT gated on `resolveSheetCapabilitiesForAccess`'s own `capabilities.canRead`:
+      // that additionally applies the approval-/e-learning-projection fences, which /context has
+      // never applied. That is a SEPARATE, separately-tracked defect (pinned today as a VACUOUS
+      // control in tests/integration/approval-projection-key-parity.db.test.ts); closing it here
+      // would be an unrelated behaviour change riding along inside an ordering fix.
+      if (resolvedSheetId) {
+        const { sheetScope, sheetLiveness } = await resolveSheetCapabilitiesForAccess(
+          pool.query.bind(pool),
+          resolvedSheetId,
+          access,
+        )
+        if (!canReadWithSheetGrant(baseCapabilities, sheetScope, access.isAdminRole)) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      }
+
       const sheetRowResult = resolvedSheetId
         ? await pool.query(
           `SELECT s.id, s.base_id, s.name, s.description, (to_jsonb(s) ->> 'system_kind') AS system_kind,
@@ -8668,7 +8700,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const sheetRow = (sheetRowResult as any).rows?.[0]
       if (resolvedSheetId && !sheetRow) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${resolvedSheetId}` } })
+        // Reachable only if the sheet was soft-deleted BETWEEN the liveness gate above and this read.
+        // Values-free by construction (multitable/sheet-refusals.ts) — the id echo that made this
+        // line the oracle #5936 reports is gone.
+        return sendSheetNotLive(res, 'absent')
       }
 
       if (!resolvedBaseId) {
