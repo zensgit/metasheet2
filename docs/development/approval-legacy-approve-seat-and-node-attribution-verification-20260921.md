@@ -74,8 +74,8 @@
 
 | 套件 | 结果 |
 |---|---|
-| `approval-revoke-terminal-guard.db.test.ts` + `approval-can-decide-current-node.db.test.ts` | **15/15 通过**（两文件）。前者是本变更**唯一**受影响的仓内 legacy-route 消费者（设计 §4 #6）|
-| `tests/unit/approvals-routes.test.ts` | **12/12 通过** |
+| `approval-revoke-terminal-guard.db.test.ts` + `approval-can-decide-current-node.db.test.ts` | **15/15 通过**（两文件）。前者是本变更受影响的仓内 legacy-route 消费者之一（设计 §4 #6；另一个见 #11）|
+| `tests/unit/approvals-routes.test.ts` | **12/12 通过**（设计 §4 #11）|
 
 ## 4. 两点接线
 
