@@ -1578,6 +1578,14 @@ jobs:
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # Arms this step's embedded anti-skip-green sentinels (module-top-level
+          # `itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip`, e.g.
+          # approval-comments.db.test.ts:56, approval-instance-readability-s1.db.test.ts:50,
+          # approval-lock9-process-attachments-realdb.db.test.ts:35): a missing/broken
+          # DATABASE_URL reaching this step's vitest workers goes RED instead of a silent
+          # skipped-green. The other files this step runs do not reference EXPECT_DB, so
+          # this is a no-op for them.
+          EXPECT_DB: '1'
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
