@@ -61,6 +61,12 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  *   * (9) `/actions` PARITY — the other door's verdict for the very same seatless caller and the
  *     very same instance is the same 403 with the same code, and the seated caller's `/actions`
  *     row carries the same server-derived `nodeKey`. The two doors now answer alike.
+ *   * (10) `/reject` ATTRIBUTION — the (4) discriminator again, on the OTHER legacy endpoint.
+ *     It exists because the attribution wiring is a PAIR of sibling call sites, one per endpoint,
+ *     and cases (3)(4)(5)(8) all run through `/approve` only: without this case a mutation of the
+ *     `/reject` site alone leaves the whole file green, and a both-sites mutation proves neither
+ *     site individually. `/reject`'s seatless refusal is already covered by (2); this is its
+ *     attribution half.
  *
  * Requires real PostgreSQL: the gate runs inside the route's own transaction, the role arm resolves
  * through `AuthService` → `user_roles`, and the attribution assertions read `approval_records`.
@@ -728,5 +734,48 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
     const rows = await recordsFor(created.id, 'approve')
     expect(rows).toHaveLength(1)
     expect(rows[0].metadata?.nodeKey).toBe('approval_a')
+  })
+
+  it('(10) /reject ATTRIBUTION — the (4) discriminator on the OTHER endpoint: `/reject`\'s own attribution site is separately load-bearing', async () => {
+    const admin = freshId('admin')
+    const requester = freshId('req')
+    const approverA = freshId('appr-a')
+    const approverB = freshId('appr-b')
+    await grantWrite(requester)
+    const adminToken = await authToken(admin, 'admin')
+    const requesterToken = await authToken(requester)
+    const approverAToken = await authToken(approverA)
+
+    const templateId = await publishTemplate(
+      adminToken,
+      twoStepGraph({ assigneeType: 'user', assigneeIds: [approverA] }, { assigneeType: 'user', assigneeIds: [approverB] }),
+      'forged-key-reject',
+    )
+    const created = await createApproval(requesterToken, templateId)
+
+    const response = await jsonRequest(baseUrl, `/api/approvals/${created.id}/reject`, approverAToken, {
+      method: 'POST',
+      body: {
+        version: created.version,
+        reason: 'no',
+        metadata: {
+          nodeKey: 'approval_b',
+          nodeEntryEpoch: 99999,
+          clientNote: 'keep-me',
+          nested: { a: 1 },
+        },
+      },
+    })
+    expect(response.status, await response.clone().text()).toBe(200)
+
+    const rows = await recordsFor(created.id, 'reject')
+    expect(rows).toHaveLength(1)
+    const metadata = rows[0].metadata ?? {}
+    expect(metadata.nodeKey).toBe('approval_a')
+    expect(metadata.nodeEntryEpoch).not.toBe(99999)
+    expect(Number.isInteger(metadata.nodeEntryEpoch)).toBe(true)
+    expect(metadata.clientNote).toBe('keep-me')
+    expect(metadata.nested).toEqual({ a: 1 })
+    expect((await rawRow(created.id)).status).toBe('rejected')
   })
 })
