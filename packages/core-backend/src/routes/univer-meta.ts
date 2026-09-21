@@ -8883,10 +8883,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -8915,10 +8911,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9064,10 +9056,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const exactMatch = req.query.match === 'exact'
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canEditRecord) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9164,10 +9152,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9301,10 +9285,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9329,10 +9309,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9384,10 +9360,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9422,10 +9394,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9697,10 +9665,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9828,10 +9792,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9973,10 +9933,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)

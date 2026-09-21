@@ -81,7 +81,13 @@ function makeWorld() {
   const world = {
     status: 'queued',
     progress: { generated: 0, settledCost: 0 },
-    rows: new Map(ROW_IDS.map((id) => [id as string, { state: 'pending', usageTokens: 0, proposed: null as string | null }])),
+    rows: new Map(
+      // `reason` carries the #5842 charged-but-not-offered provenance the worker now writes.
+      ROW_IDS.map((id) => [
+        id as string,
+        { state: 'pending', usageTokens: 0, proposed: null as string | null, reason: null as string | null },
+      ]),
+    ),
     sheets: new Map<string, SheetState>([
       [SHEET_ID, { deleted_at: null }],
       // A DELETED neighbour: a check that asked about the wrong sheet would stop a live job.
@@ -109,11 +115,30 @@ function makeWorld() {
     if (sql === `SELECT status FROM ${AI_BULK_JOB_TABLE} WHERE job_id = $1`) {
       return { rows: [{ status: world.status }], rowCount: 1 }
     }
+    // #5842 per-row "is this row still mine to send?" read.
+    if (sql === `SELECT state FROM ${AI_BULK_JOB_ROWS_TABLE} WHERE job_id = $1 AND record_id = $2`) {
+      const row = world.rows.get(String(params[1]))
+      return { rows: row ? [{ state: row.state }] : [], rowCount: row ? 1 : 0 }
+    }
     if (sql.startsWith(`UPDATE ${AI_BULK_JOB_ROWS_TABLE} SET state = 'generated'`)) {
       const row = world.rows.get(String(params[1]))!
+      // #5842: the statement carries `AND state = 'pending'` — a row a cancel already moved on
+      // is NOT re-recorded as generated. Applied here exactly as the statement asks.
+      if (/AND state = 'pending'$/.test(sql) && row.state !== 'pending') return { rows: [], rowCount: 0 }
       row.state = 'generated'
       row.proposed = String(params[3])
       row.usageTokens = Number(params[5])
+      return { rows: [], rowCount: 1 }
+    }
+    // #5842: the row was at the provider when the cancel landed — charged, not confirmable. The
+    // reason is a PARAMETER (the worker picks cancelled_ vs interrupted_after_charge from the
+    // header status), so it is recorded here exactly as the statement passes it.
+    if (sql.startsWith(`UPDATE ${AI_BULK_JOB_ROWS_TABLE} SET state = 'failure', reason = $5`)) {
+      const row = world.rows.get(String(params[1]))!
+      if (!['pending', 'pending_not_generated'].includes(row.state)) return { rows: [], rowCount: 0 }
+      row.state = 'failure'
+      row.reason = String(params[4])
+      row.usageTokens = Number(params[2])
       return { rows: [], rowCount: 1 }
     }
     if (sql.startsWith(`UPDATE ${AI_BULK_JOB_ROWS_TABLE} SET state = 'pending_not_generated'`)) {
@@ -220,10 +245,10 @@ describe('AI bulk job worker — sheet liveness before every provider call (#583
     expect(provider.sent).toEqual(['rec_1'])
     expect(env.world.status).toBe('errored')
     // BJ-5 semantics for what was already generated: kept, charged, committable.
-    expect(env.world.rows.get('rec_1')).toEqual({ state: 'generated', usageTokens: 7, proposed: 'AI OUT 1' })
+    expect(env.world.rows.get('rec_1')).toEqual({ state: 'generated', usageTokens: 7, proposed: 'AI OUT 1', reason: null })
     // The rest: visibly not generated, uncharged, no proposal (the state the review UI renders).
-    expect(env.world.rows.get('rec_2')).toEqual({ state: 'pending_not_generated', usageTokens: 0, proposed: null })
-    expect(env.world.rows.get('rec_3')).toEqual({ state: 'pending_not_generated', usageTokens: 0, proposed: null })
+    expect(env.world.rows.get('rec_2')).toEqual({ state: 'pending_not_generated', usageTokens: 0, proposed: null, reason: null })
+    expect(env.world.rows.get('rec_3')).toEqual({ state: 'pending_not_generated', usageTokens: 0, proposed: null, reason: null })
     expect(env.world.progress.generated).toBe(1)
     expect(env.world.reservations).toBe(1)
     expect(env.world.livenessAsked).toEqual([[SHEET_ID], [SHEET_ID]])
@@ -294,7 +319,14 @@ describe('AI bulk job worker — sheet liveness before every provider call (#583
 
     expect(provider.fetchFn).toHaveBeenCalledTimes(1)
     expect(env.world.status).toBe('rejected')
-    expect(rowStates(env.world)).toEqual({ rec_1: 'generated', rec_2: 'pending_not_generated', rec_3: 'pending_not_generated' })
+    // #5842: row 1 was AT THE PROVIDER when the cancel landed, so the cancel flipped it out of
+    // `pending` and the worker no longer re-records it as `generated` (that would hand the user
+    // back a row they cancelled, as a committable one). The charge is real, so the row is
+    // `failure`/cancelled_after_charge — CHARGED, visible, not confirmable — never a silently
+    // uncharged-looking row.
+    expect(rowStates(env.world)).toEqual({ rec_1: 'failure', rec_2: 'pending_not_generated', rec_3: 'pending_not_generated' })
+    expect(env.world.rows.get('rec_1')!.usageTokens).toBe(7)
+    expect(env.world.rows.get('rec_1')!.proposed).toBeNull()
     // The status check comes first: a cancelled job is not even asked about its sheet again.
     expect(env.world.livenessAsked).toEqual([[SHEET_ID]])
   })
