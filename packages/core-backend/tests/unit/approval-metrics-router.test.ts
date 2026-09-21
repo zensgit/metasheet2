@@ -26,6 +26,34 @@ vi.mock('../../src/middleware/auth', () => ({
   },
 }))
 
+// P4(2) phase 0 (census-tiered-admin-20260915.md) — `/summary`, `/report`, `/teams`, `/breaches`
+// now route through `approvalAdminCapabilityGuard('data')` (`services/approval-admin-capability.ts`),
+// NOT through this file's `rbacGuard` mock below: the resolver imports `isAdmin`/`userHasPermission`
+// directly from `rbac/service` and `isPermissionAllowedByNamespaceAdmission` from
+// `rbac/namespace-admission`, bypassing the `rbac/rbac` mock entirely. Left unmocked, those calls
+// hit the REAL (here, unconfigured) DB pool, and a thrown connection error is what the resolver's
+// fail-closed catch turns into a 500 — exactly the regression this mock closes. `/people` is
+// unaffected (still gated by the real `rbacGuard('approvals:analytics')`, still covered by the
+// `rbac/rbac` mock below) so its tests need no change. Every scenario in this file that expects the
+// data-admin guard to ALLOW sets `authState.user.permissions` directly (`*:*` / `approvals:admin`),
+// which the resolver's token-array arm answers without ever reaching these two functions — so a
+// static `false`/`true` here (mirroring the sibling `approval-admin-capability.test.ts` mock) is
+// enough; no `authState.allowRbac` plumbing is needed on this path.
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: vi.fn().mockResolvedValue(false),
+  userHasPermission: vi.fn().mockResolvedValue(false),
+  listUserPermissions: vi.fn().mockResolvedValue([]),
+  invalidateUserPerms: vi.fn(),
+  getPermCacheStatus: vi.fn().mockReturnValue({ size: 0 }),
+}))
+
+vi.mock('../../src/rbac/namespace-admission', () => ({
+  isPermissionAllowedByNamespaceAdmission: vi.fn().mockResolvedValue(true),
+  filterPermissionCodesByNamespaceAdmission: vi.fn().mockImplementation(
+    (_userId: string, codes: string[]) => Promise.resolve(codes),
+  ),
+}))
+
 vi.mock('../../src/rbac/rbac', () => ({
   // Per-code guard: `allowRbac=false` is a hard gate (existing tests); otherwise the user must hold
   // the specific permission code (or `*:*`). This lets the person/team tests assert that `/people`

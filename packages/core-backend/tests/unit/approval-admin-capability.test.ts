@@ -21,7 +21,9 @@ import { usePinnedServer } from '../utils/pinned-server'
 import {
   APPROVAL_ADMIN_CAPABILITY_PREDICATE,
   isApprovalAdministrator,
+  resolveApprovalAdminCapability,
 } from '../../src/services/approval-admin-capability'
+import { isAdmin as mockedIsAdmin, userHasPermission as mockedUserHasPermission } from '../../src/rbac/service'
 
 const authState = vi.hoisted(() => ({
   user: null as Record<string, unknown> | null,
@@ -381,5 +383,75 @@ describe('the capability predicate agrees with the two existing DB-backed admin 
     // …and finds it when it is, so the empty result above is a real refusal, not a broken regex.
     const genuine = decoy.replace("'superuser'", "'admin'")
     expect(extractAdminArms(genuine)).toEqual([`FROM users WHERE id = $1 AND ${CANONICAL_ARM_TAIL}`])
+  })
+})
+
+/**
+ * P4(2) phase 0 — `resolveApprovalAdminCapability`'s DB-only arms (4: `isAdmin`/`user_roles`; 5:
+ * `userHasPermission`/`user_permissions` ∪ `role_permissions`), plus its fail-closed error arm.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM THE REAL-DB PARITY SUITE
+ * (`tests/integration/approval-admin-capability-resolver-phase0.db.test.ts`): that suite's four
+ * viewers are seeded via real `user_roles`/`user_permissions` rows, but `AuthService.resolveRbacProfile`
+ * hydrates `req.user.role`/`.permissions` from those SAME rows before the guard ever runs — so every
+ * ALLOW there resolves at arm 1 (token role) or arm 2 (token-resolved permission array), which is
+ * accurate for production but never actually exercises arms 4/5 as the DECIDING arm. A transcription
+ * error in either loop (mirrored, not imported, from `rbac/rbac.ts` — see the resolver's own
+ * docblock) would be invisible to that suite. This file isolates them: a viewer with `{ id }` ONLY
+ * (no `role`/`roles`/`permissions`) cannot pass arms 1-3, so the outcome is arms 4/5 or the error arm,
+ * and nothing else.
+ */
+describe('resolveApprovalAdminCapability — DB-only arms (4/5) and the fail-closed error arm', () => {
+  const bareViewer = { id: 'db-only-viewer' }
+
+  beforeEach(() => {
+    // A known baseline before each test — this block's tests are otherwise independent of the
+    // route-level `beforeEach` above (which never sets these two mocks to a non-default value).
+    vi.mocked(mockedIsAdmin).mockReset().mockResolvedValue(false)
+    vi.mocked(mockedUserHasPermission).mockReset().mockResolvedValue(false)
+  })
+
+  it('arm 4: `isAdmin` (user_roles) true → platform-admin, for all three capabilities', async () => {
+    vi.mocked(mockedIsAdmin).mockResolvedValue(true)
+    for (const capability of ['template', 'process', 'data'] as const) {
+      await expect(resolveApprovalAdminCapability(bareViewer, capability))
+        .resolves.toEqual({ allowed: true, reason: 'platform-admin' })
+    }
+    // POSITIVE CONTROL for the mock itself: `isAdmin` was actually consulted, not bypassed.
+    expect(mockedIsAdmin).toHaveBeenCalled()
+  })
+
+  it('arm 5: `userHasPermission` (user_permissions ∪ role_permissions) true → permission, per capability code', async () => {
+    vi.mocked(mockedUserHasPermission).mockImplementation(async (_userId: string, code: string) => code === 'approvals:admin')
+    await expect(resolveApprovalAdminCapability(bareViewer, 'process'))
+      .resolves.toEqual({ allowed: true, reason: 'permission' })
+    await expect(resolveApprovalAdminCapability(bareViewer, 'data'))
+      .resolves.toEqual({ allowed: true, reason: 'permission' })
+    // `template` needs `approval-templates:manage` OR `approvals:admin-templates` — neither is
+    // `approvals:admin`, so this negative case is the discriminator that the per-code loop (not a
+    // blanket "any permission") is what is running.
+    await expect(resolveApprovalAdminCapability(bareViewer, 'template'))
+      .resolves.toEqual({ allowed: false, reason: 'none' })
+
+    vi.mocked(mockedUserHasPermission).mockImplementation(async (_userId: string, code: string) => code === 'approval-templates:manage')
+    await expect(resolveApprovalAdminCapability(bareViewer, 'template'))
+      .resolves.toEqual({ allowed: true, reason: 'permission' })
+  })
+
+  it('both arms false → none (a bare id with no role, no permission grant, is refused)', async () => {
+    await expect(resolveApprovalAdminCapability(bareViewer, 'process'))
+      .resolves.toEqual({ allowed: false, reason: 'none' })
+  })
+
+  it('fail-closed: `isAdmin` throwing resolves to `{ allowed: false, reason: \'error\' }`, never throws past this function', async () => {
+    vi.mocked(mockedIsAdmin).mockRejectedValue(new Error('connection reset'))
+    await expect(resolveApprovalAdminCapability(bareViewer, 'process'))
+      .resolves.toEqual({ allowed: false, reason: 'error' })
+  })
+
+  it('fail-closed: `userHasPermission` throwing (isAdmin already false) also resolves to the error arm', async () => {
+    vi.mocked(mockedUserHasPermission).mockRejectedValue(new Error('relation "user_permissions" does not exist'))
+    await expect(resolveApprovalAdminCapability(bareViewer, 'data'))
+      .resolves.toEqual({ allowed: false, reason: 'error' })
   })
 })
