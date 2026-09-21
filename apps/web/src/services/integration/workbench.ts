@@ -1338,6 +1338,33 @@ export async function listIntegrationProvenanceByRow(
   return Array.isArray(data) ? data : []
 }
 
+// Q4a (read-only): ONE run's provenance timeline, from the per-run sub-route
+// GET /api/integration/runs/:runId/provenance (plugin handler `runsProvenance`). Entries share
+// the IntegrationProvenanceTimelineEntry shape with the cross-run by-rowId read above — same
+// view, same projection — so a drift in one is a drift in both.
+//
+// The runId rides in the PATH (a `/runs?runId=` shaped call would hit the LIST route and return
+// runs, not events). Scope is passed as query params, never as an `x-tenant-id` header: apiFetch
+// attaches the session JWT and the route derives the tenant from the verified claim.
+//
+// The route answers `{ items: [...] }`, not a bare array — an unknown or foreign run is a 404
+// (RUN_NOT_FOUND), never an empty list, so callers must branch on the error code rather than
+// reading "no events" as "no such run".
+export async function getIntegrationRunProvenance(
+  runId: string,
+  scope: IntegrationScope = {},
+  options: { limit?: number } = {},
+): Promise<IntegrationProvenanceTimelineEntry[]> {
+  const suffix = buildQuerySuffix({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    limit: options.limit,
+  })
+  const response = await apiFetch(`/api/integration/runs/${encodeURIComponent(runId)}/provenance${suffix}`)
+  const data = await parseIntegrationResponse<{ items?: IntegrationProvenanceTimelineEntry[] }>(response)
+  return Array.isArray(data?.items) ? data.items : []
+}
+
 export interface IntegrationDeadLetterReplayPayload extends IntegrationScope {
   mode?: IntegrationPipelineMode
 }

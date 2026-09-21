@@ -10070,6 +10070,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integration/runs/{runId}/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List one run's provenance timeline
+         * @description Read-only per-run provenance timeline, scoped by (tenantId, workspaceId, runId) and ordered by `eventIndex` (the migration-060 view's WITH ORDINALITY over the run's persisted `provenance_events`, i.e. write order). The run is resolved first through the same three-key lookup the single-run read uses, so another tenant's run id and a run id that does not exist return the SAME details-free 404 — an unknown run is never answered with an empty timeline. `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does not re-redact and never returns raw payloads. No write, replay or retry.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the run reads apply. */
+                    workspaceId?: string;
+                    /** @description Max events to return. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies. */
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["ProvenanceTimelineEntry"][];
+                            };
+                        };
+                    };
+                };
+                /** @description runId missing from the path */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry implements neither the per-run provenance read (PROVENANCE_READ_NOT_IMPLEMENTED) nor the single-run read the scope probe needs (RUN_READ_NOT_IMPLEMENTED) — optional-method wiring older than this route. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;

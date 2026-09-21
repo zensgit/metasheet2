@@ -390,6 +390,11 @@
       :run-detail-error="runDetailError"
       :run-detail="runDetail"
       :run-detail-payload-text="runDetailPayloadText"
+      :run-provenance-expanded="runProvenanceExpanded"
+      :run-provenance-loading="runProvenanceLoading"
+      :run-provenance-error="runProvenanceError"
+      :run-provenance-entries="runProvenanceEntries"
+      :toggle-run-provenance="toggleRunProvenance"
       :dead-letter-error-label="deadLetterErrorLabel"
       :dead-letter-error-hint="deadLetterErrorHint"
       :is-dead-letter-replayable="isDeadLetterReplayable"
@@ -471,6 +476,7 @@ import {
   normalizeIntegrationProjectId,
   getExternalSystemSchema,
   getIntegrationRun,
+  getIntegrationRunProvenance,
   getPlmDataSourceCapabilities,
   installIntegrationStaging,
   integrationApiErrorCode,
@@ -923,6 +929,15 @@ const runDetail = ref<IntegrationPipelineRun | null>(null)
 // Monotonic request token: a second 详情 click while the first GET is still in flight must not let
 // the slower answer paint over the newer one.
 let runDetailRequestId = 0
+// Q4a (read-only): the open run's provenance timeline, from the per-run sub-route. Collapsed by
+// default and fetched on first expand, so opening 详情 costs exactly ONE request unless the
+// operator asks for the lineage. The three refs are cleared by closeRunDetail/openRunDetail along
+// with the rest of the dialog state — a timeline must never outlive the run it belongs to.
+const runProvenanceExpanded = ref(false)
+const runProvenanceLoading = ref(false)
+const runProvenanceError = ref('')
+const runProvenanceEntries = ref<IntegrationProvenanceTimelineEntry[]>([])
+let runProvenanceRequestId = 0
 // DF-N2-3 (read-only): per-dead-letter cross-run provenance timeline, fetched lazily
 // on expand by the row's idempotency key (rowId). No write/replay affordance here.
 const expandedDeadLetterProvenanceIds = ref<Set<string>>(new Set())
@@ -3487,6 +3502,17 @@ function closeRunDetail(): void {
   runDetailLoading.value = false
   // Bump the token so an answer still in flight cannot re-open a dialog the user just closed.
   runDetailRequestId += 1
+  resetRunProvenance()
+}
+
+// Q4a: the provenance section belongs to ONE run. Resetting it on every open/close is what stops
+// run A's timeline from being shown under run B's header after a fast 详情→关闭→详情 sequence.
+function resetRunProvenance(): void {
+  runProvenanceExpanded.value = false
+  runProvenanceLoading.value = false
+  runProvenanceError.value = ''
+  runProvenanceEntries.value = []
+  runProvenanceRequestId += 1
 }
 
 // Branch on the machine-readable CODE, never on the server's prose: a re-worded message or a
@@ -3518,6 +3544,7 @@ async function openRunDetail(runId: string): Promise<void> {
   runDetail.value = null
   runDetailError.value = ''
   runDetailLoading.value = true
+  resetRunProvenance()
   try {
     // Same scope the list query used — currentScope() is the single source for both, so the
     // detail can never be looked up in a workspace the row was not listed under.
@@ -3540,6 +3567,57 @@ const runDetailPayloadText = computed(() => {
   if (!details || typeof details !== 'object' || Object.keys(details).length === 0) return ''
   return JSON.stringify(details, null, 2)
 })
+
+// Q4a (read-only): the open run's provenance timeline. Lazy — the first expand issues the single
+// GET, a collapse/re-expand reuses what was fetched, and nothing here writes, replays or retries.
+// A second toggle while the first GET is in flight is fenced by the same monotonic-token pattern
+// the detail read uses, so a slow answer cannot paint into a section that was already collapsed
+// or into a different run's dialog.
+async function toggleRunProvenance(): Promise<void> {
+  if (!runDetailId.value) return
+  if (runProvenanceExpanded.value) {
+    runProvenanceExpanded.value = false
+    return
+  }
+  runProvenanceExpanded.value = true
+  // Already loaded once for THIS run (resetRunProvenance clears it when the run changes).
+  if (runProvenanceEntries.value.length > 0 || runProvenanceError.value) return
+  runProvenanceRequestId += 1
+  const requestId = runProvenanceRequestId
+  const runId = runDetailId.value
+  runProvenanceLoading.value = true
+  try {
+    // Same scope the detail read used — currentScope() is the single source, so the timeline can
+    // never be looked up in a workspace the run was not read under.
+    const entries = await getIntegrationRunProvenance(runId, currentScope())
+    if (requestId !== runProvenanceRequestId) return
+    runProvenanceEntries.value = entries
+  } catch (error) {
+    if (requestId !== runProvenanceRequestId) return
+    runProvenanceError.value = runProvenanceErrorCopy(error)
+  } finally {
+    if (requestId === runProvenanceRequestId) runProvenanceLoading.value = false
+  }
+}
+
+// Same discipline as runDetailErrorCopy: branch on the machine-readable CODE, never on server
+// prose, so a re-worded or differently-localized backend message cannot kill these states.
+function runProvenanceErrorCopy(error: unknown): string {
+  const code = integrationApiErrorCode(error)
+  if (code === 'RUN_NOT_FOUND') {
+    return bi(
+      '运行不存在或不可见（可能属于其它租户/工作区，或已被清理）。',
+      'This run does not exist or is not visible in your scope.',
+    )
+  }
+  if (code === 'PROVENANCE_READ_NOT_IMPLEMENTED' || code === 'RUN_READ_NOT_IMPLEMENTED') {
+    return bi(
+      '当前版本未启用运行溯源事件读取。',
+      'Per-run provenance read is not enabled in this version.',
+    )
+  }
+  return error instanceof Error ? error.message : String(error)
+}
 
 // DF-N2-3 (read-only): a dead-letter's row (idempotency key) is the only typed rowId
 // in this panel. Expanding fetches that row's cross-run provenance timeline once via
