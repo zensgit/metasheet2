@@ -8612,9 +8612,12 @@ describe('ApprovalProductService', () => {
 // .code` has no charset property to check against. That is safe ONLY because today's
 // codomain is a CLOSED, single-element set. This pins the census as data, not as an
 // argument: it fails on a second constructor written in the same literal-inline shape
-// (gate round2 P3-B), scanned anywhere under `plugins/` or `packages/core-backend/src/`.
-// This file is wired into no CI gate (gate round2 P3-C): a second producer is caught only
-// if someone runs this file's containing full local lane, not automatically.
+// (see `docs/development/approval-cancel-round-phase2-verification-20260918.md` for this
+// slice's verification record), scanned anywhere under `plugins/` or
+// `packages/core-backend/src/`. This file is collected by core-backend's default vitest
+// run — the required `test (20.x)` job's "Run core-backend tests" step
+// (`plugin-tests.yml:842-844`, `pnpm --filter @metasheet/core-backend test`); a second
+// producer written in the matched shape reds that required check.
 //
 // The pattern below deliberately requires a QUOTED code literal immediately after
 // `kind: 'business_refused'` — `takeBusinessRefusal`'s own pass-through construction
