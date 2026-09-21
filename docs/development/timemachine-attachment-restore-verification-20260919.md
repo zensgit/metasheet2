@@ -12,6 +12,44 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Bounded Denied-audit CI Correction (2026-09-22)
+
+Code checkpoint: `363cb715117169cfd1af98b3eb584d79d726a22a`, tree
+`28eb8eadc5daff541650020ee0093defe95c13e8`. Parent is
+`a0e4d70749275042dcec3688babdc54730176906`. Only
+`packages/core-backend/tests/integration/multitable-oapi2a-comments-write-realdb.test.ts`
+changes: replace a fixed 100ms sleep with the neighboring scope-guard test's
+bounded `vi.waitFor` pattern (5000ms deadline, 50ms interval). The same denied/403
+audit-row assertion, HTTP 403, error-code and no-comment checks remain mandatory.
+No production, permission, workflow, migration or recovery behavior changed.
+
+Parent Plugin run `35619976280` had Node18 SUCCESS and Node20 FAILURE at job
+`106400289557`. Both isolated manual-checkpoint acceptance steps passed. The
+multitable DB lane had 261 passing files and one failed file: the denied comment
+audit assertion at line 126; 2879 tests passed, one failed and two were skipped.
+The test and production audit boundary are byte-identical to main `cd42eaf745`.
+The boundary writes after response finish, so receiving HTTP 403 does not prove
+the audit INSERT has completed. Coverage skipped after this failure is not a
+healthy intentional skip.
+
+Owned fresh PostgreSQL 15 clusters, local Node 25.9.0:
+
+- A fixture-only BEFORE INSERT trigger delayed this suite's denied audit by
+  `pg_sleep(0.4)`: original test failed exactly its audit assertion (1 RED, 3 PASS).
+- Identical delay with the correction: 4/4 PASS.
+- Mutation in the owned database returned NULL instead of inserting the denied
+  audit: corrected test still failed after the bounded wait (1 RED, 3 PASS).
+- Without fault injection, comment-write plus scope-guard neighbor: 19/19 PASS.
+- Core type-check and diff-check PASS. Each cluster completed fresh migration;
+  each run removed its trigger/function, dropped its database with connections=0,
+  and stopped/removed the owned cluster. No production source was mutated.
+
+Logs: `/private/tmp/tm-oapi-audit-{old-delay,fixed-delay,omitted,neighbor}.log`,
+`/private/tmp/tm-oapi-audit-typecheck.log`. Local reproduction establishes a
+timing-sensitive test, not the precise remote scheduler delay or an independent
+Node20 reproduction. New exact-head CI must run after publication. The earlier
+browser API_REQUEST_FAILED remains unattributed; this audit fix does not close it.
+
 ## Current-main Replay Investigation (2026-09-21)
 
 Local merge `45458ad0c21a5d0d7bd743855c240d175927a420` has ordered parents
