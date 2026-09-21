@@ -7,7 +7,7 @@ import type { Kysely } from 'kysely'
 import { db as defaultDb } from '../db/db'
 import type { Database } from '../db/types'
 import { Logger } from '../core/logger'
-import { substituteLiteral } from './regex-safety'
+import { substituteLiteral, assessUserPattern, USER_REGEX_MAX_SUBJECT_LEN } from './regex-safety'
 
 const logger = new Logger('FormulaEngine')
 
@@ -327,14 +327,33 @@ export class FormulaEngine {
       return out.repeat(c)
     })
     this.functions.set('TEXT', (value: unknown, format: unknown) => this.textFormat(value, format))
+    // PROPOSED (H-3): REGEX* compile a caller-authored pattern. A nested-quantifier
+    // pattern (e.g. "^(a+)+$", 7 chars) froze an unrelated tenant for ~55s on the
+    // shared event loop. `assessUserPattern` refuses statically-catastrophic
+    // patterns + over-length patterns; `USER_REGEX_MAX_SUBJECT_LEN` bounds the
+    // O(n^2) global-scan cost. PARTIAL (misses alternation-overlap ReDoS): the
+    // complete fix is a linear-time engine (RE2) — an owner/dependency decision.
+    const guardedUserRegex = (pattern: string, subject: string): RegExp | '#ERROR!' => {
+      if (subject.length > USER_REGEX_MAX_SUBJECT_LEN) return '#ERROR!'
+      if (!assessUserPattern(pattern).safe) return '#ERROR!'
+      try { return new RegExp(pattern) } catch { return '#ERROR!' }
+    }
     this.functions.set('REGEXMATCH', (text: unknown, pattern: unknown) => {
-      try { return new RegExp(String(pattern)).test(String(text)) } catch { return '#ERROR!' }
+      const s = String(text)
+      const re = guardedUserRegex(String(pattern), s)
+      return re === '#ERROR!' ? '#ERROR!' : re.test(s)
     })
     this.functions.set('REGEXEXTRACT', (text: unknown, pattern: unknown) => {
-      try { const m = String(text).match(new RegExp(String(pattern))); return m ? (m[1] ?? m[0]) : '#VALUE!' } catch { return '#ERROR!' }
+      const s = String(text)
+      const re = guardedUserRegex(String(pattern), s)
+      if (re === '#ERROR!') return '#ERROR!'
+      const m = s.match(re); return m ? (m[1] ?? m[0]) : '#VALUE!'
     })
     this.functions.set('REGEXREPLACE', (text: unknown, pattern: unknown, replacement: unknown) => {
-      try { return String(text).replace(new RegExp(String(pattern), 'g'), String(replacement)) } catch { return '#ERROR!' }
+      const s = String(text)
+      if (s.length > USER_REGEX_MAX_SUBJECT_LEN) return '#ERROR!'
+      if (!assessUserPattern(String(pattern)).safe) return '#ERROR!'
+      try { return s.replace(new RegExp(String(pattern), 'g'), String(replacement)) } catch { return '#ERROR!' }
     })
     // Date / time (reuse the timezone-stable date parse used by WEEKDAY, via coerceDateValue)
     this.functions.set('HOUR', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getHours() : '#VALUE!' })

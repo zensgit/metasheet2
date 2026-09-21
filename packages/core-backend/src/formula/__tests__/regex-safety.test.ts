@@ -6,7 +6,12 @@
  */
 import { describe, expect, it } from 'vitest'
 import { FormulaEngine } from '../engine'
-import { substituteLiteral } from '../regex-safety'
+import {
+  substituteLiteral,
+  assessUserPattern,
+  hasNestedUnboundedQuantifier,
+  USER_REGEX_MAX_SUBJECT_LEN,
+} from '../regex-safety'
 
 const engine = new FormulaEngine({ db: undefined as never })
 const ctx = { sheetId: 's', row: 1, col: 1, values: {} } as never
@@ -37,5 +42,47 @@ describe('SUBSTITUTE — literal replacement (Excel/Sheets semantics), no regex'
     const { ms, result } = await evalMs('SUBSTITUTE("2026-09-22", "-", "/")')
     expect(result).toBe('2026/09/22')
     expect(ms).toBeLessThan(50)
+  })
+})
+
+describe('assessUserPattern — static catastrophic-shape rejection', () => {
+  it('flags nested unbounded quantifiers, passes linear patterns', () => {
+    expect(hasNestedUnboundedQuantifier('^(a+)+$')).toBe(true)
+    expect(hasNestedUnboundedQuantifier('(?:x+)*')).toBe(true)
+    expect(hasNestedUnboundedQuantifier('(\\d+){2,}')).toBe(true)
+    expect(hasNestedUnboundedQuantifier('^[a-z0-9-]+$')).toBe(false)
+    expect(hasNestedUnboundedQuantifier('^\\d{4}-\\d{2}$')).toBe(false)
+    // Char-class contents must not be mistaken for a quantified group.
+    expect(hasNestedUnboundedQuantifier('[(+*)]+')).toBe(false)
+    expect(assessUserPattern('^(a+)+$').safe).toBe(false)
+    expect(assessUserPattern('^[a-z]+$').safe).toBe(true)
+    expect(assessUserPattern('x'.repeat(2000)).safe).toBe(false)
+  })
+})
+
+describe('REGEXMATCH/EXTRACT/REPLACE — bounded, no cross-tenant freeze', () => {
+  it('POSITIVE: REGEXMATCH nested-quantifier pattern is refused, returns fast', async () => {
+    const subject = 'a'.repeat(32) + '!' // unfixed: measured ~20s in-process
+    const { ms, result } = await evalMs(`REGEXMATCH("${subject}", "^(a+)+$")`)
+    expect(result).toBe('#ERROR!')
+    expect(ms).toBeLessThan(200)
+  })
+
+  it('POSITIVE: REGEXREPLACE trim-idiom pattern on an over-long subject is refused fast', async () => {
+    const subject = 'Z' + ' '.repeat(USER_REGEX_MAX_SUBJECT_LEN + 50000) + 'Z'
+    const { ms, result } = await evalMs(`REGEXREPLACE("${subject}", "^\\\\s+|\\\\s+$", "")`)
+    expect(result).toBe('#ERROR!')
+    expect(ms).toBeLessThan(200)
+  })
+
+  it('LINEAR CONTROL: a legitimate linear pattern still works', async () => {
+    const m = await evalMs('REGEXMATCH("hello-world", "^[a-z-]+$")')
+    expect(m.result).toBe(true)
+    expect(m.ms).toBeLessThan(50)
+    const r = await evalMs('REGEXREPLACE("a1b2c3", "[0-9]", "")')
+    expect(r.result).toBe('abc')
+    expect(r.ms).toBeLessThan(50)
+    const e = await evalMs('REGEXEXTRACT("id=42", "id=([0-9]+)")')
+    expect(e.result).toBe('42')
   })
 })
