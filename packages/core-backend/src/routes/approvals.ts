@@ -3164,8 +3164,17 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
         // `DISTINCT entry_epoch` query, and called ONLY for a seat-gated instance whose node the
         // actor was just admitted at — so the resolver's "no active assignments" fail-closed branch
-        // is unreachable from here, and a non-seat-gated legacy row (which has no assignments at
-        // all) never reaches it.
+        // (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) is unreachable from here, and a non-seat-gated legacy
+        // row (which has no assignments at all) never reaches it.
+        //
+        // KNOWN GAP, recorded rather than assumed away: this route does NOT dispatch through
+        // `handleApprovalsError`, so a `ServiceError` thrown here does not keep its code. The outer
+        // catch flattens anything that is not a schema error to `500 APPROVAL_APPROVE_FAILED` /
+        // `APPROVAL_REJECT_FAILED`, which means the resolver's structural
+        // `APPROVAL_NODE_ENTRY_EPOCH_MIXED` (a single round spanning epochs) reaches the client as a
+        // generic 500. That is still FAIL-CLOSED — the inner catch rolls the transaction back before
+        // rethrowing, so a refused call leaves zero rows exactly like the 403 above — but the code
+        // IDENTITY is lost, and a later reader must not assume these routes surface it.
         const nodeEntryEpoch = seat.nodeKey !== null
           ? await productService.currentNodeEntryEpoch(client, id, seat.nodeKey)
           : null
@@ -3374,8 +3383,17 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
         // `DISTINCT entry_epoch` query, and called ONLY for a seat-gated instance whose node the
         // actor was just admitted at — so the resolver's "no active assignments" fail-closed branch
-        // is unreachable from here, and a non-seat-gated legacy row (which has no assignments at
-        // all) never reaches it.
+        // (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) is unreachable from here, and a non-seat-gated legacy
+        // row (which has no assignments at all) never reaches it.
+        //
+        // KNOWN GAP, recorded rather than assumed away: this route does NOT dispatch through
+        // `handleApprovalsError`, so a `ServiceError` thrown here does not keep its code. The outer
+        // catch flattens anything that is not a schema error to `500 APPROVAL_APPROVE_FAILED` /
+        // `APPROVAL_REJECT_FAILED`, which means the resolver's structural
+        // `APPROVAL_NODE_ENTRY_EPOCH_MIXED` (a single round spanning epochs) reaches the client as a
+        // generic 500. That is still FAIL-CLOSED — the inner catch rolls the transaction back before
+        // rethrowing, so a refused call leaves zero rows exactly like the 403 above — but the code
+        // IDENTITY is lost, and a later reader must not assume these routes surface it.
         const nodeEntryEpoch = seat.nodeKey !== null
           ? await productService.currentNodeEntryEpoch(client, id, seat.nodeKey)
           : null

@@ -14,7 +14,7 @@
 |---|---|
 | 基点 | `origin/main` = `5edf4c3e17d3608fa4513b5ffd801142da026dcf` |
 | 分支 | `fix/approval-legacy-approve-seat-and-node-attribution` |
-| 改动 | 3 文件 +995/−3（`routes/approvals.ts` +257/−2、`ApprovalProductService.ts` +9/−1、新真库套件 +732）；另 `vitest.config.ts`（两点接线之一）+ 新 CI lane 文件 |
+| 改动 | 7 文件 +1471/−3。源码 2：`routes/approvals.ts` +273/−2、`ApprovalProductService.ts` +8/−1；新真库套件 +781；两点接线 `vitest.config.ts` +9；新 CI lane +144；本文件与设计 MD |
 | 迁移 / DDL | **0 / 0** |
 | 新错误码 | **0**（复用 `APPROVAL_ASSIGNMENT_REQUIRED`；`APPROVAL_STATUS_INVALID` 原样保留）|
 | 真库 | `metasheet2_rc2_20260921`（owner `ms2testbed`，非超级；`postgres` 只用于 createdb/dropdb），`psql -Atc "SELECT current_database(), current_user"` ⇒ `metasheet2_rc2_20260921|ms2testbed` |
@@ -35,7 +35,7 @@
 
 `packages/core-backend/tests/integration/approval-legacy-decision-seat-and-node-attribution.db.test.ts`
 
-**10 tests / 10 passed**（含 `EXPECT_DB=1` 反空转绿哨兵）。
+**11 tests / 11 passed**（含 `EXPECT_DB=1` 反空转绿哨兵）。
 
 | 用例 | 断言要点 |
 |---|---|
@@ -48,20 +48,27 @@
 | (7) 状态：终态实例 | 仍是 400 `APPROVAL_STATUS_INVALID`（对无席位者与原审批人**两者**都断言）；席位闸没有把 400 变成 403 |
 | (8) 非席位闸（无 published definition 的 platform 行）| 仍 200（现状不变）；客户端 `nodeKey`/`nodeEntryEpoch` 被剥离且**不**补服务端值；`keep` 键保留 |
 | (9) `/actions` 平价 | 同一个无席位者在**两道门**上都是 403 + 同一错误码 + 零行；有席位者经 `/actions` 的行同样是服务端 `nodeKey` |
+| (10) `/reject` 归属 | (4) 的判别腿在**另一条端点**上重跑一遍。归属接线是**一对**兄弟站点（每条路由各一个），而 (3)(4)(5)(8) 全部只走 `/approve` —— 没有这条腿，单独 mutate `/reject` 站点整份文件仍然全绿 |
 
 ### 2.1 Mutation（证明每条腿承重）
 
 一律 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` 校验；全程未用 `git checkout --` / `reset --hard` / `stash`。
 
-| Mutation | 改动 | 结果 |
-|---|---|---|
-| **M1** 摘掉席位闸 | 两处 `if (!seat.allowed) {` ⇒ `if (false as boolean) {` | **5 failed / 5 passed**，红的是 **(1)(2)(5)(6)(9)** —— 全部准入腿 |
-| **M2** 摘掉归属剥离 | 两处 `JSON.stringify(attributedMetadata)` ⇒ `JSON.stringify(metadata)` | **4 failed / 6 passed**，红的是 **(3)(4)(5)(8)** —— 全部归属腿 |
+**逐站点隔离**：准入与归属各有**两个**兄弟站点（`/approve` 一个、`/reject` 一个）。同时 mutate 两侧
+只能证明「这一对里至少有一个承重」，对**任一侧单独**没有判别力，所以四个 mutation 都只改**一行**。
+失败用例名从 `FAIL` 行逐字提取，不靠推断；行号取自本分支最终 head。
 
-两个 mutation 的红集合**不相交地覆盖**了 9 条腿中的 8 条（(7) 状态腿刻意对两者都免疫：它断言的是
-「新闸**没有**改变已有拒绝的身份」，对两个 mutation 都应该保持绿 —— 这正是它的判别力所在）。
+| Mutation | 改动（单行）| 结果 | 红的用例 |
+|---|---|---|---|
+| **M1a** `/approve` 席位闸 | `:3133` `if (!seat.allowed) {` ⇒ `if (false as boolean) {` | 4 failed / 7 passed | **(1)(5)(6)(9)** |
+| **M1b** `/reject` 席位闸 | `:3334` 同上 | 1 failed / 10 passed | **(2)** —— 恰好一条，就是 `/reject` 的准入腿 |
+| **M2a** `/approve` 归属剥离 | `:3190` `JSON.stringify(attributedMetadata)` ⇒ `JSON.stringify(metadata)` | 4 failed / 7 passed | **(3)(4)(5)(8)** |
+| **M2b** `/reject` 归属剥离 | `:3392` 同上 | 1 failed / 10 passed | **(10)** —— 恰好一条，就是 `/reject` 的归属腿 |
 
-还原后 `cmp` 通过，`routes/approvals.ts` sha256 = `81ab41f8a646e3f72173b67c58f8a5fcef4e56816dc57d319d26ea7af410849b`。
+11 条腿里有 **10 条**被某一个**单站点**mutation 杀掉。唯一免疫的是 **(7) 状态腿**，这是刻意的：
+它断言的是「新闸**没有**改变已有拒绝的身份」，对四个 mutation 都应该保持绿 —— 这正是它的判别力所在。
+
+每个 mutation 跑完立即 `cp` 还原并 `cmp` 校验通过（四次全部）。
 
 ## 3. 邻接既有套件（回归）
 
@@ -90,3 +97,8 @@
   不是「已证明不存在其他消费者」。
 - **本变更不修「裸终结」**（设计 §6 末段）：被准入之后这两条端点的行为一字未改。
 - **PostgreSQL 版本**：本轮读数取自本机 PG（`ms2testbed`），CI lane 用 `postgres:16`；生产 PG15 轴未在本轮跑。
+- **`ServiceError` 码在这两条路由上不外泄**：它们不走 `handleApprovalsError`，外层 catch 把非 schema 错误
+  一律压成 `500 APPROVAL_APPROVE_FAILED` / `APPROVAL_REJECT_FAILED`。因此 `currentNodeEntryEpoch` 的结构性
+  `APPROVAL_NODE_ENTRY_EPOCH_MIXED` 到客户端是一个泛化 500。**仍然 fail-closed**（内层 catch 先 ROLLBACK
+  再 rethrow，零行），但**错误身份丢失**是已知缺口、不是不变量；源码里已就地注明。未在本轮修（修它会改动
+  这两条路由既有的错误信封契约，属另一次合同变更）。
