@@ -549,3 +549,133 @@ $ npx vitest run \
   会话 scratchpad，不在仓库内。删后 `git status` 只剩本 PR 自己的三个文件。
 - 变异全部内存级，源文件零改动。
 - 未连接任何真实数据库；文档与输出里不含主机 / 账号 / 口令 / 令牌值。
+
+---
+
+## 9. 2026-09-21 反驳者 blocker 复核（第三轮 rebase，合 `8d5b1fdd5`）
+
+### 9.1 blocker 结论：成立，且是必红 required 门
+
+反驳者指出上一轮「邻接集 9 files / 141 tests 全绿」是**人工挑文件**得出的，漏掉了 09-20 19:45
+才合入 main 的 `tests/unit/admin-bulk-data-sources-fk-409.test.ts`（#5904 / `70916cbc1`）。
+本地复现确认：该 spec 在本支 **16/16 全红**，而在 merge-base `5edf4c3e1` 的主检出 16/16 全绿 ——
+红是本 PR 引入的，不是环境问题。CI 侧 `run 35553865942` 的 16 条失败全部前缀于这一个文件，
+即它是 `test (18.x)` / `test (20.x)` 两条 required 门变红的**唯一**原因。
+
+### 9.2 根因是两层，只修反驳者写的那一层不够
+
+反驳者给的修法（补 `vi.mock('../../src/rbac/service')`）方向正确但不完整。实测：
+
+1. **第一层（反驳者已指出）**：该 spec 的 `vi.mock('../../src/db/pg', () => ({ pool: null }))`
+   只给 `pool` 不给 `query`；`rbac/service.ts:19` 的
+   `isAdmin(userId, runQuery: typeof query = query)` 默认参数取的正是 `query`，于是
+   `audit-integration.ts:148` 的 `await isAdmin(user.id)` 抛
+   `No "query" export is defined on the "../../src/db/pg" mock`，被该守卫的 catch 兜成
+   `503 RBAC_CHECK_FAILED`。补上与 `admin-dlq-read-authz.test.ts:28-30`、
+   `admin-read-gates-batch3-authz.test.ts:83-85` 逐字同款的替身后，**只有第 1 条转绿，其余 15 条
+   变成 403**。
+2. **第二层（补测才暴露）**：该 spec 的 `afterEach` 调 `vi.restoreAllMocks()`
+   （fk-409 spec 原 `:216-218`），它会把 `vi.mock` 工厂里那个
+   `vi.fn().mockResolvedValue(true)` 的实现一并剥掉 —— 第二条用例起 `isAdmin` 返回
+   `undefined`，`requireAdminRole()` 判非 admin 答 `403`。故在 `beforeEach` 里用
+   `vi.mocked(isAdmin).mockResolvedValue(true)` 重新装填。两层都补齐后 16/16 转绿。
+
+这一层是「照搬同目录范式」照搬不出来的：被抄的两个 spec 都没有 `restoreAllMocks`。
+
+### 9.3 补的是身份显式化，不是把门抄掉
+
+该 spec 的夹具主体本来就叫 `'admin-fixture'`（`buildApp()` 里注入 `user = { id: 'admin-fixture' }`），
+替身只是让这个**既定**身份生效，没有放宽任何东西，也没有改它断言的 409 / 400 / 500 边界 ——
+16 条断言一字未动。
+
+**变异自证（内存级，一次性探针跑完即删）**：
+
+| 变异 | 结果 | 说明 |
+| --- | --- | --- |
+| 把 fk-409 的 `mockResolvedValue(true)` 翻成 `false` | **16/16 红，每条都是 403** | 证明替身没有把门旁路掉；门在整个 suite 里全程活着 |
+| 把 `requireAdminRole` 整个 mock 成 passthrough，跑 `admin-safety-toggle-and-bulk-authz` | **25 条里 17 条红** | 证明合完 main 之后 12 处门仍然是 load-bearing |
+
+两个探针（`w8k-mut2-fk409-nonadmin.test.ts`、`w8k-mut3-passthrough.test.ts`）跑完即删，
+`ls tests/unit/w8k-*` 为空，`git status` 干净；`admin-routes.ts` 源文件零改动。
+
+### 9.4 邻接集口径改掉：不再人工挑文件
+
+本轮把口径换成**全仓 grep**，这正是上一轮漏掉 fk-409 的原因：
+
+```
+grep -rl "initAdminRoutes\|admin-routes" --include=*.test.ts --include=*.spec.ts .
+```
+
+命中 **16 个** spec 文件（上一轮只人工挑了 9 个）。其中
+`tests/integration/directory-binding-sync-hook.db.test.ts` 需要真库、不在 CI unit 泳道，
+其余 15 个 + `require-admin-role-fail-closed.test.ts` 一起跑：
+
+```
+Test Files  16 passed (16)
+     Tests  265 passed (265)
+```
+
+合 `origin/main`（`8d5b1fdd5`）**之后**重跑同一组，仍是 16 files / 265 tests 全绿。
+
+### 9.5 合 main 后 12 处门逐条复核
+
+`git merge origin/main` 无冲突。合并后用静态扫描脚本逐条核「门是否仍是首位 handler」
+（脚本按 `router.<verb>(` + 路径字面量定位，再取路径后第一个非空非注释的 handler）：
+
+| 路由 | 行号 | 首位 handler |
+| --- | --- | --- |
+| `POST /safety/enable` | `:214` | `requireAdminRole(),` |
+| `POST /safety/disable` | `:237` | `requireAdminRole(),` |
+| `POST /cache/clear` | `:1152` | `requireAdminRole(),` |
+| `POST /metrics/reset` | `:1208` | `requireAdminRole(),` |
+| `DELETE /data/bulk` | `:1381` | `requireAdminRole(),` |
+| `PUT /data/bulk` | `:1500` | `requireAdminRole(),` |
+| `POST /dlq/:id/retry` | `:1715` | `requireAdminRole(),` |
+| `DELETE /dlq/:id` | `:1747` | `requireAdminRole(),` |
+| `POST /dlq/retry-all` | `:1936` | `requireAdminRole(),` |
+| `POST /dlq/cleanup` | `:1988` | `requireAdminRole(),` |
+| `POST /ratelimits/:key/reset` | `:2149` | `requireAdminRole(),` |
+| `POST /ratelimits/reset-all` | `:2188` | `requireAdminRole(),` |
+
+12 / 12 成立。#5914 的门保留：`admin-routes.ts:1646`
+`router.get('/slo/status', requireAdminRole(), ...)`；两个子路由挂载
+`:2386 router.use('/snapshots', snapshotLabelsRouter)` /
+`:2387 router.use('/safety/rules', protectionRulesRouter)` 未被改动。
+
+`tsc --noEmit` 退出码 0。
+
+### 9.6 nonBlocking 1 一并处理：`openapi/admin-api.yaml` 的契约漂移
+
+反驳者登记的「契约文档漂移」本轮顺手修掉。原 NOTE（`:157-161`）写着
+「`POST /safety/enable` 既无 `requireAdminRole()` 也无 `requireSafetyCheck()` …
+此处不记 403 因为根本不返回」—— 本 PR 之后这句已成假。改动：
+
+- 把那段 NOTE 换成记录「该缺口已闭合」的新注，并点明 `/dlq`、`/ratelimits`
+  两组路径在本文件里根本还没有 operation 描述（见文件头 note），所以它们的门只是被记录、
+  没有被文档化。
+- `/safety/enable` 补 `403` → `AdminError`（此前该 operation 完全没有 403）。
+- `safety/disable`、`cache/clear`、`metrics/reset`、`data/bulk` 的 `DELETE` 与 `PUT` 五处
+  原本只记了 `403: Confirmation required → SafetyCheckRequired`；现在同一状态码上有两个产出者，
+  改成 `oneOf: [AdminError, SafetyCheckRequired]` 并在 description 里写明顺序
+  （`requireAdminRole()` 在前，只有 admin 才走得到 `requireSafetyCheck()`），
+  同时补 `503`（`requireAdminRole()` 的 fail-closed 分支，`RBAC_CHECK_FAILED`）。
+
+改法是按 operationId 精确定位的（`disableSafetyGuard` / `clearCache` / `resetMetrics` /
+`bulkDeleteData` / `bulkUpdateData`），脚本带跨 operation 边界的断言；全文件其余
+`SafetyCheckRequired` 引用（共 23 处）未受影响。`yaml.safe_load` 解析通过，20 条 path。
+
+需要说明的是：全仓 grep 未发现任何 `ts/mjs/js/json/yml` 引用 `admin-api.yaml`，
+所以 `contracts (openapi)` 绿**不等于**这份文档正确 —— 这次修的是人读的准确性，没有测试能兜住它。
+
+### 9.7 其余 nonBlocking 项状态
+
+反驳者登记的另外三条（闭世界用例不含两个子路由、闭世界识别器的 `toString()` 理论残余、
+设计 §4 残余 1–6）本轮**未动**，维持上一轮的登记结论：它们都不影响 CI，也都已在
+spec 注释或设计文档里写明理由并交给 #5680 / 后续 PR。
+
+### 9.8 本轮边界自检
+
+- 只在 worktree `metasheet-wt-w8k` 内改动；主检出与其他 `metasheet-*` 目录只读。
+- 未合任何 PR、未碰 `main`、未改 `.github/`、未改任何 pin 文件与 `test-chain.txt`。
+- 两个一次性变异探针跑完即删，`git status` 干净；变异全部内存级。
+- 未连接任何真实数据库；本节不含主机 / 账号 / 口令 / 令牌值。
