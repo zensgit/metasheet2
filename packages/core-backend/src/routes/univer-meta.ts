@@ -17669,11 +17669,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // (`sheet.baseId` / `sheet.id` build the response's commentsScope), so it is moved, not
       // dropped; its 404 is now RACE-ONLY and values-free.
       //
-      // What deliberately stays ABOVE: the RECORD row probe. Without `sheetId`/`viewId` in the body
-      // it is the only way to learn which sheet is being addressed, and it is not a SHEET oracle —
-      // with a body `sheetId`, an ABSENT sheet yields zero rows and the byte-identical
-      // `Record not found: <recordId>` that a LIVE sheet returns for a recordId not on it. Accepted
-      // residual, pinned by issue #5911.
+      // What deliberately stays ABOVE, both pre-existing and both pinned by issue #5911:
+      //  1. the RECORD row probe. Without `sheetId`/`viewId` in the body it is the only way to learn
+      //     which sheet is being addressed, and it is not a SHEET oracle — with a body `sheetId`, an
+      //     ABSENT sheet yields zero rows and the byte-identical `Record not found: <recordId>` that a
+      //     LIVE sheet returns for a recordId not on it.
+      //  2. `resolveMetaSheetId` above it, when the body carries `sheetId`/`viewId`. A viewId on a
+      //     DIFFERENT sheet throws `ConflictError`, which the catch has no branch for, so it reaches
+      //     the generic 500 — a pre-authority answer that differs from the 404 an unknown viewId gets.
+      //     That is a VIEW-side difference: it turns on `view.sheetId !== sheetId`, never on whether
+      //     the named sheet is live, soft-deleted or absent, so the three sheet states stay
+      //     indistinguishable here (pinned by the `resolveMetaSheetId` cell in
+      //     tests/unit/multitable-sheet-existence-oracle-b5.test.ts).
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })

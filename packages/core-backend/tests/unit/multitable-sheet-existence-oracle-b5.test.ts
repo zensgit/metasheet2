@@ -34,8 +34,13 @@
  *  - #5908 — (a) keeps its VIEW-row probe ahead of authority. The view is an AUTHORISATION INPUT on
  *    this route (`isPublicFormAccessAllowed(view, token)` and the protected-form evaluation both
  *    consume it), so it cannot be moved below the decision it feeds. Consequence, pinned below: an
- *    ABSENT sheet cannot carry a real view, so it answers the same `View not found` 404 as a bad
- *    viewId. A DELETED sheet's view DOES still resolve (`tryResolveView`, multitable/loaders.ts,
+ *    ABSENT sheet carries no view — `meta_views.sheet_id` is
+ *    `.references('meta_sheets.id').onDelete('cascade')`, src/db/migrations/
+ *    zzz20251231_create_meta_schema.ts:32, the only production DDL for the table — so an absent
+ *    sheet's viewId answers the same `View not found` 404 as a viewId that was never real. Should
+ *    that FK ever be dropped, a DANGLING view is answered by the values-free liveness 404 and every
+ *    refused caller class still sees exactly what it sees on a LIVE sheet; both arms are asserted
+ *    below. A DELETED sheet's view DOES still resolve (`tryResolveView`, multitable/loaders.ts,
  *    does not filter liveness), which is exactly why the LIVE/DELETED pair below is identical.
  *  - #5911 — (b) keeps its RECORD-row probe ahead of authority. Without `sheetId`/`viewId` in the
  *    body it is the ONLY way to learn which sheet is addressed. It is not a SHEET oracle: with a
@@ -44,10 +49,19 @@
  *    equality below, together with the probe's SQL shape.
  *
  * ── Fixture notes ─────────────────────────────────────────────────────────────
- * SELF-CONTAINED by design (the shared fixture tests/utils/sheet-existence-oracle.ts announced with
- * #5839 B1 is not on main at the time of writing; this file is modelled on the fake pool of
- * tests/unit/multitable-record-gate-capability-before-liveness.test.ts and on the sibling
- * tests/unit/multitable-sheet-existence-oracle-b3.test.ts, and a follow-up may migrate it).
+ * The shared fixture tests/utils/sheet-existence-oracle.ts (landed with #5839 B1) IS on main, and the
+ * three refusal BODIES below are imported from it — so they stay captured from the real
+ * `sendForbidden` / `sendSheetNotLive` rather than hand-typed, which is the discipline that keeps a
+ * changed product body from leaving a green copy behind.
+ *
+ * Its POOL (`makeOracleFakePool`) is NOT used, for two states this batch cannot do without:
+ *   - SHEET_RACE — `makeOracleFakePool` derives liveness `live` for every id it does not know and
+ *     serves the `deleted_at IS NULL` row only for its own LIVE, so the race and an ordinary live
+ *     sheet are the same id there; here they must be two ids answered by two different reads.
+ *   - SHEET_LIVE_NOFIELDS — a SECOND live sheet that HAS a row (its `options.answer` hook is consulted
+ *     only after the sheet-row probe, so a second row-bearing live sheet is not expressible).
+ * The local pool below is modelled on tests/unit/multitable-record-gate-capability-before-liveness.ts
+ * and on the sibling tests/unit/multitable-sheet-existence-oracle-b3.test.ts.
  *
  * The fake pool models `deleted_at` and answers the RESOLVER's read
  * (`SELECT deleted_at FROM meta_sheets WHERE id = $1`, multitable/sheet-liveness.ts) rather than
@@ -63,6 +77,11 @@ import request from 'supertest'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
+import {
+  FORBIDDEN as FORBIDDEN_BODY,
+  SHEET_ABSENT_BODY,
+  SHEET_DELETED_BODY,
+} from '../utils/sheet-existence-oracle'
 
 // ── ids ───────────────────────────────────────────────────────────────────────
 
@@ -83,6 +102,15 @@ const VIEW_ON_LIVE = 'viw_b5_on_live'
 const VIEW_ON_DELETED = 'viw_b5_on_deleted'
 const VIEW_ON_RACE = 'viw_b5_on_race'
 const VIEW_ABSENT = 'viw_b5_absent'
+/**
+ * A view whose sheet row does not exist. The production FK (`meta_views.sheet_id` REFERENCES
+ * `meta_sheets(id) ON DELETE CASCADE`, src/db/migrations/zzz20251231_create_meta_schema.ts:32) makes
+ * this unreachable today; it is staged anyway so the #5908 residual is pinned by BEHAVIOUR rather
+ * than by that FK alone — if the constraint is ever dropped, the cell below still has to hold.
+ */
+const VIEW_DANGLING = 'viw_b5_dangling'
+/** A view on the second LIVE sheet — used only to feed `resolveMetaSheetId` a cross-sheet viewId. */
+const VIEW_ON_NOFIELDS = 'viw_b5_on_nofields'
 /** The SAME token on both views, so a LIVE/DELETED difference can only come from the sheet. */
 const PUBLIC_TOKEN = 'tok_b5_public'
 
@@ -107,17 +135,14 @@ const RECORD_PROBE_UNSCOPED_SQL = 'SELECT id, sheet_id FROM meta_records WHERE i
 
 // ── bodies ────────────────────────────────────────────────────────────────────
 
+/** The ONE body still written out here: the 401 is plain express, not a sheet refusal helper. */
 const UNAUTHENTICATED_BODY = { error: 'Authentication required' }
-const FORBIDDEN_BODY = { ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } }
-const SHEET_NOT_FOUND_BODY = { ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } }
-const SHEET_DELETED_BODY = {
-  ok: false,
-  error: {
-    code: 'SHEET_DELETED',
-    message:
-      'This sheet has been deleted. It can be restored with POST /api/multitable/sheets/{sheetId}/restore by an actor with schema authority.',
-  },
-}
+/**
+ * The relocated probe's 404 and the `buildRecordPatchContext` 404 are hand-built in the route rather
+ * than emitted by `sendSheetNotLive`, and this equality is what pins them to the canonical absent
+ * refusal: if either drifts away from it, the cells below red.
+ */
+const SHEET_NOT_FOUND_BODY = SHEET_ABSENT_BODY
 const recordNotFoundBody = (recordId: string) => ({
   ok: false,
   error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` },
@@ -156,6 +181,8 @@ const VIEW_ROWS = new Map<string, ReturnType<typeof viewRow>>([
   [VIEW_ON_LIVE, viewRow(VIEW_ON_LIVE, SHEET_LIVE)],
   [VIEW_ON_DELETED, viewRow(VIEW_ON_DELETED, SHEET_DELETED)],
   [VIEW_ON_RACE, viewRow(VIEW_ON_RACE, SHEET_RACE)],
+  [VIEW_DANGLING, viewRow(VIEW_DANGLING, SHEET_ABSENT)],
+  [VIEW_ON_NOFIELDS, viewRow(VIEW_ON_NOFIELDS, SHEET_LIVE_NOFIELDS)],
 ])
 
 /** Record rows survive a SOFT delete; nothing can sit on a sheet that never existed. */
@@ -224,7 +251,11 @@ function createFakePool() {
       // its schema, which is why liveness has to be refused explicitly rather than inferred.
       // SHEET_LIVE_NOFIELDS is live but schema-less, which is what drives `buildRecordPatchContext`
       // to return null and the route to answer its second (now values-free) 404.
-      const schemaless = p(0) === SHEET_ABSENT || p(0) === SHEET_LIVE_NOFIELDS
+      // Only SHEET_LIVE_NOFIELDS is schema-less. SHEET_ABSENT is deliberately NOT listed: no cell can
+      // reach a meta_fields read for it (every ABSENT request is answered by the record probe's 404
+      // first, asserted in (b)①-residual), so an `|| p(0) === SHEET_ABSENT` arm would be dead code
+      // implying a coverage this file does not have.
+      const schemaless = p(0) === SHEET_LIVE_NOFIELDS
       return { rows: schemaless ? [] : FIELD_ROWS.map((f) => ({ ...f })) }
     }
     if (flat.includes('FROM meta_bases')) {
@@ -415,11 +446,18 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
 
       expect(res.status).toBe(200)
       expect(res.body.ok).toBe(true)
-      expect(res.body.data?.commentsScope).toMatchObject({
+      // EXACT, not partial: a field ADDED to this scope (a leaked ownerId, a tenant id) must red here
+      // too, exactly as it does on the PATCH side. The record id is generated, so it is read back from
+      // the response's own `record` rather than hand-fixed — the assertion is still a total one.
+      const newRecordId = res.body.data?.record?.id
+      expect(typeof newRecordId, 'the submit response carried no record id').toBe('string')
+      expect(res.body.data?.commentsScope).toEqual({
         targetType: 'meta_record',
+        targetId: newRecordId,
         baseId: BASE_ID,
         sheetId: SHEET_LIVE,
         viewId: VIEW_ON_LIVE,
+        recordId: newRecordId,
         containerType: 'meta_sheet',
         containerId: SHEET_LIVE,
       })
@@ -430,7 +468,7 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
       const livenessIndex = log.findIndex((sql) => sql.includes(LIVENESS_SQL))
       expect(probeIndex, 'the sheet row was never read on the success path').toBeGreaterThanOrEqual(0)
       expect(livenessIndex).toBeGreaterThanOrEqual(0)
-      expect(probeIndex, 'the existence probe still runs before the liveness resolution').toBeGreaterThan(livenessIndex)
+      expect(probeIndex, 'the existence probe must run AFTER the liveness resolution').toBeGreaterThan(livenessIndex)
     })
 
     it('③ a valid publicToken on DELETED: 404 SHEET_DELETED, values-free, and still no sheet row read', async () => {
@@ -486,6 +524,38 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
       // capability resolution, no sheet row. This is the shape #5908 tracks.
       expect(anonLog.length).toBe(1)
       expect(anonLog[0]).toContain('FROM meta_views')
+      expectNoSheetRowRead()
+    })
+
+    /**
+     * ⑤ THE ABSENT ARM, and the #5908 premise held to BEHAVIOUR rather than to a constraint. The FK
+     * cited in the header means a view on an absent sheet cannot exist; this cell stages one anyway
+     * and shows the oracle stays closed either way — every REFUSED caller class gets byte-identically
+     * what it gets on a LIVE sheet, and the one caller that gets PAST authority is answered by the
+     * values-free liveness 404, never by a row probe.
+     */
+    it('⑤ #5908 premise, held to behaviour: a DANGLING view (sheet row absent) changes no refused caller’s answer', async () => {
+      const anonLive = await submit('ANON', VIEW_ON_LIVE)
+      const anonDangling = await submit('ANON', VIEW_DANGLING)
+      const anonDanglingProbes = existenceProbes()
+      const outsiderLive = await submit('OUTSIDER', VIEW_ON_LIVE)
+      const outsiderDangling = await submit('OUTSIDER', VIEW_DANGLING)
+      const outsiderDanglingProbes = existenceProbes()
+
+      expect(anonLive.status).toBe(401)
+      expect(anonDangling.status).toBe(anonLive.status)
+      expect(anonDangling.text, 'an anonymous caller can tell an absent sheet from a live one').toBe(anonLive.text)
+      expect(outsiderLive.status).toBe(403)
+      expect(outsiderDangling.status).toBe(outsiderLive.status)
+      expect(outsiderDangling.text, 'a zero-capability caller can tell an absent sheet from a live one').toBe(outsiderLive.text)
+      expect(anonDanglingProbes).toEqual([])
+      expect(outsiderDanglingProbes).toEqual([])
+
+      // …and the caller that DOES clear authority gets the values-free liveness 404, not a row-probe 404.
+      const authorised = await submit('ANON', VIEW_DANGLING, { publicToken: PUBLIC_TOKEN })
+      expect(authorised.status).toBe(404)
+      expect(authorised.body).toEqual(SHEET_NOT_FOUND_BODY)
+      expect(authorised.text, 'the refusal echoed the absent sheet id back').not.toContain(SHEET_ABSENT)
       expectNoSheetRowRead()
     })
   })
@@ -557,6 +627,7 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
      */
     it('② OUTSIDER without sheetId/viewId: capability is judged on the record’s sheet — identical 403 for LIVE and DELETED', async () => {
       const live = await patch('OUTSIDER', REC_ON_LIVE, {})
+      const liveProbes = existenceProbes()
       const liveLog = statements()
       const deleted = await patch('OUTSIDER', REC_ON_DELETED, {})
 
@@ -564,6 +635,10 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
       expect(live.body).toEqual(FORBIDDEN_BODY)
       expect(deleted.text).toBe(live.text)
 
+      // Both halves carry the evidence assertion: `expectNoSheetRowRead` only sees the DELETED
+      // request's log, so without this a probe that ran on the LIVE branch alone would be left to the
+      // text-identity assertion to catch.
+      expect(liveProbes).toEqual([])
       expectNoSheetRowRead()
       // The unscoped probe ran first, and the liveness read that followed named the record's sheet.
       expect(liveLog[0]).toBe(RECORD_PROBE_UNSCOPED_SQL)
@@ -604,7 +679,7 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
       const probeIndex = log.findIndex((sql) => sql.includes(EXISTENCE_PROBE_SQL))
       const livenessIndex = log.findIndex((sql) => sql.includes(LIVENESS_SQL))
       expect(probeIndex, 'the sheet row was never read on the success path').toBeGreaterThanOrEqual(0)
-      expect(probeIndex, 'the existence probe still runs before the liveness resolution').toBeGreaterThan(livenessIndex)
+      expect(probeIndex, 'the existence probe must run AFTER the liveness resolution').toBeGreaterThan(livenessIndex)
     })
 
     /**
@@ -676,6 +751,31 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
       const unscoped = statements()
       expect(unscoped[0]).toBe(RECORD_PROBE_UNSCOPED_SQL)
       expect(unscoped.findIndex((sql) => sql.includes(LIVENESS_SQL))).toBeGreaterThan(0)
+    })
+
+    /**
+     * ⑤ THE OTHER pre-authority step, named so the residual list is exhaustive (#5911). When the body
+     * carries `sheetId`/`viewId`, `resolveMetaSheetId` runs ABOVE the record probe; a viewId that
+     * belongs to a DIFFERENT sheet throws `ConflictError`, for which the catch has no branch, so the
+     * caller gets the generic 500 instead of the 404 an unknown viewId leads to. That difference turns
+     * on `view.sheetId !== sheetId` ALONE: this cell pins that the three sheet states are still
+     * indistinguishable through it, which is what keeps it out of the #5839 oracle. If someone ever
+     * makes this step answer differently for a live / soft-deleted / absent sheet, this reds.
+     */
+    it('⑤ residual: the pre-authority resolveMetaSheetId answers identically for LIVE, DELETED and ABSENT', async () => {
+      const answers: Array<{ status: number; text: string }> = []
+      for (const sheetId of [SHEET_LIVE, SHEET_DELETED, SHEET_ABSENT]) {
+        // The viewId belongs to a FOURTH sheet, so the mismatch is the same for all three ids and the
+        // only thing varying across the loop is the liveness of the sheet the caller named.
+        const res = await patch('OUTSIDER', REC_ON_LIVE, { sheetId, viewId: VIEW_ON_NOFIELDS })
+        expect(res.text, 'the pre-authority resolution echoed a sheet id back').not.toContain(sheetId)
+        answers.push({ status: res.status, text: res.text })
+      }
+      expect(
+        answers.map((a) => `${a.status} ${a.text}`),
+        'the pre-authority sheetId/viewId resolution distinguishes the three sheet states — that would be a #5839 oracle',
+      ).toEqual([`${answers[0].status} ${answers[0].text}`, `${answers[0].status} ${answers[0].text}`, `${answers[0].status} ${answers[0].text}`])
+      expectNoSheetRowRead()
     })
   })
 })
