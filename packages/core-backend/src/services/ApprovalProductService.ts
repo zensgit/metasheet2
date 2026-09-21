@@ -11908,7 +11908,14 @@ export class ApprovalProductService {
   //   - exactly one non-NULL epoch → return it → epoch tally.
   //   - mixed NULL/non-NULL, or >1 distinct non-NULL → a STRUCTURAL invariant violation (a single
   //     round must never span epochs) → fail closed. Never MAX()-collapse.
-  private async currentNodeEntryEpoch(
+  //
+  // VISIBILITY WIDENED (`private` -> public), body unchanged: the legacy decision endpoints in
+  // `routes/approvals.ts` stamp the ROUND half of a decision row's node attribution and must use
+  // THIS resolver, on their own transaction client, rather than a second hand-written copy of the
+  // `DISTINCT entry_epoch` query — a copy would have to re-derive the empty/mixed fail-closed
+  // branches below by hand, and a narrower re-derivation of a shared rule is the drift this whole
+  // module's docblocks keep warning about. No call site changed; no behaviour changed.
+  async currentNodeEntryEpoch(
     client: { query: typeof pool.query },
     instanceId: string,
     nodeKey: string,
