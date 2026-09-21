@@ -1810,6 +1810,173 @@ components:
           format: date-time
           nullable: true
       required: [id, tenantId, pipelineId, mode, status, rowsRead, rowsCleaned, rowsWritten, rowsFailed]
+    IntegrationPipelineFieldMapping:
+      type: object
+      description: >-
+        Q4c: one field mapping row of a pipeline. This is the exact shape produced by
+        plugin-integration-core's rowToFieldMapping (plugins/plugin-integration-core/lib/pipelines.cjs)
+        and is embedded in IntegrationPipeline.fieldMappings when the read requests it
+        (GET /api/integration/pipelines/{id}?includeFieldMappings=true, the default).
+      properties:
+        id: { type: string }
+        pipelineId: { type: string }
+        sourceField: { type: string }
+        targetField: { type: string }
+        transform:
+          type: object
+          nullable: true
+          additionalProperties: true
+        validation:
+          type: object
+          nullable: true
+          additionalProperties: true
+        defaultValue:
+          nullable: true
+          description: Any JSON value persisted as the field's default; shape is caller-defined.
+        sortOrder: { type: integer }
+        createdAt: { type: string, format: date-time, nullable: true }
+      required: [id, pipelineId, sourceField, targetField, sortOrder]
+    IntegrationPipeline:
+      type: object
+      description: >-
+        Q4c: read-only pipeline projection. This is the exact shape produced by
+        plugin-integration-core's rowToPipeline (plugins/plugin-integration-core/lib/pipelines.cjs)
+        and is shared verbatim by the list route (GET /api/integration/pipelines) and the
+        single-pipeline read (GET /api/integration/pipelines/{id}); the list read never embeds
+        `fieldMappings` (the registry call omits it), only the single read does, and only when
+        `includeFieldMappings` is not explicitly `false`.
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        workspaceId: { type: string, nullable: true }
+        projectId: { type: string, nullable: true }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        sourceSystemId: { type: string }
+        sourceObject: { type: string }
+        targetSystemId: { type: string }
+        targetObject: { type: string }
+        stagingSheetId: { type: string, nullable: true }
+        mode: { type: string }
+        idempotencyKeyFields:
+          type: array
+          items: { type: string }
+        options:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [draft, active, paused, disabled]
+        createdBy: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
+        fieldMappings:
+          type: array
+          description: >-
+            Present only on the single-pipeline read with includeFieldMappings !== 'false';
+            absent (not null, not []) on the list route and on a read with
+            includeFieldMappings=false.
+          items: { $ref: '#/components/schemas/IntegrationPipelineFieldMapping' }
+      required:
+        - id
+        - tenantId
+        - name
+        - sourceSystemId
+        - sourceObject
+        - targetSystemId
+        - targetObject
+        - mode
+        - idempotencyKeyFields
+        - options
+        - status
+    IntegrationExternalSystem:
+      type: object
+      description: >-
+        Q4c: public (credential-redacted) external-system projection. This is the exact shape
+        produced by plugin-integration-core's rowToPublicExternalSystem
+        (plugins/plugin-integration-core/lib/external-systems.cjs) and is shared verbatim by the
+        list route (GET /api/integration/external-systems) and the single-system read
+        (GET /api/integration/external-systems/{id}). `config` has every key in that system's
+        `kind`-specific private-config set already deleted (never redacted-in-place); raw
+        credentials are never in this projection — only derived presence/format/fingerprint
+        fields are.
+      properties:
+        id: { type: string }
+        connectionId: { type: string, nullable: true }
+        tenantId: { type: string }
+        workspaceId: { type: string, nullable: true }
+        projectId: { type: string, nullable: true }
+        name: { type: string }
+        kind: { type: string }
+        role:
+          type: string
+          enum: [source, target, bidirectional]
+        config:
+          type: object
+          additionalProperties: true
+          description: Sanitized config with every private (kind-specific) key already removed.
+        capabilities:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [active, inactive, error]
+        lastTestedAt: { type: string, format: date-time, nullable: true }
+        lastError: { type: string, nullable: true }
+        hasCredentials:
+          type: boolean
+          description: True iff a non-empty encrypted credential blob is stored; never the credential itself.
+        credentialFormat:
+          type: string
+          nullable: true
+          description: Detected format token of the stored ciphertext (e.g. its envelope version), never its content.
+        credentialFingerprint:
+          type: string
+          nullable: true
+          description: >-
+            Non-reversible fingerprint of the stored credential, present only where the route
+            computes one; null when it does not.
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
+      required: [id, tenantId, name, kind, role, config, capabilities, status, hasCredentials]
+    IntegrationDeadLetter:
+      type: object
+      description: >-
+        Q4c: redacted dead-letter projection returned by GET /api/integration/dead-letters. This
+        is plugin-integration-core's rowToDeadLetter (plugins/plugin-integration-core/lib/dead-letter.cjs)
+        with redactDeadLetter (plugins/plugin-integration-core/lib/http-routes.cjs) applied: by
+        default `sourcePayload`/`transformedPayload` are stripped entirely (`payloadRedacted:
+        true`); an admin caller passing `includePayload=true` gets both fields back, sanitized
+        (secret-shaped values scrubbed), not verbatim. `errorMessage` is always scrubbed for
+        secret-shaped substrings, including on rows written before write-time scrubbing existed.
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        workspaceId: { type: string, nullable: true }
+        runId: { type: string }
+        pipelineId: { type: string }
+        idempotencyKey: { type: string, nullable: true }
+        sourcePayload:
+          description: Present only when an admin requested includePayload=true; sanitized, not verbatim.
+          nullable: true
+        transformedPayload:
+          description: Present only when an admin requested includePayload=true; sanitized, not verbatim.
+          nullable: true
+        errorCode: { type: string }
+        errorMessage:
+          type: string
+          description: Free-text error, scrubbed of secret-shaped substrings at read time.
+        retryCount: { type: integer }
+        status:
+          type: string
+          enum: [open, replayed, discarded]
+        lastReplayRunId: { type: string, nullable: true }
+        payloadRedacted:
+          type: boolean
+          description: Always true; marks that this projection is the redacted view, whichever branch produced it.
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
+      required: [id, tenantId, runId, pipelineId, errorCode, errorMessage, retryCount, status, payloadRedacted]
     ConnectorActionOperation:
       type: string
       description: >-
