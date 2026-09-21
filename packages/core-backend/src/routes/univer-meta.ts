@@ -8647,12 +8647,70 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       let resolvedBaseId = baseId || null
       let resolvedSheetId = sheetId || null
-      if (resolvedSheetId || viewId) {
+      // A viewId WITHOUT a sheetId is the ONLY resolution that must happen before the gate below:
+      // there is no other way to learn which sheet the request addresses. It reads `meta_views` and
+      // never a sheet row, so it says nothing about the three sheet states the gate hides. The
+      // sheetId+viewId PAIRING check is deliberately deferred to AFTER the gate — see below.
+      if (!resolvedSheetId && viewId) {
         const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
-          sheetId: resolvedSheetId,
-          viewId: viewId || undefined,
+          sheetId: null,
+          viewId,
         })
         resolvedSheetId = resolved.sheetId
+      }
+
+      // #5936 — AUTHORITY BEFORE EXISTENCE, the #5839 B-series order, on the one univer-meta handler
+      // the closure guard could not see. The aliased sheet-row read below filters `s.deleted_at IS
+      // NULL` and used to answer `404 … Sheet not found: <id>` BEFORE this handler's first
+      // `sendForbidden` (which sits after the base-wide sheet-list load), so a signed-in caller
+      // /context was going to refuse anyway learned which of three things a sheet id was — live
+      // (403), soft-deleted (404) or never real (404) — with the id echoed back. The guard's
+      // EXISTENCE_PROBE recognised only the single-line `FROM meta_sheets WHERE id = $1 AND
+      // deleted_at IS NULL` form, so this handler was silently absent from its ledger; the probe now
+      // recognises the aliased, multi-line form too.
+      //
+      // ORDER ONLY — this gate NARROWS nothing and WIDENS nothing:
+      //   * the 403 predicate is the SAME `canReadWithSheetGrant(baseCapabilities, scope, isAdmin)`
+      //     the readable-rows filter below applies, evaluated against THIS sheet's scope, so every
+      //     caller that reached 200 before still reaches it;
+      //   * the membership check further down (`readableSheetRows.some(...)`, which additionally
+      //     requires the sheet to be listed under its base and not to be a hidden system sheet) is
+      //     untouched and still runs — this gate stands in FRONT of it, never instead of it.
+      // Deliberately NOT gated on `resolveSheetCapabilitiesForAccess`'s own `capabilities.canRead`:
+      // that additionally applies the approval-/e-learning-projection fences, which /context has
+      // never applied. That is a SEPARATE, separately-tracked defect (pinned today as a VACUOUS
+      // control in tests/integration/approval-projection-key-parity.db.test.ts); closing it here
+      // would be an unrelated behaviour change riding along inside an ordering fix.
+      //
+      // COST, disclosed rather than discovered: this is the Workbench's main load path, and the gate
+      // adds 2 DB round trips for an admin (liveness + this sheet's scope map) and 3 for a non-admin
+      // (+ the approval-projection membership lookup). One of them — loadSheetPermissionScopeMap for
+      // THIS sheet — is issued again ~20 lines below with the same parameters, where the map is
+      // loaded for the whole base sheet list. Seeding that later map from `sheetScope` would remove
+      // the duplicate, but it would also change the parameters of a query sibling specs assert on;
+      // left as a named residual rather than folded into an ordering fix.
+      if (resolvedSheetId) {
+        const { sheetScope, sheetLiveness } = await resolveSheetCapabilitiesForAccess(
+          pool.query.bind(pool),
+          resolvedSheetId,
+          access,
+        )
+        if (!canReadWithSheetGrant(baseCapabilities, sheetScope, access.isAdminRole)) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      }
+
+      // #5936 (refutation round) — the sheetId+viewId PAIRING check, now BEHIND the gate. It used to
+      // run with the resolution above, and `resolveMetaSheetId` throws ConflictError when the view
+      // EXISTS but belongs to another sheet; this handler's catch maps that to 500. So a caller with
+      // no capability at all could tell an existing foreign view (500) from a non-existent one (403),
+      // and scan a held viewId against candidate sheet ids for the view→sheet binding — a
+      // pre-authority door of the same family as the row read below, on the same handler. Run here,
+      // every caller the gate refuses gets the SAME 403 whatever the viewId is, and `meta_views` is
+      // not even consulted for them. A caller that PASSES the gate sees exactly what it saw before,
+      // including the 500 (a client error mapped to INTERNAL_ERROR — a separate defect, not the remit
+      // of an ordering fix).
+      if (sheetId && viewId) {
+        await resolveMetaSheetId(pool as unknown as { query: QueryFn }, { sheetId, viewId })
       }
 
       const sheetRowResult = resolvedSheetId
@@ -8669,7 +8727,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const sheetRow = (sheetRowResult as any).rows?.[0]
       if (resolvedSheetId && !sheetRow) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${resolvedSheetId}` } })
+        // Reachable only if the sheet went away BETWEEN the liveness gate above and this read. The
+        // row read filters `s.deleted_at IS NULL`, so its MISS cannot tell soft-deleted from absent:
+        // re-read liveness (one query, on the race path only) so a sheet that is merely in the
+        // recycle bin still answers SHEET_DELETED and the client keeps the restore affordance that
+        // distinct code exists for (multitable/sheet-liveness.ts). Values-free either way
+        // (multitable/sheet-refusals.ts) — the id echo that made this line the oracle #5936 reports
+        // is gone in both branches.
+        const racedLiveness = await loadSheetLiveness(pool.query.bind(pool), resolvedSheetId)
+        return sendSheetNotLive(res, racedLiveness === 'live' ? 'absent' : racedLiveness)
       }
 
       if (!resolvedBaseId) {
