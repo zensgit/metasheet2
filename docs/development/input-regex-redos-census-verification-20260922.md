@@ -239,6 +239,18 @@ Adversarial subject at the ceiling: long member run + failing tail, 10000 charac
 is only reachable once a rung crosses `USER_REGEX_PROBE_FLOOR_MS = 2`, and the worst rung
 over the whole ladder for this corpus is 0.069ms — ~29x under it.
 
+**That 29x is headroom, not a bound, and the next paragraph is why.** 0.069ms is the cost of
+the regex work in a rung. What the floor actually compares against is the WALL time of that
+rung, which also absorbs whatever the runtime does inside it — a GC pause lands in exactly
+that window. Re-measured over 50 full-ladder passes per pattern, the median pass's worst
+rung is 0.014–0.048ms (consistent with 0.069ms) while the worst pass reaches tens of
+milliseconds; that tail is dominated by allocation pressure and, in the run that produced
+it, by the measuring harness's own retained probe strings rather than by the guard. So the
+two numbers below are not in conflict: **29x of headroom on regex cost, and a measured
+1-in-100000 rate of the floor being crossed anyway once real allocation load is present.**
+The headroom is what makes the rate small; it is not what makes it zero, and nothing here
+bounds the rate on a loaded host.
+
 **Round 3 widened this and found the limit of the claim.** Re-run at 3000x6 = **18000
 calls**, with a counter patched into the deciding branch itself rather than inferred from
 rung timings: **deciding branch entered 0 times, 0 refusals.** But the same counter over

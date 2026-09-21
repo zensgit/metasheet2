@@ -294,8 +294,11 @@ a genuinely catastrophic pattern explode), through the real `validateRecord`:
 | `^[^@]+@[^@]+(\.[^@]+)+$` e-mail | **REFUSED** | ACCEPTED | 0.012ms | 0.25ms |
 | `^(/[a-z0-9_-]+)+$` path segments | **REFUSED** | ACCEPTED | 0.038ms | 0.59ms |
 
-Every one of them is LINEAR: the worst single rung over the whole ladder is 0.069ms, ~29x
-under the 2ms floor, so the deciding branch is never entered at all **for this corpus** —
+Every one of them is LINEAR: the worst single rung over the whole ladder is 0.069ms of
+regex work, ~29x under the 2ms floor. That is headroom on the regex cost, not a bound on
+the rung's wall time (a GC pause lands inside the same window) — verification MD §5.2. On
+this corpus the headroom is enough: the deciding branch is never entered at all **for this
+corpus** —
 0 entries and 0 refusals over 18000 calls, counted inside the branch rather than inferred
 (verification MD §5.2). The corpus qualifier is load-bearing and was added in round 3: over
 the 100000-pair random linear corpus the branch IS entered once, so "a linear pattern never
