@@ -756,11 +756,15 @@ describe('#5839 B5 — sheet-existence oracle on POST /views/:viewId/submit and 
     /**
      * ⑤ THE OTHER pre-authority step, named so the residual list is exhaustive (#5911). When the body
      * carries `sheetId`/`viewId`, `resolveMetaSheetId` runs ABOVE the record probe; a viewId that
-     * belongs to a DIFFERENT sheet throws `ConflictError`, for which the catch has no branch, so the
-     * caller gets the generic 500 instead of the 404 an unknown viewId leads to. That difference turns
-     * on `view.sheetId !== sheetId` ALONE: this cell pins that the three sheet states are still
-     * indistinguishable through it, which is what keeps it out of the #5839 oracle. If someone ever
-     * makes this step answer differently for a live / soft-deleted / absent sheet, this reds.
+     * belongs to a DIFFERENT sheet throws `ConflictError`. That used to have no branch in the catch,
+     * so the caller got the generic 500; since #5946 the call goes through `resolveMetaSheetIdOrRefuse`
+     * and the answer is the values-free absent-sheet 404. Either way the difference from the 404 an
+     * unknown viewId leads to turns on `view.sheetId !== sheetId` ALONE: this cell pins that the three
+     * sheet states are still indistinguishable through it, which is what keeps it out of the #5839
+     * oracle. If someone ever makes this step answer differently for a live / soft-deleted / absent
+     * sheet, this reds. (The refusal's own shape is pinned by
+     * tests/unit/multitable-sheet-view-mismatch-refusal.test.ts; this cell deliberately asserts only
+     * the three-way equality, so it stays the state oracle's cell and not a copy of that one.)
      */
     it('⑤ residual: the pre-authority resolveMetaSheetId answers identically for LIVE, DELETED and ABSENT', async () => {
       const answers: Array<{ status: number; text: string }> = []

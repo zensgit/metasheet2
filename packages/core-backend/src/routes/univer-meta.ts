@@ -6361,6 +6361,60 @@ async function resolveMetaSheetId(
   return { sheetId: viewId, view: null }
 }
 
+/**
+ * `resolveMetaSheetId` + the ONE refusal its `ConflictError` deserves (#5946).
+ *
+ * The resolver throws `ConflictError` when a request names BOTH a `sheetId` and a `viewId` and the
+ * view resolves to a DIFFERENT sheet. Ten routes call it, and on main the class was answered two
+ * wrong ways: SEVEN handlers had no branch for it and fell through to their generic hardcoded 500
+ * (values-free, but the wrong class — a caller cannot tell a bad address from a broken server, and
+ * every such request is logged as a server fault); THREE caught it and answered `409 CONFLICT` with
+ * `err.message`, which pastes the requested `viewId` AND `sheetId` back onto the wire.
+ *
+ * Both are replaced, here and once, by the SAME values-free 404 `sendSheetNotLive(res, 'absent')`
+ * emits: the address this request carries does not name a live sheet this route can act on. Echoing
+ * is impossible by construction rather than by care — the wrapper hands `sendSheetNotLive` no value
+ * (that helper takes no id and no error; multitable/sheet-refusals.ts), and `err` never reaches the
+ * response.
+ *
+ * WHY the ABSENT body specifically, and not a new code: the refusal must stay INDISTINGUISHABLE
+ * across the three sheet states. A mismatch answered one way for a LIVE sheet and another for a
+ * soft-deleted or absent one would re-open the #5839 existence oracle from the VIEW side — the
+ * difference here turns on `view.sheetId !== sheetId` ALONE, never on the named sheet's liveness.
+ * Pinned by the `resolveMetaSheetId` cell of tests/unit/multitable-sheet-existence-oracle-b5.test.ts
+ * and, for all ten routes, by tests/unit/multitable-sheet-view-mismatch-refusal.test.ts.
+ *
+ * It replaces ONLY what happens when the resolution THROWS. The wrapper sits exactly where the call
+ * sat, so each handler's own 401 → 403 → liveness-404 order is untouched, and `ValidationError`
+ * (neither id supplied) still propagates to that handler's catch and maps as before.
+ *
+ * WHY IT TAKES THE PROMISE instead of the resolver's arguments: the sheet-liveness closure guard
+ * classifies a handler as sheet-addressed partly by finding the literal `resolveMetaSheetId` in its
+ * body (tests/unit/multitable-sheet-liveness-closure.guard.test.ts, `addressesASheet`). A wrapper
+ * that swallowed the name — `orRefuseSheetViewMismatch(...)` does not match that `\b`-anchored
+ * pattern — would have quietly dropped GET /context out of that guard's scope. Keeping the call
+ * itself at the call site keeps every one of these handlers in scope, so this fix cannot pay for a
+ * better refusal with a weaker guard.
+ *
+ * Returns `null` AFTER the response has been sent: every call site must `return` on null. A raw
+ * `resolveMetaSheetId(` that is NOT wrapped like this is refused by the structural cells of
+ * tests/unit/multitable-sheet-view-mismatch-refusal.test.ts, so an 11th 500 cannot be reintroduced.
+ */
+async function orRefuseSheetViewMismatch(
+  res: Response,
+  resolution: Promise<{ sheetId: string; view: UniverMetaViewConfig | null }>,
+): Promise<{ sheetId: string; view: UniverMetaViewConfig | null } | null> {
+  try {
+    return await resolution
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      sendSheetNotLive(res, 'absent')
+      return null
+    }
+    throw err
+  }
+}
+
 function normalizeRecordCreateContextId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
@@ -8648,10 +8702,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       let resolvedBaseId = baseId || null
       let resolvedSheetId = sheetId || null
       if (resolvedSheetId || viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: resolvedSheetId,
           viewId: viewId || undefined,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         resolvedSheetId = resolved.sheetId
       }
 
@@ -13431,10 +13487,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const refererContext = extractMultitableRecordCreateContextFromUrl(
         req.get('referer') ?? req.get('referrer'),
       )
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId ?? refererContext.sheetId,
         viewId: parsed.data.viewId ?? refererContext.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
       const widgets = parsed.data.widgets.map((widget) => serializeDashboardWidget(widget as DashboardWidgetInput))
@@ -16329,10 +16387,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: sheetIdParam,
         viewId: viewIdParam,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
       const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
@@ -16830,9 +16890,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] view failed:', err)
@@ -16848,10 +16910,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: sheetIdParam,
         viewId: viewIdParam,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
@@ -17718,10 +17782,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -17753,12 +17819,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       //     ABSENT sheet yields zero rows and the byte-identical `Record not found: <recordId>` that a
       //     LIVE sheet returns for a recordId not on it.
       //  2. `resolveMetaSheetId` above it, when the body carries `sheetId`/`viewId`. A viewId on a
-      //     DIFFERENT sheet throws `ConflictError`, which the catch has no branch for, so it reaches
-      //     the generic 500 — a pre-authority answer that differs from the 404 an unknown viewId gets.
-      //     That is a VIEW-side difference: it turns on `view.sheetId !== sheetId`, never on whether
-      //     the named sheet is live, soft-deleted or absent, so the three sheet states stay
-      //     indistinguishable here (pinned by the `resolveMetaSheetId` cell in
-      //     tests/unit/multitable-sheet-existence-oracle-b5.test.ts).
+      //     DIFFERENT sheet throws `ConflictError`; since #5946 the call goes through
+      //     `orRefuseSheetViewMismatch`, which answers it with the values-free absent-sheet 404
+      //     instead of the generic 500 this used to reach. Still a pre-authority answer, and still a
+      //     VIEW-side difference from the 404 an unknown viewId gets: it turns on
+      //     `view.sheetId !== sheetId`, never on whether the named sheet is live, soft-deleted or
+      //     absent, so the three sheet states stay indistinguishable here (pinned by the
+      //     `resolveMetaSheetId` cell in tests/unit/multitable-sheet-existence-oracle-b5.test.ts and
+      //     by tests/unit/multitable-sheet-view-mismatch-refusal.test.ts).
       const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
@@ -18081,10 +18149,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       let sheetId = sheetIdParam
       let viewConfig: UniverMetaViewConfig | null = null
       if (sheetIdParam || viewIdParam) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: sheetIdParam,
           viewId: viewIdParam,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
         viewConfig = resolved.view
       }
@@ -18234,9 +18304,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] record context failed:', err)
@@ -18899,10 +18971,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId,
         viewId: parsed.data.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
 
       const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
@@ -19024,10 +19098,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -19393,10 +19469,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -19793,10 +19871,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId,
         viewId: parsed.data.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
@@ -19952,9 +20032,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // materialization refusals never reach here — they are caught + skipped at their sites.)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       if (err instanceof VersionConflictError || err instanceof ServiceVersionConflictError) {
         return res.status(409).json({
           ok: false,
