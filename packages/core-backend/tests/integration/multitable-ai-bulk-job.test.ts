@@ -214,6 +214,20 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     // Force the inline cap LOW so every multi-row request routes to a JOB.
     process.env.MULTITABLE_AI_BULK_MAX_ROWS = '1'
 
+    // E-10 BURST BUDGET — pinned ABOVE this suite's own request budget (#5915 real-DB red).
+    // The cap (default 30, services/ai-provider-readiness.ts:237) resolves ONCE at
+    // createMultitableAiRoutes construction (src/routes/multitable-ai.ts:213-227) and is counted
+    // per AUTHENTICATED user id in a fixed 60s window; BOTH bulk-preview (:669) and the bulk-job
+    // commit (:1413) spend it, and the limiter answers 429 `rate_limited` BEFORE the route reads
+    // the job header. This file drives ~35 ACTOR-keyed preview+commit calls, so on the default cap
+    // the 31st one — the commit in `commit re-gate: a row that goes stale …` — was answered 429
+    // instead of 200 while the job itself was perfectly committable (`suspended`, no claim).
+    // Burst limiting has its OWN goldens (tests/unit/multitable-ai-shortcut-routes.test.ts A2-T7 and
+    // tests/unit/ai-bulk-job-commit-burst-gate.test.ts); here it is background noise and pinning it
+    // keeps every case testing the job semantics it is named after. Guarded against silent removal
+    // by tests/unit/ai-bulk-job-commit-burst-gate.test.ts (budget guard).
+    process.env.MULTITABLE_AI_TENANT_BURST_RPM = '1000'
+
     // The job service shares the route's pool + fetchFn; NO queue (we drive runJob).
     jobService = new BulkFillJobService({ pool: poolManager.get() as unknown as PoolLike, fetchFn: fetchStub })
 
