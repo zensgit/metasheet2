@@ -16890,10 +16890,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
 
-      const sheet = await loadSheetRow(pool.query.bind(pool), view.sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
-      }
       const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       const publicTokenParam = typeof parsed.data.publicToken === 'string'
         ? parsed.data.publicToken.trim()
@@ -16931,7 +16927,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // AUTHZ-FIRST: liveness is checked only AFTER this route has decided the caller may see the
       // sheet at all (public-token access OR canRead). An anonymous caller with no valid token must
       // get the ordinary refusal, never a 404 telling them the sheet was deleted.
+      //
+      // #5839 B5: the SHEET ROW probe now sits BELOW this line too. It used to run before any
+      // refusal and answer `Sheet not found: <id>`, so a caller this route was about to turn away
+      // could still tell a live sheet from an absent one. Nothing above needs the row:
+      // resolveSheetCapabilities takes the `view.sheetId` STRING, and `sheet.baseId` / `sheet.id`
+      // are first read by the response's commentsScope. What remains above is the VIEW row probe —
+      // the view is an AUTHORISATION INPUT here (isPublicFormAccessAllowed / the protected-form
+      // evaluation both consume it), so it cannot move; that is the named residual, issue #5908.
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // Loaded here, after authority and liveness. The 404 below is RACE-ONLY — a delete committing
+      // between the liveness read above and this one — and values-free (never echoes an id).
+      const sheet = await loadSheetRow(pool.query.bind(pool), view.sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
       const fieldById = buildFieldMutationGuardMap(fields)
@@ -17562,16 +17573,28 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       sheetId = String(recordRow.sheet_id)
 
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5839 B5: the SHEET ROW probe MOVED here, below the 401/403/liveness triple. It used to run
+      // above them and answer `Sheet not found: <sheetId>`, which told a caller this route was about
+      // to refuse whether the sheet was live, soft-deleted or absent. The row itself is still needed
+      // (`sheet.baseId` / `sheet.id` build the response's commentsScope), so it is moved, not
+      // dropped; its 404 is now RACE-ONLY and values-free.
+      //
+      // What deliberately stays ABOVE: the RECORD row probe. Without `sheetId`/`viewId` in the body
+      // it is the only way to learn which sheet is being addressed, and it is not a SHEET oracle —
+      // with a body `sheetId`, an ABSENT sheet yields zero rows and the byte-identical
+      // `Record not found: <recordId>` that a LIVE sheet returns for a recordId not on it. Accepted
+      // residual, pinned by issue #5911.
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
 
       // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4): Layer-3
       // per-subject field-WRITE gate, parity with grid `/patch` (`buildRecordPatchContext` is the SAME
@@ -17584,7 +17607,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // rejected ones back leaks nothing beyond what the caller already sent — same posture as `/patch`.
       const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        // #5839 B5: values-free. This branch already sits behind the 401/403/liveness triple, but the
+        // body echoed the resolved sheet id back, which is exactly the value the move above removes.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
       }
       const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
         isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
