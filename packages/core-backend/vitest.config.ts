@@ -92,6 +92,14 @@ export default defineConfig({
       // `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-legacy-decision-seat.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-legacy-decision-seat-and-node-attribution.db.test.ts',
+      // Legacy decision endpoints — SETTLEMENT parity with `/actions`: two sibling instances of one
+      // template decided through the two doors and compared field by field (instance cursor, seats,
+      // audit rows, metrics), plus the absolute post-state a settlement must reach and the forgery
+      // family re-run against it. Requires real PostgreSQL: the whole claim is what the two doors
+      // leave in the DATABASE. Excluded from the no-DB default job so `describeIfDatabase` cannot
+      // skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-legacy-decision-seat.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-legacy-decision-settlement-parity.db.test.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
