@@ -31,17 +31,17 @@ framing that only (a) closes the 28 ungated tokens. This round:
    test asserts this — P3-6).
 2. Regenerates the manifest at **499** tokens (was 397).
 3. Restates the "no automated gate" premise with the measured numbers (P2-1, this section and §1).
-4. Adds a merge-sequencing section (§9, P2-2) — WIDENED relative to round 1's exec-block-only
+4. Adds a merge-sequencing section (§8, P2-2) — WIDENED relative to round 1's exec-block-only
    framing: any of the 18 additional free-form lines, not only the exec block, is now
    manifest-bearing.
-5. Fixes P3-1…P3-7 and NIT-1…NIT-3 (see §10).
+5. Fixes P3-1…P3-7 and NIT-1…NIT-3 (see §9).
 
 **Cost, stated plainly (per the review's own framing of option (a), not softened here):** this is
 not a five-line change in effect. It makes 18 additional invocation sites manifest-bearing, and
 unlike the exec block none of them is one-token-per-line, sorted, or covered by the shape guard's
 structural assertions — so an edit to any of those free-form command lines now needs a
 `node scripts/ops/required-web-lane-token-manifest.mjs --write`, and each one becomes a new way to
-red `main` under the §9 mechanism.
+red `main` under the §8 mechanism.
 
 ## 1. Problem, restated precisely
 
@@ -172,7 +172,7 @@ it does not make that conflict worse in kind, since the exec block is itself one
 none of them is one-token-per-line, none is sorted, and none is covered by the shape guard's
 structural assertions — they are free-form `npx vitest run a b c --reporter=dot`-shaped commands.
 An edit to any positional argument on any of those 18 lines is now manifest-bearing, with no shape
-guard to keep the resulting diff well-formed the way the exec block's is. See §9 for the
+guard to keep the resulting diff well-formed the way the exec block's is. See §8 for the
 consequence this has for the four in-flight PRs already touching this file.
 
 ## 3. How the guard is attacked (adversarial self-check)
@@ -252,7 +252,7 @@ gate review's independently-derived count.
 
 ## 5. What the guard actually asserts
 
-`required-web-lane-token-manifest-guard.test.ts` (round 2 numbering — see §10 for the P3/NIT
+`required-web-lane-token-manifest-guard.test.ts` (round 2 numbering — see §9 for the P3/NIT
 disposition of each round-1 finding):
 
 1. **Sanity** — the active token collection (union of all 19 gating invocations) and the manifest
@@ -263,16 +263,16 @@ disposition of each round-1 finding):
 2. **Manifest hygiene** — no duplicate TOKEN lines (header/comment lines are excluded from the
    count first — round 2, P3-5; a duplicate is not a safety gap by itself — set semantics absorb
    it — but is dead weight worth flagging, and it DOES hard-fail this specific assertion, corrected
-   language per P3-4 / §10).
+   language per P3-4 / §9).
 3. **`missingFromActive` (manifest ⊅ active) is empty** — a token recorded in the manifest that is
    produced by NO gating invocation: **silently dropped from the required web lane.** The failure
    message names the SCANNED line numbers, not the token's former line — round 2 acknowledges this
    is the honest limit of what a script-and-manifest-only guard can localize for a deletion (see
-   §9's mutation table, M5).
+   §8's mutation table, M5).
 4. **`extraInActive` (active ⊅ manifest) is empty** — a token produced by a gating invocation but
    not yet recorded in the manifest: **added without updating the record.** The failure message DOES
    name the exact source line(s), since that information is available for a token that still
-   exists in the active text (§9's M6 proves this).
+   exists in the active text (§8's M6 proves this).
 5. **`.gitattributes` pins the manifest** the same way it pins the script (`text eol=lf
    merge=union`).
 6. **Cross-copy agreement (round 2, P3-6)** — `logicalLines`/`execLogicalLine`/`tokensOf`'s
@@ -282,15 +282,13 @@ disposition of each round-1 finding):
    tests — see §4).
 
 Both direction assertions (3, 4) are separate `it()` blocks specifically so a mutation of one
-direction cannot hide behind, or be conflated with, the other — see §9.
+direction cannot hide behind, or be conflated with, the other — see §8.
 
 This is a **set** assertion (`Set` membership checks over parsed token arrays), not a text/regex
 match — the class of guard the standing "source-text assertions are not behaviour" and "count
 guards conflate sources" feedback both warn against building instead.
 
-## 6. Reserved (see §9 for the mutation plan, moved and expanded)
-
-## 7. CI wiring — how this actually lands in the required lane
+## 6. CI wiring — how this actually lands in the required lane
 
 - `required-web-lane-token-manifest-guard.test.ts` is placed in
   `packages/core-backend/tests/unit/`, the exact directory the shape guard was added to one day
@@ -314,7 +312,7 @@ guards conflate sources" feedback both warn against building instead.
   this file and `required-web-lane-registration-shape.test.ts` from the same default-config glob,
   **18→39 tests** before/after this file existed (18 unedited shape-guard tests; round 1 added 10,
   round 2 replaced them with 21 — see the verification document for the transcript; round-1 design
-  §7 said "27→28", which was wrong on both numbers — P3-2, corrected here). This is the proof the
+  §6 said "27→28", which was wrong on both numbers — P3-2, corrected here). This is the proof the
   task asked for in place of trusting "no wiring needed, same as the shape test."
 - `web-tests.yml` (the job that actually **executes** the pinned tokens against vitest) is a
   separate, always-on job (`web-tests`, no path filter) — this guard does not run there and does
@@ -323,7 +321,7 @@ guards conflate sources" feedback both warn against building instead.
 - The `test` job's `pull_request` trigger has no path filter (confirmed above), so this guard runs
   on every PR regardless of which files it touches.
 
-## 8. Explicitly not done in this PR
+## 7. Explicitly not done in this PR
 
 - No change to any of the 19 gating lines' token SET (`node
   scripts/ops/required-web-lane-token-set-diff.mjs origin/main` against this branch — this script
@@ -336,10 +334,10 @@ guards conflate sources" feedback both warn against building instead.
   and diffing against the fetched `origin/main` blobs; re-confirmed after the round-2 changes).
 - No branch-protection / required-context change, no DDL, no merge, no undraft. This is a
   candidate PR awaiting owner disposition of §3's OPEN item (round 2: now spanning all 19 lines,
-  not only the exec block) and, separately, of §9's merge sequencing relative to the four in-flight
+  not only the exec block) and, separately, of §8's merge sequencing relative to the four in-flight
   PRs noted in the PR body (A-2/A-4/A-5/B-2).
 
-## 9. Mutation plan (round 2: re-run and expanded) and merge sequencing (P2-2)
+## 8. Mutation plan (round 2: re-run and expanded) and merge sequencing (P2-2)
 
 ### 9a. Mutation plan
 
@@ -396,13 +394,13 @@ command (`node scripts/ops/required-web-lane-token-manifest.mjs --write`), which
 cheap once someone notices — the risk this section addresses is the blast radius and the fact that
 `strict: false` means nobody is forced to notice before merging.
 
-## 10. Disposition of round-1 gate review findings (P3/NIT), all addressed in round 2
+## 9. Disposition of round-1 gate review findings (P3/NIT), all addressed in round 2
 
 | Finding | Fix |
 |---|---|
 | P3-1 (tsc vacuous for the new file) | Verification §4c wording corrected — exit 0 is confirmed NOT to type-check the new file (`--listFiles` still shows 0 hits); no gate exists for this file's TS today, stated plainly rather than implied as coverage. |
-| P3-2 ("27→28", should be 18→28) | §7 above corrected to the actual 18→39 (round 2 added more assertions than round 1's 10). |
-| P3-3 (`test (18.x)` treated as required) | §7 above, this doc's other mentions, and the guard test header all corrected to "only `test (20.x)` is required". |
+| P3-2 ("27→28", should be 18→28) | §6 above corrected to the actual 18→39 (round 2 added more assertions than round 1's 10). |
+| P3-3 (`test (18.x)` treated as required) | §6 above, this doc's other mentions, and the guard test header all corrected to "only `test (20.x)` is required". |
 | P3-4 (`.gitattributes` "harmless/absorbed" contradicts the hard assertion) | `.gitattributes` prose corrected; the hard `no duplicate lines` assertion is UNCHANGED (kept, per the review's own "fix the prose … not both"). |
 | P3-5 (manifest has no `#` support / provenance) | Both readers (generator, guard test) strip `#`-prefixed lines; `--write` now emits a provenance header. |
 | P3-6 (no cross-copy agreement assertion) | New "cross-copy agreement" test, §5 item 6 above. |

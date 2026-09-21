@@ -73,8 +73,10 @@ The 3 extra are `||`, `exit`, and `$?`, all produced by the `|| exit $?` tail on
 exactly the round-1 gate review's independently-derived total — confirming their parser handled
 all three artifacts even though their prose named only one.
 
-## 3. Mutation drill — against the REAL files (cp → mutate → run → restore → cmp; no `git
-   checkout --` / `reset --hard` / `stash drop` used anywhere in this drill)
+## 3. Mutation drill
+
+### 3a. Against the REAL committed files (cp → mutate → run → restore → cmp; no `git
+    checkout --` / `reset --hard` / `stash drop` used anywhere in this drill) — measured THIS round
 
 Backups taken once at the top: `cp apps/web/scripts/run-required-web-tests.sh /tmp/h6r2-sh.orig`,
 `cp apps/web/scripts/run-required-web-tests.tokens /tmp/h6r2-tok.orig`. Every restore below is
@@ -87,17 +89,47 @@ no `.sh`/`.tokens` diff) before and after the whole drill.
 | **M5** | Deleted the ENTIRE physical line `npx vitest run multitable-field-config-panel --reporter=dot` (line 624, an EARLY, non-exec-block line) | **round 2 — P1-1 option (a) discriminating case** | same | **RED** — `1 token(s) … are produced by NONE of the 18 gating \`vitest run\` invocations … (lines: 477, 501, 539, 555, 556, 557, 566, 600, 612, 661, 689, 703, 729, 751, 784, 1179, 1182, 1256) … multitable-field-config-panel` — note the invocation count dropped 19→18 and every downstream line number shifted by −1 since a whole physical line was removed; the message correctly re-scans and reports the NEW line numbers, and (per design) does not claim to know 624 was the token's former line | `cp /tmp/h6r2-sh.orig` back → `cmp` OK |
 | **M6** | Appended `zzzH6Round2RealDiskAddProbe` to the end of line 690's positional list (`permission-match-parity platform-app-shell platform-app-launcher` → `+ zzz…`) | **round 2 — line-attribution case** | same | **RED** — `1 token(s) are produced by a gating \`vitest run\` invocation … but are not recorded in … : zzzH6Round2RealDiskAddProbe@line(s) 690` — exact line named | `cp /tmp/h6r2-sh.orig` back → `cmp` OK |
 | **M7** | Swapped the order of `approval-fwb-mapping-config`/`approval-fwb-mapping-editor` on line 555 (EARLY line, no add/remove) | **round 2** | same | **GREEN** — 6 passed / 15 skipped (all "set equality" assertions clean) | `cp /tmp/h6r2-sh.orig` back → `cmp` OK |
-| M2 | Added a token to the exec block, absent from the manifest | round 1, re-verified via in-memory self-proof (see the test file; on-disk M2 is the same shape as M6 with a different anchor line) | `CI=true npx vitest run required-web-lane-token-manifest-guard --reporter=verbose` | **RED** — extra-in-active, names the token and `@line(s) 1257` | in-memory only, no disk mutation needed for this case (see the guard test file's own M2) |
-| M3 | Deleted the `amountAutoSum` line from the **manifest** (token still active) | round 1, unchanged | `npx vitest run required-web-lane-token-manifest -t "set equality"` (in-memory in the guard's own self-proof suite; also reproduced on-disk in round 1) | **RED** — "extra in active", naming `amountAutoSum` | n/a (in-memory) |
-| M4 | Reversed the manifest file's line order (`tail -r`) | round 1, unchanged | same | **GREEN** | n/a (in-memory; see guard file's own M4) |
 | A1 | **Attack, re-run post-widening** — deleted `multitable-field-config-panel` from BOTH line 624 AND the manifest, same "commit" | round 2 — confirms §3's OPEN item now spans the widened surface | `npx vitest run required-web-lane-token-manifest -t "set equality"` | **GREEN** — 6 passed / 15 skipped; the coordinated delete still defeats the guard by construction, exactly as round 1's design §3 already recorded for the exec block, now reproduced on an early line too | `cp /tmp/h6r2-sh.orig` and `cp /tmp/h6r2-tok.orig` back → both `cmp` OK |
 | A2 | Duplicated one manifest TOKEN line (`amountAutoSum`, set unchanged) | round 1, re-verified against the 499-token manifest | same | **RED** — `expected 499 to be 500` ("no duplicate TOKEN lines") — confirms P3-4's fix keeps the hard assertion; only the `.gitattributes` prose calling this "harmless/absorbed" was wrong and has been corrected | `cp` backup back → `cmp` OK |
-| **A3** | Prepended an arbitrary `# manually added by a well-meaning dev, not via --write` comment line to the manifest | **round 2 fix verification (P3-5)** | same | **GREEN** — 6 passed / 15 skipped. Round 1 (unpatched) would have mis-parsed this as a 397th "token" and reported a FALSE missing-token drop naming the whole comment string — reproduced as the pre-fix behaviour during development of this round, not re-demonstrated on the committed code since the fix is now unconditional | `cp` backup back → `cmp` OK |
+| A3 | Prepended an arbitrary `# manually added by a well-meaning dev, not via --write` comment line to the manifest | **round 2 fix verification (P3-5)** | same | **GREEN** — 6 passed / 15 skipped. This is the CURRENT (patched) reader; see §3c for the separately-computed replay showing what the round-1 (unpatched) reader would have done to the same mutation | `cp` backup back → `cmp` OK |
 
 Final state after the whole drill: `git status --short` shows only the intentional file changes
 for this round (`.tokens`, `exec-block.mjs`, `token-manifest.mjs`, the guard test,
 `.gitattributes`, both docs) — `run-required-web-tests.sh` and `run-required-web-tests.tokens` are
 back to their canonical (post-`--write`) content, confirmed by `cmp` against the pre-drill backups.
+
+### 3b. In the guard test file's own in-memory self-proof suite (string-level mutations of a copy
+    of the script text, never touching disk — see the test file for the exact code)
+
+M1–M7 above are ALSO exercised here, plus two cases not run on-disk this round:
+
+| # | Mutation | Result observed (in-memory) |
+|---|---|---|
+| M2 | Token added to the exec block, not in the manifest | `extraInActive` contains the token; `lineMap.get(token)` resolves to `[1257]` (the exec block's one logical line) — the test asserts the LINE MAP resolves correctly; it does not additionally call `describeExtra()` to build a message for this case (M6's on-disk drill above is the row that observed a fully formatted message) |
+| M3 | Line deleted from the manifest (token still active) | `extraInActive` contains the token |
+| M4 | Manifest reordered (no add/remove) | both diff directions empty (GREEN) |
+| NIT-3 probe A | `assertNeitherCollapsesRelativeToTheOther(0, 0)` | throws (RED) — the derived floor is not vacuous |
+| NIT-3 probe B | same helper called with `(50, 50)` and `(300, 300)` | does not throw (GREEN) — a synchronized shrink is not spuriously flagged |
+
+### 3c. Separately-computed replay of the ROUND-1 (unpatched) manifest reader against the SAME
+    A3 mutation — computed this round, not by running the round-1 vitest suite
+
+To state the P3-5 "before" case as something actually computed rather than asserted, the round-1
+`manifestTokens()` (blank-line filter only, no `#` strip — verbatim from the pre-fix source) was
+re-implemented in a throwaway script and run, this round, against `git show
+4e5e0a5fe90f4c7068da19093f5a00b2a62f9e85:apps/web/scripts/run-required-web-tests.tokens` (the
+round-1 committed manifest, 397 tokens) with the same `#`-comment line prepended as A3 above:
+
+```
+round-1 manifest (unmutated): 397 tokens, distinct: 397
+round-1 manifestTokens() applied to the comment-prepended mutation: 398 entries, distinct: 398
+first entry (treated as a token): "# manually added by a well-meaning dev, not via --write"
+round-1 missingFromActive (would have reported RED, naming): ["# manually added by a well-meaning dev, not via --write"]
+```
+Confirms the round-1 (pre-fix) reader would have treated the comment line as a 398th manifest
+"entry" and reported it as a false silently-dropped token — this is a computed replay of the
+old reader's exact source against the old manifest, not a claim about the round-1 vitest suite's
+own historical run (which was never observed by this session).
 
 ## 4. Full-suite local runs
 
@@ -170,25 +202,39 @@ cited in the design doc §1 / PR body.
 
 ## 5. Numbers (round 2)
 
+Each line is marked `(measured this round)` — re-derived by this session's own commands/tests
+above — or `(cited: round-1 gate review)` — taken from
+`impl-gate-H6-token-manifest-guard-round1-20260922.md` and not independently re-run this round.
+
 - Distinct tokens across all **19** gating `vitest run` invocations: **499** (397 in the final exec
-  block, unchanged by this PR; 102 more across the 18 earlier lines).
+  block, unchanged by this PR; 102 more across the 18 earlier lines) — **(measured this round: §2
+  generator output, and independently by the guard test's own `allVitestTokens()` call)**.
 - Manifest tokens: **499** (matches); manifest file is 505 lines (6-line provenance header + 499
-  token lines).
+  token lines) — **(measured this round: §2, `wc -l`)**.
 - Raw (pre-filter) union across all 19 lines: 502 distinct entries — 499 real tokens plus `||`,
   `exit`, `$?` from the two `|| exit $?`-tailed lines (1180, 1183); `stripTrailingErrorGuard`
-  removes exactly those 3.
-- Of the 499: **192** already gated by four existing lane-reading guards before this PR (118 in the
-  exec block, 74 among the earlier lines: 122 approval-ci-coverage + 35 stock-prep-web + 34
-  elearning-media + 4 network-unavailable, minus double-counting where noted in the design doc);
-  **279** exec-block tokens newly gated by this PR; **28** earlier-line tokens newly gated by this
-  PR that had NO gate at all before (P1-1's discriminating set).
+  removes exactly those 3 — **(measured this round: §2's reconciliation)**.
+- **(cited: round-1 gate review, NOT independently re-run this round)** Of the 499: 192 already
+  gated by four existing lane-reading guards before this PR (118 in the exec block, 74 among the
+  earlier lines). The review's own per-guard breakdown (122 approval-ci-coverage-enumeration + 35
+  stock-prep-web-ci-coverage-enumeration + 34 elearning-media-ci-wiring + 4
+  network-unavailable-copy-ci-wiring) sums to 195, not 192 — the review's table shows this is a
+  union, not a sum (some tokens are pinned by more than one guard), but does not itemize which 3
+  overlap. This round did not re-derive that breakdown; only the union total (192) is used in the
+  design doc and PR body. 279 exec-block tokens newly gated by this PR and 28 earlier-line tokens
+  newly gated with no prior gate at all are likewise cited from the review, consistent with the
+  measured 499/397/102 split above (279 + 28 + 192 = 499).
 - New guard test file: **21** `it()` blocks (6 set-equality assertions + 4 `stripTrailingErrorGuard`
-  unit tests + 11 mutation-self-proof cases including baseline), up from round 1's 10.
-- Existing shape guard: **18** `it()` blocks, unedited (byte-identical to `origin/main`).
-- Existing attendance web-guard workflow spec: **27** tests, unedited (byte-identical).
+  unit tests + 11 mutation-self-proof cases including baseline), up from round 1's 10 — **(measured
+  this round: §4a/§4b transcripts)**.
+- Existing shape guard: **18** `it()` blocks, unedited (byte-identical to `origin/main`) —
+  **(measured this round)**.
+- Existing attendance web-guard workflow spec: **27** tests, unedited (byte-identical) —
+  **(measured this round)**.
 - Combined core-backend-side run for this slice's two files: **39/39 passed** (was 28/28 in round
-  1 — the guard file grew, the shape guard did not).
-- `tsc --noEmit -p .`: exit 0, but vacuous for both `tests/unit/*.test.ts` files (P3-1).
+  1 — the guard file grew, the shape guard did not) — **(measured this round)**.
+- `tsc --noEmit -p .`: exit 0, but vacuous for both `tests/unit/*.test.ts` files (P3-1) —
+  **(measured this round: §4c)**.
 - Files changed by this PR (round 2, cumulative over round 1): 4 modified/new code files
   (`scripts/ops/required-web-lane-exec-block.mjs`, `scripts/ops/required-web-lane-token-
   manifest.mjs`, `apps/web/scripts/run-required-web-tests.tokens`, `packages/core-backend/tests/
