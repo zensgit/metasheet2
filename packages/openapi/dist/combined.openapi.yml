@@ -2228,6 +2228,305 @@ components:
         - rowsCleaned
         - rowsWritten
         - rowsFailed
+    IntegrationPipelineFieldMapping:
+      type: object
+      description: >-
+        Q4c: one field mapping row of a pipeline. This is the exact shape
+        produced by plugin-integration-core's rowToFieldMapping
+        (plugins/plugin-integration-core/lib/pipelines.cjs) and is embedded in
+        IntegrationPipeline.fieldMappings when the read requests it (GET
+        /api/integration/pipelines/{id}?includeFieldMappings=true, the default).
+      properties:
+        id:
+          type: string
+        pipelineId:
+          type: string
+        sourceField:
+          type: string
+        targetField:
+          type: string
+        transform:
+          type: object
+          nullable: true
+          additionalProperties: true
+        validation:
+          type: object
+          nullable: true
+          additionalProperties: true
+        defaultValue:
+          nullable: true
+          description: >-
+            Any JSON value persisted as the field's default; shape is
+            caller-defined.
+        sortOrder:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - pipelineId
+        - sourceField
+        - targetField
+        - sortOrder
+    IntegrationPipeline:
+      type: object
+      description: >-
+        Q4c: read-only pipeline projection. This is the exact shape produced by
+        plugin-integration-core's rowToPipeline
+        (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared
+        verbatim by the list route (GET /api/integration/pipelines) and the
+        single-pipeline read (GET /api/integration/pipelines/{id}); the list
+        read never embeds `fieldMappings` (the registry call omits it), only the
+        single read does, and only when `includeFieldMappings` is not explicitly
+        `false`.
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        workspaceId:
+          type: string
+          nullable: true
+        projectId:
+          type: string
+          nullable: true
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        sourceSystemId:
+          type: string
+        sourceObject:
+          type: string
+        targetSystemId:
+          type: string
+        targetObject:
+          type: string
+        stagingSheetId:
+          type: string
+          nullable: true
+        mode:
+          type: string
+        idempotencyKeyFields:
+          type: array
+          items:
+            type: string
+        options:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum:
+            - draft
+            - active
+            - paused
+            - disabled
+        createdBy:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        fieldMappings:
+          type: array
+          description: >-
+            Present only on the single-pipeline read with includeFieldMappings
+            !== 'false'; absent (not null, not []) on the list route and on a
+            read with includeFieldMappings=false.
+          items:
+            $ref: '#/components/schemas/IntegrationPipelineFieldMapping'
+      required:
+        - id
+        - tenantId
+        - name
+        - sourceSystemId
+        - sourceObject
+        - targetSystemId
+        - targetObject
+        - mode
+        - idempotencyKeyFields
+        - options
+        - status
+    IntegrationExternalSystem:
+      type: object
+      description: >-
+        Q4c: public (credential-redacted) external-system projection. This is
+        the exact shape produced by plugin-integration-core's
+        rowToPublicExternalSystem
+        (plugins/plugin-integration-core/lib/external-systems.cjs) and is shared
+        verbatim by the list route (GET /api/integration/external-systems) and
+        the single-system read (GET /api/integration/external-systems/{id}).
+        `config` has every key in that system's `kind`-specific private-config
+        set already deleted (never redacted-in-place); raw credentials are never
+        in this projection — only derived presence/format/fingerprint fields
+        are.
+      properties:
+        id:
+          type: string
+        connectionId:
+          type: string
+          nullable: true
+        tenantId:
+          type: string
+        workspaceId:
+          type: string
+          nullable: true
+        projectId:
+          type: string
+          nullable: true
+        name:
+          type: string
+        kind:
+          type: string
+        role:
+          type: string
+          enum:
+            - source
+            - target
+            - bidirectional
+        config:
+          type: object
+          additionalProperties: true
+          description: >-
+            Sanitized config with every private (kind-specific) key already
+            removed.
+        capabilities:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - error
+        lastTestedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastError:
+          type: string
+          nullable: true
+        hasCredentials:
+          type: boolean
+          description: >-
+            True iff a non-empty encrypted credential blob is stored; never the
+            credential itself.
+        credentialFormat:
+          type: string
+          nullable: true
+          description: >-
+            Detected format token of the stored ciphertext (e.g. its envelope
+            version), never its content.
+        credentialFingerprint:
+          type: string
+          nullable: true
+          description: >-
+            Non-reversible fingerprint of the stored credential, present only
+            where the route computes one; null when it does not.
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - tenantId
+        - name
+        - kind
+        - role
+        - config
+        - capabilities
+        - status
+        - hasCredentials
+    IntegrationDeadLetter:
+      type: object
+      description: >-
+        Q4c: redacted dead-letter projection returned by GET
+        /api/integration/dead-letters. This is plugin-integration-core's
+        rowToDeadLetter (plugins/plugin-integration-core/lib/dead-letter.cjs)
+        with redactDeadLetter
+        (plugins/plugin-integration-core/lib/http-routes.cjs) applied: by
+        default `sourcePayload`/`transformedPayload` are stripped entirely
+        (`payloadRedacted: true`); an admin caller passing `includePayload=true`
+        gets both fields back, sanitized (secret-shaped values scrubbed), not
+        verbatim. `errorMessage` is always scrubbed for secret-shaped
+        substrings, including on rows written before write-time scrubbing
+        existed.
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        workspaceId:
+          type: string
+          nullable: true
+        runId:
+          type: string
+        pipelineId:
+          type: string
+        idempotencyKey:
+          type: string
+          nullable: true
+        sourcePayload:
+          description: >-
+            Present only when an admin requested includePayload=true; sanitized,
+            not verbatim.
+          nullable: true
+        transformedPayload:
+          description: >-
+            Present only when an admin requested includePayload=true; sanitized,
+            not verbatim.
+          nullable: true
+        errorCode:
+          type: string
+        errorMessage:
+          type: string
+          description: Free-text error, scrubbed of secret-shaped substrings at read time.
+        retryCount:
+          type: integer
+        status:
+          type: string
+          enum:
+            - open
+            - replayed
+            - discarded
+        lastReplayRunId:
+          type: string
+          nullable: true
+        payloadRedacted:
+          type: boolean
+          description: >-
+            Always true; marks that this projection is the redacted view,
+            whichever branch produced it.
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - tenantId
+        - runId
+        - pipelineId
+        - errorCode
+        - errorMessage
+        - retryCount
+        - status
+        - payloadRedacted
     ConnectorActionOperation:
       type: string
       description: >-
@@ -22551,6 +22850,620 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '503':
           $ref: '#/components/responses/ElearningError'
+  /api/integration/external-systems:
+    get:
+      summary: List external systems
+      description: >-
+        Read-only external-system listing, scoped by (tenantId, workspaceId) and
+        optionally narrowed by kind/status. `data` is a plain array of
+        IntegrationExternalSystem (the credential-redacted public projection);
+        there is no cursor or total count. A workspace-scoped caller's page
+        additionally merges in tenant-wide (null-workspace) rows so a system
+        shared across the tenant is still visible from a workspace — see
+        listExternalSystems' merge branch for the exact windowing.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: >-
+            Workspace scope. Omitted means the null (tenant-wide) workspace,
+            which is never widened further.
+          schema:
+            type: string
+        - in: query
+          name: kind
+          required: false
+          description: >-
+            Restrict to one adapter kind (e.g. k3, data-source:sql-readonly).
+            Not validated against an enum server-side — an unknown kind simply
+            matches zero rows.
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          description: >-
+            Restrict to one status. An unrecognized value is a 400
+            (ExternalSystemValidationError), not an empty result.
+          schema:
+            type: string
+            enum:
+              - active
+              - inactive
+              - error
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max rows to return. Must be a positive integer; a non-numeric or
+            non-positive value is silently ignored (registry default applies).
+            Capped at 500 server-side.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip. Must be a positive integer; a non-numeric or
+            non-positive value is silently ignored (registry default applies),
+            not rejected.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IntegrationExternalSystem'
+        '400':
+          description: An unrecognized `status` value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: ExternalSystemValidationError
+                      message: status must be one of active, inactive, error
+                      details:
+                        field: status
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/external-systems/{id}:
+    get:
+      summary: Get one external system
+      description: >-
+        Read-only single-system read, scoped by (tenantId, workspaceId, id).
+        Returns the same credential-redacted IntegrationExternalSystem
+        projection as the list route. Another tenant's system id and a
+        non-existent id both raise ExternalSystemNotFoundError → 404 with the
+        identical message.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: External system id.
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/IntegrationExternalSystem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            System not visible in the caller's (tenant, workspace) scope.
+            Identical body for a non-existent id and another tenant's id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                external_system_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: ExternalSystemNotFoundError
+                      message: external system not found
+  /api/integration/pipelines:
+    get:
+      summary: List integration pipelines
+      description: >-
+        Read-only pipeline listing, scoped by (tenantId, workspaceId) and
+        optionally narrowed by status/sourceSystemId/targetSystemId. `data` is a
+        plain array of IntegrationPipeline, newest first (ORDER BY created_at
+        DESC); there is no cursor or total count. The list projection never
+        embeds `fieldMappings` (only the single-pipeline read can).
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          description: >-
+            Restrict to pipelines in one status. An unrecognized value is a 400
+            (PipelineValidationError), not an empty result.
+          schema:
+            type: string
+            enum:
+              - draft
+              - active
+              - paused
+              - disabled
+        - in: query
+          name: sourceSystemId
+          required: false
+          description: Restrict to pipelines whose sourceSystemId matches.
+          schema:
+            type: string
+        - in: query
+          name: targetSystemId
+          required: false
+          description: Restrict to pipelines whose targetSystemId matches.
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max rows to return. Must be a positive integer; a non-numeric or
+            non-positive value is silently ignored (registry default applies).
+            Capped at 500 server-side.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip. Must be a positive integer; a non-numeric or
+            non-positive value is silently ignored (registry default applies),
+            not rejected.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IntegrationPipeline'
+        '400':
+          description: An unrecognized `status` value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: PipelineValidationError
+                      message: status must be one of draft, active, paused, disabled
+                      details:
+                        field: status
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/pipelines/{id}:
+    get:
+      summary: Get one integration pipeline
+      description: >-
+        Read-only single-pipeline read, scoped by (tenantId, workspaceId, id).
+        By default the response embeds `fieldMappings` (a second read of the
+        pipeline's field-mapping rows); pass `includeFieldMappings=false` to
+        skip that second read and omit the key entirely (not an empty array).
+        Another tenant's pipeline id and a non-existent id both raise
+        PipelineNotFoundError → 404 with the identical message and no
+        distinguishing detail.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: Pipeline id.
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema:
+            type: string
+        - in: query
+          name: includeFieldMappings
+          required: false
+          description: >-
+            Any value other than the exact string `false` is treated as true
+            (the handler's check is `!== 'false'`). Default true.
+          schema:
+            type: string
+            enum:
+              - 'true'
+              - 'false'
+            default: 'true'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/IntegrationPipeline'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            Pipeline not visible in the caller's (tenant, workspace) scope.
+            Identical body for a non-existent id and another tenant's id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                pipeline_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: PipelineNotFoundError
+                      message: pipeline not found
+  /api/integration/provenance:
+    get:
+      summary: List one row's cross-run provenance timeline
+      description: >-
+        Read-only cross-run provenance timeline for one rowId, scoped by
+        (tenantId, workspaceId, rowId) and optionally narrowed by pipelineId and
+        a [from, to] window on the run's `created_at`. Reads the migration-060
+        integration_provenance_by_row view; ordered oldest-first (by
+        run_created_at, then a stable secondary compare). `attrs` were redacted
+        at write (DF-N2-2b scrub gate); this read path does NOT re-redact and
+        never returns raw payloads. No write, replay or retry.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: rowId
+          required: true
+          description: >-
+            Row id to fetch the timeline for. Missing/empty is a 400
+            (ROW_ID_REQUIRED).
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema:
+            type: string
+        - in: query
+          name: pipelineId
+          required: false
+          description: Restrict the timeline to events from one pipeline.
+          schema:
+            type: string
+        - in: query
+          name: from
+          required: false
+          description: >-
+            Inclusive lower bound on the owning run's created_at. Must be an ISO
+            date-time; an unparsable value is a 400 (PipelineValidationError).
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          required: false
+          description: >-
+            Inclusive upper bound on the owning run's created_at. Must be an ISO
+            date-time; an unparsable value is a 400 (PipelineValidationError).
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max events to return. Capped at 500 at the route (the registry's own
+            ceiling is higher; the tighter of the two always wins).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          description: Events to skip.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProvenanceTimelineEntry'
+        '400':
+          description: rowId missing, or an unparsable from/to.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                row_id_required:
+                  value:
+                    ok: false
+                    error:
+                      code: ROW_ID_REQUIRED
+                      message: rowId is required
+                from_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: PipelineValidationError
+                      message: from must be an ISO date-time
+                      details:
+                        field: from
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '501':
+          description: >-
+            The host's pipeline registry does not implement the by-row
+            provenance read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                provenance_read_not_implemented:
+                  value:
+                    ok: false
+                    error:
+                      code: PROVENANCE_READ_NOT_IMPLEMENTED
+                      message: Provenance read is not implemented
+  /api/integration/dead-letters:
+    get:
+      summary: List dead letters
+      description: >-
+        Read-only dead-letter listing, scoped by (tenantId, workspaceId) and
+        optionally narrowed by pipelineId/runId/status. `data` is a plain array
+        of IntegrationDeadLetter, newest first (ORDER BY created_at DESC); there
+        is no cursor or total count. `sourcePayload`/`transformedPayload` are
+        stripped by default; only a caller whose session resolves as admin AND
+        passes `includePayload=true` gets them back (sanitized). A non-admin
+        caller passing `includePayload=true` is silently ignored (redacted
+        view), not rejected.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema:
+            type: string
+        - in: query
+          name: pipelineId
+          required: false
+          description: Restrict to dead letters from one pipeline.
+          schema:
+            type: string
+        - in: query
+          name: runId
+          required: false
+          description: Restrict to dead letters from one run.
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          description: >-
+            Restrict to one status. An unrecognized value is a 400
+            (DeadLetterError), not an empty result.
+          schema:
+            type: string
+            enum:
+              - open
+              - replayed
+              - discarded
+        - in: query
+          name: includePayload
+          required: false
+          description: >-
+            Admin-only. Must be the exact string `true`; any other value
+            (including for a non-admin caller) keeps the redacted
+            (payload-stripped) projection.
+          schema:
+            type: string
+            enum:
+              - 'true'
+              - 'false'
+            default: 'false'
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max rows to return. Must be a positive integer; a non-numeric or
+            non-positive value is silently ignored (registry default applies).
+            Capped at 500 server-side.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip. Must be a positive integer; a non-numeric or
+            non-positive value is silently ignored (registry default applies),
+            not rejected.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IntegrationDeadLetter'
+        '400':
+          description: An unrecognized `status` value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: DeadLetterError
+                      message: status must be one of open, replayed, discarded
+                      details:
+                        field: status
+                        status: bogus
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/integration/runs:
     get:
       summary: List integration pipeline runs
