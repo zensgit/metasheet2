@@ -329,6 +329,12 @@ type ApprovalRecordInsert = {
   toVersion: number
   metadata: Record<string, unknown>
   targetUserId?: string | null
+  /**
+   * H-5 — `approval_records.reason`. Only the legacy `/reject` door has ever written this column
+   * (see `ApprovalActionRequest.reason`); every other insert site omits it and the column is
+   * written NULL, exactly as it was before the column entered this writer's statement.
+   */
+  reason?: string | null
 }
 
 type ApprovalHistoryEntry = {
@@ -9531,6 +9537,25 @@ export class ApprovalProductService {
       // P17/P22/P26: attendance instances fail closed before assignment/instance DML
       // (including adversarial rows carrying published_definition_id).
       await guardAttendanceCentralMutationOrThrow(client, instance)
+      // H-5 — OPTIONAL optimistic-lock precondition, placed exactly where `adminJump` places its
+      // own (same file, `if (instance.version !== request.version)`): AFTER the attendance
+      // fail-closed guard, so an attendance-sourced instance keeps answering with the attendance
+      // refusal it answers with today, and BEFORE any other verdict, so a stale caller is told
+      // their read is stale rather than being told something about a state they never saw.
+      //
+      // This is the half that makes the legacy doors' published `version` precondition REAL again
+      // after they hand their own row lock back (see `ApprovalActionRequest.expectedVersion`): the
+      // check below and the write at the end of this method are one transaction under one lock.
+      // Callers that do not set the rider (the `/actions` route, the card wrapper, the after-sales
+      // bridge) are unaffected — `undefined` skips the branch entirely.
+      if (request.expectedVersion !== undefined && instance.version !== request.expectedVersion) {
+        throw new ServiceError(
+          'Approval instance version mismatch',
+          409,
+          'APPROVAL_VERSION_CONFLICT',
+          { currentVersion: instance.version },
+        )
+      }
       if (!instance.published_definition_id) {
         throw new ServiceError('Approval is not managed by the template runtime', 409, 'APPROVAL_RUNTIME_UNSUPPORTED')
       }
@@ -10670,6 +10695,11 @@ export class ApprovalProductService {
           actorId: actor.userId,
           actorName,
           comment: request.comment || null,
+          // H-5: the legacy `/reject` door's own `reason` column, carried through the SAME
+          // transaction as the transition above rather than backfilled after the commit (a
+          // post-commit second write could fail and leave the mandatory field NULL forever).
+          // `/actions` never sets this rider, so its rows keep writing NULL here.
+          reason: request.reason ?? null,
           fromStatus: instance.status,
           toStatus: 'rejected',
           fromVersion: instance.version,
@@ -12404,10 +12434,16 @@ export class ApprovalProductService {
     record: ApprovalRecordInsert,
     actor?: { ip?: string | null; userAgent?: string | null },
   ): Promise<string> {
+    // H-5: `reason` is APPENDED as the LAST column/placeholder rather than slotted next to
+    // `comment`, deliberately. Every existing positional index ($1..$13) therefore keeps its
+    // meaning, including for the unit suites that assert on this statement's params BY INDEX
+    // (e.g. `params[9]` = metadata, `params[2]` = actor_id in approval-product-service.test.ts).
+    // A caller that does not set `reason` writes NULL, which is what the column already held for
+    // every row this writer has ever produced.
     const result = await client.query<{ id: string | number }>(
       `INSERT INTO approval_records
-       (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, target_user_id, ip_address, user_agent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, target_user_id, ip_address, user_agent, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id`,
       [
         instanceId,
@@ -12423,6 +12459,7 @@ export class ApprovalProductService {
         record.targetUserId || null,
         actor?.ip || null,
         actor?.userAgent || null,
+        record.reason ?? null,
       ],
     )
     // Production: `RETURNING id` on a successful single-row INSERT always yields exactly one row, so
