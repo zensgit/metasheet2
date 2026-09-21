@@ -2,7 +2,7 @@
 
 与 `docs/development/autonomous-run-20260920-outcome.md`（PR #5900，「第七窗口接管日」）是两条并行线：#5900 记录另一会话在同一时间段内对第七窗口交接件的接管与合并，本文只记录第八次 36h 窗口自身的授权、执行与产出，两文互不重复对方内容。
 
-状态：**未定稿**。账本截至 2026-09-20 18:20 CST（`claude-auto24/STATE.md` 第 622 行，「## 2026-09-18 18:55 第八次窗口（36h）开始」到「## 2026-09-20 18:15 第九次窗口（24h）开始」这一段）仍在推进；本文按该段账本与 GitHub 现场核验落笔，之后的进展（第九次窗口）不在本文覆盖范围内。撰写时点：约 2026-09-20 18:12 CST（GitHub 服务器时间头核对）。本文经过一轮定稿前复核：对五支已合 PR 逐条核对 `gh pr view --json commits` 的提交 trailer（发现模型分派与计划不符，见第 4 节脚注）；对四支在飞 PR 用 `gh pr checks` 现场核对 CI 结果（发现三支带真回归/已知超时的红检查，见第 3 节）。
+状态：**已定稿**（定稿时间 2026-09-21 11:15 CST，`TZ=UTC-8 date` 实测）。账本截至 2026-09-20 18:20 CST（`claude-auto24/STATE.md` 第 622 行，「## 2026-09-18 18:55 第八次窗口（36h）开始」到「## 2026-09-20 18:15 第九次窗口（24h）开始」这一段）为本文覆盖范围；本文按该段账本与 GitHub 现场核验落笔，之后的进展（第九次窗口及以后）不在本文覆盖范围内，见 `docs/development/takeover-beiliao-20260821/autonomous-24h-run-20260920.md`（PR #5930）。撰写时点：约 2026-09-20 18:12 CST（GitHub 服务器时间头核对）。本文经过两轮复核：第一轮（撰写时）对五支已合 PR 逐条核对 `gh pr view --json commits` 的提交 trailer（发现模型分派与计划不符，见第 4 节脚注）、对四支在飞 PR 用 `gh pr checks` 现场核对 CI 结果（发现三支带真回归/已知超时的红检查，见第 3 节）；第二轮（本次定稿，2026-09-21）用 `gh pr view`/`gh pr checks`/`gh issue view` 逐一核实第一轮遗留的全部「待补」格——#5842（→ PR #5915）、#5839 B1（→ PR #5924）、#5839 B3（→ PR #5919）均已合并且 CI 全绿；#5839 B4（→ PR #5921）在飞、CI 大部分绿但尚未合入 main；#5839 B2/B5 仍未开 PR；第一轮记录的三支带真回归的已合 PR（#5873/#5892/#5893）经复核 CI 均已转绿，未发现独立修复 PR；222 上机（R59）截至定稿时仍未执行，详见第 3、7 节。
 
 ---
 
@@ -93,16 +93,16 @@
 | [#5872](https://github.com/zensgit/metasheet2/pull/5872) | 已合（`bb77ca5f2`） | 通知面板靠视口左缘时改左对齐，内容不再被裁切 | opus（提交 trailer 实证，见第 4 节脚注；PLAN 未列此项） | spec 13/13；变异（阈值比较反转）→ 两条新用例红；字节扫描 2 文件 0 控制字节 |
 | [#5874](https://github.com/zensgit/metasheet2/pull/5874) | 已合（`2f99f3a02`） | 根选择支持 contains 匹配与前缀可选，输出 values-free 根选择报告（#5862） | opus | bom-expansion / table-actions 两套 OK（+ 新用例 a–f）；8 个内存级变异全部红；无 pin 文件改动；字节扫描 6 文件 0 控制字节；21 项检查全 SUCCESS、CLEAN、`--match-head-commit` |
 | [#5875](https://github.com/zensgit/metasheet2/pull/5875) | 已合（`b87794a6b`） | 表头随滚动固定 + 视图可冻结前 N 行，与冻结列叠加（#5863） | opus（提交 trailer 实证，见第 4 节脚注） | 5 个 spec 205/205；三处变异各红；字节扫描 8 文件 0 控制字节；审批 tripwire 0；25 项检查全 SUCCESS（1 SKIPPED）、CLEAN、`--match-head-commit` |
-| [#5873](https://github.com/zensgit/metasheet2/pull/5873) | 评审中/CI 中（OPEN） | DELETE 方法覆写中间件 + 前端 DELETE 传输自动回退（客户出网丢弃 DELETE），并顺带修好自身打红的三条浏览器车道 | opus（实现 + 修复轮） | PR 正文自报：playwright 三配置 6/29/17 全过、web vitest 73 passed、backend vitest 18 passed、三处内存级变异各红。**现场核验（`gh pr checks`，本次定稿时）**：`test (18.x)` / `test (20.x)` 两项 fail，其余 28 pass、2 skipping；与 STATE.md 18:05 CST 定性一致——`elearning-media-playback-runtime` 三条 `expected -1 > 4755`，判定为文本位置守卫锚点丢失的**真回归**，与本 PR 改动本身无关但尚未修，终审后待补一轮修复 |
-| [#5891](https://github.com/zensgit/metasheet2/pull/5891) | 评审中/CI 中（OPEN） | 同步 bulk-preview 每行外发前复查表存活，删表后停止外发（#5838，摘除守卫具名 GAP 豁免） | opus | PR 正文自报：守卫 77/77、新增 spec 5/5、`ai-bulk-job-sheet-liveness` 6/6、变异探针删表用例外发 1→3 次复现。**现场核验**：26 pass、1 skipping、0 fail（全绿），与 STATE.md「#5891 全绿 CLEAN」一致 |
-| [#5892](https://github.com/zensgit/metasheet2/pull/5892) | 评审中/CI 中（OPEN） | 遗留 `:sheetId` 路由补父表存活守卫，并把 `:sheetId` 绑定到 `:id`（#5828，摘除守卫具名 GAP 豁免） | opus | PR 正文自报：守卫 74 passed（豁免摘除后）、四消费方合计 213 passed、新增 spec 14 passed、既有 + 新增 112 passed、集成套件 29 passed、6 项变异使新行为测试红、2 项使守卫自身红。**现场核验**：`test (20.x)` 一项 fail、23 pass、2 skipping；与 STATE.md 定性一致——`elearning-scope-access` 真库 10,000 规则扫描 30s 超时，判定与本 PR 改动无关，待重跑 |
-| [#5893](https://github.com/zensgit/metasheet2/pull/5893) | 评审中/CI 中（OPEN），修复轮已通过工作流重新派发 | 「使用模板」按 (租户,用户,模板,工作区,Base名) 去重，窗口内重复安装返回同一个 Base（#5861） | opus | PR 正文自报：unit 5 文件 73 passed、集成 81 passed、web 10 文件 154 passed、openapi-parity pass、7 项变异表全红。**现场核验**：`test (18.x)` / `test (20.x)` 两项 fail、27 pass、2 skipping；与 STATE.md 定性一致——`global-history-flag-manifest` completeness 未登记新增 env 读取，判定为**真回归**，已写进接管派工单、修复轮进行中（见第 7 节） |
-| #5842（待开 PR） | 待补（修复→终审工作流 `wf_c949030e-33b` 进行中；分支未推送到 origin） | 批量任务取消后立即提交的竞态修复（守卫流水线） | opus | 反驳发现 17 条含 8 项 major（`scratchpad/findings/5842.json`）；修复代理此前六次停摆，已改走防停摆工作流；无法核验（未推送） |
-| #5839 B1（待开 PR） | 待补（守卫流水线 `wf_bb7795c7-a30`，18:05 处于「账本阶段」；分支未推送） | 表配置族 12 条纯删除（config-history 摘出为 11 条）+ 共享测试夹具 `sheet-existence-oracle.ts` | opus | 无法核验（未推送） |
-| #5839 B3（待开 PR） | 待补（18:05 处于「反驳中」；分支未推送） | 4 条需补拒绝/搬移的路由（prepare/export-xlsx/dry-run/attachments） | opus | 无法核验（未推送） |
-| #5839 B4（待开 PR） | 待补（18:05 处于「写 spec」；分支未推送） | 事务内两条记录权限路由补存活拒绝 | opus | 无法核验（未推送） |
-| #5839 B2 | 待派（等 B1 推送触发器 `bry660an4` 自动触发） | 字段/视图/导入/汇总 8 条纯删除 | sonnet | 未派发，无验证数据 |
-| #5839 B5 | 未派（等 owner 裁决，账本清零批，须最后合并） | 公开表单入口 `POST /views/:viewId/submit` + `PATCH /records/:recordId` | opus（计划） | 未派发 |
+| [#5873](https://github.com/zensgit/metasheet2/pull/5873) | 已合（`2ab346bf0`，2026-09-21T03:00:13Z） | DELETE 方法覆写中间件 + 前端 DELETE 传输自动回退（客户出网丢弃 DELETE），并顺带修好自身打红的三条浏览器车道 | opus（实现 + 修复轮） | PR 正文自报：playwright 三配置 6/29/17 全过、web vitest 73 passed、backend vitest 18 passed、三处内存级变异各红。**定稿现场复核（`gh pr checks`，合并后）**：全部检查 pass（含 `test (18.x)`/`test (20.x)`）、1 项 skipping；此前记录的 `elearning-media-playback-runtime` 三条真回归在合并前最终一跑已转绿，未找到独立修复 PR，本次未深挖是瞬时问题还是被其他改动顺带修复 |
+| [#5891](https://github.com/zensgit/metasheet2/pull/5891) | 已合（`a93323343`，2026-09-20T11:07:50Z） | 同步 bulk-preview 每行外发前复查表存活，删表后停止外发（#5838，摘除守卫具名 GAP 豁免） | opus | PR 正文自报：守卫 77/77、新增 spec 5/5、`ai-bulk-job-sheet-liveness` 6/6、变异探针删表用例外发 1→3 次复现。**现场核验**：26 pass、1 skipping、0 fail（全绿），与 STATE.md「#5891 全绿 CLEAN」一致；定稿复核（合并后）同样全绿 |
+| [#5892](https://github.com/zensgit/metasheet2/pull/5892) | 已合（`e3b5b132d`，2026-09-20T12:32:07Z） | 遗留 `:sheetId` 路由补父表存活守卫，并把 `:sheetId` 绑定到 `:id`（#5828，摘除守卫具名 GAP 豁免） | opus | PR 正文自报：守卫 74 passed（豁免摘除后）、四消费方合计 213 passed、新增 spec 14 passed、既有 + 新增 112 passed、集成套件 29 passed、6 项变异使新行为测试红、2 项使守卫自身红。合并前一次现场核验曾见 `test (20.x)` fail（`elearning-scope-access` 真库 10,000 规则扫描 30s 超时，判定与本 PR 无关）；**定稿复核（合并后 `gh pr checks`）**：重跑已转绿，全部检查 pass |
+| [#5893](https://github.com/zensgit/metasheet2/pull/5893) | 已合（`ae500f1a1`，2026-09-20T12:33:12Z） | 「使用模板」按 (租户,用户,模板,工作区,Base名) 去重，窗口内重复安装返回同一个 Base（#5861，客户 #5） | opus | PR 正文自报：unit 5 文件 73 passed、集成 81 passed、web 10 文件 154 passed、openapi-parity pass、7 项变异表全红。合并前一次现场核验曾见 `test (18.x)`/`test (20.x)` 两项 fail（`global-history-flag-manifest` completeness 未登记新增 env 读取，判定为真回归，修复轮随后完成，未产生独立 PR）；**定稿复核（合并后 `gh pr checks`）**：全部检查 pass |
+| [#5842 → PR #5915](https://github.com/zensgit/metasheet2/pull/5915) | 已合（`8d5b1fdd5`，2026-09-21T03:07:21Z）；issue #5842 已随合并关闭（CLOSED） | 批量任务取消后立即提交的竞态修复（守卫流水线） | opus/Fable（修复→终审） | PR 正文自报：反驳发现的 17 条含 8 项 major 全部 FIXED；新增 `ai-bulk-job-cancel-commit-state.test.ts`（13 例）+ 20 项内存级变异全红；与 main 两轮合并逐 hunk 核对；字节扫描 0 控制字节。**现场核验（`gh pr checks`）**：28/30 pass、2 skipping、0 fail |
+| [#5839 B1 → PR #5924](https://github.com/zensgit/metasheet2/pull/5924) | 已合（`0714f0a3f`，2026-09-21T02:50:49Z） | 表配置族 11 条路由权限判定先于表行探测，未授权者对存活/软删/不存在的表同得 403（config-history 摘出）+ 共享测试夹具 `sheet-existence-oracle.ts` | opus | **现场核验（`gh pr checks`）**：27/28 pass、1 skipping、0 fail |
+| [#5839 B3 → PR #5919](https://github.com/zensgit/metasheet2/pull/5919) | 已合（`afb4e44a5`，2026-09-20T12:40:05Z） | 关掉四个 univer-meta 处理器的表存在性预言机（prepare/export-xlsx/dry-run/attachments），补行为级证据 | opus | **现场核验（`gh pr checks`）**：27/28 pass、1 skipping、0 fail |
+| [#5839 B4 → PR #5921](https://github.com/zensgit/metasheet2/pull/5921) | 评审中/CI 中（OPEN，`mergeStateStatus=BLOCKED`）。**现场核验（`gh pr checks`，本次定稿时）**：24 项已 pass、`test (18.x)`/`test (20.x)`/`web-tests` 三项仍 pending、1 项 skipping，尚未合入 main | 事务内两条记录权限路由的表存活判定移到权限判定之后，values-free 拒绝 | opus | 未合并，暂无终态核验 |
+| #5839 B2 | 在飞，尚未开 PR。GitHub 侧核验（`gh pr list --search 5839`）确认无对应 PR；触发器 `bry660an4` 是否已因 B1（PR #5924）合并而点火、脚本进度如何，超出本次可核验范围（无内部工作流可读接口），如实写"未核实" | 字段/视图/导入/汇总 8 条纯删除，复用 B1 夹具 | sonnet（计划） | 未核实（无 PR 可查） |
+| #5839 B5 | 在飞，尚未开 PR（同上，GitHub 侧确认无对应 PR）；账本清零批，仍等 owner 对第 6 节裁决②/③/⑤ 拍板后才可合并 | 公开表单入口 `POST /views/:viewId/submit` + `PATCH /records/:recordId` | opus（计划） | 未核实（无 PR 可查） |
 
 ---
 
@@ -205,12 +205,12 @@
 | #5839 B5 与 config-history 处置（挑漏缺口④/owner 裁决③） | 未派，等 owner 二选一 | owner |
 | #5839 8 项 owner 裁决（①–⑧，见第 6 节） | 待拍板 | owner |
 | #5864 字段类型转换矩阵（二刀预检 + 三刀迁移方案已给，未实现） | 待拍板 | owner |
-| #5842 竞态修复 | 修复→终审工作流 `wf_c949030e-33b` 进行中，分支未推送到 origin | 待补（下次唤醒核实工作流产出） |
-| #5839 B1/B3/B4 | 各自流水线进行中（账本阶段/反驳中/写 spec），分支均未推送到 origin | 待补 |
-| #5839 B2 | 等 B1 推送触发器 `bry660an4` 自动派发 sonnet 版脚本 | 待补 |
-| #5893 修复轮 | 原工作流因修复代理六次停摆判死，已改派 `wf_5eecfa39-42d`（修复→终审）；`test (18.x)/(20.x)` 现场核实仍 fail（`global-history-flag-manifest` completeness 真回归，已写进接管派工单） | 待补 |
-| #5873/#5891/#5892 | 评审工作流进行中，尚未合并。现场核验：#5891 全绿；#5873 `test(18.x)/(20.x)` fail（真回归，待终审后补一轮修复）；#5892 `test(20.x)` fail（判定与改动无关的真库规则扫描超时，待重跑） | 待补（合并时机） |
-| 222 上机（R59） | 36h 窗口内未执行部署（窗口 06:55 CST 到期时部署窗口 18:00–08:00 已关闭）；本窗口内合并的 5 支 PR 截至窗口结束时是否已上机，超出本窗口账本范围，未核实，写待补；是否在下一个 18:00–08:00 CST 部署窗口上机 | owner |
+| #5842 竞态修复 | 已合并（PR #5915，`8d5b1fdd5`，2026-09-21T03:07:21Z） | 无（已完成） |
+| #5839 B1/B3/B4 | B1 已合（PR #5924，`0714f0a3f`）；B3 已合（PR #5919，`afb4e44a5`）；B4 评审中/CI 中（PR #5921 OPEN，24/28 项已 pass，`test(18.x)/(20.x)/web-tests` 仍 pending，未合入 main） | B1/B3 无（已完成）；B4 走既定合并协议（13 项 required 绿 + CLEAN + 0 非 SUCCESS + `--match-head-commit`），无需 owner |
+| #5839 B2 | 在飞，尚未开 PR；`gh pr list --search 5839` 确认 GitHub 上无对应 PR，触发器 `bry660an4` 是否已点火、脚本进度如何超出本次可核验范围（无内部工作流可读接口） | 待核实（下次唤醒） |
+| #5893 修复轮 | 已完成，随 PR #5893 一并合并（`ae500f1a1`，2026-09-20T12:33:12Z），未产生独立修复 PR；合并后 `gh pr checks` 现场核验：`test (18.x)/(20.x)` 均转 pass，此前的 `global-history-flag-manifest` completeness 真回归已消失 | 无（已完成） |
+| #5873/#5891/#5892 | 三支均已合并——#5891（`a93323343`，全绿）；#5873（`2ab346bf0`，此前 `test(18.x)/(20.x)` 真回归在合并前最终一跑已转绿，未找到独立修复 PR）；#5892（`e3b5b132d`，此前 `test(20.x)` 超时在最终一跑已转绿） | 无（已完成） |
+| 222 上机（R59） | 36h 窗口内未执行部署（窗口 06:55 CST 到期时部署窗口 18:00–08:00 已关闭）。按派工单给出的账本事实：本窗口内合并的 PR 以及随后第九次窗口（PR #5930，仍为草稿）内合并的 PR，截至本文定稿时均未上机——36h 窗口内没有任何一次 222 上机，第九窗口截至定稿时也尚未上机（本次任务边界不含 222 现场访问，未独立复核该事实，以派工单账本为准）；是否在下一个 18:00–08:00 CST 部署窗口上机 | owner |
 | 交付件（本文档） | 提交并推送分支，不开 PR（按派工单要求） | — |
 
 ---
@@ -224,4 +224,4 @@
 
 ---
 
-*本文由第八次自主开发窗口内派出的交付文档工作流（`wf_e6199ab0-8e6`）起草，素材截至 `claude-auto24/STATE.md` 第 622 行（2026-09-20 18:20 CST）；后经一轮独立定稿复核（`gh pr view`/`gh pr checks`/`git log` 现场核对，见第 3、4 节标注处），修正模型分派记录与 CI 现状描述。*
+*本文由第八次自主开发窗口内派出的交付文档工作流（`wf_e6199ab0-8e6`）起草，素材截至 `claude-auto24/STATE.md` 第 622 行（2026-09-20 18:20 CST）；经两轮独立复核（`gh pr view`/`gh pr checks`/`git log` 现场核对），第一轮修正模型分派记录与 CI 现状描述，第二轮（2026-09-21 11:15 CST 定稿）补齐全部「待补」格并转为正式 PR，见第 3、4、7 节标注处。*
