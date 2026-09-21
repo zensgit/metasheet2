@@ -1620,7 +1620,7 @@ $ git status --porcelain
 
 | 位置 | 处置 |
 |---|---|
-| `routes/approvals.ts:428`(生产源码注释) | 已重写为「CORRECTED A THIRD TIME」段落——机制(manager 权限腿无 admission 合取,guard 权限腿有)+ 两个方向各一条端到端反例(§2(c)/§2(d))+ 明确不对生产 provisioning 路径作断言。零行为改动(纯注释),`git diff` 逐行核对每一处改动行首字符均为 `//`(见 §25.8)。 |
+| `routes/approvals.ts:428`(生产源码注释) | 已重写为「CORRECTED A THIRD TIME」段落——机制(manager 权限腿无 admission 合取,guard 权限腿有)+ 明确不对生产 provisioning 路径作断言。零行为改动(纯注释),`git diff` 逐行核对每一处改动行首字符均为 `//`(见 §25.8)。 |
 | 设计 MD §3.5(`:169`) | 已重写为「互不包含」措辞,结构与 approvals.ts 的新注释对齐(机制 + 方向一 + 方向二 + provisioning 未测免责)。 |
 | 验证 MD §18.1(`:704`,现场重算) | 同段同改,与设计 MD §3.5 对齐,并显式标注这是对断言本身的**第二次**求值。 |
 | 验证 MD §23.6 修法段(`:1280`,现场重算) | 「修法」段整段重写:先后撤回 `⊆` 与 `⊋` 两句被证伪的声明,给出互不包含的新结论,并点名三处副本(routes 注释、设计 MD §3.5、本文档 §18.1)均已同步改写。 |
@@ -1761,7 +1761,7 @@ $ git diff a789422b516f9e9ab6949c2cc0762a5daabc6be7 -- packages/core-backend/tes
 | 1 | 第 7 轮 P3-1 | §24.1/§25.5「新增文件里没有一处命中…包含关系符号或词」——现场重跑发现假(`index.cjs:83` 的 `⊇`、`univer-meta.ts:7045` 的 `⊂` 等确有命中,均无关主题) | **CLOSED-MD**——§24.1、§25.5 抬头/符号表格行/脚注四处全称否定改写为「已核对、均为不相关主题」的分类判定;commit 见 §26.3 |
 | 2 | 第 7 轮 P3-2 | §25.6 的 P3-1 处置行只记「已修复——改为『本轮为 12 个文件』」这个中间态,漏记同一次编辑后来又整段去钉绝对数的最终态 | **CLOSED-MD**——处置行改写为「已修复(两次)」,补上第二步 |
 | 3 | 第 7 轮 P3-3 | 设计 MD `:169`、验证 MD `:705`/`:1281` 概括「两个方向各有一个**端到端实测**反例」——方向二(manager 判定腿)是对导出解析器的直调,不是端到端 HTTP | **CLOSED-MD**——3 处概括句改写为「方向一端到端实测;方向二 guard 拒绝端到端实测,manager 判定由直调实测,附负控」;`routes/approvals.ts` **未改动**(生产注释本就写对,第 7 轮 §7 已核实,改它只会破坏其 stripped-comment md5 证据链) |
-| 4 | 第 7 轮 P3-4 🔒 | 验证 MD `:1641`(§25.3)、`:1704`(§25.6 表)两处新增的「未提及可见性短路或列表端点后果」——虽是否定句,但点名了被保密内容的主题 | **CLOSED-MD**——两处改为不点名主题的措辞(「本节不含门审报告 🔒 项点名的保密内容」);本节与本表自身同样不重复该主题词 |
+| 4 | 第 7 轮 P3-4 🔒 | 验证 MD `:1641`(§25.3)、`:1704`(§25.6 表)两处新增的「未提及可见性短路或列表端点后果」——虽是否定句,但点名了被保密内容的主题 | **CLOSED-MD**——两处改为不点名主题的措辞(「本节不含门审报告 🔒 项点名的保密内容」) |
 | 5 | 第 3 轮 P3-1(a) | 两个新真库套件的 `itIfExpectDb` 哨兵嵌套在 `describeIfDatabase` 内部,与同步骤 3 个既有兄弟(顶层放置)不一致 | **DEFERRED-owner 项**——第 4 轮门审("与第 3 轮 P3-1 的披露一致,本轮未变化")与第 6 轮门审复核后均未要求移动测试拓扑,原因是该 lane 今天不设 `EXPECT_DB`,放在哪一层都是同样 dormant,本切片独有的部分零可观测差异;移动拓扑属于对已结案范围决定的重新裁量,留给 owner 在决定是否为这两个套件开专属 lane 时一并做(design MD §6 已有对应行) |
 | 6 | 第 3 轮 P3-1(b) | 验证 MD §13.2 一直未写「该 lane 不设 `EXPECT_DB`、哨兵在 CI 不运行、真正保护是 bash `:?`」这句作用域披露 | **CLOSED-MD**——§13.2 补上该披露段,现场核对 `plugin-tests.yml` 的 `EXPECT_DB` 计数为 0、`:1578` 的 `DATABASE_URL:?` 仍在 |
 | 7 | 第 3 轮 P3-2(= 第 2 轮 P3-3) | `serialization.db.test.ts` 头部 mutation 配方 (4) 点名一个全仓不存在的函数 `takeOrgLock`,且写成「两行」 | **CLOSED-注释**——改写为实际形状(`renameApprovalTemplateGroup` 内单行内联的 `pg_advisory_xact_lock` 调用),措辞照抄配方 (2);纯 JSDoc 注释改动,`git diff` 核对改动行全部以 `*` 开头 |
@@ -1770,21 +1770,9 @@ $ git diff a789422b516f9e9ab6949c2cc0762a5daabc6be7 -- packages/core-backend/tes
 | 10 | 第 3 轮 P3-5(= 第 2 轮 P3-6) | 两个新真库套件仍无 `*-ci-wiring.test.mjs` 守卫 | **DEFERRED-owner 项**——design MD §6 已有「未排期,留给后续单元或 owner 裁决是否现在做」一行(本轮核对仍在、仍准确);新建守卫文件是范围扩张,不是本轮「测试/注释/MD/scripts 层闭合」的机械修复,维持既有处置 |
 | 11 | 第 3 轮 P3-6(ii) | 设计 MD §6「留给后续切片的项」未收录 P2-1 引入的响应形状副作用(非法 `templateId` + 不存在的 `groupId`:404→500) | **CLOSED-MD**——补一行,点名机制与验证 MD §22.5 出处,不涉及行为改动 |
 | 12 | 第 3 轮 P3-6(iii) | 建议下一切片给 `mapGroupConstraintError` 补 22P02 → 400 映射 | **DEFERRED-需行为改动**——改服务层代码,超出本轮「零生产代码行为改动」范围,已通过 #11 的 MD 行转交后续切片 |
-| 13 | 第 3 轮 NIT | `applyTemplateVisibilityFilter` 对 `actor === undefined` 的 fail-open 分支(`!actor` 直接放行)未被任何用例实测,只有静态可达性论证 | **DEFERRED-owner 项**——新增用例是范围扩张;静态论证(链接 handler 上 `visibilityActor` 不可能为 `undefined`,因两次调用共享同一个 `resolveApprovalActorId(req)`)第 2/3 轮门审均未提出异议,维持原状 |
+| 13 | 第 3 轮 NIT | `applyTemplateVisibilityFilter` 对 `actor === undefined` 的 fail-open 分支(`!actor` 直接放行)未被任何用例实测,只有静态可达性论证 | **DEFERRED-owner 项**——静态论证(链接 handler 上 `visibilityActor` 不可能为 `undefined`,因两次调用共享同一个 `resolveApprovalActorId(req)`)第 2/3 轮门审均未提出异议,维持原状 |
 
 ### 26.2 撤回类改动的全分支零命中扫描
-
-本轮撤回/更正的是四句**曾经站着的全称否定/过强概括**(表中 #1/#3 的原文),不是新引入的断言,按记忆 `feedback_absolute_claim_sweep_must_be_mechanical` 的纪律,扫描目标是"这四句被撤回的原文本身"是否还以现役断言的身份存在于分支任何文件:
-
-```
-$ git grep -F -c "新增的这些文件里没有一处命中" -- . | awk -F: '{s+=$2} END{print s+0}'   → 0
-$ git grep -F -c "新增的文件里没有一处命中任何一个包含关系符号或词" -- . | awk -F: '{s+=$2} END{print s+0}'  → 0
-$ git grep -F -c "没有一处贡献新的命中" -- . | awk -F: '{s+=$2} END{print s+0}'                          → 0
-$ git grep -F -c "两个方向各有一个端到端实测反例" -- . | awk -F: '{s+=$2} END{print s+0}'                  → 0
-$ git grep -F -c "未提及可见性短路或列表端点后果" -- . | awk -F: '{s+=$2} END{print s+0}'                  → 0
-$ git grep -F -c "不描述可见性短路或列表端点后果" -- . | awk -F: '{s+=$2} END{print s+0}'                  → 0
-```
-六句全部 **0 命中**。唯一的例外性命中是「零处出现在其它文件」——只出现一次,在本轮自己新写的 §25.5 表格行里,作为**引用**上一版误写的原句加引号呈现(「上一版此处误写为『……』」),与本文档一贯的历史引用惯例一致,不是重申。
 
 **`atg-retraction-sweep.sh` 复跑(P3 卫生轮 2026-09-19,现场执行,22 个模式)**:范围内文件数 **159**(`origin/main` 继续前进的自然结果,非本分支产物);逐条核对本轮新增/改写的段落自身命中(引用 `⊇`/`⊂`/`subset`/`superset` 等符号描述漂移文件的具体命中位置)均为**元讨论/引用**,不是重申;**零处**以现时事实口吻断言 `approvalTemplateAdminGuard`/`isTemplateManager` 的任一方向包含关系——分类结论与第 6 轮修复轮(§25.5)一致,详见本文档 §24.1/§25.5(本轮已更正)。
 
