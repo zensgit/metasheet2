@@ -390,6 +390,8 @@
       :run-detail-error="runDetailError"
       :run-detail="runDetail"
       :run-detail-payload-text="runDetailPayloadText"
+      :run-detail-polling="runDetailPolling"
+      :refresh-run-detail="refreshRunDetail"
       :run-provenance-expanded="runProvenanceExpanded"
       :run-provenance-loading="runProvenanceLoading"
       :run-provenance-error="runProvenanceError"
@@ -782,6 +784,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   workbenchSectionObserver?.disconnect()
   workbenchSectionObserver = null
+  // Q4b: an unmounted view whose timer keeps firing would call getIntegrationRun forever.
+  stopRunDetailPolling()
 })
 
 const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
@@ -929,6 +933,23 @@ const runDetail = ref<IntegrationPipelineRun | null>(null)
 // Monotonic request token: a second 详情 click while the first GET is still in flight must not let
 // the slower answer paint over the newer one.
 let runDetailRequestId = 0
+// Q4b (read-only): auto-refresh the open dialog while the run is still non-terminal, so an
+// operator watching a running/pending pipeline sees status/metrics move without manually
+// re-clicking 详情. `runDetailPolling` is the label's source of truth — it tracks whether a
+// timer is actually armed, not just "the dialog is open" (a terminal run's dialog stays open
+// with the timer stopped). The timer itself lives OUTSIDE Vue reactivity (a plain `let`), same
+// discipline as `workbenchSectionObserver` above: a ref would re-run watchers for no reason and
+// a stray IntersectionObserver-style leak is exactly the class of bug `onBeforeUnmount` guards.
+const RUN_DETAIL_POLL_MS = 5000
+const runDetailPolling = ref(false)
+let runDetailPollTimer: ReturnType<typeof setInterval> | null = null
+// Mirrors plugin-integration-core/lib/pipelines.cjs TERMINAL_RUN_STATUSES verbatim (read there,
+// not re-derived) — this list is the one place a pipeline run's lifecycle is authoritative, and a
+// drift here would either poll forever past a finished run or stop refreshing one still running.
+const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled'])
+function isTerminalRunStatus(status: string | null | undefined): boolean {
+  return typeof status === 'string' && TERMINAL_RUN_STATUSES.has(status)
+}
 // Q4a (read-only): the open run's provenance timeline, from the per-run sub-route. Collapsed by
 // default and fetched on first expand, so opening 详情 costs exactly ONE request unless the
 // operator asks for the lineage. The three refs are cleared by closeRunDetail/openRunDetail along
@@ -3503,6 +3524,80 @@ function closeRunDetail(): void {
   // Bump the token so an answer still in flight cannot re-open a dialog the user just closed.
   runDetailRequestId += 1
   resetRunProvenance()
+  stopRunDetailPolling()
+}
+
+// Q4b: the only place the timer is ever cleared. Called on close, on unmount, on RUN_NOT_FOUND,
+// and the moment a poll or manual refresh observes a terminal status — never left to expire on
+// its own, since setInterval keeps firing forever otherwise.
+function stopRunDetailPolling(): void {
+  if (runDetailPollTimer !== null) {
+    clearInterval(runDetailPollTimer)
+    runDetailPollTimer = null
+  }
+  runDetailPolling.value = false
+}
+
+// Arms the timer only when there is an open dialog showing a non-terminal run and none is already
+// running — idempotent on purpose, since both openRunDetail and every successful refresh call it.
+function scheduleRunDetailPollingIfNeeded(): void {
+  if (!runDetailId.value || isTerminalRunStatus(runDetail.value?.status)) {
+    stopRunDetailPolling()
+    return
+  }
+  if (runDetailPollTimer !== null) return
+  runDetailPolling.value = true
+  runDetailPollTimer = setInterval(() => {
+    void refreshRunDetail(false)
+  }, RUN_DETAIL_POLL_MS)
+}
+
+// Q4b: the single re-fetch path both the timer tick and the dialog's manual refresh button call.
+// `showLoading` is the only behavioral difference between the two callers: a manual click may
+// show the loading hint and surface a fetch error, a silent background tick must never flash the
+// loading state over content the operator is reading, nor replace a good last-known run with an
+// error banner over one flaky poll — it just tries again next tick, and only gives up (stopping
+// the timer) on RUN_NOT_FOUND, the one code that means "will never succeed again".
+async function refreshRunDetail(showLoading: boolean): Promise<void> {
+  if (!runDetailId.value) return
+  runDetailRequestId += 1
+  const requestId = runDetailRequestId
+  const runId = runDetailId.value
+  if (showLoading) runDetailLoading.value = true
+  try {
+    const run = await getIntegrationRun(runId, currentScope())
+    if (requestId !== runDetailRequestId) return
+    runDetail.value = run
+    runDetailError.value = ''
+    if (runProvenanceExpanded.value) await refreshRunProvenanceQuietly(runId)
+    scheduleRunDetailPollingIfNeeded()
+  } catch (error) {
+    if (requestId !== runDetailRequestId) return
+    if (showLoading || integrationApiErrorCode(error) === 'RUN_NOT_FOUND') {
+      runDetailError.value = runDetailErrorCopy(error)
+      stopRunDetailPolling()
+    }
+    // A silent background tick's own transient failure otherwise keeps the last good state on
+    // screen and the timer keeps trying — one flaky poll must not blank out a working dialog.
+  } finally {
+    if (showLoading && requestId === runDetailRequestId) runDetailLoading.value = false
+  }
+}
+
+// Q4b: re-reads the already-expanded provenance timeline alongside a run refresh, without the
+// loading flag or error banner toggleRunProvenance's explicit expand uses — a background refresh
+// must not flicker a "loading…" state over a timeline the operator is already reading, and a
+// transient failure here should not blank a good timeline (the next tick tries again).
+async function refreshRunProvenanceQuietly(runId: string): Promise<void> {
+  runProvenanceRequestId += 1
+  const requestId = runProvenanceRequestId
+  try {
+    const entries = await getIntegrationRunProvenance(runId, currentScope())
+    if (requestId !== runProvenanceRequestId) return
+    runProvenanceEntries.value = entries
+  } catch {
+    // Keep the last known good timeline; this is a background refresh, not the explicit toggle.
+  }
 }
 
 // Q4a: the provenance section belongs to ONE run. Resetting it on every open/close is what stops
@@ -3551,6 +3646,7 @@ async function openRunDetail(runId: string): Promise<void> {
     const run = await getIntegrationRun(runId, currentScope())
     if (requestId !== runDetailRequestId) return
     runDetail.value = run
+    scheduleRunDetailPollingIfNeeded()
   } catch (error) {
     if (requestId !== runDetailRequestId) return
     runDetailError.value = runDetailErrorCopy(error)

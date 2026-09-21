@@ -76,6 +76,20 @@
           <div class="integration-workbench__run-detail-head">
             <strong>{{ bi('运行详情', 'Run details') }}</strong>
             <span data-testid="run-detail-id">{{ runDetailId }}</span>
+            <!-- Q4b (read-only): non-terminal runs auto-refresh every 5s; the label reflects
+                 whether a timer is actually armed (a terminal run's dialog stays open with no
+                 timer), and the button lets the operator force one read without waiting. -->
+            <span
+              class="integration-workbench__run-detail-poll-status"
+              data-testid="run-detail-poll-status"
+            >{{ runDetailPolling ? bi('自动刷新中', 'Auto-refreshing') : bi('自动刷新已停止', 'Auto-refresh stopped') }}</span>
+            <button
+              type="button"
+              class="integration-workbench__link-button"
+              data-testid="refresh-run-detail"
+              :disabled="runDetailLoading"
+              @click="refreshRunDetail(true)"
+            >{{ bi('刷新', 'Refresh') }}</button>
             <button
               type="button"
               class="integration-workbench__link-button"
@@ -328,6 +342,11 @@ defineProps<{
   runDetailError: string
   runDetail: IntegrationPipelineRun | null
   runDetailPayloadText: string
+  // Q4b (read-only): true while the dialog is auto-polling a non-terminal run every
+  // RUN_DETAIL_POLL_MS; the parent view owns the timer, this component only shows the label and
+  // forwards the manual-refresh click.
+  runDetailPolling: boolean
+  refreshRunDetail: (showLoading: boolean) => Promise<void>
   // Q4a per-run provenance section. Owned/fetched by the parent view (this component still makes
   // no service call); `runProvenanceExpanded` is false until the operator asks for the lineage.
   runProvenanceExpanded: boolean
@@ -588,6 +607,11 @@ defineProps<{
   align-items: center;
   gap: 8px;
   font-size: 13px;
+}
+
+.integration-workbench__run-detail-poll-status {
+  font-size: 12px;
+  color: var(--ms-text-secondary, #6b7280);
 }
 
 .integration-workbench__run-detail-body {

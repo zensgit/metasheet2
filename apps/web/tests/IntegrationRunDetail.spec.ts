@@ -403,4 +403,68 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
     // timestamps this dialog does render contain ':' but no dotted host label before it.
     expect(dialogText).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/)
   })
+
+  // --- Q4b: non-terminal runs auto-refresh every RUN_DETAIL_POLL_MS ---------------------------
+  // Only `setInterval`/`clearInterval` are faked: `flushUi`'s own `setTimeout(…, 0)` microtask
+  // pump must keep running on real timers, or the mount/open sequence above never settles.
+  const RUN_DETAIL_POLL_MS = 5000
+
+  describe('Q4b auto-polling', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('re-fetches the run after RUN_DETAIL_POLL_MS while it is still non-terminal (running)', async () => {
+      installMocks(() => jsonResponse({ ...DETAIL_RUN, status: 'running', finishedAt: null }))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      expect(detailCalls[1].url).toBe(DETAIL_URL)
+      // The label reflects an armed timer.
+      expect((host.querySelector('[data-testid="run-detail-poll-status"]') as HTMLElement).textContent)
+        .toContain('Auto-refreshing')
+    })
+
+    it('does not poll again once the run reaches a terminal status (succeeded)', async () => {
+      let call = 0
+      installMocks(() => {
+        call += 1
+        // First read is still running; the poll it schedules comes back succeeded.
+        const status = call === 1 ? 'running' : 'succeeded'
+        return jsonResponse({ ...DETAIL_RUN, status, finishedAt: call === 1 ? null : DETAIL_RUN.finishedAt })
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      expect((host.querySelector('[data-testid="run-detail-status"]') as HTMLElement).textContent).toContain('succeeded')
+      expect((host.querySelector('[data-testid="run-detail-poll-status"]') as HTMLElement).textContent)
+        .toContain('stopped')
+      // A run that just turned terminal must never fire a THIRD read on the next tick.
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+    })
+
+    it('clears the timer when the dialog is closed, so no further reads happen', async () => {
+      installMocks(() => jsonResponse({ ...DETAIL_RUN, status: 'running', finishedAt: null }))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(1)
+    })
+  })
 })
