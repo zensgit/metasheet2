@@ -83,7 +83,11 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       const forbiddenWrites = []
       page.on('pageerror', error => errors.push(error.message))
       page.on('requestfailed', request => {
-        if (new URL(request.url()).pathname.startsWith('/api/')) apiFailures.push('API_REQUEST_FAILED')
+        const path = new URL(request.url()).pathname
+        if (path.startsWith('/api/')) {
+          const kind = request.failure()?.errorText === 'net::ERR_ABORTED' ? 'ABORTED' : 'TRANSPORT'
+          apiFailures.push(`API_REQUEST_FAILED_${kind}:${request.method()}:${path}`)
+        }
       })
       page.on('response', response => {
         const path = new URL(response.url()).pathname
