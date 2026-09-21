@@ -25610,12 +25610,15 @@ module.exports = {
       return rows.length > 0
     }
 
-    // ACL slice A (2026-09-17): closed action set for group-manager reads.
-    // Write actions (members mutate, managers mutate, rule edit, fixed-schedule apply)
-    // stay admin-only and MUST NOT be added here without a separate owner decision.
+    // ACL slice A reads + O3 in-group writes (2026-09-20). Unknown action → false.
+    // Still admin-only (must NOT be added here): add/remove managers, group CRUD,
+    // rule/holiday/payroll edits, fixed-schedule apply/rebuild/clear/config.
     const ATTENDANCE_GROUP_MANAGER_ACTIONS = new Set([
       'view_group',
       'list_members',
+      'list_managers',
+      'add_members',
+      'remove_members',
       'view_team_availability',
       'fixed_schedule_preview',
     ])
@@ -26352,7 +26355,39 @@ module.exports = {
       return false
     }
 
-    function withAttendanceGroupMemberAccess(handler) {
+    async function authorizeAttendanceGroupScopedAction(req, res, { groupId, action }) {
+      const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      if (!actorAccess) return null
+
+      if (process.env.RBAC_BYPASS === 'true') {
+        return { ...actorAccess, scope: 'org' }
+      }
+
+      try {
+        if (await hasAttendanceAdminAccess(actorAccess.userId)) {
+          return { ...actorAccess, scope: 'org' }
+        }
+        const allowed = await canManageAttendanceGroup(actorAccess.orgId, actorAccess.userId, groupId, action)
+        if (!allowed) {
+          res.status(403).json({
+            ok: false,
+            error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' },
+          })
+          return null
+        }
+        return { ...actorAccess, scope: 'managed' }
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          respondAttendanceGroupManagerTableMissing(res)
+          return null
+        }
+        logger.error('Attendance group scoped authorization failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
+    }
+
+    function withAttendanceGroupMemberAccess(action, handler) {
       return async (req, res, next) => {
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -26360,51 +26395,29 @@ module.exports = {
           return
         }
 
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        const actorAccess = await authorizeAttendanceGroupScopedAction(req, res, { groupId, action })
         if (!actorAccess) return
 
-        const invokeHandler = async () => {
-          try {
-            const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
-              groupId,
-              orgId: actorAccess.orgId,
-            })
-            if (!groupExists) return
-            await handler(req, res, next, actorAccess)
-          } catch (error) {
-            if (error instanceof HttpError && !res.headersSent) {
-              res.status(error.status).json({
-                ok: false,
-                error: {
-                  code: error.code,
-                  message: error.message,
-                  ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
-                },
-              })
-              return
-            }
-            throw error
-          }
-        }
-
-        if (process.env.RBAC_BYPASS === 'true') {
-          await invokeHandler()
-          return
-        }
-
         try {
-          if (await hasAttendanceAdminAccess(actorAccess.userId)) {
-            await invokeHandler()
-            return
-          }
-          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+            groupId,
+            orgId: actorAccess.orgId,
+          })
+          if (!groupExists) return
+          await handler(req, res, next, actorAccess)
         } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+          if (error instanceof HttpError && !res.headersSent) {
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
             return
           }
-          logger.error('Attendance group scoped manager guard failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+          throw error
         }
       }
     }
@@ -45301,7 +45314,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+      withAttendanceGroupMemberAccess('list_members', async (req, res, _next, actorAccess) => {
         const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -45346,7 +45359,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+      withAttendanceGroupMemberAccess('add_members', async (req, res, _next, actorAccess) => {
         const schema = z.object({
           userId: z.string().optional(),
           userIds: z.array(z.string()).optional(),
@@ -45389,6 +45402,14 @@ module.exports = {
               if (rows.length) created.push(mapAttendanceGroupMemberRow(rows[0]))
             }
           })
+          emitEvent('attendance.group.members.changed', {
+            orgId,
+            groupId,
+            actorId: actorAccess.userId,
+            action: 'add',
+            scope: actorAccess.scope === 'managed' ? 'managed' : 'org',
+            count: created.length,
+          })
           res.json({ ok: true, data: { items: created } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
@@ -45404,7 +45425,7 @@ module.exports = {
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/groups/:id/members/:userId',
-      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+      withAttendanceGroupMemberAccess('remove_members', async (req, res, _next, actorAccess) => {
         const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -45421,6 +45442,14 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Member not found' } })
             return
           }
+          emitEvent('attendance.group.members.changed', {
+            orgId,
+            groupId,
+            actorId: actorAccess.userId,
+            action: 'remove',
+            scope: actorAccess.scope === 'managed' ? 'managed' : 'org',
+            count: 1,
+          })
           res.json({ ok: true, data: { id: rows[0].id } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
@@ -45436,15 +45465,18 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id/managers',
-      withPermission('attendance:admin', async (req, res) => {
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
-        if (!actorAccess) return
-        const orgId = actorAccess.orgId
+      async (req, res) => {
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
+        const actorAccess = await authorizeAttendanceGroupScopedAction(req, res, {
+          groupId,
+          action: 'list_managers',
+        })
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -45480,7 +45512,7 @@ module.exports = {
           logger.error('Attendance group managers fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group managers' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -45751,10 +45783,6 @@ module.exports = {
       async (req, res) => {
         const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
-        if (!actorAccess.fullAdmin) {
-          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
-          return
-        }
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -45773,6 +45801,26 @@ module.exports = {
         if (!groupId) {
           respondInvalidUuid(res)
           return
+        }
+        if (process.env.RBAC_BYPASS !== 'true' && !actorAccess.fullAdmin) {
+          try {
+            const allowed = await canManageAttendanceGroup(orgId, actorAccess.userId, groupId, 'fixed_schedule_preview')
+            if (!allowed) {
+              res.status(403).json({
+                ok: false,
+                error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' },
+              })
+              return
+            }
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              respondAttendanceGroupManagerTableMissing(res)
+              return
+            }
+            logger.error('Attendance group fixed schedule preview authorization failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+            return
+          }
         }
         const shiftId = normalizeUuidString(parsed.data.shiftId)
         if (!shiftId) {

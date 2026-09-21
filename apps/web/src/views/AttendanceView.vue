@@ -5344,7 +5344,7 @@
                       <div>
                         <h6>{{ tr('Owners', '负责人') }}</h6>
                         <span class="attendance__field-hint">
-                          {{ tr('Owner and sub-owner roster only; delegated permissions are not granted in this slice.', '仅维护负责人/子负责人名单；本切片不授予委托权限。') }}
+                          {{ tr('Owner roster writes stay admin-only. Group owners can manage members of their own group.', '负责人名单仍由管理员维护。组负责人可以管理自己组内的考勤人员。') }}
                         </span>
                       </div>
                       <button
@@ -5394,7 +5394,7 @@
                             </option>
                           </select>
                           <small class="attendance__field-hint">
-                            {{ tr('Role labels are stored for display; route permissions remain admin-only.', '角色仅用于展示存储；路由权限仍保持管理员限定。') }}
+                            {{ tr('Adding or removing owners stays admin-only. Member add/remove is allowed for this group\'s owner or sub-owner.', '添加或移除负责人仍仅限管理员。本组 owner/sub_owner 可以增删考勤人员。') }}
                           </small>
                         </label>
                       </div>
@@ -14333,7 +14333,7 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
     {
       key: 'advanced-controls',
       title: tr('Advanced controls', '高级控制'),
-      value: tr('Owner roster is editable; delegated permissions stay deferred', '负责人名单可维护；委托权限仍暂缓'),
+      value: tr('Group owners can manage members of their group; owner roster and org policy stay admin-only', '组负责人可管理本组人员；负责人名单与组织级策略仍仅限管理员'),
       detail: tr('No disabled fake controls are rendered for unsupported group-owned capabilities.', '不会为尚未支持的考勤组能力渲染假的禁用控件。'),
       actions: [],
     },
