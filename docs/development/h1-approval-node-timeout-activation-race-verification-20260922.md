@@ -284,7 +284,7 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 ⇒ 不触发 s6a pin / W7-R10 分类 / CI corpus 的任何一钉。
 `ApprovalMetricsService.ts` 一行未改，所以以该文件为 `paths:` 的 lane 不被本 PR 触发（也无需触发）。
 
-### 6.1 CI 实测（本 PR 的 Draft PR #5970，head `718a54c2bd0ad1ca46c85f2aae1428e22e8efba3`）
+### 6.1 CI 实测（Draft PR #5970，第一次提交 `718a54c2bd0ad1ca46c85f2aae1428e22e8efba3`）
 
 | lane | 结果 | 它覆盖了本地哪条缺口 |
 |---|---|---|
@@ -307,8 +307,12 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 即 §7 第 1 条的 **PG 16 轴**与第 7 条的**默认无 DB lane**都由 CI 实际执行并通过 ——
 两者都不是本地跑出来的，出处标在这里。
 
-PR 仍为 **Draft**，head `4b0650b96557001c82f718211c106389cc72e914`。绿不等于被采纳：
-是否合并由 owner 决定，本代理未 undraft、未请求合并。
+上表结果对应提交 `4b0650b96557001c82f718211c106389cc72e914` —— **本分支最后一次代码变更**；
+在它之后本分支只有文档提交（零代码改动），所以这些结果对当前 head 的**代码**仍然成立。
+**刻意不在此写当前 head 的 40 位 SHA**：那会让本节每加一次文档就作废一次（自指快照）。
+读者要核对当前 head，用 `gh pr view 5970 --json headRefOid`。
+
+PR 仍为 **Draft**。绿不等于被采纳：是否合并由 owner 决定，本代理未 undraft、未请求合并、未改任何锁文正文。
 
 ---
 
