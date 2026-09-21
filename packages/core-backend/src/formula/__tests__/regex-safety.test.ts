@@ -12,6 +12,7 @@ import {
   hasNestedUnboundedQuantifier,
   USER_REGEX_MAX_SUBJECT_LEN,
 } from '../regex-safety'
+import { validateRecord } from '../../multitable/field-validation-engine'
 
 const engine = new FormulaEngine({ db: undefined as never })
 const ctx = { sheetId: 's', row: 1, col: 1, values: {} } as never
@@ -84,5 +85,32 @@ describe('REGEXMATCH/EXTRACT/REPLACE — bounded, no cross-tenant freeze', () =>
     expect(r.ms).toBeLessThan(50)
     const e = await evalMs('REGEXEXTRACT("id=42", "id=([0-9]+)")')
     expect(e.result).toBe('42')
+  })
+})
+
+describe('field-validation pattern rule — stored regex guarded on record write', () => {
+  const patternField = (regex: string) => [{
+    id: 'f1', name: 'F1', type: 'string',
+    config: { validation: [{ type: 'pattern' as const, params: { regex } }] },
+  }]
+
+  function validateMs(fields: Parameters<typeof validateRecord>[0], data: Record<string, unknown>) {
+    const t0 = process.hrtime.bigint()
+    const out = validateRecord(fields, data)
+    return { ms: Number(process.hrtime.bigint() - t0) / 1e6, out }
+  }
+
+  it('POSITIVE: a nested-quantifier stored pattern is refused fast (was ~20s @n=32)', () => {
+    const { ms, out } = validateMs(patternField('^(a+)+$'), { f1: 'a'.repeat(32) + '!' })
+    expect(out.valid).toBe(false) // catastrophic pattern rejected → fails validation
+    expect(ms).toBeLessThan(200)
+  })
+
+  it('LINEAR CONTROL: a benign stored pattern still validates a large value fast', () => {
+    const ok = validateMs(patternField('^[a-z]+$'), { f1: 'a'.repeat(100000) })
+    expect(ok.out.valid).toBe(true)
+    expect(ok.ms).toBeLessThan(100)
+    const bad = validateMs(patternField('^[0-9]+$'), { f1: 'abc' })
+    expect(bad.out.valid).toBe(false) // ordinary validation failure still works
   })
 })

@@ -11,6 +11,7 @@ import type {
   FieldValidationRule,
   ValidationResult,
 } from './field-validation'
+import { assessUserPattern } from '../formula/regex-safety'
 
 // ---------------------------------------------------------------------------
 // Default messages
@@ -99,6 +100,15 @@ function validateMaxLength(value: unknown, maxLen: number): boolean {
 
 function validatePattern(value: unknown, regex: string, flags?: string): boolean {
   if (typeof value !== 'string') return false
+  // PROPOSED (H-3): a stored `pattern` rule compiles this caller-authored regex on
+  // EVERY record write / public form submission. A nested-quantifier pattern
+  // (e.g. "^(a+)+$") was measured blocking the event loop ~20s at a 33-char record
+  // value. Refuse statically-catastrophic / over-length patterns before compiling —
+  // a catastrophic validation pattern is misconfiguration and fails validation,
+  // consistent with the invalid-regex branch below. PARTIAL (misses
+  // alternation-overlap ReDoS); the complete fix is a linear-time engine (RE2).
+  // See docs/development/input-regex-redos-census-*.md.
+  if (!assessUserPattern(regex).safe) return false
   try {
     const re = new RegExp(regex, flags)
     return re.test(value)
