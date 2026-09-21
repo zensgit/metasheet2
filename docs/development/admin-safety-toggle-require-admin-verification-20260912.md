@@ -679,3 +679,78 @@ spec 注释或设计文档里写明理由并交给 #5680 / 后续 PR。
 - 未合任何 PR、未碰 `main`、未改 `.github/`、未改任何 pin 文件与 `test-chain.txt`。
 - 两个一次性变异探针跑完即删，`git status` 干净；变异全部内存级。
 - 未连接任何真实数据库；本节不含主机 / 账号 / 口令 / 令牌值。
+
+---
+
+## 10. 2026-09-21 第四轮：合入新 main 后的复证
+
+上一轮（§9）把反驳者的唯一 blocker 修掉后推上去，远端 head `5fc233bda`
+的 27 项检查是 **26 SUCCESS + 1 SKIPPED，零红**；两条 required 门
+`test (18.x)` / `test (20.x)` 都是 `COMPLETED/SUCCESS`，blocker 关闭。
+
+本轮只做一件事：`origin/main` 又前进了 13 个提交（到 `e15a6e315`），把它合进本支并复证。
+
+### 10.1 合并
+
+`git merge origin/main` **零冲突**。原因是实读确认过：这 13 个提交与本支改动的
+6 个文件（`admin-routes.ts` / `admin-api.yaml` / 两份 docs / 两个 spec）**交集为空** ——
+`git diff --name-only HEAD...origin/main --` 点名这 6 个路径时输出为空。
+新 main 的改动集中在 multitable 存活门（#5939/#5935/#5940/#5921）、attendance、
+after-sales 与 stock-prep，没有一处落在 `/api/admin` 写面上。
+
+合并提交：`aa83a2b6c`。
+
+### 10.2 门仍在原位
+
+合并后 `admin-routes.ts` 里 `requireAdminRole()` 共 **44 处**，本 PR 的 12 处写面门
+逐条仍是首位 handler（`:172`、`:221`、`:244`、`:1158`、`:1214`、`:1387`、`:1506`、
+`:1721`、`:1753`、`:1942`、`:1994`、`:2155`）。
+#5914 引入的门也原样保留：`admin-routes.ts:1646` 的
+`router.get('/slo/status', requireAdminRole(), ...)`，以及 `snapshot-labels.ts` 内的 5 处。
+
+### 10.3 邻接集改成全仓 grep（不再人工挑）
+
+上一轮遗漏 fk-409 的教训已落实。本轮的邻接集是 grep 出来的，两层：
+
+1. **打这 12 条路径的 spec**——`grep -rlE "data/bulk|safety/enable|safety/disable|cache/clear|metrics/reset|dlq/|ratelimits/|health/check" tests/ --include=*.test.ts` → 6 个文件，全部在册：
+   `admin-bulk-data-sources-fk-409` / `admin-dlq-read-authz` / `admin-read-error-echo-redaction` /
+   `admin-read-gates-batch2-authz` / `admin-read-gates-batch3-authz` / `admin-safety-toggle-and-bulk-authz`。
+2. **import 了 `admin-routes` 的 spec**（更宽的闭世界）——`grep -rlE "routes/admin-routes" tests/ --include=*.test.ts` → 10 个文件。
+
+跑第 2 层（含第 1 层全部 6 个）：**10 passed / 216 tests passed**，零红。
+其中此前变红的 `admin-bulk-data-sources-fk-409.test.ts` 已回到全绿。
+
+### 10.4 变异自证（内存级，合并后复跑）
+
+§8.3 / §8.3.1 已对 12 条门逐条做过变异。本轮在**合完新 main 的树上**再打一次总闸，
+确认门没有因为合并而变成摆设：
+
+把真 spec `admin-safety-toggle-and-bulk-authz.test.ts` 原样复制一份，在它自己的
+`vi.mock('../../src/db/pg', ...)` 之前插一行内存级变异——
+`vi.mock('../../src/guards/audit-integration', async (io) => ({ ...await io(), requireAdminRole: () => (_q,_s,n) => n() }))`——
+即把 `requireAdminRole` 整个换成 passthrough，源文件零改动。
+
+| | 结果 |
+| --- | --- |
+| 未变异 | 25 passed / 25 |
+| 变异成 passthrough | **16 failed / 9 passed**（25） |
+
+红的 16 条正是断言 `403 ADMIN_REQUIRED` 的那批（如
+`POST /ratelimits/:key/reset`、`POST /ratelimits/reset-all`，spec `:192-195` 的
+`it.each(OTHER_WRITE_ENDPOINTS)`）；绿的 9 条是不依赖该门的用例。
+没有出现「变异了却全绿」。变异副本跑完即删，`git status` 干净。
+
+### 10.5 其余门禁
+
+- `npx tsc --noEmit`（`packages/core-backend`）：**exit 0**，无输出。
+- 推送前 `git diff origin/main...HEAD | grep -cP '\x08'` → **0**，无控制字符。
+- 相对 `origin/main` 的改动面仍是那 6 个文件，未因合并扩散。
+
+### 10.6 本轮边界自检
+
+- 只在 worktree `metasheet-wt-w8k` 内改动；主检出与其他 `metasheet-*` 目录只读。
+- 未合任何 PR、未碰 `main`、未改 `.github/`、未改任何 pin 文件与 `test-chain.txt`。
+- 未开新 PR；推送只对我方分支 `fix/admin-safety-toggle-and-bulk-require-admin`，
+  用 `--force-with-lease`。
+- 一次性变异探针跑完即删；变异全部内存级，源文件零改动。
+- 未连接任何真实数据库；本节不含主机 / 账号 / 口令 / 令牌值。
