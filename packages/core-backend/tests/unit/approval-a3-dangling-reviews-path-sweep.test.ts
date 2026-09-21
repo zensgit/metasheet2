@@ -83,11 +83,24 @@ import { describe, expect, it } from 'vitest'
  * re-absorbs files A-1 (not A-3) authored, including a migration #5907 later renamed on a
  * different lane descended from A-1 — freezing the old name under that recipe is exactly what
  * collided with the rename the moment the two lanes combined. THE CORRECTED RECIPE anchors the
- * diff at the tip of the A-1 segment on this branch, not `origin/main`:
- * `git diff --name-only 574e97e5b652fb2f9da0a93b9a69bffb3f93dc54..<A-3 branch tip>`. That SHA is
- * content-level (not subject-level) proven to be the last commit whose content matches A-1's own
- * copy of the 11 paths A-1's design touches, established independently in
- * `a-stack-alignment-dry-run-20260921.md` §1. Re-running the recipe against this frozen list
+ * diff at the point where A-3's own work starts on THIS branch, not `origin/main`, and names that
+ * point by tracked content rather than by a pinned SHA. The SHA this recipe used to carry is
+ * reachable from `feat/approval-template-groups-phase2-backfill` and, by `git merge-base
+ * --is-ancestor` (exit 1), unreachable from `feat/approval-template-groups-phase2-backfill-aligned`,
+ * which ships this file byte-identical; there the same command still exits 0 and diffs across the
+ * whole divergence instead of A-3's own segment — the dangling-pin class this file's own header
+ * exists to avoid. THE CORRECTED RECIPE, re-derivable on whichever branch this file sits on:
+ *
+ *   A3_START=$(git log --diff-filter=A --format=%H HEAD -- packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts | tail -1)
+ *   git diff --name-only "$A3_START^..HEAD"
+ *
+ * — the first commit on this branch that ADDS A-3's own backfill-batches migration, diffed from
+ * its parent. Run 2026-09-22 in a worktree of each branch: the two outputs hold the same 27 paths;
+ * `A3_OWNED_FILES` below freezes 26 of them, and the 27th,
+ * `docs/development/approval-template-groups-phase2-design-20260918.md`, is not frozen here.
+ * Re-derive it per branch rather than extrapolating from this paragraph: A-1's migration was
+ * already renamed once on a sibling lane, and a rename of A-3's own migration moves this anchor
+ * the same way. Re-running the recipe against this frozen list
  * removes exactly 6 of a prior 32-entry list's paths, all A-1-inherited and none A-3-authored:
  * both phase1 `.md` docs, the phase1 migration renamed above, the phase1
  * `approval-template-groups-lifecycle.db.test.ts`, and `scripts/dev/atg-retraction-sweep.sh` /
@@ -95,9 +108,8 @@ import { describe, expect, it } from 'vitest'
  * "still runs" does not hold uniformly across the six (verified with `git ls-files` plus a grep
  * of `.github/` and every `package.json`): all six remain `git`-tracked; the phase1 migration and
  * `approval-template-groups-lifecycle.db.test.ts` still run in CI — the migration via
- * `migrate.ts`'s directory scan (it loads whatever the migrations folder currently tracks, not a
- * hand-named file), the test named explicitly at `plugin-tests.yml:1706`; the two phase1 `.md`
- * docs do not run at all (Markdown), and the two `scripts/dev/atg-*.sh` helpers are
+ * `migrate.ts`'s directory scan, the test named explicitly at `plugin-tests.yml:1706`; the two
+ * phase1 `.md` docs do not run at all (Markdown), and the two `scripts/dev/atg-*.sh` helpers are
  * developer-invoked only, with zero references in `.github/` or any `package.json`. None of the
  * six is A-3's own file to freeze a path for, either way.
  *
@@ -224,8 +236,9 @@ function linesContainingToken(files: readonly string[], token: string, root: str
     try {
       content = fs.readFileSync(abs, 'utf8')
     } catch {
-      // Binary or unreadable-as-utf8 file (e.g. an image under scripts/ fixtures) — not a
-      // candidate for a doc-comment path reference; skip rather than throw.
+      // A read failure (e.g. a tracked path absent from the checkout, or a directory) — skip it
+      // rather than throw. Undecodable bytes do not arrive here: `fs.readFileSync(abs, 'utf8')`
+      // substitutes U+FFFD for them and returns.
       continue
     }
     const lines = content.split('\n')
