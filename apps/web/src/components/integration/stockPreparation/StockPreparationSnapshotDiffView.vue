@@ -208,6 +208,20 @@
             </div>
           </dl>
 
+          <!-- Q3c: client-side, values-free 对账摘要 CSV — the change-distribution counts (including the
+               two fingerprint-decomposition kinds above), held/ready counts (only when the row detail
+               below has already been loaded — never triggers its own GET), and the diff-id list per
+               change type. No material name / quantity / drawing number ever enters this file; see
+               `buildDiffSummaryCsv` below for the exact contract. -->
+          <button
+            type="button"
+            class="sp-snap__export"
+            data-testid="stock-prep-snapshot-diff-export"
+            @click="onExportDiffSummary"
+          >
+            {{ bi('导出对账摘要', 'Export reconciliation summary') }}
+          </button>
+
           <!-- View-2 per-row drill-down: lazy, values-free (handles + enums + counts + opaque SHA-16
                fingerprints only — never a raw path key / drawing number / quantity / unit). -->
           <div class="sp-snap__rows-wrap">
@@ -378,6 +392,7 @@ import {
   STOCK_PREP_DIFF_REVIEW_PLAIN,
   stockPrepEnumPlain,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { downloadCsvFile } from '../../../services/integration/stockPreparation/stockPrepCsv'
 
 const props = withDefaults(
   defineProps<{
@@ -444,7 +459,10 @@ function fingerprintLabel(fp: string | null): string {
   return fp ?? '—'
 }
 
-// Fixed whitelist of the eight values-free change-count kinds (counts of lines, never the values).
+// Fixed whitelist of the ten values-free change-count kinds (counts of lines, never the values).
+// Q3c: componentCodeChanged/materialChanged were added alongside the backend's changeCountsFromEvidence
+// (stock-preparation-snapshot-reads.cjs) — both are independent of fingerprintChanged, not new totals
+// carved out of it (a row can carry more than one changeType at once).
 const changeCountEntries = computed(() => {
   const counts = diff.value?.changeCounts
   if (!counts) return []
@@ -457,11 +475,89 @@ const changeCountEntries = computed(() => {
     { key: 'pathChanged', value: counts.pathChanged },
     { key: 'missingChildBom', value: counts.missingChildBom },
     { key: 'fingerprintChanged', value: counts.fingerprintChanged },
+    { key: 'componentCodeChanged', value: counts.componentCodeChanged },
+    { key: 'materialChanged', value: counts.materialChanged },
   ].map((entry) => {
     const plain = stockPrepEnumPlain(STOCK_PREP_DIFF_KIND_PLAIN, entry.key)
     return { ...entry, label: plain ? bi(plain.zh, plain.en) : entry.key }
   })
 })
+
+/** Point 9 idiom (shared with StockPreparationProjectSyncPanel.vue): filesystem-hostile chars → '_'. */
+function sanitizeFilenameToken(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, '_')
+}
+
+function diffSummaryCsvFilename(): string {
+  const now = new Date()
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  const batchToken = sanitizeFilenameToken(selectedBatchId.value || 'batch')
+  return `stock-prep-diff-summary-${batchToken}-${yyyy}${mm}${dd}.csv`
+}
+
+/**
+ * Q3c: builds the client-side, values-free 对账摘要 export — everything here is already on screen,
+ * so this issues NO new GET. Three sections, all under the fixed `section,key,value` header:
+ *   - `batch`: the compared pair by internal handle + version (never a project/customer name).
+ *   - `summary`: `blockingExceptionCount` plus `readyRowCount`/`heldRowCount` — the latter two are
+ *     populated ONLY when the row-detail drill-down has already been opened and loaded
+ *     (`diffRows.value`); when it has not, they are left blank rather than triggering a fetch of
+ *     their own; `ready = rowCount - heldRowCount` matches the two vocabularies the row table itself
+ *     renders (`STOCK_PREP_REVIEW_STATUSES`: only `ready`/`held` exist).
+ *   - `changeCount`: the full whitelist `changeCountEntries` already renders on screen, including the
+ *     two Q3c additions (componentCodeChanged/materialChanged) — same numbers, same keys.
+ *   - `rowId`: only when row detail is loaded — one line per (changeType, diffId) pair, so a
+ *     reviewer can jump from "N rows had a component-code swap" straight to which rows those are,
+ *     without ever exporting the swap's actual values.
+ * VALUES-FREE: every cell is a count, a fixed enum token, or an internal handle
+ * (`snapshotBatchId`/`diffId`) — never a material name, quantity, drawing number, unit or path key.
+ */
+function buildDiffSummaryCsv(): { headers: string[]; rows: Array<Array<string | number>> } {
+  const headers = ['section', 'key', 'value']
+  const rows: Array<Array<string | number>> = []
+
+  const currentBatchId = diff.value?.snapshotBatchId ?? selectedBatchId.value ?? ''
+  const baseBatchId = diff.value?.baseSnapshotBatchId ?? ''
+  const batches = result.value?.batches ?? []
+  const versionOf = (batchId: string): number | string => {
+    const found = batches.find((batch) => batch.snapshotBatchId === batchId)
+    return found ? found.snapshotVersion : ''
+  }
+
+  rows.push(['batch', 'currentSnapshotBatchId', currentBatchId])
+  rows.push(['batch', 'currentSnapshotVersion', currentBatchId ? versionOf(currentBatchId) : ''])
+  rows.push(['batch', 'baseSnapshotBatchId', baseBatchId])
+  rows.push(['batch', 'baseSnapshotVersion', baseBatchId ? versionOf(baseBatchId) : ''])
+
+  rows.push(['summary', 'blockingExceptionCount', diff.value?.blockingExceptionCount ?? ''])
+  const loadedRows = diffRows.value
+  rows.push(['summary', 'readyRowCount', loadedRows ? loadedRows.rowCount - loadedRows.heldRowCount : ''])
+  rows.push(['summary', 'heldRowCount', loadedRows ? loadedRows.heldRowCount : ''])
+
+  for (const entry of changeCountEntries.value) {
+    rows.push(['changeCount', entry.key, entry.value])
+  }
+
+  if (loadedRows) {
+    for (const row of loadedRows.rows) {
+      for (const changeType of row.changeTypes) {
+        rows.push(['rowId', changeType, row.diffId])
+      }
+    }
+  }
+
+  return { headers, rows }
+}
+
+function onExportDiffSummary(): void {
+  if (!diff.value) return
+  const { headers, rows } = buildDiffSummaryCsv()
+  // Guard ON — same reasoning as the missing-components export (stockPrepCsv.ts B3): defensive even
+  // though every cell here is a fixed enum token or an internal handle, never a customer value.
+  downloadCsvFile(diffSummaryCsvFilename(), headers, rows, { guardFormulas: true })
+}
 
 function resetRowDetail(): void {
   rowsSeq += 1 // invalidate any in-flight rows load for the batch we are leaving
@@ -865,6 +961,22 @@ watch(() => props.projectId, loadBatches)
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-2);
+}
+
+.sp-snap__export {
+  align-self: flex-start;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-snap__export:hover {
+  background: var(--el-fill-color-light);
 }
 
 .sp-snap__rows-toggle {

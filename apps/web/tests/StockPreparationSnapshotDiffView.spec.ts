@@ -107,6 +107,8 @@ function diffSummary(baseId = 'batch-beta'): StockPreparationSnapshotDiffSummary
       pathChanged: 0,
       missingChildBom: 1,
       fingerprintChanged: 5,
+      componentCodeChanged: 6,
+      materialChanged: 7,
     },
     blockingExceptionCount: 1,
   }
@@ -315,9 +317,9 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     // Hint gone once a diff is shown.
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-hint"]')).toBeNull()
 
-    // All eight change-count kinds render.
+    // All ten change-count kinds render (Q3c: componentCodeChanged/materialChanged joined the eight).
     const counts = root.querySelectorAll('[data-testid="stock-prep-snapshot-diff-count"]')
-    expect(counts.length).toBe(8)
+    expect(counts.length).toBe(10)
     const kinds = Array.from(counts).map((el) => el.getAttribute('data-kind'))
     expect(kinds).toEqual([
       'added',
@@ -328,6 +330,8 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
       'pathChanged',
       'missingChildBom',
       'fingerprintChanged',
+      'componentCodeChanged',
+      'materialChanged',
     ])
 
     // Blocking-exception count + base-batch handle render (base = predecessor).
