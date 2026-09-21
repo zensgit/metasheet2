@@ -1666,6 +1666,9 @@ exec npx vitest run \
   templateCenterI18n \
   templateDetailI18n \
   templateGalleryFilter \
+  todoApi \
+  TodoCenterView \
+  todoCountsRealtime \
   ui-foundation-style-guard \
   uiFoundationTexture \
   useApprovalBatchActions \
@@ -1678,9 +1681,6 @@ exec npx vitest run \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
-  todoApi \
-  TodoCenterView \
-  todoCountsRealtime \
   --reporter=dot
   amountAutoSum \
   approval-amount-in-words \
