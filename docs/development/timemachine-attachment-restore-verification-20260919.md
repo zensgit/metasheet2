@@ -12,6 +12,48 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Clean-head Acceptance and Source Review (2026-09-22)
+
+Exact clean candidate `3d01f8209897d07eebe0880c846be9d061fbb9db`, tree
+`8182836bb997149efbf4f43a87d51e01ba8c95cb`. Main remained
+`cd42eaf7455f03dd99021a02c47c42f1f3db6484` at the subsequent readback.
+
+- `--workbench`: 8/8 PASS; evidence run
+  `8b6ff040-7957-4dbb-a897-724333dd81ab`. Real login/session/router,
+  retained whole-table restore, deleted-row information and restore, sidebar
+  history, actor name/viewer-local time, deleted-column typed restore and values.
+  Inspected screenshots include sidebar history and the restored column.
+- `--browser`: all 1440/390 scalar, attachment, Workbench and full application
+  loops PASS, including cell-editor deletion, original restored bytes, authenticated
+  download and decoded gallery PNG. Strict failed-request assertions unchanged.
+- Same archive run: 32 migration replay gates, historical 47/59/127 tests,
+  HTTP authorization/drift/fault/retry checks and final stage arbitration/drain.
+- Owned fixture counters and connections zero, owned storage released, both
+  clusters stopped/removed. No real tenant or customer storage used.
+
+Commands are `TM_TEST_PG_BIN=/opt/homebrew/opt/postgresql@15/bin node
+scripts/ops/run-recovery-manual-checkpoint.mjs --workbench` and the same command
+with `--browser`. Logs: `/private/tmp/tm-3d01-workbench.log` and
+`/private/tmp/tm-3d01-archive-browser.log`.
+
+Sol high read-only review inspected the source path from manual durable capture
+and signed manifest through preview/execute revalidation, atomic stage adoption,
+record CAS/history/token/receipt, expired-stage/purge arbitration, local storage,
+runtime shutdown and authenticated attachment reads. Result: no source-evidenced
+P1/P2 in that inspected integration path. No tests were run by the reviewer;
+unrelated PR files, all UI state behavior, CI wiring and the denied-comment test
+were not comprehensively reviewed. Session closed; no whole-PR approval inferred.
+
+Public SHA-bound evidence: [acceptance and review update](https://github.com/zensgit/metasheet2/pull/5882#issuecomment-5764110501).
+The earlier API_REQUEST_FAILED remains unattributed; a passing repeat does not
+establish its cause. Owner-open tenant and detached-ID decisions are unchanged.
+The `3d01f8209897d07eebe0880c846be9d061fbb9db` remote matrix subsequently
+reached terminal 34 SUCCESS + 1 expected Strict E2E SKIPPED, zero pending/failure.
+Node18, Node20, Web Tests and coverage succeeded. Node20 job `106421045699`
+passed the previously failing multitable real-DB lane and its later integration
+steps. This closes that exact-head CI gate, not the unattributed browser event or
+owner decisions. A documentation successor does not inherit exact-SHA checks.
+
 ## Bounded Denied-audit CI Correction (2026-09-22)
 
 Code checkpoint: `363cb715117169cfd1af98b3eb584d79d726a22a`, tree
@@ -32,7 +74,9 @@ The boundary writes after response finish, so receiving HTTP 403 does not prove
 the audit INSERT has completed. Coverage skipped after this failure is not a
 healthy intentional skip.
 
-Owned fresh PostgreSQL 15 clusters, local Node 25.9.0:
+Owned fresh PostgreSQL 15 clusters; standalone driver Node 25.9.0, pnpm child
+runtime Node 24.14.1 (verified with `pnpm --filter @metasheet/core-backend exec
+node --version`). Neither is a local Node20 reproduction:
 
 - A fixture-only BEFORE INSERT trigger delayed this suite's denied audit by
   `pg_sleep(0.4)`: original test failed exactly its audit assertion (1 RED, 3 PASS).

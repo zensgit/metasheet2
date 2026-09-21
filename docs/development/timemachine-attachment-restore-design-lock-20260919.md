@@ -2,6 +2,28 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Current-main Acceptance Refresh (2026-09-22)
+
+Candidate `3d01f8209897d07eebe0880c846be9d061fbb9db`, tree
+`8182836bb997149efbf4f43a87d51e01ba8c95cb`, includes main
+`cd42eaf7455f03dd99021a02c47c42f1f3db6484` through the documented true merge.
+The paired report records fresh clean-head Workbench 8/8 and full archive
+desktop/mobile browser acceptance, plus a bounded Sol source review with no
+source-evidenced P1/P2 in the inspected capture-to-download and cleanup chain.
+This review is not blanket approval of all PR files, all UI states or CI wiring.
+
+No restoration, access, custody, cleanup or retention contract changed in the
+latest CI correction. The denied-comment audit test now observes its asynchronous
+row within a bounded deadline instead of assuming a 100ms sleep is sufficient;
+delayed insertion passes and omitted insertion still fails in owned PostgreSQL.
+
+Remote CI at that exact candidate is terminal: 34 SUCCESS + 1 expected Strict
+E2E SKIPPED, zero pending/failure; later documentation heads require their own
+checks. The earlier generic browser request failure
+remains unattributed despite subsequent successful complete runs. Owner decisions
+for tenant authority and detached-ID lifecycle remain open. PR #5882 stays
+Draft/HOLD; no real-environment access, flags, dispatch, deployment or merge.
+
 ## Acceptance Backend Drain Correction (2026-09-20)
 
 The later documentation head `a05a2a420b49d3986d3169be5667cb1c8aff971d`
