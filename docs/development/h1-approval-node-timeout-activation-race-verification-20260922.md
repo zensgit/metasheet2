@@ -229,9 +229,12 @@ tsc --noEmit -p <tmp tsconfig，include 增加 tests/integration/approval-dedup-
 把「return 分支确实发出了再入节点的激活 stamp」显式钉住。
 
 **声明边界（防止被读成「改测试掩盖问题」）**：这条单测的被测对象是 `dispatchAction` 的**事务纪律**，
-不是 metrics 的落地顺序；注入 stub 后它对「是否 await」**没有**判别力 —— 判别力在 §3 的 C/D 两次回跑
-与 §2 的两条真库用例上，那两条在旧实现下是确定性红的。metrics 写本身的覆盖也没丢：
-`tests/unit/approval-metrics-service.test.ts`（SQL 形状）+ 本 PR 新增的真库用例。
+不是 metrics 的落地顺序；注入 stub 后它对「是否 await」**没有**判别力。
+**这句话是跑出来的，不是推出来的**：把生产文件还原成 `cd42eaf74…` 的 blob（`diff` 零差异，即**修复前**的实现），
+**保留打过补丁的单测文件**，在无 DB 配置下重跑该文件 —— `Test Files 1 passed (1) / Tests 184 passed (184)`。
+即它在修复前后都绿，确实不承载判别力。
+判别力在 §3 的 C/D 两次回跑与 §2 的两条真库用例上，那两条在旧实现下是确定性红的。
+metrics 写本身的覆盖也没丢：`tests/unit/approval-metrics-service.test.ts`（SQL 形状）+ 本 PR 新增的真库用例。
 
 **修后本地重跑同一条 lane**：
 
@@ -308,7 +311,9 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 两者都不是本地跑出来的，出处标在这里。
 
 上表结果对应提交 `4b0650b96557001c82f718211c106389cc72e914` —— **本分支最后一次代码变更**；
-在它之后本分支只有文档提交（零代码改动），所以这些结果对当前 head 的**代码**仍然成立。
+在它之后本分支只有文档提交，所以这些结果对当前 head 的**代码**仍然成立。
+这一点是**可机械核验**的，不是断言 —— `git diff --stat 4b0650b96557001c82f718211c106389cc72e914..<当前 head>`
+的输出只含 `docs/` 路径（零 `packages/` / 零 `.github/` 条目）。
 **刻意不在此写当前 head 的 40 位 SHA**：那会让本节每加一次文档就作废一次（自指快照）。
 读者要核对当前 head，用 `gh pr view 5970 --json headRefOid`。
 
