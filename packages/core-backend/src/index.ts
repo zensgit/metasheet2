@@ -326,6 +326,8 @@ import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
 import { authenticate as authenticateElearningApp } from './middleware/auth'
+import { methodOverrideMiddleware } from './middleware/method-override'
+import { methodProbeRouter } from './routes/method-probe'
 import {
   isElearningAssignmentSurfaceEnabled,
   isElearningAnalyticsSurfaceEnabled,
@@ -1617,8 +1619,13 @@ export class MetaSheetServer {
     this.app.use(correlationIdMiddleware)
 
     // CORS
+    // `exposedHeaders` is an EXPLICIT list, so a header a cross-origin browser client must be able
+    // to read has to be named here. `X-Method-Overridden` is the receipt the DELETE method-override
+    // stamps on a rewritten request (middleware/method-override.ts); without it a client cannot tell
+    // "the server honoured my override" from "a hop stripped the header and a same-path POST twin
+    // ran instead". Same-origin fetches could read it regardless; cross-origin ones cannot.
     this.app.use(cors({
-      exposedHeaders: ['X-Correlation-ID'],
+      exposedHeaders: ['X-Correlation-ID', 'X-Method-Overridden'],
     }))
 
     // API responses should always opt out of MIME sniffing, including early 4xx replies.
@@ -1715,7 +1722,17 @@ export class MetaSheetServer {
       }
     }
 
-    // 请求日志
+    // 请求日志。UNCHANGED BY THE METHOD-OVERRIDE WORK, ON PURPOSE — two other suites own this
+    // middleware, its literal AND its shape, and both fail closed:
+    //   - tests/unit/elearning-media-playback-runtime.test.ts locates the request logger by searching
+    //     index.ts for the exact template below and orders the whole pipeline around it. Interpolating
+    //     an override marker into it turned that search into -1 and made `test (18.x)/(20.x)` red.
+    //   - tests/unit/attendance-w6-group-effective-policy-authorization.test.ts partitions every `this`
+    //     use of this assembly scope against a FROZEN key census keyed by ancestor KIND. Wrapping the
+    //     logger call in a branch, or adding a second `this.logger` call here, produces keys nobody
+    //     enumerated, lands in its UNKNOWN bucket and reds it.
+    // So the override CLAIM is logged where the decision is actually made and where it can also record
+    // whether the claim was HONOURED — middleware/method-override.ts — instead of here.
     this.app.use((req, res, next) => {
       this.logger.info(`${req.method} ${req.path}`)
       next()
@@ -1757,6 +1774,29 @@ export class MetaSheetServer {
     this.app.use(attendanceAuditMiddleware())
     this.app.use(attendanceSecurityMiddleware())
 
+    // DELETE method-override (POST + X-HTTP-Method-Override: DELETE -> DELETE).
+    //
+    // POSITION IS LOAD-BEARING, and it is pinned by tests/unit/method-override.test.ts:
+    //   - AFTER the global JWT gate above, so an unauthenticated override is just an unauthenticated
+    //     request (401, handler never runs). The middleware ALSO re-checks `req.user` itself, because
+    //     the gate lets whitelisted paths and the OAPI `mst_` method-bound allowlist through WITHOUT
+    //     setting `req.user`, and neither may be turned into a DELETE by a header.
+    //   - AFTER `attendanceSecurityMiddleware()`, so the rewrite cannot be used to dodge a
+    //     method-keyed guard. `pickLimiter` (middleware/attendance-production.ts) selects the import
+    //     prepare/preview/upload/commit buckets on `req.method === 'POST'`; rewriting to DELETE before
+    //     it ran would have made `POST /api/attendance/import/commit` + override consume NO limiter
+    //     token while the 50 MB import JSON parser still ran. The attendance audit record likewise
+    //     keeps the verb that actually arrived on the wire, and carries `meta.request.methodOverride`
+    //     so a tunnelled delete is still findable as a delete.
+    // WHO READS `req.method` IN THIS WINDOW — stated exactly, because "nothing does" was false:
+    // `attendanceAuditMiddleware` and `attendanceSecurityMiddleware` BOTH do, deliberately (the
+    // limiter is the whole reason for this mount position). Their reads are allow-listed line by
+    // line in the spec, so a NEW verb-keyed read there is caught rather than silently permitted.
+    // Nothing ELSE does: `correlationContextEnrichmentMiddleware` keys on user/tenant only and the
+    // tenant ALS wrapper keys on `req.user.tenantId` (both asserted in the spec). Any future
+    // method-keyed guard must be mounted ABOVE this line.
+    this.app.use(methodOverrideMiddleware)
+
     // 健康检查
     const healthHandler = (req: Request, res: Response) => {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
@@ -1786,6 +1826,8 @@ export class MetaSheetServer {
     }
     this.app.get('/health', healthHandler)
     this.app.get('/api/health', healthHandler)
+    // DELETE transport probe (authenticated by the global gate above; see routes/method-probe.ts).
+    this.app.use(methodProbeRouter())
 
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
