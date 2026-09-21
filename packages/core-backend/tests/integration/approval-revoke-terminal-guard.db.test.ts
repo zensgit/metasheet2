@@ -200,7 +200,7 @@ describeIfDatabase('approval revoke: terminal-status guard ahead of the node-key
     })
   }
 
-  it('(a) legacy /approve: instance is terminal with a non-null current_node_key on this base, so this test also re-confirms the pre-existing-fixture premise the guard is closing', async () => {
+  it('(a) legacy /approve: the instance is terminal and revoke is refused 409 by the STATUS guard — the non-null-cursor premise this case used to re-confirm is retired by the settlement-parity slice', async () => {
     const suffix = `a-${TS}`
     const requesterId = `l1-req-${suffix}`
     const approverId = `l1-apr-${suffix}`
@@ -220,12 +220,22 @@ describeIfDatabase('approval revoke: terminal-status guard ahead of the node-key
     })
     expect(legacyApprove.status, await legacyApprove.clone().text()).toBe(200)
 
-    // PREMISE CHECK (not the fix under test): legacy /approve's UPDATE sets status only, so
-    // current_node_key is still whatever it was before approval — confirming the node-key check
-    // alone would not have rejected this instance.
+    // PREMISE, RESTATED (`fix/approval-legacy-approve-settlement-parity`): legacy `/approve` no
+    // longer writes the terminal status itself. A seat-gated (template-runtime) instance is settled
+    // by `ApprovalProductService.dispatchAction` — the same method `/actions` calls — so this row
+    // now reaches the SAME terminal shape as case (b): `approved` with the cursor CLEARED.
+    //
+    // WHAT THAT COSTS THIS FILE, said plainly rather than quietly dropped: this case used to be the
+    // one place where a terminal instance still carried a live `current_node_key`, which is what
+    // made "the node-key check alone would not have rejected this instance" a DEMONSTRATED claim
+    // rather than a stated one. No shipped route produces that shape any more, so the status
+    // guard's independence from the pre-existing node-key check is no longer discriminated here —
+    // the guard is unchanged and still correct, but on this fixture it is now defence in depth.
+    // Restoring the discriminator would mean constructing the state directly rather than through
+    // the HTTP surface, which is a change to this file's fixture doctrine and is NOT made here.
     const afterApprove = await rawRow(created.id)
     expect(afterApprove.status).toBe('approved')
-    expect(afterApprove.current_node_key).toBe('approval_a')
+    expect(afterApprove.current_node_key).toBeNull()
 
     const revokeResponse = await revoke(requesterToken, created.id)
     const revokeBody = await revokeResponse.clone().text()
@@ -296,7 +306,7 @@ describeIfDatabase('approval revoke: terminal-status guard ahead of the node-key
     expect(finalRow.current_node_key).toBeNull()
   })
 
-  it('(d) OBSERVATIONAL, not a design assertion: legacy /reject leaves current_node_key non-null the same way /approve does, and the new guard (status-based) covers it — recorded as-is', async () => {
+  it('(d) OBSERVATIONAL, not a design assertion: legacy /reject reaches the same terminal shape as /approve does, and the new guard (status-based) covers it — recorded as-is', async () => {
     const suffix = `d-${TS}`
     const requesterId = `l1-req-${suffix}`
     const approverId = `l1-apr-${suffix}`
@@ -317,11 +327,12 @@ describeIfDatabase('approval revoke: terminal-status guard ahead of the node-key
     expect(legacyReject.status, await legacyReject.clone().text()).toBe(200)
 
     // OBSERVATION (structural symmetry with (a), not asserted as intended behavior of /reject —
-    // /reject itself is out of scope for this change): the row is 'rejected' and current_node_key
-    // is left as it was, same shape as legacy /approve.
+    // /reject itself is out of scope for THIS file's change): the row is 'rejected' and, since
+    // `fix/approval-legacy-approve-settlement-parity`, the cursor is cleared — the same shape
+    // legacy /approve now reaches, and the same shape `/actions{reject}` has always reached.
     const afterReject = await rawRow(created.id)
     expect(afterReject.status).toBe('rejected')
-    expect(afterReject.current_node_key).toBe('approval_a')
+    expect(afterReject.current_node_key).toBeNull()
 
     // 'rejected' is a member of APPROVAL_TERMINAL_STATUSES, so the new status-based guard (added
     // for revoke, not specific to any one terminal status) refuses this the same way it refuses
