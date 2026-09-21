@@ -1619,7 +1619,7 @@ $ git grep -n "reviews/" -- 'packages/**' 'apps/**' 'plugins/**' 'scripts/**' | 
 
 新增守卫 `packages/core-backend/tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts`(`approval-*.test.ts` 命名,进入 T4 census 人口,不进 exclude 名单,常驻 required no-DB 作业):`git ls-files -z --cached -- packages apps plugins scripts` 派生域(排除 `.md`),逐文件逐行扫描字面子串 `reviews/`(源码里拆成 `['review','s','/'].join('')` 三段拼接,避免这份守卫自己的常量声明也带着连续字面量);decoy 树正控——`withDecoyTree` 同款手法,仿 `source-files-no-raw-control-bytes.test.ts` 的既有约定,不是新发明一套机制。
 
-**自指陷阱,现场发现现场修**:该守卫文件本身是 `.ts`、在 `packages/**` 之下,且其文档注释/常量/两条用例标题/decoy fixture 内容都**必须**把这个词当数据写出来——提交入库后它自己就落进被扫描的域,第一次跑 `git add` 之后重新执行 §14.7.9(见下)的静态三件套时,该守卫的"全零命中"用例**真的红了**(命中自己文件里 4 行),不是假设性风险。修法**不是**把这条腿改弱(比如豁免整个文件),而是仿本仓 census 自身 §6"self-exemption closure"与 NUL 守卫`KNOWN_0X01_CARRIERS`的既有约定:显式排除**这一个**文件(`SELF_PATH`,由 `path.relative(REPO_ROOT, __filename)` 派生,不是手写字符串——文件改名不会留下失效的硬编码路径),并新增一条用例证明该排除**存在必要性**(未排除时这份文件真的会命中 >0 次)且**范围恰好是这一个文件**(排除后确实从扫描域消失)——不是"加一个豁免就完事",是把"豁免是否承重"变成可执行断言。
+**自指陷阱,现场发现现场修**:该守卫文件本身是 `.ts`、在 `packages/**` 之下,且其文档注释/常量/两条用例标题/decoy fixture 内容都**必须**把这个词当数据写出来——提交入库后它自己就落进被扫描的域,第一次跑 `git add` 之后重新执行 §14.7.7 的静态三件套时,该守卫的"全零命中"用例**真的红了**(命中自己文件里 4 行),不是假设性风险。修法**不是**把这条腿改弱(比如豁免整个文件),而是仿本仓 census 自身 §6"self-exemption closure"与 NUL 守卫`KNOWN_0X01_CARRIERS`的既有约定:显式排除**这一个**文件(`SELF_PATH`,由 `path.relative(REPO_ROOT, __filename)` 派生,不是手写字符串——文件改名不会留下失效的硬编码路径),并新增一条用例证明该排除**存在必要性**(未排除时这份文件真的会命中 >0 次)且**范围恰好是这一个文件**(排除后确实从扫描域消失)——不是"加一个豁免就完事",是把"豁免是否承重"变成可执行断言。
 
 ```
 $ unset DATABASE_URL && npx vitest run tests/unit/approval-a3-dangling-reviews-path-sweep.test.ts --reporter=verbose
@@ -1704,7 +1704,7 @@ $ env -u DATABASE_URL -u EXPECT_DB CI=true npx vitest run --reporter=dot        
 | Tests skipped | 1617 − 8(down-guard 原 8 例不再被收集,不再计入 skip) | 1609 | 1609 ✓ |
 | Tests 合计 | | 16715 | 16715 ✓ |
 
-六项全部吻合,两次独立重跑结果确定性一致(`0 failed` 双证),不留"环境噪声"这类未裁定项。
+六项全部吻合。**如实记录第三次重跑**:在最终树(含自指陷阱修复后的 sweep 守卫)上共跑了三次这条全量无库套件——第一次与第三次干净,均为上表的最终数字(`0 failed`);**第二次 `1 failed | 948 passed`**,失败用例本轮**未定位、未归因**(`packages/core-backend` 全量套件规模大,单次重跑耗时约 100 秒,本仓已有记录在案的间歇性失败族——见 `finding_vitest_ontaskupdate_timeout_silently_drops_assertions`,约 9% 间歇率——本次失败的具体用例未被抓取输出保存,无法回溯核对是否属于该已知族)。三次里出现的那次红**记为未裁定,不记为"环境噪声"**(那需要归因证据,本轮没有),也不因为另外两次干净就把它从记录里去掉。
 
 ### 14.7.8 收尾
 
