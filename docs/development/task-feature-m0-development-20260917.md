@@ -7,7 +7,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 - 切片：**A（M0 普查 + 锁草案 PROPOSED）**
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
-- head SHA：内容 SHA `1ae6f99aa9f94ade142b01cb5ec2b0a62e1aeaf5`（闸 §15 第十一轮；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。
+- head SHA：内容 SHA 见本轮 SHA-record 提交（闸 §16 第十二轮；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。
 - PR #：**5845** Draft https://github.com/zensgit/metasheet2/pull/5845
 - `gh pr view 5845 --json mergeable,mergeStateStatus,statusCheckRollup` 开 PR 后立即原始摘录（非 DIRTY；checks 当时多为 QUEUED，`mergeStateStatus=BLOCKED` 因 required 未完成，不是冲突）：
 
@@ -63,7 +63,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 | 12 | `docker-build.yml` 对 `docs/**` paths-ignore | `:4-8` | `sed -n '4,8p' .github/workflows/docker-build.yml` | `paths-ignore: docs/**` |
 | 13 | 锁草案含 §0–§15 且 §8 为 N/A 一行 | 锁文件 | `rg -n "^## " docs/development/task-feature-design-lock-20260917.md` | 见 §3 |
 | 14 | 锁草案 §13 含题号 1–39 各恰一次（多重集） | 锁文件 | `python3 -c "import re; from collections import Counter; from pathlib import Path; t=Path('docs/development/task-feature-design-lock-20260917.md').read_text(); nums=[int(n) for n in re.findall(r'\*\*(\d+)\.', t) if 1<=int(n)<=39]; c=Counter(nums); print('unique', len(c), 'multiset', len(nums), 'dupes', dict((k,v) for k,v in c.items() if v>1), 'missing', [i for i in range(1,40) if i not in c])"` | `unique 39 multiset 39 dupes {} missing []`。mutation：副本再插入一个 `**14.` ⇒ `unique 39 multiset 40 dupes {14: 2}` |
-| 15 | §13-9 / §13-10 / §13-11 / §13-12 标未裁，且 §13-5 随落槌 | 四处 slash + §9 表 §13-5 行 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | slash `:9` `:25` `:341` `:551` |
+| 15 | §13-9 / §13-10 / §13-11 / §13-12 标未裁，且 §13-5 随落槌 | 四处 slash + §9 表 §13-5 行 | `grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md` | slash `:9` `:25` `:415` `:645` |
 
 ---
 
@@ -105,7 +105,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 5. **`hashtext` 数值碰撞 UNCLEAR**：只做字面前缀差。
 6. **§13-9 / §13-10 / §13-11 / §13-12 未裁**（§13-11 不适用默认前进；§13-5 随 §13-11，单独未裁亦阻断 M2）。
 7. **待办中心锁未 ratify**：PendingItem 按交接件临时六字段；R1。
-8. **对抗闸未齐**：第十一轮 REJECT（`reviews/gate-task-m0-20260917.md` §15，1 P1 / 9 P2 / 10 P3）。本轮按 §15 一次改完、不 rebase。不声称 M0 退出门已过。
+8. **对抗闸未齐**：第十二轮 REJECT（闸 §16，2 P1 / 4 P2 / 11 P3）。本轮按 §16 一次改完、不 rebase。不声称 M0 退出门已过。
 9. **飞书 `:21-23` vs 计划 §5-2**：计划把《完成与重启任务》:23 列为 `scope=self|all` 出处之一；锁按闸 P3-1 把 `:21-23` 标 IM 不对标，`:20` 单独支撑创建人完成范围。以闸 P3-1 为准，计划 :23 记偏离。
 10. **`guardPolicy.ts` 行号漂移**：计划写 `:29` / `:77` / `:87-95`；本 SHA `ATTENDANCE_FOCUS_ALLOWED_PATHS` `:34`、`PLM_WORKBENCH_ALLOWED_PREFIXES` `:82`、`KNOWN_REQUIRED_FEATURES` `:100`，`/stock-prep` 无 `requiredFeature` 先例 `:90-99`（普查 §5.2 / §5.3）。
 
@@ -115,7 +115,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 1. **未连生产库**（也未连 staging）。
 2. **未跑真库测试、未跑浏览器、未起 API 服务器**。
-3. **闸未齐**：第十一轮 REJECT。本轮按闸 §15 一次改完、不 rebase。
+3. **闸未齐**：第十二轮 REJECT。本轮按闸 §16 一次改完、不 rebase。
 4. **§13-9 / §13-10 / §13-11 / §13-12 未裁**（§13-5 随 §13-11）。
 5. 未实现任务 B 纯函数与单测。
 6. 未写迁移、路由、服务、前端（任务 C 禁止）。
@@ -130,24 +130,21 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 ---
 
-## 6. 修复轮（闸 §15 第十一轮 1 P1 / 9 P2 / 10 P3）
+## 6. 修复轮（闸 §16 第十二轮 2 P1 / 4 P2 / 11 P3）
 
-未改 §13-9 / §13-10 / §13-11 / §13-12（§13-5 随 §13-11）。未合并。不 ratify。任务 B 未起。本轮不 rebase。机核命令均用锁内原串。
+未改 §13-9 / §13-10 / §13-11 / §13-12（§13-5 随 §13-11）。未合并。不 ratify。任务 B 未起。本轮不 rebase。机核命令均用锁内原串，在终稿锁上实跑。
 
-| finding | 改动 | 联立 |
-|---|---|---|
-| ① 门 19 | M2 `I_M2` 40 个 `(s,v)`；清单角色 NOT RUN；漏格比身份集合 | 与门 7 里程碑分层同形 |
-| ② (d) | tokens 行与对照句 grep -F 整串相同；补 §7 两条 | 共句三 token 同 §10 |
-| ③ 门 20 | 单引号 POSIX ERE 可跑 | 与 §6.4：keys 零命中、I/O 在 src/db |
-| ④ 门 19 探针① | 只置反 `(assignee,view)`；三端集合相等 | from 关系见 §6.1 |
-| ⑤ 门 22 | meta 深等于 appRoutes `/tasks`；path `/tasks` 避开 elearning 合取 | `:234/:243` |
-| ⑥ 门 21 | D/T/G 三条可 diff 命令 | 门 22 承载含这三件 |
-| ⑦ 门 1 | §13-10 阻断 = 门 1 整体 | 读格也经 rbacGuard read |
-| ⑧ 真隔离 | A/B 同形除 org_id；去 org 子句两面都选中 | 报告锚点 `:362` |
-| ⑨ 门 3 | 显式 `[]` 替换默认行；六格写通道；播种在 complete 前 | §4.2 / §6.2 |
-| ⑩ 门 7 | 根表扫描?/≥1?；多重集恰三次；锁序从标题删除 | §6.4 锁序 P2 NOT RUN |
-| ⑪ P3 | Pago_Pago UTC−11；objsubid 一参形；e 条两门一致；OPTIONAL 三身份 | |
-| ⑫ (d) 两遍 | 见下 | 路径形 63；裸 80 |
+| finding | 改动（自写） | 机制走查 | 联立 |
+|---|---|---|---|
+| ① P1-A / P2-d 门 19 × §6.1 | 五 view 各一条 TS 谓词 `taskMatchesView`；`delegated` = `createdByMe ∧ othersAssigned`；正控比「该视角应收该行」；`TASK_ROLE_ABILITY` 退出探针；`I_M2` 40 行清单 + `gate19\|s\|v` 抽取；每格钉 ambient 与 `{T}/∅` | 列表读路径消费 SQL 臂（`buildTaskScopeCondition`）；TS 谓词只给测试期望；能力表只服务 `can()` | 探针① 改 assigned SQL 臂；pending 派生 `view:'assigned'`；漏格 diff 锁内 `i-m2` 块 |
+| ② P1-B / P3(b) 门 21 × §5.3 ① × 门 22 | G 只抽 yml **step**（`vitest run` 段）；paths glob 字符类零抽取 + stdin 正负控；T = 文件名 `^tasks.*\.spec\.ts$` + `LC_ALL=C sort`；删 CamelCase 子句；门 22 承载 ③ = D=T=G | step 逐文件才进 G；`on.paths` 的 `tasks*.spec.ts` 含 `*` 被 `[^[:space:]*]` 丢掉 | 门 22 承载 ①②③；§5.3 ① step 行不得 glob |
+| ③ P2-a 门 22 | 断言对象 = `import appRoutes` 后 `path==='/tasks'` 记录；投影 `requiresAuth` / `permissions` / `requiredFeature` 缺席；title/titleZh 非空存在、不断言文案；`:553` 负控钉该 admin 夹具 | `/tasks` 使 `:234/:243` elearning 合取为假；删 `:553` 后 admin 短路没了、`permissions=[]` 使 `isRoutePermitted` 失败 | 与 `useAuth.ts:548-556` 短路；不走 `router/types.ts` |
+| ④ P2-b / P3(g) 门 20 | 无 I/O = (A) db 相对导入 ERE 零 **且** (B) `\.query\(|FenceQuery|:\s*QueryFn` 零；各三正控；(B) 钉 `:24 query?: QueryFn` 而非 `:9 type QueryFn`；人口 `find \| wc -l ≥ 1`；GNU grep 缺失路径 exit 2 | find 缺目录印 0 / find exit 1，不是 grep exit 2；macOS grep 缺目录常见 exit 1 | 与 §6.4：keys 无 I/O、取锁在 `src/db/` |
+| ⑤ P2-c §4.2 / §6.2 / §9 × 门 3 | 创建期语义三处同形一句；×0 `COUNT=0`；×1 `COUNT=1` 且 creator；×n `COUNT=n` | 省略字段 / 显式 `[]` / 显式非空数组 三通道在 complete 前完成 | 门 3 存活六格不调用增删人 API；§13-9 仍阻断增删人/切模式 |
+| ⑥ P3(a) drift-exempt | §7 两 token 共句改为 SYSTEM_SHEET_KINDS 句（不再误标独立句）；tokens 行补 `:1785` / `:1797`，正文对照句标 **已漂** | 块外 `grep -nF` 含「已漂」；禁止 `grep -v` | `:1785` 与 §10 四 token 共句；`:1797` 与 `:1782` 共 §5.2.1 ① |
+| ⑦ P3(c) 门 16 | ①② 判据改为 `(status, error.code, error.message)` | code 同为 `UNAUTHORIZED`，message 拆 Missing Bearer vs Invalid token | 全形仍钉 `jwt-middleware.ts:156` / `:75-77` |
+| ⑧ P3 其余 | e 条抬头「写路由约束」；§4.3「`V` 五值路由」；真隔离钉 due、无 `badge_scope`；门 7 `≥1` 单位 = `find … \| wc -l` 的 `.ts` 行数；导出名仅 `export (async )?function NAME`；§12 尾「不得以已武装子集报门通过」；门 2 403 逐字 | 真隔离现 `:440`（闸写 `:366` 是改前锚，以终稿为准） | 读格 e 不适用；门 7 锁序仍 P2 NOT RUN |
+| ⑨ (d) 两遍 | 同 head 重核 | 见下 | 路径形 66；裸 81 |
 
 ### 机核（带引号完整命令与 exit）
 
@@ -157,7 +154,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 grep -n "process.env.RBAC_OPTIONAL === '1'" docs/development/task-feature-design-lock-20260917.md
 ```
 
-exit **0**。命中行 **121**（§4.3 定义）、**191**（setup 守卫）、**470**（§13-1d）。
+exit **0**。命中行 **121**（§4.3 定义）、**191**（setup 守卫）、**564**（§13-1d）。
 
 ```bash
 grep -n '全文唯一' docs/development/task-feature-design-lock-20260917.md
@@ -165,7 +162,25 @@ grep -n '全文唯一' docs/development/task-feature-design-lock-20260917.md
 
 exit **1**（零命中）。
 
-**门 20 ERE**（锁内单引号原串）扫 `src/tasks`（目录本 SHA 不存在，本机 macOS grep exit **1**；武装后目录必须存在且 `find … \| wc -l` ≥ 1，grep exit 2 仍红）：
+**创建期同形**（核心句三处）：python 计数字面 `省略 assignees 字段 ⇒ …（可含或不含 creator）。` = **3**（§4.2 `:99` / §6.2 `:327` / §9 `:380`）。
+
+**I_M2 清单**：
+
+```bash
+sed -n '/^```i-m2$/,/^```$/p' docs/development/task-feature-design-lock-20260917.md | grep '^gate19|' | LC_ALL=C sort | wc -l
+```
+
+exit **0**，**40**。
+
+**门 20 人口**：
+
+```bash
+find packages/core-backend/src/tasks -name '*.ts' | wc -l
+```
+
+stdout **0**；`find` stderr `find: packages/core-backend/src/tasks: No such file or directory`；单独 `find` exit **1**（macOS）；管道 `wc` exit **0**。武装后须 ≥ 1（单位：`.ts` 文件行数）。
+
+**门 20 (A) ERE**（锁内单引号原串）。目录不存在：本机 macOS grep exit **1**；锁以 GNU grep 缺失路径 **exit 2** 为准，武装后目录必须存在：
 
 ```bash
 grep -R -E --include='*.ts' --include='*.js' --include='*.cjs' \
@@ -173,7 +188,7 @@ grep -R -E --include='*.ts' --include='*.js' --include='*.cjs' \
   packages/core-backend/src/tasks
 ```
 
-exit **1**。正控三形：
+exit **1**。(A) 正控三形：
 
 ```bash
 grep -n -E 'from[[:space:]]+['\''"](\.\./)+db/' packages/core-backend/src/auth/session-registry.ts
@@ -193,26 +208,142 @@ grep -n -E 'import\(['\''"](\.\./)+db/' packages/core-backend/src/observability/
 
 exit **0** → `:335` `await import('../db/db')`。
 
-联立 §6.4：keys 文件无 I/O、本 ERE 对其零命中；取锁在 `src/db/task-advisory-locks.ts`。
+**门 20 (B) ERE**：
 
-**(d) 每 token**（块外 `grep -nF '<token>'` 且含「已漂」）：
-
-```
-:1782 → 1
-:1069 → 1
-:1763-1777 → 1
-:1642 → 1
-AGENTS.md:48-50 → 1
-guardPolicy.ts:29 → 1
-system-sheet-predicate.ts:39-42 → 1
-history-trust-checkpoint.ts:82-85 → 1
+```bash
+grep -R -E --include='*.ts' --include='*.js' --include='*.cjs' \
+  '\.query\(|FenceQuery|:\s*QueryFn' \
+  packages/core-backend/src/tasks
 ```
 
-共句：`:1642` / `:1763-1777` / `AGENTS.md:48-50` 同 §10 一句。
+exit **1**（macOS 缺目录）。(B) 正控三形：
 
-### ⑫ 两遍导出
+```bash
+grep -n -E '\.query\(' packages/core-backend/src/plugin/PluginRegistry.ts
+```
 
-路径形 unique **63**。裸 `:N` unique **80**：
+exit **0** → `:800` `this.database.query(`。
+
+```bash
+grep -n FenceQuery packages/core-backend/src/multitable/recovery-archive-source-pin.ts
+```
+
+exit **0** → `:1` `import type { FenceQuery }`。
+
+```bash
+grep -n -E ':\s*QueryFn' packages/core-backend/src/approvals/approval-departure-transfer-dispatch.ts
+```
+
+exit **0** → `:24` `query?: QueryFn`（`:9` `type QueryFn` **不**命中本 ERE）。
+
+联立 §6.4：keys 文件无 I/O、两 ERE 对 `src/tasks` 零命中；取锁在 `src/db/task-advisory-locks.ts`。
+
+**门 21 paths glob 正负控**（stdin；yml 未建）：
+
+```bash
+printf '%s\n' 'apps/web/tests/tasksFoo.spec.ts' 'apps/web/tests/tasks*.spec.ts' | grep -oE 'apps/web/tests/tasks[^[:space:]*]+\.spec\.ts'
+```
+
+exit **0**，只抽 `apps/web/tests/tasksFoo.spec.ts`（glob 行零抽取）。
+
+```bash
+printf '%s\n' 'apps/web/tests/tasksFoo.spec.ts' 'apps/web/tests/tasks*.spec.ts' | grep -oE 'apps/web/tests/tasks[^[:space:]]+\.spec\.ts'
+```
+
+exit **0**，两行都抽（负控：去掉 `*` 排除则 glob 漏进）。
+
+**(d) 每 token**（先抽出块外正文，再 `grep -nF` 且含「已漂」）。抽取：
+
+```bash
+python3 -c 'from pathlib import Path
+p=Path("docs/development/task-feature-design-lock-20260917.md")
+lines=p.read_text().splitlines(True); out=[]; skip=False
+for line in lines:
+    if line.startswith("```drift-exempt"):
+        skip=True; continue
+    if skip and line.startswith("```"):
+        skip=False; continue
+    if not skip: out.append(line)
+Path("/tmp/r12b-body.txt").write_text("".join(out))'
+```
+
+exit **0**（670 行）。清单 10 token（原 8 + `:1785` / `:1797`）。逐条：
+
+```bash
+grep -nF ':1782' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:175` §5.2.1 ①）。
+
+```bash
+grep -nF ':1069' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:215` §5.3 ②）。
+
+```bash
+grep -nF ':1763-1777' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:406` §10）。
+
+```bash
+grep -nF ':1642' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:406` §10）。
+
+```bash
+grep -nF 'AGENTS.md:48-50' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:406` §10）。
+
+```bash
+grep -nF 'guardPolicy.ts:29' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:163`）。
+
+```bash
+grep -nF 'system-sheet-predicate.ts:39-42' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:364` §7 SYSTEM_SHEET_KINDS）。
+
+```bash
+grep -nF 'history-trust-checkpoint.ts:82-85' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:364` 同句）。
+
+```bash
+grep -nF ':1785' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:406` §10）。
+
+```bash
+grep -nF ':1797' /tmp/r12b-body.txt | grep '已漂'
+```
+
+exit **0**，HITS **1**（`:175` 与 `:1782` 共句）。
+
+共句：§7 两 token 同 SYSTEM_SHEET_KINDS 句 `:364`；§10 四 token（`:1642` / `:1763-1777` / `AGENTS.md:48-50` / `:1785`）同挂载句 `:406`；`:1782` 与 `:1797` 同 e2e glob 句 `:175`。
+
+**slash 四连**：
+
+```bash
+grep -n -F "§13-9 / §13-10 / §13-11 / §13-12" docs/development/task-feature-design-lock-20260917.md
+```
+
+exit **0** → `:9` `:25` `:415` `:645`。
+
+**真隔离** 终稿 `:440`（闸 `:146` 写 `:362→:366` 是改前推算）。
+
+### ⑨ 两遍导出
+
+路径形 unique **66**（`/tmp/r12b-d1.txt`）。裸 `:N` unique **81**（`/tmp/r12b-d2.txt`）：
 
 ```
 `:101
@@ -291,10 +422,21 @@ history-trust-checkpoint.ts:82-85 → 1
 `:8
 `:82-86
 `:842-844
+`:9
 `:91-97
 `:94
 `:96
 `:99
 ```
+
+两遍命令（锁 §14-4 (d) 原串）：
+
+```bash
+LOCK=docs/development/task-feature-design-lock-20260917.md
+grep -oE '[A-Za-z0-9_./-]+\.(ts|js|cjs|mjs|yml|yaml|md|vue|sh|json):[0-9]+(-[0-9]+)?' "$LOCK" | sort -u
+grep -oE "$(printf '\140'):[0-9]+(-[0-9]+)?" "$LOCK" | sort -u
+```
+
+exit 皆 **0**。
 
 `git merge-base HEAD origin/main` = `bb77ca5f2ce3c2825265ec8877861d367d017ead`。相对 merge-base 仍三份 docs `A`。
