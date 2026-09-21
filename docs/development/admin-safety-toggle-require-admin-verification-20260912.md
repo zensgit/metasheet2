@@ -754,3 +754,130 @@ after-sales 与 stock-prep，没有一处落在 `/api/admin` 写面上。
   用 `--force-with-lease`。
 - 一次性变异探针跑完即删；变异全部内存级，源文件零改动。
 - 未连接任何真实数据库；本节不含主机 / 账号 / 口令 / 令牌值。
+
+---
+
+## 11. 2026-09-21 第五轮：反驳者 blocker 落地 + 再合入新 main 的复证
+
+### 11.1 上一轮反驳者 blocker（邻接 spec `admin-bulk-data-sources-fk-409.test.ts` 16/16 全红）
+
+**已修，修法与反驳者 howToFix 一致**：给该 spec 补 RBAC 替身。
+`tests/unit/admin-bulk-data-sources-fk-409.test.ts:148-150`
+
+```
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: vi.fn().mockResolvedValue(true),
+}))
+```
+
+与 `tests/unit/admin-dlq-read-authz.test.ts:28-30`、
+`tests/unit/admin-read-gates-batch3-authz.test.ts:83-85` 逐字同款。
+
+**为什么是这个修法**：`requireAdminRole()`（`src/guards/audit-integration.ts:148`）调
+`isAdmin(user.id)`；`src/rbac/service.ts:19` 的 `runQuery` 默认参数取 `src/db/pg` 的
+`query`，而该 spec 的 `vi.mock('../../src/db/pg', () => ({ pool: null }))` 只给了 `pool`，
+于是每个请求都被该守卫的 catch 兜成 `503 RBAC_CHECK_FAILED`，把它本来要断言的 409/400/500
+边界全盖掉。该 spec 的夹具主体本来就叫 `'admin-fixture'`（`:170`），补替身是把这个既定身份
+显式化，不放宽任何断言。另在 `:214-217` 处理 `vi.restoreAllMocks()` 会剥掉工厂
+`mockResolvedValue` 的问题（每个用例重新钉 `true`），避免还原后静默降级成 `undefined`。
+
+### 11.2 邻接集口径改正：不再人工挑文件，改成全仓 grep
+
+上一轮遗漏 fk-409，正是因为它是 09-20 19:45 才合进 main 的新邻接件，而当时的「邻接集」
+是人工挑的 9 个。本轮改成两道机械 grep（在 `packages/core-backend` 下执行）：
+
+1. 打这 12 条路径的 spec：
+   `grep -rlE "safety/enable|safety/disable|cache/clear|metrics/reset|data/bulk|dlq/retry-all|dlq/cleanup|dlq/[^ '\"]*retry|ratelimits/.*reset|/dlq/" tests/ ../../plugins ../../apps`
+   → 3 个文件（`admin-bulk-data-sources-fk-409` / `admin-dlq-read-authz` /
+   `admin-safety-toggle-and-bulk-authz`）。
+2. 任何 import `admin-routes` 的 spec（覆盖闭世界扫描类、不直接写路径的）：
+   `grep -rlE "routes/admin-routes" tests/` → 10 个文件。
+
+取并集 = 10 个文件，全跑：
+
+| 批次 | 结果 |
+| --- | --- |
+| `admin-bulk-data-sources-fk-409` + `admin-safety-toggle-and-bulk-authz` + `admin-read-gates-batch2/batch3-authz` + `admin-safety-confirm-authz` + `safety-guard-confirm-flow` + `require-admin-role-fail-closed` + `admin-read-error-echo-redaction` | **8 files / 148 tests passed** |
+| `admin-snapshot-delete-authz` + `admin-yjs-status-routes` + `multitable-sheet-liveness-closure-all-routes.guard` | **3 files / 83 tests passed** |
+
+合计 **10 files / 231 tests，全绿**；fk-409 从上一轮的 16 failed 回到 16 passed。
+
+### 11.3 再合入新 main（`96cd7b57c`）
+
+上一轮合的是 `e15a6e315`；之后 main 又前进 `0e73ac2eb`、`96cd7b57c`。本轮
+`git merge origin/main` **零冲突**——这两个提交改的是 `plugins/plugin-integration-core/*`、
+`docs/*` 与 multitable 路由，`git diff` 对 `src/routes/admin-routes.ts` 为空。
+
+合并后逐条实读 12 处门仍是**首位 handler**（`src/routes/admin-routes.ts`）：
+`/safety/enable:221`、`/safety/disable:244`、`/cache/clear:1158`、`/metrics/reset:1214`、
+`DELETE /data/bulk:1387`、`PUT /data/bulk:1506`、`/dlq/:id/retry:1721`、
+`DELETE /dlq/:id:1753`、`/dlq/retry-all:1942`、`/dlq/cleanup:1994`、
+`/ratelimits/:key/reset:2155`、`/ratelimits/reset-all:2194`。
+
+`#5914` 的门保留：`admin-routes.ts:1646` `router.get('/slo/status', requireAdminRole(), ...)`；
+子路由挂载 `:2386 router.use('/snapshots', snapshotLabelsRouter)` /
+`:2387 router.use('/safety/rules', protectionRulesRouter)` 本支未改动。
+
+### 11.4 变异自证：12 条门逐条，内存级，在合完新 main 的树上重跑
+
+做法同 §8.3.1：一次性复制真 spec（`tests/unit/w8k-mut-r5.test.ts`，跑完即删、未提交），
+在 import 之后插一段内存级变异，按 `requireAdminRole().toString()` 逐字比对，从目标路由的
+`route.stack` 里摘掉**且仅摘掉**那一个 handler；**命中数不等于 1 就直接抛错**，杜绝
+「变异没落上却全绿」。`src/routes/admin-routes.ts` 全程零写入。
+
+基线（未变异）= **25 passed / 25**。
+
+| 被摘掉门的路由 | 变异后 |
+| --- | --- |
+| `POST /safety/enable` | 2 failed / 23 passed |
+| `POST /safety/disable` | 3 failed / 22 passed |
+| `POST /cache/clear` | 2 failed / 23 passed |
+| `POST /metrics/reset` | 2 failed / 23 passed |
+| `DELETE /data/bulk` | 2 failed / 23 passed |
+| `PUT /data/bulk` | 4 failed / 21 passed |
+| `POST /dlq/:id/retry` | 2 failed / 23 passed |
+| `DELETE /dlq/:id` | 2 failed / 23 passed |
+| `POST /dlq/retry-all` | 2 failed / 23 passed |
+| `POST /dlq/cleanup` | 2 failed / 23 passed |
+| `POST /ratelimits/:key/reset` | 2 failed / 23 passed |
+| `POST /ratelimits/reset-all` | 2 failed / 23 passed |
+
+12/12 都红，**没有一条变异是静默全绿**，也没有一条把无关用例整片带红（红的都是该路由自己
+的「非 admin 拿 403 ADMIN_REQUIRED」与「写入口零调用」两类断言；`PUT /data/bulk` 与
+`/safety/disable` 多出的那 1–2 条是它们额外被「关掉确认层后越权写」串联用例覆盖）。
+
+驱动脚本本身还吃过一次坑并被自身的 fail-closed 断言逮住：Git Bash 的 MSYS 把参数
+`/safety/enable` 改写成 `C:/Program Files/Git/safety/enable`，12 轮里有 9 轮 `hits=0`
+直接抛 `MUTATION DID NOT LAND`。加 `MSYS_NO_PATHCONV=1` 后复跑得到上表——这正说明
+「命中数必须等于 1」这道自检是有效的，否则那 9 轮会伪装成「变异后仍全绿 ⇒ 用例没效力」。
+
+### 11.5 非阻塞项处置
+
+- 反驳者指出的 `openapi/admin-api.yaml:157-161` 那段已作废 NOTE 与缺失的 403 响应：
+  本支 `admin-api.yaml` 已改。实读复核（不照抄自述）：
+  ① `:157-161` 那段「handler 既无 requireAdminRole 也无 requireSafetyCheck / 不返 403」的 NOTE
+  **已删**，`grep "has neither requireAdminRole"` 全文件 0 命中。
+  ② 该 yaml 只收录了 12 条里的 **6 条**（`/safety/enable`、`/safety/disable`、`/cache/clear`、
+  `/metrics/reset`、`/data/bulk` 的 PUT 与 DELETE），这 6 条现在各自有 `403` 响应
+  （`:181`、`:209`、`:993`、`:1035`、`:1079`、`:1121`），其中 5 条逐字写明 `code: ADMIN_REQUIRED`，
+  `/safety/enable` 那条写 `not a platform admin (requireAdminRole())`。
+  ③ 余下 6 条（`/dlq/*` 4 条、`/ratelimits/*` 2 条）**该 yaml 里根本没有对应 path**
+  （`grep -E "^  /(dlq|ratelimits)"` 0 命中），故无处可补；补齐这些 path 属该契约文件自身的
+  覆盖面缺口，与本 PR 的授权门无关，登记不做。
+  ④ 另有一处同类 NOTE 在 `:678`（snapshot 列表 GET 的读面），不在本 PR 的 12 条写面内，未动。
+  全仓 grep 确认无 ts/mjs/js/json/yml 引用该 yaml，故以上是文档一致性修正、不改变任何 CI 判定。
+- 其余三条（闭世界范围收在根路由、`requireAdminRole().toString()` 逐字识别的理论残余、
+  设计 §4 残余 1–6）维持原登记，交 `#5680`，本轮不扩范围。
+
+### 11.6 其余门禁与边界自检
+
+- `npx tsc --noEmit`（`packages/core-backend`）：**exit 0**，无输出。
+- `git diff origin/main HEAD | grep -cP '\x08'` → **0**。
+- 相对 `origin/main` 的改动面仍是那 6 个文件，未因两次合并扩散。
+- 只在 worktree `metasheet-wt-w8k` 内改动；主检出与其他 `metasheet-*` 目录只读。
+- 未合任何 PR、未碰 `main`、未改 `.github/`、未改任何 pin 文件与 `test-chain.txt`。
+- 未开新 PR；推送只对我方分支 `fix/admin-safety-toggle-and-bulk-require-admin`，
+  用 `--force-with-lease`。
+- 一次性变异副本跑完即删（`ls tests/unit/w8k-mut-r5.test.ts` 为空，`git status` 干净）；
+  驱动脚本落在 scratchpad，未进仓库。
+- 未连接任何真实数据库；本节不含主机 / 账号 / 口令 / 令牌值。
