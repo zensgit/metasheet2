@@ -289,6 +289,84 @@ describe('Attendance reports analytics', () => {
     expect(vi.mocked(apiFetch).mock.calls.some((call) => String(call[0]).includes('/api/attendance/summary?'))).toBe(true)
   })
 
+  it('blocks inverted report ranges before either reload entry point sends a request', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')
+    const toInput = container!.querySelector<HTMLInputElement>('#attendance-to-date')
+    const headerReload = container!.querySelector<HTMLButtonElement>('.attendance__filters button')
+    const cardReload = container!.querySelector<HTMLButtonElement>(
+      '[data-report-card="request-report"] .attendance__requests-header button',
+    )
+    expect(fromInput).toBeTruthy()
+    expect(toInput).toBeTruthy()
+    expect(headerReload).toBeTruthy()
+    expect(cardReload).toBeTruthy()
+
+    fromInput!.value = '2026-04-20'
+    fromInput!.dispatchEvent(new Event('input'))
+    toInput!.value = '2026-04-10'
+    toInput!.dispatchEvent(new Event('input'))
+    await flushUi(3)
+
+    expect(fromInput!.getAttribute('aria-invalid')).toBe('true')
+    expect(toInput!.getAttribute('aria-invalid')).toBe('true')
+    expect(fromInput!.classList.contains('attendance__input--invalid')).toBe(true)
+    expect(toInput!.classList.contains('attendance__input--invalid')).toBe(true)
+
+    vi.mocked(apiFetch).mockClear()
+    headerReload!.click()
+    await flushUi(3)
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(container!.querySelector('.attendance__status-block')?.textContent)
+      .toContain('Start date must be on or before end date.')
+
+    cardReload!.click()
+    await flushUi(3)
+    expect(apiFetch).not.toHaveBeenCalled()
+  })
+
+  it('keeps equal and ascending report ranges loadable', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')!
+    const toInput = container!.querySelector<HTMLInputElement>('#attendance-to-date')!
+    const headerReload = container!.querySelector<HTMLButtonElement>('.attendance__filters button')!
+    const cardReload = container!.querySelector<HTMLButtonElement>(
+      '[data-report-card="request-report"] .attendance__requests-header button',
+    )!
+
+    fromInput.value = '2026-04-15'
+    fromInput.dispatchEvent(new Event('input'))
+    toInput.value = '2026-04-15'
+    toInput.dispatchEvent(new Event('input'))
+    await flushUi(3)
+
+    expect(fromInput.getAttribute('aria-invalid')).toBe('false')
+    expect(toInput.getAttribute('aria-invalid')).toBe('false')
+
+    vi.mocked(apiFetch).mockClear()
+    headerReload.click()
+    await flushUi()
+    expect(apiFetch).toHaveBeenCalled()
+
+    fromInput.value = '2026-04-01'
+    fromInput.dispatchEvent(new Event('input'))
+    toInput.value = '2026-04-15'
+    toInput.dispatchEvent(new Event('input'))
+    await flushUi(3)
+
+    vi.mocked(apiFetch).mockClear()
+    cardReload.click()
+    await flushUi()
+    expect(apiFetch).toHaveBeenCalledTimes(1)
+    expect(String(vi.mocked(apiFetch).mock.calls[0]?.[0])).toContain('/api/attendance/reports/requests?')
+  })
+
   it('clears stale report data and blocks export when the current user filter is forbidden', async () => {
     app = createApp(AttendanceView, { mode: 'reports' })
     app.mount(container!)
