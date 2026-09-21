@@ -64,24 +64,50 @@ function targetedRunCommand(source: string): string {
  * Asserted-not-assumed: this throws rather than returning '' if the shape is not what it claims, so
  * a future rewrite cannot quietly turn the `toContain` checks below into assertions about ''.
  */
-function requiredLaneExecCommand(script: string): string {
-  const logical: string[] = []
+interface LogicalLine {
+  line: string
+  /** 1-indexed physical line number the logical line STARTS at (before backslash-folding). */
+  lineNumber: number
+}
+
+/**
+ * ALL logical lines of the script, in order, each paired with the physical line number it starts
+ * at: strip whole-line `#` comments, then join backslash continuations. This is the ONE fold —
+ * `requiredLaneExecCommand()` below and the "nothing survives past exec" assertion both build on
+ * it, rather than each carrying their own drift-prone copy of the same three rules.
+ *
+ * A blank physical line (not a comment, no trailing backslash) folds into its own zero-token
+ * logical line rather than disappearing — load-bearing for the assertion below, which must tell
+ * "an empty line after exec" (fine) apart from "nothing after exec" (also fine) without confusing
+ * either with "a dead token block after exec" (not fine): all three parse to different shapes only
+ * if blank lines survive the fold as visible, empty entries.
+ */
+function logicalLinesWithLineNumbers(script: string): LogicalLine[] {
+  const result: LogicalLine[] = []
   let buf: string | null = null
-  for (const raw of script.split('\n')) {
-    const line = raw.replace(/\r$/, '')
+  let bufStart = -1
+  const physical = script.split('\n')
+  for (let i = 0; i < physical.length; i++) {
+    const line = physical[i].replace(/\r$/, '')
     if (/^\s*#/.test(line)) continue
+    if (buf === null) bufStart = i + 1
     const trimmedRight = line.replace(/\s+$/, '')
     const continued = trimmedRight.endsWith('\\')
     const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
     buf = buf === null ? body : `${buf} ${body}`.trim()
     if (!continued) {
-      logical.push(buf)
+      result.push({ line: buf, lineNumber: bufStart })
       buf = null
     }
   }
-  if (buf !== null) logical.push(buf)
+  if (buf !== null) result.push({ line: buf, lineNumber: bufStart })
+  return result
+}
 
-  const execLines = logical.filter(line => /^exec\s+npx\s+vitest\s+run\b/.test(line))
+function requiredLaneExecCommand(script: string): string {
+  const execLines = logicalLinesWithLineNumbers(script)
+    .map(entry => entry.line)
+    .filter(line => /^exec\s+npx\s+vitest\s+run\b/.test(line))
   if (execLines.length !== 1) {
     throw new Error(`run-required-web-tests.sh must have exactly one exec vitest invocation, found ${execLines.length}`)
   }
@@ -98,6 +124,38 @@ describe('attendance web guard workflow contract', () => {
 
     const physical = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
     expect(physical.slice('exec npx vitest run '.length).trim()).toBe('\\')
+  })
+
+  /**
+   * GATE-5086 follow-up (2026-09-22, independent verification `verify-exec-deadblock-fix-*.md`):
+   * four rebased branches each left a SECOND, headerless copy of the required-lane token list —
+   * byte-identical to the live block, minus the `exec npx vitest run \` line that makes it live —
+   * physically sitting right after the real one. Because it has no `exec` header, it satisfied the
+   * "exactly one exec logical line" test above AND every other consumer of this file (the
+   * core-backend shape guard included) while registering zero of its tokens with any CI job: dead
+   * weight today, a silent black hole for the next token appended to the wrong copy tomorrow.
+   *
+   * The blind spot was structural, not a missed pattern: nothing in this file had ever looked PAST
+   * the exec line. This closes that — the required lane must be the last thing in the script that
+   * says anything at all, once comments are gone and continuations are folded. A blank line or a
+   * `#` comment after it is not "something": both fold to zero-token or absent logical lines here
+   * and stay green (see `logicalLinesWithLineNumbers()`'s doc comment for why blank lines still
+   * appear as entries instead of vanishing).
+   */
+  it('has no non-empty logical line anywhere after the required lane exec block', () => {
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    const logical = logicalLinesWithLineNumbers(required)
+    const execIndex = logical.findIndex(entry => /^exec\s+npx\s+vitest\s+run\b/.test(entry.line))
+    expect(execIndex).toBeGreaterThan(-1)
+
+    const offenders = logical
+      .slice(execIndex + 1)
+      .filter(entry => entry.line.trim().length > 0)
+      .map(entry => {
+        const tokens = entry.line.trim().split(/\s+/)
+        return `line ${entry.lineNumber}: ${tokens.length} tokens: ${entry.line.slice(0, 80)}`
+      })
+    expect(offenders).toEqual([])
   })
 
   it('runs makeup regressions in both unit gates and the dedicated browser lane', () => {
