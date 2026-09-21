@@ -68,13 +68,17 @@
  * than implicit in a constraint a future reader of this file would otherwise have to go look up.
  * `role_permissions` has no row from this migration's own `up()`. Rows normally come from an admin's
  * own `POST /api/roles` / `PUT /api/roles/:id` call — the role-permission product endpoints
- * (`routes/roles.ts:496`/`:588`), the same authorized, audited path `user_permissions` rows come from
- * (`POST /api/permissions/grant`). Other writers exist and are not on that audit trail:
+ * (`routes/roles.ts:496`/`:588`), the same authorized, audited path the `user_permissions` rows this
+ * `down()` deletes normally come from (`POST /api/permissions/grant`); preset-driven writers exist
+ * there too (`routes/admin-users.ts:3858`, `routes/permissions.ts:377`) and are likewise off that
+ * audit trail. At least three other writers exist and are not on that audit trail:
  * `PluginRbacProvisioningService.applyRoleMatrix` (`services/PluginRbacProvisioningService.ts:122`)
  * writes plugin-provisioned rows under `${pluginId}:${appId}:${roleSlug}` role ids, reachable without
  * either endpoint above (it also self-registers the code into `permissions` at `:97-107`, so this
- * migration's own `down()` is not a durable de-registration against that path either); and a migration
- * can bind a code to a role directly — the two cited above
+ * migration's own `down()` is not a durable de-registration against that path either);
+ * `attendance-admin.ts`'s `ensureAttendanceRoleTemplates` (`:461`) does the same at runtime for its
+ * own hardcoded `attendance:*` codes (immaterial to `approvals:read` specifically, but on this same
+ * unaudited-writer list); and a migration can bind a code to a role directly — the two cited above
  * (`zzzz20260630090000_add_approvals_analytics_permission`,
  * `zzzz20260702110000_add_approval_reassign_and_admin_scopes`) do exactly that. This PR does not
  * change any of those writers, and does not grant `approvals:read` to anyone.
@@ -84,7 +88,9 @@
  * per-role, with no compensation path and no audit trail of what was dropped. Re-running `up()`
  * re-registers the catalogue row but does not restore who held it — an admin has to re-grant each
  * holder again, per-user through `POST /api/permissions/grant` or per-role through `POST /api/roles` /
- * `PUT /api/roles/:id`. Same shape as
+ * `PUT /api/roles/:id`; if a dropped holder's row instead came from a preset
+ * (`POST /api/admin/users` with `presetId`, or `POST /api/admin/permission-templates/apply`), the
+ * re-grant point is that preset, not the product grant endpoint. Same shape as
  * `zzzz20260915121000_add_multitable_submit_approval_permission`'s `down()`, which has the identical
  * property for `approvals:write`.
  */
