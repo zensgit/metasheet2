@@ -2642,9 +2642,25 @@ describe('sheet-liveness closure over EVERY route file', () => {
     // checked after the provider call
     expect(redFor(withoutStop.replace(send, `${send}${stop![0].slice(1)}`))).toMatch(/BEFORE the provider call/)
     // checked ahead of the cancel check
-    const cancelCheck = "      if ((await readJobStatus(query, jobId)) !== 'running') {\n"
+    // (#5842 re-pointed this needle: the per-row cancel check now asks the GENERATING-status
+    // predicate instead of comparing to the `running` literal, because the commit phase got its
+    // own status. The mutation below is unchanged — it still moves the liveness gate ahead of
+    // whatever the cancel check is.)
+    const cancelCheck = "      if (!isGeneratingBulkJobStatus(await readJobStatus(query, jobId))) {\n"
     expect(source).toContain(cancelCheck)
     expect(redFor(withoutStop.replace(cancelCheck, `${stop![0].slice(1)}${cancelCheck}`))).toMatch(/follow the per-row cancel/)
+    // the per-row cancel check DELETED outright — the needle's own bite, re-proven after #5891
+    // (#5838) was merged into this branch (that merge left the worker loop alone; it only swapped
+    // this file's private describeLivenessLookupError for the shared one). With nothing left in the
+    // loop body that asks `readJobStatus(query, jobId)`, the structural cancel finder above has no
+    // statement to order against and the guard reds. Re-pointing the needle at the #5842 predicate
+    // therefore did not cost this assertion its teeth (and a future re-point that stops matching the
+    // loop reds on the `toContain` one line above).
+    const cancelBlock = /\n( *)if \(!isGeneratingBulkJobStatus\(await readJobStatus\(query, jobId\)\)\) \{\n[\s\S]*?\n\1\}\n/.exec(source)
+    expect(cancelBlock, 'the per-row cancel check must be locatable for the self-test').not.toBeNull()
+    const withoutCancel = source.replace(cancelBlock![0], '\n')
+    expect(withoutCancel).not.toContain(cancelCheck)
+    expect(redFor(withoutCancel)).toMatch(/follow the per-row cancel/)
     // asks about another id
     expect(redFor(source.replace('jobSheetIsLive(query, jobId, plan.sheetId)', 'jobSheetIsLive(query, jobId, plan.fieldId)'))).toMatch(/must stop on/)
     // stops without leaving the active state

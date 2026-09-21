@@ -504,4 +504,97 @@ describe('useAiBulkFill — async-job state machine', () => {
     expect(fetchFn.mock.calls.length).toBeGreaterThan(before)
     expect(bulk.state.phase).toBe('polling')
   })
+
+  // ── #5842: after a cancel, commit is offered ONLY on a SERVER-confirmed committable status ──
+  // The server is authoritative: the commit phase has its own status (`committing`), a cancelled
+  // job is `rejected`, and both come back from the cancel/poll responses. The review page must
+  // read that status instead of assuming "we reached review, so commit is allowed".
+  it('cancel → server says rejected: the review page offers commit and the commit request is sent', async () => {
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: (n) => jsonResponse(pollHeader({ state: n === 1 ? 'running' : 'rejected' })),
+      rows: () => jsonResponse({ rows: JOB_ROWS, nextCursor: null }),
+      cancel: () => jsonResponse({ jobId: 'aibulkjob_1', cancelled: true, state: 'rejected' }),
+    })
+    const { bulk } = setup(fetchFn as never)
+
+    await bulk.preview(previewInput)
+    expect(bulk.state.phase).toBe('polling')
+
+    await bulk.cancelJob()
+    expect(bulk.state.phase).toBe('jobReview')
+    expect(bulk.state.job?.state).toBe('rejected')
+    expect(bulk.canCommitJob.value).toBe(true)
+
+    const commits = () => fetchFn.mock.calls.filter(([u]) => String(u).endsWith('/commit')).length
+    expect(await bulk.commitJob()).not.toBeNull()
+    expect(commits()).toBe(1)
+  })
+
+  it('cancel → server says the job is COMMITTING (a commit is already in flight): review renders but commit is NOT offered and no commit request is sent', async () => {
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: (n) => jsonResponse(pollHeader({ state: n === 1 ? 'running' : 'committing' })),
+      rows: () => jsonResponse({ rows: JOB_ROWS, nextCursor: null }),
+      // The server refused the cancel: a commit request holds the claim.
+      cancel: () => jsonResponse({ jobId: 'aibulkjob_1', cancelled: false, state: 'committing' }),
+    })
+    const { bulk } = setup(fetchFn as never)
+
+    await bulk.preview(previewInput)
+    await bulk.cancelJob()
+
+    expect(bulk.state.job?.state).toBe('committing')
+    // The rows are still shown (truthful review), but the write is not on offer …
+    expect(bulk.state.jobRows).toHaveLength(5)
+    expect(bulk.canCommitJob.value).toBe(false)
+    // … and calling commit anyway is a no-op, not a racing request.
+    expect(await bulk.commitJob()).toBeNull()
+    expect(fetchFn.mock.calls.filter(([u]) => String(u).endsWith('/commit'))).toHaveLength(0)
+  })
+
+  it('cancel succeeded but the follow-up poll FAILED: the committable decision uses the status the CANCEL response returned, not the stale pre-cancel one', async () => {
+    let polls = 0
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => {
+        polls += 1
+        // First poll (during generation) → running; the post-cancel re-poll fails.
+        if (polls === 1) return jsonResponse(pollHeader({ state: 'running' }))
+        return jsonResponse({ error: { code: 'INTERNAL_ERROR', message: 'boom' } }, { status: 500 })
+      },
+      rows: () => jsonResponse({ rows: JOB_ROWS, nextCursor: null }),
+      cancel: () => jsonResponse({ jobId: 'aibulkjob_1', cancelled: true, state: 'rejected' }),
+    })
+    const { bulk } = setup(fetchFn as never)
+
+    await bulk.preview(previewInput)
+    expect(bulk.state.job?.state).toBe('running')
+
+    await bulk.cancelJob()
+    expect(bulk.state.phase).toBe('jobReview')
+    // NOT still 'running' (which would block a legitimate commit) and NOT invented on the client:
+    // it is the status the server returned from the cancel itself.
+    expect(bulk.state.job?.state).toBe('rejected')
+    expect(bulk.canCommitJob.value).toBe(true)
+  })
+
+  it('a job still GENERATING is never committable from the review page, and `committing` does not stop the poll loop', async () => {
+    vi.useFakeTimers()
+    const fetchFn = router({
+      start: () => jsonResponse({ jobId: 'aibulkjob_1' }),
+      poll: () => jsonResponse(pollHeader({ state: 'committing' })),
+      rows: () => jsonResponse({ rows: JOB_ROWS, nextCursor: null }),
+    })
+    const { bulk } = setup(fetchFn as never, 2000)
+
+    await bulk.preview(previewInput)
+    // `committing` is the server's commit phase: not terminal, so the UI keeps polling for the
+    // outcome, and it never enters a confirmable review on its own.
+    expect(bulk.state.phase).toBe('polling')
+    expect(bulk.canCommitJob.value).toBe(false)
+    const before = fetchFn.mock.calls.length
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetchFn.mock.calls.length).toBeGreaterThan(before)
+  })
 })

@@ -74,8 +74,11 @@ import {
   readGeneratedRows,
   countBulkJobRowsByState,
   cancelBulkJob,
-  setHeaderRunning,
-  setHeaderAggregate,
+  claimBulkJobCommit,
+  heartbeatBulkJobCommit,
+  finishBulkJobCommit,
+  releaseBulkJobCommitClaim,
+  isCommittableBulkJobStatus,
   setRowCommitOutcome,
   type BulkJobRowSeed,
 } from '../services/ai-bulk-job-service'
@@ -1411,6 +1414,13 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       return
     }
 
+    // #5842: THIS request's commit-claim identity. `commitClaimed` gates the catch below so a
+    // throw before the claim touches nothing; `commitClaimId` is stamped on the header by the
+    // claim and re-asserted by every later write, so a request whose claim was reclaimed (it
+    // stalled past the staleness window and someone else took over) can neither resolve nor
+    // release the claim that now belongs to another request.
+    let commitClaimed = false
+    const commitClaimId = randomUUID()
     try {
       const pool = poolManager.get() as unknown as PoolLike
       const query = pool.query.bind(pool) as QueryFn
@@ -1424,8 +1434,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       // crashed mid-generate (BJ-5, persisted partial committable); `rejected` =
       // cancelled (BJ-4, already-generated rows still committable). Reject `queued`/
       // `running` (the worker is still generating — committing now would race it and
-      // write a partial) and `resolved` (already committed). 409 Conflict.
-      if (header.status !== 'suspended' && header.status !== 'errored' && header.status !== 'rejected') {
+      // write a partial), `committing` (#5842 — another commit request holds the claim) and
+      // `resolved` (already committed). 409 Conflict. This is only the early, friendly refusal:
+      // the AUTHORITATIVE decision is the conditional claim below, on the SAME set.
+      if (!isCommittableBulkJobStatus(header.status)) {
         return res.status(409).json({
           ok: false,
           error: { code: 'BULK_JOB_NOT_COMMITTABLE', message: `Bulk job is not awaiting commit (status: ${header.status}).` },
@@ -1452,25 +1464,34 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      // The write set = the job's `generated` rows whose recordId was confirmed.
-      // A confirmed recordId NOT in the generated set is ignored (it has no value
-      // to write — skipped / failure / pending_not_generated rows are not confirmable).
-      const generatedRows = (await readGeneratedRows(ledgerQuery, jobId)).filter((r) => confirmed.has(r.recordId))
-
       // BACKEND-owned chunking (BJ-10): ≤ the inline cap per chunk. The FE never loops.
       const chunkSize = resolveBulkInlineMaxRows()
       type JobCommitOutcome = 'committed' | 'stale_reprev' | 'write_conflict' | 'skipped_no_perm'
       const counts: Record<JobCommitOutcome, number> = { committed: 0, stale_reprev: 0, write_conflict: 0, skipped_no_perm: 0 }
 
-      // Flip a COMMITTABLE job → running for the commit phase, GUARDED (clears
-      // suspend_reason). False = a concurrent commit already claimed it (or it left
-      // the committable set between the read above and here) → 409, no double-commit.
-      if (!(await setHeaderRunning(ledgerQuery, jobId))) {
+      // CLAIM the commit phase: a COMMITTABLE job → `committing` (#5842), by one conditional
+      // UPDATE … RETURNING (never select-then-update), so exactly one of two concurrent commits
+      // proceeds. `committing` is NOT a generating status, so a worker still finishing the row it
+      // had at the provider cannot be re-armed by this claim — which is what re-using `running`
+      // did. False = a concurrent commit already claimed it (or it left the committable set
+      // between the read above and here) → 409, no double-commit.
+      if (!(await claimBulkJobCommit(ledgerQuery, jobId, commitClaimId))) {
         return res.status(409).json({
           ok: false,
           error: { code: 'BULK_JOB_COMMIT_IN_PROGRESS', message: 'Another commit is already in progress for this job.' },
         })
       }
+      // From here the claim is OURS: any throw must release it (see the catch) or the job would
+      // hold the active slot in a non-committable status until the staleness reclaim.
+      commitClaimed = true
+
+      // The write set = the job's `generated` rows whose recordId was confirmed.
+      // A confirmed recordId NOT in the generated set is ignored (it has no value
+      // to write — skipped / failure / pending_not_generated rows are not confirmable).
+      // Read UNDER the claim (#5842 refuter, race lens): reading it first would make "exactly one
+      // request writes this work set" depend on a second invariant in another file (the worker's
+      // row-level `state = 'pending'` guard) instead of on the claim we just took.
+      const generatedRows = (await readGeneratedRows(ledgerQuery, jobId)).filter((r) => confirmed.has(r.recordId))
 
       // AI-fields S1 LOCK-B3: ONE batch id for this WHOLE commit request, shared across every chunk and
       // every row it writes — BJ-10's backend-owned chunking is a pagination detail (avoids one oversized
@@ -1478,6 +1499,15 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const commitBatchId = randomUUID()
       for (let i = 0; i < generatedRows.length; i += chunkSize) {
         const chunk = generatedRows.slice(i, i + chunkSize)
+        // #5842: prove this commit is still alive before each chunk. The staleness reclaims (a
+        // later commit's claim, the user's cancel, the boot sweep) all key on `updated_at`, so a
+        // long commit that never touched the header would look abandoned while it was writing.
+        // The beat is guarded on OUR claim id, so a false return means someone else now holds the
+        // job — keep the partial (rows already written are `committed`) and stop.
+        if (!(await heartbeatBulkJobCommit(ledgerQuery, jobId, commitClaimId))) {
+          commitClaimed = false
+          break
+        }
         for (const row of chunk) {
           const written = await commitOneRecord({
             req,
@@ -1502,16 +1532,37 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
 
       // Durable aggregate on the header; the job resolves (terminal success — the
-      // generate+review+commit cycle is complete, even if some rows stale-dropped).
+      // generate+review+commit cycle is complete, even if some rows stale-dropped). GUARDED on
+      // our own `committing` claim (#5842): if the claim was lost meanwhile (an orphan sweep
+      // reconciled it), we report the job's REAL status instead of claiming `resolved`.
       const aggregate = { confirmed: parsed.data.recordIds.length, attempted: generatedRows.length, counts }
-      await setHeaderAggregate(ledgerQuery, jobId, aggregate, 'resolved')
+      const finished = await finishBulkJobCommit(ledgerQuery, jobId, aggregate, commitClaimId)
+      commitClaimed = false
+      let state = 'resolved'
+      if (!finished) {
+        console.warn(`[multitable-ai] bulk-job commit ${jobId}: the commit claim was lost before the aggregate could be stored`)
+        state = (await readBulkJobHeader(ledgerQuery, jobId))?.status ?? 'errored'
+      }
 
       // AI-fields S1 LOCK-B6: same ephemeral run→batch mapping as bulk-commit — null when nothing in
       // this request actually committed (no revision, no batch to point at).
       const batchId = counts.committed > 0 ? commitBatchId : null
-      return res.json({ jobId, state: 'resolved', counts, attempted: generatedRows.length, batchId })
+      return res.json({ jobId, state, counts, attempted: generatedRows.length, batchId })
     } catch (err) {
       console.error('[multitable-ai] bulk-job commit failed:', err)
+      if (commitClaimed) {
+        // #5842: hand OUR claim back as `errored` (committable) so a failed commit does not
+        // strand the job's generated rows — rows already written are `committed` and a retry
+        // does not re-write them. Guarded on our claim id inside the helper, so a request that
+        // lost the claim to a staleness reclaim cannot error out the request that took over.
+        // Best-effort: never mask the original failure.
+        try {
+          const claimPool = poolManager.get() as unknown as PoolLike
+          await releaseBulkJobCommitClaim(claimPool.query.bind(claimPool) as AiUsageQueryFn, jobId, commitClaimId)
+        } catch (releaseErr) {
+          console.error(`[multitable-ai] bulk-job commit ${jobId}: could not release the commit claim:`, releaseErr)
+        }
+      }
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit bulk job' } })
     }
   })

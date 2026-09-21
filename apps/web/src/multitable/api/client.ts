@@ -1746,17 +1746,26 @@ export interface AiBulkCommitData {
 // wire (the same fixture-drift rule as B-3).
 
 /**
- * Job lifecycle status (the poll route's `state`, a WorkflowJobStatus). Job mode
+ * Job lifecycle status (the poll route's `state`). Job mode
  * cares about: `queued`/`running` (the worker is still generating — keep polling)
  * → `suspended` (generation done, AWAITING review — the diff is ready) /
  * `resolved` (already committed — terminal success) / `rejected` (cancelled —
  * already-generated rows stay committable) / `errored` (crashed mid-generate —
  * the persisted partial is still committable).
+ *
+ * `committing` (#5842) is the COMMIT phase, NOT a generating one: a commit request holds the
+ * job's claim and is writing records. The server returns it on the poll header, on a cancel it
+ * refused, and on a commit whose claim was lost — so the union must carry it or this contract
+ * lies about a value the API really sends. It is neither committable (a commit is already in
+ * flight → 409) nor terminal (keep polling for the outcome); see the exhaustive policy table in
+ * composables/useAiBulkFill.ts, which is keyed on THIS union so a new status cannot be added
+ * without deciding both questions.
  */
 export type AiBulkJobStatus =
   | 'queued'
   | 'running'
   | 'suspended'
+  | 'committing'
   | 'resolved'
   | 'rejected'
   | 'errored'
