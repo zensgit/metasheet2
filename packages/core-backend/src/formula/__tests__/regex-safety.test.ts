@@ -126,6 +126,23 @@ describe('probe ladder — the sampling schedule itself', () => {
     expect(userRegexProbeLadder(USER_REGEX_MAX_SUBJECT_LEN).length).toBeLessThan(80)
   })
 
+  it('bounds the ladder\'s TOTAL work, which the rung COUNT does not', () => {
+    // The rung count is the wrong bound, and the benign path is the common path:
+    // on a linear pattern NO rung crosses USER_REGEX_PROBE_FLOOR_MS, so the loop
+    // never breaks early and the guard pays EVERY rung on every record write.
+    // Eight more final-approach rungs would move the count by 8 and the WORK by
+    // 8n. Measured on the current ladder: n=20 -> 189 characters (9.4x the real
+    // subject), 200 -> 1815 (9.1x), 1000 -> 13102 (13.1x), 10000 -> 124494 (12.4x).
+    for (const n of [20, 200, 1000, USER_REGEX_MAX_SUBJECT_LEN]) {
+      const total = userRegexProbeLadder(n).reduce((a, b) => a + b, 0)
+      expect(total, `total probe characters at n=${n}`).toBeLessThanOrEqual(16 * n)
+    }
+    // Non-degenerate in the other direction: the bound must not be satisfiable by
+    // an empty or trivial ladder, which would pass every assertion above.
+    const atCeiling = userRegexProbeLadder(USER_REGEX_MAX_SUBJECT_LEN).reduce((a, b) => a + b, 0)
+    expect(atCeiling).toBeGreaterThan(8 * USER_REGEX_MAX_SUBJECT_LEN)
+  })
+
   it('probe subjects keep the real tail — the failing character is what makes a shape explode', () => {
     const subject = 'a'.repeat(100) + '!'
     const probe = userRegexProbeSubject(subject, 20)
@@ -161,6 +178,47 @@ describe('fit anchor — the rule that makes the verdict noise-proof', () => {
   })
 })
 
+describe('confirmation re-measurement — the second guard on the refusal path', () => {
+  it('re-measures a one-off spike instead of turning it into a refusal', () => {
+    // The refusal path re-measures (`bestOf`) because a GC pause or a descheduled
+    // slice can inflate ONE sample above the floor, and a refusal here is a
+    // write-path rejection of a legitimate value. That re-measurement had NO test:
+    // collapsing `bestOf` to a single sample left all 245 cases green, because in
+    // a quiet process no sample is ever inflated — the classic untested guard.
+    //
+    // It is not hypothetical. Instrumented, the 100000-pair differential-fuzz
+    // corpus crosses the floor on exactly ONE pair and the slope test calls that
+    // pair super-linear; the re-measurement is what declines to refuse it.
+    //
+    // This case manufactures the inflation through the `execute` seam the guard
+    // already takes, so no clock injection is needed: one rung is expensive for
+    // its first TWO measurements — the shape of a pause spanning the ladder
+    // sample AND the first confirmation sample — and free afterwards.
+    const SPIKE_MS = USER_REGEX_PROBE_FLOOR_MS * 3
+    const samplesAtLength = new Map<number, number>()
+    const execute = (re: RegExp, s: string): boolean => {
+      const n = (samplesAtLength.get(s.length) ?? 0) + 1
+      samplesAtLength.set(s.length, n)
+      if (s.length === 20 && n <= 2) {
+        const until = performance.now() + SPIKE_MS
+        while (performance.now() < until) { /* burn CPU, deliberately */ }
+      }
+      return re.test(s)
+    }
+    const outcome = runUserRegex('^[a-z]+$', undefined, 'a'.repeat(40), execute)
+
+    // 1. BEHAVIOUR: a spike must not become a refusal.
+    expect(outcome.status).toBe('ok')
+    // 2. MECHANISM: and not merely because the deciding branch was never entered.
+    //    Whichever rung decided must have been sampled three times (one ladder
+    //    sample + two confirmation samples). With `bestOf` collapsed to a single
+    //    sample the maximum is two, so this assertion is what kills that mutant —
+    //    and it is a count of calls, not a duration, so it cannot flake.
+    const perRung = [...samplesAtLength.entries()].filter(([len]) => len < 40).map(([, n]) => n)
+    expect(Math.max(...perRung)).toBeGreaterThanOrEqual(3)
+  })
+})
+
 describe('FALSE POSITIVES — the six common linear patterns the round-1 detector refused', () => {
   it.each(SIX_LINEAR.map((c) => [c.label, c] as const))(
     'ACCEPTS %s on a matching value (field-validation write path)',
@@ -193,9 +251,14 @@ describe('FALSE POSITIVES — the six common linear patterns the round-1 detecto
     },
   )
 
-  it('never enters the timing-decision branch for a linear pattern (the verdict is not timing-dependent)', () => {
+  it('never enters the timing-decision branch FOR THESE SIX (measured 0 entries in 18000 calls)', () => {
     // Every rung of every one of the six stays far below the floor, so the
     // extrapolation branch — the only non-deterministic one — is never reached.
+    //
+    // Scope, because the earlier title generalised past the evidence: this holds
+    // for THIS corpus. Over 100000 random linear pairs the branch is entered once
+    // (verification MD §5.4), and there the confirmation re-measurement, not the
+    // floor, is what prevents a refusal.
     for (const c of SIX_LINEAR) {
       let worst = 0
       for (const len of userRegexProbeLadder(c.adversarial.length)) {

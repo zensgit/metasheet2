@@ -84,11 +84,19 @@ export const USER_REGEX_MAX_PATTERN_LEN = 1000
 
 /**
  * A ladder rung must cost at least this long before its measurement is allowed to
- * decide anything. MEASURED: across the six common linear patterns the round-1
- * detector wrongly refused, run against 10000-character adversarial subjects, the
- * worst SINGLE rung over the whole ladder is 0.069ms — ~29x under this floor — so
- * on a linear corpus the deciding branch is never entered at all and the verdict
- * is not timing-dependent. A 200x6 run refused 0 of 1200.
+ * decide anything. MEASURED on the two linear corpora this slice has, and the two
+ * do NOT say the same thing — the difference is the honest part:
+ *   - the six common linear patterns the round-1 detector wrongly refused, run
+ *     against 10000-character adversarial subjects: the worst single rung across
+ *     the whole ladder is in the tens of microseconds, and over 18000 calls the
+ *     deciding branch was entered 0 times and 0 calls were refused;
+ *   - the 100000-pair differential-fuzz corpus: the deciding branch is entered
+ *     exactly ONCE, and the slope test calls that one pair super-linear. The
+ *     re-measurement below is what declines to refuse it. 0 pairs diverged.
+ * So the floor makes the verdict overwhelmingly — but NOT entirely — independent
+ * of timing. The confirmation re-measurement on the refusal path is the second
+ * half of that property, not a belt-and-braces extra; it is pinned separately
+ * (regex-safety.test.ts, "confirmation re-measurement").
  */
 export const USER_REGEX_PROBE_FLOOR_MS = 2
 
