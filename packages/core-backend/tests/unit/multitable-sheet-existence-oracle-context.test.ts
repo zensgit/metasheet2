@@ -153,12 +153,21 @@ describe('#5936 — GET /context: authority before the sheet row', () => {
 
   it('GET /context is NOT on the existence-oracle GAP ledger — this commit must not add it there', () => {
     const ledger = existenceGapLedgerText()
-    // Non-vacuous: the extracted block really is a list of entries, so `not.toContain` is a claim.
+    // Non-vacuous, WITHOUT a magnitude and WITHOUT naming a still-listed entry: #5839 empties this
+    // ledger one slice at a time (B4 took two off, B2 took it from 11 to 3), so both an "at least N"
+    // threshold and a pinned survivor red on a CORRECT ledger as soon as the next slice lands. What
+    // must never happen is the reader slicing out text that is not the array: so require ≥1 entry AND
+    // require every entry it found to have the shape of a route key.
+    const entries = [...ledger.matchAll(/'([^']+)'/g)].map((m) => m[1]!)
     expect(
-      ledger.split("',").length - 1,
+      entries.length,
       'the extracted ledger block holds no entries — the reader is pointed at the wrong text',
-    ).toBeGreaterThan(5)
-    expect(ledger).not.toContain("'GET /context'")
+    ).toBeGreaterThan(0)
+    for (const entry of entries) {
+      expect(entry, `not a route key — the reader is pointed at the wrong array: ${entry}`)
+        .toMatch(/^(GET|POST|PUT|PATCH|DELETE) \//)
+    }
+    expect(entries).not.toContain('GET /context')
   })
 
   for (const caller of [OUTSIDER, READ_ONLY] as const) {
