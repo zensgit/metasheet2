@@ -1001,19 +1001,10 @@ Test Files  8 passed (8)        Tests  135 passed (135)
 
 ## 13. 第 6 轮验证(对齐 `impl-gate-A5-daily-ops-round5-20260921.md`:0 P1 / 1 P2 / 5 P3 / 4 NIT)
 
-> **PROPOSED —— 未过门审,未 ratify,未合并,未 undraft,未开 PR。** 本节的每个数字都逐字抄自本轮输出。
+> **PROPOSED —— 未过门审,未 ratify,未合并,未 undraft,未开 PR。**
 > 起点 head = `a26d34398dbfa132dda4c051e5d6f9db09bb6090`(`git rev-parse origin/feat/approval-template-groups-phase4-daily-ops`,与门审报告抬头**逐字一致**);`#5878`(`e90d16c90f58a58789a6acd589df362aaa2c2f42`)与 `4e94e8fe0219be61a908f42d5af13dee7e189e1a` 的 `git merge-base --is-ancestor` 双 **PASS**。
 
 ### 13.1 改了什么(1 个源文件 + 1 个 spec + 2 个 MD;零新增文件)
-
-代码侧的 diffstat 仍**限定在 `apps/` 下**(本节自己就在被改的 MD 里,把包含本文件的计数写进本文件是自指快照)。
-
-```
-git diff --stat a26d34398dbfa132dda4c051e5d6f9db09bb6090 -- apps/
- apps/web/src/views/approval/TemplateCenterView.vue |  92 +++++--
- .../tests/approvalTemplateCenterCategory.spec.ts   | 271 +++++++++++++++++++++
- 2 files changed, 348 insertions(+), 15 deletions(-)
-```
 
 另两个被改文件是记录件本身:`…-design-20260920.md`(§8.1 就地勘误 + 新增 §9)与本文件(§12.7-1 就地勘误 + 新增 §13)。
 
@@ -1022,7 +1013,7 @@ git diff --stat a26d34398dbfa132dda4c051e5d6f9db09bb6090 -- apps/
 ```
 git diff --name-only a26d34398d -- .github/ '**/package.json' '**/s6a-package-provenance-pins.json' apps/web/scripts/ packages/ scripts/   → 空
 ```
-⇒ 零 CI 改动、零 s6a pin 变动、零后端文件、零迁移、零 DDL、零新端点、零新 flag、零新增文件。两个被改的 `apps/` 文件都**已经**在 `approval-web-guard.yml` 的两个 `paths:` 触发器里(`TemplateCenterView.vue` 命中 6、`approvalTemplateCenterCategory.spec.ts` 命中 4)。
+⇒ 零 CI 改动、零 s6a pin 变动、零后端文件、零迁移、零 DDL、零新端点、零新 flag、零新增文件。两个被改的 `apps/` 文件都**已经**在 `approval-web-guard.yml` 的两个 `paths:` 触发器里。
 
 ### 13.2 新增用例(4 条,全部落在既有文件)
 
@@ -1129,7 +1120,7 @@ Error: SESSION_ORG_REAUTH_REQUIRED
 > **M-T** 与 **M-ad** 原来的锚点是 `pageSessionOrgsClaim = ownSwitch ? { principal: getAuthPrincipalKey() } : null`;本轮起该行读 `tryReadAuthPrincipalKey()`(设计 MD §9.1)。两条探针的**语义未变**(M-T:一律保留 claim;M-ad:一律丢 claim),只把函数名跟着改。结果:M-T **12 failed**、M-ad **1 failed**,与前轮同向且覆盖变宽。
 > **`M-b` / `M-b2` 仍为 NOT RUN**,理由与第 5 轮逐字相同:前轮台账只写了「可辩护地 inert」,**没有记下它们改的是哪一行**,本代理不按描述另造一个更窄的同类物冒充原探针(房规「另造更窄同类物=合同变更」)。
 
-**唯一的幸存者**是 `M-H` / `M-H-5spec`(同一行的两个集合),与 r3 / r4 / r5 **四轮同结论**,正控 `M-G-5spec` 在同一集合上 **2 failed** ⇒ 不是「无判别力的测试」而是「不可达的纵深守卫」,**保留,不通胀**(设计 MD §7.4 / §9.5)。
+**唯一的幸存者**是 `M-H` / `M-H-5spec`(同一行的两个集合),与 r3 / r4 / r5 **四轮同结论**⇒ 不是「无判别力的测试」而是「不可达的纵深守卫」,**保留,不通胀**(设计 MD §7.4 / §9.5)。
 
 ### 13.4 静态门
 
@@ -1195,6 +1186,6 @@ Test Files  1 failed (1)        Tests  3 failed | 8 passed (11)
 2. **两条断言软化**(上文方框):`sessionOrgsCalls` 的两处严格等值换成「有出路 `>= 1`」与 `>= 2`。
 
 两项都**不改一行行为**。台账因此仍然绑定:`M-U` 的红来自用例 1 的**第一条**断言(warn 有没有记到),与被软化的两条无关
-——**已逐条复跑核对**(M-U:`1 failed`,只红用例 1;M-aa:`2 failed`,与软化前逐字同一批)。
+——**已复跑核对**(M-U:`1 failed`,只红用例 1;M-aa:`2 failed`,与软化前逐字同一批)。
 `…/scratchpad/a5r6-mutbak/` 在这次编辑之前就已按清理规程删掉,所以**没有**再跑整套台账(也因此不会踩到本轮登记过的
 「`restore()` 会用陈旧 `.orig` 静默回滚」那个机具坑);重跑的是 §13.4 / §13.5 / §13.6 的全部门与全量实跑,数字见上。

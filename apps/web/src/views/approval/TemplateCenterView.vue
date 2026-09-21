@@ -796,15 +796,13 @@ provide(SessionOrgHostKey, { sessionOrg: pageSessionOrg, notifySessionOrgRequire
 // and `clearToken` happen to call `clearExplicitSessionOrg()` themselves a few lines later, so the
 // round-5 sentence reached a true conclusion through a false premise (gate round-5 C-2).
 //
-// THE MECHANISM THAT ACTUALLY LOAD-BEARS IS IN THE READER, and it does not depend on anyone
-// clearing anything: `readExplicitSession` (`utils/explicitSessionOrg.ts:10-28`, whose predicate
+// THE MECHANISM THAT ACTUALLY LOAD-BEARS IS IN THE READER: `readExplicitSession`
+// (`utils/explicitSessionOrg.ts:10-28`, whose predicate
 // is `:17` + `:23`) binds the marker to the EXACT token text — it requires
 // `marker.token === token` AND `localStorage.auth_token === token` AND
 // `localStorage.jwt === token`, and throws otherwise. Any transition that swaps the token
 // therefore makes the marker unreadable, which `currentExplicitSessionOrg()` below turns into
-// `null`. No `setToken`/`clearToken` path (invite acceptance, DingTalk callback, forced password
-// change, dev-token refresh, the bootstrap's 401 branch, sign-out) can match a target, and no marker
-// can outlive the token it was issued for.
+// `null`.
 //
 // What CAN still match is another tab's switch, which installs a marker bound to the NEW token and
 // which the storage listener republishes (`useAuth.ts:77`, the same `preserveExplicitSession` flag):
