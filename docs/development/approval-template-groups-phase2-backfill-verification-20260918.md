@@ -1301,6 +1301,214 @@ $ psql -U ms2testbed -d postgres -lqt | cut -d'|' -f1 | grep -c metasheet2_a3dow
 
 ---
 
+## 14.6 修复轮 1(2026-09-21,回应独立门审 `impl-gate-A3-guarded-down-round1-20260921.md`,裁定 0 P1 / 2 P2 / 5 P3 / 2 NIT)
+
+**范围声明**:本轮只处置该门审报告点名的 2 P2 + 5 P3 + 2 NIT,均为**候选**改动,不构成 ratify/合并/应用。一次性 worktree(detached @ `59b5cd7ee18ad8adb6b34e65af1c77e6dd204144`,该门审 verdict 绑定的 head,逐字匹配),node_modules 软链;私有处女库 `metasheet2_a3r2_20260921`,owner `ms2testbed`(非超级,仅 `Create DB`),`psql -Atc "select current_database(), current_user"` 逐次核过;收尾 `dropdb`。未合并、未 undraft、未开/改 PR、未改锁文正文。
+
+### 14.6.1 P2-1 —— 新增真库用例(守卫此前零测试覆盖)
+
+新文件 `packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts`(259 行,8 例),形状照兄弟先例 `attendance-w4c0-durable-storage-smoke.db.test.ts:6,22-23`(直接 `import { up, down }`,不经 Migrator 事务包裹):
+
+| 用例 | 覆盖点 |
+|---|---|
+| `up() is idempotent before this file touches anything` | 基线 |
+| `down() fail-closes BEFORE DDL while all three tables hold a row each…` | 三表各一行 → 拒绝;`Promise.all` 快照 `toEqual` 逐字节核对拒绝前后三表 exists+count 完全相同 |
+| `down() with the force env set passes and ACTUALLY drops all three tables` | 同一夹具,force 正控 |
+| `down() on fully-missing tables does not crash with 42P01` | **P2-2 回归**:三表全缺 |
+| `down() on empty (present, zero-row) tables passes and drops them` | 空表通过 |
+| `half-applied state (only the head table exists) WITH a row still fail-closes…` | **P2-2 回归第二种形状**:手工 `DROP` 掉两张子表模拟半应用,头表 1 行 → 仍拒绝,`ATG_BACKFILL_DOWN_BLOCKED`,断言消息**不**含 `42P01` |
+| `up() remains idempotent after this file's DDL churn…` | 收尾重建,二次 `up()` |
+
+```
+$ DATABASE_URL=postgresql://ms2testbed@localhost:5432/metasheet2_a3r2_20260921 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run tests/integration/approval-template-groups-backfill-down-guard.db.test.ts --reporter=dot
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+```
+
+**Mutation(整段删除 `down()` 里 :170-191 的 `if (total > 0) { … }` 守卫块,`cp` 备份 → 编辑 → 跑 → `cp` 还原 → `cmp` 逐字节核)**:
+
+```
+$ cp <migration> /tmp/a3r2-mig.ts.bak   # 备份
+# 删除守卫块后重跑同一文件:
+ × down() fail-closes BEFORE DDL while all three tables hold a row each…   → promise resolved "undefined" instead of rejecting
+ × down() with the force env set passes and ACTUALLY drops all three tables → expected -1 to be greater than 0
+ × half-applied state … still fail-closes …                                → expected undefined to be an instance of Error
+ × up() remains idempotent after this file's DDL churn…                    → relation "…backfill_batches" does not exist (级联:前面用例把表丢了)
+ Test Files  1 failed (1)
+      Tests  4 failed | 4 passed (8)
+$ cp /tmp/a3r2-mig.ts.bak <migration>
+$ cmp /tmp/a3r2-mig.ts.bak <migration>   # 零输出,字节相同
+```
+4/8 变红(其中 1 条是前序失败留下脏状态的级联,不是独立判别点;直接判别的是前 3 条),证明该守卫此前"零测试覆盖"的缺口已被这份新文件堵上。还原后重跑(先 `--latest` 重建被前一次探针丢弃的表)回到 `8 passed (8)`。
+
+**第二次 mutation(只还原 P2-2 那段——`atgBackfillTableRowCount` 改回单语句 CASE 形式,守卫 if 块本身不动,`cp`/`cmp` 同法),专门核两条 42P01 回归用例是否 load-bearing(不是自证)**:
+```
+# 把 helper 体换回:
+#   SELECT CASE WHEN to_regclass(...) IS NULL THEN 0 ELSE (SELECT count(*) FROM t) END AS n
+$ npx tsx src/db/migrate.ts --latest   # 先重建三表,拿到干净基线
+$ DATABASE_URL=… EXPECT_DB=1 npx vitest --config vitest.integration.config.ts run tests/integration/approval-template-groups-backfill-down-guard.db.test.ts --reporter=verbose
+ ✓ up() is idempotent before this file touches anything
+ ✓ down() fail-closes BEFORE DDL while all three tables hold a row each…
+ ✓ down() with the force env set passes and ACTUALLY drops all three tables
+ × down() on fully-missing tables does not crash with 42P01 …           → promise rejected "error: relation … does not exist" instead of resolving
+ ✓ down() on empty (present, zero-row) tables passes and drops them
+ × half-applied state … still fail-closes … not 42P01 …                 → expected 'relation "…batch_groups" does not exist' to match /ATG_BACKFILL_DOWN_BLOCKED/
+ Test Files  1 failed (1)
+      Tests  2 failed | 6 passed (8)
+$ cp /tmp/a3r2-mig-p2.ts.bak <migration>
+$ cmp /tmp/a3r2-mig-p2.ts.bak <migration>   # 零输出,字节相同
+```
+**恰好、只有**这两条 P2-2 回归用例变红,且红的原因逐字就是"relation … does not exist"(42P01 的具体表现),其余 6 条(含守卫本身的拒绝/force/空表/up 幂等)完全不受影响——证明这两条用例的判别力落在 P2-2 这个具体修复点上,不是vacuous(记忆 `feedback_prove_a_fix_by_running_the_old_implementation`/`feedback_ineffective_mutation_looks_like_a_useless_test`)。还原后重跑(先 `--latest` 重建)回到 `8 passed (8)`。
+
+**收尾修复(自查发现,非门审报告点名项)**:`down() with the force env set …` 用例最初把 `orgTags.length = 0` 也清空了,但该用例只 DROP 了三张**批次**表,fixture 建在 phase-1 的 `approval_template_groups`/`approval_template_group_links`(独立的表,未被 DROP)上的行仍然存在——清空 `orgTags` 会让 `afterAll` 找不到这两行去删,造成每次跑这条用例都在共享库里泄漏一个组。已改为只清 `batchIds`(该表已不存在,没有行可删),保留 `orgTags`/`templateIds` 交给 `afterAll` 正常清理;`psql` 核对修复后再跑一次不再新增 `approval_template_groups` 残留行(修复前的历史残留行——本会话早前几次手工探针/测试迭代留下的——随处女库整体 `dropdb` 一并清除,不需要单独回收)。
+
+**部署范围(与硬约束"s6a/plugin-tests 字节不变"对齐,候选阶段刻意延后)**:本文件**未**加入 `vitest.config.ts` 的 no-DB exclude 名单,**未**加入 `.github/workflows/plugin-tests.yml` 的 `approval-real-db-integration` 白名单,**未**新增 `*-ci-wiring.test.mjs` 守卫,**未**重算 s6a 钉——`shasum -a 256 .github/workflows/plugin-tests.yml` 与 `git diff --quiet` 核对该三个文件本轮字节不变。该文件靠自身的 `describeIfDatabase`/`itIfExpectDb` 哨兵在无 `DATABASE_URL` 时整体跳过,不影响无库 `pnpm test` 的结果(与仓内其余 `.db.test.ts` 文件同一行为)。两点接线 + census 三件套的正式落地,按门审报告 P2-1"修法"段自己的建议,留给真正提议合并这条守卫的那一轮一次性做完,避免本轮与合并轮各钉一次 s6a。
+
+### 14.6.2 P2-2 —— `to_regclass` 守卫改为两语句结构
+
+`packages/core-backend/src/db/migrations/zzzz20260919090000_create_approval_template_group_backfill_batches.ts:156-162`(`atgBackfillTableRowCount`)由单条 `CASE WHEN to_regclass(...) IS NULL THEN 0 ELSE (SELECT count(*) …) END` 改为两条独立语句(先 `SELECT to_regclass(...) IS NOT NULL AS e`,只有为真才发第二条 `count(*)`),逐字采用门审报告 §3 P2-2"修法"段给出的实现;`:117-153` 的注释同步改写(不再声称 CASE 形式"不炸 42P01",改为解释 Postgres parse-time 解析问题与两语句修法)。设计 MD 同步:`docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §23.2 追加一段"订正"(2026-09-21),不改写原历史代码块引文,只对 :1068 那句已被证伪的断言求值 + 给出订正后的代码。
+
+真库回归(本轮独立复现,`.probe-scratch` 探针,写作前已删除):
+
+```
+=== Case A: all three tables MISSING -> down() must NOT throw 42P01 ===
+PASS: Case A: down() on fully-missing tables did not throw
+=== Case B: half-applied (only head table present, WITH a row) -> down() must reject with ATG_BACKFILL_DOWN_BLOCKED, not 42P01 ===
+PASS: Case B: down() threw
+PASS: Case B: error is ATG_BACKFILL_DOWN_BLOCKED, not 42P01
+PASS: Case B: error message does NOT mention 42P01
+PASS: Case B: head table SURVIVES the rejected down()
+```
+与门审报告 E12/E13 的复现方法一致(对缺表直接执行该 helper 发出的原句 SQL / 端到端调用 `down()`),结论相反——门审 E12/E13 复现的是**改动前**的 CASE 形式(证伪);上面是**改动后**的两语句形式(证实)。同一场景在永久测试文件里以 `down() on fully-missing tables does not crash with 42P01` 与 `half-applied state … not 42P01` 两条用例常驻(§14.6.1),不再依赖一次性探针。
+
+### 14.6.3 P3-1 —— force 变量:登记 `--help` + 加宽范围书面化 + `console.warn`
+
+- `packages/core-backend/src/db/migrate.ts` 的 `printHelp()`(Notes 段)新增一条,点名 `ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP` 这个具体例子,说明它在迁移文件内部读取(不是 CLI 边界),`--rollback`/`--reset` 本身不读它。`npx tsx src/db/migrate.ts --help` 现场核对输出逐字包含新增段落(见上方终端记录)。
+- 迁移文件 `down()` 前的注释块新增"Scope note"(:135-140),书面记录这个变量相对 `ALLOW_DB_RESET` 先例是一处加宽(CLI 边界 vs 迁移文件内部),不假装对齐。
+- `down()` 新增 `console.warn`(:185-190),force 分支生效时打印变量名 + 三个计数。真库验证(§14.6.4 的 Migrator 正控)现场核对该行确实打印到 stderr。
+
+### 14.6.4 P3-2 —— 通过唯一生产调用方(Migrator/`--rollback`)实测,而非只靠直接 `import` 调用
+
+方法:在处女库上手工从 `kysely_migration` 删除本迁移之后的两条迁移行(`zzzz20260919120000_add_attachment_blob_purge_claim`、`zzzz20260919130000_extend_archive_nonce_object_identity`),让本迁移成为 Migrator 视角下的"最新",与门审报告 E5/E6 使用的方法相同(§14.4 已如实记录这个必要性)。
+
+**负控(不设 force)**:
+```
+$ psql … INSERT INTO approval_template_group_backfill_batches (id, org_id, created_by) VALUES ('atgbb_cli_probe_1', …)
+$ npx tsx src/db/migrate.ts --rollback
+failed to execute migration "zzzz20260919090000_create_approval_template_group_backfill_batches"
+Error: ATG_BACKFILL_DOWN_BLOCKED: …
+EXIT=1
+```
+之后 `to_regclass` 非空、`count=1`、`kysely_migration` 该行仍在 —— 与门审 E5 一致。
+
+**正控(force=true)**:
+```
+$ ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP=true npx tsx src/db/migrate.ts --rollback
+ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP=true — forcing the drop of … (batches=1, batch_groups=0, batch_links=0). …
+migration "zzzz20260919090000_create_approval_template_group_backfill_batches" was executed successfully
+EXIT=0
+```
+之后 `to_regclass` 为空、`kysely_migration` 该行计数 0、`--list` 显示 `Applied: 410`——与门审 E6 一致,并额外验证了 P3-1 新增的 `console.warn` 确实在 Migrator 调用路径下打印。随后 `npx tsx src/db/migrate.ts --latest` 把三条迁移重新应用,库回到 413/0。
+
+**披露(与门审 P3-5 同一发现,只登记不改该文件)**:上面两步都依赖手工编辑 `kysely_migration` 让本迁移"可达"——真实的、未经手工干预的 `--rollback` CLI 链路会先撞上 `zzzz20260919120000_add_attachment_blob_purge_claim.ts:17`(在 Migrator 已开启的事务连接上又调用 `.transaction()`,被 Kysely 拒绝)。本轮独立复现:
+```
+$ npx tsx src/db/migrate.ts --rollback   # 撤 extend_archive_nonce_object_identity,成功
+$ npx tsx src/db/migrate.ts --rollback   # 尝试撤 add_attachment_blob_purge_claim
+Error: calling the transaction method for a Transaction is not supported
+    at Object.down (…/add_attachment_blob_purge_claim.ts:17:12)
+```
+本轮**零字节改动**该文件,按派工"只登记,不改该文件"处置;修复留给 owner 排期。
+
+### 14.6.5 P3-3 —— `--reset` 实际后果按实测改写
+
+复现门审 E7 的构造(本迁移经手工编辑 `kysely_migration` 成为"最新",批次头 1 行,不设 force):
+```
+$ ALLOW_DB_RESET=true npx tsx src/db/migrate.ts --reset
+Error: ATG_BACKFILL_DOWN_BLOCKED: …
+EXIT=1
+$ npx tsx src/db/migrate.ts --list
+Applied: 411    # --reset 前后不变(本轮独立复现的库上,前置状态是 411 applied / 2 pending)
+```
+`Applied` 计数在这次 `--reset` 前后**逐字不变**,与门审 E7(该门审环境里同样是 411)独立吻合——确认"整次 `--reset` 事务性中止,零迁移回退",不是"退到这一步停下"。设计 MD §23.6 已追加订正段(不改写原句,标记它被证伪的那一半失效,结论句本身仍 OPERATIVE),把这条实测结果写成书面记录。
+
+### 14.6.6 P3-4 —— 修正迁移 `:117` 的悬空路径引用
+
+原文引用 `reviews/approval-template-groups-phase2-backfill-ddl-declaration-20260920.md`,仓内无 `reviews/` 目录(该文件在私有 `~/.claude/projects/…/reviews/`)。已改为"private review record …(not in this repo; it lives in the reviewer's private review-notes tree, not under a repo `reviews/` directory)",不再给出一个仓内解析不到的相对路径。
+
+### 14.6.7 P3-5 —— 既有缺陷,登记不修
+
+`zzzz20260919120000_add_attachment_blob_purge_claim.ts:17` 的既有 bug(见 §14.6.4 复现)——本轮零字节改动该文件,按派工原文"只登记,不改该文件"处置,与门审报告的处置意见(独立复现、判定同意、建议单独排期)一致。
+
+### 14.6.8 NIT-1 / NIT-2
+
+- **NIT-1**(`count(*)` 全表扫描 vs `EXISTS`):按门审报告原话"不改也行"——本轮**未改**,接受现状(错误信息里的精确计数对运维有价值)。
+- **NIT-2**(`scripts/dev-bootstrap.sh:283/372`"重置数据库: pnpm db:reset"文案):两处各追加一行,提示本地库若跑过 backfill 真库用例,`db:reset` 可能撞上 `ATG_BACKFILL_DOWN_BLOCKED`。
+
+### 14.6.9 回归证据(处女库 `metasheet2_a3r2_20260921`)
+
+```
+$ cd packages/core-backend && npx tsc --noEmit
+exit 0
+$ DATABASE_URL=postgresql://ms2testbed@localhost:5432/metasheet2_a3r2_20260921 EXPECT_DB=1 \
+  npx vitest --config vitest.integration.config.ts run \
+    tests/integration/approval-template-groups-lifecycle.db.test.ts \
+    tests/integration/approval-template-groups-serialization.db.test.ts \
+    tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+    tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+    tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+    tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+    tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+    tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
+    --reporter=dot
+ Test Files  8 passed (8)
+      Tests  94 passed (94)
+```
+86(既有 7 文件)+ 8(新文件)= 94,逐位相加一致——既有 7 文件套件在新守卫代码 + 新测试文件并存下**零回归**。`shasum -a 256 .github/workflows/plugin-tests.yml`、`git diff --quiet` 对 `plugin-tests.yml`/`vitest.config.ts`/`vitest.integration.config.ts` 三文件核对**字节不变**;`node --test plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` 绿(s6a provenance 未失配)。
+
+**无库三件套(闭世界普查 + 全量真库 CI-wiring + 全量无库套件,证明新文件加入后这三条 required 通道不变红)**——本轮加新文件前**未**过一遍这三条,advisor 复核时点出;当场补跑,发现第一条确实红,已处置(见下一段):
+```
+$ unset DATABASE_URL && npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts
+ × T3 — …: is wired: …/approval-template-groups-backfill-down-guard.db.test.ts
+   Error: … UNCOVERED — NOT excluded from the no-DB job, but describeIfDatabase-gated with no
+   real-DB lane wiring — it will skip-green forever in the required test job and never run for real
+ Test Files  1 failed (1)
+      Tests  1 failed | 350 passed (351)
+```
+新文件确实撞上了这条闭世界普查(它要求每个 `tests/integration/approval-*` 文件要么被 no-DB exclude 名单排除且接进某条真库 lane,要么明确豁免——单纯"不排除 + DB-gated + 零 lane 接线"判 UNCOVERED)。**没有**通过改 `vitest.config.ts`/`plugin-tests.yml`(会违反本轮硬约束"s6a/plugin-tests 字节不变")解决,而是用该守卫自带的、专为"刻意暂不接线"场景设计的显式登记机制——`packages/core-backend/tests/unit/approval-ci-coverage-allowlist.ts`(一个 typed const 数组,不是 JSON/YAML,不被 s6a 或 `plugin-tests.yml` 引用)——新增一条 `{file, why, date}` 登记,`why` 点名本轮的硬约束与"两点接线随合并轮一次做完"的既定安排。补登记后三件套全绿:
+```
+$ unset DATABASE_URL && npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts
+ Test Files  1 passed (1)
+      Tests  353 passed (353)
+$ node --test scripts/ops/*-ci-wiring.test.mjs        # 仓根运行(不是 core-backend 内)
+ tests 492
+ pass 492
+$ env -u DATABASE_URL CI=true pnpm --filter @metasheet/core-backend test
+ Test Files  948 passed | 176 skipped (1124)
+      Tests  15103 passed | 1617 skipped (16720)
+```
+第二、三条数字与门审报告 §2.4/§2.3 记录的历史基线(491/491、931 passed|175 skipped)不逐字相同——head 在这两点之间已前进了大量与本轮无关的提交(新增测试文件/套件),0 fail 才是承重的判据,不是绝对数字对齐。
+
+**本轮代码侧 diff 范围**(`git diff --stat`,不含本文档与配对设计 MD 自身的追加——两份 MD 的插入行数在本节撰写期间持续变动,不适合钉一个数字):
+```
+ packages/core-backend/src/db/migrate.ts                                    |  11 +-
+ …zzzz20260919090000_create_approval_template_group_backfill_batches.ts     |  60 +++--
+ packages/core-backend/tests/unit/approval-ci-coverage-allowlist.ts         |  17 ++
+ scripts/dev-bootstrap.sh                                                   |   4 +
+ 4 files changed, 74 insertions(+), 18 deletions(-)
+ + 1 new file: packages/core-backend/tests/integration/approval-template-groups-backfill-down-guard.db.test.ts(259 行,8 例,含 orgTags 清理修复)
+```
+两份 `.md`(本文档 + 配对设计 MD)按 §14.6.1–§14.6.8、§23.2/§23.6/§23.7 各节的追加内容单独计入,不重复列在这张代码侧表里。
+
+### 14.6.10 收尾
+
+```
+$ dropdb -U ms2testbed metasheet2_a3r2_20260921
+```
+未合并、未 undraft、未开/改 PR、未把迁移应用到任何共享/staging/prod 库、未改锁文正文。一切仍是候选,供下一轮门审核对。
+
+---
+
 ## 13. P3 卫生轮(2026-09-19)
 
 范围:`impl-gate-A3-round4-20260918.md` 与 `impl-gate-A3-round2-20260918.md` 两份门审报告里**全部**仍开放的 P3(round-3 的 3 条 P3 已在 §12.2–§12.4 全部闭合,round-2 的 6 条 P3 里已有 4 条在 §10.1–§10.4 闭合——见下表,均在本轮之前;本轮新处理的是这两份报告余下未闭合的项)。硬规矩:本轮**生产代码零行为改动**,只允许测试、注释、MD、`scripts/dev`;含 DDL/需要新并发测试/owner 裁决的项只登记不做。
