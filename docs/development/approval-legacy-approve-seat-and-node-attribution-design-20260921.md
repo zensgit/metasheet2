@@ -170,4 +170,9 @@ platform 行上仍然活着（归属剥离那一半）。若 owner 选择先落 
    并重生成 `packages/openapi/dist/`（本轮未做，避免 dist 重生成与本变更混在一起）；
 2. 历史行的时代标记（§5.3），需迁移，超出本次零迁移边界；
 3. §6 的 owner 裁决；
-4. 生产库 pre-fix 遗留行的普查（§5.4）。
+4. 生产库 pre-fix 遗留行的普查（§5.4）；
+5. **`ServiceError` 码在这两条路由上不外泄**：它们不走 `handleApprovalsError`，外层 catch 把非 schema 错误
+   一律压成 `500 APPROVAL_APPROVE_FAILED` / `APPROVAL_REJECT_FAILED`。于是 `currentNodeEntryEpoch` 的结构性
+   `APPROVAL_NODE_ENTRY_EPOCH_MIXED`（一轮跨了多个 epoch）到客户端是一个泛化 500。**仍然 fail-closed**
+   （内层 catch 先 ROLLBACK 再 rethrow，零行），但**错误身份丢失**是已知缺口、不是不变量，源码就地注明。
+   本轮**未修**：修它要动这两条路由既有的错误信封契约，属另一次合同变更。
