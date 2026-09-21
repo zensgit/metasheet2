@@ -282,17 +282,60 @@ test('placement parsers reject comment-only and wrong-step decoys', () => {
   assert.equal(wholeFileVitestArgs(realStep).includes(file), false)
 })
 
+/**
+ * The production statement the source writer parks on, read from its single definition (#5938).
+ *
+ * The waiter probe used to carry a hand-copied COPY of this text. A copy cannot fail loudly: reword the
+ * statement and the probe matches nothing, so the `>= 2` floor reds as if the lock had been LOST, and
+ * the property it existed to prove stops being checked. So the probe derives its pattern from the
+ * constant, and this guard pins BOTH halves of that derivation — the reference, and that the constant
+ * really is a `meta_sheets` row lock that reads `deleted_at`.
+ */
+const SHEET_ROW_LOCK_SQL_CONSTANT = 'SHEET_ROW_LOCK_LIVENESS_SQL'
+
+function readSheetRowLockLivenessSql() {
+  const src = readFileSync(
+    join(repoRoot, 'packages/core-backend/src/multitable/sheet-liveness.ts'),
+    'utf8',
+  )
+  const m = new RegExp(`export const ${SHEET_ROW_LOCK_SQL_CONSTANT} = '([^']+)'`).exec(src)
+  assert.ok(m, `${SHEET_ROW_LOCK_SQL_CONSTANT} must be exported from src/multitable/sheet-liveness.ts`)
+  return m[1]
+}
+
 function assertAuthorityWriterWaiterContract(source) {
   const start = source.indexOf('// Both production writers must be blocked')
   const end = source.indexOf('// Membership writers have no sheet-row prerequisite', start)
   assert.ok(start >= 0 && end > start, 'authority-writer waiter contract block must exist')
   const block = source.slice(start, end)
 
+  // (1) The FOR UPDATE leg is DERIVED from the production constant, never copied.
   assert.match(
     block,
-    /query LIKE 'SELECT 1 FROM meta_sheets WHERE id = \$1 FOR UPDATE%'/,
-    'waiter probe must recognize the exact-anchor branch FOR UPDATE writer',
+    /query LIKE \$1\b/,
+    'waiter probe must bind the FOR UPDATE pattern as a parameter it derives, not inline a literal',
   )
+  assert.match(
+    block,
+    /\[`\$\{SHEET_ROW_LOCK_LIVENESS_SQL\}%`\]/,
+    `waiter probe must derive the FOR UPDATE pattern from ${SHEET_ROW_LOCK_SQL_CONSTANT}`,
+  )
+  assert.match(
+    source,
+    /import \{ SHEET_ROW_LOCK_LIVENESS_SQL \} from '\.\.\/\.\.\/src\/multitable\/sheet-liveness'/,
+    `the golden must import ${SHEET_ROW_LOCK_SQL_CONSTANT} from the production module`,
+  )
+  assert.doesNotMatch(
+    block,
+    /query LIKE '[^']*FROM meta_sheets[^']*FOR UPDATE%'/,
+    're-inlining a copy of the row-lock statement is what went blind in #5938',
+  )
+  // (2) …and the constant really is the meta_sheets row lock that reads deleted_at.
+  const productionSql = readSheetRowLockLivenessSql()
+  assert.match(productionSql, /\bFROM\s+meta_sheets\b/, `${SHEET_ROW_LOCK_SQL_CONSTANT} must lock meta_sheets`)
+  assert.match(productionSql, /\bFOR\s+UPDATE\b/, `${SHEET_ROW_LOCK_SQL_CONSTANT} must take a row lock`)
+  assert.match(productionSql, /\bdeleted_at\b/, `${SHEET_ROW_LOCK_SQL_CONSTANT} must read deleted_at under that lock`)
+
   assert.match(
     block,
     /query LIKE 'SELECT id FROM meta_sheets WHERE id = \$1 FOR SHARE%'/,
@@ -336,6 +379,26 @@ test('authority waiter contract rejects the tempting >=1 weakening', () => {
   assert.throws(
     () => assertAuthorityWriterWaiterContract(weakened),
     /both independent authority writers|weakening the dual-writer guarantee/,
+  )
+})
+
+test('authority waiter contract rejects re-inlining a copy of the row-lock statement (#5938 blindness)', () => {
+  const routeTest = readFileSync(
+    join(
+      repoRoot,
+      'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+    ),
+    'utf8',
+  )
+  // The exact regression: a hand-copied literal that no longer matches what the route issues. It is
+  // still a syntactically fine probe — only the guard can tell it apart from the derived one.
+  const reblinded = routeTest.replace(
+    'query LIKE $1',
+    "query LIKE 'SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE%'",
+  )
+  assert.throws(
+    () => assertAuthorityWriterWaiterContract(reblinded),
+    /re-inlining a copy of the row-lock statement|must bind the FOR UPDATE pattern/,
   )
 })
 

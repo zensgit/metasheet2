@@ -66,15 +66,23 @@ export class SheetNotLiveError extends Error {
 }
 
 /**
+ * The verdict, written ONCE. Every arity and every lock mode below maps the SAME row shape to the SAME
+ * three outcomes through this function, so a new caller cannot arrive with a second, subtly different
+ * idea of what "live" means (a `!row.deleted_at` that also swallows the empty string, say).
+ */
+function livenessOfRow(row: { deleted_at?: unknown } | undefined): SheetLiveness {
+  if (!row) return 'absent'
+  return row.deleted_at === null || typeof row.deleted_at === 'undefined' ? 'live' : 'deleted'
+}
+
+/**
  * One query, three outcomes. `deleted_at` is read rather than filtered so `deleted` and `absent` stay
  * distinguishable — a filtered `WHERE deleted_at IS NULL` collapses them and loses the actionable half.
  */
 export async function loadSheetLiveness(query: LivenessQuery, sheetId: string): Promise<SheetLiveness> {
   if (typeof sheetId !== 'string' || sheetId.length === 0) return 'absent'
   const res = await query('SELECT deleted_at FROM meta_sheets WHERE id = $1', [sheetId])
-  const row = (res.rows as Array<{ deleted_at?: unknown } | undefined>)[0]
-  if (!row) return 'absent'
-  return row.deleted_at === null || typeof row.deleted_at === 'undefined' ? 'live' : 'deleted'
+  return livenessOfRow((res.rows as Array<{ deleted_at?: unknown } | undefined>)[0])
 }
 
 /**
@@ -113,7 +121,7 @@ export async function loadSheetLivenessBatch(
   const res = await query('SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[])', [lookups])
   for (const row of res.rows as Array<{ id?: unknown; deleted_at?: unknown } | undefined>) {
     if (!row || typeof row.id !== 'string') continue
-    result.set(row.id, row.deleted_at === null || typeof row.deleted_at === 'undefined' ? 'live' : 'deleted')
+    result.set(row.id, livenessOfRow(row))
   }
   return result
 }
@@ -125,6 +133,69 @@ export async function isSheetLive(query: LivenessQuery, sheetId: string): Promis
 /** Throws {@link SheetNotLiveError} unless the sheet exists and is not soft-deleted. */
 export async function assertSheetLive(query: LivenessQuery, sheetId: string): Promise<void> {
   const liveness = await loadSheetLiveness(query, sheetId)
+  if (liveness === 'live') return
+  throw new SheetNotLiveError(sheetId, liveness)
+}
+
+/**
+ * The ONE statement text every sheet-row lock in a permission write transaction issues (#5938).
+ *
+ * EXPORTED because it is observable: a real-DB test that proves a writer is PARKED on this row reads
+ * `pg_stat_activity.query` and matches it by TEXT (the pool passes `text: sql` through verbatim —
+ * integration/db/connection-pool.ts `buildQueryConfig`). A hard-coded copy of this string in such a
+ * probe goes silently BLIND the day the statement is reworded: the probe matches nothing, the waiter
+ * count never reaches its floor, and the property "the writer parks on its sheet row" stops being
+ * verified rather than failing loudly. Probes therefore DERIVE their `LIKE` pattern from this constant
+ * — see tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts (waiter contract) and the
+ * structural guard that pins the derivation.
+ */
+export const SHEET_ROW_LOCK_LIVENESS_SQL = 'SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE'
+
+/**
+ * The SAME question, asked UNDER the row lock — the ONE statement that both LOCKS the `meta_sheets` row
+ * and reads its `deleted_at` (#5938).
+ *
+ * ── Why a pre-transaction gate is not enough ──────────────────────────────────
+ * The sheet-addressed write paths gate on {@link loadSheetLiveness} through `resolveSheetCapabilities`,
+ * OUTSIDE the transaction, and then open a transaction that takes `meta_sheets … FOR UPDATE` before
+ * writing. Both halves are correct and the pair still leaves a TOCTOU window, because the lock is not a
+ * time machine: if the soft delete COMMITS between the gate's read and the lock request, the lock is
+ * already free — the writer neither waits for it nor sees the pre-delete row version. It acquires the
+ * lock on a row whose `deleted_at` is now set and writes anyway. Soft delete is a plain UPDATE in its
+ * own transaction, so this is an ordinary interleaving, not a rare one.
+ *
+ * Locking and re-reading in ONE statement is what closes it: after `FOR UPDATE` returns, no concurrent
+ * soft delete can commit until this transaction ends, and the `deleted_at` this statement returns is the
+ * value at that moment. A caller that refuses on anything but `live` therefore cannot write to a sheet
+ * that is dead at write time — and a caller cannot take the lock while forgetting the re-read, because
+ * there is no longer a lock-only statement to take.
+ *
+ * ── How to refuse ─────────────────────────────────────────────────────────────
+ * Use {@link assertSheetLiveForUpdate} unless the caller genuinely needs the three-way verdict: throwing
+ * out of the transaction callback is what rolls it back, so the refusal cannot leave a partial write
+ * behind. Route callers map the thrown {@link SheetNotLiveError} to `sendSheetNotLive(res, err.liveness)`
+ * — the SAME values-free 404 bodies their pre-transaction gate answers, so the two refusals are
+ * indistinguishable to a client and the window cannot be probed for existence either.
+ *
+ * `query` MUST be the transaction client's own query (the one holding the lock), never the pool-level
+ * `query`: a pool-level re-read runs on a DIFFERENT connection, takes a SECOND, independent lock, and
+ * proves nothing about the row this transaction is about to write.
+ */
+export async function loadSheetLivenessForUpdate(query: LivenessQuery, sheetId: string): Promise<SheetLiveness> {
+  if (typeof sheetId !== 'string' || sheetId.length === 0) return 'absent'
+  const res = await query(SHEET_ROW_LOCK_LIVENESS_SQL, [sheetId])
+  return livenessOfRow((res.rows as Array<{ deleted_at?: unknown } | undefined>)[0])
+}
+
+/**
+ * Lock the sheet row and REFUSE unless it is still live — the single call a write transaction makes
+ * where it used to take a lock-only `SELECT 1 … FOR UPDATE` (#5938).
+ *
+ * Throwing (rather than returning a verdict) is deliberate: it rolls the transaction back and makes
+ * "took the lock but forgot to act on the answer" unwritable at this seam.
+ */
+export async function assertSheetLiveForUpdate(query: LivenessQuery, sheetId: string): Promise<void> {
+  const liveness = await loadSheetLivenessForUpdate(query, sheetId)
   if (liveness === 'live') return
   throw new SheetNotLiveError(sheetId, liveness)
 }
