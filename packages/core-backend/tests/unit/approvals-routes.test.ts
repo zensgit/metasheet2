@@ -559,6 +559,155 @@ describe('approvals routes', () => {
     })
   })
 
+  /**
+   * H-5 P3-C — THE SAME PRECONDITION, on the SIBLING DOOR.
+   *
+   * `expectedVersion` is passed down twice, once per legacy decision endpoint: `/approve` forwards
+   * it at `settleLegacyDecisionThroughSharedPath(..., { expectedVersion: requestedVersion, reason:
+   * null })` and `/reject` at `{ expectedVersion: requestedVersion, reason }`. Every leg above is
+   * an `/approve` leg, so before this case the `/reject` literal could be deleted outright and no
+   * test in the repository went red — the guard was installed on both doors and asserted on one.
+   * (`feedback_generation_guard_must_be_applied_to_every_sibling_surface`.)
+   *
+   * The fixture is the `/approve` case's, deliberately unchanged apart from the path and the body:
+   * read 1 (this route's own `SELECT ... FOR UPDATE`) answers version 4, so every precondition this
+   * route evaluates passes; read 2 (the settlement transaction's own locked read, on the
+   * connection `dispatchAction` takes for itself) answers version 5, which is the state a
+   * concurrent decision leaves behind — with none of the timing.
+   *
+   * `currentVersion: 5` is the load-bearing digit, not `409` alone. 5 can ONLY have come from the
+   * service's `details.currentVersion` (the version read under the settlement's lock); 4 is what
+   * `legacyDecisionErrorResponse`'s `fallbackCurrentVersion` would have reported (this route's own
+   * pre-check read). So this body also pins that the detail crossed the mapper. And `toEqual`
+   * pins the SHAPE: `error.currentVersion`, never `error.details` — one 409 envelope per endpoint,
+   * whichever of the two version checks fired.
+   */
+  it('re-checks the caller version INSIDE the shared settlement path on /reject and answers in the one published 409 envelope', async () => {
+    let instanceReads = 0
+    pgState.client.query.mockImplementation(async (sql: unknown) => {
+      const statement = String(sql).replace(/\s+/g, ' ').trim()
+      if (statement === 'BEGIN' || statement === 'ROLLBACK' || statement === 'COMMIT') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances')) {
+        instanceReads += 1
+        return {
+          rows: [
+            {
+              id: 'apr-seat-1',
+              status: 'pending',
+              // THE WINDOW: read 1 is this route's own pre-check (its lock is then handed back);
+              // read 2 is the settlement transaction's own locked read.
+              version: instanceReads === 1 ? 4 : 5,
+              source_system: 'platform',
+              published_definition_id: 'pubdef-1',
+              current_node_key: 'approval_a',
+              metadata: null,
+              created_at: new Date('2026-03-26T10:00:00.000Z'),
+              updated_at: new Date('2026-03-26T10:05:00.000Z'),
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT node_key, is_active, assignment_type, assignee_id')) {
+        return {
+          rows: [
+            { node_key: 'approval_a', is_active: true, assignment_type: 'user', assignee_id: 'user-1' },
+          ],
+          rowCount: 1,
+        }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    pinned.setApp(app)
+    const response = await request(pinned.url())
+      .post('/api/approvals/apr-seat-1/reject')
+      .send({ version: 4, reason: 'no' })
+
+    // Both locked reads happened: the route's own, and the settlement's. Without the second there
+    // would be nothing to re-check against.
+    expect(instanceReads).toBe(2)
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_VERSION_CONFLICT',
+        message: 'Approval instance version mismatch',
+        currentVersion: 5,
+      },
+    })
+    // The refusal happened BEFORE any write: no UPDATE and no audit INSERT was ever issued on
+    // either connection. (`.not.` alone would pass on a route that never ran, so it sits next to
+    // the `instanceReads === 2` assertion above, which proves it did.)
+    const statements = pgState.client.query.mock.calls.map(([sql]: [unknown]) => String(sql))
+    expect(statements.some((statement) => statement.includes('UPDATE approval_instances'))).toBe(false)
+    expect(statements.some((statement) => statement.includes('INSERT INTO approval_records'))).toBe(false)
+  })
+
+  /**
+   * POSITIVE CONTROL for the case above, the `/reject` twin of the `/approve` one: the SAME fixture
+   * with the settlement's locked read AGREEING with the caller is not refused — it proceeds past
+   * the precondition into the runtime lookup (which this mock deliberately does not serve, so the
+   * call ends as a 404 rather than a 409). The discriminator is the CODE, not the bare status:
+   * `APPROVAL_VERSION_CONFLICT` must be gone. Without this control, a `/reject` that refused every
+   * seat-gated call for some unrelated reason would pass the case above.
+   */
+  it('does NOT raise a version conflict inside the settlement path on /reject when the caller version is current', async () => {
+    pgState.client.query.mockImplementation(async (sql: unknown) => {
+      const statement = String(sql).replace(/\s+/g, ' ').trim()
+      if (statement === 'BEGIN' || statement === 'ROLLBACK' || statement === 'COMMIT') {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_instances')) {
+        return {
+          rows: [
+            {
+              id: 'apr-seat-1',
+              status: 'pending',
+              version: 4,
+              source_system: 'platform',
+              published_definition_id: 'pubdef-1',
+              current_node_key: 'approval_a',
+              metadata: null,
+              created_at: new Date('2026-03-26T10:00:00.000Z'),
+              updated_at: new Date('2026-03-26T10:05:00.000Z'),
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT node_key, is_active, assignment_type, assignee_id')) {
+        return {
+          rows: [
+            { node_key: 'approval_a', is_active: true, assignment_type: 'user', assignee_id: 'user-1' },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+        return { rows: [], rowCount: 0 }
+      }
+      throw new Error(`Unhandled client query: ${statement}`)
+    })
+
+    pinned.setApp(app)
+    const response = await request(pinned.url())
+      .post('/api/approvals/apr-seat-1/reject')
+      .send({ version: 4, reason: 'no' })
+
+    expect(response.body?.error?.code).not.toBe('APPROVAL_VERSION_CONFLICT')
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_PUBLISHED_DEFINITION_NOT_FOUND',
+        message: 'Published definition not found',
+      },
+    })
+  })
+
   it('returns a structured validation error when reject omits the reason', async () => {
     pinned.setApp(app)
     const response = await request(pinned.url())

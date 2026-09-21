@@ -82,17 +82,35 @@ async function jsonRequest(
   baseUrl: string,
   path: string,
   token: string,
-  options: { method?: string; body?: unknown } = {},
+  options: { method?: string; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<Response> {
   return fetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
     headers: {
       Authorization: `Bearer ${token}`,
       ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers ?? {}),
     },
     ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
   })
 }
+
+/**
+ * (S8)'s two pinned origin values.
+ *
+ * `AUDIT_ORIGIN_USER_AGENT` is sent by (S8) itself, so the assertion is exact and
+ * environment-independent: it can only appear in the row if THIS request's header reached
+ * `insertApprovalRecord`'s `actor` argument.
+ *
+ * `AUDIT_ORIGIN_IP` is tied to ONE property of this suite's own setup: `beforeAll` binds the
+ * server to `host: '127.0.0.1'` explicitly, so the accepted socket is IPv4 and Express's `req.ip`
+ * (trust-proxy off ⇒ `req.socket.remoteAddress`) is the dotted-quad loopback rather than the
+ * `::ffff:`-mapped form a `::` dual-stack bind would produce. If that bind ever changes, this pin
+ * is the thing that legitimately moves — and it should move deliberately, not be relaxed to a
+ * substring match that a NULL could also satisfy.
+ */
+const AUDIT_ORIGIN_USER_AGENT = 'h5-settlement-parity-audit-origin/1.0'
+const AUDIT_ORIGIN_IP = '127.0.0.1'
 
 function buildFormSchema() {
   return { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] }
@@ -964,6 +982,174 @@ describeIfDatabase('legacy /approve + /reject settle through the same path as /a
       [created.id],
     )
     expect(activeSeats.rows.map((seat) => seat.node_key)).toEqual(['approval_b'])
+  })
+
+  /**
+   * (S8) H-5 P3-A — THE ORIGIN COLUMNS, ABSOLUTELY.
+   *
+   * `ip_address` / `user_agent` / `target_user_id` are in the differential's projection (see
+   * `settlementSnapshot`), and the differential is the WRONG instrument for them. Since the legacy
+   * doors settle through the shared path, both of them and `/actions` now file their audit row
+   * through ONE writer (`ApprovalProductService.insertApprovalRecord`), so a regression in that
+   * writer —
+   * an `actor` argument made optional, a placeholder order edited, a refactor that drops the
+   * fourth argument at one call site and then at all of them — is necessarily SYMMETRIC. Both
+   * doors lose the column together, and `expect(legacy).toEqual(actions)` is still satisfied. That
+   * is the failure mode this file's own docblock names, and (P1)(P2)(P3) cannot see it.
+   *
+   * So each column is asserted here by exact value, on BOTH doors, and each carries a DIFFERENT
+   * claim — stated per column rather than lumped together as "the origin is covered":
+   *
+   *   * `user_agent` — the caller's own header, pinned to a literal this case sends. Catches
+   *     "stopped forwarding" AND "forwarded something else"; environment-independent.
+   *   * `ip_address` — the caller's address, pinned to the loopback this suite's own bind produces
+   *     (see `AUDIT_ORIGIN_IP`). Catches "stopped forwarding".
+   *   * `target_user_id` — asserted NULL, and the asymmetry is deliberate: a decision row has no
+   *     target by construction, so this leg catches a writer that STARTS populating the column
+   *     (an actor id leaking into the audit row's target, which a differential cannot see either
+   *     because both doors would leak the same id). It does NOT catch "stopped forwarding" —
+   *     there is nothing to stop forwarding. This column has a leg in ONE direction only.
+   *
+   * NOT a second copy of the settlement assertions: the post-state (cursor, seats, metrics) is
+   * owned by (P1)(P2)(S1)(S2) and is deliberately not re-asserted here.
+   */
+  it('(S8) AUDIT ORIGIN — both doors persist the caller\'s IP and user-agent, and neither invents a target, asserted by exact value because a regression in the shared writer hits both doors at once', async () => {
+    const admin = freshId('admin')
+    const requester = freshId('req')
+    const approverA = freshId('appr-a')
+    await grantWrite(requester)
+    const adminToken = await authToken(admin, 'admin')
+    const requesterToken = await authToken(requester)
+    const approverAToken = await authToken(approverA)
+
+    const templateId = await publishTemplate(
+      adminToken,
+      oneStepGraph({ assigneeType: 'user', assigneeIds: [approverA] }),
+      'audit-origin-columns',
+    )
+    const viaLegacy = await createApproval(requesterToken, templateId)
+    const viaActions = await createApproval(requesterToken, templateId)
+
+    // THE SAME user-agent on both requests: the claim is about each door's own row, not about a
+    // divergence between them, and a differential is explicitly not what is being run here.
+    const legacyResponse = await jsonRequest(baseUrl, `/api/approvals/${viaLegacy.id}/approve`, approverAToken, {
+      method: 'POST',
+      body: { version: viaLegacy.version, comment: 'ok' },
+      headers: { 'User-Agent': AUDIT_ORIGIN_USER_AGENT },
+    })
+    expect(legacyResponse.status, await legacyResponse.clone().text()).toBe(200)
+    const actionsResponse = await jsonRequest(baseUrl, `/api/approvals/${viaActions.id}/actions`, approverAToken, {
+      method: 'POST',
+      body: { action: 'approve', comment: 'ok' },
+      headers: { 'User-Agent': AUDIT_ORIGIN_USER_AGENT },
+    })
+    expect(actionsResponse.status, await actionsResponse.clone().text()).toBe(200)
+
+    for (const door of [
+      { name: 'legacy /approve', instanceId: viaLegacy.id },
+      { name: '/actions', instanceId: viaActions.id },
+    ]) {
+      const rows = await pool().query<{ ip_address: string | null; user_agent: string | null; target_user_id: string | null }>(
+        `SELECT ip_address, user_agent, target_user_id FROM approval_records
+          WHERE instance_id = $1 AND action = 'approve'`,
+        [door.instanceId],
+      )
+      // Vacuity guard: the decision row exists, so the three assertions below are read off a row
+      // that was actually written rather than passing on an empty result.
+      expect(rows.rows, door.name).toHaveLength(1)
+      expect(rows.rows[0].user_agent, door.name).toBe(AUDIT_ORIGIN_USER_AGENT)
+      expect(rows.rows[0].ip_address, door.name).toBe(AUDIT_ORIGIN_IP)
+      expect(rows.rows[0].target_user_id, door.name).toBeNull()
+    }
+  })
+
+  /**
+   * (S9) H-5 P3-B — THE SAME RACE, WITH THE SEAT GATE TAKEN OUT OF THE WAY.
+   *
+   * (S7) above runs two concurrent decisions from ONE approver against an A(x)->B(y) graph, so the
+   * loser — whatever else is true — is not seated at B. Neutralise the `expectedVersion`
+   * precondition and (S7) still refuses that loser, at the SEAT gate, 403: the case is
+   * deterministically red under such a mutation but red on the wrong assertion, and it can never
+   * observe the harm the precondition exists to prevent.
+   *
+   * This case removes that cover by seating the SAME approver at BOTH nodes — A(x)->B(x), which is
+   * the shape the original defect report named (one actor holding a seat at the current node AND
+   * at the next one; a real reviewer who appears twice in a chain). Now the loser IS admitted by
+   * every gate except the version one:
+   *
+   *   * seat — they hold an active seat at whichever node is current, before and after the winner
+   *     advances the cursor;
+   *   * status — the instance is still `pending` (A->B, so the first decision advances rather than
+   *     ends);
+   *   * round — the seat at B is a fresh, active assignment row.
+   *
+   * So the ONLY thing standing between the loser and a second settlement is the optimistic-lock
+   * precondition, in whichever of its two places fires (this route's own pre-check when the
+   * winner's COMMIT got there first, the settlement transaction's `expectedVersion` re-check when
+   * it did not). WHAT IS ASSERTED is the outcome, which is what a race acceptance may assert: one
+   * winner, one 409, ONE approve row, and a cursor that advanced exactly once. Remove the
+   * precondition and this caller decides node B holding a version that never pointed at B.
+   */
+  it('(S9) CONCURRENT DOUBLE DECISION, ONE APPROVER SEATED AT BOTH NODES — the loser is refused rather than deciding the NEXT node with a version that never pointed at it', async () => {
+    const admin = freshId('admin')
+    const requester = freshId('req')
+    const approverA = freshId('appr-a')
+    await grantWrite(requester)
+    const adminToken = await authToken(admin, 'admin')
+    const requesterToken = await authToken(requester)
+    const approverAToken = await authToken(approverA)
+
+    // THE FIXTURE SHAPE, and the whole point of this case: `approverA` at BOTH nodes.
+    const templateId = await publishTemplate(
+      adminToken,
+      twoStepGraph({ assigneeType: 'user', assigneeIds: [approverA] }, { assigneeType: 'user', assigneeIds: [approverA] }),
+      'concurrent-double-decision-same-actor',
+    )
+    const created = await createApproval(requesterToken, templateId)
+
+    const body = { version: created.version, comment: 'ok' }
+    const [first, second] = await Promise.all([
+      jsonRequest(baseUrl, `/api/approvals/${created.id}/approve`, approverAToken, { method: 'POST', body }),
+      jsonRequest(baseUrl, `/api/approvals/${created.id}/approve`, approverAToken, { method: 'POST', body }),
+    ])
+    const outcomes = await Promise.all([first, second].map(async (response) => ({
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    })))
+
+    expect(outcomes.filter((outcome) => outcome.status === 200)).toHaveLength(1)
+    const refused = outcomes.filter((outcome) => outcome.status !== 200)
+    expect(refused).toHaveLength(1)
+    // 409, NOT 403: with this fixture the seat gate cannot be what refuses — that is the
+    // difference between this case and (S7), stated as an assertion rather than as a comment.
+    expect(refused[0].status).toBe(409)
+    const error = refused[0].body.error as Record<string, unknown>
+    expect(error.code).toBe('APPROVAL_VERSION_CONFLICT')
+    expect(typeof error.currentVersion).toBe('number')
+    expect(error.details).toBeUndefined()
+
+    // EXACTLY ONE SETTLEMENT: one version bump, one approve row, the cursor one node along.
+    // Without the precondition the loser settles node B as well, and these read
+    // `status='approved'` / `version = N+2` / two approve rows.
+    const row = await instanceRow(created.id)
+    expect(row.status).toBe('pending')
+    expect(row.current_node_key).toBe('approval_b')
+    expect(row.version).toBe(created.version + 1)
+    const approveRows = await pool().query<{ n: string }>(
+      "SELECT COUNT(*)::text AS n FROM approval_records WHERE instance_id = $1 AND action = 'approve'",
+      [created.id],
+    )
+    expect(Number(approveRows.rows[0].n)).toBe(1)
+    const activeSeats = await pool().query<{ node_key: string; assignee_id: string }>(
+      'SELECT node_key, assignee_id FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE',
+      [created.id],
+    )
+    expect(activeSeats.rows.map((seat) => seat.node_key)).toEqual(['approval_b'])
+    // FIXTURE-SHAPE GUARD, asserted rather than assumed from the graph literal above: the node the
+    // refused caller would have gone on to decide is one THEY are seated at. If a future change to
+    // the publisher stopped materialising B's seat for the same user, this case would quietly
+    // degrade back into (S7) — seat-gated loser, harm unobservable — and this line is what says so.
+    expect(activeSeats.rows.map((seat) => seat.assignee_id)).toEqual([approverA])
   })
 
   // ── FORGERY family, re-run against the settlement path ───────────────────────────────────────
