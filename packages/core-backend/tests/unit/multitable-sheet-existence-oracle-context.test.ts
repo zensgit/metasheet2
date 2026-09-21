@@ -40,8 +40,9 @@
  *   - the gate costs 2 extra DB round trips for an admin and 3 for a non-admin on the Workbench's
  *     main load path, one of them a repeat of the scope-map lookup the handler issues again below
  *     (the COST paragraph at the gate, routes/univer-meta.ts);
- *   - a caller that PASSES the gate and names a view belonging to another sheet still gets 500
- *     (ConflictError → INTERNAL_ERROR). Pre-existing, unchanged, and now strictly post-authority;
+ *   - CLOSED by #5946: a caller that PASSES the gate and names a view belonging to another sheet used
+ *     to get 500 (ConflictError → INTERNAL_ERROR). It now gets the shared values-free absent-sheet
+ *     404, still strictly post-authority. Cell (f-authorised) below;
  *   - the probe regexes bound their span to ONE SQL fragment, so a probe assembled from two
  *     CONCATENATED template literals would be missed. No such shape exists in univer-meta.ts today
  *     (measured: the closure guard's found-set is unchanged by the widening).
@@ -387,13 +388,20 @@ describe('#5936 — GET /context: authority before the sheet row', () => {
   it('(f) a caller that PASSES the gate still sees the viewId/sheetId pairing conflict', async () => {
     currentUser = MANAGER
     const { res } = await call({ sheetId: LIVE, viewId: FOREIGN_VIEW })
-    // ORDER ONLY. The ConflictError → INTERNAL_ERROR mapping is pre-existing and deliberately
-    // untouched (a client error answered 500 is a separate defect, out of this issue's remit). What
-    // this pins is that moving the pairing check BEHIND the gate did not swallow it: an authorised
+    // ORDER unchanged: moving the pairing check BEHIND the gate did not swallow it — an authorised
     // caller still gets the conflict answer, and it is still values-free on the wire.
-    expect(res.status, JSON.stringify(res.body)).toBe(500)
+    //
+    // The CLASS of that answer changed with #5946, and only the class: this used to be the handler's
+    // generic 500 (ConflictError → INTERNAL_ERROR), which #5948 named as a residual. The call now
+    // goes through `orRefuseSheetViewMismatch`, so the class is the shared values-free absent-sheet
+    // 404 — the same body the liveness refusals above emit, taken from the same helper rather than
+    // hand-typed. The POSITION is asserted below and is what this cell is really about.
+    expect(res.status, JSON.stringify(res.body)).toBe(SHEET_NOT_LIVE_STATUS)
+    expect(res.body).toEqual(SHEET_ABSENT_BODY)
+    expect(res.status, 'the pairing conflict is a client error again, not a server fault').not.toBe(500)
     expect(JSON.stringify(res.body)).not.toContain('sht_oracle')
     expect(JSON.stringify(res.body)).not.toContain('vw_oracle')
+    expect(JSON.stringify(res.body)).not.toContain('INTERNAL_ERROR')
   })
 
   it('(b) soft-deleted BETWEEN the gate and the row read: still SHEET_DELETED, not "absent"', async () => {
