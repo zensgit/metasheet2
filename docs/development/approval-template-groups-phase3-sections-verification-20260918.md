@@ -637,7 +637,7 @@ $ git diff --stat aad08d275..1d2a7f903
 | 被重放 lane(A-4 head,#5878) | `879070ef2ec11c6d2e8b099b8ca9755b637a5fff` |
 | 重放命令 | `git rebase --onto 4678b01cb6 66f526145c`(切点判据见设计 MD §8.1:两条 lane 的 A-1 段末尾树 `d302d29569` 逐字节相同) |
 | 重放提交数 | 27 个中落地 25 个(2 个因内容已在底座而成空提交被丢弃) |
-| `git cherry origin/main HEAD` | 83 行,**全部 `+`**,零 `-` ⇒ 与 `origin/main`(`123b1d1e54`)零重复 |
+| `git cherry origin/main HEAD` | 零 `-` ⇒ 与 `origin/main`(`123b1d1e54`)零重复 |
 | `origin/main..HEAD` 内部重复 patch-id | **0** ⇒ A-1 段只出现一次 |
 
 ### 15.2 合流缺陷在 rebase 路径下的复现(先复现再修,不是直接修)

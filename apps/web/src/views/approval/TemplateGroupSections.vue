@@ -263,7 +263,7 @@ const {
 
 const showSessionOrgSwitcher = ref(false)
 // The one blocked call to replay once the session-org switch resolves. Only `loadAll()` ever
-// registers here (see the scope note above) and it self-guards against overlap, so a single slot
+// registers here (see the scope note above), so a single slot
 // is enough — no queue needed.
 let pendingRetry: (() => Promise<void>) | null = null
 

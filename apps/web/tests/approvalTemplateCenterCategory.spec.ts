@@ -108,11 +108,7 @@ vi.mock('../src/approvals/api', () => ({
   // A-2 scope item 2 (design lock v2.13 §6 phase 1) — ApprovalTemplateGroupsPanel.vue calls
   // `listApprovalTemplateGroups`/`createApprovalTemplateGroup` on mount/submit plus an
   // `instanceof ApprovalApiError` check in its catch branch, so all three keys must exist on this
-  // replacement mock whenever a test in this file mounts it. After the A-2 x A-4 convergence it is
-  // NOT mounted by the tests below: TemplateCenterView.vue mounts the panel only in the GROUPED
-  // view and only after an admin opens the disclosure toggle, and every test here stays in the
-  // default flat view. The keys stay so that a future grouped-view test in this file does not
-  // rediscover the unhandled-onMounted failure; they are not why the I6 assertion below passes.
+  // replacement mock whenever a test in this file mounts it.
   //
   // A-2 × A-4 merge resolution (this branch): the two lanes each added a
   // `listApprovalTemplateGroups` key to THIS object literal. Duplicate keys here are invisible to
