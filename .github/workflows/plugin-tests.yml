@@ -1581,10 +1581,12 @@ jobs:
           # Arms this step's embedded anti-skip-green sentinels (module-top-level
           # `itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip`, e.g.
           # approval-comments.db.test.ts:56, approval-instance-readability-s1.db.test.ts:50,
-          # approval-lock9-process-attachments-realdb.db.test.ts:35): a missing/broken
-          # DATABASE_URL reaching this step's vitest workers goes RED instead of a silent
-          # skipped-green. The other files this step runs do not reference EXPECT_DB, so
-          # this is a no-op for them.
+          # approval-lock9-process-attachments-realdb.db.test.ts:35): second in-worker door —
+          # a DATABASE_URL that is set in this step's shell but falsy by the time it reaches
+          # the vitest worker goes RED instead of a silent skipped-green. A truthy-but-wrong
+          # DATABASE_URL reds either way, armed or not, from the suites' own connection
+          # failures — this arming does not specifically catch that case. The other files
+          # this step runs do not reference EXPECT_DB, so this is a no-op for them.
           EXPECT_DB: '1'
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"

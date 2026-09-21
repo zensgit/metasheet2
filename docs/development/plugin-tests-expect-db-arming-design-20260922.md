@@ -49,8 +49,8 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 - Defined at **module top level**, outside any `describeIfDatabase` gate — so unlike the rest of
   the file's tests, this one test's `it`-vs-`it.skip` choice does not depend on `DATABASE_URL`.
-- The value is read with **strict string equality** (`=== '1'`) — not a truthy check. `'0'`,
-  `'true'`, or a bare unquoted `1` (YAML would parse that as a number) do **not** arm it.
+- The value is read with **strict string equality** (`=== '1'`) — not a truthy check. `'0'` and
+  `'true'` do **not** arm it.
 - When armed (`EXPECT_DB === '1'`) and `DATABASE_URL` is falsy, the test body's own assertion
   fails — the file goes **RED**, not skip-green.
 - When unarmed (today's state for this step), the test is `it.skip`, unconditionally, regardless
@@ -85,9 +85,15 @@ wiring.test.mjs`'s 40 synthetic cases, `pb4-2/3/4`, `b4-department-bindings`,
 ## 3. What this fix does and does not close
 
 **Does close**: the specific gap where this step's shell has `DATABASE_URL` set (the common,
-intended case) but the value silently fails to reach the vitest worker process, or is truthy-but-
-wrong — the embedded sentinel now actually runs in that lane and would catch it, instead of being
+intended case) but the value silently fails to reach the vitest worker process as a falsy value —
+the embedded sentinel now actually runs in that lane and would catch it, instead of being
 permanently `it.skip`ped.
+
+**Also red after this fix, but not because of it**: a `DATABASE_URL` that is truthy but wrong
+(bad host/port/db name) still reds — from the suites' own connection failures, identically
+whether `EXPECT_DB` is armed or not (independent review verified this: `EXPECT_DB` unset vs `1`
+against the same bad URL both exit 1). The sentinel's `toBeTruthy()` check passes on a
+wrong-but-non-empty URL, so it does not specifically catch this case.
 
 **Does NOT close, and was never claimed to**: a `DATABASE_URL` that is unset or empty **in the
 step's own shell** never reaches vitest at all — the step's pre-existing guard
