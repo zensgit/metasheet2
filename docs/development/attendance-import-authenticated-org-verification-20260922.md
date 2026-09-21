@@ -1,6 +1,6 @@
 # Attendance import authenticated-organization verification
 
-Status: **SOURCE AUDIT COMPLETE / OWNER DECISIONS OPEN / STRICT-QA HARDENING IN PROGRESS**
+Status: **SOURCE AUDIT COMPLETE / OWNER DECISIONS OPEN / STRICT-QA HARDENING GATED**
 
 Baseline: `origin/main@cd42eaf7455f03dd99021a02c47c42f1f3db6484`.
 
@@ -25,7 +25,7 @@ worktree `codex/attendance-qa-org-scope-20260921`.
 | Historical #5676 status | Draft branch inspected as hypothesis; not treated as current authorization or transferable gate evidence |
 | Independent adversarial source review | COMPLETE: found the RATIFIED template-preferences conflict, omitted routes and OpenAPI/actor-identity gaps; this revision records them as blockers rather than choosing silently |
 | Import runtime edits | NONE |
-| Strict-QA implementation | In progress on isolated branch `codex/attendance-strict-delegated-principal-20260922`; no import runtime behavior changed |
+| Strict-QA implementation | Draft/HOLD PR #5978 at `2d992e400`; exact-head independent gate PASS with 0 P1 / 0 P2; no import runtime behavior changed |
 | Database/staging/flags | NOT RUN / NOT CHANGED |
 
 ## 3. Source trace
@@ -93,6 +93,7 @@ the implementation plan.
 | Integration sync selects another org | No claim in this slice | NOT RUN; separate tenancy audit required |
 | Strict smoke uses delegated tenant admin | Full lifecycle succeeds without platform-admin bypass | Contract helper positive control PASS locally; remote/staging lifecycle NOT RUN |
 | Strict smoke receives platform-admin exercise bearer | Fail before product side effects | Focused regression PASS locally; platform-role mutation turns both matching tests red |
+| Strict provisioning refreshes to platform-admin bearer | Fail before the first role-assignment write | Focused regression and in-memory source mutation PASS locally; exact-head independent gate PASS |
 
 ## 6. Verification commands
 
@@ -104,7 +105,7 @@ node --test \
   scripts/ops/attendance-delegated-admin-contract.test.mjs \
   scripts/ops/attendance-prod-auth-fallback-workflow-contract.test.mjs \
   scripts/ops/attendance-verifier-contract.test.mjs
-# PASS: 44/44 at implementation head d20b04d7d
+# PASS: 46/46 at implementation head 2d992e400
 
 NODE_PATH=/Users/chouhua/Downloads/Github/metasheet2/node_modules \
   node --test scripts/ops/attendance-acceptance-wiring.test.mjs
@@ -121,6 +122,12 @@ Mutation evidence:
 Mutation: remove the explicit role=admin rejection.
 Result: 0/2 matching tests passed; both platform-admin refusal legs failed.
 Restore: performed with apply_patch; focused suite returned 41/41 PASS.
+
+Mutation: remove the provisioner's post-refresh delegated-posture block from
+an in-memory copy of the on-disk script.
+Result: the source-order contract fails because no delegated check remains
+between refresh_token_if_needed and try_assign_role.
+Canonical file: never weakened; focused suite returned 46/46 PASS.
 ```
 
 Independent Grok 4.6 review of the superseded first implementation head
@@ -131,7 +138,22 @@ actual exercise principal. Head `d20b04d7d` closes this by rechecking the full
 delegated posture before adopting every refreshed token, by making delegated
 contract failures non-recoverable, and by adding one refreshed-platform-admin
 negative for each of the three consumers. A fresh independent exact-head gate
-on `d20b04d7d` remains required.
+on `d20b04d7d` then found a second P1: `attendance-provision-user.sh` refreshes
+its own bearer before write operations, while that refreshed bearer was checked
+only for tenant equality. A same-tenant platform-admin token could therefore
+perform the three role-assignment probes even though the runner's original
+bearer passed the delegated check. Head `2d992e400` closes this by propagating
+the strict posture flag and expected tenant into all three provisioning calls,
+then rerunning the shared tenant/role/permission/feature verifier after the
+provisioner refresh and before its first write.
+
+Fresh independent exact-head review of `2d992e400` returned PASS with 0 P1 and
+0 P2. It inspected the complete base-to-head diff, all refresh consumers,
+provisioning call order, strict flag propagation and required test-list wiring.
+The reviewer reran the focused contract set: 46 tests passed; the separate
+acceptance-wiring file could not resolve `js-yaml` in the review archive, so
+that file is NOT RUN locally rather than counted green. GitHub required checks
+remain the authoritative wiring execution for this head.
 
 The strict workflow now requires the tenant-bound delegated-admin contract,
 and `attendance-run-gates.sh` executes the read-only `/auth/me` verifier before
@@ -170,11 +192,11 @@ Each mutation must turn only its matching regression red, then be fully restored
 ## 7. NOT RUN and residuals
 
 - No import runtime code or import lifecycle tests were changed.
-- Strict-QA hardening has focused local evidence but is not yet independently
-  gated; the evidence above is branch-head-scoped only.
+- Strict-QA hardening is independently gated at `2d992e400` with 0 P1 / 0 P2;
+  the verdict is branch-head-scoped only and does not authorize merge.
 - No PostgreSQL, browser, Windows package, staging, CI or deployment validation
   was run for this draft.
-- No exact-head independent implementation gate exists yet.
+- No import-runtime implementation or import-runtime exact-head gate exists yet.
 - OD-IA-1 through OD-IA-5 are business/scope/compatibility decisions.
   Implementation must not start by silently choosing any of them.
 - Historical CI and staging results from #5676 or the earlier candidate do not
