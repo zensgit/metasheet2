@@ -5,6 +5,7 @@ import {
 } from './attendance-smoke-workdate.mjs'
 import { pathToFileURL } from 'node:url'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './attendance-acceptance-preflight.mjs'
+import { assertDelegatedAttendanceAdminIdentity } from './attendance-delegated-admin-contract.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -23,6 +24,7 @@ const requireImportUploadAsync = process.env.REQUIRE_IMPORT_UPLOAD_ASYNC == null
   : process.env.REQUIRE_IMPORT_UPLOAD_ASYNC === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
+const requireDelegatedAttendanceAdmin = process.env.REQUIRE_DELEGATED_ATTENDANCE_ADMIN === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 120000))
@@ -410,6 +412,13 @@ async function run() {
   const meData = me.body?.data ?? {}
   const user = meData?.user ?? {}
   const features = meData?.features ?? {}
+  if (requireDelegatedAttendanceAdmin) {
+    assertDelegatedAttendanceAdminIdentity({
+      user,
+      features,
+      expectedTenantId: process.env.AUTH_EXPECTED_TENANT_ID,
+    })
+  }
   let userId = user?.userId || user?.id || user?.user_id
   if (!userId) {
     // Some dev token setups return user identity only in JWT payload.

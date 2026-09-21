@@ -24,6 +24,7 @@ REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC:-false}"
 REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE:-false}"
 REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
 REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE:-true}"
+REQUIRE_DELEGATED_ATTENDANCE_ADMIN="${REQUIRE_DELEGATED_ATTENDANCE_ADMIN:-false}"
 
 function die() {
   echo "[attendance-run-gates] ERROR: $*" >&2
@@ -87,6 +88,15 @@ node "${ROOT_DIR}/scripts/ops/attendance-acceptance-preflight.mjs" \
 AUTH_TOKEN="$(API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
   "${ROOT_DIR}/scripts/ops/attendance-resolve-auth.sh")"
 
+if [[ "$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" == "true" ]]; then
+  info "Verifying tenant-bound delegated attendance administrator..."
+  API_BASE="$API_BASE" \
+    AUTH_TOKEN="$AUTH_TOKEN" \
+    AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+    node "${ROOT_DIR}/scripts/ops/attendance-verify-delegated-admin.mjs" \
+    >"${OUTPUT_ROOT}/delegated-admin-contract.log" 2>&1
+fi
+
 gate_preflight="SKIP"
 gate_api="FAIL"
 gate_provision="SKIP"
@@ -142,6 +152,7 @@ function run_api_smoke() {
     REQUIRE_IMPORT_UPSERT_STRATEGY="$REQUIRE_IMPORT_UPSERT_STRATEGY" \
     REQUIRE_PREVIEW_ASYNC="$REQUIRE_PREVIEW_ASYNC" \
     REQUIRE_BATCH_RESOLVE="$REQUIRE_BATCH_RESOLVE" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     "${ROOT_DIR}/scripts/ops/attendance-smoke-api.sh" \
     >"${OUTPUT_ROOT}/gate-api-smoke.log" 2>&1; then
     gate_api="PASS"
