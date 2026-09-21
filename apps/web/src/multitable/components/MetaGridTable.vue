@@ -177,25 +177,32 @@
           </tr>
         </tbody>
         <tbody v-else>
+          <!-- #5863c: frozen rows (always mounted) + the A1 virtualization top spacer are both items in
+               flatRenderItems, IN ORDER, so the spacer's flow position always comes AFTER the frozen
+               prefix (never pushes it down) — see flatRenderItems' own comment. -->
+          <template v-for="item in flatRenderItems" :key="item.kind === 'spacer' ? `spacer:${item.position}` : item.row.id">
           <!-- A1 virtualization top spacer: reserves the height of rows scrolled above the window so the
-               scrollbar + row positions match a fully-rendered table. Height 0 → effectively absent. -->
-          <tr v-if="topSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-top-spacer">
-            <td :colspan="colSpan" :style="{ height: `${topSpacerHeight}px`, padding: '0', border: 'none' }"></td>
+               scrollbar + row positions match a fully-rendered table. -->
+          <tr v-if="item.kind === 'spacer'" class="meta-grid__spacer" aria-hidden="true" :data-test="`grid-${item.position}-spacer`">
+            <td :colspan="colSpan" :style="{ height: `${item.height}px`, padding: '0', border: 'none' }"></td>
           </tr>
-          <template v-for="{ row, index: ri } in windowRows" :key="row.id">
+          <!-- Alias-destructure `item` back to `row`/`ri` (single-element v-for) so the row markup below
+               is untouched from before the flatRenderItems refactor. Two independent v-if (not v-if/
+               v-else) since v-else can't safely combine with a v-for on the same template element. -->
+          <template v-if="item.kind === 'row'" v-for="{ row, index: ri } in [item]" :key="row.id">
             <tr
               role="row"
               :aria-selected="row.id === selectedRecordId || undefined"
               class="meta-grid__row"
-              :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
+              :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri, 'meta-grid__row--frozen-top': isFrozenRow(ri) }"
               :style="rowStyle(row.id)"
               @click="emit('select-record', row.id)"
-              @contextmenu="onRowContextMenu($event, row.id)"
+              @contextmenu="onRowContextMenu($event, row.id, ri)"
             >
-              <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
+              <td v-if="enableMultiSelect" class="meta-grid__check-col" :style="isFrozenRow(ri) ? { position: 'sticky', top: `${frozenRowTop(ri)}px`, zIndex: '3' } : undefined" @click.stop>
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
               </td>
-              <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
+              <td class="meta-grid__row-num" :style="isFrozenRow(ri) ? { left: `${rowNumLeft}px`, position: 'sticky', top: `${frozenRowTop(ri)}px`, zIndex: '3' } : { left: `${rowNumLeft}px` }">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
                 <button
                   type="button"
@@ -233,6 +240,18 @@
                 >
                   <MetaCommentAffordance :state="rowCommentAffordance(row.id)" />
                 </button>
+                <!-- #5863c: row-freeze pin, mirrors MetaFieldHeader's column-freeze pin. Toggling on row k
+                     sets frozenTopRowCount = k+1 (capped); toggling the current boundary row unfreezes. -->
+                <button
+                  type="button"
+                  class="meta-grid__row-pin"
+                  :class="{ 'meta-grid__row-pin--on': isFrozenRow(ri) }"
+                  data-test="grid-freeze-row"
+                  :aria-label="frozenTopRowsCountEffective === ri + 1 ? l('grid.unfreezeRows') : l('grid.freezeUpToRow')"
+                  :title="frozenTopRowsCountEffective === ri + 1 ? l('grid.unfreezeRows') : l('grid.freezeUpToRow')"
+                  @click.stop="onToggleFreezeRows(ri)"
+                  @mousedown.stop
+                >&#x1F4CC;</button>
               </td>
               <td
                 v-for="(field, ci) in visibleFields"
@@ -243,7 +262,7 @@
                 :aria-label="field.name"
                 class="meta-grid__cell"
                 :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(row.id, field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci, 'meta-grid__cell--scale-fill': cellHasScaleFill(row.id, field.id), 'meta-grid__cell--remote-cursor': hasRemoteCursor(row.id, field.id) }"
-                :style="cellStyle(row.id, field.id, ci)"
+                :style="cellStyle(row.id, field.id, ci, ri)"
                 @dblclick="startEdit(row, field)"
                 @click.stop="onCellClick(ri, ci, row.id)"
               >
@@ -320,6 +339,7 @@
                 </div>
               </td>
             </tr>
+          </template>
           </template>
           <!-- A1 virtualization bottom spacer: reserves the height of rows scrolled below the window. -->
           <tr v-if="bottomSpacerHeight > 0" class="meta-grid__spacer" aria-hidden="true" data-test="grid-bottom-spacer">
@@ -430,6 +450,7 @@ import { isDateLikeStringField, isYjsTextEligible } from '../utils/yjs-text-elig
 import { isYjsCollabEnabled } from '../composables/useYjsCellBinding'
 import { useLocale } from '../../composables/useLocale'
 import { frozenPrefixCount } from '../utils/frozen-columns'
+import { MAX_FROZEN_TOP_ROWS } from '../utils/frozen-rows'
 import {
   metaCoreLabel,
   selectedCount,
@@ -466,6 +487,9 @@ const props = defineProps<{
   canBulkRestore?: boolean
   canCreate?: boolean
   frozenLeftColumnIds?: string[]
+  // #5863c: first N rows (flat/ungrouped path only — see isFrozenRow) pinned under the sticky
+  // header, same opaque-config narrowing pattern as frozenLeftColumnIds (see utils/frozen-rows.ts).
+  frozenTopRowCount?: number
   rowActionOverrides?: Record<string, MetaRowActions>
   fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
@@ -560,6 +584,7 @@ const emit = defineEmits<{
   (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
   (e: 'create-record'): void
   (e: 'set-frozen', frozenLeftColumnIds: string[]): void
+  (e: 'set-frozen-rows', frozenTopRowCount: number): void
   (e: 'set-aggregation', payload: { fieldId: string; fn: string | null }): void
   // Group-collapse toggle request (controlled-from-parent): parent flips the key in the persisted set.
   (e: 'toggle-group', key: string): void
@@ -701,18 +726,47 @@ const windowEnd = computed(() => {
 })
 // The rows actually mounted. Carries each row's ABSOLUTE index so row-number / focus / selection /
 // keyboard-nav all keep using the real index (window-local `ri` would desync them — the keystone bug).
+// #5863c: rows < frozenTopRowsCountEffective are ALWAYS mounted (never virtualized away — a frozen
+// row's own sticky positioning depends on it staying in the DOM) via a separate template loop
+// (see the template's own v-for over the first N rows), so this window is clamped to start no
+// earlier than the frozen-row count to avoid rendering those rows TWICE.
 const windowRows = computed<Array<{ row: MetaRecord; index: number }>>(() => {
   const rowsArr = filteredRows.value
-  if (!flatWindowEnabled.value) return rowsArr.map((row, index) => ({ row, index }))
+  const frozenN = frozenTopRowsCountEffective.value
+  if (!flatWindowEnabled.value) return rowsArr.map((row, index) => ({ row, index })).filter((x) => x.index >= frozenN)
   const out: Array<{ row: MetaRecord; index: number }> = []
-  for (let i = windowStart.value; i < windowEnd.value; i++) out.push({ row: rowsArr[i], index: i })
+  const start = Math.max(windowStart.value, frozenN)
+  for (let i = start; i < windowEnd.value; i++) out.push({ row: rowsArr[i], index: i })
+  return out
+})
+// The frozen prefix, ALWAYS rendered outside the virtualized window (see windowRows above).
+const frozenTopRows = computed<Array<{ row: MetaRecord; index: number }>>(() => {
+  const n = frozenTopRowsCountEffective.value
+  if (n <= 0) return []
+  return filteredRows.value.slice(0, n).map((row, index) => ({ row, index }))
+})
+// Render order: frozen prefix first (always mounted, in-flow at the top of tbody, pinned by each
+// cell's own `position: sticky; top: ...`) so their natural flow position is never pushed down by
+// the spacer, THEN the top spacer (as an item, not a template-level sibling — its natural flow
+// position must come AFTER the frozen prefix), THEN the (possibly virtualized) rest.
+type FlatRenderItem =
+  | { kind: 'row'; row: MetaRecord; index: number }
+  | { kind: 'spacer'; position: 'top' | 'bottom'; height: number }
+const flatRenderItems = computed<FlatRenderItem[]>(() => {
+  const out: FlatRenderItem[] = frozenTopRows.value.map((r) => ({ kind: 'row', ...r }))
+  if (topSpacerHeight.value > 0) out.push({ kind: 'spacer', position: 'top', height: topSpacerHeight.value })
+  for (const r of windowRows.value) out.push({ kind: 'row', ...r })
   return out
 })
 // Spacer heights reserve the off-screen rows' vertical space so the scrollbar + scroll position match a
 // fully-rendered table. zero when windowing is off (no spacer rows are emitted then).
+// #5863c: the frozen prefix is rendered separately (frozenTopRows, always mounted — see windowRows),
+// so the spacer only needs to cover the SKIPPED-but-not-frozen rows between the frozen prefix and
+// the virtualized window's start (never negative — windowStart is always >= 0, and >= frozenN once
+// scrolled past the frozen rows).
 const topSpacerHeight = computed(() =>
   flatWindowEnabled.value
-    ? windowStart.value * rowHeightPx.value
+    ? Math.max(0, windowStart.value - frozenTopRowsCountEffective.value) * rowHeightPx.value
     : groupedWindowEnabled.value
       ? groupedItemOffsets.value[groupWindowStart.value]
       : 0,
@@ -769,6 +823,11 @@ function measureViewport() {
   const firstGroupSubtotal = tableWrap.value.querySelector<HTMLElement>('tbody tr.meta-grid__group-subtotal')
   const gs = firstGroupSubtotal?.offsetHeight ?? 0
   if (gs > 0) measuredGroupSubtotalHeight.value = gs
+  // #5863c: frozen-row `top` offsets stack under the real header height (its sticky-top position),
+  // not the density-based row height fallback used for body rows.
+  const headerRow = tableWrap.value.querySelector<HTMLElement>('thead tr')
+  const hh = headerRow?.offsetHeight ?? 0
+  if (hh > 0) measuredHeaderHeight.value = hh
   maybeKickWhenNotScrollable()
 }
 
@@ -1093,7 +1152,11 @@ function resolveRowActions(recordId: string): MetaRowActions {
 // context affordance — no floating menu component, just the native contextmenu suppressed when actionable.
 // Gated on `canCreate` (a duplicate is a create; the server re-enforces it). NOT active while a cell is being
 // edited, so the native menu (copy/paste) still works inside the cell editor.
-function onRowContextMenu(e: MouseEvent, recordId: string): void {
+// `ri` (row index, flat path only) is unused today — accepted so callers can pass it without a
+// signature mismatch; the row-freeze pin (#5863c) is its own dedicated button, not merged into this
+// gesture (this remains a single instant action, not an actual multi-item context menu).
+function onRowContextMenu(e: MouseEvent, recordId: string, ri?: number): void {
+  void ri
   if (!props.canCreate || editCell.value) return
   e.preventDefault()
   emit('duplicate-record', recordId)
@@ -1124,8 +1187,9 @@ const isEditable = (recordId: string, f: MetaField) =>
   !isFieldAlwaysReadOnly(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
-function cellStyle(rid: string, fid: string, ci?: number) {
+function cellStyle(rid: string, fid: string, ci?: number, ri?: number) {
   const frozen = typeof ci === 'number' && isFrozen(ci)
+  const frozenRow = typeof ri === 'number' && isFrozenRow(ri)
   // frozen cells need a definite width so the sticky-offset math is exact
   const w = frozen ? colWidth(fid) : props.columnWidths?.[fid]
   const widthStyle: Record<string, string> | undefined = w
@@ -1156,12 +1220,22 @@ function cellStyle(rid: string, fid: string, ci?: number) {
   const effectiveFormat: Record<string, string> | undefined = (barEntry || colorScaleFill)
     ? (formatStyle?.color ? { color: formatStyle.color } : undefined)
     : formatStyle
-  // frozen body cell: sticky-left + an OPAQUE bg (occludes scrolled-under content). Preserve any
-  // conditional-formatting backgroundColor — only fall back to #fff when formatting set none. (Row
-  // hover/selection tint is still not shown on frozen cells — accepted MVP limitation; conditional
-  // formatting is NOT lost.) With a data bar present, the opaque base is #fff so the gradient shows.
-  const frozenStyle: Record<string, string> | undefined = frozen
-    ? { position: 'sticky', left: `${frozenLeft(ci!)}px`, zIndex: '2', backgroundColor: colorScaleFill ?? effectiveFormat?.backgroundColor ?? '#fff' }
+  // frozen body cell: sticky-left and/or sticky-top + an OPAQUE bg (occludes scrolled-under
+  // content). Preserve any conditional-formatting backgroundColor — only fall back to #fff when
+  // formatting set none. (Row hover/selection tint is still not shown on frozen cells — accepted
+  // MVP limitation; conditional formatting is NOT lost.) With a data bar present, the opaque base
+  // is #fff so the gradient shows.
+  // #5863c: a cell frozen on BOTH axes (frozen column ∩ frozen row) needs a HIGHER zIndex (3) than
+  // either single-axis frozen cell (2) so it paints over a frozen-row-only or frozen-column-only
+  // neighbor cell scrolling past it — see multitable-frozen-columns-grid.spec.ts.
+  const frozenStyle: Record<string, string> | undefined = (frozen || frozenRow)
+    ? {
+        position: 'sticky',
+        ...(frozen ? { left: `${frozenLeft(ci!)}px` } : {}),
+        ...(frozenRow ? { top: `${frozenRowTop(ri!)}px` } : {}),
+        zIndex: frozen && frozenRow ? '3' : '2',
+        backgroundColor: colorScaleFill ?? effectiveFormat?.backgroundColor ?? '#fff',
+      }
     : undefined
   // Over a scale fill, force a readable text color via a CSS var the cell-renderer
   // sign-colors inherit (see the `.meta-grid__cell--scale-fill` :deep rule). A
@@ -1231,6 +1305,28 @@ const rowNumLeft = computed(() => (props.enableMultiSelect ? CHECK_COL_W : 0))
 function onToggleFreeze(i: number) {
   if (i === frozenCount.value - 1) emit('set-frozen', [])
   else emit('set-frozen', props.visibleFields.slice(0, i + 1).map((f) => f.id))
+}
+
+// ── frozen top rows (#5863c) ────────────────────────────────────────────────
+// FLAT/UNGROUPED PATH ONLY — the grouped-rows render path (server-side nested groups, subtotals,
+// collapse) has no stable "first N rendered data rows" concept independent of collapse state, so
+// row-freezing is intentionally a no-op there (isFrozenRow always false when groupedRows is truthy).
+// The row-number context menu disables the freeze-rows action while grouping is active for the
+// same reason (see onRowContextMenu / the freeze-rows menu entry below).
+const frozenTopRowsCountEffective = computed(() => {
+  if (groupedRows.value) return 0
+  return Math.max(0, Math.min(props.frozenTopRowCount ?? 0, filteredRows.value.length))
+})
+function isFrozenRow(ri: number) { return ri < frozenTopRowsCountEffective.value }
+// Real layout override (measureViewport), falling back to the header's own padding/font math so the
+// very first paint (before layout is measured) still offsets frozen rows below the header.
+const HEADER_ROW_DEFAULT_HEIGHT = 37
+const measuredHeaderHeight = ref(0)
+const headerHeightPx = computed(() => (measuredHeaderHeight.value > 0 ? measuredHeaderHeight.value : HEADER_ROW_DEFAULT_HEIGHT))
+function frozenRowTop(ri: number) { return headerHeightPx.value + ri * rowHeightPx.value }
+function onToggleFreezeRows(ri: number) {
+  if (frozenTopRowsCountEffective.value === ri + 1) emit('set-frozen-rows', 0)
+  else emit('set-frozen-rows', Math.min(ri + 1, MAX_FROZEN_TOP_ROWS))
 }
 
 // ── aggregation footer (#4-3b-1): SERVER-RESPONSE ONLY, no local fallback ──
@@ -1761,17 +1857,34 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
 /* Header-only refinements: target thead specifically so the shared
    row-num/check-col classes (also used on body td) keep their existing
-   body-row appearance — only the header cells adopt the panel/token look. */
+   body-row appearance — only the header cells adopt the panel/token look.
+   #5863: these corner cells sit at the intersection of the left-sticky row-num/
+   check-col stack and the sticky-top header row, so they need BOTH `top: 0`
+   and a zIndex above a frozen body cell's (2) — 3, matching the plain
+   (non-frozen) `.meta-field-header` tier, so the corner paints over body
+   content scrolling underneath it in both directions. */
 thead .meta-grid__row-num,
 thead .meta-grid__check-col {
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
+  position: sticky;
+  top: 0;
+  z-index: 3;
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
 .meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
+/* #5863c: a frozen-top row is always rendered (never virtualized away, see windowRows/isFrozenRow)
+   and pinned by its own cells' `position: sticky; top: ...` (see cellStyle) — `content-visibility:
+   auto` would otherwise let the browser skip its layout/paint once scrolled "off" its ORIGINAL flow
+   position, which fights the sticky offset. */
+.meta-grid__row--frozen-top { content-visibility: visible; }
+.meta-grid__row-pin { border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.12s; vertical-align: middle; }
+.meta-grid__row-num:hover .meta-grid__row-pin { opacity: 0.4; }
+.meta-grid__row-pin:hover { opacity: 0.85; }
+.meta-grid__row-pin--on { opacity: 0.9; }
 .meta-grid__row:hover { background: var(--ms-bg-page, #f5f6f8); }
 .meta-grid__row--selected, .meta-grid__row--focused { background: #ecf5ff; }
 .meta-grid__cell { position: relative; padding: 6px 12px; border-bottom: 1px solid #eee; overflow: hidden; text-overflow: ellipsis; cursor: default; }

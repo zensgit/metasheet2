@@ -1667,7 +1667,11 @@ export interface AiBulkPreviewRow {
  * is heterogeneous: `skipped_no_perm` (not writable — needs a perm change),
  * `rate_limited_before_call` / `blocked_before_call` (transient — a re-run may
  * reach it), `generation_failed_before_usage` (provider failed, no usage),
- * `unsafe_input` (secret-shaped content, not sent).
+ * `unsafe_input` (secret-shaped content, not sent), `sheet_not_live` (#5838: the
+ * table could not be confirmed available WHILE the batch ran — deleted, its row
+ * gone, or the liveness lookup itself failed; the server fails closed on all
+ * three and does not distinguish them here, so copy for this reason must not
+ * ASSERT a deletion).
  */
 export interface AiBulkPreviewSkipped {
   recordId: string
@@ -1693,11 +1697,22 @@ export interface AiBulkPreviewData {
   /** Total settled provider cost (USD) for THIS preview — already charged; shown for cost honesty. */
   settledCost: number
   /**
-   * true → the batch BROKE EARLY (provider/cache error or quota/blocked/
-   * rate-limit hit mid-loop): the preview is PARTIAL, remaining in-scope rows
-   * were not reached. NOT the over-cap path (that is a 400 BULK_SCOPE_TOO_LARGE
-   * which never returns rows). The backend deliberately returns NO total, so the
-   * UI signals incompleteness without a count (hidden-row oracle guard).
+   * true → the batch BROKE EARLY: a provider/cache error, a quota/blocked/
+   * rate-limit hit mid-loop, or (#5838) the TABLE stopping being confirmable
+   * mid-loop. The preview is PARTIAL, remaining in-scope rows were not reached.
+   * NOT the over-cap path (that is a 400 BULK_SCOPE_TOO_LARGE which never
+   * returns rows). The backend deliberately returns NO total, so the UI signals
+   * incompleteness without a count (hidden-row oracle guard).
+   *
+   * `capped` alone does NOT say WHICH cause: the causes differ in what the user
+   * should do next, and only the sheet-liveness one makes "write these, then
+   * re-run" wrong (both refuse on a table that is gone). Read `skipped[].reason`
+   * for `sheet_not_live` before rendering re-run advice. A sheet-liveness stop on
+   * the FIRST row usually does not reach here at all: with nothing generated and
+   * nothing charged the server re-reads the verdict and refuses 404 instead. It
+   * DOES reach here when that re-read comes back live (a transient lookup failure
+   * stopped the batch) — an empty, uncharged partial on a live table, which the
+   * re-run advice does fit.
    */
   capped: boolean
 }
@@ -1731,17 +1746,26 @@ export interface AiBulkCommitData {
 // wire (the same fixture-drift rule as B-3).
 
 /**
- * Job lifecycle status (the poll route's `state`, a WorkflowJobStatus). Job mode
+ * Job lifecycle status (the poll route's `state`). Job mode
  * cares about: `queued`/`running` (the worker is still generating — keep polling)
  * → `suspended` (generation done, AWAITING review — the diff is ready) /
  * `resolved` (already committed — terminal success) / `rejected` (cancelled —
  * already-generated rows stay committable) / `errored` (crashed mid-generate —
  * the persisted partial is still committable).
+ *
+ * `committing` (#5842) is the COMMIT phase, NOT a generating one: a commit request holds the
+ * job's claim and is writing records. The server returns it on the poll header, on a cancel it
+ * refused, and on a commit whose claim was lost — so the union must carry it or this contract
+ * lies about a value the API really sends. It is neither committable (a commit is already in
+ * flight → 409) nor terminal (keep polling for the outcome); see the exhaustive policy table in
+ * composables/useAiBulkFill.ts, which is keyed on THIS union so a new status cannot be added
+ * without deciding both questions.
  */
 export type AiBulkJobStatus =
   | 'queued'
   | 'running'
   | 'suspended'
+  | 'committing'
   | 'resolved'
   | 'rejected'
   | 'errored'
@@ -1900,6 +1924,9 @@ export class MultitableApiClient implements CommentsApiClient {
   private templatesCacheCustomUnavailable = false
   private templatesGeneration = 0
   private templatesInflight: { promise: Promise<ListTemplatesResult>; generation: number } | null = null
+  // #5861:「使用模板」的在途合并表。key = (模板 id, baseName, workspaceId);
+  // 只在请求在途期间有条目(settle 即删),所以它挡连点、不挡「稍后再装一次」。
+  private readonly installTemplateInflight = new Map<string, Promise<InstallTemplateResult>>()
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -2246,16 +2273,41 @@ export class MultitableApiClient implements CommentsApiClient {
     return data
   }
 
+  /**
+   * #5861 —— 在途合并(前端侧的第二道闸门)。
+   *
+   * 客户在「使用模板」看起来没反应时反复点,装出了 4 个同名 Base。权威的去重在服务端
+   * (同一意图窗口内只落一个 Base);这里只负责让**同一个前端里**并发的重复调用共用一次
+   * 请求:同 (模板, 落点参数) 的调用在前一次还没落地之前返回同一个 promise,请求只发一次。
+   *
+   * 边界:只合并**在途**的调用 —— 上一次 settle(成功或失败)之后 key 立刻从表里删掉,
+   * 所以「装完之后真的想再装一次」不会被前端永久挡住(那由服务端的窗口决定)。
+   * 不做任何重试:重复发送由去重账本负责变得安全,不是由这里制造。
+   */
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
-    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    })
-    const data = await this.parseJson<InstallTemplateResult>(res)
-    // Installing a template creates a base — the cached bases list is stale.
-    this.invalidateBasesCache()
-    return data
+    // JSON 数组做键:每段都带引号+转义,任何分隔符都无法被模板 id / Base 名伪造出来。
+    const inflightKey = JSON.stringify([templateId, input.baseName ?? null, input.workspaceId ?? null])
+    const pending = this.installTemplateInflight.get(inflightKey)
+    if (pending) return pending
+
+    const run = (async () => {
+      const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      })
+      const data = await this.parseJson<InstallTemplateResult>(res)
+      // Installing a template creates a base — the cached bases list is stale.
+      this.invalidateBasesCache()
+      return data
+    })()
+
+    this.installTemplateInflight.set(inflightKey, run)
+    try {
+      return await run
+    } finally {
+      this.installTemplateInflight.delete(inflightKey)
+    }
   }
 
   // S2 — zero-write install simulation (design 20260611 §2.1). Same body

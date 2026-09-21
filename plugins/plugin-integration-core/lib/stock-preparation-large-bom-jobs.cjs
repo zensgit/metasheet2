@@ -954,6 +954,9 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
       //
       // Listed BEFORE the spread so an explicit caller value still wins (the route stays the
       // authority over what it passes); absent on both => `undefined` => the expander's default.
+      // #5862: the snapshot carries the WHOLE normalized block (`sheetMetalMatch`,
+      // `sheetMetalRequiresMainPrefix` included), and a snapshot taken before those keys existed
+      // re-normalizes to the老系统 defaults for them — so both lanes read one rule set.
       rootSelection: job.actionSnapshot && job.actionSnapshot.rootSelection,
       ...expansionOptions,
     })

@@ -388,7 +388,7 @@
           :rows="grid.rows.value" :visible-fields="scopedGridFields" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="effectiveRowActions.canEdit"
-          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
+          :can-delete="gridAllowsAnyDelete" :can-bulk-edit="effectiveRowActions.canEdit" :can-bulk-restore="effectiveRowActions.canEdit" :can-create="caps.canCreateRecord.value" :frozen-left-column-ids="activeFrozenLeftColumnIds" :frozen-top-row-count="activeFrozenTopRowCount" :aggregation-config="activeAggregationConfig" :aggregates="aggregateValues" :aggregate-too-large="aggregateTooLarge" :aggregate-groups="aggregateGroups" :field-read-only-ids="readOnlyFieldIds" :column-widths="activeColumnWidths" :collapsed-group-keys="activeCollapsedGroupKeys"
           :row-action-overrides="grid.rowActionOverrides.value"
           :link-summaries="grid.linkSummaries.value" :person-summaries="grid.personSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="gridAllowsAnyDelete || effectiveRowActions.canEdit"
@@ -416,6 +416,7 @@
           @create-record="onAddRecord"
           @duplicate-record="onDuplicateRecord"
           @set-frozen="onSetFrozen"
+          @set-frozen-rows="onSetFrozenRows"
           @set-aggregation="onSetAggregation"
           @toggle-group="onToggleGroup"
           @open-comments="onOpenRecordComments"
@@ -906,6 +907,7 @@ import {
 } from '../utils/calendar-holiday-notice'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 import { parseFrozenIds } from '../utils/frozen-columns'
+import { parseFrozenTopRowCount } from '../utils/frozen-rows'
 import {
   parseColumnWidths,
   parseRowDensity,
@@ -3657,6 +3659,15 @@ const activeFrozenLeftColumnIds = computed(() => parseFrozenIds(workbench.active
 function onSetFrozen(frozenLeftColumnIds: string[]) {
   void onPersistActiveViewConfig({
     config: { ...(workbench.activeView.value?.config ?? {}), frozenLeftColumnIds },
+  })
+}
+
+// frozen top rows (#5863c) — same opaque-config pattern as frozen columns above; view.config is
+// freeform JSON, so no backend key allowlist to update (see frozen-rows.ts narrowing).
+const activeFrozenTopRowCount = computed(() => parseFrozenTopRowCount(workbench.activeView.value?.config))
+function onSetFrozenRows(frozenTopRowCount: number) {
+  void onPersistActiveViewConfig({
+    config: { ...(workbench.activeView.value?.config ?? {}), frozenTopRowCount },
   })
 }
 

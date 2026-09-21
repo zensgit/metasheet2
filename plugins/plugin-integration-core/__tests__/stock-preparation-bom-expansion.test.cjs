@@ -15,6 +15,7 @@ const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
+  normalizeRootSelection,
   expandPlmProjectBom,
   summarizeBomExpansionForEvidence,
   summarizeMissingComponents,
@@ -24,7 +25,7 @@ const {
 // X5: `createRowErrorCollector` rides the same seam, so the cap's MEMORY bound can be asserted on
 // the structure itself rather than only through the length of an expansion's output.
 const {
-  __internals: { dashHierarchyRelationship, createRowErrorCollector },
+  __internals: { dashHierarchyRelationship, createRowErrorCollector, hasSheetMetalShape, hasMainDrawingShape, selectOrderRootCandidates },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 
 // The C3 planner, required HERE so one test can carry a declared source column the whole way:
@@ -1827,6 +1828,166 @@ async function testRootSelectionDropsDashDescendantsWhenNoMainDrawing() {
   assert.equal(dashHierarchyRelationship('K300-01', '   '), -1, '判不了就是 -1,而 -1 从不导致剔除')
 }
 
+// ⑤b #5862 — 钣金匹配方式与前缀可选:客户口径是「图号含 -A/-B/-C/-D」(contains),老系统口径是
+//     endsWith;两者都是配置。总图判定永远先于钣金判定,所以一个总图图号不可能被算成钣金。
+function testSheetMetalMatchModeAndPrefixRequirement() {
+  const endsWith = normalizeRootSelection({ sheetMetalSuffixes: ['-A', '-B', '-C', '-D'] })
+  const contains = normalizeRootSelection({ sheetMetalSuffixes: ['-A', '-B', '-C', '-D'], sheetMetalMatch: 'contains' })
+  assert.equal(endsWith.sheetMetalMatch, 'endsWith', '默认 = 老系统的 endsWith')
+  assert.equal(endsWith.sheetMetalRequiresMainPrefix, true, '默认 = 老系统的「钣金也要 J 开头」')
+
+  // (a) token 在图号中段:contains 认,endsWith 不认。
+  assert.equal(hasSheetMetalShape('J1-2-C-05', contains), true, 'contains:-C 在中段也算钣金')
+  assert.equal(hasSheetMetalShape('J1-2-C-05', endsWith), false, 'endsWith:-C 不在末尾就不算')
+  assert.equal(hasSheetMetalShape('J1-2-A', contains), true, 'contains 也认末尾')
+  // contains 的命中位置必须在首字符之后:以 token 开头的图号不算(前缀要求关掉时才可能出现这种形状)。
+  const containsNoPrefix = normalizeRootSelection({ sheetMetalMatch: 'contains', sheetMetalRequiresMainPrefix: false })
+  assert.equal(hasSheetMetalShape('-A1-2', containsNoPrefix), false, '仅仅以 token 开头不是命中')
+  assert.equal(hasSheetMetalShape('X-A1-2', containsNoPrefix), true, '首字符之后出现才是命中')
+
+  // (b) 总图永远不是钣金,先判总图。
+  assert.equal(hasMainDrawingShape('J1-2-00', contains), true)
+  assert.equal(hasSheetMetalShape('J1-2-00', contains), false, '总图不含 token,当然不是钣金')
+  assert.equal(hasMainDrawingShape('J1-A-00', contains), true, 'J1-A-00 含 -A 又以 -00 结尾:是总图')
+  assert.equal(hasSheetMetalShape('J1-A-00', contains), false, '总图判定先行,所以不是钣金')
+  // 同样的顺序对 endsWith 也成立(那里两种形状本来就不可能重叠,这里只是钉住顺序不因模式而变)。
+  assert.equal(hasSheetMetalShape('J1-A-00', endsWith), false)
+
+  // 顺序在根选择上的后果:两版总图 + 一张真钣金,contains 模式下低版本总图不能借「含 -A」溜回根集合。
+  const candidates = [
+    { componentSourceId: 'M1', componentCode: 'J1-A-00', sourceVersion: 'V1' },
+    { componentSourceId: 'M2', componentCode: 'J1-A-00', sourceVersion: 'V2' },
+    { componentSourceId: 'S1', componentCode: 'J1-2-B-03', sourceVersion: 'V1' },
+    { componentSourceId: 'O1', componentCode: 'J1-2-05', sourceVersion: 'V1' },
+  ]
+  const picked = selectOrderRootCandidates(candidates, contains)
+  assert.deepEqual(picked.selected.map((c) => c.componentSourceId), ['M2', 'S1'], '最高版总图 + 钣金;低版总图不是钣金根')
+  assert.equal(picked.droppedCount, 2)
+
+  // (c) 前缀可选:B1-2-A 在「不要求 J 前缀」下是钣金,默认下不是。
+  const noPrefix = normalizeRootSelection({ sheetMetalRequiresMainPrefix: false })
+  assert.equal(hasSheetMetalShape('B1-2-A', noPrefix), true)
+  assert.equal(hasSheetMetalShape('B1-2-A', endsWith), false, '默认仍要求 J 前缀(老系统)')
+  assert.equal(hasSheetMetalShape('B1-2-00', noPrefix), false, '总图形状要求前缀,B1-2-00 不是总图;也不含 token,所以也不是钣金')
+
+  // (d)(e) 配置 fail-closed:未知键、非法匹配模式都在配置时拒绝,不是静默忽略。
+  assert.throws(
+    () => normalizeRootSelection({ sheetMetalMatchMode: 'contains' }),
+    (error) => error instanceof StockPreparationBomExpansionError
+      && /rootSelection.sheetMetalMatchMode is not a recognized key/.test(error.message)
+      && error.details.field === 'rootSelection.sheetMetalMatchMode',
+    '拼错的键 => 拒,否则存进快照的规则是展开器不跑的规则',
+  )
+  assert.throws(
+    () => normalizeRootSelection({ sheetMetalMatch: 'regex' }),
+    (error) => error instanceof StockPreparationBomExpansionError
+      && /rootSelection.sheetMetalMatch must be one of endsWith, contains/.test(error.message)
+      && error.details.field === 'rootSelection.sheetMetalMatch',
+  )
+  assert.throws(
+    () => normalizeRootSelection({ sheetMetalRequiresMainPrefix: 'no' }),
+    /rootSelection.sheetMetalRequiresMainPrefix/,
+  )
+  // 既有的键一个不少地仍被接受(闭合键集不能把老配置拒掉)。
+  const full = normalizeRootSelection({
+    enabled: true,
+    mainDrawingPrefix: 'J',
+    mainDrawingSuffix: '-00',
+    sheetMetalSuffixes: ['-A', '-B', '-C', '-D'],
+    sheetMetalMatch: 'contains',
+    sheetMetalRequiresMainPrefix: true,
+    dropDashDescendants: true,
+  })
+  assert.deepEqual(Object.keys(full), ['enabled', 'mainDrawingPrefix', 'mainDrawingSuffix', 'sheetMetalSuffixes', 'sheetMetalMatch', 'sheetMetalRequiresMainPrefix', 'dropDashDescendants'])
+  // 归一化的输出能原样喂回归一化(大 BOM 通道从动作快照读回来就是这么用的)。
+  assert.deepEqual(normalizeRootSelection({ ...full, sheetMetalSuffixes: [...full.sheetMetalSuffixes] }), full)
+}
+
+// ⑤c #5862 — values-free 根选择报告:模式 + 四个计数 + flag,没有图号。
+async function testRootSelectionReportCountsAndFlags() {
+  const partLibrary = [
+    { OBJ_ID: 'PART-MAIN-V1', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-MAIN-V3', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V3' },
+    { OBJ_ID: 'PART-SHEET-A', IdentityNo: 'J2601-A', IdentityName: '钣金件A', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-SHEET-B', IdentityNo: 'J2601-B', IdentityName: '钣金件B', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-OTHER', IdentityNo: 'X-900', IdentityName: '别的件', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-P', IdentityNo: 'K300-01', IdentityName: '父件', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-C', IdentityNo: 'K300-01-02', IdentityName: '子件', Material: 'Q235', SysVer: 'V1' },
+    { OBJ_ID: 'PART-U', IdentityNo: 'M900-01', IdentityName: '不相干', Material: 'Q235', SysVer: 'V1' },
+  ]
+  const expand = (partIds, rootSelection) => expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: partIds.map((partId, index) => ({ order_id: 'ORDER-1', part_id: partId, quantity: '1', sort_id: index + 1 })),
+      DN_PDM_PartLibraryInfo: partLibrary,
+      DN_PDM_BomHeadInfo: [],
+      DN_PDM_BomDetailsInfo: [],
+    })).adapter,
+    projectNo: 'P-001',
+    ...(rootSelection ? { rootSelection } : {}),
+  })
+  const reportOf = (result) => result.summary.rootSelectionReport
+  const evidenceReportOf = (result) => summarizeBomExpansionForEvidence(result).rootSelectionReport
+
+  // 总图(两版)+ 两张钣金 + 一条别的:多钣金根 flag。
+  const twoSheets = await expand(['PART-MAIN-V1', 'PART-MAIN-V3', 'PART-SHEET-A', 'PART-SHEET-B', 'PART-OTHER'])
+  assert.deepEqual(reportOf(twoSheets), {
+    mode: 'main_drawing',
+    mainDrawingCandidates: 2,
+    sheetMetalRoots: 2,
+    otherCandidatesDropped: 1,
+    dashDescendantsDropped: 0,
+    flags: ['multipleSheetMetalRoots'],
+  })
+  assert.equal(twoSheets.summary.rootsFilteredOut, 2, '低版总图 + 别的件:两条剔除;报告里 other=1,另一条是被版本压掉的总图(mainDrawingCandidates-1)')
+  assert.deepEqual(evidenceReportOf(twoSheets), reportOf(twoSheets), '报告原样投影到 dry-run 证据')
+  assert.equal(JSON.stringify(reportOf(twoSheets)).includes('J2601'), false, 'VALUES-FREE:报告里没有图号')
+
+  // 总图 + 0 钣金:sheetMetalRootMissing。
+  const noSheet = await expand(['PART-MAIN-V3', 'PART-OTHER'])
+  assert.deepEqual(reportOf(noSheet), {
+    mode: 'main_drawing',
+    mainDrawingCandidates: 1,
+    sheetMetalRoots: 0,
+    otherCandidatesDropped: 1,
+    dashDescendantsDropped: 0,
+    flags: ['sheetMetalRootMissing'],
+  })
+
+  // 无总图 + 3 候选(其中一条是 dash 子级):noMainDrawingMultipleRoots + dash 计数。
+  const noMain = await expand(['PART-P', 'PART-C', 'PART-U'])
+  assert.deepEqual(reportOf(noMain), {
+    mode: 'no_main_drawing',
+    mainDrawingCandidates: 0,
+    sheetMetalRoots: 0,
+    otherCandidatesDropped: 0,
+    dashDescendantsDropped: 1,
+    flags: ['noMainDrawingMultipleRoots'],
+  })
+  assert.equal(noMain.summary.rootsFilteredOut, 1)
+
+  // 无总图 + 单根:没有 flag。
+  const single = await expand(['PART-U'])
+  assert.deepEqual(reportOf(single).flags, [])
+  assert.equal(reportOf(single).mode, 'no_main_drawing')
+
+  // 关掉:mode=disabled,全零,无 flag —— 「规则关着」本身就是答案。
+  const disabled = await expand(['PART-MAIN-V3', 'PART-SHEET-A', 'PART-OTHER'], { enabled: false })
+  assert.deepEqual(reportOf(disabled), {
+    mode: 'disabled',
+    mainDrawingCandidates: 0,
+    sheetMetalRoots: 0,
+    otherCandidatesDropped: 0,
+    dashDescendantsDropped: 0,
+    flags: [],
+  })
+  assert.equal(disabled.rows.length, 3)
+  assert.deepEqual(evidenceReportOf(disabled), reportOf(disabled))
+  // 报告是 summary 的最后一个键:既有条件键都不被它移动。
+  const keys = Object.keys(twoSheets.summary)
+  assert.equal(keys[keys.length - 1], 'rootSelectionReport')
+  assert.equal(keys[keys.length - 2], 'rootsFilteredOut')
+}
+
 // ⑥ 正控:换根/去重之后,沿路径累乘一如既往(老系统 GetChildrenBom 1122-1136)。
 async function testQuantityRollupSurvivesF1c() {
   const { adapter } = createAdapter(baseData({
@@ -2004,6 +2165,8 @@ async function main() {
   await testSiblingsThatDisagreeOnQuantityAreNotCollapsed()
   await testRootSelectionKeepsHighestMainDrawingAndSheetMetal()
   await testRootSelectionDropsDashDescendantsWhenNoMainDrawing()
+  testSheetMetalMatchModeAndPrefixRequirement()
+  await testRootSelectionReportCountsAndFlags()
   await testQuantityRollupSurvivesF1c()
   await testNameAndSpecSplitThreeShapes()
   await testSortColumnsLandInThePackColumns()

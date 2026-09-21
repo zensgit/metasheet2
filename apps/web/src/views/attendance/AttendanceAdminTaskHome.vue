@@ -46,7 +46,14 @@
         :data-admin-task-group="group.key"
       >
         <div class="attendance__admin-task-copy">
-          <strong>{{ group.title }}</strong>
+          <div class="attendance__admin-task-copy-title">
+            <strong>{{ group.title }}</strong>
+            <span
+              class="attendance__admin-task-status"
+              :class="'attendance__admin-task-status--' + resolveGroupStatus(group.status)"
+              :data-admin-task-status="resolveGroupStatus(group.status)"
+            >{{ statusLabel(group.status) }}</span>
+          </div>
           <span>{{ group.detail }}</span>
         </div>
         <div class="attendance__admin-task-actions">
@@ -79,6 +86,12 @@
 </template>
 
 <script setup lang="ts">
+import {
+  attendanceAdminTaskHomeStatusLabel,
+  resolveAttendanceAdminTaskHomeStatus,
+  type AttendanceAdminTaskHomeStatus,
+} from './attendanceAdminTaskHomeStatus'
+
 type TranslateFn = (en: string, zh: string) => string
 
 type AttendanceAdminTaskHomeLinkAction = {
@@ -103,14 +116,23 @@ type AttendanceAdminTaskHomeGroup = {
   key: string
   title: string
   detail: string
+  status?: AttendanceAdminTaskHomeStatus | string
   linkActions: AttendanceAdminTaskHomeLinkAction[]
   buttonActions: AttendanceAdminTaskHomeSectionAction[]
 }
 
-defineProps<{
+const props = defineProps<{
   tr: TranslateFn
   groups: AttendanceAdminTaskHomeGroup[]
 }>()
+
+function resolveGroupStatus(status: AttendanceAdminTaskHomeGroup['status']): AttendanceAdminTaskHomeStatus {
+  return resolveAttendanceAdminTaskHomeStatus(status)
+}
+
+function statusLabel(status: AttendanceAdminTaskHomeGroup['status']): string {
+  return attendanceAdminTaskHomeStatusLabel(resolveGroupStatus(status), props.tr)
+}
 
 const emit = defineEmits<{
   'select-section': [id: string]
@@ -214,9 +236,59 @@ function onLinkActionClick(href: string, event: MouseEvent): void {
   gap: 5px;
 }
 
+.attendance__admin-task-copy-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .attendance__admin-task-copy strong {
   color: #1f2937;
   font-size: 13px;
+}
+
+.attendance__admin-task-status {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+  border: 1px solid #cbd5e1;
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.attendance__admin-task-status--ok {
+  border-color: #86efac;
+  background: #dcfce7;
+  color: #166534;
+}
+
+.attendance__admin-task-status--needs_attention {
+  border-color: #fdba74;
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.attendance__admin-task-status--not_configured {
+  border-color: #fcd34d;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.attendance__admin-task-status--failed {
+  border-color: #fca5a5;
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.attendance__admin-task-status--unknown {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+  color: #475569;
 }
 
 .attendance__admin-task-copy span {

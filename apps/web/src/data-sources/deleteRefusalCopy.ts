@@ -11,18 +11,16 @@
  *
  * ### Why this module exists
  *
- * Left alone, the store surfaces `error.message` verbatim — which is English prose naming an
- * internal table (`integration_external_systems.config.dataSourceId`) and advertising the
- * platform-admin `force=true` escape hatch. Operators of this page are neither. This turns the
- * refusal into the two things they can act on: HOW MANY bindings hold the source, and WHERE to go
- * clear them.
+ * Left alone, the store surfaces `error.message` verbatim — bilingual server prose written for an
+ * API caller. This turns the refusal into the two things an operator can act on: HOW MANY bindings
+ * hold the source, and WHERE to go clear them.
  *
  * ### Deliberately absent: force
  *
- * `force=true` is a platform-admin API-level action, audited as a deliberate reference break. It is
- * NOT surfaced here and there is no UI affordance for it — this copy must not teach an operator to
- * reach for a flag the UI will not send and their role would be refused anyway (403
- * `DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY`).
+ * There is no force path any more, anywhere. `?force=true` used to be a platform-admin API-level
+ * reference break; the owner retired it on 2026-09-20 (a referenced source cannot be deleted —
+ * unbind first) and the server now ignores the flag for every tier. This UI never sent it and
+ * still does not; the only route through the refusal is the one this copy points at.
  *
  * ### values-free
  *

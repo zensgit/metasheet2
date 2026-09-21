@@ -272,6 +272,10 @@ const ROUTES = [
   ['GET', '/api/integration/staging/descriptors', 'stagingDescriptors'],
   ['POST', '/api/integration/staging/install', 'stagingInstall'],
   ['GET', '/api/integration/runs', 'runsList'],
+  ['GET', '/api/integration/runs/:runId', 'runsGet'],
+  // Q4a: per-run provenance sub-route. A distinct segment count from '/runs/:runId' above, so the
+  // ':runId' pattern cannot capture it (no ordering hazard like '/templates/references').
+  ['GET', '/api/integration/runs/:runId/provenance', 'runsProvenance'],
   ['GET', '/api/integration/provenance', 'provenanceByRow'],
   ['GET', '/api/integration/dead-letters', 'deadLettersList'],
   ['POST', '/api/integration/dead-letters/:id/replay', 'deadLettersReplay'],
@@ -9915,6 +9919,90 @@ function requireStockPreparationAudit() {
         limit: asListLimit(query.limit),
         offset: asListOffset(query.offset),
       })))
+    },
+
+    // SC-04: single-run read. Same gate as runsList (requireAccess 'read' → scopedInput →
+    // resolveTenantId, which already carries assertVerifiedTenantClaim). Deliberately NOT wrapped in
+    // resolveOperatorValueScope: that helper is scoped to the stock-prep operator tier and its own
+    // comment excludes the integration:read legacy tier this route belongs to.
+    //
+    // getPipelineRun is intentionally NOT added to the pipelineRegistry requireService list
+    // (optional-method 501, like listProvenanceByRow): adding it would make every host wiring and
+    // every test mock that predates this route fail at mount time.
+    //
+    // 404 is NOT a cross-tenant existence oracle: the registry's WHERE carries tenant_id +
+    // workspace_id + id, so another tenant's run id and a non-existent id are one selectOne miss.
+    // The registry's PipelineNotFoundError.details echoes {id, tenantId, workspaceId} and sendError
+    // passes `details` through — so the miss is re-thrown here as a details-free 404 and the
+    // response body is identical for both cases.
+    async runsGet(req, res) {
+      requireAccess(req, 'read')
+      if (typeof pipelineRegistry.getPipelineRun !== 'function') {
+        throw new HttpRouteError(501, 'RUN_READ_NOT_IMPLEMENTED', 'Run read is not implemented')
+      }
+      const runId = firstString(requestParams(req).runId)
+      if (!runId) {
+        throw new HttpRouteError(400, 'RUN_ID_REQUIRED', 'runId is required')
+      }
+      let run
+      try {
+        run = await pipelineRegistry.getPipelineRun(scopedInput(req, { id: runId }))
+      } catch (error) {
+        if (error && /NotFound/.test(String(error.name))) {
+          throw new HttpRouteError(404, 'RUN_NOT_FOUND', 'pipeline run not found')
+        }
+        throw error
+      }
+      return sendOk(res, run)
+    },
+
+    // Q4a: read-only per-RUN provenance timeline — the run-detail counterpart of the by-rowId
+    // route below. Same gate as runsGet (requireAccess 'read' → scopedInput → resolveTenantId,
+    // which already carries assertVerifiedTenantClaim); no write, replay or retry.
+    //
+    // The by-rowId route's `rowId` requirement is untouched: that route still 400s without one
+    // (ROW_ID_REQUIRED, below). This is a SEPARATE path whose selector is the runId already in
+    // the URL, not a relaxation of that guard.
+    //
+    // Neither listProvenanceByRun nor getPipelineRun is in the pipelineRegistry requireService
+    // list (optional-method 501, like listProvenanceByRow / getPipelineRun): adding either would
+    // make every host wiring and test mock that predates this route fail at MOUNT time.
+    //
+    // 404 before the read, and NOT a cross-tenant existence oracle: the run is first resolved
+    // through getPipelineRun, whose WHERE carries tenant_id + workspace_id + id, so another
+    // tenant's run id and a non-existent id are one selectOne miss and produce the identical
+    // details-free 404. Without that probe an unknown run would answer 200 + [] — which is the
+    // same body a real-but-empty run gives, so the 404 is what makes "not yours" indistinguishable
+    // from "does not exist" rather than distinguishable from "exists but has no events".
+    async runsProvenance(req, res) {
+      requireAccess(req, 'read')
+      if (typeof pipelineRegistry.listProvenanceByRun !== 'function') {
+        throw new HttpRouteError(501, 'PROVENANCE_READ_NOT_IMPLEMENTED', 'Provenance read is not implemented')
+      }
+      if (typeof pipelineRegistry.getPipelineRun !== 'function') {
+        throw new HttpRouteError(501, 'RUN_READ_NOT_IMPLEMENTED', 'Run read is not implemented')
+      }
+      const runId = firstString(requestParams(req).runId)
+      if (!runId) {
+        throw new HttpRouteError(400, 'RUN_ID_REQUIRED', 'runId is required')
+      }
+      try {
+        await pipelineRegistry.getPipelineRun(scopedInput(req, { id: runId }))
+      } catch (error) {
+        if (error && /NotFound/.test(String(error.name))) {
+          throw new HttpRouteError(404, 'RUN_NOT_FOUND', 'pipeline run not found')
+        }
+        throw error
+      }
+      const query = requestQuery(req)
+      // asListLimit caps at MAX_LIST_LIMIT (500), below the registry's own 1000 ceiling; the
+      // registry still applies its default when nothing usable arrives, so the tighter of the
+      // two always wins and no caller-supplied value can widen the page.
+      const items = await pipelineRegistry.listProvenanceByRun(scopedInput(req, {
+        runId,
+        limit: asListLimit(query.limit),
+      }))
+      return sendOk(res, { items })
     },
 
     // DF-N2-2c: read-only by-rowId provenance timeline (cross-run). Reads the

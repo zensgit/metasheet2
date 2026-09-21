@@ -144,6 +144,15 @@
 # by a THIRD new spec, attendanceFeatureOverride.spec.ts — src/stores/featureFlags.ts is NOT
 # under the attendance/** glob (it's a cross-surface store), so both the store file and its new
 # spec are added to the path filter explicitly.
+# DELETE transport fallback (2026-09-18): apps/web/src/utils/delete-fallback.ts is imported by
+# utils/api.ts, so it is in the module graph of EVERY harness this lane boots — a change there is
+# exactly what turned the attendance-makeup browser step 6/6 red (the module then lived under
+# src/api/ and the harness `**/api/**` route stub swallowed it). Without the two entries below, a
+# PR touching only that module classified as relevant=false and skipped the very lane that catches
+# it. Both wiring points (push.paths + the in-job classifier) per this file's convention. Its spec,
+# apps/web/tests/delete-fallback.spec.ts, is deliberately NOT listed: it already runs in the
+# always-on required-web-tests lane (apps/web/scripts/run-required-web-tests.sh), and a spec-only
+# change cannot alter this lane's module graph.
 #
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
@@ -162,6 +171,7 @@ on:
       - 'apps/web/src/composables/useSessionOrg.ts'
       - 'apps/web/src/composables/useAttendanceSessionGuard.ts'
       - 'apps/web/src/utils/api.ts'
+      - 'apps/web/src/utils/delete-fallback.ts'
       - 'apps/web/src/utils/explicitSessionOrg.ts'
       - 'apps/web/src/services/attendance/effectiveCalendar.ts'
       - 'apps/web/src/services/attendance/teamAvailability.ts'
@@ -215,6 +225,8 @@ on:
       - 'apps/web/tests/attendance-reports-analytics.spec.ts'
       - 'apps/web/tests/attendance-overview-priority.spec.ts'
       - 'apps/web/tests/AttendanceAdminTaskHome.spec.ts'
+      - 'apps/web/tests/attendanceAdminTaskHomeStatus.spec.ts'
+      - 'apps/web/tests/attendanceAdminTaskHomeAccess.spec.ts'
       - 'apps/web/tests/attendance-experience-entrypoints.spec.ts'
       - 'apps/web/tests/attendance-experience-mobile-zh.spec.ts'
       - 'apps/web/tests/attendanceGroupContextRoute.spec.ts'
@@ -289,6 +301,7 @@ jobs:
               apps/web/src/composables/useSessionOrg.ts|\
               apps/web/src/composables/useAttendanceSessionGuard.ts|\
               apps/web/src/utils/api.ts|\
+              apps/web/src/utils/delete-fallback.ts|\
               apps/web/src/utils/explicitSessionOrg.ts|\
               apps/web/src/services/attendance/effectiveCalendar.ts|\
               apps/web/src/services/attendance/teamAvailability.ts|\
@@ -342,6 +355,8 @@ jobs:
               apps/web/tests/attendance-reports-analytics.spec.ts|\
               apps/web/tests/attendance-overview-priority.spec.ts|\
               apps/web/tests/AttendanceAdminTaskHome.spec.ts|\
+              apps/web/tests/attendanceAdminTaskHomeStatus.spec.ts|\
+              apps/web/tests/attendanceAdminTaskHomeAccess.spec.ts|\
               apps/web/tests/attendance-experience-entrypoints.spec.ts|\
               apps/web/tests/attendance-experience-mobile-zh.spec.ts|\
               apps/web/tests/attendanceGroupContextRoute.spec.ts|\
@@ -445,7 +460,7 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-        run: pnpm --filter @metasheet/web exec vitest run --maxWorkers=2 --minWorkers=1 attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation useAttendanceAdminConfig attendanceOverviewRequestReveal attendanceEmployeeMakeupRequestCard attendanceEmployeeLeaveRequestCard tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run --maxWorkers=2 --minWorkers=1 attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendanceAdminTaskHomeStatus attendanceAdminTaskHomeAccess attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation useAttendanceAdminConfig attendanceOverviewRequestReveal attendanceEmployeeMakeupRequestCard attendanceEmployeeLeaveRequestCard tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot
 
       - name: Install Chromium for makeup request browser regression
         if: steps.changes.outputs.relevant == 'true'

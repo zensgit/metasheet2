@@ -20,7 +20,8 @@
  *     every audit row).
  *   - DELETE gains a referential guard: 409 (coded, naming the reference COUNT) while any
  *     integration_external_systems canonical or attributable legacy binding references the
- *     source; force=true is platform-admin only and audited as a deliberate reference break.
+ *     source. There is NO force bypass (owner ruling 2026-09-20 ①): `?force=true` is ignored
+ *     for every tier, admins included, and the 403 DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY is gone.
  *
  * ACTOR TIERS
  *   T1 admin    { role: 'admin' }                        — the management tier (also T1b via roles[])
@@ -58,7 +59,6 @@ import type {
   Transaction,
 } from '../../src/data-adapters/BaseAdapter'
 import {
-  DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE,
   DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
 } from '../../src/data-adapters/DataSourceManager'
@@ -101,7 +101,15 @@ const refCountQueriedIds: string[] = []
 const groupedRefQueries: Array<{ kind: 'canonical' | 'legacy'; ids: string[] }> = []
 
 function fakeDb() {
-  return {
+  // Table-strict: only data_sources (+ integration_external_systems on selectFrom) is
+  // modelled; any other table name is a harness error. The lock's table name is pinned in
+  // data-source-remove-ordering.test.ts; this matrix only refuses drift.
+  function onlyDataSources(verb: string, table: string): void {
+    if (table !== 'data_sources') {
+      throw new Error(`fake db: ${verb}(${JSON.stringify(table)}) — the stand-in models only data_sources`)
+    }
+  }
+  const executor = {
     selectFrom: (table: string) => {
       if (table === 'integration_external_systems') {
         const captured: Array<{ lhs: unknown; op: unknown; value: unknown }> = []
@@ -166,21 +174,36 @@ function fakeDb() {
         }
         return b
       }
-      const b = { selectAll: () => b, where: () => b, execute: async () => [] }
+      // data_sources: loadFromDatabase's selectAll chain, and (W7-B) removeDataSource's
+      // `SELECT id ... FOR UPDATE` lock step at the head of its transaction.
+      onlyDataSources('selectFrom', table)
+      const b = { selectAll: () => b, select: () => b, forUpdate: () => b, where: () => b, execute: async () => [] }
       return b
     },
-    insertInto: () => {
+    insertInto: (table: string) => {
+      onlyDataSources('insertInto', table)
       const b = { values: () => b, onConflict: () => b, execute: async () => [] }
       return b
     },
-    updateTable: () => {
+    updateTable: (table: string) => {
+      onlyDataSources('updateTable', table)
       const b = { set: () => b, where: () => b, execute: async () => [] }
       return b
     },
-    deleteFrom: () => {
+    deleteFrom: (table: string) => {
+      onlyDataSources('deleteFrom', table)
       const b = { where: () => b, execute: async () => [] }
       return b
     },
+  }
+  return {
+    ...executor,
+    // W7-B: the delete guard's check + write run inside one transaction; the trx handed to
+    // the callback is this same builder set. Statement ORDER is pinned in
+    // data-source-remove-ordering.test.ts; this matrix pins WHO may delete WHAT.
+    transaction: () => ({
+      execute: async <T>(cb: (trx: typeof executor) => Promise<T>): Promise<T> => cb(executor),
+    }),
   }
 }
 
@@ -494,7 +517,7 @@ describe('data_sources referential delete guard', () => {
     expect(res.body.data).toEqual({ id: ID, removed: true })
   })
 
-  it('REFERENCED source: owner delete => coded 409 naming the OWNER-ATTRIBUTED count and the force escape hatch; source survives', async () => {
+  it('REFERENCED source: owner delete => coded 409 naming the OWNER-ATTRIBUTED count and telling them to UNBIND first; source survives', async () => {
     const ID = 'dsv-del-ref'
     await createAsOwner(ID)
     externalRefRows.push(
@@ -508,7 +531,9 @@ describe('data_sources referential delete guard', () => {
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe(DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE)
     expect(res.body.error.message).toContain('2 external system')
-    expect(res.body.error.message).toContain('force=true')
+    expect(res.body.error.message).toContain('请先解绑 2 个外部系统')
+    // the retired escape hatch is no longer advertised as a way through
+    expect(res.body.error.message).not.toMatch(/repeat the request with force=true/)
     expect(res.body.error.details).toEqual({ referenceCount: 2 })
     // Count, not config: the refusal carries ONLY code/message/details.referenceCount —
     // nothing from the referencing systems' configuration rides along.
@@ -518,15 +543,16 @@ describe('data_sources referential delete guard', () => {
     expect((await as(OWNER).get(`/api/data-sources/${ID}`)).status).toBe(200)
   })
 
-  it('force=true is ADMIN-ONLY: the owner is refused 403 and the source survives', async () => {
+  it('force is RETIRED for the owner: `?force=true` => the same 409 (not 403, not 200); source survives', async () => {
     const ID = 'dsv-del-ref'
     const res = await as(OWNER).delete(`/api/data-sources/${ID}?force=true`)
-    expect(res.status).toBe(403)
-    expect(res.body.error.code).toBe(DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE)
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe(DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE)
+    expect(res.body.error.details).toEqual({ referenceCount: 2 })
     expect((await as(OWNER).get(`/api/data-sources/${ID}`)).status).toBe(200)
   })
 
-  it('admin WITHOUT force => the same 409 (force must be explicit, admin or not)', async () => {
+  it('admin WITHOUT force => the same 409', async () => {
     const ID = 'dsv-del-ref'
     const res = await as(ADMIN).delete(`/api/data-sources/${ID}`)
     expect(res.status).toBe(409)
@@ -540,21 +566,35 @@ describe('data_sources referential delete guard', () => {
     expect(res.body).toEqual(notFoundBody(ID))
   })
 
-  it('admin WITH force=true => 200, audited as a deliberate reference break with actor + owner + count', async () => {
+  it('force is RETIRED for the admin too (owner ruling ①): `?force=true` => 409, nothing deleted, NO delete audit row', async () => {
     const ID = 'dsv-del-ref'
+    const auditBefore = auditCalls('delete', ID).length
     const res = await as(ADMIN).delete(`/api/data-sources/${ID}?force=true`)
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe(DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE)
+    expect(res.body.error.details).toEqual({ referenceCount: 2 })
+    // the former `forcedReferenceBreak` audit shape can no longer be produced by anyone
+    expect(auditCalls('delete', ID).length).toBe(auditBefore)
+    expect(JSON.stringify(auditMock.mock.calls)).not.toContain('forcedReferenceBreak')
+
+    currentUser = OWNER
+    expect((await as(OWNER).get(`/api/data-sources/${ID}`)).status).toBe(200)
+    expect((await as(ADMIN).get(`/api/data-sources/${ID}`)).status).toBe(200)
+  })
+
+  it('once the bindings are gone, the SAME admin delete succeeds — unbinding is the only path', async () => {
+    const ID = 'dsv-del-ref'
+    for (let i = externalRefRows.length - 1; i >= 0; i -= 1) {
+      if (externalRefRows[i]?.dataSourceId === ID) externalRefRows.splice(i, 1)
+    }
+    const res = await as(ADMIN).delete(`/api/data-sources/${ID}`)
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual({ id: ID, removed: true })
-
     expect(auditCalls('delete', ID).at(-1)).toMatchObject({
       actorId: ADMIN.id,
-      meta: {
-        ownerId: OWNER.id,
-        crossOwnerAdmin: true,
-        forcedReferenceBreak: true,
-        referenceCount: 2,
-      },
+      meta: { ownerId: OWNER.id, crossOwnerAdmin: true },
     })
+    expect(auditCalls('delete', ID).at(-1)?.meta).not.toHaveProperty('forcedReferenceBreak')
 
     currentUser = OWNER
     expect((await as(OWNER).get(`/api/data-sources/${ID}`)).status).toBe(404)

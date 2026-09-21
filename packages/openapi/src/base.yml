@@ -1749,6 +1749,461 @@ components:
           format: date-time
           description: Run creation time; the read-route from/to window bounds whole runs by this field.
       required: [runId, pipelineId, rowId, eventType, at, attrs, eventIndex, runStatus, runMode, runCreatedAt]
+    IntegrationPipelineRun:
+      type: object
+      description: >-
+        SC-04 pipeline run projection. This is the EXACT shape produced by the plugin's
+        rowToPipelineRun (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared
+        verbatim by the list route (GET /api/integration/runs) and the single-run read
+        (GET /api/integration/runs/{runId}) — the single read does no extra join, so the
+        two projections cannot drift.
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        workspaceId:
+          type: string
+          nullable: true
+        pipelineId:
+          type: string
+        mode:
+          type: string
+          description: Run mode recorded by the runner (e.g. dry-run vs. a real write run).
+        triggeredBy:
+          type: string
+          nullable: true
+        status:
+          type: string
+        rowsRead:
+          type: integer
+        rowsCleaned:
+          type: integer
+        rowsWritten:
+          type: integer
+        rowsFailed:
+          type: integer
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        durationMs:
+          type: integer
+          nullable: true
+        errorSummary:
+          type: string
+          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+          description: >-
+            Run detail JSONB as persisted by the runner (e.g. targetWriteSummaries,
+            watermarkAdvanced). Forward-compatible: unknown keys are passed through
+            unchanged. Already sanitized at write time; this read path does NOT re-redact,
+            so nothing secret may be written into it.
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+      required: [id, tenantId, pipelineId, mode, status, rowsRead, rowsCleaned, rowsWritten, rowsFailed]
+    StockPreparationSnapshotBatchSummary:
+      type: object
+      description: >-
+        Q4c: one row of the readonly BOM snapshot-batch LIST (view 2). Exact shape produced by
+        plugin-integration-core's batchSummary
+        (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:201), one per
+        immutable snapshot batch of the business project. Values-free: no drawing number,
+        quantity, unit, path key or timestamp value, only counts/status enums/booleans and the
+        presence of createdAt (never its value).
+      properties:
+        snapshotBatchId:
+          type: string
+          nullable: true
+        snapshotVersion:
+          type: integer
+          description: Defaults to 0 when the stored cell is missing or non-numeric.
+        snapshotStatus:
+          type: string
+          nullable: true
+        syncRunId:
+          type: string
+          nullable: true
+        lineCount:
+          type: integer
+          description: Count of bom_snapshot_line rows linked to this batch.
+        createdAtPresent:
+          type: boolean
+          description: Whether the batch row's createdAt cell is set — never the timestamp itself.
+        incomplete:
+          type: boolean
+          description: >-
+            True when the multi-step persist path (batch row -> lines -> run row) did not
+            finish: zero lines OR no matching run row (isBatchIncomplete,
+            stock-preparation-snapshot-reads.cjs:197). An orphaned batch is never presented as
+            normal.
+      required: [snapshotBatchId, snapshotVersion, snapshotStatus, syncRunId, lineCount, createdAtPresent, incomplete]
+    StockPreparationSnapshotBatchListResult:
+      type: object
+      description: >-
+        Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches
+        (listSnapshotBatches, stock-preparation-snapshot-reads.cjs:228). Batches are ordered
+        newest-first (highest snapshotVersion first; snapshotBatchId breaks ties,
+        orderBatches, same file:215). An unprovisioned batch sheet degrades gracefully to
+        `{ projectId, batchCount: 0, batches: [] }` rather than an error.
+      properties:
+        projectId:
+          type: string
+          description: The (business) projectId the request named, echoed back.
+        batchCount:
+          type: integer
+        batches:
+          type: array
+          items: { $ref: '#/components/schemas/StockPreparationSnapshotBatchSummary' }
+      required: [projectId, batchCount, batches]
+    StockPreparationSnapshotChangeCounts:
+      type: object
+      description: >-
+        Q4c: values-free per-changeType tally over one snapshot-batch diff's evidence
+        (changeCountsFromEvidence, stock-preparation-snapshot-reads.cjs:263). Exactly these 10
+        keys; each defaults to 0 when the engine's evidence carries no rows of that changeType.
+        `componentCodeChanged`/`materialChanged` (added Q3c) are independent of
+        `fingerprintChanged` — a row can carry more than one changeType, so these two do not
+        subtract from it.
+      properties:
+        added: { type: integer }
+        removed: { type: integer }
+        quantityChanged: { type: integer }
+        unitChanged: { type: integer }
+        versionChanged: { type: integer }
+        pathChanged: { type: integer }
+        missingChildBom: { type: integer }
+        fingerprintChanged:
+          type: integer
+          description: Tally of the engine's source_fingerprint_changed changeType.
+        componentCodeChanged:
+          type: integer
+          description: >-
+            In-place component-code swap at an otherwise unchanged path (Q3c fingerprint
+            decomposition); previously only visible folded into fingerprintChanged.
+        materialChanged:
+          type: integer
+          description: >-
+            In-place material substitution at an otherwise unchanged path (Q3c fingerprint
+            decomposition); previously only visible folded into fingerprintChanged.
+      required:
+        - added
+        - removed
+        - quantityChanged
+        - unitChanged
+        - versionChanged
+        - pathChanged
+        - missingChildBom
+        - fingerprintChanged
+        - componentCodeChanged
+        - materialChanged
+    StockPreparationSnapshotDiffResult:
+      type: object
+      description: >-
+        Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff
+        (getSnapshotDiff, stock-preparation-snapshot-reads.cjs:404). Values-free counts-only diff
+        of the named batch against its resolved base (predecessor or caller-chosen). An
+        unprovisioned substrate (no batch/line/exception sheet at all) degrades gracefully to
+        zero counts and a null baseSnapshotBatchId rather than an error.
+      properties:
+        snapshotBatchId:
+          type: string
+        baseSnapshotBatchId:
+          type: string
+          nullable: true
+          description: >-
+            null when no predecessor exists and the caller named none. Otherwise the resolved
+            (auto-picked or caller-chosen and validated) base batch id.
+        changeCounts:
+          $ref: '#/components/schemas/StockPreparationSnapshotChangeCounts'
+        blockingExceptionCount:
+          type: integer
+          description: >-
+            exception_confirmation rows linked to this batch whose stored severity is
+            'blocking'; not filtered by resolution status.
+      required: [snapshotBatchId, baseSnapshotBatchId, changeCounts, blockingExceptionCount]
+    StockPreparationSnapshotDiffRow:
+      type: object
+      description: >-
+        Q4c: one row of the per-row diff browse (view 2 rows). Exact projection produced by
+        projectDiffRow over the engine's makeDiff output, through the closed DIFF_ROW_KEYS
+        allowlist (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:526,
+        :543) — a future engine key can never leak through this route unreviewed. Values-free:
+        handles, enums and sha16-prefixed fingerprints only, never a drawing number, quantity,
+        unit or path key value.
+      properties:
+        diffId:
+          type: string
+          description: Deterministic id (stableDiffId) hashing (base, current, row key).
+        diffType:
+          type: string
+          enum: [added, removed, changed, unchanged, held]
+        reviewStatus:
+          type: string
+          enum: [ready, held]
+          description: >-
+            'held' iff changeTypes includes at least one BLOCKING_CHANGE_TYPES entry
+            (reviewStatusForChangeTypes, stock-preparation-snapshot-diff.cjs:240).
+        changeTypes:
+          type: array
+          items:
+            type: string
+            enum:
+              - added
+              - removed
+              - quantity_changed
+              - unit_changed
+              - version_changed
+              - path_changed
+              - parent_changed
+              - material_changed
+              - component_code_changed
+              - source_fingerprint_changed
+              - invalid_qty
+              - missing_child_bom
+              - duplicate_path_key
+              - missing_path_key
+        reason:
+          type: string
+          description: >-
+            Fixed diagnostic token naming which diff rule produced this row (e.g.
+            matched_path_changed, missing_from_current_snapshot, new_in_current_snapshot,
+            previous_missing_path_key). Closed set today but not asserted stable across engine
+            versions, so left as a free string rather than an enum.
+        rowCount:
+          type: integer
+          description: >-
+            Usually 1 (one source line); >1 only for a duplicate_path_key collision row, where
+            it is the number of raw rows collapsed into this one diagnostic entry.
+        previousSnapshotLineId:
+          type: string
+          nullable: true
+        currentSnapshotLineId:
+          type: string
+          nullable: true
+        keyFingerprint:
+          type: string
+          description: 'sha16:-prefixed non-reversible hash of the row''s match key.'
+        previousPathKeyFingerprint:
+          type: string
+          description: >-
+            sha16:-prefixed hash of the previous row's path key. OMITTED entirely (not null)
+            when there is no previous row or it carries no path key.
+        currentPathKeyFingerprint:
+          type: string
+          description: >-
+            sha16:-prefixed hash of the current row's path key. OMITTED entirely (not null)
+            when there is no current row or it carries no path key.
+      required:
+        - diffId
+        - diffType
+        - reviewStatus
+        - changeTypes
+        - reason
+        - rowCount
+        - previousSnapshotLineId
+        - currentSnapshotLineId
+        - keyFingerprint
+    StockPreparationSnapshotDiffRowsResult:
+      type: object
+      description: >-
+        Q4c: `data` of
+        GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows
+        (listSnapshotDiffRows, stock-preparation-snapshot-reads.cjs:558). Same base-resolution
+        and H-1 completeness-gate semantics as the counts diff; `heldRowCount` is computed over
+        the WHOLE pair BEFORE the optional reviewStatus/diffType filters, so a filtered read
+        keeps that context; `rowCount` is the length of `rows` AFTER filtering.
+      properties:
+        snapshotBatchId:
+          type: string
+        baseSnapshotBatchId:
+          type: string
+          nullable: true
+        rowCount:
+          type: integer
+          description: rows.length after any reviewStatus/diffType filter is applied.
+        heldRowCount:
+          type: integer
+          description: Count of held-reviewStatus rows over the whole pair, before filtering.
+        rows:
+          type: array
+          items: { $ref: '#/components/schemas/StockPreparationSnapshotDiffRow' }
+      required: [snapshotBatchId, baseSnapshotBatchId, rowCount, heldRowCount, rows]
+    IntegrationPipelineFieldMapping:
+      type: object
+      description: >-
+        Q4c: one field mapping row of a pipeline. This is the exact shape produced by
+        plugin-integration-core's rowToFieldMapping (plugins/plugin-integration-core/lib/pipelines.cjs)
+        and is embedded in IntegrationPipeline.fieldMappings when the read requests it
+        (GET /api/integration/pipelines/{id}?includeFieldMappings=true, the default).
+      properties:
+        id: { type: string }
+        pipelineId: { type: string }
+        sourceField: { type: string }
+        targetField: { type: string }
+        transform:
+          type: object
+          nullable: true
+          additionalProperties: true
+        validation:
+          type: object
+          nullable: true
+          additionalProperties: true
+        defaultValue:
+          nullable: true
+          description: Any JSON value persisted as the field's default; shape is caller-defined.
+        sortOrder: { type: integer }
+        createdAt: { type: string, format: date-time, nullable: true }
+      required: [id, pipelineId, sourceField, targetField, sortOrder]
+    IntegrationPipeline:
+      type: object
+      description: >-
+        Q4c: read-only pipeline projection. This is the exact shape produced by
+        plugin-integration-core's rowToPipeline (plugins/plugin-integration-core/lib/pipelines.cjs)
+        and is shared verbatim by the list route (GET /api/integration/pipelines) and the
+        single-pipeline read (GET /api/integration/pipelines/{id}); the list read never embeds
+        `fieldMappings` (the registry call omits it), only the single read does, and only when
+        `includeFieldMappings` is not explicitly `false`.
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        workspaceId: { type: string, nullable: true }
+        projectId: { type: string, nullable: true }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        sourceSystemId: { type: string }
+        sourceObject: { type: string }
+        targetSystemId: { type: string }
+        targetObject: { type: string }
+        stagingSheetId: { type: string, nullable: true }
+        mode: { type: string }
+        idempotencyKeyFields:
+          type: array
+          items: { type: string }
+        options:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [draft, active, paused, disabled]
+        createdBy: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
+        fieldMappings:
+          type: array
+          description: >-
+            Present only on the single-pipeline read with includeFieldMappings !== 'false';
+            absent (not null, not []) on the list route and on a read with
+            includeFieldMappings=false.
+          items: { $ref: '#/components/schemas/IntegrationPipelineFieldMapping' }
+      required:
+        - id
+        - tenantId
+        - name
+        - sourceSystemId
+        - sourceObject
+        - targetSystemId
+        - targetObject
+        - mode
+        - idempotencyKeyFields
+        - options
+        - status
+    IntegrationExternalSystem:
+      type: object
+      description: >-
+        Q4c: public (credential-redacted) external-system projection. This is the exact shape
+        produced by plugin-integration-core's rowToPublicExternalSystem
+        (plugins/plugin-integration-core/lib/external-systems.cjs) and is shared verbatim by the
+        list route (GET /api/integration/external-systems) and the single-system read
+        (GET /api/integration/external-systems/{id}). `config` has every key in that system's
+        `kind`-specific private-config set already deleted (never redacted-in-place); raw
+        credentials are never in this projection — only derived presence/format/fingerprint
+        fields are.
+      properties:
+        id: { type: string }
+        connectionId: { type: string, nullable: true }
+        tenantId: { type: string }
+        workspaceId: { type: string, nullable: true }
+        projectId: { type: string, nullable: true }
+        name: { type: string }
+        kind: { type: string }
+        role:
+          type: string
+          enum: [source, target, bidirectional]
+        config:
+          type: object
+          additionalProperties: true
+          description: Sanitized config with every private (kind-specific) key already removed.
+        capabilities:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [active, inactive, error]
+        lastTestedAt: { type: string, format: date-time, nullable: true }
+        lastError: { type: string, nullable: true }
+        hasCredentials:
+          type: boolean
+          description: True iff a non-empty encrypted credential blob is stored; never the credential itself.
+        credentialFormat:
+          type: string
+          nullable: true
+          description: Detected format token of the stored ciphertext (e.g. its envelope version), never its content.
+        credentialFingerprint:
+          type: string
+          nullable: true
+          description: >-
+            Non-reversible fingerprint of the stored credential, present only where the route
+            computes one; null when it does not.
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
+      required: [id, tenantId, name, kind, role, config, capabilities, status, hasCredentials]
+    IntegrationDeadLetter:
+      type: object
+      description: >-
+        Q4c: redacted dead-letter projection returned by GET /api/integration/dead-letters. This
+        is plugin-integration-core's rowToDeadLetter (plugins/plugin-integration-core/lib/dead-letter.cjs)
+        with redactDeadLetter (plugins/plugin-integration-core/lib/http-routes.cjs) applied: by
+        default `sourcePayload`/`transformedPayload` are stripped entirely (`payloadRedacted:
+        true`); an admin caller passing `includePayload=true` gets both fields back, sanitized
+        (secret-shaped values scrubbed), not verbatim. `errorMessage` is always scrubbed for
+        secret-shaped substrings, including on rows written before write-time scrubbing existed.
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        workspaceId: { type: string, nullable: true }
+        runId: { type: string }
+        pipelineId: { type: string }
+        idempotencyKey: { type: string, nullable: true }
+        sourcePayload:
+          description: Present only when an admin requested includePayload=true; sanitized, not verbatim.
+          nullable: true
+        transformedPayload:
+          description: Present only when an admin requested includePayload=true; sanitized, not verbatim.
+          nullable: true
+        errorCode: { type: string }
+        errorMessage:
+          type: string
+          description: Free-text error, scrubbed of secret-shaped substrings at read time.
+        retryCount: { type: integer }
+        status:
+          type: string
+          enum: [open, replayed, discarded]
+        lastReplayRunId: { type: string, nullable: true }
+        payloadRedacted:
+          type: boolean
+          description: Always true; marks that this projection is the redacted view, whichever branch produced it.
+        createdAt: { type: string, format: date-time, nullable: true }
+        updatedAt: { type: string, format: date-time, nullable: true }
+      required: [id, tenantId, runId, pipelineId, errorCode, errorMessage, retryCount, status, payloadRedacted]
     ConnectorActionOperation:
       type: string
       description: >-

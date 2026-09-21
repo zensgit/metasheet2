@@ -399,6 +399,16 @@ function createMockServices(overrides = {}) {
         calls.push(['listPipelineRuns', input])
         return [run]
       },
+      // SC-04: mirrors the real registry — a hit returns the projected run, a miss throws a
+      // PipelineNotFoundError whose details echo the scope. The echo is what the route must strip.
+      async getPipelineRun(input) {
+        calls.push(['getPipelineRun', input])
+        if (input.id === run.id && input.tenantId === run.tenantId) return { ...run }
+        const error = new Error('pipeline run not found')
+        error.name = 'PipelineNotFoundError'
+        error.details = { id: input.id, tenantId: input.tenantId, workspaceId: input.workspaceId }
+        throw error
+      },
       async listProvenanceByRow(input) {
         calls.push(['listProvenanceByRow', input])
         return [{
@@ -406,6 +416,24 @@ function createMockServices(overrides = {}) {
           eventType: 'target_write_succeeded', at: '2026-04-24T01:00:00.000Z', attrs: {},
           eventIndex: 1, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
         }]
+      },
+      // Q4a: per-run timeline. Two events so the route's ordering/shape is observable, and the
+      // returned runId echoes the requested one so a route that forwarded the WRONG selector
+      // (e.g. the pipelineId) is visible in the body, not just in the recorded call.
+      async listProvenanceByRun(input) {
+        calls.push(['listProvenanceByRun', input])
+        return [
+          {
+            runId: input.runId, pipelineId: 'pipe_1', rowId: 'k1',
+            eventType: 'row_cleaned', at: '2026-04-24T01:00:00.000Z', attrs: {},
+            eventIndex: 1, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
+          },
+          {
+            runId: input.runId, pipelineId: 'pipe_1', rowId: 'k1',
+            eventType: 'target_write_succeeded', at: '2026-04-24T01:00:01.000Z', attrs: {},
+            eventIndex: 2, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
+          },
+        ]
       },
     },
     pipelineRunner: {
@@ -3253,6 +3281,145 @@ async function testRunAndDeadLetterRoutes() {
     offset: 2,
   })
 
+  // --- SC-04: GET /api/integration/runs/:runId -------------------------------------------------
+  // happy path: 200, data is the single projected run (not an array), and the registry received
+  // exactly the three scope keys {tenantId, workspaceId, id} — nothing else, no oracle-widening.
+  res = await invoke(routes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(Array.isArray(res.body.data), false, 'single-run read returns an object, not a list')
+  assert.equal(res.body.data.id, 'run_1')
+  assert.equal(res.body.data.pipelineId, 'pipe_1')
+  assert.deepEqual(findCall(calls, 'getPipelineRun')[1], {
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    id: 'run_1',
+  }, 'getPipelineRun receives exactly {tenantId, workspaceId, id}')
+
+  // workspace omitted → resolveWorkspaceId (firstString) yields null at the route boundary and the
+  // registry pins workspace_id = null, exactly as listPipelineRuns does — no widening beyond list.
+  const { calls: nullWsCalls, services: nullWsServices } = createMockServices()
+  const { routes: nullWsRoutes } = mountRoutes(nullWsServices)
+  res = await invoke(nullWsRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(findCall(nullWsCalls, 'getPipelineRun')[1].workspaceId, null,
+    'no workspace hint resolves to null (registry pins workspace_id = null, same as list)')
+  await invoke(nullWsRoutes, 'GET', '/api/integration/runs', { user: READ_USER })
+  assert.equal(findCall(nullWsCalls, 'listPipelineRuns')[1].workspaceId, null,
+    'list resolves the same null workspace for the same request shape (parity, not a new hole)')
+
+  // a missing id and another tenant's id take the SAME path: the registry misses on the
+  // three-key WHERE and the route answers one details-free 404 for both — no existence oracle.
+  const missing = await invoke(routes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_does_not_exist' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertErrorResponse(missing, [404])
+  assert.equal(missing.body.error.code, 'RUN_NOT_FOUND')
+  const missingSerialized = JSON.stringify(missing.body)
+  assert.equal(missingSerialized.includes('tenant_1'), false, '404 body does not echo the tenant')
+  assert.equal(missingSerialized.includes('run_does_not_exist'), false, '404 body does not echo the requested id')
+  assert.equal(missingSerialized.includes('workspace_1'), false, '404 body does not echo the workspace')
+
+  // "another tenant's run": the caller is tenant_1 but the row belongs elsewhere. The mock registry
+  // only hits on (id, tenantId) == (run_1, tenant_1), so pointing the same route at a run that the
+  // caller's tenant does not own yields the byte-identical 404 body as the non-existent id above.
+  const foreignRunServices = createMockServices()
+  foreignRunServices.services.pipelineRegistry.getPipelineRun = async function getPipelineRun(input) {
+    foreignRunServices.calls.push(['getPipelineRun', input])
+    // simulate a row that exists under tenant_other only
+    if (input.id === 'run_foreign' && input.tenantId === 'tenant_other') {
+      return { id: 'run_foreign', tenantId: 'tenant_other', workspaceId: 'workspace_1', pipelineId: 'pipe_1', status: 'succeeded' }
+    }
+    const error = new Error('pipeline run not found')
+    error.name = 'PipelineNotFoundError'
+    error.details = { id: input.id, tenantId: input.tenantId, workspaceId: input.workspaceId }
+    throw error
+  }
+  const { routes: foreignRunRoutes } = mountRoutes(foreignRunServices.services)
+  const foreign = await invoke(foreignRunRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_foreign' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertErrorResponse(foreign, [404])
+  assert.equal(foreign.body.error.code, 'RUN_NOT_FOUND')
+  assert.deepEqual(foreign.body, missing.body, 'foreign-tenant run and non-existent run produce the identical 404 body')
+  assert.equal(findCall(foreignRunServices.calls, 'getPipelineRun')[1].tenantId, 'tenant_1',
+    'the lookup was scoped to the CALLER tenant, not the run owner')
+
+  // an explicit foreign tenantId in the query is refused before the registry (resolveTenantId)
+  const { calls: crossCalls, services: crossServices } = createMockServices()
+  const { routes: crossRoutes } = mountRoutes(crossServices)
+  const cross = await invoke(crossRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(cross, [403])
+  assert.equal(findCalls(crossCalls, 'getPipelineRun').length, 0, 'cross-tenant query never reached the registry')
+
+  // unauthenticated → 401, never reached the registry
+  const { calls: anonCalls, services: anonServices } = createMockServices()
+  const { routes: anonRoutes } = mountRoutes(anonServices)
+  const anon = await invoke(anonRoutes, 'GET', '/api/integration/runs/:runId', { params: { runId: 'run_1' } })
+  assertErrorResponse(anon, [401])
+  assert.equal(anon.body.error.code, 'UNAUTHENTICATED')
+  assert.equal(findCalls(anonCalls, 'getPipelineRun').length, 0, 'unauthenticated read did not reach the registry')
+
+  // a principal without any integration permission → 403, never reached the registry
+  const { calls: noPermCalls, services: noPermServices } = createMockServices()
+  const { routes: noPermRoutes } = mountRoutes(noPermServices)
+  const noPerm = await invoke(noPermRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: { id: 'user_none', tenantId: 'tenant_1', permissions: ['other:read'] },
+    params: { runId: 'run_1' },
+  })
+  assertErrorResponse(noPerm, [403])
+  assert.equal(noPerm.body.error.code, 'FORBIDDEN')
+  assert.equal(findCalls(noPermCalls, 'getPipelineRun').length, 0, 'unauthorized read did not reach the registry')
+
+  // write permission also grants read (same tier ladder as runsList)
+  const { calls: writerCalls, services: writerServices } = createMockServices()
+  const { routes: writerRoutes } = mountRoutes(writerServices)
+  const writer = await invoke(writerRoutes, 'GET', '/api/integration/runs/:runId', {
+    user: WRITE_USER,
+    params: { runId: 'run_1' },
+  })
+  assertOkResponse(writer, 200)
+  assert.equal(findCalls(writerCalls, 'getPipelineRun').length, 1, 'write permission reached the registry')
+
+  // 501 when a host's registry predates getPipelineRun (optional-method, like listProvenanceByRow);
+  // the mount itself must still succeed — the method is NOT in the requireService list.
+  const noGet = createMockServices()
+  delete noGet.services.pipelineRegistry.getPipelineRun
+  const { routes: noGetRoutes, registered: noGetRegistered } = mountRoutes(noGet.services)
+  assert.ok(noGetRegistered.includes('GET /api/integration/runs/:runId'), 'route mounts without getPipelineRun on the registry')
+  const notImpl = await invoke(noGetRoutes, 'GET', '/api/integration/runs/:runId', { user: READ_USER, params: { runId: 'run_1' } })
+  assertErrorResponse(notImpl, [501])
+  assert.equal(notImpl.body.error.code, 'RUN_READ_NOT_IMPLEMENTED')
+  // the 501 is decided AFTER the auth gate: an anonymous caller on the same host still gets 401
+  const notImplAnon = await invoke(noGetRoutes, 'GET', '/api/integration/runs/:runId', { params: { runId: 'run_1' } })
+  assertErrorResponse(notImplAnon, [401])
+
+  // a non-NotFound registry failure is NOT swallowed into a 404 (only NotFound is remapped)
+  const boom = createMockServices()
+  boom.services.pipelineRegistry.getPipelineRun = async function getPipelineRun() {
+    const error = new Error('db unavailable')
+    error.name = 'DataSourceUnavailableError'
+    throw error
+  }
+  const { routes: boomRoutes } = mountRoutes(boom.services)
+  const boomRes = await invoke(boomRoutes, 'GET', '/api/integration/runs/:runId', { user: READ_USER, params: { runId: 'run_1' } })
+  assert.notEqual(boomRes.statusCode, 404, 'non-NotFound registry errors keep their own status')
+  assert.equal(boomRes.body.ok, false)
+
   // limit above MAX_LIST_LIMIT is clamped
   const { calls: largeCalls, services: largeServices } = createMockServices()
   const { routes: largeRoutes } = mountRoutes(largeServices)
@@ -3728,6 +3895,171 @@ async function testProvenanceReadRoute() {
   res = await invoke(noProvRoutes, 'GET', '/api/integration/provenance', { user: READ_USER, query: { rowId: 'k1' } })
   assertErrorResponse(res, [501])
   assert.equal(res.body.error.code, 'PROVENANCE_READ_NOT_IMPLEMENTED')
+}
+
+// Q4a: GET /api/integration/runs/:runId/provenance — the per-run sub-route. Five gate cases
+// (200/401/403/404/501) plus the invariant that matters most here: adding this route must NOT
+// have relaxed the by-rowId route's ROW_ID_REQUIRED guard (asserted at the end, against the same
+// mounted routes — if someone "unified" the two handlers by making rowId optional, that assertion
+// is what goes red).
+async function testRunProvenanceSubRoute() {
+  const { calls, services } = createMockServices()
+  const { routes, registered } = mountRoutes(services)
+  assert.ok(registered.includes('GET /api/integration/runs/:runId/provenance'), 'per-run provenance sub-route registered')
+
+  // 200: the run is resolved in the caller's scope first, then the timeline is read. The body is
+  // an OBJECT with `items` (not a bare array), and the registry received exactly the scope keys
+  // plus the runId from the PATH.
+  let res = await invoke(routes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(Array.isArray(res.body.data), false, 'data is an envelope object, not a bare array')
+  assert.equal(res.body.data.items.length, 2, 'both events of the run are returned')
+  assert.deepEqual(res.body.data.items.map((item) => item.eventIndex), [1, 2], 'events keep their event_index order')
+  assert.deepEqual(
+    Object.keys(res.body.data.items[0]).sort(),
+    ['at', 'attrs', 'eventIndex', 'eventType', 'pipelineId', 'rowId', 'runCreatedAt', 'runId', 'runMode', 'runStatus'],
+    'serialized entry has exactly the timeline fields (no drop, no extra)',
+  )
+  const byRunCall = findCall(calls, 'listProvenanceByRun')[1]
+  assert.deepEqual(byRunCall, {
+    tenantId: 'tenant_1',
+    workspaceId: 'workspace_1',
+    runId: 'run_1',
+    limit: undefined,
+  }, 'listProvenanceByRun receives exactly {tenantId, workspaceId, runId, limit}')
+  assert.equal(findCall(calls, 'getPipelineRun')[1].tenantId, 'tenant_1',
+    'the existence probe was scoped to the caller tenant')
+
+  // the caller-supplied limit is clamped by the route's own MAX_LIST_LIMIT before the registry
+  const { calls: limitCalls, services: limitServices } = createMockServices()
+  const { routes: limitRoutes } = mountRoutes(limitServices)
+  await invoke(limitRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { limit: String(MAX_LIST_LIMIT + 9999) },
+  })
+  assert.equal(findCall(limitCalls, 'listProvenanceByRun')[1].limit, MAX_LIST_LIMIT,
+    `limit clamped to MAX_LIST_LIMIT (${MAX_LIST_LIMIT}) before the registry`)
+
+  // 401: unauthenticated never reaches either registry method
+  const { calls: anonCalls, services: anonServices } = createMockServices()
+  const { routes: anonRoutes } = mountRoutes(anonServices)
+  const anon = await invoke(anonRoutes, 'GET', '/api/integration/runs/:runId/provenance', { params: { runId: 'run_1' } })
+  assertErrorResponse(anon, [401])
+  assert.equal(anon.body.error.code, 'UNAUTHENTICATED')
+  assert.equal(findCalls(anonCalls, 'listProvenanceByRun').length, 0, 'unauthenticated read did not reach the registry')
+  assert.equal(findCalls(anonCalls, 'getPipelineRun').length, 0, 'unauthenticated read did not reach the existence probe')
+
+  // 403: a principal with no integration permission
+  const { calls: noPermCalls, services: noPermServices } = createMockServices()
+  const { routes: noPermRoutes } = mountRoutes(noPermServices)
+  const noPerm = await invoke(noPermRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: { id: 'user_none', tenantId: 'tenant_1', permissions: ['other:read'] },
+    params: { runId: 'run_1' },
+  })
+  assertErrorResponse(noPerm, [403])
+  assert.equal(noPerm.body.error.code, 'FORBIDDEN')
+  assert.equal(findCalls(noPermCalls, 'listProvenanceByRun').length, 0, 'unauthorized read did not reach the registry')
+
+  // 403: an explicit foreign tenantId is refused before the registry (resolveTenantId)
+  const { calls: crossCalls, services: crossServices } = createMockServices()
+  const { routes: crossRoutes } = mountRoutes(crossServices)
+  const cross = await invoke(crossRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(cross, [403])
+  assert.equal(findCalls(crossCalls, 'listProvenanceByRun').length, 0, 'cross-tenant query never reached the registry')
+
+  // 404: an unknown run and another tenant's run take the same path — the probe misses and the
+  // timeline is never read, so an unknown run cannot be distinguished from an empty one.
+  const { calls: missCalls, services: missServices } = createMockServices()
+  const { routes: missRoutes } = mountRoutes(missServices)
+  const missing = await invoke(missRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_does_not_exist' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertErrorResponse(missing, [404])
+  assert.equal(missing.body.error.code, 'RUN_NOT_FOUND')
+  const missingSerialized = JSON.stringify(missing.body)
+  assert.equal(missingSerialized.includes('tenant_1'), false, '404 body does not echo the tenant')
+  assert.equal(missingSerialized.includes('run_does_not_exist'), false, '404 body does not echo the requested id')
+  assert.equal(findCalls(missCalls, 'listProvenanceByRun').length, 0, 'a 404 run never reaches the provenance read')
+
+  const foreign = createMockServices()
+  foreign.services.pipelineRegistry.getPipelineRun = async function getPipelineRun(input) {
+    foreign.calls.push(['getPipelineRun', input])
+    if (input.id === 'run_foreign' && input.tenantId === 'tenant_other') {
+      return { id: 'run_foreign', tenantId: 'tenant_other', workspaceId: 'workspace_1', pipelineId: 'pipe_1', status: 'succeeded' }
+    }
+    const error = new Error('pipeline run not found')
+    error.name = 'PipelineNotFoundError'
+    error.details = { id: input.id, tenantId: input.tenantId, workspaceId: input.workspaceId }
+    throw error
+  }
+  const { routes: foreignRoutes } = mountRoutes(foreign.services)
+  const foreignRes = await invoke(foreignRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_foreign' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertErrorResponse(foreignRes, [404])
+  assert.deepEqual(foreignRes.body, missing.body, 'foreign-tenant run and non-existent run produce the identical 404 body')
+  assert.equal(findCalls(foreign.calls, 'listProvenanceByRun').length, 0, "another tenant's run never reaches the provenance read")
+
+  // 501: a host whose registry predates listProvenanceByRun — the MOUNT must still succeed
+  // (the method is NOT in the requireService list), and the auth gate still runs first.
+  const noByRun = createMockServices()
+  delete noByRun.services.pipelineRegistry.listProvenanceByRun
+  const { routes: noByRunRoutes, registered: noByRunRegistered } = mountRoutes(noByRun.services)
+  assert.ok(noByRunRegistered.includes('GET /api/integration/runs/:runId/provenance'),
+    'route mounts without listProvenanceByRun on the registry')
+  const notImpl = await invoke(noByRunRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+  })
+  assertErrorResponse(notImpl, [501])
+  assert.equal(notImpl.body.error.code, 'PROVENANCE_READ_NOT_IMPLEMENTED')
+  const notImplAnon = await invoke(noByRunRoutes, 'GET', '/api/integration/runs/:runId/provenance', { params: { runId: 'run_1' } })
+  assertErrorResponse(notImplAnon, [401])
+
+  // 501 (the other optional method): no getPipelineRun → the existence probe cannot run, so the
+  // route refuses rather than answering an unscoped timeline.
+  const noGet = createMockServices()
+  delete noGet.services.pipelineRegistry.getPipelineRun
+  const { routes: noGetRoutes } = mountRoutes(noGet.services)
+  const noGetRes = await invoke(noGetRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+  })
+  assertErrorResponse(noGetRes, [501])
+  assert.equal(noGetRes.body.error.code, 'RUN_READ_NOT_IMPLEMENTED')
+  assert.equal(findCalls(noGet.calls, 'listProvenanceByRun').length, 0,
+    'without the existence probe the timeline is not read at all')
+
+  // write permission also grants read (same tier ladder as runsGet)
+  const { calls: writerCalls, services: writerServices } = createMockServices()
+  const { routes: writerRoutes } = mountRoutes(writerServices)
+  const writer = await invoke(writerRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: WRITE_USER,
+    params: { runId: 'run_1' },
+  })
+  assertOkResponse(writer, 200)
+  assert.equal(findCalls(writerCalls, 'listProvenanceByRun').length, 1, 'write permission reached the registry')
+
+  // INVARIANT: the by-rowId route still hard-requires rowId on the very same mount. Relaxing it
+  // (route or registry) to "unify" the two reads turns this red, and the by-rowId handler must
+  // still be the one that answers /provenance — not the new sub-route.
+  res = await invoke(routes, 'GET', '/api/integration/provenance', { user: READ_USER, query: {} })
+  assertErrorResponse(res, [400])
+  assert.equal(res.body.error.code, 'ROW_ID_REQUIRED',
+    'the cross-run by-rowId route still refuses a request without rowId (Q4a did not widen it)')
 }
 
 async function testTemplatesDeriveRoute() {
@@ -9494,6 +9826,7 @@ async function main() {
   await testStagingRoutes()
   await testRunAndDeadLetterRoutes()
   await testProvenanceReadRoute()
+  await testRunProvenanceSubRoute()
   await testErrorResponseShape()
   await testTenantGuards()
   await testCursorStringGuard()

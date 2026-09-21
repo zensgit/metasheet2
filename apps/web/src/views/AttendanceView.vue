@@ -65,11 +65,25 @@
       <section class="attendance__filters" v-if="showReports">
         <label class="attendance__field" for="attendance-from-date">
           <span>{{ tr('From', '开始') }}</span>
-          <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
+          <input
+            id="attendance-from-date"
+            name="fromDate"
+            v-model="fromDate"
+            type="date"
+            :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
+            :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
+          />
         </label>
         <label class="attendance__field" for="attendance-to-date">
           <span>{{ tr('To', '结束') }}</span>
-          <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
+          <input
+            id="attendance-to-date"
+            name="toDate"
+            v-model="toDate"
+            type="date"
+            :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
+            :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
+          />
         </label>
         <label class="attendance__field" for="attendance-org-id">
           <span>{{ tr('Org ID', '组织 ID') }}</span>
@@ -1488,7 +1502,7 @@
               {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
             </button>
           </div>
-          <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
+          <div v-if="adminSurfaceBlocked" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
           <template v-else>
             <div
               v-show="adminTaskHomeOpen"
@@ -4968,8 +4982,8 @@
                       </button>
                     </div>
                   </div>
-                  <div v-if="attendanceGroups.length === 0" class="attendance__empty">
-                    {{ tr('No attendance groups yet. Create one to start configuring members.', '暂无考勤组。先新建一个考勤组，再配置成员。') }}
+                  <div v-if="attendanceGroups.length === 0" class="attendance__empty" data-attendance-group-empty="true">
+                    {{ attendanceGroupEmptyCopy }}
                   </div>
                   <div v-else-if="filteredAttendanceGroups.length === 0" class="attendance__empty">
                     {{ tr('No groups match the current filters.', '当前筛选条件下没有考勤组。') }}
@@ -5344,7 +5358,7 @@
                       <div>
                         <h6>{{ tr('Owners', '负责人') }}</h6>
                         <span class="attendance__field-hint">
-                          {{ tr('Owner and sub-owner roster only; delegated permissions are not granted in this slice.', '仅维护负责人/子负责人名单；本切片不授予委托权限。') }}
+                          {{ tr('Owner roster writes stay admin-only. Group owners can manage members of their own group.', '负责人名单仍由管理员维护。组负责人可以管理自己组内的考勤人员。') }}
                         </span>
                       </div>
                       <button
@@ -5394,7 +5408,7 @@
                             </option>
                           </select>
                           <small class="attendance__field-hint">
-                            {{ tr('Role labels are stored for display; route permissions remain admin-only.', '角色仅用于展示存储；路由权限仍保持管理员限定。') }}
+                            {{ tr('Adding or removing owners stays admin-only. Member add/remove is allowed for this group\'s owner or sub-owner.', '添加或移除负责人仍仅限管理员。本组 owner/sub_owner 可以增删考勤人员。') }}
                           </small>
                         </label>
                       </div>
@@ -10109,6 +10123,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
+import { isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import { isAttendanceAdminEndpointUnavailable } from './attendance/attendanceAdminEndpointCompatibility'
@@ -10303,6 +10318,16 @@ import type { AttendanceAuthorizedGroup } from './attendance/useAttendanceGroupR
 import { hydrateAttendanceGroupRoute } from './attendance/attendanceGroupRouteHydration'
 import { shouldReloadSetupReadinessOnSurfaceOpen, useAttendanceSetupReadiness } from './attendance/useAttendanceSetupReadiness'
 import {
+  deriveAdminTaskHomeGroupStatus,
+  type AttendanceAdminTaskHomeStatus,
+} from './attendance/attendanceAdminTaskHomeStatus'
+import {
+  attendanceGroupEmptyListCopy,
+  filterAdminTaskHomeGroupsForCatalogScope,
+  resolveAttendanceGroupCatalogScope,
+  type AttendanceGroupCatalogScope,
+} from './attendance/attendanceAdminTaskHomeAccess'
+import {
   applyPayrollSummaryFieldsToConfig,
   buildPayrollSummaryFieldOptionsFromReportFields,
   extractPayrollSummaryFieldCodes,
@@ -10423,6 +10448,7 @@ type AttendanceAdminTaskHomeGroup = {
   key: string
   title: string
   detail: string
+  status?: AttendanceAdminTaskHomeStatus
   actions: AttendanceAdminTaskHomeAction[]
   linkActions: AttendanceAdminTaskHomeLinkAction[]
   buttonActions: AttendanceAdminTaskHomeSectionAction[]
@@ -12138,6 +12164,13 @@ const payrollCycleGenerating = ref(false)
 const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | null>(null)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
+const attendanceGroupCatalogScope = ref<AttendanceGroupCatalogScope>('unknown')
+const adminSurfaceBlocked = computed(() =>
+  adminForbidden.value && attendanceGroupCatalogScope.value !== 'managed',
+)
+const attendanceGroupEmptyCopy = computed(() =>
+  attendanceGroupEmptyListCopy(attendanceGroupCatalogScope.value, tr),
+)
 type AttendanceSchedulerScopeTargets = {
   scheduleGroupIds: string[]
   attendanceGroupIds: string[]
@@ -14315,7 +14348,7 @@ const attendanceGroupSummaryCards = computed<AttendanceGroupSummaryCard[]>(() =>
     {
       key: 'advanced-controls',
       title: tr('Advanced controls', '高级控制'),
-      value: tr('Owner roster is editable; delegated permissions stay deferred', '负责人名单可维护；委托权限仍暂缓'),
+      value: tr('Group owners can manage members of their group; owner roster and org policy stay admin-only', '组负责人可管理本组人员；负责人名单与组织级策略仍仅限管理员'),
       detail: tr('No disabled fake controls are rendered for unsupported group-owned capabilities.', '不会为尚未支持的考勤组能力渲染假的禁用控件。'),
       actions: [],
     },
@@ -15077,6 +15110,7 @@ const routeGroupContextActive = computed(() => Boolean(props.routeGroupContext))
 // (charter §6.2 "暂留父层: section 权限过滤、active id、数据加载").
 const {
   state: setupReadinessState,
+  input: setupReadinessInput,
   steps: setupReadinessSteps,
   summary: setupReadinessSummary,
   needsAttention: setupReadinessNeedsAttention,
@@ -15103,7 +15137,7 @@ const setupSectionActive = computed(() =>
 // surface (wizard section or task home) is on screen and the org changes, and re-opening the
 // task home refreshes when the loaded org no longer matches (org changed while it was closed).
 const setupTaskHomeVisible = computed(() =>
-  showAdmin.value && adminTaskHomeOpen.value && !adminForbidden.value,
+  showAdmin.value && adminTaskHomeOpen.value && !adminSurfaceBlocked.value,
 )
 
 watch(setupSectionActive, (active) => {
@@ -15516,10 +15550,19 @@ function buildAdminTaskHomeGroup(
   }
 }
 
-const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
+const adminTaskHomePeopleGroupsStatusInput = computed(() => ({
+  loadState: setupReadinessState.value,
+  readiness: setupReadinessInput.value,
+  steps: setupReadinessSteps.value,
+}))
+
+const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => {
+  const peopleInput = adminTaskHomePeopleGroupsStatusInput.value
+  const catalog = [
   {
     key: 'daily-operations',
     title: tr('Daily operations', '日常运营'),
+    status: deriveAdminTaskHomeGroupStatus('daily-operations', peopleInput),
     detail: tr(
       'Approvals, anomalies, imports, and audit follow-up.',
       '审批、异常、导入与审计跟进。',
@@ -15567,6 +15610,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'people-groups',
     title: tr('People and attendance groups', '人员与考勤组'),
+    status: deriveAdminTaskHomeGroupStatus('people-groups', peopleInput),
     detail: tr(
       'Groups, members, owners, access, and availability.',
       '考勤组、成员、负责人、权限与可用性。',
@@ -15611,6 +15655,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'work-time-policies',
     title: tr('Work time and policies', '工时与策略'),
+    status: deriveAdminTaskHomeGroupStatus('work-time-policies', peopleInput),
     detail: tr(
       'Shifts, schedules, holidays, rule sets, overtime, and leave policies.',
       '班次、排班、节假日、规则集、加班与请假策略。',
@@ -15652,6 +15697,7 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
   {
     key: 'reporting-payroll',
     title: tr('Reporting and payroll', '报表与计薪'),
+    status: deriveAdminTaskHomeGroupStatus('reporting-payroll', peopleInput),
     detail: tr(
       'Import batches, report fields, payroll templates, and payroll cycles.',
       '导入批次、统计字段、计薪模板与计薪周期。',
@@ -15680,7 +15726,10 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
       },
     ],
   },
-].map(buildAdminTaskHomeGroup))
+  ]
+  return filterAdminTaskHomeGroupsForCatalogScope(catalog, attendanceGroupCatalogScope.value)
+    .map(buildAdminTaskHomeGroup)
+})
 
 function shouldShowAdminSection(id: string): boolean {
   return !adminFocusedMode.value || resolvedAdminSectionId() === id
@@ -15821,6 +15870,7 @@ const statusActionBusy = computed(() => {
 const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))
 const toDate = ref(toDateInput(today))
+const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(fromDate.value, toDate.value))
 
 const recordsPage = ref(1)
 const recordsPageSize = 20
@@ -22697,6 +22747,16 @@ async function loadRequestReport() {
   }
 }
 
+function validateReportDateRange(): boolean {
+  if (isAttendanceReportDateRangeValid(fromDate.value, toDate.value)) return true
+
+  setStatus(
+    tr('Start date must be on or before end date.', '开始日期不能晚于结束日期。'),
+    'error',
+  )
+  return false
+}
+
 async function refreshAll(): Promise<boolean> {
   if (!attendancePluginActive.value) return false
   loading.value = true
@@ -22753,6 +22813,8 @@ async function refreshOverviewWithStatus() {
 }
 
 async function reloadReportsWithStatus() {
+  if (!validateReportDateRange()) return
+
   loading.value = true
   recordsPage.value = 1
   beginReportsDatasetRefresh()
@@ -22814,6 +22876,8 @@ async function reloadAnomaliesWithStatus() {
 }
 
 async function reloadRequestReportWithStatus() {
+  if (!validateReportDateRange()) return
+
   try {
     await loadRequestReport()
     setStatus(
@@ -28090,6 +28154,7 @@ async function loadAttendanceGroups() {
     if (generation !== attendanceGroupLoadGeneration) return
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceGroupCatalogScope.value = 'unknown'
       return
     }
     const data = await response.json()
@@ -28098,6 +28163,8 @@ async function loadAttendanceGroups() {
       throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
+    const parsedScope = resolveAttendanceGroupCatalogScope(data.data?.scope)
+    attendanceGroupCatalogScope.value = parsedScope === 'unknown' ? 'org' : parsedScope
     attendanceGroups.value = data.data?.items ?? []
     attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
     if (props.routeGroupContext) {

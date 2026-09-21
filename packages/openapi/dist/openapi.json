@@ -2934,6 +2934,681 @@
           "runCreatedAt"
         ]
       },
+      "IntegrationPipelineRun": {
+        "type": "object",
+        "description": "SC-04 pipeline run projection. This is the EXACT shape produced by the plugin's rowToPipelineRun (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/runs) and the single-run read (GET /api/integration/runs/{runId}) — the single read does no extra join, so the two projections cannot drift.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string",
+            "nullable": true
+          },
+          "pipelineId": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Run mode recorded by the runner (e.g. dry-run vs. a real write run)."
+          },
+          "triggeredBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string"
+          },
+          "rowsRead": {
+            "type": "integer"
+          },
+          "rowsCleaned": {
+            "type": "integer"
+          },
+          "rowsWritten": {
+            "type": "integer"
+          },
+          "rowsFailed": {
+            "type": "integer"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "durationMs": {
+            "type": "integer",
+            "nullable": true
+          },
+          "errorSummary": {
+            "type": "string",
+            "nullable": true
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Run detail JSONB as persisted by the runner (e.g. targetWriteSummaries, watermarkAdvanced). Forward-compatible: unknown keys are passed through unchanged. Already sanitized at write time; this read path does NOT re-redact, so nothing secret may be written into it."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "tenantId",
+          "pipelineId",
+          "mode",
+          "status",
+          "rowsRead",
+          "rowsCleaned",
+          "rowsWritten",
+          "rowsFailed"
+        ]
+      },
+      "StockPreparationSnapshotBatchSummary": {
+        "type": "object",
+        "description": "Q4c: one row of the readonly BOM snapshot-batch LIST (view 2). Exact shape produced by plugin-integration-core's batchSummary (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:201), one per immutable snapshot batch of the business project. Values-free: no drawing number, quantity, unit, path key or timestamp value, only counts/status enums/booleans and the presence of createdAt (never its value).",
+        "properties": {
+          "snapshotBatchId": {
+            "type": "string",
+            "nullable": true
+          },
+          "snapshotVersion": {
+            "type": "integer",
+            "description": "Defaults to 0 when the stored cell is missing or non-numeric."
+          },
+          "snapshotStatus": {
+            "type": "string",
+            "nullable": true
+          },
+          "syncRunId": {
+            "type": "string",
+            "nullable": true
+          },
+          "lineCount": {
+            "type": "integer",
+            "description": "Count of bom_snapshot_line rows linked to this batch."
+          },
+          "createdAtPresent": {
+            "type": "boolean",
+            "description": "Whether the batch row's createdAt cell is set — never the timestamp itself."
+          },
+          "incomplete": {
+            "type": "boolean",
+            "description": "True when the multi-step persist path (batch row -> lines -> run row) did not finish: zero lines OR no matching run row (isBatchIncomplete, stock-preparation-snapshot-reads.cjs:197). An orphaned batch is never presented as normal."
+          }
+        },
+        "required": [
+          "snapshotBatchId",
+          "snapshotVersion",
+          "snapshotStatus",
+          "syncRunId",
+          "lineCount",
+          "createdAtPresent",
+          "incomplete"
+        ]
+      },
+      "StockPreparationSnapshotBatchListResult": {
+        "type": "object",
+        "description": "Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches (listSnapshotBatches, stock-preparation-snapshot-reads.cjs:228). Batches are ordered newest-first (highest snapshotVersion first; snapshotBatchId breaks ties, orderBatches, same file:215). An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error.",
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "description": "The (business) projectId the request named, echoed back."
+          },
+          "batchCount": {
+            "type": "integer"
+          },
+          "batches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StockPreparationSnapshotBatchSummary"
+            }
+          }
+        },
+        "required": [
+          "projectId",
+          "batchCount",
+          "batches"
+        ]
+      },
+      "StockPreparationSnapshotChangeCounts": {
+        "type": "object",
+        "description": "Q4c: values-free per-changeType tally over one snapshot-batch diff's evidence (changeCountsFromEvidence, stock-preparation-snapshot-reads.cjs:263). Exactly these 10 keys; each defaults to 0 when the engine's evidence carries no rows of that changeType. `componentCodeChanged`/`materialChanged` (added Q3c) are independent of `fingerprintChanged` — a row can carry more than one changeType, so these two do not subtract from it.",
+        "properties": {
+          "added": {
+            "type": "integer"
+          },
+          "removed": {
+            "type": "integer"
+          },
+          "quantityChanged": {
+            "type": "integer"
+          },
+          "unitChanged": {
+            "type": "integer"
+          },
+          "versionChanged": {
+            "type": "integer"
+          },
+          "pathChanged": {
+            "type": "integer"
+          },
+          "missingChildBom": {
+            "type": "integer"
+          },
+          "fingerprintChanged": {
+            "type": "integer",
+            "description": "Tally of the engine's source_fingerprint_changed changeType."
+          },
+          "componentCodeChanged": {
+            "type": "integer",
+            "description": "In-place component-code swap at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged."
+          },
+          "materialChanged": {
+            "type": "integer",
+            "description": "In-place material substitution at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged."
+          }
+        },
+        "required": [
+          "added",
+          "removed",
+          "quantityChanged",
+          "unitChanged",
+          "versionChanged",
+          "pathChanged",
+          "missingChildBom",
+          "fingerprintChanged",
+          "componentCodeChanged",
+          "materialChanged"
+        ]
+      },
+      "StockPreparationSnapshotDiffResult": {
+        "type": "object",
+        "description": "Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff (getSnapshotDiff, stock-preparation-snapshot-reads.cjs:404). Values-free counts-only diff of the named batch against its resolved base (predecessor or caller-chosen). An unprovisioned substrate (no batch/line/exception sheet at all) degrades gracefully to zero counts and a null baseSnapshotBatchId rather than an error.",
+        "properties": {
+          "snapshotBatchId": {
+            "type": "string"
+          },
+          "baseSnapshotBatchId": {
+            "type": "string",
+            "nullable": true,
+            "description": "null when no predecessor exists and the caller named none. Otherwise the resolved (auto-picked or caller-chosen and validated) base batch id."
+          },
+          "changeCounts": {
+            "$ref": "#/components/schemas/StockPreparationSnapshotChangeCounts"
+          },
+          "blockingExceptionCount": {
+            "type": "integer",
+            "description": "exception_confirmation rows linked to this batch whose stored severity is 'blocking'; not filtered by resolution status."
+          }
+        },
+        "required": [
+          "snapshotBatchId",
+          "baseSnapshotBatchId",
+          "changeCounts",
+          "blockingExceptionCount"
+        ]
+      },
+      "StockPreparationSnapshotDiffRow": {
+        "type": "object",
+        "description": "Q4c: one row of the per-row diff browse (view 2 rows). Exact projection produced by projectDiffRow over the engine's makeDiff output, through the closed DIFF_ROW_KEYS allowlist (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:526, :543) — a future engine key can never leak through this route unreviewed. Values-free: handles, enums and sha16-prefixed fingerprints only, never a drawing number, quantity, unit or path key value.",
+        "properties": {
+          "diffId": {
+            "type": "string",
+            "description": "Deterministic id (stableDiffId) hashing (base, current, row key)."
+          },
+          "diffType": {
+            "type": "string",
+            "enum": [
+              "added",
+              "removed",
+              "changed",
+              "unchanged",
+              "held"
+            ]
+          },
+          "reviewStatus": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "held"
+            ],
+            "description": "'held' iff changeTypes includes at least one BLOCKING_CHANGE_TYPES entry (reviewStatusForChangeTypes, stock-preparation-snapshot-diff.cjs:240)."
+          },
+          "changeTypes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "added",
+                "removed",
+                "quantity_changed",
+                "unit_changed",
+                "version_changed",
+                "path_changed",
+                "parent_changed",
+                "material_changed",
+                "component_code_changed",
+                "source_fingerprint_changed",
+                "invalid_qty",
+                "missing_child_bom",
+                "duplicate_path_key",
+                "missing_path_key"
+              ]
+            }
+          },
+          "reason": {
+            "type": "string",
+            "description": "Fixed diagnostic token naming which diff rule produced this row (e.g. matched_path_changed, missing_from_current_snapshot, new_in_current_snapshot, previous_missing_path_key). Closed set today but not asserted stable across engine versions, so left as a free string rather than an enum."
+          },
+          "rowCount": {
+            "type": "integer",
+            "description": "Usually 1 (one source line); >1 only for a duplicate_path_key collision row, where it is the number of raw rows collapsed into this one diagnostic entry."
+          },
+          "previousSnapshotLineId": {
+            "type": "string",
+            "nullable": true
+          },
+          "currentSnapshotLineId": {
+            "type": "string",
+            "nullable": true
+          },
+          "keyFingerprint": {
+            "type": "string",
+            "description": "sha16:-prefixed non-reversible hash of the row's match key."
+          },
+          "previousPathKeyFingerprint": {
+            "type": "string",
+            "description": "sha16:-prefixed hash of the previous row's path key. OMITTED entirely (not null) when there is no previous row or it carries no path key."
+          },
+          "currentPathKeyFingerprint": {
+            "type": "string",
+            "description": "sha16:-prefixed hash of the current row's path key. OMITTED entirely (not null) when there is no current row or it carries no path key."
+          }
+        },
+        "required": [
+          "diffId",
+          "diffType",
+          "reviewStatus",
+          "changeTypes",
+          "reason",
+          "rowCount",
+          "previousSnapshotLineId",
+          "currentSnapshotLineId",
+          "keyFingerprint"
+        ]
+      },
+      "StockPreparationSnapshotDiffRowsResult": {
+        "type": "object",
+        "description": "Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows (listSnapshotDiffRows, stock-preparation-snapshot-reads.cjs:558). Same base-resolution and H-1 completeness-gate semantics as the counts diff; `heldRowCount` is computed over the WHOLE pair BEFORE the optional reviewStatus/diffType filters, so a filtered read keeps that context; `rowCount` is the length of `rows` AFTER filtering.",
+        "properties": {
+          "snapshotBatchId": {
+            "type": "string"
+          },
+          "baseSnapshotBatchId": {
+            "type": "string",
+            "nullable": true
+          },
+          "rowCount": {
+            "type": "integer",
+            "description": "rows.length after any reviewStatus/diffType filter is applied."
+          },
+          "heldRowCount": {
+            "type": "integer",
+            "description": "Count of held-reviewStatus rows over the whole pair, before filtering."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StockPreparationSnapshotDiffRow"
+            }
+          }
+        },
+        "required": [
+          "snapshotBatchId",
+          "baseSnapshotBatchId",
+          "rowCount",
+          "heldRowCount",
+          "rows"
+        ]
+      },
+      "IntegrationPipelineFieldMapping": {
+        "type": "object",
+        "description": "Q4c: one field mapping row of a pipeline. This is the exact shape produced by plugin-integration-core's rowToFieldMapping (plugins/plugin-integration-core/lib/pipelines.cjs) and is embedded in IntegrationPipeline.fieldMappings when the read requests it (GET /api/integration/pipelines/{id}?includeFieldMappings=true, the default).",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "pipelineId": {
+            "type": "string"
+          },
+          "sourceField": {
+            "type": "string"
+          },
+          "targetField": {
+            "type": "string"
+          },
+          "transform": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          },
+          "validation": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          },
+          "defaultValue": {
+            "nullable": true,
+            "description": "Any JSON value persisted as the field's default; shape is caller-defined."
+          },
+          "sortOrder": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "pipelineId",
+          "sourceField",
+          "targetField",
+          "sortOrder"
+        ]
+      },
+      "IntegrationPipeline": {
+        "type": "object",
+        "description": "Q4c: read-only pipeline projection. This is the exact shape produced by plugin-integration-core's rowToPipeline (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/pipelines) and the single-pipeline read (GET /api/integration/pipelines/{id}); the list read never embeds `fieldMappings` (the registry call omits it), only the single read does, and only when `includeFieldMappings` is not explicitly `false`.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string",
+            "nullable": true
+          },
+          "projectId": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "sourceSystemId": {
+            "type": "string"
+          },
+          "sourceObject": {
+            "type": "string"
+          },
+          "targetSystemId": {
+            "type": "string"
+          },
+          "targetObject": {
+            "type": "string"
+          },
+          "stagingSheetId": {
+            "type": "string",
+            "nullable": true
+          },
+          "mode": {
+            "type": "string"
+          },
+          "idempotencyKeyFields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "options": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "paused",
+              "disabled"
+            ]
+          },
+          "createdBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "fieldMappings": {
+            "type": "array",
+            "description": "Present only on the single-pipeline read with includeFieldMappings !== 'false'; absent (not null, not []) on the list route and on a read with includeFieldMappings=false.",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationPipelineFieldMapping"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "tenantId",
+          "name",
+          "sourceSystemId",
+          "sourceObject",
+          "targetSystemId",
+          "targetObject",
+          "mode",
+          "idempotencyKeyFields",
+          "options",
+          "status"
+        ]
+      },
+      "IntegrationExternalSystem": {
+        "type": "object",
+        "description": "Q4c: public (credential-redacted) external-system projection. This is the exact shape produced by plugin-integration-core's rowToPublicExternalSystem (plugins/plugin-integration-core/lib/external-systems.cjs) and is shared verbatim by the list route (GET /api/integration/external-systems) and the single-system read (GET /api/integration/external-systems/{id}). `config` has every key in that system's `kind`-specific private-config set already deleted (never redacted-in-place); raw credentials are never in this projection — only derived presence/format/fingerprint fields are.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "nullable": true
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string",
+            "nullable": true
+          },
+          "projectId": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "source",
+              "target",
+              "bidirectional"
+            ]
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Sanitized config with every private (kind-specific) key already removed."
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "inactive",
+              "error"
+            ]
+          },
+          "lastTestedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastError": {
+            "type": "string",
+            "nullable": true
+          },
+          "hasCredentials": {
+            "type": "boolean",
+            "description": "True iff a non-empty encrypted credential blob is stored; never the credential itself."
+          },
+          "credentialFormat": {
+            "type": "string",
+            "nullable": true,
+            "description": "Detected format token of the stored ciphertext (e.g. its envelope version), never its content."
+          },
+          "credentialFingerprint": {
+            "type": "string",
+            "nullable": true,
+            "description": "Non-reversible fingerprint of the stored credential, present only where the route computes one; null when it does not."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "tenantId",
+          "name",
+          "kind",
+          "role",
+          "config",
+          "capabilities",
+          "status",
+          "hasCredentials"
+        ]
+      },
+      "IntegrationDeadLetter": {
+        "type": "object",
+        "description": "Q4c: redacted dead-letter projection returned by GET /api/integration/dead-letters. This is plugin-integration-core's rowToDeadLetter (plugins/plugin-integration-core/lib/dead-letter.cjs) with redactDeadLetter (plugins/plugin-integration-core/lib/http-routes.cjs) applied: by default `sourcePayload`/`transformedPayload` are stripped entirely (`payloadRedacted: true`); an admin caller passing `includePayload=true` gets both fields back, sanitized (secret-shaped values scrubbed), not verbatim. `errorMessage` is always scrubbed for secret-shaped substrings, including on rows written before write-time scrubbing existed.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string",
+            "nullable": true
+          },
+          "runId": {
+            "type": "string"
+          },
+          "pipelineId": {
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "nullable": true
+          },
+          "sourcePayload": {
+            "description": "Present only when an admin requested includePayload=true; sanitized, not verbatim.",
+            "nullable": true
+          },
+          "transformedPayload": {
+            "description": "Present only when an admin requested includePayload=true; sanitized, not verbatim.",
+            "nullable": true
+          },
+          "errorCode": {
+            "type": "string"
+          },
+          "errorMessage": {
+            "type": "string",
+            "description": "Free-text error, scrubbed of secret-shaped substrings at read time."
+          },
+          "retryCount": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "replayed",
+              "discarded"
+            ]
+          },
+          "lastReplayRunId": {
+            "type": "string",
+            "nullable": true
+          },
+          "payloadRedacted": {
+            "type": "boolean",
+            "description": "Always true; marks that this projection is the redacted view, whichever branch produced it."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "tenantId",
+          "runId",
+          "pipelineId",
+          "errorCode",
+          "errorMessage",
+          "retryCount",
+          "status",
+          "payloadRedacted"
+        ]
+      },
       "ConnectorActionOperation": {
         "type": "string",
         "description": "DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.",
@@ -27052,7 +27727,7 @@
       },
       "delete": {
         "summary": "Delete data source",
-        "description": "Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, naming the reference count) while any integration external system's config.dataSourceId references this source. force=true (platform-admin only) breaks the reference deliberately and is audited.",
+        "description": "Refuses with 409 (DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS, details.referenceCount) while any integration external system references this source (canonical connection_id, or an owner-attributed legacy config.dataSourceId). There is no bypass: unbind the external systems first. The check runs inside the delete transaction under a row lock, and the database's foreign key onto data_sources.live_id refuses the soft delete itself while a canonical binding exists (reported as the same 409, with details.referenceCount null).",
         "security": [
           {
             "bearerAuth": []
@@ -27071,7 +27746,8 @@
             "in": "query",
             "name": "force",
             "required": false,
-            "description": "Platform-admin only — delete even while referenced by external systems.",
+            "deprecated": true,
+            "description": "Retired 2026-09-20 (owner ruling: a referenced source cannot be deleted). The server ignores this parameter for every tier, platform admins included, and answers the same 409. Kept only so old clients still validate; do not send it.",
             "schema": {
               "type": "boolean"
             }
@@ -27088,7 +27764,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "Referenced by external systems (reference count in the error body)"
+            "description": "Referenced by external systems (details.referenceCount in the error body; unbind first)"
           }
         }
       }
@@ -31678,6 +32354,1857 @@
         }
       }
     },
+    "/api/integration/external-systems": {
+      "get": {
+        "summary": "List external systems",
+        "description": "Read-only external-system listing, scoped by (tenantId, workspaceId) and optionally narrowed by kind/status. `data` is a plain array of IntegrationExternalSystem (the credential-redacted public projection); there is no cursor or total count. A workspace-scoped caller's page additionally merges in tenant-wide (null-workspace) rows so a system shared across the tenant is still visible from a workspace — see listExternalSystems' merge branch for the exact windowing.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null (tenant-wide) workspace, which is never widened further.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "description": "Restrict to one adapter kind (e.g. k3, data-source:sql-readonly). Not validated against an enum server-side — an unknown kind simply matches zero rows.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "description": "Restrict to one status. An unrecognized value is a 400 (ExternalSystemValidationError), not an empty result.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "inactive",
+                "error"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "description": "Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/IntegrationExternalSystem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unrecognized `status` value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "status_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "ExternalSystemValidationError",
+                        "message": "status must be one of active, inactive, error",
+                        "details": {
+                          "field": "status"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/integration/external-systems/{id}": {
+      "get": {
+        "summary": "Get one external system",
+        "description": "Read-only single-system read, scoped by (tenantId, workspaceId, id). Returns the same credential-redacted IntegrationExternalSystem projection as the list route. Another tenant's system id and a non-existent id both raise ExternalSystemNotFoundError → 404 with the identical message.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "External system id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/IntegrationExternalSystem"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "System not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "external_system_not_found": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "ExternalSystemNotFoundError",
+                        "message": "external system not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/pipelines": {
+      "get": {
+        "summary": "List integration pipelines",
+        "description": "Read-only pipeline listing, scoped by (tenantId, workspaceId) and optionally narrowed by status/sourceSystemId/targetSystemId. `data` is a plain array of IntegrationPipeline, newest first (ORDER BY created_at DESC); there is no cursor or total count. The list projection never embeds `fieldMappings` (only the single-pipeline read can).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "description": "Restrict to pipelines in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "active",
+                "paused",
+                "disabled"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "sourceSystemId",
+            "required": false,
+            "description": "Restrict to pipelines whose sourceSystemId matches.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "targetSystemId",
+            "required": false,
+            "description": "Restrict to pipelines whose targetSystemId matches.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "description": "Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/IntegrationPipeline"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unrecognized `status` value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "status_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "PipelineValidationError",
+                        "message": "status must be one of draft, active, paused, disabled",
+                        "details": {
+                          "field": "status"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/integration/pipelines/{id}": {
+      "get": {
+        "summary": "Get one integration pipeline",
+        "description": "Read-only single-pipeline read, scoped by (tenantId, workspaceId, id). By default the response embeds `fieldMappings` (a second read of the pipeline's field-mapping rows); pass `includeFieldMappings=false` to skip that second read and omit the key entirely (not an empty array). Another tenant's pipeline id and a non-existent id both raise PipelineNotFoundError → 404 with the identical message and no distinguishing detail.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "description": "Pipeline id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "includeFieldMappings",
+            "required": false,
+            "description": "Any value other than the exact string `false` is treated as true (the handler's check is `!== 'false'`). Default true.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "true"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/IntegrationPipeline"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Pipeline not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "pipeline_not_found": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "PipelineNotFoundError",
+                        "message": "pipeline not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/provenance": {
+      "get": {
+        "summary": "List one row's cross-run provenance timeline",
+        "description": "Read-only cross-run provenance timeline for one rowId, scoped by (tenantId, workspaceId, rowId) and optionally narrowed by pipelineId and a [from, to] window on the run's `created_at`. Reads the migration-060 integration_provenance_by_row view; ordered oldest-first (by run_created_at, then a stable secondary compare). `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does NOT re-redact and never returns raw payloads. No write, replay or retry.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "rowId",
+            "required": true,
+            "description": "Row id to fetch the timeline for. Missing/empty is a 400 (ROW_ID_REQUIRED).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pipelineId",
+            "required": false,
+            "description": "Restrict the timeline to events from one pipeline.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "description": "Inclusive lower bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError).",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "description": "Inclusive upper bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError).",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max events to return. Capped at 500 at the route (the registry's own ceiling is higher; the tighter of the two always wins).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "description": "Events to skip.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ProvenanceTimelineEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "rowId missing, or an unparsable from/to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "row_id_required": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "ROW_ID_REQUIRED",
+                        "message": "rowId is required"
+                      }
+                    }
+                  },
+                  "from_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "PipelineValidationError",
+                        "message": "from must be an ISO date-time",
+                        "details": {
+                          "field": "from"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "501": {
+            "description": "The host's pipeline registry does not implement the by-row provenance read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "provenance_read_not_implemented": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "PROVENANCE_READ_NOT_IMPLEMENTED",
+                        "message": "Provenance read is not implemented"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/dead-letters": {
+      "get": {
+        "summary": "List dead letters",
+        "description": "Read-only dead-letter listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/runId/status. `data` is a plain array of IntegrationDeadLetter, newest first (ORDER BY created_at DESC); there is no cursor or total count. `sourcePayload`/`transformedPayload` are stripped by default; only a caller whose session resolves as admin AND passes `includePayload=true` gets them back (sanitized). A non-admin caller passing `includePayload=true` is silently ignored (redacted view), not rejected.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pipelineId",
+            "required": false,
+            "description": "Restrict to dead letters from one pipeline.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "runId",
+            "required": false,
+            "description": "Restrict to dead letters from one run.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "description": "Restrict to one status. An unrecognized value is a 400 (DeadLetterError), not an empty result.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "replayed",
+                "discarded"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "includePayload",
+            "required": false,
+            "description": "Admin-only. Must be the exact string `true`; any other value (including for a non-admin caller) keeps the redacted (payload-stripped) projection.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "description": "Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/IntegrationDeadLetter"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unrecognized `status` value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "status_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "DeadLetterError",
+                        "message": "status must be one of open, replayed, discarded",
+                        "details": {
+                          "field": "status",
+                          "status": "bogus"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/integration/runs": {
+      "get": {
+        "summary": "List integration pipeline runs",
+        "description": "Read-only run listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/status. `data` is a plain array of IntegrationPipelineRun, newest first (ORDER BY created_at DESC); there is no cursor or total count.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pipelineId",
+            "required": false,
+            "description": "Restrict to runs of one pipeline.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "description": "Restrict to runs in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "running",
+                "succeeded",
+                "partial",
+                "failed",
+                "cancelled"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. Capped at 500 server-side.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "description": "Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/IntegrationPipelineRun"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unrecognized `status` value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "status_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "PipelineValidationError",
+                        "message": "status must be one of pending, running, succeeded, partial, failed, cancelled",
+                        "details": {
+                          "field": "status"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/integration/runs/{runId}": {
+      "get": {
+        "summary": "Get one integration pipeline run",
+        "description": "Read-only single-run read, scoped by (tenantId, workspaceId, runId). The tenant is resolved from the verified session claim; `tenantId` may be echoed as a query parameter but must MATCH the caller's own tenant (a mismatch is 403), so this parameter cannot widen scope. Another tenant's run id and a run id that does not exist return the SAME details-free 404 — the route is not a cross-tenant existence oracle. No write, replay or retry is performed.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "description": "Pipeline run id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace — the same normalization the list route applies, so a run written under the null workspace is read back there.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/IntegrationPipelineRun"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "runId missing from the path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_id_required": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_ID_REQUIRED",
+                        "message": "runId is required"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_not_found": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_NOT_FOUND",
+                        "message": "pipeline run not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The host's pipeline registry does not implement the single-run read (optional-method wiring older than this route).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_read_not_implemented": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_READ_NOT_IMPLEMENTED",
+                        "message": "Run read is not implemented"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/runs/{runId}/provenance": {
+      "get": {
+        "summary": "List one run's provenance timeline",
+        "description": "Read-only per-run provenance timeline, scoped by (tenantId, workspaceId, runId) and ordered by `eventIndex` (the migration-060 view's WITH ORDINALITY over the run's persisted `provenance_events`, i.e. write order). The run is resolved first through the same three-key lookup the single-run read uses, so another tenant's run id and a run id that does not exist return the SAME details-free 404 — an unknown run is never answered with an empty timeline. `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does not re-redact and never returns raw payloads. No write, replay or retry.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "description": "Pipeline run id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Workspace scope. Omitted means the null workspace — the same normalization the run reads apply.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "description": "Max events to return. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/ProvenanceTimelineEntry"
+                          }
+                        }
+                      },
+                      "required": [
+                        "items"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "runId missing from the path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_id_required": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_ID_REQUIRED",
+                        "message": "runId is required"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "run_not_found": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_NOT_FOUND",
+                        "message": "pipeline run not found"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The host's pipeline registry implements neither the per-run provenance read (PROVENANCE_READ_NOT_IMPLEMENTED) nor the single-run read the scope probe needs (RUN_READ_NOT_IMPLEMENTED) — optional-method wiring older than this route.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "provenance_read_not_implemented": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "PROVENANCE_READ_NOT_IMPLEMENTED",
+                        "message": "Provenance read is not implemented"
+                      }
+                    }
+                  },
+                  "run_read_not_implemented": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "RUN_READ_NOT_IMPLEMENTED",
+                        "message": "Run read is not implemented"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/stock-preparation/snapshot-batches": {
+      "get": {
+        "summary": "List a project's immutable BOM snapshot batches (stock-prep view 2)",
+        "description": "Read-only, values-free LIST of the immutable BOM snapshot batches for one business project — queryRecords-only against the internal MetaSheet-provisioned MVP tables, never PLM/K3/any external system. Uses the two-project split: the STAGING project (derived from the auth tenant) locates the provisioned sheets, `projectId` (the PLM business project) filters the batch rows and is echoed back. An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error. `workspaceId` is accepted by the query allowlist but is never read by the handler or the read function — it has no effect on the result (confirmed by reading both; not a documented no-op elsewhere in this module family).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": true,
+            "description": "The (business) PLM project id. Missing/empty is a 400 (STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID, field: projectId).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Accepted by the query allowlist but NOT forwarded to the read function — has no effect on the response (dead parameter; documented here so a caller does not assume it scopes anything).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/StockPreparationSnapshotBatchListResult"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing `projectId`, or an unsupported query field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "project_id_required": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID",
+                        "message": "projectId is required",
+                        "details": {
+                          "field": "projectId"
+                        }
+                      }
+                    }
+                  },
+                  "unsupported_field": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID",
+                        "message": "unsupported request field: sheetId",
+                        "details": {
+                          "field": "sheetId"
+                        }
+                      }
+                    }
+                  },
+                  "tenant_required": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "TENANT_REQUIRED",
+                        "message": "tenantId is required"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "description": "The bounded readonly scan exceeded its page bound (READ_MAX_PAGES=50 pages of READ_PAGE_LIMIT=500 rows each) reading the batch/line/run sheets — fails closed rather than scanning forever.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "result_too_large": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_READS_RESULT_TOO_LARGE",
+                        "message": "stock-preparation snapshot read exceeded the page bound",
+                        "details": {
+                          "maxPages": 50
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The host's multitable provisioning API (findObjectSheet/resolveFieldIds) or the records API (queryRecords) is not available.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "provisioning_unavailable": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE",
+                        "message": "multitable provisioning API is not available"
+                      }
+                    }
+                  },
+                  "records_api_unavailable": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_READS_RECORDS_API_UNAVAILABLE",
+                        "message": "stock-preparation snapshot reads require multitable.records.queryRecords",
+                        "details": {
+                          "requiredMethods": [
+                            "queryRecords"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff": {
+      "get": {
+        "summary": "Values-free counts diff of one snapshot batch vs its base (stock-prep view 2)",
+        "description": "Read-only, values-free diff of the named snapshot batch against its immutable predecessor (auto-picked: same business project, highest snapshotVersion strictly below the current one) or an explicit caller-chosen `baseSnapshotBatchId`. The business project used for the predecessor search is read from the CURRENT batch row itself (the FE diff call sends no `projectId`); the `projectId` query param is only a fallback used when that batch row cannot be read. `workspaceId` is accepted by the query allowlist but has no effect on the result (same dead-parameter note as the LIST route). H-1 gate: BOTH the current and the resolved base batch must be structurally complete (at least one line AND a matching run row) — an incomplete side fails loud with 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE rather than serving a partial/fabricated diff. An unprovisioned substrate (no batch/line/exception sheet exists at all) degrades gracefully to zero counts and `baseSnapshotBatchId: null`, unless an explicit base was requested (then 404).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "snapshotBatchId",
+            "required": true,
+            "description": "The snapshot batch being diffed (the \"current\" side).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "baseSnapshotBatchId",
+            "required": false,
+            "description": "Caller-chosen base pair, overriding the predecessor auto-pick. Must differ from `snapshotBatchId` (400 SNAPSHOT_DIFF_BASE_INVALID), must exist (404 SNAPSHOT_DIFF_BASE_NOT_FOUND) and must belong to the same business project as the diffed batch (409 SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH). Only verifiable when the diffed batch's own row exists — a caller-chosen pair against a ghost current id is also 404 SNAPSHOT_DIFF_BASE_NOT_FOUND.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": false,
+            "description": "Fallback business-project id, used only when the current batch row cannot be read (the normal path reads the project from that row). Does not filter or narrow the diffed batch itself (the batch id already rode the path).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Accepted by the query allowlist but has no effect on the response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/StockPreparationSnapshotDiffResult"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unsupported query field, or `baseSnapshotBatchId` equal to `snapshotBatchId`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "base_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BASE_INVALID",
+                        "message": "baseSnapshotBatchId must differ from the diffed batch",
+                        "details": {
+                          "field": "baseSnapshotBatchId"
+                        }
+                      }
+                    }
+                  },
+                  "unsupported_field": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID",
+                        "message": "unsupported request field: sheetId",
+                        "details": {
+                          "field": "sheetId"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "An explicit `baseSnapshotBatchId` that does not exist, or that cannot be verified because the diffed batch's own row does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "base_not_found": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BASE_NOT_FOUND",
+                        "message": "base snapshot batch was not found",
+                        "details": {
+                          "field": "baseSnapshotBatchId"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The resolved base belongs to a different business project than the diffed batch, OR (H-1) the current/base batch is structurally incomplete, OR the current/base batch identity is ambiguous (duplicate snapshotBatchId or duplicate run identity, no substrate unique index).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "base_project_mismatch": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH",
+                        "message": "base snapshot batch belongs to a different business project",
+                        "details": {
+                          "field": "baseSnapshotBatchId"
+                        }
+                      }
+                    }
+                  },
+                  "batch_incomplete": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BATCH_INCOMPLETE",
+                        "message": "snapshot diff refuses an incomplete snapshot batch",
+                        "details": {
+                          "target": "current",
+                          "reason": "incomplete"
+                        }
+                      }
+                    }
+                  },
+                  "batch_ambiguous": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BATCH_INCOMPLETE",
+                        "message": "snapshot diff refuses an ambiguous snapshot batch identity",
+                        "details": {
+                          "target": "base",
+                          "reason": "ambiguous"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The host's multitable provisioning API or records API is not available (same two codes as the LIST route).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "provisioning_unavailable": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE",
+                        "message": "multitable provisioning API is not available"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows": {
+      "get": {
+        "summary": "Per-row diff browse of one snapshot batch vs its base (stock-prep view 2 rows)",
+        "description": "Read-only, values-free PER-ROW diff browse: diffType/changeTypes/reviewStatus per diff row, for the FE's row-level drill-down under view 2. Same base resolution (auto-pick or explicit `baseSnapshotBatchId`) and H-1 completeness gate as the counts diff (GET .../diff); the enum filters `reviewStatus`/`diffType` are validated against the route's own closed vocabulary FIRST (400 with the field name), so the read function's own belt-and-braces re-check of the same vocabulary is unreachable via HTTP. `heldRowCount` is computed over the WHOLE pair BEFORE these filters are applied, so a filtered read still carries that context; `rowCount` is the post-filter row count.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "snapshotBatchId",
+            "required": true,
+            "description": "The snapshot batch being diffed (the \"current\" side).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "baseSnapshotBatchId",
+            "required": false,
+            "description": "Same semantics as the counts diff route's `baseSnapshotBatchId`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reviewStatus",
+            "required": false,
+            "description": "Restrict rows to one reviewStatus. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "held"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "diffType",
+            "required": false,
+            "description": "Restrict rows to one diffType. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "added",
+                "removed",
+                "changed",
+                "unchanged",
+                "held"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": false,
+            "description": "Same fallback semantics as the counts diff route's `projectId`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenantId",
+            "required": false,
+            "description": "Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspaceId",
+            "required": false,
+            "description": "Accepted by the query allowlist but has no effect on the response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/StockPreparationSnapshotDiffRowsResult"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unsupported query field, an out-of-vocabulary `reviewStatus`/`diffType`, or `baseSnapshotBatchId` equal to `snapshotBatchId`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "review_status_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID",
+                        "message": "reviewStatus must be one of the review-status vocabulary",
+                        "details": {
+                          "field": "reviewStatus"
+                        }
+                      }
+                    }
+                  },
+                  "diff_type_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID",
+                        "message": "diffType must be one of the diff-type vocabulary",
+                        "details": {
+                          "field": "diffType"
+                        }
+                      }
+                    }
+                  },
+                  "base_invalid": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BASE_INVALID",
+                        "message": "baseSnapshotBatchId must differ from the diffed batch",
+                        "details": {
+                          "field": "baseSnapshotBatchId"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "Same semantics as the counts diff route's 404.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "base_not_found": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BASE_NOT_FOUND",
+                        "message": "base snapshot batch was not found",
+                        "details": {
+                          "field": "baseSnapshotBatchId"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Same semantics as the counts diff route's 409 (project mismatch / H-1 incomplete / ambiguous).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "batch_incomplete": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_DIFF_BATCH_INCOMPLETE",
+                        "message": "snapshot diff refuses an incomplete snapshot batch",
+                        "details": {
+                          "target": "current",
+                          "reason": "incomplete"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The filtered/unfiltered row set exceeded MAX_DIFF_ROWS=2000, or the underlying bounded sheet scan exceeded its page bound (same as the LIST route's 422).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "rows_too_large": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_READS_ROWS_TOO_LARGE",
+                        "message": "snapshot diff row read exceeded the row bound",
+                        "details": {
+                          "maxRows": 2000
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "The host's multitable provisioning API or records API is not available (same two codes as the LIST route).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "provisioning_unavailable": {
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE",
+                        "message": "multitable provisioning API is not available"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/multitable/bases": {
       "get": {
         "summary": "List multitable bases",
@@ -32004,7 +34531,19 @@
         },
         "responses": {
           "201": {
-            "description": "Created",
+            "description": "Created. Repeated identical installs inside the server-side dedupe window (same authenticated tenant, user, templateId, workspaceId and baseName) return the FIRST base again instead of creating another one; the body is then byte-identical to the original 201 and only the Idempotent-Replayed header distinguishes the two.",
+            "headers": {
+              "Idempotent-Replayed": {
+                "description": "Present with the value `true` only when this 201 replayed an earlier install instead of creating a new base; absent on a fresh install. Ops/gateway signal only — the web client does not read it, and it is not CORS-exposed, so browser JS cannot see it without Access-Control-Expose-Headers.",
+                "required": false,
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

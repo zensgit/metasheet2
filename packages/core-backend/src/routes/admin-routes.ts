@@ -36,6 +36,10 @@ import { messageBus } from '../integration/messaging/message-bus';
 import { getRateLimiter } from '../integration/rate-limiting';
 import { pluginConfigManager } from '../core/plugin-config-manager';
 import { isDatabaseSchemaError } from '../utils/database-errors';
+import {
+  DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+  isLiveConnectionFkViolation
+} from '../data-adapters/DataSourceManager';
 import type { PluginManifest } from '../types/plugin';
 
 const logger = new Logger('AdminRoutes');
@@ -69,14 +73,90 @@ let services: AdminRouteServices = {};
 const router = Router();
 
 // ═══════════════════════════════════════════════════════════════════
+// Read-side failure envelope (ADM-05 follow-up)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Stable error code every read-side GET in this router returns on its 500 branch.
+ *
+ * SECURITY (ADM-05 follow-up to #5884 / #5897): batches 2 and 3 gated these reads on platform admin
+ * but deliberately left the 500 bodies alone, recording "redacting that is a separate decision
+ * point" in the route comments. This is that decision. The unhandled-failure branch of every GET
+ * here used to serialize `err.message` straight into the HTTP body, and the errors that actually
+ * reach those branches are driver/infra errors: pg connection failures carry host, port, database
+ * and role in their text (`connect ECONNREFUSED <host>:<port>`, `password authentication failed for
+ * user "<role>"`), Redis and pool errors carry the same shape, and a stack-bearing Error from a
+ * subsystem can carry absolute server paths. A platform admin is trusted — but the HTTP body is not
+ * the right channel for it: it lands in browser devtools, in proxy and CDN access logs, in
+ * screenshots pasted into issues, and in any ops dashboard that renders `error` verbatim. The
+ * operator needs the detail; the wire does not carry it. So the original error keeps going to
+ * logger.error() (message + stack, server side only) and the body carries a stable machine-readable
+ * code plus a fixed human string.
+ *
+ * Shape note: the body keeps `success: false` and keeps `error` a STRING. util/response.ts's
+ * jsonError() was considered and NOT reused here — it emits `{ ok: false, error: { code, message } }`,
+ * a different envelope from the `{ success, error }` one every route in this router and every
+ * existing admin spec reads, so reusing it would turn a redaction into a breaking response-shape
+ * change. `code` is added alongside, which is additive for existing consumers.
+ *
+ * Status codes are unchanged: a 500 stays a 500. Only the body text changes.
+ */
+export const ADMIN_READ_FAILED_CODE = 'ADMIN_READ_FAILED';
+
+/** Fixed, values-free human string. Carries no driver, host, path or identifier. */
+export const ADMIN_READ_FAILED_MESSAGE = '读取失败，详情见服务端日志';
+
+/**
+ * Send the redacted 500 body for a read-side GET, after logging the real error server side.
+ *
+ * @param res      express response
+ * @param context  static, values-free log context (e.g. 'Failed to get detailed health')
+ * @param error    the caught value; its message/stack go to the log, never to the body
+ * @param extra    additional NON-SENSITIVE fields the route already returned on its 500 (e.g. the
+ *                 pluginId the caller itself supplied in the path)
+ */
+function sendAdminReadFailure(
+  res: Response,
+  context: string,
+  error: unknown,
+  extra?: Record<string, unknown>
+): void {
+  logger.error(context, error as Error);
+  res.status(500).json({
+    success: false,
+    code: ADMIN_READ_FAILED_CODE,
+    error: ADMIN_READ_FAILED_MESSAGE,
+    ...(extra ?? {})
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Safety Guard Management
 // ═══════════════════════════════════════════════════════════════════
 
 /**
  * GET /api/admin/safety/status
  * Get SafetyGuard status and pending confirmations
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all. It returns
+ * safetyGuard.isEnabled() and safetyGuard.getPendingCount() (guards/middleware.ts:180), i.e. whether
+ * the platform's destructive-operation brake is switched on right now and how many dangerous
+ * operations are sitting unconfirmed. Both are reconnaissance for the write side of this same
+ * router: "is the brake off?" is exactly what a caller probes before attempting a protected
+ * operation, and the pending count is a live side channel on other admins' in-flight confirmations.
+ * The sibling POST /safety/confirm and POST /safety/enable treat the very same switch as privileged,
+ * so reading it was the odd one out. Gated on platform admin (requireAdminRole: no user or non-admin
+ * -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns
+ * false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20).
+ *
+ * The guard is added HERE, at the single mount point, not inside createSafetyStatusEndpoint():
+ * admin-routes.ts:79 is the factory's only call site in the tree (guards/middleware.ts:180 is the
+ * definition, the rest are docs), so gating at the mount is zero-impact for other callers and keeps
+ * the factory's contract — a synchronous (req, res) => void that reads no request input — intact.
+ * That contract is what tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts:951 rests
+ * on; folding an async guard into the factory would have changed it for no benefit.
  */
-router.get('/safety/status', createSafetyStatusEndpoint());
+router.get('/safety/status', requireAdminRole(), createSafetyStatusEndpoint());
 
 /**
  * POST /api/admin/safety/confirm
@@ -131,15 +211,24 @@ router.post(
  * POST /api/admin/safety/enable
  * Enable SafetyGuard
  */
-router.post('/safety/enable', (req: Request, res: Response) => {
-  const guard = getSafetyGuard();
-  guard.updateConfig({ enabled: true });
-  logger.info('SafetyGuard enabled via admin API', {
-    context: 'AdminRoutes',
-    initiator: req.ip
-  });
-  res.json({ success: true, message: 'SafetyGuard enabled' });
-});
+router.post(
+  '/safety/enable',
+  // SECURITY (#5655): 开关确认层本身是特权操作。本端点原先零中间件；/safety/disable 原先只挂
+  // requireSafetyCheck，而它用的 RESET_METRICS 是 LOW、根本不要确认，于是任何已认证用户
+  // 一次请求就能关掉全局 SafetyGuard（SafetyGuard.checkOperation：disabled 时对一切
+  // allowed:true），从而把本文件所有仅靠确认层把守的写/删端点一起打开。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
+  (req: Request, res: Response) => {
+    const guard = getSafetyGuard();
+    guard.updateConfig({ enabled: true });
+    logger.info('SafetyGuard enabled via admin API', {
+      context: 'AdminRoutes',
+      initiator: req.ip
+    });
+    res.json({ success: true, message: 'SafetyGuard enabled' });
+  }
+);
 
 /**
  * POST /api/admin/safety/disable
@@ -147,6 +236,12 @@ router.post('/safety/enable', (req: Request, res: Response) => {
  */
 router.post(
   '/safety/disable',
+  // SECURITY (#5655): 开关确认层本身是特权操作。/safety/disable 原先只挂
+  // requireSafetyCheck，而它用的 RESET_METRICS 是 LOW、根本不要确认，于是任何已认证用户
+  // 一次请求就能关掉全局 SafetyGuard（SafetyGuard.checkOperation：disabled 时对一切
+  // allowed:true），从而把本文件所有仅靠确认层把守的写/删端点一起打开。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS, // Using LOW risk for this
     getDetails: () => ({ action: 'disable_safety_guard' })
@@ -448,11 +543,7 @@ router.get('/plugins', requireAdminRole(), async (_req: Request, res: Response) 
       list
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to list plugins', error);
   }
 });
 
@@ -495,12 +586,7 @@ router.get('/plugins/:id', requireAdminRole(), async (req: Request, res: Respons
       config: configEntry
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminReadFailure(res, 'Failed to get plugin detail', error, { pluginId: id });
   }
 });
 
@@ -582,12 +668,7 @@ router.get('/plugins/:id/config', requireAdminRole(), async (req: Request, res: 
     const configEntry = await loadPluginConfig(id);
     res.json({ success: true, pluginId: id, config: configEntry });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminReadFailure(res, 'Failed to get plugin config', error, { pluginId: id });
   }
 });
 
@@ -1070,6 +1151,11 @@ router.post(
  */
 router.post(
   '/cache/clear',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.CLEAR_CACHE,
     getDetails: () => ({ action: 'clear_cache' })
@@ -1121,6 +1207,11 @@ router.post(
  */
 router.post(
   '/metrics/reset',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS,
     getDetails: () => ({ action: 'reset_metrics' })
@@ -1168,11 +1259,132 @@ router.post(
 // ═══════════════════════════════════════════════════════════════════
 
 /**
+ * REFERENTIAL REFUSAL for the two bulk data routes when their target is `data_sources`.
+ *
+ * Since #5896, `integration_external_systems.connection_id` is a foreign key onto
+ * `data_sources(live_id)` — a STORED generated column that holds the row's own id while the row is
+ * live and NULL once `deleted_at` is set (migration zzzz20260920120000). Consequence for THESE two
+ * routes: a bulk HARD delete of a referenced source, and a bulk update that sets `deleted_at` on
+ * one, are both refused by PostgreSQL with SQLSTATE 23503 on
+ * `fk_integration_external_systems_live_connection_id`. Until now each handler dropped that into its
+ * generic catch and answered a bare 500 carrying `err.message` — the rows were never touched, but
+ * the caller had no stable code to branch on and the driver's own prose reached the client. This is
+ * row 5 of the coverage matrix in
+ * docs/development/data-source-live-id-fk-binding-lock-design-20260920.md §7.
+ *
+ * TWO LAYERS, deliberately:
+ *   ① a PRE-CHECK that resolves the ids the mutation would hit and refuses 409 before any write is
+ *      attempted — this is the only layer that can NAME the offending ids;
+ *   ② the CATCH mapping, which is what actually removes the bare 500: a bind that commits between
+ *      the pre-check and the mutation still trips the constraint, and the pre-check is advisory
+ *      (see referencedDataSourceIdsForRefusal) so it must never be the sole guard.
+ *
+ * The predicate and the code are the ones DataSourceManager already uses for the single-source
+ * delete (`isLiveConnectionFkViolation`, DataSourceManager.ts:50, and
+ * DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE): SQLSTATE first, constraint name second, message
+ * prose NEVER — this deployment's PostgreSQL runs a zh_CN locale and the English
+ * "violates foreign key constraint" sentence simply is not there. Any OTHER 23503 (another table's
+ * constraint, or any table other than data_sources) keeps its existing status code.
+ */
+const DATA_SOURCES_TABLE = 'data_sources';
+const UNDEFINED_TABLE_SQLSTATE = '42P01';
+
+/** Values-free 409 body: the code, the target table and the ids the caller itself asked about. */
+function referencedRefusalBody(ids: string[]) {
+  return {
+    success: false,
+    error:
+      'One or more target data sources are still referenced by an integration external system; unbind them first — 请先解绑引用它们的外部系统。',
+    code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+    details: { table: DATA_SOURCES_TABLE, ids }
+  };
+}
+
+/**
+ * The ids among the `data_sources` rows matching `filters` that an integration external system
+ * canonically points at (`connection_id`) — i.e. exactly the rows the live-id foreign key protects.
+ *
+ * CANONICAL SHAPE ONLY. The legacy shape (`connection_id IS NULL` + `config->>'dataSourceId'` with
+ * the owner stamp) has no foreign key, so a bulk mutation does not trip on it and naming it here
+ * would claim a guarantee the database does not make; it stays registered as uncovered in §7 of the
+ * design note. Owner attribution — the reason DataSourceManager.countExternalSystemReferences reads
+ * that stamp — does not apply to the canonical column, which is server-written and unambiguous.
+ *
+ * 42P01 (integration schema not installed) means nothing can reference anything: zero, exact, and
+ * judged STRICTLY by the SQLSTATE, never by message prose — same posture as
+ * DataSourceManager.countExternalSystemReferences (DataSourceManager.ts:710).
+ */
+async function findReferencedDataSourceIds(filters: Record<string, unknown>): Promise<string[]> {
+  // Same filter application as the mutation below, so the pre-check and the write see the same set.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let idQuery = db.selectFrom(DATA_SOURCES_TABLE as any).select('id' as any) as any;
+  for (const [key, value] of Object.entries(filters)) {
+    idQuery = idQuery.where(key, '=', value);
+  }
+  const candidateRows = (await idQuery.execute()) as Array<{ id?: unknown }>;
+  const candidateIds = candidateRows
+    .map((row) => row?.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (candidateIds.length === 0) return [];
+
+  let referenceRows: Array<{ connection_id?: unknown }>;
+  try {
+    referenceRows = (await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .selectFrom('integration_external_systems' as any)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .select('connection_id' as any)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .where('connection_id' as any, 'in', candidateIds as any)
+      .execute()) as Array<{ connection_id?: unknown }>;
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return [];
+    throw err;
+  }
+
+  const referenced = new Set(
+    referenceRows
+      .map((row) => row?.connection_id)
+      .filter((id): id is string => typeof id === 'string')
+  );
+  return candidateIds.filter((id) => referenced.has(id));
+}
+
+/**
+ * ADVISORY wrapper around findReferencedDataSourceIds: used both for the pre-check and to name the
+ * ids in the catch-mapped refusal.
+ *
+ * A failure of the LOOKUP is not a failure of the request: the authoritative guard is the database
+ * constraint, which refuses the write whatever this read returned, and the catch below maps it. So a
+ * broken pre-check must not convert a legitimate bulk mutation into a new 500 it did not have
+ * before — it logs (values-free: the SQLSTATE only, never the driver's text, which embeds host,
+ * port, database and login) and returns "nothing known to be referenced". The cost of that choice is
+ * bounded: the refusal may then carry an empty `ids` list, never a wrong status.
+ */
+async function referencedDataSourceIdsForRefusal(filters: Record<string, unknown>): Promise<string[]> {
+  try {
+    return await findReferencedDataSourceIds(filters);
+  } catch (err) {
+    logger.warn('Reference lookup for bulk data_sources mutation failed; the database constraint remains the guard', {
+      context: 'AdminRoutes',
+      table: DATA_SOURCES_TABLE,
+      sqlstate: (err as { code?: string } | null)?.code ?? 'unknown'
+    });
+    return [];
+  }
+}
+
+/**
  * DELETE /api/admin/data/bulk
  * Bulk delete data
  */
 router.delete(
   '/data/bulk',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.DELETE_DATA,
     getDetails: (req) => ({
@@ -1216,6 +1428,22 @@ router.delete(
         return;
       }
 
+      // ① Referential pre-check (see the block comment above "Data Operations"). A hard delete of
+      // a source an external system still points at is refused by the live-id foreign key; answer
+      // 409 with the ids BEFORE attempting the write, so the caller learns which rows to unbind.
+      if (table === DATA_SOURCES_TABLE) {
+        const referencedIds = await referencedDataSourceIdsForRefusal(filters);
+        if (referencedIds.length > 0) {
+          logger.warn('Bulk deletion refused: target data sources are still referenced', {
+            context: 'AdminRoutes',
+            table,
+            referencedCount: referencedIds.length
+          });
+          res.status(409).json(referencedRefusalBody(referencedIds));
+          return;
+        }
+      }
+
       // Build and execute delete query
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let query = db.deleteFrom(table as any) as any;
@@ -1243,6 +1471,19 @@ router.delete(
       });
     } catch (error) {
       const err = error as Error;
+      // ② Database backstop: a binding that committed after the pre-check (or a pre-check that
+      // could not run) still trips the live-id foreign key. Same DECISION as ①, so the same 409 —
+      // never the bare 500 this route used to answer. Judged by SQLSTATE + constraint name, so a
+      // 23503 raised by ANY other constraint, or against any other table, keeps its 500.
+      if (table === DATA_SOURCES_TABLE && isLiveConnectionFkViolation(err)) {
+        logger.warn('Bulk deletion refused by the binding foreign key', {
+          context: 'AdminRoutes',
+          table,
+          constraint: (err as { constraint?: string }).constraint
+        });
+        res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
+        return;
+      }
       logger.error('Bulk deletion failed', err);
       res.status(500).json({
         success: false,
@@ -1258,6 +1499,11 @@ router.delete(
  */
 router.put(
   '/data/bulk',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.BULK_UPDATE,
     getDetails: (req) => ({
@@ -1310,6 +1556,28 @@ router.put(
         return;
       }
 
+      // ① Referential pre-check, NARROWED to the update that actually clears `live_id`: the
+      // generated column is NULL exactly when `deleted_at` is not null, so only an update that
+      // SETS `deleted_at` can trip the foreign key. An update of `name`, `status` … does not touch
+      // a key column (PostgreSQL takes FOR NO KEY UPDATE) and must not be refused here — widening
+      // this to "any update of data_sources" would break legitimate bulk edits of referenced rows.
+      const clearsLiveId =
+        Object.prototype.hasOwnProperty.call(updates, 'deleted_at') &&
+        (updates as Record<string, unknown>).deleted_at !== null &&
+        (updates as Record<string, unknown>).deleted_at !== undefined;
+      if (table === DATA_SOURCES_TABLE && clearsLiveId) {
+        const referencedIds = await referencedDataSourceIdsForRefusal(filters);
+        if (referencedIds.length > 0) {
+          logger.warn('Bulk update refused: target data sources are still referenced', {
+            context: 'AdminRoutes',
+            table,
+            referencedCount: referencedIds.length
+          });
+          res.status(409).json(referencedRefusalBody(referencedIds));
+          return;
+        }
+      }
+
       // Build and execute update query
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let query = (db.updateTable(table as any) as any).set(updates);
@@ -1337,6 +1605,16 @@ router.put(
       });
     } catch (error) {
       const err = error as Error;
+      // ② Database backstop — same shape as the DELETE route above.
+      if (table === DATA_SOURCES_TABLE && isLiveConnectionFkViolation(err)) {
+        logger.warn('Bulk update refused by the binding foreign key', {
+          context: 'AdminRoutes',
+          table,
+          constraint: (err as { constraint?: string }).constraint
+        });
+        res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
+        return;
+      }
       logger.error('Bulk update failed', err);
       res.status(500).json({
         success: false,
@@ -1353,8 +1631,19 @@ router.put(
 /**
  * GET /api/admin/slo/status
  * Get SLO status and error budgets
+ *
+ * SECURITY (issue #5678, batch 3 residual): this read used to carry no authorization at all — the
+ * last ungated GET in this file. It delegates to sloService.getSLOStatus() (SLOService.ts:122),
+ * which aggregates the process-wide prom-client registry with no tenant predicate anywhere, so the
+ * response is the platform's own reliability posture — per-SLO current availability, error-budget
+ * total/consumed/remaining and the healthy/at_risk/violated verdict — to any authenticated caller of
+ * any tenant. That is a free "is the platform hurting right now, and how much budget is left before
+ * it breaches?" oracle, pollable at will. Gated on platform admin like its /dlq, /ratelimits and
+ * /health/summary siblings (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 RBAC_CHECK_FAILED fail-closed; no database pool -> isAdmin() returns false at
+ * rbac/service.ts:20 -> 403, never an open door — see guards/audit-integration.ts:113).
  */
-router.get('/slo/status', async (req: Request, res: Response) => {
+router.get('/slo/status', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const status = await sloService.getSLOStatus();
     res.json({
@@ -1363,10 +1652,7 @@ router.get('/slo/status', async (req: Request, res: Response) => {
       status
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to get SLO status', error);
   }
 });
 
@@ -1418,10 +1704,7 @@ router.get('/dlq', requireAdminRole(), async (req: Request, res: Response) => {
       ...result
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to list DLQ messages', error);
   }
 });
 
@@ -1431,6 +1714,11 @@ router.get('/dlq', requireAdminRole(), async (req: Request, res: Response) => {
  */
 router.post(
   '/dlq/:id/retry',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.BULK_UPDATE, // Using BULK_UPDATE as proxy for retry
     getDetails: (req) => ({ action: 'retry_dlq', messageId: req.params.id })
@@ -1458,6 +1746,11 @@ router.post(
  */
 router.delete(
   '/dlq/:id',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.DELETE_DATA, // Using DELETE_DATA as proxy
     getDetails: (req) => ({ action: 'resolve_dlq', messageId: req.params.id })
@@ -1488,8 +1781,18 @@ router.delete(
 /**
  * GET /api/admin/shards
  * Get health status of all database shards/pools
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. It returns
+ * poolManager.getPoolStats() plus getMetricsSnapshot() — the name, status, live/idle/waiting
+ * connection counts and last driver error string of every database pool the process holds
+ * (integration/db/connection-pool.ts:302 and :359). Nothing in that shape is tenant-scoped: it is
+ * the platform's database topology and saturation profile, so any authenticated caller of any
+ * tenant could map the shard layout and watch pool pressure. Gated on platform admin like the
+ * sibling admin operations (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/shards', async (req: Request, res: Response) => {
+router.get('/shards', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const stats = await poolManager.getPoolStats();
     const metricsSnapshot = poolManager.getMetricsSnapshot();
@@ -1522,20 +1825,23 @@ router.get('/shards', async (req: Request, res: Response) => {
       metrics: metricsSnapshot
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get shard status', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get shard status', error);
   }
 });
 
 /**
  * GET /api/admin/shards/:name
  * Get detailed status of a specific shard
+ *
+ * SECURITY (issue #5678, batch 2): same exposure as GET /shards for one pool, and additionally an
+ * enumeration oracle — the 404 vs 200 split answers "does a shard with this name exist?" one guess
+ * at a time, so an unauthenticated-by-role caller could recover the shard naming scheme even
+ * without listing. Gated on platform admin (requireAdminRole: no user or non-admin -> 403
+ * ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false ->
+ * 403, see guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the
+ * lookup, so the 404/200 distinction is never reached by a denied caller.
  */
-router.get('/shards/:name', async (req: Request, res: Response) => {
+router.get('/shards/:name', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { name } = req.params;
     const stats = await poolManager.getPoolStats();
@@ -1564,12 +1870,7 @@ router.get('/shards/:name', async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get shard details', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get shard details', error);
   }
 });
 
@@ -1580,8 +1881,18 @@ router.get('/shards/:name', async (req: Request, res: Response) => {
 /**
  * GET /api/admin/queues
  * Get queue statistics (MessageBus + DLQ)
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. It returns the
+ * in-process MessageBus stats (queue depth, exact/pattern subscription counts, pending RPC count)
+ * and, via three dlqService.list() calls, the platform-wide dead-letter totals. Those totals come
+ * from the same untenanted `dead_letter_queue` table that forced the batch-1 gate on GET /dlq
+ * (services/DeadLetterQueueService.ts:151 — no tenant_id column, no tenant predicate), so the
+ * counts are every tenant's failures aggregated, readable by any authenticated caller. Gated on
+ * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
+ * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/queues', async (req: Request, res: Response) => {
+router.get('/queues', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     // Get MessageBus stats
     const messageBusStats = messageBus.getStats();
@@ -1614,12 +1925,7 @@ router.get('/queues', async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get queue stats', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get queue stats', error);
   }
 });
 
@@ -1629,6 +1935,11 @@ router.get('/queues', async (req: Request, res: Response) => {
  */
 router.post(
   '/dlq/retry-all',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.BULK_UPDATE,
     getDetails: () => ({ action: 'retry_all_dlq' })
@@ -1676,6 +1987,11 @@ router.post(
  */
 router.post(
   '/dlq/cleanup',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.DELETE_DATA,
     getDetails: (req) => ({ action: 'cleanup_dlq', days: req.body.days || 30 })
@@ -1711,8 +2027,20 @@ router.post(
 /**
  * GET /api/admin/ratelimits
  * Get current rate limiting status
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all. It returns
+ * rateLimiter.getConfig() verbatim — tokensPerSecond, bucketCapacity, cleanupIntervalMs and
+ * bucketIdleTimeoutMs (integration/rate-limiting/token-bucket.ts:302) — plus the global counters
+ * activeBuckets / totalAccepted / totalRejected (token-bucket.ts:257). The configuration is the
+ * exact shape of the platform's throttle: published to any authenticated caller it turns "probe
+ * until throttled" into "read the refill rate and stay one token under it", and bucketIdleTimeoutMs
+ * tells that caller how long to idle so its bucket is reclaimed. activeBuckets is a platform-wide
+ * gauge of how many tenant/user keys are currently active — not this caller's tenant, all of them.
+ * Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/ratelimits', async (req: Request, res: Response) => {
+router.get('/ratelimits', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const rateLimiter = getRateLimiter();
     const globalStats = rateLimiter.getGlobalStats();
@@ -1761,20 +2089,27 @@ router.get('/ratelimits', async (req: Request, res: Response) => {
       buckets: showBuckets === 'true' ? buckets : undefined
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get rate limit status', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get rate limit status', error);
   }
 });
 
 /**
  * GET /api/admin/ratelimits/:key
  * Get rate limit status for a specific key (tenant/user)
+ *
+ * SECURITY (issue #5678, batch 3): the strongest exposure in this batch. The bucket key is chosen
+ * by the caller from the path, and the keys this platform actually uses are `tenant:<tenantId>`
+ * (integration/rate-limiting/message-rate-limiter.ts:230). With no authorization, any authenticated
+ * user of any tenant could name ANOTHER tenant's key and get back that tenant's tokensRemaining,
+ * totalAccepted, totalRejected and acceptanceRate — a cross-tenant traffic meter. Even a wrong guess
+ * pays: the `not_tracked` branch versus the stats branch is an existence oracle answering "has this
+ * tenant/user sent anything recently?" one guess at a time, with no rate limit of its own on the
+ * guessing. Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED;
+ * isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the lookup, so the
+ * two branches are indistinguishable to a denied caller.
  */
-router.get('/ratelimits/:key', async (req: Request, res: Response) => {
+router.get('/ratelimits/:key', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { key } = req.params;
     const rateLimiter = getRateLimiter();
@@ -1803,12 +2138,7 @@ router.get('/ratelimits/:key', async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get rate limit status for key', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get rate limit status for key', error);
   }
 });
 
@@ -1818,6 +2148,11 @@ router.get('/ratelimits/:key', async (req: Request, res: Response) => {
  */
 router.post(
   '/ratelimits/:key/reset',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS,
     getDetails: (req) => ({ action: 'reset_rate_limit', key: req.params.key })
@@ -1852,6 +2187,11 @@ router.post(
  */
 router.post(
   '/ratelimits/reset-all',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS,
     getDetails: () => ({ action: 'reset_all_rate_limits' })
@@ -1887,8 +2227,18 @@ import { getHealthAggregator } from '../services/HealthAggregatorService';
 /**
  * GET /api/admin/health/detailed
  * Get detailed health status of all subsystems
+ *
+ * SECURITY (issue #5678, batch 2): this read used to carry no authorization at all. Unlike
+ * GET /health/summary (deliberately left alone in this batch, see the design note), it returns the
+ * FULL per-subsystem payload from HealthAggregatorService.checkHealth()
+ * (services/HealthAggregatorService.ts:209): database, messageBus, plugins, rateLimiting and system
+ * details plus the raw `warnings` and `errors` arrays, which carry failure text produced by the
+ * underlying subsystems. That is platform-level operational state, not tenant state, and any
+ * authenticated caller of any tenant could poll it. Gated on platform admin (requireAdminRole: no
+ * user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool ->
+ * isAdmin returns false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20).
  */
-router.get('/health/detailed', async (req: Request, res: Response) => {
+router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const healthAggregator = getHealthAggregator();
     const health = await healthAggregator.checkHealth();
@@ -1904,20 +2254,29 @@ router.get('/health/detailed', async (req: Request, res: Response) => {
       errors: health.errors
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get detailed health', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get detailed health', error);
   }
 });
 
 /**
  * GET /api/admin/health/summary
  * Get a quick health summary without full details
+ *
+ * SECURITY (issue #5678, batch 3): this read used to carry no authorization at all, which after
+ * batch 2 left the /health pair inconsistent — GET /health/detailed and GET /health/subsystem/:name
+ * became admin-only while the summary over the SAME HealthAggregatorService state stayed open. The
+ * summary is coarser but not harmless: status, uptime (i.e. when this process last restarted),
+ * per-status subsystem counts, and the hasWarnings / hasErrors booleans, which are a free polling
+ * channel telling an unprivileged caller exactly when the platform is degraded. Note it is also the
+ * cheapest of the three to hammer — it serves getLastHealth() from cache when one exists
+ * (services/HealthAggregatorService.ts:303) and only falls back to a fresh checkHealth(). Gated on
+ * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
+ * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The 500 branch below used to echo
+ * err.message; that separate decision point is now closed — it returns ADMIN_READ_FAILED via
+ * sendAdminReadFailure() and the original error goes to the log only (see the helper's note).
  */
-router.get('/health/summary', async (req: Request, res: Response) => {
+router.get('/health/summary', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const healthAggregator = getHealthAggregator();
 
@@ -1937,20 +2296,24 @@ router.get('/health/summary', async (req: Request, res: Response) => {
       hasErrors: health.errors.length > 0
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get health summary', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get health summary', error);
   }
 });
 
 /**
  * GET /api/admin/health/subsystem/:name
  * Get health status of a specific subsystem
+ *
+ * SECURITY (issue #5678, batch 2): same exposure as GET /health/detailed narrowed to one subsystem
+ * — the handler runs the same checkHealth() and returns that subsystem's detail object verbatim,
+ * so `?name=database` alone hands over the database subsystem's diagnostic shape. The 400 branch
+ * also echoes the whitelist of valid subsystem names, which is a free map of what this deployment
+ * runs. Gated on platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED;
+ * isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The guard runs before the name
+ * validation, so a denied caller cannot read the whitelist out of the 400 either.
  */
-router.get('/health/subsystem/:name', async (req: Request, res: Response) => {
+router.get('/health/subsystem/:name', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const { name } = req.params;
     const validSubsystems = ['database', 'messageBus', 'plugins', 'rateLimiting', 'system'];
@@ -1973,12 +2336,7 @@ router.get('/health/subsystem/:name', async (req: Request, res: Response) => {
       subsystem
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get subsystem health', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get subsystem health', error);
   }
 });
 

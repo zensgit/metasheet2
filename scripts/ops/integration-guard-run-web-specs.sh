@@ -52,6 +52,37 @@
 # token in this list — the nearest neighbours, `StockPreparationWorkspace` and
 # `StockPreparationProjectWorkspaceView`, diverge right after `StockPreparation` — so it resolves to
 # exactly one file.
+#
+# W7-A3 场景 B 页面验收 note: StockPreparationScenarioBAcceptance (2026-09-20) is in THIS list on the
+# same footing as the notes above — it mounts StockPreparationDashboardView and
+# StockPreparationSnapshotDiffView, both under apps/web/src/components/integration/stockPreparation/**,
+# a `/**` roster entry that already fires this lane. A roster entry for the .spec.ts itself is the same
+# follow-up as the notes above, for the same person. The filter token is
+# `StockPreparationScenarioBAcceptance`, neither a substring nor a superstring of any other token in
+# this list (nearest neighbours `StockPreparationSnapshotDiffView` / `StockPreparationDashboardView`
+# diverge right after `StockPreparation`), so it resolves to exactly one file.
+#
+# SC-04 运行详情前端 note: IntegrationRunDetail (2026-09-20) is in THIS list on the same footing
+# as the notes above — it mounts IntegrationWorkbenchView and exercises
+# apps/web/src/components/integration/IntegrationMonitoringSection.vue,
+# apps/web/src/services/integration/workbench.ts and apps/web/src/views/IntegrationWorkbenchView.vue,
+# all three of which are EXACT roster entries in scripts/ops/integration-guard-guarded-paths.mjs, so
+# this lane already fires on every change to the surface it covers. A roster entry for the .spec.ts
+# itself is the same follow-up as the notes above, for the same person. The filter token is
+# `IntegrationRunDetail`, neither a substring nor a superstring of any other token in this list
+# (nearest neighbours `IntegrationMonitoringSection` / `IntegrationWorkbenchView` diverge right after
+# `Integration`), so it resolves to exactly one file.
+#
+# Q3c 导出对账摘要 note: StockPreparationDiffSummaryExport (2026-09-20) is in THIS list on the same
+# footing as the notes above — it covers StockPreparationSnapshotDiffView.vue (client-side CSV
+# export of the diff summary) and services/integration/stockPreparation/bomSnapshotDiff.ts, both
+# under the `/**` roster entries (apps/web/src/components/integration/stockPreparation/** and
+# apps/web/src/services/integration/stockPreparation/**) that already fire this lane for stock-prep
+# changes generally. A roster entry for the .spec.ts itself is the same deferred follow-up as the
+# notes above, for the same person. The filter token is `StockPreparationDiffSummaryExport`, neither
+# a substring nor a superstring of any other token in this list (nearest neighbours
+# `StockPreparationSnapshotDiffView` / `StockPreparationScenarioBAcceptance` diverge right after
+# `StockPreparation`), so it resolves to exactly one file.
 set -euo pipefail
 
-pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror k3-endpoint-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationHubOverviewSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper StockPreparationSourceBinding StockPreparationProjectQuery StockPreparationHomeQueryLabels --reporter=dot
+pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror k3-endpoint-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationHubOverviewSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper StockPreparationSourceBinding StockPreparationProjectQuery StockPreparationHomeQueryLabels StockPreparationScenarioBAcceptance IntegrationRunDetail StockPreparationDiffSummaryExport --reporter=dot

@@ -51,10 +51,58 @@ function targetedRunCommand(source: string): string {
     .join('\n')
 }
 
+/**
+ * The required lane's `exec npx vitest run …` as ONE logical command line.
+ *
+ * Q8 (2026-09-21): that invocation is no longer a single physical line — it is one token per line,
+ * backslash-continued and alphabetised, so that concurrent spec-adding branches stop conflicting
+ * pairwise on one 11 KB line. A `line.startsWith('exec npx vitest run ')` parse now matches only
+ * the header, whose sole "token" is the continuation backslash, and would report every attendance
+ * spec below as unregistered. So: strip whole-line `#` comments (the script carries a lot of prose
+ * naming files it does NOT run), join continuations, then take the exec line.
+ *
+ * Asserted-not-assumed: this throws rather than returning '' if the shape is not what it claims, so
+ * a future rewrite cannot quietly turn the `toContain` checks below into assertions about ''.
+ */
+function requiredLaneExecCommand(script: string): string {
+  const logical: string[] = []
+  let buf: string | null = null
+  for (const raw of script.split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    if (/^\s*#/.test(line)) continue
+    const trimmedRight = line.replace(/\s+$/, '')
+    const continued = trimmedRight.endsWith('\\')
+    const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
+    buf = buf === null ? body : `${buf} ${body}`.trim()
+    if (!continued) {
+      logical.push(buf)
+      buf = null
+    }
+  }
+  if (buf !== null) logical.push(buf)
+
+  const execLines = logical.filter(line => /^exec\s+npx\s+vitest\s+run\b/.test(line))
+  if (execLines.length !== 1) {
+    throw new Error(`run-required-web-tests.sh must have exactly one exec vitest invocation, found ${execLines.length}`)
+  }
+  return execLines[0]
+}
+
 describe('attendance web guard workflow contract', () => {
+  it('parses the required lane as one exec logical line, not one physical line', () => {
+    // Pins the parsing contract the assertion below depends on, and shows why it changed: the
+    // physical-line form yields nothing usable against the current file.
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    const command = requiredLaneExecCommand(required)
+    expect(command.split(/\s+/).length).toBeGreaterThan(300)
+
+    const physical = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
+    expect(physical.slice('exec npx vitest run '.length).trim()).toBe('\\')
+  })
+
   it('runs makeup regressions in both unit gates and the dedicated browser lane', () => {
     const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
-    const requiredCommand = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
+    const requiredCommand = requiredLaneExecCommand(required)
     for (const spec of ['attendanceEmployeeMakeupRequestCard', 'attendanceEmployeeLeaveRequestCard', 'attendance-selfservice-dashboard']) {
       expect(requiredCommand.split(/\s+/)).toContain(spec)
       expect(targetedRunCommand(workflow).split(/\s+/)).toContain(spec)
@@ -85,6 +133,36 @@ describe('attendance web guard workflow contract', () => {
       expect(cases!.split(/\|\\?\s*/).map(value => value.trim())).toContain(path)
     },
   )
+
+  /**
+   * THE MODULE THAT MADE THIS LANE RED MUST SELECT THIS LANE (refuter finding).
+   *
+   * `src/utils/delete-fallback.ts` is imported by `utils/api.ts`, i.e. it is in the module graph of
+   * every harness this lane boots — and on 2026-09-18 a change to it (its directory, then) took the
+   * makeup browser step 6/6 red. The stock-prep lane got a classifier entry for it in the same PR
+   * and this lane did not, so a later PR touching only that module would classify relevant=false,
+   * skip `playwright test --config playwright.attendance-makeup.config.ts` altogether, and land the
+   * red on an unrelated attendance PR afterwards. Both wiring points, same as the session sources.
+   */
+  it('selects the DELETE-transport fallback module in both push and PR classifiers', () => {
+    const path = 'apps/web/src/utils/delete-fallback.ts'
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    expect(doc.on.push.paths).toContain(path)
+    const cases = workflow.match(/case "\$path" in([\s\S]*?)\)\s*relevant=true/)?.[1]
+    expect(cases).toBeTruthy()
+    expect(cases!.split(/\|\\?\s*/).map(value => value.trim())).toContain(path)
+    // The lane it unlocks is the one that went red — assert it is still gated on the classifier and
+    // is the browser step, so this pin cannot be satisfied by a lane that no longer runs Playwright.
+    // Select the step that EXECUTES playwright, not merely one whose text contains the config path:
+    // the classifier step's own `run` lists `apps/web/playwright.attendance-makeup.config.ts` as a
+    // path pattern, so a `includes('playwright.attendance-makeup.config.ts')` search finds THAT step
+    // first — it has no `if:` at all, and the assertion read `undefined`.
+    const steps = Object.values((loadYaml(workflow) as { jobs: Record<string, { steps?: Array<{ name?: string; run?: string; if?: string }> }> }).jobs)
+      .flatMap(job => job.steps ?? [])
+    const browser = steps.filter(step => /playwright test --config playwright\.attendance-makeup\.config\.ts/.test(step.run ?? ''))
+    expect(browser).toHaveLength(1)
+    expect(browser[0].if).toBe("steps.changes.outputs.relevant == 'true'")
+  })
 
   it.each(sessionSpecs)('executes the exact session spec in domain and required commands: %s', spec => {
     const doc = loadYaml(workflow) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }> }
@@ -169,6 +247,17 @@ describe('attendance web guard workflow contract', () => {
       'attendanceAdminEndpointCompatibility',
       'useAttendanceAdminProvisioning',
       'useAttendanceAdminUsers',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
+
+  it('keeps attendance task-home badge and group-access specs in the classifier and targeted run list', () => {
+    const targetedRun = targetedRunCommand(workflow)
+    for (const spec of [
+      'attendanceAdminTaskHomeStatus',
+      'attendanceAdminTaskHomeAccess',
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))

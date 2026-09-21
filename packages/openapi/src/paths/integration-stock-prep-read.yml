@@ -1,0 +1,434 @@
+paths:
+  # Q4c PR-2. Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, route table
+  # entry :144, handler `stockPreparationSnapshotBatchList` (~L7469), parsed by
+  # `stockPreparationSnapshotBatchListInput` (~L2614) against the closed allowlist
+  # `VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS` (~L1708: tenantId/workspaceId/projectId),
+  # calling `listSnapshotBatches`
+  # (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:228). Read the
+  # handler + read function themselves before touching this block — they are the sole source of
+  # truth. Admin-gated (`requireAccess(req, 'admin')`), unlike the broader 'read' tier the
+  # sibling stockPreparationProjectList route uses.
+  /api/integration/stock-preparation/snapshot-batches:
+    get:
+      summary: List a project's immutable BOM snapshot batches (stock-prep view 2)
+      description: >-
+        Read-only, values-free LIST of the immutable BOM snapshot batches for one business
+        project — queryRecords-only against the internal MetaSheet-provisioned MVP tables,
+        never PLM/K3/any external system. Uses the two-project split: the STAGING project
+        (derived from the auth tenant) locates the provisioned sheets, `projectId` (the PLM
+        business project) filters the batch rows and is echoed back. An unprovisioned batch
+        sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an
+        error. `workspaceId` is accepted by the query allowlist but is never read by the handler
+        or the read function — it has no effect on the result (confirmed by reading both; not a
+        documented no-op elsewhere in this module family).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: projectId
+          required: true
+          description: >-
+            The (business) PLM project id. Missing/empty is a 400
+            (STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID, field: projectId).
+          schema: { type: string }
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: >-
+            Accepted by the query allowlist but NOT forwarded to the read function — has no
+            effect on the response (dead parameter; documented here so a caller does not assume
+            it scopes anything).
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data: { $ref: '#/components/schemas/StockPreparationSnapshotBatchListResult' }
+        '400':
+          description: Missing `projectId`, or an unsupported query field.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                project_id_required:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID
+                      message: projectId is required
+                      details: { field: projectId }
+                unsupported_field:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID
+                      message: 'unsupported request field: sheetId'
+                      details: { field: sheetId }
+                tenant_required:
+                  value:
+                    ok: false
+                    error:
+                      code: TENANT_REQUIRED
+                      message: tenantId is required
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: >-
+            The bounded readonly scan exceeded its page bound (READ_MAX_PAGES=50 pages of
+            READ_PAGE_LIMIT=500 rows each) reading the batch/line/run sheets — fails closed
+            rather than scanning forever.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                result_too_large:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_RESULT_TOO_LARGE
+                      message: stock-preparation snapshot read exceeded the page bound
+                      details: { maxPages: 50 }
+        '501':
+          description: >-
+            The host's multitable provisioning API (findObjectSheet/resolveFieldIds) or the
+            records API (queryRecords) is not available.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                provisioning_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE
+                      message: multitable provisioning API is not available
+                records_api_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_RECORDS_API_UNAVAILABLE
+                      message: stock-preparation snapshot reads require multitable.records.queryRecords
+                      details: { requiredMethods: [queryRecords] }
+  # Q4c PR-2. Contract source: http-routes.cjs route table entry :145, handler
+  # `stockPreparationSnapshotDiff` (~L7491), parsed by `stockPreparationSnapshotDiffInput`
+  # (~L2632) against `VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_QUERY_KEYS` (~L1715:
+  # tenantId/workspaceId/projectId/baseSnapshotBatchId), calling `getSnapshotDiff`
+  # (lib/stock-preparation-snapshot-reads.cjs:404). Same admin gate as the LIST route above.
+  /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff:
+    get:
+      summary: Values-free counts diff of one snapshot batch vs its base (stock-prep view 2)
+      description: >-
+        Read-only, values-free diff of the named snapshot batch against its immutable
+        predecessor (auto-picked: same business project, highest snapshotVersion strictly below
+        the current one) or an explicit caller-chosen `baseSnapshotBatchId`. The business
+        project used for the predecessor search is read from the CURRENT batch row itself (the
+        FE diff call sends no `projectId`); the `projectId` query param is only a fallback used
+        when that batch row cannot be read. `workspaceId` is accepted by the query allowlist but
+        has no effect on the result (same dead-parameter note as the LIST route). H-1 gate:
+        BOTH the current and the resolved base batch must be structurally complete (at least one
+        line AND a matching run row) — an incomplete side fails loud with 409
+        SNAPSHOT_DIFF_BATCH_INCOMPLETE rather than serving a partial/fabricated diff. An
+        unprovisioned substrate (no batch/line/exception sheet exists at all) degrades
+        gracefully to zero counts and `baseSnapshotBatchId: null`, unless an explicit base was
+        requested (then 404).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: snapshotBatchId
+          required: true
+          description: The snapshot batch being diffed (the "current" side).
+          schema: { type: string }
+        - in: query
+          name: baseSnapshotBatchId
+          required: false
+          description: >-
+            Caller-chosen base pair, overriding the predecessor auto-pick. Must differ from
+            `snapshotBatchId` (400 SNAPSHOT_DIFF_BASE_INVALID), must exist (404
+            SNAPSHOT_DIFF_BASE_NOT_FOUND) and must belong to the same business project as the
+            diffed batch (409 SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH). Only verifiable when the
+            diffed batch's own row exists — a caller-chosen pair against a ghost current id is
+            also 404 SNAPSHOT_DIFF_BASE_NOT_FOUND.
+          schema: { type: string }
+        - in: query
+          name: projectId
+          required: false
+          description: >-
+            Fallback business-project id, used only when the current batch row cannot be read
+            (the normal path reads the project from that row). Does not filter or narrow the
+            diffed batch itself (the batch id already rode the path).
+          schema: { type: string }
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Accepted by the query allowlist but has no effect on the response.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data: { $ref: '#/components/schemas/StockPreparationSnapshotDiffResult' }
+        '400':
+          description: >-
+            An unsupported query field, or `baseSnapshotBatchId` equal to `snapshotBatchId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                base_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_INVALID
+                      message: baseSnapshotBatchId must differ from the diffed batch
+                      details: { field: baseSnapshotBatchId }
+                unsupported_field:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID
+                      message: 'unsupported request field: sheetId'
+                      details: { field: sheetId }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >-
+            An explicit `baseSnapshotBatchId` that does not exist, or that cannot be verified
+            because the diffed batch's own row does not exist.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                base_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_NOT_FOUND
+                      message: base snapshot batch was not found
+                      details: { field: baseSnapshotBatchId }
+        '409':
+          description: >-
+            The resolved base belongs to a different business project than the diffed batch, OR
+            (H-1) the current/base batch is structurally incomplete, OR the current/base batch
+            identity is ambiguous (duplicate snapshotBatchId or duplicate run identity, no
+            substrate unique index).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                base_project_mismatch:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH
+                      message: base snapshot batch belongs to a different business project
+                      details: { field: baseSnapshotBatchId }
+                batch_incomplete:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BATCH_INCOMPLETE
+                      message: snapshot diff refuses an incomplete snapshot batch
+                      details: { target: current, reason: incomplete }
+                batch_ambiguous:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BATCH_INCOMPLETE
+                      message: snapshot diff refuses an ambiguous snapshot batch identity
+                      details: { target: base, reason: ambiguous }
+        '501':
+          description: >-
+            The host's multitable provisioning API or records API is not available (same two
+            codes as the LIST route).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                provisioning_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE
+                      message: multitable provisioning API is not available
+  # Q4c PR-2. Contract source: http-routes.cjs route table entry :148, handler
+  # `stockPreparationSnapshotDiffRows` (~L7515), parsed by
+  # `stockPreparationSnapshotDiffRowsInput` (~L2651) against
+  # `VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_QUERY_KEYS` (~L1721: DIFF's 4 keys plus
+  # reviewStatus/diffType), calling `listSnapshotDiffRows`
+  # (lib/stock-preparation-snapshot-reads.cjs:558). Same base-resolution/H-1 semantics as the
+  # counts diff above (identical helper functions); this route additionally projects each diff
+  # through the closed `DIFF_ROW_KEYS` allowlist and caps the result at MAX_DIFF_ROWS=2000.
+  /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows:
+    get:
+      summary: Per-row diff browse of one snapshot batch vs its base (stock-prep view 2 rows)
+      description: >-
+        Read-only, values-free PER-ROW diff browse: diffType/changeTypes/reviewStatus per diff
+        row, for the FE's row-level drill-down under view 2. Same base resolution (auto-pick or
+        explicit `baseSnapshotBatchId`) and H-1 completeness gate as the counts diff
+        (GET .../diff); the enum filters `reviewStatus`/`diffType` are validated against the
+        route's own closed vocabulary FIRST (400 with the field name), so the read function's
+        own belt-and-braces re-check of the same vocabulary is unreachable via HTTP.
+        `heldRowCount` is computed over the WHOLE pair BEFORE these filters are applied, so a
+        filtered read still carries that context; `rowCount` is the post-filter row count.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: snapshotBatchId
+          required: true
+          description: The snapshot batch being diffed (the "current" side).
+          schema: { type: string }
+        - in: query
+          name: baseSnapshotBatchId
+          required: false
+          description: Same semantics as the counts diff route's `baseSnapshotBatchId`.
+          schema: { type: string }
+        - in: query
+          name: reviewStatus
+          required: false
+          description: >-
+            Restrict rows to one reviewStatus. A value outside the vocabulary is a 400
+            (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result.
+          schema: { type: string, enum: [ready, held] }
+        - in: query
+          name: diffType
+          required: false
+          description: >-
+            Restrict rows to one diffType. A value outside the vocabulary is a 400
+            (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result.
+          schema: { type: string, enum: [added, removed, changed, unchanged, held] }
+        - in: query
+          name: projectId
+          required: false
+          description: Same fallback semantics as the counts diff route's `projectId`.
+          schema: { type: string }
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Accepted by the query allowlist but has no effect on the response.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data: { $ref: '#/components/schemas/StockPreparationSnapshotDiffRowsResult' }
+        '400':
+          description: >-
+            An unsupported query field, an out-of-vocabulary `reviewStatus`/`diffType`, or
+            `baseSnapshotBatchId` equal to `snapshotBatchId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                review_status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID
+                      message: reviewStatus must be one of the review-status vocabulary
+                      details: { field: reviewStatus }
+                diff_type_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID
+                      message: diffType must be one of the diff-type vocabulary
+                      details: { field: diffType }
+                base_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_INVALID
+                      message: baseSnapshotBatchId must differ from the diffed batch
+                      details: { field: baseSnapshotBatchId }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Same semantics as the counts diff route's 404.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                base_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_NOT_FOUND
+                      message: base snapshot batch was not found
+                      details: { field: baseSnapshotBatchId }
+        '409':
+          description: Same semantics as the counts diff route's 409 (project mismatch / H-1 incomplete / ambiguous).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                batch_incomplete:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BATCH_INCOMPLETE
+                      message: snapshot diff refuses an incomplete snapshot batch
+                      details: { target: current, reason: incomplete }
+        '422':
+          description: >-
+            The filtered/unfiltered row set exceeded MAX_DIFF_ROWS=2000, or the underlying
+            bounded sheet scan exceeded its page bound (same as the LIST route's 422).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                rows_too_large:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_ROWS_TOO_LARGE
+                      message: snapshot diff row read exceeded the row bound
+                      details: { maxRows: 2000 }
+        '501':
+          description: >-
+            The host's multitable provisioning API or records API is not available (same two
+            codes as the LIST route).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                provisioning_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE
+                      message: multitable provisioning API is not available

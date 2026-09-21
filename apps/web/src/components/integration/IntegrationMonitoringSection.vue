@@ -49,8 +49,145 @@
               </button>
               <pre v-if="isRunExpanded(run.id)" :data-testid="`run-row-summaries-${run.id}`">{{ JSON.stringify(runRowSummaries(run), null, 2) }}</pre>
             </div>
+            <!-- SC-04 (read-only): re-reads THIS run from GET /api/integration/runs/:runId. Not a
+                 replay/retry affordance — the dialog it opens has no write control at all. -->
+            <div class="integration-workbench__run-actions">
+              <button
+                type="button"
+                class="integration-workbench__link-button"
+                :data-testid="`open-run-detail-${run.id}`"
+                :disabled="runDetailId === run.id && runDetailLoading"
+                :title="bi('重新读取这条运行的最新状态与详情（只读）', 'Re-read this run\'s latest status and details (read-only)')"
+                @click="openRunDetail(run.id)"
+              >{{ bi('详情', 'Details') }}</button>
+            </div>
           </li>
         </ol>
+        <!-- One dialog for the whole list: `runDetailId` ('' = closed) is the single source of
+             truth for which run is open, so two rows can never both be showing a dialog. -->
+        <div
+          v-if="runDetailId"
+          class="integration-workbench__run-detail"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="bi('运行详情', 'Run details')"
+          data-testid="run-detail-dialog"
+        >
+          <div class="integration-workbench__run-detail-head">
+            <strong>{{ bi('运行详情', 'Run details') }}</strong>
+            <span data-testid="run-detail-id">{{ runDetailId }}</span>
+            <!-- Q4b (read-only): non-terminal runs auto-refresh every 5s; the label reflects
+                 whether a timer is actually armed (a terminal run's dialog stays open with no
+                 timer), and the button lets the operator force one read without waiting. -->
+            <span
+              class="integration-workbench__run-detail-poll-status"
+              data-testid="run-detail-poll-status"
+            >{{ runDetailPolling ? bi('自动刷新中', 'Auto-refreshing') : bi('自动刷新已停止', 'Auto-refresh stopped') }}</span>
+            <button
+              type="button"
+              class="integration-workbench__link-button"
+              data-testid="refresh-run-detail"
+              :disabled="runDetailLoading"
+              @click="refreshRunDetail(true)"
+            >{{ bi('刷新', 'Refresh') }}</button>
+            <button
+              type="button"
+              class="integration-workbench__link-button"
+              data-testid="close-run-detail"
+              @click="closeRunDetail"
+            >{{ bi('关闭', 'Close') }}</button>
+          </div>
+          <div v-if="runDetailLoading" class="integration-workbench__hint" data-testid="run-detail-loading">
+            {{ bi('详情加载中…', 'Loading details…') }}
+          </div>
+          <p v-else-if="runDetailError" class="integration-workbench__run-error" data-testid="run-detail-error">
+            {{ runDetailError }}
+          </p>
+          <div v-else-if="runDetail" class="integration-workbench__run-detail-body">
+            <div class="integration-workbench__run-head">
+              <strong
+                :class="`integration-workbench__run-status integration-workbench__run-status--${runDetail.status}`"
+                data-testid="run-detail-status"
+              >{{ runDetail.status }}</strong>
+              <span data-testid="run-detail-mode">{{ runDetail.mode }}</span>
+              <span v-if="runDetail.triggeredBy">by {{ runDetail.triggeredBy }}</span>
+            </div>
+            <div class="integration-workbench__run-metrics" data-testid="run-detail-metrics">
+              <span>read {{ runDetail.rowsRead }}</span>
+              <span>clean {{ runDetail.rowsCleaned }}</span>
+              <span class="integration-workbench__run-metric--write">write {{ runDetail.rowsWritten }}</span>
+              <span class="integration-workbench__run-metric--fail">fail {{ runDetail.rowsFailed }}</span>
+              <span v-if="runDetail.durationMs != null">{{ runDetail.durationMs }}ms</span>
+            </div>
+            <small data-testid="run-detail-times">{{ runDetail.startedAt || runDetail.createdAt || runDetail.id }}<template v-if="runDetail.finishedAt"> → {{ runDetail.finishedAt }}</template></small>
+            <p v-if="runDetail.errorSummary" class="integration-workbench__run-error" data-testid="run-detail-error-summary">{{ runDetail.errorSummary }}</p>
+            <!-- details JSONB, read-only pretty JSON — the same affordance the row-level results
+                 already use. No new exposure surface: this is the field the list already returns. -->
+            <pre v-if="runDetailPayloadText" data-testid="run-detail-payload">{{ runDetailPayloadText }}</pre>
+            <div v-else class="integration-workbench__empty" data-testid="run-detail-payload-empty">
+              {{ bi('这条运行没有附加详情（details 为空）。', 'This run carries no extra details (empty details).') }}
+            </div>
+            <!-- Q4a (read-only): this run's provenance events, collapsed by default so opening
+                 详情 still costs exactly one request. Values-free by construction — only the
+                 event type, rowId, ordinal and timestamps are rendered, and `attrs` goes through
+                 the SAME redacted summariser the cross-run dead-letter timeline already uses
+                 (truncated, key-capped), never a raw payload dump. -->
+            <div class="integration-workbench__run-provenance">
+              <button
+                type="button"
+                class="integration-workbench__link-button"
+                data-testid="toggle-run-provenance"
+                :disabled="runProvenanceLoading"
+                @click="toggleRunProvenance"
+              >{{ runProvenanceExpanded
+                ? bi('收起溯源事件', 'Hide provenance events')
+                : bi('展开溯源事件', 'Show provenance events') }}</button>
+              <div v-if="runProvenanceExpanded" data-testid="run-provenance">
+                <div
+                  v-if="runProvenanceLoading"
+                  class="integration-workbench__hint"
+                  data-testid="run-provenance-loading"
+                >{{ bi('溯源事件加载中…', 'Loading provenance events…') }}</div>
+                <p
+                  v-else-if="runProvenanceError"
+                  class="integration-workbench__run-error"
+                  data-testid="run-provenance-error"
+                >{{ runProvenanceError }}</p>
+                <ol
+                  v-else-if="runProvenanceEntries.length > 0"
+                  class="integration-workbench__record-list"
+                  data-testid="run-provenance-timeline"
+                >
+                  <li
+                    v-for="(entry, index) in runProvenanceEntries"
+                    :key="`${entry.runId}-${entry.eventIndex}`"
+                    :data-testid="`run-provenance-entry-${index}`"
+                  >
+                    <div class="integration-workbench__provenance-event-head">
+                      <strong>{{ entry.eventType }}</strong>
+                      <span>#{{ entry.eventIndex }}</span>
+                      <span>{{ entry.at }}</span>
+                    </div>
+                    <small>rowId {{ entry.rowId }}</small>
+                    <p
+                      v-if="rowProvenanceAttrsSummary(entry.attrs)"
+                      class="integration-workbench__provenance-attrs"
+                    >{{ rowProvenanceAttrsSummary(entry.attrs) }}</p>
+                  </li>
+                </ol>
+                <div
+                  v-else
+                  class="integration-workbench__empty"
+                  data-testid="run-provenance-empty"
+                >{{ bi('这条运行没有溯源事件。', 'This run recorded no provenance events.') }}</div>
+              </div>
+            </div>
+          </div>
+          <p class="integration-workbench__hint">{{ bi(
+            '只读：仅重新读取这条运行的记录，不触发任何重跑或写入。',
+            'Read-only: this only re-reads the run record; it triggers no re-run or write.',
+          ) }}</p>
+        </div>
       </div>
       <div>
         <h3>Open Dead Letters</h3>
@@ -197,6 +334,26 @@ defineProps<{
   bi: (zh: string, en: string) => string
   runRowSummaries: (run: IntegrationPipelineRun) => IntegrationTargetWriteSummary[]
   isRunExpanded: (runId: string) => boolean
+  // SC-04 single-run detail dialog. All five values are owned/derived by the parent view (this
+  // component still makes no service call): `runDetailId` is '' when closed, `runDetailPayloadText`
+  // is the pre-serialized `details` JSON ('' when the run carries none → empty state).
+  runDetailId: string
+  runDetailLoading: boolean
+  runDetailError: string
+  runDetail: IntegrationPipelineRun | null
+  runDetailPayloadText: string
+  // Q4b (read-only): true while the dialog is auto-polling a non-terminal run every
+  // RUN_DETAIL_POLL_MS; the parent view owns the timer, this component only shows the label and
+  // forwards the manual-refresh click.
+  runDetailPolling: boolean
+  refreshRunDetail: (showLoading: boolean) => Promise<void>
+  // Q4a per-run provenance section. Owned/fetched by the parent view (this component still makes
+  // no service call); `runProvenanceExpanded` is false until the operator asks for the lineage.
+  runProvenanceExpanded: boolean
+  runProvenanceLoading: boolean
+  runProvenanceError: string
+  runProvenanceEntries: IntegrationProvenanceTimelineEntry[]
+  toggleRunProvenance: () => Promise<void>
   deadLetterErrorLabel: (deadLetter: IntegrationDeadLetter) => string
   deadLetterErrorHint: (deadLetter: IntegrationDeadLetter) => string | null
   isDeadLetterReplayable: (deadLetter: IntegrationDeadLetter) => boolean
@@ -210,6 +367,8 @@ defineProps<{
   rowProvenanceAttrsSummary: (attrs: Record<string, unknown> | undefined) => string
   refreshPipelineObservation: (silent?: boolean) => Promise<void>
   toggleRunSummaries: (runId: string) => void
+  openRunDetail: (runId: string) => Promise<void>
+  closeRunDetail: () => void
   requestReplay: (deadLetterId: string) => void
   cancelReplay: () => void
   replayDeadLetter: (deadLetter: IntegrationDeadLetter) => Promise<void>
@@ -426,11 +585,59 @@ defineProps<{
   margin: 4px 0 0;
 }
 
+/* SC-04 read-only single-run detail. Rendered inline inside the section (not teleported) so it
+   stays inside the panel's own scroll context and needs no portal/overlay dependency. */
+.integration-workbench__run-actions {
+  margin-top: 4px;
+}
+
+.integration-workbench__run-detail {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--ms-border);
+  border-radius: 6px;
+  background: var(--ms-bg-card);
+  display: grid;
+  gap: 6px;
+}
+
+.integration-workbench__run-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.integration-workbench__run-detail-poll-status {
+  font-size: 12px;
+  color: var(--ms-text-3);
+}
+
+.integration-workbench__run-detail-body {
+  display: grid;
+  gap: 4px;
+}
+
+.integration-workbench__run-detail-body pre {
+  min-height: 0;
+  max-height: 240px;
+  margin: 4px 0 0;
+}
+
 .integration-workbench__dead-letter-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* Q4a (read-only): per-run provenance section inside the run-detail dialog. Reuses the
+   `__provenance-*` rules below for its entries. */
+.integration-workbench__run-provenance {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
 }
 
 /* DF-N2-3 (read-only): cross-run provenance timeline (per dead-letter row). */

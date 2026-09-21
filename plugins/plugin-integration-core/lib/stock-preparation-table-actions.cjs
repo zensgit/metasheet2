@@ -46,6 +46,7 @@ const {
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
   DECISIONS,
+  EXISTING_ROW_CREATED_BY,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
@@ -497,6 +498,9 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // Absent also means the expander applies ITS default (`DEFAULT_ROOT_SELECTION`, 老系统规则),
     // which is the owner's ruling; a deployment that needs the pre-F1c root set writes
     // `rootSelection: { enabled: false }` HERE and it now actually reaches both lanes.
+    // #5862: `sheetMetalMatch` / `sheetMetalRequiresMainPrefix` ride the SAME block — the whole
+    // normalized object is stored and forwarded, so a new key needs no new wire here or in the
+    // large-BOM lane; it needs the expander's normalizer to know it (and to refuse a misspelling).
     ...(rootSelection ? { rootSelection } : {}),
   }
 }
@@ -512,6 +516,8 @@ function normalizeStockPreparationActionConfig(input = {}) {
  *
  * The expander's own error class is translated to this module's 422 config error so a bad deploy
  * config fails where an operator can see it (config time) with the code every other bad key uses.
+ * #5862: that vocabulary now includes `sheetMetalMatch` ('endsWith' | 'contains') and
+ * `sheetMetalRequiresMainPrefix`, and the block is a CLOSED key set — an unknown key is a 422 too.
  */
 function normalizeActionRootSelection(input) {
   if (input === undefined || input === null) return undefined
@@ -955,6 +961,11 @@ function ensureWriteRecordsApi(recordsApi) {
   return recordsApi
 }
 
+// GOV-05: the ONE place the records API's `createdBy` (meta_records.created_by) used to be dropped.
+// It rides out on the planner's Symbol key — never as a string key, so it is not a column, not in
+// `Object.keys`, not in stableStringify (buildRevision), not in JSON (responses / token store). Set
+// only when the host surfaced a non-blank string; a NULL created_by (plugin-written row) leaves the
+// key ABSENT. Read from the RECORD envelope, never from `data`: a `createdBy` cell cannot forge it.
 function unmapRecordFields(record, fieldIdMap = {}) {
   const data = isPlainObject(record && record.data) ? record.data : record
   const inverse = {}
@@ -963,6 +974,8 @@ function unmapRecordFields(record, fieldIdMap = {}) {
   for (const [field, value] of Object.entries(data || {})) {
     out[inverse[field] || field] = value
   }
+  const createdBy = isPlainObject(record) && data !== record ? record.createdBy : undefined
+  if (typeof createdBy === 'string' && createdBy.trim() !== '') out[EXISTING_ROW_CREATED_BY] = createdBy
   return out
 }
 

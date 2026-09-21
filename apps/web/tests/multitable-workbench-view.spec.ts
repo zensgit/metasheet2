@@ -370,7 +370,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
     // `select-record` alone is now a plain cursor move (W2 lock §3.1 erratum) and no longer opens
     // the inspector; tests that need the panel OPEN click the new `data-expand-record` button
     // (mirrors the real grid's row-number icon → `expand-record`).
-    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
+    emits: ['select-record', 'expand-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change', 'set-frozen-rows'],
     render() {
       gridStubSeen.fetchRecord = this.$props.fetchRecord as typeof gridStubSeen.fetchRecord
       gridStubSeen.mentionSearch = this.$props.mentionSearch as typeof gridStubSeen.mentionSearch
@@ -437,6 +437,15 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('open-field-comments', { recordId: 'rec_1', fieldId: 'fld_title' }),
           },
           'open-field-comments',
+        ),
+        // #5863c: row-freeze pin round-trip — mirrors the real grid's per-row pin → set-frozen-rows.
+        h(
+          'button',
+          {
+            'data-set-frozen-rows': '2',
+            onClick: () => this.$emit('set-frozen-rows', 2),
+          },
+          'set-frozen-rows',
         ),
         h(
           'button',
@@ -3958,6 +3967,19 @@ describe('MultitableWorkbench view wiring', () => {
       expect(workbenchMock.loadSheetMeta).toHaveBeenCalled()
       // optimistic-local: toolbar reflects the new density immediately
       expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('compact')
+    })
+
+    it('#5863c set-frozen-rows: persists frozenTopRowCount AND preserves sibling config keys', async () => {
+      seedGridConfig({ ...SIBLINGS })
+      mountWorkbench()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-set-frozen-rows="2"]')!.click()
+      await flushUi()
+
+      expect(workbenchMock.client.updateView).toHaveBeenCalledTimes(1)
+      const [viewId, body] = workbenchMock.client.updateView.mock.calls[0]
+      expect(viewId).toBe('view_grid')
+      expect(body.config).toEqual({ ...SIBLINGS, frozenTopRowCount: 2 })
     })
 
     it('group collapse: persists scoped {fieldId, fieldIds, collapsedKeys} AND preserves siblings', async () => {
