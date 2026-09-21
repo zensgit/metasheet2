@@ -138,6 +138,20 @@ export async function assertSheetLive(query: LivenessQuery, sheetId: string): Pr
 }
 
 /**
+ * The ONE statement text every sheet-row lock in a permission write transaction issues (#5938).
+ *
+ * EXPORTED because it is observable: a real-DB test that proves a writer is PARKED on this row reads
+ * `pg_stat_activity.query` and matches it by TEXT (the pool passes `text: sql` through verbatim —
+ * integration/db/connection-pool.ts `buildQueryConfig`). A hard-coded copy of this string in such a
+ * probe goes silently BLIND the day the statement is reworded: the probe matches nothing, the waiter
+ * count never reaches its floor, and the property "the writer parks on its sheet row" stops being
+ * verified rather than failing loudly. Probes therefore DERIVE their `LIKE` pattern from this constant
+ * — see tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts (waiter contract) and the
+ * structural guard that pins the derivation.
+ */
+export const SHEET_ROW_LOCK_LIVENESS_SQL = 'SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE'
+
+/**
  * The SAME question, asked UNDER the row lock — the ONE statement that both LOCKS the `meta_sheets` row
  * and reads its `deleted_at` (#5938).
  *
@@ -169,7 +183,7 @@ export async function assertSheetLive(query: LivenessQuery, sheetId: string): Pr
  */
 export async function loadSheetLivenessForUpdate(query: LivenessQuery, sheetId: string): Promise<SheetLiveness> {
   if (typeof sheetId !== 'string' || sheetId.length === 0) return 'absent'
-  const res = await query('SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+  const res = await query(SHEET_ROW_LOCK_LIVENESS_SQL, [sheetId])
   return livenessOfRow((res.rows as Array<{ deleted_at?: unknown } | undefined>)[0])
 }
 

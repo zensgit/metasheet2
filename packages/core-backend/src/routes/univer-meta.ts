@@ -9348,6 +9348,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // D-H1: sheet_config writer (row-level-read-deny). Fence-before-check, then the live column
         // read + UPDATE. Flag-off ⇒ no-op / byte-identical.
         await fenceWriterEntry(query, sheetId)
+        // #5938: this is an ACCESS-CONTROL write (it turns row-level read-deny on or off), and its
+        // liveness gate above ran on the POOL before this transaction existed. A soft delete
+        // committing in that window would simply be overwritten on top of: the UPDATE's `WHERE id`
+        // still matches the deleted row. Lock the row and re-read `deleted_at` in ONE statement
+        // first, so the UPDATE below cannot land on a sheet that is dead at write time. Taken AFTER
+        // the fence, so the lock order (fence → sheet row) is the one every fenced writer uses.
+        await assertSheetLiveForUpdate(query, sheetId)
         const beforeResult = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           rowLevelReadPermissionsEnabled: ((beforeResult as any).rows?.[0] as { enabled?: boolean } | undefined)?.enabled === true,
@@ -9374,6 +9381,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
       }
+      // #5938: the in-transaction liveness re-check (under the row lock) refused — same values-free
+      // body this route's own pre-transaction gate answers.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set row-level-read-deny flag failed:', err)
@@ -9433,6 +9443,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // D-H1: sheet_config writer (conditional-read rules). Fence-before-check, then the live
         // column read + UPDATE. Flag-off ⇒ no-op / byte-identical.
         await fenceWriterEntry(query, sheetId)
+        // #5938: same as the row-level-read-deny writer above — an ACCESS-CONTROL write whose gate
+        // ran on the pool. Lock the row and re-read `deleted_at` in one statement before the UPDATE,
+        // which carries no `deleted_at` predicate of its own and would otherwise overwrite the
+        // read-deny rules of a sheet soft-deleted inside the window.
+        await assertSheetLiveForUpdate(query, sheetId)
         const beforeResult = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           conditionalReadRules: parseConditionalRules(((beforeResult as any).rows?.[0] as { rules?: unknown } | undefined)?.rules).rules,
@@ -9459,6 +9474,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
       }
+      // #5938: in-transaction liveness re-check (under the row lock) refused — same values-free body
+      // as this route's own gate.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set conditional-rules failed:', err)
@@ -11090,8 +11108,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
       // #5938: the permission-revert branch's in-transaction liveness re-check (under the sheet row lock)
-      // found the sheet soft-deleted or gone. Same values-free 404 this route's own gate answers at :10699,
-      // so the TOCTOU window cannot be told apart from "it was already deleted when you asked".
+      // found the sheet soft-deleted or gone. Same values-free 404 this route's own pre-transaction
+      // `sheetLiveness !== 'live'` gate answers (anchored on the identifier, not a line number: this PR's
+      // own insertions moved that gate), so the TOCTOU window cannot be told apart from "it was already
+      // deleted when you asked".
       if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       // O-2 X2: this route's applyPermissionDeEscalation writes field_permissions and
       // spreadsheet_permissions, BOTH of which carry a recovery-authority trigger that is ARMED from

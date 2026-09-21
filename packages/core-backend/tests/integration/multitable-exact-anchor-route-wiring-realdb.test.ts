@@ -25,6 +25,7 @@ import * as exactApply from '../../src/multitable/exact-anchor-recovery-execute'
 import * as realtimeMod from '../../src/multitable/realtime-publish'
 import { eventBus } from '../../src/integration/events/event-bus'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
+import { SHEET_ROW_LOCK_LIVENESS_SQL } from '../../src/multitable/sheet-liveness'
 import { applyFencedDerivedDataMerge, withFencedDerivedTransaction } from '../../src/multitable/derived-write-fence'
 import { runRecoveryArchiveDerivedTransaction } from '../../src/multitable/recovery-archive-derived-processor'
 import { RECOVERY_AUTHORITY_TRIGGERS } from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
@@ -1051,6 +1052,13 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
 
       // Both production writers must be blocked on their owning meta_sheets row. Removing the source
       // authority lock makes the first settle; omitting foreign sheets makes the second settle.
+      //
+      // The FOR UPDATE pattern is DERIVED from the production statement (SHEET_ROW_LOCK_LIVENESS_SQL,
+      // multitable/sheet-liveness.ts) rather than copied: a hard-coded copy goes blind the day that
+      // statement is reworded — the probe then matches nothing, this loop runs to exhaustion and the
+      // `>= 2` floor below turns a REWORDING into a red that reads like a lost lock, while the property
+      // "the source permission writer parks on its sheet row" quietly stops being checked at all
+      // (#5938: the rename from `SELECT 1 …` to `SELECT deleted_at …` did exactly this).
       let authorityWaiters = 0
       for (let i = 0; i < 100; i++) {
         const waiting = await q(
@@ -1060,9 +1068,10 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
               AND state = 'active'
               AND wait_event_type = 'Lock'
               AND (
-                query LIKE 'SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE%'
+                query LIKE $1
                 OR query LIKE 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE%'
               )`,
+          [`${SHEET_ROW_LOCK_LIVENESS_SQL}%`],
         )
         authorityWaiters = Number(waiting.rows[0]?.c ?? 0)
         if (authorityWaiters >= 2 || sourceSettled || foreignSettled) break

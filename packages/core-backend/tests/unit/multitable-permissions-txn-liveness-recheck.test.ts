@@ -3,12 +3,19 @@
  * transaction, under the row lock.
  *
  * Sibling of tests/unit/spreadsheet-permissions-txn-liveness-recheck.test.ts, which pins the same
- * property on the legacy door. Same window, same fix, four more lock sites:
+ * property on the legacy door. Same window, same fix, six more lock sites:
  *
  *   PUT /sheets/:sheetId/permissions/:subjectType/:subjectId           → spreadsheet_permissions
  *   PUT /views/:viewId/permissions/:subjectType/:subjectId             → meta_view_permissions
  *   PUT /sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId → field_permissions
  *   POST /sheets/:sheetId/config-restore-execute (permission-revert)   → applyPermissionDeEscalation
+ *   PUT /sheets/:sheetId/row-level-read-deny                           → meta_sheets.row_level_read_permissions_enabled
+ *   PUT /sheets/:sheetId/conditional-rules                             → meta_sheets.conditional_read_rules
+ *
+ * The last two write access-control POLICY onto the sheet row itself rather than a grant table. They are
+ * here because the authority (`canManageSheetAccess`), the shape (pool gate, then transaction) and the
+ * consequence (a read-deny decision recorded against a sheet that no longer exists, waiting for a
+ * restore to bring it back) are the same — only the table differs.
  *
  * ── The window ────────────────────────────────────────────────────────────────
  * Each handler gates on `resolveSheetCapabilities` (403 → 404) using the POOL, then opens a transaction
@@ -64,8 +71,15 @@ const collapse = (sql: string): string => sql.replace(/\s+/g, ' ').trim()
 const GATE_READ = /^SELECT deleted_at FROM meta_sheets WHERE id = \$1$/i
 const LOCKED_READ = /^SELECT deleted_at FROM meta_sheets WHERE id = \$1 FOR UPDATE$/i
 
-/** Write statements against the three permission tables this file's routes own. */
-const PERMISSION_WRITE = /^(?:INSERT INTO|DELETE FROM|UPDATE)\s+(?:spreadsheet_permissions|meta_view_permissions|field_permissions)\b/i
+/**
+ * Write statements against the three permission tables this file's routes own — AND the two
+ * access-control columns on `meta_sheets` itself (the row-level read-deny switch and the conditional
+ * read-deny rules). Those two are read-deny POLICY, written by the same `canManageSheetAccess`
+ * authority through the same pool-gate-then-transaction shape, and their UPDATE carries no
+ * `deleted_at` predicate: under READ COMMITTED it waits for a concurrent soft delete's row lock and
+ * then overwrites on top of it. A matcher scoped to "permission tables" called them clean by omission.
+ */
+const PERMISSION_WRITE = /^(?:(?:INSERT INTO|DELETE FROM|UPDATE)\s+(?:spreadsheet_permissions|meta_view_permissions|field_permissions)\b|UPDATE meta_sheets SET (?:row_level_read_permissions_enabled|conditional_read_rules)\b)/i
 
 type Liveness = 'live' | 'deleted' | 'absent'
 
@@ -218,7 +232,9 @@ const SITES: Site[] = [
     wrote: /^DELETE FROM field_permissions/i,
   },
   {
-    // The revert path the legacy route's own comments point at (spreadsheet-permissions.ts:151/:205):
+    // The revert path the legacy route's own grant/revoke comment blocks point at (they name the
+    // "permission-revert execute path" whose lock they take — anchored on that phrase rather than on a
+    // line number, which drifts the moment either file gains a line):
     // de-escalation-only, but a de-escalation applied to a soft-deleted sheet still silently narrows
     // what a later restore brings back. Its liveness re-check is the FIRST statement in the txn, so the
     // refusal precedes the preview-identity verdict — which is why a placeholder token reaches it.
@@ -232,6 +248,24 @@ const SITES: Site[] = [
     // This branch never reaches a write in these legs; the control leg asserts the 404 is gone instead.
     wrote: /^never-matches-anything$/,
     env: { MULTITABLE_ENABLE_PERMISSION_REVERT: 'true' },
+  },
+  {
+    // The read-deny SWITCH. Not a grant-table row — a column on `meta_sheets` itself — but the same
+    // authority, the same window, and an UPDATE with no `deleted_at` predicate, so a soft delete that
+    // commits after the gate read is simply overwritten on top of.
+    name: 'PUT /sheets/:sheetId/row-level-read-deny',
+    method: 'put',
+    path: '/sheets/:sheetId/row-level-read-deny',
+    req: { params: { sheetId: SHEET }, body: { enabled: true } },
+    wrote: /^UPDATE meta_sheets SET row_level_read_permissions_enabled\b/i,
+  },
+  {
+    // The read-deny RULES — same shape, same reasoning as the switch above.
+    name: 'PUT /sheets/:sheetId/conditional-rules',
+    method: 'put',
+    path: '/sheets/:sheetId/conditional-rules',
+    req: { params: { sheetId: SHEET }, body: { rules: [] } },
+    wrote: /^UPDATE meta_sheets SET conditional_read_rules\b/i,
   },
 ]
 
