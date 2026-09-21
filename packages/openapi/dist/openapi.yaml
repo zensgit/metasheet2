@@ -2228,6 +2228,286 @@ components:
         - rowsCleaned
         - rowsWritten
         - rowsFailed
+    StockPreparationSnapshotBatchSummary:
+      type: object
+      description: >-
+        Q4c: one row of the readonly BOM snapshot-batch LIST (view 2). Exact
+        shape produced by plugin-integration-core's batchSummary
+        (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:201),
+        one per immutable snapshot batch of the business project. Values-free:
+        no drawing number, quantity, unit, path key or timestamp value, only
+        counts/status enums/booleans and the presence of createdAt (never its
+        value).
+      properties:
+        snapshotBatchId:
+          type: string
+          nullable: true
+        snapshotVersion:
+          type: integer
+          description: Defaults to 0 when the stored cell is missing or non-numeric.
+        snapshotStatus:
+          type: string
+          nullable: true
+        syncRunId:
+          type: string
+          nullable: true
+        lineCount:
+          type: integer
+          description: Count of bom_snapshot_line rows linked to this batch.
+        createdAtPresent:
+          type: boolean
+          description: >-
+            Whether the batch row's createdAt cell is set — never the timestamp
+            itself.
+        incomplete:
+          type: boolean
+          description: >-
+            True when the multi-step persist path (batch row -> lines -> run
+            row) did not finish: zero lines OR no matching run row
+            (isBatchIncomplete, stock-preparation-snapshot-reads.cjs:197). An
+            orphaned batch is never presented as normal.
+      required:
+        - snapshotBatchId
+        - snapshotVersion
+        - snapshotStatus
+        - syncRunId
+        - lineCount
+        - createdAtPresent
+        - incomplete
+    StockPreparationSnapshotBatchListResult:
+      type: object
+      description: >-
+        Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches
+        (listSnapshotBatches, stock-preparation-snapshot-reads.cjs:228). Batches
+        are ordered newest-first (highest snapshotVersion first; snapshotBatchId
+        breaks ties, orderBatches, same file:215). An unprovisioned batch sheet
+        degrades gracefully to `{ projectId, batchCount: 0, batches: [] }`
+        rather than an error.
+      properties:
+        projectId:
+          type: string
+          description: The (business) projectId the request named, echoed back.
+        batchCount:
+          type: integer
+        batches:
+          type: array
+          items:
+            $ref: '#/components/schemas/StockPreparationSnapshotBatchSummary'
+      required:
+        - projectId
+        - batchCount
+        - batches
+    StockPreparationSnapshotChangeCounts:
+      type: object
+      description: >-
+        Q4c: values-free per-changeType tally over one snapshot-batch diff's
+        evidence (changeCountsFromEvidence,
+        stock-preparation-snapshot-reads.cjs:263). Exactly these 10 keys; each
+        defaults to 0 when the engine's evidence carries no rows of that
+        changeType. `componentCodeChanged`/`materialChanged` (added Q3c) are
+        independent of `fingerprintChanged` — a row can carry more than one
+        changeType, so these two do not subtract from it.
+      properties:
+        added:
+          type: integer
+        removed:
+          type: integer
+        quantityChanged:
+          type: integer
+        unitChanged:
+          type: integer
+        versionChanged:
+          type: integer
+        pathChanged:
+          type: integer
+        missingChildBom:
+          type: integer
+        fingerprintChanged:
+          type: integer
+          description: Tally of the engine's source_fingerprint_changed changeType.
+        componentCodeChanged:
+          type: integer
+          description: >-
+            In-place component-code swap at an otherwise unchanged path (Q3c
+            fingerprint decomposition); previously only visible folded into
+            fingerprintChanged.
+        materialChanged:
+          type: integer
+          description: >-
+            In-place material substitution at an otherwise unchanged path (Q3c
+            fingerprint decomposition); previously only visible folded into
+            fingerprintChanged.
+      required:
+        - added
+        - removed
+        - quantityChanged
+        - unitChanged
+        - versionChanged
+        - pathChanged
+        - missingChildBom
+        - fingerprintChanged
+        - componentCodeChanged
+        - materialChanged
+    StockPreparationSnapshotDiffResult:
+      type: object
+      description: >-
+        Q4c: `data` of GET
+        /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff
+        (getSnapshotDiff, stock-preparation-snapshot-reads.cjs:404). Values-free
+        counts-only diff of the named batch against its resolved base
+        (predecessor or caller-chosen). An unprovisioned substrate (no
+        batch/line/exception sheet at all) degrades gracefully to zero counts
+        and a null baseSnapshotBatchId rather than an error.
+      properties:
+        snapshotBatchId:
+          type: string
+        baseSnapshotBatchId:
+          type: string
+          nullable: true
+          description: >-
+            null when no predecessor exists and the caller named none. Otherwise
+            the resolved (auto-picked or caller-chosen and validated) base batch
+            id.
+        changeCounts:
+          $ref: '#/components/schemas/StockPreparationSnapshotChangeCounts'
+        blockingExceptionCount:
+          type: integer
+          description: >-
+            exception_confirmation rows linked to this batch whose stored
+            severity is 'blocking'; not filtered by resolution status.
+      required:
+        - snapshotBatchId
+        - baseSnapshotBatchId
+        - changeCounts
+        - blockingExceptionCount
+    StockPreparationSnapshotDiffRow:
+      type: object
+      description: >-
+        Q4c: one row of the per-row diff browse (view 2 rows). Exact projection
+        produced by projectDiffRow over the engine's makeDiff output, through
+        the closed DIFF_ROW_KEYS allowlist
+        (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:526,
+        :543) — a future engine key can never leak through this route
+        unreviewed. Values-free: handles, enums and sha16-prefixed fingerprints
+        only, never a drawing number, quantity, unit or path key value.
+      properties:
+        diffId:
+          type: string
+          description: Deterministic id (stableDiffId) hashing (base, current, row key).
+        diffType:
+          type: string
+          enum:
+            - added
+            - removed
+            - changed
+            - unchanged
+            - held
+        reviewStatus:
+          type: string
+          enum:
+            - ready
+            - held
+          description: >-
+            'held' iff changeTypes includes at least one BLOCKING_CHANGE_TYPES
+            entry (reviewStatusForChangeTypes,
+            stock-preparation-snapshot-diff.cjs:240).
+        changeTypes:
+          type: array
+          items:
+            type: string
+            enum:
+              - added
+              - removed
+              - quantity_changed
+              - unit_changed
+              - version_changed
+              - path_changed
+              - parent_changed
+              - material_changed
+              - component_code_changed
+              - source_fingerprint_changed
+              - invalid_qty
+              - missing_child_bom
+              - duplicate_path_key
+              - missing_path_key
+        reason:
+          type: string
+          description: >-
+            Fixed diagnostic token naming which diff rule produced this row
+            (e.g. matched_path_changed, missing_from_current_snapshot,
+            new_in_current_snapshot, previous_missing_path_key). Closed set
+            today but not asserted stable across engine versions, so left as a
+            free string rather than an enum.
+        rowCount:
+          type: integer
+          description: >-
+            Usually 1 (one source line); >1 only for a duplicate_path_key
+            collision row, where it is the number of raw rows collapsed into
+            this one diagnostic entry.
+        previousSnapshotLineId:
+          type: string
+          nullable: true
+        currentSnapshotLineId:
+          type: string
+          nullable: true
+        keyFingerprint:
+          type: string
+          description: sha16:-prefixed non-reversible hash of the row's match key.
+        previousPathKeyFingerprint:
+          type: string
+          description: >-
+            sha16:-prefixed hash of the previous row's path key. OMITTED
+            entirely (not null) when there is no previous row or it carries no
+            path key.
+        currentPathKeyFingerprint:
+          type: string
+          description: >-
+            sha16:-prefixed hash of the current row's path key. OMITTED entirely
+            (not null) when there is no current row or it carries no path key.
+      required:
+        - diffId
+        - diffType
+        - reviewStatus
+        - changeTypes
+        - reason
+        - rowCount
+        - previousSnapshotLineId
+        - currentSnapshotLineId
+        - keyFingerprint
+    StockPreparationSnapshotDiffRowsResult:
+      type: object
+      description: >-
+        Q4c: `data` of GET
+        /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows
+        (listSnapshotDiffRows, stock-preparation-snapshot-reads.cjs:558). Same
+        base-resolution and H-1 completeness-gate semantics as the counts diff;
+        `heldRowCount` is computed over the WHOLE pair BEFORE the optional
+        reviewStatus/diffType filters, so a filtered read keeps that context;
+        `rowCount` is the length of `rows` AFTER filtering.
+      properties:
+        snapshotBatchId:
+          type: string
+        baseSnapshotBatchId:
+          type: string
+          nullable: true
+        rowCount:
+          type: integer
+          description: rows.length after any reviewStatus/diffType filter is applied.
+        heldRowCount:
+          type: integer
+          description: >-
+            Count of held-reviewStatus rows over the whole pair, before
+            filtering.
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/StockPreparationSnapshotDiffRow'
+      required:
+        - snapshotBatchId
+        - baseSnapshotBatchId
+        - rowCount
+        - heldRowCount
+        - rows
     ConnectorActionOperation:
       type: string
       description: >-
@@ -22881,6 +23161,525 @@ paths:
                     error:
                       code: RUN_READ_NOT_IMPLEMENTED
                       message: Run read is not implemented
+  /api/integration/stock-preparation/snapshot-batches:
+    get:
+      summary: List a project's immutable BOM snapshot batches (stock-prep view 2)
+      description: >-
+        Read-only, values-free LIST of the immutable BOM snapshot batches for
+        one business project — queryRecords-only against the internal
+        MetaSheet-provisioned MVP tables, never PLM/K3/any external system. Uses
+        the two-project split: the STAGING project (derived from the auth
+        tenant) locates the provisioned sheets, `projectId` (the PLM business
+        project) filters the batch rows and is echoed back. An unprovisioned
+        batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches:
+        [] }` rather than an error. `workspaceId` is accepted by the query
+        allowlist but is never read by the handler or the read function — it has
+        no effect on the result (confirmed by reading both; not a documented
+        no-op elsewhere in this module family).
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: projectId
+          required: true
+          description: >-
+            The (business) PLM project id. Missing/empty is a 400
+            (STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID, field:
+            projectId).
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: >-
+            Accepted by the query allowlist but NOT forwarded to the read
+            function — has no effect on the response (dead parameter; documented
+            here so a caller does not assume it scopes anything).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: >-
+                      #/components/schemas/StockPreparationSnapshotBatchListResult
+        '400':
+          description: Missing `projectId`, or an unsupported query field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                project_id_required:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID
+                      message: projectId is required
+                      details:
+                        field: projectId
+                unsupported_field:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID
+                      message: 'unsupported request field: sheetId'
+                      details:
+                        field: sheetId
+                tenant_required:
+                  value:
+                    ok: false
+                    error:
+                      code: TENANT_REQUIRED
+                      message: tenantId is required
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          description: >-
+            The bounded readonly scan exceeded its page bound (READ_MAX_PAGES=50
+            pages of READ_PAGE_LIMIT=500 rows each) reading the batch/line/run
+            sheets — fails closed rather than scanning forever.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                result_too_large:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_RESULT_TOO_LARGE
+                      message: stock-preparation snapshot read exceeded the page bound
+                      details:
+                        maxPages: 50
+        '501':
+          description: >-
+            The host's multitable provisioning API
+            (findObjectSheet/resolveFieldIds) or the records API (queryRecords)
+            is not available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                provisioning_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE
+                      message: multitable provisioning API is not available
+                records_api_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_RECORDS_API_UNAVAILABLE
+                      message: >-
+                        stock-preparation snapshot reads require
+                        multitable.records.queryRecords
+                      details:
+                        requiredMethods:
+                          - queryRecords
+  /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff:
+    get:
+      summary: >-
+        Values-free counts diff of one snapshot batch vs its base (stock-prep
+        view 2)
+      description: >-
+        Read-only, values-free diff of the named snapshot batch against its
+        immutable predecessor (auto-picked: same business project, highest
+        snapshotVersion strictly below the current one) or an explicit
+        caller-chosen `baseSnapshotBatchId`. The business project used for the
+        predecessor search is read from the CURRENT batch row itself (the FE
+        diff call sends no `projectId`); the `projectId` query param is only a
+        fallback used when that batch row cannot be read. `workspaceId` is
+        accepted by the query allowlist but has no effect on the result (same
+        dead-parameter note as the LIST route). H-1 gate: BOTH the current and
+        the resolved base batch must be structurally complete (at least one line
+        AND a matching run row) — an incomplete side fails loud with 409
+        SNAPSHOT_DIFF_BATCH_INCOMPLETE rather than serving a partial/fabricated
+        diff. An unprovisioned substrate (no batch/line/exception sheet exists
+        at all) degrades gracefully to zero counts and `baseSnapshotBatchId:
+        null`, unless an explicit base was requested (then 404).
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: snapshotBatchId
+          required: true
+          description: The snapshot batch being diffed (the "current" side).
+          schema:
+            type: string
+        - in: query
+          name: baseSnapshotBatchId
+          required: false
+          description: >-
+            Caller-chosen base pair, overriding the predecessor auto-pick. Must
+            differ from `snapshotBatchId` (400 SNAPSHOT_DIFF_BASE_INVALID), must
+            exist (404 SNAPSHOT_DIFF_BASE_NOT_FOUND) and must belong to the same
+            business project as the diffed batch (409
+            SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH). Only verifiable when the
+            diffed batch's own row exists — a caller-chosen pair against a ghost
+            current id is also 404 SNAPSHOT_DIFF_BASE_NOT_FOUND.
+          schema:
+            type: string
+        - in: query
+          name: projectId
+          required: false
+          description: >-
+            Fallback business-project id, used only when the current batch row
+            cannot be read (the normal path reads the project from that row).
+            Does not filter or narrow the diffed batch itself (the batch id
+            already rode the path).
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: Accepted by the query allowlist but has no effect on the response.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: '#/components/schemas/StockPreparationSnapshotDiffResult'
+        '400':
+          description: >-
+            An unsupported query field, or `baseSnapshotBatchId` equal to
+            `snapshotBatchId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                base_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_INVALID
+                      message: baseSnapshotBatchId must differ from the diffed batch
+                      details:
+                        field: baseSnapshotBatchId
+                unsupported_field:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID
+                      message: 'unsupported request field: sheetId'
+                      details:
+                        field: sheetId
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            An explicit `baseSnapshotBatchId` that does not exist, or that
+            cannot be verified because the diffed batch's own row does not
+            exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                base_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_NOT_FOUND
+                      message: base snapshot batch was not found
+                      details:
+                        field: baseSnapshotBatchId
+        '409':
+          description: >-
+            The resolved base belongs to a different business project than the
+            diffed batch, OR (H-1) the current/base batch is structurally
+            incomplete, OR the current/base batch identity is ambiguous
+            (duplicate snapshotBatchId or duplicate run identity, no substrate
+            unique index).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                base_project_mismatch:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH
+                      message: >-
+                        base snapshot batch belongs to a different business
+                        project
+                      details:
+                        field: baseSnapshotBatchId
+                batch_incomplete:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BATCH_INCOMPLETE
+                      message: snapshot diff refuses an incomplete snapshot batch
+                      details:
+                        target: current
+                        reason: incomplete
+                batch_ambiguous:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BATCH_INCOMPLETE
+                      message: >-
+                        snapshot diff refuses an ambiguous snapshot batch
+                        identity
+                      details:
+                        target: base
+                        reason: ambiguous
+        '501':
+          description: >-
+            The host's multitable provisioning API or records API is not
+            available (same two codes as the LIST route).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                provisioning_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE
+                      message: multitable provisioning API is not available
+  /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows:
+    get:
+      summary: >-
+        Per-row diff browse of one snapshot batch vs its base (stock-prep view 2
+        rows)
+      description: >-
+        Read-only, values-free PER-ROW diff browse:
+        diffType/changeTypes/reviewStatus per diff row, for the FE's row-level
+        drill-down under view 2. Same base resolution (auto-pick or explicit
+        `baseSnapshotBatchId`) and H-1 completeness gate as the counts diff (GET
+        .../diff); the enum filters `reviewStatus`/`diffType` are validated
+        against the route's own closed vocabulary FIRST (400 with the field
+        name), so the read function's own belt-and-braces re-check of the same
+        vocabulary is unreachable via HTTP. `heldRowCount` is computed over the
+        WHOLE pair BEFORE these filters are applied, so a filtered read still
+        carries that context; `rowCount` is the post-filter row count.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: snapshotBatchId
+          required: true
+          description: The snapshot batch being diffed (the "current" side).
+          schema:
+            type: string
+        - in: query
+          name: baseSnapshotBatchId
+          required: false
+          description: Same semantics as the counts diff route's `baseSnapshotBatchId`.
+          schema:
+            type: string
+        - in: query
+          name: reviewStatus
+          required: false
+          description: >-
+            Restrict rows to one reviewStatus. A value outside the vocabulary is
+            a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an
+            empty result.
+          schema:
+            type: string
+            enum:
+              - ready
+              - held
+        - in: query
+          name: diffType
+          required: false
+          description: >-
+            Restrict rows to one diffType. A value outside the vocabulary is a
+            400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an
+            empty result.
+          schema:
+            type: string
+            enum:
+              - added
+              - removed
+              - changed
+              - unchanged
+              - held
+        - in: query
+          name: projectId
+          required: false
+          description: Same fallback semantics as the counts diff route's `projectId`.
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the
+            authenticated tenant (403 TENANT_MISMATCH otherwise); only a
+            tenantless platform admin may name another.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          description: Accepted by the query allowlist but has no effect on the response.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    $ref: >-
+                      #/components/schemas/StockPreparationSnapshotDiffRowsResult
+        '400':
+          description: >-
+            An unsupported query field, an out-of-vocabulary
+            `reviewStatus`/`diffType`, or `baseSnapshotBatchId` equal to
+            `snapshotBatchId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                review_status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID
+                      message: reviewStatus must be one of the review-status vocabulary
+                      details:
+                        field: reviewStatus
+                diff_type_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID
+                      message: diffType must be one of the diff-type vocabulary
+                      details:
+                        field: diffType
+                base_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_INVALID
+                      message: baseSnapshotBatchId must differ from the diffed batch
+                      details:
+                        field: baseSnapshotBatchId
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Same semantics as the counts diff route's 404.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                base_not_found:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BASE_NOT_FOUND
+                      message: base snapshot batch was not found
+                      details:
+                        field: baseSnapshotBatchId
+        '409':
+          description: >-
+            Same semantics as the counts diff route's 409 (project mismatch /
+            H-1 incomplete / ambiguous).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                batch_incomplete:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_DIFF_BATCH_INCOMPLETE
+                      message: snapshot diff refuses an incomplete snapshot batch
+                      details:
+                        target: current
+                        reason: incomplete
+        '422':
+          description: >-
+            The filtered/unfiltered row set exceeded MAX_DIFF_ROWS=2000, or the
+            underlying bounded sheet scan exceeded its page bound (same as the
+            LIST route's 422).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                rows_too_large:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_ROWS_TOO_LARGE
+                      message: snapshot diff row read exceeded the row bound
+                      details:
+                        maxRows: 2000
+        '501':
+          description: >-
+            The host's multitable provisioning API or records API is not
+            available (same two codes as the LIST route).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                provisioning_unavailable:
+                  value:
+                    ok: false
+                    error:
+                      code: SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE
+                      message: multitable provisioning API is not available
   /api/multitable/bases:
     get:
       summary: List multitable bases
