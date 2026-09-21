@@ -3796,3 +3796,201 @@ $ npx tsc --noEmit       → 无输出，EXIT 0（node 20.20.2 / pnpm 10.33.0）
 - 未改锁文;未合并;未 undraft;未开 PR;未动任何 PR 状态;未动 `origin/main`;
   未对任何共享 / staging / 生产库应用迁移;全程未用 `git stash` / `git checkout -- <path>` / `git reset --hard`;
   只删我自己建的东西(探针文件;本轮未新建 worktree)。
+
+---
+
+# Part N — 「休眠合入条件」逐条求值(候选,2026-09-21,分支 `feat/approval-cancel-round-phase1-r8`)
+
+状态:**候选证据,非裁定。** 本 Part 不批准合并、undraft、DDL 应用或分支合入。条件③ 属 owner,本代理
+不代答。
+
+| 项 | 值 |
+|---|---|
+| 候选分支 | `feat/approval-cancel-round-phase1-r8`,自 PR #5851 head `b8b71539a6a89e51331e2e4874f994498df15c55` |
+| 被吸收的前一候选 | `feat/approval-cancel-round-phase1-dormancy-check` @ `7c535638cc376c1c568883c111978377f3934f08`(两件守卫,cherry-pick,零冲突) |
+| 对照 `origin/main` | `5edf4c3e17d3608fa4513b5ffd801142da026dcf`(本轮 fetch 时) |
+| 一次性库 | `metasheet2_c1r8_20260921`(全量迁移)、`metasheet2_c1r8_20260921_pf2`(第四种失败模式反例),owner 均 `ms2testbed`(非超级),本轮结束 `dropdb` |
+
+审阅方给出的三条「休眠合入」条件,逐条求值:
+
+## N1. 条件① 现有生产路径回归通过
+
+前一轮取证的裁决是 **FAIL(分裂)**:代码侧 PASS、迁移侧 FAIL(两项)。本轮对迁移侧那两项各给出处置。
+
+### N1-a 代码侧 — **PASS(引用,未在本轮重跑)**
+
+8/9 端点真 HTTP 字节等同、唯一 DIFF 是 `workflow_key='approval.cancel-round'` 实例上的 409 正控 —— 这是
+前一轮的结论,本轮**没有**重跑该比对台。本轮改动(种子迁移的一列、两件测试、一件新测试、CI 接线、
+文档)不触及那 9 个端点的代码路径,但这是**论证**,不是重测;若 owner 要求,重跑口径在前一轮报告 §7。
+
+### N1-b 迁移侧之一:种子模板可见性 — **已处置(候选修法,证据见下)**
+
+**处置方式**:改未应用的种子迁移正文,显式写入收窄的 `visibility_scope`(取值与理由见设计 MD §11,
+本文不重述)。不改锁文正文。
+
+**新增可执行证据**:`tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts`,
+真库 + 真服务器 + 真 HTTP,**7 条全绿**。它不用「响应是空的」当判据,而是每条负例都配一条**同一用户、
+同一端点、换一个恒不匹配的 id / token** 的请求,再做**逐字节**比对 —— 这才是「这一行对普通用户贡献零
+字节」的可执行形式。三条正控:一个对**他**可见的模板确实返回(过滤器活着、权限够)、一个 scope 指向
+**别人**的模板不返回(`user` 支按 actor 自己的 id 匹配)、同样的端点对 template-manager **仍然**返回
+种子(管理员既有语义未变)。
+
+**mutation 实测(证明这 7 条承重)**:把种子行的 `visibility_scope` 改回默认 `{"type":"all","ids":[]}`
+再跑同一文件:
+
+```
+Tests  5 failed | 2 passed (7)
+ → expected { ids: [], type: 'all' } to deeply equal { type: 'user', …(1) }
+ → expected [ …(2) ] to not include '00000000-0000-4000-8000-000000000001'
+ → expected '{"data":[{"id":"00000000-0000-4000-80…' to be '{"data":[],"total":0,"limit":20,"offs…'
+ → expected 200 to be 404
+ → {"error":{"code":"APPROVAL_REQUESTER_CHOICE_REQUIRED",…}}: expected 422 to be 404
+```
+
+恢复取值后复绿(7/7)。
+
+**该 mutation 顺带给出一条此前记为「未测边界」的事实(§2.1 的那一项):** 在默认 scope 下,一个只持
+`approvals:read` + `approvals:write` 的普通用户对种子 templateId 发 `POST /api/approvals` **不是**被挡
+住 —— 它走到节点解析层(422 `APPROVAL_REQUESTER_CHOICE_REQUIRED`);补上 `requesterChoices` 后返回
+**201**,落下一条 `publishedDefinitionId = 00000000-0000-4000-8000-000000000003` 的真实待办实例
+(本轮用临时探针取证,探针取证后**已删**,未提交、未接线;实例已清理)。**须说准的边界**:该实例的
+`workflow_key` 是 `'approval-product-template'` 而非 `'approval.cancel-round'`,故 `isCancelRoundInstance`
+对它为假、九处出口守卫都不适用 —— 它是「用系统定义跑出来的普通实例」,属**数据形状污染**,**不是**
+守卫被绕过。这条不进 PR body / 提交信息 / 公开文档。
+
+**残留(不藏)**:`users.id` 是 `TEXT`,哨兵受众 id 的不可命中靠约定而非类型 —— 与
+`applyTemplateVisibilityFilter` 自带的两个哨兵同类。
+
+### N1-c 迁移侧之二:考勤迁移耦合 — **不改迁移;改为写清部署序 + 交普查包**
+
+按要求**没有**动 `zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts`。改为:
+
+1. 设计 MD 新增 §10「部署序与回滚」,逐字记录三种失败模式(`23514` / `42703` / `23503`)、
+   「任一侧单独部署 ⇒ 5 个考勤写入点 100% 失败」、preflight 一行悬空即整批回滚、以及**回滚分三层**
+   (代码 / 迁移 / 业务补偿)。
+2. 给 owner 的**只读**生产普查包(五条 SELECT + 逐条判据 + 非 0 时的处置选项)写在
+   `c1-attendance-coupling-census-pack-20260921.md`(不在本仓)。
+
+**本轮新发现,并已实测 —— preflight 覆盖不到的第四种失败模式:**
+一条 `attendance_requests` 行,其 `approval_instance_id` 指向的实例 `workflow_key = 'approval.cancel-round'`,
+**通过** preflight(该谓词只问悬空与空键,计数返回 `0`),回填把该值逐字写进新列,随后
+`ADD CONSTRAINT atr_not_cancel_round` 以 **`23514` / `constraint: 'atr_not_cancel_round'`** 失败,整批
+回滚(`kysely_migration` 无记录、四条约束一条没建、连 `ADD COLUMN` 的列都不存在)。
+复现:一次性库先排除该迁移跑完全量 → 种入 1 行该形状数据 → 不排除地重跑 `db:migrate`。
+**结论:只跑 preflight 自带的那条 SELECT 不足以判定「可以部署」。** 该集合今天**应当**为空,但在入口
+切片接线之后会变成可达集合。
+
+**仍然 UNVERIFIED**:生产这五个集合各是多少行 —— 本代理无权读生产,本轮只证明了「非空时会发生什么」。
+
+**「5 个写入点」是本轮机械点数,不是转抄**:`plugins/plugin-attendance/index.cjs` 内
+`approval_workflow_key` 恰 5 次(4 条 `INSERT INTO attendance_requests` `:33702`/`:33945`/`:34221`/`:34507`
++ 1 条 `UPDATE` `:34850`);同文件另有 4 条 `UPDATE attendance_requests`(`:35250`/`:35627`/`:37952`/`:37968`)
+不触及这两列。这 5 处的 `approval_instance_id` 取自紧邻上方新建实例的 id,**恒非 NULL** —— 这是失败模式
+(c) 为 100% 而非「视数据而定」的原因。
+
+### N1 小结
+
+| 分项 | 本轮状态 |
+|---|---|
+| 代码侧 | PASS(引用前一轮证据,本轮未重跑;本轮改动不触及该 9 个端点的代码路径) |
+| 迁移侧 · 种子可见性 | **已处置**(改未应用迁移 + 7 条真 HTTP 用例 + 5/7 红的 mutation) |
+| 迁移侧 · 考勤耦合 | **未改迁移**;部署序写进设计 MD §10,普查交 owner;新增第四种失败模式实测 |
+
+条件① 是否因此翻成 PASS,**不由本文判定** —— 考勤那一侧的阻断点是「生产普查未做 + 锁文点名的单独裁
+未见」,两者都在 owner 侧。
+
+## N2. 条件② 新能力不可达有可执行检查 — **PASS(两件守卫已在本分支)**
+
+两件守卫由 cherry-pick `7c535638cc` 落入本候选分支,零冲突、零生产文件改动。
+
+| 件 | 本轮实测 |
+|---|---|
+| 静态普查 `tests/unit/approval-cancel-round-dormancy-unreachable.test.ts` | 8/8 绿(与另三件相关单测同跑:**4 文件 376 条全绿**) |
+| 动态探针 `tests/harness/approval-cancel-round-dormancy-probe.ts` | `DORMANCY_PROBE_CONTROL=none`:routes 1135 / fired 942 / **reach 0** / PASS(exit 0);`=self` 正控:**reach 1** / POSITIVE CONTROL PASSED |
+
+**本轮得到一次计划外的判别力证据**:我给种子模块新写的文档注释里提到了 `createCancelRoundInstance`
+这个符号,静态普查的**原文钉**(第 8 条)立刻红掉,报「production 里提到该符号的文件集合从 5 变 6」。
+按「原文钉的存在理由就是逼人看一眼」的设计,我的处置是**把注释改写成不含该符号**(而不是把新文件加进
+已知集合去放宽守卫),并在注释里写明为什么此处刻意不写符号名。改写后复绿。**这不是空转绿:它是本轮
+对该守卫真实触发过一次的记录。**
+
+**接线两点 / 四钉(本轮新增件的实际接线)。** 本轮新增一个真库文件
+`approval-cancel-round-seed-template-visibility.db.test.ts`,按本仓既有规程接了**五处**:
+
+1. `packages/core-backend/vitest.config.ts` 的 `test.exclude`(否则 `describeIfDatabase` 会在无库任务里
+   skip-green);
+2. `.github/workflows/plugin-tests.yml` 必跑 `test (20.x)` 的 `approval-real-db-integration` 步骤,
+   **整文件参数**(同时把该步骤的标题补上,run-list 与人读名字不脱节);
+3. s6a `pluginTestsWorkflow` 摘要 —— 用 `computePackageProvenancePinSet(repoRoot)` **脚本重算并脚本写回**
+   (未手敲),差异核验为**只有这一个键移动**:
+   `ee9e4f49…9d3874` → `1c33be81…04db2`;`plugin-integration-core` 自己的 `test-chain` **224 套件全过**,
+   含 `sealed-export-package-provenance.test.cjs`;
+4. `tests/unit/approval-cancel-round-ci-wiring.test.ts` 的 `CANCEL_ROUND_REALDB_FILES` —— 该数组是被
+   **遍历**的,新文件不加进去就等于**一道接线守卫都没有**;同批把「all seven」这类会静默过期的计数措辞
+   改成按数组说话,并在数组上写明「加文件=加进这个数组」;
+5. `tests/unit/approval-ci-coverage-enumeration.test.ts` 是**活 `readdirSync` 枚举**,新文件由 (1)+(2)
+   自动满足,**无需改动** —— 本轮实跑确认它对新文件是绿的(不是推断)。
+
+两件休眠守卫自身的接线:静态普查落在 `tests/unit/**`(Vitest 默认 include ⇒ 两个 required 上下文都跑,
+无需改 workflow);动态探针是 `tests/harness/**` 的 tsx harness,**不被 Vitest 收集、本轮仍未接 CI** ——
+这一点与前一轮记录一致,是**已披露的未完项**,不是新增缺口。
+
+## N3. 条件③ owner 明确接受委托条款 — **OPEN,留空**
+
+本代理无权代 owner 表态,本轮未取得任何 owner 亲写授权。相邻的、仍留给 owner 的项(不代裁):
+
+- 锁文 §14.3 #10 要求的**生产普查 + 单独裁决**:普查语句已备好(见上),**执行与裁决未做**;
+- 接线时「翻回可见」用哪条路线(数据迁移 / 运行期开关)—— 设计 MD §11.5 把两条都写出来,**不选**;
+- `dispatchAction` revoke/reject 两分支 `rowCount !== 1` 的错误码契约缺口(前轮已记,未变);
+- 种子 `assigneeSources` 用 `requester_choice` 是设计选择而非锁文原文,待 WI-4 实现者对齐(前轮已记)。
+
+## N4. 本轮跑了什么(命令与结果行)
+
+```
+# 七个 cancel-round 真库文件 + 新用例(库 metasheet2_c1r8_20260921)
+npx vitest run --config vitest.integration.config.ts \
+  tests/integration/approval-cancel-round-{lock-order-census,creation,redemption,seat-guards,\
+attendance-fk-migration,outlet-guards,node-timeout-effect,seed-template-visibility}.db.test.ts
+→ Test Files 8 passed (8) | Tests 66 passed (66)
+
+# 四件相关单测(静态普查 / CI 接线 / 插件镜像常量 / 活枚举)
+npx vitest run tests/unit/approval-cancel-round-{dormancy-unreachable,ci-wiring,plugin-mirror-constant}.test.ts \
+               tests/unit/approval-ci-coverage-enumeration.test.ts
+→ Test Files 4 passed (4) | Tests 376 passed (376)
+
+# 动态探针(真实 / 正控)
+DORMANCY_PROBE_CONTROL=none  → routes 1135 / fired 942 / reach 0 / PASS (exit 0)
+DORMANCY_PROBE_CONTROL=self  → reach 1 / POSITIVE CONTROL PASSED
+
+# 类型检查
+npx tsc -p packages/core-backend/tsconfig.json --noEmit → exit 0
+
+# core-backend 全量(CI=true,无 DATABASE_URL,即 no-DB 任务形状)
+CI=true pnpm --filter @metasheet/core-backend test
+→ Test Files 950 passed | 175 skipped (1125) | Tests 15123 passed | 1609 skipped (16732)
+
+# plugin-integration-core 链(含 s6a provenance)
+CI=true node scripts/test-chain.cjs → test-chain: 224 suites passed
+
+# 与 origin/main 零重复提交
+git cherry origin/main HEAD | grep -c '^-'  → 0
+
+# merge-tree(HEAD 对以下四者均无冲突)
+origin/feat/approval-cancel-round-phase2                     → clean
+origin/feat/approval-cancel-round-phase2-history-projection  → clean
+origin/feat/approval-projection-entry-p32a                   → clean
+origin/main                                                  → clean
+```
+
+## N5. 纪律与清理(本轮)
+
+- 一次性库 `metasheet2_c1r8_20260921` / `_pf2`:owner `ms2testbed`(**非超级**),`postgres` 只用于
+  `createdb`/`dropdb`;跑前按硬约束 `grep -n DATABASE_URL .github/workflows/*.yml` + `package.json`
+  枚举出全部连接串变量(`DATABASE_URL` / `ATTENDANCE_TEST_DATABASE_URL` / `SMOKE_DATABASE_URL` /
+  `PG_SUPERUSER_URL` / `A_PROVISIONING_DB_URL` / `A_RUNTIME_DB_URL`)并全部导向该库,`psql` 以
+  `current_database()` 复核;`PGPASSWORD` 显式 unset。结束 `dropdb`。
+- 临时探针文件(取证 §N1-b 那条 201 的)**已删**,未提交、未接线;它创建的实例已在同一次运行内清理。
+- s6a 摘要**脚本重算脚本写回**,未手敲;差异核验为只有 `pluginTestsWorkflow` 一个键移动。
+- 未改锁文正文;未合并;未 undraft;未开 PR;未动 #5851 分支;未动 `origin/main`;未对任何共享 /
+  staging / 生产库应用迁移;全程未用 `git stash` / `git checkout -- <path>` / `git reset --hard`;
+  只删我自己建的东西。
