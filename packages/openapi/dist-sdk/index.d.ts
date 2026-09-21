@@ -9923,6 +9923,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integration/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List integration pipeline runs
+         * @description Read-only run listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/status. `data` is a plain array of IntegrationPipelineRun, newest first (ORDER BY created_at DESC); there is no cursor or total count.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to runs of one pipeline. */
+                    pipelineId?: string;
+                    /** @description Restrict to runs in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result. */
+                    status?: "pending" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipelineRun"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/integration/runs/{runId}": {
         parameters: {
             query?: never;
@@ -10218,9 +10285,11 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Created */
+                /** @description Created. Repeated identical installs inside the server-side dedupe window (same authenticated tenant, user, templateId, workspaceId and baseName) return the FIRST base again instead of creating another one; the body is then byte-identical to the original 201 and only the Idempotent-Replayed header distinguishes the two. */
                 201: {
                     headers: {
+                        /** @description Present with the value `true` only when this 201 replayed an earlier install instead of creating a new base; absent on a fresh install. Ops/gateway signal only — the web client does not read it, and it is not CORS-exposed, so browser JS cannot see it without Access-Control-Expose-Headers. */
+                        "Idempotent-Replayed"?: "true";
                         [name: string]: unknown;
                     };
                     content: {

@@ -1,10 +1,10 @@
 /**
- * issue #5678 (batch 3) — the last four GET routes under /api/admin that carried NO authorization,
- * minus the one held back for an in-flight PR.
+ * issue #5678 (batch 3) — the last GET routes under /api/admin that carried NO authorization.
  *
  * Batch 1 (#5710) gated GET /api/admin/dlq; batch 2 (#5884) gated /shards, /shards/:name, /queues,
  * /health/detailed and /health/subsystem/:name — see tests/unit/admin-read-gates-batch2-authz.test.ts,
- * whose skeleton this suite follows. Batch 2 left five residuals; this batch closes four of them:
+ * whose skeleton this suite follows. Batch 2 left five residuals; this batch closes all five, plus a
+ * sixth that the batch-2 inventory and the first cut of this sweep both missed (see below):
  *
  *   GET /api/admin/safety/status    — is the destructive-operation brake switched on, and how many
  *                                     dangerous operations are sitting unconfirmed right now
@@ -15,18 +15,48 @@
  *                                     caller-chosen keys (`tenant:<id>`, message-rate-limiter.ts:230)
  *   GET /api/admin/health/summary   — the coarse half of the /health pair batch 2 gated: status,
  *                                     uptime, per-status subsystem counts, hasWarnings / hasErrors
+ *   GET /api/admin/slo/status       — the platform's reliability posture: per-SLO current
+ *                                     availability and error budget (total / consumed / remaining /
+ *                                     remaining %) plus the healthy / at_risk / violated verdict
+ *   GET /api/admin/snapshots        — snapshot-labels.ts:145, mounted at admin-routes.ts:2142 with
+ *                                     `router.use('/snapshots', ...)`. Ungated since the router
+ *                                     landed (b08a71705a) while its three siblings in the same file
+ *                                     (:40/:74/:109) are platform-admin. Its three service queries
+ *                                     (SnapshotService.ts:1169/1197/1220) are
+ *                                     `selectFrom('snapshots').selectAll()` with only a tag / level
+ *                                     / channel predicate and NO tenant predicate, so it returned
+ *                                     every tenant's snapshot rows to any authenticated caller.
  *
  * Before this change any authenticated user of any tenant, holding no role whatsoever, could read
- * all four. The gate is requireAdminRole() as the FIRST handler on each route, same three-state
+ * all six. The gate is requireAdminRole() as the FIRST handler on each route, same three-state
  * semantics as batches 1 and 2: no user or non-admin -> 403 ADMIN_REQUIRED; the RBAC lookup throwing
  * -> 503 RBAC_CHECK_FAILED (fail-closed); no database pool -> isAdmin() returns false at
  * rbac/service.ts:20 -> 403, never an open door. See guards/audit-integration.ts:113.
  *
- * The fifth residual, GET /slo/status, is deliberately still ungated on this tree: #5680 is OPEN and
- * its structural spec uses that route as its reverse control ("a GET with no admin guard in first
- * position"), so gating it here would red that PR. It is the only ungated GET left in
- * admin-routes.ts, and the sweep at the bottom of this file pins exactly that — so the day #5680
- * merges, the follow-up cannot be forgotten silently: the sweep is what has to be edited.
+ * SCOPE OF THE CLOSED-WORLD SWEEP. The sweep at the bottom of this file walks the mounted router
+ * RECURSIVELY: a `router.use(prefix, subRouter)` layer is descended into and its routes are reported
+ * under `prefix + route.path`. That matters because the first cut of this sweep only looked at
+ * layers carrying `layer.route`, which skips every `router.use` mount wholesale — /snapshots
+ * (snapshot-labels.ts) and /safety/rules (protection-rules.ts) both sat outside the "closed world",
+ * and `GET /api/admin/snapshots` was in fact ungated the whole time the sweep was reporting zero.
+ * The scope that matters is the one #5678 itself uses ("…plus the sub-router protection-rules.ts's
+ * GET / and GET /:id, 13 in total"), i.e. every GET reachable under /api/admin however it is
+ * mounted — so that is what the sweep now covers. What it still does NOT cover: guards that read
+ * something other than req.user / req.path / req.ip / req.params / req.query (the synthetic request
+ * below carries exactly those plus an empty `headers`), and routers mounted under a PARAMETRIC
+ * prefix (none today — the helper reports those by raw regexp source rather than silently dropping
+ * them).
+ *
+ * GET /slo/status was held back when this suite first landed, because #5680 (open, based on
+ * fix/admin-safety-toggle-and-bulk-require-admin = #5665's head, not on main) uses that route as its
+ * reverse control: "a GET with no admin guard in first position". Its CI runs on that branch, not on
+ * this tree, so gating the route here cannot red it TODAY. The trigger is not a manual rebase: the
+ * moment #5665 merges and its branch is deleted, GitHub re-points #5680's base at main by itself and
+ * the reverse control loses its material — #5680 then has to turn that control into a positive one,
+ * since there is no longer any ungated GET under /api/admin to point at. That failure is loud, not
+ * silent. The sweep here is a closed-world zero assertion, so a route that regresses — or a new
+ * ungated GET added later, in this file or in a sub-router — reds it by name rather than slipping
+ * through unremarked.
  *
  * /safety/status is gated at its mount point (admin-routes.ts:97) rather than inside
  * createSafetyStatusEndpoint(): that factory has exactly one call site in the tree, and its body is
@@ -54,7 +84,19 @@ vi.mock('../../src/rbac/service', () => ({
   isAdmin: vi.fn().mockResolvedValue(true),
 }))
 vi.mock('../../src/db/pg', () => ({ pool: null }))
-vi.mock('../../src/services/SnapshotService', () => ({}))
+
+/**
+ * SnapshotService is module-mocked (not spied) on purpose: the real singleton opens a Kysely handle
+ * at import time, and the three queries under test are the cross-tenant `selectAll()` reads this
+ * batch is gating — they must never be reachable from a unit test at all. Memory-level doubles, no
+ * database, no fixture rows that resemble real snapshot ids.
+ */
+const snapshotServiceStub = vi.hoisted(() => ({
+  getByTags: vi.fn(),
+  getByProtectionLevel: vi.fn(),
+  getByReleaseChannel: vi.fn(),
+}))
+vi.mock('../../src/services/SnapshotService', () => ({ snapshotService: snapshotServiceStub }))
 vi.mock('../../src/audit/audit', () => ({}))
 
 vi.mock('../../src/services/DeadLetterQueueService', () => ({
@@ -72,6 +114,7 @@ import { initAdminRoutes } from '../../src/routes/admin-routes'
 import { getSafetyGuard } from '../../src/guards/SafetyGuard'
 import { getRateLimiter } from '../../src/integration/rate-limiting'
 import { getHealthAggregator } from '../../src/services/HealthAggregatorService'
+import { sloService } from '../../src/services/SLOService'
 
 // Values-free fixtures: synthetic bucket key and counters only, no tenant id, host or credential.
 const BUCKET_KEY = 'tenant-fixture-a'
@@ -106,6 +149,28 @@ function bucketStatsFixture() {
   }
 }
 
+/**
+ * Values-free SLO posture: a synthetic indicator id with a budget deliberately most of the way
+ * spent, so a leak of this payload would be visible as an `at_risk` verdict in the assertions.
+ */
+function sloStatusFixture() {
+  return [
+    {
+      id: 'slo-fixture-availability',
+      name: 'SLO fixture — availability',
+      target: 0.999,
+      currentAvailability: 0.9975,
+      errorBudget: {
+        total: 400,
+        consumed: 340,
+        remaining: 60,
+        remainingPercentage: 15,
+      },
+      status: 'at_risk' as const,
+    },
+  ]
+}
+
 function healthFixture() {
   return {
     status: 'healthy',
@@ -130,6 +195,20 @@ function healthFixture() {
   }
 }
 
+/**
+ * Values-free snapshot rows: synthetic ids, no tenant id, no real snapshot name. The whole point of
+ * the route is that these rows are NOT tenant-scoped, so the fixture is deliberately two rows that
+ * would belong to two different tenants in production — a leak of this payload past the gate would
+ * show up as `count: 2` in the assertions.
+ */
+const PROTECTION_LEVEL_FIXTURE = 'protected'
+function snapshotRowsFixture() {
+  return [
+    { id: 'snap-fixture-a', protection_level: PROTECTION_LEVEL_FIXTURE, tags: ['fixture'] },
+    { id: 'snap-fixture-b', protection_level: PROTECTION_LEVEL_FIXTURE, tags: ['fixture'] },
+  ]
+}
+
 let isEnabledSpy: ReturnType<typeof vi.spyOn>
 let pendingCountSpy: ReturnType<typeof vi.spyOn>
 let getConfigSpy: ReturnType<typeof vi.spyOn>
@@ -137,6 +216,98 @@ let getGlobalStatsSpy: ReturnType<typeof vi.spyOn>
 let getBucketStatsSpy: ReturnType<typeof vi.spyOn>
 let getLastHealthSpy: ReturnType<typeof vi.spyOn>
 let checkHealthSpy: ReturnType<typeof vi.spyOn>
+let getSLOStatusSpy: ReturnType<typeof vi.spyOn>
+
+type ExpressHandler = { handle: (req: any, res: any, next?: any) => Promise<void> | void }
+type ExpressLayer = {
+  name?: string
+  regexp?: RegExp & { fast_slash?: boolean }
+  keys?: Array<{ name: string | number }>
+  handle?: unknown
+  route?: {
+    path?: string
+    methods?: Record<string, boolean>
+    stack?: ExpressHandler[]
+  }
+}
+
+/**
+ * Recover the mount prefix of a `router.use(prefix, subRouter)` layer. Express 4 keeps no copy of
+ * the original string (only the compiled `layer.regexp`), so this un-compiles the one shape
+ * path-to-regexp emits for a literal prefix: `^\/safety\/rules\/?(?=\/|$)`. Anything else — a
+ * parametric mount, a regexp mount, a shape a future express emits — is returned verbatim as
+ * `/<unparsed:...>` so the sweep still REPORTS the sub-router (loudly, by an ugly name) instead of
+ * silently dropping it, which is exactly the failure mode this helper exists to kill.
+ */
+function mountPrefixOf(layer: ExpressLayer): string {
+  if (layer.regexp?.fast_slash) return ''
+  const src = layer.regexp?.source ?? ''
+  const match = /^\^(.*)\\\/\?\(\?=\\\/\|\$\)$/.exec(src)
+  if (!match || (layer.keys?.length ?? 0) > 0) return `/<unparsed:${src}>`
+  const literal = match[1].replace(/\\\//g, '/')
+  if (!/^(\/[A-Za-z0-9_.-]+)+$/.test(literal)) return `/<unparsed:${src}>`
+  return literal
+}
+
+function joinRoutePath(prefix: string, path: string): string {
+  const joined = `${prefix}${path === '/' ? '' : path}`
+  return joined === '' ? '/' : joined
+}
+
+/**
+ * Every GET route reachable under a mounted router, INCLUDING the ones contributed by sub-routers
+ * mounted with router.use(). Walking only `layer.route` — which is what the first cut of the
+ * closed-world sweep did — skips `router.use` mounts entirely, so /snapshots (snapshot-labels.ts)
+ * and /safety/rules (protection-rules.ts) were invisible to it. Paths come back in the same shape
+ * express matches them, prefix included, so they can be asserted on by name.
+ */
+function collectGetRoutes(router: unknown, prefix = ''): Array<{ path: string; handlers: ExpressHandler[] }> {
+  const stack = (router as { stack?: ExpressLayer[] } | undefined)?.stack ?? []
+  const collected: Array<{ path: string; handlers: ExpressHandler[] }> = []
+  for (const layer of stack) {
+    if (layer.route) {
+      if (!layer.route.methods?.get || typeof layer.route.path !== 'string') continue
+      collected.push({
+        path: joinRoutePath(prefix, layer.route.path),
+        handlers: layer.route.stack ?? [],
+      })
+      continue
+    }
+    const sub = layer.handle as { stack?: ExpressLayer[] } | undefined
+    if (sub && Array.isArray(sub.stack)) {
+      collected.push(...collectGetRoutes(sub, joinRoutePath(prefix, mountPrefixOf(layer))))
+    }
+  }
+  return collected
+}
+
+/**
+ * The synthetic request the structural probes feed to a candidate guard. It carries exactly what
+ * requireAdminRole() reads today (req.user, req.path, req.ip) plus the params/query/headers an
+ * unrelated first handler might touch. A guard that reads something NOT in here throws, and the
+ * probes treat a throw as "not a gate" — conservative in the safe direction (it gets reported),
+ * but it is why a future guard reading req.headers would need this object widened rather than the
+ * assertion relaxed.
+ */
+function syntheticRequest(userId: string, path: string) {
+  return { user: { id: userId }, ip: '127.0.0.1', path, params: {}, query: {}, headers: {} }
+}
+
+/** Capture-only response double: no network, no express, nothing written to disk. */
+function captureResponse() {
+  return {
+    statusCode: 200,
+    body: null as unknown,
+    status(code: number) {
+      this.statusCode = code
+      return this
+    },
+    json(payload: unknown) {
+      this.body = payload
+      return this
+    },
+  }
+}
 
 function buildApp(user?: { id: string; email?: string }): Express {
   const app = express()
@@ -165,8 +336,11 @@ function mountApp(user?: { id: string; email?: string }): void {
 
 const pinned = usePinnedServer()
 
-/** Every service a denied caller must not have been able to reach through any of the four routes. */
+/** Every service a denied caller must not have been able to reach through any of the six routes. */
 function expectNoServiceReached() {
+  expect(snapshotServiceStub.getByTags).not.toHaveBeenCalled()
+  expect(snapshotServiceStub.getByProtectionLevel).not.toHaveBeenCalled()
+  expect(snapshotServiceStub.getByReleaseChannel).not.toHaveBeenCalled()
   expect(isEnabledSpy).not.toHaveBeenCalled()
   expect(pendingCountSpy).not.toHaveBeenCalled()
   expect(getConfigSpy).not.toHaveBeenCalled()
@@ -174,6 +348,7 @@ function expectNoServiceReached() {
   expect(getBucketStatsSpy).not.toHaveBeenCalled()
   expect(getLastHealthSpy).not.toHaveBeenCalled()
   expect(checkHealthSpy).not.toHaveBeenCalled()
+  expect(getSLOStatusSpy).not.toHaveBeenCalled()
 }
 
 beforeEach(() => {
@@ -194,6 +369,18 @@ beforeEach(() => {
   // cache warmed by another suite.
   getLastHealthSpy = vi.spyOn(aggregator, 'getLastHealth').mockReturnValue(null)
   checkHealthSpy = vi.spyOn(aggregator, 'checkHealth').mockResolvedValue(healthFixture() as never)
+
+  // Memory-level double on the exported singleton admin-routes.ts:29 imports: the real
+  // getSLOStatus() reads the process-wide prom-client registry, which other suites also write to.
+  getSLOStatusSpy = vi
+    .spyOn(sloService, 'getSLOStatus')
+    .mockResolvedValue(sloStatusFixture() as never)
+
+  // Module-level doubles (see the vi.mock above) — re-armed here because clearAllMocks() above
+  // wipes the implementations along with the call history.
+  snapshotServiceStub.getByTags.mockResolvedValue(snapshotRowsFixture())
+  snapshotServiceStub.getByProtectionLevel.mockResolvedValue(snapshotRowsFixture())
+  snapshotServiceStub.getByReleaseChannel.mockResolvedValue(snapshotRowsFixture())
 })
 
 afterEach(() => {
@@ -202,7 +389,7 @@ afterEach(() => {
 })
 
 /**
- * The four routes under test, each with the request that exercises it and the assertion that its
+ * The six routes under test, each with the request that exercises it and the assertion that its
  * success payload really did come from the gated handler.
  */
 const ROUTES: Array<{
@@ -266,6 +453,40 @@ const ROUTES: Array<{
       expect(checkHealthSpy).toHaveBeenCalledTimes(1)
     },
   },
+  {
+    label: 'GET /api/admin/slo/status',
+    path: '/api/admin/slo/status',
+    routePath: '/slo/status',
+    expectOk: (body) => {
+      expect(body.success).toBe(true)
+      expect(body.count).toBe(1)
+      const [first] = body.status as Array<{
+        id: string
+        status: string
+        errorBudget: { remainingPercentage: number }
+      }>
+      // Budget posture passed through unchanged — the gate must not have narrowed the admin payload.
+      expect(first.id).toBe('slo-fixture-availability')
+      expect(first.status).toBe('at_risk')
+      expect(first.errorBudget.remainingPercentage).toBe(15)
+      expect(getSLOStatusSpy).toHaveBeenCalledTimes(1)
+    },
+  },
+  {
+    label: 'GET /api/admin/snapshots (sub-router snapshot-labels.ts)',
+    // Mounted with router.use('/snapshots', ...) at admin-routes.ts:2142 — the route itself is
+    // snapshot-labels.ts:145 `router.get('/')`, so its guard-position key is the joined path.
+    path: `/api/admin/snapshots?protection_level=${PROTECTION_LEVEL_FIXTURE}`,
+    routePath: '/snapshots',
+    expectOk: (body) => {
+      expect(body.success).toBe(true)
+      expect(body.count).toBe(2)
+      expect(snapshotServiceStub.getByProtectionLevel).toHaveBeenCalledTimes(1)
+      expect(snapshotServiceStub.getByProtectionLevel).toHaveBeenCalledWith(
+        PROTECTION_LEVEL_FIXTURE
+      )
+    },
+  },
 ]
 
 describe.each(ROUTES)('$label — platform-admin gate (issue #5678 batch 3)', (route) => {
@@ -310,42 +531,17 @@ describe.each(ROUTES)('$label — platform-admin gate (issue #5678 batch 3)', (r
   it('the gate is the FIRST handler on the route, not something after the read', async () => {
     // Structural backstop for the behavioural specs above: if someone re-orders the stack so the
     // handler runs before the guard, the 403 would arrive after the state had already been read.
-    // Asserting position 0 pins the ordering itself.
-    const router = initAdminRoutes() as unknown as {
-      stack?: Array<{
-        route?: {
-          path?: string
-          methods?: Record<string, boolean>
-          stack?: Array<{ handle: (req: any, res: any, next?: any) => Promise<void> | void }>
-        }
-      }>
-    }
-    const layer = router.stack?.find(
-      (item) => item.route?.path === route.routePath && item.route?.methods?.get
-    )
-    expect(layer, `no GET layer found for ${route.routePath}`).toBeDefined()
-    const stack = layer?.route?.stack ?? []
+    // Asserting position 0 pins the ordering itself. The lookup goes through collectGetRoutes so a
+    // sub-router route (/snapshots) is found by the same joined path express matches it under.
+    const found = collectGetRoutes(initAdminRoutes()).filter((r) => r.path === route.routePath)
+    expect(found.length, `no GET layer found for ${route.routePath}`).toBe(1)
+    const stack = found[0].handlers
     expect(stack.length).toBeGreaterThanOrEqual(2)
 
     vi.mocked(isAdmin).mockResolvedValue(false)
-    const res = {
-      statusCode: 200,
-      body: null as unknown,
-      status(code: number) {
-        this.statusCode = code
-        return this
-      },
-      json(payload: unknown) {
-        this.body = payload
-        return this
-      },
-    }
+    const res = captureResponse()
     const next = vi.fn()
-    await stack[0]?.handle(
-      { user: { id: 'u-nonadmin-structural' }, ip: '127.0.0.1', path: route.routePath },
-      res,
-      next
-    )
+    await stack[0]?.handle(syntheticRequest('u-nonadmin-structural', route.routePath), res, next)
     expect(res.statusCode).toBe(403)
     expect((res.body as { code?: string } | null)?.code).toBe('ADMIN_REQUIRED')
     expect(next).not.toHaveBeenCalled()
@@ -399,7 +595,22 @@ describe('batch 3 gate — cross-route invariants', () => {
     expect(checkHealthSpy).not.toHaveBeenCalled()
   })
 
-  it('all four routes are gated — none of them answers a non-admin with 200', async () => {
+  it('the error-budget posture of /slo/status is not pollable by a non-admin', async () => {
+    // "How much budget is left before the platform breaches its SLO?" was a free oracle for any
+    // authenticated caller of any tenant, and it moves in real time.
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    mountApp({ id: 'u-nonadmin-slo' })
+
+    const res = await request(pinned.url()).get('/api/admin/slo/status').expect(403)
+
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain('errorBudget')
+    expect(serialized).not.toContain('at_risk')
+    expect(serialized).not.toContain('remainingPercentage')
+    expect(getSLOStatusSpy).not.toHaveBeenCalled()
+  })
+
+  it('all six routes are gated — none of them answers a non-admin with 200', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     mountApp({ id: 'u-nonadmin-sweep' })
 
@@ -410,54 +621,50 @@ describe('batch 3 gate — cross-route invariants', () => {
     expectNoServiceReached()
   })
 
-  it('GET /slo/status is the ONLY ungated GET left in admin-routes.ts (residual, see #5680)', async () => {
-    // Closed-world sweep over the router itself rather than over a hand-written list: every GET
-    // layer whose first handler does not deny a non-admin is reported. Today exactly one does not,
-    // and it is held back only because #5680 uses it as a reverse control. When #5680 merges and
-    // that route is gated, THIS expectation is what fails — the follow-up cannot be lost silently.
-    const router = initAdminRoutes() as unknown as {
-      stack?: Array<{
-        route?: {
-          path?: string
-          methods?: Record<string, boolean>
-          stack?: Array<{ handle: (req: any, res: any, next?: any) => Promise<void> | void }>
-        }
-      }>
-    }
+  it('no ungated GET is left anywhere under /api/admin, sub-routers included (closed world)', async () => {
+    // Closed-world sweep over the mounted router rather than over a hand-written list: every GET
+    // route — in admin-routes.ts itself AND in every router.use()-mounted sub-router beneath it —
+    // whose first handler does not deny a non-admin is reported. The list is now empty, and it is
+    // the empty list that is pinned: a route that loses its guard, or a new GET added without one
+    // anywhere in that tree, reds this by name instead of slipping in unremarked.
     vi.mocked(isAdmin).mockResolvedValue(false)
 
     const ungated: string[] = []
-    for (const item of router.stack ?? []) {
-      if (!item.route?.methods?.get || !item.route.path) continue
-      const first = item.route.stack?.[0]
-      if (!first) continue
-      const res = {
-        statusCode: 200,
-        body: null as unknown,
-        status(code: number) {
-          this.statusCode = code
-          return this
-        },
-        json(payload: unknown) {
-          this.body = payload
-          return this
-        },
+    for (const item of collectGetRoutes(initAdminRoutes())) {
+      const first = item.handlers[0]
+      if (!first) {
+        // A GET route with no handler at all cannot be gated either — report it rather than skip.
+        ungated.push(`${item.path} (no handler)`)
+        continue
       }
+      const res = captureResponse()
       const next = vi.fn()
       try {
-        await first.handle(
-          { user: { id: 'u-nonadmin-closed-world' }, ip: '127.0.0.1', path: item.route.path, params: {}, query: {} },
-          res,
-          next
-        )
+        await first.handle(syntheticRequest('u-nonadmin-closed-world', item.path), res, next)
       } catch {
         // A first handler that throws on a synthetic request is not a gate either — report it.
       }
-      if (res.statusCode !== 403) ungated.push(item.route.path)
+      if (res.statusCode !== 403) ungated.push(item.path)
     }
 
-    expect(ungated, `ungated GET routes in admin-routes.ts: ${ungated.join(', ')}`).toEqual([
-      '/slo/status',
-    ])
+    expect(ungated, `ungated GET routes under /api/admin: ${ungated.join(', ')}`).toEqual([])
+  })
+
+  it('the sweep actually descends into router.use() sub-routers (anti-blind-spot)', () => {
+    // The assertion above is a zero assertion, and a zero assertion is worthless if the walker
+    // cannot see the thing it claims is absent. This pins the coverage itself: the two sub-routers
+    // mounted at admin-routes.ts:2142-2143 must show up in the collected set under their joined
+    // paths, and no path may come back as `/<unparsed:...>` (the walker's loud fallback for a
+    // mount shape it could not un-compile).
+    const paths = collectGetRoutes(initAdminRoutes()).map((r) => r.path)
+
+    // snapshot-labels.ts:145 (`router.get('/')`) under the /snapshots mount.
+    expect(paths).toContain('/snapshots')
+    // protection-rules.ts:179 and :207 under the /safety/rules mount.
+    expect(paths).toContain('/safety/rules')
+    expect(paths).toContain('/safety/rules/:id')
+    // …and a route from admin-routes.ts itself, so this is not accidentally sub-router-only.
+    expect(paths).toContain('/slo/status')
+    expect(paths.filter((p) => p.includes('<unparsed:'))).toEqual([])
   })
 })

@@ -49,6 +49,7 @@ import { eventBus } from '../integration/events/event-bus'
 import { createRateLimiter } from '../middleware/rate-limiter'
 import { ensureRecordWriteAllowed, resolveSheetCapabilities, resolveSheetReadableCapabilities } from '../multitable/permission-service'
 import { sendSheetNotLive } from '../multitable/sheet-refusals'
+import { describeLivenessLookupError, loadSheetLiveness, type SheetLiveness } from '../multitable/sheet-liveness'
 import { loadFieldsForSheet, tryResolveView } from '../multitable/loaders'
 import {
   insertBulkPreviewCacheRow,
@@ -73,8 +74,11 @@ import {
   readGeneratedRows,
   countBulkJobRowsByState,
   cancelBulkJob,
-  setHeaderRunning,
-  setHeaderAggregate,
+  claimBulkJobCommit,
+  heartbeatBulkJobCommit,
+  finishBulkJobCommit,
+  releaseBulkJobCommitClaim,
+  isCommittableBulkJobStatus,
   setRowCommitOutcome,
   type BulkJobRowSeed,
 } from '../services/ai-bulk-job-service'
@@ -949,6 +953,22 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
 
       for (const cand of generationCandidates) {
         const recordId = cand.recordId
+        // #5838: re-check THIS sheet before EVERY provider call — the entry gate proved it live once,
+        // and this loop can keep sending its record content outbound for minutes afterwards. Not live,
+        // or the lookup failed (fail-closed) → send nothing more. The verdict is the inline twin of the
+        // worker's (#5832): the rows already generated are KEPT (charged, cached, committable once the
+        // sheet is live again — bulk-commit refuses a non-live sheet on its own), this row and every
+        // un-reached row are UNCHARGED and never sent, and the partial comes back `capped: true` — an
+        // outright refusal here would hide a real, already-settled spend from the caller. When there is
+        // NO such spend (the stop landed on the first row) the partial has nothing to protect and the
+        // request is refused instead — see the zero-spend block after this loop.
+        // RESIDUAL WINDOW: a delete committing after this check answers live still lets THIS row out;
+        // it spans runShortcutCore's quota-reservation transaction (same note as the worker's).
+        if (!(await bulkPreviewSheetIsLive(query, sheetId))) {
+          skipped.push({ recordId, reason: 'sheet_not_live' })
+          paused = true
+          break
+        }
         const captured = { version: cand.version, data: cand.data }
         // Mask + assemble: unreadable source fields NEVER enter the prompt.
         const prompt = assembleMaskedPrompt(config, patchContext, captured.data)
@@ -1041,6 +1061,22 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
           // but DO NOT pause (other rows may be clean).
           skipped.push({ recordId, reason: 'unsafe_input' })
           continue
+        }
+      }
+
+      // ZERO-SPEND liveness stop (#5838): the partial above exists for ONE reason — an outright refusal
+      // would hide an already-settled spend. When the loop stopped on its FIRST row there is no such
+      // spend (nothing generated, nothing charged, nothing cached), so the module rule stands and this
+      // answers the 404 the entry gate would have: `deleted` keeps its restore hint, `absent` stays
+      // NOT_FOUND. The verdict is re-read rather than inferred from the loop's bare `false`, because
+      // that `false` is fail-closed and collapses "the sheet is gone" with "the lookup failed" — and a
+      // LIVE sheet must never be told it was deleted. A still-failing lookup throws into the 500 below:
+      // no spend is at stake here, so an error is the honest answer.
+      if (paused && rows.length === 0 && failures.length === 0 && settledCost === 0
+        && skipped.some((entry) => entry.reason === 'sheet_not_live')) {
+        const stopLiveness = await loadSheetLiveness(query, sheetId)
+        if (stopLiveness !== 'live') {
+          return sendSheetNotLive(res, stopLiveness)
         }
       }
 
@@ -1378,6 +1414,13 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       return
     }
 
+    // #5842: THIS request's commit-claim identity. `commitClaimed` gates the catch below so a
+    // throw before the claim touches nothing; `commitClaimId` is stamped on the header by the
+    // claim and re-asserted by every later write, so a request whose claim was reclaimed (it
+    // stalled past the staleness window and someone else took over) can neither resolve nor
+    // release the claim that now belongs to another request.
+    let commitClaimed = false
+    const commitClaimId = randomUUID()
     try {
       const pool = poolManager.get() as unknown as PoolLike
       const query = pool.query.bind(pool) as QueryFn
@@ -1391,8 +1434,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       // crashed mid-generate (BJ-5, persisted partial committable); `rejected` =
       // cancelled (BJ-4, already-generated rows still committable). Reject `queued`/
       // `running` (the worker is still generating — committing now would race it and
-      // write a partial) and `resolved` (already committed). 409 Conflict.
-      if (header.status !== 'suspended' && header.status !== 'errored' && header.status !== 'rejected') {
+      // write a partial), `committing` (#5842 — another commit request holds the claim) and
+      // `resolved` (already committed). 409 Conflict. This is only the early, friendly refusal:
+      // the AUTHORITATIVE decision is the conditional claim below, on the SAME set.
+      if (!isCommittableBulkJobStatus(header.status)) {
         return res.status(409).json({
           ok: false,
           error: { code: 'BULK_JOB_NOT_COMMITTABLE', message: `Bulk job is not awaiting commit (status: ${header.status}).` },
@@ -1419,25 +1464,34 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      // The write set = the job's `generated` rows whose recordId was confirmed.
-      // A confirmed recordId NOT in the generated set is ignored (it has no value
-      // to write — skipped / failure / pending_not_generated rows are not confirmable).
-      const generatedRows = (await readGeneratedRows(ledgerQuery, jobId)).filter((r) => confirmed.has(r.recordId))
-
       // BACKEND-owned chunking (BJ-10): ≤ the inline cap per chunk. The FE never loops.
       const chunkSize = resolveBulkInlineMaxRows()
       type JobCommitOutcome = 'committed' | 'stale_reprev' | 'write_conflict' | 'skipped_no_perm'
       const counts: Record<JobCommitOutcome, number> = { committed: 0, stale_reprev: 0, write_conflict: 0, skipped_no_perm: 0 }
 
-      // Flip a COMMITTABLE job → running for the commit phase, GUARDED (clears
-      // suspend_reason). False = a concurrent commit already claimed it (or it left
-      // the committable set between the read above and here) → 409, no double-commit.
-      if (!(await setHeaderRunning(ledgerQuery, jobId))) {
+      // CLAIM the commit phase: a COMMITTABLE job → `committing` (#5842), by one conditional
+      // UPDATE … RETURNING (never select-then-update), so exactly one of two concurrent commits
+      // proceeds. `committing` is NOT a generating status, so a worker still finishing the row it
+      // had at the provider cannot be re-armed by this claim — which is what re-using `running`
+      // did. False = a concurrent commit already claimed it (or it left the committable set
+      // between the read above and here) → 409, no double-commit.
+      if (!(await claimBulkJobCommit(ledgerQuery, jobId, commitClaimId))) {
         return res.status(409).json({
           ok: false,
           error: { code: 'BULK_JOB_COMMIT_IN_PROGRESS', message: 'Another commit is already in progress for this job.' },
         })
       }
+      // From here the claim is OURS: any throw must release it (see the catch) or the job would
+      // hold the active slot in a non-committable status until the staleness reclaim.
+      commitClaimed = true
+
+      // The write set = the job's `generated` rows whose recordId was confirmed.
+      // A confirmed recordId NOT in the generated set is ignored (it has no value
+      // to write — skipped / failure / pending_not_generated rows are not confirmable).
+      // Read UNDER the claim (#5842 refuter, race lens): reading it first would make "exactly one
+      // request writes this work set" depend on a second invariant in another file (the worker's
+      // row-level `state = 'pending'` guard) instead of on the claim we just took.
+      const generatedRows = (await readGeneratedRows(ledgerQuery, jobId)).filter((r) => confirmed.has(r.recordId))
 
       // AI-fields S1 LOCK-B3: ONE batch id for this WHOLE commit request, shared across every chunk and
       // every row it writes — BJ-10's backend-owned chunking is a pagination detail (avoids one oversized
@@ -1445,6 +1499,15 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       const commitBatchId = randomUUID()
       for (let i = 0; i < generatedRows.length; i += chunkSize) {
         const chunk = generatedRows.slice(i, i + chunkSize)
+        // #5842: prove this commit is still alive before each chunk. The staleness reclaims (a
+        // later commit's claim, the user's cancel, the boot sweep) all key on `updated_at`, so a
+        // long commit that never touched the header would look abandoned while it was writing.
+        // The beat is guarded on OUR claim id, so a false return means someone else now holds the
+        // job — keep the partial (rows already written are `committed`) and stop.
+        if (!(await heartbeatBulkJobCommit(ledgerQuery, jobId, commitClaimId))) {
+          commitClaimed = false
+          break
+        }
         for (const row of chunk) {
           const written = await commitOneRecord({
             req,
@@ -1469,16 +1532,37 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
 
       // Durable aggregate on the header; the job resolves (terminal success — the
-      // generate+review+commit cycle is complete, even if some rows stale-dropped).
+      // generate+review+commit cycle is complete, even if some rows stale-dropped). GUARDED on
+      // our own `committing` claim (#5842): if the claim was lost meanwhile (an orphan sweep
+      // reconciled it), we report the job's REAL status instead of claiming `resolved`.
       const aggregate = { confirmed: parsed.data.recordIds.length, attempted: generatedRows.length, counts }
-      await setHeaderAggregate(ledgerQuery, jobId, aggregate, 'resolved')
+      const finished = await finishBulkJobCommit(ledgerQuery, jobId, aggregate, commitClaimId)
+      commitClaimed = false
+      let state = 'resolved'
+      if (!finished) {
+        console.warn(`[multitable-ai] bulk-job commit ${jobId}: the commit claim was lost before the aggregate could be stored`)
+        state = (await readBulkJobHeader(ledgerQuery, jobId))?.status ?? 'errored'
+      }
 
       // AI-fields S1 LOCK-B6: same ephemeral run→batch mapping as bulk-commit — null when nothing in
       // this request actually committed (no revision, no batch to point at).
       const batchId = counts.committed > 0 ? commitBatchId : null
-      return res.json({ jobId, state: 'resolved', counts, attempted: generatedRows.length, batchId })
+      return res.json({ jobId, state, counts, attempted: generatedRows.length, batchId })
     } catch (err) {
       console.error('[multitable-ai] bulk-job commit failed:', err)
+      if (commitClaimed) {
+        // #5842: hand OUR claim back as `errored` (committable) so a failed commit does not
+        // strand the job's generated rows — rows already written are `committed` and a retry
+        // does not re-write them. Guarded on our claim id inside the helper, so a request that
+        // lost the claim to a staleness reclaim cannot error out the request that took over.
+        // Best-effort: never mask the original failure.
+        try {
+          const claimPool = poolManager.get() as unknown as PoolLike
+          await releaseBulkJobCommitClaim(claimPool.query.bind(claimPool) as AiUsageQueryFn, jobId, commitClaimId)
+        } catch (releaseErr) {
+          console.error(`[multitable-ai] bulk-job commit ${jobId}: could not release the commit claim:`, releaseErr)
+        }
+      }
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to commit bulk job' } })
     }
   })
@@ -1723,6 +1807,49 @@ function resolvePersistedShortcutConfig(
     return { error: `Persisted aiShortcut config is invalid: ${parsed.error}`, httpStatus: 400, code: 'VALIDATION_ERROR' }
   }
   return { config: parsed.config }
+}
+
+/**
+ * SHEET LIVENESS for the INLINE bulk-preview loop (#5838) — the same question the async worker asks
+ * (services/ai-bulk-job-service.ts `jobSheetIsLive`, #5832), on the other lane.
+ *
+ * Why the entry gate is not enough: bulk-preview refuses a non-live sheet ONCE, then loops over up to
+ * `MULTITABLE_AI_BULK_MAX_ROWS` rows (default 200, operator-raisable) sending each row's record content
+ * to the provider, one request at a time, for as long as the HTTP request lives (per-row timeout up to
+ * 60s). Nothing downstream of that loop reads `meta_sheets` again — the captured row data is already in
+ * memory and `runShortcutCore` only addresses the usage ledger by id — so a sheet soft-deleted during
+ * the request kept sending every remaining row's content outbound. Same class as #5832, same fix.
+ *
+ * Returns true ONLY on positive proof that the sheet is live:
+ *  · `deleted` → false. The point of the fix.
+ *  · `absent`  → false. The route proved the sheet live at entry, so `absent` here means the
+ *    `meta_sheets` row disappeared mid-request; the captured prompts would still go out.
+ *  · lookup THROWS → false (FAIL-CLOSED), matching the worker: on an egress path a failed lookup is
+ *    not proof of a live sheet, and the cost of stopping is small and recoverable — the rows already
+ *    generated stay charged, cached and committable (once the sheet is live again), the caller gets
+ *    them as a partial (`capped`), and the un-reached rows are UNCHARGED and can be re-run.
+ * Logged values-free through the shared describer (never `message` / `detail`, which can carry
+ * connection details or row values).
+ */
+async function bulkPreviewSheetIsLive(query: QueryFn, sheetId: string): Promise<boolean> {
+  let liveness: SheetLiveness
+  try {
+    liveness = await loadSheetLiveness(query, sheetId)
+  } catch (err) {
+    console.error(
+      '[multitable-ai] bulk-preview: sheet liveness lookup failed; stopping generation before the next provider call (fail-closed, #5838)',
+      { reason: 'liveness_lookup_failed', ...describeLivenessLookupError(err) },
+    )
+    return false
+  }
+  if (liveness !== 'live') {
+    console.warn(
+      '[multitable-ai] bulk-preview: the sheet is not live; stopping generation before the next provider call (#5838)',
+      { reason: liveness === 'deleted' ? 'sheet_deleted' : 'sheet_absent' },
+    )
+    return false
+  }
+  return true
 }
 
 async function readRecordOnce(

@@ -23,6 +23,28 @@ servers:
   - url: http://localhost:8900/api/admin
     description: Local development server
 
+# SECURITY (ADM-05 follow-up, docs/admin-api-security-schemes): every path under /api/admin sits
+# behind the global JWT gate (jwt-middleware.ts:150-168, wired at index.ts:1670-1683) — there is no
+# entry in GLOBAL_GATE_EXCEPTIONS for /api/admin or any sub-path (auth/api-path-policy.ts:114-164),
+# so an unauthenticated caller always gets 401 here, spec-wide. That JWT gate only verifies the
+# token; it does not check role. Role enforcement is a second, per-operation layer added by
+# requireAdminRole()/protectAdminOperation() in the route handlers themselves — see each operation's
+# own '403' response below for whether that second layer is present.
+#
+# This file documents a curated subset of packages/core-backend/src/routes/admin-routes.ts and its
+# protection-rules.ts sub-router (SafetyGuard, Plugins, Snapshots, Protection Rules, Data, System).
+# It does NOT yet cover the newer read-only endpoints added directly to admin-routes.ts (/dlq,
+# /shards, /shards/{name}, /queues, /ratelimits, /ratelimits/{key}, /health/detailed,
+# /health/summary, /health/subsystem/{name}, /slo/status) — their handler-level gate status is
+# tracked separately in docs/development/admin-read-endpoints-exposure-inventory-20260912.md.
+# As of 2026-09-20 all of those are gated with requireAdminRole() except GET /slo/status, which is
+# intentionally left ungated for now: PR #5680 (admin-routes structural guard spec, still OPEN at
+# time of writing) uses it as the one negative-control example asserting "this route has no gate",
+# so adding the gate here first would turn that PR red. Once #5680 merges, a follow-up PR gates
+# /slo/status and flips that assertion to positive.
+security:
+  - bearerAuth: []
+
 tags:
   - name: SafetyGuard
     description: SafetyGuard management endpoints
@@ -60,6 +82,12 @@ paths:
                 config:
                   tokenExpirationSeconds: 300
                   allowBypass: false
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
 
   /safety/confirm:
     post:
@@ -91,7 +119,7 @@ paths:
             X-Idempotency-Replayed:
               schema:
                 type: string
-              description: 'true' if this is a cached response
+              description: "'true' if this is a cached response"
             X-RateLimit-Remaining:
               schema:
                 type: integer
@@ -106,6 +134,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
         '404':
           description: Token not found or expired
           content:
@@ -120,6 +154,11 @@ paths:
                 $ref: '#/components/schemas/Error'
 
   /safety/enable:
+    # NOTE (2026-09-20 security-schemes audit): admin-routes.ts's POST /safety/enable handler
+    # (router.post('/safety/enable', (req, res) => {...})) has neither requireAdminRole() nor
+    # requireSafetyCheck() — unlike its siblings POST /safety/confirm and POST /safety/disable,
+    # any caller who clears the global JWT gate can flip SafetyGuard back on. No 403 is documented
+    # here because none is actually returned; flagged as a residual finding, not fixed by this PR.
     post:
       tags:
         - SafetyGuard
@@ -195,11 +234,16 @@ paths:
                 message: "Plugin plugin-view-gantt reloaded successfully"
                 pluginId: "plugin-view-gantt"
         '403':
-          description: Confirmation required
+          description: |
+            Either AdminError (caller authenticated but not a platform admin —
+            protectAdminOperation()'s requireAdminRole() runs first) or SafetyCheckRequired (admin
+            check passed but the dangerous-operation confirmation token is missing/invalid).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                anyOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
         '500':
           description: Plugin reload failed
           content:
@@ -235,11 +279,16 @@ paths:
                 message: "All plugins reloaded successfully"
                 warning: "Service may have experienced brief unavailability"
         '403':
-          description: Double confirmation required
+          description: |
+            Either AdminError (caller authenticated but not a platform admin —
+            protectAdminOperation()'s requireAdminRole() runs first) or SafetyCheckRequired
+            (admin check passed but the double-confirmation token is missing/invalid).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                anyOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
         '500':
           description: Reload failed
           content:
@@ -272,11 +321,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/PluginOperationResponse'
         '403':
-          description: Confirmation required
+          description: |
+            Either AdminError (caller authenticated but not a platform admin —
+            protectAdminOperation()'s requireAdminRole() runs first) or SafetyCheckRequired
+            (admin check passed but the confirmation token is missing/invalid).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                anyOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
         '500':
           description: Unload failed
           content:
@@ -317,11 +371,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/RestoreResponse'
         '403':
-          description: Confirmation required
+          description: |
+            Either AdminError (caller authenticated but not a platform admin —
+            protectAdminOperation()'s requireAdminRole() runs first) or SafetyCheckRequired
+            (admin check passed but the confirmation token is missing/invalid).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                anyOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
         '500':
           description: Restore failed
           content:
@@ -354,11 +413,16 @@ paths:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
         '403':
-          description: Confirmation required
+          description: |
+            Either AdminError (caller authenticated but not a platform admin —
+            protectAdminOperation()'s requireAdminRole() runs first; GHSA-h8mf hardening) or
+            SafetyCheckRequired (admin check passed but the confirmation token is missing/invalid).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                anyOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
 
   /snapshots/cleanup:
     post:
@@ -395,11 +459,16 @@ paths:
                 skipped: 2
                 freedBytes: 1048576
         '403':
-          description: Confirmation required
+          description: |
+            Either AdminError (caller authenticated but not a platform admin —
+            protectAdminOperation()'s requireAdminRole() runs first) or SafetyCheckRequired
+            (admin check passed but the confirmation token is missing/invalid).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SafetyCheckRequired'
+                anyOf:
+                  - $ref: '#/components/schemas/AdminError'
+                  - $ref: '#/components/schemas/SafetyCheckRequired'
 
   /snapshots/{id}/tags:
     put:
@@ -446,6 +515,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SnapshotResponse'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
         '404':
           description: Snapshot not found
           content:
@@ -502,6 +577,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
         '404':
           description: Snapshot not found
           content:
@@ -555,6 +636,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
         '404':
           description: Snapshot not found
           content:
@@ -563,6 +650,10 @@ paths:
                 $ref: '#/components/schemas/Error'
 
   /snapshots:
+    # NOTE (2026-09-20 security-schemes audit): GET / in snapshot-labels.ts has no
+    # requireAdminRole() (unlike its PUT/PATCH siblings on this same router) — any caller who
+    # clears the global JWT gate can query the snapshot list. No 403 is documented here because
+    # none is actually returned; flagged as a residual finding, not fixed by this PR.
     get:
       tags:
         - Snapshot Protection
@@ -652,6 +743,12 @@ paths:
                       $ref: '#/components/schemas/ProtectionRule'
                   count:
                     type: integer
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
     post:
       tags:
         - Protection Rules
@@ -687,6 +784,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
 
   /safety/rules/{id}:
     get:
@@ -714,6 +817,12 @@ paths:
                     type: boolean
                   rule:
                     $ref: '#/components/schemas/ProtectionRule'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
         '404':
           description: Rule not found
           content:
@@ -759,6 +868,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
         '404':
           description: Rule not found
           content:
@@ -785,6 +900,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
         '404':
           description: Rule not found
           content:
@@ -822,6 +943,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller is authenticated but is not a platform admin (requireAdminRole()).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminError'
 
   /cache/clear:
     post:
@@ -934,6 +1061,18 @@ paths:
                 $ref: '#/components/schemas/SafetyCheckRequired'
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Global gate for every /api/admin path (jwt-middleware.ts:150-168, mounted at
+        index.ts:1670-1683). Missing or invalid token -> 401. This scheme only proves the caller
+        is authenticated; it does not by itself grant admin privileges. Operations additionally
+        gated by requireAdminRole()/protectAdminOperation() can still reject an authenticated
+        non-admin caller with 403 (see AdminError) — check each operation's own responses.
+
   parameters:
     IdempotencyKey:
       name: X-Idempotency-Key
@@ -1293,3 +1432,32 @@ components:
           type: string
         details:
           type: object
+
+    AdminError:
+      type: object
+      description: |
+        Exact response body of requireAdminRole() (guards/audit-integration.ts:113-198). Distinct
+        from the generic Error schema above: no `success` field, and `error` is a fixed category
+        string rather than a free-form message. Returned with HTTP 403 when the caller is
+        authenticated but is not a platform admin; the same middleware fails closed with HTTP 503
+        and error: ServiceUnavailable / code: RBAC_CHECK_FAILED if the admin-role lookup itself
+        throws (e.g. RBAC service unavailable) — not modeled as a separate response here since this
+        schema only documents the 403 case.
+      required:
+        - error
+        - code
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - AccessDenied
+          example: AccessDenied
+        code:
+          type: string
+          enum:
+            - ADMIN_REQUIRED
+          example: ADMIN_REQUIRED
+        message:
+          type: string
+          example: This operation requires admin privileges

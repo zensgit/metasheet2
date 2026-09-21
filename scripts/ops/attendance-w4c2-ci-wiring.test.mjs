@@ -5,6 +5,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { fileURLToPath } from 'node:url'
 import { dirname, join, posix } from 'node:path'
 import { tmpdir } from 'node:os'
+import { PYTHON_CANDIDATE_LABEL, spawnPythonSync } from './python-interpreter.mjs'
 import {
   REAL_DB_STEP_IDS,
   extractStepById,
@@ -1173,7 +1174,7 @@ function jobsContainingStepId(stepId) {
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
     'try:',
-    '    doc = yaml.safe_load(sys.stdin.read())',
+    '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
     'except Exception as exc:',
     "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
     '    sys.exit(4)',
@@ -1189,14 +1190,14 @@ function jobsContainingStepId(stepId) {
     '                hits.append(str(job_name))',
     'json.dump(hits, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py, stepId], {
+  const res = spawnPythonSync(['-c', py, stepId], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`job-scope guard: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`job-scope guard: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(
@@ -1222,7 +1223,7 @@ function stepRunScriptsOfJob(jobName) {
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
     'try:',
-    '    doc = yaml.safe_load(sys.stdin.read())',
+    '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
     'except Exception as exc:',
     "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
     '    sys.exit(4)',
@@ -1236,14 +1237,14 @@ function stepRunScriptsOfJob(jobName) {
     '        out.append(run if isinstance(run, str) else "")',
     'json.dump(out, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py, jobName], {
+  const res = spawnPythonSync(['-c', py, jobName], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`step-order guard: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`step-order guard: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(
@@ -3149,7 +3150,7 @@ function workflowStepsWithRun(files) {
     'except Exception as exc:',
     "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
     '    sys.exit(3)',
-    'entries = json.loads(sys.stdin.read())',
+    'entries = json.loads(sys.stdin.buffer.read().decode("utf-8"))',
     'out = []',
     'for entry in entries:',
     '    try:',
@@ -3180,14 +3181,14 @@ function workflowStepsWithRun(files) {
     '            })',
     'json.dump(out, sys.stdout)',
   ].join('\n')
-  const res = spawnSync('python3', ['-c', py], {
+  const res = spawnPythonSync(['-c', py], {
     input: JSON.stringify(files),
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
     timeout: 120_000,
   })
   if (res.error) {
-    throw new Error(`workflow step walk: failing CLOSED — python3 could not be spawned (${res.error.message})`)
+    throw new Error(`workflow step walk: failing CLOSED — no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message})`)
   }
   if (res.status !== 0) {
     throw new Error(

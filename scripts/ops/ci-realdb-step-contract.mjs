@@ -77,7 +77,7 @@
  * already wired. No workflow step was added or modified for it.
  */
 
-import { spawnSync } from 'node:child_process'
+import { PYTHON_CANDIDATE_LABEL, spawnPythonSync } from './python-interpreter.mjs'
 
 /**
  * Stable `id:` values of the real-DB steps in .github/workflows/plugin-tests.yml that share
@@ -111,6 +111,15 @@ export const REAL_DB_STEP_IDS = Object.freeze({
  * (the text is not valid YAML). Keys are stringified because YAML 1.1 scalars like `on`
  * parse to booleans, which json.dump would otherwise coerce ambiguously; values json.dump
  * cannot encode (e.g. timestamps) fall back to str().
+ *
+ * stdin is decoded EXPLICITLY as UTF-8 (`sys.stdin.buffer.read().decode("utf-8")`) rather than
+ * through `sys.stdin.read()`. Text-mode stdin uses the interpreter's locale encoding, which on
+ * the GitHub `ubuntu-latest` runner is already UTF-8 (so CI is unchanged) but on a CJK Windows
+ * console is cp936/GBK — the workflow files carry Chinese `name:` values, so the locale decode
+ * produced lone surrogates and PyYAML raised `ReaderError(... 'special characters are not
+ * allowed')`, i.e. exit 4, i.e. a local-only fail-closed red with nothing wrong in the YAML.
+ * stdout needs no counterpart: `json.dump` defaults to `ensure_ascii=True`, so the hand-off back
+ * to Node is pure ASCII regardless of the console code page.
  */
 const PY_YAML_TO_JSON = [
   'import json, sys',
@@ -120,7 +129,7 @@ const PY_YAML_TO_JSON = [
   "    sys.stderr.write('PYYAML_MISSING: %r' % (exc,))",
   '    sys.exit(3)',
   'try:',
-  '    doc = yaml.safe_load(sys.stdin.read())',
+  '    doc = yaml.safe_load(sys.stdin.buffer.read().decode("utf-8"))',
   'except Exception as exc:',
   "    sys.stderr.write('YAML_PARSE_ERROR: %r' % (exc,))",
   '    sys.exit(4)',
@@ -151,7 +160,11 @@ const parseCache = new Map()
  */
 export function parseYamlDocument(wf) {
   if (parseCache.has(wf)) return parseCache.get(wf)
-  const res = spawnSync('python3', ['-c', PY_YAML_TO_JSON], {
+  // `spawnPythonSync` tries python3 → py -3 → python, falling through ONLY on ENOENT (see
+  // ./python-interpreter.mjs). On CI (`ubuntu-latest`, system `python3` on PATH) the first
+  // candidate answers, so this is behaviorally identical to the previous bare
+  // `spawnSync('python3', …)`; a non-zero status such as 3/4 below is never retried elsewhere.
+  const res = spawnPythonSync(['-c', PY_YAML_TO_JSON], {
     input: wf,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -159,9 +172,10 @@ export function parseYamlDocument(wf) {
   })
   if (res.error) {
     throw new Error(
-      `real-DB step contract: failing CLOSED — python3 could not be spawned for the YAML parse ` +
-        `(${res.error.message}). These guards run before pnpm install in the required test job, ` +
-        `so the system python3 + PyYAML is the YAML parser they depend on.`,
+      `real-DB step contract: failing CLOSED — no Python interpreter could be spawned for the ` +
+        `YAML parse (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${res.error.message}). These ` +
+        `guards run before pnpm install in the required test job, so the system python3 + ` +
+        `PyYAML is the YAML parser they depend on.`,
     )
   }
   if (res.status !== 0) {
@@ -678,11 +692,23 @@ function maskCommentsAndStrings(src) {
 /**
  * Body of the direct `test.exclude: [ ... ]` array only — property of the `test` object
  * at brace depth 1. Nested `coverage.exclude` (or any later/deeper exclude) is ignored.
+ *
+ * LINE ENDINGS: the source is normalized to LF FIRST, and both the mask and the returned slice
+ * come from that normalized text, so a CRLF checkout (Windows `core.autocrlf`) yields a
+ * byte-identical body to the same file with LF endings. Without this, `quotedExcludeEntries`'
+ * per-line comment strip below silently no-ops on every line (`.` does not match `\r`, and `$`
+ * without the `m` flag only anchors at end-of-input), the first apostrophe inside a stripped-in
+ * comment shifts quote pairing for everything after it, and the parse degrades into garbage
+ * entries — 462 "entries" (201 of them containing a literal `\r\n`) instead of 400 on the real
+ * `packages/core-backend/vitest.config.ts`. On LF input `String#replace` returns an identical
+ * string, so CI (Linux, LF) is unaffected.
+ *
  * @param {string} src
- * @returns {string | null} raw array body, or null if no direct test.exclude
+ * @returns {string | null} raw array body (LF-normalized), or null if no direct test.exclude
  */
 export function extractTestExcludeArrayBody(src) {
-  const masked = maskCommentsAndStrings(src)
+  const text = src.replace(/\r\n?/g, '\n')
+  const masked = maskCommentsAndStrings(text)
   const testKey = /\btest\s*:\s*\{/.exec(masked)
   if (!testKey) return null
   // Position of the `{` that opens the test object.
@@ -715,8 +741,8 @@ export function extractTestExcludeArrayBody(src) {
           else if (masked[j] === ']') {
             bDepth -= 1
             if (bDepth === 0) {
-              // Slice the ORIGINAL source so quoted entries stay intact.
-              return src.slice(bracketOpen + 1, j)
+              // Slice the NORMALIZED source (same length as `masked`) so quoted entries stay intact.
+              return text.slice(bracketOpen + 1, j)
             }
           }
         }
@@ -731,13 +757,20 @@ export function extractTestExcludeArrayBody(src) {
 /**
  * Quoted string entries in an exclude-array body. Strips // line comments first so a
  * decoy path that only appears in a comment is NOT counted as an exclude entry.
+ *
+ * The comment pattern is `[^\r\n]*` rather than `.*$`: `.` never matches `\r`, and `$` without
+ * the `m` flag only anchors at end-of-input, so on a CRLF body every `//` line survived the
+ * strip. `extractTestExcludeArrayBody` already hands back LF-normalized text; this keeps the
+ * function correct when a caller passes a raw CRLF body of its own. Behavior on LF input is
+ * unchanged (each split line holds no terminator, so both patterns run to the line end).
+ *
  * @param {string} arrayBody
  * @returns {string[]}
  */
 export function quotedExcludeEntries(arrayBody) {
   const noLineComments = arrayBody
     .split('\n')
-    .map((line) => line.replace(/\/\/.*$/, ''))
+    .map((line) => line.replace(/\/\/[^\r\n]*/, ''))
     .join('\n')
   const entries = []
   const re = /'([^']+)'|"([^"]+)"/g

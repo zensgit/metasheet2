@@ -36,6 +36,10 @@ import { messageBus } from '../integration/messaging/message-bus';
 import { getRateLimiter } from '../integration/rate-limiting';
 import { pluginConfigManager } from '../core/plugin-config-manager';
 import { isDatabaseSchemaError } from '../utils/database-errors';
+import {
+  DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+  isLiveConnectionFkViolation
+} from '../data-adapters/DataSourceManager';
 import type { PluginManifest } from '../types/plugin';
 
 const logger = new Logger('AdminRoutes');
@@ -67,6 +71,64 @@ type AuthenticatedRequest = Request
 let services: AdminRouteServices = {};
 
 const router = Router();
+
+// ═══════════════════════════════════════════════════════════════════
+// Read-side failure envelope (ADM-05 follow-up)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Stable error code every read-side GET in this router returns on its 500 branch.
+ *
+ * SECURITY (ADM-05 follow-up to #5884 / #5897): batches 2 and 3 gated these reads on platform admin
+ * but deliberately left the 500 bodies alone, recording "redacting that is a separate decision
+ * point" in the route comments. This is that decision. The unhandled-failure branch of every GET
+ * here used to serialize `err.message` straight into the HTTP body, and the errors that actually
+ * reach those branches are driver/infra errors: pg connection failures carry host, port, database
+ * and role in their text (`connect ECONNREFUSED <host>:<port>`, `password authentication failed for
+ * user "<role>"`), Redis and pool errors carry the same shape, and a stack-bearing Error from a
+ * subsystem can carry absolute server paths. A platform admin is trusted — but the HTTP body is not
+ * the right channel for it: it lands in browser devtools, in proxy and CDN access logs, in
+ * screenshots pasted into issues, and in any ops dashboard that renders `error` verbatim. The
+ * operator needs the detail; the wire does not carry it. So the original error keeps going to
+ * logger.error() (message + stack, server side only) and the body carries a stable machine-readable
+ * code plus a fixed human string.
+ *
+ * Shape note: the body keeps `success: false` and keeps `error` a STRING. util/response.ts's
+ * jsonError() was considered and NOT reused here — it emits `{ ok: false, error: { code, message } }`,
+ * a different envelope from the `{ success, error }` one every route in this router and every
+ * existing admin spec reads, so reusing it would turn a redaction into a breaking response-shape
+ * change. `code` is added alongside, which is additive for existing consumers.
+ *
+ * Status codes are unchanged: a 500 stays a 500. Only the body text changes.
+ */
+export const ADMIN_READ_FAILED_CODE = 'ADMIN_READ_FAILED';
+
+/** Fixed, values-free human string. Carries no driver, host, path or identifier. */
+export const ADMIN_READ_FAILED_MESSAGE = '读取失败，详情见服务端日志';
+
+/**
+ * Send the redacted 500 body for a read-side GET, after logging the real error server side.
+ *
+ * @param res      express response
+ * @param context  static, values-free log context (e.g. 'Failed to get detailed health')
+ * @param error    the caught value; its message/stack go to the log, never to the body
+ * @param extra    additional NON-SENSITIVE fields the route already returned on its 500 (e.g. the
+ *                 pluginId the caller itself supplied in the path)
+ */
+function sendAdminReadFailure(
+  res: Response,
+  context: string,
+  error: unknown,
+  extra?: Record<string, unknown>
+): void {
+  logger.error(context, error as Error);
+  res.status(500).json({
+    success: false,
+    code: ADMIN_READ_FAILED_CODE,
+    error: ADMIN_READ_FAILED_MESSAGE,
+    ...(extra ?? {})
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Safety Guard Management
@@ -466,11 +528,7 @@ router.get('/plugins', requireAdminRole(), async (_req: Request, res: Response) 
       list
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to list plugins', error);
   }
 });
 
@@ -513,12 +571,7 @@ router.get('/plugins/:id', requireAdminRole(), async (req: Request, res: Respons
       config: configEntry
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminReadFailure(res, 'Failed to get plugin detail', error, { pluginId: id });
   }
 });
 
@@ -600,12 +653,7 @@ router.get('/plugins/:id/config', requireAdminRole(), async (req: Request, res: 
     const configEntry = await loadPluginConfig(id);
     res.json({ success: true, pluginId: id, config: configEntry });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminReadFailure(res, 'Failed to get plugin config', error, { pluginId: id });
   }
 });
 
@@ -1186,6 +1234,122 @@ router.post(
 // ═══════════════════════════════════════════════════════════════════
 
 /**
+ * REFERENTIAL REFUSAL for the two bulk data routes when their target is `data_sources`.
+ *
+ * Since #5896, `integration_external_systems.connection_id` is a foreign key onto
+ * `data_sources(live_id)` — a STORED generated column that holds the row's own id while the row is
+ * live and NULL once `deleted_at` is set (migration zzzz20260920120000). Consequence for THESE two
+ * routes: a bulk HARD delete of a referenced source, and a bulk update that sets `deleted_at` on
+ * one, are both refused by PostgreSQL with SQLSTATE 23503 on
+ * `fk_integration_external_systems_live_connection_id`. Until now each handler dropped that into its
+ * generic catch and answered a bare 500 carrying `err.message` — the rows were never touched, but
+ * the caller had no stable code to branch on and the driver's own prose reached the client. This is
+ * row 5 of the coverage matrix in
+ * docs/development/data-source-live-id-fk-binding-lock-design-20260920.md §7.
+ *
+ * TWO LAYERS, deliberately:
+ *   ① a PRE-CHECK that resolves the ids the mutation would hit and refuses 409 before any write is
+ *      attempted — this is the only layer that can NAME the offending ids;
+ *   ② the CATCH mapping, which is what actually removes the bare 500: a bind that commits between
+ *      the pre-check and the mutation still trips the constraint, and the pre-check is advisory
+ *      (see referencedDataSourceIdsForRefusal) so it must never be the sole guard.
+ *
+ * The predicate and the code are the ones DataSourceManager already uses for the single-source
+ * delete (`isLiveConnectionFkViolation`, DataSourceManager.ts:50, and
+ * DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE): SQLSTATE first, constraint name second, message
+ * prose NEVER — this deployment's PostgreSQL runs a zh_CN locale and the English
+ * "violates foreign key constraint" sentence simply is not there. Any OTHER 23503 (another table's
+ * constraint, or any table other than data_sources) keeps its existing status code.
+ */
+const DATA_SOURCES_TABLE = 'data_sources';
+const UNDEFINED_TABLE_SQLSTATE = '42P01';
+
+/** Values-free 409 body: the code, the target table and the ids the caller itself asked about. */
+function referencedRefusalBody(ids: string[]) {
+  return {
+    success: false,
+    error:
+      'One or more target data sources are still referenced by an integration external system; unbind them first — 请先解绑引用它们的外部系统。',
+    code: DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
+    details: { table: DATA_SOURCES_TABLE, ids }
+  };
+}
+
+/**
+ * The ids among the `data_sources` rows matching `filters` that an integration external system
+ * canonically points at (`connection_id`) — i.e. exactly the rows the live-id foreign key protects.
+ *
+ * CANONICAL SHAPE ONLY. The legacy shape (`connection_id IS NULL` + `config->>'dataSourceId'` with
+ * the owner stamp) has no foreign key, so a bulk mutation does not trip on it and naming it here
+ * would claim a guarantee the database does not make; it stays registered as uncovered in §7 of the
+ * design note. Owner attribution — the reason DataSourceManager.countExternalSystemReferences reads
+ * that stamp — does not apply to the canonical column, which is server-written and unambiguous.
+ *
+ * 42P01 (integration schema not installed) means nothing can reference anything: zero, exact, and
+ * judged STRICTLY by the SQLSTATE, never by message prose — same posture as
+ * DataSourceManager.countExternalSystemReferences (DataSourceManager.ts:710).
+ */
+async function findReferencedDataSourceIds(filters: Record<string, unknown>): Promise<string[]> {
+  // Same filter application as the mutation below, so the pre-check and the write see the same set.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let idQuery = db.selectFrom(DATA_SOURCES_TABLE as any).select('id' as any) as any;
+  for (const [key, value] of Object.entries(filters)) {
+    idQuery = idQuery.where(key, '=', value);
+  }
+  const candidateRows = (await idQuery.execute()) as Array<{ id?: unknown }>;
+  const candidateIds = candidateRows
+    .map((row) => row?.id)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (candidateIds.length === 0) return [];
+
+  let referenceRows: Array<{ connection_id?: unknown }>;
+  try {
+    referenceRows = (await db
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .selectFrom('integration_external_systems' as any)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .select('connection_id' as any)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .where('connection_id' as any, 'in', candidateIds as any)
+      .execute()) as Array<{ connection_id?: unknown }>;
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return [];
+    throw err;
+  }
+
+  const referenced = new Set(
+    referenceRows
+      .map((row) => row?.connection_id)
+      .filter((id): id is string => typeof id === 'string')
+  );
+  return candidateIds.filter((id) => referenced.has(id));
+}
+
+/**
+ * ADVISORY wrapper around findReferencedDataSourceIds: used both for the pre-check and to name the
+ * ids in the catch-mapped refusal.
+ *
+ * A failure of the LOOKUP is not a failure of the request: the authoritative guard is the database
+ * constraint, which refuses the write whatever this read returned, and the catch below maps it. So a
+ * broken pre-check must not convert a legitimate bulk mutation into a new 500 it did not have
+ * before — it logs (values-free: the SQLSTATE only, never the driver's text, which embeds host,
+ * port, database and login) and returns "nothing known to be referenced". The cost of that choice is
+ * bounded: the refusal may then carry an empty `ids` list, never a wrong status.
+ */
+async function referencedDataSourceIdsForRefusal(filters: Record<string, unknown>): Promise<string[]> {
+  try {
+    return await findReferencedDataSourceIds(filters);
+  } catch (err) {
+    logger.warn('Reference lookup for bulk data_sources mutation failed; the database constraint remains the guard', {
+      context: 'AdminRoutes',
+      table: DATA_SOURCES_TABLE,
+      sqlstate: (err as { code?: string } | null)?.code ?? 'unknown'
+    });
+    return [];
+  }
+}
+
+/**
  * DELETE /api/admin/data/bulk
  * Bulk delete data
  */
@@ -1234,6 +1398,22 @@ router.delete(
         return;
       }
 
+      // ① Referential pre-check (see the block comment above "Data Operations"). A hard delete of
+      // a source an external system still points at is refused by the live-id foreign key; answer
+      // 409 with the ids BEFORE attempting the write, so the caller learns which rows to unbind.
+      if (table === DATA_SOURCES_TABLE) {
+        const referencedIds = await referencedDataSourceIdsForRefusal(filters);
+        if (referencedIds.length > 0) {
+          logger.warn('Bulk deletion refused: target data sources are still referenced', {
+            context: 'AdminRoutes',
+            table,
+            referencedCount: referencedIds.length
+          });
+          res.status(409).json(referencedRefusalBody(referencedIds));
+          return;
+        }
+      }
+
       // Build and execute delete query
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let query = db.deleteFrom(table as any) as any;
@@ -1261,6 +1441,19 @@ router.delete(
       });
     } catch (error) {
       const err = error as Error;
+      // ② Database backstop: a binding that committed after the pre-check (or a pre-check that
+      // could not run) still trips the live-id foreign key. Same DECISION as ①, so the same 409 —
+      // never the bare 500 this route used to answer. Judged by SQLSTATE + constraint name, so a
+      // 23503 raised by ANY other constraint, or against any other table, keeps its 500.
+      if (table === DATA_SOURCES_TABLE && isLiveConnectionFkViolation(err)) {
+        logger.warn('Bulk deletion refused by the binding foreign key', {
+          context: 'AdminRoutes',
+          table,
+          constraint: (err as { constraint?: string }).constraint
+        });
+        res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
+        return;
+      }
       logger.error('Bulk deletion failed', err);
       res.status(500).json({
         success: false,
@@ -1328,6 +1521,28 @@ router.put(
         return;
       }
 
+      // ① Referential pre-check, NARROWED to the update that actually clears `live_id`: the
+      // generated column is NULL exactly when `deleted_at` is not null, so only an update that
+      // SETS `deleted_at` can trip the foreign key. An update of `name`, `status` … does not touch
+      // a key column (PostgreSQL takes FOR NO KEY UPDATE) and must not be refused here — widening
+      // this to "any update of data_sources" would break legitimate bulk edits of referenced rows.
+      const clearsLiveId =
+        Object.prototype.hasOwnProperty.call(updates, 'deleted_at') &&
+        (updates as Record<string, unknown>).deleted_at !== null &&
+        (updates as Record<string, unknown>).deleted_at !== undefined;
+      if (table === DATA_SOURCES_TABLE && clearsLiveId) {
+        const referencedIds = await referencedDataSourceIdsForRefusal(filters);
+        if (referencedIds.length > 0) {
+          logger.warn('Bulk update refused: target data sources are still referenced', {
+            context: 'AdminRoutes',
+            table,
+            referencedCount: referencedIds.length
+          });
+          res.status(409).json(referencedRefusalBody(referencedIds));
+          return;
+        }
+      }
+
       // Build and execute update query
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let query = (db.updateTable(table as any) as any).set(updates);
@@ -1355,6 +1570,16 @@ router.put(
       });
     } catch (error) {
       const err = error as Error;
+      // ② Database backstop — same shape as the DELETE route above.
+      if (table === DATA_SOURCES_TABLE && isLiveConnectionFkViolation(err)) {
+        logger.warn('Bulk update refused by the binding foreign key', {
+          context: 'AdminRoutes',
+          table,
+          constraint: (err as { constraint?: string }).constraint
+        });
+        res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
+        return;
+      }
       logger.error('Bulk update failed', err);
       res.status(500).json({
         success: false,
@@ -1371,8 +1596,19 @@ router.put(
 /**
  * GET /api/admin/slo/status
  * Get SLO status and error budgets
+ *
+ * SECURITY (issue #5678, batch 3 residual): this read used to carry no authorization at all — the
+ * last ungated GET in this file. It delegates to sloService.getSLOStatus() (SLOService.ts:122),
+ * which aggregates the process-wide prom-client registry with no tenant predicate anywhere, so the
+ * response is the platform's own reliability posture — per-SLO current availability, error-budget
+ * total/consumed/remaining and the healthy/at_risk/violated verdict — to any authenticated caller of
+ * any tenant. That is a free "is the platform hurting right now, and how much budget is left before
+ * it breaches?" oracle, pollable at will. Gated on platform admin like its /dlq, /ratelimits and
+ * /health/summary siblings (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin
+ * throwing -> 503 RBAC_CHECK_FAILED fail-closed; no database pool -> isAdmin() returns false at
+ * rbac/service.ts:20 -> 403, never an open door — see guards/audit-integration.ts:113).
  */
-router.get('/slo/status', async (req: Request, res: Response) => {
+router.get('/slo/status', requireAdminRole(), async (req: Request, res: Response) => {
   try {
     const status = await sloService.getSLOStatus();
     res.json({
@@ -1381,10 +1617,7 @@ router.get('/slo/status', async (req: Request, res: Response) => {
       status
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to get SLO status', error);
   }
 });
 
@@ -1436,10 +1669,7 @@ router.get('/dlq', requireAdminRole(), async (req: Request, res: Response) => {
       ...result
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to list DLQ messages', error);
   }
 });
 
@@ -1550,12 +1780,7 @@ router.get('/shards', requireAdminRole(), async (req: Request, res: Response) =>
       metrics: metricsSnapshot
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get shard status', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get shard status', error);
   }
 });
 
@@ -1600,12 +1825,7 @@ router.get('/shards/:name', requireAdminRole(), async (req: Request, res: Respon
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get shard details', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get shard details', error);
   }
 });
 
@@ -1660,12 +1880,7 @@ router.get('/queues', requireAdminRole(), async (req: Request, res: Response) =>
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get queue stats', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get queue stats', error);
   }
 });
 
@@ -1819,12 +2034,7 @@ router.get('/ratelimits', requireAdminRole(), async (req: Request, res: Response
       buckets: showBuckets === 'true' ? buckets : undefined
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get rate limit status', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get rate limit status', error);
   }
 });
 
@@ -1873,12 +2083,7 @@ router.get('/ratelimits/:key', requireAdminRole(), async (req: Request, res: Res
       }
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get rate limit status for key', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get rate limit status for key', error);
   }
 });
 
@@ -1984,12 +2189,7 @@ router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Res
       errors: health.errors
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get detailed health', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get detailed health', error);
   }
 });
 
@@ -2007,9 +2207,9 @@ router.get('/health/detailed', requireAdminRole(), async (req: Request, res: Res
  * (services/HealthAggregatorService.ts:303) and only falls back to a fresh checkHealth(). Gated on
  * platform admin (requireAdminRole: no user or non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing ->
  * 503 fail-closed; no database pool -> isAdmin returns false -> 403, see
- * guards/audit-integration.ts:113 and rbac/service.ts:20). The 500 branch below still echoes
- * err.message; redacting that is a separate decision point (see the design note), deliberately not
- * folded into this "tighten only, change no shape" change.
+ * guards/audit-integration.ts:113 and rbac/service.ts:20). The 500 branch below used to echo
+ * err.message; that separate decision point is now closed — it returns ADMIN_READ_FAILED via
+ * sendAdminReadFailure() and the original error goes to the log only (see the helper's note).
  */
 router.get('/health/summary', requireAdminRole(), async (req: Request, res: Response) => {
   try {
@@ -2031,12 +2231,7 @@ router.get('/health/summary', requireAdminRole(), async (req: Request, res: Resp
       hasErrors: health.errors.length > 0
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get health summary', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get health summary', error);
   }
 });
 
@@ -2076,12 +2271,7 @@ router.get('/health/subsystem/:name', requireAdminRole(), async (req: Request, r
       subsystem
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to get subsystem health', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    sendAdminReadFailure(res, 'Failed to get subsystem health', error);
   }
 });
 

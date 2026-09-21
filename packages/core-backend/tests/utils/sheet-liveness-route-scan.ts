@@ -911,7 +911,7 @@ function testsResult(test: ts.Expression, x: string, sf: ts.SourceFile): 'refuse
 
 export type SiteKind =
   | 'resolver' | 'blind-resolver' | 'liveness-load' | 'assert-live'
-  | 'vetted' | 'delegated' | 'inline-sheet-query' | 'gate-helper'
+  | 'vetted' | 'delegated' | 'inline-sheet-query' | 'parent-liveness-query' | 'gate-helper'
 
 export interface GateSite {
   kind: SiteKind
@@ -943,6 +943,105 @@ export function sheetTableLivenessFilter(sql: string): boolean {
   return false
 }
 
+/**
+ * Kysely terminators that RUN a built query and answer with ONE row or nothing — the only shape the
+ * falsy check this analyzer demands can actually refuse on.
+ *
+ * `execute` is deliberately NOT here: it answers an ARRAY, and `[]` is truthy, so `if (!rows) return …`
+ * under such a chain is dead code that refuses nothing. A liveness chain that ends in `.execute()` is
+ * therefore not recognised at all (fail closed: its handler stays UNGUARDED).
+ */
+const KYSELY_ROW_EXECUTORS = new Set(['executeTakeFirst', 'executeTakeFirstOrThrow'])
+
+/** `a.b('x').c('y')` read back as the steps `[b('x'), c('y')]`; empty when it is not such a chain. */
+function builderChain(call: ts.CallExpression): Array<{ name: string; args: ts.NodeArray<ts.Expression> }> {
+  const steps: Array<{ name: string; args: ts.NodeArray<ts.Expression> }> = []
+  let node: ts.Expression = call
+  while (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+    steps.unshift({ name: node.expression.name.text, args: node.arguments })
+    node = node.expression.expression
+  }
+  return steps
+}
+
+const stringLiteralOf = (e: ts.Expression | undefined): string | null =>
+  e && (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) ? e.text : null
+
+/**
+ * An id a liveness chain may be asked about: an id the enclosing code is ADDRESSED by — one of the
+ * enclosing function's own parameters (a gate helper's `id`), or `<req>.params.<x>` (a route handler
+ * reading its own path). A literal, a body/query field or an unrelated local asks about some OTHER row
+ * than the request's, so such a chain is not this request's liveness and is not recognised.
+ *
+ * Two things this does NOT decide, both pinned per file by the guard's own assertions rather than here:
+ *  - WHICH addressed id it is (`:id` vs `:sheetId` — both are addressed);
+ *  - for the PARAMETER form, what the caller actually passes. A helper's parameter is only as addressed
+ *    as its call sites, which are outside this expression; the guard pins those call sites separately
+ *    (for #5828: `loadLiveSpreadsheetSheet(db, id, sheetId)` with `const { id, sheetId } = req.params`).
+ */
+function addressedIdArgument(value: ts.Expression | undefined, call: ts.CallExpression): boolean {
+  if (!value) return false
+  const e = unwrap(value)
+  // `req.params.<x>` — the owner of the property being read is itself `<something>.params`.
+  if (ts.isPropertyAccessExpression(e)) {
+    const owner = unwrap(e.expression)
+    return ts.isPropertyAccessExpression(owner) && owner.name.text === 'params'
+  }
+  if (!ts.isIdentifier(e)) return false
+  const fn = enclosingFunction(call)
+  if (!fn) return false
+  return fn.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === e.text)
+}
+
+/**
+ * Any builder step that JOINs. A PATTERN rather than a list on purpose: kysely 0.28 ships eight
+ * (`inner|left|right|full|cross` × `Join`, plus `innerJoinLateral` / `leftJoinLateral` /
+ * `crossJoinLateral`) and an enumerated set goes silently stale the moment one is added or missed —
+ * a missed name would make an ambiguous-column chain count as liveness. Over-matching is harmless
+ * because a chain that matches is REFUSED, which leaves its handler UNGUARDED (louder, not quieter);
+ * no step of a select chain this analyzer recognises otherwise mentions a join.
+ */
+const KYSELY_JOIN_STEP = /join/i
+
+/**
+ * `<db>.selectFrom('<parent>') … .where('id', '=', <addressed id>) … .where('deleted_at', 'is', null)
+ *  … .executeTakeFirst()` — a kysely liveness filter on ONE row of a soft-deletable PARENT table.
+ *
+ * A LEGACY entity keeps soft delete on its parent only (`sheets` has no `deleted_at`; its parent
+ * `spreadsheets` does), so the parent row IS the child's liveness and `meta_sheets` never appears.
+ * Nothing is recognised by default: only the tables a caller names in `AnalyzeOptions.parentLivenessTables`
+ * count, so no other file's closed world is widened by this. Matches the query's EXECUTOR call only,
+ * so one chain is one site, and only a single-row executor counts (`KYSELY_ROW_EXECUTORS`).
+ *
+ * What this recognises is the SHAPE — a live-parent row addressed by an id the request supplies. It does
+ * NOT decide which of the addressed ids that is (a chain asked about `req.params.sheetId` has the same
+ * shape as one asked about `req.params.id`), and it says nothing about the child row belonging to that
+ * parent: the child binding is not a liveness fact, and both are pinned per file by the guard test.
+ *
+ * A chain that JOINS another table is not recognised either: the columns this reads are the bare
+ * strings `'id'` / `'deleted_at'`, which name the parent only while the parent is the chain's sole
+ * table — under a join they may be the other table's, so such a chain is refused rather than guessed at
+ * (`KYSELY_JOIN_STEP`, and a multi-table `selectFrom([…])` fails the single string-literal check below).
+ */
+export function parentTableLivenessChain(call: ts.CallExpression, tables: Set<string>): string | null {
+  if (tables.size === 0) return null
+  const steps = builderChain(call)
+  const last = steps[steps.length - 1]
+  if (!last || !KYSELY_ROW_EXECUTORS.has(last.name)) return null
+  const from = steps.find((s) => s.name === 'selectFrom')
+  const table = from && from.args.length === 1 ? stringLiteralOf(from.args[0]) : null
+  if (table === null || !tables.has(table)) return null
+  if (steps.some((s) => KYSELY_JOIN_STEP.test(s.name))) return null
+  const wheres = steps.filter((s) => s.name === 'where' && s.args.length === 3)
+  const bound = wheres.some((w) => stringLiteralOf(w.args[0]) === 'id'
+    && stringLiteralOf(w.args[1]) === '='
+    && addressedIdArgument(w.args[2], call))
+  const live = wheres.some((w) => stringLiteralOf(w.args[0]) === 'deleted_at'
+    && stringLiteralOf(w.args[1]) === 'is'
+    && w.args[2]!.kind === ts.SyntaxKind.NullKeyword)
+  return bound && live ? `${table} … deleted_at is null` : null
+}
+
 function firstStringArg(call: ts.CallExpression): string | null {
   const first = call.arguments[0]
   if (!first) return null
@@ -959,6 +1058,12 @@ export interface AnalyzeOptions {
   delegated: string | null
   /** Callees that may be awaited before the first gate (rate limiting, the caller's own job lookup). */
   preGateCalls: Set<string>
+  /**
+   * Tables whose `deleted_at` IS the liveness of the rows a file addresses, for LEGACY entities that
+   * carry soft delete on the parent only (`parentTableLivenessChain`). Unset for every other file, so
+   * a kysely `selectFrom('<parent>')` filter counts as a gate nowhere but where it is named.
+   */
+  parentLivenessTables?: Set<string>
   /** Routes: a capability 403 must sit between each resolver call and its liveness refusal. */
   requireOrder: boolean
   /** Routes: nothing but `preGateCalls` is awaited (and no service/pool/db call is made) before the gate. */
@@ -970,6 +1075,19 @@ export interface AnalyzeOptions {
    * this is set or `requireOrder` is on.
    */
   refusalReturn?: string
+  /**
+   * Same-file helpers whose liveness refusal stops an IN-REQUEST EGRESS LOOP instead of answering the
+   * request (#5838: the inline AI bulk-preview loop asks before every provider call). Their refusal must
+   * be inert and must return `false` and NOTHING ELSE — fail-closed for the caller, which is what stops
+   * the sending. NAMED, never inferred: every helper not listed here must still answer 403/404/410, and
+   * the caller side (that a `false` really leaves the loop) is proven where the helper is named.
+   *
+   * The excuse is exactly that — an excuse from ANSWERING, not a promotion: a listed helper is also
+   * struck from every handler's liveness `sources` — as is any helper that merely RELAYS its verdict
+   * (all of whose liveness exits come from struck sites, to any depth) — so no route can ever prove its
+   * liveness with a question that answers nothing, directly or through a wrapper.
+   */
+  egressStops?: Set<string>
 }
 
 export interface HandlerAnalysis {
@@ -979,6 +1097,8 @@ export interface HandlerAnalysis {
   /** Helper name → role, for reports and self-tests. */
   roles: Map<string, 'gate' | 'decision' | 'plain'>
 }
+
+const NO_PARENT_TABLES: Set<string> = new Set()
 
 function collectSites(unit: HandlerUnit, sf: ts.SourceFile, options: AnalyzeOptions, gateHelpers: Map<FnNode, string>): GateSite[] {
   const out: GateSite[] = []
@@ -1003,10 +1123,17 @@ function collectSites(unit: HandlerUnit, sf: ts.SourceFile, options: AnalyzeOpti
         const sql = firstStringArg(node)
         if (sql !== null && sheetTableLivenessFilter(sql)) kind = 'inline-sheet-query'
       }
+      let parentTable: string | null = null
+      if (!kind) {
+        parentTable = parentTableLivenessChain(node, options.parentLivenessTables ?? NO_PARENT_TABLES)
+        if (parentTable !== null) kind = 'parent-liveness-query'
+      }
       if (kind) {
         out.push({
           kind,
-          name: kind === 'inline-sheet-query' ? 'meta_sheets … deleted_at IS NULL' : calleeText,
+          name: kind === 'inline-sheet-query'
+            ? 'meta_sheets … deleted_at IS NULL'
+            : parentTable ?? calleeText,
           call: node,
           enclosing: enclosingFunction(node),
           line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
@@ -1174,10 +1301,42 @@ function returnsExactly(stmt: ts.Statement, expected: string, sf: ts.SourceFile)
 const AUTHORITY_REFUSAL = /\b40[13]\b|\bsendForbidden\(|\bsendUnauthorized\(|'FORBIDDEN'|'UNAUTHORIZED'|'UNAUTHENTICATED'/
 const NOT_LIVE_ANSWER = /\bsendSheetNotLive\(|\bstatus\(\s*(?:403|404|410)\s*\)|\bstatus:\s*(?:403|404|410)\b|^\s*throw\b|[;{]\s*throw\b/
 
+/**
+ * The refusal branch tells its caller `false` and has NO WAY to tell it anything else: its last
+ * statement is `return false` (so a log line may precede), and EVERY `return` it can reach — not just
+ * the last one — returns exactly `false`. Checking only the last statement would accept a refusal that
+ * is fail-open on a sub-case (`if (liveness === 'deleted') return true; return false`): "keep sending"
+ * on precisely the case the guard exists for, with the trailing `return false` as cover.
+ */
+function refusesOnlyFalse(branch: ts.Statement, sf: ts.SourceFile): boolean {
+  const last = ts.isBlock(branch) ? branch.statements[branch.statements.length - 1] : branch
+  if (!last || !ts.isReturnStatement(last) || !last.expression || collapsed(codeOf(last.expression, sf)) !== 'false') return false
+  let onlyFalse = true
+  const walk = (node: ts.Node): void => {
+    if (ts.isReturnStatement(node) && (!node.expression || collapsed(codeOf(node.expression, sf)) !== 'false')) onlyFalse = false
+    // A nested function's `return` belongs to that function, not to the refusal.
+    if (node === branch || !isFnNode(node)) ts.forEachChild(node, walk)
+  }
+  walk(branch)
+  return onlyFalse
+}
+
 /** Why the branch of a liveness refusal does not really refuse (null when it does). */
-function refusalBranchProblem(refusal: ts.IfStatement, options: AnalyzeOptions, sf: ts.SourceFile): string | null {
+function refusalBranchProblem(refusal: ts.IfStatement, options: AnalyzeOptions, sf: ts.SourceFile, unitLabel = ''): string | null {
   const branch = refusal.thenStatement
   const text = collapsed(codeOf(branch, sf))
+  if (options.egressStops?.has(unitLabel)) {
+    // An EGRESS-STOP helper, named by the caller's guard (#5838): it is not asked whether to ANSWER the
+    // request — it is asked, between two outbound provider calls, whether the request may keep sending.
+    // Its refusal therefore reports `false` to its caller instead of a status; it must still be inert (a
+    // refusal only answers) and must have no way to report anything else. That the CALLER then leaves
+    // the egress loop is proven where the helper is named, not here.
+    if (!inert(branch, true)) return `its liveness refusal branch awaits or calls a data source (\`${text.slice(0, 80)}\`) — a refusal only answers`
+    if (!refusesOnlyFalse(branch, sf)) {
+      return `its liveness refusal must end in \`return false\` and return nothing else — an egress-stop helper reports the refusal to its caller (\`${text.slice(0, 80)}\`)`
+    }
+    return null
+  }
   if (options.refusalReturn !== undefined) {
     if (returnsExactly(branch, options.refusalReturn, sf)) return null
     return `its liveness refusal does \`${text.slice(0, 80)}\` — it must be exactly \`return ${options.refusalReturn}\``
@@ -1317,7 +1476,7 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
           if (windowRule) {
             // A REFUSAL MUST REFUSE, and nothing but an authority refusal or an inert declaration may run
             // between the binding and it (a write there lands on a deleted sheet).
-            const branch = refusalBranchProblem(refusal.stmt, options, sf)
+            const branch = refusalBranchProblem(refusal.stmt, options, sf, unit.label)
             if (branch) violations.add(`${where}: ${branch}`)
             let holder: ts.Node = site.call.parent
             while (ts.isAwaitExpression(holder) || ts.isParenthesizedExpression(holder) || ts.isAsExpression(holder) || ts.isNonNullExpression(holder)) {
@@ -1373,11 +1532,37 @@ export function analyzeHandler(h: Pick<RouteHandler, 'units'>, sf: ts.SourceFile
     results = evaluate()
   }
 
+  // An EGRESS-STOP helper (#5838) is excused from answering 403/404/410 because it does not answer the
+  // request at all — it tells an in-request send loop to stop. It can therefore never BE a route's
+  // liveness proof: a handler whose only liveness question is such a helper would be counted GUARDED
+  // while answering 200 on a soft-deleted sheet, and the excuse granted for the loop would have silently
+  // bought that too. Neither may a RELAY launder it: a helper whose liveness exits all come from
+  // egress-stopped sites only passes the stop signal on, so it is struck as well — to any depth
+  // (fixpoint), while one genuinely answering source among its exits keeps it a real gate. The helper's
+  // caller side (that a `false` really leaves the loop, uncharged) is proven by name, per loop.
+  const stopNames = new Set(options.egressStops ?? [])
+  for (let round = 0; stopNames.size > 0 && round < results.length + 1; round += 1) {
+    let grew = false
+    for (const r of results) {
+      if (roots.has(r.unit.node) || stopNames.has(r.unit.label)) continue
+      const own = ownExits(r)
+      if (own.length > 0 && own.every((e) => stopNames.has(e.site.name))) {
+        stopNames.add(r.unit.label)
+        grew = true
+      }
+    }
+    if (!grew) break
+  }
+
   const sources: string[] = []
   for (const r of results) {
     const own = ownExits(r)
     if (roots.has(r.unit.node)) {
-      for (const e of own) if (e.exit !== 'loop') sources.push(`${e.site.kind} ${e.site.name}`)
+      for (const e of own) {
+        if (e.exit === 'loop') continue
+        if (stopNames.has(e.site.name)) continue
+        sources.push(`${e.site.kind} ${e.site.name}`)
+      }
       continue
     }
     const classes = own.map(exitClass)

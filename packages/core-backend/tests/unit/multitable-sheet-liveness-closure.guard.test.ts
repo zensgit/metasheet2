@@ -157,8 +157,14 @@ const EXEMPT: Record<string, string> = {
     'creates a BASE. It never resolves a sheet — the only `sheetId` token in its body belongs to the '
     + 'template-install helper text further down the file, not to this handler.',
   'POST /templates/:templateId/install':
-    'CREATES sheets. There is no pre-existing sheet whose liveness could be asserted; the sheets it '
-    + 'makes are live by construction.',
+    'CREATES sheets — and, since the #5861 install dedupe, MAY REPLAY a create it recorded up to the '
+    + 'dedupe window ago. On the fresh path the sheets it returns are live by construction. On the '
+    + 'replay path the liveness of exactly what it hands back IS asserted, just not in this handler '
+    + 'body: `multitable/template-install-dedupe.ts` re-reads the recorded base (`meta_bases ... AND '
+    + 'deleted_at IS NULL`) AND every recorded sheet id (`meta_sheets WHERE id = ANY(...) AND '
+    + 'deleted_at IS NULL`, all of them or no replay) before returning the recorded response; any miss '
+    + 'drops the ledger row and installs afresh. That is why the classifier still sees no guard token '
+    + 'here. If that module ever stops re-asserting liveness, this exemption is false again.',
   'GET /record-subscription-notifications':
     'reads the CALLER’S OWN notification rows, keyed by user, not by sheet. It takes no sheet id.',
 }
@@ -193,31 +199,16 @@ const EXISTENCE_BEFORE_AUTHORITY_GAP = {
     'DELETE /sheets/:sheetId/records/:recordId/permissions/:permissionId',
     'GET /fields',
     'GET /records-summary',
-    'GET /sheets/:sheetId/conditional-rules',
     'GET /sheets/:sheetId/config-history',
-    'GET /sheets/:sheetId/export-xlsx',
-    'GET /sheets/:sheetId/field-permissions',
     'GET /sheets/:sheetId/form-share-candidates',
-    'GET /sheets/:sheetId/permission-candidates',
-    'GET /sheets/:sheetId/permissions',
-    'GET /sheets/:sheetId/person-fields/:fieldId/directory',
-    'GET /sheets/:sheetId/records/:recordId/permissions',
-    'GET /sheets/:sheetId/row-level-read-deny',
     'GET /sheets/:sheetId/view-aggregate',
     'GET /views',
     'PATCH /records/:recordId',
-    'POST /attachments',
     'POST /fields',
-    'POST /person-fields/prepare',
-    'POST /sheets/:sheetId/formula/dry-run',
     'POST /sheets/:sheetId/import-xlsx',
     'POST /views',
     'POST /views/:viewId/submit',
-    'PUT /sheets/:sheetId/conditional-rules',
-    'PUT /sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId',
-    'PUT /sheets/:sheetId/permissions/:subjectType/:subjectId',
     'PUT /sheets/:sheetId/records/:recordId/permissions',
-    'PUT /sheets/:sheetId/row-level-read-deny',
   ],
 }
 

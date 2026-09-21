@@ -1,8 +1,91 @@
 paths:
+  # Contract source: plugins/plugin-integration-core/lib/http-routes.cjs, handler `runsList`
+  # (read the handler itself, not this comment, before touching this block — it is the sole
+  # source of truth). Same tenant/workspace scoping as the single-run read below: `tenantId` is
+  # resolved from the verified session claim and an explicit query value must match it (403 on
+  # mismatch), so the parameter cannot widen scope beyond a tenantless platform admin. Response
+  # `data` is a plain array (no `total`/`nextCursor` — the handler has neither), sharing the
+  # IntegrationPipelineRun projection verbatim with the single-run read.
+  /api/integration/runs:
+    get:
+      summary: List integration pipeline runs
+      description: >-
+        Read-only run listing, scoped by (tenantId, workspaceId) and optionally narrowed by
+        pipelineId/status. `data` is a plain array of IntegrationPipelineRun, newest first
+        (ORDER BY created_at DESC); there is no cursor or total count.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Optional echo of the caller's own tenant. Must equal the authenticated tenant
+            (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another.
+          schema: { type: string }
+        - in: query
+          name: workspaceId
+          required: false
+          description: Workspace scope. Omitted means the null workspace.
+          schema: { type: string }
+        - in: query
+          name: pipelineId
+          required: false
+          description: Restrict to runs of one pipeline.
+          schema: { type: string }
+        - in: query
+          name: status
+          required: false
+          description: >-
+            Restrict to runs in one status. An unrecognized value is a 400
+            (PipelineValidationError), not an empty result.
+          schema:
+            type: string
+            enum: [pending, running, succeeded, partial, failed, cancelled]
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Max rows to return. Must be a positive integer; a non-numeric or non-positive value
+            is silently ignored (registry default applies), not rejected. Capped at 500 server-side.
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - in: query
+          name: offset
+          required: false
+          description: >-
+            Rows to skip. Must be a positive integer; a non-numeric or non-positive value is
+            silently ignored (registry default applies), not rejected.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/IntegrationPipelineRun' }
+        '400':
+          description: An unrecognized `status` value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                status_invalid:
+                  value:
+                    ok: false
+                    error:
+                      code: PipelineValidationError
+                      message: >-
+                        status must be one of pending, running, succeeded, partial, failed,
+                        cancelled
+                      details: { field: status }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   # SC-04 single-run read. Contract for the plugin route added in #5887
-  # (plugins/plugin-integration-core/lib/http-routes.cjs, handler `runsGet`). The list route
-  # GET /api/integration/runs is intentionally NOT contracted in this slice — it predates this
-  # file and adding it would widen the change beyond the single read it documents.
+  # (plugins/plugin-integration-core/lib/http-routes.cjs, handler `runsGet`).
   /api/integration/runs/{runId}:
     get:
       summary: Get one integration pipeline run
