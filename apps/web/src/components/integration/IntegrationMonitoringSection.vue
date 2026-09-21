@@ -113,6 +113,61 @@
             <div v-else class="integration-workbench__empty" data-testid="run-detail-payload-empty">
               {{ bi('这条运行没有附加详情（details 为空）。', 'This run carries no extra details (empty details).') }}
             </div>
+            <!-- Q4a (read-only): this run's provenance events, collapsed by default so opening
+                 详情 still costs exactly one request. Values-free by construction — only the
+                 event type, rowId, ordinal and timestamps are rendered, and `attrs` goes through
+                 the SAME redacted summariser the cross-run dead-letter timeline already uses
+                 (truncated, key-capped), never a raw payload dump. -->
+            <div class="integration-workbench__run-provenance">
+              <button
+                type="button"
+                class="integration-workbench__link-button"
+                data-testid="toggle-run-provenance"
+                :disabled="runProvenanceLoading"
+                @click="toggleRunProvenance"
+              >{{ runProvenanceExpanded
+                ? bi('收起溯源事件', 'Hide provenance events')
+                : bi('展开溯源事件', 'Show provenance events') }}</button>
+              <div v-if="runProvenanceExpanded" data-testid="run-provenance">
+                <div
+                  v-if="runProvenanceLoading"
+                  class="integration-workbench__hint"
+                  data-testid="run-provenance-loading"
+                >{{ bi('溯源事件加载中…', 'Loading provenance events…') }}</div>
+                <p
+                  v-else-if="runProvenanceError"
+                  class="integration-workbench__run-error"
+                  data-testid="run-provenance-error"
+                >{{ runProvenanceError }}</p>
+                <ol
+                  v-else-if="runProvenanceEntries.length > 0"
+                  class="integration-workbench__record-list"
+                  data-testid="run-provenance-timeline"
+                >
+                  <li
+                    v-for="(entry, index) in runProvenanceEntries"
+                    :key="`${entry.runId}-${entry.eventIndex}`"
+                    :data-testid="`run-provenance-entry-${index}`"
+                  >
+                    <div class="integration-workbench__provenance-event-head">
+                      <strong>{{ entry.eventType }}</strong>
+                      <span>#{{ entry.eventIndex }}</span>
+                      <span>{{ entry.at }}</span>
+                    </div>
+                    <small>rowId {{ entry.rowId }}</small>
+                    <p
+                      v-if="rowProvenanceAttrsSummary(entry.attrs)"
+                      class="integration-workbench__provenance-attrs"
+                    >{{ rowProvenanceAttrsSummary(entry.attrs) }}</p>
+                  </li>
+                </ol>
+                <div
+                  v-else
+                  class="integration-workbench__empty"
+                  data-testid="run-provenance-empty"
+                >{{ bi('这条运行没有溯源事件。', 'This run recorded no provenance events.') }}</div>
+              </div>
+            </div>
           </div>
           <p class="integration-workbench__hint">{{ bi(
             '只读：仅重新读取这条运行的记录，不触发任何重跑或写入。',
@@ -273,6 +328,13 @@ defineProps<{
   runDetailError: string
   runDetail: IntegrationPipelineRun | null
   runDetailPayloadText: string
+  // Q4a per-run provenance section. Owned/fetched by the parent view (this component still makes
+  // no service call); `runProvenanceExpanded` is false until the operator asks for the lineage.
+  runProvenanceExpanded: boolean
+  runProvenanceLoading: boolean
+  runProvenanceError: string
+  runProvenanceEntries: IntegrationProvenanceTimelineEntry[]
+  toggleRunProvenance: () => Promise<void>
   deadLetterErrorLabel: (deadLetter: IntegrationDeadLetter) => string
   deadLetterErrorHint: (deadLetter: IntegrationDeadLetter) => string | null
   isDeadLetterReplayable: (deadLetter: IntegrationDeadLetter) => boolean
@@ -544,6 +606,14 @@ defineProps<{
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+/* Q4a (read-only): per-run provenance section inside the run-detail dialog. Reuses the
+   `__provenance-*` rules below for its entries. */
+.integration-workbench__run-provenance {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
 }
 
 /* DF-N2-3 (read-only): cross-run provenance timeline (per dead-letter row). */
