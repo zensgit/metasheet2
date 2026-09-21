@@ -37,13 +37,47 @@ the SFC. **Parse-failure count is asserted 0**, not assumed.
 | **flagged super-linear** | **14** |
 | fuzz errors | 0 |
 
-The 47 unresolvable were **hand-read** (class-two hunt): all but the formula
-engine resolve their pattern from a module constant, an escaped
-(`escapeRegExp`-guarded) template, or a fixed literal-with-interpolation used in
-tests. The formula engine is the only production site where the **pattern itself**
-is user-authored and unescaped.
+The 47 unresolvable were **hand-read** (class-two hunt). Per-site provenance
+(not a sweeping claim — the first draft asserted "all but the formula engine are
+safe", which was **wrong**; a second class-two site, `field-validation-engine.ts:103`,
+was found and is finding L2):
 
-## 3. Instrument controls — 6/6 pass (this is what makes "1 live / 13 not" a conclusion)
+**CONFIRMED live class-two (fixed on branch):**
+- `formula/engine.ts:183,326,329,332` — SUBSTITUTE + REGEX*; pattern = user
+  formula arg. Finding L1.
+- `multitable/field-validation-engine.ts:103` — `rule.params.regex` from the
+  uncapped `property.validation` blob; runs on record write / public form submit.
+  Finding L2. (Measured § 4.4.)
+
+**UNVERIFIED — pattern is config/query/author-derived, NOT swept as safe (owner-review):**
+- `data-adapters/RedisAdapter.ts:532` — `value.$regex` + `value.$options` flags
+  (Mongo-style query operator; potentially query-derived).
+- `services/ApprovalGraphExecutor.ts:729` — `new RegExp(pattern).test(...)`
+  (approval-graph condition; author-supplied).
+- `core/plugin-config-manager.ts:150`, `plugin/PluginConfigManager.ts:633` —
+  `validation.pattern` / `item.pattern` from plugin config.
+- `gateway/APIGateway.ts:640,939` — `rules.pattern` / `pattern` from gateway route
+  config.
+- `sandbox/SafeFunctions.ts:361` — `pattern` (sandbox).
+- `plugins/plugin-attendance/index.cjs:12490` — `new RegExp(pattern, 'i')`.
+- `apps/web/src/views/FormView.vue:650` — `validation.pattern` (FE mirror of L2;
+  single-session).
+
+**Verified safe (escaping present in source) / low-risk template:**
+- Escaped: `services/ApprovalProductService.ts:3166`,
+  `integration/messaging/message-bus.ts:331,334`,
+  `apps/web/.../approvalFormCommands.ts:405,414`, `.../conditionEdit.ts:324-342`,
+  `.../MetaCommentComposer.vue:349,378,422` (all use `escapeRegExp`/`escapeRegex`
+  or `.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')`).
+- Template over a fixed/enumerated token (function/api/element name):
+  `routes/univer-meta.ts:1588`, `sandbox/SecurityPolicy.ts:185,308`,
+  `messaging/pattern-trie.ts:267`, `workflow/bpmnCompilePreview.ts:289,290,315`.
+- Internal glob/placeholder, not a user-facing pattern: `core/EventBusService.ts:765`,
+  `services/CacheService.ts:210`, `sandbox/SandboxManager.ts:319`.
+- Test-only files (not production): `attendance/__tests__/w4c2-*`, `w4c3c-active-current.test.ts`,
+  `tests/audit-system.test.ts`.
+
+## 3. Instrument controls — 6/6 pass (what makes "flagged vs not" a conclusion, not a guess)
 
 `run-controls.cjs`:
 
@@ -67,9 +101,11 @@ The POS-1 pass on the **exact real precedent pattern** is the proof the classifi
 has discriminating power: without it, a zero-findings census would be
 indistinguishable from a broken extractor.
 
-## 4. The live finding — reproduced three ways on the real origin/main code
+## 4. The live findings — reproduced on the real origin/main code
 
-### 4.1 In-process, via the route's own method `MultitableFormulaEngine.dryRun`
+L1 (formula engine) in § 4.1–4.3; L2 (field-validation pattern rule) in § 4.4.
+
+### 4.1 (L1) In-process, via the route's own method `MultitableFormulaEngine.dryRun`
 (`probe-dryrun.ts`; the no-DB engine constructed exactly as `univer-meta.ts:452`).
 Each row also replays the route's three caps against the attack expression:
 
@@ -116,37 +152,74 @@ victim recovers to 3ms after the attack), one positive (catastrophic attacker
 blocks). This mirrors the precedent's evidence shape (victim GET blocked 15.01s)
 and is well past the finding's >1s threshold.
 
-## 5. The fix works — old implementation vs new, load-bearing assertions
+### 4.4 (L2) Field-validation pattern rule via the real `validateRecord`
+(`probe-validate.ts`; `validateRecord` called exactly as `univer-meta.ts:17526`,
+with rules shaped as `{type:'pattern', params:{regex}}` parsed from
+`property.validation`):
 
-`src/formula/__tests__/regex-safety.test.ts` — **7 tests pass in 4ms**
-(`vitest run … --config vitest.config.ts`, `CI=true`).
+| stored pattern rule | record value | time | result |
+|---|---|---|---|
+| `^[a-z]+$` (negative control) | 100k chars | 0.1ms | valid:true |
+| `^(a+)+$` | `a×24 + "!"` | 431ms | valid:false |
+| `^(a+)+$` | `a×28 + "!"` | 1274ms | valid:false |
+| `^(a+)+$` | `a×30 + "!"` | 5196ms | valid:false |
+| `^(a+)+$` | `a×32 + "!"` | **20545ms** | valid:false |
+
+The benign pattern on a 100k value is 0.1ms; the nested-quantifier pattern on a
+33-char value blocks 20.5s — the input source is the field's own uncapped
+`property.validation` (`univer-meta.ts:17519-17525`), the trigger is any record
+write / public form submit. NOTE (recorded): the first probe run used
+`params.pattern` and got 0ms/valid:true — the real dispatch reads `params.regex`
+(`field-validation-engine.ts:168-171`); corrected, the site fired. This is why the
+"all 47 safe" first-draft claim was false and why this finding was initially missed.
+
+## 5. The fixes work — old implementation vs new, load-bearing assertions
+
+`src/formula/__tests__/regex-safety.test.ts` — **9 tests pass** (7 formula + 2
+field-validation), plus the 87 pre-existing `tests/unit/formula-engine.test.ts` and
+77 pre-existing `tests/unit/field-validation{,-wiring}.test.ts` all still pass
+(`vitest run … --config vitest.config.ts`, `CI=true`) — **no regression**.
 
 - The POSITIVE tests assert the previously-catastrophic cases now return `#ERROR!`
-  in <200ms. **The old implementation measured 20368ms (dry-run) / 20655ms
-  (stored) on the identical n=32 case (§4.1/§4.2)** — so the `<200ms` bound is the
-  mutation proof: the pre-fix code fails it by 100×.
+  (L1) / fail validation fast (L2) in <200ms. **The old implementation measured
+  20368ms (L1 dry-run) / 20655ms (L1 stored) / 20545ms (L2 validateRecord) on the
+  identical n=32 case (§4.1/4.2/4.4)** — so the `<200ms` bound is the mutation
+  proof: the pre-fix code fails it by 100×.
 - LINEAR CONTROLS assert legitimate patterns still work: `REGEXMATCH("hello-world",
   "^[a-z-]+$")→true`, `REGEXREPLACE("a1b2c3","[0-9]","")→"abc"`,
   `REGEXEXTRACT("id=42","id=([0-9]+)")→"42"`, `SUBSTITUTE("2026-09-22","-","/")→
-  "2026/09/22"`.
+  "2026/09/22"`; L2: a benign `^[a-z]+$` rule still validates a 100k value in
+  <100ms, and an ordinary `^[0-9]+$`-vs-`"abc"` failure still reports invalid.
 - SUBSTITUTE correctness: `substituteLiteral("xa+y","a+","Z")→"xZy"` (arg-2 `a+`
-  treated literally; the old regex impl treated it as a quantifier).
+  treated literally; the old regex impl treated it as a quantifier). In-repo
+  SUBSTITUTE dependents (`grep -rn "SUBSTITUTE("`): one existing test + one docs
+  example, both use literal args and still pass — no dependency on the old regex
+  behaviour.
 - Detector unit cases: `hasNestedUnboundedQuantifier` true for `^(a+)+$`,
   `(?:x+)*`, `(\d+){2,}`; false for `^[a-z0-9-]+$`, `^\d{4}-\d{2}$`, and
   `[(+*)]+` (char-class contents not mistaken for a quantified group).
 
-`tsc --noEmit -p tsconfig.json` clean at both commit states (SUBSTITUTE-only and
-full).
+`tsc --noEmit -p tsconfig.json` clean at every commit state.
 
 ## 6. NOT RUN / limitations (explicit)
 
+- **The fix was NOT re-verified at victim latency (OOB).** The finding was proven
+  at victim latency (55s cross-tenant, § 4.3); the fix is proven only in-process
+  (§ 5, sub-ms return). The inference is sound — a sub-ms return means no CPU burn
+  means no event-loop block — but it is an inference, and the P1 criterion lives at
+  the victim request. Not re-run because the worktree was removed; the in-process
+  mutation evidence (20368ms → <200ms on the identical n=32) carries the argument.
+- **L2 cross-tenant HTTP proof** — NOT RUN. L2 was proven in-process only (§ 4.4,
+  20.5s). It shares L1's shared-event-loop mechanism, so the cross-tenant
+  consequence follows by the same argument as § 4.3, but the concurrent victim
+  measurement was not repeated for L2.
 - **Full application boot** against `metasheet2_h3_20260922` was NOT performed.
   The OOB proof used a focused real-Express harness that mounts the **real**
   `dryRun`/engine code and a real DB-backed victim route. The full auth/routing
   stack adds request latency but is **not part of the blocking mechanism** (a
   synchronous regex on the single-threaded event loop blocks regardless of what
   else is mounted). The one-shot DB is exercised by the victim's `SELECT 1`.
-- **Per-site cross-tenant HTTP proof for the 13 literal sites** — NOT RUN. They
+- **Per-site cross-tenant HTTP proof for the 14 flagged literal-shape sites** — NOT RUN. They
   were microbenchmarked only; reachability is traced or marked UNVERIFIED in the
   design table. No speculative fixes were shipped for UNVERIFIED-reachability
   sites (doctrine: dead-code defect ≠ live vulnerability).
@@ -165,5 +238,5 @@ full).
 
 ## 7. Reproduction artifacts (scratch, not committed)
 `extract.cjs`, `fuzz-one.cjs`, `runner.cjs`, `controls.cjs`, `run-controls.cjs`,
-`probe-formula.ts`, `probe-dryrun.ts`, `probe-stored.ts`, `oob-server.ts`,
+`probe-formula.ts`, `probe-dryrun.ts`, `probe-stored.ts`, `probe-validate.ts`, `oob-server.ts`,
 `oob-client.mjs`, plus `h3-sites.json` / `h3-fuzz.json` / `controls-result*.txt`.
