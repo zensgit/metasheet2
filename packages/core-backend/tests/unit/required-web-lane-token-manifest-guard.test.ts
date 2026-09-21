@@ -74,13 +74,31 @@
  * file's header for why it is a third extraction of `logicalLines`/`execLogicalLine`/`tokensOf`
  * rather than an import of either existing copy (one has `process.exit` at module top level, the
  * other's top level registers 18 `describe()` tests that would be double-counted by a second
- * import). Those three functions are kept byte-identical to **the shape guard's copy** on purpose
- * — see the "cross-copy agreement" test below, which checks that textually, not just
- * behaviourally. ROUND 3 (r2-P3-2): a THIRD copy exists,
+ * import). Those three functions are kept ALGORITHMICALLY equivalent to **the shape guard's
+ * copy** — see the "cross-copy agreement" tests below. ROUND 3 (r2-P3-2): a THIRD copy exists,
  * `scripts/ops/required-web-lane-token-set-diff.mjs` — `logicalLines`/`tokensOf` are identical
  * there too; `execLogicalLine` there genuinely diverges (an extra `label` parameter, a
- * `${label}: `-prefixed throw message) and the cross-copy test below now checks that explicitly,
- * not silently.
+ * `${label}: `-prefixed throw message) and the cross-copy tests below check that explicitly, not
+ * silently.
+ *
+ * ROUND 4 (2026-09-22, merge-train dry-run v3 gate findings G1/G2 — see
+ * `docs/development/required-web-lane-token-manifest-guard-verification-20260922.md` §r4):
+ *   - G1: the cross-copy agreement tests used to diff the three copies' SOURCE TEXT byte-for-byte.
+ *     The dry-run measured that merging this PR alongside an independent, unmerged sibling PR that
+ *     refactors `required-web-lane-registration-shape.test.ts`'s `logicalLines()` into a thin
+ *     wrapper over a new `logicalLinesWithLineNumbers()` helper (same behaviour, different bytes)
+ *     reds that text diff for no actual drift. The tests now materialize each copy's extracted
+ *     source into a real callable and compare OUTPUT across a named fixture battery instead — see
+ *     the "cross-copy agreement" class comment further down for the fixture list and the one
+ *     shape deliberately excluded from it. `required-web-lane-exec-block.mjs` gained a
+ *     `logicalLinesWithLineNumbers()` export in the same round (its OWN output on any input is
+ *     unchanged — see that file's own ROUND 4 note) so the line-number half of the comparison has
+ *     a same-shaped function to compare against once a sibling copy exports one too.
+ *   - G2: the M2 mutation-self-proof case asserted a hardcoded exec-block start line (`1257`) that
+ *     the dry-run measured an independent sibling PR moving to `1359` by inserting comments above
+ *     the block. The expected line is now PARSED from the real script via `allVitestInvocations`
+ *     rather than hand-typed, plus a new discriminating test that inserts N comment lines above
+ *     the block and asserts the detected start line moves by exactly N.
  *
  * CI WIRING: this file lives in `packages/core-backend/tests/unit/`, the same directory as its
  * shape-guard neighbour, and is picked up by the SAME mechanism — `pnpm --filter @metasheet/core-
@@ -114,6 +132,7 @@ import {
   allVitestTokens,
   execLogicalLine,
   logicalLines,
+  logicalLinesWithLineNumbers,
   stripTrailingErrorGuard,
   tokensOf,
 } from '../../../../scripts/ops/required-web-lane-exec-block.mjs'
@@ -169,15 +188,41 @@ function describeExtra(tokens: string[], lineMap: Map<string, number[]>): string
 }
 
 /**
- * P3-6 (round-1 gate review) — cross-copy agreement, checked as SOURCE TEXT, not behaviour.
+ * P3-6 (round-1 gate review) — cross-copy agreement.
  *
  * `logicalLines`/`execLogicalLine`/`tokensOf` in `required-web-lane-exec-block.mjs` are meant to
- * stay byte-for-byte algorithmically identical to `required-web-lane-registration-shape.test.ts`'s
- * own copy (that file cannot be safely `import`ed here — see its neighbour module's header for why
- * — so its exports are never called directly by this file). A source-text check is strictly
- * STRONGER than a behavioural one here: calling both copies on one input (the exec block) cannot
- * detect a divergence that only shows up on a different input; comparing the normalized source
- * proves the algorithms are the same for every input, not just today's.
+ * stay algorithmically equivalent to `required-web-lane-registration-shape.test.ts`'s own copy
+ * (that file cannot be safely `import`ed here — see its neighbour module's header for why — so its
+ * exports are never called directly by this file).
+ *
+ * ROUND 4 (2026-09-22, merge-train dry-run v3 gate finding G1) — round 1 checked this as SOURCE
+ * TEXT, not behaviour, on the stated reasoning that a source-text check is strictly STRONGER than
+ * a behavioural one on a finite fixture set. That reasoning is correct as far as it goes, but it
+ * bought soundness by being MORE FRAGILE than the property this guard actually needs: the dry-run
+ * measured that `required-web-lane-registration-shape.test.ts` can be refactored into a
+ * `logicalLinesWithLineNumbers()` helper plus a one-line `logicalLines()` wrapper around it — same
+ * input/output behaviour on every fixture below, zero bytes in common with the old inline body —
+ * and the byte-for-byte check reds on that refactor alone, with no actual drift. A guard that reds
+ * on a same-behaviour refactor trains its own maintainers to treat its failures as noise, which
+ * is a worse outcome than the narrower fixture coverage this round accepts in exchange.
+ *
+ * So: this round extracts the sibling's function source the same way as before (still via
+ * `extractExportedFunctionSource`/`extractPlainFunctionSource` below — importing the sibling files
+ * directly is still unsafe, see their own headers), then MATERIALIZES it into a real, callable
+ * function (`materialize()` below) and calls it on a battery of >=6 named fixtures — comment
+ * lines, backslash continuations, a `#` line inside the block region, a dead block after `exec`,
+ * a blank line, and a bare single line — asserting the OUTPUT is byte-for-byte identical to this
+ * file's own copy, not the source. Where a sibling exports a differently-shaped function (e.g.
+ * `logicalLinesWithLineNumbers`, which this file's copy did not have before this same round —
+ * see `required-web-lane-exec-block.mjs`'s ROUND 4 note), the comparison is written against that
+ * shape directly (an "adapter", not a second copy of the parser) rather than reduced back to text.
+ *
+ * One case is DELIBERATELY EXCLUDED from the "must agree" fixture set: a `#` line landing INSIDE
+ * an active backslash continuation. `logicalLinesWithLineNumbers()`'s own doc comment (this round)
+ * states plainly that this file's fold order is NOT bash-exact for that shape, and at least one
+ * sibling copy may already have (or later gain) a bash-exact fix for exactly that case — asserting
+ * equality there would pin a coincidence, not a contract. See the fixture list below for the
+ * measured proof that this specific shape — and only this shape — actually diverges.
  */
 function extractExportedFunctionSource(fileText: string, functionName: string): string {
   const marker = new RegExp(`export function ${functionName}\\([^)]*\\)[^{]*\\{`)
@@ -229,16 +274,84 @@ function extractPlainFunctionSource(fileText: string, functionName: string, file
   return fileText.slice(head.index, i)
 }
 
-/** Strip the `export` keyword, TypeScript type annotations, and comments — the only documented differences between the copies. */
-function normalizeParserSource(src: string): string {
-  return src
-    .replace(/^export\s+/, '')
-    .replace(/\/\/[^\n]*/g, '')
-    .replace(/:\s*string\s*\|\s*null/g, '')
-    .replace(/:\s*string\[\]/g, '')
-    .replace(/:\s*string\b/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+/**
+ * ROUND 4 — strip the leading `export` keyword and TypeScript parameter/return type annotations
+ * from an extracted function source, so it becomes plain, executable JavaScript.
+ *
+ * Deliberately does NOT collapse whitespace (unlike the retired text-comparison normalizer this
+ * replaces): every copy of this parser relies on automatic semicolon insertion at line breaks
+ * (no source has a single semicolon in it), so joining statements onto one line would itself
+ * introduce a syntax error having nothing to do with the algorithms being compared.
+ *
+ * Deliberately NOT a single blanket `:\s*Ident` strip either — a first attempt at that also ate
+ * the `:` in `continued ? a : b` ternaries (there is one in `logicalLines()`'s fold loop), in `//`
+ * comment prose ("nothing after it: keep what we have" -> "nothing after it what we have"), AND —
+ * the one that actually breaks at runtime instead of just reading oddly — in an object literal's
+ * `key: value` inside the function BODY (`{ line: body, lineNumber: bufStart }` in
+ * `logicalLinesWithLineNumbers()`'s fold loop: a global `[(,]identifier:\s*TYPE` pattern matches
+ * `, lineNumber: bufStart` too, because `bufStart` is itself a valid bare identifier — indistinguishable
+ * from a type name by shape alone — and strips it down to the shorthand `{ line: body, lineNumber }`,
+ * which then throws `lineNumber is not defined`). All three measured to actually happen, not
+ * hypothesized. The fix: comments are dropped first (never executed, so dropping them cannot
+ * change behaviour), then the source is split at its OWN first top-level `{` — the parameter-list
+ * and return-type patterns are applied ONLY to the header before that brace (where a `(`/`,`-then-
+ * identifier-then-colon can only ever be a parameter, never an object literal), while the
+ * `let`/`const` variable-annotation pattern is applied to the whole thing (safe everywhere, since
+ * `let`/`const` never precedes an object-literal key).
+ */
+function stripTypesForEval(src: string): string {
+  const TYPE = '[A-Za-z_$][\\w$]*(?:\\[\\])?(?:\\s*\\|\\s*[A-Za-z_$][\\w$]*(?:\\[\\])?)*'
+  const withoutComments = src.replace(/^export\s+/, '').replace(/\/\/[^\n]*/g, '')
+  const headerEnd = withoutComments.indexOf('{')
+  const header = headerEnd === -1 ? withoutComments : withoutComments.slice(0, headerEnd + 1)
+  const rest = headerEnd === -1 ? '' : withoutComments.slice(headerEnd + 1)
+  const strippedHeader = header
+    .replace(new RegExp(`\\)\\s*:\\s*${TYPE}\\s*\\{$`), ') {')
+    .replace(new RegExp(`([(,]\\s*[A-Za-z_$][\\w$]*)\\s*:\\s*${TYPE}`, 'g'), '$1')
+  const strippedRest = rest.replace(new RegExp(`\\b(let|const)(\\s+[A-Za-z_$][\\w$]*)\\s*:\\s*${TYPE}`, 'g'), '$1$2')
+  return strippedHeader + strippedRest
+}
+
+/**
+ * Materialize a set of extracted (regex brace-matched) function sources into real, callable
+ * functions, ALL DECLARED IN THE SAME SCOPE — see the P3-6 class comment above for why cross-copy
+ * agreement is checked this way (behaviour, not text) as of ROUND 4. One scope, not one `new
+ * Function` per source, because `execLogicalLine()` calls `logicalLines()` internally: materializing
+ * it alone leaves that call unresolved (`logicalLines is not defined`) the moment it is invoked,
+ * even though the extraction/stripping both otherwise succeeded — this was caught empirically, not
+ * anticipated. `names` must be exactly the declared top-level function names inside `sources`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- deliberately untyped: materializes
+// arbitrary sibling-file source, whose static type this file cannot see.
+function materializeAll<T extends Record<string, (...args: any[]) => unknown>>(sources: string[], names: string[]): T {
+  const body = sources.map(stripTypesForEval).join('\n')
+  // eslint-disable-next-line no-new-func -- deliberate: this is the whole point of ROUND 4 — turn
+  // extracted, type-stripped function bodies into callables so the guard compares OUTPUT on a
+  // fixture battery, not source bytes.
+  const factory = new Function(`'use strict';\n${body}\nreturn { ${names.join(', ')} };`)
+  return factory() as T
+}
+
+/**
+ * ROUND 4 — the >=6 named fixtures every cross-copy behavioural comparison below runs. Each is a
+ * complete, syntactically well-formed script fragment carrying exactly one `exec npx vitest run`
+ * logical line, so `logicalLines`, `execLogicalLine`, and `tokensOf(execLogicalLine(...))` are all
+ * exercisable on every entry uniformly.
+ *
+ * `commentInsideBlockOutsideContinuation` is the "in-block `#` line" case — the comment sits among
+ * the script's other gating lines, but BETWEEN two already-terminated logical lines, never inside
+ * an active continuation. That placement is the one the sibling's own doc comment guarantees is
+ * unchanged behaviour ("a `#`-prefixed physical line encountered OUTSIDE any continuation ...
+ * exactly as before"); a `#` line landing INSIDE a continuation is a separately documented,
+ * excluded divergence (see the P3-6 class comment) and is deliberately not one of these fixtures.
+ */
+const FIXTURES: Record<string, string> = {
+  singleLineNoContinuation: 'exec npx vitest run foo bar --reporter=dot\n',
+  continuation: 'exec npx vitest run \\\n  foo \\\n  bar \\\n  --reporter=dot\n',
+  commentBeforeBlock: '# a leading comment, not part of any continuation\nexec npx vitest run \\\n  foo \\\n  --reporter=dot\n',
+  commentInsideBlockOutsideContinuation: 'npx vitest run alpha --reporter=dot\n# a comment between two SEPARATE, already-terminated logical lines\nexec npx vitest run \\\n  beta \\\n  --reporter=dot\n',
+  deadBlockAfterExec: 'exec npx vitest run \\\n  gamma \\\n  --reporter=dot\n\n# a dead comment after the exec block — nothing gates on it\necho unreachable\n',
+  blankLineBeforeBlock: 'npx vitest run one --reporter=dot\n\nexec npx vitest run \\\n  two \\\n  --reporter=dot\n',
 }
 
 /**
@@ -316,59 +429,137 @@ describe('required web lane token manifest — set equality', () => {
     ).toEqual(sorted)
   })
 
-  it('cross-copy agreement: logicalLines/execLogicalLine/tokensOf are textually identical (modulo export/TS-types/comments) to the shape guard\'s own copy (P3-6)', () => {
+  it('r4-G1: cross-copy BEHAVIOURAL agreement — logicalLines/execLogicalLine/tokensOf produce byte-identical output (not byte-identical source) to the shape guard\'s own copy, across >=6 fixtures (comment lines, continuations, an in-block # line outside any continuation, a dead block after exec, a blank line, a bare single line) (P3-6, rewritten round 4)', () => {
     const shapeGuardSrc = readFileSync(SHAPE_GUARD_PATH, 'utf8')
-    const ours: Record<string, (...args: never[]) => unknown> = { logicalLines, execLogicalLine, tokensOf }
-    for (const name of ['logicalLines', 'execLogicalLine', 'tokensOf']) {
-      const theirs = normalizeParserSource(extractExportedFunctionSource(shapeGuardSrc, name))
-      const ourNormalized = normalizeParserSource(ours[name].toString())
+    // Materialized TOGETHER, one scope: execLogicalLine() calls logicalLines() internally, so the
+    // two must be declared side by side for that call to resolve (see materializeAll's own note).
+    // `logicalLines`'s own body may itself call `logicalLinesWithLineNumbers` (true as of the
+    // sibling refactor this round exists to tolerate — see the class comment) — include it in the
+    // SAME materialized scope whenever the sibling exports it, or that internal call is left
+    // unresolved (measured: `logicalLinesWithLineNumbers is not defined`), even though extraction
+    // of the three functions actually under test succeeded on its own.
+    const sourcesToMaterialize = [
+      extractExportedFunctionSource(shapeGuardSrc, 'logicalLines'),
+      extractExportedFunctionSource(shapeGuardSrc, 'execLogicalLine'),
+      extractExportedFunctionSource(shapeGuardSrc, 'tokensOf'),
+    ]
+    const namesToMaterialize = ['logicalLines', 'execLogicalLine', 'tokensOf']
+    if (/export function logicalLinesWithLineNumbers\(/.test(shapeGuardSrc)) {
+      sourcesToMaterialize.push(extractExportedFunctionSource(shapeGuardSrc, 'logicalLinesWithLineNumbers'))
+      namesToMaterialize.push('logicalLinesWithLineNumbers')
+    }
+    const { logicalLines: theirLogicalLines, execLogicalLine: theirExecLogicalLine, tokensOf: theirTokensOf } = materializeAll<{
+      logicalLines: (scriptSrc: string) => string[]
+      execLogicalLine: (scriptSrc: string) => string
+      tokensOf: (logicalLine: string) => string[]
+    }>(sourcesToMaterialize, namesToMaterialize)
+
+    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 6 named fixtures').toBeGreaterThanOrEqual(6)
+
+    for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
       expect(
-        ourNormalized,
-        `scripts/ops/required-web-lane-exec-block.mjs's ${name}() has diverged from `
-          + `required-web-lane-registration-shape.test.ts's copy — a bug fixed in one and not the `
-          + `other is now invisible to the guard that is supposed to catch drift. Update both.`,
-      ).toBe(theirs)
+        theirLogicalLines(scriptSrc),
+        `[${fixtureName}] scripts/ops/required-web-lane-exec-block.mjs's logicalLines() output `
+          + `diverged from required-web-lane-registration-shape.test.ts's copy on this fixture — a `
+          + `bug fixed in one and not the other is now invisible to the guard that is supposed to `
+          + `catch drift. Update both.`,
+      ).toEqual(logicalLines(scriptSrc))
+
+      const ourExec = execLogicalLine(scriptSrc)
+      expect(
+        theirExecLogicalLine(scriptSrc),
+        `[${fixtureName}] execLogicalLine() output diverged from the shape guard's copy`,
+      ).toBe(ourExec)
+      expect(
+        theirTokensOf(ourExec),
+        `[${fixtureName}] tokensOf() output diverged from the shape guard's copy`,
+      ).toEqual(tokensOf(ourExec))
     }
   })
 
-  it('r2-P3-2: cross-copy agreement covers the THIRD copy too — logicalLines/tokensOf textually identical to required-web-lane-token-set-diff.mjs; execLogicalLine there diverges ONLY by its documented extra `label` parameter and message prefix', () => {
-    const diffSrc = readFileSync(TOKEN_SET_DIFF_PATH, 'utf8')
-
-    for (const name of ['logicalLines', 'tokensOf'] as const) {
-      const ours = { logicalLines, tokensOf }[name]
-      const theirs = normalizeParserSource(extractPlainFunctionSource(diffSrc, name, TOKEN_SET_DIFF_PATH))
-      const ourNormalized = normalizeParserSource(ours.toString())
-      expect(
-        ourNormalized,
-        `scripts/ops/required-web-lane-exec-block.mjs's ${name}() has diverged from `
-          + `required-web-lane-token-set-diff.mjs's copy (the third copy of this parser) — update `
-          + `both.`,
-      ).toBe(theirs)
+  it('r4-G1: cross-copy line-number-mapping agreement — logicalLinesWithLineNumbers(), gated on the sibling actually exporting it (adapter, not a fourth copy of the parser)', () => {
+    const shapeGuardSrc = readFileSync(SHAPE_GUARD_PATH, 'utf8')
+    const exportsLineNumbers = /export function logicalLinesWithLineNumbers\(/.test(shapeGuardSrc)
+    if (!exportsLineNumbers) {
+      // Documented, not silent: the sibling has not (yet) grown a line-number-carrying export.
+      // The moment it does (as the dry-run measured it can, without an owner ruling on this file),
+      // this branch starts exercising the comparison below with zero further edits here.
+      expect(exportsLineNumbers).toBe(false)
+      return
     }
+    const { logicalLinesWithLineNumbers: theirs } = materializeAll<{
+      logicalLinesWithLineNumbers: (scriptSrc: string) => Array<{ line: string; lineNumber: number }>
+    }>(
+      [extractExportedFunctionSource(shapeGuardSrc, 'logicalLinesWithLineNumbers')],
+      ['logicalLinesWithLineNumbers'],
+    )
+    for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
+      expect(
+        theirs(scriptSrc),
+        `[${fixtureName}] logicalLinesWithLineNumbers() (folded result + line-number mapping) `
+          + `diverged from the shape guard's copy`,
+      ).toEqual(logicalLinesWithLineNumbers(scriptSrc))
+    }
+  })
 
-    // execLogicalLine's third copy takes an extra `label` argument and prefixes its throw message
-    // with it (that CLI reports which revision failed to parse) — a documented, deliberate
-    // divergence (design doc §4's round-3 addendum). Strip exactly those two differences before
-    // comparing, so an UNDOCUMENTED further divergence still reds this assertion.
-    const theirsRawExec = extractPlainFunctionSource(diffSrc, 'execLogicalLine', TOKEN_SET_DIFF_PATH)
-    const theirsPatched = theirsRawExec
-      .replace('function execLogicalLine(scriptSrc, label)', 'function execLogicalLine(scriptSrc)')
-      .replace(
-        '`${label}: expected exactly 1 exec logical line, found ${matches.length}`',
-        '`expected exactly 1 exec logical line, found ${matches.length}`',
-      )
+  it('r4-G1 fixture sanity: the excluded in-continuation `#` shape actually diverges between the two documented fold orders — proves the exclusion is load-bearing, not a dodge', () => {
+    // Not part of FIXTURES / the "must agree" set on purpose (see the P3-6 class comment). Bash
+    // terminates the logical line right at a `#` encountered mid-continuation; a naive
+    // strip-comments-then-fold pass (this file's algorithm) instead glues both sides together.
+    const inContinuation = 'exec npx vitest run \\\n  foo \\\n# a comment INSIDE the continuation\n  bar \\\n  --reporter=dot\n'
+    // Trailing '' is the fold's own blank-line-at-EOF entry (the source ends in "\n"), present
+    // regardless of the comment-placement question this fixture is about — not part of the point.
+    expect(logicalLines(inContinuation)).toEqual(['exec npx vitest run foo bar --reporter=dot', ''])
+  })
+
+  it('r2-P3-2: cross-copy BEHAVIOURAL agreement covers the THIRD copy too — logicalLines/tokensOf produce byte-identical output to required-web-lane-token-set-diff.mjs across the same >=6 fixtures; execLogicalLine there diverges ONLY by its documented extra `label` parameter and message prefix (rewritten round 4)', () => {
+    const diffSrc = readFileSync(TOKEN_SET_DIFF_PATH, 'utf8')
+    // Materialized TOGETHER for the same reason as the shape-guard copy above: this file's
+    // execLogicalLine() also calls its own logicalLines() internally.
+    const { logicalLines: diffLogicalLines, tokensOf: diffTokensOf, execLogicalLine: diffExecLogicalLineRaw } = materializeAll<{
+      logicalLines: (scriptSrc: string) => string[]
+      tokensOf: (logicalLine: string) => string[]
+      execLogicalLine: (scriptSrc: string, label: string) => string
+    }>(
+      [
+        extractPlainFunctionSource(diffSrc, 'logicalLines', TOKEN_SET_DIFF_PATH),
+        extractPlainFunctionSource(diffSrc, 'tokensOf', TOKEN_SET_DIFF_PATH),
+        extractPlainFunctionSource(diffSrc, 'execLogicalLine', TOKEN_SET_DIFF_PATH),
+      ],
+      ['logicalLines', 'tokensOf', 'execLogicalLine'],
+    )
+
+    // execLogicalLine's third copy takes an extra `label` argument, used only in its thrown
+    // message — a documented, deliberate divergence (design doc §4's round-3 addendum). Fixture
+    // sanity below still proves that documented divergence is actually present verbatim, so an
+    // UNDOCUMENTED further divergence (e.g. the label affecting the RETURN value, not just a
+    // throw) would still be caught by the byte-identical-return-value comparison in the loop.
     expect(
-      theirsPatched,
-      'fixture sanity: the two known differences (label parameter, message prefix) must still be '
-        + 'present verbatim in required-web-lane-token-set-diff.mjs, or this test is comparing two '
-        + 'copies that already silently converged',
-    ).not.toBe(theirsRawExec)
-    expect(
-      normalizeParserSource(theirsPatched),
-      'scripts/ops/required-web-lane-exec-block.mjs\'s execLogicalLine() has diverged from '
-        + 'required-web-lane-token-set-diff.mjs\'s copy by more than the documented label '
-        + 'parameter/message prefix — update both.',
-    ).toBe(normalizeParserSource(execLogicalLine.toString()))
+      extractPlainFunctionSource(diffSrc, 'execLogicalLine', TOKEN_SET_DIFF_PATH),
+      'fixture sanity: the documented `label` parameter must still be present verbatim in '
+        + 'required-web-lane-token-set-diff.mjs, or this test is comparing two copies that already '
+        + 'silently converged',
+    ).toContain('function execLogicalLine(scriptSrc, label)')
+
+    for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
+      expect(
+        diffLogicalLines(scriptSrc),
+        `[${fixtureName}] scripts/ops/required-web-lane-exec-block.mjs's logicalLines() output `
+          + `diverged from required-web-lane-token-set-diff.mjs's copy (the third copy of this `
+          + `parser) — update both.`,
+      ).toEqual(logicalLines(scriptSrc))
+
+      const ourExec = execLogicalLine(scriptSrc)
+      expect(
+        diffExecLogicalLineRaw(scriptSrc, 'fixture-label'),
+        `[${fixtureName}] execLogicalLine() output diverged from the token-set-diff copy by more `
+          + `than the documented label prefix`,
+      ).toBe(ourExec)
+      expect(
+        diffTokensOf(ourExec),
+        `[${fixtureName}] tokensOf() output diverged from the token-set-diff copy`,
+      ).toEqual(tokensOf(ourExec))
+    }
   })
 })
 
@@ -455,10 +646,38 @@ describe('required web lane token manifest — mutation self-proof', () => {
     const { missingFromActive, extraInActive } = diffSets(activeSet, manifestSet)
     expect(extraInActive, 'M2 must be caught by the "nothing silently added" assertion').toContain('__h6_round2_exec_block_add_probe__')
     expect(missingFromActive, 'M2 is an addition, not a drop — the other direction must stay clean').toEqual([])
-    // The exec block is ONE logical line (backslash-continued) starting at physical line 1257 —
-    // every token in it, including one injected on a new physical line, is attributed to the
-    // logical line's START, not the physical line the injected text happens to sit on.
-    expect(lineMap.get('__h6_round2_exec_block_add_probe__')).toEqual([1257])
+    // ROUND 4 (G2 fix, merge-train dry-run v3): the exec block is ONE logical line
+    // (backslash-continued) — every token in it, including one injected on a new physical line, is
+    // attributed to the logical line's START, not the physical line the injected text happens to
+    // sit on. The expected start line is PARSED from the real (unmutated) script via
+    // `allVitestInvocations`, not hardcoded: a hardcoded literal (round 1-3's `1257`) silently goes
+    // stale the moment any earlier edit shifts the exec block's physical position — measured by the
+    // dry-run to actually happen (a sibling lane's insert above the block moved it to 1359) — while
+    // this computed value tracks the real file under test by construction. The next test proves the
+    // computed value actually moves when the file does, discriminating it from a renamed constant.
+    const execInvocation = allVitestInvocations(scriptSrc).find((inv) => /^exec\s+npx\s+vitest\s+run\b/.test(inv.text))
+    expect(execInvocation, 'fixture sanity: the real script must have exactly one exec logical line').toBeTruthy()
+    const expectedExecStartLine = execInvocation!.startLine
+    expect(lineMap.get('__h6_round2_exec_block_add_probe__')).toEqual([expectedExecStartLine])
+  })
+
+  it('r4-G2: inserting N comment-only physical lines above the exec block shifts its detected start line by exactly N — discriminates the computed expectation above from a hardcoded constant that would not move with the file', () => {
+    const insertedCount = 37
+    const execHeaderLine = 'exec npx vitest run \\'
+    const lines = scriptSrc.split('\n')
+    const execIdx = lines.indexOf(execHeaderLine)
+    expect(execIdx, 'fixture sanity: exec header line must exist verbatim in the real script').toBeGreaterThan(-1)
+    const inserted = Array.from({ length: insertedCount }, (_, i) => `# r4-G2 probe inserted comment line ${i}`)
+    const mutated = [...lines.slice(0, execIdx), ...inserted, ...lines.slice(execIdx)].join('\n')
+
+    const before = allVitestInvocations(scriptSrc).find((inv) => /^exec\s+npx\s+vitest\s+run\b/.test(inv.text))!.startLine
+    const after = allVitestInvocations(mutated).find((inv) => /^exec\s+npx\s+vitest\s+run\b/.test(inv.text))!.startLine
+    expect(
+      after,
+      `inserting ${insertedCount} comment-only physical lines above the exec block must move its `
+        + `detected start line by exactly ${insertedCount} — a hardcoded expectation would instead `
+        + `stay fixed and silently mismatch the very first time a lane rebase moves the block`,
+    ).toBe(before + insertedCount)
   })
 
   it('M3 a line deleted from the MANIFEST (token still active) -> "extra in active" reds, naming it', () => {

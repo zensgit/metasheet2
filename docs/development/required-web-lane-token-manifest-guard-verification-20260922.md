@@ -18,6 +18,9 @@
   canonical checkout (root, `apps/web`, `packages/core-backend`, `plugins/*`).
 - Node `v25.9.0`, `vitest/1.6.1`, `pnpm` via the repo's own toolchain (no reinstall needed —
   symlinked `node_modules`).
+- **Round 4** (2026-09-22, same day): merge-train dry-run v3 gate findings G1/G2 — see §8 below and
+  design doc §11 for root cause/fix. Round-3 head (superseded by this round's commit):
+  `4d196c3d3ddc9bbcc723d7689cc134513d8dcf30`.
 - **NOT RUN**: real GitHub Actions CI. Everything below is a local reproduction of what the `test`
   job would run (same `pnpm --filter @metasheet/core-backend test` invocation, same
   `vitest.config.ts`, `CI=true` set to match the retry semantics that config reads — see
@@ -365,3 +368,96 @@ $ cd packages/core-backend && CI=true npx vitest run required-web-lane --reporte
  Test Files  2 passed (2)
       Tests  43 passed (43)
 ```
+
+## 8. Round 4 (2026-09-22) — G1/G2 repro + fix, on both the standalone branch and the merge-train dry-run overlay
+
+Design doc §11 has the root-cause narrative; this section is measured numbers and commands only.
+
+### 8a. Repro — `refs/dryrun/mtv3-final` (main + 17 lanes incl. #5898, unmodified), one-off worktree
+
+```
+$ git -C /Users/chouhua/Downloads/Github/metasheet2 worktree add <scratch>/h6-r4-dryrun refs/dryrun/mtv3-final --detach
+HEAD is now at a93bea106 Merge commit '2a16ae841338af4c7dfc630d3be984f826494c47' into HEAD
+$ cd <scratch>/h6-r4-dryrun/packages/core-backend
+$ CI=true npx vitest run tests/unit/required-web-lane-token-manifest-guard.test.ts \
+    --pool=forks --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=3
+```
+Two reds, both quoted verbatim from the run:
+```
+✗ cross-copy agreement: logicalLines/execLogicalLine/tokensOf are textually identical … (P3-6)
+  AssertionError: … has diverged from required-web-lane-registration-shape.test.ts's copy …
+  expected 'function logicalLines(scriptSrc) { co…' to be 'function logicalLines(scriptSrc) { re…'
+
+✗ M2 a token added to the FINAL EXEC BLOCK …
+  AssertionError: expected [ 1359 ] to deeply equal [ 1257 ]
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 23 passed (25)
+```
+Matches the dry-run report's §2 gate-2 row and §4 G1/G2 exactly (2 failed / 23 passed of 25).
+
+### 8b. Fix applied on the PR branch (round-4 head), standalone
+
+```
+$ cd <scratch>/h6-r4-pr/packages/core-backend
+$ CI=true npx vitest run tests/unit/required-web-lane-token-manifest-guard.test.ts \
+    --pool=forks --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=3
+ Test Files  1 passed (1)
+      Tests  28 passed (28)
+```
+28 (was 25): +3 net — `r4-G1` (behavioural cross-copy, replaces the old P3-6), `r4-G1`
+(line-number-mapping, new), `r4-G1 fixture sanity` (in-continuation-`#` divergence proof, new),
+`r2-P3-2` (behavioural, replaces the old text form), `r4-G2` (insert-N-comments, new) — net of the
+2 old text-comparison tests removed.
+
+Full suite:
+```
+$ CI=true npx vitest run required-web-lane --reporter=dot
+ ✓ tests/unit/required-web-lane-token-manifest-guard.test.ts (28 tests)
+ ✓ tests/unit/required-web-lane-registration-shape.test.ts (18 tests)
+ Test Files  2 passed (2)
+      Tests  46 passed (46)
+```
+(was 43 in §7g; +3, matching the manifest guard's own +3 above — the shape guard's own 18 are
+untouched by this round).
+
+### 8c. Fix overlaid onto `refs/dryrun/mtv3-final`, cp-only, one-off worktree, never committed there
+
+```
+$ cp <scratch>/h6-r4-pr/packages/core-backend/tests/unit/required-web-lane-token-manifest-guard.test.ts \
+     <scratch>/h6-r4-dryrun/packages/core-backend/tests/unit/required-web-lane-token-manifest-guard.test.ts
+$ cp <scratch>/h6-r4-pr/scripts/ops/required-web-lane-exec-block.mjs \
+     <scratch>/h6-r4-dryrun/scripts/ops/required-web-lane-exec-block.mjs
+$ cd <scratch>/h6-r4-dryrun/packages/core-backend
+$ CI=true npx vitest run tests/unit/required-web-lane-token-manifest-guard.test.ts \
+    --pool=forks --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=3
+ Test Files  1 passed (1)
+      Tests  28 passed (28)
+```
+Both G1 (now comparing #5898's ACTUAL `logicalLinesWithLineNumbers()`-backed `logicalLines()`
+wrapper by behaviour, including the line-number-mapping half — the sibling exports it on this
+tree, so that test's feature-detection branch is live, not skipped, here) and G2 red assertions are
+green on the tree they were measured red on. The `<scratch>/h6-r4-dryrun` worktree was `git
+worktree remove`d afterward without committing or pushing anything from it; `refs/dryrun/mtv3-final`
+itself was never written to.
+
+### 8d. Type-check and duplicate-commit sweep
+
+```
+$ cd <scratch>/h6-r4-pr/packages/core-backend && npx tsc --noEmit
+(no output, exit 0)
+```
+(the package's own `tsconfig.json` excludes `**/*.test.ts`, so this is the same scope CI's `pnpm
+type-check` step actually covers — it was 0 before this round too). The new test-file code itself
+was additionally checked standalone with the project's own `strict: false`/ES2022/node+vitest-globals
+settings (module widened to ESNext only because this file's `import.meta.url` usage requires it —
+unrelated to the round-4 diff): 0 errors.
+```
+$ git cherry origin/main
++ 4e5e0a5fe90f4c7068da19093f5a00b2a62f9e85
++ d8e25a044b0530df148abf11c4e20ee1f5390957
++ 905aac7e7e7535fb1ffb0e0fbdc885dc2e7015aa
++ 4d196c3d3ddc9bbcc723d7689cc134513d8dcf30
++ <round-4 commit>
+```
+All `+` (no `-`), before and after the round-4 commit — no duplicate-of-main commits introduced.
