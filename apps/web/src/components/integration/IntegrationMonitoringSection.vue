@@ -611,7 +611,7 @@ defineProps<{
 
 .integration-workbench__run-detail-poll-status {
   font-size: 12px;
-  color: var(--ms-text-secondary, #6b7280);
+  color: var(--ms-text-3);
 }
 
 .integration-workbench__run-detail-body {
