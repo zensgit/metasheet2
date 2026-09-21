@@ -76,6 +76,83 @@ function buildRows() {
 const ROWS = Object.freeze(buildRows().map((row) => Object.freeze(row)))
 const ROW_COUNT = ROWS.length
 
+// ── v2：第二批次的同一张表 ───────────────────────────────────────────────────────────────────
+// 场景 B 的第 3 步是「对账」。对账引擎（lib/stock-preparation-snapshot-diff.cjs 的
+// planBomSnapshotDiff）把两个快照批次按 pathKey 配对，分类成 changed / added / removed /
+// unchanged。v1 的 54 行只能证「第一次同步」（全部 added）；要真正跑一次对账，需要一份**只差
+// 四处**的 v2。
+//
+// 四类变更各一条，刻意各自只触发一种 changeType（除去必然伴随的 source_fingerprint_changed）：
+//   ① 改数量     —— 只动 qty        -> changed / quantity_changed
+//   ② 物料替换   —— 只动 part_no    -> changed / component_code_changed
+//   ③ 新增子件   —— 多一行          -> added
+//   ④ 删除子件   —— 少一行          -> removed
+// 其余 51 行逐字段不变 -> unchanged。
+//
+// ② 为什么**保持 path_key 不变**：这是「原位替换」和「删一行再加一行」的分界。diff 引擎的
+// path_key 是**位置地址**（某个父件下的某个装配位），childDrawingNo 是「这个位置上装的是哪个
+// 件」；引擎正是靠「同一 path_key 上 childDrawingNo 变了」把原位物料替换认出来
+// （stock-preparation-snapshot-diff.cjs:222-228 的 component_code_changed）。若让 path_key 跟着
+// part_no 走，同一件事会被报成 removed+added，component_code_changed 这一类就永远走不到。
+// v1 的 path_key 由 part_no 拼出来只是生成方便；v2 这一行把两者解耦，正是为了钉住这个语义。
+const V2_QTY_DELTA = 100
+const V2_QTY_CHANGED_PATH_KEY = `/${ROOT_PART_NO}/${subassemblyNo(1)}/${partNo(1, 3)}`
+const V2_SUBSTITUTED_PATH_KEY = `/${ROOT_PART_NO}/${subassemblyNo(2)}/${partNo(2, 5)}`
+const V2_SUBSTITUTED_FROM_PART_NO = partNo(2, 5)
+const V2_SUBSTITUTED_TO_PART_NO = `${partNo(2, 5)}R`
+const V2_REMOVED_PATH_KEY = `/${ROOT_PART_NO}/${subassemblyNo(4)}/${partNo(4, 8)}`
+const V2_ADDED_PART_NO = partNo(6, 9)
+const V2_ADDED_PATH_KEY = `/${ROOT_PART_NO}/${subassemblyNo(6)}/${V2_ADDED_PART_NO}`
+
+function buildRowsV2() {
+  const rows = []
+  for (const row of ROWS) {
+    if (row.path_key === V2_REMOVED_PATH_KEY) continue
+    if (row.path_key === V2_QTY_CHANGED_PATH_KEY) {
+      rows.push({ ...row, qty: row.qty + V2_QTY_DELTA })
+      continue
+    }
+    if (row.path_key === V2_SUBSTITUTED_PATH_KEY) {
+      // 位置（path_key / parent_no / line_no）与版本、数量、单位全部不动，只换掉装在这个位置上
+      // 的件号与件名 —— 这就是原位物料替换。
+      rows.push({ ...row, part_no: V2_SUBSTITUTED_TO_PART_NO, part_name: '合成替换件 2-5' })
+      continue
+    }
+    rows.push({ ...row })
+  }
+  // 新增子件：第 6 个分总成下的第 9 个零件。件号/版本与被删掉的那一行都不同，所以引擎的
+  // identity 配对（childDrawingNo|childVersion，:167-172）不会把 removed 和 added 误配成一次移动。
+  rows.push({
+    line_no: ROW_COUNT + 1,
+    project_no: PROJECT_NO,
+    parent_no: subassemblyNo(6),
+    part_no: V2_ADDED_PART_NO,
+    part_name: '合成新增零件 6-9',
+    qty: 2 + ((6 * 9) % 7),
+    uom: UNITS[(6 + 9) % UNITS.length],
+    rev: `B${9 % 4}`,
+    level_no: 2,
+    path_key: V2_ADDED_PATH_KEY,
+  })
+  return rows
+}
+
+const ROWS_V2 = Object.freeze(buildRowsV2().map((row) => Object.freeze(row)))
+const ROW_COUNT_V2 = ROWS_V2.length
+
+// 两批次配对后的期望分布（测试与文档共用同一份算术，避免两处各写一个数）：
+//   v1 54 个 path_key，其中 1 个在 v2 消失 -> 53 对被 path 配上；
+//   53 对里 2 对有变更（①②），51 对逐字段相等 -> unchanged；
+//   再加 v2 独有的 1 行 added 与 v1 独有的 1 行 removed -> 共 55 条 diff。
+const V2_EXPECTED_DIFF = Object.freeze({
+  changedQuantity: 1,
+  changedComponentCode: 1,
+  added: 1,
+  removed: 1,
+  unchanged: ROW_COUNT - 1 - 2,
+  total: (ROW_COUNT - 1) + 1 + 1,
+})
+
 // 已批准只读读取配置的字段映射。
 //   source 一侧 = 合成表的列名（PG 不带引号建表 -> 全部折叠成小写，适配器把行原样交给
 //                 read-source-read-runtime 的 mapRecord，所以这里必须写小写）。
@@ -154,8 +231,47 @@ function schemaSql() {
   ].join('\n')
 }
 
+const SEED_COLUMNS = 'line_no, project_no, parent_no, part_no, part_name, qty, uom, rev, level_no, path_key'
+
+function seedValues(rows) {
+  return rows.map((row) => `  (${[
+    row.line_no,
+    row.project_no,
+    row.parent_no,
+    row.part_no,
+    row.part_name,
+    row.qty,
+    row.uom,
+    row.rev,
+    row.level_no,
+    row.path_key,
+  ].map(sqlLiteral).join(', ')})`)
+}
+
+// v2 种子：同一张表、同一套列，换成 ROWS_V2 的内容。演练顺序是
+//   01-schema.sql -> 02-seed.sql -> （跑第 1 次源运行，落批次 1）-> 03-seed-v2.sql -> （跑第 2 次，落批次 2）
+// 两次源运行之间只有这张表的内容变了，备料侧的配置一个字都没动 —— 这正是「对账」要证的事。
+function seedSqlV2() {
+  return [
+    ...SQL_HEADER,
+    '-- v2（第二批次）：把 02-seed.sql 灌进去的那 54 行整体替换成 v2 的 54 行。',
+    `-- 相对 v1 只有四处不同：1 行改数量、1 行原位物料替换（path_key 不变、件号变）、1 行新增、1 行删除。`,
+    '',
+    `DELETE FROM ${TABLE_NAME};`,
+    '',
+    `INSERT INTO ${TABLE_NAME} (${SEED_COLUMNS}) VALUES`,
+    `${seedValues(ROWS_V2).join(',\n')};`,
+    '',
+    `-- PASS: DELETE ${ROW_COUNT} 之后 INSERT 0 ${ROW_COUNT_V2}`,
+    `-- SELECT count(*) FROM ${TABLE_NAME};                 -- ${ROW_COUNT_V2}`,
+    `-- SELECT count(*) FROM ${TABLE_NAME} WHERE level_no = 1; -- ${SUBASSEMBLY_COUNT}`,
+    `-- SELECT count(*) FROM ${TABLE_NAME} WHERE level_no = 2; -- ${ROW_COUNT_V2 - SUBASSEMBLY_COUNT}`,
+    '',
+  ].join('\n')
+}
+
 function seedSql() {
-  const columns = 'line_no, project_no, parent_no, part_no, part_name, qty, uom, rev, level_no, path_key'
+  const columns = SEED_COLUMNS
   const values = ROWS.map((row) => `  (${[
     row.line_no,
     row.project_no,
@@ -189,10 +305,22 @@ module.exports = {
   PROJECT_NO,
   ROOT_PART_NO,
   ROWS,
+  ROWS_V2,
   ROW_COUNT,
+  ROW_COUNT_V2,
   SUBASSEMBLY_COUNT,
   TABLE_NAME,
+  V2_ADDED_PART_NO,
+  V2_ADDED_PATH_KEY,
+  V2_EXPECTED_DIFF,
+  V2_QTY_CHANGED_PATH_KEY,
+  V2_QTY_DELTA,
+  V2_REMOVED_PATH_KEY,
+  V2_SUBSTITUTED_FROM_PART_NO,
+  V2_SUBSTITUTED_PATH_KEY,
+  V2_SUBSTITUTED_TO_PART_NO,
   readSourceConfig,
   schemaSql,
   seedSql,
+  seedSqlV2,
 }
