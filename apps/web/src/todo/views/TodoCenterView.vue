@@ -235,17 +235,27 @@ function isSameOriginRelativeHref(href: string): boolean {
  * branches on `isZh` for every other string.
  */
 function formatItemTimestamp(value: string, locale: string): string {
+  // Defensive against a future source violating its own `updatedAt: string` (non-optional) type at
+  // runtime: `new Date(undefined)` is NOT NaN-as-a-date-parse-failure, it IS an Invalid Date, but
+  // `Number.isNaN(...getTime())` still catches it — so `undefined`/`null` fall into the SAME
+  // pass-through branch as an unparseable string rather than rendering "Invalid Date" (the same
+  // failure mode `detailField.ts`'s `formatDisplayDate` guards against). Rendered as '' rather than
+  // the literal word "undefined" so a missing value degrades to "no timestamp shown" instead of a
+  // visibly broken string.
+  if (value === undefined || value === null) return ''
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(locale)
 }
 
 function updatedAtLabel(value: string): string {
   const stamp = formatItemTimestamp(value, isZh.value ? 'zh-CN' : 'en-US')
+  if (stamp === '') return ''
   return isZh.value ? `更新于 ${stamp}` : `Updated ${stamp}`
 }
 
 function dueAtLabel(value: string): string {
   const stamp = formatItemTimestamp(value, isZh.value ? 'zh-CN' : 'en-US')
+  if (stamp === '') return ''
   return isZh.value ? `截止 ${stamp}` : `Due ${stamp}`
 }
 

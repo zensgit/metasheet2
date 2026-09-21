@@ -60,11 +60,11 @@
 
 | 文件 | 结果 | 说明 |
 |---|---|---|
-| `apps/web/tests/TodoCenterView.spec.ts` | **14/14 PASS**（原 9 条 + 本轮新增 5 条） | 见 §1.1 明细 |
+| `apps/web/tests/TodoCenterView.spec.ts` | **15/15 PASS**（原 9 条 + 本轮新增 6 条） | 见 §1.1 明细 |
 | `apps/web/tests/attendance-web-guard-workflow.spec.ts` | **27/27 PASS** | prompt 点名的必绿项 |
 | `packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts` | **18/18 PASS** | prompt 点名的必绿项；见 §2 |
 
-### 1.1 本轮新增的 5 条用例（file:line 见下）及其 mutation 结果
+### 1.1 本轮新增的 6 条用例（file:line 见下）及其 mutation 结果
 
 | 用例 | file:line | Mutation | Mutation 结果 |
 |---|---|---|---|
@@ -72,9 +72,10 @@
 | "renders updatedAt/dueAt in English…passes an unparseable value through unchanged" | `TodoCenterView.spec.ts:211` | （未破坏性测；正控本身覆盖 `Number.isNaN` 分支，判据本身简单到不需要额外破坏） | 见 §1.2 的独立正控说明 |
 | "unavailable copy is productized…locale-aware" | `TodoCenterView.spec.ts:147` | 把两处新文案改回旧文案（`该来源暂时无法查询`/`This source could not be checked right now`，`TodoCenterView.vue:31`） | **RED**（`expected '该来源暂时无法查询' to be '暂时无法查看，请稍后重试'`）——证明断言真的钉住了新字符串，不是空转 |
 | （既有）"renders a view-only pill for actionable:false…" | `TodoCenterView.spec.ts:228`（原有，未改） | 未改动——本轮零改动 pill 相关代码 | 不重复验证（B-2 已交付） |
+| "renders nothing (not 'Updated undefined') if a future source sends a missing updatedAt"（实现代理自复核后追加，非 Opus 门审） | `TodoCenterView.spec.ts:232` | 删掉 `formatItemTimestamp` 里 `if (value === undefined \|\| value === null) return ''` 那一行防御 | **RED**（`expected '' to be '更新于 undefined'`）——证明该防御分支承重，不是摆设 |
 
 （复现步骤：`cp` 备份 → `sed`/Python 原地替换 → 跑单文件 → `cmp` 确认 `cp` 复原字节相同 → 复跑确认
-仍 14/14——过程记录见本会话终端历史，未落盘为脚本，因为只是两次一次性验证，不是复用夹具。）
+仍 15/15——过程记录见本会话终端历史，未落盘为脚本，因为只是几次一次性验证，不是复用夹具。）
 
 ### 1.2 `formatItemTimestamp` 的 Invalid-Date 正控
 
@@ -104,6 +105,28 @@
   在 `apps/web/scripts/run-required-web-tests.sh`（清理后仍在）与
   `.github/workflows/approval-web-guard.yml`（`:377-380`/`:770-773` 的 path-filter，`:1013` 的
   inline vitest token 列表）两处均已存在，未做改动，也不需要改动。
+- **实现代理自复核（非 Opus 门审）：该文件的其它读者未被本次删除破坏（逐个跑过，非静态假设）**——
+  `required-web-lane-registration-shape.test.ts` 自己的 docblock 点名另外 6 个曾经/仍在解析
+  这份脚本的守卫，外加全仓 grep 命中的另外 3 个 spec 直接读它的文本；删除死代码块（推到 push 之后
+  的 head `ae7e065ec`）之后，**逐一在该 head 的干净 checkout 上重跑，全绿**：
+
+  | 文件 | 结果 |
+  |---|---|
+  | `packages/core-backend/tests/unit/stock-prep-web-ci-coverage-enumeration.test.ts` | 5/5 PASS |
+  | `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts` | 343/343 PASS |
+  | `packages/core-backend/tests/unit/network-unavailable-copy-ci-wiring.test.ts` | 7/7 PASS |
+  | `scripts/ops/elearning-media-ci-wiring.test.mjs`（`node` 直跑） | 15/15 PASS |
+  | `plugins/plugin-integration-core/__tests__/stock-preparation-handoff.test.cjs`（`node` 直跑） | EXIT=0，全部 `OK` |
+  | `apps/web/tests/AttendanceReportFieldsSection.spec.ts` | 44/44 PASS |
+  | `apps/web/tests/approval-record-link-picker.spec.ts` | 12/12 PASS |
+  | `apps/web/tests/multitable-comment-inbox-view.spec.ts` | 2/2 PASS |
+  | `apps/web/tests/multitable-b4-field-always-readonly.spec.ts` | 16/16 PASS |
+
+  （`approval-ci-coverage-enumeration.test.ts` 自己的注释点名"W1 有四个独立的 vitest 调用，含多行
+  续行的"——它按"整段折叠续行"解析，与本文件删除的死代码段（无 `exec` 前缀、从未被任何 shell 执行）
+  无关，343 条用例全过证实了这一点，不是靠读注释推断。）
+  `scripts/ops/integration-guard-run-web-specs.sh`（"两点纪律"的第二登记点，独立于本次改动的文件）
+  也核对过 `git diff` 为空，未受影响。
 
 ## 3. 类型检查 / 构建
 
@@ -111,6 +134,35 @@
 |---|---|
 | `npx vue-tsc -b --force`（`apps/web`） | **1 条 TS2769**，锚点 `vite.config.ts(28,29)`（vite 插件类型跨版本不兼容，与本切片改动的文件无关）。**已核对为先存**：`merge-train-dry-run-v2-20260921.md` §"对照" 记录同一 head 家族在 pristine `origin/main` 上跑 `pnpm --filter @metasheet/web type-check` 同样 EXIT=2、同一条 TS2769、前 39 行逐字节相同。本轮日志（`grep -c "error TS"` = 1；`grep TodoCenterView` 零命中）确认零新增错误，且错误与 `TodoCenterView.vue` 无关联。 |
 | `npx vite build`（`apps/web`） | **EXIT=0**，`✓ built in 14.67s` |
+
+### 3.1 本地全量 `run-required-web-tests.sh` 直跑——1 处红，机制已定位、与本切片无关
+
+跑 `bash apps/web/scripts/run-required-web-tests.sh`（`set -euo pipefail`）在
+`tests/multitable-recovery-archive-modal.spec.ts` 处中止（该文件字母序早于 `TodoCenterView`，
+所以本轮改动的令牌从未被这次直跑执行到）。**机制已定位，不是猜测**：本机 `node --version` =
+**v25.9.0**，而该脚本目标的 CI 运行器（`actions/setup-node`）钉的是 **20.x**；同一份
+`run-required-web-tests.sh` 自己的历史注释（W0 docket #39 一节）就记录过同一类失败——"reproduced
+as a DETERMINISTIC 5/5 failure in ISOLATION under Node 20.20.2……本机 Node 版本不同导致的微任务/
+定时器结算差异"。核对过与本切片无关：
+```
+git diff origin/main origin/feat/todo-center-phase2-fe -- apps/web/tests/multitable-recovery-archive-modal.spec.ts
+```
+零输出（该文件与其大概率的源文件都不在这条分支的历史改动范围内），且该测试在**隔离**跑（不经这份
+脚本，单独 `npx vitest run multitable-recovery-archive-modal`）时结果相同（3 次重跑，确定性失败，
+非偶发）——所以本轮改动前后这个坑都在，不是本切片引入，也不因本切片而加重或减轻。真正必绿的两项
+（`attendance-web-guard-workflow.spec.ts`、`required-web-lane-registration-shape.test.ts`）与本轮
+自己的 `TodoCenterView.spec.ts` 均已单独跑过并 PASS（见 §1），未被这处早于它们字母序的无关红块
+挡住。
+
+### 3.2 新断言与 Node/ICU/时区无关
+
+`TodoCenterView.spec.ts` 本轮新增的所有断言都只钉**标签前缀**（`toContain('更新于')` /
+`toContain('Updated')` / `toContain('not-a-date')` / `toBe('')`），**没有一条对 `toLocaleString()`
+产出的具体时间戳字符串做逐字断言**——`updatedAtLabel`/`dueAtLabel` 内部调用的 `Intl`/`Date` 格式化
+在不同 Node 版本、不同 ICU 数据、不同容器时区下产出的具体时间文本可能不同，但这些测试不关心那部分，
+只关心"有没有渲染该字段的标签"与"未解析成功时原样透传"。真机截图里出现的具体时间字符串
+（`9/21/2026, 11:46:32 PM`、`2026/9/21 23:46:32`）是**证据**，不是**判据**——单测判据的判别力不
+依赖于本机与 CI 之间 Node/ICU/时区的任何差异。
 
 ## 4. 真实浏览器验收（三腿）
 
@@ -130,6 +182,12 @@ GRANT  SELECT ON TABLE approval_assignments TO   ms2testbed;   -- 恢复
 选它的理由与既有报告一致：该表是共享待处理查询（`approval-pending-query.ts`）count 与 list 两条语句
 都要读的表，能同时让徽标与中心页进入不可用；权限漂移是真实运维事故的形状，不是改 schema、不是打桩。
 
+**关于截图 `h4-01`/`h4-03` 文件大小相同（37084 字节）**：`cmp` 核对为**逐字节相同**，这是预期结果，
+不是复制粘贴的证据缺陷——`GRANT` 之后重新拉取的 DOM 状态（2 条条目、同样的 `Updated` 标签、同一行
+带 pill 同一行不带）与撤权之前完全一致，截图渲染是确定性的，恢复到相同状态自然产出相同字节。真正
+承重的恢复证据是 `results-h4.json` 的 `leg3recovery: {recoveredCount:2, stillUnavailable:0}`（这两
+个数字来自撤权→恢复之间的一次真实往返，不是重放旧截图）。
+
 ## 5. NOT RUN 清单（如实记录，不掩饰）
 
 1. **`dueAt` 字段在真实浏览器里的"有值渲染"半边 NOT RUN**——今天唯一注册的审批源
@@ -147,12 +205,25 @@ GRANT  SELECT ON TABLE approval_assignments TO   ms2testbed;   -- 恢复
    h4d 同时持 `admin` 与 `attendance_approver` 两个 `user_roles` 行，本报告只验证了"D 能看到 pending
    经 source_queue 臂 + actionable=false"这一条最终观察，未逐一分解"如果去掉 admin 会怎样"（那是锁
    §1.5 A0 表 class ⑥ 已经用后端真库测试覆盖的组合，不是本切片要重新证明的范围）。
+4. **真机三腿全程只跑过英文（`Language: English`）分支，zh-CN 呈现从未在真实浏览器里出现过**——
+   三张截图（`h4-01`/`h4-02`/`h4-03`）拍到的都是 `updatedAtLabel`/`dueAtLabel`/新版不可用文案的
+   **英文**产出（`Updated 9/21/2026, 11:46:32 PM`、`Can't be shown right now — please try again
+   shortly.`）；中文产出（`更新于 2026/9/21 23:46:32`、`暂时无法查看，请稍后重试`）只在 jsdom
+   单测（`TodoCenterView.spec.ts`）里出现过，**owner 实际使用的语言（中文）从未被真机验证覆盖**。
+   补齐方法：驱动脚本里把登录后的 `locale-switcher` select 切到 `zh-CN` 再截一轮，成本是一次
+   `page.selectOption` + 3 张截图，本轮未做，如实列入 NOT RUN 而非事后补拍旧截图冒充。
+5. **`formatItemTimestamp` 对缺失 `updatedAt` 的防御性分支（`value === undefined/null → ''`）
+   未在真实浏览器验证**——今天唯一注册的来源恒产出非空 `updatedAt`（`row.updated_at.toISOString()`，
+   后端 NOT NULL 语义），这条分支是纯防御性代码（防止未来违反 `PendingItem.updatedAt: string` 类型
+   契约的来源把字面量 `"undefined"` 渲染出来），已有单元测试 + mutation 覆盖（见 §1.1 的第二轮
+   补测），真机层面没有也不该有一个违反契约的真实来源去触发它。
 
 ## 6. 未做的事（如实记录）
 
 - 未合并、未 undraft 任何 PR；未动 `origin/main`。
 - 未对 `metasheet_test`/`metasheet_v2`/`metasheet_testbed_*` 做任何读写。
 - 未改锁文正文（`todo-center-design-lock-draft-20260915.md` 全程只读）。
-- 未 `git checkout -- .`/`reset --hard`/`stash drop`；本轮两次 mutation 还原均用 `cp` 备份 +
-  `cmp` 核对字节相同。
+- 未 `git checkout -- .`/`reset --hard`/`stash drop`；本轮 4 次 mutation 还原（dueAt 渲染守卫、
+  不可用文案字符串、`run-required-web-tests.sh` 的第二条 exec 逻辑行、`updatedAt` 缺失防御分支）
+  均用 `cp` 备份 + `cmp` 核对字节相同。
 - 未删除任何不是本轮创建的 worktree/库/文件/进程。
