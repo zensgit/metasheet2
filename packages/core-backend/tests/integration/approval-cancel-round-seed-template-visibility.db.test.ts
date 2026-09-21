@@ -48,10 +48,9 @@ import {
  *   - the SAME endpoints, as a template manager, DO return the seed (existing semantics for
  *     admins are deliberately unchanged) ⇒ the 404/absence above is about audience, not deletion.
  *
- * SCOPE / WHAT THIS FILE DOES NOT CLAIM. It covers the three read/write surfaces that consume
- * `applyTemplateVisibilityFilter` for this row (`listTemplates`, `loadTemplateBundleWithClient`
- * behind `GET /api/approval-templates/:id`, and `templateVisibleAtCreateBoundary` behind
- * `POST /api/approvals`). It says nothing about the cancel round's own creation path:
+ * SCOPE / WHAT THIS FILE DOES NOT CLAIM. It covers the two read surfaces that consume
+ * `applyTemplateVisibilityFilter` for this row (`listTemplates`, and `loadTemplateBundleWithClient`
+ * behind `GET /api/approval-templates/:id`). It says nothing about the cancel round's own creation path:
  * `createCancelRoundInstance` is keyed on `CANCEL_ROUND_PUBLISHED_DEFINITION_ID` and deliberately
  * bypasses the template-visibility gate entirely (its own doc comment states this), so the scope
  * written by the migration neither enables nor disables it — which is exactly why this row can be
