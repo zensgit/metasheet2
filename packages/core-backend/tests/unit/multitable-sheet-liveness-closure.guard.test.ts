@@ -196,7 +196,6 @@ const EXISTENCE_BEFORE_AUTHORITY_GAP = {
     + 'sheet from a soft-deleted or absent one. Fix per handler: drop the probe (sheetLiveness already refuses a '
     + 'non-live sheet after the 403) or move it after the 403, with the values-free SHEET_NOT_FOUND_MESSAGE.',
   handlers: [
-    'DELETE /sheets/:sheetId/records/:recordId/permissions/:permissionId',
     'GET /fields',
     'GET /records-summary',
     'GET /sheets/:sheetId/config-history',
@@ -208,7 +207,6 @@ const EXISTENCE_BEFORE_AUTHORITY_GAP = {
     'POST /sheets/:sheetId/import-xlsx',
     'POST /views',
     'POST /views/:viewId/submit',
-    'PUT /sheets/:sheetId/records/:recordId/permissions',
   ],
 }
 
