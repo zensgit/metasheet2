@@ -8611,10 +8611,10 @@ describe('ApprovalProductService', () => {
 // would silently drop a legitimate code and `AttendanceRequestOperationBusinessRefusalV1
 // .code` has no charset property to check against. That is safe ONLY because today's
 // codomain is a CLOSED, single-element set. This pins the census as data, not as an
-// argument: it fails the moment a second production constructor of the LITERAL code
-// appears anywhere under `plugins/` or `packages/*/src/`, forcing a re-review of the
-// close-reason projection's domain-closure assumption (§6 of the gate report) rather than
-// letting a second producer slip in silently.
+// argument: it fails on a second constructor written in the same literal-inline shape
+// (gate round2 P3-B), scanned anywhere under `plugins/` or `packages/core-backend/src/`.
+// This file is wired into no CI gate (gate round2 P3-C): a second producer is caught only
+// if someone runs this file's containing full local lane, not automatically.
 //
 // The pattern below deliberately requires a QUOTED code literal immediately after
 // `kind: 'business_refused'` — `takeBusinessRefusal`'s own pass-through construction
