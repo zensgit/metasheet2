@@ -200,7 +200,7 @@ neuter 都至少打红一条用例，不再有「靠读代码断言正确性」�
 | 新错误码 / 迁移 / DDL / 公开合同 | **零**（见 §6 的不变量核对） |
 | 「metrics 故障不能拖垮审批流」 | **保持**：`settleMetricsCall` 内部 try/catch，promise 永不 reject ⇒ `await` 不可能把 metrics 错误路由进调用点外层那个 `catch { await rollbackQuietly(client); throw error }` |
 | 代价 | 响应路径 **+1 个事务（BEGIN / SELECT FOR UPDATE / UPDATE / COMMIT）+ 1 条 UPDATE ≈ 5 次往返**；**timeout-jump 与 return 两条路径 +2 个**（round-2 起 decision 关闭也被 await，见 §5.1）；实测范围见验证 MD §5 |
-| 连接池 | 在仍持有审批连接（C1）时**顺序**取第二条连接；timeout-jump / return 路径上先后取 C2、C3。**同族但形状更重，不是「既有模式」逐字复制**：被引作先例的 `emitApprovalTaskCreatedEventsPostCommit`（定义 `:11847`）与 `supersedeCardDeliveriesPostCommit`（定义 `:11905`）都走 `pool.query(sql, params)` —— **借一条连接、跑一条语句、立刻归还**；而本 PR 被 await 的写走 `recordNodeActivation → mutateBreakdown → defaultTransaction`（`ApprovalMetricsService.ts:1019-1040`）：`pool.connect()` + `BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`，**跨多条语句持有第二条连接并取行锁**。有界性来自 `connection-pool.ts:252-258` 的 `connectionTimeoutMillis = 10000` 与 `statement_timeout` / `query_timeout = 30000`：最坏情况是**有界**的额外时延 + 一次被吞掉的 metrics 失败，不会把审批响应挂死。`DB_POOL_MAX` 默认 20；「持有 C1 再取 C2」的形状在 baseline 上已存在（`:11245` 的 supersede 无条件执行），所以池耗尽的悬崖是既有的，本 PR 加长了第二条连接的持有时长、并在两条路径上把它变成两条。**并发/池压测仍未做**（§7 R3） |
+| 连接池 | 在仍持有审批连接（C1）时**顺序**再借若干条。**逐个方法数过，不是估**：每个被 await 的 hook 最多**两次**顺序 checkout —— `mutateBreakdown` 的多语句取锁事务（`pool.connect()`）**加上**其后独立的单语句 `this.query(UPDATE …)`（`pool.query()`，`recordNodeActivation` 只在 `added` 为真时发出，`recordNodeDecision` 无条件发出）。于是 approve / 管理员 jump / handler 三条路径最多 **C1 + 2 次顺序 checkout**；timeout-jump 与 return 两条路径（关闭 + 激活两个 hook）最多 **C1 + 4 次顺序 checkout**。全部**顺序**且每次用完即还，不存在同时持有多于两条的时刻。**同族但形状更重，不是「既有模式」逐字复制**：被引作先例的 `emitApprovalTaskCreatedEventsPostCommit`（定义 `:11847`）与 `supersedeCardDeliveriesPostCommit`（定义 `:11905`）都走 `pool.query(sql, params)` —— **借一条连接、跑一条语句、立刻归还**；而本 PR 被 await 的写走 `recordNodeActivation → mutateBreakdown → defaultTransaction`（`ApprovalMetricsService.ts:1019-1040`）：`pool.connect()` + `BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`，**跨多条语句持有第二条连接并取行锁**。有界性来自 `connection-pool.ts:252-258` 的 `connectionTimeoutMillis = 10000` 与 `statement_timeout` / `query_timeout = 30000`：最坏情况是**有界**的额外时延 + 一次被吞掉的 metrics 失败，不会把审批响应挂死。`DB_POOL_MAX` 默认 20；「持有 C1 再取 C2」的形状在 baseline 上已存在（`:11245` 的 supersede 无条件执行），所以池耗尽的悬崖是既有的，本 PR 加长了第二条连接的持有时长、并在两条路径上把它变成两条。**并发/池压测仍未做**（§7 R3） |
 | 锁竞争 | 被 await 的激活事务与同一请求内的 decision 关闭会在**同一行**上 `FOR UPDATE` 排队。round-1 把这当成「串行化，只是延迟」——**那句话是错的**，排队顺序决定结果正确与否（§5.1）。round-2 让这两条在需要的路径上按代码顺序串行，顺序不再由锁竞争决定 |
 
 ### 5.1 round-2 勘误 —— 只恢复派发次序**不足以**关闭同节点再激活的 arm 丢失
@@ -306,19 +306,27 @@ r1 门审指出：`settleMetricsCall` 同步调用 `fn()`，使激活写的 `poo
 未修。
 
 **R3 —— 连接形状比先例更重，且并发/池压测未做（round-2 改写，采纳 r1 门审 P3-1）。**
-被引作先例的两处同位置 await 走 `pool.query` —— 单语句 checkout 后立即归还；本 PR 被 await 的写是
-**多语句取行锁事务**（`pool.connect()` + `BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`），
-在 timeout-jump / return 两条路径上还是**顺序两条**（C2、C3）。
-**有界性有依据**：`connection-pool.ts:252-258` 的 `connectionTimeoutMillis = 10000` 与
-`statement_timeout` / `query_timeout = 30000` 使最坏情况是有界的额外时延 + 一次被吞掉的 metrics 失败，
-不会把审批响应挂死。**没有做的是**：高并发下的池压力实测。
-`DB_POOL_MAX` 默认 20，「持有 C1 再取 C2」的悬崖是既有的（`:11245` 无条件执行），
-本 PR 加长持有时长、并把那两条路径变成 C1+C2+C3 —— **「边际」二字仍无实测数字支撑，如实记。**
+被引作先例的两处同位置 await 走 `pool.query` —— 单语句 checkout 后立即归还；本 PR 被 await 的每个 hook
+里**头一次 checkout 是多语句取行锁事务**（`pool.connect()` + `BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`），
+其后还有**第二次独立 checkout**（单语句 `UPDATE`）。数出来的上界是：
+approve / 管理员 jump / handler 三条路径 **C1 + 2 次顺序 checkout**；
+timeout-jump 与 return 两条路径 **C1 + 4 次顺序 checkout**（关闭 2 次 + 激活 2 次）。
+**有界性有依据，但按 checkout 逐次计**：`connection-pool.ts:252-258` 的
+`connectionTimeoutMillis = 10000` 与 `statement_timeout` / `query_timeout = 30000`
+是**每次 checkout / 每条语句**的上界，不是整条路径的上界 —— 所以最坏情况是
+「有界，但可能是若干个这样的上界之和」，仍不会把审批响应永久挂死。
+**没有做的是**：高并发下的池压力实测。
+`DB_POOL_MAX` 默认 20，「持有 C1 再借第二条」的悬崖是既有的（`:11245` 无条件执行），
+本 PR 加长了持有时长、并把那两条路径的 checkout 次数翻倍 —— **「边际」二字仍无实测数字支撑，如实记。**
 
-**R5 —— 被 await 的 hook 把 metrics 侧的停顿引入审批响应时延（round-2 新增）。**
-每一个被 await 的 hook 最坏可在响应路径上增加 `connectionTimeoutMillis`（10s，取不到连接）或
-`statement_timeout`（30s，语句被别的事务挡住）。timeout-jump 与 return 路径上现在有**两个**这样的 hook。
-错误仍然被吞（promise 永不 reject，审批流不失败、不回滚），**代价体现在时延而不是正确性**。
+**R5 —— 被 await 的 hook 把 metrics 侧的停顿引入审批响应时延**与**完成事件的发出时刻**（round-2 新增）。**
+每一次 checkout 最坏可增加 `connectionTimeoutMillis`（10s，取不到连接）或
+`statement_timeout`（30s，语句被别的事务挡住）；按 §5 表的计数，timeout-jump 与 return 路径上
+最多 4 次这样的 checkout。错误仍然被吞（promise 永不 reject，审批流不失败、不回滚），
+**代价体现在时延而不是正确性**。
+**另一处必须写明**：`:9534` 的被 await 关闭排在 `emitApprovalCompletionEvent(completionEvent)`
+**之前**，所以 metrics 侧的停顿不只是拖慢 HTTP 响应，它按同一个上界**推迟完成事件的发出**
+（下游 bridge / trigger 因此也被推迟）。这条不影响事件的内容或是否发出，只影响时刻。
 这是选择「结果确定」所付的价；若 owner 认为该上界不可接受，替代方向是把这两条 hook 合并成
 **一个**事务（需要改 `ApprovalMetricsService` 的公开方法，本 PR 刻意不做）。
 

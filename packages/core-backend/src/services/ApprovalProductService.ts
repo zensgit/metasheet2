@@ -10684,9 +10684,11 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        // H-1 P1-1: AWAITED close — a return can resolve back to the node it was issued from (the
-        // target auto-approves / dedupes forward again), and then this close and the activation
-        // below contend for the same `approval_metrics` row. See `settleNodeDecisionMetric`.
+        // H-1 P1-1: AWAITED close — a return can resolve back to the node it was issued from when the
+        // target is skipped and the cascade lands here again (constructed and covered: an
+        // `approvalType:'auto_approve'` target, see the `H-1 P1-1 GATE (return branch)` case). This
+        // close and the activation below then contend for the same `approval_metrics` row. See
+        // `settleNodeDecisionMetric`.
         await this.settleNodeDecisionMetric(id, currentNodeKey, actor.userId)
         if (resolution.currentNodeKey) {
           await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))

@@ -416,9 +416,11 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 > （`POST /api/approvals/:id/actions` 的 approve），而 approve 路径上 round-2 **没有**新增任何 await
 > （它的决策关闭仍是 fire-and-forget）。**round-2 真正变慢的两条路径 —— `applyNodeTimeoutEffect`
 > 与 `return` 分支 —— 没有延迟数字**，因为本轮没有为它们重做这个探针。
-> 可以从结构上说的只有：那两条路径在响应前各多等**一个**短事务
-> （`BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`），最坏情况由
-> `connectionTimeoutMillis = 10000` / `statement_timeout = 30000` 封顶（设计 MD §7 R5）。
+> 可以从结构上说的只有：那两条路径在响应前多等**一个 hook**，而每个被 await 的 hook 最多是
+> **两次顺序 checkout**（`mutateBreakdown` 的多语句取锁事务 + 其后独立的单语句 `UPDATE`），
+> 所以这两条路径最多是 `C1 + 4 次顺序 checkout`（设计 MD §5 表末两行已逐个数过）。
+> `connectionTimeoutMillis = 10000` / `statement_timeout = 30000` 是**每次 checkout / 每条语句**的上界，
+> 不是整条路径的上界（设计 MD §7 R5）。
 > **这是一条 NOT RUN，见 §7 第 9 条。**
 
 ---
@@ -469,13 +471,27 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 
 PR 仍为 **Draft**。绿不等于被采纳：是否合并由 owner 决定，本代理未 undraft、未请求合并、未改任何锁文正文。
 
-### 6.3 round-2 的 CI —— 尚未运行（NOT RUN，不要把 §6.2 读成本轮的结果）
+### 6.3 round-2 的 CI
 
-§6.1 / §6.2 记的是**代码提交 `4b0650b96557001c82f718211c106389cc72e914`（round-1）** 的结果。
-round-2 改了同一个生产文件并在同一个套件里加了 6 条用例，**它自己的 CI 在本文提交时还没有跑**。
-触发面不变（改的两个文件都在 l6a lane 的 `paths:` 里，见 §6 的表），未新增测试文件、
-未改 `plugin-tests.yml`、未改 `vitest.config.ts` 的 `exclude` ⇒ 仍不触发 s6a pin / W7-R10 分类 /
-CI corpus 的任何一钉。**本轮不声称任何 round-2 的 CI 结果**；PG 16 轴与 required 清单由 lane 自己报。
+§6.1 / §6.2 记的是**代码提交 `4b0650b96557001c82f718211c106389cc72e914`（round-1）** 的结果 ——
+**不要把它读成本轮的结果**。
+
+round-2 的第一个提交 **`b8b92261907f662725337da4355457c548073b82`** push 后：
+
+| 项 | 结果（`gh pr checks 5970`，不背数字） |
+|---|---|
+| `approval-realdb-l6a-roundscoping`（本 PR 的目标 lane，`postgres:16` + Node 20 + `pnpm install --frozen-lockfile`） | **pass**（1m37s）—— 即本地缺的 PG 16 轴与真实依赖树那两格 |
+| 当时已结算的其余全部 check | 全 pass，零 fail（`test (18.x)` / `test (20.x)` / `web-tests` 三条当时仍 pending） |
+
+本文最终提交对应的 head **在此之后**（本节这段更正 + 生产文件里一条注释的措辞收紧 + §5/R3 的
+checkout 计数更正），它会重新触发同一批 lane。**本文不预告那次运行的结果**：读者以
+`gh pr checks 5970` 为准。触发面不变（改的文件都在 l6a lane 的 `paths:` 里，见 §6 的表），
+未新增测试文件、未改 `plugin-tests.yml`、未改 `vitest.config.ts` 的 `exclude`
+⇒ 仍不触发 s6a pin / W7-R10 分类 / CI corpus 的任何一钉。
+
+main 分支保护的 required 清单请用
+`gh api repos/zensgit/metasheet2/branches/main/protection --jq '.required_status_checks.contexts[]'`
+现读（本轮读到 **13 条**），不要背这个数字。
 
 ---
 
