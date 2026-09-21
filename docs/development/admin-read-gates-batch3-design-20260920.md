@@ -88,3 +88,26 @@
 服务替身用 `vi.spyOn` 打在真实单例上，**不**用 `vi.mock` 替换模块（限流器 / SafetyGuard / 健康聚合器被 `src/` 大面积引用）。一个本批特有的坑写在 spec 头：`initAdminRoutes()` 内部会调 `initSafetyGuard()`，它 **destroy 并替换** SafetyGuard 单例（`admin-routes.ts:2146`），所以 SafetyGuard 的 spy 必须在建完 app 之后装——spec 里统一走 `mountApp()` 而不是直接 `pinned.setApp()`。
 
 验证记录与变异自证见 `admin-read-gates-batch3-verification-20260920.md`。
+
+## 残余已清零（追加于 2026-09-20，基线 `origin/main` = `1a6663a41`）
+
+上文「本批明确不动」里唯一被留置的读端点 `GET /slo/status` 已在同日由 `fix/admin-slo-status-gate` 补门，`admin-routes.ts` 下的无门 GET 归零。留置的理由在补门时被重新核了一遍，结论是它从一开始就比实际情况保守：
+
+- 留置写的是「#5680 合入后再动，否则把那个 PR 钉红」。实际情况是 #5680 的分支基于 #5665 而不是 main，它的 CI 跑在自己的分支树上；main 上给 `/slo/status` 加门不会进入 #5680 的任何一次检查。真正的后果只有一个：#5680 那条以「存在一条首位无门的 GET」为素材的反向对照不再有素材可指，必须改成正向形式。触发点不是「等它 rebase」——#5665 一旦合并、分支被删，GitHub 会自动把 #5680 的 base 改指 main，当场变红。
+- 因此接力棒的方向也反了过来：原来是「#5680 合入 → 本批闭世界用例变红 → 提醒补门」；现在是「闭世界用例钉死空列表 → #5680 的 base 改指 main 那一刻，它必须自己把反向对照改成正向」。这一点写进了 `admin-read-gates-batch3-authz.test.ts` 的文件头。
+
+补门后的形状与本批其余四条逐字一致：`requireAdminRole()` 作为 `/slo/status` 的首位 handler，三态语义不变（见「门的语义」一节），管理员侧响应体零变化。暴露面的描述见 `admin-routes.ts` 该路由上方的 `SECURITY` 注释：`sloService.getSLOStatus()`（`SLOService.ts:122`）聚合的是进程级 prom-client registry，全程没有任何租户谓词，所以加门前任何租户的任何已认证用户都能按需轮询平台自身的错误预算余量与 `healthy / at_risk / violated` 判定。
+
+### 盘点口径修正：本批漏了一条子路由读（同日补上）
+
+「归零」的第一版声明只对 `admin-routes.ts` **本体**注册的 GET 成立，被反驳轮证伪：`admin-routes.ts:2142` 的 `router.use('/snapshots', snapshotLabelsRouter)` 挂进来的 `snapshot-labels.ts:145` `router.get('/')` 自落地起就没有门（同文件三条写端点 `:40/:74/:109` 都有），而本批的闭世界扫描只遍历带 `layer.route` 的顶层层，`router.use()` 产生的层整层被跳过，所以扫描报的零是「看不见 → 报零」，不是「没有 → 报零」。
+
+这一条的暴露面比本批原先要关的五条都重：`SnapshotService.ts:1169 / :1197 / :1220` 三条查询都是 `selectFrom('snapshots').selectAll()`，谓词只有 tag / protection_level / release_channel，零租户谓词 —— 加门前任意租户的任意已认证用户可读全平台快照行。
+
+口径本身不是新定的：#5678 的盘点原文就把 `router.use` 挂进来的子路由 GET 算在内（点名 `protection-rules.ts` 的 `GET /` 与 `GET /:id`），只是漏登记了 `snapshot-labels.ts`。因此同一个 PR 里做了三件事而不是收窄措辞：① 给 `snapshot-labels.ts:145` 补 `requireAdminRole()`；② 把闭世界扫描改成**递归**下钻 `router.use()` 子路由、路径按挂载前缀拼接；③ 新增一条反盲区用例，直接断言扫描确实看得见 `/snapshots`、`/safety/rules`、`/safety/rules/:id`（零断言必须先证明镜头能看见目标）。
+
+补门只收窄受众，不改查询：`snapshots` 三条查询缺租户谓词这一条**仍是未清零残余**，登记在验证稿的「残余」一节，跟进见 #5918。
+
+本批其余残余（`openapi/admin-api.yaml` 全文件缺 `securitySchemes`、500 分支回显 `err.message`）不在该 PR 范围内，仍然是残余。
+
+验证记录与变异自证见 `admin-slo-status-gate-verification-20260920.md`。
