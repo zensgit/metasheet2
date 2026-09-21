@@ -260,6 +260,13 @@ import {
   listMultitableTemplates,
   type MultitableTemplate,
 } from '../multitable/template-library'
+// #5861 —— 「使用模板」的安装去重(同一意图在窗口内只落一个 Base)。
+import {
+  TemplateInstallLedgerUnavailableError,
+  runDeduplicatedTemplateInstall,
+  type TemplateInstallQueryFn,
+  type TemplateInstallScope,
+} from '../multitable/template-install-dedupe'
 import {
   CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
   CUSTOM_TEMPLATE_ID_PREFIX,
@@ -606,6 +613,21 @@ const SYSTEM_PEOPLE_SHEET_NAME = 'People'
 // ../multitable/system-sheet-predicate next to the #5825 list-visibility predicate.
 /** Values-free refusal for a client create that asks for the reserved People sentinel description (#5807). */
 const RESERVED_SHEET_DESCRIPTION_MESSAGE = 'This description is reserved for a system-managed sheet'
+/**
+ * #5839: the VIEW half of the export route's existence refusal, values-free by the same rule as
+ * `SHEET_NOT_FOUND_MESSAGE` (multitable/sheet-liveness.ts) — it never echoes the requested view id.
+ *
+ * A NAME rather than a bare literal because nothing else can hold it there: the sheet-liveness closure
+ * guard's `EXISTENCE_PROBE` matches `meta_sheets` reads only, so a view probe drifting back above the
+ * 403 (or back to the id-bearing message) is invisible to it. The pin is behavioural —
+ * tests/unit/multitable-sheet-existence-oracle-b3.test.ts asserts this exact body on the export route,
+ * and asserts it arrives only for a caller who already passed canRead + canExport.
+ *
+ * Deliberately NOT applied to `DELETE /views/:viewId`, whose id-bearing `View not found: <id>` is
+ * pinned by tests/integration/multitable-view-config.api.test.ts and sits behind that route's own
+ * authority check.
+ */
+const EXPORT_VIEW_NOT_FOUND_MESSAGE = 'View not found'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
 // ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
 // history-exclusion predicate); imported at the top of this file.
@@ -8334,7 +8356,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         resolvedTemplate = found
       }
 
-      const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
+      // #5861:安装去重。同一次「安装意图」= (租户, 用户, 模板, 工作区, 请求的 Base 名),
+      // 窗口内(默认 5 分钟)重复安装**不新建**,而是原样重放第一次那条 201 —— 用户拿回的
+      // 就是他刚才想要的那个 Base。租户只取 resolveTemplateTenantId(req)(JWT 的
+      // authenticatedTenantId),不是可被 x-tenant-id 兼容头改写的 req.user.tenantId;
+      // 用户只取鉴权解析出的 access.userId。并发互斥来自安装事务里的
+      // pg_try_advisory_xact_lock(有界等待)+ 账本主键,不是「先查后插」;重放前还会核对
+      // 那次安装的 Base 与每一张表都还 live(见 template-install-dedupe.ts)。
+      const installScope: TemplateInstallScope = {
+        tenantId: resolveTemplateTenantId(req),
+        actorId: access.userId,
+        templateId,
+        workspaceId: parsed.data.workspaceId ?? null,
+        baseName: parsed.data.baseName?.trim() || null,
+      }
+      const runInstall = (query: unknown) => installMultitableTemplate({
         query: query as unknown as QueryFn,
         templateId,
         template: resolvedTemplate,
@@ -8342,16 +8378,77 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         ownerId: access.userId,
         workspaceId: parsed.data.workspaceId ?? null,
         idGenerator: (prefix) => buildId(prefix).slice(0, 50),
-      }))
-
-      templateInstallLogger.info('[multitable.template.install]', {
-        templateId,
-        ok: true,
-        userId,
-        baseId: result.base.id,
-        sheetId: result.sheets[0]?.id ?? null,
       })
-      return res.status(201).json({ ok: true, data: result })
+
+      let outcome: { replayed: boolean; baseId: string; body: unknown; lockHeld: boolean }
+      // 重放时这里保持 null:那条 201 的 sheetId 已经在第一次安装时记过一次日志了。
+      let freshSheetId: string | null = null
+      // 账本表缺失(42P01)走的是下面那条 fail-open 支路 —— 那条路上的 lockHeld=false
+      // 表示「这次压根没经过去重」,不是「锁没抢到」,所以不能让它触发抢锁失败的 warn。
+      let ledgerUnavailable = false
+      try {
+        outcome = await pool.transaction(async ({ query }) => runDeduplicatedTemplateInstall({
+          query: query as unknown as TemplateInstallQueryFn,
+          scope: installScope,
+          install: async () => {
+            const result = await runInstall(query)
+            freshSheetId = result.sheets[0]?.id ?? null
+            // sheetIds 是**全部**新建的表:重放前逐个核对 live,少一张就不重放、真的再装。
+            return {
+              baseId: result.base.id,
+              sheetIds: result.sheets.map((sheet) => sheet.id),
+              body: { ok: true, data: result },
+            }
+          },
+        }))
+      } catch (err) {
+        // 账本表还没迁移 → 退回**改动前**的行为(照常安装,只是不去重),而不是让
+        // 「使用模板」整个挂掉。此路径上一个事务已经回滚,什么都没写。
+        if (!(err instanceof TemplateInstallLedgerUnavailableError)) throw err
+        ledgerUnavailable = true
+        // 消息故意不带稳定的 `[multitable.template.install]` token —— 下面那条
+        // 结构化 info 事件才是事件面,否则 SOP 的事件名 grep 会把一次安装数成两次。
+        templateInstallLogger.warn('Template install dedupe ledger unavailable; installed without dedupe', {
+          templateId,
+          userId,
+        })
+        const result = await pool.transaction(async ({ query }) => runInstall(query))
+        freshSheetId = result.sheets[0]?.id ?? null
+        outcome = { replayed: false, baseId: result.base.id, body: { ok: true, data: result }, lockHeld: false }
+      }
+
+      if (!ledgerUnavailable && !outcome.lockHeld && !outcome.replayed) {
+        // 有界等待内没拿到咨询锁 —— 这一次只剩账本主键兜底(并发下可能多出一个 Base,
+        // 即改动前的行为),但绝不把一次重复点击变成 500。不带稳定 token,不进 SOP 事件面。
+        templateInstallLogger.warn('Template install dedupe lock not acquired within the bounded wait; installed with primary-key fallback only', {
+          templateId,
+          userId,
+        })
+      }
+      if (outcome.replayed) {
+        // 重放**不写一行**,所以它不是一次安装:走一个**不同的** token,否则 H 系列 SOP 的
+        // `grep -F '[multitable.template.install]' | grep '"ok":true' | uniq -c` 会把一次
+        // 4 连点数成 4 次安装 —— 那正是用来验证 #5861 是否修好的那个计数
+        // (docs/operations/multitable-h-series-observation-sop-20260519.md §5/§6)。
+        // 与 dry-run 同一个先例:不同动作 = 不同 token。
+        templateInstallLogger.info('[multitable.template.install.replayed]', {
+          templateId,
+          ok: true,
+          userId,
+          baseId: outcome.baseId,
+        })
+        // 重放的 body 与第一次逐字节相同(客户端契约不变);只有这个响应头能看出是重放。
+        res.set('Idempotent-Replayed', 'true')
+      } else {
+        templateInstallLogger.info('[multitable.template.install]', {
+          templateId,
+          ok: true,
+          userId,
+          baseId: outcome.baseId,
+          sheetId: freshSheetId,
+        })
+      }
+      return res.status(201).json(outcome.body)
     } catch (err) {
       let statusCode: number
       let errorCode: string
@@ -8808,10 +8905,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -8840,10 +8933,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -8989,10 +9078,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const exactMatch = req.query.match === 'exact'
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canEditRecord) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9089,10 +9174,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9226,10 +9307,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9254,10 +9331,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9309,10 +9382,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9347,10 +9416,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9622,10 +9687,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9753,10 +9814,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -9898,10 +9955,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -13441,11 +13494,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sourceSheet = await loadSheetRow(pool.query.bind(pool), parsed.data.sheetId)
-      if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), parsed.data.sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5839: the sheet ROW is read only AFTER authority and liveness. It used to be the FIRST statement
+      // here and answered 404 with the requested id pasted back, so a caller this handler then refused
+      // with 403 could still tell a live sheet from a soft-deleted or an absent one. Nothing needed the
+      // row earlier: its ONLY consumer is `baseId` on the next line, already downstream of both refusals.
+      // The throw is RACE-ONLY now — liveness said `live` one statement ago, so a miss means the sheet was
+      // deleted in between. Values-free (SHEET_NOT_FOUND_MESSAGE, no id): the catch below maps it to the
+      // same 404 shape, which must not re-open the oracle the probe was.
+      const sourceSheet = await loadSheetRow(pool.query.bind(pool), parsed.data.sheetId)
+      if (!sourceSheet) throw new NotFoundError(SHEET_NOT_FOUND_MESSAGE)
       const baseId = sourceSheet.baseId ?? await pool.transaction(async ({ query }) => ensureLegacyBase(query as unknown as QueryFn))
       const plan = await planPeopleSheetPreset(pool.query.bind(pool) as unknown as QueryFn, baseId)
       const preset = await pool.transaction(async ({ query }) => {
@@ -15563,10 +15623,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       let viewHiddenFieldIds: string[] = []
       // Capture the resolved view so the export can apply its ROW filter + sort (not only the
       // hidden-field mask). #3003 wired "all rows" to this route but exported the WHOLE sheet — it read
@@ -15574,13 +15630,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // exported every row. parity fix: export ALL rows OF THE VIEW'S FILTER (the full filtered set,
       // not a page, not the unfiltered sheet), in the view's sort order.
       let view: SharedMultitableViewConfig | null = null
-      if (viewId) {
-        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
-        if (!view || view.sheetId !== sheetId) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
-        }
-        viewHiddenFieldIds = view.hiddenFieldIds ?? []
-      }
 
       const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
@@ -15588,6 +15637,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5839: BOTH existence probes — the sheet row and the view row — now run AFTER the 401/403/404
+      // above. They used to run first, and each answered 404 echoing the requested id, so a caller this
+      // route then refused (no read / no export) could enumerate sheet ids AND view ids. Neither is
+      // needed earlier: `sheet` is consumed only by the download filename far below, and `view` /
+      // `viewHiddenFieldIds` only by the field mask and the row query that follow. The view probe reads
+      // meta_views, so the sibling ledger (whose EXISTENCE_PROBE regex is meta_sheets-only) never saw it
+      // and never will; its message is values-free here for the same reason the sheet's is, and it is a
+      // NAMED constant (EXPORT_VIEW_NOT_FOUND_MESSAGE) so the behavioural pin has something to hold.
+      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
+      if (viewId) {
+        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: EXPORT_VIEW_NOT_FOUND_MESSAGE } })
+        }
+        viewHiddenFieldIds = view.hiddenFieldIds ?? []
+      }
 
       // D3c: export must mirror the view path's field masking — apply subject-scoped
       // field_permissions + view.hidden_field_ids, not only static property.hidden.
@@ -16108,10 +16177,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
+      // #5839: the sheet-row probe that used to open this handler is GONE. It answered 404 with the id
+      // pasted back before the first 403, so a caller without canManageFields could tell a live sheet
+      // from a soft-deleted or an absent one, and nothing downstream ever read the row (`sheet` was
+      // bound and never used). Dropping it ALONE would have been a regression in the other direction:
+      // this handler bound no `sheetLiveness` at all, so a canManageFields caller would then have
+      // dry-run against a soft-deleted (or absent) sheet and got a 200 computed from its field schema
+      // — `loadFieldsForSheetShared` reads meta_fields by sheet_id and never joins meta_sheets, and
+      // `resolveSheetCapabilities` does NOT zero capabilities for a dead sheet (permission-service.ts).
+      // So BOTH branches below now end in authority-then-liveness:
+      //   recordId present → requireRecordReadable (403 canRead, then its own liveness 404, then record)
+      //   recordId absent  → the 403 and the liveness 404 written out here, in that order.
+      // The 403 is per-branch rather than shared after the if/else ON PURPOSE: a shared one would have
+      // to sit AFTER this branch's liveness refusal, which would hand a caller without canManageFields
+      // a 404 SHEET_DELETED — the same oracle, re-opened one refusal later. And `sheetLiveness` is
+      // bound INSIDE the branch, never hoisted into a cross-branch `let`: a hoisted binding is one the
+      // recordId path never refuses on (the closure guard's bind-and-use assertion reds on exactly that).
       // #5c: when recordId is present, the record-level read gate (requireRecordReadable) yields
       // access + capabilities (404 record-not-on-sheet / 401 / 403 sheet-!canRead). Per the current
       // schema record-read is grant-additive (record_permissions.access_level is read|write|admin,
@@ -16126,11 +16207,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
         capabilities = readable.capabilities
         recordReadAccess = readable.access
+        if (!capabilities.canManageFields) return sendForbidden(res)
       } else {
-        const resolved = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-        capabilities = resolved.capabilities
+        const { capabilities: sheetCapabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+        capabilities = sheetCapabilities
+        if (!capabilities.canManageFields) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       }
-      if (!capabilities.canManageFields) return sendForbidden(res)
 
       const referencedFieldIds = dryRunFormulaEngine.extractFieldReferences(expression)
       if (referencedFieldIds.length > DRY_RUN_MAX_REFERENCED_FIELDS) {
@@ -18411,25 +18494,30 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
         const pool = poolManager.get()
         try {
-          const sheetRes = await pool.query(
-            'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
-            [sheetId],
-          )
-          if (sheetRes.rows.length === 0) {
-            return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-          }
-          const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-          // Inside a SERVICE CALLBACK: throw instead of writing a response — the route's catch maps
-          // SheetNotLiveError to the same 404. A soft-deleted sheet's recycle bin must not list, its
-          // records must not be deleted, and a trashed record must not be restored into it.
+          // #5839: the inline `SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL` probe
+          // that used to open this block is GONE. It answered 404 with the requested id pasted back
+          // BEFORE the 403 below, so any signed-in caller — including one without canEditRecord — could
+          // tell a live sheet from a soft-deleted or an absent one just by attempting an upload.
           //
-          // `=== 'deleted'` and NOT `!== 'live'`: an ABSENT sheet already has pinned semantics that
-          // belong to the service, not to this guard — the recycle-bin golden requires that restoring
-          // into a HARD-deleted sheet answers 409 from RecordService's orphan guard ("rejected, not
-          // resurrected"), and a 404 here would preempt it. Only the soft-deleted case is new: the row
-          // still exists, so the orphan guard would happily resurrect a record into a deleted sheet.
-          if (sheetLiveness === 'deleted') throw new SheetNotLiveError(sheetId, sheetLiveness)
+          // The refusal is now `sheetLiveness !== 'live'`, AFTER the authority check, written as a
+          // RESPONSE rather than a throw. Two things changed with it:
+          //   - `!== 'live'` (not `=== 'deleted'`): the probe used to be what answered the ABSENT case,
+          //     and `multitable_attachments.sheet_id` is `NOT NULL REFERENCES meta_sheets(id)`
+          //     (db/migrations/zzzz20260319103000_create_multitable_attachments.ts:8). `storeAttachment`
+          //     uploads the BYTES to storage BEFORE the INSERT (multitable/attachment-service.ts:439
+          //     upload → :453 INSERT), so letting an absent sheet through would write the file, take an
+          //     FK violation on the INSERT, best-effort-delete the blob and answer 500. Refusing here
+          //     keeps that whole sequence from starting.
+          //   - a response, not `throw new SheetNotLiveError(...)`: this is a MULTER callback, not a
+          //     service callback — `res` is in scope and every other refusal in it returns directly.
+          //     The throw could not be answered correctly anyway: SheetNotLiveError extends Error
+          //     (multitable/sheet-liveness.ts:50) and this block's catch tests `instanceof NotFoundError`
+          //     (a module-private class), so a thrown one fell through to the 500 below. That path was
+          //     reachable only in the race between the deleted probe and the resolver; with the probe
+          //     gone it would have become the ordinary soft-delete answer.
+          const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
           if (!capabilities.canEditRecord) return sendForbidden(res)
+          if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
           if (fieldId) {
             const fieldRes = await pool.query(

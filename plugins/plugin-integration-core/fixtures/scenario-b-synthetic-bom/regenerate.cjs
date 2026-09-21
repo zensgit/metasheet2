@@ -8,11 +8,12 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const { schemaSql, seedSql } = require('./scenario-b-synthetic-bom.cjs')
+const { schemaSql, seedSql, seedSqlV2 } = require('./scenario-b-synthetic-bom.cjs')
 
 const files = [
   ['01-schema.sql', schemaSql()],
   ['02-seed.sql', seedSql()],
+  ['03-seed-v2.sql', seedSqlV2()],
 ]
 
 for (const [name, content] of files) {
