@@ -1254,17 +1254,6 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 #
 # 解析本文件的守卫必须「去注释 → 拼接续行 → 取唯一 exec 逻辑行」，不能按物理行 startsWith。
 # ============================================================================================
-#
-# H-4 cleanup (2026-09-22): a prior rebase on this branch left a SECOND, stale copy of this
-# entire token list appended after the `--reporter=dot` terminator (397 tokens, missing the
-# three `todo*` tokens the live copy above already carried — a snapshot from before they were
-# added). `required-web-lane-registration-shape.test.ts`'s "exactly one exec logical line"
-# check did not catch it because the stale copy's continuation lines have no `exec` prefix of
-# their own — bash never reaches them (this file's `exec` REPLACES the process at the first
-# non-continued line), so they were dead weight, not a second executed invocation. Removed
-# (diffed token-for-token against the live block first: identical set minus todoApi/
-# TodoCenterView/todoCountsRealtime) to bring this branch back to the single-block shape
-# `origin/main` already has.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \

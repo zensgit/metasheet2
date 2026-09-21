@@ -51,10 +51,6 @@
             >
               <span class="todo-center__item-main">
                 <span class="todo-center__item-title">{{ item.title }}</span>
-                <span class="todo-center__item-meta" data-testid="todo-center-item-meta">
-                  <span data-testid="todo-center-item-updated-at">{{ updatedAtLabel(item.updatedAt) }}</span>
-                  <span v-if="item.dueAt" data-testid="todo-center-item-due-at">{{ dueAtLabel(item.dueAt) }}</span>
-                </span>
               </span>
               <span
                 v-if="item.actionable === false"
@@ -254,8 +250,10 @@ function updatedAtLabel(value: string): string {
 }
 
 function dueAtLabel(value: string): string {
+  // No `if (stamp === '') return ''` guard here (unlike `updatedAtLabel`): this function's only
+  // call site is inside `v-if="item.dueAt"` (template, ':73'), so `value` is always truthy and
+  // therefore never `undefined`/`null` — the two inputs `formatItemTimestamp` returns '' for.
   const stamp = formatItemTimestamp(value, isZh.value ? 'zh-CN' : 'en-US')
-  if (stamp === '') return ''
   return isZh.value ? `截止 ${stamp}` : `Due ${stamp}`
 }
 

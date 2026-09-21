@@ -1,7 +1,9 @@
 # 待办中心 B-3 打磨（H-4）— 验证 MD
 
-**状态: PROPOSED.** 数字与结论均本轮（Sonnet 实现代理 D2）实测；尚未经 Opus 门审，门审前一律
-按候选对待。设计依据见同目录 `todo-center-phase3-polish-design-20260922.md`。
+**状态: PROPOSED.** §0-§6 数字为 D2 原始实测；§7 起为修复轮 2（D1 rebase + D2 record fix，
+2026-09-22，工作树 `wt-h4-d1d2-20260922`）按门审 `impl-gate-B3-todo-polish-round1-20260922.md`
+逐条重跑/改正，命令与输出均本会话现跑贴出，不手写。尚未经门审复核，复核前一律按候选对待。
+设计依据见同目录 `todo-center-phase3-polish-design-20260922.md`。
 
 ## 0. 测试台
 
@@ -60,22 +62,49 @@
 
 | 文件 | 结果 | 说明 |
 |---|---|---|
-| `apps/web/tests/TodoCenterView.spec.ts` | **15/15 PASS**（原 9 条 + 本轮新增 6 条） | 见 §1.1 明细 |
-| `apps/web/tests/attendance-web-guard-workflow.spec.ts` | **27/27 PASS** | prompt 点名的必绿项 |
-| `packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts` | **18/18 PASS** | prompt 点名的必绿项；见 §2 |
+| `apps/web/tests/TodoCenterView.spec.ts` | **15/15 PASS**（新 B-2 基线 **11** 条 + 本切片新增 **4** 条——`git show 16703f8cf…:apps/web/tests/TodoCenterView.spec.ts \| grep -cE "^\s*it\("` = 11；`grep -cE "^\s*it\(" apps/web/tests/TodoCenterView.spec.ts` = 15，修复轮 2 复算） | 见 §1.1 明细 |
+| `apps/web/tests/attendance-web-guard-workflow.spec.ts` | **27/27 PASS** | prompt 点名的必绿项；修复轮 2 重跑仍 27/27 |
+| `packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts` | **18/18 PASS** | prompt 点名的必绿项；见 §2——**但该文件不在任何 CI workflow 里**，18/18 是本地信号，非 CI 闸（门审 P3-2） |
 
-### 1.1 本轮新增的 6 条用例（file:line 见下）及其 mutation 结果
+### 1.1 本切片新增的 4 条用例（file:line 见下）及其 mutation 结果
 
 | 用例 | file:line | Mutation | Mutation 结果 |
 |---|---|---|---|
-| "renders updatedAt for every item, and dueAt only when the source supplies one" | `TodoCenterView.spec.ts:189` | 把两处 `v-if="item.dueAt"` 删成恒渲染（`TodoCenterView.vue:56`/`:77`） | **RED**（`expected <span> to be null`）——证明"只在有 `dueAt` 时渲染"这条断言承重 |
-| "renders updatedAt/dueAt in English…passes an unparseable value through unchanged" | `TodoCenterView.spec.ts:211` | （未破坏性测；正控本身覆盖 `Number.isNaN` 分支，判据本身简单到不需要额外破坏） | 见 §1.2 的独立正控说明 |
+| "renders updatedAt for every item, and dueAt only when the source supplies one" | `TodoCenterView.spec.ts:189` | 见下方**隔离网格**（修复轮 2 改正——原表把两处 `v-if="item.dueAt"` 合并一起改，是混淆型 mutation，见 §1.1.1） | 承重（router-link 支），惰性行支零判别力，已处理 |
+| "renders updatedAt/dueAt in English…passes an unparseable value through unchanged" | `TodoCenterView.spec.ts:211` | 门审 round 1 M8：把 `Number.isNaN(parsed.getTime()) ? value : …` 换成无条件 `parsed.toLocaleString(locale)` | **RED**（`1 failed / 14 passed`）——该断言确实承重（门审 NIT-2：D2 原判断"不需要破坏"缺证据，现补上门审的红证） |
 | "unavailable copy is productized…locale-aware" | `TodoCenterView.spec.ts:147` | 把两处新文案改回旧文案（`该来源暂时无法查询`/`This source could not be checked right now`，`TodoCenterView.vue:31`） | **RED**（`expected '该来源暂时无法查询' to be '暂时无法查看，请稍后重试'`）——证明断言真的钉住了新字符串，不是空转 |
-| （既有）"renders a view-only pill for actionable:false…" | `TodoCenterView.spec.ts:228`（原有，未改） | 未改动——本轮零改动 pill 相关代码 | 不重复验证（B-2 已交付） |
-| "renders nothing (not 'Updated undefined') if a future source sends a missing updatedAt"（实现代理自复核后追加，非 Opus 门审） | `TodoCenterView.spec.ts:232` | 删掉 `formatItemTimestamp` 里 `if (value === undefined \|\| value === null) return ''` 那一行防御 | **RED**（`expected '' to be '更新于 undefined'`）——证明该防御分支承重，不是摆设 |
+| （既有，未改）"renders a view-only pill for actionable:false…" | `TodoCenterView.spec.ts:247`（修复轮 2 改正——原表写 `:228`，那一行实际是注释，`sed -n '228p;247p'` 现跑核对） | 未改动——本轮零改动 pill 相关代码 | 不重复验证（B-2 已交付） |
+| "renders nothing (not 'Updated undefined') if a future source sends a missing updatedAt" | `TodoCenterView.spec.ts:232` | 删掉 `formatItemTimestamp` 里 `if (value === undefined \|\| value === null) return ''` 那一行防御 | **RED**（`expected '' to be '更新于 undefined'`）——证明该防御分支承重，不是摆设 |
 
-（复现步骤：`cp` 备份 → `sed`/Python 原地替换 → 跑单文件 → `cmp` 确认 `cp` 复原字节相同 → 复跑确认
-仍 15/15——过程记录见本会话终端历史，未落盘为脚本，因为只是几次一次性验证，不是复用夹具。）
+#### 1.1.1 惰性行 `dueAt` mutation 是混淆型——隔离 2×2 网格重做（门审 P2-1）
+
+原表把"删 `:56`"与"删 `:77`"合并成一条 mutation 读一次红，红是 `:77` 一个人挣来的，`:56`
+（惰性行分支）搭了顺风车——`feedback_confounded_mutation_needs_isolated_variant_grid.md`
+点名的复发型。修复轮 2 重做为逐一隔离（每次只改一处，`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp` 核字节，
+工作树 `wt-h4-d1d2-20260922`，已 rebase 到新 B-2 之上的最终树）：
+
+| # | 变异 | 预期 | 实测 | 判定 |
+|---|---|---|---|---|
+| M1 | 只删 `:77`（router-link 支）的 ` v-if="item.dueAt"` | RED | **1 failed / 14 passed** | 承重 ✓ |
+| M2 | 只删 `:56`（惰性行支）的 ` v-if="item.dueAt"` | RED（原表的预期） | **15 passed** | **零判别力** |
+| M5 | 删惰性行支整个 meta 块（`:54-57` 四行） | RED（原表的预期） | **15 passed** | **零判别力** |
+
+三次 mutation 均单独还原、`cmp` 核字节相同，收尾 `git status --porcelain`/`git diff` 均为空
+（还原到 M2/M5 之前的状态）。**结论**：`:56`/`:54-57` 是不可达分支（今天唯一注册的来源
+`approval-pending-source.ts` 恒产出站内相对 href，`isSameOriginRelativeHref` 恒真，惰性行永不触发）
+上的新增代码，且零覆盖。二选一（门审给的修法）：删掉它（选择，只删，见设计 MD §2.1）或补一条能
+到达它的用例。选删除的理由：惰性行本来就是"链接失效时的降级展示"，只显示标题即可，为一个今天
+不可达、将来即使可达也不影响核心判据的展示项维护一条测试，成本大于收益。
+
+删除后在最终树上重跑 M1（`:77` 现移到 `:73`，因为惰性行支的四行已经不在文件里）：
+
+| # | 变异 | 预期 | 实测 | 判定 |
+|---|---|---|---|---|
+| M1-final | 删最终树 `:73` 的 ` v-if="item.dueAt"`（router-link 支，惰性行支的重复块已删，`:56`/M2/M5 不再存在——N/A） | RED | **1 failed / 14 passed** | 承重 ✓，删除后守卫仍在 |
+
+（复现步骤：`cp` 备份 → `sed -i '' 'N s/v-if="item.dueAt" //'` 原地替换 → `npx vitest run
+TodoCenterView --reporter=dot` → `cp` 复原 → `cmp` 核对字节相同 → 复跑确认仍 15/15；全部命令与
+输出见本会话终端历史。）
 
 ### 1.2 `formatItemTimestamp` 的 Invalid-Date 正控
 
@@ -87,28 +116,58 @@
 
 ## 2. run-required-web-tests.sh 结构
 
+**修复轮 2 更正**：D2 原稿把这份脚本的死代码清理记成"本切片的清理前/清理后"，两处引用的 exec 行号
+都写成 `1258`，是转录错——D2 自己 rebase 前的树上，"清理前"（含死代码块）实际 exec 行在 `1257`，
+"清理后"（D2 自己删完块、又加一段说明注释）实际在 `1268`。这两个数字连同"清理前/后"这个框架本身
+现已随 rebase 一并作废：更关键的是，2026-09-22 B-2 自己的一个独立修复轮
+（`16703f8cfd7a11ac90da8568bc4a1a7846d6dd05`）**用逐字节相同的删除**做了同一处清理——
+
+```
+$ git diff 0a6531b80… 16703f8cfd7a11ac90da8568bc4a1a7846d6dd05 -- apps/web/scripts/run-required-web-tests.sh | grep '^-' | grep -v '^---' | md5
+dede25980e7b585a7dc105d95080eb05
+$ git diff 0a6531b80… ae7e065ece0c3a01b36898a07c37af28211e833a -- apps/web/scripts/run-required-web-tests.sh | grep '^-' | grep -v '^---' | md5
+dede25980e7b585a7dc105d95080eb05
+```
+
+本分支 `git rebase --onto 16703f8cf… 0a6531b80… HEAD` 到这个新 head 之上，两侧删除幂等——**本 PR 现在
+对该文件的 diff 是零字节**：
+
+```
+$ git diff 16703f8cfd7a11ac90da8568bc4a1a7846d6dd05 -- apps/web/scripts/run-required-web-tests.sh
+（空输出）
+```
+
+以下是修复轮 2 在最终树（rebase 后）上现跑的结构断言，不再区分"清理前/后"（该框架不再适用——本 PR
+自己对这份文件零改动，下列全部是对继承自新 B-2 的文件状态做校验）：
+
 - `bash -n apps/web/scripts/run-required-web-tests.sh` → **exit 0**
-- 清理前：2056 行，`--reporter=dot` 出现 3 处（1 处在小段独立命令里，2 处属于本次发现的
-  死代码重复；`grep -c "^exec npx vitest run"` = 1）
-- 清理后：**1669 行**，`grep -n "^exec npx vitest run"` 只有 1258 行一处；`diff` 逐令牌核对
-  （删除段 sort 后与保留段的差集 = 恰好 `todoApi`/`TodoCenterView`/`todoCountsRealtime` 三项，
-  无其它遗漏或多出）
-- **Mutation（证明该守卫真的会抓第二条 exec）**：手工在文件末尾追加一段真正带 `exec` 前缀的第二调用
-  （`exec npx vitest run \  amountAutoSum \  --reporter=dot`），`required-web-lane-registration-
-  shape.test.ts` 立即 **10/18 FAIL**（`expected exactly 1 exec logical line, found 3`）——证明"恰一
-  逻辑块"这条断言不是摆设；随后 `cmp` 复原，18/18 恢复绿。**同时确认**：本轮删除的死代码块之所以逃过
-  该守卫，正是因为它缺少 `exec` 前缀（只是普通续行文本，从未被任何 shell 执行到）——该守卫抓的是
-  "第二条会执行的 exec"，不是"任意重复文本"，所以死代码块的移除是本轮"恰一逻辑块"这句话的**充分而
-  非必要**推论：即使不删，18 条既有检查也不会变红；删除的价值是把文件恢复到与 `origin/main` 字节对齐
-  的单块形状，消除未来合并时的困惑源。
+- `grep -n '^exec npx vitest run' …` → 恰一处，**`:1257`**
+- `wc -l …` → **1658 行**（与新 B-2 相同）
+- `grep -c '^exec ' …` → **1**
+- token 集合两方向对账（`node scripts/ops/required-web-lane-token-set-diff.mjs`）：
+  - vs `origin/feat/todo-center-phase2-fe`（新 B-2）：`400 tokens, 400 distinct` 两侧，**SET IDENTICAL**
+  - vs 旧 H-4 head `7601a7eebc8c7ebfad76506be8d9c8f4e6dc9008`：同上，**SET IDENTICAL**
+  - 即本切片对 exec 令牌集合**零新增、零丢失**，`TodoCenterView`/`todoApi`/`todoCountsRealtime`
+    三个 todo 令牌本就来自新 B-2（#5857 引入），本切片验证的是它们今天仍被收集，不是本切片新增
+- **Mutation（证明该守卫真的会抓第二条 exec，本轮现跑，改正 `found 3` 的转录错）**：手工在文件末尾
+  追加一段真正带 `exec` 前缀的第二调用（`exec npx vitest run \  amountAutoSum \  --reporter=dot`），
+  `required-web-lane-registration-shape.test.ts` 立即 **10 failed / 8 passed (18)**，报错
+  `expected exactly 1 exec logical line, found` **`2`**（不是原稿写的 `3`）——证明"恰一逻辑块"这条
+  断言不是摆设；随后 `cp` 复原，`cmp` 核字节相同，18/18 恢复绿。
 - **两点纪律核对**：本轮零新增 spec 文件，`TodoCenterView`/`todoApi`/`todoCountsRealtime` 三令牌
-  在 `apps/web/scripts/run-required-web-tests.sh`（清理后仍在）与
+  在 `apps/web/scripts/run-required-web-tests.sh`（现与新 B-2 相同）与
   `.github/workflows/approval-web-guard.yml`（`:377-380`/`:770-773` 的 path-filter，`:1013` 的
   inline vitest token 列表）两处均已存在，未做改动，也不需要改动。
-- **实现代理自复核（非 Opus 门审）：该文件的其它读者未被本次删除破坏（逐个跑过，非静态假设）**——
+- **门审 P3-2（先存事实，如实登记，不当 CI 绿）**：`grep -rn "required-web-lane-registration"
+  .github/` **零命中**——`required-web-lane-registration-shape.test.ts` 当前不在任何 GitHub Actions
+  workflow 里执行；本轮/门审 round 1 的 18/18 都是本地直跑得出的信号，不是 CI 强制闸。这不是本切片
+  引入的缺口（先存），本切片也不修（另开票）；只是原稿把它跟 `attendance-web-guard-workflow.spec.ts`
+  并列写成"prompt 点名的必绿项"容易让读者误以为两者都有 CI 意义——两者中只有后者真的挂在
+  `attendance-web-guard`（required）workflow 上。
+- **D2 原始自复核（非 Opus 门审）：该文件的其它读者未被这处死代码删除破坏（逐个跑过，非静态假设）**——
   `required-web-lane-registration-shape.test.ts` 自己的 docblock 点名另外 6 个曾经/仍在解析
-  这份脚本的守卫，外加全仓 grep 命中的另外 3 个 spec 直接读它的文本；删除死代码块（推到 push 之后
-  的 head `ae7e065ec`）之后，**逐一在该 head 的干净 checkout 上重跑，全绿**：
+  这份脚本的守卫，外加全仓 grep 命中的另外 3 个 spec 直接读它的文本；这轮结果针对的是删除后的**文件
+  内容**（现与新 B-2 逐字节相同，见上），与"谁的提交做了这次删除"无关，故修复轮 2 未重跑，原表保留：
 
   | 文件 | 结果 |
   |---|---|
@@ -135,24 +194,44 @@
 | `npx vue-tsc -b --force`（`apps/web`） | **1 条 TS2769**，锚点 `vite.config.ts(28,29)`（vite 插件类型跨版本不兼容，与本切片改动的文件无关）。**已核对为先存**：`merge-train-dry-run-v2-20260921.md` §"对照" 记录同一 head 家族在 pristine `origin/main` 上跑 `pnpm --filter @metasheet/web type-check` 同样 EXIT=2、同一条 TS2769、前 39 行逐字节相同。本轮日志（`grep -c "error TS"` = 1；`grep TodoCenterView` 零命中）确认零新增错误，且错误与 `TodoCenterView.vue` 无关联。 |
 | `npx vite build`（`apps/web`） | **EXIT=0**，`✓ built in 14.67s` |
 
+**修复轮 2 在最终树（rebase + P2-1/P3-5 修复后）上重跑，确认结论不变（数字现跑，替换旧数字，不并列）**：
+`npx vue-tsc -b --force` → `EXIT=2`，`grep -c "error TS"` = **1**，唯一一条仍是
+`vite.config.ts(28,29): error TS2769`，`grep -c TodoCenterView` = **0**；`npx vite build` →
+**EXIT=0**，`✓ built in 12.91s`。
+
 ### 3.1 本地全量 `run-required-web-tests.sh` 直跑——1 处红，机制已定位、与本切片无关
 
-跑 `bash apps/web/scripts/run-required-web-tests.sh`（`set -euo pipefail`）在
-`tests/multitable-recovery-archive-modal.spec.ts` 处中止（该文件字母序早于 `TodoCenterView`，
-所以本轮改动的令牌从未被这次直跑执行到）。**机制已定位，不是猜测**：本机 `node --version` =
-**v25.9.0**，而该脚本目标的 CI 运行器（`actions/setup-node`）钉的是 **20.x**；同一份
-`run-required-web-tests.sh` 自己的历史注释（W0 docket #39 一节）就记录过同一类失败——"reproduced
-as a DETERMINISTIC 5/5 failure in ISOLATION under Node 20.20.2……本机 Node 版本不同导致的微任务/
-定时器结算差异"。核对过与本切片无关：
+**修复轮 2 更正（门审 P3-4）**：D2 原稿把中止原因写成"该文件字母序早于 `TodoCenterView`"——这是
+**错的机制**：`multitable-recovery-archive-modal.spec.ts` 根本不在脚本 `:1257` 起的 exec 令牌块里，
+它是 **`:612` 一条独立的 `npx vitest run multitable-recovery-archive-client
+multitable-recovery-archive-modal --reporter=dot`**（没有 `|| exit $?`），在 `:473` 的
+`set -euo pipefail` 下失败即退出整个脚本——与 exec 块内部的字母序**毫无关系**（它在 exec 块之前
+645 行，属于脚本前半段一长串独立 `npx vitest run` 调用中的一条）。"直跑到这里就没跑到 exec 块"这个
+**结论**是对的，"因为字母序"这个**机制**是错的，本仓 `feedback_failing_consistently_is_not_evidence_
+of_cause.md` 的同族。命令核对：
+
+```
+$ grep -n "set -euo pipefail" apps/web/scripts/run-required-web-tests.sh
+473:set -euo pipefail
+$ grep -n "multitable-recovery-archive-modal" apps/web/scripts/run-required-web-tests.sh
+612:npx vitest run multitable-recovery-archive-client multitable-recovery-archive-modal --reporter=dot
+$ apps/web $ npx vitest run multitable-recovery-archive-client multitable-recovery-archive-modal --reporter=dot
+Test Files  1 failed | 1 passed (2)
+     Tests  1 failed | 153 passed (154)
+```
+
+**机制核实、与本切片无关**：本机 `node --version` = **v25.9.0**，而该脚本目标的 CI 运行器
+（`actions/setup-node`）钉的是 **20.x**；同一份 `run-required-web-tests.sh` 自己的历史注释
+（W0 docket #39 一节）就记录过同一类失败——"reproduced as a DETERMINISTIC 5/5 failure in ISOLATION
+under Node 20.20.2……本机 Node 版本不同导致的微任务/定时器结算差异"。核对过与本切片无关：
 ```
 git diff origin/main origin/feat/todo-center-phase2-fe -- apps/web/tests/multitable-recovery-archive-modal.spec.ts
 ```
-零输出（该文件与其大概率的源文件都不在这条分支的历史改动范围内），且该测试在**隔离**跑（不经这份
-脚本，单独 `npx vitest run multitable-recovery-archive-modal`）时结果相同（3 次重跑，确定性失败，
-非偶发）——所以本轮改动前后这个坑都在，不是本切片引入，也不因本切片而加重或减轻。真正必绿的两项
-（`attendance-web-guard-workflow.spec.ts`、`required-web-lane-registration-shape.test.ts`）与本轮
-自己的 `TodoCenterView.spec.ts` 均已单独跑过并 PASS（见 §1），未被这处早于它们字母序的无关红块
-挡住。
+零输出（该文件与其大概率的源文件都不在这条分支的历史改动范围内），且该测试独立跑时结果相同
+（1 failed/153 passed，多次重跑确定性失败，非偶发）——所以本轮改动前后这个坑都在，不是本切片引入，
+也不因本切片而加重或减轻。真正必绿的两项（`attendance-web-guard-workflow.spec.ts`、
+`required-web-lane-registration-shape.test.ts`）与本轮自己的 `TodoCenterView.spec.ts` 均已单独跑过
+并 PASS（见 §1），未被这条更早触发、与本轮令牌无关的独立调用挡住。
 
 ### 3.2 新断言与 Node/ICU/时区无关
 
@@ -170,7 +249,7 @@ git diff origin/main origin/feat/todo-center-phase2-fe -- apps/web/tests/multita
 |---|---|---|---|
 | ① updatedAt 呈现 | 两条条目都渲染 `Updated <本地化时间戳>` | **PASS** | 截图 `h4-01-mixed-actionable-and-updatedat.png`；DOM 文本 `Updated 9/21/2026, 11:46:32 PM` / `Updated 9/21/2026, 11:43:21 PM` |
 | ① dueAt 呈现（代码路径） | 无数据时不渲染该 `data-testid` | **PASS（但见下方 NOT RUN）** | `results-h4.json`：两行 `dueAtPresent: false` |
-| ② C′ pill——正控 | **同一用户、同一列表**里两行分别为 `actionable:true`（无 pill）与 `actionable:false`（有 pill），仅这一个字段不同 | **PASS** | 截图同上：第一行无 "View only"，第二行有；`net-todo-requests.json` 逐字确认后端返回体里两条 `actionable` 值分别为 `true`/`false` |
+| ② C′ pill——正控 | **同一用户、同一次页面加载**里两个不同实例（`0a0b7fd8…`/`b71c437f…`，`id`/`title`/`href`/`updatedAt` 均不同）分别渲染为 `actionable:true`（无 pill）与 `actionable:false`（有 pill）——判据 C′ 要求的"不同形"成立，渲染出的判别物只有 pill（**修复轮 2 改正**：D2 原稿写"仅这一个字段不同"，是过强表述——两行是两个不同实例，不是同一实例改一个字段） | **PASS** | 截图同上：第一行无 "View only"，第二行有；`net-todo-requests.json` 逐字确认后端返回体里两条 `actionable` 值分别为 `true`/`false` |
 | ③ 来源不可用文案 | 真实（可逆）撤权触发 `unavailable`，文案 = `Can't be shown right now — please try again shortly.`，不含 "source"/"来源" | **PASS** | 截图 `h4-02-source-unavailable-copy.png`；`results-h4.json` 的 `leg3.containsInternalTerm: false` |
 | ③ 恢复 | `GRANT` 后重新拉取，2 条恢复、0 处于 unavailable | **PASS** | 截图 `h4-03-recovered-after-grant.png`；`results-h4.json` 的 `leg3recovery: {recoveredCount:2, stillUnavailable:0}` |
 
@@ -227,3 +306,37 @@ GRANT  SELECT ON TABLE approval_assignments TO   ms2testbed;   -- 恢复
   不可用文案字符串、`run-required-web-tests.sh` 的第二条 exec 逻辑行、`updatedAt` 缺失防御分支）
   均用 `cp` 备份 + `cmp` 核对字节相同。
 - 未删除任何不是本轮创建的 worktree/库/文件/进程。
+
+## 7. 修复轮 2（D1 rebase + D2 record fix，2026-09-22）—— 登记项与未动项
+
+对象门审：`impl-gate-B3-todo-polish-round1-20260922.md`。本轮**未创建任何数据库**——TodoCenterView.spec.ts、
+attendance-web-guard-workflow.spec.ts、required-web-lane-registration-shape.test.ts、vue-tsc、
+vite build 五项均不触库；真机三腿（§4）沿用本轮之前已产出、门审 round 1 已逐文件审计过的证据，未重跑。
+
+### 7.1 Rebase（详细命令见设计 MD §4.1，此处只登记与验证 MD 相关的部分）
+
+- 分支旧 head `7601a7eebc8c7ebfad76506be8d9c8f4e6dc9008` → 新 head
+  `2e99240b2206215a6e0b82cc53e5af916b767396`，rebase 到新 B-2 head
+  `16703f8cfd7a11ac90da8568bc4a1a7846d6dd05` 之上，**零冲突**（两条 B-3 自有提交自动应用）。
+- **P3-3 登记（不修，归 #5857）**：`git log --format='%H %an <%ae>' origin/main..HEAD | grep -v
+  'zensgit <77236085'` 恰两行，均 `Merge Rehearsal <rehearsal@local.invalid>`
+  （`03c276cc290fdfbb0e5de2ff38b8cb61477774cf`、`9fa446dd358514011fe1f6ddd8a9fa6db223776e`）——
+  两条都是 `#5857` 祖先链上的既有提交（`git merge-base --is-ancestor 0a6531b80… HEAD` = YES 的
+  那条链带进来的），**不是本切片自己的两条提交**（`2e99240b2`/`6ff646e5e` 的 author/committer
+  均 `zensgit <77236085+zensgit@users.noreply.github.com>`）。修复归属 #5857 合并前处理，本 PR
+  不动、不新增提交去改写它们。
+- **P3-7 登记（不修，归 #5857）**：真机截图显示 `/todo` 导航入口在 1280px 下被裁掉末字
+  （`App.vue:392-397`/`:415-426` 的 `overflow-x: auto` + `flex: 0 0 auto` 故意把宽度压力推给导航
+  条内部滚动，是设计内降级不是回归）。`git diff --name-only 16703f8cf… HEAD` 不含 `App.vue`——本 PR
+  零改动该文件；该入口本身是 #5857 B-2 step 11 加的（`7341beccfbe95e7d338c7504970388b2a4940f09`），
+  归属 #5857 之后的 UX 切片，不阻塞本 PR。
+
+### 7.2 P2-1（惰性行分支 meta 块零覆盖）—— 见 §1.1.1，选择删除
+
+隔离网格、还原记录、删除后 M1-final 重跑均见 §1.1.1；对应代码改动见设计 MD §2.1。
+
+### 7.3 PR body 需要的范围更正（非本 MD 内容，仅登记本轮已知需要同步的一处）
+
+PR #5973 body 第四条 scope 描述（"清理 `run-required-web-tests.sh` 末尾一处遗留的死代码重复令牌块"）
+在 rebase 后不再准确——该清理现在完全来自继承的新 B-2 head，本 PR 对该文件零 diff（见 §2）。
+`gh pr edit 5973 --body` 已同步这一句改述，详见提交后的 PR body。
