@@ -230,12 +230,8 @@ function safeMetricsCall(label: string, fn: () => Promise<void>): void {
  */
 async function settleMetricsCall(label: string, fn: () => Promise<void>): Promise<void> {
   try {
-    // The `Promise.resolve().then(fn)` hop is the SAME microtask trampoline `safeMetricsCall` uses, and
-    // it is load-bearing here, not cosmetic: calling `fn()` inline would start this hook's own
-    // transaction (`pool.connect()` + `SELECT … FOR UPDATE` on the instance's `approval_metrics` row)
-    // BEFORE any hook the caller dispatched earlier in the same synchronous block had even been invoked,
-    // inverting the order in which sibling hooks reach that row lock. Keeping the hop preserves
-    // "dispatched first reaches the row first"; the `await` then additionally waits for settlement.
+    // Restores the microtask trampoline `safeMetricsCall` uses. Discriminating power here comes from
+    // the `await` in `settleNodeDecisionMetric` (see the H-1 test names), not from this hop.
     await Promise.resolve().then(fn)
   } catch (error) {
     logMetricsHookFailure(label, error)
@@ -11333,12 +11329,10 @@ export class ApprovalProductService {
    * only WHEN the caller continues — after the stamp is durable, instead of after it is merely queued.
    *
    * Rationale: this write arms the SLA scanner. Left unsettled it can land after the caller's response
-   * has been observed and overwrite state written in between (a forced/consumed deadline, or a NEWER
-   * node's activation stamp when two activations in one cascade land out of order), which surfaces as
+   * has been observed and overwrite state written in between (a forced/consumed deadline), which surfaces as
    * `applyNodeTimeoutEffect` returning 'skipped_stale' against a correctly-armed row, or as the scanner
    * firing a stale node's effect. Every call site is POST-COMMIT — no approval lock is held while this
-   * awaits, so it can only add latency, never deadlock. Sibling post-commit awaits on the same held
-   * connection already exist (`emitApprovalTaskCreatedEventsPostCommit`, `supersedeCardDeliveriesPostCommit`).
+   * awaits, so it can only add latency, never deadlock.
    */
   private emitNodeActivationMetric(
     instanceId: string,

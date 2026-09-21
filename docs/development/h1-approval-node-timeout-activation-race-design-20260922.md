@@ -33,7 +33,7 @@ tests/integration/approval-dedup-return-round-scoping.db.test.ts:482
 
 **本文的第一条主张（与报告的措辞有一处分歧，明写在此）**：报告把它归为
 「测试夹具的缺陷，不是生产缺陷」。这句话对**该条用例**成立，但对**这两列的所有权语义**不成立。
-生产代码自己已经把这个窗口写在注释里 —— `ApprovalProductService.ts:9312`（本轮 head 行号）：
+生产代码自己已经把这个窗口写在注释里 —— `ApprovalProductService.ts:9307`（本轮 head 行号）：
 
 ```
 // The armed deadline no longer matches the current node's configured effect (e.g. the
@@ -53,8 +53,8 @@ tests/integration/approval-dedup-return-round-scoping.db.test.ts:482
 | 角色 | 读者 | file:line（本分支） |
 |---|---|---|
 | SLA 扫描器的**待办集合** | `ApprovalMetricsService.scanNodeTimeouts` | `ApprovalMetricsService.ts:481-489` |
-| `applyNodeTimeoutEffect` 的**事务内竞态守卫** | `ApprovalProductService.applyNodeTimeoutEffect` | `ApprovalProductService.ts:9265-9271` |
-| 超时单发性的**消费标记** | `markNodeTimeoutFired` / `consumeTimeout` | `ApprovalMetricsService.ts:493-499` / `ApprovalProductService.ts:9230-9236` |
+| `applyNodeTimeoutEffect` 的**事务内竞态守卫** | `ApprovalProductService.applyNodeTimeoutEffect` | `ApprovalProductService.ts:9261-9267` |
+| 超时单发性的**消费标记** | `markNodeTimeoutFired` / `consumeTimeout` | `ApprovalMetricsService.ts:493-499` / `ApprovalProductService.ts:9226-9232` |
 
 即它们是**状态机的 armed state**，被当作判据读回。一个「尽力而为、不知何时落库」的写，
 不能承载一个会被当判据读回的状态 —— 这正是 `feedback_persistent_transition_must_not_depend_on_network_call`
@@ -124,14 +124,14 @@ grep -rn --exclude-dir=node_modules --exclude-dir=.git \
 | 3 | `ApprovalMetricsService.ts:440` | `recordNodeDecision` 清空 | 否 | 已有作用域守卫 `AND EXISTS (… i.current_node_key = $2)`，注释自述同族 RACE FIX |
 | 4 | `ApprovalMetricsService.ts:468` | `recordTerminal` 清空 | 否 | **无作用域**（见 §7 残留 R2） |
 | 5 | `ApprovalMetricsService.ts:496` | `markNodeTimeoutFired` 清空 | 否 | 仅 SLA 调度器调用 |
-| 6 | `ApprovalProductService.ts:9197`（基线）→ `:9233`（本轮 head） | `consumeTimeout` 置 NULL | 否 | 在 `applyNodeTimeoutEffect` 自己的事务内 |
+| 6 | `ApprovalProductService.ts:9197`（基线）→ `:9229`（本轮 head） | `consumeTimeout` 置 NULL | 否 | 在 `applyNodeTimeoutEffect` 自己的事务内 |
 
 ### 4.2 生产读取点（2 个）
 
 | file:line（基线） | 读者 |
 |---|---|
 | `ApprovalMetricsService.ts:481-486` | `scanNodeTimeouts`（扫描器待办集合） |
-| `ApprovalProductService.ts:9265-9271`（本轮 head）| `applyNodeTimeoutEffect` 的 `FOR UPDATE` 竞态守卫 |
+| `ApprovalProductService.ts:9261-9267`（本轮 head）| `applyNodeTimeoutEffect` 的 `FOR UPDATE` 竞态守卫 |
 
 ### 4.3 DDL（只读性确认，本 PR 不动）
 
@@ -144,18 +144,18 @@ grep -rn --exclude-dir=node_modules --exclude-dir=.git \
 
 | 本分支 file:line | 所在方法 | 前置 `await client.query('COMMIT')` | 执行覆盖（round-2 起） |
 |---|---|---|---|
-| `ApprovalProductService.ts:8482` | 管理员 jump | `:8464` | `H-1 SITE (admin jump)` |
-| `ApprovalProductService.ts:9536` | `applyNodeTimeoutEffect` 自己的再激活 | `:9526` | `H-1 SITE (timeout re-activation)`（+ `H-1 P1-1 GATE (timeout jump)`） |
-| `ApprovalProductService.ts:10586` | handler 节点分支 | `:10576` | `H-1 SITE (handler branch)` |
-| `ApprovalProductService.ts:10692` | `return` 分支 | `:10685` | `H-1 SITE (return branch)` |
-| `ApprovalProductService.ts:11266` | 普通 approve/dispatch | `:11243` | `H-1 DISCRIMINATOR` + `H-1 GATE` |
+| `ApprovalProductService.ts:8478` | 管理员 jump | `:8460` | `H-1 SITE (admin jump)` |
+| `ApprovalProductService.ts:9532` | `applyNodeTimeoutEffect` 自己的再激活 | `:9522` | `H-1 SITE (timeout re-activation)`（+ `H-1 P1-1 GATE (timeout jump)`） |
+| `ApprovalProductService.ts:10582` | handler 节点分支 | `:10572` | `H-1 SITE (handler branch)` |
+| `ApprovalProductService.ts:10690` | `return` 分支 | `:10681` | `H-1 SITE (return branch)` |
+| `ApprovalProductService.ts:11264` | 普通 approve/dispatch | `:11241` | `H-1 DISCRIMINATOR` + `H-1 GATE` |
 
 round-2 另加的两个被 await 的**决策关闭**调用点（同样 POST-COMMIT）：
 
 | 本分支 file:line | 所在方法 | 前置 COMMIT | 执行覆盖 |
 |---|---|---|---|
-| `ApprovalProductService.ts:9534` | `applyNodeTimeoutEffect` | `:9526` | `H-1 P1-1 GATE (timeout jump)` |
-| `ApprovalProductService.ts:10690` | `dispatchAction` 的 `return` 分支 | `:10685` | `H-1 P1-1 GATE (return branch)` |
+| `ApprovalProductService.ts:9530` | `applyNodeTimeoutEffect` | `:9522` | `H-1 P1-1 GATE (timeout jump)` |
+| `ApprovalProductService.ts:10688` | `dispatchAction` 的 `return` 分支 | `:10681` | `H-1 P1-1 GATE (return branch)` |
 
 **round-1 的 P2-1 缺口已关闭**：逐站点 mutation 表见验证 MD §3.1 —— 7 个 `await` 每一个单独
 neuter 都至少打红一条用例，不再有「靠读代码断言正确性」的站点。
@@ -177,7 +177,7 @@ neuter 都至少打红一条用例，不再有「靠读代码断言正确性」�
 | CAS 键 | 能否挡住 §3 变体 A（同节点、外部改写） | 能否挡住乱序激活 | 新失败模式 |
 |---|---|---|---|
 | `approval_instances.current_node_key = $nodeKey`（复刻 `:440` 先例） | **否** —— 实例仍在 `approval_c`，谓词为真，迟到的写照样落 | 是 | 无 |
-| `approval_instances.node_activation_seq = $seq`（该列**已存在**，`ApprovalProductService.ts:11922` 的 `bumpNodeActivationSeq`） | **否** —— 同一次激活，代数未变 | 是（更强） | 无 |
+| `approval_instances.node_activation_seq = $seq`（该列**已存在**，`ApprovalProductService.ts:11961` 的 `bumpNodeActivationSeq`） | **否** —— 同一次激活，代数未变 | 是（更强） | 无 |
 | `current_node_deadline_at IS NOT DISTINCT FROM $观测到的前值` | 是 | 部分 | **有**：合法的并发消费者（扫描器 consume）也会让 CAS 失败 ⇒ **新节点的 timeout 永远不被 arm**。「重读」要把它和「更新的激活」区分开，又回到需要代数 |
 
 **判定性事实**：`node_activation_seq` 在报告复现的交错里**没有推进**（同一次激活、同一节点），
@@ -200,7 +200,7 @@ neuter 都至少打红一条用例，不再有「靠读代码断言正确性」�
 | 新错误码 / 迁移 / DDL / 公开合同 | **零**（见 §6 的不变量核对） |
 | 「metrics 故障不能拖垮审批流」 | **保持**：`settleMetricsCall` 内部 try/catch，promise 永不 reject ⇒ `await` 不可能把 metrics 错误路由进调用点外层那个 `catch { await rollbackQuietly(client); throw error }` |
 | 代价 | 响应路径 **+1 个事务（BEGIN / SELECT FOR UPDATE / UPDATE / COMMIT）+ 1 条 UPDATE ≈ 5 次往返**；**timeout-jump 与 return 两条路径 +2 个**（round-2 起 decision 关闭也被 await，见 §5.1）；实测范围见验证 MD §5 |
-| 连接池 | 在仍持有审批连接（C1）时**顺序**再借若干条。**逐个方法数过，不是估**：每个被 await 的 hook 最多**两次**顺序 checkout —— `mutateBreakdown` 的多语句取锁事务（`pool.connect()`）**加上**其后独立的单语句 `this.query(UPDATE …)`（`pool.query()`，`recordNodeActivation` 只在 `added` 为真时发出，`recordNodeDecision` 无条件发出）。于是 approve / 管理员 jump / handler 三条路径最多 **C1 + 2 次顺序 checkout**；timeout-jump 与 return 两条路径（关闭 + 激活两个 hook）最多 **C1 + 4 次顺序 checkout**。全部**顺序**且每次用完即还，不存在同时持有多于两条的时刻。**同族但形状更重，不是「既有模式」逐字复制**：被引作先例的 `emitApprovalTaskCreatedEventsPostCommit`（定义 `:11847`）与 `supersedeCardDeliveriesPostCommit`（定义 `:11905`）都走 `pool.query(sql, params)` —— **借一条连接、跑一条语句、立刻归还**；而本 PR 被 await 的写走 `recordNodeActivation → mutateBreakdown → defaultTransaction`（`ApprovalMetricsService.ts:1019-1040`）：`pool.connect()` + `BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`，**跨多条语句持有第二条连接并取行锁**。有界性来自 `connection-pool.ts:252-258` 的 `connectionTimeoutMillis = 10000` 与 `statement_timeout` / `query_timeout = 30000`：最坏情况是**有界**的额外时延 + 一次被吞掉的 metrics 失败，不会把审批响应挂死。`DB_POOL_MAX` 默认 20；「持有 C1 再取 C2」的形状在 baseline 上已存在（`:11245` 的 supersede 无条件执行），所以池耗尽的悬崖是既有的，本 PR 加长了第二条连接的持有时长、并在两条路径上把它变成两条。**并发/池压测仍未做**（§7 R3） |
+| 连接池 | 在仍持有审批连接（C1）时**顺序**再借若干条。**逐个方法数过，不是估**：每个被 await 的 hook 最多**两次**顺序 checkout —— `mutateBreakdown` 的多语句取锁事务（`pool.connect()`）**加上**其后独立的单语句 `this.query(UPDATE …)`（`pool.query()`，`recordNodeActivation` 只在 `added` 为真时发出，`recordNodeDecision` 无条件发出）。于是 approve / 管理员 jump / handler 三条路径最多 **C1 + 2 次顺序 checkout**；timeout-jump 与 return 两条路径（关闭 + 激活两个 hook）最多 **C1 + 4 次顺序 checkout**。全部**顺序**且每次用完即还，不存在同时持有多于两条的时刻。**同族但形状更重，不是「既有模式」逐字复制**：被引作先例的 `emitApprovalTaskCreatedEventsPostCommit`（定义 `:11886`）与 `supersedeCardDeliveriesPostCommit`（定义 `:11944`）都走 `pool.query(sql, params)` —— **借一条连接、跑一条语句、立刻归还**；而本 PR 被 await 的写走 `recordNodeActivation → mutateBreakdown → defaultTransaction`（`ApprovalMetricsService.ts:1019-1040`）：`pool.connect()` + `BEGIN` + `SELECT … FOR UPDATE` + `UPDATE` + `COMMIT`，**跨多条语句持有第二条连接并取行锁**。有界性来自 `connection-pool.ts:248-261` 的 `connectionTimeoutMillis = 10000` 与 `statement_timeout` / `query_timeout = 30000`：最坏情况是**有界**的额外时延 + 一次被吞掉的 metrics 失败，不会把审批响应挂死。`DB_POOL_MAX` 默认 20；「持有 C1 再取 C2」的形状在 baseline 上已存在（`:11255` 的 supersede 无条件执行），所以池耗尽的悬崖是既有的，本 PR 加长了第二条连接的持有时长、并在两条路径上把它变成两条。**并发/池压测仍未做**（§7 R3） |
 | 锁竞争 | 被 await 的激活事务与同一请求内的 decision 关闭会在**同一行**上 `FOR UPDATE` 排队。round-1 把这当成「串行化，只是延迟」——**那句话是错的**，排队顺序决定结果正确与否（§5.1）。round-2 让这两条在需要的路径上按代码顺序串行，顺序不再由锁竞争决定 |
 
 ### 5.1 round-2 勘误 —— 只恢复派发次序**不足以**关闭同节点再激活的 arm 丢失
@@ -252,27 +252,27 @@ r1 门审指出：`settleMetricsCall` 同步调用 `fn()`，使激活写的 `poo
 3. **`:231` `settleMetricsCall`** —— 新增的**可 await** 形式，同样的 log-and-swallow 合同，
    **并且保留 `Promise.resolve().then(fn)` 微任务跳板**（round-2：round-1 写成 `await fn()`，
    那会让本 hook 的事务抢在同一同步块中更早派发的 hook 之前发出，见 §5.1）。
-4. **`:11341` `emitNodeActivationMetric`** —— 返回类型 `void` → `Promise<void>`，体内
+4. **`:11337` `emitNodeActivationMetric`** —— 返回类型 `void` → `Promise<void>`，体内
    `safeMetricsCall(...)` → `return settleMetricsCall(...)`。**入参、写入的值、SQL 一字未动。**
 5. **5 个激活调用点**（§4.4 表）加 `await`。
-6. **round-2 新增 `:11313` `settleNodeDecisionMetric`** —— `emitNodeDecisionMetric` 的**可 await 兄弟**：
+6. **round-2 新增 `:11311` `settleNodeDecisionMetric`** —— `emitNodeDecisionMetric` 的**可 await 兄弟**：
    同一次写、同一套 log-and-swallow 合同，只是调用方等待落库。写体抽成
-   `:11318 nodeDecisionMetricWrite`（`decidedAt` 仍在 hook **运行时**取），两个形式共用，无重复字面量。
-7. **两个决策调用点改 `await this.settleNodeDecisionMetric(...)`**：`:9534`（`applyNodeTimeoutEffect`
-   的再激活路径）与 `:10690`（`dispatchAction` 的 `return` 分支）。**其余 3 个 `emitNodeDecisionMetric`
-   调用点逐字未动**（`:10740` reject、`:10810` sequential 队首推进、`:11261` approve）：前两者之后不发出
+   `:11316 nodeDecisionMetricWrite`（`decidedAt` 仍在 hook **运行时**取），两个形式共用，无重复字面量。
+7. **两个决策调用点改 `await this.settleNodeDecisionMetric(...)`**：`:9530`（`applyNodeTimeoutEffect`
+   的再激活路径）与 `:10688`（`dispatchAction` 的 `return` 分支）。**其余 3 个 `emitNodeDecisionMetric`
+   调用点逐字未动**（`:10738` reject、`:10808` sequential 队首推进、`:11259` approve）：前两者之后不发出
    任何激活写；approve 的激活写被 `resolution.currentNodeKey !== currentNodeKey` 挡住，
    于是它的关闭与它的激活针对**不同节点**，关闭的作用域守卫无论谁先落库都为假。
 
 未改动且**刻意**未改动的：
 
-- **`recordInstanceStart`（`:8162` 的 `safeMetricsCall`）不在本 PR 范围**。理由不是「范围收窄」，
-  而是**没有同请求碰撞**：`:8163` 的注释自述「the FIRST node is activated here (not via
+- **`recordInstanceStart`（`:8158` 的 `safeMetricsCall`）不在本 PR 范围**。理由不是「范围收窄」，
+  而是**没有同请求碰撞**：`:8159` 的注释自述「the FIRST node is activated here (not via
   `emitNodeActivationMetric`)」，该 INSERT 与激活 UPDATE 不在同一请求内，且它带
   `ON CONFLICT DO NOTHING`（§4.1 #1）⇒ 它不能覆盖任何东西。
 - `ApprovalMetricsService.ts` **一行未改**（所以本 PR 不触发以该文件为 `paths:` 的 lane；
   触发的是以 `ApprovalProductService.ts` 为 `paths:` 的 lane，含 l6a —— 见验证 MD §6）。
-- `:9312` 那条注释保留原文：它描述的是**跨请求**的窗口（R1），本 PR 没有关闭它，
+- `:9307` 那条注释保留原文：它描述的是**跨请求**的窗口（R1），本 PR 没有关闭它，
   改写它会把一个仍然成立的事实写成已解决。
 
 ### 公开合同不变量核对
@@ -299,8 +299,8 @@ r1 门审指出：`settleMetricsCall` 同步调用 `fn()`，使激活写的 `poo
 
 **R2 —— `recordTerminal` 的清空无作用域，且本 PR 让这条边**方向上变差**。**
 `ApprovalMetricsService.ts:468` 的清空没有 `recordNodeDecision` 那样的
-`AND EXISTS (… current_node_key = $2)` 守卫，且它（`ApprovalProductService.ts:11252` / `:10574` 的 `emitTerminalMetric`）仍是 fire-and-forget；激活写现在被 await 了，
-所以在两者都会触发的路径上（`ApprovalProductService.ts:10574-10583`：`emitTerminalMetric` 之后
+`AND EXISTS (… current_node_key = $2)` 守卫，且它（`ApprovalProductService.ts:11262` / `:10579` 的 `emitTerminalMetric`）仍是 fire-and-forget；激活写现在被 await 了，
+所以在两者都会触发的路径上（`ApprovalProductService.ts:10579-10582`：`emitTerminalMetric` 之后
 紧跟 `emitNodeActivationMetric`），激活 stamp 更容易**存活在一个终态行上**。
 **危害有界**：`scanNodeTimeouts` 带 `terminal_at IS NULL`，残留的 arm 不会被扫描到，是惰性脏数据。
 未修。
@@ -311,12 +311,12 @@ r1 门审指出：`settleMetricsCall` 同步调用 `fn()`，使激活写的 `poo
 其后还有**第二次独立 checkout**（单语句 `UPDATE`）。数出来的上界是：
 approve / 管理员 jump / handler 三条路径 **C1 + 2 次顺序 checkout**；
 timeout-jump 与 return 两条路径 **C1 + 4 次顺序 checkout**（关闭 2 次 + 激活 2 次）。
-**有界性有依据，但按 checkout 逐次计**：`connection-pool.ts:252-258` 的
+**有界性有依据，但按 checkout 逐次计**：`connection-pool.ts:248-261` 的
 `connectionTimeoutMillis = 10000` 与 `statement_timeout` / `query_timeout = 30000`
 是**每次 checkout / 每条语句**的上界，不是整条路径的上界 —— 所以最坏情况是
 「有界，但可能是若干个这样的上界之和」，仍不会把审批响应永久挂死。
 **没有做的是**：高并发下的池压力实测。
-`DB_POOL_MAX` 默认 20，「持有 C1 再借第二条」的悬崖是既有的（`:11245` 无条件执行），
+`DB_POOL_MAX` 默认 20，「持有 C1 再借第二条」的悬崖是既有的（`:11255` 无条件执行），
 本 PR 加长了持有时长、并把那两条路径的 checkout 次数翻倍 —— **「边际」二字仍无实测数字支撑，如实记。**
 
 **R5 —— 被 await 的 hook 把 metrics 侧的停顿引入审批响应时延**与**完成事件的发出时刻**（round-2 新增）。**
@@ -324,7 +324,7 @@ timeout-jump 与 return 两条路径 **C1 + 4 次顺序 checkout**（关闭 2 �
 `statement_timeout`（30s，语句被别的事务挡住）；按 §5 表的计数，timeout-jump 与 return 路径上
 最多 4 次这样的 checkout。错误仍然被吞（promise 永不 reject，审批流不失败、不回滚），
 **代价体现在时延而不是正确性**。
-**另一处必须写明**：`:9534` 的被 await 关闭排在 `emitApprovalCompletionEvent(completionEvent)`
+**另一处必须写明**：`:9530` 的被 await 关闭排在 `emitApprovalCompletionEvent(completionEvent)`
 **之前**，所以 metrics 侧的停顿不只是拖慢 HTTP 响应，它按同一个上界**推迟完成事件的发出**
 （下游 bridge / trigger 因此也被推迟）。这条不影响事件的内容或是否发出，只影响时刻。
 这是选择「结果确定」所付的价；若 owner 认为该上界不可接受，替代方向是把这两条 hook 合并成

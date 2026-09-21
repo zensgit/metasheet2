@@ -27,7 +27,7 @@
 | 包管理 | **未用 pnpm**，直调 `./node_modules/.bin/{tsx,vitest,tsc}` | `pnpm 10.16.1 exec` | `exec` 只做 bin 解析，直调等价；绕开是为了不让本机 pnpm 改写 lockfile |
 | 依赖树 | 工作树 `node_modules` 软链到 canonical（根 / apps/web / packages/core-backend / plugins/*，共 9 条） | `pnpm install --frozen-lockfile` | — |
 | 一次性库 | `metasheet2_h1_20260922`，owner **`ms2testbed`（非超级）**；`postgres` 超级用户**只**用于 `createdb` / `dropdb` | `postgres:postgres@…/metasheet_approval_realdb` | — |
-| 连接串变量 | **被测代码只读 `DATABASE_URL`**（`src/integration/db/connection-pool.ts:200` 经 `secretManager.get('DATABASE_URL')` → `SecretManager.ts:19` `process.env[key]`；`migrate.ts` 走同一 `db`）。**round-2 勘误**：本行原写「全仓普查后无第二个」，那是错的 —— `.github/workflows/*.yml` + `package.json` 里共有 **6 个**连接串变量（见 §4.6），round-2 把**每一个**都 export 到一次性库 | 同名 | 每次运行前 `psql -tAc "select current_database(), current_user"` 核过 = `metasheet2_h1_20260922 \| ms2testbed`（round-1）／`metasheet2_h1fix_20260922`、`metasheet2_h1nb_20260922`（round-2） |
+| 连接串变量 | **被测代码只读 `DATABASE_URL`**（`src/integration/db/connection-pool.ts:226` 经 `secretManager.get('DATABASE_URL')` → `SecretManager.ts:19` `process.env[key]`；`migrate.ts` 走同一 `db`）。**round-2 勘误**：本行原写「全仓普查后无第二个」，那是错的 —— `.github/workflows/*.yml` + `package.json` 里共有 **6 个**连接串变量（见 §4.6），round-2 把**每一个**都 export 到一次性库 | 同名 | 每次运行前 `psql -tAc "select current_database(), current_user"` 核过 = `metasheet2_h1_20260922 \| ms2testbed`（round-1）／`metasheet2_h1fix_20260922`、`metasheet2_h1nb_20260922`（round-2） |
 | 迁移排除 | `MIGRATION_EXCLUDE=008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql` | **与 l6a workflow 逐字相同** | — |
 | 并发参数 | `vitest.integration.config.ts` 原样（`pool:'forks'` / `fileParallelism:false` / `maxConcurrency:1`） | 同 | — |
 | `CI=true` | 每次运行都置 | — | — |
@@ -46,7 +46,7 @@
 
 - `installLateActivationStamp(instanceId, nodeKey, delayMs)`
   （`approval-dedup-return-round-scoping.db.test.ts:709`）把**共享 metrics 单例**
-  （`getApprovalMetricsService()`，`ApprovalMetricsService.ts:1044`，`ApprovalProductService.ts:5296`
+  （`getApprovalMetricsService()`，`ApprovalMetricsService.ts:1044`，`ApprovalProductService.ts:5328`
   的默认构造参数捕获的就是这个对象）上的 `recordNodeActivation` 替换成一个**自有属性**，
   只拦截第一次、且只拦截 `(instanceId, nodeKey)` 匹配的那次调用，先 `await sleep(delayMs)` 再委托原方法，
   完成后 resolve 一个 `landed` promise。`restore()` 用 `delete` 摘掉自有属性，原型方法归位。
@@ -207,7 +207,7 @@ start → approval_a { approvalType: 'auto_approve' }
 **其余 14 条在三个红的变体下全部保持绿** ⇒ 新增的两条 P1 用例是唯一对本轮改动有判别力的断言，
 没有顺带打红别的东西（`feedback_confounded_mutation_needs_isolated_variant_grid`）。
 
-**`:10690`（return 分支）的同节点场景本轮是构造出来并实测的，不是「与 `:9534` 同形状」的推断**：
+**`:10688`（return 分支）的同节点场景本轮是构造出来并实测的，不是「与 `:9530` 同形状」的推断**：
 门审明写它未复现；本轮用同一张图（返回目标 `approval_a` 是 `auto_approve`，级联落回 `approval_c`）
 把它跑成了一条确定性用例。
 
@@ -220,13 +220,13 @@ start → approval_a { approvalType: 'auto_approve' }
 
 | # | 站点（本轮 head 行号） | 所在方法 | 未 mutate | 单独 neuter 后 |
 |---|---|---|---|---|
-| 1 | `:8482` `emitNodeActivationMetric` | 管理员 jump | 绿 | **Failed Tests 1** —— `H-1 SITE (admin jump)` |
-| 2 | `:9534` `settleNodeDecisionMetric` | `applyNodeTimeoutEffect` 决策关闭 | 绿 | **Failed Tests 1** —— `H-1 P1-1 GATE (timeout jump)` |
-| 3 | `:9536` `emitNodeActivationMetric` | `applyNodeTimeoutEffect` 再激活 | 绿 | **Failed Tests 2** —— `H-1 SITE (timeout re-activation)` + `H-1 P1-1 GATE (timeout jump)` |
-| 4 | `:10586` `emitNodeActivationMetric` | handler 分支 | 绿 | **Failed Tests 1** —— `H-1 SITE (handler branch)` |
-| 5 | `:10690` `settleNodeDecisionMetric` | `return` 分支决策关闭 | 绿 | **Failed Tests 1** —— `H-1 P1-1 GATE (return branch)` |
-| 6 | `:10692` `emitNodeActivationMetric` | `return` 分支再激活 | 绿 | **Failed Tests 1** —— `H-1 SITE (return branch)` |
-| 7 | `:11266` `emitNodeActivationMetric` | 普通 approve/dispatch | 绿 | **Failed Tests 2** —— `H-1 DISCRIMINATOR` + `H-1 GATE` |
+| 1 | `:8478` `emitNodeActivationMetric` | 管理员 jump | 绿 | **Failed Tests 1** —— `H-1 SITE (admin jump)` |
+| 2 | `:9530` `settleNodeDecisionMetric` | `applyNodeTimeoutEffect` 决策关闭 | 绿 | **Failed Tests 1** —— `H-1 P1-1 GATE (timeout jump)` |
+| 3 | `:9532` `emitNodeActivationMetric` | `applyNodeTimeoutEffect` 再激活 | 绿 | **Failed Tests 2** —— `H-1 SITE (timeout re-activation)` + `H-1 P1-1 GATE (timeout jump)` |
+| 4 | `:10582` `emitNodeActivationMetric` | handler 分支 | 绿 | **Failed Tests 1** —— `H-1 SITE (handler branch)` |
+| 5 | `:10688` `settleNodeDecisionMetric` | `return` 分支决策关闭 | 绿 | **Failed Tests 1** —— `H-1 P1-1 GATE (return branch)` |
+| 6 | `:10690` `emitNodeActivationMetric` | `return` 分支再激活 | 绿 | **Failed Tests 1** —— `H-1 SITE (return branch)` |
+| 7 | `:11264` `emitNodeActivationMetric` | 普通 approve/dispatch | 绿 | **Failed Tests 2** —— `H-1 DISCRIMINATOR` + `H-1 GATE` |
 
 7 次 mutation 后的还原全部 `CMP_IDENTICAL`（脚本逐次打印）。
 
@@ -524,7 +524,7 @@ main 分支保护的 required 清单请用
 12. **同节点探针只在 PG 15.17 上跑**（n=30 ×4 变体）。PG 16 轴本地仍未跑。
 13. **R1（真并发跨请求乱序）仍未构造、未测、未修**；R2（`recordTerminal` 无作用域清空）同上；
     R5（被 await 的 hook 把 metrics 停顿引入响应时延）是本轮**新增并披露**的残留，未做压测。
-14. **未对 `:10810`（sequential 模式节点内队首推进）构造任何用例。** r1 门审在「观察」里点出
+14. **未对 `:10808`（sequential 模式节点内队首推进）构造任何用例。** r1 门审在「观察」里点出
     该处提交后对**仍停在同一节点**的实例发出 `emitNodeDecisionMetric`，其作用域清空守卫为真、
     会把进行中节点的 deadline 清掉。那是 baseline 既有、不在本 PR 的 diff 里、**本轮同样未构造复现**，
     只在此登记以免被当成已处理。
@@ -580,3 +580,163 @@ main 分支保护的 required 清单请用
 - `dropdb -U postgres metasheet2_h1fix_20260922` 与 `dropdb -U postgres metasheet2_h1nb_20260922`。
 - 备份目录 `…/scratchpad/h1-bak/` 清理。
 - 登记到 `~/.claude/projects/-Users-chouhua-Downloads-Github-metasheet2/soak-working/resource-inventory-20260920.md`。
+
+---
+
+## 附录 D — P3-B 行号锚点重生成记录（D1 记录修复轮，2026-09-22）
+
+**触发原因**：本轮 P3-A 在 `ApprovalProductService.ts` 的 JSDoc 里删除 2 行（两句被 r1 证否的论证），
+P3-C 在 `settleMetricsCall` 的跳板注释里删除 4 行换成 2 行（净 -4 行）；两处编辑都在文件前部，
+使其后所有行号整体下移 —— 原 `:239` 起的内容下移 4 行，原 `:11343`（`private emitNodeActivationMetric(` 的原位置）
+起的内容累计下移 6 行。设计 MD / 验证 MD 里所有指向 `ApprovalProductService.ts` 且原行号 ≥ 239 的锚点，
+连同 r1 遗留、本轮之前就已存在的「+45 漂移」三处定义锚点（`emitApprovalTaskCreatedEventsPostCommit` /
+`supersedeCardDeliveriesPostCommit` / `bumpNodeActivationSeq`），以及另外新发现的、与本轮编辑无关的
+历史性错锚（`ApprovalProductService.ts` 构造函数行、`connection-pool.ts` 的 `DATABASE_URL` 读取行与
+`connectionTimeoutMillis` 等配置项跨度、`settleNodeDecisionMetric`/`nodeDecisionMetricWrite` 定义行、
+`applyNodeTimeoutEffect` 竞态守卫跨度、`consumeTimeout` 定义跨度、跨请求窗口注释行），全部按下表重新核验。
+
+**方法**：对每个锚点，用 `grep -n '<唯一上下文文本>' <本轮 worktree 内文件>` 取本轮 head
+（提交 `b273f5746` + 本轮未提交的 P3-A/P3-C 编辑）上的真实行号；跨度锚点（`AA-BB`）另用
+`sed -n 'AA,BBp' <file>` 核对首尾行内容与文中描述一致。以下为关键命令与其真实输出（本会话原样执行）。
+
+### D.1 — 编辑后关键定义行（`grep -n`，本轮 head）
+
+```
+$ grep -n "private emitNodeActivationMetric(\|private settleNodeDecisionMetric(\|private nodeDecisionMetricWrite(\|private async emitApprovalTaskCreatedEventsPostCommit\|private async supersedeCardDeliveriesPostCommit\|private async bumpNodeActivationSeq\|class ApprovalProductService\|constructor(private readonly metrics" packages/core-backend/src/services/ApprovalProductService.ts
+5323:export class ApprovalProductService {
+5328:  constructor(private readonly metrics: ApprovalMetricsService = getApprovalMetricsService()) {}
+11311:  private settleNodeDecisionMetric(instanceId: string, nodeKey: string, actorId: string): Promise<void> {
+11316:  private nodeDecisionMetricWrite(instanceId: string, nodeKey: string, actorId: string): () => Promise<void> {
+11337:  private emitNodeActivationMetric(
+11886:  private async emitApprovalTaskCreatedEventsPostCommit(
+11944:  private async supersedeCardDeliveriesPostCommit(instanceId: string, excludeId?: string): Promise<void> {
+11961:  private async bumpNodeActivationSeq(
+```
+
+### D.2 — 7 个被 await 的 hook 调用点 + 各自前置 COMMIT（`awk`，本轮 head）
+
+```
+$ awk 'NR>=8400 && NR<=11300 && /emitNodeActivationMetric\(|emitNodeDecisionMetric\(|settleNodeDecisionMetric\(|query\(.COMMIT.\)|emitTerminalMetric\(/ {print NR": "$0}' packages/core-backend/src/services/ApprovalProductService.ts
+8460:       await client.query('COMMIT')
+8478:         await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+8771:         await client.query('COMMIT')
+9026:           await client.query('COMMIT')
+9070:           await client.query('COMMIT')
+9114:           await client.query('COMMIT')
+9185:         await client.query('COMMIT')
+9236:         await client!.query('COMMIT')
+9256:         await client.query('COMMIT')
+9280:           await client.query('COMMIT')
+9396:         await client.query('COMMIT')
+9522:       await client.query('COMMIT')
+9530:       await this.settleNodeDecisionMetric(id, currentNodeKey, APPROVAL_TIMEOUT_SYSTEM_ACTOR)
+9532:         await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+9825:           await client.query('COMMIT')
+10027:         await client.query('COMMIT')
+10061:         await client.query('COMMIT')
+10121:         await client.query('COMMIT')
+10189:         await client.query('COMMIT')
+10268:         await client.query('COMMIT')
+10270:         this.emitTerminalMetric(id, 'revoked')
+10454:           await client.query('COMMIT')
+10572:         await client.query('COMMIT')
+10579:           this.emitTerminalMetric(id, 'approved')
+10582:           await this.emitNodeActivationMetric(
+10681:         await client.query('COMMIT')
+10688:         await this.settleNodeDecisionMetric(id, currentNodeKey, actor.userId)
+10690:           await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+10737:         await client.query('COMMIT')
+10738:         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+10740:         this.emitTerminalMetric(id, 'rejected')
+10806:           await client.query('COMMIT')
+10808:           this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+10841:           await client.query('COMMIT')
+10987:           await client.query('COMMIT')
+11241:       await client.query('COMMIT')
+11259:       this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+11262:         this.emitTerminalMetric(id, 'approved')
+11264:         await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+11284:   private emitNodeDecisionMetric(instanceId: string, nodeKey: string, actorId: string): void {
+```
+
+### D.3 — 其余分散锚点（`grep -n` / `sed -n`，本轮 head）
+
+```
+$ grep -n "recordInstanceStart(\|The armed deadline no longer matches\|const consumeTimeout = async\|SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL\|armedResult = await client.query\|armed.current_node_timeout_effect !== scannedEffect" packages/core-backend/src/services/ApprovalProductService.ts
+8158:    safeMetricsCall(`recordInstanceStart(${instanceId})`, async () => {
+8174:      await this.metrics.recordInstanceStart({
+9226:      const consumeTimeout = async (): Promise<void> => {
+9229:             SET current_node_deadline_at = NULL, current_node_timeout_effect = NULL
+9261:      const armedResult = await client.query<{ current_node_deadline_at: string | Date | null; current_node_timeout_effect: string | null }>(
+9267:      if (!armed || Number.isNaN(deadlineMs) || deadlineMs > Date.now() || armed.current_node_timeout_effect !== scannedEffect) {
+9307:        // The armed deadline no longer matches the current node's configured effect (e.g. the
+```
+
+```
+$ grep -n "DATABASE_URL\|connectionTimeoutMillis\|DB_POOL_MAX\|statement_timeout\|query_timeout" packages/core-backend/src/integration/db/connection-pool.ts
+17:  query_timeout?: number
+18:  statement_timeout?: number
+136:      queryConfig.query_timeout = Math.floor(timeoutMs)
+137:      queryConfig.statement_timeout = Math.floor(timeoutMs)
+226:    const connectionString = secretManager.get('DATABASE_URL', { required: process.env.NODE_ENV === 'production' })
+228:      this.logger.warn('DATABASE_URL not set; database pool will use driver defaults and may fail to connect')
+248:        max: parseInt(process.env.DB_POOL_MAX || '20', 10), // 最大连接数
+253:        connectionTimeoutMillis: parseInt(process.env.DB_CONNECT_TIMEOUT || '10000', 10), // 连接超时
+260:        query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT || '30000', 10), // 查询超时
+261:        statement_timeout: parseInt(process.env.DB_STATEMENT_TIMEOUT || '30000', 10), // 语句超时
+```
+
+**核对方法说明（本轮的一处自纠）**：`:9312`（原 head，跨请求窗口注释）第一遍按整段注释的第二行
+折算得到 `:9308`，随后用 `sed -n '9304,9315p'` 逐行核对时发现注释首行实际在 `:9307`
+（`// The armed deadline no longer matches …`），已改用 `:9307` 覆盖前一遍的 `:9308`，
+以此提醒：本表全部数字均以 D.1–D.3 的 `grep -n` / `sed -n` 输出为准，不做二次心算折算。
+
+### D.4 — 修正对照表（旧锚点 → 本轮 head 真值；旧值为编辑前 MD 原文，含 r1 遗留漂移与另外发现的历史错锚）
+
+| 内容 | 旧锚点（MD 原文） | 本轮 head 真值 |
+|---|---|---|
+| 管理员 jump 前置 COMMIT | `:8464` | `:8460` |
+| 管理员 jump activation | `:8482` | `:8478` |
+| `recordInstanceStart` 的 `safeMetricsCall` | `:8162` | `:8158` |
+| T1-1 「FIRST node activated」注释 | `:8163` | `:8159` |
+| `consumeTimeout` 定义跨度 | `:9230-9236` | `:9226-9232` |
+| `consumeTimeout` 置 NULL 语句行 | `:9233`（本轮 head，旧文写法） | `:9229` |
+| 事务内竞态守卫跨度 | `:9265-9271` | `:9261-9267` |
+| 跨请求窗口注释（R1，未关闭） | `:9312` | `:9307` |
+| `applyNodeTimeoutEffect` 决策关闭（GATE/SITE 表） | `:9534` | `:9530` |
+| `applyNodeTimeoutEffect` 再激活（SITE 表） | `:9536` | `:9532` |
+| timeout-jump 前置 COMMIT | `:9526` | `:9522` |
+| handler 分支前置 COMMIT | `:10576` | `:10572` |
+| handler 分支 `emitTerminalMetric('approved')` | `:10574`（旧文与另一条混用） | `:10579` |
+| handler 分支 activation | `:10586` | `:10582` |
+| return 分支前置 COMMIT | `:10685` | `:10681` |
+| return 分支决策关闭（GATE 表） | `:10690`（与下行旧文互相指错） | `:10688` |
+| return 分支 activation（SITE 表） | `:10692` / `:10694`（两处旧文不一致） | `:10690` |
+| reject 分支 `emitNodeDecisionMetric`（fire-and-forget） | `:10740` | `:10738` |
+| sequential 队首推进 `emitNodeDecisionMetric` | `:10810` | `:10808` |
+| approve 前置 COMMIT | `:11243` / `:11245`（两处旧文不一致） | `:11241` |
+| approve `emitNodeDecisionMetric`（fire-and-forget） | `:11261` | `:11259` |
+| approve `emitTerminalMetric('approved')`（此前被 SITE 表误当 activation） | `:11252` / `:11266` | `:11262` |
+| approve activation（DISCRIMINATOR/GATE/SITE 表） | `:11266` / `:11268`（两处旧文不一致） | `:11264` |
+| `settleNodeDecisionMetric` 定义 | `:11313` | `:11311` |
+| `nodeDecisionMetricWrite` 定义 | `:11318` | `:11316` |
+| `emitNodeActivationMetric` 定义（签名行） | `:11341` | `:11337` |
+| `emitApprovalTaskCreatedEventsPostCommit` 定义（r1 遗留 +45 漂移之一） | `:11847` | `:11886` |
+| `supersedeCardDeliveriesPostCommit` 定义（r1 遗留 +45 漂移之一） | `:11905` | `:11944` |
+| `supersedeCardDeliveriesPostCommit` 无条件调用点 | `:11245`（与前置 COMMIT 旧文混用同一数字） | `:11255` |
+| `bumpNodeActivationSeq` 定义（r1 遗留 +45 漂移之一） | `:11922` | `:11961` |
+| 构造函数（`getApprovalMetricsService()` 默认参数） | `ApprovalProductService.ts:5296` | `:5328` |
+| `connection-pool.ts` 的 `secretManager.get('DATABASE_URL')` | `connection-pool.ts:200` | `:226` |
+| `connection-pool.ts` 的 `connectionTimeoutMillis`/`DB_POOL_MAX`/`statement_timeout` 跨度 | `connection-pool.ts:252-258` | `:248-261` |
+
+**未改动的锚点（逐条核过，命中即确认，未列入 D.4）**：`:201`/`:210`/`:231`（早于两处编辑，行号不变）；
+`ApprovalMetricsService.ts` 全部锚点（该文件本 PR 一行未改：`:247`/`:317`/`:440`/`:458-471`/`:468`/
+`:481-489`/`:493-499`/`:496`/`:1019-1040`/`:1044`）；`SecretManager.ts:19`；测试文件
+`approval-dedup-return-round-scoping.db.test.ts` 的 `:696`/`:709`/`:788`/`:824`（该文件本轮未改动，
+`diff` 对 `b273f5746` 为空）；`ApprovalMetricsService.ts:440` 先例引用（design MD §5 行 179）。
+`:482`（design MD §1 引用的历史 CI 失败输出逐字转录）与 `:903`（verification MD 引用的历史 CI 失败输出逐字转录）
+是对已发生事件的原样引用，不是指向本轮 head 的活锚点，未重算。`:5432` 为示例 `DATABASE_URL` 里的
+PostgreSQL 端口号，不是行号，未列入。
+
+> 本附录由 `grep -n` / `sed -n` 的真实输出生成，不含手工心算的行号；表中数字与本轮提交里
+> 设计 MD、验证 MD 正文的修改逐一对应。
