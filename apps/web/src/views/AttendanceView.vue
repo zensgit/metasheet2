@@ -65,11 +65,25 @@
       <section class="attendance__filters" v-if="showReports">
         <label class="attendance__field" for="attendance-from-date">
           <span>{{ tr('From', '开始') }}</span>
-          <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
+          <input
+            id="attendance-from-date"
+            name="fromDate"
+            v-model="fromDate"
+            type="date"
+            :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
+            :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
+          />
         </label>
         <label class="attendance__field" for="attendance-to-date">
           <span>{{ tr('To', '结束') }}</span>
-          <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
+          <input
+            id="attendance-to-date"
+            name="toDate"
+            v-model="toDate"
+            type="date"
+            :class="{ 'attendance__input--invalid': reportDateRangeInvalid }"
+            :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
+          />
         </label>
         <label class="attendance__field" for="attendance-org-id">
           <span>{{ tr('Org ID', '组织 ID') }}</span>
@@ -10109,6 +10123,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
+import { isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import { isAttendanceAdminEndpointUnavailable } from './attendance/attendanceAdminEndpointCompatibility'
@@ -15855,6 +15870,7 @@ const statusActionBusy = computed(() => {
 const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))
 const toDate = ref(toDateInput(today))
+const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(fromDate.value, toDate.value))
 
 const recordsPage = ref(1)
 const recordsPageSize = 20
@@ -22731,6 +22747,16 @@ async function loadRequestReport() {
   }
 }
 
+function validateReportDateRange(): boolean {
+  if (isAttendanceReportDateRangeValid(fromDate.value, toDate.value)) return true
+
+  setStatus(
+    tr('Start date must be on or before end date.', '开始日期不能晚于结束日期。'),
+    'error',
+  )
+  return false
+}
+
 async function refreshAll(): Promise<boolean> {
   if (!attendancePluginActive.value) return false
   loading.value = true
@@ -22787,6 +22813,8 @@ async function refreshOverviewWithStatus() {
 }
 
 async function reloadReportsWithStatus() {
+  if (!validateReportDateRange()) return
+
   loading.value = true
   recordsPage.value = 1
   beginReportsDatasetRefresh()
@@ -22848,6 +22876,8 @@ async function reloadAnomaliesWithStatus() {
 }
 
 async function reloadRequestReportWithStatus() {
+  if (!validateReportDateRange()) return
+
   try {
     await loadRequestReport()
     setStatus(
