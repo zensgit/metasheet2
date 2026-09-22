@@ -240,35 +240,44 @@ executable-code changes and is outside this record-level pass — existing, unre
 
 The S-8 independent adversarial gate (`impl-gate-S8-first-point-sort-guard-20260923.md`,
 APPROVE-with-hardening, 0 P1/1 P2 PRE-EXISTING/2 P3/5 NIT) found the second registration point's
-one-token and two-space-indent checks (`:587`/`:590`) each duplicated inline in the first
-registration point's own per-line loop (`:190`/`:193` respectively) — the first point has no
-bare-`#` check of its own — and the second point's bare-`#` check (`:580`) reimplemented a second
-time, as its own separate copy, inside its own PC1 self-proof rather than exercising the real
-assertion.
+one-token and two-space-indent checks (in the it titled "opens with the bare pnpm/vitest header, is
+written one token per physical line continued with a trailing backslash, and rejects a bare
+`#`-prefixed physical line inside the block") each duplicated inline in the first registration
+point's own per-line loop (the it titled "is written one token per physical line, continued with a
+trailing backslash") — the first point has no bare-`#` check of its own — and the second point's
+bare-`#` check reimplemented a second time, as its own separate copy, inside its own PC1 self-proof
+(it titled "PC1 — a bare `#`-prefixed line inside the block reds the direct detector (kills a
+mid-rebase-note truncation)") rather than exercising the real assertion.
 
 Commit `89edec9e4d28e862ab1320f8193af1c98bf2576c` on this branch moved the three predicates
 (`isBareCommentLine`, `isOneTokenLine`, `hasTwoSpaceIndent`) to live once each at module scope, made
 both registration points' real assertions and PC1 call them instead of a local copy, and added
 three new self-proofs (PC5, PC6, M6) that feed each predicate's **function body** a controlled bad
 input and assert it is caught. Measured, that layer is a real improvement: SIB-1/2/3/4 each red on
-this branch's head under the mutation and are green on base `72da9f76b` under the identical
-mutation (S-9 independent gate, `impl-gate-S9-sibling-predicates-20260923.md` §三.1). What this
-commit does not close is the real assertions' **call sites**: replacing `isBareCommentLine(line)`,
-`isOneTokenLine(payload)` or `hasTwoSpaceIndent(line)` with a constant at the call site itself — not
-inside the function body — leaves the suite green (S-9 gate CALL-1/2a/2b/3a/3b, `30 passed (30)`
-each), because a fail-open check run on an already-conformant script reads the same as a correct one
-— the same limit `:586-592` above already names for `firstSortBreak`. A same-file mutation
-self-proof does not by itself rule this out: it can only feed a predicate the input IT supplies and
-check the verdict, not show what a constant-replaced call site would have done to some other input a
-future regression might carry.
+this branch's head under the mutation; SIB-1 and SIB-4 are measured green on base `72da9f76b` under
+the same mutation intent (the site differs: base has no module-scope predicate to neuter), while
+SIB-2 and SIB-3 have no corresponding self-proof on base at all — they would be trivially green
+there since there is nothing for the mutation to land on, but base never actually measured this, so
+their absence of a red is not evidence the predicate was covered (S-9 independent gate,
+`impl-gate-S9-sibling-predicates-20260923.md` §三.1). What this commit does not close is the real
+assertions' **call sites**: replacing `isBareCommentLine(line)`, `isOneTokenLine(payload)` or
+`hasTwoSpaceIndent(line)` with a constant at the call site itself — not inside the function body —
+leaves the suite green (S-9 gate CALL-1/2a/2b/3a/3b, green each), because a fail-open check run on
+an already-conformant script reads the same as a correct one — the same limit `firstSortBreak`'s own
+doc comment already names for that detector. A same-file mutation self-proof does not by itself rule
+this out: it can only feed a predicate the input IT supplies and check the verdict, not show what a
+constant-replaced call site would have done to some other input a future regression might carry.
 
 Base `72da9f76b`'s bare-`#` predicate (SIB-1) genuinely was covered by a sibling copy before this
-branch: PC1 carried its own separate `#` check while the real assertion's inline copy had none, so
-neutering the real assertion's copy alone left PC1's copy silently standing in for it. That
-sibling-masking mechanism is scoped to SIB-1. The indent predicate (SIB-3/4) was not sibling-masked:
-on base, neutering BOTH its inline copies together (`:193` and `:590`) at once is still green
-(`27 passed (27)`, S-9 gate §三, base-comparison run) — because indent carried no self-proof at all
-before this branch, so there was no sibling to do the masking. The mechanism there is the same
+branch: PC1 carried its own separate `#` check while the real assertion's own inline copy had no
+self-proof of its own, so neutering the real assertion's copy alone left PC1's copy silently
+standing in for it. That sibling-masking mechanism is scoped to SIB-1. The one-token predicate
+(SIB-2) and the indent predicate (SIB-3/4) were not sibling-masked: on base, neutering BOTH the
+indent predicate's inline copies together (the first and second registration points' own per-line
+loops — the same two `it` blocks named above) at once is still green (S-9 gate §三, base-comparison run) —
+because SIB-2 and indent carried no self-proof at all before this branch, so there was no sibling to
+do the masking. On this branch's head, SIB-2's self-proof is PC5 (it titled "PC5 — a registration
+line carrying two tokens reds the one-token-per-line detector"). The mechanism there is the same
 fail-open-indistinguishable-from-correct limit named above, not a masking sibling.
 
 The gate's separate NIT-1/NIT-2/NIT-4 wording corrections and the `firstSortBreak` return-shape
@@ -277,12 +286,19 @@ the token list itself) are in the same commit.
 
 **S-9 gate follow-up (2026-09-23, record-level, optional narrowing).** Commit `3f5a4ae4b` on this
 branch hoists the shared `payload` derivation (`line.replace(/\s+$/, '').replace(/\\$/,
-'').trim()`) — previously duplicated three times, at this branch's own `:210`, `:629`, and PC5's
-own `:689` — into one module-scope `payloadOf(line)`, with all three sites now calling it. This is
-a narrowing, not a closure: the S-9 gate's PAY-PC positive control (replacing the call site with
-`line`, unmodified) reds the second point's real assertion, showing the site is reachable and
-load-bearing; but replacing the call site itself (`const payload = payloadOf(line)` → a literal) at
-either real assertion still leaves the suite green (`30 passed (30)` each), which is the identical
-call-site limit two paragraphs above, applied to this predicate too. What the hoist buys is that the
-derivation now has ONE copy instead of three, so a regression IN THAT DERIVATION — as opposed to a
-regression at one specific call site — is now visible to PC5, where before this commit it was not.
+'').trim()`) — previously duplicated three times, at the first point's real assertion (it titled "is
+written one token per physical line, continued with a trailing backslash"), the second point's real
+assertion (it titled "opens with the bare pnpm/vitest header, is written one token per physical line
+continued with a trailing backslash, and rejects a bare `#`-prefixed physical line inside the
+block"), and PC5's own self-proof (it titled "PC5 — a registration line carrying two tokens reds the
+one-token-per-line detector") — into one module-scope `payloadOf(line)`, with all three sites now
+calling it. This is a narrowing, not a closure: the S-9 gate's PAY-PC positive control (replacing
+the call site with `line`, unmodified) reds the second point's real assertion, showing the site is
+reachable and load-bearing; but replacing the call site itself (`const payload = payloadOf(line)` →
+a literal) at either real assertion still leaves the suite green each time, which is the identical
+call-site limit two paragraphs above, applied to this predicate too. After the hoist, the positive
+control that replaces the body of `payloadOf` with `line` reds both real assertions and PC5 (before
+the hoist only one site). A regression inside `payloadOf` that only drops the trailing-whitespace
+normalisation stays green (S-10 gate PAY-WS): the PC5 fixture carries no trailing whitespace after
+the backslash, so PC5 cannot see it. The single definition removes the drift surface; it does not
+make every derivation regression visible.
