@@ -624,7 +624,8 @@ restore → `cmp` to prove the restore took). Suite = the six files, `--retry=0`
 | **Mh** | drop the budget conjunct (slope alone decides) | **RED** (1 case) | `super-linear growth whose extrapolation stays INSIDE the budget is accepted (the budget is a conjunct too)` |
 | **X5** | the first rung confirms once instead of three times | **RED** (1 case) | `the FIRST rung re-measures three times before refusing a 2-character subject` |
 | **X6** | the anchor is confirmed with ONE sample instead of two | **RED** (3 cases) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` + `re-measures a one-off spike instead of turning it into a refusal` + `the ANCHOR is re-measured too, and the re-measured anchor is what the verdict uses` |
-| **X7** | the anchor confirmation is deleted (the ladder sample stands) | **RED** (3 cases) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` + `re-measures a one-off spike instead of turning it into a refusal` + `the ANCHOR is re-measured too, and the re-measured anchor is what the verdict uses` |
+| **X7** | the anchor confirmation is deleted (the ladder sample stands) | **RED** (3 cases) |
+| **X11** | insert the prescribed "statically provable linear" fast path at the top of `runUserRegex` | **RED** (14 cases, 4 of them the new star-height-1 cases) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` + `re-measures a one-off spike instead of turning it into a refusal` + `the ANCHOR is re-measured too, and the re-measured anchor is what the verdict uses` |
 
 X1, X9 and X10 are the three ways to get §5.8.1 wrong — never withdraw, withdraw and stop,
 withdraw and forget the sample — and every one of the ten reds the case written for it. The
@@ -664,6 +665,148 @@ catastrophic shape, so the suite runs the unguarded regex and blocks. A run that
 finish is a red lane, not a green one; it is recorded as its own status rather than folded
 into RED so the distinction stays visible. `Mj` is GREEN and is recorded as a known unpinned
 constant (§6), not as a covered guard.
+
+**5.8.9 The two remedies proposed for P2-4 were traced through the guard and declined — the
+reasons are measurements, not arguments.**
+Alongside the spend budget above, two further remedies were put for the runway regression:
+skip the timing ladder for any pattern a STATIC rule can call linear, or CACHE the ladder's
+conclusion per `(pattern, subject-length bucket)`. Both were implemented far enough to be
+measured against the shipped guard. Neither is adopted, and each failed for a different
+reason.
+
+*(a) Coverage — the fast path would skip the ladder for none of the patterns it was for.*
+The predicate implemented literally as worded ("no quantified group whose body carries a
+quantifier, and none whose body carries an alternation"):
+
+| population | takes the fast path |
+|---|---|
+| the six common linear patterns (§5.2) | **0 / 6** |
+| the three named catastrophic shapes (§5.3) | 0 / 3 |
+| the two star-height-1 polynomials below | **2 / 2** |
+
+Every one of the six carries a quantified group — `(\.\d+)*`, `(-[a-z0-9]+)*`, `(\w+\.)*`,
+`(,[a-z]+)*`, `(\.[^@]+)+`, `(/[a-z0-9_-]+)+` — which is exactly the property round 1's
+detector keyed on when it refused all six (design MD §3C.1). A predicate sound enough to be
+safe in the ACCEPT direction has to exclude them for the same reason round 1's could not
+separate them in the REFUSE direction.
+
+*(b) Soundness — it would remove refusals the guard makes today.* Two shapes with no
+quantified group anywhere in the source, so the predicate calls both linear. Unguarded on
+this machine:
+
+| pattern | n=250 | n=500 | n=1000 | n=2000 | n=4000 | growth per doubling |
+|---|---|---|---|---|---|---|
+| `^a*a*a*a*b$` | 851ms | 2963ms | **38679ms** | — | — | x3.5 then x13.1 |
+| `^.*.*.*b$` | 11.1ms | 24.4ms | 169ms | 1270ms | **10118ms** | x2.2 … x8.0 |
+
+and what the SHIPPED ladder does with the same pairs:
+
+| pattern | n=1000 | n=4000 | n=10000 (the ceiling) |
+|---|---|---|---|
+| `^a*a*a*a*b$` | refused, 22.5ms, slope 3.78 @len 80 | refused, 21.7ms | refused, 21.9ms |
+| `^.*.*.*b$` | refused, 9.8ms, slope 2.59 @len 197 | refused, 20.8ms | refused, 11.9ms |
+
+The subject ceiling is 10000, i.e. ten times the length at which the first shape already
+costs 38.7 seconds. So the fast path does not merely fail to help — it hands the real call a
+shape the guard refuses today, in 22ms, on measured evidence. That is a bypass, and it is
+the same mistake as round 1's in the opposite direction: a shape is not evidence either way.
+
+*(c) The cache — the verdict is not a function of `(pattern, subject length)`.*
+
+| pattern | subject | guard | cost |
+|---|---|---|---|
+| `^(a+)+$` | 33 `a`s, matches immediately | **ok** | 0.492ms |
+| `^(a+)+$` | 32 `a`s + a failing tail, **same length** | **refused** | 10.1ms |
+
+Same pattern, same length bucket, opposite verdicts — because a backtracking blow-up is a
+property of the (pattern, VALUE) pair, not of the pair's shape or size. Any cache keyed that
+way serves the first row's `ok` to the second row's value and disables the guard for it. The
+same value six characters shorter already costs 318ms unguarded.
+
+*(d) What the benign rows cost without either remedy.* Independent re-measurement, best of
+three in one process, `r2` = the reviewed head `bab083dc4` (a copy verified byte-identical
+to that commit) and `r3` = this head:
+
+| pair | unguarded | r2 | r3 | **r3 − unguarded** | verdict |
+|---|---|---|---|---|---|
+| the runway shape (26-char pattern / 1200-char value) | 0.001 | 1911 | **635** | 635 | refused -> refused |
+| slug, adversarial at the ceiling | 0.032 | 0.453 | 0.466 | **0.434** | ok -> ok |
+| slug, matching (13 chars) | 0.000 | 0.005 | 0.005 | **0.005** | ok -> ok |
+| anchored class at the ceiling | 0.003 | 0.058 | 0.059 | **0.056** | ok -> ok |
+| version number, adversarial at the ceiling | 0.019 | 0.259 | 0.233 | **0.214** | ok -> ok |
+| e-mail, adversarial at the ceiling | 0.003 | 0.163 | 0.156 | **0.154** | ok -> ok |
+| path segments, adversarial at the ceiling | 0.042 | 0.517 | 0.522 | **0.480** | ok -> ok |
+| quadratic trim idiom at the ceiling (/g) | 45.2 | 48.7 | 51.9 | **6.8** | ok -> ok |
+| nested quantifier, n=33 (a true positive) | not run | 9.4 | 9.3 | n/a | refused -> refused |
+| alternation overlap, n=33 (a true positive) | not run | 13.2 | 10.6 | n/a | refused -> refused |
+
+Every benign row pays **under half a millisecond** over the unguarded call. The single row
+above a millisecond is the quadratic trim idiom — +6.8ms on a 45.2ms unguarded baseline,
++15% — and that is a POLYNOMIAL shape the slope test deliberately accepts, not one of the
+linear patterns the remedy was aimed at. So the "a benign pair pays under a millisecond"
+property already holds on this corpus, and neither remedy would have bought it for the six.
+
+*(e) Both polynomial shapes are now pinned, so the fast path cannot be added quietly.*
+`regex-safety.test.ts` gains five cases: a POSITIVE CONTROL asserting that the three named
+catastrophic shapes AND all six linear patterns do carry a quantified group (without which
+the predicate assertion would be vacuous), two cases through `runUserRegex` and two through
+the real `validateRecord`. Their discriminating assertion is the VERDICT, not a time bound:
+at the n chosen — 250 and 2000, picked so a regression that ACCEPTED the shape still
+finishes in about a second rather than hanging a required lane — the unguarded call is fast
+enough that no loose millisecond bound would separate the two implementations. That is
+stated in the file rather than papered over. Mutation **X11** (insert the prescribed fast
+path at the top of `runUserRegex`) turns the suite **14 red**, four of them these new
+behavioural cases, and the red lines carry the leaked unguarded cost (848ms / 1248ms /
+1230ms) as their duration. The positive control stays green under X11, as it must.
+
+**5.8.10 CI collection (P2-3) — the round-2 gate's finding is REFUTED, and here is the
+collection line.**
+The gate reported that no workflow executes the three test files, having grepped the
+workflows for the file names, for `vitest run` with no file arguments, and for `pnpm test` /
+`npm test` / `pnpm -r test`. All four greps miss the step that actually runs them:
+
+```
+.github/workflows/plugin-tests.yml
+  job `test:`                        (line 174, matrix node-version: [18.x, 20.x])
+  step "Run core-backend tests"      (lines 842-844)
+    run: pnpm --filter @metasheet/core-backend test
+```
+
+`test (20.x)` is a required context on `main` (`gh api repos/zensgit/metasheet2/branches/
+main/protection` → the contexts list includes it). The package script is `"test": "vitest"`
+— no file arguments and no `run` — so it is a WHOLE-CONFIG collection over
+`vitest.config.ts`, and GitHub Actions sets `CI=true`, which is what makes vitest execute
+once instead of watching. The step carries no `if:`, so it runs on both matrix legs.
+
+Run here, at this head, as the exact command the workflow runs:
+
+```
+CI=true pnpm --filter @metasheet/core-backend test
+> @metasheet/core-backend@2.5.0 test .../h3-r3/packages/core-backend
+> vitest
+  Test Files  982 passed | 175 skipped (1157)
+       Tests  15983 passed | 1615 skipped (17598)
+```
+
+Cases reported by that run, per file — the collection evidence, counted from the run's own
+output rather than inferred from the glob:
+
+| file | cases collected |
+|---|---|
+| `src/formula/__tests__/regex-safety.test.ts` | **55** (60 after 5.8.9(e)) |
+| `tests/unit/user-regex-guard-three-copy-parity.test.ts` | **33** |
+| `tests/unit/user-regex-guard-read-parity-fuzz.test.ts` | **4** |
+
+So this slice's cases are gated by a required check as they stand. **No workflow file is
+edited by this branch, therefore the `plugin-tests.yml` s6a provenance pin is untouched and
+is not recomputed** — the two-point wiring registration (a `vitest.config.ts` exclude plus a
+named step) applies to DB-backed specs that must be kept out of the no-DB lane, and none of
+these three needs a database.
+
+The limit of this claim, stated: what is verified is that the command the required job runs
+collects and executes these files, reproduced locally at this head. The branch has no PR, so
+no GitHub checks list has been observed executing it. "被触发≠被验证" cuts both ways, and the
+remaining step is to read the check output on the PR.
 
 ### 5.9 SUBSTITUTE
 
@@ -773,10 +916,11 @@ design MD §3.4(1).
 - **Refusals are unobservable.** No metric, no log line, no counter. If a tenant's
   legitimate pattern were refused in production, nothing would surface it. Design MD
   §3.4(8).
-- **CI run-list membership NOT verified.** The three new/changed test files sit in
-  `packages/core-backend`'s default `vitest.config.ts` collection and were run locally; the
-  branch has no PR, so no checks list exists to confirm a required lane actually collects
-  them. "被触发≠被验证" — this must be re-checked when a PR is opened.
+- **CI collection verified locally, NOT yet on a PR check.** The three files are collected
+  and executed by `pnpm --filter @metasheet/core-backend test`, which is the required
+  `test (20.x)` job's own step (§5.8.10) — reproduced here at this head with the per-file
+  case counts taken from the run's output. What is still missing is the same evidence read
+  off a GitHub checks list, which needs a PR. "被触发≠被验证".
 - **Stored-path HTTP chain** (field-create → record-write over HTTP) — the engine
   behaviour was proven by direct calls into the real `evaluateField`/`dryRun`; the
   full HTTP write chain was NOT driven end-to-end.

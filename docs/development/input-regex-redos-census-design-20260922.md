@@ -197,8 +197,9 @@ concurrent request, across all tenants.
      **And "decides nothing" means the ladder keeps climbing.** The rung is recorded as an
      ordinary sub-floor sample and sampling continues; it is NOT a reason to stop. A first
      cut of this fix withdrew the refusal and fell out of the loop into the real call, which
-     hands an unmeasured pattern the whole subject — measured, `^(a|a)*$` at n=33 then ran
-     for 21884ms once in 1000 calls, where round 2 refused 1000/1000 (§5.8.1b). The minimum
+     hands an unmeasured pattern the whole subject — measured, one of the three named
+     catastrophic shapes then ran for over twenty seconds once in 1000 calls, where round 2
+     refused 1000/1000 (verification MD §5.8.1b). The minimum
      `bestOf` takes is biased downward by WARM-UP, not only by pauses: the first sample at a
      probe length is systematically the slowest, and the deciding rung for the named shapes
      sits only ~1.1x–1.6x above the floor. Continuing reaches the next rung, which is above
@@ -207,8 +208,10 @@ concurrent request, across all tenants.
      **The re-measurement is bounded by `USER_REGEX_REMEASURE_BUDGET_MS = 200` (round 3).**
      Confirmation costs up to three runs of the deciding rung, and that rung's cost is not
      bounded by anything here. Measured, a shape whose cost is discontinuous in subject
-     length crossed the floor on a single 660ms rung and the guard paid **1927ms** for a
-     pattern the unguarded code answers in 0.005ms (§3D.2). Once a call has already spent
+     length crosses the floor on a SINGLE rung costing hundreds of milliseconds, and the
+     guard paid about three times that rung for a pattern the unguarded code answers in
+     microseconds (§3D.2; exact values in verification MD §5.8.3 — they are machine- and
+     version-relative and are quoted in one place only). Once a call has already spent
      the budget on measurement, a scheduling pause is no longer a candidate explanation for
      the number, so the first measurement stands. This bounds the guard's own MULTIPLIER;
      it does not, and cannot, bound the cost of one probe. It is deliberately NOT applied
@@ -414,17 +417,23 @@ read as closing it.
    costs **650.9ms**, one rung, same verdict. The residual 650.9ms is one probe, and nothing
    short of an interruptible engine bounds that.
 
-   **Two remedies were considered and declined, on the record.**
-   *A static "provably linear, skip the ladder" fast path* would admit almost nothing: every
-   one of the six common linear patterns contains a quantified group whose body carries a
-   quantifier, which is precisely the predicate round 1 proved cannot separate them from a
-   catastrophic shape (§3C.1). Any predicate sound enough to be safe here excludes them, so
-   the fast path would cover only patterns that already cost microseconds — and its failure
-   mode is admitting a catastrophic pattern unmeasured.
-   *Caching the ladder's conclusion per (pattern, subject-length bucket)* is unsound: for a
-   nested-quantifier pattern, a MATCHING subject returns instantly and a same-length subject
-   with a failing tail is catastrophic. They share a bucket, so one cached "ok" disables the
-   guard for the other. Neither is adopted.
+   **Two remedies were considered and declined, and round 3 MEASURED both rather than
+   arguing them** (verification MD §5.8.9).
+   *A static "provably linear, skip the ladder" fast path* fails in both directions at once.
+   Coverage: **0 of the 6** common linear patterns take it, because every one of them
+   contains a quantified group whose body carries a quantifier — precisely the predicate
+   round 1 proved cannot separate them from a catastrophic shape (§3C.1). Soundness: it
+   ADMITS shapes the guard refuses today. `^a*a*a*a*b$` has no quantified group at all, so
+   the predicate calls it linear; measured unguarded it costs **851ms at n=250 and 38679ms
+   at n=1000**, against a subject ceiling of 10000, while the shipped ladder refuses it in
+   ~22ms on a measured slope of 3.78. Skipping the ladder for it is a bypass. Both shapes
+   are now pinned behaviourally so the fast path cannot be reintroduced quietly (mutation
+   X11: 14 red).
+   *Caching the ladder's conclusion per (pattern, subject-length bucket)* is unsound because
+   the verdict is a property of the (pattern, VALUE) pair, not of its size. Measured, same
+   pattern and same length: `^(a+)+$` against 33 matching characters is **ok in 0.492ms**,
+   and against 32 characters plus a failing tail is **refused in 10.1ms**. They share a
+   bucket, so one cached "ok" disables the guard for the other. Neither is adopted.
 3. **A timing criterion is machine-relative.** The constants are budgets measured on one
    machine. A much slower host shifts which rung crosses the floor. The floor, the
    dynamic-range anchor and the confirm-before-refusing re-measurement are what keep that

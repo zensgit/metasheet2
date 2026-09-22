@@ -649,6 +649,79 @@ describe('TRUE POSITIVES — catastrophic shapes are refused on measured evidenc
   })
 })
 
+/**
+ * Shapes with STAR HEIGHT 1 — no quantified GROUP anywhere in the source, so no
+ * nested quantifier and no quantified alternation for a static rule to find —
+ * whose backtracking cost is nonetheless polynomial of degree >= 3 in the
+ * subject length.
+ *
+ * These pin the guard against one specific proposed optimisation: "a pattern a
+ * static rule can prove linear does not need the timing ladder, so skip it."
+ * Round 1 of this slice already measured that a static shape rule cannot
+ * separate the six common linear patterns from a catastrophic one in the REFUSE
+ * direction. These two shapes are the same lesson in the ACCEPT direction, where
+ * the failure mode is a guard BYPASS rather than a false positive: measured
+ * unguarded on the census machine, `^a*a*a*a*b$` costs ~0.85s at n=250 and
+ * ~39s at n=1000, and the subject ceiling is 10000 (verification MD §5.8.9).
+ *
+ * Each n is chosen so a regression that ACCEPTED the shape would still finish in
+ * about a second — a hung required lane is a worse failure report than a red
+ * assertion. The consequence, stated plainly: the discriminating assertion here
+ * is the VERDICT, not a time bound. At these n the unguarded call is fast enough
+ * that no loose millisecond bound would separate the two implementations, so
+ * none is asserted.
+ */
+const STAR_HEIGHT_ONE_POLYNOMIAL: Array<{ label: string; pattern: string; n: number }> = [
+  { label: 'four adjacent unbounded quantifiers over the same atom', pattern: '^a*a*a*a*b$', n: 250 },
+  { label: 'three adjacent unbounded dot-stars', pattern: '^.*.*.*b$', n: 2000 },
+]
+
+/** A quantified group — `)` followed by a quantifier — is what every "nested quantifier" rule keys on. */
+const hasQuantifiedGroup = (pattern: string) => /\)(?:[*+?]|\{\d)/.test(pattern)
+
+describe('STAR-HEIGHT-1 POLYNOMIALS — the shapes a static "provably linear" rule would wave through', () => {
+  it('POSITIVE CONTROL: the named catastrophic shapes DO carry a quantified group, so the predicate is not vacuous', () => {
+    for (const { pattern } of MALICIOUS) {
+      expect(hasQuantifiedGroup(pattern), pattern).toBe(true)
+    }
+    for (const { pattern } of SIX_LINEAR) {
+      // ... and so does every one of the six LINEAR patterns, which is precisely
+      // why a nested-quantifier rule cannot be used to separate the two groups.
+      expect(hasQuantifiedGroup(pattern), pattern).toBe(true)
+    }
+  })
+
+  it.each(STAR_HEIGHT_ONE_POLYNOMIAL.map((c) => [c.label, c.pattern, c.n] as const))(
+    'refuses %s on measured evidence even though it carries no quantified group at all',
+    (_label, pattern, n) => {
+      expect(hasQuantifiedGroup(pattern), `${pattern} must carry no quantified group`).toBe(false)
+
+      const outcome = runUserRegex(pattern, undefined, 'a'.repeat(n), (re, s) => re.test(s))
+      expect(outcome.status).toBe('refused')
+      if (outcome.status === 'ok') throw new Error('unreachable')
+      expect(outcome.refusal.kind).toBe('superlinear')
+      if (outcome.refusal.kind !== 'superlinear') throw new Error('unreachable')
+      // The refusal rests on the measured curve, not on the shape: both conjuncts
+      // of the verdict are asserted separately so a fast path that skipped the
+      // ladder could not satisfy either.
+      expect(outcome.refusal.slope).toBeGreaterThan(USER_REGEX_SUPERLINEAR_SLOPE)
+      expect(outcome.refusal.predictedMs).toBeGreaterThan(USER_REGEX_PROBE_BUDGET_MS)
+      expect(outcome.refusal.atLength).toBeLessThan(n)
+    },
+  )
+
+  it.each(STAR_HEIGHT_ONE_POLYNOMIAL.map((c) => [c.label, c.pattern, c.n] as const))(
+    'the real validateRecord refuses %s with the too-slow wording, not the format-mismatch wording',
+    (_label, pattern, n) => {
+      const { out } = validateMs(patternField(pattern), { f1: 'a'.repeat(n) })
+      expect(out.valid).toBe(false)
+      expect(out.errors).toHaveLength(1)
+      expect(out.errors[0].message).not.toBe('F1 does not match the required format')
+      expect(out.errors[0].message).toContain('too slow')
+    },
+  )
+})
+
 describe('subject ceiling — independent of the field\'s own rule list', () => {
   it('refuses an over-ceiling value with its own wording (never the format-mismatch message)', () => {
     const { ms, out } = validateMs(patternField('^[a-z]*$'), { f1: 'a'.repeat(USER_REGEX_MAX_SUBJECT_LEN + 1) })

@@ -129,20 +129,24 @@ export const USER_REGEX_DECISION_DYNAMIC_RANGE = 8
  * it is NOT a bound on the cost of any single probe, and nothing here can bound
  * that without an interruptible engine.
  *
- * Derivation, all measured (verification MD §5.7):
+ * Derivation, all measured (verification MD §5.8.3):
  *  a) The sub-floor sweep alone can never reach it. A rung that does not cross
  *     USER_REGEX_PROBE_FLOOR_MS costs less than that floor by definition, and the
  *     rung count at the subject ceiling is pinned below 80 (regex-safety.test.ts,
  *     "stays logarithmic in n"), so the sweep spends under 160ms. This budget
  *     therefore only ever fires because ONE rung was itself expensive — which is
  *     the case it exists for.
- *  b) The three named catastrophic shapes spend ~13ms through their deciding
- *     rung, so they are re-measured exactly as before. This constant changes
- *     nothing for them.
+ *  b) The three named catastrophic shapes spend about a dozen milliseconds through
+ *     their deciding rung — more than an order of magnitude under this budget — so they
+ *     are re-measured exactly as before and this constant changes nothing for them.
  *  c) The §3D.2 discontinuous-cost shape (a fixed-length runway in front of a
- *     nested quantifier) crosses the floor on a single 660ms rung. Re-measuring
- *     that rung twice made the guard cost 1927ms for a pattern the unguarded code
- *     answers in 0.005ms. Under this budget it costs one rung.
+ *     nested quantifier) crosses the floor on a SINGLE rung costing hundreds of
+ *     milliseconds, for a pattern the unguarded code answers in microseconds.
+ *     Re-measuring that rung twice tripled the guard's cost; under this budget it
+ *     pays the rung once.
+ *
+ * Exact millisecond values live in the verification MD §5.8.3. They are machine-
+ * and version-relative and would rot if they were pinned here.
  *
  * DELIBERATELY NOT a bound on the ladder loop. Stopping the sweep early could
  * skip the rung that would have crossed the floor and turn a refusal into an
@@ -336,8 +340,9 @@ export function runUserRegex<T>(
   // Bounded by the SAME measurement budget as the rest of the call. Once the
   // ladder has already spent USER_REGEX_REMEASURE_BUDGET_MS, a scheduling pause
   // is no longer a candidate explanation for the number, and re-measuring only
-  // multiplies a cost already known to be real: MEASURED, a shape that crosses
-  // the floor on a single 660ms rung cost 1927ms here before this bound.
+  // multiplies a cost already known to be real: MEASURED, a shape that crosses the
+  // floor on a single very expensive rung cost ~3x that rung before this bound
+  // (verification MD §5.8.3).
   // `fallbackMs` is the sample already taken, so a skipped re-measurement still
   // feeds the verdict a measured value rather than an invented one.
   const bestOf = (len: number, times: number, fallbackMs: number): number => {
@@ -393,18 +398,21 @@ export function runUserRegex<T>(
         // what `bestOf` exists to detect. Round 2 fed the re-measured value back
         // into the slope alone and could still refuse on it; MEASURED under heap
         // load, 1 refusal in 2000 runs of one benign pair, its own evidence
-        // reading measuredMs=1.48ms against a 2ms floor.
+        // reporting a measured cost BELOW the floor it had supposedly crossed
+        // (verification MD §5.8.1).
         //
         // AND THE LADDER MUST KEEP CLIMBING. "Decides nothing" means exactly that:
         // this rung is now an ordinary sub-floor sample, not a reason to stop
         // measuring. Breaking out here hands the real call to a pattern whose cost
         // curve was never established — MEASURED on this tree while the withdrawal
-        // did break: `^(a|a)*$` at n=33 entered at rung 19 (first sample 2.41ms,
-        // confirmations 1.46/1.48ms — the FIRST sample at a length is
-        // systematically the slowest, so the min is biased DOWN), the refusal was
-        // withdrawn, the ladder stopped, and the real call ran 21884ms. 1 in 1000,
-        // where round 2 refused 1000/1000. Continuing reaches rung 20, which is
-        // above the floor on every sample, and refuses there.
+        // did break: one of the three named catastrophic shapes entered the branch
+        // at a rung whose FIRST sample was above the floor and whose confirmations
+        // were below it (the first sample at a length is systematically the
+        // slowest, so the min is biased DOWN by warm-up, not only by pauses), the
+        // refusal was withdrawn, the ladder stopped, and the real call ran for over
+        // twenty seconds — once in a thousand calls, where round 2 refused all
+        // thousand. Continuing reaches the next rung, which is above the floor on
+        // every sample, and refuses there. Numbers: verification MD §5.8.1b.
         sampledLen.push(len)
         sampledMs.push(confirmedMs)
         continue
