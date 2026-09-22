@@ -210,9 +210,9 @@ describe('required web lane registration block — structural shape', () => {
   it('is sorted case-insensitively (so a new token\'s line is a pure function of its name)', () => {
     const tokens = tokensOf(execLogicalLine(script))
     const sorted = [...tokens].sort(caseInsensitive)
-    const firstBreak = tokens.findIndex((token, index) => token !== sorted[index])
+    const firstBreak = firstSortBreak(tokens)
     expect(
-      firstBreak === -1 ? null : { at: firstBreak, found: tokens[firstBreak], expected: sorted[firstBreak] },
+      firstBreak === null ? null : { at: firstBreak, found: tokens[firstBreak], expected: sorted[firstBreak] },
       'insert new tokens in case-insensitive alphabetical position — appending to the tail rebuilds '
       + 'the contended line this block exists to remove',
     ).toBeNull()
@@ -341,8 +341,9 @@ describe('required web lane registration block — parser decoys', () => {
  * worktree — and assert the corresponding detector fires.
  *
  * Each case re-implements nothing: it calls the same exported `logicalLines` / `execLogicalLine` /
- * `tokensOf` the assertions use, plus a local copy of the sortedness and duplicate predicates, so
- * a regression in the parser reds here too.
+ * `tokensOf` the assertions use, plus a local copy of the duplicate predicate; sortedness is checked
+ * via the shared `firstSortBreak` detector the real assertion itself calls, so a regression in
+ * either the parser or the detector reds here too.
  */
 describe('required web lane registration block — mutation self-proof', () => {
   const script = readFileSync(REQUIRED_LANE, 'utf8')
@@ -350,14 +351,12 @@ describe('required web lane registration block — mutation self-proof', () => {
   const headerIndex = lines.findIndex((line) => line === 'exec npx vitest run \\')
 
   const hasDuplicate = (tokens: string[]): boolean => new Set(tokens).size !== tokens.length
-  const isSorted = (tokens: string[]): boolean =>
-    tokens.every((token, index) => index === 0 || caseInsensitive(tokens[index - 1], token) <= 0)
 
   /** Sanity: the unmutated file is clean under both predicates, so a red below is the mutation. */
   it('baseline: the real file is duplicate-free and sorted', () => {
     const tokens = tokensOf(execLogicalLine(script))
     expect(hasDuplicate(tokens)).toBe(false)
-    expect(isSorted(tokens)).toBe(true)
+    expect(firstSortBreak(tokens)).toBeNull()
     expect(headerIndex).toBeGreaterThan(-1)
   })
 
@@ -392,7 +391,7 @@ describe('required web lane registration block — mutation self-proof', () => {
     const tokens = tokensOf(execLogicalLine(mutated))
     expect(hasDuplicate(tokens), 'M2 is an ordering fault only — the duplicate detector must NOT fire').toBe(false)
     expect(tokens.length, 'M2 must not change the token set size').toBe(tokensOf(execLogicalLine(script)).length)
-    expect(isSorted(tokens), 'M2 must be caught by `is sorted`').toBe(false)
+    expect(firstSortBreak(tokens), 'M2 must be caught by `is sorted`').not.toBeNull()
   })
 
   it('M3 continuation joining removed -> every token-reading guard goes blind', () => {
@@ -626,16 +625,13 @@ describe('required web lane registration block — second registration point mut
   const secondScript = readFileSync(SECOND_REGISTRATION_POINT, 'utf8')
   const { lines, header: headerIndex } = secondRegistrationBlock(secondScript)
 
-  const isSorted = (tokens: string[]): boolean =>
-    tokens.every((token, index) => index === 0 || caseInsensitive(tokens[index - 1], token) <= 0)
-
   it('baseline: the real file opens correctly and its token set is duplicate-free and sorted', () => {
     expect(headerIndex).toBeGreaterThan(-1)
     const invocation = logicalLines(secondScript).find((line) => /\bvitest\s+run\b/.test(line)) as string
     const tokens = tokensOf(invocation)
     expect(tokens.length).toBeGreaterThan(30)
     expect(new Set(tokens).size).toBe(tokens.length)
-    expect(isSorted(tokens)).toBe(true)
+    expect(firstSortBreak(tokens)).toBeNull()
   })
 
   it('PC1 — a bare `#`-prefixed line inside the block reds the direct detector (kills a mid-rebase-note truncation)', () => {
@@ -661,7 +657,7 @@ describe('required web lane registration block — second registration point mut
       expect(after.length, 'PC2 must actually remove exactly one token').toBe(before.length - 1)
       // The shape assertions this file adds do not compare against a remembered token set, so the
       // mutated text is still a well-formed one-token-per-line, sorted, single-logical-line block.
-      expect(isSorted(after)).toBe(true)
+      expect(firstSortBreak(after)).toBeNull()
       expect(new Set(after).size).toBe(after.length)
     },
   )
