@@ -555,10 +555,8 @@ to surface (see the dry-run's own §4 G1 row).
 
 **Fix**: the three functions' equivalence is now checked by MATERIALIZING each copy's extracted
 source into a real, callable function (`materializeAll()`, `required-web-lane-token-manifest-guard.test.ts`)
-and comparing OUTPUT across the shared FIXTURES battery (a bare single line, a backslash
-continuation, a comment before the block, a comment between two already-terminated lines, a dead
-block after `exec`, a blank line before the block, an INDENTED comment before the block, and an
-INDENTED comment inside the block outside any continuation) — not source text. `required-web-lane-exec-block.mjs`
+and comparing OUTPUT across the shared FIXTURES battery (the fixture set is pinned by
+`EXPECTED_FIXTURE_KEYS` in the guard test) — not source text. `required-web-lane-exec-block.mjs`
 gained its own `logicalLinesWithLineNumbers()` export in the same round (an ADAPTER matching the
 sibling's post-refactor shape, per this PR's own "write an adapter, not a fourth copy" convention
 — §4 item 1 above — not a behaviour change: its own `logicalLines()` output is proved unchanged by

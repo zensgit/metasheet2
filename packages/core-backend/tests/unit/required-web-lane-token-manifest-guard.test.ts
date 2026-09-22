@@ -372,7 +372,10 @@ const FIXTURES: Record<string, string> = {
 }
 
 /**
- * The FIXTURES key set, defined exactly once. Both cross-copy assertions below compare
+ * The FIXTURES key set, defined in exactly one expectation literal (S-8 gate NIT-3: the key names
+ * themselves still exist twice — once as `FIXTURES` object keys, once in this array — and it is the
+ * `toEqual` assertion below that ties the two together; what this array removes is a THIRD and
+ * FOURTH bare literal, one per cross-copy assertion). Both cross-copy assertions below compare
  * `Object.keys(FIXTURES)` against this instead of each carrying its own literal array — a rewritten
  * literal that drifts from FIXTURES itself would otherwise still read as "count and names defined
  * once" while silently being defined twice (S-7 gate P3-B).
