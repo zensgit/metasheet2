@@ -215,7 +215,7 @@ function describeExtra(tokens: string[], lineMap: Map<string, number[]>): string
  * So: this round extracts the sibling's function source the same way as before (still via
  * `extractExportedFunctionSource`/`extractPlainFunctionSource` below — importing the sibling files
  * directly is still unsafe, see their own headers), then MATERIALIZES it into a real, callable
- * function (`materialize()` below) and calls it on a battery of >=8 named fixtures — comment
+ * function (`materialize()` below) and calls it on the shared FIXTURES battery of named fixtures — comment
  * lines, backslash continuations, a `#` line inside the block region, a dead block after `exec`,
  * a blank line, and a bare single line — asserting the OUTPUT is byte-for-byte identical to this
  * file's own copy, not the source. Where a sibling exports a differently-shaped function (e.g.
@@ -339,7 +339,7 @@ function materializeAll<T extends Record<string, (...args: any[]) => unknown>>(s
 }
 
 /**
- * ROUND 4 — the >=8 named fixtures every cross-copy behavioural comparison below runs. Each is a
+ * ROUND 4 — the shared FIXTURES battery every cross-copy behavioural comparison below runs. Each is a
  * complete, syntactically well-formed script fragment carrying exactly one `exec npx vitest run`
  * logical line, so `logicalLines`, `execLogicalLine`, and `tokensOf(execLogicalLine(...))` are all
  * exercisable on every entry uniformly.
@@ -446,7 +446,7 @@ describe('required web lane token manifest — set equality', () => {
     ).toEqual(sorted)
   })
 
-  it('r4-G1: cross-copy BEHAVIOURAL agreement — logicalLines/execLogicalLine/tokensOf produce byte-identical output (not byte-identical source) to the shape guard\'s own copy, across >=6 fixtures (comment lines, continuations, an in-block # line outside any continuation, a dead block after exec, a blank line, a bare single line) (P3-6, rewritten round 4)', () => {
+  it('r4-G1: cross-copy BEHAVIOURAL agreement — logicalLines/execLogicalLine/tokensOf produce byte-identical output (not byte-identical source) to the shape guard\'s own copy, across the shared FIXTURES battery (P3-6, rewritten round 4)', () => {
     const shapeGuardSrc = readFileSync(SHAPE_GUARD_PATH, 'utf8')
     // Materialized TOGETHER, one scope: execLogicalLine() calls logicalLines() internally, so the
     // two must be declared side by side for that call to resolve (see materializeAll's own note).
@@ -471,9 +471,31 @@ describe('required web lane token manifest — set equality', () => {
       tokensOf: (logicalLine: string) => string[]
     }>(sourcesToMaterialize, namesToMaterialize)
 
-    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 8 named fixtures').toBeGreaterThanOrEqual(8)
-    expect(FIXTURES).toHaveProperty('indentedCommentBeforeBlock')
-    expect(FIXTURES).toHaveProperty('indentedCommentInsideBlockOutsideContinuation')
+    expect(
+      Object.keys(FIXTURES).sort(),
+      'exact FIXTURES key set — count and names defined once',
+    ).toEqual(
+      [
+        'singleLineNoContinuation',
+        'continuation',
+        'commentBeforeBlock',
+        'commentInsideBlockOutsideContinuation',
+        'deadBlockAfterExec',
+        'blankLineBeforeBlock',
+        'indentedCommentBeforeBlock',
+        'indentedCommentInsideBlockOutsideContinuation',
+      ].sort(),
+    )
+    expect(
+      FIXTURES.indentedCommentBeforeBlock,
+      'load-bearing property this fixture exists to pin: the leading `#` stays INDENTED — '
+        + 'de-indenting it (key name and count unchanged) must fail this assertion',
+    ).toMatch(/^[ \t]+#/m)
+    expect(
+      FIXTURES.indentedCommentInsideBlockOutsideContinuation,
+      'load-bearing property this fixture exists to pin: the in-block `#` line stays INDENTED — '
+        + 'de-indenting it (key name and count unchanged) must fail this assertion',
+    ).toMatch(/^[ \t]+#/m)
 
     for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
       expect(
@@ -531,9 +553,31 @@ describe('required web lane token manifest — set equality', () => {
       ['logicalLines'],
     )
 
-    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 8 named fixtures').toBeGreaterThanOrEqual(8)
-    expect(FIXTURES).toHaveProperty('indentedCommentBeforeBlock')
-    expect(FIXTURES).toHaveProperty('indentedCommentInsideBlockOutsideContinuation')
+    expect(
+      Object.keys(FIXTURES).sort(),
+      'exact FIXTURES key set — count and names defined once',
+    ).toEqual(
+      [
+        'singleLineNoContinuation',
+        'continuation',
+        'commentBeforeBlock',
+        'commentInsideBlockOutsideContinuation',
+        'deadBlockAfterExec',
+        'blankLineBeforeBlock',
+        'indentedCommentBeforeBlock',
+        'indentedCommentInsideBlockOutsideContinuation',
+      ].sort(),
+    )
+    expect(
+      FIXTURES.indentedCommentBeforeBlock,
+      'load-bearing property this fixture exists to pin: the leading `#` stays INDENTED — '
+        + 'de-indenting it (key name and count unchanged) must fail this assertion',
+    ).toMatch(/^[ \t]+#/m)
+    expect(
+      FIXTURES.indentedCommentInsideBlockOutsideContinuation,
+      'load-bearing property this fixture exists to pin: the in-block `#` line stays INDENTED — '
+        + 'de-indenting it (key name and count unchanged) must fail this assertion',
+    ).toMatch(/^[ \t]+#/m)
 
     for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
       const mapped = logicalLinesWithLineNumbers(scriptSrc)
@@ -596,7 +640,7 @@ describe('required web lane token manifest — set equality', () => {
     expect(logicalLines(inContinuation)).toEqual(['exec npx vitest run foo bar --reporter=dot', ''])
   })
 
-  it('r2-P3-2: cross-copy BEHAVIOURAL agreement covers the THIRD copy too — logicalLines/tokensOf produce byte-identical output to required-web-lane-token-set-diff.mjs across the same >=6 fixtures; execLogicalLine there diverges ONLY by its documented extra `label` parameter and message prefix (rewritten round 4)', () => {
+  it('r2-P3-2: cross-copy BEHAVIOURAL agreement covers the THIRD copy too — logicalLines/tokensOf produce byte-identical output to required-web-lane-token-set-diff.mjs across the shared FIXTURES battery; execLogicalLine there diverges ONLY by its documented extra `label` parameter and message prefix (rewritten round 4)', () => {
     const diffSrc = readFileSync(TOKEN_SET_DIFF_PATH, 'utf8')
     // Materialized TOGETHER for the same reason as the shape-guard copy above: this file's
     // execLogicalLine() also calls its own logicalLines() internally.
