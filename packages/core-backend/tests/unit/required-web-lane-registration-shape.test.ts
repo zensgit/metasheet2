@@ -453,3 +453,238 @@ describe('required web lane registration block — mutation self-proof', () => {
     ).toBe(0)
   })
 })
+
+/**
+ * H-7 (2026-09-22) — the SECOND registration point's own registration shape.
+ *
+ * `scripts/ops/integration-guard-run-web-specs.sh` registers a second, independent set of web
+ * specs for the `integration-guard` required check (see that file's own header for the #4614
+ * maintenance-cost history and the two-point discipline this file already documents above). Until
+ * this change its `pnpm --filter @metasheet/web exec vitest run …` invocation was ONE single
+ * physical line carrying all 54 filter tokens — the exact contention shape the PARSING CONTRACT
+ * section above already fixed for the required lane script, applied here for the identical reason
+ * (two branches adding unrelated specs collide on the same physical line).
+ *
+ * SCOPED CLAIM, MEASURED NOT ASSUMED (2026-09-22): a bare `#`-prefixed physical line inside EITHER
+ * this file's continuation block or the required lane's is not a harmless mid-rebase note. Because
+ * backslash-continued lines are joined before bash goes looking for arguments, such a line ends the
+ * command it interrupts right there — its OWN trailing backslash is consumed as ordinary comment
+ * text, not honoured as a continuation — so every token after it, including the trailing
+ * `--reporter=dot`, either never reaches the real invocation or reappears as an unrelated (and here,
+ * invalid) command on the next physical line. Measured directly against this file with a
+ * PATH-injected `pnpm` shim: inserting one such line after the third token dropped the real argv
+ * from 60 entries (5-word prefix + 54 specs + `--reporter=dot`) to 8 (prefix + 3 specs), and the
+ * following physical line failed as `fieldHints: command not found`.
+ *
+ * This is a two-clause coverage, not "parses the way bash does" (that phrase is the exact overclaim
+ * a prior review round flagged — a folding parser that only strips a LEADING `#` is silently blind
+ * to one placed mid-word): a bare, `#`-prefixed physical line (one word, e.g. `  #note \`) is caught
+ * by the direct check below; a trailing inline comment sharing a line with a real token
+ * (`  token #note \`, two words) is caught by the pre-existing "exactly one argument per physical
+ * line" shape below, because bash's comment start is a word boundary too and the comment text counts
+ * as extra words under a naive whitespace split. `token#note` (no space) is not a bash comment at
+ * all — `#` only starts one at the start of a word — and is out of scope for the same reason it is
+ * for the required lane above.
+ *
+ * That two-clause coverage is what THIS file's `logicalLines()` cannot provide on its own: it strips
+ * every `#`-prefixed physical line from the WHOLE file before folding continuations, so a comment
+ * line inserted between two token lines is simply invisible to it — the fold reconnects the token
+ * before and the token after with no gap, and every existing token-derived assertion below (count,
+ * duplicates, `-t`/`--testNamePattern`, overlap) stays green. That parser is still the right tool for
+ * "does the block still look like a single filtered vitest invocation" (which is what it is used for
+ * below); it does not double as a truncation detector, which is why the checks in this section walk
+ * RAW physical lines instead.
+ *
+ * P3-2 CORRECTION (2026-09-22): a prior independent review round measured this exact mid-block `#`
+ * shape against ONLY this repo's static text-shape guards and reported "all guards green" for
+ * `scripts/ops/integration-guard-run-web-specs.sh`. Measured directly here: that holds for the
+ * TEXT-based guards, but `scripts/ops/integration-guard-required-wiring-contract.test.mjs` —
+ * which actually EXECUTES this script against a PATH-injected `pnpm` shim and is wired into
+ * `plugin-tests.yml`'s required `test` job on both node-version legs — already reds on it today,
+ * on `origin/main`, with zero changes from this file: the `--reporter=dot` tail check and the
+ * roster-coverage check both fail once the flag and the trailing tokens are swallowed. What that
+ * execution-based contract does NOT catch is a SINGLE token dropped without truncating the tail:
+ * measured by deleting one token from each of two categories —
+ *   - a `WEB_SPEC_ROSTER_ENTRIES` token (e.g. `bomSnapshotDiff`, which backs a real
+ *     `apps/web/tests/*.spec.ts` roster entry) -> the roster-coverage test REDS;
+ *   - a token this script's own header documents as deliberately outside the roster (e.g.
+ *     `IntegrationRunDetail` — see that file's "SC-04" note) -> the contract stays 62/62 GREEN.
+ * So the honest scope of the pre-existing execution-based safety net is: truncation (any mid-block
+ * `#`) is always caught; a single dropped EXISTING token is caught only when that token backs a
+ * roster-entry spec file. The shape checks in this section close the FIRST class directly (so a
+ * truncating `#` reds two independent ways instead of relying solely on the runtime contract) and
+ * make no claim about the second — a shape guard checks structure, not token-set membership, exactly
+ * as the pre-existing `token count > 30` bound above does for the required lane.
+ */
+describe('required web lane registration block — second registration point (integration guard web specs) structural shape', () => {
+  const secondScript = readFileSync(SECOND_REGISTRATION_POINT, 'utf8')
+  const SECOND_HEADER_LINE = 'pnpm --filter @metasheet/web exec vitest run \\'
+
+  /**
+   * Raw physical-line walk of the second point's continuation block. Deliberately independent of
+   * `logicalLines()` (see the module doc above for why): that function makes a `#`-prefixed line
+   * invisible, which is exactly the shape this walk exists to catch.
+   */
+  function secondRegistrationBlock(scriptSrc: string) {
+    const lines = scriptSrc.split('\n').map((line) => line.replace(/\r$/, ''))
+    const header = lines.findIndex((line) => line === SECOND_HEADER_LINE)
+    const body: string[] = []
+    let terminatorIndex = header
+    if (header !== -1) {
+      let i = header + 1
+      for (; i < lines.length; i += 1) {
+        body.push(lines[i])
+        if (!lines[i].replace(/\s+$/, '').endsWith('\\')) break
+      }
+      terminatorIndex = i
+    }
+    return { lines, header, body, terminatorIndex }
+  }
+
+  it('passes `bash -n`', (ctx) => {
+    if (!BASH) {
+      expect(process.env.CI, 'CI must always have a runnable bash — a missing one there is a real failure').toBeFalsy()
+      ctx.skip()
+      return
+    }
+    const result = spawnSync(BASH, ['-n', SECOND_REGISTRATION_POINT], { encoding: 'utf8' })
+    expect(result.error, `could not spawn bash: ${result.error?.message ?? ''}`).toBeUndefined()
+    expect(`${result.status} ${result.stderr ?? ''}`.trim()).toBe('0')
+  })
+
+  it(
+    'opens with the bare pnpm/vitest header, is written one token per physical line continued with a ' +
+      'trailing backslash, and rejects a bare `#`-prefixed physical line inside the block',
+    () => {
+      const { header, body, terminatorIndex, lines } = secondRegistrationBlock(secondScript)
+      expect(header, 'the block must open with the bare pnpm/vitest header, unindented').toBeGreaterThan(-1)
+      expect(terminatorIndex, 'the block must terminate (a dangling continuation at EOF)').toBeLessThan(lines.length)
+
+      for (const line of body) {
+        expect(
+          line.trim().startsWith('#'),
+          'a `#`-prefixed physical line inside the exec continuation block silently truncates the ' +
+            'argv bash actually passes to vitest — every token after it (including the trailing ' +
+            `--reporter=dot flag) runs in no CI job at all: ${JSON.stringify(line)}`,
+        ).toBe(false)
+        const payload = line.replace(/\s+$/, '').replace(/\\$/, '').trim()
+        expect(
+          payload.split(/\s+/).filter(Boolean).length,
+          `registration line carries more than one argument: ${JSON.stringify(line)}`,
+        ).toBe(1)
+        expect(line.startsWith('  '), `registration line must be indented two spaces: ${JSON.stringify(line)}`).toBe(true)
+      }
+      expect(body[body.length - 1].trim(), 'the block must end on the reporter flag').toBe('--reporter=dot')
+    },
+  )
+
+  it("is sorted case-insensitively (so a new token's line is a pure function of its name)", () => {
+    const invocation = logicalLines(secondScript).find((line) => /\bvitest\s+run\b/.test(line))
+    expect(invocation, 'expected exactly one vitest invocation logical line').toBeTruthy()
+    const tokens = tokensOf(invocation as string)
+    const sorted = [...tokens].sort(caseInsensitive)
+    const firstBreak = tokens.findIndex((token, index) => token !== sorted[index])
+    expect(
+      firstBreak === -1 ? null : { at: firstBreak, found: tokens[firstBreak], expected: sorted[firstBreak] },
+      'insert new tokens in case-insensitive alphabetical position — appending to the tail rebuilds ' +
+        'the contended single-line shape this block exists to remove',
+    ).toBeNull()
+  })
+
+  it('has no non-empty logical line anywhere after the registration block', () => {
+    const { terminatorIndex, lines } = secondRegistrationBlock(secondScript)
+    expect(terminatorIndex, 'the block must be found before checking what follows it').toBeLessThan(lines.length)
+    const rest = lines.slice(terminatorIndex + 1).join('\n')
+    const trailing = logicalLines(rest).filter((line) => line.trim() !== '')
+    expect(trailing, 'no executable code may follow the second registration point\'s vitest invocation').toEqual([])
+  })
+})
+
+/**
+ * MUTATION SELF-PROOF for the second registration point (H-7, 2026-09-22) — same discipline as the
+ * required-lane self-proof above: each case applies real damage to the REAL file's text IN MEMORY
+ * (the file on disk is never touched) and asserts the corresponding detector's actual verdict, so a
+ * regression in the parser or the assertions themselves reds here too.
+ */
+describe('required web lane registration block — second registration point mutation self-proof', () => {
+  const secondScript = readFileSync(SECOND_REGISTRATION_POINT, 'utf8')
+  const SECOND_HEADER_LINE = 'pnpm --filter @metasheet/web exec vitest run \\'
+  const lines = secondScript.split('\n').map((line) => line.replace(/\r$/, ''))
+  const headerIndex = lines.findIndex((line) => line === SECOND_HEADER_LINE)
+
+  const isSorted = (tokens: string[]): boolean =>
+    tokens.every((token, index) => index === 0 || caseInsensitive(tokens[index - 1], token) <= 0)
+
+  it('baseline: the real file opens correctly and its token set is duplicate-free and sorted', () => {
+    expect(headerIndex).toBeGreaterThan(-1)
+    const invocation = logicalLines(secondScript).find((line) => /\bvitest\s+run\b/.test(line)) as string
+    const tokens = tokensOf(invocation)
+    expect(tokens.length).toBeGreaterThan(30)
+    expect(new Set(tokens).size).toBe(tokens.length)
+    expect(isSorted(tokens)).toBe(true)
+  })
+
+  it('PC1 — a bare `#`-prefixed line inside the block reds the direct detector (kills a mid-rebase-note truncation)', () => {
+    const mutated = [...lines.slice(0, headerIndex + 2), '  #note \\', ...lines.slice(headerIndex + 2)].join('\n')
+    const mutatedLines = mutated.split('\n')
+    const body: string[] = []
+    let i = headerIndex + 1
+    for (; i < mutatedLines.length; i += 1) {
+      body.push(mutatedLines[i])
+      if (!mutatedLines[i].replace(/\s+$/, '').endsWith('\\')) break
+    }
+    const offenders = body.filter((line) => line.trim().startsWith('#'))
+    expect(offenders, 'PC1 must be caught by the bare-`#`-line detector').toEqual(['  #note \\'])
+  })
+
+  it(
+    'PC2 — dropping ONE existing, non-roster-exempt token leaves this shape guard green (documented ' +
+      'scope boundary, not a regression): content-loss protection for the SET of tokens is the job of ' +
+      'the execution-based scripts/ops/integration-guard-required-wiring-contract.test.mjs roster-' +
+      'coverage check, not this structural guard — matching the pre-existing `> 30` loose bound above ' +
+      'for the required lane, which has the same limitation',
+    () => {
+      const invocationLineIndex = lines.findIndex((line, index) => index > headerIndex && !line.replace(/\s+$/, '').endsWith('\\'))
+      // Drop one interior token line (not the header, not the terminator) — e.g. the FIRST token line.
+      const dropped = [...lines.slice(0, headerIndex + 1), ...lines.slice(headerIndex + 2)].join('\n')
+      expect(invocationLineIndex).toBeGreaterThan(headerIndex)
+
+      const before = tokensOf(logicalLines(secondScript).find((line) => /\bvitest\s+run\b/.test(line)) as string)
+      const after = tokensOf(logicalLines(dropped).find((line) => /\bvitest\s+run\b/.test(line)) as string)
+      expect(after.length, 'PC2 must actually remove exactly one token').toBe(before.length - 1)
+      // The shape assertions this file adds do not compare against a remembered token set, so the
+      // mutated text is still a well-formed one-token-per-line, sorted, single-logical-line block.
+      expect(isSorted(after)).toBe(true)
+      expect(new Set(after).size).toBe(after.length)
+    },
+  )
+
+  it('PC3 — a blank line plus a whole-line comment AFTER the block is not flagged (not an always-red detector)', () => {
+    const { header, terminatorIndex } = (() => {
+      const header = lines.findIndex((line) => line === SECOND_HEADER_LINE)
+      let i = header + 1
+      for (; i < lines.length; i += 1) {
+        if (!lines[i].replace(/\s+$/, '').endsWith('\\')) break
+      }
+      return { header, terminatorIndex: i }
+    })()
+    const mutated = [...lines.slice(0, terminatorIndex + 1), '', '# a trailing rebase note', ...lines.slice(terminatorIndex + 1)]
+    const rest = mutated.slice(terminatorIndex + 1).join('\n')
+    const trailing = logicalLines(rest).filter((line) => line.trim() !== '')
+    expect(trailing, 'PC3 must NOT be flagged as trailing code').toEqual([])
+    expect(header).toBeGreaterThan(-1)
+  })
+
+  it('PC4 — two adjacent tokens swapped out of order reds the sortedness detector', () => {
+    const invocation = logicalLines(secondScript).find((line) => /\bvitest\s+run\b/.test(line)) as string
+    const tokens = tokensOf(invocation)
+    expect(tokens.length).toBeGreaterThan(1)
+    const swapped = [...tokens]
+    ;[swapped[0], swapped[1]] = [swapped[1], swapped[0]]
+    // A swap of two already-adjacent tokens is a duplicate-free, same-length permutation — isolates
+    // the ordering fault from the count/duplicate detectors, same discipline as M2 above.
+    expect(new Set(swapped).size).toBe(new Set(tokens).size)
+    expect(swapped.length).toBe(tokens.length)
+    expect(isSorted(swapped), 'PC4 must be caught by `is sorted`').toBe(false)
+  })
+})
