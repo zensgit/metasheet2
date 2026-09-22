@@ -113,11 +113,17 @@
  * precedent): `npx vitest run required-web-lane --reporter=verbose` — a substring filter that
  * vitest applies AFTER globbing the whole package under the real config, not a literal path handed
  * straight to the loader — collects BOTH this file and the shape guard's file from that same
- * default-config glob; see the design/verification docs for the transcript (18 -> 43 tests before
- * vs. after this file existed — measured AFTER round 3's own new assertions were added, via
- * `npx vitest run required-web-lane --reporter=verbose` with this file moved aside and restored;
- * round-1's stale "18 -> 28" and round-2's stale "18 -> 39" figures re-broke twice here — r2-P3-1 —
- * so this one is now cited only from that command's own output, never hand-typed).
+ * default-config glob.
+ *
+ * ROUND 5 (r4-P2-2) — the before/after TEST COUNT this comment used to quote is DELETED here
+ * rather than re-measured. That figure went stale in three consecutive rounds (each round that
+ * added assertions carried the previous round's number forward by hand), and round 4 shipped a
+ * clause asserting the figure came straight from the command's own output in the same commit that
+ * carried it over by hand. A number each future round has to remember to re-derive is a liability
+ * in a file whose subject is derived-not-hardcoded expectations. What the CI-wiring argument needs
+ * is the qualitative claim above — both files come out of the same default-config glob — and that
+ * is re-checkable by running the command printed above. The measured figures stay in the
+ * verification document's dated transcript sections, where they are historical by construction.
  *
  * Values-free: reads only repo-tracked script/manifest text and asserts on token-name sets.
  */
@@ -344,6 +350,15 @@ function materializeAll<T extends Record<string, (...args: any[]) => unknown>>(s
  * unchanged behaviour ("a `#`-prefixed physical line encountered OUTSIDE any continuation ...
  * exactly as before"); a `#` line landing INSIDE a continuation is a separately documented,
  * excluded divergence (see the P3-6 class comment) and is deliberately not one of these fixtures.
+ *
+ * ROUND 5 (r4-P3-2) — `indentedCommentBeforeBlock` / `indentedCommentInsideBlockOutsideContinuation`
+ * added. Each round-4 fixture put its `#` at column 0, so a copy that narrowed its comment
+ * predicate from `^\s*#` to `^#` — a real behaviour change: the indented line stops being skipped
+ * and folds into the logical-line stream instead — stayed green across the whole battery. The r4
+ * gate measured exactly that mutation (applied to `required-web-lane-token-set-diff.mjs`) passing.
+ * These two place an indented `#` on both sides of the block boundary the fixtures above already
+ * distinguish, so the narrowed predicate now diverges on the battery and reds. The lane script has
+ * no indented `#` among its gating lines today, which is why this was latent rather than live.
  */
 const FIXTURES: Record<string, string> = {
   singleLineNoContinuation: 'exec npx vitest run foo bar --reporter=dot\n',
@@ -352,6 +367,8 @@ const FIXTURES: Record<string, string> = {
   commentInsideBlockOutsideContinuation: 'npx vitest run alpha --reporter=dot\n# a comment between two SEPARATE, already-terminated logical lines\nexec npx vitest run \\\n  beta \\\n  --reporter=dot\n',
   deadBlockAfterExec: 'exec npx vitest run \\\n  gamma \\\n  --reporter=dot\n\n# a dead comment after the exec block — nothing gates on it\necho unreachable\n',
   blankLineBeforeBlock: 'npx vitest run one --reporter=dot\n\nexec npx vitest run \\\n  two \\\n  --reporter=dot\n',
+  indentedCommentBeforeBlock: '  # an INDENTED leading comment, not part of any continuation\nexec npx vitest run \\\n  foo \\\n  --reporter=dot\n',
+  indentedCommentInsideBlockOutsideContinuation: 'npx vitest run alpha --reporter=dot\n\t# an INDENTED (tab) comment between two SEPARATE, already-terminated logical lines\nexec npx vitest run \\\n  beta \\\n  --reporter=dot\n',
 }
 
 /**
@@ -477,28 +494,91 @@ describe('required web lane token manifest — set equality', () => {
     }
   })
 
-  it('r4-G1: cross-copy line-number-mapping agreement — logicalLinesWithLineNumbers(), gated on the sibling actually exporting it (adapter, not a fourth copy of the parser)', () => {
+  it('r4-G1 (rewritten round 5): logicalLinesWithLineNumbers() agrees with BOTH sibling copies on the fold, and its start-line bookkeeping is anchored to the fixture text itself — self-contained, so it does real work whether or not the sibling has grown the same export', () => {
+    // ROUND 5 (r4-P3-1) — round 4 wrote this as `if (!siblingExportsIt) { expect(false).toBe(false);
+    // return }`. On THIS branch the sibling is byte-identical to origin/main and carries no such
+    // export, so the body was skipped and the test was a tautology at the reviewed head: the r4
+    // gate measured a sibling mutation reddening 2 tests on the dry-run tree and 1 here, the
+    // missing one being this test. Restructured so the comparison is driven by the FIXTURES
+    // battery against the two sibling copies that do exist, plus a line-number anchor taken from
+    // the fixture's own text — none of which depends on a sibling refactor landing first. The
+    // full (line + lineNumber) cross-copy comparison is kept, and simply widens to it when the
+    // sibling does grow the export.
     const shapeGuardSrc = readFileSync(SHAPE_GUARD_PATH, 'utf8')
-    const exportsLineNumbers = /export function logicalLinesWithLineNumbers\(/.test(shapeGuardSrc)
-    if (!exportsLineNumbers) {
-      // Documented, not silent: the sibling has not (yet) grown a line-number-carrying export.
-      // The moment it does (as the dry-run measured it can, without an owner ruling on this file),
-      // this branch starts exercising the comparison below with zero further edits here.
-      expect(exportsLineNumbers).toBe(false)
-      return
+    const diffSrc = readFileSync(TOKEN_SET_DIFF_PATH, 'utf8')
+    const siblingExportsLineNumbers = /export function logicalLinesWithLineNumbers\(/.test(shapeGuardSrc)
+
+    // Copy 2 (the shape guard), materialized in ONE scope for the reason `materializeAll`'s header
+    // records: on a tree where the sibling HAS the wrapper, its `logicalLines()` is implemented in
+    // terms of it, so materializing either name alone leaves the other unresolved at call time.
+    const shapeSources = [extractExportedFunctionSource(shapeGuardSrc, 'logicalLines')]
+    const shapeNames = ['logicalLines']
+    if (siblingExportsLineNumbers) {
+      shapeSources.push(extractExportedFunctionSource(shapeGuardSrc, 'logicalLinesWithLineNumbers'))
+      shapeNames.push('logicalLinesWithLineNumbers')
     }
-    const { logicalLinesWithLineNumbers: theirs } = materializeAll<{
-      logicalLinesWithLineNumbers: (scriptSrc: string) => Array<{ line: string; lineNumber: number }>
-    }>(
-      [extractExportedFunctionSource(shapeGuardSrc, 'logicalLinesWithLineNumbers')],
-      ['logicalLinesWithLineNumbers'],
+    const shapeCopy = materializeAll<{
+      logicalLines: (scriptSrc: string) => string[]
+      logicalLinesWithLineNumbers?: (scriptSrc: string) => Array<{ line: string; lineNumber: number }>
+    }>(shapeSources, shapeNames)
+
+    // Copy 3 (the token-set-diff script) — a standalone CLI whose copies are plain, non-exported
+    // declarations, so it needs the plain extractor rather than the `export function` one.
+    const diffCopy = materializeAll<{ logicalLines: (scriptSrc: string) => string[] }>(
+      [extractPlainFunctionSource(diffSrc, 'logicalLines', TOKEN_SET_DIFF_PATH)],
+      ['logicalLines'],
     )
+
+    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 6 named fixtures').toBeGreaterThanOrEqual(6)
+
     for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
+      const mapped = logicalLinesWithLineNumbers(scriptSrc)
+      const projected = mapped.map((entry) => entry.line)
+
+      // (a) THE FOLD HALF, three copies. The wrapper's projection must match this file's own
+      // `logicalLines()` and both sibling copies' on this fixture.
       expect(
-        theirs(scriptSrc),
-        `[${fixtureName}] logicalLinesWithLineNumbers() (folded result + line-number mapping) `
-          + `diverged from the shape guard's copy`,
-      ).toEqual(logicalLinesWithLineNumbers(scriptSrc))
+        projected,
+        `[${fixtureName}] logicalLinesWithLineNumbers()'s folded projection diverged from this `
+          + `file's own logicalLines() — the wrapper and the function it backs disagree`,
+      ).toEqual(logicalLines(scriptSrc))
+      expect(
+        projected,
+        `[${fixtureName}] logicalLinesWithLineNumbers()'s folded projection diverged from `
+          + `required-web-lane-registration-shape.test.ts's logicalLines() copy`,
+      ).toEqual(shapeCopy.logicalLines(scriptSrc))
+      expect(
+        projected,
+        `[${fixtureName}] logicalLinesWithLineNumbers()'s folded projection diverged from `
+          + `required-web-lane-token-set-diff.mjs's logicalLines() copy`,
+      ).toEqual(diffCopy.logicalLines(scriptSrc))
+
+      // (b) THE LINE-NUMBER HALF, anchored on the fixture TEXT rather than on any copy of the
+      // parser. Each fixture carries exactly one `exec npx vitest run` logical line (see the
+      // FIXTURES header), so the physical index of its header is findable by a raw scan of the
+      // fixture's own lines — a derivation no fold implementation participates in. An off-by-one
+      // in the start-line bookkeeping moves the recorded number off that index and reds here.
+      const physicalLines = scriptSrc.split('\n')
+      const execPhysicalIdx = physicalLines.findIndex((line) => /^\s*exec\s+npx\s+vitest\s+run\b/.test(line))
+      expect(execPhysicalIdx, `[${fixtureName}] fixture sanity: the fixture must carry an exec header physical line`).toBeGreaterThan(-1)
+      const execEntry = mapped.find((entry) => /^exec\s+npx\s+vitest\s+run\b/.test(entry.line))
+      expect(execEntry, `[${fixtureName}] fixture sanity: the folded stream must carry an exec logical line`).toBeTruthy()
+      expect(
+        execEntry!.lineNumber,
+        `[${fixtureName}] the exec logical line's recorded start line disagrees with the physical `
+          + `index of the exec header in the fixture's own text — the fold's start-line `
+          + `bookkeeping has drifted off by that difference`,
+      ).toBe(execPhysicalIdx + 1)
+
+      // (c) Where the sibling HAS grown the same export, the full (line + lineNumber) outputs must
+      // be byte-identical — round 4's comparison, kept intact and live on such a tree.
+      if (shapeCopy.logicalLinesWithLineNumbers) {
+        expect(
+          shapeCopy.logicalLinesWithLineNumbers(scriptSrc),
+          `[${fixtureName}] logicalLinesWithLineNumbers() (folded result + line-number mapping) `
+            + `diverged from the shape guard's copy`,
+        ).toEqual(mapped)
+      }
     }
   })
 
@@ -566,7 +646,7 @@ describe('required web lane token manifest — set equality', () => {
 describe('required web lane token manifest — stripTrailingErrorGuard()', () => {
   const scriptSrc = readFileSync(LANE_SCRIPT, 'utf8')
 
-  it('strips the exact `|| exit $?` tail carried by the two early gating lines that have it (1180, 1183)', () => {
+  it('strips the exact `|| exit $?` tail carried by the early gating lines that have it', () => {
     expect(stripTrailingErrorGuard('npx vitest run foo bar --reporter=dot || exit $?')).toBe('npx vitest run foo bar --reporter=dot')
   })
 
@@ -579,19 +659,37 @@ describe('required web lane token manifest — stripTrailingErrorGuard()', () =>
     expect(stripTrailingErrorGuard('npx vitest run exit --reporter=dot')).toBe('npx vitest run exit --reporter=dot')
   })
 
-  it('applied to the real lines 1180/1183, tokenizes clean of `||`/`exit`/`$?` — none of the three survive as if they were vitest positional filters', () => {
+  it('applied to the REAL gating invocations that carry the tail, tokenizes clean of `||`/`exit`/`$?` — none of the three survive as if they were vitest positional filters', () => {
+    // ROUND 5 (r4-P2-1) — round 4 selected these two invocations by hardcoded start line
+    // (`startLine === 1180` / `=== 1183`). Those literals track nothing: an edit anywhere above
+    // them shifts the real lines, `find()` returns undefined, and the test reds on its own fixture
+    // sanity for a reason that has nothing to do with the tail-stripping it is about (the r4 gate
+    // measured exactly that: a 40-line insert after the shebang turned this test red). Selected by
+    // the PROPERTY under test instead — the gating invocations whose text the stripper changes —
+    // which follows the file wherever those lines move to.
     const invocations = allVitestInvocations(scriptSrc)
-    const line1180 = invocations.find((l) => l.startLine === 1180)
-    const line1183 = invocations.find((l) => l.startLine === 1183)
-    expect(line1180, 'fixture sanity: line 1180 must still be one of the 19 gating invocations').toBeTruthy()
-    expect(line1183, 'fixture sanity: line 1183 must still be one of the 19 gating invocations').toBeTruthy()
-    const tokens1180 = tokensOf(stripTrailingErrorGuard(line1180!.text))
-    const tokens1183 = tokensOf(stripTrailingErrorGuard(line1183!.text))
-    for (const garbage of ['||', 'exit', '$?']) {
-      expect(tokens1180, `line 1180 must not tokenize the shell control operator/variable "${garbage}"`).not.toContain(garbage)
-      expect(tokens1183, `line 1183 must not tokenize the shell control operator/variable "${garbage}"`).not.toContain(garbage)
+    const guardedInvocations = invocations.filter((inv) => stripTrailingErrorGuard(inv.text) !== inv.text)
+    expect(
+      guardedInvocations.length,
+      'fixture sanity: the lane script must still carry at least one `|| exit $?`-tailed gating invocation for this test to be about anything',
+    ).toBeGreaterThan(0)
+    for (const inv of guardedInvocations) {
+      const tokens = tokensOf(stripTrailingErrorGuard(inv.text))
+      for (const garbage of ['||', 'exit', '$?']) {
+        expect(
+          tokens,
+          `the gating invocation starting at line ${inv.startLine} must not tokenize the shell control operator/variable "${garbage}"`,
+        ).not.toContain(garbage)
+      }
     }
-    expect(tokens1183).toEqual(['attendance-punch-outcome'])
+    // Positive side: stripping does not merely empty the line. The single-token tailed invocation
+    // still yields its real token — located by that token, not by a line number.
+    const punchOutcome = guardedInvocations.find((inv) => tokensOf(stripTrailingErrorGuard(inv.text)).includes('attendance-punch-outcome'))
+    expect(
+      punchOutcome,
+      'fixture sanity: a `|| exit $?`-tailed gating invocation for attendance-punch-outcome must still exist for the positive side of this assertion to mean anything',
+    ).toBeTruthy()
+    expect(tokensOf(stripTrailingErrorGuard(punchOutcome!.text))).toEqual(['attendance-punch-outcome'])
   })
 })
 
@@ -699,14 +797,21 @@ describe('required web lane token manifest — mutation self-proof', () => {
     expect(extraInActive, 'reordering the manifest must not be mistaken for an addition').toEqual([])
   })
 
-  it('M5 (P1-1 option (a) discriminating case) an ENTIRE EARLY LINE deleted (multitable-field-config-panel, line 624) -> "missing from active" reds, naming it; message names the SCANNED lines, not a false former-line claim', () => {
+  it('M5 (P1-1 option (a) discriminating case) an ENTIRE EARLY LINE deleted (multitable-field-config-panel) -> "missing from active" reds, naming it; message names the SCANNED lines, not a false former-line claim', () => {
     const victimLine = 'npx vitest run multitable-field-config-panel --reporter=dot'
     const lines = scriptSrc.split('\n')
     const idx = lines.indexOf(victimLine)
-    expect(idx, 'fixture sanity: line 624 must still read exactly this').toBeGreaterThan(-1)
+    expect(idx, 'fixture sanity: the lane script must still carry this exact physical line for multitable-field-config-panel').toBeGreaterThan(-1)
     const mutated = [...lines.slice(0, idx), ...lines.slice(idx + 1)].join('\n')
 
-    expect(allVitestInvocations(mutated).length, 'deleting the whole line removes one gating invocation: 19 -> 18').toBe(18)
+    // ROUND 5 (r4-P2-1, widened census): the post-mutation invocation count was hardcoded (`18`,
+    // with a `19 -> 18` message). Derived from the same script the mutation was built from, so
+    // adding or removing a gating line elsewhere in the lane no longer reds this case.
+    const gatingInvocationsBefore = allVitestInvocations(scriptSrc).length
+    expect(
+      allVitestInvocations(mutated).length,
+      'deleting the whole physical line must remove exactly one gating invocation from the parsed set',
+    ).toBe(gatingInvocationsBefore - 1)
     const activeSet = allVitestTokens(mutated)
     expect(activeSet.has('multitable-field-config-panel')).toBe(false)
 
@@ -716,16 +821,39 @@ describe('required web lane token manifest — mutation self-proof', () => {
 
     const scannedLines = allVitestInvocations(mutated).map((l) => l.startLine)
     const message = describeMissing(missingFromActive, scannedLines)
-    expect(message, 'the message must name the lines it scanned').toContain('477')
-    expect(message, 'line 624 no longer exists post-mutation and must NOT appear as if it were the found location').not.toMatch(/\b624\b/)
+    // ROUND 5 (r4-P2-1): both expectations were hardcoded — `toContain('477')` and
+    // `.not.toMatch(/\b624\b/)`. The second is the worse shape of the two: once an edit above
+    // shifts the lane's line numbers, the deleted line is no longer numbered 624 and the negative
+    // assertion passes VACUOUSLY rather than reddening. Both are derived below — the first from
+    // the scan this test just performed, the second from the physical index the mutation used.
+    expect(
+      scannedLines.length,
+      'fixture sanity: the post-mutation scan must still find gating invocations for the message to name',
+    ).toBeGreaterThan(0)
+    expect(message, 'the message must name the lines it scanned').toContain(String(scannedLines[0]))
+    // The deleted line's own 1-based number, anchored to the mutation this test performed. The
+    // anchor is what carries the negative assertion that follows: `.not.toMatch` over a list of
+    // post-mutation scanned line numbers holds for nearly any integer, so on its own it would
+    // survive a drifted expectation without complaint — which is exactly how round 4's `/\b624\b/`
+    // went quietly green once the lane shifted. Asserting that the derived number still indexes
+    // the physical line this test removed is the part with discriminating power.
+    const deletedPhysicalLine = idx + 1
+    expect(
+      lines[deletedPhysicalLine - 1],
+      'fixture sanity: the derived line number must index the exact physical line this test deletes',
+    ).toBe(victimLine)
+    expect(
+      message,
+      'the deleted line no longer exists post-mutation and must NOT appear as if it were the found location',
+    ).not.toMatch(new RegExp(`\\b${deletedPhysicalLine}\\b`))
   })
 
-  it('M6 (line-attribution case) a token appended to an EARLY line (690: permission-match-parity / platform-app-shell / platform-app-launcher) -> "extra in active" reds, naming it AND its exact source line', () => {
+  it('M6 (line-attribution case) a token appended to an EARLY line (permission-match-parity / platform-app-shell / platform-app-launcher) -> "extra in active" reds, naming it AND its exact source line', () => {
     const originalLine = 'npx vitest run permission-match-parity platform-app-shell platform-app-launcher --reporter=dot'
     const mutatedLine = 'npx vitest run permission-match-parity platform-app-shell platform-app-launcher __h6_round2_early_line_add_probe__ --reporter=dot'
     const lines = scriptSrc.split('\n')
     const idx = lines.indexOf(originalLine)
-    expect(idx, 'fixture sanity: line 690 must still read exactly this').toBeGreaterThan(-1)
+    expect(idx, 'fixture sanity: the lane script must still carry this exact physical line').toBeGreaterThan(-1)
     const mutatedLines = [...lines]
     mutatedLines[idx] = mutatedLine
     const mutated = mutatedLines.join('\n')
@@ -735,18 +863,26 @@ describe('required web lane token manifest — mutation self-proof', () => {
     const { missingFromActive, extraInActive } = diffSets(activeSet, manifestSet)
     expect(extraInActive).toContain('__h6_round2_early_line_add_probe__')
     expect(missingFromActive).toEqual([])
-    expect(lineMap.get('__h6_round2_early_line_add_probe__'), 'the injected token must be attributed to exactly line 690, unlike the M5 drop direction').toEqual([690])
+    // ROUND 5 (r4-P2-1): derived from the physical index this test already computed above, not the
+    // hardcoded `690` round 4 left here. The mutated line carries no backslash continuation, so its
+    // logical line starts on that physical line itself; an edit above moves index and expectation
+    // together.
+    const expectedAttributionLine = idx + 1
+    expect(
+      lineMap.get('__h6_round2_early_line_add_probe__'),
+      'the injected token must be attributed to exactly the physical line it was injected on, unlike the M5 drop direction',
+    ).toEqual([expectedAttributionLine])
 
     const message = describeExtra(extraInActive, lineMap)
-    expect(message).toContain('__h6_round2_early_line_add_probe__@line(s) 690')
+    expect(message).toContain(`__h6_round2_early_line_add_probe__@line(s) ${expectedAttributionLine}`)
   })
 
-  it('M7 reordering the two tokens WITHIN one early (non-exec-block) line (555) changes nothing — set, not sequence, semantics', () => {
+  it('M7 reordering the two tokens WITHIN one early (non-exec-block) line changes nothing — set, not sequence, semantics', () => {
     const originalLine = 'npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot'
     const reorderedLine = 'npx vitest run approval-fwb-mapping-editor approval-fwb-mapping-config --reporter=dot'
     const lines = scriptSrc.split('\n')
     const idx = lines.indexOf(originalLine)
-    expect(idx, 'fixture sanity: line 555 must still read exactly this').toBeGreaterThan(-1)
+    expect(idx, 'fixture sanity: the lane script must still carry this exact physical line').toBeGreaterThan(-1)
     const mutatedLines = [...lines]
     mutatedLines[idx] = reorderedLine
     const mutated = mutatedLines.join('\n')
@@ -754,8 +890,10 @@ describe('required web lane token manifest — mutation self-proof', () => {
     const before = allVitestTokens(scriptSrc)
     const after = allVitestTokens(mutated)
     expect([...after].sort(), 'reordering tokens within a line must not change the derived token set').toEqual([...before].sort())
-    expect(allVitestTokenLines(mutated).get('approval-fwb-mapping-config'), 'line attribution must survive the reorder').toEqual([555])
-    expect(allVitestTokenLines(mutated).get('approval-fwb-mapping-editor')).toEqual([555])
+    // ROUND 5 (r4-P2-1): derived from the physical index computed above, not the hardcoded `555`.
+    const expectedAttributionLine = idx + 1
+    expect(allVitestTokenLines(mutated).get('approval-fwb-mapping-config'), 'line attribution must survive the reorder').toEqual([expectedAttributionLine])
+    expect(allVitestTokenLines(mutated).get('approval-fwb-mapping-editor')).toEqual([expectedAttributionLine])
 
     const { missingFromActive, extraInActive } = diffSets(after, manifestSet)
     expect(missingFromActive, 'reordering must not be mistaken for a drop').toEqual([])
@@ -800,5 +938,22 @@ describe('required web lane token manifest — mutation self-proof', () => {
         + 'logicalLines() on every gating line, so a future divergence between the two reds here '
         + 'instead of relying only on the header\'s prose promise',
     ).toEqual(fromLogicalLines)
+  })
+
+  it('r2-P3-4 (widened round 5, r4-P3-3): the same allVitestInvocations-vs-logicalLines agreement holds across the whole FIXTURES battery, not just the one real lane script', () => {
+    // ROUND 5 (r4-P3-3) — the fourth copy of the comment-strip/continuation-fold loop (inside
+    // `allVitestInvocations`) had its agreement checked against `logicalLines()` on exactly ONE
+    // input: the real lane script. That script carries no indented `#` and no comment inside a
+    // continuation, so a whole class of divergence between the two loops was unobservable. Running
+    // the same comparison over the named battery brings the fourth copy under the same coverage
+    // the other three already have — including the two indented-`#` fixtures added this round.
+    for (const [fixtureName, fixtureSrc] of Object.entries(FIXTURES)) {
+      expect(
+        allVitestInvocations(fixtureSrc).map((l) => l.text),
+        `[${fixtureName}] allVitestInvocations()'s own fold loop diverged from logicalLines() on `
+          + `this fixture — the fourth copy of the loop has drifted from the three that are `
+          + `compared behaviourally above`,
+      ).toEqual(logicalLines(fixtureSrc).filter((line) => /\bvitest\s+run\b/.test(line)))
+    }
   })
 })

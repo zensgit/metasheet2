@@ -405,10 +405,13 @@ $ CI=true npx vitest run tests/unit/required-web-lane-token-manifest-guard.test.
  Test Files  1 passed (1)
       Tests  28 passed (28)
 ```
-28 (was 25): +3 net — `r4-G1` (behavioural cross-copy, replaces the old P3-6), `r4-G1`
-(line-number-mapping, new), `r4-G1 fixture sanity` (in-continuation-`#` divergence proof, new),
-`r2-P3-2` (behavioural, replaces the old text form), `r4-G2` (insert-N-comments, new) — net of the
-2 old text-comparison tests removed.
+Round 4's change to that figure, by kind (r4-NIT-2 — the arithmetic prose that stood here
+enumerated five items against a net-of-three delta, which read as a contradiction):
+
+- **new**: `r4-G1` (line-number-mapping), `r4-G1 fixture sanity` (in-continuation-`#` divergence
+  proof), `r4-G2` (insert-N-comments).
+- **rewritten in place**: `r4-G1` (behavioural cross-copy, replacing the old P3-6 text form),
+  `r2-P3-2` (behavioural, replacing its own old text form).
 
 Full suite:
 ```
@@ -458,6 +461,187 @@ $ git cherry origin/main
 + d8e25a044b0530df148abf11c4e20ee1f5390957
 + 905aac7e7e7535fb1ffb0e0fbdc885dc2e7015aa
 + 4d196c3d3ddc9bbcc723d7689cc134513d8dcf30
-+ <round-4 commit>
++ 1e23dca923a8ccb98477d3fdb5fcf4d0a5d117c5
 ```
 All `+` (no `-`), before and after the round-4 commit — no duplicate-of-main commits introduced.
+(r4-NIT-1: the fifth entry was a literal `<round-4 commit>` placeholder inside a block presented as
+command output; it is the measured SHA above. The round-5 commit is deliberately absent from this
+block rather than back-filled — a transcript cannot list the commit that creates it. §r5 below
+carries its own `git cherry` run.)
+
+---
+
+## §r5. Round 5 (2026-09-22) — round-4 gate hardening
+
+Base: `origin/main` @ `cd42eaf7455f03dd99021a02c47c42f1f3db6484`. Round-4 head (the reviewed one):
+`1e23dca923a8ccb98477d3fdb5fcf4d0a5d117c5`. Two detached worktrees under the session scratchpad,
+`node_modules` symlinked from the canonical checkout at root / `apps/web` / `packages/core-backend`.
+Zero databases created or reused. Command throughout (`minForks=1` for the same vitest 1.6.1
+`RangeError` the earlier rounds recorded):
+
+```
+CI=true npx vitest run <file(s)> --pool=forks --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=3
+```
+
+Each on-disk mutation below is `cp` backup → mutate → run → `cp` restore → `cmp`; no
+`git checkout --`, `reset --hard`, or `stash` was used anywhere, and both trees ended at
+`git status --porcelain` = 0 lines.
+
+### r5.1 The fix, on the branch tree
+
+```
+$ cd <scratch>/h6r5-br/packages/core-backend
+$ CI=true npx vitest run tests/unit/required-web-lane-token-manifest-guard.test.ts …
+ Test Files  1 passed (1)
+      Tests  29 passed (29)
+
+$ CI=true npx vitest run tests/unit/required-web-lane-token-manifest-guard.test.ts \
+    tests/unit/required-web-lane-registration-shape.test.ts …
+ Test Files  2 passed (2)
+      Tests  47 passed (47)
+
+$ CI=true npx vitest run tests/unit/approval-ci-coverage-enumeration.test.ts \
+    tests/unit/approval-field-access-enum-mirror.test.ts …          # environment-health control
+ Test Files  2 passed (2)
+      Tests  392 passed (392)
+```
+
+`apps/web/tests/run-required-web-tests-shape.spec.ts` (the third lane-shape guard the dry-run
+lists) still does not exist at this head — it is #5898's file and #5898 is unmerged — so "the two
+existing guards" resolves to one on this branch, the core-backend shape guard, inside the combined
+run above. Recorded rather than silently counted, same as round 4.
+
+The two CLI consumers of the edited `.mjs` were smoke-run because that file's header changed:
+
+```
+$ node scripts/ops/required-web-lane-token-manifest.mjs
+active (19 gating invocations): 499 distinct tokens
+committed manifest: 499 tokens, 499 distinct
+MANIFEST MATCHES — the committed token set equals the active token set.
+
+$ node scripts/ops/required-web-lane-token-set-diff.mjs origin/main HEAD
+SET IDENTICAL — every filter the old invocation handed vitest is still handed to it.
+```
+
+### r5.2 r4-P2-1's own probe, run as a differential (the round-4 file vs. the round-5 file)
+
+40 comment-only physical lines inserted after the lane script's shebang — zero tokens and zero
+logical lines changed. The round-4 file was put in place with
+`git show HEAD:packages/core-backend/tests/unit/required-web-lane-token-manifest-guard.test.ts`,
+not by hand-editing, so the two legs differ by exactly the committed round-5 diff:
+
+```
+(A) round-5 file  ->  Test Files  1 passed (1)
+                           Tests  29 passed (29)
+
+(B) round-4 file  ->  Tests  4 failed | 24 passed (28)
+    AssertionError: fixture sanity: line 1180 must still be one of the 19 gating invocations: expected undefined to be truthy
+    AssertionError: the message must name the lines it scanned: expected '1 token(s) recorded in apps/web/scrip…' to contain '477'
+    AssertionError: the injected token must be attributed to exactly line 690, unlike the M5 drop direction: expected [ 730 ] to deeply equal [ 690 ]
+    AssertionError: line attribution must survive the reorder: expected [ 595 ] to deeply equal [ 555 ]
+```
+
+Leg (B) reproduces the round-4 gate's §3.5 measurement byte-for-byte, here on the branch tree
+rather than the dry-run overlay.
+
+**A negative assertion over line numbers carries almost no power on its own, so the derived value
+is anchored instead.** `describeMissing` prints the post-mutation SCANNED lines; the deleted line's
+number is absent from that list for nearly any value it could take, so `.not.toMatch(/\b<n>\b/)`
+would survive a drifted `<n>` without complaint — which is how round 4's `/\b624\b/` went quietly
+green. Measured: after the deletion the nearest scanned lines above it are 661 and 689, so a
+collision would need the next gating invocation at exactly `deleted + 1`. The round-5 test
+therefore asserts that the derived number still indexes the physical line the mutation removed
+(`expect(lines[deletedPhysicalLine - 1]).toBe(victimLine)`); that is the assertion with
+discriminating power, and PC-D below mutates the derivation to prove it.
+
+**The fifth failure that is not in that list is the finding the gate's census had not reached.**
+`.not.toMatch(/\b624\b/)` does not appear among leg (B)'s four reds: after the shift the deleted
+line is no longer numbered 624, so the negative assertion passes without testing anything about
+the line it names. A loud red is a nuisance; an assertion that quietly stops checking its subject
+is the failure mode this guard exists to prevent. Round 5 derives it from the index the same test
+already computes.
+
+### r5.3 Positive controls — each derived expectation, mutated, must red
+
+Each mutation asserts its anchor count is exactly 1 before running (an ineffective mutation looks
+identical to a useless test), and each is restored and `cmp`-verified afterwards.
+
+| # | mutation | target | result |
+|---|---|---|---|
+| PC-A | `stripTrailingErrorGuard(inv.text) !== inv.text` → `===` (selector picks the untailed lines) | guard test | `1 failed \| 28 passed (29)` |
+| PC-B | `toBe(gatingInvocationsBefore - 1)` → `toBe(gatingInvocationsBefore)` | guard test | `1 failed \| 28 passed (29)` |
+| PC-C | `toContain(String(firstScannedLine))` → `firstScannedLine + 1` | guard test | `1 failed \| 28 passed (29)` |
+| PC-D | `const deletedPhysicalLine = idx + 1` → `idx + 2` | guard test | `1 failed \| 28 passed (29)`, on the anchor assertion: `the derived line number must index the exact physical line this test deletes: expected '' to be 'npx vitest run multitable-field-confi…'` |
+| PC-E | M6 `idx + 1` → `idx + 2` | guard test | `1 failed \| 28 passed (29)` |
+| PC-F | M7 `idx + 1` → `idx + 2` | guard test | `1 failed \| 28 passed (29)` |
+| PC-G | widened `r2-P3-4` loses its `vitest run` filter | guard test | `1 failed \| 28 passed (29)` |
+| MUT-1 | `startLine = lineNo` → `lineNo + 1` inside `logicalLinesWithLineNumbers()` | `required-web-lane-exec-block.mjs` | `1 failed \| 28 passed (29)`, message `[singleLineNoContinuation] the exec logical line's recorded start line disagrees with the physical index …: expected 2 to be 1` |
+| MUT-E | `/^\s*#/` → `/^#/` | `required-web-lane-token-set-diff.mjs` | `2 failed \| 27 passed (29)`, both naming `[indentedCommentBeforeBlock]` — the round-4 gate measured this mutation **green** (its §3.2 MUT-E row) |
+
+**MUT-1 against the round-4 file: `Test Files 1 passed (1)`.** The same mutation is entirely green
+under round 4 and reds under round 5 — that difference is the vacuity r4-P3-1 identified, measured
+rather than argued.
+
+### r5.4 `refs/dryrun/mtv3-final` overlay (the ref itself is not written)
+
+```
+$ git rev-parse refs/dryrun/mtv3-final        # before
+a93bea106f06f26e4a5e68216bc119eb2c08a599
+
+(1) dry-run tree, its own round-3-era guard, untouched:
+      Tests  2 failed | 23 passed (25)        # matches the round-4 gate's §3.1(a)
+
+(2) the two round-5 code files cp-overlaid onto the same tree:
+      Tests  29 passed (29)
+
+(3) same overlay + MUT-C on the dry-run SIBLING (`bufStart = i + 1` → `i + 2`):
+      1 red, [singleLineNoContinuation] logicalLinesWithLineNumbers() (folded result +
+      line-number mapping) diverged from the shape guard's copy
+      -> branch (c) of the rewritten test is LIVE on a tree where the sibling exports the wrapper:
+         round 4's cross-copy coverage is widened, not traded away
+
+(4) same overlay + the 40-line post-shebang insert:
+      Tests  29 passed (29)
+
+$ git rev-parse refs/dryrun/mtv3-final        # after the whole round
+a93bea106f06f26e4a5e68216bc119eb2c08a599
+```
+
+Both overlaid files restored and `cmp`-verified; dry-run tree `git status --porcelain` = 0 lines.
+
+### r5.5 Type-check, hardcoded-number census, commit hygiene
+
+```
+$ cd <scratch>/h6r5-br/packages/core-backend && npx tsc --noEmit -p tsconfig.json | grep -c "error TS"
+0
+```
+Same scope caveat as round 4, unchanged and still disclosed: the package `tsconfig.json` excludes
+`**/*.test.ts`, so neither CI's `pnpm type-check` nor this run type-checks the guard file itself.
+
+Census (widened past the round-4 gate's enumeration — `grep -nE '[0-9]{3,}'` over the whole guard
+file, then classifying each hit, rather than the narrow assertion-shaped grep):
+
+| class | disposition |
+|---|---|
+| load-bearing physical-line expectations | the round-4 gate's prescribed grep, `grep -nE "toEqual\(\[[0-9]+\]\)\|toBe\([0-9]{3,}\)"`, returns **0 hits**; the per-site listing is design §12's table |
+| line numbers in `it()` titles and fixture-sanity messages | deleted |
+| each 3+-digit hit remaining in the code region (`grep -nE '[0-9]{3,}'`, lines past the class header) | each sits inside a `//` comment recording what was removed and why, except NIT-3's synthetic probe input; **zero in an assertion position** |
+| `19` / `499` / `397` / `102` / `28` in class-header prose and in `.mjs` headers | census figures with their recompute commands, dated to the round that measured them; out of this round's scope and untouched |
+| `37` (r4-G2's insert count), `50` / `300` (NIT-3 probe inputs) | test inputs, not expectations about the file |
+
+`git cherry origin/main <branch head>` and the identity census over
+`origin/main..<branch head>` are run AFTER the round-5 commit exists and are reported on the PR
+rather than pasted here: a transcript committed inside that commit cannot list it, and back-filling
+self-referential snapshots is how three of the last four rounds introduced a fresh false number
+(the same reason §8d's placeholder is not being extended). Identity is set per-command with
+`git -c user.name=… -c user.email=…`; no `git config` was executed in any scope this round.
+
+### r5.6 NOT RUN (with reasons)
+
+| item | reason |
+|---|---|
+| `test (20.x)` / `test (18.x)` on #5974 | not queried this round; a pending or unqueried required check is NOT RUN, not green |
+| any real-DB suite | zero databases created or reused, per this round's execution discipline |
+| full no-DB core-backend lane | out of scope for a hardening round; the neighbour files (392 passed) stand in as the environment-health control |
+| `bash -e apps/web/scripts/run-required-web-tests.sh` | the dry-run measured it red on both the train and the pristine `origin/main` control, a main-existing red with zero H-6 content |
+| `pnpm -r test` | prohibited by the execution discipline |

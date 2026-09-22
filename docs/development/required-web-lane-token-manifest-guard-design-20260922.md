@@ -398,12 +398,16 @@ guards conflate sources" feedback both warn against building instead.
   that vitest applies to the file list it has already globbed under the real config — not a literal
   path handed straight to a loader (that would only prove a targeted run passes, not that anything
   collects the file, per the standing "triggered ≠ verified" rule). That command collects **both**
-  this file and `required-web-lane-registration-shape.test.ts` from the same default-config glob,
-  **18→43 tests** before/after this file existed (18 unedited shape-guard tests; round 1 added 10,
-  round 2 replaced them with 21, round 3 added 4 more for a total of 25 — see the verification
-  document §4b for the transcript; round-1 design §6 said "27→28", round 2 said "18→39" — both
-  superseded, r2-P3-1 / this round's own re-measurement). This is the proof the task asked for in
-  place of trusting "no wiring needed, same as the shape test."
+  this file and `required-web-lane-registration-shape.test.ts` from the same default-config glob. This is
+  the proof the task asked for in place of trusting "no wiring needed, same as the shape test."
+  **ROUND 5 (r4-P2-2)**: the before/after test COUNT that stood here is deleted rather than
+  re-measured. It went stale in three consecutive rounds — round 1 wrote "27→28", round 2 "18→39",
+  rounds 3/4 "18→43", each figure carried forward by the round that invalidated it — and round 4
+  shipped a companion clause in the guard file asserting the figure came straight from the
+  command's own output while in fact carrying it over by hand. The collection claim above is the
+  part the wiring argument rests on, it is re-checkable by running the printed command, and it does
+  not decay when a later round adds assertions. The measured counts stay in the verification
+  document's dated transcript sections (§4b, §8b, §r5), where they are historical by construction.
 - `web-tests.yml` (the job that actually **executes** the pinned tokens against vitest) is a
   separate, always-on job (`web-tests`, no path filter) — this guard does not run there and does
   not need to; it runs in the job that gates the manifest file's correctness, not the job that
@@ -562,6 +566,13 @@ the comparison has a same-shaped counterpart once a sibling exports one; on THIS
 (`required-web-lane-registration-shape.test.ts` not yet carrying #5898) that half is
 feature-detected and skipped, not silently vacuous (the test asserts the detection itself).
 
+> **SUPERSEDED IN ROUND 5 — this sentence, not the section.** The round-4 gate (r4-P3-1) measured
+> what "feature-detected and skipped" costs: on this branch the skipped body made the test a
+> tautology (`expect(false).toBe(false)`), so a sibling mutation reddened 2 tests on the dry-run
+> tree and 1 here. Round 5 rewrote that test to be self-contained — see §12 (r4-P3-1). The rest of
+> the G1 paragraph above (the materialize-and-compare fix, the fixture battery, the deliberate
+> in-continuation-`#` exclusion) is unchanged and still OPERATIVE.
+
 One shape is DELIBERATELY EXCLUDED from the "must agree" fixture set: a `#` comment landing INSIDE
 an active backslash continuation. Measured (not assumed): the two documented fold orders disagree
 there — this PR's algorithm (strip all `#` lines, then fold) glues both sides of the comment into
@@ -581,7 +592,121 @@ lines above the exec header and asserts the detected start line moves by exactly
 regression back to a hardcoded literal would itself be caught (that test would still pass against
 a hand-typed constant only if N happened to be 0, which it deliberately is not).
 
+> **SCOPE CORRECTION, ROUND 5 — this claim, not the section.** As written it is true of the exec-block
+> site it describes and of nothing else: the round-4 gate (r4-P2-1) found four more hardcoded
+> physical-line expectations of the identical shape surviving in the same file, and a widened
+> round-5 census found two more the gate's enumeration had not reached. The discriminating test
+> above guards the M2 site; it has no reach into the others. Round 5 derives them — see §12
+> (r4-P2-1), including the measured before/after for a 40-line insert.
+
 ### Verification
 
 See the verification doc's own §8 (round 4) for the exact commands and measured before/after
 numbers on both the standalone branch and the `refs/dryrun/mtv3-final` overlay.
+
+---
+
+## 12. Round 5 (2026-09-22) — round-4 gate findings (`r4-` prefix)
+
+Source: `impl-gate-H6-token-manifest-guard-round4-20260922.md`, verdict APPROVE-with-hardening,
+0 P1 / 2 P2 / 3 P3 / 2 NIT, head-scoped to `1e23dca923a8ccb98477d3fdb5fcf4d0a5d117c5`. Nothing in
+that report blocked; this round lands the hardening it attached. Commands and verbatim outputs for
+each item are in the verification document's §r5.
+
+### r4-P2-1 — the residual hardcoded line numbers, derived from the script under test
+
+Round 4 fixed the M2 site (`toEqual([1257])` → parsed start line) and left the same shape standing
+elsewhere in the same file. The gate enumerated 5 sites / 4 values. A widened census this round —
+`grep -nE '[0-9]{3,}'` over the whole file, then classifying each hit as derived / prose / live —
+found **two more load-bearing sites the gate's enumeration had not reached**, both in M5:
+
+| site | round-4 expectation | round-5 derivation | failure mode it had |
+|---|---|---|---|
+| `stripTrailingErrorGuard` real-line test | `invocations.find((l) => l.startLine === 1180)` / `=== 1183` | `invocations.filter((inv) => stripTrailingErrorGuard(inv.text) !== inv.text)` — selected by the property under test | red on its own fixture sanity |
+| M5 message, scanned lines | `toContain('477')` | `toContain(String(scannedLines[0]))` | red |
+| M5 message, deleted line (**gate census missed this one**) | `.not.toMatch(/\b624\b/)` | `.not.toMatch(new RegExp(\`\\b${idx + 1}\\b\`))` | **VACUOUSLY GREEN** — once the lane shifts, 624 names nothing and the negative assertion stops testing the deleted line |
+| M5 invocation count (**gate census missed this one**) | `.toBe(18)`, message `19 -> 18` | `.toBe(allVitestInvocations(scriptSrc).length - 1)` | red whenever the lane gains or loses a gating line |
+| M6 attribution | `.toEqual([690])` + `@line(s) 690` | `idx + 1`, from the index the test already computes | red |
+| M7 attribution | `.toEqual([555])` ×2 | `idx + 1`, same | red |
+
+The silent-green row is why the widened census mattered: a loud red is a nuisance, an assertion
+that quietly stops checking its subject is the failure this guard exists to prevent elsewhere.
+Deriving that row's number is necessary but not sufficient: `describeMissing` prints the
+post-mutation scanned lines, and the deleted line's number is absent from that list for nearly any
+value, so the negative match would survive a drifted expectation just as quietly. The round-5 test
+therefore also asserts that the derived number still indexes the physical line the mutation removed
+— that is the assertion with discriminating power, and verification §r5.3's PC-D mutates the
+derivation to show it reds.
+
+Line numbers were also deleted from the `it()` titles and fixture-sanity messages that carried them
+(`(1180, 1183)`, `line 624`, `(690: …)`, `(555)`). Deleted, not re-derived: they were prose, they
+would rot the same way, and a round whose subject is derived-not-hardcoded expectations should not
+leave hand-typed line numbers in its own test names.
+
+**Measured** (verification §r5): with 40 comment-only lines inserted after the lane script's
+shebang — a change that alters zero tokens and zero logical lines — the round-4 file gives
+`4 failed | 24 passed (28)` (reproducing the gate's §3.5 exactly, on the branch tree) and the
+round-5 file gives `29 passed (29)`.
+
+### r4-P2-2 — the stale count is deleted, not re-measured
+
+Guard file `:116` and design `:402` both printed a before/after test count, both stale, and the
+guard's own sentence claimed the figure was taken from the command's output when it had been
+carried over by hand. The count is **deleted from both live sites** and the qualitative claim it
+was decorating — that one `--reporter=verbose` run collects both files from the same default-config
+glob — is kept with its command. This deviates from the gate's literal prescription ("re-measure
+and paste 18 → 46 / total of 28"): a pasted figure is correct for exactly as long as it takes the
+next round to add an assertion, and this one has gone stale in three consecutive rounds. The dated
+transcripts in the verification document keep the measured figures where they cannot rot.
+
+### r4-P3-1 — the line-number-mapping test is self-contained
+
+Round 4's mapping test skipped its body unless the sibling exported `logicalLinesWithLineNumbers`,
+which on this branch it does not, making the test `expect(false).toBe(false)`. Rewritten to run the
+FIXTURES battery unconditionally against three things: (a) the fold half, compared to this file's
+own `logicalLines()` and to both sibling copies' — so the wrapper is checked against three parsers
+regardless of sibling state; (b) the line-number half, anchored on the **fixture's own text** —
+each fixture carries exactly one `exec npx vitest run` logical line, so the physical index of its
+header is found by a raw scan that no fold implementation participates in; (c) the full
+`{line, lineNumber}` comparison from round 4, which now widens in automatically when the sibling
+grows the export.
+
+**Positive control** (verification §r5): mutating `startLine = lineNo` → `lineNo + 1` inside
+`logicalLinesWithLineNumbers()` reds exactly this test under round 5 and is **entirely green**
+under the round-4 file — the difference is the vacuity the gate identified.
+
+### r4-P3-2 — indented-`#` fixtures
+
+Two added: `indentedCommentBeforeBlock` (space-indented, before the block) and
+`indentedCommentInsideBlockOutsideContinuation` (tab-indented, between two already-terminated
+logical lines). MUT-E — narrowing a copy's comment predicate from `^\s*#` to `^#` — was measured
+green by the round-4 gate across the whole battery; it now reds on both new fixtures. The lane
+script still has no indented `#` among its gating lines, so this class stays latent in production
+and live in the battery.
+
+### r4-P3-3 — the rotted exemption comment, plus the coverage it was hiding
+
+`allVitestInvocations`'s header justified its duplicate fold loop by saying `logicalLines()` had to
+stay byte-identical to its siblings and therefore could not track line numbers. Round 4 falsified
+both halves. The comment now states the actual round-4 reason (output-shape stability, scoped), and
+the residual it names — the fourth copy compared on a single input — is closed from the test side:
+`r2-P3-4` gained a widened case running the same `allVitestInvocations` ↔ `logicalLines` comparison
+across the shared FIXTURES battery, indented-`#` fixtures included.
+
+### r4-NIT-1 / r4-NIT-2
+
+NIT-1: the `git cherry` transcript's `+ <round-4 commit>` placeholder is replaced with the measured
+SHA. The round-5 commit is deliberately **not** added to that block — a transcript cannot list the
+commit that creates it, and back-filling self-referential snapshots is how three of the last four
+rounds introduced a fresh false number.
+
+NIT-2: §8b's "+3 net" sentence, which enumerated five items against a net-of-three delta, is split
+into its two kinds (new vs. rewritten-in-place) with the arithmetic removed.
+
+### Still open after this round
+
+r3-P3-1 (census incomplete: a 7th/8th lane-reading guard findable by one `git grep`), r3-P3-2
+("pinned by NOTHING" is text-literal), r3-NIT-1 (bounds live in prose, not an assertion) — carried
+forward unchanged, out of this round's scope, as they were out of round 4's. Round 2's two
+owner-disposition items (P1-1 option (a) vs. (b); merge sequencing) remain **unresolved by any
+owner ruling** — no comment or review exists on #5974.
