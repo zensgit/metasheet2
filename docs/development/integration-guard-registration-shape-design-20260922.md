@@ -229,6 +229,7 @@ tokens, §2), P3-2 (`.gitattributes` `eol=lf` half not extended alongside `merge
 P3-3 (no `merge=union` pin, so alphabetically-adjacent lanes can still conflict, §5) are existing,
 unresolved** — the gate's own disposition recommends they land in a separate follow-up PR, not in
 this one; no `.gitattributes` or coverage change is made in this pass.
+
 P3-4 (PR body item 3 expanding the `#`-truncation mechanism and disclosing an unfixed detection
 gap) was handled in this pass by trimming that body item; the mechanism detail stays in this MD
 and the private review notes. NIT-2 (the mutation self-proof block re-implements
