@@ -372,6 +372,23 @@ const FIXTURES: Record<string, string> = {
 }
 
 /**
+ * The FIXTURES key set, defined exactly once. Both cross-copy assertions below compare
+ * `Object.keys(FIXTURES)` against this instead of each carrying its own literal array — a rewritten
+ * literal that drifts from FIXTURES itself would otherwise still read as "count and names defined
+ * once" while silently being defined twice (S-7 gate P3-B).
+ */
+const EXPECTED_FIXTURE_KEYS = [
+  'singleLineNoContinuation',
+  'continuation',
+  'commentBeforeBlock',
+  'commentInsideBlockOutsideContinuation',
+  'deadBlockAfterExec',
+  'blankLineBeforeBlock',
+  'indentedCommentBeforeBlock',
+  'indentedCommentInsideBlockOutsideContinuation',
+] as const
+
+/**
  * NIT-3 (round-1 gate review) — a derived sanity floor instead of a hardcoded magic number,
  * factored out so the "does it actually red on the degenerate case" probe below calls the exact
  * same logic the real assertion uses, rather than re-deriving it and risking the two drifting.
@@ -474,18 +491,7 @@ describe('required web lane token manifest — set equality', () => {
     expect(
       Object.keys(FIXTURES).sort(),
       'exact FIXTURES key set — count and names defined once',
-    ).toEqual(
-      [
-        'singleLineNoContinuation',
-        'continuation',
-        'commentBeforeBlock',
-        'commentInsideBlockOutsideContinuation',
-        'deadBlockAfterExec',
-        'blankLineBeforeBlock',
-        'indentedCommentBeforeBlock',
-        'indentedCommentInsideBlockOutsideContinuation',
-      ].sort(),
-    )
+    ).toEqual([...EXPECTED_FIXTURE_KEYS].sort())
     expect(
       FIXTURES.indentedCommentBeforeBlock,
       'load-bearing property this fixture exists to pin: the leading `#` stays INDENTED — '
@@ -556,18 +562,7 @@ describe('required web lane token manifest — set equality', () => {
     expect(
       Object.keys(FIXTURES).sort(),
       'exact FIXTURES key set — count and names defined once',
-    ).toEqual(
-      [
-        'singleLineNoContinuation',
-        'continuation',
-        'commentBeforeBlock',
-        'commentInsideBlockOutsideContinuation',
-        'deadBlockAfterExec',
-        'blankLineBeforeBlock',
-        'indentedCommentBeforeBlock',
-        'indentedCommentInsideBlockOutsideContinuation',
-      ].sort(),
-    )
+    ).toEqual([...EXPECTED_FIXTURE_KEYS].sort())
     expect(
       FIXTURES.indentedCommentBeforeBlock,
       'load-bearing property this fixture exists to pin: the leading `#` stays INDENTED — '
