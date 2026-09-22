@@ -555,9 +555,10 @@ to surface (see the dry-run's own §4 G1 row).
 
 **Fix**: the three functions' equivalence is now checked by MATERIALIZING each copy's extracted
 source into a real, callable function (`materializeAll()`, `required-web-lane-token-manifest-guard.test.ts`)
-and comparing OUTPUT across a named battery of >=6 fixtures (a bare single line, a backslash
+and comparing OUTPUT across the shared FIXTURES battery (a bare single line, a backslash
 continuation, a comment before the block, a comment between two already-terminated lines, a dead
-block after `exec`, a blank line before the block) — not source text. `required-web-lane-exec-block.mjs`
+block after `exec`, a blank line before the block, an INDENTED comment before the block, and an
+INDENTED comment inside the block outside any continuation) — not source text. `required-web-lane-exec-block.mjs`
 gained its own `logicalLinesWithLineNumbers()` export in the same round (an ADAPTER matching the
 sibling's post-refactor shape, per this PR's own "write an adapter, not a fourth copy" convention
 — §4 item 1 above — not a behaviour change: its own `logicalLines()` output is proved unchanged by
@@ -725,5 +726,5 @@ fix (a) would need to close the gap. The PR body carried a fourth copy of the re
 was deleted from the body on 2026-09-22 (body-only, not in the tree). **P3-1 (fourth-copy
 coverage hole) is existing, unresolved** — no assertion changed in this pass.
 
-NIT-1 closed at 928d3d51a (floor raised to 8; the two indented-# fixtures named) and hardened at
-804f2a55fee2381c9e93dd7061aa837ecf8952ec (exact key set; the indented-# property pinned).
+NIT-1 closed at 928d3d51a (floor raised to 8; the two indented-# fixtures named), then superseded
+at 804f2a55f by an exact key-set assertion (the indented-# property pinned).
