@@ -242,14 +242,47 @@ The S-8 independent adversarial gate (`impl-gate-S8-first-point-sort-guard-20260
 APPROVE-with-hardening, 0 P1/1 P2 PRE-EXISTING/2 P3/5 NIT) found the second registration point's
 one-token and two-space-indent checks (`:587`/`:590`) each duplicated inline in the first
 registration point's own per-line loop (`:190`/`:193` respectively) — the first point has no
-bare-`#` check of its own — and the second point's bare-`#` check (`:579`) reimplemented a second
+bare-`#` check of its own — and the second point's bare-`#` check (`:580`) reimplemented a second
 time, as its own separate copy, inside its own PC1 self-proof rather than exercising the real
-assertion. So any of these copies could be neutered (return a constant) with the suite staying
-green, because the sibling copy it was not wired to masked the gap (gate §六, SIB-1..4). Commit
-`89edec9e4d28e862ab1320f8193af1c98bf2576c` on this branch closes that: the three predicates
-(`isBareCommentLine`, `isOneTokenLine`, `hasTwoSpaceIndent`) now live once each at module scope,
-both registration points' real assertions and PC1 call them instead of a local copy, and three new
-self-proofs (PC5, PC6, M6) feed each predicate a controlled bad input and assert it is caught. The
-gate's separate NIT-1/NIT-2/NIT-4 wording corrections and the `firstSortBreak` return-shape change
-it prescribed (returning `{ at, found, expected }` so neither "is sorted" call site re-sorts the
-token list itself) are in the same commit.
+assertion.
+
+Commit `89edec9e4d28e862ab1320f8193af1c98bf2576c` on this branch moved the three predicates
+(`isBareCommentLine`, `isOneTokenLine`, `hasTwoSpaceIndent`) to live once each at module scope, made
+both registration points' real assertions and PC1 call them instead of a local copy, and added
+three new self-proofs (PC5, PC6, M6) that feed each predicate's **function body** a controlled bad
+input and assert it is caught. Measured, that layer is a real improvement: SIB-1/2/3/4 each red on
+this branch's head under the mutation and are green on base `72da9f76b` under the identical
+mutation (S-9 independent gate, `impl-gate-S9-sibling-predicates-20260923.md` §三.1). What this
+commit does not close is the real assertions' **call sites**: replacing `isBareCommentLine(line)`,
+`isOneTokenLine(payload)` or `hasTwoSpaceIndent(line)` with a constant at the call site itself — not
+inside the function body — leaves the suite green (S-9 gate CALL-1/2a/2b/3a/3b, `30 passed (30)`
+each), because a fail-open check run on an already-conformant script reads the same as a correct one
+— the same limit `:586-592` above already names for `firstSortBreak`. A same-file mutation
+self-proof does not by itself rule this out: it can only feed a predicate the input IT supplies and
+check the verdict, not show what a constant-replaced call site would have done to some other input a
+future regression might carry.
+
+Base `72da9f76b`'s bare-`#` predicate (SIB-1) genuinely was covered by a sibling copy before this
+branch: PC1 carried its own separate `#` check while the real assertion's inline copy had none, so
+neutering the real assertion's copy alone left PC1's copy silently standing in for it. That
+sibling-masking mechanism is scoped to SIB-1. The indent predicate (SIB-3/4) was not sibling-masked:
+on base, neutering BOTH its inline copies together (`:193` and `:590`) at once is still green
+(`27 passed (27)`, S-9 gate §三, base-comparison run) — because indent carried no self-proof at all
+before this branch, so there was no sibling to do the masking. The mechanism there is the same
+fail-open-indistinguishable-from-correct limit named above, not a masking sibling.
+
+The gate's separate NIT-1/NIT-2/NIT-4 wording corrections and the `firstSortBreak` return-shape
+change it prescribed (returning `{ at, found, expected }` so neither "is sorted" call site re-sorts
+the token list itself) are in the same commit.
+
+**S-9 gate follow-up (2026-09-23, record-level, optional narrowing).** Commit `3f5a4ae4b` on this
+branch hoists the shared `payload` derivation (`line.replace(/\s+$/, '').replace(/\\$/,
+'').trim()`) — previously duplicated three times, at this branch's own `:210`, `:629`, and PC5's
+own `:689` — into one module-scope `payloadOf(line)`, with all three sites now calling it. This is
+a narrowing, not a closure: the S-9 gate's PAY-PC positive control (replacing the call site with
+`line`, unmodified) reds the second point's real assertion, showing the site is reachable and
+load-bearing; but replacing the call site itself (`const payload = payloadOf(line)` → a literal) at
+either real assertion still leaves the suite green (`30 passed (30)` each), which is the identical
+call-site limit two paragraphs above, applied to this predicate too. What the hoist buys is that the
+derivation now has ONE copy instead of three, so a regression IN THAT DERIVATION — as opposed to a
+regression at one specific call site — is now visible to PC5, where before this commit it was not.
