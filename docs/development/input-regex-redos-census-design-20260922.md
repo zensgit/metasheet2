@@ -74,7 +74,7 @@ Full site lists for the two multi-site shapes are in § 2.1.
 
 | # | file:line | input source | shape | measured | disposition |
 |---|---|---|---|---|---|
-| **L1** | pre-image SINKS `formula/engine.ts:326/329/332` (REGEXMATCH/EXTRACT/REPLACE) + `:183` (SUBSTITUTE); post-image REGISTRATIONS `:340/:344/:350` + `:187`, sinks moved into `regex-safety.ts:272/282/354` | **user supplies the PATTERN** via a formula expression | class-two; nested-quantifier `new RegExp(userStr)` | **20.4s in-process @58-char expr; 55.0s cross-tenant victim GET (OOB)** | **LIVE, CONFIRMED cross-tenant. MITIGATED on branch (PROPOSED), not fixed:** the three named catastrophic shapes are refused in ≤14.4ms (600/600 runs) and SUBSTITUTE no longer reaches a regex engine at all; a pattern whose cost is discontinuous in subject length is still not caught (§3D). |
+| **L1** | pre-image SINKS `formula/engine.ts:326/329/332` (REGEXMATCH/EXTRACT/REPLACE) + `:183` (SUBSTITUTE); post-image REGISTRATIONS `:340/:344/:350` + `:187`, sinks moved into `regex-safety.ts:311/324/432` | **user supplies the PATTERN** via a formula expression | class-two; nested-quantifier `new RegExp(userStr)` | **20.4s in-process @58-char expr; 55.0s cross-tenant victim GET (OOB)** | **LIVE, CONFIRMED cross-tenant. MITIGATED on branch (PROPOSED), not fixed:** the three named catastrophic shapes are refused in ≤14.4ms (600/600 runs) and SUBSTITUTE no longer reaches a regex engine at all; a pattern whose cost is discontinuous in subject length is still not caught (§3D). |
 | **L2** | pre-image SINK `multitable/field-validation-engine.ts:103` (inside `validatePattern:100`); post-image `:112` (`evaluatePatternRule`), `:129` (guarded call), `:192` (the `pattern` case) | **user supplies the PATTERN** via a stored `property.validation` rule (uncapped `z.record(z.unknown())`); runs on **every record write and public form submission** (`univer-meta.ts:17526`, `record-service.ts:725`) | class-two; nested-quantifier `new RegExp(rule.params.regex)` `.test` | **20.5s in-process @33-char record value** (benign control 0.1ms) | **LIVE, CONFIRMED. MITIGATED on branch (PROPOSED), not fixed:** same ladder as L1, plus the subject ceiling this site had no equivalent of (§3B.2). Cross-tenant HTTP proof NOT RUN (in-process only); same shared-event-loop mechanism as L1. |
 | **L3** | pre-image SINK `plugins/plugin-integration-core/lib/validator.cjs:97` (inside `compilePattern`); post-image `:155` (guarded call), `:160` (`PATTERN_NOT_EVALUATED`) | **user supplies the PATTERN** via a pipeline `fieldMapping.validation` rule (`params.regex \| params.pattern \| params.value`) | class-two; `new RegExp(pattern, flags)` `.test` on a record value | **20164ms in-process @33-char value**, measured on the real module through the real `validateValue` (this round, mutation M7) | **LIVE on the code shape; runtime reachability argued but NOT end-to-end proven (§3E). MITIGATED on branch (PROPOSED)** — missed entirely by the round-1 scope glob. |
 | 1 | `attendance/w7-shadow-expected-differences.ts:287` | `ratifiedBy` from W7 expected-shadow roster config | `/[\w-]+\.md\b/` `.test` | ratio 101, 5.1s @1e5 | internal domain config, not HTTP body → UNVERIFIED reachable; no fix |
@@ -126,7 +126,7 @@ formula engine (L1); § 3B is the field-validation pattern rule (L2).
 caller-authored `pattern` string into `new RegExp(String(pattern))`
 (pre-image sinks `formula/engine.ts:326/329/332`; post-image registrations
 `:340/:344/:350`, with the `new RegExp` itself now inside
-`formula/regex-safety.ts:272/282/354`). `SUBSTITUTE(text, old, new)` compiled `old` into
+`formula/regex-safety.ts:311/324/432`). `SUBSTITUTE(text, old, new)` compiled `old` into
 `new RegExp(String(old), 'g')` (pre-image sink `:183`); post-image `:187` calls
 `substituteLiteral` and reaches no regex engine at all. A nested-quantifier pattern such as
 `^(a+)+$` (7 characters) is exponential in the subject length; because JS regex
@@ -149,7 +149,7 @@ concurrent request, across all tenants.
   more severe variant: unbounded stored pattern, lower-privileged trigger.
 
 ### 3.3 Candidate mitigation (PROPOSED, round 2)
-- **`SUBSTITUTE` → literal replacement** (`substituteLiteral`, `formula/regex-safety.ts:44`,
+- **`SUBSTITUTE` → literal replacement** (`substituteLiteral`, `formula/regex-safety.ts:49`,
   split/join, O(n)). This both fixes a spec bug (Excel/Sheets SUBSTITUTE is literal,
   not regex) and removes the vector — arg-2 never reaches a regex engine. This IS a
   complete fix for this function; it is also a behaviour change, see §3.4(1).
@@ -171,20 +171,49 @@ concurrent request, across all tenants.
   is not the one this slice exists to bound — so it is declined on the record rather than
   added. If the owner wants formula text arguments bounded, that is a separate contract
   decision about the formula core, not a ReDoS mitigation.
-- **`REGEX*` → `runUserRegex`** (`formula/regex-safety.ts:258`), which refuses on two
+- **`REGEX*` → `runUserRegex`** (`formula/regex-safety.ts:297`), which refuses on two
   measured criteria and on nothing else:
-  1. **the subject ceiling first** — `USER_REGEX_MAX_SUBJECT_LEN = 10000` (`:80`) and
-     `USER_REGEX_MAX_PATTERN_LEN = 1000` (`:83`), applied before compilation and
+  1. **the subject ceiling first** — `USER_REGEX_MAX_SUBJECT_LEN = 10000` (`:85`) and
+     `USER_REGEX_MAX_PATTERN_LEN = 1000` (`:88`), applied before compilation and
      independent of any caller-side rule list. Derivation in §3.3.1.
   2. **a bounded timing ladder** — sample the cost of the REAL (pattern, subject) pair at
-     an ascending schedule of truncated subjects (`userRegexProbeLadder`, `:147`), and
+     an ascending schedule of truncated subjects (`userRegexProbeLadder`, `:186`), and
      refuse only when the measured log-log growth exponent exceeds
      `USER_REGEX_SUPERLINEAR_SLOPE = 2` **and** the extrapolated cost at the real length
-     exceeds `USER_REGEX_PROBE_BUDGET_MS = 100` — both re-measured once before the
+     exceeds `USER_REGEX_PROBE_BUDGET_MS = 100` — both re-measured before the
      refusal is returned. A rung below `USER_REGEX_PROBE_FLOOR_MS = 2` decides nothing,
      and the fit is anchored against a rung at least
-     `USER_REGEX_DECISION_DYNAMIC_RANGE = 8` times cheaper (`selectFitAnchor`, `:193`)
+     `USER_REGEX_DECISION_DYNAMIC_RANGE = 8` times cheaper (`selectFitAnchor`, `:232`)
      rather than the adjacent rung — see §3C.2 for the measurement that forced that.
+
+     **The re-measurement withdraws the ENTRY condition, not only the slope (round 3).**
+     The only gate into the deciding branch is the floor test, so a rung that re-measures
+     BELOW the floor is a rung whose first sample was inflated — exactly what the
+     re-measurement exists to detect. Round 2 fed the re-measured value back into the
+     slope alone and refused anyway; measured under heap load that produced **1 refusal in
+     2000 runs of one benign pair**, the refusal's own evidence reading `measuredMs=0.00`
+     against a 2ms floor (verification MD §5.8.1).
+
+     **And "decides nothing" means the ladder keeps climbing.** The rung is recorded as an
+     ordinary sub-floor sample and sampling continues; it is NOT a reason to stop. A first
+     cut of this fix withdrew the refusal and fell out of the loop into the real call, which
+     hands an unmeasured pattern the whole subject — measured, `^(a|a)*$` at n=33 then ran
+     for 21884ms once in 1000 calls, where round 2 refused 1000/1000 (§5.8.1b). The minimum
+     `bestOf` takes is biased downward by WARM-UP, not only by pauses: the first sample at a
+     probe length is systematically the slowest, and the deciding rung for the named shapes
+     sits only ~1.1x–1.6x above the floor. Continuing reaches the next rung, which is above
+     the floor on every sample.
+
+     **The re-measurement is bounded by `USER_REGEX_REMEASURE_BUDGET_MS = 200` (round 3).**
+     Confirmation costs up to three runs of the deciding rung, and that rung's cost is not
+     bounded by anything here. Measured, a shape whose cost is discontinuous in subject
+     length crossed the floor on a single 660ms rung and the guard paid **1927ms** for a
+     pattern the unguarded code answers in 0.005ms (§3D.2). Once a call has already spent
+     the budget on measurement, a scheduling pause is no longer a candidate explanation for
+     the number, so the first measurement stands. This bounds the guard's own MULTIPLIER;
+     it does not, and cannot, bound the cost of one probe. It is deliberately NOT applied
+     to the ladder loop: stopping the sweep early could skip the rung that would have
+     crossed the floor and turn a refusal into an acceptance.
   When not refused, `runUserRegex` returns the result of the real regex against the real
   subject, byte-for-byte what the unguarded code returned (differential fuzz: 100000
   pairs, 0 divergences — verification MD §5.4).
@@ -257,7 +286,7 @@ change the record value reaching a stored regex was bounded only by
 byte-identical to a genuine mismatch, so neither the submitting user nor the field
 administrator could tell "this value really is malformed" from "the guard declined to run
 this check". Round 2 pushes a distinct message per refusal kind
-(`describeUserRegexRefusal`, `formula/regex-safety.ts:220`) and deliberately ignores the
+(`describeUserRegexRefusal`, `formula/regex-safety.ts:259`) and deliberately ignores the
 rule's own `message` override for refusals, because that string describes a format
 mismatch and this is not one. The **invalid-regex** branch is unchanged on purpose: it
 predates this slice and keeps returning a plain validation failure.
@@ -351,12 +380,51 @@ read as closing it.
    geometric rung step at length 80 → 100 adds 20 characters to the quantified run, i.e.
    ~2^20 more work in a single rung. Shorter runs of the same family behave: `runway=512`
    and `runway=4000` at the same k refuse in 239ms / 243ms.
+
+   **A strictly stronger instance of the same residual (round 3, independent gate).** The
+   example above still CONVERGES — it refuses, just expensively — and a reader could take
+   that to mean the ladder always gets there eventually. It does not. Replace the
+   fixed-length runway with a MINIMUM-LENGTH assertion whose threshold is set to the real
+   subject's own length: every rung is shorter than the threshold, so the assertion fails
+   on every rung, so every rung is flat, so the ladder never refuses at all. Measured
+   (16-character pattern of that shape, warm-vs-warm against the unguarded code):
+   guard overhead **≤0.3%** at three subject lengths, i.e. a confirmed **no-op**, with the
+   cost doubling per added character and an out-of-band victim request measured at 20829ms.
+   The shape family is disclosed here and in `regex-safety.ts:31`; the payload is not
+   written down in this repository.
+
+   Note also that the "final approach" rungs in `userRegexProbeLadder` bound the last step
+   in SUBJECT LENGTH, not in WORK. Against a threshold-style predicate — one that flips at
+   an exact length rather than growing with it — that bound buys nothing, because the
+   discontinuity is not a matter of how many characters the last step adds.
 2. **A probe is a COST proxy, not a semantic one.** `userRegexProbeSubject` keeps the head
    and the real last 8 characters. A pattern with a literal suffix longer than 8 characters
    (`^(a+)+TERMINATOR1234$`) would see its probes fail where the real subject matches, so
    the probe could be catastrophic for a subject the unguarded code handles instantly. The
    100000-pair differential fuzz found no such case and none of the named patterns has that
    shape, but it is NOT excluded by construction.
+
+   **Round 3 — this was measured, and round 2's "could be" was a real regression.** With a
+   26-character pattern of that family and a 1200-character value (well inside the
+   ceiling), `origin/main` answers in well under a millisecond and round 2's guard took
+   **1943.8ms**: the deciding rung at length 1184 costs 644.7ms on its own, and the
+   confirmation ran it twice more. The attacker's MAXIMUM capability is not raised by this — on either tree he would
+   pick a stronger attack — but it is a real per-input regression this slice introduced.
+   `USER_REGEX_REMEASURE_BUDGET_MS` (§3.3) removes the 3x multiplier: the same pair now
+   costs **650.9ms**, one rung, same verdict. The residual 650.9ms is one probe, and nothing
+   short of an interruptible engine bounds that.
+
+   **Two remedies were considered and declined, on the record.**
+   *A static "provably linear, skip the ladder" fast path* would admit almost nothing: every
+   one of the six common linear patterns contains a quantified group whose body carries a
+   quantifier, which is precisely the predicate round 1 proved cannot separate them from a
+   catastrophic shape (§3C.1). Any predicate sound enough to be safe here excludes them, so
+   the fast path would cover only patterns that already cost microseconds — and its failure
+   mode is admitting a catastrophic pattern unmeasured.
+   *Caching the ladder's conclusion per (pattern, subject-length bucket)* is unsound: for a
+   nested-quantifier pattern, a MATCHING subject returns instantly and a same-length subject
+   with a failing tail is catastrophic. They share a bucket, so one cached "ok" disables the
+   guard for the other. Neither is adopted.
 3. **A timing criterion is machine-relative.** The constants are budgets measured on one
    machine. A much slower host shifts which rung crosses the floor. The floor, the
    dynamic-range anchor and the confirm-before-refusing re-measurement are what keep that
@@ -377,8 +445,10 @@ read as closing it.
    direction and nothing here bounds by how much.
 7. **The benign path pays the whole ladder.** A linear pattern crosses no rung, so the loop
    never exits early: every pattern-ruled field on every record write scans its value about
-   twelve times over. Measured 12x–34x the pre-image, absolute 4µs–104µs per field, ~100ms
-   for the largest request `express.json({limit:'10mb'})` accepts (verification MD §5.6).
+   twelve times over. Measured 12x–34x the pre-image, absolute 4µs–104µs per field, and
+   **~100ms to ~440ms** for the largest request `express.json({limit:'10mb'})` accepts —
+   a RANGE, because the per-value cost depends on the pattern's shape and the round-2 text
+   quoted the cheapest row of its own table (verification MD §5.6).
    Bounded and small, but it is a real hot-path cost that a linear-time engine would not
    have — owner item §3.4.9.
 
@@ -472,36 +542,54 @@ contain `new RegExp(validation.pattern)`). A required lane cannot execute that S
    RE2 / worker option in item 2: a linear-time engine needs no ladder and therefore no
    multiplier. Deciding item 2 decides this one.
 
-## 4. Seams (file:line — POST-image unless marked, re-pinned mechanically at the end of round 2)
+## 4. Seams (file:line — POST-image unless marked, regenerated mechanically at the end of round 3)
 
 Convention, because round 1 got this wrong (gate P3-1): a "SINK" number points at the
 `new RegExp` line itself; a "registration"/function number points at the declaration. Both
 are given where they differ.
 
 Guard:
-- `packages/core-backend/src/formula/regex-safety.ts` — `substituteLiteral:44`,
-  `USER_REGEX_MAX_SUBJECT_LEN:80`, `USER_REGEX_MAX_PATTERN_LEN:83`,
-  `USER_REGEX_PROBE_FLOOR_MS:93`, `USER_REGEX_PROBE_BUDGET_MS:96`,
-  `USER_REGEX_SUPERLINEAR_SLOPE:99`, `USER_REGEX_DECISION_DYNAMIC_RANGE:109`,
-  `userRegexProbeLadder:139`, `userRegexProbeSubject:165`, `selectFitAnchor:185`,
-  `describeUserRegexRefusal:212`, `runUserRegex:250`.
-- `apps/web/src/utils/userRegexGuard.ts` — mirror; same order, `:24/:27/:30/:33/:36/:39`,
-  `:47`, `:64`, `:84`, `:108`, `:141`.
-- `plugins/plugin-integration-core/lib/user-regex-guard.cjs` — mirror;
-  `:24-:31` constants, `selectFitAnchor:65`, `runUserRegex:99`.
+- `packages/core-backend/src/formula/regex-safety.ts` — `substituteLiteral:49`,
+  `USER_REGEX_MAX_SUBJECT_LEN:85`, `USER_REGEX_MAX_PATTERN_LEN:88`,
+  `USER_REGEX_PROBE_FLOOR_MS:106`, `USER_REGEX_PROBE_BUDGET_MS:109`,
+  `USER_REGEX_SUPERLINEAR_SLOPE:112`, `USER_REGEX_DECISION_DYNAMIC_RANGE:122`,
+  `USER_REGEX_REMEASURE_BUDGET_MS:156` (round 3),
+  `userRegexProbeLadder:186`, `userRegexProbeSubject:212`,
+  `selectFitAnchor:232`, `describeUserRegexRefusal:259`,
+  `runUserRegex:297`. Decision points inside `runUserRegex`:
+  re-measurement budget `:346`, flat-curve break `:384`,
+  sub-floor withdrawal, which records the rung and keeps climbing
+  `:389` (round 3).
+- `apps/web/src/utils/userRegexGuard.ts` — mirror; `USER_REGEX_MAX_SUBJECT_LEN:24`
+  and the five siblings that follow it, `USER_REGEX_REMEASURE_BUDGET_MS:47`,
+  `userRegexProbeLadder:55`, `userRegexProbeSubject:72`,
+  `selectFitAnchor:92`, `describeUserRegexRefusal:116`,
+  `runUserRegex:149`.
+- `plugins/plugin-integration-core/lib/user-regex-guard.cjs` — mirror; constants from
+  `:24`, `USER_REGEX_REMEASURE_BUDGET_MS:35`,
+  `selectFitAnchor:69`, `runUserRegex:103`.
+
+**These numbers are generated, not typed.** Round 2's version of this section claimed the
+same and nine of its guard anchors were stale by exactly 8 lines — a doc comment grew
+between rounds and the list was not regenerated. Regenerate by locating each symbol's
+declaration, never by adding a delta.
 
 Call sites:
 - `packages/core-backend/src/formula/engine.ts:187` (SUBSTITUTE), `:340` (REGEXMATCH),
   `:344` (REGEXEXTRACT), `:350` (REGEXREPLACE) — these are the REGISTRATION lines; the
   pre-image SINK lines were `:183/:326/:329/:332` and the post-image sinks are
-  `regex-safety.ts:272` (validity compile), `:282` (per-rung), `:354` (the real call).
+  `regex-safety.ts:311` (validity compile), `:324` (per-rung),
+  `:432` (the real call).
 - `packages/core-backend/src/multitable/field-validation-engine.ts:112`
   (`evaluatePatternRule`), `:129` (the guarded call), `:192` (the `pattern` case),
   `:273` (`getDefaultValidationRules`, the parity anchor for the ceiling)
   — pre-image sink `:103`, inside `validatePattern:100`.
-- `apps/web/src/views/FormView.vue:658` — pre-image sink `:650`.
-- `plugins/plugin-integration-core/lib/validator.cjs:155` (guarded call), `:160`
-  (`PATTERN_NOT_EVALUATED`); callers `lib/pipeline-runner.cjs:805`,
+- `apps/web/src/views/FormView.vue:668` (guarded call), `:671` (the refusal
+  message the submitter reads) — pre-image sink `:650`.
+- `plugins/plugin-integration-core/lib/validator.cjs:166` (guarded call), `:171`
+  (`PATTERN_NOT_EVALUATED`), `compilePattern:85` with its own compile sink
+  `:100` — which runs BEFORE the guard, so the pattern-length ceiling is enforced
+  here after compilation (verification MD §6); callers `lib/pipeline-runner.cjs:805`,
   `lib/http-routes.cjs:3389,3407`, route table `:269`, handler `:9758`,
   `requireAccess:934`.
 
@@ -511,7 +599,7 @@ Unchanged context (pre-image = post-image, this slice does not touch them):
 - `packages/core-backend/src/multitable/formula-engine.ts:96,155,337,339,372` — evaluateField / dryRun / recalc / fenced derived merge.
 
 Tests:
-- `packages/core-backend/src/formula/__tests__/regex-safety.test.ts` — 45 cases.
-- `packages/core-backend/tests/unit/user-regex-guard-three-copy-parity.test.ts` — 32 cases.
+- `packages/core-backend/src/formula/__tests__/regex-safety.test.ts` — 54 cases.
+- `packages/core-backend/tests/unit/user-regex-guard-three-copy-parity.test.ts` — 33 cases.
 - `packages/core-backend/tests/unit/user-regex-guard-read-parity-fuzz.test.ts` — 4 cases,
   100000 differential pairs.

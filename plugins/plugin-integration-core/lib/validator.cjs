@@ -152,6 +152,17 @@ function validateValue(value, rules, field = null) {
         // curve. A refusal is reported under its own code, never as PATTERN: a
         // pipeline operator must be able to tell "the value is malformed" from
         // "the check declined to run". See lib/user-regex-guard.cjs.
+        //
+        // SCOPE (round 3): `compilePattern` above has ALREADY called
+        // `new RegExp(pattern, flags)` by the time the guard sees it, so
+        // USER_REGEX_MAX_PATTERN_LEN is enforced here AFTER compilation, not before
+        // it. The backend case that pins "refuses an over-length pattern BEFORE
+        // compiling it" is L1/L2-scoped and does not describe this call site.
+        // Measured, the gap is small — pre-compiling a 133331-character alternation
+        // costs 1.1ms — so this is recorded rather than restructured: moving the
+        // length check into `compilePattern` would change the error CODE an
+        // over-length pattern reports here (PATTERN_NOT_EVALUATED -> INVALID_RULE),
+        // which is a pipeline-visible contract change and not this slice's to make.
         const outcome = runUserRegex(source, flags === null ? undefined : flags, String(value), (re, subject) => {
           re.lastIndex = 0
           return re.test(subject)

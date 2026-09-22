@@ -88,7 +88,8 @@ does and does not cover):**
   `messaging/pattern-trie.ts:267`, `workflow/bpmnCompilePreview.ts:289,290,315`.
 - Internal glob/placeholder, not a user-facing pattern: `core/EventBusService.ts:765`,
   `services/CacheService.ts:210`, `sandbox/SandboxManager.ts:319`.
-- Test-only files (not production): `attendance/__tests__/w4c2-*`, `w4c3c-active-current.test.ts`,
+- Test-only files (not production): `attendance/__tests__/w4c2-*`,
+  `w4c3a-rollout-control-inventory.test.ts`, `w4c3c-active-current.test.ts`,
   `tests/audit-system.test.ts`.
 
 ## 3. Instrument controls — 6/6 pass (what makes "flagged vs not" a conclusion, not a guess)
@@ -286,10 +287,13 @@ well under the 100ms the task set. Refusal reaches the caller as a distinct mess
 (`"…validation pattern is too slow on this value to be evaluated safely"`), never as the
 format-mismatch wording.
 
-**Time-to-refusal does not grow with the subject** (round 3; the table above is n=33 only,
-and a reader could reasonably assume a ceiling-length subject costs proportionally more).
-The ladder decides at a rung around len 20 in every case, so the real subject length never
-enters the cost:
+**For these three shapes, time-to-refusal does not grow with the subject** (round 3; the
+table above is n=33 only, and a reader could reasonably assume a ceiling-length subject costs
+proportionally more). The ladder decides at a rung around len 20 for each of them, so the
+real subject length never enters the cost. **This is a statement about the three named
+shapes, not a property of the guard** — design MD §3D.1 burns 495760ms inside the ladder on a
+different shape, and §3D.2 measures 644.7ms in a single rung at n=1200. Both are
+counterexamples to the general reading:
 
 | pattern | n=33 | n=10000 (the ceiling) | unguarded at n=33 |
 |---|---|---|---|
@@ -451,9 +455,14 @@ the guarded one, not a re-implementation:
 bounded by the request body limit.** `express.json({ limit: '10mb' })`
 (`packages/core-backend/src/index.ts`) caps one request at ~10MB, so the most
 pattern-checked characters a single request can carry is ~10⁷ — about 1000 ceiling-length
-values, ~0.10ms each ⇒ **~100ms of added event-loop occupancy for the largest request the
-server will accept**, against ~7ms unguarded. At realistic value lengths a 1000-record
-import pays **3–7ms**. Stated as the upper corner rather than the typical case, and it is
+values. The per-value cost is NOT one number: the per-call table above runs from 0.0472ms
+(anchored class at the ceiling) to **0.4436ms** (slug on an adversarial value at the
+ceiling), and the aggregate table below reads 0.1038ms for one ceiling-length field. The
+bound is therefore **~100ms to ~440ms of added event-loop occupancy for the largest request
+the server will accept**, against ~7ms unguarded. Round 2 quoted the cheap row alone, which
+understated its own upper corner by 4.4x; a bound is taken from the expensive row.
+
+At realistic value lengths a 1000-record import pays **3–7ms**. Stated as the upper corner rather than the typical case, and it is
 an owner item (design MD §3.4.9) rather than something this round absorbs: the honest
 reading is "bounded and small in absolute terms, but a 12–34x multiplier on a hot path is
 a real cost that a linear-time engine would not have".
@@ -476,7 +485,187 @@ in-process (1000 records: 3.0ms / 6.9ms) and derived the per-request bound from 
 body limit — see the round-3 block above. **STILL NOT RUN:** no real HTTP import /
 batch-create measurement, and no concurrency measurement of the guard's own cost. §6.
 
-### 5.7 SUBSTITUTE
+### 5.8 ROUND 3 — what changed, and what it was measured to do
+
+Round 3 answers the four P2 findings of the round-2 gate. Everything below was measured on
+this machine in one session; the suite numbers are version-independent, the millisecond
+numbers are not (§6).
+
+**5.8.1 A rung that re-measures below the floor now decides nothing (P2-1).**
+The only gate into the deciding branch is the floor test, and round 2 fed the re-measured
+value back into the SLOPE alone — so the guard could prove its entry sample was noise and
+refuse on it anyway, contradicting the contract `USER_REGEX_PROBE_FLOOR_MS` states in its
+own doc comment. Reproduced here independently of the gate, in one process with 180000 live
+ballast objects so the heap has a realistic shape, one benign pair (a quadratic pattern
+against a ceiling-length subject, unguarded answer `false`), 2000 runs of each build:
+
+| build | refusals | the refusal's own evidence |
+|---|---|---|
+| round 2 (`bab083dc4`) | **1 / 2000 refused** | `slope=4.17 pred=4596880ms atLen=60 measuredMs=0.00` |
+| round 3 | **0 / 2000 refused** | — |
+
+`measuredMs=0.00` against a 2ms floor: the re-measurement had already shown the rung cost
+nothing, and the refusal went out regardless.
+
+**5.8.1b The first cut of that fix was WORSE than the defect it fixed, and that is the more
+useful record.** Withdrawing the refusal while leaving the loop's `break` in place stops the
+ladder and hands the real call a pattern whose cost curve was never established. Measured on
+that cut: `^(a|a)*$` at n=33 entered the branch at rung 19 — ladder sample 2.41ms,
+confirmations 1.46ms and 1.48ms — the refusal was withdrawn, the ladder stopped, and the
+real call ran for **21884ms**. **1 in 1000 calls, where round 2 refused 1000/1000.**
+
+The mechanism is not a pause. `bestOf` takes a MINIMUM, and the minimum is biased DOWNWARD
+by warm-up: the FIRST sample at a given probe length is systematically the slowest, so a
+rung whose steady-state cost sits just under the floor can cross it once and never again.
+Measured standalone, the deciding rung for the three named shapes costs 2.18ms–3.14ms
+(p5–p95) against a 2ms floor — a margin of well under 2x, which is why this is reachable at
+all.
+
+The shipped rule is the whole invariant, not half of it: a rung that re-measures below the
+floor is recorded as an ordinary sub-floor sample and **the ladder keeps climbing**. The
+next rung up is above the floor on every sample and refuses there. Re-measured after the
+correction: **0 acceptances in 1000 runs** for each of the three named shapes, against
+1/1000 for `^(a\|a)*$` on the first cut.
+
+**5.8.2 Five ACCEPT-side guards are now pinned (P2-2).**
+The gate mutated four guards that decide NOT to refuse and all 247 cases stayed green. A
+fifth — the `predictedMs > USER_REGEX_PROBE_BUDGET_MS` conjunct, the gate's `Mh` — the gate
+reported as pinned (1 red); re-run at the round-3 head it came back **GREEN**, so whatever
+reddened it in round 2 was not a deterministic case. Rather than carry that claim forward
+unverified it gets a case too.
+
+The root cause is structural, not an oversight: the false-positive corpus never enters the
+deciding branch (0 entries in 18000 calls, §5.2) and the true-positive corpus is refused
+under any single conjunct alone, so the branch's accept side has no natural input at all.
+Five constructed cost curves now cover it, each asserting an outcome AND a sample count at a
+NAMED rung length. The round-2 case asserted `Math.max` over every rung, which is satisfied
+by ANY rung being sampled three times; it now names the deciding rung and the anchor rung
+separately, and that alone catches two mutations it used to miss.
+
+**5.8.3 The confirmation is bounded (P2-4).**
+`USER_REGEX_REMEASURE_BUDGET_MS = 200`, spent against the total time the call has spent
+measuring. Before/after in the same process, best of three runs each, against the unguarded
+`new RegExp(...).test(...)`:
+
+| pair | unguarded | round 2 | round 3 | verdict |
+|---|---|---|---|---|
+| the §3D.2 runway shape (26-char pattern / 1200-char value) | 0.001 | 1943.8 | 650.9 | refused -> refused |
+| slug, adversarial at the ceiling | 0.032 | 0.5 | 0.4 | ok -> ok |
+| slug, matching (13 chars) | 0.000 | 0.0 | 0.0 | ok -> ok |
+| anchored class at the ceiling | 0.003 | 0.1 | 0.1 | ok -> ok |
+| version number, adversarial at the ceiling | 0.016 | 0.2 | 0.2 | ok -> ok |
+| e-mail, adversarial at the ceiling | 0.003 | 0.2 | 0.2 | ok -> ok |
+| path segments, adversarial at the ceiling | 0.037 | 0.5 | 0.5 | ok -> ok |
+| quadratic trim idiom at the ceiling (/g) | 45.261 | 51.0 | 50.3 | ok -> ok |
+| nested quantifier, n=33 (a true positive) | not run (~20s, see §5.3) | 10.6 | 10.2 | refused -> refused |
+| alternation overlap, n=33 (a true positive) | not run (~20s, see §5.3) | 11.7 | 11.4 | refused -> refused |
+
+The runway pair is the finding: **1943.8ms → 650.9ms**, same verdict, because the
+deciding rung is measured once instead of three times. Its cost breakdown: 45 sub-floor
+rungs cost 0.072ms in total and the single deciding rung at length 1184 costs 644.7ms, so
+the residual is one probe and nothing here bounds it. Every benign row is unchanged; the
+largest benign delta is under 1ms.
+
+It is deliberately NOT applied to the ladder loop. Stopping the sweep early could skip the
+rung that would have crossed the floor and turn a refusal into an acceptance — the same
+class of mistake as 5.8.1b, one level up.
+
+**5.8.4 What the guard ACCEPTS costs more than the budget suggests (P3-4).**
+`USER_REGEX_PROBE_BUDGET_MS = 100` bounds an EXTRAPOLATION, not the real cost of a shape the
+ladder accepts. Walking n up to the first refusal, per shape:
+
+| pattern | first refused at | worst ACCEPTED single call |
+|---|---|---|
+| `^(a+)+$` | n=27 (11.0ms) | 165.2ms @ n=26 |
+| `^(a\|a)*$` | n=28 (10.5ms) | 390.3ms @ n=27 |
+| `^([a-z]\|[a-z])*$` | n=27 (12.6ms) | 186.5ms @ n=26 |
+| `^(a{1,2})*$` | n=38 (41.9ms) | 162.3ms @ n=37 |
+
+So the mitigation buys a reduction from ~20000ms to a worst accepted call of **165ms–390ms**
+on this machine — roughly 50x–100x, not "everything is under 100ms" — and an attacker can
+still call it repeatedly. That number belongs beside the 600/600 refusal count, not instead
+of it.
+
+**5.8.5 Aggregate cost, re-measured (P3-3).**
+Through the real `validateRecord`, ceiling-length values, the slug pattern:
+
+| pattern fields in one record | guarded |
+|---|---|
+| 1 | 0.2 |
+| 20 | 3.4 |
+| 200 | 33.7 |
+
+**5.8.6 READ PARITY — round 2 vs round 3, field by field.**
+An independent generator (wider than the in-repo suite: lookarounds, top-level alternation,
+ten flag combinations, subjects to 96 characters), its own seed, the full outcome shape
+compared — and every accepted pair also compared against the unguarded answer:
+
+```
+pairs=100000 distinctPatterns=64793
+r2 refusals=969  r3 refusals=969
+divergences (r2 vs r3, and new vs unguarded) = 0
+```
+
+Identical refusal counts and zero divergences: the round-3 changes move no verdict on this
+corpus. Positive control (an over-ceiling subject must diverge) passes.
+
+**5.8.7 Round-3 mutation battery — the new guards.**
+Same protocol as §5.5 (`cp` backup → edit → `cmp` to prove the edit took → run → `cp`
+restore → `cmp` to prove the restore took). Suite = the six files, `--retry=0`.
+
+| # | mutation | result | case(s) that went red |
+|---|---|---|---|
+| **X1** | the sub-floor withdrawal is never taken (a rung that re-measures below the floor still refuses) | **RED** (2 cases) | `a rung that re-measures BELOW the floor withdraws the refusal, not just the slope` + `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` |
+| **X9** | the withdrawal stops the ladder instead of continuing it | **RED** (1 case) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` |
+| **X10** | the withdrawn rung is not recorded as a sample | **RED** (1 case) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` |
+| **X2** | drop the re-measurement budget break | **RED** (1 case) | `stops re-measuring once the call has already spent the measurement budget` |
+| **X3** | a flat curve falls back to the ADJACENT rung instead of breaking | **RED** (1 case) | `a FLAT curve is not evidence: no anchor DYNAMIC_RANGE times cheaper => accept` |
+| **X4** | drop the slope conjunct (budget alone decides) | **RED** (1 case) | `LINEAR growth whose extrapolation exceeds the budget is still accepted (slope is a conjunct, not a tie-break)` |
+| **Mh** | drop the budget conjunct (slope alone decides) | **RED** (1 case) | `super-linear growth whose extrapolation stays INSIDE the budget is accepted (the budget is a conjunct too)` |
+| **X5** | the first rung confirms once instead of three times | **RED** (1 case) | `the FIRST rung re-measures three times before refusing a 2-character subject` |
+| **X6** | the anchor is confirmed with ONE sample instead of two | **RED** (3 cases) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` + `re-measures a one-off spike instead of turning it into a refusal` + `the ANCHOR is re-measured too, and the re-measured anchor is what the verdict uses` |
+| **X7** | the anchor confirmation is deleted (the ladder sample stands) | **RED** (3 cases) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` + `re-measures a one-off spike instead of turning it into a refusal` + `the ANCHOR is re-measured too, and the re-measured anchor is what the verdict uses` |
+
+X1, X9 and X10 are the three ways to get §5.8.1 wrong — never withdraw, withdraw and stop,
+withdraw and forget the sample — and every one of the ten reds the case written for it. The
+extra reds are not noise: X1 also reds the keeps-climbing case (never withdrawing means
+never reaching the rung above), and X6/X7 also red the round-2 spike case and the
+keeps-climbing case, because a mis-measured anchor changes which verdict the withdrawal
+path is asked about. The round-2 spike case only catches them at all because its `Math.max`
+assertion was replaced by two named-length ones.
+
+**5.8.8 Round-3 re-run of the round-2 battery.**
+
+| # | mutation | result |
+|---|---|---|
+| **Ma** | pattern-length ceiling deleted | **RED** (2 cases) |
+| **Mb** | subject-length ceiling deleted | **RED** (4 cases) |
+| **Md** | ladder neutered (empty rung list) | **suite did not finish (240s cap)** |
+| **Me** | floor raised so no rung ever decides | **suite did not finish (240s cap)** |
+| **Mf** | anchor = the adjacent rung | **RED** (7 cases) |
+| **Mh** | drop the budget conjunct (slope alone decides) | **RED** (1 case) |
+| **Mi2** | `USER_REGEX_PROBE_BUDGET_MS` x1000 | **RED** (15 cases) |
+| **Mi3** | `USER_REGEX_SUPERLINEAR_SLOPE` x10 | **RED** (14 cases) |
+| **Mj** | `MIN_MEASURABLE_MS` -> 0 | **GREEN** |
+| **Mk** | probe becomes a pure prefix (drops the failing tail) | **RED** (13 cases) |
+| **Mn** | deciding rung confirmed with a single sample | **RED** (3 cases) |
+| **Mp** | final-approach rungs deleted | **RED** (3 cases) |
+| **Mr** | FE subject ceiling drifts to 20000 | **RED** (2 cases) |
+| **Mr2** | FE anchor rule drifts | **RED** (2 cases) |
+| **Mr3** | FE probe becomes a pure prefix | **RED** (3 cases) |
+| **Ms** | `validator.cjs` bypasses the guard | **RED** (2 cases) |
+| **Mt** | `FormView.vue` reverts to a bare `new RegExp` | **RED** (1 case) |
+| **Mu** | L2 field-validation bypasses the guard | **suite did not finish (240s cap)** |
+| **Mv** | `SUBSTITUTE` reverts to a regex replacement | **RED** (1 case) |
+| **Mw** | `REGEXMATCH` reverts to a bare `new RegExp` | **RED** (3 cases) |
+
+"suite did not finish" means the run passed a 240s cap: those mutations take the guard off a
+catastrophic shape, so the suite runs the unguarded regex and blocks. A run that cannot
+finish is a red lane, not a green one; it is recorded as its own status rather than folded
+into RED so the distinction stays visible. `Mj` is GREEN and is recorded as a known unpinned
+constant (§6), not as a covered guard.
+
+### 5.9 SUBSTITUTE
 
 `substituteLiteral("xa+y","a+","Z") → "xZy"` (arg-2 treated literally; the old regex impl
 treated it as a quantifier). In-repo dependents (`grep -rn "SUBSTITUTE("`): one existing
@@ -485,6 +674,51 @@ test + one docs example, both literal args, both still pass. A stored
 design MD §3.4(1).
 
 ## 6. NOT RUN / limitations (explicit)
+
+**Round-3 additions to this list, first:**
+- **Node version.** Every millisecond figure in §5.8 was measured on **node v25.9.0**; the
+  required lanes run **18.x / 20.x**. The timing tables are machine- AND version-relative.
+  The eleven new cases are NOT: they drive a manufactured cost curve through the `execute`
+  seam and assert outcomes and call counts, with no duration assertion anywhere.
+- **The host was not quiet.** Two unrelated processes held two cores at 100% for the whole
+  session. Every absolute number in §5.8 is therefore an upper-ish estimate rather than a
+  best case, and the ratios are the evidence.
+- **The 2000-run load measurement in §5.8.1 is not in any lane.** It needs a loaded heap and
+  tolerance for a ~1e-3 event; a required lane cannot carry that. The lane carries the
+  deterministic seam-driven cases instead.
+- **The 2.18ms floor margin in §5.8.1b is a property of THIS machine.** On a host where the
+  deciding rung for those shapes lands under 2ms, the ladder simply decides one rung later;
+  on a host where the sub-floor rungs land above it, it decides one rung earlier. What the
+  round-3 rule removes is the case where a withdrawal ENDS the measurement, not the
+  machine-relativity of the floor itself (§3D.3).
+- **The re-measurement budget is not proven unreachable by a benign pattern, only measured
+  to be.** The worst benign ladder spend in §5.6 is single-digit milliseconds against a 200ms
+  budget, and the sub-floor sweep is bounded below it structurally (rung count pinned < 80 x
+  a 2ms floor). A host slow enough to make a benign rung cost 200ms would change the guard's
+  behaviour anyway.
+- **No metric, no log, no counter on the refusal path** — unchanged from round 2, and §5.8.1
+  sharpens it: a refusal caused by measurement noise leaves nothing behind in production.
+  Owner item (design MD §3.4.8).
+- **The FE refusal string is English inside a zh-CN form.** `FormView.vue` renders
+  `${field.label}: ${describeUserRegexRefusal(...)}`, so a Chinese form shows a Chinese label
+  followed by an English sentence; the backend has the same shape. Cosmetic, disclosed, not
+  fixed here — fixing it means adding an i18n surface to a payload-free operator string.
+- **`MIN_MEASURABLE_MS` has no behavioural pin.** Setting it to 0 leaves the suite green and
+  neither this round nor the round-2 gate could construct a verdict flip: at a zero anchor
+  the extrapolation is dominated by the log ratio and stays far over budget either way. It
+  changes only the `slope`/`predictedMs` REPORTED inside a refusal. Recorded as a known
+  unpinned constant rather than presented as covered.
+- **The L3 pattern-length ceiling is enforced after compilation, not before it.**
+  `validator.cjs`'s `compilePattern` calls `new RegExp` before the guard sees the pattern, so
+  the backend case "refuses an over-length pattern BEFORE compiling it" is L1/L2-scoped.
+  Measured cost of the gap: 1.1ms to pre-compile a 133331-character alternation. Not
+  restructured, because moving the check would change the error CODE this site reports
+  (`PATTERN_NOT_EVALUATED` -> `INVALID_RULE`), a pipeline-visible contract change.
+- **The re-measurement budget has no BEHAVIOURAL three-copy pin.** The constant's equality
+  across the three copies is pinned, and the backend case pins the behaviour, but the shared
+  case table has no rung expensive enough to reach the budget — same coverage shape as every
+  other constant in that table.
+
 
 - **The mitigation was NOT re-verified at victim latency (OOB).** The finding was proven at
   victim latency (55s cross-tenant, § 4.3); the mitigation is measured only in-process

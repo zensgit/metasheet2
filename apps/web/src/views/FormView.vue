@@ -648,13 +648,23 @@ function validateField(field: FormField, value: any): string | null {
       return `${field.label} 不能超过 ${validation.maxLength} 个字符`
     }
     if (validation.pattern) {
-      // PROPOSED (H-3, round 2): the public form mirrors the backend's stored
-      // `pattern` rule, so it inherits the same ReDoS exposure (self-DoS in the
-      // submitter's own tab) AND, more importantly, must agree with the backend
-      // about which values are refused — otherwise the form says "ok" and the
-      // write returns 422 with an unrelated wording. Same guard, same constants:
-      // apps/web/src/utils/userRegexGuard.ts, pinned three ways from the
-      // backend's required lane.
+      // PROPOSED (H-3, round 2): a caller-supplied pattern runs here on the
+      // submitter's own thread, so the self-DoS exposure is direct and that reason
+      // stands on its own. Same guard, same constants:
+      // apps/web/src/utils/userRegexGuard.ts, pinned three ways from the backend's
+      // required lane.
+      //
+      // SCOPED (round 3): the earlier comment also claimed this "mirrors the
+      // backend's stored `pattern` rule". That is NOT verified. This form reads
+      // `FormConfig.fields[].validation.pattern` (type `FieldValidation`, see
+      // ../types/views.ts) by way of `ViewManager.loadViewConfig`; the backend's
+      // record-write rule is `property.validation[].params.regex`. They are two
+      // different configuration surfaces and nothing in this slice establishes that
+      // they carry the same string. The agreement argument is therefore withdrawn;
+      // the self-DoS argument is not.
+      //
+      // `flags` is passed as `undefined` because `FieldValidation` has no `flags`
+      // field at all — a no-op, not a divergence from the backend's flag handling.
       const outcome = runUserRegex(validation.pattern, undefined, value, (re, subject) => re.test(subject))
       if (outcome.status !== 'ok') {
         if (outcome.refusal.kind === 'invalid-pattern') return `${field.label} 格式不正确`

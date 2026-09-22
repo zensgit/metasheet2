@@ -57,11 +57,19 @@ function guardedValidatePattern(value: unknown, regex: string, flags?: string): 
 }
 
 /**
- * Atoms that cannot nest an unbounded quantifier inside a quantified group, so
- * every generated pattern is linear (or at worst mildly polynomial) by
- * construction. The corpus deliberately INCLUDES the shapes round 1 refused —
- * `(...)*` and `(...)+` over a character class — because those are the population
- * whose verdict must not move.
+ * The corpus deliberately INCLUDES the shapes round 1 refused — `(...)*` and
+ * `(...)+` over a character class — because those are the population whose verdict
+ * must not move; the assertion at the bottom of the non-degeneracy case REQUIRES
+ * them to be present.
+ *
+ * CORRECTION (round 3): an earlier version of this comment claimed every generated
+ * pattern was "linear by construction". That is false, and the suite's own
+ * non-degeneracy assertion proves it — `ATOMS` contains `([a-z]+)` and
+ * `GROUP_QUANTIFIERS` contains `*` and `+`, so `([a-z]+)+` is generable and is
+ * required to appear. What actually keeps this corpus cheap is the 64-character cap
+ * in `makeSubject`: catastrophic backtracking on these shapes needs a longer run
+ * than that to become measurable. The claim is "held by the subject cap", not
+ * "excluded by construction".
  */
 const ATOMS = [
   'a', 'b', 'z', '0', '9', '-', '_', '\\.', '@', '/', ',', ':',
