@@ -21,6 +21,13 @@
  * See docs/development/multitable-automation-a6-3-3-branch-local-wait-scope-gate-20260615.md
  *  and docs/development/multitable-automation-a6-3-3a-branch-local-wait-verification-20260615.md
  */
+/**
+ * G05 note: the rule-driven `send_webhook` action is now SSRF-gated, and the gate RESOLVES a target name.
+ * These specs use a TEST-NET-3 literal (RFC 5737, documentation-only and not routable) because the gate
+ * accepts a public IP literal WITHOUT any DNS lookup — so the run stays deterministic offline. The previous
+ * `example.test` host is RFC 6761 guaranteed-NXDOMAIN: the gate would fail closed on it (and stall for the
+ * resolver timeout first). The stubbed fetchFn still means no packet is ever sent.
+ */
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -96,7 +103,7 @@ const HIGH_BRANCH_FAIL = {
   actions: [
     { type: 'send_notification', config: { userIds: [NOTIFY_USER], message: 'review' } },
     { type: 'wait_for_callback', config: {} },
-    { type: 'send_webhook', config: { url: 'https://example.test/fail' } },
+    { type: 'send_webhook', config: { url: 'https://203.0.113.10/fail' } },
     { type: 'update_record', config: { fields: { status: 'should_not_run' } } },
   ],
 }
