@@ -583,7 +583,7 @@ main 分支保护的 required 清单请用
 ## 附录 D — P3-B 行号锚点重生成记录（D1 记录修复轮，2026-09-22）
 
 **触发原因**：本轮 P3-A 在 `ApprovalProductService.ts` 的 JSDoc 里删除 2 行（两句被 r1 证否的论证），
-P3-C 在 `settleMetricsCall` 的跳板注释里删除 6 行换成 2 行（净 -4 行）；两处编辑都在文件前部，
+P3-C 在 `settleMetricsCall` 的跳板注释里删除 6 行换成 2 行（净 -4 行）；
 使其后所有行号整体下移 —— 原 `:239` 起的内容下移 4 行，原 `:11343`（`private emitNodeActivationMetric(` 的原位置）
 起的内容累计下移 6 行。设计 MD / 验证 MD 里所有指向 `ApprovalProductService.ts` 且原行号 ≥ 239 的锚点，
 连同 r1 遗留、本轮之前就已存在的「+45 漂移」三处定义锚点（`emitApprovalTaskCreatedEventsPostCommit` /
