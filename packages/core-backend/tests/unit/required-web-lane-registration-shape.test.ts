@@ -144,6 +144,28 @@ const caseInsensitive = (a: string, b: string): number => {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
+/**
+ * The three per-line predicates shared by BOTH registration points' structural-shape checks and
+ * their mutation self-proofs (S-8 gate P2, closing the SIB-1..4 finding: each registration point
+ * previously carried its own inline copy, so a real assertion could be neutered while a self-proof
+ * covering only its own separate copy stayed green).
+ */
+
+/** True when a physical line is a whole-line bash comment (leading whitespace then `#`). */
+function isBareCommentLine(line: string): boolean {
+  return line.trim().startsWith('#')
+}
+
+/** True when a continuation line's trimmed payload carries a single whitespace-separated token. */
+function isOneTokenLine(payload: string): boolean {
+  return payload.split(/\s+/).filter(Boolean).length === 1
+}
+
+/** True when a continuation line opens with the two-space indent the registration convention pins. */
+function hasTwoSpaceIndent(line: string): boolean {
+  return line.startsWith('  ')
+}
+
 describe('required web lane registration block — structural shape', () => {
   const script = readFileSync(REQUIRED_LANE, 'utf8')
 
@@ -187,10 +209,10 @@ describe('required web lane registration block — structural shape', () => {
     for (const line of body) {
       const payload = line.replace(/\s+$/, '').replace(/\\$/, '').trim()
       expect(
-        payload.split(/\s+/).filter(Boolean).length,
+        isOneTokenLine(payload),
         `exec block line carries more than one argument: ${JSON.stringify(line)}`,
-      ).toBe(1)
-      expect(line.startsWith('  '), `exec block line must be indented two spaces: ${JSON.stringify(line)}`).toBe(true)
+      ).toBe(true)
+      expect(hasTwoSpaceIndent(line), `exec block line must be indented two spaces: ${JSON.stringify(line)}`).toBe(true)
     }
     expect(body[body.length - 1].trim(), 'the block must end on the reporter flag').toBe('--reporter=dot')
   })
@@ -209,10 +231,9 @@ describe('required web lane registration block — structural shape', () => {
 
   it('is sorted case-insensitively (so a new token\'s line is a pure function of its name)', () => {
     const tokens = tokensOf(execLogicalLine(script))
-    const sorted = [...tokens].sort(caseInsensitive)
     const firstBreak = firstSortBreak(tokens)
     expect(
-      firstBreak === null ? null : { at: firstBreak, found: tokens[firstBreak], expected: sorted[firstBreak] },
+      firstBreak,
       'insert new tokens in case-insensitive alphabetical position — appending to the tail rebuilds '
       + 'the contended line this block exists to remove',
     ).toBeNull()
@@ -342,8 +363,14 @@ describe('required web lane registration block — parser decoys', () => {
  *
  * Each case re-implements nothing: it calls the same exported `logicalLines` / `execLogicalLine` /
  * `tokensOf` the assertions use, plus a local copy of the duplicate predicate; sortedness is checked
- * via the shared `firstSortBreak` detector the real assertion itself calls, so a regression in
- * either the parser or the detector reds here too.
+ * via the shared `firstSortBreak` detector the real assertion itself calls. A fail-open regression in
+ * that detector — one that returns null unconditionally — reds HERE, in this self-proof block (M2
+ * below feeds it a controlled out-of-order input); a fail-closed regression — one that returns a
+ * break unconditionally — reds instead in the real assertion and its baseline check, because a
+ * fail-open detector run over the unmutated script's own already-sorted tokens reads the same as a
+ * correct one. The self-proof block and the real assertion catch opposite failure directions for the
+ * same detector (S-8 gate NIT-1: this paragraph previously read "a regression in either the parser
+ * or the detector reds here too", which MUT-B (S-8 gate §三) disproves for the fail-closed direction).
  */
 describe('required web lane registration block — mutation self-proof', () => {
   const script = readFileSync(REQUIRED_LANE, 'utf8')
@@ -451,6 +478,14 @@ describe('required web lane registration block — mutation self-proof', () => {
       '(c) documented residual: a doubled self-contained command is syntactically fine',
     ).toBe(0)
   })
+
+  it('M6 a registration line missing its two-space indent reds the indent detector (first registration point)', () => {
+    // Controlled bad input fed straight to the same predicate the real "one token per physical
+    // line" assertion above calls for this registration point — proves the detector, not a
+    // reimplementation of it.
+    expect(hasTwoSpaceIndent('alpha \\'), 'M6 must be caught by the two-space-indent detector').toBe(false)
+    expect(hasTwoSpaceIndent('  alpha \\'), 'M6 must not flag a legitimately indented line').toBe(true)
+  })
 })
 
 /**
@@ -541,16 +576,25 @@ function secondRegistrationBlock(scriptSrc: string) {
 }
 
 /**
- * First index at which `tokens` diverges from case-insensitive alphabetical order, or `null` when
- * already sorted. Module-scope for the same reason as `secondRegistrationBlock` above: the real
- * "is sorted" assertion below and its mutation self-proof (PC4) must exercise the SAME detector —
- * PC4 reimplementing its own boolean copy would prove only that the copy reds, not that the real
- * assertion does.
+ * First point at which `tokens` diverges from case-insensitive alphabetical order, or `null` when
+ * already sorted. Returns the full `{ at, found, expected }` triple rather than a bare index so
+ * BOTH real "is sorted" assertions below can pass this value straight to `expect(...).toBeNull()`
+ * without re-sorting the token list themselves to build their own failure message (S-8 gate NIT-4:
+ * two independent re-sorts of the same tokens, one here and one at each call site, could drift onto
+ * different comparators and report an `expected` that does not match where the detector broke).
+ *
+ * Module-scope for the same reason as `secondRegistrationBlock` above: the real "is sorted"
+ * assertion below and its mutation self-proof (PC4) must exercise the SAME detector. PC4 feeds this
+ * function a controlled out-of-order input and checks the result is non-null; that proves the
+ * detector THE REAL ASSERTION CALLS has not been neutered into fail-open — it does not by itself
+ * prove the real assertion would red under an arbitrary regression, since on the real script's own
+ * already-sorted tokens a fail-open detector (see MUT-A in the S-8 gate) is indistinguishable from a
+ * correct one.
  */
-function firstSortBreak(tokens: string[]): number | null {
+function firstSortBreak(tokens: string[]): { at: number; found: string; expected: string } | null {
   const sorted = [...tokens].sort(caseInsensitive)
   const index = tokens.findIndex((token, i) => token !== sorted[i])
-  return index === -1 ? null : index
+  return index === -1 ? null : { at: index, found: tokens[index], expected: sorted[index] }
 }
 
 describe('required web lane registration block — second registration point (integration guard web specs) structural shape', () => {
@@ -577,17 +621,17 @@ describe('required web lane registration block — second registration point (in
 
       for (const line of body) {
         expect(
-          line.trim().startsWith('#'),
+          isBareCommentLine(line),
           'a `#`-prefixed physical line inside the exec continuation block silently truncates the ' +
             'argv bash actually passes to vitest — every token after it (including the trailing ' +
             `--reporter=dot flag) runs in no CI job at all: ${JSON.stringify(line)}`,
         ).toBe(false)
         const payload = line.replace(/\s+$/, '').replace(/\\$/, '').trim()
         expect(
-          payload.split(/\s+/).filter(Boolean).length,
+          isOneTokenLine(payload),
           `registration line carries more than one argument: ${JSON.stringify(line)}`,
-        ).toBe(1)
-        expect(line.startsWith('  '), `registration line must be indented two spaces: ${JSON.stringify(line)}`).toBe(true)
+        ).toBe(true)
+        expect(hasTwoSpaceIndent(line), `registration line must be indented two spaces: ${JSON.stringify(line)}`).toBe(true)
       }
       expect(body[body.length - 1].trim(), 'the block must end on the reporter flag').toBe('--reporter=dot')
     },
@@ -597,10 +641,9 @@ describe('required web lane registration block — second registration point (in
     const invocation = logicalLines(secondScript).find((line) => /\bvitest\s+run\b/.test(line))
     expect(invocation, 'expected exactly one vitest invocation logical line').toBeTruthy()
     const tokens = tokensOf(invocation as string)
-    const sorted = [...tokens].sort(caseInsensitive)
     const firstBreak = firstSortBreak(tokens)
     expect(
-      firstBreak === null ? null : { at: firstBreak, found: tokens[firstBreak], expected: sorted[firstBreak] },
+      firstBreak,
       'insert new tokens in case-insensitive alphabetical position — appending to the tail rebuilds ' +
         'the contended single-line shape this block exists to remove',
     ).toBeNull()
@@ -636,8 +679,23 @@ describe('required web lane registration block — second registration point mut
 
   it('PC1 — a bare `#`-prefixed line inside the block reds the direct detector (kills a mid-rebase-note truncation)', () => {
     const mutated = [...lines.slice(0, headerIndex + 2), '  #note \\', ...lines.slice(headerIndex + 2)].join('\n')
-    const offenders = secondRegistrationBlock(mutated).body.filter((line) => line.trim().startsWith('#'))
+    const offenders = secondRegistrationBlock(mutated).body.filter((line) => isBareCommentLine(line))
     expect(offenders, 'PC1 must be caught by the bare-`#`-line detector').toEqual(['  #note \\'])
+  })
+
+  it('PC5 — a registration line carrying two tokens reds the one-token-per-line detector', () => {
+    const mutated = [...lines.slice(0, headerIndex + 2), '  alpha beta \\', ...lines.slice(headerIndex + 2)].join('\n')
+    const offenders = secondRegistrationBlock(mutated).body.filter((line) => {
+      const payload = line.replace(/\s+$/, '').replace(/\\$/, '').trim()
+      return !isOneTokenLine(payload)
+    })
+    expect(offenders, 'PC5 must be caught by the one-token-per-line detector').toEqual(['  alpha beta \\'])
+  })
+
+  it('PC6 — a registration line missing its two-space indent reds the indent detector', () => {
+    const mutated = [...lines.slice(0, headerIndex + 2), 'alpha \\', ...lines.slice(headerIndex + 2)].join('\n')
+    const offenders = secondRegistrationBlock(mutated).body.filter((line) => !hasTwoSpaceIndent(line))
+    expect(offenders, 'PC6 must be caught by the two-space-indent detector').toEqual(['alpha \\'])
   })
 
   it(
