@@ -240,11 +240,12 @@ executable-code changes and is outside this record-level pass — existing, unre
 
 The S-8 independent adversarial gate (`impl-gate-S8-first-point-sort-guard-20260923.md`,
 APPROVE-with-hardening, 0 P1/1 P2 PRE-EXISTING/2 P3/5 NIT) found the second registration point's
-bare-`#`, one-token and two-space-indent checks (`:579`/`:587`/`:590`) each carried their own
-inline copy, duplicated again in the first registration point's own per-line loop
-(`:190`/`:193`) and, for the bare-`#` case, reimplemented a third time inside its own PC1
-self-proof — so any one of those copies could be neutered (return a constant) with the suite
-staying green, while the neighbouring copies masked the gap (gate §六, SIB-1..4). Commit
+one-token and two-space-indent checks (`:587`/`:590`) each duplicated inline in the first
+registration point's own per-line loop (`:190`/`:193` respectively) — the first point has no
+bare-`#` check of its own — and the second point's bare-`#` check (`:579`) reimplemented a second
+time, as its own separate copy, inside its own PC1 self-proof rather than exercising the real
+assertion. So any of these copies could be neutered (return a constant) with the suite staying
+green, because the sibling copy it was not wired to masked the gap (gate §六, SIB-1..4). Commit
 `89edec9e4d28e862ab1320f8193af1c98bf2576c` on this branch closes that: the three predicates
 (`isBareCommentLine`, `isOneTokenLine`, `hasTwoSpaceIndent`) now live once each at module scope,
 both registration points' real assertions and PC1 call them instead of a local copy, and three new
