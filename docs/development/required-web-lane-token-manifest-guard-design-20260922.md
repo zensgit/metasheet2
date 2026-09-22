@@ -689,9 +689,11 @@ and live in the battery.
 `allVitestInvocations`'s header justified its duplicate fold loop by saying `logicalLines()` had to
 stay byte-identical to its siblings and therefore could not track line numbers. Round 4 falsified
 both halves. The comment now states the actual round-4 reason (output-shape stability, scoped), and
-the residual it names — the fourth copy compared on a single input — is closed from the test side:
-`r2-P3-4` gained a widened case running the same `allVitestInvocations` ↔ `logicalLines` comparison
-across the shared FIXTURES battery, indented-`#` fixtures included.
+the residual it names — the fourth copy compared on a single input — is narrowed, not closed, from
+the test side: `r2-P3-4` gained a widened case running the same `allVitestInvocations` ↔
+`logicalLines` comparison across the shared FIXTURES battery, but that comparison is filtered
+through a `vitest run` predicate, which absorbs the divergence the two indented-`#` fixtures were
+added to catch — existing, unresolved (round-5 gate P3-1).
 
 ### r4-NIT-1 / r4-NIT-2
 
@@ -710,3 +712,15 @@ r3-P3-1 (census incomplete: a 7th/8th lane-reading guard findable by one `git gr
 forward unchanged, out of this round's scope, as they were out of round 4's. Round 2's two
 owner-disposition items (P1-1 option (a) vs. (b); merge sequencing) remain **unresolved by any
 owner ruling** — no comment or review exists on #5974.
+
+### Round-5 gate, record-level disposition (2026-09-22)
+
+The round-5 gate (`impl-gate-H6-token-manifest-guard-round5-20260922.md`) found the three
+"closed"/"covered" sentences above (this section, and the matching comments in the guard test and
+`exec-block.mjs`) overclaiming: the fourth-copy comparison is filtered through a `vitest run`
+predicate that absorbs the divergence the two indented-`#` fixtures were added to catch. This
+record-only pass narrowed those three sentences (a comment edit in the guard test file counts among
+them) to what the assertion actually covers; it does not add the fixture the gate's fix (a) would
+need to close the gap. **P3-1 (fourth-copy coverage hole) and NIT-1 (fixture-count floor still
+reads 6 against an actual battery of 8) are existing, unresolved** — no assertion changed in this
+pass.
