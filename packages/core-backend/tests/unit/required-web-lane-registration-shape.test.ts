@@ -166,6 +166,20 @@ function hasTwoSpaceIndent(line: string): boolean {
   return line.startsWith('  ')
 }
 
+/**
+ * Trim a trailing continuation backslash (and any whitespace around it) off a raw continuation
+ * line, leaving the payload `isOneTokenLine()` checks. Module-scope and single-defined for the
+ * same reason as the three predicates above: both registration points' real "one token per line"
+ * assertions and PC5's self-proof of `isOneTokenLine` now derive `payload` from this ONE function
+ * instead of each carrying its own copy of the same two `.replace()` calls (S-9 gate P2-1 §五
+ * "可收窄,未收窄" — narrows the derivation's copy count from 3 to 1; it does not make the real
+ * assertions' call sites themselves un-neuterable, see the module-doc comment above the mutation
+ * self-proof describe block below).
+ */
+function payloadOf(line: string): string {
+  return line.replace(/\s+$/, '').replace(/\\$/, '').trim()
+}
+
 describe('required web lane registration block — structural shape', () => {
   const script = readFileSync(REQUIRED_LANE, 'utf8')
 
@@ -207,7 +221,7 @@ describe('required web lane registration block — structural shape', () => {
     expect(i, 'the exec block must terminate (a dangling continuation at EOF)').toBeLessThan(lines.length)
 
     for (const line of body) {
-      const payload = line.replace(/\s+$/, '').replace(/\\$/, '').trim()
+      const payload = payloadOf(line)
       expect(
         isOneTokenLine(payload),
         `exec block line carries more than one argument: ${JSON.stringify(line)}`,
@@ -366,11 +380,16 @@ describe('required web lane registration block — parser decoys', () => {
  * via the shared `firstSortBreak` detector the real assertion itself calls. A fail-open regression in
  * that detector — one that returns null unconditionally — reds HERE, in this self-proof block (M2
  * below feeds it a controlled out-of-order input); a fail-closed regression — one that returns a
- * break unconditionally — reds instead in the real assertion and its baseline check, because a
- * fail-open detector run over the unmutated script's own already-sorted tokens reads the same as a
- * correct one. The self-proof block and the real assertion catch opposite failure directions for the
- * same detector (S-8 gate NIT-1: this paragraph previously read "a regression in either the parser
- * or the detector reds here too", which MUT-B (S-8 gate §三) disproves for the fail-closed direction).
+ * break unconditionally — reds in the real assertion and its baseline check for BOTH registration
+ * points, and ALSO in PC2 further below (the second registration point's own self-proof block),
+ * which independently re-derives `firstSortBreak` on a real dropped-token list and asserts it is
+ * `null` — because a fail-open detector run over the unmutated script's own already-sorted tokens
+ * reads the same as a correct one. This block's M2 case is what specifically targets the fail-open
+ * direction; the fail-closed direction is not confined to outside every self-proof block (S-8 gate
+ * NIT-1: this paragraph previously read "a regression in either the parser or the detector reds
+ * here too", which MUT-B (S-8 gate §三) disproved for the fail-closed direction; S-9 gate NIT-3
+ * further corrects a later revision of this same sentence that said the fail-closed direction "reds
+ * instead" — measured, MUT-B reds PC2 too, so "instead" overstated the boundary).
  */
 describe('required web lane registration block — mutation self-proof', () => {
   const script = readFileSync(REQUIRED_LANE, 'utf8')
@@ -479,7 +498,7 @@ describe('required web lane registration block — mutation self-proof', () => {
     ).toBe(0)
   })
 
-  it('M6 a registration line missing its two-space indent reds the indent detector (first registration point)', () => {
+  it('M6 a registration line missing its two-space indent reds the shared two-space-indent detector (witness shared by both registration points)', () => {
     // Controlled bad input fed straight to the same predicate the real "one token per physical
     // line" assertion above calls for this registration point — proves the detector, not a
     // reimplementation of it.
@@ -626,7 +645,7 @@ describe('required web lane registration block — second registration point (in
             'argv bash actually passes to vitest — every token after it (including the trailing ' +
             `--reporter=dot flag) runs in no CI job at all: ${JSON.stringify(line)}`,
         ).toBe(false)
-        const payload = line.replace(/\s+$/, '').replace(/\\$/, '').trim()
+        const payload = payloadOf(line)
         expect(
           isOneTokenLine(payload),
           `registration line carries more than one argument: ${JSON.stringify(line)}`,
@@ -686,7 +705,7 @@ describe('required web lane registration block — second registration point mut
   it('PC5 — a registration line carrying two tokens reds the one-token-per-line detector', () => {
     const mutated = [...lines.slice(0, headerIndex + 2), '  alpha beta \\', ...lines.slice(headerIndex + 2)].join('\n')
     const offenders = secondRegistrationBlock(mutated).body.filter((line) => {
-      const payload = line.replace(/\s+$/, '').replace(/\\$/, '').trim()
+      const payload = payloadOf(line)
       return !isOneTokenLine(payload)
     })
     expect(offenders, 'PC5 must be caught by the one-token-per-line detector').toEqual(['  alpha beta \\'])
