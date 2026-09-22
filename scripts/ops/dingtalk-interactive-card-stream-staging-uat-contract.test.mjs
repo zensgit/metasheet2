@@ -35,6 +35,21 @@ const WORKFLOW = join(
   'workflows',
   'dingtalk-interactive-card-stream-staging-uat.yml',
 )
+const UAT_CHECKLIST = join(
+  REPO_ROOT,
+  'docs',
+  'development',
+  'approval-dingtalk-slice-b-uat-checklist-20260710.md',
+)
+const DINGTALK_CLIENT = join(
+  REPO_ROOT,
+  'packages',
+  'core-backend',
+  'src',
+  'integrations',
+  'dingtalk',
+  'client.ts',
+)
 const ATTENDANCE_WORKFLOW = join(
   REPO_ROOT,
   '.github',
@@ -94,6 +109,95 @@ function actionBody(source, name, nextNames = []) {
   const mainIdx = source.indexOf('\n# --- main', start + 1)
   if (mainIdx !== -1 && mainIdx < end) end = mainIdx
   return source.slice(start, end)
+}
+
+function runObserveFixture(observe, {
+  dir,
+  expected,
+  windowLines = [],
+  historicalLines = [],
+  injectAfterArm = true,
+  containerChanges = false,
+  delayedLines = [],
+}) {
+  const output = join(dir, 'output')
+  const historicalLogs = join(dir, 'historical.log')
+  const windowLogs = join(dir, 'window.log')
+  const inspectCount = join(dir, 'inspect-count')
+  const logsCount = join(dir, 'logs-count')
+  const harness = join(dir, 'harness.sh')
+  writeFileSync(historicalLogs, historicalLines.length > 0 ? `${historicalLines.join('\n')}\n` : '')
+  writeFileSync(windowLogs, '')
+  writeFileSync(inspectCount, '0')
+  writeFileSync(logsCount, '0')
+  const testObserve = observe
+    .replace('for attempt in $(seq 1 300); do', 'for attempt in $(seq 1 2); do')
+    .replace('    sleep 1', '    sleep 0.05')
+  writeFileSync(
+    harness,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'log() {',
+      '  if [[ "$*" == observer_armed=true* && "$INJECT_AFTER_ARM" == "true" ]]; then',
+      '    printf "%s\\n" "$INJECT_LINES" >> "$WINDOW_LOG_FIXTURE"',
+      '  fi',
+      '}',
+      'fail() { echo "$*" >&2; exit 1; }',
+      'assert_staging_only() { :; }',
+      'require_exact_deployed_sha() { :; }',
+      'require_lifecycle_flags_off() { :; }',
+      'require_log_level_info_or_debug() { :; }',
+      'register_ephemeral() { :; }',
+      'read_flag_from_container() { printf true; }',
+      'docker() {',
+      '  if [[ "$1" == "inspect" ]]; then',
+      '    local count',
+      '    count="$(cat "$INSPECT_COUNT_FILE")"',
+      '    count=$((count + 1))',
+      '    printf "%s" "$count" > "$INSPECT_COUNT_FILE"',
+      '    if [[ "$MOCK_CONTAINER_CHANGES" == "true" && "$count" -gt 1 ]]; then printf "%064d" 0 | tr 0 b; else printf "%064d" 0 | tr 0 a; fi',
+      '    return 0',
+      '  fi',
+      '  [[ "$1" == "logs" ]] || return 1',
+      '  local logs_count',
+      '  logs_count="$(cat "$LOGS_COUNT_FILE")"',
+      '  logs_count=$((logs_count + 1))',
+      '  printf "%s" "$logs_count" > "$LOGS_COUNT_FILE"',
+      '  if [[ "$logs_count" == "2" && -n "$DELAYED_LINES" ]]; then',
+      '    printf "%s\\n" "$DELAYED_LINES" >> "$WINDOW_LOG_FIXTURE"',
+      '  fi',
+      '  if [[ " $* " == *" --since "* ]]; then',
+      '    cat "$WINDOW_LOG_FIXTURE"',
+      '  else',
+      '    cat "$HISTORICAL_LOG_FIXTURE" "$WINDOW_LOG_FIXTURE"',
+      '  fi',
+      '}',
+      'BACKEND_CONTAINER=metasheet-staging-backend',
+      'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
+      'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
+      testObserve,
+      'action_observe',
+    ].join('\n'),
+  )
+  const result = spawnSync('bash', [harness], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      EXPECTED_DELIVERY_ID: expected,
+      HISTORICAL_LOG_FIXTURE: historicalLogs,
+      WINDOW_LOG_FIXTURE: windowLogs,
+      INSPECT_COUNT_FILE: inspectCount,
+      LOGS_COUNT_FILE: logsCount,
+      INJECT_AFTER_ARM: String(injectAfterArm),
+      INJECT_LINES: windowLines.join('\n'),
+      MOCK_CONTAINER_CHANGES: String(containerChanges),
+      DELAYED_LINES: delayedLines.join('\n'),
+      OUTPUT_DIR: output,
+      STREAM_UAT_PERSIST_DIR: dir,
+    },
+  })
+  return { output, result }
 }
 
 // --- parse / presence -----------------------------------------------------------------
@@ -192,6 +296,34 @@ test('contract suite is wired into the required Node 20 plugin-tests lane', () =
     step.run,
     /node --test scripts\/ops\/dingtalk-interactive-card-stream-staging-uat-contract\.test\.mjs/,
   )
+})
+
+test('U6 keeps card forwarding disabled and uses controlled callback injection for B', () => {
+  const checklist = read(UAT_CHECKLIST)
+  assert.match(
+    checklist,
+    /\| U6 \| 非受理人 B 的受控技术注入同意回调（不依赖卡片转发） \|[^\n]*supportForward=false/,
+  )
+  assert.doesNotMatch(checklist, /\| U6 \|[^\n]*转发的卡/)
+  assert.match(read(DINGTALK_CLIENT), /supportForward:\s*false/)
+})
+
+test('U11-a distinguishes an absent corp anchor from a real corp mismatch', () => {
+  const checklist = read(UAT_CHECKLIST)
+  const u11a = checklist.split('\n').find((line) => line.startsWith('| **U11-a**'))
+  assert.ok(u11a, 'U11-a checklist row must exist')
+  assert.match(checklist, /两者都缺 ⇒ 判 `corp_anchor_absent`/)
+  assert.match(u11a, /`corp_anchor_absent` ⇒ 真实帧缺企业锚点/)
+  assert.match(u11a, /`corp_mismatch` ⇒ 锚点存在但企业确实不一致/)
+  assert.doesNotMatch(u11a, /corp_mismatch.*根本不带/)
+})
+
+test('U4-U7 require a fresh armed observer window; U8 uses web evidence', () => {
+  const checklist = read(UAT_CHECKLIST)
+  assert.match(checklist, /看到\s*`observer_armed=true` 后立即执行/)
+  assert.match(checklist, /等待完整五分钟观察窗结束/)
+  assert.match(checklist, /不得拿 U4 的历史日志证明 U5/)
+  assert.match(checklist, /U8 是网页深链，不产生 Stream callback/)
 })
 
 // --- exact-SHA gate -------------------------------------------------------------------
@@ -318,97 +450,54 @@ test('remote script require_exact_deployed_sha used by every non-status action a
   assert.doesNotMatch(status, /require_exact_deployed_sha/)
 })
 
-test('observe is read-only and emits values-free callback classes without raw logs or ids', () => {
+test('observe opens one fresh log window and emits only values-free callback classes', () => {
   const source = read(REMOTE_SH)
   const observe = actionBody(source, 'action_observe', ['action_prepare'])
   assert.match(observe, /action=observe/)
   assert.match(observe, /require_lifecycle_flags_off "observe"/)
   assert.match(observe, /require_log_level_info_or_debug "observe"/)
+  assert.match(observe, /observer_armed=true/)
+  assert.doesNotMatch(observe, /evidence_count.*&& break/)
+  assert.match(observe, /docker logs --since "\$window_started"/)
+  assert.match(observe, /docker inspect --format '\{\{\.Id\}\}'/)
+  assert.match(observe, /callback_evidence_count=1/)
   assert.match(observe, /header_event_corp_id_present=/)
   assert.match(observe, /body_corp_id_present=/)
+  assert.match(observe, /corp_gate_result=/)
   assert.match(observe, /latest_callback_outcome=/)
   assert.match(observe, /window_callback_handler_error_count=/)
   assert.match(observe, /card_update_failed_count=/)
-  for (const outcome of [
-    'ignored_unsupported_action',
-    'delivery_not_found',
-    'executed',
-    'stale',
-    'operator_unresolved',
-    'link_secret_unavailable',
-    'engine_rejected',
-    'wrapper_not_found',
-  ]) {
-    assert.match(observe, new RegExp(`handled_outcome="${outcome}"`))
-  }
-  // A parse-time rejection has no delivery id and cannot be claimed as scoped
-  // evidence for EXPECTED_DELIVERY_ID. The two out_track_id outcomes above do.
-  assert.doesNotMatch(observe, /handled_outcome="rejected"/)
-  assert.doesNotMatch(observe, /handled_outcome="(?:accepted|duplicate)"/)
+  assert.match(observe, /outside the closed set/)
+  assert.doesNotMatch(observe, /callback_outcome="(?:other|unknown|rejected|ignored_unsupported_action|delivery_not_found)"/)
   assert.doesNotMatch(observe, /echo "callback_handler_error_count=/)
-  assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$anchor_line"|deliveryId=/)
+  assert.doesNotMatch(observe, /cat "\$tmp"|echo "\$evidence_line"|deliveryId=/)
   assert.doesNotMatch(observe, /atomic_(?:set|upsert)|recreate_backend_only|compose_staging_cmd up/)
+  assert.doesNotMatch(source, /callback-observer-baseline|observe-baseline/)
 })
 
-test('observe dynamically scopes Winston log evidence to the expected delivery', () => {
+test('observe accepts one atomic same-delivery completion emitted after the window is armed', () => {
   const source = read(REMOTE_SH)
   const observe = actionBody(source, 'action_observe', ['action_prepare'])
   const dir = mkdtempSync(join(tmpdir(), 'stream-observer-'))
-  const output = join(dir, 'output')
-  const logs = join(dir, 'backend.log')
-  const harness = join(dir, 'harness.sh')
   const expected = '12345678-1234-4123-8123-123456789abc'
   const other = '87654321-4321-4123-8123-cba987654321'
   try {
-    writeFileSync(
-      logs,
-      [
-        `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${other}","headerEventCorpIdPresent":false,"bodyCorpIdPresent":true}`,
-        `info: DingTalk interactive-card callback handled (stale delivery=${other})`,
-        `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false}`,
-        `info: DingTalk interactive-card callback handled (operator_unresolved:missing_link delivery=${expected})`,
-        `info: DingTalk interactive-card callback handled (executed delivery=${expected})`,
+    const { output, result } = runObserveFixture(observe, {
+      dir,
+      expected,
+      windowLines: [
+        `info: DingTalk interactive-card callback completed evidence {"deliveryId":"${other}","headerEventCorpIdPresent":false,"bodyCorpIdPresent":true,"corpGateResult":"matched","callbackOutcome":"stale"}`,
         'warn: DingTalk interactive-card callback failed (callback_handler_error)',
         `warn: DingTalk approval-card terminal update failed (card_update_failed:Error) delivery=${expected}`,
-      ].join('\n') + '\n',
-    )
-    writeFileSync(
-      harness,
-      [
-        '#!/usr/bin/env bash',
-        'set -euo pipefail',
-        'log() { :; }',
-        'fail() { echo "$*" >&2; exit 1; }',
-        'assert_staging_only() { :; }',
-        'require_exact_deployed_sha() { :; }',
-        'require_lifecycle_flags_off() { :; }',
-        'require_log_level_info_or_debug() { :; }',
-        'register_ephemeral() { :; }',
-        'read_flag_from_container() { printf true; }',
-        'docker() { [[ "$1" == "logs" ]] || return 1; cat "$LOG_FIXTURE"; }',
-        'BACKEND_CONTAINER=metasheet-staging-backend',
-        'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
-        'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
-        observe,
-        'action_observe',
-      ].join('\n'),
-    )
-    const result = spawnSync('bash', [harness], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        EXPECTED_DELIVERY_ID: expected,
-        LOG_FIXTURE: logs,
-        OUTPUT_DIR: output,
-        STREAM_UAT_PERSIST_DIR: dir,
-      },
+        `info: DingTalk interactive-card callback completed evidence {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false,"corpGateResult":"matched","callbackOutcome":"executed"}`,
+      ],
     })
     assert.equal(result.status, 0, result.stderr)
     const artifact = readFileSync(join(output, 'callback-observer.txt'), 'utf8')
-    assert.match(artifact, /callback_anchor_log_count=1/)
+    assert.match(artifact, /callback_evidence_count=1/)
     assert.match(artifact, /header_event_corp_id_present=true/)
     assert.match(artifact, /body_corp_id_present=false/)
-    assert.match(artifact, /callback_handled_count=2/)
+    assert.match(artifact, /corp_gate_result=matched/)
     assert.match(artifact, /latest_callback_outcome=executed/)
     assert.match(artifact, /window_callback_handler_error_count=1/)
     assert.match(artifact, /card_update_failed_count=1/)
@@ -418,64 +507,169 @@ test('observe dynamically scopes Winston log evidence to the expected delivery',
   }
 })
 
-test('observe precisely classifies scoped out_track_id terminal outcomes', () => {
+test('observe classifies the closed corp-gate and callback-outcome matrices', () => {
   const source = read(REMOTE_SH)
   const observe = actionBody(source, 'action_observe', ['action_prepare'])
-  const dir = mkdtempSync(join(tmpdir(), 'stream-observer-out-track-'))
-  const output = join(dir, 'output')
-  const logs = join(dir, 'backend.log')
-  const harness = join(dir, 'harness.sh')
   const expected = '12345678-1234-4123-8123-123456789abc'
-  try {
-    writeFileSync(
-      harness,
-      [
-        '#!/usr/bin/env bash',
-        'set -euo pipefail',
-        'log() { :; }',
-        'fail() { echo "$*" >&2; exit 1; }',
-        'assert_staging_only() { :; }',
-        'require_exact_deployed_sha() { :; }',
-        'require_lifecycle_flags_off() { :; }',
-        'require_log_level_info_or_debug() { :; }',
-        'register_ephemeral() { :; }',
-        'read_flag_from_container() { printf true; }',
-        'docker() { [[ "$1" == "logs" ]] || return 1; cat "$LOG_FIXTURE"; }',
-        'BACKEND_CONTAINER=metasheet-staging-backend',
-        'FLAG_STREAM=DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
-        'mkdir -p "$STREAM_UAT_PERSIST_DIR" "$OUTPUT_DIR"',
-        observe,
-        'action_observe',
-      ].join('\n'),
-    )
-    for (const [line, expectedOutcome] of [
-      [
-        `info: DingTalk interactive-card callback handled (ignored_unsupported_action out_track_id=${expected})`,
-        'ignored_unsupported_action',
-      ],
-      [
-        `info: DingTalk interactive-card callback handled (delivery_not_found out_track_id=${expected})`,
-        'delivery_not_found',
-      ],
-    ]) {
-      writeFileSync(logs, `${line}\n`)
-      const result = spawnSync('bash', [harness], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          EXPECTED_DELIVERY_ID: expected,
-          LOG_FIXTURE: logs,
-          OUTPUT_DIR: output,
-          STREAM_UAT_PERSIST_DIR: dir,
-        },
-      })
+  for (const [corpGate, outcome] of [
+    ['matched', 'stale'],
+    ['corp_anchor_absent', 'operator_unresolved'],
+    ['corp_anchor_conflict', 'operator_unresolved'],
+    ['delivery_corp_unresolved', 'operator_unresolved'],
+    ['corp_mismatch', 'operator_unresolved'],
+    ['matched', 'link_secret_unavailable'],
+    ['matched', 'engine_rejected'],
+    ['matched', 'wrapper_not_found'],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), 'stream-observer-matrix-'))
+    try {
+      const line = `info: DingTalk interactive-card callback completed evidence {"deliveryId":"${expected}","headerEventCorpIdPresent":false,"bodyCorpIdPresent":true,"corpGateResult":"${corpGate}","callbackOutcome":"${outcome}"}`
+      const { output, result } = runObserveFixture(observe, { dir, expected, windowLines: [line] })
       assert.equal(result.status, 0, result.stderr)
       const artifact = readFileSync(join(output, 'callback-observer.txt'), 'utf8')
-      assert.match(artifact, new RegExp(`latest_callback_outcome=${expectedOutcome}`))
+      assert.match(artifact, new RegExp(`corp_gate_result=${corpGate}`))
+      assert.match(artifact, new RegExp(`latest_callback_outcome=${outcome}`))
       assert.doesNotMatch(artifact, new RegExp(expected))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
+  }
+})
+
+test('observe ignores historical evidence; removing --since makes the fixture false-green', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  const historical = `info: DingTalk interactive-card callback completed evidence {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false,"corpGateResult":"matched","callbackOutcome":"executed"}`
+  const originalDir = mkdtempSync(join(tmpdir(), 'stream-observer-history-original-'))
+  const mutatedDir = mkdtempSync(join(tmpdir(), 'stream-observer-history-mutated-'))
+  try {
+    const original = runObserveFixture(observe, {
+      dir: originalDir,
+      expected,
+      historicalLines: [historical],
+      injectAfterArm: false,
+    })
+    assert.notEqual(original.result.status, 0)
+    assert.match(original.result.stderr, /timed out without one completed callback/)
+
+    const mutatedObserve = observe.replace(
+      'docker logs --since "$window_started" "$BACKEND_CONTAINER"',
+      'docker logs "$BACKEND_CONTAINER"',
+    )
+    assert.notEqual(mutatedObserve, observe)
+    const mutated = runObserveFixture(mutatedObserve, {
+      dir: mutatedDir,
+      expected,
+      historicalLines: [historical],
+      injectAfterArm: false,
+    })
+    assert.equal(mutated.result.status, 0, mutated.result.stderr)
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(originalDir, { recursive: true, force: true })
+    rmSync(mutatedDir, { recursive: true, force: true })
+  }
+})
+
+test('observe rejects split, duplicate, unknown, and container-replaced evidence', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  const valid = `info: DingTalk interactive-card callback completed evidence {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false,"corpGateResult":"matched","callbackOutcome":"executed"}`
+  const cases = [
+    {
+      name: 'split legacy lines',
+      lines: [
+        `info: DingTalk interactive-card callback corp anchor {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false}`,
+        `info: DingTalk interactive-card callback handled (executed delivery=${expected})`,
+      ],
+      reason: /timed out without one completed callback/,
+    },
+    { name: 'duplicate completion', lines: [valid, valid], reason: /requires exactly one completed callback/ },
+    {
+      name: 'delayed duplicate completion',
+      lines: [valid],
+      delayedLines: [valid],
+      reason: /requires exactly one completed callback/,
+    },
+    {
+      name: 'unknown outcome',
+      lines: [valid.replace('"executed"', '"unexpected"')],
+      reason: /callback outcome outside the closed set/,
+    },
+    { name: 'container replacement', lines: [valid], containerChanges: true, reason: /container changed/ },
+  ]
+  for (const entry of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'stream-observer-negative-'))
+    try {
+      const { output, result } = runObserveFixture(observe, {
+        dir,
+        expected,
+        windowLines: entry.lines,
+        delayedLines: entry.delayedLines ?? [],
+        containerChanges: entry.containerChanges ?? false,
+      })
+      assert.notEqual(result.status, 0, `${entry.name} must fail`)
+      assert.match(result.stderr, entry.reason)
+      assert.doesNotMatch(result.stderr, new RegExp(expected))
+      assert.equal(existsSync(join(output, 'callback-observer.txt')), false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('observe duplicate and outcome guards are mutation-killed', () => {
+  const source = read(REMOTE_SH)
+  const observe = actionBody(source, 'action_observe', ['action_prepare'])
+  const expected = '12345678-1234-4123-8123-123456789abc'
+  const valid = `info: DingTalk interactive-card callback completed evidence {"deliveryId":"${expected}","headerEventCorpIdPresent":true,"bodyCorpIdPresent":false,"corpGateResult":"matched","callbackOutcome":"executed"}`
+  const mutations = [
+    {
+      name: 'restore early exit after first completion',
+      lines: [valid],
+      delayedLines: [valid],
+      mutate: (body) => body.replace(
+        '    sleep 1',
+        '    [[ "$evidence_count" == "1" ]] && break # mutation: miss delayed duplicate evidence\n    sleep 1',
+      ),
+    },
+    {
+      name: 'remove duplicate guard',
+      lines: [valid, valid],
+      mutate: (body) => body.replace(
+        '    [[ "$evidence_count" -le 1 ]] \\\n      || fail "action=observe requires exactly one completed callback in the fresh window (callback_evidence_count=${evidence_count})"',
+        '    : # mutation: accept duplicate callback evidence',
+      ),
+    },
+    {
+      name: 'restore open outcome fallback',
+      lines: [valid.replace('"executed"', '"unexpected"')],
+      mutate: (body) => body.replace(
+        '  [[ -n "$callback_outcome" ]] || fail "action=observe completed evidence carried a callback outcome outside the closed set"',
+        '  callback_outcome="executed" # mutation: accept unknown outcome',
+      ),
+    },
+  ]
+
+  for (const { name, lines, delayedLines = [], mutate } of mutations) {
+    const originalDir = mkdtempSync(join(tmpdir(), 'stream-observer-mutation-original-'))
+    const mutatedDir = mkdtempSync(join(tmpdir(), 'stream-observer-mutation-mutated-'))
+    try {
+      const original = runObserveFixture(observe, { dir: originalDir, expected, windowLines: lines, delayedLines })
+      assert.notEqual(original.result.status, 0, `${name}: original must fail`)
+      const mutatedObserve = mutate(observe)
+      assert.notEqual(mutatedObserve, observe, `${name}: mutation must change the body`)
+      const mutated = runObserveFixture(mutatedObserve, { dir: mutatedDir, expected, windowLines: lines, delayedLines })
+      assert.equal(
+        mutated.result.status,
+        0,
+        `${name}: mutation must be caught by the test fixture\nstdout=${mutated.result.stdout}\nstderr=${mutated.result.stderr}`,
+      )
+    } finally {
+      rmSync(originalDir, { recursive: true, force: true })
+      rmSync(mutatedDir, { recursive: true, force: true })
+    }
   }
 })
 
