@@ -119,8 +119,9 @@ detector. The two-clause coverage this slice adds, each with its own counterexam
 - `token#note` (no space before `#`) is not a bash comment at all — `#` only starts one at the
   start of a word — and is out of scope for the identical reason it already is for the first point.
 
-That pair (bare-line direct check + pre-existing per-line-token-count check) is a complete cover of
-the block; nothing in this slice or its comments claims "folds the way bash does" beyond that.
+That pair (bare-line direct check + pre-existing per-line-token-count check) covers the two
+bash-comment word shapes enumerated above; nothing in this slice or its comments claims "folds the
+way bash does" beyond that.
 
 ## 4. Guard placement and CI collection evidence
 
@@ -218,3 +219,13 @@ here from the local run.
   shape-only slice (§0, §5).
 
 No lock document is touched by this slice. No DDL. No flag changes.
+
+## 7. Round-1 gate review disposition (2026-09-22, record-level)
+
+The round-1 gate (`impl-gate-H7-integration-guard-registration-shape-round1-20260922.md`, APPROVE,
+0 P1/0 P2/4 P3/2 NIT) found §3's "complete cover of the block" an unscoped absolute given the
+section itself already hedges to two named word shapes — narrowed above. **P3-1 (the ~7 non-roster
+tokens, §2), P3-2 (`.gitattributes` `eol=lf` half not extended alongside `merge=union`, §5) and
+P3-3 (no `merge=union` pin, so alphabetically-adjacent lanes can still conflict, §5) are existing,
+unresolved** — the gate's own disposition recommends they land in a separate follow-up PR, not in
+this one; no `.gitattributes` or coverage change is made in this pass.
