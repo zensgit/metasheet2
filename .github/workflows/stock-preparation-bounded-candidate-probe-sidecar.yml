@@ -1,0 +1,79 @@
+name: Stock Preparation Bounded Candidate Discovery Sidecar
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-preparation-bounded-candidate-probe-sidecar.yml'
+      - '.github/workflows/plugin-tests.yml'
+      - 'scripts/ops/build-stock-preparation-bounded-candidate-probe-sidecar.mjs'
+      - 'scripts/ops/build-stock-preparation-bounded-candidate-probe-sidecar.test.mjs'
+      - 'scripts/ops/stock-preparation-bounded-candidate-probe.ps1'
+      - 'scripts/ops/stock-preparation-bounded-candidate-probe-README.txt'
+      - 'scripts/ops/stock-preparation-rca-window-pm2-sample.mjs'
+      - 'scripts/ops/__tests__/stock-preparation-bounded-candidate-probe.ps51.tests.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  powershell51:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Run exact target-shell behavior contract
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-bounded-candidate-probe.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  build:
+    needs: powershell51
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - name: Require manual delivery builds from main
+        if: github.event_name == 'workflow_dispatch'
+        run: test "$GITHUB_REF" = 'refs/heads/main'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Bind checkout content to provenance SHA
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - name: Verify and stage the no-Git discovery sidecar
+        run: |
+          set -euo pipefail
+          node --test scripts/ops/build-stock-preparation-bounded-candidate-probe-sidecar.test.mjs
+          node scripts/ops/build-stock-preparation-bounded-candidate-probe-sidecar.mjs \
+            --source-sha "$SOURCE_SHA" \
+            --output-dir output/stock-preparation-bounded-candidate-probe
+          package_dir="$(find output/stock-preparation-bounded-candidate-probe -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          package_name="$(basename "$package_dir")"
+          (
+            cd output/stock-preparation-bounded-candidate-probe
+            zip -X -r "$package_name.zip" "$package_name"
+            sha256sum "$package_name.zip" > "$package_name.zip.sha256"
+          )
+      - name: Upload exact-SHA discovery sidecar
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-preparation-bounded-discovery-${{ env.SOURCE_SHA }}
+          path: |
+            output/stock-preparation-bounded-candidate-probe/*.zip
+            output/stock-preparation-bounded-candidate-probe/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
