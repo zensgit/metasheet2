@@ -516,30 +516,33 @@ describe('required web lane registration block — mutation self-proof', () => {
  * make no claim about the second — a shape guard checks structure, not token-set membership, exactly
  * as the pre-existing `token count > 30` bound above does for the required lane.
  */
+const SECOND_HEADER_LINE = 'pnpm --filter @metasheet/web exec vitest run \\'
+
+/**
+ * Raw physical-line walk of the second registration point's continuation block. Deliberately
+ * independent of `logicalLines()` (see the module doc above for why): that function makes a
+ * `#`-prefixed line invisible, which is exactly the shape this walk exists to catch. Module-scope
+ * so the structural-shape describe below and its mutation self-proof describe share one walker
+ * instead of each maintaining its own copy of the same logic.
+ */
+function secondRegistrationBlock(scriptSrc: string) {
+  const lines = scriptSrc.split('\n').map((line) => line.replace(/\r$/, ''))
+  const header = lines.findIndex((line) => line === SECOND_HEADER_LINE)
+  const body: string[] = []
+  let terminatorIndex = header
+  if (header !== -1) {
+    let i = header + 1
+    for (; i < lines.length; i += 1) {
+      body.push(lines[i])
+      if (!lines[i].replace(/\s+$/, '').endsWith('\\')) break
+    }
+    terminatorIndex = i
+  }
+  return { lines, header, body, terminatorIndex }
+}
+
 describe('required web lane registration block — second registration point (integration guard web specs) structural shape', () => {
   const secondScript = readFileSync(SECOND_REGISTRATION_POINT, 'utf8')
-  const SECOND_HEADER_LINE = 'pnpm --filter @metasheet/web exec vitest run \\'
-
-  /**
-   * Raw physical-line walk of the second point's continuation block. Deliberately independent of
-   * `logicalLines()` (see the module doc above for why): that function makes a `#`-prefixed line
-   * invisible, which is exactly the shape this walk exists to catch.
-   */
-  function secondRegistrationBlock(scriptSrc: string) {
-    const lines = scriptSrc.split('\n').map((line) => line.replace(/\r$/, ''))
-    const header = lines.findIndex((line) => line === SECOND_HEADER_LINE)
-    const body: string[] = []
-    let terminatorIndex = header
-    if (header !== -1) {
-      let i = header + 1
-      for (; i < lines.length; i += 1) {
-        body.push(lines[i])
-        if (!lines[i].replace(/\s+$/, '').endsWith('\\')) break
-      }
-      terminatorIndex = i
-    }
-    return { lines, header, body, terminatorIndex }
-  }
 
   it('passes `bash -n`', (ctx) => {
     if (!BASH) {
@@ -608,9 +611,7 @@ describe('required web lane registration block — second registration point (in
  */
 describe('required web lane registration block — second registration point mutation self-proof', () => {
   const secondScript = readFileSync(SECOND_REGISTRATION_POINT, 'utf8')
-  const SECOND_HEADER_LINE = 'pnpm --filter @metasheet/web exec vitest run \\'
-  const lines = secondScript.split('\n').map((line) => line.replace(/\r$/, ''))
-  const headerIndex = lines.findIndex((line) => line === SECOND_HEADER_LINE)
+  const { lines, header: headerIndex } = secondRegistrationBlock(secondScript)
 
   const isSorted = (tokens: string[]): boolean =>
     tokens.every((token, index) => index === 0 || caseInsensitive(tokens[index - 1], token) <= 0)
@@ -626,14 +627,7 @@ describe('required web lane registration block — second registration point mut
 
   it('PC1 — a bare `#`-prefixed line inside the block reds the direct detector (kills a mid-rebase-note truncation)', () => {
     const mutated = [...lines.slice(0, headerIndex + 2), '  #note \\', ...lines.slice(headerIndex + 2)].join('\n')
-    const mutatedLines = mutated.split('\n')
-    const body: string[] = []
-    let i = headerIndex + 1
-    for (; i < mutatedLines.length; i += 1) {
-      body.push(mutatedLines[i])
-      if (!mutatedLines[i].replace(/\s+$/, '').endsWith('\\')) break
-    }
-    const offenders = body.filter((line) => line.trim().startsWith('#'))
+    const offenders = secondRegistrationBlock(mutated).body.filter((line) => line.trim().startsWith('#'))
     expect(offenders, 'PC1 must be caught by the bare-`#`-line detector').toEqual(['  #note \\'])
   })
 
@@ -660,14 +654,7 @@ describe('required web lane registration block — second registration point mut
   )
 
   it('PC3 — a blank line plus a whole-line comment AFTER the block is not flagged (not an always-red detector)', () => {
-    const { header, terminatorIndex } = (() => {
-      const header = lines.findIndex((line) => line === SECOND_HEADER_LINE)
-      let i = header + 1
-      for (; i < lines.length; i += 1) {
-        if (!lines[i].replace(/\s+$/, '').endsWith('\\')) break
-      }
-      return { header, terminatorIndex: i }
-    })()
+    const { header, terminatorIndex } = secondRegistrationBlock(secondScript)
     const mutated = [...lines.slice(0, terminatorIndex + 1), '', '# a trailing rebase note', ...lines.slice(terminatorIndex + 1)]
     const rest = mutated.slice(terminatorIndex + 1).join('\n')
     const trailing = logicalLines(rest).filter((line) => line.trim() !== '')
