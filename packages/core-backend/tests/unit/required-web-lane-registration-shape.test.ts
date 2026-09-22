@@ -541,6 +541,19 @@ function secondRegistrationBlock(scriptSrc: string) {
   return { lines, header, body, terminatorIndex }
 }
 
+/**
+ * First index at which `tokens` diverges from case-insensitive alphabetical order, or `null` when
+ * already sorted. Module-scope for the same reason as `secondRegistrationBlock` above: the real
+ * "is sorted" assertion below and its mutation self-proof (PC4) must exercise the SAME detector —
+ * PC4 reimplementing its own boolean copy would prove only that the copy reds, not that the real
+ * assertion does.
+ */
+function firstSortBreak(tokens: string[]): number | null {
+  const sorted = [...tokens].sort(caseInsensitive)
+  const index = tokens.findIndex((token, i) => token !== sorted[i])
+  return index === -1 ? null : index
+}
+
 describe('required web lane registration block — second registration point (integration guard web specs) structural shape', () => {
   const secondScript = readFileSync(SECOND_REGISTRATION_POINT, 'utf8')
 
@@ -586,9 +599,9 @@ describe('required web lane registration block — second registration point (in
     expect(invocation, 'expected exactly one vitest invocation logical line').toBeTruthy()
     const tokens = tokensOf(invocation as string)
     const sorted = [...tokens].sort(caseInsensitive)
-    const firstBreak = tokens.findIndex((token, index) => token !== sorted[index])
+    const firstBreak = firstSortBreak(tokens)
     expect(
-      firstBreak === -1 ? null : { at: firstBreak, found: tokens[firstBreak], expected: sorted[firstBreak] },
+      firstBreak === null ? null : { at: firstBreak, found: tokens[firstBreak], expected: sorted[firstBreak] },
       'insert new tokens in case-insensitive alphabetical position — appending to the tail rebuilds ' +
         'the contended single-line shape this block exists to remove',
     ).toBeNull()
@@ -638,7 +651,7 @@ describe('required web lane registration block — second registration point mut
       'coverage check, not this structural guard — matching the pre-existing `> 30` loose bound above ' +
       'for the required lane, which has the same limitation',
     () => {
-      const invocationLineIndex = lines.findIndex((line, index) => index > headerIndex && !line.replace(/\s+$/, '').endsWith('\\'))
+      const invocationLineIndex = secondRegistrationBlock(secondScript).terminatorIndex
       // Drop one interior token line (not the header, not the terminator) — e.g. the FIRST token line.
       const dropped = [...lines.slice(0, headerIndex + 1), ...lines.slice(headerIndex + 2)].join('\n')
       expect(invocationLineIndex).toBeGreaterThan(headerIndex)
@@ -672,6 +685,6 @@ describe('required web lane registration block — second registration point mut
     // the ordering fault from the count/duplicate detectors, same discipline as M2 above.
     expect(new Set(swapped).size).toBe(new Set(tokens).size)
     expect(swapped.length).toBe(tokens.length)
-    expect(isSorted(swapped), 'PC4 must be caught by `is sorted`').toBe(false)
+    expect(firstSortBreak(swapped), 'PC4 must be caught by the real sort detector').not.toBeNull()
   })
 })
