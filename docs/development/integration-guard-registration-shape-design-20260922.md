@@ -299,6 +299,8 @@ a literal) at either real assertion still leaves the suite green each time, whic
 call-site limit two paragraphs above, applied to this predicate too. After the hoist, the positive
 control that replaces the body of `payloadOf` with `line` reds both real assertions and PC5 (before
 the hoist only one site). A regression inside `payloadOf` that only drops the trailing-whitespace
-normalisation stays green (S-10 gate PAY-WS): the PC5 fixture carries no trailing whitespace after
-the backslash, so PC5 cannot see it. The single definition removes the drift surface; it does not
-make every derivation regression visible.
+normalisation stays green (S-10 gate PAY-WS). The S-11 gate re-ran that mutation with a trailing
+space appended to the PC5 fixture and it still stayed green, so the blind spot is not a property of
+the fixture; under that mutation no assertion in this file reds. The cause is not isolated in this
+document. The single definition removes the drift surface; it does not make every derivation
+regression visible.
