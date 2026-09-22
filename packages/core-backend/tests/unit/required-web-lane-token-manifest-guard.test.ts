@@ -215,7 +215,7 @@ function describeExtra(tokens: string[], lineMap: Map<string, number[]>): string
  * So: this round extracts the sibling's function source the same way as before (still via
  * `extractExportedFunctionSource`/`extractPlainFunctionSource` below — importing the sibling files
  * directly is still unsafe, see their own headers), then MATERIALIZES it into a real, callable
- * function (`materialize()` below) and calls it on a battery of >=6 named fixtures — comment
+ * function (`materialize()` below) and calls it on a battery of >=8 named fixtures — comment
  * lines, backslash continuations, a `#` line inside the block region, a dead block after `exec`,
  * a blank line, and a bare single line — asserting the OUTPUT is byte-for-byte identical to this
  * file's own copy, not the source. Where a sibling exports a differently-shaped function (e.g.
@@ -339,7 +339,7 @@ function materializeAll<T extends Record<string, (...args: any[]) => unknown>>(s
 }
 
 /**
- * ROUND 4 — the >=6 named fixtures every cross-copy behavioural comparison below runs. Each is a
+ * ROUND 4 — the >=8 named fixtures every cross-copy behavioural comparison below runs. Each is a
  * complete, syntactically well-formed script fragment carrying exactly one `exec npx vitest run`
  * logical line, so `logicalLines`, `execLogicalLine`, and `tokensOf(execLogicalLine(...))` are all
  * exercisable on every entry uniformly.
@@ -471,7 +471,9 @@ describe('required web lane token manifest — set equality', () => {
       tokensOf: (logicalLine: string) => string[]
     }>(sourcesToMaterialize, namesToMaterialize)
 
-    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 6 named fixtures').toBeGreaterThanOrEqual(6)
+    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 8 named fixtures').toBeGreaterThanOrEqual(8)
+    expect(FIXTURES).toHaveProperty('indentedCommentBeforeBlock')
+    expect(FIXTURES).toHaveProperty('indentedCommentInsideBlockOutsideContinuation')
 
     for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
       expect(
@@ -529,7 +531,9 @@ describe('required web lane token manifest — set equality', () => {
       ['logicalLines'],
     )
 
-    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 6 named fixtures').toBeGreaterThanOrEqual(6)
+    expect(Object.keys(FIXTURES).length, 'fixture sanity: at least 8 named fixtures').toBeGreaterThanOrEqual(8)
+    expect(FIXTURES).toHaveProperty('indentedCommentBeforeBlock')
+    expect(FIXTURES).toHaveProperty('indentedCommentInsideBlockOutsideContinuation')
 
     for (const [fixtureName, scriptSrc] of Object.entries(FIXTURES)) {
       const mapped = logicalLinesWithLineNumbers(scriptSrc)
