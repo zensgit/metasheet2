@@ -719,7 +719,7 @@ The round-5 gate (`impl-gate-H6-token-manifest-guard-round5-20260922.md`) found 
 "closed"/"covered" sentences above (this section, and the matching comments in the guard test and
 `exec-block.mjs`) overclaiming: the fourth-copy comparison is filtered through a `vitest run`
 predicate that absorbs the divergence the two indented-`#` fixtures were added to catch. This
-record-only pass narrowed those three sentences (a comment edit in the guard test file counts among
+record-only pass narrowed those three committed sentences; the PR body carried a fourth copy of the refuted clause, deleted from the body on 2026-09-22 (body-only, not in the tree) (a comment edit in the guard test file counts among
 them) to what the assertion actually covers; it does not add the fixture the gate's fix (a) would
 need to close the gap. **P3-1 (fourth-copy coverage hole) and NIT-1 (fixture-count floor still
 reads 6 against an actual battery of 8) are existing, unresolved** — no assertion changed in this
