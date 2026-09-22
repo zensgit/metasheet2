@@ -205,16 +205,18 @@ CI=true npx vitest run src/formula/__tests__/regex-safety.test.ts \
   tests/unit/formula-engine.test.ts tests/unit/field-validation.test.ts \
   tests/unit/field-validation-wiring.test.ts --config vitest.config.ts
 ```
-→ `regex-safety` 45, three-copy parity 32, read-parity fuzz 4, formula-engine 87,
-field-validation 72, field-validation-wiring 5.
+→ round 3b, re-counted at this head: `regex-safety` **60**, three-copy parity **33**,
+read-parity fuzz **4**, formula-engine **87**, field-validation **72**,
+field-validation-wiring **5** = **261 passed / 6 files**. (Round 2 read 45 / 32 for the
+first two; the cases added since are listed in §5.8.2 and §5.8.9(e).)
 
 Full default lane (the config CI's backend job uses), **no DATABASE_URL — the lane's own
 `exclude` list drops every DB-backed integration spec, and this slice's mechanism is
 DB-independent**:
 ```
-CI=true npx vitest run --config vitest.config.ts
+CI=true pnpm --filter @metasheet/core-backend test     # the required job's own step, §5.8.10
 → Test Files  982 passed | 175 skipped (1157)
-        Tests  15966 passed | 1615 skipped (17581)      exit 0
+        Tests  15988 passed | 1615 skipped (17603)      exit 0
 ```
 `plugins/plugin-integration-core`: `node scripts/test-chain.cjs` → **229 suites passed**.
 `packages/core-backend`: `npx tsc --noEmit -p tsconfig.json` → exit 0, no output.
@@ -609,6 +611,19 @@ divergences (r2 vs r3, and new vs unguarded) = 0
 Identical refusal counts and zero divergences: the round-3 changes move no verdict on this
 corpus. Positive control (an over-ceiling subject must diverge) passes.
 
+Re-run in round 3b with a different seed, since that round touches `regex-safety.ts` (comments
+only) and adds cases:
+
+```
+pairs=100000 distinctPatterns=64697
+r2 refusals=1083  r3 refusals=1083
+divergences (r2 vs r3, and new vs unguarded) = 0
+```
+
+Positive control passes there too. `r2` is a copy of `bab083dc4` verified byte-identical to
+that commit before the run (`git show <sha>:<path> | cmp -`), so "r2" is the reviewed head
+and not a reconstruction of it.
+
 **5.8.7 Round-3 mutation battery — the new guards.**
 Same protocol as §5.5 (`cp` backup → edit → `cmp` to prove the edit took → run → `cp`
 restore → `cmp` to prove the restore took). Suite = the six files, `--retry=0`.
@@ -625,7 +640,7 @@ restore → `cmp` to prove the restore took). Suite = the six files, `--retry=0`
 | **X5** | the first rung confirms once instead of three times | **RED** (1 case) | `the FIRST rung re-measures three times before refusing a 2-character subject` |
 | **X6** | the anchor is confirmed with ONE sample instead of two | **RED** (3 cases) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` + `re-measures a one-off spike instead of turning it into a refusal` + `the ANCHOR is re-measured too, and the re-measured anchor is what the verdict uses` |
 | **X7** | the anchor confirmation is deleted (the ladder sample stands) | **RED** (3 cases) |
-| **X11** | insert the prescribed "statically provable linear" fast path at the top of `runUserRegex` | **RED** (14 cases, 4 of them the new star-height-1 cases) | `a withdrawn refusal keeps climbing the ladder — a later rung can still refuse` + `re-measures a one-off spike instead of turning it into a refusal` + `the ANCHOR is re-measured too, and the re-measured anchor is what the verdict uses` |
+| **X11** | insert the prescribed "statically provable linear" fast path at the top of `runUserRegex` | **RED** (16 cases) | the 4 `STAR-HEIGHT-1 POLYNOMIALS` cases + 9 `execute`-seam cases (4 `confirmation re-measurement`, 5 `deciding branch, ACCEPT side` — their synthetic patterns carry no quantified group either, so the fast path skips the seam) + 3 INVALID-PATTERN cases, because the prescribed fast path compiles `new RegExp` OUTSIDE the existing try/catch and throws where the guard used to return `invalid-pattern` |
 
 X1, X9 and X10 are the three ways to get §5.8.1 wrong — never withdraw, withdraw and stop,
 withdraw and forget the sample — and every one of the ten reds the case written for it. The
@@ -755,9 +770,17 @@ at the n chosen — 250 and 2000, picked so a regression that ACCEPTED the shape
 finishes in about a second rather than hanging a required lane — the unguarded call is fast
 enough that no loose millisecond bound would separate the two implementations. That is
 stated in the file rather than papered over. Mutation **X11** (insert the prescribed fast
-path at the top of `runUserRegex`) turns the suite **14 red**, four of them these new
-behavioural cases, and the red lines carry the leaked unguarded cost (848ms / 1248ms /
-1230ms) as their duration. The positive control stays green under X11, as it must.
+path at the top of `runUserRegex`) turns the six-file suite **16 red**, four of them these
+new behavioural cases; the red lines carry the leaked unguarded cost as their duration. The
+positive control stays green under X11, as it must.
+
+The four BEHAVIOURAL cases are timing-derived — the ladder has to cross the floor at a rung
+and fit a slope above 2 — so their result was also read off the FULL-package run, where 982
+files compete for forks, rather than only from a quiet process: **all five cases in the
+block (the four plus the positive control) are green there** (same run as §5.8.10). That matters because the lane sets `retry: 2`, which would hide a single
+flake rather than remove it. Quiet-process stability before that: 100/100 refused at each
+chosen n. The same shape at n=1000 was 23/25, which is why `^.*.*.*b$` is pinned at n=2000
+and not lower.
 
 **5.8.10 CI collection (P2-3) — the round-2 gate's finding is REFUTED, and here is the
 collection line.**
@@ -776,7 +799,10 @@ workflows for the file names, for `vitest run` with no file arguments, and for `
 main/protection` → the contexts list includes it). The package script is `"test": "vitest"`
 — no file arguments and no `run` — so it is a WHOLE-CONFIG collection over
 `vitest.config.ts`, and GitHub Actions sets `CI=true`, which is what makes vitest execute
-once instead of watching. The step carries no `if:`, so it runs on both matrix legs.
+once instead of watching. The step carries no `if:`, so it runs on both matrix legs. And the
+workflow's `on.pull_request` carries only `branches: [main, develop]` — **no `paths` filter**
+(the `paths` list in that file sits under `on.push`, not under `on.pull_request`), so the job
+is not path-gated away on a PR that happens to touch only these files.
 
 Run here, at this head, as the exact command the workflow runs:
 
@@ -785,7 +811,7 @@ CI=true pnpm --filter @metasheet/core-backend test
 > @metasheet/core-backend@2.5.0 test .../h3-r3/packages/core-backend
 > vitest
   Test Files  982 passed | 175 skipped (1157)
-       Tests  15983 passed | 1615 skipped (17598)
+       Tests  15988 passed | 1615 skipped (17603)
 ```
 
 Cases reported by that run, per file — the collection evidence, counted from the run's own
@@ -793,7 +819,7 @@ output rather than inferred from the glob:
 
 | file | cases collected |
 |---|---|
-| `src/formula/__tests__/regex-safety.test.ts` | **55** (60 after 5.8.9(e)) |
+| `src/formula/__tests__/regex-safety.test.ts` | **60** |
 | `tests/unit/user-regex-guard-three-copy-parity.test.ts` | **33** |
 | `tests/unit/user-regex-guard-read-parity-fuzz.test.ts` | **4** |
 

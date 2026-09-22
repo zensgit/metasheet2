@@ -419,16 +419,20 @@ read as closing it.
 
    **Two remedies were considered and declined, and round 3 MEASURED both rather than
    arguing them** (verification MD §5.8.9).
-   *A static "provably linear, skip the ladder" fast path* fails in both directions at once.
+   *A static "provably linear, skip the ladder" fast path*, with the predicate AS PROPOSED
+   ("no nested quantifier, no quantified alternation"), fails in both directions at once.
    Coverage: **0 of the 6** common linear patterns take it, because every one of them
    contains a quantified group whose body carries a quantifier — precisely the predicate
-   round 1 proved cannot separate them from a catastrophic shape (§3C.1). Soundness: it
-   ADMITS shapes the guard refuses today. `^a*a*a*a*b$` has no quantified group at all, so
-   the predicate calls it linear; measured unguarded it costs **851ms at n=250 and 38679ms
-   at n=1000**, against a subject ceiling of 10000, while the shipped ladder refuses it in
-   ~22ms on a measured slope of 3.78. Skipping the ladder for it is a bypass. Both shapes
-   are now pinned behaviourally so the fast path cannot be reintroduced quietly (mutation
-   X11: 14 red).
+   round 1 proved cannot separate them from a catastrophic shape (§3C.1). That half
+   generalises: the six are star height 2, so ANY predicate sound enough to be safe here
+   excludes them. Soundness: THIS predicate ADMITS shapes the guard refuses today. (A
+   genuinely sound linearity analysis is not refuted by the counter-example below; it is
+   simply not what was proposed, and building one is its own slice.)
+   `^a*a*a*a*b$` has no quantified group at all, so the predicate calls it linear; measured
+   unguarded it costs **851ms at n=250 and 38679ms at n=1000**, against a subject ceiling of
+   10000, while the shipped ladder refuses it in ~22ms on a measured slope of 3.78. Skipping
+   the ladder for it is a bypass. Both shapes are now pinned behaviourally so the fast path
+   cannot be reintroduced quietly (mutation X11: **16 red** on the six-file suite).
    *Caching the ladder's conclusion per (pattern, subject-length bucket)* is unsound because
    the verdict is a property of the (pattern, VALUE) pair, not of its size. Measured, same
    pattern and same length: `^(a+)+$` against 33 matching characters is **ok in 0.492ms**,
