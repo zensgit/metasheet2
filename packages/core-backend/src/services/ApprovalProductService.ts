@@ -231,7 +231,7 @@ function safeMetricsCall(label: string, fn: () => Promise<void>): void {
 async function settleMetricsCall(label: string, fn: () => Promise<void>): Promise<void> {
   try {
     // Restores the microtask trampoline `safeMetricsCall` uses. Discriminating power here comes from
-    // the `await` in `settleNodeDecisionMetric` (see the H-1 test names), not from this hop.
+    // the `await`s at the call sites (see the H-1 test names), not from this hop.
     await Promise.resolve().then(fn)
   } catch (error) {
     logMetricsHookFailure(label, error)

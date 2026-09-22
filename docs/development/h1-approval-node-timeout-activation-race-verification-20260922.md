@@ -462,10 +462,7 @@ A(P) → C(Q, `timeout{afterMinutes:1,effect:'jump'}`) 的模板，重复 N 次�
 即 §7 第 1 条的 **PG 16 轴**与第 7 条的**默认无 DB lane**都由 CI 实际执行并通过 ——
 两者都不是本地跑出来的，出处标在这里。
 
-上表结果对应提交 `4b0650b96557001c82f718211c106389cc72e914` —— **本分支最后一次代码变更**；
-在它之后本分支只有文档提交，所以这些结果对当前 head 的**代码**仍然成立。
-这一点是**可机械核验**的，不是断言 —— `git diff --stat 4b0650b96557001c82f718211c106389cc72e914..<当前 head>`
-的输出只含 `docs/` 路径（零 `packages/` / 零 `.github/` 条目）。
+上表结果对应提交 `4b0650b96557001c82f718211c106389cc72e914`。
 **刻意不在此写当前 head 的 40 位 SHA**：那会让本节每加一次文档就作废一次（自指快照）。
 读者要核对当前 head，用 `gh pr view 5970 --json headRefOid`。
 
@@ -586,7 +583,7 @@ main 分支保护的 required 清单请用
 ## 附录 D — P3-B 行号锚点重生成记录（D1 记录修复轮，2026-09-22）
 
 **触发原因**：本轮 P3-A 在 `ApprovalProductService.ts` 的 JSDoc 里删除 2 行（两句被 r1 证否的论证），
-P3-C 在 `settleMetricsCall` 的跳板注释里删除 4 行换成 2 行（净 -4 行）；两处编辑都在文件前部，
+P3-C 在 `settleMetricsCall` 的跳板注释里删除 6 行换成 2 行（净 -4 行）；两处编辑都在文件前部，
 使其后所有行号整体下移 —— 原 `:239` 起的内容下移 4 行，原 `:11343`（`private emitNodeActivationMetric(` 的原位置）
 起的内容累计下移 6 行。设计 MD / 验证 MD 里所有指向 `ApprovalProductService.ts` 且原行号 ≥ 239 的锚点，
 连同 r1 遗留、本轮之前就已存在的「+45 漂移」三处定义锚点（`emitApprovalTaskCreatedEventsPostCommit` /
