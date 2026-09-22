@@ -29,7 +29,12 @@
  * class. A pattern whose cost is DISCONTINUOUS in subject length — a fixed-length
  * runway before a nested quantifier, `^.{64}(a+)+$` — is flat on every rung below
  * the runway and can still block; measured, one such shape made a ladder rung
- * itself run for minutes. A linear-time engine (RE2) or a killable worker is the
+ * itself run for minutes. And that example still CONVERGES: replace the runway with
+ * a MINIMUM-LENGTH assertion whose threshold equals the real subject's own length
+ * and every rung fails the assertion, so the guard is a measured no-op (overhead
+ * under 0.3%) at any cost — see design MD §3D.1. The "final approach" rungs below
+ * bound the last step in SUBJECT LENGTH, not in WORK, so they do not help against a
+ * predicate that flips at an exact length. A linear-time engine (RE2) or a killable worker is the
  * only complete answer; that is an owner/dependency decision. See the design MD
  * §3D "Residual: what this guard still cannot see".
  */
@@ -115,6 +120,40 @@ export const USER_REGEX_SUPERLINEAR_SLOPE = 2
  * on a ratio scheduling jitter cannot manufacture.
  */
 export const USER_REGEX_DECISION_DYNAMIC_RANGE = 8
+
+/**
+ * Total measurement spend, in milliseconds, above which the refusal path's
+ * confirmation re-measurement is SKIPPED and the first measurement stands.
+ *
+ * It bounds the guard's own MULTIPLIER on the most expensive rung it ever ran;
+ * it is NOT a bound on the cost of any single probe, and nothing here can bound
+ * that without an interruptible engine.
+ *
+ * Derivation, all measured (verification MD §5.7):
+ *  a) The sub-floor sweep alone can never reach it. A rung that does not cross
+ *     USER_REGEX_PROBE_FLOOR_MS costs less than that floor by definition, and the
+ *     rung count at the subject ceiling is pinned below 80 (regex-safety.test.ts,
+ *     "stays logarithmic in n"), so the sweep spends under 160ms. This budget
+ *     therefore only ever fires because ONE rung was itself expensive — which is
+ *     the case it exists for.
+ *  b) The three named catastrophic shapes spend ~13ms through their deciding
+ *     rung, so they are re-measured exactly as before. This constant changes
+ *     nothing for them.
+ *  c) The §3D.2 discontinuous-cost shape (a fixed-length runway in front of a
+ *     nested quantifier) crosses the floor on a single 660ms rung. Re-measuring
+ *     that rung twice made the guard cost 1927ms for a pattern the unguarded code
+ *     answers in 0.005ms. Under this budget it costs one rung.
+ *
+ * DELIBERATELY NOT a bound on the ladder loop. Stopping the sweep early could
+ * skip the rung that would have crossed the floor and turn a refusal into an
+ * acceptance — a new bypass. Bounding only the re-measurement cannot do that.
+ *
+ * The trade, stated plainly: above this budget the guard decides on ONE sample,
+ * so a pause landing on a rung after 200ms of measurement is no longer filtered
+ * out. That window requires a rung expensive enough to have spent the budget,
+ * and such a rung is not a pause.
+ */
+export const USER_REGEX_REMEASURE_BUDGET_MS = 200
 
 /** Floor used in place of a zero/unmeasurable previous rung so the slope stays finite. */
 const MIN_MEASURABLE_MS = 0.001
@@ -277,21 +316,37 @@ export function runUserRegex<T>(
   // A fresh RegExp per timing rung: `lastIndex` on a /g pattern is per-object
   // state, and reusing one object across rungs would make every rung after the
   // first measure a different thing than the real call does.
+  // Total time this call has spent MEASURING (ladder rungs and confirmation
+  // samples alike). It is what USER_REGEX_REMEASURE_BUDGET_MS is spent against.
+  let spentMs = 0
   const timeAt = (len: number): number => {
     const probe = userRegexProbeSubject(subject, len)
     const re = new RegExp(pattern, flags)
     const started = nowMs()
     execute(re, probe)
-    return nowMs() - started
+    const ms = nowMs() - started
+    spentMs += ms
+    return ms
   }
   // Re-measurement used only on the refusal path: a GC pause or a descheduled
   // slice can inflate one sample above the floor, and a refusal is a write-path
   // rejection. `min` of repeated samples removes that, and it costs nothing on
   // the overwhelmingly common accept path because it never runs there.
-  const bestOf = (len: number, times: number): number => {
+  //
+  // Bounded by the SAME measurement budget as the rest of the call. Once the
+  // ladder has already spent USER_REGEX_REMEASURE_BUDGET_MS, a scheduling pause
+  // is no longer a candidate explanation for the number, and re-measuring only
+  // multiplies a cost already known to be real: MEASURED, a shape that crosses
+  // the floor on a single 660ms rung cost 1927ms here before this bound.
+  // `fallbackMs` is the sample already taken, so a skipped re-measurement still
+  // feeds the verdict a measured value rather than an invented one.
+  const bestOf = (len: number, times: number, fallbackMs: number): number => {
     let best = Infinity
-    for (let i = 0; i < times; i++) best = Math.min(best, timeAt(len))
-    return best
+    for (let i = 0; i < times; i++) {
+      if (spentMs > USER_REGEX_REMEASURE_BUDGET_MS) break
+      best = Math.min(best, timeAt(len))
+    }
+    return best === Infinity ? fallbackMs : best
   }
 
   const sampledLen: number[] = []
@@ -307,7 +362,7 @@ export function runUserRegex<T>(
       // The very first rung (a <=2-character subject) already burned floor-level
       // CPU. There is no curve to fit, but a 2-character subject costing >=2ms is
       // pathological on its face. Confirm, then refuse.
-      const confirmed = bestOf(len, 3)
+      const confirmed = bestOf(len, 3, ms)
       if (confirmed >= USER_REGEX_PROBE_FLOOR_MS) {
         return {
           status: 'refused',
@@ -329,8 +384,31 @@ export function runUserRegex<T>(
     if (anchor < 0) break
     const verdict = verdictFor(sampledLen[anchor], sampledMs[anchor], len, ms, subject.length)
     if (verdict.superlinear) {
-      const confirmedAnchor = bestOf(sampledLen[anchor], 2)
-      const confirmedMs = bestOf(len, 2)
+      const confirmedAnchor = bestOf(sampledLen[anchor], 2, sampledMs[anchor])
+      const confirmedMs = bestOf(len, 2, ms)
+      if (confirmedMs < USER_REGEX_PROBE_FLOOR_MS) {
+        // The re-measurement withdraws the ENTRY condition, not just the slope.
+        // The only gate into this branch is the floor test above, so a rung that
+        // re-measures BELOW the floor is a rung whose first sample was inflated —
+        // what `bestOf` exists to detect. Round 2 fed the re-measured value back
+        // into the slope alone and could still refuse on it; MEASURED under heap
+        // load, 1 refusal in 2000 runs of one benign pair, its own evidence
+        // reading measuredMs=1.48ms against a 2ms floor.
+        //
+        // AND THE LADDER MUST KEEP CLIMBING. "Decides nothing" means exactly that:
+        // this rung is now an ordinary sub-floor sample, not a reason to stop
+        // measuring. Breaking out here hands the real call to a pattern whose cost
+        // curve was never established — MEASURED on this tree while the withdrawal
+        // did break: `^(a|a)*$` at n=33 entered at rung 19 (first sample 2.41ms,
+        // confirmations 1.46/1.48ms — the FIRST sample at a length is
+        // systematically the slowest, so the min is biased DOWN), the refusal was
+        // withdrawn, the ladder stopped, and the real call ran 21884ms. 1 in 1000,
+        // where round 2 refused 1000/1000. Continuing reaches rung 20, which is
+        // above the floor on every sample, and refuses there.
+        sampledLen.push(len)
+        sampledMs.push(confirmedMs)
+        continue
+      }
       const confirmed = verdictFor(sampledLen[anchor], confirmedAnchor, len, confirmedMs, subject.length)
       if (confirmed.superlinear) {
         return {

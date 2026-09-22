@@ -38,6 +38,14 @@ export const USER_REGEX_SUPERLINEAR_SLOPE = 2
 /** The deciding rung must be this many times more expensive than the rung it is fitted against. */
 export const USER_REGEX_DECISION_DYNAMIC_RANGE = 8
 
+/**
+ * Total measurement spend above which the refusal path's confirmation
+ * re-measurement is skipped and the first measurement stands. Bounds the guard's
+ * multiplier on the most expensive rung, not the cost of a single probe; see the
+ * TS original for the measurements behind it.
+ */
+export const USER_REGEX_REMEASURE_BUDGET_MS = 200
+
 const MIN_MEASURABLE_MS = 0.001
 
 function nowMs(): number {
@@ -156,17 +164,27 @@ export function runUserRegex<T>(
     return { status: 'refused', refusal: { kind: 'invalid-pattern' } }
   }
 
+  // Total time this call has spent MEASURING (ladder rungs and confirmation
+  // samples alike). It is what USER_REGEX_REMEASURE_BUDGET_MS is spent against.
+  let spentMs = 0
   const timeAt = (len: number): number => {
     const probe = userRegexProbeSubject(subject, len)
     const re = new RegExp(pattern, flags)
     const started = nowMs()
     execute(re, probe)
-    return nowMs() - started
+    const ms = nowMs() - started
+    spentMs += ms
+    return ms
   }
-  const bestOf = (len: number, times: number): number => {
+  // Bounded by USER_REGEX_REMEASURE_BUDGET_MS; `fallbackMs` is the sample already
+  // taken, so a skipped re-measurement still feeds the verdict a measured value.
+  const bestOf = (len: number, times: number, fallbackMs: number): number => {
     let best = Infinity
-    for (let i = 0; i < times; i++) best = Math.min(best, timeAt(len))
-    return best
+    for (let i = 0; i < times; i++) {
+      if (spentMs > USER_REGEX_REMEASURE_BUDGET_MS) break
+      best = Math.min(best, timeAt(len))
+    }
+    return best === Infinity ? fallbackMs : best
   }
 
   const sampledLen: number[] = []
@@ -182,7 +200,7 @@ export function runUserRegex<T>(
       // The very first rung (a <=2-character subject) already burned floor-level
       // CPU. There is no curve to fit, but a 2-character subject costing >=2ms is
       // pathological on its face. Confirm, then refuse.
-      const confirmed = bestOf(len, 3)
+      const confirmed = bestOf(len, 3, ms)
       if (confirmed >= USER_REGEX_PROBE_FLOOR_MS) {
         return {
           status: 'refused',
@@ -204,8 +222,17 @@ export function runUserRegex<T>(
     if (anchor < 0) break
     const verdict = verdictFor(sampledLen[anchor], sampledMs[anchor], len, ms, subject.length)
     if (verdict.superlinear) {
-      const confirmedAnchor = bestOf(sampledLen[anchor], 2)
-      const confirmedMs = bestOf(len, 2)
+      const confirmedAnchor = bestOf(sampledLen[anchor], 2, sampledMs[anchor])
+      const confirmedMs = bestOf(len, 2, ms)
+      if (confirmedMs < USER_REGEX_PROBE_FLOOR_MS) {
+        // The re-measurement withdraws the ENTRY condition too, not just the
+        // slope; and "decides nothing" means the ladder keeps climbing rather
+        // than handing the real call to an unmeasured pattern. See the TS
+        // original for the measurement that forced the `continue`.
+        sampledLen.push(len)
+        sampledMs.push(confirmedMs)
+        continue
+      }
       const confirmed = verdictFor(sampledLen[anchor], confirmedAnchor, len, confirmedMs, subject.length)
       if (confirmed.superlinear) {
         return {
