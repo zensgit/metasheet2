@@ -499,8 +499,10 @@ describe('required web lane registration block — mutation self-proof', () => {
   })
 
   it('M6 a registration line missing its two-space indent reds the shared two-space-indent detector (witness shared by both registration points)', () => {
-    // Controlled bad input fed straight to the same predicate the real "one token per physical
-    // line" assertion above calls for this registration point — proves the detector, not a
+    // Controlled bad input fed straight to the shared `hasTwoSpaceIndent` predicate that BOTH
+    // registration points' real per-line loops call: the first point's own loop (in the
+    // "structural shape" describe above) and the second point's own loop (in the "second
+    // registration point ... structural shape" describe below) — proves the detector, not a
     // reimplementation of it.
     expect(hasTwoSpaceIndent('alpha \\'), 'M6 must be caught by the two-space-indent detector').toBe(false)
     expect(hasTwoSpaceIndent('  alpha \\'), 'M6 must not flag a legitimately indented line').toBe(true)
