@@ -177,12 +177,19 @@ export function stripTrailingErrorGuard(logicalLine) {
  * 1-based source line number its logical line STARTS at (comments stripped first, same as
  * `logicalLines()`, so a commented-out example like `# `npx vitest run …`` is correctly excluded).
  *
- * Deliberately re-implements the comment-strip/continuation-fold loop rather than sharing it with
- * `logicalLines()` above: `logicalLines()` must stay byte-identical to the other two copies of it
- * elsewhere in the repo (see the cross-copy agreement check), so it cannot be refactored to also
- * track line numbers without breaking that assertion. This is the one deliberate exception to
- * "don't duplicate this parser a fourth time" — the duplication is of the untyped line-splitting
- * loop only, not of `logicalLines`/`execLogicalLine`/`tokensOf` themselves.
+ * Re-implements the comment-strip/continuation-fold loop rather than sharing it with
+ * `logicalLines()` above. ROUND 5 (r4-P3-3) — the justification this comment used to give was
+ * that `logicalLines()` had to stay BYTE-IDENTICAL to the repo's other copies of it, so it could
+ * not be refactored to track line numbers. Round 4 falsified that twice: the cross-copy check is
+ * now behavioural rather than textual, and `logicalLinesWithLineNumbers()` — a function that does
+ * exactly "track line numbers" — now lives in this same file. The real reason this loop is still
+ * here is narrower: round 4 left it untouched to avoid changing `allVitestInvocations`'s output
+ * shape in the same change that rewrote the cross-copy checks, and no round since has needed to.
+ * The residual that scoping accepts — the fourth copy being compared on a single input — is closed
+ * from the test side: `r2-P3-4` compares it to `logicalLines()` on the real lane script, and its
+ * round-5 widening runs the same comparison across the shared FIXTURES battery, so a divergence
+ * between this loop and `logicalLines()` reds there. The duplication is of the untyped
+ * line-splitting loop, not of `logicalLines`/`execLogicalLine`/`tokensOf` themselves.
  *
  * Every `vitest run` invocation in this script today happens to fall after `set -euo pipefail`
  * (line 473; the earliest invocation is at line 477) — this function does not itself special-case
