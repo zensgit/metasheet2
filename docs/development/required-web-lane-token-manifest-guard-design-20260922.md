@@ -723,5 +723,7 @@ record-only pass narrowed those three committed sentences (a comment edit in the
 counts among them) to what the assertion actually covers; it does not add the fixture the gate's
 fix (a) would need to close the gap. The PR body carried a fourth copy of the refuted clause; it
 was deleted from the body on 2026-09-22 (body-only, not in the tree). **P3-1 (fourth-copy
-coverage hole) and NIT-1 (fixture-count floor still reads 6 against an actual battery of 8) are
-existing, unresolved** — no assertion changed in this pass.
+coverage hole) is existing, unresolved** — no assertion changed in this pass.
+
+NIT-1 closed at 928d3d51a (floor raised to 8; the two indented-# fixtures named) and hardened at
+804f2a55fee2381c9e93dd7061aa837ecf8952ec (exact key set; the indented-# property pinned).
