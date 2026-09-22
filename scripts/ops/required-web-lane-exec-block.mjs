@@ -185,11 +185,13 @@ export function stripTrailingErrorGuard(logicalLine) {
  * exactly "track line numbers" — now lives in this same file. The real reason this loop is still
  * here is narrower: round 4 left it untouched to avoid changing `allVitestInvocations`'s output
  * shape in the same change that rewrote the cross-copy checks, and no round since has needed to.
- * The residual that scoping accepts — the fourth copy being compared on a single input — is closed
- * from the test side: `r2-P3-4` compares it to `logicalLines()` on the real lane script, and its
- * round-5 widening runs the same comparison across the shared FIXTURES battery, so a divergence
- * between this loop and `logicalLines()` reds there. The duplication is of the untyped
- * line-splitting loop, not of `logicalLines`/`execLogicalLine`/`tokensOf` themselves.
+ * The residual that scoping accepts — the fourth copy being compared on a single input — is
+ * narrowed, not closed, from the test side: `r2-P3-4` compares it to `logicalLines()` on the real
+ * lane script, and its round-5 widening runs the same comparison across the shared FIXTURES
+ * battery, but that comparison is filtered through a `vitest run` predicate, so a divergence
+ * confined to a non-`vitest run` logical line (e.g. an indented `#` comment) does not red there —
+ * existing, unresolved (round-5 gate P3-1). The duplication is of the untyped line-splitting loop,
+ * not of `logicalLines`/`execLogicalLine`/`tokensOf` themselves.
  *
  * Every `vitest run` invocation in this script today happens to fall after `set -euo pipefail`
  * (line 473; the earliest invocation is at line 477) — this function does not itself special-case

@@ -945,8 +945,10 @@ describe('required web lane token manifest — mutation self-proof', () => {
     // `allVitestInvocations`) had its agreement checked against `logicalLines()` on exactly ONE
     // input: the real lane script. That script carries no indented `#` and no comment inside a
     // continuation, so a whole class of divergence between the two loops was unobservable. Running
-    // the same comparison over the named battery brings the fourth copy under the same coverage
-    // the other three already have — including the two indented-`#` fixtures added this round.
+    // the same comparison over the named battery widens it to the fourth copy, but the comparison
+    // below is filtered through a `vitest run` predicate, which absorbs the divergence the two
+    // indented-`#` fixtures were added to catch — that class stays open, not covered by this loop
+    // (existing, unresolved; round-5 gate P3-1).
     for (const [fixtureName, fixtureSrc] of Object.entries(FIXTURES)) {
       expect(
         allVitestInvocations(fixtureSrc).map((l) => l.text),
