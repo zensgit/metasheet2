@@ -32,6 +32,7 @@ const {
 const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-group-fixed-schedule-producer-key.cjs')
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const { resolvePunchOrgIdV1, extractRequestedPunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
+const { refuseOutdoorApprovalFlowSave } = require('./lib/outdoor-approval-flow-save.cjs')
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   recordShadowOrgResolutionV1,
@@ -17629,6 +17630,7 @@ function mapAttendanceRulesMePunchPolicy(settings) {
     unscheduledMode: punchPolicy.unscheduled.mode,
     outdoorApprovalRequired: punchPolicy.outdoor.requireApproval === true,
     outdoorNoteRequired: punchPolicy.outdoor.requireNote === true,
+    outdoorPhotoRequired: punchPolicy.outdoor.requirePhoto === true,
     merge: {
       internalWinsOnIn: punchPolicy.merge.internalWinsOnIn === true,
       externalWinsOnOut: punchPolicy.merge.externalWinsOnOut === true,
@@ -50679,6 +50681,40 @@ module.exports = {
           if (merged.annualLeavePolicy?.enabled === true && !isValidTimeZoneIdentifier(merged.annualLeavePolicy.timezone)) {
             res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_INVALID', message: 'annualLeavePolicy.timezone must be a valid IANA timezone identifier' } })
             return
+          }
+          // #5961: writing punchPolicy.outdoor with requireApproval on must resolve the same
+          // way an outdoor punch does. Unrelated settings writes do not re-check a stored
+          // outdoor policy. requireApproval false always saves.
+          if (parsed.data.punchPolicy && parsed.data.punchPolicy.outdoor && merged.punchPolicy?.outdoor?.requireApproval === true) {
+            const outdoor = merged.punchPolicy.outdoor
+            const orgId = getOrgId(req)
+            const approvalFlowId = typeof outdoor.approvalFlowId === 'string' ? outdoor.approvalFlowId.trim() : ''
+            let explicitFlow = null
+            if (approvalFlowId) {
+              const flow = await loadApprovalFlow(db, orgId, { flowId: approvalFlowId })
+              explicitFlow = flow
+                ? { requestType: flow.requestType, isActive: flow.isActive === true }
+                : null
+            }
+            const activeRows = approvalFlowId
+              ? []
+              : await db.query(
+                `SELECT id FROM attendance_approval_flows
+                 WHERE org_id = $1 AND request_type = 'outdoor_punch' AND is_active = true
+                 ORDER BY created_at DESC
+                 LIMIT 2`,
+                [orgId],
+              )
+            const refusal = refuseOutdoorApprovalFlowSave({
+              requireApproval: true,
+              approvalFlowId,
+              explicitFlow,
+              activeOutdoorFlowCount: activeRows.length,
+            })
+            if (refusal) {
+              res.status(refusal.status).json({ ok: false, error: { code: refusal.code, message: refusal.message } })
+              return
+            }
           }
           const saved = await saveSettings(db, merged)
           scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })

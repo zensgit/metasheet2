@@ -6120,19 +6120,27 @@ attendanceIntegrationDescribe(
     const foreignOnlyHeaders = { Authorization: `Bearer ${foreignOnlyToken}` }
     const originalSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
     const originalSettings = (originalSettingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+    const outdoorFlowId = randomUuidV4()
     try {
-      await requestJson(`${baseUrl}/api/attendance/settings`, {
+      await pool.query(
+        `INSERT INTO attendance_approval_flows (id, org_id, name, request_type, steps, is_active)
+         VALUES ($1, $2, $3, 'outdoor_punch', '[]'::jsonb, true)`,
+        [outdoorFlowId, orgId, `Rules Me Outdoor ${runSuffix}`],
+      )
+      const settingsPut = await requestJson(`${baseUrl}/api/attendance/settings`, {
         method: 'PUT',
         headers: adminHeaders,
         body: JSON.stringify({
+          orgId,
           punchPolicy: {
             unscheduled: { mode: 'block' },
             merge: { internalWinsOnIn: true, externalWinsOnOut: true },
-            outdoor: { requireApproval: true, requireNote: true, approvalFlowId: `secret-flow-${runSuffix}` },
+            outdoor: { requireApproval: true, requireNote: true, requirePhoto: true, approvalFlowId: outdoorFlowId },
           },
           geoFence: { lat: 31.23, lng: 121.47, radiusMeters: 300 },
         }),
       })
+      expect(settingsPut.status, settingsPut.raw).toBe(200)
       await pool.query(
         `INSERT INTO users (id, email, name, password_hash, is_active)
          VALUES ($1, $2, $3, 'no-login', true), ($4, $5, $6, 'no-login', true), ($7, $8, $9, 'no-login', true)
@@ -6240,6 +6248,7 @@ attendanceIntegrationDescribe(
         unscheduledMode: 'block',
         outdoorApprovalRequired: true,
         outdoorNoteRequired: true,
+        outdoorPhotoRequired: true,
         merge: { internalWinsOnIn: true, externalWinsOnOut: true },
       })
       const warningCodes = new Set((data?.warnings ?? []).map((warning: { code?: string }) => warning.code))
@@ -6247,7 +6256,8 @@ attendanceIntegrationDescribe(
       expect(warningCodes.has('SCHEDULE_GROUP_WINDOW_OVERLAP')).toBe(true)
       expect(warningCodes.has('DEFAULT_RULE_FALLBACK')).toBe(true)
       expect(warningCodes.has('GROUP_RULE_SET_PREVIEW_DIVERGENCE')).toBe(true)
-      expect(res.raw).not.toContain(`secret-flow-${runSuffix}`)
+      expect(res.raw).not.toContain(outdoorFlowId)
+      expect(res.raw).not.toContain(`Rules Me Outdoor ${runSuffix}`)
       expect(res.raw).not.toContain(`rule-set-secret-${runSuffix}`)
       expect(res.raw).not.toContain('geoFence')
 
@@ -6297,7 +6307,7 @@ attendanceIntegrationDescribe(
       const spoofTenantHeader = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers: { ...headers, 'x-tenant-id': 'other-org' } })
       expect(spoofTenantHeader.status).toBe(400)
     } finally {
-      await requestJson(`${baseUrl}/api/attendance/settings`, {
+      const restored = await requestJson(`${baseUrl}/api/attendance/settings`, {
         method: 'PUT',
         headers: adminHeaders,
         body: JSON.stringify({
@@ -6305,6 +6315,18 @@ attendanceIntegrationDescribe(
           geoFence: originalSettings.geoFence ?? null,
         }),
       }).catch(() => undefined)
+      if (!restored || restored.status !== 200) {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT',
+          headers: adminHeaders,
+          body: JSON.stringify({
+            punchPolicy: {
+              outdoor: { requireApproval: false, requireNote: false, requirePhoto: false, approvalFlowId: '' },
+            },
+          }),
+        }).catch(() => undefined)
+      }
+      await pool.query(`DELETE FROM attendance_approval_flows WHERE id = $1`, [outdoorFlowId]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_schedule_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId, foreignOnlyId]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_schedule_groups WHERE id = ANY($1::uuid[])`, [[scheduleGroupAId, scheduleGroupBId]]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_group_members WHERE user_id = ANY($1::text[])`, [[meId, otherId, foreignOnlyId]]).catch(() => undefined)

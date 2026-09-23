@@ -1037,6 +1037,7 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       method: 'PUT',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: {
+        orgId,
         punchPolicy: {
           outdoor: {
             requireApproval: true,
