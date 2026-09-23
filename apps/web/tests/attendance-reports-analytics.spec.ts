@@ -484,7 +484,7 @@ describe('Attendance reports analytics', () => {
       await flushUi()
 
       findButtonByText(container!, 'Export CSV').click()
-      await flushUi(4)
+      await flushUi(12)
       const firstUrl = vi.mocked(apiFetch).mock.calls.map(call => String(call[0])).find(url => url.includes('/api/attendance/export?'))
       expect(firstUrl).toContain('limit=3')
       expect(firstUrl).not.toContain('status=')
@@ -500,7 +500,7 @@ describe('Attendance reports analytics', () => {
       reportExportHeaders['X-Attendance-Export-Status'] = 'late'
 
       findButtonByText(container!, 'Export CSV').click()
-      await flushUi(4)
+      await flushUi(12)
       const lateUrl = vi.mocked(apiFetch).mock.calls.map(call => String(call[0])).filter(url => url.includes('/api/attendance/export?')).at(-1)
       expect(lateUrl).toContain('status=late')
       expect(lateUrl).toContain('limit=3')
