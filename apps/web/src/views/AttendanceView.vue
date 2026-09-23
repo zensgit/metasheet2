@@ -2203,6 +2203,13 @@
               </p>
               <div v-if="!notificationDeliveriesLoading && notificationDeliveries.length === 0" class="attendance__empty" data-attendance-notification-deliveries-empty>
                 {{ tr('No delivery rows match this filter.', '当前筛选下没有通知投递记录。') }}
+                <p
+                  v-if="reportDigestProducerDormant"
+                  class="attendance__field-hint attendance__field-hint--warning"
+                  data-attendance-notification-deliveries-digest-dormant
+                >
+                  {{ tr('No digest outbox is written while the report-digest producer gate is off. Check ATTENDANCE_REPORT_DIGEST_ENABLED.', '统计通知生产者开关关闭时不会写入 digest outbox。请检查 ATTENDANCE_REPORT_DIGEST_ENABLED。') }}
+                </p>
               </div>
               <div v-if="notificationDeliveries.length > 0" class="attendance__table-wrapper">
                 <table class="attendance__table" data-attendance-notification-deliveries-table>
@@ -2261,6 +2268,24 @@
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Report digest subscription', '统计通知订阅') }}</h4>
               </div>
+              <p class="attendance__field-hint" data-report-digest-runtime="hint">
+                {{ tr('Saving this subscription does not start delivery. Rows are produced only when ATTENDANCE_REPORT_DIGEST_ENABLED is on, the scheduler ticks only when ATTENDANCE_SCHEDULER_ENABLED is exactly true, and delivery runs only when ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED is exactly true. The selected channel also needs its own server configuration.', '保存订阅不会开始发送。仅当 ATTENDANCE_REPORT_DIGEST_ENABLED 开启时才会写入 outbox；调度器仅在 ATTENDANCE_SCHEDULER_ENABLED 精确为 true 时才会执行；投递仅在 ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED 精确为 true 时才会发出。所选渠道还需要各自的服务端配置。') }}
+              </p>
+              <p
+                class="attendance__field-hint"
+                data-report-digest-runtime="status"
+                :data-report-digest-runtime-live="reportDigestRuntimeLiveAttr"
+              >
+                {{ reportDigestRuntimeStatusText }}
+              </p>
+              <p
+                v-if="reportDigestDormant"
+                class="attendance__field-hint attendance__field-hint--warning"
+                data-report-digest-runtime="warning"
+                role="status"
+              >
+                {{ reportDigestDormantWarningText }}
+              </p>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-report-digest-enabled">
                   <span>{{ tr('Enable report digest subscription', '启用统计通知订阅') }}</span>
@@ -7434,8 +7459,23 @@
                 </label>
               </div>
               <div class="attendance__admin-subsection" data-admin-card="annual-leave-scheduled-trigger">
-                <p class="attendance__field-hint">
-                  {{ tr('When on, the accrual engine runs automatically once a month per org (in addition to the manual run below) — no admin click required. Off (default) = accrual only ever runs when an admin manually triggers it.', '开启后，计提引擎每月为每个组织自动运行一次（在下方手工运行之外）——无需管理员点击。关闭（默认）＝计提仅在管理员手工触发时运行。') }}
+                <p class="attendance__field-hint" data-annual-policy-runtime="hint">
+                  {{ tr('This switch allows monthly auto-accrual for this org. It runs only when ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED is on and ATTENDANCE_SCHEDULER_ENABLED is exactly true, and only when the annual-leave engine above is enabled with a valid timezone. With the switch off, accrual runs only from the manual action. Manual run stays available either way.', '此开关表示本组织允许每月自动计提。仅当 ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED 开启且 ATTENDANCE_SCHEDULER_ENABLED 精确为 true，并且上方年假引擎已启用且时区有效时，调度器才会按月运行。开关关闭时，计提只来自手工操作。手工运行始终可用。') }}
+                </p>
+                <p
+                  class="attendance__field-hint"
+                  data-annual-policy-runtime="status"
+                  :data-annual-policy-runtime-live="annualAccrualRuntimeLiveAttr"
+                >
+                  {{ annualAccrualRuntimeStatusText }}
+                </p>
+                <p
+                  v-if="annualAccrualDormant"
+                  class="attendance__field-hint attendance__field-hint--warning"
+                  data-annual-policy-runtime="warning"
+                  role="status"
+                >
+                  {{ annualAccrualDormantWarningText }}
                 </p>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-scheduled-trigger">
                   <span>{{ tr('Auto-run accrual monthly (scheduler)', '每月自动运行计提（调度器）') }}</span>
@@ -11055,6 +11095,21 @@ interface AttendanceSettings {
   }
 }
 
+interface AttendanceRuntimeGateSnapshot {
+  live: boolean
+  requiredEnv: string[]
+  offEnv: string[]
+  producerEnabled?: boolean
+  schedulerEnabled?: boolean
+  deliveryWorkerEnabled?: boolean
+  accrualScheduledEnabled?: boolean
+}
+
+interface AttendanceDualGateRuntimeStatus {
+  reportDigest?: AttendanceRuntimeGateSnapshot
+  annualLeaveAccrualScheduled?: AttendanceRuntimeGateSnapshot
+}
+
 type AutoShiftConfidence = 'high' | 'medium' | 'low'
 type AutoShiftMode = 'preview' | 'apply' | 'auto'
 
@@ -12061,6 +12116,35 @@ const exportingXlsx = ref(false)
 const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
 const attendanceSettings = ref<AttendanceSettings | null>(null)
+// Sibling of settings `data` on GET/PUT /api/attendance/settings. Not persisted.
+// Missing means the server did not report the gates — the cards then treat an enabled switch as dormant.
+const attendanceRuntimeGates = ref<AttendanceDualGateRuntimeStatus | null>(null)
+
+const REPORT_DIGEST_REQUIRED_ENV = [
+  'ATTENDANCE_REPORT_DIGEST_ENABLED',
+  'ATTENDANCE_SCHEDULER_ENABLED',
+  'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+] as const
+
+const ANNUAL_ACCRUAL_REQUIRED_ENV = [
+  'ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED',
+  'ATTENDANCE_SCHEDULER_ENABLED',
+] as const
+
+function applyAttendanceRuntimeGates(payload: { runtimeGates?: AttendanceDualGateRuntimeStatus | null } | null | undefined): void {
+  if (!payload || !Object.prototype.hasOwnProperty.call(payload, 'runtimeGates')) return
+  attendanceRuntimeGates.value = payload.runtimeGates ?? null
+}
+
+function runtimeOnOffLabel(value: boolean | undefined): string {
+  if (value === true) return tr('on', '开')
+  if (value === false) return tr('off', '关')
+  return tr('not reported', '未回报')
+}
+
+function formatEnvList(names: readonly string[]): string {
+  return names.join(', ')
+}
 const holidaySyncLoading = ref(false)
 const provisionLoading = ref(false)
 const provisionHasLoaded = ref(false)
@@ -23516,6 +23600,7 @@ async function loadSettings() {
     adminForbidden.value = false
     attendanceResultEditAdminCapability.value = 'allowed'
     attendanceSettings.value = (data.data as AttendanceSettings | null) ?? null
+    applyAttendanceRuntimeGates(data)
     applySettingsToForm(data.data || {})
     applyShiftComplianceToForm(data.data || {})
     applyOvertimeBankPolicyToForm(data.data || {})
@@ -23734,6 +23819,79 @@ function reportDigestCadencePayload(cadence: AttendanceReportDigestCadenceForm) 
   }
 }
 
+const reportDigestGate = computed(() => attendanceRuntimeGates.value?.reportDigest ?? null)
+
+const reportDigestDormant = computed(() => {
+  if (reportDigestPolicyForm.enabled !== true) return false
+  const gate = reportDigestGate.value
+  if (!gate) return true
+  return gate.live !== true
+})
+
+const reportDigestProducerDormant = computed(() => {
+  if (reportDigestPolicyForm.enabled !== true) return false
+  const gate = reportDigestGate.value
+  if (!gate) return true
+  return gate.producerEnabled !== true
+})
+
+const reportDigestDormantEnvList = computed(() => {
+  const gate = reportDigestGate.value
+  if (gate?.offEnv && gate.offEnv.length > 0) return formatEnvList(gate.offEnv)
+  return formatEnvList(REPORT_DIGEST_REQUIRED_ENV)
+})
+
+const reportDigestRuntimeLiveAttr = computed(() => {
+  const gate = reportDigestGate.value
+  if (!gate) return 'unknown'
+  return gate.live === true ? 'true' : 'false'
+})
+
+const reportDigestRuntimeStatusText = computed(() => {
+  const gate = reportDigestGate.value
+  if (!gate) return tr('Server runtime: not reported', '服务端运行状态：未回报')
+  return tr(
+    `Server runtime: producer ${runtimeOnOffLabel(gate.producerEnabled)}, scheduler ${runtimeOnOffLabel(gate.schedulerEnabled)}, delivery worker ${runtimeOnOffLabel(gate.deliveryWorkerEnabled)}`,
+    `服务端运行状态：生产者${runtimeOnOffLabel(gate.producerEnabled)}，调度器${runtimeOnOffLabel(gate.schedulerEnabled)}，投递${runtimeOnOffLabel(gate.deliveryWorkerEnabled)}`,
+  )
+})
+
+const reportDigestDormantWarningText = computed(() => {
+  const gate = reportDigestGate.value
+  if (!gate) {
+    return tr(
+      `Enabled here, but the server did not report runtime gates. This subscription stays dormant until: ${reportDigestDormantEnvList.value}`,
+      `此处已启用，但服务端未回报运行开关。统计通知保持休眠，直到开启：${reportDigestDormantEnvList.value}`,
+    )
+  }
+  return tr(
+    `Enabled here, but this subscription stays dormant until these server gates are on: ${reportDigestDormantEnvList.value}`,
+    `此处已启用，但统计通知保持休眠，直到这些服务端开关开启：${reportDigestDormantEnvList.value}`,
+  )
+})
+
+function reportDigestSaveStatusMessage(): string {
+  if (reportDigestPolicyForm.enabled !== true) {
+    return tr('Report digest subscription saved', '统计通知订阅已保存')
+  }
+  if (!reportDigestDormant.value) {
+    return tr(
+      'Report digest subscription saved. Server runtime gates for digest are on. The selected channel still needs its own server configuration.',
+      '统计通知订阅已保存。统计通知的服务端运行开关已开启。所选渠道仍需要各自的服务端配置。',
+    )
+  }
+  if (!reportDigestGate.value) {
+    return tr(
+      `Report digest subscription saved. The server did not report runtime gates, so it stays dormant until: ${reportDigestDormantEnvList.value}`,
+      `统计通知订阅已保存。服务端未回报运行开关，因此保持休眠，直到开启：${reportDigestDormantEnvList.value}`,
+    )
+  }
+  return tr(
+    `Report digest subscription saved. It stays dormant until these server gates are on: ${reportDigestDormantEnvList.value}`,
+    `统计通知订阅已保存。它保持休眠，直到这些服务端开关开启：${reportDigestDormantEnvList.value}`,
+  )
+}
+
 async function saveReportDigestPolicy(): Promise<void> {
   const error = reportDigestPolicyError()
   if (error) {
@@ -23772,8 +23930,9 @@ async function saveReportDigestPolicy(): Promise<void> {
     adminForbidden.value = false
     const savedSettings = (data.data || payload) as AttendanceSettings
     attendanceSettings.value = savedSettings
+    applyAttendanceRuntimeGates(data)
     applyReportDigestPolicyToForm(savedSettings)
-    setStatus(tr('Report digest subscription saved', '统计通知订阅已保存'), 'info')
+    setStatus(reportDigestSaveStatusMessage(), 'info')
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save report digest subscription', '保存统计通知订阅失败'), 'save-settings')
   } finally {
@@ -25451,6 +25610,7 @@ async function loadAnnualPolicy() {
       throw new Error(readErrorMessage(data, tr('Failed to load annual leave policy', '加载年假策略失败')))
     }
     adminForbidden.value = false
+    applyAttendanceRuntimeGates(data)
     applyAnnualPolicyToForm((data.data || {}) as AttendanceSettings)
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load annual leave policy', '加载年假策略失败')), 'error')
@@ -25488,6 +25648,72 @@ function annualPolicyTierError(): string | null {
   }
   if (tiers[tiers.length - 1].maxYears !== null) return tr('The last tier must be open-ended (leave max years blank)', '最后一个阶梯须为开放上限(截止年留空)')
   return null
+}
+
+const annualAccrualGate = computed(() => attendanceRuntimeGates.value?.annualLeaveAccrualScheduled ?? null)
+
+const annualAccrualDormant = computed(() => {
+  if (annualPolicyForm.scheduledTriggerEnabled !== true) return false
+  const gate = annualAccrualGate.value
+  if (!gate) return true
+  return gate.live !== true
+})
+
+const annualAccrualDormantEnvList = computed(() => {
+  const gate = annualAccrualGate.value
+  if (gate?.offEnv && gate.offEnv.length > 0) return formatEnvList(gate.offEnv)
+  return formatEnvList(ANNUAL_ACCRUAL_REQUIRED_ENV)
+})
+
+const annualAccrualRuntimeLiveAttr = computed(() => {
+  const gate = annualAccrualGate.value
+  if (!gate) return 'unknown'
+  return gate.live === true ? 'true' : 'false'
+})
+
+const annualAccrualRuntimeStatusText = computed(() => {
+  const gate = annualAccrualGate.value
+  if (!gate) return tr('Server runtime: not reported', '服务端运行状态：未回报')
+  return tr(
+    `Server runtime: accrual gate ${runtimeOnOffLabel(gate.accrualScheduledEnabled)}, scheduler ${runtimeOnOffLabel(gate.schedulerEnabled)}`,
+    `服务端运行状态：计提开关${runtimeOnOffLabel(gate.accrualScheduledEnabled)}，调度器${runtimeOnOffLabel(gate.schedulerEnabled)}`,
+  )
+})
+
+const annualAccrualDormantWarningText = computed(() => {
+  const gate = annualAccrualGate.value
+  if (!gate) {
+    return tr(
+      `Turned on here, but the server did not report runtime gates. Monthly auto-accrual stays dormant until: ${annualAccrualDormantEnvList.value}`,
+      `此处已开启，但服务端未回报运行开关。每月自动计提保持休眠，直到开启：${annualAccrualDormantEnvList.value}`,
+    )
+  }
+  return tr(
+    `Turned on here, but monthly auto-accrual stays dormant until these server gates are on: ${annualAccrualDormantEnvList.value}`,
+    `此处已开启，但每月自动计提保持休眠，直到这些服务端开关开启：${annualAccrualDormantEnvList.value}`,
+  )
+})
+
+function annualPolicySaveStatusMessage(): string {
+  if (annualPolicyForm.scheduledTriggerEnabled !== true) {
+    return tr('Annual leave policy saved', '年假策略已保存')
+  }
+  if (!annualAccrualDormant.value) {
+    return tr(
+      'Annual leave policy saved. Monthly auto-accrual server gates are on. It still runs only when the annual-leave engine is enabled with a valid timezone.',
+      '年假策略已保存。每月自动计提的服务端开关已开启。年假引擎启用且时区有效时才会真正运行。',
+    )
+  }
+  if (!annualAccrualGate.value) {
+    return tr(
+      `Annual leave policy saved. The server did not report runtime gates, so monthly auto-accrual stays dormant until: ${annualAccrualDormantEnvList.value}`,
+      `年假策略已保存。服务端未回报运行开关，因此每月自动计提保持休眠，直到开启：${annualAccrualDormantEnvList.value}`,
+    )
+  }
+  return tr(
+    `Annual leave policy saved. Monthly auto-accrual stays dormant until these server gates are on: ${annualAccrualDormantEnvList.value}`,
+    `年假策略已保存。每月自动计提保持休眠，直到这些服务端开关开启：${annualAccrualDormantEnvList.value}`,
+  )
 }
 
 async function saveAnnualPolicy() {
@@ -25530,8 +25756,9 @@ async function saveAnnualPolicy() {
     adminForbidden.value = false
     // Backfill from the server's normalized response (falling back to the payload), mirroring the other policy
     // cards — so the form reflects exactly what persisted (e.g. a malformed ladder the backend reverted).
+    applyAttendanceRuntimeGates(data)
     applyAnnualPolicyToForm((data.data || payload) as AttendanceSettings)
-    setStatus(tr('Annual leave policy saved', '年假策略已保存'), 'info')
+    setStatus(annualPolicySaveStatusMessage(), 'info')
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to save annual leave policy', '保存年假策略失败')), 'error')
   } finally {

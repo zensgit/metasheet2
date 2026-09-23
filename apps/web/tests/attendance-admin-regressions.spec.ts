@@ -179,6 +179,7 @@ describe('Attendance admin regressions', () => {
   let exportReportFieldSheetId = 'sheet-1'
   let exportReportFieldViewId = 'fields_by_category'
   let attendanceSettingsData: Record<string, unknown> | null = null
+  let attendanceRuntimeGates: Record<string, unknown> | null = null
   let attendanceSettingsFail = false
   let attendanceSettingsSaveData: Record<string, unknown> | null = null
   let attendanceApprovalFlowsData: unknown[] | null = null
@@ -206,6 +207,7 @@ describe('Attendance admin regressions', () => {
     pluginHarness.fetchPlugins.mockReset()
     pluginHarness.fetchPlugins.mockResolvedValue(undefined)
     attendanceSettingsData = null
+    attendanceRuntimeGates = null
     attendanceSettingsFail = false
     attendanceSettingsSaveData = null
     attendanceApprovalFlowsData = null
@@ -747,13 +749,14 @@ describe('Attendance admin regressions', () => {
       }
       if (url.includes('/api/attendance/settings')) {
         const settingsMethod = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
+        const runtimeGates = attendanceRuntimeGates ? { runtimeGates: attendanceRuntimeGates } : {}
         if (settingsMethod !== 'GET') {
-          return jsonResponse(200, { ok: true, data: attendanceSettingsSaveData ?? {} })
+          return jsonResponse(200, { ok: true, data: attendanceSettingsSaveData ?? {}, ...runtimeGates })
         }
         if (attendanceSettingsFail) {
           return jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
         }
-        return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {} })
+        return jsonResponse(200, { ok: true, data: attendanceSettingsData ?? {}, ...runtimeGates })
       }
       if (url.includes('/api/attendance/requests')
         && !url.includes('/api/attendance/requests/')
@@ -2137,6 +2140,131 @@ describe('Attendance admin regressions', () => {
     saveBtn.click()
     await flushUi(4)
     expect(savedPayload?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: false })
+  })
+
+  it('annual-leave policy: scheduled trigger on with env gates off warns and the save status says it will stay dormant', async () => {
+    attendanceSettingsData = {
+      annualLeavePolicy: {
+        enabled: true,
+        tenureMode: 'cumulative_service',
+        standardDayMinutes: 480,
+        tiers: [{ minYears: 1, maxYears: null, days: 5 }],
+        carryover: { enabled: false },
+        timezone: 'Asia/Shanghai',
+        scheduledTrigger: { enabled: true },
+      },
+    }
+    attendanceRuntimeGates = {
+      annualLeaveAccrualScheduled: {
+        accrualScheduledEnabled: false,
+        schedulerEnabled: false,
+        live: false,
+        requiredEnv: ['ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED', 'ATTENDANCE_SCHEDULER_ENABLED'],
+        offEnv: ['ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED', 'ATTENDANCE_SCHEDULER_ENABLED'],
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-policy"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')!
+    const card = section.querySelector<HTMLElement>('[data-admin-card="annual-leave-scheduled-trigger"]')!
+    expect(card.querySelector('[data-annual-policy-runtime="hint"]')?.textContent).toContain('ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED')
+    expect(card.querySelector('[data-annual-policy-runtime="hint"]')?.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
+    expect(card.querySelector('[data-annual-policy-runtime="hint"]')?.textContent).not.toContain('no admin click required')
+    expect(card.querySelector('[data-annual-policy-runtime="status"]')?.getAttribute('data-annual-policy-runtime-live')).toBe('false')
+    expect(card.querySelector('[data-annual-policy-runtime="status"]')?.textContent).toContain('accrual gate off')
+    expect(card.querySelector('[data-annual-policy-runtime="warning"]')?.textContent).toContain('stays dormant')
+    expect(card.querySelector('[data-annual-policy-runtime="warning"]')?.textContent).toContain('ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED')
+
+    const saveBtn = Array.from(section.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
+    saveBtn.click()
+    await flushUi(6)
+    const puts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(puts).toHaveLength(1)
+    const body = JSON.parse(String((puts[0][1] as { body?: string } | undefined)?.body || '{}'))
+    expect(body.annualLeavePolicy.scheduledTrigger).toEqual({ enabled: true })
+    const status = container!.querySelector('.attendance__status-block--admin .attendance__status')
+    expect(status?.textContent).toContain('stays dormant')
+    expect(status?.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
+    expect(status?.textContent).not.toContain('Monthly auto-accrual server gates are on.')
+  })
+
+  it('annual-leave policy: scheduled trigger on with live gates hides the warning, and off never warns', async () => {
+    attendanceSettingsData = {
+      annualLeavePolicy: {
+        enabled: true,
+        tenureMode: 'cumulative_service',
+        standardDayMinutes: 480,
+        tiers: [{ minYears: 1, maxYears: null, days: 5 }],
+        carryover: { enabled: false },
+        timezone: 'Asia/Shanghai',
+        scheduledTrigger: { enabled: true },
+      },
+    }
+    attendanceRuntimeGates = {
+      annualLeaveAccrualScheduled: {
+        accrualScheduledEnabled: true,
+        schedulerEnabled: true,
+        live: true,
+        requiredEnv: ['ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED', 'ATTENDANCE_SCHEDULER_ENABLED'],
+        offEnv: [],
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-policy"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')!
+    const card = section.querySelector<HTMLElement>('[data-admin-card="annual-leave-scheduled-trigger"]')!
+    expect(card.querySelector('[data-annual-policy-runtime="status"]')?.getAttribute('data-annual-policy-runtime-live')).toBe('true')
+    expect(card.querySelector('[data-annual-policy-runtime="warning"]')).toBeNull()
+
+    const saveBtn = Array.from(section.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
+    saveBtn.click()
+    await flushUi(6)
+    expect(container!.querySelector('.attendance__status-block--admin .attendance__status')?.textContent).toContain('Monthly auto-accrual server gates are on')
+
+    const toggle = card.querySelector<HTMLInputElement>('[data-annual-policy="scheduled-trigger"]')!
+    toggle.click()
+    await flushUi(2)
+    expect(card.querySelector('[data-annual-policy-runtime="warning"]')).toBeNull()
+
+    app!.unmount()
+    attendanceSettingsData = {
+      annualLeavePolicy: {
+        enabled: true,
+        tenureMode: 'cumulative_service',
+        standardDayMinutes: 480,
+        tiers: [{ minYears: 1, maxYears: null, days: 5 }],
+        carryover: { enabled: false },
+        timezone: 'Asia/Shanghai',
+        scheduledTrigger: { enabled: false },
+      },
+    }
+    attendanceRuntimeGates = {
+      annualLeaveAccrualScheduled: {
+        accrualScheduledEnabled: false,
+        schedulerEnabled: false,
+        live: false,
+        requiredEnv: ['ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED', 'ATTENDANCE_SCHEDULER_ENABLED'],
+        offEnv: ['ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED', 'ATTENDANCE_SCHEDULER_ENABLED'],
+      },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-policy"]')!.click()
+    await flushUi(4)
+    const offCard = container!.querySelector<HTMLElement>('[data-admin-card="annual-leave-scheduled-trigger"]')!
+    expect(offCard.querySelector('[data-annual-policy-runtime="hint"]')?.textContent).toContain('ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED')
+    expect(offCard.querySelector('[data-annual-policy-runtime="warning"]')).toBeNull()
   })
 
   // ===== L5c admin operations =====
@@ -4608,6 +4736,195 @@ describe('Attendance admin regressions', () => {
         },
       },
     })
+  })
+
+  function digestPolicySettings(enabled: boolean) {
+    return {
+      attendanceReportDigestPolicy: {
+        enabled,
+        timezone: 'Asia/Shanghai',
+        channel: 'work_notification' as const,
+        cadences: {
+          daily: { enabled: false, sendAt: '18:30', recipients: ['self'] },
+          weekly: { enabled: false, weekday: 1, sendAt: '09:00', recipients: ['self'] },
+          monthly: { enabled: false, dayOfMonth: 1, sendAt: '09:00', recipients: ['self'] },
+        },
+      },
+    }
+  }
+
+  function dormantRuntimeGates() {
+    return {
+      reportDigest: {
+        producerEnabled: false,
+        schedulerEnabled: false,
+        deliveryWorkerEnabled: false,
+        live: false,
+        requiredEnv: [
+          'ATTENDANCE_REPORT_DIGEST_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+          'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+        ],
+        offEnv: [
+          'ATTENDANCE_REPORT_DIGEST_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+          'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+        ],
+      },
+      annualLeaveAccrualScheduled: {
+        accrualScheduledEnabled: false,
+        schedulerEnabled: false,
+        live: false,
+        requiredEnv: [
+          'ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+        ],
+        offEnv: [
+          'ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+        ],
+      },
+    }
+  }
+
+  function liveRuntimeGates() {
+    return {
+      reportDigest: {
+        producerEnabled: true,
+        schedulerEnabled: true,
+        deliveryWorkerEnabled: true,
+        live: true,
+        requiredEnv: [
+          'ATTENDANCE_REPORT_DIGEST_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+          'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+        ],
+        offEnv: [] as string[],
+      },
+      annualLeaveAccrualScheduled: {
+        accrualScheduledEnabled: true,
+        schedulerEnabled: true,
+        live: true,
+        requiredEnv: [
+          'ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+        ],
+        offEnv: [] as string[],
+      },
+    }
+  }
+
+  async function openReportDigestSection(): Promise<HTMLElement> {
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-report-digest-policy"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('[data-attendance-report-digest-policy]')
+    expect(section).toBeTruthy()
+    return section!
+  }
+
+  it('report digest: enabled while env gates are off shows the dormant warning and a save status that does not claim delivery', async () => {
+    attendanceSettingsData = digestPolicySettings(true)
+    attendanceSettingsSaveData = digestPolicySettings(true)
+    attendanceRuntimeGates = dormantRuntimeGates()
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const section = await openReportDigestSection()
+    expect(section.querySelector('[data-report-digest-runtime="hint"]')?.textContent).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
+    expect(section.querySelector('[data-report-digest-runtime="hint"]')?.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
+    expect(section.querySelector('[data-report-digest-runtime="hint"]')?.textContent).toContain('ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED')
+    expect(section.querySelector('[data-report-digest-runtime="status"]')?.getAttribute('data-report-digest-runtime-live')).toBe('false')
+    expect(section.querySelector('[data-report-digest-runtime="status"]')?.textContent).toContain('producer off')
+    const warning = section.querySelector('[data-report-digest-runtime="warning"]')
+    expect(warning?.textContent).toContain('stays dormant')
+    expect(warning?.textContent).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
+
+    section.querySelector<HTMLButtonElement>('[data-report-digest="save"]')!.click()
+    await flushUi(6)
+    const puts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(puts).toHaveLength(1)
+    const body = JSON.parse(String((puts[0][1] as { body?: string } | undefined)?.body || '{}'))
+    expect(body.attendanceReportDigestPolicy.enabled).toBe(true)
+    const status = container!.querySelector('.attendance__status-block--admin .attendance__status')
+    expect(status?.textContent).toContain('stays dormant')
+    expect(status?.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
+    expect(status?.textContent).not.toContain('gates for digest are on')
+  })
+
+  it('report digest: enabled while runtime gates are live hides the dormant warning', async () => {
+    attendanceSettingsData = digestPolicySettings(true)
+    attendanceSettingsSaveData = digestPolicySettings(true)
+    attendanceRuntimeGates = liveRuntimeGates()
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const section = await openReportDigestSection()
+    expect(section.querySelector('[data-report-digest-runtime="status"]')?.getAttribute('data-report-digest-runtime-live')).toBe('true')
+    expect(section.querySelector('[data-report-digest-runtime="status"]')?.textContent).toContain('producer on')
+    expect(section.querySelector('[data-report-digest-runtime="warning"]')).toBeNull()
+
+    section.querySelector<HTMLButtonElement>('[data-report-digest="save"]')!.click()
+    await flushUi(6)
+    const status = container!.querySelector('.attendance__status-block--admin .attendance__status')
+    expect(status?.textContent).toContain('Server runtime gates for digest are on')
+    expect(status?.textContent).toContain('channel')
+  })
+
+  it('report digest: a disabled subscription does not warn, and a missing runtime report stays dormant when enabled', async () => {
+    attendanceSettingsData = digestPolicySettings(false)
+    attendanceRuntimeGates = dormantRuntimeGates()
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const section = await openReportDigestSection()
+    expect(section.querySelector('[data-report-digest-runtime="hint"]')?.textContent).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
+    expect(section.querySelector('[data-report-digest-runtime="warning"]')).toBeNull()
+
+    const enabled = section.querySelector<HTMLInputElement>('[data-report-digest="enabled"]')!
+    enabled.click()
+    await flushUi(2)
+    expect(section.querySelector('[data-report-digest-runtime="warning"]')?.textContent).toContain('stays dormant')
+
+    app!.unmount()
+    attendanceRuntimeGates = null
+    attendanceSettingsData = digestPolicySettings(true)
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+    const unknownSection = await openReportDigestSection()
+    expect(unknownSection.querySelector('[data-report-digest-runtime="status"]')?.getAttribute('data-report-digest-runtime-live')).toBe('unknown')
+    expect(unknownSection.querySelector('[data-report-digest-runtime="warning"]')?.textContent).toContain('did not report')
+  })
+
+  it('notification deliveries: empty history names the digest producer gate when the subscription is enabled and the producer is off', async () => {
+    attendanceSettingsData = digestPolicySettings(true)
+    attendanceRuntimeGates = dormantRuntimeGates()
+    attendanceNotificationDeliveriesData = {
+      items: [],
+      total: 0,
+      page: 1,
+      pageSize: 50,
+      counters: { pending: 0, sending: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const empty = container!.querySelector('[data-attendance-notification-deliveries-empty]')
+    expect(empty?.textContent).toContain('No delivery rows match this filter.')
+    expect(empty?.querySelector('[data-attendance-notification-deliveries-digest-dormant]')?.textContent).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
+
+    app!.unmount()
+    attendanceSettingsData = digestPolicySettings(false)
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+    expect(container!.querySelector('[data-attendance-notification-deliveries-digest-dormant]')).toBeNull()
   })
 
   it('loads makeupPunchPolicy into the admin card and PUTs ONLY { makeupPunchPolicy }', async () => {
