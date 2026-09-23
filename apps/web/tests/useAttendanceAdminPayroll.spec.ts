@@ -61,7 +61,7 @@ describe('useAttendanceAdminPayroll', () => {
 
     await payroll.loadPayrollTemplates()
 
-    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/payroll-templates?orgId=org-1')
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/payroll-templates?orgId=org-1&page=1&pageSize=200')
     expect(payroll.payrollTemplates.value).toHaveLength(1)
     expect(payroll.payrollTemplateName('tpl-1')).toBe('Monthly')
     expect(payroll.payrollTemplateName('')).toBe('Manual')
@@ -72,7 +72,7 @@ describe('useAttendanceAdminPayroll', () => {
       if (input === '/api/attendance/payroll-templates' && init?.method === 'POST') {
         return jsonResponse(200, { ok: true, data: { id: 'tpl-2' } })
       }
-      if (input === '/api/attendance/payroll-templates?orgId=org-1') {
+      if (input === '/api/attendance/payroll-templates?orgId=org-1&page=1&pageSize=200') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -177,7 +177,7 @@ describe('useAttendanceAdminPayroll', () => {
       if (input === '/api/attendance/payroll-templates' && init?.method === 'POST') {
         return jsonResponse(200, { ok: true, data: { id: 'tpl-summary' } })
       }
-      if (input === '/api/attendance/payroll-templates?orgId=org-1') {
+      if (input === '/api/attendance/payroll-templates?orgId=org-1&page=1&pageSize=200') {
         return jsonResponse(200, { ok: true, data: { items: [] } })
       }
       throw new Error(`Unexpected request: ${input}`)
@@ -255,7 +255,7 @@ describe('useAttendanceAdminPayroll', () => {
           },
         })
       }
-      if (input === '/api/attendance/payroll-cycles?orgId=org-1') {
+      if (input === '/api/attendance/payroll-cycles?orgId=org-1&page=1&pageSize=200') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -309,7 +309,7 @@ describe('useAttendanceAdminPayroll', () => {
       if (input === '/api/attendance/payroll-cycles' && init?.method === 'POST') {
         return jsonResponse(200, { ok: true, data: savedCycle })
       }
-      if (input === '/api/attendance/payroll-cycles?orgId=org-1') {
+      if (input === '/api/attendance/payroll-cycles?orgId=org-1&page=1&pageSize=200') {
         return jsonResponse(200, { ok: true, data: { items: [savedCycle] } })
       }
       if (input === '/api/attendance/payroll-cycles/cycle-new/summary?orgId=org-1&userId=user-1') {
@@ -397,5 +397,38 @@ describe('useAttendanceAdminPayroll', () => {
     await payroll.loadPayrollTemplates()
 
     expect(adminForbidden.value).toBe(true)
+  })
+
+  it('reads payroll cycle total and loads the next page', async () => {
+    const apiFetch = vi.fn(async (input: string) => {
+      if (input === '/api/attendance/payroll-cycles?orgId=org-1&page=1&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{ id: 'cycle-1', startDate: '2026-01-01', endDate: '2026-01-31', status: 'open' }],
+            total: 2,
+          },
+        })
+      }
+      if (input === '/api/attendance/payroll-cycles?orgId=org-1&page=2&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{ id: 'cycle-2', startDate: '2025-12-01', endDate: '2025-12-31', status: 'closed' }],
+            total: 2,
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const payroll = useAttendanceAdminPayroll(createOptions({ apiFetch }))
+
+    await payroll.loadPayrollCycles()
+    expect(payroll.payrollCyclesCursor.total).toBe(2)
+    expect(payroll.payrollCycles.value.map((item) => item.id)).toEqual(['cycle-1'])
+
+    await payroll.loadMorePayrollCycles()
+    expect(payroll.payrollCycles.value.map((item) => item.id)).toEqual(['cycle-1', 'cycle-2'])
+    expect(payroll.payrollCyclesCursor.total).toBe(2)
   })
 })

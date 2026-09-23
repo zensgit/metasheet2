@@ -36,7 +36,7 @@ describe('useAttendanceAdminScheduling', () => {
 
     await scheduling.loadRotationRules()
 
-    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/rotation-rules?')
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/rotation-rules?page=1&pageSize=200')
     expect(scheduling.rotationRules.value).toHaveLength(1)
     expect(scheduling.rotationAssignmentForm.rotationRuleId).toBe('rot-1')
     expect(adminForbidden.value).toBe(false)
@@ -102,7 +102,7 @@ describe('useAttendanceAdminScheduling', () => {
         orgId: 'org-1',
       }),
     })
-    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/shifts?orgId=org-1')
+    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/shifts?orgId=org-1&page=1&pageSize=200')
     expect(scheduling.shifts.value[0]?.id).toBe('shift-1')
     expect(scheduling.assignmentForm.shiftId).toBe('shift-1')
     expect(scheduling.shiftForm.name).toBe('Standard Shift')
@@ -315,8 +315,8 @@ describe('useAttendanceAdminScheduling', () => {
 
     expect(confirm).toHaveBeenCalledWith('Delete this rotation rule?')
     expect(apiFetch).toHaveBeenNthCalledWith(1, '/api/attendance/rotation-rules/rot-1', { method: 'DELETE' })
-    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/rotation-rules?')
-    expect(apiFetch).toHaveBeenNthCalledWith(3, '/api/attendance/rotation-assignments?')
+    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/rotation-rules?page=1&pageSize=200')
+    expect(apiFetch).toHaveBeenNthCalledWith(3, '/api/attendance/rotation-assignments?page=1&pageSize=200')
     expect(setStatus).toHaveBeenCalledWith('Rotation rule deleted.')
   })
 
@@ -659,5 +659,64 @@ describe('useAttendanceAdminScheduling', () => {
 
     expect(adminForbidden.value).toBe(true)
     expect(setStatus).toHaveBeenCalledWith('Admin permissions required', 'error')
+  })
+
+  it('reads shift total and appends the next page', async () => {
+    const adminForbidden = ref(false)
+    const apiFetch = vi.fn(async (input: string) => {
+      if (input === '/api/attendance/shifts?orgId=org-1&page=1&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'shift-1',
+              name: 'Early',
+              timezone: 'UTC',
+              workStartTime: '08:00',
+              workEndTime: '16:00',
+              isOvernight: false,
+              lateGraceMinutes: 0,
+              earlyGraceMinutes: 0,
+              roundingMinutes: 0,
+              workingDays: [1],
+            }],
+            total: 2,
+          },
+        })
+      }
+      if (input === '/api/attendance/shifts?orgId=org-1&page=2&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'shift-2',
+              name: 'Late',
+              timezone: 'UTC',
+              workStartTime: '16:00',
+              workEndTime: '00:00',
+              isOvernight: true,
+              lateGraceMinutes: 0,
+              earlyGraceMinutes: 0,
+              roundingMinutes: 0,
+              workingDays: [1],
+            }],
+            total: 2,
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      getOrgId: () => 'org-1',
+    })
+
+    await scheduling.loadShifts()
+    expect(scheduling.shiftsCursor.total).toBe(2)
+    await scheduling.loadMoreShifts()
+    expect(scheduling.shifts.value.map((item) => item.id)).toEqual(['shift-1', 'shift-2'])
+    expect(scheduling.shifts.value[1]?.isOvernight).toBe(true)
   })
 })

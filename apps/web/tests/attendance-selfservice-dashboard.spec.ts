@@ -2002,10 +2002,10 @@ describe('Attendance self-service dashboard', () => {
     await flushUi()
 
     expect(vi.mocked(apiFetch).mock.calls.some(call =>
-      String(call[0]) === '/api/attendance/leave-types?isActive=true'
+      String(call[0]) === '/api/attendance/leave-types?isActive=true&page=1&pageSize=200'
     )).toBe(true)
     expect(vi.mocked(apiFetch).mock.calls.some(call =>
-      String(call[0]) === '/api/attendance/overtime-rules?isActive=true'
+      String(call[0]) === '/api/attendance/overtime-rules?isActive=true&page=1&pageSize=200'
     )).toBe(true)
 
     const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')

@@ -1,5 +1,11 @@
 import { computed, reactive, ref, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
+import {
+  attendanceAdminListPageParams,
+  beginAttendanceAdminListRequest,
+  createAttendanceAdminListCursor,
+  storeAttendanceAdminListPage,
+} from './attendanceAdminListPage'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -490,10 +496,16 @@ export function useAttendanceAdminPayroll({
     }
   }
 
-  async function loadPayrollTemplates() {
+  const payrollTemplatesCursor = reactive(createAttendanceAdminListCursor())
+  const payrollCyclesCursor = reactive(createAttendanceAdminListCursor())
+
+  async function loadPayrollTemplates(options: { append?: boolean } = {}) {
+    const append = options.append === true
+    const page = beginAttendanceAdminListRequest(payrollTemplatesCursor, payrollTemplates.value.length, append)
+    if (page === null) return
     payrollTemplateLoading.value = true
     try {
-      const query = buildQuery({ orgId: getOrgId() })
+      const query = buildQuery({ orgId: getOrgId(), ...attendanceAdminListPageParams(page) })
       const response = await apiFetch(`/api/attendance/payroll-templates?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
@@ -504,7 +516,13 @@ export function useAttendanceAdminPayroll({
         throw new Error(extractErrorMessage(data, tr('Failed to load payroll templates', '加载计薪模板失败')))
       }
       adminForbidden.value = false
-      payrollTemplates.value = data.data?.items ?? []
+      payrollTemplates.value = storeAttendanceAdminListPage(payrollTemplatesCursor, payrollTemplates.value, {
+        incoming: data.data?.items ?? [],
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.id,
+      })
     } catch (error) {
       const message = error instanceof Error && error.message
         ? error.message
@@ -627,10 +645,13 @@ export function useAttendanceAdminPayroll({
     payrollCycleSummary.value = null
   }
 
-  async function loadPayrollCycles() {
+  async function loadPayrollCycles(options: { append?: boolean } = {}) {
+    const append = options.append === true
+    const page = beginAttendanceAdminListRequest(payrollCyclesCursor, payrollCycles.value.length, append)
+    if (page === null) return
     payrollCycleLoading.value = true
     try {
-      const query = buildQuery({ orgId: getOrgId() })
+      const query = buildQuery({ orgId: getOrgId(), ...attendanceAdminListPageParams(page) })
       const response = await apiFetch(`/api/attendance/payroll-cycles?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
@@ -641,7 +662,13 @@ export function useAttendanceAdminPayroll({
         throw new Error(extractErrorMessage(data, tr('Failed to load payroll cycles', '加载计薪周期失败')))
       }
       adminForbidden.value = false
-      payrollCycles.value = data.data?.items ?? []
+      payrollCycles.value = storeAttendanceAdminListPage(payrollCyclesCursor, payrollCycles.value, {
+        incoming: data.data?.items ?? [],
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.id,
+      })
     } catch (error) {
       const message = error instanceof Error && error.message
         ? error.message
@@ -851,7 +878,9 @@ export function useAttendanceAdminPayroll({
     payrollCycleGenerating,
     payrollCycleGenerateResult,
     payrollTemplates,
+    payrollTemplatesCursor,
     payrollCycles,
+    payrollCyclesCursor,
     payrollSummaryFieldOptions,
     payrollSummaryFieldOptionsLoading,
     payrollSummarySelectedFieldOptions,
@@ -872,12 +901,14 @@ export function useAttendanceAdminPayroll({
     movePayrollSummaryFieldCode,
     loadPayrollSummaryFieldOptions,
     loadPayrollTemplates,
+    loadMorePayrollTemplates: () => loadPayrollTemplates({ append: true }),
     savePayrollTemplate,
     deletePayrollTemplate,
     resetPayrollCycleForm,
     resetPayrollCycleGenerateForm,
     editPayrollCycle,
     loadPayrollCycles,
+    loadMorePayrollCycles: () => loadPayrollCycles({ append: true }),
     generatePayrollCycles,
     savePayrollCycle,
     deletePayrollCycle,

@@ -1,5 +1,12 @@
-import { ref, type Ref } from 'vue'
+import { reactive, ref, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
+import {
+  attendanceAdminListPageParams,
+  beginAttendanceAdminListRequest,
+  createAttendanceAdminListCursor,
+  resetAttendanceAdminListCursor,
+  storeAttendanceAdminListPage,
+} from './attendanceAdminListPage'
 import { withCsvBom } from './csvExport'
 
 type ApiFetchFn = typeof baseApiFetch
@@ -19,6 +26,7 @@ interface ApiEnvelope<T> {
 
 interface AttendanceImportBatchListPayload {
   items?: AttendanceImportBatch[]
+  total?: number
 }
 
 interface AttendanceImportBatchItemsPayload {
@@ -153,6 +161,7 @@ export interface UseAttendanceAdminImportBatchesOptions {
 
 export interface LoadImportBatchesOptions {
   orgId?: string | null
+  append?: boolean
 }
 
 export interface RollbackImportBatchOptions {
@@ -192,11 +201,13 @@ function csvEscape(value: unknown): string {
   return text
 }
 
-function buildBatchListUrl(orgId?: string | null): string {
+function buildBatchListUrl(orgId?: string | null, page = 1): string {
   const params = new URLSearchParams()
   if (orgId) params.set('orgId', orgId)
-  const query = params.toString()
-  return query ? `/api/attendance/import/batches?${query}` : '/api/attendance/import/batches'
+  const pageParams = attendanceAdminListPageParams(page)
+  params.set('page', pageParams.page)
+  params.set('pageSize', pageParams.pageSize)
+  return `/api/attendance/import/batches?${params.toString()}`
 }
 
 export function resolveImportBatchEngine(batch: AttendanceImportBatch): string {
@@ -728,7 +739,9 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
   const importStatusMessage = ref('')
   const importStatusKind = ref<ImportStatusKind>('info')
   const importBatches = ref<AttendanceImportBatch[]>([])
+  const importBatchesCursor = reactive(createAttendanceAdminListCursor())
   const importBatchItems = ref<AttendanceImportItem[]>([])
+  const importBatchItemsCursor = reactive(createAttendanceAdminListCursor())
   const importBatchSelectedId = ref('')
   const importBatchSnapshot = ref<Record<string, any> | null>(null)
   const importBatchImpactLoading = ref(false)
@@ -748,10 +761,14 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
   }
 
   async function loadImportBatches(loadOptions: LoadImportBatchesOptions = {}) {
+    const requestedOrgId = loadOptions.orgId ?? null
+    const append = loadOptions.append === true && requestedOrgId === lastLoadedOrgId.value
+    const page = beginAttendanceAdminListRequest(importBatchesCursor, importBatches.value.length, append)
+    if (page === null) return
     importLoading.value = true
-    lastLoadedOrgId.value = loadOptions.orgId ?? null
+    lastLoadedOrgId.value = requestedOrgId
     try {
-      const response = await apiFetch(buildBatchListUrl(loadOptions.orgId))
+      const response = await apiFetch(buildBatchListUrl(requestedOrgId, page))
       if (response.status === 403) {
         adminForbiddenRef.value = true
         return
@@ -762,7 +779,13 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
         throw new Error(String(data?.error?.message || tr('Failed to load import batches', '加载导入批次失败')))
       }
 
-      importBatches.value = Array.isArray(data.data?.items) ? data.data.items : []
+      importBatches.value = storeAttendanceAdminListPage(importBatchesCursor, importBatches.value, {
+        incoming: Array.isArray(data.data?.items) ? data.data.items : [],
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.id,
+      })
     } catch (error: unknown) {
       setImportStatus((error as Error)?.message || tr('Failed to load import batches', '加载导入批次失败'), 'error')
     } finally {
@@ -770,11 +793,19 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     }
   }
 
-  async function loadImportBatchItems(batchId: string) {
+  function loadMoreImportBatches() {
+    return loadImportBatches({ orgId: lastLoadedOrgId.value, append: true })
+  }
+
+  async function loadImportBatchItems(batchId: string, loadOptions: { append?: boolean } = {}) {
     if (!batchId) return
+    const append = loadOptions.append === true && importBatchSelectedId.value === batchId
+    const page = beginAttendanceAdminListRequest(importBatchItemsCursor, importBatchItems.value.length, append)
+    if (page === null) return
     importLoading.value = true
     try {
-      const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items`)
+      const params = new URLSearchParams(attendanceAdminListPageParams(page))
+      const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items?${params.toString()}`)
       if (response.status === 403) {
         adminForbiddenRef.value = true
         return
@@ -789,13 +820,25 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
       if (importBatchImpactReport.value?.batchId && importBatchImpactReport.value.batchId !== batchId) {
         importBatchImpactReport.value = null
       }
-      importBatchItems.value = Array.isArray(data.data?.items) ? data.data.items : []
-      importBatchSnapshot.value = null
+      importBatchItems.value = storeAttendanceAdminListPage(importBatchItemsCursor, importBatchItems.value, {
+        incoming: Array.isArray(data.data?.items) ? data.data.items : [],
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.id,
+      })
+      if (!append) importBatchSnapshot.value = null
     } catch (error: unknown) {
       setImportStatus((error as Error)?.message || tr('Failed to load import batch items', '加载导入批次明细失败'), 'error')
     } finally {
       importLoading.value = false
     }
+  }
+
+  function loadMoreImportBatchItems() {
+    const batchId = importBatchSelectedId.value
+    if (!batchId) return undefined
+    return loadImportBatchItems(batchId, { append: true })
   }
 
   function toggleImportBatchSnapshot(item: AttendanceImportItem) {
@@ -835,6 +878,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
         importBatchItems.value = []
         importBatchSnapshot.value = null
         importBatchSelectedId.value = ''
+        resetAttendanceAdminListCursor(importBatchItemsCursor)
       }
       setImportStatus(tr('Import batch rolled back.', '导入批次已回滚。'))
     } catch (error: unknown) {
@@ -1013,6 +1057,8 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     importBatchSelectedId,
     importBatchSnapshot,
     importBatches,
+    importBatchesCursor,
+    importBatchItemsCursor,
     importLoading,
     importStatusKind,
     importStatusMessage,
@@ -1020,6 +1066,8 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     loadFullImportBatchImpact,
     loadImportBatchItems,
     loadImportBatches,
+    loadMoreImportBatches,
+    loadMoreImportBatchItems,
     rollbackImportBatch,
     setImportStatus,
     toggleImportBatchSnapshot,

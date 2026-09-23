@@ -44,6 +44,16 @@
           {{ rule.name }}
         </option>
       </select>
+      <AttendanceListTruncationNotice
+        :tr="tr"
+        list-key="overtime-rules-card"
+        :loaded="catalogLoaded ?? overtimeRules.length"
+        :total="catalogTotal ?? overtimeRules.length"
+        :page="catalogPage ?? 1"
+        :last-page-count="catalogLastPageCount ?? overtimeRules.length"
+        :loading="catalogLoading"
+        @load-more="emit('loadMore')"
+      />
       <small v-if="overtimeRules.length === 0" class="overtime-card__hint" data-overtime-card-empty-rules>
         {{
           tr(
@@ -138,6 +148,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import AttendanceListTruncationNotice from './AttendanceListTruncationNotice.vue'
 import {
   formatLeaveDurationHours,
   minutesFromDateTimeRange,
@@ -166,11 +177,17 @@ const props = defineProps<{
   requestForm: OvertimeRequestFormFields
   overtimeRules: OvertimeRuleOption[]
   submitting: boolean
+  catalogLoaded?: number
+  catalogTotal?: number
+  catalogPage?: number
+  catalogLastPageCount?: number
+  catalogLoading?: boolean
 }>()
 
 const emit = defineEmits<{
   cancel: []
   submit: []
+  loadMore: []
 }>()
 
 const durationUnit = ref<LeaveDurationDisplayUnit>('hours')
