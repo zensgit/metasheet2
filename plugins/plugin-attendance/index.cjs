@@ -9170,6 +9170,59 @@ function attendanceSchedulerScopeAllowsActorActionFacts(scopeRow, actorContext, 
   return target ? attendanceSchedulerScopeMatchesTarget(scopeRow, target) : false
 }
 
+// Nested route copies delegate here so assignment writes, export/import/approve/remind,
+// and auto-shift system dispatch share one intersection implementation.
+const attendanceSchedulerScopeAllowsActorActionFactsImpl = attendanceSchedulerScopeAllowsActorActionFacts
+
+function attendanceAssignmentDispatchFactsForMembership(userId, membership) {
+  const scheduleGroupId = normalizeAttendanceSchedulerScopeRef(
+    membership?.schedule_group_id ?? membership?.scheduleGroupId,
+  )
+  const attendanceGroupId = normalizeAttendanceSchedulerScopeRef(
+    membership?.attendance_group_id ?? membership?.attendanceGroupId,
+  )
+  const department = normalizeAttendanceSchedulerScopeRef(
+    membership?.department_ref ?? membership?.departmentRef,
+  )
+  const normalizedUserId = normalizeAttendanceSchedulerScopeRef(userId)
+  return {
+    scheduleGroupIds: scheduleGroupId ? [scheduleGroupId] : [],
+    attendanceGroupIds: attendanceGroupId ? [attendanceGroupId] : [],
+    departments: department ? [department] : [],
+    userIds: normalizedUserId ? [normalizedUserId] : [],
+    roles: [],
+    roleTags: [],
+  }
+}
+
+// View SQL (schedulerScopeSqlBody / buildAttendanceAssignmentViewSql) does not
+// constrain roles or roleTags. Drop them before the facts helper so a roles-only
+// scope stays unconstrained and fails closed, and a role list cannot veto a row
+// that view would already show.
+function attendanceSchedulerScopeProjectedForAssignmentView(scopeRow) {
+  const scope = normalizeAttendanceSchedulerScopeBody(scopeRow?.scope ?? scopeRow)
+  return {
+    ...scopeRow,
+    scope: {
+      scheduleGroupIds: scope.scheduleGroupIds,
+      attendanceGroupIds: scope.attendanceGroupIds,
+      userIds: scope.userIds,
+      departments: scope.departments,
+      roles: [],
+      roleTags: [],
+    },
+  }
+}
+
+function attendanceScheduleAssignmentDispatchScopeAllowsMembership(scopeRow, actorContext, userId, membership) {
+  return attendanceSchedulerScopeAllowsActorActionFactsImpl(
+    attendanceSchedulerScopeProjectedForAssignmentView(scopeRow),
+    actorContext,
+    'dispatch',
+    attendanceAssignmentDispatchFactsForMembership(userId, membership),
+  )
+}
+
 function countBy(items, resolveKey) {
   const counts = new Map()
   for (const item of Array.isArray(items) ? items : []) {
@@ -24929,6 +24982,8 @@ module.exports = {
     attendanceSchedulerScopeMatchesTarget,
     attendanceSchedulerScopeMatchesActor,
     attendanceSchedulerScopeAllowsActorActionTarget,
+    attendanceSchedulerScopeAllowsActorActionFacts,
+    attendanceScheduleAssignmentDispatchScopeAllowsMembership,
     matchScopeFilters,
     loadAttendanceScopeContextForUser,
     loadAttendanceScopeContextMapForUsers,
@@ -25938,12 +25993,15 @@ module.exports = {
       return clauses.length ? `AND (${clauses.join(' OR ')})` : 'AND FALSE'
     }
 
-    async function resolveAttendanceScheduleAssignmentScopeTarget(orgId, payload) {
+    async function resolveAttendanceScheduleAssignmentDispatchMemberships(orgId, payload) {
       const userId = payload?.userId ?? payload?.user_id
       const startDate = normalizeDateOnly(payload?.startDate ?? payload?.start_date) ?? payload?.startDate ?? payload?.start_date
       const endDate = normalizeAttendanceScheduleAssignmentEndDate(payload?.endDate ?? payload?.end_date)
+      // Same overlap window as buildAttendanceAssignmentViewSql, not export's
+      // full-range coverage predicate. One row must satisfy every constrained
+      // view dimension; see attendanceScheduleAssignmentDispatchScopeAllowsMembership.
       const rows = await db.query(
-        `SELECT DISTINCT m.schedule_group_id
+        `SELECT DISTINCT m.schedule_group_id, g.attendance_group_id, g.department_ref
          FROM attendance_schedule_group_members m
          JOIN attendance_schedule_groups g
            ON g.id = m.schedule_group_id
@@ -25957,10 +26015,7 @@ module.exports = {
          ORDER BY m.schedule_group_id ASC`,
         [orgId, userId, startDate, endDate]
       )
-      return {
-        scheduleGroupIds: rows.map(row => row.schedule_group_id).filter(Boolean),
-        userIds: [userId],
-      }
+      return { userId, memberships: rows }
     }
 
     async function assertAttendanceScheduleAssignmentDispatchAllowed(req, res, { orgId, payload, actorAccess } = {}) {
@@ -25968,16 +26023,32 @@ module.exports = {
       if (!access) return null
       if (access.fullAdmin) return access
 
-      const target = await resolveAttendanceScheduleAssignmentScopeTarget(orgId, payload)
-      if (target.scheduleGroupIds.length === 0) {
+      const { userId, memberships } = await resolveAttendanceScheduleAssignmentDispatchMemberships(orgId, payload)
+      if (memberships.length === 0) {
         respondAttendanceSchedulerScopeForbidden(res)
         return null
       }
-      return assertAttendanceSchedulerScopeAllowed(req, res, {
-        action: 'dispatch',
-        target,
-        actorAccess: access,
-      })
+
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, access.orgId, access.userId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(access.orgId, actorContext)
+        const allowed = scopes.some(scope => memberships.some(membership =>
+          attendanceScheduleAssignmentDispatchScopeAllowsMembership(scope, actorContext, userId, membership)
+        ))
+        if (!allowed) {
+          respondAttendanceSchedulerScopeForbidden(res)
+          return null
+        }
+        return access
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
+          return null
+        }
+        logger.error('Attendance scheduler scope guard failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Scheduler scope check failed' } })
+        return null
+      }
     }
 
     async function canEditAttendanceScheduleGroup(access, groupRow) {
@@ -26127,27 +26198,11 @@ module.exports = {
     }
 
     function buildAttendanceSchedulerScopeFactTarget(scopeRow, facts) {
-      const scope = normalizeAttendanceSchedulerScopeBody(scopeRow?.scope ?? scopeRow)
-      const target = {}
-      let constrained = false
-      for (const key of ['scheduleGroupIds', 'attendanceGroupIds', 'userIds', 'departments', 'roles', 'roleTags']) {
-        const scopeValues = normalizeStringArray(scope[key])
-        if (scopeValues.length === 0) continue
-        constrained = true
-        const factValues = new Set(normalizeStringArray(facts?.[key]))
-        const matches = scopeValues.filter(value => factValues.has(value))
-        if (matches.length === 0) return null
-        target[key] = matches
-      }
-      return constrained ? target : null
+      return buildAttendanceSchedulerScopeTargetFromFacts(scopeRow, facts)
     }
 
     function attendanceSchedulerScopeAllowsActorActionFacts(scopeRow, actorContext, action, facts) {
-      if (!scopeRow || scopeRow.isActive === false || scopeRow.is_active === false) return false
-      if (!attendanceSchedulerScopeMatchesActor(scopeRow, actorContext)) return false
-      if (!normalizeStringArray(scopeRow.actions).includes(action)) return false
-      const target = buildAttendanceSchedulerScopeFactTarget(scopeRow, facts)
-      return target ? attendanceSchedulerScopeMatchesTarget(scopeRow, target) : false
+      return attendanceSchedulerScopeAllowsActorActionFactsImpl(scopeRow, actorContext, action, facts)
     }
 
     async function resolveAttendanceUserSchedulerScopeFacts(client, orgId, userIdValue, { workDate, from, to } = {}) {
