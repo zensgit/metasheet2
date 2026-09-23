@@ -19462,6 +19462,76 @@ async function reverseLeaveBalanceDeduction(trx, { orgId, userId, requestId }) {
   return { reversed, lots: lotsTouched, unrecoverableExpired, alreadyReversed: false }
 }
 
+// #5982: authoritative cancellation already projects the live row inside P14.
+// legacy_projection_only and shadow do not. Anything else (including a missing
+// posture) is treated like shadow: the employee-visible row is still legacy.
+function shouldRecalculateLiveRecordAfterApprovedLeaveCancel(acceptedWritePosture) {
+  return acceptedWritePosture !== 'authoritative'
+}
+
+function liveAttendanceRecordIsLegacyProjection(row) {
+  if (!row) return false
+  const owner = row.projection_owner == null || String(row.projection_owner).trim() === ''
+    ? 'legacy_untracked'
+    : String(row.projection_owner)
+  if (owner !== 'legacy_untracked') return false
+  if (row.current_calculation_id != null && String(row.current_calculation_id).trim() !== '') return false
+  return true
+}
+
+/**
+ * Rewrite the live attendance row after an approved leave has been marked
+ * cancelled. Mirrors the approve-path upsert (loadApprovedMinutes +
+ * upsertAttendanceRecord) but does not pass statusOverride, so computeMetrics
+ * follows remaining approved minutes and punches. No-ops when there is no
+ * legacy active row to correct — inserting an absent day, or writing a
+ * retired / W4-owned parent, would either inflate absence or trip the
+ * pointer guard and roll back the balance reverse.
+ */
+async function recalculateLiveAttendanceRecordAfterApprovedLeaveCancel(trx, { orgId, userId, workDate }) {
+  const normalizedWorkDate = normalizeDateOnly(workDate)
+  if (!normalizedWorkDate || !/^\d{4}-\d{2}-\d{2}$/.test(normalizedWorkDate)) {
+    return { rewritten: false, reason: 'work_date_invalid' }
+  }
+  const existingRow = await loadAttendanceRecordForUpdate(trx, {
+    userId,
+    orgId,
+    workDate: normalizedWorkDate,
+  })
+  if (!existingRow) return { rewritten: false, reason: 'missing' }
+  if (String(existingRow.visibility_state ?? '') === 'retired') {
+    return { rewritten: false, reason: 'retired' }
+  }
+  if (!liveAttendanceRecordIsLegacyProjection(existingRow)) {
+    return { rewritten: false, reason: 'w4_owned' }
+  }
+  const baseRule = await loadDefaultRule(trx, orgId)
+  const context = await resolveWorkContext({
+    db: trx,
+    orgId,
+    userId,
+    workDate: normalizedWorkDate,
+    defaultRule: baseRule,
+  })
+  const approvedMinutes = await loadApprovedMinutes(trx, orgId, userId, normalizedWorkDate)
+  const record = await upsertAttendanceRecord({
+    userId,
+    orgId,
+    workDate: normalizedWorkDate,
+    timezone: context.rule.timezone,
+    rule: context.rule,
+    updateFirstInAt: null,
+    updateLastOutAt: null,
+    mode: 'merge',
+    isWorkday: context.isWorkingDay,
+    leaveMinutes: approvedMinutes.leaveMinutes,
+    overtimeMinutes: approvedMinutes.overtimeMinutes,
+    existingRow,
+    client: trx,
+  })
+  return { rewritten: true, reason: 'recalculated', record }
+}
+
 // 年假/法定假 L3 (owner design-lock 2026-06-15): convert an annual leave request's duration into STANDARD-DAY
 // deduction minutes. The request model is a single workDate + metadata.minutes (defaulted from the leave type's
 // defaultMinutesPerDay); v1 is single-day only (multi-day/cross-day annual = future). requestedUnits =
@@ -24618,6 +24688,8 @@ module.exports = {
   __attendanceW4CurrentPolicyTimezoneForTests: requireStrictCurrentPolicyTimezone,
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
+    shouldRecalculateLiveRecordAfterApprovedLeaveCancel,
+    recalculateLiveAttendanceRecordAfterApprovedLeaveCancel,
   },
   __attendanceImportForTests: {
     buildUnresolvedRowUserWarning,
@@ -35283,6 +35355,16 @@ module.exports = {
             orgId: requestOrgId,
             userId: requestRow.user_id,
             requestId: route.requestId,
+          })
+        }
+        // #5982: request status is already 'cancelled', so loadApprovedMinutes
+        // inside the helper excludes this leave. Authoritative live projection
+        // stays on P14 (called above) and must not be overwritten here.
+        if (approvedLeave && shouldRecalculateLiveRecordAfterApprovedLeaveCancel(operation.acceptedWritePosture)) {
+          await recalculateLiveAttendanceRecordAfterApprovedLeaveCancel(trx, {
+            orgId: requestOrgId,
+            userId: requestRow.user_id,
+            workDate: requestRow.work_date,
           })
         }
         let response = {
