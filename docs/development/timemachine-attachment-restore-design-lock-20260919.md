@@ -1,6 +1,26 @@
 # Archive Attachment Restore
 
-Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
+Status: OWNER-CONFIRMED bounded capability; synthetic acceptance VERIFIED; Draft/HOLD, not merged or enabled.
+
+## Bounded Delivery Gate (2026-09-23)
+
+PR #5882 at `9f5c0c6805174a24a97ae0095d8082fffbb4fb87` is OPEN/Draft,
+based on unchanged main `cd42eaf7455f03dd99021a02c47c42f1f3db6484`.
+Its exact-head checks are terminal: 34 SUCCESS, 1 expected Strict E2E SKIPPED,
+0 failure and 0 pending. The worktree is clean and synchronized with the remote
+branch. This documentation successor changes no runtime or test code from the
+locally accepted `3d01f8209897d07eebe0880c846be9d061fbb9db` product
+checkpoint; the subsequent commits through `9f5c0c6805` change only reports.
+
+The bounded contract is ready for a separate owner Ready/merge decision: existing
+permissions and detached-ID lifecycle are confirmed below; synthetic owned-DB
+and authenticated desktop/mobile Workbench acceptance covers retained-table,
+row, column, scalar and synchronous attachment restoration. It does not certify
+production enablement, customer storage, hostile NAS durability, async attachment
+restoration, hard-deleted whole-table resurrection or real-tenant UAT. The earlier
+browser `API_REQUEST_FAILED` is still unattributed, not fixed by later passes.
+Historical OPEN gate rows later in this file are checkpoint-scoped; the paired
+verification report's current gate disposition governs this candidate.
 
 ## Owner Permission and Lifecycle Disposition (2026-09-23)
 

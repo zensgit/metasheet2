@@ -1,7 +1,6 @@
 # Attachment Restore Verification
 
-Status: IMPLEMENTATION IN PROGRESS; explicitly composed synchronous attachment
-restore passes isolated HTTP and synthetic full-application browser acceptance.
+Status: BOUNDED SYNTHETIC ACCEPTANCE VERIFIED; PR #5882 remains Draft/HOLD.
 No production enablement or real-tenant UAT.
 
 Base: `868c8d2b26424fcaa8405661a6999abb17ec6d93` (#5849 merge).
@@ -11,6 +10,21 @@ Source/authorization checkpoint: `19d8e6e49996ff6a1083697dcaa22b118f463a2e`.
 File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
+
+## Current Delivery Gate (2026-09-23)
+
+| Gate | Exact evidence and disposition |
+| --- | --- |
+| Main and PR | Main/base `cd42eaf7455f03dd99021a02c47c42f1f3db6484`; PR #5882 exact head `9f5c0c6805174a24a97ae0095d8082fffbb4fb87`, OPEN/Draft, clean merge state, no auto-merge; local worktree clean and synchronized. |
+| Remote exact-head CI | 35 terminal checks: 34 SUCCESS, 1 expected Strict E2E SKIPPED, 0 pending/failure. Node18, Node20, Web Tests, migration replay and coverage succeeded at this head. |
+| Owned DB and browser | Product checkpoint `3d01f8209897d07eebe0880c846be9d061fbb9db`: real LoginView/session/router Workbench 8/8, full 1440/390 browser archive loops, authenticated original binary and decoded PNG, fresh/replay 32 migration gates, historical 47/59/127 neighbors, zero owned DB/backend residue. Later commits through `9f5c0c6805` change only reports. |
+| Permission and lifecycle | Owner-confirmed existing administrator/sheet/row/field authority. Removing an attachment from a cell does not itself revoke its old ID; explicit deletion makes it unavailable. No new tenant or detach-revocation contract is claimed. |
+| Review and residual risk | Bounded Sol source review found no P1/P2 in the inspected restore chain, not a whole-PR approval. A prior browser `API_REQUEST_FAILED` remains unattributed despite later full passes; no root-cause fix is claimed. |
+| Release boundary | Ready/merge requires separate owner authorization. Flags, dispatch, staging, deployment, production, customer storage/data and real-tenant UAT remain NOT RUN. Async attachment restore, hostile-NAS guarantees and hard-deleted whole-table resurrection are outside this slice. |
+
+The older gate and OPEN sections below record their original checkpoint state;
+this table supersedes them only for the bounded evidence named here. It does not
+turn excluded capabilities into passing acceptance.
 
 ## Owner Disposition and Evidence Boundary (2026-09-23)
 
