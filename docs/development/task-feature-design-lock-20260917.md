@@ -38,7 +38,7 @@
 flowchart LR
   U["任务中心 / 详情"] --> API["tasks 路由"]
   API --> SOR["tasks* 专用表"]
-  API --> PRED["resolveTaskRoles / buildTaskScopeCondition"]
+  API --> PRED["task-access.ts"]
   SOR --> PEND["listPendingForUser"]
   PEND --> TODO["待办中心 未来消费"]
   SOR --> PROJ["P2 单向投影"]
@@ -70,7 +70,7 @@ flowchart LR
 
 | 模块 | 裁决 | 期次 |
 |---|---|---|
-| 任务实体 / org / 四视角 / 完成重启 / pending | ✅ 做 | P0-A / M2 |
+| 任务实体 / org / `V` 五值视角 / 完成重启 / pending | ✅ 做 | P0-A / M2 |
 | 前端 `/tasks` `/tasks/:id` / 红点轮询 / 422 引导 | ✅ 做 | P0-A / M2 |
 | 子任务树 / 评论 / 删除退出 | ✅ 做 | P0-B / M3 |
 | 清单 / 分组 / 提醒 outbox / 事件通知 / socket | ✅ 做 | P1 / M4 |
@@ -110,7 +110,7 @@ P1：`task_lists` / `task_list_members` / `task_list_items` / `task_groups` / `t
 
 P2：`task_dependencies` / `task_attachments` + `task_attachment_purge_intents` + row-delete 触发器 / `task_fields` / `task_list_field_bindings` / `task_field_values` / `task_record_projection` PK `(list_id, task_id)` 无 FK。
 
-索引最小集（**已定，来源 计划 v5 §2.2**；建表迁移内一次建全）：`idx_tska_user (task_assignees.user_id)`、`idx_tskf_user (task_followers.user_id)`、`idx_tsk_org_status (tasks.org_id, status) WHERE deleted_at IS NULL`、`idx_tsk_creator (tasks.created_by) WHERE deleted_at IS NULL`、`idx_tsk_parent (tasks.parent_id) WHERE parent_id IS NOT NULL`、`idx_tsk_due (tasks.due_at) WHERE due_time IS NOT NULL AND status='open' AND deleted_at IS NULL`、`idx_tsk_due_date (tasks.due_date) WHERE due_time IS NULL AND status='open' AND deleted_at IS NULL`、`idx_tski_task (task_list_items.task_id)`、`idx_tske_task_time (task_events.task_id, occurred_at DESC)`、`idx_tcmt_task_time (task_comments.task_id, created_at)`；outbox 三条同形。不按 `archived_at` 过滤 pending/四视角。
+索引最小集（**已定，来源 计划 v5 §2.2**；建表迁移内一次建全）：`idx_tska_user (task_assignees.user_id)`、`idx_tskf_user (task_followers.user_id)`、`idx_tsk_org_status (tasks.org_id, status) WHERE deleted_at IS NULL`、`idx_tsk_creator (tasks.created_by) WHERE deleted_at IS NULL`、`idx_tsk_parent (tasks.parent_id) WHERE parent_id IS NOT NULL`、`idx_tsk_due (tasks.due_at) WHERE due_time IS NOT NULL AND status='open' AND deleted_at IS NULL`、`idx_tsk_due_date (tasks.due_date) WHERE due_time IS NULL AND status='open' AND deleted_at IS NULL`、`idx_tski_task (task_list_items.task_id)`、`idx_tske_task_time (task_events.task_id, occurred_at DESC)`、`idx_tcmt_task_time (task_comments.task_id, created_at)`；outbox 三条同形。不按 `archived_at` 过滤 pending/`V`。
 
 ### 4.3 org 归属（**已定 1a，来源 计划 v5 §2.4**；其余见 §13-1）
 
@@ -118,7 +118,7 @@ P2：`task_dependencies` / `task_attachments` + `task_attachment_purge_intents` 
 - 写路径：claim 缺失一律 **422**，不 fallback、不写 `'default'`。产生点在 **handler 内**，位于 `authenticate` + `rbacGuard('tasks', …)` **之后**（缺 org 的已认证且已过 RBAC 的请求才 422）。`deriveApprovalInstanceOrgId` 不得作兜底（门 1 覆盖）。
 - 读路径：视角闭集 `V = {assigned, following, created, delegated, any_role}`。`tasks.org_id = :orgId` **只由** `buildTaskScopeCondition` **单点发射**；`buildTaskPendingCondition` / `listPendingForUser` / `V` 五值路由不得自行写 org 子句。`orgId` 空 ⇒ 空列表 + `degraded: true, reason: 'org_missing'`；谓词抛错 ⇒ `reason: 'predicate_error'`。只有 `org_missing` 触发 session-org 引导。挂载先 `GET /api/tasks/context`。
 - `task_comments` / `task_events` 不设 org 列。
-- 残留披露（任务域不加固，见 §13-1d）。**`RBAC_OPTIONAL` 谓词（定义唯一；复制处必须逐字 `process.env.RBAC_OPTIONAL === '1'`）**：`RBAC_OPTIONAL_ON := (process.env.RBAC_OPTIONAL === '1')`。机核：下列三处身份必须各恰一行含逐字 `process.env.RBAC_OPTIONAL === '1'`——(1) 本定义句（§4.3）、(2) setup 守卫描述（§5.2.1 ②）、(3) §13-1d。`grep -n "process.env.RBAC_OPTIONAL === '1'" docs/development/task-feature-design-lock-20260917.md` 输出恰好这三行。负控：删 (2) 或 (3) 该字面 ⇒ 行数 ≠ 3。计划「未设置」改为本谓词，偏离见 §9。三读点字面即此：`namespace-admission.ts:9`、`service.ts:17`（真用点 `:25` / `:63` / `:101` `allowDegradation`，不是日志行 `:105`）、`permissions.ts:21`。`namespace-admission.ts:346` 是降级后果行，不是旗读点。专属 config `env.RBAC_OPTIONAL: ''`、setup 守卫、门 2/13/16 行尾均用同一谓词（为真则抛 / 本门红）。`RBAC_TOKEN_TRUST` **三处读点、两条轴**：`rbac.ts:12`（**装载期**常量，无 `NODE_ENV` 约束）；`AuthService.ts:171-175`（**调用期**读，且合取 `NODE_ENV !== 'production'`）；`security/auth-runtime-config.ts:84`（生产告警，不授权）。承重通道见 §5.2.1 ② / 门 16。trust-off 支：`req.user.permissions` 来自 `AuthService.resolveRbacProfile`（`:748` `listUserPermissions`：`user_permissions` ∪ `role_permissions` ∪ `users.permissions` jsonb，再按 admission 过滤）；`rbac.ts:78` 先于 `:94` / `:101`。
+- 残留披露（任务域不加固，见 §13-1d）。**`RBAC_OPTIONAL` 谓词（定义唯一；复制处必须逐字 `process.env.RBAC_OPTIONAL === '1'`）**：`RBAC_OPTIONAL_ON := (process.env.RBAC_OPTIONAL === '1')`。机核：下列三处身份必须各恰一行含逐字 `process.env.RBAC_OPTIONAL === '1'`——(1) 本定义句（§4.3）、(2) setup 守卫描述（§5.2.1 ②）、(3) §13-1d。`grep -n "process.env.RBAC_OPTIONAL === '1'" docs/development/task-feature-design-lock-20260917.md` 输出恰好这三行。负控：删 (2) 或 (3) 该字面 ⇒ 行数 ≠ 3。计划「未设置」改为本谓词，偏离见 §9。三读点字面即此：`namespace-admission.ts:9`、`service.ts:17`（真用点 `:25` / `:63` / `:101` `allowDegradation`，不是日志行 `:105`）、`src/routes/permissions.ts:21`。`namespace-admission.ts:346` 是降级后果行，不是旗读点。专属 config `env.RBAC_OPTIONAL: ''`、setup 守卫、门 2/13/16 行尾均用同一谓词（为真则抛 / 本门红）。`RBAC_TOKEN_TRUST` **三处读点、两条轴**：`rbac.ts:12`（**装载期**常量，无 `NODE_ENV` 约束）；`AuthService.ts:171-175`（**调用期**读，且合取 `NODE_ENV !== 'production'`）；`security/auth-runtime-config.ts:84`（生产告警，不授权）。承重通道见 §5.2.1 ② / 门 16。trust-off 支：`req.user.permissions` 来自 `AuthService.resolveRbacProfile`（`:748` `listUserPermissions`：`user_permissions` ∪ `role_permissions` ∪ `users.permissions` jsonb，再按 admission 过滤）；`rbac.ts:78` 先于 `:94` / `:101`。
 
 ### 4.4 日期与时区（**已定，来源 计划 v5 §2.6**）
 
@@ -238,8 +238,8 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 ### 6.1 谓词一份真相、两种形态、一条从属链（**已定骨架，来源 计划 v5 §3**）
 
-- `task-access.ts`：`resolveTaskRoles`（行级，能力取并集，读 `TASK_ROLE_ABILITY`，**不进列表读路径**）+ `buildTaskScopeCondition`（只产 SQL，**列表读路径**）+ `taskMatchesView(row, me, view)`（TS 侧视角谓词，**正控期望行集**用它，不把「可见性」当判据）。
-- **`TASK_ROLE_ABILITY`** 只服务 `can()` / `resolveTaskRoles`，**不进** `GET /api/tasks` / `/pending` / `/pending-count` 读路径。门 19 探针**不以该表为 mutation 目标**。
+- 落点：`packages/core-backend/src/tasks/task-access.ts`（M2 落文件）。导出角色闭集 `R = {creator, assignee, follower, list-editor, list-reader, none}`；能力闭集 `A = {view, edit, complete, reopen, comment, attach, delete, leave}`；真相表 `TASK_ROLE_ABILITY`（`|R|×|A|` 布尔矩阵，叠加取并集）；`resolveTaskRoles`；`can(roles, ability)`（读该表）；`buildTaskScopeCondition`（只产 SQL）；`taskMatchesView(row, me, view)`（TS 侧视角谓词）。
+- **`TASK_ROLE_ABILITY` / `can()`** 只服务单对象写路由（complete / reopen / edit / …），**不进** `GET /api/tasks` / `/pending` / `/pending-count` 列表读路径。`buildTaskScopeCondition` **不读**该表的列。列表正控用 `taskMatchesView`，不把「可见性」当判据。计划 v5 §3 `:116` 探针①（置反真相表格 ⇒ 列表三端红）**删除**，偏离见 §9。
 - **TS 侧视角谓词** `taskMatchesView`（`delegated` 的 TS 对应物在此定义）。ambient `A = { meInAssignees, meInFollowers, createdByMe, othersAssigned }`。行是否应收：
 
 | view | 应收 iff |
@@ -250,17 +250,23 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 | `delegated` | `createdByMe ∧ othersAssigned` |
 | `any_role` | 上四者 OR |
 
-`s` 与 ambient 一致：`creator ∈ s ⇔ createdByMe`，`assignee ∈ s ⇔ meInAssignees`，`follower ∈ s ⇔ meInFollowers`；`none` ⇒ 三旗全假。`othersAssigned` 每格钉死（`delegated` / `any_role` 依赖它）。期望行集 = 夹具里 `taskMatchesView=true` 的行，**不是** `resolveTaskRoles` 的能力并集。
-- **SQL 读路径**：`buildTaskScopeCondition` 按 view 发射与上表逐行同构的臂（`assigned` → `EXISTS task_assignees`；`following` → `task_followers`；`created` → `created_by=:me`；`delegated` → `created_by=:me AND EXISTS (assignee ≠ me)`；`any_role` → OR）。`buildTaskPendingCondition` 只派生 `view:'assigned'`。
+**ambient 钉法**（本句唯一；门 19 引用，不另写）：三旗由 s 决定（`creator ∈ s ⇔ createdByMe`，`assignee ∈ s ⇔ meInAssignees`，`follower ∈ s ⇔ meInFollowers`；`none` ⇒ 三旗全假）。`othersAssigned` 默认：若 `v ∈ {delegated, any_role}` 且 `creator ∈ s` 则为 true，否则 false。另：每个 `creator ∈ s` 的 `delegated` 再开一格 `othersAssigned=false`（用例名 `gate19|<s>|delegated|noa`），期望 ∅——翻转 delegated SQL 第二合取 `EXISTS (assignee ≠ me)`。期望行集 = 夹具里 `taskMatchesView=true` 的行，**不是** `resolveTaskRoles` 的能力并集。
+- **SQL 读路径**：`buildTaskScopeCondition` 按 view 发射与上表逐行同构的臂（`assigned` → `EXISTS task_assignees`；`following` → `task_followers`；`created` → `created_by=:me`；`delegated` → `created_by=:me AND EXISTS (assignee ≠ me)`；`any_role` → OR）。`buildTaskPendingCondition` 只派生 `view:'assigned'`。每个 SQL 合取至少一格翻转：`assigned` 比 `meInAssignees`；`following` 比 `meInFollowers`；`created` 比 `createdByMe`；`delegated` 比 `createdByMe`（`assignee|delegated` = ∅ vs `creator|delegated` = {T}）**且**比 `othersAssigned`（`creator|delegated` = {T} vs `creator|delegated|noa` = ∅）；`any_role` 比 OR（`none` = ∅ vs 单角色 = {T}）。
 - **门 19 网格按里程碑分层**：
-  - **M2 子集**：`S_M2 = {{creator},{assignee},{follower},{none},{creator,assignee},{creator,follower},{assignee,follower},{creator,assignee,follower}}`；`V` 同上五值。`I_M2 = S_M2 × V`（40）。身份序列化 `s` = 角色名升序 `+` 连接（`assignee+creator`），`v` = view 名。**表列映射**：用例名 `gate19|<s>|<v>` 三列 = 前缀 `gate19` / `s` / `v`。抽取（武装后；`LC_ALL=C sort`）：
+  - **M2 子集**：`S_M2 = {{creator},{assignee},{follower},{none},{creator,assignee},{creator,follower},{assignee,follower},{creator,assignee,follower}}`；`V` 同上五值。`I_CORE = S_M2 × V`（40）∪ `I_FLIP`（4 个 `delegated|noa`）= `I_M2`（44）。身份序列化 `s` = 角色名升序 `+` 连接（`assignee+creator`），`v` = view 名。**表列映射**：用例名 `gate19|<s>|<v>` 或 `gate19|<s>|<v>|noa`。抽取（武装后；仓根同一 cwd；`LC_ALL=C sort`）。收集侧从 **vitest verbose 执行产物**抽（与门 17 `.each` 展开规则兼容：展开后静态计数 = 无 table 的 `it(` / `test(` 数 + 每个 `it.each` / `test.each` 的表行数，不含表头；verbose 里 `gate19|` 行数必须等于该计数）。多文件用 `grep -h`（或去掉 `file > ` 前缀）。锁侧同一 cwd 抽 `i-m2` 块：
 
 ```bash
-grep -oE 'gate19\|[^|]+\|[^|"'\'' ]+' tests/integration/task-*.db.test.ts | LC_ALL=C sort
+grep -h -oE 'gate19\|[^[:space:]]+' /tmp/gate19-verbose.txt | LC_ALL=C sort -u
 sed -n '/^```i-m2$/,/^```$/p' docs/development/task-feature-design-lock-20260917.md | grep '^gate19|' | LC_ALL=C sort
 ```
 
-两路输出 `diff` 必须空。漏格：删一个用例名 ⇒ diff 非空 ⇒ 红。锁内清单（40 行，`LC_ALL=C` 序）：
+两路 `diff` 必须空。漏格负控在**执行产物**上证红：从 `/tmp/gate19-verbose.txt` 删一行 `gate19|…` ⇒ diff 非空 ⇒ 红（不在源文件上 grep 删）。yml/测试未建时 stdin 正控（多文件前缀归一）：
+
+```bash
+printf '%s\n' '✓ tests/integration/task-a.db.test.ts > gate19|assignee|assigned' '✓ tests/integration/task-b.db.test.ts > gate19|creator|delegated|noa' | grep -h -oE 'gate19\|[^[:space:]]+' | LC_ALL=C sort -u
+```
+
+期望两行、无路径前缀。负控：从该 stdin 删第二行 ⇒ 只剩一行 ⇒ 与 44 行清单 diff 非空。锁内清单（44 行，`LC_ALL=C` 序）：
 
 ```i-m2
 gate19|assignee|any_role
@@ -272,11 +278,13 @@ gate19|assignee+creator|any_role
 gate19|assignee+creator|assigned
 gate19|assignee+creator|created
 gate19|assignee+creator|delegated
+gate19|assignee+creator|delegated|noa
 gate19|assignee+creator|following
 gate19|assignee+creator+follower|any_role
 gate19|assignee+creator+follower|assigned
 gate19|assignee+creator+follower|created
 gate19|assignee+creator+follower|delegated
+gate19|assignee+creator+follower|delegated|noa
 gate19|assignee+creator+follower|following
 gate19|assignee+follower|any_role
 gate19|assignee+follower|assigned
@@ -287,11 +295,13 @@ gate19|creator|any_role
 gate19|creator|assigned
 gate19|creator|created
 gate19|creator|delegated
+gate19|creator|delegated|noa
 gate19|creator|following
 gate19|creator+follower|any_role
 gate19|creator+follower|assigned
 gate19|creator+follower|created
 gate19|creator+follower|delegated
+gate19|creator+follower|delegated|noa
 gate19|creator+follower|following
 gate19|follower|any_role
 gate19|follower|assigned
@@ -305,7 +315,7 @@ gate19|none|delegated
 gate19|none|following
 ```
 
-夹具每格一行任务 T。ambient 三旗由 s 决定。`othersAssigned`：若 `v ∈ {delegated, any_role}` 且 `creator ∈ s` 则 **true**（否则 delegated 恒空），其余格 **false**。期望行集 ∈ `{{T}, ∅}`：
+夹具每格一行任务 T。ambient 见上「ambient 钉法」唯一句。下表**独立钉死**（不是运行期从 `taskMatchesView` 生成；实现后用谓词回放必须与本表逐格相等，不等则红）。期望行集 ∈ `{{T}, ∅}`（默认 ambient；`delegated` 列在 `creator ∈ s` 时为 `othersAssigned=true`）：
 
 | s \ v | assigned | following | created | delegated | any_role |
 |---|---|---|---|---|---|
@@ -317,6 +327,17 @@ gate19|none|following
 | `assignee+creator` | {T} | ∅ | {T} | {T} | {T} |
 | `creator+follower` | ∅ | {T} | {T} | {T} | {T} |
 | `assignee+creator+follower` | {T} | {T} | {T} | {T} | {T} |
+
+`I_FLIP`（`createdByMe ∧ ¬othersAssigned`，delegated，期望 ∅）：
+
+| s | v | othersAssigned | 期望 |
+|---|---|---|---|
+| `creator` | `delegated` | false | ∅ |
+| `assignee+creator` | `delegated` | false | ∅ |
+| `creator+follower` | `delegated` | false | ∅ |
+| `assignee+creator+follower` | `delegated` | false | ∅ |
+
+**人口隔离**（`I_M2` 44 格）：每格独立用户（`user_id` 含用例名）**或**格间清库（`TRUNCATE tasks, task_assignees, task_followers` CASCADE，在下一格播种前）。禁止两格共享任务行。
   - **清单角色格**绑首个清单 PR，§12 尾 **NOT RUN**。
 - `buildTaskPendingCondition` **必须由** `buildTaskScopeCondition({view:'assigned'})` 派生，不得自行发射角色臂。
 - **错误契约两族（已定，来源 计划 v5 §3 / §7-8）**：允许列表谓词抛错 ⇒ 空列表 + `degraded`；投影 deny 集合查询失败 ⇒ **抛出**，绝不返回空 deny 集。
@@ -341,7 +362,7 @@ gate19|none|following
 结构变更按 org 串行化，**取锁后重读**。任务域三把键的取锁写法**唯一**如下，与 §1「`src/tasks/` 无 I/O」共存：
 
 - **键生成**（纯函数、无 I/O）：`packages/core-backend/src/tasks/task-lock-keys.ts` — `taskStructureLockKey(orgId)` / `taskProjectionLockKey(listId, taskId)` / `tasksSchedulerLeaderLockKey()`，分别生成 `task-structure:<orgId>` / `task-projection:<listId>:<taskId>` / `tasks-scheduler:leader`。
-- **取锁**（有 I/O）：`packages/core-backend/src/db/task-advisory-locks.ts` 导出 `acquireTaskStructureLock` / `acquireTaskProjectionLock` / `acquireTasksSchedulerLeaderLock`。三者签名均 `(query, …ids)`，体内 `query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])`，`key` 只来自上一模块。
+- **取锁**（有 I/O）：`packages/core-backend/src/db/task-advisory-locks.ts` 导出 `acquireTaskStructureLock` / `acquireTaskProjectionLock` / `acquireTasksSchedulerLeaderLock`。声明形**仅** `export async function NAME`（不含 `export const NAME =`，与门 7 导出名规则同一）。三者签名均 `(query, …ids)`，体内 `query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])`，`key` 只来自上一模块。
 
 **任务域禁令作用域**：`packages/core-backend/src/{tasks,services,routes,multitable,db}` 下任务域源文件不得手写 `pg_advisory_xact_lock(hashtext(` 字面量（登记的 helper 三行除外）。**测试 harness / 门 6 夹具直发 SQL 不受此禁令**（连接 1 持锁路线，见门 6）。
 
@@ -390,6 +411,7 @@ N/A:本线无媒体轨。
 | `TASKS_*` 与 GH manifest | 章程 `AGENTS.md:68` 落地；计划 v5 无此条。正文在 **§10** 与 **§12 门 18**（不是 §13 三十九题之一）。义务推迟到首个引入 `TASKS_*` 源码读的 PR，届时同 PR 扩 `globalHistoryFlagsInSource()` 并补 manifest。本锁**不**把「无需登记」结为已定豁免。 | **未裁**（有期限推迟，不是豁免；无 owner 亲写豁免 comment） |
 | §13-1c | 跨 org 负责人/关注人 | **未设独立验收门**（仅建议；不由门 1 覆盖） |
 | 门 19 投影端 | 计划 `:116` 三端含投影 | **偏离**：§13-5/§13-11 未裁前投影端不算入 |
+| 门 19 读路径 vs 计划 `:116` | 计划探针① 置反真相表格 ⇒ 列表三端红；真相表进读路径 | **偏离**：计划 `:116` 探针① **删除**；`TASK_ROLE_ABILITY` 退出列表读路径；TS 谓词 `taskMatchesView` 与 SQL 臂双真相靠门 19 对拍；真相表控件改探针②（能力格置反 ⇒ 对应写路由红），验收与门 3 complete/reopen 联立 |
 | `SYSTEM_SHEET_KINDS` | 计划 §7-7 两处加 `'task_projection'` + 集合相等 | **推迟**到首个任务投影 PR（§7） |
 | 其余 §13 | 建议答案见 §13 | 待 M1 逐条 comment 或默认前进 |
 
@@ -413,7 +435,7 @@ N/A:本线无媒体轨。
 |---|---|---|---|
 | M0 | 普查 + 本 PROPOSED 锁 | 计划被认可 | 本 PR-0 Draft；39 题建议答案；两轮闸另走 |
 | M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-11 / §13-12 落槌。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2 |
-| M2 | PR-1 实体+最小前端（含 DDL，Draft，不应用不合并） | M1 | 门表（按 §12 尾计分；NOT RUN / 不进计分的门**不得计为通过**；门 9 未解除 NOT RUN 前 M2 **不得退出**）+ **门 22 必须计分**（不在 §13-10 阻断名单）+ 非 admin 真机**冒烟**（只作可达性记录；前置 = §13-10 落槌 **且** 权限快照带 `tasks:read`；未满足不计入冒烟）+ **独立合并授权 comment** |
+| M2 | PR-1 实体+最小前端（含 DDL，Draft，不应用不合并） | M1 | **已武装子集全绿 + NOT RUN 子集在 §12 尾登记**（不得把未武装子集当通过；门 9 未解除 NOT RUN 前 M2 **不得退出**）+ **门 22 必须计分**（不在 §13-10 阻断名单）+ 非 admin 真机**冒烟**（只作可达性记录；前置 = §13-10 落槌 **且** 权限快照带 `tasks:read`；未满足不计入冒烟）+ **独立合并授权 comment** |
 | M3–M5 | P0-B / P1 / P2 | 上一 PR 合并授权 | 同形 |
 
 ---
@@ -426,7 +448,7 @@ a. `users` 行 `is_active` 且 `activation_status='activated'`（`AuthService.ts
 b. `user_orgs` 一行 `is_active` 且 `org_id` 等于 token `tenantId` claim（`:387-405`）。
 c. token 不带 `sid`，或带 `sid` 且该会话活跃（`:282-288`）。
 d. 未 revoke（`:277`）。
-e. **写路由约束（仅写对照格适用）**：该格必须是写路由（读路由 `orgId` 空时 degraded 200）。读格（门 1 真隔离、门 16 判别格）标 **不适用**。
+e. 写路由约束：该格必须是写路由（读路由 `orgId` 空时 degraded 200）。仅写对照格适用；读格（门 1 真隔离、门 16 判别格）标 **不适用**。
 f. 专属 config/setup `TASKS_ENABLED='true'`（先例 setup.ts:57-61）。关时 404。
 g. 路由已挂载（审批段之后，§10）。
 h. 最小合法请求体（缺字段 4xx 与 403 不同形）。
@@ -438,18 +460,18 @@ i. `must_change_password=false`（`jwt-middleware.ts:83-99`）。
    **跨 org 写格**：a 适用；**b 故意否定**；c、d、f–i 适用；**e 适用**。
    **对照格（有效 org 写 200）**：a–d、f–i 适用；**e 适用**。
    **真隔离读格**（先跑正控）：未 mutation 时读路由 **200** 且行集**只含 org A 且非空**。A/B 两行除 `org_id` 外同形：`status='open'`、夹具用户 `task_assignees` 行且 `completed_at IS NULL`、`due_at`/`due_date` 使默认 pending 谓词（`view=assigned` 派生）为真——即**去掉 org 子句后** `view=any_role` 与 `/pending` **每个读面都会选中 A 和 B**。B 行只能 harness 直发 SQL 播种。然后断言两读面不含 B。负控删 `tasks.org_id = :orgId` 后，对 **any_role 面**与 **/pending 面分别**证红。a–d、f–i 适用；**e 不适用**（读格，与门 16 判别格同一标注）。与 §13-1c 关系：B 行是测试播种的同用户跨 org **任务行**，不是产品写路径上的跨 org 负责人/关注人；§13-1c 仍由 owner 裁。
-2. 非 admin：**②③ 齐全 + ① 已作为 FK 前置存在 ⇒ 200**（正控；夹具 `role_id` **不得**以 `_admin` 结尾）。403 格逐字节断言响应体 `{ error: 'Insufficient permissions' }`（`packages/core-backend/src/rbac/rbac.ts:108`）。负控三格**各用独立用户**（`listUserPermissions` 按 `userId` 缓存，`RBAC_CACHE_TTL_MS` 默认 60000；禁止三格共用一行用户而不 `invalidateUserPerms`）。缺 ②、缺 ③，各 **403**（响应体逐字 `{ error: 'Insufficient permissions' }`）；第三格（码面）：角色 `role_permissions` **只有**同 namespace 另一码（建议 `tasks:write`，不得 `tasks:*`）、**无**所需码、admission 行在 ⇒ **403**，拒绝点 `packages/core-backend/src/rbac/service.ts:44-61`。第三格钉 token **不带** `perms`（本门 `TRUST='true'`）。与门 16 相反：门 16 在 `TRUST='false'` 下**要** token 带 DB 未授予的 `tasks:read`；本门禁止 perms。排除 `*:*`、`user_permissions` 直授、`users.permissions` jsonb。一格 provisioning 前置：无 ① 插 ② 须**直接 SQL INSERT**，断言 SQLSTATE **23503** 且 `constraint === 'role_permissions_permission_code_fkey'`。**直授+admission 仍 403**：任何角色不带 `tasks:*` 任一码 **且** 无 `_admin` 形角色名；机制 = `controlledNamespaces` 不含 `'tasks'`（`:345`）。码名与 seed 待 §13-10 裁；**§13-10 落槌前本门不进验收计分**。required 承载: TBD（§13-12 未裁）。harness：`setup.integration.ts:8` `TRUST='true'`。lane env：`RBAC_OPTIONAL_ON` 为真则本门红。执行点：每个 `task-*.db.test.ts` import `assert-rbac-optional-off.ts`（`=== '1'` 则抛）；**不改** `setup.integration.ts`。
+2. 非 admin：**②③ 齐全 + ① 已作为 FK 前置存在 ⇒ 200**（正控；夹具 `role_id` **不得**以 `_admin` 结尾）。403 格响应体逐字 `{ error: 'Insufficient permissions' }`（`packages/core-backend/src/rbac/rbac.ts:108`）。负控三格**各用独立用户**（`listUserPermissions` 按 `userId` 缓存，`RBAC_CACHE_TTL_MS` 默认 60000；禁止三格共用一行用户而不 `invalidateUserPerms`）。缺 ②、缺 ③，各 **403**（响应体逐字 `{ error: 'Insufficient permissions' }`）；第三格（码面）：角色 `role_permissions` **只有**同 namespace 另一码（建议 `tasks:write`，不得 `tasks:*`）、**无**所需码、admission 行在 ⇒ **403**，拒绝点 `packages/core-backend/src/rbac/service.ts:44-61`。第三格钉 token **不带** `perms`（本门 `TRUST='true'`）。与门 16 相反：门 16 在 `TRUST='false'` 下**要** token 带 DB 未授予的 `tasks:read`；本门禁止 perms。排除 `*:*`、`user_permissions` 直授、`users.permissions` jsonb。一格 provisioning 前置：无 ① 插 ② 须**直接 SQL INSERT**，断言 SQLSTATE **23503** 且 `constraint === 'role_permissions_permission_code_fkey'`。**直授+admission 仍 403**：任何角色不带 `tasks:*` 任一码 **且** 无 `_admin` 形角色名；机制 = `controlledNamespaces` 不含 `'tasks'`（`:345`）。码名与 seed 待 §13-10 裁；**§13-10 落槌前本门不进验收计分**。required 承载: TBD（§13-12 未裁）。harness：`setup.integration.ts:8` `TRUST='true'`。lane env：`RBAC_OPTIONAL_ON` 为真则本门红。执行点：每个 `task-*.db.test.ts` import `assert-rbac-optional-off.ts`（`=== '1'` 则抛）；**不改** `setup.integration.ts`。
 3. 完成判定网格。增删人格与切模式格同受 §13-9 **未裁**阻断（见 §6.2）。**存活六格**（创建后未切模式、**不调用增删人 API**）。通道（harness 播种若用，必须在任何 complete/reopen **之前**）：
    - `all×0`：`POST /api/tasks` 显式 `assignees: []`。创建后断言 `COUNT(task_assignees)=0`。期望：公式不判 done；仅创建人可 complete/reopen；创建人 complete ⇒ handler 写 `status='done'`。
    - `any×0`：同通道。创建后 `COUNT=0`。any 谓词无行可完成 ⇒ 不判 done；创建人 complete ⇒ done。
    - `all×1`：`POST` 省略 `assignees`。创建后 `COUNT=1` 且该行 `user_id=creator`。该行 `completed_at` 非空 ⇔ done。
    - `any×1`：同 `all×1` 通道与计数。
-   - `all×n`（n≥2）：`POST` 显式 `assignees: [u1, …, un]`（或 harness SQL 在 complete **之前**播种）。创建后 `COUNT=n`。部分完成夹具与门 4 反格共用。
+   - `all×n`（n≥2）：`POST` 显式 `assignees: [u1, …, un]`（或 harness SQL 在 complete **之前**播种）。**播种完成后、complete 前**断言 `COUNT(task_assignees)=n`。部分完成夹具与门 4 反格共用。
    - `any×n`：同 `all×n` 通道与计数。任一行非空 ⇒ done。
 4. 可见 ≠ pending。**反格构造**（与门 3 `all×n` 部分完成**同一夹具**）：`all` 模式、我已完成、至少另一负责人未完成 ⇒ `GET /api/tasks?view=assigned` **含**该任务，`GET /api/tasks/pending` 与 `/pending-count` **不含**，红点不计。正格：我未完成 ⇒ pending 含。
 5. PendingItem：**必须有夹具**，空列表不能单独过门。无截止日：响应恰五键 `source/id/title/href/updatedAt`，无 `dueAt`。有定时：恰六键，`dueAt` = `due_at` 的 ISO-8601 timestamptz。有全天：恰六键，`dueAt` = `due_date` 在 `tasks.time_zone` 下 23:59:59.999 的瞬时 ISO（§4.4）。**跨时区格（服务端字节）**：同一全天任务，请求头 `x-viewer-time-zone` 分别为 `Pacific/Kiritimati`（UTC+14）与 `Pacific/Pago_Pago`（UTC−11）时，响应 `dueAt` **逐字节相同**（不随查看者时区换算）。**禁止**写「显示日期」。mutant：实现把全天 `dueAt` 改按查看者时区换算 ⇒ 本格红。`href` = `/tasks/${taskId}`（绝对路径，无 origin、无 query；**待办中心锁 ratify 后以该锁为准**）。两夹具响应体都不含正文字段。
 6. 树 depth 0..4、无环。交叉移动：两独立连接各开事务。**连接 1 持锁路线 = 测试 harness 直发** `SELECT pg_advisory_xact_lock(hashtext($1))`（参数 = `taskStructureLockKey(orgId)`），**不**经 `acquireTaskStructureLock`。联立结论：§6.4 禁令只约束任务域生产源码；harness / 本门夹具 SQL 不受禁令，故 mutation helper 取锁行**不破坏**连接 1 持锁。连接 1 不提交。`pg_locks` 键匹配见 §6.4（`classid`/`objid` + 负 hashtext 时 `classid=4294967295`）。**正控**（连接 2 阻塞）：`wait_event_type='Lock'` **且** `wait_event='advisory'`，且 `pg_locks` 对该键有 `granted=false` 行；未阻塞时该判别式**零行**。`pg_blocking_pids(pid1)` 空只记 sanity。**负控**：`cp` 备份 `task-advisory-locks.ts`，注释 `acquireTaskStructureLock` 体内取锁行，`cmp` 证 mutation 已落地（不得 `git checkout --` 还原未提交实现）。被计时对象 = **生产操作**（经 helper 的结构变更调用）在有界 deadline 内**返回**——不计被删的那一行 SQL。此时连接 1 事务仍开（第三连接先断言 pid1 对该键 `granted=true`），`pg_locks` 无该键 `granted=false` 行。测完 `cp` 恢复。
-7. 锁键单点（锁序控件见 §6.4，P2 前 NOT RUN，不在本门标题）。扫描根 × 里程碑（`find` + bash；grep exit 2 / zsh nomatch 红）：
+7. 锁键单点（锁序控件见 §6.4，P2 前 NOT RUN，不在本门标题）。扫描根 × 里程碑（`find` + bash）。**平台限定**：本门以 GNU find/grep 为准（缺路径 grep **exit 2** 红）；macOS find 缺路径常见 exit 1，不得当过门。zsh nomatch 红。
 
 | 根 | 里程碑 | 扫描? | 要求文件数 ≥ 1? |
 |---|---|---|---|
@@ -501,11 +523,11 @@ POSIX ERE：`pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*
 ⑧ `(422, —)` org 缺失（rbacGuard 之后的 handler）。② 完全缺失且 token 无 perms 的夹具在两姿态同形 403，**不得充当信任面证据**。夹具层不得使 `RBAC_OPTIONAL_ON`。**§13-10 落槌前本门不进验收计分**。
 17. 真库接线齐备：①（no-DB 对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped）+ ②（lane 绿后从 verbose 日志读出**收集用例数 == 展开后静态计数**，写进 PR body）+ ④（三集合相等、扫描负控、正则未失效；④ 自身收集数 == 展开后静态计数；承载 `.github/workflows/plugin-tests.yml:842-844`；required 是否含 `test (20.x)` 以 §5.2.1 ④ 带日期实读为准，M2 接线 PR 重读）。④ 非空负控自首个 `task-*.db.test.ts` PR 起武装，此前 **NOT RUN** 不计分。③ 的 required 承载: TBD（§13-12 未裁）。**.each 计数规则**：展开后静态计数 = 无 table 的 `it(` / `test(` 数 + 每个 `it.each` / `test.each` 的表行数（不含表头）。含 `.each` 的文件必须在 PR body 写出展开表行数；未写或收集数 ≠ 展开后计数 ⇒ 本门红。不禁用 `.each`（本 SHA `tests/integration/*.db.test.ts` 260 文件中 13 个使用）。**门 17 只证执行发生，不证行为。**
 18. **首个**在 `packages/core-backend/src` 引入 `TASKS_*` 源码读的 PR 必须同 PR 扩 `globalHistoryFlagsInSource()` 覆盖 `TASKS_*_ENABLED` 并补 `scripts/ops/global-history-flag-manifest.mjs` 条目。负控：删掉该正则扩展（mutation `cp` 备份）后 `pnpm verify:global-history-flag-manifest:test` 必须红。本门在 M0（无源码读）不适用；从该 PR 起适用。
-19. 谓词从属链（计划 v5 §3 `:116`）。M2 身份集合 `I_M2` 见 §6.1。正控：`GET /api/tasks?view=v` 的行集 **等于** `taskMatchesView(row, me, v)=true` 的夹具行（钉 ambient），**不比** `resolveTaskRoles` 可见性。每格 ambient：`othersAssigned` 对 `{creator}` 的 `delegated`/`any_role` 钉 `true`（否则 delegated 恒空）；其余格钉与 `s` 一致的三旗。
-    **探针①**（读路径 mutation，不以 `TASK_ROLE_ABILITY` 为目标）：只改 `buildTaskScopeCondition` 的 `assigned` 臂一处。正控端集合 = mutation 端集合 = `{ GET /api/tasks?view=assigned, GET /api/tasks/pending, GET /api/tasks/pending-count }`。未改三端绿（行集 = TS 谓词）；改后三端同红。
-    **探针②**：同探针①（assignee 臂即读路径）；不另开第二目标。
-    漏格：上条两路 `LC_ALL=C sort` 输出 `diff` 非空 ⇒ 红。投影端待 §13-11，不算入。
-20. `src/tasks/` 无 I/O。**操作定义**（合取）：(A) 无 `db/` 相对导入（下条 ERE 零命中）；(B) 无执行器形参、无 `.query(` 调用（ERE `\.query\(|FenceQuery|:\s*QueryFn` 零命中）。(A) 正控三形见下。(B) 正控三形：`.query(` → `PluginRegistry.ts:800` `this.database.query(`；`FenceQuery` → `recovery-archive-source-pin.ts:1` `import type { FenceQuery }`；`:\s*QueryFn` → `approval-departure-transfer-dispatch.ts:24` `query?: QueryFn`（不是 `:9` `type QueryFn`，该形无冒号前缀、本 ERE 不命中）。
+19. 谓词从属链（计划 v5 §3 `:116`）。M2 身份集合 `I_M2` 见 §6.1。正控：`GET /api/tasks?view=v` 的行集 **等于** `taskMatchesView(row, me, v)=true` 的夹具行，**不比** `resolveTaskRoles` 可见性。ambient 钉法 = §6.1 唯一句（不在本门另写）。
+    **探针①**（列表读路径）：只改 `buildTaskScopeCondition` 的 `assigned` 臂一处。正控端集合 = mutation 端集合 = `{ GET /api/tasks?view=assigned, GET /api/tasks/pending, GET /api/tasks/pending-count }`。未改三端绿（行集 = TS 谓词）；改后三端同红。
+    **探针②**（真相表控件，写路径；另开目标）：置反 `TASK_ROLE_ABILITY[assignee][complete]`。`POST /api/tasks/:id/complete`（夹具用户是 assignee）必须红；列表三端保持绿。未置反该写路由绿。验收与门 3 complete 联立。
+    漏格：verbose 执行产物与锁内 `i-m2` 两路 `LC_ALL=C sort` `diff` 非空 ⇒ 红。投影端待 §13-11，不算入。
+20. `src/tasks/` 无 I/O。**行为门承载**（本门过门判据）：harness `tests/unit/task-pure-no-io.test.ts`（M2 武装）把 DB 入口（`../db/pg` 的 `query` / `pool.query`）stub 成**一律抛**；`import` 全部 `src/tasks/*.ts` 并调用每个导出。任何到达 stub 的调用 ⇒ 红。**正控**：同 harness `import { acquireTaskStructureLock } from '../db/task-advisory-locks'` 并调用 ⇒ **必须红**（证 stub 活着）。静态 ERE 降为辅助（过门不单靠零命中）。(A) 无 `db/` 相对导入；(B) 无方法式 `.query(` / `FenceQuery` / `:\s*QueryFn`。(A) 正控三形见下。(B) 正控三形：`.query(` → `PluginRegistry.ts:800` `this.database.query(`；`FenceQuery` → `recovery-archive-source-pin.ts:1` `import type { FenceQuery }`；`:\s*QueryFn` → `approval-departure-transfer-dispatch.ts:24` `query?: QueryFn`（不是 `:9` `type QueryFn`，该形无冒号前缀、本 ERE 不命中）。
 
 ```bash
 find packages/core-backend/src/tasks -name '*.ts' | wc -l
@@ -530,7 +552,7 @@ grep -R -E --include='*.ts' --include='*.js' --include='*.cjs' \
 (B) 零命中。缺失路径同 (A)：GNU exit 2。自首个 `src/tasks/*.ts` PR 起武装。
 21. 前端发现式枚举。三集合各一条可 diff 命令（`LC_ALL=C sort`；token **即文件名**，必须匹配 `^tasks.*\.spec\.ts$`）：
     - D：`find apps/web/tests -maxdepth 1 -name 'tasks*.spec.ts' -print | sed 's|.*/||' | LC_ALL=C sort`
-    - T：`sed -n '1186p' apps/web/scripts/run-required-web-tests.sh | tr ' ' '\n' | grep -E '^tasks.*\.spec\.ts$' | LC_ALL=C sort`
+    - T：按模式抽 `^exec npx vitest run` 行（断言该模式命中**恰 1 行**），再拆 token：`grep -c -E '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh` 必须 `= 1`；`grep -E '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh | tr ' ' '\n' | grep -E '^tasks.*\.spec\.ts$' | LC_ALL=C sort`
     - G：只抽 **step 行**（含 `vitest run`、不含 `paths:`）：`awk '/vitest run/{p=1} p{print} /reporter=/{exit}' .github/workflows/tasks-web-guard.yml | grep -oE 'apps/web/tests/tasks[^[:space:]*]+\.spec\.ts' | sed 's|.*/||' | LC_ALL=C sort`
     `diff <(D) <(T)` 与 `diff <(T) <(G)` 皆空。**paths glob 正负控**（字符类；yml 未建时用 stdin 可跑）：
 
@@ -542,12 +564,12 @@ printf '%s\n' 'apps/web/tests/tasksFoo.spec.ts' 'apps/web/tests/tasks*.spec.ts' 
 22. `guardPolicy` 行为 spec（**必须计分，不在 §13-10 阻断名单**）。本 PR 必须同时满足的承载：① `run-required-web-tests.sh:1186` token（即 `tasks*.spec.ts` 文件名）；② `web-tests.yml:77` 执行该脚本；③ 门 21 的 D=T=G 三件（含 step 逐文件、paths glob 零抽取）。**断言对象**：spec `import` `appRoutes` 后取出 `path==='/tasks'` 的记录。**比较投影**：`requiresAuth === true`、`permissions` 深等于 `['tasks:read']`、`'requiredFeature' in meta === false`。`title` / `titleZh` 按惯例**必须存在且为非空字符串**（本门不断言具体文案）。`input.meta` 每格用该投影；`input.path` 默认 `'/tasks'`（`isElearningFocusExactPath` `:234` / `:243` 为假）。
     - allow 格（**stub** `hasPermission`）：`attendanceFocused=false ∧ plmWorkbenchFocused=false`，`hasPermission('tasks:read')=true` ⇒ `{ action:'allow' }`。
     - redirect 格（**stub**）：同焦点钉，`hasPermission=false` ⇒ `{ action:'redirect', target: ctx.resolveHomePath() }`。
-    - 焦点-attendance 格（**stub**，`hasPermission=true`）：`path='/tasks'`、`attendanceFocused=true` ⇒ `{ action:'redirect', target:'/attendance' }`（`/tasks` 非 `isElearningFocusExactPath`）。
-    - 焦点-plm 格（**stub**，`hasPermission=true`）：`path='/tasks'`、`plmWorkbenchFocused=true` ⇒ `{ action:'redirect', target:'/plm' }`。
+    - 焦点-attendance 格（**stub**，`hasPermission=true`）：`path='/tasks'`、`attendanceFocused=true`、**`plmWorkbenchFocused=false`** ⇒ `{ action:'redirect', target:'/attendance' }`（`/tasks` 非 `isElearningFocusExactPath`）。
+    - 焦点-plm 格（**stub**，`hasPermission=true`）：`path='/tasks'`、`plmWorkbenchFocused=true`、**`attendanceFocused=false`** ⇒ `{ action:'redirect', target:'/plm' }`。
     - 焦点反格（**stub**）：`path='/attendance'`、`attendanceFocused=true`、`hasPermission=true` ⇒ `{ action:'allow' }`。
     - admin 格（**真实** `useAuth.hasPermission` 驱动 `buildRouteGuardContext`）：钉 `snapshot.isAdmin=true`、`permissions=[]`、`path='/tasks'`、两焦点 false ⇒ allow。负控：在**该夹具**上删 `useAuth.ts:553` 后跑本格 ⇒ **必须红**（实证：admin 短路消失、`permissions=[]` 使 `isRoutePermitted` 失败）。
 
-门 2/9/13/17 行尾的 TBD 未裁前不得声称「门全绿」。**§13-10 落槌前门 1 整体 / 2 / 13 / 16 不进验收计分。** 非 admin 真机冒烟只作可达性记录。**门 22 必须计分**（承载含门 21 三件）。门 3 增删人/切模式格被 §13-9 阻断。门 9 任务线 NOT RUN 至 §13-11。**NOT RUN 按子集粒度**：门 7 的 `src/multitable/task-*` 根、门 10 P2 子集、门 19 清单角色格、门 17 ④、门 21 整门（无 spec 时）、锁序控件（§6.4）——未到里程碑的子集不计分，已武装子集照计。**不得以已武装子集报「门通过」**（门下仍有 NOT RUN 子集则该门不得计为通过）。门 18 M0 不适用。门 16 四件 M2 同 PR 落。
+门 2/9/13/17 行尾的 TBD 未裁前不得声称「门全绿」。**§13-10 落槌前门 1 整体 / 2 / 13 / 16 不进验收计分。** 非 admin 真机冒烟只作可达性记录。**门 22 必须计分**（承载含门 21 三件）。门 3 增删人/切模式格被 §13-9 阻断。门 9 任务线 NOT RUN 至 §13-11。**NOT RUN 按子集粒度**：门 7 的 `src/multitable/task-*` 根、门 10 P2 子集、门 19 清单角色格、门 17 ④、门 21 整门（无 spec 时）、锁序控件（§6.4）——未到里程碑的子集不计分，已武装子集照计。M2 退出单位 = **已武装子集全绿 + NOT RUN 子集本段登记**（不得以已武装子集报「门通过」）。门 18 M0 不适用。门 16 四件 M2 同 PR 落。
 
 ---
 
