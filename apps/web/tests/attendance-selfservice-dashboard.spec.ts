@@ -761,6 +761,8 @@ describe('Attendance self-service dashboard', () => {
 
     expect(container?.querySelector('[data-selfservice-card="status"]')?.textContent).toContain('Late + Early')
     expect(container?.querySelector('[data-selfservice-card="status"]')?.textContent).toContain('Both a late arrival and an early departure')
+    expect(container?.querySelector('[data-selfservice-setup-hint]')).toBeNull()
+    expect(container?.textContent).not.toContain('you may not be assigned to an attendance group yet')
     // Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.2: ONE
     // canonical attention item replaces the old focus-list + primary-action
     // "two competing copies" (data-selfservice-focus-list / -primary-action).
@@ -2228,21 +2230,25 @@ describe('Attendance self-service dashboard', () => {
     await flushUi()
 
     const statusCard = container!.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
-    const setupHint = container!.querySelector('[data-selfservice-setup-hint]')?.textContent ?? ''
     const attentionBand = container!.querySelector('[data-attendance-overview-attention]')?.textContent ?? ''
     const attentionKey = container!.querySelector('[data-attendance-overview-attention]')?.getAttribute('data-attendance-overview-attention-key')
     const actionsCard = container!.querySelector('[data-selfservice-card="actions"]')?.textContent ?? ''
+    const setupPhrase = 'you may not be assigned to an attendance group yet'
 
     expect(statusCard).toContain('No attendance data is available in this range yet.')
-    expect(setupHint).toContain('you may not be assigned to an attendance group yet')
-    expect(setupHint).toContain('confirm your group and shift setup')
+    expect(statusCard).not.toContain(setupPhrase)
+    expect(container!.querySelector('[data-selfservice-setup-hint]')).toBeNull()
     // Employee-overview task-first design-lock §4.2 row 6 (setup_needed):
-    // the single canonical attention item reuses this same setup guidance —
-    // no fabricated CTA and no second competing "primary action" copy.
+    // the single canonical attention item owns this setup guidance.
+    // Punch column and 常用 must not mount the same paragraph again.
     expect(attentionKey).toBe('setup_needed')
     expect(attentionBand).toContain('Check attendance setup')
+    expect(attentionBand).toContain(setupPhrase)
+    expect(attentionBand).toContain('confirm your group and shift setup')
+    expect((container!.textContent ?? '').split(setupPhrase).length - 1).toBe(1)
     expect(container!.querySelector('[data-attendance-overview-attention-action]')).toBeNull()
-    expect(actionsCard).toContain('confirm your group and shift setup')
+    expect(actionsCard).not.toContain(setupPhrase)
+    expect(actionsCard).toContain('Jump into the request form or records table without leaving overview.')
 
     const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
     expect(requestType).toBeTruthy()
