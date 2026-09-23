@@ -2931,6 +2931,9 @@
                     :placeholder="tr('One per line or comma separated', '每行一个或逗号分隔')"
                   ></textarea>
                 </label>
+                <p class="attendance__field-hint attendance__field--full" data-attendance-geo-fence-hint>
+                  {{ tr('Latitude, longitude, and radius save together. Leave all three empty to turn the fence off. A partial fill is rejected and does not clear an existing fence.', '纬度、经度和半径需一起保存。三项都留空才会关闭围栏。只填一部分会被拒绝，且不会清掉已有围栏。') }}
+                </p>
                 <label class="attendance__field" for="attendance-geo-lat">
                   <span>{{ tr('Geo fence lat', '地理围栏纬度') }}</span>
                   <input
@@ -2939,6 +2942,8 @@
                     v-model="settingsForm.geoFenceLat"
                     type="number"
                     step="0.000001"
+                    data-attendance-geo-fence-lat
+                    :aria-invalid="geoFenceSaveError ? 'true' : 'false'"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-geo-lng">
@@ -2949,6 +2954,8 @@
                     v-model="settingsForm.geoFenceLng"
                     type="number"
                     step="0.000001"
+                    data-attendance-geo-fence-lng
+                    :aria-invalid="geoFenceSaveError ? 'true' : 'false'"
                   />
                 </label>
                 <label class="attendance__field" for="attendance-geo-radius">
@@ -2959,8 +2966,18 @@
                     v-model="settingsForm.geoFenceRadius"
                     type="number"
                     min="1"
+                    data-attendance-geo-fence-radius
+                    :aria-invalid="geoFenceSaveError ? 'true' : 'false'"
                   />
                 </label>
+                <p
+                  v-if="geoFenceSaveError"
+                  class="attendance__status attendance__status--error attendance__field--full"
+                  data-attendance-geo-fence-error
+                  role="alert"
+                >
+                  {{ geoFenceSaveError }}
+                </p>
                 <AttendanceEmployeeQuickActionIconsField
                   v-model="adminConfig.settingsForm.employeeQuickActionIcons"
                   :tr="tr"
@@ -5917,6 +5934,13 @@
                       >
                         {{ attendanceGroupFixedScheduleClearLoading ? tr('Clearing...', '清除中...') : tr('Clear managed rows', '清除已管理排班') }}
                       </button>
+                      <small
+                        v-if="attendanceGroupFixedSchedulePreviewOnly"
+                        class="attendance__field-hint"
+                        data-attendance-group-fixed-schedule-preview-only
+                      >
+                        {{ tr('Preview is available. Apply, rebuild, and clear stay off unless this account has the matching scheduler permission. That is not an administrator role.', '可以预览。没有对应的排班调度权限时，应用、重建和清除保持关闭。这不是管理员角色。') }}
+                      </small>
                     </div>
                     <div
                       v-if="attendanceGroupFixedSchedulePreviewResult"
@@ -10202,6 +10226,18 @@ import {
   type EmployeeQuickActionIcons,
 } from './attendance/attendanceEmployeeWorkspaceCommonIcons'
 import { useAttendanceAdminConfig } from './attendance/useAttendanceAdminConfig'
+import {
+  fixedScheduleScopeForbiddenCopy,
+  fixedScheduleWritesForCatalog,
+  readFixedScheduleWrites,
+  type FixedScheduleWriteAction,
+  type FixedScheduleWrites,
+} from './attendance/attendanceFixedScheduleWrites'
+import {
+  geoFenceClearedMessage,
+  geoFenceIncompleteMessage,
+  resolveGeoFenceSave,
+} from './attendance/attendanceGeoFenceSave'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -12165,6 +12201,8 @@ const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | nu
 const importLoading = ref(false)
 const adminForbidden = ref(false)
 const attendanceGroupCatalogScope = ref<AttendanceGroupCatalogScope>('unknown')
+const attendanceGroupFixedScheduleWriteGrants = ref<FixedScheduleWrites>(fixedScheduleWritesForCatalog('unknown'))
+const geoFenceSaveError = ref('')
 const adminSurfaceBlocked = computed(() =>
   adminForbidden.value && attendanceGroupCatalogScope.value !== 'managed',
 )
@@ -14508,15 +14546,25 @@ const attendanceGroupFixedScheduleManagedActionAvailable = computed(() =>
 )
 const attendanceGroupFixedScheduleApplyAvailable = computed(() =>
   Boolean(
-    attendanceGroupFixedSchedulePreviewResult.value
+    attendanceGroupFixedScheduleWriteGrants.value.apply
+      && attendanceGroupFixedSchedulePreviewResult.value
       && attendanceGroupFixedSchedulePreviewResult.value.blockingConflicts.length === 0
       && !attendanceGroupFixedSchedulePreviewResult.value.applied
       && !attendanceGroupFixedSchedulePreviewResult.value.rebuilt
       && !attendanceGroupFixedScheduleFormBusy.value,
   )
 )
-const attendanceGroupFixedScheduleRebuildAvailable = computed(() => attendanceGroupFixedScheduleManagedActionAvailable.value)
-const attendanceGroupFixedScheduleClearAvailable = computed(() => attendanceGroupFixedScheduleManagedActionAvailable.value)
+const attendanceGroupFixedScheduleRebuildAvailable = computed(() =>
+  attendanceGroupFixedScheduleWriteGrants.value.rebuild && attendanceGroupFixedScheduleManagedActionAvailable.value,
+)
+const attendanceGroupFixedScheduleClearAvailable = computed(() =>
+  attendanceGroupFixedScheduleWriteGrants.value.clear && attendanceGroupFixedScheduleManagedActionAvailable.value,
+)
+const attendanceGroupFixedSchedulePreviewOnly = computed(() => {
+  if (attendanceGroupCatalogScope.value !== 'managed') return false
+  const grants = attendanceGroupFixedScheduleWriteGrants.value
+  return !grants.apply || !grants.rebuild || !grants.clear
+})
 const attendanceGroupFixedSchedulePreviewSummary = computed(() => {
   const result = attendanceGroupFixedSchedulePreviewResult.value
   if (!result) return ''
@@ -24680,22 +24728,25 @@ async function runAutoShiftMatchingApply() {
 }
 
 async function saveSettings() {
+  const geoFenceDecision = resolveGeoFenceSave({
+    lat: settingsForm.geoFenceLat,
+    lng: settingsForm.geoFenceLng,
+    radius: settingsForm.geoFenceRadius,
+  })
+  if (!geoFenceDecision.ok) {
+    geoFenceSaveError.value = geoFenceIncompleteMessage(tr)
+    setStatus(geoFenceSaveError.value, 'error')
+    return
+  }
+  geoFenceSaveError.value = ''
+  const clearingExistingFence = geoFenceDecision.explicitClear && Boolean(attendanceSettings.value?.geoFence)
+  const geoFence = geoFenceDecision.geoFence
   settingsLoading.value = true
   try {
     const ipAllowlist = settingsForm.ipAllowlist
       .split(/[\n,]/)
       .map(item => item.trim())
       .filter(Boolean)
-
-    const latValue = settingsForm.geoFenceLat.trim()
-    const lngValue = settingsForm.geoFenceLng.trim()
-    const radiusValue = settingsForm.geoFenceRadius.trim()
-    const lat = latValue.length > 0 ? Number(latValue) : Number.NaN
-    const lng = lngValue.length > 0 ? Number(lngValue) : Number.NaN
-    const radius = radiusValue.length > 0 ? Number(radiusValue) : Number.NaN
-    const geoFence = Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radius)
-      ? { lat, lng, radiusMeters: radius }
-      : null
 
     const overtimeSourceValue = settingsForm.holidayOvertimeSource
     const overtimeSource = overtimeSourceValue === 'approval' || overtimeSourceValue === 'clock' || overtimeSourceValue === 'both'
@@ -24797,7 +24848,7 @@ async function saveSettings() {
     attendanceSettings.value = savedSettings
     applySettingsToForm(savedSettings)
     employeeOverviewQuickActionIcons.value = resolveEmployeeQuickActionIcons(savedSettings.employeeQuickActionIcons)
-    setStatus(tr('Settings updated.', '设置已更新。'))
+    setStatus(clearingExistingFence ? geoFenceClearedMessage(tr) : tr('Settings updated.', '设置已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save settings', '保存设置失败'), 'save-settings')
   } finally {
@@ -27986,6 +28037,7 @@ function resetAttendanceGroupForm() {
 
 function resetAttendanceGroupFixedSchedulePreview() {
   attendanceGroupFixedSchedulePreviewResult.value = null
+  attendanceGroupFixedScheduleWriteGrants.value = fixedScheduleWritesForCatalog(attendanceGroupCatalogScope.value)
   attendanceGroupFixedSchedulePreviewForm.startDate = toDateInput(today)
   attendanceGroupFixedSchedulePreviewForm.endDate = toDateInput(today)
   attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0]?.id ?? attendanceGroupFixedSchedulePreviewForm.shiftId
@@ -28155,6 +28207,7 @@ async function loadAttendanceGroups() {
     if (response.status === 403) {
       adminForbidden.value = true
       attendanceGroupCatalogScope.value = 'unknown'
+      attendanceGroupFixedScheduleWriteGrants.value = fixedScheduleWritesForCatalog('unknown')
       return
     }
     const data = await response.json()
@@ -28165,6 +28218,7 @@ async function loadAttendanceGroups() {
     adminForbidden.value = false
     const parsedScope = resolveAttendanceGroupCatalogScope(data.data?.scope)
     attendanceGroupCatalogScope.value = parsedScope === 'unknown' ? 'org' : parsedScope
+    attendanceGroupFixedScheduleWriteGrants.value = fixedScheduleWritesForCatalog(attendanceGroupCatalogScope.value)
     attendanceGroups.value = data.data?.items ?? []
     attendanceGroupsTotal.value = typeof data.data?.total === 'number' ? data.data.total : attendanceGroups.value.length
     if (props.routeGroupContext) {
@@ -28350,6 +28404,9 @@ async function previewAttendanceGroupFixedSchedule() {
   }
   attendanceGroupFixedSchedulePreviewLoading.value = true
   attendanceGroupFixedSchedulePreviewResult.value = null
+  if (attendanceGroupCatalogScope.value === 'managed') {
+    attendanceGroupFixedScheduleWriteGrants.value = fixedScheduleWritesForCatalog('managed')
+  }
   try {
     const response = await apiFetch(`/api/attendance/groups/${groupId}/fixed-schedule/preview`, {
       method: 'POST',
@@ -28370,6 +28427,9 @@ async function previewAttendanceGroupFixedSchedule() {
     }
     adminForbidden.value = false
     attendanceGroupFixedSchedulePreviewResult.value = data.data as AttendanceGroupFixedSchedulePreviewResult
+    if (attendanceGroupCatalogScope.value === 'managed') {
+      attendanceGroupFixedScheduleWriteGrants.value = readFixedScheduleWrites(data.fixedScheduleWrites)
+    }
     setStatus(tr('Fixed schedule preview ready. No assignments were written.', '固定排班预览已生成，未写入任何排班。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to preview fixed schedule', '预览固定排班失败')), 'error')
@@ -28385,6 +28445,34 @@ function buildAttendanceGroupFixedScheduleRequestBody(): Record<string, string |
     endDate: attendanceGroupFixedSchedulePreviewForm.endDate,
     orgId: normalizedOrgId(),
   }
+}
+
+async function readFixedScheduleWriteResponse(response: Response, action: FixedScheduleWriteAction) {
+  if (response.status !== 403) return response.json()
+  const data = await response.json().catch(() => null)
+  const code = typeof data?.error?.code === 'string' ? data.error.code : ''
+  if (code === 'SCHEDULER_SCOPE_FORBIDDEN') {
+    attendanceGroupFixedScheduleWriteGrants.value = {
+      ...attendanceGroupFixedScheduleWriteGrants.value,
+      [action]: false,
+    }
+    const error = new Error(fixedScheduleScopeForbiddenCopy(action, tr)) as AttendanceApiError
+    error.status = 403
+    error.code = 'SCHEDULER_SCOPE_FORBIDDEN'
+    throw error
+  }
+  adminForbidden.value = true
+  throw createForbiddenError()
+}
+
+function reportFixedScheduleWriteError(error: unknown, fallback: string) {
+  const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code || '') : ''
+  if (code === 'SCHEDULER_SCOPE_FORBIDDEN') {
+    const message = error instanceof Error ? error.message : fallback
+    setStatus(message, 'error', { code: 'SCHEDULER_SCOPE_FORBIDDEN' })
+    return
+  }
+  setStatus(readErrorMessage(error, fallback), 'error')
 }
 
 async function applyAttendanceGroupFixedSchedulePreview() {
@@ -28404,11 +28492,7 @@ async function applyAttendanceGroupFixedSchedulePreview() {
       method: 'POST',
       body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
     })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
+    const data = await readFixedScheduleWriteResponse(response, 'apply')
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to apply fixed schedule', '应用固定排班失败')))
     }
@@ -28417,7 +28501,7 @@ async function applyAttendanceGroupFixedSchedulePreview() {
     await loadAssignments()
     setStatus(tr('Fixed schedule applied.', '固定排班已应用。'))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to apply fixed schedule', '应用固定排班失败')), 'error')
+    reportFixedScheduleWriteError(error, tr('Failed to apply fixed schedule', '应用固定排班失败'))
   } finally {
     attendanceGroupFixedScheduleApplyLoading.value = false
   }
@@ -28436,11 +28520,7 @@ async function rebuildAttendanceGroupFixedScheduleManagedRows() {
       method: 'POST',
       body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
     })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
+    const data = await readFixedScheduleWriteResponse(response, 'rebuild')
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to rebuild managed fixed schedule rows', '重建已管理固定排班失败')))
     }
@@ -28449,7 +28529,7 @@ async function rebuildAttendanceGroupFixedScheduleManagedRows() {
     await loadAssignments()
     setStatus(tr('Managed fixed schedule rows rebuilt.', '已重建已管理固定排班。'))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to rebuild managed fixed schedule rows', '重建已管理固定排班失败')), 'error')
+    reportFixedScheduleWriteError(error, tr('Failed to rebuild managed fixed schedule rows', '重建已管理固定排班失败'))
   } finally {
     attendanceGroupFixedScheduleRebuildLoading.value = false
   }
@@ -28472,11 +28552,7 @@ async function clearAttendanceGroupFixedScheduleManagedRows() {
       method: 'POST',
       body: JSON.stringify(buildAttendanceGroupFixedScheduleRequestBody()),
     })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
+    const data = await readFixedScheduleWriteResponse(response, 'clear')
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to clear managed fixed schedule rows', '清除已管理固定排班失败')))
     }
@@ -28489,7 +28565,7 @@ async function clearAttendanceGroupFixedScheduleManagedRows() {
       `已清除 ${count} 条已管理固定排班。`,
     ))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to clear managed fixed schedule rows', '清除已管理固定排班失败')), 'error')
+    reportFixedScheduleWriteError(error, tr('Failed to clear managed fixed schedule rows', '清除已管理固定排班失败'))
   } finally {
     attendanceGroupFixedScheduleClearLoading.value = false
   }

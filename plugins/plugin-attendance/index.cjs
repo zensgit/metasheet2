@@ -26102,6 +26102,38 @@ module.exports = {
       }
     }
 
+    const ATTENDANCE_FIXED_SCHEDULE_WRITES_DENIED = Object.freeze({ apply: false, rebuild: false, clear: false })
+    const ATTENDANCE_FIXED_SCHEDULE_WRITES_ALLOWED = Object.freeze({ apply: true, rebuild: true, clear: true })
+
+    // Advisory only. Does not authorize the write routes and does not consult the O3 manager set.
+    // Lookup failure fails closed (all false) and must not turn a successful preview into an error.
+    async function resolveAttendanceGroupFixedScheduleWriteGrants(actorAccess, groupId) {
+      if (!actorAccess || actorAccess.fullAdmin) return { ...ATTENDANCE_FIXED_SCHEDULE_WRITES_ALLOWED }
+      try {
+        const actorContext = await loadAttendanceScopeContextForUser(db, actorAccess.orgId, actorAccess.userId)
+        const scopes = await loadActiveAttendanceSchedulerScopesForActor(actorAccess.orgId, actorContext)
+        const target = { attendanceGroupIds: [groupId] }
+        const allows = (action) => scopes.some((scope) => attendanceSchedulerScopeAllowsActorActionTarget(
+          scope,
+          actorContext,
+          action,
+          target,
+        ))
+        const dispatch = allows('dispatch')
+        const clear = allows('clear')
+        return {
+          apply: dispatch,
+          rebuild: dispatch && clear,
+          clear,
+        }
+      } catch (error) {
+        if (!isDatabaseSchemaError(error)) {
+          logger.error('Attendance fixed schedule write grant lookup failed', error)
+        }
+        return { ...ATTENDANCE_FIXED_SCHEDULE_WRITES_DENIED }
+      }
+    }
+
     async function assertAttendanceGroupFixedScheduleDispatchAllowed(req, res, { groupId, actorAccess } = {}) {
       return assertAttendanceGroupFixedScheduleActionsAllowed(req, res, {
         groupId,
@@ -26527,6 +26559,8 @@ module.exports = {
         }).nullable().optional(),
       }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
+      // null is an explicit clear. An incomplete object is rejected here and must not be
+      // normalized into null (#5965); merge would otherwise wipe a stored fence.
       geoFence: z.object({
         lat: z.number(),
         lng: z.number(),
@@ -45862,7 +45896,8 @@ module.exports = {
             })
             return
           }
-          res.json({ ok: true, data: preview.data })
+          const fixedScheduleWrites = await resolveAttendanceGroupFixedScheduleWriteGrants(actorAccess, groupId)
+          res.json({ ok: true, data: preview.data, fixedScheduleWrites })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })

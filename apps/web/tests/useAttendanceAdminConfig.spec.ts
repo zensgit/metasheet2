@@ -240,6 +240,49 @@ describe('useAttendanceAdminConfig', () => {
     expect(options.setStatus).toHaveBeenCalledWith('Settings updated.')
   })
 
+  it('refuses an incomplete geofence and does not PUT null', async () => {
+    const apiFetchWithTimeout = vi.fn(async () => jsonResponse(200, { ok: true, data: {} }))
+    const options = createOptions({ apiFetchWithTimeout })
+    const config = useAttendanceAdminConfig(options)
+    config.settingsForm.geoFenceLat = '31.2'
+    config.settingsForm.geoFenceLng = '121.5'
+    config.settingsForm.geoFenceRadius = ''
+
+    await config.saveSettings()
+
+    expect(apiFetchWithTimeout).not.toHaveBeenCalled()
+    expect(config.geoFenceSaveError.value).toContain('Nothing was saved')
+    expect(options.setStatus).toHaveBeenCalledWith(expect.stringContaining('Nothing was saved'), 'error')
+  })
+
+  it('sends geoFence null only when all three fields are empty and says the fence was turned off', async () => {
+    const apiFetchWithTimeout = vi.fn(async (_path: string, init?: RequestInit) => {
+      if (String(init?.method || 'GET').toUpperCase() === 'PUT') {
+        return jsonResponse(200, { ok: true, data: { geoFence: null, ipAllowlist: ['10.0.0.9'] } })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: { geoFence: { lat: 31.2, lng: 121.5, radiusMeters: 150 }, ipAllowlist: ['10.0.0.1'] },
+      })
+    })
+    const options = createOptions({ apiFetchWithTimeout })
+    const config = useAttendanceAdminConfig(options)
+    await config.loadSettings()
+    config.settingsForm.geoFenceLat = ''
+    config.settingsForm.geoFenceLng = ''
+    config.settingsForm.geoFenceRadius = ''
+    config.settingsForm.ipAllowlist = '10.0.0.9'
+
+    await config.saveSettings()
+
+    const putCall = apiFetchWithTimeout.mock.calls.find(([, init]) => String(init?.method || '').toUpperCase() === 'PUT')
+    expect(putCall).toBeTruthy()
+    const payload = JSON.parse(String(putCall?.[1]?.body || '{}'))
+    expect(payload.geoFence).toBeNull()
+    expect(payload.ipAllowlist).toEqual(['10.0.0.9'])
+    expect(options.setStatus).toHaveBeenCalledWith('Settings updated. Geofence turned off.')
+  })
+
   it('syncs holidays for the requested years and updates last run', async () => {
     const apiFetchWithTimeout = vi.fn(async () => jsonResponse(200, {
       ok: true,

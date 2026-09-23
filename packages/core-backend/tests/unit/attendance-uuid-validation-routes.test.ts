@@ -1363,6 +1363,9 @@ describe('attendance UUID route validation', () => {
       if (probe !== undefined) return probe
       const fixedSchedule = fixedScheduleQueryResult(sql)
       if (fixedSchedule.handled) return fixedSchedule.rows
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return []
       throw new Error(`unexpected SQL: ${sql}`)
     })
 
@@ -1373,12 +1376,54 @@ describe('attendance UUID route validation', () => {
     })
 
     expect(res.statusCode).toBe(200)
-    expect(res.body).toMatchObject({ ok: true })
+    expect(res.body).toMatchObject({
+      ok: true,
+      fixedScheduleWrites: { apply: false, rebuild: false, clear: false },
+    })
     expect(db.transaction).not.toHaveBeenCalled()
     expect(eventEmit).not.toHaveBeenCalled()
     const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
     expect(sql).toContain('FROM attendance_group_managers')
+    expect(sql).toContain('FROM attendance_scheduler_scopes')
     expect(sql).not.toContain('INSERT INTO attendance_shift_assignments')
+  })
+
+  it('reports scheduler dispatch on preview without adding apply to the owner action set', async () => {
+    const { db, routes } = await createHarness('false')
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params, false)
+      if (rbac !== undefined) return rbac
+      const probe = groupManagerProbeResult(sql, params, { managed: true })
+      if (probe !== undefined) return probe
+      const fixedSchedule = fixedScheduleQueryResult(sql)
+      if (fixedSchedule.handled) return fixedSchedule.rows
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) {
+        return [{
+          id: 'scope-dispatch',
+          org_id: 'default',
+          subject_type: 'user',
+          subject_ref: 'owner-user-1',
+          actions: ['dispatch'],
+          is_active: true,
+          scope: { attendanceGroupIds: [attendanceGroupId] },
+        }]
+      }
+      throw new Error(`unexpected SQL: ${sql}`)
+    })
+
+    const previewRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/fixed-schedule/preview', {
+      params: { id: attendanceGroupId },
+      body: { shiftId, startDate: '2026-06-01', endDate: '2026-06-30' },
+      user: { id: 'owner-user-1', orgId: 'default' },
+    })
+    expect(previewRes.statusCode).toBe(200)
+    expect(previewRes.body).toMatchObject({
+      ok: true,
+      fixedScheduleWrites: { apply: true, rebuild: false, clear: false },
+    })
+    expect(db.transaction).not.toHaveBeenCalled()
   })
 
   it('keeps group CRUD and fixed-schedule apply admin-or-scheduler-only for a group owner', async () => {
