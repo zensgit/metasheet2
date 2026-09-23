@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import { buildAttendanceReportRangePreset } from '../src/views/attendance/attendanceReportCalendar'
 import { apiFetch } from '../src/utils/api'
 
 vi.mock('../src/composables/usePlugins', () => ({
@@ -40,7 +41,8 @@ async function flushUi(cycles = 8): Promise<void> {
   }
 }
 
-function installReportsMock(): void {
+function installReportsMock(options: { recordTimezone?: string } = {}): void {
+  const recordTimezone = options.recordTimezone ?? 'UTC'
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = typeof input === 'string' ? input : input.url
 
@@ -98,6 +100,7 @@ function installReportsMock(): void {
               early_leave_minutes: 0,
               status: 'normal',
               meta: {},
+              workday_context: { timezone: recordTimezone },
             },
             {
               id: 'record-late',
@@ -109,6 +112,7 @@ function installReportsMock(): void {
               early_leave_minutes: 0,
               status: 'late',
               meta: {},
+              workday_context: { timezone: recordTimezone },
             },
             {
               id: 'record-adjusted',
@@ -120,6 +124,7 @@ function installReportsMock(): void {
               early_leave_minutes: 0,
               status: 'adjusted',
               meta: {},
+              workday_context: { timezone: recordTimezone },
             },
           ],
           total: 3,
@@ -287,6 +292,32 @@ describe('Attendance reports analytics', () => {
     expect(periodLabel?.textContent).toContain('Apr')
     expect(vi.mocked(apiFetch).mock.calls.length).toBeGreaterThan(initialCallCount)
     expect(vi.mocked(apiFetch).mock.calls.some((call) => String(call[0]).includes('/api/attendance/summary?'))).toBe(true)
+  })
+
+  it('applies this-week and the default window in the record IANA zone, not the browser calendar', async () => {
+    const now = new Date('2026-09-27T16:30:00.000Z')
+    vi.setSystemTime(now)
+    installReportsMock({ recordTimezone: 'Asia/Shanghai' })
+
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi(12)
+
+    const shanghaiWeek = buildAttendanceReportRangePreset('this-week', now, 'Asia/Shanghai')
+    const utcWeek = buildAttendanceReportRangePreset('this-week', now, 'UTC')
+    const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')
+    const toInput = container!.querySelector<HTMLInputElement>('#attendance-to-date')
+    expect(container!.querySelector('[data-report-range-timezone]')?.getAttribute('data-timezone')).toBe('Asia/Shanghai')
+    expect(fromInput?.value).toBe('2026-08-29')
+    expect(toInput?.value).toBe('2026-09-28')
+
+    findFilterButton(container!, 'range-preset', 'this-week').click()
+    await flushUi(6)
+
+    expect(fromInput?.value).toBe(shanghaiWeek?.from)
+    expect(toInput?.value).toBe(shanghaiWeek?.to)
+    expect(fromInput?.value).not.toBe(utcWeek?.from)
+    expect(findFilterButton(container!, 'range-preset', 'this-week').disabled).toBe(false)
   })
 
   it('blocks inverted report ranges before either reload entry point sends a request', async () => {

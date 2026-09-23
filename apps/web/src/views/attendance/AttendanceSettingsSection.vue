@@ -30,6 +30,12 @@
           min="1"
         />
       </label>
+      <p class="attendance__field-hint attendance__field--full" data-auto-absence-timezone-hint>
+        {{ tr(
+          'Run at uses each organization default attendance rule IANA timezone (the same zone as punch work dates), not the server local clock.',
+          '执行时间按各组织默认考勤规则的 IANA 时区计算（与打卡工作日同一时区），不使用服务器本地时钟。',
+        ) }}
+      </p>
       <label class="attendance__field" for="attendance-min-punch-interval">
         <span>{{ tr('Min punch interval (min)', '最小打卡间隔（分钟）') }}</span>
         <input

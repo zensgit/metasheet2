@@ -310,12 +310,16 @@
             class="attendance__filter-pill"
             :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
             type="button"
+            :disabled="!reportRangeTimeZone"
             :data-report-filter-value="preset.id"
             @click="applyReportRangePreset(preset.id)"
           >
             {{ preset.label }}
           </button>
         </div>
+        <p class="attendance__field-hint" data-report-range-timezone :data-timezone="reportRangeTimeZone || ''">
+          {{ reportRangeTimezoneHint }}
+        </p>
         <p class="attendance__field-hint attendance__field-hint--strong">
           {{
             tr(
@@ -2598,6 +2602,12 @@
                     min="1"
                   />
                 </label>
+                <p class="attendance__field-hint attendance__field--full" data-auto-absence-timezone-hint>
+                  {{ tr(
+                    'Run at uses each organization default attendance rule IANA timezone (the same zone as punch work dates), not the server local clock.',
+                    '执行时间按各组织默认考勤规则的 IANA 时区计算（与打卡工作日同一时区），不使用服务器本地时钟。',
+                  ) }}
+                </p>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-first-day-enabled">
                   <span>{{ tr('Holiday first-day base hours', '节假日首日基准工时') }}</span>
                   <input
@@ -10390,10 +10400,14 @@ import {
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
+import {
+  buildAttendanceReportDefaultRange,
+  buildAttendanceReportRangePreset,
+  type AttendanceReportRangePreset,
+} from './attendance/attendanceReportCalendar'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
-type AttendanceReportRangePreset = 'this-week' | 'this-month' | 'last-month' | 'this-quarter'
 const ATTENDANCE_OVERVIEW_SECTION_IDS = {
   requests: 'attendance-overview-requests',
   anomalies: 'attendance-overview-anomalies',
@@ -12446,60 +12460,8 @@ const reportsExportBlocked = computed(() =>
   reportsUnavailable.value || reportsDataStale.value
 )
 
-function startOfWeek(date: Date): Date {
-  const next = new Date(date)
-  const day = next.getDay()
-  const delta = day === 0 ? -6 : 1 - day
-  next.setDate(next.getDate() + delta)
-  next.setHours(0, 0, 0, 0)
-  return next
-}
-
-function endOfWeek(date: Date): Date {
-  const next = startOfWeek(date)
-  next.setDate(next.getDate() + 6)
-  next.setHours(23, 59, 59, 999)
-  return next
-}
-
-function firstDayOfQuarter(date: Date): Date {
-  const month = Math.floor(date.getMonth() / 3) * 3
-  return new Date(date.getFullYear(), month, 1)
-}
-
-function lastDayOfQuarter(date: Date): Date {
-  const start = firstDayOfQuarter(date)
-  return new Date(start.getFullYear(), start.getMonth() + 3, 0)
-}
-
-function buildReportRangePreset(preset: AttendanceReportRangePreset): { from: string; to: string } {
-  if (preset === 'this-week') {
-    const now = new Date()
-    return {
-      from: toDateInput(startOfWeek(now)),
-      to: toDateInput(endOfWeek(now)),
-    }
-  }
-  if (preset === 'this-month') {
-    const now = new Date()
-    return {
-      from: toDateInput(firstDayOfMonth(now)),
-      to: toDateInput(lastDayOfMonth(now)),
-    }
-  }
-  if (preset === 'last-month') {
-    const now = new Date()
-    const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    return {
-      from: toDateInput(firstDayOfMonth(previousMonth)),
-      to: toDateInput(lastDayOfMonth(previousMonth)),
-    }
-  }
-  const now = new Date()
-  return {
-    from: toDateInput(firstDayOfQuarter(now)),
-    to: toDateInput(lastDayOfQuarter(now)),
-  }
+function buildReportRangePreset(preset: AttendanceReportRangePreset): { from: string; to: string } | null {
+  return buildAttendanceReportRangePreset(preset, new Date(), reportRangeTimeZone.value)
 }
 
 function formatShortDate(value: string): string {
@@ -12521,7 +12483,7 @@ const reportRangePresetOptions = computed<Array<{ id: AttendanceReportRangePrese
 const activeReportRangePreset = computed<AttendanceReportRangePreset | ''>(() => {
   for (const preset of reportRangePresetOptions.value) {
     const range = buildReportRangePreset(preset.id)
-    if (range.from === fromDate.value && range.to === toDate.value) {
+    if (range && range.from === fromDate.value && range.to === toDate.value) {
       return preset.id
     }
   }
@@ -13596,10 +13558,18 @@ function markReportsDatasetUnavailable(): void {
   clearReportsDataset()
 }
 
+const reportRangePristine = ref(true)
+let applyingReportRange = false
+let lastAutoReportRangeZone: string | null = null
+
 async function applyReportRangePreset(preset: AttendanceReportRangePreset): Promise<void> {
   const range = buildReportRangePreset(preset)
+  if (!range) return
+  reportRangePristine.value = false
+  applyingReportRange = true
   fromDate.value = range.from
   toDate.value = range.to
+  applyingReportRange = false
   recordsPage.value = 1
   await reloadReportsWithStatus()
 }
@@ -14971,6 +14941,27 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
 const showReports = computed(() => props.mode === 'reports')
+const reportRangeTimeZone = computed<string | null>(() => {
+  // Record workday_context.timezone is the zone punch already stored on those
+  // work dates. Reports must not substitute /api/attendance/rules/me when that
+  // evidence is missing or mixed.
+  if (!showReports.value || records.value.length === 0) return null
+  if (reportHasInvalidRecordTimezone.value || reportRecordTimezones.value.length !== 1) return null
+  return reportRecordTimezones.value[0]!
+})
+const reportRangeTimezoneHint = computed(() => {
+  const zone = reportRangeTimeZone.value
+  if (!zone) {
+    return tr(
+      'Attendance timezone is unavailable, so week and month presets stay off.',
+      '考勤时区不可用，周/月快捷区间已停用。',
+    )
+  }
+  return tr(
+    `Range presets use the attendance timezone calendar (${zone}).`,
+    `快捷区间按考勤时区日历（${zone}）。`,
+  )
+})
 const overviewSectionElements = new Map<string, HTMLElement>()
 
 function isKnownOverviewSectionId(id: string | null | undefined): id is AttendanceOverviewSectionId {
@@ -15871,6 +15862,32 @@ const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))
 const toDate = ref(toDateInput(today))
 const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(fromDate.value, toDate.value))
+
+function applyPristineReportRange(timeZone: string | null): boolean {
+  if (!showReports.value || !reportRangePristine.value || !timeZone) return false
+  const range = buildAttendanceReportDefaultRange(new Date(), timeZone)
+  if (!range) return false
+  if (fromDate.value === range.from && toDate.value === range.to) return false
+  applyingReportRange = true
+  fromDate.value = range.from
+  toDate.value = range.to
+  applyingReportRange = false
+  return true
+}
+
+function maybeResyncPristineReportRange(): void {
+  if (!showReports.value || !reportRangePristine.value) return
+  const zone = reportRangeTimeZone.value
+  if (!zone || zone === lastAutoReportRangeZone) return
+  const changed = applyPristineReportRange(zone)
+  lastAutoReportRangeZone = zone
+  if (changed) void reloadReportsWithStatus()
+}
+
+watch([fromDate, toDate], () => {
+  if (applyingReportRange) return
+  reportRangePristine.value = false
+}, { flush: 'sync' })
 
 const recordsPage = ref(1)
 const recordsPageSize = 20
@@ -22800,6 +22817,7 @@ async function refreshAll(): Promise<boolean> {
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
     loading.value = false
+    maybeResyncPristineReportRange()
   }
   return success
 }
@@ -22842,6 +22860,7 @@ async function reloadReportsWithStatus() {
     )
   } finally {
     loading.value = false
+    maybeResyncPristineReportRange()
   }
 }
 
