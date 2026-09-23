@@ -11612,6 +11612,10 @@ function calculateDurationMinutes(startAt, endAt) {
 }
 
 function applyOvertimeRule(minutes, rule) {
+  // Segmentation-only normalizer. Still raises below minMinutes, ceil-rounds, then
+  // clamps to maxMinutesPerDay. The request write path must not call this: out-of-range
+  // overtime is rejected by resolveOvertimeWriteMinutes (#5985). Keep the two in lockstep
+  // for values that already sit inside the rule, where raise and clamp are no-ops.
   if (!rule) return minutes
   const minMinutes = Math.max(0, Number(rule.minMinutes ?? 0))
   const rounding = Math.max(1, Number(rule.roundingMinutes ?? 1))
@@ -11625,6 +11629,93 @@ function applyOvertimeRule(minutes, rule) {
     adjusted = Math.min(adjusted, maxMinutes)
   }
   return adjusted
+}
+
+function overtimeRuleBoundNumbers(rule) {
+  const minRaw = Math.max(0, Number(rule?.minMinutes ?? 0))
+  const roundingRaw = Math.max(1, Number(rule?.roundingMinutes ?? 1))
+  const maxRaw = Math.max(0, Number(rule?.maxMinutesPerDay ?? 0))
+  return {
+    minMinutes: Number.isFinite(minRaw) ? minRaw : 0,
+    roundingMinutes: Number.isFinite(roundingRaw) ? roundingRaw : 1,
+    maxMinutesPerDay: Number.isFinite(maxRaw) ? maxRaw : 0,
+  }
+}
+
+function roundOvertimeMinutes(minutes, roundingMinutes) {
+  if (Number.isFinite(roundingMinutes) && roundingMinutes > 1) {
+    return Math.ceil(minutes / roundingMinutes) * roundingMinutes
+  }
+  return minutes
+}
+
+// Write-path contract (#5985). Reject below min and above max. Round only after the
+// submitted value is inside the rule. If rounding itself would pass the daily max, reject
+// instead of clamping. maxMinutesPerDay <= 0 means no daily cap, matching applyOvertimeRule.
+function resolveOvertimeWriteMinutes(minutes, rule) {
+  const submitted = Number(minutes)
+  if (!rule) return { ok: true, minutes: submitted }
+  const { minMinutes, roundingMinutes, maxMinutesPerDay } = overtimeRuleBoundNumbers(rule)
+  if (maxMinutesPerDay > 0 && minMinutes > maxMinutesPerDay) {
+    return {
+      ok: false,
+      code: 'OVERTIME_RULE_BOUNDS_INVALID',
+      message: 'Overtime rule minimum exceeds the daily maximum',
+      detail: 'minMinutes must be less than or equal to maxMinutesPerDay',
+      submittedMinutes: submitted,
+      limit: null,
+      roundedMinutes: null,
+    }
+  }
+  if (minMinutes > 0 && submitted < minMinutes) {
+    return {
+      ok: false,
+      code: 'OVERTIME_MINUTES_BELOW_MIN',
+      message: 'Overtime minutes are below the rule minimum',
+      detail: `Must be at least ${minMinutes} minutes`,
+      submittedMinutes: submitted,
+      limit: minMinutes,
+      roundedMinutes: null,
+    }
+  }
+  if (maxMinutesPerDay > 0 && submitted > maxMinutesPerDay) {
+    return {
+      ok: false,
+      code: 'OVERTIME_MINUTES_ABOVE_MAX',
+      message: 'Overtime minutes exceed the rule daily maximum',
+      detail: `Must be at most ${maxMinutesPerDay} minutes`,
+      submittedMinutes: submitted,
+      limit: maxMinutesPerDay,
+      roundedMinutes: null,
+    }
+  }
+  const rounded = roundOvertimeMinutes(submitted, roundingMinutes)
+  if (maxMinutesPerDay > 0 && rounded > maxMinutesPerDay) {
+    return {
+      ok: false,
+      code: 'OVERTIME_MINUTES_ABOVE_MAX',
+      message: 'Overtime minutes exceed the rule daily maximum after rounding',
+      detail: `Rounding to ${rounded} minutes exceeds the daily maximum of ${maxMinutesPerDay}`,
+      submittedMinutes: submitted,
+      limit: maxMinutesPerDay,
+      roundedMinutes: rounded,
+    }
+  }
+  return { ok: true, minutes: rounded }
+}
+
+// Write-path contract (#5983). Same shape as makeup's requireAttachment gate:
+// exact true, and a trimmed attachment URL. Does not throw; the draft resolver does.
+function rejectLeaveAttachmentIfRequired(leaveType, attachmentUrl) {
+  if (!leaveType || leaveType.requiresAttachment !== true) return null
+  if (normalizeOptionalText(attachmentUrl)) return null
+  return {
+    status: 422,
+    code: 'LEAVE_ATTACHMENT_REQUIRED',
+    message: 'An attachment is required for this leave type',
+    field: 'attachmentUrl',
+    detail: 'Required when the leave type requires an attachment',
+  }
 }
 
 const OVERTIME_SEGMENTATION_ENGINE = 'attendance_overtime_segmentation_v1'
@@ -24608,6 +24699,11 @@ module.exports = {
   __attendanceMakeupPunchForTests: {
     deriveMakeupAnomalyFacts,
   },
+  __attendanceRequestWriteHonestyForTests: {
+    applyOvertimeRule,
+    resolveOvertimeWriteMinutes,
+    rejectLeaveAttachmentIfRequired,
+  },
   // W4C-3c test seams — boundary still enforces capability/authorization.
   get __attendanceW4RecordOperationBoundaryForTests() {
     return w4RecordOperationBoundary
@@ -33180,7 +33276,16 @@ module.exports = {
           )
         }
         overtimeSegmentationInputMinutes = durationMinutes
-        durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
+        const overtimeWrite = resolveOvertimeWriteMinutes(durationMinutes, overtimeRule)
+        if (!overtimeWrite.ok) {
+          throw new HttpError(
+            422,
+            overtimeWrite.code,
+            overtimeWrite.message,
+            singleValidationDetail('minutes', overtimeWrite.detail),
+          )
+        }
+        durationMinutes = overtimeWrite.minutes
       }
 
       if ((requestType === 'leave' || requestType === 'overtime') && (!durationMinutes || durationMinutes <= 0)) {
@@ -33207,6 +33312,18 @@ module.exports = {
       const attachmentUrl = parsedData.attachmentUrl === undefined
         ? normalizeOptionalText(existingMetadata.attachmentUrl)
         : normalizeOptionalText(firstDefinedValue(parsedData.attachmentUrl, parsedData.attachment_url))
+
+      if (requestType === 'leave') {
+        const attachmentRejection = rejectLeaveAttachmentIfRequired(leaveType, attachmentUrl)
+        if (attachmentRejection) {
+          throw new HttpError(
+            attachmentRejection.status,
+            attachmentRejection.code,
+            attachmentRejection.message,
+            singleValidationDetail(attachmentRejection.field, attachmentRejection.detail),
+          )
+        }
+      }
 
       const metadata = {}
       if (durationMinutes) metadata.minutes = durationMinutes

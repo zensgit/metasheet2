@@ -788,6 +788,13 @@
               <small v-if="overtimeRules.length === 0" class="attendance__field-hint">
                 {{ tr('Ask an attendance admin to enable an active overtime rule before submitting overtime requests.', '请联系考勤管理员启用可用加班规则后再提交加班申请。') }}
               </small>
+              <small
+                v-else-if="overtimeRuleBoundsHint"
+                class="attendance__field-hint"
+                data-overtime-rule-bounds-hint
+              >
+                {{ overtimeRuleBoundsHint }}
+              </small>
             </label>
             <div
               v-if="canQuickFillLeave"
@@ -867,7 +874,7 @@
                 name="requestAttachment"
                 v-model="requestForm.attachmentUrl"
                 type="text"
-                :placeholder="tr('Optional', '可选')"
+                :placeholder="isLeaveRequest && selectedLeaveType?.requiresAttachment ? tr('Required for this leave type', '该假种需要附件') : tr('Optional', '可选')"
               />
             </label>
             <label class="attendance__field attendance__field--full" for="attendance-request-reason">
@@ -7765,6 +7772,9 @@
                   />
                 </label>
               </div>
+              <p class="attendance__field-hint" data-overtime-rule-admin-bounds>
+                {{ tr('Minimum and daily maximum are hard limits. Requests outside them are rejected; they are not raised or cut down. Rounding still rounds accepted durations up. A daily maximum of 0 means no cap.', '最小分钟数和每日上限是硬门槛。超出范围的申请会被拒绝，不会被抬高或截断。已通过的时长仍按取整向上取整。每日上限为 0 表示不设上限。') }}
+              </p>
               <div class="attendance__admin-actions">
                 <button
                   class="attendance__btn attendance__btn--primary"
@@ -10193,6 +10203,12 @@ import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspac
 import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
 import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
 import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
+import {
+  effectiveOvertimeSubmittedMinutes,
+  overtimeRuleBoundsHintCopy,
+  overtimeWriteBoundsCopy,
+  resolveOvertimeWriteMinutes,
+} from './attendance/overtimeWriteBounds'
 import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
@@ -23002,6 +23018,19 @@ function validateRequestForm(): string | null {
     if (!hasMinutes && !hasRange) {
       return tr('Overtime duration required', '请填写加班时长')
     }
+    const overtimeRule = overtimeRules.value.find(item => item.id === requestForm.overtimeRuleId)
+    const submittedMinutes = effectiveOvertimeSubmittedMinutes({
+      minutes: requestForm.minutes,
+      requestedInAt: requestForm.requestedInAt,
+      requestedOutAt: requestForm.requestedOutAt,
+    })
+    if (overtimeRule && submittedMinutes !== null) {
+      const overtimeWrite = resolveOvertimeWriteMinutes(submittedMinutes, overtimeRule)
+      if (!overtimeWrite.ok) {
+        const copy = overtimeWriteBoundsCopy(overtimeWrite)
+        return tr(copy.en, copy.zh)
+      }
+    }
   }
 
   return null
@@ -25200,6 +25229,17 @@ function formatSelfRulesWarning(code: string): string {
 const selectedLeaveType = computed<AttendanceLeaveType | null>(
   () => leaveTypes.value.find(item => item.id === requestForm.leaveTypeId) ?? null,
 )
+
+const selectedOvertimeRule = computed<AttendanceOvertimeRule | null>(
+  () => overtimeRules.value.find(item => item.id === requestForm.overtimeRuleId) ?? null,
+)
+
+const overtimeRuleBoundsHint = computed(() => {
+  const rule = selectedOvertimeRule.value
+  if (!rule) return ''
+  const copy = overtimeRuleBoundsHintCopy(rule)
+  return tr(copy.en, copy.zh)
+})
 
 const leaveQuickFillShiftWindow = computed<AttendanceLeaveQuickFillShiftWindow | null>(() => {
   const rule = selfRulesData.value?.runtimeRule
