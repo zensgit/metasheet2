@@ -219,7 +219,7 @@
             v-if="makeupRequestCardOpen"
             :tr="tr"
             :request-form="requestForm"
-            :anomalies="eligibleMakeupAnomalies"
+            :anomalies="makeupCardAnomalies"
             :today-work-date="todayWorkDateKey"
             :submitting="requestSubmitting"
             @cancel="closeDedicatedMakeupRequestCard"
@@ -679,7 +679,6 @@
           data-attendance-request-tools
           :open="overviewRequestToolsOpen"
           @toggle="onOverviewRequestToolsToggle"
-          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)"
         >
           <summary class="attendance__details-summary attendance__request-tools-summary">
             <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
@@ -1022,7 +1021,7 @@
           </div>
         </details>
 
-        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
+        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
           <div class="attendance__requests-header">
             <h3>{{ tr('Anomalies', '异常') }}</h3>
             <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="reloadAnomaliesWithStatus">
@@ -10195,7 +10194,7 @@ import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployee
 import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
 import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
-import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
+import { resolveMakeupCardPrefill, resolveSuggestedMakeupTimes } from './attendance/makeupRequestCardPrefill'
 import {
   DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
   resolveEmployeeQuickActionIcons,
@@ -10833,6 +10832,7 @@ type AttendanceSelfServiceActionKey =
   | 'overtime'
   | 'shift_swap'
   | 'records'
+  | 'my-requests'
   | 'request-report'
 
 interface AttendanceSelfServiceRequestFollowup {
@@ -13429,8 +13429,8 @@ const selfServiceRequestFollowup = computed<AttendanceSelfServiceRequestFollowup
       title: tr('Pending follow-up', '待跟进申请'),
       detail: describeRequestStatus('pending', pending),
       status: 'pending',
-      action: 'request-report',
-      actionLabel: tr('Open request report', '打开申请报表'),
+      action: 'my-requests',
+      actionLabel: tr('View my requests', '查看我的申请'),
     }
   }
 
@@ -13440,7 +13440,7 @@ const selfServiceRequestFollowup = computed<AttendanceSelfServiceRequestFollowup
       title: tr('Needs attention', '需要关注'),
       detail: describeRequestStatus('rejected', rejected),
       status: 'rejected',
-      action: 'request-report',
+      action: 'my-requests',
       actionLabel: tr('Review request history', '查看申请历史'),
     }
   }
@@ -13451,8 +13451,8 @@ const selfServiceRequestFollowup = computed<AttendanceSelfServiceRequestFollowup
       title: tr('Latest approval', '最近已批准'),
       detail: describeRequestStatus('approved', approved),
       status: 'approved',
-      action: 'request-report',
-      actionLabel: tr('Open request report', '打开申请报表'),
+      action: 'my-requests',
+      actionLabel: tr('View my requests', '查看我的申请'),
     }
   }
 
@@ -14997,12 +14997,23 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
 const overviewRequestToolsOpen = ref(false)
 const leaveRequestCardOpen = ref(false)
 const makeupRequestCardOpen = ref(false)
+const makeupCardPinnedRecordId = ref<string | null>(null)
 const overtimeRequestCardOpen = ref(false)
 const shiftSwapRequestCardOpen = ref(false)
 
 const eligibleMakeupAnomalies = computed(() =>
   anomalies.value.filter(item => item.state !== 'pending'),
 )
+
+const makeupCardAnomalies = computed(() => {
+  const items = eligibleMakeupAnomalies.value
+  const pinId = makeupCardPinnedRecordId.value
+  if (!pinId) return items
+  const index = items.findIndex(item => item.recordId === pinId)
+  if (index <= 0) return items
+  const pinned = items[index]
+  return [pinned, ...items.filter(item => item.recordId !== pinId)]
+})
 
 function onOverviewRequestToolsToggle(event: Event): void {
   const target = event.currentTarget
@@ -17334,15 +17345,7 @@ async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void>
     )
     return
   }
-  requestForm.workDate = item.workDate
-  requestForm.requestType = item.suggestedRequestType ?? 'time_correction'
-  setStatus(
-    appendStatusContext(
-      tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。'),
-      requestTimezoneContextHint.value,
-    ),
-  )
-  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
+  await openDedicatedMakeupRequestCard(item)
 }
 
 async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Promise<void> {
@@ -17368,6 +17371,10 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
   if (shiftSwapRequestCardOpen.value) closeDedicatedShiftSwapRequestCard()
   if (action === 'records') {
     await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)
+    return
+  }
+  if (action === 'my-requests' || (action === 'request-report' && !showReports.value)) {
+    await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)
     return
   }
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)
@@ -17425,11 +17432,21 @@ function prepareRequestDraft(requestType: AttendanceRequest['request_type'], wor
   requestForm.requestType = requestType
 }
 
-async function openDedicatedMakeupRequestCard(): Promise<void> {
+async function openDedicatedMakeupRequestCard(target?: AttendanceAnomaly | null): Promise<void> {
   clearRequestSubmitStatus()
-  const fallbackWorkDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
-  const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
+  const pinned = target && target.state !== 'pending' ? target : null
+  const fallbackWorkDate = pinned?.workDate || activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
+  const pool = pinned
+    ? [pinned, ...anomalies.value.filter(item => item.recordId !== pinned.recordId)]
+    : anomalies.value
+  const draft = resolveMakeupCardPrefill(pool, fallbackWorkDate)
   prepareRequestDraft(draft.requestType, draft.workDate)
+  makeupCardPinnedRecordId.value = pinned?.recordId ?? null
+  if (pinned) {
+    const times = resolveSuggestedMakeupTimes(pinned, leaveQuickFillShiftWindow.value)
+    requestForm.requestedInAt = times.requestedInAt
+    requestForm.requestedOutAt = times.requestedOutAt
+  }
   leaveRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
   shiftSwapRequestCardOpen.value = false
@@ -17448,7 +17465,12 @@ async function openDedicatedMakeupRequestCard(): Promise<void> {
   if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
     card.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
-  const focusId = draft.anomaly ? 'attendance-makeup-card-anomaly' : 'attendance-makeup-card-time'
+  const suggestedTime = pinned
+    ? (requestForm.requestedInAt || requestForm.requestedOutAt)
+    : ''
+  const focusId = pinned
+    ? (suggestedTime ? 'attendance-makeup-card-time' : 'attendance-makeup-card-anomaly')
+    : (draft.anomaly ? 'attendance-makeup-card-anomaly' : 'attendance-makeup-card-time')
   const focusField = document.getElementById(focusId)
   if (focusField instanceof HTMLElement && typeof focusField.focus === 'function') {
     focusField.focus()
@@ -17457,6 +17479,7 @@ async function openDedicatedMakeupRequestCard(): Promise<void> {
 
 function closeDedicatedMakeupRequestCard(): void {
   makeupRequestCardOpen.value = false
+  makeupCardPinnedRecordId.value = null
 }
 
 async function submitDedicatedMakeupRequestCard(): Promise<void> {

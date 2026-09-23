@@ -172,8 +172,9 @@ describe('W5-2 context-help wiring', () => {
     app.mount(container!)
     await flushUi(8)
 
-    const card = container!.querySelector<HTMLElement>('[data-overview-section="attendance-overview-anomalies"]')
+    const card = container!.querySelector<HTMLElement>('[data-attendance-request-tools]')
     expect(card).not.toBeNull()
+    expect(card!.id).not.toBe('attendance-overview-anomalies')
     const help = card!.querySelector<HTMLElement>('[data-attendance-context-help][data-context-help-context="self-request-center"]')
     expect(help).not.toBeNull()
     const link = help!.querySelector<HTMLAnchorElement>('[data-context-help-evidence-link]')
@@ -211,7 +212,7 @@ describe('W5-2 context-help wiring', () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(8)
-    const card = container!.querySelector<HTMLElement>('[data-overview-section="attendance-overview-anomalies"]')!
+    const card = container!.querySelector<HTMLElement>('[data-attendance-request-tools]')!
     const link = card.querySelector<HTMLAnchorElement>('[data-context-help-evidence-link]')!
     expect(link.textContent?.trim()).toBe('View basis (decision trace)')
   })

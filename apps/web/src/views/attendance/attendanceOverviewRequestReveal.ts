@@ -1,10 +1,14 @@
 /**
- * Employee overview: which deep-link / footer entries must open the
- * request/makeup disclosure after that card became collapsed-by-default.
+ * Employee overview: which deep links must open the collapsed request/makeup
+ * disclosure.
  *
- * `attendance-overview-requests` is still the Summary card id. Historical
- * "我的申请" entries keep that query section; they must reveal the request
- * tools instead of leaving the form hidden.
+ * `attendance-overview-requests` is the Summary card id. Historical 「我的申请」
+ * entries keep that query section and must reveal the request tools.
+ *
+ * `attendance-overview-anomalies` is the anomalies list. Landing there must
+ * not open the makeup disclosure (task-home 「异常」 scrolls to the list).
+ * `attendance-overview-request-report` is the reports-mode request report and
+ * is absent on overview, so it must not open the makeup disclosure either.
  */
 export const ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID = 'attendance-overview-requests'
 export const ATTENDANCE_OVERVIEW_ANOMALIES_SECTION_ID = 'attendance-overview-anomalies'
@@ -15,10 +19,5 @@ export function shouldRevealOverviewRequestTools(
   requestId: string | null | undefined = '',
 ): boolean {
   if (String(requestId ?? '').trim()) return true
-  const section = String(sectionId ?? '').trim()
-  return (
-    section === ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID
-    || section === ATTENDANCE_OVERVIEW_ANOMALIES_SECTION_ID
-    || section === ATTENDANCE_OVERVIEW_REQUEST_REPORT_SECTION_ID
-  )
+  return String(sectionId ?? '').trim() === ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID
 }
