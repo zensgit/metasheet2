@@ -51,8 +51,8 @@ function failure(cause: unknown): string {
   if (code === 401 || code === 403) return t('当前身份无权归档此表', 'Your current identity cannot archive this table')
   if (code === 409) return t('归档请求冲突，请刷新状态', 'Archive request conflict; refresh its status')
   if (code === 503 && (cause as { code?: unknown } | null)?.code === 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE') {
-    return t('含附件的手动归档尚不可用；本次归档未完成。',
-      'Manual archives containing attachments are not yet available; this archive is incomplete.')
+    return t('附件内容或存储配置不可用；本次归档未完成。',
+      'Attachment content or storage configuration is unavailable; this archive is incomplete.')
   }
   return t('归档当前不可用，请检查配置后重试', 'Archive unavailable; check configuration and retry')
 }

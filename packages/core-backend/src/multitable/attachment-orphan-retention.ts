@@ -5,7 +5,7 @@ import { query, transaction } from '../db/pg'
 import { fenceWriterEntry, type FenceQuery } from './canonical-sheet-fence'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { resolveWithinBase } from '../services/StorageService'
-import { hasActiveArchiveSourcePin, markAttachmentPurgeClaim } from './attachment-purge-claim'
+import { hasActiveArchiveSourcePin, markAttachmentPurgeClaim, stampClaimedAttachmentPurge } from './attachment-purge-claim'
 
 type AttachmentTransaction = <T>(work: (client: { query: FenceQuery }) => Promise<T>) => Promise<T>
 
@@ -281,10 +281,10 @@ async function cleanupOrphanMultitableAttachmentsWithSourcePinGuard(input: {
           continue
         }
       }
-      await queryFn(
-        'UPDATE multitable_attachments SET blob_purged_at = now() WHERE id = $1 AND blob_purged_at IS NULL',
-        [claimed.id],
-      )
+      if (!await stampClaimedAttachmentPurge(queryFn, claimed.id, claimed.storage_path)) {
+        skipped += 1
+        continue
+      }
       deleted += 1
     }
 
@@ -479,10 +479,10 @@ async function sweepMultitableAttachmentBlobPurgeWithSourcePinGuard(input: {
           continue
         }
       }
-      await queryFn(
-        'UPDATE multitable_attachments SET blob_purged_at = now() WHERE id = $1 AND blob_purged_at IS NULL',
-        [claimed.id],
-      )
+      if (!await stampClaimedAttachmentPurge(queryFn, claimed.id, claimed.storage_path)) {
+        skipped += 1
+        continue
+      }
       purged += 1
     }
 

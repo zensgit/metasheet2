@@ -53,6 +53,7 @@ function fakeApiClient() {
 }
 
 interface HarnessOptions {
+  apiClient?: ReturnType<typeof fakeApiClient>
   record?: MetaRecord | null
   fields?: MetaField[]
   onClose?: () => void
@@ -72,7 +73,7 @@ function mountInspector(options: HarnessOptions = {}): { container: HTMLElement;
         canComment: false,
         canDelete: false,
         sheetId: 'sheet_1',
-        apiClient: fakeApiClient() as any,
+        apiClient: (options.apiClient ?? fakeApiClient()) as any,
         ...(options.onClose ? { onClose: options.onClose } : {}),
         ...(options.openComments !== undefined ? { openComments: options.openComments } : {}),
       })
@@ -201,6 +202,35 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
   })
 
   describe('tab structure + ARIA pairing', () => {
+    it.each(['en', 'zh-CN'])('history preserves original time and displays the viewer zone (%s)', async (locale) => {
+      useLocale().setLocale(locale)
+      const createdAt = '2026-09-14T08:00:00.000Z'
+      const apiClient = fakeApiClient()
+      apiClient.listRecordHistory.mockResolvedValue([
+        { id: 'time-1', version: 1, action: 'update', source: 'rest', actorId: 'actor-1', actorName: 'Example User', changedFieldIds: [], createdAt },
+        { id: 'time-2', version: 0, action: 'create', source: 'rest', actorId: 'unknown-actor', actorName: null, changedFieldIds: [], createdAt: 'legacy-time-unavailable' },
+      ])
+      const { container, app } = mountInspector({ apiClient })
+      try {
+        tabButtons(container)[1].click()
+        await flushUi()
+        const times = container.querySelectorAll('.meta-record-drawer__history-meta time')
+        expect(times).toHaveLength(2)
+        expect(times[0].textContent).toBe(new Date(createdAt).toLocaleString(locale === 'zh-CN' ? 'zh-CN' : 'en-US', {
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hourCycle: 'h23', timeZoneName: 'short',
+        }))
+        expect(times[0].getAttribute('datetime')).toBe(createdAt)
+        expect(times[0].getAttribute('title')).toBe(createdAt)
+        expect(times[1].textContent).toBe('legacy-time-unavailable')
+        expect(tabPanel(container)?.textContent).toContain('Example User')
+        expect(tabPanel(container)?.textContent).toContain('unknown-actor')
+      } finally {
+        app.unmount()
+      }
+    })
+
     it('renders a tablist with 4 tabs (S5: details/history/comments/attachments) and exactly 1 rendered tabpanel', async () => {
       const { container, app } = mountInspector()
       await flushUi()
