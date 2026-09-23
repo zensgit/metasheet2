@@ -2,6 +2,30 @@
 
 Status: OWNER-CONFIRMED bounded capability; implementation and acceptance OPEN.
 
+## Owner Permission and Lifecycle Disposition (2026-09-23)
+
+Owner explicitly confirmed the following boundary against published candidate
+`402c412711f67f12c3c101c975c1ed44fe27a4aa`, based on main
+`cd42eaf7455f03dd99021a02c47c42f1f3db6484`:
+
+1. This slice retains existing administrator, sheet, row and field authority.
+   New tenant isolation requires a separate contract; no new organization policy
+   or second-tenant isolation claim is introduced here.
+2. Removing an attachment from a cell does not automatically revoke its old ID.
+   Existing authorization still applies to reads/deletes of that ID; this is not
+   public or unauthenticated access. Explicit deletion makes that attachment ID
+   unavailable. Detach-immediately-revokes access requires a separate contract.
+   Sealed archive copies retain the already-defined recovery lifecycle.
+3. The historical browser API_REQUEST_FAILED remains an unattributed risk. It
+   is not declared fixed or harmless because later acceptance passed.
+
+The first two owner decisions are now CLOSED for this bounded slice. This section
+supersedes historical owner-pending statements below and in the paired report,
+not their SHA-scoped test facts. Previously requested new second-tenant acceptance
+is deferred with that separate capability, not marked as a passing test.
+No product or permission code changes are required by this disposition. It grants
+no Ready/merge, flag, dispatch, deployment or real-environment authorization.
+
 ## Current-main Acceptance Refresh (2026-09-22)
 
 Candidate `3d01f8209897d07eebe0880c846be9d061fbb9db`, tree

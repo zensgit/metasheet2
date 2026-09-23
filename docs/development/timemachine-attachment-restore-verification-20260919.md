@@ -12,6 +12,31 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Branch: `codex/timemachine-attachment-restore-20260919`.
 
+## Owner Disposition and Evidence Boundary (2026-09-23)
+
+Owner confirmed existing permissions and detached-ID lifecycle for this slice.
+The authoritative decision is in the paired design lock's 2026-09-23 section.
+This supersedes prior owner-pending statements; it does not retroactively create
+test evidence or authorize implementation of new tenant isolation/revocation.
+
+| Item | Disposition |
+| --- | --- |
+| Existing administrator/sheet/row/field checks | Retained; previously recorded authorization negatives remain SHA-bound evidence. |
+| New tenant isolation | Separate future contract. Not implemented or verified by the other-actor/scope-relocation tests. No longer an owner-decision blocker for this bounded slice. |
+| Attachment removed from cell | Does not itself revoke the old ID; existing authorization still applies. The earlier owned HTTP diagnostic is consistent with the confirmed contract, not an authentication bypass. |
+| Explicit attachment deletion | Earlier diagnostic observed authorized DELETE then GET 404; anonymous/inactive access refused and sealed archive bytes remained intact. No new behavior or test run is claimed today. |
+| Detach-immediately-revokes access | Separate future contract, including draft/archive lifecycle exceptions; not silently implemented. |
+| Historical browser API_REQUEST_FAILED | Still unattributed and not declared fixed; later complete passes do not establish its cause. |
+
+Publication baseline: clean/synchronized PR #5882 head
+`402c412711f67f12c3c101c975c1ed44fe27a4aa`, main
+`cd42eaf7455f03dd99021a02c47c42f1f3db6484`. Its terminal checks were
+34 SUCCESS + 1 expected Strict E2E SKIPPED, zero pending/failure, recorded in
+[the exact-head terminal receipt](https://github.com/zensgit/metasheet2/pull/5882#issuecomment-5765259644).
+This follow-up changes only the two reports; successor exact-head checks are
+separate. No DB/browser rerun, runtime changes, Ready/merge, flags, dispatch,
+deployment or customer data/storage access accompanies the documentation change.
+
 ## Clean-head Acceptance and Source Review (2026-09-22)
 
 Exact clean candidate `3d01f8209897d07eebe0880c846be9d061fbb9db`, tree
