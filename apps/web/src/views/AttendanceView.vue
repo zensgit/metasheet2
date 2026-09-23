@@ -175,6 +175,7 @@
         :annual-self-balance-loading="annualSelfBalanceLoading"
         :annual-self-balance-error="annualSelfBalanceError"
         :annual-self-balance-summary="annualSelfBalanceSummary"
+        :balance-day-minutes="annualSelfBalanceDayMinutes"
         :balance-leave-type="selfBalanceLeaveType"
         :balance-trace-href="selfBalanceTraceHref"
         :self-rules-loading="selfRulesLoading"
@@ -10369,8 +10370,14 @@ import {
   parseAttendanceRotationSequenceInput,
 } from './attendance/attendanceRotationSequencePreview'
 import {
+  annualLeaveExceedsTypeDayMessage,
+  annualLeaveMinutesExceedTypeDay,
+  annualLeaveSettleStatusCopy,
+  isAnnualLeaveSettleErrorCode,
+} from './attendance/annualLeaveDayContract'
+import {
   buildLeaveQuickFill,
-  computeLeaveMinutesDaysEquivalent,
+  formatLeaveTypeDaysHint,
   hasValidLeaveQuickFillShiftWindow,
   type AttendanceLeaveQuickFillKind,
   type AttendanceLeaveQuickFillShiftWindow,
@@ -21076,7 +21083,14 @@ function classifyStatusError(
   // (CROSS_USER may carry 403, QUOTA may carry 409/422). meta.code stays set so
   // the banner keeps showing the exact server code for support/admins.
   const makeupCopy = context === 'request-submit' ? resolveMakeupPunchRequestStatusCopy(code, tr) : null
-  if (makeupCopy) {
+  const annualSettleCopy = (context === 'request-submit' || context === 'request-resolve')
+    && isAnnualLeaveSettleErrorCode(code)
+    ? annualLeaveSettleStatusCopy(originalMessage, context, tr)
+    : null
+  if (annualSettleCopy) {
+    message = annualSettleCopy.message
+    meta.hint = annualSettleCopy.hint
+  } else if (makeupCopy) {
     message = makeupCopy.message
     if (makeupCopy.hint) meta.hint = makeupCopy.hint
     if (makeupCopy.action) meta.action = makeupCopy.action
@@ -22990,6 +23004,11 @@ function validateRequestForm(): string | null {
     const leaveType = leaveTypes.value.find(item => item.id === requestForm.leaveTypeId)
     if (leaveType?.requiresAttachment && !requestForm.attachmentUrl.trim()) {
       return tr('Attachment URL required for this leave type', '该请假类型要求填写附件 URL')
+    }
+    const leaveMinutesValue = String(requestForm.minutes ?? '').trim()
+    const leaveMinutes = leaveMinutesValue.length > 0 ? Number(leaveMinutesValue) : Number.NaN
+    if (leaveType && annualLeaveMinutesExceedTypeDay(leaveType, Number.isFinite(leaveMinutes) ? leaveMinutes : null)) {
+      return annualLeaveExceedsTypeDayMessage(Number(leaveType.defaultMinutesPerDay), leaveMinutes, tr)
     }
   }
 
@@ -25026,6 +25045,7 @@ interface AnnualLeaveBalanceEvent {
 interface AnnualLeaveBalanceData {
   userId: string
   summary: { leaveTypeCode: string; grantedMinutes: number; remainingMinutes: number; exhaustedMinutes: number; expiredMinutes: number }
+  dayBasis?: { minutesPerDay: number; source: string } | null
   activeLots: AnnualLeaveBalanceLot[]
   recentEvents: AnnualLeaveBalanceEvent[]
   eventLimit: number
@@ -25261,20 +25281,11 @@ const leaveQuickFillHalfDayNote = computed(() => {
   )
 })
 
-// G2: minutes -> day-equivalent hint, explicitly against THIS leave type's defaultMinutesPerDay
-// (never an org-level standardDayMinutes -- that field isn't on the employee wire, design-lock §3).
+// G2: minutes -> day-equivalent hint, explicitly against THIS leave type's defaultMinutesPerDay.
+// Annual balance days use /me dayBasis (policy standard day), not this hint (#5969).
 const leaveMinutesDaysHint = computed(() => {
   if (!isLeaveRequest.value || !requestForm.leaveTypeId) return ''
-  const perDay = selectedLeaveType.value?.defaultMinutesPerDay
-  const days = computeLeaveMinutesDaysEquivalent(requestForm.minutes, perDay)
-  if (days === null) return ''
-  // toFixed(1) on top of the already-rounded-to-one-decimal `days` guarantees a stable trailing
-  // zero for the "保留一位小数" display (e.g. exactly `1` renders as "1.0", not "1").
-  const daysText = days.toFixed(1)
-  return tr(
-    `≈ ${daysText} day(s) (based on this leave type's standard day of ${perDay} min)`,
-    `≈ ${daysText} 天（按该假种标准日 ${perDay} 分钟）`,
-  )
+  return formatLeaveTypeDaysHint(requestForm.minutes, selectedLeaveType.value?.defaultMinutesPerDay, tr)
 })
 
 // 年假/法定假 employee self-service: the overview card reads the caller's OWN balance via the token-locked /me
@@ -25283,6 +25294,11 @@ const annualSelfBalance = ref<AnnualLeaveBalanceData | null>(null)
 const annualSelfBalanceLoading = ref(false)
 const annualSelfBalanceError = ref<string | null>(null)
 const annualSelfBalanceSummary = computed(() => annualSelfBalance.value?.summary ?? null)
+const annualSelfBalanceDayMinutes = computed(() => {
+  if (selfBalanceLeaveType.value !== 'annual') return null
+  const perDay = Number(annualSelfBalance.value?.dayBasis?.minutesPerDay)
+  return Number.isInteger(perDay) && perDay > 0 ? perDay : null
+})
 
 // OD-W5-7 (docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md
 // §9 backlog table, decision (b)): leaveTypeCode is parameterized here — default 'annual' is

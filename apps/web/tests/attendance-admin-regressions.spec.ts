@@ -1564,7 +1564,17 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/attendance/leave-balances/me')) {
-        return jsonResponse(200, { ok: true, data: { userId: 'self', summary: { leaveTypeCode: 'annual', grantedMinutes: 2400, remainingMinutes: 1800, exhaustedMinutes: 600, expiredMinutes: 0 }, activeLots: [], recentEvents: [], eventLimit: 50 } })
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            userId: 'self',
+            summary: { leaveTypeCode: 'annual', grantedMinutes: 2250, remainingMinutes: 2250, exhaustedMinutes: 0, expiredMinutes: 0 },
+            dayBasis: { minutesPerDay: 450, source: 'annualLeavePolicy.standardDayMinutes' },
+            activeLots: [],
+            recentEvents: [],
+            eventLimit: 50,
+          },
+        })
       }
       return emptyAttendanceResponse()
     })
@@ -1573,7 +1583,10 @@ describe('Attendance admin regressions', () => {
     await flushUi(10)
     const card = container!.querySelector('[data-selfservice-card="annual-balance"]')
     expect(card).toBeTruthy()
-    expect(card!.querySelector('[data-annual-self-balance]')?.textContent).toContain('3 days 6h') // remaining 1800 min → 3d 6h
+    const balanceText = card!.querySelector('[data-annual-self-balance]')?.textContent ?? ''
+    expect(balanceText).toContain('5 days')
+    expect(balanceText).toContain('1 day = 450 min')
+    expect(balanceText).not.toContain('4 days')
     // the request hits the token-locked /me endpoint and carries NO userId param (self-service, server-forced subject)
     const meCall = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).find(u => u.includes('/leave-balances/me'))
     expect(meCall).toBeTruthy()

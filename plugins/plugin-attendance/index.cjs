@@ -19494,6 +19494,48 @@ function computeAnnualLeaveStandardDayMinutes({ requestMinutes, defaultMinutesPe
   return deductMinutes
 }
 
+// #5969: employee annual "day" is the bank day approve deducts, not a display guess of 480.
+// Comp time and any non-annual read have no day ruler (null). Missing / non-positive input is null
+// so the client shows hours+minutes instead of inventing a day length.
+function annualLeaveEmployeeDayBasis(leaveTypeCode, standardDayMinutes) {
+  if (leaveTypeCode !== 'annual') return null
+  const minutesPerDay = Number(standardDayMinutes)
+  if (!Number.isInteger(minutesPerDay) || minutesPerDay <= 0) return null
+  return {
+    minutesPerDay,
+    source: 'annualLeavePolicy.standardDayMinutes',
+  }
+}
+
+// #5969: when the annual engine is on, create/pending-edit must fail the same way approve would,
+// before a pending row exists. Does not deduct — approve still owns the ledger write.
+async function assertAnnualLeaveRequestSettleable(client, { orgId, userId, requestMinutes, defaultMinutesPerDay, standardDayMinutes }) {
+  const deductMinutes = computeAnnualLeaveStandardDayMinutes({
+    requestMinutes,
+    defaultMinutesPerDay,
+    standardDayMinutes,
+  })
+  if (!userId) {
+    throw new HttpError(422, 'ANNUAL_LEAVE_DEDUCTION_AMOUNT_INVALID', 'Cannot derive a standard-day annual-leave deduction from this request')
+  }
+  const result = await client.query(
+    `SELECT COALESCE(SUM(remaining_minutes), 0) AS available
+       FROM attendance_leave_balances
+      WHERE org_id = $1 AND user_id = $2 AND leave_type_code = 'annual' AND status = 'active'`,
+    [orgId, userId],
+  )
+  const rows = Array.isArray(result) ? result : (result?.rows ?? [])
+  const available = Number(rows[0]?.available || 0)
+  if (available < deductMinutes) {
+    throw new HttpError(
+      422,
+      'ANNUAL_LEAVE_BALANCE_INSUFFICIENT',
+      `Annual leave balance insufficient: requested ${deductMinutes} min, available ${available} min`,
+    )
+  }
+  return deductMinutes
+}
+
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 // 年假/法定假 accrual engine (L2b — design-lock #2622 + dev-verification report 2026-06-15). Annual
 // leave is a COMPUTED ENTITLEMENT (not comp_time's idempotent event-credit): eligibility (连续满12个月)
@@ -24496,6 +24538,12 @@ module.exports = {
   // exported nested one bag down, so the top-level optional call silently no-op'd
   // and the 60s settings cache leaked across tests in the shared attendance suite.
   resetAttendanceSettingsCacheForTests,
+  // #5969 day contract: pure formula + create-time settle check (no ledger write).
+  __annualLeaveDayContractForTests: {
+    computeAnnualLeaveStandardDayMinutes,
+    annualLeaveEmployeeDayBasis,
+    assertAnnualLeaveRequestSettleable,
+  },
   // W4C-2 Stage D: runtime probe for the env-gated outbox drain worker. `getState().gated`
   // is true ONLY when activate saw ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED non-empty
   // (no env => no worker); `runOnce()` is the EXACT closure the shared scheduler ticks, so
@@ -33307,6 +33355,21 @@ module.exports = {
             )
           }
           metadata[OVERTIME_ATTRIBUTION_KEY] = freeze.anchor
+        }
+      }
+
+      // #5969: annual leave with the engine on must be settleable at create/pending-edit.
+      // Same formula and insufficient-balance code as approve; no ledger write here.
+      if (requestType === 'leave' && leaveType?.code === 'annual') {
+        const annualPolicy = (await getSettings(client))?.annualLeavePolicy
+        if (annualPolicy?.enabled === true) {
+          await assertAnnualLeaveRequestSettleable(client, {
+            orgId,
+            userId: existingRequest?.user_id,
+            requestMinutes: durationMinutes,
+            defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
+            standardDayMinutes: annualPolicy.standardDayMinutes,
+          })
         }
       }
 
@@ -50463,7 +50526,14 @@ module.exports = {
         const eventLimit = parsed.data.eventLimit ?? 50
         try {
           const data = await readAnnualLeaveBalanceForUser(orgId, userId, leaveTypeCode, eventLimit)
-          res.json({ ok: true, data })
+          // #5969: tell the employee card which bank-day the live policy uses. Comp time is null
+          // (minute-native). Absent/invalid standard day is null so the card does not guess 480.
+          const settings = await getSettings(db)
+          const dayBasis = annualLeaveEmployeeDayBasis(
+            leaveTypeCode,
+            settings?.annualLeavePolicy?.standardDayMinutes,
+          )
+          res.json({ ok: true, data: { ...data, dayBasis } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
