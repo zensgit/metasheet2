@@ -52,7 +52,6 @@ let created = false
 let client: Client | undefined
 let db: Kysely<unknown> | undefined
 let downloadPools: typeof import('../src/integration/db/connection-pool').poolManager | undefined
-let applicationClosedDownloadPool = false
 let shutdownAuthMessaging: (() => Promise<void>) | undefined
 try {
   await admin.connect()
@@ -2501,7 +2500,6 @@ try {
               try {
                 if (server) {
                   await server.stop('SYNTHETIC_ACCEPTANCE_FINISHED')
-                  applicationClosedDownloadPool = true
                   downloadPools?.get().stopMetricsCollection()
                   // Admin route singletons are process-owned, not server.stop-owned.
                   const { getSafetyGuard } = require('../src/guards/SafetyGuard.ts') as typeof import('../src/guards/SafetyGuard')
@@ -2562,6 +2560,8 @@ try {
         } finally { await attachmentHttpPool.end() }
       }
       await verifyFullApplication?.()
+      // Keep the fixture-owned download connection live until teardown checks its closure.
+      assert.deepEqual((await downloadPool.query('SELECT current_database() AS db')).rows[0], { db: database })
     } finally {
       if (commandFlags.archive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
       else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = commandFlags.archive
@@ -2582,7 +2582,7 @@ try {
   await db?.destroy()
   await client?.end()
   await shutdownAuthMessaging?.()
-  if (!applicationClosedDownloadPool) await downloadPools?.close()
+  await downloadPools?.close()
   if (created) {
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
     await admin.query(`DROP DATABASE "${database}"`)
