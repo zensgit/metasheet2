@@ -15485,10 +15485,33 @@ async function loadOvertimeRule(db, orgId, { id, name }) {
   }
 }
 
+const ATTENDANCE_APPROVAL_FLOW_REQUIRED = 'ATTENDANCE_APPROVAL_FLOW_REQUIRED'
+
+// Strict false only. Missing / null / true keep the approval bridge (including the
+// no-flow admin queue). Makeup request types have no requiresApproval column.
+function attendanceRequestSkipsApproval(requestType, { leaveType, overtimeRule } = {}) {
+  if (requestType === 'leave') return leaveType?.requiresApproval === false
+  if (requestType === 'overtime') return overtimeRule?.requiresApproval === false
+  return false
+}
+
 async function loadApprovalFlow(db, orgId, { requestType, flowId }) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     if (flowId) {
+      // Generic request binding passes requestType and must not accept an inactive
+      // or wrong-type flow. Id-only lookup stays unchanged for admin GET and for
+      // outdoor's own post-check (OUTDOOR_APPROVAL_FLOW_REQUIRED).
+      if (requestType) {
+        const rows = await db.query(
+          `SELECT * FROM attendance_approval_flows
+           WHERE org_id = $1 AND id = $2 AND request_type = $3 AND is_active = true
+           LIMIT 1`,
+          [targetOrg, flowId, requestType]
+        )
+        if (!rows.length) return null
+        return mapApprovalFlowRow(rows[0])
+      }
       const rows = await db.query(
         `SELECT * FROM attendance_approval_flows
          WHERE org_id = $1 AND id = $2
@@ -15512,6 +15535,194 @@ async function loadApprovalFlow(db, orgId, { requestType, flowId }) {
     if (isDatabaseSchemaError(error)) return null
     throw error
   }
+}
+
+// Leave / OT / makeup submit selection. Zero active flows returns null so the
+// existing admin / attendance:approve queue still applies. More than one active
+// flow, or an explicit id that is missing / inactive / wrong type, is 422.
+// Shift-swap keeps loadApprovalFlow's newest-active LIMIT 1 (dedicated route).
+async function resolveGenericApprovalFlow(db, orgId, { requestType, flowId }) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  if (flowId) {
+    const flow = await loadApprovalFlow(db, targetOrg, { requestType, flowId })
+    if (!flow) {
+      throw new HttpError(
+        422,
+        ATTENDANCE_APPROVAL_FLOW_REQUIRED,
+        'Approval flow does not exist, is inactive, or does not match the request type',
+        singleValidationDetail('approvalFlowId', 'Provide an active approval flow for this request type')
+      )
+    }
+    return flow
+  }
+  let rows
+  try {
+    rows = await db.query(
+      `SELECT * FROM attendance_approval_flows
+       WHERE org_id = $1 AND request_type = $2 AND is_active = true
+       ORDER BY created_at DESC
+       LIMIT 2`,
+      [targetOrg, requestType]
+    )
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) return null
+    throw error
+  }
+  if (rows.length > 1) {
+    throw new HttpError(
+      422,
+      ATTENDANCE_APPROVAL_FLOW_REQUIRED,
+      'Multiple active approval flows exist for this request type; specify approvalFlowId',
+      singleValidationDetail('approvalFlowId', 'Exactly one active flow is required when approvalFlowId is omitted')
+    )
+  }
+  if (!rows.length) return null
+  return mapApprovalFlowRow(rows[0])
+}
+
+// Same-transaction effects for a request inserted as approved because the leave
+// type or overtime rule has requiresApproval=false. Comp-time / annual / leave-offset
+// deductions match final approval. Overtime comp-time grants and the overtime bank
+// stay on the human approval path (see the #5967 design note).
+async function applyExemptedLeaveOrOvertimeEffects(trx, {
+  orgId,
+  userId,
+  requestId,
+  requestType,
+  workDate,
+  metadata,
+  referenceSegments,
+  resolvedAt,
+}) {
+  if (requestType !== 'leave' && requestType !== 'overtime') return null
+  const requestMetadata = metadata && typeof metadata === 'object' ? metadata : {}
+  if (requestType === 'leave' && requestMetadata.leaveType?.code === 'comp_time') {
+    await deductCompTimeBalance(trx, {
+      orgId,
+      userId,
+      requestId,
+      minutes: requestMetadata.minutes,
+    })
+  }
+  const leaveTypeCode = requestType === 'leave' ? requestMetadata.leaveType?.code : null
+  if (leaveTypeCode && leaveTypeCode !== 'comp_time') {
+    const settings = await getSettings(trx)
+    if (leaveTypeCode === 'annual' && settings?.annualLeavePolicy?.enabled === true) {
+      const deductMinutes = computeAnnualLeaveStandardDayMinutes({
+        requestMinutes: requestMetadata.minutes,
+        defaultMinutesPerDay: requestMetadata.leaveType?.defaultMinutesPerDay,
+        standardDayMinutes: settings.annualLeavePolicy.standardDayMinutes,
+      })
+      await deductLeaveBalance(trx, {
+        orgId,
+        userId,
+        leaveTypeCode: 'annual',
+        amountMinutes: deductMinutes,
+        sourceType: 'annual_leave',
+        insufficientCode: 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT',
+        insufficientLabel: 'Annual leave',
+        sourceId: requestId,
+      })
+    }
+    if (leaveTypeCode !== 'annual') {
+      const offsetPolicy = settings?.leaveBalanceDeductionPolicy
+      if (offsetPolicy?.enabled === true) {
+        const rule = (offsetPolicy.rules || []).find((entry) => entry.requestLeaveType === leaveTypeCode)
+        const pool = rule?.deductFrom?.[0]
+        if (rule && pool && pool !== 'unpaid') {
+          await deductLeaveBalance(trx, {
+            orgId,
+            userId,
+            leaveTypeCode: pool,
+            amountMinutes: requestMetadata.minutes,
+            sourceType: 'leave_offset',
+            insufficientCode: 'LEAVE_OFFSET_BALANCE_INSUFFICIENT',
+            insufficientLabel: `Leave offset (${leaveTypeCode}→${pool})`,
+            sourceId: requestId,
+            mode: rule.insufficient === 'partial_unpaid_absence' ? 'partial' : 'block',
+          })
+        }
+      }
+    }
+  }
+  const baseRule = await loadDefaultRule(trx, orgId)
+  const context = await resolveWorkContext({
+    db: trx,
+    orgId,
+    userId,
+    workDate,
+    defaultRule: baseRule,
+    referenceSegments: referenceSegments === true,
+  })
+  const timezone = context.rule.timezone
+  const approvedMinutes = await loadApprovedMinutes(trx, orgId, userId, workDate)
+  const finalOvertimeAnchor = requestType === 'overtime'
+    ? parseOvertimeAttributionV1(
+      requestMetadata[OVERTIME_ATTRIBUTION_KEY] ?? requestMetadata.overtimeAttributionV1,
+    )
+    : null
+  const overtimeRecordMeta = requestType === 'overtime' && finalOvertimeAnchor
+    ? {
+      [OVERTIME_ATTRIBUTION_KEY]: finalOvertimeAnchor,
+      [FROZEN_ATTRIBUTION_KEY]: buildFrozenWorkDateAttribution(
+        {
+          kind: 'resolved',
+          orgId,
+          userId,
+          workDate: finalOvertimeAnchor.workDate,
+          shiftId: finalOvertimeAnchor.shiftId,
+          segmentIndex: null,
+          reasonCode: WORK_DATE_REASON.OVERTIME_EXTENDED_WINDOW,
+          evidenceSnapshot: {
+            overtimeAttributionV1: finalOvertimeAnchor,
+            requestId,
+          },
+        },
+        { orgId, userId },
+      ),
+    }
+    : undefined
+  const record = await upsertAttendanceRecord({
+    userId,
+    orgId,
+    workDate,
+    timezone,
+    rule: context.rule,
+    updateFirstInAt: null,
+    updateLastOutAt: null,
+    mode: 'merge',
+    statusOverride: context.isWorkingDay ? 'adjusted' : 'off',
+    isWorkday: context.isWorkingDay,
+    leaveMinutes: approvedMinutes.leaveMinutes,
+    overtimeMinutes: approvedMinutes.overtimeMinutes,
+    meta: overtimeRecordMeta,
+    client: trx,
+  })
+  await trx.query(
+    `INSERT INTO attendance_events
+     (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb)`,
+    [
+      randomUUID(),
+      userId,
+      orgId,
+      workDate,
+      resolvedAt,
+      'adjustment',
+      'request',
+      timezone,
+      JSON.stringify({}),
+      JSON.stringify({
+        requestId,
+        requestType,
+        minutes: requestMetadata.minutes ?? null,
+        leaveType: requestMetadata.leaveType ?? null,
+        overtimeRule: requestMetadata.overtimeRule ?? null,
+        approvalExemption: requestMetadata.approvalExemption ?? null,
+      }),
+    ]
+  )
+  return record
 }
 
 async function loadRotationAssignment(db, orgId, userId, workDate) {
@@ -24933,6 +25144,12 @@ module.exports = {
     loadAttendanceScopeContextForUser,
     loadAttendanceScopeContextMapForUsers,
   },
+  __attendanceApprovalExemptionForTests: {
+    ATTENDANCE_APPROVAL_FLOW_REQUIRED,
+    attendanceRequestSkipsApproval,
+    loadApprovalFlow,
+    resolveGenericApprovalFlow,
+  },
   __attendanceApprovalCenterForTests: {
     ATTENDANCE_APPROVAL_WORKFLOW_KEY,
     ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS,
@@ -33192,14 +33409,23 @@ module.exports = {
         )
       }
 
-      const approvalFlow = await loadApprovalFlow(client, orgId, {
-        requestType,
-        flowId: normalizeRequestUuidReferenceInput(
-          firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id),
-          existingApprovalFlow.id,
-          'approvalFlowId'
-        ),
+      const requestedApprovalFlowId = normalizeRequestUuidReferenceInput(
+        firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id),
+        existingApprovalFlow.id,
+        'approvalFlowId'
+      )
+      // Create-only. A persisted pending row keeps its approval bridge even if the
+      // leave type or overtime rule is later switched to requiresApproval=false.
+      const skipsApproval = !existingRequest?.id && attendanceRequestSkipsApproval(requestType, {
+        leaveType,
+        overtimeRule,
       })
+      const approvalFlow = skipsApproval
+        ? null
+        : await resolveGenericApprovalFlow(client, orgId, {
+          requestType,
+          flowId: requestedApprovalFlowId,
+        })
 
       const reason = parsedData.reason === undefined
         ? normalizeOptionalText(existingRequest?.reason)
@@ -33318,6 +33544,7 @@ module.exports = {
         requestedOutAt,
         reason,
         metadata,
+        skipsApproval,
       }
     }
 
@@ -33650,29 +33877,35 @@ module.exports = {
         if (settings?.makeupPunchPolicy?.enabled === true) makeupPunchPolicy = settings.makeupPunchPolicy
       }
       const requestId = randomUUID()
-      const approvalId = `apv_${randomUUID()}`
-      assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
-      const orgRelations = await resolveAttendanceOrgRelationsFreeze({
-        orgId: route.orgId,
-        userId: route.actorId,
-        flowSteps: draft.metadata?.approvalFlow?.steps,
-        context,
-      })
-      const approvalPayload = buildAttendanceApprovalInstancePayload({
-        approvalId,
-        requestId,
-        orgId: route.orgId,
-        userId: route.actorId,
-        requesterName: route.requesterName,
-        draft,
-        orgRelations,
-        requestNamedOrgId: route.requestNamedOrgId,
-      })
-      const approvalAssignments = buildAttendanceApprovalAssignments(
-        draft.metadata?.approvalFlow?.steps,
-        0,
-        approvalPayload.requesterSnapshot,
-      )
+      const skipApproval = draft.skipsApproval === true
+      let approvalId = null
+      let approvalPayload = null
+      let approvalAssignments = null
+      if (!skipApproval) {
+        approvalId = `apv_${randomUUID()}`
+        assertDynamicFlowStepsRuntimeAvailable(normalizeApprovalSteps(draft.metadata?.approvalFlow?.steps), context)
+        const orgRelations = await resolveAttendanceOrgRelationsFreeze({
+          orgId: route.orgId,
+          userId: route.actorId,
+          flowSteps: draft.metadata?.approvalFlow?.steps,
+          context,
+        })
+        approvalPayload = buildAttendanceApprovalInstancePayload({
+          approvalId,
+          requestId,
+          orgId: route.orgId,
+          userId: route.actorId,
+          requesterName: route.requesterName,
+          draft,
+          orgRelations,
+          requestNamedOrgId: route.requestNamedOrgId,
+        })
+        approvalAssignments = buildAttendanceApprovalAssignments(
+          draft.metadata?.approvalFlow?.steps,
+          0,
+          approvalPayload.requesterSnapshot,
+        )
+      }
       return {
         ...requestCreateIdentityFromRoute('generic', route),
         state: {
@@ -33681,6 +33914,7 @@ module.exports = {
           draft,
           makeupPunchPolicy,
           requestId,
+          skipApproval,
           approvalId,
           approvalPayload,
           approvalAssignments,
@@ -33688,9 +33922,9 @@ module.exports = {
       }
     }
 
-    async function executeGenericRequestCreate(trx, prepared) {
+    async function executeGenericRequestCreate(trx, prepared, operation) {
       const {
-        route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments,
+        route, draft, makeupPunchPolicy, requestId, skipApproval, approvalId, approvalPayload, approvalAssignments,
       } = prepared.state
       await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
       const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
@@ -33718,12 +33952,38 @@ module.exports = {
       // equality gate holds by construction. Every OTHER route.orgId use in this function
       // (the lock above, findDuplicateAttendanceRequest, lifecycle events below) is
       // deliberately left unrewritten (spec §3 disclosure (a)) — prod-inert under u1a=1.
-      const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
-      await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      // requiresApproval=false uses the same derivation and skips the approval instance.
+      const resolvedAt = new Date()
+      let stampedOrgId
+      if (skipApproval === true) {
+        delete draft.metadata.approvalFlow
+        draft.metadata.approvalExemption = {
+          version: 1,
+          reason: 'requires_approval_false',
+          source: draft.requestType === 'leave' ? 'leave_type' : 'overtime_rule',
+        }
+        draft.metadata.resolution = {
+          action: 'approve',
+          status: 'approved',
+          comment: null,
+          actorId: route.actorId,
+          actorName: route.requesterName,
+          resolvedAt: resolvedAt.toISOString(),
+          source: 'requires_approval_false',
+        }
+        stampedOrgId = await deriveAttendanceApprovalOrgStampV1(trx, Object.freeze({
+          subjectUserId: route.actorId,
+          requestNamedOrgId: route.requestNamedOrgId,
+        }))
+      } else {
+        const stamped = await upsertAttendanceApprovalInstance(trx, approvalPayload)
+        stampedOrgId = stamped.orgId
+        await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
+      }
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, resolved_by, resolved_at, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33734,11 +33994,25 @@ module.exports = {
           draft.requestedInAt,
           draft.requestedOutAt,
           draft.reason,
-          'pending',
-          approvalId,
+          skipApproval === true ? 'approved' : 'pending',
+          skipApproval === true ? null : approvalId,
+          skipApproval === true ? route.actorId : null,
+          skipApproval === true ? resolvedAt : null,
           JSON.stringify(draft.metadata),
         ],
       )
+      if (skipApproval === true) {
+        await applyExemptedLeaveOrOvertimeEffects(trx, {
+          orgId: stampedOrgId,
+          userId: route.actorId,
+          requestId,
+          requestType: draft.requestType,
+          workDate: draft.workDate,
+          metadata: draft.metadata,
+          referenceSegments: operation?.referenceSegments === true,
+          resolvedAt,
+        })
+      }
       const snapshotAppend = await appendRequestCalculationSnapshotOnCreate(trx, {
         orgId: route.orgId,
         requestId,
@@ -34641,7 +34915,7 @@ module.exports = {
       },
       async execute(trx, prepared, operation) {
         const variant = prepared?.state?.routeVariant ?? operation?.routeVariant
-        if (variant === 'generic') return executeGenericRequestCreate(trx, prepared)
+        if (variant === 'generic') return executeGenericRequestCreate(trx, prepared, operation)
         if (variant === 'outdoor') return executeOutdoorRequestCreate(trx, prepared)
         if (variant === 'schedule_dispatch') return executeScheduleDispatchRequestCreate(trx, prepared)
         if (variant === 'shift_swap') return executeShiftSwapRequestCreate(trx, prepared)
