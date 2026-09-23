@@ -194,7 +194,13 @@ const statusMessage = computed(() => {
     return tr('Enter the base rest start date to generate extra rest days.', '请填写基础休息起始日期，才能生成额外休息日规则。')
   }
   return isLongerRestTarget.value
-    ? tr('Fill a holiday name, attendance group, valid day counts, and a valid base rest start date before adding a rule.', '请先填写节假日名称、考勤组、有效天数和有效的基础休息起始日期。')
-    : tr('Fill a holiday name, attendance group, and valid day counts before adding a rule.', '请先填写节假日名称、考勤组和有效天数。')
+    ? tr(
+        'Fill a holiday name, attendance group, base rest days, target rest days, and a valid base rest start date before adding a rule.',
+        '请先填写节假日名称、考勤组、基础休息天数、目标休息天数和有效的基础休息起始日期。',
+      )
+    : tr(
+        'Fill a holiday name, attendance group, base rest days, and target rest days before adding a rule.',
+        '请先填写节假日名称、考勤组、基础休息天数和目标休息天数。',
+      )
 })
 </script>
