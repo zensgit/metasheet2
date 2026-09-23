@@ -29913,6 +29913,10 @@ watch(
     showReports.value,
     adminForbidden.value,
     attendancePluginActive.value,
+    // Overview cards stay unmounted while `pluginLoading` is true. The first
+    // immediate pass therefore cannot see them; rerun once the gate clears so
+    // section deep links scroll to the real card (#5966).
+    pluginLoading.value,
   ] as const,
   () => {
     if (props.routeGroupContext) return

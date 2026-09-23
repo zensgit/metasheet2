@@ -15,7 +15,7 @@
 ## 决定
 
 1. **Id 归位。** 总览「异常」卡片绑 `attendance-overview-anomalies`。「申请报表」继续只在 reports 模式绑 `attendance-overview-request-report`。「补卡申请」折叠卡不再占用任何 overview section id（仍用 `data-attendance-request-tools`）。
-2. **深链不再误开补卡折叠卡。** `shouldRevealOverviewRequestTools` 只对「我的申请」section（`attendance-overview-requests`）和带 `requestId` 的入口打开折叠卡。anomalies 与 request-report 不再打开它。任务首页「异常」href 保持 `/attendance?tab=overview&section=attendance-overview-anomalies`，落点改为异常列表。
+2. **深链不再误开补卡折叠卡。** `shouldRevealOverviewRequestTools` 只对「我的申请」section（`attendance-overview-requests`）和带 `requestId` 的入口打开折叠卡。anomalies 与 request-report 不再打开它。任务首页「异常」href 保持 `/attendance?tab=overview&section=attendance-overview-anomalies`，落点改为异常列表。总览卡片在 `pluginLoading` 期间不挂载，section 聚焦在插件门禁结束后再跑一次，否则第一次 `getElementById` 找不到异常卡。
 3. **总览跟进不再自称申请报表。** 总览没有申请报表卡。pending / rejected / approved 跟进动作改为 `my-requests`：滚到并打开「我的申请」折叠卡里的申请明细。pending / approved 按钮文案为「查看我的申请」；rejected 仍为「查看申请历史」。关注条同一优先级的 action 同步改为 `my-requests`。overview 上若仍有人发出 `request-report`，同样落到「我的申请」，而不是空的报表 id。reports 模式的 `request-report` 仍滚到申请报表卡。
 4. **异常行「创建申请」走专用补卡卡。** 与关注条「处理缺卡」同一函数 `openDedicatedMakeupRequestCard`，并钉住被点的那一行。建议时间只填卡片上可见的那一个时间字段：
    - `missed_check_in` / `missed_check_out`：优先用 `rules/me` 的同日班次边界（`workStartTime` / `workEndTime`，且 `end > start`）；没有班次时，若该侧已有打卡且日期前缀等于工作日，再用该打卡的墙上时间。
