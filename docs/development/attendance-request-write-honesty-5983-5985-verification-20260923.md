@@ -15,10 +15,10 @@ Branch: `cursor/attendance-write-honesty-5983-5985-b2c9`. Draft PR; not merged.
 | 47 with rounding 15 inside max 120 | both paths return 60 |
 | 90 / 30 / 600 on an aligned rule | stored as submitted |
 | min 600 and max 30 | `OVERTIME_RULE_BOUNDS_INVALID` |
-| `resolveAttendanceRequestDraft` source | calls both reject helpers and does not call `applyOvertimeRule` |
+| `resolveAttendanceRequestDraft` source | calls both reject helpers, throws on `!overtimeWrite.ok` and `attachmentRejection`, and does not call `applyOvertimeRule` |
 | Employee overtime card | hint text includes `30–600` and says the value is rejected |
 
-`resolveAttendanceRequestDraft` throws those `HttpError`s before `executeGenericRequestCreate` inserts `attendance_requests`. A rejected create therefore does not leave a `pending` row.
+`resolveAttendanceRequestDraft` throws those `HttpError`s before `executeGenericRequestCreate` inserts `attendance_requests`. A rejected create therefore does not leave a `pending` row. The source test goes red if those `if` throws are removed or if the draft calls `applyOvertimeRule` again. It would not catch a change that throws a different status or code while keeping the same `if` text.
 
 ## Commands
 
