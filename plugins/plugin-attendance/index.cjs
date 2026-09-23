@@ -14,6 +14,13 @@ const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolv
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
+const {
+  resolveAttendanceExportLimit,
+  normalizeAttendanceExportStatus,
+  buildAttendanceExportDisclosure,
+  applyAttendanceExportDisclosureHeaders,
+  appendAttendanceExportNotice,
+} = require('./lib/attendance-export-disclosure.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
@@ -50708,6 +50715,7 @@ module.exports = {
           from: z.string().optional(),
           to: z.string().optional(),
           limit: z.string().optional(),
+          status: z.string().optional(),
           format: z.enum(['csv', 'json']).optional(),
           header: z.enum(['label', 'code']).optional(),
         })
@@ -50718,6 +50726,7 @@ module.exports = {
           from: typeof req.query.from === 'string' ? req.query.from : undefined,
           to: typeof req.query.to === 'string' ? req.query.to : undefined,
           limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
+          status: typeof req.query.status === 'string' ? req.query.status : undefined,
           format: typeof req.query.format === 'string' ? req.query.format.toLowerCase() : undefined,
           header: typeof req.query.header === 'string' ? req.query.header.toLowerCase() : undefined,
         })
@@ -50754,10 +50763,27 @@ module.exports = {
           }
         }
 
-        const requestedLimit = parseNumber(parsed.data.limit, 1000)
-        const limit = Math.min(Math.max(requestedLimit, 1), 5000)
+        const exportStatus = normalizeAttendanceExportStatus(parsed.data.status)
+        if (!exportStatus.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: exportStatus.message } })
+          return
+        }
+        const limit = resolveAttendanceExportLimit(parsed.data.limit)
+        const filterParams = [targetUserId, orgId, from, to]
+        let statusClause = ''
+        if (exportStatus.value) {
+          filterParams.push(exportStatus.value)
+          statusClause = ` AND ar.status = $${filterParams.length}`
+        }
 
         try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_current_records ar
+             WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4${statusClause}`,
+            filterParams,
+          )
+          const matchedTotal = Number(countRows[0]?.total ?? 0)
           const rows = await db.query(
             `SELECT ar.user_id, ar.org_id, ar.work_date, ar.timezone, ar.first_in_at, ar.last_out_at,
                     ar.work_minutes, ar.late_minutes, ar.early_leave_minutes, ar.status, ar.is_workday,
@@ -50766,11 +50792,17 @@ module.exports = {
                     u.position AS position, u.hire_date AS hire_date
              FROM attendance_current_records ar
              LEFT JOIN users u ON u.id = ar.user_id
-             WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4
+             WHERE ar.user_id = $1 AND ar.org_id = $2 AND ar.work_date BETWEEN $3 AND $4${statusClause}
              ORDER BY ar.work_date DESC
-             LIMIT $5`,
-            [targetUserId, orgId, from, to, limit]
+             LIMIT $${filterParams.length + 1}`,
+            [...filterParams, limit]
           )
+          const exportDisclosure = buildAttendanceExportDisclosure({
+            matchedTotal,
+            returned: rows.length,
+            limit,
+            status: exportStatus.value,
+          })
 
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
           const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
@@ -50807,14 +50839,24 @@ module.exports = {
               from,
               to,
               total: rows.length,
+              matchedTotal: exportDisclosure.matchedTotal,
+              truncated: exportDisclosure.truncated,
+              limit: exportDisclosure.limit,
+              status: exportDisclosure.status,
               format: 'json',
             })
+            applyAttendanceExportDisclosureHeaders(res, exportDisclosure)
             res.json({
               ok: true,
               success: true,
               data: {
                 items: exportItems,
                 total: rows.length,
+                matchedTotal: exportDisclosure.matchedTotal,
+                returned: exportDisclosure.returned,
+                limit: exportDisclosure.limit,
+                truncated: exportDisclosure.truncated,
+                status: exportDisclosure.status,
                 from,
                 to,
                 format: 'json',
@@ -50824,9 +50866,12 @@ module.exports = {
             })
             return
           }
-          const csv = buildAttendanceRecordReportCsv(exportItems, reportFields.fields, {
-            headerMode: parsed.data.header || 'label',
-          })
+          const csv = appendAttendanceExportNotice(
+            buildAttendanceRecordReportCsv(exportItems, reportFields.fields, {
+              headerMode: parsed.data.header || 'label',
+            }),
+            exportDisclosure,
+          )
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`
 
           emitEvent('attendance.exported', {
@@ -50835,10 +50880,15 @@ module.exports = {
             from,
             to,
             total: rows.length,
+            matchedTotal: exportDisclosure.matchedTotal,
+            truncated: exportDisclosure.truncated,
+            limit: exportDisclosure.limit,
+            status: exportDisclosure.status,
           })
           res.setHeader('Content-Type', 'text/csv')
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
           setAttendanceReportFieldConfigHeaders(res, reportFieldConfig)
+          applyAttendanceExportDisclosureHeaders(res, exportDisclosure)
           res.status(200).send(withCsvBom(csv))
         } catch (error) {
           if (isDatabaseSchemaError(error)) {

@@ -40,6 +40,19 @@ async function flushUi(cycles = 8): Promise<void> {
   }
 }
 
+const reportExportHeaders: Record<string, string> = {}
+
+function resetReportExportHeaders(): void {
+  for (const key of Object.keys(reportExportHeaders)) delete reportExportHeaders[key]
+  Object.assign(reportExportHeaders, {
+    'X-Attendance-Export-Total': '3',
+    'X-Attendance-Export-Returned': '3',
+    'X-Attendance-Export-Limit': '3',
+    'X-Attendance-Export-Truncated': 'false',
+    'X-Attendance-Export-Status': 'all',
+  })
+}
+
 function installReportsMock(): void {
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = typeof input === 'string' ? input : input.url
@@ -174,7 +187,11 @@ function installReportsMock(): void {
     if (url.includes('/api/attendance/export?')) {
       return new Response('姓名,日期,状态\n张三,2026-04-01,正常\n', {
         status: 200,
-        headers: { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename="attendance-export.csv"' },
+        headers: {
+          'Content-Type': 'text/csv',
+          'Content-Disposition': 'attachment; filename="attendance-export.csv"',
+          ...reportExportHeaders,
+        },
       })
     }
 
@@ -207,6 +224,7 @@ describe('Attendance reports analytics', () => {
     vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
+    resetReportExportHeaders()
     window.history.replaceState({}, '', '/attendance?tab=reports')
     installReportsMock()
     container = document.createElement('div')
@@ -228,6 +246,10 @@ describe('Attendance reports analytics', () => {
 
     expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('Visible requests')
     expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('4')
+    expect(container?.querySelector('[data-report-snapshot="records"]')?.textContent).toBe('17')
+    expect(container?.querySelector('[data-report-snapshot="flagged"]')?.textContent).toBe('8')
+    expect(container?.querySelector('[data-report-snapshot="work-minutes"]')?.textContent).toBe('5820')
+    expect(container?.querySelector('[data-reports-insight="metrics"]')?.textContent).toContain('5820')
     expect(container?.querySelector('[data-reports-insight="trend"]')?.textContent).toContain('Normal')
     expect(container?.querySelector('[data-reports-insight="trend"]')?.textContent).toContain('Late + Early')
     expect(container?.querySelector('[data-reports-insight="metrics"]')?.textContent).toContain('Overtime minutes')
@@ -421,6 +443,8 @@ describe('Attendance reports analytics', () => {
     // threads the SAME header-mode as the CSV export (default 'label') — dropping
     // the header param from exportXlsx makes this go red.
     expect(xlsxUrl).toContain('header=label')
+    expect(xlsxUrl).toContain('limit=3')
+    expect(xlsxUrl).not.toContain('status=')
 
     // gated identically to CSV: a forbidden user filter disables both.
     const userInput = container!.querySelector<HTMLInputElement>('#attendance-user-id')
@@ -428,5 +452,65 @@ describe('Attendance reports analytics', () => {
     userInput!.dispatchEvent(new Event('input'))
     await flushUi(3)
     expect(container!.querySelector<HTMLButtonElement>('[data-testid="attendance-export-xlsx"]')!.disabled).toBe(true)
+  })
+
+  it('keeps snapshot record metrics on the summary range when the page status pill changes', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    findFilterButton(container!, 'record-status', 'adjusted').click()
+    await flushUi(3)
+
+    expect(container?.querySelector('[data-report-snapshot="records"]')?.textContent).toBe('17')
+    expect(container?.querySelector('[data-report-snapshot="flagged"]')?.textContent).toBe('8')
+    expect(container?.querySelector('[data-report-snapshot="work-minutes"]')?.textContent).toBe('5820')
+    const recordRows = Array.from(
+      container!.querySelectorAll<HTMLElement>('[data-report-card="records"] tbody > tr'),
+    ).filter(row => !row.classList.contains('attendance__table-row--meta'))
+    expect(recordRows).toHaveLength(1)
+  })
+
+  it('exports the record-status pill within the loaded total and warns when the server truncates', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:report-export') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    try {
+      app = createApp(AttendanceView, { mode: 'reports' })
+      app.mount(container!)
+      await flushUi()
+
+      findButtonByText(container!, 'Export CSV').click()
+      await flushUi(4)
+      const firstUrl = vi.mocked(apiFetch).mock.calls.map(call => String(call[0])).find(url => url.includes('/api/attendance/export?'))
+      expect(firstUrl).toContain('limit=3')
+      expect(firstUrl).not.toContain('status=')
+      expect(container!.querySelector('[data-report-export-disclosure]')?.textContent).toContain('3 of 3')
+      expect(container!.querySelector('.attendance__status-block')?.textContent).toContain('Export ready (3 of 3 rows).')
+
+      findFilterButton(container!, 'record-status', 'late').click()
+      await flushUi(2)
+      reportExportHeaders['X-Attendance-Export-Total'] = '6200'
+      reportExportHeaders['X-Attendance-Export-Returned'] = '5000'
+      reportExportHeaders['X-Attendance-Export-Limit'] = '5000'
+      reportExportHeaders['X-Attendance-Export-Truncated'] = 'true'
+      reportExportHeaders['X-Attendance-Export-Status'] = 'late'
+
+      findButtonByText(container!, 'Export CSV').click()
+      await flushUi(4)
+      const lateUrl = vi.mocked(apiFetch).mock.calls.map(call => String(call[0])).filter(url => url.includes('/api/attendance/export?')).at(-1)
+      expect(lateUrl).toContain('status=late')
+      expect(lateUrl).toContain('limit=3')
+      expect(container!.querySelector('[data-report-export-disclosure]')?.textContent).toContain('5000 of 6200')
+      expect(container!.querySelector('.attendance__status--error')?.textContent).toContain('Export truncated: 5000 of 6200 rows (limit 5000).')
+      expect(container!.querySelector('[data-report-snapshot="records"]')?.textContent).toBe('17')
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
   })
 })
