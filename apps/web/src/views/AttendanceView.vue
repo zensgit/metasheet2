@@ -10197,6 +10197,12 @@ import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmplo
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
 import {
+  alignDefaultHistoryRangeToRuleToday,
+  buildHeroTodayTimeline,
+  resolveDedicatedRequestWorkDate,
+  selectTodayAttendanceRecord,
+} from './attendance/attendanceTodayWorkbench'
+import {
   DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
   resolveEmployeeQuickActionIcons,
   type EmployeeQuickActionIcons,
@@ -13278,57 +13284,52 @@ const attendanceCaliberGuideItems = computed<AttendanceCaliberGuideItem[]>(() =>
 
 const todayWorkDateKey = computed(() => formatAttendanceDateKey(new Date(), resolvedAttendanceTimezone.value) ?? '')
 
-const latestAttendanceRecord = computed<AttendanceRecord | null>(() => {
-  if (records.value.length === 0) return null
-  return [...records.value].sort((left, right) => right.work_date.localeCompare(left.work_date))[0] ?? null
-})
-
-const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
-  records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
+// Design-lock §4.1 / #5986: today's punch timeline is today's row only.
+// A historical record in the loaded range is never substituted.
+const todayAttendanceRecord = computed(() =>
+  selectTodayAttendanceRecord(records.value, todayWorkDateKey.value),
 )
 
-// UI-P1 (ui-p1-remainder design-lock D1): two-node punch timeline for the
-// workbench record. When there is no row for today the workbench intentionally
-// falls back to the latest row, so preserve both event polarities from that row
-// instead of collapsing its checkout into an untyped "latest punch" label.
 const heroTodayTimeline = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   if (!record) return null
-  const timeOf = (value: string | null | undefined) => {
-    return formatAttendanceClockTime(
-      value,
-      attendanceRecordTimezone(record),
-    )
-  }
-  return {
-    checkIn: timeOf(record.first_in_at),
-    checkOut: timeOf(record.last_out_at),
-  }
+  return buildHeroTodayTimeline(record, value => formatAttendanceClockTime(
+    value,
+    attendanceRecordTimezone(record),
+  ))
 })
 
-const activeWorkbenchStatusDescription = computed(() =>
-  selfServiceNeedsSetupHint.value
-    ? tr(
+const activeWorkbenchStatusDescription = computed(() => {
+  if (selfServiceNeedsSetupHint.value) {
+    return tr(
       'No attendance data is available in this range yet.',
       '当前区间内还没有考勤数据。',
     )
-    : describeAttendanceStatus(activeWorkbenchRecord.value?.status)
-)
+  }
+  const record = todayAttendanceRecord.value
+  if (!record) {
+    return tr(
+      'No attendance record for today yet.',
+      '今天还没有考勤记录。',
+    )
+  }
+  return describeAttendanceStatus(record.status)
+})
 
 const activeWorkbenchHasLateEarly = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   return Boolean(record && ((record.late_minutes ?? 0) > 0 || (record.early_leave_minutes ?? 0) > 0))
 })
 
 const activeWorkbenchLateEarlyLabel = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   if (!record) return '--'
   return `${record.late_minutes ?? 0} / ${record.early_leave_minutes ?? 0}`
 })
 
 const activeWorkbenchAttentionCount = computed(() => {
   if (anomalies.value.length === 0) return 0
-  const focusDate = activeWorkbenchRecord.value?.work_date
+  const focusDate = todayAttendanceRecord.value?.work_date
   if (!focusDate) return anomalies.value.length
   return anomalies.value.filter(item => item.workDate === focusDate).length
 })
@@ -13510,14 +13511,15 @@ const attendanceStatusGuideItems = computed<AttendanceSelfServiceStatusGuideItem
 // Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.2: ONE
 // canonical "Needs attention" item, built from the same facts the retired
 // selfServiceFocusItems/selfServicePrimaryAction computeds used to derive
-// (activeWorkbenchRecord, anomalies, requests, the setup gate) plus the
+// (today's attendance row, anomalies, requests, the setup gate) plus the
 // shared status banner. See attendanceOverviewPriority.ts for the pure,
-// independently-tested first-match table.
-const workbenchRecordStatus = computed<string | null>(() => activeWorkbenchRecord.value?.status ?? null)
+// independently-tested first-match table. Historical rows do not supply
+// today's status (#5986).
+const workbenchRecordStatus = computed<string | null>(() => todayAttendanceRecord.value?.status ?? null)
 const workbenchFocusDateLabel = computed<string | null>(() =>
-  activeWorkbenchRecord.value ? formatDate(activeWorkbenchRecord.value.work_date) : null
+  todayAttendanceRecord.value ? formatDate(todayAttendanceRecord.value.work_date) : null
 )
-const workbenchWorkMinutes = computed(() => activeWorkbenchRecord.value?.work_minutes ?? 0)
+const workbenchWorkMinutes = computed(() => todayAttendanceRecord.value?.work_minutes ?? 0)
 
 const attendanceOverviewAttentionItem = computed(() => resolveAttendanceOverviewAttention(
   {
@@ -15870,6 +15872,9 @@ const statusActionBusy = computed(() => {
 const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))
 const toDate = ref(toDateInput(today))
+const initialHistoryFromDate = fromDate.value
+const initialHistoryToDate = toDate.value
+let defaultHistoryRangeAligned = false
 const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(fromDate.value, toDate.value))
 
 const recordsPage = ref(1)
@@ -17374,7 +17379,7 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
 }
 
 async function openDedicatedLeaveRequestCard(): Promise<void> {
-  prepareRequestDraft('leave', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  prepareRequestDraft('leave', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
   makeupRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
   shiftSwapRequestCardOpen.value = false
@@ -17427,7 +17432,7 @@ function prepareRequestDraft(requestType: AttendanceRequest['request_type'], wor
 
 async function openDedicatedMakeupRequestCard(): Promise<void> {
   clearRequestSubmitStatus()
-  const fallbackWorkDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
+  const fallbackWorkDate = resolveDedicatedRequestWorkDate(todayWorkDateKey.value)
   const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
   prepareRequestDraft(draft.requestType, draft.workDate)
   leaveRequestCardOpen.value = false
@@ -17465,7 +17470,7 @@ async function submitDedicatedMakeupRequestCard(): Promise<void> {
 }
 
 async function openDedicatedOvertimeRequestCard(): Promise<void> {
-  prepareRequestDraft('overtime', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  prepareRequestDraft('overtime', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
   leaveRequestCardOpen.value = false
   makeupRequestCardOpen.value = false
   shiftSwapRequestCardOpen.value = false
@@ -17498,7 +17503,7 @@ async function submitDedicatedOvertimeRequestCard(): Promise<void> {
 }
 
 async function openDedicatedShiftSwapRequestCard(): Promise<void> {
-  prepareRequestDraft('shift_swap', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  prepareRequestDraft('shift_swap', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
   leaveRequestCardOpen.value = false
   makeupRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
@@ -22757,6 +22762,27 @@ function validateReportDateRange(): boolean {
   return false
 }
 
+function consumeDefaultHistoryRangeAlignment(): boolean {
+  if (defaultHistoryRangeAligned) return false
+  const todayKey = todayWorkDateKey.value
+  if (!todayKey) return false
+  defaultHistoryRangeAligned = true
+  const aligned = alignDefaultHistoryRangeToRuleToday({
+    fromDate: fromDate.value,
+    toDate: toDate.value,
+    todayKey,
+    initialFromDate: initialHistoryFromDate,
+    initialToDate: initialHistoryToDate,
+  })
+  if (!aligned.changed) return false
+  fromDate.value = aligned.fromDate
+  toDate.value = aligned.toDate
+  if (lastCalendarEffectiveRange.value) {
+    lastCalendarEffectiveRange.value = { from: aligned.fromDate, to: aligned.toDate }
+  }
+  return true
+}
+
 async function refreshAll(): Promise<boolean> {
   if (!attendancePluginActive.value) return false
   loading.value = true
@@ -22786,6 +22812,18 @@ async function refreshAll(): Promise<boolean> {
     const results = await Promise.allSettled(tasks)
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
+    if (consumeDefaultHistoryRangeAlignment()) {
+      calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
+      const reloaded = await Promise.allSettled([
+        loadSummary(),
+        loadRecords(),
+        loadAnomalies(),
+        loadRequestReport(),
+        loadHolidays(),
+      ])
+      const reloadFailed = reloaded.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (reloadFailed) throw reloadFailed.reason
+    }
     if (showReports.value) {
       markReportsDatasetLoaded()
     }

@@ -4,7 +4,7 @@
 //
 // Pure first-match "Needs attention" builder for the overview band. It
 // consumes the SAME facts `AttendanceView.vue` already derives from
-// `activeWorkbenchRecord` / `anomalies` / `requests` / the shared status
+// today's attendance row / `anomalies` / `requests` / the shared status
 // banner (`statusMessage`/`statusKind`/`statusMeta`) — it fetches no new
 // data and reinterprets no backend status/error code. Its only job is to
 // pick ONE canonical attention item so the overview never renders the old
@@ -80,7 +80,7 @@ export interface AttendanceOverviewAttentionFacts {
    */
   latestRequestStatus: string | null
   pendingRequestCount: number
-  /** `activeWorkbenchRecord?.status ?? null` — raw backend value, untouched. */
+  /** Today's attendance row status, or null when that row is absent. Raw backend value. */
   focusRecordStatus: string | null
   /** Localized label for `focusRecordStatus` (e.g. via `formatStatus`). */
   focusRecordStatusLabel: string | null
