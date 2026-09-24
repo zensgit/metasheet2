@@ -77,3 +77,9 @@ pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
 1. 已存的 `partial_unpaid_absence` 不会被迁移改写。管理员必须改成 `block` 再保存，在此之前命中该规则的批准保持 422。免批创建（#6005）必须调用同一个 helper，否则免批仍会部分扣并全额投影。
 2. `deductLeaveBalance` 的 `mode='partial'` 仍在引擎里，策略路径不再调用。账4 若要重新打开该模式，必须先定义缺勤分钟的落点，并让 `loadApprovedMinutes` 与之一致。
 3. 销假重算（#5982）和折天展示（#5969）本 PR 未改。
+
+## 与 #6005 叠在最新 main
+
+拒绝函数抽到共享文件之后，本分支 `5ce2ea195` 与 #6005 `c4ba74ae7` 叠在 `origin/main` `f31a88663` 上是干净合并。更早一版 #6005（`a27025960`）只 require 了 `rejectLeaveOffsetPartialAbsence`，和本分支的五个名字在 `index.cjs` 顶部冲突过一次；对齐 require 之后没有剩余冲突。本地 throwaway `cursor/attendance-exempt-offset-combined-8e13` @ `3329fc841`，没有推送，也没有开 PR。
+
+该树上免批余额负例、leave-offset 单元、W7 分类共 5 files / 39 tests passed。本环境没有 `DATABASE_URL`，上面两条集成没有在叠合树上重跑。
