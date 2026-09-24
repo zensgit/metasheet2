@@ -65,7 +65,45 @@ RC 栈上 `P29(a)` / `P33(a)` 改写成关闭后的答案(legacy 写入在席位
 验证 MD §O7.4 的 token 表对 `a85f33d194…` 之后的 head 不再成立;§O9.5 按本 head 现算(含新锚点
 `delegated_seat_nodes` / `nodesSkippedByJump`),§O7.4 原句按求值标记读,不整节作废。
 
-## 3. 栈中(RC on r9)—— 本节由该分支追加
+## 3. 栈中 `fix/approval-legacy-approve-seat-and-node-attribution-on-r9`(RC on r9)
+
+### 3.1 重放与冲突
+
+RC(`origin/fix/approval-legacy-approve-seat-and-node-attribution` = `09d0275726…`,相对其 main merge-base
+`5edf4c3e17…` 的 4 个提交)`cherry-pick -x` 到栈底之上。冲突只在 `packages/core-backend/src/routes/approvals.ts`,三个 hunk:
+
+| hunk | 位置 | 解法 |
+|---|---|---|
+| 1 | `ApprovalInstance` 可选列声明 | 并集(r8 的 `workflow_key` + RC 的 `published_definition_id` / `current_node_key` / `metadata`),无判断 |
+| 2 | legacy `POST /:id/approve` | **F4 (i),owner 2026-09-25 点名 (b)**:席位闸(`resolveLegacyDecisionSeat` + 403)**先**,`rejectIfCancelRound(instance, 'legacy POST /:id/approve')` **后**(紧接 403 块之后、轮次归属解析之前) |
+| 3 | legacy `POST /:id/reject` | 同上 |
+
+v3b §5.1 的 hunk 2(`publishApprovalCountsForUsers` 重复声明)在本基线上**不出现**:它由 B-2 的
+`approval-todo-counts-dual-publish-wiring.test.ts` 机械强制,而该文件不在 `e046a21c0` 上。
+
+**可观察后果(F4 (i)(b))**:无席位者对撤销轮实例调 legacy `/approve` / `/reject` 得到与普通实例**逐字节相同**的
+403 `APPROVAL_ASSIGNMENT_REQUIRED`(values-free,不透露实例种类);席位持有人得到 409 `CANCEL_ROUND_OUTLET_FORBIDDEN`。
+两格都钉成腿(`V1(a)` / `V2(a)`,= v3b 动作 1)。
+
+### 3.2 C-1 腿在本栈上的答案(裁决 (c) 的机械后果,不是新的语义选择)
+
+RC 让 legacy 决策门(i)只放行在当前节点持有**活跃席位**的人,(ii)把行归属到**服务端派生**的 `nodeKey` /
+`nodeEntryEpoch`(请求体里的两个键被丢弃)。栈底 creation 件里 18 条驱动 legacy 门的腿因此改答案;每条腿在本分支上
+按本门的行为重写,标题带「本栈」,下层的答案留在下层分支历史里。两族:
+
+| 族 | 腿 | 本栈答案 |
+|---|---|---|
+| 无席位者的写入被拒(403,零行,values-free) | `P27(a)` `N13(a)` `N20(a)` `P29(a)` `N21(a)` `P33(a)` | 夹具断言拒绝,随后由真正的审批人诚实结掉;撤销轮答诚实答案(`P29(a)` = `{A, E}`,与 HONEST6 `P28(a)` 逐字相同 —— 门审第 5 轮 P1 在此关闭) |
+| 有席位者的行被服务端归属 | `P12(a)` `N7(a)` `N8(a)` `P13(a)` `N9(a)` `P19(a)` `N11(a)` `P21(a)` `N14(a)` `N15(a)` `N18(a)` `N19(a)` | 行落在席位所在节点,还原按裁决第一句进行:席位回 A(`N19(a)` = 门审 FORGERY3 的「还原到 A」臂,`{A, E}`);A 已停权 ⇒ 阻断且 reason = `inactive`(`N7(a)` / `N8(a)`);`P21(a)` 的会签 2 → 1 残留关闭(`{A, D}`) |
+
+不改动的:`createCancelRoundInstance` 的三条合取与 r9 的跳过豁免逐字不变;RC 的 legacy 服务端写入**没有**复制进 C-1
+代码(它只属于 RC 的提交)。
+
+### 3.3 v3b 动作 1(runbook §3b-⑥ 要求)
+
+`V1(a)`:无席位者 × 撤销轮实例 × legacy `/approve` 与 `/reject` ⇒ 403,回应体与同一人在普通待办实例上的拒绝逐字节相同,
+撤销轮零行、status / version 不变。`V2(a)`:撤销轮席位持有人 A ⇒ 409 `CANCEL_ROUND_OUTLET_FORBIDDEN`,零行。
+把 `/approve` 门的两道闸对调的 mutation 让 `V1(a)` 红(无席位者得 409)。
 
 ## 4. 栈顶(H-5 on r9)—— 本节由该分支追加
 
