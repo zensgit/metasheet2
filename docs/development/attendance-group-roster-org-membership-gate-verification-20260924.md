@@ -6,9 +6,9 @@
 
 ## 1. Verdict
 
-**PASS** locally for the roster-write gate this PR claims: group member and group manager inserts fail closed with 404 `USER_NOT_IN_ORG` when the target is not an active member of the actor org, a mixed member batch inserts nothing, and the #5899 owner-adds-member path still returns 200 for an active member.
+**PASS** locally for the roster-write gate this PR claims: group member, group manager, and schedule-group member inserts fail closed with 404 `USER_NOT_IN_ORG` when the target is not an active member of the actor org. A mixed batch inserts nothing. CSV preview and commit use the same predicate and the same all-or-nothing 404, with per-row `details` in the import skipped-row shape, and do not emit `ensure_member` or insert `attendance_group_members` for a rejected id. The #5899 owner-adds-member path still returns 200 for an active member.
 
-Not a merge, deploy, or product-acceptance verdict.
+Not a merge, deploy, or product-acceptance verdict. Existing ghost rows are not deleted.
 
 ## 2. What was verified
 
@@ -22,6 +22,15 @@ Not a merge, deploy, or product-acceptance verdict.
 | 非 manager 成员写仍 403，且不进事务 | PASS | 既有腿 `db.transaction` 未被调用 |
 | owner POST managers 仍 403（OW8） | PASS | 既有腿 |
 | admin 仍能走 R0 组路由（成员/负责人 POST 在 mock 里视为活跃成员） | PASS | `admits attendance admins through every R0 group-route endpoint` |
+| 排班组 admin / scoped scheduler 添加活跃成员仍 200，且 SQL 含同一谓词 | PASS | 既有两条 schedule-group member POST；断言 `expectActiveOrgMemberPredicate` |
+| 排班组停用 / 他组织 / 不存在 → 404，无 INSERT | PASS | `rejects a schedule-group member add for %s without inserting` |
+| 排班组批 `[active, bad]` → 404，details 只有坏 id，无 INSERT | PASS | `rejects a mixed schedule-group member batch before inserting the valid id` |
+| CSV preview：停用 / 他组织 / 不存在 → 404，details 为 `{ userId, workDate, warnings }`，不进入假期计算 | PASS | `preview rejects auto-assign for %s…` |
+| CSV preview 混合批只报告被拒行；重复行只一条 detail | PASS | `preview rejects a mixed auto-assign batch…`、`preview reports one skipped-row detail…` |
+| 不会被分配的行（无考勤组，或组不存在且不 autoCreate）不查这道门 | PASS | `preview does not gate a row that would not be assigned`、`preview leaves unknown groups ungated…` |
+| 已存在的组、不 autoCreate，仍 404 | PASS | `preview still gates an existing group when auto-create is off` |
+| 活跃成员 preview 200；commit 仍把 `ensure_member` 放进同步计划 | PASS | `preview accepts an active org member…`、`commit still plans ensure_member…` |
+| commit 停用 / 他组织 / 不存在 / 混合批 → 404，不调用 `commitSyncImportPlan`，无成员 INSERT，无考勤记录 INSERT | PASS | `commit rejects auto-assign for %s…`、`commit rejects a mixed auto-assign batch…` |
 
 三种负向（停用、他组织、不存在）在 API 上是**同一个空结果**：谓词不返回该 id。单测用不同 userId 分别打，响应码与 `details` 相同，不提供「用户是否存在于他组织」的区分。
 
@@ -34,7 +43,8 @@ Not a merge, deploy, or product-acceptance verdict.
 pnpm --filter @metasheet/core-backend exec vitest run \
   tests/unit/attendance-uuid-validation-routes.test.ts
 # Test Files  1 passed (1)
-# Tests  109 passed (109)
+# Tests  127 passed (127)
+# 含排班组成员门与 CSV preview/commit 门（在原 109 之上）
 
 # 考勤插件既有 unit 套件（tests/unit/attendance*）+ O3 源扫描
 cd packages/core-backend && pnpm exec vitest run \
@@ -42,8 +52,10 @@ cd packages/core-backend && pnpm exec vitest run \
   tests/unit/attendance*.spec.ts
 # Test Files  96 passed (96)
 # Tests  1744 passed (1744)
-# 其中 attendance-advanced-scheduling-scope.test.ts 7 passed
-# 其中 attendance-uuid-validation-routes.test.ts 109 passed
+# 上一轮 head 的全量考勤 unit 是 1744（当时路由文件 109）。
+# 本轮路由文件单独重跑为 127 passed；另加
+# src/attendance/__tests__/w4c3a-plugin-v1-boundary.test.ts
+# 与路由文件一起：Test Files 2 passed，Tests 155 passed。
 
 # #5945 回归（issue #5942）：main tip，未改报表代码
 pnpm --filter @metasheet/web exec vitest run --watch=false \
@@ -69,21 +81,68 @@ pnpm --filter @metasheet/core-backend exec vitest run \
 | `rejects a mixed member batch before inserting the valid id` | **红**：`expected 200 to be 404` |
 | `lets an owner add members of a managed group…` | **红**：SQL 不再含 `FROM user_orgs uo` |
 
-断言已恢复。恢复后全文件 **109 passed**。
+断言已恢复。那次恢复后全文件是 **109 passed**。本轮补上排班组与 CSV 门之后，同一文件是 **127 passed**。
 
 负责人 POST 与成员 POST 共用 `assertActiveOrgMemberUserIds`。去掉负责人调用会让 `rejects an admin manager add for %s` 变成 200（mock 在 INSERT 被调用时返回成功行）。谓词文本被 `expectActiveOrgMemberPredicate` 锁住：`FROM user_orgs uo`、`JOIN users u`、`uo.is_active = true`、`u.is_active = true`、`uo.user_id = ANY($2::text[])`。
 
-## 5. 未跑 / 测不到的降级
+## 5. PostgreSQL 上的谓词
 
-- 无真实 PostgreSQL。`ANY($2::text[])` 与 `user_orgs.user_id text` 的类型匹配没有在库上执行。单测桩按参数过滤，不执行 SQL。
+单测桩不执行 SQL。本轮在本机 PostgreSQL **16.15** 上用合成 text id 跑了与代码相同的 `ANY($2::text[])` 查询（临时库，跑完可丢，不是客户库）。
+
+插入：`active-user`（本 org、两侧 `is_active`）、`inactive-user`（`users.is_active = false`）、`inactive-membership`（`user_orgs.is_active = false`）、`other-org-user`（只在另一个 org）、请求里再带一个不存在的 `missing-user`。
+
+`EXECUTE gate('org-a', ARRAY[...]::text[])` **只返回 `active-user` 一行**。`text[]` 与 `user_id text` 能匹配，没有 uuid 转换错误。
+
+这不是考勤插件的集成套件，也没有起 `attendance_group_members` 业务表。
+
+## 6. 只读：已有幽灵行
+
+本 PR **不** UPDATE / DELETE。下面的语句只列出「行上的 org 里，这个 userId 不是活跃 `user_orgs` ∩ `users`」的花名册行。id 仅供人工核对。
+
+```sql
+SELECT 'attendance_group_members' AS source, m.org_id, m.user_id, m.group_id AS container_id
+  FROM attendance_group_members m
+  LEFT JOIN user_orgs uo
+    ON uo.org_id = m.org_id
+   AND uo.user_id = m.user_id
+   AND uo.is_active = true
+  LEFT JOIN users u
+    ON u.id = uo.user_id
+   AND u.is_active = true
+ WHERE u.id IS NULL
+UNION ALL
+SELECT 'attendance_group_managers', m.org_id, m.user_id, m.group_id
+  FROM attendance_group_managers m
+  LEFT JOIN user_orgs uo
+    ON uo.org_id = m.org_id
+   AND uo.user_id = m.user_id
+   AND uo.is_active = true
+  LEFT JOIN users u
+    ON u.id = uo.user_id
+   AND u.is_active = true
+ WHERE u.id IS NULL
+UNION ALL
+SELECT 'attendance_schedule_group_members', m.org_id, m.user_id, m.schedule_group_id
+  FROM attendance_schedule_group_members m
+  LEFT JOIN user_orgs uo
+    ON uo.org_id = m.org_id
+   AND uo.user_id = m.user_id
+   AND uo.is_active = true
+  LEFT JOIN users u
+    ON u.id = uo.user_id
+   AND u.is_active = true
+ WHERE u.id IS NULL;
+```
+
+## 7. 仍测不到的降级
+
 - 无浏览器。管理端粘贴框 / global-scope 负责人选择器未点。
-- **排班组** `POST /api/attendance/schedule-groups/:id/members` 仍不查 `user_orgs`（#6045 可选残留，本 PR 明确不做）。
-- **导入** `insertAttendanceGroupMembers` 仍按 CSV 解析出的 userId 批量 INSERT，不走本门。
-- 已经落库的幽灵成员/负责人 **不会**被本 PR 清掉。
+- 已经落库的幽灵成员、负责人、排班组成员 **不会**被本 PR 清掉。用第 6 节的只读查询找，不要当清理脚本跑。
 - 检查与 INSERT 之间没有 `SELECT … FOR UPDATE`。并发把用户停用，仍可能在检查通过后插入。事务只保证「检查失败则本语句不提交」。
-- 单测分不出「停用成员关系」和「用户行 `is_active = false`」的 SQL 执行差异；两者都靠谓词文本 + 空结果拒绝。删掉其中一列 `is_active` 会红在文本断言，不会红在「另一种停用仍然 200」的行为差上——因为桩不解释 SQL。
+- 单测分不出「停用成员关系」和「用户行 `is_active = false`」的执行差异；第 5 节的真实库查询把这两种都排除了，单测本身仍靠谓词文本 + 空结果。
+- W4 `applyAttendanceLegacyGroupEffectsV1` 不重查 `user_orgs`。它只执行计划里已经冻结的 `ensure_member`。活的 preview / commit / legacy import / async enqueue / integration sync 都先经过 `commitAttendanceImportPayload`，被拒绝的用户不会进入计划。绕过该函数、自己组计划的调用方不在本 PR。
 - #5945（报表日期区间）不在本 PR 的改动里。在 `main` `f31a88663` 上重跑 `tests/attendance-reports-analytics.spec.ts` 为 **7/7 PASS**（含倒置区间拦截与相等/升序区间仍可加载）。本 PR 不修改该行为。
 
-## 6. 口径
+## 8. 口径
 
 合成 id（`member-user-2`、`inactive-user`、`other-org-user`、`missing-user`、`not-in-this-org`）。无主机、口令、authorityCode。

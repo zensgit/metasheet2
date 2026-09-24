@@ -2788,6 +2788,357 @@ describe('attendance UUID route validation', () => {
     expect(db.transaction).not.toHaveBeenCalled()
   })
 
+  describe('csv import group-member active-org gate', () => {
+    const memberWarning = 'Target user is not an active member of this org'
+
+    function importAssignRow(userId: string, workDate = '2026-06-10', extras: Record<string, unknown> = {}) {
+      return {
+        userId,
+        workDate,
+        fields: {
+          attendanceGroup: 'Day Shift',
+          firstInAt: `${workDate}T09:00:00.000Z`,
+          lastOutAt: `${workDate}T18:00:00.000Z`,
+        },
+        ...extras,
+      }
+    }
+
+    function sqlText(query: unknown) {
+      return typeof query === 'string' ? query : String((query as { text?: unknown })?.text ?? query)
+    }
+
+    function queryParams(query: unknown, paramsArg: unknown[]) {
+      return typeof query === 'string'
+        ? paramsArg
+        : ((query as { values?: unknown[] })?.values ?? paramsArg)
+    }
+
+    function installImportPipelineMock(
+      db: { query: { mockImplementation: (impl: (query: unknown, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[] | null,
+      options: { groups?: Array<{ id: string; name: string }> } = {},
+    ) {
+      db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
+        const sql = sqlText(query)
+        const params = queryParams(query, paramsArg)
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        const actor = actorContextQueryResult(sql)
+        if (actor !== undefined) return actor
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          if (activeUserIds === null) throw new Error(`unexpected membership query: ${sql}`)
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          const active = new Set(activeUserIds)
+          return requested.filter((userId) => active.has(userId)).map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('SELECT id, name, code, rule_set_id FROM attendance_groups')) {
+          return (options.groups ?? []).map((group) => ({
+            id: group.id,
+            name: group.name,
+            code: null,
+            rule_set_id: null,
+          }))
+        }
+        if (sql.includes('FROM attendance_scheduler_scopes')) return []
+        if (sql.includes('SELECT DISTINCT group_id') && sql.includes('FROM attendance_group_members')) return []
+        if (sql.includes('SELECT DISTINCT m.schedule_group_id')) return []
+        if (sql.includes('FROM attendance_rules')) return []
+        if (sql.includes('SELECT value FROM system_configs')) return []
+        if (sql.includes('SELECT name, code, rule_set_id FROM attendance_groups')) return []
+        if (sql.includes('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')) return []
+        if (sql.includes('SET LOCAL statement_timeout')) return []
+        if (sql.includes('INSERT INTO attendance_import_batches')) return []
+        if (sql.includes('FROM attendance_holidays')) return []
+        if (sql.includes('FROM attendance_shift_assignments')) return []
+        if (sql.includes('FROM attendance_rotation_assignments')) return []
+        if (sql.includes('FROM attendance_records') && sql.includes('last_out_at IS NULL')) return []
+        if (sql.includes('FROM attendance_requests') && sql.includes("request_type = 'overtime'")) return []
+        if (sql.includes('FROM attendance_records ar')) return []
+        if (sql.includes('INSERT INTO attendance_records')) {
+          return [{
+            id: '00000000-0000-4000-8000-000000000401',
+            user_id: 'worker-1',
+            work_date: '2026-06-10',
+          }]
+        }
+        if (sql.includes('INSERT INTO attendance_import_items')) return []
+        if (sql.includes('INSERT INTO attendance_group_members')) {
+          throw new Error('attendance_group_members insert must not run before the org gate')
+        }
+        throw new Error(`unexpected query: ${sql}`)
+      })
+    }
+
+    function expectMemberNotInOrg(res: { statusCode: number; body: unknown }, details: unknown[]) {
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: memberWarning,
+          details,
+        },
+      })
+    }
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('preview rejects auto-assign for %s with a per-row warning and does not succeed', async (_label, userId) => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow(userId)],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [{
+        userId,
+        workDate: '2026-06-10',
+        warnings: [memberWarning],
+      }])
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('FROM attendance_holidays')
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+    })
+
+    it('preview rejects a mixed auto-assign batch and reports only the rejected rows', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, ['worker-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [
+            importAssignRow('worker-1', '2026-06-10'),
+            importAssignRow('not-in-this-org', '2026-06-11'),
+            importAssignRow('not-in-this-org', '2026-06-12'),
+          ],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [
+        { userId: 'not-in-this-org', workDate: '2026-06-11', warnings: [memberWarning] },
+        { userId: 'not-in-this-org', workDate: '2026-06-12', warnings: [memberWarning] },
+      ])
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining('uo.user_id = ANY($2::text[])'),
+        ['default', ['worker-1', 'not-in-this-org']],
+      )
+    })
+
+    it('preview reports one skipped-row detail when the same inactive user is duplicated', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [
+            importAssignRow('missing-user'),
+            importAssignRow('missing-user'),
+          ],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [{
+        userId: 'missing-user',
+        workDate: '2026-06-10',
+        warnings: [memberWarning],
+      }])
+    })
+
+    it('preview does not gate a row that would not be assigned', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, null)
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [{
+            userId: 'missing-user',
+            workDate: '2026-06-10',
+            fields: {
+              firstInAt: '2026-06-10T09:00:00.000Z',
+              lastOutAt: '2026-06-10T18:00:00.000Z',
+            },
+          }],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: {
+          items: [{ userId: 'missing-user', workDate: '2026-06-10' }],
+        },
+      })
+    })
+
+    it('preview leaves unknown groups ungated when auto-create is off', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, null)
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('missing-user')],
+          groupSync: { autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: {
+          groupWarnings: ['Attendance group not found: Day Shift'],
+        },
+      })
+    })
+
+    it('preview still gates an existing group when auto-create is off', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [], { groups: [{ id: attendanceGroupId, name: 'Day Shift' }] })
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('missing-user')],
+          groupSync: { autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [{
+        userId: 'missing-user',
+        workDate: '2026-06-10',
+        warnings: [memberWarning],
+      }])
+    })
+
+    it('preview accepts an active org member for auto-assign', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, ['worker-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('worker-1')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: {
+          items: [{ userId: 'worker-1', workDate: '2026-06-10' }],
+        },
+      })
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+    })
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('commit rejects auto-assign for %s before the sync plan and inserts no members', async (_label, userId) => {
+      const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      ))
+      const { db, routes } = await createHarness('true', commitSyncImportPlan)
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+        body: {
+          rows: [importAssignRow(userId)],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [{
+        userId,
+        workDate: '2026-06-10',
+        warnings: [memberWarning],
+      }])
+      expect(commitSyncImportPlan).not.toHaveBeenCalled()
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+      expect(sql).not.toContain('INSERT INTO attendance_records')
+    })
+
+    it('commit rejects a mixed auto-assign batch with no partial member plan', async () => {
+      const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      ))
+      const { db, routes } = await createHarness('true', commitSyncImportPlan)
+      installImportPipelineMock(db, ['worker-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+        body: {
+          rows: [
+            importAssignRow('worker-1', '2026-06-10'),
+            importAssignRow('not-in-this-org', '2026-06-11'),
+          ],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [{
+        userId: 'not-in-this-org',
+        workDate: '2026-06-11',
+        warnings: [memberWarning],
+      }])
+      expect(commitSyncImportPlan).not.toHaveBeenCalled()
+      expect(db.query.mock.calls.map(([query]) => sqlText(query)).some((sql) => sql.includes('INSERT INTO attendance_group_members'))).toBe(false)
+    })
+
+    it('commit still plans ensure_member for an active org member', async () => {
+      const commitSyncImportPlan = vi.fn(async () => syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      ))
+      const { db, routes } = await createHarness('true', commitSyncImportPlan)
+      installImportPipelineMock(db, ['worker-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
+        body: {
+          rows: [importAssignRow('worker-1')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(commitSyncImportPlan).toHaveBeenCalledWith(expect.objectContaining({
+        groupEffects: expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'ensure_member',
+            userId: 'worker-1',
+            groupRef: 'day shift',
+          }),
+        ]),
+      }))
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+    })
+  })
+
   it('lets full attendance admins add schedule group members without scheduler scopes', async () => {
     const { db, routes } = await createHarness('false')
 
@@ -2795,6 +3146,9 @@ describe('attendance UUID route validation', () => {
       const rbac = rbacQueryResult(sql, params, true)
       if (rbac !== undefined) return rbac
       if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+        return [{ user_id: 'worker-1' }]
+      }
       if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
       if (sql.includes('INSERT INTO attendance_schedule_group_members')) return [scheduleGroupMemberRow()]
       throw new Error(`unexpected query: ${sql}`)
@@ -2810,6 +3164,9 @@ describe('attendance UUID route validation', () => {
     expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: 'worker-1' }] } })
     expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    const membershipSql = db.query.mock.calls.map(([text]) => String(text)).find((text) => text.includes('FROM user_orgs uo'))
+    expect(membershipSql).toEqual(expect.any(String))
+    expectActiveOrgMemberPredicate(String(membershipSql))
   })
 
   it('lets scoped non-admin schedulers add members inside their scheduler scope', async () => {
@@ -2822,6 +3179,9 @@ describe('attendance UUID route validation', () => {
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeRow()]
       if (sql.includes('pg_advisory_xact_lock')) return []
+      if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+        return [{ user_id: 'worker-1' }]
+      }
       if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
       if (sql.includes('INSERT INTO attendance_schedule_group_members')) return [scheduleGroupMemberRow()]
       throw new Error(`unexpected query: ${sql}`)
@@ -2840,6 +3200,86 @@ describe('attendance UUID route validation', () => {
       ['default', 'scheduler-1', [], []],
     )
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    const membershipSql = db.query.mock.calls.map(([text]) => String(text)).find((text) => text.includes('FROM user_orgs uo'))
+    expect(membershipSql).toEqual(expect.any(String))
+    expectActiveOrgMemberPredicate(String(membershipSql))
+  })
+
+  describe('schedule group member active-org gate', () => {
+    function installScheduleMemberWriteMock(
+      db: { query: { mockImplementation: (impl: (sql: string, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[],
+    ) {
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, true)
+        if (rbac !== undefined) return rbac
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          const active = new Set(activeUserIds)
+          return requested.filter((userId) => active.has(userId)).map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('pg_advisory_xact_lock')) return []
+        if (sql.includes('FROM attendance_schedule_group_members') && sql.includes('LIMIT 1')) return []
+        if (sql.includes('INSERT INTO attendance_schedule_group_members')) {
+          return [scheduleGroupMemberRow({ user_id: params[2] })]
+        }
+        throw new Error(`unexpected query: ${sql}`)
+      })
+    }
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('rejects a schedule-group member add for %s without inserting', async (_label, userId) => {
+      const { db, routes } = await createHarness('false')
+      installScheduleMemberWriteMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups/:id/members', {
+        params: { id: scheduleGroupId },
+        body: { userIds: [userId], effectiveFrom: '2026-06-01' },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: [{ userId }],
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_schedule_group_members')
+      expect(db.transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects a mixed schedule-group member batch before inserting the valid id', async () => {
+      const { db, routes } = await createHarness('false')
+      installScheduleMemberWriteMock(db, ['worker-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/schedule-groups/:id/members', {
+        params: { id: scheduleGroupId },
+        body: { userIds: ['worker-1', 'not-in-this-org'], effectiveFrom: '2026-06-01' },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          details: [{ userId: 'not-in-this-org' }],
+        },
+      })
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining('uo.user_id = ANY($2::text[])'),
+        ['default', ['worker-1', 'not-in-this-org']],
+      )
+      expect(db.query.mock.calls.map(([text]) => String(text)).some((text) => text.includes('INSERT INTO attendance_schedule_group_members'))).toBe(false)
+    })
   })
 
   it('rejects member dispatch outside scheduler scope and does not write', async () => {

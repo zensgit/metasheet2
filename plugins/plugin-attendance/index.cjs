@@ -6349,6 +6349,17 @@ class HttpError extends Error {
   }
 }
 
+function attendanceHttpErrorBody(error) {
+  return {
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+    },
+  }
+}
+
 // Attendance import upload path containment (post-closeout P3 defense-in-depth, 2026-07-11).
 // Output-side containment mirroring core StorageService.resolveWithinBase, layered behind the existing
 // isUuidLike(fileId) + sanitizeImportUploadOrgId(orgId) input gates: even if a future caller builds a path
@@ -9496,8 +9507,124 @@ async function ensureAttendanceGroups(db, orgId, groupNames, options) {
   return { map, created }
 }
 
-async function insertAttendanceGroupMembers(db, orgId, members) {
+const ATTENDANCE_IMPORT_MEMBER_NOT_IN_ORG_WARNING = 'Target user is not an active member of this org'
+
+function shouldAssignAttendanceImportGroupMember({
+  groupSync,
+  groupKey,
+  rowUserId,
+  groupIdMap,
+  groupNames,
+  prepareOnly,
+}) {
+  if (!groupSync?.autoAssignMembers || !groupKey || !rowUserId) return false
+  if (prepareOnly) {
+    return Boolean(groupIdMap?.has(groupKey) || (groupSync.autoCreate && groupNames?.has(groupKey)))
+  }
+  return Boolean(groupIdMap?.has(groupKey))
+}
+
+// Rows that commit would turn into attendance_group_members writes. Invalid and
+// duplicate rows are not assigned, so they are not part of this batch.
+function collectImportGroupMemberAssignmentRows({
+  rows,
+  fallbackUserId,
+  userMap,
+  userMapKeyField,
+  userMapSourceFields,
+  requiredFields,
+  punchRequiredFields,
+  groupSync,
+  groupIdMap,
+  groupNames,
+  prepareOnly,
+}) {
+  const assignments = []
+  const seen = new Set()
+  const required = Array.isArray(requiredFields) ? requiredFields : []
+  const punchRequired = Array.isArray(punchRequiredFields) ? punchRequiredFields : []
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const workDate = row?.workDate
+    const rowUserId = resolveRowUserId({
+      row,
+      fallbackUserId,
+      userMap,
+      userMapKeyField,
+      userMapSourceFields,
+    })
+    let rejected = !rowUserId || !workDate
+    if (!rejected && required.length) {
+      rejected = required.some((field) => {
+        const value = resolveRequiredFieldValue(row, field)
+        return value === undefined || value === null || value === ''
+      })
+    }
+    if (!rejected && punchRequired.length && shouldEnforcePunchRequired(row)) {
+      rejected = punchRequired.some((field) => {
+        const value = resolveRequiredFieldValue(row, field)
+        return value === undefined || value === null || value === ''
+      })
+    }
+    if (rejected) continue
+    const dedupKey = `${rowUserId}:${workDate}`
+    if (seen.has(dedupKey)) continue
+    seen.add(dedupKey)
+    const groupKey = resolveAttendanceGroupKey(row)
+    if (!shouldAssignAttendanceImportGroupMember({
+      groupSync,
+      groupKey,
+      rowUserId,
+      groupIdMap,
+      groupNames,
+      prepareOnly,
+    })) continue
+    assignments.push({ userId: rowUserId, workDate })
+  }
+  return assignments
+}
+
+function importMemberAssignmentDetailOptions(assignments) {
+  const byUserId = new Map()
+  for (const assignment of assignments) {
+    const userId = String(assignment?.userId ?? '').trim()
+    if (!userId) continue
+    const list = byUserId.get(userId) ?? []
+    list.push({
+      userId,
+      workDate: assignment.workDate ?? '',
+      warnings: [ATTENDANCE_IMPORT_MEMBER_NOT_IN_ORG_WARNING],
+    })
+    byUserId.set(userId, list)
+  }
+  return {
+    detailForRejected(userId) {
+      return byUserId.get(userId) ?? [{
+        userId,
+        workDate: '',
+        warnings: [ATTENDANCE_IMPORT_MEMBER_NOT_IN_ORG_WARNING],
+      }]
+    },
+  }
+}
+
+async function assertImportGroupMemberAssignmentsActive(client, orgId, assignments) {
+  if (!assignments?.length) return
+  await assertActiveOrgMemberUserIds(
+    client,
+    orgId,
+    assignments.map((assignment) => assignment.userId),
+    importMemberAssignmentDetailOptions(assignments),
+  )
+}
+
+async function insertAttendanceGroupMembers(db, orgId, members, options) {
   if (!members.length) return 0
+  await assertActiveOrgMemberUserIds(
+    db,
+    orgId,
+    members.map((member) => member?.userId),
+    options,
+  )
   const chunkSize = 200
   let inserted = 0
   for (let i = 0; i < members.length; i += chunkSize) {
@@ -19865,11 +19992,13 @@ async function runAnnualLeaveAccrualScheduledTriggerOnce(db, logger = console, o
   return { ran: true, orgs }
 }
 
-// Roster-write gate (#6045 group members, #6047 group managers). Same active-org predicate as
-// applyAnnualLeaveManualAdjustment below: user_orgs.is_active AND users.is_active in the actor org.
-// Inactive membership, a deactivated user, another org, and a nonexistent id all return no row and
-// fail closed as 404 USER_NOT_IN_ORG. Callers must run this before any INSERT in the same
-// transaction: a rejection throws and writes nothing, including earlier ids in a batch.
+// Roster-write gate (#6045 group members, #6047 group managers, schedule-group members,
+// CSV autoAssignMembers). Same active-org predicate as applyAnnualLeaveManualAdjustment
+// below: user_orgs.is_active AND users.is_active in the actor org. Inactive membership, a
+// deactivated user, another org, and a nonexistent id all return no row and fail closed as
+// 404 USER_NOT_IN_ORG. Callers must run this before any INSERT in the same transaction: a
+// rejection throws and writes nothing, including earlier ids in a batch. Import callers pass
+// detailForRejected so details match skipped-row shape { userId, workDate, warnings }.
 const ACTIVE_ORG_MEMBER_USER_IDS_SQL = `SELECT uo.user_id
     FROM user_orgs uo
     JOIN users u ON u.id = uo.user_id
@@ -19878,7 +20007,7 @@ const ACTIVE_ORG_MEMBER_USER_IDS_SQL = `SELECT uo.user_id
      AND uo.is_active = true
      AND u.is_active = true`
 
-async function assertActiveOrgMemberUserIds(client, orgId, userIds) {
+async function assertActiveOrgMemberUserIds(client, orgId, userIds, options) {
   const requested = []
   const seen = new Set()
   for (const raw of userIds) {
@@ -19894,11 +20023,20 @@ async function assertActiveOrgMemberUserIds(client, orgId, userIds) {
   const active = new Set(rows.map((row) => String(row.user_id)))
   const rejected = requested.filter((userId) => !active.has(userId))
   if (rejected.length) {
+    const detailForRejected = typeof options?.detailForRejected === 'function'
+      ? options.detailForRejected
+      : null
+    const details = []
+    for (const userId of rejected) {
+      const produced = detailForRejected ? detailForRejected(userId) : { userId }
+      if (Array.isArray(produced)) details.push(...produced)
+      else if (produced) details.push(produced)
+    }
     throw new HttpError(
       404,
       'USER_NOT_IN_ORG',
       'Target user is not an active member of this org',
-      rejected.map((userId) => ({ userId })),
+      details,
     )
   }
   return requested
@@ -28804,6 +28942,7 @@ module.exports = {
 		          }
 		        }
 	        const groupMembersToInsert = new Map()
+	        const importMemberAssignmentRows = []
 		        batchMeta = {
 		          ...(payload.batchMeta ?? {}),
 		          engine: importEngine,
@@ -29242,19 +29381,27 @@ module.exports = {
 		            return true
 	          }
 	          seenRowKeys.add(dedupKey)
-	          const prepareOnlyGroupResolvable = groupKey
-	            && (groupIdMap?.has(groupKey) || (groupSync?.autoCreate && groupNames.has(groupKey)))
-	          if (prepareOnly && groupSync?.autoAssignMembers && prepareOnlyGroupResolvable && rowUserId) {
-	            preparedPlanGroupEffects.push({
-	              kind: 'ensure_member',
-	              groupRef: groupKey,
-	              userId: rowUserId,
-	              firstSourceOrdinal: sourceOrdinal,
-	            })
-	          } else if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
-	            const groupEntry = groupIdMap.get(groupKey)
-	            if (groupEntry?.id) {
-	              groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
+	          if (shouldAssignAttendanceImportGroupMember({
+	            groupSync,
+	            groupKey,
+	            rowUserId,
+	            groupIdMap,
+	            groupNames,
+	            prepareOnly,
+	          })) {
+	            importMemberAssignmentRows.push({ userId: rowUserId, workDate })
+	            if (prepareOnly) {
+	              preparedPlanGroupEffects.push({
+	                kind: 'ensure_member',
+	                groupRef: groupKey,
+	                userId: rowUserId,
+	                firstSourceOrdinal: sourceOrdinal,
+	              })
+	            } else {
+	              const groupEntry = groupIdMap.get(groupKey)
+	              if (groupEntry?.id) {
+	                groupMembersToInsert.set(`${groupEntry.id}:${rowUserId}`, { groupId: groupEntry.id, userId: rowUserId })
+	              }
 	            }
 	          }
 
@@ -29813,11 +29960,26 @@ module.exports = {
 	          return true
 	        })
 
+	        const importMemberGateOptions = importMemberAssignmentDetailOptions(importMemberAssignmentRows)
+	        if (importMemberAssignmentRows.length) {
+	          await assertActiveOrgMemberUserIds(
+	            trx,
+	            orgId,
+	            importMemberAssignmentRows.map((assignment) => assignment.userId),
+	            importMemberGateOptions,
+	          )
+	        }
+
 	        await flushRecordUpserts()
 	        await flushImportItems()
 
 		        if (!prepareOnly && groupSync?.autoAssignMembers && groupMembersToInsert.size) {
-	          const groupMembersAdded = await insertAttendanceGroupMembers(trx, orgId, Array.from(groupMembersToInsert.values()))
+	          const groupMembersAdded = await insertAttendanceGroupMembers(
+	            trx,
+	            orgId,
+	            Array.from(groupMembersToInsert.values()),
+	            importMemberGateOptions,
+	          )
 	          if (batchMeta) {
 	            batchMeta.groupMembersAdded = groupMembersAdded
 	            await trx.query(
@@ -41766,10 +41928,29 @@ module.exports = {
           )
           const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
           const groupWarnings = []
+          let previewGroupIdMap = null
           if (groupNames.size && !groupSync?.autoCreate) {
-            const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+            previewGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
             for (const [key, name] of groupNames.entries()) {
-              if (!groupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+              if (!previewGroupIdMap.has(key)) groupWarnings.push(`Attendance group not found: ${name}`)
+            }
+          }
+          if (groupSync?.autoAssignMembers) {
+            const importMemberAssignments = collectImportGroupMemberAssignmentRows({
+              rows,
+              fallbackUserId: parsed.data.userId ?? userId,
+              userMap: parsed.data.userMap,
+              userMapKeyField: parsed.data.userMapKeyField,
+              userMapSourceFields: parsed.data.userMapSourceFields,
+              requiredFields,
+              punchRequiredFields,
+              groupSync,
+              groupIdMap: previewGroupIdMap,
+              groupNames,
+              prepareOnly: true,
+            })
+            if (importMemberAssignments.length) {
+              await assertImportGroupMemberAssignmentsActive(db, orgId, importMemberAssignments)
             }
           }
           if (groupSync?.ruleSetId && !parsed.data.ruleSetId && groupNames.size) {
@@ -42160,7 +42341,7 @@ module.exports = {
           })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json(attendanceHttpErrorBody(error))
             return
           }
           if (isDatabaseSchemaError(error)) {
@@ -42465,7 +42646,7 @@ module.exports = {
 	          })
 	        } catch (error) {
 	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            res.status(error.status).json(attendanceHttpErrorBody(error))
 	            return
 	          }
 	          const errorCode = typeof error?.code === 'string' && error.code
@@ -42889,7 +43070,7 @@ module.exports = {
 	            }
 	          }
 	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            res.status(error.status).json(attendanceHttpErrorBody(error))
 	            return
 	          }
 
@@ -43112,7 +43293,7 @@ module.exports = {
 
 	      } catch (error) {
 	        if (error instanceof HttpError) {
-	          res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	          res.status(error.status).json(attendanceHttpErrorBody(error))
 	          return
 	        }
 	        const errorCode = typeof error?.code === 'string' && error.code
@@ -43608,7 +43789,7 @@ module.exports = {
 	            }
 	          }
 	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            res.status(error.status).json(attendanceHttpErrorBody(error))
 	            return
 	          }
 	          const errorCode = typeof error?.code === 'string' && error.code
@@ -46649,6 +46830,7 @@ module.exports = {
         try {
           const created = []
           await db.transaction(async (trx) => {
+            await assertActiveOrgMemberUserIds(trx, orgId, input.userIds)
             for (const userId of input.userIds) {
               await acquireAttendanceScheduleGroupMemberLock(trx, orgId, groupId, userId)
               const overlapRows = await trx.query(
@@ -46680,7 +46862,7 @@ module.exports = {
           res.json({ ok: true, data: { items: created } })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json(attendanceHttpErrorBody(error))
             return
           }
           if (error?.code === '23505') {

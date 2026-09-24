@@ -14,6 +14,8 @@
 |---|---|---|
 | `POST /api/attendance/groups/:id/members` | trim 后 `INSERT … ON CONFLICT DO NOTHING`，不查组织成员 | 同一事务内先查活跃组织成员；任一 id 不通过则 **整批 404 `USER_NOT_IN_ORG`，零 INSERT** |
 | `POST /api/attendance/groups/:id/managers` | trim 后 `INSERT … ON CONFLICT DO UPDATE`，不查组织成员 | 同一事务内先查；不通过则 **404 `USER_NOT_IN_ORG`，不写、不触碰已有行** |
+| `POST /api/attendance/schedule-groups/:id/members` | 事务内按 userId 查重叠后直接 INSERT | 同一事务内、任何重叠查询和 INSERT 之前先查整批；任一 id 不通过则 **整批 404 `USER_NOT_IN_ORG`，零 INSERT** |
+| CSV `autoAssignMembers`（preview / commit / `insertAttendanceGroupMembers`） | 解析出的 userId 直接进入 `ensure_member` 或 `attendance_group_members` INSERT | 会落成员的行先过同一门；任一 id 不通过则 **整批 404，零成员 INSERT，也不把 ensure_member 交给同步计划** |
 | 谁可以写（O3 / OW8） | owner/sub_owner 可 `add_members`；managers POST 仍 `attendance:admin` | **不改 ACL** |
 
 谓词与年假手工调账 `applyAnnualLeaveManualAdjustment` 相同：`user_orgs.is_active = true AND users.is_active = true`，且 `user_orgs.org_id` 等于 actor 的已认证组织。真源表是 `user_orgs`（`user_id`/`org_id` 均为 text）JOIN `users`。
@@ -44,9 +46,7 @@
 - 不改 O3：谁可以 `add_members` / `remove_members` / `list_*` / preview。
 - 不改 OW8：负责人 POST/DELETE 仍仅 `attendance:admin`。
 - 不改 DELETE 成员/负责人（删除不是授予）。
-- 不改 `POST /api/attendance/schedule-groups/:id/members`（#6045 标为可选同型残留，本 PR 不扩）。
-- 不改导入路径 `insertAttendanceGroupMembers`（CSV 落成员，不是这两条路由）。
-- 不回扫、不删除历史上已经写入的幽灵行。
+- 不回扫、不删除历史上已经写入的幽灵行。只在验证记录里留一条只读查找 SQL。
 - 不把 `users.activation_status` 加进谓词。年假调账与本门只看两列 `is_active`。W4 事务内 liveness 另有 `activation_status`，那是另一条写路径。
 - 不改管理端 picker / global-scope 搜索。API 拒绝即可；UI 会看到 404。
 - 不新增 env flag。
@@ -131,4 +131,55 @@ HTTP **404**。`details` 只回显调用方自己提交、且未通过的 id（�
 
 本地已做成员 POST 去门变异：`inactive user` 与 `mixed member batch` 得到 200 而不是 404；owner 正向腿缺少 `FROM user_orgs uo`。恢复断言后套件回到绿。详见验证记录。
 
-测不到的降级：见验证记录第 5 节（排班组成员、导入落成员、历史幽灵行、真实 PostgreSQL 的 `ANY($2::text[])`）。
+排班组 POST 与 CSV 自动入组的负向腿同样锁「404 且没有成员 INSERT」。CSV 正向腿锁同步计划里仍有 `ensure_member`，且计划发出前 SQL 含 `FROM user_orgs uo`。
+
+---
+
+## 6. 排班组成员与 CSV 自动入组
+
+同一谓词、同一 404、同一全有或全无。空结果不区分停用、他组织、不存在。
+
+### 6.1 `POST /api/attendance/schedule-groups/:id/members`
+
+事务开头、重叠 `SELECT` 和 `INSERT` 之前：
+
+`assertActiveOrgMemberUserIds(trx, orgId, input.userIds)`
+
+`details` 仍是 `[{ userId }]`。坏 id 与合格 id 同批时，合格 id 不插入，后续重叠检查也不跑。调度范围 / admin ACL 仍在这道门之前，不改。这条路由的 `HttpError` JSON 现在带上 `details`。
+
+### 6.2 CSV `autoAssignMembers`
+
+只有**真的会写成考勤组成员**的行进门。与原来的分配分支相同：`autoAssignMembers`，行有 `userId` 和 `workDate`，通过必填校验，不是同 payload 里的重复行，并且考勤组可解析（组已存在，或 prepareOnly 且 `autoCreate` 会建这个组）。没有考勤组字段、组不存在且不自动创建、无效行、重复行：不分配成员，也不因为这些行 404。
+
+三处都查，任一失败则**整批**失败，零成员 INSERT：
+
+1. `POST /api/attendance/import/preview`：在成功 JSON 之前。失败则整次 preview 是 404，不是 200 里夹一条 warning。
+2. `commitAttendanceImportPayload`：行扫描之后、`flushRecordUpserts` 与 `insertAttendanceGroupMembers` 之前。失败则抛出，prepareOnly 计划不返回，`commitSyncImportPlan` 收不到这个用户的 `ensure_member`，同批合格用户的成员效果也不发出。
+3. `insertAttendanceGroupMembers` 在任何 chunk `INSERT` 之前再查一次，挡住 `prepareOnly: false` 的直接调用。
+
+`details` 用导入跳过行的形状。同一个 userId 的每一条会被分配的日期各一条；重复行不计入：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "USER_NOT_IN_ORG",
+    "message": "Target user is not an active member of this org",
+    "details": [
+      {
+        "userId": "<id>",
+        "workDate": "2026-06-10",
+        "warnings": ["Target user is not an active member of this org"]
+      }
+    ]
+  }
+}
+```
+
+preview、sync commit、legacy `POST /api/attendance/import`、async commit 入队、integration sync 的 `HttpError` 响应都带上 `details`。
+
+W4 效果适配器 `applyAttendanceLegacyGroupEffectsV1` 仍只执行已冻结的 `ensure_member`，不回头再查 `user_orgs`。活的 HTTP 路径都先经过 `commitAttendanceImportPayload`，被拒绝的用户不会进入计划。
+
+### 6.3 历史行
+
+不删除、不更新已经落库的成员、负责人、排班组成员。只读查找 SQL 写在验证记录里。
