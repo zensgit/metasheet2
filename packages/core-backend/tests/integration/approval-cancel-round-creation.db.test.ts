@@ -666,6 +666,55 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
    * The zero-row oracle every creation-time rejection owes (lock §14.3's own "零行" requirement):
    * no `approval_rounds` row, no dedicated `approval_instances` row, and no seat on one.
    */
+  /**
+   * LEGACY DECISION DOOR ON THIS BRANCH (the seat/attribution candidate is stacked on r9): `POST
+   * /:id/approve` and `/:id/reject` admit a caller only through the decision door's own predicate (an
+   * ACTIVE seat at a decidable node on a pending instance) and file the row under the SERVER-derived
+   * `nodeKey` / `nodeEntryEpoch`; the caller's own copies of those two keys are dropped. Every leg in
+   * this file that drives the legacy door therefore states the answer THIS door gives — a caller with
+   * no seat is refused before any write, and a seated caller's row is attributed to the seat's node
+   * whatever the request body named. The answers the same legs pinned on the branch below (where the
+   * door copied the body verbatim) are in that branch's history, not here.
+   */
+  type LegacyDoorSnapshot = { status: string; version: number; approveRows: number }
+
+  async function legacyDoorSnapshot(documentId: string): Promise<LegacyDoorSnapshot> {
+    const inst = await pool().query<{ status: string; version: number }>(
+      `SELECT status, version FROM approval_instances WHERE id = $1`,
+      [documentId],
+    )
+    const rows = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
+      [documentId],
+    )
+    return { status: inst.rows[0]?.status ?? '', version: Number(inst.rows[0]?.version), approveRows: Number(rows.rows[0]?.n ?? '0') }
+  }
+
+  /**
+   * The refusal the legacy door gives a caller with no seat: 403 `APPROVAL_ASSIGNMENT_REQUIRED`, the
+   * route's own envelope, values-free (no seat, no node key, no person, and nothing that says what
+   * KIND of instance was addressed), and a zero-row delta — status, version and the approve-row count
+   * are exactly what they were before the call.
+   */
+  async function expectLegacyDecisionRefusedValuesFree(
+    response: Response,
+    documentId: string,
+    before: LegacyDoorSnapshot,
+    mustNotLeak: string[],
+  ): Promise<string> {
+    const text = await response.clone().text()
+    expect(response.status, text).toBe(403)
+    const body = (await response.json()) as { ok?: boolean; error?: { code?: string; message?: string } }
+    expect(body.ok).toBe(false)
+    expect(body.error?.code).toBe('APPROVAL_ASSIGNMENT_REQUIRED')
+    expect(text.toLowerCase()).not.toContain('cancel')
+    expect(text).not.toContain('approval_')
+    for (const token of mustNotLeak) expect(text).not.toContain(token)
+    const after = await legacyDoorSnapshot(documentId)
+    expect(after).toEqual(before)
+    return text
+  }
+
   async function expectZeroCancelRoundRows(documentId: string): Promise<void> {
     const roundRows = await pool().query<{ id: string }>(`SELECT id FROM approval_rounds WHERE document_id = $1`, [
       documentId,
@@ -1256,14 +1305,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
    */
   async function delegatedApprovedOriginal(
     label: string,
-    // `approveVia: 'legacy'` is the G-4 leg (README §2.3, the DISCLOSED gap): the legacy
-    // `POST /api/approvals/:id/approve` route copies `metadata` verbatim out of the REQUEST BODY
-    // (`routes/approvals.ts:2877-2879`), so its approve row carries NO `nodeKey` and the restore
-    // join's `a.node_key = r.metadata->>'nodeKey'` conjunction cannot match. Production-shaped:
-    // the row is written by the shipped route, not hand-edited into the table afterwards.
-    // `legacyNodeKey` injects `metadata.nodeKey` into the LEGACY request body. That body is copied
-    // VERBATIM into `approval_records.metadata` by the shipped route, so this is not a hand-edit of
-    // the table — it is exactly what any holder of `approvals:act` can send today.
+    // `approveVia: 'legacy'` drives the legacy `POST /api/approvals/:id/approve` door. On THIS branch
+    // that door seat-gates the caller (D holds the delegated seat at `approval_a`, so D is admitted)
+    // and files the row under the SERVER-derived `nodeKey` (`approval_a`) + `nodeEntryEpoch`;
+    // `legacyNodeKey` still puts a `metadata.nodeKey` into the request body, and the fixture asserts
+    // below that the stored row does NOT carry that value — the caller's key is dropped, not copied.
     options: { approveVia?: 'actions' | 'legacy'; legacyNodeKey?: string } = {},
   ): Promise<{
     documentId: string
@@ -1354,18 +1400,22 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // The audit trail the seat query reads names D, and A appears in it nowhere — the provenance the
     // restore depends on lives ONLY in `approval_assignments`. The `node_key` the row carries is the
     // leg's own precondition, asserted (not assumed) per writer: the template runtime writes
-    // `approval_a`, the legacy route writes NOTHING at all.
-    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
-      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+    // `approval_a`, and on this branch the legacy door writes the SAME server-derived `approval_a`
+    // (plus the round's `nodeEntryEpoch`) whatever the request body named.
+    const records = await pool().query<{ actor_id: string; node_key: string | null; epoch: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key, metadata->>'nodeEntryEpoch' AS epoch
          FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
       [documentId],
     )
-    expect(records.rows).toEqual([
-      {
-        actor_id: delegateeD,
-        node_key: approveVia === 'legacy' ? (options.legacyNodeKey ?? null) : 'approval_a',
-      },
+    expect(records.rows.map((row) => ({ actor_id: row.actor_id, node_key: row.node_key }))).toEqual([
+      { actor_id: delegateeD, node_key: 'approval_a' },
     ])
+    if (approveVia === 'legacy') {
+      expect(Number.isInteger(Number(records.rows[0]?.epoch))).toBe(true)
+      if (options.legacyNodeKey !== undefined && options.legacyNodeKey !== 'approval_a') {
+        expect(records.rows[0]?.node_key).not.toBe(options.legacyNodeKey)
+      }
+    }
     const allRecords = await pool().query<{ actor_id: string }>(
       `SELECT actor_id FROM approval_records WHERE instance_id = $1`,
       [documentId],
@@ -1709,14 +1759,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
          FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
       [documentId],
     )
-    // 每条腿自己的前提,断言而不是假设:第二行的 `nodeKey` 是模板运行时写的 `approval_b`,还是
-    // legacy 路由从请求体逐字搬过来的那个值。两者混淆的话,`P21(a)` 与 `P11(a)` 就分不清了。
+    // 每条腿自己的前提,断言而不是假设:第二行的 `nodeKey` 无论由模板运行时还是由本栈的 legacy 门
+    // 写,都是服务端派生的 `approval_b`;请求体里报的名字(若有)不落库。
     expect(records.rows).toEqual([
       { actor_id: delegateeD, node_key: 'approval_a' },
-      {
-        actor_id: delegateeD,
-        node_key: options.secondNodeVia === 'legacy' ? (options.legacyNodeKey ?? null) : 'approval_b',
-      },
+      { actor_id: delegateeD, node_key: 'approval_b' },
     ])
 
     const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
@@ -1749,31 +1796,15 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(seatRows.rows.length).toBe(2)
   })
 
-  it('§2-G3 第三句 负控 P12(a) (G-4) — legacy POST /:id/approve 写的 approve 行没有 nodeKey,该行无法归属到节点席位 ⇒ **阻断**(409 SEAT_INELIGIBLE / delegate_not_seat / 零行),**谁都没停权**也照样阻断', async () => {
+  it('§2-G3 第三句 正控 P12(a)(本栈:legacy 门自写节点归属)— 被委托人 D 走 legacy 且**不带** nodeKey:行由服务端归属到 `approval_a` ⇒ 席位还原成 A、201;「行无法归属 ⇒ 阻断」那一格在本栈上不再可达', async () => {
     const fixture = await delegatedApprovedOriginal('g3dlg-legacy', { approveVia: 'legacy' })
-
-    const service = new ApprovalProductService()
-    let thrown: unknown
-    try {
-      const unexpected = await service.createCancelRoundInstance(fixture.documentId, { userId: fixture.requesterId })
-      await registerUnexpectedlyCreatedRound(fixture.documentId, unexpected.id)
-    } catch (error) {
-      thrown = error
-    }
-    // OWNER RULING 2026-09-20, verbatim: 「原主体无法可靠还原…则阻断,不静默回退给历史被委托人」.
-    // 裁决前这一腿 MEASURED 的答案是席位 `[D]` —— 即被委托人 D 留在席位上,正是被禁止的那个回退。
-    // 它不再是「已登记缺口的钉子」,而是缺口**被关掉的方向**的钉子;`reason` 的值说明阻断的是
-    // 「行无法归属」而不是「某个人失格」—— 本腿里没有任何人被停权。
-    expect(thrown, 'creation must BLOCK, not fall back to the historical delegatee').toBeTruthy()
-    const failure = thrown as { statusCode?: number; code?: string; message?: string; details?: Record<string, unknown> }
-    expect(failure.statusCode).toBe(409)
-    expect(failure.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
-    expect(failure.details).toEqual({ ineligibleCount: 1, reasons: ['delegate_not_seat'] })
-    for (const person of [fixture.delegatorA, fixture.delegateeD]) {
-      expect(JSON.stringify(failure.details)).not.toContain(person)
-      expect(String(failure.message)).not.toContain(person)
-    }
-    await expectZeroCancelRoundRows(fixture.documentId)
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // On the branch below this one the same document BLOCKED (`delegate_not_seat`): the legacy row
+    // carried no node and could not be attributed. Here the door wrote the node itself, so the
+    // restore has what it needs and the ruling's first sentence applies: the seat is A's.
+    expect(attempt.thrown, 'a server-attributed legacy row restores the seat instead of blocking').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA])
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
   /**
@@ -2008,20 +2039,20 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     return { ...attempt, delegatorA: fixture.delegatorA, delegateeD: fixture.delegateeD }
   }
 
-  it('§2-G3 第三句 负控 N7(a) — legacy 语料 × 停权「原审批主体 A」⇒ **阻断**(409 SEAT_INELIGIBLE / delegate_not_seat / 零行),不静默把席位留给历史被委托人 D', async () => {
+  it('§2-G3 第三句 负控 N7(a)(本栈)— legacy 语料 × 停权「原审批主体 A」⇒ 仍然阻断,但 reason 是 `inactive`:行已由服务端归属,A 被还原出来、再被资格闸拒;席位不回退给历史被委托人 D', async () => {
     const attempt = await legacyAttemptAfterDeactivating('g3dlg-lgcygA', 'delegatorA')
-    // 裁决前这一腿钉的是「创建成功、席位 [D]」。现在它钉相反的答案,并且 reason 说明**为什么**:
-    // 不是「A 不在职」(A 根本没被解析出来),而是这条 approve 行无法归属到节点席位。
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['delegate_not_seat'] }, [
+    // On the branch below the reason was `delegate_not_seat` (the row could not be attributed at
+    // all). Here the row IS attributed, A is restored, and the qualification gate is what blocks.
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['inactive'] }, [
       attempt.delegatorA,
       attempt.delegateeD,
     ])
     expect(attempt.seats, 'a blocked creation seats nobody').toEqual([])
   })
 
-  it('§2-G3 第三句 负控 N8(a) — legacy 语料 × 委托**已撤销** × 停权「原审批主体 A」⇒ 同样阻断,委托状态不改变答案', async () => {
+  it('§2-G3 第三句 负控 N8(a)(本栈)— legacy 语料 × 委托**已撤销** × 停权「原审批主体 A」⇒ 同样阻断(`inactive`),委托状态不改变答案', async () => {
     const attempt = await legacyAttemptAfterDeactivating('g3dlg-lgcygR', 'delegatorA', 'revoked')
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['delegate_not_seat'] }, [
+    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['inactive'] }, [
       attempt.delegatorA,
       attempt.delegateeD,
     ])
@@ -2032,16 +2063,14 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // 现在的答案:委托已撤销、原主体已离职 ⇒ **没有人**拿到撤销轮的决定权,轮次开不出来。
   })
 
-  it('§2-G3 第三句 负控 P13(a)(承重)— legacy 语料 × 停权「被委托人 D」:阻断的 reason 是 delegate_not_seat 而**不是** inactive —— D 从来没被坐下,所以资格闸没有在他身上跑', async () => {
+  it('§2-G3 第三句 正控 P13(a)(本栈,承重)— legacy 语料 × 停权「被委托人 D」:行由服务端归属、席位还原成 A,D 从来没被坐下,所以停权 D **不阻断**,201、席位 [A]', async () => {
     const attempt = await legacyAttemptAfterDeactivating('g3dlg-lgcygD', 'delegateeD')
-    // 这条腿承的是**归因**:裁决前它答 `reasons: ['inactive']`(D 被坐下、被资格闸拒),
-    // 现在答 `['delegate_not_seat']`。两个 reason 分别对应「谁被坐下」的两种答案,所以它是
-    // 「席位到底给了谁」的判别腿 —— 把阻断退回「席位 [D]」的 mutation 下,它会红。
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['delegate_not_seat'] }, [
-      attempt.delegatorA,
-      attempt.delegateeD,
-    ])
-    expect(attempt.seats).toEqual([])
+    // The attribution leg: on the branch below this answered `delegate_not_seat`; before the ruling
+    // it answered `inactive` (D was seated and refused). Here neither — the row is attributed, the
+    // seat is A's, and D's account status is irrelevant to a seat D does not hold.
+    expect(attempt.thrown, 'deactivating the delegatee must not block a seat that is A\'s').toBeFalsy()
+    expect(attempt.seats).toEqual([attempt.delegatorA])
+    expect(attempt.seats).not.toContain(attempt.delegateeD)
   })
 
   // ── owner 点名的反例组:多人委托同一人 ──────────────────────────────────────────────────────────
@@ -2225,16 +2254,16 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(new Set(attempt.seats).size, 'no duplicate seat for the same subject').toBe(2)
   })
 
-  it('§2-G3 第三句 负控 N9(a) — owner 点名的反例:多人委托同一人 × legacy 行(A→D、B→D,节点 2 走 legacy 路由)⇒ 该行有两个候选原主体,**阻断**(seat_unresolvable),既不猜 A/B 也不回退 D', async () => {
+  it('§2-G3 第三句 正控 N9(a)(本栈)— owner 点名的反例:多人委托同一人 × legacy 行(A→D、B→D,节点 2 走 legacy 路由)⇒ 行由服务端归属到 `approval_b`,两席各自还原回 A 和 B,不再需要猜、也不回退 D', async () => {
     const fixture = await multiDelegatorOriginal('g3dlg-multiL', 'two_nodes', 'mixed')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    // 裁决前实测的答案是 `[A, D]`(节点 1 还原成 A、节点 2 的 legacy 行把 D 留下)—— 恰好是
-    // 「静默回退给历史被委托人」。现在这一行不可归属 ⇒ 整张单据阻断。
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
-      ...fixture.delegators,
-      fixture.delegateeD,
-    ])
-    expect(attempt.seats).toEqual([])
+    // On the branch below this BLOCKED (`seat_unresolvable`: two candidate subjects, no node on the
+    // row). The door now writes the node, so the row maps to exactly one delegator — the same
+    // answer as the all-`/actions` twin `P16(a)`.
+    expect(attempt.thrown, 'a server-attributed legacy row maps to exactly one delegator').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegators[0], fixture.delegators[1]])
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
+    expect(attempt.seats.length).toBe(2)
   })
 
   it('§2-G3 第三句 负控 N10(a) — 多人委托同一人 × 原主体 A 已停权 ⇒ 阻断(reasons: [inactive]),**不**回退给 D;另一位原主体 B 仍在职也救不了这张单据(阻断不过滤)', async () => {
@@ -2313,14 +2342,14 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       body: { version: versionRow.rows[0].version },
     })
     expect(legacy.status, await legacy.clone().text()).toBe(200)
-    // 这一腿的前提,断言而不是假设:approve 行确实**没有** nodeKey(否则它测的就不是 legacy 语料),
-    // 且这张单据上确实**没有**任何带 `delegatedFrom` 的席位。
+    // 这一腿的前提,断言而不是假设:本栈上 legacy 门自写节点归属,所以这条行带的是服务端写的
+    // `approval_a`(请求体没有给任何 nodeKey);且这张单据上确实**没有**任何带 `delegatedFrom` 的席位。
     const records = await pool().query<{ actor_id: string; node_key: string | null }>(
       `SELECT actor_id, metadata->>'nodeKey' AS node_key
          FROM approval_records WHERE instance_id = $1 AND action = 'approve'`,
       [documentId],
     )
-    expect(records.rows).toEqual([{ actor_id: approverA, node_key: null }])
+    expect(records.rows).toEqual([{ actor_id: approverA, node_key: 'approval_a' }])
     const delegatedRows = await pool().query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM approval_assignments
         WHERE instance_id = $1 AND metadata->>'delegatedFrom' IS NOT NULL`,
@@ -2348,18 +2377,17 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
   // 没有被委托席位的 actor 完全不受影响(`P19(a)`)—— 爆炸半径就锁在这里。
   // ══════════════════════════════════════════════════════════════════════════════════════════════
 
-  it('§2-G3 第三句 负控 N11(a)(审阅发现,修复前实测可绕过)— legacy 路由伪造 metadata.nodeKey 成一个**不存在的节点**:不再把 actor 坐下,而是 409 seat_unresolvable、零行', async () => {
+  it('§2-G3 第三句 正控 N11(a)(本栈)— 请求体把 metadata.nodeKey 报成一个**不存在的节点**:legacy 门把它丢掉、写下服务端的 `approval_a` ⇒ 席位还原成 A、201;这个名字连库都进不了', async () => {
     const fixture = await delegatedApprovedOriginal('g3dlg-forged', {
       approveVia: 'legacy',
       legacyNodeKey: 'totally_made_up_node_that_never_existed',
     })
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    // 修复前这里 MEASURED 的答案是:不抛、席位 `[D]`。现在:
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-    ])
-    expect(attempt.seats).toEqual([])
+    // Before corroboration existed this seated D; on the branch below it BLOCKED. Here the fixture
+    // has already asserted the made-up name is not on the row, and the answer is the honest one.
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA])
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
   it('§2-G3 第三句 正控 P20(a) — 反向不对称:同一条 legacy 路由,传**真实的** nodeKey(approval_a)不是绕过,它只是把还原做对了 ⇒ 201、席位 [A];所以修法拒的是「没有凭据的名字」,不是「请求体里带了 metadata」', async () => {
@@ -2375,22 +2403,17 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // 而不是归因到「legacy + metadata 一律拒」。少了它,N11(a) 可能只是在测一条更粗的规则。
   })
 
-  it('§2-G3 第三句 负控 P21(a)(**已登记的残留**,钉今天的答案)— 被委托人在自己**真有**席位的兄弟节点上走 legacy、却把 nodeKey 报成**被委托的那个节点**:凭据判据命中 1 条、放行,于是他把自己从撤销轮里摘了出去,会签人数 2 → 1', async () => {
+  it('§2-G3 第三句 正控 P21(a)(本栈:下层登记的残留在这里关闭)— 被委托人在自己**真有**席位的兄弟节点上走 legacy、把 nodeKey 报成被委托的那个节点:legacy 门写下的是 `approval_b`,于是席位是 {A, D} 两席,会签人数不再 2 → 1', async () => {
     const fixture = await delegatedSiblingSeatOriginal('g3dlg-selfdrop', {
       secondNodeVia: 'legacy',
       legacyNodeKey: 'approval_a',
     })
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    // MEASURED,不是预测。两条 approve 行都被归属到 approval_a ⇒ 都还原成 A ⇒ 去重后 1 席。
+    // MEASURED. On the branch below both rows folded onto `approval_a` and the 会签 threshold fell to
+    // 1; the honest twin `P11(a)` answers {A, D}, and so does this leg now.
     expect(attempt.thrown).toBeFalsy()
-    expect(attempt.seats).toEqual([fixture.delegatorA])
-    expect(attempt.seats.length).toBe(1)
-    // **这条腿不主张 1 是对的。** 诚实的同形单据(`P11(a)`,两节点都走模板运行时)答 {A, D} 两席;
-    // 这里 D 通过给自己那条 legacy 行改名,把自己从撤销轮的会签集合里摘掉了 —— 门槛真的降了。
-    // 为什么本轮不修:凭据判据在这条路径上**没有被骗**(D 确实在 approval_a 有一条被委托席位),
-    // 要分辨「这条 legacy 行到底结的是哪个节点」需要的是 legacy 路由自己写 `nodeKey`,
-    // 或者按「actor 的席位数 vs approve 行数」对账 —— 前者是路由的合同变更,后者会误伤诚实语料。
-    // 两条都属 owner,已登记进设计 MD §3.4。将来若被修好,这条腿会红并点名自己。
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD])
+    expect(attempt.seats.length).toBe(2)
   })
 
   /**
@@ -2423,7 +2446,7 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     const adminToken = await authToken(baseUrl, adminId)
     const requesterToken = await authToken(baseUrl, requesterId)
     await authToken(baseUrl, delegatorA)
-    await authToken(baseUrl, otherUserE)
+    const tokenE = await authToken(baseUrl, otherUserE)
     const tokenD = await authToken(baseUrl, delegateeD)
     if (siblingNode === 'role' && options.seedRoleMembership === true) {
       await grantRoleMembership(delegateeD, 'admin')
@@ -2487,18 +2510,24 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       })
       expect(second.status, `approval_role: ${await second.clone().text()}`).toBe(200)
     } else {
-      // D is NOT the seat holder at `approval_b`. The legacy route does not consult seats at all —
-      // it locks any pending `platform` instance by id — which is precisely why the `nodeKey` it
-      // copies out of the body cannot be taken as evidence of anything.
+      // D is NOT the seat holder at `approval_b`. On this branch the legacy door consults the seat
+      // table before any write, so D's attempt to decide E's node (naming it in the body) is refused
+      // values-free with zero rows; the document is then completed by its real approver E.
       const versionRow = await pool().query<{ version: number }>(
         `SELECT version FROM approval_instances WHERE id = $1`,
         [documentId],
       )
+      const before = await legacyDoorSnapshot(documentId)
       const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
         method: 'POST',
         body: { version: versionRow.rows[0].version, metadata: { nodeKey: 'approval_b' } },
       })
-      expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
+      await expectLegacyDecisionRefusedValuesFree(legacy, documentId, before, [delegatorA, delegateeD, otherUserE])
+      const byE = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenE, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(byE.status, `approval_b: ${await byE.clone().text()}`).toBe(200)
     }
 
     // 正控先行,逐条:两个节点的席位形状必须是这条腿说的那样,否则断言可以因为别的原因平凡成立。
@@ -2523,11 +2552,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
          FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
       [documentId],
     )
-    // 两条 approve 行都由 D 写、都带一个**真实存在于本单**的 nodeKey —— 两条腿的差别只在那个节点
-    // 是不是 D 自己够得着的席位。
+    // `role`: both rows are D's, both server-attributed. `otherUser`: D's refused attempt left no
+    // row, so the second row is E's own — the honest shape of that document.
     expect(records.rows).toEqual([
       { actor_id: delegateeD, node_key: 'approval_a' },
-      { actor_id: delegateeD, node_key: siblingKey },
+      { actor_id: siblingNode === 'role' ? delegateeD : otherUserE, node_key: siblingKey },
     ])
     const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
       documentId,
@@ -2553,17 +2582,14 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // 少了那条记录,同一张单据现在阻断 —— 那是 `N16(a)`,严格性的代价被钉成数据而不是散文。
   })
 
-  it('§2-G3 第三句 负控 N13(a) — 放宽不等于放开:D 走 legacy 把 nodeKey 报成**第三人 E 的 user 节点**(该节点在本单上确实存在)⇒ 仍然 409 seat_unresolvable、零行。凭据不是「这个节点存在」,是「这个 actor 在那里真有席位」', async () => {
+  it('§2-G3 第三句 正控 N13(a)(本栈)— D 走 legacy 把 nodeKey 报成**第三人 E 的 user 节点**:legacy 门在写入前拒绝(403,零行,回应不透露实例种类与节点名);E 自己结掉该节点后,席位是 {A, E}', async () => {
     const fixture = await delegateAlsoDecidesSiblingNode('g3dlg-othersib', 'otherUser')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-      fixture.otherUserE,
-    ])
-    expect(attempt.seats).toEqual([])
-    // 这条腿与 P22(a) 只差**兄弟节点的席位类型**(role vs 另一个人的 user)。少了它,P22(a) 的放宽
-    // 可能只是「有第二个节点就放行」;有了它,放宽被钉死在「非 user 席位才放行」这一格上。
+    // The refusal itself is asserted inside the fixture (values-free 403, zero-row delta). What is
+    // left is the honest document: D stood in for A at `approval_a`, E decided `approval_b`.
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.otherUserE].sort())
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
   it('§2-G3 第三句 负控 N16(a)(严格性的代价,钉成数据)— 与 P22(a) **逐字段同形**的诚实单据,唯一差别是 D 的角色成员身份**没有服务端记录**(只存在于 dev-token 的 roles=admin 里)⇒ 409 seat_unresolvable、零行。凭据读的是持久化底座,不是令牌声明', async () => {
@@ -2710,15 +2736,27 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
         `SELECT version FROM approval_instances WHERE id = $1`,
         [documentId],
       )
-      // 伪造只用到 shipped 路由的既有行为:legacy `POST /:id/approve` 不查席位,并把请求体的
-      // `metadata` 原样写进 `approval_records.metadata`。这里**没有**手工改表。
+      // Both shapes drive the shipped legacy door with a body-named node. On this branch the door
+      // seat-gates and attributes server-side: D (the delegated seat holder at `approval_a`) is
+      // admitted and the row is filed under `approval_a` whatever the body said; E (no seat on this
+      // instance) is refused before any write, and D then settles A's node honestly.
       const forger = opts.secondRow === 'thirdPartyLegacy' ? tokenE : tokenD
       const forgedNodeKey = opts.secondRow === 'thirdPartyLegacy' ? 'approval_a' : 'approval_role'
+      const before = await legacyDoorSnapshot(documentId)
       const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, forger, {
         method: 'POST',
         body: { version: versionRow.rows[0].version, metadata: { nodeKey: forgedNodeKey } },
       })
-      expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
+      if (opts.secondRow === 'thirdPartyLegacy') {
+        await expectLegacyDecisionRefusedValuesFree(legacy, documentId, before, [delegatorA, delegateeD, otherUserE])
+        const second = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(second.status, `approval_a: ${await second.clone().text()}`).toBe(200)
+      } else {
+        expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
+      }
     }
 
     // 正控先行:席位与 approve 行的形状必须是这条腿说的那样。
@@ -2739,11 +2777,12 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
          FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
       [documentId],
     )
+    // Whatever the second row's writer and whatever the body named, the stored node is the
+    // server's `approval_a`: the runtime writes it for `/actions`, the legacy door derives it from
+    // D's seat, and E's refused attempt left nothing behind.
     expect(records.rows).toEqual([
       { actor_id: opts.roleApprover === 'delegateeD' ? delegateeD : otherUserE, node_key: 'approval_role' },
-      opts.secondRow === 'thirdPartyLegacy'
-        ? { actor_id: otherUserE, node_key: 'approval_a' }
-        : { actor_id: delegateeD, node_key: opts.secondRow === 'honest' ? 'approval_a' : 'approval_role' },
+      { actor_id: delegateeD, node_key: 'approval_a' },
     ])
     const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
       documentId,
@@ -2764,33 +2803,25 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(attempt.seats.length).toBe(2)
   })
 
-  it('§2-G3 第三句 负控 N14(a)(门审 FORGERY,基数那一半)— D 是**真**角色成员,但把自己那条 legacy 行的 nodeKey 也报成角色节点:两条 approve 行压在**一席**的节点上 ⇒ 409 seat_unresolvable、零行;A 在原单上的席位原样健在,会签门槛不会从 2 降到 1', async () => {
+  it('§2-G3 第三句 正控 N14(a)(本栈:门审 FORGERY 的形状)— D 是真角色成员,把自己那条 legacy 行的 nodeKey 报成角色节点:legacy 门写下的是 D 席位所在的 `approval_a`,两行各归其位 ⇒ 席位 {A, D} 两席、201;门槛与诚实孪生 `P23(a)` 相同', async () => {
     const fixture = await roleNodeFirstOriginal('g3cred-forgery', {
       roleApprover: 'delegateeD',
       secondRow: 'forged',
       membershipFor: [{ who: 'delegateeD' }],
     })
-    // 隔离前置:成员身份那一半在这条腿上**成立**(库里有记录)。
-    // **门审第 4 轮后的诚实分界**:这条腿现在是**过定**的 —— 占位容量合取(D 两条行压在他够得着的
-    // 一席上)与结算合取(A 的节点一条决定记录都没有)**同时**把它判死。它因此**不是**任一合取的
-    // 隔离见证:容量那一半的隔离腿是 `N20(a)`,结算那一半的是 `N19(a)`。这里写「过定」而不是
-    // 「隔离」,是因为 mutation 网格实测两条都红不动它。
-    const membership = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
-      [fixture.delegateeD],
+    // Precondition of the shape: the body named the role node, the row does not carry it — exactly
+    // one approve row names `approval_role` (D's honest one), exactly one names `approval_a`.
+    const rowsAtRoleNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_role'`,
+      [fixture.documentId],
     )
-    expect(membership.rows[0]?.n).toBe('1')
+    expect(rowsAtRoleNode.rows[0]?.n).toBe('1')
     expect(fixture.roleSeatRows).toBe(1)
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    await expectSeatBlock(attempt, { ineligibleCount: 2, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-      fixture.otherUserE,
-    ])
-    expect(attempt.seats).toEqual([])
-    // 「A 不丢」的可断言形式,两句分开:①撤销轮没开成(上面);②原单上 A 的那条委托席位行没被改写
-    // (夹具里的 `approval_a` 行断言);③诚实兄弟腿 `P23(a)` 答 `[A, D]` 两席 —— 没有 ③,
-    // 「门槛不得 2→1」就没有可比的参照物。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD])
+    expect(attempt.seats.length).toBe(2)
   })
 
   it('§2-G3 第三句 正控 P24(a)(N15(a) 的诚实兄弟腿)— 角色节点由**第三人 E** 亲自按、D 诚实地结掉 A 的节点:席位是 {A, E} 两席,D 不占席位', async () => {
@@ -2807,44 +2838,29 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
-  it('§2-G3 第三句 负控 N15(a)(门审 FORGERY2,成员身份那一半,**隔离**)— 角色节点由第三人 E 决定、D **不在**任何一个角色里,只是把节点名字说了出来;角色节点有**两行**席位所以基数预算有富余 ⇒ 仍然 409 seat_unresolvable、零行。凭据不是「这个节点带角色席位」,是「这个 actor 在那个角色里」', async () => {
+  it('§2-G3 第三句 正控 N15(a)(本栈:门审 FORGERY2 的形状)— 角色节点由第三人 E 决定、D 不在任何角色里、只在请求体里说了角色节点的名字:legacy 门按 D 的席位写下 `approval_a` ⇒ 席位 {A, E} 两席,D 不占席位', async () => {
     const fixture = await roleNodeFirstOriginal('g3cred-forgery2', {
       roleApprover: 'otherUserE',
       secondRow: 'forged',
       roleAssigneeIds: ['admin', 'auditor'],
       membershipFor: [{ who: 'otherUserE' }],
     })
-    // 隔离前置,两条:① 角色节点有 2 行席位、节点上有 2 条 approve 行 —— 在**旧**实现里这意味着
-    // 「基数预算那一半通过」;门审第 4 轮证明那正是 P1 的载体,本轮已换成**按 actor 的占位容量**,
-    // 而 D 在这条腿上够得着的席位数是 **0**(他不在任何角色里),所以容量那一半也不再是独立的;
-    // ② D 在库里没有任何角色成员记录。**过定**:成员身份与结算两条合取同时判死这条腿,
-    // 隔离见证分别是 `N16(a)`(成员身份)与 `N19(a)`(结算)。
     expect(fixture.roleSeatRows).toBe(2)
     const approveRowsAtRoleNode = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM approval_records
         WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_role'`,
       [fixture.documentId],
     )
-    expect(approveRowsAtRoleNode.rows[0]?.n).toBe('2')
+    expect(approveRowsAtRoleNode.rows[0]?.n).toBe('1')
     const membership = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1`,
       [fixture.delegateeD],
     )
     expect(membership.rows[0]?.n).toBe('0')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-      fixture.otherUserE,
-    ])
-    expect(attempt.seats).toEqual([])
-    // 这条腿直接证伪了上一版实现里那句承重注释(「the actor decided it through that seat」):
-    // D 既不是角色成员、也从没决定过那个节点。诚实兄弟腿 `P24(a)` 答 `[A, E]` 两席 —— 伪造要拿走的
-    // 正是 A 那一席。
-    //
-    // **已登记的残留(不在本轮修,写出来而不是装作不存在)**:预算富余是真的 —— 若伪造者**恰好**
-    // 是 `auditor` 的成员,两半凭据都会通过。要分辨「这一行结的是哪一席」需要 legacy 路由自己写
-    // `nodeKey`(设计 MD §3.4 的 owner 项),本臂的两半都做不到。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.otherUserE].sort())
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -2883,118 +2899,65 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(attempt.seats.length).toBe(2)
   })
 
-  it('§2-G3 第三句 负控 N18(a)(门审第 4 轮 FORGERY4,**承重**)— 或签角色节点配两条 role id(2 席 / 1 条诚实 approve 行,预算恒有一格富余):D 是其中一条的真成员,把自己那条 legacy 行的 nodeKey 也报成角色节点 ⇒ 409 seat_unresolvable、零行。修复前实测 `seats=[D]`、A 完全丢失、会签门槛 2 → 1、零阻断', async () => {
+  it('§2-G3 第三句 正控 N18(a)(本栈:门审第 4 轮 FORGERY4 的形状)— 或签角色节点配两条 role id,D 是其中一条的真成员、把自己那条 legacy 行的 nodeKey 报成角色节点:legacy 门写下 `approval_a` ⇒ 席位 {A, D} 两席,与诚实孪生 `P25(a)` 相同', async () => {
     const fixture = await roleNodeFirstOriginal('g3cred-forgery4', {
       roleApprover: 'delegateeD',
       secondRow: 'forged',
       roleAssigneeIds: ['admin', 'auditor'],
       membershipFor: [{ who: 'delegateeD' }],
     })
-    // 前置正控三条,把「为什么修复前它能穿过去」钉成数据而不是引用门审报告:
-    // ① 节点有 2 行席位;② 节点上有 2 条 approve 行 ⇒ **旧预算判据 2 ≤ 2 成立**;
-    // ③ D 的成员身份有服务端记录 ⇒ 成员身份那一半也成立。两半都过,这就是门审的 FORGERY4。
     expect(fixture.roleSeatRows).toBe(2)
     const approveRowsAtRoleNode = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM approval_records
         WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_role'`,
       [fixture.documentId],
     )
-    expect(approveRowsAtRoleNode.rows[0]?.n).toBe('2')
-    const membership = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
-      [fixture.delegateeD],
-    )
-    expect(membership.rows[0]?.n).toBe('1')
+    expect(approveRowsAtRoleNode.rows[0]?.n).toBe('1')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    await expectSeatBlock(attempt, { ineligibleCount: 2, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-      fixture.otherUserE,
-    ])
-    expect(attempt.seats).toEqual([])
-    // 「A 不丢」三句分开写(与 `N14(a)` 同一形状):①撤销轮没开成(上面);②原单上 A 的那条委托
-    // 席位行没被改写(夹具内断言);③诚实兄弟腿 `P25(a)` 答 `[A, D]` **两席**,这就是门槛参照物。
-    // **过定**:容量合取与结算合取都判死它,隔离见证分别是 `N20(a)` / `N19(a)`。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD])
+    expect(attempt.seats.length).toBe(2)
   })
 
-  it('§2-G3 第三句 负控 N19(a)(门审第 4 轮 FORGERY3;**结算合取的隔离见证**)— 角色节点由第三人 E 诚实决定,被委托人 D 是该节点**另一条** role id 的**真**成员、只把节点名字说了出来:成员身份成立、占位容量也成立(1 行 ≤ 1 席),但 A 的节点一条决定记录都没有 ⇒ 原审批主体无从还原 ⇒ 409 seat_unresolvable、零行。修复前实测 `seats=[D, E]`、A 丢失', async () => {
+  it('§2-G3 第三句 正控 N19(a)(本栈:门审第 4 轮 FORGERY3 的形状,裁决的「还原到 A」臂)— 角色节点由第三人 E 诚实决定,D 是另一条 role id 的真成员、只在请求体里说了角色节点的名字:legacy 门按 D 的席位写下 `approval_a` ⇒ A 还原、席位 {A, E} 两席;下层的阻断在这里变成还原', async () => {
     const fixture = await roleNodeFirstOriginal('g3cred-forgery3', {
       roleApprover: 'otherUserE',
       secondRow: 'forged',
       roleAssigneeIds: ['admin', 'auditor'],
       membershipFor: [
         { who: 'otherUserE' },
-        // FORGERY3 的全部要害:D 是**另一条** role id 的真成员,所以「唯一满足成员身份的人」这条
-        // 门审原话里的判据对他**成立** —— 这也是本实现与门审 (b) 字面写法分岔的地方,已在设计 MD 登记。
         { who: 'delegateeD', roleId: 'auditor' },
       ],
     })
-    // 隔离前置四条 —— 这条腿只有在**前两条合取都通过**时才对结算合取有判别力:
-    // ① 节点 2 行席位;② D 在库里确有 `auditor` 成员记录;③ D 在该节点只有 **1** 条 approve 行
-    // (≤ 他够得着的 1 席 ⇒ 容量合取通过);④ A 的节点 `approval_a` 的 approve 行数为 **0**
-    // (= 结算合取的触发条件)。
     expect(fixture.roleSeatRows).toBe(2)
-    const membership = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'auditor'`,
-      [fixture.delegateeD],
-    )
-    expect(membership.rows[0]?.n).toBe('1')
-    const actorRowsAtRoleNode = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM approval_records
-        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2
-          AND metadata->>'nodeKey' = 'approval_role'`,
-      [fixture.documentId, fixture.delegateeD],
-    )
-    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('1')
     const rowsAtDelegatedNode = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM approval_records
-        WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_a'`,
-      [fixture.documentId],
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_a'`,
+      [fixture.documentId, fixture.delegateeD],
     )
-    expect(rowsAtDelegatedNode.rows[0]?.n).toBe('0')
+    expect(rowsAtDelegatedNode.rows[0]?.n).toBe('1')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    await expectSeatBlock(attempt, { ineligibleCount: 1, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-      fixture.otherUserE,
-    ])
-    expect(attempt.seats).toEqual([])
-    // **这条腿答的是「阻断」,不是「[A, E]」。** 任务书写的是「FORGERY3 复核 [A, E] 不丢 A」;
-    // 门审 §1.2 的裁决要求原话是「应**阻断或**还原到 A」。还原到 A 需要从一条**没有凭据**的行里猜出
-    // 它结的是哪个节点 —— 同形的「一个委托人 + 行不可归属」在本文件里早已由 `delegate_not_seat` 臂
-    // 判成**阻断**(`P12(a)`/`N7(a)`/`N8(a)`/`P13(a)`),这里再猜一次就是两套判据打架。
-    // `[A, E]` 的门槛参照物是诚实兄弟腿 `P24(a)`,与 `N14(a)`/`P23(a)` 的配对方式完全一致。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.otherUserE].sort())
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
-  it('§2-G3 第三句 负控 P27(a)(**本轮修法新造的残留**,钉今天的答案)— 结算合取取的是**弱**形式:第三人 E(没有任何委托)走 legacy 把 nodeKey 报成 **A 的节点**,就把该节点「点亮」成有决定记录;于是 D 的角色行照常放行 ⇒ 席位 `[D, E]`,**A 丢了**、不阻断', async () => {
+  it('§2-G3 第三句 正控 P27(a)(本栈:下层登记的弱结算残留在这里关闭)— 第三人 E(没有任何委托)走 legacy 把 nodeKey 报成 A 的节点:legacy 门在写入前拒绝 E(403,零行,回应不透露实例种类与节点名);D 诚实结掉 A 的节点后,席位 {A, D}', async () => {
     const fixture = await roleNodeFirstOriginal('g3cred-thirdlit', {
       roleApprover: 'delegateeD',
       secondRow: 'thirdPartyLegacy',
       roleAssigneeIds: ['admin', 'auditor'],
       membershipFor: [{ who: 'delegateeD' }],
     })
-    // 前置正控:E 在本单上**没有**任何被委托席位(所以他走的是「从无委托席位 ⇒ 本人」那条早退臂),
-    // 且 A 的节点现在确有一条 approve 行(结算合取被满足的原因)。
-    const eDelegatedSeats = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM approval_assignments
-        WHERE instance_id = $1 AND assignee_id = $2 AND metadata->>'delegatedFrom' IS NOT NULL`,
+    const eRows = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records WHERE instance_id = $1 AND actor_id = $2`,
       [fixture.documentId, fixture.otherUserE],
     )
-    expect(eDelegatedSeats.rows[0]?.n).toBe('0')
-    const rowsAtDelegatedNode = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM approval_records
-        WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_a'`,
-      [fixture.documentId],
-    )
-    expect(rowsAtDelegatedNode.rows[0]?.n).toBe('1')
+    expect(eRows.rows[0]?.n).toBe('0')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    // MEASURED,不是预测。**这条腿不主张 `[D, E]` 是对的**:它钉的是弱形式结算合取的代价 ——
-    // 「那个节点被谁决定的」本轮仍然无法从库里分辨,因为 legacy 路由的 `nodeKey` 来自请求体。
-    // 根治仍然是 (c)(让 legacy 路由自己写 `nodeKey`),属 owner 的合同变更,设计 MD §3.4 已登记。
-    // 将来若被修好,这条腿会红并点名自己。
     expect(attempt.thrown).toBeFalsy()
-    expect(attempt.seats).toEqual([fixture.delegateeD, fixture.otherUserE])
-    expect(attempt.seats).not.toContain(fixture.delegatorA)
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD])
+    expect(attempt.seats).not.toContain(fixture.otherUserE)
   })
 
   /**
@@ -3098,15 +3061,23 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       })
       expect(third.status, `approval_c: ${await third.clone().text()}`).toBe(200)
     } else {
+      // D holds no seat at `approval_c`: on this branch the legacy door refuses the attempt before
+      // any write (values-free 403, zero-row delta), and E closes the document honestly.
       const versionRow = await pool().query<{ version: number }>(
         `SELECT version FROM approval_instances WHERE id = $1`,
         [documentId],
       )
+      const before = await legacyDoorSnapshot(documentId)
       const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
         method: 'POST',
         body: { version: versionRow.rows[0].version, metadata: { nodeKey: 'approval_role' } },
       })
-      expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
+      await expectLegacyDecisionRefusedValuesFree(legacy, documentId, before, [delegatorA, delegateeD, otherUserE])
+      const third = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenE, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(third.status, `approval_c: ${await third.clone().text()}`).toBe(200)
     }
 
     const seats = await pool().query<{ node_key: string | null; assignment_type: string; assignee_id: string; df: string | null }>(
@@ -3124,12 +3095,11 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
          FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
       [documentId],
     )
+    // Either way the third row is E's honest `approval_c`: D's refused legacy attempt left no row.
     expect(records.rows).toEqual([
       { actor_id: delegateeD, node_key: 'approval_role' },
       { actor_id: delegateeD, node_key: 'approval_a' },
-      opts.closer === 'thirdPartyE'
-        ? { actor_id: otherUserE, node_key: 'approval_c' }
-        : { actor_id: delegateeD, node_key: 'approval_role' },
+      { actor_id: otherUserE, node_key: 'approval_c' },
     ])
     const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
       documentId,
@@ -3146,42 +3116,18 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(attempt.seats.length).toBe(3)
   })
 
-  it('§2-G3 第三句 负控 N20(a)(**占位容量合取的隔离见证**)— D 诚实地按掉角色节点、也诚实地结掉 A 的节点(结算合取因此通过、成员身份也通过),然后**多发一条** legacy 行把 nodeKey 再报一次角色节点:同一席不能被同一个人占两次 ⇒ 409 seat_unresolvable、零行', async () => {
+  it('§2-G3 第三句 正控 N20(a)(本栈:下层的容量隔离见证形状)— D 诚实按掉角色节点、结掉 A 的节点,再想多发一条 legacy 行报角色节点:D 在第三个节点没有席位,legacy 门在写入前拒绝(403,零行);E 结掉第三节点后席位 {A, D, E},与诚实孪生 `P26(a)` 相同', async () => {
     const fixture = await roleNodeDelegatedThirdOriginal('g3cred-forgery5', { closer: 'delegateeDForgedRole' })
-    // 隔离前置三条 —— 只有它们都成立,这条腿才是**容量**那一半的见证:
-    // ① D 有服务端 `admin` 成员记录 ⇒ 成员身份通过;
-    // ② A 的节点 `approval_a` 有 D 的一条诚实 approve 行 ⇒ 结算合取通过(A 还原得回来);
-    // ③ D 在角色节点上有 **2** 条 approve 行,而他够得着的席位只有 **1** 席(`admin`;另一席是
-    //    `auditor`,他不在里面)⇒ 只剩容量那一半能判死它。
-    const membership = await pool().query<{ role_id: string }>(
-      `SELECT role_id FROM user_roles WHERE user_id = $1 ORDER BY role_id`,
-      [fixture.delegateeD],
-    )
-    expect(membership.rows.map((row) => row.role_id)).toEqual(['admin'])
-    const rowsAtDelegatedNode = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM approval_records
-        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2
-          AND metadata->>'nodeKey' = 'approval_a'`,
-      [fixture.documentId, fixture.delegateeD],
-    )
-    expect(rowsAtDelegatedNode.rows[0]?.n).toBe('1')
     const actorRowsAtRoleNode = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM approval_records
-        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2
-          AND metadata->>'nodeKey' = 'approval_role'`,
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_role'`,
       [fixture.documentId, fixture.delegateeD],
     )
-    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('2')
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('1')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    await expectSeatBlock(attempt, { ineligibleCount: 2, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-      fixture.otherUserE,
-    ])
-    expect(attempt.seats).toEqual([])
-    // 门槛参照物是诚实兄弟腿 `P26(a)` 的**三席**。注意阻断是**整单**的:D 那条诚实的 `approval_a`
-    // 行本可以把 A 还原回来,但裁决说的是「阻断」而不是「过滤掉坏行继续开」——
-    // 撤销节点是 `approvalMode: 'all'`,丢一席就是悄悄降门槛(`R7-M3` 那一族)。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE])
+    expect(attempt.seats.length).toBe(3)
   })
 
   it('§2-G3 第三句 负控 N17(a)(门审第 3 轮 P2-1:此前的**未测守卫**)— 同一个 (instance, node, assignee) 上出现**两个不同的** delegatedFrom(节点重入在 epoch 之间改写了委托所留下的残留)⇒ 没有唯一的原审批主体 ⇒ 409 seat_unresolvable、零行,既不猜也不回退给 D', async () => {
@@ -3797,15 +3743,23 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
       expect(third.status, `approval_c: ${await third.clone().text()}`).toBe(200)
       expectedRecords.push({ actor_id: otherUserE, node_key: 'approval_c' })
     } else {
+      // D holds no seat at `approval_c`: on this branch the legacy door refuses the attempt before
+      // any write (values-free 403, zero-row delta), and E closes the document honestly.
       const versionRow = await pool().query<{ version: number }>(`SELECT version FROM approval_instances WHERE id = $1`, [
         documentId,
       ])
+      const before = await legacyDoorSnapshot(documentId)
       const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
         method: 'POST',
         body: { version: versionRow.rows[0].version, metadata: { nodeKey: 'approval_role' } },
       })
-      expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
-      expectedRecords.push({ actor_id: delegateeD, node_key: 'approval_role' })
+      await expectLegacyDecisionRefusedValuesFree(legacy, documentId, before, [delegatorA, delegateeD, otherUserE, adminId])
+      const third = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenE, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(third.status, `approval_c: ${await third.clone().text()}`).toBe(200)
+      expectedRecords.push({ actor_id: otherUserE, node_key: 'approval_c' })
     }
 
     const seats = await pool().query<{ node_key: string | null; assignment_type: string; assignee_id: string; df: string | null }>(
@@ -3849,34 +3803,23 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
-  it('§2-G3 第三句 负控 P29(a)(门审第 5 轮点名的形状,**r9 休眠 —— 钉今天的答案**)— 与 P28(a) 只差最后一步:第三个节点由 D 走 legacy 报角色节点。今天不阻断、席位 {A, D, E}(D 多拿一席);这条路径随 RC(根因 (c))落地而关闭,届时本腿会红并点名自己', async () => {
+  it('§2-G3 第三句 正控 P29(a)(门审第 5 轮点名的形状 —— **本栈关闭**)— 与 P28(a) 只差最后一步:第三个节点由 D 走 legacy 报角色节点。legacy 门在写入前拒绝 D(403,零行,回应不透露实例种类);E 结掉第三节点后席位 {A, E},与 P28(a) 逐字相同 —— D 不再多拿一席', async () => {
     const fixture = await roleNodeDelegatedThirdWalk('r9-p1-dormant', {
       roleApprover: 'otherUserE',
       delegatedNode: 'honest',
       closer: 'forgedRole',
     })
-    // 前置:三条合取在 D 的角色行上今天都成立 —— 成员记录在库里、D 在角色节点恰 1 行、A 的节点由 D
-    // 诚实结掉(所以结算合取过)。少了这三句,读数可能来自别的臂。
-    const membership = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
-      [fixture.delegateeD],
-    )
-    expect(membership.rows[0]?.n).toBe('1')
     const actorRowsAtRoleNode = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM approval_records
         WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_role'`,
       [fixture.documentId, fixture.delegateeD],
     )
-    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('1')
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('0')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    // MEASURED on this head, and NOT a claim that it is right: the honest twin `P28(a)` answers
-    // {A, E}. The delta is one row whose `nodeKey` came out of a request body, and nothing on this
-    // branch can tell that row from a decision. The closure is the legacy route writing its own
-    // node attribution and seat-gating the write (root cause (c), a separate candidate); on the
-    // branch that carries it this leg is rewritten to the closed answer.
     expect(attempt.thrown).toBeFalsy()
-    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE].sort())
-    expect(attempt.seats.length).toBe(3)
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(2)
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
   })
 
   it('§2-G3 第三句 正控 P30(a)(门审第 5 轮 P2-1 ADMINJUMP;owner 2026-09-25 裁决落地)— 零伪造:D 按角色节点、管理员把 A 的节点**跳过**、E 结第三个节点 ⇒ **不阻断**,席位 {D, E}(A 从未决定过任何东西,被跳过的节点没有可还原的席位)', async () => {
@@ -3931,42 +3874,27 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     expect(attempt.seats.length).toBe(3)
   })
 
-  it('§2-G3 第三句 负控 N21(a)(门审第 5 轮 REENTRY;**占位容量合取在已重入节点上的隔离见证**)— D 两个 epoch 都亲自按角色节点、诚实结掉 A 的节点(成员身份与结算都成立),再走 legacy 多报一条角色节点行:3 行 > 2 席 ⇒ 409 seat_unresolvable、零行。重入抬高了容量,但没有抬到能装下这条多出来的行', async () => {
+  it('§2-G3 第三句 正控 N21(a)(本栈:门审第 5 轮 REENTRY 的形状)— D 两个 epoch 都亲自按角色节点、诚实结掉 A 的节点,再想走 legacy 多报一条角色节点行:D 在第三个节点没有席位,legacy 门在写入前拒绝(403,零行);E 结掉第三节点后席位 {A, D, E},与 `P34(a)` 相同', async () => {
     const fixture = await roleNodeDelegatedThirdWalk('r9-reentry-forged', {
       roleApprover: 'delegateeD',
       reentry: { reapprover: 'delegateeD' },
       delegatedNode: 'honest',
       closer: 'forgedRole',
     })
-    // 隔离前置:① 角色节点 4 行席位,其中 D 够得着的(`admin`)是 2 行;② D 在角色节点 3 行 approve
-    // (epoch 1、epoch 2、legacy);③ A 的节点由 D 诚实结掉 ⇒ 结算合取过;④ 成员记录在库里。
     expect(fixture.roleSeatRows).toBe(4)
-    const reachable = await pool().query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM approval_assignments a
-        WHERE a.instance_id = $1 AND a.node_key = 'approval_role' AND a.assignment_type <> 'user'
-          AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = $2 AND ur.role_id = a.assignee_id)`,
-      [fixture.documentId, fixture.delegateeD],
-    )
-    expect(reachable.rows[0]?.n).toBe('2')
     const actorRowsAtRoleNode = await pool().query<{ n: string }>(
       `SELECT COUNT(*)::text AS n FROM approval_records
         WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_role'`,
       [fixture.documentId, fixture.delegateeD],
     )
-    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('3')
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('2')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    await expectSeatBlock(attempt, { ineligibleCount: 3, reasons: ['seat_unresolvable'] }, [
-      fixture.delegatorA,
-      fixture.delegateeD,
-      fixture.otherUserE,
-      fixture.adminId,
-    ])
-    expect(attempt.seats).toEqual([])
-    // 门槛参照物是诚实孪生 `P34(a)` 的三席。与 `N20(a)` 的差别只有一处:这条腿的节点被端到端重入过,
-    // 所以「隔离成立」不再依赖「节点从未重入」这个前提。
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(3)
   })
 
-  it('§2-G3 第三句 负控 P33(a)(门审第 5 轮 REENTRY2,**已登记残留,钉今天的答案**)— 重入后 epoch 2 由 E 按:D 在角色节点只有 1 条诚实行、够得着 2 席,于是多出来的那条 legacy 行装得下 ⇒ 不阻断,席位 {A, D, E}(与诚实答案相同,只因 `approverIds` 去重)。随 RC 关闭', async () => {
+  it('§2-G3 第三句 正控 P33(a)(门审第 5 轮 REENTRY2 —— **本栈关闭**)— 重入后 epoch 2 由 E 按,D 想走 legacy 多报一条角色节点行:D 在第三个节点没有席位,legacy 门在写入前拒绝(403,零行);E 结掉第三节点后席位 {A, D, E},容量富余没有被任何请求体行花掉', async () => {
     const fixture = await roleNodeDelegatedThirdWalk('r9-reentry2', {
       roleApprover: 'delegateeD',
       reentry: { reapprover: 'otherUserE' },
@@ -3979,13 +3907,136 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
         WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_role'`,
       [fixture.documentId, fixture.delegateeD],
     )
-    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('2')
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('1')
     const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
-    // MEASURED. The seat SET equals the honest answer only because `approverIds` de-duplicates; the
-    // capacity conjunct itself let a request-body row through. Registered residual (design MD
-    // §3.5.6 row 3, now CONSTRUCTED); closed by the legacy route's own attribution + seat gate.
     expect(attempt.thrown).toBeFalsy()
     expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE].sort())
     expect(attempt.seats.length).toBe(3)
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // 合并列车干跑 v3b 动作 1(runbook §3b-⑥,F4 (i) 席位闸先):把「无席位者 × 撤销轮实例」那一格钉成被测性质。
+  //   · V1(a) —— 一个持 `approvals:act`、在撤销轮实例上**没有席位**的人对它调 legacy `/approve` 与 `/reject`:
+  //     两条都是 403 `APPROVAL_ASSIGNMENT_REQUIRED`,回应体与他在一张**普通**待办实例上得到的拒绝**逐字节相同**
+  //     (values-free:不透露这是一轮撤销、不透露节点与人),撤销轮实例零行、status / version 不变;
+  //   · V2(a)(闸序钉)—— 撤销轮的席位持有人(被还原的原审批人 A)对同一实例调 legacy `/approve`:席位闸放行,
+  //     随后的出口守卫以 409 `CANCEL_ROUND_OUTLET_FORBIDDEN` 拒绝,零行。两条腿合起来就是 (b) 序:
+  //     无席位 ⇒ 403(先),有席位 ⇒ 409(后)。把两道闸对调的 mutation 会让 V1(a) 红(无席位者得 409)。
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  async function openedCancelRoundOf(documentId: string): Promise<{ id: string; version: number; seats: string[] }> {
+    const round = await pool().query<{ id: string; version: number }>(
+      `SELECT id, version FROM approval_instances WHERE workflow_key = $1 AND business_key = $2`,
+      [APPROVAL_CANCEL_ROUND_WORKFLOW_KEY, documentId],
+    )
+    expect(round.rows).toHaveLength(1)
+    const seatRows = await pool().query<{ assignee_id: string }>(
+      `SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE ORDER BY assignee_id`,
+      [round.rows[0].id],
+    )
+    return { id: round.rows[0].id, version: Number(round.rows[0].version), seats: seatRows.rows.map((r) => r.assignee_id) }
+  }
+
+  it('v3b 动作 1 · V1(a) — 无席位者对撤销轮实例调 legacy /approve 与 /reject:均 403 APPROVAL_ASSIGNMENT_REQUIRED,回应体与他在普通待办实例上得到的逐字节相同(values-free),撤销轮零行、status/version 不变', async () => {
+    const fixture = await delegatedApprovedOriginal('v3b-a1', { approveVia: 'actions' })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA])
+    const round = await openedCancelRoundOf(fixture.documentId)
+    expect(round.seats).toEqual([fixture.delegatorA])
+
+    const outsider = `wi4-v3b-out-${TS}`
+    const outsiderToken = await authToken(baseUrl, outsider)
+    // Reference body: the SAME outsider refused on an ORDINARY pending instance (a fresh one-node
+    // document, nobody has decided it). Byte equality against this is the "learns nothing" claim.
+    const refRequester = `wi4-v3b-rreq-${TS}`
+    const refApprover = `wi4-v3b-rapr-${TS}`
+    await grantWrite(refRequester)
+    const refAdminToken = await authToken(baseUrl, `wi4-v3b-radm-${TS}`)
+    const refRequesterToken = await authToken(baseUrl, refRequester)
+    await authToken(baseUrl, refApprover)
+    const refTemplateId = await publishOneNodeTemplate(refAdminToken, refApprover, 'v3b-ref')
+    const refCreate = await jsonRequest(baseUrl, '/api/approvals', refRequesterToken, {
+      method: 'POST',
+      body: { templateId: refTemplateId, formData: { reason: 'r' } },
+    })
+    expect(refCreate.status, await refCreate.clone().text()).toBe(201)
+    const refId = ((await refCreate.json()) as { id: string }).id
+    createdApprovalIds.add(refId)
+    const refVersion = (await pool().query<{ version: number }>(`SELECT version FROM approval_instances WHERE id = $1`, [refId])).rows[0].version
+    const refBefore = await legacyDoorSnapshot(refId)
+    const refApprove = await jsonRequest(baseUrl, `/api/approvals/${refId}/approve`, outsiderToken, {
+      method: 'POST',
+      body: { version: refVersion },
+    })
+    const refApproveBody = await expectLegacyDecisionRefusedValuesFree(refApprove, refId, refBefore, [outsider, refApprover])
+    const refReject = await jsonRequest(baseUrl, `/api/approvals/${refId}/reject`, outsiderToken, {
+      method: 'POST',
+      body: { version: refVersion, reason: 'no' },
+    })
+    const refRejectBody = await expectLegacyDecisionRefusedValuesFree(refReject, refId, refBefore, [outsider, refApprover])
+
+    const before = await legacyDoorSnapshot(round.id)
+    expect(before.status).toBe('pending')
+    const approve = await jsonRequest(baseUrl, `/api/approvals/${round.id}/approve`, outsiderToken, {
+      method: 'POST',
+      body: { version: round.version },
+    })
+    const approveBody = await expectLegacyDecisionRefusedValuesFree(approve, round.id, before, [
+      outsider,
+      fixture.delegatorA,
+      fixture.delegateeD,
+      fixture.requesterId,
+      fixture.documentId,
+    ])
+    expect(approveBody).toBe(refApproveBody)
+    const reject = await jsonRequest(baseUrl, `/api/approvals/${round.id}/reject`, outsiderToken, {
+      method: 'POST',
+      body: { version: round.version, reason: 'no' },
+    })
+    const rejectBody = await expectLegacyDecisionRefusedValuesFree(reject, round.id, before, [
+      outsider,
+      fixture.delegatorA,
+      fixture.delegateeD,
+      fixture.requesterId,
+      fixture.documentId,
+    ])
+    expect(rejectBody).toBe(refRejectBody)
+    const anyRow = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records WHERE instance_id = $1 AND actor_id = $2`,
+      [round.id, outsider],
+    )
+    expect(anyRow.rows[0]?.n).toBe('0')
+  })
+
+  it('v3b 动作 1 · V2(a)(闸序钉)— 撤销轮的席位持有人 A 对同一实例调 legacy /approve:席位闸放行、出口守卫随后以 409 CANCEL_ROUND_OUTLET_FORBIDDEN 拒绝,零行;与 V1(a) 合起来就是「席位闸先、出口守卫后」', async () => {
+    const fixture = await delegatedApprovedOriginal('v3b-a1-order', { approveVia: 'actions' })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown).toBeFalsy()
+    const round = await openedCancelRoundOf(fixture.documentId)
+    expect(round.seats).toEqual([fixture.delegatorA])
+    const tokenA = await authToken(baseUrl, fixture.delegatorA)
+    const before = await legacyDoorSnapshot(round.id)
+    // The round's audit trail at this point is its creation record only; the refusal below must
+    // add nothing to it (a delta, not an absolute count — the creation row is legitimately there).
+    const rowsBefore = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records WHERE instance_id = $1`,
+      [round.id],
+    )
+    const approve = await jsonRequest(baseUrl, `/api/approvals/${round.id}/approve`, tokenA, {
+      method: 'POST',
+      body: { version: round.version },
+    })
+    const text = await approve.clone().text()
+    expect(approve.status, text).toBe(409)
+    const body = (await approve.json()) as { error?: { code?: string } }
+    expect(body.error?.code).toBe('CANCEL_ROUND_OUTLET_FORBIDDEN')
+    const after = await legacyDoorSnapshot(round.id)
+    expect(after).toEqual(before)
+    const rowsAfter = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records WHERE instance_id = $1`,
+      [round.id],
+    )
+    expect(rowsAfter.rows[0]?.n).toBe(rowsBefore.rows[0]?.n)
   })
 })
