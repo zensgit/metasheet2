@@ -8861,11 +8861,26 @@ export class ApprovalProductService {
       //       WEAK FORM ON PURPOSE — 「that node has SOME decision record」, not 「this actor's own row
       //       settles that seat」. The strong form would also block honest documents where the seat was
       //       legitimately never exercised BY THE DELEGATEE: a 或签 sibling won by somebody else, a
-      //       `transfer` that moved the seat on, a node re-entry that rewrote it, an admin jump that
-      //       skipped it. Its price is a REGISTERED RESIDUAL WITH A LEG, not prose: a THIRD PARTY's
-      //       row naming that node satisfies it, and this arm then seats the delegatee anyway —
-      //       负控 `P27(a)` pins that answer as data. Closing it needs (c) (the legacy route writing
-      //       its own `nodeKey`), which is an owner call on a shipped endpoint's contract.
+      //       `transfer` that moved the seat on, a node re-entry that rewrote it. Its price is a
+      //       REGISTERED RESIDUAL WITH A LEG, not prose: a THIRD PARTY's row naming that node
+      //       satisfies it, and this arm then seats the delegatee anyway — 负控 `P27(a)` pins that
+      //       answer as data. Closing it needs (c) (the legacy route writing its own `nodeKey`),
+      //       which is an owner call on a shipped endpoint's contract.
+      //       SKIPPED NODES ARE EXEMPT — gate round 5 P2-1, MEASURED: the previous wording of this
+      //       paragraph listed 「an admin jump that skipped it」 among the shapes the weak form
+      //       tolerates. It does not: a node an admin jump (or a node-timeout jump) passed over
+      //       carries NO `approve` record at all, so the weak form judged it unsettled and turned a
+      //       zero-forgery honest document into a permanent 409 (the same document was cancellable
+      //       before conjunct (3) existed). Owner ruling 2026-09-25: 「管理员跳过(及超时跳过)的节点
+      //       不计入判定,诚实单据仍可撤销」. The exemption reads SERVER-WRITTEN evidence only — the
+      //       `action = 'jump'` audit row (`adminJump` / `timeoutEffect`) whose `oldAssignees` names
+      //       the seats the jump deactivated without a decision (`nodesSkippedByJump` below); it
+      //       never reads the row's own caller-supplied `nodeKey`. 正控 `P30(a)` / `P32(a)` are the
+      //       exempted shapes, 正控 `P31(a)` their un-jumped twin, and 负控 `N19(a)` still blocks: a
+      //       node NOBODY decided AND NO jump skipped stays unsettled. `sign` rows written by
+      //       `insertAutoApprovalEvents` with `metadata.skipped = true` are deliberately NOT skip
+      //       evidence — they record a skipped AUTO-APPROVAL (`evaluateSkippedCrossBranchAdjacent`);
+      //       the node itself stays pending for a person and is settled or jumped like any other.
       //       Sentinel (`system:`) rows DO count as a decision record here: an auto-approved node WAS
       //       decided and there is nothing to restore, so counting them keeps G6-1's corpus cancellable
       //       (正控 `P10(a)` / 负控 `N6(a)`). Conjunct (2)'s capacity count, by contrast, is taken
@@ -8955,6 +8970,33 @@ export class ApprovalProductService {
           WHERE r.instance_id = $1 AND r.action = 'approve'`,
         [documentId],
       )
+      // SKIP EVIDENCE for conjunct (3) — owner ruling 2026-09-25 (gate round 5 P2-1). Every jump the
+      // system performs on an instance writes ONE `action = 'jump'` audit row (`adminJump` for the
+      // administrator's `POST /:id/jump`, `applyNodeTimeoutEffect` for the node-timeout scanner —
+      // `metadata.timeoutEffect`), and both stamp `oldAssignees` = the assignment rows that were
+      // ACTIVE at that moment and were deactivated by the jump without a decision (see
+      // `assignmentRowsForAudit`). Those node keys, and only those, are the nodes 「跳过」 means: the
+      // set is written by the server at the moment of the jump, so it cannot be named out of a request
+      // body the way `approve` rows' `metadata.nodeKey` can. Read from the audit trail rather than from
+      // `approval_assignments.is_active`: an inactive seat row with no decision is ALSO what a
+      // `transfer` or a `return` leaves behind, and those nodes are settled by whoever decided them
+      // afterwards — only the jump rows say the node was passed over.
+      const jumpRows = await client.query<{ old_assignees: unknown }>(
+        `SELECT r.metadata->'oldAssignees' AS old_assignees
+           FROM approval_records r
+          WHERE r.instance_id = $1
+            AND r.action = 'jump'
+            AND (r.metadata->>'adminJump' = 'true' OR r.metadata->>'timeoutEffect' = 'true')`,
+        [documentId],
+      )
+      const nodesSkippedByJump = new Set<string>()
+      for (const row of jumpRows.rows) {
+        if (!Array.isArray(row.old_assignees)) continue
+        for (const entry of row.old_assignees) {
+          const nodeKey = isRecord(entry) ? entry.nodeKey : null
+          if (typeof nodeKey === 'string' && nodeKey.length > 0) nodesSkippedByJump.add(nodeKey)
+        }
+      }
       // Gate round 6, G6-1 (P1, reproduced on a real DB before the fix): `system:`-namespaced
       // SENTINEL actors are not people, and this was the ONE seat-derivation site in the repo that
       // did not drop them. `insertAutoApprovalEvents` writes `action: skipped ? 'sign' : 'approve'`
@@ -8996,7 +9038,9 @@ export class ApprovalProductService {
       //   · `nodesWithDecisionRecord` — which nodes carry ANY `approve` record, SENTINELS INCLUDED.
       //     Conjunct (3)'s right-hand side. An auto-approved node WAS decided; there is nothing left
       //     to restore there, and dropping sentinels from this set would turn G6-1's corpus back into
-      //     permanently un-cancellable documents.
+      //     permanently un-cancellable documents. `nodesSkippedByJump` (built above from the `jump`
+      //     audit rows) is the OTHER half of that right-hand side: a node the system passed over was
+      //     never decided by anybody and has nothing to restore either — owner ruling 2026-09-25.
       // Rows with no `nodeKey` enter NEITHER: they are settled by the `delegate_not_seat` /
       // `seat_unresolvable` arms above, which consult no node accounting at all (正控 `P19(a)`).
       const actorNodeApproveRowCounts = new Map<string, number>()
@@ -9078,11 +9122,18 @@ export class ApprovalProductService {
         const actorSeatsAtNode = row.node_actor_role_seat_count ?? 0
         const actorRowsAtNode = actorNodeApproveRowCounts.get(actorNodeKey(actorId, row.node_key)) ?? 0
         // Conjunct (3)'s evaluation: the nodes this actor stood in for at which NOTHING was ever
-        // decided. Non-empty means the DELEGATOR's seat has no record to be restored from, whatever
-        // this row says about itself.
+        // decided AND which no jump passed over. Non-empty means the DELEGATOR's seat has no record to
+        // be restored from, whatever this row says about itself. A node a server-written `jump` row
+        // skipped is not counted (owner ruling 2026-09-25; 正控 `P30(a)` admin jump, `P32(a)` timeout
+        // jump) — there the seat was never exercised by anyone, honestly, and the ruling's own
+        // question 「原审批主体还原得了吗」 has the same answer it has for a 或签 sibling: nothing
+        // to restore, nothing forged.
         const unsettledDelegatedSeatNodes = (row.delegated_seat_nodes ?? []).filter(
           (nodeKey): nodeKey is string =>
-            typeof nodeKey === 'string' && nodeKey.length > 0 && !nodesWithDecisionRecord.has(nodeKey),
+            typeof nodeKey === 'string' &&
+            nodeKey.length > 0 &&
+            !nodesWithDecisionRecord.has(nodeKey) &&
+            !nodesSkippedByJump.has(nodeKey),
         )
         if (
           actorSeatsAtNode > 0 &&
@@ -9094,7 +9145,8 @@ export class ApprovalProductService {
           // (2) OCCUPANCY CAPACITY: this actor's own rows at that node fit the seats THIS ACTOR
           //     could occupy there — a seat is filled once (负控 `N20(a)`, isolating);
           // (3) SETTLEMENT: every node this actor held a DELEGATED seat at carries a decision of its
-          //     own, so the ruling's 原审批主体 is still restorable (负控 `N19(a)`, isolating).
+          //     own or was passed over by a server-recorded jump (正控 `P30(a)` / `P32(a)`), so the
+          //     ruling's 原审批主体 is still restorable or was never owed (负控 `N19(a)`, isolating).
           seatIds.push(actorId)
           continue
         }
@@ -9110,9 +9162,10 @@ export class ApprovalProductService {
         //     the node than they could ever occupy there (负控 `N14(a)` / `N18(a)` — FORGERY /
         //     FORGERY4, two rows folded onto one occupiable seat; 负控 `N20(a)` — the isolating
         //     variant where only this conjunct blocks);
-        //   · the actor stood in for a node that NOTHING decided, so the delegator's seat is gone
-        //     whatever this row claims (负控 `N19(a)` — FORGERY3; also `N14(a)` / `N18(a)`, which
-        //     are over-determined and are recorded as such, not as isolation).
+        //   · the actor stood in for a node that NOTHING decided and NO jump skipped, so the
+        //     delegator's seat is gone whatever this row claims (负控 `N19(a)` — FORGERY3; also
+        //     `N14(a)` / `N18(a)`, which are over-determined and are recorded as such, not as
+        //     isolation). A skipped node is exempt (正控 `P30(a)` / `P32(a)`).
         unseatableRowCount += 1
         unseatableReasons.add('seat_unresolvable')
       }
