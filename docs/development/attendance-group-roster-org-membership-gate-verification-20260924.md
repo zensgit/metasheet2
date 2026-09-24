@@ -133,6 +133,8 @@ pnpm --filter @metasheet/core-backend exec vitest run \
 
 `test (20.x)` 同一 head 上，考勤 unit / lint / typecheck 通过。唯一红的是 elearning schema gate：`bounds the real catalog scan at 10,000 active scope rules` 在 30000ms 超时。该步不跑本 PR 的考勤代码。
 
+`MARK_ROSTER_ORG_FAILED_SQL` 是 private worker 对 `attendance_import_jobs` 的第五条 `UPDATE`。P25 call-path 分类把 `w4c3a-legacy-plan-worker-repository.ts` / `mapStoredChunk` / `attendance_import_jobs` / write / update 的 count 从 4 改成 5，census 长度从 109 改成 110。角色仍是 `operational_status`，adapter 仍是 `private_worker`。
+
 ## 6. 只读：已有幽灵行
 
 本 PR **不** UPDATE / DELETE。下面的语句只列出「行上的 org 里，这个 userId 不是活跃 `user_orgs` ∩ `users`」的花名册行。id 仅供人工核对。
