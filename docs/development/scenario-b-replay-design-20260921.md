@@ -166,10 +166,8 @@ scripts/ops/scenario-b-replay-contract.test.mjs`）。前者注入假 fetch；�
 
 ## 7. 已知残余
 
-1. **CI 泳道没接。** 自测登记在 `package.json` 的 `verify:scenario-b-replay:test`，但没有新增
-   `.github/workflows/*.yml`（本波边界不动 `.github/`）。同族脚本（如
-   `stock-preparation-mvp-postdeploy-smoke`）都是各自一条 dispatch-only workflow，这条按同样形状补是
-   下一步。
+1. **CI 泳道已接。** `.github/workflows/scenario-b-replay-verify.yml` 跑 replay 与契约两套件；
+   其 wiring job 断言 paths 覆盖契约测试的真实 require 闭包、且 job 真跑两套件。
 2. **真复演未跑。** 本机没有可用的 PG 客户端/服务端，也没起后端，所以只跑到「真 socket + 桩服务器」
    这一层。详见验证 MD §3，那里写明了到底证了什么、没证什么。
 3. **`RESEED_V2` 的成败只看退出码。** 脚本不校验「表里现在真的是 v2 那 54 行」—— 那要连库。
@@ -179,3 +177,9 @@ scripts/ops/scenario-b-replay-contract.test.mjs`）。前者注入假 fetch；�
    `reused` 回 200，所以重复跑不会堆版本，但也没有清理动作。复用到的若已是 `approved`，脚本跳过审批
    （报告里 `APPROVE_CONFIG` 记 `skipped=reused_approved_version`）；此前无条件再批会在第二次执行时 409
    （#5931 复审 F4）。每次演练的业务项目是新的，历史批次原样保留、不清理。
+
+- **同一后端不要混用默认作用域与 `--workspace`（同一个 `--system-id`）。** 外部系统登记按作用域
+  归属：先默认（租户级）再 `--workspace X` 会在 REGISTER_SYSTEM 得 409 `EXTERNAL_SYSTEM_SCOPE_MISMATCH`；
+  先 `--workspace X` 再默认或 `--workspace Y` 会因表上全局唯一 id 得 500。两者都在第 2 步 fail-closed，
+  不会假绿。旧版脚本跑过的后端上系统已登记为租户级，旧 runbook 若写 `--workspace workspace_scenario_b`
+  会撞 409——要么去掉该参数，要么换一个 `--system-id`。
