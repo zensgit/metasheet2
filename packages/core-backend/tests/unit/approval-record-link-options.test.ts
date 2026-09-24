@@ -333,3 +333,92 @@ describe('listApprovalRecordLinkOptions — values-free DATABASE_UNAVAILABLE', (
     expect(stageLists[0]).toEqual([...RECORD_LINK_TARGET_AUTH_STAGES])
   })
 })
+
+describe('listApprovalRecordLinkOptions — People system sheet read window (#5960)', () => {
+  const ROSTER = 120
+  const roster = Array.from({ length: ROSTER }, (_, i) => ({
+    id: `rec_${String(i).padStart(3, '0')}`,
+    data: { fld_title: `Person ${i}` },
+    display_label: `Person ${i}`,
+  }))
+
+  type SheetKind = 'people-kind' | 'people-sentinel' | 'ordinary'
+  const recordSelects: unknown[][] = []
+
+  function rosterQuery(kind: SheetKind, opts: { ignoreLimit?: boolean } = {}) {
+    const gate = authorizedDualGateQuery()
+    return async (sql: string, params?: unknown[]) => {
+      const q = sql.replace(/\s+/g, ' ')
+      if (q.includes("to_jsonb(s) ->> 'system_kind'") && q.includes('FROM meta_sheets')) {
+        if (kind === 'people-kind') return { rows: [{ description: null, system_kind: 'people_directory' }] }
+        if (kind === 'people-sentinel') return { rows: [{ description: '__metasheet_system:people__', system_kind: null }] }
+        return { rows: [{ description: 'ordinary sheet', system_kind: null }] }
+      }
+      if (q.includes('COUNT(*)') && q.includes('FROM meta_records')) return { rows: [{ n: ROSTER }] }
+      if (q.includes('FROM meta_records') && q.includes('LIMIT')) {
+        const p = params ?? []
+        recordSelects.push(p)
+        const limit = Number(p[p.length - 2])
+        const offset = Number(p[p.length - 1])
+        return { rows: roster.slice(offset, opts.ignoreLimit ? offset + 20 : offset + limit) }
+      }
+      return gate(sql)
+    }
+  }
+
+  beforeEach(() => {
+    recordSelects.length = 0
+    pgState.query.mockReset()
+    permissionState.loadFieldPermissionScopeMap.mockReset()
+    permissionState.loadFieldPermissionScopeMap.mockResolvedValue(new Map())
+    permissionState.loadRowLevelReadDenyEnabledStrict.mockReset()
+    permissionState.loadRowLevelReadDenyEnabledStrict.mockResolvedValue(false)
+    permissionState.loadDeniedRecordIds.mockReset()
+    permissionState.loadDeniedRecordIds.mockResolvedValue(new Set())
+  })
+
+  async function list(kind: SheetKind, limit: number, offset: number, opts?: { ignoreLimit?: boolean }) {
+    pgState.query.mockImplementation(rosterQuery(kind, opts))
+    const result = await listApprovalRecordLinkOptions({ userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1', limit, offset })
+    if (result.ok !== true) throw new Error(`expected ok, got ${JSON.stringify(result)}`)
+    return result
+  }
+
+  it.each(['people-kind', 'people-sentinel'] as const)('%s: offset past the window is an EMPTY page, hasMore false, no record read', async (kind) => {
+    const result = await list(kind, 20, 60)
+    expect(result.records).toEqual([])
+    expect(result.page.hasMore).toBe(false)
+    expect(result.page.total).toBe(50)
+    expect(recordSelects).toEqual([])
+  })
+
+  it('People: limit is clamped to the window and total never reveals the exact roster size', async () => {
+    const result = await list('people-kind', 100, 0)
+    expect(result.records).toHaveLength(50)
+    expect(result.page).toEqual({ limit: 50, offset: 0, total: 50, hasMore: false })
+    const p = recordSelects[0]
+    expect(p[p.length - 2]).toBe(50)
+  })
+
+  it('People: a page straddling the window edge is truncated at row 50', async () => {
+    const result = await list('people-kind', 20, 40)
+    expect(result.records.map((r) => r.id)).toEqual(roster.slice(40, 50).map((r) => r.id))
+    expect(result.page.hasMore).toBe(false)
+    expect(result.page.total).toBe(50)
+  })
+
+  it('People: post-read chokepoint truncates even if the DB ignores the SQL LIMIT', async () => {
+    const result = await list('people-kind', 20, 40, { ignoreLimit: true })
+    expect(result.records).toHaveLength(10)
+    expect(result.records.at(-1)?.id).toBe('rec_049')
+  })
+
+  it('ordinary sheet: paging, limit and exact total are unchanged', async () => {
+    const deep = await list('ordinary', 20, 60)
+    expect(deep.records.map((r) => r.id)).toEqual(roster.slice(60, 80).map((r) => r.id))
+    expect(deep.page).toEqual({ limit: 20, offset: 60, total: ROSTER, hasMore: true })
+    const wide = await list('ordinary', 100, 0)
+    expect(wide.records).toHaveLength(100)
+    expect(wide.page).toEqual({ limit: 100, offset: 0, total: ROSTER, hasMore: true })
+  })
+})
