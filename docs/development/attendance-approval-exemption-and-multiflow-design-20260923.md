@@ -42,7 +42,11 @@
 4. 请假抵扣若规则仍是 `partial_unpaid_absence`：在扣减和投影之前调用 `rejectLeaveOffsetPartialAbsence`（`plugins/plugin-attendance/lib/leave-offset-partial-absence-guard.cjs`）。这是与 #6015 终审路径共用的**唯一**拒绝函数，错误码 `422 LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE`。不再传 `deductLeaveBalance({ mode: 'partial' })`，因此不会少扣余额再把全额请假分钟写入考勤。池子够不够扣都拒绝。
 5. 请假/加班：通过上面的门之后才 `loadApprovedMinutes` + `upsertAttendanceRecord`，并写一条 `adjustment` / `source='request'` 事件。`referenceSegments` 用本事务边界已经解析好的位，不在行锁之后再解析。
 6. 计算快照仍走创建追加。生命周期事件仍是单条 `attendance.requested`（outbox 种类是闭集）。
-7. **临时门禁（owner 未决）**：免批加班在插入 `attendance_requests` 之前，以及 `applyExemptedLeaveOrOvertimeEffects` 投影之前，读取 `getSettings` 已经归一化的对象。`compTimeFromOvertime.enabled` 只有布尔 `true` 算启用（现有 normalizer 把非布尔退回默认 `false`）。`overtimeBankPolicy.enabled` 走现有 `parseBoolean`，所以字符串 `'true'` / `'1'` / `'yes'` 会变成布尔 `true` 并被拒绝；数字 `1` 不是字符串，`parseBoolean` 退回 `false`，不拒绝。守卫函数本身只判断 `=== true`，不再解析字符串。命中则抛 `422 EXEMPT_OVERTIME_CREDIT_PENDING`，不创建「已批准但未入账」的记录。两个策略都未启用时，免批加班仍按原设计直接 `approved` 并把分钟写入当日记录，不发调休批次。
+7. **免批加班入账，两阶段（owner Harold，2026-09-24）。** 阶段一只保持现有守卫，不改文案、不改行为。阶段二只记在本文，本 PR 不实现。
+
+   **阶段一（现在）。** 免批加班在插入 `attendance_requests` 之前，以及 `applyExemptedLeaveOrOvertimeEffects` 投影之前，读取 `getSettings` 已经归一化的对象。归一化后 `compTimeFromOvertime.enabled === true` 或 `overtimeBankPolicy.enabled === true` 时，抛 `422 EXEMPT_OVERTIME_CREDIT_PENDING`。不静默批准且不入账，也不静默改走人工审批。`compTimeFromOvertime.enabled` 只有布尔 `true` 算启用（现有 normalizer 把非布尔退回默认 `false`）。`overtimeBankPolicy.enabled` 走现有 `parseBoolean`，所以字符串 `'true'` / `'1'` / `'yes'` 会变成布尔 `true` 并被拒绝；数字 `1` 不是字符串，`parseBoolean` 退回 `false`，不拒绝。守卫函数本身只判断 `=== true`。两个策略都未启用时，免批加班仍直接 `approved` 并把分钟写入当日记录，不发调休批次。
+
+   **阶段二（未实现）。** 免批只跳过人工决定，不跳过入账结算。`compTimeFromOvertime` 或 `overtimeBankPolicy` 启用时，免批加班与入账同时成立，要等下面四条都锁死并且事务测试通过之后才开放这个组合：自动入账、撤销/冲正、重试幂等、余额不足。在那之前组合保持阶段一的 422。
 
 ## 非目标
 
@@ -50,7 +54,7 @@
 - 不改 S7 动态审批人解析与 authoring gate。
 - 不把「缺流」改成硬拒绝。
 - 不改员工四卡、总览、ACL O3。
-- **加班转调休 / 加班银行入账仍只在人工终审。** 两个策略默认关。策略未启用时，免批加班会把分钟写进当日记录，但不会发调休批次。**策略一旦启用，免批加班提交被 `422 EXEMPT_OVERTIME_CREDIT_PENDING` 拒绝**（临时门禁，等 owner 决定免批加班是否入账）。见验证文档。
+- **加班转调休 / 加班银行入账，阶段一仍只在人工终审。** 两个策略默认关。策略未启用时，免批加班会把分钟写进当日记录，但不会发调休批次。**策略一旦启用，免批加班提交被 `422 EXEMPT_OVERTIME_CREDIT_PENDING` 拒绝。** 这是 Harold 2026-09-24 两阶段决定的阶段一：不静默批准且不入账，也不静默改走人工审批。阶段二（免批只跳过人工决定、不跳过入账；自动入账、撤销/冲正、重试幂等、余额不足都锁死并通过事务测试之后才开放组合）本 PR 不实现。
 
 ## 验收
 
