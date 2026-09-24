@@ -206,3 +206,41 @@ Each mutation must turn only its matching regression red, then be fully restored
 - Route inventory is not yet mechanically enforced. A future implementation
   must classify every `/api/attendance/import*` route before this report may be
   promoted from source-audit status.
+
+## 8. 2026-09-24 handoff snapshot
+
+This is a status snapshot, not a new runtime or staging gate. The design in the
+companion document remains DRAFT and OD-IA-1 through OD-IA-5 remain unratified.
+
+| Item | Current evidence | Boundary |
+| --- | --- | --- |
+| Main | `origin/main@f31a88663d5dcb7a290b6237abff53d8c43d55fe`; `git merge-base --is-ancestor 9ce340e0f origin/main` passed | #4688 / W4C-3a / P06 is already delivered on main; do not reimplement it |
+| #4556 | OPEN; last issue update `2026-08-24T09:54:07Z` | No closure or new owner decision |
+| Import contract | Draft/HOLD PR #5975 at `7b85952a13478ce04e328745b4ecd4728393b723`; GitHub status rollup SUCCESS | Source audit and proposed business matrix only; no runtime repair or import DB gate |
+| Strict delegated QA | Draft/HOLD PR #5978 at `2d992e400fb70bd2eec4daee326bf2955793b109`; GitHub status rollup SUCCESS | Independent exact-head review and focused 46/46 apply only to this head; no staging proof or merge authorization |
+
+Delivered within this review window: a complete import-route and identity-source
+inventory, the positive/negative business matrix, an explicit record of the
+RATIFIED template-preferences conflict, and delegated-principal strict-QA
+hardening in its separate Draft PR. The historical staging observation has not
+been reproduced here.
+
+Remaining development after owner ratification: write reproducing two-org tests
+first, implement the narrow authenticated import identity boundary across the
+entire core lifecycle, update OpenAPI/UI/ops callers, wire required web tests,
+run focused and neighboring regressions plus mutations, then commission an
+independent review of the resulting exact head. Integration tenancy and any
+template-preferences contract amendment are separate work. No real database,
+browser, staging, deployment, migration, flag, soak, or customer-data gate is
+claimed by this handoff.
+
+Principal risk: a read-only patch or an `orgId` follow-up parameter would leave
+write-side request authority intact and split one import lifecycle across two
+organizations. A green strict run under a platform administrator would likewise
+fail to prove the delegated-admin contract.
+
+Shortest owner authorization for the next bounded step: **"Ratify OD-IA-1 to
+OD-IA-5 as recommended; implement only the authenticated-org import lifecycle
+repair in a fresh `codex/` worktree and keep its PR Draft/HOLD."** This does not
+authorize Ready, merge, deployment, migration, flags, soak, production/customer
+data, or closure of #4556.
