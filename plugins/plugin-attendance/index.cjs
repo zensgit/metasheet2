@@ -19997,8 +19997,9 @@ async function runAnnualLeaveAccrualScheduledTriggerOnce(db, logger = console, o
 // below: user_orgs.is_active AND users.is_active in the actor org. Inactive membership, a
 // deactivated user, another org, and a nonexistent id all return no row and fail closed as
 // 404 USER_NOT_IN_ORG. Callers must run this before any INSERT in the same transaction: a
-// rejection throws and writes nothing, including earlier ids in a batch. Import callers pass
-// detailForRejected so details match skipped-row shape { userId, workDate, warnings }.
+// rejection throws and writes nothing, including earlier ids in a batch. details are
+// values-free source indexes: [{ code, rejectedCount, indexes }]. Import callers pass
+// indexesForRejected so indexes are source-row positions, not request-array positions.
 const ACTIVE_ORG_MEMBER_USER_IDS_SQL = `SELECT uo.user_id
     FROM user_orgs uo
     JOIN users u ON u.id = uo.user_id
