@@ -82,6 +82,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20.x
+      # The wiring test parses this workflow with js-yaml (a root devDependency).
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
       # Without this job the paths-coverage contract would be a guard nobody
       # runs: it proves every repo file the verify tests read is listed in
       # both the pull_request and push paths above.
