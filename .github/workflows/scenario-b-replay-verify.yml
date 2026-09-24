@@ -1,0 +1,77 @@
+name: Scenario B Replay Verify
+
+# CI lane for the scenario-B one-command replay script's own tests (#5931 review F2-F4 follow-up).
+# Before this lane the suites were only registered as `pnpm verify:scenario-b-replay:test`, which
+# nothing ran: a guard nobody executes is not a guard.
+#
+#   wiring — parses THIS file (js-yaml, a root devDependency, hence pnpm install) and proves both
+#            trigger `paths` lists cover every repo file the two replay suites load, and that the
+#            `replay` job below really runs both suites. See
+#            scripts/ops/scenario-b-replay-ci-wiring.test.mjs; it derives the dependency set from
+#            the test sources and from the real require closure, not from this list.
+#   replay — hermetic: checkout + setup-node only. Both suites use Node built-ins plus repo files
+#            (the contract suite drives the REAL plugin-integration-core http-routes handlers and
+#            read-source-config store with in-memory doubles); no network, no database.
+#
+# The plugin's own scenario-B suites (scenario-b-v2-snapshot-diff / scenario-b-synthetic-bom-source-run)
+# are already in plugins/plugin-integration-core/test-chain.txt, run by integration-guard.yml, so they
+# are not duplicated here.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/scenario-b-replay-verify.yml'
+      - 'scripts/ops/scenario-b-replay*.mjs'
+      # The contract suite requires lib/http-routes.cjs, whose require closure spans ~100 files of
+      # this directory (persist, snapshot reads, diff engine, config store, adapters).
+      - 'plugins/plugin-integration-core/lib/**'
+      - 'plugins/plugin-integration-core/fixtures/scenario-b-synthetic-bom/**'
+      - 'package.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/scenario-b-replay-verify.yml'
+      - 'scripts/ops/scenario-b-replay*.mjs'
+      - 'plugins/plugin-integration-core/lib/**'
+      - 'plugins/plugin-integration-core/fixtures/scenario-b-synthetic-bom/**'
+      - 'package.json'
+
+permissions:
+  contents: read
+
+jobs:
+  wiring:
+    name: trigger-path wiring contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      # The wiring test parses this workflow with js-yaml (a root devDependency).
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run scenario-b-replay trigger-path wiring test
+        run: node --test scripts/ops/scenario-b-replay-ci-wiring.test.mjs
+
+  replay:
+    name: replay self-test + producer/consumer contract (hermetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Run scenario-b-replay suites
+        run: node --test scripts/ops/scenario-b-replay.test.mjs scripts/ops/scenario-b-replay-contract.test.mjs

@@ -466,5 +466,110 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       await flushUi()
       expect(detailCalls).toHaveLength(1)
     })
+
+    // --- #5950 review N1/N2: delayed-response interleavings -----------------------------------
+    // These drive the REAL view through the apiFetch seam with hand-resolved promises, so the
+    // order in which responses land is decided by the test, not by the mock's microtask timing.
+    function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+      let resolve!: (value: T) => void
+      const promise = new Promise<T>((r) => { resolve = r })
+      return { promise, resolve }
+    }
+    const RUNNING_RUN = { ...DETAIL_RUN, status: 'running', finishedAt: null }
+
+    it('N1: an initial read still in flight at unmount cannot re-arm polling when it lands', async () => {
+      const initial = deferred<Response>()
+      installMocks(() => initial.promise as unknown as Response)
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      app!.unmount()
+      app = null
+      initial.resolve(jsonResponse(RUNNING_RUN))
+      await flushUi()
+      expect(vi.getTimerCount(), 'no interval may be armed after unmount').toBe(0)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS * 2)
+      await flushUi()
+      expect(detailCalls, 'unmounted view must not issue another run GET').toHaveLength(1)
+    })
+
+    it('N1: a background tick in flight at unmount cannot re-arm polling when it lands', async () => {
+      const tick = deferred<Response>()
+      let call = 0
+      installMocks(() => {
+        call += 1
+        return (call === 2 ? tick.promise : jsonResponse(RUNNING_RUN)) as unknown as Response
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      app!.unmount()
+      app = null
+      tick.resolve(jsonResponse(RUNNING_RUN))
+      await flushUi()
+      expect(vi.getTimerCount(), 'no interval may be armed after unmount').toBe(0)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS * 2)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+    })
+
+    it('N1: a provenance re-pull in flight at unmount cannot re-arm polling when it lands', async () => {
+      const repull = deferred<Response>()
+      let provenanceCall = 0
+      installMocks(
+        () => jsonResponse(RUNNING_RUN),
+        () => {
+          provenanceCall += 1
+          return (provenanceCall === 2 ? repull.promise : jsonResponse({ items: PROVENANCE_ITEMS })) as unknown as Response
+        },
+      )
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(provenanceCalls).toHaveLength(1)
+      // The tick's run read lands; the quiet provenance re-pull it chains is still pending.
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      expect(provenanceCalls).toHaveLength(2)
+      app!.unmount()
+      app = null
+      repull.resolve(jsonResponse({ items: PROVENANCE_ITEMS }))
+      await flushUi()
+      expect(vi.getTimerCount(), 'no interval may be armed after unmount').toBe(0)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS * 2)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+    })
+
+    it('N2: a background tick that lands before a pending manual refresh does not leave the button stuck', async () => {
+      const manual = deferred<Response>()
+      let call = 0
+      installMocks(() => {
+        call += 1
+        return (call === 2 ? manual.promise : jsonResponse(RUNNING_RUN)) as unknown as Response
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      const refresh = host.querySelector('[data-testid="refresh-run-detail"]') as HTMLButtonElement
+      refresh.click()
+      await flushUi()
+      expect(refresh.disabled).toBe(true)
+      expect(host.querySelector('[data-testid="run-detail-loading"]')).not.toBeNull()
+      // The background tick is issued while the manual read is pending, and answers first.
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(3)
+      manual.resolve(jsonResponse(RUNNING_RUN))
+      await flushUi()
+      expect(refresh.disabled, 'a completed manual refresh must release its loading state').toBe(false)
+      expect(host.querySelector('[data-testid="run-detail-loading"]')).toBeNull()
+      // Polling is still alive afterwards (the fix must not have stopped the background loop).
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(4)
+    })
   })
 })

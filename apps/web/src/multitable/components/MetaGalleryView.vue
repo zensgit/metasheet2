@@ -61,9 +61,9 @@
         >
         <div v-if="coverAttachment(row)" class="meta-gallery__cover">
           <img
-            v-if="coverAttachment(row)?.thumbnailUrl || coverAttachment(row)?.url"
+            v-if="coverUrls.get(coverAttachment(row)?.id ?? '')"
             class="meta-gallery__cover-image"
-            :src="coverAttachment(row)?.thumbnailUrl || coverAttachment(row)?.url"
+            :src="coverUrls.get(coverAttachment(row)?.id ?? '')"
             :alt="cardTitle(row)"
           />
           <div v-else class="meta-gallery__cover-fallback">{{ coverAttachment(row)?.filename }}</div>
@@ -126,7 +126,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { apiFetch } from '../../utils/api'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGalleryViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveGalleryViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
@@ -260,6 +261,41 @@ function coverAttachment(row: MetaRecord): MetaAttachment | null {
   if (!coverField.value) return null
   return props.attachmentSummaries?.[row.id]?.[coverField.value.id]?.[0] ?? null
 }
+
+const coverUrls = ref(new Map<string, string>())
+const coverRequests = new Map<string, AbortController>()
+
+function clearCovers(): void {
+  for (const controller of coverRequests.values()) controller.abort()
+  coverRequests.clear()
+  for (const url of coverUrls.value.values()) URL.revokeObjectURL(url)
+  coverUrls.value.clear()
+}
+
+watch(() => JSON.stringify(props.rows.map(row => coverAttachment(row))), () => {
+  clearCovers()
+  for (const row of props.rows) {
+    const attachment = coverAttachment(row)
+    if (!attachment || !(attachment.thumbnailUrl || attachment.url) || coverRequests.has(attachment.id)) continue
+    const controller = new AbortController()
+    coverRequests.set(attachment.id, controller)
+    void loadCover(attachment.id, controller)
+  }
+}, { immediate: true })
+
+async function loadCover(id: string, controller: AbortController): Promise<void> {
+  try {
+    if (!id || id === '.' || id === '..') return
+    const response = await apiFetch(`/api/multitable/attachments/${encodeURIComponent(id)}?thumbnail=true`, { signal: controller.signal })
+    if (!response.ok) return
+    const blob = await response.blob()
+    if (!controller.signal.aborted) coverUrls.value.set(id, URL.createObjectURL(blob))
+  } catch {
+    // Unavailable covers retain the existing filename fallback.
+  }
+}
+
+onBeforeUnmount(clearCovers)
 
 function formatValue(row: MetaRecord, field: MetaField): string {
   return formatFieldDisplay({
@@ -413,9 +449,9 @@ function getColumnsCount(): number {
 .meta-gallery__card--large { padding: 18px 20px; }
 .meta-gallery__card:hover { border-color: #409eff; box-shadow: 0 2px 8px rgba(64,158,255,.15); }
 .meta-gallery__card:focus-visible { outline: 2px solid #409eff; outline-offset: 1px; }
-.meta-gallery__cover { margin: -14px -16px 12px; border-bottom: 1px solid #eef2f7; background: #f8fafc; min-height: 132px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px 8px 0 0; }
-.meta-gallery__card--small .meta-gallery__cover { min-height: 108px; margin: -12px -14px 10px; }
-.meta-gallery__card--large .meta-gallery__cover { min-height: 176px; margin: -18px -20px 14px; }
+.meta-gallery__cover { margin: -14px -16px 12px; border-bottom: 1px solid #eef2f7; background: #f8fafc; height: 132px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 8px 8px 0 0; }
+.meta-gallery__card--small .meta-gallery__cover { height: 108px; margin: -12px -14px 10px; }
+.meta-gallery__card--large .meta-gallery__cover { height: 176px; margin: -18px -20px 14px; }
 .meta-gallery__cover-image { width: 100%; height: 100%; object-fit: cover; display: block; }
 .meta-gallery__cover-fallback { padding: 24px; font-size: 12px; color: #64748b; text-align: center; }
 .meta-gallery__card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }

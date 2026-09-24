@@ -5,6 +5,8 @@ const require = createRequire(import.meta.url)
 const { MetaSheetServer, resolveRecoveryArchiveMainPoolRuntime } = require('../src/index.ts') as typeof import('../src/index')
 const { prepareRecoveryLocalStartup } = require('../src/multitable/recovery-local-startup.ts') as typeof import('../src/multitable/recovery-local-startup')
 const { readLocalRecoverySecret } = require('../src/multitable/recovery-local-operator-input.ts') as typeof import('../src/multitable/recovery-local-operator-input')
+const { getAttachmentStorageService } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+const { StorageServiceImpl } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
 
 // FD 3 is an inherited local pipe, never a secret argument or environment value.
 const cancellation = new AbortController()
@@ -28,6 +30,9 @@ try {
       return readLocalRecoverySecret(3, signal)
     },
     resolveDatabase: resolveRecoveryArchiveMainPoolRuntime,
+    resolveAttachmentStorage: getAttachmentStorageService,
+    resolveAttachmentCleanupStorage: storage => storage instanceof StorageServiceImpl
+      ? StorageServiceImpl.resolveLocalRecoveryCleanup(storage) : undefined,
   })
   if (!local || cancellation.signal.aborted) {
     local?.releaseCustody()

@@ -96,6 +96,9 @@ export async function prepareRecoveryLocalStartup(input: {
   signal: AbortSignal
   readSecret: (signal: AbortSignal) => Promise<Buffer>
   resolveDatabase: () => RecoveryArchiveApplicationDatabaseRuntime
+  resolveAttachmentStorage: () => NonNullable<RecoveryArchiveApplicationComposition['attachmentStorage']>
+  resolveAttachmentCleanupStorage?: (storage: NonNullable<RecoveryArchiveApplicationComposition['attachmentStorage']>) =>
+    RecoveryArchiveApplicationComposition['attachmentCleanupStorage']
 }): Promise<Readonly<{
   composition: RecoveryArchiveApplicationComposition
   releaseCustody: () => void
@@ -125,8 +128,13 @@ export async function prepareRecoveryLocalStartup(input: {
     check()
     session.unlock({ custodyId: config.custodyId, backup, recoverySecret: secret })
     const keyCustody = session.admitForArchive(config.custodyId)
+    const attachmentStorage = input.resolveAttachmentStorage()
+    check()
+    const attachmentCleanupStorage = input.resolveAttachmentCleanupStorage?.(attachmentStorage)
+    check()
     const composition: RecoveryArchiveApplicationComposition = Object.freeze({
-      keyCustody, objectStore,
+      keyCustody, objectStore, attachmentStorage,
+      ...(attachmentCleanupStorage ? { attachmentCleanupStorage } : {}),
       auditedReplayHorizonMs: config.auditedReplayHorizonMs,
       asyncResumeHorizonMs: config.asyncResumeHorizonMs,
       workerIntervalMs: config.workerIntervalMs,

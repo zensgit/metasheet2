@@ -41,7 +41,6 @@
 //   node scripts/ops/scenario-b-replay.mjs \
 //     --base-url http://127.0.0.1:8900 \
 //     --dev-token --tenant tenant_scenario_b \
-//     --workspace workspace_scenario_b \
 //     --data-source-id syn-bom-postgres-b1 \
 //     --mode v1v2 \
 //     --reseed-command "psql -d syn_bom_b1 -v ON_ERROR_STOP=1 -f <fixture-dir>/03-seed-v2.sql"
@@ -49,7 +48,20 @@
 // 退出码：0 = 全绿；1 = 某一步失败（报告说明是哪一步、期望什么状态码、拿到什么）；
 //        2 = 安全门拒绝（一个业务请求都没发）；3 = 参数错误。
 //
-// 自测：node --test scripts/ops/scenario-b-replay.test.mjs（注入假 fetch，不碰网络）。
+// 作用域（#5931 复审 F3）：登记 / 配置保存 / 审批 / 源运行 / 快照读面**用同一个作用域**。默认不带
+// workspace（租户级 NULL，与外接源「须留 null」的约定一致）；给 --workspace <id> 时五类请求全带同一个
+// workspace。保存/审批 handler 只从查询串取 workspace（scopedInput 收到的 input 里没有 body.workspaceId），
+// 所以配置期三步走 ?workspaceId=，源运行走请求体（其白名单里有 workspaceId），读面走查询串。
+//
+// 可重复（#5931 复审 F4）：保存命中「已批准的同内容版本」（saveVersion 返回 reused:true + status:'approved'）
+// 时跳过审批；每次演练用一个隔离的新业务项目（--project-id 加本次随机后缀），因为真落库要求同一项目
+// snapshotVersion 严格递增、真 diff 读面拒绝同版本多前驱 —— 两道守卫都不关、历史批次都不删。
+//
+// 定位：这是**合成数据复演脚本**。真 PG + 真后端上的复演尚未执行；它不等于客户历史迁移，也不等于
+// 双轨对账验收。
+//
+// 自测：node --test scripts/ops/scenario-b-replay.test.mjs（注入假 fetch，不碰网络）；
+//       node --test scripts/ops/scenario-b-replay-contract.test.mjs（真 handler + 真配置仓闭环）。
 // 设计说明：docs/development/scenario-b-replay-design-20260921.md
 // ---------------------------------------------------------------------------------------------
 
@@ -57,6 +69,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import crypto from 'node:crypto'
+import { isIP } from 'node:net'
 
 // 这三个 helper 都不在模块顶层解析 import.meta.url —— 自测的变异探针要把**这份源码**用
 // data: URL 就地编成另一个模块对象（内存级、磁盘上一个字节都不动），而 data: URL 下
@@ -117,6 +130,23 @@ const STEP_BODY_KEYS = Object.freeze({
 
 const FORBIDDEN_BODY_KEY_PATTERN = /persist|tenant/i
 
+// 每个请求的查询串键白名单（同一类机械执行点）。作用域只有 workspaceId 一个载体；租户永远不走查询串。
+// SAVE_CONFIG / APPROVE_CONFIG 的**请求体**白名单刻意不含 workspaceId：那两个 handler 不读
+// body.workspaceId（http-routes.cjs readSourceConfigsSave/Approve 只把 {config|id, actor} 交给
+// scopedInput），放进请求体会被静默丢掉 —— 那正是 F3 的形状。
+const SCOPE_QUERY_KEYS = Object.freeze(['workspaceId'])
+const STEP_QUERY_KEYS = Object.freeze({
+  GATE: Object.freeze([]),
+  REGISTER_SYSTEM: SCOPE_QUERY_KEYS,
+  SAVE_CONFIG: SCOPE_QUERY_KEYS,
+  APPROVE_CONFIG: SCOPE_QUERY_KEYS,
+  RUN_V1: Object.freeze([]),
+  RUN_V2: Object.freeze([]),
+  BATCH_LIST: Object.freeze(['workspaceId', 'projectId']),
+  DIFF: SCOPE_QUERY_KEYS,
+  DIFF_ROWS: SCOPE_QUERY_KEYS,
+})
+
 // ── 参数 ────────────────────────────────────────────────────────────────────────────────────
 export function parseArgs(argv) {
   const args = {
@@ -124,11 +154,13 @@ export function parseArgs(argv) {
     token: '',
     devToken: false,
     tenant: '',
-    workspace: 'workspace_scenario_b',
+    // '' = 不选 workspace（租户级 NULL 作用域）。非空时整条链都带它，见文件头「作用域」。
+    workspace: '',
     fixtureDir: defaultFixtureDir(),
     mode: 'v1v2',
     dataSourceId: 'syn-bom-postgres-b1',
     systemId: 'syn-bom-source-b1',
+    // 业务项目前缀：实际项目号 = `${projectId}_${本次随机盐}`，每次演练一个隔离的新项目（F4）。
     projectId: 'business_project_scenario_b',
     sourceProjectNo: '',
     projectName: '',
@@ -169,6 +201,7 @@ export function parseArgs(argv) {
   if (args.mode !== 'v1' && args.mode !== 'v1v2') throw new UsageError('--mode must be v1 or v1v2')
   if (!Number.isFinite(args.timeoutMs) || args.timeoutMs <= 0) throw new UsageError('--timeout-ms must be a positive number')
   args.baseUrl = String(args.baseUrl).replace(/\/+$/, '')
+  args.workspace = String(args.workspace).trim()
   return args
 }
 
@@ -177,6 +210,14 @@ export class UsageError extends Error {}
 // ── 安全门 ──────────────────────────────────────────────────────────────────────────────────
 // 本机（loopback）也是一个合法的沙箱标记 —— Q3b 的落点就是「本机/沙箱」。但 loopback **不豁免**
 // 生产 Apply 姿态与命名空间这两条：一个把本机端口转发到生产的人拿不到放行。
+//
+// F2（#5931 复审 R1）：loopback 必须由**地址字面量**证明，不能由名字的字符串形状证明。
+//   · 先经 WHATWG URL 规范化（小写、IPv4 简写/十六进制展开成点分十进制、IPv6 压缩），再用
+//     node:net isIP() 认定它是 IP literal，然后才判 127.0.0.0/8 或 ::1。
+//   · 名字只认一个：规范化后恰为 'localhost'（大小写不敏感由 URL 规范化兑现）。带尾点的 'localhost.'、
+//     'localhost.evil.test'、'evil.localhost'、'127.x.invalid' 一律不是 —— 它们落到哪由 DNS 决定。
+//   · IPv4 映射的 IPv6（[::ffff:127.0.0.1]，规范化成 [::ffff:7f00:1]）按非 loopback 处理：只认 ::1。
+//   · 0.0.0.0 是「任意地址」，不是 127/8 或 ::1，不再当正向标记。
 export function isLoopbackBase(baseUrl) {
   let host
   try {
@@ -184,8 +225,12 @@ export function isLoopbackBase(baseUrl) {
   } catch {
     return false
   }
-  const bare = host.replace(/^\[|\]$/g, '')
-  return bare === 'localhost' || bare === '::1' || bare === '0.0.0.0' || /^127\./.test(bare)
+  if (host === 'localhost') return true
+  const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+  const family = isIP(bare)
+  if (family === 4) return bare.split('.')[0] === '127'
+  if (family === 6) return bare === '::1'
+  return false
 }
 
 /**
@@ -266,15 +311,31 @@ function sentinelClass(sentinel) {
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────────────────────
-async function requestJson(ctx, { method = 'GET', pathname, body, accept, step }) {
+// 查询串守卫：键白名单 + 租户/落库类键一律拒。值为空的键不出门。
+export function buildQuery(step, query) {
+  const allowed = STEP_QUERY_KEYS[step]
+  if (!allowed) throw new Error(`no query allowlist declared for step ${step}`)
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query || {})) {
+    if (FORBIDDEN_BODY_KEY_PATTERN.test(key)) throw new Error(`step ${step} query carries a forbidden key class: ${key}`)
+    if (!allowed.includes(key)) throw new Error(`step ${step} query carries an unexpected key: ${key}`)
+    if (value === undefined || value === null || value === '') continue
+    params.set(key, String(value))
+  }
+  const text = params.toString()
+  return text ? `?${text}` : ''
+}
+
+async function requestJson(ctx, { method = 'GET', pathname, query, body, accept, step }) {
   if (body !== undefined) assertRequestBodySafe(step, body)
+  const search = buildQuery(step, query)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), ctx.timeoutMs)
   const headers = { Accept: 'application/json' }
   if (ctx.token) headers.Authorization = `Bearer ${ctx.token}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   try {
-    const response = await ctx.fetchImpl(`${ctx.baseUrl}${pathname}`, {
+    const response = await ctx.fetchImpl(`${ctx.baseUrl}${pathname}${search}`, {
       method,
       headers,
       signal: controller.signal,
@@ -335,6 +396,10 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
   const fixture = injectedFixture
     || requireFrom(args.fixtureDir)(path.join(args.fixtureDir, 'scenario-b-synthetic-bom.cjs'))
   const salt = crypto.randomUUID().replace(/-/g, '').slice(0, 10)
+  // F4：每次演练一个隔离的新业务项目。后缀是随机十六进制，values-free，写进报告以便对照。
+  const projectId = `${args.projectId}_${salt}`
+  // F3：整条链的唯一作用域选择。空 = 不带 workspace（租户级 NULL）。
+  const scopeQuery = args.workspace ? { workspaceId: args.workspace } : {}
   const ids = {
     runV1: `${args.runPrefix}_run_v1_${salt}`,
     runV2: `${args.runPrefix}_run_v2_${salt}`,
@@ -349,6 +414,7 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
     ok: false,
     exitCode: EXIT_CODES.STEP_FAILED,
     stoppedAt: 'GATE',
+    rehearsal: { projectSuffix: salt, projectIsolated: true, workspaceSelected: Boolean(args.workspace) },
     gate: { decision: 'not_run', reason: null, markers: {}, preflightStatus: 0 },
     steps,
     batches: {},
@@ -407,6 +473,7 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
     step: 'REGISTER_SYSTEM',
     method: 'POST',
     pathname: '/api/integration/external-systems',
+    query: scopeQuery,
     body: {
       id: args.systemId,
       name: 'scenario-b-synthetic-bom',
@@ -422,6 +489,7 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
     step: 'SAVE_CONFIG',
     method: 'POST',
     pathname: '/api/integration/read-source-configs',
+    query: scopeQuery,
     body: { config: fixture.readSourceConfig({ systemId: args.systemId }) },
     accept: [200, 201],
   })
@@ -430,19 +498,29 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
     : ''
   if (!record('SAVE_CONFIG', { ...saveConfig, ok: saveConfig.ok && Boolean(ids.configId) }, { configIdPresent: Boolean(ids.configId) })) return fail()
 
-  const approve = await requestJson(ctx, {
-    step: 'APPROVE_CONFIG',
-    method: 'POST',
-    pathname: `/api/integration/read-source-configs/${encodeURIComponent(ids.configId)}/approve`,
-    body: {},
-    accept: [200],
-  })
-  if (!record('APPROVE_CONFIG', approve)) return fail()
+  // F4：真 saveVersion 对同内容版本返回 { reused: true, status }（read-source-config-store.cjs
+  // reuseExisting / rowToPublicReadSourceConfig）；真 approve 只认 draft→approved。所以已批准的复用版本
+  // 不再发 approve（否则第二次执行必 409）；复用到的仍是 draft（上次保存后审批没走完）才照常审批。
+  const savedData = saveConfig.body && saveConfig.body.data ? saveConfig.body.data : null
+  const reusedApproved = Boolean(savedData) && savedData.reused === true && savedData.status === 'approved'
+  if (reusedApproved) {
+    record('APPROVE_CONFIG', { status: null, ok: true }, { skipped: 'reused_approved_version' })
+  } else {
+    const approve = await requestJson(ctx, {
+      step: 'APPROVE_CONFIG',
+      method: 'POST',
+      pathname: `/api/integration/read-source-configs/${encodeURIComponent(ids.configId)}/approve`,
+      query: scopeQuery,
+      body: {},
+      accept: [200],
+    })
+    if (!record('APPROVE_CONFIG', approve)) return fail()
+  }
 
   // ── 3. 第一批次源运行 -> staging 落库 ──────────────────────────────────────────────────────
   const runBody = (overrides) => ({
-    workspaceId: args.workspace,
-    projectId: args.projectId,
+    ...scopeQuery,
+    projectId,
     ...(args.sourceProjectNo ? { sourceProjectNo: args.sourceProjectNo } : { sourceProjectNo: fixture.PROJECT_NO }),
     ...(args.projectName ? { projectName: args.projectName } : {}),
     readSourceConfigId: ids.configId,
@@ -463,7 +541,8 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
   if (args.mode === 'v1') {
     const list = await requestJson(ctx, {
       step: 'BATCH_LIST',
-      pathname: `/api/integration/stock-preparation/snapshot-batches?projectId=${encodeURIComponent(args.projectId)}`,
+      pathname: '/api/integration/stock-preparation/snapshot-batches',
+      query: { ...scopeQuery, projectId },
       accept: [200],
     })
     const listed = findBatch(list.body, ids.batchV1)
@@ -495,7 +574,8 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
   // ── 6. 三条只读读面 ─────────────────────────────────────────────────────────────────────
   const list = await requestJson(ctx, {
     step: 'BATCH_LIST',
-    pathname: `/api/integration/stock-preparation/snapshot-batches?projectId=${encodeURIComponent(args.projectId)}`,
+    pathname: '/api/integration/stock-preparation/snapshot-batches',
+    query: { ...scopeQuery, projectId },
     accept: [200],
   })
   const listedV1 = findBatch(list.body, ids.batchV1)
@@ -513,6 +593,7 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
   const diff = await requestJson(ctx, {
     step: 'DIFF',
     pathname: `/api/integration/stock-preparation/snapshot-batches/${encodeURIComponent(ids.batchV2)}/diff`,
+    query: scopeQuery,
     accept: [200],
   })
   const diffData = diff.body && diff.body.data ? diff.body.data : null
@@ -522,6 +603,7 @@ export async function runReplay({ args, fetchImpl, reseed, fixture: injectedFixt
   const rows = await requestJson(ctx, {
     step: 'DIFF_ROWS',
     pathname: `/api/integration/stock-preparation/snapshot-batches/${encodeURIComponent(ids.batchV2)}/diff/rows`,
+    query: scopeQuery,
     accept: [200],
   })
   const rowsData = rows.body && rows.body.data ? rows.body.data : null
@@ -669,9 +751,10 @@ export function renderReport(report) {
   const lines = []
   lines.push('── scenario-b replay ─────────────────────────────────────────')
   lines.push(`mode=${report.mode} ok=${report.ok} exitCode=${report.exitCode} stoppedAt=${report.stoppedAt}`)
+  if (report.rehearsal) lines.push(`rehearsal: projectSuffix=${report.rehearsal.projectSuffix} workspaceSelected=${report.rehearsal.workspaceSelected}`)
   lines.push(`gate: ${report.gate.decision}${report.gate.reason ? ` (${report.gate.reason})` : ''} markers=${JSON.stringify(report.gate.markers)}`)
   for (const step of report.steps) {
-    lines.push(`  ${step.ok ? 'PASS' : 'FAIL'} ${step.step.padEnd(16)} http=${step.status}`)
+    lines.push(`  ${step.ok ? 'PASS' : 'FAIL'} ${step.step.padEnd(16)} http=${step.status ?? '-'}${step.skipped ? ` skipped=${step.skipped}` : ''}`)
   }
   if (report.batches.v1) lines.push(`batch v1: created=${report.batches.v1.createdLines} listed=${report.batches.v1.lineCount ?? '-'}`)
   if (report.batches.v2) lines.push(`batch v2: created=${report.batches.v2.createdLines} listed=${report.batches.v2.lineCount ?? '-'}`)
