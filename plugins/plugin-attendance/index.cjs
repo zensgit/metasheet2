@@ -15,6 +15,10 @@ const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapte
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
 const {
+  LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE,
+  LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_MESSAGE,
+  leaveOffsetRuleDeclaresPartialAbsence,
+  leaveOffsetPolicyDeclaresPartialAbsence,
   rejectLeaveOffsetPartialAbsence,
 } = require('./lib/leave-offset-partial-absence-guard.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
@@ -25177,6 +25181,10 @@ module.exports = {
   __attendanceApprovalExemptionForTests: {
     ATTENDANCE_APPROVAL_FLOW_REQUIRED,
     EXEMPT_OVERTIME_CREDIT_PENDING_CODE,
+    LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE,
+    LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_MESSAGE,
+    leaveOffsetRuleDeclaresPartialAbsence,
+    leaveOffsetPolicyDeclaresPartialAbsence,
     attendanceRequestSkipsApproval,
     loadApprovalFlow,
     resolveGenericApprovalFlow,
