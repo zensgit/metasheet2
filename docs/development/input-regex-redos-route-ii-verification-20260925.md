@@ -120,7 +120,7 @@ counted as VOID and does not appear above; none occurred).
 
 ## 5. CI collection (not re-verified on CI — no PR)
 
-- The three backend test files fall under `packages/core-backend`'s default vitest glob, which is
+- The two new backend test files fall under `packages/core-backend`'s default vitest glob, which is
   what the required `test (20.x)` job runs (`pnpm --filter @metasheet/core-backend test`); the
   census gate established this collection path with a positive control on the earlier branch.
   Not re-run on CI here.
