@@ -317,11 +317,12 @@ function assembleCallbacks(
         trx,
       ).clearResumedSuspendedReason(jobId, orgId)
     },
-    async markPlanFailed(trx, jobId, orgId, reason) {
+    async markPlanFailed(trx, jobId, orgId, reason, errorDetail) {
       await createAttendanceLegacyPlanWorkerRepositoryV1(trx).markPlanFailed(
         jobId,
         orgId,
         reason,
+        errorDetail,
       )
     },
   })

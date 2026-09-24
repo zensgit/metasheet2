@@ -28660,7 +28660,13 @@ module.exports = {
 	            })
 	          } catch (error) {
 	            const message = error instanceof HttpError
-	              ? error.code
+	              ? JSON.stringify({
+	                  code: error.code,
+	                  message: error.message,
+	                  ...(Array.isArray(error.details) && error.details.length > 0
+	                    ? { details: error.details }
+	                    : {}),
+	                })
 	              : String(error?.message ?? error ?? 'Unknown error')
 	            logger.error('Attendance async import preview failed', error)
 	            await updateImportJobProgress({
@@ -42878,6 +42884,41 @@ module.exports = {
 	          }
 	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
 
+	          const { rows: previewGateRows } = await resolveImportRows({
+	            payload: parsed.data,
+	            orgId,
+	            fallbackUserId: parsed.data.userId ?? requesterId,
+	          })
+	          const previewGroupSync = normalizeGroupSyncOptions(
+	            parsed.data.groupSync,
+	            parsed.data.ruleSetId,
+	            parsed.data.timezone,
+	          )
+	          if (previewGroupSync?.autoAssignMembers) {
+	            const previewProfile = resolveImportProfileForPayload(parsed.data)
+	            const previewGroupNames = collectAttendanceGroupNames(previewGateRows)
+	            let previewGroupIdMap = null
+	            if (previewGroupNames.size && !previewGroupSync.autoCreate) {
+	              previewGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+	            }
+	            const previewAssignments = collectImportGroupMemberAssignmentRows({
+	              rows: previewGateRows,
+	              fallbackUserId: parsed.data.userId ?? requesterId,
+	              userMap: parsed.data.userMap,
+	              userMapKeyField: parsed.data.userMapKeyField,
+	              userMapSourceFields: parsed.data.userMapSourceFields,
+	              requiredFields: previewProfile?.requiredFields ?? [],
+	              punchRequiredFields: previewProfile?.punchRequiredFields ?? [],
+	              groupSync: previewGroupSync,
+	              groupIdMap: previewGroupIdMap,
+	              groupNames: previewGroupNames,
+	              prepareOnly: true,
+	            })
+	            if (previewAssignments.length) {
+	              await assertImportGroupMemberAssignmentsActive(db, orgId, previewAssignments)
+	            }
+	          }
+
 	          const sanitizedPayload = sanitizeImportJobPayload({
 	            ...parsed.data,
 	            __jobType: 'preview',
@@ -42912,7 +42953,7 @@ module.exports = {
           res.json({ ok: true, data: { job: mapImportJobRow(jobRow) } })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json(attendanceHttpErrorBody(error))
             return
           }
           if (isDatabaseSchemaError(error)) {

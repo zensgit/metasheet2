@@ -2,7 +2,7 @@
 
 > **文档性质：实现设计（design lock for this PR）**  
 > **日期**：2026-09-24  
-> **基准**：`main` @ `f31a88663d5dcb7a290b6237abff53d8c43d55fe`  
+> **基准**：`main` @ `e046a21c0a0110fbe22ca765852f1e053d90c0cb`  
 > **谱系**：#5899 O3（`attendance-group-acl-write-o3-design-20260920.md`）把 `add_members` 下放给组负责人之后，成员/负责人写入仍把 `userId` 原样 INSERT。  
 > **本 PR**：设计 + 实现 + 验证；**draft，不合并**。修 #6045、#6047。
 
@@ -180,9 +180,9 @@ HTTP **404**。`details` 不含 `userId`、日期或其他提交值。`indexes` 
 
 `indexes` 是源行下标，不是 userId。preview、sync commit、legacy `POST /api/attendance/import`、async commit 入队、integration sync 的 `HttpError` 响应都带上这份 `details`。
 
-导入路由的组织来自已认证 `user.orgId`。body、query、`x-org-id` 只做一致性断言：与认证组织不同则 404 `NOT_FOUND`，不拿选择器去查成员、也不拿它做导入权限范围。同步 `/preview` 与异步 `buildAsyncPreviewResult` 都走同一成员门；异步预览失败时 job `error` 记 `USER_NOT_IN_ORG`，不回显 id。
+导入路由的组织来自已认证 `user.orgId`。body、query、`x-org-id` 只做一致性断言：与认证组织不同则 404 `NOT_FOUND`，不拿选择器去查成员、也不拿它做导入权限范围。同步 `/preview`、`POST /api/attendance/import/preview-async` 入队之前、以及异步 `buildAsyncPreviewResult` 都走同一成员门。入队前失败是 404，job 不入库。已经入队后成员失效时，job `error` 是 `{ code, message, details }` JSON，`details` 仍是上面的 index 形状，preview 不标成 completed。
 
-W4 冻结计划仍不重算组是否存在。但 `ensure_member` 在执行前条件复检和效果事务的 INSERT 之前，都再查一次 `user_orgs.is_active AND users.is_active`。入队后停用的用户不能写入。复检失败返回 false；效果事务内失败抛 `W4C3A_MEMBER_NOT_ACTIVE_IN_ORG`，不执行 `INSERT INTO attendance_group_members`。
+W4 冻结计划仍不重算组是否存在。`ensure_member` 在执行前条件复检里再查一次；效果适配器在**任何** group 或 member `INSERT` 之前用同一谓词批量再查。失败抛 `W4C3A_MEMBER_NOT_ACTIVE_IN_ORG`，`status = 404`，`details` 为 index 形状。Worker 把 job 标成 `failed`，`w4_execution_reason_code = USER_NOT_IN_ORG`，`error` 为这份 JSON。既有计划失败原因仍写 `error = NULL`。迁移 `zzzz20260924180000_attendance_roster_org_gate_job_reason` 只为这个 reason 允许非空 `error`。W4 没有 `ensure_manager`。
 
 ### 6.3 历史行
 

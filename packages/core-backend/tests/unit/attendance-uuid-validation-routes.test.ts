@@ -3159,6 +3159,25 @@ describe('attendance UUID route validation', () => {
       expectActiveOrgMemberPredicate(sql)
       expect(sql).not.toContain('INSERT INTO attendance_group_members')
     })
+
+    it('async preview rejects an inactive auto-assign user before inserting a job', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, [])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview-async', {
+        body: {
+          rows: [importAssignRow('missing-user')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      expectMemberNotInOrg(res, [0])
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_import_jobs')
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+    })
   })
 
   it('lets full attendance admins add schedule group members without scheduler scopes', async () => {

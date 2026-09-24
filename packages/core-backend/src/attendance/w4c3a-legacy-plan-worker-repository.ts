@@ -239,6 +239,15 @@ const MARK_FAILED_SQL = `
   RETURNING id
 `
 
+const MARK_ROSTER_ORG_FAILED_SQL = `
+  UPDATE attendance_import_jobs
+  SET status = 'failed', error = $4, w4_execution_reason_code = $3,
+      finished_at = now(), updated_at = now()
+  WHERE id = $1::uuid AND org_id = $2 AND w4_contract_version = 1
+    AND status IN ('queued', 'running') AND w4_execution_reason_code IS NULL
+  RETURNING id
+`
+
 const INSERT_TERMINAL_RESPONSE_SQL = `
   INSERT INTO attendance_import_legacy_terminal_responses (
     job_id, org_id, response_variant, response_digest, response
@@ -282,7 +291,12 @@ export function createAttendanceLegacyPlanWorkerRepositoryV1(
   loadCompletedResponse(jobId: string, orgId: string): Promise<Readonly<{ response: unknown; responseDigest: string }>>
   markSuspendedQueued(jobId: string, orgId: string): Promise<void>
   clearResumedSuspendedReason(jobId: string, orgId: string): Promise<void>
-  markPlanFailed(jobId: string, orgId: string, reason: AttendanceLegacyPlanFailureReasonCodeV1): Promise<void>
+  markPlanFailed(
+    jobId: string,
+    orgId: string,
+    reason: AttendanceLegacyPlanFailureReasonCodeV1,
+    errorDetail?: string,
+  ): Promise<void>
   storeCompletedResponseAndTerminalize(
     job: AttendanceLegacyPlanWorkerRepositoryJobV1,
     plan: VerifiedAttendanceLegacyPlanV1,
@@ -353,9 +367,23 @@ export function createAttendanceLegacyPlanWorkerRepositoryV1(
       }
     },
 
-    async markPlanFailed(jobId: string, orgId: string, reason: AttendanceLegacyPlanFailureReasonCodeV1) {
+    async markPlanFailed(
+      jobId: string,
+      orgId: string,
+      reason: AttendanceLegacyPlanFailureReasonCodeV1,
+      errorDetail?: string,
+    ) {
       if (!ATTENDANCE_LEGACY_PLAN_FAILURE_REASON_CODES_V1.includes(reason)) {
         fail('W4C3A_REPOSITORY_REASON_INVALID')
+      }
+      if (reason === 'USER_NOT_IN_ORG') {
+        if (typeof errorDetail !== 'string' || errorDetail.length === 0) {
+          fail('W4C3A_REPOSITORY_REASON_INVALID')
+        }
+        if ((await db.query(MARK_ROSTER_ORG_FAILED_SQL, [jobId, orgId, reason, errorDetail])).rows.length !== 1) {
+          fail('W4C3A_REPOSITORY_STATUS_UPDATE_REJECTED')
+        }
+        return
       }
       if ((await db.query(MARK_FAILED_SQL, [jobId, orgId, reason])).rows.length !== 1) {
         fail('W4C3A_REPOSITORY_STATUS_UPDATE_REJECTED')

@@ -1,12 +1,12 @@
 # 考勤组花名册写入：活跃组织成员门 — 验证记录（2026-09-24）
 
 > Design: `docs/development/attendance-group-roster-org-membership-gate-design-20260924.md`  
-> 基准：`main` @ `f31a88663d5dcb7a290b6237abff53d8c43d55fe`  
+> 基准：`main` @ `e046a21c0a0110fbe22ca765852f1e053d90c0cb`  
 > 证据：本地 vitest；合成 fixture；values-free。无真实租户、无浏览器。
 
 ## 1. Verdict
 
-**PASS** locally for the roster-write gate this PR claims: group member, group manager, and schedule-group member inserts fail closed with 404 `USER_NOT_IN_ORG` when the target is not an active member of the actor org. A mixed batch inserts nothing. CSV preview and commit use the same predicate and the same all-or-nothing 404, with per-row `details` in the import skipped-row shape, and do not emit `ensure_member` or insert `attendance_group_members` for a rejected id. The #5899 owner-adds-member path still returns 200 for an active member.
+**PASS** locally for the roster-write gate this PR claims: group member, group manager, and schedule-group member inserts fail closed with 404 `USER_NOT_IN_ORG` when the target is not an active member of the actor org. A mixed batch inserts nothing. CSV preview and commit use the same predicate and the same all-or-nothing 404, with per-row index `details`, and do not emit `ensure_member` or insert `attendance_group_members` for a rejected id. Import writes pin the authenticated org: a different body or query org is 404 `NOT_FOUND` and is not used as the membership org. Async preview runs the same gate before `INSERT INTO attendance_import_jobs`. A queued W4 `ensure_member` is rechecked with the same predicate before any group or member `INSERT`; failure is `USER_NOT_IN_ORG` with the index JSON. The #5899 owner-adds-member path still returns 200 for an active member.
 
 Not a merge, deploy, or product-acceptance verdict. Existing ghost rows are not deleted.
 
@@ -31,6 +31,12 @@ Not a merge, deploy, or product-acceptance verdict. Existing ghost rows are not 
 | 已存在的组、不 autoCreate，仍 404 | PASS | `preview still gates an existing group when auto-create is off` |
 | 活跃成员 preview 200；commit 仍把 `ensure_member` 放进同步计划 | PASS | `preview accepts an active org member…`、`commit still plans ensure_member…` |
 | commit 停用 / 他组织 / 不存在 / 混合批 → 404，不调用 `commitSyncImportPlan`，无成员 INSERT，无考勤记录 INSERT | PASS | `commit rejects auto-assign for %s…`、`commit rejects a mixed auto-assign batch…` |
+| 导入组织选择器不是认证 org → 404 `NOT_FOUND`，不查 `user_orgs` | PASS | `rejects preview when the org selector is not the authenticated org`（body `org-b` 与 query `orgId=org-b`） |
+| async preview 停用 id → 404，谓词已跑，**无** `attendance_import_jobs` INSERT | PASS | `async preview rejects an inactive auto-assign user before inserting a job` |
+| W4 `ensure_member` 写入前再查；空结果则抛 `W4C3A_MEMBER_NOT_ACTIVE_IN_ORG`，status 404，index `[1]`，无 INSERT | PASS | `rejects an inactive ensure_member before any group or member insert` |
+| worker 把该失败记成 `USER_NOT_IN_ORG`，`error` 为 index JSON，不 terminalize 成功 | PASS | `fails a queued plan when the write-time roster gate rejects a member` |
+| `USER_NOT_IN_ORG` 走 `error = $4`；缺 detail 在查询前拒绝 | PASS | repository `markPlanFailed` 断言 |
+| 入队后停用，真实 PG 不插入 `ensure_member` | PASS | `enqueue then deactivate does not insert ensure_member`（3/3） |
 
 三种负向（停用、他组织、不存在）在 API 上是**同一个空结果**：谓词不返回该 id。单测用不同 userId 分别打，响应码与 `details` 相同，不提供「用户是否存在于他组织」的区分。
 
@@ -63,6 +69,25 @@ pnpm --filter @metasheet/web exec vitest run --watch=false \
 # Test Files  1 passed (1)
 # Tests  7 passed (7)
 # 含 blocks inverted report ranges… 与 keeps equal and ascending report ranges loadable
+
+# 三条残留门（认证 org 选择器、async preview 入队前、W4 写入前）合跑
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/attendance-uuid-validation-routes.test.ts \
+  src/attendance/__tests__/w4c3a-legacy-plan-mutation-seams.test.ts \
+  src/attendance/__tests__/w4c3a-legacy-plan-worker.test.ts \
+  src/attendance/__tests__/w4c3a-legacy-plan-worker-repository.test.ts \
+  src/attendance/__tests__/w4c3a-plugin-v1-boundary.test.ts \
+  tests/unit/attendance-import-permission.test.ts --watch=false
+# Test Files  6 passed (6)
+# Tests  209 passed (209)
+
+DATABASE_URL=postgresql://127.0.0.1/postgres \
+pnpm --filter @metasheet/core-backend exec vitest run \
+  --config vitest.integration.config.ts \
+  tests/integration/attendance-w4c3a-group-effects.db.test.ts --watch=false
+# Test Files  1 passed (1)
+# Tests  3 passed (3)
+# 含 enqueue then deactivate does not insert ensure_member
 ```
 
 ## 4. Adversarial / mutation
@@ -151,9 +176,11 @@ SELECT 'attendance_schedule_group_members', m.org_id, m.user_id, m.schedule_grou
 
 - 无浏览器。管理端粘贴框 / global-scope 负责人选择器未点。
 - 已经落库的幽灵成员、负责人、排班组成员 **不会**被本 PR 清掉。用第 6 节的只读查询找，不要当清理脚本跑。
-- 检查与 INSERT 之间没有 `SELECT … FOR UPDATE`。并发把用户停用，仍可能在检查通过后插入。事务只保证「检查失败则本语句不提交」。
 - 单测分不出「停用成员关系」和「用户行 `is_active = false`」的执行差异；第 5 节的真实库查询把这两种都排除了，单测本身仍靠谓词文本 + 空结果。
-- W4 `applyAttendanceLegacyGroupEffectsV1` 不重查 `user_orgs`。它只执行计划里已经冻结的 `ensure_member`。活的 preview / commit / legacy import / async enqueue / integration sync 都先经过 `commitAttendanceImportPayload`，被拒绝的用户不会进入计划。绕过该函数、自己组计划的调用方不在本 PR。
+- 条件复检失败仍是 `PRECONDITION_CHANGED`（`error` 为空），不带 index。真正写入前的适配器失败才记 `USER_NOT_IN_ORG` 和 index JSON。两条都会阻止成员 INSERT。
+- 检查与 INSERT 之间没有 `SELECT … FOR UPDATE`。W4 写入前的再查盖住入队后的窗口，盖不住检查通过后、INSERT 之前的并发停用。
+- W4 没有负责人写入。managers POST 仍是同步路径上的门。
+- async preview 的 job `error` 在 `updateImportJobProgress` 里截到 2000 字符。HTTP 入队前的 404 带完整 index `details`。
 - #5945（报表日期区间）不在本 PR 的改动里。在 `main` `f31a88663` 上重跑 `tests/attendance-reports-analytics.spec.ts` 为 **7/7 PASS**（含倒置区间拦截与相等/升序区间仍可加载）。本 PR 不修改该行为。
 
 ## 8. 口径
