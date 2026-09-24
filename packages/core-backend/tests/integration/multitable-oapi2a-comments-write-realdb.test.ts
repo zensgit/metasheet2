@@ -11,7 +11,7 @@
  * Runs only with DATABASE_URL.
  */
 import net from 'net'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -122,8 +122,10 @@ describeIfDatabase('OAPI-2a comments:write token comment-create (real DB, full s
     expect(res.status).toBe(403)
     expect(JSON.stringify(await res.json())).toContain('INSUFFICIENT_SCOPE')
     expect(await commentCount()).toBe(before)
-    await new Promise((r) => setTimeout(r, 100)) // boundary finish-listener flush
-    expect((await auditRows(tokWrongScopeId)).some((r) => r.outcome === 'denied' && r.status_code === 403)).toBe(true)
+    // The finish listener persists asynchronously; observe the row, not a fixed sleep.
+    await vi.waitFor(async () => {
+      expect((await auditRows(tokWrongScopeId)).some((r) => r.outcome === 'denied' && r.status_code === 403)).toBe(true)
+    }, { timeout: 5000, interval: 50 })
   })
 
   test('revoked token → 401, no comment', async () => {

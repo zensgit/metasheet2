@@ -64,14 +64,16 @@
  *    今天 `TEMPORARY_EXEMPTIONS` 为空（上一批已随 #5710 收口），机制本身由
  *    `describe('豁免表')` 里的合成用例证明仍然是活代码，不会烂在那儿。
  */
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // --------------------------------------------------------------------------
 // import 期依赖切断 —— 与 admin-safety-toggle-and-bulk-authz.test.ts 同款配方。
-// 目的只是让 `admin-routes` 及其传递路由模块能在无库 lane 里被 import；本文件**不发任何 HTTP 请求**，
-// 只读 router 对象的结构，所以这些桩不参与任何被断言的判定。
+// 目的是让 `admin-routes` 及其传递路由模块能在无库 lane 里被 import。结构性用例只读 router 对象的
+// 结构，这些桩不参与判定；唯一发 HTTP 请求的是 `describe('扫描结论与 Express 真实 dispatch 一致')`，
+// 它用 `rbacCalls.isAdmin` 恒 false 的桩观察「请求有没有经过 admin 门」（调用次数 = 门是否执行）。
 // --------------------------------------------------------------------------
-vi.mock('../../src/rbac/service', () => ({ isAdmin: vi.fn(async () => false) }))
+const rbacCalls = vi.hoisted(() => ({ isAdmin: vi.fn(async (_userId: string) => false) }))
+vi.mock('../../src/rbac/service', () => ({ isAdmin: rbacCalls.isAdmin }))
 // 无库 lane：`pool: null` 让 logSafetyOperation 退化成 warn。
 vi.mock('../../src/db/pg', () => ({ pool: null }))
 // 切断 SnapshotService → audit → AuditRepository 这条在 import 期就要求真实连接池的链。
@@ -103,7 +105,9 @@ vi.mock('../../src/db/kysely', () => {
   return { db, transaction: vi.fn() }
 })
 
-import type { NextFunction, Request, Response, Router } from 'express'
+import express, { type NextFunction, type Request, type Response, type Router } from 'express'
+import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 import adminRouter, { initAdminRoutes } from '../../src/routes/admin-routes'
 import {
   OperationType,
@@ -211,7 +215,11 @@ const ADMIN_MOUNT = '/api/admin'
 
 interface RouteHandlerLayer {
   handle: unknown
-  /** express 给 `route.post(fn)` 这类 layer 打上的方法名；`route.all(fn)` 时为 undefined。 */
+  /**
+   * express 给 `route.post(fn)` 这类 layer 打上的方法名；`route.all(fn)` 时为 undefined
+   * （express@4.21.2 `lib/router/route.js:197` `layer.method = undefined`、`:222` `layer.method = method`）。
+   * 这个表示法由 `describe('混合方法路由…')` 里的前提自检钉住。
+   */
   method?: string
 }
 
@@ -286,6 +294,20 @@ interface WriteRoute {
   source: string
 }
 
+/**
+ * 对写方法 `method`，Express **首先执行**的那一层 —— 与 `Route.prototype.dispatch` 同一语义：
+ * express@4.21.2 `lib/router/route.js:144` 跳过 `layer.method && layer.method !== method` 的层；
+ * `route.all(fn)` 产出的层 `method` 为 undefined，对所有方法生效。
+ *
+ * 初版在 `route.methods._all` 为真时对每个写方法直接取 `route.stack[0]`，会把
+ * `.route(p).get(requireAdminRole()).all(h)` 里 GET-only 的门误算成四个写方法的门（#5680 复审 N3）；
+ * 反例见 `describe('混合方法路由…')` 与真实 HTTP 对照组。对不含 `.all()` 的普通路由，栈里不存在
+ * 无 method 的层，这个谓词与原来的 `l.method === method` 等价，真实 admin router 上的判定不变。
+ */
+function firstDispatchedLayer(route: RouteLike, method: WriteMethod): RouteHandlerLayer | undefined {
+  return route.stack.find((l) => !l.method || l.method === method)
+}
+
 function collectWriteRoutes(router: Router, mount: string, source: string): WriteRoute[] {
   const out: WriteRoute[] = []
   for (const layer of asRouterLike(router).stack) {
@@ -301,9 +323,7 @@ function collectWriteRoutes(router: Router, mount: string, source: string): Writ
       const isAll = route.methods._all === true
       for (const method of WRITE_METHODS) {
         if (!isAll && route.methods[method] !== true) continue
-        const handlerLayer = isAll
-          ? route.stack[0]
-          : route.stack.find((l) => l.method === method)
+        const handlerLayer = firstDispatchedLayer(route, method)
         out.push({
           method,
           path: fullPath,
@@ -747,5 +767,209 @@ describe('变异自证', () => {
     // 还原后硬红清单重新为空（afterEach 另查 violations）。
     expect(exemptionsCoveringGatedRoutes(PERMANENT_EXEMPTIONS)).toEqual([])
     expect(isAdminGate(stack[0].handle)).toBe(false)
+  })
+})
+
+// --------------------------------------------------------------------------
+// 6. 混合方法路由（#5680 复审 N3）
+//
+// Express 4 的 `Route.prototype.dispatch`（express@4.21.2 `lib/router/route.js:137-150`）逐层走
+// `route.stack`，遇到 `layer.method && layer.method !== method` 就跳过（:144）。所以
+// `.route(p).get(requireAdminRole()).all(h)` 这种形状：`route.methods._all === true`，栈首是
+// **GET-only** 的门 —— 对 POST/PUT/PATCH/DELETE 而言首个真正执行的是 `h`，门根本不跑。
+//
+// 本守卫初版在 `_all` 为真时对每个写方法直接取 `route.stack[0]`，于是把那道 GET-only 门误算成
+// 四个写方法的门：复审用内存注入这条合成路由复演，原 23 条用例全绿（假绿）。这是**测试保证缺口**，
+// 不是现网越权路由 —— 今天 admin router 里没有 `.all()` 形状的真实路由。
+//
+// 下面的合成路由全部在测试内构造（独立的 `express.Router()`，或对单例 router 的内存注入并在
+// finally 里撤掉），不改生产路由、不落盘。喂给的是与真实守卫**同一个** `auditWriteRoutes`。
+// --------------------------------------------------------------------------
+
+const reachedHandler = (_req: Request, res: Response) => {
+  res.json({ unguardedWriteReached: true })
+}
+
+const PROBE_PATH = '/n3-mixed-probe'
+
+interface MixedShape {
+  name: string
+  build: () => Router
+  /** 被收集到的写方法（`_all` 路由 = 四个都有）。 */
+  collected: readonly WriteMethod[]
+  /** 按 Express dispatch 语义「应该有门」的写方法，也是 HTTP 对照组的行为期望。 */
+  gated: readonly WriteMethod[]
+}
+
+function probeRouter(register: (route: ReturnType<Router['route']>) => void): Router {
+  const r = express.Router()
+  register(r.route(PROBE_PATH))
+  return r
+}
+
+const SHAPE_GET_GATE_ALL_OPEN: MixedShape = {
+  name: '.get(门).all(无门) —— 门只挂在 GET 上，写方法全部绕过（N3 原始反例）',
+  build: () => probeRouter((route) => route.get(requireAdminRole()).all(reachedHandler)),
+  collected: WRITE_METHODS,
+  gated: [],
+}
+const SHAPE_POST_GATE_ALL_OPEN: MixedShape = {
+  name: '.post(门, h).all(无门) —— 只有 POST 有门，PUT/PATCH/DELETE 绕过',
+  build: () =>
+    probeRouter((route) => route.post(requireAdminRole(), reachedHandler).all(reachedHandler)),
+  collected: WRITE_METHODS,
+  gated: ['post'],
+}
+const SHAPE_ALL_OPEN_POST_GATE: MixedShape = {
+  // 这里的 all 层是**终结型** handler（直接应答）。若换成 `next()` 透传型，POST 行为上会继续走到
+  // 后面的门而被 403，扫描却按「首位」判无门 —— 那是本守卫有意的保守（首位原则，设计 §2.1），
+  // 不是 dispatch 不一致，所以不放进下面「扫描 ⇔ 行为」的对照组。
+  name: '.all(无门).post(门, h) —— all 层排在前面，POST 也先到无门层',
+  build: () =>
+    probeRouter((route) => route.all(reachedHandler).post(requireAdminRole(), reachedHandler)),
+  collected: WRITE_METHODS,
+  gated: [],
+}
+const SHAPE_ALL_GATE: MixedShape = {
+  name: '.all(门).post(h) —— all 层对所有方法生效，四个写方法都先过门',
+  build: () => probeRouter((route) => route.all(requireAdminRole()).post(reachedHandler)),
+  collected: WRITE_METHODS,
+  gated: ['post', 'put', 'patch', 'delete'],
+}
+const SHAPE_POST_GATE_ONLY: MixedShape = {
+  name: '.post(门, h) —— 普通单方法路由，只收集 POST 且有门',
+  build: () => probeRouter((route) => route.post(requireAdminRole(), reachedHandler)),
+  collected: ['post'],
+  gated: ['post'],
+}
+
+const MIXED_SHAPES: readonly MixedShape[] = [
+  SHAPE_GET_GATE_ALL_OPEN,
+  SHAPE_POST_GATE_ALL_OPEN,
+  SHAPE_ALL_OPEN_POST_GATE,
+  SHAPE_ALL_GATE,
+  SHAPE_POST_GATE_ONLY,
+]
+
+function scanProbe(r: Router): { collected: WriteMethod[]; gated: WriteMethod[] } {
+  const probe = auditWriteRoutes(r).all.filter((w) => w.path === PROBE_PATH)
+  return {
+    collected: probe.map((w) => w.method),
+    gated: probe.filter((w) => isAdminGate(w.firstHandler)).map((w) => w.method),
+  }
+}
+
+describe('混合方法路由：按 Express method dispatch 取首个 handler（#5680 复审 N3）', () => {
+  it('前提自检：express 对 .all 层的 method 表示为 undefined、对 .get 层为 "get"（取层谓词建立在这之上）', () => {
+    const route = asRouterLike(SHAPE_GET_GATE_ALL_OPEN.build()).stack[0].route!
+    expect(route.methods._all).toBe(true)
+    expect(route.stack.map((l) => l.method)).toEqual(['get', undefined])
+    expect(isAdminGate(route.stack[0].handle), '栈首应当是真的 requireAdminRole() 门').toBe(true)
+  })
+
+  it('负例：.get(requireAdminRole()).all(无门) → 四个写方法全部判无门并点名', () => {
+    const r = SHAPE_GET_GATE_ALL_OPEN.build()
+    expect(scanProbe(r)).toEqual({ collected: [...WRITE_METHODS], gated: [] })
+    expect(auditWriteRoutes(r).violations.map((v) => v.label)).toEqual(
+      WRITE_METHODS.map((m) => `${m.toUpperCase()} ${ADMIN_MOUNT}${PROBE_PATH} (via router.all)`),
+    )
+  })
+
+  it('负例：.post(requireAdminRole(), h).all(无门) → 只有 POST 有门，PUT/PATCH/DELETE 判无门', () => {
+    expect(scanProbe(SHAPE_POST_GATE_ALL_OPEN.build())).toEqual({
+      collected: [...WRITE_METHODS],
+      gated: ['post'],
+    })
+  })
+
+  it('负例：.all(无门).post(requireAdminRole(), h) → POST 也先到无门层，四个都判无门', () => {
+    expect(scanProbe(SHAPE_ALL_OPEN_POST_GATE.build())).toEqual({
+      collected: [...WRITE_METHODS],
+      gated: [],
+    })
+  })
+
+  it('正例：.all(requireAdminRole()).post(h) → 四个写方法都判有门、零违规', () => {
+    const r = SHAPE_ALL_GATE.build()
+    expect(scanProbe(r)).toEqual({ collected: [...WRITE_METHODS], gated: [...WRITE_METHODS] })
+    expect(auditWriteRoutes(r).violations).toEqual([])
+  })
+
+  it('正例：.post(requireAdminRole(), h) → 只收集 POST 且判有门', () => {
+    expect(scanProbe(SHAPE_POST_GATE_ONLY.build())).toEqual({ collected: ['post'], gated: ['post'] })
+  })
+
+  it('注入到真实 admin router：.get(门).all(无门) 让核心不变量红并点名四个写方法（复审原复演形状）', () => {
+    const stack = asRouterLike(router).stack
+    const before = stack.length
+    router.route(PROBE_PATH).get(requireAdminRole()).all(reachedHandler)
+    try {
+      expect(stack.length, '注入没有生效').toBe(before + 1)
+      expect(auditWriteRoutes(router).violations.map((v) => v.label)).toEqual(
+        WRITE_METHODS.map((m) => `${m.toUpperCase()} ${ADMIN_MOUNT}${PROBE_PATH} (via router.all)`),
+      )
+    } finally {
+      stack.length = before
+    }
+    expect(auditWriteRoutes(router).violations).toEqual([])
+  })
+})
+
+describe('扫描结论与 Express 真实 dispatch 一致（真实 HTTP，非 admin 身份）', () => {
+  // tests/unit 禁止 `request(app)`（#4154）：一律走 pinned server。
+  const pinned = usePinnedServer()
+  let current: Router | null = null
+
+  beforeEach(() => {
+    current = null
+    rbacCalls.isAdmin.mockReset()
+    rbacCalls.isAdmin.mockResolvedValue(false)
+    const app = express()
+    app.use((req, _res, next) => {
+      ;(req as unknown as { user: { id: string } }).user = { id: 'structural-gate-nonadmin-fixture' }
+      next()
+    })
+    app.use(ADMIN_MOUNT, (req, res, next) => {
+      if (!current) {
+        next(new Error('测试没有装合成 router'))
+        return
+      }
+      current(req, res, next)
+    })
+    pinned.setApp(app)
+  })
+
+  for (const s of MIXED_SHAPES) {
+    it(`${s.name}：扫描判有门 ⇔ 请求被 403 ADMIN_REQUIRED 且门执行过`, async () => {
+      current = s.build()
+      const scanned = scanProbe(current)
+      expect(scanned.collected).toEqual([...s.collected])
+
+      const observedGated: WriteMethod[] = []
+      for (const method of s.collected) {
+        rbacCalls.isAdmin.mockClear()
+        const res = await request(pinned.url())[method](`${ADMIN_MOUNT}${PROBE_PATH}`)
+        if (res.status === 403) {
+          expect(res.body.code, `${method} 403 但不是 admin 门给的`).toBe('ADMIN_REQUIRED')
+          expect(rbacCalls.isAdmin, `${method} 403 但门没执行`).toHaveBeenCalledTimes(1)
+          observedGated.push(method)
+        } else {
+          expect(res.status, `${method} 既没被门拦也没到 handler`).toBe(200)
+          expect(res.body).toEqual({ unguardedWriteReached: true })
+          expect(rbacCalls.isAdmin, `${method} 到了 handler 但门执行过`).not.toHaveBeenCalled()
+        }
+      }
+      // 行为层先对上期望（防止「扫描和行为一起错」），再要求扫描逐方法与行为一致。
+      expect(observedGated).toEqual([...s.gated])
+      expect(scanned.gated).toEqual(observedGated)
+    })
+  }
+
+  it('.get(门).all(无门) 的 GET 确实被门拦（门本身是活的，只是不管写方法）', async () => {
+    current = SHAPE_GET_GATE_ALL_OPEN.build()
+    const res = await request(pinned.url()).get(`${ADMIN_MOUNT}${PROBE_PATH}`)
+    expect(res.status).toBe(403)
+    expect(res.body.code).toBe('ADMIN_REQUIRED')
+    expect(rbacCalls.isAdmin).toHaveBeenCalledTimes(1)
   })
 })

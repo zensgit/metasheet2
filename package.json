@@ -110,7 +110,7 @@
     "verify:stock-preparation-target-binding": "node --test scripts/ops/stock-preparation-derive-target-binding.test.mjs",
     "verify:source-discovery-probe:test": "node --test scripts/ops/source-discovery-probe.test.mjs && node --test scripts/ops/source-discovery-draft-emitter.test.mjs",
     "verify:stock-prep-acceptance-bootstrap:test": "node --test scripts/ops/stock-prep-acceptance-bootstrap.test.mjs",
-    "verify:scenario-b-replay:test": "node --test scripts/ops/scenario-b-replay.test.mjs",
+    "verify:scenario-b-replay:test": "node --test scripts/ops/scenario-b-replay.test.mjs scripts/ops/scenario-b-replay-contract.test.mjs",
     "ops:stock-prep-persist-repair-once": "tsx packages/core-backend/scripts/stock-preparation-persist-repair-once.ts",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",
     "build": "pnpm -r build",

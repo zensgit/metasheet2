@@ -34,6 +34,7 @@ import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_
 import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures'
 import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
 import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity'
+import * as attachmentRestoreStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -212,9 +213,17 @@ const MIGRATIONS: NamedMigration[] = [
       down: (db) => db.transaction().execute(nonceObjectIdentity.down),
     },
   },
+  {
+    name: 'zzzz20260919160000_create_archive_attachment_restore_stages',
+    module: {
+      up: (db) => db.transaction().execute(attachmentRestoreStages.up),
+      down: (db) => db.transaction().execute(attachmentRestoreStages.down),
+    },
+  },
 ]
 
 const TOUCHED_RELATIONS = [
+  'meta_recovery_archive_attachment_stages',
   'meta_recovery_archive_manual_requests',
   'meta_recovery_archive_prepared_captures',
   'meta_recovery_archive_derived_effects',
@@ -258,6 +267,7 @@ const TOUCHED_RELATIONS = [
 ]
 
 const OWNED_RELATIONS = [
+  'meta_recovery_archive_attachment_stages',
   'meta_recovery_archive_manual_requests',
   'meta_recovery_archive_prepared_captures',
   'meta_recovery_archive_derived_effects',
@@ -530,6 +540,7 @@ const ARCHIVE_RESTORE_JOB_FUNCTIONS = [
 
 const OWNED_FUNCTIONS = [
   'meta_recovery_archive_manual_request_guard',
+  'meta_recovery_archive_attachment_stage_guard',
   'meta_recovery_archive_prepared_capture_guard',
   ...OPERATION_FUNCTIONS,
   ...AUTHORITY_FUNCTIONS,

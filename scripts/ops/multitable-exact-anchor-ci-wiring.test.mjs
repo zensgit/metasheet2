@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { readFileSync as readFileSyncRaw } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -52,10 +53,39 @@ const FILES = [
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
+function historyPanelWebContract(workflow, required) {
+  const step = namedStepBody(workflow, 'Run record history panel spec')
+  assert.doesNotMatch(step, /^\s*(?:if|continue-on-error):/m)
+  assert.match(step, /run: pnpm --filter @metasheet\/web exec vitest run multitable-record-history-panel --reporter=dot/)
+  for (const path of ['apps/web/src/multitable/components/MetaRecordHistoryPanel.vue', 'apps/web/tests/multitable-record-history-panel.spec.ts']) {
+    assert.equal(workflow.split('\n').filter(line => line.trim() === `- '${path}'`).length, 2)
+  }
+  const commands = required.replace(/\\\n/g, ' ').split('\n').filter(line => !/^\s*#/.test(line) && line.includes('vitest run '))
+  assert.ok(commands.some(line => line.split(/\s+/).includes('multitable-record-history-panel')))
+}
+
+test('record history panel remains selected in both web lanes and both guard triggers', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/multitable-web-guard.yml'), 'utf8')
+  const required = readFileSync(join(repoRoot, 'apps/web/scripts/run-required-web-tests.sh'), 'utf8')
+  historyPanelWebContract(workflow, required)
+  assert.throws(() => historyPanelWebContract(workflow.replace('vitest run multitable-record-history-panel ', 'vitest run missing-history-panel '), required))
+  assert.throws(() => historyPanelWebContract(workflow, required.replaceAll('multitable-record-history-panel', 'missing-history-panel')))
+  for (const path of ['apps/web/src/multitable/components/MetaRecordHistoryPanel.vue', 'apps/web/tests/multitable-record-history-panel.spec.ts']) {
+    assert.throws(() => historyPanelWebContract(workflow.replace(`- '${path}'`, "- 'missing-history-path'"), required))
+  }
+})
+
 function manualCheckpointContract(workflow) {
   const step = namedStepBody(workflow, 'Run isolated manual checkpoint acceptance')
   assert.doesNotMatch(step, /^\s*(?:if|continue-on-error):/m)
   assert.match(step, /^\s+TM_TEST_PG_BIN="\$\(pg_config --bindir\)" node scripts\/ops\/run-recovery-manual-checkpoint\.mjs\s*$/m)
+}
+
+function attachmentStageRunnerContract(runner) {
+  assert.match(runner, /:\s*\['scripts\/verify-recovery-manual-checkpoint\.mts', 'scripts\/verify-recovery-attachment-stage\.mts'\]/)
+  assert.match(runner, /for \(const script of scripts\)/)
+  assert.match(runner, /'exec', 'tsx', script\]/)
+  assert.match(runner, /assert\.equal\(code, 0,/)
 }
 
 test('required plugin lane runs the owned-cluster manual checkpoint driver without skip-green', () => {
@@ -69,8 +99,42 @@ test('required plugin lane runs the owned-cluster manual checkpoint driver witho
     '      - name: Run isolated manual checkpoint acceptance\n        if: false',
   )))
   const runner = readFileSync(join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), 'utf8')
+  attachmentStageRunnerContract(runner)
+  assert.throws(() => attachmentStageRunnerContract(runner.replace(
+    ", 'scripts/verify-recovery-attachment-stage.mts']", "]",
+  )))
   assert.match(runner, /scripts\/verify-recovery-manual-checkpoint\.mts/)
   assert.match(runner, /assert\.equal\(code, 0,/)
+})
+
+function ownedWorkbenchContract(runner) {
+  assert.match(runner, /const workbench = process\.argv\.includes\('--workbench'\)/)
+  assert.match(runner, /if \(workbench\) \{/)
+  assert.match(runner, /runPnpm\(\['migrate'\], databaseEnv\)/)
+  assert.match(runner, /runPnpm\(\['exec', 'tsx', 'scripts\/verify-timemachine-workbench\.mts'\], databaseEnv\)/)
+  assert.match(runner, /SELECT count\(\*\) FROM pg_stat_activity WHERE datname=/)
+  assert.match(runner, /'WORKBENCH_DATABASE_CONNECTIONS_REMAIN'/)
+  assert.match(runner, /run\('dropdb',/)
+}
+
+test('optional full-workbench acceptance owns its migrated database and residue gate', () => {
+  const runner = readFileSync(join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), 'utf8')
+  ownedWorkbenchContract(runner)
+  assert.throws(() => ownedWorkbenchContract(runner.replace(
+    'scripts/verify-timemachine-workbench.mts', 'scripts/disabled-workbench.mts',
+  )))
+  assert.throws(() => ownedWorkbenchContract(runner.replace('WORKBENCH_DATABASE_CONNECTIONS_REMAIN', 'ignored')))
+  assert.throws(() => ownedWorkbenchContract(runner.replace('if (workbench)', 'if (false && workbench)')))
+})
+
+test('owned acceptance modes cannot silently suppress one another', () => {
+  for (const modes of [['--browser', '--workbench'], ['--attachment-stage', '--workbench'], ['--browser', '--attachment-stage']]) {
+    const result = spawnSync(process.execPath, [join(repoRoot, 'scripts/ops/run-recovery-manual-checkpoint.mjs'), ...modes], {
+      env: {}, encoding: 'utf8', timeout: 10000,
+    })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /INCOMPATIBLE_ACCEPTANCE_ARGUMENTS/)
+  }
 })
 
 function maskCommentsAndStrings(src) {
@@ -434,6 +498,7 @@ const TIME_MACHINE_REPLAY_MIGRATIONS = [
   'zzzz20260918130000_create_recovery_archive_prepared_captures',
   'zzzz20260918140000_create_recovery_archive_manual_requests',
   'zzzz20260919130000_extend_archive_nonce_object_identity',
+  'zzzz20260919160000_create_archive_attachment_restore_stages',
 ]
 const TIME_MACHINE_REPLAY_VERIFIER =
   'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'
@@ -526,7 +591,7 @@ function migrationReplayContract(workflow, verifier) {
   assert.deepEqual(
     names,
     TIME_MACHINE_REPLAY_MIGRATIONS,
-    'verifier must exercise the exact 31 Time Machine migrations in causal order',
+    'verifier must exercise the exact 32 Time Machine migrations in causal order',
   )
   assert.match(verifier, /for \(const migration of \[\.\.\.MIGRATIONS\]\.reverse\(\)\)/)
   assert.match(verifier, /for \(const migration of MIGRATIONS\)/)
@@ -630,7 +695,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, driftedMigration),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingArchiveCleanup = verifier.replace(
@@ -640,7 +705,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingArchiveCleanup, verifier, 'archive-cleanup removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingArchiveCleanup),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingSectionCausality = verifier.replace(
@@ -650,7 +715,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingSectionCausality, verifier, 'section-causality removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingSectionCausality),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingOperationBinding = verifier.replace(
@@ -660,7 +725,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingOperationBinding, verifier, 'operation-binding removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingOperationBinding),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingArchiveWriterBlock = verifier.replace(
@@ -670,7 +735,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingArchiveWriterBlock, verifier, 'archive-writer-block removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingArchiveWriterBlock),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingCoverageBinding = verifier.replace(
@@ -680,7 +745,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingCoverageBinding, verifier, 'coverage-binding removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingCoverageBinding),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingObjectReceiptAuthority = verifier.replace(
@@ -694,7 +759,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, missingObjectReceiptAuthority),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingClaimAnchorAmendment = verifier.replace(
@@ -708,7 +773,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, missingClaimAnchorAmendment),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingLegalHoldAuthority = verifier.replace(
@@ -722,7 +787,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, missingLegalHoldAuthority),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingArchiveCryptoRegistry = verifier.replace(
@@ -736,7 +801,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, missingArchiveCryptoRegistry),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingRestoreJobs = verifier.replace(
@@ -746,7 +811,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingRestoreJobs, verifier, 'restore-jobs removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingRestoreJobs),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingDerivedEffects = verifier.replace(
@@ -756,7 +821,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingDerivedEffects, verifier, 'derived-effects removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingDerivedEffects),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const missingSectionCheckpoints = verifier.replace(
@@ -766,7 +831,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingSectionCheckpoints, verifier, 'section-checkpoints removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingSectionCheckpoints),
-    /exact 31 Time Machine migrations/,
+    /exact 32 Time Machine migrations/,
   )
 
   const driftedExclude = workflow.replace(
@@ -778,19 +843,25 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
     '',
   )
   assert.notEqual(missingPreparedCaptures, verifier)
-  assert.throws(() => migrationReplayContract(workflow, missingPreparedCaptures), /exact 31 Time Machine migrations/)
+  assert.throws(() => migrationReplayContract(workflow, missingPreparedCaptures), /exact 32 Time Machine migrations/)
   const missingManualRequests = verifier.replace(
     /  \{\n    name: 'zzzz20260918140000_create_recovery_archive_manual_requests',[\s\S]*?\n  \},\n/,
     '',
   )
   assert.notEqual(missingManualRequests, verifier)
-  assert.throws(() => migrationReplayContract(workflow, missingManualRequests), /exact 31 Time Machine migrations/)
+  assert.throws(() => migrationReplayContract(workflow, missingManualRequests), /exact 32 Time Machine migrations/)
   const missingNonceObjects = verifier.replace(
     /  \{\n    name: 'zzzz20260919130000_extend_archive_nonce_object_identity',[\s\S]*?\n  \},\n/,
     '',
   )
   assert.notEqual(missingNonceObjects, verifier)
-  assert.throws(() => migrationReplayContract(workflow, missingNonceObjects), /exact 31 Time Machine migrations/)
+  assert.throws(() => migrationReplayContract(workflow, missingNonceObjects), /exact 32 Time Machine migrations/)
+  const missingAttachmentStages = verifier.replace(
+    /  \{\n    name: 'zzzz20260919160000_create_archive_attachment_restore_stages',[\s\S]*?\n  \},\n/,
+    '',
+  )
+  assert.notEqual(missingAttachmentStages, verifier)
+  assert.throws(() => migrationReplayContract(workflow, missingAttachmentStages), /exact 32 Time Machine migrations/)
   assert.throws(() => migrationReplayContract(driftedExclude, verifier), /same exact exclusion set/)
 })
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+import { createHash } from 'node:crypto'
 
 import {
   assertRecoveryArchiveSyncPlanMatchesClaims,
@@ -51,6 +52,47 @@ function claims(plan = compileRecoveryArchiveSyncPlan(input())): ExactArchiveRec
 }
 
 describe('recovery archive sync plan', () => {
+  test('keeps scalar/link v1 hash byte-equivalent and distinguishes an empty attachment plan', () => {
+    const plan = compileRecoveryArchiveSyncPlan(input())
+    expect(plan.planHash).toBe(createHash('sha256').update(JSON.stringify([
+      'recovery-archive-sync-plan-v1', 'workspace-sync', 'base-sync', 'sheet-sync', 'actor-sync',
+      'revert', 'whole_sheet', SHA('1'), 'generation-sync', SHA('2'), SHA('3'), 'key-sync', [], [],
+    ])).digest('hex'))
+    const attachments = compileRecoveryArchiveSyncPlan(input({ attachmentMetadata: [] }))
+    expect(attachments.planHash).not.toBe(plan.planHash)
+    expect(() => assertRecoveryArchiveSyncPlanMatchesClaims(attachments, claims(plan))).toThrow(RecoveryArchiveSyncPlanError)
+  })
+
+  test('binds every attachment metadata axis and detaches canonical roster from its source', () => {
+    const row = { attachmentId: 'att-b', recordId: 'r', fieldId: 'f', metadataHash: SHA('a') }
+    const roster = [row, { ...row, attachmentId: 'att-a' }]
+    const plan = compileRecoveryArchiveSyncPlan(input({ attachmentMetadata: roster }))
+    expect(plan.attachmentMetadata?.map(item => item.attachmentId)).toEqual(['att-a', 'att-b'])
+    expect(compileRecoveryArchiveSyncPlan(input({ attachmentMetadata: [...roster].reverse() })).planHash).toBe(plan.planHash)
+    for (const replacement of [
+      { attachmentId: 'att-other' }, { recordId: 'other-record' },
+      { fieldId: 'other-field' }, { metadataHash: SHA('b') },
+    ]) {
+      const changed = compileRecoveryArchiveSyncPlan(input({ attachmentMetadata: [roster[1]!, { ...row, ...replacement }] }))
+      expect(() => assertRecoveryArchiveSyncPlanMatchesClaims(changed, claims(plan))).toThrow(RecoveryArchiveSyncPlanError)
+    }
+    row.metadataHash = SHA('c')
+    expect(plan.attachmentMetadata?.[1]?.metadataHash).toBe(SHA('a'))
+    expect(Object.isFrozen(plan.attachmentMetadata)).toBe(true)
+    expect(Object.isFrozen(plan.attachmentMetadata?.[0])).toBe(true)
+  })
+
+  test('rejects ambiguous, malformed and out-of-scope attachment bindings', () => {
+    const row = { attachmentId: 'att', recordId: 'r', fieldId: 'f', metadataHash: SHA('a') }
+    for (const attachmentMetadata of [undefined, null, {}, [row, row], [{ ...row, extra: true }],
+      [{ ...row, metadataHash: 'bad' }], [{ ...row, recordId: ' r' }]]) {
+      expect(() => compileRecoveryArchiveSyncPlan({ ...input(), attachmentMetadata })).toThrow(RecoveryArchiveSyncPlanError)
+    }
+    expect(() => compileRecoveryArchiveSyncPlan(input({ scopeKind: 'selected_records', selectedRecordIds: ['other'],
+      attachmentMetadata: [row] }))).toThrow(RecoveryArchiveSyncPlanError)
+    expect(() => compileRecoveryArchiveSyncPlan(input({ scopeKind: 'selected_fields', selectedRecordIds: ['r'],
+      selectedFieldIds: ['other'], attachmentMetadata: [row] }))).toThrow(RecoveryArchiveSyncPlanError)
+  })
   test.each([
     input(),
     input({
