@@ -59,6 +59,7 @@ on:
       # scripts/ops/ops-sql-pack-verify-wiring.test.mjs, which derives this
       # exact dependency from the test source rather than trusting this list.
       - 'packages/core-backend/src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock.ts'
+      - 'scripts/ops/ops-sql-pack-verify-wiring.test.mjs'
   push:
     branches: [main]
     paths:
@@ -66,11 +67,27 @@ on:
       - 'scripts/ops/readonly-inventory-20260916/**'
       - 'scripts/ops/live-id-fk-validate-20260920/**'
       - 'packages/core-backend/src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock.ts'
+      - 'scripts/ops/ops-sql-pack-verify-wiring.test.mjs'
 
 permissions:
   contents: read
 
 jobs:
+  wiring:
+    name: trigger-path wiring contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      # Without this job the paths-coverage contract would be a guard nobody
+      # runs: it proves every repo file the verify tests read is listed in
+      # both the pull_request and push paths above.
+      - name: Run ops-sql-pack-verify trigger-path wiring test
+        run: node --test scripts/ops/ops-sql-pack-verify-wiring.test.mjs
+
   hermetic:
     name: ${{ matrix.pack }} — hermetic layer (no DB)
     runs-on: ubuntu-latest
