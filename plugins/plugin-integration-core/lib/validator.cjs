@@ -11,6 +11,32 @@ const { getPath } = require('./transform-engine.cjs')
 
 const SUPPORTED_RULES = new Set(['required', 'pattern', 'enum', 'min', 'max'])
 
+// ---------------------------------------------------------------------------
+// Length limits for a caller-supplied pattern — plugin copy.
+//
+// This is the pipeline validator's copy of the LENGTH GATE in
+// `packages/core-backend/src/formula/regex-safety.ts` (the plugin is loaded at
+// runtime and has no import edge to that package). The constants and
+// `findUserRegexLengthRefusal` are kept identical to that module and are pinned
+// against it, and against the public form's copy, by
+// `packages/core-backend/tests/unit/user-regex-limits-three-copy-parity.test.ts`.
+// The sources of the two numbers are documented on the backend copy.
+// ---------------------------------------------------------------------------
+
+const USER_REGEX_MAX_SUBJECT_LEN = 10000
+
+const USER_REGEX_MAX_PATTERN_LEN = 4000
+
+function findUserRegexLengthRefusal(patternLength, subjectLength) {
+  if (patternLength > USER_REGEX_MAX_PATTERN_LEN) {
+    return { kind: 'pattern-too-long', length: patternLength, limit: USER_REGEX_MAX_PATTERN_LEN }
+  }
+  if (subjectLength > USER_REGEX_MAX_SUBJECT_LEN) {
+    return { kind: 'subject-too-long', length: subjectLength, limit: USER_REGEX_MAX_SUBJECT_LEN }
+  }
+  return null
+}
+
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
@@ -142,8 +168,23 @@ function validateValue(value, rules, field = null) {
           errors.push(makeError(field, rule, 'INVALID_RULE', `${fieldLabel} has invalid pattern rule`, value, { error }))
           break
         }
+        // Length gate (see the constants above). It runs after `compilePattern`,
+        // so here the pattern limit bounds the match, not the compilation — an
+        // INVALID_RULE report keeps precedence over a length refusal. A refusal
+        // is reported under its own code so a pipeline operator can tell "the
+        // value is malformed" from "the check declined to run".
+        const subject = String(value)
+        const refusal = findUserRegexLengthRefusal(regexp.source.length, subject.length)
+        if (refusal) {
+          errors.push(makeError(field, rule, 'PATTERN_NOT_EVALUATED', `${fieldLabel} could not be pattern-checked`, value, {
+            reason: refusal.kind,
+            length: refusal.length,
+            limit: refusal.limit,
+          }))
+          break
+        }
         regexp.lastIndex = 0
-        if (!regexp.test(String(value))) {
+        if (!regexp.test(subject)) {
           errors.push(makeError(field, rule, 'PATTERN', `${fieldLabel} does not match pattern`, value, {
             pattern: String(regexp),
           }))
@@ -242,6 +283,9 @@ function validateRecord(record, fieldMappings = []) {
 }
 
 module.exports = {
+  USER_REGEX_MAX_SUBJECT_LEN,
+  USER_REGEX_MAX_PATTERN_LEN,
+  findUserRegexLengthRefusal,
   SUPPORTED_RULES,
   isEmpty,
   normalizeRules,

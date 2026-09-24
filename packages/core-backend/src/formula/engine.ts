@@ -7,6 +7,7 @@ import type { Kysely } from 'kysely'
 import { db as defaultDb } from '../db/db'
 import type { Database } from '../db/types'
 import { Logger } from '../core/logger'
+import { runUserRegex } from './regex-safety'
 
 const logger = new Logger('FormulaEngine')
 
@@ -179,9 +180,15 @@ export class FormulaEngine {
     this.functions.set('UPPER', (text: unknown) => String(text).toUpperCase())
     this.functions.set('LOWER', (text: unknown) => String(text).toLowerCase())
     this.functions.set('TRIM', (text: unknown) => String(text).trim())
-    this.functions.set('SUBSTITUTE', (text: unknown, old: unknown, newText: unknown) =>
-      String(text).replace(new RegExp(String(old), 'g'), String(newText))
-    )
+    // SUBSTITUTE compiles its second argument as a global pattern (unchanged from
+    // before). The caller-supplied pattern and the subject now pass through the
+    // shared length gate in ./regex-safety.ts; inside the limits the result is
+    // the same replace call as before, outside them the function reports #ERROR!.
+    this.functions.set('SUBSTITUTE', (text: unknown, old: unknown, newText: unknown) => {
+      const replaceWith = String(newText)
+      const outcome = runUserRegex(String(old), 'g', String(text), (re, s) => s.replace(re, replaceWith), { site: 'formula:SUBSTITUTE' })
+      return outcome.status === 'ok' ? outcome.value : '#ERROR!'
+    })
 
     // Logical functions
     this.functions.set('IF', this.ifFunction.bind(this))
@@ -322,14 +329,31 @@ export class FormulaEngine {
       return out.repeat(c)
     })
     this.functions.set('TEXT', (value: unknown, format: unknown) => this.textFormat(value, format))
+    // REGEX* compile a caller-supplied pattern. Every one of them goes through
+    // `runUserRegex` (./regex-safety.ts): a pattern or subject over the shared
+    // length limits is refused and reported as #ERROR! (the same sentinel an
+    // invalid pattern already produced here); inside the limits the call is the
+    // one that was here before, on the same RegExp, with the same flags.
     this.functions.set('REGEXMATCH', (text: unknown, pattern: unknown) => {
-      try { return new RegExp(String(pattern)).test(String(text)) } catch { return '#ERROR!' }
+      try {
+        const outcome = runUserRegex(String(pattern), undefined, String(text), (re, s) => re.test(s), { site: 'formula:REGEXMATCH' })
+        return outcome.status === 'ok' ? outcome.value : '#ERROR!'
+      } catch { return '#ERROR!' }
     })
     this.functions.set('REGEXEXTRACT', (text: unknown, pattern: unknown) => {
-      try { const m = String(text).match(new RegExp(String(pattern))); return m ? (m[1] ?? m[0]) : '#VALUE!' } catch { return '#ERROR!' }
+      try {
+        const outcome = runUserRegex(String(pattern), undefined, String(text), (re, s) => s.match(re), { site: 'formula:REGEXEXTRACT' })
+        if (outcome.status !== 'ok') return '#ERROR!'
+        const m = outcome.value
+        return m ? (m[1] ?? m[0]) : '#VALUE!'
+      } catch { return '#ERROR!' }
     })
     this.functions.set('REGEXREPLACE', (text: unknown, pattern: unknown, replacement: unknown) => {
-      try { return String(text).replace(new RegExp(String(pattern), 'g'), String(replacement)) } catch { return '#ERROR!' }
+      try {
+        const replaceWith = String(replacement)
+        const outcome = runUserRegex(String(pattern), 'g', String(text), (re, s) => s.replace(re, replaceWith), { site: 'formula:REGEXREPLACE' })
+        return outcome.status === 'ok' ? outcome.value : '#ERROR!'
+      } catch { return '#ERROR!' }
     })
     // Date / time (reuse the timezone-stable date parse used by WEEKDAY, via coerceDateValue)
     this.functions.set('HOUR', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getHours() : '#VALUE!' })
