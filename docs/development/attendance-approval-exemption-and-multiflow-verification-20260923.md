@@ -84,3 +84,20 @@ node --test scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
 2. 已经 pending 的单，事后把假种/加班规则改成免批，编辑不会拆实例、不会改成 approved。
 3. 换班在未带 `approvalFlowId` 时仍是最新一条启用流（`loadApprovalFlow` 的 `LIMIT 1`）。本 PR 不改换班、不改 S7。
 4. 免批请假若余额不足（调休、或已启用的年假/冲抵 `block`），事务在投影前失败。`partial_unpaid_absence` 不论余额够不够都是 `LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE`。
+
+## 与 #6015 叠在最新 main
+
+第一次把 #6015 `5ce2ea195` 和本分支 `a27025960` 叠到 `origin/main` `f31a88663` 时，唯一冲突在 `plugins/plugin-attendance/index.cjs` 顶部：两边都新增了对 `leave-offset-partial-absence-guard.cjs` 的 require，但名字列表不同。`c4ba74ae7` 把本分支的 require 收成与 #6015 相同的五个名字之后，再叠一次是干净合并。本地 throwaway `cursor/attendance-exempt-offset-combined-8e13` @ `3329fc841`，没有推送，也没有开 PR。
+
+在该树上：
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
+  tests/unit/attendance-approval-exemption-5967.test.ts \
+  tests/unit/attendance-approval-exemption-balance-5967.test.ts \
+  tests/unit/attendance-leave-offset-policy.test.ts \
+  tests/unit/attendance-approval-center-bridge.test.ts \
+  tests/unit/attendance-w7-w6r5-preservation-guard.test.ts
+```
+
+结果：5 files, 39 tests passed。DML collector 的 exact-head 与 hard zero-bypass 通过。没有 `DATABASE_URL`，集成测试未重跑。免批与终审两处都调用 `rejectLeaveOffsetPartialAbsence`，调用点不再传 `mode: 'partial'`。
