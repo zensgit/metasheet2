@@ -536,7 +536,9 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
             plan,
             null,
           )
-          if (!replayExecuted.ok) {
+          // `in` narrowing: tsconfig.cache.tests.json sets strict:false, and
+          // `!result.ok` does not narrow this union there.
+          if ('detail' in replayExecuted) {
             return failClosed(trx, rechecked, 'USER_NOT_IN_ORG', replayExecuted.detail)
           }
           const response = parseLegacyImportAsyncJobSummaryV1(replayExecuted.value)
@@ -572,7 +574,7 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           plan,
           registryClaim,
         )
-        if (!executed.ok) {
+        if ('detail' in executed) {
           return failClosed(trx, rechecked, 'USER_NOT_IN_ORG', executed.detail)
         }
         const response = parseLegacyImportAsyncJobSummaryV1(executed.value)
