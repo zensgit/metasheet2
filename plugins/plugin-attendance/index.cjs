@@ -14,6 +14,13 @@ const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolv
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
+const {
+  LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE,
+  LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_MESSAGE,
+  leaveOffsetRuleDeclaresPartialAbsence,
+  leaveOffsetPolicyDeclaresPartialAbsence,
+  rejectLeaveOffsetPartialAbsence,
+} = require('./lib/leave-offset-partial-absence-guard.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
@@ -14251,8 +14258,6 @@ const LEAVE_DEDUCTION_POOLS = Object.freeze(['comp_time', 'annual', 'unpaid'])
 // Read vocabulary still includes partial_unpaid_absence so a legacy stored rule stays visible on GET
 // (#6009). It is not a writable or approvable mode: see leaveOffsetRuleDeclaresPartialAbsence.
 const LEAVE_DEDUCTION_INSUFFICIENT_MODES = Object.freeze(['block', 'partial_unpaid_absence'])
-const LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE = 'LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE'
-const LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_MESSAGE = 'Leave offset insufficient mode partial_unpaid_absence is not online: unpaid-absence accounting is not wired. Use insufficient=block. This request was not applied.'
 
 function normalizeLeaveBalanceDeductionPolicySetting(raw) {
   const value = raw && typeof raw === 'object' ? raw : {}
@@ -14279,18 +14284,8 @@ function normalizeLeaveBalanceDeductionPolicySetting(raw) {
   return { enabled: parseBoolean(value.enabled, false), rules }
 }
 
-// #6009: partial_unpaid_absence promised 「余下计缺勤」 but deductLeaveBalance's shortfall was discarded
-// and loadApprovedMinutes still summed the full request. attendance_records has no absence-minute column,
-// so the mode cannot be honored. Legacy stored rules stay readable (normalizer keeps the token); PUT and
-// final approve fail closed instead of under-deducting the pool and projecting the full leave.
-function leaveOffsetRuleDeclaresPartialAbsence(rule) {
-  return Boolean(rule && rule.insufficient === 'partial_unpaid_absence')
-}
-
-function leaveOffsetPolicyDeclaresPartialAbsence(policy) {
-  const rules = Array.isArray(policy?.rules) ? policy.rules : []
-  return rules.some((rule) => leaveOffsetRuleDeclaresPartialAbsence(rule))
-}
+// #6009 rejection lives in lib/leave-offset-partial-absence-guard.cjs so final
+// approval and the approval-exempt create path share one helper.
 
 const MAKEUP_PUNCH_ALLOWED_ANOMALY_TYPES = Object.freeze([
   'missing_check_in',
@@ -38194,13 +38189,7 @@ module.exports = {
                 const rule = (offsetPolicy.rules || []).find((r) => r.requestLeaveType === leaveOffsetCode)
                 const pool = rule?.deductFrom?.[0]
                 if (rule && pool && pool !== 'unpaid') {
-                  if (leaveOffsetRuleDeclaresPartialAbsence(rule)) {
-                    throw new HttpError(
-                      422,
-                      LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE,
-                      LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_MESSAGE,
-                    )
-                  }
+                  rejectLeaveOffsetPartialAbsence(rule, HttpError)
                   await deductLeaveBalance(trx, {
                     orgId,
                     userId: requestRow.user_id,

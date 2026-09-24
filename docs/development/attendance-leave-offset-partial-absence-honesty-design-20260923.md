@@ -34,7 +34,7 @@
 | 管理端下拉 | 新规则只有「不足则阻断」。不提供可再次选中的「部分扣（余下计缺勤）」。卡片文案写明缺勤核算未上线。 |
 | 已存 `partial_unpaid_absence` | GET / 正常化 **保留** 该值（不在读路径悄悄改成 `block`）。编辑器显示为禁用项，并提示必须改成阻断后才能保存。客户端在保存前拒绝，不发 PUT。 |
 | `PUT /api/attendance/settings` | 请求体的 `rules` 里只要有该模式 → `422 LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE`，不写设置。只改 `enabled`、不带 `rules` 的局部 PUT 仍按原合并逻辑走，避免一张遗留规则卡住其它设置写入。 |
-| 最终批准 | 规则启用、命中、且扣减池不是 `unpaid` 时，若 `insufficient === 'partial_unpaid_absence'`，在 `deductLeaveBalance` **之前**抛上述 422。余额、申请状态、当日考勤记录都不变。池子够不够扣都拒绝，避免「够扣就当 block、不够才拒绝」的半合同。 |
+| 最终批准 | 规则启用、命中、且扣减池不是 `unpaid` 时，调用 `rejectLeaveOffsetPartialAbsence`（`plugins/plugin-attendance/lib/leave-offset-partial-absence-guard.cjs`）。这是与 #6005 免批创建共用的**唯一**拒绝函数：`insufficient === 'partial_unpaid_absence'` 时在 `deductLeaveBalance` **之前**抛上述 422。余额、申请状态、当日考勤记录都不变。池子够不够扣都拒绝，避免「够扣就当 block、不够才拒绝」的半合同。 |
 | `block` | 不变：不足则 `422 LEAVE_OFFSET_BALANCE_INSUFFICIENT` 并回滚；足够则全额扣。 |
 | `deductLeaveBalance` 的 `mode='partial'` | 引擎保留，请假抵扣策略不再调用。注释不再把 `shortfall` 说成已经落到账3 缺勤。 |
 
@@ -46,6 +46,7 @@
 - 不改 #5969 折天展示。
 - 不新增缺勤分钟列、不改 `loadApprovedMinutes` 的求和、不做账4 结算套件。
 - 不迁移已存 JSON。遗留值靠批准 fail-closed 挡住，直到管理员改成 `block` 再保存。
+- 免批创建（#6005）不在本 PR 实现。它必须调用同一个 `rejectLeaveOffsetPartialAbsence`，不能再传 `mode: 'partial'`。本 PR 把函数抽到上述 lib，终审和 PUT 用它；#6005 的免批事务测试打同一份实现。
 
 ## 4. 测试要抓住的降级
 

@@ -44,9 +44,23 @@ pnpm exec vitest run --config vitest.integration.config.ts \
 
 `node --check plugins/plugin-attendance/index.cjs` 通过。
 
+### 2026-09-24 复核（拒绝函数抽到共享 helper）
+
+批准路径改为调用 `rejectLeaveOffsetPartialAbsence`。错误码、文案、PUT 判断与原先相同，实现改到 `plugins/plugin-attendance/lib/leave-offset-partial-absence-guard.cjs`，以便 #6005 免批路径调用同一份。本环境没有 `DATABASE_URL`，上面两条集成没有重跑。单元与 W7 分类重跑：
+
+```bash
+node --check plugins/plugin-attendance/index.cjs
+node --check plugins/plugin-attendance/lib/leave-offset-partial-absence-guard.cjs
+pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
+  tests/unit/attendance-leave-offset-policy.test.ts \
+  tests/unit/attendance-w7-w6r5-preservation-guard.test.ts
+```
+
+结果：2 files, 19 tests passed。该 helper 文件记入 `ATTENDANCE_W7_NOT_CALCULATION_PATH_FILES_V1`（只在扣减前抛 422，不碰冻结工时上下文）。#6015 原先的 CI（含 `test (18.x)`、`test (20.x)`、coverage）是成功的；这次改动是为了和 #6005 共用拒绝，不是为了修一条失败的检查。
+
 ## 对抗（fail-closed）
 
-去掉批准前的 `leaveOffsetRuleDeclaresPartialAbsence` 分支后，上面的遗留批准会从 422 变成 200，并且不够扣时余额被部分扣掉、申请变成已批准（`loadApprovedMinutes` 仍按全额分钟投影）。集成测试会红。
+去掉批准前的 `rejectLeaveOffsetPartialAbsence` 调用后，上面的遗留批准会从 422 变成 200，并且不够扣时余额被部分扣掉、申请变成已批准（`loadApprovedMinutes` 仍按全额分钟投影）。集成测试会红。该函数与 #6005 免批路径是同一份 `plugins/plugin-attendance/lib/leave-offset-partial-absence-guard.cjs`。
 
 去掉 PUT 上的同一判断后，保存该模式会从 422 变成 200。往返测试会红。
 
@@ -60,6 +74,6 @@ pnpm exec vitest run --config vitest.integration.config.ts \
 
 ## 开放问题
 
-1. 已存的 `partial_unpaid_absence` 不会被迁移改写。管理员必须改成 `block` 再保存，在此之前命中该规则的批准保持 422。
+1. 已存的 `partial_unpaid_absence` 不会被迁移改写。管理员必须改成 `block` 再保存，在此之前命中该规则的批准保持 422。免批创建（#6005）必须调用同一个 helper，否则免批仍会部分扣并全额投影。
 2. `deductLeaveBalance` 的 `mode='partial'` 仍在引擎里，策略路径不再调用。账4 若要重新打开该模式，必须先定义缺勤分钟的落点，并让 `loadApprovedMinutes` 与之一致。
 3. 销假重算（#5982）和折天展示（#5969）本 PR 未改。
