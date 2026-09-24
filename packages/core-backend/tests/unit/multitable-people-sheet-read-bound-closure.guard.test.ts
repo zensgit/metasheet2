@@ -47,7 +47,10 @@
  * loader resolves the bound INSIDE itself (the route has no `sendForbidden`; its authority refusal is the
  * service's own `APPROVAL_RECORD_LINK_TARGET_UNAVAILABLE` return), so it is classified `boundInside` below
  * and the guard verifies - from the syntax tree, never from comments - that the loader CALLS the resolver
- * and does so after that refusal. Remove the call and the route reads as unbound again.
+ * (after that refusal) AND the three window helpers, every one of them IMPORTED from
+ * `people-sheet-read-bound` (a same-named local function does not count). Remove any of those calls and
+ * the route reads as unbound again. This is a structural backstop; the behavioural tests in
+ * `approval-record-link-options.test.ts` are what pin the actual window.
  *
  * The registration scan is AST-based and shared with the sheet-liveness closed world
  * (tests/utils/sheet-liveness-route-scan.ts): registrations, handler resolution (wrappers, consts,
@@ -483,21 +486,50 @@ const CROSS_FILE_ENUMERATORS: Record<string, {
   },
 }
 
+/** The helpers a `boundInside` loader must call besides the resolver (pre-clamp, post-truncate, page meta). */
+const BOUND_HELPERS = ['boundReadWindow', 'boundEnumeratedRows', 'boundPageMeta'] as const
+/** The one module those names (and the resolver) must be imported from. */
+const BOUND_MODULE_RE = /(^|\/)people-sheet-read-bound(\.ts)?$/
+
+/** Top-level-or-nested local declarations of `name` in the file (function / variable / class). */
+function declaresLocally(sf: ts.SourceFile, name: string): boolean {
+  let found = false
+  const visit = (n: ts.Node): void => {
+    if (found) return
+    if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name?.text === name) found = true
+    else if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) found = true
+    else ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  return found
+}
+
 /**
- * Pure verdict for a `boundInside` loader: the resolver is CALLED (a call expression, so prose in a
- * comment cannot satisfy it) and the call sits after the first reference to the gate identifier.
+ * Pure verdict for a `boundInside` loader, from the SYNTAX TREE only (comments cannot satisfy it):
+ *   - the resolver and every BOUND_HELPERS name is CALLED inside `fn`;
+ *   - each of those names is a named import from `people-sheet-read-bound` (same imported name), and
+ *     is not shadowed by a same-named local declaration;
+ *   - the resolver call sits after the first reference to the gate identifier.
  */
-function boundInsideVerdict(fn: ts.Node, gate: string): boolean {
+function boundInsideVerdict(fn: ts.Node, gate: string, sf: ts.SourceFile = fn.getSourceFile()): boolean {
   let gateAt = -1
-  let resolverAt = -1
+  const firstCall = new Map<string, number>()
   const visit = (n: ts.Node): void => {
     if (ts.isIdentifier(n) && n.text === gate && gateAt < 0) gateAt = n.getStart()
-    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === RESOLVER && resolverAt < 0) {
-      resolverAt = n.getStart()
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && !firstCall.has(n.expression.text)) {
+      firstCall.set(n.expression.text, n.getStart())
     }
     ts.forEachChild(n, visit)
   }
   visit(fn)
+  const imports = namedImports(sf)
+  for (const name of [RESOLVER, ...BOUND_HELPERS]) {
+    if (!firstCall.has(name)) return false
+    const imported = imports.get(name)
+    if (!imported || imported.imported !== name || !BOUND_MODULE_RE.test(imported.module)) return false
+    if (declaresLocally(sf, name)) return false
+  }
+  const resolverAt = firstCall.get(RESOLVER)!
   return gateAt >= 0 && resolverAt > gateAt
 }
 
@@ -729,19 +761,43 @@ describe('#5807 — every enumerating reader of a sheet is bound or named', () =
     expect(Object.keys(EXEMPT)).not.toContain('routes/approvals.ts GET /api/approvals/record-link-options')
   })
 
-  it('SELF-TEST — boundInsideVerdict is not a rubber stamp (resolver removed / moved before the gate / only in a comment)', () => {
-    const src = [
-      'async function ok() { if (!a) return { ...GATE_X }; const b = await resolvePeopleSheetReadBound(q, s) }',
-      'async function removed() { if (!a) return { ...GATE_X }; const b = null }',
-      'async function early() { const b = await resolvePeopleSheetReadBound(q, s); if (!a) return { ...GATE_X } }',
-      'async function prose() { if (!a) return { ...GATE_X } /* resolvePeopleSheetReadBound(q, s) */ }',
-    ].join(String.fromCharCode(10))
-    const sf = ts.createSourceFile('probe.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-    const verdict = (name: string) => boundInsideVerdict(findFunctionsNamed(sf, name)[0], 'GATE_X')
-    expect(verdict('ok')).toBe(true)
-    expect(verdict('removed')).toBe(false)
-    expect(verdict('early')).toBe(false)
-    expect(verdict('prose')).toBe(false)
+  it('SELF-TEST — boundInsideVerdict is not a rubber stamp (each missing piece / local fake / wrong order reds)', () => {
+    const NL = String.fromCharCode(10)
+    const IMPORT = "import { boundEnumeratedRows, boundPageMeta, boundReadWindow, resolvePeopleSheetReadBound } from '../multitable/people-sheet-read-bound'"
+    const GOOD_BODY = [
+      'if (!a) return { ...GATE_X }',
+      'const b = await resolvePeopleSheetReadBound(q, s)',
+      'const w = boundReadWindow(b, { limit, offset })',
+      'rows = boundEnumeratedRows(b, rows, offset)',
+      'return boundPageMeta(b, page)',
+    ]
+    const probe = (body: string[], opts: { imports?: string; extra?: string } = {}): boolean => {
+      const src = [opts.imports ?? IMPORT, opts.extra ?? '', `async function target() {${NL}${body.join(NL)}${NL}}`].join(NL)
+      const sf = ts.createSourceFile('probe.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+      return boundInsideVerdict(findFunctionsNamed(sf, 'target')[0], 'GATE_X', sf)
+    }
+    const without = (needle: string) => GOOD_BODY.filter((line) => !line.includes(needle))
+    expect(probe(GOOD_BODY)).toBe(true)
+    // resolver removed / before the gate / only in a comment
+    expect(probe(without('resolvePeopleSheetReadBound'))).toBe(false)
+    expect(probe([GOOD_BODY[1], GOOD_BODY[0], ...GOOD_BODY.slice(2)])).toBe(false)
+    expect(probe([...without('resolvePeopleSheetReadBound'), '/* resolvePeopleSheetReadBound(q, s) */'])).toBe(false)
+    // each window helper is required
+    expect(probe(without('boundReadWindow'))).toBe(false)
+    expect(probe(without('boundEnumeratedRows'))).toBe(false)
+    expect(probe(without('boundPageMeta'))).toBe(false)
+    // a hand-written local fake with the right name does not count, imported or not
+    const fake = 'async function resolvePeopleSheetReadBound(_q: unknown, _s: unknown) { return { bounded: false, maxItems: 50 } }'
+    expect(probe(GOOD_BODY, {
+      imports: "import { boundEnumeratedRows, boundPageMeta, boundReadWindow } from '../multitable/people-sheet-read-bound'",
+      extra: fake,
+    })).toBe(false)
+    expect(probe(GOOD_BODY, { extra: fake })).toBe(false)
+    // imported from the wrong module, or aliased from a different export
+    expect(probe(GOOD_BODY, { imports: IMPORT.replace('people-sheet-read-bound', 'fake-bound') })).toBe(false)
+    expect(probe(GOOD_BODY, {
+      imports: "import { boundEnumeratedRows, boundPageMeta, boundReadWindow, boundReadWindow as resolvePeopleSheetReadBound } from '../multitable/people-sheet-read-bound'",
+    })).toBe(false)
   })
 
   it('SELF-TEST — `GET /sheets/:sheetId/point-in-time` is bound (it was the first cut’s named GAP)', () => {
