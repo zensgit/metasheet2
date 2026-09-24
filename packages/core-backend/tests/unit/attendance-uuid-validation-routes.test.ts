@@ -574,6 +574,15 @@ function attendanceReadOnlyRbacQueryResult(sql: string, params: unknown[] = []) 
   return undefined
 }
 
+function expectActiveOrgMemberPredicate(sql: string) {
+  expect(sql).toContain('FROM user_orgs uo')
+  expect(sql).toContain('JOIN users u ON u.id = uo.user_id')
+  expect(sql).toContain('uo.org_id = $1')
+  expect(sql).toContain('uo.user_id = ANY($2::text[])')
+  expect(sql).toContain('uo.is_active = true')
+  expect(sql).toContain('u.is_active = true')
+}
+
 function groupManagerProbeResult(
   sql: string,
   params: unknown[] = [],
@@ -818,6 +827,7 @@ describe('attendance UUID route validation', () => {
     db.query.mockClear()
     db.query
       .mockResolvedValueOnce([{ id: groupId }])
+      .mockResolvedValueOnce([{ user_id: 'owner-user-1' }])
       .mockResolvedValueOnce([{ ...managerRow, role: 'sub_owner' }])
 
     const createRes = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
@@ -843,6 +853,7 @@ describe('attendance UUID route validation', () => {
       expect.stringContaining('attendance_group_managers'),
       ['default', groupId, 'owner-user-1', 'sub_owner', 'attendance-user-1'],
     )
+    expectActiveOrgMemberPredicate(db.query.mock.calls.map(call => String(call[0])).join('\n'))
 
     db.query.mockClear()
     db.query
@@ -911,6 +922,10 @@ describe('attendance UUID route validation', () => {
         expect(params).toEqual([groupId, 'default'])
         return [{ id: groupId }]
       }
+      if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+        expect(params).toEqual(['default', ['member-user-2']])
+        return [{ user_id: 'member-user-2' }]
+      }
       if (sql.includes('INSERT INTO attendance_group_members')) {
         expect(params).toEqual(['default', groupId, 'member-user-2'])
         return [memberRow]
@@ -930,6 +945,7 @@ describe('attendance UUID route validation', () => {
     const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
     expect(sql).toContain('FROM attendance_group_managers')
     expect(sql).toContain("role IN ('owner', 'sub_owner')")
+    expectActiveOrgMemberPredicate(sql)
     expect(eventEmit).toHaveBeenCalledWith('attendance.group.members.changed', {
       orgId: 'default',
       groupId,
@@ -937,6 +953,184 @@ describe('attendance UUID route validation', () => {
       action: 'add',
       scope: 'managed',
       count: 1,
+    })
+  })
+
+  // #6045 / #6047: inactive, other-org, and nonexistent ids are one predicate
+  // (no active user_orgs ∩ users row). The route must not distinguish them, and
+  // must not insert any roster row — including the valid ids in a mixed batch.
+  describe('attendance group roster active-org gate', () => {
+    const ownerUserId = 'owner-user-1'
+    const memberRow = {
+      id: scheduleGroupMemberId,
+      org_id: 'default',
+      group_id: attendanceGroupId,
+      user_id: 'member-user-2',
+      created_at: '2026-05-30T10:00:00.000Z',
+      updated_at: '2026-05-30T10:00:00.000Z',
+    }
+    const managerId = '00000000-0000-4000-8000-000000000201'
+    const createdAt = '2026-05-29T22:00:00.000Z'
+
+    function installOwnerMemberWriteMock(
+      db: { query: { mockImplementation: (impl: (sql: string, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[],
+    ) {
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const rbac = rbacQueryResult(sql, params, false)
+        if (rbac !== undefined) return rbac
+        const probe = groupManagerProbeResult(sql, params, {
+          userId: ownerUserId,
+          groupId: attendanceGroupId,
+          managed: true,
+        })
+        if (probe !== undefined) return probe
+        if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          return requested
+            .filter((userId) => activeUserIds.includes(userId))
+            .map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('INSERT INTO attendance_group_members')) {
+          return [{ ...memberRow, user_id: params[2] }]
+        }
+        throw new Error(`unexpected SQL: ${sql}`)
+      })
+    }
+
+    function installAdminManagerWriteMock(
+      db: { query: { mockImplementation: (impl: (sql: string, params?: unknown[]) => Promise<unknown>) => void } },
+      activeUserIds: string[],
+    ) {
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('SELECT id FROM attendance_groups WHERE id = $1')) return [{ id: attendanceGroupId }]
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1].map(String) : []
+          return requested
+            .filter((userId) => activeUserIds.includes(userId))
+            .map((user_id) => ({ user_id }))
+        }
+        if (sql.includes('INSERT INTO attendance_group_managers')) {
+          return [{
+            id: managerId,
+            org_id: 'default',
+            group_id: attendanceGroupId,
+            user_id: params[2],
+            role: params[3],
+            created_by: params[4],
+            created_at: createdAt,
+            updated_at: createdAt,
+          }]
+        }
+        throw new Error(`unexpected SQL: ${sql}`)
+      })
+    }
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('rejects an owner member add for %s without inserting', async (_label, userId) => {
+      const { db, eventEmit, routes } = await createHarness('false')
+      installOwnerMemberWriteMock(db, ['member-user-2'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+        params: { id: attendanceGroupId },
+        body: { userId },
+        user: { id: ownerUserId, orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toEqual({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: [{ userId }],
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+      expect(eventEmit).not.toHaveBeenCalled()
+      expect(db.transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it.each([
+      ['inactive user', 'inactive-user'],
+      ['user from another org', 'other-org-user'],
+      ['nonexistent user', 'missing-user'],
+    ])('rejects an admin manager add for %s without inserting', async (_label, userId) => {
+      const { db, routes } = await createHarness()
+      installAdminManagerWriteMock(db, ['owner-user-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+        params: { id: attendanceGroupId },
+        body: { userId, role: 'owner' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toEqual({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: [{ userId }],
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      expect(sql).not.toContain('INSERT INTO attendance_group_managers')
+      expect(db.transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects a mixed member batch before inserting the valid id', async () => {
+      const { db, eventEmit, routes } = await createHarness('false')
+      installOwnerMemberWriteMock(db, ['member-user-2'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/members', {
+        params: { id: attendanceGroupId },
+        body: { userIds: ['member-user-2', 'not-in-this-org'] },
+        user: { id: ownerUserId, orgId: 'default' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toEqual({
+        ok: false,
+        error: {
+          code: 'USER_NOT_IN_ORG',
+          message: 'Target user is not an active member of this org',
+          details: [{ userId: 'not-in-this-org' }],
+        },
+      })
+      const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
+      expectActiveOrgMemberPredicate(sql)
+      const membershipCall = db.query.mock.calls.find(([text]) => String(text).includes('FROM user_orgs uo'))
+      expect(membershipCall?.[1]).toEqual(['default', ['member-user-2', 'not-in-this-org']])
+      expect(sql).not.toContain('INSERT INTO attendance_group_members')
+      expect(eventEmit).not.toHaveBeenCalled()
+    })
+
+    it('lets an admin add an active org member as a group manager', async () => {
+      const { db, routes } = await createHarness()
+      installAdminManagerWriteMock(db, ['owner-user-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/groups/:id/managers', {
+        params: { id: attendanceGroupId },
+        body: { userId: 'owner-user-1', role: 'owner' },
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.body).toMatchObject({
+        ok: true,
+        data: { userId: 'owner-user-1', role: 'owner', groupId: attendanceGroupId },
+      })
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO attendance_group_managers'),
+        ['default', attendanceGroupId, 'owner-user-1', 'owner', 'attendance-user-1'],
+      )
+      expectActiveOrgMemberPredicate(db.query.mock.calls.map(([text]) => String(text)).join('\n'))
     })
   })
 
@@ -4507,6 +4701,10 @@ describe('attendance UUID route validation', () => {
         if (sql.includes('SELECT *') && sql.includes('FROM attendance_groups')) return [attendanceGroupRow()]
         if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_members')) return [{ total: 0 }]
         if (sql.includes('SELECT * FROM attendance_group_members')) return []
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          const requested = Array.isArray(params[1]) ? params[1] : []
+          return requested.map((userId) => ({ user_id: userId }))
+        }
         if (sql.includes('INSERT INTO attendance_group_members')) return [memberRow]
         if (sql.includes('DELETE FROM attendance_group_members')) return [{ id: scheduleGroupMemberId }]
         if (sql.includes('COUNT(*)::int AS total') && sql.includes('attendance_group_managers')) return [{ total: 0 }]

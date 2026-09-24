@@ -19865,6 +19865,45 @@ async function runAnnualLeaveAccrualScheduledTriggerOnce(db, logger = console, o
   return { ran: true, orgs }
 }
 
+// Roster-write gate (#6045 group members, #6047 group managers). Same active-org predicate as
+// applyAnnualLeaveManualAdjustment below: user_orgs.is_active AND users.is_active in the actor org.
+// Inactive membership, a deactivated user, another org, and a nonexistent id all return no row and
+// fail closed as 404 USER_NOT_IN_ORG. Callers must run this before any INSERT in the same
+// transaction: a rejection throws and writes nothing, including earlier ids in a batch.
+const ACTIVE_ORG_MEMBER_USER_IDS_SQL = `SELECT uo.user_id
+    FROM user_orgs uo
+    JOIN users u ON u.id = uo.user_id
+   WHERE uo.org_id = $1
+     AND uo.user_id = ANY($2::text[])
+     AND uo.is_active = true
+     AND u.is_active = true`
+
+async function assertActiveOrgMemberUserIds(client, orgId, userIds) {
+  const requested = []
+  const seen = new Set()
+  for (const raw of userIds) {
+    const userId = String(raw ?? '').trim()
+    if (!userId || seen.has(userId)) continue
+    seen.add(userId)
+    requested.push(userId)
+  }
+  if (!requested.length) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'userId is required')
+  }
+  const rows = await client.query(ACTIVE_ORG_MEMBER_USER_IDS_SQL, [orgId, requested])
+  const active = new Set(rows.map((row) => String(row.user_id)))
+  const rejected = requested.filter((userId) => !active.has(userId))
+  if (rejected.length) {
+    throw new HttpError(
+      404,
+      'USER_NOT_IN_ORG',
+      'Target user is not an active member of this org',
+      rejected.map((userId) => ({ userId })),
+    )
+  }
+  return requested
+}
+
 // 年假/法定假 L2c: apply an admin manual ± to a user's annual balance via LOT mutation (never event-only).
 // Idempotent on (org_id, source_key) — a replay re-applies nothing. positive → a new annual_manual_adjustment
 // lot + grant event; negative → FIFO-deduct active annual lots + deduct event(s) (reusing deductLeaveBalance);
@@ -45391,7 +45430,10 @@ module.exports = {
         try {
           const created = []
           await db.transaction(async (trx) => {
-            for (const userId of new Set(userIds)) {
+            // All-or-nothing: reject the whole batch before any INSERT when any id is not an
+            // active member of this org. A throw rolls the transaction back.
+            const acceptedUserIds = await assertActiveOrgMemberUserIds(trx, orgId, userIds)
+            for (const userId of acceptedUserIds) {
               const rows = await trx.query(
                 `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
                  VALUES ($1, $2, $3, now(), now())
@@ -45412,6 +45454,7 @@ module.exports = {
           })
           res.json({ ok: true, data: { items: created } })
         } catch (error) {
+          if (error instanceof HttpError) throw error
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -45553,16 +45596,21 @@ module.exports = {
         try {
           const groupExists = await assertAttendanceGroupInActorOrg(db, res, { groupId, orgId })
           if (!groupExists) return
-          const rows = await db.query(
-            `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role, created_by, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, now(), now())
-             ON CONFLICT (org_id, group_id, user_id, role)
-             DO UPDATE SET updated_at = attendance_group_managers.updated_at
-             RETURNING *`,
-            [orgId, groupId, parsed.data.userId.trim(), role, actorAccess.userId]
-          )
+          const userId = parsed.data.userId.trim()
+          const rows = await db.transaction(async (trx) => {
+            await assertActiveOrgMemberUserIds(trx, orgId, [userId])
+            return trx.query(
+              `INSERT INTO attendance_group_managers (org_id, group_id, user_id, role, created_by, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, now(), now())
+               ON CONFLICT (org_id, group_id, user_id, role)
+               DO UPDATE SET updated_at = attendance_group_managers.updated_at
+               RETURNING *`,
+              [orgId, groupId, userId, role, actorAccess.userId]
+            )
+          })
           res.json({ ok: true, data: mapAttendanceGroupManagerRow(rows[0]) })
         } catch (error) {
+          if (error instanceof HttpError) throw error
           if (error?.code === '23503') {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
             return
