@@ -5013,3 +5013,119 @@ git merge-tree --write-tree <C-1 head> $(git rev-parse origin/feat/approval-canc
 - **`R7-M2` / `R7-M3` / `M-A` / `M-B` / `M-C` / `M-F`** —— 他轮实跑,本轮 diff 未触碰其判别点,未复跑。
 - **CI** —— 本分支零 PR,本 head 上 CI 从未跑过;§O8.3 全部是本地实跑。
 
+
+---
+
+# Part O9 — r9:rebase 到窗口基线 + reading-a 并入 + 门审第 5 轮的三条处置(2026-09-25)
+
+**状态:候选(CANDIDATE)。私有分支 `feat/approval-cancel-round-phase1-r9`,零 PR;未合并、未 undraft、
+未 ratify。** 本 Part 只记录本 head 上实跑的读数;owner 本窗口点名的裁决(§J-13 读法 (a) + 根因 (c)、
+第 5 轮 P2-1 = 跳过节点不计入)以 `reviews/goal-72h-autonomous-window-20260925.md` §0 为准,本文不复述为「已 ratify」。
+
+> **本文件的两块 `N` 编号(写在明处)**:上面 `## N1. 条件① …` ~ `## N5. 纪律与清理` 是 r8 分支(休眠合入
+> 三条件)的记录;`# Part N — §2-G3 第三句 候选读法 (a) …` 及其 `## N1. 跑了什么,数字` ~ `## N6.` 是 reading-a
+> 分支的记录。两支在 `b8b71539a6…` 上分叉、各自追加,r9 把两支的提交按顺序重放到窗口基线上,两块**原样并列、
+> 编号不改**,以免门审报告里对 `§N1-b` / `§N4`(r8)与 `§N6` / `§O6.2`(reading-a)的引用失效。
+
+## O9.0 取证基线
+
+| 项 | 值 |
+|---|---|
+| 窗口基线(`origin/main` 于窗口开始) | `e046a21c0a0110fbe22ca765852f1e053d90c0cb` |
+| r8 源头(只读) | `origin/feat/approval-cancel-round-phase1-r8` = `0819a89d039bfc00fae8ba71c4760ea9342bd19b`;相对其与 main 的 merge-base `868c8d2b2642…` 共 **74** 个提交,`git cherry-pick -x` 逐个重放,**零冲突**;重放后树 SHA `1f367d144e03…` 与 `git merge-tree --write-tree e046a21c0 <r8>` 的树 **逐字相同**(rebase 结果 = 三方合并结果) |
+| reading-a 源头(只读) | `origin/feat/approval-cancel-round-phase1-g3-reading-a` = `86c04ee68b8bed5916c827533241534e28c7027e`;相对 `b8b71539a6…` 共 **13** 个提交,`cherry-pick -x` 逐个重放;**唯一冲突**在本文件(两支各自在文件末尾追加的段落),按「两段原样并列(r8 段在前、reading-a 段在后)」解;`ApprovalProductService.ts` / creation 件 / 设计 MD 自动合并 |
+| 重放后 `ApprovalProductService.ts` 相对 reading-a 交付 head | 只差 r8 那一处注释(`git diff <reading-a> HEAD -- <file>` = 6 插 / 1 删,全部是 `Lock:143` 注释指向仓内设计 MD);creation 件**逐字相同** |
+| r8 ∪ reading-a 的 head(改代码之前) | `b16ec9b72e78f0ee71131ed046271d4e9cf49986`(87 个提交在基线之上) |
+| 一次性库 | `ms2_laneA_r9_20260925`(`createdb -O ms2testbed`,owner 非超级);`MIGRATION_EXCLUDE` 逐字取自 `plugin-tests.yml` 的 `Run DB migrations` 步骤;迁移 **EXIT 0 / 412 executed / 400 BASE TABLE**;`DATABASE_URL` / `ATTENDANCE_TEST_DATABASE_URL` / `SMOKE_DATABASE_URL` / `E2E_S6A_PROVISIONING_DB_URL` / `E2E_S6A_RUNTIME_DB_URL`(按 `.github/workflows/*.yml` + `package.json` 普查)**全部**指向它;每次跑前 `psql -Atc "select current_database()"` 断言 |
+| 工作树 | `…/scratchpad/laneA-r9`(新分支,`node_modules` 软链自 canonical);结束 `git worktree remove` |
+| 本轮改 `src/` 的提交(**本 Part 所有读数点名的对象**) | **`3c4d4036816266b0211becae733a521ed34fc92b`**(唯一一次改 `src/` + creation 件;`ApprovalProductService.ts` 在该提交上的 blob sha256 = `33ffbf22391a716c47e84d31a196e4bbb70b666477a1672514b21f24a83d9a43`)。本文件与两份 MD 的 docs-only 提交在它之后、不碰 `src/`;§O9.5 的 token 表在该提交上 `git grep -c` 逐字复核 |
+
+## O9.1 修了什么(逐条对门审第 5 轮)
+
+| 门审条目 | 处置 | 在哪 |
+|---|---|---|
+| **P1**(合取 (2) 仍是 capability:多成员角色节点上第三人一条 legacy 行可多拿一席) | **r9 休眠,不在本分支修**(owner 裁根因 (c) = RC 候选:legacy 路由自写节点归属 + 席位闸)。按门审 §1.6 (a) 的要求钉一对腿:负控 **`P29(a)`** 钉今天的答案(`[A, D, E]`,不阻断),正控 **`P28(a)`** HONEST6 `[A, E]` 做门槛参照物;RC 栈上 `P29(a)` 改写成关闭后的答案 | creation 件;设计 MD §3.5.5 新行 |
+| **P2-1**(合取 (3) 把被跳过节点判成不可还原;注释写反) | **修**(owner 裁:跳过节点不计入):读 `action='jump'` 且 `adminJump` / `timeoutEffect` 的审计行的 `oldAssignees[].nodeKey` 为 `nodesSkippedByJump`,从 `unsettledDelegatedSeatNodes` 里剔除;注释改写(admin jump 从「弱形式容得下」挪到「弱形式也判死 ⇒ 按裁决豁免」,并写明 `sign`+`skipped` 行**不是**跳过证据、为什么);腿 **`P30(a)`**(管理员跳过)/ **`P32(a)`**(超时跳过)/ **`P31(a)`**(无跳过孪生) | `ApprovalProductService.ts`;设计 MD §3.5.7 |
+| **P2-2**(`N20(a)` 的隔离被节点重入打掉;§3.5.6 第三行 NOT CONSTRUCTED) | **端到端构造**(shipped `action:'return'`,不是夹具级 INSERT):**`N21(a)`** = 在**已重入**节点上的容量隔离见证(两 epoch 都由 D 按 + 多一条 legacy 行 ⇒ 3 行 > 2 席 ⇒ 阻断);**`P33(a)`** = REENTRY2 今天的答案钉成数据(`[A, D, E]`,登记残留,随 RC 关闭);**`P34(a)`** = 诚实孪生 | creation 件;设计 MD §3.5.6 第三行改 CONSTRUCTED |
+| **P3**(§O7.4 token 表在本 head 已为假) | §O9.5 按本 head **现算**,含新锚点 `delegated_seat_nodes` / `nodesSkippedByJump`;§O7.4 那句「对交付 head 同样成立」按下面的求值标记读 | 本 Part |
+
+> **§O7.4 求值标记(P3)**:§O7.4 的数字点名的对象是 `f05f7f6c03…`;其后 `a85f33d194…`(reading-a)与本轮的代码提交
+> **都改了 `src/`**,所以「本文件的 docs-only 提交在它之后,不碰 `src/`,所以上表对交付 head 同样成立」这句
+> **对 `a85f33d194…` 之后的任何 head 不成立**。§O6.2 第 1 条的正向判据改指 **§O9.5**;§O6.2 第 3 条「锚点失效时按当时 head 现算」照旧 OPERATIVE。
+
+## O9.2 新腿(八条)与判别力
+
+| 腿 | 形状 | 本 head 读数 | 修复前实现(reading-a 交付的 `ApprovalProductService.ts`,sha256 `dd8ac540…` 整份覆盖回去) |
+|---|---|---|---|
+| `P28(a)` HONEST6 | E 按角色节点、D 诚实结 A 的节点、E 结第三节点 | `[A, E]` 两席 | 绿(同) |
+| `P29(a)` **休眠钉** | 同上,第三节点由 D 走 legacy 报角色节点 | 不阻断,`[A, D, E]` | 绿(同 —— 这条洞第 4 轮就在) |
+| `P30(a)` ADMINJUMP | D 按角色节点、管理员 `POST /:id/jump` 跳过 A 的节点、E 结第三节点 | 不阻断,`[D, E]` | **红**(409 `seat_unresolvable`) |
+| `P31(a)` ADMINJUMP-CF | 同上,无跳过(D 以 A 的代理结掉) | `[A, D, E]` | 绿 |
+| `P32(a)` TIMEOUTJUMP | A 的节点带 `timeout.effect='jump'`,`applyNodeTimeoutEffect` 跳过 | 不阻断,`[D, E]` | **红** |
+| `P34(a)` 重入诚实孪生 | D 按 → D `return` → D 再按 → D 结 A 的节点 → E 结第三节点 | `[A, D, E]`;角色节点 4 行席位 | 绿 |
+| `N21(a)` REENTRY(**容量隔离,已重入节点**) | 同上,第三节点由 D 走 legacy 报角色节点 | **阻断**,`ineligibleCount: 3` | 绿(同 —— 容量合取本轮未变) |
+| `P33(a)` REENTRY2 **残留钉** | D 按 → D `return` → **E** 再按 → D 结 A 的节点 → D 走 legacy 报角色节点 | 不阻断,`[A, D, E]` | 绿(同) |
+
+`-t 'P2[89]\(a\)|P3[0-4]\(a\)|N21\(a\)'` ⇒ **8 passed | 56 skipped (64)**(选中数非零)。
+修复前实现整件:**2 failed / 62 passed**,红的恰是 `P30(a)` / `P32(a)` ⇒ 红的是修法,不是夹具。
+
+每条腿的**前置形状**在夹具里断言(不是假设):A 的节点上活跃的正是 D 的被委托席位行;跳过腿上恰一条 `jump`
+审计行、`adminJump` / `timeoutEffect` 为 `'true'`、`oldAssignees` 恰为 `[{D, approval_a}]`、A 的节点 approve 行数 0;
+重入腿上角色节点 4 行席位、D 够得着 2 行;legacy 腿上 D 在角色节点的行数与预期相符;整单 `approved`。
+
+## O9.3 套件(全部在一次性库上,`EXPECT_DB=1`)
+
+| 跑 | 结果 |
+|---|---|
+| 基线(r8 ∪ reading-a,改代码前,head `b16ec9b72e…`)八件 | **8 files / 105 passed / 0 failed** |
+| 交付(改代码后,`3c4d403681…` 的树)八件 + 两个邻居(`approval-delegation-seam` / `approval-revoke-terminal-guard`) | **10 files / 120 passed / 0 failed**(八件 113 = 105 + 8 新腿;邻居 7) |
+| 创建件单跑(mutation 基线) | **64 passed**(56 + 8) |
+| 四件单元守卫(`dormancy-unreachable` / `ci-wiring` / `plugin-mirror-constant` / `approval-ci-coverage-enumeration`,`CI=true`) | **4 files / 385 passed** |
+| `tsc --noEmit -p packages/core-backend/tsconfig.json` | **EXIT 0 / 0 行**(重放后、改代码后各一次) |
+| core-backend 全量 `CI=true` | **NOT RUN on r9 alone** —— 在栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9` 上跑(该分支的验证 MD 节) |
+
+## O9.4 Mutation 网格(五格 + 一次旧实现互换;`cp` 备份 → 改 → 跑整件 → `cp` 还原 → `cmp`;每格先断言锚点恰 1 次)
+
+被测文件 sha256(改动后、每格还原后复核)= `33ffbf22391a716c47e84d31a196e4bbb70b666477a1672514b21f24a83d9a43`。
+
+| # | 改动(`ApprovalProductService.ts`) | `diff` 行 | 实测红(64 腿整件) | 判定 |
+|---|---|---|---|---|
+| **M-x1** | 跳过豁免去掉(`!nodesSkippedByJump.has(nodeKey)` → `true`) | 2 | **2 红**:`P30(a)` `P32(a)` | 豁免承重;无跳过孪生 `P31(a)` 与其余 61 腿不动 |
+| **M-x2** | 所有被委托节点一律豁免(→ `false`,合取 (3) 空转) | 2 | **1 红**:`N19(a)` | 豁免钉在**跳过证据**上,不是「无决定即豁免」 |
+| **M-viii′** | 容量合取恒真(`+ 99`) | 2 | **2 红**:`N20(a)` `N21(a)` | `N21(a)` 在**已重入**节点上隔离成立;`P33(a)` 本来就放行,不变 |
+| **M-ix** | 结算合取恒真(`>= 0`) | 2 | **1 红**:`N19(a)` | 与 §O8.4 同读数;`P30(a)`/`P32(a)` 不动 |
+| **M-x3** | 跳过证据只认 `adminJump`(去掉 `timeoutEffect` 那半边) | 2 | **1 红**:`P32(a)` | 超时那半边独立承重 |
+| 旧实现互换(非 mutation) | 整份换成 reading-a 交付文件(`dd8ac540…`) | — | **2 红**:`P30(a)` `P32(a)` | 与 M-x1 同形 |
+
+`P29(a)` / `P33(a)` 是**钉今天答案**的腿:本分支上没有一条 mutation 能让它们红(它们钉的洞不在本分支修),
+它们的判别力在 RC 栈上给出(那里它们被改写成关闭后的答案,并对「RC 席位闸去掉」的 mutation 红)。
+
+## O9.5 token 普查(**本 head 现算**,取代 §O7.4 的表;命令 `git grep -c -F '<token>' <code commit> -- packages/core-backend/src/services/`)
+
+| token | 文件 / 次 |
+|---|---|
+| `node_actor_user_seats` | 1 / 4 |
+| `node_actor_role_seat_count` | 1 / 6 |
+| `node_seat_row_count` | 1 / 1(只剩注释,全仓非 docs 残留 = 1 处注释,代码 0) |
+| `instance_delegators` | 1 / 5 |
+| `node_non_user_seat_count` | 1 / 1(注释) |
+| `delegated_seat_nodes` | 1 / 5 |
+| **`nodesSkippedByJump`(r9 新锚点)** | 1 / 5 |
+| `nodesWithDecisionRecord` | 1 / 4 |
+| `SELECT DISTINCT actor_id FROM approval_records` | 0(反向判据,仍为 0) |
+
+**C-2 / 投影候选的合并事实(信息性,不是本轮判据)**:两支仍基于 `b8b71539a6…`,与 r9 的 merge-base 退回
+`868c8d2b26…`,`git merge-tree --write-tree HEAD <phase2 6a40f0121a…>` / `<…-history-projection 65c1d2cdb2…>`
+**都有冲突**(`plugin-tests.yml` / 两份 MD / 种子迁移 / 种子模块……)。这是 L-D(C-2 重放到 r9)的对象,
+不是 r9 的缺陷;§O8.5b 的「三方合并干净」对**新基线**不再成立,按 §O6.2 第 3 条现算。
+
+## O9.6 本轮**没有**验的(如实列)
+
+- core-backend 全量 `CI=true`(r9 单独):NOT RUN,在栈顶跑。
+- 生产语料普查(跳过节点 × 委托 × 多 role id)—— 需生产库,不在授权内。
+- `sign` + `skipped` 行的端到端夹具(需要带 `mergeAdjacentApprover` 策略 + 跨分支冲突的模板):按源码读
+  (`evaluateSkippedCrossBranchAdjacent` 只返回事件、不把 assignment 判成已决定),**未构造**;它被排除在跳过证据外
+  的理由是机制而不是实测。
+- G3 half B、`R7-M2` / `R7-M3` / `M-A` / `M-B` / `M-C` / `M-F`、§O8.4 的 M-i…M-vii —— 他轮实测,本轮 diff 未触碰其判别点,未复跑。
+- CI —— 零 PR,本 head 上 CI 从未跑过;本 Part 全部本地实跑。
+- 逐提交 rebase 到 C-2 / 投影候选 —— L-D 的对象。

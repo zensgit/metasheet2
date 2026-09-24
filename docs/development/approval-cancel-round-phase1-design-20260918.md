@@ -855,6 +855,8 @@ seen as a re-opening of G6-1 rather than a new mystery.
 |---|---|---|
 | 结算合取的**弱**形式:第三人一条 legacy 行即可点亮节点 | **`P27(a)`**(新) | 不阻断,`seats=[D, E]`,**A 丢**。根治 = (c) |
 | 被委托人在自己**真有**席位的兄弟节点走 legacy、把 `nodeKey` 报成被委托节点 | `P21(a)`(既有) | 不阻断,两行同指 A ⇒ 会签 2 → 1 |
+| **门审第 5 轮 P1 点名的形状**(r9,2026-09-25):角色节点由第三人决定、被委托人是该节点某条 role id 的真成员、诚实结掉了被委托节点,再在第三个节点走 legacy 报角色节点 | **`P29(a)`**(新;诚实孪生 `P28(a)` = `[A, E]`) | 不阻断,`seats=[A, D, E]`(多一席)。**r9 休眠**:合取 (2) 的两个输入都无法把一条 legacy 行与一条决定区分开;该路径随 RC(根因 (c):legacy 路由自写节点归属 + 席位闸)落地关闭,RC 栈上本腿改写成关闭后的答案 |
+| **节点重入后的容量富余**(r9,2026-09-25;§3.5.6 第三行由 NOT CONSTRUCTED 改为 CONSTRUCTED):角色节点被端到端重入一次、epoch 2 由别人按,被委托人在角色节点只有 1 条诚实行、够得着 2 席,再走 legacy 报角色节点 | **`P33(a)`**(新;隔离见证改由 **`N21(a)`** 在**已重入**节点上给出,诚实孪生 `P34(a)`) | 不阻断,`seats=[A, D, E]`(与诚实答案相同,只因 `approverIds` 去重)。随 RC 关闭 |
 | 成员身份只看**当前**,不看决定时刻 | `N16(a)`(既有) | 阻断(fail-closed);「当时在角色里、现在不在」与「从来不在」在库里同形 |
 | `source_queue` 席位无法满足成员身份 | **无腿**(登记,见 `ApprovalProductService.ts` 的 REGISTERED GAP) | 阻断;widening 到 permissions 属 owner |
 
@@ -868,7 +870,37 @@ seen as a re-opening of G6-1 rather than a new mystery.
 |---|---|---|
 | **transfer**(`dispatchAction` 的 `transfer` 分支) | **否 —— 结构上不可能** | 它插的行来自 `ApprovalGraphExecutor.buildTransferAssignments()`,返回值里 `assignmentType: 'user'` 是**字面量**(`ApprovalGraphExecutor.ts:1219`);合取 (2) 只数 `assignment_type <> 'user'` 的行 ⇒ transfer 永远进不了这个计数 |
 | **add_sign**(加签) | **否 —— 结构上不可能** | 同理:`buildAddSignAssignments()` 的返回类型就是 `assignmentType: 'user'`(`ApprovalGraphExecutor.ts:1248` 的类型 + `:1256` 的 `'user' as const`) |
-| **节点重入**(`return` 分支 / `adminJump` / 超时跳转) | **是,仍然成立** | 重入走 `insertAssignments(client, id, resolution.assignments, …)`,而 `resolution.assignments` 对**角色节点**会再落一行 role 席位 ⇒ 同一个成员的 `actorSeatsAtNode` 随重入次数增长。**本轮 NOT CONSTRUCTED,理由**:端到端重入夹具本文件没有,造一条需要 return/adminJump 的完整走位(`N17(a)` 走的是**夹具级 INSERT**,不是端到端)。**风险方向**:重入 N 次的角色节点上,一个成员可以花掉 N 格容量,其中 N−1 格可以是伪造行 —— 前提是他的被委托席位都已结算(否则合取 (3) 先判死)。**登记为 OPEN,归 (c) 根治** |
+| **节点重入**(`return` 分支 / `adminJump` / 超时跳转) | **是,仍然成立 —— r9 已端到端构造(2026-09-25)** | 重入走 `insertAssignments(client, id, resolution.assignments, …)`,而 `resolution.assignments` 对**角色节点**会再落一行 role 席位 ⇒ 同一个成员的 `actorSeatsAtNode` 随重入次数增长。**CONSTRUCTED(r9)**:`roleNodeDelegatedThirdWalk` 走 shipped 的 `action:'return'` 退回角色节点再按一次(角色节点 2 → 4 行席位,被委托人够得着的 1 → 2)。实测三格:`P34(a)` 两个 epoch 都由 D 按 + 诚实结尾 ⇒ `[A, D, E]`;**`N21(a)`** 两个 epoch 都由 D 按 + 多一条 legacy 行 ⇒ 3 行 > 2 席 ⇒ **阻断**(占位容量合取在已重入节点上的**隔离见证**,只有 M-viii′ 让它红);**`P33(a)`** epoch 2 由 E 按 + 多一条 legacy 行 ⇒ 2 行 ≤ 2 席 ⇒ **放行**,`[A, D, E]`(登记残留,见 §3.5.5)。**风险方向不变**:重入 N 次、别人按了 k 个 epoch,则 k 格容量可以被 legacy 行花掉;仍**归 (c) 根治**(RC 栈上 legacy 写入被席位闸拒绝,该行根本写不出来) |
+
+#### 3.5.7 被跳过的节点不计入结算合取(r9,2026-09-25;门审第 5 轮 P2-1,owner 已裁)
+
+**缺陷(实测,零伪造)**:合取 (3) 把「被委托席位所在节点没有任何 `approve` 记录」判成不可还原。
+被管理员 `POST /:id/jump` 或节点超时效果(`timeout.effect = 'jump'`)**跳过**的节点恰好没有任何
+`approve` 记录,而 `delegated_seat_nodes` 又不看 `is_active`,于是一张诚实单据(D 按角色节点 →
+管理员跳过 A 的节点 → E 结第三个节点)在入口 head 上可开撤销轮(`[D, E]`)、在 reading-a 交付 head 上
+判 409。源码注释还把 admin jump 写在「弱形式容得下」的例子里 —— 注释断言与实测相反。
+
+**owner 裁决(2026-09-25)**:「管理员跳过(及超时跳过)的节点不计入判定,诚实单据仍可撤销。」
+
+**落地**(`ApprovalProductService.ts`,非 user 席位臂之前的一次额外查询):
+- 读**服务端写下的跳过证据**:`approval_records` 里 `action = 'jump'` 且 `metadata.adminJump = true`
+  (管理员路由)或 `metadata.timeoutEffect = true`(超时扫描器)的行,取其 `metadata.oldAssignees[].nodeKey`
+  —— 那是跳转当刻仍活跃、被跳转停用而**没有决定**的席位所在节点(`assignmentRowsForAudit` 写的)。
+  这个集合是跳转发生时由服务端落库的,不能从请求体里说出来;
+- `unsettledDelegatedSeatNodes` 的过滤多一项 `!nodesSkippedByJump.has(nodeKey)`;其余三条合取逐字不变。
+- **故意不算作跳过证据**的两样:① `approval_assignments.is_active = FALSE` 且无决定 —— `transfer` /
+  `return` 也会留下这种行,而那些节点最终由别人决定(有 `approve` 行)或被跳过(有 `jump` 行),
+  只看 `jump` 行才不会把「换人再决定」误判成「跳过」;② `insertAutoApprovalEvents` 写的
+  `action = 'sign'` + `metadata.skipped = true` 行 —— 它记录的是一次被**跳过的自动审批**
+  (`evaluateSkippedCrossBranchAdjacent`),节点本身留给人继续决定,不是被跳过的节点。门审 §2.1 把这
+  一族称作「超时跳过同族」;本实现按其机制归类,真正会留下未决节点的超时效果只有 `jump`。
+
+**腿**:`P30(a)`(管理员跳过 ⇒ 不阻断、`[D, E]`)、`P32(a)`(超时跳过 ⇒ 同)、`P31(a)`(无跳过孪生 ⇒
+`[A, D, E]`)。`N19(a)` 仍阻断(无决定**且**无跳过)。判别力见验证 MD §O9(M-x1 只红 `P30(a)`/`P32(a)`;
+M-x2 让 `N19(a)` 红 ⇒ 豁免钉在跳过证据上,不是「无决定即豁免」;M-x3 只红 `P32(a)` ⇒ 超时那半边独立承重)。
+
+**未变**:`A` 在被跳过的节点上**不**被还原 —— 那个节点没有任何人决定,没有可还原的席位;裁决说的是
+「不计入判定」,不是「视同 A 已决定」。
 
 ## 4. Outlet guards — the lock's §14.3 table, re-derived against this tree
 
