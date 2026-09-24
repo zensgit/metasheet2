@@ -1,26 +1,36 @@
 # Archive Attachment Restore
 
-Status: OWNER-CONFIRMED bounded capability; synthetic acceptance VERIFIED; Draft/HOLD, not merged or enabled.
+Status: MERGED ON MAIN; owner-confirmed bounded capability with synthetic
+acceptance verified. Not enabled or real-tenant accepted.
 
-## Bounded Delivery Gate (2026-09-23)
+## Merged-main Delivery Gate (2026-09-23)
 
-PR #5882 at `9f5c0c6805174a24a97ae0095d8082fffbb4fb87` is OPEN/Draft,
-based on unchanged main `cd42eaf7455f03dd99021a02c47c42f1f3db6484`.
-Its exact-head checks are terminal: 34 SUCCESS, 1 expected Strict E2E SKIPPED,
-0 failure and 0 pending. The worktree is clean and synchronized with the remote
-branch. This documentation successor changes no runtime or test code from the
-locally accepted `3d01f8209897d07eebe0880c846be9d061fbb9db` product
-checkpoint; the subsequent commits through `9f5c0c6805` change only reports.
+PR #5882 merged at `2026-09-23T14:39:49Z` into main commit
+`261835ad2dea6331e7880893e781b7f7c3439588` (tree
+`94cd151e67dea64aeda8cbe57d34a866c1b91250`). Its ordered parents are
+main `cd42eaf7455f03dd99021a02c47c42f1f3db6484` and the owner-authorized
+PR head `bea1bdcef048932ce2bcdfe1f79c6ae349b77352`. The merge-triggered
+push matrix is terminal: 17 successful workflows, with 22 successful and four
+conditionally skipped jobs, zero failure or pending. Node18, Node20, Web Tests,
+the Time Machine D2 archive real-DB gate and isolated manual checkpoint
+acceptance all succeeded. The PR-only coverage job and three publication/deploy
+jobs skipped; image registry login and image publication steps also skipped.
+Separately scheduled health probes are not counted as merge-triggered CI.
 
-The bounded contract is ready for a separate owner Ready/merge decision: existing
-permissions and detached-ID lifecycle are confirmed below; synthetic owned-DB
-and authenticated desktop/mobile Workbench acceptance covers retained-table,
+The product checkpoint `3d01f8209897d07eebe0880c846be9d061fbb9db` and
+the merged PR head differ only in this design lock and its paired verification
+report. The merge adds no runtime/test delta beyond that locally accepted
+checkpoint.
+
+The bounded contract is merged under a separate owner Ready/merge decision.
+Existing permissions and detached-ID lifecycle are confirmed below; synthetic
+owned-DB and authenticated desktop/mobile Workbench acceptance covers retained-table,
 row, column, scalar and synchronous attachment restoration. It does not certify
 production enablement, customer storage, hostile NAS durability, async attachment
 restoration, hard-deleted whole-table resurrection or real-tenant UAT. The earlier
 browser `API_REQUEST_FAILED` is still unattributed, not fixed by later passes.
-Historical OPEN gate rows later in this file are checkpoint-scoped; the paired
-verification report's current gate disposition governs this candidate.
+Historical OPEN/Draft gate rows later in this file are checkpoint-scoped; the paired
+verification report's merged-main gate governs current delivery status.
 
 ## Owner Permission and Lifecycle Disposition (2026-09-23)
 
