@@ -4,10 +4,13 @@
  *
  * A fake Kysely cannot prove which rows a DML migration touches, so this test pins the SHAPE of
  * the statement instead: every predicate the design requires must be present in `up()`, the
- * UPDATE and the ledger INSERT must share one `hit` CTE, non-readonly kinds must not be named,
+ * UPDATE must re-check the binding-side predicates on the row it writes and the ledger must be fed
+ * by the UPDATE's RETURNING (F1), non-readonly kinds must not be named,
  * and `down()` must restore only ledger-recorded rows. Deleting any single predicate from the
  * migration source turns exactly the matching assertion red (the verification note records the
- * six mutations). The real-PostgreSQL evidence (six planted rows, census classes, up / replay /
+ * six mutations). The concurrency behaviour is proven with two real connections in
+ * tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts. The real-PostgreSQL
+ * evidence (six planted rows, census classes, up / replay /
  * down round trip, no 23503) lives in
  * docs/development/legacy-binding-connection-id-backfill-verification-20260920.md.
  */
@@ -45,6 +48,13 @@ function backfillStatement(up: string): string {
   return up.slice(start, end)
 }
 
+/** The candidate CTE only: from `WITH hit AS` up to the UPDATE CTE. */
+function hitCte(stmt: string): string {
+  const end = stmt.indexOf('upd AS (')
+  expect(end).toBeGreaterThan(0)
+  return stmt.slice(0, end)
+}
+
 async function source(): Promise<string> {
   return stripComments(await fs.readFile(MIGRATION_PATH, 'utf-8'))
 }
@@ -67,7 +77,9 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
   })
 
   it('up(): predicate 2 — only rows still in the legacy shape (connection_id IS NULL)', async () => {
-    const stmt = backfillStatement(section(await source(), 'up'))
+    // scoped to the candidate CTE: the UPDATE repeats this predicate (F1), so a whole-statement
+    // match would stay green if the CTE copy were deleted
+    const stmt = hitCte(backfillStatement(section(await source(), 'up')))
     expect(stmt).toMatch(/AND b\.connection_id IS NULL/)
   })
 
@@ -93,7 +105,7 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
 
   it('up(): the cutover\'s rollback shape (marker TRUE + connection_id NULL) is left alone', async () => {
     const stmt = backfillStatement(section(await source(), 'up'))
-    expect(stmt).toMatch(/AND b\.legacy_connection_fallback_eligible IS NOT TRUE/)
+    expect(hitCte(stmt)).toMatch(/AND b\.legacy_connection_fallback_eligible IS NOT TRUE/)
     // and the marker is never rewritten by this migration
     expect(stmt).not.toMatch(/legacy_connection_fallback_eligible\s*=/)
   })
@@ -105,15 +117,33 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
     expect(stmt).not.toMatch(/updated_at\s*=/)
   })
 
-  it('up(): the UPDATE and the ledger INSERT share one hit CTE (counted == changed)', async () => {
+  it('up(): one statement — the UPDATE writes from the hit CTE and the ledger is fed ONLY by the UPDATE\'s RETURNING (recorded == changed)', async () => {
     const stmt = backfillStatement(section(await source(), 'up'))
     expect(stmt).toMatch(/^WITH hit AS \(/)
-    expect(stmt).toMatch(/upd AS \(\s*UPDATE integration_external_systems AS b[\s\S]*FROM hit\s+WHERE b\.id = hit\.binding_id\s+RETURNING b\.id AS binding_id/)
+    expect(stmt).toMatch(/upd AS \(\s*UPDATE integration_external_systems AS b[\s\S]*FROM hit\s+WHERE b\.id = hit\.binding_id\s[\s\S]*RETURNING b\.id\s+AS binding_id/)
     expect(stmt).toMatch(/INSERT INTO \$\{sql\.raw\(LEDGER_TABLE\)\}/)
-    expect(stmt).toMatch(/FROM hit\s+WHERE hit\.binding_id IN \(SELECT binding_id FROM upd\)/)
+    // F1: the ledger rows come from the rows the UPDATE actually changed, never from the candidates
+    expect(stmt).toMatch(/SELECT upd\.binding_id, upd\.tenant_id, upd\.connection_id,\s+upd\.legacy_data_source_id, upd\.legacy_data_source_owner_id, \$\{MIGRATION_NAME\}\s+FROM upd\s+ON CONFLICT/)
+    expect(stmt).not.toMatch(/SELECT hit\./)
     // exactly one FROM/JOIN of the two tables — no second, differently-filtered scan
     expect(stmt.match(/FROM integration_external_systems AS b/g)?.length).toBe(1)
     expect(stmt.match(/JOIN data_sources AS ds/g)?.length).toBe(1)
+  })
+
+  it('up(): F1 — the UPDATE re-checks the binding-side predicates on the row it writes, and the source rows are locked', async () => {
+    // Structural companion of tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts,
+    // which proves the behaviour with two real connections (the source-regex pins alone are not
+    // evidence; they only make a silent deletion visible in the no-DB job).
+    const stmt = backfillStatement(section(await source(), 'up'))
+    const upd = stmt.slice(stmt.indexOf('upd AS ('), stmt.indexOf('RETURNING'))
+    expect(upd).toMatch(/AND b\.kind = \$\{SQL_READONLY_KIND\}/)
+    expect(upd).toMatch(/AND b\.connection_id IS NULL/)
+    expect(upd).toMatch(/AND b\.legacy_connection_fallback_eligible IS NOT TRUE/)
+    expect(upd).toMatch(/AND b\.tenant_id = hit\.tenant_id/)
+    expect(upd).toMatch(/AND b\.config->>'dataSourceId' = hit\.legacy_data_source_id/)
+    expect(upd).toMatch(/AND b\.config->>'dataSourceOwnerId' = hit\.legacy_data_source_owner_id/)
+    const hit = stmt.slice(0, stmt.indexOf('upd AS ('))
+    expect(hit).toMatch(/FOR SHARE OF ds\s*\)/)
   })
 
   it('up(): guarded by table/column existence (pre-cutover schema is a no-op, not an error)', async () => {

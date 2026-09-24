@@ -1,4 +1,4 @@
-# 设计：sql-readonly legacy 绑定行 `connection_id` 一次性回填（DML 迁移，#5896 后续）
+# 设计：sql-readonly legacy 绑定行 `connection_id` 一次性回填（DDL 账本表 + DML 回填，#5896 后续）
 
 - 日期：2026-09-20（本机 `date -u` 2026-09-21 02:05 起）
 - 任务：Q5 收尾——把 #5896 设计 §7 登记为 **uncovered** 的「legacy 形态」关掉一半：凡是**今天就能无歧义证明**指向哪个 Connection 的 `data-source:sql-readonly` legacy 行，一次性提升为 canonical 形态；证明不了的一行不动，列给 owner。
@@ -10,7 +10,9 @@
   - 本文 + `legacy-binding-connection-id-backfill-verification-20260920.md`
 - 相关：#5896（live_id FK；本迁移**必须在它之后**部署）、#5783（legacy 重绑必须同写 canonical）、`zzzz20260902120000`（切换迁移，PR-1）、`data-source-live-id-fk-binding-lock-design-20260920.md` §7
 
-> **owner 门：这是一支 DML 迁移（改 `integration_external_systems` 的行），不走「默认前进」。PR 开出后留 OPEN，owner 明示才合；合并前先在目标库跑 `05-legacy-binding-census.sql` 看 `backfillable` 数字。** 部署顺序：`zzzz20260920120000`（#5896）→ 本迁移。
+> **分类：DDL（新建账本表 `integration_external_system_connection_backfills`，`CREATE TABLE IF NOT EXISTS`）+ DML（回填 `integration_external_systems` 的行）。**
+>
+> **owner 门：这支迁移改 `integration_external_systems` 的行，不走「默认前进」。PR 开出后留 OPEN，owner 明示才合；合并前先在目标库跑 `05-legacy-binding-census.sql` 看 `backfillable` 数字。** 部署顺序：`zzzz20260920120000`（#5896）→ 本迁移。
 
 ---
 
@@ -56,7 +58,9 @@
 
 `config` 是客户端可见、每次保存 PATCH 合并（`resolveUpdatedConfig` `:456`）、服务端专有键在 normalize 收口处被剥（`SERVER_OWNED_CONFIG_KEYS` `:33`）——在里面放任何新键都会浮到工作台编辑表单。改为账本表 `integration_external_system_connection_backfills`（`binding_id` PK、`tenant_id`、写入的 `connection_id`、被移除的 `legacy_data_source_id` / `legacy_data_source_owner_id`、`migration_name`、`backfilled_at`）：values-free、API 不可见，`down()` 只按账本恢复。
 
-**账本与 UPDATE 同一条语句、同一个 `hit` CTE**（`:103-143`：`hit` → `upd`（UPDATE … RETURNING）→ INSERT 账本 `WHERE hit.binding_id IN (SELECT binding_id FROM upd)`），「计数的行」和「改了的行」不可能漂移。
+**账本与 UPDATE 同一条语句，账本只由 UPDATE 的 `RETURNING` 喂**（`hit` → `upd`（UPDATE … RETURNING 实际写入行的 id / tenant / connection_id / owner 戳与被移除指针）→ `INSERT … SELECT … FROM upd`），「记账的行」和「改了的行」不可能漂移；UPDATE 跳过的候选不进账本。
+
+**并发（窗口 8 复审 F1）**：READ COMMITTED 下 `hit` 候选来自语句快照；UPDATE 等到并发写入者的行锁后，是在对方已提交的新行版本上写。初版 UPDATE 只按 `b.id = hit.binding_id` 写，会把期间已提交的合法重绑（legacy → canonical B）覆盖回 A，账本也记 A。修法两道：① UPDATE 自己的 WHERE 对**正在写的当前行**逐条复核绑定侧条件（kind、`connection_id IS NULL`、回滚标记、tenant、指针 == 候选、owner 戳 == 候选），PG 在锁等待后会对新行版本重新求值（EvalPlanQual），不满足即跳过；② 候选 CTE `FOR SHARE OF ds` 锁住所 join 的源行，源的软删 / owner 变更 / 租户变更要么先提交（候选按新版本重判后掉出），要么等本迁移提交。两道各有两连接实库回归（`tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts`），逐条去掉均红。
 
 ## 6. 幂等与 `down()` 的选择性
 
@@ -81,7 +85,8 @@ owner 要求四类（可回填 / 指向软删源 / owner 不匹配 / 非 sql-rea
 
 ## 10. 验证（详见 verification 文档）
 
-- 结构钉 14 条：七个谓词各自存在、同一 `hit` CTE、目标形态、`down()` 选择性、账本只在空时 DROP；九个内存级文本变异各红（`fs.promises.readFile` 在 setupFile 里包一层，磁盘不动）。
+- 结构钉 14 条（F1 后 15 条：谓词 2 与回滚标记两条钉收窄到候选 CTE；「同一 `hit` CTE」一条改为「账本只由 RETURNING 喂」；新增一条钉 UPDATE 复核与 `FOR SHARE OF ds`）：七个谓词各自存在、目标形态、`down()` 选择性、账本只在空时 DROP；九个内存级文本变异各红（`fs.promises.readFile` 在 setupFile 里包一层，磁盘不动）。
+- F1 两连接竞争回归（真 PG，12 条，独立 CI 车道 `legacy-binding-backfill-race-realdb.yml`，`EXPECT_DB=1` 防跳绿）：见 verification §9。
 - 便携 PG 16.9：真迁移建 schema（`20251206000001` → 057 DDL → `zzzz20260902120000` → `zzzz20260920120000`），植入 11 行（八类各一 + 可回填两行 + canonical 对照两行），普查八类计数与 id 正确 → `up()` 只改 2 行无 23503 → 重放 0 行 → `down()` 逐字节恢复 → 再 `up()` → 人为重绑后 `down()` 只恢复一行；六个迁移级变异各按预期偏离（去谓词 5 → 23503；去其余任一谓词 → 对应那一行被错误回填）。
 
 ## 11. 留给 owner 的决定

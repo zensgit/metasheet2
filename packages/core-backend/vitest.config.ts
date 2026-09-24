@@ -1808,6 +1808,11 @@ export default defineConfig({
       // CI-executed lane to land in without a workflow edit, which this change deliberately does not
       // make). That wiring is a disclosed follow-up, not a silent gap.
       'tests/integration/b2a-operation-claim-078-realdb.test.ts',
+      // #5933 F1: two-connection race proof for the zzzz20260920150000 legacy-binding backfill (a
+      // concurrent writer's committed change must survive; the ledger records only changed rows).
+      // Requires real PostgreSQL; excluded here so the no-DB job cannot skip-green it, and wired as a
+      // WHOLE FILE with EXPECT_DB=1 in .github/workflows/legacy-binding-backfill-race-realdb.yml.
+      'tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

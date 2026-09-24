@@ -66,8 +66,11 @@
  * new key there would surface in the workbench edit form. A ledger row per backfilled binding
  * (binding id, tenant id, the connection id written, the legacy pointer removed) is values-free,
  * invisible to the API, and lets `down()` restore EXACTLY the rows this migration changed and
- * nothing the cutover or a human touched. The ledger is written from the SAME `hit` CTE as the
- * UPDATE, in one statement, so "rows counted" and "rows changed" cannot drift apart.
+ * nothing the cutover or a human touched. The ledger is written from the UPDATE's RETURNING, in
+ * one statement, so "rows recorded" and "rows changed" cannot drift apart — a candidate the
+ * UPDATE skipped (see CONCURRENCY in `up()`) is never recorded.
+ *
+ * CLASSIFICATION: DDL (the ledger table, CREATE TABLE IF NOT EXISTS) + DML (the backfill).
  *
  * IDEMPOTENT: predicate 2 makes a replay a no-op (0 rows, 0 ledger inserts). `down()` restores
  * only ledger rows whose binding still carries the connection id the ledger recorded and has not
@@ -106,8 +109,24 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     )
   `.execute(db)
 
-  // ONE statement: the hit set, the UPDATE and the ledger INSERT share the same `hit` CTE, so the
-  // ledger can never name a row the UPDATE did not change (and vice versa).
+  // ONE statement: candidate set, UPDATE and ledger INSERT. The ledger is fed ONLY by the UPDATE's
+  // RETURNING, so it can never name a row the UPDATE did not change (and vice versa).
+  //
+  // CONCURRENCY (F1 of the window-8 review). Under READ COMMITTED the `hit` candidates come from the
+  // statement snapshot. A concurrent writer may commit a change to a candidate between that
+  // snapshot and the UPDATE — e.g. a legitimate legacy -> canonical rebind to another source. Two
+  // guards make the write re-prove all seven predicates against the CURRENT rows:
+  //   * binding side (predicates 1, 2, 3, 4, 6 and the marker): repeated in the UPDATE's own WHERE,
+  //     against `b` = the row being written. When the UPDATE waits on a writer's row lock,
+  //     PostgreSQL re-evaluates this WHERE on the committed new row version (EvalPlanQual), so a
+  //     row that was rebound, re-kinded, re-pointed, re-stamped, moved tenant or flagged in between
+  //     is SKIPPED, not overwritten. (The `hit` columns are frozen CTE values; they are compared
+  //     against the live row, never written blindly.)
+  //   * source side (predicates 3-6 on `ds`): `FOR SHARE OF ds` locks every joined source for the
+  //     rest of the transaction and, if a source was being changed, re-evaluates the join against
+  //     the committed new version. A concurrent soft-delete / owner change / tenant change of the
+  //     source therefore either finishes first (and the candidate drops out) or waits until the
+  //     backfill commits.
   await sql`
     WITH hit AS (
       SELECT
@@ -125,6 +144,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       WHERE b.kind = ${SQL_READONLY_KIND}
         AND b.connection_id IS NULL
         AND b.legacy_connection_fallback_eligible IS NOT TRUE
+      FOR SHARE OF ds
     ),
     upd AS (
       UPDATE integration_external_systems AS b
@@ -132,15 +152,24 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           config = b.config - 'dataSourceId'
       FROM hit
       WHERE b.id = hit.binding_id
-      RETURNING b.id AS binding_id
+        AND b.kind = ${SQL_READONLY_KIND}
+        AND b.connection_id IS NULL
+        AND b.legacy_connection_fallback_eligible IS NOT TRUE
+        AND b.tenant_id = hit.tenant_id
+        AND b.config->>'dataSourceId' = hit.legacy_data_source_id
+        AND b.config->>'dataSourceOwnerId' = hit.legacy_data_source_owner_id
+      RETURNING b.id                 AS binding_id,
+                b.tenant_id          AS tenant_id,
+                b.connection_id      AS connection_id,
+                hit.legacy_data_source_id,
+                b.config->>'dataSourceOwnerId' AS legacy_data_source_owner_id
     )
     INSERT INTO ${sql.raw(LEDGER_TABLE)} (
       binding_id, tenant_id, connection_id, legacy_data_source_id, legacy_data_source_owner_id, migration_name
     )
-    SELECT hit.binding_id, hit.tenant_id, hit.connection_id,
-           hit.legacy_data_source_id, hit.legacy_data_source_owner_id, ${MIGRATION_NAME}
-    FROM hit
-    WHERE hit.binding_id IN (SELECT binding_id FROM upd)
+    SELECT upd.binding_id, upd.tenant_id, upd.connection_id,
+           upd.legacy_data_source_id, upd.legacy_data_source_owner_id, ${MIGRATION_NAME}
+    FROM upd
     ON CONFLICT (binding_id) DO UPDATE
       SET tenant_id = EXCLUDED.tenant_id,
           connection_id = EXCLUDED.connection_id,

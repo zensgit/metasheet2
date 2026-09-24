@@ -1,0 +1,93 @@
+name: Legacy binding backfill race (real DB)
+
+# WHAT IT GUARDS: F1 of the window-8 review of #5933. The one-shot backfill migration
+# zzzz20260920150000_backfill_sql_readonly_legacy_connection_id must not overwrite a binding that a
+# concurrent writer changed after the migration's snapshot (READ COMMITTED), and its ledger must
+# record only rows the UPDATE really changed. That is a two-connection property: only a real
+# PostgreSQL can prove it, so the suite (legacy-binding-connection-id-backfill-race.db.test.ts)
+# creates its own isolated schema per test and races a writer connection against up().
+#
+# WHY A STANDALONE LANE (not plugin-tests.yml): plugin-tests.yml is an s6a sha256-pinned provenance
+# input (plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json)
+# and is kept byte-identical to main; editing it forces a re-pin. Same precedent as
+# multitable-recovery-schema-drift.yml.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the same change, so the hermetic `test` job cannot
+# collect-and-skip-green it. EXPECT_DB=1 arms the suite's anti-skip-green sentinel: a run here with a
+# missing/broken DATABASE_URL goes RED. The suite builds its own two tables, so no db:migrate step.
+#
+# NOT A REQUIRED CHECK: path-filtered on purpose (a path-filtered required check would stay pending
+# on unrelated PRs).
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/db/migrations/zzzz20260920150000_backfill_sql_readonly_legacy_connection_id.ts'
+      - 'packages/core-backend/tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts'
+      - '.github/workflows/legacy-binding-backfill-race-realdb.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/db/migrations/zzzz20260920150000_backfill_sql_readonly_legacy_connection_id.ts'
+      - 'packages/core-backend/tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts'
+      - '.github/workflows/legacy-binding-backfill-race-realdb.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-binding-backfill-race:
+    name: legacy-binding-backfill-race
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_backfill_race
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_backfill_race"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_backfill_race
+      METASHEET_REAL_DB_TEST_STEP: '1'
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run backfill two-connection race suite (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and hide
+        # a regression; verbose prints every collected test so an empty collection shows in the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts
+          --reporter=verbose

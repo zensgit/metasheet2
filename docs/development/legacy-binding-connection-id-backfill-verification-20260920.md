@@ -1,4 +1,4 @@
-# 验证记录：sql-readonly legacy 绑定行 `connection_id` 一次性回填（DML 迁移，#5896 后续）
+# 验证记录：sql-readonly legacy 绑定行 `connection_id` 一次性回填（DDL 账本表 + DML 回填，#5896 后续）
 
 - 日期：2026-09-20（本机 `date -u` 2026-09-21 02:05–02:30 UTC）
 - 设计：`legacy-binding-connection-id-backfill-design-20260920.md`
@@ -120,3 +120,15 @@
 
 - 没在任何真实库上跑普查或迁移；`backfillable` 在 222 / 生产上是多少，未知。
 - 便携 PG 集群与 `_pgtmp-w8n/` 已在收尾时停掉并删除。
+
+## 9. F1（窗口 8 复审）：候选快照覆盖并发提交的重绑 —— 修复与实证
+
+- 缺陷：七个资格条件只在候选 CTE `hit` 里，UPDATE 只按 `b.id = hit.binding_id` 写。READ COMMITTED 下候选来自旧快照，UPDATE 等到并发写入者的行锁后在其已提交的新版本上写，把合法重绑 legacy → canonical `source_b` 覆盖回 `source_a`，账本也记 `source_a`。
+- 修复：UPDATE 的 WHERE 对当前行复核绑定侧条件（kind、`connection_id IS NULL`、回滚标记、tenant == 候选、指针 == 候选、owner 戳 == 候选）；候选 CTE 加 `FOR SHARE OF ds`；账本改由 `UPDATE … RETURNING` 喂，跳过的行不记账。
+- owner 探针（改造版：新数据目录、独立端口、本机合成 PG 16.15，迁移模块分别指向 b591dd957 原文与修复后文件）：
+  - 修复前：`{"outcome":"committed","expected":"source_b","actual":"source_a","ledger":["source_a"]}`
+  - 修复后：`{"outcome":"committed","expected":"source_b","actual":"source_b","ledger":[]}`
+- 仓库回归 `packages/core-backend/tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts`（每条独立 schema；写入者开事务改行不提交 → 迁移 `up()` 起跑 → 第三连接经 `pg_stat_activity` 确认迁移在锁上等待 → 写入者提交 → 迁移必须提交且保留写入者的结果）：基线 up/重放/down、canonical 重绑、混合形态（写 `connection_id` 保留指针）、指针改指、owner 戳改写、回滚标记翻 TRUE、kind 改走、tenant 迁移、源 owner 变更、源软删、正对照（只改无关键仍回填并记账），外加 `EXPECT_DB` 哨兵，共 12 条。
+- 内存级变异（vite transform 在加载时改迁移源码，不落盘）：去掉全部 6 条 UPDATE 复核 → 7 红；逐条去掉 kind / `connection_id IS NULL` / 标记 / tenant / 指针 / owner 戳 → 各恰好 1 条对应用例红；去掉 `FOR SHARE OF ds` → 源 owner 变更（行被写入）与源软删（迁移以 23503 中止）2 红；账本改回从候选喂 → 7 红；恢复 → 12 绿。
+- CI：该文件从默认无库 vitest 配置排除（不会被收集后跳绿），整文件接入独立车道 `.github/workflows/legacy-binding-backfill-race-realdb.yml`（postgres:16 service、`EXPECT_DB=1`）；不改 s6a 钉住的 `plugin-tests.yml`。
+- 生产普查与应用仍须 owner 授权。
