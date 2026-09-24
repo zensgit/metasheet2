@@ -583,6 +583,14 @@ function expectActiveOrgMemberPredicate(sql: string) {
   expect(sql).toContain('u.is_active = true')
 }
 
+function orgGateDetails(indexes: number[]) {
+  return [{
+    code: 'USER_NOT_IN_ORG',
+    rejectedCount: indexes.length,
+    indexes,
+  }]
+}
+
 function groupManagerProbeResult(
   sql: string,
   params: unknown[] = [],
@@ -1047,7 +1055,7 @@ describe('attendance UUID route validation', () => {
         error: {
           code: 'USER_NOT_IN_ORG',
           message: 'Target user is not an active member of this org',
-          details: [{ userId }],
+          details: orgGateDetails([0]),
         },
       })
       const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
@@ -1076,7 +1084,7 @@ describe('attendance UUID route validation', () => {
         error: {
           code: 'USER_NOT_IN_ORG',
           message: 'Target user is not an active member of this org',
-          details: [{ userId }],
+          details: orgGateDetails([0]),
         },
       })
       const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
@@ -1101,7 +1109,7 @@ describe('attendance UUID route validation', () => {
         error: {
           code: 'USER_NOT_IN_ORG',
           message: 'Target user is not an active member of this org',
-          details: [{ userId: 'not-in-this-org' }],
+          details: orgGateDetails([1]),
         },
       })
       const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
@@ -2870,16 +2878,17 @@ describe('attendance UUID route validation', () => {
       })
     }
 
-    function expectMemberNotInOrg(res: { statusCode: number; body: unknown }, details: unknown[]) {
+    function expectMemberNotInOrg(res: { statusCode: number; body: unknown }, indexes: number[]) {
       expect(res.statusCode).toBe(404)
       expect(res.body).toMatchObject({
         ok: false,
         error: {
           code: 'USER_NOT_IN_ORG',
           message: memberWarning,
-          details,
+          details: orgGateDetails(indexes),
         },
       })
+      expect(JSON.stringify(res.body)).not.toContain('userId')
     }
 
     it.each([
@@ -2898,11 +2907,7 @@ describe('attendance UUID route validation', () => {
         user: { id: 'admin-1', orgId: 'default' },
       })
 
-      expectMemberNotInOrg(res, [{
-        userId,
-        workDate: '2026-06-10',
-        warnings: [memberWarning],
-      }])
+      expectMemberNotInOrg(res, [0])
       const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
       expectActiveOrgMemberPredicate(sql)
       expect(sql).not.toContain('FROM attendance_holidays')
@@ -2925,10 +2930,7 @@ describe('attendance UUID route validation', () => {
         user: { id: 'admin-1', orgId: 'default' },
       })
 
-      expectMemberNotInOrg(res, [
-        { userId: 'not-in-this-org', workDate: '2026-06-11', warnings: [memberWarning] },
-        { userId: 'not-in-this-org', workDate: '2026-06-12', warnings: [memberWarning] },
-      ])
+      expectMemberNotInOrg(res, [1, 2])
       expect(db.query).toHaveBeenCalledWith(
         expect.stringContaining('uo.user_id = ANY($2::text[])'),
         ['default', ['worker-1', 'not-in-this-org']],
@@ -2950,11 +2952,7 @@ describe('attendance UUID route validation', () => {
         user: { id: 'admin-1', orgId: 'default' },
       })
 
-      expectMemberNotInOrg(res, [{
-        userId: 'missing-user',
-        workDate: '2026-06-10',
-        warnings: [memberWarning],
-      }])
+      expectMemberNotInOrg(res, [0])
     })
 
     it('preview does not gate a row that would not be assigned', async () => {
@@ -3018,11 +3016,43 @@ describe('attendance UUID route validation', () => {
         user: { id: 'admin-1', orgId: 'default' },
       })
 
-      expectMemberNotInOrg(res, [{
-        userId: 'missing-user',
-        workDate: '2026-06-10',
-        warnings: [memberWarning],
-      }])
+      expectMemberNotInOrg(res, [0])
+    })
+
+    it('rejects preview when the org selector is not the authenticated org', async () => {
+      const { db, routes } = await createHarness('true')
+      installImportPipelineMock(db, ['worker-1'])
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          orgId: 'org-b',
+          rows: [importAssignRow('worker-1')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Organization not found' },
+      })
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      expect(sql).not.toContain('FROM user_orgs uo')
+
+      const queryRes = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
+        body: {
+          rows: [importAssignRow('worker-1')],
+          groupSync: { autoCreate: true, autoAssignMembers: true },
+        },
+        query: { orgId: 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(queryRes.statusCode).toBe(404)
+      expect(queryRes.body).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_FOUND' },
+      })
     })
 
     it('preview accepts an active org member for auto-assign', async () => {
@@ -3068,11 +3098,7 @@ describe('attendance UUID route validation', () => {
         user: { id: 'admin-1', orgId: 'default' },
       })
 
-      expectMemberNotInOrg(res, [{
-        userId,
-        workDate: '2026-06-10',
-        warnings: [memberWarning],
-      }])
+      expectMemberNotInOrg(res, [0])
       expect(commitSyncImportPlan).not.toHaveBeenCalled()
       const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
       expect(sql).not.toContain('INSERT INTO attendance_group_members')
@@ -3098,11 +3124,7 @@ describe('attendance UUID route validation', () => {
         user: { id: 'admin-1', orgId: 'default' },
       })
 
-      expectMemberNotInOrg(res, [{
-        userId: 'not-in-this-org',
-        workDate: '2026-06-11',
-        warnings: [memberWarning],
-      }])
+      expectMemberNotInOrg(res, [1])
       expect(commitSyncImportPlan).not.toHaveBeenCalled()
       expect(db.query.mock.calls.map(([query]) => sqlText(query)).some((sql) => sql.includes('INSERT INTO attendance_group_members'))).toBe(false)
     })
@@ -3247,7 +3269,7 @@ describe('attendance UUID route validation', () => {
         error: {
           code: 'USER_NOT_IN_ORG',
           message: 'Target user is not an active member of this org',
-          details: [{ userId }],
+          details: orgGateDetails([0]),
         },
       })
       const sql = db.query.mock.calls.map(([text]) => String(text)).join('\n')
@@ -3271,7 +3293,7 @@ describe('attendance UUID route validation', () => {
         ok: false,
         error: {
           code: 'USER_NOT_IN_ORG',
-          details: [{ userId: 'not-in-this-org' }],
+          details: orgGateDetails([1]),
         },
       })
       expect(db.query).toHaveBeenCalledWith(

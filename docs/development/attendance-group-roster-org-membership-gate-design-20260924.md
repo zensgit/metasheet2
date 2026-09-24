@@ -92,12 +92,16 @@ SELECT uo.user_id
   "error": {
     "code": "USER_NOT_IN_ORG",
     "message": "Target user is not an active member of this org",
-    "details": [{ "userId": "<rejected id>" }]
+    "details": [{
+      "code": "USER_NOT_IN_ORG",
+      "rejectedCount": 1,
+      "indexes": [0]
+    }]
   }
 }
 ```
 
-HTTP **404**。`details` 只回显调用方自己提交、且未通过的 id（去重后、保持请求顺序）。不区分「停用 / 他组织 / 不存在」——三种都是「不是该组织的活跃成员」，避免用不同错误码泄露他组织是否存在该用户。
+HTTP **404**。`details` 不含 `userId`、日期或其他提交值。`indexes` 是去重后请求顺序里未通过的下标；`rejectedCount` 是这个下标数组的长度。不区分「停用 / 他组织 / 不存在」。
 
 3. 全部通过才执行既有 `INSERT … ON CONFLICT DO NOTHING`。已是成员不是错误：冲突行不出现在 `data.items`，与现在一致。成功才发 `attendance.group.members.changed`。
 
@@ -145,7 +149,7 @@ HTTP **404**。`details` 只回显调用方自己提交、且未通过的 id（�
 
 `assertActiveOrgMemberUserIds(trx, orgId, input.userIds)`
 
-`details` 仍是 `[{ userId }]`。坏 id 与合格 id 同批时，合格 id 不插入，后续重叠检查也不跑。调度范围 / admin ACL 仍在这道门之前，不改。这条路由的 `HttpError` JSON 现在带上 `details`。
+`details` 仍是 values-free 的 `{ code, rejectedCount, indexes }`。坏 id 与合格 id 同批时，合格 id 不插入，后续重叠检查也不跑。调度范围 / admin ACL 仍在这道门之前，不改。这条路由的 `HttpError` JSON 现在带上 `details`。
 
 ### 6.2 CSV `autoAssignMembers`
 
@@ -165,20 +169,20 @@ HTTP **404**。`details` 只回显调用方自己提交、且未通过的 id（�
   "error": {
     "code": "USER_NOT_IN_ORG",
     "message": "Target user is not an active member of this org",
-    "details": [
-      {
-        "userId": "<id>",
-        "workDate": "2026-06-10",
-        "warnings": ["Target user is not an active member of this org"]
-      }
-    ]
+    "details": [{
+      "code": "USER_NOT_IN_ORG",
+      "rejectedCount": 1,
+      "indexes": [0]
+    }]
   }
 }
 ```
 
-preview、sync commit、legacy `POST /api/attendance/import`、async commit 入队、integration sync 的 `HttpError` 响应都带上 `details`。
+`indexes` 是源行下标，不是 userId。preview、sync commit、legacy `POST /api/attendance/import`、async commit 入队、integration sync 的 `HttpError` 响应都带上这份 `details`。
 
-W4 效果适配器 `applyAttendanceLegacyGroupEffectsV1` 仍只执行已冻结的 `ensure_member`，不回头再查 `user_orgs`。活的 HTTP 路径都先经过 `commitAttendanceImportPayload`，被拒绝的用户不会进入计划。
+导入路由的组织来自已认证 `user.orgId`。body、query、`x-org-id` 只做一致性断言：与认证组织不同则 404 `NOT_FOUND`，不拿选择器去查成员、也不拿它做导入权限范围。同步 `/preview` 与异步 `buildAsyncPreviewResult` 都走同一成员门；异步预览失败时 job `error` 记 `USER_NOT_IN_ORG`，不回显 id。
+
+W4 冻结计划仍不重算组是否存在。但 `ensure_member` 在执行前条件复检和效果事务的 INSERT 之前，都再查一次 `user_orgs.is_active AND users.is_active`。入队后停用的用户不能写入。复检失败返回 false；效果事务内失败抛 `W4C3A_MEMBER_NOT_ACTIVE_IN_ORG`，不执行 `INSERT INTO attendance_group_members`。
 
 ### 6.3 历史行
 

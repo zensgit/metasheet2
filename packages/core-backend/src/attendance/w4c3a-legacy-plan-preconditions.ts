@@ -14,6 +14,17 @@ type QueryRow = Record<string, unknown>
 
 class AttendanceLegacyRecordPreconditionRowError extends Error {}
 
+const ACTIVE_ORG_MEMBER_SQL = `
+  SELECT 1
+    FROM user_orgs uo
+    JOIN users u ON u.id = uo.user_id
+   WHERE uo.org_id = $1
+     AND uo.user_id = $2
+     AND uo.is_active = true
+     AND u.is_active = true
+   LIMIT 1
+`
+
 function compareUtf8(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
 }
@@ -382,6 +393,10 @@ export async function lockAndRecheckAttendanceLegacyGroupPreconditionsV1(
       ).rows
       if (rows.length !== 0) return false
     }
+    const activeMember = (
+      await trx.query(ACTIVE_ORG_MEMBER_SQL, [orgId, effect.userId])
+    ).rows
+    if (activeMember.length !== 1) return false
     // Effective existing group referenced only by membership (no ensure_group).
     if (
       !seenGroupIds.has(effect.groupRef) &&

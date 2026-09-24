@@ -232,6 +232,9 @@ describe('blueprint mutations — real production surfaces', () => {
         if (sql.includes('INSERT INTO attendance_groups')) {
           return { rows: [{ id: GROUP_ID }] }
         }
+        if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
+          return { rows: [{ ok: 1 }] }
+        }
         if (sql.includes('INSERT INTO attendance_group_members')) {
           // Conflict-ignore: zero rows.
           return { rows: [] }
@@ -279,6 +282,30 @@ describe('blueprint mutations — real production surfaces', () => {
           ? { rows: [{ id: MEMBER_ID }] }
           : { rows: [] },
     }
+    const inactiveTrx = {
+      query: async (sql: string) => {
+        if (sql.includes('FROM user_orgs uo')) return { rows: [] }
+        if (sql.includes('INSERT INTO attendance_group_members')) {
+          throw new Error('deactivated member must not be inserted')
+        }
+        return { rows: [] }
+      },
+    }
+    await expect(
+      applyAttendanceLegacyGroupEffectsV1(
+        inactiveTrx as never,
+        planWithGroups([
+          {
+            kind: 'ensure_member',
+            memberId: MEMBER_ID,
+            groupRef: GROUP_ID,
+            userId: 'user-a',
+            membershipExistedAtPrepare: false,
+          },
+        ]),
+      ),
+    ).rejects.toThrowError('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG')
+
     await expect(
       applyAttendanceLegacyGroupEffectsV1(
         mismatchedIdTrx as never,

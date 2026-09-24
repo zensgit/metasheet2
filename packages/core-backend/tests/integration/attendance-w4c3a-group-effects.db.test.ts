@@ -105,6 +105,18 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
         updated_at timestamptz DEFAULT now(),
         UNIQUE (org_id, group_id, user_id)
       )`)
+    await pool.query(`
+      CREATE TABLE users (
+        id text PRIMARY KEY,
+        is_active boolean NOT NULL DEFAULT true
+      )`)
+    await pool.query(`
+      CREATE TABLE user_orgs (
+        user_id text NOT NULL,
+        org_id text NOT NULL,
+        is_active boolean NOT NULL DEFAULT true,
+        PRIMARY KEY (user_id, org_id)
+      )`)
   }, 60_000)
 
   afterAll(async () => {
@@ -170,6 +182,14 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
        VALUES ($1, $2, $3)`,
       [orgId, groupId, userId],
     )
+    await pool.query(
+      `INSERT INTO users (id, is_active) VALUES ($1, true)`,
+      [userId],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -203,5 +223,47 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
     } finally {
       client.release()
     }
+  })
+
+  it('enqueue then deactivate does not insert ensure_member', async () => {
+    const groupId = crypto.randomUUID()
+    const memberId = crypto.randomUUID()
+    const userId = `queued-${run}`
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, timezone)
+       VALUES ($1, $2, $3, 'UTC')`,
+      [groupId, orgId, `Queued ${run}`],
+    )
+    await pool.query(`INSERT INTO users (id, is_active) VALUES ($1, true)`, [userId])
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
+    await pool.query(
+      `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+      [userId, orgId],
+    )
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await expect(applyAttendanceLegacyGroupEffectsV1(
+        trx(client),
+        plan(orgId, [{
+          kind: 'ensure_member',
+          memberId,
+          groupRef: groupId,
+          userId,
+          membershipExistedAtPrepare: false,
+        }]),
+      )).rejects.toThrow('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG')
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+    const written = await pool.query(
+      `SELECT 1 FROM attendance_group_members WHERE org_id = $1 AND user_id = $2`,
+      [orgId, userId],
+    )
+    expect(written.rows).toHaveLength(0)
   })
 })

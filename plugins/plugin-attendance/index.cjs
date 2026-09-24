@@ -9543,7 +9543,9 @@ function collectImportGroupMemberAssignmentRows({
   const seen = new Set()
   const required = Array.isArray(requiredFields) ? requiredFields : []
   const punchRequired = Array.isArray(punchRequiredFields) ? punchRequiredFields : []
-  for (const row of Array.isArray(rows) ? rows : []) {
+  const sourceRows = Array.isArray(rows) ? rows : []
+  for (let rowIndex = 0; rowIndex < sourceRows.length; rowIndex += 1) {
+    const row = sourceRows[rowIndex]
     const workDate = row?.workDate
     const rowUserId = resolveRowUserId({
       row,
@@ -9578,31 +9580,29 @@ function collectImportGroupMemberAssignmentRows({
       groupNames,
       prepareOnly,
     })) continue
-    assignments.push({ userId: rowUserId, workDate })
+    const sourceIndex = Number.isInteger(row?.__sourceIndex) ? row.__sourceIndex : rowIndex
+    assignments.push({ userId: rowUserId, workDate, rowIndex: sourceIndex })
   }
   return assignments
 }
 
 function importMemberAssignmentDetailOptions(assignments) {
-  const byUserId = new Map()
+  const indexesByUserId = new Map()
   for (const assignment of assignments) {
     const userId = String(assignment?.userId ?? '').trim()
     if (!userId) continue
-    const list = byUserId.get(userId) ?? []
-    list.push({
-      userId,
-      workDate: assignment.workDate ?? '',
-      warnings: [ATTENDANCE_IMPORT_MEMBER_NOT_IN_ORG_WARNING],
-    })
-    byUserId.set(userId, list)
+    const list = indexesByUserId.get(userId) ?? []
+    list.push(assignment.rowIndex)
+    indexesByUserId.set(userId, list)
   }
   return {
-    detailForRejected(userId) {
-      return byUserId.get(userId) ?? [{
-        userId,
-        workDate: '',
-        warnings: [ATTENDANCE_IMPORT_MEMBER_NOT_IN_ORG_WARNING],
-      }]
+    indexesForRejected(rejectedUserIds) {
+      const indexes = []
+      for (const userId of rejectedUserIds) {
+        const rows = indexesByUserId.get(userId)
+        if (rows) indexes.push(...rows)
+      }
+      return indexes
     },
   }
 }
@@ -20023,20 +20023,18 @@ async function assertActiveOrgMemberUserIds(client, orgId, userIds, options) {
   const active = new Set(rows.map((row) => String(row.user_id)))
   const rejected = requested.filter((userId) => !active.has(userId))
   if (rejected.length) {
-    const detailForRejected = typeof options?.detailForRejected === 'function'
-      ? options.detailForRejected
-      : null
-    const details = []
-    for (const userId of rejected) {
-      const produced = detailForRejected ? detailForRejected(userId) : { userId }
-      if (Array.isArray(produced)) details.push(...produced)
-      else if (produced) details.push(produced)
-    }
+    const indexes = typeof options?.indexesForRejected === 'function'
+      ? options.indexesForRejected(rejected)
+      : requested.flatMap((userId, index) => (active.has(userId) ? [] : [index]))
     throw new HttpError(
       404,
       'USER_NOT_IN_ORG',
       'Target user is not an active member of this org',
-      details,
+      [{
+        code: 'USER_NOT_IN_ORG',
+        rejectedCount: indexes.length,
+        indexes,
+      }],
     )
   }
   return requested
@@ -26418,12 +26416,29 @@ module.exports = {
     }
 
     async function resolveAttendanceImportActor(req, res) {
-      const access = await resolveAttendanceSchedulerScopeActor(req, res)
-      if (!access) return null
+      const userId = getAuthenticatedUserId(req)
+      if (!userId) {
+        res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+        return null
+      }
+      const orgId = getAuthenticatedOrgId(req)
+      if (!orgId) {
+        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+        return null
+      }
+      const selectors = [req.body?.orgId, req.query?.orgId, req.headers['x-org-id']]
+        .flatMap((value) => Array.isArray(value) ? value : [value])
+        .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
+        .map((value) => String(value).trim())
+      if (selectors.some((value) => value !== orgId)) {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Organization not found' } })
+        return null
+      }
       try {
         return {
-          ...access,
-          fullImport: access.fullAdmin || await hasAttendanceImportAccess(access.userId),
+          userId,
+          orgId,
+          fullImport: await hasAttendanceAdminAccess(userId) || await hasAttendanceImportAccess(userId),
         }
       } catch (error) {
         logger.error('Attendance import actor resolution failed', error)
@@ -28249,7 +28264,13 @@ module.exports = {
 	        duplicates: 0,
 	      }
 	      const seenKeys = new Set()
+	      const assignmentRows = []
+	      let asyncSourceIndex = -1
 	      const rowScan = await rowSource.iterateRows((row) => {
+	        asyncSourceIndex += 1
+	        if (payload.groupSync?.autoAssignMembers) {
+	          assignmentRows.push({ ...row, __sourceIndex: asyncSourceIndex })
+	        }
 	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
@@ -28353,6 +28374,34 @@ module.exports = {
 	      })
 	      if (!rowScan.rowCount) {
 	        throw new Error('No rows to preview')
+	      }
+	      const asyncGroupSync = normalizeGroupSyncOptions(
+	        payload.groupSync,
+	        payload.ruleSetId,
+	        payload.timezone,
+	      )
+	      if (asyncGroupSync?.autoAssignMembers) {
+	        const asyncGroupNames = collectAttendanceGroupNames(assignmentRows)
+	        let asyncGroupIdMap = null
+	        if (asyncGroupNames.size && !asyncGroupSync.autoCreate) {
+	          asyncGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
+	        }
+	        const asyncMemberAssignments = collectImportGroupMemberAssignmentRows({
+	          rows: assignmentRows,
+	          fallbackUserId: payload.userId ?? requesterId,
+	          userMap: payload.userMap,
+	          userMapKeyField: payload.userMapKeyField,
+	          userMapSourceFields: payload.userMapSourceFields,
+	          requiredFields,
+	          punchRequiredFields,
+	          groupSync: asyncGroupSync,
+	          groupIdMap: asyncGroupIdMap,
+	          groupNames: asyncGroupNames,
+	          prepareOnly: true,
+	        })
+	        if (asyncMemberAssignments.length) {
+	          await assertImportGroupMemberAssignmentsActive(db, orgId, asyncMemberAssignments)
+	        }
 	      }
 	      const csvWarnings = rowScan.warnings
 
@@ -28610,7 +28659,9 @@ module.exports = {
 	              payload,
 	            })
 	          } catch (error) {
-	            const message = String(error?.message ?? error ?? 'Unknown error')
+	            const message = error instanceof HttpError
+	              ? error.code
+	              : String(error?.message ?? error ?? 'Unknown error')
 	            logger.error('Attendance async import preview failed', error)
 	            await updateImportJobProgress({
 	              jobId: rowId,
@@ -29389,7 +29440,7 @@ module.exports = {
 	            groupNames,
 	            prepareOnly,
 	          })) {
-	            importMemberAssignmentRows.push({ userId: rowUserId, workDate })
+	            importMemberAssignmentRows.push({ userId: rowUserId, workDate, rowIndex: sourceOrdinal })
 	            if (prepareOnly) {
 	              preparedPlanGroupEffects.push({
 	                kind: 'ensure_member',
@@ -41803,9 +41854,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
         if (!importAccess) return
+        const orgId = importAccess.orgId
         const requesterId = importAccess.userId
 	        const userId = parsed.data.userId ?? requesterId
 	        if (!userId) {
@@ -42364,11 +42415,11 @@ module.exports = {
           return
         }
 
-	        const orgId = getOrgId(req)
-        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
+	        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
 	        if (!importAccess) {
 	          return
 	        }
+        const orgId = importAccess.orgId
         const requesterId = importAccess.userId
 
 		        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
@@ -42751,8 +42802,10 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
+        const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
+        if (!importAccess) return
+        const orgId = importAccess.orgId
+        const requesterId = importAccess.userId
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
@@ -42904,9 +42957,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
         if (!importAccess) return
+        const orgId = importAccess.orgId
         if (!importAccess.fullImport) {
           res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Full attendance import permission required' } })
           return

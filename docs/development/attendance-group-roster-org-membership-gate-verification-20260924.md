@@ -25,7 +25,7 @@ Not a merge, deploy, or product-acceptance verdict. Existing ghost rows are not 
 | 排班组 admin / scoped scheduler 添加活跃成员仍 200，且 SQL 含同一谓词 | PASS | 既有两条 schedule-group member POST；断言 `expectActiveOrgMemberPredicate` |
 | 排班组停用 / 他组织 / 不存在 → 404，无 INSERT | PASS | `rejects a schedule-group member add for %s without inserting` |
 | 排班组批 `[active, bad]` → 404，details 只有坏 id，无 INSERT | PASS | `rejects a mixed schedule-group member batch before inserting the valid id` |
-| CSV preview：停用 / 他组织 / 不存在 → 404，details 为 `{ userId, workDate, warnings }`，不进入假期计算 | PASS | `preview rejects auto-assign for %s…` |
+| CSV preview：停用 / 他组织 / 不存在 → 404，details 为 `{ code, rejectedCount, indexes }`，不含 userId | PASS | `preview rejects auto-assign for %s…` |
 | CSV preview 混合批只报告被拒行；重复行只一条 detail | PASS | `preview rejects a mixed auto-assign batch…`、`preview reports one skipped-row detail…` |
 | 不会被分配的行（无考勤组，或组不存在且不 autoCreate）不查这道门 | PASS | `preview does not gate a row that would not be assigned`、`preview leaves unknown groups ungated…` |
 | 已存在的组、不 autoCreate，仍 404 | PASS | `preview still gates an existing group when auto-create is off` |

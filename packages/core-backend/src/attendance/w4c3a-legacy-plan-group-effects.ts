@@ -8,6 +8,9 @@
  * INSERT ... ON CONFLICT DO NOTHING RETURNING (counts only actual inserts).
  *
  * Never rereads rules/settings/profile/source or recomputes existence branches.
+ * ensure_member still rechecks user_orgs ∩ users.is_active in this same
+ * transaction immediately before INSERT. A frozen plan is not a license to
+ * write a member who was deactivated after enqueue.
  */
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import type { VerifiedAttendanceLegacyPlanV1 } from './w4c3a-legacy-plan-worker'
@@ -54,6 +57,17 @@ const ENSURE_MEMBER_SQL = `
   RETURNING id::text AS id
 `
 
+const ACTIVE_ORG_MEMBER_SQL = `
+  SELECT 1
+    FROM user_orgs uo
+    JOIN users u ON u.id = uo.user_id
+   WHERE uo.org_id = $1
+     AND uo.user_id = $2
+     AND uo.is_active = true
+     AND u.is_active = true
+   LIMIT 1
+`
+
 /**
  * Applies frozen group/member effects from a verified plan only.
  * Empty plan.groupEffects performs zero SQL and returns zero counts.
@@ -98,6 +112,11 @@ export async function applyAttendanceLegacyGroupEffectsV1(
 
   for (const effect of plan.groupEffects) {
     if (effect.kind !== 'ensure_member') continue
+    const active = await trx.query(ACTIVE_ORG_MEMBER_SQL, [
+      plan.manifest.orgId,
+      effect.userId,
+    ])
+    if (active.rows.length !== 1) fail('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG')
     const result = await trx.query(ENSURE_MEMBER_SQL, [
       effect.memberId,
       plan.manifest.orgId,

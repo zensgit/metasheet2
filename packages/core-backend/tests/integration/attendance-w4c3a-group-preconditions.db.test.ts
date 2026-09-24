@@ -55,6 +55,19 @@ function tracingTrx(client: PoolClient, sqlLog: string[]): AttendanceW4Transacti
   }
 }
 
+async function seedActiveOrgMember(pool: Pool, orgId: string, userId: string) {
+  await pool.query(
+    `INSERT INTO users (id, is_active) VALUES ($1, true)
+     ON CONFLICT (id) DO UPDATE SET is_active = true`,
+    [userId],
+  )
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+    [userId, orgId],
+  )
+}
+
 function groupPlan(input: {
   orgId: string
   groupRevision: number
@@ -102,6 +115,18 @@ async function createBase(pool: Pool): Promise<void> {
       org_id text NOT NULL, group_id uuid NOT NULL, user_id text NOT NULL,
       created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(),
       UNIQUE (org_id, group_id, user_id)
+    )`)
+  await pool.query(`
+    CREATE TABLE users (
+      id text PRIMARY KEY,
+      is_active boolean NOT NULL DEFAULT true
+    )`)
+  await pool.query(`
+    CREATE TABLE user_orgs (
+      user_id text NOT NULL,
+      org_id text NOT NULL,
+      is_active boolean NOT NULL DEFAULT true,
+      PRIMARY KEY (user_id, org_id)
     )`)
   await pool.query(`
     CREATE TABLE attendance_import_jobs (
@@ -214,6 +239,7 @@ describeIfDatabase('W4C-3a group precondition 4×2 matrix (real PostgreSQL)', ()
       `INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ($1,$2,$3)`,
       [orgId, groupId, userId],
     )
+    await seedActiveOrgMember(pool, orgId, userId)
     const fp = computeLegacyImportGroupStateFingerprintV1({
       groups: [{
         id: groupId, orgId, name: 'Order Group', code: null, timezone: 'UTC', ruleSetId: null,
@@ -275,6 +301,8 @@ describeIfDatabase('W4C-3a group precondition 4×2 matrix (real PostgreSQL)', ()
        VALUES ($1, $2, $3), ($1, $2, $4)`,
       [orgId, groupId, bmpUser, astralUser],
     )
+    await seedActiveOrgMember(pool, orgId, bmpUser)
+    await seedActiveOrgMember(pool, orgId, astralUser)
     const revision = Number(
       (
         await pool.query(
@@ -485,6 +513,7 @@ describeIfDatabase('W4C-3a group precondition 4×2 matrix (real PostgreSQL)', ()
       `INSERT INTO attendance_group_members (org_id, group_id, user_id) VALUES ($1,$2,$3)`,
       [orgId, groupId, userId],
     )
+    await seedActiveOrgMember(pool, orgId, userId)
     const fp = computeLegacyImportGroupStateFingerprintV1({
       groups: [{ id: groupId, orgId, name: 'EM Hold', code: null, timezone: 'UTC', ruleSetId: null }],
       memberships: [{ orgId, groupId, userId, exists: true }],
@@ -667,6 +696,7 @@ describeIfDatabase('W4C-3a group precondition 4×2 matrix (real PostgreSQL)', ()
       `INSERT INTO attendance_groups (id, org_id, name, timezone) VALUES ($1,$2,'MM Hold','UTC')`,
       [groupId, orgId],
     )
+    await seedActiveOrgMember(pool, orgId, userId)
     const fp = computeLegacyImportGroupStateFingerprintV1({
       groups: [{ id: groupId, orgId, name: 'MM Hold', code: null, timezone: 'UTC', ruleSetId: null }],
       memberships: [{ orgId, groupId, userId, exists: false }],
