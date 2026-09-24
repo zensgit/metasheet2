@@ -14,6 +14,9 @@ const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolv
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
+const {
+  rejectLeaveOffsetPartialAbsence,
+} = require('./lib/leave-offset-partial-absence-guard.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
@@ -15580,10 +15583,31 @@ async function resolveGenericApprovalFlow(db, orgId, { requestType, flowId }) {
   return mapApprovalFlowRow(rows[0])
 }
 
+// Temporary guard (#5967 owner decision still open). Exempt overtime is inserted
+// as approved and does not grant comp-time lots or overtime-bank lots. While
+// either credit policy is enabled, that would persist an approved request with
+// no credit. Reject the submission instead of writing it.
+const EXEMPT_OVERTIME_CREDIT_PENDING_CODE = 'EXEMPT_OVERTIME_CREDIT_PENDING'
+const EXEMPT_OVERTIME_CREDIT_PENDING_MESSAGE = 'Approval-exempt overtime cannot be submitted while comp-time or overtime-bank credit is enabled. Exempt overtime does not grant that credit, and an approved request without it is blocked until the owner decides. Turn compTimeFromOvertime and overtimeBankPolicy off, or submit overtime that requires approval.'
+
+function exemptOvertimeCreditPolicyBlocksSubmission(settings) {
+  return settings?.compTimeFromOvertime?.enabled === true
+    || settings?.overtimeBankPolicy?.enabled === true
+}
+
+function rejectExemptOvertimeWhenCreditPolicyEnabled(settings) {
+  if (!exemptOvertimeCreditPolicyBlocksSubmission(settings)) return
+  throw new HttpError(
+    422,
+    EXEMPT_OVERTIME_CREDIT_PENDING_CODE,
+    EXEMPT_OVERTIME_CREDIT_PENDING_MESSAGE,
+  )
+}
+
 // Same-transaction effects for a request inserted as approved because the leave
 // type or overtime rule has requiresApproval=false. Comp-time / annual / leave-offset
-// deductions match final approval. Overtime comp-time grants and the overtime bank
-// stay on the human approval path (see the #5967 design note).
+// deductions match final approval, including the shared partial-absence rejection.
+// Overtime comp-time grants and the overtime bank stay on the human approval path.
 async function applyExemptedLeaveOrOvertimeEffects(trx, {
   orgId,
   userId,
@@ -15596,6 +15620,9 @@ async function applyExemptedLeaveOrOvertimeEffects(trx, {
 }) {
   if (requestType !== 'leave' && requestType !== 'overtime') return null
   const requestMetadata = metadata && typeof metadata === 'object' ? metadata : {}
+  if (requestType === 'overtime') {
+    rejectExemptOvertimeWhenCreditPolicyEnabled(await getSettings(trx))
+  }
   if (requestType === 'leave' && requestMetadata.leaveType?.code === 'comp_time') {
     await deductCompTimeBalance(trx, {
       orgId,
@@ -15627,9 +15654,13 @@ async function applyExemptedLeaveOrOvertimeEffects(trx, {
     if (leaveTypeCode !== 'annual') {
       const offsetPolicy = settings?.leaveBalanceDeductionPolicy
       if (offsetPolicy?.enabled === true) {
-        const rule = (offsetPolicy.rules || []).find((entry) => entry.requestLeaveType === leaveTypeCode)
-        const pool = rule?.deductFrom?.[0]
-        if (rule && pool && pool !== 'unpaid') {
+        const offsetRules = Array.isArray(offsetPolicy.rules) ? offsetPolicy.rules : []
+        const offsetRule = offsetRules.find((entry) => entry.requestLeaveType === leaveTypeCode)
+        const pool = offsetRule?.deductFrom?.[0]
+        if (offsetRule && pool && pool !== 'unpaid') {
+          // Same helper as final approval (#6015). Reject before any partial
+          // deduction and before loadApprovedMinutes projects the full request.
+          rejectLeaveOffsetPartialAbsence(offsetRule, HttpError)
           await deductLeaveBalance(trx, {
             orgId,
             userId,
@@ -15639,7 +15670,6 @@ async function applyExemptedLeaveOrOvertimeEffects(trx, {
             insufficientCode: 'LEAVE_OFFSET_BALANCE_INSUFFICIENT',
             insufficientLabel: `Leave offset (${leaveTypeCode}→${pool})`,
             sourceId: requestId,
-            mode: rule.insufficient === 'partial_unpaid_absence' ? 'partial' : 'block',
           })
         }
       }
@@ -25146,9 +25176,13 @@ module.exports = {
   },
   __attendanceApprovalExemptionForTests: {
     ATTENDANCE_APPROVAL_FLOW_REQUIRED,
+    EXEMPT_OVERTIME_CREDIT_PENDING_CODE,
     attendanceRequestSkipsApproval,
     loadApprovalFlow,
     resolveGenericApprovalFlow,
+    exemptOvertimeCreditPolicyBlocksSubmission,
+    rejectExemptOvertimeWhenCreditPolicyEnabled,
+    applyExemptedLeaveOrOvertimeEffects,
   },
   __attendanceApprovalCenterForTests: {
     ATTENDANCE_APPROVAL_WORKFLOW_KEY,
@@ -33975,6 +34009,9 @@ module.exports = {
           subjectUserId: route.actorId,
           requestNamedOrgId: route.requestNamedOrgId,
         }))
+        if (draft.requestType === 'overtime') {
+          rejectExemptOvertimeWhenCreditPolicyEnabled(await getSettings(trx))
+        }
       } else {
         const stamped = await upsertAttendanceApprovalInstance(trx, approvalPayload)
         stampedOrgId = stamped.orgId
