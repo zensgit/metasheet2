@@ -465,6 +465,7 @@ import { useRoute } from 'vue-router'
 import type { FormConfig, FormField, FormResponse } from '../types/views'
 import { ViewManager } from '../services/ViewManager'
 import { useAuth } from '../composables/useAuth'
+import { findUserRegexLengthRefusal } from '../utils/userRegexLimits'
 
 // Props and route
 const route = useRoute()
@@ -647,6 +648,14 @@ function validateField(field: FormField, value: any): string | null {
       return `${field.label} 不能超过 ${validation.maxLength} 个字符`
     }
     if (validation.pattern) {
+      // Same length limits as the backend's pattern rule (utils/userRegexLimits.ts):
+      // a value over the limit is refused before the pattern runs on it.
+      const refusal = findUserRegexLengthRefusal(validation.pattern.length, value.length)
+      if (refusal) {
+        return refusal.kind === 'subject-too-long'
+          ? `${field.label} 不能超过 ${refusal.limit} 个字符`
+          : `${field.label} 的格式规则过长，无法校验`
+      }
       const regex = new RegExp(validation.pattern)
       if (!regex.test(value)) {
         return `${field.label} 格式不正确`
