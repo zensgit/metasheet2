@@ -22,6 +22,17 @@ mutation 一律 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`。
 | token 普查 | Part O9 §O9.5(本 head 现算) |
 | NOT RUN | core-backend 全量(在栈顶跑);生产语料普查;`sign`+`skipped` 端到端夹具;C-2 / 投影逐提交重放(L-D) |
 
-## 2. 栈中 `fix/approval-legacy-approve-seat-and-node-attribution-on-r9` —— 由该分支追加
+## 2. 栈中 `fix/approval-legacy-approve-seat-and-node-attribution-on-r9`
+
+| 项 | 读数 |
+|---|---|
+| 重放 | RC 4 提交(`09d0275726…` 相对 `5edf4c3e17…`)`cherry-pick -x`;冲突只在 `routes/approvals.ts` 三个 hunk,按设计 MD §3.1 解(F4 (i)(b));`ApprovalProductService.ts` / `vitest.config.ts` 自动合并 |
+| `tsc --noEmit` | EXIT 0 / 0 行(重放后、改测试后各一次) |
+| RC 并入、改测试**前**,creation 件 + RC 自带件 | **18 failed / 57 passed (75)**:18 条红全部是栈底驱动 legacy 门的腿(6 条「无席位者被拒 403」+ 12 条「有席位者的行被服务端归属」),RC 自带 11 条全绿 —— 这是裁决 (c) 落地后的**预期**,不是缺陷;每条按本门行为重写(设计 MD §3.2) |
+| 改测试**后**:八件 cancel-round + RC 自带件 + 两邻居 | **11 files / 133 passed / 0 failed**(creation 66 = 64 + `V1(a)` `V2(a)`;RC 11;邻居 7;其余 cancel-round 件与栈底同数) |
+| `approval-cancel-round-outlet-guards` #7/#7′(legacy 门 × 撤销轮 × 席位持有人) | 仍 409 `CANCEL_ROUND_OUTLET_FORBIDDEN`(席位闸放行后出口守卫生效,= F4 (i)(b) 的「有席位 ⇒ 409」格) |
+| Mutation 网格(`routes/approvals.ts`,sha256 `51ed120018a10e11e75043f5a52ea0e45eed320cd3ed95a6272bc68a29fdd8f2`,每格 `cp` 备份 → 改 → 跑 creation 整件 → 还原 → `cmp`) | **M-rc-gate**(两扇门的席位闸关掉 `if (!seat.allowed)` → `if (false)`)⇒ **7 红**:`N13(a)` `N20(a)` `N21(a)` `P27(a)` `P29(a)` `P33(a)` `V1(a)` —— 恰为「无席位者被拒」族 + v3b 动作 1;**M-rc-attr**(两扇门的服务端归属关掉 `nodeKey: seat.nodeKey` → `null`)⇒ **13 红**:`P12(a)` `N7(a)` `N8(a)` `P13(a)` `N9(a)` `P19(a)` `N11(a)` `P20(a)` `P21(a)` `N14(a)` `N15(a)` `N18(a)` `N19(a)` —— 恰为「行被服务端归属」族(+ 既有的 `P20(a)`);**M-rc-order**(`/approve` 门把出口守卫挪到席位闸之前,= F4 (i)(a))⇒ **1 红**:`V1(a)`(无席位者对撤销轮得 409 而非 403),`V2(a)` 不动 |
+| 门审第 5 轮 P1 的形状(`P29(a)`) | **本栈关闭**:legacy 写入在席位闸处被拒(403,零行,回应与普通实例逐字节相同),诚实结尾后 `{A, E}` = HONEST6;M-rc-gate 下红 ⇒ 关闭由席位闸承重 |
+| NOT RUN | core-backend 全量(栈顶跑);RC 自带 standalone workflow 在 CI 的实跑(零 PR);生产语料普查 |
 
 ## 3. 栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9` —— 由该分支追加
