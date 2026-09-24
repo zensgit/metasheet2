@@ -73,8 +73,8 @@
  * CLASSIFICATION: DDL (the ledger table, CREATE TABLE IF NOT EXISTS) + DML (the backfill).
  *
  * IDEMPOTENT: predicate 2 makes a replay a no-op (0 rows, 0 ledger inserts). `down()` restores
- * only ledger rows whose binding still carries the connection id the ledger recorded and has not
- * regained a pointer, deletes those ledger rows, and drops the ledger only when it is empty — a
+ * only ledger rows whose binding still carries the connection id, tenant and owner stamp the ledger
+ * recorded and has not regained a pointer, deletes those ledger rows, and drops the ledger only when it is empty — a
  * binding re-bound by a human after the backfill is left as the human left it, with its ledger
  * row kept as evidence.
  *
@@ -127,6 +127,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   //     the committed new version. A concurrent soft-delete / owner change / tenant change of the
   //     source therefore either finishes first (and the candidate drops out) or waits until the
   //     backfill commits.
+  //
+  // LOCKING COST (operator note). The share lock on every candidate source is held until the
+  // migrate batch COMMITS; for that whole time UPDATE/DELETE on those data_sources rows (edit,
+  // soft-delete, owner transfer) blocks. With several candidates the lock order is interleaved per
+  // row (ds1 -> b1 -> ds2 -> b2 ...), so a concurrent writer that takes the same rows in any order
+  // other than "source first, then binding" can deadlock with it (SQLSTATE 40P01). PostgreSQL then
+  // aborts one side; if it is the migration, the whole transaction rolls back — including the
+  // ledger table, which is created in the same transaction — and simply re-running migrate is safe.
+  //
+  // LEDGER UPSERT (Sf7, deliberate). `ON CONFLICT (binding_id) DO UPDATE` overwrites a ledger row
+  // that an earlier down() kept as evidence (binding changed by a human after the backfill) when a
+  // later up() backfills that binding again. The ledger must describe the data as it now is, so
+  // down() can restore exactly this backfill; the older evidence is intentionally replaced.
   await sql`
     WITH hit AS (
       SELECT
@@ -184,8 +197,13 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   if (!(await checkTableExists(db, LEDGER_TABLE))) return
   if (await checkTableExists(db, 'integration_external_systems')) {
     // Restore ONLY rows this migration changed and that still look the way it left them:
-    // same connection id, no pointer regained, still sql-readonly. Anything a human re-bound in
-    // between is left alone (its ledger row stays as evidence and keeps the table from dropping).
+    // same connection id, no pointer regained, still sql-readonly, still the SAME tenant and the
+    // SAME owner stamp the ledger recorded (mirrors up()'s re-checks: a binding moved to another
+    // tenant, or re-stamped to another owner, after the backfill must not be turned back into a
+    // legacy pointer at the old tenant's / old owner's source). Anything a human changed in between
+    // is left alone (its ledger row stays as evidence and keeps the table from dropping). These are
+    // all predicates on `b`, so they are re-evaluated on the committed row if down() waits on a
+    // concurrent writer's row lock.
     await sql`
       WITH restored AS (
         UPDATE integration_external_systems AS b
@@ -195,6 +213,8 @@ export async function down(db: Kysely<unknown>): Promise<void> {
         WHERE b.id = l.binding_id
           AND b.kind = ${SQL_READONLY_KIND}
           AND b.connection_id = l.connection_id
+          AND b.tenant_id = l.tenant_id
+          AND b.config->>'dataSourceOwnerId' = l.legacy_data_source_owner_id
           AND NOT (b.config ? 'dataSourceId')
           AND l.migration_name = ${MIGRATION_NAME}
         RETURNING b.id AS binding_id

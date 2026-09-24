@@ -126,16 +126,20 @@ describeDb('zzzz20260920150000 backfill vs concurrent writers (real DB, two conn
   }
 
   /**
-   * W runs `writerSql` in an open transaction; the migration's up() starts; the observer must see
-   * the migration blocked on a lock; W commits; the migration must commit.
+   * W runs `writerSql` in an open transaction; the migration's up() (or down()) starts; the observer
+   * must see the migration blocked on a lock; W commits; the migration must commit.
    */
   async function raceUpAgainst(writerSql: string): Promise<{ blocked: boolean; outcome: string }> {
+    return raceAgainst(writerSql, 'up')
+  }
+
+  async function raceAgainst(writerSql: string, direction: 'up' | 'down'): Promise<{ blocked: boolean; outcome: string }> {
     await writer.query('BEGIN')
     await writer.query(writerSql)
     let outcome = 'pending'
     const inflight = migrationDb
       .transaction()
-      .execute((tx) => up(tx))
+      .execute((tx) => (direction === 'up' ? up(tx) : down(tx)))
       .then(
         () => { outcome = 'committed' },
         (err: { code?: string; message?: string }) => { outcome = err.code || err.message || 'error' },
@@ -144,8 +148,8 @@ describeDb('zzzz20260920150000 backfill vs concurrent writers (real DB, two conn
     for (let n = 0; n < 400 && outcome === 'pending'; n++) {
       const r = await observer.query(
         `SELECT 1 FROM pg_stat_activity
-          WHERE application_name = $1 AND wait_event_type = 'Lock' AND query LIKE '%WITH hit AS%'`,
-        [migrationApp],
+          WHERE application_name = $1 AND wait_event_type = 'Lock' AND query LIKE $2`,
+        [migrationApp, direction === 'up' ? '%WITH hit AS%' : '%WITH restored AS%'],
       )
       if (r.rowCount) { blocked = true; break }
       await new Promise((resolve) => setTimeout(resolve, 25))
@@ -305,6 +309,33 @@ describeDb('zzzz20260920150000 backfill vs concurrent writers (real DB, two conn
       connection_id: 'source_a',
       config: { dataSourceOwnerId: 'owner_a', note: 'touched' },
     })
+    expect((await binding()).config).not.toHaveProperty('dataSourceId')
+    expect(await ledger()).toEqual([{ binding_id: 'binding_a', connection_id: 'source_a' }])
+    expectInterleavedAndCommitted(race)
+  })
+
+  it('down(): a binding moved to another tenant after the backfill is NOT turned back into a legacy pointer (Sf4)', async () => {
+    await migrationDb.transaction().execute((tx) => up(tx))
+    const race = await raceAgainst(
+      `UPDATE integration_external_systems SET tenant_id = 'tenant_b', updated_at = NOW() WHERE id = 'binding_a'`,
+      'down',
+    )
+    expect(await binding()).toMatchObject({ tenant_id: 'tenant_b', connection_id: 'source_a' })
+    expect((await binding()).config).not.toHaveProperty('dataSourceId')
+    // its ledger row is kept as evidence (and keeps the ledger table from being dropped)
+    expect(await ledger()).toEqual([{ binding_id: 'binding_a', connection_id: 'source_a' }])
+    expectInterleavedAndCommitted(race)
+  })
+
+  it('down(): a binding re-stamped to another owner after the backfill is NOT turned back into a legacy pointer (Sf5)', async () => {
+    await migrationDb.transaction().execute((tx) => up(tx))
+    const race = await raceAgainst(
+      `UPDATE integration_external_systems
+          SET config = jsonb_set(config, '{dataSourceOwnerId}', '"owner_z"'), updated_at = NOW()
+        WHERE id = 'binding_a'`,
+      'down',
+    )
+    expect(await binding()).toMatchObject({ connection_id: 'source_a', config: { dataSourceOwnerId: 'owner_z' } })
     expect((await binding()).config).not.toHaveProperty('dataSourceId')
     expect(await ledger()).toEqual([{ binding_id: 'binding_a', connection_id: 'source_a' }])
     expectInterleavedAndCommitted(race)

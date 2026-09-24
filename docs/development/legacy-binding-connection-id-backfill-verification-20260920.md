@@ -132,3 +132,10 @@
 - 内存级变异（vite transform 在加载时改迁移源码，不落盘）：去掉全部 6 条 UPDATE 复核 → 7 红；逐条去掉 kind / `connection_id IS NULL` / 标记 / tenant / 指针 / owner 戳 → 各恰好 1 条对应用例红；去掉 `FOR SHARE OF ds` → 源 owner 变更（行被写入）与源软删（迁移以 23503 中止）2 红；账本改回从候选喂 → 7 红；恢复 → 12 绿。
 - CI：该文件从默认无库 vitest 配置排除（不会被收集后跳绿），整文件接入独立车道 `.github/workflows/legacy-binding-backfill-race-realdb.yml`（postgres:16 service、`EXPECT_DB=1`）；不改 s6a 钉住的 `plugin-tests.yml`。
 - 生产普查与应用仍须 owner 授权。
+
+## 10. 复审补充：down() 对齐 up()、锁代价、Sf7
+
+- `down()` 的 WHERE 补 `b.tenant_id = l.tenant_id` 与 `b.config->>'dataSourceOwnerId' = l.legacy_data_source_owner_id`。反例（独立核验 Sf4/Sf5）：回填后绑定被移到另一租户，或 owner 戳改成别人，旧 `down()` 仍会把它退回成指向原租户 / 原 owner 源的 legacy 指针。
+- 竞争回归新增 2 条（两连接，写入者持锁时 `down()` 起跑、第三连接确认等待、写入者提交）：Sf4 租户迁移、Sf5 owner 戳改写 → 行保持写入者的结果、账本行保留作证据。套件共 14 条。
+- 内存级变异：去掉 `down()` 的 tenant 条件 → 只有 Sf4 红；去掉 owner 戳条件 → 只有 Sf5 红；恢复 → 14 绿。之前的 `up()` 变异照旧（去全部 6 条复核 → 7 红；去 `FOR SHARE OF ds` → 2 红）。
+- 锁代价与 40P01、Sf7 账本 upsert 覆盖证据行：见设计文档 §5 与迁移 `up()` 注释（LOCKING COST / LEDGER UPSERT）。

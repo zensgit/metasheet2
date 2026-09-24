@@ -62,10 +62,14 @@
 
 **并发（窗口 8 复审 F1）**：READ COMMITTED 下 `hit` 候选来自语句快照；UPDATE 等到并发写入者的行锁后，是在对方已提交的新行版本上写。初版 UPDATE 只按 `b.id = hit.binding_id` 写，会把期间已提交的合法重绑（legacy → canonical B）覆盖回 A，账本也记 A。修法两道：① UPDATE 自己的 WHERE 对**正在写的当前行**逐条复核绑定侧条件（kind、`connection_id IS NULL`、回滚标记、tenant、指针 == 候选、owner 戳 == 候选），PG 在锁等待后会对新行版本重新求值（EvalPlanQual），不满足即跳过；② 候选 CTE `FOR SHARE OF ds` 锁住所 join 的源行，源的软删 / owner 变更 / 租户变更要么先提交（候选按新版本重判后掉出），要么等本迁移提交。两道各有两连接实库回归（`tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts`），逐条去掉均红。
 
+**锁代价（运维须知）**：迁移对所有候选源持 `FOR SHARE`，直到 migrate 批次提交；期间这些数据源的更新（编辑、软删、owner 移交）都会被阻塞。多行计划下锁序是逐行交错的 ds1 → b1 → ds2 → b2 …，与「先锁源再改绑定」以外顺序的写入者可能 40P01 死锁；PG 中止其中一方，若中止的是迁移，整体回滚（账本表在同一事务内创建，一并回滚），直接重跑 migrate 即可。
+
+**账本 upsert（Sf7，有意为之）**：`ON CONFLICT (binding_id) DO UPDATE` 会覆盖此前 `down()` 保留下来的证据行（回填后被人改过的绑定，之后又被再次回填时）。账本必须描述数据当前的样子，`down()` 才能准确恢复这一次回填，所以旧证据被有意替换。
+
 ## 6. 幂等与 `down()` 的选择性
 
 - 重放：谓词 2 让第二次 `up()` 命中 0 行、账本 0 插入（PG 实证：行与账本逐字节相同，`backfilled_at` 不变）。
-- `down()`（`:146-177`）只恢复**账本里有、且行仍是本迁移留下的样子**的行：`kind` 仍 sql-readonly、`connection_id` 仍等于账本记录值、`config` 里没有重新出现 `dataSourceId`、`migration_name` 匹配。恢复即删对应账本行；账本**空了才 DROP**。人在回填后重绑过的行原样保留，其账本行留作证据、表不删（PG 实证：重绑 `b_ok2` 后 `down()` 只恢复 `b_ok1`，账本剩 `b_ok2` 一行）。
+- `down()` 只恢复**账本里有、且行仍是本迁移留下的样子**的行：`kind` 仍 sql-readonly、`connection_id` 仍等于账本记录值、`tenant_id` 与 owner 戳（`config->>'dataSourceOwnerId'`）仍等于账本记录值（与 `up()` 的复核对齐，复审 Sf4/Sf5）、`config` 里没有重新出现 `dataSourceId`、`migration_name` 匹配。恢复即删对应账本行；账本**空了才 DROP**。人在回填后重绑过的行原样保留，其账本行留作证据、表不删（PG 实证：重绑 `b_ok2` 后 `down()` 只恢复 `b_ok1`，账本剩 `b_ok2` 一行）。
 - 切换迁移的 `down()` 会不会撞上本账本？切换迁移 `down()` 只删自己加的列/约束，账本是独立表，互不影响；但**回滚顺序必须是本迁移先 down**（否则 `connection_id` 列被删，本 `down()` 的 UPDATE 会失败——迁移框架本身就按逆序回滚）。
 
 ## 7. 与切换迁移在指针匹配上的一处刻意差异
