@@ -3553,4 +3553,439 @@ describeIfDatabase('createCancelRoundInstance (WI-4): creation', () => {
     // 读法 (a) 下是 **一席**。撤销节点是 `approvalMode: 'all'`,所以这就是会签门槛 2 → 1。
     expect(seats.length).toBe(1)
   })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // r9 —— 门审第 5 轮的三条处置(P1 休眠 / P2-1 修法 / P2-2 构造),全部落在同一个三节点走位夹具上
+  //
+  //   `start → approval_role → approval_a → approval_c → end` + 委托 A→D(与 `roleNodeDelegatedThirdOriginal`
+  //   同一张图),但每一段走位都可选:
+  //     · `roleApprover`   —— 角色节点(epoch 1)由谁走 `/actions` 亲自按:D 自己,或第三人 E;
+  //     · `reentry`        —— 在 `approval_a` 上 D 以 A 的代理走 `action:'return'` 退回角色节点,再由
+  //                            `reapprover` 在 epoch 2 按一次(端到端重入,不是夹具级 INSERT);
+  //     · `delegatedNode`  —— A 的节点怎么离开:`'honest'` D 以 A 的代理结掉;`'adminJump'` 管理员走
+  //                            `POST /:id/jump` 跳到 `approval_c`;`'timeoutJump'` 节点超时效果
+  //                            (`timeout.effect = 'jump'`)由 `applyNodeTimeoutEffect` 跳到 `approval_c`;
+  //     · `closer`         —— 第三个节点怎么结:`'thirdPartyE'` E 走 `/actions`;`'forgedRole'` D 走
+  //                            legacy `POST /:id/approve` 把 `metadata.nodeKey` 报成角色节点(整单因此结束)。
+  //   每条腿都先断言自己的前置形状(席位行、approve 行、jump 行),再读撤销轮的答案。
+  //
+  //   三组读数(全部实测,不是预测):
+  //     · P28(a)/P29(a)  —— 角色节点由 E 决定、D 诚实结掉 A 的节点;第三个节点由 E 结(诚实)或由 D 走
+  //                        legacy 报角色节点。**r9 休眠**:后者的答案钉成今天的数据,它随 RC(根因 (c),
+  //                        legacy 路由自写 `nodeKey` + 席位闸)落地而关闭 —— 到那时这条腿会红并点名自己;
+  //     · P30(a)/P31(a)/P32(a) —— owner 2026-09-25 裁决「管理员跳过(及超时跳过)的节点不计入判定」:
+  //                        被跳过的 A 节点不再把诚实单据判成永久不可撤销;席位是 {D, E}(A 从未决定过
+  //                        任何东西,那个节点是被系统跳过的,没有可还原的席位);无跳过的孪生腿答 {A, D, E};
+  //     · N21(a)/P33(a)/P34(a) —— 节点重入端到端构造(设计 MD §3.5.6 第三行由 NOT CONSTRUCTED 改为
+  //                        CONSTRUCTED):重入让同一个成员在角色节点上的可占席位数随 epoch 增长。
+  //                        `N21(a)` 是占位容量合取在**已重入**节点上的隔离见证(D 两个 epoch 都亲自按,
+  //                        再多一条 legacy 行 ⇒ 3 行 > 2 席,只有容量判死它);`P33(a)` 钉 epoch 2 由 E
+  //                        按时的今天答案(1 诚实 + 1 legacy ≤ 2 席 ⇒ 放行)—— 已登记残留,随 RC 关闭;
+  //                        `P34(a)` 是它们的诚实孪生(两 epoch 都由 D 按、E 结第三节点 ⇒ {A, D, E})。
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Mirrors `approval-cancel-round-node-timeout-effect.db.test.ts`'s own `forceDeadlineOverdue`: the
+   * activation metrics writes are unawaited best-effort calls, so wait for the `approval_metrics` row
+   * to settle before stamping the deadline overdue and naming the effect the scanner would pass.
+   */
+  async function forceNodeDeadlineOverdue(instanceId: string, effect: 'jump'): Promise<void> {
+    let prev = ''
+    let stable = 0
+    for (let attempt = 0; attempt < 60 && stable < 3; attempt++) {
+      const row = await pool().query<{ current_node_deadline_at: unknown; current_node_timeout_effect: string | null }>(
+        `SELECT current_node_deadline_at, current_node_timeout_effect FROM approval_metrics WHERE instance_id = $1`,
+        [instanceId],
+      )
+      const sig = `${row.rows[0]?.current_node_timeout_effect ?? 'null'}|${row.rows[0]?.current_node_deadline_at ? 'set' : 'null'}`
+      stable = sig === prev ? stable + 1 : 0
+      prev = sig
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(stable).toBeGreaterThanOrEqual(3)
+    const updated = await pool().query(
+      `UPDATE approval_metrics
+         SET current_node_deadline_at = now() - INTERVAL '1 minute',
+             current_node_timeout_effect = $2
+       WHERE instance_id = $1
+       RETURNING instance_id`,
+      [instanceId, effect],
+    )
+    expect(updated.rows).toHaveLength(1)
+  }
+
+  async function roleNodeDelegatedThirdWalk(
+    label: string,
+    opts: {
+      roleApprover: 'delegateeD' | 'otherUserE'
+      reentry?: { reapprover: 'delegateeD' | 'otherUserE' }
+      delegatedNode: 'honest' | 'adminJump' | 'timeoutJump'
+      closer: 'thirdPartyE' | 'forgedRole'
+    },
+  ): Promise<{
+    documentId: string
+    requesterId: string
+    delegatorA: string
+    delegateeD: string
+    otherUserE: string
+    adminId: string
+    roleSeatRows: number
+  }> {
+    const suffix = `${label}-${TS}`
+    const requesterId = `wi4-r9req-${suffix}`
+    const delegatorA = `wi4-r9A-${suffix}`
+    const delegateeD = `wi4-r9D-${suffix}`
+    const otherUserE = `wi4-r9E-${suffix}`
+    const adminId = `wi4-r9adm-${suffix}`
+    const delegationId = `wi4-r9deleg-${suffix}`
+    await grantWrite(requesterId)
+    const adminToken = await authToken(baseUrl, adminId)
+    const requesterToken = await authToken(baseUrl, requesterId)
+    await authToken(baseUrl, delegatorA)
+    const tokenD = await authToken(baseUrl, delegateeD)
+    const tokenE = await authToken(baseUrl, otherUserE)
+    // Production-shaped memberships for BOTH role-node candidates (the credential in conjunct (1)
+    // reads `user_roles`, never the dev token's `roles` claim).
+    await grantRoleMembership(delegateeD, 'admin')
+    await grantRoleMembership(otherUserE, 'admin')
+
+    createdDelegationIds.add(delegationId)
+    await pool().query(
+      `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+       VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+      [delegationId, delegatorA, delegateeD],
+    )
+
+    const templateId = await publishGraphTemplate(
+      adminToken,
+      {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_role',
+            type: 'approval',
+            config: { assigneeType: 'role', assigneeIds: ['admin', 'auditor'], approvalMode: 'single' },
+          },
+          {
+            key: 'approval_a',
+            type: 'approval',
+            config: {
+              assigneeType: 'user',
+              assigneeIds: [delegatorA],
+              approvalMode: 'single',
+              // The timeout-jump leg needs a SHIPPED timeout config on the node the scanner skips;
+              // the other legs never arm the deadline, so the config is inert for them.
+              ...(opts.delegatedNode === 'timeoutJump'
+                ? { timeout: { afterMinutes: 60, effect: 'jump', jumpToNodeKey: 'approval_c' } }
+                : {}),
+            },
+          },
+          {
+            key: 'approval_c',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: [otherUserE], approvalMode: 'single' },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-r', source: 'start', target: 'approval_role' },
+          { key: 'e-r-a', source: 'approval_role', target: 'approval_a' },
+          { key: 'e-a-c', source: 'approval_a', target: 'approval_c' },
+          { key: 'e-c-end', source: 'approval_c', target: 'end' },
+        ],
+      } as unknown as ReturnType<typeof oneNodeGraph>,
+      label,
+    )
+
+    const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason: 'r' } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const documentId = ((await create.json()) as { id: string }).id
+    createdApprovalIds.add(documentId)
+
+    const expectedRecords: Array<{ actor_id: string; node_key: string | null }> = []
+    const roleToken = opts.roleApprover === 'delegateeD' ? tokenD : tokenE
+    const first = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, roleToken, {
+      method: 'POST',
+      body: { action: 'approve' },
+    })
+    expect(first.status, `approval_role (epoch 1): ${await first.clone().text()}`).toBe(200)
+    expectedRecords.push({ actor_id: opts.roleApprover === 'delegateeD' ? delegateeD : otherUserE, node_key: 'approval_role' })
+
+    if (opts.reentry) {
+      // END-TO-END re-entry through the shipped `return` action: D, sitting at `approval_a` as A's
+      // delegate, sends the document back to the role node; the executor re-activates it with a NEW
+      // entry epoch and lands a fresh set of role seat rows (the old ones stay as inactive history).
+      const sendBack = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'return', targetNodeKey: 'approval_role', comment: 'r9 re-entry' },
+      })
+      expect(sendBack.status, `return to approval_role: ${await sendBack.clone().text()}`).toBe(200)
+      const reToken = opts.reentry.reapprover === 'delegateeD' ? tokenD : tokenE
+      const again = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, reToken, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(again.status, `approval_role (epoch 2): ${await again.clone().text()}`).toBe(200)
+      expectedRecords.push({ actor_id: opts.reentry.reapprover === 'delegateeD' ? delegateeD : otherUserE, node_key: 'approval_role' })
+    }
+
+    // Precondition, asserted rather than assumed: A's node is where the document sits now, and the
+    // seat there is D's DELEGATED one (delegatedFrom = A). Every variant below leaves this node one
+    // way or another; the leg's reading is only meaningful if the seat was really there to leave.
+    const seatAtA = await pool().query<{ assignee_id: string; df: string | null; is_active: boolean }>(
+      `SELECT assignee_id, metadata->>'delegatedFrom' AS df, is_active
+         FROM approval_assignments WHERE instance_id = $1 AND node_key = 'approval_a' AND is_active = TRUE`,
+      [documentId],
+    )
+    expect(seatAtA.rows).toEqual([{ assignee_id: delegateeD, df: delegatorA, is_active: true }])
+
+    if (opts.delegatedNode === 'honest') {
+      const second = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(second.status, `approval_a: ${await second.clone().text()}`).toBe(200)
+      expectedRecords.push({ actor_id: delegateeD, node_key: 'approval_a' })
+    } else if (opts.delegatedNode === 'adminJump') {
+      const versionRow = await pool().query<{ version: number }>(`SELECT version FROM approval_instances WHERE id = $1`, [
+        documentId,
+      ])
+      const jump = await jsonRequest(baseUrl, `/api/approvals/${documentId}/jump`, adminToken, {
+        method: 'POST',
+        body: { version: versionRow.rows[0].version, targetNodeKey: 'approval_c', reason: 'r9 admin jump' },
+      })
+      expect(jump.status, `admin jump: ${await jump.clone().text()}`).toBe(200)
+    } else {
+      await forceNodeDeadlineOverdue(documentId, 'jump')
+      const outcome = await new ApprovalProductService().applyNodeTimeoutEffect(documentId, 'jump')
+      expect(outcome).toBe('applied')
+    }
+
+    if (opts.delegatedNode !== 'honest') {
+      // The SERVER-WRITTEN skip evidence the fix reads: exactly one `jump` audit row, stamped by the
+      // administrator's route or by the timeout scanner, whose `oldAssignees` names D's delegated seat
+      // at `approval_a` — the seat the jump deactivated without a decision.
+      const jumpRows = await pool().query<{ admin_jump: string | null; timeout_effect: string | null; old: unknown }>(
+        `SELECT metadata->>'adminJump' AS admin_jump, metadata->>'timeoutEffect' AS timeout_effect,
+                metadata->'oldAssignees' AS old
+           FROM approval_records WHERE instance_id = $1 AND action = 'jump'`,
+        [documentId],
+      )
+      expect(jumpRows.rows).toHaveLength(1)
+      expect(opts.delegatedNode === 'adminJump' ? jumpRows.rows[0].admin_jump : jumpRows.rows[0].timeout_effect).toBe('true')
+      const skipped = (jumpRows.rows[0].old as Array<{ assigneeId: string; nodeKey: string | null }>).map((entry) => ({
+        assigneeId: entry.assigneeId,
+        nodeKey: entry.nodeKey,
+      }))
+      expect(skipped).toEqual([{ assigneeId: delegateeD, nodeKey: 'approval_a' }])
+      const rowsAtA = await pool().query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM approval_records
+          WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_a'`,
+        [documentId],
+      )
+      expect(rowsAtA.rows[0]?.n).toBe('0')
+    }
+
+    if (opts.closer === 'thirdPartyE') {
+      const third = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenE, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(third.status, `approval_c: ${await third.clone().text()}`).toBe(200)
+      expectedRecords.push({ actor_id: otherUserE, node_key: 'approval_c' })
+    } else {
+      const versionRow = await pool().query<{ version: number }>(`SELECT version FROM approval_instances WHERE id = $1`, [
+        documentId,
+      ])
+      const legacy = await jsonRequest(baseUrl, `/api/approvals/${documentId}/approve`, tokenD, {
+        method: 'POST',
+        body: { version: versionRow.rows[0].version, metadata: { nodeKey: 'approval_role' } },
+      })
+      expect(legacy.status, `legacy: ${await legacy.clone().text()}`).toBe(200)
+      expectedRecords.push({ actor_id: delegateeD, node_key: 'approval_role' })
+    }
+
+    const seats = await pool().query<{ node_key: string | null; assignment_type: string; assignee_id: string; df: string | null }>(
+      `SELECT node_key, assignment_type, assignee_id, metadata->>'delegatedFrom' AS df
+         FROM approval_assignments WHERE instance_id = $1 ORDER BY node_key, assignee_id`,
+      [documentId],
+    )
+    const roleSeatRows = seats.rows.filter((row) => row.node_key === 'approval_role').length
+    // Two role ids ⇒ two seat rows per entry epoch: re-entry doubles the count (the re-entry legs
+    // assert this explicitly), nothing else changes it.
+    expect(roleSeatRows).toBe(opts.reentry ? 4 : 2)
+    // A's delegated seat row(s) on the original are never rewritten by anything below.
+    const delegatedRowsAtA = seats.rows.filter((row) => row.node_key === 'approval_a')
+    expect(delegatedRowsAtA.length).toBe(opts.reentry ? 2 : 1)
+    for (const row of delegatedRowsAtA) {
+      expect(row).toEqual({ node_key: 'approval_a', assignment_type: 'user', assignee_id: delegateeD, df: delegatorA })
+    }
+    const records = await pool().query<{ actor_id: string; node_key: string | null }>(
+      `SELECT actor_id, metadata->>'nodeKey' AS node_key
+         FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY id`,
+      [documentId],
+    )
+    expect(records.rows).toEqual(expectedRecords)
+    const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [
+      documentId,
+    ])
+    expect(status.rows[0]?.status).toBe('approved')
+    return { documentId, requesterId, delegatorA, delegateeD, otherUserE, adminId, roleSeatRows }
+  }
+
+  it('§2-G3 第三句 正控 P28(a)(门审第 5 轮 HONEST6,`P29(a)` 的诚实兄弟腿)— 角色节点由第三人 E 决定、D 诚实地结掉 A 的节点、E 结第三个节点:席位是 {A, E} **两席**,D 不占席位', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-honest6', {
+      roleApprover: 'otherUserE',
+      delegatedNode: 'honest',
+      closer: 'thirdPartyE',
+    })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'an honest document must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(2)
+    expect(attempt.seats).not.toContain(fixture.delegateeD)
+  })
+
+  it('§2-G3 第三句 负控 P29(a)(门审第 5 轮点名的形状,**r9 休眠 —— 钉今天的答案**)— 与 P28(a) 只差最后一步:第三个节点由 D 走 legacy 报角色节点。今天不阻断、席位 {A, D, E}(D 多拿一席);这条路径随 RC(根因 (c))落地而关闭,届时本腿会红并点名自己', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-p1-dormant', {
+      roleApprover: 'otherUserE',
+      delegatedNode: 'honest',
+      closer: 'forgedRole',
+    })
+    // 前置:三条合取在 D 的角色行上今天都成立 —— 成员记录在库里、D 在角色节点恰 1 行、A 的节点由 D
+    // 诚实结掉(所以结算合取过)。少了这三句,读数可能来自别的臂。
+    const membership = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`,
+      [fixture.delegateeD],
+    )
+    expect(membership.rows[0]?.n).toBe('1')
+    const actorRowsAtRoleNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_role'`,
+      [fixture.documentId, fixture.delegateeD],
+    )
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('1')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // MEASURED on this head, and NOT a claim that it is right: the honest twin `P28(a)` answers
+    // {A, E}. The delta is one row whose `nodeKey` came out of a request body, and nothing on this
+    // branch can tell that row from a decision. The closure is the legacy route writing its own
+    // node attribution and seat-gating the write (root cause (c), a separate candidate); on the
+    // branch that carries it this leg is rewritten to the closed answer.
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(3)
+  })
+
+  it('§2-G3 第三句 正控 P30(a)(门审第 5 轮 P2-1 ADMINJUMP;owner 2026-09-25 裁决落地)— 零伪造:D 按角色节点、管理员把 A 的节点**跳过**、E 结第三个节点 ⇒ **不阻断**,席位 {D, E}(A 从未决定过任何东西,被跳过的节点没有可还原的席位)', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-adminjump', {
+      roleApprover: 'delegateeD',
+      delegatedNode: 'adminJump',
+      closer: 'thirdPartyE',
+    })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'a document whose delegated node was skipped by an admin jump must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegateeD, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(2)
+    expect(attempt.seats).not.toContain(fixture.delegatorA)
+  })
+
+  it('§2-G3 第三句 正控 P31(a)(ADMINJUMP 的无跳过孪生 / 门槛见证)— 同一张图、同样的人,只是没有人跳过 A 的节点(D 以 A 的代理结掉它):席位 {A, D, E} **三席**', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-adminjump-cf', {
+      roleApprover: 'delegateeD',
+      delegatedNode: 'honest',
+      closer: 'thirdPartyE',
+    })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'an honest document must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(3)
+  })
+
+  it('§2-G3 第三句 正控 P32(a)(P2-1 的超时跳过同族)— 零伪造:A 的节点由**节点超时效果**(`timeout.effect = jump`,`applyNodeTimeoutEffect`)跳过,其余与 P30(a) 相同 ⇒ 不阻断,席位 {D, E}', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-timeoutjump', {
+      roleApprover: 'delegateeD',
+      delegatedNode: 'timeoutJump',
+      closer: 'thirdPartyE',
+    })
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'a document whose delegated node was skipped by a timeout jump must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegateeD, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(2)
+    expect(attempt.seats).not.toContain(fixture.delegatorA)
+  })
+
+  it('§2-G3 第三句 正控 P34(a)(重入的诚实孪生 / 门槛见证)— 端到端节点重入:D 按角色节点、以 A 的代理退回、再按一次(两个 epoch 都是 D)、结掉 A 的节点、E 结第三个节点 ⇒ 不阻断,席位 {A, D, E};角色节点 4 行席位、D 在那里 2 行 approve', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-reentry-honest', {
+      roleApprover: 'delegateeD',
+      reentry: { reapprover: 'delegateeD' },
+      delegatedNode: 'honest',
+      closer: 'thirdPartyE',
+    })
+    expect(fixture.roleSeatRows).toBe(4)
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    expect(attempt.thrown, 'an honestly re-entered document must stay cancellable').toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(3)
+  })
+
+  it('§2-G3 第三句 负控 N21(a)(门审第 5 轮 REENTRY;**占位容量合取在已重入节点上的隔离见证**)— D 两个 epoch 都亲自按角色节点、诚实结掉 A 的节点(成员身份与结算都成立),再走 legacy 多报一条角色节点行:3 行 > 2 席 ⇒ 409 seat_unresolvable、零行。重入抬高了容量,但没有抬到能装下这条多出来的行', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-reentry-forged', {
+      roleApprover: 'delegateeD',
+      reentry: { reapprover: 'delegateeD' },
+      delegatedNode: 'honest',
+      closer: 'forgedRole',
+    })
+    // 隔离前置:① 角色节点 4 行席位,其中 D 够得着的(`admin`)是 2 行;② D 在角色节点 3 行 approve
+    // (epoch 1、epoch 2、legacy);③ A 的节点由 D 诚实结掉 ⇒ 结算合取过;④ 成员记录在库里。
+    expect(fixture.roleSeatRows).toBe(4)
+    const reachable = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_assignments a
+        WHERE a.instance_id = $1 AND a.node_key = 'approval_role' AND a.assignment_type <> 'user'
+          AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = $2 AND ur.role_id = a.assignee_id)`,
+      [fixture.documentId, fixture.delegateeD],
+    )
+    expect(reachable.rows[0]?.n).toBe('2')
+    const actorRowsAtRoleNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_role'`,
+      [fixture.documentId, fixture.delegateeD],
+    )
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('3')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    await expectSeatBlock(attempt, { ineligibleCount: 3, reasons: ['seat_unresolvable'] }, [
+      fixture.delegatorA,
+      fixture.delegateeD,
+      fixture.otherUserE,
+      fixture.adminId,
+    ])
+    expect(attempt.seats).toEqual([])
+    // 门槛参照物是诚实孪生 `P34(a)` 的三席。与 `N20(a)` 的差别只有一处:这条腿的节点被端到端重入过,
+    // 所以「隔离成立」不再依赖「节点从未重入」这个前提。
+  })
+
+  it('§2-G3 第三句 负控 P33(a)(门审第 5 轮 REENTRY2,**已登记残留,钉今天的答案**)— 重入后 epoch 2 由 E 按:D 在角色节点只有 1 条诚实行、够得着 2 席,于是多出来的那条 legacy 行装得下 ⇒ 不阻断,席位 {A, D, E}(与诚实答案相同,只因 `approverIds` 去重)。随 RC 关闭', async () => {
+    const fixture = await roleNodeDelegatedThirdWalk('r9-reentry2', {
+      roleApprover: 'delegateeD',
+      reentry: { reapprover: 'otherUserE' },
+      delegatedNode: 'honest',
+      closer: 'forgedRole',
+    })
+    expect(fixture.roleSeatRows).toBe(4)
+    const actorRowsAtRoleNode = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM approval_records
+        WHERE instance_id = $1 AND action = 'approve' AND actor_id = $2 AND metadata->>'nodeKey' = 'approval_role'`,
+      [fixture.documentId, fixture.delegateeD],
+    )
+    expect(actorRowsAtRoleNode.rows[0]?.n).toBe('2')
+    const attempt = await attemptCancelRound(fixture.documentId, fixture.requesterId)
+    // MEASURED. The seat SET equals the honest answer only because `approverIds` de-duplicates; the
+    // capacity conjunct itself let a request-body row through. Registered residual (design MD
+    // §3.5.6 row 3, now CONSTRUCTED); closed by the legacy route's own attribution + seat gate.
+    expect(attempt.thrown).toBeFalsy()
+    expect(attempt.seats).toEqual([fixture.delegatorA, fixture.delegateeD, fixture.otherUserE].sort())
+    expect(attempt.seats.length).toBe(3)
+  })
 })
