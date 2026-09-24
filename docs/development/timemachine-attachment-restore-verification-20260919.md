@@ -1,6 +1,6 @@
 # Attachment Restore Verification
 
-Status: BOUNDED SYNTHETIC ACCEPTANCE VERIFIED; PR #5882 remains Draft/HOLD.
+Status: MERGED ON MAIN; bounded synthetic acceptance and merge-triggered CI verified.
 No production enablement or real-tenant UAT.
 
 Base: `868c8d2b26424fcaa8405661a6999abb17ec6d93` (#5849 merge).
@@ -9,22 +9,25 @@ First code checkpoint: `0158b581001d630a470d39b2476c2cfb0c48b16e`.
 Source/authorization checkpoint: `19d8e6e49996ff6a1083697dcaa22b118f463a2e`.
 File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
-Branch: `codex/timemachine-attachment-restore-20260919`.
+Merged PR branch (historical): `codex/timemachine-attachment-restore-20260919`.
 
-## Current Delivery Gate (2026-09-23)
+## Merged-main Delivery Gate (2026-09-23)
 
 | Gate | Exact evidence and disposition |
 | --- | --- |
-| Main and PR | Main/base `cd42eaf7455f03dd99021a02c47c42f1f3db6484`; PR #5882 exact head `9f5c0c6805174a24a97ae0095d8082fffbb4fb87`, OPEN/Draft, clean merge state, no auto-merge; local worktree clean and synchronized. |
-| Remote exact-head CI | 35 terminal checks: 34 SUCCESS, 1 expected Strict E2E SKIPPED, 0 pending/failure. Node18, Node20, Web Tests, migration replay and coverage succeeded at this head. |
-| Owned DB and browser | Product checkpoint `3d01f8209897d07eebe0880c846be9d061fbb9db`: real LoginView/session/router Workbench 8/8, full 1440/390 browser archive loops, authenticated original binary and decoded PNG, fresh/replay 32 migration gates, historical 47/59/127 neighbors, zero owned DB/backend residue. Later commits through `9f5c0c6805` change only reports. |
+| Main and PR | PR #5882 MERGED at `2026-09-23T14:39:49Z`; merge/main `261835ad2dea6331e7880893e781b7f7c3439588`, tree `94cd151e67dea64aeda8cbe57d34a866c1b91250`, ordered parents `cd42eaf7455f03dd99021a02c47c42f1f3db6484` + owner-authorized head `bea1bdcef048932ce2bcdfe1f79c6ae349b77352`. |
+| Merge-triggered push CI | 17/17 workflows SUCCESS; 26 jobs = 22 SUCCESS + 4 conditional SKIPPED, 0 pending/failure. Node18, Node20, Web Tests, migration replay, Time Machine D2 archive real-DB fail-not-skip and isolated manual checkpoint acceptance succeeded. Coverage is PR-only and skipped on push; separately scheduled health probes and issue-triggered runs are not counted. |
+| Publication/deployment | `Deploy to Production` run `35875847298`: test SUCCESS; build-and-push and deploy SKIPPED. `Build and Push Docker Images` run `35875846996`: local CI build SUCCESS; registry login, approved image publication and deploy SKIPPED. No task-triggered dispatch, publish or deployment. |
+| Owned DB and browser | Product checkpoint `3d01f8209897d07eebe0880c846be9d061fbb9db`: real LoginView/session/router Workbench 8/8, full 1440/390 browser archive loops, authenticated original binary and decoded PNG, fresh/replay 32 migration gates, historical 47/59/127 neighbors, zero owned DB/backend residue. Later commits through the merged head `bea1bdcef048932ce2bcdfe1f79c6ae349b77352` change only reports. |
 | Permission and lifecycle | Owner-confirmed existing administrator/sheet/row/field authority. Removing an attachment from a cell does not itself revoke its old ID; explicit deletion makes it unavailable. No new tenant or detach-revocation contract is claimed. |
-| Review and residual risk | Bounded Sol source review found no P1/P2 in the inspected restore chain, not a whole-PR approval. A prior browser `API_REQUEST_FAILED` remains unattributed despite later full passes; no root-cause fix is claimed. |
-| Release boundary | Ready/merge requires separate owner authorization. Flags, dispatch, staging, deployment, production, customer storage/data and real-tenant UAT remain NOT RUN. Async attachment restore, hostile-NAS guarantees and hard-deleted whole-table resurrection are outside this slice. |
+| Review and residual risk | Bounded Sol and Grok 4.7 read-only reviews found no P1/P2 in their inspected restore paths, not whole-PR approval. A prior browser `API_REQUEST_FAILED` remains unattributed despite later full passes; no root-cause fix is claimed. |
+| Release boundary | Owner separately authorized Ready/merge for exact `bea1bdcef048932ce2bcdfe1f79c6ae349b77352`; that action is complete. No Time Machine flag enablement, task-triggered dispatch, staging/deploy, feature-specific production operation, customer storage/data access or real-tenant UAT was performed under this task. Async attachment restore, hostile-NAS guarantees and hard-deleted whole-table resurrection are outside this slice. |
 
-The older gate and OPEN sections below record their original checkpoint state;
-this table supersedes them only for the bounded evidence named here. It does not
-turn excluded capabilities into passing acceptance.
+The merged PR head differs from product checkpoint `3d01f8209897d07eebe0880c846be9d061fbb9db`
+only in this report and its paired design lock. The older gate and OPEN sections
+below record their original checkpoint state; this table supersedes them only
+for the bounded evidence named here. It does not turn excluded capabilities
+into passing acceptance.
 
 ## Owner Disposition and Evidence Boundary (2026-09-23)
 
