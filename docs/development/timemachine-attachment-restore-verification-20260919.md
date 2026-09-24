@@ -11,6 +11,22 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Merged PR branch (historical): `codex/timemachine-attachment-restore-20260919`.
 
+## V1 Isolated Acceptance Merged-Main Gate (2026-09-25, Asia/Taipei)
+
+PR [#6050](https://github.com/zensgit/metasheet2/pull/6050) merged the
+one-file acceptance-harness fix and this report. Its exact head was
+`56345a7c19f017888a2025bfa49749066a14f76e`; merge/main is
+`e046a21c0a0110fbe22ca765852f1e053d90c0cb` (tree
+`c8dbab2f046a07593086a40ea3e73e2948a1b39a`), with ordered parents
+`f31a88663d5dcb7a290b6237abff53d8c43d55fe` and that PR head.
+
+| Gate | Exact merged-main evidence |
+| --- | --- |
+| PR head | `56345a7c19f017888a2025bfa49749066a14f76e`: 25 SUCCESS, 1 intentional Strict E2E SKIPPED, zero pending/failure before owner-authorized Ready/merge. |
+| Push CI | All 9 workflows with `event=push` and `head_sha=e046a21c0a0110fbe22ca765852f1e053d90c0cb` completed SUCCESS; zero pending/failure. Plugin System Tests Node18/Node20 and Web Tests succeeded. Other events on the same SHA are not included. |
+| Deployment boundary | `Deploy to Production` run `36048703075`: test SUCCESS; `build-and-push` and `deploy` jobs SKIPPED. No task-triggered dispatch, flag enablement or deployment. |
+| Acceptance boundary | The local synthetic Workbench/browser/database and restart/backup-set evidence below remains SHA-bound. The earlier `API_REQUEST_FAILED` is still unattributed; no real-tenant UAT, customer storage test, hostile-NAS certification, async attachment restore or hard-deleted whole-table resurrection is claimed. |
+
 ## V1 Isolated Acceptance Refresh (2026-09-25, Asia/Taipei)
 
 This refresh ran against then-current `origin/main`
@@ -36,8 +52,9 @@ force: removing an attachment from a cell does not revoke its old ID, while
 explicit deletion makes it unavailable. New tenant isolation, detach-time
 revocation, hostile NAS durability, asynchronous attachment recovery, whole-
 table resurrection after hard delete, flags, staging/deployment and real-tenant
-UAT are outside this acceptance. The one-file harness fix requires its own
-published exact-head CI and merge disposition before it is a mainline result.
+UAT are outside this acceptance. At this checkpoint, the one-file harness fix
+still required publication and merge; the merged-main gate above records its
+subsequent disposition.
 
 ## Merged-main Delivery Gate (2026-09-23)
 
