@@ -71,6 +71,11 @@
 
 loopback **不豁免**其余判据：把本机端口转发到生产的人拿不到放行（自测里有这条正例/反例对）。
 
+loopback 的判定（#5931 复审 F2 收紧）：URL 规范化后的 hostname 必须**先被 `node:net` `isIP()`
+证明是 IP 字面量**，再判 IPv4 `127.0.0.0/8` 或 IPv6 `::1`；名字只认恰好 `localhost`。以 `127.` 打头的
+DNS 名（`127.x.invalid`、`127.0.0.1.nip.io`）、借 localhost 作前缀/子域的名字、带尾点的 `localhost.`、
+IPv4 映射地址 `[::ffff:127.0.0.1]` 与 `0.0.0.0` 都**不是**正向标记（解析到哪由 DNS/栈决定）。
+
 判不了就拒：预检 401/403/404/500、响应形状不认识，一律 `preflight_unreachable` /
 `preflight_shape_unknown`，退出码 2，**一个业务请求都不发**（自测断言 `calls.length === 1`）。
 
@@ -129,7 +134,6 @@ psql -d syn_bom_b1 -v ON_ERROR_STOP=1 \
 node scripts/ops/scenario-b-replay.mjs \
   --base-url http://127.0.0.1:8900 \
   --dev-token --tenant tenant_scenario_b \
-  --workspace workspace_scenario_b \
   --data-source-id syn-bom-postgres-b1 \
   --project-id business_project_scenario_b \
   --mode v1v2 \
@@ -144,18 +148,21 @@ node scripts/ops/scenario-b-replay.mjs \
 | `--base-url` | 必填 | 目标部署；末尾斜杠会被削掉 |
 | `--token` / `--dev-token` | 二选一必填 | `--dev-token` 走 `GET /api/auth/dev-token`（生产上这条路由是 404，见 `packages/core-backend/src/routes/auth.ts:64`） |
 | `--tenant` | 空 | **只**用于铸 dev-token；不进任何业务请求 |
-| `--workspace` | `workspace_scenario_b` | 同租户的已批准配置选择器 |
+| `--workspace` | 空（租户级 NULL 作用域） | 整条链的唯一作用域：给了就登记/保存/审批（查询串 `workspaceId`）、源运行（请求体 `workspaceId`）、快照读面（查询串）全带同一个值；不给就全不带。配置仓按作用域精确匹配、不回退（#5931 复审 F3） |
 | `--fixture-dir` | 仓库里的合成夹具目录 | 期望计数从这里读 |
 | `--mode` | `v1v2` | `v1` 只落一个批次、不读 diff |
-| `--data-source-id` / `--system-id` / `--project-id` | 合成默认值 | 源登记与业务项目键 |
+| `--data-source-id` / `--system-id` | 合成默认值 | 源登记 |
+| `--project-id` | `business_project_scenario_b` | 业务项目号**前缀**：实际项目号 = 前缀 + `_` + 本次随机盐，每次演练一个隔离的新项目（#5931 复审 F4；落库按项目要求版本严格递增、diff 读面拒同版本多前驱，两道守卫都不关） |
 | `--source-project-no` / `--project-name` | 取夹具 / 空 | 给了就当哨兵，报告里绝不出现 |
 | `--run-prefix` | `scenario_b_replay` | 批次/运行 id 前缀，实际 id 再缀一段随机盐（批次不可变，不能撞） |
 | `--reseed-command` | 空 | v1→v2 之间代跑的那条命令；不给且非 TTY 则停在 `RESEED_V2` |
 | `--timeout-ms` | 20000 | 单请求超时 |
 | `--json` | 关 | 吐完整 JSON 报告而不是人读摘要 |
 
-自测：`pnpm verify:scenario-b-replay:test`（等价 `node --test scripts/ops/scenario-b-replay.test.mjs`），
-注入假 fetch，不碰网络、不碰数据库。
+自测：`pnpm verify:scenario-b-replay:test`（等价 `node --test scripts/ops/scenario-b-replay.test.mjs
+scripts/ops/scenario-b-replay-contract.test.mjs`）。前者注入假 fetch；后者把脚本的 fetch 接到真
+`http-routes` handler + 真 `read-source-config-store`（有作用域语义的内存 db），钉住登记→保存→审批→源运行→
+读面的作用域闭环与「同一后端连续两次完整复演都成功」。都不碰网络、不碰数据库。
 
 ## 7. 已知残余
 
@@ -168,5 +175,7 @@ node scripts/ops/scenario-b-replay.mjs \
 3. **`RESEED_V2` 的成败只看退出码。** 脚本不校验「表里现在真的是 v2 那 54 行」—— 那要连库。
    真正的守卫在下游：如果换表没成功，`RUN_V2` 落的行与 v1 一致，`DIFF_ROWS` 会报 54 条全 unchanged，
    第 11 步红。也就是说这条残余**不会**变成假绿，只会变成一条更晚、更绕的红。
-4. **源登记是每次重来的。** 脚本每次都 upsert 外部系统 + 存一版配置 + approve；`saveVersion` 对同一份
-   配置会 `reused` 回 200，所以重复跑不会堆版本，但也没有清理动作。
+4. **源登记是每次重来的。** 脚本每次都 upsert 外部系统 + 存一版配置；`saveVersion` 对同一份配置会
+   `reused` 回 200，所以重复跑不会堆版本，但也没有清理动作。复用到的若已是 `approved`，脚本跳过审批
+   （报告里 `APPROVE_CONFIG` 记 `skipped=reused_approved_version`）；此前无条件再批会在第二次执行时 409
+   （#5931 复审 F4）。每次演练的业务项目是新的，历史批次原样保留、不清理。
