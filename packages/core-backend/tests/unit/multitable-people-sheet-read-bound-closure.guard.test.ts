@@ -40,7 +40,17 @@
  *     relative paths inside `src/` only.
  *   - a registration whose handler the scanner cannot read at all (`scanned.opaque`): recorded by the
  *     shared scanner, asserted by the sheet-liveness closed world, not re-judged here.
- *   - routes OUTSIDE these two files. The population is asserted below so a silent narrowing reds.
+ *   - routes OUTSIDE these files. The population is asserted below so a silent narrowing reds.
+ *
+ * #5960 widened the population to `routes/approvals.ts`: `GET /api/approvals/record-link-options` is the
+ * same-shape person picker, reached through `listApprovalRecordLinkOptions` in a SERVICE module. That
+ * loader resolves the bound INSIDE itself (the route has no `sendForbidden`; its authority refusal is the
+ * service's own `APPROVAL_RECORD_LINK_TARGET_UNAVAILABLE` return), so it is classified `boundInside` below
+ * and the guard verifies - from the syntax tree, never from comments - that the loader CALLS the resolver
+ * (after that refusal) AND the three window helpers, every one of them IMPORTED from
+ * `people-sheet-read-bound` (a same-named local function does not count). Remove any of those calls and
+ * the route reads as unbound again. This is a structural backstop; the behavioural tests in
+ * `approval-record-link-options.test.ts` are what pin the actual window.
  *
  * The registration scan is AST-based and shared with the sheet-liveness closed world
  * (tests/utils/sheet-liveness-route-scan.ts): registrations, handler resolution (wrappers, consts,
@@ -65,8 +75,8 @@ import {
   type RouteHandler,
 } from '../utils/sheet-liveness-route-scan'
 
-/** The two route files that answer sheet records under a bare `canRead`. */
-const FILES = ['routes/univer-meta.ts', 'routes/dashboard.ts'] as const
+/** The route files that answer sheet records under a bare `canRead` (approvals.ts: #5960). */
+const FILES = ['routes/univer-meta.ts', 'routes/dashboard.ts', 'routes/approvals.ts'] as const
 const SRC_ROOT = join(__dirname, '../../src')
 
 /** The resolver every bound reader must name (in its own body or in a same-file gate helper). */
@@ -329,7 +339,27 @@ function enumeratesInline(handler: RouteHandler): boolean {
  * first cut's guard did not have: it judged SQL literals only, so `GET /records` -- which pages the
  * sheet through `queryRecordsWithCursor` -- was invisible, and deleting its bound left the guard green.
  */
-const CROSS_FILE_ENUMERATORS: Record<string, { module: string; returns: string; binds: boolean; reason: string }> = {
+const CROSS_FILE_ENUMERATORS: Record<string, {
+  module: string
+  returns: string
+  binds: boolean
+  reason: string
+  /**
+   * The loader resolves the bound ITSELF. `gate` names the identifier of its authority refusal; the
+   * guard requires (AST) a call to the resolver inside the loader, positioned after that identifier.
+   */
+  boundInside?: { gate: string }
+}> = {
+  listApprovalRecordLinkOptions: {
+    module: 'services/approval-record-link-options.ts',
+    returns: 'Promise<ApprovalRecordLinkOptionsResult>',
+    binds: true,
+    boundInside: { gate: 'APPROVAL_RECORD_LINK_TARGET_UNAVAILABLE' },
+    reason:
+      '#5960: the approvals record-link picker. It pages a caller-addressed sheet (limit/offset, id + display '
+      + 'label, exact COUNT) under approvals:write + base/sheet canRead, so with the People sheet as target it '
+      + 'is a roster reader. It resolves the People read window itself, after its own authority refusal.',
+  },
   queryRecordsWithCursor: {
     module: 'multitable/records.ts',
     returns: 'Promise<CursorPaginatedResult<LoadedMultitableRecord>>',
@@ -456,6 +486,67 @@ const CROSS_FILE_ENUMERATORS: Record<string, { module: string; returns: string; 
   },
 }
 
+/** The helpers a `boundInside` loader must call besides the resolver (pre-clamp, post-truncate, page meta). */
+const BOUND_HELPERS = ['boundReadWindow', 'boundEnumeratedRows', 'boundPageMeta'] as const
+/** The one module those names (and the resolver) must be imported from. */
+const BOUND_MODULE_RE = /(^|\/)people-sheet-read-bound(\.ts)?$/
+
+/** Top-level-or-nested local declarations of `name` in the file (function / variable / class). */
+function declaresLocally(sf: ts.SourceFile, name: string): boolean {
+  let found = false
+  const visit = (n: ts.Node): void => {
+    if (found) return
+    if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name?.text === name) found = true
+    else if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) found = true
+    else ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  return found
+}
+
+/**
+ * Pure verdict for a `boundInside` loader, from the SYNTAX TREE only (comments cannot satisfy it):
+ *   - the resolver and every BOUND_HELPERS name is CALLED inside `fn`;
+ *   - each of those names is a named import from `people-sheet-read-bound` (same imported name), and
+ *     is not shadowed by a same-named local declaration;
+ *   - the resolver call sits after the first reference to the gate identifier.
+ */
+function boundInsideVerdict(fn: ts.Node, gate: string, sf: ts.SourceFile = fn.getSourceFile()): boolean {
+  let gateAt = -1
+  const firstCall = new Map<string, number>()
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n) && n.text === gate && gateAt < 0) gateAt = n.getStart()
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && !firstCall.has(n.expression.text)) {
+      firstCall.set(n.expression.text, n.getStart())
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(fn)
+  const imports = namedImports(sf)
+  for (const name of [RESOLVER, ...BOUND_HELPERS]) {
+    if (!firstCall.has(name)) return false
+    const imported = imports.get(name)
+    if (!imported || imported.imported !== name || !BOUND_MODULE_RE.test(imported.module)) return false
+    if (declaresLocally(sf, name)) return false
+  }
+  const resolverAt = firstCall.get(RESOLVER)!
+  return gateAt >= 0 && resolverAt > gateAt
+}
+
+/** The real loader's function node, for a classified `boundInside` enumerator. */
+function boundInsideFunction(name: string): FnNode | null {
+  const entry = CROSS_FILE_ENUMERATORS[name]
+  if (!entry?.boundInside) return null
+  const index = indexModule(join(SRC_ROOT, ...entry.module.split('/')))
+  return index?.fns.get(name)?.[0] ?? null
+}
+
+function calleeBoundInside(name: string): boolean {
+  const entry = CROSS_FILE_ENUMERATORS[name]
+  const fn = boundInsideFunction(name)
+  return Boolean(entry?.boundInside && fn && boundInsideVerdict(fn, entry.boundInside.gate))
+}
+
 /** Cross-file enumerators this handler calls whose use IS paging the sheet (unclassified counts too). */
 function bindingEnumeratorCalls(file: ScannedFile, handler: RouteHandler): string[] {
   return crossFileEnumeratorCalls(file, handler).filter((name) => CROSS_FILE_ENUMERATORS[name]?.binds !== false)
@@ -463,6 +554,17 @@ function bindingEnumeratorCalls(file: ScannedFile, handler: RouteHandler): strin
 
 function enumeratesRecords(file: ScannedFile, handler: RouteHandler): boolean {
   return enumeratesInline(handler) || bindingEnumeratorCalls(file, handler).length > 0
+}
+
+/**
+ * Bound EITHER by naming the resolver in the handler / a same-file helper, OR (no inline enumeration,
+ * and every binding loader it calls verifiably resolves the bound inside itself).
+ */
+function isBound(file: ScannedFile, handler: RouteHandler): boolean {
+  if (resolverUnitCode(handler) !== null) return true
+  if (enumeratesInline(handler)) return false
+  const via = bindingEnumeratorCalls(file, handler)
+  return via.length > 0 && via.every(calleeBoundInside)
 }
 
 /** The unit (handler body or same-file helper) that names the resolver, if any. */
@@ -518,7 +620,7 @@ describe('#5807 — every enumerating reader of a sheet is bound or named', () =
 
   it('every enumerating reader either resolves the bound or is EXEMPT with a reason', () => {
     const unaccounted = enumerating
-      .filter((entry) => resolverUnitCode(entry.handler) === null)
+      .filter((entry) => !isBound(entry.file, entry.handler))
       .filter((entry) => !(entry.key in EXEMPT))
       .map((entry) => {
         const via = bindingEnumeratorCalls(entry.file, entry.handler)
@@ -534,7 +636,7 @@ describe('#5807 — every enumerating reader of a sheet is bound or named', () =
       const entry = byKey.get(key)
       if (!entry) stale.push(`${key}: route no longer exists`)
       else if (!enumeratesRecords(entry.file, entry.handler)) stale.push(`${key}: no longer enumerates — drop the exemption`)
-      else if (resolverUnitCode(entry.handler) !== null) stale.push(`${key}: now resolves the bound — drop the exemption`)
+      else if (isBound(entry.file, entry.handler)) stale.push(`${key}: now resolves the bound — drop the exemption`)
     }
     expect(stale).toEqual([])
   })
@@ -638,6 +740,64 @@ describe('#5807 — every enumerating reader of a sheet is bound or named', () =
       expect(entry!.handler.code.includes(RESOLVER), key).toBe(false)
       expect(resolverUnitCode(entry!.handler), key).not.toBeNull()
     }
+  })
+
+  it('every boundInside loader CALLS the resolver after its own authority refusal (#5960)', () => {
+    const inside = Object.entries(CROSS_FILE_ENUMERATORS).filter(([, entry]) => entry.boundInside)
+    expect(inside.length).toBeGreaterThan(0)
+    for (const [name] of inside) {
+      expect(boundInsideFunction(name), `${name} not found in its pinned module`).not.toBeNull()
+      expect(calleeBoundInside(name), name).toBe(true)
+    }
+  })
+
+  it('SELF-TEST — approvals record-link-options is in the population, enumerates via its service, and is bound there', () => {
+    const entry = byKey.get('routes/approvals.ts GET /api/approvals/record-link-options')
+    expect(entry, 'record-link-options is gone — re-point this self-test').toBeTruthy()
+    expect(enumeratesInline(entry!.handler)).toBe(false)
+    expect(bindingEnumeratorCalls(entry!.file, entry!.handler)).toEqual(['listApprovalRecordLinkOptions'])
+    expect(resolverUnitCode(entry!.handler)).toBeNull()
+    expect(isBound(entry!.file, entry!.handler)).toBe(true)
+    expect(Object.keys(EXEMPT)).not.toContain('routes/approvals.ts GET /api/approvals/record-link-options')
+  })
+
+  it('SELF-TEST — boundInsideVerdict is not a rubber stamp (each missing piece / local fake / wrong order reds)', () => {
+    const NL = String.fromCharCode(10)
+    const IMPORT = "import { boundEnumeratedRows, boundPageMeta, boundReadWindow, resolvePeopleSheetReadBound } from '../multitable/people-sheet-read-bound'"
+    const GOOD_BODY = [
+      'if (!a) return { ...GATE_X }',
+      'const b = await resolvePeopleSheetReadBound(q, s)',
+      'const w = boundReadWindow(b, { limit, offset })',
+      'rows = boundEnumeratedRows(b, rows, offset)',
+      'return boundPageMeta(b, page)',
+    ]
+    const probe = (body: string[], opts: { imports?: string; extra?: string } = {}): boolean => {
+      const src = [opts.imports ?? IMPORT, opts.extra ?? '', `async function target() {${NL}${body.join(NL)}${NL}}`].join(NL)
+      const sf = ts.createSourceFile('probe.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+      return boundInsideVerdict(findFunctionsNamed(sf, 'target')[0], 'GATE_X', sf)
+    }
+    const without = (needle: string) => GOOD_BODY.filter((line) => !line.includes(needle))
+    expect(probe(GOOD_BODY)).toBe(true)
+    // resolver removed / before the gate / only in a comment
+    expect(probe(without('resolvePeopleSheetReadBound'))).toBe(false)
+    expect(probe([GOOD_BODY[1], GOOD_BODY[0], ...GOOD_BODY.slice(2)])).toBe(false)
+    expect(probe([...without('resolvePeopleSheetReadBound'), '/* resolvePeopleSheetReadBound(q, s) */'])).toBe(false)
+    // each window helper is required
+    expect(probe(without('boundReadWindow'))).toBe(false)
+    expect(probe(without('boundEnumeratedRows'))).toBe(false)
+    expect(probe(without('boundPageMeta'))).toBe(false)
+    // a hand-written local fake with the right name does not count, imported or not
+    const fake = 'async function resolvePeopleSheetReadBound(_q: unknown, _s: unknown) { return { bounded: false, maxItems: 50 } }'
+    expect(probe(GOOD_BODY, {
+      imports: "import { boundEnumeratedRows, boundPageMeta, boundReadWindow } from '../multitable/people-sheet-read-bound'",
+      extra: fake,
+    })).toBe(false)
+    expect(probe(GOOD_BODY, { extra: fake })).toBe(false)
+    // imported from the wrong module, or aliased from a different export
+    expect(probe(GOOD_BODY, { imports: IMPORT.replace('people-sheet-read-bound', 'fake-bound') })).toBe(false)
+    expect(probe(GOOD_BODY, {
+      imports: "import { boundEnumeratedRows, boundPageMeta, boundReadWindow, boundReadWindow as resolvePeopleSheetReadBound } from '../multitable/people-sheet-read-bound'",
+    })).toBe(false)
   })
 
   it('SELF-TEST — `GET /sheets/:sheetId/point-in-time` is bound (it was the first cut’s named GAP)', () => {

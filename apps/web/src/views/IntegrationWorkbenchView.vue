@@ -785,7 +785,12 @@ onBeforeUnmount(() => {
   workbenchSectionObserver?.disconnect()
   workbenchSectionObserver = null
   // Q4b: an unmounted view whose timer keeps firing would call getIntegrationRun forever.
-  stopRunDetailPolling()
+  // #5950 review N1: clearing the timer alone is not enough — a read still in flight would land
+  // after this and re-arm it. Mark the view disposed (scheduleRunDetailPollingIfNeeded refuses to
+  // arm once set) and close the dialog, which bumps the request tokens so every late branch
+  // (openRunDetail, refreshRunDetail, the quiet provenance re-pull) returns before scheduling.
+  runDetailDisposed = true
+  closeRunDetail()
 })
 
 const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
@@ -943,6 +948,19 @@ let runDetailRequestId = 0
 const RUN_DETAIL_POLL_MS = 5000
 const runDetailPolling = ref(false)
 let runDetailPollTimer: ReturnType<typeof setInterval> | null = null
+// #5950 review N1: set once in onBeforeUnmount. After that no response, however late, may arm a
+// new interval — the component that would clear it is already gone.
+let runDetailDisposed = false
+// #5950 review N2: loading ownership is per request, not "whoever holds the newest token". Each
+// loading-showing read (openRunDetail, manual refresh) adds its own token here and removes it in
+// its own `finally`, unconditionally; `runDetailLoading` is true exactly while one is pending. A
+// newer background tick may still supersede the manual read's DATA (the newest answer wins), but
+// it can no longer strand the loading flag the manual read owns.
+const runDetailLoadingOwners = new Set<number>()
+function releaseRunDetailLoading(requestId: number): void {
+  runDetailLoadingOwners.delete(requestId)
+  runDetailLoading.value = runDetailLoadingOwners.size > 0
+}
 // Mirrors plugin-integration-core/lib/pipelines.cjs TERMINAL_RUN_STATUSES verbatim (read there,
 // not re-derived) — this list is the one place a pipeline run's lifecycle is authoritative, and a
 // drift here would either poll forever past a finished run or stop refreshing one still running.
@@ -3520,6 +3538,7 @@ function closeRunDetail(): void {
   runDetailId.value = ''
   runDetail.value = null
   runDetailError.value = ''
+  runDetailLoadingOwners.clear()
   runDetailLoading.value = false
   // Bump the token so an answer still in flight cannot re-open a dialog the user just closed.
   runDetailRequestId += 1
@@ -3541,7 +3560,7 @@ function stopRunDetailPolling(): void {
 // Arms the timer only when there is an open dialog showing a non-terminal run and none is already
 // running — idempotent on purpose, since both openRunDetail and every successful refresh call it.
 function scheduleRunDetailPollingIfNeeded(): void {
-  if (!runDetailId.value || isTerminalRunStatus(runDetail.value?.status)) {
+  if (runDetailDisposed || !runDetailId.value || isTerminalRunStatus(runDetail.value?.status)) {
     stopRunDetailPolling()
     return
   }
@@ -3563,13 +3582,20 @@ async function refreshRunDetail(showLoading: boolean): Promise<void> {
   runDetailRequestId += 1
   const requestId = runDetailRequestId
   const runId = runDetailId.value
-  if (showLoading) runDetailLoading.value = true
+  if (showLoading) {
+    runDetailLoadingOwners.add(requestId)
+    runDetailLoading.value = true
+  }
   try {
     const run = await getIntegrationRun(runId, currentScope())
     if (requestId !== runDetailRequestId) return
     runDetail.value = run
     runDetailError.value = ''
-    if (runProvenanceExpanded.value) await refreshRunProvenanceQuietly(runId)
+    if (runProvenanceExpanded.value) {
+      await refreshRunProvenanceQuietly(runId)
+      // N1: the dialog may have been closed (or the view unmounted) during the re-pull.
+      if (requestId !== runDetailRequestId) return
+    }
     scheduleRunDetailPollingIfNeeded()
   } catch (error) {
     if (requestId !== runDetailRequestId) return
@@ -3580,7 +3606,8 @@ async function refreshRunDetail(showLoading: boolean): Promise<void> {
     // A silent background tick's own transient failure otherwise keeps the last good state on
     // screen and the timer keeps trying — one flaky poll must not blank out a working dialog.
   } finally {
-    if (showLoading && requestId === runDetailRequestId) runDetailLoading.value = false
+    // N2: release THIS request's loading ownership whether or not a newer read superseded it.
+    if (showLoading) releaseRunDetailLoading(requestId)
   }
 }
 
@@ -3638,6 +3665,8 @@ async function openRunDetail(runId: string): Promise<void> {
   runDetailId.value = runId
   runDetail.value = null
   runDetailError.value = ''
+  runDetailLoadingOwners.clear()
+  runDetailLoadingOwners.add(requestId)
   runDetailLoading.value = true
   resetRunProvenance()
   try {
@@ -3651,7 +3680,7 @@ async function openRunDetail(runId: string): Promise<void> {
     if (requestId !== runDetailRequestId) return
     runDetailError.value = runDetailErrorCopy(error)
   } finally {
-    if (requestId === runDetailRequestId) runDetailLoading.value = false
+    releaseRunDetailLoading(requestId)
   }
 }
 
