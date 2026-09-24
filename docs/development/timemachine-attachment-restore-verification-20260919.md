@@ -11,6 +11,34 @@ File preparation checkpoint: `a4bce2504849293703d3a6aebbc534d16a79cc94`.
 Durable ledger checkpoint: `e4b447034a70918866428d355a9285db79d41d14`.
 Merged PR branch (historical): `codex/timemachine-attachment-restore-20260919`.
 
+## V1 Isolated Acceptance Refresh (2026-09-25, Asia/Taipei)
+
+This refresh ran against then-current `origin/main`
+`f31a88663d5dcb7a290b6237abff53d8c43d55fe` (tree
+`5768eb1b01dd4fbbe6726bcd5c4683aafa56ea3d`) in a clean isolated
+worktree. The only source change is test-harness commit
+`4494f9410` (tree `e46a3aba35ce9a1992685a33010035d3e26862ce`), in
+`packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts`.
+No recovery product, permission, migration, storage, workflow or flag file changed.
+
+| Gate | Current-main evidence |
+| --- | --- |
+| Real Workbench | `run-recovery-manual-checkpoint.mjs --workbench` exited 0: login/session/router Workbench 8/8; its owned database had zero connections before drop and its PostgreSQL cluster was stopped and removed. |
+| Full browser and database | On the unmodified main, `--browser` passed its 47/59/127 real-DB neighbors and 32 migration replay checks, then failed because the harness queried the download pool after `MetaSheetServer.stop()` had closed it. The same command after the one-file fix exited 0, passed those same gates, all 1440/390 scalar/attachment/Workbench/application loops, authenticated original-byte downloads and gallery PNG decode, and ended with zero owned database/stage connections, no retained application timers, and removed owned browser/Vite/cluster resources. This is a discriminating RED-to-GREEN harness regression, not a product behavior fix. |
+| Real-process restart | `verify-recovery-local-startup.mts` exited 0 in a new disposable PostgreSQL 15 cluster. Evidence at `artifacts/recovery-local-startup/evidence.json` binds source head `f31a8866` and records wrong-secret refusal before listen, no pre-unlock listener, authenticated restoration of 5,001 exact rows, locked restart until fresh FD3 delivery, two migration passes and zero database/backend/path/process residue. The owned cluster was then stopped and removed. |
+| Local backup-set faults | `verify-recovery-local-backup.mts` exited 0 in a separate disposable PostgreSQL 15 cluster: two distinct databases, source unavailable before target worker, 5,001 recovered rows and drained effects, ten nonce sections, retained receipt/store identity and released writer block. The driver also exercised wrong secret/key, missing or tampered package/object, and receipt SHA/size refusals. Its owned databases and work root were removed; the cluster was stopped and removed. |
+| Quality | Acceptance-script TypeScript project and `git diff --check` pass. Default ESLint project excludes this script; the dedicated project reports three existing `no-inner-declarations` findings at untouched lines 251/296/319. With only that existing rule disabled, scoped lint passes. |
+
+These are synthetic local tests, not a customer environment or release decision.
+The earlier intermittent browser `API_REQUEST_FAILED` is still unattributed;
+this passing run does not establish its cause. Existing authority remains in
+force: removing an attachment from a cell does not revoke its old ID, while
+explicit deletion makes it unavailable. New tenant isolation, detach-time
+revocation, hostile NAS durability, asynchronous attachment recovery, whole-
+table resurrection after hard delete, flags, staging/deployment and real-tenant
+UAT are outside this acceptance. The one-file harness fix requires its own
+published exact-head CI and merge disposition before it is a mainline result.
+
 ## Merged-main Delivery Gate (2026-09-23)
 
 | Gate | Exact evidence and disposition |
