@@ -105,7 +105,43 @@ RC 让 legacy 决策门(i)只放行在当前节点持有**活跃席位**的人,(
 撤销轮零行、status / version 不变。`V2(a)`:撤销轮席位持有人 A ⇒ 409 `CANCEL_ROUND_OUTLET_FORBIDDEN`,零行。
 把 `/approve` 门的两道闸对调的 mutation 让 `V1(a)` 红(无席位者得 409)。
 
-## 4. 栈顶(H-5 on r9)—— 本节由该分支追加
+## 4. 栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9`(H-5 on r9)
+
+### 4.1 重放与冲突
+
+H-5(`origin/fix/approval-legacy-approve-settlement-parity` = `89f2805c4f…`,相对 RC 的 3 个提交)`cherry-pick -x` 到栈中之上。两处冲突:
+
+| 提交 | 文件 | hunk | 解法 |
+|---|---|---|---|
+| `7d623d361`(legacy 门走共享结算路径) | `routes/approvals.ts` | legacy `/approve` 与 `/reject` 各一处:栈中放在席位闸之后的 `rejectIfCancelRound` 与 H-5 插在同一位置的「H-5 SETTLEMENT PARITY」块 | **出口守卫在前、结算块在后**:席位闸 → `rejectIfCancelRound` → `if (seat.seatGated) { … dispatchAction … }`。理由:`dispatchAction` 的动作闸对撤销轮实例**放行** `approve` / `reject`(在允许集内),所以有席位的 legacy 调用方必须在交给结算路径之前就被出口守卫拒绝(锁 §14.3 #7/#7′),否则 legacy 门会在撤销轮实例上跑普通 approve |
+| `53c42b33e`(版本前置条件钉到共享结算路径) | `services/ApprovalProductService.ts` | `dispatchAction` 事务内、考勤 fail-closed 守卫之后:r8 的 `assertCancelRoundActionAllowed` 与 H-5 的 `expectedVersion` 版本闸 | **F4 (ii),owner 2026-09-25 点名 (b)**:版本闸**先**、`assertCancelRoundActionAllowed` **后** |
+
+v3b §5.2 只列了后者;前者是栈中把 `rejectIfCancelRound` 放在席位闸之后(F4 (i))**引起**的,v3b 的合流树上没有这一格。
+
+### 4.2 F4 (ii) 今天不可观察,由静态守卫钉住(v3b 动作 3,runbook §3b-⑥ 要求)
+
+v3b §5.2.1 实测:`expectedVersion` 只由 legacy 两扇门写入,而两扇门在派发前都用 `rejectIfCancelRound` 拒绝撤销轮实例,
+所以「撤销轮实例 ∧ `expectedVersion` 已设」在 `dispatchAction` 内永不同时成立,(a)/(b) 两序行为等价。
+本分支把这件事做成**被测性质**:`tests/unit/approval-legacy-decision-version-precondition-sites.test.ts`(源码普查,先剥注释行):
+
+1. `expectedVersion: requestedVersion` 写入点在 `routes/approvals.ts` **恰 2 处**,分别落在 legacy `/approve` 与 `/reject` 的 handler
+   span 内;`/actions` handler 内 **0 处**;handler 之外 `expectedVersion:` 只允许出现在 `settleLegacyDecisionThroughSharedPath` 的
+   形参类型与唯一转发点。**任何第三个写入点即红**(复活路径 1);
+2. 每扇 legacy 门内三件的**次序**:`resolveLegacyDecisionSeat` < `rejectIfCancelRound` < 写入点(F4 (i) 的静态钉);任一门少了出口
+   守卫或把它挪到派发之后即红(复活路径 2);
+3. `dispatchAction` 内:`guardAttendanceCentralMutationOrThrow` < `request.expectedVersion` 读取点(恰一行)<
+   `assertCancelRoundActionAllowed`(F4 (ii) 的静态钉);对调即红。
+
+三条 mutation(加第三写入点 / 删 `/reject` 的出口守卫 / 对调 F4 (ii) 序)的读数在验证 MD §3。对调 F4 (ii) 序之后再跑真库四件
+(creation / outlet-guards / RC 自带 / H-5 parity)**读数不变** —— 这就是 v3b §5.2.1「今天不可达」的实证,也是为什么裁决落地
+只能靠静态守卫承重。
+
+### 4.3 legacy 门在栈顶的行为(对 C-1 腿的影响)
+
+H-5 让 seat-gated 实例上的 legacy 决策走 `dispatchAction`(节点推进、完成事件),不再由路由直接写终态。栈中重写过的
+18 条 C-1 腿**读数不变**:它们驱动 legacy 门的位置都是图的最后一个审批节点(单节点 / `approval_a` 末位 / `approval_b` 末位),
+共享结算在那里同样落终态;行的 `nodeKey` / `nodeEntryEpoch` 由 `dispatchAction` 写(与栈中 RC 门派生的值相同)。
+`approval-revoke-terminal-guard` (a) 已由 H-5 自己改为「终态且 `current_node_key` 清空」。
 
 ## 5. 本栈依赖的 owner 裁决(逐字见 `reviews/goal-72h-autonomous-window-20260925.md` §0;本文不复述为「已 ratify」)
 
