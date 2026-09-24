@@ -49,6 +49,17 @@ PR #5665 给 `admin-routes.ts` 里 12 条只挂 `requireSafetyCheck` 的写端�
 - 对每条**写方法**（POST/PUT/PATCH/DELETE）取该方法在 `route.stack` 里的**首个** handler，判定它是不是
   admin 门。不是、且不在豁免表里 → 红，错误信息点名 `METHOD /api/admin/<path>`。
 - `router.all(path, fn)` 也被算作写方法（它同样应答 POST/PUT/PATCH/DELETE），不让它绕过。
+- 「首个 handler」按 Express 实际 dispatch 取：对写方法 `m`，取 `route.stack` 中第一个
+  `!layer.method || layer.method === m` 的层（express@4.21.2 `lib/router/route.js:144` 跳过
+  `layer.method && layer.method !== m` 的层；`.all()` 产出的层 `method` 为 undefined，见 `:197`）。
+  （2026-09-23 更正，#5680 复审 N3 后续：初版在 `route.methods._all` 为真时对所有写方法直接取
+  `route.stack[0]`，于是 `.route(p).get(requireAdminRole()).all(h)` 里 GET-only 的门被误算成四个写方法
+  的门 —— 复审内存注入这条合成路由后原 23 条用例全绿，而真实 HTTP 下非 admin 的 POST/PUT/PATCH/DELETE
+  都到达 `h`。上一句「不让它绕过」在初版实现里对混合方法形状不成立。这是测试保证缺口，不是现网路由：
+  admin router 里没有 `.all()` 形状的真实路由。更正后 spec 内含混合方法正反例、对真实 router 的注入
+  负例，以及真实 HTTP 对照组，逐方法断言扫描结论与 Express dispatch 一致。）
+- 刻意保留的保守：首位是 `next()` 透传型的 `.all()` 层、门排在其后时，行为上写方法仍会过门，但本守卫
+  按「首位」判无门（§2.1）。这是方向正确的误报（fail-closed），不纳入「扫描 ⇔ 行为」对照组。
 
 ### 2.1 为什么是「首位」
 

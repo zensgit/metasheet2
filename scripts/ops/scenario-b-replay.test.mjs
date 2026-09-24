@@ -28,6 +28,7 @@ import {
   SANDBOX_OBJECT_ID_NAMESPACE_PATTERN,
   UsageError,
   assertRequestBodySafe,
+  buildQuery,
   evaluateSandboxGate,
   isLoopbackBase,
   parseArgs,
@@ -289,12 +290,67 @@ test('gate: markers 是布尔/计数，从不回显 allowlist 字符串或主机
 })
 
 test('gate: loopback 判定', () => {
-  for (const url of ['http://127.0.0.1:8900', 'http://localhost:8900', 'http://[::1]:8900', 'http://127.5.5.5']) {
+  for (const url of [
+    'http://127.0.0.1:8900', 'http://localhost:8900', 'http://LOCALHOST:8900', 'http://[::1]:8900', 'http://127.5.5.5',
+    // WHATWG URL 把这两种 IPv4 写法规范化成 127.0.0.1 —— 规范化之后它们就是 IP literal。
+    'http://127.1:8900', 'http://0x7f.0.0.1:8900',
+    'http://[0:0:0:0:0:0:0:1]:8900',
+  ]) {
     assert.equal(isLoopbackBase(url), true, url)
   }
   for (const url of ['http://10.0.0.5:8900', 'https://prod.example.com', 'not a url']) {
     assert.equal(isLoopbackBase(url), false, url)
   }
+})
+
+// F2（#5931 复审 R1）：loopback 必须是 IP literal。以 127. 打头的 DNS 名、借 localhost 当前缀/子域的名字，
+// 解析到哪里由远端 DNS 决定，不是本机的证明。
+const DECEPTIVE_LOOPBACK_NAMES = Object.freeze([
+  'http://127.review-example.invalid:8900',
+  'http://127.0.0.1.evil.test:8900',
+  'http://127.0.0.1.nip.io:8900',
+  'http://127.x.invalid',
+  'http://localhost.evil:8900',
+  'http://localhost.evil.test:8900',
+  'http://evil.localhost:8900',
+  'http://localhost.:8900',
+  // IPv4 映射的 IPv6（URL 规范化成 [::ffff:7f00:1]）：明确按「非 loopback」处理 —— 只认 ::1。
+  'http://[::ffff:127.0.0.1]:8900',
+  // 0.0.0.0 是「任意地址」，不是 127/8 或 ::1。
+  'http://0.0.0.0:8900',
+])
+
+test('gate F2: 欺骗性 DNS 名 / 映射地址 / 0.0.0.0 都不算 loopback', () => {
+  for (const url of DECEPTIVE_LOOPBACK_NAMES) {
+    assert.equal(isLoopbackBase(url), false, url)
+  }
+})
+
+test('gate F2: 远端 DNS 名冒充 127.* —— 预检是默认装机（沙箱模式关、清单空）时必须拒 no_sandbox_marker', () => {
+  const bare = clone(SANDBOX_PREFLIGHT)
+  bare.data.checks.sandboxWriteAuthorization.modeEnabled = false
+  bare.data.checks.sandboxWriteAuthorization.allowlist = []
+  bare.data.checks.sandboxWriteAuthorization.declaredSandboxTargetObjectIds = []
+  for (const url of DECEPTIVE_LOOPBACK_NAMES) {
+    const gate = evaluateSandboxGate({ baseUrl: url, status: 200, body: bare })
+    assert.equal(gate.allowed, false, url)
+    assert.equal(gate.reason, GATE_REFUSAL_CODES.NO_SANDBOX_MARKER, url)
+    assert.equal(gate.markers.loopbackBase, false, url)
+  }
+})
+
+test('gate F2: 整条 runReplay 对欺骗性 DNS 名停在门口，一个业务请求都不发', async () => {
+  const bare = clone(SANDBOX_PREFLIGHT)
+  bare.data.checks.sandboxWriteAuthorization.modeEnabled = false
+  bare.data.checks.sandboxWriteAuthorization.allowlist = []
+  bare.data.checks.sandboxWriteAuthorization.declaredSandboxTargetObjectIds = []
+  const { report, calls } = await replay({
+    args: baseArgs({ baseUrl: 'http://127.review-example.invalid:8900' }),
+    plan: { GATE: { status: 200, body: bare } },
+  })
+  assert.equal(report.exitCode, EXIT_CODES.GATE_REFUSED)
+  assert.equal(report.gate.reason, GATE_REFUSAL_CODES.NO_SANDBOX_MARKER)
+  assert.equal(calls.length, 1, '只发了预检')
 })
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
@@ -471,7 +527,7 @@ test('整条复演一次 tenantId / x-tenant-id / autopersist 都没发出去', 
   // 源运行请求体就是测试里那份 sourceRunBody 的键集（少了 tenantId —— 那是刻意的）。
   const run = calls.find((c) => c.url.endsWith('/source-runs/plm-bom'))
   assert.deepEqual(Object.keys(run.body).sort(), [
-    'projectId', 'readSourceConfigId', 'snapshotBatchId', 'snapshotVersion', 'sourceProjectNo', 'syncRunId', 'workspaceId',
+    'projectId', 'readSourceConfigId', 'snapshotBatchId', 'snapshotVersion', 'sourceProjectNo', 'syncRunId',
   ])
 })
 
@@ -481,6 +537,21 @@ test('assertRequestBodySafe：多一个键、或任何 tenant/persist 类的键�
   assert.throws(() => assertRequestBodySafe('RUN_V1', { workspaceId: 'w', autoPersist: true }), /forbidden key class/)
   assert.throws(() => assertRequestBodySafe('RUN_V1', { workspaceId: 'w', inputs: {} }), /unexpected key/)
   assert.throws(() => assertRequestBodySafe('NOT_A_STEP', {}), /no request-body allowlist/)
+  // F3：保存/审批的作用域只走查询串 —— 放进请求体会被真 handler 静默丢掉（那正是 F3 的形状），所以出门前就拒。
+  assert.throws(() => assertRequestBodySafe('SAVE_CONFIG', { config: {}, workspaceId: 'w' }), /unexpected key/)
+  assert.throws(() => assertRequestBodySafe('APPROVE_CONFIG', { workspaceId: 'w' }), /unexpected key/)
+})
+
+test('buildQuery（F3）：作用域查询串键白名单 —— 只有 workspaceId（读面另加 projectId），租户/落库类键出门前就拒', () => {
+  assert.equal(buildQuery('SAVE_CONFIG', { workspaceId: 'ws_1' }), '?workspaceId=ws_1')
+  assert.equal(buildQuery('SAVE_CONFIG', {}), '', '不选 workspace 就一个查询键都不带（租户级 NULL）')
+  assert.equal(buildQuery('APPROVE_CONFIG', { workspaceId: '' }), '', '空值不出门')
+  assert.equal(buildQuery('BATCH_LIST', { workspaceId: 'ws_1', projectId: 'p' }), '?workspaceId=ws_1&projectId=p')
+  assert.throws(() => buildQuery('SAVE_CONFIG', { tenantId: 't1' }), /forbidden key class/)
+  assert.throws(() => buildQuery('DIFF', { autopersist: 'true' }), /forbidden key class/)
+  assert.throws(() => buildQuery('SAVE_CONFIG', { projectId: 'p' }), /unexpected key/)
+  assert.throws(() => buildQuery('RUN_V1', { workspaceId: 'ws_1' }), /unexpected key/, '源运行的作用域走请求体，不走查询串')
+  assert.throws(() => buildQuery('NOT_A_STEP', {}), /no query allowlist/)
 })
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════
