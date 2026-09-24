@@ -392,7 +392,7 @@ describe('listApprovalRecordLinkOptions — People system sheet read window (#59
     expect(recordSelects).toEqual([])
   })
 
-  it('People: limit is clamped to the window and total never reveals the exact roster size', async () => {
+  it('People: limit is clamped to the window and total is capped at the window (exact only below 50)', async () => {
     const result = await list('people-kind', 100, 0)
     expect(result.records).toHaveLength(50)
     expect(result.page).toEqual({ limit: 50, offset: 0, total: 50, hasMore: false })
@@ -411,6 +411,36 @@ describe('listApprovalRecordLinkOptions — People system sheet read window (#59
     const result = await list('people-kind', 20, 40, { ignoreLimit: true })
     expect(result.records).toHaveLength(10)
     expect(result.records.at(-1)?.id).toBe('rec_049')
+  })
+
+  it('People: below the window total is min(COUNT, 50) = the exact count (the cap hides only sizes >= 50)', async () => {
+    const gate = rosterQuery('people-kind')
+    pgState.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('COUNT(*)') && sql.includes('FROM meta_records')) return { rows: [{ n: 7 }] }
+      return gate(sql, params)
+    })
+    const result = await listApprovalRecordLinkOptions({ userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1', limit: 20, offset: 0 })
+    expect(result.ok && result.page.total).toBe(7)
+  })
+
+  it('People-bound resolver failure is a values-free 503 (never echoes the driver text)', async () => {
+    const RAW = 'connection to host=db.internal port=5432 user=metasheet failed: SELECT description FROM meta_sheets s'
+    const gate = rosterQuery('people-kind')
+    pgState.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("to_jsonb(s) ->> 'system_kind'")) throw new Error(RAW)
+      return gate(sql, params)
+    })
+    const result = await listApprovalRecordLinkOptions({ userId: 'user-1', baseId: 'base-1', sheetId: 'sheet-1', limit: 20, offset: 60 })
+    expect(result).toEqual({
+      ok: false,
+      status: 503,
+      code: 'DATABASE_UNAVAILABLE',
+      message: APPROVAL_RECORD_LINK_DATABASE_UNAVAILABLE_MESSAGE,
+    })
+    const serialized = JSON.stringify(result)
+    expect(serialized).not.toContain('db.internal')
+    expect(serialized).not.toContain('meta_sheets')
+    expect(recordSelects).toEqual([])
   })
 
   it('ordinary sheet: paging, limit and exact total are unchanged', async () => {
