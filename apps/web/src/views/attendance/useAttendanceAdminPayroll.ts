@@ -77,6 +77,7 @@ interface ApiEnvelope<T> {
 
 interface AttendanceItemListPayload<T> {
   items?: T[]
+  total?: unknown
 }
 
 interface PayrollCycleGeneratePayload {

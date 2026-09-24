@@ -10386,6 +10386,7 @@ import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdmin
 import AttendanceListTruncationNotice from './attendance/AttendanceListTruncationNotice.vue'
 import {
   attendanceAdminListPageParams,
+  attendanceListAppendRequested,
   beginAttendanceAdminListRequest,
   createAttendanceAdminListCursor,
   resetAttendanceAdminListCursor,
@@ -22670,8 +22671,8 @@ async function loadScheduleDispatchRequests() {
   }
 }
 
-async function loadShiftSwapRequests(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadShiftSwapRequests(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.shiftSwapRequests, shiftSwapRequests.value.length, append)
   if (page === null) return
   shiftSwapLoading.value = true
@@ -22723,8 +22724,8 @@ function loadMoreShiftSwapRequests() {
   return loadShiftSwapRequests({ append: true })
 }
 
-async function loadShiftSwapAssignmentOptions(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadShiftSwapAssignmentOptions(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.shiftSwapAssignments, shiftSwapAssignments.value.length, append)
   if (page === null) return
   try {
@@ -22804,8 +22805,8 @@ watch(missedPunchReminderCandidates, () => {
   missedPunchReminderSelectedIds.value = missedPunchReminderSelectedIds.value.filter(id => valid.has(id))
 })
 
-async function loadMissedPunchReminderCandidates(options: { append?: boolean } = {}): Promise<void> {
-  const append = options.append === true
+async function loadMissedPunchReminderCandidates(options: { append?: boolean } | Event = {}): Promise<void> {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(
     adminListCursor.missedPunchCandidates,
     missedPunchReminderCandidates.value.length,
@@ -25258,7 +25259,7 @@ function editLeaveType(item: AttendanceLeaveType) {
 }
 
 async function loadLeaveTypes(options: { activeOnly?: boolean; append?: boolean } = {}) {
-  const append = options.append === true
+  const append = attendanceListAppendRequested(options)
   if (!append) leaveTypesActiveOnly = options.activeOnly === true
   const page = beginAttendanceAdminListRequest(adminListCursor.leaveTypes, leaveTypes.value.length, append)
   if (page === null) return
@@ -26417,7 +26418,7 @@ function editOvertimeRule(item: AttendanceOvertimeRule) {
 }
 
 async function loadOvertimeRules(options: { activeOnly?: boolean; append?: boolean } = {}) {
-  const append = options.append === true
+  const append = attendanceListAppendRequested(options)
   if (!append) overtimeRulesActiveOnly = options.activeOnly === true
   const page = beginAttendanceAdminListRequest(adminListCursor.overtimeRules, overtimeRules.value.length, append)
   if (page === null) return
@@ -27194,8 +27195,8 @@ function editRotationRule(rule: AttendanceRotationRule) {
   rotationRuleForm.isActive = rule.isActive
 }
 
-async function loadRotationRules(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadRotationRules(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.rotationRules, rotationRules.value.length, append)
   if (page === null) return
   rotationRuleLoading.value = true
@@ -27317,8 +27318,8 @@ function editRotationAssignment(item: AttendanceRotationAssignmentItem) {
   rotationAssignmentForm.isActive = item.assignment.isActive
 }
 
-async function loadRotationAssignments(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadRotationAssignments(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.rotationAssignments, rotationAssignments.value.length, append)
   if (page === null) return
   rotationAssignmentLoading.value = true
@@ -27541,8 +27542,8 @@ function editShift(shift: AttendanceShift) {
   shiftForm.workingDays = shift.workingDays.join(',')
 }
 
-async function loadShifts(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadShifts(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.shifts, shifts.value.length, append)
   if (page === null) return
   shiftLoading.value = true
@@ -27700,8 +27701,8 @@ function editAssignment(item: AttendanceAssignmentItem) {
   assignmentForm.slotIndex = assignmentSlotIndex(item.assignment)
 }
 
-async function loadAssignments(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadAssignments(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.assignments, assignments.value.length, append)
   if (page === null) return
   assignmentLoading.value = true
@@ -29414,8 +29415,8 @@ function editPayrollTemplate(item: AttendancePayrollTemplate) {
   payrollTemplateForm.summaryFieldCodes = extractPayrollSummaryFieldCodes(item.config)
 }
 
-async function loadPayrollTemplates(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadPayrollTemplates(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.payrollTemplates, payrollTemplates.value.length, append)
   if (page === null) return
   payrollTemplateLoading.value = true
@@ -29554,8 +29555,8 @@ function editPayrollCycle(item: AttendancePayrollCycle) {
   payrollCycleSummary.value = null
 }
 
-async function loadPayrollCycles(options: { append?: boolean } = {}) {
-  const append = options.append === true
+async function loadPayrollCycles(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
   const page = beginAttendanceAdminListRequest(adminListCursor.payrollCycles, payrollCycles.value.length, append)
   if (page === null) return
   payrollCycleLoading.value = true

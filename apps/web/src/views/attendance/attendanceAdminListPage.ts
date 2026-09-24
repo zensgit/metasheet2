@@ -30,6 +30,17 @@ export function resetAttendanceAdminListCursor(cursor: AttendanceAdminListCursor
   cursor.lastPageCount = 0
 }
 
+/**
+ * Click and change handlers pass a DOM event. Load-more passes `{ append: true }`.
+ * An event is never an append: `append` is only honored on a plain options object.
+ */
+export function attendanceListAppendRequested(
+  options: { append?: boolean } | Event | undefined,
+): boolean {
+  if (!options || options instanceof Event) return false
+  return options.append === true
+}
+
 export function attendanceAdminListPageParams(
   page = 1,
   pageSize = ATTENDANCE_ADMIN_LIST_PAGE_SIZE,

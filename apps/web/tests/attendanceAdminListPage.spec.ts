@@ -5,6 +5,7 @@ import {
   applyAttendanceAdminListPage,
   attendanceAdminListPageParams,
   attendanceAdminListTruncationKind,
+  attendanceListAppendRequested,
   attendanceListCanLoadMore,
   beginAttendanceAdminListRequest,
   createAttendanceAdminListCursor,
@@ -12,6 +13,13 @@ import {
 } from '../src/views/attendance/attendanceAdminListPage'
 
 describe('attendanceAdminListPage', () => {
+  it('treats a click event as a reload and a plain options object as append', () => {
+    expect(attendanceListAppendRequested(undefined)).toBe(false)
+    expect(attendanceListAppendRequested(new Event('click'))).toBe(false)
+    expect(attendanceListAppendRequested({})).toBe(false)
+    expect(attendanceListAppendRequested({ append: true })).toBe(true)
+  })
+
   it('requests the API max page size and reads total', () => {
     expect(attendanceAdminListPageParams(1)).toEqual({
       page: '1',
