@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   ATTENDANCE_CATALOG_PAGE_SIZE,
+  attendanceCatalogAppendRequested,
   attendanceCatalogHasMore,
   attendanceCatalogListQuery,
   mergeAttendanceCatalogItems,
@@ -9,6 +10,13 @@ import {
 } from '../src/views/attendance/attendanceCatalogPage'
 
 describe('attendance catalog page', () => {
+  it('treats a click event as a reload and a plain options object as append', () => {
+    expect(attendanceCatalogAppendRequested(undefined)).toBe(false)
+    expect(attendanceCatalogAppendRequested(new Event('click'))).toBe(false)
+    expect(attendanceCatalogAppendRequested({})).toBe(false)
+    expect(attendanceCatalogAppendRequested({ append: true })).toBe(true)
+  })
+
   it('requests the parsePagination cap instead of the default page of 50', () => {
     expect(ATTENDANCE_CATALOG_PAGE_SIZE).toBe(200)
     expect(attendanceCatalogListQuery(1)).toEqual({ page: '1', pageSize: '200' })

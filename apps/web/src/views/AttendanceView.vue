@@ -10421,6 +10421,7 @@ import {
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
 import {
+  attendanceCatalogAppendRequested,
   attendanceCatalogHasMore,
   attendanceCatalogListQuery,
   mergeAttendanceCatalogItems,
@@ -28356,9 +28357,9 @@ function clearAttendanceGroupMembers() {
   attendanceGroupMemberLoading.value = false
 }
 
-async function loadAttendanceGroupMembers(options?: { append?: boolean }) {
+async function loadAttendanceGroupMembers(options?: { append?: boolean } | Event) {
   const groupId = attendanceGroupMemberGroupId.value
-  const append = options?.append === true
+  const append = attendanceCatalogAppendRequested(options)
   if (!groupId) {
     clearAttendanceGroupMembers()
     return
@@ -28440,9 +28441,9 @@ function clearAttendanceGroupManagers() {
   attendanceGroupManagerLoading.value = false
 }
 
-async function loadAttendanceGroupManagers(options?: { append?: boolean }) {
+async function loadAttendanceGroupManagers(options?: { append?: boolean } | Event) {
   const groupId = attendanceGroupMemberGroupId.value
-  const append = options?.append === true
+  const append = attendanceCatalogAppendRequested(options)
   if (!groupId) {
     clearAttendanceGroupManagers()
     return
@@ -28465,9 +28466,10 @@ async function loadAttendanceGroupManagers(options?: { append?: boolean }) {
       throw new Error(readErrorMessage(data, tr('Failed to load group owners', '加载考勤组负责人失败')))
     }
     adminForbidden.value = false
-    const items = Array.isArray(data.data?.items)
-      ? data.data.items.map(normalizeAttendanceGroupManagerRow).filter((row): row is AttendanceGroupManager => row !== null)
-      : []
+    const rawManagerItems: unknown[] = Array.isArray(data.data?.items) ? data.data.items : []
+    const items = rawManagerItems
+      .map(item => normalizeAttendanceGroupManagerRow(item))
+      .filter((row): row is AttendanceGroupManager => row !== null)
     const merged = append
       ? mergeAttendanceCatalogItems(attendanceGroupManagers.value, items, manager => manager.id)
       : items
