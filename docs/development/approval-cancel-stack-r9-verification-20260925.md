@@ -35,4 +35,17 @@ mutation 一律 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`。
 | 门审第 5 轮 P1 的形状(`P29(a)`) | **本栈关闭**:legacy 写入在席位闸处被拒(403,零行,回应与普通实例逐字节相同),诚实结尾后 `{A, E}` = HONEST6;M-rc-gate 下红 ⇒ 关闭由席位闸承重 |
 | NOT RUN | core-backend 全量(栈顶跑);RC 自带 standalone workflow 在 CI 的实跑(零 PR);生产语料普查 |
 
-## 3. 栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9` —— 由该分支追加
+## 3. 栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9`
+
+| 项 | 读数 |
+|---|---|
+| 重放 | H-5 3 提交(`89f2805c4f…` 相对 RC `09d0275726…`)`cherry-pick -x`;冲突:`routes/approvals.ts` 两处(栈中的 `rejectIfCancelRound` × H-5 结算块同位 ⇒ 出口守卫先、结算后)+ `ApprovalProductService.ts` 一处(F4 (ii)(b) 版本闸先、`assertCancelRoundActionAllowed` 后);其余自动合并 |
+| `tsc --noEmit` | EXIT 0 / 0 行 |
+| 八件 cancel-round + RC 自带 + H-5 parity + 两邻居(`EXPECT_DB=1`) | **12 files / 151 passed / 0 failed**(creation 66 / RC 11 / parity 18 / revoke-terminal-guard 5 / delegation-seam 2 / outlet-guards 7);栈中重写的 18 条 C-1 腿读数不变 |
+| H-5 单元件 `approvals-routes.test.ts` + 三件 cancel-round 单元守卫(`CI=true`) | **4 files / 395 passed** |
+| v3b 动作 3 守卫 `tests/unit/approval-legacy-decision-version-precondition-sites.test.ts` | **4 / 4** |
+| core-backend 全量(`CI=true npx vitest run`,无 DB,required lane 形状) | **985 files passed / 175 skipped (1160);16040 tests passed / 1615 skipped (17655);0 failed;EXIT 0** |
+| Mutation —— 守卫(`cp` 备份 → 改 → 跑守卫 → 还原 → `cmp`;被测 sha256 routes `62a9940fa957f48c4355a132b8eead2120ab65e85d63c3c0b1555688a552df09` / service `be984a1d7f961d3efaabe57b2ccdf769b0ec20395fe8ef00c859427ed45c18ad`) | **g1** `/actions` handler 内加第三个 `expectedVersion: requestedVersion` 写入点 ⇒ 守卫 **1 red**(WRITE POINTS);**g2** 删 `/reject` 门的 `rejectIfCancelRound` ⇒ **1 red**(EACH legacy door 次序);**g3** 对调 `dispatchAction` 内版本闸与动作闸 ⇒ **1 red**(dispatchAction 次序) |
+| Mutation —— g3 保持对调、跑真库四件(creation / outlet-guards / RC 自带 / parity) | **102 passed / 0 failed** —— F4 (ii) 两序在今天的语料上**不可分辨**(v3b §5.2.1 实证),所以裁决由静态守卫承重 |
+| Mutation —— v1 版本前置条件关掉(`if (false && …)`) | creation + parity:**2 red**,恰为 parity 的 **(S7)** **(S9)**(H-5 r3 门审的 M11 同读数);creation 66 条不动 |
+| NOT RUN | RC / H-5 standalone workflow 在 CI 的实跑(零 PR);带 DB 的全量;生产语料普查 |
