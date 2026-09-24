@@ -93,7 +93,20 @@ pnpm --filter @metasheet/core-backend exec vitest run \
 
 `EXECUTE gate('org-a', ARRAY[...]::text[])` **只返回 `active-user` 一行**。`text[]` 与 `user_id text` 能匹配，没有 uuid 转换错误。
 
-这不是考勤插件的集成套件，也没有起 `attendance_group_members` 业务表。
+这不是考勤插件的集成套件，也没有起 `attendance_group_members` 业务表。本机没有已迁移的 `metasheet_test`，所以没有在本机重跑 `plugin-tests.yml` 里的考勤集成步骤。
+
+## 5.1 CI on `7b5f5347b` and the fixture follow-up
+
+`test (18.x)` job `107739345168`（run `36030943911`）的考勤集成步骤 **17 failed | 1767 passed**。失败都是同一件事：测试用合成 userId 调成员 POST，期望 200，门返回 404 `USER_NOT_IN_ORG`。
+
+| 文件 | 失败腿 |
+|---|---|
+| `attendance-plugin.test.ts` | multi-shift fixed apply、publish lifecycle、temporary-shift fixed rebuild、unscheduled punch、shift-compliance cap、scoped schedule-group member add、snake_case member alias、auto-shift preview 的 8 条（都走 `createGroupForAutoShift`） |
+| `attendance-shift-segments-writer-matrix.db.test.ts` | fixed schedule apply/rebuild、automatic matching apply |
+
+修正只补 fixture，不放宽门：写之前用既有 `ensureActiveImportIdentitiesForTest`（插件集成）或 `seedActiveIdentity`（writer matrix）插入活跃 `users` + `user_orgs`。排班组那条里，scope 拒绝的 `otherUserId` 仍不播种；`assertAttendanceSchedulerScopeAllowed` 在门之前返回 403。
+
+`test (20.x)` 同一 head 上，考勤 unit / lint / typecheck 通过。唯一红的是 elearning schema gate：`bounds the real catalog scan at 10,000 active scope rules` 在 30000ms 超时。该步不跑本 PR 的考勤代码。
 
 ## 6. 只读：已有幽灵行
 

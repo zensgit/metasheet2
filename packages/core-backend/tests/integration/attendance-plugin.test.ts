@@ -3016,6 +3016,7 @@ attendanceIntegrationDescribe(
       expect(mixedComprehensiveRows[0]?.plannedMinutes).toBe(240)
 
       const fixedApplyUserId = `${adminUserId}-fixed-apply`
+      await ensureActiveImportIdentitiesForTest(fixedApplyUserId)
       expect((await createAssignment(fixedApplyUserId, eveningShiftId, 1)).status).toBe(201)
       const fixedGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
         method: 'POST',
@@ -3348,6 +3349,7 @@ attendanceIntegrationDescribe(
       groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
       expect(groupId).toBeTruthy()
       if (!groupId) return
+      await ensureActiveImportIdentitiesForTest(employeeUserId)
       const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
         method: 'POST',
         headers: adminHeaders,
@@ -4389,6 +4391,7 @@ attendanceIntegrationDescribe(
       fixedGroupId = (fixedGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
       expect(fixedGroupId).toBeTruthy()
       if (!fixedGroupId) return
+      await ensureActiveImportIdentitiesForTest(fixedUserId)
       const fixedMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${fixedGroupId}/members`, {
         method: 'POST',
         headers,
@@ -4874,6 +4877,7 @@ attendanceIntegrationDescribe(
       const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ name: `punchpolicy-${runSuffix}`, timezone: 'UTC', attendanceType: 'scheduled_shift', description: 'integration-test' }) })
       expect(groupRes.status).toBe(200)
       groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      await ensureActiveImportIdentitiesForTest(employeeUserId)
       const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, { method: 'POST', headers: adminHeaders, body: JSON.stringify({ userIds: [employeeUserId] }) })
       expect(memberRes.status).toBe(200)
 
@@ -5039,6 +5043,7 @@ attendanceIntegrationDescribe(
       const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, { method: 'POST', headers, body: JSON.stringify({ name: `compliance-grp-${runSuffix}`, timezone: 'UTC', attendanceType: 'fixed_shift', description: 'integration-test' }) })
       expect(groupRes.status).toBe(200)
       groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+      await ensureActiveImportIdentitiesForTest(memberUserId)
       const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, { method: 'POST', headers, body: JSON.stringify({ userIds: [memberUserId] }) })
       expect(memberRes.status).toBe(200)
       const applyRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/fixed-schedule/apply`, { method: 'POST', headers, body: JSON.stringify({ shiftId: bigShiftId, startDate: startD, endDate: startD }) })
@@ -8319,6 +8324,7 @@ attendanceIntegrationDescribe(
       const siblingRows = await pool.query('SELECT description FROM attendance_schedule_groups WHERE id = $1', [siblingId])
       expect(siblingRows.rows[0]?.description ?? null).toBeNull()
 
+      await ensureActiveImportIdentitiesForTest(dispatchUserId)
       const memberAdd = await requestJson(`${baseUrl}/api/attendance/schedule-groups/${childId}/members`, {
         method: 'POST',
         headers,
@@ -9286,6 +9292,7 @@ attendanceIntegrationDescribe(
     expect(groupId).toBeTruthy()
     if (!groupId) return
 
+    await ensureActiveImportIdentitiesForTest(testUserId)
     const groupMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
       method: 'POST',
       headers: {
@@ -11146,6 +11153,7 @@ attendanceIntegrationDescribe(
       expect(groupId).toBeTruthy()
       if (!groupId) throw new Error('group id missing')
 
+      await ensureActiveImportIdentitiesForTest(userId, orgId)
       const memberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
