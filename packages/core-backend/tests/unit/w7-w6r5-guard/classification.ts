@@ -176,6 +176,11 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-shift-service.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs',
+  // Settings-save gate for outdoor requireApproval (#5961). Classified
+  // `calculation_path` — the HONEST bucket, not a carve-out: index.cjs
+  // require()s it from PUT /settings, so both W6 aggregate bans apply
+  // even though the module only decides whether that save is allowed.
+  'plugins/plugin-attendance/lib/outdoor-approval-flow-save.cjs',
 ] as const)
 
 /**
