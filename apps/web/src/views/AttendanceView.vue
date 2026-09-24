@@ -15822,7 +15822,9 @@ async function focusInitialAttendanceSection(): Promise<void> {
   ) ?? overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
   if (target instanceof HTMLElement) {
     revealOverviewHistoryDetails(target)
-    target.scrollIntoView({ behavior: 'auto', block: 'start' })
+    if (typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: 'auto', block: 'start' })
+    }
   }
 }
 
@@ -29913,10 +29915,6 @@ watch(
     showReports.value,
     adminForbidden.value,
     attendancePluginActive.value,
-    // Overview cards stay unmounted while `pluginLoading` is true. The first
-    // immediate pass therefore cannot see them; rerun once the gate clears so
-    // section deep links scroll to the real card (#5966).
-    pluginLoading.value,
   ] as const,
   () => {
     if (props.routeGroupContext) return
@@ -29924,6 +29922,17 @@ watch(
   },
   { immediate: true },
 )
+
+// Overview cards stay unmounted while `pluginLoading` is true. The first
+// immediate pass therefore cannot see them; rerun once the gate clears so
+// section deep links scroll to the real card (#5966). Admin section focus is
+// left to the watch above: retrying it writes the section hash onto the
+// groups URL and calls scrollIntoView before jsdom implements it.
+watch(pluginLoading, (loading) => {
+  if (loading || props.routeGroupContext) return
+  if (!showOverview.value && !showReports.value) return
+  void focusInitialAttendanceSection()
+})
 
 watch(
   [
