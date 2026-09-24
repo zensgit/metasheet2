@@ -2085,10 +2085,41 @@ describe('attendance UUID route validation', () => {
     expect(csvRes.statusCode).toBe(200)
     const csv = String(csvRes.body)
     const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    expect(csv).not.toContain('# META')
     expect(lines[0]).not.toContain('# META')
-    expect(lines.at(-1)).toBe('# META attendance_export returned=2 total=6 limit=5000 truncated=true status=all')
+    expect(lines.at(-1)).not.toContain('# META')
+    expect(csvRes.headers['X-Attendance-Export-Total']).toBe('6')
+    expect(csvRes.headers['X-Attendance-Export-Returned']).toBe('2')
+    expect(csvRes.headers['X-Attendance-Export-Truncated']).toBe('true')
     expect(csvRes.headers['X-Attendance-Export-Limit']).toBe('5000')
     expect(csvRes.headers['X-Attendance-Export-Status']).toBe('all')
+
+    const imported: Array<{ fields: Record<string, string> }> = []
+    const importResult = attendancePlugin.__attendanceImportCsvHeaderForTests.iterateImportRowsFromCsv({
+      csvText: csv,
+      onRow(row: { fields: Record<string, string> }) {
+        imported.push(row)
+      },
+    }) as { rowCount: number }
+    expect(importResult.rowCount).toBe(2)
+    expect(imported).toHaveLength(2)
+
+    const XLSX = await import('xlsx')
+    const workbook = XLSX.read(csv, { type: 'string', raw: true })
+    const matrix = XLSX.utils.sheet_to_json<(string | number)[]>(
+      workbook.Sheets[workbook.SheetNames[0]],
+      { header: 1, raw: true, defval: '' },
+    )
+    expect(matrix).toHaveLength(1 + importResult.rowCount)
+    const headerWidth = matrix[0].length
+    expect(headerWidth).toBeGreaterThan(1)
+    for (const dataRow of matrix.slice(1)) {
+      expect(dataRow).toHaveLength(headerWidth)
+    }
+    for (const row of imported) {
+      expect(Object.keys(row.fields).length).toBe(headerWidth)
+    }
+    expect(matrix.flat().some((cell) => String(cell).includes('# META'))).toBe(false)
     const cappedSelect = db.query.mock.calls.filter(([sql]) => String(sql).includes('ORDER BY ar.work_date DESC')).at(-1)
     expect(String(cappedSelect?.[0])).not.toContain('ar.status =')
     expect(cappedSelect?.[1]).toEqual(['attendance-user-1', 'default', '2026-06-01', '2026-06-30', 5000])

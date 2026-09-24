@@ -12,13 +12,13 @@ const disclosure = require('../../../../plugins/plugin-attendance/lib/attendance
     limit: number
     status?: string | null
   }) => { matchedTotal: number; returned: number; limit: number; truncated: boolean; status: string }
-  appendAttendanceExportNotice: (csv: string, input: {
+  applyAttendanceExportDisclosureHeaders: (res: { setHeader: (name: string, value: string) => void }, disclosure: {
     matchedTotal: number
     returned: number
     limit: number
     truncated: boolean
     status: string
-  }) => string
+  }) => void
 }
 
 describe('attendance export disclosure', () => {
@@ -60,10 +60,17 @@ describe('attendance export disclosure', () => {
       limit: 5000,
       status: 'late',
     })
-    const csv = disclosure.appendAttendanceExportNotice('work_date,status\n2026-04-01,late', capped)
-    const lines = csv.trim().split('\n')
-    expect(lines[0]).toBe('work_date,status')
-    expect(lines[1]).toBe('2026-04-01,late')
-    expect(lines[2]).toBe('# META attendance_export returned=5000 total=6200 limit=5000 truncated=true status=late')
+    const headers = new Map<string, string>()
+    disclosure.applyAttendanceExportDisclosureHeaders({
+      setHeader(name: string, value: string) {
+        headers.set(name, value)
+      },
+    }, capped)
+    expect(headers.get('X-Attendance-Export-Total')).toBe('6200')
+    expect(headers.get('X-Attendance-Export-Returned')).toBe('5000')
+    expect(headers.get('X-Attendance-Export-Limit')).toBe('5000')
+    expect(headers.get('X-Attendance-Export-Truncated')).toBe('true')
+    expect(headers.get('X-Attendance-Export-Status')).toBe('late')
+    expect(disclosure).not.toHaveProperty('appendAttendanceExportNotice')
   })
 })

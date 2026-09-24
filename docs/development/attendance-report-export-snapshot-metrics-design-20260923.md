@@ -22,9 +22,10 @@ The report snapshot card labels record count, flagged count, and work minutes as
   - `X-Attendance-Export-Truncated` — `true` when matched > returned
   - `X-Attendance-Export-Status` — status token or `all`
 - JSON keeps `data.total` as the returned length (existing callers) and adds `matchedTotal`, `returned`, `limit`, `truncated`, `status`.
-- CSV (and therefore the client-built Excel file) always appends one footer line beginning with `# META attendance_export`. It is not a record. Data rows stay above it; the header row stays line 1.
+- CSV bodies contain only the header row and data rows. Truncation is not written into the file. CSV has no comment syntax, and the Excel export parses that same CSV with SheetJS (`csvTextToXlsxArrayBuffer`), so a `# META` footer would become an extra worksheet row. The pre-overwrite import backup downloads the same CSV, so it would have inherited that row too.
+- Truncation reaches the client through the response headers above. The reports UI reads those headers (`noteReportExportDisclosure`) and shows returned/matched in the status bar. It does not parse a footer out of the file.
 - The reports UI requests `limit = min(recordsTotal, 5000)` when the loaded range total is known, otherwise 5000, and passes the record-status pill when it is not `all`. The status bar and a persistent disclosure line state returned/matched, and use the error status when truncated.
-- The import-override backup button is unchanged. It still omits `limit`/`status`, so it inherits the new default cap and the CSV footer.
+- The import-override backup button still omits `limit`/`status`, so it inherits the default cap of 5000. Its downloaded CSV is header plus data rows only, same column structure as an uncapped export of those rows. Restore parses that CSV with the existing import reader.
 
 ## Snapshot contract
 

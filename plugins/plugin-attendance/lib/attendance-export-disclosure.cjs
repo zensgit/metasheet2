@@ -42,19 +42,6 @@ function applyAttendanceExportDisclosureHeaders(res, disclosure) {
   res.setHeader('X-Attendance-Export-Status', disclosure.status || 'all')
 }
 
-function appendAttendanceExportNotice(csv, disclosure) {
-  const notice = [
-    '# META attendance_export',
-    `returned=${disclosure.returned}`,
-    `total=${disclosure.matchedTotal}`,
-    `limit=${disclosure.limit}`,
-    `truncated=${disclosure.truncated ? 'true' : 'false'}`,
-    `status=${disclosure.status || 'all'}`,
-  ].join(' ')
-  const body = String(csv ?? '').replace(/\s+$/, '')
-  return `${body}\n${notice}\n`
-}
-
 module.exports = {
   ATTENDANCE_EXPORT_MAX_ROWS,
   ATTENDANCE_EXPORT_STATUS_PATTERN,
@@ -62,5 +49,4 @@ module.exports = {
   normalizeAttendanceExportStatus,
   buildAttendanceExportDisclosure,
   applyAttendanceExportDisclosureHeaders,
-  appendAttendanceExportNotice,
 }

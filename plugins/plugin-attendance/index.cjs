@@ -19,7 +19,6 @@ const {
   normalizeAttendanceExportStatus,
   buildAttendanceExportDisclosure,
   applyAttendanceExportDisclosureHeaders,
-  appendAttendanceExportNotice,
 } = require('./lib/attendance-export-disclosure.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
@@ -50866,12 +50865,9 @@ module.exports = {
             })
             return
           }
-          const csv = appendAttendanceExportNotice(
-            buildAttendanceRecordReportCsv(exportItems, reportFields.fields, {
-              headerMode: parsed.data.header || 'label',
-            }),
-            exportDisclosure,
-          )
+          const csv = buildAttendanceRecordReportCsv(exportItems, reportFields.fields, {
+            headerMode: parsed.data.header || 'label',
+          })
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`
 
           emitEvent('attendance.exported', {
