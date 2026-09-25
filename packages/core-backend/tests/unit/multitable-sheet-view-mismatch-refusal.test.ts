@@ -52,6 +52,14 @@
  *     FUNCTION rather than by "somewhere above the router" — and the wrapped form still names the
  *     resolver, so the sheet-liveness closure guard keeps every one of these handlers (GET /context
  *     is in ITS scope for that token alone, asserted rather than asserted in prose).
+ *  6. …and by SHAPE, because 5 is by NAME. Every cell in 5 recognises the refusal by the resolver's
+ *     name or by `instanceof ConflictError`, so the three form-share routes that HAND-WRITE the same
+ *     view→sheet check (#5957 final review) were invisible to all of them, and a fourth copy under
+ *     any other name would be too. The last sections of this file find every sheet-pairing refusal
+ *     by what it does — an `if` comparing two sheet ids whose mismatch path answers the request —
+ *     COMPUTE whether that answer is values-free and whether it runs before the handler's first
+ *     401/403, and hold the result to a closed-world census with named exceptions. The three
+ *     form-share routes are on it as a GAP, and that GAP is also measured on the wire.
  *
  * ── Why the ABSENT body and not a new code ────────────────────────────────────
  * A dedicated code would have to be emitted identically for a live, a soft-deleted and an absent
@@ -75,7 +83,7 @@
  * the same id, so a warm cache would red it instead of greening it.
  */
 import express, { type Express, type Response } from 'express'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import request from 'supertest'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
@@ -1067,5 +1075,913 @@ describe('#5946 structural — the wrapped call is the only door', () => {
     lines[idx] = '      // removed'
     expect(callSitesThatIgnoreNull(lines.join('\n')).length).toBe(1)
     expect(callSitesThatIgnoreNull(UNIVER_META_SOURCE)).toEqual([])
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BY SHAPE, NOT BY NAME — every sheet-pairing refusal in univer-meta.ts
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── Why the cells above are not enough ────────────────────────────────────────
+ * Every structural cell above recognises the #5946 refusal by a NAME: a line that says
+ * `resolveMetaSheetId(`, a branch that says `instanceof ConflictError`, the wrapper's literal call
+ * form. The #5957 final review read the one path none of them looks at: GET and PATCH
+ * /sheets/:sheetId/views/:viewId/form-share and POST …/form-share/regenerate each HAND-WRITE the same
+ * check — read the view row, compare its `sheet_id` with the addressed sheet, refuse — before any
+ * authority or liveness gate, with both ids pasted into the message and "no such view" worded apart
+ * from "view on another sheet". None of the names the cells above know appears there, so they stayed
+ * green over all three, and a fourth copy under any other name would be just as invisible.
+ *
+ * ── What this section recognises instead ──────────────────────────────────────
+ * THE SHAPE. An `if` whose condition compares two ids with `===` / `!==` / `==` / `!=`, at least one
+ * of them sheet-id-valued (an identifier or member path whose LAST segment is `sheetId` / `sheet_id`,
+ * any case, optionally `String(…)`-wrapped) and the other not a literal — directly, or through a
+ * boolean the comparison was first bound to — and whose MISMATCH path answers the request: a
+ * `.status(…)` on any response object, a `res.json/send/end`, a call handed `res`, a `throw`, a `next(…)` or a
+ * `return { status: … }` refusal object. The mismatch path is the then-branch of an inequality, and
+ * the else-branch of an equality (or, when there is no else and the then-branch returns, the
+ * statement after the `if`); a `!(…)` around the comparison, or a `!` on the bound boolean, flips it.
+ * When the comparison sits inside a callback in the condition (`.some((row) => …)`) its polarity is
+ * not knowable from the text, and both branches are read.
+ *
+ * Two properties of every site are COMPUTED from the code, never taken from the table:
+ *   echo             the answer's payload is not provably constant. A payload is the argument list
+ *                    of `.json(` / `.send(` / `new X(` / `next(`, the arguments after `res` of a helper
+ *                    call, a thrown expression, or a returned `{ status: … }` object. It is constant
+ *                    only if every leaf is a literal or an identifier DECLARED as a plain string or
+ *                    number literal — in this file, or exported so by the module it is imported from.
+ *                    A `${…}` template, a concatenation with a variable, a shorthand `{ viewId }`, a
+ *                    member path (`err.message`, `req.params.viewId`), a call, or a local built from
+ *                    any of those all read as echo: "cannot prove constant" is echo, never the reverse.
+ *   beforeAuthority  inside a route handler: no 401/403 refusal (the closure guard's
+ *                    AUTHORITY_REFUSAL, widened to 401 for the public-form layer) precedes the site in
+ *                    the handler, and the site's mismatch path does not answer ONLY a 401/403 (then it
+ *                    is the authority refusal itself). `null` outside every handler.
+ *
+ * THE RULES, over the whole file:
+ *   1. CLOSED WORLD — the sites found are exactly the keys of SHEET_PAIRING_CENSUS. A new pairing
+ *      refusal, whatever its helpers are called and however its message is worded, reds until it is
+ *      written down.
+ *   2. DECLARED = COMPUTED — each row's `echo` and `beforeAuthority` equal what the scan computes, so a
+ *      row cannot be written down more flattering than the code it describes.
+ *   3. ONLY NAMED EXCEPTIONS — `echo: true`, or `beforeAuthority` other than `false`, is allowed only
+ *      for a key in SHEET_PAIRING_EXCEPTIONS, each with its reason; an exception whose site no longer
+ *      needs it reds as well, so the list can only shrink.
+ * A key is `<route or enclosing function> | <the comparison as written>`, never a line number.
+ *
+ * ── Known limits, stated instead of claimed away ──────────────────────────────
+ *   - A pairing moved into a predicate (`if (!belongsTo(view, sheetId))`) puts its comparison in a
+ *     `return`, not an `if`, and is not seen; nor is one with neither operand named for a sheet id
+ *     (`row.owner !== target`), nor a membership test (`ids.includes(view.sheetId)`, `set.has(…)`),
+ *     nor a refusal written as a ternary (`x ? res.status(404)… : …`).
+ *   - A pairing whose mismatch path only hands back `null` and lets its CALLER answer is read where the
+ *     comparison is, which does not answer the request — so it is not a site; the caller's answer is
+ *     not traced back to it.
+ *   - Authority position is TEXTUAL, as in the closure guard: a 401/403 written earlier in the handler
+ *     counts even when it sits in a branch or a closure that does not run before the site.
+ *   - A pairing pushed into SQL is covered for `meta_views` SELECTs only, by the SQL cell below.
+ *   - Scope is routes/univer-meta.ts, the file the #5946 refusal and its three hand-written copies
+ *     live in. Other route files are not scanned.
+ *   - Comments are blanked with the same two regexes the closure guard strips them with; the
+ *     population cell reds if that ever swallows a route declaration.
+ *   - Identifier resolution is one level deep and literal-only, so a constant defined from another
+ *     constant reads as echo — a false alarm, never a miss.
+ */
+
+const ROUTES_DIR = join(__dirname, '../../src/routes')
+
+/** CRLF-normalised; comments blanked to spaces IN PLACE, so every offset keeps its line. */
+function maskComments(source: string): string {
+  return source
+    .replace(/\r\n/g, '\n')
+    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])(\/\/.*)$/gm, (_all, lead: string, comment: string) => lead + ' '.repeat(comment.length))
+}
+
+const CLOSER: Record<string, string> = { '(': ')', '[': ']', '{': '}' }
+
+/** End (exclusive) of a '…' or "…" literal opening at `at`; -1 if it runs off its line. */
+function skipQuoted(code: string, at: number): number {
+  const quote = code[at]
+  for (let i = at + 1; i < code.length; i += 1) {
+    if (code[i] === '\\') { i += 1; continue }
+    if (code[i] === quote) return i + 1
+    if (code[i] === '\n') return -1
+  }
+  return -1
+}
+
+/** End (exclusive) of a template literal opening at `at`, `${…}` holes included; -1 if unbalanced. */
+function skipTemplate(code: string, at: number): number {
+  for (let i = at + 1; i < code.length; i += 1) {
+    if (code[i] === '\\') { i += 1; continue }
+    if (code[i] === '`') return i + 1
+    if (code[i] === '$' && code[i + 1] === '{') {
+      const close = matchBracket(code, i + 1)
+      if (close === -1) return -1
+      i = close
+    }
+  }
+  return -1
+}
+
+/**
+ * A `/` starts a regex literal (not a division) after an operator, an opening bracket, a separator or
+ * a keyword — the usual rule. Needed because this file has regex literals holding quotes INSIDE
+ * template holes (`${s.replace(/"/g, '""')}`), and a scanner that reads that `"` as a string start
+ * loses its place for the rest of the file.
+ */
+function regexMayStart(code: string, at: number, prev: string): boolean {
+  if (code[at] !== '/' || code[at + 1] === '/' || code[at + 1] === '*') return false
+  return prev === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev)
+    || /(?<![\w$])(?:return|typeof|case|in|of|delete|void|throw|new)$/.test(code.slice(Math.max(0, at - 10), at).trimEnd())
+}
+
+/**
+ * If a string, template or regex literal starts at `at` (`prev` = the previous significant char), its
+ * end (exclusive); 0 if none starts there; -1 if a string or template starts and never ends. A `/`
+ * whose closing slash is not on its line is read as a division.
+ */
+function literalEnd(code: string, at: number, prev: string): number {
+  const c = code[at]
+  if (c === "'" || c === '"') return skipQuoted(code, at)
+  if (c === '`') return skipTemplate(code, at)
+  if (!regexMayStart(code, at, prev)) return 0
+  let inClass = false
+  for (let j = at + 1; j < code.length && code[j] !== '\n'; j += 1) {
+    if (code[j] === '\\') { j += 1; continue }
+    if (code[j] === '[') inClass = true
+    else if (code[j] === ']') inClass = false
+    else if (code[j] === '/' && !inClass) {
+      let end = j + 1
+      while (/[a-z]/i.test(code[end] ?? '')) end += 1
+      return end
+    }
+  }
+  return 0
+}
+
+/** Index of the bracket closing the one at `open`, string/template/regex-aware; -1 if unbalanced. */
+function matchBracket(code: string, open: number): number {
+  const first = CLOSER[code[open] ?? '']
+  if (!first) return -1
+  const stack = [first]
+  let prev = code[open]!
+  for (let i = open + 1; i < code.length; i += 1) {
+    const c = code[i]!
+    const end = literalEnd(code, i, prev)
+    if (end === -1) return -1
+    if (end > 0) {
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    if (c in CLOSER) {
+      stack.push(CLOSER[c]!)
+    } else if (c === ')' || c === ']' || c === '}') {
+      if (stack.pop() !== c) return -1
+      if (stack.length === 0) return i
+    }
+    if (!/\s/.test(c)) prev = c
+  }
+  return -1
+}
+
+function skipSpace(code: string, at: number): number {
+  let i = at
+  while (i < code.length && /\s/.test(code[i]!)) i += 1
+  return i
+}
+
+/**
+ * End (exclusive) of the statement starting at `at`: its `;`, or a line break at bracket depth 0 that
+ * is not followed by a continuation, or the enclosing block's closing bracket. -1 if unbalanced.
+ */
+function statementEnd(code: string, at: number): number {
+  let prev = ''
+  for (let i = at; i < code.length; i += 1) {
+    const c = code[i]!
+    const end = literalEnd(code, i, prev)
+    if (end === -1) return -1
+    if (end > 0) {
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    if (c in CLOSER) {
+      const close = matchBracket(code, i)
+      if (close === -1) return -1
+      i = close
+      prev = 'x'
+      continue
+    }
+    if (c === ';') return i + 1
+    if (c === '\n' && !/^\s*(?:[.?:+]|&&|\|\|)/.test(code.slice(i + 1, i + 80))) return i
+    if (c === '}' || c === ')' || c === ']') return i
+    if (!/\s/.test(c)) prev = c
+  }
+  return code.length
+}
+
+/** The parenthesised condition of the `if` at `at`, as [open, close] bracket indexes. */
+function ifCondition(code: string, at: number): [number, number] | null {
+  const open = code.indexOf('(', at)
+  const close = open === -1 ? -1 : matchBracket(code, open)
+  return close === -1 ? null : [open, close]
+}
+
+interface IfStatement {
+  condition: [number, number]
+  then: [number, number]
+  else: [number, number] | null
+  /** Just past the whole statement, else-chain included. */
+  end: number
+}
+
+/** Branch extent of a block (`{…}`) or a single statement starting at `at`. */
+function branchAt(code: string, at: number): [number, number] | null {
+  if (code[at] === '{') {
+    const close = matchBracket(code, at)
+    return close === -1 ? null : [at, close + 1]
+  }
+  if (/^if\s*\(/.test(code.slice(at, at + 8))) {
+    const nested = parseIf(code, at)
+    return nested ? [at, nested.end] : null
+  }
+  const end = statementEnd(code, at)
+  return end <= at ? null : [at, end]
+}
+
+function parseIf(code: string, at: number): IfStatement | null {
+  const condition = ifCondition(code, at)
+  if (!condition) return null
+  const then = branchAt(code, skipSpace(code, condition[1] + 1))
+  if (!then) return null
+  const afterThen = skipSpace(code, then[1])
+  let elseBranch: [number, number] | null = null
+  if (/^else(?![\w$])/.test(code.slice(afterThen, afterThen + 5))) {
+    elseBranch = branchAt(code, skipSpace(code, afterThen + 4))
+    if (!elseBranch) return null
+  }
+  return { condition, then, else: elseBranch, end: elseBranch ? elseBranch[1] : then[1] }
+}
+
+// ── the comparison ────────────────────────────────────────────────────────────
+
+/** `a.b?.c[0]`, each segment optionally a no-argument call (`.trim()`, `.toString()`). */
+const ID_PATH = String.raw`(?<![\w$.\]])[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*(?:\(\s*\))?|\[\d+\])*`
+const NO_ARG_CALLS = String.raw`(?:\s*\??\.\s*[A-Za-z_$][\w$]*\(\s*\))*`
+const ID_OPERAND = String.raw`(?:String\(\s*${ID_PATH}\s*\)${NO_ARG_CALLS}|${ID_PATH})`
+const ID_COMPARISON = new RegExp(String.raw`(${ID_OPERAND})\s*(!==|===|!=|==)\s*(${ID_OPERAND})`, 'g')
+
+/** The segment an operand is NAMED by: wrappers and trailing `.trim()`-style calls peeled off. */
+const lastSegment = (operand: string): string =>
+  operand
+    .replace(/(?:\s*\??\.\s*[A-Za-z_$][\w$]*\(\s*\))+$/, '')
+    .replace(/^String\(\s*/, '')
+    .replace(/\s*\)$/, '')
+    .split(/\s*\??\.\s*/)
+    .pop()!
+    .replace(/(?:\[\d+\])+$/, '')
+const isSheetIdValued = (operand: string): boolean => /sheet_?id$/i.test(lastSegment(operand))
+const isLiteralName = (operand: string): boolean => /^(?:null|undefined|true|false|NaN|Infinity)$/.test(operand)
+
+// ── the answer ────────────────────────────────────────────────────────────────
+
+/** The request is ANSWERED here: a status, a response write, a call handed `res`, a throw, next(), a refusal object. */
+const ANSWERS_REQUEST = new RegExp([
+  String.raw`\.\s*status\s*\(`,
+  String.raw`(?<![\w$.])res\s*\.\s*(?:json|send|sendStatus|end|redirect)\s*\(`,
+  String.raw`(?<![\w$.])(?!(?:if|for|while|switch|catch|return|new)(?![\w$]))[A-Za-z_$][\w$]*\s*\(\s*(?:req\s*,\s*)?res\s*[,)]`,
+  String.raw`(?<![\w$.])throw(?![\w$])`,
+  String.raw`(?<![\w$.])next\s*\(\s*[^)\s]`,
+  String.raw`(?<![\w$.])return\s*\{\s*(?:kind\s*:\s*'error'\s*,\s*)?status\s*:`,
+].join('|'))
+
+/** Where the answer's CONTENT sits. Named groups say which kind of opener matched. */
+const PAYLOAD_OPENER = new RegExp([
+  String.raw`(?<call>\.\s*(?:json|send)\s*\(|(?<![\w$.])new\s+[A-Za-z_$][\w$]*\s*\(|(?<![\w$.])next\s*\()`,
+  String.raw`(?<helper>(?<![\w$.])(?!(?:if|for|while|switch|catch|return|new)(?![\w$]))[A-Za-z_$][\w$]*\s*\(\s*(?:req\s*,\s*)?res\s*(?=[,)]))`,
+  String.raw`(?<object>(?<![\w$.])return\s*(?=\{\s*(?:kind\s*:\s*'error'\s*,\s*)?status\s*:))`,
+  String.raw`(?<thrown>(?<![\w$.])throw\s+(?!new(?![\w$])))`,
+].join('|'), 'g')
+
+/** Every payload in an answering branch, or null if one cannot be delimited (read as echo). */
+function answerPayloads(text: string): string[] | null {
+  const payloads: string[] = []
+  for (const m of text.matchAll(PAYLOAD_OPENER)) {
+    const groups = m.groups ?? {}
+    const at = m.index!
+    if (groups.call) {
+      const open = at + m[0].length - 1
+      const close = matchBracket(text, open)
+      if (close === -1) return null
+      payloads.push(text.slice(open + 1, close))
+    } else if (groups.helper) {
+      const open = text.indexOf('(', at)
+      const close = matchBracket(text, open)
+      if (close === -1) return null
+      payloads.push(text.slice(open + 1, close).replace(/^\s*(?:req\s*,\s*)?res\s*,?/, ''))
+    } else if (groups.object) {
+      const open = text.indexOf('{', at)
+      const close = matchBracket(text, open)
+      if (close === -1) return null
+      payloads.push(text.slice(open, close + 1))
+    } else if (groups.thrown) {
+      const from = at + m[0].length
+      const end = statementEnd(text, from)
+      if (end === -1) return null
+      payloads.push(text.slice(from, end))
+    }
+  }
+  return payloads
+}
+
+const TEMPLATE_LITERAL = /`(?:[^`\\]|\\.)*`/g
+const QUOTED_LITERAL = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g
+const LITERAL_INITIALISER = /^(?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\$]|\\.)*`|-?\d+(?:\.\d+)?)(?:\s+as\s+const)?\s*;?$/
+
+const escapeName = (name: string): string => name.replace(/\$/g, '\\$')
+
+/** The initialiser of `name`'s declaration nearest before `at` (else the first one), or null. */
+function initialiserOf(code: string, name: string, at: number, exportedOnly = false): string | null {
+  const decl = new RegExp(
+    String.raw`(?<![\w$.])${exportedOnly ? String.raw`export\s+` : ''}(?:const|let|var)\s+${escapeName(name)}\s*(?::[^=\n]+)?=(?![=>])\s*`,
+    'g',
+  )
+  const all = [...code.matchAll(decl)]
+  const before = all.filter((m) => m.index! < at)
+  const chosen = before.length > 0 ? before[before.length - 1]! : all[0]
+  if (!chosen) return null
+  const from = chosen.index! + chosen[0].length
+  const end = statementEnd(code, from)
+  return end === -1 ? null : code.slice(from, end).trim()
+}
+
+/** True only if `name` is declared, here or in the relative module it is imported from, as a plain literal. */
+function declaredAsLiteral(name: string, code: string, at: number): boolean {
+  const local = initialiserOf(code, name, at)
+  if (local !== null) return LITERAL_INITIALISER.test(local)
+  const imported = new RegExp(
+    String.raw`import\s+(?:type\s+)?\{[^}]*(?<![\w$])${escapeName(name)}(?![\w$])[^}]*\}\s*from\s*'([^']+)'`,
+  ).exec(code)
+  if (!imported || !imported[1]!.startsWith('.')) return false
+  const base = join(ROUTES_DIR, imported[1]!)
+  for (const candidate of [`${base}.ts`, join(base, 'index.ts')]) {
+    if (!existsSync(candidate)) continue
+    const init = initialiserOf(maskComments(readFileSync(candidate, 'utf8')), name, Number.POSITIVE_INFINITY, true)
+    return init !== null && LITERAL_INITIALISER.test(init)
+  }
+  return false
+}
+
+/** Fail-closed: true only when every leaf of `expr` is provably a constant. */
+function isConstantExpression(expr: string, code: string, at: number): boolean {
+  const templates: string[] = expr.match(TEMPLATE_LITERAL) ?? []
+  if (templates.some((t) => t.includes('${'))) return false
+  const residue = expr
+    .replace(TEMPLATE_LITERAL, ' ')
+    .replace(QUOTED_LITERAL, ' ')
+    .replace(/(?<![\w$.])as\s+const(?![\w$])/g, ' ')
+    .replace(/(?<![\w$.])new\s+[A-Za-z_$][\w$]*/g, ' ')
+    .replace(/([{,]\s*)[A-Za-z_$][\w$]*\s*:/g, '$1')
+  for (const ref of residue.match(/(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*/g) ?? []) {
+    if (/^(?:true|false|null|undefined)$/.test(ref)) continue
+    if (!/^[A-Za-z_$][\w$]*$/.test(ref)) return false
+    if (!declaredAsLiteral(ref, code, at)) return false
+  }
+  return true
+}
+
+// ── authority position ────────────────────────────────────────────────────────
+
+/** The closure guard's AUTHORITY_REFUSAL, widened to 401 (the public-form submit layer answers 401 first). */
+const AUTHORITY_REFUSAL_401_403 = /\.status\(\s*40[13]\s*\)|(?<![\w$])status:\s*40[13](?![\w$])|(?<![\w$])send\w*(?:Forbidden|Unauthori[sz]ed)\w*\(|(?<![\w$])(?:Forbidden|Unauthori[sz]ed)Error(?![\w$])|(?<![\w$])requireRecordReadable\(/
+
+const SHAPE_ROUTE_DECL = /^([ \t]*)router\.(get|post|patch|delete|put)\(\s*'([^']+)'/
+const SHAPE_FN_DECL = /^[ \t]*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^[ \t]*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:\([^)\n]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=\n]+?)?\s*=>/gm
+
+interface HandlerSpan { key: string; start: number; end: number }
+
+function handlerSpans(code: string): HandlerSpan[] {
+  const lines = code.split('\n')
+  const offsets: number[] = []
+  let offset = 0
+  for (const line of lines) {
+    offsets.push(offset)
+    offset += line.length + 1
+  }
+  const spans: HandlerSpan[] = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = SHAPE_ROUTE_DECL.exec(lines[i]!)
+    if (!m) continue
+    let j = i + 1
+    while (j < lines.length && lines[j]!.trimEnd() !== `${m[1]}})` && !SHAPE_ROUTE_DECL.test(lines[j]!)) j += 1
+    spans.push({
+      key: `${m[2]!.toUpperCase()} ${m[3]}`,
+      start: offsets[i]!,
+      end: j < lines.length ? offsets[j]! + lines[j]!.length : code.length,
+    })
+  }
+  return spans
+}
+
+// ── the scan ──────────────────────────────────────────────────────────────────
+
+interface PairingSite {
+  key: string
+  /** For messages only; never part of the key. */
+  line: number
+  echo: boolean
+  beforeAuthority: boolean | null
+}
+
+interface PairingScan {
+  sites: PairingSite[]
+  /** Sites whose nearest `if` could not be parsed — reported, never silently skipped. */
+  unparseable: string[]
+  handlers: number
+}
+
+function scanSheetPairings(source: string): PairingScan {
+  const code = maskComments(source)
+  const lineAt = (index: number) => code.slice(0, index).split('\n').length
+  const handlers = handlerSpans(code)
+  const fnDecls = [...code.matchAll(SHAPE_FN_DECL)].map((m) => ({ index: m.index!, name: (m[1] ?? m[2])! }))
+  const ifStarts = [...code.matchAll(/(?<![\w$.])if\s*\(/g)].map((m) => m.index!)
+  const sites: PairingSite[] = []
+  const unparseable: string[] = []
+
+  for (const m of code.matchAll(ID_COMPARISON)) {
+    const [text, left, op, right] = m as unknown as [string, string, string, string]
+    if (!isSheetIdValued(left) && !isSheetIdValued(right)) continue
+    if (isLiteralName(left) || isLiteralName(right)) continue
+    const at = m.index!
+
+    // 1. The `if` whose condition holds the comparison: the nearest one before it whose `(…)` spans it.
+    let statement: IfStatement | null = null
+    let negated = /!\s*\(\s*$/.test(code.slice(Math.max(0, at - 8), at))
+    let alias: string | null = null
+    let nearestFailed = false
+    for (let k = ifStarts.length - 1; k >= 0; k -= 1) {
+      const start = ifStarts[k]!
+      if (start >= at) continue
+      if (start < at - 4000) break
+      const condition = ifCondition(code, start)
+      if (!condition) {
+        if (start > at - 600) nearestFailed = true
+        continue
+      }
+      if (condition[0] < at && condition[1] > at) {
+        statement = parseIf(code, start)
+        if (!statement) nearestFailed = true
+        break
+      }
+    }
+
+    // 2. …or the `if` that tests a boolean the comparison was first bound to.
+    if (!statement) {
+      const lineStart = code.lastIndexOf('\n', at) + 1
+      const bind = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*boolean\s*)?=\s*[^;\n]*$/.exec(code.slice(lineStart, at))
+      if (bind) {
+        alias = bind[1]!
+        const use = new RegExp(String.raw`(?<![\w$.])${escapeName(alias)}(?![\w$])`)
+        for (const start of ifStarts) {
+          if (start <= at) continue
+          if (start > at + 4000) break
+          const condition = ifCondition(code, start)
+          if (!condition || !use.test(code.slice(condition[0], condition[1]))) continue
+          statement = parseIf(code, start)
+          if (!statement) nearestFailed = true
+          else negated = new RegExp(String.raw`!\s*${escapeName(alias)}(?![\w$])`).test(code.slice(condition[0], condition[1]))
+          break
+        }
+      }
+    }
+
+    if (!statement) {
+      if (nearestFailed) unparseable.push(`line ${lineAt(at)}: ${text}`)
+      continue
+    }
+
+    // 3. The mismatch path(s), and whether any of them answers the request.
+    const inCallback = alias === null && code.slice(statement.condition[0], at).includes('=>')
+    const mismatchWhenTrue = (op === '!==' || op === '!=') !== negated
+    const thenText = code.slice(statement.then[0], statement.then[1])
+    const paths: Array<[number, number]> = []
+    if (inCallback || mismatchWhenTrue) paths.push(statement.then)
+    if (inCallback || !mismatchWhenTrue) {
+      if (statement.else) paths.push(statement.else)
+      else if (!inCallback && /(?<![\w$.])(?:return|throw)(?![\w$])/.test(thenText)) {
+        const next = branchAt(code, skipSpace(code, statement.end))
+        if (next) paths.push(next)
+      }
+    }
+    const answering = paths.filter(([s, e]) => ANSWERS_REQUEST.test(code.slice(s, e)))
+    if (answering.length === 0) continue
+
+    // 4. Its shape.
+    const echo = answering.some(([s, e]) => {
+      const payloads = answerPayloads(code.slice(s, e))
+      return payloads === null || payloads.some((p) => !isConstantExpression(p, code, e))
+    })
+    const handler = handlers.find((h) => at >= h.start && at < h.end) ?? null
+    const fn = handler ? null : fnDecls.filter((f) => f.index < at).pop() ?? null
+    const context = handler ? handler.key : fn ? `fn ${fn.name}` : '(module)'
+    // A mismatch path that answers ONLY a 401/403 is the authority refusal itself — no other status in it.
+    const answersOnlyWithAuthority = answering.every(([s, e]) => {
+      const path = code.slice(s, e)
+      return AUTHORITY_REFUSAL_401_403.test(path) && !/\.\s*status\s*\(\s*(?!40[13]\s*\))/.test(path)
+    })
+    const beforeAuthority = handler
+      ? !AUTHORITY_REFUSAL_401_403.test(code.slice(handler.start, at)) && !answersOnlyWithAuthority
+      : null
+    sites.push({ key: `${context} | ${text.replace(/\s+/g, ' ')}`, line: lineAt(at), echo, beforeAuthority })
+  }
+
+  const seen = new Map<string, number>()
+  for (const site of sites) {
+    const n = (seen.get(site.key) ?? 0) + 1
+    seen.set(site.key, n)
+    if (n > 1) site.key = `${site.key} #${n}`
+  }
+  return { sites, unparseable, handlers: handlers.length }
+}
+
+// ── the census ────────────────────────────────────────────────────────────────
+
+interface CensusRow {
+  echo: boolean
+  beforeAuthority: boolean | null
+}
+
+const RESOLVER_PAIRING_KEY = 'fn resolveMetaSheetId | view.sheetId !== sheetId'
+
+const FORM_SHARE_GAP_WHY = 'GAP — #5957 final review (and the r59 handoff\'s "form-share: by name → by shape"). '
+  + 'Hand-written, not routed through the #5946 wrapper: BEFORE the handler\'s canManageFormShareForSheet 403 and '
+  + 'its liveness refusal, a cross-sheet viewId is answered 404 `View <viewId> does not belong to sheet <sheetId>` '
+  + 'and a missing one 404 `View not found: <viewId>` — both ids pasted back, and the two cases told apart, for any '
+  + 'signed-in caller, including one the handler would then refuse. Two of the three are write routes. Fix: read the '
+  + 'view below the 403 + liveness gates and answer both cases with sendSheetNotLive(res, \'absent\'); this row then '
+  + 'leaves the list, its census row flips, and its wire witness below reds until it is deleted.'
+
+/**
+ * The ONLY sites allowed to echo or to answer ahead of their handler's 401/403. Keyed like the census.
+ * MAPPED: the echo never reaches the wire, and the cells that prove it are named. GAP: a known defect.
+ */
+const SHEET_PAIRING_EXCEPTIONS: Record<string, { kind: 'MAPPED' | 'GAP'; why: string }> = {
+  [RESOLVER_PAIRING_KEY]: {
+    kind: 'MAPPED',
+    why: 'THE resolver. Its ConflictError message names both ids, but it never reaches the wire: every caller goes '
+      + 'through orRefuseSheetViewMismatch, which answers sendSheetNotLive(res, \'absent\') instead — held by the '
+      + 'by-name cells above (no raw call outside the allow-list, ten wrapped sites, a `return` on every null, no '
+      + 'ConflictError branch echoing err.message). It sits outside every handler, so it has no authority position '
+      + 'of its own; where its callers run it relative to their gates is pinned by the ROUTES cells.',
+  },
+  'GET /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId': { kind: 'GAP', why: FORM_SHARE_GAP_WHY },
+  'PATCH /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId': { kind: 'GAP', why: FORM_SHARE_GAP_WHY },
+  'POST /sheets/:sheetId/views/:viewId/form-share/regenerate | String(row.sheet_id) !== sheetId': { kind: 'GAP', why: FORM_SHARE_GAP_WHY },
+}
+
+/**
+ * Every sheet-pairing refusal in routes/univer-meta.ts, with its COMPUTED shape. Closed world: the
+ * scan must find exactly these keys. Only the four excepted rows may read anything but
+ * `echo: false, beforeAuthority: false`.
+ */
+const SHEET_PAIRING_CENSUS: Record<string, CensusRow> = {
+  // module scope — the #5946 resolver (MAPPED)
+  [RESOLVER_PAIRING_KEY]: { echo: true, beforeAuthority: null },
+  // GET /context: the addressed sheet must be one the caller can read; its answer IS the 403
+  'GET /context | String(row.id) === resolvedSheetId': { echo: false, beforeAuthority: false },
+  // config restore: a revision's entity must sit on the sheet being restored
+  'POST /sheets/:sheetId/config-restore-preview | fieldRow.sheetId !== sheetId': { echo: false, beforeAuthority: false },
+  'POST /sheets/:sheetId/config-restore-preview | rev.entity_id !== rev.sheet_id': { echo: false, beforeAuthority: false },
+  'POST /sheets/:sheetId/config-restore-execute | rev.entity_id !== rev.sheet_id': { echo: false, beforeAuthority: false },
+  'POST /sheets/:sheetId/config-restore-execute | entitySheetId !== sheetId': { echo: false, beforeAuthority: false },
+  'POST /sheets/:sheetId/config-restore-execute | liveField.sheetId !== sheetId': { echo: false, beforeAuthority: false },
+  'POST /sheets/:sheetId/config-restore-execute | fieldRow.sheetId !== sheetId': { echo: false, beforeAuthority: false },
+  // the three hand-written form-share copies (GAP)
+  'GET /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId': { echo: true, beforeAuthority: true },
+  'PATCH /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId': { echo: true, beforeAuthority: true },
+  'POST /sheets/:sheetId/views/:viewId/form-share/regenerate | String(row.sheet_id) !== sheetId': { echo: true, beforeAuthority: true },
+  // the two view pairings that already sit behind their handler's gates and answer values-free
+  'GET /sheets/:sheetId/export-xlsx | view.sheetId !== sheetId': { echo: false, beforeAuthority: false },
+  'GET /sheets/:sheetId/view-aggregate | view.sheetId !== sheetId': { echo: false, beforeAuthority: false },
+  // cross-base mirror link: the forward link must point at the other end
+  'POST /crossbase/mirror-link | forwardCfg.foreignSheetId !== sheetB': { echo: false, beforeAuthority: false },
+  // automation delivery logs: the rule must belong to the addressed sheet
+  'GET /sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries | rule.sheet_id !== sheetId': { echo: false, beforeAuthority: false },
+  'GET /sheets/:sheetId/automations/:ruleId/dingtalk-group-deliveries | rule.sheet_id !== sheetId': { echo: false, beforeAuthority: false },
+}
+
+function pairingViolations(scan: PairingScan): string[] {
+  const out: string[] = scan.unparseable.map((u) => `UNPARSEABLE — the scan could not read the \`if\` around ${u}`)
+  const found = new Map(scan.sites.map((s) => [s.key, s]))
+  for (const [key, site] of found) {
+    const shape = `echo=${site.echo} beforeAuthority=${site.beforeAuthority}`
+    const row = SHEET_PAIRING_CENSUS[key]
+    if (!row) out.push(`NEW (line ${site.line}) — not in SHEET_PAIRING_CENSUS: ${key}  [computed ${shape}]`)
+    else if (row.echo !== site.echo || row.beforeAuthority !== site.beforeAuthority) {
+      out.push(`DECLARED ≠ COMPUTED (line ${site.line}): ${key}  [declared echo=${row.echo} beforeAuthority=${row.beforeAuthority}, computed ${shape}]`)
+    }
+    const needsException = site.echo || site.beforeAuthority !== false
+    if (needsException && !(key in SHEET_PAIRING_EXCEPTIONS)) out.push(`UNEXCUSED (line ${site.line}): ${key}  [${shape}]`)
+    if (!needsException && key in SHEET_PAIRING_EXCEPTIONS) out.push(`REDUNDANT exception — the site no longer needs it: ${key}`)
+  }
+  for (const key of Object.keys(SHEET_PAIRING_CENSUS)) if (!found.has(key)) out.push(`GONE — census row matches no site: ${key}`)
+  for (const key of Object.keys(SHEET_PAIRING_EXCEPTIONS)) if (!found.has(key)) out.push(`GONE — exception matches no site: ${key}`)
+  return out
+}
+
+/**
+ * Every string and template literal in `code` (comments already blanked), as [start, end) spans that
+ * include the quotes. A real scan, not a regex over the file: one regex over 20k lines desyncs on the
+ * first template whose `${…}` holds a backtick and then reads code as strings for thousands of lines
+ * (measured while writing this: its longest "literal" was 28k characters). Regex literals are skipped
+ * by the usual rule — a `/` after an operator, an opening bracket or a keyword starts one. The cell
+ * that uses this checks that every `meta_views` in the code landed inside some span.
+ */
+function literalSpans(code: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = []
+  let prev = ''
+  for (let i = 0; i < code.length; i += 1) {
+    const c = code[i]!
+    const end = literalEnd(code, i, prev)
+    if (end > 0) {
+      if (c !== '/') spans.push([i, end])
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    if (!/\s/.test(c)) prev = c
+  }
+  return spans
+}
+
+/**
+ * The SQL spelling of the same pairing: a `meta_views` SELECT binding BOTH the view id and a sheet id,
+ * so a view on another sheet and a missing view both come back as zero rows. Bare or alias-qualified;
+ * `sheet_id` is never read as `id` (lookbehind). Per literal, so two statements cannot splice.
+ */
+const SQL_ID_BIND = String.raw`(?<![.\w])(?:\w+\.)?id\s*=\s*\$\d+`
+const SQL_SHEET_BIND = String.raw`(?<![.\w])(?:\w+\.)?sheet_id\s*=\s*\$\d+`
+const SQL_VIEW_PAIRING = new RegExp(
+  String.raw`^\s*SELECT(?![\w$])[\s\S]*?(?<![\w$])meta_views(?![\w$])[\s\S]*?(?:${SQL_ID_BIND}[\s\S]*?${SQL_SHEET_BIND}|${SQL_SHEET_BIND}[\s\S]*?${SQL_ID_BIND})`,
+  'i',
+)
+
+function sqlViewPairings(source: string): string[] {
+  const code = maskComments(source)
+  return literalSpans(code)
+    .map(([s, e]) => code.slice(s + 1, e - 1))
+    .filter((sql) => SQL_VIEW_PAIRING.test(sql))
+    .map((sql) => sql.replace(/\s+/g, ' ').trim().slice(0, 160))
+}
+
+describe('#5946 structural — by SHAPE: every sheet-pairing refusal, whatever it is called', () => {
+  let cached: PairingScan | null = null
+  const scan = (): PairingScan => (cached ??= scanSheetPairings(UNIVER_META_SOURCE))
+
+  it('population: every route declaration was seen, and the scan is live (the resolver is found by its shape)', () => {
+    const declared = UNIVER_META_SOURCE.split(/\r?\n/).filter((l) => /^\s*router\.(get|post|patch|delete|put)\(\s*'/.test(l)).length
+    expect(declared, 'univer-meta.ts lost its route declarations — the scan below would have nothing to read').toBeGreaterThan(100)
+    expect(scan().handlers, 'comment blanking swallowed a route declaration').toBe(declared)
+    expect(scan().sites.map((s) => s.key)).toContain(RESOLVER_PAIRING_KEY)
+    expect(scan().sites.length, 'the scan found (almost) nothing — suspect it before trusting a green census').toBeGreaterThanOrEqual(10)
+  })
+
+  it('closed world, declared = computed, and only named exceptions echo or answer before authority', () => {
+    expect(pairingViolations(scan()), 'a sheet-pairing refusal changed shape, appeared, or vanished — see the rules above').toEqual([])
+  })
+
+  it('the exceptions are the resolver (MAPPED) and the three form-share routes (GAP), each with its reason', () => {
+    const gap = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'GAP').map(([k]) => k.split(' | ')[0])
+    const mapped = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'MAPPED').map(([k]) => k)
+    expect(mapped).toEqual([RESOLVER_PAIRING_KEY])
+    expect(gap.sort()).toEqual(Object.keys(FORM_SHARE_WITNESS).sort())
+    for (const exception of Object.values(SHEET_PAIRING_EXCEPTIONS)) expect(exception.why.length).toBeGreaterThan(200)
+  })
+
+  it('no meta_views SELECT pairs the view id with a sheet id in SQL (the SQL spelling of the same check)', () => {
+    // The literal scan is trusted only if it put EVERY `meta_views` of the code inside some literal —
+    // the table name appears nowhere else in this file, so one left outside means the scan desynced.
+    const code = maskComments(UNIVER_META_SOURCE)
+    const spans = literalSpans(code)
+    const occurrences = [...code.matchAll(/(?<![\w$])meta_views(?![\w$])/g)].map((m) => m.index!)
+    expect(occurrences.length, 'meta_views vanished from the code — this cell would measure nothing').toBeGreaterThan(10)
+    const outside = occurrences.filter((at) => !spans.some(([s, e]) => at > s && at < e))
+    expect(outside.map((at) => code.slice(0, at).split('\n').length), 'the literal scan desynced: these meta_views sit outside every literal it found').toEqual([])
+
+    expect(sqlViewPairings(UNIVER_META_SOURCE), 'a view/sheet pairing moved into SQL — give it a census row and a values-free refusal').toEqual([])
+  })
+})
+
+// ── the GAP, measured on the wire ─────────────────────────────────────────────
+
+/**
+ * The static rows say the three form-share routes echo and answer ahead of their 403. These cells say
+ * the same thing about the RESPONSES, so the GAP rows describe the product rather than the scanner.
+ * For each route, a caller holding nothing:
+ *   - on a view that DOES belong to the addressed sheet is refused 403 — the route's own authority gate;
+ *   - on a view that belongs to ANOTHER sheet gets a 404 instead — so the pairing answered first — that
+ *     is not the shared #5946 refusal and carries both ids;
+ *   - on a view that does not exist gets a different 404 text — so the two cases are told apart.
+ * When a route is fixed these cells red on purpose: delete its SHEET_PAIRING_EXCEPTIONS row, update its
+ * census row, and delete its entry here (the self-check keeps this list equal to the GAP rows).
+ */
+const FORM_SHARE_WITNESS: Record<string, (agent: ReturnType<typeof request>, sheetId: string, viewId: string) => request.Test> = {
+  'GET /sheets/:sheetId/views/:viewId/form-share': (a, sheetId, viewId) =>
+    a.get(`/api/multitable/sheets/${sheetId}/views/${viewId}/form-share`),
+  'PATCH /sheets/:sheetId/views/:viewId/form-share': (a, sheetId, viewId) =>
+    a.patch(`/api/multitable/sheets/${sheetId}/views/${viewId}/form-share`).send({}),
+  'POST /sheets/:sheetId/views/:viewId/form-share/regenerate': (a, sheetId, viewId) =>
+    a.post(`/api/multitable/sheets/${sheetId}/views/${viewId}/form-share/regenerate`),
+}
+
+describe('GAP witness — the three form-share routes answer the hand-written pairing ahead of their 403', () => {
+  const VIEW_NOWHERE = 'viw_5946_form_share_nowhere'
+
+  for (const [route, send] of Object.entries(FORM_SHARE_WITNESS)) {
+    it(`${route}: the caller it refuses learns, before the 403, that a foreign view exists and on which sheet`, async () => {
+      const own = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_ON_LIVE)
+      const foreign = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
+      const missing = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_NOWHERE)
+
+      expect([own.status, own.body], `${route}: a caller holding nothing is not refused on a view that belongs — the witness proves nothing`).toEqual([FORBIDDEN_STATUS, FORBIDDEN])
+
+      const fixed = `${route} no longer answers the hand-written pairing — if it now answers the shared refusal, the GAP is fixed: `
+        + 'delete its SHEET_PAIRING_EXCEPTIONS row, update its SHEET_PAIRING_CENSUS row, and remove it from FORM_SHARE_WITNESS'
+      expect(foreign.status, fixed).toBe(404)
+      expect(foreign.body, fixed).not.toEqual(MISMATCH_BODY)
+      expect(foreign.text, `${fixed} (the viewId is no longer echoed)`).toContain(VIEW_ELSEWHERE)
+      expect(foreign.text, `${fixed} (the sheetId is no longer echoed)`).toContain(SHEET_LIVE)
+
+      expect(missing.status).toBe(404)
+      expect(missing.text, `${fixed} (a missing view and a foreign view now answer alike)`).not.toBe(foreign.text)
+    })
+  }
+})
+
+// ── self-tests: invisible by name, red by shape ───────────────────────────────
+
+describe('by SHAPE — self-tests: a hand-written copy under new names is invisible to the by-name cells and red here', () => {
+  const ANCHOR = "  router.delete('/views/:viewId', "
+  const PLANTED = 'GET /sheets/:sheetId/views/:viewId/share-snapshot'
+
+  /** A new route holding `body`, planted just above DELETE /views/:viewId. Nothing touches the disk. */
+  const plant = (body: string): string => {
+    expect(UNIVER_META_SOURCE).toContain(ANCHOR)
+    return UNIVER_META_SOURCE.replace(
+      ANCHOR,
+      "  router.get('/sheets/:sheetId/views/:viewId/share-snapshot', async (req: Request, res: Response) => {\n"
+        + '    const target = String(req.params.sheetId)\n'
+        + "    const found = await poolManager.get().query('SELECT id, sheet_id FROM meta_views WHERE id = $1', [req.params.viewId])\n"
+        + '    const owner = found.rows[0]\n'
+        + `${body}\n`
+        + '    return res.json({ ok: true })\n'
+        + '  })\n\n'
+        + ANCHOR,
+    )
+  }
+
+  const siteIn = (source: string, keyPrefix: string): PairingSite | undefined =>
+    scanSheetPairings(source).sites.find((s) => s.key.startsWith(keyPrefix))
+
+  it('the fourth copy, renamed throughout: every by-name cell stays green over it, the shape census reds', () => {
+    const mutated = plant(
+      '    if (owner && owner.sheet_id != target) {\n'
+        + "      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${req.params.viewId} is not part of ${target}` } })\n"
+        + '    }',
+    )
+    // By name: blind. Each of these is what a by-name cell above asserts, and each still holds.
+    expect(rawResolverOffenders(mutated)).toEqual([])
+    expect(conflictEchoes(mutated).filter((r) => !(r in CONFLICT_ECHO_ALLOW_LIST))).toEqual([])
+    expect(callSitesThatIgnoreNull(mutated)).toEqual([])
+    expect(mutated.split(WRAPPED_CALL).length - 1).toBe(ROUTES.length)
+    // By shape: seen, with the shape it really has.
+    const site = siteIn(mutated, `${PLANTED} | `)
+    expect(site, 'the planted pairing refusal is invisible to the shape scan').toBeTruthy()
+    expect(site!.key).toBe(`${PLANTED} | owner.sheet_id != target`)
+    expect([site!.echo, site!.beforeAuthority]).toEqual([true, true])
+    const violations = pairingViolations(scanSheetPairings(mutated)).join('\n')
+    expect(violations).toContain(`NEW (line ${site!.line}) — not in SHEET_PAIRING_CENSUS: ${site!.key}`)
+    expect(violations).toContain(`UNEXCUSED (line ${site!.line}): ${site!.key}`)
+  })
+
+  it('values-free wording does not buy a pass: a new site still reds the closed world, and ahead of the 403 it is unexcused', () => {
+    const mutated = plant(
+      "    if (!owner || String(owner.sheet_id) !== target) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Nothing here' } })",
+    )
+    const site = siteIn(mutated, `${PLANTED} | `)!
+    expect([site.echo, site.beforeAuthority]).toEqual([false, true])
+    const violations = pairingViolations(scanSheetPairings(mutated)).join('\n')
+    expect(violations).toContain(`NEW (line ${site.line})`)
+    expect(violations).toContain(`UNEXCUSED (line ${site.line})`)
+  })
+
+  it('evasions of the obvious spelling are still read: a bound boolean with a message built in a local', () => {
+    const mutated = plant(
+      '    const elsewhere = owner.sheetId !== target\n'
+        + '    const text = `View ${req.params.viewId} lives elsewhere`\n'
+        + '    if (elsewhere) {\n'
+        + "      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: text } })\n"
+        + '    }',
+    )
+    const site = siteIn(mutated, `${PLANTED} | `)
+    expect(site, 'a comparison bound to a boolean first is invisible').toBeTruthy()
+    expect(site!.echo, 'a message interpolated into a local first reads as values-free').toBe(true)
+  })
+
+  it('…an equality whose else answers, echoing through a shorthand property', () => {
+    const mutated = plant(
+      '    if (owner.sheetId === target) {\n'
+        + '      return res.json({ ok: true })\n'
+        + '    } else {\n'
+        + '      const viewId = req.params.viewId\n'
+        + "      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', viewId } })\n"
+        + '    }',
+    )
+    const site = siteIn(mutated, `${PLANTED} | `)
+    expect(site, 'an equality refusing in its else-branch is invisible').toBeTruthy()
+    expect(site!.echo, 'a shorthand `{ viewId }` reads as values-free').toBe(true)
+  })
+
+  it('…an equality that returns, followed by the refusal, after a 403 (so NOT before authority) — concatenation is still echo', () => {
+    const mutated = plant(
+      "    if (!req.user) return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'no' } })\n"
+        + '    if (owner.sheetId === target) return res.json({ ok: true })\n'
+        + "    return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View ' + req.params.viewId } })",
+    )
+    const site = siteIn(mutated, `${PLANTED} | `)
+    expect(site, 'a fall-through refusal after a returning equality is invisible').toBeTruthy()
+    expect([site!.echo, site!.beforeAuthority]).toEqual([true, false])
+  })
+
+  it('…a trimmed operand refused through a helper handed `res`, a thrown error, and a response object not named `res`', () => {
+    const viaHelper = siteIn(plant("    if (owner.sheet_id.trim() !== target) return refuseElsewhere(res, req.params.viewId)"), `${PLANTED} | `)
+    expect(viaHelper?.key).toBe(`${PLANTED} | owner.sheet_id.trim() !== target`)
+    expect(viaHelper!.echo, 'an id handed to a refusal helper reads as values-free').toBe(true)
+
+    const thrown = siteIn(plant('    if (String(owner.sheet_id).trim() !== target) throw new NotFoundError(`View ${req.params.viewId}`)'), `${PLANTED} | `)
+    expect(thrown?.key).toBe(`${PLANTED} | String(owner.sheet_id).trim() !== target`)
+    expect(thrown!.echo).toBe(true)
+
+    const renamed = siteIn(
+      plant("    if (owner.sheetId !== target) return response.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View not found' } })"),
+      `${PLANTED} | `,
+    )
+    expect(renamed, 'a refusal written on a response object with another name is invisible').toBeTruthy()
+    expect([renamed!.echo, renamed!.beforeAuthority]).toEqual([false, true])
+  })
+
+  it('negative controls: a commented-out copy and a comparison that only skips a row are not sites', () => {
+    const commented = plant(
+      "    // if (owner.sheet_id !== target) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `${target}` } })",
+    )
+    expect(siteIn(commented, `${PLANTED} | `)).toBeUndefined()
+    const skipping = plant('    for (const row of found.rows) { if (row.sheet_id !== target) continue }')
+    expect(siteIn(skipping, `${PLANTED} | `)).toBeUndefined()
+    expect(pairingViolations(scanSheetPairings(skipping))).toEqual([])
+  })
+
+  it('a GAP row cannot outlive its fix: values-free wording on one form-share route reds declared = computed', () => {
+    const echoing = "return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })"
+    const first = UNIVER_META_SOURCE.indexOf(echoing)
+    expect(first, 'the form-share echo this probe rewrites is gone — the GAP may be fixed; see the witness cells').toBeGreaterThan(0)
+    const mutated = UNIVER_META_SOURCE.slice(0, first) + "return sendSheetNotLive(res, 'absent')" + UNIVER_META_SOURCE.slice(first + echoing.length)
+    const key = 'GET /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId'
+    expect(scanSheetPairings(mutated).sites.find((s) => s.key === key)?.echo).toBe(false)
+    expect(pairingViolations(scanSheetPairings(mutated)).join('\n')).toContain(`DECLARED ≠ COMPUTED`)
+  })
+
+  it('position is computed, not declared: remove the 403 ahead of a post-authority site and its row reds', () => {
+    // A view pairing that was moved BEHIND its handler's gates — the move the form-share fix will make.
+    const key = 'GET /sheets/:sheetId/view-aggregate | view.sheetId !== sheetId'
+    expect(SHEET_PAIRING_CENSUS[key], 'the probed row left the census — pick another post-authority row').toEqual({ echo: false, beforeAuthority: false })
+    const route = key.split(' | ')[0]!
+    const [verb, path] = route.split(' ')
+    const decl = `router.${verb!.toLowerCase()}('${path}'`
+    const start = UNIVER_META_SOURCE.indexOf(decl)
+    expect(start, `cannot find ${route}`).toBeGreaterThan(0)
+    const end = UNIVER_META_SOURCE.indexOf('\n  router.', start + 10)
+    const handler = UNIVER_META_SOURCE.slice(start, end)
+    const disarmed = handler
+      .replace(/sendForbidden\(res\)/g, 'res.json({ ok: true })')
+      .replace(/\.status\(40[13]\)/g, '.status(200)')
+      .replace(/status: 40[13]/g, 'status: 200')
+    expect(disarmed, 'the probe did not remove anything').not.toBe(handler)
+    const mutated = UNIVER_META_SOURCE.slice(0, start) + disarmed + UNIVER_META_SOURCE.slice(end)
+    expect(scanSheetPairings(mutated).sites.find((s) => s.key === key)?.beforeAuthority).toBe(true)
+    expect(pairingViolations(scanSheetPairings(mutated)).join('\n')).toContain(`DECLARED ≠ COMPUTED`)
+  })
+
+  it('the SQL spelling is caught, bare or aliased, and a sheet-scoped LIST is not', () => {
+    const bare = plant("    const probe = await poolManager.get().query('SELECT id FROM meta_views WHERE id = $1 AND sheet_id = $2', [req.params.viewId, target])")
+    expect(sqlViewPairings(bare)).toHaveLength(1)
+    const aliased = plant('    const probe = await poolManager.get().query(`SELECT v.id FROM meta_views v\n      WHERE v.sheet_id = $2 AND v.id = $1`, [req.params.viewId, target])')
+    expect(sqlViewPairings(aliased)).toHaveLength(1)
+    const listing = plant("    const probe = await poolManager.get().query('SELECT id FROM meta_views WHERE sheet_id = $1 ORDER BY id', [target])")
+    expect(sqlViewPairings(listing)).toEqual([])
   })
 })
