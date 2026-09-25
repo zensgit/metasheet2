@@ -41,6 +41,7 @@ import {
   isLiveConnectionFkViolation
 } from '../data-adapters/DataSourceManager';
 import type { PluginManifest } from '../types/plugin';
+import { createAdminFailureResponders } from './admin-failure-envelope';
 
 const logger = new Logger('AdminRoutes');
 
@@ -73,62 +74,25 @@ let services: AdminRouteServices = {};
 const router = Router();
 
 // ═══════════════════════════════════════════════════════════════════
-// Read-side failure envelope (ADM-05 follow-up)
+// Failure envelope (ADM-05 follow-up)
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Stable error code every read-side GET in this router returns on its 500 branch.
- *
- * SECURITY (ADM-05 follow-up to #5884 / #5897): batches 2 and 3 gated these reads on platform admin
- * but deliberately left the 500 bodies alone, recording "redacting that is a separate decision
- * point" in the route comments. This is that decision. The unhandled-failure branch of every GET
- * here used to serialize `err.message` straight into the HTTP body, and the errors that actually
- * reach those branches are driver/infra errors: pg connection failures carry host, port, database
- * and role in their text (`connect ECONNREFUSED <host>:<port>`, `password authentication failed for
- * user "<role>"`), Redis and pool errors carry the same shape, and a stack-bearing Error from a
- * subsystem can carry absolute server paths. A platform admin is trusted — but the HTTP body is not
- * the right channel for it: it lands in browser devtools, in proxy and CDN access logs, in
- * screenshots pasted into issues, and in any ops dashboard that renders `error` verbatim. The
- * operator needs the detail; the wire does not carry it. So the original error keeps going to
- * logger.error() (message + stack, server side only) and the body carries a stable machine-readable
- * code plus a fixed human string.
- *
- * Shape note: the body keeps `success: false` and keeps `error` a STRING. util/response.ts's
- * jsonError() was considered and NOT reused here — it emits `{ ok: false, error: { code, message } }`,
- * a different envelope from the `{ success, error }` one every route in this router and every
- * existing admin spec reads, so reusing it would turn a redaction into a breaking response-shape
- * change. `code` is added alongside, which is additive for existing consumers.
- *
- * Status codes are unchanged: a 500 stays a 500. Only the body text changes.
+ * Every 500 branch in this router — and in the two sub-routers mounted at the foot of this file —
+ * answers through sendAdminReadFailure (GET) or sendAdminWriteFailure (every other method): the
+ * original error goes to logger.error() only, the body carries a stable code plus a fixed string.
+ * #5903 introduced the read side here; the write side and the sub-routers followed. The rationale
+ * and the shape note live on the shared module (routes/admin-failure-envelope.ts). The constants are
+ * re-exported so existing importers of this module keep working.
  */
-export const ADMIN_READ_FAILED_CODE = 'ADMIN_READ_FAILED';
+export {
+  ADMIN_READ_FAILED_CODE,
+  ADMIN_READ_FAILED_MESSAGE,
+  ADMIN_WRITE_FAILED_CODE,
+  ADMIN_WRITE_FAILED_MESSAGE
+} from './admin-failure-envelope';
 
-/** Fixed, values-free human string. Carries no driver, host, path or identifier. */
-export const ADMIN_READ_FAILED_MESSAGE = '读取失败，详情见服务端日志';
-
-/**
- * Send the redacted 500 body for a read-side GET, after logging the real error server side.
- *
- * @param res      express response
- * @param context  static, values-free log context (e.g. 'Failed to get detailed health')
- * @param error    the caught value; its message/stack go to the log, never to the body
- * @param extra    additional NON-SENSITIVE fields the route already returned on its 500 (e.g. the
- *                 pluginId the caller itself supplied in the path)
- */
-function sendAdminReadFailure(
-  res: Response,
-  context: string,
-  error: unknown,
-  extra?: Record<string, unknown>
-): void {
-  logger.error(context, error as Error);
-  res.status(500).json({
-    success: false,
-    code: ADMIN_READ_FAILED_CODE,
-    error: ADMIN_READ_FAILED_MESSAGE,
-    ...(extra ?? {})
-  });
-}
+const { sendAdminReadFailure, sendAdminWriteFailure } = createAdminFailureResponders(logger);
 
 // ═══════════════════════════════════════════════════════════════════
 // Safety Guard Management
@@ -615,12 +579,7 @@ router.post('/plugins/:id/enable', requireAdminRole(), async (req: Authenticated
       registry: persisted
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminWriteFailure(res, 'Failed to enable plugin', error, { pluginId: id });
   }
 });
 
@@ -649,12 +608,7 @@ router.post('/plugins/:id/disable', requireAdminRole(), async (req: Authenticate
       registry: persisted
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminWriteFailure(res, 'Failed to disable plugin', error, { pluginId: id });
   }
 });
 
@@ -709,12 +663,7 @@ router.put('/plugins/:id/config', requireAdminRole(), async (req: AuthenticatedR
       persisted
     });
   } catch (error) {
-    const err = error as Error;
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      pluginId: id
-    });
+    sendAdminWriteFailure(res, 'Failed to update plugin config', error, { pluginId: id });
   }
 });
 
@@ -755,13 +704,7 @@ router.post(
         runtime
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error(`Plugin reload failed: ${id} - ${err.message}`, err);
-      res.status(500).json({
-        success: false,
-        error: err.message,
-        pluginId: id
-      });
+      sendAdminWriteFailure(res, `Plugin reload failed: ${id}`, error, { pluginId: id });
     }
   }
 );
@@ -812,12 +755,7 @@ router.post(
         warning: 'Service may have experienced brief unavailability'
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error(`All plugins reload failed: ${err.message}`, err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'All plugins reload failed', error);
     }
   }
 );
@@ -866,9 +804,7 @@ router.post('/plugins/reload-all-unsafe', async (req: AuthenticatedRequest, res:
     }
     return res.json({ success: true, message: 'All plugins reloaded (unsafe local bypass)', activated })
   } catch (error) {
-    const err = error as Error
-    logger.error('Unsafe reload-all failed', err)
-    return res.status(500).json({ success: false, error: err.message })
+    return sendAdminWriteFailure(res, 'Unsafe reload-all failed', error)
   }
 })
 
@@ -908,9 +844,7 @@ router.post('/plugins/:id/reload-unsafe', async (req: AuthenticatedRequest, res:
     const runtime = services.activatePlugin ? await services.activatePlugin(id) : undefined
     return res.json({ success: true, message: `Plugin ${id} reloaded (unsafe local bypass)`, pluginId: id, runtime })
   } catch (error) {
-    const err = error as Error
-    logger.error('Unsafe single plugin reload failed', err)
-    return res.status(500).json({ success: false, error: err.message })
+    return sendAdminWriteFailure(res, 'Unsafe single plugin reload failed', error)
   }
 })
 
@@ -949,13 +883,7 @@ router.delete(
         pluginId: id
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error(`Plugin unload failed: ${id} - ${err.message}`, err);
-      res.status(500).json({
-        success: false,
-        error: err.message,
-        pluginId: id
-      });
+      sendAdminWriteFailure(res, `Plugin unload failed: ${id}`, error, { pluginId: id });
     }
   }
 );
@@ -1014,13 +942,7 @@ router.post(
         warning: 'Current state has been overwritten'
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error(`Snapshot restore failed: ${id} - ${err.message}`, err);
-      res.status(500).json({
-        success: false,
-        error: err.message,
-        snapshotId: id
-      });
+      sendAdminWriteFailure(res, `Snapshot restore failed: ${id}`, error, { snapshotId: id });
     }
   }
 );
@@ -1073,13 +995,7 @@ router.delete(
         snapshotId: id
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error(`Snapshot deletion failed: ${id} - ${err.message}`, err);
-      res.status(500).json({
-        success: false,
-        error: err.message,
-        snapshotId: id
-      });
+      sendAdminWriteFailure(res, `Snapshot deletion failed: ${id}`, error, { snapshotId: id });
     }
   }
 );
@@ -1131,12 +1047,7 @@ router.post(
         freedBytes: result.freed
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error(`Snapshot cleanup failed: ${err.message}`, err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'Snapshot cleanup failed', error);
     }
   }
 );
@@ -1191,12 +1102,7 @@ router.post(
         }
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error('Cache clear failed', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'Cache clear failed', error);
     }
   }
 );
@@ -1244,12 +1150,7 @@ router.post(
         }
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error('Metrics reset failed', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'Metrics reset failed', error);
     }
   }
 );
@@ -1484,11 +1385,7 @@ router.delete(
         res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
         return;
       }
-      logger.error('Bulk deletion failed', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'Bulk deletion failed', err);
     }
   }
 );
@@ -1615,11 +1512,7 @@ router.put(
         res.status(409).json(referencedRefusalBody(await referencedDataSourceIdsForRefusal(filters)));
         return;
       }
-      logger.error('Bulk update failed', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'Bulk update failed', err);
     }
   }
 );
@@ -1732,10 +1625,7 @@ router.post(
         res.status(400).json({ success: false, error: 'Failed to retry message' });
       }
     } catch (error) {
-      res.status(500).json({
-        success: false,
-        error: (error as Error).message
-      });
+      sendAdminWriteFailure(res, 'DLQ retry failed', error);
     }
   }
 );
@@ -1766,10 +1656,7 @@ router.delete(
         res.json({ success: true, message: 'Message resolved' });
       }
     } catch (error) {
-      res.status(500).json({
-        success: false,
-        error: (error as Error).message
-      });
+      sendAdminWriteFailure(res, 'DLQ resolve/ignore failed', error);
     }
   }
 );
@@ -1971,12 +1858,7 @@ router.post(
         remaining: pending.total - succeeded - failed
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error('DLQ retry-all failed', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'DLQ retry-all failed', error);
     }
   }
 );
@@ -2010,12 +1892,7 @@ router.post(
         retentionDays: days
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error('DLQ cleanup failed', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'DLQ cleanup failed', error);
     }
   }
 );
@@ -2171,12 +2048,7 @@ router.post(
         key
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error('Failed to reset rate limit', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'Failed to reset rate limit', error);
     }
   }
 );
@@ -2208,12 +2080,7 @@ router.post(
         message: 'All rate limits have been reset'
       });
     } catch (error) {
-      const err = error as Error;
-      logger.error('Failed to reset all rate limits', err);
-      res.status(500).json({
-        success: false,
-        error: err.message
-      });
+      sendAdminWriteFailure(res, 'Failed to reset all rate limits', error);
     }
   }
 );
@@ -2362,12 +2229,9 @@ router.post('/health/check', async (req: Request, res: Response) => {
       summary: health.summary
     });
   } catch (error) {
-    const err = error as Error;
-    logger.error('Failed to perform health check', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    // Deliberately ungated route (see the envelope module's note), so this body is readable by any
+    // authenticated caller — the redaction matters most here.
+    sendAdminWriteFailure(res, 'Failed to perform health check', error);
   }
 });
 
