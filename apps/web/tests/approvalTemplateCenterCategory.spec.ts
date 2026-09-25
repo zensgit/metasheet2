@@ -89,6 +89,18 @@ const cloneTemplateSpy = vi.fn<[string], Promise<any>>().mockResolvedValue({
 vi.mock('../src/approvals/api', () => ({
   listTemplateCategories: () => listTemplateCategoriesSpy(),
   cloneTemplate: (id: string) => cloneTemplateSpy(id),
+  // A-2 scope item 2 (design lock v2.13 §6 phase 1) — TemplateCenterView.vue now always mounts
+  // ApprovalTemplateGroupsPanel.vue when canManageTemplates is true (which this file mocks as
+  // true throughout), and that panel calls these two on mount/submit and does an
+  // `instanceof ApprovalApiError` check in its catch branch — all three must exist on this
+  // replacement mock or the panel's onMounted throws unhandled (this spec makes no assertions
+  // about groups, so an empty resolved list is enough).
+  ApprovalApiError: class ApprovalApiError extends Error {},
+  listApprovalTemplateGroups: () => Promise.resolve([]),
+  createApprovalTemplateGroup: (name: string) => Promise.resolve({
+    id: 'atg_test', orgId: 'org_test', name, sortOrder: 1,
+    createdBy: 'test', createdAt: '', updatedAt: '', archivedAt: null,
+  }),
 }))
 
 // ---------------------------------------------------------------------------

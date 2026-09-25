@@ -1336,6 +1336,8 @@ exec npx vitest run \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
   approvalTemplateGovernance \
+  approvalTemplateGroupsClient \
+  ApprovalTemplateGroupsPanel \
   approvalTemplateRouteGuard \
   approvalTemplateVersionHistory \
   approvalUserPicker \
@@ -1598,6 +1600,7 @@ exec npx vitest run \
   routePreviewErrors \
   run-required-web-tests-shape \
   searchApprovalDirectoryUsers \
+  SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \
   StockPreparationCodeHelp \
@@ -1654,3 +1657,105 @@ exec npx vitest run \
   workflowHubView \
   xlsx-mapping \
   --reporter=dot
+# A-2 slice 1 (approval form grouping lock v2.13 §2 "多 org 成员", 第 8 轮 P3-b, 2026-09-18):
+# `SessionOrgSwitcher.spec.ts` — the isolated unit spec for the new shared
+# `apps/web/src/components/SessionOrgSwitcher.vue` (copied and generalized from
+# `views/attendance/AttendanceSessionOrgSwitcher.vue`, which stays untouched — moving/editing it
+# would narrow `attendance-web-guard.yml:297-301,:397-400`'s closed-world session-spec census).
+# Full-filename token (not the bare `SessionOrgSwitcher` basename): verified against every existing
+# token below (none is a substring of it, it is a substring of none) — no coverage silently drops.
+# It still incidentally ALSO matches `tests/AttendanceSessionOrgSwitcher.spec.ts` (the token is a
+# suffix of that sibling filename: `Attendance` + `SessionOrgSwitcher.spec.ts`; `npx vitest run
+# SessionOrgSwitcher.spec.ts --reporter=verbose` locally confirms exactly these 2 files, 4 tests) —
+# harmless duplication, not a gap: that file already runs required via its OWN dedicated token at
+# line 477 above, so this line re-running it changes no coverage, just re-executes an already-gated
+# file. This token covers the new shared component in isolation only; the acceptance-J integration
+# spec (403 SESSION_ORG_REQUIRED → selector → retry → 201, wired into the approval template center
+# page) has since landed on this same branch as the `ApprovalTemplateGroupsPanel` token below (P3
+# hygiene wave, 2026-09-19: this sentence originally said "lands in a later slice with its own
+# token" — stale, since that slice had already landed here before this comment was corrected).
+#
+# A-2 slice 2 (approval form grouping lock v2.13 §6 phase 1 FE client, 2026-09-18): `approvalTemplateGroupsClient`
+# — unit spec for the seven group-endpoint client functions added to `approvals/api.ts`
+# (list/create/rename/archive/unarchive/link/unlink), including the acceptance-J assertion that a
+# 403 `SESSION_ORG_REQUIRED` throws `ApprovalApiError` with `.code` intact rather than being
+# collapsed to a generic message — the case the front-end 403-retry flow (a later slice) will
+# branch on. Verified against every existing token above: none is a substring of it, it is a
+# substring of none (`python3` bidirectional scan, 397 tokens, zero collisions — recomputed 2026-09-19
+# in the P3 hygiene wave; see the FE verification MD's hygiene section for why this moved from the
+# original "394 tokens" snapshot); `npx vitest run approvalTemplateGroupsClient --reporter=verbose`
+# locally confirms it resolves to exactly this one spec file (8/8 tests). This token covers the
+# client functions in isolation only.
+#
+# A-2 scope item 4 (approval form grouping lock v2.13 §4 acceptance J, 2026-09-18):
+# `ApprovalTemplateGroupsPanel` — the integration spec this line's earlier `SessionOrgSwitcher`
+# comment deferred: `ApprovalTemplateGroupsPanel.vue` (mounted from `TemplateCenterView.vue` for
+# `canManageTemplates`) is the panel that actually calls the seven group endpoints, and its own
+# spec exercises the full 403 `SESSION_ORG_REQUIRED` → shared switcher → retry → 201 loop end to
+# end through the real `useSessionOrg`/`useAuth` composables (only `apiFetch` is mocked), plus
+# that a single-org member (never 403'd) never sees the selector and never calls
+# `/api/auth/session-org*`. Mutation-verified (removing the panel's `err.code ===
+# 'SESSION_ORG_REQUIRED'` branch leaves the retry test stuck on the first 403, confirmed red, then
+# restored via `cp` backup/diff/cmp). Verified against every existing token above: none is a
+# substring of it, it is a substring of none (`python3` bidirectional scan, 395 tokens, zero
+# collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally confirms it
+# resolves to exactly this one spec file (2/2 tests).
+# restored via `cp` backup/diff/cmp) — that was the LIST endpoint's own SESSION_ORG_REQUIRED
+# branch (`loadGroups`); a separate probe on the CREATE endpoint's branch (`onCreate`) isolates to
+# only the create-flow test, and each restore verified byte-identical via `cmp`, so both of the
+# panel's two catch sites are independently mutation-covered by a dedicated test (list-load
+# 403-then-retry vs. create 403-then-retry — 3 cases total). Verified against every existing token
+# above: none is a substring of it, it is a substring of none (`python3` bidirectional scan, 395
+# tokens, zero collisions); `npx vitest run ApprovalTemplateGroupsPanel --reporter=verbose` locally
+# confirms it resolves to exactly this one spec file (3/3 tests).
+# above: none is a substring of it, it is a substring of none (`python3` bidirectional scan, 397
+# tokens, zero collisions — recomputed 2026-09-19 in the P3 hygiene wave; see the FE verification
+# MD's hygiene section for why this moved from the original "395 tokens" snapshot); `npx vitest run
+# ApprovalTemplateGroupsPanel --reporter=verbose` locally confirms it resolves to exactly this one
+# spec file (3/3 tests).
+#
+# P3 hygiene wave correction (2026-09-19): the three tokens above were originally appended as a
+# SECOND, duplicate copy of this entire `exec npx vitest run ...` line instead of being inserted
+# into the one below — because bash's `exec` builtin unconditionally replaces the process on the
+# FIRST such line reached (no `if`/`case` guards this line), that duplicate line was dead code, and
+# none of `SessionOrgSwitcher.spec.ts` / `approvalTemplateGroupsClient` / `ApprovalTemplateGroupsPanel`
+# were ever exercised by the required `web-tests` job on this branch until this commit folded them
+# into the one live line below. Root cause: commit `96c512876` (`2ef7add98` on this branch after a
+# later rebase) added the duplicate copy rather than editing the existing line in place; three later
+# commits kept appending their own tokens to that dead copy without anyone noticing, because both
+# `tail -1` (used by the A-2 gate report) and this file's own verification-MD Python helper's
+# first-match `.startswith(...)` scan only ever look at ONE `exec npx vitest run` line and silently
+# picked the wrong one. See the FE verification MD's P3 hygiene section for the full repro.
+# P3 hygiene wave correction (2026-09-19), second pass — the paragraph this replaces named the
+# wrong root cause; see the FE verification MD's hygiene section and
+# p3-hygiene-gate2-A2-20260919.md §1.1 for the corrected repro. What actually happened: the
+# original commit (`2699e0a07`, author date 2026-09-18 06:57:35) edited this line IN PLACE (17
+# insertions / 1 deletion — a normal same-line edit, not an appended second line) to add only the
+# FIRST of the three tokens (`SessionOrgSwitcher.spec.ts`) — sorted-token diff between `0144932ac`
+# and `2699e0a07` shows exactly that one addition and nothing else. `approvalTemplateGroupsClient`
+# and `ApprovalTemplateGroupsPanel` were NOT on this line yet; they landed on it later, in
+# `1e55c39b8` (author date 2026-09-18 07:10:50) and `bc66e283e` (author date 2026-09-18 07:33:18)
+# respectively. The file-level `git log -S'<token>' -- <this file>` cited by the previous pass
+# cannot discriminate an exec-line landing from a comment-only mention of the same token, so the
+# claim above is backed by the exec-line form instead, run once on the named commit and once on
+# its parent:
+#     git show <sha>:<this file> | grep '^exec npx vitest run' | grep -c '<token>'
+# Verbatim results (measured 2026-09-19): for `approvalTemplateGroupsClient`, 0 at `1e55c39b8^`
+# and 1 at `1e55c39b8`; for `ApprovalTemplateGroupsPanel`, 0 at `bc66e283e^` and 1 at
+# `bc66e283e`. One caveat on the words "this line": at `bc66e283e` the file still carried TWO
+# exec lines (`git show bc66e283e:<this file> | grep -n '^exec npx vitest run'` prints 1186 and
+# 1227) and the token landed on 1227 — the dead duplicate, not the live first-reached line. For
+# the duplicate era "this line" therefore means the dead copy produced by the merge described
+# next. A later rebase produced
+# `2ef7add98` (committer date 2026-09-18 20:56), a rebase replay of
+# that same commit whose three-way merge against a sibling edit to this file kept BOTH versions of
+# the line instead of erroring — the duplicate (dead) copy, not the original, is what carried the
+# risk: bash's `exec` builtin unconditionally replaces the process on the FIRST such line reached,
+# so only the earlier of the two lines ever ran. On the commits actually named in the prior
+# paragraph's audit trail (`cb6d7fa9f`, `d3097be00`) — both of which predate the rebase above —
+# the three tokens had never been split off a dead duplicate in the first place: there was only
+# ever the single live line at those commits, so the "never exercised until this commit" claim did
+# not hold for this branch's history. The duplicate-line hazard itself is real
+# (see the two repo precedents cited in scripts/dev/atg-exec-line-post-rebase-check.sh's header)
+# and that script exists to catch it mechanically on future rebases; this paragraph corrects only
+# the narrative of how this specific occurrence resolved.
