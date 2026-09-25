@@ -131,6 +131,8 @@ function scenarioBDiffSummary(): StockPreparationSnapshotDiffSummary {
       pathChanged: 0,
       missingChildBom: 0,
       fingerprintChanged: 0,
+      componentCodeChanged: 0,
+      materialChanged: 0,
     },
     blockingExceptionCount: 0,
   }
@@ -208,9 +210,12 @@ function scenarioBV2DiffSummary(): StockPreparationSnapshotDiffSummary {
       versionChanged: 0,
       pathChanged: 0,
       missingChildBom: 0,
-      // 已知缺口：汇总词表里没有 componentCodeChanged —— 原位物料替换在这张汇总表上只能以
-      // fingerprintChanged 露头（2 = 改数量那行 + 替换那行）。逐行明细里才点名（见下）。
+      // fingerprintChanged stays the pre-existing sourceFingerprint tally (2 = the quantity-changed
+      // row + the in-place swap row); componentCodeChanged below is an INDEPENDENT count over the
+      // same rows (Q3c closed the gap this used to document — see stock-preparation-snapshot-reads.cjs).
       fingerprintChanged: 2,
+      componentCodeChanged: 1,
+      materialChanged: 0,
     },
     blockingExceptionCount: 0,
   }
@@ -387,9 +392,10 @@ describe('StockPreparationScenarioBAcceptance (W7-A3, values-free)', () => {
     expect(countOf('quantityChanged')).toContain('1')
     expect(countOf('fingerprintChanged')).toContain('2')
     expect(countOf('unitChanged')).toContain('0')
-    // 汇总词表里根本没有 componentCodeChanged 这一格（后端 changeCounts 也不产它）——
-    // 这是已知缺口，钉成断言而不是写成散文。
-    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-count"][data-kind="componentCodeChanged"]')).toBeNull()
+    // Q3c: the gap this used to document is closed — the summary now names the in-place component-
+    // code swap by its own key (independent of fingerprintChanged above, not carved out of it).
+    expect(countOf('componentCodeChanged')).toContain('1')
+    expect(countOf('materialChanged')).toContain('0')
 
     // 逐行明细：55 行，四类各自可数；原位物料替换在这一层**被点名**。
     ;(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-toggle"]') as HTMLButtonElement).click()

@@ -9923,6 +9923,419 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integration/external-systems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List external systems
+         * @description Read-only external-system listing, scoped by (tenantId, workspaceId) and optionally narrowed by kind/status. `data` is a plain array of IntegrationExternalSystem (the credential-redacted public projection); there is no cursor or total count. A workspace-scoped caller's page additionally merges in tenant-wide (null-workspace) rows so a system shared across the tenant is still visible from a workspace — see listExternalSystems' merge branch for the exact windowing.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null (tenant-wide) workspace, which is never widened further. */
+                    workspaceId?: string;
+                    /** @description Restrict to one adapter kind (e.g. k3, data-source:sql-readonly). Not validated against an enum server-side — an unknown kind simply matches zero rows. */
+                    kind?: string;
+                    /** @description Restrict to one status. An unrecognized value is a 400 (ExternalSystemValidationError), not an empty result. */
+                    status?: "active" | "inactive" | "error";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationExternalSystem"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/external-systems/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one external system
+         * @description Read-only single-system read, scoped by (tenantId, workspaceId, id). Returns the same credential-redacted IntegrationExternalSystem projection as the list route. Another tenant's system id and a non-existent id both raise ExternalSystemNotFoundError → 404 with the identical message.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description External system id. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationExternalSystem"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description System not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/pipelines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List integration pipelines
+         * @description Read-only pipeline listing, scoped by (tenantId, workspaceId) and optionally narrowed by status/sourceSystemId/targetSystemId. `data` is a plain array of IntegrationPipeline, newest first (ORDER BY created_at DESC); there is no cursor or total count. The list projection never embeds `fieldMappings` (only the single-pipeline read can).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to pipelines in one status. An unrecognized value is a 400 (PipelineValidationError), not an empty result. */
+                    status?: "draft" | "active" | "paused" | "disabled";
+                    /** @description Restrict to pipelines whose sourceSystemId matches. */
+                    sourceSystemId?: string;
+                    /** @description Restrict to pipelines whose targetSystemId matches. */
+                    targetSystemId?: string;
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipeline"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/pipelines/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get one integration pipeline
+         * @description Read-only single-pipeline read, scoped by (tenantId, workspaceId, id). By default the response embeds `fieldMappings` (a second read of the pipeline's field-mapping rows); pass `includeFieldMappings=false` to skip that second read and omit the key entirely (not an empty array). Another tenant's pipeline id and a non-existent id both raise PipelineNotFoundError → 404 with the identical message and no distinguishing detail.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Any value other than the exact string `false` is treated as true (the handler's check is `!== 'false'`). Default true. */
+                    includeFieldMappings?: "true" | "false";
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline id. */
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationPipeline"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Pipeline not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List one row's cross-run provenance timeline
+         * @description Read-only cross-run provenance timeline for one rowId, scoped by (tenantId, workspaceId, rowId) and optionally narrowed by pipelineId and a [from, to] window on the run's `created_at`. Reads the migration-060 integration_provenance_by_row view; ordered oldest-first (by run_created_at, then a stable secondary compare). `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does NOT re-redact and never returns raw payloads. No write, replay or retry.
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description Row id to fetch the timeline for. Missing/empty is a 400 (ROW_ID_REQUIRED). */
+                    rowId: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict the timeline to events from one pipeline. */
+                    pipelineId?: string;
+                    /** @description Inclusive lower bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError). */
+                    from?: string;
+                    /** @description Inclusive upper bound on the owning run's created_at. Must be an ISO date-time; an unparsable value is a 400 (PipelineValidationError). */
+                    to?: string;
+                    /** @description Max events to return. Capped at 500 at the route (the registry's own ceiling is higher; the tighter of the two always wins). */
+                    limit?: number;
+                    /** @description Events to skip. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["ProvenanceTimelineEntry"][];
+                        };
+                    };
+                };
+                /** @description rowId missing, or an unparsable from/to. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description The host's pipeline registry does not implement the by-row provenance read. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/dead-letters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List dead letters
+         * @description Read-only dead-letter listing, scoped by (tenantId, workspaceId) and optionally narrowed by pipelineId/runId/status. `data` is a plain array of IntegrationDeadLetter, newest first (ORDER BY created_at DESC); there is no cursor or total count. `sourcePayload`/`transformedPayload` are stripped by default; only a caller whose session resolves as admin AND passes `includePayload=true` gets them back (sanitized). A non-admin caller passing `includePayload=true` is silently ignored (redacted view), not rejected.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace. */
+                    workspaceId?: string;
+                    /** @description Restrict to dead letters from one pipeline. */
+                    pipelineId?: string;
+                    /** @description Restrict to dead letters from one run. */
+                    runId?: string;
+                    /** @description Restrict to one status. An unrecognized value is a 400 (DeadLetterError), not an empty result. */
+                    status?: "open" | "replayed" | "discarded";
+                    /** @description Admin-only. Must be the exact string `true`; any other value (including for a non-admin caller) keeps the redacted (payload-stripped) projection. */
+                    includePayload?: "true" | "false";
+                    /** @description Max rows to return. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies). Capped at 500 server-side. */
+                    limit?: number;
+                    /** @description Rows to skip. Must be a positive integer; a non-numeric or non-positive value is silently ignored (registry default applies), not rejected. */
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["IntegrationDeadLetter"][];
+                        };
+                    };
+                };
+                /** @description An unrecognized `status` value. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/integration/runs": {
         parameters: {
             query?: never;
@@ -10052,6 +10465,368 @@ export interface paths {
                     };
                 };
                 /** @description The host's pipeline registry does not implement the single-run read (optional-method wiring older than this route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/runs/{runId}/provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List one run's provenance timeline
+         * @description Read-only per-run provenance timeline, scoped by (tenantId, workspaceId, runId) and ordered by `eventIndex` (the migration-060 view's WITH ORDINALITY over the run's persisted `provenance_events`, i.e. write order). The run is resolved first through the same three-key lookup the single-run read uses, so another tenant's run id and a run id that does not exist return the SAME details-free 404 — an unknown run is never answered with an empty timeline. `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does not re-redact and never returns raw payloads. No write, replay or retry.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Workspace scope. Omitted means the null workspace — the same normalization the run reads apply. */
+                    workspaceId?: string;
+                    /** @description Max events to return. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies. */
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    /** @description Pipeline run id. */
+                    runId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                items: components["schemas"]["ProvenanceTimelineEntry"][];
+                            };
+                        };
+                    };
+                };
+                /** @description runId missing from the path */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Run not visible in the caller's (tenant, workspace) scope. Identical body for a non-existent id and another tenant's id; carries no `details`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's pipeline registry implements neither the per-run provenance read (PROVENANCE_READ_NOT_IMPLEMENTED) nor the single-run read the scope probe needs (RUN_READ_NOT_IMPLEMENTED) — optional-method wiring older than this route. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a project's immutable BOM snapshot batches (stock-prep view 2)
+         * @description Read-only, values-free LIST of the immutable BOM snapshot batches for one business project — queryRecords-only against the internal MetaSheet-provisioned MVP tables, never PLM/K3/any external system. Uses the two-project split: the STAGING project (derived from the auth tenant) locates the provisioned sheets, `projectId` (the PLM business project) filters the batch rows and is echoed back. An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error. `workspaceId` is accepted by the query allowlist but is never read by the handler or the read function — it has no effect on the result (confirmed by reading both; not a documented no-op elsewhere in this module family).
+         */
+        get: {
+            parameters: {
+                query: {
+                    /** @description The (business) PLM project id. Missing/empty is a 400 (STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID, field: projectId). */
+                    projectId: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but NOT forwarded to the read function — has no effect on the response (dead parameter; documented here so a caller does not assume it scopes anything). */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotBatchListResult"];
+                        };
+                    };
+                };
+                /** @description Missing `projectId`, or an unsupported query field. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description The bounded readonly scan exceeded its page bound (READ_MAX_PAGES=50 pages of READ_PAGE_LIMIT=500 rows each) reading the batch/line/run sheets — fails closed rather than scanning forever. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API (findObjectSheet/resolveFieldIds) or the records API (queryRecords) is not available. */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Values-free counts diff of one snapshot batch vs its base (stock-prep view 2)
+         * @description Read-only, values-free diff of the named snapshot batch against its immutable predecessor (auto-picked: same business project, highest snapshotVersion strictly below the current one) or an explicit caller-chosen `baseSnapshotBatchId`. The business project used for the predecessor search is read from the CURRENT batch row itself (the FE diff call sends no `projectId`); the `projectId` query param is only a fallback used when that batch row cannot be read. `workspaceId` is accepted by the query allowlist but has no effect on the result (same dead-parameter note as the LIST route). H-1 gate: BOTH the current and the resolved base batch must be structurally complete (at least one line AND a matching run row) — an incomplete side fails loud with 409 SNAPSHOT_DIFF_BATCH_INCOMPLETE rather than serving a partial/fabricated diff. An unprovisioned substrate (no batch/line/exception sheet exists at all) degrades gracefully to zero counts and `baseSnapshotBatchId: null`, unless an explicit base was requested (then 404).
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Caller-chosen base pair, overriding the predecessor auto-pick. Must differ from `snapshotBatchId` (400 SNAPSHOT_DIFF_BASE_INVALID), must exist (404 SNAPSHOT_DIFF_BASE_NOT_FOUND) and must belong to the same business project as the diffed batch (409 SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH). Only verifiable when the diffed batch's own row exists — a caller-chosen pair against a ghost current id is also 404 SNAPSHOT_DIFF_BASE_NOT_FOUND. */
+                    baseSnapshotBatchId?: string;
+                    /** @description Fallback business-project id, used only when the current batch row cannot be read (the normal path reads the project from that row). Does not filter or narrow the diffed batch itself (the batch id already rode the path). */
+                    projectId?: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but has no effect on the response. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description The snapshot batch being diffed (the "current" side). */
+                    snapshotBatchId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotDiffResult"];
+                        };
+                    };
+                };
+                /** @description An unsupported query field, or `baseSnapshotBatchId` equal to `snapshotBatchId`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description An explicit `baseSnapshotBatchId` that does not exist, or that cannot be verified because the diffed batch's own row does not exist. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The resolved base belongs to a different business project than the diffed batch, OR (H-1) the current/base batch is structurally incomplete, OR the current/base batch identity is ambiguous (duplicate snapshotBatchId or duplicate run identity, no substrate unique index). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API or records API is not available (same two codes as the LIST route). */
+                501: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Per-row diff browse of one snapshot batch vs its base (stock-prep view 2 rows)
+         * @description Read-only, values-free PER-ROW diff browse: diffType/changeTypes/reviewStatus per diff row, for the FE's row-level drill-down under view 2. Same base resolution (auto-pick or explicit `baseSnapshotBatchId`) and H-1 completeness gate as the counts diff (GET .../diff); the enum filters `reviewStatus`/`diffType` are validated against the route's own closed vocabulary FIRST (400 with the field name), so the read function's own belt-and-braces re-check of the same vocabulary is unreachable via HTTP. `heldRowCount` is computed over the WHOLE pair BEFORE these filters are applied, so a filtered read still carries that context; `rowCount` is the post-filter row count.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Same semantics as the counts diff route's `baseSnapshotBatchId`. */
+                    baseSnapshotBatchId?: string;
+                    /** @description Restrict rows to one reviewStatus. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result. */
+                    reviewStatus?: "ready" | "held";
+                    /** @description Restrict rows to one diffType. A value outside the vocabulary is a 400 (STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID), not an empty result. */
+                    diffType?: "added" | "removed" | "changed" | "unchanged" | "held";
+                    /** @description Same fallback semantics as the counts diff route's `projectId`. */
+                    projectId?: string;
+                    /** @description Optional echo of the caller's own tenant. Must equal the authenticated tenant (403 TENANT_MISMATCH otherwise); only a tenantless platform admin may name another. */
+                    tenantId?: string;
+                    /** @description Accepted by the query allowlist but has no effect on the response. */
+                    workspaceId?: string;
+                };
+                header?: never;
+                path: {
+                    /** @description The snapshot batch being diffed (the "current" side). */
+                    snapshotBatchId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["StockPreparationSnapshotDiffRowsResult"];
+                        };
+                    };
+                };
+                /** @description An unsupported query field, an out-of-vocabulary `reviewStatus`/`diffType`, or `baseSnapshotBatchId` equal to `snapshotBatchId`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Same semantics as the counts diff route's 404. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description Same semantics as the counts diff route's 409 (project mismatch / H-1 incomplete / ambiguous). */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The filtered/unfiltered row set exceeded MAX_DIFF_ROWS=2000, or the underlying bounded sheet scan exceeded its page bound (same as the LIST route's 422). */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The host's multitable provisioning API or records API is not available (same two codes as the LIST route). */
                 501: {
                     headers: {
                         [name: string]: unknown;
@@ -17655,6 +18430,193 @@ export interface components {
             };
             /** Format: date-time */
             createdAt?: string | null;
+        };
+        /** @description Q4c: one row of the readonly BOM snapshot-batch LIST (view 2). Exact shape produced by plugin-integration-core's batchSummary (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:201), one per immutable snapshot batch of the business project. Values-free: no drawing number, quantity, unit, path key or timestamp value, only counts/status enums/booleans and the presence of createdAt (never its value). */
+        StockPreparationSnapshotBatchSummary: {
+            snapshotBatchId: string | null;
+            /** @description Defaults to 0 when the stored cell is missing or non-numeric. */
+            snapshotVersion: number;
+            snapshotStatus: string | null;
+            syncRunId: string | null;
+            /** @description Count of bom_snapshot_line rows linked to this batch. */
+            lineCount: number;
+            /** @description Whether the batch row's createdAt cell is set — never the timestamp itself. */
+            createdAtPresent: boolean;
+            /** @description True when the multi-step persist path (batch row -> lines -> run row) did not finish: zero lines OR no matching run row (isBatchIncomplete, stock-preparation-snapshot-reads.cjs:197). An orphaned batch is never presented as normal. */
+            incomplete: boolean;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches (listSnapshotBatches, stock-preparation-snapshot-reads.cjs:228). Batches are ordered newest-first (highest snapshotVersion first; snapshotBatchId breaks ties, orderBatches, same file:215). An unprovisioned batch sheet degrades gracefully to `{ projectId, batchCount: 0, batches: [] }` rather than an error. */
+        StockPreparationSnapshotBatchListResult: {
+            /** @description The (business) projectId the request named, echoed back. */
+            projectId: string;
+            batchCount: number;
+            batches: components["schemas"]["StockPreparationSnapshotBatchSummary"][];
+        };
+        /** @description Q4c: values-free per-changeType tally over one snapshot-batch diff's evidence (changeCountsFromEvidence, stock-preparation-snapshot-reads.cjs:263). Exactly these 10 keys; each defaults to 0 when the engine's evidence carries no rows of that changeType. `componentCodeChanged`/`materialChanged` (added Q3c) are independent of `fingerprintChanged` — a row can carry more than one changeType, so these two do not subtract from it. */
+        StockPreparationSnapshotChangeCounts: {
+            added: number;
+            removed: number;
+            quantityChanged: number;
+            unitChanged: number;
+            versionChanged: number;
+            pathChanged: number;
+            missingChildBom: number;
+            /** @description Tally of the engine's source_fingerprint_changed changeType. */
+            fingerprintChanged: number;
+            /** @description In-place component-code swap at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged. */
+            componentCodeChanged: number;
+            /** @description In-place material substitution at an otherwise unchanged path (Q3c fingerprint decomposition); previously only visible folded into fingerprintChanged. */
+            materialChanged: number;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff (getSnapshotDiff, stock-preparation-snapshot-reads.cjs:404). Values-free counts-only diff of the named batch against its resolved base (predecessor or caller-chosen). An unprovisioned substrate (no batch/line/exception sheet at all) degrades gracefully to zero counts and a null baseSnapshotBatchId rather than an error. */
+        StockPreparationSnapshotDiffResult: {
+            snapshotBatchId: string;
+            /** @description null when no predecessor exists and the caller named none. Otherwise the resolved (auto-picked or caller-chosen and validated) base batch id. */
+            baseSnapshotBatchId: string | null;
+            changeCounts: components["schemas"]["StockPreparationSnapshotChangeCounts"];
+            /** @description exception_confirmation rows linked to this batch whose stored severity is 'blocking'; not filtered by resolution status. */
+            blockingExceptionCount: number;
+        };
+        /** @description Q4c: one row of the per-row diff browse (view 2 rows). Exact projection produced by projectDiffRow over the engine's makeDiff output, through the closed DIFF_ROW_KEYS allowlist (plugins/plugin-integration-core/lib/stock-preparation-snapshot-reads.cjs:526, :543) — a future engine key can never leak through this route unreviewed. Values-free: handles, enums and sha16-prefixed fingerprints only, never a drawing number, quantity, unit or path key value. */
+        StockPreparationSnapshotDiffRow: {
+            /** @description Deterministic id (stableDiffId) hashing (base, current, row key). */
+            diffId: string;
+            /** @enum {string} */
+            diffType: "added" | "removed" | "changed" | "unchanged" | "held";
+            /**
+             * @description 'held' iff changeTypes includes at least one BLOCKING_CHANGE_TYPES entry (reviewStatusForChangeTypes, stock-preparation-snapshot-diff.cjs:240).
+             * @enum {string}
+             */
+            reviewStatus: "ready" | "held";
+            changeTypes: ("added" | "removed" | "quantity_changed" | "unit_changed" | "version_changed" | "path_changed" | "parent_changed" | "material_changed" | "component_code_changed" | "source_fingerprint_changed" | "invalid_qty" | "missing_child_bom" | "duplicate_path_key" | "missing_path_key")[];
+            /** @description Fixed diagnostic token naming which diff rule produced this row (e.g. matched_path_changed, missing_from_current_snapshot, new_in_current_snapshot, previous_missing_path_key). Closed set today but not asserted stable across engine versions, so left as a free string rather than an enum. */
+            reason: string;
+            /** @description Usually 1 (one source line); >1 only for a duplicate_path_key collision row, where it is the number of raw rows collapsed into this one diagnostic entry. */
+            rowCount: number;
+            previousSnapshotLineId: string | null;
+            currentSnapshotLineId: string | null;
+            /** @description sha16:-prefixed non-reversible hash of the row's match key. */
+            keyFingerprint: string;
+            /** @description sha16:-prefixed hash of the previous row's path key. OMITTED entirely (not null) when there is no previous row or it carries no path key. */
+            previousPathKeyFingerprint?: string;
+            /** @description sha16:-prefixed hash of the current row's path key. OMITTED entirely (not null) when there is no current row or it carries no path key. */
+            currentPathKeyFingerprint?: string;
+        };
+        /** @description Q4c: `data` of GET /api/integration/stock-preparation/snapshot-batches/{snapshotBatchId}/diff/rows (listSnapshotDiffRows, stock-preparation-snapshot-reads.cjs:558). Same base-resolution and H-1 completeness-gate semantics as the counts diff; `heldRowCount` is computed over the WHOLE pair BEFORE the optional reviewStatus/diffType filters, so a filtered read keeps that context; `rowCount` is the length of `rows` AFTER filtering. */
+        StockPreparationSnapshotDiffRowsResult: {
+            snapshotBatchId: string;
+            baseSnapshotBatchId: string | null;
+            /** @description rows.length after any reviewStatus/diffType filter is applied. */
+            rowCount: number;
+            /** @description Count of held-reviewStatus rows over the whole pair, before filtering. */
+            heldRowCount: number;
+            rows: components["schemas"]["StockPreparationSnapshotDiffRow"][];
+        };
+        /** @description Q4c: one field mapping row of a pipeline. This is the exact shape produced by plugin-integration-core's rowToFieldMapping (plugins/plugin-integration-core/lib/pipelines.cjs) and is embedded in IntegrationPipeline.fieldMappings when the read requests it (GET /api/integration/pipelines/{id}?includeFieldMappings=true, the default). */
+        IntegrationPipelineFieldMapping: {
+            id: string;
+            pipelineId: string;
+            sourceField: string;
+            targetField: string;
+            transform?: {
+                [key: string]: unknown;
+            } | null;
+            validation?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Any JSON value persisted as the field's default; shape is caller-defined. */
+            defaultValue?: unknown;
+            sortOrder: number;
+            /** Format: date-time */
+            createdAt?: string | null;
+        };
+        /** @description Q4c: read-only pipeline projection. This is the exact shape produced by plugin-integration-core's rowToPipeline (plugins/plugin-integration-core/lib/pipelines.cjs) and is shared verbatim by the list route (GET /api/integration/pipelines) and the single-pipeline read (GET /api/integration/pipelines/{id}); the list read never embeds `fieldMappings` (the registry call omits it), only the single read does, and only when `includeFieldMappings` is not explicitly `false`. */
+        IntegrationPipeline: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            projectId?: string | null;
+            name: string;
+            description?: string | null;
+            sourceSystemId: string;
+            sourceObject: string;
+            targetSystemId: string;
+            targetObject: string;
+            stagingSheetId?: string | null;
+            mode: string;
+            idempotencyKeyFields: string[];
+            options: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "draft" | "active" | "paused" | "disabled";
+            createdBy?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+            /** @description Present only on the single-pipeline read with includeFieldMappings !== 'false'; absent (not null, not []) on the list route and on a read with includeFieldMappings=false. */
+            fieldMappings?: components["schemas"]["IntegrationPipelineFieldMapping"][];
+        };
+        /** @description Q4c: public (credential-redacted) external-system projection. This is the exact shape produced by plugin-integration-core's rowToPublicExternalSystem (plugins/plugin-integration-core/lib/external-systems.cjs) and is shared verbatim by the list route (GET /api/integration/external-systems) and the single-system read (GET /api/integration/external-systems/{id}). `config` has every key in that system's `kind`-specific private-config set already deleted (never redacted-in-place); raw credentials are never in this projection — only derived presence/format/fingerprint fields are. */
+        IntegrationExternalSystem: {
+            id: string;
+            connectionId?: string | null;
+            tenantId: string;
+            workspaceId?: string | null;
+            projectId?: string | null;
+            name: string;
+            kind: string;
+            /** @enum {string} */
+            role: "source" | "target" | "bidirectional";
+            /** @description Sanitized config with every private (kind-specific) key already removed. */
+            config: {
+                [key: string]: unknown;
+            };
+            capabilities: {
+                [key: string]: unknown;
+            };
+            /** @enum {string} */
+            status: "active" | "inactive" | "error";
+            /** Format: date-time */
+            lastTestedAt?: string | null;
+            lastError?: string | null;
+            /** @description True iff a non-empty encrypted credential blob is stored; never the credential itself. */
+            hasCredentials: boolean;
+            /** @description Detected format token of the stored ciphertext (e.g. its envelope version), never its content. */
+            credentialFormat?: string | null;
+            /** @description Non-reversible fingerprint of the stored credential, present only where the route computes one; null when it does not. */
+            credentialFingerprint?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
+        };
+        /** @description Q4c: redacted dead-letter projection returned by GET /api/integration/dead-letters. This is plugin-integration-core's rowToDeadLetter (plugins/plugin-integration-core/lib/dead-letter.cjs) with redactDeadLetter (plugins/plugin-integration-core/lib/http-routes.cjs) applied: by default `sourcePayload`/`transformedPayload` are stripped entirely (`payloadRedacted: true`); an admin caller passing `includePayload=true` gets both fields back, sanitized (secret-shaped values scrubbed), not verbatim. `errorMessage` is always scrubbed for secret-shaped substrings, including on rows written before write-time scrubbing existed. */
+        IntegrationDeadLetter: {
+            id: string;
+            tenantId: string;
+            workspaceId?: string | null;
+            runId: string;
+            pipelineId: string;
+            idempotencyKey?: string | null;
+            /** @description Present only when an admin requested includePayload=true; sanitized, not verbatim. */
+            sourcePayload?: unknown;
+            /** @description Present only when an admin requested includePayload=true; sanitized, not verbatim. */
+            transformedPayload?: unknown;
+            errorCode: string;
+            /** @description Free-text error, scrubbed of secret-shaped substrings at read time. */
+            errorMessage: string;
+            retryCount: number;
+            /** @enum {string} */
+            status: "open" | "replayed" | "discarded";
+            lastReplayRunId?: string | null;
+            /** @description Always true; marks that this projection is the redacted view, whichever branch produced it. */
+            payloadRedacted: boolean;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
         };
         /**
          * @description DF-T1A connector action operation kind. read/preview/export are non-mutating; upsert is a write (always gated). Submit/Audit/BOM are intentionally NOT modeled here.

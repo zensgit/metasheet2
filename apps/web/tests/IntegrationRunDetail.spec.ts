@@ -43,6 +43,22 @@ const DEAD_LETTERS_URL = `/api/integration/dead-letters?tenantId=default&pipelin
 // workspaceId is null in the default scope, and buildQueryString drops null — so the detail URL
 // carries only the tenant echo. This literal is the contract this file pins.
 const DETAIL_URL = `/api/integration/runs/${RUN_ID}?tenantId=default`
+// Q4a: the per-run provenance sub-route. Same query-suffix rule as the detail URL (workspaceId is
+// null in the default scope and buildQueryString drops it), and `provenance` is a PATH segment —
+// a `/runs/<id>?provenance=1` shaped call would hit the single-run read instead.
+const PROVENANCE_URL = `/api/integration/runs/${RUN_ID}/provenance?tenantId=default`
+const PROVENANCE_ITEMS = [
+  {
+    runId: RUN_ID, pipelineId: PIPELINE_ID, rowId: 'DEMO-001',
+    eventType: 'row_cleaned', at: '2026-09-19T02:00:00.500Z', attrs: { rule: 'trim' },
+    eventIndex: 1, runStatus: 'partial', runMode: 'dry-run', runCreatedAt: '2026-09-19T02:00:00.000Z',
+  },
+  {
+    runId: RUN_ID, pipelineId: PIPELINE_ID, rowId: 'DEMO-001',
+    eventType: 'target_write_succeeded', at: '2026-09-19T02:00:01.000Z', attrs: {},
+    eventIndex: 2, runStatus: 'partial', runMode: 'dry-run', runCreatedAt: '2026-09-19T02:00:00.000Z',
+  },
+]
 
 const LIST_RUN = {
   id: RUN_ID,
@@ -103,10 +119,12 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
   let detailCalls: Array<{ url: string; init?: RequestInit }> = []
+  let provenanceCalls: Array<{ url: string; init?: RequestInit }> = []
 
   beforeEach(() => {
     setActivePinia(createPinia())
     detailCalls = []
+    provenanceCalls = []
     apiGetMock.mockReset()
     apiGetMock.mockImplementation(async (url: string) => {
       if (url === '/api/data-sources') return { ok: true, data: { items: [] } }
@@ -135,19 +153,33 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
 
   // `answerDetail` decides what the SINGLE read returns; everything else is the same bootstrap +
   // list answer for all four cases.
-  function installMocks(answerDetail: () => Response): void {
+  function installMocks(
+    answerDetail: () => Response,
+    answerProvenance: () => Response = () => jsonResponse({ items: PROVENANCE_ITEMS }),
+  ): void {
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
       if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === LIST_URL) return jsonResponse([LIST_RUN])
       if (url === DEAD_LETTERS_URL) return jsonResponse([])
+      if (url === PROVENANCE_URL) {
+        provenanceCalls.push({ url, init })
+        return answerProvenance()
+      }
       if (url === DETAIL_URL) {
         detailCalls.push({ url, init })
         return answerDetail()
       }
       throw new Error(`unexpected URL ${url}`)
     })
+  }
+
+  async function expandProvenance(host: HTMLDivElement): Promise<void> {
+    const toggle = host.querySelector('[data-testid="toggle-run-provenance"]') as HTMLButtonElement
+    expect(toggle).not.toBeNull()
+    toggle.click()
+    await flushUi()
   }
 
   async function mountAndListRuns(): Promise<HTMLDivElement> {
@@ -271,6 +303,96 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
     expect(error.textContent).not.toContain('Run read is not implemented')
   })
 
+  // --- Q4a: per-run provenance section ------------------------------------------------------
+  it('fetches the run provenance from the per-run sub-route with the runId in the path, and only on expand', async () => {
+    installMocks(() => jsonResponse(DETAIL_RUN))
+    const host = await mountAndListRuns()
+    await openDetail(host)
+    // Opening 详情 must NOT have fetched the timeline: the section is collapsed by default, so the
+    // dialog still costs exactly one request.
+    expect(provenanceCalls).toHaveLength(0)
+    expect(host.querySelector('[data-testid="run-provenance-timeline"]')).toBeNull()
+    await expandProvenance(host)
+    expect(provenanceCalls).toHaveLength(1)
+    expect(provenanceCalls[0].url).toBe(PROVENANCE_URL)
+    // `provenance` rides in the PATH under the runId — `/runs/<id>?provenance=1` is the single read.
+    expect(provenanceCalls[0].url.split('?')[0]).toBe(`/api/integration/runs/${RUN_ID}/provenance`)
+    // x-tenant-id hole: the value-plane request leans on the session JWT apiFetch attaches.
+    const headers = new Headers((provenanceCalls[0].init?.headers ?? {}) as HeadersInit)
+    expect(headers.get('x-tenant-id')).toBeNull()
+    // collapse + re-expand reuses the fetched timeline (no second request for the same run)
+    await expandProvenance(host)
+    await expandProvenance(host)
+    expect(provenanceCalls).toHaveLength(1)
+  })
+
+  it('renders one entry per provenance event, in event_index order, values-free', async () => {
+    installMocks(() => jsonResponse(DETAIL_RUN))
+    const host = await mountAndListRuns()
+    await openDetail(host)
+    await expandProvenance(host)
+    const entries = host.querySelectorAll('[data-testid^="run-provenance-entry-"]')
+    expect(entries).toHaveLength(PROVENANCE_ITEMS.length)
+    const first = (entries[0] as HTMLElement).textContent ?? ''
+    expect(first).toContain('row_cleaned')
+    expect(first).toContain('#1')
+    expect(first).toContain('DEMO-001')
+    const second = (entries[1] as HTMLElement).textContent ?? ''
+    expect(second).toContain('target_write_succeeded')
+    expect(second).toContain('#2')
+    // Read-only: the provenance section adds no replay/retry control.
+    const section = host.querySelector('[data-testid="run-provenance"]') as HTMLElement
+    expect(section.querySelector('[data-testid^="replay-"]')).toBeNull()
+    // Values-free: no URL- or host-shaped strings reach the rendered timeline.
+    const sectionText = section.textContent ?? ''
+    expect(sectionText).not.toMatch(/https?:\/\//)
+    expect(sectionText).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/)
+  })
+
+  it('clears the provenance section when the dialog is closed and re-opened', async () => {
+    installMocks(() => jsonResponse(DETAIL_RUN))
+    const host = await mountAndListRuns()
+    await openDetail(host)
+    await expandProvenance(host)
+    expect(provenanceCalls).toHaveLength(1)
+    expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+    ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+    await flushUi()
+    await openDetail(host)
+    // Re-opened collapsed: a timeline fetched for an earlier dialog must never be showing under a
+    // freshly opened one (that is how run A's lineage would appear under run B's header).
+    expect(host.querySelector('[data-testid="run-provenance"]')).toBeNull()
+    expect(host.querySelector('[data-testid="run-provenance-timeline"]')).toBeNull()
+    // ...and the cache was cleared too, so expanding again really re-reads rather than replaying
+    // whatever the previous dialog happened to hold.
+    await expandProvenance(host)
+    expect(provenanceCalls).toHaveLength(2)
+    expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+  })
+
+  it.each([
+    ['zh-CN' as const, '运行不存在或不可见'],
+    ['en' as const, 'does not exist or is not visible'],
+  ])('maps a 404 on the provenance sub-route to the not-visible copy, not an empty timeline (%s)', async (locale, copy) => {
+    setLocale(locale)
+    installMocks(
+      () => jsonResponse(DETAIL_RUN),
+      () => errorResponse(404, 'RUN_NOT_FOUND', 'pipeline run not found'),
+    )
+    const host = await mountAndListRuns()
+    await openDetail(host)
+    await expandProvenance(host)
+    const error = host.querySelector('[data-testid="run-provenance-error"]') as HTMLElement
+    expect(error).not.toBeNull()
+    expect(error.textContent).toContain(copy)
+    // Branching is on the CODE, so the server's own prose is never what the operator reads.
+    expect(error.textContent).not.toContain('pipeline run not found')
+    // A 404 must NOT be shown as "this run recorded no events" — that is the state a real,
+    // empty run gets, and conflating them is exactly what the route's 404 exists to prevent.
+    expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
+    expect(host.querySelector('[data-testid="run-provenance-timeline"]')).toBeNull()
+  })
+
   it('keeps the detail surface values-free (no host/URL-shaped strings in the rendered dialog)', async () => {
     installMocks(() => jsonResponse(DETAIL_RUN))
     const host = await mountAndListRuns()
@@ -280,5 +402,174 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
     // Bare host:port shapes (e.g. an accidentally surfaced server address) are out too. The ISO
     // timestamps this dialog does render contain ':' but no dotted host label before it.
     expect(dialogText).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/)
+  })
+
+  // --- Q4b: non-terminal runs auto-refresh every RUN_DETAIL_POLL_MS ---------------------------
+  // Only `setInterval`/`clearInterval` are faked: `flushUi`'s own `setTimeout(…, 0)` microtask
+  // pump must keep running on real timers, or the mount/open sequence above never settles.
+  const RUN_DETAIL_POLL_MS = 5000
+
+  describe('Q4b auto-polling', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('re-fetches the run after RUN_DETAIL_POLL_MS while it is still non-terminal (running)', async () => {
+      installMocks(() => jsonResponse({ ...DETAIL_RUN, status: 'running', finishedAt: null }))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      expect(detailCalls[1].url).toBe(DETAIL_URL)
+      // The label reflects an armed timer.
+      expect((host.querySelector('[data-testid="run-detail-poll-status"]') as HTMLElement).textContent)
+        .toContain('Auto-refreshing')
+    })
+
+    it('does not poll again once the run reaches a terminal status (succeeded)', async () => {
+      let call = 0
+      installMocks(() => {
+        call += 1
+        // First read is still running; the poll it schedules comes back succeeded.
+        const status = call === 1 ? 'running' : 'succeeded'
+        return jsonResponse({ ...DETAIL_RUN, status, finishedAt: call === 1 ? null : DETAIL_RUN.finishedAt })
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      expect((host.querySelector('[data-testid="run-detail-status"]') as HTMLElement).textContent).toContain('succeeded')
+      expect((host.querySelector('[data-testid="run-detail-poll-status"]') as HTMLElement).textContent)
+        .toContain('stopped')
+      // A run that just turned terminal must never fire a THIRD read on the next tick.
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+    })
+
+    it('clears the timer when the dialog is closed, so no further reads happen', async () => {
+      installMocks(() => jsonResponse({ ...DETAIL_RUN, status: 'running', finishedAt: null }))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(1)
+    })
+
+    // --- #5950 review N1/N2: delayed-response interleavings -----------------------------------
+    // These drive the REAL view through the apiFetch seam with hand-resolved promises, so the
+    // order in which responses land is decided by the test, not by the mock's microtask timing.
+    function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+      let resolve!: (value: T) => void
+      const promise = new Promise<T>((r) => { resolve = r })
+      return { promise, resolve }
+    }
+    const RUNNING_RUN = { ...DETAIL_RUN, status: 'running', finishedAt: null }
+
+    it('N1: an initial read still in flight at unmount cannot re-arm polling when it lands', async () => {
+      const initial = deferred<Response>()
+      installMocks(() => initial.promise as unknown as Response)
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      expect(detailCalls).toHaveLength(1)
+      app!.unmount()
+      app = null
+      initial.resolve(jsonResponse(RUNNING_RUN))
+      await flushUi()
+      expect(vi.getTimerCount(), 'no interval may be armed after unmount').toBe(0)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS * 2)
+      await flushUi()
+      expect(detailCalls, 'unmounted view must not issue another run GET').toHaveLength(1)
+    })
+
+    it('N1: a background tick in flight at unmount cannot re-arm polling when it lands', async () => {
+      const tick = deferred<Response>()
+      let call = 0
+      installMocks(() => {
+        call += 1
+        return (call === 2 ? tick.promise : jsonResponse(RUNNING_RUN)) as unknown as Response
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      app!.unmount()
+      app = null
+      tick.resolve(jsonResponse(RUNNING_RUN))
+      await flushUi()
+      expect(vi.getTimerCount(), 'no interval may be armed after unmount').toBe(0)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS * 2)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+    })
+
+    it('N1: a provenance re-pull in flight at unmount cannot re-arm polling when it lands', async () => {
+      const repull = deferred<Response>()
+      let provenanceCall = 0
+      installMocks(
+        () => jsonResponse(RUNNING_RUN),
+        () => {
+          provenanceCall += 1
+          return (provenanceCall === 2 ? repull.promise : jsonResponse({ items: PROVENANCE_ITEMS })) as unknown as Response
+        },
+      )
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(provenanceCalls).toHaveLength(1)
+      // The tick's run read lands; the quiet provenance re-pull it chains is still pending.
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+      expect(provenanceCalls).toHaveLength(2)
+      app!.unmount()
+      app = null
+      repull.resolve(jsonResponse({ items: PROVENANCE_ITEMS }))
+      await flushUi()
+      expect(vi.getTimerCount(), 'no interval may be armed after unmount').toBe(0)
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS * 2)
+      await flushUi()
+      expect(detailCalls).toHaveLength(2)
+    })
+
+    it('N2: a background tick that lands before a pending manual refresh does not leave the button stuck', async () => {
+      const manual = deferred<Response>()
+      let call = 0
+      installMocks(() => {
+        call += 1
+        return (call === 2 ? manual.promise : jsonResponse(RUNNING_RUN)) as unknown as Response
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      const refresh = host.querySelector('[data-testid="refresh-run-detail"]') as HTMLButtonElement
+      refresh.click()
+      await flushUi()
+      expect(refresh.disabled).toBe(true)
+      expect(host.querySelector('[data-testid="run-detail-loading"]')).not.toBeNull()
+      // The background tick is issued while the manual read is pending, and answers first.
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(3)
+      manual.resolve(jsonResponse(RUNNING_RUN))
+      await flushUi()
+      expect(refresh.disabled, 'a completed manual refresh must release its loading state').toBe(false)
+      expect(host.querySelector('[data-testid="run-detail-loading"]')).toBeNull()
+      // Polling is still alive afterwards (the fix must not have stopped the background loop).
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(detailCalls).toHaveLength(4)
+    })
   })
 })

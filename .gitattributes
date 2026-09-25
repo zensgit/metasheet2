@@ -101,3 +101,24 @@ scripts/ops/multitable-onprem-package-build.sh text eol=lf
 # 与上面的 pin 规则同理用 `text eol=lf` 而不是 `-text`：工作区是 LF，且 `git add` 时归一化，
 # 于是 CRLF 编辑器也塞不进 CRLF 字节。
 plugins/plugin-integration-core/fixtures/scenario-b-synthetic-bom/** text eol=lf
+
+# ---------------------------------------------------------------------------
+# 必跑 web 泳道登记行（Q8 / C4 P1）
+# ---------------------------------------------------------------------------
+# apps/web/scripts/run-required-web-tests.sh 的最后一条 `exec npx vitest run …` 是全仓
+# 并发冲突最密集的一行：2026-09-01 以来被改了 76 次，几乎每次并行登记都撞在同一条物理行上
+# （O(n²)：n 条同时在飞的加 spec 分支两两冲突）。根治办法是把它拆成「一行一个 token」的
+# 反斜杠续行块并按大小写不敏感字母序排列——**这才是主防线**：两条 PR 各自插入的新 token
+# 落在不同物理行，三方合并不再重叠。
+#
+#   eol=lf      — 这是一个 shell 脚本，且多处守卫按物理行解析它；CRLF 检出会让
+#                 `line.endsWith('\')` 这类续行判定全部失效。core.autocrlf=true 的
+#                 Windows 检出上没有这条规则就会写回 CRLF。
+#   merge=union — **仅作本地 rebase/merge 的兜底**。union 在本地 `git merge` / `git rebase`
+#                 时让两侧新增行都留下而不报冲突。GitHub 服务端合并是否读取 .gitattributes
+#                 的 merge driver **未经证实**（本仓未做实证），所以不要把它当保证；它只是
+#                 字母序多行之外的第二层。union 可能造出的坏形状——重复 token、乱序、把
+#                 某条非列表行变成两行——由
+#                 packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts
+#                 的四条结构断言 + `bash -n` 兜住。
+apps/web/scripts/run-required-web-tests.sh text eol=lf merge=union

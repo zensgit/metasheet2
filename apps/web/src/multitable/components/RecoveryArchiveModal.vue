@@ -40,7 +40,7 @@
               class="archive-recovery__entry"
               :class="{ 'archive-recovery__entry--selected': selectedGenerationId === entry.generationId }"
               :data-test="`archive-recovery-entry-${entry.generationId}`"
-              :disabled="Boolean(job)"
+              :disabled="executing || Boolean(job)"
               @click="selectEntry(entry.generationId)"
             >
               <span class="archive-recovery__entry-time">{{ formatTime(entry.recoveryPointAt) }}</span>
@@ -253,6 +253,7 @@ let executeRequest = 0
 let jobRequest = 0
 let jobDiscoveryRequest = 0
 let jobPollTimer: ReturnType<typeof setTimeout> | null = null
+let unmounted = false
 
 const selectedEntry = computed(() => entries.value.find((entry) => entry.generationId === selectedGenerationId.value) ?? null)
 const canPreview = computed(() => {
@@ -317,7 +318,7 @@ function l(key: string): string {
     preview: '生成预览', previewing: '正在生成预览…', changes: '写入变更', reverts: '回退记录', resurrections: '恢复记录',
     deletions: '删除记录', kept: '保留后建记录', drift: '架构漂移', asyncRequired: '变更量超过同步上限，将作为可恢复的后台作业执行。',
     startingJob: '正在创建作业…', startJob: '创建恢复作业', executing: '正在执行…', execute: '执行恢复', blocked: '服务器未允许执行此预览。',
-    no_changes: '当前状态没有需要恢复的变更。', unsupported_attachments: '所选范围包含附件变更，当前暂不支持恢复附件。未执行恢复。', schema_drift: '当前架构与归档恢复点不兼容。', inbound_unprovable: '关联完整性无法证明，服务器拒绝执行。',
+    no_changes: '当前状态没有需要恢复的变更。', unsupported_attachments: '当前服务配置或所选范围不支持附件恢复。未执行恢复。', schema_drift: '当前架构与归档恢复点不兼容。', inbound_unprovable: '关联完整性无法证明，服务器拒绝执行。',
     async_plan_required: '需要后台恢复作业。', runtimeUnavailable: '归档恢复当前不可用。', forbidden: '没有归档恢复权限。', notFound: '恢复点或作业不存在。',
     disabled: '归档恢复尚未启用。', serviceNotReady: '归档恢复服务尚未就绪。', scopeUnavailable: '当前表的归档恢复范围尚未配置。',
     dataUnavailable: '归档恢复数据暂时不可用。', unauthenticated: '请重新登录后访问归档恢复。', recheck: '重新检查归档恢复',
@@ -333,7 +334,7 @@ function l(key: string): string {
     preview: 'Preview', previewing: 'Preparing preview…', changes: 'Write changes', reverts: 'Records reverted', resurrections: 'Records restored',
     deletions: 'Records deleted', kept: 'Later records kept', drift: 'Schema drift', asyncRequired: 'This change exceeds the synchronous limit and will run as a resumable background job.',
     startingJob: 'Starting job…', startJob: 'Start recovery job', executing: 'Executing…', execute: 'Execute recovery', blocked: 'The server did not allow this preview.',
-    no_changes: 'There are no changes to recover.', unsupported_attachments: 'The selection contains attachment changes. Attachment recovery is not supported yet. No recovery was performed.', schema_drift: 'The current schema is incompatible with this archive point.', inbound_unprovable: 'Link integrity cannot be proven, so the server refused execution.',
+    no_changes: 'There are no changes to recover.', unsupported_attachments: 'The current service configuration or selected scope does not support attachment recovery. No recovery was performed.', schema_drift: 'The current schema is incompatible with this archive point.', inbound_unprovable: 'Link integrity cannot be proven, so the server refused execution.',
     async_plan_required: 'A background recovery job is required.', runtimeUnavailable: 'Archive recovery is currently unavailable.', forbidden: 'You do not have archive recovery permission.', notFound: 'The recovery point or job was not found.',
     disabled: 'Archive recovery is not enabled.', serviceNotReady: 'The archive recovery service is not ready.', scopeUnavailable: 'Archive recovery scope is not configured for this sheet.',
     dataUnavailable: 'Archive recovery data is currently unavailable.', unauthenticated: 'Sign in again to access archive recovery.', recheck: 'Check archive recovery again',
@@ -411,7 +412,7 @@ function clearPreview(): void {
 }
 
 function selectEntry(generationId: string): void {
-  if (!jobDiscoveryResolved.value || job.value) return
+  if (!jobDiscoveryResolved.value || executing.value || job.value) return
   selectedGenerationId.value = generationId
   clearPreview()
 }
@@ -469,7 +470,7 @@ async function loadCatalog(reset: boolean): Promise<void> {
   }
 }
 
-async function discoverCurrentSheetJob(): Promise<void> {
+async function discoverCurrentSheetJob(preserveResult = false): Promise<void> {
   const sheetId = props.sheetId
   if (!sheetId || job.value) {
     jobDiscoveryResolved.value = Boolean(job.value)
@@ -485,7 +486,7 @@ async function discoverCurrentSheetJob(): Promise<void> {
     jobDiscoveryResolved.value = true
     const next = page.entries[0]
     if (next) applyJobSnapshot(sheetId, next)
-    else await loadCatalog(true)
+    else if (!preserveResult) await loadCatalog(true)
   } catch (error) {
     if (request === jobDiscoveryRequest && props.visible && sheetId === props.sheetId) {
       jobDiscoveryError.value = messageFor(error)
@@ -635,6 +636,7 @@ async function cancelCurrentJob(): Promise<void> {
 }
 
 function applyJobSnapshot(sheetId: string, next: RecoveryArchiveJobSnapshot): void {
+  if (unmounted) return
   const previous = jobsBySheet.get(sheetId)
   jobsBySheet.set(sheetId, next)
   if (sheetId !== props.sheetId) return
@@ -650,7 +652,7 @@ function applyJobSnapshot(sheetId: string, next: RecoveryArchiveJobSnapshot): vo
 
 function scheduleJobPoll(): void {
   clearJobPoll()
-  if (!props.visible || !jobActive.value) return
+  if (unmounted || !props.visible || !jobActive.value) return
   jobPollTimer = setTimeout(() => { void refreshCurrentJob(true) }, JOB_POLL_MS)
 }
 
@@ -747,12 +749,15 @@ watch(
       return
     }
     if (job.value) void refreshCurrentJob(true)
-    else void discoverCurrentSheetJob()
+    else if (!executing.value) void discoverCurrentSheetJob(Boolean(result.value))
   },
   { immediate: true },
 )
 
 onBeforeUnmount(() => {
+  unmounted = true
+  executeRequest++
+  jobRequest++
   invalidateArchiveReads()
   clearJobPoll()
 })

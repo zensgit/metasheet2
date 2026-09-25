@@ -119,6 +119,18 @@ import {
   isHiddenSystemSheet,
   isSystemPeopleSheetDescription,
 } from '../multitable/system-sheet-predicate'
+// #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
+// bound, never a grant: every call site below sits AFTER the unchanged canRead/liveness gate.
+import {
+  PEOPLE_SHEET_READ_MAX_ITEMS,
+  boundCursorRead,
+  boundEnumeratedRows,
+  boundPageMeta,
+  boundReadWindow,
+  boundRecordSummaryPage,
+  refuseBoundedSheetBulkRead,
+  resolvePeopleSheetReadBound,
+} from '../multitable/people-sheet-read-bound'
 import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
 import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
@@ -191,6 +203,9 @@ import {
   SHEET_NOT_FOUND_MESSAGE,
   SheetNotLiveError,
   assertSheetLive,
+  assertSheetLiveForUpdate,
+  loadSheetLiveness,
+  type SheetLiveness,
 } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
@@ -4551,6 +4566,26 @@ async function tryResolveView(
 // from multitable/sheet-refusals.ts so the copies cannot drift: the refusal SHAPE is a client
 // contract (clients switch on `error.code`), not a per-file detail. Call sites are unchanged.
 
+/**
+ * The SAME liveness refusal as `sendSheetNotLive`, for the handlers that cannot touch `res`.
+ *
+ * The record_permissions PUT/DELETE run their whole decision inside `pool.transaction` and return a
+ * typed OUTCOME object; the response is written only after COMMIT (a body written inside the
+ * callback survives a rollback). So they need the refusal as a VALUE, not as a send. The codes and
+ * messages come from `multitable/sheet-liveness.ts` — the same two bodies `sendSheetNotLive` emits,
+ * so the wire shape cannot drift from every other sheet-addressed route.
+ *
+ * Values-free by construction: no sheet id is taken, so none can be echoed back.
+ */
+function sheetNotLiveOutcome(
+  liveness: SheetLiveness,
+): { kind: 'error'; status: number; code: string; message: string } {
+  if (liveness === 'deleted') {
+    return { kind: 'error', status: 404, code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE }
+  }
+  return { kind: 'error', status: 404, code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE }
+}
+
 // ── F21: display-name rename (sheet + base) ────────────────────────────────────
 // The delivery contract (§12/§15 of the multitable application model) says display names are the
 // CUSTOMER'S to change. Until this slice no route could write `meta_sheets.name` or `meta_bases.name`
@@ -5484,7 +5519,7 @@ function toSummaryDisplay(value: unknown): string {
   return JSON.stringify(value)
 }
 
-function getAttachmentStorageService(): StorageServiceImpl {
+export function getAttachmentStorageService(): StorageServiceImpl {
   if (!multitableAttachmentStorage) {
     const baseUrl = process.env.ATTACHMENT_STORAGE_BASE_URL || 'http://localhost:8900/files'
     multitableAttachmentStorage = StorageServiceImpl.createLocalService(ATTACHMENT_PATH, baseUrl)
@@ -5938,7 +5973,16 @@ const loadFieldsForSheet = loadFieldsForSheetShared
  * MetaPersonPicker debounces and re-queries on EVERY keystroke, so a minimum of 2+ would make a
  * legitimate 1-character search (common for CJK surnames) silently answer nothing.
  */
-export const PERSON_DIRECTORY_MAX_ITEMS = 50
+// #5807: the literal `50` now lives in multitable/people-sheet-read-bound.ts (the People-sheet read
+// window) and this is an ALIAS of it, so the roster-shaped reads of this file and the People sheet's
+// own enumerating reads share ONE number by construction rather than by two literals that agree today.
+//
+// WARNING — raising this is a SECURITY decision, not a UX one. It was a candidate-list ceiling (how
+// many people the picker offers); since the alias it is ALSO the People sheet's read window, so
+// bumping it to make a picker show more people widens what a bare `multitable:read` can take from the
+// roster in one request. Change the window at its definition, deliberately, or give the picker its own
+// literal again — but do not raise this one by reflex.
+export const PERSON_DIRECTORY_MAX_ITEMS = PEOPLE_SHEET_READ_MAX_ITEMS
 export const PERSON_DIRECTORY_MIN_QUERY_LENGTH = 1
 
 /**
@@ -6336,6 +6380,85 @@ async function resolveMetaSheetId(
 
   // Backward-compatible fallback: treat viewId as a sheetId when no view exists.
   return { sheetId: viewId, view: null }
+}
+
+/**
+ * `resolveMetaSheetId` + the ONE refusal its `ConflictError` deserves (#5946).
+ *
+ * The resolver throws `ConflictError` when a request names BOTH a `sheetId` and a `viewId` and the
+ * view resolves to a DIFFERENT sheet. Ten routes call it, and on main the class was answered two
+ * wrong ways: SEVEN handlers had no branch for it and fell through to their generic hardcoded 500
+ * (values-free, but the wrong class — a caller cannot tell a bad address from a broken server, and
+ * every such request is logged as a server fault); THREE caught it and answered `409 CONFLICT` with
+ * `err.message`, which pastes the requested `viewId` AND `sheetId` back onto the wire.
+ *
+ * Both are replaced, here and once, by the SAME values-free 404 `sendSheetNotLive(res, 'absent')`
+ * emits: the address this request carries does not name a live sheet this route can act on. Echoing
+ * is impossible by construction rather than by care — the wrapper hands `sendSheetNotLive` no value
+ * (that helper takes no id and no error; multitable/sheet-refusals.ts), and `err` never reaches the
+ * response.
+ *
+ * WHY the ABSENT body specifically, and not a new code: the refusal must stay INDISTINGUISHABLE
+ * across the three sheet states. A mismatch answered one way for a LIVE sheet and another for a
+ * soft-deleted or absent one would re-open the #5839 existence oracle from the VIEW side — the
+ * difference here turns on `view.sheetId !== sheetId` ALONE, never on the named sheet's liveness.
+ * Pinned by the `resolveMetaSheetId` cell of tests/unit/multitable-sheet-existence-oracle-b5.test.ts
+ * and, for all ten routes, by tests/unit/multitable-sheet-view-mismatch-refusal.test.ts.
+ *
+ * It replaces ONLY what happens when the resolution THROWS. The wrapper sits exactly where the call
+ * sat, so each handler's own 401 → 403 → liveness-404 order is untouched, and `ValidationError`
+ * (neither id supplied) still propagates to that handler's catch and maps as before.
+ *
+ * ORDER IS NOT ITS BUSINESS — and on GET /context that matters. #5948 deliberately moved that
+ * handler's `sheetId`+`viewId` pairing check BEHIND its #5936 authority gate, so a caller the gate
+ * refuses gets the same 403 whatever viewId it holds and `meta_views` is not consulted for it. This
+ * wrapper is attached to the POST-gate call only; the pre-gate `sheetId: null` resolution above the
+ * gate stays raw (it cannot throw ConflictError — there is no sheetId to compare against — and
+ * wrapping it would put a 404 in front of the gate and re-open the door #5948 closed). That one raw
+ * call is the single allow-listed exception in
+ * tests/unit/multitable-sheet-view-mismatch-refusal.test.ts, which also pins where it sits.
+ *
+ * WHY IT TAKES THE PROMISE instead of the resolver's arguments — stated as MEASURED, not as
+ * reasoned. The univer-meta sheet-liveness closure guard classifies a handler as sheet-addressed
+ * by four predicates (tests/unit/multitable-sheet-liveness-closure.guard.test.ts,
+ * `addressesASheet`), and for GET /context exactly ONE of them fires: the literal
+ * `resolveMetaSheetId` in its body. Its path has no `:sheetId`; it does not call
+ * `requireRecordReadable`; and the gate #5948 added calls `resolveSheetCapabilitiesForAccess`,
+ * which that guard's `\bresolveSheetCapabilities\b` does NOT match (the boundary fails before
+ * `ForAccess`).
+ *
+ * What an args-shaped wrapper would actually cost — `addressesASheet` replayed over this whole
+ * file with every `orRefuseSheetViewMismatch(res, resolveMetaSheetId(` rewritten to a
+ * name-swallowing `resolveMetaSheetIdOrRefuse(res, `:
+ *   - pre-#5948 tree (2435c92ec): 105 handlers, in scope 83 -> 82, LOST ["GET /context"];
+ *   - this tree, #5948 merged:    105 handlers, in scope 83 -> 83, LOST [].
+ * The difference IS #5948. Its reorder left GET /context a PRE-gate BARE `resolveMetaSheetId`
+ * call (line 8744 below, the allow-listed one), and that call alone now keeps the token inside
+ * the handler body. So the claim here is NOT that an args-shaped wrapper would still drop GET
+ * /context out of that scope today — measured, it would not. It is that the classification must
+ * not DEPEND on this wrapper's shape: the Promise form keeps the resolver's name at all ten call
+ * sites, so /context's membership holds whether or not that pre-gate call survives a later
+ * refactor, and no rewrite here can quietly shrink the guard's in-scope population. Asserted, not
+ * asserted-in-prose, by the closure-scope cell of the spec above, which pins how many times the
+ * token occurs in that handler's CODE and which of those occurrences is the pre-gate call.
+ *
+ * Returns `null` AFTER the response has been sent: every call site must `return` on null. A raw
+ * `resolveMetaSheetId(` that is NOT wrapped like this is refused by the structural cells of
+ * tests/unit/multitable-sheet-view-mismatch-refusal.test.ts, so an 11th 500 cannot be reintroduced.
+ */
+async function orRefuseSheetViewMismatch(
+  res: Response,
+  resolution: Promise<{ sheetId: string; view: UniverMetaViewConfig | null }>,
+): Promise<{ sheetId: string; view: UniverMetaViewConfig | null } | null> {
+  try {
+    return await resolution
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      sendSheetNotLive(res, 'absent')
+      return null
+    }
+    throw err
+  }
 }
 
 function normalizeRecordCreateContextId(value: unknown): string | undefined {
@@ -8624,12 +8747,87 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       let resolvedBaseId = baseId || null
       let resolvedSheetId = sheetId || null
-      if (resolvedSheetId || viewId) {
+      // A viewId WITHOUT a sheetId is the ONLY resolution that must happen before the gate below:
+      // there is no other way to learn which sheet the request addresses. It reads `meta_views` and
+      // never a sheet row, so it says nothing about the three sheet states the gate hides. The
+      // sheetId+viewId PAIRING check is deliberately deferred to AFTER the gate — see below.
+      //
+      // #5946 — this one call is DELIBERATELY NOT wrapped in `orRefuseSheetViewMismatch`, and is the
+      // single entry of that wrapper's allow-list (RAW_RESOLVER_ALLOW_LIST in
+      // tests/unit/multitable-sheet-view-mismatch-refusal.test.ts). Two reasons, both load-bearing:
+      //   * it passes `sheetId: null`, and `resolveMetaSheetId` throws ConflictError only on the
+      //     `view.sheetId !== sheetId` comparison, which is unreachable when there is no sheetId to
+      //     compare against — there is no refusal here to improve;
+      //   * wrapping it would put a 404 refusal IN FRONT of the #5936 authority gate below, handing
+      //     a caller with no capability a way to tell an existing foreign view from a missing one
+      //     and scan a held viewId against candidate sheet ids. That is the exact door #5948 closed.
+      if (!resolvedSheetId && viewId) {
         const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
-          sheetId: resolvedSheetId,
-          viewId: viewId || undefined,
+          sheetId: null,
+          viewId,
         })
         resolvedSheetId = resolved.sheetId
+      }
+
+      // #5936 — AUTHORITY BEFORE EXISTENCE, the #5839 B-series order, on the one univer-meta handler
+      // the closure guard could not see. The aliased sheet-row read below filters `s.deleted_at IS
+      // NULL` and used to answer `404 … Sheet not found: <id>` BEFORE this handler's first
+      // `sendForbidden` (which sits after the base-wide sheet-list load), so a signed-in caller
+      // /context was going to refuse anyway learned which of three things a sheet id was — live
+      // (403), soft-deleted (404) or never real (404) — with the id echoed back. The guard's
+      // EXISTENCE_PROBE recognised only the single-line `FROM meta_sheets WHERE id = $1 AND
+      // deleted_at IS NULL` form, so this handler was silently absent from its ledger; the probe now
+      // recognises the aliased, multi-line form too.
+      //
+      // ORDER ONLY — this gate NARROWS nothing and WIDENS nothing:
+      //   * the 403 predicate is the SAME `canReadWithSheetGrant(baseCapabilities, scope, isAdmin)`
+      //     the readable-rows filter below applies, evaluated against THIS sheet's scope, so every
+      //     caller that reached 200 before still reaches it;
+      //   * the membership check further down (`readableSheetRows.some(...)`, which additionally
+      //     requires the sheet to be listed under its base and not to be a hidden system sheet) is
+      //     untouched and still runs — this gate stands in FRONT of it, never instead of it.
+      // Deliberately NOT gated on `resolveSheetCapabilitiesForAccess`'s own `capabilities.canRead`:
+      // that additionally applies the approval-/e-learning-projection fences, which /context has
+      // never applied. That is a SEPARATE, separately-tracked defect (pinned today as a VACUOUS
+      // control in tests/integration/approval-projection-key-parity.db.test.ts); closing it here
+      // would be an unrelated behaviour change riding along inside an ordering fix.
+      //
+      // COST, disclosed rather than discovered: this is the Workbench's main load path, and the gate
+      // adds 2 DB round trips for an admin (liveness + this sheet's scope map) and 3 for a non-admin
+      // (+ the approval-projection membership lookup). One of them — loadSheetPermissionScopeMap for
+      // THIS sheet — is issued again ~20 lines below with the same parameters, where the map is
+      // loaded for the whole base sheet list. Seeding that later map from `sheetScope` would remove
+      // the duplicate, but it would also change the parameters of a query sibling specs assert on;
+      // left as a named residual rather than folded into an ordering fix.
+      if (resolvedSheetId) {
+        const { sheetScope, sheetLiveness } = await resolveSheetCapabilitiesForAccess(
+          pool.query.bind(pool),
+          resolvedSheetId,
+          access,
+        )
+        if (!canReadWithSheetGrant(baseCapabilities, sheetScope, access.isAdminRole)) return sendForbidden(res)
+        if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      }
+
+      // #5936 (refutation round) — the sheetId+viewId PAIRING check, now BEHIND the gate. It used to
+      // run with the resolution above, and `resolveMetaSheetId` throws ConflictError when the view
+      // EXISTS but belongs to another sheet; this handler's catch maps that to 500. So a caller with
+      // no capability at all could tell an existing foreign view (500) from a non-existent one (403),
+      // and scan a held viewId against candidate sheet ids for the view→sheet binding — a
+      // pre-authority door of the same family as the row read below, on the same handler. Run here,
+      // every caller the gate refuses gets the SAME 403 whatever the viewId is, and `meta_views` is
+      // not even consulted for them.
+      //
+      // #5946 closes the residual #5948 named on its last line: a caller that PASSES the gate used
+      // to see the ConflictError mapped to 500 with the handler's generic body. It now answers the
+      // same values-free absent-sheet 404 the other nine routes answer. The ORDER above is
+      // untouched — this refusal still sits BEHIND the gate, so the refused caller's answer is
+      // byte-identical whatever the viewId is, and `meta_views` is still not consulted for them.
+      if (sheetId && viewId) {
+        const paired = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, { sheetId, viewId }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!paired) return
+        // The pairing is confirmed, not re-derived: `resolvedSheetId` is already `sheetId` here.
       }
 
       const sheetRowResult = resolvedSheetId
@@ -8646,7 +8844,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const sheetRow = (sheetRowResult as any).rows?.[0]
       if (resolvedSheetId && !sheetRow) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${resolvedSheetId}` } })
+        // Reachable only if the sheet went away BETWEEN the liveness gate above and this read. The
+        // row read filters `s.deleted_at IS NULL`, so its MISS cannot tell soft-deleted from absent:
+        // re-read liveness (one query, on the race path only) so a sheet that is merely in the
+        // recycle bin still answers SHEET_DELETED and the client keeps the restore affordance that
+        // distinct code exists for (multitable/sheet-liveness.ts). Values-free either way
+        // (multitable/sheet-refusals.ts) — the id echo that made this line the oracle #5936 reports
+        // is gone in both branches.
+        const racedLiveness = await loadSheetLiveness(pool.query.bind(pool), resolvedSheetId)
+        return sendSheetNotLive(res, racedLiveness === 'live' ? 'absent' : racedLiveness)
       }
 
       if (!resolvedBaseId) {
@@ -9191,7 +9397,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // permission-revert execute path holds, so this forward sheet-grant write serializes against a
         // concurrent revert — it cannot interleave between the revert's live-grant re-check and its apply
         // (which would turn a re-checked de-escalation into a net escalation).
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: the SAME statement now also re-reads `deleted_at` and refuses unless the sheet is still
+        // live. The liveness gate above ran on the POOL, before this transaction existed; a soft delete
+        // that committed in between left this row lock FREE, so this transaction took it without waiting
+        // and without seeing the pre-delete row version, and wrote grants onto a dead sheet. The throw
+        // rolls back before the DELETE/INSERT below; the outer catch answers the gate's own 404 body.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT perm_code FROM spreadsheet_permissions
@@ -9266,6 +9478,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
     } catch (err) {
       if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
+      // #5938: the in-transaction liveness re-check (under the row lock) found the sheet gone. Same
+      // values-free body the pre-transaction gate answers, so the window is not an existence oracle.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update sheet permission failed:', err)
@@ -9316,6 +9531,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // D-H1: sheet_config writer (row-level-read-deny). Fence-before-check, then the live column
         // read + UPDATE. Flag-off ⇒ no-op / byte-identical.
         await fenceWriterEntry(query, sheetId)
+        // #5938: this is an ACCESS-CONTROL write (it turns row-level read-deny on or off), and its
+        // liveness gate above ran on the POOL before this transaction existed. A soft delete
+        // committing in that window would simply be overwritten on top of: the UPDATE's `WHERE id`
+        // still matches the deleted row. Lock the row and re-read `deleted_at` in ONE statement
+        // first, so the UPDATE below cannot land on a sheet that is dead at write time. Taken AFTER
+        // the fence, so the lock order (fence → sheet row) is the one every fenced writer uses.
+        await assertSheetLiveForUpdate(query, sheetId)
         const beforeResult = await query('SELECT row_level_read_permissions_enabled AS enabled FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           rowLevelReadPermissionsEnabled: ((beforeResult as any).rows?.[0] as { enabled?: boolean } | undefined)?.enabled === true,
@@ -9342,6 +9564,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
       }
+      // #5938: the in-transaction liveness re-check (under the row lock) refused — same values-free
+      // body this route's own pre-transaction gate answers.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set row-level-read-deny flag failed:', err)
@@ -9401,6 +9626,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // D-H1: sheet_config writer (conditional-read rules). Fence-before-check, then the live
         // column read + UPDATE. Flag-off ⇒ no-op / byte-identical.
         await fenceWriterEntry(query, sheetId)
+        // #5938: same as the row-level-read-deny writer above — an ACCESS-CONTROL write whose gate
+        // ran on the pool. Lock the row and re-read `deleted_at` in one statement before the UPDATE,
+        // which carries no `deleted_at` predicate of its own and would otherwise overwrite the
+        // read-deny rules of a sheet soft-deleted inside the window.
+        await assertSheetLiveForUpdate(query, sheetId)
         const beforeResult = await query('SELECT conditional_read_rules AS rules FROM meta_sheets WHERE id = $1', [sheetId])
         const before = {
           conditionalReadRules: parseConditionalRules(((beforeResult as any).rows?.[0] as { rules?: unknown } | undefined)?.rules).rules,
@@ -9427,6 +9657,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
       }
+      // #5938: in-transaction liveness re-check (under the row lock) refused — same values-free body
+      // as this route's own gate.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] set conditional-rules failed:', err)
@@ -9600,7 +9833,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Never-escalate-under-concurrency (#3389 follow-up): lock the owning sheet row (the SAME lock the
         // permission-revert execute path takes — sheetId is the view's sheet) so this forward view-grant
         // write serializes against a concurrent revert.
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: same statement re-reads `deleted_at` and refuses unless the OWNING sheet is still live —
+        // the lock the pre-transaction gate's verdict relies on is only free of a concurrent soft delete
+        // once it is HELD, so the verdict has to be re-taken here. `meta_view_permissions` rows outlive a
+        // soft-deleted sheet exactly as `spreadsheet_permissions` rows do.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           'SELECT permission FROM meta_view_permissions WHERE view_id = $1 AND subject_type = $2 AND subject_id = $3',
@@ -9648,6 +9886,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       return res.json({ ok: true, data: { viewId, subjectType, subjectId, permission: parsed.data.permission } })
     } catch (err) {
+      // #5938: in-transaction liveness re-check (under the owning sheet's row lock) refused.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update view permission failed:', err)
@@ -9822,7 +10062,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Never-escalate-under-concurrency (#3389 follow-up): take the SAME meta_sheets row lock the
         // permission-revert execute path holds, so this forward field-grant write serializes against a
         // concurrent revert.
-        await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+        //
+        // #5938: same statement re-reads `deleted_at` and refuses unless the sheet is still live. The
+        // pre-transaction gate read liveness on the pool; a soft delete committing between that read and
+        // this lock leaves the lock free, so `field_permissions` writes would land on a dead sheet.
+        await assertSheetLiveForUpdate(query, sheetId)
         const configBatchId = randomUUID()
         const beforeResult = await query(
           `SELECT visible, read_only
@@ -9915,6 +10159,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       })
     } catch (err) {
       if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
+      // #5938: in-transaction liveness re-check (under the sheet row lock) refused.
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update field permission failed:', err)
@@ -10180,6 +10426,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // #5807 — the People-sheet quantity bound applies HERE too, and not as a history nicety: this route
+      // reconstructs the state of the CURRENTLY-LIVE records, so `asOf=<now>` reproduces the LIVE roster
+      // (full `data`, 200 rows a page, `offset` with no upper bound) and `total` is the exact headcount
+      // the window exists to withhold. It was named as a GAP in the first cut and is closed here with the
+      // same ruler as /view: the first window of rows, `total` clamped to it, nothing past it. Resolved
+      // AFTER the 401/403/404 above, so it adds no oracle. Ordinary sheets: byte-identical to before.
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+
       // Scope to CURRENTLY-LIVE records (deleted-since-T are out of v1).
       const liveIds = ((await pool.query('SELECT id FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: unknown }>).map((r) => String(r.id))
       if (liveIds.length === 0) return res.json({ ok: true, data: { records: [], total: 0, asOf: asOfIso } })
@@ -10206,7 +10460,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       visible.sort((a, b) => (a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0)) // stable pagination
       const total = visible.length // post-permission-filter total (LOCK-3)
-      return res.json({ ok: true, data: { records: visible.slice(offset, offset + limit), total, asOf: asOfIso } })
+      // #5807 CHOKEPOINT: truncate the page to the window (an offset past it yields an empty page, never
+      // row 51) and clamp the reported `total`, which would otherwise re-publish the roster's exact
+      // cardinality. `boundEnumeratedRows`/`boundPageMeta` are the identity for every ordinary sheet.
+      const boundedRecords = boundEnumeratedRows(readBound, visible.slice(offset, offset + limit), offset)
+      const boundedTotal = boundPageMeta(readBound, { offset, limit, total, hasMore: false }).total
+      return res.json({ ok: true, data: { records: boundedRecords, total: boundedTotal, asOf: asOfIso } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -10869,7 +11128,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // field permissions) now take this SAME lock (#3389 follow-up), so the serialization is two-sided.
           // (One remaining un-serialized writer: the legacy /api/spreadsheets/:id/permissions grant|revoke route —
           // see the dev-verification honest gaps for the retire-or-lock follow-up.)
-          await query('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
+          //
+          // #5938: the lock statement ALSO re-reads `deleted_at` and refuses unless the sheet is still live. The
+          // route's liveness gate ran on the pool before this transaction opened; a soft delete committing in
+          // between leaves the lock free, so the de-escalation would apply to a sheet that no longer exists —
+          // narrowing, invisibly, what a later restore brings back. The throw rolls back before
+          // `applyPermissionDeEscalation`; the outer catch answers the gate's own values-free 404.
+          await assertSheetLiveForUpdate(query, sheetId)
           const live = await loadLivePermissionGrant(query, parsedPerm.scope, parsedPerm.parts, sheetId)
           const verdict = verifyConfigPermissionRevertPreviewIdentity(previewToken, { sheetId, revisionId, entityId: rev.entity_id, currentGrantHash: hashPermissionGrant(live), actorId: access.userId })
           if (!verdict.valid) {
@@ -11038,6 +11303,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
+      // #5938: the permission-revert branch's in-transaction liveness re-check (under the sheet row lock)
+      // found the sheet soft-deleted or gone. Same values-free 404 this route's own pre-transaction
+      // `sheetLiveness !== 'live'` gate answers (anchored on the identifier, not a line number: this PR's
+      // own insertions moved that gate), so the TOCTOU window cannot be told apart from "it was already
+      // deleted when you asked".
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       // O-2 X2: this route's applyPermissionDeEscalation writes field_permissions and
       // spreadsheet_permissions, BOTH of which carry a recovery-authority trigger that is ARMED from
       // ladder rung L1 onward. Without this line a 40001 raised under a held exclusive lease fell
@@ -13000,10 +13271,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         })
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
-        const sheet = await loadSheetRow(query, sheetId)
-        if (!sheet) {
-          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
-        }
+        // ORDER (#5839): AUTHORITY FIRST, then existence. The sheet-row probe used to sit here, ahead
+        // of the 403, and answered 404 with the id echoed back — so a signed-in caller this route then
+        // refused could tell a live sheet from a soft-deleted or absent one just by reading the status.
+        // Nothing the capability resolver consumes reads `meta_sheets.deleted_at`, so a caller without
+        // canManageSheetAccess now gets the SAME 403 in all three states.
+        // SCOPE, so this is not read as more than it is: the resolver does read `meta_sheets` in ONE
+        // place — its own approval-projection fence (`loadApprovalProjectionSheetIds`,
+        // multitable/permission-service.ts: `id = ANY($1::text[]) AND base_id = $2`, deliberately with
+        // no `deleted_at` filter). For an id inside that admin-only base the fence hits for a live AND
+        // for a soft-deleted sheet and strips canManageSheetAccess, so PRESENT (403) is still
+        // distinguishable from ABSENT (404 below) there, at one extra round trip. Strictly narrower
+        // than the probe removed here (which split live from soft-deleted on every base); pinned as a
+        // named RESIDUAL in tests/unit/multitable-sheet-existence-oracle-b4.test.ts.
         const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
           query,
           sheetId,
@@ -13012,6 +13292,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (!capabilities.canManageSheetAccess) {
           return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
         }
+
+        // Liveness AFTER the 403, and it is this route's own check: the resolver above returns
+        // { isAdminRole, capabilities, permissions } — no liveness — so dropping the probe without
+        // this would let a manager write grants onto a soft-deleted sheet (the record rows outlive it).
+        // One PK lookup, inside the transaction, under the advisory lock already held.
+        const sheetLiveness = await loadSheetLiveness(query, sheetId)
+        if (sheetLiveness !== 'live') return sheetNotLiveOutcome(sheetLiveness)
 
         const recordCheck = await query('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2', [recordId, sheetId])
         if (recordCheck.rows.length === 0) {
@@ -13097,10 +13384,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         })
         await acquireRecordLinkRowAuthLockOnQuery(query, sheetId, recordId)
 
-        const sheet = await loadSheetRow(query, sheetId)
-        if (!sheet) {
-          return { kind: 'error', status: 404, code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` }
-        }
+        // ORDER (#5839): same as PUT — authority first, then existence. The pre-403 sheet-row probe
+        // told a caller this route was about to refuse whether the sheet was live, soft-deleted or
+        // never there; nothing the capability inputs consume reads `meta_sheets.deleted_at`, so a
+        // caller without canManageSheetAccess now gets the same 403 in all three states. Same SCOPE
+        // caveat as the PUT twin above: the resolver's approval-projection fence DOES read
+        // `meta_sheets` by id (multitable/permission-service.ts, no `deleted_at` filter), so inside
+        // that admin-only base present stays distinguishable from absent. Pinned as a RESIDUAL in
+        // tests/unit/multitable-sheet-existence-oracle-b4.test.ts.
         const { capabilities } = await resolveSheetCapabilitiesForUserOnQuery(
           query,
           sheetId,
@@ -13109,6 +13400,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (!capabilities.canManageSheetAccess) {
           return { kind: 'error', status: 403, code: 'FORBIDDEN', message: 'Insufficient permissions' }
         }
+
+        // Liveness AFTER the 403 — the resolver has none to give, and a revoke on a deleted sheet
+        // must still refuse rather than quietly edit a sheet that no longer exists.
+        const sheetLiveness = await loadSheetLiveness(query, sheetId)
+        if (sheetLiveness !== 'live') return sheetNotLiveOutcome(sheetLiveness)
 
         const result = await query(
           'DELETE FROM record_permissions WHERE id = $1 AND sheet_id = $2 AND record_id = $3',
@@ -13148,10 +13444,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -13197,10 +13489,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        throw new NotFoundError(`Sheet not found: ${sheetId}`)
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -13339,10 +13627,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const refererContext = extractMultitableRecordCreateContextFromUrl(
         req.get('referer') ?? req.get('referrer'),
       )
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId ?? refererContext.sheetId,
         viewId: parsed.data.viewId ?? refererContext.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
       const widgets = parsed.data.widgets.map((widget) => serializeDashboardWidget(widget as DashboardWidgetInput))
@@ -13353,6 +13643,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — the dashboard is `view-aggregate`'s twin: a group-by widget over the People system
+      // sheet's `Name` column IS the roster, one bucket per person, and a clamped bucket list is a wrong
+      // aggregate the same way a clamped COUNT is. Refusing only `view-aggregate` would have closed the
+      // front door and left this side door open, so both answer the SAME values-free 403, here too after
+      // the 401/403/404 so it adds no oracle.
+      if (refuseBoundedSheetBulkRead(res, await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId))) return
 
       const fields = await loadSheetFields(pool as unknown as { query: QueryFn }, sheetId)
       const fieldScopeMap = access.userId
@@ -13999,10 +14295,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -14123,10 +14415,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageViews) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -14789,10 +15077,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
@@ -15443,11 +15727,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       try {
         const pool = poolManager.get()
-        const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-        if (!sheet) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-        }
-
         const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
         if (!access.userId) {
           return res.status(401).json({ error: 'Authentication required' })
@@ -15590,6 +15869,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       if (!capabilities.canRead || !capabilities.canExport) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — an export of the People system sheet is the whole roster in one file, and a TRUNCATED
+      // export is worse than none (the file claims to be the sheet). Refuse instead, with the shared
+      // values-free 403: identical body to the authority refusal above, so it echoes no sheet id and
+      // adds no oracle (a caller without read/export already got that 403 one line earlier). Covers csv
+      // too — the format branch is far below and both share this pipeline.
+      if (refuseBoundedSheetBulkRead(res, await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId))) return
 
       // #5839: BOTH existence probes — the sheet row and the view row — now run AFTER the 401/403/404
       // above. They used to run first, and each answered 404 echoing the requested id, so a caller this
@@ -15897,23 +16182,30 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     try {
       const pool = poolManager.get()
-      const sheet = await loadSheetRowShared(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
-      let view: SharedMultitableViewConfig | null = null
-      if (viewId) {
-        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
-        if (!view || view.sheetId !== sheetId) {
-          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
-        }
-      }
       const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — an aggregate over the People system sheet cannot be truncated without lying (a clamped
+      // COUNT/SUM is a wrong number, and this route hard-fails rather than truncate by design), and its
+      // footer count is exactly the roster cardinality the window withholds. Same values-free 403.
+      if (refuseBoundedSheetBulkRead(res, await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId))) return
+
+      // #5839 B2 (optional move): the view lookup is a meta_views probe outside the sheet-existence
+      // guard's scope, so it moved to AFTER the authority/liveness checks above (it was previously
+      // between the deleted sheet-row probe and the 403, which would have kept it as an existence
+      // oracle for `viewId` even though the sheet oracle it originally sat next to is now closed).
+      // Its only real consumer (view?.hiddenFieldIds) is further down, so nothing between the old and
+      // new position dereferences `view`. Message is values-free (no id echoed back).
+      let view: SharedMultitableViewConfig | null = null
+      if (viewId) {
+        view = await tryResolveViewShared(pool.query.bind(pool), viewId)
+        if (!view || view.sheetId !== sheetId) {
+          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View not found' } })
+        }
+      }
 
       // max-rows guard: COUNT first, HARD-FAIL (413) with total — never truncate (aggregates must be exact)
       const maxRows = Number(process.env.MULTITABLE_AGGREGATE_MAX_ROWS || '10000')
@@ -16246,15 +16538,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const search = normalizeSearchTerm(req.query.search)
     const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined
     const offsetParam = typeof req.query.offset === 'string' ? Number.parseInt(req.query.offset, 10) : undefined
-    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam!, 1), 5000) : undefined
-    const offset = Number.isFinite(offsetParam) ? Math.max(offsetParam!, 0) : 0
+    // #5807: `let`, not `const` — a bounded (People) sheet re-clamps both to its window right after the
+    // read gate below, BEFORE any record query runs. Ordinary sheets keep these values untouched.
+    let limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam!, 1), 5000) : undefined
+    let offset = Number.isFinite(offsetParam) ? Math.max(offsetParam!, 0) : 0
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: sheetIdParam,
         viewId: viewIdParam,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const viewConfig = resolved.view
       const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
@@ -16272,6 +16568,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // authority entirely. Absent means "create it"; deleted means "it was deliberately removed".
       const seedMayMaterialize = seed && sheetLiveness === 'absent'
       if (!seedMayMaterialize && sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — People system sheet: bound the QUANTITY, never the authority. Resolved AFTER the 401/403/
+      // 404 above (it must add no oracle) and BEFORE every record query below, so the SQL itself asks for
+      // at most the window. `readBound.bounded` is false for every ordinary sheet and every branch below
+      // is then byte-identical to before.
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+      const boundedWindow = boundReadWindow(readBound, { limit, offset })
+      limit = boundedWindow.limit
+      offset = boundedWindow.offset
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
       if (seed) {
@@ -16573,6 +16877,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
       }
 
+      // #5807 CHOKEPOINT — every branch above (SQL fast path, in-memory filter/sort, plain page, and the
+      // `limit`-less "whole sheet" branch) lands here, so a bounded sheet cannot answer past its window
+      // even if one branch missed the pre-clamp. Placed BEFORE the link/attachment/person summaries and
+      // the record-permission filter, so nothing downstream is ever built for a dropped row.
+      if (readBound.bounded) {
+        rows = boundEnumeratedRows(readBound, rows, offset)
+        // The window is never advertised as continuable, and `total` is clamped to it (an honest total
+        // would re-publish the roster's cardinality). A `limit`-less request had no `page` at all; it
+        // gets one now, as the ONLY signal that the answer was truncated.
+        page = boundPageMeta(readBound, page ?? { offset, limit: limit ?? readBound.maxItems, total: rows.length, hasMore: false })
+      }
+
       const linkValuesByRecord = await loadLinkValuesByRecord(
         pool.query.bind(pool),
         rows.map((r) => r.id),
@@ -16752,9 +17068,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] view failed:', err)
@@ -16770,10 +17088,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: sheetIdParam,
         viewId: viewIdParam,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
@@ -16973,10 +17293,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
 
-      const sheet = await loadSheetRow(pool.query.bind(pool), view.sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${view.sheetId}` } })
-      }
       const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), view.sheetId)
       const publicTokenParam = typeof parsed.data.publicToken === 'string'
         ? parsed.data.publicToken.trim()
@@ -17014,7 +17330,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // AUTHZ-FIRST: liveness is checked only AFTER this route has decided the caller may see the
       // sheet at all (public-token access OR canRead). An anonymous caller with no valid token must
       // get the ordinary refusal, never a 404 telling them the sheet was deleted.
+      //
+      // #5839 B5: the SHEET ROW probe now sits BELOW this line too. It used to run before any
+      // refusal and answer `Sheet not found: <id>`, so a caller this route was about to turn away
+      // could still tell a live sheet from an absent one. Nothing above needs the row:
+      // resolveSheetCapabilities takes the `view.sheetId` STRING, and `sheet.baseId` / `sheet.id`
+      // are first read by the response's commentsScope. What remains above is the VIEW row probe —
+      // the view is an AUTHORISATION INPUT here (isPublicFormAccessAllowed / the protected-form
+      // evaluation both consume it), so it cannot move; that is the named residual, issue #5908.
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // Loaded here, after authority and liveness. The 404 below is RACE-ONLY — a delete committing
+      // between the liveness read above and this one — and values-free (never echoes an id).
+      const sheet = await loadSheetRow(pool.query.bind(pool), view.sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
 
       const fields = await loadFieldsForSheet(pool.query.bind(pool), view.sheetId)
       const fieldById = buildFieldMutationGuardMap(fields)
@@ -17629,10 +17960,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -17645,16 +17978,37 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       sheetId = String(recordRow.sheet_id)
 
-      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
-      if (!sheet) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5839 B5: the SHEET ROW probe MOVED here, below the 401/403/liveness triple. It used to run
+      // above them and answer `Sheet not found: <sheetId>`, which told a caller this route was about
+      // to refuse whether the sheet was live, soft-deleted or absent. The row itself is still needed
+      // (`sheet.baseId` / `sheet.id` build the response's commentsScope), so it is moved, not
+      // dropped; its 404 is now RACE-ONLY and values-free.
+      //
+      // What deliberately stays ABOVE, both pre-existing and both pinned by issue #5911:
+      //  1. the RECORD row probe. Without `sheetId`/`viewId` in the body it is the only way to learn
+      //     which sheet is being addressed, and it is not a SHEET oracle — with a body `sheetId`, an
+      //     ABSENT sheet yields zero rows and the byte-identical `Record not found: <recordId>` that a
+      //     LIVE sheet returns for a recordId not on it.
+      //  2. `resolveMetaSheetId` above it, when the body carries `sheetId`/`viewId`. A viewId on a
+      //     DIFFERENT sheet throws `ConflictError`; since #5946 the call goes through
+      //     `orRefuseSheetViewMismatch`, which answers it with the values-free absent-sheet 404
+      //     instead of the generic 500 this used to reach. Still a pre-authority answer, and still a
+      //     VIEW-side difference from the 404 an unknown viewId gets: it turns on
+      //     `view.sheetId !== sheetId`, never on whether the named sheet is live, soft-deleted or
+      //     absent, so the three sheet states stay indistinguishable here (pinned by the
+      //     `resolveMetaSheetId` cell in tests/unit/multitable-sheet-existence-oracle-b5.test.ts and
+      //     by tests/unit/multitable-sheet-view-mismatch-refusal.test.ts).
+      const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
+      }
 
       // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4): Layer-3
       // per-subject field-WRITE gate, parity with grid `/patch` (`buildRecordPatchContext` is the SAME
@@ -17667,7 +18021,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // rejected ones back leaks nothing beyond what the caller already sent — same posture as `/patch`.
       const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
       if (!patchContext) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        // #5839 B5: values-free. This branch already sits behind the 401/403/liveness triple, but the
+        // body echoed the resolved sheet id back, which is exactly the value the move above removes.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: SHEET_NOT_FOUND_MESSAGE } })
       }
       const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
         isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
@@ -17866,6 +18222,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // #5807 — People system sheet quantity bound, resolved after the 401/403/404 (no oracle). This
+      // reader is CURSOR-paginated: the window is the FIRST page and any cursor is a walk past it, so a
+      // cursor on a bounded sheet answers an empty page (fail-closed — the cursor is opaque here).
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+      const boundedCursor = boundCursorRead(readBound, { limit, cursor: cursor || undefined })
+
       // Field-read gate: layer-2 (property.hidden) ∧ layer-3 (field_permissions.visible) — the #2015
       // composite shared with GET /view. hiddenFieldIds:[] keeps layer-1 a display-only concern (this list
       // endpoint takes a sheetId, not a viewId, so layer-1 does not apply here). access.userId is
@@ -17895,14 +18257,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const sort = sortField ? { fieldId: sortField, direction: sortDir } : undefined
-      const result: CursorPaginatedResult<LoadedMultitableRecord> = await queryRecordsWithCursor({
-        query: pool.query.bind(pool),
-        sheetId,
-        cursor: cursor || undefined,
-        limit,
-        sort,
-        filter,
-      })
+      // #5807: `skip` (a cursor on a bounded sheet) answers the empty page WITHOUT reading records at all.
+      const result: CursorPaginatedResult<LoadedMultitableRecord> = boundedCursor.skip
+        ? { items: [], nextCursor: null, hasMore: false }
+        : await queryRecordsWithCursor({
+          query: pool.query.bind(pool),
+          sheetId,
+          cursor: cursor || undefined,
+          limit: boundedCursor.limit,
+          sort,
+          filter,
+        })
 
       // Record-permission filter (parity with GET /view): drop records the subject cannot read when
       // record-level assignments exist. Read is grant-additive today, so this is mostly defense-in-depth,
@@ -17927,10 +18292,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
       }
 
+      // #5807 CHOKEPOINT: truncate to the window and hand back NO continuation — a bounded sheet never
+      // offers a `nextCursor`, so the only way to ask for more is a cursor this route now refuses.
+      const boundedItems = boundEnumeratedRows(readBound, items, 0)
       const body = {
         ok: true,
         data: {
-          records: items.map((r) => ({
+          records: boundedItems.map((r) => ({
             id: r.id,
             version: r.version,
             data: filterRecordDataByFieldIds(r.data, allowedFieldIds),
@@ -17939,8 +18307,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             lockedBy: r.lockedBy,
             lockedAt: r.lockedAt,
           })),
-          nextCursor: result.nextCursor,
-          hasMore: result.hasMore,
+          nextCursor: readBound.bounded ? null : result.nextCursor,
+          hasMore: readBound.bounded ? false : result.hasMore,
         },
       }
       return res.json(body)
@@ -17971,10 +18339,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       let sheetId = sheetIdParam
       let viewConfig: UniverMetaViewConfig | null = null
       if (sheetIdParam || viewIdParam) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: sheetIdParam,
           viewId: viewIdParam,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
         viewConfig = resolved.view
       }
@@ -18124,9 +18494,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
       }
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] record context failed:', err)
@@ -18161,18 +18533,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-
-      // Verify sheet exists
-      const sheetRes = await pool.query('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
-      }
       const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
         return res.status(401).json({ error: 'Authentication required' })
       }
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+
+      // #5807 — People system sheet quantity bound (after the 401/403/404, no oracle). This route is the
+      // one that MUST also bound `displayMap`: the loader fills it from every matched record regardless
+      // of `limit`, so clamping the page alone would still ship the whole roster's display values.
+      const readBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), sheetId)
+      const boundedWindow = boundReadWindow(readBound, { limit, offset })
 
       const baseAllowedFieldIds = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
       // §2a.3 DISPLAY-PROJECTION chokepoint (resolveDisplayFieldTaint) — C2: /records-summary projects
@@ -18201,21 +18573,30 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId)
         : undefined
-      const summary = await loadRecordSummaries(pool.query.bind(pool), sheetId, {
-        displayFieldId,
-        allowedFieldIds,
-        search,
-        limit,
-        offset,
-        ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
-      })
+      // #5807: a request that STARTS past the window can only answer the empty page, and
+      // `loadRecordSummaries` reads + summarizes every row of the sheet before it slices — so skip the
+      // read instead of doing that work for an answer that is thrown away. Same shape the chokepoint
+      // below would have produced. Ordinary sheets never take this branch (`beyondWindow` is false).
+      const summary: RecordSummaryPage = boundedWindow.beyondWindow
+        ? { records: [], displayMap: {}, page: { offset: boundedWindow.offset, limit: boundedWindow.limit ?? readBound.maxItems, total: 0, hasMore: false }, displayFieldId: null }
+        : await loadRecordSummaries(pool.query.bind(pool), sheetId, {
+          displayFieldId,
+          allowedFieldIds,
+          search,
+          limit: boundedWindow.limit ?? limit,
+          offset: boundedWindow.offset,
+          ...(summaryDeniedIds && summaryDeniedIds.size > 0 ? { excludeRecordIds: summaryDeniedIds } : {}),
+        })
+      // #5807 CHOKEPOINT: truncates `records`, REBUILDS `displayMap` from the survivors, clamps
+      // `page.total` to the window and never says `hasMore`. Identity for every ordinary sheet.
+      const boundedSummary = boundRecordSummaryPage(readBound, summary)
 
       return res.json({
         ok: true,
         data: {
-          records: summary.records,
-          displayMap: summary.displayMap,
-          page: summary.page,
+          records: boundedSummary.records,
+          displayMap: boundedSummary.displayMap,
+          page: boundedSummary.page,
         },
       })
     } catch (err) {
@@ -18280,6 +18661,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const { access: foreignAccess, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), linkConfig.foreignSheetId)
       if (!capabilities.canRead) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // #5807 — the bound follows the FOREIGN sheet (the one being enumerated), not the source sheet: the
+      // legacy person field is a link INTO the People sheet, so this picker is one of its readers. The
+      // already-`selected` summaries below are the caller's own record's values, not an enumeration, and
+      // stay untouched — that is what keeps the person chip rendering.
+      const foreignReadBound = await resolvePeopleSheetReadBound(pool.query.bind(pool), linkConfig.foreignSheetId)
+      const foreignBoundedWindow = boundReadWindow(foreignReadBound, { limit, offset })
 
       // ②b §3.2 Sink B-2 / decision (d) — the EXPLICIT cross-base candidate pull. Unlike the inline
       // summary sinks (silent mask), this endpoint deliberately enumerates the foreign sheet's records,
@@ -18346,13 +18733,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), linkConfig.foreignSheetId))
         ? await loadDeniedRecordIds(pool.query.bind(pool), linkConfig.foreignSheetId, foreignAccess.userId)
         : undefined
-      const summary = await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
-        search,
-        limit,
-        offset,
-        allowedFieldIds: foreignAllowedFieldIds,
-        ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
-      })
+      // #5807: same short-circuit as /records-summary — past the window there is nothing to answer, and
+      // the loader would otherwise read and summarize the whole foreign sheet to produce it.
+      const summary: RecordSummaryPage = foreignBoundedWindow.beyondWindow
+        ? { records: [], displayMap: {}, page: { offset: foreignBoundedWindow.offset, limit: foreignBoundedWindow.limit ?? foreignReadBound.maxItems, total: 0, hasMore: false }, displayFieldId: null }
+        : await loadRecordSummaries(pool.query.bind(pool), linkConfig.foreignSheetId, {
+          search,
+          limit: foreignBoundedWindow.limit ?? limit,
+          offset: foreignBoundedWindow.offset,
+          allowedFieldIds: foreignAllowedFieldIds,
+          ...(foreignDeniedIds && foreignDeniedIds.size > 0 ? { excludeRecordIds: foreignDeniedIds } : {}),
+        })
+      // #5807 CHOKEPOINT (same helper as /records-summary, same ruler).
+      const boundedSummary = boundRecordSummaryPage(foreignReadBound, summary)
 
       return res.json({
         ok: true,
@@ -18364,8 +18757,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           },
           targetSheet,
           selected,
-          records: summary.records,
-          page: summary.page,
+          records: boundedSummary.records,
+          page: boundedSummary.page,
         },
       })
     } catch (err) {
@@ -18795,10 +19188,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId,
         viewId: parsed.data.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
 
       const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
@@ -18920,10 +19315,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -19289,10 +19686,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const pool = poolManager.get()
       let sheetId = parsed.data.sheetId
       if (parsed.data.sheetId || parsed.data.viewId) {
-        const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+        const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
           sheetId: parsed.data.sheetId,
           viewId: parsed.data.viewId,
-        })
+        }))
+        // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+        if (!resolved) return
         sheetId = resolved.sheetId
       }
 
@@ -19689,10 +20088,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const resolved = await resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
+      const resolved = await orRefuseSheetViewMismatch(res, resolveMetaSheetId(pool as unknown as { query: QueryFn }, {
         sheetId: parsed.data.sheetId,
         viewId: parsed.data.viewId,
-      })
+      }))
+      // null = the view names another sheet; the values-free 404 is already on the wire (#5946).
+      if (!resolved) return
       const sheetId = resolved.sheetId
       const { access, capabilities, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) {
@@ -19848,9 +20249,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // materialization refusals never reach here — they are caught + skipped at their sites.)
       const writerFenceResponse = sendWriterFenceConflict(res, err)
       if (writerFenceResponse) return writerFenceResponse
-      if (err instanceof ConflictError) {
-        return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
-      }
+      // #5946: the `409 CONFLICT` + `err.message` branch that stood here is GONE. Its only feeder
+      // was the view/sheet mismatch of `resolveMetaSheetId`, which `orRefuseSheetViewMismatch`
+      // answers above with the values-free 404 — and the message this branch echoed pasted the
+      // requested viewId AND sheetId back onto the wire. No other `ConflictError` is thrown under
+      // this try (the only other throw site is the POST /sheets create-collision, its own handler).
       if (err instanceof VersionConflictError || err instanceof ServiceVersionConflictError) {
         return res.status(409).json({
           ok: false,

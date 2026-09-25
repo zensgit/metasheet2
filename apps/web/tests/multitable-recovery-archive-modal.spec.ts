@@ -82,8 +82,8 @@ async function confirmManual() {
 
 describe('ManualArchiveCapture', () => {
   it.each([
-    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Manual archives containing attachments are not yet available; this archive is incomplete.'],
-    [true, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', '含附件的手动归档尚不可用；本次归档未完成。'],
+    [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Attachment content or storage configuration is unavailable; this archive is incomplete.'],
+    [true, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', '附件内容或存储配置不可用；本次归档未完成。'],
     [false, 403, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE', 'Your current identity cannot archive this table'],
     [false, 503, 'RECOVERY_ARCHIVE_MANUAL_ATTACHMENT_UNAVAILABLE_private', 'Archive unavailable; check configuration and retry'],
   ])('uses exact safe manual diagnostics (%s/%s/%s)', async (isZh, status, code, expected) => {
@@ -536,6 +536,58 @@ describe('RecoveryArchiveModal', () => {
     expect(readJob).not.toHaveBeenCalled()
   })
 
+  it.each(['success', 'failure'])('does not restart job polling after unmount on a late read %s', async (outcome) => {
+    vi.useFakeTimers()
+    let resolveRead!: (snapshot: RecoveryArchiveJobSnapshot) => void
+    let rejectRead!: (error: unknown) => void
+    const readJob = vi.fn(() => new Promise<RecoveryArchiveJobSnapshot>((resolve, reject) => {
+      resolveRead = resolve
+      rejectRead = reject
+    }))
+    const props = mount({
+      listJobs: vi.fn(async () => ({ entries: [jobSnapshot('planned')], nextCursor: null })),
+      readJob,
+    })
+    await flush()
+    ;(q('[data-test="archive-recovery-job-refresh"]') as HTMLButtonElement).click()
+    await flush()
+    expect(readJob).toHaveBeenCalledTimes(1)
+    props.unmount()
+    if (outcome === 'success') resolveRead(jobSnapshot('applying', '2500'))
+    else rejectRead(new Error('private-provider-error'))
+    await flush()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(readJob).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(props.cancelJob).not.toHaveBeenCalled()
+  })
+
+  it('does not restart job polling when async acceptance arrives after unmount', async () => {
+    vi.useFakeTimers()
+    let resolveAccept!: (snapshot: RecoveryArchiveJobSnapshot) => void
+    const acceptJob = vi.fn(() => new Promise<RecoveryArchiveJobSnapshot>((resolve) => { resolveAccept = resolve }))
+    const props = mount({ previewArchive: vi.fn(async () => asyncPreview()), acceptJob })
+    await flush()
+    ;(q(`[data-test="archive-recovery-entry-${generationId}"]`) as HTMLButtonElement).click()
+    await flush()
+    ;(q('[data-test="archive-recovery-request-preview"]') as HTMLButtonElement).click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    ;(q('[data-test="archive-recovery-execute"]') as HTMLButtonElement).click()
+    await flush()
+    expect(acceptJob).toHaveBeenCalledTimes(1)
+    props.unmount()
+    resolveAccept(jobSnapshot('planned'))
+    await flush()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(props.readJob).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(props.cancelJob).not.toHaveBeenCalled()
+  })
+
   it('executes only a server-executable whole-sheet preview after explicit confirmation', async () => {
     const props = mount()
     await flush()
@@ -642,6 +694,88 @@ describe('RecoveryArchiveModal', () => {
 
     expect(props.onExecuted).not.toHaveBeenCalled()
     expect(q('[data-test="archive-recovery-result"]')).toBeFalsy()
+  })
+
+  it.each(['before-completion', 'after-completion'])('retains synchronous restore results when reopening %s', async timing => {
+    let finish!: (result: RecoveryArchiveExecuteResult) => void
+    const ctx = mount({ executeArchive: vi.fn(() => new Promise<RecoveryArchiveExecuteResult>(resolve => { finish = resolve })) })
+    await flush()
+    q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+    await flush()
+    q('[data-test="archive-recovery-request-preview"]')!.click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    q('[data-test="archive-recovery-execute"]')!.click()
+    await flush()
+    ctx.visible.value = false
+    await flush()
+    if (timing === 'after-completion') { finish(executeResult); await flush() }
+    ctx.visible.value = true
+    await flush()
+    if (timing === 'before-completion') { finish(executeResult); await flush() }
+    expect(q('[data-test="archive-recovery-result"]')).not.toBeNull()
+    expect(ctx.listCatalog).toHaveBeenCalledTimes(1)
+    expect(ctx.onExecuted).toHaveBeenCalledTimes(1)
+  })
+
+  it('discovers a new durable job on reopen despite a retained synchronous result', async () => {
+    const listJobs = vi.fn().mockResolvedValueOnce({ entries: [], nextCursor: null })
+      .mockResolvedValue({ entries: [jobSnapshot('paused_retryable')], nextCursor: null })
+    const ctx = mount({ listJobs })
+    await flush()
+    q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+    await flush()
+    q('[data-test="archive-recovery-request-preview"]')!.click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    q('[data-test="archive-recovery-execute"]')!.click()
+    await flush()
+    expect(q('[data-test="archive-recovery-result"]')).not.toBeNull()
+    ctx.visible.value = false
+    await flush()
+    ctx.visible.value = true
+    await flush()
+    expect(listJobs).toHaveBeenCalledTimes(2)
+    expect(q('[data-test="archive-recovery-job-state"]')?.textContent).toBe('Paused and resumable')
+    expect(ctx.listCatalog).toHaveBeenCalledTimes(1)
+    expect(ctx.acceptJob).not.toHaveBeenCalled()
+    expect(ctx.resumeJob).not.toHaveBeenCalled()
+  })
+
+  it('pins the recovery point while a synchronous restore is pending', async () => {
+    const otherId = '11111111-1111-4111-8111-111111111111'
+    let finish!: (result: RecoveryArchiveExecuteResult) => void
+    const ctx = mount({
+      listCatalog: vi.fn(async () => ({ entries: [...catalog.entries, { ...catalog.entries[0], generationId: otherId }], nextCursor: null })),
+      executeArchive: vi.fn(() => new Promise<RecoveryArchiveExecuteResult>(resolve => { finish = resolve })),
+    })
+    await flush()
+    q(`[data-test="archive-recovery-entry-${generationId}"]`)!.click()
+    await flush()
+    q('[data-test="archive-recovery-request-preview"]')!.click()
+    await flush()
+    const confirmation = q('[data-test="archive-recovery-confirm-input"]') as HTMLInputElement
+    confirmation.checked = true
+    confirmation.dispatchEvent(new Event('change'))
+    await flush()
+    q('[data-test="archive-recovery-execute"]')!.click()
+    await flush()
+    const other = q(`[data-test="archive-recovery-entry-${otherId}"]`) as HTMLButtonElement
+    expect(other.disabled).toBe(true)
+    other.dispatchEvent(new Event('click'))
+    await flush()
+    expect(q(`[data-test="archive-recovery-entry-${generationId}"]`)!.classList.contains('archive-recovery__entry--selected')).toBe(true)
+    finish(executeResult)
+    await flush()
+    expect(q('[data-test="archive-recovery-result"]')).not.toBeNull()
+    expect(ctx.executeArchive).toHaveBeenCalledTimes(1)
+    expect(other.disabled).toBe(false)
   })
 
   it('finishes an in-flight synchronous restore after closing and reopening the same sheet', async () => {
@@ -798,7 +932,7 @@ describe('RecoveryArchiveModal', () => {
     expect(q('[data-test="archive-recovery-job-outcome"]')?.textContent).toContain('Only part of the job was applied')
   })
 
-  it.each([[false, 'Attachment recovery is not supported yet'], [true, '当前暂不支持恢复附件']] as const)(
+  it.each([[false, 'current service configuration or selected scope'], [true, '当前服务配置或所选范围']] as const)(
     'explains unsupported attachments without offering execution (Chinese=%s)', async (isZh, expected) => {
       const props = mount({ isZh, previewArchive: vi.fn(async () => ({ ...syncPreview(),
         executable: false, previewIdentity: null, blockedReason: 'unsupported_attachments' })) })

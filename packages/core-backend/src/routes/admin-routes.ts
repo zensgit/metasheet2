@@ -211,15 +211,24 @@ router.post(
  * POST /api/admin/safety/enable
  * Enable SafetyGuard
  */
-router.post('/safety/enable', (req: Request, res: Response) => {
-  const guard = getSafetyGuard();
-  guard.updateConfig({ enabled: true });
-  logger.info('SafetyGuard enabled via admin API', {
-    context: 'AdminRoutes',
-    initiator: req.ip
-  });
-  res.json({ success: true, message: 'SafetyGuard enabled' });
-});
+router.post(
+  '/safety/enable',
+  // SECURITY (#5655): 开关确认层本身是特权操作。本端点原先零中间件；/safety/disable 原先只挂
+  // requireSafetyCheck，而它用的 RESET_METRICS 是 LOW、根本不要确认，于是任何已认证用户
+  // 一次请求就能关掉全局 SafetyGuard（SafetyGuard.checkOperation：disabled 时对一切
+  // allowed:true），从而把本文件所有仅靠确认层把守的写/删端点一起打开。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
+  (req: Request, res: Response) => {
+    const guard = getSafetyGuard();
+    guard.updateConfig({ enabled: true });
+    logger.info('SafetyGuard enabled via admin API', {
+      context: 'AdminRoutes',
+      initiator: req.ip
+    });
+    res.json({ success: true, message: 'SafetyGuard enabled' });
+  }
+);
 
 /**
  * POST /api/admin/safety/disable
@@ -227,6 +236,12 @@ router.post('/safety/enable', (req: Request, res: Response) => {
  */
 router.post(
   '/safety/disable',
+  // SECURITY (#5655): 开关确认层本身是特权操作。/safety/disable 原先只挂
+  // requireSafetyCheck，而它用的 RESET_METRICS 是 LOW、根本不要确认，于是任何已认证用户
+  // 一次请求就能关掉全局 SafetyGuard（SafetyGuard.checkOperation：disabled 时对一切
+  // allowed:true），从而把本文件所有仅靠确认层把守的写/删端点一起打开。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS, // Using LOW risk for this
     getDetails: () => ({ action: 'disable_safety_guard' })
@@ -1136,6 +1151,11 @@ router.post(
  */
 router.post(
   '/cache/clear',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.CLEAR_CACHE,
     getDetails: () => ({ action: 'clear_cache' })
@@ -1187,6 +1207,11 @@ router.post(
  */
 router.post(
   '/metrics/reset',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS,
     getDetails: () => ({ action: 'reset_metrics' })
@@ -1355,6 +1380,11 @@ async function referencedDataSourceIdsForRefusal(filters: Record<string, unknown
  */
 router.delete(
   '/data/bulk',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.DELETE_DATA,
     getDetails: (req) => ({
@@ -1469,6 +1499,11 @@ router.delete(
  */
 router.put(
   '/data/bulk',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.BULK_UPDATE,
     getDetails: (req) => ({
@@ -1679,6 +1714,11 @@ router.get('/dlq', requireAdminRole(), async (req: Request, res: Response) => {
  */
 router.post(
   '/dlq/:id/retry',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.BULK_UPDATE, // Using BULK_UPDATE as proxy for retry
     getDetails: (req) => ({ action: 'retry_dlq', messageId: req.params.id })
@@ -1706,6 +1746,11 @@ router.post(
  */
 router.delete(
   '/dlq/:id',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.DELETE_DATA, // Using DELETE_DATA as proxy
     getDetails: (req) => ({ action: 'resolve_dlq', messageId: req.params.id })
@@ -1890,6 +1935,11 @@ router.get('/queues', requireAdminRole(), async (req: Request, res: Response) =>
  */
 router.post(
   '/dlq/retry-all',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.BULK_UPDATE,
     getDetails: () => ({ action: 'retry_all_dlq' })
@@ -1937,6 +1987,11 @@ router.post(
  */
 router.post(
   '/dlq/cleanup',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.DELETE_DATA,
     getDetails: (req) => ({ action: 'cleanup_dlq', days: req.body.days || 30 })
@@ -2093,6 +2148,11 @@ router.get('/ratelimits/:key', requireAdminRole(), async (req: Request, res: Res
  */
 router.post(
   '/ratelimits/:key/reset',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS,
     getDetails: (req) => ({ action: 'reset_rate_limit', key: req.params.key })
@@ -2127,6 +2187,11 @@ router.post(
  */
 router.post(
   '/ratelimits/reset-all',
+  // SECURITY (#5655): requireSafetyCheck 是确认流程，不是授权门
+  // （guards/middleware.ts requireSafetyCheck 内零角色判断）。单挂它时这条写端点对任何
+  // 已认证的非 admin 开放（LOW 风险根本不要确认，MEDIUM 一次重试即可）。
+  // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
+  requireAdminRole(),
   requireSafetyCheck({
     operation: OperationType.RESET_METRICS,
     getDetails: () => ({ action: 'reset_all_rate_limits' })

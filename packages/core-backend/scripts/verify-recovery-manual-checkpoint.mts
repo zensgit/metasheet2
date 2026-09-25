@@ -1,6 +1,6 @@
 /** Synthetic full-schema checkpoint acceptance; never use a customer database. */
 import assert from 'node:assert/strict'
-import { AsyncLocalStorage } from 'node:async_hooks'
+import { AsyncLocalStorage, createHook } from 'node:async_hooks'
 import { spawnSync } from 'node:child_process'
 import { createCipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, rm, realpath, rename } from 'node:fs/promises'
@@ -51,12 +51,25 @@ process.env.ATTACHMENT_PATH = join(root, 'attachment-source')
 let created = false
 let client: Client | undefined
 let db: Kysely<unknown> | undefined
+let downloadPools: typeof import('../src/integration/db/connection-pool').poolManager | undefined
+let applicationClosedDownloadPool = false
+let shutdownAuthMessaging: (() => Promise<void>) | undefined
 try {
   await admin.connect()
   assert.equal(await realpath((await admin.query('SHOW data_directory')).rows[0].data_directory), pgdata)
   assert.equal((await admin.query('SELECT current_user AS owner')).rows[0].owner, 'tm_manual')
   await admin.query(`CREATE DATABASE "${database}"`)
   created = true
+  // The real download route uses the main pool, not the archive injection port.
+  // Replace only this process's unused default with the verified owned database.
+  downloadPools = (require('../src/integration/db/connection-pool.ts') as typeof import('../src/integration/db/connection-pool')).poolManager
+  assert.equal(downloadPools.get().getInternalPool().totalCount, 0)
+  await downloadPools.close()
+  const downloadPool = downloadPools.createPool('main', { ...connection, database,
+    connectionString: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
+    max: 4, connectionTimeoutMillis: 5000 })
+  assert.deepEqual((await downloadPool.query('SELECT current_database() AS db,current_user AS owner')).rows[0],
+    { db: database, owner: 'tm_manual' })
   await writeFile(`${root}/config.json`, '{}', { mode: 0o600 })
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: root,
@@ -76,6 +89,9 @@ try {
   // Historical migration tests must unwind newer layers and restore them. Run
   // the actual CI replay/neighbor entrypoints before the new protocol tests.
   const neighbors = [
+    ['vitest', '--config', 'vitest.integration.config.ts', 'run',
+      'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
+      '--reporter=dot'],
     ['tsx', 'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'],
     ['vitest', '--config', 'vitest.integration.config.ts', 'run',
       'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
@@ -93,10 +109,15 @@ try {
   for (const args of neighbors) {
     const run = spawnSync('pnpm', ['--filter', '@metasheet/core-backend', 'exec', ...args], {
       cwd: repo, env: { ...env, METASHEET_REAL_DB_TEST_STEP: '1' }, encoding: 'utf8',
-      timeout: 240000, maxBuffer: 16 * 1024 * 1024,
+      // The full historical suite includes real lease/expiry waits; retain a bounded CI budget.
+      timeout: 600000, maxBuffer: 16 * 1024 * 1024,
     })
     console.log(run.status === 0 ? (run.stdout ?? '').slice(-4000) : (run.stdout ?? ''))
-    if (run.status !== 0) console.error(run.stderr ?? '')
+    if (run.status !== 0) {
+      console.error(run.stderr ?? '')
+      const timedOut = run.error && 'code' in run.error && run.error.code === 'ETIMEDOUT'
+      console.error(timedOut ? 'MIGRATION_NEIGHBOR_TIMEOUT' : 'MIGRATION_NEIGHBOR_PROCESS_FAILED')
+    }
     assert.equal(run.status, 0, 'MIGRATION_NEIGHBOR_FAILED')
   }
   client = new Client({ ...connection, database })
@@ -1690,12 +1711,43 @@ try {
   console.log('PASS: physically purged in-scope attachment refuses fresh admission with zero generation/request/pin side effects')
   const { LocalStorageProvider } = require('../src/services/StorageService.ts') as typeof import('../src/services/StorageService')
   const sourceStorage = new LocalStorageProvider(join(root, 'attachment-source'))
+  const expectedAttachmentBytes = (id: string): Buffer => id === 'manual-second-attachment'
+    ? Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=', 'base64')
+    : Buffer.from('synthetic-' + id)
+  await query(`INSERT INTO multitable_attachments(id,sheet_id,storage_file_id,filename,mime_type,size,storage_path)
+    VALUES ('manual-second-attachment','no-genesis','manual-second-file','synthetic','text/plain',3,'synthetic/second')`)
   const syntheticAttachments = (await query(`SELECT id FROM multitable_attachments WHERE sheet_id='no-genesis' ORDER BY id`)).rows
+  await query(`UPDATE multitable_attachments SET filename='synthetic.png',mime_type='image/png'
+    WHERE id='manual-second-attachment'`)
   for (const row of syntheticAttachments) {
-    const bytes = Buffer.from(`synthetic-${row.id}`)
+    const bytes = expectedAttachmentBytes(row.id)
     const file = await sourceStorage.uploadContentAddressed(bytes, { filename: 'source.bin', contentType: 'application/octet-stream' })
     await query(`UPDATE multitable_attachments SET storage_path=$2,size=$3,storage_provider='local',
       blob_purged_at=NULL,blob_purge_claimed_at=NULL WHERE id=$1`, [row.id, file.path, bytes.length])
+  }
+  await query(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order")
+    VALUES ('manual-attachment-field','no-genesis','Synthetic files','attachment','{}',2)`)
+  await query(`UPDATE multitable_attachments SET record_id='manual-source-record',field_id='manual-attachment-field'
+    WHERE id IN ('manual-live-attachment','manual-second-attachment')`)
+  const sourceLedger = require('../src/multitable/operation-ledger.ts') as typeof import('../src/multitable/operation-ledger')
+  const sourceHistory = require('../src/multitable/record-history-service.ts') as typeof import('../src/multitable/record-history-service')
+  const sourceFence = require('../src/multitable/canonical-sheet-fence.ts') as typeof import('../src/multitable/canonical-sheet-fence')
+  const beforeSourceFenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+  process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+  try { await transaction(async () => {
+    await sourceFence.fenceWriterEntry(query, 'no-genesis')
+    const ledger = await sourceLedger.mintOperation(query, 'no-genesis')
+    assert.ok(ledger.operationId)
+    const changed = (await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','["manual-second-attachment","manual-live-attachment"]'),
+      version=version+1 WHERE id='manual-source-record' RETURNING data,version`)).rows[0]
+    await sourceHistory.recordRecordRevision(query, { sheetId: 'no-genesis', recordId: 'manual-source-record',
+      version: changed.version, action: 'update', source: 'rest', actorId,
+      changedFieldIds: ['manual-attachment-field'], patch: { 'manual-attachment-field': ['manual-second-attachment', 'manual-live-attachment'] },
+      snapshot: changed.data, ledger })
+    assert.equal(await sourceLedger.sealOperation(query, ledger), true)
+  }) } finally {
+    if (beforeSourceFenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    else process.env.MULTITABLE_ENABLE_WRITER_FENCE = beforeSourceFenceFlag
   }
   let attachmentTransaction = false
   const attachmentReadTransaction: Parameters<typeof manualAdmission.bindRecoveryArchiveManualAttachmentRead>[0] =
@@ -1719,7 +1771,7 @@ try {
   const verifiedAttachments = await readAttachments(verifiedSource.source!)
   assert.equal(reads, syntheticAttachments.length)
   for (const attachment of verifiedAttachments) {
-    assert.deepEqual(attachment.plaintext, Buffer.from(`synthetic-${attachment.attachmentId}`))
+    assert.deepEqual(attachment.plaintext, expectedAttachmentBytes(attachment.attachmentId))
     const pin = (await pins(verifiedSource.generationId)).find((row) => row.attachment_id === attachment.attachmentId)
     assert.equal(pin.availability, 'available')
     assert.equal(pin.content_sha256, attachment.plaintextSha256)
@@ -1754,7 +1806,7 @@ try {
       assert.ok((await pins(attempt.generationId)).every((row) => row.availability === 'mutable'))
     } finally {
       if (failure === 'source-change') for (const row of syntheticAttachments) {
-        await query('UPDATE multitable_attachments SET size=$2 WHERE id=$1', [row.id, Buffer.byteLength(`synthetic-${row.id}`)])
+        await query('UPDATE multitable_attachments SET size=$2 WHERE id=$1', [row.id, expectedAttachmentBytes(row.id).length])
       }
     }
   }
@@ -1869,9 +1921,9 @@ try {
     const completeAttachments = await attachmentReader.readRecoveryArchiveCompleteSectionState(readInput)
     for (const row of syntheticAttachments) {
       const binary = attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id)
-      assert.deepEqual(binary.bytes, Buffer.from(`synthetic-${row.id}`))
+      assert.deepEqual(binary.bytes, expectedAttachmentBytes(row.id))
       binary.bytes.fill(0)
-      assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id).bytes, Buffer.from(`synthetic-${row.id}`))
+      assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(completeAttachments, row.id).bytes, expectedAttachmentBytes(row.id))
     }
     await assert.rejects(attachmentReader.readRecoveryArchiveCompleteSectionState({ ...readInput, attachmentObjects: [] }),
       { message: 'RECOVERY_ARCHIVE_READER_SECTION_OBJECTS_INVALID' })
@@ -1886,10 +1938,12 @@ try {
     console.log('PASS: public archive authority includes exact attachments; reader authenticates/decrypts live/deleted binary frames with defensive private byte copies; missing/swapped objects refuse')
     const commandModule = require('../src/multitable/recovery-archive-manual-command.ts') as typeof import('../src/multitable/recovery-archive-manual-command')
     const commandFlags = { archive: process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED,
+      strict: process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT,
       fence: process.env.MULTITABLE_ENABLE_WRITER_FENCE }
     try {
       process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
       process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+      process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
       let commandSourceReads = 0
       const attachmentCommand = commandModule.bindRecoveryArchiveManualCommand(uploadInput.transaction, async () => true,
         { keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
@@ -1907,33 +1961,79 @@ try {
         selectedBinding: commandAuthority.selectedBinding, manifestObject: commandAuthority.manifestObject,
         sectionObjects: commandAuthority.sectionObjects, attachmentObjects: commandAuthority.attachmentObjects, query })
       for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(commandState, row.id).bytes,
-        Buffer.from(`synthetic-${row.id}`))
+        expectedAttachmentBytes(row.id))
       console.log('PASS: manual command captures live/deleted source attachments, publishes and reads exact bytes; exact retry never rereads source')
       const express = require('express') as typeof import('express')
       const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
       const attachmentApp = express()
       attachmentApp.use(express.json())
-      attachmentApp.use((req, _res, next) => {
-        if (req.headers.authorization === 'Bearer synthetic-manual-owner') req.user = { id: actorId, role: 'admin' }
-        next()
-      })
+      const { authRouter } = require('../src/routes/auth.ts') as typeof import('../src/routes/auth')
+      const { messageBus } = require('../src/integration/messaging/message-bus.ts') as typeof import('../src/integration/messaging/message-bus')
+      shutdownAuthMessaging = () => messageBus.shutdown()
+      const { jwtAuthMiddleware } = require('../src/auth/jwt-middleware.ts') as typeof import('../src/auth/jwt-middleware')
+      const bcrypt = require('bcryptjs') as typeof import('bcryptjs')
+      const loginIdentifier = `tm-${randomUUID()}@example.invalid`
+      const loginPassword = randomBytes(32).toString('hex')
+      await query('UPDATE users SET email=$2,password_hash=$3 WHERE id=$1',
+        [actorId, loginIdentifier, await bcrypt.hash(loginPassword, 4)])
+      attachmentApp.use('/api/auth', authRouter)
+      attachmentApp.use(jwtAuthMiddleware)
+      if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
+        const { Injector } = require('@wendellhu/redi') as typeof import('@wendellhu/redi')
+        const { ICommentService } = require('../src/di/identifiers.ts') as typeof import('../src/di/identifiers')
+        const { CommentService } = require('../src/services/CommentService.ts') as typeof import('../src/services/CommentService')
+        const { CollabService } = require('../src/services/CollabService.ts') as typeof import('../src/services/CollabService')
+        const { EventBus } = require('../src/integration/events/event-bus.ts') as typeof import('../src/integration/events/event-bus')
+        const { Logger } = require('../src/core/logger.ts') as typeof import('../src/core/logger')
+        const { commentsRouter } = require('../src/routes/comments.ts') as typeof import('../src/routes/comments')
+        const logger = new Logger('SyntheticWorkbenchAcceptance')
+        const comments = new CommentService(new CollabService(logger, new EventBus()), logger)
+        const injector = new Injector([[ICommentService, { useValue: comments }]])
+        attachmentApp.use(commentsRouter(injector))
+      }
+      const attachmentHttpPool = new Pool({ ...connection, database, max: 4 })
+      const attachmentHttpDepth = new AsyncLocalStorage<number>()
+      const attachmentHttpProbe = { currentTransactionDepth: () => attachmentHttpDepth.getStore() ?? 0 }
+      const attachmentHttpDatabase: import('../src/routes/univer-meta').RecoveryArchiveRouterDatabaseRuntime = {
+        query: (text, params) => attachmentHttpPool.query(text, params),
+        transactionDepthProbe: attachmentHttpProbe,
+        async transaction(work) {
+          const owned = await attachmentHttpPool.connect()
+          try {
+            await owned.query('BEGIN')
+            const result = await attachmentHttpDepth.run(1, () => work((text, params) => owned.query(text, params)))
+            await owned.query('COMMIT')
+            return result
+          } catch (error) { await owned.query('ROLLBACK'); throw error }
+          finally { owned.release() }
+        },
+      }
       attachmentApp.use('/api/multitable', univerMetaRouter({
         recoveryArchiveRuntime: { keyCustody: attachmentCustody,
-          transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
-        recoveryArchiveDatabaseRuntime: { query, transaction: uploadInput.transaction,
-          transactionDepthProbe: attachmentCapture.transactionDepth },
+          transactionDepth: attachmentHttpProbe, objectStore: attachmentProvider,
+          attachmentStorage: sourceStorage },
+        recoveryArchiveDatabaseRuntime: attachmentHttpDatabase,
         recoveryArchiveAuditedReplayHorizonMs: 60000,
         recoveryArchiveManualPolicy: admissionPolicy,
       }))
       const attachmentServer = attachmentApp.listen(0, '127.0.0.1')
+      let verifyFullApplication: (() => Promise<void>) | undefined
       try {
         await new Promise<void>((resolve, reject) => { attachmentServer.once('listening', resolve); attachmentServer.once('error', reject) })
         const address = attachmentServer.address()
         assert.ok(address && typeof address !== 'string')
         const url = `http://127.0.0.1:${address.port}/api/multitable/sheets/no-genesis/recovery-archive/captures`
-        const headers = { 'content-type': 'application/json', authorization: 'Bearer synthetic-manual-owner' }
-        await query(`INSERT INTO meta_fields(id,sheet_id,name,type,property,"order")
-          VALUES ('manual-attachment-field','no-genesis','Synthetic files','attachment','{}',2)`)
+        const login = await fetch(`http://127.0.0.1:${address.port}/api/auth/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ identifier: loginIdentifier, password: loginPassword }),
+        })
+        assert.equal(login.status, 200)
+        const loginBody = await login.json() as { success: boolean; data: { token: string; user: { id: string } } }
+        assert.equal(loginBody.success, true)
+        assert.equal(loginBody.data.user.id, actorId)
+        const loginToken = loginBody.data.token
+        assert.equal(typeof loginToken, 'string')
+        const headers = { 'content-type': 'application/json', authorization: `Bearer ${loginToken}` }
         const requestId = randomUUID()
         const beforeHttp = await generationCount()
         assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1956,7 +2056,7 @@ try {
           selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
           sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects, query })
         for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(state, row.id).bytes,
-          Buffer.from(`synthetic-${row.id}`))
+          expectedAttachmentBytes(row.id))
         const catalog = await fetch(url.replace('/captures', `/catalog/${result.data.generationId}`), { headers })
         assert.equal(catalog.status, 200)
         assert.equal((await catalog.json() as { data: { generationId: string } }).data.generationId, result.data.generationId)
@@ -1964,21 +2064,22 @@ try {
         const previewAttachmentScope = async (scope: Record<string, unknown>) => {
           const response = await fetch(previewUrl, { method: 'POST', headers,
             body: JSON.stringify({ generationId: result.data.generationId, mode: 'revert', scope }) })
-          assert.equal(response.status, 200)
-          return (await response.json() as { data: { blockedReason: string; executable: boolean; previewIdentity: string | null } }).data
+          const body = await response.json() as { data: { blockedReason: string; executable: boolean; previewIdentity: string | null } }
+          assert.equal(response.status, 200, JSON.stringify(body))
+          return body.data
         }
         assert.equal((await previewAttachmentScope({ kind: 'whole_sheet' })).blockedReason, 'no_changes')
         const beforeAttachmentEdit = (await query(`SELECT data,version,updated_at FROM meta_records WHERE id='manual-source-record'`)).rows[0]
         try {
           await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}',$1::jsonb),version=version+1
-            WHERE id='manual-source-record'`, [JSON.stringify([syntheticAttachments[0].id])])
+            WHERE id='manual-source-record'`, [JSON.stringify((state.records.get('manual-source-record')!.data!['manual-attachment-field'] as string[]).slice(0, 1))])
           for (const scope of [{ kind: 'whole_sheet' },
             { kind: 'selected_records', recordIds: ['manual-source-record'] },
             { kind: 'selected_fields', recordIds: ['manual-source-record'], fieldIds: ['manual-attachment-field'] }]) {
             const preview = await previewAttachmentScope(scope)
-            assert.equal(preview.blockedReason, 'unsupported_attachments')
-            assert.equal(preview.executable, false)
-            assert.equal(preview.previewIdentity, null)
+            assert.equal(preview.blockedReason, null)
+            assert.equal(preview.executable, true)
+            assert.equal(typeof preview.previewIdentity, 'string')
           }
           assert.equal((await previewAttachmentScope({ kind: 'selected_fields', recordIds: ['manual-source-record'],
             fieldIds: ['manual-source-field'] })).blockedReason, 'no_changes')
@@ -1986,7 +2087,448 @@ try {
           await query(`UPDATE meta_records SET data=$1::jsonb,version=$2,updated_at=$3 WHERE id='manual-source-record'`,
             [JSON.stringify(beforeAttachmentEdit.data), beforeAttachmentEdit.version, beforeAttachmentEdit.updated_at])
         }
-        console.log('PASS: HTTP preview distinguishes attachment-only change from no_changes in whole/record/field scope; scalar-only selection preserved, no execution identity issued')
+        console.log('PASS: HTTP preview binds attachment-only change in whole/record/field scope; scalar-only no_changes preserved')
+        // Keep fault-injection coverage at the canonical facade before exercising public execution.
+        const identityApi = require('../src/multitable/restore-preview-identity.ts') as typeof import('../src/multitable/restore-preview-identity')
+        const planApi = require('../src/multitable/recovery-archive-sync-plan.ts') as typeof import('../src/multitable/recovery-archive-sync-plan')
+        const metadataApi = require('../src/multitable/recovery-archive-attachment-apply.ts') as typeof import('../src/multitable/recovery-archive-attachment-apply')
+        const restoreApi = require('../src/multitable/recovery-archive-sync-restore.ts') as typeof import('../src/multitable/recovery-archive-sync-restore')
+        const recordId = 'manual-source-record'
+        const fieldId = 'manual-attachment-field'
+        const archived = state.records.get(recordId)!
+        const restoredIds = archived.data![fieldId] as string[]
+        assert.equal(restoredIds.length, 2)
+        await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+        const beforeRestore = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        const metadata = []
+        for (const id of restoredIds) {
+          const row = (await query('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [id])).rows[0]
+          metadata.push({ attachmentId: id, recordId, fieldId, metadataHash: metadataApi.hashArchiveAttachmentMetadata(row.metadata) })
+        }
+        const scopeHash = identityApi.hashAnchorRecoveryScope([{ recordId, exists: archived.exists, version: archived.version }])
+        const plan = planApi.compileRecoveryArchiveSyncPlan({ workspaceId: authority.selectedBinding.workspaceId,
+          baseId: authority.selectedBinding.baseId, sheetId: 'no-genesis', actorId, recoveryMode: 'revert',
+          scopeKind: 'selected_fields', scopeHash, archiveGenerationId: authority.selectedBinding.generationId,
+          archiveRootHash: authority.selectedBinding.rootHash, sourceVectorHash: authority.selectedBinding.sourceVectorHash,
+          keyId: authority.keyId, selectedRecordIds: [recordId], selectedFieldIds: [fieldId], attachmentMetadata: metadata })
+        const liveRows = (await query("SELECT id,version FROM meta_records WHERE sheet_id='no-genesis'")).rows
+        const schema = (await query("SELECT id,type,property FROM meta_fields WHERE sheet_id='no-genesis'")).rows
+        const token = identityApi.mintExactArchiveRecoveryIdentity({ sheetId: 'no-genesis', actorId, mode: 'revert',
+          anchorOperationId: authority.selectedBinding.anchorOperationId, anchorSeq: authority.selectedBinding.anchorSeq,
+          checkpointId: authority.selectedBinding.checkpointId, scopeHash,
+          liveSetHash: identityApi.hashExactAnchorLiveSet(liveRows.map(row => ({ recordId: row.id, version: row.version })), []),
+          schemaHash: identityApi.hashExactAnchorSchema(schema.map(row => ({ id: row.id, type: row.type, property: row.property }))),
+          authorizedScopeHash: identityApi.hashRecoveryAuthorizationScope({ sheetId: 'no-genesis', actorId }),
+          archiveGenerationId: authority.selectedBinding.generationId, archiveRootHash: authority.selectedBinding.rootHash,
+          archiveSourceVectorHash: authority.selectedBinding.sourceVectorHash, archiveKeyId: authority.keyId,
+          archivePlanHash: plan.planHash, scopeKind: 'selected_fields' })
+        let uploadAttempts = 0
+        let refuseUpload = true
+        let allowRestore = false
+        const facadeInput: Parameters<typeof restoreApi.applyRecoveryArchiveSyncRestore>[0] = {
+          query, transaction: uploadInput.transaction,
+          apply: { token, actorId, sheetId: 'no-genesis', preliminaryFullRead: async () => allowRestore,
+            stabilizeAuthorization: async () => 'ready', finalLockedFullRead: async () => allowRestore,
+            evaluatePlanAuthorization: async (_q, context) => {
+              assert.ok(context.revertWrites.some(write => write.recordId === recordId && write.changedFieldIds.includes(fieldId)))
+              return allowRestore
+            } },
+          archive: { selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
+            sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects,
+            keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
+          selectedRecordIds: [recordId], selectedFieldIds: [fieldId], auditedReplayHorizonMs: 60000,
+          attachmentStorage: { reserveRecoveryAttachment: (...args) => sourceStorage.reserveRecoveryAttachment(...args),
+            uploadByKey: async (...args) => {
+            assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
+            uploadAttempts++
+            if (refuseUpload && uploadAttempts === 2) throw new Error('SYNTHETIC_RESTORE_UPLOAD_FAILED')
+            return sourceStorage.uploadByKey(...args)
+          }, readRecoveryAttachment: async (...args) => {
+            assert.equal(attachmentCapture.transactionDepth.currentTransactionDepth(), 0)
+            return sourceStorage.readRecoveryAttachment(...args)
+          } },
+        }
+        assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'forbidden' })
+        assert.equal(uploadAttempts, 0)
+        allowRestore = true
+        assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore({ ...facadeInput,
+          apply: { ...facadeInput.apply, evaluatePlanAuthorization: async () => false } }),
+        { ok: false, reason: 'forbidden' })
+        assert.equal(uploadAttempts, 0, 'plan permission denial must refuse before staging')
+        for (const unavailable of ['key', 'hold'] as const) {
+          const blocked = await restoreApi.applyRecoveryArchiveSyncRestore({ ...facadeInput,
+            transaction: work => uploadInput.transaction(async q => {
+              if (unavailable === 'key') await q(`UPDATE meta_recovery_archive_keys
+                SET state='retiring',row_version=row_version+1 WHERE key_id=$1`, [authority.keyId])
+              else await q(`INSERT INTO meta_recovery_archive_legal_holds
+                (id,workspace_id,base_id,sheet_id,generation_id,reason_code,placed_by_actor_id)
+                VALUES ($1::uuid,$2,$3,$4,$5::uuid,'SYNTHETIC_RESTORE_HOLD',$6)`,
+              [randomUUID(), authority.selectedBinding.workspaceId, authority.selectedBinding.baseId,
+                'no-genesis', authority.selectedBinding.generationId, actorId])
+              return work(q)
+            }) })
+          assert.deepEqual(blocked, { ok: false, reason: 'recovery-trust-required' })
+          assert.equal(uploadAttempts, 0)
+          assert.equal((await query('SELECT state FROM meta_recovery_archive_keys WHERE key_id=$1', [authority.keyId])).rows[0].state, 'active')
+          assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_legal_holds WHERE generation_id=$1::uuid',
+            [authority.selectedBinding.generationId])).rows[0].n, 0)
+        }
+        await assert.rejects(restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { message: 'RECOVERY_ARCHIVE_ATTACHMENT_STAGE_REFUSED' })
+        assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforeRestore)
+        const reservedBeforeRetry = (await query('SELECT object_id,state FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid', [actorId])).rows
+        assert.equal(uploadAttempts, 2)
+        assert.equal(reservedBeforeRetry.length, 2)
+        assert.deepEqual(reservedBeforeRetry.map(row => row.state).sort(), ['reserved', 'verified'])
+        for (const binding of metadata) {
+          const row = (await query('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [binding.attachmentId])).rows[0]
+          assert.equal(metadataApi.hashArchiveAttachmentMetadata(row.metadata), binding.metadataHash)
+        }
+        refuseUpload = false
+        const tokenDigest = createHash('sha256').update(token).digest('hex')
+        const transactionEvidence = async () => (await query(`SELECT
+          (SELECT count(*)::int FROM meta_record_revisions WHERE sheet_id='no-genesis') AS revisions,
+          (SELECT count(*)::int FROM meta_record_history_operations WHERE sheet_id='no-genesis') AS operations,
+          (SELECT count(*)::int FROM meta_recovery_token_burns WHERE token_sha256=$1) AS burns,
+          (SELECT count(*)::int FROM meta_recovery_archive_sync_receipts WHERE token_sha256=$1) AS receipts`, [tokenDigest])).rows[0]
+        const beforeFailedApply = await transactionEvidence()
+        assert.equal(beforeFailedApply.burns, 0)
+        assert.equal(beforeFailedApply.receipts, 0)
+        for (const failurePoint of ['second-metadata', 'receipt'] as const) {
+          let metadataUpdates = 0
+          let faultReached = false
+          const failingApply = restoreApi.applyRecoveryArchiveSyncRestore({ ...facadeInput,
+            transaction: work => uploadInput.transaction(q => work(async (statement, params) => {
+              if (failurePoint === 'receipt' && statement.includes('INSERT INTO public.meta_recovery_archive_sync_receipts')) {
+                faultReached = true
+                throw new Error('SYNTHETIC_RESTORE_RECEIPT_FAILED')
+              }
+              const result = await q(statement, params)
+              if (statement.includes('UPDATE multitable_attachments') && statement.includes('SET storage_file_id=$5')) {
+                metadataUpdates++
+                if (failurePoint === 'second-metadata' && metadataUpdates === 2) {
+                  faultReached = true
+                  throw new Error('SYNTHETIC_SECOND_METADATA_FAILED')
+                }
+              }
+              return result
+            })) })
+          if (failurePoint === 'second-metadata') {
+            assert.deepEqual(await failingApply, { ok: false, reason: 'preview-drift' })
+          } else {
+            await assert.rejects(failingApply, { message: 'SYNTHETIC_RESTORE_RECEIPT_FAILED' })
+          }
+          assert.equal(faultReached, true)
+          assert.equal(metadataUpdates, 2)
+          assert.deepEqual(await transactionEvidence(), beforeFailedApply)
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforeRestore)
+          for (const binding of metadata) {
+            const row = (await query('SELECT to_jsonb(a) AS metadata FROM multitable_attachments a WHERE id=$1', [binding.attachmentId])).rows[0]
+            assert.equal(metadataApi.hashArchiveAttachmentMetadata(row.metadata), binding.metadataHash)
+          }
+          const unadopted = (await query(`SELECT state,applied_operation_id,applied_at,displaced_storage_file_id,displaced_storage_path
+            FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid`, [actorId])).rows
+          assert.equal(unadopted.length, 2)
+          assert.ok(unadopted.every(row => row.state === 'verified' && row.applied_operation_id === null
+            && row.applied_at === null && row.displaced_storage_file_id === null && row.displaced_storage_path === null))
+          assert.equal(uploadAttempts, 3)
+        }
+        const appliedAttachments = await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput)
+        assert.equal(appliedAttachments.ok, true, JSON.stringify(appliedAttachments))
+        assert.deepEqual((await query('SELECT data FROM meta_records WHERE id=$1', [recordId])).rows[0].data[fieldId], restoredIds)
+        const adopted = (await query("SELECT object_id,state FROM meta_recovery_archive_attachment_stages WHERE actor_id=$1::uuid", [actorId])).rows
+        assert.equal(adopted.length, restoredIds.length)
+        assert.ok(adopted.every(row => row.state === 'applied'))
+        assert.deepEqual(adopted.map(row => row.object_id).sort(), reservedBeforeRetry.map(row => row.object_id).sort())
+        assert.equal(uploadAttempts, 3, 'retry must not reupload the already verified first file')
+        for (const id of restoredIds) {
+          const row = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
+          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, expectedAttachmentBytes(id))
+        }
+        const afterUploads = uploadAttempts
+        assert.deepEqual(await restoreApi.applyRecoveryArchiveSyncRestore(facadeInput), { ok: false, reason: 'token-replayed' })
+        assert.equal(uploadAttempts, afterUploads)
+        console.log('PASS: authenticated two-file restore; second upload, second metadata and final receipt failures leave no partial live effect; same-token retry reuses both files; canonical adoption and token replay verified')
+        await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+        const publicScope = { kind: 'selected_fields', recordIds: [recordId], fieldIds: [fieldId] }
+        const publicPreview = await previewAttachmentScope(publicScope)
+        assert.equal(publicPreview.executable, true)
+        assert.equal(typeof publicPreview.previewIdentity, 'string')
+        const executeUrl = url.replace('/captures', '/execute')
+        const executeBody = JSON.stringify({ previewIdentity: publicPreview.previewIdentity, scope: publicScope })
+        const beforePublic = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        assert.equal((await fetch(executeUrl, { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: executeBody })).status, 401)
+        assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        const stageCount = async () => (await query('SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_stages')).rows[0].n
+        const stagesBeforePublic = await stageCount()
+        for (const visible of [true, false]) try {
+          await query(`INSERT INTO field_permissions (sheet_id,field_id,subject_type,subject_id,visible,read_only)
+            VALUES ($1,$2,'user',$3,$4,true)`, ['no-genesis', fieldId, actorId, visible])
+          const revokedField = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(revokedField.status, 403, JSON.stringify(await revokedField.json()))
+          assert.equal(await stageCount(), stagesBeforePublic, 'field permission revocation must refuse before staging')
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        } finally {
+          await query(`DELETE FROM field_permissions WHERE sheet_id=$1 AND field_id=$2
+            AND subject_type='user' AND subject_id=$3`, ['no-genesis', fieldId, actorId])
+        }
+        try {
+          await query('UPDATE multitable_attachments SET field_id=NULL WHERE id=$1', [restoredIds[0]])
+          const movedBinding = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(movedBinding.status, 409, JSON.stringify(await movedBinding.json()))
+          assert.equal(await stageCount(), stagesBeforePublic, 'original binding drift must refuse before staging')
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        } finally {
+          await query('UPDATE multitable_attachments SET field_id=$2 WHERE id=$1', [restoredIds[0], fieldId])
+        }
+        const retainedFilename = (await query('SELECT filename FROM multitable_attachments WHERE id=$1', [restoredIds[0]])).rows[0].filename
+        try {
+          await query('UPDATE multitable_attachments SET filename=$2 WHERE id=$1', [restoredIds[0], 'synthetic-metadata-drift.bin'])
+          const drifted = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(drifted.status, 409, JSON.stringify(await drifted.json()))
+          assert.equal(await stageCount(), stagesBeforePublic, 'metadata drift must refuse before staging')
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+        } finally {
+          await query('UPDATE multitable_attachments SET filename=$2 WHERE id=$1', [restoredIds[0], retainedFilename])
+        }
+        const alteredSelection = await fetch(executeUrl, { method: 'POST', headers,
+          body: JSON.stringify({ previewIdentity: publicPreview.previewIdentity,
+            scope: { ...publicScope, fieldIds: ['manual-source-field'] } }) })
+        assert.equal(alteredSelection.status, 409, JSON.stringify(await alteredSelection.json()))
+        assert.equal(await stageCount(), stagesBeforePublic, 'changed selection must refuse before staging')
+        const publicTokenDigest = createHash('sha256').update(publicPreview.previewIdentity!).digest('hex')
+        const publicEffectEvidence = async () => (await query(`SELECT
+          (SELECT count(*)::int FROM meta_record_revisions WHERE sheet_id='no-genesis') AS revisions,
+          (SELECT count(*)::int FROM meta_record_history_operations WHERE sheet_id='no-genesis') AS operations,
+          (SELECT count(*)::int FROM meta_recovery_token_burns WHERE token_sha256=$1) AS burns,
+          (SELECT count(*)::int FROM meta_recovery_archive_sync_receipts WHERE token_sha256=$1) AS receipts`,
+        [publicTokenDigest])).rows[0]
+        const beforeLockedApply = await publicEffectEvidence()
+        const originalLock = (await query('SELECT locked,locked_by,locked_at,created_by FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        const metadataBeforeLock = (await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows
+        const assertRejectedIdentityHasNoEffect = async () => {
+          assert.equal(await stageCount(), stagesBeforePublic)
+          assert.deepEqual(await publicEffectEvidence(), beforeLockedApply)
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+          assert.deepEqual((await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows, metadataBeforeLock)
+        }
+        const originalScope = (await query(`SELECT s.base_id,b.workspace_id FROM meta_sheets s
+          JOIN meta_bases b ON b.id=s.base_id WHERE s.id='no-genesis'`)).rows[0]
+        const alternateBaseId = `synthetic-base-${randomUUID()}`
+        await query('INSERT INTO meta_bases(id,name,workspace_id) VALUES ($1,$2,$3)',
+          [alternateBaseId, 'Synthetic alternate base', originalScope.workspace_id])
+        try {
+          for (const drift of ['workspace', 'base'] as const) try {
+            if (drift === 'workspace') {
+              await query('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1',
+                [originalScope.base_id, `synthetic-workspace-${randomUUID()}`])
+            } else {
+              await query("UPDATE meta_sheets SET base_id=$1 WHERE id='no-genesis'", [alternateBaseId])
+            }
+            const response = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+            assert.equal(response.status, 404)
+            const body = await response.json() as { ok: boolean; error: { code: string } }
+            assert.equal(body.ok, false)
+            assert.equal(body.error.code, 'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND')
+            await assertRejectedIdentityHasNoEffect()
+          } finally {
+            await query("UPDATE meta_sheets SET base_id=$1 WHERE id='no-genesis'", [originalScope.base_id])
+            await query('UPDATE meta_bases SET workspace_id=$2 WHERE id=$1',
+              [originalScope.base_id, originalScope.workspace_id])
+          }
+        } finally {
+          await query('DELETE FROM meta_bases WHERE id=$1', [alternateBaseId])
+        }
+        console.log('PASS: post-preview workspace/base relocation rejects original archive identity with zero data/metadata/stage/history/token/receipt effects')
+        try {
+          await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+          const revokedExecution = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          assert.equal(revokedExecution.status, 401)
+          await assertRejectedIdentityHasNoEffect()
+        } finally {
+          await query('UPDATE users SET is_active=true WHERE id=$1', [actorId])
+        }
+        const alternateActorId = randomUUID()
+        const alternateLogin = `tm-${alternateActorId}@example.invalid`
+        await query(`INSERT INTO users(id,email,password_hash,role,is_active)
+          VALUES ($1,$2,$3,'admin',true)`, [alternateActorId, alternateLogin, await bcrypt.hash(loginPassword, 4)])
+        const alternateResponse = await fetch(`http://127.0.0.1:${address.port}/api/auth/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ identifier: alternateLogin, password: loginPassword }),
+        })
+        assert.equal(alternateResponse.status, 200)
+        const alternateSession = await alternateResponse.json() as typeof loginBody
+        assert.equal(alternateSession.data.user.id, alternateActorId)
+        const substitutedExecution = await fetch(executeUrl, { method: 'POST',
+          headers: { ...headers, authorization: `Bearer ${alternateSession.data.token}` }, body: executeBody })
+        assert.equal(substitutedExecution.status, 409, JSON.stringify(await substitutedExecution.json()))
+        await assertRejectedIdentityHasNoEffect()
+        console.log('PASS: post-preview inactive actor and independently logged-in actor substitution refuse with zero data/metadata/stage/history/token/receipt effects')
+        try {
+          await query("UPDATE users SET role='user' WHERE id=$1", [alternateActorId])
+          const deniedHeaders = { ...headers, authorization: `Bearer ${alternateSession.data.token}` }
+          const deniedCatalog = await fetch(url.replace('/captures', '/catalog'), { headers: deniedHeaders })
+          assert.equal(deniedCatalog.status, 403, JSON.stringify(await deniedCatalog.json()))
+          const deniedRestore = await fetch(executeUrl, { method: 'POST', headers: deniedHeaders, body: executeBody })
+          assert.equal(deniedRestore.status, 403, JSON.stringify(await deniedRestore.json()))
+          await assertRejectedIdentityHasNoEffect()
+        } finally {
+          await query("UPDATE users SET role='admin' WHERE id=$1", [alternateActorId])
+        }
+        console.log('PASS: database-revoked global admin cannot reuse an authenticated session to read archive catalog or execute restore; zero live effects')
+        try {
+          await query(`UPDATE meta_records SET locked=true,locked_by='synthetic-other-locker',created_by=NULL WHERE id=$1`, [recordId])
+          const lockedRestore = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+          const lockedBody = await lockedRestore.json() as { error: { code: string } }
+          assert.equal(lockedRestore.status, 409, JSON.stringify(lockedBody))
+          assert.equal(lockedBody.error.code, 'RECORD_LOCKED')
+          assert.deepEqual(await publicEffectEvidence(), beforeLockedApply)
+          assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], beforePublic)
+          assert.deepEqual((await query('SELECT id,storage_file_id,storage_path FROM multitable_attachments WHERE id=ANY($1::text[]) ORDER BY id', [restoredIds])).rows, metadataBeforeLock)
+        } finally {
+          await query('UPDATE meta_records SET locked=$2,locked_by=$3,locked_at=$4,created_by=$5 WHERE id=$1',
+            [recordId, originalLock.locked, originalLock.locked_by, originalLock.locked_at, originalLock.created_by])
+        }
+        console.log('PASS: post-preview hidden/read-only field refuses 403; other-owner record lock refuses 409 without metadata, data, revision, token or receipt effects')
+        const publicResponse = await fetch(executeUrl, { method: 'POST', headers, body: executeBody })
+        const publicResult = await publicResponse.json()
+        assert.equal(publicResponse.status, 200, JSON.stringify(publicResult))
+        assert.equal(publicResult.ok, true)
+        assert.equal(publicResult.data.revertedCount, 1)
+        assert.equal(publicResult.data.resurrectedCount, 0)
+        const afterPublic = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+        assert.deepEqual(afterPublic.data[fieldId], restoredIds)
+        assert.equal(Number(afterPublic.version), Number(beforePublic.version) + 1)
+        for (const id of restoredIds) {
+          const row = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
+          assert.deepEqual((await sourceStorage.readContentAddressed(row.storage_path)).bytes, expectedAttachmentBytes(id))
+        }
+        assert.equal((await fetch(executeUrl, { method: 'POST', headers, body: executeBody })).status, 409)
+        assert.deepEqual((await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0], afterPublic)
+        console.log('PASS: public HTTP preview/execution restores both original attachment bytes, checks authentication, increments once and refuses token replay')
+        const verifyDownloads = async () => {
+          for (const id of restoredIds) {
+            const downloadUrl = `http://127.0.0.1:${address.port}/api/multitable/attachments/${encodeURIComponent(id)}`
+            const response = await fetch(downloadUrl, { headers })
+            assert.equal(response.status, 200)
+            assert.deepEqual(Buffer.from(await response.arrayBuffer()), expectedAttachmentBytes(id))
+            assert.equal((await fetch(downloadUrl)).status, 401)
+          }
+        }
+        await verifyDownloads()
+        console.log('PASS: production attachment download route returns both restored original binaries; anonymous download refuses')
+        if (process.env.TM_MANUAL_TEST_BROWSER === 'true') {
+          const { verifyManualArchiveBrowser } = await import('./verify-recovery-manual-browser.mjs')
+          const syntheticAttachmentEdit = async (editThroughBrowser?: () => Promise<void>, verifyRouterDownload = true) => {
+            const before = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+            const historyCount = async () => (await query(`SELECT count(*)::int AS n FROM meta_record_revisions
+              WHERE record_id=$1 AND source='restore'`, [recordId])).rows[0].n
+            const beforeHistory = await historyCount()
+            if (editThroughBrowser) await editThroughBrowser()
+            else await query(`UPDATE meta_records SET data=jsonb_set(data,'{manual-attachment-field}','[]'),version=version+1 WHERE id=$1`, [recordId])
+            const edited = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+            assert.deepEqual(edited.data['manual-attachment-field'], [])
+            assert.equal(Number(edited.version), Number(before.version) + (editThroughBrowser ? restoredIds.length : 1))
+            if (editThroughBrowser) {
+              const revisions = (await query(`SELECT changed_field_ids,patch FROM meta_record_revisions
+                WHERE record_id=$1 AND version>$2 AND source='attachment' ORDER BY version`, [recordId, before.version])).rows
+              assert.equal(revisions.length, restoredIds.length)
+              assert.ok(revisions.every(row => JSON.stringify(row.changed_field_ids) === JSON.stringify([fieldId])))
+              assert.deepEqual(revisions.at(-1)?.patch, { [fieldId]: [] })
+            }
+            return async () => {
+              const after = (await query('SELECT data,version FROM meta_records WHERE id=$1', [recordId])).rows[0]
+              assert.deepEqual(after.data, before.data)
+              assert.equal(Number(after.version), Number(edited.version) + 1)
+              assert.equal(await historyCount(), beforeHistory + 1)
+              for (const id of restoredIds) {
+                const metadata = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [id])).rows[0]
+                assert.deepEqual((await sourceStorage.readContentAddressed(metadata.storage_path)).bytes, expectedAttachmentBytes(id))
+              }
+              if (verifyRouterDownload) await verifyDownloads()
+            }
+          }
+          await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'attachment', loginToken)
+          await query(`INSERT INTO meta_views(id,sheet_id,name,type) VALUES
+            ('manual-browser-grid','no-genesis','Synthetic archive grid','grid')`)
+          await query(`INSERT INTO meta_views(id,sheet_id,name,type,config) VALUES
+            ('manual-browser-gallery','no-genesis','Synthetic archive gallery','gallery',
+             '{"coverFieldId":"manual-attachment-field","columns":1}')`)
+          await verifyManualArchiveBrowser(`http://127.0.0.1:${address.port}`, syntheticAttachmentEdit, 'workbench', loginToken)
+          verifyFullApplication = async () => {
+            const timers = new Map<number, { timer: NodeJS.Timeout; stack: string }>()
+            const timerHook = createHook({
+              init(id, type, _trigger, resource) {
+                if (type === 'Timeout') timers.set(id, {
+                  timer: resource as NodeJS.Timeout,
+                  stack: new Error().stack?.split('\n').slice(2, 12).join('\n') ?? '',
+                })
+              },
+              destroy(id) { timers.delete(id) },
+            }).enable()
+            const fullEnv = {
+              ...env, VITEST: 'true',
+              SKIP_PLUGINS: 'true', DISABLE_EVENT_BUS: 'true', DISABLE_WORKFLOW: 'true',
+              DISABLE_REDIS_CIRCUIT_BREAKER_STORE: 'true', OTEL_SDK_DISABLED: 'true',
+              ATTACHMENT_PATH: join(root, 'attachment-source'),
+              MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+              MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
+            }
+            const priorEnv = { ...process.env }
+            for (const key of Object.keys(process.env)) delete process.env[key]
+            Object.assign(process.env, fullEnv)
+            let server: import('../src/index').MetaSheetServer | undefined
+            try {
+              const { MetaSheetServer, resolveRecoveryArchiveMainPoolRuntime } = require('../src/index.ts') as typeof import('../src/index')
+              const { createRecoveryArchiveWorkerCallbacks } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+              server = new MetaSheetServer({ host: '127.0.0.1', port: 0, pluginDirs: [], manageProcessSignals: false,
+                createRecoveryArchiveComposition: () => ({
+                  keyCustody: attachmentCustody, objectStore: attachmentProvider, attachmentStorage: sourceStorage,
+                  auditedReplayHorizonMs: 60000, asyncResumeHorizonMs: 60000, workerIntervalMs: 60000,
+                  manualCapture: admissionPolicy,
+                  worker: { ...createRecoveryArchiveWorkerCallbacks(resolveRecoveryArchiveMainPoolRuntime()),
+                    leaseMs: 30000, replayHorizonMs: 60000, sweepLimit: 1, maxChunksPerRun: 1,
+                    workerOwnerId: 'synthetic-full-app-worker' },
+                }),
+              })
+              await server.start()
+              const fullAddress = server.getAddress()
+              assert.ok(fullAddress && typeof fullAddress !== 'string' && fullAddress.address === '127.0.0.1')
+              await verifyManualArchiveBrowser(`http://127.0.0.1:${fullAddress.port}`,
+                edit => syntheticAttachmentEdit(edit, false), 'application', loginToken,
+                { identifier: loginIdentifier, password: loginPassword, actorId })
+            } finally {
+              try {
+                if (server) {
+                  await server.stop('SYNTHETIC_ACCEPTANCE_FINISHED')
+                  applicationClosedDownloadPool = true
+                  assert.equal(downloadPool.getInternalPool().totalCount, 0)
+                  downloadPools?.get().stopMetricsCollection()
+                  // Admin route singletons are process-owned, not server.stop-owned.
+                  const { getSafetyGuard } = require('../src/guards/SafetyGuard.ts') as typeof import('../src/guards/SafetyGuard')
+                  const { getActiveStore, destroyIdempotency } = require('../src/guards/idempotency.ts') as typeof import('../src/guards/idempotency')
+                  assert.equal(getActiveStore().constructor.name, 'MemoryIdempotencyStore')
+                  getSafetyGuard().destroy()
+                  await destroyIdempotency()
+                }
+                await new Promise<void>(resolve => setImmediate(resolve))
+                const retained = [...timers.values()].filter(entry => entry.timer.hasRef())
+                console.log('SYNTHETIC_APPLICATION_RETAINED_TIMERS', retained.map(entry => entry.stack))
+                assert.equal(retained.length, 0, 'SYNTHETIC_APPLICATION_RETAINED_TIMERS')
+              } finally {
+                timerHook.disable()
+                for (const key of Object.keys(process.env)) delete process.env[key]
+                Object.assign(process.env, priorEnv)
+              }
+            }
+          }
+        }
+        await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
+        try {
+          const revoked = await fetch(`http://127.0.0.1:${address.port}/api/multitable/attachments/${encodeURIComponent(restoredIds[0])}`, { headers })
+          assert.equal(revoked.status, 401)
+        } finally { await query('UPDATE users SET is_active=true WHERE id=$1', [actorId]) }
+        console.log('PASS: production login and JWT authorize attachment capture/restore/download; inactive actor download refuses')
         const unavailableId = syntheticAttachments[0].id
         const sourceKey = (await query('SELECT storage_path FROM multitable_attachments WHERE id=$1', [unavailableId])).rows[0].storage_path
         const sourcePath = join(root, 'attachment-source', sourceKey)
@@ -2009,20 +2551,25 @@ try {
             selectedBinding: authority.selectedBinding, manifestObject: authority.manifestObject,
             sectionObjects: authority.sectionObjects, attachmentObjects: authority.attachmentObjects, query })
           for (const row of syntheticAttachments) assert.deepEqual(attachmentReader.readRecoveryArchiveAttachmentBytes(isolated, row.id).bytes,
-            Buffer.from(`synthetic-${row.id}`))
+            expectedAttachmentBytes(row.id))
         } finally { await rename(parkedPath, sourcePath) }
         console.log('PASS: unavailable live source refuses fresh HTTP publication with pins retained; completed archive still independently reads exact files')
         console.log('PASS: real HTTP manual attachment capture uses server local storage, refuses anonymous/client paths, retries one generation, and exposes catalog with independently decrypted exact files')
       } finally {
-        attachmentServer.closeIdleConnections()
-        await new Promise<void>((resolve, reject) => attachmentServer.close(error => error ? reject(error) : resolve()))
-        assert.equal(attachmentServer.address(), null)
+        try {
+          attachmentServer.closeIdleConnections()
+          await new Promise<void>((resolve, reject) => attachmentServer.close(error => error ? reject(error) : resolve()))
+          assert.equal(attachmentServer.address(), null)
+        } finally { await attachmentHttpPool.end() }
       }
+      await verifyFullApplication?.()
     } finally {
       if (commandFlags.archive === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
       else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = commandFlags.archive
       if (commandFlags.fence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
       else process.env.MULTITABLE_ENABLE_WRITER_FENCE = commandFlags.fence
+      if (commandFlags.strict === undefined) delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
+      else process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = commandFlags.strict
     }
     console.log('PASS: live/deleted source files form authenticated attachment index and exact 10+N nonce reservations; caller attachment substitution ignored; durable interrupted capture resumes without reread/reseal')
     console.log('PASS: missing manifest refuses publication and retains source pins; complete attachment roster atomically verifies catalog/receipts/archive refs and releases only its own source pins')
@@ -2035,6 +2582,8 @@ try {
   else process.env.ATTACHMENT_PATH = originalAttachmentPath
   await db?.destroy()
   await client?.end()
+  await shutdownAuthMessaging?.()
+  if (!applicationClosedDownloadPool) await downloadPools?.close()
   if (created) {
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
     await admin.query(`DROP DATABASE "${database}"`)

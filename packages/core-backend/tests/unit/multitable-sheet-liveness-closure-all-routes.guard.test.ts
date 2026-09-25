@@ -999,19 +999,20 @@ const ownJobGate = (h: RouteHandler) => {
     && !/\b(meta_records|meta_fields|requireRecordReadable|readRecordOnce|resolveSheet\w*Capabilities)\b/.test(everything(h))
 }
 
-const LEGACY_PERMISSION_GAP = 'GAP — tracked in #5829 — `:id` is read from / written to '
-  + '`spreadsheet_permissions.sheet_id`, the SAME table multitable reads as per-sheet grants '
-  + '(permission-service loadSheetPermissionScopeMap). Gated only by rbacGuard(\'spreadsheet-permissions\', …): no '
-  + 'sheet liveness and no canManageSheetAccess, so it '
-
-const LEGACY_PERMISSION_NOT_FIXED = '. `:id` IS a meta_sheets id on the kysely schema: grant/revoke already lock '
-  + '`meta_sheets` by it, and src/db/migrations/zzzz20260405190000_create_spreadsheet_permissions.ts declares '
-  + '`sheet_id … REFERENCES meta_sheets(id)` (relied on by tests/integration/'
-  + 'multitable-legacy-permission-route-lock-realdb.test.ts). The one open question is which schema production '
-  + 'databases came from: the legacy migrations/036_create_spreadsheet_permissions.sql creates the same table '
-  + '`REFERENCES spreadsheets(id)`, and both use CREATE TABLE IF NOT EXISTS, so on a 036-first database `:id` '
-  + 'names a legacy spreadsheet and a meta-sheet liveness refusal would break it. Proposed once production is '
-  + 'confirmed: canManageSheetAccess + a liveness refusal on grant/revoke.'
+// #5829's open question, answered and then closed (the pair of constants those three exemptions
+// cited is gone with them): `:id` IS a meta_sheets id. The LIVE schema builder is the kysely
+// migration src/db/migrations/zzzz20260405190000_create_spreadsheet_permissions.ts:7,
+// `sheet_id text NOT NULL REFERENCES meta_sheets(id) ON DELETE CASCADE`. The raw-SQL twin that
+// declared the same table `REFERENCES spreadsheets(id)`
+// (migrations/036_create_spreadsheet_permissions.sql:4) is a no-op history marker in
+// SUPERSEDED_LEGACY_SQL_MIGRATIONS (src/db/migration-provider.ts), as is the migration that would
+// create its FK target (`034_create_spreadsheets`) — but only SINCE 36ee32502 (2026-05-12), and
+// only while MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL is not 'true'. The residual class is NAMED
+// rather than declared empty: a database this repo migrated BEFORE that commit ran 036 first (the
+// provider merges both streams into one name-keyed record, so '036…' precedes 'zzzz…') and
+// carries the legacy FK. On such a database multitable's OWN per-sheet grant writes would already
+// violate that FK, which is why the gate treats such an `:id` as a non-existent sheet instead of
+// claiming the case impossible.
 
 /**
  * #5831 part B — the user-scoped cross-sheet aggregates of CommentService and how each must apply the
@@ -1199,23 +1200,14 @@ const COVERED: Record<string, CoveredFile> = {
   'routes/multitable-button.ts': { minHandlers: 1, minInScope: 1, exempt: {} },
   'routes/multitable-record-approvals.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
   'routes/recovery-archive-restore-owner.ts': { minHandlers: 11, minInScope: 11, exempt: {} },
-  'routes/spreadsheet-permissions.ts': {
-    minHandlers: 3,
-    minInScope: 3,
-    exempt: {
-      'GET /api/spreadsheets/:id/permissions': {
-        reason: `${LEGACY_PERMISSION_GAP}lists grants on a soft-deleted multitable sheet${LEGACY_PERMISSION_NOT_FIXED}`,
-      },
-      'POST /api/spreadsheets/:id/permissions/grant': {
-        reason: `${LEGACY_PERMISSION_GAP}grants on a soft-deleted multitable sheet (and on a live one without sheet authority)${LEGACY_PERMISSION_NOT_FIXED}`,
-        stillTrue: (h) => /SELECT 1 FROM meta_sheets WHERE id = \$1 FOR UPDATE/.test(h.code),
-      },
-      'POST /api/spreadsheets/:id/permissions/revoke': {
-        reason: `${LEGACY_PERMISSION_GAP}revokes on a soft-deleted multitable sheet (and on a live one without sheet authority)${LEGACY_PERMISSION_NOT_FIXED}`,
-        stillTrue: (h) => /SELECT 1 FROM meta_sheets WHERE id = \$1 FOR UPDATE/.test(h.code),
-      },
-    },
-  },
+  // #5829 CLOSED: all three legacy grant-table routes now run the same capability/liveness PAIR as
+  // the forward routes — resolveSheetCapabilities → 403 on !canManageSheetAccess →
+  // sendSheetNotLive — through the same-file helpers mayManageSheetAccess /
+  // answerUnlessSheetManageable, so the scan proves them GUARDED on the tree and no exemption is
+  // left to grant. (Since #5924 the forward routes run that same pair with no pre-gate existence
+  // check of their own — see routes/spreadsheet-permissions.ts's header for the residual, narrower
+  // differences.)
+  'routes/spreadsheet-permissions.ts': { minHandlers: 3, minInScope: 3, exempt: {} },
   // #5828 closed: all three `:sheetId` handlers now gate on loadLiveSpreadsheetSheet — see
   // "LEGACY SPREADSHEET SHEETS" for the parent-liveness AND the :sheetId → :id binding half.
   'routes/spreadsheets.ts': { minHandlers: 9, minInScope: 3, exempt: {} },
@@ -2145,10 +2137,13 @@ describe('sheet-liveness closure over EVERY route file', () => {
     // 12 after #5831 part A closed the six comment-id GAPs (GUARDED now, see COMMENT-ID ROUTES); 10 after
     // part B closed the inbox and unread-count GAPs (FILTERED now, see INBOX SCOPE); 9 after #5844 closed the
     // requireRecordReadable order GAP on main; 8 after #5891 closed the #5838 inline bulk-preview GAP
-    // (FIXED now, see PROVIDER_LOOPS); 5 after #5828 closed the three legacy spreadsheet GAPs (GUARDED now,
-    // see LEGACY SPREADSHEET SHEETS). A branch that closes another GAP lowers this floor by the number it
-    // removes (#5843, which closes the #5832 GAP, takes it to 4).
-    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(5)
+    // (FIXED now, see PROVIDER_LOOPS); 5 after #5828 closed the three legacy spreadsheet GAPs (GUARDED
+    // now, see LEGACY SPREADSHEET SHEETS); 2 after #5829 closed the three legacy
+    // spreadsheet-permissions GAPs (GUARDED now — routes/spreadsheet-permissions.ts carries the
+    // same capability/liveness pair as the forward routes, so its `exempt` table is empty). The two
+    // that remain are the PLUGIN ROUTE BRIDGE pair (#5833), both in index.ts. A branch that closes
+    // another GAP lowers this floor by the number it removes.
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(2)
   })
 
   it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {

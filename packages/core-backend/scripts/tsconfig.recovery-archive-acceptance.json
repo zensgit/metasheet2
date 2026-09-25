@@ -14,6 +14,7 @@
     "./verify-recovery-local-startup.mts",
     "./verify-recovery-manual-source.mts",
     "./verify-recovery-manual-checkpoint.mts",
+    "./verify-recovery-attachment-stage.mts",
     "./start-recovery-local.mts"
   ]
 }

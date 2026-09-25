@@ -61,6 +61,7 @@ import { useLocale } from '../src/composables/useLocale'
 import { isEmptyValue } from '../src/multitable/utils/conditional-formatting'
 import { formatFieldDisplay } from '../src/multitable/utils/field-display'
 import { recordHiddenFieldsHeading, recordLabel } from '../src/multitable/utils/meta-record-labels'
+import * as authenticatedApi from '../src/utils/api'
 import type { MetaRecordInspectorFieldLayout } from '../src/multitable/utils/recordDisplay'
 
 async function flushUi(cycles = 4) {
@@ -172,6 +173,7 @@ afterEach(() => {
   document.body.innerHTML = ''
   useLocale().setLocale('en')
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 // =====================================================================================================
@@ -1053,6 +1055,11 @@ describe('attachments 3-up gallery (§1.3 "Attachments") — CSS provision only'
   })
 
   it('attachment thumbnails still render through MetaAttachmentList inside the fields panel (the gallery is layout-only)', async () => {
+    vi.spyOn(authenticatedApi, 'apiFetch').mockResolvedValue(new Response(new Uint8Array([1]), { status: 200 }))
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = () => 'blob:gallery-thumbnail'
+      static revokeObjectURL = () => {}
+    })
     const { container } = mountPanel({
       record: record('rec_1', { fld_title: 'a', fld_files: ['att_1'] }),
       fields: [F_TITLE, F_FILES],
@@ -1061,6 +1068,7 @@ describe('attachments 3-up gallery (§1.3 "Attachments") — CSS provision only'
       },
     })
     await flushUi()
-    expect(container.querySelector('.meta-record-drawer__attachments .meta-attachment-list__items img')?.getAttribute('src')).toContain('thumbnail=true')
+    await vi.waitFor(() => expect(container.querySelector('.meta-record-drawer__attachments .meta-attachment-list__items img')?.getAttribute('src')).toBe('blob:gallery-thumbnail'))
+    expect(authenticatedApi.apiFetch).toHaveBeenCalledWith('/api/multitable/attachments/att_1?thumbnail=true', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 })

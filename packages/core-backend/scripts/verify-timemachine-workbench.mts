@@ -244,6 +244,70 @@ try {
     cases.push('workbench history shows named actor and every deleted value, then restores only that row')
     await page.getByRole('dialog', { name: 'History', exact: true }).getByRole('button', { name: 'Close', exact: true }).click()
     await expect(page.getByText('Synthetic project 0', { exact: true })).toBeVisible()
+    await row.locator('[data-test="grid-open-record"]').click()
+    const inspector = page.locator('.meta-record-drawer')
+    await expect(inspector).toBeVisible()
+    const inspectorHistory = page.waitForResponse((response) => new URL(response.url()).pathname
+      === `/api/multitable/sheets/${sheetId}/records/${records[0]}/history`
+      && response.request().method() === 'GET')
+    await inspector.getByRole('tab', { name: 'History', exact: true }).click()
+    const historyResponse = await inspectorHistory
+    assert.equal(historyResponse.status(), 200)
+    const historyEnvelope = await historyResponse.json()
+    assert.equal(historyEnvelope.ok, true)
+    const recordHistory = historyEnvelope.data
+    assert.ok(Array.isArray(recordHistory.items) && recordHistory.items.length > 0)
+    const historyRows = inspector.locator('.meta-record-drawer__history-item')
+    await expect(historyRows).toHaveCount(recordHistory.items.length)
+    await expect(historyRows.first()).toContainText('Recovery Tester')
+    const deletedHistoryRow = historyRows.filter({ hasText: 'Deleted' })
+    await expect(deletedHistoryRow).toHaveCount(1)
+    await expect(deletedHistoryRow.locator('[data-test="history-field-diff"]')).toHaveCount(2)
+    await expect(deletedHistoryRow).toContainText('Synthetic project 0')
+    await expect(deletedHistoryRow).toContainText('Quantity')
+    await expect(deletedHistoryRow.locator('[data-test="record-history-restore"]')).toHaveCount(0)
+    await expect(historyRows.first().locator('time')).toHaveText(new Intl.DateTimeFormat('en-US', {
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23', timeZoneName: 'short', timeZone: 'America/New_York',
+    }).format(new Date(recordHistory.items[0].createdAt)))
+    await page.screenshot({ path: resolve(output, 'record-inspector-history.png'), animations: 'disabled' })
+    cases.push('right-side record inspector loads real row history with deleted values, named actor and viewer-local time')
+    await inspector.locator('.meta-record-drawer__close').click()
+    await expect(inspector).toHaveCount(0)
+    const beforeHistoryRestore = (await q('SELECT data,version FROM meta_records WHERE id=$1', [records[0]])).rows[0]
+    await row.getByRole('gridcell', { name: 'Quantity', exact: true }).dblclick()
+    const numberEditor = row.locator('.meta-cell-editor__input[type="number"]')
+    await numberEditor.fill('42')
+    const editResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/multitable/patch'
+      && response.request().method() === 'POST')
+    await numberEditor.press('Enter')
+    assert.equal((await editResponse).status(), 200)
+    await expect(row.getByRole('gridcell', { name: 'Quantity', exact: true })).toHaveText('42')
+    const editedRecord = (await q('SELECT data,version FROM meta_records WHERE id=$1', [records[0]])).rows[0]
+    assert.equal(editedRecord.data[fields[1]], 42)
+    assert.equal(editedRecord.version, beforeHistoryRestore.version + 1)
+    await row.locator('[data-test="grid-open-record"]').click()
+    await inspector.getByRole('tab', { name: 'History', exact: true }).click()
+    await expect(inspector.locator('[data-test="record-history-restore"]')).toHaveCount(1)
+    await inspector.locator('[data-test="record-history-restore"]').click()
+    const recordPreview = page.locator('[data-test="restore-preview"]')
+    await expect(recordPreview.locator('[data-test="restore-preview-changes"]')).toContainText('Quantity')
+    await expect(recordPreview.locator('[data-test="restore-preview-confirm"]')).toBeEnabled()
+    assert.deepEqual((await q('SELECT data,version FROM meta_records WHERE id=$1', [records[0]])).rows[0], editedRecord)
+    const historyRestore = page.waitForResponse((response) => new URL(response.url()).pathname
+      === `/api/multitable/sheets/${sheetId}/records/${records[0]}/restore-execute`
+      && response.request().method() === 'POST')
+    await recordPreview.locator('[data-test="restore-preview-confirm"]').click()
+    assert.equal((await historyRestore).status(), 200)
+    await expect(row.getByRole('gridcell', { name: 'Quantity', exact: true })).toHaveText('7')
+    const historyRestored = (await q('SELECT data,version FROM meta_records WHERE id=$1', [records[0]])).rows[0]
+    assert.deepEqual(historyRestored.data, beforeHistoryRestore.data)
+    assert.equal(historyRestored.version, editedRecord.version + 1)
+    assert.deepEqual((await q('SELECT * FROM meta_records WHERE id=$1', [records[1]])).rows[0], before.records[1])
+    await expect(inspector.locator('[data-test="record-history-restored-from"]').first()).toBeVisible()
+    await page.screenshot({ path: resolve(output, 'record-inspector-restored.png'), animations: 'disabled' })
+    cases.push('right-side history previews then explicitly restores an edited row, increments once and preserves its peer')
+    await inspector.locator('.meta-record-drawer__close').click()
     process.env.MULTITABLE_TOMBSTONE_CAPTURE_ENABLED = 'true'
     const beforeColumn = await snapshot()
     await page.locator('.mt-workbench__actions').getByRole('button', { name: 'Fields', exact: true }).click()

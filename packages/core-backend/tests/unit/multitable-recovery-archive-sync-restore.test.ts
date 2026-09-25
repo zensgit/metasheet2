@@ -1,4 +1,10 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
+import { prepareArchiveAttachmentBatch } from '../../src/multitable/recovery-archive-attachment-prepare'
+import { ApplyRefusalError } from '../../src/multitable/exact-anchor-recovery-execute'
+import { loadArchiveAttachmentMetadataBindings } from '../../src/multitable/recovery-archive-attachment-apply'
+import type { QueryFn } from '../../src/multitable/permission-service'
+import { createArchiveAttachmentStageLedger } from '../../src/multitable/recovery-archive-attachment-stage-ledger'
+import { stageRecoveryArchiveAttachment } from '../../src/multitable/recovery-archive-attachment-stage'
 
 import {
   materializeRecoveryArchiveLinksForSync,
@@ -21,6 +27,49 @@ const row = (
 })
 
 describe('recovery archive sync restore facade', () => {
+  test('stage and ledger preserve explicit permission denial without IO', async () => {
+    const query = vi.fn()
+    const transaction = async <T>(work: (q: QueryFn) => Promise<T>) => work(query)
+    const ledger = createArchiveAttachmentStageLedger({ actorId: '11111111-1111-4111-8111-111111111111',
+      tokenHash: 'a'.repeat(64), tokenExpiresAt: '2099-01-01T00:00:00.000Z', transaction,
+      authorize: async () => false })
+    await expect(ledger.reserve({ generationId: 'g', workspaceId: 'w', baseId: 'b', sheetId: 's',
+      recordId: 'r', fieldId: 'f', attachmentId: 'att-original', sourceVersion: '1',
+      plaintextSha256: 'b'.repeat(64), sizeBytes: '1' })).rejects
+      .toMatchObject({ name: 'ArchiveAttachmentStageAuthorizationError' })
+    const storage = { uploadByKey: vi.fn(), readRecoveryAttachment: vi.fn(), reserveRecoveryAttachment: vi.fn() }
+    await expect(stageRecoveryArchiveAttachment({ original: {}, transactionDepth: { currentTransactionDepth: () => 0 },
+      authorize: async () => false, storage } as unknown as Parameters<typeof stageRecoveryArchiveAttachment>[0]))
+      .rejects.toMatchObject({ name: 'ArchiveAttachmentStageAuthorizationError' })
+    expect(query).not.toHaveBeenCalled()
+    for (const operation of Object.values(storage)) expect(operation).not.toHaveBeenCalled()
+  })
+
+  test('preparation permission revocation is a typed forbidden refusal before any source or storage access', async () => {
+    const query = vi.fn()
+    const storage = { uploadByKey: vi.fn(), readRecoveryAttachment: vi.fn(), reserveRecoveryAttachment: vi.fn() }
+    const input = {
+      apply: { token: 'synthetic', preliminaryFullRead: async () => false },
+      archive: { selectedBinding: { workspaceId: 'w', baseId: 'b' } },
+      transaction: async (work: (q: typeof query) => Promise<unknown>) => work(query),
+      storage,
+    } as unknown as Parameters<typeof prepareArchiveAttachmentBatch>[0]
+    await expect(prepareArchiveAttachmentBatch(input)).rejects.toMatchObject({ name: 'ApplyRefusalError', reason: 'forbidden' })
+    await expect(prepareArchiveAttachmentBatch(input)).rejects.toBeInstanceOf(ApplyRefusalError)
+    expect(query).not.toHaveBeenCalled()
+    for (const operation of Object.values(storage)) expect(operation).not.toHaveBeenCalled()
+  })
+
+  test('missing original attachment metadata has a distinct binding refusal; DB failures stay infrastructure errors', async () => {
+    const cells = [{ recordId: 'r', fieldId: 'f', beforeIds: [], targetIds: ['att-original'] }]
+    const query = vi.fn(async () => ({ rows: [] })) as unknown as QueryFn
+    await expect(loadArchiveAttachmentMetadataBindings(query, 's', cells)).rejects
+      .toMatchObject({ name: 'ArchiveAttachmentMetadataBindingError' })
+    const failure = new Error('synthetic database failure')
+    const broken = vi.fn(async () => { throw failure }) as unknown as QueryFn
+    await expect(loadArchiveAttachmentMetadataBindings(broken, 's', cells)).rejects.toBe(failure)
+  })
+
   test('materializes the authenticated link section into one canonical authority projection', () => {
     expect(materializeRecoveryArchiveLinksForSync([
       row('link-b', 'field-a', 'record-b', 'target-a'),

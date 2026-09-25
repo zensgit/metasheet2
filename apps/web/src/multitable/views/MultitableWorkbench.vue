@@ -559,6 +559,7 @@
       :visible="batchRestore.visible"
       :phase="batchRestore.phase"
       :loading="batchRestore.loading"
+      :executing="batchRestoreExecuting"
       :target-version="batchRestore.targetVersion"
       :preview-records="batchRestore.records"
       :restorable-count="batchRestore.restorableCount"
@@ -3041,16 +3042,27 @@ const restorePreview = ref<{
 
 const restorePreviewFieldName = (fieldId: string): string => scopedAllFields.value.find((f) => f.id === fieldId)?.name ?? fieldId
 
+let restoreRequestId = 0
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  onCancelRestore,
+  { flush: 'sync' },
+)
+onBeforeUnmount(onCancelRestore)
+
 async function onRestoreRecordVersion(payload: { recordId: string; targetVersion: number; expectedVersion: number; fieldIds?: string[] }) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
+  const requestId = ++restoreRequestId
   // Full-record AND per-field (column-subset) both go through preview→confirm→execute now — fieldIds is carried
   // through so the preview shows exactly the selected changes and the identity binds that filtered set.
   restorePreview.value = { visible: true, loading: true, changes: [], schemaDrift: false, executable: false, identity: null, payload: { recordId: payload.recordId, targetVersion: payload.targetVersion, expectedVersion: payload.expectedVersion, fieldIds: payload.fieldIds } }
   try {
     const pv = await workbench.client.restorePreviewRecord(sheetId, payload.recordId, payload.targetVersion, payload.fieldIds)
+    if (requestId !== restoreRequestId) return
     restorePreview.value = { ...restorePreview.value, loading: false, changes: pv.changes, schemaDrift: pv.schemaDrift, executable: pv.previewIdentity != null, identity: pv.previewIdentity }
   } catch (error) {
+    if (requestId !== restoreRequestId) return
     restorePreview.value = { ...restorePreview.value, visible: false }
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
@@ -3059,21 +3071,25 @@ async function onRestoreRecordVersion(payload: { recordId: string; targetVersion
 async function onConfirmRestore() {
   const sheetId = workbench.activeSheetId.value
   const state = restorePreview.value
-  if (!sheetId || !state.payload || !state.identity) { restorePreview.value = { ...state, visible: false }; return }
+  if (!sheetId || !state.visible || state.loading || !state.payload || !state.identity) return
+  const requestId = ++restoreRequestId
   const { recordId, targetVersion, expectedVersion, fieldIds } = state.payload
   restorePreview.value = { ...state, visible: false }
   try {
     const result = await workbench.client.restoreExecuteRecord(sheetId, recordId, targetVersion, expectedVersion, state.identity, fieldIds)
+    if (requestId !== restoreRequestId) return
     showSuccess(recordLabel(result.noop ? 'record.restoreNoop' : 'record.restoreSuccess', isZh.value))
     await grid.loadViewData(grid.page.value.offset)
-    if (selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
+    if (requestId === restoreRequestId && selectedRecordId.value) await refreshSelectedRecordContext(selectedRecordId.value)
   } catch (error) {
+    if (requestId !== restoreRequestId) return
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
 }
 
 function onCancelRestore() {
-  restorePreview.value = { ...restorePreview.value, visible: false }
+  restoreRequestId++
+  restorePreview.value = { visible: false, loading: false, changes: [], schemaDrift: false, executable: false, identity: null, payload: null }
 }
 
 // BS-4: scoped (multi-record) restore. Default entry = revert-to-original (v1); the dialog's Advanced picker
@@ -3118,11 +3134,18 @@ const batchRecordLabel = (recordId: string): string => {
 // Monotonic token: rapid Advanced version-switching (v3 → v4) can resolve out of order — only the LAST request's
 // response may land, or a slow v3 could overwrite v4's preview (wrong diff shown / identity mismatch at confirm).
 let batchPreviewSeq = 0
+const batchRestoreExecuting = computed(() => batchRestore.value.loading && batchRestore.value.identity !== null)
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  invalidateBatchRestore,
+  { flush: 'sync' },
+)
+onBeforeUnmount(invalidateBatchRestore)
 async function runBatchPreview(version: number) {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return
   const seq = ++batchPreviewSeq
-  batchRestore.value = { ...batchRestore.value, loading: true, targetVersion: version }
+  batchRestore.value = { ...batchRestore.value, loading: true, targetVersion: version, identity: null, executable: false }
   try {
     const pv = await workbench.client.restoreBatchPreview(sheetId, batchRestore.value.recordIds, version)
     if (seq !== batchPreviewSeq) return // a newer preview superseded this one → drop the stale response
@@ -3141,13 +3164,15 @@ function onBulkRestoreRequest(recordIds: string[]) {
 }
 
 function onBatchPreviewVersion(version: number) {
+  if (!batchRestore.value.visible || batchRestore.value.phase !== 'preview') return
+  if (batchRestore.value.loading && batchRestore.value.identity) return
   void runBatchPreview(version)
 }
 
 async function onConfirmBatchRestore() {
   const sheetId = workbench.activeSheetId.value
   const state = batchRestore.value
-  if (!sheetId || !state.identity || state.scope.length === 0) { batchRestore.value = { ...state, visible: false }; return }
+  if (!sheetId || !state.visible || state.loading || state.phase !== 'preview' || !state.identity || state.scope.length === 0) return
   const expectedVersions = buildBatchExpectedVersions(state.records, state.scope) // wire-drift guard
   // [P3] FE fail-closed: if any scope record lacks a previewVersion, expectedVersions would be incomplete and the
   // server would 400 — block the execute and show a restore error (the user re-opens batch restore to retry) rather
@@ -3159,22 +3184,31 @@ async function onConfirmBatchRestore() {
     return
   }
   batchRestore.value = { ...state, loading: true }
+  const seq = ++batchPreviewSeq
   try {
     const result = await workbench.client.restoreBatchExecute(sheetId, state.scope, state.targetVersion, expectedVersions, state.identity)
+    if (seq !== batchPreviewSeq) return
     batchRestore.value = { ...batchRestore.value, loading: false, phase: 'result', resultRecords: result.records, restoredCount: result.restoredCount, skippedCount: result.skippedCount }
     await grid.loadViewData(grid.page.value.offset)
+    if (seq !== batchPreviewSeq) return
     showSuccess(`${result.restoredCount} ${recordLabel('record.batchRestoreRestored', isZh.value)} · ${result.skippedCount} ${recordLabel('record.batchRestoreSummarySkipped', isZh.value)}`)
   } catch (error) {
+    if (seq !== batchPreviewSeq) return
     batchRestore.value = { ...batchRestore.value, loading: false }
     showError((error as Error)?.message ?? recordLabel('record.errorRestore', isZh.value))
   }
 }
 
 function onBatchRestoreDone() {
-  batchRestore.value = { ...batchRestore.value, visible: false }
+  onBatchRestoreCancel()
 }
 function onBatchRestoreCancel() {
-  batchRestore.value = { ...batchRestore.value, visible: false }
+  if (batchRestoreExecuting.value) return
+  invalidateBatchRestore()
+}
+function invalidateBatchRestore() {
+  batchPreviewSeq++
+  batchRestore.value = { visible: false, phase: 'preview', loading: false, targetVersion: 1, recordIds: [], records: [], scope: [], restorableCount: 0, skippedCount: 0, executable: false, identity: null, resultRecords: [], restoredCount: 0 }
 }
 
 async function onReloadConflict() {
@@ -5862,7 +5896,7 @@ defineExpose({
    `--primary` amber variant below is deliberately KEPT as an additive class — MtButton has no
    warning/amber variant, so it preserves the banner's attention fill on the retry action. */
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
-.mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 16px 0; }
 .mt-workbench__capability-banner {
   margin: 8px 16px 0;
   padding: 3px 10px;
@@ -5876,7 +5910,7 @@ defineExpose({
   font-size: 12px;
   line-height: 1.6;
   color: var(--ms-text-2, #646a73);
-  max-width: 100%;
+  max-width: calc(100% - 32px);
 }
 .mt-workbench__capability-banner::before {
   content: '\1F512';

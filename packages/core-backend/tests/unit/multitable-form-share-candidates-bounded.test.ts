@@ -112,8 +112,11 @@ async function buildApp(opts?: { sheetAccess?: string; sheetExists?: boolean }):
   PERMISSION_CANDIDATES_MAX = univerMeta.PERMISSION_CANDIDATES_MAX_ITEMS
 
   const query = vi.fn(async (sql: string, _params?: unknown[]): Promise<QueryResult> => {
+    // #5839 B2: form-share-candidates' own sheet-row probe is gone — the route's ONLY 404 source is now
+    // the post-403 sheetLiveness answer, fed by this liveness query. Honour `sheetExists:false` here
+    // (not just on the projection branch below) so the 404 case still proves something real.
     if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
-      return { rows: [{ deleted_at: null }], rowCount: 1 }
+      return opts?.sheetExists === false ? { rows: [] } : { rows: [{ deleted_at: null }] }
     }
     if (sql.includes('FROM meta_sheets WHERE id = $1') && sql.includes('base_id')) {
       if (opts?.sheetExists === false) return { rows: [] }
@@ -202,7 +205,9 @@ describe('#5795 form-share candidates — bounded disclosure', () => {
       expect(rosterCalls).toHaveLength(0)
     })
 
-    it('the short-circuit sits AFTER the sheet 404', async () => {
+    // #5839 B2: the route's own sheet-row probe is gone, so this is now the positive proof that an
+    // absent sheet still 404s — via the post-403 sheetLiveness answer alone (manager on ABSENT → 404).
+    it('manager on ABSENT sheet: 404, from sheetLiveness alone (the short-circuit still sits after it)', async () => {
       pinned.setApp(await buildApp({ sheetExists: false }))
 
       const res = await request(pinned.url()).get(url)
