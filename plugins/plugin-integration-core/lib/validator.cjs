@@ -111,18 +111,24 @@ function compilePattern(rule) {
   const pattern = ruleValue(rule, ['regex', 'pattern', 'value'])
   const flags = ruleValue(rule, ['flags'])
 
-  if (pattern instanceof RegExp) return { regexp: pattern, error: null }
+  // `patternLength` is what the length gate measures: the caller's own string,
+  // which is what the backend and web copies measure too. `RegExp.prototype.source`
+  // re-escapes `/` and line breaks, so it is never shorter than the string it was
+  // compiled from and would refuse an at-limit pattern the other copies accept.
+  // Only a rule that carries a RegExp instance (no original string to measure)
+  // falls back to `source`.
+  if (pattern instanceof RegExp) return { regexp: pattern, patternLength: pattern.source.length, error: null }
   if (typeof pattern !== 'string') {
-    return { regexp: null, error: 'pattern rule requires params.regex, params.pattern, or params.value' }
+    return { regexp: null, patternLength: 0, error: 'pattern rule requires params.regex, params.pattern, or params.value' }
   }
   if (flags !== undefined && typeof flags !== 'string') {
-    return { regexp: null, error: 'pattern flags must be a string' }
+    return { regexp: null, patternLength: pattern.length, error: 'pattern flags must be a string' }
   }
 
   try {
-    return { regexp: new RegExp(pattern, flags), error: null }
+    return { regexp: new RegExp(pattern, flags), patternLength: pattern.length, error: null }
   } catch (error) {
-    return { regexp: null, error: error.message }
+    return { regexp: null, patternLength: pattern.length, error: error.message }
   }
 }
 
@@ -163,7 +169,7 @@ function validateValue(value, rules, field = null) {
         break
       case 'pattern': {
         if (isEmpty(value)) break
-        const { regexp, error } = compilePattern(rule)
+        const { regexp, patternLength, error } = compilePattern(rule)
         if (error) {
           errors.push(makeError(field, rule, 'INVALID_RULE', `${fieldLabel} has invalid pattern rule`, value, { error }))
           break
@@ -174,7 +180,7 @@ function validateValue(value, rules, field = null) {
         // is reported under its own code so a pipeline operator can tell "the
         // value is malformed" from "the check declined to run".
         const subject = String(value)
-        const refusal = findUserRegexLengthRefusal(regexp.source.length, subject.length)
+        const refusal = findUserRegexLengthRefusal(patternLength, subject.length)
         if (refusal) {
           errors.push(makeError(field, rule, 'PATTERN_NOT_EVALUATED', `${fieldLabel} could not be pattern-checked`, value, {
             reason: refusal.kind,

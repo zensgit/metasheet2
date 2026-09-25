@@ -359,6 +359,19 @@ describe('formula engine site — same answer as before inside the limits', () =
     ['=REGEXEXTRACT("abc", "[")', '#ERROR!'],
     ['=REGEXREPLACE("abc", "[", "x")', '#ERROR!'],
     ['=SUBSTITUTE("abc", "[", "x")', '#ERROR!'],
+    // NESTED. A refused SUBSTITUTE THROWS (an invalid pattern threw before this
+    // slice too), so the whole formula is #ERROR! however deeply it sits — an
+    // outer LEN never sees a 7-character string, and IFERROR cannot trap it
+    // because the throw happens while its arguments are being evaluated (the
+    // engine's existing semantics for a throw, measured on the base). The
+    // REGEX* functions return the sentinel as a STRING, which an outer function
+    // then receives as an ordinary value — also as before. Both halves are
+    // pinned so the asymmetry is documented, not accidental.
+    // MUTATION: SUBSTITUTE returning '#ERROR!' instead of throwing -> LEN row 7, IFERROR row "fb".
+    ['=LEN(SUBSTITUTE("abc", "[", "x"))', '#ERROR!'],
+    ['=IFERROR(SUBSTITUTE("abc", "[", "x"), "fb")', '#ERROR!'],
+    ['=LEN(REGEXREPLACE("abc", "[", "x"))', 7],
+    ['=IFERROR(REGEXREPLACE("abc", "[", "x"), "fb")', 'fb'],
   ])('%s -> %j', async (formula, expected) => {
     expect(await engine.calculate(formula, ctx)).toEqual(expected)
   })
@@ -399,14 +412,35 @@ describe('formula engine site — refusals at the limits', () => {
     expect(fn('SUBSTITUTE')(atCap, 'a', '')).toBe('')
   })
 
-  it.each(['REGEXMATCH', 'REGEXEXTRACT', 'REGEXREPLACE', 'SUBSTITUTE'])('%s reports #ERROR! for a subject one over the limit', (name) => {
+  it.each(['REGEXMATCH', 'REGEXEXTRACT', 'REGEXREPLACE'])('%s reports #ERROR! for a subject one over the limit', (name) => {
     expect(fn(name)(overCap, '^a+$', '')).toBe('#ERROR!')
     // The previous implementation returned a real answer for this input; the
     // difference is the gate, not a changed answer inside the limits.
   })
 
-  it.each(['REGEXMATCH', 'REGEXEXTRACT', 'REGEXREPLACE', 'SUBSTITUTE'])('%s reports #ERROR! for a pattern one over the limit', (name) => {
+  it.each(['REGEXMATCH', 'REGEXEXTRACT', 'REGEXREPLACE'])('%s reports #ERROR! for a pattern one over the limit', (name) => {
     expect(fn(name)('abc', longPattern, '')).toBe('#ERROR!')
+  })
+
+  it('SUBSTITUTE throws for a subject or a pattern one over the limit, naming the limit', () => {
+    // Thrown, not returned: see the nested pins above and in the table below.
+    expect(() => fn('SUBSTITUTE')(overCap, '^a+$', '')).toThrow(`${USER_REGEX_MAX_SUBJECT_LEN}-character limit`)
+    expect(() => fn('SUBSTITUTE')('abc', longPattern, '')).toThrow(`${USER_REGEX_MAX_PATTERN_LEN}-character limit`)
+  })
+
+  it.each([
+    // Over the limit, nested: the whole formula is #ERROR! (thrown), never a
+    // sentinel string handed to the outer function. MUTATION: SUBSTITUTE
+    // returning '#ERROR!' -> the LEN row gives 7 and the IFERROR row gives "fb".
+    { name: 'LEN(SUBSTITUTE(subject one over))', formula: `=LEN(SUBSTITUTE("${overCap}", "a", ""))`, expected: '#ERROR!' },
+    { name: 'IFERROR(SUBSTITUTE(subject one over))', formula: `=IFERROR(SUBSTITUTE("${overCap}", "a", ""), "fb")`, expected: '#ERROR!' },
+    { name: 'LEN(SUBSTITUTE(pattern one over))', formula: `=LEN(SUBSTITUTE("abc", "${longPattern}", ""))`, expected: '#ERROR!' },
+    // At the limit the real answer flows out to the outer function.
+    { name: 'LEN(SUBSTITUTE(subject at the limit))', formula: `=LEN(SUBSTITUTE("${atCap}", "a", ""))`, expected: 0 },
+    // REGEX* contrast: the sentinel string reaches LEN, as it did before for an invalid pattern.
+    { name: 'LEN(REGEXREPLACE(subject one over))', formula: `=LEN(REGEXREPLACE("${overCap}", "a", ""))`, expected: 7 },
+  ])('$name', async ({ formula, expected }) => {
+    expect(await engine.calculate(formula, ctx)).toEqual(expected)
   })
 })
 
@@ -538,8 +572,9 @@ describe('timing regression — over-limit quadratic subject returns promptly at
   })
 
   it('SUBSTITUTE', () => {
-    const r = ms(() => fn('SUBSTITUTE')(quadraticSubject, TAIL, ''))
-    expect(r.out).toBe('#ERROR!')
+    // SUBSTITUTE reports a refusal by throwing; the clock stops either way.
+    const r = ms(() => { try { fn('SUBSTITUTE')(quadraticSubject, TAIL, ''); return 'returned' } catch { return 'threw' } })
+    expect(r.out).toBe('threw')
     expect(r.ms).toBeLessThan(THRESHOLD_MS)
   })
 
