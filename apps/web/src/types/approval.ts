@@ -621,6 +621,37 @@ export interface ApprovalTemplateListItemDTO {
   updatedAt: string
 }
 
+/**
+ * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 3 (A-4) FE read
+ * surface. Mirrors the backend's `ApprovalTemplateGroupRow` (`ApprovalTemplateGroupService.ts`)
+ * byte-for-byte — same camelCase field set, no re-derivation on this side.
+ */
+export interface ApprovalTemplateGroupDTO {
+  id: string
+  orgId: string
+  name: string
+  sortOrder: number | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  archivedAt: string | null
+}
+
+/**
+ * Approval form grouping lock v2.13 §3 I3 / §4 acceptance row E (phase-3 leg) — the reorder
+ * endpoint's ACTUAL response shape. Mirrors the backend's `ApprovalTemplateGroupReorderResult`
+ * (`ApprovalTemplateGroupReorderService.ts`) byte-for-byte: `{id, sortOrder}` only — the reorder
+ * transaction never re-reads `name`/`createdBy`/`archivedAt` after its per-row `UPDATE`s, so those
+ * fields are NOT part of this response. Deliberately its own type, not `ApprovalTemplateGroupDTO`
+ * (which this endpoint's response was previously, incorrectly, typed as — a caller trusting the
+ * wider type for any field beyond `id`/`sortOrder` would read `undefined` at runtime despite the
+ * compiler believing otherwise).
+ */
+export interface ApprovalTemplateGroupReorderResultDTO {
+  id: string
+  sortOrder: number
+}
+
 export interface ApprovalTemplateDetailDTO extends ApprovalTemplateListItemDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph

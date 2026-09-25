@@ -73,6 +73,38 @@ on:
       - 'apps/web/tests/templateCenterI18n.spec.ts'
       - 'apps/web/tests/approvalTemplateCenterCategory.spec.ts'
       - 'apps/web/tests/approvalTemplateVersionHistory.spec.ts'
+      # A-2 (approval form grouping design lock v2.13, RATIFIED 2026-09-18, §6 phase 1 / acceptance
+      # J front-end half, 2026-09-18): this lane's own two-point gap (AGENTS.md "Testing
+      # Guidelines" — a new spec needs BOTH the domain web-guard workflow AND
+      # run-required-web-tests.sh; these three specs were already on the latter's exec line but
+      # absent here, same shape as the categoryCandidateInput/templateDetailI18n gap above). THIS
+      # file is the advisory/targeted half of the pair — its own header above ("Scope
+      # (deliberately TARGETED...)") says it is NOT a required check; the REQUIRED gating for
+      # these three specs already comes from run-required-web-tests.sh -> web-tests.yml.
+      # `SessionOrgSwitcher.vue` is the shared component copied and generalized from
+      # `views/attendance/AttendanceSessionOrgSwitcher.vue` (that file and `useSessionOrg.ts` stay
+      # untouched — moving/editing either would narrow attendance-web-guard.yml's closed-world
+      # census). `ApprovalTemplateGroupsPanel.vue` (mounted from TemplateCenterView.vue, already
+      # listed above) is the only place in this slice exercising acceptance J: a 403
+      # `SESSION_ORG_REQUIRED` on a group endpoint shows the switcher, selecting an org retries the
+      # blocked call. `approvals/api.ts` (the seven group-endpoint client functions) is already
+      # listed above.
+      - 'apps/web/src/components/SessionOrgSwitcher.vue'
+      - 'apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue'
+      - 'apps/web/tests/SessionOrgSwitcher.spec.ts'
+      - 'apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts'
+      - 'apps/web/tests/approvalTemplateGroupsClient.spec.ts'
+      # A-4 (approval form grouping design lock v2.13 §6 phase 3, 2026-09-20): the grouped-view
+      # half of the same two-point pair as the A-2 entries directly above, added for exactly the
+      # same reason and with exactly the same standing — `approvalTemplateCenterSections.spec.ts`
+      # was already on `run-required-web-tests.sh`'s single exec line (the REQUIRED half, via
+      # web-tests.yml) but absent from this advisory/targeted workflow, so an edit to
+      # `TemplateGroupSections.vue` triggered no targeted run. `TemplateGroupSections.vue` also now
+      # carries the page-level half of acceptance J (a 403 `SESSION_ORG_REQUIRED` on its mount-time
+      # load routes into the same shared `SessionOrgSwitcher.vue` listed above), which is why it
+      # belongs on the same filter as the panel rather than on a filter of its own.
+      - 'apps/web/src/views/approval/TemplateGroupSections.vue'
+      - 'apps/web/tests/approvalTemplateCenterSections.spec.ts'
       - 'apps/web/src/views/approval/TemplateCenterView.vue'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/ApprovalNewView.vue'
@@ -393,6 +425,17 @@ on:
       # can serve one account's answer to the next, which is the defect this surface exists to
       # prevent — so both belong in this filter alongside the module that consumes them.
       - 'apps/web/src/composables/authPrincipal.ts'
+      # A-5 日常操作收口 round 4 (2026-09-21): the approval-template LIST STORE. The template
+      # center's flat surfaces do not own the rows, the total, the error or the loading flag they
+      # render — `approvals/templateStore.ts` does, and round 4 moved the request algebra (request
+      # generation + the session signature the read was issued under) into it, because a page-local
+      # generation cannot stop an older read from overwriting a slot the page does not own.
+      # The nine cases that drive that store's three exits are the ONLY coverage those exits have
+      # anywhere (the five component specs replace this module with a `vi.fn()` whose error/loading
+      # are hand-driven refs, so its catch and finally exits are unreachable from them); they live
+      # in `approvalTemplateCenterCategory.spec.ts`, already listed above. Without this path a change
+      # touching only this file would not run them.
+      - 'apps/web/src/approvals/templateStore.ts'
       - 'apps/web/src/composables/useAuth.ts'
       # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
       # transition and guards a late answer with a generation. A change to it can leave a mounted
@@ -470,6 +513,38 @@ on:
       - 'apps/web/tests/templateCenterI18n.spec.ts'
       - 'apps/web/tests/approvalTemplateCenterCategory.spec.ts'
       - 'apps/web/tests/approvalTemplateVersionHistory.spec.ts'
+      # A-2 (approval form grouping design lock v2.13, RATIFIED 2026-09-18, §6 phase 1 / acceptance
+      # J front-end half, 2026-09-18): this lane's own two-point gap (AGENTS.md "Testing
+      # Guidelines" — a new spec needs BOTH the domain web-guard workflow AND
+      # run-required-web-tests.sh; these three specs were already on the latter's exec line but
+      # absent here, same shape as the categoryCandidateInput/templateDetailI18n gap above). THIS
+      # file is the advisory/targeted half of the pair — its own header above ("Scope
+      # (deliberately TARGETED...)") says it is NOT a required check; the REQUIRED gating for
+      # these three specs already comes from run-required-web-tests.sh -> web-tests.yml.
+      # `SessionOrgSwitcher.vue` is the shared component copied and generalized from
+      # `views/attendance/AttendanceSessionOrgSwitcher.vue` (that file and `useSessionOrg.ts` stay
+      # untouched — moving/editing either would narrow attendance-web-guard.yml's closed-world
+      # census). `ApprovalTemplateGroupsPanel.vue` (mounted from TemplateCenterView.vue, already
+      # listed above) is the only place in this slice exercising acceptance J: a 403
+      # `SESSION_ORG_REQUIRED` on a group endpoint shows the switcher, selecting an org retries the
+      # blocked call. `approvals/api.ts` (the seven group-endpoint client functions) is already
+      # listed above.
+      - 'apps/web/src/components/SessionOrgSwitcher.vue'
+      - 'apps/web/src/views/approval/ApprovalTemplateGroupsPanel.vue'
+      - 'apps/web/tests/SessionOrgSwitcher.spec.ts'
+      - 'apps/web/tests/ApprovalTemplateGroupsPanel.spec.ts'
+      - 'apps/web/tests/approvalTemplateGroupsClient.spec.ts'
+      # A-4 (approval form grouping design lock v2.13 §6 phase 3, 2026-09-20): the grouped-view
+      # half of the same two-point pair as the A-2 entries directly above, added for exactly the
+      # same reason and with exactly the same standing — `approvalTemplateCenterSections.spec.ts`
+      # was already on `run-required-web-tests.sh`'s single exec line (the REQUIRED half, via
+      # web-tests.yml) but absent from this advisory/targeted workflow, so an edit to
+      # `TemplateGroupSections.vue` triggered no targeted run. `TemplateGroupSections.vue` also now
+      # carries the page-level half of acceptance J (a 403 `SESSION_ORG_REQUIRED` on its mount-time
+      # load routes into the same shared `SessionOrgSwitcher.vue` listed above), which is why it
+      # belongs on the same filter as the panel rather than on a filter of its own.
+      - 'apps/web/src/views/approval/TemplateGroupSections.vue'
+      - 'apps/web/tests/approvalTemplateCenterSections.spec.ts'
       - 'apps/web/src/views/approval/DelegationSettingsView.vue'
       - 'apps/web/src/views/approval/MyDelegationView.vue'
       - 'apps/web/src/components/layout/PageShell.vue'
@@ -774,6 +849,17 @@ on:
       # can serve one account's answer to the next, which is the defect this surface exists to
       # prevent — so both belong in this filter alongside the module that consumes them.
       - 'apps/web/src/composables/authPrincipal.ts'
+      # A-5 日常操作收口 round 4 (2026-09-21): the approval-template LIST STORE. The template
+      # center's flat surfaces do not own the rows, the total, the error or the loading flag they
+      # render — `approvals/templateStore.ts` does, and round 4 moved the request algebra (request
+      # generation + the session signature the read was issued under) into it, because a page-local
+      # generation cannot stop an older read from overwriting a slot the page does not own.
+      # The nine cases that drive that store's three exits are the ONLY coverage those exits have
+      # anywhere (the five component specs replace this module with a `vi.fn()` whose error/loading
+      # are hand-driven refs, so its catch and finally exits are unreachable from them); they live
+      # in `approvalTemplateCenterCategory.spec.ts`, already listed above. Without this path a change
+      # touching only this file would not run them.
+      - 'apps/web/src/approvals/templateStore.ts'
       - 'apps/web/src/composables/useAuth.ts'
       # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
       # transition and guards a late answer with a generation. A change to it can leave a mounted
@@ -967,4 +1053,28 @@ jobs:
         # cancelEditCategory when a candidate is being keyboard-accepted, alongside its existing i18n
         # retrofit coverage. Inserted next to the neighbouring `templateCenterI18n`/`approvalTemplateCenterCategory`
         # tokens (same view family).
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry categoryCandidateInput templateDetailI18n --reporter=dot
+        # A-2 (approval form grouping design lock v2.13, acceptance J front-end half, 2026-09-18):
+        # `SessionOrgSwitcher.spec.ts` (full-filename token — its bare basename would also collect
+        # `AttendanceSessionOrgSwitcher.spec.ts`, harmless since that file has no dedicated token in
+        # THIS workflow, but the full-filename form keeps this line's intent legible),
+        # `approvalTemplateGroupsClient`, and `ApprovalTemplateGroupsPanel` close this lane's own
+        # two-point gap for the three new A-2 specs (paths above; same shape as the
+        # categoryCandidateInput/templateDetailI18n gap fixed earlier in this file). Checked against
+        # every existing token in this exact command (103 before, 106 after) with a bidirectional
+        # substring scan (`python3`, extracting this run line verbatim): each of the 3 new tokens
+        # is a substring of none of the 103 pre-existing ones and none of the 103 is a substring of
+        # any new one. NOT claiming the 103 are collision-free among THEMSELVES — they are not
+        # (pre-existing, untouched by this change: `approval-record-link`/
+        # `approval-record-link-picker`, `approval-center`/`approval-center-master-detail`/
+        # `approval-center-detail-pane-controller`).
+        # A-4 (same lock, §6 phase 3 grouped view, 2026-09-20): ONE token added,
+        # `approvalTemplateCenterSections` — closes the A-4 half of the same two-point gap
+        # (`paths:` above), pairing this targeted workflow with the token that was already on
+        # run-required-web-tests.sh's exec line. It matches exactly one file
+        # (`apps/web/tests/approvalTemplateCenterSections.spec.ts`). Bidirectional substring scan
+        # re-run over this exact command (106 before, 107 after; note the pre-existing duplicate
+        # tokens on this line mean 104 DISTINCT after): the new token is a substring of none of the
+        # 106 pre-existing ones, and none of the 106 is a substring of it — in particular the
+        # neighbouring `approvalTemplateCenterCategory` diverges right after
+        # `approvalTemplateCenter`, so neither collects the other's file.
+        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry categoryCandidateInput templateDetailI18n SessionOrgSwitcher.spec.ts approvalTemplateGroupsClient ApprovalTemplateGroupsPanel approvalTemplateCenterSections --reporter=dot

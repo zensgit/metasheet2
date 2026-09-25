@@ -242,7 +242,11 @@ export interface ApprovalTemplateVisibilityActor {
   isTemplateManager: boolean
 }
 
-type TemplateRow = {
+// Exported (approval form grouping lock v2.13 §6 phase 3, A-4) so
+// `ApprovalTemplateGroupSectionService.ts` can map its own section-scoped query results through
+// the SAME row shape and DTO mapper below rather than re-deriving them — one row->DTO
+// definition, not a second one that could drift from `visibility_scope` / `sla_hours` coercion.
+export type TemplateRow = {
   id: string
   key: string
   name: string
@@ -4074,7 +4078,10 @@ function asApprovalGraph(value: Record<string, unknown>): ApprovalGraph {
   return normalizeApprovalGraph(value, STORED_GRAPH_CONTEXT)
 }
 
-function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListItemDTO {
+// Exported for the same reason as `TemplateRow` above — the section-scoped list query
+// (`ApprovalTemplateGroupSectionService.ts`) selects `t.*` from this same table and must map it
+// through this exact function so the `data[]` shape is byte-identical to the unsectioned path.
+export function toApprovalTemplateListItemDTO(row: TemplateRow): ApprovalTemplateListItemDTO {
   return {
     id: row.id,
     key: row.key,

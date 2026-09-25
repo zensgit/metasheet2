@@ -441,6 +441,13 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/TemplateAuthoringView.vue', 'section.label} ${section.description}${section.id'],
     ['src/views/approval/TemplateAuthoringView.vue', 'approval-template-section-${section.id}'],
     ['src/views/approval/TemplateAuthoringView.vue', 'approval-template-preset-${preset.id}'],
+    // Approval form grouping lock v2.13 §6 phase 3 (A-4) — TemplateGroupSections.vue's per-item
+    // test hook (a TEMPLATE id, not a person id); the visible render one line below is
+    // `{{ item.name }}`, never `item.id`.
+    ['src/views/approval/TemplateGroupSections.vue', '`template-group-section-item-${item.id}`'],
+    // Same file, the per-item move-to-group `<select>`'s test hook — same TEMPLATE id, same
+    // reasoning (the visible option text is `target.label`, never a raw id).
+    ['src/views/approval/TemplateGroupSections.vue', ':data-testid="`template-group-section-move-${item.id}`"'],
   ]),
 
   // ---- OUT-OF-SCOPE: non-person entity ids (approval instance / template / version row) in a data-testid, route path, or a function-call argument (not a rendered id -- the FUNCTION'S RETURN is what renders) ----
@@ -476,6 +483,21 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/TemplateCenterView.vue', "router.push({ path: `/approval-templates/${row.id}` })"],
     ['src/views/approval/TemplateCenterView.vue', "router.push({ path: `/approval-templates/${cloned.id}` })"],
     ['src/views/approval/TemplateAuthoringView.vue', 'id: `${next.id}_col1`,'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: an APPROVAL TEMPLATE GROUP id (not a person id) embedded in a `section=`
+  // API filter token -- lock v2.13 §4 acceptance row C's `group:<id>` bucket token, sent to the
+  // backend as a query parameter, never rendered as visible text. The group's `name` (a resolved,
+  // authored label -- same audience/shape as the department/role names elsewhere in this
+  // allowlist) is what actually renders in the section header (`{{ section.title }}`, itself
+  // sourced from `g.name`, never `g.id`). ----
+  ...group('OUT-OF-SCOPE', 'an APPROVAL TEMPLATE GROUP id (not a person id) embedded in a `section=group:<id>` API filter token, never rendered as visible text -- only the group\'s `name` is displayed', [
+    ['src/views/approval/TemplateGroupSections.vue', '...groups.map((g) => ({ token: `${GROUP_TOKEN_PREFIX}${g.id}`, title: g.name, alwaysShow: true })),'],
+    // Same token shape, rebuilt from the reorder endpoint's response (`{id, sortOrder}[]`) to
+    // re-key `sections.value` by token after a move -- still the group id, still never rendered
+    // (the map's VALUE, `r.sortOrder`, drives a `.sort()`, and `.sort()` output is positional, not
+    // text).
+    ['src/views/approval/TemplateGroupSections.vue', 'const sortOrderByToken = new Map(results.map((r) => [`${GROUP_TOKEN_PREFIX}${r.id}`, r.sortOrder]))'],
   ]),
 
   // ---- OUT-OF-SCOPE: ids embedded in a non-rendered cache/storage/dedup key ----
