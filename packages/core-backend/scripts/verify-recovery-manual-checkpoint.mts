@@ -2585,7 +2585,7 @@ try {
   await shutdownAuthMessaging?.()
   if (!applicationClosedDownloadPool) await downloadPools?.close()
   if (created) {
-    const readRemaining = async () => (await admin.query(`SELECT application_name,state,
+    const readRemaining = async () => (await admin.query(`SELECT state,
       round(extract(epoch FROM now()-backend_start))::int AS age_seconds
       FROM pg_stat_activity WHERE datname=$1`, [database])).rows
     let remaining = await readRemaining()
