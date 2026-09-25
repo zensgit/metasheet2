@@ -4,7 +4,7 @@ PR：https://github.com/zensgit/metasheet2/pull/5845 （Draft）。head SHA 以 
 
 ## 0. 头
 
-- 切片：**A（M0 普查 + 锁草案 PROPOSED）**
+- 切片：**A（M0 普查 + 锁）**。正文 §0–§11、§13–§15 于 2026-09-26 ratified（评论 5835498504）。§12 门表仍 PROPOSED。评论 5838025266：§20 九项不再在本锁里修；M2 拆成后端/前端两个 Draft。
 - 计划冻结基线：`062614f4407b3d9bffc82dae266071b8a6e5e5bd`
 - 本切片工作基线 / merge-base：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（`git merge-base HEAD origin/main`；`#5872`）
 - head SHA：内容 SHA `32a6f8ff1711125277866a2d680c36b5a36bfd39`（闸 §19 第十五轮；merge-base `bb77ca5f2ce3c2825265ec8877861d367d017ead`；本轮不 rebase）。若其后有 SHA-record 提交，末次仅回填本行。

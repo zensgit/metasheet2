@@ -1,12 +1,12 @@
-# MetaSheet 任务功能线 — Design Lock（PROPOSED）
+# MetaSheet 任务功能线 — Design Lock
 
-- 日期：2026-09-17
-- 状态：**PROPOSED — 不是已 ratify 的锁**。本件是 M1 的输入。不构成 DDL 应用、PR 合并或生产开关授权。三者各自需要 owner 亲写 GitHub comment。
+- 日期：2026-09-17；裁决：2026-09-26
+- 状态：正文 §0–§11、§13–§15 **RATIFIED 2026-09-26**（owner 原话「四题按建议值；同意拆分；起任务 B；用 B」，见评论 [5835498504](https://github.com/zensgit/metasheet2/pull/5845#issuecomment-5835498504)）。**§12 门表仍 PROPOSED**，随 M2 源码 PR 在真库/真前端逐门实跑后再 ratify。不构成 DDL 应用、PR 合并或 `TASKS_ENABLED` 授权。
 - **基线 SHA**：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（本 head 相对 `origin/main` 的 merge-base）
 - 计划输入：`task-feature-development-plan-20260915.md` v5，MD5 `f74e172840d2aa2502216d0dd8dff867`（PROPOSED 计划，不等于 ratify）
 - 普查：`docs/development/task-feature-census-20260917.md`
 - 骨架：照 `docs/development/elearning-plugin-design-lock-20260810.md` 的 §0–§15 编号。**§8 不重排**（计划 v5 多处按「锁 §4 / 锁 §12」引用）。
-- 实现者不得批准自己的安全结论。§13-9 / §13-10 / §13-11 / §13-12 标「未裁」。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2。
+- 实现者不得批准自己的安全结论。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 **已裁 2026-09-26**（见评论 5835498504）。§12 门表文字自评论 5838025266 起不再在本锁里修。
 
 ---
 
@@ -22,7 +22,7 @@
 
 权威数据在任务域专用表。org 来源合同定为 `req.authenticatedTenantId`（本 SHA `packages/core-backend/src/auth/jwt-middleware.ts:101-104`）。非 admin 可达需要三件事：① `permissions` seed（是 ② 的 FK 前置，见 `20250924190000_create_rbac_tables.ts:105-115` `role_permissions_permission_code_fkey` `ON DELETE CASCADE`）；② 非 admin 角色 `role_permissions` 带 `tasks:*`；③ `user_namespace_admissions` 行。**②③ 缺一 403**；无 ① 插 ② ⇒ SQLSTATE 23503，不是 403。码名见 §13-10c **未裁**。feature flag `TASKS_ENABLED === 'true'`，默认 OFF。`TASKS_*` 源码读与 GH manifest 义务见 §10（有期限推迟，不是豁免）。
 
-本锁 **PROPOSED**。M2 实体核心（DDL/路由/前端）要等 M1 ratify **且** §13-9 / §13-10 / §13-11 / §13-12 落槌。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2。
+正文 §0–§11、§13–§15 自 2026-09-26 起是 ratified 输入。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 **已裁 2026-09-26**（见评论 5835498504）。§12 门表仍 PROPOSED。M2 源码是 Draft，不应用 DDL，不合并，不打开 `TASKS_ENABLED`。
 
 ---
 
@@ -474,15 +474,15 @@ N/A:本线无媒体轨。
 | 已定·接线 | 两点接线（§5.3）；真库 ① exclude 逐文件字面量；发现式覆盖枚举④（§5.2.1 ④ 三集合 + OPTIONAL import）；五段部署链（§5.4）；专属 tasks-auth 形状（§5.2.1 ②；**M2 落文件**） | 已定，来源计划 v5 §8-10。**偏离**：计划 §8-10 写 db/web lane 都断言 OPTIONAL；web 无后端三读点，web lane 不装 `assert-rbac-optional-off`。计划「未设置」改为逐字 `process.env.RBAC_OPTIONAL === '1'` |
 | required context 活体 | `test (20.x)` 是否 required | **不是已定冻结**。以 §5.2.1 ④ 带日期的 `gh api …/protection` 实读为准；M2 接线 PR 必须重读 protection，不得抄本锁日期 |
 | 已定·产品缺省 | 导航/引导（§5.2）、PendingItem 五/六键+不带正文、§13-37/38/39 缺省 | 已定，来源计划 v5 |
-| 真库接线②形状 | paths、不加 `branches:`、不声明 `merge_group`（§5.2.1 ②） | **paths 保留时已定**。若 §13-12 裁 (b)，该形状被 (b) 取代，不是本行提前落槌 (b) |
-| §13-5 | 谓词两形态与从属链 (a)/(b)/(c) | **未裁**；随 §13-11 同批落槌；**不适用默认前进** |
-| §13-9 | 完成/重启对称性（增删人 / 切模式重算） | **未裁**（阻断门 3 增删人格与切模式格；P0 未切模式、未增删人的 any 路径不受阻） |
-| §13-10 | RBAC 豁免集 / `tasks_user` seed / 码名 | **未裁** |
-| §13-12 | 真库测试 required 承载（§5.2.1 ③ 的 (a)/(b)） | **未裁** |
-| §13-11 | 任务投影读路径与 deny 加载点（门 9 前置） | **未裁**；**不适用**「其余 §13 默认前进」 |
+| 真库接线②形状 | paths、不加 `branches:`、不声明 `merge_group`（§5.2.1 ②） | **已裁 2026-09-26**（见评论 5835498504）：§13-12 取 (b)，本形状被取代（去 paths、声明 `merge_group`、四步 POST-append） |
+| §13-5 | 谓词两形态与从属链 (a)/(b)/(c) | **已裁 2026-09-26**（见评论 5835498504）。随 §13-11：投影侧 (a) 共用 WHERE 文本生成器 |
+| §13-9 | 完成/重启对称性（增删人 / 切模式重算） | **已裁 2026-09-26**（见评论 5835498504）。any 模式其余人 `completed_at` 置同一时刻并记 `completed_by_any`；any 重启 = 全部；增删人/切模式按计划 §5-4 |
+| §13-10 | RBAC 豁免集 / `tasks_user` seed / 码名 | **已裁 2026-09-26**（见评论 5835498504）。(a) 不把 `tasks` 加入 `NON_NAMESPACED_PERMISSION_RESOURCES`；(b) 不 seed `tasks_user`；(c) 三码 `tasks:read` / `tasks:write` / `tasks:admin` |
+| §13-12 | 真库测试 required 承载（§5.2.1 ③ 的 (a)/(b)） | **已裁 2026-09-26**（见评论 5835498504）。取 (b)：任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append |
+| §13-11 | 任务投影读路径与 deny 加载点（门 9 前置） | **已裁 2026-09-26**（见评论 5835498504）。(a) 共用 WHERE 文本生成器 + deny 失败必抛；读路径 = 复用 `loadDeniedRecordIds` 的新 sibling |
 | `TASKS_*` 与 GH manifest | 章程 `AGENTS.md:68` 落地；计划 v5 无此条。正文在 **§10** 与 **§12 门 18**（不是 §13 三十九题之一）。义务推迟到首个引入 `TASKS_*` 源码读的 PR，届时同 PR 扩 `globalHistoryFlagsInSource()` 并补 manifest。本锁**不**把「无需登记」结为已定豁免。 | **未裁**（有期限推迟，不是豁免；无 owner 亲写豁免 comment） |
 | §13-1c | 跨 org 负责人/关注人 | **未设独立验收门**（仅建议；不由门 1 覆盖） |
-| 门 19 投影端 | 计划 `:116` 三端含投影 | **偏离**：§13-5/§13-11 未裁前投影端不算入 |
+| 门 19 投影端 | 计划 `:116` 三端含投影 | **已裁 2026-09-26**（见评论 5835498504）后投影端算入。实现随 M5；§12 门表仍 PROPOSED |
 | 门 19 读路径 vs 计划 `:116` | 计划原文（逐字）：「删真相表任一格 ⇒ 路由端、count/list 端、投影逐行端三处同红」；「只改 `buildTaskScopeCondition` 的 assignee 臂一处 ⇒ `GET /api/tasks?view=assigned`、`/pending`、`/pending-count` 必须同时红」 | **偏离**：第一句不用于列表读路径（真相表不进该路径）。探针②与下句同形：置反 `TASK_ROLE_ABILITY[assignee][complete]`。夹具：他人创建、我为 assignee、我非 creator（不与门 3 ×1 共用）。`POST /api/tasks/:id/complete` 必须红；列表三端保持绿。未置反该写路由绿。第二句保留为探针①，并钉 count（见门 19）。「双真相」只指 `taskMatchesView` 与 SQL 臂两份文本；标题「一份真相」仍是一套语义，对拍在门 19 |
 | `SYSTEM_SHEET_KINDS` | 计划 §7-7 两处加 `'task_projection'` + 集合相等 | **推迟**到首个任务投影 PR（§7） |
 | 其余 §13 | 建议答案见 §13 | 待 M1 逐条 comment 或默认前进 |
@@ -506,7 +506,7 @@ N/A:本线无媒体轨。
 | 里程碑 | 交付 | 进入 | 退出 |
 |---|---|---|---|
 | M0 | 普查 + 本 PROPOSED 锁 | 计划被认可 | 本 PR-0 Draft；39 题建议答案；两轮闸另走 |
-| M1 | owner comment ID | 本锁 | §13-9 / §13-10 / §13-11 / §13-12 落槌。§13-5 随 §13-11 落槌，单独未裁亦阻断 M2 |
+| M1 | owner comment ID | 本锁 | **已裁 2026-09-26**（见评论 5835498504）。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 按建议值落槌 |
 | M2 | PR-1 实体+最小前端（含 DDL，Draft，不应用不合并） | M1 | **只要求 §12 `arm-set` 里首个可跑为 M2 的子集全绿**。更晚里程碑的行按该表登记，不挡本行。门 22 计分。非 admin 真机冒烟只作可达性记录（权限快照带 `tasks:read`）。另需独立合并授权 comment。M1 退出已经要求四条裁题落槌，本行不再复述阻断句 |
 | M3–M5 | P0-B / P1 / P2 | 上一 PR 合并授权 | 同形 |
 
@@ -717,7 +717,7 @@ raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,23)) els
 
 ## 13. 锁必答题（39 题，一题不删）
 
-> owner 第三/四轮已定案条款照计划 v5 抄为已定。§13-9、§13-10、§13-11、§13-12 **未裁**，只给建议+代价。§13-11 **不适用**「其余 §13 默认前进」（本表行见 §9；§13-5 随 §13-11 同批，单独未裁亦阻断 M2）。
+> owner 第三/四轮已定案条款照计划 v5 抄为已定。§13-5、§13-9、§13-10、§13-11、§13-12 **已裁 2026-09-26**（owner 原话「四题按建议值」，见评论 5835498504）。下面保留建议段作为被采纳的正文。
 
 ### L0
 
@@ -738,7 +738,7 @@ raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,23)) els
 建议：默认 `overdue`；用户可配的 `badge_scope` 闭集为 `off` / `overdue` / `overdue_or_today`（计划 v5 §2.1 CHECK；语料《使用任务红点标记》:14 / :15-16、《任务设置》:15-16）。`all_open` 只是 `buildTaskPendingCondition` 的 scope 参数（计划 v5 §3 `/pending` 传 `all_open`），**不是** `badge_scope` 列值。count 与 list 同函数不同参数。**已定方向，来源 计划 v5 §2.1 / §3**。
 
 **5. 谓词两形态与从属链**
-建议：采用计划名字与形状；pending 由 scope assigned 派生；投影侧建议 (a) 共用同一份 WHERE 文本生成器。**骨架已定，来源 计划 v5 §3**；(a)/(b)/(c) 与 §13-11 一并裁。本项与 §13-11 同为 owner 裁项，未裁前**不适用**默认前进（§9 表已有本行；§13-5 随 §13-11 落槌，单独未裁亦阻断 M2）。
+**已裁 2026-09-26**（见评论 5835498504）：投影侧 (a)。建议段即被采纳的正文：采用计划名字与形状；pending 由 scope assigned 派生；共用同一份 WHERE 文本生成器。**骨架已定，来源 计划 v5 §3**。
 
 **6. 设父/转独立**
 双端授权 + 跨 org 禁止 + 父候选排除子孙。**已定，来源 计划 v5 §5-5**。
@@ -750,22 +750,22 @@ raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,23)) els
 **已定，来源 计划 v5 §2.3**：P0-A 一次写全 CHECK（词表见计划 §2.3）。新增词 = 新 DDL + owner 合并授权。与 §4.2 一致，不再标「建议」。
 
 **9. 完成/重启对称性**
-建议：any 模式其余人 `completed_at` 置同一时刻并记 `completed_by_any`；any 重启 = 全部；增删人/切模式按计划 §5-4。**规则已写进计划 §5-2/3/4，请 ratify 时确认 any 置位**。§6.2 不变量在 `all`（部分完成）→ `any` 切模式瞬间依赖本条重算；**未裁前增删人格与切模式格不得声称不变量闭合**。
+**已裁 2026-09-26**（见评论 5835498504）：any 模式其余人 `completed_at` 置同一时刻并记 `completed_by_any`；any 重启 = 全部；增删人/切模式按计划 §5-4。§6.2 不变量在 `all`（部分完成）→ `any` 的瞬间按本条重算。
 
-**10. RBAC（未裁）**
+**10. RBAC**
+**已裁 2026-09-26**（见评论 5835498504）：(a) 不加入豁免集；(b) 不 seed `tasks_user`；(c) 三码 `tasks:read` / `tasks:write` / `tasks:admin`。不 seed 角色。下面保留代价说明。
 - **10a** 建议：**不**把 `tasks` 加入 `NON_NAMESPACED_PERMISSION_RESOURCES`（保持受控）。代价：非 admin 可达要「角色授码 + 逐用户准入」两步 runbook；**②③ 缺一即 403**（§15 R10 仍 OPERATIVE 的支）+ 徽标常驻三态缓解。加入豁免 = 全员可达合同变更，与 approvals 同档。不得再写「① 缺失即 403」。
 - **10b** 建议：不 seed `tasks_user`（stock-prep 先例零自动）。代价：每个租户要手工绑角色。seed 则要写清绑哪些角色、是否自动 admission。告知 owner：`deriveDelegatedAdminNamespace`（`packages/core-backend/src/rbac/namespace-admission.ts:102-108,:196-199`）让 namespace 凭角色名进 `controlledNamespaces`；**admission 行仍必需（`:347`）**。削弱 ①② 中哪一件待普查（§5.1）。seed `tasks_admin` 形角色名会走这条通道。
-- **10c** 建议三码名 `tasks:read/write/admin`。P0-A **不得**把三码当已交付 seed（§4.2）。
-- **本条未裁；M2 不得写「所有活跃用户可用」。**
+- **10c** 三码名 `tasks:read` / `tasks:write` / `tasks:admin`。M2 seed 这三行 `permissions`，不绑 `role_permissions`，不写「所有活跃用户可用」。
 
 **11. 投影撤权 TS/SQL**
-建议：(a) 共用 WHERE 文本生成器 + deny 失败必抛。不选 (b) 存 `visibleUserIds`（与「撤权不等同步」冲突）。
-**请 owner 裁**（本条已入未裁四题，见 §9 表；**不适用**默认前进）：任务投影读路径与 deny 加载点 = 复用 `loadDeniedRecordIds` 的新 sibling，或独立读路径。**不得自行发明**第二条读路径。该函数**不得**照 `permission-service.ts:1272-1279` 形吞表缺失错。本条落定前门 9 任务线 **NOT RUN**。
+**已裁 2026-09-26**（见评论 5835498504）：(a) 共用 WHERE 文本生成器 + deny 失败必抛。不选 (b) 存 `visibleUserIds`。读路径 = 复用 `loadDeniedRecordIds` 的新 sibling。**不得自行发明**第二条读路径。该函数**不得**照 `permission-service.ts:1272-1279` 形吞表缺失错。实现在 M5；§12 门 9 文字本轮不动。
 
-**12. §8-1 ③ required 承载（未裁）**
+**12. §8-1 ③ required 承载**
+**已裁 2026-09-26**（见评论 5835498504）：取 (b)。任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。(a) 不采用。下面保留代价说明。§12 门表里的 TBD 句本轮不改。
 - **(a)** 整文件加进 `.github/workflows/plugin-tests.yml` `test` job run-list。代价：s6a pin 重算（`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json:90` 钉住该文件）+ 与在飞 PR 串行化。本切片禁止改该文件。裁 (a) 时 ④ 必须扩成**四集合**相等（三集合 + 该 run-list）。
 - **(b)** 任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。代价：lane 须先单独合进 main 才有同名 job；在飞 PR 要 rebase 才出现 context。裁 (b) 时 §5.2.1 ② 的「保留 paths、不声明 merge_group」形状被本项取代。
-- 建议：倾向 (b)，避免动 s6a。**未裁；§12 门 2/9/13/17 行尾「required 承载: TBD（§13-12 未裁）」未裁前不得声称门全绿。**
+- 已采纳 (b)，避免动 s6a。
 
 ### L1
 
