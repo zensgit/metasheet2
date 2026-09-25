@@ -213,3 +213,43 @@ limit value changed, no notification added.
 | P3-1 the form's gate wiring had no test | fixed: `validateField` extracted from `FormView.vue` into `apps/web/src/views/formViewValidation.ts` (`validateFormField`, pure); pinned from `apps/web/tests/formViewValidation.spec.ts` and, so a required lane sees it, from the backend parity file. The view's one-line delegation is covered by `vue-tsc` only (no mount — `@vue/test-utils` is not a dependency of `apps/web`) | §1 FE row |
 | P3-2 the plugin copy measured `RegExp#source.length` | fixed: `compilePattern` returns the caller's string length; `source` only for a `RegExp` instance. Parity file replays one `/`-bearing pattern exactly at the limit through all three copies and the form's caller | §2.3 L3 row |
 | P3-3 two over-strong sentences | fixed: §0 item 1 names the sites instead of "every entry point"; the module comment in `regex-safety.ts` now states the new-refusal populations of §6.2 instead of "not refused here". The commit message of `d55a31be9` cannot be edited; the verification MD records that its "Every place…" sentence is overstated | §0, `regex-safety.ts:13-19` |
+
+## 9. Owner decisions — owner 裁决 (2026-09-25)
+
+Recorded from the owner's ruling on the round-2 questions (§5, §7, and the route-level list the
+second gate review carried). Only what was ruled is written here; the disposition column is what
+this branch does about it. Nothing in this section changes a limit value, a message, or a runtime
+setting.
+
+| question | ruling | disposition on this branch |
+|---|---|---|
+| Q1 — §5: which of (a)–(d), or the V8 flag option (e) the gate review added, should follow | **(a)**: this round lands the length gate and the shape warning only. **(e)** is opened as a separate, **local** evaluation — CI form first, then staging — and does not enter production configuration. (b), (c) and (d) are not chosen. | unchanged: none of (b)–(e) is on this branch; no limit value changed; no runtime flag, `NODE_OPTIONS`, image command, deploy script, `.env` or workflow file touched. The (e) evaluation gets its own document when it exists. |
+| Q2 — §6.1: the evaluation inside the limits | accepted as a **known residual** until the (e) evaluation is done: a pattern that is super-linear inside the limits is warned about (§3), not refused. | §6.1 stands as written; §6.3 still counts nothing. |
+| Q3 — §2.3, L2 message precedence | **kept**: the refusal message wins over a rule's custom message. | `field-validation-engine.ts` unchanged since round 1. |
+| Q4 — §6.2 announcement | **notify by release note**; no pre-landing announcement and no counter. The text is in §9.1. | the release-note text is kept here so the release carries it as written. |
+| the web spec's CI collection (gate review, round 2, P3-1) | **wire it into the required lane**. | `apps/web/scripts/run-required-web-tests.sh`: one token, `formViewValidation`, in its sorted place in the final `exec npx vitest run` block; readings in the verification MD §8. |
+
+### 9.1 Release-note text (Q4)
+
+New refusals introduced by the length gate — the populations of §6.2, stated for field and
+pipeline administrators:
+
+- A field whose explicit rule list carries a `pattern` rule but no `maxLength` rule now refuses
+  a value longer than 10000 characters on write. Before, that path had no length bound. The
+  public form's `validation.pattern` surface gives the same answer.
+- Any stored pattern longer than 4000 characters — a formula argument, a validation rule, a
+  pipeline mapping — is refused.
+- The formula sinks report an error for an over-limit input: `REGEXMATCH` / `REGEXEXTRACT` /
+  `REGEXREPLACE` return `#ERROR!` (the value they already return for an invalid pattern), and
+  `SUBSTITUTE` raises, so the whole formula is `#ERROR!` at any nesting depth (§8, P2-1). The
+  answers are not new; the inputs that produce them are.
+
+Reading note for §6.2, third bullet: that sentence predates §8 (P2-1). For `SUBSTITUTE` the sink
+raises rather than returning the sentinel as a value; what the caller of `calculate` sees is the
+same `#ERROR!`.
+
+### 9.2 What stays open
+
+- The (e) evaluation itself (local; CI form, then staging; not production configuration) — a
+  separate piece of work with its own design and readings.
+- Everything in §6 other than the Q2 residual named above is unchanged by this section.
