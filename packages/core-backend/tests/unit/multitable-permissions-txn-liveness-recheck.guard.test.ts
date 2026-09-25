@@ -811,10 +811,14 @@ describe('#5954 — the multi-sheet helper actually locks, reads and refuses', (
  * #5954 — the cross-base mirror op's in-transaction guard re-reads liveness for BOTH sheets under the lock.
  *
  * The real-DB race (tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts,
- * F-5/F-6) proves the behaviour; this leg pins the WIRING without a database, so dropping either sheet from
- * the call — or handing the helper the pool — reds in the no-DB lane too:
+ * F-5/F-6/F-8) proves the behaviour; this leg pins the WIRING without a database, so dropping either sheet
+ * from the call, swapping their order, or handing the helper the pool reds in the no-DB lane too:
  *   - the FIRST statement of `preWriteGuard` is `await assertSheetsLiveForUpdate(<its own query>, [...])`;
- *   - the array names BOTH `sheetA` and `sheetB` (the two ids the pre-transaction gates resolved);
+ *   - the array names BOTH `sheetA` and `sheetB` (the two ids the pre-transaction gates resolved), and in
+ *     EXACTLY the order `[sheetB, sheetA]`: the helper reports the first non-live id in caller order, so this
+ *     order IS the refusal precedence when both ends die with different verdicts (one hard-deleted =>
+ *     `absent` 404 NOT_FOUND, the other soft-deleted => `deleted` 404 SHEET_DELETED). B first is the order
+ *     the pre-transaction gates run in; the real-DB F-8 case shows the body it decides;
  *   - the handler spells no raw `meta_sheets` row lock;
  *   - its catch maps SheetNotLiveError to the values-free `sendSheetNotLive(res, err.liveness)`.
  */
@@ -868,9 +872,15 @@ describe('#5954 — the cross-base mirror op re-reads BOTH sheets under its lock
       if (own === '' || handed !== own) out.push(`assertSheetsLiveForUpdate is handed \`${handed}\` instead of preWriteGuard's own \`${own}\``)
       const ids = call.arguments[1]
       const names = ids && ts.isArrayLiteralExpression(ids)
-        ? ids.elements.map((e) => (ts.isIdentifier(e) ? e.text : e.getText(source))).sort()
+        ? ids.elements.map((e) => (ts.isIdentifier(e) ? e.text : e.getText(source)))
         : []
-      if (names.join(',') !== 'sheetA,sheetB') out.push(`assertSheetsLiveForUpdate re-reads [${names.join(', ')}], not both sheetA and sheetB`)
+      // NOT sorted: the caller order is observable (it picks which verdict is reported when both ends are
+      // dead), so the analyzer must see it.
+      if (!names.includes('sheetA') || !names.includes('sheetB')) {
+        out.push(`assertSheetsLiveForUpdate re-reads [${names.join(', ')}], not both sheetA and sheetB`)
+      } else if (names.join(',') !== 'sheetB,sheetA') {
+        out.push(`assertSheetsLiveForUpdate re-reads [${names.join(', ')}], not exactly [sheetB, sheetA] (the refusal precedence: B first, as the pre-transaction gates run)`)
+      }
     }
 
     if (!/if \(err instanceof SheetNotLiveError\) return sendSheetNotLive\(res, err\.liveness\)/.test(route.body.getText(source))) {
@@ -911,6 +921,13 @@ describe('#5954 — the cross-base mirror op re-reads BOTH sheets under its lock
   it('the analyzer REJECTS a re-read that drops sheet A, and one that drops sheet B', () => {
     expect(mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetB])')).join('\n')).toContain('not both sheetA and sheetB')
     expect(mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetA])')).join('\n')).toContain('not both sheetA and sheetB')
+  })
+
+  it('the analyzer REJECTS both sheets in the swapped order (A first flips which verdict wins when both are dead)', () => {
+    const swapped = mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetA, sheetB])'))
+    expect(swapped).toEqual([
+      'assertSheetsLiveForUpdate re-reads [sheetA, sheetB], not exactly [sheetB, sheetA] (the refusal precedence: B first, as the pre-transaction gates run)',
+    ])
   })
 
   it('the analyzer REJECTS a re-read handed the pool instead of the guard\'s own query', () => {
