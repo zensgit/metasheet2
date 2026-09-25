@@ -59,7 +59,7 @@
  *     what they do — an `if` (or a boolean it tests) comparing a sheet id with a non-literal, whose
  *     mismatch path answers the request; the exact shape, and what it does NOT see, are spelled out
  *     there — COMPUTE whether that answer is values-free and whether it runs before the handler's
- *     first 401/403, and hold the result to a closed-world census with named exceptions. The three
+ *     first 403, and hold the result to a closed-world census with named exceptions. The three
  *     form-share routes are on it as a GAP, and that GAP is also measured on the wire.
  *
  * ── Why the ABSENT body and not a new code ────────────────────────────────────
@@ -86,6 +86,7 @@
 import express, { type Express, type Response } from 'express'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import request from 'supertest'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 
@@ -1111,11 +1112,17 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *       a function the handler defined over it, a `throw`, `next(…)` / `reject(…)`, or a returned object
  *       with a `status` key).
  * The mismatch path is the then-branch when the comparison being an inequality makes the condition
- * true, the else-branch otherwise (or, with no else and a then-branch that returns, the statement after
- * the `if`). A `!(…)` that holds exactly the comparison, or a `!` on the bound boolean, flips it. When
- * the polarity cannot be told from the text — the comparison sits in a callback (`.some((row) => …)`,
- * `const same = (v) => …`), or in a `!(…)` that holds more than it (`!(owner && owner.sheetId === x)`),
- * or the boolean is tested as more than a bare name — BOTH paths are read.
+ * true, the else-branch otherwise. A mismatch branch that does not `return` / `throw`, opposite one that
+ * does — with no else, the empty else-branch — continues into the FALL-THROUGH RUN (`fallThroughRun`):
+ * the statements after the `if`, up to and including the first that returns, throws or answers
+ * unconditionally, or to the end of the enclosing block; an inner `if` / loop / `try` on the way is read
+ * whole and the run goes on past it. A `!(…)` that holds exactly the comparison, or a `!` on the bound
+ * boolean, flips the polarity; so does the `!` before `rows.some((row) => …)` / `rows.every(…)` whose
+ * one-parameter arrow body IS the comparison, when that call is a whole `&&` / `||` operand of a condition
+ * with no `?` / `:` / `??` at its top level (`quantifiedPolarity` — both are monotone in the predicate).
+ * When the polarity cannot be told from the text — any other callback (`.filter(…)`, `.some(…) === false`,
+ * `const same = (v) => …`), a `!(…)` that holds more than the comparison (`!(owner && owner.sheetId === x)`),
+ * or the boolean tested as more than a bare name — BOTH paths are read.
  *
  * Two properties of every site are COMPUTED from the code, never taken from the table:
  *   echo             the answer's payload is not provably constant. Every construct that makes a path
@@ -1123,23 +1130,32 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *                    (`.end(…)`, `.redirect(…)`, `.set(…)` included), the value written onto the response
  *                    object, everything a response-handed call is given besides the response (`req`
  *                    included), a response closure's own answer, a thrown / rejected / next()-ed
- *                    expression, a returned `{ …status… }` object, the arguments of every `new X(…)` —
- *                    so the answer trigger and the payload read cannot measure different things. A payload
- *                    is constant only if every leaf is a literal or a MODULE constant: declared once, at
- *                    column 0, as `const` with a plain literal initialiser and bound nowhere else in the
- *                    file (or imported unrenamed from a relative module that exports it so). A `${…}`
- *                    hole, a spread, a concatenation with a variable, a shorthand `{ viewId }`, a member
- *                    path, a call, a `let` / `var`, or any function-local name reads as echo: "cannot prove
- *                    constant" is echo, never the reverse.
- *   beforeAuthority  inside a route handler: no 401/403 refusal (the closure guard's
- *                    AUTHORITY_REFUSAL, widened to 401 for the public-form layer) precedes the site in
- *                    the handler, and the site's mismatch path does not answer ONLY a 401/403 (then it
- *                    is the authority refusal itself). `null` outside every handler.
+ *                    expression, a returned `{ …status… }` object, the arguments of every `new X(…)`.
+ *                    A value HANDED ON — thrown, returned as a status object, passed to `next` / `reject` —
+ *                    is answered somewhere else, and that answer is read as well (`consumerOf`): for a
+ *                    `throw`, the `catch` of the innermost `try` in the handler that holds it; for a status
+ *                    object returned out of a callback into a binding (`const failure = await
+ *                    pool.transaction(async … => …)`), the then-branch of the first later `if (failure)`.
+ *                    There the value's own name (`err.message`, `failure.status`) stands for the value,
+ *                    whose payload is read at the handoff. Where the handler has no such place — `next` /
+ *                    `reject`, a throw with no `catch`, a status object returned any other way — it reads
+ *                    as echo. A payload is constant only if every leaf is a literal or a MODULE constant:
+ *                    declared once, at column 0, as `const` with a plain literal initialiser and bound
+ *                    nowhere else in the file (or imported unrenamed from a relative module that exports
+ *                    it so). A `${…}` hole, a spread, a concatenation with a variable, a shorthand
+ *                    `{ viewId }`, a member path, a call, a `let` / `var`, or any function-local name reads
+ *                    as echo. Within what the scan reads, "cannot prove constant" is echo; what it does
+ *                    NOT read is listed under NOT FOLLOWED below.
+ *   beforeAuthority  inside a route handler: no 403-class refusal (the closure guard's AUTHORITY_REFUSAL,
+ *                    NOT widened to 401 — a 401 turns away only callers who are not signed in, while the
+ *                    GAP is a signed-in caller told apart before its 403) precedes the site in the
+ *                    handler, and the site's mismatch path does not answer ONLY a 403 (then it is the
+ *                    authority refusal itself). `null` outside every handler.
  *
  * THE RULES, over the whole file:
  *   1. CLOSED WORLD — the sites found are exactly the keys of SHEET_PAIRING_CENSUS. A new site of the
- *      shape above, whatever its helpers are called and however its message is worded, reds until it is
- *      written down.
+ *      shape above (within the limits listed below) reds until it is written down; what its helpers are
+ *      called and how its message is worded do not enter into it.
  *   2. DECLARED = COMPUTED — each row's `echo` and `beforeAuthority` equal what the scan computes, so a
  *      row cannot be written down more flattering than the code it describes.
  *   3. ONLY NAMED EXCEPTIONS — `echo: true`, or `beforeAuthority` other than `false`, is allowed only
@@ -1165,9 +1181,18 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     `res` and literals reads as values-free whatever it sends; the same for a module-level function
  *     that answers through a response object it reaches some other way;
  *   - a response closure is followed one level: a closure that calls another closure is read by its own
- *     text only.
+ *     text only, and a closure that throws, returns a status object or calls `next` reads as echo;
+ *   - a fall-through run ends with its enclosing block: when the returning `if` is the last statement
+ *     of a `try` or another inner block, what runs after that block is not read — the mismatch path then
+ *     reads as not answering, and the site is not seen;
+ *   - a thrown value is taken to reach the `catch` of the innermost enclosing `try` in the handler, by
+ *     position; whether a throw inside a callback that is not awaited really gets there is not checked.
+ *     That `catch` is read whole — every answer in it is payload, whichever error it is written for —
+ *     and one that does not answer, rethrows, or hands the error on reads as echo;
+ *   - a returned status object is followed only into an `if (<binding>)` after the binding it is
+ *     returned into; `if (!failure)`, a caller of a named function, or any other consumer reads as echo.
  * OTHER:
- *   - Authority position is TEXTUAL, as in the closure guard: a 401/403 written earlier in the handler
+ *   - Authority position is TEXTUAL, as in the closure guard: a 403 written earlier in the handler
  *     counts even when it sits in a branch or a closure that does not run before the site.
  *   - A pairing pushed into SQL is covered by the SQL cell below for a `meta_views` SELECT that binds
  *     `id = $n` and `sheet_id = $n` in one literal or `+`-joined literals, the SELECT anywhere in it
@@ -1177,8 +1202,9 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *   - Comments are blanked with the same two regexes the closure guard strips them with; the
  *     population cell reds if that ever swallows a route declaration.
  *   - The constant rule errs toward echo: a function-local `const` with a literal value, a constant
- *     defined from another constant, a TS cast in a payload, or a response method name on an unrelated
- *     object (`map.set(k, v)` on the path) reads as echo — false alarms, never misses.
+ *     defined from another constant, a TS cast in a payload, a response method name on an unrelated
+ *     object (`map.set(k, v)` on the path), or a `catch` whose other branches answer a local (the
+ *     `getDbNotReadyMessage` hint most handlers carry) reads as echo — false alarms in that direction.
  */
 
 const ROUTES_DIR = join(__dirname, '../../src/routes')
@@ -1359,6 +1385,35 @@ function parseIf(code: string, at: number): IfStatement | null {
   return { condition, then, else: elseBranch, end: elseBranch ? elseBranch[1] : then[1] }
 }
 
+/** A statement that only answers CONDITIONALLY: the run below reads it whole and goes on past it. */
+const COMPOUND_HEAD = /^(?:if|else|for|while|do|switch|try)(?![\w$])|^\{/
+
+/**
+ * The FALL-THROUGH RUN from `at`: the statements of the enclosing block from there on, up to and
+ * including the first that ends the path unconditionally — one headed by `return` / `throw`, or a
+ * plain statement that answers (`answers`) — or up to the block's end. An inner `if`, loop, `try` or
+ * block is read whole and the run continues past it, since what it answers is conditional. null if a
+ * statement in the run cannot be delimited.
+ */
+function fallThroughRun(code: string, at: number, answers: (statement: string) => boolean): [number, number] | null {
+  const start = skipSpace(code, at)
+  let i = start
+  let end = start
+  while (i < code.length && !'})]'.includes(code[i]!)) {
+    if (code[i] === ';') {
+      i = skipSpace(code, i + 1)
+      continue
+    }
+    const statement = branchAt(code, i)
+    if (!statement) return null
+    end = statement[1]
+    const text = code.slice(statement[0], statement[1])
+    if (/^(?:return|throw)(?![\w$])/.test(text) || (!COMPOUND_HEAD.test(text) && answers(text))) break
+    i = skipSpace(code, end)
+  }
+  return [start, end]
+}
+
 // ── the comparison ────────────────────────────────────────────────────────────
 
 /** Every `===` / `!==` / `==` / `!=` outside string, template and regex literals, as [offset, operator]. */
@@ -1393,6 +1448,8 @@ interface Frame {
   negated: boolean
   /** An arrow `=>` was passed at this level: what follows it is a callback body. */
   arrow: boolean
+  /** Where the first such `=>` stands; -1 if none. */
+  arrowAt: number
   /** Start of the current operand at this level: just past the last operator that binds looser than `===`. */
   from: number
 }
@@ -1419,7 +1476,7 @@ const LOOSE_OPERATOR = /^(?:&&=?|\|\|=?|\?\?=?|=>|>>>=|>>=|<<=|\*\*=)/
  * that ends a statement. null if the walk cannot reach `at` outside a literal.
  */
 function unitAt(code: string, from: number, to: number, at: number, length: number): ExpressionUnit | null {
-  const stack: Frame[] = [{ open: from - 1, negated: false, arrow: false, from }]
+  const stack: Frame[] = [{ open: from - 1, negated: false, arrow: false, arrowAt: -1, from }]
   let prev = ''
   let held: { start: number; frames: Frame[]; depth: number; fromFrameStart: boolean } | null = null
   const unit = (end: number, byBracket: boolean): ExpressionUnit =>
@@ -1444,7 +1501,7 @@ function unitAt(code: string, from: number, to: number, at: number, length: numb
     if (c in CLOSER) {
       let bangs = 0
       for (let j = i - 1; j >= from && /[\s!]/.test(code[j]!); j -= 1) if (code[j] === '!') bangs += 1
-      stack.push({ open: i, negated: bangs % 2 === 1, arrow: false, from: i + 1 })
+      stack.push({ open: i, negated: bangs % 2 === 1, arrow: false, arrowAt: -1, from: i + 1 })
       prev = c
       continue
     }
@@ -1463,7 +1520,10 @@ function unitAt(code: string, from: number, to: number, at: number, length: numb
     else if (/^(?:==|!=|<=|>=|\?\.(?!\d))/.test(ahead)) skip = 2
     else if (loose) {
       delimiter = loose[0].length
-      if (loose[0] === '=>') top.arrow = true
+      if (loose[0] === '=>' && !top.arrow) {
+        top.arrow = true
+        top.arrowAt = i
+      }
     } else if ('=?:,;&|^'.includes(c)) delimiter = 1
     else if (/[A-Za-z_$]/.test(c) && !/[\w$]/.test(code[i - 1] ?? '')) {
       const word = /^[A-Za-z_$][\w$]*/.exec(code.slice(i, i + 40))![0]
@@ -1506,6 +1566,58 @@ function polarityOf(unit: ExpressionUnit, bangs: number): Polarity {
 
 const combinePolarity = (a: Polarity, b: Polarity): Polarity =>
   a === 'unknown' || b === 'unknown' ? 'unknown' : (a === 'flipped') !== (b === 'flipped') ? 'flipped' : 'direct'
+
+/** `text` with every literal and every bracket's content blanked to spaces in place: its top level only. */
+function topLevelOnly(text: string): string {
+  const unreadable = text.replace(/[^\n]/g, '?')
+  const out = text.split('')
+  let prev = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i]!
+    const end = literalEnd(text, i, prev)
+    if (end === -1) return unreadable
+    if (end > 0) {
+      for (let j = i; j < end; j += 1) out[j] = ' '
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    if (c in CLOSER) {
+      const close = matchBracket(text, i)
+      if (close === -1) return unreadable
+      for (let j = i + 1; j < close; j += 1) out[j] = ' '
+      i = close
+      prev = 'x'
+      continue
+    }
+    if (!/\s/.test(c)) prev = c
+  }
+  return out.join('')
+}
+
+/**
+ * The polarity of a comparison that is the WHOLE body of a one-parameter, expression-bodied arrow handed
+ * straight to `.some(…)` / `.every(…)` on a dotted name — `!rows.some((row) => String(row.id) === x)`.
+ * Both are monotone in their predicate, so the comparison keeps the polarity of the call, `!`s before its
+ * receiver counted. Read through only when that call is a whole operand of `&&` / `||` at the region's top
+ * level (region start, `&&` or `||` before it; region end, `&&` or `||` after it) and that top level holds
+ * no `?` / `:` / `??` — otherwise, and for every other callback, null (the caller keeps `unknown`).
+ */
+function quantifiedPolarity(code: string, unit: ExpressionUnit, region: [number, number]): Polarity | null {
+  if (unit.frames.length !== 2) return null
+  const [outer, call] = unit.frames as [Frame, Frame]
+  if (outer.arrow || !call.arrow || call.negated) return null
+  const close = matchBracket(code, call.open)
+  if (close === -1 || unit.end !== close) return null
+  if (!/^\s*(?:\(\s*[A-Za-z_$][\w$]*\s*(?::[^(),]*)?\)|[A-Za-z_$][\w$]*)\s*$/.test(code.slice(call.open + 1, call.arrowAt))) return null
+  if (code.slice(call.arrowAt + 2, unit.start).trim() !== '') return null
+  const head = code.slice(region[0], call.open)
+  const receiver = /(?<![\w$.!])(!*)\s*[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*\s*\??\.\s*(?:some|every)\s*$/.exec(head)
+  if (!receiver || !/(?:^|&&|\|\|)\s*$/.test(head.slice(0, receiver.index))) return null
+  if (!/^\s*(?:;?\s*$|&&(?!=)|\|\|(?!=))/.test(code.slice(close + 1, region[1]))) return null
+  if (/\?(?!\.)|:/.test(topLevelOnly(code.slice(region[0], region[1])))) return null
+  return receiver[1]!.length % 2 === 1 ? 'flipped' : 'direct'
+}
 
 /**
  * The operand's VALUE is a sheet id: it holds an identifier, or a quoted key (`row['sheet_id']`,
@@ -1616,20 +1728,32 @@ function splitTopLevel(list: string): string[] {
   return parts
 }
 
+/**
+ * A value the path hands to code that answers it ELSEWHERE, at `at` (an offset in the text read):
+ *   throw   a `throw` — answered by a `catch` (see `consumerOf`);
+ *   return  a returned `{ …status… }` object — answered by whoever receives it (see `consumerOf`);
+ *   pass    `next(…)` / `reject(…)` / `Promise.reject(…)` — answered outside the handler, never followed.
+ */
+interface Handoff { kind: 'throw' | 'return' | 'pass'; at: number }
+
 interface AnswerRead {
   /** The text answers the request. */
   answers: boolean
   /** Everything the answer carries, or null if some of it could not be delimited (read as echo). */
   payloads: string[] | null
+  /** Values handed on to be answered elsewhere; the answer given THERE is part of this path's payload. */
+  handoffs: Handoff[]
 }
 
 /**
  * Functions a handler defines for itself that reach its response object — `const refuse = () => res.status(…)…`,
- * `const send = res.json.bind(res)`, `function refuse() { res… }` — by name, with the text that defines them.
- * A call to one of these answers the way its definition does.
+ * `const send = res.json.bind(res)`, `function refuse() { res… }` — or that throw, by name, with the text that
+ * defines them. A call to one of these answers the way its definition does.
  */
 function responseClosures(handlerText: string, responseNames: readonly string[]): Map<string, string> {
-  const reaches = new RegExp(String.raw`(?<![\w$.])(?:${responseNames.map(escapeName).join('|')})(?![\w$])`)
+  // …or that THROW: a call to one hands its error on to wherever it is caught, which readAnswer does not
+  // follow through a call — so such a call answers, and reads as echo.
+  const reaches = new RegExp(String.raw`(?<![\w$.])(?:${responseNames.map(escapeName).join('|')}|throw)(?![\w$])`)
   const closures = new Map<string, string>()
   for (const m of handlerText.matchAll(/(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=(?![=>])\s*/g)) {
     const from = m.index! + m[0].length
@@ -1649,8 +1773,8 @@ function responseClosures(handlerText: string, responseNames: readonly string[])
 }
 
 /**
- * Reads a mismatch path. Every construct that makes it ANSWER also contributes its PAYLOAD, so the two can
- * never measure different things:
+ * Reads a mismatch path. Every construct that makes it ANSWER also contributes its PAYLOAD, so the answer
+ * trigger and the payload read are the same constructs:
  *   - a response method on ANY receiver — `.status/json/jsonp/send/sendStatus/sendFile/end/redirect/render/
  *     download/flushHeaders(` answers; `.write/writeHead/set/header/setHeader/append/location/links/cookie/
  *     clearCookie/type/contentType/attachment/vary/format(` only writes — and either way ALL its arguments are payload;
@@ -1660,21 +1784,25 @@ function responseClosures(handlerText: string, responseNames: readonly string[])
  *   - a call handed the response object ANYWHERE in its arguments (`refuse(req, res)`, `refuse(404, res, …)`,
  *     `refuse({ res, viewId })`) answers, and everything else it is handed — `req` included — is payload;
  *   - a call to a function the handler defined over its response object (`closures`) answers, and carries its
- *     arguments plus whatever that definition's own answer carries;
+ *     arguments plus whatever that definition's own answer carries (a closure that itself throws, returns a
+ *     status object or calls `next` reads as undelimited, i.e. echo);
  *   - `throw`: the thrown expression; `next(…)` / `reject(…)` / `Promise.reject(…)` with an argument: the argument;
  *   - `return {…}` with a `status` key anywhere in it: the whole object;
  *   - every `new X(…)` on the path: its arguments.
+ * The last three answer SOMEWHERE ELSE, so each is also listed as a handoff: the scan then reads the place
+ * that answers it (`consumerOf`) as part of the same payload, and reads it as echo where there is none.
  */
 function readAnswer(text: string, responseNames: readonly string[], closures: ReadonlyMap<string, string> = new Map()): AnswerRead {
   let answers = false
   const payloads: string[] = []
+  const handoffs: Handoff[] = []
   const argsOf = (open: number): string | null => {
     const close = matchBracket(text, open)
     return close === -1 ? null : text.slice(open + 1, close)
   }
   for (const m of text.matchAll(RESPONSE_METHOD)) {
     const args = argsOf(m.index! + m[0].length - 1)
-    if (args === null) return { answers: true, payloads: null }
+    if (args === null) return { answers: true, payloads: null, handoffs: [] }
     payloads.push(args)
     if (RESPONSE_ENDS.includes(m[1]!)) answers = true
   }
@@ -1694,12 +1822,12 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
       const c = text[j]
       if (c === '[') {
         const close = matchBracket(text, j)
-        if (close === -1) return { answers: true, payloads: null }
+        if (close === -1) return { answers: true, payloads: null, handoffs: [] }
         member = '[]'
         i = close + 1
       } else if (c === '(') {
         const args = argsOf(j)
-        if (args === null) return { answers: true, payloads: null }
+        if (args === null) return { answers: true, payloads: null, handoffs: [] }
         payloads.push(args)
         if (member === null || !(RESPONSE_READS.includes(member) || RESPONSE_WRITES.includes(member))) answers = true
         member = null
@@ -1707,7 +1835,7 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
       } else if (c === '=' && member !== null && text[j - 1] !== '.') {
         answers = true
         const end = statementEnd(text, j + 1)
-        if (end === -1) return { answers: true, payloads: null }
+        if (end === -1) return { answers: true, payloads: null, handoffs: [] }
         payloads.push(text.slice(j + 1, end))
         break
       } else {
@@ -1722,11 +1850,12 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
   const handedAll = responseToken(responseNames, 'g')
   for (const m of text.matchAll(CALLEE)) {
     const args = argsOf(m.index! + m[0].length - 1)
-    if (args === null) return { answers: true, payloads: null }
+    if (args === null) return { answers: true, payloads: null, handoffs: [] }
     const closure = text[m.index! - 1] === '.' ? undefined : closures.get(m[1]!)
     if (closure !== undefined) {
       const inner = readAnswer(closure, responseNames)
-      if (inner.payloads === null) return { answers: true, payloads: null }
+      // A closure that hands its value on (throws, returns a status object, calls next) is not followed.
+      if (inner.payloads === null || inner.handoffs.length > 0) return { answers: true, payloads: null, handoffs: [] }
       answers = true
       payloads.push(args, ...inner.payloads)
       continue
@@ -1739,31 +1868,34 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
     answers = true
     const from = m.index! + m[0].length
     const end = statementEnd(text, from)
-    if (end === -1) return { answers: true, payloads: null }
+    if (end === -1) return { answers: true, payloads: null, handoffs: [] }
     payloads.push(text.slice(from, end))
+    handoffs.push({ kind: 'throw', at: m.index! })
   }
   for (const m of text.matchAll(/(?<![\w$.])next\s*\(|(?<![\w$])reject\s*\(/g)) {
     const args = argsOf(m.index! + m[0].length - 1)
-    if (args === null) return { answers: true, payloads: null }
+    if (args === null) return { answers: true, payloads: null, handoffs: [] }
     if (args.trim() === '') continue
     answers = true
     payloads.push(args)
+    handoffs.push({ kind: 'pass', at: m.index! })
   }
   for (const m of text.matchAll(/(?<![\w$.])return\s*(?=\{)/g)) {
     const open = m.index! + m[0].length
     const close = matchBracket(text, open)
-    if (close === -1) return { answers: true, payloads: null }
+    if (close === -1) return { answers: true, payloads: null, handoffs: [] }
     const object = text.slice(open, close + 1)
     if (!/(?<![\w$.])status\s*:|['"]status['"]\s*:/.test(object)) continue
     answers = true
     payloads.push(object)
+    handoffs.push({ kind: 'return', at: m.index! })
   }
   for (const m of text.matchAll(/(?<![\w$.])new\s+[A-Za-z_$][\w$.]*\s*\(/g)) {
     const args = argsOf(m.index! + m[0].length - 1)
-    if (args === null) return { answers, payloads: null }
+    if (args === null) return { answers, payloads: null, handoffs }
     payloads.push(args)
   }
-  return { answers, payloads }
+  return { answers, payloads, handoffs }
 }
 
 // ── constants ─────────────────────────────────────────────────────────────────
@@ -1871,8 +2003,12 @@ function isConstantExpression(expr: string, isConstantName: (name: string) => bo
 
 // ── authority position ────────────────────────────────────────────────────────
 
-/** The closure guard's AUTHORITY_REFUSAL, widened to 401 (the public-form submit layer answers 401 first). */
-const AUTHORITY_REFUSAL_401_403 = /\.status\(\s*40[13]\s*\)|(?<![\w$])status:\s*40[13](?![\w$])|(?<![\w$])send\w*(?:Forbidden|Unauthori[sz]ed)\w*\(|(?<![\w$])(?:Forbidden|Unauthori[sz]ed)Error(?![\w$])|(?<![\w$])requireRecordReadable\(/
+/**
+ * The closure guard's AUTHORITY_REFUSAL: a 403-class refusal. NOT widened to 401 — the GAP is answering
+ * before the 403 (a signed-in caller holding nothing gets 403 on its own view and something else on a
+ * foreign one), and a 401 only turns away callers who are not signed in, so it closes none of that.
+ */
+const AUTHORITY_REFUSAL_403 = /\.status\(\s*403\s*\)|(?<![\w$])status:\s*403(?![\w$])|(?<![\w$])send\w*Forbidden\w*\(|(?<![\w$])ForbiddenError(?![\w$])|(?<![\w$])requireRecordReadable\(/
 
 const SHAPE_ROUTE_DECL = /^([ \t]*)router\.(get|post|patch|delete|put)\(\s*'([^']+)'/
 const SHAPE_FN_DECL = /^[ \t]*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^[ \t]*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:\([^)\n]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=\n]+?)?\s*=>/gm
@@ -1904,6 +2040,76 @@ function handlerSpans(code: string): HandlerSpan[] {
     })
   }
   return spans
+}
+
+// ── where a handed-off value is answered ──────────────────────────────────────
+
+/** The text that answers a handed-off value, and the name the value goes by there (null: it has none). */
+interface Consumer { text: string; name: string | null }
+
+/**
+ * Where the value handed off at `at` is ANSWERED, inside `handler`:
+ *   throw   the `catch` of the innermost `try` of the handler whose block holds the `throw`: its body, and
+ *           its parameter;
+ *   return  the function holding the `return` is written inside the initialiser of a binding
+ *           (`const failure = await pool.transaction(async … => { … })`, or `failure = …`): the first
+ *           later `if` in the handler that names the binding, provided its condition is the bare binding
+ *           — its then-branch, and the binding.
+ * null — NOT FOLLOWED, read as echo — for `next(…)` / `reject(…)`, for a site outside every handler, for
+ * a throw with no enclosing `try` (or only a `finally`), and for an object returned anywhere else.
+ */
+function consumerOf(
+  code: string,
+  handler: HandlerSpan | null,
+  handoff: Handoff,
+  at: number,
+  ifStarts: readonly number[],
+  conditionOf: (start: number) => [number, number] | null,
+  inLiteral: (at: number) => boolean,
+): Consumer | null {
+  if (!handler || handoff.kind === 'pass') return null
+  const before = code.slice(handler.start, at)
+  if (handoff.kind === 'throw') {
+    let tryOpen = -1
+    let tryClose = -1
+    for (const m of before.matchAll(/(?<![\w$.])try\s*\{/g)) {
+      const open = handler.start + m.index! + m[0].length - 1
+      if (inLiteral(open)) continue
+      const close = matchBracket(code, open)
+      if (close > at && open > tryOpen) {
+        tryOpen = open
+        tryClose = close
+      }
+    }
+    if (tryOpen === -1) return null
+    const after = skipSpace(code, tryClose + 1)
+    const clause = /^catch\s*(?:\(\s*([A-Za-z_$][\w$]*)?[^)]*\))?\s*\{/.exec(code.slice(after, after + 200))
+    if (!clause) return null
+    const bodyOpen = after + clause[0].length - 1
+    const bodyClose = matchBracket(code, bodyOpen)
+    return bodyClose === -1 ? null : { text: code.slice(bodyOpen, bodyClose + 1), name: clause[1] ?? null }
+  }
+  // return: the innermost function body holding the `return`, then the binding its initialiser sits in.
+  let body = -1
+  for (const m of before.matchAll(/=>\s*\{|(?<![\w$.])function(?![\w$])[^{;]*\{/g)) {
+    const open = handler.start + m.index! + m[0].length - 1
+    if (inLiteral(handler.start + m.index!)) continue
+    if (open > body && matchBracket(code, open) > at) body = open
+  }
+  if (body === -1) return null
+  const bound = bindingAround(code, body, inLiteral)
+  if (!bound || bound.end <= at) return null
+  const named = new RegExp(String.raw`(?<![\w$.])${escapeName(bound.name)}(?![\w$])`)
+  for (const start of ifStarts) {
+    if (start < bound.end || start >= handler.end) continue
+    const condition = conditionOf(start)
+    if (!condition || !named.test(code.slice(condition[0] + 1, condition[1]))) continue
+    // The first `if` that names the binding is the consumer; only `if (<binding>)` is read as one.
+    if (code.slice(condition[0] + 1, condition[1]).trim() !== bound.name) return null
+    const consumer = parseIf(code, start)
+    return consumer ? { text: code.slice(consumer.then[0], consumer.then[1]), name: bound.name } : null
+  }
+  return null
 }
 
 // ── the scan ──────────────────────────────────────────────────────────────────
@@ -1982,7 +2188,7 @@ function scanSheetPairings(source: string): PairingScan {
     const text = `${left} ${op} ${right}`.replace(/\s+/g, ' ')
 
     // 3. Its polarity in the `if` that decides — through the bound boolean when there is one.
-    let polarity = polarityOf(unit, 0)
+    let polarity = quantifiedPolarity(code, unit, region) ?? polarityOf(unit, 0)
     if (binding) {
       const limit = handler ? handler.end : at + 4000
       const use = new RegExp(String.raw`(?<![\w$.])${escapeName(binding.name)}(?![\w$])`, 'g')
@@ -2015,36 +2221,60 @@ function scanSheetPairings(source: string): PairingScan {
     }
 
     // 4. The mismatch path(s) — both branches when the polarity is unknown — and whether any answers.
+    //    A mismatch branch that does not end the path, opposite one that does, continues into the
+    //    FALL-THROUGH RUN after the `if` (with no else, the empty else-branch is such a branch).
     const mismatchWhenTrue = (op === '!==' || op === '!=') !== (polarity === 'flipped')
-    const thenText = code.slice(statement.then[0], statement.then[1])
-    const paths: Array<[number, number]> = []
-    if (polarity === 'unknown' || mismatchWhenTrue) paths.push(statement.then)
-    if (polarity === 'unknown' || !mismatchWhenTrue) {
-      if (statement.else) paths.push(statement.else)
-      else if (/(?<![\w$.])(?:return|throw)(?![\w$])/.test(thenText)) {
-        const next = branchAt(code, skipSpace(code, statement.end))
-        if (next) paths.push(next)
-      }
-    }
     const responseNames = handler ? handler.responseNames : DEFAULT_RESPONSE_NAMES
     let closures = handler ? closuresByHandler.get(handler) : undefined
     if (handler && !closures) {
       closures = responseClosures(code.slice(handler.start, handler.end), responseNames)
       closuresByHandler.set(handler, closures)
     }
-    const reads = paths.map(([s, e]) => ({ path: code.slice(s, e), read: readAnswer(code.slice(s, e), responseNames, closures) }))
+    const ends = (span: [number, number] | null) => span !== null && /(?<![\w$.])(?:return|throw)(?![\w$])/.test(code.slice(span[0], span[1]))
+    const paths: Array<[number, number]> = []
+    const ifEnd = statement.end
+    let undelimited = false
+    const mismatchPath = (branch: [number, number] | null, other: [number, number] | null) => {
+      if (branch) paths.push(branch)
+      if (ends(branch) || !ends(other)) return
+      const run = fallThroughRun(code, ifEnd, (next) => readAnswer(next, responseNames, closures).answers)
+      if (run) paths.push(run)
+      else undelimited = true
+    }
+    if (polarity === 'unknown' || mismatchWhenTrue) mismatchPath(statement.then, statement.else)
+    if (polarity === 'unknown' || !mismatchWhenTrue) mismatchPath(statement.else, statement.then)
+    if (undelimited) {
+      unparseable.push(`line ${lineAt(at)}: ${text} (the statements after it)`)
+      continue
+    }
+    const reads = paths.map(([s, e]) => ({ from: s, path: code.slice(s, e), read: readAnswer(code.slice(s, e), responseNames, closures) }))
     const answering = reads.filter((r) => r.read.answers)
     if (answering.length === 0) continue
 
-    // 5. Its shape.
-    const echo = answering.some(({ read }) => read.payloads === null || read.payloads.some((p) => !isConstantExpression(p, isConstantName)))
+    // 5. Its shape. A handed-off value is answered where `consumerOf` finds it answered: that answer is
+    //    payload too — with the value's own name there (`err`, `failure`) standing for the value, whose
+    //    payload is already read at the handoff. No such place in the handler reads as echo.
+    const constant = (p: string) => isConstantExpression(p, isConstantName)
+    const answeredConstant = (from: number, handoff: Handoff): boolean => {
+      const consumer = consumerOf(code, handler, handoff, from + handoff.at, ifStarts, conditionOf, inLiteral)
+      if (!consumer) return false
+      const read = readAnswer(consumer.text, responseNames, closures)
+      if (!read.answers || read.payloads === null || read.handoffs.length > 0) return false
+      const value = consumer.name
+        ? new RegExp(String.raw`(?<![\w$.])${escapeName(consumer.name)}(?![\w$])(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*`, 'g')
+        : null
+      return read.payloads.every((p) => constant(value ? p.replace(value, ' null ') : p))
+    }
+    const echo = answering.some(({ from, read }) => read.payloads === null
+      || !read.payloads.every(constant)
+      || !read.handoffs.every((h) => answeredConstant(from, h)))
     const fn = handler ? null : fnDecls.filter((f) => f.index < at).pop() ?? null
     const context = handler ? handler.key : fn ? `fn ${fn.name}` : '(module)'
-    // A mismatch path that answers ONLY a 401/403 is the authority refusal itself — no other status in it.
+    // A mismatch path that answers ONLY a 403 is the authority refusal itself — no other status in it.
     const answersOnlyWithAuthority = answering.every(({ path }) =>
-      AUTHORITY_REFUSAL_401_403.test(path) && !/\.\s*status\s*\(\s*(?!40[13]\s*\))/.test(path))
+      AUTHORITY_REFUSAL_403.test(path) && !/\.\s*status\s*\(\s*(?!403\s*\))/.test(path))
     const beforeAuthority = handler
-      ? !AUTHORITY_REFUSAL_401_403.test(code.slice(handler.start, at)) && !answersOnlyWithAuthority
+      ? !AUTHORITY_REFUSAL_403.test(code.slice(handler.start, at)) && !answersOnlyWithAuthority
       : null
     sites.push({ key: `${context} | ${text}`, line: lineAt(at), echo, beforeAuthority })
   }
@@ -2072,11 +2302,12 @@ const FORM_SHARE_GAP_WHY = 'GAP — #5957 final review (and the r59 handoff\'s "
   + 'its liveness refusal, a cross-sheet viewId is answered 404 `View <viewId> does not belong to sheet <sheetId>` '
   + 'and a missing one 404 `View not found: <viewId>` — both ids pasted back, and the two cases told apart, for any '
   + 'signed-in caller, including one the handler would then refuse. Two of the three are write routes. Fix: read the '
-  + 'view below the 403 + liveness gates and answer both cases with sendSheetNotLive(res, \'absent\'); this row then '
-  + 'leaves the list, its census row flips, and its wire witness below reds until it is deleted.'
+  + 'view below the 403 + liveness gates and answer both cases with sendSheetNotLive(res, \'absent\') — fixed means a '
+  + 'caller holding nothing gets the same 403 on its own, a foreign and a missing view. This row then leaves the list, '
+  + 'its census row flips, and its wire witness below goes from holding GAP to holding FIXED.'
 
 /**
- * The ONLY sites allowed to echo or to answer ahead of their handler's 401/403. Keyed like the census.
+ * The ONLY sites allowed to echo or to answer ahead of their handler's 403. Keyed like the census.
  * MAPPED: the echo never reaches the wire, and the cells that prove it are named. GAP: a known defect.
  */
 const SHEET_PAIRING_EXCEPTIONS: Record<string, { kind: 'MAPPED' | 'GAP'; why: string }> = {
@@ -2217,11 +2448,12 @@ describe('#5946 structural — by SHAPE: a sheet-pairing refusal of the recognis
     expect(pairingViolations(scan()), 'a sheet-pairing refusal changed shape, appeared, or vanished — see the rules above').toEqual([])
   })
 
-  it('the exceptions are the resolver (MAPPED) and the three form-share routes (GAP), each with its reason', () => {
-    const gap = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'GAP').map(([k]) => k.split(' | ')[0])
+  it('the exceptions are the resolver (MAPPED) and form-share routes (GAP) only, each with its reason', () => {
+    const gap = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'GAP').map(([k]) => k.split(' | ')[0]!)
     const mapped = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'MAPPED').map(([k]) => k)
     expect(mapped).toEqual([RESOLVER_PAIRING_KEY])
-    expect(gap.sort()).toEqual(Object.keys(FORM_SHARE_WITNESS).sort())
+    // Each GAP route is one the wire witness holds (to GAP while its row is here, to FIXED once it is gone).
+    for (const route of gap) expect(FORM_SHARE_ROUTES as readonly string[]).toContain(route)
     for (const exception of Object.values(SHEET_PAIRING_EXCEPTIONS)) expect(exception.why.length).toBeGreaterThan(200)
   })
 
@@ -2244,14 +2476,62 @@ describe('#5946 structural — by SHAPE: a sheet-pairing refusal of the recognis
 /**
  * The static rows say the three form-share routes echo and answer ahead of their 403. These cells say
  * the same thing about the RESPONSES, so the GAP rows describe the product rather than the scanner.
- * For each route, a caller holding nothing:
- *   - on a view that DOES belong to the addressed sheet is refused 403 — the route's own authority gate;
- *   - on a view that belongs to ANOTHER sheet gets a 404 instead — so the pairing answered first — that
- *     is not the shared #5946 refusal and carries both ids;
- *   - on a view that does not exist gets a different 404 text — so the two cases are told apart.
- * When a route is fixed these cells red on purpose: delete its SHEET_PAIRING_EXCEPTIONS row, update its
- * census row, and delete its entry here (the self-check keeps this list equal to the GAP rows).
+ * For each route, a caller holding nothing asks for three views, and `formShareGapState` names what the
+ * three answers show:
+ *   GAP      as recorded — on a view that DOES belong to the addressed sheet it is refused 403 (the route's
+ *            own authority gate); on a view that belongs to ANOTHER sheet it gets a 404 instead (so the
+ *            pairing answered first) that is not the shared #5946 refusal and carries both ids; on a view
+ *            that does not exist it gets a different 404 text (so the two cases are told apart);
+ *   FIXED    the order FORM_SHARE_GAP_WHY prescribes, stated positively: the SAME 403 FORBIDDEN on all
+ *            three views. Nothing weaker counts — in particular not "the foreign view now answers the
+ *            shared refusal", which a pairing still standing ahead of the 403 can do while the own-view
+ *            403 vs foreign-view 404 difference remains;
+ *   CHANGED  neither: the route moved, but not to the fixed state.
+ * A route with a GAP row in SHEET_PAIRING_EXCEPTIONS is held to GAP; one without is held to FIXED. So
+ * the list below never shrinks: when a route is fixed its GAP cell reds on purpose, its exception row is
+ * deleted and its census row updated, and from then on the same entry holds FIXED — a route can only
+ * leave the GAP list into three identical 403s, never because the static scan stopped seeing a pairing
+ * (moving only the pairing below the 403, with "no such view" still answered first, reads REDUNDANT
+ * there and CHANGED here). CHANGED reds with what the three answers were: the route is NOT fixed.
  */
+interface WitnessAnswer { status: number; body: unknown; text: string }
+type GapState = 'GAP' | 'FIXED' | 'CHANGED'
+
+function formShareGapState(own: WitnessAnswer, foreign: WitnessAnswer, missing: WitnessAnswer): GapState {
+  const forbidden = (r: WitnessAnswer) => r.status === FORBIDDEN_STATUS && isDeepStrictEqual(r.body, FORBIDDEN)
+  if (forbidden(own) && forbidden(foreign) && forbidden(missing)) return 'FIXED'
+  const recorded = forbidden(own)
+    && foreign.status === 404 && !isDeepStrictEqual(foreign.body, MISMATCH_BODY)
+    && foreign.text.includes(VIEW_ELSEWHERE) && foreign.text.includes(SHEET_LIVE)
+    && missing.status === 404 && missing.text !== foreign.text
+  return recorded ? 'GAP' : 'CHANGED'
+}
+
+const GAP_STATE_WHY: Record<GapState, string> = {
+  GAP: 'still answers the GAP as recorded, but its SHEET_PAIRING_EXCEPTIONS row is gone — the route is NOT fixed: '
+    + 'restore its GAP row, or fix the ORDER FORM_SHARE_GAP_WHY prescribes',
+  FIXED: 'is FIXED — a caller holding nothing gets the same 403 on its own, a foreign and a missing view: delete its '
+    + 'SHEET_PAIRING_EXCEPTIONS row and set its SHEET_PAIRING_CENSUS row to echo:false/beforeAuthority:false; '
+    + 'its FORM_SHARE_WITNESS entry stays and holds FIXED from then on',
+  CHANGED: 'changed but is NOT fixed — a caller holding nothing does not get the same 403 on its own, a foreign and a '
+    + 'missing view, so something still answers ahead of the 403 (or the route broke). The fix is the ORDER in '
+    + 'FORM_SHARE_GAP_WHY; a GAP row stays until the answers below are three identical 403s',
+}
+
+/** The #5957 final review's three routes. Fixed, not derived from the exceptions: the list cannot shrink. */
+const FORM_SHARE_ROUTES = [
+  'GET /sheets/:sheetId/views/:viewId/form-share',
+  'PATCH /sheets/:sheetId/views/:viewId/form-share',
+  'POST /sheets/:sheetId/views/:viewId/form-share/regenerate',
+] as const
+
+/** Every witnessed route and the state it is held to: GAP while it has a GAP row, FIXED once it has none. */
+function witnessPlan(exceptions: Readonly<Record<string, { kind: string }>>): Array<[string, GapState]> {
+  return FORM_SHARE_ROUTES.map((route): [string, GapState] => [
+    route,
+    Object.entries(exceptions).some(([key, e]) => e.kind === 'GAP' && key.startsWith(`${route} | `)) ? 'GAP' : 'FIXED',
+  ])
+}
 const FORM_SHARE_WITNESS: Record<string, (agent: ReturnType<typeof request>, sheetId: string, viewId: string) => request.Test> = {
   'GET /sheets/:sheetId/views/:viewId/form-share': (a, sheetId, viewId) =>
     a.get(`/api/multitable/sheets/${sheetId}/views/${viewId}/form-share`),
@@ -2264,23 +2544,37 @@ const FORM_SHARE_WITNESS: Record<string, (agent: ReturnType<typeof request>, she
 describe('GAP witness — the three form-share routes answer the hand-written pairing ahead of their 403', () => {
   const VIEW_NOWHERE = 'viw_5946_form_share_nowhere'
 
-  for (const [route, send] of Object.entries(FORM_SHARE_WITNESS)) {
-    it(`${route}: the caller it refuses learns, before the 403, that a foreign view exists and on which sheet`, async () => {
+  it('self-check: the witness covers exactly the three form-share routes, and every GAP row is one of them', () => {
+    expect(Object.keys(FORM_SHARE_WITNESS).sort()).toEqual([...FORM_SHARE_ROUTES].sort())
+    const gap = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'GAP').map(([k]) => k.split(' | ')[0])
+    for (const route of gap) expect(FORM_SHARE_ROUTES as readonly string[], 'a GAP row with no wire witness').toContain(route)
+  })
+
+  it('self-check: a route whose GAP row is deleted stays witnessed, held to FIXED — the list cannot shrink', () => {
+    const plan = witnessPlan(SHEET_PAIRING_EXCEPTIONS)
+    expect(plan.map(([route]) => route).sort()).toEqual([...FORM_SHARE_ROUTES].sort())
+    const getRoute = 'GET /sheets/:sheetId/views/:viewId/form-share'
+    const withoutGet = Object.fromEntries(Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([key]) => !key.startsWith(`${getRoute} | `)))
+    const after = witnessPlan(withoutGet)
+    expect(after.map(([route]) => route).sort(), 'deleting a GAP row dropped its route from the witness').toEqual([...FORM_SHARE_ROUTES].sort())
+    expect(after.find(([route]) => route === getRoute)?.[1]).toBe('FIXED')
+  })
+
+  for (const [route, expected] of witnessPlan(SHEET_PAIRING_EXCEPTIONS)) {
+    const send = FORM_SHARE_WITNESS[route]!
+    const title = expected === 'GAP'
+      ? 'the caller it refuses learns, before the 403, that a foreign view exists and on which sheet'
+      : 'a caller holding nothing gets the same 403 on its own, a foreign and a missing view'
+    it(`${route} (${expected}): ${title}`, async () => {
       const own = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_ON_LIVE)
       const foreign = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
       const missing = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_NOWHERE)
 
       expect([own.status, own.body], `${route}: a caller holding nothing is not refused on a view that belongs — the witness proves nothing`).toEqual([FORBIDDEN_STATUS, FORBIDDEN])
 
-      const fixed = `${route} no longer answers the hand-written pairing — if it now answers the shared refusal, the GAP is fixed: `
-        + 'delete its SHEET_PAIRING_EXCEPTIONS row, update its SHEET_PAIRING_CENSUS row, and remove it from FORM_SHARE_WITNESS'
-      expect(foreign.status, fixed).toBe(404)
-      expect(foreign.body, fixed).not.toEqual(MISMATCH_BODY)
-      expect(foreign.text, `${fixed} (the viewId is no longer echoed)`).toContain(VIEW_ELSEWHERE)
-      expect(foreign.text, `${fixed} (the sheetId is no longer echoed)`).toContain(SHEET_LIVE)
-
-      expect(missing.status).toBe(404)
-      expect(missing.text, `${fixed} (a missing view and a foreign view now answer alike)`).not.toBe(foreign.text)
+      const state = formShareGapState(own, foreign, missing)
+      const seen = `own ${own.status} / foreign ${foreign.status} ${foreign.text.slice(0, 160)} / missing ${missing.status} ${missing.text.slice(0, 160)}`
+      expect(state, `${route} ${GAP_STATE_WHY[state]} [${seen}]`).toBe(expected)
     })
   }
 })
@@ -2583,5 +2877,152 @@ describe('by SHAPE — self-tests: a hand-written copy under new names is invisi
     // Two separate statements do not splice into one pairing.
     const apart = plant("    const a = 'SELECT id FROM meta_views WHERE id = $1'\n    const b = 'UPDATE t SET x = 1 WHERE sheet_id = $2'")
     expect(sqlViewPairings(apart)).toEqual([])
+  })
+
+  // ── #6069 second review: what the scan read too narrowly ────────────────────────────────────
+  const FREE_REFUSAL = "return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View not found' } })"
+  const RETURNS_WHEN_EQUAL = '    if (owner.sheetId === target) return res.json({ ok: true })\n'
+
+  it('a fall-through refusal is read as a RUN, not one statement: a local, a log line or a conditional answer between; an else that does not answer', () => {
+    // FT0 (the control the first version already read): the refusal right after the returning equality.
+    plantedSite(plant(`${RETURNS_WHEN_EQUAL}    ${ECHO_REFUSAL}`), true, 'FT0 refusal directly after')
+    // FT1: the message built in a local between the `if` and the refusal.
+    plantedSite(plant(`${RETURNS_WHEN_EQUAL}    const text = \`View \${req.params.viewId} is on \${owner.sheetId}\`\n    return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: text } })`), true, 'FT1 message built in a local between')
+    // FT2: a log line between.
+    plantedSite(plant(`${RETURNS_WHEN_EQUAL}    console.warn('view elsewhere', req.params.viewId)\n    ${ECHO_REFUSAL}`), true, 'FT2 a log line between')
+    // A conditional values-free answer between does not end the run: the refusal after it is read too.
+    plantedSite(plant(`${RETURNS_WHEN_EQUAL}    if (!owner.name) ${FREE_REFUSAL}\n    ${ECHO_REFUSAL}`), true, 'a conditional answer between')
+    // An else that does not answer continues into the statements after the `if`.
+    plantedSite(plant(`    if (owner.sheetId === target) {\n      return res.json({ ok: true })\n    } else {\n      console.warn('elsewhere')\n    }\n    ${ECHO_REFUSAL}`), true, 'an else that does not answer')
+    // The run is read as far as it goes, and no further: a values-free one reads values-free.
+    plantedSite(plant(`${RETURNS_WHEN_EQUAL}    console.warn('view elsewhere')\n    ${FREE_REFUSAL}`), false, 'a values-free run')
+  })
+
+  /** The two transaction refusals (a returned `{ status }` object) the census holds, and the caller line that answers one. */
+  const TXN_SITES: Array<[key: string, site: string]> = [
+    [
+      'POST /sheets/:sheetId/config-restore-execute | entitySheetId !== sheetId',
+      "if (entitySheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'The config entity belongs to a different sheet than its revision; refusing to un-create.' }",
+    ],
+    [
+      'POST /sheets/:sheetId/config-restore-execute | fieldRow.sheetId !== sheetId',
+      "if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }",
+    ],
+  ]
+  const TXN_CONSUMER = 'if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })'
+
+  it('a handed-off value is read where it is ANSWERED: the caller of a returned status object, the catch of a throw', () => {
+    // RS: the census rows whose refusal is `return { status: 400, … }` inside pool.transaction. Only the CALLER changes.
+    for (const [key, text] of TXN_SITES) {
+      expect(SHEET_PAIRING_CENSUS[key], `${key}: the probed row left the census — re-anchor this probe`).toEqual({ echo: false, beforeAuthority: false })
+      const site = UNIVER_META_SOURCE.indexOf(text)
+      const consumer = UNIVER_META_SOURCE.indexOf(TXN_CONSUMER, site)
+      expect(site > 0 && consumer > site && consumer - site < 8000, `${key}: the refusal or its caller moved — re-anchor this probe`).toBe(true)
+      const callerEchoes = UNIVER_META_SOURCE.slice(0, consumer)
+        + 'if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: `${failure.message} (sheet ${sheetId}, revision ${revisionId})` } })'
+        + UNIVER_META_SOURCE.slice(consumer + TXN_CONSUMER.length)
+      const rs = scanSheetPairings(callerEchoes)
+      const rsSite = rs.sites.find((s) => s.key === key)
+      expect([rsSite?.echo, rsSite?.beforeAuthority], `RS ${key}: the caller echoes, the returned object does not`).toEqual([true, false])
+      expect(pairingViolations(rs).join('\n')).toContain(`DECLARED ≠ COMPUTED (line ${rsSite!.line}): ${key}`)
+    }
+
+    // TH: the view-aggregate refusal becomes a throw, and the handler's catch answers it with both ids.
+    const thrown = rewriteAggregateRefusal("throw new NotFoundError('View not found')")
+    const catchAt = thrown.indexOf('} catch (err) {', thrown.indexOf("router.get('/sheets/:sheetId/view-aggregate'"))
+    expect(catchAt, 'the view-aggregate catch moved — re-anchor this probe').toBeGreaterThan(0)
+    const opened = catchAt + '} catch (err) {'.length
+    const th = scanSheetPairings(thrown.slice(0, opened)
+      + "\n      if (err instanceof NotFoundError) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `${err.message}: ${viewId} is not on ${sheetId}` } })"
+      + thrown.slice(opened))
+    const thSite = th.sites.find((s) => s.key === AGGREGATE_KEY)
+    expect([thSite?.echo, thSite?.beforeAuthority], 'TH: the catch echoes, the thrown error does not').toEqual([true, false])
+    expect(pairingViolations(th).join('\n')).toContain(`DECLARED ≠ COMPUTED (line ${thSite!.line}): ${AGGREGATE_KEY}`)
+
+    // The same readings on a planted route: the answer given where the value lands decides.
+    const tryCatch = (answer: string) => plant("    try {\n      if (owner.sheetId !== target) throw new NotFoundError('View not found')\n    } catch (err) {\n"
+      + `      if (err instanceof NotFoundError) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: ${answer} } })\n`
+      + "      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'failed' } })\n    }")
+    plantedSite(tryCatch('err.message'), false, 'a constant error, answered with its own message')
+    plantedSite(tryCatch('`${err.message}: ${req.params.viewId}`'), true, 'a constant error, answered with the viewId')
+    plantedSite(plant("    if (owner.sheetId !== target) throw new NotFoundError('View not found')"), true, 'a throw no catch in the handler answers')
+    plantedSite(plant("    if (owner.sheetId !== target) return next(new NotFoundError('View not found'))"), true, 'next(…): answered outside the handler')
+    plantedSite(plant("    const fail = () => { throw new NotFoundError('View not found') }\n    if (owner.sheetId !== target) fail()"), true, 'a local function that only throws')
+    const transaction = (answer: string) => plant('    const failure = await poolManager.get().transaction(async () => {\n'
+      + "      if (owner.sheetId !== target) return { status: 404, code: 'NOT_FOUND', message: 'View not found' }\n      return null\n    })\n"
+      + (answer ? `    if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: ${answer} } })` : ''))
+    plantedSite(transaction('failure.message'), false, 'a constant status object, answered with its own fields')
+    plantedSite(transaction('`${failure.message}: ${req.params.viewId}`'), true, 'a constant status object, answered with the viewId')
+    plantedSite(transaction(''), true, 'a status object nobody answers here')
+  })
+
+  it('polarity passes through a whole `!rows.some((row) => …)` conjunct, and nowhere else a callback stands', () => {
+    // GET /context's pairing is exactly this shape; its census row (echo:false) is read through it, so the
+    // success path after its 403 is not mistaken for the refusal.
+    expect(SHEET_PAIRING_CENSUS['GET /context | String(row.id) === resolvedSheetId']).toEqual({ echo: false, beforeAuthority: false })
+    const echoingSuccess = '    return res.json({ ok: true, data: { rows: found.rows, viewId: req.params.viewId } })'
+    // The refusal is values-free and the success path echoes: only the refusal is the mismatch path.
+    plantedSite(plant(`    if (target && !found.rows.some((row: any) => row.sheet_id === target)) {\n      ${FREE_REFUSAL}\n    }\n${echoingSuccess}`), false, '!rows.some(…) as a whole conjunct')
+    plantedSite(plant(`    if (found.rows.every((row: any) => row.sheet_id !== target)) {\n      ${FREE_REFUSAL}\n    }\n${echoingSuccess}`), false, 'rows.every(…) as the whole condition')
+    // Anything the rule does not cover keeps `unknown` and reads both paths — here the echoing success path.
+    plantedSite(plant(`    if (found.rows.some((row: any) => row.sheet_id === target) === false) {\n      ${FREE_REFUSAL}\n    }\n${echoingSuccess}`), true, '.some(…) compared with false')
+    plantedSite(plant(`    if (found.rows.filter((row: any) => row.sheet_id === target).length === 0) {\n      ${FREE_REFUSAL}\n    }\n${echoingSuccess}`), true, '.filter(…) is not read through')
+    plantedSite(plant(`    if (target ? !found.rows.some((row: any) => row.sheet_id === target) : false) {\n      ${FREE_REFUSAL}\n    }\n${echoingSuccess}`), true, 'a ternary at the top level')
+  })
+
+  it('position counts only a 403: a pairing moved between a 401 and its 403 is before authority, and a 401 does not close a GAP', () => {
+    // B: view-aggregate's pairing block moved between its 401 and its sendForbidden.
+    // Multi-line anchors: read the product text with LF line ends (a Windows checkout has CRLF).
+    const LF_SOURCE = UNIVER_META_SOURCE.replace(/\r\n/g, '\n')
+    const decl = LF_SOURCE.indexOf("router.get('/sheets/:sheetId/view-aggregate'")
+    const blockStart = LF_SOURCE.indexOf('      let view: SharedMultitableViewConfig | null = null\n      if (viewId) {', decl)
+    const blockTail = `          ${"return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View not found' } })"}\n        }\n      }\n`
+    const blockEnd = LF_SOURCE.indexOf(blockTail, blockStart) + blockTail.length
+    const gate = LF_SOURCE.indexOf('      if (!capabilities.canRead) return sendForbidden(res)\n', decl)
+    const unauthenticated = LF_SOURCE.indexOf('return res.status(401)', decl)
+    expect(decl > 0 && unauthenticated > decl && gate > unauthenticated && blockStart > gate && blockEnd > blockStart + 100, 'view-aggregate moved — re-anchor this probe').toBe(true)
+    const block = LF_SOURCE.slice(blockStart, blockEnd)
+    const lifted = LF_SOURCE.slice(0, gate) + block + LF_SOURCE.slice(gate, blockStart) + LF_SOURCE.slice(blockEnd)
+    const b = scanSheetPairings(lifted)
+    const bSite = b.sites.find((s) => s.key === AGGREGATE_KEY)
+    expect([bSite?.echo, bSite?.beforeAuthority], 'B: a 401 ahead of the pairing is not its authority gate').toEqual([false, true])
+    expect(pairingViolations(b).join('\n')).toContain(`UNEXCUSED (line ${bSite!.line}): ${AGGREGATE_KEY}`)
+
+    // C: a GAP route with a 401 on top and its pairing answering the SHARED refusal — still ahead of the 403.
+    // The first GAP route whose handler still holds the hand-written echo (GET form-share today).
+    const echoing = "return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })"
+    const target = Object.keys(FORM_SHARE_WITNESS).map((route) => {
+      const [verb, path] = route.split(' ') as [string, string]
+      const declaration = `router.${verb.toLowerCase()}('${path}', async (req: Request, res: Response) => {\n`
+      const top = LF_SOURCE.indexOf(declaration) + declaration.length
+      const end = LF_SOURCE.indexOf('\n  })\n', top)
+      const refusal = LF_SOURCE.indexOf(echoing, top)
+      return { route, top, refusal: top > declaration.length && refusal > top && refusal < end ? refusal : -1 }
+    }).find((r) => r.refusal > 0)
+    expect(target, 'no GAP route still holds the hand-written pairing — the GAP is fixed: retire this probe').toBeTruthy()
+    const partial = LF_SOURCE.slice(0, target!.top)
+      + "    if (!(req as any).user) return res.status(401).json({ error: 'Authentication required' })\n"
+      + LF_SOURCE.slice(target!.top, target!.refusal) + "return sendSheetNotLive(res, 'absent')" + LF_SOURCE.slice(target!.refusal + echoing.length)
+    const c = scanSheetPairings(partial)
+    const key = `${target!.route} | String(row.sheet_id) !== sheetId`
+    const cSite = c.sites.find((s) => s.key === key)
+    expect([cSite?.echo, cSite?.beforeAuthority], 'C: values-free now, but still ahead of the 403').toEqual([false, true])
+    const violations = pairingViolations(c).join('\n')
+    expect(violations).toContain(`DECLARED ≠ COMPUTED (line ${cSite!.line}): ${key}`)
+    expect(violations, 'C: the ledger would call the GAP closed while the pairing still answers first').not.toContain(`REDUNDANT exception — the site no longer needs it: ${key}`)
+  })
+
+  it('the witness calls a route FIXED only on three identical 403s: the shared refusal ahead of the 403 is CHANGED', () => {
+    const answer = (status: number, body: unknown): WitnessAnswer => ({ status, body, text: JSON.stringify(body) })
+    const forbidden = answer(FORBIDDEN_STATUS, FORBIDDEN)
+    const shared = answer(MISMATCH_STATUS, MISMATCH_BODY)
+    const echoed = answer(404, { ok: false, error: { code: 'NOT_FOUND', message: `View ${VIEW_ELSEWHERE} does not belong to sheet ${SHEET_LIVE}` } })
+    const missing = answer(404, { ok: false, error: { code: 'NOT_FOUND', message: 'View not found: viw_x' } })
+    expect(formShareGapState(forbidden, echoed, missing), 'the recorded GAP').toBe('GAP')
+    expect(formShareGapState(forbidden, forbidden, forbidden), 'the fix FORM_SHARE_GAP_WHY prescribes').toBe('FIXED')
+    // Probe C on the wire: the foreign view answers the shared refusal, but after an own-view 403 — not fixed.
+    expect(formShareGapState(forbidden, shared, missing)).toBe('CHANGED')
+    expect(formShareGapState(forbidden, shared, shared), 'foreign and missing alike, still 404 vs the own view\'s 403').toBe('CHANGED')
+    expect(formShareGapState(forbidden, forbidden, missing)).toBe('CHANGED')
   })
 })
