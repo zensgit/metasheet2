@@ -164,7 +164,8 @@ All five restored by `cp` and `cmp` byte-equal; `git status --porcelain` unchang
   step in `.github/workflows/` runs an explicit name list (`multitable-web-guard`,
   `approval-web-guard`, `attendance-web-guard`, …) and no workflow runs the package's bare `test`
   script. This round does not edit workflows; whether to add the spec to a run-list is for the
-  owner. `FormView.vue` itself is still only type-checked (`vue-tsc`), not mounted.
+  owner. `FormView.vue` itself is still only type-checked (`vue-tsc`), not mounted. **Superseded by §8**:
+  the spec is now wired into the required `web-tests` lane.
 
 ## 6. NOT RUN
 
@@ -203,3 +204,62 @@ All five restored by `cp` and `cmp` byte-equal; `git status --porcelain` unchang
   substring "all sites" and not an over-claim.
 - Timing readings on this tree, same idiom and subjects as §2: every guarded over-limit case
   0.0–0.1 ms; the bare `SUBSTITUTE` under MR5 3827 ms (the threshold is 500 ms).
+
+## 8. Required web lane wiring (2026-09-25/26, after the owner ruling)
+
+- **Change**: one line in `apps/web/scripts/run-required-web-tests.sh` — the token
+  `formViewValidation` in the final `exec npx vitest run` block, between
+  `featureFlagsApprovalMobile` and `IntegrationRunDetail` (the block's own case-insensitive
+  order). No other lane file, no workflow, no `.gitattributes` change. This supersedes §5's
+  "not collected by CI" sentence: the spec now runs in `web-tests` (`.github/workflows/web-tests.yml`,
+  a required check on `main`), which runs this script unconditionally. The path-filtered
+  `approval-web-guard` / `multitable-web-guard` are not edited (workflow files are outside this
+  branch); the script's header names them as the second registration point for specs that belong to
+  those guards, and this spec belongs to neither. There is no separate token manifest on this branch
+  to keep in step (`scripts/ops/required-web-lane-token-set-diff.mjs` is a comparison tool, not a
+  manifest).
+- **Token**: `node scripts/ops/required-web-lane-token-set-diff.mjs fa23d5a02` — before 397 distinct,
+  after 398, `ADDED (1): formViewValidation`, nothing removed. Collision scan: 755 distinct positional
+  tokens across every `vitest run` line of the script, `.github/workflows/*.yml` and
+  `scripts/ops/*.sh`; none is a substring of `tests/formViewValidation.spec.ts` and none contains the
+  new token. An independent matcher over the 829 spec files under `apps/web/tests`: 398 tokens
+  collect 470 files, 397 collect 469, and the difference is exactly `tests/formViewValidation.spec.ts`;
+  the new token collects that one file and no other.
+- **Shape guards** (all against the edited script):
+  1. `packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts` as on this
+     branch and on `main` (it runs in the required `test (20.x)` job): 18/18.
+  2. The same file from `origin/test/web-required-script-shape-guard` (`7bfd21cc6`), run as a
+     temporary copy in the same directory: 22/22 — it adds "no non-empty logical line after the exec
+     block" and "no `#` physical line inside the block".
+  3. That branch's `apps/web/tests/run-required-web-tests-shape.spec.ts`, run as a temporary copy:
+     4/5 as-is — the one red case asserts that branch's own token is present, which this branch does
+     not carry — and 5/5 with that token added as a temporary union simulation (`cp` backup → edit →
+     run → restore → `cmp` equal).
+  Both temporary files removed afterwards; `git status` shows only the intended files.
+- **Lane runs** (`CI=true bash scripts/run-required-web-tests.sh` on this tree):
+  - Node 25.9.0 (the local default): stops at the `multitable-recovery-archive-*` invocation with one
+    red in `tests/multitable-recovery-archive-modal.spec.ts` ("does not submit when durable request
+    identity cannot be saved"): 3/3 reproducible in isolation under Node 25, 0/2 under Node 20.20.2.
+    The spec, the component and the jsdom setup file are byte-identical to `origin/main` and to the
+    base and are not touched by this branch; the workflow runs Node 20.x, not 25.
+  - Node 20.20.2, run 1: every invocation before the exec block green; the exec block collected
+    **470 files** (= the matcher count, the new spec among them) and reported `4 failed | 466 passed`
+    files, `12 failed | 7311 passed (7323)` tests. All 12 are `Test timed out in 5000ms`, in four
+    files none of which this branch touches (`multitable-automation-manager`,
+    `multitable-automation-rule-editor`, `multitable-workbench-1672-1673`,
+    `multitable-workbench-permission-wiring`), while the host load average was 29–41 on 12 cores from
+    other sessions' test processes. The same four files re-run in isolation under Node 20: 4/4 files,
+    287/287 tests, with single tests at 4.3–4.6 s against the 5 s limit. (The one "Failed to fetch
+    dynamically imported module" line in that log belongs to `multitable-chart-load-error.spec.ts`,
+    which passed — it exercises that path on purpose.)
+  - Node 20.20.2, run 2 (same tree, load average 19–42 during the run): every invocation before the
+    exec block green; the exec block again collected **470 files** and reported `1 failed | 469
+    passed` files, `1 failed | 7322 passed (7323)` tests — one `Test timed out in 5000ms` in
+    `tests/multitable-automation-manager.spec.ts` (green 104/104 in the isolated re-run above; not
+    touched by this branch). Three runs on this host gave 470 collected files each time and only
+    timeout reds in untouched files; a run without other sessions' test load was not available, and
+    the required check itself is judged on CI, which was not run (no PR).
+- **Isolated**: `tests/formViewValidation.spec.ts` 17/17 under Node 25. Inside both Node 20 lane
+  runs the exec block's log carries the line `✓ tests/formViewValidation.spec.ts  (17 tests)`.
+- **Not run**: CI itself (no PR); the two path-filtered guards; the branch-protection listing was
+  read (`web-tests` is among the required contexts) and not changed.
