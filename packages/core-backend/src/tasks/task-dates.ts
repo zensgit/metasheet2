@@ -141,8 +141,8 @@ const CANDIDATE_PROBE_SPAN_MS = 24 * 60 * 60 * 1000
 
 /**
  * Local wall-clock (civil Y-M-D h:m:s[.ms] in `timeZone`) → UTC epoch-ms. Candidate-set resolution
- * (see the module docblock, correction 3, for why this replaced an order-dependent two-probe
- * scheme): probe the zone's UTC offset at three points spanning the naive UTC-as-local guess
+ * (a single probe resolves overlaps differently for east- and west-of-UTC zones; this does not):
+ * probe the zone's UTC offset at three points spanning the naive UTC-as-local guess
  * (guess−24h, guess, guess+24h), convert each probed offset to a candidate UTC instant, then:
  *   - if one or more candidates round-trip back to the EXACT requested civil time, return the
  *     LATEST one that does (an overlap/fall-back ambiguity resolves to the later instant, matching
@@ -162,8 +162,8 @@ function zonedWallClockToUtcMs(parts: ZonedWallClockParts, timeZone: string): nu
     minute: parts.minute,
     second: parts.second,
   }
-  // Offset probed from a whole-second guess — see the module docblock (correction 1) for why `ms`
-  // is split out and added back at the end rather than folded into the guess itself.
+  // Offset probed from a whole-second guess; `ms` is added back at the end so a `:59.999` input stays
+  // exact (the offset probe only has whole-second resolution).
   const utcGuess = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second, 0)
   const probeInstants = [utcGuess - CANDIDATE_PROBE_SPAN_MS, utcGuess, utcGuess + CANDIDATE_PROBE_SPAN_MS]
   const candidates = new Set<number>()

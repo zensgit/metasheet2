@@ -163,7 +163,8 @@ describe('task-dates', () => {
       },
     )
 
-    it('the SAME all-day task gives a byte-identical due_at for a +14 and a -11 viewer, while the viewers really do see different dates', () => {
+    it('due_at cannot depend on the viewer: computeDueAt takes one argument (the task), and the +14/-11 viewers really do see different dates', () => {
+      expect(computeDueAt.length).toBe(1)
       const now = new Date('2026-09-15T12:30:00.000Z')
       const kiri = resolveViewerTimeZone('Pacific/Kiritimati', ALL_DAY_TASK.timeZone)
       const pago = resolveViewerTimeZone('Pacific/Pago_Pago', ALL_DAY_TASK.timeZone)
@@ -225,8 +226,8 @@ describe('task-dates', () => {
   })
 
   describe('DST boundaries — America/New_York — viewerNextMidnight (not just computeDueAt)', () => {
-    // `now` rows straddling both 2026 DST edges, and their pinned NM(America/New_York) — verified
-    // against `taskb-r1/oracle_dates.py`'s independent Python zoneinfo computation.
+    // `now` rows straddling both 2026 DST edges, and their pinned NM(America/New_York) — values
+    // computed independently with Python zoneinfo.
     const NOW_TO_NM: Array<[string, string]> = [
       ['2026-03-08T06:00:00.000Z', '2026-03-09T04:00:00.000Z'],
       ['2026-03-08T12:00:00.000Z', '2026-03-09T04:00:00.000Z'],
@@ -295,9 +296,8 @@ describe('task-dates', () => {
 
   describe('DST boundaries — Asia/Beirut (EAST-of-UTC spring-forward gap)', () => {
     // 2026-03-29 00:00 local is inside Beirut's skipped hour (clocks jump 00:00 -> 01:00). This is
-    // the case a naive single-pass guess+correct gets WRONG for an east-of-UTC zone (see the
-    // task-dates.ts module docblock, correction 2) — verified against
-    // `taskb-r1/oracle_dates.py`'s independent zoneinfo computation.
+    // the case a naive single-pass guess+correct gets WRONG for an east-of-UTC zone — value
+    // computed independently with Python zoneinfo.
     it('viewerNextMidnight lands on the post-transition instant, not an hour early', () => {
       expect(viewerNextMidnight(new Date('2026-03-28T12:00:00.000Z'), 'Asia/Beirut').toISOString()).toBe(
         '2026-03-28T22:00:00.000Z',
@@ -318,7 +318,7 @@ describe('task-dates', () => {
       ).toBe('2026-03-08T07:30:00.000Z')
     })
 
-    // PINNED VALUE CHANGED (P2 finding, task-dates.ts §"correction 3"): the old two-probe
+    // PINNED VALUE CHANGED (review finding: overlap resolution): the old two-probe
     // resolution was SIGN-DEPENDENT — for this WEST-of-UTC zone it happened to return the EARLIER
     // of the two valid instants (05:30Z) by probe-order accident, not by any stated rule. PG's own
     // `AT TIME ZONE` (the lock's SQL) deterministically returns the LATER instant for a fall-back
@@ -341,7 +341,7 @@ describe('task-dates', () => {
   })
 
   // -----------------------------------------------------------------------------------------------
-  // DST fold regression cells (P2 finding "correction 3"): the OLD two-probe resolution was
+  // DST fold regression cells (review finding: overlap resolution): the OLD two-probe resolution was
   // SIGN-DEPENDENT — for a WEST-of-UTC zone's fall-back overlap it returned the EARLIER instant by
   // probe-order accident; for an EAST-of-UTC zone (Europe/Berlin) it happened to already return the
   // LATER one, matching PG. These cells were independently verified against `Intl.DateTimeFormat`
@@ -515,6 +515,7 @@ describe('task-dates — review round 2 fixes', () => {
     ['2026-09-15', '10:75'],
     ['2026-09-15', '25:00'],
     ['2026-09-15', '12:00:60'],
+    ['2026-09-15', '24:00'],
   ] as const)('rejects an impossible calendar value %s %s instead of rolling it over', (dueDate, dueTime) => {
     expect(() => computeDueAt({ dueDate, dueTime, timeZone: 'Asia/Shanghai' })).toThrow(RangeError)
   })

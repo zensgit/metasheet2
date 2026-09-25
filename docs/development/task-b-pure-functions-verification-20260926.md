@@ -14,7 +14,7 @@
 | 审阅第 2 轮 | Opus 子代理(独立,只读) | REJECT:两条 P1 CLOSED(含 Postgres 实跑证据);1 P2 + 若干 P3 未闭合 |
 | 余项修复 | 编排者(Opus 主循环)亲自修 | 见 §3 |
 
-说明:第 2 轮之后的余项由编排者直接修,未再起第 3 轮独立审——修复面见 §3,均配了新单测。「实现者不自批」在本件退化为「同一编排者下的不同代理」:实现为 Sonnet、两轮审阅为独立 Opus 代理、余项修复为编排者。M2 接入前建议再起一次独立审。
+说明:第 2 轮之后的余项由编排者直接修;随后起了第 3 轮独立 Opus 审(只审这些修复),结论 ACCEPT、无 P1/P2,新测试对修复前代码 15 条失败(证明有判别力),查看者时区校验对约 100 个手选拼写与 BMP 全字符插入穷举无绕过,445 个被接受的时区 × 7 个时刻与 PG 15.17 `AT TIME ZONE` 0 差异。其余 P3 已顺手修。「实现者不自批」在本件退化为「同一编排者下的不同代理」:实现为 Sonnet、两轮审阅为独立 Opus 代理、余项修复为编排者。M2 接入前建议再起一次独立审。
 
 ## 2. 第 2 轮审阅的独立核验(摘要;均针对提交 `dcf6fad68`,§3 的修复之前)
 
@@ -45,7 +45,7 @@
 ```
 pnpm --filter @metasheet/core-backend exec vitest run tests/unit/task-
  Test Files  5 passed (5)
-      Tests  293 passed (293)
+      Tests  295 passed (295)
 
 cd packages/core-backend && npx tsc --noEmit -p tsconfig.json 2>&1 | grep -E "src/tasks|tests/unit/task-"
 (无输出,grep exit 1)
@@ -60,5 +60,4 @@ exit 1(零命中,门 20 静态部分)
 ## 5. 未做 / 未验证
 
 - 真库行为测试(门 19 SQL 侧、门 3 路由面、门 20 行为门):属 M2,NOT RUN。第 2 轮审阅在本机 PG 上的实跑只是审阅证据,不是本分支的测试。
-- 第 3 轮独立审:未起(见 §1 说明)。
 - 设计外的签名变更(待 owner 在 M2 审阅时确认):`buildTaskPendingCondition` 增加可选 `viewerTzParam`;`isOverdue` 增加可选 `viewerTz`;`validateViewerTimeZoneHeader` 新导出。
