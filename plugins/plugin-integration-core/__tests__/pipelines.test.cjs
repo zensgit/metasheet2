@@ -632,6 +632,40 @@ async function main() {
   assert.deepEqual({ count: smallMid.items.length, truncated: smallMid.truncated, nextCursor: smallMid.nextCursor },
     { count: 50, truncated: true, nextCursor: '150' }, 'limit 50 after #100 of 199: a full page, truncated, cursor #150')
 
+  // A run whose event_index has a HOLE. The migration-060 view drops non-object slots of the
+  // persisted array, so ordinals can skip. Every fixture above is contiguous (1..N), where "the
+  // last returned eventIndex" and "cursor + items returned" are the same number and an offset-style
+  // cursor would pass unnoticed. Here #100 is missing (#1..#99, #101..#202 = 201 events), so the two
+  // differ: an offset cursor would say 200 and re-serve #201 on the next page.
+  const gappedRows = boundaryRows('gapped_run', 'tenant_1', 202).filter((row) => row.event_index !== 100)
+  db.seed('integration_provenance_by_row', gappedRows)
+  const gappedIndexes = gappedRows.map((row) => row.event_index).sort((a, b) => a - b)
+  const gapPage1 = await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'gapped_run' })
+  assert.equal(gapPage1.items.length, 200, 'gapped run: the first page holds 200 events')
+  assert.equal(gapPage1.items[gapPage1.items.length - 1].eventIndex, 201,
+    'gapped run: the 200th event is #201 (the hole at #100 shifts every later ordinal)')
+  assert.deepEqual({ total: gapPage1.total, truncated: gapPage1.truncated, nextCursor: gapPage1.nextCursor },
+    { total: 201, truncated: true, nextCursor: '201' },
+    'gapped run: nextCursor is the last RETURNED eventIndex (201), not an offset (200)')
+  const gapPage2 = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'gapped_run', cursor: gapPage1.nextCursor,
+  })
+  const gapPage2Select = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()
+  assert.deepEqual(gapPage2Select[2].range, { event_index: { gte: 202 } },
+    'gapped run: page two starts strictly after the last event page one returned')
+  assert.deepEqual(gapPage2.items.map(entry => entry.eventIndex), [202], 'gapped run: page two is exactly the one remaining event')
+  assert.deepEqual({ total: gapPage2.total, truncated: gapPage2.truncated, nextCursor: gapPage2.nextCursor },
+    { total: 201, truncated: false, nextCursor: null }, 'gapped run: page two completes the timeline')
+  assert.deepEqual(gapPage1.items.concat(gapPage2.items).map(entry => entry.eventIndex), gappedIndexes,
+    'gapped run: first page + cursor page = every seeded event exactly once (no repeat, no skip across the hole)')
+  // ...and from a mid-run cursor with a caller limit, the hole inside the page moves the cursor too.
+  const gapMid = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'gapped_run', limit: 100, cursor: '50',
+  })
+  assert.deepEqual({ first: gapMid.items[0].eventIndex, count: gapMid.items.length, truncated: gapMid.truncated, nextCursor: gapMid.nextCursor },
+    { first: 51, count: 100, truncated: true, nextCursor: '151' },
+    'gapped run, limit 100 after #50: #51..#99 + #101..#151, cursor #151 (an offset cursor would say 150)')
+
   // a count the db layer cannot produce is a server fault, never "0 events"
   const brokenCountDb = createMockDb()
   brokenCountDb.seed('integration_provenance_by_row', boundaryRows('broken_count_run', 'tenant_1', 2))

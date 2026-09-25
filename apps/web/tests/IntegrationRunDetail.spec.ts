@@ -851,6 +851,173 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       expect(notice(host)!.textContent).toContain('showing 200 of 201')
     })
 
+    // --- f-prov200 review round 1: a 加载更多 issued DURING a replacing re-read ------------------
+    // The case above issues 加载更多 BEFORE the re-read starts, so the request token alone fences
+    // it. Here the polling re-read starts first (bumping the token), and only THEN does the
+    // operator click 加载更多 on the 1..400 timeline still on screen: the click captures the NEW
+    // token and sends cursor=400. The token cannot tell that answer apart, so the page must be
+    // fenced against the timeline it was issued for — appending #401.. after the re-read's #1..#200
+    // would silently drop #201..#400 from the middle and take the button away (nextCursor null).
+    function pollingRaceMocks(fake: ReturnType<typeof pagedProvenance>, cursorAnswer?: () => Response) {
+      const state = {
+        holdFirstPage: false,
+        holdCursorPage: false,
+        heldFirst: deferredResponse(),
+        heldFirstUrl: '',
+        heldMore: deferredResponse(),
+        heldMoreUrl: '',
+      }
+      installMocks(() => jsonResponse({ ...DETAIL_RUN, status: 'running', finishedAt: null }), (url) => {
+        if (state.holdFirstPage && !hasCursor(url)) {
+          state.holdFirstPage = false
+          state.heldFirstUrl = url
+          return state.heldFirst.promise
+        }
+        if (state.holdCursorPage && hasCursor(url)) {
+          state.holdCursorPage = false
+          state.heldMoreUrl = url
+          return state.heldMore.promise
+        }
+        return fake.answer(url)
+      })
+      return {
+        state,
+        releaseFirst: () => state.heldFirst.resolve(fake.answer(state.heldFirstUrl)),
+        releaseMore: () => state.heldMore.resolve(cursorAnswer ? cursorAnswer() : fake.answer(state.heldMoreUrl)),
+      }
+    }
+
+    // Drives: 1..400 shown → polling re-read held → 加载更多 (cursor 400) held → re-read lands.
+    async function clickLoadMoreDuringPollingReread(
+      race: ReturnType<typeof pollingRaceMocks>,
+    ): Promise<HTMLDivElement> {
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(renderedIndexes(host)).toEqual(range(1, 400))
+      race.state.holdFirstPage = true
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(race.state.heldFirstUrl).not.toBe('')
+      // The re-read is in flight, the 1..400 timeline and its cursor are still on screen, and the
+      // button is live — this is the click the token alone cannot fence.
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+      race.state.holdCursorPage = true
+      await clickLoadMore(host)
+      expect(race.state.heldMoreUrl).not.toBe('')
+      expect(new URLSearchParams(race.state.heldMoreUrl.split('?')[1]).get('cursor')).toBe('400')
+      race.releaseFirst()
+      await flushUi()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      return host
+    }
+
+    it('a 加载更多 clicked while a polling re-read is in flight, landing AFTER the re-read replaced the timeline, is discarded (no silent gap)', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      try {
+        const fake = pagedProvenance(450)
+        const race = pollingRaceMocks(fake)
+        const host = await clickLoadMoreDuringPollingReread(race)
+        // The cursor-400 page lands last: it extends a timeline that is no longer on screen.
+        race.releaseMore()
+        await flushUi()
+        const shown = renderedIndexes(host)
+        expect(shown).toEqual(range(1, 200))
+        expect(notice(host)!.textContent).toContain('showing 200 of 450')
+        // The button survives (the late page did not clear nextCursor) and is not stuck loading...
+        expect(loadMoreButton(host)!.disabled).toBe(false)
+        expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).toBeNull()
+        // ...and paging resumes from the NEW timeline's own cursor, contiguously.
+        await clickLoadMore(host)
+        expect(fake.requests[fake.requests.length - 1].get('cursor')).toBe('200')
+        expect(renderedIndexes(host)).toEqual(range(1, 400))
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a 加载更多 clicked during a polling re-read that FAILS after the re-read landed does not flag the new timeline', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      try {
+        const fake = pagedProvenance(450)
+        const race = pollingRaceMocks(fake, () => errorResponse(500, 'INTERNAL_ERROR', 'provenance page failed'))
+        const host = await clickLoadMoreDuringPollingReread(race)
+        race.releaseMore()
+        await flushUi()
+        // The failure belongs to a page of the replaced timeline; the one on screen never asked.
+        expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).toBeNull()
+        expect(renderedIndexes(host)).toEqual(range(1, 200))
+        expect(notice(host)!.textContent).toContain('showing 200 of 450')
+        expect(loadMoreButton(host)!.disabled).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // --- f-prov200 review round 1: close + reopen, released while the section is COLLAPSED -------
+    // The earlier close/reopen case re-expands BEFORE releasing the held page, and that expand
+    // issues its own read (bumping the token), which would hide a reset that forgot to fence. Here
+    // the late answer lands while the reopened dialog is still collapsed, so only the reset itself
+    // stands between it and the new dialog — and a painted-in timeline would also make the next
+    // expand skip its read (the section reuses what it holds).
+    it('a held 加载更多 page released after close + reopen, before re-expanding, never reaches the reopened dialog', async () => {
+      const fake = pagedProvenance(201)
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (hasCursor(url) && !heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(heldUrl).not.toBe('')
+      ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      await openDetail(host)
+      held.resolve(fake.answer(heldUrl))
+      await flushUi()
+      await expandProvenance(host)
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+      // The reopened dialog read its own first page rather than reusing anything painted in.
+      expect(fake.requests.filter((params) => !params.has('cursor'))).toHaveLength(2)
+    })
+
+    it('a held FIRST-page read released after close + reopen, before re-expanding, never reaches the reopened dialog', async () => {
+      // Two distinguishable answers: the earlier dialog's read is answered from a 201-event run,
+      // everything after the reopen from a 450-event one.
+      const earlier = pagedProvenance(201)
+      const current = pagedProvenance(450)
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (!heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return current.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(heldUrl).not.toBe('')
+      ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      await openDetail(host)
+      held.resolve(earlier.answer(heldUrl))
+      await flushUi()
+      await expandProvenance(host)
+      expect(current.requests).toHaveLength(1)
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 450')
+    })
+
     it('a polling re-read replaces the entries AND their disclosure together (0 events while running, 201 once terminal)', async () => {
       vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
       try {

@@ -3635,7 +3635,9 @@ async function refreshRunProvenanceQuietly(runId: string): Promise<void> {
   const requestId = runProvenanceRequestId
   // f-prov200: this re-read REPLACES the timeline with its first page, so a "load more" still in
   // flight now extends a timeline that no longer exists — its answer is fenced out by the token
-  // above, and its button must not stay stuck in the loading state waiting for it.
+  // above, and its button must not stay stuck in the loading state waiting for it. (A "load more"
+  // clicked AFTER this point captures the new token; loadMoreRunProvenance fences that one by the
+  // timeline it was issued for.)
   runProvenanceLoadingMore.value = false
   try {
     const page = await getIntegrationRunProvenance(runId, currentScope())
@@ -3797,25 +3799,39 @@ const runProvenanceTruncationNotice = computed(() => {
 
 // f-prov200 (read-only): append the next page after the last event on screen. Does NOT bump the
 // request token — it extends the current timeline rather than replacing it — but it captures the
-// token, so a reset (close/re-open) or a replacing re-read that lands meanwhile fences its answer
-// out instead of letting run A's next page append under run B.
+// token, so a reset (close/re-open) or a replacing re-read ISSUED BEFORE this click fences its
+// answer out instead of letting run A's next page append under run B.
+//
+// The token alone is not enough: a polling re-read that is already in flight has bumped the token
+// before the click, so the click captures the NEW token while the old timeline (and its cursor)
+// is still on screen. If that re-read lands first it replaces the timeline with page one, and a
+// token-only fence would then append the old cursor's page after it — a silent gap in the middle
+// and no cursor left to recover it. So the page is also fenced against the exact timeline it was
+// issued for: every write to the timeline assigns a NEW array (a replace lands page.items, an
+// append concatenates, a reset clears), so an unchanged reference means nothing has landed since
+// the cursor was read, and the page continues exactly the events on screen.
 async function loadMoreRunProvenance(): Promise<void> {
   const cursor = runProvenanceNextCursor.value
   const runId = runDetailId.value
   if (!runId || !cursor || runProvenanceLoadingMore.value) return
   const requestId = runProvenanceRequestId
+  const issuedFor = runProvenanceEntries.value
+  const stillExtendsIssuedTimeline = () => requestId === runProvenanceRequestId && runProvenanceEntries.value === issuedFor
   runProvenanceLoadingMore.value = true
   runProvenanceLoadMoreError.value = ''
   try {
     const page = await getIntegrationRunProvenance(runId, currentScope(), { cursor })
-    if (requestId !== runProvenanceRequestId) return
+    if (!stillExtendsIssuedTimeline()) return
     applyRunProvenancePage(page, 'append')
   } catch (error) {
-    if (requestId !== runProvenanceRequestId) return
+    // A failed page of a timeline that was replaced meanwhile says nothing about the one on screen.
+    if (!stillExtendsIssuedTimeline()) return
     // The events already on screen stay, and so does the notice + button: a failed page is
     // retryable and must not make the timeline look complete.
     runProvenanceLoadMoreError.value = runProvenanceErrorCopy(error)
   } finally {
+    // The loading flag is owned per token, not per timeline: a page discarded because a re-read
+    // replaced the timeline must still release the button so the NEW timeline can be paged.
     if (requestId === runProvenanceRequestId) runProvenanceLoadingMore.value = false
   }
 }
