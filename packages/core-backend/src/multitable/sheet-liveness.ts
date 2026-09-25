@@ -201,6 +201,72 @@ export async function assertSheetLiveForUpdate(query: LivenessQuery, sheetId: st
 }
 
 /**
+ * The MULTI-sheet form of {@link SHEET_ROW_LOCK_LIVENESS_SQL}: ONE statement that locks every named
+ * `meta_sheets` row AND reads each one's `deleted_at` under that lock (#5954).
+ *
+ * `ORDER BY id COLLATE "C"` is what makes the ACQUISITION order deterministic. `FOR UPDATE` locks rows in
+ * the order the plan emits them, and the lock step sits above the sort, so without an ORDER BY the order
+ * is whatever the scan happens to produce (index order, or heap order for a seq/bitmap scan) — sorting the
+ * parameter array alone never governed it. `"C"` is byte order, which for the ASCII ids sheets carry is
+ * exactly JS `Array#sort` order — the order every other ordered sheet locker already uses
+ * (`acquireCanonicalSheetFencesInOrder`, `lockRecordLinkTargetSheetsOnQuery`). The database's default
+ * collation would NOT be: under a non-C locale it can order two ids differently from those lockers, which
+ * is how two transactions come to wait on each other.
+ *
+ * EXPORTED for the same reason as the single-id constant: the real-DB race test proves the caller PARKS on
+ * this statement by matching `pg_stat_activity.query`, and derives that pattern from here rather than from
+ * a copy that could go blind.
+ */
+export const SHEETS_ROW_LOCK_LIVENESS_SQL = 'SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE'
+
+/**
+ * Lock SEVERAL sheet rows and REFUSE unless every one of them is still live — the multi-sheet counterpart
+ * of {@link assertSheetLiveForUpdate}, for a write transaction that gates on more than one sheet (#5954:
+ * `POST /crossbase/mirror-link` writes an edge between two sheets and used to lock both with a lock-only
+ * `SELECT id … FOR UPDATE` that never looked at `deleted_at`).
+ *
+ * Same window, same closure: a soft delete that commits between the caller's pre-transaction gate and this
+ * lock leaves the lock FREE, so only a read made UNDER the lock can see it. Same verdict function, so
+ * "live" means exactly what it means for one sheet. Same refusal ({@link SheetNotLiveError}), so a route
+ * maps it to the SAME values-free 404 bodies via `sendSheetNotLive(res, err.liveness)`.
+ *
+ * - Ids are de-duplicated and sorted before they are sent, and the statement locks in that same order.
+ * - An id with no row is `absent`; a row with `deleted_at` set is `deleted`. A row for an id that was NOT
+ *   asked about cannot vouch for one that was: verdicts are looked up by the requested id only.
+ * - A non-string or empty id is `absent` — refused, never skipped. Skipping it would lock fewer sheets than
+ *   the caller named and report success.
+ * - When more than one sheet is dead, the refusal names the FIRST dead one in the CALLER'S order, so a
+ *   caller that passes its ids in the order its own pre-transaction gates ran gets the same verdict under
+ *   the lock that those gates would have given at that moment.
+ * - An empty list is a caller bug, not a request: it throws a values-free TypeError rather than locking
+ *   nothing and passing.
+ *
+ * `query` MUST be the transaction client's own query — see {@link loadSheetLivenessForUpdate}.
+ */
+export async function assertSheetsLiveForUpdate(query: LivenessQuery, sheetIds: readonly string[]): Promise<void> {
+  if (!Array.isArray(sheetIds) || sheetIds.length === 0) throw new TypeError('SHEET_LIVENESS_NO_SHEET_IDS')
+  const verdicts = new Map<string, SheetLiveness>()
+  const callerOrder: Array<{ sheetId: string; valid: boolean }> = []
+  for (const sheetId of sheetIds) {
+    const valid = typeof sheetId === 'string' && sheetId.length > 0
+    callerOrder.push({ sheetId: typeof sheetId === 'string' ? sheetId : '', valid })
+    if (valid && !verdicts.has(sheetId)) verdicts.set(sheetId, 'absent')
+  }
+  const lookups = [...verdicts.keys()].sort()
+  if (lookups.length > 0) {
+    const res = await query(SHEETS_ROW_LOCK_LIVENESS_SQL, [lookups])
+    for (const row of res.rows as Array<{ id?: unknown; deleted_at?: unknown } | undefined>) {
+      if (!row || typeof row.id !== 'string' || !verdicts.has(row.id)) continue
+      verdicts.set(row.id, livenessOfRow(row))
+    }
+  }
+  for (const { sheetId, valid } of callerOrder) {
+    const liveness: SheetLiveness = valid ? (verdicts.get(sheetId) ?? 'absent') : 'absent'
+    if (liveness !== 'live') throw new SheetNotLiveError(sheetId, liveness)
+  }
+}
+
+/**
  * Shapes a driver error may take on the way into a log line, and nothing else: an identifier-shaped
  * constructor name, and an identifier-shaped `code` (a SQLSTATE such as `57014`, or an errno such as
  * `ECONNREFUSED`).

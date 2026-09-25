@@ -204,6 +204,7 @@ import {
   SheetNotLiveError,
   assertSheetLive,
   assertSheetLiveForUpdate,
+  assertSheetsLiveForUpdate,
   loadSheetLiveness,
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
@@ -19904,7 +19905,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Gating-row locks FIRST, deterministic order (sheets sorted, then records): serializes against
         // permission grant/revoke (which take the sheet FOR UPDATE) and against concurrent instances of
         // this op. The forward writer re-locks rec_A later in this same transaction (no-op).
-        await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])
+        //
+        // #5954: the sheet lock RE-READS liveness in the same statement. `livenessA`/`livenessB` above were
+        // read OUTSIDE this transaction; a soft delete of either sheet that commits after those reads and
+        // before this lock leaves the lock free, and a lock-only statement would then write the edge into
+        // a deleted sheet. The helper sorts and locks both rows, and refuses (SheetNotLiveError → the
+        // catch below → sendSheetNotLive, the same values-free 404 as the pre-transaction gates) unless
+        // BOTH are still live. Ids are passed B-then-A — the order the gates above ran — so a request
+        // that finds both ends dead gets the verdict those gates would have given.
+        await assertSheetsLiveForUpdate(query, [sheetB, sheetA])
         // §4: re-derive the base-B sheet capability UNDER the lock so a concurrent sheet-B grant revoke
         // cannot be missed. capsB/scopeB above were resolved PRE-transaction; because a sheet-B write grant
         // LIFTS the capability (applyContextSheetSchemaWriteGrant), a revoke committing between that resolve

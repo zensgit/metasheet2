@@ -24,13 +24,27 @@
  *       MIRROR_LINK_TARGET_UNAVAILABLE 403 even with a concurrent forward edit on that rec_A; the mask is
  *       evaluated under the acquired lock, so a concurrent write cannot make a masked rec_A appear readable.
  *
- * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list.
+ * A SECOND suite at the end of this file (#5954) races the op's two-sheet lock against a concurrent SOFT
+ * DELETE of either sheet — see its own header.
+ *
+ * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list. Two-point
+ * wired since #5954: excluded from the no-DB default lane in vitest.config.ts (so it cannot collect and
+ * skip-green there), and pinned by scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs.
  */
 import express, { type Express } from 'express'
+import type { PoolClient } from 'pg'
 import request from 'supertest'
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { __resetSharedCrossBaseWriteQuotaForTest } from '../../src/multitable/automation-executor'
+import {
+  SHEETS_ROW_LOCK_LIVENESS_SQL,
+  SHEET_DELETED_CODE,
+  SHEET_DELETED_MESSAGE,
+  SheetNotLiveError,
+  assertSheetsLiveForUpdate,
+} from '../../src/multitable/sheet-liveness'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -211,5 +225,329 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
       await q('DELETE FROM record_permissions WHERE sheet_id = $1', [SA]).catch(() => {})
       await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = false WHERE id = $1', [SA])
     }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+// #5954 — the op's TWO-SHEET lock re-reads liveness: the real interleaving, on real Postgres, two connections.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+/**
+ * `POST /crossbase/mirror-link` gates both sheets' liveness through the POOL (outside any transaction), then
+ * locks both sheet rows inside the patch transaction (`preWriteGuard`). Before #5954 that lock was the
+ * lock-only `SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE`: a soft delete committing
+ * between the gates and the lock left it FREE, and the op wrote the edge into the deleted sheet, answering
+ * 200. It now locks through `assertSheetsLiveForUpdate`, which reads `deleted_at` in the locking statement.
+ *
+ * The unit suites script the window with fakes. A fake can SAY "the locked read returned the committed
+ * row"; only Postgres can show that `FOR UPDATE` actually WAITS for an uncommitted soft delete and then
+ * hands back the row version that delete committed — which is the whole fix. So it is proven here:
+ *
+ *   H-* (the helper, two raw connections)
+ *     D: BEGIN; UPDATE meta_sheets SET deleted_at = now() … (the production soft delete) — uncommitted
+ *     M: BEGIN; assertSheetsLiveForUpdate(M, [sheetA, sheetB]) — must PARK on that row. Proven twice: the
+ *        call has not settled, AND pg_stat_activity shows M's backend waiting on a Lock, running the
+ *        helper's statement, with D's pid in pg_blocking_pids(M).
+ *     D: COMMIT   ⇒ M's FOR UPDATE returns the COMMITTED row (deleted_at set) and the helper REFUSES.
+ *     D: ROLLBACK ⇒ M gets both rows live, PASSES, and then HOLDS both rows (a NOWAIT probe is refused).
+ *   Run with sheet A and with sheet B as the deleted one.
+ *
+ *   R-* (the route, end to end)
+ *     D holds the same uncommitted soft delete; the op passes its pool-level gates (an uncommitted delete is
+ *     invisible to them — that is the window), enters the patch transaction and parks on its sheet lock.
+ *     D commits ⇒ the values-free 404 SHEET_DELETED and NO edge (pre-#5954: 200 and the edge).
+ *     D rolls back instead ⇒ 200 and exactly one canonical edge.
+ *
+ * The waiter probe DERIVES its `pg_stat_activity` pattern from SHEETS_ROW_LOCK_LIVENESS_SQL rather than
+ * copying the statement (#5938: a copied pattern went blind when the statement was reworded); the
+ * structural guard (tests/unit/multitable-permissions-txn-liveness-recheck.guard.test.ts) pins that from
+ * source. Every wait is bounded (poll budget, `lock_timeout`, explicit settle timeouts), so a regression
+ * reds in seconds instead of hanging the lane; every connection is rolled back and released in `finally`.
+ *
+ * Own fixture ids (`_mlrd_`), own app, own hooks — nothing is shared with the Decision-F suite above.
+ */
+test('sentinel: #5954 mirror sheet-liveness lock real-DB lane must not skip-green', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('#5954 mirror sheet-liveness lock real-DB step is missing DATABASE_URL')
+  }
+  expect(true).toBe(true)
+})
+
+describeIfDatabase.sequential('#5954 — mirror op two-sheet lock vs a concurrent soft delete (real DB)', () => {
+  const LTS = Date.now()
+  const L_BASE_A = `base_mlrd_a_${LTS}`
+  const L_BASE_B = `base_mlrd_b_${LTS}`
+  const L_SA = `sheet_mlrd_a_${LTS}` // base-A sheet — forward field, rec_A (the edge's write target)
+  const L_SB = `sheet_mlrd_b_${LTS}` // base-B sheet — mirror field, rec_B
+  const L_F_A = `fld_mlrd_fwd_${LTS}`
+  const L_M_B = `fld_mlrd_mir_${LTS}`
+  const L_F_B_NAME = `fld_mlrd_bname_${LTS}`
+  const L_REC_A1 = `rec_mlrd_a1_${LTS}`
+  const L_REC_B1 = `rec_mlrd_b1_${LTS}`
+  const L_OWNER = `u_mlrd_owner_${LTS}` // owns L_BASE_A ⇒ base-A writable + full multitable perms
+
+  /** The production soft delete, verbatim (routes/univer-meta.ts DELETE /sheets/:sheetId). */
+  const SOFT_DELETE_SQL = 'UPDATE meta_sheets SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL'
+  const SHEET_DELETED_BODY = { ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } }
+
+  const connect = (): Promise<PoolClient> => poolManager.get().getInternalPool().connect()
+  const backendPid = async (client: PoolClient): Promise<number> =>
+    Number(((await client.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: unknown }).pid)
+
+  function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms: ${label}`)), ms)
+      promise.then(
+        (value) => { clearTimeout(timer); resolve(value) },
+        (error: unknown) => { clearTimeout(timer); reject(error) },
+      )
+    })
+  }
+
+  /**
+   * Poll until some backend is WAITING ON A LOCK, running the helper's statement, blocked BY `holderPid`.
+   * Returns the waiter's pid, or null if none appeared within the budget or the caller settled first (a
+   * settled caller did not wait — that is the failure this probe exists to see).
+   *
+   * Text AND pid: the text says WHICH statement waits (the liveness-reading lock, not some other read);
+   * `pg_blocking_pids` says it waits on THIS holder (not on an unrelated lock elsewhere).
+   */
+  async function waitForParkedWaiter(holderPid: number, settled: () => boolean, waiterPid?: number): Promise<number | null> {
+    for (let i = 0; i < 250; i++) {
+      if (settled()) return null
+      const res = await q(
+        `SELECT pid
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND state = 'active'
+            AND wait_event_type = 'Lock'
+            AND query LIKE $1
+            AND $2::int = ANY(pg_blocking_pids(pid))`,
+        [`${SHEETS_ROW_LOCK_LIVENESS_SQL}%`, holderPid],
+      )
+      const pids = (res.rows as Array<{ pid: unknown }>).map((r) => Number(r.pid))
+      const hit = waiterPid === undefined ? pids[0] : pids.find((pid) => pid === waiterPid)
+      if (hit !== undefined) return hit
+      await sleep(20)
+    }
+    return null
+  }
+
+  const lockMirrorRows = async (): Promise<number> =>
+    Number(((await q('SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1', [L_M_B])).rows[0] as { n: number }).n)
+  const lockForwardEdgeCount = async (): Promise<number> =>
+    Number(((await q(
+      'SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+      [L_F_A, L_REC_A1, L_REC_B1],
+    )).rows[0] as { n: number }).n)
+
+  let lockApp: Express
+  const lockUser = { id: L_OWNER, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
+  const lockMirrorOp = () =>
+    request(lockApp).post('/api/multitable/crossbase/mirror-link').send({
+      sheetId: L_SB, recordId: L_REC_B1, fieldId: L_M_B, action: 'add', foreignRecordId: L_REC_A1, targetBaseId: L_BASE_A,
+    })
+
+  beforeAll(async () => {
+    process.env.MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE = 'true'
+    lockApp = express()
+    lockApp.use(express.json())
+    lockApp.use((req, _res, next) => { ;(req as express.Request & { user?: unknown }).user = lockUser; next() })
+    lockApp.use('/api/multitable', univerMetaRouter())
+
+    // Same fixture shape as the Decision-F suite above (whose F-1 proves this actor reaches 200 on this
+    // op), so a red here is about the lock, not the setup.
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [L_OWNER])
+    await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [L_BASE_A, 'MLRD A', L_OWNER])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [L_BASE_B, 'MLRD B'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3),($4,$5,$6)', [L_SA, L_BASE_A, 'A', L_SB, L_BASE_B, 'B'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [L_F_A, L_SA, 'Fwd', 'link', JSON.stringify({ foreignSheetId: L_SB, foreignBaseId: L_BASE_B, twoWay: true, mirrorFieldId: L_M_B }), 1])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [L_M_B, L_SB, 'Mir', 'link', JSON.stringify({ foreignSheetId: L_SA, foreignBaseId: L_BASE_A, twoWay: true, mirrorFieldId: L_F_A, mirrorOf: L_F_A }), 1])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [L_F_B_NAME, L_SB, 'BName', 'string', '{}', 2])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1),($4,$5,$6::jsonb,1)',
+      [L_REC_A1, L_SA, '{}', L_REC_B1, L_SB, JSON.stringify({ [L_F_B_NAME]: 'b1' })])
+  })
+
+  beforeEach(() => {
+    __resetSharedCrossBaseWriteQuotaForTest()
+  })
+
+  afterEach(async () => {
+    expect(await lockMirrorRows()).toBe(0) // the mirror field never owns a meta_links row, on any path
+    await q('DELETE FROM meta_links WHERE field_id = $1', [L_F_A]).catch(() => {})
+    // Every case soft-deletes one of the two sheets (or rolls that back); put both back to live.
+    await q('UPDATE meta_sheets SET deleted_at = NULL WHERE id = ANY($1::text[])', [[L_SA, L_SB]])
+  })
+
+  afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE
+    await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[L_F_A, L_M_B]]).catch(() => {})
+    for (const t of ['meta_record_revisions', 'meta_records']) {
+      await q(`DELETE FROM ${t} WHERE sheet_id = ANY($1::text[])`, [[L_SA, L_SB]]).catch(() => {})
+    }
+    await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[L_SA, L_SB]]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[L_SA, L_SB]]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[L_BASE_A, L_BASE_B]]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [L_OWNER]).catch(() => {})
+  })
+
+  test('fixture: both sheets start live, and the helper passes on them uncontended', async () => {
+    const m = await connect()
+    try {
+      await m.query('BEGIN')
+      await expect(assertSheetsLiveForUpdate((sql, params) => m.query(sql, params), [L_SA, L_SB])).resolves.toBeUndefined()
+    } finally {
+      await m.query('ROLLBACK').catch(() => {})
+      m.release()
+    }
+  })
+
+  // ── H-*: the helper, two raw connections ──────────────────────────────────────────────────────────────
+
+  type Outcome = { ok: true } | { ok: false; err: unknown }
+  type HelperRace = { outcome: Outcome; lockedRows: unknown[][]; probe: PoolClient }
+
+  /**
+   * D soft-deletes `target` and holds it uncommitted; M runs the helper for [SA, SB] and must park on it.
+   * `finish` decides D's fate; `inspect` then sees M's outcome and the rows M's locking statement actually
+   * returned, WHILE M's transaction is still open (so a passed helper still holds its locks). All three
+   * connections are rolled back and released here, whatever `inspect` or the race itself throws.
+   */
+  async function raceHelper(target: string, finish: 'COMMIT' | 'ROLLBACK', inspect: (race: HelperRace) => Promise<void>): Promise<void> {
+    const d = await connect()
+    const m = await connect()
+    const probe = await connect()
+    let mOutcome: Promise<Outcome> | null = null
+    try {
+      const dPid = await backendPid(d)
+      const mPid = await backendPid(m)
+
+      await d.query('BEGIN')
+      const deleted = await d.query(SOFT_DELETE_SQL, [target])
+      expect(deleted.rowCount).toBe(1) // D really holds a new row version of the target, uncommitted
+
+      await m.query('BEGIN')
+      await m.query("SET LOCAL lock_timeout = '10s'") // bounded, whatever goes wrong
+      const lockedRows: unknown[][] = []
+      const mQuery = async (sql: string, params: unknown[]) => {
+        const res = await m.query(sql, params)
+        if (sql === SHEETS_ROW_LOCK_LIVENESS_SQL) lockedRows.push(res.rows)
+        return res
+      }
+      let settled = false
+      mOutcome = assertSheetsLiveForUpdate(mQuery, [L_SA, L_SB])
+        .then((): Outcome => ({ ok: true }), (err: unknown): Outcome => ({ ok: false, err }))
+        .finally(() => { settled = true })
+
+      // M must be WAITING — not done — and waiting on D, in the helper's statement.
+      const parkedPid = await waitForParkedWaiter(dPid, () => settled, mPid)
+      expect(settled, 'M settled while D still held the row — it did not wait on the lock').toBe(false)
+      expect(parkedPid, 'M never showed up as a Lock waiter blocked by D in the helper statement').toBe(mPid)
+
+      await d.query(finish)
+      const outcome = await withTimeout(mOutcome, 10_000, `helper after D ${finish}`)
+      await inspect({ outcome, lockedRows, probe })
+    } finally {
+      // D first: if M is still parked behind it, this is what lets M finish before it is released.
+      await d.query('ROLLBACK').catch(() => {})
+      if (mOutcome) await withTimeout(mOutcome, 10_000, 'drain M').catch(() => {})
+      await m.query('ROLLBACK').catch(() => {})
+      await probe.query('ROLLBACK').catch(() => {})
+      d.release()
+      m.release()
+      probe.release()
+    }
+  }
+
+  const rowOf = (rows: unknown[], id: string) =>
+    (rows as Array<{ id: string; deleted_at: unknown }>).find((r) => r.id === id)
+
+  for (const [label, target, other] of [['A', L_SA, L_SB], ['B', L_SB, L_SA]] as const) {
+    test(`H-${label} COMMIT: M parks on sheet ${label}'s row; D commits the soft delete ⇒ M's lock returns the committed row and the helper REFUSES`, async () => {
+      await raceHelper(target, 'COMMIT', async ({ outcome, lockedRows }) => {
+        expect(outcome.ok, 'the helper PASSED on a sheet whose soft delete committed while it waited').toBe(false)
+        const err = (outcome as { ok: false; err: unknown }).err
+        expect(err).toBeInstanceOf(SheetNotLiveError)
+        expect((err as SheetNotLiveError).liveness).toBe('deleted')
+        expect((err as SheetNotLiveError).sheetId).toBe(target)
+        expect((err as SheetNotLiveError).message).not.toContain(target)
+
+        // What the ONE locking statement handed back: both rows, the target in its COMMITTED version.
+        expect(lockedRows.length).toBe(1)
+        expect(lockedRows[0]!.length).toBe(2)
+        const targetRow = rowOf(lockedRows[0]!, target)
+        expect(targetRow).toHaveProperty('deleted_at')
+        expect(targetRow?.deleted_at).not.toBeNull()
+        expect(rowOf(lockedRows[0]!, other)?.deleted_at).toBeNull()
+      })
+    })
+
+    test(`H-${label} ROLLBACK: M parks on sheet ${label}'s row; D rolls back ⇒ the helper PASSES and M holds both rows`, async () => {
+      await raceHelper(target, 'ROLLBACK', async ({ outcome, lockedRows, probe }) => {
+        expect(outcome).toEqual({ ok: true })
+        expect(lockedRows.length).toBe(1)
+        expect(rowOf(lockedRows[0]!, L_SA)).toHaveProperty('deleted_at', null)
+        expect(rowOf(lockedRows[0]!, L_SB)).toHaveProperty('deleted_at', null)
+
+        // …and the pass is a HELD lock, not a read: a third session cannot take either row.
+        for (const id of [L_SA, L_SB]) {
+          await expect(probe.query('SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE NOWAIT', [id]))
+            .rejects.toMatchObject({ code: '55P03' })
+        }
+      })
+    })
+  }
+
+  // ── R-*: the route, end to end ────────────────────────────────────────────────────────────────────────
+
+  /** D holds an uncommitted soft delete of `target` while the mirror op runs; `finish` decides D's fate. */
+  async function raceRoute(target: string, finish: 'COMMIT' | 'ROLLBACK'): Promise<request.Response> {
+    const d = await connect()
+    let op: Promise<request.Response> | null = null
+    try {
+      const dPid = await backendPid(d)
+      await d.query('BEGIN')
+      const deleted = await d.query(SOFT_DELETE_SQL, [target])
+      expect(deleted.rowCount).toBe(1)
+
+      let settled = false
+      op = Promise.resolve(lockMirrorOp()).finally(() => { settled = true })
+
+      // The op got through its pool-level gates (the uncommitted delete is invisible to them) and is now
+      // parked INSIDE the patch transaction, on the helper's statement, behind D.
+      const parkedPid = await waitForParkedWaiter(dPid, () => settled)
+      expect(settled, 'the op settled while D still held the row — it did not wait on the sheet lock').toBe(false)
+      expect(parkedPid, 'the op never showed up as a Lock waiter blocked by D in the helper statement').not.toBeNull()
+
+      await d.query(finish)
+      return await withTimeout(op, 15_000, `mirror op after D ${finish}`)
+    } finally {
+      await d.query('ROLLBACK').catch(() => {})
+      // Never leave a request in flight into the next case's cleanup.
+      if (op) await withTimeout(op, 15_000, 'drain mirror op').catch(() => {})
+      d.release()
+    }
+  }
+
+  for (const [label, target] of [['A', L_SA], ['B', L_SB]] as const) {
+    test(`R-${label} COMMIT: sheet ${label} is soft-deleted while the op waits on its lock ⇒ 404 SHEET_DELETED, no edge (pre-#5954: 200 + edge)`, async () => {
+      const res = await raceRoute(target, 'COMMIT')
+      expect(res.status).toBe(404)
+      expect(res.body).toEqual(SHEET_DELETED_BODY)
+      const raw = JSON.stringify(res.body)
+      for (const value of [L_SA, L_SB, L_BASE_A, L_BASE_B, L_F_A, L_M_B, L_REC_A1, L_REC_B1]) expect(raw).not.toContain(value)
+      expect(await lockForwardEdgeCount()).toBe(0)
+      // The delete itself stood: the sheet is dead, and the op did not resurrect or touch it.
+      const row = await q('SELECT deleted_at FROM meta_sheets WHERE id = $1', [target])
+      expect((row.rows[0] as { deleted_at: unknown }).deleted_at).not.toBeNull()
+    })
+  }
+
+  test('R-ROLLBACK: the soft delete rolls back while the op waits ⇒ 200 and exactly one canonical edge', async () => {
+    const res = await raceRoute(L_SA, 'ROLLBACK')
+    expect(res.status).toBe(200)
+    expect(await lockForwardEdgeCount()).toBe(1)
   })
 })

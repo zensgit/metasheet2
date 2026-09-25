@@ -23,6 +23,10 @@
  *   D. The real-DB probe that proves a writer PARKS on the sheet row derives its `pg_stat_activity`
  *      pattern from the production statement instead of copying it. A copy cannot fail loudly: reword the
  *      statement and the probe matches nothing, so the property stops being verified (#5938 round 2).
+ *   E. The cross-base mirror RECORD op (`POST /crossbase/mirror-link`) — not a permission write, so rule B
+ *      never looked at it — takes its two-sheet lock through `assertSheetsLiveForUpdate`, on its guard's
+ *      OWN query, naming BOTH sheets, before its guard touches that query for anything else (#5954). Rule A
+ *      alone would only say "no bare lock"; deleting the lock outright would satisfy it.
  *
  * "Writes access control" is BOTH senses: a row in a permission table (`spreadsheet_permissions`,
  * `meta_view_permissions`, `field_permissions`) AND an access-control column on `meta_sheets` itself
@@ -49,6 +53,7 @@ import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 import {
+  SHEETS_ROW_LOCK_LIVENESS_SQL,
   SHEET_ROW_LOCK_LIVENESS_SQL,
   SheetNotLiveError,
   assertSheetLiveForUpdate,
@@ -92,18 +97,15 @@ const RECHECK = 'assertSheetLiveForUpdate'
  * NAMED exemptions from rule A — a raw `meta_sheets … FOR UPDATE` that is NOT a permission write.
  *
  * Keyed by the collapsed SQL text so a new lock cannot inherit an old entry's licence. Each is a
- * standing statement that this lock guards something other than a grant table; the RESIDUAL is reported
- * rather than hidden (the mirror op re-derives its own per-row gating under the lock, but it does NOT
- * re-read sheet liveness — tracked for its own issue, not silently blessed here).
+ * standing statement that this lock guards something other than a grant table.
+ *
+ * EMPTY since #5954. Its one entry was the cross-base mirror op's lock-only
+ * `SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE` — a MULTI-sheet lock the single-id
+ * helper could not express, so it never re-read liveness. It now locks through
+ * `assertSheetsLiveForUpdate`, which reads `deleted_at` in the locking statement; the exemption went with
+ * the residual. Re-adding an entry here is re-opening a window, and needs a reason that says so.
  */
-const RAW_LOCK_LEDGER = new Map<string, string>([
-  [
-    'SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE',
-    'cross-base mirror record op (routes/univer-meta.ts) — a RECORD write, not a permission write, and a '
-    + 'MULTI-sheet lock that the single-id helper cannot express. It re-derives base-B capability under the '
-    + 'lock but does not re-read sheet liveness; RESIDUAL, tracked for its own issue.',
-  ],
-])
+const RAW_LOCK_LEDGER = new Map<string, string>([])
 
 /**
  * The WHOLE-TREE census of `meta_sheets` row locks (#5938 round 2).
@@ -120,8 +122,11 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     'THE helper. The one statement that locks the row and re-reads `deleted_at` together.',
   ],
   [
-    'routes/univer-meta.ts :: SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE',
-    'cross-base mirror RECORD op — ledgered above; a multi-sheet lock the single-id helper cannot express.',
+    'multitable/sheet-liveness.ts :: SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE',
+    'THE multi-sheet helper (`assertSheetsLiveForUpdate`, #5954). Locks every named sheet row in byte order '
+    + 'and re-reads each `deleted_at` in the same statement. Its caller is the cross-base mirror RECORD op '
+    + '(routes/univer-meta.ts POST /crossbase/mirror-link), whose lock-only multi-sheet statement it replaced; '
+    + 'rule E below pins that the route really goes through it.',
   ],
   [
     'multitable/link-writer-fence.ts :: SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE NOWAIT',
@@ -390,6 +395,94 @@ function violations(scan: Scan): string[] {
   return out
 }
 
+/** The route rule E is about, and the helper it must lock through. */
+const MIRROR_ROUTE = '/crossbase/mirror-link'
+const MULTI_RECHECK = 'assertSheetsLiveForUpdate'
+
+interface MirrorGuardScan {
+  /** `router.post('/crossbase/mirror-link', …)` was located at all. */
+  routeFound: boolean
+  /** Its `const preWriteGuard = async (query) => …` was located at all. */
+  guardFound: boolean
+  violations: string[]
+}
+
+/**
+ * Rule E (#5954). Inside the mirror route, find `preWriteGuard` and require that the FIRST call which is
+ * handed the guard's own query parameter is `assertSheetsLiveForUpdate(<that param>, <both sheets>)`.
+ *
+ * "First call handed the query" rather than "first statement": what matters is that nothing reads or
+ * writes on the transaction before both sheet rows are locked and re-read, whatever the surrounding code
+ * looks like. Every other `assertSheetsLiveForUpdate` in the guard handed something ELSE (the pool-level
+ * `q`, a second client) is its own violation — that lock would sit on another connection.
+ */
+function scanMirrorLinkGuard(file: string, text: string): MirrorGuardScan {
+  const source = ts.createSourceFile(file, text.replace(/\r\n/g, '\n'), ts.ScriptTarget.Latest, true)
+  let routeFound = false
+  let guard: ts.ArrowFunction | ts.FunctionExpression | undefined
+  const findGuard = (m: ts.Node) => {
+    if (
+      ts.isVariableDeclaration(m) && ts.isIdentifier(m.name) && m.name.text === 'preWriteGuard'
+      && m.initializer && (ts.isArrowFunction(m.initializer) || ts.isFunctionExpression(m.initializer))
+    ) {
+      guard = m.initializer
+    }
+    ts.forEachChild(m, findGuard)
+  }
+  const visit = (n: ts.Node) => {
+    if (
+      ts.isCallExpression(n) && calleeName(n) === 'post'
+      && n.arguments[0] && ts.isStringLiteralLike(n.arguments[0]) && n.arguments[0].text === MIRROR_ROUTE
+    ) {
+      routeFound = true
+      for (const arg of n.arguments.slice(1)) findGuard(arg)
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(source)
+
+  const out: string[] = []
+  if (!guard) return { routeFound, guardFound: false, violations: out }
+  const param = guard.parameters[0]
+  const queryName = param && ts.isIdentifier(param.name) ? param.name.text : ''
+  if (!queryName) {
+    out.push(`${MIRROR_ROUTE} preWriteGuard binds no query parameter — nothing in it can be the transaction's lock`)
+    return { routeFound, guardFound: true, violations: out }
+  }
+
+  const calls: ts.CallExpression[] = []
+  const collect = (m: ts.Node) => {
+    if (ts.isCallExpression(m)) calls.push(m)
+    ts.forEachChild(m, collect)
+  }
+  ts.forEachChild(guard.body, collect)
+  calls.sort((a, b) => a.getStart(source) - b.getStart(source))
+
+  const isQueryIdent = (e: ts.Expression | undefined) => !!e && ts.isIdentifier(e) && e.text === queryName
+  for (const call of calls) {
+    if (calleeName(call) === MULTI_RECHECK && !isQueryIdent(call.arguments[0])) {
+      out.push(`${MIRROR_ROUTE} calls ${MULTI_RECHECK} with \`${firstArgText(call, source)}\` instead of the guard's own \`${queryName}\` — that locks the rows on another connection`)
+    }
+  }
+  const firstUse = calls.find((c) => isQueryIdent(c.expression) || c.arguments.some((a) => isQueryIdent(a)))
+  if (!firstUse) {
+    out.push(`${MIRROR_ROUTE} preWriteGuard never uses \`${queryName}\` — it cannot be holding any lock`)
+  } else if (calleeName(firstUse) !== MULTI_RECHECK || !isQueryIdent(firstUse.arguments[0])) {
+    out.push(
+      `${MIRROR_ROUTE} preWriteGuard's first use of \`${queryName}\` is \`${collapse(firstUse.getText(source)).slice(0, 120)}\``
+      + ` — the two sheet rows must be locked and re-read through ${MULTI_RECHECK}(${queryName}, …) first`,
+    )
+  } else {
+    const idsText = firstUse.arguments[1] ? firstUse.arguments[1].getText(source) : ''
+    for (const sheet of ['sheetA', 'sheetB']) {
+      if (!new RegExp(String.raw`\b${sheet}\b`).test(idsText)) {
+        out.push(`${MIRROR_ROUTE} ${MULTI_RECHECK} does not name \`${sheet}\` — an edge has two ends and both must be live`)
+      }
+    }
+  }
+  return { routeFound, guardFound: true, violations: out }
+}
+
 describe('#5938 — permission write transactions re-check sheet liveness under the lock', () => {
   const scan = scanGuardedFiles()
 
@@ -461,13 +554,24 @@ describe('#5938 — permission write transactions re-check sheet liveness under 
     expect(locksSheetRowAnyMode('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE')).toBe(false)
   })
 
-  it('the ledgered exemption is the cross-base mirror RECORD op, not a permission write', () => {
-    // Named, with its reason, so the residual is reportable rather than invisible.
-    expect([...RAW_LOCK_LEDGER.keys()]).toEqual([
-      'SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE',
-    ])
-    const [reason] = [...RAW_LOCK_LEDGER.values()]
-    expect(reason).toContain('RECORD write')
+  it('the raw-lock ledger is EMPTY — the cross-base mirror residual is closed, not re-licensed (#5954)', () => {
+    expect([...RAW_LOCK_LEDGER.keys()]).toEqual([])
+    // …and the lock-only statement it used to license is gone from the route, in any lock mode.
+    expect(censusOfSrcTree().filter((k) => k.startsWith('routes/univer-meta.ts ::'))).toEqual([])
+  })
+
+  it('re-introducing the bare multi-sheet lock into the route REDS rule A (in-memory, #5954)', () => {
+    // The exact pre-#5954 statement, spliced back where the helper now sits. Nothing on disk changes.
+    const route = readFileSync(join(SRC, 'routes/univer-meta.ts'), 'utf8').replace(/\r\n/g, '\n')
+    const helperCall = 'await assertSheetsLiveForUpdate(query, [sheetB, sheetA])'
+    expect(route).toContain(helperCall)
+    const reverted = route.replace(
+      helperCall,
+      "await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])",
+    )
+    const found = violations({ txns: [], rawLocks: scanSource('routes/univer-meta.ts', reverted).rawLocks })
+    expect(found.join('\n')).toContain('raw meta_sheets row lock')
+    expect(found.join('\n')).toContain('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE')
   })
 })
 
@@ -711,5 +815,125 @@ describe('#5938 — the real-DB waiter probe derives its pattern instead of copy
     // The FOR SHARE leg (the foreign record-permission writer) is a different statement in a file this
     // PR does not touch; it stays a literal, and it stays present.
     expect(block).toContain("query LIKE 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE%'")
+  })
+})
+
+/**
+ * Rule E — the cross-base mirror op's two-sheet lock re-reads liveness (#5954).
+ *
+ * Rule A reds a bare lock, and the census reds a new one, but neither can see the lock go MISSING: delete
+ * it and both are satisfied. This rule is the positive half — it requires the route's guard to take both
+ * sheet rows through the liveness-reading helper, on the transaction's own query, first.
+ */
+describe('#5954 — the cross-base mirror op locks BOTH sheets through the liveness-reading helper', () => {
+  const route = scanMirrorLinkGuard('routes/univer-meta.ts', readFileSync(join(SRC, 'routes/univer-meta.ts'), 'utf8'))
+
+  it('finds the route and its preWriteGuard at all (anti-vacuity)', () => {
+    expect(route.routeFound).toBe(true)
+    expect(route.guardFound).toBe(true)
+  })
+
+  it('the guard locks and re-reads both sheets first, on its own query', () => {
+    expect(route.violations).toEqual([])
+  })
+
+  const wrap = (guardBody: string) => `
+    router.post('/crossbase/mirror-link', async (req: any, res: any) => {
+      const q = pool.query.bind(pool)
+      const preWriteGuard = async (query: any): Promise<void> => {
+${guardBody}
+      }
+      await service.patchRecords({ preWriteGuard })
+    })
+  `
+  const FIXED = wrap(`
+        await assertSheetsLiveForUpdate(query, [sheetB, sheetA])
+        const fresh = await loadSheetPermissionScopeMap(query, [sheetB], actor)
+  `)
+  /** The pre-#5954 shape: locks both rows, reads neither `deleted_at`. */
+  const BARE_LOCK = wrap(`
+        await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])
+        const fresh = await loadSheetPermissionScopeMap(query, [sheetB], actor)
+  `)
+  /** Satisfies rule A (no raw literal) and the census — by locking nothing. */
+  const NO_LOCK = wrap(`
+        const fresh = await loadSheetPermissionScopeMap(query, [sheetB], actor)
+  `)
+  /** Reads right; the lock lands on a pool connection and is released at once. */
+  const POOL_QUERY = wrap(`
+        await assertSheetsLiveForUpdate(q, [sheetB, sheetA])
+        const fresh = await loadSheetPermissionScopeMap(query, [sheetB], actor)
+  `)
+  /** The helper, but only after the transaction already read under no sheet lock. */
+  const LATE = wrap(`
+        const fresh = await loadSheetPermissionScopeMap(query, [sheetB], actor)
+        await assertSheetsLiveForUpdate(query, [sheetB, sheetA])
+  `)
+  /** Only one end of the edge. */
+  const ONE_END = wrap(`
+        await assertSheetsLiveForUpdate(query, [sheetB])
+        const fresh = await loadSheetPermissionScopeMap(query, [sheetB], actor)
+  `)
+
+  it('the fixed shape is accepted', () => {
+    const scan = scanMirrorLinkGuard('probe.ts', FIXED)
+    expect(scan.guardFound).toBe(true)
+    expect(scan.violations).toEqual([])
+  })
+
+  it('the pre-#5954 bare lock is rejected — by rule E AND by rule A', () => {
+    expect(scanMirrorLinkGuard('probe.ts', BARE_LOCK).violations.join('\n')).toContain(`through ${MULTI_RECHECK}(query, …) first`)
+    expect(violations(scanSource('probe.ts', BARE_LOCK)).join('\n')).toContain('raw meta_sheets row lock')
+  })
+
+  it('dropping the lock altogether is rejected — rule A alone would call it clean', () => {
+    expect(violations(scanSource('probe.ts', NO_LOCK))).toEqual([])
+    expect(scanMirrorLinkGuard('probe.ts', NO_LOCK).violations.join('\n')).toContain(`through ${MULTI_RECHECK}(query, …) first`)
+  })
+
+  it('the helper handed the pool is rejected — the lock must be on the transaction', () => {
+    const found = scanMirrorLinkGuard('probe.ts', POOL_QUERY).violations.join('\n')
+    expect(found).toContain('instead of the guard\'s own `query`')
+    expect(found).toContain(`through ${MULTI_RECHECK}(query, …) first`)
+  })
+
+  it('the helper placed after another use of the transaction is rejected — order is the point', () => {
+    expect(scanMirrorLinkGuard('probe.ts', LATE).violations.join('\n')).toContain('first use of `query` is `loadSheetPermissionScopeMap')
+  })
+
+  it('the helper naming only one end of the edge is rejected', () => {
+    expect(scanMirrorLinkGuard('probe.ts', ONE_END).violations).toEqual([
+      `${MIRROR_ROUTE} ${MULTI_RECHECK} does not name \`sheetA\` — an edge has two ends and both must be live`,
+    ])
+  })
+
+  it('the multi-sheet statement locks meta_sheets, reads deleted_at, and pins its lock order', () => {
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(/\bFROM\s+meta_sheets\b/)
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(/\bFOR\s+UPDATE\b/)
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(/^SELECT id, deleted_at\b/)
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toContain('ORDER BY id COLLATE "C"')
+  })
+})
+
+/**
+ * Rule D for #5954's race test — the same blindness, the same cure. The real-DB test proves the mirror op
+ * PARKS on its sheet rows by matching `pg_stat_activity.query`; that pattern must come from the production
+ * constant, not a copy. It is DATABASE_URL-gated, so this leg reads its SOURCE.
+ */
+describe('#5954 — the real-DB race test derives its waiter pattern instead of copying it', () => {
+  const RACE = join(__dirname, '..', 'integration', 'multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts')
+  const raceSource = readFileSync(RACE, 'utf8').replace(/\r\n/g, '\n')
+
+  it('imports the production statement constant and binds it as the pattern', () => {
+    expect(raceSource).toMatch(/import \{[^}]*\bSHEETS_ROW_LOCK_LIVENESS_SQL\b[^}]*\} from '\.\.\/\.\.\/src\/multitable\/sheet-liveness'/)
+    expect(raceSource).toContain('[`${SHEETS_ROW_LOCK_LIVENESS_SQL}%`')
+  })
+
+  it('carries no copied row-lock literal', () => {
+    expect(raceSource).not.toMatch(/LIKE '[^']*FROM meta_sheets[^']*FOR UPDATE%'/)
+  })
+
+  it('asserts the waiter by the blocking pid as well as by text — a text-only probe cannot tell WHO blocks', () => {
+    expect(raceSource).toContain('pg_blocking_pids(')
   })
 })

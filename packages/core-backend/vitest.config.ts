@@ -1191,6 +1191,13 @@ export default defineConfig({
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
       'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
       'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
+      // C2 mirror write-through concurrency goldens (Decision-F) + #5954 two-sheet lock vs a concurrent
+      // soft delete: genuine two-connection Postgres races (a holder keeps a row locked / an uncommitted
+      // soft delete; the op / the helper must PARK on it, then refuse on COMMIT and pass on ROLLBACK).
+      // Meaningless without real Postgres; DATABASE_URL-gated. Already a whole-file entry of the
+      // multitable real-DB step in plugin-tests.yml; excluded HERE so the no-DB lane cannot
+      // collect-skip-green it, and two-point pinned via the exact-anchor CI wiring contract.
+      'tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

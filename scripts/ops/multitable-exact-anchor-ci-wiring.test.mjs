@@ -50,6 +50,11 @@ const FILES = [
   'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
   // D-H1 cross-sheet link writers must keep their no-skip real-DB lane in the same two-point contract.
   'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
+  // #5954: the only EXECUTED proof that the cross-base mirror op's two-sheet lock waits for, and then
+  // refuses on, a concurrently committed soft delete (it lives beside the op's Decision-F concurrency
+  // goldens). A fake cannot show Postgres parking; dropping either wiring point must red here rather
+  // than let the race proof silently stop running.
+  'tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts',
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
