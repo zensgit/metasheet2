@@ -21,15 +21,31 @@
  *      never called. (POST /health/check is ungated BY DESIGN — a permanent exemption registered in
  *      admin-routes-write-endpoints-structural-gate.test.ts — so for it the probe asserts the stronger
  *      thing: a non-admin who reaches its 500 gets the redacted body too.)
- *   3. STRUCTURAL GUARD over the tree's source, discovered by following `router.use(<imported router>)`
- *      from admin-routes.ts, so a sub-router mounted tomorrow is scanned without editing this file.
- *      Any 5xx response whose arguments read `.message` / `.stack`, or reference the caught error or a
- *      local derived from it, is red. Log calls are not sinks and are never flagged.
+ *   3. STRUCTURAL GUARD over the tree's source (tests/utils/response-error-echo-scan.ts, TypeScript AST
+ *      + checker symbols). The file set is discovered from admin-routes.ts by resolving every
+ *      `.use(...)` argument back to a module — an imported binding or namespace member, a factory
+ *      call on one, a local alias / later assignment / destructure of one, a conditional, an array,
+ *      an in-file function's `return`, a relative `import()` / `require()`. Because static resolution
+ *      can never see every way code hands a router to `.use()`, the count of routers nested in the
+ *      LIVE mounted stack must equal the count of static router mounts: a sub-router mounted tomorrow
+ *      in a way the walk cannot follow turns that assertion red instead of silently leaving the scan.
+ *      In the discovered files, any 5xx response — `.status(S)` chained, set earlier on the same
+ *      receiver (`res.status(S); res.json(…)`, `res.statusCode = S`), `jsonError`, a responder's
+ *      `extra` — whose arguments read `.message` / `.stack` or reference a TAINTED symbol is red.
+ *      Taint starts at the caught error and follows declarations, assignments (`x = …`,
+ *      `obj.p = …`), Object.assign / push, and arguments into same-file helpers' parameters. Log
+ *      calls are not sinks and are never flagged. What the scanner does NOT model (helpers in another
+ *      module, a status set in another function, text built only inside a function's return,
+ *      `next(err)`) is listed in its header; for the routes that exist today those shapes are pinned
+ *      by layer 1's runtime probes, not by this layer.
  *
  * Mutation self-proof is built in and memory-level (no source file is written, so a parallel suite
- * cannot observe a mutant): every responder call site in the tree is rewritten, in memory, back to the
- * pre-change echo and the guard must flag each one; and a live router handler is swapped for the
- * pre-change implementation and the probe's own assertion must fail on it.
+ * cannot observe a mutant): every responder call site in the tree is rewritten, in memory, into each
+ * of eight echo shapes (chained `.message` / `String()`, responder `extra`, assignment-derived local,
+ * property-assigned body, split status, `statusCode =`, same-file helper) and the guard must flag
+ * every site under every shape; the live-stack cross-check must fail when one router more is mounted
+ * than the walk found; and a live router handler is swapped for the pre-change implementation and
+ * the probe's own assertion must fail on it.
  *
  * Values-free fixtures: RFC 5737 TEST-NET-3 documentation address and literal placeholder names.
  */
@@ -42,8 +58,9 @@ import { fileURLToPath } from 'node:url'
 import { isAdmin } from '../../src/rbac/service'
 import { usePinnedServer } from '../utils/pinned-server'
 import {
-  discoverMountedRouterFiles,
+  discoverMountedRouterTree,
   scanResponseErrorEcho,
+  type ResponderCall,
 } from '../utils/response-error-echo-scan'
 
 vi.mock('../../src/rbac/service', () => ({
@@ -672,16 +689,114 @@ const resolveRel = (from: string, spec: string) => {
 }
 const ENVELOPE = 'admin-failure-envelope.ts'
 
-function treeFiles(): string[] {
-  return [...discoverMountedRouterFiles('admin-routes.ts', readRoute, resolveRel), ENVELOPE]
+function routerTree() {
+  return discoverMountedRouterTree('admin-routes.ts', readRoute, resolveRel)
 }
 
+function treeFiles(): string[] {
+  return [...routerTree().files, ENVELOPE]
+}
+
+/** Routers nested (at any depth) in a live express stack: every layer whose handle carries a stack. */
+function liveNestedRouters(stack: RouteLayer[]): number {
+  let count = 0
+  for (const layer of stack) {
+    const inner = layer.handle?.stack
+    if (Array.isArray(inner)) count += 1 + liveNestedRouters(inner)
+  }
+  return count
+}
+
+/** Offenders in a probe handler whose catch binds `error`. */
+const flaggedIn = (body: string) =>
+  scanResponseErrorEcho('probe.ts', `async function h(req, res) { try { await x() } catch (error) { ${body} } }`).offenders.length
+/** Offenders in a whole probe source. */
+const flaggedFile = (source: string) => scanResponseErrorEcho('probe.ts', source).offenders.length
+
 describe('structural guard: no 5xx response in the /api/admin tree carries caught-error text', () => {
-  it('discovers the tree by following router.use(<imported router>) from admin-routes.ts', () => {
+  it('discovers the tree by resolving the .use(...) arguments of admin-routes.ts', () => {
     const files = treeFiles()
     for (const expected of ['admin-routes.ts', 'snapshot-labels.ts', 'protection-rules.ts', ENVELOPE]) {
       expect(files).toContain(expected)
     }
+  })
+
+  it('live-stack cross-check: the routers nested in the mounted tree are exactly the static router mounts', () => {
+    const liveStack = (currentRouter as unknown as { stack: RouteLayer[] }).stack
+    const staticRouterMounts = routerTree().mounts.filter((m) => m.router)
+    const live = liveNestedRouters(liveStack)
+    // The count comparison is the part that needs no per-router expectation: it is what turns red
+    // for a router mounted TOMORROW in a way the static walk cannot follow.
+    expect(staticRouterMounts).toHaveLength(live)
+    // Today: /snapshots -> snapshot-labels.ts and /safety/rules -> protection-rules.ts.
+    expect(live).toBeGreaterThanOrEqual(2)
+    expect(staticRouterMounts.map((m) => m.targets).flat()).toEqual(
+      expect.arrayContaining(['snapshot-labels.ts', 'protection-rules.ts'])
+    )
+    // Mutation: one router more in the live stack than the walk found (a mount it could not follow)
+    // must make the counts disagree. Built on a copy; the live router is not touched.
+    const withUnfollowed = [...liveStack, { handle: express.Router() as unknown as { stack: RouteLayer[] } }]
+    expect(liveNestedRouters(withUnfollowed)).not.toBe(staticRouterMounts.length)
+  })
+
+  it('discovery self-check: follows aliases, factories, namespace members, destructures, assignments, returns and import()', () => {
+    const subRouter = `import { Router } from 'express'\nconst r = Router()\nexport default r\nexport const make = () => Router()\n`
+    const sources: Record<string, string> = {
+      'root.ts': [
+        `import express, { Router } from 'express'`,
+        `import { make as createA } from './a'`,
+        `import b from './b'`,
+        `import * as c from './c'`,
+        `import d from './d'`,
+        `import e from './e'`,
+        `import f from './f'`,
+        `import g from './g'`,
+        `import { guard } from './guard'`,
+        `const router = Router()`,
+        `router.use(express.json())`,
+        `const aliasA = createA()`,
+        `router.use('/a', aliasA)`,
+        `const aliasB = b`,
+        `const again = aliasB`,
+        `router.use('/b', again)`,
+        `router.use('/c', c.default)`,
+        `const { dRouter } = { dRouter: d }`,
+        `router.use('/d', dRouter)`,
+        `let late: unknown`,
+        `late = e`,
+        `router.use('/e', late)`,
+        `function pick() { return f }`,
+        `router.use('/f', pick())`,
+        `router.use('/g', process.env.FLAG ? g : undefined)`,
+        `router.use('/h', (await import('./h')).default)`,
+        `router.use('/local', Router())`,
+        `router.use(guard)`,
+        `export default router`,
+      ].join('\n'),
+      'a.ts': subRouter,
+      'b.ts': subRouter,
+      'c.ts': subRouter,
+      'd.ts': subRouter,
+      'e.ts': subRouter,
+      'f.ts': subRouter,
+      'g.ts': subRouter,
+      'h.ts': subRouter,
+      'guard.ts': `export function guard(_req: unknown, _res: unknown, next: () => void) { next() }\n`,
+    }
+    const tree = discoverMountedRouterTree(
+      'root.ts',
+      (rel) => {
+        if (!(rel in sources)) throw new Error(`unexpected read: ${rel}`)
+        return sources[rel]
+      },
+      (_from, spec) => `${spec.replace(/^\.\//, '')}.ts`
+    )
+    expect([...tree.files].sort()).toEqual(
+      ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts', 'g.ts', 'guard.ts', 'h.ts', 'root.ts'].sort()
+    )
+    // 8 imported sub-routers + the Router() built in place; the middleware module is scanned but is not a router.
+    expect(tree.mounts.filter((m) => m.router)).toHaveLength(9)
+    expect(tree.mounts.find((m) => m.targets.includes('guard.ts'))?.router).toBe(false)
   })
 
   it('zero offenders across every discovered file', () => {
@@ -698,56 +813,171 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(calls.filter((c) => c.file === 'admin-routes.ts').length).toBeGreaterThanOrEqual(35)
     expect(calls.filter((c) => c.file === 'snapshot-labels.ts').length).toBeGreaterThanOrEqual(4)
     expect(calls.filter((c) => c.file === 'protection-rules.ts').length).toBeGreaterThanOrEqual(6)
+    // Every responder call sits in a catch, so every mutation below has a caught binding to echo.
+    expect(calls.filter((c) => c.catchVar === null)).toEqual([])
   })
 
   it('scanner self-check: flags echoes, ignores log calls, 4xx and fixed text', () => {
-    const flagged = (body: string) =>
-      scanResponseErrorEcho('probe.ts', `async function h(req, res) { try { await x() } catch (error) { ${body} } }`).offenders.length
-    // flagged
-    expect(flagged(`res.status(500).json({ success: false, error: (error as Error).message })`)).toBe(1)
-    expect(flagged(`const err = error as Error; res.status(500).json({ error: err.message })`)).toBe(1)
-    expect(flagged(`res.status(500).json({ error: String(error) })`)).toBe(1)
-    expect(flagged('res.status(500).json({ error: `failed: ${error}` })')).toBe(1)
-    expect(flagged(`const m = String(error); res.status(502).send(m)`)).toBe(1)
-    expect(flagged(`const { message } = error as Error; res.status(500).json({ error: message })`)).toBe(1)
-    expect(flagged(`res.status(500).json({ error: (error as Error).stack })`)).toBe(1)
-    expect(flagged(`res.status(500).json({ error })`)).toBe(1)
-    expect(flagged(`res.status(code).json({ error: (error as Error).message })`)).toBe(1)
-    expect(flagged(`res.status(500).set('x', 'y').json({ error: (error as Error).message })`)).toBe(1)
-    expect(flagged(`return jsonError(res, 500, 'X_FAILED', (error as Error)?.message || 'fallback')`)).toBe(1)
-    expect(flagged(`sendAdminWriteFailure(res, 'ctx', error, { detail: (error as Error).message })`)).toBe(1)
+    // flagged: the caught error reaches a 5xx body directly
+    expect(flaggedIn(`res.status(500).json({ success: false, error: (error as Error).message })`)).toBe(1)
+    expect(flaggedIn(`const err = error as Error; res.status(500).json({ error: err.message })`)).toBe(1)
+    expect(flaggedIn(`res.status(500).json({ error: String(error) })`)).toBe(1)
+    expect(flaggedIn('res.status(500).json({ error: `failed: ${error}` })')).toBe(1)
+    expect(flaggedIn(`const m = String(error); res.status(502).send(m)`)).toBe(1)
+    expect(flaggedIn(`const { message } = error as Error; res.status(500).json({ error: message })`)).toBe(1)
+    expect(flaggedIn(`res.status(500).json({ error: (error as Error).stack })`)).toBe(1)
+    expect(flaggedIn(`res.status(500).json({ error })`)).toBe(1)
+    expect(flaggedIn(`res.status(code).json({ error: (error as Error).message })`)).toBe(1)
+    expect(flaggedIn(`res.status(500).set('x', 'y').json({ error: (error as Error).message })`)).toBe(1)
+    expect(flaggedIn(`return jsonError(res, 500, 'X_FAILED', (error as Error)?.message || 'fallback')`)).toBe(1)
+    expect(flaggedIn(`sendAdminWriteFailure(res, 'ctx', error, { detail: (error as Error).message })`)).toBe(1)
+    // flagged: taint through ASSIGNMENTS, not only declaration initializers
+    expect(flaggedIn(`let detail = ''; detail = String(error); res.status(500).json({ success: false, error: detail })`)).toBe(1)
+    expect(flaggedIn(`const body: Record<string, unknown> = { success: false }; body.error = String(error); res.status(500).json(body)`)).toBe(1)
+    expect(flaggedIn(`const body = {}; Object.assign(body, { error: String(error) }); res.status(500).json(body)`)).toBe(1)
+    expect(flaggedIn(`const errors: string[] = []; errors.push(String(error)); res.status(500).json({ errors })`)).toBe(1)
+    expect(flaggedIn(`let m = ''; ({ message: m } = error as Error); res.status(500).json({ error: m })`)).toBe(1)
+    expect(flaggedIn(`const describe = () => String(error); res.status(500).json({ error: describe() })`)).toBe(1)
+    expect(flaggedIn(`[error].forEach((e) => res.status(500).json({ error: String(e) }))`)).toBe(1)
+    // flagged: the status set in an EARLIER statement on the same receiver
+    expect(flaggedIn(`res.status(500); res.json({ success: false, error: String(error) })`)).toBe(1)
+    expect(flaggedIn(`res.statusCode = 500; res.json({ success: false, error: String(error) })`)).toBe(1)
+    expect(flaggedIn(`res.writeHead(500); res.end(String(error))`)).toBe(1)
+    expect(flaggedIn('res.status(503); if (retry) { res.send(`failed: ${error}`) }')).toBe(1)
+    expect(flaggedIn(`const r = res.status(500); r.json({ error: String(error) })`)).toBe(1)
+    // flagged: a responder called through an alias
+    expect(flaggedIn(`const fail = sendAdminWriteFailure; fail(res, 'ctx', error, { detail: String(error) })`)).toBe(1)
+    // flagged: a same-file helper that receives the caught error as an argument
+    expect(
+      flaggedFile(
+        `function fail(res: any, e: unknown) { res.status(500).json({ success: false, error: String(e) }) }\n` +
+          `async function h(req: any, res: any) { try { await x() } catch (error) { fail(res, error) } }`
+      )
+    ).toBe(1)
+    expect(
+      flaggedFile(
+        `const fail = (res: any, ...rest: unknown[]) => res.status(500).json({ error: String(rest[0]) })\n` +
+          `async function h(req: any, res: any) { try { await x() } catch (error) { fail(res, error) } }`
+      )
+    ).toBe(1)
+    // flagged: declared outside the catch, assigned inside, answered after it
+    expect(
+      flaggedFile(
+        `async function h(req: any, res: any) { let failure: unknown = null; try { await x() } catch (error) { failure = error }\n` +
+          `  if (failure) res.status(500).json({ error: String(failure) }) }`
+      )
+    ).toBe(1)
+    // flagged: other error channels — .then(_, onErr), .catch(named), .on('error'), error middleware
+    expect(flaggedFile(`function h(req: any, res: any) { x().then(() => res.json({}), (e) => res.status(500).json({ error: String(e) })) }`)).toBe(1)
+    expect(flaggedFile(`function onErr(e: unknown) { out.status(500).json({ error: String(e) }) }\nfunction h() { x().catch(onErr) }`)).toBe(1)
+    expect(flaggedFile(`function h(req: any, res: any) { stream.on('error', (err) => res.status(500).json({ error: String(err) })) }`)).toBe(1)
+    expect(flaggedFile(`function onError(err: any, req: any, res: any, next: any) { res.status(500).json({ error: err.toString() }) }`)).toBe(1)
+    // flagged: a responder DEFINITION that puts its caught-value parameter into the body
+    expect(
+      flaggedFile(
+        `export function make(logger: any) { return { sendAdminWriteFailure: (res: any, context: string, error: unknown, extra?: object) => {\n` +
+          `  logger.error(context, error); res.status(500).json({ ...extra, success: false, detail: String(error) }) } } }`
+      )
+    ).toBe(1)
     // not flagged
-    expect(flagged(`logger.error(\`failed: \${(error as Error).message}\`, error as Error); res.status(500).json({ error: 'fixed' })`)).toBe(0)
-    expect(flagged(`res.status(400).json({ error: (error as Error).message })`)).toBe(0)
-    expect(flagged(`res.status(503).json({ success: false, error: 'Service not available' })`)).toBe(0)
-    expect(flagged(`sendAdminWriteFailure(res, 'ctx', error, { pluginId: req.params.id })`)).toBe(0)
-    expect(flagged(`res.json({ error: (error as Error).message })`)).toBe(0)
+    expect(flaggedIn(`logger.error(\`failed: \${(error as Error).message}\`, error as Error); res.status(500).json({ error: 'fixed' })`)).toBe(0)
+    expect(flaggedIn(`res.status(400).json({ error: (error as Error).message })`)).toBe(0)
+    expect(flaggedIn(`res.status(404); res.json({ error: String(error) })`)).toBe(0)
+    expect(flaggedIn(`res.status(503).json({ success: false, error: 'Service not available' })`)).toBe(0)
+    expect(flaggedIn(`sendAdminWriteFailure(res, 'ctx', error, { pluginId: req.params.id })`)).toBe(0)
+    expect(flaggedIn(`res.json({ error: (error as Error).message })`)).toBe(0)
+    expect(
+      flaggedFile(
+        `function a(req: any, res: any) { try { x() } catch (error) { sendAdminWriteFailure(res, 'ctx', error) } }\n` +
+          `function b(req: any, res: any) { const error = 'fixed text'; res.status(500).json({ error }) }`
+      )
+    ).toBe(0)
+    expect(
+      flaggedFile(
+        `function fail(res: any, id: string) { res.status(500).json({ success: false, id }) }\n` +
+          `async function h(req: any, res: any) { try { await x() } catch (error) { log(error); fail(res, req.params.id) } }`
+      )
+    ).toBe(0)
+    expect(
+      flaggedFile(
+        `export function make(logger: any) { return { sendAdminWriteFailure: (res: any, context: string, error: unknown, extra?: object) => {\n` +
+          `  logger.error(context, error); res.status(500).json({ ...extra, success: false, error: 'fixed' }) } } }`
+      )
+    ).toBe(0)
   })
 
-  it('mutation self-proof: restoring the echo at ANY responder call site in the tree is flagged', () => {
+  it('mutation self-proof: at EVERY responder call site in the tree, each of eight echo shapes is flagged', () => {
+    type Built = { expr?: string; stmts?: string; helper?: string }
+    const caught = (c: ResponderCall) => c.catchVar ?? 'error'
+    const shapes: Array<{ id: string; build: (c: ResponderCall, k: number) => Built }> = [
+      { id: 'chained .message', build: (c) => ({ expr: `${c.resText}.status(500).json({ success: false, error: (${caught(c)} as Error).message })` }) },
+      { id: 'chained String()', build: (c) => ({ expr: `${c.resText}.status(500).json({ success: false, error: String(${caught(c)}) })` }) },
+      { id: 'responder extra', build: (c) => ({ expr: `${c.name}(${c.resText}, 'ctx', ${caught(c)}, { detail: (${caught(c)} as Error).message })` }) },
+      {
+        id: 'assignment-derived local',
+        build: (c, k) => ({ stmts: `let detail${k} = ''; detail${k} = String(${caught(c)}); ${c.resText}.status(500).json({ success: false, error: detail${k} });` }),
+      },
+      {
+        id: 'property-assigned body',
+        build: (c, k) => ({ stmts: `const body${k}: Record<string, unknown> = { success: false }; body${k}.error = String(${caught(c)}); ${c.resText}.status(500).json(body${k});` }),
+      },
+      { id: 'split status', build: (c) => ({ stmts: `${c.resText}.status(500); ${c.resText}.json({ success: false, error: String(${caught(c)}) });` }) },
+      { id: 'statusCode assignment', build: (c) => ({ stmts: `${c.resText}.statusCode = 500; ${c.resText}.json({ success: false, error: String(${caught(c)}) });` }) },
+      {
+        id: 'same-file helper',
+        build: (c, k) => ({
+          expr: `echoFail${k}(${c.resText}, ${caught(c)})`,
+          helper: `function echoFail${k}(r: any, e: unknown): void { r.status(500).json({ success: false, error: String(e) }) }`,
+        }),
+      },
+    ]
+    const lineAt = (text: string, offset: number) => text.slice(0, offset).split('\n').length
+
     let total = 0
-    let caught = 0
     const missed: string[] = []
     for (const rel of treeFiles()) {
       const source = readRoute(rel)
-      for (const call of scanResponseErrorEcho(rel, source).responderCalls) {
-        const errVar = call.catchVar ?? 'error'
-        const variants = [
-          `res.status(500).json({ success: false, error: (${errVar} as Error).message })`,
-          `res.status(500).json({ success: false, error: String(${errVar}) })`,
-          `${call.name}(res, 'ctx', ${errVar}, { detail: (${errVar} as Error).message })`,
-        ]
-        for (const variant of variants) {
+      const calls = [...scanResponseErrorEcho(rel, source).responderCalls].sort((x, y) => x.start - y.start)
+      if (calls.length === 0) continue
+      for (const shape of shapes) {
+        // Rewrite EVERY site of the file at once, remembering where each site's echo now lives.
+        let out = ''
+        let cursor = 0
+        const spans: Array<{ line: number; helper?: string; from: number; to: number }> = []
+        calls.forEach((c, k) => {
+          const built = shape.build(c, k)
+          const asStatement = built.stmts !== undefined && c.stmtStart !== null && c.stmtEnd !== null
+          const from = asStatement ? (c.stmtStart as number) : c.start
+          const to = asStatement ? (c.stmtEnd as number) : c.end
+          const replacement =
+            built.stmts === undefined ? (built.expr as string) : asStatement ? `{ ${built.stmts} }` : `(() => { ${built.stmts} })()`
+          out += source.slice(cursor, from)
+          const at = out.length
+          out += replacement
+          cursor = to
+          spans.push({ line: c.line, helper: built.helper, from: at, to: at + replacement.length })
+        })
+        out += source.slice(cursor)
+        // A helper's echo lives in the helper: attribute the site to its own helper.
+        for (const span of spans) {
+          if (span.helper === undefined) continue
+          out += '\n'
+          span.from = out.length
+          out += span.helper
+          span.to = out.length
+        }
+        const offenderLines = scanResponseErrorEcho(rel, out).offenders.map((o) => o.line)
+        for (const span of spans) {
           total += 1
-          const mutated = source.slice(0, call.start) + variant + source.slice(call.end)
-          const offenders = scanResponseErrorEcho(rel, mutated).offenders
-          if (offenders.length > 0) caught += 1
-          else missed.push(`${rel}:${call.line} <- ${variant}`)
+          const first = lineAt(out, span.from)
+          const last = lineAt(out, span.to)
+          if (!offenderLines.some((line) => line >= first && line <= last)) {
+            missed.push(`${rel}:${span.line} <- ${shape.id}`)
+          }
         }
       }
     }
     expect(missed).toEqual([])
-    expect(caught).toBe(total)
-    expect(total).toBeGreaterThanOrEqual(45 * 3)
+    expect(total).toBeGreaterThanOrEqual(45 * shapes.length)
   })
 })
