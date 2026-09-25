@@ -47,6 +47,27 @@
           >
             {{ t.delegationsButton }}
           </el-button>
+          <!-- Approval form grouping lock v2.13 §6 phase 3 (A-4) — additive view-mode toggle.
+               Default 'flat' keeps every existing spec's mount behavior byte-identical; the
+               grouped branch below is a SIBLING template, not a wrapper around the existing
+               table/gallery markup, so this never touches their structure. -->
+          <el-button
+            :type="viewMode === 'flat' ? 'primary' : 'default'"
+            size="small"
+            class="ms-ml-12"
+            data-testid="template-center-view-mode-flat"
+            @click="viewMode = 'flat'"
+          >
+            {{ t.viewModeFlat }}
+          </el-button>
+          <el-button
+            :type="viewMode === 'grouped' ? 'primary' : 'default'"
+            size="small"
+            data-testid="template-center-view-mode-grouped"
+            @click="viewMode = 'grouped'"
+          >
+            {{ t.viewModeGrouped }}
+          </el-button>
         </div>
       </template>
     </PageHeader>
@@ -92,6 +113,12 @@
       <el-tab-pane :label="t.tabArchived" name="archived" />
     </el-tabs>
 
+    <!-- Approval form grouping lock v2.13 §6 phase 3 (A-4) — `viewMode` gate wraps the ENTIRE
+         pre-existing flat table/gallery block as a sibling of the new grouped view, rather than
+         being merged into the table's own `v-if`/`v-else` pair (which would make the gallery
+         `v-else` fire in grouped+non-manager mode too). Default 'flat' keeps this block's own
+         `v-if`/`v-else` behaving exactly as before for every spec that never touches viewMode. -->
+    <template v-if="viewMode === 'flat'">
     <!-- G-B2-17: admin path unchanged — the management table stays exactly as before. -->
     <el-table
       v-if="canManageTemplates"
@@ -246,9 +273,49 @@
         :title="searchText || categoryFilter ? t.emptyTableSearch : t.emptyGalleryDefault"
       />
     </div>
+    </template>
+    <template v-else>
+      <!-- A-2 x A-4 merge convergence (2026-09-20) — master/subordinate for the two grouping
+           surfaces this page grew, one per lane. A-4's TemplateGroupSections is the PRIMARY
+           grouping surface: it owns the rendered group order and every section's rows, and it is
+           the only thing that loads groups on entering the grouped view. A-2's
+           ApprovalTemplateGroupsPanel is the MANAGEMENT ENTRY: admin-only, disclosure-gated
+           (collapsed by default), and it mounts — and therefore calls
+           `listApprovalTemplateGroups()` — only once an admin explicitly opens it, so no default
+           render path fetches the group list twice. On a successful mutation the panel emits
+           `changed` and this view re-runs the sections' own `loadAll()`, closing the state
+           desync (creating a group in the manager used to leave the section list stale).
+
+           The panel is NOT mounted in the flat view at all. That is what keeps A-4's I6
+           invariant ("the flat table's category tag never triggers a group-linkage lookup",
+           asserted in approvalTemplateCenterCategory.spec.ts) literally true after the merge
+           rather than rewritten: the assertion is unchanged from A-4's head. See the phase-3
+           design MD's "A-2 x A-4 合流" section. -->
+      <div v-if="canManageTemplates" class="template-center__group-manager">
+        <el-button
+          size="small"
+          data-testid="template-center-group-manager-toggle"
+          :aria-expanded="showGroupManager ? 'true' : 'false'"
+          @click="showGroupManager = !showGroupManager"
+        >
+          {{ showGroupManager ? t.groupManagerHide : t.groupManagerShow }}
+        </el-button>
+        <ApprovalTemplateGroupsPanel
+          v-if="showGroupManager"
+          :tr="tr"
+          @changed="handleGroupsChanged"
+        />
+      </div>
+      <TemplateGroupSections
+        ref="groupSectionsRef"
+        :status="statusTab === 'all' ? undefined : statusTab"
+        :search="searchText || undefined"
+        @select="handleSectionItemSelect"
+      />
+    </template>
 
     <el-pagination
-      v-if="store.total > pageSize"
+      v-if="viewMode === 'flat' && store.total > pageSize"
       class="template-center__pagination"
       background
       layout="total, prev, pager, next"
@@ -265,6 +332,8 @@ import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
 import EmptyState from '../../components/status/EmptyState.vue'
+import ApprovalTemplateGroupsPanel from './ApprovalTemplateGroupsPanel.vue'
+import TemplateGroupSections from './TemplateGroupSections.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
@@ -297,6 +366,10 @@ const recentTemplates = ref<RecentTemplateEntry[]>([])
 // the ZH/EN + computed convention ApprovalBatchTransferView.vue established in this directory.
 const { isZh } = useLocale()
 const t = computed(() => (isZh.value ? ZH : EN))
+// A-2 scope item 2 — the shared `SessionOrgSwitcher`/`ApprovalTemplateGroupsPanel` take a plain
+// `tr(en, zh)` function (same shape `AttendanceView.vue:10468` uses), not the whole-object `t`
+// convention this file otherwise uses.
+const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 
 const statusTab = ref<'all' | ApprovalTemplateStatus>('all')
 const searchText = ref('')
@@ -308,6 +381,8 @@ const cloningId = ref<string | null>(null)
 const archivingId = ref<string | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
+// Approval form grouping lock v2.13 §6 phase 3 (A-4) — additive view-mode toggle, default 'flat'.
+const viewMode = ref<'flat' | 'grouped'>('flat')
 
 // G-B2-17 — the requester gallery re-filters the current page's templates instantly as
 // categoryFilter/searchText change (no need to wait for handleSearch's Enter/blur), on top of
@@ -380,6 +455,25 @@ function handlePageChange(page: number) {
 
 function handleRowClick(row: ApprovalTemplateListItemDTO) {
   router.push({ path: `/approval-templates/${row.id}` })
+}
+
+// Approval form grouping lock v2.13 §6 phase 3 (A-4) — TemplateGroupSections emits a bare
+// template id (it has no dependency on vue-router itself, unlike handleRowClick's row object).
+function handleSectionItemSelect(templateId: string) {
+  router.push({ path: `/approval-templates/${templateId}` })
+}
+
+// A-2 x A-4 merge convergence — the group MANAGER (A-2's panel) is collapsed by default and
+// lives inside the grouped view only; see the template comment on `template-center__group-manager`
+// for why (I6 in the flat view, single group fetch on the default grouped render).
+const showGroupManager = ref(false)
+const groupSectionsRef = ref<InstanceType<typeof TemplateGroupSections> | null>(null)
+
+// The manager mutated the org's groups (create). The sections view owns the rendered group order,
+// so it — not the panel — is the surface that must re-read; `loadAll` is the same entry point the
+// sections view runs on mount (it already `defineExpose`s it).
+function handleGroupsChanged() {
+  void groupSectionsRef.value?.loadAll()
 }
 
 function startApproval(templateId: string) {
