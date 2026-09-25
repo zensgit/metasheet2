@@ -6503,6 +6503,38 @@ function getAuthenticatedOrgId(req) {
   return null
 }
 
+function attendanceImportOrgSelectorValues(req) {
+  return [req.body?.orgId, req.query?.orgId, req.headers?.['x-org-id']]
+    .flatMap((value) => Array.isArray(value) ? value : [value])
+    .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map((value) => String(value).trim())
+}
+
+function attendanceImportOrgSelectorMismatches(req, orgId) {
+  return attendanceImportOrgSelectorValues(req).some((value) => value !== orgId)
+}
+
+function rejectUnauthenticatedAttendanceImportOrg(res) {
+  res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+}
+
+function rejectMismatchedAttendanceImportOrg(res) {
+  res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Organization not found' } })
+}
+
+function resolveAuthenticatedAttendanceOrg(req, res) {
+  const orgId = getAuthenticatedOrgId(req)
+  if (!orgId) {
+    rejectUnauthenticatedAttendanceImportOrg(res)
+    return null
+  }
+  if (attendanceImportOrgSelectorMismatches(req, orgId)) {
+    rejectMismatchedAttendanceImportOrg(res)
+    return null
+  }
+  return orgId
+}
+
 function getAuthenticatedUserId(req) {
   const user = req.user
   const raw = user?.id ?? user?.sub ?? user?.userId
@@ -20006,7 +20038,8 @@ const ACTIVE_ORG_MEMBER_USER_IDS_SQL = `SELECT uo.user_id
    WHERE uo.org_id = $1
      AND uo.user_id = ANY($2::text[])
      AND uo.is_active = true
-     AND u.is_active = true`
+     AND u.is_active = true
+   FOR SHARE OF uo, u`
 
 async function assertActiveOrgMemberUserIds(client, orgId, userIds, options) {
   const requested = []
@@ -25166,7 +25199,21 @@ module.exports = {
       attendanceOrgResolutionShadowMetricsLogStop = startShadowMetricsLoggingV1(logger)
     }
     const { hasAttendanceAdminAccess, hasAttendanceImportAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
-    const withAttendanceImportPermission = (handler) => withAnyPermission(['attendance:import', 'attendance:admin'], handler)
+    const withAttendanceImportPermission = (handler) => withAnyPermission(
+      ['attendance:import', 'attendance:admin'],
+      async (req, res) => {
+        const access = await resolveAttendanceImportActor(req, res)
+        if (!access) return
+        req.attendanceImportAccess = access
+        return handler(req, res)
+      },
+    )
+    function readBoundAttendanceImportOrg(req, res) {
+      const orgId = req.attendanceImportAccess?.orgId
+      if (typeof orgId === 'string' && orgId.length > 0) return orgId
+      rejectUnauthenticatedAttendanceImportOrg(res)
+      return null
+    }
     const emitEvent = (type, data) => {
       if (context.api?.events?.emit) {
         context.api.events.emit(type, data)
@@ -26422,19 +26469,8 @@ module.exports = {
         res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
         return null
       }
-      const orgId = getAuthenticatedOrgId(req)
-      if (!orgId) {
-        res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
-        return null
-      }
-      const selectors = [req.body?.orgId, req.query?.orgId, req.headers['x-org-id']]
-        .flatMap((value) => Array.isArray(value) ? value : [value])
-        .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
-        .map((value) => String(value).trim())
-      if (selectors.some((value) => value !== orgId)) {
-        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Organization not found' } })
-        return null
-      }
+      const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+      if (!orgId) return null
       try {
         return {
           userId,
@@ -31716,7 +31752,8 @@ module.exports = {
 	      'POST',
 	      '/api/attendance/import/upload-artifact',
 	      withAttendanceImportPermission(async (req, res) => {
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const requesterId = getUserId(req)
 	        if (!requesterId) {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -41662,8 +41699,8 @@ module.exports = {
 	    // Per-user field-picker memory (attendance-import-template-prefs design-lock
 	    // §2, RATIFIED 2026-07-07). Governance: the actor is ALWAYS req.user — the
 	    // legacy x-user-id header fallback in getUserId() is deliberately NOT used
-	    // here (personal-views lock §7 Q1 anti-pattern). org stays a legitimate
-	    // client dimension (multi-org admins), mirroring getOrgId().
+	    // here (personal-views lock §7 Q1 anti-pattern). Org is the authenticated
+	    // org only; body, query, and x-org-id cannot select another org.
 	    const getTemplatePrefsActorId = (req) => {
 	      const user = req.user
 	      const raw = user?.id ?? user?.sub ?? user?.userId
@@ -41683,7 +41720,8 @@ module.exports = {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
 	          return
 	        }
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const rows = await db.query(
 	          `SELECT selected_keys FROM attendance_import_template_prefs WHERE org_id = $1 AND user_id = $2`,
 	          [orgId, actorId]
@@ -41705,7 +41743,8 @@ module.exports = {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
 	          return
 	        }
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const raw = req.body?.selectedKeys
 	        if (raw !== null && raw !== undefined && !Array.isArray(raw)) {
 	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'selectedKeys must be an array of field keys (or null/[] to clear)' } })
@@ -41756,7 +41795,8 @@ module.exports = {
 	      'POST',
 	      '/api/attendance/import/upload',
 	      withAttendanceImportPermission(async (req, res) => {
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const requesterId = getUserId(req)
 	        if (!requesterId) {
 	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -41823,11 +41863,11 @@ module.exports = {
 	      'POST',
 	      '/api/attendance/import/prepare',
       async (req, res) => {
-        const orgId = getOrgId(req)
         const access = await assertAttendanceImportPrepareAllowed(req, res)
         if (!access) {
           return
         }
+        const orgId = access.orgId
         const requesterId = access.userId
 
         try {
@@ -43179,7 +43219,8 @@ module.exports = {
       'GET',
       '/api/attendance/import/jobs/:id',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const jobId = String(req.params?.id ?? '').trim()
         if (!jobId) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'jobId is required' } })
@@ -43213,9 +43254,9 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const importAccess = await assertAttendanceImportPrepareAllowed(req, res)
         if (!importAccess) return
+        const orgId = importAccess.orgId
         const requesterId = importAccess.userId
 		        const userId = parsed.data.userId ?? requesterId
 		        if (!userId) {
@@ -43428,7 +43469,8 @@ module.exports = {
 	    'GET',
 	    '/api/attendance/integrations',
 	    withAttendanceImportPermission(async (req, res) => {
-	      const orgId = getOrgId(req)
+	      const orgId = readBoundAttendanceImportOrg(req, res)
+	      if (!orgId) return
 	      const { page, pageSize, offset } = parsePagination(req.query)
 	      const status = typeof req.query.status === 'string' ? req.query.status : null
 
@@ -43480,7 +43522,8 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const payload = parsed.data
         const status = payload.status ?? 'active'
         const config = normalizeIntegrationConfig(payload.config ?? {})
@@ -43518,7 +43561,8 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -43575,7 +43619,8 @@ module.exports = {
       'DELETE',
       '/api/attendance/integrations/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -43607,7 +43652,8 @@ module.exports = {
       'GET',
       '/api/attendance/integrations/:id/runs',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -43656,14 +43702,14 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
-        const requesterId = getUserId(req)
+        const importAccess = req.attendanceImportAccess ?? await resolveAttendanceImportActor(req, res)
+	    if (!importAccess) return
+        const orgId = importAccess.orgId
+        const requesterId = importAccess.userId
         if (!requesterId) {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-	    const importAccess = await resolveAttendanceImportActor(req, res)
-	    if (!importAccess) return
         const integrationId = normalizeUuidString(req.params.id)
         if (!integrationId) {
           respondInvalidUuid(res)
@@ -43916,7 +43962,8 @@ module.exports = {
       'GET',
       '/api/attendance/import/batches',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -43956,7 +44003,8 @@ module.exports = {
       'GET',
       '/api/attendance/import/batches/:id',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
@@ -43987,7 +44035,8 @@ module.exports = {
 	      'GET',
 	      '/api/attendance/import/batches/:id/items',
 	      withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = readBoundAttendanceImportOrg(req, res)
+        if (!orgId) return
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
@@ -44031,7 +44080,8 @@ module.exports = {
 	      'GET',
 	      '/api/attendance/import/batches/:id/export.csv',
 	      withAttendanceImportPermission(async (req, res) => {
-	        const orgId = getOrgId(req)
+	        const orgId = readBoundAttendanceImportOrg(req, res)
+	        if (!orgId) return
 	        const batchId = normalizeUuidString(req.params.id)
 	        if (!batchId) {
 	          respondInvalidUuid(res)
@@ -44181,11 +44231,8 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-        const orgId = getAuthenticatedOrgId(req)
-        if (!orgId) {
-          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
-          return
-        }
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)

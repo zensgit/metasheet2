@@ -365,6 +365,7 @@ describe('blueprint mutations — real production surfaces', () => {
       }],
     })
     expect(calls.some((sql) => sql.includes('FROM user_orgs'))).toBe(true)
+    expect(calls.some((sql) => sql.includes('FOR SHARE OF uo, u'))).toBe(true)
     expect(calls.some((sql) => sql.includes('INSERT INTO'))).toBe(false)
   })
 

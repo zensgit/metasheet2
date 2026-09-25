@@ -75,7 +75,23 @@ const ACTIVE_ORG_MEMBER_USER_IDS_SQL = `
      AND uo.user_id = ANY($2::text[])
      AND uo.is_active = true
      AND u.is_active = true
+   FOR SHARE OF uo, u
 `
+
+export function throwAttendanceRosterOrgMembershipError(
+  plan: VerifiedAttendanceLegacyPlanV1,
+  rejectedUserIds: readonly string[],
+): never {
+  const indexes = rosterWriteIndexes(plan, rejectedUserIds)
+  throw new AttendanceLegacyGroupEffectError('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG', {
+    status: 404,
+    details: [{
+      code: 'USER_NOT_IN_ORG',
+      rejectedCount: indexes.length,
+      indexes,
+    }],
+  })
+}
 
 function rosterWriteIndexes(
   plan: VerifiedAttendanceLegacyPlanV1,
@@ -141,15 +157,7 @@ export async function applyAttendanceLegacyGroupEffectsV1(
     )
     const rejected = memberUserIds.filter((userId) => !active.has(userId))
     if (rejected.length > 0) {
-      const indexes = rosterWriteIndexes(plan, rejected)
-      throw new AttendanceLegacyGroupEffectError('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG', {
-        status: 404,
-        details: [{
-          code: 'USER_NOT_IN_ORG',
-          rejectedCount: indexes.length,
-          indexes,
-        }],
-      })
+      throwAttendanceRosterOrgMembershipError(plan, rejected)
     }
   }
 

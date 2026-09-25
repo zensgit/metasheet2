@@ -88,6 +88,31 @@ pnpm --filter @metasheet/core-backend exec vitest run \
 # Test Files  1 passed (1)
 # Tests  3 passed (3)
 # 含 enqueue then deactivate does not insert ensure_member
+
+# 导入链读接口组织边界 + 成员未命中终态统一 + FOR SHARE（rebase 到 main f2d5331d 之后）
+pnpm --filter @metasheet/core-backend exec vitest run \
+  tests/unit/attendance-uuid-validation-routes.test.ts \
+  tests/unit/attendance-import-permission.test.ts \
+  src/attendance/__tests__/w4c3a-legacy-plan-mutation-seams.test.ts \
+  src/attendance/__tests__/w4c3a-legacy-plan-worker.test.ts \
+  src/attendance/__tests__/w4c3a-plugin-v1-boundary.test.ts --watch=false
+# Test Files  5 passed (5)
+# Tests  234 passed (234)
+
+pnpm --filter @metasheet/core-backend exec tsc -p tsconfig.json --noEmit --pretty false
+pnpm --filter @metasheet/core-backend exec tsc -p tsconfig.cache.tests.json --noEmit --pretty false
+# both exited 0
+
+node --test --test-name-pattern 'generated runtime call-path census' \
+  scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs
+# 1/1 pass
+
+# 真实 PostgreSQL 16。三个文件全跑：
+# Test Files  3 passed (3)
+# Tests  39 passed (39)
+# 全链：enqueue → 停用 user_orgs → createAttendanceLegacyPlanProcessorV1
+# → status failed，reason USER_NOT_IN_ORG，error JSON indexes [0]，成员行与本批 records 为 0。
+# FOR SHARE：并发 UPDATE user_orgs.is_active 在成员 INSERT 提交前停在 Lock。
 ```
 
 ## 4. Adversarial / mutation
@@ -181,8 +206,8 @@ SELECT 'attendance_schedule_group_members', m.org_id, m.user_id, m.schedule_grou
 - 无浏览器。管理端粘贴框 / global-scope 负责人选择器未点。
 - 已经落库的幽灵成员、负责人、排班组成员 **不会**被本 PR 清掉。用第 6 节的只读查询找，不要当清理脚本跑。
 - 单测分不出「停用成员关系」和「用户行 `is_active = false`」的执行差异；第 5 节的真实库查询把这两种都排除了，单测本身仍靠谓词文本 + 空结果。
-- 条件复检失败仍是 `PRECONDITION_CHANGED`（`error` 为空），不带 index。真正写入前的适配器失败才记 `USER_NOT_IN_ORG` 和 index JSON。两条都会阻止成员 INSERT。
-- 检查与 INSERT 之间没有 `SELECT … FOR UPDATE`。W4 写入前的再查盖住入队后的窗口，盖不住检查通过后、INSERT 之前的并发停用。
+- 组织成员未命中，无论卡在条件复检还是执行适配器，终态都是 `USER_NOT_IN_ORG` 加 index JSON。结构漂移仍是 `PRECONDITION_CHANGED` 且 `error` 为空。同一条效果上结构检查先于成员查询。
+- 成员查询与 INSERT 在同一事务，并对本批 `user_orgs` / `users` 行 `FOR SHARE`。并发停用要等事务提交，不能插在检查和 INSERT 之间。不存在的 userId 没有行锁；该情况直接拒绝、不 INSERT。锁不覆盖事务提交之后的停用，也不阻止不锁这些行的旁路写入。
 - W4 没有负责人写入。managers POST 仍是同步路径上的门。
 - async preview 的 job `error` 在 `updateImportJobProgress` 里截到 2000 字符。HTTP 入队前的 404 带完整 index `details`。
 - #5945（报表日期区间）不在本 PR 的改动里。在 `main` `f31a88663` 上重跑 `tests/attendance-reports-analytics.spec.ts` 为 **7/7 PASS**（含倒置区间拦截与相等/升序区间仍可加载）。本 PR 不修改该行为。

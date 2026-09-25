@@ -581,6 +581,7 @@ function expectActiveOrgMemberPredicate(sql: string) {
   expect(sql).toContain('uo.user_id = ANY($2::text[])')
   expect(sql).toContain('uo.is_active = true')
   expect(sql).toContain('u.is_active = true')
+  expect(sql).toContain('FOR SHARE OF uo, u')
 }
 
 function orgGateDetails(indexes: number[]) {
@@ -5507,5 +5508,112 @@ describe('attendance UUID route validation', () => {
     expect(allowed.res.statusCode).toBe(200)
     expect(allowed.res.body).toMatchObject({ ok: true, data: { state: 'not_configured' } })
     expect(allowed.db.query.mock.calls.some(([sql]) => String(sql).includes('attendance_groups'))).toBe(true)
+  })
+
+  describe('import-chain authenticated org', () => {
+    const batchId = '00000000-0000-4000-8000-000000000901'
+    const integrationId = '00000000-0000-4000-8000-000000000902'
+    const reads: Array<{ key: string; params?: Record<string, string>; body?: unknown }> = [
+      { key: 'GET /api/attendance/import/jobs/:id', params: { id: 'job-1' } },
+      { key: 'GET /api/attendance/import/batches' },
+      { key: 'GET /api/attendance/import/batches/:id', params: { id: batchId } },
+      { key: 'GET /api/attendance/import/batches/:id/items', params: { id: batchId } },
+      { key: 'GET /api/attendance/import/batches/:id/export.csv', params: { id: batchId } },
+      { key: 'GET /api/attendance/import/template-prefs' },
+      { key: 'GET /api/attendance/integrations' },
+      { key: 'GET /api/attendance/integrations/:id/runs', params: { id: integrationId } },
+    ]
+
+    async function invokeImport(
+      key: string,
+      extra: { params?: Record<string, string>; body?: unknown; query?: Record<string, unknown>; headers?: Record<string, unknown>; user?: Record<string, unknown> },
+    ) {
+      const { db, routes } = await createHarness('true')
+      const res = await invokeRoute(routes, key, extra)
+      return { db, res }
+    }
+
+    it.each(reads)('$key rejects a query org override before reading import data', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        query: { orgId: 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Organization not found' },
+      })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it.each(reads)('$key rejects a body org override before reading import data', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        body: { orgId: 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it.each(reads)('$key rejects an x-org-id override before reading import data', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        headers: { 'x-org-id': 'org-b' },
+        user: { id: 'admin-1', orgId: 'org-a' },
+      })
+      expect(res.statusCode).toBe(404)
+      expect(res.body).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it.each(reads)('$key rejects a caller with import permission and no authenticated org', async ({ key, params }) => {
+      const { db, res } = await invokeImport(key, {
+        params,
+        user: { id: 'admin-1' },
+      })
+      expect(res.statusCode).toBe(403)
+      expect(res.body).toMatchObject({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' },
+      })
+      expect(db.query).not.toHaveBeenCalled()
+    })
+
+    it('prepare, legacy import, upload, and rollback use the same selector contract', async () => {
+      const { db, routes } = await createHarness('true')
+      const user = { id: 'admin-1', orgId: 'org-a' }
+      const cases: Array<{ key: string; params?: Record<string, string>; body?: unknown; query?: Record<string, unknown>; headers?: Record<string, unknown> }> = [
+        { key: 'POST /api/attendance/import/prepare', query: { orgId: 'org-b' } },
+        { key: 'POST /api/attendance/import/prepare', body: { orgId: 'org-b' } },
+        { key: 'POST /api/attendance/import/prepare', headers: { 'x-org-id': 'org-b' } },
+        { key: 'POST /api/attendance/import/upload', query: { orgId: 'org-b' } },
+        { key: 'POST /api/attendance/import/upload-artifact', headers: { 'x-org-id': 'org-b' } },
+        {
+          key: 'POST /api/attendance/import',
+          body: {
+            orgId: 'org-b',
+            rows: [{ userId: 'worker-1', workDate: '2026-06-10', fields: {} }],
+          },
+        },
+        {
+          key: 'POST /api/attendance/import/rollback/:id',
+          params: { id: batchId },
+          query: { orgId: 'org-b' },
+        },
+      ]
+      for (const entry of cases) {
+        db.query.mockClear()
+        const res = await invokeRoute(routes, entry.key, { ...entry, user })
+        expect(res.statusCode, entry.key).toBe(404)
+        expect(res.body).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } })
+        const sql = db.query.mock.calls.map(([query]) => String(query)).join('\n')
+        expect(sql, entry.key).not.toContain('org-b')
+        expect(sql, entry.key).not.toContain('attendance_import_jobs')
+        expect(sql, entry.key).not.toContain('attendance_import_batches')
+      }
+    })
   })
 })

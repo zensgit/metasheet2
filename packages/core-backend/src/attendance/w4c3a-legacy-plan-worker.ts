@@ -559,7 +559,17 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_IDENTITY_MISMATCH')
         }
         await callbacks.acquireClass11(trx, plan, targets)
-        if (!(await callbacks.recheckPreconditions(trx, plan))) {
+        let preconditionsHold = false
+        try {
+          preconditionsHold = await callbacks.recheckPreconditions(trx, plan)
+        } catch (error) {
+          const detail = rosterOrgMembershipFailureDetail(error)
+          if (detail !== null) {
+            return failClosed(trx, rechecked, 'USER_NOT_IN_ORG', detail)
+          }
+          throw error
+        }
+        if (!preconditionsHold) {
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED')
         }
         const registryClaim = await callbacks.claimOperationRows(

@@ -94,4 +94,34 @@ describe('attendance import permission wiring', () => {
     expect(pluginSource).toContain('tokenSubjectUserId,')
     expect(pluginSource).not.toContain('tokenSubjectUserId: actorId')
   })
+
+  it('binds the import permission wrapper to the authenticated org', () => {
+    const start = pluginSource.indexOf('const withAttendanceImportPermission =')
+    const end = pluginSource.indexOf('const emitEvent', start)
+    const wrapper = pluginSource.slice(start, end)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(wrapper).toContain('resolveAttendanceImportActor(req, res)')
+    expect(wrapper).toContain('req.attendanceImportAccess = access')
+
+    const boundReads = [
+      '/api/attendance/import/jobs/:id',
+      '/api/attendance/import/batches',
+      '/api/attendance/import/batches/:id',
+      '/api/attendance/import/batches/:id/items',
+      '/api/attendance/import/batches/:id/export.csv',
+      '/api/attendance/import/template-prefs',
+      '/api/attendance/import/upload',
+      '/api/attendance/import/upload-artifact',
+      '/api/attendance/integrations',
+      '/api/attendance/integrations/:id/runs',
+    ]
+    for (const path of boundReads) {
+      const marker = pluginSource.indexOf(`'${path}'`)
+      expect(marker, path).toBeGreaterThanOrEqual(0)
+      const next = pluginSource.indexOf('context.api.http.addRoute', marker + path.length)
+      const body = pluginSource.slice(marker, next === -1 ? marker + 1200 : next)
+      expect(body, path).not.toContain('getOrgId(req)')
+      expect(body, path).toContain('readBoundAttendanceImportOrg')
+    }
+  })
 })

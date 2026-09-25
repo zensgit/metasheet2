@@ -2,7 +2,7 @@
 
 > **文档性质：实现设计（design lock for this PR）**  
 > **日期**：2026-09-24  
-> **基准**：`main` @ `e046a21c0a0110fbe22ca765852f1e053d90c0cb`  
+> **基准**：`main` @ `f2d5331d605d1e155f8dd5ffe7f880be9f93480f`  
 > **谱系**：#5899 O3（`attendance-group-acl-write-o3-design-20260920.md`）把 `add_members` 下放给组负责人之后，成员/负责人写入仍把 `userId` 原样 INSERT。  
 > **本 PR**：设计 + 实现 + 验证；**draft，不合并**。修 #6045、#6047。
 
@@ -184,6 +184,35 @@ HTTP **404**。`details` 不含 `userId`、日期或其他提交值。`indexes` 
 
 W4 冻结计划仍不重算组是否存在。`ensure_member` 在执行前条件复检里再查一次；效果适配器在**任何** group 或 member `INSERT` 之前用同一谓词批量再查。失败抛 `W4C3A_MEMBER_NOT_ACTIVE_IN_ORG`，`status = 404`，`details` 为 index 形状。Worker 把 job 标成 `failed`，`w4_execution_reason_code = USER_NOT_IN_ORG`，`error` 为这份 JSON。既有计划失败原因仍写 `error = NULL`。迁移 `zzzz20260924180000_attendance_roster_org_gate_job_reason` 只为这个 reason 允许非空 `error`。W4 没有 `ensure_manager`。
 
+组织成员未命中时，条件复检和执行适配器记**同一个**终态：`USER_NOT_IN_ORG`，`error` 为上面的 index JSON。结构漂移（指纹、行数、组被改掉）仍是 `ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED` 且 `error` 为空。同一条 `ensure_member` 上，结构检查先于活跃成员查询：结构失败先返回 false，不会被改写成 `USER_NOT_IN_ORG`。活跃成员查询未命中则先记下该 userId，循环结束后一次抛出，indexes 覆盖本批全部未命中的 `ensure_member`。Worker 在 `recheckPreconditions` 和 `executeVerifiedPlan` 两处都捕获这个错误，所以入队后停用无论被哪一阶段拦住，终态 reason 和 details 相同。
+
+成员查询与随后的成员 INSERT 在同一事务里，并对命中的 `user_orgs` / `users` 行加 `FOR SHARE OF uo, u`。并发把 `is_active` 改成 false 的 `UPDATE` 会等到该事务提交。检查通过后、INSERT 之前，停用不能先提交。锁只打在本批 userId 对应的行上，不锁整张表。查不到行时没有锁；那种情况直接 404，不会 INSERT。插件同步写入、W4 条件复检、W4 效果适配器三处 SQL 都带这把锁。
+
 ### 6.3 历史行
 
 不删除、不更新已经落库的成员、负责人、排班组成员。只读查找 SQL 写在验证记录里。
+
+### 6.4 导入链读接口的组织
+
+`withAttendanceImportPermission` 在权限码之后调用 `resolveAttendanceImportActor`。没有已认证组织是 403 `FORBIDDEN` “Authenticated organization not found”。body / query / `x-org-id` 与已认证组织不一致是 404 `NOT_FOUND` “Organization not found”，处理函数不跑。处理函数用 `req.attendanceImportAccess.orgId`，不再调用 `getOrgId(req)`。
+
+改过的导入链入口：
+
+- `GET /api/attendance/import/jobs/:id`
+- `GET /api/attendance/import/batches`
+- `GET /api/attendance/import/batches/:id`
+- `GET /api/attendance/import/batches/:id/items`
+- `GET /api/attendance/import/batches/:id/export.csv`
+- `GET` / `PUT /api/attendance/import/template-prefs`
+- `POST /api/attendance/import/upload`
+- `POST /api/attendance/import/upload-artifact`
+- `GET /api/attendance/integrations`
+- `GET /api/attendance/integrations/:id/runs`
+- `POST /api/attendance/integrations/:id/sync`
+- `POST /api/attendance/import/prepare` 与 `POST /api/attendance/import`：token 和后续查询用 `importAccess.orgId`
+- `POST` / `PUT` / `DELETE /api/attendance/integrations`：`resolveAuthenticatedAttendanceOrg`（admin 权限包装器，同一 403/404）
+- `POST /api/attendance/import/rollback/:id`：已认证组织，并拒绝不一致的选择器
+
+静态 `GET /api/attendance/import/template` 与 `template.csv` 不读组织数据，但走同一个权限包装器，因此也要求已认证组织；选择器不一致同样 404，响应里没有组织数据。
+
+未改、仍用 `getOrgId(req)` 的不是导入链：排班范围 actor、打卡、记录、薪资模板等。
