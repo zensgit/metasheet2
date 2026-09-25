@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -43,6 +44,26 @@ const scriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-up
 const workflowPath = path.join(repoRoot, '.github/workflows/plugin-tests.yml')
 const runbookPath = path.join(repoRoot, 'docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md')
 const scriptSource = fs.readFileSync(scriptPath, 'utf8')
+
+// The PowerShell every harness and every end-to-end run of this file uses.
+// Default 'pwsh' (the ubuntu `test` job: pwsh 7). Set UPGRADE_INPLACE_TEST_SHELL
+// to Windows PowerShell 5.1's powershell.exe to run this same file under 5.1, the
+// demo host's shell -- some of the script's behaviour only exists there: pwsh 7.2+
+// never turns redirected native stderr into an ErrorRecord, so a revert of
+// Invoke-Pm2's `$ErrorActionPreference = 'Continue'` (R59: pm2's "not found" on
+// stderr becomes a terminating NativeCommandError) is red at runtime only on 5.1.
+// The pwsh 7 CI lane still catches that revert through the static pin in the
+// "R59 wiring" test. Under 5.1 the script must carry a UTF-8 BOM, as the deployed
+// copy does, unless the machine's ANSI code page is UTF-8: without it 5.1 decodes
+// the file in the ANSI code page and, under 1252, the em-dashes inside its strings
+// end them early (the script does not parse).
+const PWSH = process.env.UPGRADE_INPLACE_TEST_SHELL || 'pwsh'
+// A Windows PowerShell 5.1 started (via node) from a pwsh 7 session -- e.g. a CI step
+// whose host shell is pwsh -- inherits pwsh 7's PSModulePath and then cannot load its own core
+// modules: "The term 'Get-FileHash' is not recognized", Compress-Archive likewise.
+// Without PSModulePath it builds its own default. Every child of this file inherits
+// process.env (childEnv copies it), so dropping it here covers every spawn.
+if (process.env.UPGRADE_INPLACE_TEST_SHELL) delete process.env.PSModulePath
 
 // Strips PowerShell `<# ... #>` block comments (used here for rich, deliberately
 // quotes-the-forbidden-syntax documentation of WHY -Exclude is banned) before the
@@ -409,7 +430,7 @@ test('CI wiring: this test file is actually invoked by the required `test` job (
 // ── 2. UNIT (dot-source the real script, call the real functions) ────────────────
 
 function runPwshHarness(harness) {
-  return spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', harness], { encoding: 'utf8' })
+  return spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-Command', harness], { encoding: 'utf8' })
 }
 
 function dotSourcePrelude(scratchDir) {
@@ -757,12 +778,29 @@ function psSingleQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
+// A temp dir whose path has no 8.3 short-name segments. The R59 tests compare the
+// home the script resolved with the one the test built, and a Windows TEMP such as
+// C:\Users\RUNNER~1\... (GitHub's Windows runners) would otherwise differ from the
+// script's view only by short- vs long-name spelling (.NET Framework's GetFullPath
+// expands short names). realpathSync.native returns the long form.
+function mkLongTempDir(prefix) {
+  return fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), prefix))
+}
+
 // PowerShell source defining the two task-scheduler stubs. Every call is logged
 // to taskLogPath as `get <name>` / `start <name>`.
 //   taskPresent:  whether a task named taskName "exists".
 //   startBehavior: 'start-runtime' (writes runtimeStartedMarker — the fixture's
 //                  "pm2-runtime is up again") or 'throw' (the scheduler refuses).
-function scheduledTaskStubSource({ taskName = 'MetaSheet-PM2', taskPresent, startBehavior = 'start-runtime', runtimeStartedMarker = null, taskLogPath }) {
+//   strayDaemonMarkerPath: when given, every start also logs `start-saw-daemon=yes|no`:
+//                  whether the pm2 stub's session-bound daemon was still there when
+//                  the task started. With real pm2 on Windows, `yes` means the task's
+//                  pm2-runtime attaches to that daemon as a client and the backend
+//                  lives and dies with the upgrade session (verified with pm2 7.0.4).
+function scheduledTaskStubSource({ taskName = 'MetaSheet-PM2', taskPresent, startBehavior = 'start-runtime', runtimeStartedMarker = null, taskLogPath, strayDaemonMarkerPath = null }) {
+  const sawDaemonLine = strayDaemonMarkerPath
+    ? `  Add-Content -LiteralPath ${psSingleQuote(taskLogPath)} -Value ('start-saw-daemon=' + $(if (Test-Path -LiteralPath ${psSingleQuote(strayDaemonMarkerPath)}) { 'yes' } else { 'no' }))`
+    : ''
   const startBody =
     startBehavior === 'throw'
       ? "  throw 'STUB_TASK_SCHEDULER_REFUSED: the task could not be started'"
@@ -781,6 +819,11 @@ function scheduledTaskStubSource({ taskName = 'MetaSheet-PM2', taskPresent, star
     '  [CmdletBinding()]',
     '  param([string]$TaskName)',
     `  Add-Content -LiteralPath ${psSingleQuote(taskLogPath)} -Value ('start ' + $TaskName)`,
+    // Like the real cmdlet: starting a task that does not exist fails.
+    `  if (-not (${taskPresent ? '$true' : '$false'} -and $TaskName -eq ${psSingleQuote(taskName)})) {`,
+    `    throw "No MSFT_ScheduledTask objects found with property 'TaskName' equal to '$TaskName'."`,
+    '  }',
+    ...(sawDaemonLine ? [sawDaemonLine] : []),
     startBody,
     '}',
     '',
@@ -801,8 +844,8 @@ function readPm2HomeLog(homeLogPath) {
   })
 }
 
-test('Resolve-Pm2Home: -Pm2Home beats PM2_HOME beats the auto-detected .pm2-runtime, which needs BOTH the directory and the scheduled task (RED-witnessed)', () => {
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+test('Resolve-Pm2Home: -Pm2Home beats PM2_HOME beats the auto-detected .pm2-runtime, which needs BOTH the directory and the scheduled task; every home it returns is absolute (RED-witnessed)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
   try {
     const profileWithRuntime = path.join(scratch, 'profile-with-runtime')
     const runtimeHome = path.join(profileWithRuntime, '.pm2-runtime')
@@ -813,6 +856,10 @@ test('Resolve-Pm2Home: -Pm2Home beats PM2_HOME beats the auto-detected .pm2-runt
     fs.mkdirSync(explicitHome, { recursive: true })
     const envHome = path.join(scratch, 'env-home')
     const missingHome = path.join(scratch, 'no-such-home')
+    // Relative values, resolved against the location the harness sets (scratch).
+    const relativeHomeName = 'rel-home'
+    fs.mkdirSync(path.join(scratch, relativeHomeName), { recursive: true })
+    const relativeEnvHomeName = 'rel-env-home'
 
     const call = (label, { explicit = '', env = '', profile, task = 'MetaSheet-PM2', present }) =>
       [
@@ -851,6 +898,17 @@ test('Resolve-Pm2Home: -Pm2Home beats PM2_HOME beats the auto-detected .pm2-runt
         call('G', { explicit: '   ', env: envHome, profile: profileWithRuntime, present: true }),
         // 8. An explicit home that does not exist is refused, not silently created by pm2.
         call('H', { explicit: missingHome, profile: profileWithRuntime, present: true }),
+        // 9. A relative -Pm2Home comes back ABSOLUTE, resolved against the location its
+        //    existence was checked in: Main later Set-Locations to RootDir, a native child
+        //    inherits that as its cwd, and pm2 resolves a relative PM2_HOME against its cwd.
+        `Push-Location ${psSingleQuote(scratch)}`,
+        call('I', { explicit: relativeHomeName, profile: profileWithRuntime, present: true }),
+        // 10. The same for a relative PM2_HOME from the environment (which need not exist).
+        call('K', { env: relativeEnvHomeName, profile: profileWithRuntime, present: true }),
+        'Pop-Location',
+        // 11. A container that is not a file-system directory passes Test-Path -PathType
+        //     Container but is no pm2 home (Env:\ exists on every platform; so would HKCU:\).
+        call('J', { explicit: 'Env:\\', profile: profileWithRuntime, present: true }),
       ].join('\n')
 
     const result = runPwshHarness(harness)
@@ -865,6 +923,14 @@ test('Resolve-Pm2Home: -Pm2Home beats PM2_HOME beats the auto-detected .pm2-runt
     assert.equal(line('F'), 'default||0')
     assert.equal(line('G'), `environment PM2_HOME|${envHome}|0`)
     assert.match(line('H'), /^THREW PM2_HOME_NOT_FOUND/)
+    assert.equal(line('I'), `parameter -Pm2Home|${path.join(scratch, relativeHomeName)}|0`, 'a relative -Pm2Home must come back absolute')
+    assert.equal(line('K'), `environment PM2_HOME|${path.join(scratch, relativeEnvHomeName)}|0`, 'a relative PM2_HOME must come back absolute')
+    assert.match(line('J'), /^THREW PM2_HOME_NOT_FOUND/)
+    if (process.platform === 'win32') {
+      // Where Env:\ is known to pass the Container check (Windows PowerShell 5.1 and
+      // pwsh 7 on Windows, both verified), it must be the provider check that refuses it.
+      assert.match(line('J'), /not a file-system directory \(provider: Environment\)/)
+    }
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true })
   }
@@ -913,12 +979,63 @@ test('Invoke-Pm2 runs pm2 under the given PM2_HOME for that one call and restore
   }
 })
 
+test('Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed: on Windows they see a listening pipe by name without connecting to it and report still-open / closed; elsewhere always closed', async () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  // A pipe of our own, never pm2's real \\.\pipe\rpc.sock: that name is machine-wide
+  // and must not be touched by a test.
+  const pipeName = `ms2-upgrade-inplace-test-${process.pid}-${Date.now()}`
+  let server = null
+  let connections = 0
+  if (process.platform === 'win32') {
+    server = net.createServer((socket) => {
+      connections += 1
+      socket.destroy()
+    })
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(`\\\\.\\pipe\\${pipeName}`, resolve)
+    })
+  }
+  try {
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        `Write-Host ('LIVE=' + (Test-Pm2DaemonPipePresent -PipeName ${psSingleQuote(pipeName)}))`,
+        `Write-Host ('ABSENT=' + (Test-Pm2DaemonPipePresent -PipeName ${psSingleQuote(`${pipeName}-absent`)}))`,
+        `$t0 = Get-Date; $s = Wait-Pm2DaemonPipeClosed -PipeName ${psSingleQuote(pipeName)} -TimeoutSec 1; ` +
+          "Write-Host ('WAIT_LIVE=' + $s + ' ELAPSED_MS=' + [int]((Get-Date) - $t0).TotalMilliseconds)",
+        `Write-Host ('WAIT_ABSENT=' + (Wait-Pm2DaemonPipeClosed -PipeName ${psSingleQuote(`${pipeName}-absent`)} -TimeoutSec 1))`,
+      ].join('\n')
+    const result = await runPwshHarnessAsync(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    if (process.platform === 'win32') {
+      assert.match(result.stdout, /LIVE=True/)
+      assert.match(result.stdout, /ABSENT=False/)
+      const waited = result.stdout.match(/WAIT_LIVE=still-open ELAPSED_MS=(\d+)/)
+      assert.ok(waited, `a pipe that stays open must end the wait as still-open:\n${result.stdout}`)
+      assert.ok(Number(waited[1]) >= 900, `the wait must actually last its timeout, took ${waited[1]} ms`)
+      assert.match(result.stdout, /WAIT_ABSENT=closed/)
+      assert.equal(connections, 0, 'listing the pipe namespace must never connect to the daemon behind it')
+    } else {
+      // pm2's sockets are files inside PM2_HOME off Windows, and `pm2 kill` there
+      // returns only after the daemon's SIGQUIT: nothing to wait for.
+      assert.match(result.stdout, /LIVE=False/)
+      assert.match(result.stdout, /ABSENT=False/)
+      assert.match(result.stdout, /WAIT_LIVE=closed/)
+      assert.match(result.stdout, /WAIT_ABSENT=closed/)
+    }
+  } finally {
+    if (server) await new Promise((resolve) => server.close(resolve))
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
 // spawnSync blocks this process's event loop, so a node http server in the same
 // process could never answer a harness started with runPwshHarness. Anything that
 // needs the two to talk must use this async variant.
 function runPwshHarnessAsync(harness) {
   return new Promise((resolve) => {
-    const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-Command', harness])
+    const child = spawn(PWSH, ['-NoProfile', '-NonInteractive', '-Command', harness])
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => { stdout += chunk })
@@ -1060,11 +1177,49 @@ test('R59 wiring: pm2 is invoked in exactly one place (Invoke-Pm2), and every pm
   const invokeStart = scriptCodeOnly.indexOf('function Invoke-Pm2 {')
   const invokeEnd = scriptCodeOnly.indexOf('\nfunction ', invokeStart + 1)
   assert.ok(invokeStart > -1 && invokeEnd > invokeStart)
+  const invokeBody = scriptCodeOnly.slice(invokeStart, invokeEnd)
   assert.match(
-    scriptCodeOnly.slice(invokeStart, invokeEnd),
+    invokeBody,
     /&\s*\$Pm2Command @Arguments 2>&1/,
     'the single pm2 invocation must live inside Invoke-Pm2, which applies PM2_HOME around it',
   )
+  // The line R59's fix rests on, pinned statically because only Windows PowerShell 5.1
+  // can fail on it at runtime (pwsh 7.2+ never turns native stderr into an error
+  // record): under the script's global 'Stop', 5.1 turns pm2's stderr "not found" into
+  // a terminating NativeCommandError, losing the exit code and the text the fallback
+  // needs -- the exact R59 incident. It must be 'Continue', set before the call, with
+  // nothing re-assigning it in between.
+  const callIdx = invokeBody.search(/&\s*\$Pm2Command @Arguments 2>&1/)
+  const eapIdx = invokeBody.search(/\$ErrorActionPreference\s*=\s*['"]Continue['"]/i)
+  assert.ok(eapIdx > -1, "Invoke-Pm2 must set $ErrorActionPreference = 'Continue' for the pm2 call")
+  assert.ok(eapIdx < callIdx, "Invoke-Pm2 must set $ErrorActionPreference = 'Continue' BEFORE running pm2")
+  assert.doesNotMatch(
+    invokeBody.slice(eapIdx + 1, callIdx),
+    /\$ErrorActionPreference/i,
+    'nothing may re-assign $ErrorActionPreference between the Continue and the pm2 call',
+  )
+
+  // The fallback kills the empty daemon the "not found" restart left in this session,
+  // waits for pm2's machine-wide pipe to close, and only then starts the task -- in
+  // that order, with a still-open pipe refusing to start the task at all.
+  const restartStart = scriptCodeOnly.indexOf('function Restart-Pm2AppOrScheduledTask {')
+  const restartEnd = scriptCodeOnly.indexOf('\nfunction ', restartStart + 1)
+  assert.ok(restartStart > -1 && restartEnd > restartStart)
+  const restartBody = scriptCodeOnly.slice(restartStart, restartEnd)
+  const killIdx = restartBody.search(/Invoke-Pm2 -Pm2Command \$Pm2Command -Arguments @\('kill'\) -Pm2Home \$Pm2Home/)
+  const waitIdx = restartBody.indexOf('$pipeState = Wait-Pm2DaemonPipeClosed')
+  const stillOpenIdx = restartBody.search(/if \(\$pipeState -eq 'still-open'\) \{\s*throw "PM2_DAEMON_STILL_RUNNING/)
+  const startIdx = restartBody.indexOf('Start-ScheduledTask -TaskName $ScheduledTaskName')
+  assert.ok(killIdx > -1, 'the fallback must `pm2 kill` under the resolved home')
+  assert.ok(waitIdx > -1 && stillOpenIdx > -1 && startIdx > -1)
+  assert.ok(killIdx < waitIdx && waitIdx < stillOpenIdx && stillOpenIdx < startIdx, 'kill, then wait for the pipe, then refuse or start the task')
+  assert.match(
+    restartBody.slice(waitIdx, waitIdx + 60),
+    /Wait-Pm2DaemonPipeClosed\s*\r?\n/,
+    "the fallback must wait on pm2's own pipe (the default -PipeName), not a test pipe",
+  )
+  assert.match(scriptCodeOnly, /function Test-Pm2DaemonPipePresent \{\s*param\(\[string\]\$PipeName = 'rpc\.sock'\)/)
+  assert.match(scriptCodeOnly, /function Wait-Pm2DaemonPipeClosed \{[\s\S]*?\[string\]\$PipeName = 'rpc\.sock'/)
 
   const main = scriptSource.slice(scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
   const stopCalls = main.match(/Stop-Pm2App -Pm2Command[^\n]*/g) || []
@@ -1164,9 +1319,14 @@ const PM2_APP_ALIVE_MARKER = 'pm2-app-alive.marker'
 //                             "[PM2][ERROR] Process or Namespace <name> not found" on STDERR and exits 1.
 //   restartOtherError       — `restart` always fails with an error that is NOT "not found"
 //                             ("[PM2][ERROR] spawn EPERM" on stderr, exit 1).
+//   strayDaemonMarkerPath   — models the machine-wide pm2 daemon a CLI call leaves behind: a
+//                             "not found" restart (a CLI call that found no daemon) prints pm2's
+//                             "Spawning PM2 daemon" line and creates this file; `pm2 kill` deletes it.
+//                             The Start-ScheduledTask stub reads it to record whether the task's
+//                             pm2-runtime would have found (and attached to) that session-bound daemon.
 // Without pm2Behavior the stub is exactly the historical one: every call exits 0.
 function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
-  const { homeLogPath = null, restartNeedsHomeMarker = false, restartOtherError = false } = pm2Behavior
+  const { homeLogPath = null, restartNeedsHomeMarker = false, restartOtherError = false, strayDaemonMarkerPath = null } = pm2Behavior
   const binDir = path.join(liveRoot, 'node_modules', '.bin')
   fs.mkdirSync(binDir, { recursive: true })
   const stubPath = path.join(binDir, 'pm2.cmd')
@@ -1175,6 +1335,18 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
       ? `if exist "${witness.flagPath}" (echo FLAG_PRESENT %* >> "${witness.pm2FlagWitnessPath}") else (echo FLAG_ABSENT %* >> "${witness.pm2FlagWitnessPath}")`
       : 'rem no maintenance-flag witness requested'
     const homeLine = homeLogPath ? `echo HOME=[%PM2_HOME%] %* >> "${homeLogPath}"` : 'rem no pm2-home witness requested'
+    const killLines = strayDaemonMarkerPath
+      ? [
+          'if /i not "%1"=="kill" goto afterkill',
+          `if exist "${strayDaemonMarkerPath}" del /f /q "${strayDaemonMarkerPath}"`,
+          'echo [PM2] [v] PM2 Daemon Stopped',
+          'exit /b 0',
+          ':afterkill',
+        ]
+      : []
+    const spawnLines = strayDaemonMarkerPath
+      ? ['echo [PM2] Spawning PM2 daemon with pm2_home=%PM2_HOME%', `echo spawned> "${strayDaemonMarkerPath}"`]
+      : []
     const restartLines = restartOtherError
       ? ['if /i not "%1"=="restart" exit /b 0', 'echo [PM2][ERROR] spawn EPERM 1>&2', 'exit /b 1']
       : restartNeedsHomeMarker
@@ -1184,11 +1356,12 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
           `if not exist "%PM2_HOME%\\${PM2_APP_ALIVE_MARKER}" goto notfound`,
           'exit /b 0',
           ':notfound',
+          ...spawnLines,
           'echo [PM2][ERROR] Process or Namespace %2 not found 1>&2',
           'exit /b 1',
         ]
       : ['exit /b 0']
-    fs.writeFileSync(stubPath, ['@echo off', `echo %* >> "${pm2LogPath}"`, witnessLine, homeLine, ...restartLines, ''].join('\r\n'))
+    fs.writeFileSync(stubPath, ['@echo off', `echo %* >> "${pm2LogPath}"`, witnessLine, homeLine, ...killLines, ...restartLines, ''].join('\r\n'))
   } else {
     // pwsh's `&` call operator execs the file directly on non-Windows — the .cmd
     // extension is irrelevant there, only the shebang and the executable bit are.
@@ -1198,12 +1371,19 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
       ? `if [ -f "${witness.flagPath}" ]; then echo "FLAG_PRESENT $*" >> "${witness.pm2FlagWitnessPath}"; else echo "FLAG_ABSENT $*" >> "${witness.pm2FlagWitnessPath}"; fi\n`
       : ''
     const homeLine = homeLogPath ? `echo "HOME=[$PM2_HOME] $*" >> "${homeLogPath}"\n` : ''
+    const killLines = strayDaemonMarkerPath
+      ? `if [ "$1" = "kill" ]; then\n  rm -f "${strayDaemonMarkerPath}"\n  echo "[PM2] [v] PM2 Daemon Stopped"\n  exit 0\nfi\n`
+      : ''
+    const spawnLines = strayDaemonMarkerPath
+      ? ['    echo "[PM2] Spawning PM2 daemon with pm2_home=$PM2_HOME"', `    echo spawned > "${strayDaemonMarkerPath}"`]
+      : []
     const restartLines = restartOtherError
       ? 'if [ "$1" = "restart" ]; then\n  echo "[PM2][ERROR] spawn EPERM" >&2\n  exit 1\nfi\n'
       : restartNeedsHomeMarker
       ? [
           'if [ "$1" = "restart" ]; then',
           `  if [ -z "$PM2_HOME" ] || [ ! -f "$PM2_HOME/${PM2_APP_ALIVE_MARKER}" ]; then`,
+          ...spawnLines,
           '    echo "[PM2][ERROR] Process or Namespace $2 not found" >&2',
           '    exit 1',
           '  fi',
@@ -1211,7 +1391,7 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
           '',
         ].join('\n')
       : ''
-    fs.writeFileSync(stubPath, `#!/bin/sh\necho "$*" >> "${pm2LogPath}"\n${witnessLine}${homeLine}${restartLines}exit 0\n`)
+    fs.writeFileSync(stubPath, `#!/bin/sh\necho "$*" >> "${pm2LogPath}"\n${witnessLine}${homeLine}${killLines}${restartLines}exit 0\n`)
     fs.chmodSync(stubPath, 0o755)
   }
   return stubPath
@@ -1242,7 +1422,7 @@ function buildAcidArchive(root, options = {}) {
 
   const archivePath = path.join(root, `${packageName}.zip`)
   const compress = spawnSync(
-    'pwsh',
+    PWSH,
     ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
     { encoding: 'utf8' },
   )
@@ -1279,7 +1459,7 @@ function grepTreeForMarker(root, marker) {
 }
 
 function runUpgradeScript(args, envOverrides = {}) {
-  return spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath, ...args], {
+  return spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', scriptPath, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...envOverrides },
   })
@@ -1293,7 +1473,7 @@ function runUpgradeScript(args, envOverrides = {}) {
 // event loop live so the health server can actually answer.
 function runUpgradeScriptAsync(args, envOverrides = {}) {
   return new Promise((resolve) => {
-    const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath, ...args], {
+    const child = spawn(PWSH, ['-NoProfile', '-NonInteractive', '-File', scriptPath, ...args], {
       env: { ...process.env, ...envOverrides },
     })
     let stdout = ''
@@ -1604,7 +1784,7 @@ test('end-to-end (acid fixture): a mid-swap exception (before ANY assertion runs
     // ever runs). Rebuild the archive after deleting migrations/ from the stage.
     fs.rmSync(path.join(stageDir, 'packages/core-backend/migrations'), { recursive: true, force: true })
     const rezip = spawnSync(
-      'pwsh',
+      PWSH,
       ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
       { encoding: 'utf8' },
     )
@@ -1747,7 +1927,7 @@ test('end-to-end (acid fixture): the gate is raised BEFORE pm2 is stopped and th
     // site answering 503 forever.
     fs.rmSync(path.join(stageDir, 'packages/core-backend/migrations'), { recursive: true, force: true })
     const rezip = spawnSync(
-      'pwsh',
+      PWSH,
       ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
       { encoding: 'utf8' },
     )
@@ -1869,9 +2049,9 @@ function writeStubbedUpgradeWrapper(root, taskStub, upgradeParams) {
   return wrapperPath
 }
 
-function runPwshFileAsync(filePath, env) {
+function runPwshFileAsync(filePath, env, cwd = undefined) {
   return new Promise((resolve) => {
-    const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-File', filePath], { env })
+    const child = spawn(PWSH, ['-NoProfile', '-NonInteractive', '-File', filePath], { env, cwd })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => { stdout += chunk })
@@ -1880,6 +2060,12 @@ function runPwshFileAsync(filePath, env) {
   })
 }
 
+// The fallback's pipe check (Wait-Pm2DaemonPipeClosed) is REAL, not stubbed: on
+// Windows it looks at pm2's machine-wide \\.\pipe\rpc.sock. A real pm2 daemon running
+// on the same machine as these tests therefore makes every fallback test wait 15 s and
+// fail with PM2_DAEMON_STILL_RUNNING -- which is the script refusing correctly. CI
+// runners have no pm2; on a dev box, stop pm2 before running this file.
+//
 // runtimeHomeExists: <profile>/.pm2-runtime exists (half of the auto-detect signal).
 // runtimeAlive:      pm2-runtime still holds the app in that home, so a restart there
 //                    succeeds. false = the R59 shape (pm2-runtime exited after the stop).
@@ -1902,7 +2088,18 @@ function setUpR59Fixture(root, { runtimeHomeExists = true, runtimeAlive = false 
     homeLogPath: path.join(root, 'pm2-home.log'),
     taskLogPath: path.join(root, 'task-calls.log'),
     runtimeStartedMarker: path.join(root, 'runtime-started.marker'),
+    // The pm2 stub's model of the machine-wide daemon a "not found" CLI call leaves behind.
+    strayDaemonMarker: path.join(root, 'stray-pm2-daemon.marker'),
   }
+  // Scheduled-task stub options for this fixture; tests override taskPresent/startBehavior.
+  fx.taskStub = (overrides = {}) => ({
+    taskPresent: true,
+    startBehavior: 'start-runtime',
+    runtimeStartedMarker: fx.runtimeStartedMarker,
+    taskLogPath: fx.taskLogPath,
+    strayDaemonMarkerPath: fx.strayDaemonMarker,
+    ...overrides,
+  })
   fx.baseParams = {
     RootDir: liveRoot,
     EnvFile: path.join(liveRoot, 'docker/app.env'),
@@ -1918,13 +2115,13 @@ function buildR59LiveRootAndArchive(fx, backendPort = null, pm2Overrides = {}) {
     pm2LogPath: fx.pm2LogPath,
     backendPort,
     witness: fx.witness,
-    pm2Behavior: { homeLogPath: fx.homeLogPath, restartNeedsHomeMarker: true, ...pm2Overrides },
+    pm2Behavior: { homeLogPath: fx.homeLogPath, restartNeedsHomeMarker: true, strayDaemonMarkerPath: fx.strayDaemonMarker, ...pm2Overrides },
   })
   return buildAcidArchive(fx.root).archivePath
 }
 
-test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtime host starts the MetaSheet-PM2 task, the SAME health polling passes, no restore block (RED on the pre-fix script)', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtime host kills the empty daemon it just started, THEN starts the MetaSheet-PM2 task, the SAME health polling passes, no restore block (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
   // The backend stays DOWN until the scheduled task has started pm2-runtime again.
   const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
@@ -1932,16 +2129,17 @@ test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtim
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
       root,
-      { taskPresent: true, startBehavior: 'start-runtime', runtimeStartedMarker: fx.runtimeStartedMarker, taskLogPath: fx.taskLogPath },
+      fx.taskStub(),
       { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' },
     )
     const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
     const combined = result.stderr + result.stdout
     assert.equal(result.status, 0, `the R59 shape must now recover by itself.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
 
-    // Every pm2 call ran under the auto-detected pm2-runtime home.
+    // Every pm2 call ran under the auto-detected pm2-runtime home: the stop, the
+    // restart that answered "not found", and the kill of the daemon that restart left.
     const homes = readPm2HomeLog(fx.homeLogPath)
-    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart'], 'a recovered run must not reach the failure handler\'s stop')
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill'], 'a recovered run must not reach the failure handler\'s stop')
     for (const entry of homes) {
       assert.equal(entry.home, fx.runtimeHome, `pm2 ${entry.command} must run under ${fx.runtimeHome}, got [${entry.home}]`)
     }
@@ -1949,6 +2147,16 @@ test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtim
     assert.match(combined, /Process or Namespace metasheet-backend not found/)
     assert.match(combined, /PM2_RESTART_NOT_FOUND_FALLBACK/)
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), ['start MetaSheet-PM2'])
+    // ...and it started only AFTER the empty daemon was gone. With real pm2 on
+    // Windows (7.0.4, verified), a task started while that daemon lives gets a
+    // pm2-runtime that attaches to it as a client: the backend answers the health
+    // polling below, but runs under the upgrade session's daemon and dies with it.
+    assert.deepEqual(
+      readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start-saw-daemon=')),
+      ['start-saw-daemon=no'],
+      'the task must start with no pm2 daemon left behind by this session',
+    )
+    assert.match(combined, /Spawning PM2 daemon/, 'the fixture must actually model the daemon the "not found" restart leaves behind')
 
     // The SAME health polling as after a normal restart: backend-direct first while
     // the gate is up (and only after the task started it), gate down, then nginx.
@@ -1977,14 +2185,14 @@ test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtim
 })
 
 test('end-to-end (acid fixture, R59): when pm2-runtime still holds the app, stop AND restart run under the auto-detected .pm2-runtime home and the task is never started (RED on the pre-fix script)', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+  const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: true })
   const health = await startHealthServer({ flagPath: fx.witness.flagPath })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
       root,
-      { taskPresent: true, startBehavior: 'start-runtime', runtimeStartedMarker: fx.runtimeStartedMarker, taskLogPath: fx.taskLogPath },
+      fx.taskStub(),
       { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' },
     )
     const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
@@ -2003,15 +2211,15 @@ test('end-to-end (acid fixture, R59): when pm2-runtime still holds the app, stop
   }
 })
 
-test('end-to-end (acid fixture, R59): if the scheduled task cannot be started, the run still stops pm2, prints RESTORE REQUIRED (with the pm2 home and the task command) and drops the gate', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+test('end-to-end (acid fixture, R59): if the scheduled task cannot be started, the run still stops pm2, prints RESTORE REQUIRED (with the pm2 home, a pm2 kill and the task command) and drops the gate', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
   const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
       root,
-      { taskPresent: true, startBehavior: 'throw', taskLogPath: fx.taskLogPath },
+      fx.taskStub({ startBehavior: 'throw' }),
       { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
     )
     const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
@@ -2022,10 +2230,16 @@ test('end-to-end (acid fixture, R59): if the scheduled task cannot be started, t
     assert.match(combined, /RESTORE REQUIRED/)
     assert.ok(combined.includes(`$env:PM2_HOME = '${fx.runtimeHome}'`), 'the restore block must name the pm2 home the upgrade used')
     assert.ok(combined.includes("Start-ScheduledTask -TaskName 'MetaSheet-PM2'"), 'the restore block must say how to start pm2-runtime again')
+    // By hand, too, the "not found" answer leaves an empty daemon in the operator's
+    // session: the block must say to kill it BEFORE starting the task.
+    const restoreBlock = combined.slice(combined.indexOf('RESTORE REQUIRED'))
+    const restoreKillIdx = restoreBlock.search(/\n\s*pm2 kill\s*\r?\n/)
+    assert.ok(restoreKillIdx > -1, 'the restore block must print `pm2 kill`')
+    assert.ok(restoreKillIdx < restoreBlock.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2'"), '`pm2 kill` must come before Start-ScheduledTask')
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), ['start MetaSheet-PM2'])
 
     const homes = readPm2HomeLog(fx.homeLogPath)
-    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'stop'], 'the failure handler must still stop pm2')
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill', 'stop'], 'the failure handler must still stop pm2')
     for (const entry of homes) assert.equal(entry.home, fx.runtimeHome)
     assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling after a task that never started')
     assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally must drop the gate')
@@ -2036,14 +2250,14 @@ test('end-to-end (acid fixture, R59): if the scheduled task cannot be started, t
 })
 
 test('end-to-end (acid fixture, R59): if the task starts but the backend never answers, the health polling fails the run into RESTORE REQUIRED', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+  const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
   const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => false })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
       root,
-      { taskPresent: true, startBehavior: 'start-runtime', runtimeStartedMarker: fx.runtimeStartedMarker, taskLogPath: fx.taskLogPath },
+      fx.taskStub(),
       { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
     )
     const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
@@ -2054,7 +2268,7 @@ test('end-to-end (acid fixture, R59): if the task starts but the backend never a
     assert.match(combined, /BACKEND_HEALTHCHECK_FAILED/)
     assert.match(combined, /RESTORE REQUIRED/)
     assert.equal(health.requests.filter((entry) => entry.url === '/health').length, 2, 'the normal backend-direct polling must have run, attempts included')
-    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'stop'])
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill', 'stop'])
     assert.ok(!fs.existsSync(fx.witness.flagPath))
   } finally {
     health.server.close()
@@ -2063,13 +2277,13 @@ test('end-to-end (acid fixture, R59): if the task starts but the backend never a
 })
 
 test('end-to-end (acid fixture, R59): an UNMANAGED host (a stray .pm2-runtime but no scheduled task, no PM2_HOME) behaves exactly as before — no PM2_HOME injected, no task started, restart "not found" is still fatal', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+  const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeHomeExists: true, runtimeAlive: false })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx)
     const wrapper = writeStubbedUpgradeWrapper(
       root,
-      { taskPresent: false, startBehavior: 'start-runtime', runtimeStartedMarker: fx.runtimeStartedMarker, taskLogPath: fx.taskLogPath },
+      fx.taskStub({ taskPresent: false }),
       {
         ...fx.baseParams,
         PackageArchive: archivePath,
@@ -2085,10 +2299,15 @@ test('end-to-end (acid fixture, R59): an UNMANAGED host (a stray .pm2-runtime bu
     assert.match(combined, /PM2_RESTART_FAILED: exit=1/)
     assert.match(combined, /RESTORE REQUIRED/)
     const homes = readPm2HomeLog(fx.homeLogPath)
-    assert.deepEqual(homes.map((entry) => `${entry.command}@${entry.home}`), ['stop@', 'restart@', 'stop@'], 'no PM2_HOME may be injected on an unmanaged host')
+    assert.deepEqual(
+      homes.map((entry) => `${entry.command}@${entry.home}`),
+      ['stop@', 'restart@', 'stop@'],
+      'no PM2_HOME may be injected on an unmanaged host, and no daemon may be killed there',
+    )
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'no task may be started on an unmanaged host')
     assert.doesNotMatch(combined, /\$env:PM2_HOME = /)
     assert.doesNotMatch(combined, /Start-ScheduledTask -TaskName/)
+    assert.doesNotMatch(combined, /\n\s*pm2 kill\s*\r?\n/)
     assert.match(combined, /pm2 restart metasheet-backend --update-env/)
     assert.ok(!fs.existsSync(fx.witness.flagPath))
   } finally {
@@ -2097,13 +2316,13 @@ test('end-to-end (acid fixture, R59): an UNMANAGED host (a stray .pm2-runtime bu
 })
 
 test('end-to-end (acid fixture, R59): on a pm2-runtime host a restart failure that is NOT "not found" stays fatal — the task is not started', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+  const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: true })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, null, { restartOtherError: true })
     const wrapper = writeStubbedUpgradeWrapper(
       root,
-      { taskPresent: true, startBehavior: 'start-runtime', runtimeStartedMarker: fx.runtimeStartedMarker, taskLogPath: fx.taskLogPath },
+      fx.taskStub(),
       {
         ...fx.baseParams,
         PackageArchive: archivePath,
@@ -2129,7 +2348,7 @@ test('end-to-end (acid fixture, R59): on a pm2-runtime host a restart failure th
 
 for (const variant of ['parameter', 'environment']) {
   test(`end-to-end (acid fixture, R59): a PM2_HOME given by ${variant} wins over the auto-detected .pm2-runtime for every pm2 call`, async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+    const root = mkLongTempDir('ms2-upgrade-r59-')
     // .pm2-runtime + task present, but that home holds NO app: a run that let
     // auto-detection win would get "not found" and start the task.
     const fx = setUpR59Fixture(root, { runtimeHomeExists: true, runtimeAlive: false })
@@ -2145,7 +2364,7 @@ for (const variant of ['parameter', 'environment']) {
       else envOverrides.PM2_HOME = chosenHome
       const wrapper = writeStubbedUpgradeWrapper(
         root,
-        { taskPresent: true, startBehavior: 'start-runtime', runtimeStartedMarker: fx.runtimeStartedMarker, taskLogPath: fx.taskLogPath },
+        fx.taskStub(),
         params,
       )
       const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, envOverrides, variant === 'parameter' ? ['PM2_HOME'] : []))
@@ -2160,8 +2379,117 @@ for (const variant of ['parameter', 'environment']) {
   })
 }
 
+test('end-to-end (acid fixture, R59): -Pm2ScheduledTaskName \'\' disables the fallback even though a MetaSheet-PM2 task exists — restart "not found" stays fatal, the scheduler is never asked, the given -Pm2Home still applies', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  // .pm2-runtime holds no app (the R59 shape) and the default-named task EXISTS: only
+  // the empty task name stands between this run and the fallback.
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      Pm2Home: fx.runtimeHome,
+      Pm2ScheduledTaskName: '',
+      HealthUrl: 'http://127.0.0.1:1/api/health',
+      BackendHealthUrl: 'http://127.0.0.1:1/health',
+      HealthcheckAttempts: '1',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /PM2_RESTART_FAILED: exit=1 \(pm2 reports 'metasheet-backend' not found; the scheduled-task fallback is disabled\)/)
+    assert.doesNotMatch(combined, /PM2_RESTART_NOT_FOUND_FALLBACK/)
+    assert.match(combined, /RESTORE REQUIRED/)
+    assert.deepEqual(readLogLines(fx.taskLogPath), [], 'with the fallback disabled by name the scheduler must be neither queried nor started')
+    assert.deepEqual(
+      readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`),
+      [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`, `stop@${fx.runtimeHome}`],
+      'the explicit home must still apply to every pm2 call, and nothing may be killed',
+    )
+    assert.doesNotMatch(combined, /Start-ScheduledTask -TaskName/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): a non-default -Pm2ScheduledTaskName is the task that is detected, started and reported — never the default MetaSheet-PM2', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    // Only 'Custom-PM2' exists; starting any other name fails like the real cmdlet.
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskName: 'Custom-PM2' }), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      Pm2ScheduledTaskName: 'Custom-PM2',
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.match(result.stdout, /source: pm2-runtime \(\.pm2-runtime \+ scheduled task 'Custom-PM2'\)/)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), ['start Custom-PM2'])
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start-saw-daemon=')), ['start-saw-daemon=no'])
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), [
+      `stop@${fx.runtimeHome}`,
+      `restart@${fx.runtimeHome}`,
+      `kill@${fx.runtimeHome}`,
+    ])
+    assert.match(result.stdout, /backend started:\s+scheduled-task/)
+    assert.doesNotMatch(combined, /MetaSheet-PM2/, 'the default task name must not appear anywhere once another one is given')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): a RELATIVE -Pm2Home is resolved once, against the directory the script starts in — the step 6 Set-Location to RootDir must not move the restart to <RootDir>/<relative> (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeHomeExists: false })
+  // The operator starts the script from a directory that is NOT RootDir, naming the
+  // pm2 home relative to it. That directory holds the app; <RootDir>/<relative> does not.
+  const operatorCwd = path.join(root, 'operator-cwd')
+  const relativeName = 'rel-pm2-home'
+  const absoluteHome = path.join(operatorCwd, relativeName)
+  fs.mkdirSync(absoluteHome, { recursive: true })
+  fs.writeFileSync(path.join(absoluteHome, PM2_APP_ALIVE_MARKER), 'alive')
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskPresent: false }), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      Pm2Home: relativeName,
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']), operatorCwd)
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.deepEqual(
+      readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`),
+      [`stop@${absoluteHome}`, `restart@${absoluteHome}`],
+      'every pm2 call must see the ONE absolute home whose existence was checked',
+    )
+    assert.match(result.stdout, /backend started:\s+pm2-restart/)
+    assert.ok(
+      result.stdout.includes(`${absoluteHome} (source: parameter -Pm2Home)`),
+      `the report must name the absolute home:\n${result.stdout}`,
+    )
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('end-to-end (acid fixture, R59): an explicit -Pm2Home that does not exist refuses at startup, before pm2, the gate or any backup', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-r59-'))
+  const root = mkLongTempDir('ms2-upgrade-r59-')
   try {
     const fx = setUpR59Fixture(root, { runtimeHomeExists: false })
     const archivePath = buildR59LiveRootAndArchive(fx)
@@ -2253,7 +2581,7 @@ for (const [patternName, patternBody] of Object.entries(FORBIDDEN_PATTERNS)) {
       fs.writeFileSync(mutatedScriptPath, buildMutatedScript(patternBody))
 
       const result = spawnSync(
-        'pwsh',
+        PWSH,
         [
           '-NoProfile', '-NonInteractive', '-File', mutatedScriptPath,
           '-PackageArchive', archivePath,

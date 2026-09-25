@@ -38,11 +38,12 @@
        MAINTENANCE_GATE_NOT_WIRED. Diagnostic only, never blocks the upgrade —
        without it "maintenance flag: ... (removed)" would read like proof the
        window was shielded on a host where the flag is inert.
-       Every pm2 call (this stop, the step 7 restart, the failure-handler
-       stop) runs under ONE resolved PM2_HOME (Resolve-Pm2Home: -Pm2Home >
-       the PM2_HOME already in the environment > <user profile>\.pm2-runtime
-       when that directory AND the -Pm2ScheduledTaskName scheduled task both
-       exist > untouched), resolved before anything is changed.
+       Every pm2 call (this stop, the step 7 restart and its fallback kill,
+       the failure-handler stop) runs under ONE resolved, absolute PM2_HOME
+       (Resolve-Pm2Home: -Pm2Home > the PM2_HOME already in the environment
+       > <user profile>\.pm2-runtime when that directory AND the
+       -Pm2ScheduledTaskName scheduled task both exist > untouched), resolved
+       before anything is changed.
     3. Back up docker/, config/, packages/core-backend/dist, apps/web/dist,
        and plugins/ (excluding node_modules) to a timestamped folder. Prints
        the backup path.
@@ -78,7 +79,14 @@
        task exists, the script starts that task instead and runs the SAME
        health polling; only if that also fails does it reach the restore
        block. Without that task the restart failure is fatal exactly as
-       before.
+       before. Before starting the task it runs `pm2 kill`: the "not found"
+       restart found no daemon and started an empty one as a child of THIS
+       session, and on Windows every pm2 daemon listens on the one
+       machine-wide pipe \\.\pipe\rpc.sock -- left alive, it would be found by
+       the task's pm2-runtime, which then only attaches to it as a client, so
+       that session-bound daemon (not the task) would host the backend, and
+       the backend would live only as long as the upgrade session's process
+       tree.
     8. Print a final report: package name, backup path, migration exit,
        health, and the exact operator commands to run next (preflight +
        acceptance bootstrap).
@@ -160,15 +168,19 @@ param(
   #      2026-09-21;
   #   4. nothing: PM2_HOME is left exactly as it was (the pre-existing
   #      behaviour on a host that is not pm2-runtime managed).
-  # A value given here that is not an existing directory is refused before
-  # anything is touched: pm2 would silently start a fresh, empty home there.
+  # A value given here that is not an existing file-system directory is
+  # refused before anything is touched: pm2 would silently start a fresh,
+  # empty home there. A relative value (here or in PM2_HOME) is made absolute
+  # against the location the script starts in, because step 6 changes the
+  # location and pm2 resolves a relative PM2_HOME against its own cwd.
   [string]$Pm2Home = '',
 
   # The scheduled task that hosts the backend under pm2-runtime. Used twice:
   # to auto-detect the pm2 home (see -Pm2Home), and as the restart fallback --
   # when `pm2 restart` reports the app "not found" and this task exists, the
-  # task is started instead and the normal health polling decides the
-  # outcome. An empty string disables both.
+  # empty pm2 daemon that restart just started is killed, the task is started
+  # instead, and the normal health polling decides the outcome. An empty
+  # string disables both.
   [string]$Pm2ScheduledTaskName = 'MetaSheet-PM2',
 
   # The F22 tripwire manifest. Every path here is asserted to exist, as a
@@ -315,8 +327,16 @@ function Resolve-Pm2Home {
     wins without asking, and a host with no .pm2-runtime directory is never
     queried at all).
 
+    Home is always an ABSOLUTE path (or ''). A relative -Explicit or
+    -EnvValue is resolved here, against the current location -- the same one
+    the existence check uses. Main later runs `Set-Location $resolvedRoot`, a
+    native child inherits that location as its cwd, and pm2 resolves a
+    relative PM2_HOME against its cwd: left relative, the step 2 stop and the
+    step 7 restart would talk to two different directories.
+
     Throws PM2_HOME_NOT_FOUND when -Explicit names a directory that does not
-    exist.
+    exist, or a container that is not a file-system directory (HKCU:\...,
+    Env:\ -- both pass Test-Path -PathType Container).
   #>
   param(
     [string]$Explicit = '',
@@ -330,11 +350,21 @@ function Resolve-Pm2Home {
     if (-not (Test-Path -LiteralPath $explicitHome -PathType Container)) {
       throw "PM2_HOME_NOT_FOUND: -Pm2Home '$explicitHome' is not an existing directory. pm2 would silently create a fresh, empty home there and find no app in it."
     }
-    return [pscustomobject]@{ Home = $explicitHome; Source = 'parameter -Pm2Home'; ScheduledTaskPresent = $null }
+    $resolvedExplicit = Resolve-Path -LiteralPath $explicitHome
+    if ($resolvedExplicit.Provider.Name -ne 'FileSystem') {
+      throw "PM2_HOME_NOT_FOUND: -Pm2Home '$explicitHome' is not a file-system directory (provider: $($resolvedExplicit.Provider.Name))."
+    }
+    return [pscustomobject]@{ Home = $resolvedExplicit.ProviderPath; Source = 'parameter -Pm2Home'; ScheduledTaskPresent = $null }
   }
 
   if (-not [string]::IsNullOrWhiteSpace($EnvValue)) {
-    return [pscustomobject]@{ Home = $EnvValue; Source = 'environment PM2_HOME'; ScheduledTaskPresent = $null }
+    # Not required to exist (pm2 has always been free to create it); only made
+    # absolute, against the current file-system location.
+    $envHome = $EnvValue
+    if (-not [System.IO.Path]::IsPathRooted($envHome)) {
+      $envHome = Join-Path (Get-Location -PSProvider FileSystem).ProviderPath $envHome
+    }
+    return [pscustomobject]@{ Home = $envHome; Source = 'environment PM2_HOME'; ScheduledTaskPresent = $null }
   }
 
   if ((-not [string]::IsNullOrWhiteSpace($UserProfileDir)) -and (-not [string]::IsNullOrWhiteSpace($ScheduledTaskName))) {
@@ -429,21 +459,94 @@ function Test-Pm2ProcessNotFound {
   return ($Output -match '(?i)\bnot found\b')
 }
 
+function Test-Pm2DaemonPipePresent {
+  <#
+    Windows only: $true while something listens on pm2's RPC pipe, $false
+    when nothing does, $null when the pipe namespace cannot be listed. pm2
+    (paths.js) uses the SAME pipe, \\.\pipe\rpc.sock, for every PM2_HOME on a
+    Windows machine, so this sees any pm2 daemon on the host, including a
+    pm2-runtime's in-process one. Listing the pipe namespace does not connect
+    to anything. Always $false off Windows: pm2's sockets there are files
+    inside PM2_HOME, and `pm2 kill` returns only after the daemon's SIGQUIT.
+  #>
+  param([string]$PipeName = 'rpc.sock')
+
+  if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    return $false
+  }
+  try {
+    $suffix = '\' + $PipeName
+    foreach ($pipe in [System.IO.Directory]::GetFiles('\\.\pipe\')) {
+      if ($pipe.EndsWith($suffix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+      }
+    }
+    return $false
+  } catch {
+    return $null
+  }
+}
+
+function Wait-Pm2DaemonPipeClosed {
+  <#
+    Polls Test-Pm2DaemonPipePresent for up to $TimeoutSec seconds. Returns
+    'closed' (nothing listens), 'still-open' (something still listened when
+    the time ran out), or 'unknown' (the pipe namespace could not be listed).
+  #>
+  param(
+    [int]$TimeoutSec = 15,
+    [string]$PipeName = 'rpc.sock'
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ($true) {
+    $present = Test-Pm2DaemonPipePresent -PipeName $PipeName
+    if ($null -eq $present) {
+      return 'unknown'
+    }
+    if (-not $present) {
+      return 'closed'
+    }
+    if ((Get-Date) -ge $deadline) {
+      return 'still-open'
+    }
+    Start-Sleep -Milliseconds 250
+  }
+}
+
 function Restart-Pm2AppOrScheduledTask {
   <#
     `pm2 restart <name> --update-env` under $Pm2Home. Returns 'pm2-restart'
     when that succeeds.
 
     R59 fallback: when the restart fails AND pm2 says the app is "not found"
-    AND the $ScheduledTaskName task exists, starts that task (the
-    pm2-runtime host's own launcher) and returns 'scheduled-task'. Whether
-    the backend really came back is NOT decided here: the caller's health
-    polling decides, exactly as after a successful restart.
+    AND the $ScheduledTaskName task exists, runs `pm2 kill`, waits until no
+    pm2 daemon holds the pipe, starts that task (the pm2-runtime host's own
+    launcher) and returns 'scheduled-task'. Whether the backend really came
+    back is NOT decided here: the caller's health polling decides, exactly as
+    after a successful restart.
+
+    Why the kill (verified with real pm2 7.0.4 on Windows PowerShell 5.1): a
+    pm2 CLI call that finds no daemon starts one, as a child of THIS session,
+    so the "not found" restart has just left an empty daemon on the
+    machine-wide pipe. A pm2-runtime that finds a daemon there does not host
+    the app itself: it attaches as a client and the daemon hosts it. Without
+    the kill the backend would pass the health polling and then be tied to
+    the upgrade session: whenever that session's process tree is torn down
+    (reproduced with a kill-on-close job object), the backend goes with it
+    while the task still shows Running. With the kill the task's pm2-runtime
+    starts in no-daemon mode and hosts the app itself. `pm2 kill` stops
+    whichever daemon holds the pipe, with every app in it; on a pm2-runtime
+    host whose restart answers "not found", that daemon does not hold the
+    backend.
 
     Throws PM2_RESTART_FAILED on any other restart failure, or on "not found"
-    with no such task (the pre-existing outcome), and
-    PM2_SCHEDULED_TASK_START_FAILED when the task cannot be started. Either
-    way the caller's mutation-window handler prints the restore block.
+    with no such task (the pre-existing outcome), PM2_DAEMON_STILL_RUNNING
+    when a daemon still holds the pipe after the kill (starting the task then
+    would recreate exactly the session-bound backend above), and
+    PM2_SCHEDULED_TASK_START_FAILED when the task cannot be started. Every
+    one of them reaches the caller's mutation-window handler, which prints
+    the restore block.
   #>
   param(
     [Parameter(Mandatory = $true)][string]$Pm2Command,
@@ -467,6 +570,18 @@ function Restart-Pm2AppOrScheduledTask {
   }
 
   Write-Info "PM2_RESTART_NOT_FOUND_FALLBACK: pm2 reports '$Name' not found; scheduled task '$ScheduledTaskName' exists, so this is a pm2-runtime host whose runtime exited after the stop. Starting the task instead."
+  Write-Info "Removing the empty pm2 daemon the restart above started in this session, so the task's pm2-runtime hosts the backend itself (pm2 kill)."
+  $kill = Invoke-Pm2 -Pm2Command $Pm2Command -Arguments @('kill') -Pm2Home $Pm2Home
+  if ($kill.ExitCode -ne 0) {
+    Write-Info "pm2 kill reported exit=$($kill.ExitCode) (the pipe check below decides whether a daemon is still there)"
+  }
+  $pipeState = Wait-Pm2DaemonPipeClosed
+  if ($pipeState -eq 'still-open') {
+    throw "PM2_DAEMON_STILL_RUNNING: a pm2 daemon still listens on \\.\pipe\rpc.sock after 'pm2 kill'; starting '$ScheduledTaskName' now would make its pm2-runtime attach to that daemon instead of hosting '$Name' itself. The task was NOT started."
+  }
+  if ($pipeState -eq 'unknown') {
+    Write-Info "pm2 pipe check unavailable (the pipe namespace could not be listed); relying on 'pm2 kill' having returned."
+  }
   try {
     Start-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction Stop
   } catch {
@@ -1338,7 +1453,8 @@ function Write-RestoreBlock {
     [string]$Pm2Home = '',
     # Non-empty only when the pm2-runtime scheduled task exists on this host:
     # after a stop, pm2-runtime has exited and `pm2 restart` answers "not
-    # found", so the block also prints how to start the task.
+    # found", so the block also prints how to start the task (after a
+    # `pm2 kill` of the empty daemon that answer came from).
     [string]$ScheduledTaskName = ''
   )
 
@@ -1365,7 +1481,10 @@ function Write-RestoreBlock {
   }
   Write-Host ("  pm2 restart {0} --update-env" -f $Pm2AppName)
   if (-not [string]::IsNullOrWhiteSpace($ScheduledTaskName)) {
-    Write-Host '  # pm2-runtime host: if pm2 answers "not found", pm2-runtime has exited; start it with:'
+    Write-Host '  # pm2-runtime host: if pm2 answers "not found", pm2-runtime has exited and that pm2 call'
+    Write-Host '  # started an empty pm2 daemon in THIS session. Kill it first, or the task''s pm2-runtime'
+    Write-Host '  # attaches to it and the backend lives only as long as this session. Then start the task:'
+    Write-Host '  pm2 kill'
     Write-Host ("  Start-ScheduledTask -TaskName '{0}'" -f $ScheduledTaskName)
   }
   Write-Host '=========================================================================='

@@ -29,10 +29,11 @@
 **补充根因（依据 pm2 master 分支源码，并在开发机上用 pm2 7.0.4 + Windows PowerShell 5.1 实测；演示机上的 pm2 版本未核对）**：单设 `PM2_HOME` 救不了 restart。pm2-runtime 默认开 auto-exit：在线应用数为 0 时，约 8–11 秒后连同自己的 daemon 一起退出（`lib/binaries/Runtime4Docker.js` 的 `autoExitWorker`；实测 7.9 秒和 10.6 秒）。实测里，就在 pm2-runtime 自己的 `.pm2-runtime` home 下 restart，照样 exit=1、not found；这时再起一个 pm2-runtime（也就是计划任务做的事），1.4 秒内应用 online。另外，Windows 上 pm2 CLI 走固定命名管道 `\\.\pipe\rpc.sock`，与 `PM2_HOME` 无关（`paths.js`），所以不管在哪个 home 里 stop，都会停掉 pm2-runtime 上的应用。备份、换代码加迁移远超 8 秒，到 restart 时 daemon 已不在；不管在哪个 home 里 restart，都只会拉起一个空 daemon，报 not found。托管场景下，拉起路径只能是计划任务。
 
 **下次上机改法**（升级脚本已内置，见 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1` 的 `-Pm2Home` / `-Pm2ScheduledTaskName`）：
-- **不再需要**在 wrapper 里预设 `$env:PM2_HOME`，照常调用即可。脚本启动时先解析出一个 pm2 home，stop、restart 和失败处理里的 stop 这三次 pm2 调用都用它。优先级：`-Pm2Home` 参数 > 进程里已有的环境变量 `PM2_HOME` > 自动探测（`<用户目录>\.pm2-runtime` 存在，**且**有名为 `-Pm2ScheduledTaskName`（默认 `MetaSheet-PM2`）的计划任务）> 不设。升级脚本输出的第一行 `pm2 home: ... (source: ...)` 会写明用的是哪个，最终报告里也有。
-- restart 报 `not found`，且该计划任务存在时，脚本打印 `PM2_RESTART_NOT_FOUND_FALLBACK`，然后 `Start-ScheduledTask`，再走原来的 health 轮询（先直连后端，撤维护门，再经 nginx）。最终报告 `backend started:` 一行写的是 `pm2-restart` 或 `scheduled-task`。演示机上**预期看到的是 `scheduled-task`**。
-- 以下情况仍按原逻辑进 `RESTORE REQUIRED`：计划任务起不来（`PM2_SCHEDULED_TASK_START_FAILED`）、起来了但 health 不通过（`BACKEND_HEALTHCHECK_FAILED`）、restart 失败但原因不是 not found、没有该计划任务。托管主机上，restore 块会多打两行：`$env:PM2_HOME = '...'` 和 `Start-ScheduledTask -TaskName 'MetaSheet-PM2'`。这时仍按上面三步向前修复，不要回滚（迁移只增不删；r58 代码也能跑在新表结构上，但没必要回滚）。
-- 显式传的 `-Pm2Home` 如果不是已存在的目录，脚本启动时直接拒绝（`PM2_HOME_NOT_FOUND`）：这时还没碰 pm2、没挂维护门、也没做备份。传 `-Pm2ScheduledTaskName ''` 会同时关掉自动探测和计划任务回退。
+- **不再需要**在 wrapper 里预设 `$env:PM2_HOME`，照常调用即可。脚本启动时先解析出一个 pm2 home，本次运行的所有 pm2 调用（stop、restart、回退里的 kill、失败处理里的 stop）都用它。优先级：`-Pm2Home` 参数 > 进程里已有的环境变量 `PM2_HOME` > 自动探测（`<用户目录>\.pm2-runtime` 存在，**且**有名为 `-Pm2ScheduledTaskName`（默认 `MetaSheet-PM2`）的计划任务）> 不设。相对路径在启动时按当前目录转成绝对路径（第 6 步会切到 RootDir，pm2 按自己的 cwd 解析相对 home）。升级脚本输出的第一行 `pm2 home: ... (source: ...)` 会写明用的是哪个，最终报告里也有。
+- restart 报 `not found`，且该计划任务存在时，脚本打印 `PM2_RESTART_NOT_FOUND_FALLBACK`，先 `pm2 kill`，等 pm2 的命名管道关闭，再 `Start-ScheduledTask`，然后走原来的 health 轮询（先直连后端，撤维护门，再经 nginx）。最终报告 `backend started:` 一行写的是 `pm2-restart` 或 `scheduled-task`。演示机上**预期看到的是 `scheduled-task`**。
+- **为什么要先 kill**（开发机上 pm2 7.0.4 + PS 5.1 实测，用 kill-on-close 的 job object 模拟远程会话结束）：报 not found 的那次 restart 找不到 daemon，会在**升级会话里**拉起一个空 daemon。Windows 上所有 pm2 daemon 共用 `\\.\pipe\rpc.sock`，计划任务起的 pm2-runtime 发现管道上已有 daemon，就只作为客户端连上去，应用实际挂在这个空 daemon 下。health 当场能过，但会话的进程树一结束，后端就跟着没了，计划任务却仍显示 Running。先 kill 之后，pm2-runtime 日志是 `Launching in no daemon mode`，应用的父进程是 pm2-runtime 本身，会话结束后 health 仍 200。kill 后管道 15 秒内仍未关闭时，脚本报 `PM2_DAEMON_STILL_RUNNING`，**不**启动计划任务。演示机的远程会话断开时是否真的连带结束进程树，没有在演示机上核对过。先 kill 之后，开发机实测后端挂在计划任务起的 pm2-runtime 下、不在升级会话的进程树里，所以这一点不影响后端是否存活；上机后按第 3 节第 5 步核对一次。
+- 以下情况仍按原逻辑进 `RESTORE REQUIRED`：计划任务起不来（`PM2_SCHEDULED_TASK_START_FAILED`）、kill 后仍有 daemon（`PM2_DAEMON_STILL_RUNNING`）、起来了但 health 不通过（`BACKEND_HEALTHCHECK_FAILED`）、restart 失败但原因不是 not found、没有该计划任务。托管主机上，restore 块会多打三行：`$env:PM2_HOME = '...'`、`pm2 kill`、`Start-ScheduledTask -TaskName 'MetaSheet-PM2'`，手工执行时**先 `pm2 kill` 再启动任务**，理由同上。这时仍按上面三步向前修复，不要回滚（迁移只增不删；r58 代码也能跑在新表结构上，但没必要回滚）。
+- 显式传的 `-Pm2Home` 如果不是已存在的文件系统目录（比如 `HKCU:\...`），脚本启动时直接拒绝（`PM2_HOME_NOT_FOUND`）：这时还没碰 pm2、没挂维护门、也没做备份。传 `-Pm2ScheduledTaskName ''` 会同时关掉自动探测和计划任务回退。
 
 ## 3. 上机手册（在能连演示机的运维机上执行）
 
@@ -40,9 +41,9 @@
 
 1. **准备**：`sed 's/r59/r60/g'` 生成 `r60-build-and-ship.sh` 与 `upgrade-222-r60.ps1`；`multitable-onprem-package-upgrade-inplace.ps1` **从 `scripts/ops/` 重新复制并加 BOM**（PS 5.1 需要 BOM）。旧拷贝没有 pm2-runtime 探测，不能再用。wrapper 里**不要**再加 `PM2_HOME`（见第 2 节「下次上机改法」）。
 2. **标记**：只加本批 diff 里真实存在的标识符或文件哈希；新迁移按名字数 `kysely_migration`。带反斜杠的内容用文件写、别用 heredoc（会折叠成控制字符），写完按字节扫控制字符。
-3. **只读预检**：审计分区（当月+下月）、最近迁移、磁盘、`pm2 list`（手工执行时先设 `$env:PM2_HOME='<用户目录>\.pm2-runtime'`），另查一次 `Get-ScheduledTask -TaskName 'MetaSheet-PM2'` 确认计划任务存在。升级脚本靠它探测托管方式、在 restart not found 后回退拉起。
+3. **只读预检**：审计分区（当月+下月）、最近迁移、磁盘、`pm2 list`（手工执行时先设 `$env:PM2_HOME='<用户目录>\.pm2-runtime'`），另查一次 `Get-ScheduledTask -TaskName 'MetaSheet-PM2'` 确认计划任务存在。升级脚本靠它探测托管方式、在 restart not found 后回退拉起。若 `pm2 list` 输出里出现 `Spawning PM2 daemon`，说明 pm2-runtime 此刻没在跑，这条命令刚在本会话里拉起了一个空 daemon：先停下来查后端为什么没在跑，别在这个状态下升级。
 4. **打包上机**：`bash r60-build-and-ship.sh all`（CI 打包 → 校验 sha256 / gitSha / base path `/assets/` → scp → 远端 sha 复核 → wrapper：pg_dump 备份 → 就地升级含 migrate → health → 标记 → 前端 smoke → 定时试拉 → pm2）。
-5. **判定**：日志 `FullyQualifiedErrorId` 计数必须 0；新标记全 True；web smoke PASS；维护标志不存在。
+5. **判定**：日志 `FullyQualifiedErrorId` 计数必须 0；新标记全 True；web smoke PASS；维护标志不存在。`backend started: scheduled-task` 时，再只读核对一次后端挂在谁下面：`Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Select-Object ProcessId, ParentProcessId, CommandLine`，后端进程的 `ParentProcessId` 应指向命令行含 `pm2-runtime` 的进程，而不是命令行含 `Daemon.js` 的 pm2 daemon。然后结束升级会话，重新连上再测一次 health。
 6. **回滚**：升级脚本打印的 `RESTORE REQUIRED` 块给出备份路径；数据库用 `pre-rNN-*.dump` 恢复（仅在迁移本身出错时才需要）。
 
 远端 shell 约定：PowerShell 5.1，不认 `&&`；脚本一律 scp 后 `-File` 运行；wrapper 保持纯 ASCII。
