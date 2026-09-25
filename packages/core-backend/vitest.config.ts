@@ -83,6 +83,15 @@ export default defineConfig({
       // skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-can-decide-current-node.db.test.ts',
+      // todo-center-design-lock v2.14 §3.0/§5 — the shared "pending" query production-path gate.
+      // Runs under its OWN vitest.todo-center-pending-gate.config.ts (RBAC_BYPASS=false,
+      // RBAC_TOKEN_TRUST=false, PRODUCT_MODE=plm-workbench — the OPPOSITE of this default config's
+      // setup.integration.ts, which trusts token claims), so it must never be collected here. The
+      // filename itself (no `.test.ts`/`.spec.ts` suffix) already keeps it out of this config's
+      // implicit include glob; this entry is a redundant, harmless second guard. Wired as a WHOLE
+      // FILE into .github/workflows/approval-realdb-todo-center-pending-query.yml, which arms
+      // EXPECT_DB=1 (plugin-tests.yml is left byte-identical — see that workflow's own header).
+      'tests/todo-center-pending-gate/todo-center-pending-gate.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
