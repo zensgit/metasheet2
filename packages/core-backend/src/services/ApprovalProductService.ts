@@ -13521,10 +13521,15 @@ export class ApprovalProductService {
     })
 
     // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
-    // 暴露整个 metadata。」 The REFRESH half of the cancel-round outcome: a requester who reloads
-    // `GET /api/approvals/:id` after the decision reads the SAME two values the history surface
-    // whitelists, off the durable audit row that committed with the cancellation itself. Before
-    // this, the numbers existed only on the one action response that produced them (F-5).
+    // 暴露整个 metadata。」 The REFRESH half of the cancel-round outcome: a reader who reloads
+    // `GET /api/approvals/:id` after the decision AND clears that route's `rbacGuard('approvals',
+    // 'read')` plus the per-instance participant fence — today the admin bypass, or a holder of
+    // `approvals:read` (a code the permission catalogue does not list at this head, with zero
+    // grants) — reads the SAME two values the history surface whitelists, off the durable audit
+    // row that committed with the cancellation itself. A plain requester WITHOUT such a grant gets
+    // 403 at the guard today; whether that requester can ever read it is the owner-open mount-side /
+    // grant decision, not settled here. Before this, the numbers existed only on the one action
+    // response that produced them (F-5).
     //
     // ⚠️ THIS IS THE ACTION-RESPONSE BUILDER, NOT the `GET /api/approvals/:id` handler — that route
     // calls `ApprovalBridgeService.getApproval`, a SECOND implementation (measured: patching only
