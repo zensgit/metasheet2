@@ -123,24 +123,35 @@ v3b §5.2 只列了后者;前者是栈中把 `rejectIfCancelRound` 放在席位�
 
 v3b §5.2.1 实测:`expectedVersion` 只由 legacy 两扇门写入,而两扇门在派发前都用 `rejectIfCancelRound` 拒绝撤销轮实例,
 所以「撤销轮实例 ∧ `expectedVersion` 已设」在 `dispatchAction` 内**在今天的两个写入点下不成立**,(a)/(b) 两序行为等价;
-由 v3b 动作 3 守卫钉住(守卫口径见其文件头:它钉的是「传给 rider 入口的对象字面量里名为 `expectedVersion` 的属性」,不是一切数据流)。
-本分支把这件事做成**被测性质**:`tests/unit/approval-legacy-decision-version-precondition-sites.test.ts`:
+由 v3b 动作 3 守卫钉住。**守卫口径**(与其文件头一致,本节不扩写):它钉的是「`packages/core-backend/src` 下所有 `.ts` 里
+`dispatchAction` 调用实参中、在同一文件内能静态解析到的对象字面量上名为 `expectedVersion` 的属性」。声明后再赋值
+(`let r = {}; r = build(req)`、`Object.assign(r, …)`)、拼接键名(`r['expected' + 'Version'] = …`)、非字面量成员名的调用
+(`x[name](…)`)、在别的文件构造后传入的对象**不在口径内**,由代码评审负责;守卫是「已声明的人口 × 已声明的性质」的静态普查,
+绿只表示这两者成立。本分支把这件事做成**被测性质**:`tests/unit/approval-legacy-decision-version-precondition-sites.test.ts`:
 
-1. 写入点普查用 TypeScript 编译器 API 解析 `routes/approvals.ts`:枚举每个 rider 入口调用(任何接收者的 `.dispatchAction(…)` 与
-   `settleLegacyDecisionThroughSharedPath(…)`)的请求实参对象字面量里名为 `expectedVersion` 的属性,**与拼写无关**(冒号、简写、
-   字符串键、计算属性键、方法名);展开静态解析且 fail-closed(内联对象字面量 / 对象字面量条件式 / `&&` `||` `??` / 同文件内可解析
-   的标识符初始值展开其键,其余一律计为「未判定写入点」而红,除非在文件头 `ACCEPTED_UNRESOLVED_SPREADS` 具名登记 —— 今天为空);
-   请求实参不是对象字面量同样未判定。第二张网:全文件里 `expectedVersion` 的每一个标识符 / 字符串字面量 mention,除普查到的属性与
-   helper 自己的两处(形参类型成员、`precondition.expectedVersion` 读取)外一律红。结果:handler 内 **恰 2 处**(两扇门传给 helper
-   的 precondition 对象),`/actions` 内 **0 处**,handler 外 **恰 1 处**(helper 的转发点)。**任何第三个写入点即红**(复活路径 1);
-   守卫自带负控(今天的真实源码)与正控(在内存里往 `/actions` 拼入简写 / 冒号 / 字符串键 / 计算键 / 同文件 const 展开 / 条件展开各一,
-   断言报出第三写入点;不可解析展开、参数绑定名展开、非字面量计算键、非字面量请求实参各一,断言报「未判定」);
-2. 每扇 legacy 门内三件的**次序**:`resolveLegacyDecisionSeat` < `rejectIfCancelRound` < 写入点(F4 (i) 的静态钉);任一门少了出口
+1. **人口(发现式,不是清单)**:用 TypeScript 编译器 API 解析 `packages/core-backend/src` 下每一个 `.ts`,凡被调用成员名为
+   `dispatchAction` 的调用(`x.dispatchAction(…)` 与 `x['dispatchAction'](…)`,任何接收者)即为普查调用点;routes 文件内的
+   `settleLegacyDecisionThroughSharedPath(…)` 也是(其 `precondition` 实参就是门的写入点)。人口自证:发现到的调用文件与调用点
+   打印并断言 ≥ 下界(下界取今天的读数;读数只记在验证 MD §3.3),且今天已知的三个调用文件必须在其中 —— 新增调用方会被纳入普查
+   而不是漏在外面,扫描器什么都没找到即红。
+2. **性质**:每个普查调用点的请求实参(以及其它本身是内联对象字面量的实参)按对象字面量读,名为 `expectedVersion` 的属性**与拼写
+   无关**(冒号、简写、字符串键、计算属性键、方法名);展开只在同一文件内按**初始值**解析(内联对象字面量 / 对象字面量条件式 /
+   `&&` `||` `??` / 同文件作用域链上标识符的声明初始值),解析不到的请求实参或展开(调用结果、成员访问、导入名或参数名、非字面量
+   计算键)计为「未判定」并报出 —— 负控断言今天为 0,除非在 `ACCEPTED_UNRESOLVED_SPREADS` 具名登记(今天为空)。第二张网只在
+   routes 文件:全文件里 `expectedVersion` 的每一个标识符 / 字符串字面量 mention,除普查到的属性与 helper 自己的两处(形参类型成员、
+   `precondition.expectedVersion` 读取)外一律红。结果:handler 内 **恰 2 处**(两扇门传给 helper 的 precondition 对象),`/actions`
+   内 **0 处**,handler 外 **恰 1 处**(helper 的转发点),routes 以外的调用文件 **0 处**。口径内的第三写入点即红(复活路径 1);
+   守卫自带负控(今天的真实源码树)与正控:在内存里往 `/actions` 拼入简写 / 冒号 / 字符串键 / 计算键 / 同文件 const 展开 / 条件展开
+   各一,断言报出;不可解析展开、参数绑定名展开、非字面量计算键、非字面量请求实参各一,断言报「未判定」;往 routes 以外的两个调用
+   文件 —— 钉钉卡片包装器 `services/ApprovalCardDeliveryAction.ts`(点号与 `['dispatchAction']` 两种写法)与售后桥
+   `services/AfterSalesApprovalBridgeService.ts`(`as` 断言后的字面量)—— 各拼入 `expectedVersion: 1`,断言由普查本身报出;
+3. 每扇 legacy 门内三件的**次序**:`resolveLegacyDecisionSeat` < `rejectIfCancelRound` < 写入点(F4 (i) 的静态钉);任一门少了出口
    守卫或把它挪到派发之后即红(复活路径 2);
-3. `dispatchAction` 内:`guardAttendanceCentralMutationOrThrow` < `request.expectedVersion` 读取点(恰一行)<
+4. `dispatchAction` 内:`guardAttendanceCentralMutationOrThrow` < `request.expectedVersion` 读取点(恰一行)<
    `assertCancelRoundActionAllowed`(F4 (ii) 的静态钉);对调即红。
 
-三条 mutation(加第三写入点 / 删 `/reject` 的出口守卫 / 对调 F4 (ii) 序)的读数在验证 MD §3。对调 F4 (ii) 序之后再跑真库四件
+三条 mutation(加第三写入点 / 删 `/reject` 的出口守卫 / 对调 F4 (ii) 序)的读数在验证 MD §3;人口 mutation(守卫人口改回单文件 ⇒
+人口自证与人口正控红)与磁盘上往 routes 以外的调用文件加写入点的读数在验证 MD §3.3。对调 F4 (ii) 序之后再跑真库四件
 (creation / outlet-guards / RC 自带 / H-5 parity)**读数不变** —— 这就是 v3b §5.2.1「今天不可达」的实证,也是为什么裁决落地
 只能靠静态守卫承重。
 
