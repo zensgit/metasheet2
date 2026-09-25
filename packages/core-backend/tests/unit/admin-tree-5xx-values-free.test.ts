@@ -12,11 +12,17 @@
  *
  *   1. REAL EXPRESS PROBE (usePinnedServer + request(pinned.url()), never request(app) — #4154). The
  *      tree is mounted exactly as index.ts mounts it (`app.use('/api/admin', initAdminRoutes(deps))`),
- *      so the sub-routers are reached through their real mount, not imported on their own. For every
- *      one of the 32 branches this change redacts, an admin caller triggers a memory-level double that
- *      throws a driver-shaped error; the body must carry the stable code + fixed string and none of
- *      the fixture's fragments, the double must have been reached (so the 500 is that branch and not
- *      something else), and the original text must have reached logger.error().
+ *      so the sub-routers are reached through their real mount, not imported on their own, and
+ *      index.ts's global error middleware (`correlationErrorHandler`, installed after all routes) is
+ *      mounted after it in its non-production mode — the mode in which it copies an unhandled error's
+ *      text into the body's `message`. For every one of the 32 catch branches this change redacts,
+ *      plus the 4 synchronous handlers that had no catch at all (GET /safety/status, POST
+ *      /safety/enable, POST /safety/disable, GET /plugins/health — their throw used to reach that
+ *      middleware), an admin caller triggers a memory-level double that throws a driver-shaped
+ *      error; the body must carry the stable code + fixed string and none of the fixture's
+ *      fragments, the double must have been reached (so the 500 is that branch and not something
+ *      else), the original text must have reached logger.error(), and the global middleware must not
+ *      have been reached.
  *   2. GATE ORDER: a non-admin caller still gets 403 before the handler runs — the throwing double is
  *      never called. (POST /health/check is ungated BY DESIGN — a permanent exemption registered in
  *      admin-routes-write-endpoints-structural-gate.test.ts — so for it the probe asserts the stronger
@@ -147,9 +153,12 @@ import { snapshotService } from '../../src/services/SnapshotService'
 import { protectionRuleService } from '../../src/services/ProtectionRuleService'
 import { dlqService } from '../../src/services/DeadLetterQueueService'
 import { getSafetyGuard } from '../../src/guards/SafetyGuard'
+import { createSafetyStatusEndpoint } from '../../src/guards/middleware'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { getRateLimiter } from '../../src/integration/rate-limiting'
 import { getHealthAggregator } from '../../src/services/HealthAggregatorService'
+import { pluginHealthService } from '../../src/services/PluginHealthService'
+import { correlationErrorHandler } from '../../src/middleware/correlation'
 import { cache } from '../../src/cache'
 import { Logger } from '../../src/core/logger'
 
@@ -401,11 +410,48 @@ const CASES: RouteCase[] = [
   },
 ]
 
+/**
+ * The four SYNCHRONOUS handlers in admin-routes.ts that used to have no try/catch at all. A throw there
+ * skipped every responder: Express 4 caught it and forwarded it to index.ts's global error middleware,
+ * `correlationErrorHandler` (installed by installGlobalErrorHandler() AFTER the /api/admin mount),
+ * which answers `{ success: false, error: 'Internal Server Error', message, correlationId }` with
+ * `message` set to the error's own text whenever NODE_ENV !== 'production' (middleware/correlation.ts).
+ * The probe app mounts that same middleware in the same order, in its non-production mode, so a
+ * handler that loses its catch is answered exactly as a dev / test / staging server would answer it.
+ * Each double throws SYNCHRONOUSLY (mockImplementation, not mockRejectedValue): that is the path.
+ */
+const SYNC_CASES: RouteCase[] = [
+  {
+    label: 'GET /safety/status (sync handler)', method: 'get', path: '/api/admin/safety/status',
+    expect: 'read', gate: 'requireAdminRole',
+    arm: () => [vi.spyOn(getSafetyGuard(), 'isEnabled').mockImplementation(() => { throw leakyError() })],
+  },
+  {
+    label: 'POST /safety/enable (sync handler)', method: 'post', path: '/api/admin/safety/enable',
+    body: {}, expect: 'write', gate: 'requireAdminRole',
+    arm: () => [vi.spyOn(getSafetyGuard(), 'updateConfig').mockImplementation(() => { throw leakyError() })],
+  },
+  {
+    label: 'POST /safety/disable (sync handler)', method: 'post', path: '/api/admin/safety/disable',
+    body: {}, expect: 'write', gate: 'requireAdminRole',
+    arm: () => [vi.spyOn(getSafetyGuard(), 'updateConfig').mockImplementation(() => { throw leakyError() })],
+  },
+  {
+    label: 'GET /plugins/health (sync handler)', method: 'get', path: '/api/admin/plugins/health',
+    expect: 'read', gate: 'requireAdminRole',
+    arm: () => [vi.spyOn(pluginHealthService, 'getAllPluginHealth').mockImplementation(() => { throw leakyError() })],
+  },
+]
+
+const ALL_CASES: RouteCase[] = [...CASES, ...SYNC_CASES]
+
 // ── app ───────────────────────────────────────────────────────────────────────
 
 let currentUser: typeof ADMIN_USER | typeof NON_ADMIN_USER = ADMIN_USER
 let currentRouter: express.Router
 let errorLog: ReturnType<typeof vi.spyOn>
+/** The global error middleware's own logger: a call means a failure escaped the admin tree's catches. */
+const globalErrorLog = { error: vi.fn() }
 
 function buildApp(): Express {
   const app = express()
@@ -416,6 +462,9 @@ function buildApp(): Express {
   })
   currentRouter = initAdminRoutes(injected as never)
   app.use('/api/admin', currentRouter)
+  // index.ts order: the routes (setupMiddleware) first, then installGlobalErrorHandler() in startOnce().
+  // Non-production mode, i.e. the mode in which it echoes an unhandled error's text in `message`.
+  app.use(correlationErrorHandler(globalErrorLog, 'development'))
   return app
 }
 
@@ -501,13 +550,20 @@ function loggedOriginal(): boolean {
 // ── 1. real express probe: admin caller, every redacted branch ────────────────
 
 describe('admin caller: every 500 branch in the /api/admin tree is values-free', () => {
-  it('the probe covers 32 branches: 22 writes in admin-routes.ts, 4 in snapshot-labels.ts, 6 in protection-rules.ts', () => {
+  it('the probe covers 36 branches: 22 writes + 4 synchronous handlers in admin-routes.ts, 4 in snapshot-labels.ts, 6 in protection-rules.ts', () => {
     expect(CASES).toHaveLength(32)
     expect(CASES.filter((c) => c.label.includes('(snapshot-labels)'))).toHaveLength(4)
     expect(CASES.filter((c) => c.label.includes('(protection-rules)'))).toHaveLength(6)
+    expect(SYNC_CASES.map((c) => c.label)).toEqual([
+      'GET /safety/status (sync handler)',
+      'POST /safety/enable (sync handler)',
+      'POST /safety/disable (sync handler)',
+      'GET /plugins/health (sync handler)',
+    ])
+    expect(ALL_CASES).toHaveLength(36)
   })
 
-  for (const c of CASES) {
+  for (const c of ALL_CASES) {
     it(`${c.label} -> 500 ${c.expect === 'read' ? 'ADMIN_READ_FAILED' : 'ADMIN_WRITE_FAILED'}, no driver text, original logged`, async () => {
       if (c.gate === 'unsafe-local') vi.stubEnv('ALLOW_UNSAFE_ADMIN', 'true')
       const doubles = c.arm()
@@ -520,6 +576,8 @@ describe('admin caller: every 500 branch in the /api/admin tree is values-free',
       for (const [key, value] of Object.entries(c.extra ?? {})) expect(res.body[key]).toBe(value)
       // ...and the original text went to the server log.
       expect(loggedOriginal()).toBe(true)
+      // The route's own catch answered: nothing escaped to the global error middleware.
+      expect(globalErrorLog.error).not.toHaveBeenCalled()
     })
   }
 
@@ -540,7 +598,7 @@ describe('admin caller: every 500 branch in the /api/admin tree is values-free',
 // ── 2. gate order: a non-admin never reaches the throwing double ──────────────
 
 describe('non-admin caller: the gate still answers first and the handler is never reached', () => {
-  for (const c of CASES) {
+  for (const c of ALL_CASES) {
     if (c.gate === 'none-by-design') {
       it(`${c.label} is ungated by design — a non-admin reaching its 500 gets the redacted body`, async () => {
         vi.mocked(isAdmin).mockResolvedValue(false)
@@ -677,6 +735,56 @@ describe('mutation control: the probe fails on the pre-change implementation', (
       }
     )
   })
+
+  /** A sync handler with no catch: its throw reaches the global middleware, which echoes it in `message`. */
+  function expectGlobalHandlerEcho(res: { status: number; body: Record<string, unknown> }, kind: 'read' | 'write'): void {
+    expect(res.status).toBe(500)
+    expect(res.body.error).toBe('Internal Server Error')
+    expect(res.body.message).toBe(LEAKY)
+    expect(globalErrorLog.error).toHaveBeenCalledTimes(1)
+    expect(() => expectRedacted(res.status, res.body, kind)).toThrow()
+  }
+
+  it('sync handler: GET /safety/status restored to the bare createSafetyStatusEndpoint() is caught', async () => {
+    const layer = findRouteLayer((currentRouter as unknown as { stack: RouteLayer[] }).stack, '/safety/status', 'get')
+    await withSwappedHandler(layer, createSafetyStatusEndpoint(), async () => {
+      vi.spyOn(getSafetyGuard(), 'isEnabled').mockImplementation(() => { throw leakyError() })
+      const res = await request(pinned.url()).get('/api/admin/safety/status')
+      expectGlobalHandlerEcho(res as never, 'read')
+    })
+  })
+
+  it('sync handler: POST /safety/enable restored to its catch-less body is caught', async () => {
+    const layer = findRouteLayer((currentRouter as unknown as { stack: RouteLayer[] }).stack, '/safety/enable', 'post')
+    await withSwappedHandler(
+      layer,
+      (_req, res) => {
+        getSafetyGuard().updateConfig({ enabled: true })
+        res.json({ success: true, message: 'SafetyGuard enabled' })
+      },
+      async () => {
+        vi.spyOn(getSafetyGuard(), 'updateConfig').mockImplementation(() => { throw leakyError() })
+        const res = await request(pinned.url()).post('/api/admin/safety/enable').send({})
+        expectGlobalHandlerEcho(res as never, 'write')
+      }
+    )
+  })
+
+  it('sync handler: GET /plugins/health restored to its catch-less body is caught', async () => {
+    const layer = findRouteLayer((currentRouter as unknown as { stack: RouteLayer[] }).stack, '/plugins/health', 'get')
+    await withSwappedHandler(
+      layer,
+      (_req, res) => {
+        const health = pluginHealthService.getAllPluginHealth()
+        res.json({ success: true, count: health.length, health })
+      },
+      async () => {
+        vi.spyOn(pluginHealthService, 'getAllPluginHealth').mockImplementation(() => { throw leakyError() })
+        const res = await request(pinned.url()).get('/api/admin/plugins/health')
+        expectGlobalHandlerEcho(res as never, 'read')
+      }
+    )
+  })
 })
 
 // ── 3. structural guard over the mounted tree ─────────────────────────────────
@@ -804,13 +912,13 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(offenders).toEqual([])
   })
 
-  it('is not vacuous: it sees the 5xx sinks and all 45 responder calls (13 + 22 + 4 + 6)', () => {
+  it('is not vacuous: it sees the 5xx sinks and all 49 responder calls (13 + 22 + 4 sync in admin-routes.ts, 4, 6)', () => {
     const scans = treeFiles().map((rel) => scanResponseErrorEcho(rel, readRoute(rel)))
     const sinks = scans.flatMap((s) => s.sinks)
     const calls = scans.flatMap((s) => s.responderCalls)
     // The 503 "service not available" bodies and the envelope's own 500 are real sinks it inspects.
     expect(sinks.filter((s) => s.kind === 'status-chain').length).toBeGreaterThan(0)
-    expect(calls.filter((c) => c.file === 'admin-routes.ts').length).toBeGreaterThanOrEqual(35)
+    expect(calls.filter((c) => c.file === 'admin-routes.ts').length).toBeGreaterThanOrEqual(39)
     expect(calls.filter((c) => c.file === 'snapshot-labels.ts').length).toBeGreaterThanOrEqual(4)
     expect(calls.filter((c) => c.file === 'protection-rules.ts').length).toBeGreaterThanOrEqual(6)
     // Every responder call sits in a catch, so every mutation below has a caught binding to echo.
@@ -978,6 +1086,6 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
       }
     }
     expect(missed).toEqual([])
-    expect(total).toBeGreaterThanOrEqual(45 * shapes.length)
+    expect(total).toBeGreaterThanOrEqual(49 * shapes.length)
   })
 })

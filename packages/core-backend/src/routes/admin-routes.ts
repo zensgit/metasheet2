@@ -114,13 +114,27 @@ const { sendAdminReadFailure, sendAdminWriteFailure } = createAdminFailureRespon
  * false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20).
  *
  * The guard is added HERE, at the single mount point, not inside createSafetyStatusEndpoint():
- * admin-routes.ts:79 is the factory's only call site in the tree (guards/middleware.ts:180 is the
- * definition, the rest are docs), so gating at the mount is zero-impact for other callers and keeps
- * the factory's contract — a synchronous (req, res) => void that reads no request input — intact.
- * That contract is what tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts:951 rests
- * on; folding an async guard into the factory would have changed it for no benefit.
+ * this file is the factory's only call site in the tree (guards/middleware.ts is the definition, the
+ * rest are docs), so gating at the mount is zero-impact for other callers and keeps the factory's
+ * contract — a synchronous (req, res) => void that reads no request input — intact.
+ *
+ * The failure envelope is added here too, for the same reason. The factory's handler has no catch, and
+ * a synchronous throw in an Express 4 handler is forwarded to index.ts's global error middleware
+ * (correlationErrorHandler, installed after this router's mount), which puts the error's own text in
+ * the body's `message` whenever NODE_ENV !== 'production'. Wrapping the factory's handler here sends
+ * that failure through sendAdminReadFailure like every other GET in the tree. The wrapper is inline,
+ * so the handler is readable and the sheet-liveness closed world
+ * (tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts) no longer carries this
+ * registration as an opaque one.
  */
-router.get('/safety/status', requireAdminRole(), createSafetyStatusEndpoint());
+const safetyStatusEndpoint = createSafetyStatusEndpoint();
+router.get('/safety/status', requireAdminRole(), (req: Request, res: Response) => {
+  try {
+    safetyStatusEndpoint(req, res);
+  } catch (error) {
+    sendAdminReadFailure(res, 'Failed to read SafetyGuard status', error);
+  }
+});
 
 /**
  * POST /api/admin/safety/confirm
@@ -184,13 +198,19 @@ router.post(
   // 先过 requireAdminRole()（fail-closed：非 admin 403 ADMIN_REQUIRED，RBAC 挂了 503）。
   requireAdminRole(),
   (req: Request, res: Response) => {
-    const guard = getSafetyGuard();
-    guard.updateConfig({ enabled: true });
-    logger.info('SafetyGuard enabled via admin API', {
-      context: 'AdminRoutes',
-      initiator: req.ip
-    });
-    res.json({ success: true, message: 'SafetyGuard enabled' });
+    // Synchronous handler: without this catch a throw would reach the global error middleware, which
+    // echoes its text outside production (see GET /safety/status above).
+    try {
+      const guard = getSafetyGuard();
+      guard.updateConfig({ enabled: true });
+      logger.info('SafetyGuard enabled via admin API', {
+        context: 'AdminRoutes',
+        initiator: req.ip
+      });
+      res.json({ success: true, message: 'SafetyGuard enabled' });
+    } catch (error) {
+      sendAdminWriteFailure(res, 'Failed to enable SafetyGuard', error);
+    }
   }
 );
 
@@ -211,17 +231,22 @@ router.post(
     getDetails: () => ({ action: 'disable_safety_guard' })
   }),
   (req: Request, res: Response) => {
-    const guard = getSafetyGuard();
-    guard.updateConfig({ enabled: false });
-    logger.warn('SafetyGuard disabled via admin API', {
-      context: 'AdminRoutes',
-      initiator: req.ip
-    });
-    res.json({
-      success: true,
-      message: 'SafetyGuard disabled',
-      warning: 'Safety checks are now bypassed'
-    });
+    // Synchronous handler: see POST /safety/enable.
+    try {
+      const guard = getSafetyGuard();
+      guard.updateConfig({ enabled: false });
+      logger.warn('SafetyGuard disabled via admin API', {
+        context: 'AdminRoutes',
+        initiator: req.ip
+      });
+      res.json({
+        success: true,
+        message: 'SafetyGuard disabled',
+        warning: 'Safety checks are now bypassed'
+      });
+    } catch (error) {
+      sendAdminWriteFailure(res, 'Failed to disable SafetyGuard', error);
+    }
   }
 );
 
@@ -433,12 +458,17 @@ const upsertPluginConfig = async (
  * Get health status of all plugins
  */
 router.get('/plugins/health', requireAdminRole(), (req: Request, res: Response) => {
-  const health = pluginHealthService.getAllPluginHealth();
-  res.json({
-    success: true,
-    count: health.length,
-    health
-  });
+  // Synchronous handler: see GET /safety/status for why the catch is needed here.
+  try {
+    const health = pluginHealthService.getAllPluginHealth();
+    res.json({
+      success: true,
+      count: health.length,
+      health
+    });
+  } catch (error) {
+    sendAdminReadFailure(res, 'Failed to get plugin health', error);
+  }
 });
 
 /**
