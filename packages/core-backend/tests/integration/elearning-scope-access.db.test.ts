@@ -6,7 +6,6 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
-import { COURSE_VERSIONS_STATE_TRIGGER } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import {
   resolveElearningCourseAccess,
 } from '../../src/services/elearning-course-access'
@@ -661,19 +660,26 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
-      await client.query(
-        `ALTER TABLE elearning_course_versions DISABLE TRIGGER ${COURSE_VERSIONS_STATE_TRIGGER}`,
-      )
-      await client.query(
-        `UPDATE elearning_course_versions version
-            SET status = 'published', updated_at = clock_timestamp()
-           FROM ${fixtureTable} fixture
-          WHERE version.org_id = $1 AND version.id = fixture.version_id`,
-        [orgId],
-      )
-      await client.query(
-        `ALTER TABLE elearning_course_versions ENABLE TRIGGER ${COURSE_VERSIONS_STATE_TRIGGER}`,
-      )
+      // The publish guard requires a video and an exam per version. This fixture
+      // only needs published rows so the catalog scan can see them. ALTER TABLE
+      // DISABLE TRIGGER takes ShareRowExclusiveLock, which waits on autovacuum's
+      // ShareUpdateExclusiveLock (including VacuumTruncate). That wait does not
+      // resolve inside the 30s budget: passing runs of this test are ~1.3–1.7s,
+      // and the failures stop at exactly 30000ms. Replica role skips user triggers
+      // for this update only and does not lock the table. It is restored before
+      // scope rows are inserted, so those foreign keys still fire.
+      await client.query(`SET LOCAL session_replication_role = replica`)
+      try {
+        await client.query(
+          `UPDATE elearning_course_versions version
+              SET status = 'published', updated_at = clock_timestamp()
+             FROM ${fixtureTable} fixture
+            WHERE version.org_id = $1 AND version.id = fixture.version_id`,
+          [orgId],
+        )
+      } finally {
+        await client.query(`SET LOCAL session_replication_role = origin`)
+      }
       await client.query(
         `INSERT INTO elearning_scopes (id, org_id, created_by)
          SELECT scope_id, $1, $2 FROM ${fixtureTable}`,
