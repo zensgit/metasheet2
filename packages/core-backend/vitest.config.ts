@@ -83,6 +83,15 @@ export default defineConfig({
       // skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-can-decide-current-node.db.test.ts',
+      // todo-center-design-lock v2.14 §3.0/§5 — the shared "pending" query production-path gate.
+      // Runs under its OWN vitest.todo-center-pending-gate.config.ts (RBAC_BYPASS=false,
+      // RBAC_TOKEN_TRUST=false, PRODUCT_MODE=plm-workbench — the OPPOSITE of this default config's
+      // setup.integration.ts, which trusts token claims), so it must never be collected here. The
+      // filename itself (no `.test.ts`/`.spec.ts` suffix) already keeps it out of this config's
+      // implicit include glob; this entry is a redundant, harmless second guard. Wired as a WHOLE
+      // FILE into .github/workflows/approval-realdb-todo-center-pending-query.yml, which arms
+      // EXPECT_DB=1 (plugin-tests.yml is left byte-identical — see that workflow's own header).
+      'tests/todo-center-pending-gate/todo-center-pending-gate.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
@@ -96,6 +105,16 @@ export default defineConfig({
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-history-guard.yml lane, which arms EXPECT_DB=1.
       'tests/integration/approval-history-authz-guard.db.test.ts',
+      // approvals:read permission-catalogue registration (zzzz20260920130000): grant-and-gate
+      // real-DB acceptance for the finding that no migration had ever inserted this code into
+      // `permissions`, making it ungrantable through the product grant endpoint
+      // (routes/permissions.ts:156-164 400s on an unregistered code). approvals:write/act are
+      // deliberately out of scope for this migration (see the migration's own file header).
+      // Requires real PostgreSQL and the real HTTP register/grant/pending-count round trip.
+      // Excluded here so `describeIfDatabase` cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-permission-catalogue.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-permission-catalogue-grant.db.test.ts',
       // Lock-4 F4-A (node-level auto_approve, 审批类型) real-DB acceptance — gates A-1 (server door),
       // A-2 (audit-row sentinel + byte-identical absent-config control), A-3 (dedupeHistoricalApprover
       // exemption + the disclosed mergeAdjacentApprover-suppression side effect). DB-independent logic
