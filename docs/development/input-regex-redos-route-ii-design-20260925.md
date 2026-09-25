@@ -1,6 +1,6 @@
 # Input-regex length gate and shape warning — design (slice H-3, route (ii))
 
-**Status: PROPOSED.** Date: 2026-09-25. Base: `origin/main` @ `e046a21c0a0110fbe22ca765852f1e053d90c0cb`.
+**Status: PROPOSED.** Date: 2026-09-25 (round 2 appended the same day, §8). Base: `origin/main` @ `e046a21c0a0110fbe22ca765852f1e053d90c0cb`.
 Branch: `fix/input-regex-redos-route-ii`. Candidate only — not merged, no PR, no DDL, no new dependency.
 
 ## 0. Scope and relation to the earlier branch
@@ -12,8 +12,11 @@ shared event loop. That branch also carried a measurement-based guard (a timing 
 benign-input cost and boundary refusals were judged a design cost rather than a defect. The
 decision for this slice is **route (ii)**:
 
-1. a **pure length gate** at every caller-supplied-regex entry point, with limits taken from
-   constraints the product already enforces;
+1. a **pure length gate** at the caller-supplied-regex entry points named in §1 — the two
+   confirmed sites and the two sibling copies — with limits taken from constraints the product
+   already enforces. The other `new RegExp` sinks the census left as UNVERIFIED / owner-review
+   (approval form-field `pattern`, plugin config, gateway, sandbox, …) are not touched by this
+   branch and are not claimed;
 2. a **compile-time shape warning** that only logs — never refuses, never throws;
 3. the two confirmed sites (formula engine, field-validation pattern rule) treated
    individually, each with its own refusal semantics, timing regression and equivalence pins.
@@ -26,13 +29,13 @@ ladder or any of its constants. The measurement-based route is not pursued furth
 
 | # | site | pre-image sink | post-image | how the gate is reached |
 |---|---|---|---|---|
-| L1 | formula engine `SUBSTITUTE` | `packages/core-backend/src/formula/engine.ts:183` | `:187-191` | `runUserRegex(old, 'g', text, replace)` |
-| L1 | formula engine `REGEXMATCH` | `engine.ts:326` | `:337-342` | `runUserRegex(pattern, undefined, text, test)` |
-| L1 | formula engine `REGEXEXTRACT` | `engine.ts:329` | `:343-350` | `runUserRegex(pattern, undefined, text, match)` |
-| L1 | formula engine `REGEXREPLACE` | `engine.ts:332` | `:351-357` | `runUserRegex(pattern, 'g', text, replace)` |
+| L1 | formula engine `SUBSTITUTE` | `packages/core-backend/src/formula/engine.ts:183` | `:193-201` | `runUserRegex(old, 'g', text, replace)`; a refusal is thrown (§2.3) |
+| L1 | formula engine `REGEXMATCH` | `engine.ts:326` | `:347-352` | `runUserRegex(pattern, undefined, text, test)` |
+| L1 | formula engine `REGEXEXTRACT` | `engine.ts:329` | `:353-360` | `runUserRegex(pattern, undefined, text, match)` |
+| L1 | formula engine `REGEXREPLACE` | `engine.ts:332` | `:361-367` | `runUserRegex(pattern, 'g', text, replace)` |
 | L2 | field-validation `pattern` rule | `packages/core-backend/src/multitable/field-validation-engine.ts:103` | `evaluatePatternRule :114-129`, `case 'pattern' :187-197`, message `:217` | `runUserRegex(regex, flags, value, test)` |
-| L3 | integration pipeline validator | `plugins/plugin-integration-core/lib/validator.cjs:97` | constants `:26-38`, gate `:177-185` | inline copy of the gate, after `compilePattern` |
-| FE | public form field pattern | `apps/web/src/views/FormView.vue:650` | `:651-658` + `apps/web/src/utils/userRegexLimits.ts` | inline copy of the gate, before `new RegExp` |
+| L3 | integration pipeline validator | `plugins/plugin-integration-core/lib/validator.cjs:97` | constants `:26-38`, `compilePattern :110-133` (returns the caller's string length), gate `:182-191` | inline copy of the gate, after `compilePattern` |
+| FE | public form field pattern | `apps/web/src/views/FormView.vue:650` | `apps/web/src/views/formViewValidation.ts:34-40` (`validateFormField`, which `FormView.vue:468,647` delegates to) + `apps/web/src/utils/userRegexLimits.ts` | inline copy of the gate, before `new RegExp` |
 
 The shared module is `packages/core-backend/src/formula/regex-safety.ts`. L1 and L2 import it.
 L3 and FE cannot (no import edge between the roots), so they carry a copy of the two constants
@@ -70,13 +73,13 @@ A length equal to the limit is inside the limit.
 
 ### 2.3 What each site does with a refusal
 
-| site | over-limit (pattern or subject) | invalid pattern (unchanged) |
+| site | over-limit (pattern or subject) | invalid pattern |
 |---|---|---|
-| L1 `REGEXMATCH` / `REGEXEXTRACT` / `REGEXREPLACE` | `#ERROR!` | `#ERROR!` (as before) |
-| L1 `SUBSTITUTE` | `#ERROR!` | `#ERROR!` — before, the throw was caught one level up by `calculate` and produced the same sentinel |
+| L1 `REGEXMATCH` / `REGEXEXTRACT` / `REGEXREPLACE` | `#ERROR!` **returned as a string** — a wrapping function (`LEN`, `IFERROR`, …) receives it as an ordinary value | `#ERROR!` returned as a string (as before; `=LEN(REGEXREPLACE("abc","[","x"))` is `7` on the base and here — pinned) |
+| L1 `SUBSTITUTE` | **thrown** → `calculate` catches it and the **whole formula** is `#ERROR!`, however deeply the call is nested (`=LEN(SUBSTITUTE(…))` and `=IFERROR(SUBSTITUTE(…),"fb")` are both `#ERROR!`; `IFERROR` cannot trap it because the throw happens while its arguments are evaluated — the engine's existing semantics for a throw). Round 1 returned the sentinel as a string here, which changed the nested answer; round 2 restored the throw (§8) | thrown (as before: the bare `new RegExp` threw) → whole formula `#ERROR!`, nested included — pinned with the two nestings above, pre-image = post-image |
 | L2 `pattern` rule | `valid:false`, rule `pattern`, **message names the limit** (`describeUserRegexRefusal`), and this message takes precedence over a custom `rule.message` because a custom message describes a mismatch, not a refusal | `valid:false` with the format message (as before) |
-| L3 pipeline validator | error code `PATTERN_NOT_EVALUATED` with `details.reason` / `length` / `limit`; `INVALID_RULE` keeps precedence (the gate runs after `compilePattern`, so at this one site the pattern limit bounds the match, not the compilation) | `INVALID_RULE` (as before) |
-| FE form | a field error: over-length value → "不能超过 N 个字符"; over-length pattern → "格式规则过长，无法校验" | `new RegExp` throws (as before) |
+| L3 pipeline validator | error code `PATTERN_NOT_EVALUATED` with `details.reason` / `length` / `limit`, where `length` is the length of the **caller's string** (round 2; round 1 measured `RegExp#source.length`, which re-escapes `/` and line breaks and so refused, at the limit, a pattern the other two copies accept); a rule that carries a `RegExp` instance has no string to measure and falls back to `source`. `INVALID_RULE` keeps precedence (the gate runs after `compilePattern`, so at this one site the pattern limit bounds the match, not the compilation) | `INVALID_RULE` (as before) |
+| FE form (`validateFormField`) | a field error: over-length value → "不能超过 N 个字符"; over-length pattern → "格式规则过长，无法校验" | `new RegExp` throws (as before) |
 
 The L2 message rule is the one semantic choice in this table that is not forced by the gate
 itself; it follows the reviewed predecessor branch and is a one-line change if the owner
@@ -135,9 +138,10 @@ because the claim under test is "same answer", not "bounded cost"; its non-degen
 distinct patterns, both verdicts) is asserted.
 
 Also unchanged: the formula engine's string-literal parser, `SUBSTITUTE`'s treatment of its
-second argument as a pattern, the default and custom messages for a format mismatch, the
-`INVALID_RULE` code at L3, and the order in which an explicit `maxLength` rule reports before a
-`pattern` rule.
+second argument as a pattern, the way a refused `SUBSTITUTE` reaches the caller (a throw, so the
+whole formula is `#ERROR!` — round 2, §8), the default and custom messages for a format mismatch,
+the `INVALID_RULE` code at L3, and the order in which an explicit `maxLength` rule reports before
+a `pattern` rule.
 
 ## 5. The two confirmed sites — what "site-specific" could and could not mean here
 
@@ -195,3 +199,17 @@ a metric.
 3. §6.2: whether the two limits should be announced to field/pipeline administrators before
    this lands, given the explicit-rule population cannot be counted from the code.
 4. §6.3: whether a refusal counter is wanted (not in this slice).
+
+## 8. Round 2 (2026-09-25, after the first gate review)
+
+Scope of this round: only the findings on the implemented part that need no owner choice. The
+route-level questions (§5 (b)–(d) and the V8 flag option the gate review added; the §7 items on
+message precedence and announcement) are **not** touched — none of (b)–(e) is implemented, no
+limit value changed, no notification added.
+
+| finding | disposition | where |
+|---|---|---|
+| P2-1 `SUBSTITUTE`'s invalid-pattern answer changed in a nested position (round 1 returned the sentinel as a string; `=LEN(SUBSTITUTE("abc","[","x"))` went from `#ERROR!` to `7`) | fixed, option (i): a refused `SUBSTITUTE` **throws** — invalid pattern as before, over-limit too — so the whole formula is `#ERROR!` at any nesting depth; §2.3 rewritten accordingly (the "unchanged / same sentinel" wording was wrong for round 1 and is gone) | `engine.ts:193-201`; nested pins for `LEN` and `IFERROR`, invalid and over-limit, plus the `REGEX*` contrast |
+| P3-1 the form's gate wiring had no test | fixed: `validateField` extracted from `FormView.vue` into `apps/web/src/views/formViewValidation.ts` (`validateFormField`, pure); pinned from `apps/web/tests/formViewValidation.spec.ts` and, so a required lane sees it, from the backend parity file. The view's one-line delegation is covered by `vue-tsc` only (no mount — `@vue/test-utils` is not a dependency of `apps/web`) | §1 FE row |
+| P3-2 the plugin copy measured `RegExp#source.length` | fixed: `compilePattern` returns the caller's string length; `source` only for a `RegExp` instance. Parity file replays one `/`-bearing pattern exactly at the limit through all three copies and the form's caller | §2.3 L3 row |
+| P3-3 two over-strong sentences | fixed: §0 item 1 names the sites instead of "every entry point"; the module comment in `regex-safety.ts` now states the new-refusal populations of §6.2 instead of "not refused here". The commit message of `d55a31be9` cannot be edited; the verification MD records that its "Every place…" sentence is overstated | §0, `regex-safety.ts:13-19` |
