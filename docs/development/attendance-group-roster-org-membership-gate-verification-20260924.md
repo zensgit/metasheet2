@@ -215,3 +215,15 @@ SELECT 'attendance_schedule_group_members', m.org_id, m.user_id, m.schedule_grou
 ## 8. 口径
 
 合成 id（`member-user-2`、`inactive-user`、`other-org-user`、`missing-user`、`not-in-this-org`）。无主机、口令、authorityCode。
+
+## 9. Token tenant when the selector is absent or blank
+
+`getOrgId` returns `'default'` when the selector is `""` (empty string is not skipped by `??`, then the trim check falls through to `DEFAULT_ORG_ID`). Import and integration handlers do not call it.
+
+| Check | Test |
+|---|---|
+| Every import/integration handler has no `getOrgId(req)` and binds the authenticated org | `keeps every import and integration handler off getOrgId` |
+| prepare, legacy `POST /import`, and `integrations/:id/sync` with no selector use `authenticatedTenantId` | `prepare, legacy import, and integration sync use the token tenant when no org selector is sent` |
+| `orgId=""` query, body, or `x-org-id` stays on that tenant; with no token the same selector is 403 and does not query `'default'` | `an empty-string org selector stays on the token tenant` |
+
+The token-only user is `{ id: 'admin-1' }` plus `authenticatedTenantId: 'org-tenant'`, and the same routes are repeated with `user.orgId: ''`. SQL parameters include `org-tenant` and do not include `'default'`.

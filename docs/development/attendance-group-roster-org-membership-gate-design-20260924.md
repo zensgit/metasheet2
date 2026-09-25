@@ -196,6 +196,8 @@ W4 冻结计划仍不重算组是否存在。`ensure_member` 在执行前条件�
 
 `withAttendanceImportPermission` 在权限码之后调用 `resolveAttendanceImportActor`。没有已认证组织是 403 `FORBIDDEN` “Authenticated organization not found”。body / query / `x-org-id` 与已认证组织不一致是 404 `NOT_FOUND` “Organization not found”，处理函数不跑。处理函数用 `req.attendanceImportAccess.orgId`，不再调用 `getOrgId(req)`。
 
+没有选择器，以及选择器是空字符串或只含空白时，不把选择器当成另一个组织，也不回落到 `'default'`。`getOrgId` 对空字符串选择器会落到 `DEFAULT_ORG_ID`（`'default'`）；导入链不用它。已认证组织按 `user.orgId`、`user.workspaceId`、`req.authenticatedTenantId` 取第一个去空白后非空的值。空字符串 claim 会跳过，所以它不会挡住后面的 token 租户。JWT 写入 `tenantId` / `authenticatedTenantId`，不写 `user.orgId`。这种 token、且请求里没有组织选择器时，`POST /api/attendance/import/prepare`、legacy `POST /api/attendance/import`、`POST /api/attendance/integrations/:id/sync` 使用 token 租户。
+
 改过的导入链入口：
 
 - `GET /api/attendance/import/jobs/:id`

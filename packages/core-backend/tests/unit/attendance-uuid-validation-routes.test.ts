@@ -5615,5 +5615,123 @@ describe('attendance UUID route validation', () => {
         expect(sql, entry.key).not.toContain('attendance_import_batches')
       }
     })
+
+    function captureImportQueries(db: { query: { mockImplementation: (fn: (sql: string, params?: unknown[]) => Promise<unknown[]>) => void } }) {
+      const calls: Array<{ sql: string; params: unknown[] }> = []
+      db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql: String(sql), params: Array.isArray(params) ? [...params] : [] })
+        return []
+      })
+      return calls
+    }
+
+    function expectTokenTenant(calls: Array<{ params: unknown[] }>, label: string) {
+      const params = calls.flatMap((call) => call.params)
+      expect(params, label).toContain('org-tenant')
+      expect(params, label).not.toContain('default')
+    }
+
+    const legacyRows = {
+      ruleSetId: '00000000-0000-4000-8000-0000000009aa',
+      rows: [{ userId: 'worker-1', workDate: '2026-06-10', fields: {} }],
+    }
+
+    it('prepare, legacy import, and integration sync use the token tenant when no org selector is sent', async () => {
+      const { db, routes } = await createHarness('true')
+      const calls = captureImportQueries(db)
+      const tokenOnly = { id: 'admin-1' }
+      const blankOrgClaim = { id: 'admin-1', orgId: '' }
+      const cases: Array<{ label: string; key: string; params?: Record<string, string>; body?: unknown; user: Record<string, unknown> }> = [
+        { label: 'prepare absent org claim', key: 'POST /api/attendance/import/prepare', user: tokenOnly },
+        { label: 'prepare blank org claim', key: 'POST /api/attendance/import/prepare', user: blankOrgClaim },
+        { label: 'legacy import absent org claim', key: 'POST /api/attendance/import', body: legacyRows, user: tokenOnly },
+        { label: 'legacy import blank org claim', key: 'POST /api/attendance/import', body: legacyRows, user: blankOrgClaim },
+        {
+          label: 'integration sync absent org claim',
+          key: 'POST /api/attendance/integrations/:id/sync',
+          params: { id: integrationId },
+          body: { dryRun: true },
+          user: tokenOnly,
+        },
+        {
+          label: 'integration sync blank org claim',
+          key: 'POST /api/attendance/integrations/:id/sync',
+          params: { id: integrationId },
+          body: { dryRun: true },
+          user: blankOrgClaim,
+        },
+      ]
+      for (const entry of cases) {
+        calls.length = 0
+        const res = await invokeRoute(routes, entry.key, {
+          params: entry.params,
+          body: entry.body,
+          user: entry.user,
+          authenticatedTenantId: 'org-tenant',
+        })
+        expect(res.body, entry.label).not.toMatchObject({
+          error: { message: 'Authenticated organization not found' },
+        })
+        expect(res.body, entry.label).not.toMatchObject({
+          error: { message: 'Organization not found' },
+        })
+        expectTokenTenant(calls, entry.label)
+        if (entry.key.endsWith('/prepare')) expect(res.statusCode, entry.label).toBe(200)
+      }
+    })
+
+    it('an empty-string org selector stays on the token tenant', async () => {
+      const { db, routes } = await createHarness('true')
+      const calls = captureImportQueries(db)
+      const user = { id: 'admin-1' }
+      const selectors: Array<{ label: string; query?: Record<string, unknown>; body?: Record<string, unknown>; headers?: Record<string, unknown> }> = [
+        { label: 'query', query: { orgId: '' } },
+        { label: 'body', body: { orgId: '' } },
+        { label: 'header', headers: { 'x-org-id': '' } },
+      ]
+      const routesUnderTest: Array<{ key: string; params?: Record<string, string>; body?: Record<string, unknown> }> = [
+        { key: 'POST /api/attendance/import/prepare' },
+        { key: 'POST /api/attendance/import', body: legacyRows },
+        {
+          key: 'POST /api/attendance/integrations/:id/sync',
+          params: { id: integrationId },
+          body: { dryRun: true },
+        },
+      ]
+      for (const route of routesUnderTest) {
+        for (const selector of selectors) {
+          calls.length = 0
+          const label = `${route.key} ${selector.label}`
+          const res = await invokeRoute(routes, route.key, {
+            params: route.params,
+            query: selector.query,
+            body: { ...(route.body ?? {}), ...(selector.body ?? {}) },
+            headers: selector.headers,
+            user,
+            authenticatedTenantId: 'org-tenant',
+          })
+          expect(res.body, label).not.toMatchObject({
+            error: { message: 'Organization not found' },
+          })
+          expect(res.body, label).not.toMatchObject({
+            error: { message: 'Authenticated organization not found' },
+          })
+          expectTokenTenant(calls, label)
+          if (route.key.endsWith('/prepare')) expect(res.statusCode, label).toBe(200)
+        }
+      }
+
+      calls.length = 0
+      const unbound = await invokeRoute(routes, 'POST /api/attendance/import/prepare', {
+        query: { orgId: '' },
+        user,
+      })
+      expect(unbound.statusCode).toBe(403)
+      expect(unbound.body).toMatchObject({
+        ok: false,
+        error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' },
+      })
+      expect(calls).toEqual([])
+    })
   })
 })

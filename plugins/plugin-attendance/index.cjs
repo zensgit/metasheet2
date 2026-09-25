@@ -6497,9 +6497,13 @@ function getOrgId(req) {
 
 function getAuthenticatedOrgId(req) {
   const user = req.user
-  const raw = user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId
-  if (typeof raw === 'string' && raw.trim().length > 0) return raw
-  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  // Blank claims are absent. `??` would keep `user.orgId === ''` and hide
+  // `authenticatedTenantId`, and getOrgId would then fall through to 'default'.
+  const candidates = [user?.orgId, user?.workspaceId, req.authenticatedTenantId]
+  for (const raw of candidates) {
+    if (typeof raw === 'string' && raw.trim().length > 0) return raw
+    if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  }
   return null
 }
 
