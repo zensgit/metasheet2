@@ -4318,7 +4318,24 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
     return dto.id
   }
 
-  /** Both durable surfaces, read with the requester's token, asserted against ONE expected outcome. */
+  /**
+   * Both durable surfaces, read with `requesterToken`, asserted against ONE expected outcome.
+   *
+   * What that token is: the admin-role dev token this file's `authToken` mints for EVERY identity
+   * (`roles=admin&perms=*:*`), so the reader passes `rbacGuard('approvals', 'read')` on both routes
+   * through the admin bypass and then the per-instance participant fence as the requester. What the
+   * legs below therefore prove: a reader WITH read authority who is a participant gets the correct
+   * fields, and only the whitelisted ones (`cancellationOutcome` on exactly one approve row; no
+   * `delegatedFrom`, no internal key). What they do NOT prove: that a plain requester can read either
+   * surface — at this head the permission catalogue lists no `approvals:read` code and there are zero
+   * grants, so such a requester gets 403 at the guard today; that is an owner-open mount-side / grant
+   * decision, not exercised here.
+   *
+   * Per-surface `nodeKey` note: the history route rebuilds `metadata` key by key and its SELECT reads
+   * no `node_key`, so `"nodeKey"` is asserted absent on the HISTORY text only; the detail DTO
+   * legitimately carries `currentNodeKey` and `assignments[].nodeKey`, so the detail assertions are
+   * limited to `delegatedFrom` and the forbidden-token list.
+   */
   async function expectProjectedOutcome(
     roundInstanceId: string,
     requesterToken: string,
@@ -4426,6 +4443,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(outcome.ended_at).not.toBeNull()
 
       // phase-2 half: the outcome is projected under A's approve row on both surfaces.
+      // `requesterToken` is the admin-role dev token (see `authToken` / `expectProjectedOutcome`): this
+      // reads as a participant holding read authority; a plain requester's 403 is not exercised here.
       await expectProjectedOutcome(roundInstanceId, requesterToken, { status: 'cancelled', reversal }, [delegatorA])
     },
   )
@@ -4563,6 +4582,8 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       expect(outcome.ended_at).not.toBeNull()
 
       // phase-2 half: two approve rows on the round; only the redeeming (second) one carries the outcome.
+      // Same reader as the leg above: admin-role dev token, participant, read authority via the admin
+      // bypass — proves the projection for a reader who may read, not requester readability.
       await expectProjectedOutcome(roundInstanceId, requesterToken, { status: 'cancelled', reversal }, [delegateeD, otherUserE])
     },
   )

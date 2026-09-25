@@ -34,7 +34,7 @@
 | **返还 / 冲正 helper** `plugins/plugin-attendance/index.cjs` 的 `reverseLeaveBalanceDeduction`、取消适配器 `prepareRequestCancel` / `executeRequestCancel` | **未变**(三个函数体逐字相同;r9 在该文件的 17 个 hunk 全在考勤组管理 `userManagesAttendanceGroup` / `assertAttendanceGroupInActorOrg` / `withAttendanceGroupMemberAccess` 与薪资周期导出区,与 C-2 的 6 个 hunk 不相交)| 成立 |
 | **W4 边界 / 端口** `attendance/w4c3b-request-operation-boundary.ts`、`attendance/w4c3b-central-approval-hooks.ts`、`core/attendance-cancellation-execution-port.ts` | **未变**(r9 零改动)| 成立 |
 | **读面** `routes/approval-history.ts`、`services/ApprovalBridgeService.ts`、`services/approval-bridge-types.ts`、`services/approval-instance-readability.ts`、`rbac/rbac.ts`、`ApprovalAssigneeResolver.ts` | **未变**(r9 零改动)| 成立 |
-| **种子模板可见性** `db/seeds/approval-cancel-round-published-definition.ts` | **改**(+64):`CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE = { type: 'user', ids: ['__approval_cancel_round_system_only__'] }`(哨兵;普通用户不可见)| **成立且不相关**:可见性闸只在公开 `createApproval` 路径(`templateVisibleAtCreateBoundary`)生效;`createCancelRoundInstance` 不查模板可见性(该区段只有一处注释提到它),C-2 的全部夹具经进程内调用创建撤销轮,`seed-template-visibility` 7/7 在新头上绿 |
+| **种子模板可见性** `db/seeds/approval-cancel-round-published-definition.ts` 及其迁移 `db/migrations/zzzz20260918100000_seed_approval_cancel_round_published_definition.ts`(round 2 补记,门审 NIT-3)| **改**(seed 模块 +64;seed 迁移 +21/−2:`INSERT … approval_templates` 显式写 `visibility_scope` 列,`verifySeedRowsMatchExpected` 回读该列并按 `canonicalJson` 做幂等核对;逐块与原因见验证 MD §3):`CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE = { type: 'user', ids: ['__approval_cancel_round_system_only__'] }`(哨兵;普通用户不可见)| **成立且不相关**:可见性闸只在公开 `createApproval` 路径(`templateVisibleAtCreateBoundary`)生效;`createCancelRoundInstance` 不查模板可见性(该区段只有一处注释提到它),C-2 的全部夹具经进程内调用创建撤销轮,`seed-template-visibility` 7/7 在新头上绿 |
 | `packages/core-backend/src/index.ts` | **改**(+59/−2,method-override 中间件与 `retireExpiredRecoveryAttachmentStage`)| 成立:C-2 只加 2 个 import 与考勤插件 `activate` 上下文里的两个注册钩子(`registerCancelRoundExecutionBoundary` / `registerCancelRoundCancelledEventDelivery`),与 r9 的 hunk 不相交 |
 
 ⇒ 没有一个 C-2 块的前提被 r9 改掉;唯一真正变化的输入是「撤销轮席位是谁」,而 C-2 对席位只有一个假设——「席位持有人经 `/actions` 通过后走 redemption」——由 §7 的两条交互腿在真库上验证。
@@ -67,8 +67,15 @@
 
 | 腿 | r9 半边 | phase-2 半边 |
 |---|---|---|
-| **reading (a) 席位回原主体** | 原单由代理 D 在 A 的席位上通过 ⇒ 撤销轮席位 = A(`assignment_type='user'`),历史代理 D 对撤销轮 `approve` → 403、零兑现、轮仍 pending | A 通过 ⇒ 经外部事务入口兑现恰一次,轮 `applied`;`/history` 恰一条 approve 行(actor A)带 `metadata.cancellationOutcome`,详情 DTO 带同值;两面无 `nodeKey` / `delegatedFrom` / 禁止 token |
+| **reading (a) 席位回原主体** | 原单由代理 D 在 A 的席位上通过 ⇒ 撤销轮席位 = A(`assignment_type='user'`),历史代理 D 对撤销轮 `approve` → 403、零兑现、轮仍 pending | A 通过 ⇒ 经外部事务入口兑现恰一次,轮 `applied`;`/history` 恰一条 approve 行(actor A)带 `metadata.cancellationOutcome`,详情 DTO 带同值;历史面无 `nodeKey`,两面无 `delegatedFrom` / 禁止 token(按读面分列见表下「两面的 `nodeKey`」)|
 | **跳过节点不计入** | D 决角色节点、管理员跳过 D 的被委托节点(`jump` 审计行 `adminJump=true`)、E 结第三节点 ⇒ 撤销轮席位 = {D, E}(都是 `user` 臂,被跳过的 A 不在) | D 通过后仍 pending(会签),E 通过 ⇒ 兑现恰一次,轮 `applied`;两条 approve 行只有兑现那条带 `cancellationOutcome`;详情 DTO 同值 |
+
+**两面的 `nodeKey`(round 2 按读面分别写实,以代码为准;门审 NIT-1)**:
+
+- 历史面 `GET /api/approvals/:id/history`:**不带** `nodeKey`。`routes/approval-history.ts:221-241` 的 platform SELECT 列表是 `id … from_version, to_version` 加三个别名表达式(`metadata->'attachmentIds'` / `metadata->'cancellationOutcome'` / `metadata->>'cancelRoundCloseReason'`),既无 `metadata` 列也无 `node_key` 列;`:284-293` 逐 key 重建 `metadata`,只可能出现 `cancellationOutcome` / `cancelRoundCloseReason` / `attachmentIds`。腿在历史面断三者不出:禁止 token、`"nodeKey"`、`delegatedFrom`(`approval-cancel-round-redemption.db.test.ts:4357-4359`)。
+- 详情面 `GET /api/approvals/:id`:**合法带** `nodeKey`。路由走 `ApprovalBridgeService.getApproval`(`:909`),`:934` 调 `toUnifiedDTO`(`:328`),其 `:364` 发 `currentNodeKey: row.current_node_key`、`:371` 发 `assignments[].nodeKey: assignment.node_key`(DTO 类型 `approval-bridge-types.ts:37` / `:169`)。腿在详情面只断 `delegatedFrom` 与禁止 token 不出(`:4363-4364`),**不**断 `nodeKey`;门审探针亦读到两轮详情含 `"nodeKey"` 与 `currentNodeKey`。
+
+⇒ 可断言的全部是「历史面无 `nodeKey`;两面无 `delegatedFrom` / 禁止 token」。round 1 写的「两面无 `nodeKey`」按字面对详情面为假,此处更正;结论(内部键不泄漏、投影只含白名单)不变。
 
 判别力(验证 MD §6):把席位还原改回「行 actor 本人」⇒ 只有第一条腿红;把跳过豁免去掉 ⇒ 只有第二条腿红;去掉历史端点的 `cancellationOutcome` key path ⇒ 两条都红;去掉 `ApprovalBridgeService.getApproval` 的投影块 ⇒ 两条都红;去掉 `ApprovalProductService.getApproval` 的投影块 ⇒ 两条都绿(详情路由走 bridge 实现;该块由既有 P2-1 腿在 expired/blocked 动作响应上钉住,与门审 r1/r2 的读法一致)。
 
