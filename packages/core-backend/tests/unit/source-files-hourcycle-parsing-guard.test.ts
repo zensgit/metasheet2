@@ -195,6 +195,13 @@ const KNOWN_SITES: KnownSite[] = [
     kind: 'parsing',
   },
   {
+    // tasks/task-dates.ts `getFormatter()` -> `getZonedParts()` formatToParts, Number(part.value)
+    // per part. PARSING and compliant (`hourCycle: 'h23'`).
+    file: 'packages/core-backend/src/tasks/task-dates.ts',
+    lineText: "fmt = new Intl.DateTimeFormat('en-US', {",
+    kind: 'parsing',
+  },
+  {
     // automation-timezone.ts `getFormatter()` -> `getZonedParts()` formatToParts,
     // Number(part.value) per part. PARSING and already compliant.
     file: 'packages/core-backend/src/multitable/automation-timezone.ts',
@@ -230,6 +237,20 @@ const KNOWN_SITES: KnownSite[] = [
   // discarded, or a date-only (no `hour`) formatter, or (one exception) an audited
   // display-only interpolation. Every non-exception entry MUST NOT carry `hour:`.
   // ---------------------------------------------------------------------------------
+  {
+    // tasks/task-dates.ts `getFormatter()` cache key — resolvedOptions().timeZone only
+    // canonicalizes the zone name; the formatter is never formatted or parsed.
+    file: 'packages/core-backend/src/tasks/task-dates.ts',
+    lineText: "cacheKey = new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone",
+    kind: 'display',
+  },
+  {
+    // tasks/task-dates.ts `canonicalTimeZoneName()` — resolvedOptions().timeZone only
+    // canonicalizes the zone name; the formatter is never formatted or parsed.
+    file: 'packages/core-backend/src/tasks/task-dates.ts',
+    lineText: "return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone",
+    kind: 'display',
+  },
   {
     // elearning-credit-policy.ts `normalizeElearningCreditTimeZone()` — the formatter
     // output is never formatted or parsed; resolvedOptions() only canonicalizes the
@@ -663,7 +684,9 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     expect(candidates.length).toBe(KNOWN_SITES.length)
     // 25 = the previously audited 23 sites + the two display-class credit-policy sites
     // above: IANA canonicalization and the hour-free local credit-day key.
-    expect(KNOWN_SITES.length).toBe(25)
+    // 28 = 25 + the three task-dates.ts sites (one parsing formatter with hourCycle 'h23', two
+    // resolvedOptions-only canonicalizations).
+    expect(KNOWN_SITES.length).toBe(28)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {
