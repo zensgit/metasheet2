@@ -23959,7 +23959,11 @@ paths:
         not exist return the SAME details-free 404 — an unknown run is never
         answered with an empty timeline. `attrs` were redacted at write
         (DF-N2-2b scrub gate); this read path does not re-redact and never
-        returns raw payloads. No write, replay or retry.
+        returns raw payloads. No write, replay or retry. One call answers ONE
+        PAGE (default 200 events) together with `total`, `truncated` and
+        `nextCursor`, so a client can always tell the first page from the whole
+        timeline; pass the previous page's `nextCursor` as `cursor` to read the
+        next page.
       security:
         - bearerAuth: []
       parameters:
@@ -23990,7 +23994,7 @@ paths:
           name: limit
           required: false
           description: >-
-            Max events to return. Capped at 500 at the route and at 1000 in the
+            Max events per page. Capped at 500 at the route and at 1000 in the
             registry (the tighter wins); a non-numeric or non-positive value is
             silently ignored and the server-held default page size (200)
             applies.
@@ -23998,9 +24002,27 @@ paths:
             type: integer
             minimum: 1
             maximum: 500
+        - in: query
+          name: cursor
+          required: false
+          description: >-
+            The previous page's `nextCursor` (the `eventIndex` of the last event
+            it returned). Answers the events strictly after it, in `eventIndex`
+            order, under the same (tenantId, workspaceId, runId) scope. Omitted
+            or empty means the first page. Anything that is not a non-negative
+            integer string is refused with 400 INVALID_CURSOR (never silently
+            treated as the first page).
+          schema:
+            type: string
+            pattern: ^[0-9]{1,15}$
       responses:
         '200':
-          description: OK
+          description: >-
+            One page of the run's timeline plus its completeness disclosure.
+            `truncated` is true iff at least one more event exists after the
+            last returned item; `nextCursor` is then that item's `eventIndex` as
+            a string (null otherwise). `total` counts every event the run has in
+            the caller's scope, independent of `cursor` and `limit`.
           content:
             application/json:
               schema:
@@ -24016,10 +24038,30 @@ paths:
                         type: array
                         items:
                           $ref: '#/components/schemas/ProvenanceTimelineEntry'
+                      total:
+                        type: integer
+                        minimum: 0
+                        description: >-
+                          Every event this run has in the caller's scope (not
+                          just this page).
+                      truncated:
+                        type: boolean
+                        description: >-
+                          True iff more events exist after the last returned
+                          item.
+                      nextCursor:
+                        type: string
+                        nullable: true
+                        description: >-
+                          Cursor for the next page when `truncated`; null on the
+                          last page.
                     required:
                       - items
+                      - total
+                      - truncated
+                      - nextCursor
         '400':
-          description: runId missing from the path
+          description: runId missing from the path, or a malformed `cursor`
           content:
             application/json:
               schema:
@@ -24031,6 +24073,12 @@ paths:
                     error:
                       code: RUN_ID_REQUIRED
                       message: runId is required
+                invalid_cursor:
+                  value:
+                    ok: false
+                    error:
+                      code: INVALID_CURSOR
+                      message: cursor must be a non-negative integer string
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

@@ -36,6 +36,14 @@ function createMockDb() {
     })
   }
 
+  function matchesRange(row, range) {
+    return Object.entries(range || {}).every(([key, spec]) => {
+      if (spec.gte !== undefined && spec.gte !== null && !(row[key] >= spec.gte)) return false
+      if (spec.lte !== undefined && spec.lte !== null && !(row[key] <= spec.lte)) return false
+      return true
+    })
+  }
+
   const db = {
     tables,
     calls,
@@ -86,7 +94,9 @@ function createMockDb() {
     },
     async select(table, options = {}) {
       calls.push(['select', table, JSON.parse(JSON.stringify(options))])
-      const filtered = tableRows(table).filter(row => matchesWhere(row, options.where || {}))
+      // `range` mirrors db.cjs buildRangeClause: inclusive gte/lte bounds, nothing else.
+      const filtered = tableRows(table).filter(row => matchesWhere(row, options.where || {})
+        && matchesRange(row, options.range))
       const ordered = filtered.slice()
       if (options.orderBy) {
         const [field, direction] = options.orderBy
@@ -99,6 +109,10 @@ function createMockDb() {
         })
       }
       return ordered.slice(options.offset || 0, (options.offset || 0) + (options.limit || 1000))
+    },
+    async countRows(table, where) {
+      calls.push(['countRows', table, { ...where }])
+      return tableRows(table).filter(row => matchesWhere(row, where || {})).length
     },
     async transaction(callback) {
       calls.push(['transaction'])
@@ -460,7 +474,10 @@ async function main() {
     { tenant_id: 'tenant_1', workspace_id: 'ws_other', pipeline_id: 'id_1', run_id: 'id_4', run_mode: 'full', run_status: 'succeeded', run_created_at: '2026-04-24T00:00:00.000Z', event_index: 1, row_id: 'ws_leak', event_type: 'row_cleaned', event_at: '2026-04-24T00:00:01.000Z', attrs: {} },
   ])
 
-  const runTimeline = await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4' })
+  const runPage = await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4' })
+  assert.deepEqual(Object.keys(runPage).sort(), ['items', 'nextCursor', 'total', 'truncated'],
+    'listProvenanceByRun answers a page envelope, never a bare array')
+  const runTimeline = runPage.items
   assert.deepEqual(runTimeline.map(entry => entry.eventIndex), [1, 2],
     'listProvenanceByRun returns the run timeline ordered by event_index')
   assert.deepEqual(runTimeline.map(entry => entry.rowId), ['k1', 'k1'],
@@ -470,12 +487,19 @@ async function main() {
     __internals.PROVENANCE_TIMELINE_ENTRY_FIELDS.slice().sort(),
     'listProvenanceByRun projects exactly the frozen timeline entry fields (same rowToProvenanceEntry as by-row)',
   )
+  assert.deepEqual({ total: runPage.total, truncated: runPage.truncated, nextCursor: runPage.nextCursor },
+    { total: 2, truncated: false, nextCursor: null },
+    'a two-event run is disclosed as complete: total 2, not truncated, no cursor (the foreign-scope rows are not counted)')
   const byRunSelect = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()
   assert.deepEqual(byRunSelect[2].where, { tenant_id: 'tenant_1', workspace_id: null, run_id: 'id_4' },
     'listProvenanceByRun WHERE carries tenant_id + workspace_id + run_id (drop tenant_id and the cross-tenant row leaks)')
   assert.deepEqual(byRunSelect[2].orderBy, ['event_index', 'ASC'], 'ordered by event_index ASC at the DB')
-  assert.equal(byRunSelect[2].limit, __internals.PROVENANCE_BY_RUN_LIMIT_DEFAULT,
-    'no caller limit → the server-held default page size')
+  assert.equal(byRunSelect[2].limit, __internals.PROVENANCE_BY_RUN_LIMIT_DEFAULT + 1,
+    'no caller limit → the server-held default page size, plus the one-row look-ahead')
+  assert.equal(byRunSelect[2].range, undefined, 'the first page carries no keyset range')
+  const byRunCount = db.calls.filter(call => call[0] === 'countRows' && call[1] === 'integration_provenance_by_row').pop()
+  assert.deepEqual(byRunCount[2], { tenant_id: 'tenant_1', workspace_id: null, run_id: 'id_4' },
+    'total is counted under the SAME three-key WHERE as the page (drop a key and foreign events inflate it)')
 
   // omitted workspaceId normalizes to null exactly like the by-row read and the run reads
   await registry.listProvenanceByRun({ tenantId: 'tenant_1', runId: 'id_4' })
@@ -484,26 +508,40 @@ async function main() {
   assert.ok('workspace_id' in omittedWsByRun[2].where, 'workspace_id key is present (null), never dropped')
 
   // another tenant sees only its own row for the SAME run id — no cross-tenant read
-  const foreignTimeline = await registry.listProvenanceByRun({ tenantId: 'tenant_other', workspaceId: null, runId: 'id_4' })
-  assert.deepEqual(foreignTimeline.map(entry => entry.rowId), ['leak'],
+  const foreignPage = await registry.listProvenanceByRun({ tenantId: 'tenant_other', workspaceId: null, runId: 'id_4' })
+  assert.deepEqual(foreignPage.items.map(entry => entry.rowId), ['leak'],
     'the foreign tenant reads only its own row, never tenant_1\'s events')
+  assert.equal(foreignPage.total, 1, 'the foreign tenant\'s total counts only its own row')
 
-  // limit: caller value passes through, above the ceiling it is clamped, junk falls back
+  // limit: caller value passes through, above the ceiling it is clamped, junk falls back (each
+  // plus the one-row look-ahead the registry adds to decide `truncated`)
   await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', limit: 5 })
-  assert.equal(db.calls.filter(c => c[0] === 'select' && c[1] === 'integration_provenance_by_row').pop()[2].limit, 5,
+  assert.equal(db.calls.filter(c => c[0] === 'select' && c[1] === 'integration_provenance_by_row').pop()[2].limit, 5 + 1,
     'a small caller limit passes through unchanged')
   await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', limit: 100000 })
   assert.equal(db.calls.filter(c => c[0] === 'select' && c[1] === 'integration_provenance_by_row').pop()[2].limit,
-    __internals.PROVENANCE_BY_RUN_LIMIT_MAX, 'an oversized caller limit is clamped to the ceiling')
+    __internals.PROVENANCE_BY_RUN_LIMIT_MAX + 1, 'an oversized caller limit is clamped to the ceiling')
   for (const junk of [0, -1, '50', 1.5, null]) {
     await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', limit: junk })
     assert.equal(db.calls.filter(c => c[0] === 'select' && c[1] === 'integration_provenance_by_row').pop()[2].limit,
-      __internals.PROVENANCE_BY_RUN_LIMIT_DEFAULT, `a non-positive-integer limit (${JSON.stringify(junk)}) falls back to the default`)
+      __internals.PROVENANCE_BY_RUN_LIMIT_DEFAULT + 1, `a non-positive-integer limit (${JSON.stringify(junk)}) falls back to the default`)
   }
 
-  // input validation short-circuits before any db call
+  // input validation short-circuits before any db call — including a malformed cursor, which is
+  // REFUSED (not ignored): silently restarting at page one would re-serve events a "load more"
+  // caller already holds.
   const provSelectsBefore = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').length
-  for (const badInput of [{ tenantId: 'tenant_1', workspaceId: null }, { workspaceId: null, runId: 'id_4' }, undefined]) {
+  const provCountsBefore = db.calls.filter(call => call[0] === 'countRows' && call[1] === 'integration_provenance_by_row').length
+  for (const badInput of [
+    { tenantId: 'tenant_1', workspaceId: null },
+    { workspaceId: null, runId: 'id_4' },
+    undefined,
+    { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: 'abc' },
+    { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: '-1' },
+    { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: '1.5' },
+    { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: -1 },
+    { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: ['1'] },
+  ]) {
     let bad = null
     try {
       await registry.listProvenanceByRun(badInput)
@@ -514,6 +552,99 @@ async function main() {
   }
   assert.equal(db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').length, provSelectsBefore,
     'validation failures issue no view select')
+  assert.equal(db.calls.filter(call => call[0] === 'countRows' && call[1] === 'integration_provenance_by_row').length, provCountsBefore,
+    'validation failures issue no count')
+
+  // --- 8e. f-prov200: the 199 / 200 / 201 boundary of the default page -----------------------
+  // One run per size, seeded out of order and next to a same-run-id row under ANOTHER tenant, so
+  // total/truncated are checked against a scope that has something to leak. The default page is
+  // PROVENANCE_BY_RUN_LIMIT_DEFAULT (200): 199 and 200 are the whole timeline, 201 is not.
+  assert.equal(__internals.PROVENANCE_BY_RUN_LIMIT_DEFAULT, 200, 'the boundary below is written against a 200 default')
+  function boundaryRows(runId, tenantId, count) {
+    const rows = []
+    for (let index = count; index >= 1; index -= 1) {
+      rows.push({
+        tenant_id: tenantId, workspace_id: null, pipeline_id: 'id_1', run_id: runId, run_mode: 'full',
+        run_status: 'partial', run_created_at: '2026-04-25T00:00:00.000Z', event_index: index,
+        row_id: `${runId}-row-${index}`, event_type: 'row_cleaned', event_at: '2026-04-25T00:00:01.000Z', attrs: {},
+      })
+    }
+    return rows
+  }
+  for (const size of [199, 200, 201]) {
+    const runId = `boundary_run_${size}`
+    db.seed('integration_provenance_by_row', boundaryRows(runId, 'tenant_1', size))
+    db.seed('integration_provenance_by_row', boundaryRows(runId, 'tenant_other', 3))
+  }
+
+  const page199 = await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'boundary_run_199' })
+  assert.equal(page199.items.length, 199, '199 events: all 199 returned')
+  assert.deepEqual({ total: page199.total, truncated: page199.truncated, nextCursor: page199.nextCursor },
+    { total: 199, truncated: false, nextCursor: null }, '199 events: total 199, NOT truncated')
+
+  const page200 = await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'boundary_run_200' })
+  assert.equal(page200.items.length, 200, '200 events: all 200 returned')
+  assert.deepEqual({ total: page200.total, truncated: page200.truncated, nextCursor: page200.nextCursor },
+    { total: 200, truncated: false, nextCursor: null },
+    '200 events (exactly one full page): total 200, NOT truncated — the look-ahead finds nothing')
+
+  const page201 = await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'boundary_run_201' })
+  assert.equal(page201.items.length, 200, '201 events: the first page holds 200')
+  assert.deepEqual(page201.items.map(entry => entry.eventIndex), Array.from({ length: 200 }, (_, i) => i + 1),
+    '201 events: the first page is events #1..#200 in order (the look-ahead row is not returned)')
+  assert.deepEqual({ total: page201.total, truncated: page201.truncated, nextCursor: page201.nextCursor },
+    { total: 201, truncated: true, nextCursor: '200' },
+    '201 events: total 201, truncated, nextCursor = the last returned eventIndex')
+
+  const page201b = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'boundary_run_201', cursor: page201.nextCursor,
+  })
+  const page201bSelect = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()
+  assert.deepEqual(page201bSelect[2].range, { event_index: { gte: 201 } },
+    'the cursor becomes a keyset lower bound strictly after the last event already returned')
+  assert.deepEqual(page201bSelect[2].where, { tenant_id: 'tenant_1', workspace_id: null, run_id: 'boundary_run_201' },
+    'a cursor page keeps the same three-key WHERE (a cursor never widens the scope)')
+  assert.deepEqual(page201b.items.map(entry => entry.eventIndex), [201], 'page two holds exactly the one remaining event')
+  assert.deepEqual({ total: page201b.total, truncated: page201b.truncated, nextCursor: page201b.nextCursor },
+    { total: 201, truncated: false, nextCursor: null },
+    'page two: total is still the whole run (201), and the timeline is now complete')
+  const stitched = page201.items.concat(page201b.items).map(entry => entry.eventIndex)
+  assert.deepEqual(stitched, Array.from({ length: 201 }, (_, i) => i + 1),
+    'first page + cursor page = every event exactly once (no skip, no repeat)')
+
+  // a cursor past the end is an empty, complete page — not an error and not page one again
+  const pastEnd = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'boundary_run_201', cursor: '201',
+  })
+  assert.deepEqual({ items: pastEnd.items.length, total: pastEnd.total, truncated: pastEnd.truncated, nextCursor: pastEnd.nextCursor },
+    { items: 0, total: 201, truncated: false, nextCursor: null }, 'a cursor past the last event answers an empty final page')
+
+  // an explicit small limit pages the same run in fixed steps and still discloses correctly
+  const small = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'boundary_run_199', limit: 50, cursor: '150',
+  })
+  assert.deepEqual({ first: small.items[0].eventIndex, count: small.items.length, total: small.total, truncated: small.truncated, nextCursor: small.nextCursor },
+    { first: 151, count: 49, total: 199, truncated: false, nextCursor: null },
+    'limit 50 after #150 of 199: the last 49 events, complete')
+  const smallMid = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'boundary_run_199', limit: 50, cursor: '100',
+  })
+  assert.deepEqual({ count: smallMid.items.length, truncated: smallMid.truncated, nextCursor: smallMid.nextCursor },
+    { count: 50, truncated: true, nextCursor: '150' }, 'limit 50 after #100 of 199: a full page, truncated, cursor #150')
+
+  // a count the db layer cannot produce is a server fault, never "0 events"
+  const brokenCountDb = createMockDb()
+  brokenCountDb.seed('integration_provenance_by_row', boundaryRows('broken_count_run', 'tenant_1', 2))
+  brokenCountDb.countRows = async () => undefined
+  const brokenCountRegistry = createPipelineRegistry({ db: brokenCountDb, idGenerator: createIdGenerator() })
+  let brokenCountError = null
+  try {
+    await brokenCountRegistry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'broken_count_run' })
+  } catch (error) {
+    brokenCountError = error
+  }
+  assert.ok(brokenCountError instanceof Error && /count unavailable/.test(brokenCountError.message),
+    'an unusable count throws instead of disclosing a made-up total')
 
   // the by-ROW read is untouched: rowId is still mandatory there (Q4a added a route, it did not
   // widen the existing cross-run read).

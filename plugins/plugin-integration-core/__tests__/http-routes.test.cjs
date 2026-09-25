@@ -420,20 +420,26 @@ function createMockServices(overrides = {}) {
       // Q4a: per-run timeline. Two events so the route's ordering/shape is observable, and the
       // returned runId echoes the requested one so a route that forwarded the WRONG selector
       // (e.g. the pipelineId) is visible in the body, not just in the recorded call.
+      // f-prov200: the registry answers a PAGE envelope; this default is a complete two-event run.
       async listProvenanceByRun(input) {
         calls.push(['listProvenanceByRun', input])
-        return [
-          {
-            runId: input.runId, pipelineId: 'pipe_1', rowId: 'k1',
-            eventType: 'row_cleaned', at: '2026-04-24T01:00:00.000Z', attrs: {},
-            eventIndex: 1, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
-          },
-          {
-            runId: input.runId, pipelineId: 'pipe_1', rowId: 'k1',
-            eventType: 'target_write_succeeded', at: '2026-04-24T01:00:01.000Z', attrs: {},
-            eventIndex: 2, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
-          },
-        ]
+        return {
+          items: [
+            {
+              runId: input.runId, pipelineId: 'pipe_1', rowId: 'k1',
+              eventType: 'row_cleaned', at: '2026-04-24T01:00:00.000Z', attrs: {},
+              eventIndex: 1, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
+            },
+            {
+              runId: input.runId, pipelineId: 'pipe_1', rowId: 'k1',
+              eventType: 'target_write_succeeded', at: '2026-04-24T01:00:01.000Z', attrs: {},
+              eventIndex: 2, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
+            },
+          ],
+          total: 2,
+          truncated: false,
+          nextCursor: null,
+        }
       },
     },
     pipelineRunner: {
@@ -3930,9 +3936,77 @@ async function testRunProvenanceSubRoute() {
     workspaceId: 'workspace_1',
     runId: 'run_1',
     limit: undefined,
-  }, 'listProvenanceByRun receives exactly {tenantId, workspaceId, runId, limit}')
+    cursor: undefined,
+  }, 'listProvenanceByRun receives exactly {tenantId, workspaceId, runId, limit, cursor}')
   assert.equal(findCall(calls, 'getPipelineRun')[1].tenantId, 'tenant_1',
     'the existence probe was scoped to the caller tenant')
+  // f-prov200: the body carries the completeness disclosure next to the items — exactly these
+  // four keys, so a client can always tell the first page from the whole timeline.
+  assert.deepEqual(Object.keys(res.body.data).sort(), ['items', 'nextCursor', 'total', 'truncated'],
+    'the per-run envelope is exactly {items, total, truncated, nextCursor}')
+  assert.equal(res.body.data.total, 2, 'total is passed through from the registry')
+  assert.equal(res.body.data.truncated, false, 'a complete timeline is reported as NOT truncated')
+  assert.equal(res.body.data.nextCursor, null, 'a complete timeline carries no nextCursor')
+
+  // f-prov200: a truncated page's disclosure reaches the wire verbatim, and nothing else the
+  // registry might carry does (the route projects the four keys explicitly).
+  const truncatedPage = createMockServices()
+  truncatedPage.services.pipelineRegistry.listProvenanceByRun = async function listProvenanceByRun(input) {
+    truncatedPage.calls.push(['listProvenanceByRun', input])
+    return {
+      items: [{
+        runId: input.runId, pipelineId: 'pipe_1', rowId: 'k1',
+        eventType: 'row_cleaned', at: '2026-04-24T01:00:00.000Z', attrs: {},
+        eventIndex: 200, runStatus: 'succeeded', runMode: 'full', runCreatedAt: '2026-04-24T01:00:00.000Z',
+      }],
+      total: 201,
+      truncated: true,
+      nextCursor: '200',
+      internalOnly: 'must-not-serialize',
+    }
+  }
+  const { routes: truncatedRoutes } = mountRoutes(truncatedPage.services)
+  const truncatedRes = await invoke(truncatedRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { cursor: '199' },
+  })
+  assertOkResponse(truncatedRes, 200)
+  assert.deepEqual(
+    { total: truncatedRes.body.data.total, truncated: truncatedRes.body.data.truncated, nextCursor: truncatedRes.body.data.nextCursor },
+    { total: 201, truncated: true, nextCursor: '200' },
+    'a truncated page discloses total / truncated / nextCursor on the wire',
+  )
+  assert.equal('internalOnly' in truncatedRes.body.data, false, 'only the four envelope keys are serialized')
+  assert.equal(findCall(truncatedPage.calls, 'listProvenanceByRun')[1].cursor, '199',
+    'the caller cursor reaches the registry verbatim (the registry owns its keyset semantics)')
+
+  // f-prov200: a malformed cursor is a typed 400 that never reaches the probe or the registry,
+  // and its body does not echo the value. `''` is "no cursor" (first page), not an error.
+  for (const badCursor of ['abc', '-1', '1.5', ' 1', '1e3', '0x10', '1234567890123456', ['1', '2']]) {
+    const bad = createMockServices()
+    const { routes: badRoutes } = mountRoutes(bad.services)
+    const badRes = await invoke(badRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+      user: READ_USER,
+      params: { runId: 'run_1' },
+      query: { cursor: badCursor },
+    })
+    assertErrorResponse(badRes, [400])
+    assert.equal(badRes.body.error.code, 'INVALID_CURSOR', `cursor ${JSON.stringify(badCursor)} → INVALID_CURSOR`)
+    assert.equal(Object.keys(badRes.body.error.details || {}).length, 0, 'the 400 carries no details echoing the cursor')
+    assert.equal(findCalls(bad.calls, 'getPipelineRun').length, 0, 'a bad cursor never reaches the existence probe')
+    assert.equal(findCalls(bad.calls, 'listProvenanceByRun').length, 0, 'a bad cursor never reaches the registry')
+  }
+  const emptyCursor = createMockServices()
+  const { routes: emptyCursorRoutes } = mountRoutes(emptyCursor.services)
+  const emptyCursorRes = await invoke(emptyCursorRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    user: READ_USER,
+    params: { runId: 'run_1' },
+    query: { cursor: '' },
+  })
+  assertOkResponse(emptyCursorRes, 200)
+  assert.equal(findCall(emptyCursor.calls, 'listProvenanceByRun')[1].cursor, undefined,
+    'an empty cursor is the first page, not a refusal')
 
   // the caller-supplied limit is clamped by the route's own MAX_LIST_LIMIT before the registry
   const { calls: limitCalls, services: limitServices } = createMockServices()

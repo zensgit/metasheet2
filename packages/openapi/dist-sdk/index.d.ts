@@ -10492,7 +10492,7 @@ export interface paths {
         };
         /**
          * List one run's provenance timeline
-         * @description Read-only per-run provenance timeline, scoped by (tenantId, workspaceId, runId) and ordered by `eventIndex` (the migration-060 view's WITH ORDINALITY over the run's persisted `provenance_events`, i.e. write order). The run is resolved first through the same three-key lookup the single-run read uses, so another tenant's run id and a run id that does not exist return the SAME details-free 404 — an unknown run is never answered with an empty timeline. `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does not re-redact and never returns raw payloads. No write, replay or retry.
+         * @description Read-only per-run provenance timeline, scoped by (tenantId, workspaceId, runId) and ordered by `eventIndex` (the migration-060 view's WITH ORDINALITY over the run's persisted `provenance_events`, i.e. write order). The run is resolved first through the same three-key lookup the single-run read uses, so another tenant's run id and a run id that does not exist return the SAME details-free 404 — an unknown run is never answered with an empty timeline. `attrs` were redacted at write (DF-N2-2b scrub gate); this read path does not re-redact and never returns raw payloads. No write, replay or retry. One call answers ONE PAGE (default 200 events) together with `total`, `truncated` and `nextCursor`, so a client can always tell the first page from the whole timeline; pass the previous page's `nextCursor` as `cursor` to read the next page.
          */
         get: {
             parameters: {
@@ -10501,8 +10501,10 @@ export interface paths {
                     tenantId?: string;
                     /** @description Workspace scope. Omitted means the null workspace — the same normalization the run reads apply. */
                     workspaceId?: string;
-                    /** @description Max events to return. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies. */
+                    /** @description Max events per page. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies. */
                     limit?: number;
+                    /** @description The previous page's `nextCursor` (the `eventIndex` of the last event it returned). Answers the events strictly after it, in `eventIndex` order, under the same (tenantId, workspaceId, runId) scope. Omitted or empty means the first page. Anything that is not a non-negative integer string is refused with 400 INVALID_CURSOR (never silently treated as the first page). */
+                    cursor?: string;
                 };
                 header?: never;
                 path: {
@@ -10513,7 +10515,7 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description OK */
+                /** @description One page of the run's timeline plus its completeness disclosure. `truncated` is true iff at least one more event exists after the last returned item; `nextCursor` is then that item's `eventIndex` as a string (null otherwise). `total` counts every event the run has in the caller's scope, independent of `cursor` and `limit`. */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -10524,11 +10526,17 @@ export interface paths {
                             ok?: boolean;
                             data?: {
                                 items: components["schemas"]["ProvenanceTimelineEntry"][];
+                                /** @description Every event this run has in the caller's scope (not just this page). */
+                                total: number;
+                                /** @description True iff more events exist after the last returned item. */
+                                truncated: boolean;
+                                /** @description Cursor for the next page when `truncated`; null on the last page. */
+                                nextCursor: string | null;
                             };
                         };
                     };
                 };
-                /** @description runId missing from the path */
+                /** @description runId missing from the path, or a malformed `cursor` */
                 400: {
                     headers: {
                         [name: string]: unknown;
