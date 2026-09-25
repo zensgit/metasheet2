@@ -224,9 +224,9 @@ setting.
 | question | ruling | disposition on this branch |
 |---|---|---|
 | Q1 — §5: which of (a)–(d), or the V8 flag option (e) the gate review added, should follow | **(a)**: this round lands the length gate and the shape warning only. **(e)** is opened as a separate, **local** evaluation — CI form first, then staging — and does not enter production configuration. (b), (c) and (d) are not chosen. | unchanged: none of (b)–(e) is on this branch; no limit value changed; no runtime flag, `NODE_OPTIONS`, image command, deploy script, `.env` or workflow file touched. The (e) evaluation gets its own document when it exists. |
-| Q2 — §6.1: the evaluation inside the limits | accepted as a **known residual** until the (e) evaluation is done: a pattern that is super-linear inside the limits is warned about (§3), not refused. | §6.1 stands as written; §6.3 still counts nothing. |
+| Q2 — §6.1: the evaluation inside the limits | accepted as a **known residual** until the (e) evaluation is done: an exponential-shape pattern inside the limits is warned about (§3), not refused. (The broader super-linear wording of §6.1 is this document's own description, not part of the ruling.) | §6.1 stands as written; §6.3 still counts nothing. |
 | Q3 — §2.3, L2 message precedence | **kept**: the refusal message wins over a rule's custom message. | `field-validation-engine.ts` unchanged since round 1. |
-| Q4 — §6.2 announcement | **notify by release note**; no pre-landing announcement and no counter. The text is in §9.1. | the release-note text is kept here so the release carries it as written. |
+| Q4 — §6.2 announcement | **notify by release note** (the ruling: a release note is enough). The text is in §9.1. Whether to add a counter (§6.3) was not part of this ruling and stays open. | the release-note text is kept here so the release carries it as written. |
 | the web spec's CI collection (gate review, round 2, P3-1) | **wire it into the required lane**. | `apps/web/scripts/run-required-web-tests.sh`: one token, `formViewValidation`, in its sorted place in the final `exec npx vitest run` block; readings in the verification MD §8. |
 
 ### 9.1 Release-note text (Q4)
