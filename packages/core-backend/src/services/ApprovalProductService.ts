@@ -198,12 +198,44 @@ const metricsLogger = new Logger('ApprovalMetricsHook')
 const nodeTimeoutLogger = new Logger('ApprovalNodeTimeout')
 const approvalProductLogger = new Logger('ApprovalProductService')
 
+function logMetricsHookFailure(label: string, error: unknown): void {
+  metricsLogger.warn(`metrics hook ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+}
+
+/**
+ * Dispatch-only metrics hook (UNCHANGED). The `Promise.resolve().then(fn)` hop keeps the caller's
+ * synchronous path free of any work `fn` performs before its first await, and the caller never learns
+ * when — or whether — the write landed. Correct for observability-only writes (node decision, terminal).
+ */
 function safeMetricsCall(label: string, fn: () => Promise<void>): void {
   Promise.resolve()
     .then(fn)
     .catch((error) => {
-      metricsLogger.warn(`metrics hook ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+      logMetricsHookFailure(label, error)
     })
+}
+
+/**
+ * H-1 — the AWAITABLE half of `safeMetricsCall`: identical log-and-swallow contract (a metrics failure
+ * can never fail or roll back the approval flow — the promise always resolves), but the caller awaits
+ * the write's SETTLEMENT rather than only its dispatch.
+ *
+ * Why a second form exists: the node-activation stamp is NOT an observability-only write.
+ * `approval_metrics.current_node_deadline_at` / `current_node_timeout_effect` are the SLA scanner's
+ * ARMED STATE, read back as `applyNodeTimeoutEffect`'s in-transaction race guard (see the
+ * `!armed || Number.isNaN(deadlineMs) || deadlineMs > Date.now() || ... !== scannedEffect` guard below).
+ * Dispatched-but-unsettled, that write can land AFTER a later reader/writer has already observed or
+ * moved those columns and silently overwrite newer state. See
+ * docs/development/h1-approval-node-timeout-activation-race-design-20260922.md.
+ */
+async function settleMetricsCall(label: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    // Restores the microtask trampoline `safeMetricsCall` uses. Discriminating power here comes from
+    // the `await`s at the call sites (see the H-1 test names), not from this hop.
+    await Promise.resolve().then(fn)
+  } catch (error) {
+    logMetricsHookFailure(label, error)
+  }
 }
 
 interface ApprovalTemplateListQuery {
@@ -8443,7 +8475,7 @@ export class ApprovalProductService {
       }
 
       if (resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -9492,9 +9524,12 @@ export class ApprovalProductService {
 
       // Post-commit best-effort metrics, mirroring the return path: close the timed-out node's open
       // breakdown entry, then re-entry activation re-stamps the target node (incl. its own timeout).
-      this.emitNodeDecisionMetric(id, currentNodeKey, APPROVAL_TIMEOUT_SYSTEM_ACTOR)
+      // H-1 P1-1: the close is AWAITED, not dispatched — a backward timeout-jump can resolve back to
+      // the node that just timed out (e.g. the jump target auto-approves), and then these two hooks
+      // contend for the same `approval_metrics` row. See `settleNodeDecisionMetric`.
+      await this.settleNodeDecisionMetric(id, currentNodeKey, APPROVAL_TIMEOUT_SYSTEM_ACTOR)
       if (resolution.status === 'pending' && resolution.currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
       if (completionEvent) {
         emitApprovalCompletionEvent(completionEvent)
@@ -10544,7 +10579,7 @@ export class ApprovalProductService {
           this.emitTerminalMetric(id, 'approved')
         }
         if (resolution.currentNodeKey) {
-          this.emitNodeActivationMetric(
+          await this.emitNodeActivationMetric(
             id,
             resolution.currentNodeKey,
             resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)),
@@ -10645,9 +10680,14 @@ export class ApprovalProductService {
         await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+        // H-1 P1-1: AWAITED close — a return can resolve back to the node it was issued from when the
+        // target is skipped and the cascade lands here again (constructed and covered: an
+        // `approvalType:'auto_approve'` target, see the `H-1 P1-1 GATE (return branch)` case). This
+        // close and the activation below then contend for the same `approval_metrics` row. See
+        // `settleNodeDecisionMetric`.
+        await this.settleNodeDecisionMetric(id, currentNodeKey, actor.userId)
         if (resolution.currentNodeKey) {
-          this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+          await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
         }
         return (await this.getApproval(id, actor.userId, actor.roles))!
       }
@@ -11221,7 +11261,7 @@ export class ApprovalProductService {
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'approved')
       } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
-        this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
+        await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
     } catch (error) {
       await rollbackQuietly(client)
@@ -11242,22 +11282,64 @@ export class ApprovalProductService {
    * a metrics outage cannot fail the approval flow.
    */
   private emitNodeDecisionMetric(instanceId: string, nodeKey: string, actorId: string): void {
-    safeMetricsCall(`recordNodeDecision(${instanceId}/${nodeKey})`, () =>
+    safeMetricsCall(`recordNodeDecision(${instanceId}/${nodeKey})`, this.nodeDecisionMetricWrite(instanceId, nodeKey, actorId))
+  }
+
+  /**
+   * H-1 P1-1 — AWAITED sibling of `emitNodeDecisionMetric`: identical write, identical
+   * log-and-swallow contract (the promise always resolves), the caller just waits for settlement.
+   *
+   * Used ONLY on the two post-commit paths that can re-activate the SAME node they just decided
+   * (`applyNodeTimeoutEffect`'s re-entry and `dispatchAction`'s `return` branch). There, this close
+   * and the following `emitNodeActivationMetric` are two transactions contending for the SAME
+   * `approval_metrics` row, and the outcome is not symmetric:
+   *   - close first  → `recordNodeActivation` sees no open entry for the node, so it appends the
+   *     re-activation entry AND re-arms `current_node_deadline_at` / `current_node_timeout_effect`;
+   *   - activation first → the still-open entry makes `recordNodeActivation` a no-op (`added=false`,
+   *     so its deadline UPDATE is skipped), and the close that lands afterwards NULLs both columns
+   *     (its scope guard `i.current_node_key = $2` is satisfied — the instance really is still at
+   *     that node) — the node is live again but its SLA is never re-armed and the breakdown entry
+   *     for the re-activation is lost.
+   * Dispatch order alone does not decide that race (both hooks queue, then two separate connections
+   * race their `SELECT … FOR UPDATE`); awaiting the close makes the order a fact of the code path.
+   *
+   * The remaining `emitNodeDecisionMetric` call sites stay fire-and-forget on purpose: reject /
+   * sequential-queue-advance emit no activation after them, and the approve path's activation is
+   * guarded by `resolution.currentNodeKey !== currentNodeKey`, so its close and its activation
+   * address different nodes and the close's scope guard is false whichever lands first.
+   */
+  private settleNodeDecisionMetric(instanceId: string, nodeKey: string, actorId: string): Promise<void> {
+    return settleMetricsCall(`recordNodeDecision(${instanceId}/${nodeKey})`, this.nodeDecisionMetricWrite(instanceId, nodeKey, actorId))
+  }
+
+  /** Shared write body for both forms above — `decidedAt` is still taken when the hook RUNS. */
+  private nodeDecisionMetricWrite(instanceId: string, nodeKey: string, actorId: string): () => Promise<void> {
+    return () =>
       this.metrics.recordNodeDecision({
         instanceId,
         nodeKey,
         decidedAt: new Date(),
         approverIds: [actorId],
-      }),
-    )
+      })
   }
 
+  /**
+   * H-1 — AWAITED (not fire-and-forget). Returns a promise that always resolves: a metrics failure is
+   * logged and swallowed exactly as before, so this still cannot fail the approval flow. What changed is
+   * only WHEN the caller continues — after the stamp is durable, instead of after it is merely queued.
+   *
+   * Rationale: this write arms the SLA scanner. Left unsettled it can land after the caller's response
+   * has been observed and overwrite state written in between (a forced/consumed deadline), which surfaces as
+   * `applyNodeTimeoutEffect` returning 'skipped_stale' against a correctly-armed row, or as the scanner
+   * firing a stale node's effect. Every call site is POST-COMMIT — no approval lock is held while this
+   * awaits, so it can only add latency, never deadlock.
+   */
   private emitNodeActivationMetric(
     instanceId: string,
     nodeKey: string,
     calendarOrgId: string,
     timeout?: NodeTimeoutConfig,
-  ): void {
+  ): Promise<void> {
     const activatedAt = new Date()
     // T1-1: when the activating node declares a timeout, stamp its absolute deadline + effect so the
     // SLA scanner can fire on it. No timeout → recordNodeActivation clears the columns (so the prior
@@ -11268,7 +11350,7 @@ export class ApprovalProductService {
     const calendarSla = timeout?.unit === 'business'
       ? { afterMinutes: timeout.afterMinutes, orgId: calendarOrgId }
       : undefined
-    safeMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
+    return settleMetricsCall(`recordNodeActivation(${instanceId}/${nodeKey})`, () =>
       this.metrics.recordNodeActivation({
         instanceId,
         nodeKey,
