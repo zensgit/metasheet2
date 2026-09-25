@@ -32,7 +32,74 @@ mutation 一律 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`。
 | 改测试**后**:八件 cancel-round + RC 自带件 + 两邻居 | **11 files / 133 passed / 0 failed**(creation 66 = 64 + `V1(a)` `V2(a)`;RC 11;邻居 7;其余 cancel-round 件与栈底同数) |
 | `approval-cancel-round-outlet-guards` #7/#7′(legacy 门 × 撤销轮 × 席位持有人) | 仍 409 `CANCEL_ROUND_OUTLET_FORBIDDEN`(席位闸放行后出口守卫生效,= F4 (i)(b) 的「有席位 ⇒ 409」格) |
 | Mutation 网格(`routes/approvals.ts`,sha256 `51ed120018a10e11e75043f5a52ea0e45eed320cd3ed95a6272bc68a29fdd8f2`,每格 `cp` 备份 → 改 → 跑 creation 整件 → 还原 → `cmp`) | **M-rc-gate**(两扇门的席位闸关掉 `if (!seat.allowed)` → `if (false)`)⇒ **7 红**:`N13(a)` `N20(a)` `N21(a)` `P27(a)` `P29(a)` `P33(a)` `V1(a)` —— 恰为「无席位者被拒」族 + v3b 动作 1;**M-rc-attr**(两扇门的服务端归属关掉 `nodeKey: seat.nodeKey` → `null`)⇒ **13 红**:`P12(a)` `N7(a)` `N8(a)` `P13(a)` `N9(a)` `P19(a)` `N11(a)` `P20(a)` `P21(a)` `N14(a)` `N15(a)` `N18(a)` `N19(a)` —— 恰为「行被服务端归属」族(+ 既有的 `P20(a)`);**M-rc-order**(`/approve` 门把出口守卫挪到席位闸之前,= F4 (i)(a))⇒ **1 红**:`V1(a)`(无席位者对撤销轮得 409 而非 403),`V2(a)` 不动 |
-| 门审第 5 轮 P1 的形状(`P29(a)`) | **本栈关闭**:legacy 写入在席位闸处被拒(403,零行,回应与普通实例逐字节相同),诚实结尾后 `{A, E}` = HONEST6;M-rc-gate 下红 ⇒ 关闭由席位闸承重 |
+| 门审第 5 轮 P1 的形状(`P29(a)`) | **本栈关闭**:legacy 写入在席位闸处被拒(403,零行,回应与普通实例逐字节相同),诚实结尾后 `{A, E}` = HONEST6;M-rc-gate 下红 ⇒ 关闭由席位闸承重(**RC 层**读数:本层 legacy 门直接写终态,路由席位闸是唯一的闸;栈顶的层依赖见 §3「栈顶 M-rc-gate / M-rc-attr」) |
 | NOT RUN | core-backend 全量(栈顶跑);RC 自带 standalone workflow 在 CI 的实跑(零 PR);生产语料普查 |
 
-## 3. 栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9` —— 由该分支追加
+## 3. 栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9`
+
+| 项 | 读数 |
+|---|---|
+| 重放 | H-5 3 提交(`89f2805c4f…` 相对 RC `09d0275726…`)`cherry-pick -x`;冲突:`routes/approvals.ts` 两处(栈中的 `rejectIfCancelRound` × H-5 结算块同位 ⇒ 出口守卫先、结算后)+ `ApprovalProductService.ts` 一处(F4 (ii)(b) 版本闸先、`assertCancelRoundActionAllowed` 后);其余自动合并 |
+| `tsc --noEmit` | EXIT 0 / 0 行 |
+| 八件 cancel-round + RC 自带 + H-5 parity + 两邻居(`EXPECT_DB=1`) | **12 files / 151 passed / 0 failed**(creation 66 / RC 11 / parity 18 / revoke-terminal-guard 5 / delegation-seam 2 / outlet-guards 7);栈中重写的 18 条 C-1 腿读数不变 |
+| H-5 单元件 `approvals-routes.test.ts` + 三件 cancel-round 单元守卫(`CI=true`) | **4 files / 395 passed** |
+| v3b 动作 3 守卫 `tests/unit/approval-legacy-decision-version-precondition-sites.test.ts`(改写前的文本普查版) | **4 / 4**(改写后的读数见下方「守卫改写」行) |
+| core-backend 全量(`CI=true npx vitest run`,无 DB,required lane 形状) | **985 files passed / 175 skipped (1160);16040 tests passed / 1615 skipped (17655);0 failed;EXIT 0** |
+| Mutation —— 守卫(改写前;`cp` 备份 → 改 → 跑守卫 → 还原 → `cmp`;被测 sha256 routes `62a9940fa957f48c4355a132b8eead2120ab65e85d63c3c0b1555688a552df09` / service `be984a1d7f961d3efaabe57b2ccdf769b0ec20395fe8ef00c859427ed45c18ad`) | **g1** `/actions` handler 内加第三个 `expectedVersion: requestedVersion` 写入点 ⇒ 守卫 **1 red**(WRITE POINTS);**g2** 删 `/reject` 门的 `rejectIfCancelRound` ⇒ **1 red**(EACH legacy door 次序);**g3** 对调 `dispatchAction` 内版本闸与动作闸 ⇒ **1 red**(dispatchAction 次序)。改写前的普查只数 `expectedVersion:` 这一拼写,对属性简写的第三写入点视而不见(门审第 1 轮 P3-1);改写后的网格见下 |
+| Mutation —— g3 保持对调、跑真库四件(creation / outlet-guards / RC 自带 / parity) | **102 passed / 0 failed** —— F4 (ii) 两序在今天的语料上**不可分辨**(v3b §5.2.1 实证),所以裁决由静态守卫承重 |
+| Mutation —— v1 版本前置条件关掉(`if (false && …)`) | creation + parity:**2 red**,恰为 parity 的 **(S7)** **(S9)**(H-5 r3 门审的 M11 同读数);creation 66 条不动 |
+| NOT RUN | RC / H-5 standalone workflow 在 CI 的实跑(零 PR);带 DB 的全量;生产语料普查 |
+
+### 3.1 栈顶 M-rc-gate / M-rc-attr(门审第 1 轮 P3-2 收口;一次性库 `ms2_lanea2_p3close_20260925`,`createdb -O ms2testbed`,五个 `*_DATABASE_URL` / `*_DB_URL` 全指向它并以 `current_database()` 断言;迁移退出码、executed 数与 BASE TABLE 数与文首所记相同;每格 `cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`,被测 sha256 与上表相同)
+
+§2 的 M-rc-gate(7 红)/ M-rc-attr(13 红)是 **RC 层**读数。栈顶 H-5 让 seat-gated 实例经 `settleLegacyDecisionThroughSharedPath → dispatchAction` 结算,
+而 `dispatchAction` 自带 403 `APPROVAL_ASSIGNMENT_REQUIRED` 且自写 `nodeKey` / `nodeEntryEpoch`,所以同样的两格在栈顶读数不同(机理在设计 MD §4.4):
+
+| 格 | 跑 | 读数 |
+|---|---|---|
+| 基线(未变异) | creation + RC 自带 + parity 三件(`EXPECT_DB=1`) | **95 passed / 0 failed**(= 上表 creation / RC / parity 三数之和) |
+| 基线(未变异) | 单元 `approvals-routes.test.ts`(`CI=true`,无 DB) | **16 passed** |
+| **M-rc-gate**(两扇门 `if (!seat.allowed)` → `if (false)`) | 同上三件 | **1 red = `V1(a)`,其余 94 绿**:六条「无席位者被拒」腿(`N13(a)` `N20(a)` `N21(a)` `P27(a)` `P29(a)` `P33(a)`)在栈顶由 `dispatchAction` 自带的席位闸过定而保持绿;`V1(a)` 红是因为路由闸关掉后无席位者先撞上 `rejectIfCancelRound` 得 409,与普通实例的 403 不再逐字节相同 —— 路由席位闸在栈顶是**纵深**,F4 (i) 序的 values-free 性质是它唯一可观察的效果,由 `V1(a)` 单独钉住 |
+| **M-rc-gate** | 单元 `approvals-routes.test.ts` | 全绿,与基线同数(该件不驱动撤销轮) |
+| **M-rc-attr**(两扇门 `nodeKey: seat.nodeKey` → `null`) | creation + RC 自带 + parity 三件 | **全绿,与基线同数**:该行在栈顶只到非 seat-gated 直写路径,那里 `seat.nodeKey` 恒为 `null`(`resolveLegacyDecisionSeat` 对非 seat-gated 行不返回节点),所以是**语义空变异**;seat-gated 行的归属由 `dispatchAction` 写,路由层的这一行已不承重 |
+| 门审第 1 轮同格读数 | — | 门审 §5 记 M-rc-gate ⇒ creation `V1(a)` 1 红 + RC / parity / 单元全绿、M-rc-attr ⇒ creation + RC 77/77 绿;与本节逐格相同(本节的 M-rc-attr 多跑了 parity 一件,仍全绿) |
+| 可选加固「非 seat-gated 直写路径:路由席位闸关掉 ⇒ 红」 | NOT RUN | 不可构造:非 seat-gated 行的 `resolveLegacyDecisionSeat` 不查席位,`allowed` 只取决于 `status === 'pending'`,而两扇门在它之前已有 400 `APPROVAL_STATUS_INVALID`,所以 `if (false)` 在该路径上不改任何可观察行为;RC 自带 leg (8) 钉的是该路径的放行 + 丢键现状,已是它能钉的全部 |
+
+### 3.2 v3b 动作 3 守卫改写(门审第 1 轮 P3-1 收口;守卫口径见该文件头)
+
+| 跑 | 读数 |
+|---|---|
+| 守卫本件(`CI=true`;AST 普查 + 负控 + 6 条写法正控 + 4 条「未判定」正控(本轮命名为 fail-closed,第 3 轮改称「未判定」并改口径,见 §3.3)+ 两条次序钉) | **14 / 14** |
+| 守卫本件单独 `tsc --noEmit`(临时 tsconfig `extends ./tsconfig.json` 只含该文件;项目 tsconfig 本身排除 `*.test.ts`) | EXIT 0 / 0 行 |
+| `tsc --noEmit -p tsconfig.json`(core-backend,改写后) | EXIT 0 / 0 行 |
+| core-backend 全量(`CI=true npx vitest run --pool=forks --poolOptions.forks.minForks=1 --poolOptions.forks.maxForks=3`,无 DB,改写后) | **985 files passed / 175 skipped (1160);16050 tests passed / 1615 skipped (17665);0 failed;EXIT 0**(相对上表多出的条数 = 守卫改写前后用例数之差) |
+| Mutation —— 守卫改写后(磁盘上改 `routes/approvals.ts` / `ApprovalProductService.ts`,`cp` 备份 → 改 → 跑守卫 → 还原 → `cmp`) | **MG-a2**(`/actions` 内 `const expectedVersion = … as number \| undefined` + 属性简写 `expectedVersion,`,= 门审 P3-1 的盲区形状)/ **g1**(冒号写法)/ **MG-a3**(`const rider = { expectedVersion: … }` + `...rider,`)/ **MG-a4**(计算属性 `['expectedVersion']`)四格各 ⇒ **10 red**(负控 + 9 条正控:正控在已有第三写入点的源上再拼一个,数到 2 而非 1);**MG-a5**(`...buildRider(req),` 不可静态解析的展开)⇒ **8 red**(负控报「未判定写入点」+ 7 条正控);**MG-a6**(只加 `const expectedVersion = …`,不写属性)⇒ **5 red**(负控经 mention 闭包报出声明 + 4 条断言零游离 mention 的正控);**MG-a7**(只加注释行 `// expectedVersion: 1`)⇒ **0 red**(注释不是节点,负控如常绿);**MG-b**(对调 `dispatchAction` 两闸)⇒ 1 red(dispatchAction 次序);**MG-c**(删 `/reject` 出口守卫)⇒ 1 red(EACH legacy door);**MG-d**(`/approve` 出口守卫挪到席位闸前)⇒ 1 red(EACH legacy door) |
+| 今天的展开普查(改写前置核) | 被守卫文件里传给 `dispatchAction` / `settleLegacyDecisionThroughSharedPath` 的请求对象共 5 处调用(helper 内 1、`/actions` 内 2、两扇门各 1);含展开的 2 处(helper 内 `...(comment !== null ? { comment } : {})` / `...(precondition.reason !== null ? { reason: … } : {})`;`/actions` 内 `...(hasFieldWrites ? { fieldWrites: … } : {})` / `...(hasAttachmentIds ? { attachmentIds: … } : {})`),四个展开源都是**内联的对象字面量条件式**,守卫静态展开其键;`ACCEPTED_UNRESOLVED_SPREADS` 具名清单今天为**空** |
+
+### 3.3 守卫人口改为发现式(门审第 2 轮 P3-A / P3-B / NIT-a / NIT-b / NIT-c 收口;本节是**人口读数唯一的定义处**;零生产代码改动;本 lane 无库)
+
+**人口读数(今天,`packages/core-backend/src`)**:扫描 `.ts` **1258** 个;含普查调用的文件 **3** 个(`routes/approvals.ts`、
+`services/ApprovalCardDeliveryAction.ts`、`services/AfterSalesApprovalBridgeService.ts`);`dispatchAction` 调用点 **5** 处
+(routes `:718` helper 内 `productService` / `:3102` `/actions` `productService` / `:3130` `/actions` `bridgeService`;售后桥 `:447`
+`this.approvalBridge`,请求实参是 `as ApprovalActionRequest` 断言后的字面量;卡片包装器 `:269` `deps.approvals`);
+`settleLegacyDecisionThroughSharedPath` 调用点 **2** 处(`:3325` `/approve` / `:3650` `/reject`)。守卫里的下界常量
+`POPULATION_FLOOR = { callerFiles: 3, dispatchActionCalls: 5, helperCalls: 2 }` 取自这组读数;扫描文件数只设 500 的 lister 自检下限,不是读数。
+每次跑守卫都把这组读数以 `[v3b action 3] population {…}` 一行打印到日志。
+
+| 跑 | 读数 |
+|---|---|
+| 守卫本件(`CI=true`;定位自检 1 + 人口自证 1 + 负控 1 + 6 条写法正控 + 4 条「未判定」正控 + 3 条人口正控 + 两条次序钉) | **18 / 18** |
+| 守卫本件单独 `tsc --noEmit`(临时 tsconfig `extends ./tsconfig.json` 只含该文件,放在包目录内以解析 `vitest/globals`,跑完即删) | EXIT 0 / 0 行 |
+| `tsc --noEmit -p tsconfig.json`(core-backend) | EXIT 0 / 0 行 |
+| 邻居:本守卫 + 三件 `approval-cancel-round-*.test.ts` 单元守卫 + `approvals-routes.test.ts`(`CI=true`) | **5 files / 65 passed / 0 failed** |
+| Mutation **M-pop**(守卫文件:`listSourceFiles` 改为只返回 `routes/approvals.ts`,即人口改回单文件;`cp` 备份 → 改 → 跑 → `cp` 还原 → `cmp`) | **4 red / 14 green**:人口自证红(第一条断言即红:扫描文件数 1 < 500 的 lister 自检下限;其后的已知文件 / 下界断言未到达 —— 单文件人口下它们同样不成立:文件数 1 < 3、调用点 3 < 5)+ 三条人口正控红(被覆盖的文件不在人口内,普查报不出拼入的写入点)—— 人口正控只在人口真的覆盖到那个文件时才绿 |
+| Mutation **M-G6-disk**(磁盘上往 `services/ApprovalCardDeliveryAction.ts:271` 请求对象加 `expectedVersion: 1,` = 门审 G6;备份 / 还原 / `cmp` 同上) | **10 red / 8 green**:负控红(允许集合之外多出 1 处、routes 以外 1 处)+ 6 条 `/actions` 写法正控(允许集合之外数到 2 而非 1)+ 3 条人口正控(同理数到 2)。门审第 2 轮此格为 14/14 绿 |
+| Mutation **M-G4-disk**(磁盘上把 `/actions` 的 `productService.dispatchAction(` 改成 `productService['dispatchAction'](` 并加 `expectedVersion: Number(req.body?.version),` = 门审 G4 + 字面量键) | **13 red / 5 green**:负控红的理由是**普查报出 `/actions` 内写入点**(不是正控定位抛错;日志 `call not found` 0 命中);9 条 `/actions` 正控与 3 条人口正控因多数到 1 处而红;定位自检、人口自证、非字面量请求实参、两条次序钉绿。门审第 2 轮此格普查零写入点、负控绿 |
+| Mutation **M-AS-disk**(磁盘上往 `services/AfterSalesApprovalBridgeService.ts:449` 的 `as` 断言字面量加 `expectedVersion: 1,`) | **10 red / 8 green**:构成同 M-G6-disk |
+| 还原 | 每格 `RESTORE_CMP=OK`;跑后 `git status --porcelain` 只剩本轮三个被改文件;三个被变异过的 `src` 文件 sha256 与 `HEAD` 逐字同 |
+| NOT RUN | MG-b / MG-c / MG-d 次序 mutation(两条次序钉的代码与 `e19d48168` 逐字同,未复跑);真库各件(本 lane 无库;`src` 零改动);core-backend 全量(`tests/` 下只改了本守卫一件,由上两行直接覆盖);standalone workflow 在 CI 实跑(零 PR) |
+
+口径变化(与守卫文件头、设计 MD §4.2 同步):人口从「`routes/approvals.ts` 一个文件」改为「`packages/core-backend/src` 下发现到的所有
+`dispatchAction` 调用点」;性质仍是「调用实参里、同一文件内按初始值能静态解析到的对象字面量上的 `expectedVersion` 属性」;
+声明后再赋值、`Object.assign`、拼接键名、非字面量成员名调用、跨文件构造的对象**明写为口径外**(由代码评审负责),
+守卫与两份 MD 不再使用「fail closed」「任何第三个写入点即红」的说法。正控局部变量改用 `__ctl*` 命名并在拼入前断言该名在 `/actions` 内零引用(NIT-c)。

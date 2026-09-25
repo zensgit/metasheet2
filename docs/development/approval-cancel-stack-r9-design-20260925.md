@@ -89,7 +89,8 @@ v3b §5.1 的 hunk 2(`publishApprovalCountsForUsers` 重复声明)在本基线�
 
 RC 让 legacy 决策门(i)只放行在当前节点持有**活跃席位**的人,(ii)把行归属到**服务端派生**的 `nodeKey` /
 `nodeEntryEpoch`(请求体里的两个键被丢弃)。栈底 creation 件里 18 条驱动 legacy 门的腿因此改答案;每条腿在本分支上
-按本门的行为重写,标题带「本栈」,下层的答案留在下层分支历史里。两族:
+按本门的行为重写,标题带「本栈」,下层的答案留在下层分支历史里。「关闭由席位闸承重」是 **RC 层**的读数(本层 legacy 门直接写终态,
+路由席位闸是唯一的闸);栈顶的层依赖见 §4.4 与验证 MD §3.1。两族:
 
 | 族 | 腿 | 本栈答案 |
 |---|---|---|
@@ -105,7 +106,78 @@ RC 让 legacy 决策门(i)只放行在当前节点持有**活跃席位**的人,(
 撤销轮零行、status / version 不变。`V2(a)`:撤销轮席位持有人 A ⇒ 409 `CANCEL_ROUND_OUTLET_FORBIDDEN`,零行。
 把 `/approve` 门的两道闸对调的 mutation 让 `V1(a)` 红(无席位者得 409)。
 
-## 4. 栈顶(H-5 on r9)—— 本节由该分支追加
+## 4. 栈顶 `fix/approval-legacy-approve-settlement-parity-on-r9`(H-5 on r9)
+
+### 4.1 重放与冲突
+
+H-5(`origin/fix/approval-legacy-approve-settlement-parity` = `89f2805c4f…`,相对 RC 的 3 个提交)`cherry-pick -x` 到栈中之上。两处冲突:
+
+| 提交 | 文件 | hunk | 解法 |
+|---|---|---|---|
+| `7d623d361`(legacy 门走共享结算路径) | `routes/approvals.ts` | legacy `/approve` 与 `/reject` 各一处:栈中放在席位闸之后的 `rejectIfCancelRound` 与 H-5 插在同一位置的「H-5 SETTLEMENT PARITY」块 | **出口守卫在前、结算块在后**:席位闸 → `rejectIfCancelRound` → `if (seat.seatGated) { … dispatchAction … }`。理由:`dispatchAction` 的动作闸对撤销轮实例**放行** `approve` / `reject`(在允许集内),所以有席位的 legacy 调用方必须在交给结算路径之前就被出口守卫拒绝(锁 §14.3 #7/#7′),否则 legacy 门会在撤销轮实例上跑普通 approve |
+| `53c42b33e`(版本前置条件钉到共享结算路径) | `services/ApprovalProductService.ts` | `dispatchAction` 事务内、考勤 fail-closed 守卫之后:r8 的 `assertCancelRoundActionAllowed` 与 H-5 的 `expectedVersion` 版本闸 | **F4 (ii),owner 2026-09-25 点名 (b)**:版本闸**先**、`assertCancelRoundActionAllowed` **后** |
+
+v3b §5.2 只列了后者;前者是栈中把 `rejectIfCancelRound` 放在席位闸之后(F4 (i))**引起**的,v3b 的合流树上没有这一格。
+
+### 4.2 F4 (ii) 今天不可观察,由静态守卫钉住(v3b 动作 3,runbook §3b-⑥ 要求)
+
+v3b §5.2.1 实测:`expectedVersion` 只由 legacy 两扇门写入,而两扇门在派发前都用 `rejectIfCancelRound` 拒绝撤销轮实例,
+所以「撤销轮实例 ∧ `expectedVersion` 已设」在 `dispatchAction` 内**在今天的两个写入点下不成立**,(a)/(b) 两序行为等价;
+由 v3b 动作 3 守卫钉住。**守卫口径**(与其文件头一致,本节不扩写):它钉的是「`packages/core-backend/src` 下所有 `.ts` 里
+`dispatchAction` 调用实参中、在同一文件内能静态解析到的对象字面量上名为 `expectedVersion` 的属性」。声明后再赋值
+(`let r = {}; r = build(req)`、`Object.assign(r, …)`)、拼接键名(`r['expected' + 'Version'] = …`)、非字面量成员名的调用
+(`x[name](…)`)、在别的文件构造后传入的对象**不在口径内**,由代码评审负责;守卫是「已声明的人口 × 已声明的性质」的静态普查,
+绿只表示这两者成立。本分支把这件事做成**被测性质**:`tests/unit/approval-legacy-decision-version-precondition-sites.test.ts`:
+
+1. **人口(发现式,不是清单)**:用 TypeScript 编译器 API 解析 `packages/core-backend/src` 下每一个 `.ts`,凡被调用成员名为
+   `dispatchAction` 的调用(`x.dispatchAction(…)` 与 `x['dispatchAction'](…)`,任何接收者)即为普查调用点;routes 文件内的
+   `settleLegacyDecisionThroughSharedPath(…)` 也是(其 `precondition` 实参就是门的写入点)。人口自证:发现到的调用文件与调用点
+   打印并断言 ≥ 下界(下界取今天的读数;读数只记在验证 MD §3.3),且今天已知的三个调用文件必须在其中 —— 新增调用方会被纳入普查
+   而不是漏在外面,扫描器什么都没找到即红。
+2. **性质**:每个普查调用点的请求实参(以及其它本身是内联对象字面量的实参)按对象字面量读,名为 `expectedVersion` 的属性**与拼写
+   无关**(冒号、简写、字符串键、计算属性键、方法名);展开只在同一文件内按**初始值**解析(内联对象字面量 / 对象字面量条件式 /
+   `&&` `||` `??` / 同文件作用域链上标识符的声明初始值),解析不到的请求实参或展开(调用结果、成员访问、导入名或参数名、非字面量
+   计算键)计为「未判定」并报出 —— 负控断言今天为 0,除非在 `ACCEPTED_UNRESOLVED_SPREADS` 具名登记(今天为空)。第二张网只在
+   routes 文件:全文件里 `expectedVersion` 的每一个标识符 / 字符串字面量 mention,除普查到的属性与 helper 自己的两处(形参类型成员、
+   `precondition.expectedVersion` 读取)外一律红。结果:handler 内 **恰 2 处**(两扇门传给 helper 的 precondition 对象),`/actions`
+   内 **0 处**,handler 外 **恰 1 处**(helper 的转发点),routes 以外的调用文件 **0 处**。口径内的第三写入点即红(复活路径 1);
+   守卫自带负控(今天的真实源码树)与正控:在内存里往 `/actions` 拼入简写 / 冒号 / 字符串键 / 计算键 / 同文件 const 展开 / 条件展开
+   各一,断言报出;不可解析展开、参数绑定名展开、非字面量计算键、非字面量请求实参各一,断言报「未判定」;往 routes 以外的两个调用
+   文件 —— 钉钉卡片包装器 `services/ApprovalCardDeliveryAction.ts`(点号与 `['dispatchAction']` 两种写法)与售后桥
+   `services/AfterSalesApprovalBridgeService.ts`(`as` 断言后的字面量)—— 各拼入 `expectedVersion: 1`,断言由普查本身报出;
+3. 每扇 legacy 门内三件的**次序**:`resolveLegacyDecisionSeat` < `rejectIfCancelRound` < 写入点(F4 (i) 的静态钉);任一门少了出口
+   守卫或把它挪到派发之后即红(复活路径 2);
+4. `dispatchAction` 内:`guardAttendanceCentralMutationOrThrow` < `request.expectedVersion` 读取点(恰一行)<
+   `assertCancelRoundActionAllowed`(F4 (ii) 的静态钉);对调即红。
+
+三条 mutation(加第三写入点 / 删 `/reject` 的出口守卫 / 对调 F4 (ii) 序)的读数在验证 MD §3;人口 mutation(守卫人口改回单文件 ⇒
+人口自证与人口正控红)与磁盘上往 routes 以外的调用文件加写入点的读数在验证 MD §3.3。对调 F4 (ii) 序之后再跑真库四件
+(creation / outlet-guards / RC 自带 / H-5 parity)**读数不变** —— 这就是 v3b §5.2.1「今天不可达」的实证,也是为什么裁决落地
+只能靠静态守卫承重。
+
+### 4.3 legacy 门在栈顶的行为(对 C-1 腿的影响)
+
+H-5 让 seat-gated 实例上的 legacy 决策走 `dispatchAction`(节点推进、完成事件),不再由路由直接写终态。栈中重写过的
+18 条 C-1 腿**读数不变**:它们驱动 legacy 门的位置都是图的最后一个审批节点(单节点 / `approval_a` 末位 / `approval_b` 末位),
+共享结算在那里同样落终态;行的 `nodeKey` / `nodeEntryEpoch` 由 `dispatchAction` 写(与栈中 RC 门派生的值相同)。
+`approval-revoke-terminal-guard` (a) 已由 H-5 自己改为「终态且 `current_node_key` 清空」。
+
+### 4.4 栈顶的双闸:路由席位闸在栈顶是纵深,F4 (i) 序的 values-free 性质是它唯一可观察的效果
+
+栈中(§3.2)的两格 mutation 读数 —— 席位闸关掉 ⇒ 无席位者被拒族全红、路由归属置空 ⇒ 服务端归属族全红 —— 是 **RC 层**的:
+那一层 legacy 门直接写终态,路由席位闸与路由归属是唯一的闸和唯一的写入者。栈顶不同:seat-gated 实例经
+`settleLegacyDecisionThroughSharedPath → dispatchAction` 结算,而 `dispatchAction` 自带同码的 403 `APPROVAL_ASSIGNMENT_REQUIRED`
+并自写 `nodeKey` / `nodeEntryEpoch`。于是在栈顶:
+
+- 路由席位闸关掉 ⇒ 无席位者仍被 `dispatchAction` 拒(六条「无席位者被拒」腿保持绿);唯一变化是撤销轮实例上无席位者先撞上
+  `rejectIfCancelRound` 得 409,与普通实例的 403 不再逐字节相同 —— 只有 `V1(a)` 看得见。这就是 F4 (i)(b)「席位闸先」在栈顶的全部
+  可观察内容:一个 values-free 性质(不透露实例种类),由 `V1(a)` 单独钉住;路由闸本身是**纵深**(双闸 fail-closed),不是缺陷。
+- 路由归属置空 ⇒ 无腿变红:该行在栈顶只到非 seat-gated 直写路径,那里 `resolveLegacyDecisionSeat` 本就不返回节点(`nodeKey` 恒 `null`),
+  是语义空变异;seat-gated 行的归属由 `dispatchAction` 写。
+- 非 seat-gated 直写路径上不存在「路由席位闸关掉 ⇒ 红」的腿可补:那条路径的 `allowed` 只取决于 `status === 'pending'`,而两扇门在它之前
+  已有 400,闸关掉不改任何可观察行为(验证 MD §3.1 记为 NOT RUN 并注明原因)。
+
+读数在验证 MD §3.1;§3.2 的「关闭由席位闸承重」按上述限定读。
 
 ## 5. 本栈依赖的 owner 裁决(逐字见 `reviews/goal-72h-autonomous-window-20260925.md` §0;本文不复述为「已 ratify」)
 

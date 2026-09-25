@@ -671,6 +671,119 @@ async function publishApprovalCountsForUsers(
   })))
 }
 
+/**
+ * H-5 — the SETTLEMENT half of the legacy decision doors.
+ *
+ * `POST /api/approvals/:id/approve` and `.../reject` used to write the terminal status and the
+ * audit row THEMSELVES, with raw SQL, for every platform instance — including the ones the
+ * TEMPLATE RUNTIME owns. For a runtime instance that is not a decision, it is a bare status flip:
+ * the node cursor is never advanced (`current_node_key` keeps pointing at the node just decided),
+ * the remaining approvers' seats stay active, no completion event is built or enqueued, and none of
+ * the three completion consumers (`approval-bridge`, `approval-trigger`, `approval-projection`, see
+ * `multitable/automation-routing-manifest.ts`) nor the record form write-back ever hear about it.
+ * On a two-step graph A -> B, a seated approver at A could mark the whole instance `approved`
+ * with B never decided.
+ *
+ * This routes those instances through the SAME service method the `/actions` door calls
+ * (`ApprovalProductService.dispatchAction`) rather than through a second copy of its settlement.
+ * There is deliberately no shared "settlement function" extracted out of `dispatchAction`: its
+ * approve arm is the executor resolution (aggregation modes, parallel regions, auto-approval and
+ * cc cascades, node activation epochs, the completion event) and a second copy of it is precisely
+ * the drift this slice exists to remove.
+ *
+ * The instance row is re-read after the dispatch because `UnifiedApprovalDTO` carries no `version`
+ * and the legacy envelope's `data.version` is part of this route's published shape.
+ *
+ * TWO riders are forwarded besides the comment, and both exist because this door publishes
+ * something `/actions` does not:
+ *
+ *   * `expectedVersion` — the optimistic-lock precondition. The caller's `version` was already
+ *     checked under THIS route's lock, but that lock has to be handed back before the call (the
+ *     settlement re-locks the row on a second connection), so without this rider the check would
+ *     be advisory: it would say "your read was current when you read it", not "your decision is
+ *     being applied to the state you read". Passed down, it is re-checked inside the settlement
+ *     transaction, under the lock the write itself is made under.
+ *   * `reason` — this door's own `approval_records.reason` column, which `/reject` collects under a
+ *     400 `APPROVAL_REJECTION_REASON_REQUIRED` and which the shared writer would otherwise leave
+ *     NULL. `null` for `/approve`, which has never had the column.
+ */
+async function settleLegacyDecisionThroughSharedPath(
+  productService: ApprovalProductService,
+  id: string,
+  action: 'approve' | 'reject',
+  comment: string | null,
+  actor: { userId: string; userName: string; roles: string[]; ip: string | null; userAgent: string | null },
+  precondition: { expectedVersion: number; reason: string | null },
+): Promise<{ status: string; version: number }> {
+  await productService.dispatchAction(
+    id,
+    {
+      action,
+      // The caller's `metadata` is NOT forwarded: `dispatchAction` derives every attribution key
+      // (`nodeKey`, `nodeEntryEpoch`, `nextNodeKey`, `approvalMode`, ...) server-side, and handing
+      // it a client blob would re-open the attribution hole the seat/attribution slice just closed.
+      ...(comment !== null ? { comment } : {}),
+      expectedVersion: precondition.expectedVersion,
+      ...(precondition.reason !== null ? { reason: precondition.reason } : {}),
+    },
+    actor,
+  )
+  if (!pool) {
+    throw new ServiceError('Database not available', 503, 'APPROVALS_DATABASE_UNAVAILABLE')
+  }
+  const settled = await pool.query<{ status: string; version: number | string }>(
+    `SELECT status, version FROM approval_instances WHERE id = $1`,
+    [id],
+  )
+  const row = settled.rows[0]
+  if (!row) {
+    // Unreachable by construction: the dispatch above committed against this very row. Fail closed
+    // rather than answer `ok: true` with a status nobody read.
+    throw new ServiceError('Approval instance not found', 404, 'APPROVAL_NOT_FOUND')
+  }
+  return { status: row.status, version: Number(row.version) }
+}
+
+/**
+ * A `ServiceError` raised by the shared settlement path, rendered in the LEGACY envelope
+ * (`{ ok: false, error }`) that every other refusal on these two routes already uses — the status
+ * code and the error CODE are the service's own, so a refusal keeps its identity instead of being
+ * flattened to `500 APPROVAL_APPROVE_FAILED` by the outer catch. `details` is forwarded when the
+ * service supplied one (it is values-free by the service's own contract, e.g. `{ nodeKey }`).
+ */
+function legacyDecisionServiceErrorResponse(error: ServiceError) {
+  return {
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    },
+  }
+}
+
+/**
+ * ONE 409 SHAPE per endpoint. The optimistic-lock precondition is now checked in TWO places on
+ * these two routes — this route's own pre-check, under its own `FOR UPDATE` lock, and the shared
+ * settlement path's re-check, under the lock the write is actually made under (see
+ * `ApprovalActionRequest.expectedVersion`) — and BOTH are reachable, which one fires depending on
+ * whether a concurrent decision landed inside the window between them.
+ *
+ * Rendering the second one with the generic mapper above would give this endpoint two different
+ * bodies for one error code (`error.currentVersion` from `approvalVersionConflictResponse` vs
+ * `error.details.currentVersion` from the generic mapper), selected by interleaving. So a version
+ * conflict raised by the settlement is rendered in the SAME envelope this route has always
+ * published for one. `fallbackCurrentVersion` is the version this route read under its own lock,
+ * used only if the service ever raises the code without the detail.
+ */
+function legacyDecisionErrorResponse(error: ServiceError, fallbackCurrentVersion: number) {
+  if (error.code === 'APPROVAL_VERSION_CONFLICT') {
+    const detailed = Number(error.details?.currentVersion)
+    return approvalVersionConflictResponse(Number.isFinite(detailed) ? detailed : fallbackCurrentVersion)
+  }
+  return legacyDecisionServiceErrorResponse(error)
+}
+
 export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   const r = Router()
   const productService = getProductService()
@@ -3081,6 +3194,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const client = await pool.connect()
+      // Set by the settlement-parity branch below, which hands the connection back BEFORE the
+      // shared settlement path takes its own one. Guards the inner catch and the `finally` against
+      // touching a released client (a second `release()` throws).
+      let clientReleased = false
       try {
         await client.query('BEGIN')
 
@@ -3162,12 +3279,108 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // never in the cancel-round allowed set at all — action-independent, so this rejects
         // before the action-specific DML below regardless of which legacy verb the request used.
         rejectIfCancelRound(instance, 'legacy POST /:id/approve')
+        // ORDER, continued (F4 (i)): the cancel-round outlet guard above also runs BEFORE the shared
+        // settlement dispatch below — `dispatchAction` admits `approve`/`reject` on a cancel-round
+        // instance (they are in its allowed set), so a seated legacy caller must be refused HERE,
+        // not handed to the settlement path.
+
+        // ── H-5 SETTLEMENT PARITY ─────────────────────────────────────────────────────────────
+        // `seat.seatGated` is TRUE for exactly the instances the `/actions` door dispatches to
+        // `ApprovalProductService.dispatchAction` (`decisionDoorIsSeatGated` and
+        // `isTemplateRuntimeInstance` are the same population: a non-`plm:` id, `source_system`
+        // `'platform'`, and a `published_definition_id`). The same predicate that decides WHO may
+        // decide therefore also decides WHICH settlement applies — one definition, not a second,
+        // narrower copy.
+        //
+        // THE LOCK IS RELEASED FIRST, and this is the slice's one real cost — stated as a clause,
+        // not as a footnote:
+        //
+        //   `dispatchAction` re-locks this same row `FOR UPDATE` on a SECOND pool connection, so
+        //   holding ours across the call is a DETERMINISTIC SELF-DEADLOCK, not a race. We
+        //   therefore hand the connection back before calling it, which means the row is
+        //   UNLOCKED for a window between the checks above and the settlement's own transaction,
+        //   and every precondition this route evaluated above (version, status, attendance, seat)
+        //   was evaluated on a snapshot that another decision may already have replaced.
+        //
+        // What closes the window, per precondition:
+        //   * version — RE-CHECKED inside the settlement transaction, under the settlement's own
+        //     lock, via the `expectedVersion` rider passed below. A concurrent decision that lands
+        //     first makes this call a 409 (same code, same envelope as the pre-check above), not a
+        //     second settlement applied to a state this caller never read.
+        //   * status / seat / round — re-derived by `dispatchAction` from the row it locks itself
+        //     (`status !== 'pending'`, active-assignment admission), so an instance that has since
+        //     ended, or a seat that has since been retired, refuses there.
+        //   * attendance fail-closed — re-run by `guardAttendanceCentralMutationOrThrow` at the
+        //     top of the settlement transaction.
+        //
+        // What is NOT closed, recorded rather than assumed away: the ORDER in which two
+        // simultaneous callers are admitted is the order PostgreSQL grants the row lock, so which
+        // of them gets the 200 and which gets the 409 is not determined by who called first.
+        if (seat.seatGated) {
+          await client.query('ROLLBACK')
+          client.release()
+          clientReleased = true
+          let settled: { status: string; version: number }
+          try {
+            settled = await settleLegacyDecisionThroughSharedPath(
+              productService,
+              id,
+              'approve',
+              comment,
+              {
+                userId,
+                userName,
+                roles: actorRoles,
+                ip: req.ip || null,
+                userAgent: req.get('user-agent') || null,
+              },
+              // `/approve` has never had a `reason` column of its own — only `/reject` does.
+              { expectedVersion: requestedVersion, reason: null },
+            )
+          } catch (settlementError) {
+            if (settlementError instanceof ServiceError) {
+              return res
+                .status(settlementError.statusCode)
+                .json(legacyDecisionErrorResponse(settlementError, instance.version))
+            }
+            throw settlementError
+          }
+          logger.info(`Approval ${id} approved by ${userId} through the shared settlement path`)
+          const settledAssignees = await listDirectApprovalAssigneeIds(id)
+          await publishApprovalCountsForUsers(
+            options,
+            [
+              { userId, roles: actorRoles },
+              ...settledAssignees.map((assigneeId) => ({ userId: assigneeId })),
+            ],
+            'legacy-approve',
+          )
+          // The legacy envelope is unchanged in SHAPE. `status` is now whatever the settlement
+          // reached — `approved`/`rejected` when this decision was terminal, and `pending` when the
+          // instance legitimately advanced to a further node instead of ending here.
+          return res.json({
+            ok: true,
+            data: {
+              id,
+              status: settled.status,
+              version: settled.version,
+              prevVersion: instance.version,
+            },
+          })
+        }
         // The ROUND half of the attribution, resolved by the door's OWN resolver
         // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
-        // `DISTINCT entry_epoch` query, and called ONLY for a seat-gated instance whose node the
-        // actor was just admitted at — so the resolver's "no active assignments" fail-closed branch
-        // (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) is unreachable from here, and a non-seat-gated legacy
-        // row (which has no assignments at all) never reaches it.
+        // `DISTINCT entry_epoch` query.
+        //
+        // REACHABILITY, CORRECTED by the settlement-parity branch above (it used to read "called
+        // ONLY for a seat-gated instance"): every seat-gated instance now RETURNS above, so control
+        // reaches this line only on a NON-seat-gated legacy platform row. `seat.nodeKey` is `null`
+        // for those by construction (`resolveLegacyDecisionSeat` returns attribution only for a
+        // seat-gated instance), so the resolver is not called at all here and its "no active
+        // assignments" fail-closed branch (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) stays unreachable —
+        // the same conclusion as before, reached for the opposite reason. What survives below is
+        // the STRIP half of `sanitizeLegacyDecisionMetadata`: a client-supplied `nodeKey` /
+        // `nodeEntryEpoch` is still dropped from a row no server-side seat can vouch for.
         //
         // KNOWN GAP, recorded rather than assumed away: this route does NOT dispatch through
         // `handleApprovalsError`, so a `ServiceError` thrown here does not keep its code. The outer
@@ -3234,10 +3447,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           },
         })
       } catch (innerError) {
-        await client.query('ROLLBACK')
+        if (!clientReleased) {
+          await client.query('ROLLBACK')
+        }
         throw innerError
       } finally {
-        client.release()
+        if (!clientReleased) {
+          client.release()
+        }
       }
     } catch (error) {
       // Lock §14.3 outlet #7 — this catch does NOT call `handleApprovalsError` (unlike almost
@@ -3302,6 +3519,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const client = await pool.connect()
+      // Set by the settlement-parity branch below, which hands the connection back BEFORE the
+      // shared settlement path takes its own one. Guards the inner catch and the `finally` against
+      // touching a released client (a second `release()` throws).
+      let clientReleased = false
       try {
         await client.query('BEGIN')
 
@@ -3383,12 +3604,112 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // instance `rejected` with the round still `pending`, a permanent placeholder that blocks
         // re-issuing a cancel round for the same document (§5 I3 "terminal releases the slot").
         rejectIfCancelRound(instance, 'legacy POST /:id/reject')
+        // ORDER, continued (F4 (i)): the cancel-round outlet guard above also runs BEFORE the shared
+        // settlement dispatch below — `dispatchAction` admits `approve`/`reject` on a cancel-round
+        // instance (they are in its allowed set), so a seated legacy caller must be refused HERE,
+        // not handed to the settlement path.
+
+        // ── H-5 SETTLEMENT PARITY ─────────────────────────────────────────────────────────────
+        // `seat.seatGated` is TRUE for exactly the instances the `/actions` door dispatches to
+        // `ApprovalProductService.dispatchAction` (`decisionDoorIsSeatGated` and
+        // `isTemplateRuntimeInstance` are the same population: a non-`plm:` id, `source_system`
+        // `'platform'`, and a `published_definition_id`). The same predicate that decides WHO may
+        // decide therefore also decides WHICH settlement applies — one definition, not a second,
+        // narrower copy.
+        //
+        // THE LOCK IS RELEASED FIRST, and this is the slice's one real cost — stated as a clause,
+        // not as a footnote:
+        //
+        //   `dispatchAction` re-locks this same row `FOR UPDATE` on a SECOND pool connection, so
+        //   holding ours across the call is a DETERMINISTIC SELF-DEADLOCK, not a race. We
+        //   therefore hand the connection back before calling it, which means the row is
+        //   UNLOCKED for a window between the checks above and the settlement's own transaction,
+        //   and every precondition this route evaluated above (version, status, attendance, seat)
+        //   was evaluated on a snapshot that another decision may already have replaced.
+        //
+        // What closes the window, per precondition:
+        //   * version — RE-CHECKED inside the settlement transaction, under the settlement's own
+        //     lock, via the `expectedVersion` rider passed below. A concurrent decision that lands
+        //     first makes this call a 409 (same code, same envelope as the pre-check above), not a
+        //     second settlement applied to a state this caller never read.
+        //   * status / seat / round — re-derived by `dispatchAction` from the row it locks itself
+        //     (`status !== 'pending'`, active-assignment admission), so an instance that has since
+        //     ended, or a seat that has since been retired, refuses there.
+        //   * attendance fail-closed — re-run by `guardAttendanceCentralMutationOrThrow` at the
+        //     top of the settlement transaction.
+        //
+        // What is NOT closed, recorded rather than assumed away: the ORDER in which two
+        // simultaneous callers are admitted is the order PostgreSQL grants the row lock, so which
+        // of them gets the 200 and which gets the 409 is not determined by who called first.
+        if (seat.seatGated) {
+          await client.query('ROLLBACK')
+          client.release()
+          clientReleased = true
+          let settled: { status: string; version: number }
+          try {
+            settled = await settleLegacyDecisionThroughSharedPath(
+              productService,
+              id,
+              'reject',
+              comment ?? reason,
+              {
+                userId,
+                userName,
+                roles: actorRoles,
+                ip: req.ip || null,
+                userAgent: req.get('user-agent') || null,
+              },
+              // `reason` is this door's OWN persisted column, and this door 400s without it
+              // (`APPROVAL_REJECTION_REASON_REQUIRED` above). It is carried into the settlement's
+              // audit insert, in the settlement's own transaction — the same two values the
+              // inline DML below has always written: `comment` = the caller's comment (falling
+              // back to the reason text when they sent only a reason), `reason` = the reason.
+              { expectedVersion: requestedVersion, reason },
+            )
+          } catch (settlementError) {
+            if (settlementError instanceof ServiceError) {
+              return res
+                .status(settlementError.statusCode)
+                .json(legacyDecisionErrorResponse(settlementError, instance.version))
+            }
+            throw settlementError
+          }
+          logger.info(`Approval ${id} rejected by ${userId} through the shared settlement path`)
+          const settledAssignees = await listDirectApprovalAssigneeIds(id)
+          await publishApprovalCountsForUsers(
+            options,
+            [
+              { userId, roles: actorRoles },
+              ...settledAssignees.map((assigneeId) => ({ userId: assigneeId })),
+            ],
+            'legacy-reject',
+          )
+          // The legacy envelope is unchanged in SHAPE. `status` is now whatever the settlement
+          // reached — `approved`/`rejected` when this decision was terminal, and `pending` when the
+          // instance legitimately advanced to a further node instead of ending here.
+          return res.json({
+            ok: true,
+            data: {
+              id,
+              status: settled.status,
+              version: settled.version,
+              prevVersion: instance.version,
+            },
+          })
+        }
         // The ROUND half of the attribution, resolved by the door's OWN resolver
         // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
-        // `DISTINCT entry_epoch` query, and called ONLY for a seat-gated instance whose node the
-        // actor was just admitted at — so the resolver's "no active assignments" fail-closed branch
-        // (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) is unreachable from here, and a non-seat-gated legacy
-        // row (which has no assignments at all) never reaches it.
+        // `DISTINCT entry_epoch` query.
+        //
+        // REACHABILITY, CORRECTED by the settlement-parity branch above (it used to read "called
+        // ONLY for a seat-gated instance"): every seat-gated instance now RETURNS above, so control
+        // reaches this line only on a NON-seat-gated legacy platform row. `seat.nodeKey` is `null`
+        // for those by construction (`resolveLegacyDecisionSeat` returns attribution only for a
+        // seat-gated instance), so the resolver is not called at all here and its "no active
+        // assignments" fail-closed branch (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) stays unreachable —
+        // the same conclusion as before, reached for the opposite reason. What survives below is
+        // the STRIP half of `sanitizeLegacyDecisionMetadata`: a client-supplied `nodeKey` /
+        // `nodeEntryEpoch` is still dropped from a row no server-side seat can vouch for.
         //
         // KNOWN GAP, recorded rather than assumed away: this route does NOT dispatch through
         // `handleApprovalsError`, so a `ServiceError` thrown here does not keep its code. The outer
@@ -3456,10 +3777,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           },
         })
       } catch (innerError) {
-        await client.query('ROLLBACK')
+        if (!clientReleased) {
+          await client.query('ROLLBACK')
+        }
         throw innerError
       } finally {
-        client.release()
+        if (!clientReleased) {
+          client.release()
+        }
       }
     } catch (error) {
       // Lock §14.3 outlet #7′ — same rationale as the `/approve` catch above: this catch does not

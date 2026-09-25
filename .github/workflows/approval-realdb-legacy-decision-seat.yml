@@ -17,6 +17,17 @@ name: Approval real-DB acceptance (legacy decision seat + node attribution)
 #     Every refusal is asserted by error code, never by the bare 403 that `rbacGuard` also returns,
 #     AND by a zero-row delta on `approval_records` plus an unchanged status/version — "refused
 #     before the write" is the claim, so the rows are counted rather than described.
+#   - tests/integration/approval-legacy-decision-settlement-parity.db.test.ts —
+#     the OTHER half of the same two endpoints: a decision they ADMIT must be SETTLED by the
+#     template runtime, not written by the route. Two sibling instances of one template are decided
+#     through the two doors and compared field by field (instance cursor / step counters, seat rows
+#     and their epochs, audit rows and their metadata, terminal metrics), with generated ids,
+#     request numbers and timestamps normalised and the SIZE of the comparison asserted so it
+#     cannot degrade into comparing two empty objects. Differential equality alone cannot catch a
+#     regression that hits BOTH doors, so it is paired with absolute cases naming the post-state
+#     (the cursor advances to the next node; a terminal decision clears the cursor, records the
+#     terminal metric, and makes the instance un-revokable), plus the forgery family re-run
+#     against the settlement path.
 # Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
@@ -43,10 +54,15 @@ on:
     # filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-legacy-decision-seat-and-node-attribution.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-legacy-decision-settlement-parity.db.test.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/services/approval-seat-authorization.ts'
       - 'packages/core-backend/src/services/approval-actor-roles.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      # The service request contract itself (`ApprovalActionRequest`): the settlement-parity
+      # suite pins two riders declared here (`reason`, `expectedVersion`), so a change to the
+      # contract ALONE — without touching the route or the service — must still run this lane.
+      - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'
@@ -55,10 +71,15 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-legacy-decision-seat-and-node-attribution.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-legacy-decision-settlement-parity.db.test.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/services/approval-seat-authorization.ts'
       - 'packages/core-backend/src/services/approval-actor-roles.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      # The service request contract itself (`ApprovalActionRequest`): the settlement-parity
+      # suite pins two riders declared here (`reason`, `expectedVersion`), so a change to the
+      # contract ALONE — without touching the route or the service — must still run this lane.
+      - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'
@@ -131,12 +152,23 @@ jobs:
           tests/integration/approval-legacy-decision-seat-and-node-attribution.db.test.ts
           --reporter=verbose
 
+      - name: Run legacy-decision settlement parity real-DB acceptance (whole file)
+        # Second suite in the SAME lane (same services block, same migrated database) rather than a
+        # second workflow file: it pins the OTHER half of the same two endpoints — that a decision
+        # they admit is SETTLED by the template runtime exactly as `/actions` settles it. WHOLE
+        # FILE, --reporter=verbose, for the same reason as the step above.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-legacy-decision-settlement-parity.db.test.ts
+          --reporter=verbose
+
       - name: Values-free evidence (this job)
         run: |
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
-            echo "suites=approval-legacy-decision-seat-and-node-attribution.db.test.ts"
-            echo "scope=legacy POST /:id/approve and /:id/reject admission (seat, round, status) plus server-derived node attribution; seatless refusals with zero-row deltas, seated positive control, forged-node-key discriminator, role seat from a user_roles row, settled-round refusal, terminal-status refusal, not-seat-gated status quo, /actions parity"
+            echo "suites=approval-legacy-decision-seat-and-node-attribution.db.test.ts,approval-legacy-decision-settlement-parity.db.test.ts"
+            echo "scope=legacy POST /:id/approve and /:id/reject admission (seat, round, status) plus server-derived node attribution; seatless refusals with zero-row deltas, seated positive control, forged-node-key discriminator, role seat from a user_roles row, settled-round refusal, terminal-status refusal, not-seat-gated status quo, /actions parity; AND settlement parity with /actions (differential snapshot of instance cursor, seats, audit rows and metrics across two sibling instances, absolute post-state, terminal revoke refusal, forgery family)"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
