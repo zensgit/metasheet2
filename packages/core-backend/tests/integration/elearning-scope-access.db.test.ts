@@ -665,9 +665,20 @@ describe('elearning L1 scope/access gate (real DB)', () => {
       // DISABLE TRIGGER takes ShareRowExclusiveLock, which waits on autovacuum's
       // ShareUpdateExclusiveLock (including VacuumTruncate). That wait does not
       // resolve inside the 30s budget: passing runs of this test are ~1.3–1.7s,
-      // and the failures stop at exactly 30000ms. Replica role skips user triggers
-      // for this update only and does not lock the table. It is restored before
-      // scope rows are inserted, so those foreign keys still fire.
+      // and the failures stop at exactly 30000ms.
+      // session_replication_role = replica skips that user trigger and does not
+      // take the lock. It also disables foreign-key checks for this UPDATE,
+      // because PostgreSQL implements foreign keys as triggers. The UPDATE sets
+      // only status and updated_at; it does not modify the FK columns org_id
+      // and course_id. The role is restored to origin before the following
+      // statements, so only those inserts (and the later scope/course updates)
+      // get normal foreign-key checks. withRolledBackDb rolls this transaction
+      // back, so the skipped checks do not persist. Setting the parameter
+      // requires a superuser on PostgreSQL 14, which is what CI runs. On
+      // PostgreSQL 15+ a role can instead be granted SET ON PARAMETER
+      // session_replication_role. CI connects as the bootstrap superuser
+      // postgres (ankane/setup-postgres user: postgres; DATABASE_URL user
+      // postgres).
       await client.query(`SET LOCAL session_replication_role = replica`)
       try {
         await client.query(
