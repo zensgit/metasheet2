@@ -45,6 +45,12 @@ r9 的改动无一回退:`git diff --name-only b8b71539a d8e08ac16` 的 397 个�
 
 见设计 MD §3(逐函数:席位推导 **改**、资格重验 **改**、种子可见性 **改**、`index.ts` **改**;策略 / 窗口推导、结算、返还 / 冲正 helper、W4 边界、读面、Resolver、rbac **未变**;对每项给出「C-2 的假设是否仍成立」)。函数体比对方法:从两侧文件按签名抽取到同缩进的闭合行后 `cmp`。
 
+**round 2 补记(门审 NIT-3)——C-2 调用到的 C-1 侧文件中,round 1 漏列的一个**。它不在 §2 的 18 个文件里(C-2 源 diff `git diff --stat b8b71539a 65c1d2cdb -- <文件>` 为空,所以不是重放漂移),而是 r9 相对 `b8b71539a` 改了、且 C-2 夹具经 `createCancelRoundInstance` 间接依赖(读种子发布定义)的文件:
+
+| 文件 | r9 相对 `b8b71539a` | 漂移的块(`git diff b8b71539a d8e08ac16 -- <文件>`)| 原因 | C-2 假设 |
+|---|---|---|---|---|
+| `packages/core-backend/src/db/migrations/zzzz20260918100000_seed_approval_cancel_round_published_definition.ts` | **改**(+21/−2,5 块)| `@@ -36,6 +36,7 @@` import `CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE`;`@@ -70,14 +71,26 @@` `INSERT INTO approval_templates` 列表加 `visibility_scope`,值 `${visibilityScopeJson}::jsonb`(显式写,不落列默认 `{"type":"all"}`),并附解释注释;`@@ -136,6 +149,7 @@` / `@@ -146,6 +160,7 @@` `verifySeedRowsMatchExpected` 的结果类型与 SELECT 加 `t.visibility_scope AS template_visibility_scope`;`@@ -162,6 +177,10 @@` 幂等核对加 `canonicalJson(row.template_visibility_scope) === canonicalJson(CANCEL_ROUND_TEMPLATE_VISIBILITY_SCOPE)`(`ON CONFLICT DO NOTHING` 留下旧行时不再静默报成功)| r9 的种子可见性哨兵,与 seed 模块 +64 同族(设计 MD §3「种子模板可见性」行)| **成立且不相关**:`createCancelRoundInstance` 函数体内 `templateVisibleAtCreateBoundary` / `visibility_scope` / `VISIBILITY` 零命中(门审 ④b),可见性闸只在公开 `createApproval`;`seed-template-visibility` 7/7、`creation` 64/64 在新头绿(§4)|
+
 ## 4. 读数(全部在新头树 + 一次性库上)
 
 | 跑 | 读数 |
@@ -80,6 +86,8 @@ r9 的改动无一回退:`git diff --name-only b8b71539a d8e08ac16` 的 397 个�
 
 结论:白名单投影在本 head 上完好(有读权者拿到的字段正确且只含 `cancellationOutcome` / `cancelRoundCloseReason`);**谁能读到**由 `rbacGuard('approvals','read')` + 目录 + 授予决定——本 head 目录无该码、零授予 ⇒ 未授予的普通申请人今天拿到 **403**。这是 owner 开放项(§3-22 第 22 项、§J-14/18 授予对象)的现状,不是本分支要修的缺陷;本分支未改守卫、目录或授予。
 
+**§6 两条交互腿的读者令牌(round 2 同步,门审 NIT-4)**:两条腿传给 `expectProjectedOutcome` 的 `requesterToken` 由文件内 `authToken`(`approval-cancel-round-redemption.db.test.ts:102-111`)铸出,和该文件所有身份一样是 `roles=admin&perms=*:*` 的管理员角色开发令牌——过 `rbacGuard('approvals','read')` 走的是 admin 旁路,之后再过参与者围栏。因此两条腿证明的是「**有读权者**(且是参与者)拿到的字段正确、且只含白名单键」,**不**证明普通申请人可读;普通申请人今天的 403 由上面的探针单独记录。腿的说明文字(helper docblock `:4321-4338`、两处调用点注释 `:4446-4447` / `:4585-4586`)在 round 2 已按此写实。
+
 席位臂实测(D-4(a)):已兑现轮的 `approval_assignments` = `[{assignee_id: <审批人>, assignment_type: 'user', node_key: 'cancel_approval', is_active: false}]`;§6 两条腿另在 reading-(a) 还原席位与跳过节点席位上读到同样的 `'user'`。
 
 ## 6. Mutation 台账(对两条交互腿,`-t 'r9 × phase 2'`;每格 `cp` 备份 → 改 → 跑 → `cp` 还原 → sha256 与原件相同)
@@ -108,10 +116,36 @@ r9 的改动无一回退:`git diff --name-only b8b71539a d8e08ac16` 的 397 个�
 ## 8. NOT RUN(如实)
 
 - `apps/web` 的 `vue-tsc` 与任何 web 测试(零改动)。
-- 带 DB 的全量;投影候选 r1 / r2 的 mutation 网格全部复跑(只复跑了本轮五格);r9 栈顶(RC + H-5)树上的 C-2(本分支只建在 r9 底层)。
+- 带 DB 的全量;投影候选 r1 / r2 的 mutation 网格全部复跑(只复跑了本轮五格);r9 栈顶(RC + H-5)树上的 C-2(本分支只建在 r9 底层;round 2 补记,门审 NIT-5:H-5-on-r9 `fix/approval-legacy-approve-settlement-parity-on-r9` 头已由 L-A2 推进到 `e19d48168c243860d697fb75964d6c7b1a91a3e4`,round 2 `ls-remote` 复核;栈顶合树上的 C-2 仍未跑,另起 lane)。
 - 生产语料普查;真浏览器;`RBAC_TOKEN_TRUST` 未设(生产形状)下的 403 复测(本探针在 integration 配置的 `RBAC_TOKEN_TRUST=true` 下测,非特权令牌 `perms=[]` 使守卫仍落到 DB 查询;守卫代码路径见 `rbac/rbac.ts:65-108`)。
 - CI 实跑(零 PR)。
 
 ## 9. 登记(未做)
 
 M-2 / M-3 / M-4(§J-19 范围外);D-5 量纲 doc comment;投影候选门审 r1 P3-2 / P3-3、r2 P3-A / P3-B / P3-C / P3-D 原样重放未硬化;详见设计 MD §9。
+
+## 10. round 2(L-D2,2026-09-25;收门审 `impl-gate-c2-projection-on-r9-round1-20260925.md` 的 NIT;只改 `.md`、测试说明文字与生产源码注释,零行为改动)
+
+| 门审项 | 处置 | 位置 |
+|---|---|---|
+| NIT-1「两面无 `nodeKey`」过强 | 按读面分列:历史面无 `nodeKey`(SELECT `routes/approval-history.ts:221-241` 无 `metadata` / `node_key` 列,`:284-293` 逐 key 重建);详情面合法带 `currentNodeKey` / `assignments[].nodeKey`(`ApprovalBridgeService.ts:328` `toUnifiedDTO` 的 `:364` / `:371`,`getApproval` `:934` 调用)。腿的断言范围照旧(历史面 `:4357-4359`,详情面 `:4363-4364`)| 设计 MD §7 |
+| NIT-2 源码注释「申请人刷新可读」无条件 | `ApprovalProductService.ts` 该注释块改为有条件:过 `rbacGuard('approvals','read')` + 参与者围栏的读者(今天 = admin 旁路,或 `approvals:read` 持有者——目录无该码、零授予)读到同两值;无授予的普通申请人今天 403,能否读取决于 owner 未裁的挂载侧与授予。只改注释行,每个改动行以 `//` 开头 | APS 注释 |
+| NIT-3 seed 迁移未列 | §3 补表(逐块 + 原因 + 假设);设计 MD §3 同行补记 | 本文 §3 |
+| NIT-4 腿的读者令牌 | helper docblock 与两处调用点注释写明:admin 角色 dev-token,证「有读权者拿到的字段正确且只含白名单」,不证普通申请人可读;§5 同步 | 测试说明 + 本文 §5 |
+| NIT-5 H-5-on-r9 头前移 | 登记新头 `e19d48168c243860d697fb75964d6c7b1a91a3e4`;栈顶合树上的 C-2 仍 NOT RUN,另起 lane | 本文 §8 |
+| P3-1 runbook §6 例外按分支名钉在源分支 | 已由 `merge-day-runbook-v3-20260922.md` §6 停止规则下的那句「补(20260925,L-D 门审 P3-1)」补正(此处引用、不复制):替换分支经 `cherry-pick -x` 带来同一行的提交 `72284432e`,在 owner 把该分支放进合并序时适用同一例外;放不放进合并序仍是 owner 决定。本分支不改 runbook | runbook §6 |
+| P3-2 尾注与模型记录互斥 | 事实:round 1 提交 `9232cea391329f8b36e0568cfa859474bbc28594` 尾注写 `Claude Opus 5.5 (1M context)`,而 round 1 私有记录抬头 `[MODEL=fable]`、调度侧把 L-D 记为 Fable 5.1 ⇒ 尾注与实际模型不符(调度侧结论)。本 lane 不 amend、不 force-push、不改历史提交,只登记;round 2 的提交尾注按实际运行模型写 | 私有记录 round 2 |
+
+### 10.1 round 2 读数(新头树,本 lane 不建库)
+
+| 跑 | 读数 |
+|---|---|
+| `tsc --noEmit -p packages/core-backend/tsconfig.json` | **EXIT 0 / 0 行** |
+| redemption 件收集检查(无 `DATABASE_URL` / `EXPECT_DB`,`vitest.integration.config.ts`;vitest 1.6.1 无 `list` 子命令,以文件自带 `describeIfDatabase` 全跳代替)| **1 file / 36 tests collected / 36 skipped / 0 failed / EXIT 0**(证明文件仍能解析、转译、注册 36 个用例)|
+| 单元 `approval-product-service` + `approval-cancel-round-ci-wiring`(`CI=true`,无 DB)| **2 files / 192 passed / EXIT 0** |
+| 真库任何件 | **NOT RUN**(本 lane 不建库;改动只有 `.md`、测试说明文字与源码注释)|
+| 改动形状(相对 round 1 头 `9232cea39`)| 4 文件:本文、设计 MD、redemption 件(**+22/−1,全部注释 / docblock**)、`ApprovalProductService.ts`(**+9/−4,全部注释行**)|
+
+### 10.2 署名核
+
+新提交在 `id.out` / `mail.out` 的命中由私有记录 `reviews/impl-c2-projection-on-r9-round2-20260925.md` 登记(本文件随该提交落下,不能自引其 SHA);预期与 round 1 同形:`id.out` 48(集合同 round 1)、`mail.out` 1(仍是 `72284432e` 那一行)。
