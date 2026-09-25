@@ -32,8 +32,8 @@
  *
  * PARSING CONTRACT
  * ----------------
- * Every guard that reads this script must: strip whole-line `#` comments, JOIN backslash
- * continuations into logical lines, and only then look for the exec invocation. A physical-line
+ * Every guard that reads this script must: JOIN backslash continuations into logical lines the
+ * way bash actually does, and only then look for the exec invocation. A physical-line
  * `line.startsWith('exec npx vitest run ')` parse now sees a header whose only "token" is the
  * continuation backslash. This file states that contract and the three guards that used the
  * physical-line form were converted in the same commit:
@@ -43,6 +43,33 @@
  * Three other parsers already joined continuations and needed no change (verified, not assumed):
  * approval-ci-coverage-enumeration.test.ts:118-131, network-unavailable-copy-ci-wiring.test.ts:63-66,
  * scripts/ops/elearning-media-ci-wiring.test.mjs:253-268, apps/web/tests/AttendanceReportFieldsSection.spec.ts:137.
+ *
+ * P2-2 FIX (independent gate finding, 2026-09-22, `impl-gate-shape-guard-no-trailing-line-20260922.md`):
+ * the fold order above used to be "strip whole-line `#` comments, THEN join continuations" —
+ * the opposite of what bash does. Bash removes `\<newline>` pairs character-by-character before
+ * it ever looks for a comment, so a `#` that a rebase drops onto what continuation-folding would
+ * otherwise treat as a mid-block physical line does NOT get silently deleted — it starts a real
+ * comment that TERMINATES the logical command right there, regardless of whether that comment's
+ * own physical line ends in a trailing `\` (measured empirically with `bash -x` on a throwaway
+ * script; see the PR body for the transcript). The old strip-then-fold order instead glued the
+ * tokens on either side of the `#` into one unbroken logical line, so this file's parsed view of
+ * the script and bash's real argv silently disagreed. `logicalLinesWithLineNumbers()` below now
+ * folds in bash's order: a `#`-prefixed physical line encountered OUTSIDE any continuation is
+ * still fully invisible (never begins a logical line, exactly as before); a `#`-prefixed physical
+ * line encountered INSIDE a continuation flushes whatever is buffered and resumes folding fresh
+ * at the very next physical line — never re-attached to what came before.
+ *
+ * COUNTED, NOT ASSUMED (N-2/N-5, same gate): three independent copies of this fold exist —
+ * this file's `logicalLinesWithLineNumbers()` (now bash-correct, and the one enforced in the
+ * always-on REQUIRED lane), `apps/web/tests/attendance-web-guard-workflow.spec.ts`'s
+ * `logicalLinesWithLineNumbers()` (fixed in the same commit, since `requiredLaneExecCommand()`
+ * there depends on it for unrelated semantic assertions), and
+ * `apps/web/tests/run-required-web-tests-shape.spec.ts`'s `logicalLines()` (UNCHANGED — still the
+ * old strip-then-fold order; not reachable today because neither the live block nor any sibling
+ * script carries an in-block comment, but it is the one remaining place a future rebase could
+ * reintroduce this exact silent-truncation shape undetected by that file specifically). Fixing it
+ * is out of this PR's stated scope (P2-2's own remedy says the fix belongs in the required lane);
+ * recorded here so "two copies, kept in sync" is never claimed as three-for-three.
  *
  * Values-free: this file reads only repo-tracked script text and asserts on token names.
  */
@@ -58,34 +85,80 @@ const REQUIRED_LANE = join(REPO_ROOT, 'apps', 'web', 'scripts', 'run-required-we
 const SECOND_REGISTRATION_POINT = join(REPO_ROOT, 'scripts', 'ops', 'integration-guard-run-web-specs.sh')
 const GITATTRIBUTES = join(REPO_ROOT, '.gitattributes')
 
-/**
- * Strip whole-line `#` comments, then fold backslash continuations into logical lines.
- *
- * Only a line whose LAST non-whitespace character is `\` continues. The backslash is dropped and
- * a single space joins the pieces, which is exactly how bash hands the argv to vitest.
- */
-export function logicalLines(scriptSrc: string): string[] {
-  const kept = scriptSrc
-    .split('\n')
-    .map((line) => line.replace(/\r$/, ''))
-    .filter((line) => !/^\s*#/.test(line))
+export interface LogicalLine {
+  line: string
+  /** 1-indexed physical line the logical line's FIRST physical line starts at. */
+  lineNumber: number
+}
 
-  const out: string[] = []
+/**
+ * Fold backslash continuations into logical lines IN BASH'S ORDER, with each logical line paired
+ * with the 1-indexed physical line it starts at.
+ *
+ * A line whose LAST non-whitespace character is `\` continues; the backslash is dropped and a
+ * single space joins the pieces, which is exactly how bash hands the argv to vitest.
+ *
+ * `#` handling is where this differs from a naive "strip comments, then fold" parse (P2-2,
+ * 2026-09-22 — see the PARSING CONTRACT doc comment above for the full bash-semantics writeup):
+ *   - a `#`-prefixed physical line seen OUTSIDE any continuation (`buf === null`) never begins a
+ *     logical line and is fully invisible, same as before;
+ *   - a `#`-prefixed physical line seen INSIDE a continuation (`buf !== null`) flushes the buffer
+ *     as-is and resumes folding fresh at the NEXT physical line — it does not get glued to either
+ *     side, because bash's real command boundary falls exactly there.
+ *
+ * A blank physical line (not a comment, no trailing backslash) folds into its own zero-token
+ * logical line rather than disappearing — load-bearing for the "nothing after exec" assertion
+ * below, which must tell "an empty line after exec" (fine) apart from "nothing after exec" (also
+ * fine) without confusing either with "a dead token block after exec" (not fine): all three parse
+ * to different shapes only if blank lines survive the fold as visible, empty entries.
+ */
+export function logicalLinesWithLineNumbers(scriptSrc: string): LogicalLine[] {
+  const physical = scriptSrc.split('\n').map((line) => line.replace(/\r$/, ''))
+  const out: LogicalLine[] = []
   let buf: string | null = null
-  for (const raw of kept) {
+  let bufStart = -1
+  for (let i = 0; i < physical.length; i += 1) {
+    const raw = physical[i]
+    const isCommentLine = /^\s*#/.test(raw)
+    if (buf === null) {
+      if (isCommentLine) continue
+      bufStart = i + 1
+      const trimmedRight = raw.replace(/\s+$/, '')
+      const continued = trimmedRight.endsWith('\\')
+      const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
+      if (continued) {
+        buf = body
+      } else {
+        out.push({ line: body, lineNumber: bufStart })
+      }
+      continue
+    }
+    if (isCommentLine) {
+      // BASH SEMANTICS (measured, not assumed): the comment terminates the logical line right
+      // here — including when this physical line itself ends in `\` — and the NEXT physical line
+      // starts a brand-new logical line, never re-attached to what came before.
+      out.push({ line: buf, lineNumber: bufStart })
+      buf = null
+      continue
+    }
     const trimmedRight = raw.replace(/\s+$/, '')
     const continued = trimmedRight.endsWith('\\')
     const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
-    buf = buf === null ? body : `${buf} ${body}`.trim()
+    buf = `${buf} ${body}`.trim()
     if (!continued) {
-      out.push(buf)
+      out.push({ line: buf, lineNumber: bufStart })
       buf = null
     }
   }
   // A trailing continuation with nothing after it: keep what we have so the caller can still see
   // (and fail on) the malformed invocation rather than silently losing it.
-  if (buf !== null) out.push(buf)
+  if (buf !== null) out.push({ line: buf, lineNumber: bufStart })
   return out
+}
+
+/** Logical lines only, dropping the line-number pairing — most callers just want the text. */
+export function logicalLines(scriptSrc: string): string[] {
+  return logicalLinesWithLineNumbers(scriptSrc).map((entry) => entry.line)
 }
 
 /** The one logical line that `exec`s vitest. Throws if there is not exactly one. */
@@ -193,6 +266,70 @@ describe('required web lane registration block — structural shape', () => {
       expect(line.startsWith('  '), `exec block line must be indented two spaces: ${JSON.stringify(line)}`).toBe(true)
     }
     expect(body[body.length - 1].trim(), 'the block must end on the reporter flag').toBe('--reporter=dot')
+  })
+
+  it('the exec continuation block contains no physical line beginning with `#` (bash truncates argv there, not the guard)', () => {
+    // P2-2 (independent gate finding, 2026-09-22): a `#`-prefixed physical line INSIDE the exec
+    // continuation block is not a documentation comment as far as bash is concerned — it is where
+    // the continuation chain, and the whole logical command, TERMINATES. Measured with `bash -x`:
+    // inserting `  #note \\` between two token lines of the live 399-token exec invocation drops
+    // the argv bash actually passes to vitest from 399 tokens to 1 (only the token before the `#`
+    // survives — even `--reporter=dot` is gone), while the OLD strip-then-fold parsing contract
+    // stayed green on every guard that used it, because it deleted the comment and glued the
+    // tokens on either side into one unbroken (and wrong) logical line.
+    //
+    // Fixing `logicalLinesWithLineNumbers()` to fold in bash's order (see the PARSING CONTRACT
+    // doc comment) already makes `carries no duplicate token` and `ends with --reporter=dot`
+    // below red as a SIDE EFFECT of the truncated exec logical line. This assertion exists anyway
+    // as a direct, physical-line-level check that names the offending line, rather than relying on
+    // an incidental side effect of a different invariant to point at the right place.
+    const lines = script.split('\n').map((line) => line.replace(/\r$/, ''))
+    const header = lines.findIndex((line) => line === 'exec npx vitest run \\')
+    expect(header, 'the exec block must open with the bare `exec npx vitest run \\` header').toBeGreaterThan(-1)
+
+    const body: string[] = []
+    let i = header + 1
+    for (; i < lines.length; i += 1) {
+      body.push(lines[i])
+      if (!lines[i].replace(/\s+$/, '').endsWith('\\')) break
+    }
+
+    const offenders = body
+      .map((line, index) => ({ line, physicalLine: header + 2 + index }))
+      .filter(({ line }) => /^\s*#/.test(line))
+      .map(({ line, physicalLine }) => `line ${physicalLine}: ${JSON.stringify(line)}`)
+    expect(
+      offenders,
+      'a `#`-prefixed physical line inside the exec continuation block silently truncates the ' +
+      'argv bash actually passes to vitest — every token after it is registered here but runs in no CI job at all',
+    ).toEqual([])
+  })
+
+  it('has no non-empty logical line anywhere after the required lane exec block', () => {
+    // P2-1 (independent gate finding, 2026-09-22): this invariant previously lived ONLY in
+    // apps/web/tests/attendance-web-guard-workflow.spec.ts, which `attendance-web-guard.yml` runs
+    // solely when its changed-file classifier judges the diff `relevant` — and that classifier's
+    // push paths and PR case block both omit `apps/web/scripts/**` entirely (grep: zero hits). A
+    // PR shaped exactly like the three incident fix commits this file's header describes (each
+    // `git show --stat` = "1 file changed", touching only this script) would classify
+    // `relevant=false` and never run that spec — so a dead block silently reintroduced by a rebase
+    // would sail past CI a second time. Placed here instead: this file is collected by the
+    // required, path-filter-free `test (20.x)` / `test (18.x)` context (`pnpm --filter
+    // @metasheet/core-backend test` -> bare `vitest`, no exclude entry for this file — see
+    // .github/workflows/plugin-tests.yml's "Run core-backend tests" step), so it runs on every PR
+    // regardless of which files that PR touches.
+    const logical = logicalLinesWithLineNumbers(script)
+    const execIndex = logical.findIndex((entry) => /^exec\s+npx\s+vitest\s+run\b/.test(entry.line))
+    expect(execIndex).toBeGreaterThan(-1)
+
+    const offenders = logical
+      .slice(execIndex + 1)
+      .filter((entry) => entry.line.trim().length > 0)
+      .map((entry) => {
+        const tokens = entry.line.trim().split(/\s+/)
+        return `line ${entry.lineNumber}: ${tokens.length} tokens: ${entry.line.slice(0, 80)}`
+      })
+    expect(offenders).toEqual([])
   })
 
   it('carries no duplicate token (the literal artifact a union merge of two identical additions leaves)', () => {
@@ -417,6 +554,56 @@ describe('required web lane registration block — mutation self-proof', () => {
     const block = lines.slice(headerIndex, terminator + 1)
     const mutated = [...lines.slice(0, terminator + 1), ...block, ...lines.slice(terminator + 1)].join('\n')
     expect(() => execLogicalLine(mutated), 'M4 must be caught by `exactly one exec logical line`').toThrow(/found 2/)
+  })
+
+  it('M6 a dead token block after exec (no exec header) -> the trailing-logical-line detector reds', () => {
+    // The literal shape found on four rebased branches (GATE-5086 follow-up, 2026-09-22): a
+    // byte-identical COPY of the live block's tokens, minus the `exec npx vitest run \\` header
+    // that makes it live, sitting right after the real block. No exec header means neither
+    // `exactly one exec logical line` above nor a naive file-level scan ever looks at it — this
+    // is the only assertion in this file that looks PAST the exec block at all.
+    const terminator = lines.findIndex((line, index) => index > headerIndex && line.trim() === '--reporter=dot')
+    expect(terminator).toBeGreaterThan(headerIndex)
+    const deadBlock = lines.slice(headerIndex + 1, terminator + 1) // token lines + --reporter=dot, no header
+    const mutated = [...lines.slice(0, terminator + 1), ...deadBlock, ...lines.slice(terminator + 1)].join('\n')
+
+    const logical = logicalLinesWithLineNumbers(mutated)
+    const execIndex = logical.findIndex((entry) => /^exec\s+npx\s+vitest\s+run\b/.test(entry.line))
+    expect(execIndex).toBeGreaterThan(-1)
+    const offenders = logical.slice(execIndex + 1).filter((entry) => entry.line.trim().length > 0)
+    expect(offenders.length, 'M6 must be caught by `no non-empty logical line after exec`').toBeGreaterThan(0)
+  })
+
+  it("M7 a `#`-prefixed physical line inside the exec continuation block -> the in-block-comment detector reds, and the fold itself truncates (bash-consistent)", () => {
+    // Bash semantics, verified empirically (bash -x on a throwaway 5-line script — see PR body for
+    // the transcript): a `#` that lands on what continuation-folding treats as a physical line
+    // inside the block still starts a comment there and terminates the command right then —
+    // REGARDLESS of whether that comment's OWN physical line ends in `\\`. The OLD parsing
+    // contract (strip whole-line `#` comments, THEN fold continuations) got the order backwards:
+    // it deleted the comment line first and glued the tokens on either side into one unbroken
+    // logical line, so this file's parsed view of the script and bash's real argv silently
+    // disagreed. This is exactly P2-2 from the 2026-09-22 gate review.
+    const mutated = [...lines.slice(0, headerIndex + 2), '  #note \\', ...lines.slice(headerIndex + 2)].join('\n')
+
+    // Direct structural detector: raw physical-line walk over the continuation block.
+    const mutatedLines = mutated.split('\n')
+    const header2 = mutatedLines.findIndex((line) => line === 'exec npx vitest run \\')
+    const body: string[] = []
+    let i = header2 + 1
+    for (; i < mutatedLines.length; i += 1) {
+      body.push(mutatedLines[i])
+      if (!mutatedLines[i].replace(/\s+$/, '').endsWith('\\')) break
+    }
+    expect(
+      body.some((line) => /^\s*#/.test(line)),
+      'M7 must be caught by `no # inside the exec continuation block`',
+    ).toBe(true)
+
+    // Independent confirmation the fold now tracks bash: the exec logical line truncates at the
+    // comment, losing the terminating flag and almost all of its tokens.
+    const execLine = execLogicalLine(mutated)
+    expect(flagsOf(execLine)).not.toEqual(['--reporter=dot'])
+    expect(tokensOf(execLine).length).toBeLessThan(5)
   })
 
   it('M5 union duplicates a non-list line -> caught only when that line is syntax-bearing', () => {
