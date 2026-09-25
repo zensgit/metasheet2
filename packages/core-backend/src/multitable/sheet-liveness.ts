@@ -201,6 +201,84 @@ export async function assertSheetLiveForUpdate(query: LivenessQuery, sheetId: st
 }
 
 /**
+ * The MULTI-sheet row lock: ONE statement that locks every named `meta_sheets` row, in `id` order, AND reads
+ * each row's `deleted_at` (#5954).
+ *
+ * EXPORTED for the same reason as {@link SHEET_ROW_LOCK_LIVENESS_SQL}: a real-DB probe that proves a writer is
+ * PARKED on these rows can derive its pattern from this text instead of copying it.
+ *
+ * `ORDER BY id` is what makes the lock order deterministic. Passing a sorted array to `= ANY($1)` does not:
+ * the row-lock order is the order the plan hands rows to the lock step, which for a sequential scan is the
+ * physical order, not the array order. With `ORDER BY` the rows are sorted BEFORE they are locked, so every
+ * caller of this statement acquires the same set of rows in the same order — two concurrent multi-sheet
+ * writers on the same pair cannot each hold one row and wait for the other.
+ */
+export const SHEETS_ROW_LOCK_LIVENESS_SQL =
+  'SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE'
+
+/**
+ * {@link loadSheetLivenessForUpdate} for SEVERAL sheets locked together — the verdict for each, read UNDER the
+ * row locks this transaction now holds (#5954).
+ *
+ * Why a multi-id arity at all: a write that spans two sheets (the cross-base mirror op writes an edge whose
+ * ends live on two sheets) must lock both rows in one deterministic order. Two single-id calls would lock
+ * them in CALLER order, and two writers that name the pair in opposite orders would deadlock. This takes the
+ * locks in ONE statement, sorted by id, and still reads every row's `deleted_at` under its lock — the
+ * lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaces took the locks and never looked, which is the
+ * #5938 TOCTOU window on two rows at once.
+ *
+ * Every id passed in gets an entry: ids with no `meta_sheets` row, and ids that are not usable strings
+ * (matching {@link loadSheetLivenessForUpdate}'s own guard, and never sent to the database), map to
+ * `absent`. Duplicates are locked once. The verdict per row comes from the SAME `livenessOfRow` every other
+ * arity uses.
+ *
+ * `query` MUST be the transaction client's own query — see {@link loadSheetLivenessForUpdate}.
+ */
+export async function loadSheetsLivenessForUpdate(
+  query: LivenessQuery,
+  sheetIds: readonly string[],
+): Promise<Map<string, SheetLiveness>> {
+  const result = new Map<string, SheetLiveness>()
+  const lookups: string[] = []
+  for (const sheetId of sheetIds) {
+    if (typeof sheetId !== 'string' || sheetId.length === 0) {
+      if (typeof sheetId === 'string') result.set(sheetId, 'absent')
+      continue
+    }
+    if (!result.has(sheetId)) {
+      result.set(sheetId, 'absent')
+      lookups.push(sheetId)
+    }
+  }
+  if (lookups.length === 0) return result
+  lookups.sort()
+  const res = await query(SHEETS_ROW_LOCK_LIVENESS_SQL, [lookups])
+  for (const row of res.rows as Array<{ id?: unknown; deleted_at?: unknown } | undefined>) {
+    if (!row || typeof row.id !== 'string' || !result.has(row.id)) continue
+    result.set(row.id, livenessOfRow(row))
+  }
+  return result
+}
+
+/**
+ * Lock EVERY named sheet row and REFUSE unless ALL of them are still live — the multi-sheet counterpart of
+ * {@link assertSheetLiveForUpdate} (#5954).
+ *
+ * Throws {@link SheetNotLiveError} for the FIRST non-live id in the CALLER's order. The lock order is not the
+ * caller's order (it is `id` order, see {@link SHEETS_ROW_LOCK_LIVENESS_SQL}); the caller's order only decides
+ * WHICH refusal is reported when more than one sheet died, so a route can keep the same precedence its
+ * pre-transaction gate uses. Either way the refusal is the values-free one: the error message never carries
+ * an id, and routes map it through `sendSheetNotLive(res, err.liveness)`.
+ */
+export async function assertSheetsLiveForUpdate(query: LivenessQuery, sheetIds: readonly string[]): Promise<void> {
+  const verdicts = await loadSheetsLivenessForUpdate(query, sheetIds)
+  for (const sheetId of sheetIds) {
+    const liveness = verdicts.get(sheetId) ?? 'absent'
+    if (liveness !== 'live') throw new SheetNotLiveError(sheetId, liveness)
+  }
+}
+
+/**
  * Shapes a driver error may take on the way into a log line, and nothing else: an identifier-shaped
  * constructor name, and an identifier-shaped `code` (a SQLSTATE such as `57014`, or an errno such as
  * `ECONNREFUSED`).

@@ -23,17 +23,37 @@
  *   F-4 mask not bypassable under concurrency — a row-read-denied rec_A stays the uniform
  *       MIRROR_LINK_TARGET_UNAVAILABLE 403 even with a concurrent forward edit on that rec_A; the mask is
  *       evaluated under the acquired lock, so a concurrent write cannot make a masked rec_A appear readable.
+ *   F-5/F-6 sheet liveness is re-read UNDER the sheet lock (#5954) — a soft delete of sheet A (F-5) or sheet
+ *       B (F-6) that is still uncommitted when the op's pre-transaction liveness gates read "live", and that
+ *       COMMITS while the op is parked on the in-transaction sheet lock, is REFUSED with the same values-free
+ *       404 SHEET_DELETED body the pre-transaction gate answers — and nothing is written (no edge, no rec_A
+ *       version bump, no revision row). Before #5954 the lock was lock-only and the op answered 200 and wrote.
+ *   F-7 control — the same interleaving with the concurrent delete ROLLED BACK: the op waits, then succeeds.
+ *       The refusal in F-5/F-6 is caused by the committed delete, not by having waited on the lock.
  *
- * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list.
+ * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list, and is
+ * two-point wired (vitest.config.ts no-DB exclusion + whole-file real-DB step), pinned by
+ * scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs; the sentinel below reds that step if it ever loses
+ * DATABASE_URL instead of letting the suite skip green.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { SHEETS_ROW_LOCK_LIVENESS_SQL, SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE } from '../../src/multitable/sheet-liveness'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+// Fail-not-skip: in the real-DB step (the workflow sets METASHEET_REAL_DB_TEST_STEP=1) a missing DATABASE_URL
+// must RED, not collect-and-skip the whole suite green.
+test('sentinel: C2 Decision-F real-DB lane must not skip-green', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('C2 Decision-F cross-base mirror concurrency real-DB step is missing DATABASE_URL')
+  }
+  expect(true).toBe(true)
+})
 
 const TS = Date.now()
 const BASE_A = `base_c2df_a_${TS}`
@@ -106,6 +126,69 @@ async function runWhileRecordLockHeld<T>(
     client.release()
   }
 }
+
+/**
+ * #5954 interleaving: soft-delete `sheetId` in an INDEPENDENT transaction and keep it UNCOMMITTED while the
+ * mirror op starts. The op's pre-transaction liveness gates read the committed row (still live — an
+ * uncommitted UPDATE is invisible to them and does not block a plain read), pass, and the op then PARKS on
+ * the in-transaction sheet lock behind the deleter. Only once the op is observed parked — by
+ * `pg_blocking_pids`, so this cannot go blind if the lock statement is reworded — does the deleter
+ * `outcome` (COMMIT = the delete lands in the op's window; ROLLBACK = the control). Returns the settled
+ * response and the parked statement's text.
+ *
+ * Why this is the #5954 window: when the deleter commits, the op's `FOR UPDATE` returns the NEW row version
+ * (deleted_at set). A lock-only statement never looks at it — exactly as when the delete commits before the
+ * lock request and the lock is simply free. Either way only a re-read under the lock can see the delete.
+ */
+async function runWithSheetDeleteInWindow<T>(
+  sheetId: string,
+  outcome: 'commit' | 'rollback',
+  start: () => PromiseLike<T>,
+): Promise<{ result: T; parkedQuery: string }> {
+  const client = await poolManager.get().getInternalPool().connect()
+  let open = false
+  try {
+    await client.query('BEGIN')
+    open = true
+    const holderPid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+    // The production soft-delete statement (routes/univer-meta.ts, DELETE /sheets/:sheetId).
+    const del = await client.query('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL', [sheetId])
+    expect(del.rowCount).toBe(1)
+
+    let settled = false
+    const started = Promise.resolve(start()).then((v) => { settled = true; return v }, (e) => { settled = true; throw e })
+    let parkedQuery = ''
+    const deadline = Date.now() + 10_000
+    while (!parkedQuery) {
+      if (settled) {
+        // It answered without ever waiting on the deleter: it did not reach the sheet lock at all.
+        await started.catch(() => {})
+        throw new Error('the mirror op settled before parking on the held sheet row')
+      }
+      if (Date.now() > deadline) throw new Error('the mirror op never parked on the held sheet row')
+      const waiters = await q(
+        "SELECT query FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock'",
+        [holderPid],
+      )
+      if (waiters.rows.length > 1) throw new Error(`expected exactly one backend parked behind the deleter, saw ${waiters.rows.length}`)
+      if (waiters.rows.length === 1) parkedQuery = String((waiters.rows[0] as { query: unknown }).query)
+      else await sleep(20)
+    }
+    expect(settled).toBe(false) // parked behind the uncommitted delete — past BOTH pre-transaction gates
+
+    await client.query(outcome === 'commit' ? 'COMMIT' : 'ROLLBACK')
+    open = false
+    return { result: await started, parkedQuery }
+  } finally {
+    if (open) await client.query('ROLLBACK').catch(() => {})
+    client.release()
+  }
+}
+
+const recordVersion = async (recordId: string): Promise<number> =>
+  Number(((await q('SELECT version FROM meta_records WHERE id = $1', [recordId])).rows[0] as { version: unknown }).version)
+const revisionCount = async (recordId: string): Promise<number> =>
+  Number(((await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE record_id = $1', [recordId])).rows[0] as { n: number }).n)
 
 describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (real DB)', () => {
   beforeAll(async () => {
@@ -211,5 +294,38 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
       await q('DELETE FROM record_permissions WHERE sheet_id = $1', [SA]).catch(() => {})
       await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = false WHERE id = $1', [SA])
     }
+  })
+
+  // F-5/F-6 (#5954): a soft delete of EITHER end that commits inside the op's window is refused under the lock.
+  for (const [label, sheetId] of [['F-5 sheet A (forward / base-A end)', SA], ['F-6 sheet B (mirror / base-B end)', SB]] as const) {
+    test(`${label}: a soft delete committed while the op is parked on the sheet lock is refused with no side effects`, async () => {
+      const versionBefore = await recordVersion(REC_A1)
+      const revisionsBefore = await revisionCount(REC_A1)
+      try {
+        const { result: res, parkedQuery } = await runWithSheetDeleteInWindow(sheetId, 'commit', () => mirrorOp({ foreignRecordId: REC_A1 }))
+        // The SAME values-free 404 the pre-transaction gate answers for a deleted sheet: no id, no rec_A info.
+        expect(res.status).toBe(404)
+        expect(res.body).toEqual({ ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } })
+        for (const id of [SA, SB, REC_A1, REC_B1, F_A, M_B, BASE_A, BASE_B]) expect(JSON.stringify(res.body)).not.toContain(id)
+        // No side effects: the transaction rolled back before the forward write.
+        expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(0)
+        expect(await forwardTargets(REC_A1)).toEqual([])
+        expect(await recordVersion(REC_A1)).toBe(versionBefore)
+        expect(await revisionCount(REC_A1)).toBe(revisionsBefore)
+        expect(await mirrorRows()).toBe(0)
+        // It parked on the helper's own statement (pattern DERIVED from the exported constant, not copied).
+        expect(parkedQuery.startsWith(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
+      } finally {
+        await q('UPDATE meta_sheets SET deleted_at = NULL WHERE id = $1', [sheetId])
+      }
+    })
+  }
+
+  // F-7 control: the same interleaving, the delete ROLLED BACK — the op waited on the lock and then succeeds.
+  test('F-7 control: the concurrent delete rolls back ⇒ the parked op proceeds and writes exactly one edge', async () => {
+    const { result: res } = await runWithSheetDeleteInWindow(SA, 'rollback', () => mirrorOp({ foreignRecordId: REC_A1 }))
+    expect(res.status).toBe(200)
+    expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(1)
+    expect(await mirrorRows()).toBe(0)
   })
 })
