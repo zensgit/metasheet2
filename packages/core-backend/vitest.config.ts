@@ -96,6 +96,16 @@ export default defineConfig({
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-history-guard.yml lane, which arms EXPECT_DB=1.
       'tests/integration/approval-history-authz-guard.db.test.ts',
+      // approvals:read permission-catalogue registration (zzzz20260920130000): grant-and-gate
+      // real-DB acceptance for the finding that no migration had ever inserted this code into
+      // `permissions`, making it ungrantable through the product grant endpoint
+      // (routes/permissions.ts:156-164 400s on an unregistered code). approvals:write/act are
+      // deliberately out of scope for this migration (see the migration's own file header).
+      // Requires real PostgreSQL and the real HTTP register/grant/pending-count round trip.
+      // Excluded here so `describeIfDatabase` cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-permission-catalogue.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-permission-catalogue-grant.db.test.ts',
       // Lock-4 F4-A (node-level auto_approve, 审批类型) real-DB acceptance — gates A-1 (server door),
       // A-2 (audit-row sentinel + byte-identical absent-config control), A-3 (dedupeHistoricalApprover
       // exemption + the disclosed mergeAdjacentApprover-suppression side effect). DB-independent logic
