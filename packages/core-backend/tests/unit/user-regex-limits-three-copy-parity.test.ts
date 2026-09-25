@@ -20,6 +20,8 @@ import { describe, expect, it } from 'vitest'
 
 import * as backend from '../../src/formula/regex-safety'
 import * as web from '../../../../apps/web/src/utils/userRegexLimits'
+import { validateFormField } from '../../../../apps/web/src/views/formViewValidation'
+import type { FormField } from '../../../../apps/web/src/types/views'
 
 type Copy = {
   USER_REGEX_MAX_SUBJECT_LEN: number
@@ -74,5 +76,70 @@ describe('user-regex length limits — three copies agree', () => {
     const longPattern = plugin.validateValue('abc', [{ type: 'pattern', params: { regex: 'a'.repeat(P + 1) } }], 'f')
     expect(longPattern.map((e) => e.code)).toEqual(['PATTERN_NOT_EVALUATED'])
     expect(longPattern[0].details).toMatchObject({ reason: 'pattern-too-long', length: P + 1, limit: P })
+  })
+})
+
+const formField = (pattern: string, extra: Partial<FormField> = {}): FormField => ({
+  id: 'f1', name: 'f1', label: 'F1', type: 'text', required: false, order: 0, validation: { pattern }, ...extra,
+})
+
+describe('user-regex length limits — every copy measures the caller\'s own string, not RegExp#source', () => {
+  // `RegExp.prototype.source` re-escapes `/` (and line breaks), so it is never
+  // shorter than the string it was compiled from. A copy that measured `source`
+  // would refuse, at the limit, a pattern the other two accept — the exact
+  // disagreement this file exists to catch, and one the numeric table above
+  // cannot see. The fixture is one string, replayed through all three copies
+  // and through the form's own caller.
+  // MUTATION: plugin gate back on `regexp.source.length` -> the at-limit row is
+  // refused there (reported length > P) while backend / web accept it.
+  const SLASHY_AT_LIMIT = 'abc|' + '/'.repeat(P - 4) // P characters; matches 'abc'
+  const SLASHY_ONE_OVER = 'abc|' + '/'.repeat(P - 3) // P + 1 characters
+
+  it('sanity: the fixture is AT the limit as a string and longer as RegExp source', () => {
+    expect(SLASHY_AT_LIMIT.length).toBe(P)
+    expect(new RegExp(SLASHY_AT_LIMIT).source.length).toBeGreaterThan(P)
+    expect(SLASHY_ONE_OVER.length).toBe(P + 1)
+  })
+
+  it('AT the limit, all three copies evaluate the pattern (and it matches)', () => {
+    expect(backend.runUserRegex(SLASHY_AT_LIMIT, undefined, 'abc', (re, s) => re.test(s))).toEqual({ status: 'ok', value: true })
+    expect(web.findUserRegexLengthRefusal(SLASHY_AT_LIMIT.length, 'abc'.length)).toBeNull()
+    expect(validateFormField(formField(SLASHY_AT_LIMIT), 'abc')).toBeNull()
+    expect(plugin.validateValue('abc', [{ type: 'pattern', params: { regex: SLASHY_AT_LIMIT } }], 'f')).toEqual([])
+  })
+
+  it('one over, all three copies refuse it for its length and report the STRING length', () => {
+    const expected = { kind: 'pattern-too-long', length: P + 1, limit: P }
+    expect(backend.runUserRegex(SLASHY_ONE_OVER, undefined, 'abc', (re, s) => re.test(s))).toEqual({ status: 'refused', refusal: expected })
+    expect(web.findUserRegexLengthRefusal(SLASHY_ONE_OVER.length, 'abc'.length)).toEqual(expected)
+    expect(validateFormField(formField(SLASHY_ONE_OVER), 'abc')).toBe('F1 的格式规则过长，无法校验')
+    const out = plugin.validateValue('abc', [{ type: 'pattern', params: { regex: SLASHY_ONE_OVER } }], 'f')
+    expect(out.map((e) => e.code)).toEqual(['PATTERN_NOT_EVALUATED'])
+    expect(out[0].details).toMatchObject({ reason: 'pattern-too-long', length: P + 1, limit: P })
+  })
+
+  it('the plugin falls back to RegExp#source only when the rule carries a RegExp instance (no string to measure)', () => {
+    const instance = new RegExp(SLASHY_AT_LIMIT) // source is longer than P
+    const out = plugin.validateValue('abc', [{ type: 'pattern', params: { regex: instance } }], 'f')
+    expect(out.map((e) => e.code)).toEqual(['PATTERN_NOT_EVALUATED'])
+    expect(out[0].details).toMatchObject({ reason: 'pattern-too-long', length: instance.source.length, limit: P })
+    expect(plugin.validateValue('abc', [{ type: 'pattern', params: { regex: /^abc$/ } }], 'f')).toEqual([])
+  })
+})
+
+describe('user-regex length limits — the public form\'s own caller (validateFormField, which FormView.vue delegates to)', () => {
+  // The gate call itself is pinned here in the backend lane; `FormView.vue`'s
+  // one-line delegation to `validateFormField` is covered by vue-tsc only.
+  // MUTATION: `findUserRegexLengthRefusal(...)` replaced by `null` in
+  // formViewValidation.ts -> both rows below red (the pattern runs and answers).
+  it('a value AT the subject limit gets the pattern answer; one over is refused with the length message', () => {
+    expect(validateFormField(formField('^a+$'), 'a'.repeat(S))).toBeNull()
+    expect(validateFormField(formField('^b+$'), 'a'.repeat(S))).toBe('F1 格式不正确')
+    expect(validateFormField(formField('^a+$'), 'a'.repeat(S + 1))).toBe(`F1 不能超过 ${S} 个字符`)
+  })
+
+  it('a pattern one over the limit is refused with the rule-too-long message, before the subject limit', () => {
+    expect(validateFormField(formField('a'.repeat(P + 1)), 'abc')).toBe('F1 的格式规则过长，无法校验')
+    expect(validateFormField(formField('a'.repeat(P + 1)), 'a'.repeat(S + 1))).toBe('F1 的格式规则过长，无法校验')
   })
 })

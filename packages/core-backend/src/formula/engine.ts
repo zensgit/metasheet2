@@ -7,7 +7,7 @@ import type { Kysely } from 'kysely'
 import { db as defaultDb } from '../db/db'
 import type { Database } from '../db/types'
 import { Logger } from '../core/logger'
-import { runUserRegex } from './regex-safety'
+import { describeUserRegexRefusal, runUserRegex } from './regex-safety'
 
 const logger = new Logger('FormulaEngine')
 
@@ -181,13 +181,23 @@ export class FormulaEngine {
     this.functions.set('LOWER', (text: unknown) => String(text).toLowerCase())
     this.functions.set('TRIM', (text: unknown) => String(text).trim())
     // SUBSTITUTE compiles its second argument as a global pattern (unchanged from
-    // before). The caller-supplied pattern and the subject now pass through the
+    // before). The caller-supplied pattern and the subject pass through the
     // shared length gate in ./regex-safety.ts; inside the limits the result is
-    // the same replace call as before, outside them the function reports #ERROR!.
+    // the same replace call as before. A refusal — an invalid pattern, as
+    // before, or a length over the limit, new — is THROWN, not returned as a
+    // sentinel string: the bare `new RegExp` threw on an invalid pattern,
+    // `calculate` catches the throw, and the WHOLE formula is #ERROR!. A
+    // wrapping function (LEN, IFERROR, …) therefore never receives '#ERROR!'
+    // as an ordinary 7-character value. The REGEX* functions below return the
+    // sentinel instead, because that is what they did before.
     this.functions.set('SUBSTITUTE', (text: unknown, old: unknown, newText: unknown) => {
       const replaceWith = String(newText)
       const outcome = runUserRegex(String(old), 'g', String(text), (re, s) => s.replace(re, replaceWith), { site: 'formula:SUBSTITUTE' })
-      return outcome.status === 'ok' ? outcome.value : '#ERROR!'
+      if (outcome.status !== 'ok') {
+        const { refusal } = outcome
+        throw new Error(refusal.kind === 'invalid-pattern' ? refusal.message : describeUserRegexRefusal(refusal, 'SUBSTITUTE'))
+      }
+      return outcome.value
     })
 
     // Logical functions

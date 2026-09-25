@@ -11,8 +11,12 @@
  *      is refused before it is compiled; a subject longer than
  *      `USER_REGEX_MAX_SUBJECT_LEN` is refused before the pattern runs on it.
  *      Both limits are taken from constraints the product already enforces
- *      elsewhere (see the constants below for the exact sources), so a value or
- *      pattern that the rest of the product accepts is not refused here.
+ *      elsewhere (see the constants below for the exact sources). For the
+ *      populations those constraints already bound, nothing new is refused
+ *      here. For the populations they do not bound it IS a new refusal: a field
+ *      whose explicit rule list has a pattern rule but no maxLength rule (see
+ *      the note on `USER_REGEX_MAX_SUBJECT_LEN`), and any stored pattern longer
+ *      than the pattern limit. The design MD (§6.2) names both.
  *
  *   2. SHAPE WARNING (never refuses, never throws). At compile time the pattern
  *      is scanned for the two shapes that are known to backtrack super-linearly
