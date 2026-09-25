@@ -43,6 +43,24 @@ vi.mock('../../src/rbac/rbac', () => ({
   rbacGuardAny: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
 }))
 
+/**
+ * C-2 (`feat/approval-cancel-round-phase2-on-r9`, lock §3 「C-2 全局锁序」) — `dispatchAction` now
+ * opens with ONE read-only probe BEFORE `BEGIN`, and re-issues it under the instance row lock:
+ * `resolveCancelRoundRolloutLockRequirementV1` reads `id, workflow_key` to decide whether the
+ * cancel-round rollout lock must precede the row lock. It runs for `action === 'approve'` ONLY;
+ * every other action returns before any query — which is why the `/reject` legs below do not
+ * answer it: left unserved, they stay a witness for that predicate.
+ *
+ * The `/approve` legs answer it with the SAME instance they already serve (`apr-seat-1`, no
+ * `workflow_key`, so `isCancelRoundInstance` is false ⇒ `{ kind: 'none' }` ⇒ a plain `BEGIN`):
+ * the probe changes nothing about the path under test. The match is EXACT on the normalized
+ * statement, not a prefix: any other statement — including the resolver's own cancel-round
+ * follow-ups (`SELECT document_id FROM approval_rounds …`) — still reaches the
+ * `Unhandled client query` throw.
+ */
+const CANCEL_ROUND_ROLLOUT_LOCK_PROBE_STATEMENT =
+  "SELECT id, workflow_key FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform'"
+
 const pinned = usePinnedServer()
 
 describe('approvals routes', () => {
@@ -466,6 +484,9 @@ describe('approvals routes', () => {
           rowCount: 1,
         }
       }
+      if (statement === CANCEL_ROUND_ROLLOUT_LOCK_PROBE_STATEMENT) {
+        return { rows: [{ id: 'apr-seat-1', workflow_key: null }], rowCount: 1 }
+      }
       throw new Error(`Unhandled client query: ${statement}`)
     })
 
@@ -539,6 +560,9 @@ describe('approvals routes', () => {
       // through and something LATER refused.
       if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
         return { rows: [], rowCount: 0 }
+      }
+      if (statement === CANCEL_ROUND_ROLLOUT_LOCK_PROBE_STATEMENT) {
+        return { rows: [{ id: 'apr-seat-1', workflow_key: null }], rowCount: 1 }
       }
       throw new Error(`Unhandled client query: ${statement}`)
     })
