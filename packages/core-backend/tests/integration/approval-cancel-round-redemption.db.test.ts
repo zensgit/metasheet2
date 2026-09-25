@@ -168,6 +168,10 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
   // `deduct` event. `attendance_leave_balance_events.balance_id` is `ON DELETE CASCADE`, so
   // deleting the lot takes its events with it.
   const createdLeaveBalanceIds = new Set<string>()
+  // r9 × phase-2 interaction legs (bottom of this file): `approval_delegations` config rows and
+  // `user_roles` memberships those fixtures insert; both are global config and are removed here.
+  const createdDelegationIds = new Set<string>()
+  const grantedRoleMemberships: Array<{ userId: string; roleId: string }> = []
 
   const pool = () => poolManager.get()
 
@@ -218,6 +222,17 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       }
       if (grantedUserIds.size > 0) {
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...grantedUserIds]])
+      }
+      if (createdDelegationIds.size > 0) {
+        await pool().query('DELETE FROM approval_delegations WHERE id = ANY($1::text[])', [[...createdDelegationIds]])
+        createdDelegationIds.clear()
+      }
+      if (grantedRoleMemberships.length > 0) {
+        await pool().query(
+          'DELETE FROM user_roles WHERE user_id = ANY($1::text[]) AND role_id = ANY($2::text[])',
+          [grantedRoleMemberships.map((m) => m.userId), [...new Set(grantedRoleMemberships.map((m) => m.roleId))]],
+        )
+        grantedRoleMemberships.length = 0
       }
     } finally {
       await server?.stop()
@@ -4208,6 +4223,347 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
       const after = await detailDto(fixture.roundInstanceId, fixture.requesterToken)
       expect(Object.prototype.hasOwnProperty.call(after.dto, 'cancelRoundCloseReason')).toBe(false)
       expect(after.text.includes('totally-bogus')).toBe(false)
+    },
+  )
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+  // r9 × phase-2 interaction legs (2026-09-25). Phase 2 was replayed commit-by-commit onto the r9
+  // head of `feat/approval-cancel-round-phase1-r9`. r9 changed WHO sits on a cancel round — the
+  // seat is re-convened for the ORIGINAL approval subject of a delegated seat (owner ruling
+  // 2026-09-20 reading (a)), and a node an administrator or the timeout scanner jumped over is not
+  // counted (owner ruling 2026-09-25, gate round 5 P2-1). Phase 2 owns what happens AFTER the seat
+  // holders approve (redemption through the external-transaction entry, the round outcome, and the
+  // whitelist projection on both read surfaces). Neither side's own suite exercises the other, so
+  // the two legs below drive one r9-shaped seat derivation each through phase 2's redemption and
+  // read it back through the projection. Each leg asserts the r9 half (seat set, who may act) AND
+  // the phase-2 half (round `applied`, `cancellationOutcome` on `/history` and on the detail DTO),
+  // so it goes red if either half regresses or if the two halves disagree.
+  //
+  // Fixture code is duplicated from `approval-cancel-round-creation.db.test.ts` on purpose (this
+  // corpus shares no harness across `.db.test.ts` files; see the header). Appended HERE rather than
+  // in a new file so no `plugin-tests.yml` run-list edit and no s6a re-pin is needed.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+  async function grantRoleMembership(userId: string, roleId: string): Promise<void> {
+    grantedRoleMemberships.push({ userId, roleId })
+    await pool().query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [userId, roleId],
+    )
+    const row = await pool().query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM user_roles WHERE user_id = $1 AND role_id = $2`,
+      [userId, roleId],
+    )
+    expect(row.rows[0]?.n).toBe('1')
+  }
+
+  async function publishGraphTemplate(
+    adminToken: string,
+    graph: ReturnType<typeof oneNodeGraph>,
+    label: string,
+  ): Promise<string> {
+    const templateKey = `wi13-r9x-${TS}-${label}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'WI-13 cancel-round redemption fixture (r9 interaction legs)',
+        description: 'approval-cancel-round-redemption.db.test.ts',
+        formSchema: buildFormSchema(),
+        approvalGraph: graph,
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publishResponse = await jsonRequest(baseUrl, `/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResponse.status, await publishResponse.clone().text()).toBe(200)
+    return template.id
+  }
+
+  async function insertActiveDelegation(delegationId: string, delegatorId: string, delegateeId: string): Promise<void> {
+    createdDelegationIds.add(delegationId)
+    await pool().query(
+      `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+       VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+      [delegationId, delegatorId, delegateeId],
+    )
+  }
+
+  /** The cancel round's seat rows, read the way the resolver wrote them. */
+  async function roundSeatRows(roundInstanceId: string): Promise<
+    Array<{ assignee_id: string; assignment_type: string; node_key: string | null; is_active: boolean }>
+  > {
+    const rows = await pool().query<{ assignee_id: string; assignment_type: string; node_key: string | null; is_active: boolean }>(
+      `SELECT assignee_id, assignment_type, node_key, is_active
+         FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+      [roundInstanceId],
+    )
+    return rows.rows
+  }
+
+  /** Starts the round, registers it for cleanup, and returns its id. */
+  async function startRound(documentId: string, requesterId: string): Promise<string> {
+    const dto = await new ApprovalProductService().createCancelRoundInstance(documentId, { userId: requesterId })
+    createdApprovalIds.add(dto.id)
+    const roundRow = await pool().query<{ id: string }>(
+      `SELECT id FROM approval_rounds WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+      [dto.id],
+    )
+    expect(roundRow.rows.length).toBe(1)
+    createdRoundIds.add(roundRow.rows[0].id)
+    return dto.id
+  }
+
+  /** Both durable surfaces, read with the requester's token, asserted against ONE expected outcome. */
+  async function expectProjectedOutcome(
+    roundInstanceId: string,
+    requesterToken: string,
+    expectedOutcome: Record<string, unknown>,
+    expectedApproveActors: string[],
+  ): Promise<void> {
+    const history = await historyItems(roundInstanceId, requesterToken)
+    const approveItems = history.items.filter((item) => item.action === 'approve') as Array<{
+      action?: string
+      actor_id?: string
+      metadata?: Record<string, unknown>
+    }>
+    expect(approveItems.map((item) => item.actor_id).sort()).toEqual([...expectedApproveActors].sort())
+    // Exactly one approve row carries the outcome (the one that redeemed the round); the whitelist
+    // rebuilds `metadata` per key, so a row without it has no `metadata` key at all.
+    const carriers = approveItems.filter((item) => item.metadata !== undefined)
+    expect(carriers.length).toBe(1)
+    expect(carriers[0].metadata).toEqual({ cancellationOutcome: expectedOutcome })
+    expectNoForbiddenKeys(history.text, 'history')
+    expect(history.text.includes('"nodeKey"')).toBe(false)
+    expect(history.text.includes('delegatedFrom')).toBe(false)
+
+    const detail = await detailDto(roundInstanceId, requesterToken)
+    expect(detail.dto.cancellationOutcome).toEqual(expectedOutcome)
+    expectNoForbiddenKeys(detail.text, 'detail')
+    expect(detail.text.includes('delegatedFrom')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(detail.dto, 'cancelRoundCloseReason')).toBe(false)
+  }
+
+  it(
+    'r9 × phase 2 (reading (a) seat re-convened): the original was approved by a DELEGATE on the ' +
+      'delegator\'s seat — the cancel round seats the DELEGATOR (user arm), the historical delegate ' +
+      'cannot act on it, the delegator\'s approval redeems through the external-transaction entry, ' +
+      'and both read surfaces project the outcome under the delegator\'s approve row',
+    async () => {
+      const suffix = `r9xdlg-${TS}`
+      const requesterId = `wi13-r9x-req-${suffix}`
+      const delegatorA = `wi13-r9x-A-${suffix}`
+      const delegateeD = `wi13-r9x-D-${suffix}`
+      const adminId = `wi13-r9x-adm-${suffix}`
+      await grantWrite(requesterId)
+      const adminToken = await authToken(baseUrl, adminId)
+      const requesterToken = await authToken(baseUrl, requesterId)
+      const tokenA = await authToken(baseUrl, delegatorA)
+      const tokenD = await authToken(baseUrl, delegateeD)
+      await insertActiveDelegation(`wi13-r9x-deleg-${suffix}`, delegatorA, delegateeD)
+
+      // The node names A; the active delegation seats D. D approves the original.
+      const templateId = await publishOneNodeTemplate(adminToken, delegatorA, suffix)
+      const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+        method: 'POST',
+        body: { templateId, formData: { reason: 'r' } },
+      })
+      expect(create.status, await create.clone().text()).toBe(201)
+      const documentId = ((await create.json()) as { id: string }).id
+      createdApprovalIds.add(documentId)
+      const seatBefore = await pool().query<{ assignee_id: string; delegated_from: string | null }>(
+        `SELECT assignee_id, metadata->>'delegatedFrom' AS delegated_from
+           FROM approval_assignments WHERE instance_id = $1`,
+        [documentId],
+      )
+      expect(seatBefore.rows).toEqual([{ assignee_id: delegateeD, delegated_from: delegatorA }])
+      const approveOriginal = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(approveOriginal.status, await approveOriginal.clone().text()).toBe(200)
+      await ageApprovedAnchor(documentId, 30)
+      await setDocumentWindowDays(documentId, 90)
+      await attachAttendanceRequest(documentId, requesterId)
+
+      // r9 half: the round seats A (re-convened), not D, and the seat is a plain user-arm row.
+      const roundInstanceId = await startRound(documentId, requesterId)
+      expect(await roundSeatRows(roundInstanceId)).toEqual([
+        { assignee_id: delegatorA, assignment_type: 'user', node_key: 'cancel_approval', is_active: true },
+      ])
+
+      const reversal = { reversed: 7, lots: 1, unrecoverableExpired: 0, alreadyReversed: false }
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'executed',
+        response: { ok: true, data: { reversal } },
+      }))
+      try {
+        // The historical delegate holds no seat on the round: refused, nothing redeemed.
+        const wrongActor = await jsonRequest(baseUrl, `/api/approvals/${roundInstanceId}/actions`, tokenD, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(wrongActor.status, await wrongActor.clone().text()).toBe(403)
+        expect(portStub.calls.length).toBe(0)
+        expect((await roundOutcome(roundInstanceId)).outcome).toBe('pending')
+
+        // The re-convened seat holder approves: phase 2 redeems through the entry exactly once.
+        const approveRound = await jsonRequest(baseUrl, `/api/approvals/${roundInstanceId}/actions`, tokenA, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(approveRound.status, await approveRound.clone().text()).toBe(200)
+        expect(portStub.calls.length).toBe(1)
+      } finally {
+        portStub.stop()
+      }
+      const outcome = await roundOutcome(roundInstanceId)
+      expect(outcome.outcome).toBe('applied')
+      expect(outcome.ended_at).not.toBeNull()
+
+      // phase-2 half: the outcome is projected under A's approve row on both surfaces.
+      await expectProjectedOutcome(roundInstanceId, requesterToken, { status: 'cancelled', reversal }, [delegatorA])
+    },
+  )
+
+  it(
+    'r9 × phase 2 (skipped node not counted): D decided the role node, an administrator jumped over ' +
+      'D\'s delegated node, E closed the third — the cancel round seats {D, E} (both user arm, the ' +
+      'jumped delegator absent), both approvals redeem through the entry once, and both read ' +
+      'surfaces project the outcome under the redeeming approve row',
+    async () => {
+      const suffix = `r9xjump-${TS}`
+      const requesterId = `wi13-r9x-jreq-${suffix}`
+      const delegatorA = `wi13-r9x-jA-${suffix}`
+      const delegateeD = `wi13-r9x-jD-${suffix}`
+      const otherUserE = `wi13-r9x-jE-${suffix}`
+      const adminId = `wi13-r9x-jadm-${suffix}`
+      await grantWrite(requesterId)
+      const adminToken = await authToken(baseUrl, adminId)
+      const requesterToken = await authToken(baseUrl, requesterId)
+      await authToken(baseUrl, delegatorA)
+      const tokenD = await authToken(baseUrl, delegateeD)
+      const tokenE = await authToken(baseUrl, otherUserE)
+      await grantRoleMembership(delegateeD, 'admin')
+      await grantRoleMembership(otherUserE, 'admin')
+      await insertActiveDelegation(`wi13-r9x-jdeleg-${suffix}`, delegatorA, delegateeD)
+
+      const templateId = await publishGraphTemplate(
+        adminToken,
+        {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'approval_role',
+              type: 'approval',
+              config: { assigneeType: 'role', assigneeIds: ['admin', 'auditor'], approvalMode: 'single' },
+            },
+            {
+              key: 'approval_a',
+              type: 'approval',
+              config: { assigneeType: 'user', assigneeIds: [delegatorA], approvalMode: 'single' },
+            },
+            {
+              key: 'approval_c',
+              type: 'approval',
+              config: { assigneeType: 'user', assigneeIds: [otherUserE], approvalMode: 'single' },
+            },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e-s-r', source: 'start', target: 'approval_role' },
+            { key: 'e-r-a', source: 'approval_role', target: 'approval_a' },
+            { key: 'e-a-c', source: 'approval_a', target: 'approval_c' },
+            { key: 'e-c-end', source: 'approval_c', target: 'end' },
+          ],
+        } as unknown as ReturnType<typeof oneNodeGraph>,
+        suffix,
+      )
+      const create = await jsonRequest(baseUrl, '/api/approvals', requesterToken, {
+        method: 'POST',
+        body: { templateId, formData: { reason: 'r' } },
+      })
+      expect(create.status, await create.clone().text()).toBe(201)
+      const documentId = ((await create.json()) as { id: string }).id
+      createdApprovalIds.add(documentId)
+
+      const roleDecision = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenD, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(roleDecision.status, await roleDecision.clone().text()).toBe(200)
+      // Precondition: the document now sits at A's node and the seat there is D's delegated one.
+      const seatAtA = await pool().query<{ assignee_id: string; df: string | null; is_active: boolean }>(
+        `SELECT assignee_id, metadata->>'delegatedFrom' AS df, is_active
+           FROM approval_assignments WHERE instance_id = $1 AND node_key = 'approval_a' AND is_active = TRUE`,
+        [documentId],
+      )
+      expect(seatAtA.rows).toEqual([{ assignee_id: delegateeD, df: delegatorA, is_active: true }])
+      const versionRow = await pool().query<{ version: number }>(`SELECT version FROM approval_instances WHERE id = $1`, [
+        documentId,
+      ])
+      const jump = await jsonRequest(baseUrl, `/api/approvals/${documentId}/jump`, adminToken, {
+        method: 'POST',
+        body: { version: versionRow.rows[0].version, targetNodeKey: 'approval_c', reason: 'r9 × phase 2 leg' },
+      })
+      expect(jump.status, await jump.clone().text()).toBe(200)
+      const jumpRows = await pool().query<{ admin_jump: string | null }>(
+        `SELECT metadata->>'adminJump' AS admin_jump FROM approval_records WHERE instance_id = $1 AND action = 'jump'`,
+        [documentId],
+      )
+      expect(jumpRows.rows).toEqual([{ admin_jump: 'true' }])
+      const closeDecision = await jsonRequest(baseUrl, `/api/approvals/${documentId}/actions`, tokenE, {
+        method: 'POST',
+        body: { action: 'approve' },
+      })
+      expect(closeDecision.status, await closeDecision.clone().text()).toBe(200)
+      const status = await pool().query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [documentId])
+      expect(status.rows[0]?.status).toBe('approved')
+      await ageApprovedAnchor(documentId, 30)
+      await setDocumentWindowDays(documentId, 90)
+      await attachAttendanceRequest(documentId, requesterId)
+
+      // r9 half: {D, E}, both user-arm rows; the jumped node contributes no seat and no block.
+      const roundInstanceId = await startRound(documentId, requesterId)
+      expect(await roundSeatRows(roundInstanceId)).toEqual(
+        [delegateeD, otherUserE]
+          .sort()
+          .map((assignee_id) => ({ assignee_id, assignment_type: 'user', node_key: 'cancel_approval', is_active: true })),
+      )
+
+      const reversal = { reversed: 9, lots: 1, unrecoverableExpired: 0, alreadyReversed: false }
+      const portStub = bindCancellationPort(async () => ({
+        kind: 'executed',
+        response: { ok: true, data: { reversal } },
+      }))
+      try {
+        const first = await jsonRequest(baseUrl, `/api/approvals/${roundInstanceId}/actions`, tokenD, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(first.status, await first.clone().text()).toBe(200)
+        // 会签 (`approvalMode: 'all'`): one of two seats has decided — not redeemed yet.
+        expect(portStub.calls.length).toBe(0)
+        expect((await roundOutcome(roundInstanceId)).outcome).toBe('pending')
+        const second = await jsonRequest(baseUrl, `/api/approvals/${roundInstanceId}/actions`, tokenE, {
+          method: 'POST',
+          body: { action: 'approve' },
+        })
+        expect(second.status, await second.clone().text()).toBe(200)
+        expect(portStub.calls.length).toBe(1)
+      } finally {
+        portStub.stop()
+      }
+      const outcome = await roundOutcome(roundInstanceId)
+      expect(outcome.outcome).toBe('applied')
+      expect(outcome.ended_at).not.toBeNull()
+
+      // phase-2 half: two approve rows on the round; only the redeeming (second) one carries the outcome.
+      await expectProjectedOutcome(roundInstanceId, requesterToken, { status: 'cancelled', reversal }, [delegateeD, otherUserE])
     },
   )
 })
