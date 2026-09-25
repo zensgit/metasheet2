@@ -1596,6 +1596,7 @@ exec npx vitest run \
   requesterPreviewFields \
   roleManagementSave \
   routePreviewErrors \
+  run-required-web-tests-shape \
   searchApprovalDirectoryUsers \
   shared-comments-stub-client \
   statusTag \

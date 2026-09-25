@@ -85,4 +85,83 @@
 # `StockPreparation`), so it resolves to exactly one file.
 set -euo pipefail
 
-pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror k3-endpoint-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationHubOverviewSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper StockPreparationSourceBinding StockPreparationProjectQuery StockPreparationHomeQueryLabels StockPreparationScenarioBAcceptance IntegrationRunDetail StockPreparationDiffSummaryExport --reporter=dot
+#
+# REGISTRATION SHAPE (H-7, 2026-09-22): one token per physical line, backslash-continued,
+# sorted case-insensitively — the SAME prescription applied to
+# apps/web/scripts/run-required-web-tests.sh (see that file's own header) and for the identical
+# reason: this used to be ONE single physical line carrying all 54 filter tokens, so any two
+# branches adding unrelated specs here collided on that one line. Splitting it means two lanes
+# adding different tokens touch different physical lines and merge cleanly.
+#
+# This is a SHAPE change only — the token SET is unchanged (verified: NUL-delimited argv captured
+# from a PATH-injected `pnpm` shim, before vs after, is byte-identical up to order — see the
+# design doc for the exact method). Read this file the way
+# packages/core-backend/tests/unit/required-web-lane-registration-shape.test.ts documents in its
+# own PARSING CONTRACT section: strip whole-line `#` comments, JOIN backslash continuations into
+# one logical line, and only then read the invocation — a physical-line
+# `line.startsWith('pnpm --filter @metasheet/web exec vitest run ')` parse now sees a header
+# whose only "argument" is the continuation backslash.
+#
+# A `#`-prefixed line ANYWHERE inside this block is not a harmless comment: backslash-newline
+# splicing joins the whole block into ONE line before bash ever looks for a `#`, so such a line
+# silently truncates every token after it — including the trailing `--reporter=dot` — out of the
+# real invocation while this file's text looks unremarkable. That exact shape is what the
+# structural guard below and the second-registration-point block in
+# required-web-lane-registration-shape.test.ts both check for directly.
+#
+pnpm --filter @metasheet/web exec vitest run \
+  bomSnapshotDiff \
+  bridgeAgentConfigCheck \
+  composition-vocab-mirror \
+  fieldHints \
+  IntegrationBridgeAgentSection \
+  IntegrationCleaningDatasetSection \
+  IntegrationCompositionWizard \
+  IntegrationConnectionSection \
+  integrationErrorCodeLabels \
+  IntegrationExternalWritePanel \
+  IntegrationFieldOptionSyncPanel \
+  IntegrationHelpView \
+  IntegrationHubOverviewSection \
+  IntegrationK3WiseSetupView \
+  IntegrationMappingRulesSection \
+  IntegrationMonitoringSection \
+  IntegrationObjectTemplateSection \
+  IntegrationOptionSetsStructuredEditor \
+  IntegrationPayloadPreviewSection \
+  IntegrationPipelineRunSection \
+  IntegrationReadSourceCompositionAuthoringPanel \
+  IntegrationReadSourceCompositionPanel \
+  IntegrationReadSourceConfigPanel \
+  IntegrationReadSourceWizard \
+  IntegrationRunDetail \
+  IntegrationStockPrepPanel \
+  IntegrationTableActionsPanel \
+  IntegrationTemplateCatalogPicker \
+  integrationWorkbench \
+  IntegrationWorkbenchRail \
+  IntegrationWorkbenchView \
+  JsonAssist \
+  k3-endpoint-vocab-mirror \
+  MetaIntegrationFieldRuleAuthoring \
+  multitable-resolver-vocab-mirror \
+  optionSetsStructured \
+  readSourceCompositions.service \
+  readSourceModePresets \
+  readSourceTemplateCatalog \
+  StockPreparationDashboardView \
+  StockPreparationDiffSummaryExport \
+  StockPreparationExceptionQueueView \
+  StockPreparationHomeQueryLabels \
+  StockPreparationMappingConfirmView \
+  StockPreparationPrepLineView \
+  StockPreparationProjectQuery \
+  StockPreparationProjectWorkspaceView \
+  StockPreparationScenarioBAcceptance \
+  StockPreparationSnapshotDiffView \
+  StockPreparationSourceBinding \
+  StockPreparationStageOverview \
+  StockPreparationStageStepper \
+  StockPreparationUnitConfirmView \
+  StockPreparationWorkspace \
+  --reporter=dot
