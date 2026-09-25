@@ -1641,6 +1641,9 @@ exec npx vitest run \
   templateCenterI18n \
   templateDetailI18n \
   templateGalleryFilter \
+  todoApi \
+  TodoCenterView \
+  todoCountsRealtime \
   ui-foundation-style-guard \
   uiFoundationTexture \
   useApprovalBatchActions \

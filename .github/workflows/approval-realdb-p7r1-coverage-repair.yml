@@ -58,6 +58,13 @@ on:
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260703120000_add_node_entry_epoch.ts'
+      # Gate report impl-gate-B-slice1-round1-20260918.md P2-3: approval-wp3-pending-count.api.test.ts
+      # (this lane's only regression coverage of GET /api/approvals/pending-count) now exercises a
+      # WHERE clause and both aggregate outputs that live entirely in this extracted module, not in
+      # routes/approvals.ts's handler body. Before the extraction this path was already covered by
+      # the routes/approvals.ts entry above; after it, a change to ONLY this module (leaving the
+      # handler byte-identical) would not retrigger this lane without this line.
+      - 'packages/core-backend/src/services/approval-pending-query.ts'
       # Gate P3-2 (2026-08-18): the other half of the two-point wiring — a rebase or PR that
       # silently drops one of this file's exclude entries above must re-trigger this lane so a
       # human sees a red job instead of the suite quietly returning to the required no-DB job's
@@ -84,6 +91,13 @@ on:
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/types/approval-product.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260703120000_add_node_entry_epoch.ts'
+      # Gate report impl-gate-B-slice1-round1-20260918.md P2-3: approval-wp3-pending-count.api.test.ts
+      # (this lane's only regression coverage of GET /api/approvals/pending-count) now exercises a
+      # WHERE clause and both aggregate outputs that live entirely in this extracted module, not in
+      # routes/approvals.ts's handler body. Before the extraction this path was already covered by
+      # the routes/approvals.ts entry above; after it, a change to ONLY this module (leaving the
+      # handler byte-identical) would not retrigger this lane without this line.
+      - 'packages/core-backend/src/services/approval-pending-query.ts'
       # Gate P3-2 (2026-08-18): the other half of the two-point wiring — a rebase or PR that
       # silently drops one of this file's exclude entries above must re-trigger this lane so a
       # human sees a red job instead of the suite quietly returning to the required no-DB job's
