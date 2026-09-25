@@ -29,14 +29,7 @@ interface ZonedWallClockParts {
 }
 
 const formatterCache = new Map<string, Intl.DateTimeFormat>()
-// NOTE(task-b, design-gap — flag for owner ratification): the cache used to key on the RAW spelling
-// callers passed in. A route forwarding a request-scoped viewer-tz header, or a task row's own
-// `time_zone` column, can produce arbitrarily many distinct spellings of one valid zone (case,
-// deprecated alias, …); each miss allocated a NEW native ICU formatter that was never evicted — an
-// unbounded per-process growth reachable once per request. Keying on the CANONICAL name (below)
-// collapses spellings of the same zone to one entry; the size cap is a second, independent bound in
-// case a caller genuinely cycles through many distinct real zones (e.g. many different orgs' task
-// rows) in one process lifetime.
+// Formatter cache keyed on the canonical zone name, with a fixed size bound.
 const MAX_FORMATTER_CACHE_ENTRIES = 256
 /** Raw spelling -> canonical zone name, bounded the same way (avoids a formatter build per call). */
 const canonicalKeyCache = new Map<string, string>()
@@ -316,15 +309,7 @@ export function isOverdueOrToday(task: TaskDueShape, now: Date, viewerTz: string
   return task.dueDate <= viewerToday(now, viewerTz)
 }
 
-/** A bare UTC-offset string (`+05:30`, `-8`, `Z`, …). `Intl.DateTimeFormat` accepts these as a
- * `timeZone` value without throwing — they round-trip through `resolvedOptions().timeZone`
- * unchanged — so `isValidIanaTimeZone` (which only checks "does construction throw") passes them.
- * PostgreSQL's `AT TIME ZONE` reads a bare offset with the OPPOSITE sign convention from the POSIX/
- * ICU one `Intl` uses, so accepting one here would silently apply an offset backwards relative to
- * the SQL `buildTaskPendingCondition` (task-access.ts) hands to `COALESCE($3, tasks.time_zone)`.
- * This module rejects the offset FORM outright rather than trying to invert the sign, since a bare
- * offset also carries no DST information — matching a real named zone is what `resolveViewerTimeZone`
- * exists to do. */
+/** Viewer-tz headers must resolve to a canonical NAMED zone; bare UTC-offset forms are not accepted. */
 const OFFSET_FORM_RE = /^(?:[+-]\d{1,2}(?::?\d{2})?|Z)$/i
 /** An IANA-style named zone: ASCII segments separated by '/', first character a letter. */
 const NAMED_ZONE_RE = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/
@@ -352,9 +337,7 @@ export function validateViewerTimeZoneHeader(headerValue: unknown): string | nul
   if (OFFSET_FORM_RE.test(trimmed)) return null
   if (!isValidIanaTimeZone(trimmed)) return null
   const canonical = canonicalTimeZoneName(trimmed)
-  // Check the CANONICAL value, not only the raw input: some non-ASCII spellings pass the raw offset
-  // guard above yet canonicalize to a bare offset. Only a named zone (starts with a letter, ASCII
-  // name segments) is accepted.
+  // Only a canonical named zone is accepted.
   if (canonical === null || !NAMED_ZONE_RE.test(canonical) || OFFSET_FORM_RE.test(canonical)) return null
   return canonical
 }

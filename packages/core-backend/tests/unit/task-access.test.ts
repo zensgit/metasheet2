@@ -464,3 +464,18 @@ describe('task-access', () => {
     })
   })
 })
+
+describe('task-access — bind-slot contract (review round 2)', () => {
+  it('the scope fragment uses exactly $1/$2 and the pending fragment $1..$3, so an outer query can number its own params from $4', () => {
+    const scope = buildTaskScopeCondition({ view: 'any_role', actorParam: 'u1', orgParam: 'org1' })
+    expect(scope.params).toEqual(['u1', 'org1'])
+    expect(new Set(scope.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+    const pending = buildTaskPendingCondition({ actorParam: 'u1', orgParam: 'org1', scope: 'overdue', viewerTzParam: 'UTC' })
+    expect(pending.params).toEqual(['u1', 'org1', 'UTC'])
+    expect(new Set(pending.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2', '$3']))
+    const outer = `SELECT id FROM tasks WHERE ${pending.sql} AND tasks.status = $4 LIMIT $5`
+    const outerParams = [...pending.params, 'open', 50]
+    const maxSlot = Math.max(...(outer.match(/\$(\d+)/g) ?? []).map((m) => Number(m.slice(1))))
+    expect(maxSlot).toBe(outerParams.length)
+  })
+})

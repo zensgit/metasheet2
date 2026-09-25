@@ -196,7 +196,10 @@ function scopeArm(view: Exclude<TaskView, 'any_role'>): string {
 }
 
 /**
- * Produces `{ sql, params }` TEXT for the tasks list-view scope — never executes anything. The
+ * Produces `{ sql, params }` TEXT for the tasks list-view scope — never executes anything.
+ * BIND SLOTS: the fragment always occupies `$1` (actor) and `$2` (org); `buildTaskPendingCondition`
+ * additionally uses `$3` (viewer tz). A caller that embeds the fragment in a larger query must put
+ * these values FIRST in its params array and number its own parameters from `$4` on. The
  * `org_id` clause is emitted exactly once here (lock §4.3 "single-point emission"); no other
  * function in this module may write its own org clause. Throws for a `view` outside `TASK_VIEWS`
  * rather than silently emitting `(FALSE)` — a caller that forwards an unvalidated `?view=` should
