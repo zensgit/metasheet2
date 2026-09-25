@@ -330,18 +330,16 @@ describe('task-access', () => {
     })
 
     it('mutation probe: deleting the created_by=:me conjunct from the delegated arm reds the PINNED snapshot (per design §5 "删 SQL created_by=:me 合取 ⇒ 文本快照红")', () => {
-      // Locally re-declared mutant arm builder — drops the leading `created_by = $1 AND` conjunct.
-      // Not the source module.
-      const mutantDelegatedArm = () =>
-        'EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = tasks.id AND ta.user_id <> $1)'
-      const mutantSql = `(tasks.org_id = $2) AND tasks.deleted_at IS NULL AND (${mutantDelegatedArm()})`
-      // The PINNED literal from the "delegated arm" snapshot test above, not a value re-derived by
-      // calling the real builder.
-      const PINNED_DELEGATED_SNAPSHOT =
-        "(tasks.org_id = $2) AND tasks.deleted_at IS NULL AND (tasks.created_by = $1 AND EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = tasks.id AND ta.user_id <> $1))"
-      expect(mutantSql).not.toBe(PINNED_DELEGATED_SNAPSHOT)
-      expect(buildTaskScopeCondition({ view: 'delegated', actorParam: 'u1', orgParam: 'org1' }).sql).toBe(
-        PINNED_DELEGATED_SNAPSHOT,
+      // Behavioural probe on the TS twin: a delegated predicate WITHOUT the createdByMe conjunct
+      // (the SQL mutant's semantics) must disagree with the real predicate on the lock's
+      // `none|delegated|oa` cell (someone else created it, someone else is assigned, I am uninvolved).
+      const row = { createdBy: 'other', assigneeIds: ['other2'], followerIds: [] as string[] }
+      const mutantDelegated = (r: typeof row, me: string) => r.assigneeIds.some((id) => id !== me)
+      expect(mutantDelegated(row, 'me')).toBe(true)
+      expect(taskMatchesView(row, 'me', 'delegated')).toBe(false)
+      // And the real SQL text carries the conjunct the mutant drops.
+      expect(buildTaskScopeCondition({ view: 'delegated', actorParam: 'u1', orgParam: 'org1' }).sql).toContain(
+        'tasks.created_by = $1 AND EXISTS',
       )
     })
   })

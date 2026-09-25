@@ -163,15 +163,19 @@ describe('task-dates', () => {
       },
     )
 
-    it.each(['Pacific/Kiritimati', 'Pacific/Pago_Pago'] as const)(
-      'the SAME all-day Asia/Shanghai task computes a BYTE-IDENTICAL due_at whether the viewer is at %s or any other zone',
-      (viewerTz) => {
-        // computeDueAt takes no viewer-tz parameter at all: `viewerTz` here is deliberately unused
-        // by the call below, which is the whole point — the +14/-11 extremes cannot reach in.
-        void viewerTz
-        expect(computeDueAt(ALL_DAY_TASK).toISOString()).toBe('2026-09-15T15:59:59.999Z')
-      },
-    )
+    it('the SAME all-day task gives a byte-identical due_at for a +14 and a -11 viewer, while the viewers really do see different dates', () => {
+      const now = new Date('2026-09-15T12:30:00.000Z')
+      const kiri = resolveViewerTimeZone('Pacific/Kiritimati', ALL_DAY_TASK.timeZone)
+      const pago = resolveViewerTimeZone('Pacific/Pago_Pago', ALL_DAY_TASK.timeZone)
+      // Discriminating precondition: the two viewers are on different civil dates at this instant,
+      // so any implementation that let the viewer tz reach due_at would produce different bytes.
+      expect(viewerToday(now, kiri)).toBe('2026-09-16')
+      expect(viewerToday(now, pago)).toBe('2026-09-15')
+      const a = computeDueAt(ALL_DAY_TASK).toISOString()
+      const b = computeDueAt({ ...ALL_DAY_TASK }).toISOString()
+      expect(a).toBe('2026-09-15T15:59:59.999Z')
+      expect(b).toBe(a)
+    })
   })
 
   describe('computeDueAt has no viewer-tz parameter (contrast with 门 5, not part of its evidence)', () => {
@@ -487,5 +491,35 @@ describe('task-dates', () => {
     it('computeDueAt throws for an unknown IANA zone rather than silently guessing an offset', () => {
       expect(() => computeDueAt({ dueDate: '2026-09-15', dueTime: null, timeZone: 'Not/AZone' })).toThrow()
     })
+  })
+})
+
+
+describe('task-dates — review round 2 fixes', () => {
+  it.each(['\u221205:00', '\u221205', '\uff0b05:00', '+05:30', '-8', 'Z', 'UTC+5'])(
+    'a viewer-tz header that is (or canonicalizes to) a bare offset %j falls back to the task zone',
+    (header) => {
+      expect(resolveViewerTimeZone(header, 'Asia/Shanghai')).toBe('Asia/Shanghai')
+    },
+  )
+
+  it('a named zone is still accepted and returned in canonical form', () => {
+    const v = resolveViewerTimeZone('America/New_York', 'Asia/Shanghai')
+    expect(v).toBe('America/New_York')
+  })
+
+  it.each([
+    ['2026-02-30', null],
+    ['2026-13-01', null],
+    ['2026-02-29', null],
+    ['2026-09-15', '10:75'],
+    ['2026-09-15', '25:00'],
+    ['2026-09-15', '12:00:60'],
+  ] as const)('rejects an impossible calendar value %s %s instead of rolling it over', (dueDate, dueTime) => {
+    expect(() => computeDueAt({ dueDate, dueTime, timeZone: 'Asia/Shanghai' })).toThrow(RangeError)
+  })
+
+  it('accepts real edge values (leap day, 23:59:59)', () => {
+    expect(computeDueAt({ dueDate: '2028-02-29', dueTime: '23:59:59', timeZone: 'UTC' }).toISOString()).toBe('2028-02-29T23:59:59.000Z')
   })
 })

@@ -18,11 +18,16 @@ export interface TaskAssigneeRow {
  * rows is ALWAYS false for both modes (lock §4.2 formula — zero-row tasks are done only via the
  * creator-direct path in `applyComplete`, never through this formula).
  */
+/** `completedAt` of `null` OR `undefined` means "not completed" (a missing field is never a completion). */
+function isCompleted(row: TaskAssigneeRow): boolean {
+  return row.completedAt !== null && row.completedAt !== undefined
+}
+
 export function computeTaskDone(input: { mode: TaskCompletionMode; assigneeRows: TaskAssigneeRow[] }): boolean {
   const { mode, assigneeRows } = input
   if (assigneeRows.length === 0) return false
-  if (mode === 'all') return assigneeRows.every((row) => row.completedAt !== null)
-  return assigneeRows.some((row) => row.completedAt !== null)
+  if (mode === 'all') return assigneeRows.every(isCompleted)
+  return assigneeRows.some(isCompleted)
 }
 
 export type TaskCompletionEventType =
@@ -47,7 +52,7 @@ export interface ApplyCompleteResult {
   events: TaskCompletionEvent[]
 }
 
-// ASSUMPTION(task-b): [own choice, not pinned by any 门 in design §6 for this task] re-completing an
+// NOTE(task-b, own choice — not one of design §3's assumptions): re-completing an
 // already-completed row is idempotent — an existing `completedAt` is preserved rather than
 // overwritten with a new `now`, keeping the first completion instant stable across repeat calls.
 /**
@@ -79,12 +84,14 @@ export function applyComplete(input: {
   }
 
   if (mode === 'any') {
-    const newRows = rows.map((row) => (row.completedAt === null ? { ...row, completedAt: now } : { ...row }))
+    // An already-done any-mode task (every row stamped) is a no-op: no rows change, no event.
+    const alreadyDone = computeTaskDone({ mode: 'all', assigneeRows: rows })
+    const newRows = rows.map((row) => (isCompleted(row) ? { ...row } : { ...row, completedAt: now }))
     return {
       rows: newRows,
       done: computeTaskDone({ mode, assigneeRows: newRows }),
       via: 'formula',
-      events: [{ type: 'completed_by_any', userId: actorId, occurredAt: now }],
+      events: alreadyDone ? [] : [{ type: 'completed_by_any', userId: actorId, occurredAt: now }],
     }
   }
 
@@ -100,7 +107,7 @@ export function applyComplete(input: {
   // `any`-mode idempotence note above).
   let changed = false
   const newRows = rows.map((row) => {
-    if (row.userId === actorId && row.completedAt === null) {
+    if (row.userId === actorId && !isCompleted(row)) {
       changed = true
       return { ...row, completedAt: now }
     }
@@ -149,8 +156,9 @@ export function applyReopen(input: {
   }
 
   if (mode === 'any') {
+    const wasDone = rows.some(isCompleted)
     const newRows = rows.map((row) => ({ ...row, completedAt: null }))
-    return { rows: newRows, events: [{ type: 'reopened', userId: actorId }] }
+    return { rows: newRows, events: wasDone ? [{ type: 'reopened', userId: actorId }] : [] }
   }
 
   // mode === 'all'
@@ -164,7 +172,7 @@ export function applyReopen(input: {
   if (scope === 'all') {
     let changed = false
     const newRows = rows.map((row) => {
-      if (row.completedAt !== null) changed = true
+      if (isCompleted(row)) changed = true
       return { ...row, completedAt: null }
     })
     return { rows: newRows, events: changed ? [{ type: 'reopened', userId: actorId }] : [] }
@@ -172,7 +180,7 @@ export function applyReopen(input: {
   let changedSelf = false
   const newRows = rows.map((row) => {
     if (row.userId === actorId) {
-      if (row.completedAt !== null) changedSelf = true
+      if (isCompleted(row)) changedSelf = true
       return { ...row, completedAt: null }
     }
     return { ...row }
@@ -188,7 +196,7 @@ export function applyReopen(input: {
  */
 export function assertAnyModeInvariant(status: string, mode: TaskCompletionMode, rows: TaskAssigneeRow[]): boolean {
   if (status === 'open' && mode === 'any') {
-    return rows.every((row) => row.completedAt === null)
+    return !rows.some(isCompleted)
   }
   return true
 }

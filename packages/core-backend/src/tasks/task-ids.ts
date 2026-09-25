@@ -31,8 +31,10 @@ const TASK_ID_RANDOM_BYTES = 16
 
 /** Server-generated id format (lock §4.1 `:92`): `^(tsk|tlst|tcmt)_[A-Za-z0-9]+$`. PURE. */
 export function generateTaskDomainId(kind: TaskDomainIdKind, random: TaskIdRandomSource): string {
-  const prefix = TASK_ID_PREFIXES[kind]
-  if (!prefix) {
+  const prefix = Object.prototype.hasOwnProperty.call(TASK_ID_PREFIXES, kind)
+    ? TASK_ID_PREFIXES[kind]
+    : undefined
+  if (typeof prefix !== 'string') {
     throw new TypeError(`generateTaskDomainId: unknown kind "${String(kind)}"`)
   }
   const suffix = random(TASK_ID_RANDOM_BYTES)

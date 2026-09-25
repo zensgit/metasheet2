@@ -5,53 +5,12 @@
  * Design: docs/development/task-b-pure-functions-design-20260926.md §1, §2.3
  * Lock:   task-feature-design-lock-20260917.md @ ce180c8850 §4.4, 门 8
  *
- * Zoned wall-clock math is a local, dependency-free re-implementation of the SAME technique as
- * `../multitable/automation-timezone.ts` (`Intl.DateTimeFormat` offset probing) — deliberately NOT
- * imported from there, because design §0 allows exactly one external import for this whole module
- * tree (`isValidIanaTimeZone`) and that file also exports non-pure-contract helpers. Keeping this a
- * private copy avoids widening the allowed-import surface while matching the proven algorithm.
- *
- * THREE corrections versus a byte-for-byte copy of that file's `zonedWallClockToUtcMs`:
- *
- * 1. The offset probe here is computed from a WHOLE-SECOND guess (milliseconds zeroed) and the
- *    input's milliseconds are added back afterward. The original computes the probe instant
- *    directly from a guess that may carry sub-second precision, which for a `:59.999`-style input
- *    yields an offset in fractional minutes (since the DST-probe formatter only has whole-second
- *    resolution) and a result off by up to ~1ms. That never surfaces in that file's callers (they
- *    only ever pass whole seconds), but `computeDueAt`'s all-day rule needs an exact
- *    `23:59:59.999` local instant, so the split is required here for byte-identical results.
- *
- * 2. The original is genuinely single-pass: one offset probe at the naive UTC-as-local guess. That
- *    is correct for a WEST-of-UTC zone's spring-forward gap (the guess instant is still on the
- *    pre-transition side, so the probed offset is the pre-transition one, and subtracting it lands
- *    past the transition — correct). It is WRONG for an EAST-of-UTC zone's gap (e.g. Asia/Beirut's
- *    2026-03-29 00:00→01:00 jump): there the naive guess instant is already numerically past the
- *    transition, so the probed offset is the POST-transition one, and subtracting it lands an hour
- *    short — still on the wrong side of the gap.
- *
- * 3. [Correction added after the ratify-round review — the previous revision of this file probed
- *    only TWO candidate offsets (at the naive guess, then re-probed at whichever instant that guess
- *    produced) and returned the FIRST one that round-tripped. That is not just imprecise, it is
- *    SIGN-DEPENDENT: for a west-of-UTC zone's fall-back overlap the first candidate found this way
- *    is the EARLIER of the two valid instants, but for an east-of-UTC zone it is the LATER one —
- *    the same civil-time ambiguity resolves to opposite occurrences depending on which side of UTC
- *    the zone sits, purely as an artifact of probe order. PostgreSQL's `AT TIME ZONE` (the lock's
- *    own SQL, §4.4) is NOT sign-dependent: for both an overlap and a gap it deterministically picks
- *    the LATER UTC instant. This module now matches that: it collects candidate offsets probed at
- *    the naive guess and at ±24h from it (wide enough to bracket any DST transition near the target
- *    civil date, since no real zone's UTC offset magnitude exceeds ~14h), converts each to a
- *    candidate UTC instant, and returns the LATEST candidate that round-trips back to the exact
- *    requested civil time — or, if none round-trips (a spring-forward gap), the latest candidate
- *    overall (the accepted post-transition instant, same as correction 2's gap behavior, now
- *    derived from the same one-rule candidate set instead of a special-cased two-probe scheme).
- *    Verified against `taskb-r1/oracle_dates.py`'s independent zoneinfo computation for
- *    Asia/Beirut 2026-03-29 (that file also lists Africa/Cairo 2026-04-24, but Node's bundled ICU
- *    tzdata disagrees with Python's zoneinfo about Cairo's 2026 rule — Egypt's DST rule changed
- *    more than once in recent years and the two runtimes' bundled data have not always agreed on
- *    the year at which each version applies — so this module does not pin or test that zone), and
- *    independently against `Intl.DateTimeFormat` round-trip checks for America/Havana, Atlantic/
- *    Azores, America/Santiago and Europe/Berlin (see the DST-boundary describe blocks in
- *    tests/unit/task-dates.test.ts for the exact fixtures and cited PG-SQL values).
+ * Zoned wall-clock math probes `Intl.DateTimeFormat` for UTC offsets. For a civil time that does
+ * not map to exactly one instant it follows PostgreSQL's `AT TIME ZONE` rule (the lock §4.4 SQL):
+ * in a fall-back overlap it returns the LATER of the two instants, and in a spring-forward gap it
+ * returns the post-transition instant. Candidate offsets are probed at the naive guess and at
+ * ±24h from it, which brackets any DST transition near the target date. The unit tests pin
+ * overlap and gap cases for east- and west-of-UTC zones.
  */
 
 import { isValidIanaTimeZone } from '../multitable/automation-timezone'
@@ -79,6 +38,8 @@ const formatterCache = new Map<string, Intl.DateTimeFormat>()
 // case a caller genuinely cycles through many distinct real zones (e.g. many different orgs' task
 // rows) in one process lifetime.
 const MAX_FORMATTER_CACHE_ENTRIES = 256
+/** Raw spelling -> canonical zone name, bounded the same way (avoids a formatter build per call). */
+const canonicalKeyCache = new Map<string, string>()
 
 function getFormatter(timeZone: string): Intl.DateTimeFormat {
   // Canonicalize the cache key first so two spellings of the same zone share one formatter. If
@@ -86,11 +47,19 @@ function getFormatter(timeZone: string): Intl.DateTimeFormat {
   // construction below lets THAT call raise the error, so an unknown-zone caller (e.g.
   // `computeDueAt`'s "throws for an unknown IANA zone" contract) sees the same error shape as
   // before this cache change.
-  let cacheKey = timeZone
-  try {
-    cacheKey = new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone
-  } catch {
-    // fall through — the construction below re-throws for the same reason.
+  let cacheKey = canonicalKeyCache.get(timeZone)
+  if (cacheKey === undefined) {
+    cacheKey = timeZone
+    try {
+      cacheKey = new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone
+      if (canonicalKeyCache.size >= MAX_FORMATTER_CACHE_ENTRIES) {
+        const oldest = canonicalKeyCache.keys().next().value
+        if (oldest !== undefined) canonicalKeyCache.delete(oldest)
+      }
+      canonicalKeyCache.set(timeZone, cacheKey)
+    } catch {
+      // fall through — the construction below re-throws for the same reason.
+    }
   }
   let fmt = formatterCache.get(cacheKey)
   if (!fmt) {
@@ -235,13 +204,26 @@ export interface ComputeDueAtInput {
 function parseIsoDate(dueDate: string): { year: number; month: number; day: number } {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dueDate)
   if (!m) throw new RangeError(`computeDueAt: dueDate must be YYYY-MM-DD, got "${dueDate}"`)
-  return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) }
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  const probe = new Date(Date.UTC(year, month - 1, day))
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
+    throw new RangeError(`computeDueAt: "${dueDate}" is not a real calendar date`)
+  }
+  return { year, month, day }
 }
 
 function parseTimeOfDay(dueTime: string): { hour: number; minute: number; second: number } {
   const m = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(dueTime)
   if (!m) throw new RangeError(`computeDueAt: dueTime must be HH:MM or HH:MM:SS, got "${dueTime}"`)
-  return { hour: Number(m[1]), minute: Number(m[2]), second: m[3] ? Number(m[3]) : 0 }
+  const hour = Number(m[1])
+  const minute = Number(m[2])
+  const second = m[3] ? Number(m[3]) : 0
+  if (hour > 23 || minute > 59 || second > 59) {
+    throw new RangeError(`computeDueAt: "${dueTime}" is not a real time of day`)
+  }
+  return { hour, minute, second }
 }
 
 /**
@@ -344,6 +326,8 @@ export function isOverdueOrToday(task: TaskDueShape, now: Date, viewerTz: string
  * offset also carries no DST information — matching a real named zone is what `resolveViewerTimeZone`
  * exists to do. */
 const OFFSET_FORM_RE = /^(?:[+-]\d{1,2}(?::?\d{2})?|Z)$/i
+/** An IANA-style named zone: ASCII segments separated by '/', first character a letter. */
+const NAMED_ZONE_RE = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/
 
 function canonicalTimeZoneName(timeZone: string): string | null {
   try {
@@ -356,8 +340,8 @@ function canonicalTimeZoneName(timeZone: string): string | null {
 /**
  * Validates a viewer-supplied tz header value IN ISOLATION — no task-tz fallback, `null` on any
  * failure (missing, blank, not a real zone per `isValidIanaTimeZone`, or a bare-offset form per the
- * `OFFSET_FORM_RE` guard above). Returns the CANONICAL zone name (e.g. `Asia/Calcutta` → `Asia/
- * Kolkata`) so two spellings of the same zone collapse to one string for a caller that keys a cache
+ * `OFFSET_FORM_RE` guard above). Returns the CANONICAL zone name (the platform's canonical spelling, e.g. `Asia/Kolkata` and
+ * `Asia/Calcutta` collapse to one name) so two spellings of the same zone collapse to one string for a caller that keys a cache
  * or a `COALESCE($3, …)` bind value on it. `isValidIanaTimeZone` is the ONE external import this
  * module tree is allowed.
  */
@@ -367,7 +351,12 @@ export function validateViewerTimeZoneHeader(headerValue: unknown): string | nul
   if (trimmed.length === 0) return null
   if (OFFSET_FORM_RE.test(trimmed)) return null
   if (!isValidIanaTimeZone(trimmed)) return null
-  return canonicalTimeZoneName(trimmed)
+  const canonical = canonicalTimeZoneName(trimmed)
+  // Check the CANONICAL value, not only the raw input: some non-ASCII spellings pass the raw offset
+  // guard above yet canonicalize to a bare offset. Only a named zone (starts with a letter, ASCII
+  // name segments) is accepted.
+  if (canonical === null || !NAMED_ZONE_RE.test(canonical) || OFFSET_FORM_RE.test(canonical)) return null
+  return canonical
 }
 
 /**

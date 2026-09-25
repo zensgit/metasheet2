@@ -15,7 +15,8 @@ export type TaskRole = (typeof TASK_ROLES)[number]
 export const TASK_ABILITIES = ['view', 'edit', 'complete', 'reopen', 'comment', 'attach', 'delete', 'leave'] as const
 export type TaskAbility = (typeof TASK_ABILITIES)[number]
 
-// ASSUMPTION(task-b): [lock §13-23, UNRATIFIED] `follower` = view + comment + leave only, nothing else.
+// NOTE(task-b): `follower` = view + comment + leave only — lock §13-23 suggested value (not among the
+// four items the owner ruled on 2026-09-26; revisit if §13-23 is ruled differently).
 // ASSUMPTION(task-b): [design §3 item 1] `creator.leave = false` and `assignee.leave = false` —
 // leaving a task is a follower-only action; creator/assignee "leave" is not a thing this period.
 /**
@@ -203,8 +204,10 @@ function scopeArm(view: Exclude<TaskView, 'any_role'>): string {
  */
 export function buildTaskScopeCondition(input: {
   view: TaskView
-  actorParam: unknown
-  orgParam: unknown
+  /** Bind VALUE for the acting user id (emitted as `$1`). */
+  actorParam: string
+  /** Bind VALUE for the org id (emitted as `$2`). */
+  orgParam: string
 }): TaskScopeCondition {
   const { view, actorParam, orgParam } = input
   if (!TASK_VIEWS.includes(view)) {
@@ -237,8 +240,8 @@ export type TaskPendingScope = 'all_open' | 'overdue' | 'overdue_or_today'
 // expected to already be VALIDATED (e.g. `task-dates.ts`'s `validateViewerTimeZoneHeader`, which
 // returns `null` for a missing/invalid header) — this function does not itself re-validate it.
 export type TaskPendingConditionInput = {
-  actorParam: unknown
-  orgParam: unknown
+  actorParam: string
+  orgParam: string
   scope: TaskPendingScope
   /** Validated viewer-tz header (see the NOTE above), or `null`/omitted for "no viewer header". */
   viewerTzParam?: string | null

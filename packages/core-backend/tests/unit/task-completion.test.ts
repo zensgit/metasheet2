@@ -255,3 +255,38 @@ describe('task-completion', () => {
     })
   })
 })
+
+describe('task-completion — review round 2 fixes', () => {
+  it('a missing completedAt (undefined) is NOT a completion', () => {
+    const rows = [{ userId: 'u1' } as unknown as TaskAssigneeRow]
+    expect(computeTaskDone({ mode: 'all', assigneeRows: rows })).toBe(false)
+    expect(computeTaskDone({ mode: 'any', assigneeRows: rows })).toBe(false)
+    expect(assertAnyModeInvariant('open', 'any', rows)).toBe(true)
+  })
+
+  it('any mode: completing an already-done task changes nothing and emits no event', () => {
+    const rows = [row('u1', NOW), row('u2', NOW)]
+    const later = new Date('2026-09-15T13:00:00.000Z')
+    const r = applyComplete({ mode: 'any', rows, actorId: 'u1', createdBy: 'c1', now: later })
+    expect(r.events).toEqual([])
+    expect(r.rows.map((x) => x.completedAt)).toEqual([NOW, NOW])
+    expect(r.done).toBe(true)
+  })
+
+  it('any mode: completing an open task stamps every row with the same instant and emits one event', () => {
+    const r = applyComplete({ mode: 'any', rows: [row('u1', null), row('u2', null)], actorId: 'u1', createdBy: 'c1', now: NOW })
+    expect(r.rows.map((x) => x.completedAt)).toEqual([NOW, NOW])
+    expect(r.events).toEqual([{ type: 'completed_by_any', userId: 'u1', occurredAt: NOW }])
+  })
+
+  it('any mode: reopening an already-open task changes nothing and emits no event', () => {
+    const r = applyReopen({ mode: 'any', rows: [row('u1', null), row('u2', null)], actorId: 'u1', createdBy: 'c1' })
+    expect(r.events).toEqual([])
+  })
+
+  it('any mode: reopening a done task clears every row and emits one reopened event', () => {
+    const r = applyReopen({ mode: 'any', rows: [row('u1', NOW), row('u2', NOW)], actorId: 'u1', createdBy: 'c1' })
+    expect(r.rows.every((x) => x.completedAt === null)).toBe(true)
+    expect(r.events).toEqual([{ type: 'reopened', userId: 'u1' }])
+  })
+})

@@ -275,3 +275,12 @@ describe('task-ids', () => {
     })
   })
 })
+
+describe('task-ids — review round 2 fixes', () => {
+  it.each(['toString', 'constructor', '__proto__', 'hasOwnProperty'])(
+    'generateTaskDomainId rejects an Object.prototype key %j as kind',
+    (kind) => {
+      expect(() => generateTaskDomainId(kind as never, () => 'abc')).toThrow(TypeError)
+    },
+  )
+})
