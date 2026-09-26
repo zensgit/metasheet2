@@ -39,11 +39,14 @@
        without it "maintenance flag: ... (removed)" would read like proof the
        window was shielded on a host where the flag is inert.
        Every pm2 call (this stop, the step 7 restart and its fallback kill,
-       the failure-handler stop) runs under ONE resolved, absolute PM2_HOME
-       (Resolve-Pm2Home: -Pm2Home > the PM2_HOME already in the environment
-       > <user profile>\.pm2-runtime when that directory AND the
-       -Pm2ScheduledTaskName scheduled task both exist > untouched), resolved
-       before anything is changed.
+       the failure-handler stop) runs under ONE resolved, fully qualified
+       PM2_HOME (Resolve-Pm2Home: -Pm2Home > the PM2_HOME already in the
+       environment > <user profile>\.pm2-runtime when that directory AND the
+       -Pm2ScheduledTaskName scheduled task both exist), resolved before
+       anything is changed. When none of the three applies, PM2_HOME is left
+       untouched and each pm2 call inherits the environment as it is then --
+       including a PM2_HOME that docker/app.env sets, imported at step 6
+       (pre-existing behaviour; the final report says so).
     3. Back up docker/, config/, packages/core-backend/dist, apps/web/dist,
        and plugins/ (excluding node_modules) to a timestamped folder. Prints
        the backup path.
@@ -86,7 +89,9 @@
        the task's pm2-runtime, which then only attaches to it as a client, so
        that session-bound daemon (not the task) would host the backend, and
        the backend would live only as long as the upgrade session's process
-       tree.
+       tree. The task is started only once the pipe is seen closed (or, when
+       the pipe namespace cannot be listed, only if `pm2 kill` exited 0), and
+       by the folder it was found in (-TaskPath).
     8. Print a final report: package name, backup path, migration exit,
        health, and the exact operator commands to run next (preflight +
        acceptance bootstrap).
@@ -170,13 +175,18 @@ param(
   #      behaviour on a host that is not pm2-runtime managed).
   # A value given here that is not an existing file-system directory is
   # refused before anything is touched: pm2 would silently start a fresh,
-  # empty home there. A relative value (here or in PM2_HOME) is made absolute
-  # against the location the script starts in, because step 6 changes the
-  # location and pm2 resolves a relative PM2_HOME against its own cwd.
+  # empty home there. A value that is not fully qualified (here or in
+  # PM2_HOME: relative, root-relative '\x', or drive-relative 'C:x') is made
+  # absolute against the location the script starts in, because step 6
+  # changes the location and pm2 resolves such a PM2_HOME against its own
+  # cwd. A PM2_HOME from the environment that is not a file-system path at
+  # all (Env:\..., HKCU:\...) is refused the same way.
   [string]$Pm2Home = '',
 
-  # The scheduled task that hosts the backend under pm2-runtime. Used twice:
-  # to auto-detect the pm2 home (see -Pm2Home), and as the restart fallback --
+  # The scheduled task that hosts the backend under pm2-runtime, looked up by
+  # this exact name in ANY task folder; exactly one such task must exist,
+  # and it is started by its own folder (TaskPath). Used twice: to
+  # auto-detect the pm2 home (see -Pm2Home), and as the restart fallback --
   # when `pm2 restart` reports the app "not found" and this task exists, the
   # empty pm2 daemon that restart just started is killed, the task is started
   # instead, and the normal health polling decides the outcome. An empty
@@ -290,28 +300,70 @@ function Get-UserProfileDirectory {
   return $HOME
 }
 
-function Test-ScheduledTaskPresent {
+function Get-Pm2ScheduledTask {
   <#
-    True only when Get-ScheduledTask -TaskName $TaskName returns a task on
-    this host (the default name has no wildcard characters). Never throws: an empty name, a host without the ScheduledTasks
-    module (pwsh on Linux), a task that does not exist, or a query that fails
-    for any other reason all answer $false -- the callers treat "cannot tell"
-    as "not pm2-runtime managed", which is the pre-existing behaviour.
+    The ONE scheduled task on this host whose name is exactly $TaskName, in
+    whatever task folder it lives, or $null. Every decision about the task
+    (home auto-detection, the restart fallback, the restore block) and the
+    Start-ScheduledTask that acts on it go through this one lookup, so the
+    task that is started is the task that was detected:
+    Get-ScheduledTask -TaskName searches EVERY folder and treats the name as
+    a wildcard pattern, while Start-ScheduledTask -TaskName without -TaskPath
+    looks only in the root folder '\' -- a task in a subfolder would pass the
+    check and then fail to start. So the match is filtered to the exact name,
+    must be unique (the same name in two folders cannot tell which one hosts
+    pm2-runtime), and callers start it by its own TaskPath.
+
+    Never throws: an empty name, a host without the ScheduledTasks module
+    (pwsh on Linux), no such task, more than one, or a query that fails for
+    any other reason all answer $null -- the callers treat "cannot tell" as
+    "not pm2-runtime managed", which is the pre-existing behaviour.
   #>
   param([string]$TaskName)
 
   if ([string]::IsNullOrWhiteSpace($TaskName)) {
-    return $false
+    return $null
   }
   try {
     if (-not (Get-Command -Name 'Get-ScheduledTask' -ErrorAction SilentlyContinue)) {
-      return $false
+      return $null
     }
-    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-    return ($null -ne $task)
+    $found = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Where-Object { $null -ne $_ -and $_.TaskName -eq $TaskName })
   } catch {
-    return $false
+    return $null
   }
+  if ($found.Count -gt 1) {
+    Write-Info ("scheduled task name '{0}' matches {1} tasks ({2}); none of them is treated as the pm2-runtime task." -f $TaskName, $found.Count, (($found | ForEach-Object { [string]$_.TaskPath + [string]$_.TaskName }) -join ', '))
+    return $null
+  }
+  if ($found.Count -eq 0) {
+    return $null
+  }
+  return $found[0]
+}
+
+function Get-ScheduledTaskPathOrRoot {
+  # A task object's folder; the root folder '\' when it carries none.
+  param($Task)
+  if ($null -eq $Task -or [string]::IsNullOrEmpty([string]$Task.TaskPath)) {
+    return '\'
+  }
+  return [string]$Task.TaskPath
+}
+
+function Test-ScheduledTaskPresent {
+  <#
+    True only when Get-Pm2ScheduledTask finds exactly one task named exactly
+    $TaskName. Never throws.
+  #>
+  param([string]$TaskName)
+  return ($null -ne (Get-Pm2ScheduledTask -TaskName $TaskName))
+}
+
+function ConvertTo-PsSingleQuotedLiteral {
+  # 'value' with every ' doubled, so a printed command stays pasteable.
+  param([string]$Value)
+  return "'" + ($Value -replace "'", "''") + "'"
 }
 
 function Resolve-Pm2Home {
@@ -327,16 +379,21 @@ function Resolve-Pm2Home {
     wins without asking, and a host with no .pm2-runtime directory is never
     queried at all).
 
-    Home is always an ABSOLUTE path (or ''). A relative -Explicit or
-    -EnvValue is resolved here, against the current location -- the same one
-    the existence check uses. Main later runs `Set-Location $resolvedRoot`, a
-    native child inherits that location as its cwd, and pm2 resolves a
-    relative PM2_HOME against its cwd: left relative, the step 2 stop and the
-    step 7 restart would talk to two different directories.
+    Home is always a fully qualified file-system path (or ''). An -Explicit
+    or -EnvValue that is not fully qualified -- relative ('x'), root-relative
+    ('\x', rooted on whatever drive the cwd is on) or drive-relative ('C:x')
+    -- is resolved here, the way PowerShell resolves it from the current
+    location (the same location the -Explicit existence check uses). Main
+    later runs `Set-Location $resolvedRoot`, a native child inherits that
+    location as its cwd, and pm2 resolves such a PM2_HOME against its cwd:
+    left unresolved, the step 2 stop and the step 7 restart could talk to
+    two different directories (or, for '\x', two different drives).
 
     Throws PM2_HOME_NOT_FOUND when -Explicit names a directory that does not
     exist, or a container that is not a file-system directory (HKCU:\...,
-    Env:\ -- both pass Test-Path -PathType Container).
+    Env:\ -- both pass Test-Path -PathType Container), and when -EnvValue is
+    not a file-system path at all (Env:\..., HKCU:\..., a drive this session
+    does not have).
   #>
   param(
     [string]$Explicit = '',
@@ -359,10 +416,19 @@ function Resolve-Pm2Home {
 
   if (-not [string]::IsNullOrWhiteSpace($EnvValue)) {
     # Not required to exist (pm2 has always been free to create it); only made
-    # absolute, against the current file-system location.
-    $envHome = $EnvValue
-    if (-not [System.IO.Path]::IsPathRooted($envHome)) {
-      $envHome = Join-Path (Get-Location -PSProvider FileSystem).ProviderPath $envHome
+    # fully qualified. [IO.Path]::IsPathRooted is not enough: it calls '\x'
+    # and 'C:x' rooted, yet both still depend on the cwd's drive / the drive's
+    # cwd, which step 6 changes.
+    $envProvider = $null
+    $envDrive = $null
+    try {
+      $envHome = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EnvValue, [ref]$envProvider, [ref]$envDrive)
+    } catch {
+      throw "PM2_HOME_NOT_FOUND: PM2_HOME '$EnvValue' from the environment cannot be resolved to a file-system path: $($_.Exception.Message)"
+    }
+    if ($null -eq $envProvider -or $envProvider.Name -ne 'FileSystem') {
+      $providerName = if ($null -eq $envProvider) { 'unknown' } else { $envProvider.Name }
+      throw "PM2_HOME_NOT_FOUND: PM2_HOME '$EnvValue' from the environment is not a file-system path (provider: $providerName)."
     }
     return [pscustomobject]@{ Home = $envHome; Source = 'environment PM2_HOME'; ScheduledTaskPresent = $null }
   }
@@ -540,10 +606,21 @@ function Restart-Pm2AppOrScheduledTask {
     host whose restart answers "not found", that daemon does not hold the
     backend.
 
+    The task is started only on positive evidence that no daemon is left:
+      - pipe 'closed'                          -> start the task;
+      - pipe 'unknown' (namespace not listable)
+        AND `pm2 kill` exited 0                -> start the task, logged as
+                                                  unverified (pm2's own word
+                                                  that it killed the daemon);
+      - pipe 'unknown' AND `pm2 kill` failed   -> PM2_DAEMON_STATE_UNKNOWN;
+      - pipe 'still-open', or anything else    -> PM2_DAEMON_STILL_RUNNING.
+    The task is the one Get-Pm2ScheduledTask found, started by its own
+    TaskPath (a task in a subfolder cannot be started by name alone).
+
     Throws PM2_RESTART_FAILED on any other restart failure, or on "not found"
-    with no such task (the pre-existing outcome), PM2_DAEMON_STILL_RUNNING
-    when a daemon still holds the pipe after the kill (starting the task then
-    would recreate exactly the session-bound backend above), and
+    with no such task (the pre-existing outcome), PM2_DAEMON_STILL_RUNNING /
+    PM2_DAEMON_STATE_UNKNOWN as above (starting the task then could recreate
+    exactly the session-bound backend above), and
     PM2_SCHEDULED_TASK_START_FAILED when the task cannot be started. Every
     one of them reaches the caller's mutation-window handler, which prints
     the restore block.
@@ -562,30 +639,34 @@ function Restart-Pm2AppOrScheduledTask {
   if (-not (Test-Pm2ProcessNotFound -Output $restart.Output)) {
     throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode)"
   }
-  if (-not (Test-ScheduledTaskPresent -TaskName $ScheduledTaskName)) {
-    if ([string]::IsNullOrWhiteSpace($ScheduledTaskName)) {
-      throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode) (pm2 reports '$Name' not found; the scheduled-task fallback is disabled)"
-    }
-    throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode) (pm2 reports '$Name' not found and there is no scheduled task '$ScheduledTaskName' to fall back to)"
+  if ([string]::IsNullOrWhiteSpace($ScheduledTaskName)) {
+    throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode) (pm2 reports '$Name' not found; the scheduled-task fallback is disabled)"
   }
+  $task = Get-Pm2ScheduledTask -TaskName $ScheduledTaskName
+  if ($null -eq $task) {
+    throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode) (pm2 reports '$Name' not found and there is no single scheduled task '$ScheduledTaskName' to fall back to)"
+  }
+  $taskPath = Get-ScheduledTaskPathOrRoot -Task $task
 
-  Write-Info "PM2_RESTART_NOT_FOUND_FALLBACK: pm2 reports '$Name' not found; scheduled task '$ScheduledTaskName' exists, so this is a pm2-runtime host whose runtime exited after the stop. Starting the task instead."
+  Write-Info "PM2_RESTART_NOT_FOUND_FALLBACK: pm2 reports '$Name' not found; scheduled task '$taskPath$($task.TaskName)' exists, so this is a pm2-runtime host whose runtime exited after the stop. Starting the task instead."
   Write-Info "Removing the empty pm2 daemon the restart above started in this session, so the task's pm2-runtime hosts the backend itself (pm2 kill)."
   $kill = Invoke-Pm2 -Pm2Command $Pm2Command -Arguments @('kill') -Pm2Home $Pm2Home
   if ($kill.ExitCode -ne 0) {
     Write-Info "pm2 kill reported exit=$($kill.ExitCode) (the pipe check below decides whether a daemon is still there)"
   }
   $pipeState = Wait-Pm2DaemonPipeClosed
-  if ($pipeState -eq 'still-open') {
-    throw "PM2_DAEMON_STILL_RUNNING: a pm2 daemon still listens on \\.\pipe\rpc.sock after 'pm2 kill'; starting '$ScheduledTaskName' now would make its pm2-runtime attach to that daemon instead of hosting '$Name' itself. The task was NOT started."
-  }
   if ($pipeState -eq 'unknown') {
-    Write-Info "pm2 pipe check unavailable (the pipe namespace could not be listed); relying on 'pm2 kill' having returned."
+    if ($kill.ExitCode -ne 0) {
+      throw "PM2_DAEMON_STATE_UNKNOWN: the pm2 pipe namespace could not be listed and 'pm2 kill' failed (exit=$($kill.ExitCode)); nothing shows the session's pm2 daemon is gone, so '$ScheduledTaskName' was NOT started."
+    }
+    Write-Info "pm2 pipe check unavailable (the pipe namespace could not be listed); 'pm2 kill' exited 0, so the task is started without the pipe check (UNVERIFIED)."
+  } elseif ($pipeState -ne 'closed') {
+    throw "PM2_DAEMON_STILL_RUNNING: a pm2 daemon still listens on \\.\pipe\rpc.sock after 'pm2 kill' (pipe state: $pipeState); starting '$ScheduledTaskName' now would make its pm2-runtime attach to that daemon instead of hosting '$Name' itself. The task was NOT started."
   }
   try {
-    Start-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction Stop
+    Start-ScheduledTask -TaskName $task.TaskName -TaskPath $taskPath -ErrorAction Stop
   } catch {
-    throw "PM2_SCHEDULED_TASK_START_FAILED: could not start scheduled task '$ScheduledTaskName': $($_.Exception.Message)"
+    throw "PM2_SCHEDULED_TASK_START_FAILED: could not start scheduled task '$taskPath$($task.TaskName)': $($_.Exception.Message)"
   }
   Write-Info "Scheduled task '$ScheduledTaskName' started; the health polling below decides whether the backend came back."
   return 'scheduled-task'
@@ -1455,7 +1536,10 @@ function Write-RestoreBlock {
     # after a stop, pm2-runtime has exited and `pm2 restart` answers "not
     # found", so the block also prints how to start the task (after a
     # `pm2 kill` of the empty daemon that answer came from).
-    [string]$ScheduledTaskName = ''
+    [string]$ScheduledTaskName = '',
+    # That task's folder (Get-Pm2ScheduledTask), printed as -TaskPath: a task
+    # in a subfolder cannot be started by its name alone.
+    [string]$ScheduledTaskPath = '\'
   )
 
   Write-Host ''
@@ -1477,15 +1561,18 @@ function Write-RestoreBlock {
     Write-Host ("  Copy-Item -LiteralPath '{0}' -Destination '{1}' -Recurse -Force" -f $backupSrc, $liveDst)
   }
   if (-not [string]::IsNullOrWhiteSpace($Pm2Home)) {
-    Write-Host ("  `$env:PM2_HOME = '{0}'" -f $Pm2Home)
+    Write-Host ("  `$env:PM2_HOME = {0}" -f (ConvertTo-PsSingleQuotedLiteral -Value $Pm2Home))
   }
   Write-Host ("  pm2 restart {0} --update-env" -f $Pm2AppName)
   if (-not [string]::IsNullOrWhiteSpace($ScheduledTaskName)) {
+    if ([string]::IsNullOrEmpty($ScheduledTaskPath)) {
+      $ScheduledTaskPath = '\'
+    }
     Write-Host '  # pm2-runtime host: if pm2 answers "not found", pm2-runtime has exited and that pm2 call'
     Write-Host '  # started an empty pm2 daemon in THIS session. Kill it first, or the task''s pm2-runtime'
     Write-Host '  # attaches to it and the backend lives only as long as this session. Then start the task:'
     Write-Host '  pm2 kill'
-    Write-Host ("  Start-ScheduledTask -TaskName '{0}'" -f $ScheduledTaskName)
+    Write-Host ("  Start-ScheduledTask -TaskName {0} -TaskPath {1}" -f (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskName), (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskPath))
   }
   Write-Host '=========================================================================='
   Write-Host ''
@@ -1662,6 +1749,15 @@ if ($MyInvocation.InvocationName -ne '.') {
       }
       Write-PluginsSummary -RootDir $resolvedRoot
 
+      # With no home resolved, this script sets none and every pm2 call
+      # inherits the process environment as it is at that moment -- and step
+      # 6 (RunMigrations=1) imports docker/app.env into it. If that file sets
+      # PM2_HOME, the step 7 pm2 calls ran under it while the step 2 stop did
+      # not (the pre-existing behaviour); the report must not claim "not set".
+      if ([string]::IsNullOrWhiteSpace($resolvedPm2Home) -and -not [string]::IsNullOrWhiteSpace($env:PM2_HOME)) {
+        $pm2HomeReport = "not set by this script; from step 6 on, pm2 calls inherited PM2_HOME=$($env:PM2_HOME) imported from $resolvedEnvFile (the step 2 stop ran without it)"
+      }
+
       Write-Info '=== Step 8/8: final report ==='
       Write-Host ''
       Write-Host '===== multitable-onprem-package-upgrade-inplace: final report ====='
@@ -1701,13 +1797,16 @@ if ($MyInvocation.InvocationName -ne '.') {
       } catch {
         Write-Err "pm2 stop itself failed while handling the error above: $($_.Exception.Message)"
       }
-      # Test-ScheduledTaskPresent never throws, so it cannot keep the restore
+      # Get-Pm2ScheduledTask never throws, so it cannot keep the restore
       # block below from printing.
       $restoreTaskName = ''
-      if (Test-ScheduledTaskPresent -TaskName $Pm2ScheduledTaskName) {
-        $restoreTaskName = $Pm2ScheduledTaskName
+      $restoreTaskPath = '\'
+      $restoreTask = Get-Pm2ScheduledTask -TaskName $Pm2ScheduledTaskName
+      if ($null -ne $restoreTask) {
+        $restoreTaskName = [string]$restoreTask.TaskName
+        $restoreTaskPath = Get-ScheduledTaskPathOrRoot -Task $restoreTask
       }
-      Write-RestoreBlock -BackupPath $backupPath -RootDir $resolvedRoot -ReplacedRelativePaths $restoredRelativePaths -Pm2AppName $Pm2AppName -MaintenanceFlagPath $maintenanceFlagPath -Pm2Home $resolvedPm2Home -ScheduledTaskName $restoreTaskName
+      Write-RestoreBlock -BackupPath $backupPath -RootDir $resolvedRoot -ReplacedRelativePaths $restoredRelativePaths -Pm2AppName $Pm2AppName -MaintenanceFlagPath $maintenanceFlagPath -Pm2Home $resolvedPm2Home -ScheduledTaskName $restoreTaskName -ScheduledTaskPath $restoreTaskPath
       throw
     }
   } finally {

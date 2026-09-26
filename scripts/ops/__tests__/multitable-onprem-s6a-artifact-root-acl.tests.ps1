@@ -453,6 +453,33 @@ finally {
   }
 }
 
+# >>> co-hosted suite: multitable-onprem-package-upgrade-inplace (Windows lanes) >>>
+# The stock-prep-powershell51 workflow job runs THIS file on windows-latest under
+# Windows PowerShell 5.1 and under pwsh 7 -- the only CI lanes on Windows. The on-prem
+# in-place upgrade script's node:test suite has checks that only mean something there
+# (the real \\.\pipe\ enumeration behind its pm2 daemon check, and 5.1's native-stderr
+# semantics), so it rides along here: the co-hosted runner runs it with THIS file's
+# own host shell as the shell under test. Off Windows it is a SKIP -- the ubuntu
+# `test` job runs that suite under pwsh 7 in its R12-C step. Pinned by the
+# "CI wiring (Windows lanes)" test in scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs.
+if ($isWindowsHost) {
+  $cohostedRunner = Join-Path $PSScriptRoot 'multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1'
+  $cohostedShell = (Get-Process -Id $PID).Path
+  $savedErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $global:LASTEXITCODE = -1
+    & $cohostedShell -NoProfile -ExecutionPolicy Bypass -File $cohostedRunner
+    $cohostedExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+  }
+  Check "co-hosted: multitable-onprem-package-upgrade-inplace suite passes under $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) (exit=$cohostedExit)" ($cohostedExit -eq 0)
+} else {
+  Skip 'co-hosted: multitable-onprem-package-upgrade-inplace suite (Windows only; the ubuntu test job runs it under pwsh 7)'
+}
+# <<< co-hosted suite <<<
+
 if ($fail -gt 0) {
   Write-Host "FAILED: $fail check(s); $pass passed; $skip skipped"
   exit 1
