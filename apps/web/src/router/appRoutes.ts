@@ -363,6 +363,18 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Workflow Designer', titleZh: '流程设计', requiresAuth: true, requiredFeature: 'workflow' }
   },
   {
+    path: '/tasks',
+    name: 'tasks-home',
+    component: () => import('../views/tasks/TasksHomeView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, permissions: ['tasks:read'] }
+  },
+  {
+    path: '/tasks/:id',
+    name: 'tasks-detail',
+    component: () => import('../views/tasks/TasksDetailView.vue'),
+    meta: { title: 'Task', titleZh: '任务详情', requiresAuth: true, permissions: ['tasks:read'] }
+  },
+  {
     path: '/approvals',
     name: 'approval-list',
     component: () => import('../views/approval/ApprovalCenterView.vue'),
