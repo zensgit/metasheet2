@@ -3125,8 +3125,10 @@ watch(
 //   - the published height is bounded by what the frame REALLY has left after its measured fixed
 //     rows (header, splitter, add-field row, delete confirmation) and the list's floor, so it can
 //     always be honoured, and a short window shrinks the floors instead of pushing those rows out;
-//   - drag and key steps start from the drawn height;
-//   - nothing is written to localStorage unless the user chose a height.
+//   - drag and key steps start from the drawn height, and a step that draws nothing new (growing a
+//     pane that already shows all its content, a click on the splitter) chooses nothing;
+//   - no height is written to localStorage unless the user chose it, a clamp never overwrites one,
+//     and what the deployed r8-B build stored is not trusted (it moved to a versioned key).
 const CONFIG_PANE_MIN_HEIGHT = 120
 const CONFIG_PANE_STEP = 16
 // The list's floor whenever the frame has room for both floors. Mirrors the `96px` fallback of
@@ -3139,9 +3141,21 @@ const FRAME_MAX_HEIGHT_VH_RATIO = 0.84
 // that is not laid out). 64 keeps r8-B's `0.84vh - 160` ceiling (0.84vh - 64 - 96) in that case.
 // As soon as a row is laid out, the real sum replaces it (Chromium: 57 + 6 + 53 to 74).
 const FALLBACK_FIXED_ROWS_HEIGHT = 64
+// A drag whose pointer is still within this many px of where it went down is a click or a wobble, not
+// a choice: the pane stays (or returns to) exactly as it was when the drag began.
+const CONFIG_PANE_DRAG_DEAD_ZONE = 3
 // Per-browser, NOT per-user: a pane height is a device/viewport preference, not an identity-scoped
 // one (the same call MetaRecordInspector.vue made for its own width key).
-const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
+// #7a review B1: versioned. Under the r8-B key the deployed build stored heights nobody chose -- the
+// first ⤢ click saved the mount-time default (round(0.52 * vh)) and a drag started from the ceiling
+// saved r8-B's ceiling -- and no stored number can tell those apart from a real choice. Trusting
+// them now that the stored height is drawn faithfully leaves ⤢ with 0px of travel at 728px windows
+// and below, 23px at 800. Dropping them costs at most one re-drag: r8-B drew a stored height as
+// chosen only when the list and the pane both fitted the frame; whenever they did not (the #7a case)
+// the pane was shrunk in proportion to its content, so the stored number was never what the user saw.
+const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight.v2'
+// Read by nothing: removed on mount so it stops lingering in the browser.
+const LEGACY_CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
 
 // Viewport-tracked (not read once) so the ceiling -- and with it Home/End, the drag clamp, the
 // enlarge target and the default split -- stays correct across a live window resize.
@@ -3248,9 +3262,14 @@ const defaultConfigPaneHeight = computed(() =>
 // Corrupt-safe: absent / non-numeric / non-finite / non-positive means "no manual choice" (null), so
 // the live default applies. A valid value is kept AS STORED and clamped only for display (see
 // `configPaneHeight`): a height chosen on a taller window is clamped on a shorter one and comes back
-// in full once the window is tall enough again.
+// in full once the window is tall enough again. The legacy r8-B key is removed, never read (B1).
 function readStoredConfigPaneHeight(): number | null {
   if (typeof window === 'undefined') return null
+  try {
+    window.localStorage?.removeItem(LEGACY_CONFIG_PANE_STORAGE_KEY)
+  } catch {
+    // Best-effort cleanup; the legacy key is ignored either way.
+  }
   try {
     const raw = window.localStorage?.getItem(CONFIG_PANE_STORAGE_KEY)
     if (!raw) return null
@@ -3262,30 +3281,51 @@ function readStoredConfigPaneHeight(): number | null {
   }
 }
 
+// The last height the USER chose (drag, keyboard, or collapsing out of a chosen ceiling), or null
+// while there never was one. This -- not the published px -- is the state, and the collapse target.
+const chosenConfigPaneHeight = ref<number | null>(readStoredConfigPaneHeight())
+// What storage holds (as written: rounded), so a release that chose nothing new writes nothing.
+let storedConfigPaneHeight: number | null =
+  chosenConfigPaneHeight.value === null ? null : Math.round(chosenConfigPaneHeight.value)
+
 function persistConfigPaneHeight(height: number) {
   if (typeof window === 'undefined') return
   try {
     window.localStorage?.setItem(CONFIG_PANE_STORAGE_KEY, String(Math.round(height)))
+    storedConfigPaneHeight = Math.round(height)
   } catch {
     // Quota/serialization failures must never block resizing itself -- persistence is best-effort.
   }
 }
 
-// The last height the USER chose (drag, keyboard, or collapsing out of a chosen ceiling), or null
-// while there never was one. This -- not the published px -- is the state, and the collapse target.
-const chosenConfigPaneHeight = ref<number | null>(readStoredConfigPaneHeight())
 // Presentation state only -- deliberately not persisted (a reload that comes back "pressed" without
 // the user having pressed anything is worse than starting off).
 const isConfigPaneExpanded = ref(false)
+// #7a review S2: set by ⤡ when the manual height was chosen on a TALLER window and is only clamped to
+// this one's ceiling. The collapse must still visibly move (r8-B), so the pane shows the collapse
+// fallback -- but only for this dialog, and only while the choice stays clamped: the stored height is
+// never overwritten by a clamp, and a window tall enough for it gives it back in full. Cleared by the
+// next gesture that chooses a height.
+const isConfigPaneCollapsedBelowClampedChoice = ref(false)
+// ⤡'s target when there is nothing below the ceiling to restore: the default, capped one step below
+// the ceiling so the move is always visible. On a window so short that the floor meets the ceiling
+// this clamps back onto the ceiling -- there is genuinely nowhere to go.
+const collapseFallbackConfigPaneHeight = computed(() =>
+  clampConfigPaneHeight(Math.min(defaultConfigPaneHeight.value, maxConfigPaneHeight.value - CONFIG_PANE_STEP)),
+)
 // The published height (the CSS ceiling and aria-valuenow), derived on every read: expanded pins it
 // to the CURRENT ceiling, otherwise it is the manual choice (or the live default) clamped into the
 // CURRENT range. Deriving it keeps aria-valuenow inside [valuemin, valuemax] through any resize or
 // any row appearing, with no watcher writing clamped copies back.
-const configPaneHeight = computed(() =>
-  isConfigPaneExpanded.value
-    ? maxConfigPaneHeight.value
-    : clampConfigPaneHeight(chosenConfigPaneHeight.value ?? defaultConfigPaneHeight.value),
-)
+const configPaneHeight = computed(() => {
+  if (isConfigPaneExpanded.value) return maxConfigPaneHeight.value
+  const chosen = chosenConfigPaneHeight.value
+  if (chosen === null) return clampConfigPaneHeight(defaultConfigPaneHeight.value)
+  if (isConfigPaneCollapsedBelowClampedChoice.value && chosen > maxConfigPaneHeight.value) {
+    return collapseFallbackConfigPaneHeight.value
+  }
+  return clampConfigPaneHeight(chosen)
+})
 
 /** The ONLY thing ever written to localStorage is the last MANUAL height.
  *
@@ -3293,28 +3333,76 @@ const configPaneHeight = computed(() =>
  *  ACROSS MOUNTS -- enlarge wrote the ceiling, the next mount seeded both the live height and the
  *  restore target from it, and neither button changed anything.
  *  #7a: while the user has chosen nothing, nothing is written -- storing the live default would
- *  freeze a window-derived number into a px preference that no longer follows the window. */
+ *  freeze a window-derived number into a px preference that no longer follows the window. Nor is a
+ *  number that storage already holds written again, so a gesture that chose nothing new is silent. */
 function persistChosenConfigPaneHeight() {
-  if (chosenConfigPaneHeight.value === null) return
-  persistConfigPaneHeight(chosenConfigPaneHeight.value)
+  const chosen = chosenConfigPaneHeight.value
+  if (chosen === null || Math.round(chosen) === storedConfigPaneHeight) return
+  persistConfigPaneHeight(chosen)
 }
 
-/** Manual resize (drag or keyboard): clamp, remember as the manual choice, and always leave the
- *  expanded state -- a manual choice is no longer "the max" even when it lands exactly on it, so the
- *  toggle's aria-pressed must not keep claiming otherwise. Does NOT persist: it runs on every
- *  intermediate pointermove/keydown step; the localStorage write waits for the gesture's release. */
-function applyConfigPaneHeight(next: number) {
-  chosenConfigPaneHeight.value = clampConfigPaneHeight(next)
+/** The pane as a drag or key step found it. `from` is where the step starts: the height actually
+ *  DRAWN -- a pane whose content is shorter than its published height is drawn at content height, and
+ *  starting from the published number made the first stretch of every downward drag / ArrowDown
+ *  invisible. When nothing is laid out (jsdom) it is the published height. */
+type ConfigPaneGestureOrigin = {
+  published: number
+  from: number
+  /** Drawn more than 1px below its published height: the pane hugs content shorter than that. */
+  contentBound: boolean
+  chosen: number | null
+  expanded: boolean
+  collapsedBelowClampedChoice: boolean
+}
+
+function captureConfigPaneGestureOrigin(): ConfigPaneGestureOrigin {
+  // #7a: bound the gesture by the rows as they are NOW.
+  measureFixedRows()
+  const published = configPaneHeight.value
+  const rendered = renderedHeight(configPaneRef.value)
+  const contentBound = rendered > 0 && published - rendered > 1
+  return {
+    published,
+    from: contentBound ? Math.round(rendered) : published,
+    contentBound,
+    chosen: chosenConfigPaneHeight.value,
+    expanded: isConfigPaneExpanded.value,
+    collapsedBelowClampedChoice: isConfigPaneCollapsedBelowClampedChoice.value,
+  }
+}
+
+/** Puts the pane back exactly as the gesture found it (a drag that returns to where it began). */
+function restoreConfigPaneGestureOrigin(origin: ConfigPaneGestureOrigin) {
+  chosenConfigPaneHeight.value = origin.chosen
+  isConfigPaneExpanded.value = origin.expanded
+  isConfigPaneCollapsedBelowClampedChoice.value = origin.collapsedBelowClampedChoice
+}
+
+/** Manual resize (drag or keyboard) toward `next`. Does NOT persist: it runs on every intermediate
+ *  pointermove/keydown step; the localStorage write waits for the gesture's release.
+ *
+ *  #7a review S1: a step that draws nothing new chooses nothing -- the pane stays exactly as the
+ *  gesture found it. Growing a content-bound pane draws nothing (it already shows all its content),
+ *  and neither does shrinking one to a target at or above what it draws, nor any step that clamps
+ *  back onto the published height (the ceiling, the floor, or a window where they meet). Without
+ *  this, ArrowUp on one short config stored its content height + 16 as the height of EVERY config.
+ *  A step that does draw something is the user's choice: it becomes the manual height, and it always
+ *  leaves the expanded state (the toggle's aria-pressed must not keep claiming "the max").
+ *
+ *  #7a review S2: reaching the ceiling keeps a manual height that already reaches it -- one chosen on
+ *  a taller window and only clamped here -- instead of replacing it with this window's clamp. */
+function applyConfigPaneGesture(origin: ConfigPaneGestureOrigin, next: number) {
+  const target = clampConfigPaneHeight(next)
+  const draws = origin.contentBound ? target < origin.from : target !== origin.published
+  if (!draws) {
+    restoreConfigPaneGestureOrigin(origin)
+    return
+  }
+  const max = maxConfigPaneHeight.value
+  chosenConfigPaneHeight.value =
+    target >= max && origin.chosen !== null && origin.chosen > max ? origin.chosen : target
   isConfigPaneExpanded.value = false
-}
-
-/** Where a drag or a key step starts: the height actually DRAWN. A pane whose content is shorter
- *  than its published height is drawn at content height, and starting from the published number
- *  made the first stretch of every downward drag / ArrowDown invisible. Falls back to the
- *  published height when nothing is laid out (jsdom). */
-function configPaneGestureStart(): number {
-  const drawn = renderedHeight(configPaneRef.value)
-  return drawn > 0 ? Math.min(configPaneHeight.value, Math.round(drawn)) : configPaneHeight.value
+  isConfigPaneCollapsedBelowClampedChoice.value = false
 }
 
 /** 放大/缩小: enlarge pins the pane to the current ceiling, collapse returns to the last MANUAL
@@ -3326,7 +3414,11 @@ function configPaneGestureStart(): number {
  *  below the ceiling so the move is visible. It applies ONLY to a real manual choice, and only when
  *  it actually moves: with no manual choice the live default is already at or below the ceiling, and
  *  on a window so short that the floor meets the ceiling there is nowhere to go -- in both cases
- *  writing a number would store a height the user never chose. */
+ *  writing a number would store a height the user never chose.
+ *
+ *  #7a review S2: when the manual height is ABOVE this ceiling (chosen on a taller window), the
+ *  fallback is shown but not stored -- the stored height is never overwritten by a clamp. A manual
+ *  height exactly AT the ceiling was chosen at it, so r8-B's stored fallback still applies there. */
 function toggleConfigPaneExpand() {
   measureFixedRows()
   if (!isConfigPaneExpanded.value) {
@@ -3334,12 +3426,16 @@ function toggleConfigPaneExpand() {
     return
   }
   isConfigPaneExpanded.value = false
+  isConfigPaneCollapsedBelowClampedChoice.value = false
   const chosen = chosenConfigPaneHeight.value
-  if (chosen === null || clampConfigPaneHeight(chosen) < maxConfigPaneHeight.value) return
-  const fallback = clampConfigPaneHeight(
-    Math.min(defaultConfigPaneHeight.value, maxConfigPaneHeight.value - CONFIG_PANE_STEP),
-  )
-  if (fallback >= maxConfigPaneHeight.value) return
+  const max = maxConfigPaneHeight.value
+  if (chosen === null || clampConfigPaneHeight(chosen) < max) return
+  const fallback = collapseFallbackConfigPaneHeight.value
+  if (fallback >= max) return
+  if (chosen > max) {
+    isConfigPaneCollapsedBelowClampedChoice.value = true
+    return
+  }
   chosenConfigPaneHeight.value = fallback
   // A click is itself one discrete release -- persist here directly.
   persistChosenConfigPaneHeight()
@@ -3349,23 +3445,23 @@ function toggleConfigPaneExpand() {
 // ArrowUp grows and ArrowDown shrinks, the same direction as the pointer drag below.
 // #7a: the rows are re-measured first and each step starts from the DRAWN height.
 function onSplitterKeydown(event: KeyboardEvent) {
-  measureFixedRows()
+  const origin = captureConfigPaneGestureOrigin()
   switch (event.key) {
     case 'ArrowUp':
       event.preventDefault()
-      applyConfigPaneHeight(configPaneGestureStart() + CONFIG_PANE_STEP)
+      applyConfigPaneGesture(origin, origin.from + CONFIG_PANE_STEP)
       break
     case 'ArrowDown':
       event.preventDefault()
-      applyConfigPaneHeight(configPaneGestureStart() - CONFIG_PANE_STEP)
+      applyConfigPaneGesture(origin, origin.from - CONFIG_PANE_STEP)
       break
     case 'Home':
       event.preventDefault()
-      applyConfigPaneHeight(minConfigPaneHeight.value)
+      applyConfigPaneGesture(origin, minConfigPaneHeight.value)
       break
     case 'End':
       event.preventDefault()
-      applyConfigPaneHeight(maxConfigPaneHeight.value)
+      applyConfigPaneGesture(origin, maxConfigPaneHeight.value)
       break
     default:
       break
@@ -3405,13 +3501,19 @@ function onSplitterPointerDown(event: PointerEvent) {
   // Without preventDefault the drag starts a text selection across the dialog.
   event.preventDefault()
   // #7a: bound the drag by the rows as they are NOW, and start it from the drawn height.
-  measureFixedRows()
+  const origin = captureConfigPaneGestureOrigin()
   const startY = event.clientY
-  const startHeight = configPaneGestureStart()
   const handle = event.currentTarget as HTMLElement
   handle.setPointerCapture?.(event.pointerId)
   function onMove(moveEvent: PointerEvent) {
-    applyConfigPaneHeight(startHeight - (moveEvent.clientY - startY))
+    const grow = startY - moveEvent.clientY
+    // #7a review N1: a tap or a 1-2px wobble sends pointermoves too; inside the dead zone the pane is
+    // (or goes back to) exactly as the drag found it, so a click never freezes the live default.
+    if (Math.abs(grow) < CONFIG_PANE_DRAG_DEAD_ZONE) {
+      restoreConfigPaneGestureOrigin(origin)
+      return
+    }
+    applyConfigPaneGesture(origin, origin.from + grow)
   }
   function onUp(upEvent: PointerEvent) {
     // `releasePointerCapture` has been observed to throw on some browser/input-device combinations
@@ -3470,8 +3572,9 @@ onBeforeUnmount(() => {
    (`maxConfigPaneHeight`) is the primary bound, this is the belt-and-suspenders CSS half.
    #7a: the floor is published by the script (`fieldListFloor`) with the same 96px as fallback. It
    stays 96px wherever both halves fit; a very short window lowers it so the add-field row and the
-   delete confirmation stay inside the dialog instead. */
-.meta-field-mgr__body { flex: 1; min-height: var(--meta-field-mgr-list-min-height, 96px); overflow-y: auto; padding: 8px 16px; }
+   delete confirmation stay inside the dialog instead. `border-box` keeps that floor the list's WHOLE
+   height, padding included, without relying on App.vue's global reset (the component is exported). */
+.meta-field-mgr__body { flex: 1; box-sizing: border-box; min-height: var(--meta-field-mgr-list-min-height, 96px); overflow-y: auto; padding: 8px 16px; }
 /* r8-B: the drag/keyboard handle between the field list and the config pane (see
    `onSplitterPointerDown` / `onSplitterKeydown`). `flex: 0 0 auto` keeps it out of the flex
    distribution; `touch-action: none` stops a touch drag from scrolling the list instead. */

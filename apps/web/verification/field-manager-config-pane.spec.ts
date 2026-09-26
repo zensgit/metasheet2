@@ -9,11 +9,16 @@ import { mkdirSync } from 'node:fs'
 //
 // It also pins the two short-window regressions a previous attempt (#6072) was rejected for: the
 // add-field row and the delete confirmation's 取消/删除 pushed out of the dialog at 640x360, and
-// 放大→缩小 storing a height the user never chose.
+// 放大→缩小 storing a height the user never chose; and, from #6077's adversarial review, the upgrade
+// from r59's polluted storage (B1), gestures on a short config that draw nothing (S1), a clamp
+// overwriting a height chosen on a taller window (S2), and a click with a wobble (N1).
 
 const OUT = 'verification-output'
 const HARNESS = '/verification/field-manager-config-pane-harness.html'
-const STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
+// #7a review B1: the preference lives under a versioned key; the r8-B key holds what the deployed
+// build stored (often a height nobody chose) and must be ignored and removed.
+const STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight.v2'
+const LEGACY_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
 // Sub-pixel tolerance: row heights such as the confirmation (84.5px) are fractional.
 const PX = 1.5
 
@@ -37,11 +42,24 @@ type Metrics = {
   min: number
   max: number
   stored: string | null
+  legacyStored: string | null
 }
 
-async function openHarness(page: Page, width: number, height: number, errors: string[]) {
+async function openHarness(
+  page: Page,
+  width: number,
+  height: number,
+  errors: string[],
+  seed: Record<string, string> = {},
+) {
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`) })
   page.on('pageerror', (e) => errors.push(`pageerror: ${String(e)}`))
+  // Storage as an earlier build (or an earlier session) left it, in place before the app boots.
+  if (Object.keys(seed).length > 0) {
+    await page.addInitScript((entries) => {
+      for (const [key, value] of Object.entries(entries)) window.localStorage.setItem(key, value)
+    }, seed)
+  }
   await page.setViewportSize({ width, height })
   await page.goto(HARNESS, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.meta-field-mgr')).toBeVisible()
@@ -68,7 +86,7 @@ async function settle(page: Page) {
 }
 
 async function metrics(page: Page): Promise<Metrics> {
-  return page.evaluate((storageKey) => {
+  return page.evaluate((keys) => {
     const box = (el: Element | null) => {
       if (!el) return null
       const r = el.getBoundingClientRect()
@@ -101,9 +119,10 @@ async function metrics(page: Page): Promise<Metrics> {
       now: Number(splitter?.getAttribute('aria-valuenow')),
       min: Number(splitter?.getAttribute('aria-valuemin')),
       max: Number(splitter?.getAttribute('aria-valuemax')),
-      stored: window.localStorage.getItem(storageKey),
+      stored: window.localStorage.getItem(keys.current),
+      legacyStored: window.localStorage.getItem(keys.legacy),
     }
-  }, STORAGE_KEY)
+  }, { current: STORAGE_KEY, legacy: LEGACY_STORAGE_KEY })
 }
 
 function expectInsideDialog(m: Metrics, box: Box | null, label: string) {
@@ -299,6 +318,102 @@ test.describe('管理字段 config pane height (客户反馈 2026-09-24 #7a)', (
     expect(tall.stored).toBeNull()
     expect(tall.now - short.now, `default followed the window (${short.now} -> ${tall.now})`).toBeGreaterThan(100)
     expect(tall.max - tall.now, 'and ⤢ has room to enlarge again').toBeGreaterThan(100)
+
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  // --- #7a adversarial review ------------------------------------------------------------------
+
+  // B1: r59 (05461c739) at an 800px window stored round(0.52 * 800) = 416 on the first ⤢ click and
+  // round(0.84 * 800 - 160) = 512 after a drag up from its ceiling. The customer who reported #7a
+  // pressed both, so their browser holds one of these under the r8-B key.
+  for (const polluted of ['416', '512']) {
+    test(`1280x800 upgraded from r59 with '${polluted}' under the r8-B key: ⤢ still grows the pane by >100px; the legacy key is removed`, async ({ page }) => {
+      const errors: string[] = []
+      await openHarness(page, 1280, 800, errors, { [LEGACY_STORAGE_KEY]: polluted })
+      await openConfig(page, 'Select field')
+      const before = await metrics(page)
+      expect(before.legacyStored, 'the legacy key is removed on mount').toBeNull()
+      expect(before.stored, 'and never migrated').toBeNull()
+      expect(before.max - before.now, `the pane opens at the default, not the legacy ${polluted}`).toBeGreaterThan(100)
+
+      await page.locator('[data-test="field-mgr-config-expand"]').click()
+      await settle(page)
+      const expanded = await metrics(page)
+      expect(expanded.pane!.height - before.pane!.height, `⤢ grew the pane ${before.pane!.height} -> ${expanded.pane!.height}`).toBeGreaterThan(100)
+      expect(expanded.stored).toBeNull()
+
+      expect(errors, errors.join('\n')).toEqual([])
+    })
+  }
+
+  // S1: the preference is one height for every config. A gesture on a SHORT config that draws nothing
+  // (growing a pane that already shows all its content) must not replace it.
+  test('1280x800: ArrowUp, End and a 100px drag up on a short config leave the stored height alone; the tall config reopens at it', async ({ page }) => {
+    const errors: string[] = []
+    await openHarness(page, 1280, 800, errors)
+    await openConfig(page, 'Select field')
+    const splitter = page.locator('[data-test="field-mgr-splitter"]')
+    await splitter.focus()
+    await page.keyboard.press('End')
+    await settle(page)
+    const chosen = await metrics(page)
+    expect(chosen.stored, 'End is a manual choice').toBe(String(chosen.max))
+
+    await openConfig(page, 'Short config')
+    const short = await metrics(page)
+    expect(short.now - short.pane!.height, `the short pane hugs its content (drawn ${short.pane!.height}, ceiling ${short.now})`).toBeGreaterThan(100)
+    await splitter.focus()
+    await page.keyboard.press('ArrowUp')
+    await page.keyboard.press('End')
+    await settle(page)
+    await dragSplitter(page, -100)
+    const after = await metrics(page)
+    expect(after.stored, 'nothing the short pane could not draw was stored').toBe(chosen.stored)
+    expect(Math.abs(after.pane!.height - short.pane!.height)).toBeLessThanOrEqual(PX)
+
+    await openConfig(page, 'Select field')
+    const reopened = await metrics(page)
+    expect(Math.abs(reopened.pane!.height - Number(chosen.stored)), `tall config reopens at ${chosen.stored} (drawn ${reopened.pane!.height})`).toBeLessThanOrEqual(PX)
+
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  // S2: a height chosen on a taller window is only clamped on this one; ⤡ must not overwrite it.
+  test('1280x800 with 607 stored (chosen at 1080): ⤢/⤡ still moves the pane but keeps 607, and 1280x1080 draws 607 again', async ({ page }) => {
+    const errors: string[] = []
+    await openHarness(page, 1280, 800, errors, { [STORAGE_KEY]: '607' })
+    await openConfig(page, 'Select field')
+    const clamped = await metrics(page)
+    expect(Math.abs(clamped.pane!.height - clamped.max), 'clamped to this window\'s ceiling').toBeLessThanOrEqual(PX)
+
+    const toggle = page.locator('[data-test="field-mgr-config-expand"]')
+    await toggle.click()
+    await settle(page)
+    await toggle.click()
+    await settle(page)
+    const collapsed = await metrics(page)
+    expect(clamped.pane!.height - collapsed.pane!.height, `⤡ moved the pane ${clamped.pane!.height} -> ${collapsed.pane!.height}`).toBeGreaterThan(100)
+    expect(collapsed.stored, 'the clamp did not overwrite the stored height').toBe('607')
+
+    await page.setViewportSize({ width: 1280, height: 1080 })
+    await settle(page)
+    const tall = await metrics(page)
+    expect(Math.abs(tall.pane!.height - 607), `607 comes back in full (drawn ${tall.pane!.height}, ceiling ${tall.max})`).toBeLessThanOrEqual(PX)
+
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  // N1: a click with a 1-2px wobble sends pointermoves; it must not freeze the live default.
+  test('1280x800: a click on the splitter with a 2px wobble stores nothing', async ({ page }) => {
+    const errors: string[] = []
+    await openHarness(page, 1280, 800, errors)
+    await openConfig(page, 'Select field')
+    const before = await metrics(page)
+    await dragSplitter(page, 2)
+    const after = await metrics(page)
+    expect(after.stored).toBeNull()
+    expect(Math.abs(after.pane!.height - before.pane!.height)).toBeLessThanOrEqual(PX)
 
     expect(errors, errors.join('\n')).toEqual([])
   })

@@ -241,7 +241,10 @@ describe('MetaFieldManager <style> — the config panel scroll rules (item 5 is 
 // try/finally teardown when releasePointerCapture throws, persist-on-release-only, the viewport
 // re-clamp), retargeted at a HORIZONTAL separator.
 // ==============================================================================================
-const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
+// #7a review B1: the preference moved to a versioned key. The r8-B key below is what the deployed
+// build wrote -- often a height the user never chose -- so it is ignored and removed, never migrated.
+const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight.v2'
+const LEGACY_CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
 const CONFIG_PANE_MIN = 120
 const CONFIG_PANE_STEP = 16
 // jsdom lays nothing out, so the component falls back to FALLBACK_FIXED_ROWS_HEIGHT (64) for its
@@ -771,9 +774,16 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
         expandToggle(container).click()
         await flushUi()
         expect(expandToggle(container).getAttribute('aria-pressed')).toBe('true')
-        keydown(splitter(container), 'End') // lands exactly ON the max, and still un-presses
+        // #7a review: End on a pane already pinned to the max draws nothing new, so it is not a
+        // resize and chooses nothing -- the toggle stays pressed, which is still the truth.
+        keydown(splitter(container), 'End')
         await flushUi()
         expect(configPaneHeightPx(container)).toBe(expectedMax(1000))
+        expect(expandToggle(container).getAttribute('aria-pressed')).toBe('true')
+        // A real resize while expanded un-presses it.
+        keydown(splitter(container), 'ArrowDown')
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(expectedMax(1000) - CONFIG_PANE_STEP)
         expect(expandToggle(container).getAttribute('aria-pressed')).toBe('false')
       } finally {
         app.unmount()
@@ -1280,12 +1290,263 @@ describe('MetaFieldManager — #7a the config pane height actually applies (客�
   })
 })
 
+// ==============================================================================================
+// #7a adversarial review (B1 / S1 / S2 / N1): which stored heights are trusted, and when a gesture
+// counts as a choice. Same stubbed Chromium rows as above -- at 800px: room 535, ceiling 439,
+// default 267, collapse fallback min(267, 439 - 16) = 267.
+// ==============================================================================================
+describe('MetaFieldManager — #7a review: stored heights, gestures that draw nothing, the collapse fallback', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    setViewportHeight(768)
+  })
+
+  describe('B1: what the deployed r8-B build stored is ignored and removed, never trusted', () => {
+    // r59 (05461c739) at an 800px window: the first ⤢ click stored the mount-time default
+    // round(0.52 * 800) = 416, and a drag up started from the published ceiling and stored
+    // round(0.84 * 800 - 160) = 512. Trusting either leaves ⤢ 0-23px of travel here.
+    const POLLUTED = [
+      ['the first ⤢ click, round(0.52 * 800)', '416'],
+      ['a drag up from the ceiling, round(0.84 * 800 - 160)', '512'],
+    ] as const
+    for (const [origin, polluted] of POLLUTED) {
+      it(`a legacy '${polluted}' (${origin}) is removed on mount, the pane opens at the default, and ⤢ travels >100px`, async () => {
+        window.localStorage.setItem(LEGACY_CONFIG_PANE_STORAGE_KEY, polluted)
+        const { container, app } = await mountMeasured(800)
+        try {
+          expect(window.localStorage.getItem(LEGACY_CONFIG_PANE_STORAGE_KEY)).toBeNull()
+          expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBeNull()
+          expect(configPaneHeightPx(container)).toBe(267)
+          const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+          expandToggle(container).click()
+          await flushUi()
+          expect(configPaneHeightPx(container)).toBe(439)
+          expect(configPaneHeightPx(container) - 267).toBeGreaterThan(100)
+          expandToggle(container).click()
+          await flushUi()
+          expect(configPaneHeightPx(container)).toBe(267)
+          expect(setItemSpy).not.toHaveBeenCalled()
+        } finally {
+          app.unmount()
+        }
+      })
+    }
+
+    it('a height stored under the versioned key is still honoured, and the legacy key next to it is removed', async () => {
+      window.localStorage.setItem(LEGACY_CONFIG_PANE_STORAGE_KEY, '416')
+      window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '300')
+      const { container, app } = await mountMeasured(800)
+      try {
+        expect(configPaneHeightPx(container)).toBe(300)
+        expect(window.localStorage.getItem(LEGACY_CONFIG_PANE_STORAGE_KEY)).toBeNull()
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe('300')
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  describe('S1: a gesture that draws nothing new chooses nothing', () => {
+    it('a short pane (content 140 under a stored 439): ArrowUp, End and a 100px drag up leave the preference alone', async () => {
+      window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '439')
+      const { container, app } = await mountMeasured(800, { pane: 140 })
+      try {
+        expect(configPaneHeightPx(container)).toBe(439)
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        const el = splitter(container)
+        for (const key of ['ArrowUp', 'End']) {
+          keydown(el, key)
+          keyup(el, key)
+          await flushUi()
+          expect(configPaneHeightPx(container), key).toBe(439)
+        }
+        el.dispatchEvent(pointer('pointerdown', 500, 31))
+        el.dispatchEvent(pointer('pointermove', 400, 31))
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(439)
+        el.dispatchEvent(pointer('pointerup', 400, 31))
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(439)
+        expect(setItemSpy).not.toHaveBeenCalled()
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe('439')
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('a pane drawn below the 120px floor: ArrowDown and Home leave the preference alone', async () => {
+      window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '439')
+      const { container, app } = await mountMeasured(800, { pane: 110 })
+      try {
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        for (const key of ['ArrowDown', 'Home']) {
+          keydown(splitter(container), key)
+          keyup(splitter(container), key)
+          await flushUi()
+          expect(configPaneHeightPx(container), key).toBe(439)
+        }
+        expect(setItemSpy).not.toHaveBeenCalled()
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('a VISIBLE shrink of a short pane is still a choice and is stored', async () => {
+      window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '439')
+      const { container, app } = await mountMeasured(800, { pane: 200 })
+      try {
+        keydown(splitter(container), 'ArrowDown')
+        keyup(splitter(container), 'ArrowDown')
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(200 - CONFIG_PANE_STEP)
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(200 - CONFIG_PANE_STEP))
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('at 360px, where the floor meets the ceiling, no resize key chooses or writes anything', async () => {
+      const { container, app } = await mountMeasured(360)
+      try {
+        expect(ariaTrio(container)).toEqual({ now: 92, min: 92, max: 92 })
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        for (const key of ['ArrowUp', 'ArrowDown', 'Home', 'End']) {
+          keydown(splitter(container), key)
+          keyup(splitter(container), key)
+        }
+        await flushUi()
+        expect(setItemSpy).not.toHaveBeenCalled()
+        // ...so the untouched default still follows the window.
+        setViewportHeight(900)
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(309)
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  describe('N1: a click or a wobble on the splitter is not a drag', () => {
+    it('pointer moves under 3px choose nothing and write nothing', async () => {
+      const { container, app } = await mountMeasured(800)
+      try {
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        const el = splitter(container)
+        el.dispatchEvent(pointer('pointerdown', 500, 41))
+        for (const y of [501, 498, 502]) el.dispatchEvent(pointer('pointermove', y, 41))
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(267)
+        el.dispatchEvent(pointer('pointerup', 502, 41))
+        await flushUi()
+        expect(setItemSpy).not.toHaveBeenCalled()
+        setViewportHeight(900)
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(309)
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('a drag that returns to within 3px of where it started restores the untouched state', async () => {
+      const { container, app } = await mountMeasured(800)
+      try {
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        const el = splitter(container)
+        el.dispatchEvent(pointer('pointerdown', 500, 42))
+        el.dispatchEvent(pointer('pointermove', 530, 42))
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(237)
+        el.dispatchEvent(pointer('pointermove', 501, 42))
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(267)
+        el.dispatchEvent(pointer('pointerup', 501, 42))
+        await flushUi()
+        expect(setItemSpy).not.toHaveBeenCalled()
+        setViewportHeight(900)
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(309)
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  describe('S2: a height chosen on a taller window is never overwritten by this window\'s clamp', () => {
+    it('607 stored (chosen at 1080), window 800: ⤢/⤡ collapses visibly but keeps 607, and a taller window gives it back', async () => {
+      window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '607')
+      const { container, app } = await mountMeasured(800)
+      try {
+        expect(configPaneHeightPx(container)).toBe(439)
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        expandToggle(container).click()
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(439)
+        expandToggle(container).click()
+        await flushUi()
+        // Collapsing out of the ceiling still has to move (r8-B), so the fallback is SHOWN...
+        expect(configPaneHeightPx(container)).toBe(267)
+        // ...but it is not the user's height: nothing is written, 607 stays.
+        expect(setItemSpy).not.toHaveBeenCalled()
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe('607')
+
+        // 1080px: room 907.2 - 137 = 770.2 -> ceiling 674, so 607 fits and comes back in full.
+        setViewportHeight(1080)
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(607)
+        expect(setItemSpy).not.toHaveBeenCalled()
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('after that collapse, End returns to the ceiling without replacing 607; a visible step below it does replace it', async () => {
+      window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '607')
+      const { container, app } = await mountMeasured(800)
+      try {
+        expandToggle(container).click()
+        await flushUi()
+        expandToggle(container).click()
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(267)
+
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        keydown(splitter(container), 'End')
+        keyup(splitter(container), 'End')
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(439)
+        expect(setItemSpy).not.toHaveBeenCalled()
+        setViewportHeight(1080)
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(607)
+
+        setViewportHeight(800)
+        await flushUi()
+        keydown(splitter(container), 'ArrowDown')
+        keyup(splitter(container), 'ArrowDown')
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(439 - CONFIG_PANE_STEP)
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(439 - CONFIG_PANE_STEP))
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+})
+
 // --- #7a, source-level half ---------------------------------------------------------------------
 describe('MetaFieldManager <style> — #7a the pane does not shrink, and the script mirrors the CSS it bounds', () => {
   it('the config pane is out of the flex shrink distribution and border-box', () => {
     const body = ruleBody(SCROLLABLE_RULE)
     expect(body).toMatch(/flex:\s*0 0 auto/)
     expect(body).toMatch(/box-sizing:\s*border-box/)
+  })
+
+  it('the field list is border-box too, so its published floor includes its own padding (review N2)', () => {
+    // The component is exported (apps/web/src/multitable/index.ts); mounted without App.vue's global
+    // reset, a content-box list would take floor + 16px and push the add-field row out by as much.
+    expect(SFC_SOURCE.match(BODY_RULE)?.[1] ?? '').toMatch(/box-sizing:\s*border-box/)
   })
 
   it('the script constants mirror the CSS they bound (frame 84vh, list floor 96px)', () => {
