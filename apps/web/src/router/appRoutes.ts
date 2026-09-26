@@ -369,6 +369,16 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true, permissions: ['approvals:read'] }
   },
   {
+    // B-2 (todo-center-design-lock v2.14 §4) — the cross-source aggregation page. Gated exactly
+    // like `GET /api/todo/items`/`GET /api/todo/count` (`rbacGuard('approvals','read')`, see
+    // `routes/todo.ts`'s docblock on why that is coextensive with today's ONE registered source
+    // and must widen alongside the backend gate once a second source is registered).
+    path: '/todo',
+    name: 'todo-center',
+    component: () => import('../todo/views/TodoCenterView.vue'),
+    meta: { title: 'Todo Center', titleZh: '待办中心', requiresAuth: true, permissions: ['approvals:read'] }
+  },
+  {
     path: '/approvals/new/:templateId',
     name: 'approval-create',
     component: () => import('../views/approval/ApprovalNewView.vue'),
