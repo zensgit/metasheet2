@@ -602,6 +602,14 @@ export function useMultitableGrid(opts: {
   // faithful passthrough, and ANY edit clears it so the editable filterRules+filterGroups become the truth.
   const filterGroups = ref<FilterGroup[]>([])
   const sortFilterDirty = ref(false)
+  // WHICH view the sort/filter state above was loaded from, plus that view's sort/filter exactly as this
+  // client serialises them (客户反馈 2026-09-24 #5). null ⇒ NOT KNOWN: the view has just switched and its
+  // load is still in flight or has FAILED, so an empty toolbar means "not loaded yet", not "no rules".
+  // persistSortFilter writes only when this names the target view — otherwise it would wipe the target's
+  // stored sort/filter with the unknown/empty state, or, on the create-view path (selectView + an explicit
+  // loadViewData that runs BEFORE the view-switch watcher), write the PREVIOUS view's staged rules into the
+  // new view — and it writes only the facet(s) that differ from this baseline.
+  let sortFilterBaseline: { viewId: string; sortKey: string; filterKey: string } | null = null
 
   // GroupBy — ordered 1..MAX_GROUP_LEVELS group fields (nested / multi-level grouping). The array is the
   // source of truth; `groupFieldId` (level-1, legacy single-field reader) and `groupField` are derived.
@@ -650,9 +658,14 @@ export function useMultitableGrid(opts: {
     loading.value = true
     error.value = null
     try {
-      // Persist dirty sort/filter before loading
+      // Persist dirty sort/filter before loading — but ONLY state that was loaded from `vid` itself. Anything
+      // else is either the previous view's (create-view path: selectView + an explicit loadViewData run before
+      // the view-switch watcher resets) or not known yet (vid's load in flight / failed). Writing it would put
+      // foreign rules into vid, or wipe vid's stored rules with an empty toolbar — drop it instead; the load
+      // below establishes vid's real state (客户反馈 2026-09-24 #5).
       if (sortFilterDirty.value && vid) {
-        await persistSortFilter(vid)
+        if (sortFilterBaseline?.viewId === vid) await persistSortFilter(vid)
+        else resetSortFilterState()
       }
       const data = await client.loadView({
         sheetId: sid,
@@ -692,7 +705,8 @@ export function useMultitableGrid(opts: {
       rowActionOverrides.value = data.meta?.permissions?.rowActionOverrides ?? {}
       if (serverPage) page.value = serverPage
       // No view ⇒ the server applied no sort/filter, so the toolbar must not claim any (客户反馈 2026-09-24 #5).
-      if (data.view) syncFromView(data.view)
+      // It stays "not known" too (no baseline): with no view to compare against, nothing may be persisted.
+      if (data.view) syncFromView(data.view, vid || undefined)
       else resetSortFilterState()
     } catch (e: any) {
       if (requestId !== latestLoadRequestId) return
@@ -799,7 +813,9 @@ export function useMultitableGrid(opts: {
     }
   }
 
-  // Empty sort/filter state — what a view with no stored rules (e.g. a freshly created, blank view) means.
+  // Empty sort/filter state — what a view with no stored rules (e.g. a freshly created, blank view) shows.
+  // It also forgets WHICH view the state came from (sortFilterBaseline = null): until a load establishes the
+  // current view's real state, nothing may be persisted.
   function resetSortFilterState() {
     sortRules.value = []
     filterRules.value = []
@@ -807,9 +823,24 @@ export function useMultitableGrid(opts: {
     filterConjunction.value = 'and'
     nestedFilterNodes.value = null
     sortFilterDirty.value = false
+    sortFilterBaseline = null
   }
 
-  function syncFromView(view: { filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[]; fieldOrder?: string[] }) {
+  // The toolbar's sort / filter as a persist payload. An empty list is the explicit empty
+  // (emptySortInfo / emptyFilterInfo), never `undefined`, so a cleared facet is actually saved.
+  function currentSortInfo(): Record<string, unknown> {
+    return buildSortInfo(sortRules.value) ?? emptySortInfo()
+  }
+  function currentFilterInfo(): Record<string, unknown> {
+    return (nestedFilterNodes.value
+      ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
+      : buildFilterInfoFromNodes([...filterRules.value, ...filterGroups.value], filterConjunction.value))
+      ?? emptyFilterInfo(filterConjunction.value)
+  }
+
+  // `forViewId`: the view the caller asked for (loadViewData passes its request's viewId). The view's own
+  // `id` wins when present, so state is only ever attributed to the view it was actually read from.
+  function syncFromView(view: { id?: string; filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[]; fieldOrder?: string[] }, forViewId?: string) {
     // The loaded view is AUTHORITATIVE for sort + filter (客户反馈 2026-09-24 #5): a view whose sortInfo has no
     // `rules` array (a new view is created with `sortInfo: {}`) or whose filterInfo has no `conditions` means
     // "no sort" / "no filter", NOT "keep whatever the previous view left in the toolbar". Keeping it showed the
@@ -849,6 +880,11 @@ export function useMultitableGrid(opts: {
         : []
     groupFieldIds.value = normalizeGroupFieldIds(rawIds)
     sortFilterDirty.value = false
+    // This state now IS the named view's stored sort/filter — the baseline persistSortFilter diffs against.
+    const loadedViewId = typeof view.id === 'string' && view.id ? view.id : (forViewId ?? opts.viewId.value)
+    sortFilterBaseline = loadedViewId
+      ? { viewId: loadedViewId, sortKey: JSON.stringify(currentSortInfo()), filterKey: JSON.stringify(currentFilterInfo()) }
+      : null
   }
 
   // Slice 3 G-FE-2 write-routing: the ONE switch every in-place config edit below funnels through. ON (for
@@ -867,19 +903,26 @@ export function useMultitableGrid(opts: {
   }
 
   async function persistSortFilter(viewId: string) {
+    // Fail closed: never write sort/filter state that was not loaded FROM this view (see sortFilterBaseline).
+    const baseline = sortFilterBaseline
+    if (!baseline || baseline.viewId !== viewId) return
     try {
-      // Always send BOTH facets with an explicit value: an empty toolbar persists the explicit empty
-      // (emptySortInfo / emptyFilterInfo) so clearing the last rule is actually saved — an omitted key
-      // would leave the stored rules in place (shared PATCH) or fall back to the shared rules (personal).
-      const sortInfo = buildSortInfo(sortRules.value) ?? emptySortInfo()
-      const filterInfo = (nestedFilterNodes.value
-        ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
-        : buildFilterInfoFromNodes([...filterRules.value, ...filterGroups.value], filterConjunction.value))
-        ?? emptyFilterInfo(filterConjunction.value)
-      await persistViewConfig(viewId, {
-        sortInfo: sortInfo as Record<string, unknown>,
-        filterInfo: filterInfo as Record<string, unknown>,
-      })
+      // Send ONLY the facet(s) the user changed against what was loaded: a header click must not rewrite the
+      // stored filter (nor, in personal mode, pin the shared filter into the overlay). A changed facet goes out
+      // with an explicit value — the explicit empty included — so clearing the last rule is actually saved: an
+      // omitted key leaves the stored rules in place (shared PATCH) or falls back to the shared rules (personal).
+      const sortInfo = currentSortInfo()
+      const filterInfo = currentFilterInfo()
+      const sortKey = JSON.stringify(sortInfo)
+      const filterKey = JSON.stringify(filterInfo)
+      const input: PersonalViewConfigOverlay = {}
+      if (sortKey !== baseline.sortKey) input.sortInfo = sortInfo
+      if (filterKey !== baseline.filterKey) input.filterInfo = filterInfo
+      if (input.sortInfo || input.filterInfo) {
+        await persistViewConfig(viewId, input)
+        // Still the same view (no switch-reset during the await) ⇒ what we just saved is its new baseline.
+        if (sortFilterBaseline?.viewId === viewId) sortFilterBaseline = { viewId, sortKey, filterKey }
+      }
       sortFilterDirty.value = false
     } catch {
       // silent — will retry on next load
@@ -1455,9 +1498,11 @@ export function useMultitableGrid(opts: {
   watch(
     [opts.sheetId, opts.viewId],
     () => {
-      // Drop the previous view's sort/filter the moment the view changes (客户反馈 2026-09-24 #5). Waiting for
-      // the load's syncFromView is not enough: until it lands — or forever, if the load fails — the toolbar
-      // and header arrows would show the OLD view's rules, and a header click / 应用 would persist them here.
+      // Drop the previous view's sort/filter when the view changes (客户反馈 2026-09-24 #5): until the load's
+      // syncFromView lands — or forever, if the load fails — the toolbar and header arrows would otherwise show
+      // the OLD view's rules. This watcher is pre-flush, so a caller that switches the view and calls
+      // loadViewData in the same tick (onCreateView) runs BEFORE it; that path is covered by loadViewData's
+      // sortFilterBaseline check, which is what actually keeps foreign/unknown state from being persisted.
       resetSortFilterState()
       clearEditHistory()
       dismissConflict()

@@ -8,9 +8,18 @@
  * them into the new view (persistSortFilter always sends sortInfo together with filterInfo). Separately,
  * clearing the LAST rule was never saved: the empty list serialised to `undefined`, which the PATCH drops.
  *
+ * Review of #6075 added two fail-closed properties, both covered below:
+ *  - sort/filter state is persisted ONLY into the view it was loaded from. The create-view path switches the
+ *    view and calls loadViewData in the same tick, BEFORE the (pre-flush) view-switch watcher resets — a
+ *    staged, unapplied toolbar edit of the previous view must not be written into the new view.
+ *  - "not loaded yet" is not "empty": while the new view's load is in flight or has failed, a header click /
+ *    应用 must not write anything (an explicit empty would wipe the view's stored filter and sort).
+ *  - only the facet the user changed is sent; a sort edit never rewrites the stored filter and vice versa.
+ *
  * This spec drives the REAL composable (useMultitableGrid) + the REAL MetaToolbar / MetaGridTable against a
  * MultitableApiClient whose loadView/updateView are backed by an in-memory view store that mimics the
- * server's PATCH merge (a key that is absent from the body keeps the stored value).
+ * server's PATCH merge (a key that is absent from the body keeps the stored value). The real workbench
+ * create-view entry point is covered in multitable-workbench-create-view-sort-filter.spec.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App, type Ref } from 'vue'
@@ -62,12 +71,38 @@ function viewB(): StoredView {
   return { id: 'view_new', sheetId: 'sheet_1', name: '新视图', type: 'grid', sortInfo: {}, filterInfo: {}, groupInfo: {}, hiddenFieldIds: [] }
 }
 
+// View S = an existing view with its OWN saved sort (数量 ▼) and filter (唯一键 not empty) — the one whose
+// stored rules a write made before its state is known would wipe.
+function viewSaved(): StoredView {
+  return {
+    id: 'view_saved',
+    sheetId: 'sheet_1',
+    name: '已保存视图',
+    type: 'grid',
+    sortInfo: { rules: [{ fieldId: 'fld_qty', desc: true }] },
+    filterInfo: { conjunction: 'and', conditions: [{ fieldId: 'fld_key', operator: 'isNotEmpty' }] },
+    groupInfo: {},
+    hiddenFieldIds: [],
+  }
+}
+
 function makeServer(opts: { failLoadFor?: string; withoutViewFor?: string } = {}) {
-  const store: Record<string, StoredView> = { view_all: viewA(), view_new: viewB() }
+  const store: Record<string, StoredView> = { view_all: viewA(), view_new: viewB(), view_saved: viewSaved() }
   const client = new MultitableApiClient({ fetchFn: vi.fn(async () => new Response('{}', { status: 200 })) })
+  // Mutable so a test can make a view's load fail, then recover.
+  const failingLoads = new Set<string>(opts.failLoadFor ? [opts.failLoadFor] : [])
+  // A view id here makes its loads WAIT until release() — a slow network.
+  let held: { viewId: string; gate: Promise<void>; release: () => void } | null = null
+  const holdLoadsFor = (viewId: string) => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    held = { viewId, gate, release: () => { held = null; release() } }
+    return held.release
+  }
   const loadView = vi.spyOn(client, 'loadView').mockImplementation(async (params) => {
     const vid = params.viewId ?? ''
-    if (opts.failLoadFor && vid === opts.failLoadFor) throw new Error('network down')
+    if (held && held.viewId === vid) await held.gate
+    if (failingLoads.has(vid)) throw new Error('network down')
     const view = store[vid]
     return {
       fields: FIELDS,
@@ -86,7 +121,7 @@ function makeServer(opts: { failLoadFor?: string; withoutViewFor?: string } = {}
     }
     return {} as never
   })
-  return { client, store, loadView, updateView }
+  return { client, store, loadView, updateView, failingLoads, holdLoadsFor }
 }
 
 const flush = async () => {
@@ -192,30 +227,112 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     expect(server.updateView).not.toHaveBeenCalled()
   })
 
-  it('the toolbar is cleared the moment the view changes — even if B\'s load then FAILS', async () => {
-    const server = makeServer({ failLoadFor: 'view_new' })
+  it('B\'s load FAILS: the toolbar is cleared, and a header click writes NOTHING (B\'s saved filter + sort survive)', async () => {
+    const server = makeServer({ failLoadFor: 'view_saved' })
     const { container, viewId, grid } = mountHarness(server)
     await flush()
     expect(grid().sortRules.value).toHaveLength(3)
 
-    viewId.value = 'view_new'
+    viewId.value = 'view_saved'
     await flush()
 
     expect(grid().error.value).toBe('network down')
     expect(badgeOf(sortTrigger(container))).toBeNull()
     expect(headerArrows(container)).toEqual([null, null, null])
-    // A header click on the (failed-to-load) B must not smuggle A's 3 rules into B.
+    // B's state is NOT KNOWN (its load failed). An empty toolbar here means "not loaded", not "no rules":
+    // a header click must neither smuggle A's 3 rules into B nor send an empty filter that wipes B's own.
     headerByName(container, '数量').click()
     await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_saved).toEqual(viewSaved())
+    expect(server.store.view_all).toEqual(viewA())
+
+    // The network comes back: B shows exactly its own saved sort + filter — the dropped click left no trace.
+    server.failingLoads.clear()
+    await grid().loadViewData(0)
+    await flush()
+    expect(grid().error.value).toBeNull()
+    expect(badgeOf(sortTrigger(container))).toBe('1')
+    expect(badgeOf(filterTrigger(container))).toBe('1')
+    expect(headerArrows(container)).toEqual([null, null, '▼'])
+    expect(server.updateView).not.toHaveBeenCalled()
+
+    // Now that B is known, a header click saves ONLY the sort facet — B's stored filter is left alone.
+    headerByName(container, '唯一键').click()
+    await flush()
     expect(server.updateView).toHaveBeenCalledTimes(1)
-    expect(server.updateView.mock.calls[0][0]).toBe('view_new')
-    expect(server.updateView.mock.calls[0][1]).toEqual({
-      sortInfo: { rules: [{ fieldId: 'fld_qty', desc: false }] },
-      filterInfo: { conjunction: 'and', conditions: [] },
+    expect(server.updateView).toHaveBeenCalledWith('view_saved', {
+      sortInfo: { rules: [{ fieldId: 'fld_qty', desc: true }, { fieldId: 'fld_key', desc: false }] },
     })
+    expect(server.store.view_saved.filterInfo).toEqual(viewSaved().filterInfo)
   })
 
-  it('a header click in B saves ONLY the clicked column\'s sort (never A\'s rules or A\'s filter)', async () => {
+  it('B\'s load is still IN FLIGHT: + 添加排序 → 应用 writes nothing; B then shows its own saved rules', async () => {
+    const server = makeServer()
+    const { container, viewId } = mountHarness(server)
+    await flush()
+
+    const release = server.holdLoadsFor('view_saved')
+    viewId.value = 'view_saved'
+    await flush()
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+
+    // The toolbar is usable during the load (the grid's loading overlay does not cover it).
+    sortTrigger(container).click()
+    await flush()
+    ;(document.querySelector('.meta-toolbar__sort-panel .meta-toolbar__add') as HTMLButtonElement).click()
+    await flush()
+    ;(document.querySelector('.meta-toolbar__sort-panel .meta-toolbar__apply') as HTMLButtonElement).click()
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    // The dropped rule is not left on screen pretending to be applied while B is still loading.
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+
+    release()
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_saved).toEqual(viewSaved())
+    expect(badgeOf(sortTrigger(container))).toBe('1')
+    expect(badgeOf(filterTrigger(container))).toBe('1')
+    expect(headerArrows(container)).toEqual([null, null, '▼'])
+  })
+
+  it('create-view path: a STAGED (unapplied) edit of A is never written into the new view', async () => {
+    // MultitableWorkbench.vue onCreateView: `workbench.selectView(res.view.id)` then, in the SAME tick,
+    // `await grid.loadViewData(grid.page.value.offset)` — this runs BEFORE the pre-flush view-switch watcher
+    // resets the toolbar, while the state (and the dirty flag) are still A's.
+    const server = makeServer()
+    const { container, viewId, grid } = mountHarness(server)
+    await flush()
+
+    // Stage an edit in A without 应用: change the direction of the 唯一键 rule in the sort panel (onUpdateSort).
+    sortTrigger(container).click()
+    await flush()
+    const dirSelect = document.querySelectorAll('.meta-toolbar__sort-panel .meta-toolbar__sort-rule')[1]
+      .querySelectorAll('select')[1] as HTMLSelectElement
+    dirSelect.value = 'asc'
+    dirSelect.dispatchEvent(new Event('change'))
+    await flush()
+    expect(grid().sortFilterDirty.value).toBe(true)
+
+    server.store.view_created = { ...viewB(), id: 'view_created', name: '视图 2' }
+    viewId.value = 'view_created'
+    await grid().loadViewData(grid().page.value.offset)
+    await flush()
+
+    // Nothing was written anywhere: not A's staged rules into the new view, not the staged edit into A.
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_created.sortInfo).toEqual({})
+    expect(server.store.view_created.filterInfo).toEqual({})
+    expect(server.store.view_all).toEqual(viewA())
+    // …and the new view shows as blank.
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+    expect(badgeOf(filterTrigger(container))).toBeNull()
+    expect(headerArrows(container)).toEqual([null, null, null])
+    expect(grid().sortFilterDirty.value).toBe(false)
+  })
+
+  it('a header click in B saves ONLY the clicked column\'s sort (never A\'s rules, and no filter key at all)', async () => {
     const server = makeServer()
     const { container, viewId } = mountHarness(server)
     await flush()
@@ -228,10 +345,9 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     expect(server.updateView).toHaveBeenCalledTimes(1)
     expect(server.updateView).toHaveBeenCalledWith('view_new', {
       sortInfo: { rules: [{ fieldId: 'fld_qty', desc: false }] },
-      filterInfo: { conjunction: 'and', conditions: [] },
     })
     expect(server.store.view_new.sortInfo).toEqual({ rules: [{ fieldId: 'fld_qty', desc: false }] })
-    expect(server.store.view_new.filterInfo).toEqual({ conjunction: 'and', conditions: [] })
+    expect(server.store.view_new.filterInfo).toEqual({})
     // After the reload B shows exactly its own single rule.
     expect(badgeOf(sortTrigger(container))).toBe('1')
     expect(headerArrows(container)).toEqual([null, null, '▲'])
@@ -239,7 +355,7 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     expect(server.store.view_all).toEqual(viewA())
   })
 
-  it('应用 in B (sort panel) persists only what B shows; 清除筛选 in B persists an empty filter, not A\'s', async () => {
+  it('应用 in B (sort panel) persists only what B shows; 清除筛选 in B never carries A\'s filter', async () => {
     const server = makeServer()
     const { container, viewId } = mountHarness(server)
     await flush()
@@ -256,10 +372,10 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     expect(server.updateView).toHaveBeenCalledTimes(1)
     expect(server.updateView).toHaveBeenCalledWith('view_new', {
       sortInfo: { rules: [{ fieldId: 'fld_key', desc: false }] },
-      filterInfo: { conjunction: 'and', conditions: [] },
     })
 
     // 清除筛选 path (onClearFilters → clearFilters + applySortFilter) in B: add a condition, then clear it.
+    // Net change against what B stores (no filter) is nothing — so nothing is written, least of all A's filter.
     server.updateView.mockClear()
     filterTrigger(container).click()
     await flush()
@@ -270,14 +386,30 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     clearAll!.click()
     await flush()
 
-    expect(server.updateView).toHaveBeenCalledTimes(1)
-    expect(server.updateView).toHaveBeenCalledWith('view_new', {
-      sortInfo: { rules: [{ fieldId: 'fld_key', desc: false }] },
-      filterInfo: { conjunction: 'and', conditions: [] },
-    })
-    expect(server.store.view_new.filterInfo).toEqual({ conjunction: 'and', conditions: [] })
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_new.filterInfo).toEqual({})
+    expect(server.store.view_new.sortInfo).toEqual({ rules: [{ fieldId: 'fld_key', desc: false }] })
     // A is untouched throughout.
     expect(server.store.view_all).toEqual(viewA())
+  })
+
+  it('清除筛选 in A saves ONLY an explicit empty filter — A\'s 3 sort rules are not rewritten', async () => {
+    const server = makeServer()
+    const { container } = mountHarness(server)
+    await flush()
+
+    filterTrigger(container).click()
+    await flush()
+    ;(document.querySelector('.meta-toolbar__filter-actions .meta-toolbar__add--danger') as HTMLButtonElement).click()
+    await flush()
+
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+    expect(server.updateView).toHaveBeenCalledWith('view_all', {
+      filterInfo: { conjunction: 'and', conditions: [] },
+    })
+    expect(server.store.view_all.sortInfo).toEqual(viewA().sortInfo)
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+    expect(badgeOf(filterTrigger(container))).toBeNull()
   })
 
   it('clearing the LAST sort rule from the toolbar is saved as an explicit empty sort, and stays cleared after reload', async () => {
@@ -299,15 +431,41 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     await flush()
 
     expect(server.updateView).toHaveBeenCalledTimes(1)
-    expect(server.updateView).toHaveBeenCalledWith('view_all', {
-      sortInfo: { rules: [] },
-      filterInfo: { conjunction: 'and', conditions: [{ fieldId: 'fld_proj', operator: 'contains', value: '2025' }] },
-    })
+    // Only the edited facet: the explicit empty sort. A's filter is not re-sent.
+    expect(server.updateView).toHaveBeenCalledWith('view_all', { sortInfo: { rules: [] } })
     expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+    expect(server.store.view_all.filterInfo).toEqual(viewA().filterInfo)
     // Reloaded from the store: still no sort (the old undefined payload left the 3 rules in place).
     expect(grid().sortRules.value).toEqual([])
     expect(badgeOf(sortTrigger(container))).toBeNull()
     expect(badgeOf(filterTrigger(container))).toBe('1')
+  })
+
+  it('a saved edit becomes the new baseline even when the reload after it FAILS (re-adding the old rules is saved)', async () => {
+    const server = makeServer()
+    const { grid } = mountHarness(server)
+    await flush()
+
+    // Clear A's 3 sorts and apply; the PATCH lands but the reload fails.
+    server.failingLoads.add('view_all')
+    for (const rule of [...grid().sortRules.value]) grid().removeSortRule(rule.fieldId)
+    grid().applySortFilter()
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+    expect(grid().error.value).toBe('network down')
+
+    // Put exactly the original 3 rules back: that differs from what is STORED now (no sort), so it must be sent
+    // — diffing against the stale pre-save baseline would call it "unchanged" and silently skip the write.
+    server.failingLoads.clear()
+    grid().addSortRule({ fieldId: 'fld_proj', direction: 'asc' })
+    grid().addSortRule({ fieldId: 'fld_key', direction: 'desc' })
+    grid().addSortRule({ fieldId: 'fld_qty', direction: 'asc' })
+    grid().applySortFilter()
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(2)
+    expect(server.updateView.mock.calls[1]).toEqual(['view_all', { sortInfo: viewA().sortInfo }])
+    expect(server.store.view_all.sortInfo).toEqual(viewA().sortInfo)
   })
 
   it('removing the LAST filter condition (×) then 应用 saves an explicit empty filter', async () => {
@@ -327,9 +485,10 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     expect(server.updateView).toHaveBeenCalledTimes(1)
     const [vid, body] = server.updateView.mock.calls[0]
     expect(vid).toBe('view_all')
-    expect(body.filterInfo).toEqual({ conjunction: 'and', conditions: [] })
-    expect(body.sortInfo).toEqual(viewA().sortInfo)
+    // Only the edited facet: the explicit empty filter. A's 3 sort rules are not re-sent.
+    expect(body).toEqual({ filterInfo: { conjunction: 'and', conditions: [] } })
     expect(server.store.view_all.filterInfo).toEqual({ conjunction: 'and', conditions: [] })
+    expect(server.store.view_all.sortInfo).toEqual(viewA().sortInfo)
     expect(grid().filterRules.value).toEqual([])
     expect(badgeOf(filterTrigger(container))).toBeNull()
   })
@@ -352,9 +511,9 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     expect(headerArrows(container)).toEqual([null, null, null])
   })
 
-  it('a response with no view clears the sort/filter state (the server applied none)', async () => {
+  it('a response with no view clears the sort/filter state (the server applied none) and allows no write', async () => {
     const server = makeServer({ withoutViewFor: 'view_new' })
-    const { viewId, grid } = mountHarness(server)
+    const { container, viewId, grid } = mountHarness(server)
     await flush()
     expect(grid().sortRules.value).toHaveLength(3)
     viewId.value = 'view_new'
@@ -366,6 +525,10 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     await flush()
     expect(grid().sortRules.value).toEqual([])
     expect(grid().filterRules.value).toEqual([])
+    // With no view to compare against, the state stays "not known": a header click persists nothing.
+    headerByName(container, '数量').click()
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
   })
 
   it('personal mode: clearing the last sort writes an explicit empty sort into the merged overlay (no fall-back to shared)', async () => {
@@ -386,10 +549,10 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
     const [vid, overlay] = putPersonal.mock.calls[0]
     expect(vid).toBe('view_all')
     // The explicit empty survives the JSON boundary (an `undefined` facet would be dropped and the
-    // server would fall back to the SHARED sort, silently undoing the user's clear).
+    // server would fall back to the SHARED sort, silently undoing the user's clear). The untouched filter
+    // facet is NOT written: it is not pinned into the overlay, so the user keeps inheriting the shared filter.
     expect(JSON.parse(JSON.stringify(overlay))).toEqual({
       sortInfo: { rules: [] },
-      filterInfo: { conjunction: 'and', conditions: [{ fieldId: 'fld_proj', operator: 'contains', value: '2025' }] },
       hiddenFieldIds: ['fld_qty'],
     })
     expect(server.updateView).not.toHaveBeenCalled()
