@@ -1573,6 +1573,7 @@ exec npx vitest run \
   multitable-view-manager \
   multitable-workbench-1672-1673 \
   multitable-workbench-bulk-delete \
+  multitable-workbench-dashboard-exit \
   multitable-workbench-drawer-button-wiring \
   multitable-workbench-history-field-scope-wiring \
   multitable-workbench-i18n \

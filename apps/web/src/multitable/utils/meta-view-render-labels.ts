@@ -80,6 +80,7 @@ export type MetaViewRenderLabelKey =
   | 'kanban.dropToUpdate'
   | 'kanban.noCards'
   | 'dashboard.rename'
+  | 'dashboard.backToTable'
   | 'dashboard.addPanel'
   | 'dashboard.newDashboard'
   | 'dashboard.loadingDashboard'
@@ -228,6 +229,7 @@ export const VIEW_RENDER_LABEL_KEYS: readonly MetaViewRenderLabelKey[] = [
   'kanban.dropToUpdate',
   'kanban.noCards',
   'dashboard.rename',
+  'dashboard.backToTable',
   'dashboard.addPanel',
   'dashboard.newDashboard',
   'dashboard.loadingDashboard',
@@ -380,6 +382,7 @@ const LABELS: Record<MetaViewRenderLabelKey, { en: string; zh: string }> = {
   'kanban.dropToUpdate': { en: 'Drop a card here to update its group', zh: '将卡片拖到此处以更新其分组' },
   'kanban.noCards': { en: 'No cards in this column', zh: '此列没有卡片' },
   'dashboard.rename': { en: 'Rename', zh: '重命名' },
+  'dashboard.backToTable': { en: 'Back to table', zh: '返回表格' },
   'dashboard.addPanel': { en: '+ Add Panel', zh: '+ 添加面板' },
   'dashboard.newDashboard': { en: '+ New Dashboard', zh: '+ 新建仪表板' },
   'dashboard.loadingDashboard': { en: 'Loading dashboard...', zh: '正在加载仪表板...' },

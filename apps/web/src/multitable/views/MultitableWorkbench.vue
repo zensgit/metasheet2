@@ -48,7 +48,7 @@
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
       <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
       <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" :aria-pressed="showDashboardView" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
@@ -271,6 +271,7 @@
           :sheet-id="workbench.activeSheetId.value"
           :fields="scopedAllFields"
           :client="workbench.client"
+          @close="exitDashboard"
         />
         <MetaFormView
           v-else-if="activeViewType === 'form'"
@@ -1451,6 +1452,11 @@ function openHistoryForBatch(batchId: string) {
 async function onHistoryOpenRecord(payload: { sheetId: string; recordId: string }) {
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
     if (!onSelectSheet(payload.sheetId)) return
+  } else {
+    // S4 (2026-09-25 review): the same-sheet branch skips onSelectSheet (and its own exitDashboard
+    // call) entirely — same gap as onNotificationNavigate's same-sheet case. No confirm gates this
+    // branch (nothing is switching), so exiting unconditionally here is safe.
+    exitDashboard()
   }
   closeHistory()
   await resolveDeepLink(payload.recordId)
@@ -3629,6 +3635,7 @@ async function onCreateView(input: {
     })
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     workbench.selectView(res.view.id)
+    exitDashboard()
     await grid.loadViewData(grid.page.value.offset)
   } catch (e: any) { showError(e.message ?? wb('toast.viewCreateFailed', isZh.value)) }
 }
@@ -3918,10 +3925,18 @@ async function updateViewInternal(
 }
 
 async function onDeleteView(viewId: string) {
+  // S3 (2026-09-25 review): loadSheetMeta below re-syncs the view list AND resets activeViewId (it
+  // falls back to views[0] once the deleted view is gone), so checking `activeViewId.value ===
+  // viewId` AFTER the reload never matches — the exit (and the fallback selectView) silently never
+  // ran. Capture whether the deleted view was active BEFORE the reload.
+  const wasActive = workbench.activeViewId.value === viewId
   try {
     await workbench.client.deleteView(viewId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
-    if (workbench.activeViewId.value === viewId) workbench.selectView(workbench.views.value[0]?.id ?? '')
+    if (wasActive) {
+      workbench.selectView(workbench.views.value[0]?.id ?? '')
+      exitDashboard()
+    }
   } catch (e: any) { showError(e.message ?? wb('toast.viewDeleteFailed', isZh.value)) }
 }
 
@@ -3984,6 +3999,7 @@ async function onCreateSheet(name: string) {
       showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
       return
     }
+    exitDashboard() // S4 (2026-09-25 review)
   } catch (e: any) { showError(e.message ?? wb('toast.sheetCreateFailed', isZh.value)) }
 }
 
@@ -4030,6 +4046,7 @@ async function onDeleteSheet(sheetId: string) {
   if (sheetId === workbench.activeSheetId.value) {
     const ok = await workbench.loadBaseContext(workbench.activeBaseId.value)
     if (!ok) showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+    exitDashboard() // S4 (2026-09-25 review)
   } else {
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
   }
@@ -4055,9 +4072,26 @@ async function loadBases() {
   } catch { /* silent */ }
 }
 
+// A2 (2026-09-25, 客户反馈 2026-09-24 #6, 裁定见 PR #6074): once the dashboard is open, none of the
+// sidebar navigation paths reset `showDashboardView` — there was no way back to the grid short of
+// re-clicking the toggle button itself. This one-line helper is called from every path below
+// (including the early-return "already active" branches, so re-clicking the current sheet/view
+// while the dashboard is open also returns to the grid instead of doing nothing).
+function exitDashboard() {
+  showDashboardView.value = false
+}
+
 async function onSelectBase(baseId: string) {
-  if (baseId === workbench.activeBaseId.value) return
+  // N1 (2026-09-25 review): exitDashboard() must not run until the switch actually happens — a
+  // discard-changes confirm the user CANCELS must leave the dashboard exactly as it was. The
+  // already-active equality branch never prompts, so it still exits immediately (re-clicking the
+  // current base while the dashboard is open returns to the grid instead of doing nothing).
+  if (baseId === workbench.activeBaseId.value) {
+    exitDashboard()
+    return
+  }
   if (!confirmDiscardContextChanges()) return
+  exitDashboard()
   const ok = await workbench.switchBase(baseId)
   if (!ok) {
     showError(workbench.error.value ?? wb('toast.baseLoadFailed', isZh.value))
@@ -4078,8 +4112,14 @@ function rememberWorkbenchBaseOpen(baseId: string) {
 // user cancelled the discard-unsaved-changes confirm. Callers that depend on the switch (e.g. the
 // notification bell's click-to-locate) MUST honor a false return.
 function onSelectSheet(sheetId: string): boolean {
-  if (sheetId === workbench.activeSheetId.value) return true
+  // N1 (2026-09-25 review): same reasoning as onSelectBase — do not exit until the switch is
+  // actually going to happen, so a cancelled discard-changes confirm leaves the dashboard open.
+  if (sheetId === workbench.activeSheetId.value) {
+    exitDashboard()
+    return true
+  }
   if (!confirmDiscardContextChanges()) return false
+  exitDashboard()
   workbench.selectSheet(sheetId)
   return true
 }
@@ -4090,14 +4130,28 @@ function onSelectSheet(sheetId: string): boolean {
 // up in the wrong sheet and report not-found.
 async function onNotificationNavigate(payload: { sheetId: string; recordId: string }) {
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
+    // The different-sheet case delegates entirely to onSelectSheet, which (N1, 2026-09-25 review)
+    // only exits the dashboard once the switch actually happens — a cancelled discard-changes
+    // confirm here must leave the dashboard open, not close it and then abort the navigate.
     if (!onSelectSheet(payload.sheetId)) return
+  } else {
+    // A2: a same-sheet locate skips onSelectSheet (and its own exitDashboard call) entirely, so this
+    // path needs its own reset — otherwise locating a record while the dashboard is open would leave
+    // the dashboard showing instead of surfacing the record. No confirm gates this branch (nothing is
+    // switching), so exiting unconditionally here is safe.
+    exitDashboard()
   }
   await resolveDeepLink(payload.recordId)
 }
 
 function onSelectView(viewId: string) {
-  if (viewId === workbench.activeViewId.value) return
+  // N1 (2026-09-25 review): same reasoning as onSelectBase/onSelectSheet.
+  if (viewId === workbench.activeViewId.value) {
+    exitDashboard()
+    return
+  }
   if (!confirmDiscardContextChanges()) return
+  exitDashboard()
   workbench.selectView(viewId)
 }
 
@@ -4461,6 +4515,12 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
+  // S4 (2026-09-25 review): a real context switch just landed (from the props watcher or the embed's
+  // postMessage handler) — same "you actually navigated" trigger as onSelectSheet/onSelectView, so the
+  // dashboard should not still be covering the grid. NOT called on the fast 'applied' path above (the
+  // requested context already matched — nothing moved) nor on 'blocked'/'deferred'/'failed' — those
+  // never navigated, and 'blocked' in particular is the user cancelling the discard-changes confirm.
+  exitDashboard()
   // #5750 follow-up: same as the replay echo above -- report the RESOLVED triple, never the requested
   // one, whenever what is on screen is this request's own resolution. The fast-path 'applied' return
   // at the top of this function already reports the live triple (it has just proved the refs equal the
@@ -4612,6 +4672,7 @@ async function onInstallTemplate(template: MetaTemplate) {
       showError(workbench.error.value ?? wb('toast.templateRefreshFailed', isZh.value))
       return
     }
+    exitDashboard() // S4 (2026-09-25 review)
     rememberWorkbenchBaseOpen(result.base.id)
     showTemplateLibrary.value = false
     showSuccess(fmtTemplateInstalled(result.template.name, isZh.value))
@@ -5955,6 +6016,9 @@ defineExpose({
 .mt-workbench__mgr-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
 .mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
+/* A2 (2026-09-25): the toggle-dashboard button had a `--active` class bound but no matching rule —
+   it visually looked identical whether the dashboard was open or not. */
+.mt-workbench__mgr-btn--active { background: #ecf5ff; color: #409eff; border-color: #409eff; }
 .mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
