@@ -26,6 +26,7 @@ describe('group-by from toolbar', () => {
           id: 'v1',
           fields: [{ id: 'f1', name: 'Status', type: 'select' }],
           rows: [],
+          view: { id: 'v1' },
           page: { offset: 0, limit: 50, total: 0, hasMore: false },
         },
       }), { status: 200 }),
@@ -33,6 +34,8 @@ describe('group-by from toolbar', () => {
     const client = mockClientWithFn(fetchFn)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
     await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    // #6075 round 2: hidden/group state is written only into the view it was LOADED from — wait for v1's load.
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     fetchFn.mockClear()
 
     fetchFn.mockResolvedValue(

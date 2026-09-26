@@ -24,7 +24,7 @@ describe('hidden field persistence via updateView', () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
         ok: true,
-        data: { id: 'v1', fields: [{ id: 'f1', name: 'A', type: 'string' }, { id: 'f2', name: 'B', type: 'number' }], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        data: { id: 'v1', fields: [{ id: 'f1', name: 'A', type: 'string' }, { id: 'f2', name: 'B', type: 'number' }], rows: [], view: { id: 'v1' }, page: { offset: 0, limit: 50, total: 0, hasMore: false } },
       }), { status: 200 }),
     )
     const client = mockClientWithFn(fetchFn)
@@ -32,6 +32,8 @@ describe('hidden field persistence via updateView', () => {
 
     // Wait for initial load
     await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    // #6075 round 2: hidden/group state is written only into the view it was LOADED from — wait for v1's load.
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     fetchFn.mockClear()
 
     // Mock updateView response
@@ -194,13 +196,15 @@ describe('grid groupBy', () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
         ok: true,
-        data: { id: 'v1', fields: [{ id: 'f1', name: 'Status', type: 'select' }], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        data: { id: 'v1', fields: [{ id: 'f1', name: 'Status', type: 'select' }], rows: [], view: { id: 'v1' }, page: { offset: 0, limit: 50, total: 0, hasMore: false } },
       }), { status: 200 }),
     )
     const client = mockClientWithFn(fetchFn)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
 
     await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    // #6075 round 2: hidden/group state is written only into the view it was LOADED from — wait for v1's load.
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     fetchFn.mockClear()
 
     fetchFn.mockResolvedValue(

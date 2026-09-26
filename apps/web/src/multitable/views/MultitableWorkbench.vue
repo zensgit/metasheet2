@@ -1508,6 +1508,7 @@ async function onConfigReverted() {
   // user sees "撤销成功" over stale config until manual refresh). See refreshAfterConfigRevert.
   await refreshAfterConfigRevert({
     sheetId: workbench.activeSheetId.value,
+    discardUnappliedEdits: () => grid.discardUnappliedSortFilterEdits(),
     loadSheetMeta: (id) => workbench.loadSheetMeta(id),
     loadViewData: (off) => grid.loadViewData(off),
     offset: grid.page.value.offset,
@@ -3647,7 +3648,8 @@ async function onUpdateView(viewId: string, input: {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
 }) {
-  await updateViewInternal(viewId, input, true)
+  // A 视图管理 save wins over the toolbar's staged, unapplied sort/filter edits (#6075 round 2).
+  await updateViewInternal(viewId, input, true, { discardToolbarEdits: true })
 }
 
 async function onPersistActiveViewConfig(input: {
@@ -3915,9 +3917,15 @@ async function updateViewInternal(
     groupInfo?: Record<string, unknown>
   },
   notify: boolean,
+  options: { discardToolbarEdits?: boolean } = {},
 ) {
   try {
     await workbench.client.updateView(viewId, input)
+    // 客户反馈 2026-09-24 #5 / #6075 round 2: a 视图管理 save can rewrite the current view's sort/filter behind the
+    // toolbar. Staged, unapplied toolbar edits were made against the old rules — drop them, so the reload below
+    // re-syncs the toolbar from the saved view instead of PATCHing them over it. Whichever view the dialog saved:
+    // the reload must never apply edits the user did not press 应用 for.
+    if (options.discardToolbarEdits) grid.discardUnappliedSortFilterEdits()
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
     if (notify) showSuccess(wb('toast.viewSettingsSaved', isZh.value))
@@ -4711,11 +4719,17 @@ function onAutoFitColumns() {
 // Slice 3c: route by personal-vs-shared. Personal mode ON → write ONLY personal-config.fieldOrder (never the
 // shared field.order); OFF → the unchanged shared path. Logic + goldens live in utils/reorder-view-fields.ts.
 function onReorderField(fromId: string, toId: string) {
+  const viewId = workbench.activeViewId.value
+  const isPersonal = personalViewsEnabled.value && personalView.isPersonalMode(viewId)
+  // 客户反馈 2026-09-24 #5 / #6075 round 2: a personal order is the WHOLE visible-column list, derived from the grid's
+  // hidden / order state. While the view's load is in flight or has failed that state is not the view's own (it
+  // was reset on the switch), so writing it would replace the view's stored personal order — drop the drag.
+  if (isPersonal && !grid.isViewStateLoadedFor(viewId)) return
   void reorderViewFields({
     fromId,
     toId,
-    isPersonal: personalViewsEnabled.value && personalView.isPersonalMode(workbench.activeViewId.value),
-    viewId: workbench.activeViewId.value,
+    isPersonal,
+    viewId,
     sharedFields: grid.fields.value,
     visibleFieldIds: grid.visibleFields.value.map((f) => f.id),
     client: workbench.client,

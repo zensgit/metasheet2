@@ -8,13 +8,22 @@
  * them into the new view (persistSortFilter always sends sortInfo together with filterInfo). Separately,
  * clearing the LAST rule was never saved: the empty list serialised to `undefined`, which the PATCH drops.
  *
- * Review of #6075 added two fail-closed properties, both covered below:
+ * Review round 1 of #6075 added three fail-closed properties, all covered below:
  *  - sort/filter state is persisted ONLY into the view it was loaded from. The create-view path switches the
  *    view and calls loadViewData in the same tick, BEFORE the (pre-flush) view-switch watcher resets — a
  *    staged, unapplied toolbar edit of the previous view must not be written into the new view.
  *  - "not loaded yet" is not "empty": while the new view's load is in flight or has failed, a header click /
  *    应用 must not write anything (an explicit empty would wipe the view's stored filter and sort).
  *  - only the facet the user changed is sent; a sort edit never rewrites the stored filter and vice versa.
+ *
+ * Review round 2 added (describe block at the end, PATCHes parked with `heldUpdateViews`):
+ *  - in-flight writes: the baseline moves to what was SENT before the await, so a 应用 pressed meanwhile diffs
+ *    against the pending write (a re-add of the rule being removed is sent, last write wins); writes to one view
+ *    are serialised; a reload never reads a view while a write to it is in flight; a failed write is rolled back
+ *    compare-and-set, and neither a late success nor a late failure for A touches B's state.
+ *  - a 视图管理 save / config revert discards the toolbar's unapplied edits (discardUnappliedSortFilterEdits).
+ *  - hidden columns / grouping / column order get the same "only into the view they were loaded from" gate, and a
+ *    view switch resets them (the new view shows all columns until — and unless — its own load lands).
  *
  * This spec drives the REAL composable (useMultitableGrid) + the REAL MetaToolbar / MetaGridTable against a
  * MultitableApiClient whose loadView/updateView are backed by an in-memory view store that mimics the
@@ -86,8 +95,25 @@ function viewSaved(): StoredView {
   }
 }
 
+// Two views with their OWN hidden columns and grouping (#6075 round 2) — the whole-list facets a write made while
+// the incoming view is not loaded yet would replace.
+function viewColsA(): StoredView {
+  return {
+    id: 'view_cols_a', sheetId: 'sheet_1', name: '列视图 A', type: 'grid', sortInfo: {}, filterInfo: {},
+    groupInfo: { fieldIds: ['fld_proj'], fieldId: 'fld_proj' }, hiddenFieldIds: ['fld_qty'],
+  }
+}
+function viewColsB(): StoredView {
+  return {
+    id: 'view_cols_b', sheetId: 'sheet_1', name: '列视图 B', type: 'grid', sortInfo: {}, filterInfo: {},
+    groupInfo: { fieldIds: ['fld_qty'], fieldId: 'fld_qty' }, hiddenFieldIds: ['fld_key'],
+  }
+}
+
 function makeServer(opts: { failLoadFor?: string; withoutViewFor?: string } = {}) {
-  const store: Record<string, StoredView> = { view_all: viewA(), view_new: viewB(), view_saved: viewSaved() }
+  const store: Record<string, StoredView> = {
+    view_all: viewA(), view_new: viewB(), view_saved: viewSaved(), view_cols_a: viewColsA(), view_cols_b: viewColsB(),
+  }
   const client = new MultitableApiClient({ fetchFn: vi.fn(async () => new Response('{}', { status: 200 })) })
   // Mutable so a test can make a view's load fail, then recover.
   const failingLoads = new Set<string>(opts.failLoadFor ? [opts.failLoadFor] : [])
@@ -99,6 +125,8 @@ function makeServer(opts: { failLoadFor?: string; withoutViewFor?: string } = {}
     held = { viewId, gate, release: () => { held = null; release() } }
     return held.release
   }
+  // Mutable: a view id here answers WITHOUT a `view` object.
+  const viewlessLoads = new Set<string>(opts.withoutViewFor ? [opts.withoutViewFor] : [])
   const loadView = vi.spyOn(client, 'loadView').mockImplementation(async (params) => {
     const vid = params.viewId ?? ''
     if (held && held.viewId === vid) await held.gate
@@ -107,21 +135,46 @@ function makeServer(opts: { failLoadFor?: string; withoutViewFor?: string } = {}
     return {
       fields: FIELDS,
       rows: [],
-      ...(opts.withoutViewFor === vid ? {} : { view: view ? JSON.parse(JSON.stringify(view)) : undefined }),
+      ...(viewlessLoads.has(vid) ? {} : { view: view ? JSON.parse(JSON.stringify(view)) : undefined }),
       page: { offset: 0, limit: 50, total: 0, hasMore: false },
     } as never
   })
   // Mimics PATCH /views/:id: JSON drops `undefined`, and a key absent from the body KEEPS the stored value.
+  const applyPatch = (viewId: string, body: Partial<StoredView>) => {
+    const current = store[viewId]
+    if (!current) return
+    if (body.sortInfo !== undefined) current.sortInfo = body.sortInfo
+    if (body.filterInfo !== undefined) current.filterInfo = body.filterInfo
+    if (body.hiddenFieldIds !== undefined) current.hiddenFieldIds = body.hiddenFieldIds
+    if (body.groupInfo !== undefined) current.groupInfo = body.groupInfo
+  }
+  // A view id in `heldUpdateViews` PARKS its PATCHes (a slow network) until the test lands or fails them, oldest
+  // first. The store changes only when a PATCH LANDS — exactly when the server would apply it.
+  const heldUpdateViews = new Set<string>()
+  const parked: Array<{ land: () => void; fail: () => void }> = []
   const updateView = vi.spyOn(client, 'updateView').mockImplementation(async (viewId, input) => {
     const body = JSON.parse(JSON.stringify(input ?? {})) as Partial<StoredView>
-    const current = store[viewId]
-    if (current) {
-      if (body.sortInfo !== undefined) current.sortInfo = body.sortInfo
-      if (body.filterInfo !== undefined) current.filterInfo = body.filterInfo
+    if (heldUpdateViews.has(viewId)) {
+      await new Promise<void>((resolve, reject) => {
+        parked.push({
+          land: () => { applyPatch(viewId, body); resolve() },
+          fail: () => reject(new Error('PATCH failed')),
+        })
+      })
+    } else {
+      applyPatch(viewId, body)
     }
     return {} as never
   })
-  return { client, store, loadView, updateView, failingLoads, holdLoadsFor }
+  const nextParked = () => {
+    const next = parked.shift()
+    if (!next) throw new Error('no PATCH is parked')
+    return next
+  }
+  const landUpdate = () => nextParked().land()
+  const failUpdate = () => nextParked().fail()
+  const parkedCount = () => parked.length
+  return { client, store, loadView, updateView, failingLoads, holdLoadsFor, viewlessLoads, heldUpdateViews, landUpdate, failUpdate, parkedCount }
 }
 
 const flush = async () => {
@@ -556,6 +609,304 @@ describe('view switch: the loaded view is authoritative for sort + filter (客�
       hiddenFieldIds: ['fld_qty'],
     })
     expect(server.updateView).not.toHaveBeenCalled()
+  })
+})
+
+describe('#6075 round 2: in-flight writes, discarded edits, and the column / grouping state', () => {
+  const removeAllSorts = (grid: ReturnType<typeof useMultitableGrid>) => {
+    for (const rule of [...grid.sortRules.value]) grid.removeSortRule(rule.fieldId)
+  }
+
+  it('a rule RE-ADDED while the removal PATCH is in flight is sent — and wins (last write wins)', async () => {
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+
+    // 应用 #1: remove all of A's sort rules → PATCH #1 `{ rules: [] }` is in flight.
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+    expect(server.updateView.mock.calls).toEqual([['view_all', { sortInfo: { rules: [] } }]])
+
+    // Meanwhile the user re-adds exactly the same 3 rules → 应用 #2. Against the stale pre-write baseline that is
+    // "unchanged"; against the pending write (no sort) it is a real change and must be sent.
+    grid().addSortRule({ fieldId: 'fld_proj', direction: 'asc' })
+    grid().addSortRule({ fieldId: 'fld_key', direction: 'desc' })
+    grid().addSortRule({ fieldId: 'fld_qty', direction: 'asc' })
+    grid().applySortFilter()
+    await flush()
+
+    server.landUpdate() // PATCH #1 lands
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(2)
+    expect(server.updateView.mock.calls[1]).toEqual(['view_all', { sortInfo: viewA().sortInfo }])
+    server.landUpdate() // PATCH #2 lands
+    await flush()
+
+    expect(server.store.view_all.sortInfo).toEqual(viewA().sortInfo)
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+    expect(headerArrows(container)).toEqual(['▼', '▲', '▲'])
+    expect(grid().sortFilterDirty.value).toBe(false)
+  })
+
+  it('writes to one view are serialised: 应用 #2 is sent only after 应用 #1\'s PATCH has settled', async () => {
+    const server = makeServer()
+    const { grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+    grid().addSortRule({ fieldId: 'fld_qty', direction: 'desc' })
+    grid().applySortFilter()
+    await flush()
+    // #2 waits behind #1 — two PATCHes racing to the server could be applied in either order.
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+    expect(server.parkedCount()).toBe(1)
+
+    server.landUpdate()
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(2)
+    expect(server.updateView.mock.calls[1]).toEqual(['view_all', { sortInfo: { rules: [{ fieldId: 'fld_qty', desc: true }] } }])
+    server.landUpdate()
+    await flush()
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [{ fieldId: 'fld_qty', desc: true }] })
+  })
+
+  it('a reload never READS the view while a sort/filter write to it is in flight (no pre-write re-sync)', async () => {
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+    const loadsBefore = server.loadView.mock.calls.length
+    // Any other reload meanwhile (a page change, a record-mutation reload, 应用 with nothing new).
+    void grid().loadViewData(0)
+    await flush()
+    // A GET now would return A's 3 pre-write rules and re-sync the toolbar (and its baseline) to them.
+    expect(server.loadView.mock.calls.length).toBe(loadsBefore)
+
+    server.landUpdate()
+    await flush()
+    expect(server.loadView.mock.calls.length).toBeGreaterThan(loadsBefore)
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+    // The grid shows what the view now stores.
+    expect(grid().sortRules.value).toEqual([])
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+    expect(headerArrows(container)).toEqual([null, null, null])
+  })
+
+  it('a FAILED write is rolled back: the edit stays staged and the next load retries it', async () => {
+    const server = makeServer()
+    const { grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    server.failingLoads.add('view_all') // the network is down: the reload after the failed PATCH fails too
+
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+    server.failUpdate()
+    await flush()
+    expect(grid().error.value).toBe('network down')
+    expect(server.store.view_all.sortInfo).toEqual(viewA().sortInfo)
+    expect(grid().sortRules.value).toEqual([]) // the user's edit is still on screen…
+    expect(grid().sortFilterDirty.value).toBe(true) // …and staged again
+
+    // The network is back: the next load retries exactly the failed write.
+    server.heldUpdateViews.clear()
+    server.failingLoads.clear()
+    await grid().loadViewData(0)
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(2)
+    expect(server.updateView.mock.calls[1]).toEqual(['view_all', { sortInfo: { rules: [] } }])
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+  })
+
+  it('a slow write for A that SUCCEEDS after the switch to B leaves B\'s staged edit and dirty flag alone', async () => {
+    const server = makeServer()
+    const { viewId, grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+
+    viewId.value = 'view_new'
+    await flush()
+    // Stage an edit in B, without 应用.
+    grid().addSortRule({ fieldId: 'fld_qty', direction: 'desc' })
+    expect(grid().sortFilterDirty.value).toBe(true)
+
+    server.landUpdate() // A's PATCH finally lands
+    await flush()
+    expect(grid().sortFilterDirty.value).toBe(true)
+    // …so B's next load still applies B's staged edit — into B only.
+    await grid().loadViewData(0)
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(2)
+    expect(server.updateView.mock.calls[1]).toEqual(['view_new', { sortInfo: { rules: [{ fieldId: 'fld_qty', desc: true }] } }])
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+  })
+
+  it('a slow write for A that FAILS after the switch to B never rolls A\'s baseline / dirty flag back over B\'s', async () => {
+    const server = makeServer()
+    const { container, viewId, grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+
+    viewId.value = 'view_new'
+    await flush()
+    server.failUpdate() // A's PATCH fails, with B on screen
+    await flush()
+    expect(grid().sortFilterDirty.value).toBe(false)
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+
+    // B's own baseline survived: a header click in B saves exactly B's new rule, into B.
+    headerByName(container, '数量').click()
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(2)
+    expect(server.updateView.mock.calls[1]).toEqual(['view_new', { sortInfo: { rules: [{ fieldId: 'fld_qty', desc: false }] } }])
+    expect(server.store.view_new.sortInfo).toEqual({ rules: [{ fieldId: 'fld_qty', desc: false }] })
+    expect(server.store.view_all).toEqual(viewA())
+  })
+
+  it('discardUnappliedSortFilterEdits (视图管理 save / revert): the reload re-syncs from the saved view and PATCHes nothing', async () => {
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+
+    // Staged in the toolbar, NOT applied: remove every sort rule (would go out as an explicit `{ rules: [] }`).
+    removeAllSorts(grid())
+    expect(grid().sortFilterDirty.value).toBe(true)
+    expect(server.updateView).not.toHaveBeenCalled()
+
+    // The dialog saves a different sort for the same view; the workbench then discards + reloads.
+    server.store.view_all.sortInfo = { rules: [{ fieldId: 'fld_qty', desc: true }] }
+    grid().discardUnappliedSortFilterEdits()
+    // Discarded ⇒ no longer staged (the toolbar stops offering to apply it).
+    expect(grid().sortFilterDirty.value).toBe(false)
+    await grid().loadViewData(0)
+    await flush()
+
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [{ fieldId: 'fld_qty', desc: true }] })
+    expect(badgeOf(sortTrigger(container))).toBe('1')
+    expect(headerArrows(container)).toEqual([null, null, '▼'])
+    expect(grid().sortFilterDirty.value).toBe(false)
+  })
+
+  it('discardUnappliedSortFilterEdits + the reload FAILS: the stale baseline is gone, so nothing is written', async () => {
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+
+    removeAllSorts(grid())
+    server.store.view_all.sortInfo = { rules: [{ fieldId: 'fld_qty', desc: true }] }
+    server.failingLoads.add('view_all')
+    grid().discardUnappliedSortFilterEdits()
+    await grid().loadViewData(0)
+    await flush()
+    expect(grid().error.value).toBe('network down')
+
+    // The toolbar was never re-synced; diffing against the pre-save baseline would PATCH it over the saved sort.
+    headerByName(container, '唯一键').click()
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [{ fieldId: 'fld_qty', desc: true }] })
+  })
+
+  it('hidden columns / grouping: while B\'s load is IN FLIGHT the grid shows all columns and writes nothing into B', async () => {
+    const server = makeServer()
+    const { viewId, grid } = mountHarness(server, 'view_cols_a')
+    await flush()
+    expect(grid().hiddenFieldIds.value).toEqual(['fld_qty'])
+    expect(grid().groupFieldIds.value).toEqual(['fld_proj'])
+
+    const release = server.holdLoadsFor('view_cols_b')
+    viewId.value = 'view_cols_b'
+    await flush()
+    // Not known yet ⇒ blank, as the 新视图 hint says: all columns, no grouping, entry order — not A's.
+    expect(grid().hiddenFieldIds.value).toEqual([])
+    expect(grid().groupFieldIds.value).toEqual([])
+    expect(grid().fieldOrder.value).toEqual([])
+    expect(grid().isViewStateLoadedFor('view_cols_b')).toBe(false)
+
+    // Toggling a column / setting a group level now would PUT a whole list that is not B's.
+    grid().toggleFieldVisibility('fld_proj')
+    await grid().setGroupFields(['fld_proj'])
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_cols_b).toEqual(viewColsB())
+    expect(server.store.view_cols_a).toEqual(viewColsA())
+
+    release()
+    await flush()
+    // B shows exactly its own stored columns / grouping.
+    expect(grid().hiddenFieldIds.value).toEqual(['fld_key'])
+    expect(grid().groupFieldIds.value).toEqual(['fld_qty'])
+    expect(grid().isViewStateLoadedFor('view_cols_b')).toBe(true)
+
+    // Once known, a toggle writes B's own list plus the toggled column — nothing of A's.
+    grid().toggleFieldVisibility('fld_proj')
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+    expect(server.updateView).toHaveBeenCalledWith('view_cols_b', { hiddenFieldIds: ['fld_key', 'fld_proj'] })
+  })
+
+  it('hidden columns / grouping: when B\'s load FAILS nothing is written into B (its stored lists survive)', async () => {
+    const server = makeServer({ failLoadFor: 'view_cols_b' })
+    const { viewId, grid } = mountHarness(server, 'view_cols_a')
+    await flush()
+
+    viewId.value = 'view_cols_b'
+    await flush()
+    expect(grid().error.value).toBe('network down')
+    expect(grid().hiddenFieldIds.value).toEqual([])
+
+    grid().toggleFieldVisibility('fld_qty')
+    await grid().setGroupFields([])
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_cols_b).toEqual(viewColsB())
+  })
+
+  it('a loaded view with no hidden list shows every column (the previous hidden list is not kept)', async () => {
+    const server = makeServer()
+    const { grid } = mountHarness(server, 'view_cols_a')
+    await flush()
+    expect(grid().hiddenFieldIds.value).toEqual(['fld_qty'])
+
+    delete (server.store.view_cols_a as Partial<StoredView>).hiddenFieldIds
+    await grid().loadViewData(0)
+    await flush()
+    expect(grid().hiddenFieldIds.value).toEqual([])
+  })
+
+  it('a reload that answers WITHOUT a view drops the column / grouping state and the right to write it', async () => {
+    const server = makeServer()
+    const { grid } = mountHarness(server, 'view_cols_a')
+    await flush()
+    expect(grid().isViewStateLoadedFor('view_cols_a')).toBe(true)
+
+    server.viewlessLoads.add('view_cols_a')
+    await grid().loadViewData(0)
+    await flush()
+    expect(grid().hiddenFieldIds.value).toEqual([])
+    expect(grid().groupFieldIds.value).toEqual([])
+    expect(grid().isViewStateLoadedFor('view_cols_a')).toBe(false)
+    grid().toggleFieldVisibility('fld_key')
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(server.store.view_cols_a).toEqual(viewColsA())
   })
 })
 
