@@ -33,6 +33,13 @@ import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import { buildImportedRecords } from '../src/multitable/import/delimited'
 import { normalizeXlsxDateCells, parseXlsxBuffer } from '../src/multitable/import/xlsx-mapping'
+import {
+  DEFAULT_AUTOMATION_BUSINESS_TIMEZONE,
+  automationBusinessTimezone,
+  effectiveTriggerTimezone,
+  isUtcTriggerTimezone,
+  triggerTimezoneForSave,
+} from '../src/multitable/utils/automation-trigger-timezone'
 import * as XLSX from 'xlsx'
 import {
   DEFAULT_BUSINESS_TIMEZONE,
@@ -1079,6 +1086,35 @@ describe('XLSX import — Excel native date cells (review must-fix 1) and date-o
       ] as MetaField[],
     })
     expect(built.records).toEqual([{ a: '2026-09-24', b: '2026-09-24', c: '2026-09-24', d: 'whenever' }])
+  })
+})
+
+describe('S4: the automation editor and the dateTime cells read ONE business zone; the two "UTC"s stay distinct', () => {
+  afterEach(() => resetBusinessTimezone())
+
+  it('automationBusinessTimezone() follows the server-provided zone, Asia/Shanghai until then', () => {
+    expect(DEFAULT_AUTOMATION_BUSINESS_TIMEZONE).toBe(DEFAULT_BUSINESS_TIMEZONE)
+    expect(automationBusinessTimezone()).toBe('Asia/Shanghai')
+    expect(setBusinessTimezone('Asia/Tokyo')).toBe(true)
+    expect(automationBusinessTimezone()).toBe('Asia/Tokyo')
+    // A new schedule rule is saved with THAT zone; a legacy UTC rule is still never re-stamped.
+    expect(triggerTimezoneForSave({ triggerType: 'schedule.cron', draftTimezone: undefined, storedRule: null })).toBe('Asia/Tokyo')
+    expect(triggerTimezoneForSave({
+      triggerType: 'schedule.date_field',
+      draftTimezone: undefined,
+      storedRule: { id: 'r1', triggerType: 'schedule.date_field', triggerConfig: {} },
+    })).toBeUndefined()
+    resetBusinessTimezone()
+    expect(automationBusinessTimezone()).toBe('Asia/Shanghai')
+  })
+
+  it('field property "UTC" = unset (→ business zone) while triggerConfig "UTC" = real UTC', () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    expect(resolveDateTimeTimezone({ timezone: 'UTC' })).toBe('Asia/Kathmandu') // unset marker
+    expect(isUtcTriggerTimezone('UTC')).toBe(true) // real UTC for a legacy rule
+    expect(isUtcTriggerTimezone(undefined)).toBe(true)
+    expect(isUtcTriggerTimezone('Asia/Kathmandu')).toBe(false)
+    expect(effectiveTriggerTimezone({ triggerType: 'schedule.cron', draftTimezone: 'UTC', storedRule: null })).toBe('UTC')
   })
 })
 
