@@ -75,6 +75,9 @@ test('tasks auth config, setup, and gate stay pinned', () => {
   const gate = readFileSync(GATE, 'utf8')
   assert.match(gate, /tasksRouter\(/)
   assert.match(gate, /Missing Bearer token/)
+  assert.match(gate, /Insufficient permissions/)
+  assert.match(gate, /\/api\/tasks\/context/)
+  assert.match(gate, /perms: \['tasks:read'\]/)
   assert.equal(gate.includes('describe.skip'), false)
   assert.equal(gate.includes('.skip('), false)
 
@@ -111,7 +114,10 @@ test('plugin-tests.yml runs the tasks auth gate as a 20.x whole-file step after 
 
   const run = typeof step.run === 'string' ? step.run : ''
   assert.match(run, /DATABASE_URL:\?/)
-  assert.equal(run.includes('--testNamePattern'), false)
+  assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'tasks auth gate must not use a -t filter')
+  assert.equal(run.includes('--testNamePattern'), false, 'tasks auth gate must not use --testNamePattern')
+  assert.equal(/\s--name(?:\s|=|$)/.test(run), false, 'tasks auth gate must not use a --name filter')
+  assert.equal(/\|\|\s*true\b/.test(uncommentedLines(run)), false, 'tasks auth gate must not swallow failures with || true')
   assert.equal(run.includes('vitest.integration.config'), false)
   assert.equal(run.includes(CFG_REL), true)
   assert.equal(run.includes(FILE), true)

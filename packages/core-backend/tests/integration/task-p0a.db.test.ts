@@ -215,6 +215,67 @@ describe('tasks P0-A real db', () => {
     await expect(reopenTask({ orgId: otherOrg, actorId: userA, taskId: created.id, scope: 'self' })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(await taskRow(created.id)).toMatchObject({ status: 'open', version: 1 })
   })
+
+  it('does not bump version when reopen leaves the task open', async () => {
+    const { orgId, userA, userB } = ids('noop')
+    const created = await createTask({
+      orgId,
+      creatorId: userA,
+      title: '备料复核',
+      assignees: [userA, userB],
+      completionMode: 'all',
+    })
+    await completeTask({ orgId, actorId: userA, taskId: created.id })
+    expect(await taskRow(created.id)).toMatchObject({ status: 'open', version: 1 })
+    await reopenTask({ orgId, actorId: userA, taskId: created.id, scope: 'self' })
+    const rows = await assigneeRows(created.id)
+    expect(rows.find((row) => row.user_id === userA)?.completed_at).toBeNull()
+    expect(rows.find((row) => row.user_id === userB)?.completed_at).toBeNull()
+    expect(await taskRow(created.id)).toMatchObject({ status: 'open', version: 1 })
+  })
+
+  it('queues complete before reopen so an all-mode task stays open', async () => {
+    const { orgId, userA, userB } = ids('reopen-race')
+    const created = await createTask({
+      orgId,
+      creatorId: userA,
+      title: '备料复核',
+      assignees: [userA, userB],
+      completionMode: 'all',
+    })
+    await completeTask({ orgId, actorId: userA, taskId: created.id })
+    const pool = poolManager.get().getInternalPool()
+    const holder = await pool.connect()
+    let completePending: Promise<unknown> | undefined
+    let reopenPending: Promise<unknown> | undefined
+    let stopWaiting = false
+    try {
+      if (!holder.processID) throw new Error('holder pid missing')
+      await holder.query('BEGIN')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [taskStructureLockKey(orgId)])
+      completePending = completeTask({ orgId, actorId: userB, taskId: created.id })
+      await waitUntilBlocked(holder.processID, 1, () => stopWaiting)
+      reopenPending = reopenTask({ orgId, actorId: userA, taskId: created.id, scope: 'self' })
+      await waitUntilBlocked(holder.processID, 2, () => stopWaiting)
+      await holder.query('COMMIT')
+      await completePending
+      await reopenPending
+    } finally {
+      stopWaiting = true
+      try {
+        await holder.query('ROLLBACK')
+      } catch {
+        // The holder transaction was already committed.
+      }
+      if (completePending) await completePending.catch(() => undefined)
+      if (reopenPending) await reopenPending.catch(() => undefined)
+      holder.release()
+    }
+    const rows = await assigneeRows(created.id)
+    expect(rows.find((row) => row.user_id === userA)?.completed_at).toBeNull()
+    expect(rows.find((row) => row.user_id === userB)?.completed_at).toBeTruthy()
+    expect((await taskRow(created.id)).status).toBe('open')
+  })
 })
 
 async function waitUntilBlocked(holderPid: number, min: number, stopped: () => boolean): Promise<void> {
