@@ -10,6 +10,8 @@ import {
   type BatchAnomalyRowResult,
   type BatchAnomalyRowSnapshot,
 } from '../src/views/attendance/batchAnomalyResolution'
+import { comprehensiveHoursDefaultPeriod } from '../src/views/attendance/attendancePeriodBounds'
+import { formatAttendanceDateKey } from '../src/views/attendance/attendanceDateTimePresentation'
 
 type MockPlugin = { name: string; status: 'active' | 'inactive' | 'failed' }
 const pluginHarness = vi.hoisted(() => ({
@@ -7484,9 +7486,53 @@ describe('Attendance admin regressions', () => {
   })
 
   it('runs the read-only comprehensive hours preview without write controls', async () => {
+    const previous = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/rules/default') && String(init?.method || 'GET').toUpperCase() === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            name: 'Default',
+            timezone: 'Asia/Shanghai',
+            workStartTime: '09:00',
+            workEndTime: '18:00',
+            lateGraceMinutes: 10,
+            earlyGraceMinutes: 10,
+            roundingMinutes: 5,
+            workingDays: [1, 2, 3, 4, 5],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/payroll-templates') && String(init?.method || 'GET').toUpperCase() === 'GET') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'tpl-la',
+              name: 'LA payroll',
+              timezone: 'America/Los_Angeles',
+              startDay: 1,
+              endDay: 31,
+              endMonthOffset: 0,
+              autoGenerate: true,
+              isDefault: true,
+              config: {},
+            }],
+            total: 1,
+          },
+        })
+      }
+      return previous ? previous(input, init) : emptyAttendanceResponse()
+    })
+
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
-    await flushUi()
+    await flushUi(8)
+
+    const shanghaiPeriod = comprehensiveHoursDefaultPeriod(new Date(), 'Asia/Shanghai')
+    const losAngelesToday = formatAttendanceDateKey(new Date(), 'America/Los_Angeles')
+    expect(shanghaiPeriod).toBeTruthy()
 
     const previewNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-comprehensive-hours-preview"]')
     expect(previewNav).toBeTruthy()
@@ -7506,6 +7552,14 @@ describe('Attendance admin regressions', () => {
     const runButton = section!.querySelector<HTMLButtonElement>('[data-attendance-comprehensive-hours-preview-run]')
     expect(runButton).toBeTruthy()
     expect(runButton!.disabled).toBe(false)
+    expect(section!.querySelector<HTMLInputElement>('[data-attendance-comprehensive-hours-year]')?.value)
+      .toBe(String(shanghaiPeriod!.year))
+    expect(section!.querySelector<HTMLInputElement>('[data-attendance-comprehensive-hours-month]')?.value)
+      .toBe(String(shanghaiPeriod!.month))
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-timezone]')?.textContent)
+      .toContain('Asia/Shanghai')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-payroll-cycle-gen-anchor')?.value)
+      .toBe(losAngelesToday)
     runButton!.click()
     await flushUi(4)
 
@@ -7517,7 +7571,7 @@ describe('Attendance admin regressions', () => {
     expect(requestBody).toMatchObject({
       policyDraft: { capHours: 160, enforcement: 'warn' },
       scope: { userId: 'user-1' },
-      period: { type: 'month' },
+      period: { type: 'month', year: shanghaiPeriod!.year, month: shanghaiPeriod!.month },
       metric: 'planned',
     })
 
@@ -7535,6 +7589,64 @@ describe('Attendance admin regressions', () => {
     expect(buttons.join(' ')).not.toContain('Create')
     expect(buttons.join(' ')).not.toContain('Edit')
     expect(buttons.join(' ')).not.toContain('Delete')
+  })
+
+  it('discloses truncated approval-flow and rule-set catalogs and appends the next page', async () => {
+    const previous = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method === 'GET' && url.includes('/api/attendance/approval-flows')) {
+        const page = Number(new URL(url, 'http://localhost').searchParams.get('page') || '1')
+        const items = page <= 1
+          ? [{ id: 'flow-1', name: 'Flow 1', requestType: 'leave', steps: [], isActive: true }]
+          : [{ id: 'flow-2', name: 'Flow 2', requestType: 'outdoor_punch', steps: [], isActive: true }]
+        return jsonResponse(200, { ok: true, data: { items, total: 2, page, pageSize: 200 } })
+      }
+      if (method === 'GET' && url.includes('/api/attendance/rule-sets') && !url.includes('/preview')) {
+        const page = Number(new URL(url, 'http://localhost').searchParams.get('page') || '1')
+        const items = page <= 1
+          ? [{ id: 'set-1', name: 'Set 1', scope: 'org', version: 1, isDefault: true, config: {} }]
+          : [{ id: 'set-2', name: 'Set 2', scope: 'org', version: 1, isDefault: false, config: {} }]
+        return jsonResponse(200, { ok: true, data: { items, total: 2, page, pageSize: 200 } })
+      }
+      return previous ? previous(input, init) : emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    const flowNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
+    flowNav!.click()
+    await flushUi(2)
+    const flowSection = container!.querySelector<HTMLElement>('#attendance-admin-approval-flows')!
+    expect(flowSection.textContent).toContain('Flow 1')
+    expect(flowSection.textContent).not.toContain('Flow 2')
+    expect(flowSection.querySelector('[data-attendance-approval-flows-cap]')?.textContent).toContain('Showing 1 of 2')
+    const flowLoadMore = flowSection.querySelector<HTMLButtonElement>('[data-attendance-approval-flows-load-more]')
+    expect(flowLoadMore).toBeTruthy()
+    flowLoadMore!.click()
+    await flushUi(4)
+    expect(flowSection.textContent).toContain('Flow 2')
+    expect(flowSection.querySelector('[data-attendance-approval-flows-cap]')).toBeNull()
+    expect(flowSection.querySelector('[data-attendance-approval-flows-load-more]')).toBeNull()
+
+    const ruleNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-sets"]')
+    ruleNav!.click()
+    await flushUi(2)
+    const ruleSection = container!.querySelector<HTMLElement>('#attendance-admin-rule-sets')!
+    expect(ruleSection.querySelector('[data-attendance-rule-sets-cap]')?.textContent).toContain('Showing 1 of 2')
+    ruleSection.querySelector<HTMLButtonElement>('[data-attendance-rule-sets-load-more]')!.click()
+    await flushUi(4)
+    expect(ruleSection.textContent).toContain('Set 2')
+    expect(ruleSection.querySelector('[data-attendance-rule-sets-cap]')).toBeNull()
+
+    const flowCalls = vi.mocked(apiFetch).mock.calls
+      .map(call => String(call[0]))
+      .filter(url => url.includes('/api/attendance/approval-flows'))
+    expect(flowCalls.some(url => url.includes('pageSize=200'))).toBe(true)
+    expect(flowCalls.some(url => url.includes('page=2'))).toBe(true)
   })
 
   it('runs a weak comprehensive-hours advisory before saving shift assignments without blocking save', async () => {

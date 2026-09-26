@@ -8343,9 +8343,68 @@ function resolvePayrollGenerateAnchorDateInput(payload) {
   return null
 }
 
-function resolvePayrollWindow(template, anchorDate) {
-  const anchor = anchorDate ?? new Date()
-  const { year, month, day } = getUtcParts(anchor)
+function payrollDateOnlyParts(value) {
+  if (typeof value !== 'string') return null
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim())
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) return null
+  return { year, month: month - 1, day }
+}
+
+function isUtcMidnightDate(date) {
+  return date.getUTCHours() === 0
+    && date.getUTCMinutes() === 0
+    && date.getUTCSeconds() === 0
+    && date.getUTCMilliseconds() === 0
+}
+
+function zonedPayrollCalendarParts(date, timeZone) {
+  const parts = getZonedParts(date, timeZone)
+  return { year: parts.year, month: parts.month - 1, day: parts.day }
+}
+
+function payrollWindowTimeZone(template, fallbackTimeZone) {
+  const stored = typeof template?.timezone === 'string' ? template.timezone.trim() : ''
+  if (isValidTimeZoneIdentifier(stored)) return stored
+  const fallback = typeof fallbackTimeZone === 'string' ? fallbackTimeZone.trim() : ''
+  if (isValidTimeZoneIdentifier(fallback)) return fallback
+  return 'UTC'
+}
+
+// YYYY-MM-DD is a calendar literal. An instant uses the template IANA calendar.
+// A Date at exact UTC midnight keeps the UTC calendar: parseDateInput('YYYY-MM-DD')
+// and buildUtcDate produce those values, including cycle-window verification.
+function resolvePayrollAnchorCalendar(anchorDate, timeZone) {
+  if (typeof anchorDate === 'string') {
+    const trimmed = anchorDate.trim()
+    const dateOnly = payrollDateOnlyParts(trimmed)
+    if (dateOnly) return dateOnly
+    const parsed = parseDateInput(trimmed)
+    if (!parsed) return null
+    return zonedPayrollCalendarParts(parsed, timeZone)
+  }
+  if (anchorDate instanceof Date) {
+    if (Number.isNaN(anchorDate.getTime())) return null
+    if (isUtcMidnightDate(anchorDate)) return getUtcParts(anchorDate)
+    return zonedPayrollCalendarParts(anchorDate, timeZone)
+  }
+  if (anchorDate == null) return zonedPayrollCalendarParts(new Date(), timeZone)
+  return null
+}
+
+function resolvePayrollWindow(template, anchorDate, fallbackTimeZone) {
+  const timeZone = payrollWindowTimeZone(template, fallbackTimeZone)
+  const parts = resolvePayrollAnchorCalendar(anchorDate ?? new Date(), timeZone)
+  if (!parts) return null
+  const { year, month, day } = parts
   const startDay = Number(template.startDay ?? template.start_day ?? 1)
   const endDay = Number(template.endDay ?? template.end_day ?? 30)
   let offset = Number(template.endMonthOffset ?? template.end_month_offset ?? 0)
@@ -8364,13 +8423,31 @@ function resolvePayrollWindow(template, anchorDate) {
   return {
     startDate: formatDateOnly(startDate),
     endDate: formatDateOnly(endDate),
+    timeZone,
   }
 }
 
-function addMonthsToDate(anchorDate, delta) {
-  const { year, month, day } = getUtcParts(anchorDate)
-  const next = addMonthsUtc(year, month, delta)
-  return buildUtcDate(next.year, next.month, day)
+function formatPayrollCalendarDate(parts) {
+  return formatDateOnly(buildUtcDate(parts.year, parts.month, parts.day))
+}
+
+async function payrollWindowTimeZoneForRow(db, orgId, templateRow) {
+  const stored = typeof templateRow?.timezone === 'string' ? templateRow.timezone.trim() : ''
+  if (isValidTimeZoneIdentifier(stored)) return stored
+  try {
+    const rule = await loadDefaultRule(db, orgId)
+    if (isValidTimeZoneIdentifier(rule?.timezone)) return rule.timezone
+  } catch {
+    // A missing rule read keeps the previous UTC calendar instead of failing generation.
+  }
+  return 'UTC'
+}
+
+function payrollTemplateForWindow(templateRow, timeZone) {
+  return {
+    ...mapPayrollTemplateRow(templateRow),
+    timezone: timeZone,
+  }
 }
 
 // §7 precise cap-mapping check (see
@@ -24838,6 +24915,8 @@ module.exports = {
     buildAttendanceComprehensiveHoursPeriodSummaryValues,
     attendancePayrollCycleWithinMonthlySpan,
     verifyAttendancePayrollCycleTemplateWindow,
+    resolvePayrollWindow,
+    resolvePayrollAnchorCalendar,
     ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_DEFAULT,
     ATTENDANCE_COMPREHENSIVE_HOURS_CAP_SOURCE_PAYROLL_MONTHLY,
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
@@ -44355,8 +44434,18 @@ module.exports = {
         let startDate = parsed.data.startDate
         let endDate = parsed.data.endDate
         if ((!startDate || !endDate) && template) {
-          const anchor = parseDateInput(parsed.data.anchorDate) ?? new Date()
-          const resolved = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
+          const timeZone = await payrollWindowTimeZoneForRow(db, orgId, template)
+          const anchorInput = typeof parsed.data.anchorDate === 'string' && parsed.data.anchorDate.trim().length > 0
+            ? parsed.data.anchorDate.trim()
+            : new Date()
+          const anchor = typeof anchorInput === 'string' && !payrollDateOnlyParts(anchorInput) && !parseDateInput(anchorInput)
+            ? new Date()
+            : anchorInput
+          const resolved = resolvePayrollWindow(payrollTemplateForWindow(template, timeZone), anchor)
+          if (!resolved) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid payroll cycle anchorDate' } })
+            return
+          }
           startDate = startDate ?? resolved.startDate
           endDate = endDate ?? resolved.endDate
         }
@@ -44474,8 +44563,15 @@ module.exports = {
         }
 
         const anchorInput = resolvePayrollGenerateAnchorDateInput(parsed.data)
-        const anchorBase = anchorInput ? parseDateInput(anchorInput) : null
-        if (!anchorBase) {
+        const anchorIsCalendar = Boolean(anchorInput && (payrollDateOnlyParts(anchorInput) || parseDateInput(anchorInput)))
+        if (!anchorIsCalendar) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid payroll cycle anchorDate/year/month' } })
+          return
+        }
+
+        const timeZone = await payrollWindowTimeZoneForRow(db, orgId, template)
+        const baseParts = resolvePayrollAnchorCalendar(anchorInput, timeZone)
+        if (!baseParts) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid payroll cycle anchorDate/year/month' } })
           return
         }
@@ -44488,16 +44584,27 @@ module.exports = {
 
         const created = []
         const skipped = []
+        const windowTemplate = payrollTemplateForWindow(template, timeZone)
+        const firstWindow = resolvePayrollWindow(windowTemplate, formatPayrollCalendarDate(baseParts))
+        if (!firstWindow) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid payroll cycle anchorDate/year/month' } })
+          return
+        }
         try {
           await db.transaction(async (trx) => {
             for (let i = 0; i < count; i += 1) {
-              const anchor = addMonthsToDate(anchorBase, i)
-              const window = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
+              const stepped = addMonthsUtc(baseParts.year, baseParts.month, i)
+              const anchorDate = formatPayrollCalendarDate({
+                year: stepped.year,
+                month: stepped.month,
+                day: baseParts.day,
+              })
+              const window = resolvePayrollWindow(windowTemplate, anchorDate)
               const name = `${namePrefix} ${window.startDate}~${window.endDate}`
               const metadata = {
                 ...(parsed.data.metadata ?? {}),
                 generatedFrom: resolvedTemplateId,
-                anchorDate: formatDateOnly(anchor),
+                anchorDate,
                 index: i + 1,
               }
               const rows = await trx.query(
@@ -44606,8 +44713,16 @@ module.exports = {
               res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Payroll template required for anchorDate' } })
               return
             }
-            const anchor = parseDateInput(parsed.data.anchorDate) ?? new Date()
-            const resolved = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
+            const timeZone = await payrollWindowTimeZoneForRow(db, orgId, template)
+            const anchorInput = parsed.data.anchorDate.trim()
+            const anchor = payrollDateOnlyParts(anchorInput) || parseDateInput(anchorInput)
+              ? anchorInput
+              : new Date()
+            const resolved = resolvePayrollWindow(payrollTemplateForWindow(template, timeZone), anchor)
+            if (!resolved) {
+              res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid payroll cycle anchorDate' } })
+              return
+            }
             startDate = resolved.startDate
             endDate = resolved.endDate
           }

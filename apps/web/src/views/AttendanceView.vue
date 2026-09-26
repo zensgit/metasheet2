@@ -3265,6 +3265,13 @@
                 <p v-if="outdoorApprovalFlowOptions.length === 0" class="attendance__field-hint">
                   {{ tr('No active outdoor approval flow yet — create one under Approval Flows with request type outdoor_punch.', '尚无启用的外勤审批流——请在「审批流」中以请求类型 outdoor_punch 创建。') }}
                 </p>
+                <p
+                  v-else-if="approvalFlowsTruncated"
+                  class="attendance__field-hint"
+                  data-attendance-approval-flows-picker-cap
+                >
+                  {{ approvalFlowsCatalogNotice }}
+                </p>
                 <button
                   class="attendance__btn attendance__btn--primary"
                   :disabled="settingsLoading"
@@ -4800,6 +4807,23 @@
                   </tbody>
                 </table>
               </div>
+              <p
+                v-if="ruleSetsTruncated"
+                class="attendance__field-hint"
+                data-attendance-rule-sets-cap
+              >
+                {{ ruleSetsCatalogNotice }}
+              </p>
+              <button
+                v-if="ruleSetsCanLoadMore"
+                class="attendance__btn"
+                type="button"
+                :disabled="ruleSetLoading"
+                data-attendance-rule-sets-load-more
+                @click="loadMoreRuleSets"
+              >
+                {{ tr('Load more', '加载更多') }}
+              </button>
             </div>
 
             <div
@@ -7917,6 +7941,23 @@
                   </tbody>
                 </table>
               </div>
+              <p
+                v-if="approvalFlowsTruncated"
+                class="attendance__field-hint"
+                data-attendance-approval-flows-cap
+              >
+                {{ approvalFlowsCatalogNotice }}
+              </p>
+              <button
+                v-if="approvalFlowsCanLoadMore"
+                class="attendance__btn"
+                type="button"
+                :disabled="approvalFlowLoading"
+                data-attendance-approval-flows-load-more
+                @click="loadMoreApprovalFlows"
+              >
+                {{ tr('Load more', '加载更多') }}
+              </button>
             </div>
 
             <div
@@ -8257,6 +8298,13 @@
                         {{ flow.name }}
                       </option>
                     </select>
+                    <small
+                      v-if="approvalFlowsTruncated"
+                      class="attendance__field-hint"
+                      data-attendance-approval-flows-picker-cap
+                    >
+                      {{ approvalFlowsCatalogNotice }}
+                    </small>
                   </label>
                   <label class="attendance__field attendance__field--full" for="attendance-schedule-dispatch-reason">
                     <span>{{ tr('Reason', '原因') }}</span>
@@ -8465,6 +8513,9 @@
                     ) }}
                   </small>
                 </label>
+                <p class="attendance__field-hint" data-attendance-comprehensive-hours-timezone>
+                  {{ comprehensiveHoursPeriodTimezoneHint }}
+                </p>
                 <label
                   class="attendance__field attendance__field--checkbox"
                   data-attendance-comprehensive-hours-save-block-mode
@@ -10390,6 +10441,17 @@ import {
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
+import {
+  comprehensiveHoursDefaultPeriod,
+  resolvePayrollAnchorTimeZone,
+} from './attendance/attendancePeriodBounds'
+import {
+  ATTENDANCE_CATALOG_PAGE_SIZE,
+  applyCatalogPage,
+  catalogCanLoadMore,
+  catalogTruncationCopy,
+  type CatalogListState,
+} from './attendance/attendanceCatalogListPage'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -13606,6 +13668,9 @@ async function applyReportRangePreset(preset: AttendanceReportRangePreset): Prom
 const leaveTypes = ref<AttendanceLeaveType[]>([])
 const overtimeRules = ref<AttendanceOvertimeRule[]>([])
 const approvalFlows = ref<AttendanceApprovalFlow[]>([])
+const approvalFlowsTotal = ref(0)
+const approvalFlowsPage = ref(0)
+const approvalFlowsListCapped = ref(false)
 const rotationRules = ref<AttendanceRotationRule[]>([])
 const rotationAssignments = ref<AttendanceRotationAssignmentItem[]>([])
 const advancedSchedulingWorkbench = ref<AttendanceAdvancedSchedulingWorkbench | null>(null)
@@ -13615,6 +13680,9 @@ const scheduleGroupMembers = ref<AttendanceScheduleGroupMemberItem[]>([])
 const scheduleGroupMembersTotal = ref(0)
 const comprehensiveHoursPreview = ref<AttendanceComprehensiveHoursPreviewResult | null>(null)
 const ruleSets = ref<AttendanceRuleSet[]>([])
+const ruleSetsTotal = ref(0)
+const ruleSetsPage = ref(0)
+const ruleSetsListCapped = ref(false)
 const ruleTemplateSystemText = ref('[]')
 const ruleTemplateLibraryText = ref('[]')
 const ruleTemplateVersions = ref<AttendanceRuleTemplateVersion[]>([])
@@ -16452,6 +16520,7 @@ const ruleForm = reactive({
   roundingMinutes: 5,
   workingDays: '1,2,3,4,5',
 })
+const defaultRuleTimeZoneLoaded = ref(false)
 
 const shiftForm = reactive({
   name: 'Standard Shift',
@@ -16758,7 +16827,7 @@ const payrollCycleForm = reactive({
 
 const payrollCycleGenerateForm = reactive({
   templateId: '',
-  anchorDate: toDateInput(today),
+  anchorDate: '',
   count: 1,
   status: 'open',
   namePrefix: '',
@@ -16805,11 +16874,11 @@ const comprehensiveHoursPreviewForm = reactive({
   userId: '',
   userIds: '',
   periodType: 'month' as AttendanceComprehensiveHoursPeriodType,
-  year: today.getFullYear(),
-  month: today.getMonth() + 1,
-  quarter: Math.floor(today.getMonth() / 3) + 1,
-  from: toDateInput(firstDayOfMonth(today)),
-  to: toDateInput(lastDayOfMonth(today)),
+  year: undefined as number | undefined,
+  month: undefined as number | undefined,
+  quarter: undefined as number | undefined,
+  from: '',
+  to: '',
   cycleId: '',
   metric: 'planned' as AttendanceComprehensiveHoursMetric,
   capHours: 160,
@@ -16867,7 +16936,8 @@ const comprehensiveHoursCanPreview = computed(() => {
   if (comprehensiveHoursPreviewForm.periodType === 'payroll_cycle') {
     return comprehensiveHoursPreviewForm.cycleId.trim().length > 0
   }
-  return Number.isFinite(Number(comprehensiveHoursPreviewForm.year))
+  const year = Number(comprehensiveHoursPreviewForm.year)
+  return Number.isInteger(year) && year >= 1970 && year <= 9999
 })
 
 const comprehensiveHoursPreviewRows = computed(() => comprehensiveHoursPreview.value?.rows ?? [])
@@ -24900,7 +24970,13 @@ async function loadRule() {
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || 'Default'
-    ruleForm.timezone = rule.timezone || defaultTimezone
+    const loadedRuleTimeZone = normalizeAttendanceTimeZone(rule.timezone)
+    if (loadedRuleTimeZone) {
+      ruleForm.timezone = loadedRuleTimeZone
+      defaultRuleTimeZoneLoaded.value = true
+    } else {
+      ruleForm.timezone = rule.timezone || defaultTimezone
+    }
     ruleForm.workStartTime = rule.workStartTime || '09:00'
     ruleForm.workEndTime = rule.workEndTime || '18:00'
     ruleForm.lateGraceMinutes = rule.lateGraceMinutes ?? 10
@@ -24942,7 +25018,13 @@ async function saveRule() {
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || ruleForm.name
-    ruleForm.timezone = rule.timezone || ruleForm.timezone
+    const savedRuleTimeZone = normalizeAttendanceTimeZone(rule.timezone)
+    if (savedRuleTimeZone) {
+      ruleForm.timezone = savedRuleTimeZone
+      defaultRuleTimeZoneLoaded.value = true
+    } else {
+      ruleForm.timezone = rule.timezone || ruleForm.timezone
+    }
     ruleForm.workStartTime = rule.workStartTime || ruleForm.workStartTime
     ruleForm.workEndTime = rule.workEndTime || ruleForm.workEndTime
     ruleForm.lateGraceMinutes = rule.lateGraceMinutes ?? ruleForm.lateGraceMinutes
@@ -25083,6 +25165,94 @@ const annualBalanceLoading = ref(false)
 const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
 
 const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
+
+const attendanceBoundTimeZone = computed(() => {
+  if (defaultRuleTimeZoneLoaded.value) {
+    return normalizeAttendanceTimeZone(ruleForm.timezone)
+  }
+  return normalizeAttendanceTimeZone(resolvedAttendanceTimezone.value)
+})
+
+const comprehensiveHoursPeriodTimezoneHint = computed(() => {
+  const zone = attendanceBoundTimeZone.value
+  return zone
+    ? `${tr('Period timezone', '周期时区')}: ${displayTimezone(zone)}`
+    : tr(
+      'Attendance timezone unavailable. Period defaults stay empty until the org rule loads.',
+      '考勤时区不可用。组织规则加载前不填写周期默认值。',
+    )
+})
+
+function comprehensivePeriodSnapshot(): string {
+  return JSON.stringify({
+    year: comprehensiveHoursPreviewForm.year ?? null,
+    month: comprehensiveHoursPreviewForm.month ?? null,
+    quarter: comprehensiveHoursPreviewForm.quarter ?? null,
+    from: comprehensiveHoursPreviewForm.from,
+    to: comprehensiveHoursPreviewForm.to,
+  })
+}
+
+let comprehensiveHoursPeriodPristine = true
+let lastAppliedComprehensivePeriod = ''
+
+function applyComprehensiveHoursPeriodDefaults(timeZone: string, instant = new Date()) {
+  const defaults = comprehensiveHoursDefaultPeriod(instant, timeZone)
+  if (!defaults) return
+  lastAppliedComprehensivePeriod = JSON.stringify({
+    year: defaults.year,
+    month: defaults.month,
+    quarter: defaults.quarter,
+    from: defaults.from,
+    to: defaults.to,
+  })
+  comprehensiveHoursPreviewForm.year = defaults.year
+  comprehensiveHoursPreviewForm.month = defaults.month
+  comprehensiveHoursPreviewForm.quarter = defaults.quarter
+  comprehensiveHoursPreviewForm.from = defaults.from
+  comprehensiveHoursPreviewForm.to = defaults.to
+}
+
+watch(comprehensivePeriodSnapshot, (snapshot) => {
+  if (!comprehensiveHoursPeriodPristine) return
+  if (lastAppliedComprehensivePeriod && snapshot !== lastAppliedComprehensivePeriod) {
+    comprehensiveHoursPeriodPristine = false
+  }
+})
+
+watch(attendanceBoundTimeZone, (zone) => {
+  if (!zone || !comprehensiveHoursPeriodPristine) return
+  applyComprehensiveHoursPeriodDefaults(zone)
+}, { immediate: true })
+
+const payrollGenerateAnchorTimeZone = computed(() => resolvePayrollAnchorTimeZone({
+  templateId: payrollCycleGenerateForm.templateId,
+  templates: payrollTemplates.value,
+  attendanceTimeZone: attendanceBoundTimeZone.value,
+}))
+
+let payrollAnchorPristine = true
+let lastAppliedPayrollAnchor = ''
+
+function applyPayrollGenerateAnchor(timeZone: string, instant = new Date()) {
+  const dateKey = formatAttendanceDateKey(instant, timeZone)
+  if (!dateKey) return
+  lastAppliedPayrollAnchor = dateKey
+  payrollCycleGenerateForm.anchorDate = dateKey
+}
+
+watch(() => payrollCycleGenerateForm.anchorDate, (anchorDate) => {
+  if (!payrollAnchorPristine) return
+  if (lastAppliedPayrollAnchor && anchorDate !== lastAppliedPayrollAnchor) {
+    payrollAnchorPristine = false
+  }
+})
+
+watch(payrollGenerateAnchorTimeZone, (zone) => {
+  if (!zone || !payrollAnchorPristine) return
+  applyPayrollGenerateAnchor(zone)
+}, { immediate: true })
+
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
 const selfRulesHasData = computed(() => selfRulesData.value !== null)
@@ -26225,10 +26395,41 @@ function editApprovalFlow(flow: AttendanceApprovalFlow) {
   approvalFlowForm.isActive = flow.isActive
 }
 
-async function loadApprovalFlows() {
+function approvalFlowCatalogState(): CatalogListState<AttendanceApprovalFlow> {
+  return {
+    items: approvalFlows.value,
+    total: approvalFlowsTotal.value,
+    page: approvalFlowsPage.value,
+    capped: approvalFlowsListCapped.value,
+  }
+}
+
+function commitApprovalFlowCatalog(state: CatalogListState<AttendanceApprovalFlow>) {
+  approvalFlows.value = state.items
+  approvalFlowsTotal.value = state.total
+  approvalFlowsPage.value = state.page
+  approvalFlowsListCapped.value = state.capped
+}
+
+const approvalFlowsTruncated = computed(() => approvalFlowsTotal.value > approvalFlows.value.length)
+const approvalFlowsCanLoadMore = computed(() => catalogCanLoadMore(approvalFlowCatalogState()))
+const approvalFlowsCatalogNotice = computed(() => {
+  const copy = catalogTruncationCopy(
+    approvalFlows.value.length,
+    approvalFlowsTotal.value,
+    approvalFlowsListCapped.value,
+  )
+  return tr(copy.en, copy.zh)
+})
+
+async function fetchApprovalFlowPage(page: number, append: boolean) {
   approvalFlowLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      page: String(page),
+      pageSize: String(ATTENDANCE_CATALOG_PAGE_SIZE),
+    })
     const response = await apiFetch(`/api/attendance/approval-flows?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -26239,16 +26440,32 @@ async function loadApprovalFlows() {
       throw new Error(readErrorMessage(data, tr('Failed to load approval flows', '加载审批流程失败')))
     }
     adminForbidden.value = false
-    approvalFlows.value = data.data.items || []
-    // OD-S7-6 readiness is independent of the flows list; best-effort so a readiness
-    // 403/network blip never blocks listing flows. Blank org → plugin DEFAULT_ORG_ID
-    // is resolved inside the composable so the common default-org path still loads.
-    void loadApprovalDirectoryReadiness(normalizedOrgId())
+    const incoming = Array.isArray(data.data?.items) ? data.data.items : []
+    commitApprovalFlowCatalog(applyCatalogPage(approvalFlowCatalogState(), {
+      items: incoming,
+      total: data.data?.total,
+      page,
+    }, append))
+    if (!append) {
+      // OD-S7-6 readiness is independent of the flows list; best-effort so a readiness
+      // 403/network blip never blocks listing flows. Blank org → plugin DEFAULT_ORG_ID
+      // is resolved inside the composable so the common default-org path still loads.
+      void loadApprovalDirectoryReadiness(normalizedOrgId())
+    }
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load approval flows', '加载审批流程失败')), 'error')
   } finally {
     approvalFlowLoading.value = false
   }
+}
+
+async function loadApprovalFlows() {
+  await fetchApprovalFlowPage(1, false)
+}
+
+async function loadMoreApprovalFlows() {
+  if (approvalFlowLoading.value || !approvalFlowsCanLoadMore.value) return
+  await fetchApprovalFlowPage(approvalFlowsPage.value + 1, true)
 }
 
 async function saveApprovalFlow() {
@@ -27875,10 +28092,41 @@ function editRuleSet(item: AttendanceRuleSet) {
   syncRuleBuilderFromRuleSetConfig(item.config ?? {})
 }
 
-async function loadRuleSets() {
+function ruleSetCatalogState(): CatalogListState<AttendanceRuleSet> {
+  return {
+    items: ruleSets.value,
+    total: ruleSetsTotal.value,
+    page: ruleSetsPage.value,
+    capped: ruleSetsListCapped.value,
+  }
+}
+
+function commitRuleSetCatalog(state: CatalogListState<AttendanceRuleSet>) {
+  ruleSets.value = state.items
+  ruleSetsTotal.value = state.total
+  ruleSetsPage.value = state.page
+  ruleSetsListCapped.value = state.capped
+}
+
+const ruleSetsTruncated = computed(() => ruleSetsTotal.value > ruleSets.value.length)
+const ruleSetsCanLoadMore = computed(() => catalogCanLoadMore(ruleSetCatalogState()))
+const ruleSetsCatalogNotice = computed(() => {
+  const copy = catalogTruncationCopy(
+    ruleSets.value.length,
+    ruleSetsTotal.value,
+    ruleSetsListCapped.value,
+  )
+  return tr(copy.en, copy.zh)
+})
+
+async function fetchRuleSetPage(page: number, append: boolean) {
   ruleSetLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      page: String(page),
+      pageSize: String(ATTENDANCE_CATALOG_PAGE_SIZE),
+    })
     const response = await apiFetch(`/api/attendance/rule-sets?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -27889,12 +28137,26 @@ async function loadRuleSets() {
       throw new Error(readErrorMessage(data, tr('Failed to load rule sets', '加载规则集失败')))
     }
     adminForbidden.value = false
-    ruleSets.value = data.data?.items ?? []
+    const incoming = Array.isArray(data.data?.items) ? data.data.items : []
+    commitRuleSetCatalog(applyCatalogPage(ruleSetCatalogState(), {
+      items: incoming,
+      total: data.data?.total,
+      page,
+    }, append))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load rule sets', '加载规则集失败')), 'error')
   } finally {
     ruleSetLoading.value = false
   }
+}
+
+async function loadRuleSets() {
+  await fetchRuleSetPage(1, false)
+}
+
+async function loadMoreRuleSets() {
+  if (ruleSetLoading.value || !ruleSetsCanLoadMore.value) return
+  await fetchRuleSetPage(ruleSetsPage.value + 1, true)
 }
 
 async function saveRuleSet() {
