@@ -224,20 +224,33 @@ export type StockPrepHomeEmptyState = 'no_projects' | 'nothing_today' | 'directo
  *   1. directory_unavailable — the directory read genuinely failed (G3: silently, no red banner —
  *      this IS the silent degradation). Checked first among the settled cases: with no directory in
  *      hand nothing below can be claimed either way, memory-only cards notwithstanding.
- *   2. no_projects — nothing known at all, from either source.
+ *   2. no_projects — nothing known at all, from either source, AND nothing is merely hidden either
+ *      (see `hiddenCount` below — [S2] this is the one case this function refuses to claim on its
+ *      own).
  *   3. nothing_today — there are cards, but none of them are waiting on the operator.
  *
  * Returns null when the card grid should render with no banner above it.
+ *
+ * `hiddenCount` [S2, adversarial review 2026-09-26]: the number of projects THIS BROWSER chose to hide
+ * via 从列表移除 (`operatorHomeMemory.ts`'s hidden list), whether or not any of them still has a card
+ * (`buildOperatorHomeCards`'s own `pendingDecisionCount` guard can keep one visible regardless). When
+ * every visible card happens to be hidden, `cardCount` reaches 0 the same way it would if there were
+ * genuinely nothing — but 「这里还没有您的项目」 would be FALSE in that case: there are projects, this
+ * browser just asked not to see them. So `cardCount === 0 && hiddenCount > 0` returns `null` here
+ * instead of `'no_projects'`, and `StockPreparationOperatorHome.vue`'s own persistent hidden-count line
+ * (shown whenever `hiddenCount > 0`, regardless of `cardCount`) is what actually explains the empty
+ * grid and offers 全部恢复 — ONE honest message in that spot, not a second one contradicting it.
  */
 export function resolveOperatorHomeEmptyState(input: {
   directorySettled: boolean
   directoryAvailable: boolean
   cardCount: number
   actionableCount: number
+  hiddenCount: number
 }): StockPrepHomeEmptyState | null {
   if (!input.directorySettled) return null
   if (!input.directoryAvailable) return 'directory_unavailable'
-  if (input.cardCount === 0) return 'no_projects'
+  if (input.cardCount === 0) return input.hiddenCount > 0 ? null : 'no_projects'
   if (input.actionableCount === 0) return 'nothing_today'
   return null
 }

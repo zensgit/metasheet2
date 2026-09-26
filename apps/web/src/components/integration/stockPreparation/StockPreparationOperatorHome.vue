@@ -92,20 +92,39 @@
       data-testid="stock-prep-operator-home-cards-explainer"
     >
       {{ bi(
-        '这些卡片只是快捷入口，移除不会删除任何数据；重新登录后列表会恢复。',
-        'These cards are only shortcuts. Removing one does not delete any data, and the list resets the next time you sign in.',
+        '这些卡片只是快捷入口，移除不会删除任何数据；重新登录后这台电脑记住的列表会清空、隐藏也会失效。',
+        'These cards are only shortcuts. Removing one does not delete any data; signing in again clears what this computer remembers, including anything hidden.',
       ) }}
     </p>
+
+    <!-- 全部恢复 (S2, adversarial review 2026-09-26): shown WHENEVER something is hidden, regardless of
+         `cards.length` — when every visible card happens to be hidden this is the ONLY thing left on
+         screen saying so, which is exactly why `resolveOperatorHomeEmptyState` steps aside for
+         `no_projects` in that case (see its own doc) rather than the two contradicting each other. -->
     <p
-      v-if="removedProjectNo"
+      v-if="hiddenCount > 0"
+      class="sp-home__hidden-banner"
+      data-testid="stock-prep-operator-home-hidden-banner"
+    >
+      {{ bi(`已从列表移除 ${hiddenCount} 个项目 · `, `Removed ${hiddenCount} project(s) from this list · `) }}
+      <button
+        type="button"
+        class="sp-home__link"
+        data-testid="stock-prep-operator-home-restore-all"
+        @click="onRestoreAll"
+      >
+        {{ bi('全部恢复', 'Restore all') }}
+      </button>
+    </p>
+
+    <p
+      v-if="removalNoticeText"
       class="sp-home__removed-notice"
       data-testid="stock-prep-operator-home-removed-notice"
+      :data-notice-kind="removalNotice?.kind"
       role="status"
     >
-      {{ bi(
-        '已从这台电脑的列表里移除。数据没有删除，还在备料表里；要再看它，去「项目查询」或在下面输入项目号打开。',
-        'Removed from this computer. No data was deleted — it is still in the stock-preparation table; to see it again, go to Project Query or open it by number below.',
-      ) }}
+      {{ bi(removalNoticeText[0], removalNoticeText[1]) }}
     </p>
 
     <!-- 一级常驻筛选 — a row of five count buttons (§3 wireframe A ④), never a dropdown. -->
@@ -185,11 +204,15 @@
             {{ bi('打开', 'Open') }}
           </button>
           <!-- 从列表移除 (客户反馈 2026-09-24 #1a / A8): a low-emphasis text button, deliberately not
-               styled like either action above it — removing a shortcut is not this card's purpose. -->
+               styled like either action above it — removing a shortcut is not this card's purpose.
+               [S3] Disabled (never merely omitted) while this card has a LIVE pending decision, with
+               a tooltip saying why — see `canRemoveCard`'s own comment. -->
           <button
             type="button"
             class="sp-home__card-remove"
             data-testid="stock-prep-operator-home-card-remove"
+            :disabled="!canRemoveCard(card)"
+            :title="!canRemoveCard(card) ? bi('有等您处理的事，不能移除', 'This card has something waiting on you — it cannot be removed') : undefined"
             @click="onRemoveCard(card)"
           >
             {{ bi('从列表移除', 'Remove from list') }}
@@ -251,13 +274,15 @@
 // main action, and not a `--ms-color-primary` fill. The criterion then holds literally on this screen
 // too (zero filled primaries), and the one filled primary in the whole tab stays where §3 wireframe C
 // ③ puts it: the workspace's 「下一步」 bar.
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import EmptyState from '../../status/EmptyState.vue'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import type { StockPreparationOperatorDirectory } from '../../../services/integration/stockPreparation/confirmationQueue'
 import { exportStockPreparationPrepLines } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
+  clearStockPrepHiddenProjects,
+  HIDDEN_MAX_ENTRIES,
   readStockPrepHiddenProjects,
   removeStockPrepRecentProject,
   type StockPrepRecentProjectEntry,
@@ -354,6 +379,9 @@ const directoryProjects = computed(() => {
  */
 const hiddenProjectNos = ref<Set<string>>(new Set(readStockPrepHiddenProjects(props.scope)))
 
+/** [S2] How many projects this browser is currently choosing not to show — see `resolveOperatorHomeEmptyState`'s own doc for why the empty-state logic needs this, and the persistent banner below for why the UI does too. */
+const hiddenCount = computed(() => hiddenProjectNos.value.size)
+
 const cards = computed<StockPrepHomeCard[]>(() => sortOperatorHomeCards(
   buildOperatorHomeCards(directoryProjects.value, props.memory ?? [], hiddenProjectNos.value),
 ))
@@ -368,6 +396,7 @@ const emptyState = computed(() => resolveOperatorHomeEmptyState({
   directoryAvailable: directoryAvailable.value,
   cardCount: cards.value.length,
   actionableCount: actionable.value.any,
+  hiddenCount: hiddenCount.value,
 }))
 
 const EMPTY_STATE_TEXT: Record<string, { title: [string, string]; hint: [string, string] }> = {
@@ -381,8 +410,10 @@ const EMPTY_STATE_TEXT: Record<string, { title: [string, string]; hint: [string,
   nothing_today: {
     title: ['今天没有等您的事', 'Nothing is waiting on you today'],
     hint: [
-      '下面是您最近开过的项目,随时可以打开看看。',
-      'Below are the projects you have opened recently — open any of them whenever you like.',
+      // N1 (adversarial review 2026-09-26): this used to say 「最近开过的」, which is only true of a
+      // MEMORY card — a directory-only card below may be one this browser has never opened at all.
+      '下面是您能看到的项目,随时可以打开看看。',
+      'Below are the projects you can see — open any of them whenever you like.',
     ],
   },
   directory_unavailable: {
@@ -465,19 +496,92 @@ function showsOpenButton(card: StockPrepHomeCard): boolean {
 }
 
 /**
+ * [S3, adversarial review 2026-09-26] A card the ledger says is waiting on this operator RIGHT NOW must
+ * not even offer 从列表移除 — `buildOperatorHomeCards`'s own guard would keep it visible anyway (belt),
+ * but disabling the button here (braces) means the notice below can never claim 已移除 for a card that
+ * plainly did not go anywhere, and the operator gets told WHY before clicking rather than after.
+ * `pendingDecisionCount` is only ever non-null on a `directory` card carrying a LIVE ledger count (see
+ * its own field doc in operatorHomeCards.ts) — a memory-only card's `null` here always allows removal.
+ */
+function canRemoveCard(card: StockPrepHomeCard): boolean {
+  return !(card.pendingDecisionCount !== null && card.pendingDecisionCount > 0)
+}
+
+/**
  * 从列表移除 (客户反馈 2026-09-24 #1a / A8). The card may not actually leave the grid on this click —
  * `buildOperatorHomeCards` still shows a directory row with a LIVE `pendingDecisionCount > 0` — so the
  * confirmation line below is rendered at the page level, never inside the card's own DOM node, and
  * survives whether or not that node is still there after this render.
+ *
+ * [N4] Names the project and auto-clears after a short delay, rather than sitting on screen forever or
+ * silently getting replaced by the next unrelated render.
  */
-const removedProjectNo = ref<string | null>(null)
+const REMOVAL_NOTICE_DISMISS_MS = 6000
 
+const removalNotice = ref<{ projectNo: string; kind: 'removed' | 'limit_reached' } | null>(null)
+let removalNoticeTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearRemovalNoticeTimer(): void {
+  if (removalNoticeTimer !== null) {
+    clearTimeout(removalNoticeTimer)
+    removalNoticeTimer = null
+  }
+}
+
+function showRemovalNotice(notice: { projectNo: string; kind: 'removed' | 'limit_reached' }): void {
+  clearRemovalNoticeTimer()
+  removalNotice.value = notice
+  removalNoticeTimer = setTimeout(() => {
+    removalNotice.value = null
+    removalNoticeTimer = null
+  }, REMOVAL_NOTICE_DISMISS_MS)
+}
+
+onBeforeUnmount(clearRemovalNoticeTimer)
+
+/**
+ * [S1] `removeStockPrepRecentProject` REFUSES rather than evicts once the hidden list is full — this
+ * only updates `hiddenProjectNos` (so the grid actually changes) and emits `remove-recent-project` on
+ * an ACTUAL hide (`'hidden'`), never on `'limit_reached'`: a card that stayed exactly where it was must
+ * never be reported upstream as removed.
+ */
 function onRemoveCard(card: StockPrepHomeCard): void {
-  removeStockPrepRecentProject(card.projectNo, props.scope)
+  if (!canRemoveCard(card)) return
+  const result = removeStockPrepRecentProject(card.projectNo, props.scope)
+  if (result === 'limit_reached') {
+    showRemovalNotice({ projectNo: card.projectNo, kind: 'limit_reached' })
+    return
+  }
   hiddenProjectNos.value = new Set(hiddenProjectNos.value).add(card.projectNo)
-  removedProjectNo.value = card.projectNo
+  showRemovalNotice({ projectNo: card.projectNo, kind: 'removed' })
   emit('remove-recent-project', card.projectNo)
 }
+
+/** 全部恢复 (S2) — clears every project this scope hid, on this one browser, right now. */
+function onRestoreAll(): void {
+  clearStockPrepHiddenProjects(props.scope)
+  hiddenProjectNos.value = new Set()
+}
+
+/**
+ * [N4] Names the removed (or refused) project every time, rather than a generic sentence — the two
+ * kinds are worded differently on purpose (S3/S1's own point): one claims a removal happened, the
+ * other explicitly says it did not.
+ */
+const removalNoticeText = computed<readonly [string, string] | null>(() => {
+  const notice = removalNotice.value
+  if (!notice) return null
+  if (notice.kind === 'limit_reached') {
+    return [
+      `隐藏列表已满(最多 ${HIDDEN_MAX_ENTRIES} 个),项目 ${notice.projectNo} 这次没有被移除。`,
+      `The hidden list is full (limit ${HIDDEN_MAX_ENTRIES}) — project ${notice.projectNo} was not removed this time.`,
+    ]
+  }
+  return [
+    `已从这台电脑的列表里移除项目 ${notice.projectNo}。数据没有删除，还在备料表里；要再看它，去「项目查询」或在下面输入项目号打开。`,
+    `Removed project ${notice.projectNo} from this computer's list. No data was deleted — it is still in the stock-preparation table; to see it again, go to Project Query or open it by number below.`,
+  ]
+})
 
 function onCardAction(card: StockPrepHomeCard): void {
   if (card.posture.key === 'pending_decision') {
@@ -582,6 +686,19 @@ async function exportCard(projectNo: string): Promise<void> {
    only appears once — explaining what the cards below actually are before anyone has to guess. */
 .sp-home__cards-explainer {
   margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 全部恢复 (S2): visually similar to the pull-banner — a diagnostic line, not an alarm — but its own
+   class because its content (count + a live button) differs from every other muted line here. */
+.sp-home__hidden-banner {
+  margin: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
   color: var(--ms-text-3);
   font-size: 12px;
   line-height: 1.6;
@@ -754,6 +871,14 @@ async function exportCard(projectNo: string): Promise<void> {
   font-size: 12px;
   cursor: pointer;
   text-decoration: underline;
+}
+
+/* [S3] disabled, not merely omitted, while the card has a live pending decision — see the button's
+   own `:title` in the template for the tooltip this pairs with. */
+.sp-home__card-remove:disabled {
+  color: var(--ms-text-4, #b3b8c2);
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 .sp-home__card-notice {

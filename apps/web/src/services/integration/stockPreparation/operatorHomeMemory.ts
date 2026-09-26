@@ -38,6 +38,17 @@
 // are untouched. `recordStockPrepProjectVisit` clears an entry back out of that list on the next visit,
 // and `clearStockPrepOperatorHomeMemory` sweeps it on every auth transition, same as everything else
 // here.
+//
+// [B1, adversarial review 2026-09-26] An earlier revision of `removeStockPrepRecentProject` ALSO
+// deleted the memory entry, on the theory that the hidden list alone left it "resurrectable". That was
+// wrong: this memory is not private to the home page. 项目查询 (`projectQuery.ts` →
+// `buildStockPrepProjectQueryRows`) reads the exact same per-tenant+principal list, and so does
+// `StockPreparationProjectBoardView.vue`'s rule-4 "刚确认完" nudge
+// (`readStockPrepRememberedPosture`). Deleting the entry took the remembered posture away from BOTH of
+// those, silently, for a click made on a page that knows about neither. Hiding is now a pure VIEW-LAYER
+// decision that lives entirely in the hidden list; `removeStockPrepRecentProject` no longer touches
+// `readStockPrepRecentProjects`/its storage key at all. See its own doc comment for the corrected
+// rationale.
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../../composables/authPrincipal'
 import type { StockPrepPostureKey } from './projectPosture'
 
@@ -50,6 +61,16 @@ const STORAGE_KEY_PREFIX = 'metasheet.stockPrep.operatorHomeMemory.v2'
 const LEGACY_UNSCOPED_KEY = 'metasheet.stockPrep.operatorHomeMemory.v1'
 /** Bounded so a browser that opens hundreds of projects over months does not grow this without limit. */
 const MAX_ENTRIES = 30
+
+/**
+ * [S1, adversarial review 2026-09-26] The hidden list's OWN cap, deliberately separate from
+ * `MAX_ENTRIES` above: the review's own directory can hold up to ~2,000 rows, so re-using the
+ * 30-entry memory cap here meant the 31st hide silently evicted the 1st — a card an operator had
+ * asked to stop seeing would quietly come back with no warning. `removeStockPrepRecentProject` checks
+ * this BEFORE writing and REFUSES a hide past the cap (`'limit_reached'`) rather than ever truncating
+ * a list that already reached it.
+ */
+export const HIDDEN_MAX_ENTRIES = 500
 
 /**
  * A SIBLING key, deliberately built by extending `STORAGE_KEY_PREFIX` rather than starting a second
@@ -151,10 +172,17 @@ export function readStockPrepHiddenProjects(scope?: StockPrepMemoryScope): strin
   }
 }
 
+/**
+ * [S1] The `.slice` here is a DEFENSIVE backstop only — `removeStockPrepRecentProject` (the only
+ * caller) already refuses to call this once `readStockPrepHiddenProjects(scope).length` reaches
+ * `HIDDEN_MAX_ENTRIES`, so under normal use this never trims anything a person actually asked to
+ * hide. It exists so a future caller, or hand-edited storage carrying more than the cap, cannot grow
+ * this list without bound — never the mechanism by which a legitimate hide is silently dropped.
+ */
 function writeStockPrepHiddenProjects(projectNos: readonly string[], scope?: StockPrepMemoryScope): void {
   try {
     if (typeof window === 'undefined' || !window.localStorage) return
-    window.localStorage.setItem(resolveHiddenStorageKey(scope), JSON.stringify(projectNos.slice(0, MAX_ENTRIES)))
+    window.localStorage.setItem(resolveHiddenStorageKey(scope), JSON.stringify(projectNos.slice(0, HIDDEN_MAX_ENTRIES)))
   } catch {
     // Same fail-silent posture as every other write here.
   }
@@ -208,29 +236,57 @@ export function recordStockPrepProjectVisit(
 }
 
 /**
- * 从列表移除 (客户反馈 2026-09-24 #1a / A8). Drops this project from the remembered list AND adds it
- * to the hidden list, so a card the home page still has a DIRECTORY reason to show (see
- * `buildOperatorHomeCards`'s `pendingDecisionCount` guard) is not resurrected by memory alone re-adding
- * it on the next posture write for some OTHER project. This is NOT a data delete — the project's rows
- * stay exactly where they are in the 备料表; only this browser's own shortcut list changes. Reopening
- * the project (`recordStockPrepProjectVisit`, above) is the one thing that undoes it.
+ * `removeStockPrepRecentProject`'s outcome, so the UI can tell the three cases apart rather than
+ * guessing from a `void` return:
+ *   - `'hidden'` — newly added to the hidden list; the home page may now skip this card.
+ *   - `'already_hidden'` — a no-op; this project number was hidden already (idempotent, not an error).
+ *   - `'limit_reached'` — refused. [S1] The hidden list is at `HIDDEN_MAX_ENTRIES` and this call did
+ *     NOT evict anything to make room; the caller must tell the operator the hide did not happen.
  */
-export function removeStockPrepRecentProject(projectNo: string, scope?: StockPrepMemoryScope): void {
+export type StockPrepRemoveRecentProjectResult = 'hidden' | 'already_hidden' | 'limit_reached'
+
+/**
+ * 从列表移除 (客户反馈 2026-09-24 #1a / A8). Adds this project to the hidden list. THAT IS ALL —
+ * [B1, adversarial review 2026-09-26] an earlier revision ALSO deleted the matching entry out of the
+ * remembered-posture list above, on the theory that a card the home page still had a reason to show
+ * (see `buildOperatorHomeCards`'s live-`pendingDecisionCount` guard) should not silently regain its
+ * remembered posture from a stale write. That reasoning only considered the home page. The remembered
+ * list is READ BY OTHER THINGS: 项目查询 (`projectQuery.ts`) folds it into a row that is supposed to
+ * stay the COMPLETE list regardless of what is hidden here, and the board's rule-4 "刚确认完，再同步
+ * 一次" nudge (`StockPreparationProjectBoardView.vue`, `readStockPrepRememberedPosture`) depends on it
+ * surviving between mounts. Deleting the entry made a memory-only project vanish from 项目查询
+ * entirely, dropped a directory project out of the 可以导出 filter there (its remembered `ready`
+ * became the honest-but-wrong `看不到`), and erased rule 4's memory of "this was just held pending" —
+ * all from a click on a screen that knows about none of those three consumers. Hiding is therefore
+ * ENTIRELY a view-layer decision inside the hidden list; nothing this browser remembers changes. This
+ * is also why it is still not a data delete in the OTHER sense either: the project's rows stay exactly
+ * where they are in the 备料表. Reopening the project (`recordStockPrepProjectVisit`, above) undoes it.
+ */
+export function removeStockPrepRecentProject(
+  projectNo: string,
+  scope?: StockPrepMemoryScope,
+): StockPrepRemoveRecentProjectResult {
   const trimmed = projectNo.trim()
-  if (!trimmed) return
+  if (!trimmed) return 'already_hidden'
+  const hidden = readStockPrepHiddenProjects(scope)
+  if (hidden.includes(trimmed)) return 'already_hidden'
+  if (hidden.length >= HIDDEN_MAX_ENTRIES) return 'limit_reached'
+  writeStockPrepHiddenProjects([trimmed, ...hidden], scope)
+  return 'hidden'
+}
+
+/**
+ * 全部恢复 (S2, adversarial review 2026-09-26). Clears every project THIS scope hid — never every
+ * principal's, unlike `clearStockPrepOperatorHomeMemory`: that one runs on an auth transition, where
+ * "whose bucket is this" can no longer be named (see its own comment); this one is a direct click from
+ * a signed-in operator restoring their OWN list, so it stays scoped to `resolveHiddenStorageKey`.
+ * Touches only the hidden list — the remembered postures underneath are untouched either way, per
+ * `removeStockPrepRecentProject`'s own doc above.
+ */
+export function clearStockPrepHiddenProjects(scope?: StockPrepMemoryScope): void {
   try {
     if (typeof window === 'undefined' || !window.localStorage) return
-    const remaining = readStockPrepRecentProjects(scope).filter((entry) => entry.projectNo !== trimmed)
-    window.localStorage.setItem(resolveStorageKey(scope), JSON.stringify(remaining))
-  } catch {
-    // Same fail-silent posture as every other write here.
-  }
-  try {
-    if (typeof window === 'undefined' || !window.localStorage) return
-    const hidden = readStockPrepHiddenProjects(scope)
-    if (!hidden.includes(trimmed)) {
-      writeStockPrepHiddenProjects([trimmed, ...hidden], scope)
-    }
+    window.localStorage.removeItem(resolveHiddenStorageKey(scope))
   } catch {
     // Same fail-silent posture as every other write here.
   }
