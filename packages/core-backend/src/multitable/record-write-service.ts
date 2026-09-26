@@ -860,8 +860,10 @@ export class RecordWriteService {
       // injected sheet-member loader (h.loadSheetMemberUserIds) so the existing unit seam is preserved.
       const resolvePersonMemberUserIds = createPersonMemberResolver(query, sheetId, h.loadSheetMemberUserIds)
 
-      // #16: source each person field's restrictToMemberGroupIds from the property-bearing `fields`
-      // list (the per-change `fieldById` guard does not carry property). Built once per patch op.
+      // #16: source each person field's restrictToMemberGroupIds from the `fields` list. (The per-change
+      // `fieldById` guard ALSO carries `property` on both write paths — routes/univer-meta.ts
+      // buildFieldMutationGuardMap and the Yjs bridge guard in index.ts — but this map is built once per
+      // patch op from the field list rather than per change.) Built once per patch op.
       const personRestrictByFieldId = new Map<string, string[]>()
       for (const f of fields as Array<{ id?: unknown; type?: unknown; property?: unknown }>) {
         if (!f || f.type !== 'person') continue

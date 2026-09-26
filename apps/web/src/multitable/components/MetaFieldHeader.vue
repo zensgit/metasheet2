@@ -11,7 +11,11 @@
     @drop.prevent="onDrop"
   >
     <span class="meta-field-header__icon">{{ fieldTypeIcon }}</span>
-    <span class="meta-field-header__name" :title="field.name">{{ field.name }}</span>
+    <span
+      class="meta-field-header__name"
+      :title="headerTitle"
+      :data-meta-datetime-zone-hint="dateTimeHint || undefined"
+    >{{ field.name }}</span>
     <span v-if="sortDirection" class="meta-field-header__sort">
       {{ sortDirection === 'asc' ? '\u25B2' : '\u25BC' }}
     </span>
@@ -36,6 +40,8 @@ import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel } from '../utils/meta-core-labels'
+import { dateTimeZoneHint } from '../utils/business-timezone'
+import { dateTimeFieldTimezone, isDateTimeLikeFieldType } from '../utils/field-display'
 
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
@@ -83,6 +89,13 @@ function onDrop(e: DragEvent) {
 }
 
 const fieldTypeIcon = computed(() => FIELD_ICONS[props.field.type] ?? '?')
+
+// 客户反馈 2026-09-24 #4c (N6): a date-time column's cells show the BUSINESS wall clock (北京时间), not the
+// browser's. Rather than a hint in every cell, the column header's tooltip says so ONCE — and only when
+// the browser's clock actually differs from the business zone (a Beijing laptop sees no hint).
+const dateTimeHint = computed(() =>
+  isDateTimeLikeFieldType(props.field.type) ? dateTimeZoneHint(dateTimeFieldTimezone(props.field), isZh.value) : '')
+const headerTitle = computed(() => (dateTimeHint.value ? `${props.field.name} · ${dateTimeHint.value}` : props.field.name))
 
 const headerStyle = computed(() => {
   // #5863: the header row is ALWAYS sticky to the top of the grid's scroll container

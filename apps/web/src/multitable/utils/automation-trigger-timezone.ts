@@ -12,16 +12,26 @@
 //      (which also re-expresses the stored time) may change it.
 //
 // The copy for all of this lives in meta-automation-labels.ts; this module is only the time math.
+//
+// TWO DIFFERENT 'UTC's — deliberately NOT unified (A7a ↔ A7b, PR #6082 / #6083):
+//   - a dateTime FIELD's `property.timezone === 'UTC'` means UNSET: the backend sanitizer stamps it on every
+//     zone-less field on read, no UI ever set it, so business-timezone.ts resolves it to the business zone;
+//   - an automation rule's `triggerConfig.timezone === 'UTC'` (or absent / 'Etc/UTC') means REAL UTC: legacy
+//     rules were scheduled in UTC and must keep firing at the same instants (`isUtcTriggerTimezone`).
+// Both modules read the SAME business zone (`getBusinessTimezone()` below); only the meaning of 'UTC' differs.
+import { DEFAULT_BUSINESS_TIMEZONE, getBusinessTimezone } from './business-timezone'
 
-/** Default business timezone. Read it through `automationBusinessTimezone()`, never directly. */
-export const DEFAULT_AUTOMATION_BUSINESS_TIMEZONE = 'Asia/Shanghai'
+/** Default business timezone (= business-timezone.ts's). Read it through `automationBusinessTimezone()`, never directly. */
+export const DEFAULT_AUTOMATION_BUSINESS_TIMEZONE = DEFAULT_BUSINESS_TIMEZONE
 
 /**
- * The ONE place the automation editor learns the business timezone. A tenant/instance setting (A7b) can be
- * swapped in here without touching the editor or the labels.
+ * The ONE place the automation editor learns the business timezone: the SERVER-PROVIDED instance zone
+ * (`businessTimezone` on GET /api/multitable/context, from MULTITABLE_BUSINESS_TIMEZONE — A7b, PR #6083),
+ * falling back to Asia/Shanghai until / unless the server names one. Reactive: it reads the same holder the
+ * dateTime cells read, so a `computed` that calls this re-evaluates when the context response lands.
  */
 export function automationBusinessTimezone(): string {
-  return DEFAULT_AUTOMATION_BUSINESS_TIMEZONE
+  return getBusinessTimezone()
 }
 
 /** Trigger types whose config carries a `timezone` the backend honours. */
@@ -240,6 +250,12 @@ function formatMinutesOfDay(minutes: number): string {
  * others unchanged. 18:00 UTC → 02:00 (k = 1): date one day EARLIER; dateTime before 08:00 unchanged, others
  * one day EARLIER. A shift is in whole days (positive = later). The web spec cross-checks these numbers
  * against the backend function itself.
+ *
+ * ASSUMPTION: a FIXED offset, i.e. a business zone without DST (Asia/Shanghai). Both `o` and `k` are read as
+ * of `referenceMs`; in a DST business zone they differ by an hour across a transition, so the window and the
+ * day shifts would hold only for the reference day's half of the year. This is UTC → local math (always
+ * exact for one instant), so the business-timezone.ts local → UTC converter does not apply here; a DST-aware
+ * impact analysis would have to evaluate each reminder's own date instead of one reference offset.
  */
 export interface LegacyUtcSwitchImpact {
   /** The legacy time the backend uses now ('' → its 09:00 default). */

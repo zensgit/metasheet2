@@ -148,19 +148,39 @@
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
-          <input
-            v-else-if="field.type === 'dateTime'"
-            :id="`field_${field.id}`"
-            class="meta-form-view__input"
-            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
-            type="datetime-local"
-            :disabled="isFieldReadOnly(field.id)"
-            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
-            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
-            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
-            :value="dateTimeInputValue(formData[field.id])"
-            @input="formData[field.id] = dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value)"
-          />
+          <!-- dateTime: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c) -->
+          <template v-else-if="field.type === 'dateTime'">
+            <!-- B2: a draft the parser rejects stays visible, is flagged as a validation error and BLOCKS submit
+                 (a non-empty unparseable value never submits as empty or as the stale value). S3: the calendar
+                 button opens the Element Plus date-time panel; both write the same UTC instant. -->
+            <div class="meta-form-view__datetime">
+              <MetaDateTimeInput
+                :id="`field_${field.id}`"
+                class="meta-form-view__input"
+                :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+                :disabled="isFieldReadOnly(field.id)"
+                :aria-required="fieldIsRequired(field) ? 'true' : undefined"
+                :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+                :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+                :model-value="formData[field.id]"
+                :timezone="resolveDateTimeTimezone(field.property)"
+                @update:model-value="formData[field.id] = $event"
+                @update:invalid="setDateTimeDraftInvalid(field.id, $event)"
+                @update:unparseable="setDateTimeDraftUnparseable(field.id, $event)"
+              />
+              <MetaDateTimePicker
+                :model-value="formData[field.id]"
+                :timezone="resolveDateTimeTimezone(field.property)"
+                :disabled="isFieldReadOnly(field.id)"
+                @update:model-value="formData[field.id] = $event"
+              />
+            </div>
+            <span
+              v-if="dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh)"
+              class="meta-form-view__tz-hint"
+              data-meta-datetime-zone-hint=""
+            >{{ dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh) }}</span>
+          </template>
           <select
             v-else-if="field.type === 'select'"
             :id="`field_${field.id}`"
@@ -398,12 +418,13 @@ import {
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 import {
-  dateTimeInputValue,
-  dateTimeValueFromLocalInput,
   formatFieldDisplay,
   locationAddressValue,
   locationValueFromAddress,
 } from '../utils/field-display'
+import { dateTimeValueToUtcMs, dateTimeZoneHint, resolveDateTimeTimezone } from '../utils/business-timezone'
+import MetaDateTimeInput from './cells/MetaDateTimeInput.vue'
+import MetaDateTimePicker from './cells/MetaDateTimePicker.vue'
 import { isSystemField } from '../utils/system-fields'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { isFieldConditionallyRequired, isFieldVisible } from '../utils/field-visibility'
@@ -581,6 +602,17 @@ function syncFromRecord(record: MetaRecord | null | undefined) {
   for (const [fieldId, value] of Object.entries(seed)) {
     if (value === undefined) continue
     if (isFieldReadOnly(fieldId)) continue
+    // 客户反馈 2026-09-24 #4c (S1): a prefilled dateTime (`?prefill_x=2026-09-24 09:00`) is a BUSINESS wall
+    // clock (zone rule of the field), normalised here to the UTC instant so the box and the submitted value
+    // agree and nothing is read in the browser's zone. Text that is not a date-time is not seeded at all —
+    // the box would show empty while the payload carried garbage.
+    const field = fieldsById.value[fieldId]
+    if (field?.type === 'dateTime' && typeof value === 'string') {
+      const ms = dateTimeValueToUtcMs(value, resolveDateTimeTimezone(field.property))
+      if (ms === null) continue
+      formData[fieldId] = new Date(ms).toISOString()
+      continue
+    }
     formData[fieldId] = value
   }
 }
@@ -628,9 +660,43 @@ function validate(): boolean {
     if (fieldIsRequired(f) && isEmptyFormValue(v)) {
       errs[f.id] = requiredField(f.name, isZh.value)
     }
+    // B2 (客户反馈 2026-09-24 #4c): a dateTime box holding non-empty text the parser rejects — touched or
+    // half-typed — is a validation error. `formData` still holds the previous (or no) value, and submitting
+    // THAT over a visible garbage draft would silently drop what the person typed.
+    if (f.type === 'dateTime' && dateTimeDraftUnparseable.value[f.id]) {
+      errs[f.id] = lc('cell.dateTimeInvalid')
+    }
   }
   validationErrors.value = errs
   return Object.keys(errs).length === 0
+}
+
+// B2: per-field dateTime draft state from MetaDateTimeInput. `unparseable` is the LIVE gate `validate()`
+// blocks submit on; `invalid` (a commit was attempted on the garbage) shows the inline error at once through
+// `validationErrors` (same slot as the required-field error). Both are cleared by MetaDateTimeInput the
+// moment the text parses / empties / the value changes from outside.
+const dateTimeDraftUnparseable = ref<Record<string, boolean>>({})
+function clearDateTimeError(fieldId: string) {
+  const message = lc('cell.dateTimeInvalid')
+  if (validationErrors.value[fieldId] !== message) return
+  const errs = { ...validationErrors.value }
+  delete errs[fieldId]
+  validationErrors.value = errs
+}
+function setDateTimeDraftUnparseable(fieldId: string, unparseable: boolean) {
+  const next = { ...dateTimeDraftUnparseable.value }
+  if (unparseable) next[fieldId] = true
+  else delete next[fieldId]
+  dateTimeDraftUnparseable.value = next
+  // Parseable again → the error `validate()` may have raised on a never-blurred draft goes too.
+  if (!unparseable) clearDateTimeError(fieldId)
+}
+function setDateTimeDraftInvalid(fieldId: string, invalid: boolean) {
+  if (!invalid) {
+    clearDateTimeError(fieldId)
+    return
+  }
+  validationErrors.value = { ...validationErrors.value, [fieldId]: lc('cell.dateTimeInvalid') }
 }
 
 // A4: index of the first page that contains a field with a validation error,
@@ -944,6 +1010,10 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__comment-anchor--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-form-view__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-form-view__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+.meta-form-view__tz-hint { display: inline-block; margin-top: 4px; font-size: 12px; color: #909399; }
+/* dateTime composite (客户反馈 2026-09-24 #4c): the strict text box takes the width, the picker button sits beside it. */
+.meta-form-view__datetime { display: flex; align-items: center; gap: 6px; }
+.meta-form-view__datetime .meta-form-view__input { flex: 1; min-width: 0; }
 .meta-form-view__input--multi { min-height: 110px; }
 .meta-form-view__textarea {
   width: 100%; min-height: 120px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px;

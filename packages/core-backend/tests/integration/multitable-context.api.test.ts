@@ -188,12 +188,27 @@ describe('Multitable context API', () => {
       },
     })
 
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
     const response = await request(app)
       .get('/api/multitable/context')
       .query({ sheetId: 'sheet_ops' })
       .expect(200)
 
     expect(response.body.ok).toBe(true)
+    // 客户反馈 2026-09-24 #4c: /context carries the instance business timezone the web shows and parses
+    // date-times in — Asia/Shanghai when MULTITABLE_BUSINESS_TIMEZONE is unset, the env value (read per
+    // request) when it names a valid zone, the default again when it does not.
+    expect(response.body.data.businessTimezone).toBe('Asia/Shanghai')
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      const tokyo = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(tokyo.body.data.businessTimezone).toBe('Asia/Tokyo')
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      const junk = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(junk.body.data.businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
     expect(response.body.data.base).toMatchObject({ id: 'base_ops', name: 'Ops Base' })
     expect(response.body.data.sheet).toMatchObject({ id: 'sheet_ops', baseId: 'base_ops', name: 'Orders' })
     expect(response.body.data.sheets).toHaveLength(2)
