@@ -10503,7 +10503,7 @@ export interface paths {
                     workspaceId?: string;
                     /** @description Max events per page. Capped at 500 at the route and at 1000 in the registry (the tighter wins); a non-numeric or non-positive value is silently ignored and the server-held default page size (200) applies. */
                     limit?: number;
-                    /** @description The previous page's `nextCursor` (the `eventIndex` of the last event it returned). Answers the events strictly after it, in `eventIndex` order, under the same (tenantId, workspaceId, runId) scope. Omitted or empty means the first page. Anything that is not a non-negative integer string is refused with 400 INVALID_CURSOR (never silently treated as the first page). */
+                    /** @description The previous page's `nextCursor` (the `eventIndex` of the last event it returned). Answers the events strictly after it, in `eventIndex` order, under the same (tenantId, workspaceId, runId) scope. Omitted or empty means the first page. Anything else that is not 1-15 ASCII decimal digits is refused with 400 INVALID_CURSOR (never silently treated as the first page); the tenant scope is checked before the cursor. */
                     cursor?: string;
                 };
                 header?: never;

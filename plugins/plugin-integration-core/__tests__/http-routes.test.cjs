@@ -4050,6 +4050,27 @@ async function testRunProvenanceSubRoute() {
   assertErrorResponse(cross, [403])
   assert.equal(findCalls(crossCalls, 'listProvenanceByRun').length, 0, 'cross-tenant query never reached the registry')
 
+  // f-prov200 review r2: the cursor check sits AFTER tenant resolution — where the pre-existing
+  // gates already were — so a foreign tenant or a missing tenant context keeps its own 403 whatever
+  // the cursor says; INVALID_CURSOR only answers once the caller's scope is settled.
+  for (const [label, user, query, code] of [
+    ['foreign tenantId + malformed cursor', READ_USER, { tenantId: 'tenant_other', cursor: 'abc' }, 'TENANT_MISMATCH'],
+    ['no tenant context + malformed cursor', { id: 'reader_without_tenant', permissions: ['integration:read'] },
+      { tenantId: 'tenant_1', cursor: '1e3' }, 'TENANT_CONTEXT_REQUIRED'],
+  ]) {
+    const gate = createMockServices()
+    const { routes: gateRoutes } = mountRoutes(gate.services)
+    const gateRes = await invoke(gateRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+      user,
+      params: { runId: 'run_1' },
+      query,
+    })
+    assertErrorResponse(gateRes, [403])
+    assert.equal(gateRes.body.error.code, code, `${label}: the tenant gate answers (${code}), not INVALID_CURSOR`)
+    assert.equal(findCalls(gate.calls, 'getPipelineRun').length, 0, `${label}: never reaches the existence probe`)
+    assert.equal(findCalls(gate.calls, 'listProvenanceByRun').length, 0, `${label}: never reaches the registry`)
+  }
+
   // 404: an unknown run and another tenant's run take the same path — the probe misses and the
   // timeline is never read, so an unknown run cannot be distinguished from an empty one.
   const { calls: missCalls, services: missServices } = createMockServices()

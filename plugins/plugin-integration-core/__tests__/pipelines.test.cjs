@@ -541,6 +541,14 @@ async function main() {
     { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: '1.5' },
     { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: -1 },
     { tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: ['1'] },
+    // f-prov200 review r2: the registry refuses on its OWN every shape the route refuses, rather
+    // than relying on the route having checked first — exponent, hex, sign, surrounding space,
+    // whitespace-only, and more than 15 digits (even when the value is still a safe integer).
+    ...['1e3', '0x10', '+1', ' 1', '1 ', ' ', '1_000', '1234567890123456', '12345678901234567890']
+      .map(cursor => ({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor })),
+    // ...and every non-string shape that is not a non-negative safe integer.
+    ...[1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, true, {}]
+      .map(cursor => ({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor })),
   ]) {
     let bad = null
     try {
@@ -554,6 +562,13 @@ async function main() {
     'validation failures issue no view select')
   assert.equal(db.calls.filter(call => call[0] === 'countRows' && call[1] === 'integration_provenance_by_row').length, provCountsBefore,
     'validation failures issue no count')
+  // ...while every cursor the route lets through is accepted here too (the two rules agree at the
+  // edges): '0', leading zeros, and the widest 15-digit value, each as a keyset strictly after it.
+  for (const [goodCursor, gte] of [['0', 1], ['007', 8], ['999999999999999', 1000000000000000], [0, 1], [42, 43]]) {
+    await registry.listProvenanceByRun({ tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: goodCursor })
+    assert.deepEqual(db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()[2].range,
+      { event_index: { gte } }, `cursor ${JSON.stringify(goodCursor)} is accepted as "strictly after ${gte - 1}"`)
+  }
 
   // --- 8e. f-prov200: the 199 / 200 / 201 boundary of the default page -----------------------
   // One run per size, seeded out of order and next to a same-run-id row under ANOTHER tenant, so

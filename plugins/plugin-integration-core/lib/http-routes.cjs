@@ -9997,6 +9997,10 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(400, 'RUN_ID_REQUIRED', 'runId is required')
       }
       const query = requestQuery(req)
+      // The tenant/workspace scope is resolved exactly where it was before the cursor existed
+      // (ahead of the existence probe), so a missing or foreign tenant keeps its 400/403 whatever
+      // the cursor says — the cursor check below never reorders the pre-existing gates.
+      const probeInput = scopedInput(req, { id: runId })
       // f-prov200: `cursor` is the previous page's `nextCursor` (the last returned eventIndex).
       // Refused BEFORE the existence probe and without echoing the value: a 400 here is the same
       // for every runId, so it says nothing about which runs exist. A repeated `?cursor=` (array)
@@ -10006,7 +10010,7 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(400, 'INVALID_CURSOR', 'cursor must be a non-negative integer string')
       }
       try {
-        await pipelineRegistry.getPipelineRun(scopedInput(req, { id: runId }))
+        await pipelineRegistry.getPipelineRun(probeInput)
       } catch (error) {
         if (error && /NotFound/.test(String(error.name))) {
           throw new HttpRouteError(404, 'RUN_NOT_FOUND', 'pipeline run not found')

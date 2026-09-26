@@ -223,9 +223,9 @@ paths:
             The previous page's `nextCursor` (the `eventIndex` of the last event it returned).
             Answers the events strictly after it, in `eventIndex` order, under the same
             (tenantId, workspaceId, runId) scope. Omitted or empty means the first page. Anything
-            that is not a non-negative integer string is refused with 400 INVALID_CURSOR (never
-            silently treated as the first page).
-          schema: { type: string, pattern: '^[0-9]{1,15}$' }
+            else that is not 1-15 ASCII decimal digits is refused with 400 INVALID_CURSOR (never
+            silently treated as the first page); the tenant scope is checked before the cursor.
+          schema: { type: string, pattern: '^[0-9]{0,15}$' }
       responses:
         '200':
           description: >-

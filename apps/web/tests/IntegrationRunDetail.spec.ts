@@ -745,6 +745,32 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
     })
 
+    // f-prov200 review r2: an answer that says `truncated: false` yet still hands out a cursor
+    // contradicts itself. The service resolves that toward "not complete" (the `|| nextCursor`
+    // half of its truncated rule): the notice shows, the cursor is offered, and it pages normally.
+    it('fail-closed: truncated:false that still carries a nextCursor is disclosed as incomplete and the cursor is offered', async () => {
+      const answers: unknown[] = [
+        { items: PROVENANCE_ITEMS, total: 2, truncated: false, nextCursor: '2' },
+        { items: [], total: 2, truncated: false, nextCursor: null },
+      ]
+      installMocks(() => jsonResponse(DETAIL_RUN), () => jsonResponse(answers.shift()))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+      expect(notice(host)).not.toBeNull()
+      expect(notice(host)!.textContent).toContain('may be incomplete')
+      expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
+      expect(loadMoreButton(host)).not.toBeNull()
+      await clickLoadMore(host)
+      const cursorRequests = provenanceCalls.filter((call) => hasCursor(call.url))
+      expect(cursorRequests).toHaveLength(1)
+      expect(new URLSearchParams(cursorRequests[0].url.split('?')[1]).get('cursor')).toBe('2')
+      // The follow-up is consistent and complete, so the timeline now is too.
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+      expect(notice(host)).toBeNull()
+    })
+
     it('a failed 加载更多 keeps the loaded events, the notice and the button; a retry resumes from the same cursor', async () => {
       const fake = pagedProvenance(201)
       let failCursorOnce = true
@@ -987,6 +1013,39 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       expect(notice(host)!.textContent).toContain('showing 200 of 201')
       // The reopened dialog read its own first page rather than reusing anything painted in.
       expect(fake.requests.filter((params) => !params.has('cursor'))).toHaveLength(2)
+    })
+
+    // f-prov200 review r2: every read that REPLACES the timeline releases an orphaned 加载更多. The
+    // polling re-read and 刷新 already did; a collapse + re-expand re-reads page one too whenever
+    // the section holds no events (an empty page that still handed out a cursor), and it must not
+    // leave the button stuck on 加载中 waiting for an answer its own token bump will discard.
+    it('a collapse + re-expand that re-reads page one while 加载更多 is in flight releases the button', async () => {
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (hasCursor(url) && !heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return jsonResponse({ items: [], total: 3, truncated: true, nextCursor: '0' })
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(notice(host)!.textContent).toContain('showing 0 of 3')
+      await clickLoadMore(host)
+      expect(heldUrl).not.toBe('')
+      expect(loadMoreButton(host)!.disabled).toBe(true)
+      await expandProvenance(host) // collapse
+      await expandProvenance(host) // re-expand: no events held, so page one is read again
+      expect(provenanceCalls.filter((call) => !hasCursor(call.url))).toHaveLength(2)
+      expect(notice(host)!.textContent).toContain('showing 0 of 3')
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+      // The orphaned page lands now: discarded (stale token), and it does not re-lock the button.
+      held.resolve(jsonResponse({ items: [provenanceEvent(1)], total: 3, truncated: true, nextCursor: '1' }))
+      await flushUi()
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(0)
+      expect(loadMoreButton(host)!.disabled).toBe(false)
     })
 
     it('a held FIRST-page read released after close + reopen, before re-expanding, never reaches the reopened dialog', async () => {

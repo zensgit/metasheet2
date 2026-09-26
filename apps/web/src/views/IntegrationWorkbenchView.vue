@@ -3754,6 +3754,10 @@ async function toggleRunProvenance(): Promise<void> {
   runProvenanceRequestId += 1
   const requestId = runProvenanceRequestId
   const runId = runDetailId.value
+  // f-prov200: like refreshRunProvenanceQuietly, this read REPLACES the timeline and its token bump
+  // fences out any 加载更多 still in flight — so that orphaned request must not keep the button
+  // stuck in its loading state (its own finally no longer owns the flag).
+  runProvenanceLoadingMore.value = false
   runProvenanceLoading.value = true
   try {
     // Same scope the detail read used — currentScope() is the single source, so the timeline can
