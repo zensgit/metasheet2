@@ -1099,38 +1099,50 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  * THE SHAPE. An `===` / `!==` / `==` / `!=` outside every literal whose two operands — each read WHOLE,
  * out to the nearest operator that binds looser than `===` (`&&` `||` `??` `?` `:` `,` `=` `=>` …) or
  * the enclosing bracket — are:
- *   (a) one of them SHEET-ID-VALUED: it holds an identifier, or a quoted key (`row['sheet_id']`), named
- *       `…sheetId` / `…sheet_id` in any case, that is not dereferenced further (`sheetId.length` is not).
- *       Wrappers do not matter: `String(x.sheet_id ?? '')`, `(x.sheet_id as string)`, `x.sheetId.trim()`,
- *       `normalise(x.sheet_id)`, `(await sheetIdOf(…)) !== sheetId` all count;
+ *   (a) one of them SHEET-ID-VALUED: it holds an identifier, or a quoted key (`row['sheet_id']`), whose
+ *       name ENDS in `sheetId` / `sheet_id` in any case (`foreignSheetId` too), and that is not dereferenced
+ *       further (`sheetId.length` is not). Wrappers do not matter: `String(x.sheet_id ?? '')`,
+ *       `(x.sheet_id as string)`, `x.sheetId.trim()`, `normalise(x.sheet_id)`, `(await sheetIdOf(…)) !== sheetId`;
  *   (b) the other NOT A LITERAL (a string, a template without holes, a number, `null`, `undefined`,
  *       `true`, `false` — parentheses and `as const` peeled);
  *   (c) sitting in the condition of an `if` — or in the initialiser of a binding (`const x = …`,
  *       `x = …`, `x ||= …`, across line breaks) whose name a later `if` in the same handler tests;
- *   (d) whose MISMATCH path answers the request (see `readAnswer`: a response method on any object, a
- *       write onto the response object, a call handed the response object anywhere in its arguments or
- *       a function the handler defined over it, a `throw`, `next(…)` / `reject(…)`, or a returned object
- *       with a `status` key).
- * The mismatch path is the then-branch when the comparison being an inequality makes the condition
- * true, the else-branch otherwise. A mismatch branch that does not `return` / `throw`, opposite one that
- * does — with no else, the empty else-branch — continues into the FALL-THROUGH RUN (`fallThroughRun`):
- * the statements after the `if`, up to and including the first that returns, throws or answers
- * unconditionally, or to the end of the enclosing block; an inner `if` / loop / `try` on the way is read
- * whole and the run goes on past it. A `!(…)` that holds exactly the comparison, or a `!` on the bound
- * boolean, flips the polarity; so does the `!` before `rows.some((row) => …)` / `rows.every(…)` whose
- * one-parameter arrow body IS the comparison, when that call is a whole `&&` / `||` operand of a condition
- * with no `?` / `:` / `??` at its top level (`quantifiedPolarity` — both are monotone in the predicate).
- * When the polarity cannot be told from the text — any other callback (`.filter(…)`, `.some(…) === false`,
- * `const same = (v) => …`), a `!(…)` that holds more than the comparison (`!(owner && owner.sheetId === x)`),
- * or the boolean tested as more than a bare name — BOTH paths are read.
+ *   (d) whose MISMATCH PATH, as delimited below, answers the request (`readAnswer`: a response method on
+ *       any object, a write onto the response object, a call handed the response object anywhere in its
+ *       arguments or a function the handler defined over it, a `throw`, `next(…)` / `reject(…)`, or a
+ *       returned object with a `status` key).
+ * THE MISMATCH PATH. The branch the condition goes to when the comparison says "different" (the
+ * then-branch when that makes the condition true, else the else-branch — with no else, an empty one), and,
+ * when that branch does not END — end means: it is, or its block holds at its own top level, a statement
+ * headed by `return` / `throw` (`endsPath`); a `return` inside a nested callback or inside an inner `if` does
+ * not count, nor does `continue` / `break` — the FALL-THROUGH RUN after the `if` (`fallThroughRun`): the
+ * statements from there up to and including the first headed by `return` / `throw` (a plain `res.json(…)` or
+ * `res.status(404)` does not stop it). An inner `if` / loop / `try` on the way is read whole and the run goes
+ * on past it; at the end of its block the run CLIMBS OUT past the owning statement (skipping its `else` /
+ * `catch`, reading a `finally`) and goes on — except out of a LOOP body or a FUNCTION body, where it stops.
+ * So a refusal DEFERRED to a later statement — a failure message or `{ status, … }` object, an errors list, a
+ * flag, set in the branch and answered by an `if` further down — is read where it is answered.
+ * THE POLARITY — which branch that is — is read only along a chain that is monotone at every level
+ * (`polarityOf`): the comparison is one whole operand of a top level that joins operands with `&&` / `||`
+ * only, inside nothing but GROUPING `(…)` — each a whole `&&` / `||` operand one level up in turn — up to the
+ * condition (or the binding's initialiser). A `!` before a grouping bracket that holds exactly the next operand,
+ * and a `!` on the bound boolean, flip it. The one other reading is `quantifiedPolarity`: a `!rows.some((row) => …)`
+ * / `rows.every(…)` whose one-parameter arrow body IS the comparison, as a whole `&&` / `||` operand of a
+ * condition with no `?` / `:` / `??` at its top level (both, taken to be Array's, are monotone in the
+ * predicate). Anything else — a call's arguments (`Boolean(…)`, `.filter(…)`, a `function` callback), an
+ * array or index `[…]`, an operator glued to a group (`(a === b) === false`, `x - (a === b)`), a ternary, `??`,
+ * a comma, two equalities in one operand (`a === b === c`), a `!(…)` that holds more than the comparison
+ * (`!(owner && owner.sheetId === x)`), a `??=` binding, the boolean tested as more than a bare name — reads
+ * BOTH paths.
  *
  * Two properties of every site are COMPUTED from the code, never taken from the table:
  *   echo             the answer's payload is not provably constant. Every construct that makes a path
  *                    answer also hands `readAnswer` its payload — all arguments of every response method
  *                    (`.end(…)`, `.redirect(…)`, `.set(…)` included), the value written onto the response
  *                    object, everything a response-handed call is given besides the response (`req`
- *                    included), a response closure's own answer, a thrown / rejected / next()-ed
- *                    expression, a returned `{ …status… }` object, the arguments of every `new X(…)`.
+ *                    included; for a METHOD, the object it is called on too — `stream.pipe(res)`), a
+ *                    response closure's own answer, a thrown / rejected / next()-ed expression, a returned
+ *                    `{ …status… }` object, the arguments of every `new X(…)`.
  *                    A value HANDED ON — thrown, returned as a status object, passed to `next` / `reject` —
  *                    is answered somewhere else, and that answer is read as well (`consumerOf`): for a
  *                    `throw`, the `catch` of the innermost `try` in the handler that holds it; for a status
@@ -1139,28 +1151,38 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *                    There the value's own name (`err.message`, `failure.status`) stands for the value,
  *                    whose payload is read at the handoff. Where the handler has no such place — `next` /
  *                    `reject`, a throw with no `catch`, a status object returned any other way — it reads
- *                    as echo. A payload is constant only if every leaf is a literal or a MODULE constant:
- *                    declared once, at column 0, as `const` with a plain literal initialiser and bound
- *                    nowhere else in the file (or imported unrenamed from a relative module that exports
- *                    it so). A `${…}` hole, a spread, a concatenation with a variable, a shorthand
- *                    `{ viewId }`, a member path, a call, a `let` / `var`, or any function-local name reads
- *                    as echo. Within what the scan reads, "cannot prove constant" is echo; what it does
- *                    NOT read is listed under NOT FOLLOWED below.
- *   beforeAuthority  inside a route handler: no 403-class refusal (the closure guard's AUTHORITY_REFUSAL,
- *                    NOT widened to 401 — a 401 turns away only callers who are not signed in, while the
- *                    GAP is a signed-in caller told apart before its 403) precedes the site in the
- *                    handler, and the site's mismatch path does not answer ONLY a 403 (then it is the
- *                    authority refusal itself). `null` outside every handler.
+ *                    as echo. A payload is constant only if every leaf is a literal — literals delimited left
+ *                    to right by the same scanner as everywhere here, so a backtick inside one quoted string
+ *                    never pairs with one in the next — or a MODULE constant: declared once, at column 0, as
+ *                    `const` with a plain literal initialiser and bound nowhere else in the file (or imported
+ *                    unrenamed from a relative module that exports it so). A `${…}` hole, a spread, a
+ *                    concatenation with a variable, a shorthand `{ viewId }`, a member path, a call, a `let` /
+ *                    `var`, or any function-local name reads as echo. Within what the scan reads, "cannot
+ *                    prove constant" is echo; what it does NOT read is listed under NOT FOLLOWED below.
+ *   beforeAuthority  inside a route handler: no 403-class refusal precedes the site in the handler's text
+ *                    with its literals blanked (so a message cannot pass for one), and the site's mismatch
+ *                    path is not itself only a 403 — one statement, `[return] send…Forbidden…(…)`,
+ *                    `[return] <x>.status(403)….(…)` or `throw new ForbiddenError(…)` (`isAuthorityRefusalAlone`).
+ *                    A 403-class refusal is recognised BY NAME, as the closure guard's AUTHORITY_REFUSAL
+ *                    does: `.status(403)`, `status: 403`, `send…Forbidden…(`, `ForbiddenError`,
+ *                    `requireRecordReadable(` — NOT widened to 401 (a 401 turns away only callers who are not
+ *                    signed in, while the GAP is a signed-in caller told apart before its 403). `null` outside
+ *                    every handler.
  *
  * THE RULES, over the whole file:
  *   1. CLOSED WORLD — the sites found are exactly the keys of SHEET_PAIRING_CENSUS. A new site of the
- *      shape above (within the limits listed below) reds until it is written down; what its helpers are
- *      called and how its message is worded do not enter into it.
+ *      shape above (within the limits listed below) reds until it is written down; what the helpers on its
+ *      mismatch path are called and how its message is worded do not enter into finding it.
  *   2. DECLARED = COMPUTED — each row's `echo` and `beforeAuthority` equal what the scan computes, so a
  *      row cannot be written down more flattering than the code it describes.
  *   3. ONLY NAMED EXCEPTIONS — `echo: true`, or `beforeAuthority` other than `false`, is allowed only
  *      for a key in SHEET_PAIRING_EXCEPTIONS, each with its reason; an exception whose site no longer
- *      needs it reds as well, so the list can only shrink.
+ *      needs it reds (REDUNDANT), and the table may hold no key outside SHEET_PAIRING_EXCEPTION_CEILING.
+ *   And: a census row or an exception that matches no site reds (GONE). What the scan needs to read a comparison
+ *   with a sheet-id-valued operand and cannot delimit reds (UNPARSEABLE): the `if` holding it or testing its
+ *   bound boolean (its branches), the expression around the operator, the fall-through run — and, when no
+ *   enclosing `if` or binding is found at all, an `if` within 600 characters before it whose condition will not
+ *   delimit (with sheet-id text within 200 characters of the operator).
  * A key is `<route or enclosing function> | <the comparison as written>`, never a line number.
  *
  * ── Known limits, stated instead of claimed away ──────────────────────────────
@@ -1171,20 +1193,26 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     boolean stored on an object (`ctx.mismatch = …`);
  *   - a comparison through a function (`Object.is(…)`, `isEqual(…)`) or a membership test
  *     (`ids.includes(view.sheetId)`, `set.has(…)`), or one whose operands are both named for something
- *     other than a sheet id (`row.owner !== target`);
+ *     other than a sheet id (`row.owner !== target`, a destructured `{ sheet_id: owning }`);
  *   - a bound boolean tested only in a different handler, or more than 4000 characters past a
  *     comparison outside every handler; a comparison inside a template-literal hole.
- * NOT FOLLOWED:
- *   - a mismatch path that only hands back `null` and lets its CALLER answer is not a site; the caller's
- *     answer is not traced back to it;
- *   - a helper handed the response object is read at the call: its body is not, so a helper handed only
- *     `res` and literals reads as values-free whatever it sends; the same for a module-level function
- *     that answers through a response object it reaches some other way;
+ * NOT FOLLOWED (the mismatch path is read only as delimited above):
+ *   - past the end of a LOOP body or a FUNCTION body: a flag / failure set inside a loop (`{ bad = row; break }`)
+ *     or a callback (`rows.forEach(…)`, `pool.transaction(async () => { failure = …; return })`) and answered
+ *     after it is not seen; neither is anything after a branch that ENDS with `return` / `throw`, other than the
+ *     consumers below — a mismatch path that hands back `null`, `false` or a message and lets its CALLER answer
+ *     is not a site, and the caller's answer is not traced back to it;
+ *   - a helper handed the response object is read at the call: its body is not, so a plain function handed only
+ *     `res` and literals reads as values-free whatever it sends; the same for a module-level function that
+ *     answers through a response object it reaches some other way;
+ *   - the response object is known by NAME: the handler's second parameter when it is written on the
+ *     declaration line, `res`, `response`, and a plain alias the handler declares (`const out = res`), also cast
+ *     (`(res as any)`) or asserted (`res!`). Reached any other way (`req.res`, a destructured method, a property),
+ *     only the listed response methods and a call handed one of those names count as answering;
+ *   - writes onto the response made BEFORE the comparison (a header set at the top of the handler) are not
+ *     on the mismatch path and are not read;
  *   - a response closure is followed one level: a closure that calls another closure is read by its own
  *     text only, and a closure that throws, returns a status object or calls `next` reads as echo;
- *   - a fall-through run ends with its enclosing block: when the returning `if` is the last statement
- *     of a `try` or another inner block, what runs after that block is not read — the mismatch path then
- *     reads as not answering, and the site is not seen;
  *   - a thrown value is taken to reach the `catch` of the innermost enclosing `try` in the handler, by
  *     position; whether a throw inside a callback that is not awaited really gets there is not checked.
  *     That `catch` is read whole — every answer in it is payload, whichever error it is written for —
@@ -1192,19 +1220,27 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *   - a returned status object is followed only into an `if (<binding>)` after the binding it is
  *     returned into; `if (!failure)`, a caller of a named function, or any other consumer reads as echo.
  * OTHER:
- *   - Authority position is TEXTUAL, as in the closure guard: a 403 written earlier in the handler
- *     counts even when it sits in a branch or a closure that does not run before the site.
+ *   - Authority is recognised BY NAME and by TEXTUAL position, as in the closure guard: a 403 sent any other
+ *     way (`res.sendStatus(403)`, `requireSheetRead(req, res)`) is not seen — the site then reads as before
+ *     authority (a false alarm); and a 403 written earlier in the handler (outside literals) counts wherever it
+ *     sits and whether or not it runs before the site — a branch, a closure, an object never answered. The
+ *     pairing side is found by shape; this side is not.
  *   - A pairing pushed into SQL is covered by the SQL cell below for a `meta_views` SELECT that binds
  *     `id = $n` and `sheet_id = $n` in one literal or `+`-joined literals, the SELECT anywhere in it
  *     (a CTE, `INSERT … SELECT`); not for SQL assembled through `${…}` holes or other builders.
  *   - Scope is routes/univer-meta.ts, the file the #5946 refusal and its three hand-written copies
  *     live in. Other route files are not scanned.
  *   - Comments are blanked with the same two regexes the closure guard strips them with; the
- *     population cell reds if that ever swallows a route declaration.
+ *     population cell reds if that ever swallows a route declaration. Literals are delimited by a scanner that
+ *     tells a regex from a division by the token before the `/` (the usual rule); code it misreads is misread
+ *     (the SQL cell's `meta_views` check is its desync alarm).
  *   - The constant rule errs toward echo: a function-local `const` with a literal value, a constant
  *     defined from another constant, a TS cast in a payload, a response method name on an unrelated
- *     object (`map.set(k, v)` on the path), or a `catch` whose other branches answer a local (the
- *     `getDbNotReadyMessage` hint most handlers carry) reads as echo — false alarms in that direction.
+ *     object (`map.set(k, v)` on the path), a method helper handed `res`, or a `catch` whose other branches
+ *     answer a local (the `getDbNotReadyMessage` hint most handlers carry) reads as echo — false alarms in that
+ *     direction. So does reading BOTH paths where the polarity is unknown, and a fall-through run that goes on
+ *     into the handler's own success answer (a mismatch branch that only logs, at the handler's top level, is
+ *     then a site).
  */
 
 const ROUTES_DIR = join(__dirname, '../../src/routes')
@@ -1385,33 +1421,152 @@ function parseIf(code: string, at: number): IfStatement | null {
   return { condition, then, else: elseBranch, end: elseBranch ? elseBranch[1] : then[1] }
 }
 
-/** A statement that only answers CONDITIONALLY: the run below reads it whole and goes on past it. */
-const COMPOUND_HEAD = /^(?:if|else|for|while|do|switch|try)(?![\w$])|^\{/
-
 /**
- * The FALL-THROUGH RUN from `at`: the statements of the enclosing block from there on, up to and
- * including the first that ends the path unconditionally — one headed by `return` / `throw`, or a
- * plain statement that answers (`answers`) — or up to the block's end. An inner `if`, loop, `try` or
- * block is read whole and the run continues past it, since what it answers is conditional. null if a
- * statement in the run cannot be delimited.
+ * The branch ENDS its path: it is a statement headed by `return` / `throw`, or a block holding one at its OWN top
+ * level (nothing after it on that path runs). A `return` inside a nested function (`rows.map((r) => { return … })`)
+ * or inside an inner `if` / loop / `try` / block does not end it — such a statement is headed by something else —
+ * and neither does `continue` / `break`: the run after the `if` is then read (more, never less).
  */
-function fallThroughRun(code: string, at: number, answers: (statement: string) => boolean): [number, number] | null {
-  const start = skipSpace(code, at)
-  let i = start
-  let end = start
-  while (i < code.length && !'})]'.includes(code[i]!)) {
+function endsPath(code: string, span: [number, number] | null): boolean {
+  if (!span) return false
+  const head = /^(?:return|throw)(?![\w$])/
+  if (code[span[0]] !== '{') return head.test(code.slice(span[0], span[1]))
+  let i = skipSpace(code, span[0] + 1)
+  while (i < span[1] - 1) {
     if (code[i] === ';') {
       i = skipSpace(code, i + 1)
       continue
     }
     const statement = branchAt(code, i)
-    if (!statement) return null
-    end = statement[1]
-    const text = code.slice(statement[0], statement[1])
-    if (/^(?:return|throw)(?![\w$])/.test(text) || (!COMPOUND_HEAD.test(text) && answers(text))) break
-    i = skipSpace(code, end)
+    if (!statement || statement[1] <= i) return false
+    if (head.test(code.slice(statement[0], statement[1]))) return true
+    i = skipSpace(code, statement[1])
   }
-  return [start, end]
+  return false
+}
+
+/**
+ * Every bracket of `code` (literal-aware, comments already blanked), as closing index → opening index. Brackets
+ * inside a template's `${…}` holes are not paired (the literal is skipped whole).
+ */
+function bracketOpeners(code: string): Map<number, number> {
+  const openers = new Map<number, number>()
+  const stack: number[] = []
+  let prev = ''
+  for (let i = 0; i < code.length; i += 1) {
+    const c = code[i]!
+    const end = literalEnd(code, i, prev)
+    if (end > 0) {
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    if (c in CLOSER) stack.push(i)
+    else if (c === ')' || c === ']' || c === '}') {
+      const open = stack.pop()
+      if (open !== undefined && CLOSER[code[open]!] === c) openers.set(i, open)
+    }
+    if (!/\s/.test(c)) prev = c
+  }
+  return openers
+}
+
+/** The word (identifier) ending at `end` (exclusive) after whitespace, or ''. */
+function wordBefore(code: string, end: number): string {
+  let j = end - 1
+  while (j >= 0 && /\s/.test(code[j]!)) j -= 1
+  let k = j
+  while (k >= 0 && /[\w$]/.test(code[k]!)) k -= 1
+  return code.slice(k + 1, j + 1)
+}
+
+/**
+ * The block opening at `open` is one a fall-through run does NOT climb out of: a FUNCTION body (an arrow's, a
+ * `function`'s, a method's — what runs next is its caller's business) or a LOOP body (`for (…) {`, `while (…) {`,
+ * `do {` — what runs next is the next iteration). Every other block — `if (…) {`, `else {`, `try {`, `catch (…) {` /
+ * `catch {`, `finally {`, `switch (…) {`, a bare `{` — is climbed out of.
+ */
+function runStopsAt(code: string, open: number, openers: ReadonlyMap<number, number>): boolean {
+  let j = open - 1
+  while (j >= 0 && /\s/.test(code[j]!)) j -= 1
+  if (j < 0) return false
+  if (code[j] === '>') return true
+  if (code[j] === ')') {
+    const paren = openers.get(j)
+    if (paren === undefined) return true
+    return !['if', 'switch', 'catch', 'with'].includes(wordBefore(code, paren))
+  }
+  if (/[\w$]/.test(code[j]!)) return !['else', 'try', 'finally', 'catch'].includes(wordBefore(code, j + 1))
+  return false
+}
+
+/**
+ * Just past the statement whose block closes at `close`: its `else` branches and its `catch` clause are skipped
+ * (they do not run after this block did). A `finally` is left for the run to read. -1 if it cannot be delimited.
+ */
+function pastOwner(code: string, close: number): number {
+  let j = skipSpace(code, close + 1)
+  for (;;) {
+    if (/^else(?![\w$])/.test(code.slice(j, j + 5))) {
+      const branch = branchAt(code, skipSpace(code, j + 4))
+      if (!branch) return -1
+      j = skipSpace(code, branch[1])
+    } else if (/^catch(?![\w$])/.test(code.slice(j, j + 6))) {
+      let k = skipSpace(code, j + 5)
+      if (code[k] === '(') {
+        const params = matchBracket(code, k)
+        if (params === -1) return -1
+        k = skipSpace(code, params + 1)
+      }
+      const body = code[k] === '{' ? matchBracket(code, k) : -1
+      if (body === -1) return -1
+      j = skipSpace(code, body + 1)
+    } else {
+      return j
+    }
+  }
+}
+
+/**
+ * The FALL-THROUGH RUN from `at`: the statements from there on, up to and including the first headed by `return` /
+ * `throw` — the only statements taken to END the path (a plain `res.status(404)` or `res.json(…)` without `return`
+ * does not: whatever follows it is read too). An inner `if`, loop, `try` or block on the way is read whole and the
+ * run continues past it, since what it answers is conditional. When the run reaches the end of its block without
+ * ending, it CLIMBS OUT: it goes on after the statement that owns the block (past its `else` / `catch`; a `finally`
+ * is read) — except out of a function body or a loop body (`runStopsAt`), where it stops. As [start, end) spans, one
+ * per block level; null if a statement or a block on the way cannot be delimited.
+ */
+function fallThroughRun(code: string, at: number, openers: ReadonlyMap<number, number>): Array<[number, number]> | null {
+  const runs: Array<[number, number]> = []
+  let from = at
+  for (;;) {
+    const start = skipSpace(code, from)
+    let i = start
+    let end = start
+    let ended = false
+    while (i < code.length && !'})]'.includes(code[i]!)) {
+      if (code[i] === ';') {
+        i = skipSpace(code, i + 1)
+        continue
+      }
+      const statement = branchAt(code, i)
+      if (!statement) return null
+      end = statement[1]
+      if (/^(?:return|throw)(?![\w$])/.test(code.slice(statement[0], statement[1]))) {
+        ended = true
+        break
+      }
+      i = skipSpace(code, end)
+    }
+    runs.push([start, end])
+    if (ended || code[i] !== '}') return runs
+    const open = openers.get(i)
+    if (open === undefined) return null
+    if (runStopsAt(code, open, openers)) return runs
+    const next = pastOwner(code, i)
+    if (next === -1) return null
+    from = next
+  }
 }
 
 // ── the comparison ────────────────────────────────────────────────────────────
@@ -1446,6 +1601,11 @@ interface Frame {
   open: number
   /** An odd number of `!` stands right before the bracket. */
   negated: boolean
+  /**
+   * A GROUPING `(…)` — not a call's argument list (`Boolean(…)`, `fn(…)`, `x?.(…)`, `f(a)(…)`), an index or
+   * array `[…]`, or a `{…}` (object literal or function body). Only through these can a polarity be read.
+   */
+  grouping: boolean
   /** An arrow `=>` was passed at this level: what follows it is a callback body. */
   arrow: boolean
   /** Where the first such `=>` stands; -1 if none. */
@@ -1460,14 +1620,37 @@ interface ExpressionUnit {
   end: number
   /** The bracket levels enclosing the unit, the walked region first. */
   frames: Frame[]
-  /** The unit is the ENTIRE content of its innermost bracket (`!(a === b)`, not `!(x && a === b)`). */
-  whole: boolean
+  /** The end of the walked region (every other level is closed by its own bracket). */
+  regionEnd: number
 }
 
 /** Words that end an operand the way `;` does. */
 const OPERAND_ENDING_WORDS = new Set(['return', 'throw', 'yield', 'case', 'else', 'do', 'const', 'let', 'var'])
 /** Operators that bind looser than `===` and so end an operand: `&&` `||` `??` (and their `=` forms), `=>`, shift-assignments. */
 const LOOSE_OPERATOR = /^(?:&&=?|\|\|=?|\?\?=?|=>|>>>=|>>=|<<=|\*\*=)/
+
+/** Keywords a GROUPING `(` may follow (`if (`, `return (`, `await (`…); any other name before `(` makes it a call. */
+const GROUPING_AFTER_WORDS = new Set(['if', 'while', 'for', 'switch', 'catch', 'with', 'return', 'typeof', 'void', 'await', 'in', 'of', 'instanceof', 'case', 'do', 'else', 'yield', 'throw', 'delete'])
+
+/**
+ * The `(` at `open` groups an expression rather than opening a call's argument list: it follows an operator,
+ * an opening bracket, a separator or one of GROUPING_AFTER_WORDS — not a name (`Boolean(`), a `)` / `]`
+ * (`f(a)(`, `fns[0](`) or `?.` (`fn?.(`).
+ */
+function isGroupingParen(code: string, from: number, open: number): boolean {
+  let j = open - 1
+  while (j >= from && /\s/.test(code[j]!)) j -= 1
+  if (j < from) return true
+  const c = code[j]!
+  if (c === ')' || c === ']') return false
+  if (c === '.') return false
+  if (/[\w$]/.test(c)) {
+    let k = j
+    while (k > from && /[\w$]/.test(code[k - 1]!)) k -= 1
+    return code[k - 1] !== '.' && GROUPING_AFTER_WORDS.has(code.slice(k, j + 1))
+  }
+  return true
+}
 
 /**
  * Walks [from, to) bracket- and literal-aware and returns the expression unit that holds [at, at + length):
@@ -1476,15 +1659,14 @@ const LOOSE_OPERATOR = /^(?:&&=?|\|\|=?|\?\?=?|=>|>>>=|>>=|<<=|\*\*=)/
  * that ends a statement. null if the walk cannot reach `at` outside a literal.
  */
 function unitAt(code: string, from: number, to: number, at: number, length: number): ExpressionUnit | null {
-  const stack: Frame[] = [{ open: from - 1, negated: false, arrow: false, arrowAt: -1, from }]
+  const stack: Frame[] = [{ open: from - 1, negated: false, grouping: true, arrow: false, arrowAt: -1, from }]
   let prev = ''
-  let held: { start: number; frames: Frame[]; depth: number; fromFrameStart: boolean } | null = null
-  const unit = (end: number, byBracket: boolean): ExpressionUnit =>
-    ({ start: held!.start, end, frames: held!.frames, whole: byBracket && held!.fromFrameStart })
+  let held: { start: number; frames: Frame[]; depth: number } | null = null
+  const unit = (end: number): ExpressionUnit => ({ start: held!.start, end, frames: held!.frames, regionEnd: to })
   for (let i = from; i < to; i += 1) {
     const top = stack[stack.length - 1]!
     if (i === at && held === null) {
-      held = { start: top.from, frames: stack.map((f) => ({ ...f })), depth: stack.length, fromFrameStart: top.from === top.open + 1 }
+      held = { start: top.from, frames: stack.map((f) => ({ ...f })), depth: stack.length }
       i = at + length - 1
       prev = code[i]!
       continue
@@ -1501,12 +1683,12 @@ function unitAt(code: string, from: number, to: number, at: number, length: numb
     if (c in CLOSER) {
       let bangs = 0
       for (let j = i - 1; j >= from && /[\s!]/.test(code[j]!); j -= 1) if (code[j] === '!') bangs += 1
-      stack.push({ open: i, negated: bangs % 2 === 1, arrow: false, arrowAt: -1, from: i + 1 })
+      stack.push({ open: i, negated: bangs % 2 === 1, grouping: c === '(' && isGroupingParen(code, from, i), arrow: false, arrowAt: -1, from: i + 1 })
       prev = c
       continue
     }
     if (c === ')' || c === ']' || c === '}') {
-      if (held && stack.length === held.depth) return unit(i, true)
+      if (held && stack.length === held.depth) return unit(i)
       stack.pop()
       if (stack.length === 0) return null
       prev = c
@@ -1533,7 +1715,7 @@ function unitAt(code: string, from: number, to: number, at: number, length: numb
       delimiter = 1
     }
     if (delimiter > 0) {
-      if (held && stack.length === held.depth) return unit(i, false)
+      if (held && stack.length === held.depth) return unit(i)
       top.from = i + delimiter
       i += delimiter - 1
       prev = code[i]!
@@ -1546,22 +1728,61 @@ function unitAt(code: string, from: number, to: number, at: number, length: numb
     }
     if (!/\s/.test(c)) prev = c
   }
-  return held ? unit(to, true) : null
+  return held ? unit(to) : null
 }
 
 type Polarity = 'direct' | 'flipped' | 'unknown'
 
 /**
- * Whether the unit being TRUE makes its enclosing condition true (`direct`), false (`flipped`), or cannot
- * be told from the text (`unknown`): inside a callback, or inside a `!(…)` that holds more than the unit.
- * `bangs` counts the `!` written right before the unit itself (a bound boolean's `!elsewhere`).
+ * Whether the unit being TRUE pushes the region — the `if` condition, or a binding's initialiser — toward true
+ * (`direct`), toward false (`flipped`), or cannot be told from the text (`unknown`). It is told only along a
+ * chain that is monotone at every level, from the unit out to the region:
+ *   - the unit holds ONE equality at its own top level (`a === b === c` is unknown);
+ *   - every level is the region itself or a GROUPING `(…)` (`isGroupingParen`) — never a call's arguments
+ *     (`Boolean(…)`, `.filter(…)`), an index / array `[…]`, or a `{…}` (a callback or function body);
+ *   - at every level the unit (or the next inner `!…!(…)`) is a WHOLE operand of a top level that joins its
+ *     operands with `&&` / `||` and nothing else — no `?` `:` `??` `,` `;` `=` `=>` `&` `|` `^` there, and no
+ *     operator glued to the bracket (`(a === b) === false`, `x + (a === b)`, `await (a === b)`);
+ *   - a `!` before a grouping bracket flips it, but only when that bracket holds exactly the next operand
+ *     (`!(a === b)`), not a conjunction (`!(owner && a === b)` is unknown); `bangs` counts the `!` written right
+ *     before the unit itself (a bound boolean's `!elsewhere`).
+ * Everything else is `unknown`, and the scan then reads BOTH paths.
  */
-function polarityOf(unit: ExpressionUnit, bangs: number): Polarity {
-  if (unit.frames.some((f) => f.arrow)) return 'unknown'
-  const negated = unit.frames.filter((f) => f.negated)
-  if (negated.length === 0) return bangs % 2 === 1 ? 'flipped' : 'direct'
-  if (negated.length === 1 && unit.frames[unit.frames.length - 1]!.negated && unit.whole && bangs === 0) return 'flipped'
-  return 'unknown'
+function polarityOf(code: string, unit: ExpressionUnit, bangs: number): Polarity {
+  if ((topLevelOnly(code.slice(unit.start, unit.end)).match(/!==|===|!=|==/g) ?? []).length > 1) return 'unknown'
+  let flips = bangs
+  let operand: [number, number] = [unit.start, unit.end]
+  for (let k = unit.frames.length - 1; k >= 0; k -= 1) {
+    const frame = unit.frames[k]!
+    if (!frame.grouping || frame.arrow) return 'unknown'
+    const inner: [number, number] = [frame.open + 1, k === 0 ? unit.regionEnd : matchBracket(code, frame.open)]
+    if (inner[1] === -1) return 'unknown'
+    const joined = andOrOperand(code, inner, operand)
+    if (joined === null) return 'unknown'
+    if (k === 0) break
+    if (frame.negated) {
+      if (joined === 'among') return 'unknown'
+      flips += 1
+    }
+    let start = frame.open
+    for (let j = frame.open - 1; j >= 0 && /[\s!]/.test(code[j]!); j -= 1) if (code[j] === '!') start = j
+    operand = [start, inner[1] + 1]
+  }
+  return flips % 2 === 1 ? 'flipped' : 'direct'
+}
+
+/**
+ * How `operand` sits in `inner`: `alone` — it is all of it; `among` — a whole operand of a top level that joins
+ * operands with `&&` / `||` only; null — anything else (another operator at that top level, or one glued to it).
+ */
+function andOrOperand(code: string, inner: [number, number], operand: [number, number]): 'alone' | 'among' | null {
+  const top = topLevelOnly(code.slice(inner[0], inner[1])).replace(/;\s*$/, (tail) => ' '.repeat(tail.length))
+  const others = top.replace(/&&|\|\|/g, '  ')
+  if (/\?(?!\.(?!\d))|:|,|;|(?<![=!<>])=(?!=)|&|\||\^/.test(others)) return null
+  const before = top.slice(0, operand[0] - inner[0])
+  const after = top.slice(operand[1] - inner[0])
+  if (before.trim() === '' && after.trim() === '') return 'alone'
+  return /(?:^|&&|\|\|)\s*$/.test(before) && /^\s*(?:$|&&|\|\|)/.test(after) ? 'among' : null
 }
 
 const combinePolarity = (a: Polarity, b: Polarity): Polarity =>
@@ -1666,7 +1887,7 @@ function withinSpans(spans: ReadonlyArray<[number, number]>): (at: number) => bo
  * The binding whose initialiser holds `at`: the nearest `name = …` before it — outside every literal —
  * whose statement runs past it.
  */
-function bindingAround(code: string, at: number, inLiteral: (at: number) => boolean): { name: string; from: number; end: number } | null {
+function bindingAround(code: string, at: number, inLiteral: (at: number) => boolean): { name: string; from: number; end: number; nullish: boolean } | null {
   const lo = Math.max(0, at - 3000)
   const candidates = [...code.slice(lo, at).matchAll(BINDING)]
   for (let k = candidates.length - 1; k >= 0; k -= 1) {
@@ -1676,7 +1897,8 @@ function bindingAround(code: string, at: number, inLiteral: (at: number) => bool
     const from = skipSpace(code, lo + m.index! + m[0].length)
     if (from > at) continue
     const end = statementEnd(code, from)
-    if (end !== -1 && at < end) return { name, from, end }
+    // `x ??= …` keeps x whenever it is already set, so the comparison does not decide it.
+    if (end !== -1 && at < end) return { name, from, end, nullish: /\?\?\s*=$/.test(m[0]) }
   }
   return null
 }
@@ -1809,7 +2031,11 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
   // The whole chain hanging off the response object: `res.status(404).set(…).json(…)`, `res['json'](…)`,
   // `res.statusMessage = …`. Every call in it is payload; any call that is not a known read/write, and any
   // property write at its end, answers.
-  const receiver = new RegExp(String.raw`(?<![\w$.])(?:${responseNames.map(escapeName).join('|')})(?![\w$])(?=\s*(?:\??\.|\[))`, 'g')
+  // …and off a plain alias of it the handler declared (`const out = res`), a cast of either (`(res as any)`) or a
+  // non-null assertion (`res!`), so an unlisted method there answers too.
+  const aliases = [...closures].filter(([, init]) => new RegExp(String.raw`^(?:${responseNames.map(escapeName).join('|')})(?:\s+as\s+[\w$.<>]+)?\s*;?\s*$`).test(init.trim())).map(([name]) => name)
+  const receiverNames = [...responseNames, ...aliases].map(escapeName).join('|')
+  const receiver = new RegExp(String.raw`(?:\(\s*(?:${receiverNames})\s+as\s+[^()]*\)|(?<![\w$.])(?:${receiverNames})(?![\w$]))(?:\s*!)?(?=\s*(?:\??\.|\[))`, 'g')
   for (const m of text.matchAll(receiver)) {
     let i = m.index! + m[0].length
     let member: string | null = null
@@ -1846,8 +2072,8 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
       }
     }
   }
-  const handed = responseToken(responseNames)
-  const handedAll = responseToken(responseNames, 'g')
+  const handed = responseToken([...responseNames, ...aliases])
+  const handedAll = responseToken([...responseNames, ...aliases], 'g')
   for (const m of text.matchAll(CALLEE)) {
     const args = argsOf(m.index! + m[0].length - 1)
     if (args === null) return { answers: true, payloads: null, handoffs: [] }
@@ -1863,6 +2089,12 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
     if (!handed.test(args)) continue
     answers = true
     payloads.push(args.replace(handedAll, ' '))
+    // A METHOD handed the response object (`stream.pipe(res)`, `refusals.notFound(res)`) is also given the object
+    // it is called on: that is payload too (a dotted name, or — anything else — an unreadable one).
+    if (text[m.index! - 1] === '.') {
+      const chain = /(?:[A-Za-z_$][\w$]*\s*!?\s*\??\.\s*)+$/.exec(text.slice(Math.max(0, m.index! - 200), m.index!))
+      payloads.push(chain ? chain[0].replace(/\s*\??\.\s*$/, '') : '(receiver)')
+    }
   }
   for (const m of text.matchAll(/(?<![\w$.])throw(?![\w$])/g)) {
     answers = true
@@ -1900,8 +2132,15 @@ function readAnswer(text: string, responseNames: readonly string[], closures: Re
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const TEMPLATE_LITERAL = /`(?:[^`\\]|\\.)*`/g
-const QUOTED_LITERAL = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g
+/** A template literal (as `skipTemplate` delimits it) holds an unescaped `${…}` hole. */
+function templateHasHole(template: string): boolean {
+  for (let i = 1; i < template.length - 1; i += 1) {
+    if (template[i] === '\\') i += 1
+    else if (template[i] === '$' && template[i + 1] === '{') return true
+  }
+  return false
+}
+
 const LITERAL_INITIALISER = /^(?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\$]|\\.)*`|-?\d+(?:\.\d+)?)(?:\s+as\s+const)?\s*;?$/
 
 const escapeName = (name: string): string => name.replace(/\$/g, '\\$')
@@ -1985,9 +2224,25 @@ function constantNames(code: string): (name: string) => boolean {
  * other name reads as echo.
  */
 function isConstantExpression(expr: string, isConstantName: (name: string) => boolean): boolean {
-  const templates: string[] = expr.match(TEMPLATE_LITERAL) ?? []
-  if (templates.some((t) => t.includes('${'))) return false
-  const residue = expr.replace(TEMPLATE_LITERAL, ' ').replace(QUOTED_LITERAL, ' ')
+  // Literals are delimited by the same scanner as everywhere else in this file, left to right — never by one
+  // regex per quote kind, which pairs a backtick INSIDE one quoted string with one inside the next
+  // (`'View `' + viewId + '` is elsewhere'`) and swallows the name between them.
+  let residue = ''
+  let prev = ''
+  for (let i = 0; i < expr.length; i += 1) {
+    const c = expr[i]!
+    const end = literalEnd(expr, i, prev)
+    if (end === -1) return false
+    if (end > 0) {
+      if (c === '`' && templateHasHole(expr.slice(i, end))) return false
+      residue += ' '
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    residue += c
+    if (!/\s/.test(c)) prev = c
+  }
   if (residue.includes('...')) return false
   const leaves = residue
     .replace(/(?<![\w$.])as\s+const(?![\w$])/g, ' ')
@@ -2009,6 +2264,59 @@ function isConstantExpression(expr: string, isConstantName: (name: string) => bo
  * foreign one), and a 401 only turns away callers who are not signed in, so it closes none of that.
  */
 const AUTHORITY_REFUSAL_403 = /\.status\(\s*403\s*\)|(?<![\w$])status:\s*403(?![\w$])|(?<![\w$])send\w*Forbidden\w*\(|(?<![\w$])ForbiddenError(?![\w$])|(?<![\w$])requireRecordReadable\(/
+
+/**
+ * A mismatch path that IS the authority refusal, and nothing else: one statement — `[return] send…Forbidden…(…)`,
+ * `[return] <name>.status(403)` followed only by further `.method(…)` calls, or `throw new ForbiddenError(…)` —
+ * alone or alone in its block, every call's arguments delimited by bracket matching (so nothing can follow them).
+ * Read on the path with its literals blanked, so no message text can pass for it.
+ */
+function isAuthorityRefusalAlone(bareText: string): boolean {
+  let text = bareText.trim()
+  if (text.startsWith('{')) {
+    if (matchBracket(text, 0) !== text.length - 1) return false
+    text = text.slice(1, -1).trim()
+  }
+  text = text.replace(/;\s*$/, '').trim()
+  // Each head, then: after its `(…)`, only `.name(…)` calls (for the status chain) or nothing, to the end.
+  const head = /^(?:return\s+)?(?:([\w$.]*send\w*Forbidden\w*)\s*\(|([\w$]+)\s*\.\s*status\s*\(\s*403\s*\)|throw\s+new\s+ForbiddenError\s*\()/.exec(text)
+  if (!head) return false
+  let i = head[0].length
+  if (head[2] === undefined) {
+    const close = matchBracket(text, i - 1)
+    if (close === -1) return false
+    i = close + 1
+  }
+  for (;;) {
+    const rest = text.slice(i)
+    if (rest.trim() === '') return true
+    if (head[2] === undefined) return false
+    const call = /^\s*\.\s*[\w$]+\s*\(/.exec(rest)
+    if (!call) return false
+    const close = matchBracket(text, i + call[0].length - 1)
+    if (close === -1) return false
+    i = close + 1
+  }
+}
+
+/** `text` with the inside of every string, template and regex literal blanked to spaces (line breaks kept). */
+function blankLiterals(text: string): string {
+  const out = text.split('')
+  let prev = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i]!
+    const end = literalEnd(text, i, prev)
+    if (end === -1) return text.replace(/[^\n]/g, ' ')
+    if (end > 0) {
+      for (let j = i + 1; j < end - 1; j += 1) if (out[j] !== '\n') out[j] = ' '
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    if (!/\s/.test(c)) prev = c
+  }
+  return out.join('')
+}
 
 const SHAPE_ROUTE_DECL = /^([ \t]*)router\.(get|post|patch|delete|put)\(\s*'([^']+)'/
 const SHAPE_FN_DECL = /^[ \t]*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|^[ \t]*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:\([^)\n]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=\n]+?)?\s*=>/gm
@@ -2142,6 +2450,9 @@ function scanSheetPairings(source: string): PairingScan {
   }
   const isConstantName = constantNames(code)
   const inLiteral = withinSpans(literalSpans(code))
+  /** The code with every literal's inside blanked: where a 403 is looked for, so no message text can pass for one. */
+  const bare = blankLiterals(code)
+  const openers = bracketOpeners(code)
   const closuresByHandler = new Map<HandlerSpan, Map<string, string>>()
   const sites: PairingSite[] = []
   const unparseable: string[] = []
@@ -2173,7 +2484,13 @@ function scanSheetPairings(source: string): PairingScan {
     // …or the initialiser of the binding it is first assigned to, across line breaks, with or without a keyword.
     const binding = region ? null : bindingAround(code, at, inLiteral)
     if (binding) region = [binding.from, binding.end]
-    if (!region) continue
+    if (!region) {
+      // An `if` just before it that could not be delimited may be the one that holds it: say so.
+      if (nearestFailed && /sheet_?id/i.test(code.slice(Math.max(0, at - 200), at + 200))) {
+        unparseable.push(`line ${lineAt(at)}: the \`if\` before \`${op}\``)
+      }
+      continue
+    }
 
     // 2. Its operands, whole: from the looser operator before it to the one after it.
     const unit = unitAt(code, region[0], region[1], at, op.length)
@@ -2188,7 +2505,8 @@ function scanSheetPairings(source: string): PairingScan {
     const text = `${left} ${op} ${right}`.replace(/\s+/g, ' ')
 
     // 3. Its polarity in the `if` that decides — through the bound boolean when there is one.
-    let polarity = quantifiedPolarity(code, unit, region) ?? polarityOf(unit, 0)
+    let polarity = quantifiedPolarity(code, unit, region) ?? polarityOf(code, unit, 0)
+    if (binding?.nullish) polarity = 'unknown'
     if (binding) {
       const limit = handler ? handler.end : at + 4000
       const use = new RegExp(String.raw`(?<![\w$.])${escapeName(binding.name)}(?![\w$])`, 'g')
@@ -2210,7 +2528,7 @@ function scanSheetPairings(source: string): PairingScan {
         const suffix = aliasUnit ? code.slice(aliasAt + binding.name.length, aliasUnit.end) : ''
         const aliasPolarity: Polarity = !aliasUnit || uses.length > 1 || !/^[\s!]*$/.test(prefix) || suffix.trim() !== ''
           ? 'unknown'
-          : polarityOf(aliasUnit, (prefix.match(/!/g) ?? []).length)
+          : polarityOf(code, aliasUnit, (prefix.match(/!/g) ?? []).length)
         polarity = combinePolarity(polarity, aliasPolarity)
         break
       }
@@ -2221,8 +2539,8 @@ function scanSheetPairings(source: string): PairingScan {
     }
 
     // 4. The mismatch path(s) — both branches when the polarity is unknown — and whether any answers.
-    //    A mismatch branch that does not end the path, opposite one that does, continues into the
-    //    FALL-THROUGH RUN after the `if` (with no else, the empty else-branch is such a branch).
+    //    A mismatch branch that does not END the path (`endsPath`) — whatever the other branch does, and
+    //    with no else the empty else-branch — continues into the FALL-THROUGH RUN after the `if`.
     const mismatchWhenTrue = (op === '!==' || op === '!=') !== (polarity === 'flipped')
     const responseNames = handler ? handler.responseNames : DEFAULT_RESPONSE_NAMES
     let closures = handler ? closuresByHandler.get(handler) : undefined
@@ -2230,19 +2548,18 @@ function scanSheetPairings(source: string): PairingScan {
       closures = responseClosures(code.slice(handler.start, handler.end), responseNames)
       closuresByHandler.set(handler, closures)
     }
-    const ends = (span: [number, number] | null) => span !== null && /(?<![\w$.])(?:return|throw)(?![\w$])/.test(code.slice(span[0], span[1]))
     const paths: Array<[number, number]> = []
     const ifEnd = statement.end
     let undelimited = false
-    const mismatchPath = (branch: [number, number] | null, other: [number, number] | null) => {
+    const mismatchPath = (branch: [number, number] | null) => {
       if (branch) paths.push(branch)
-      if (ends(branch) || !ends(other)) return
-      const run = fallThroughRun(code, ifEnd, (next) => readAnswer(next, responseNames, closures).answers)
-      if (run) paths.push(run)
+      if (endsPath(code, branch)) return
+      const run = fallThroughRun(code, ifEnd, openers)
+      if (run) paths.push(...run)
       else undelimited = true
     }
-    if (polarity === 'unknown' || mismatchWhenTrue) mismatchPath(statement.then, statement.else)
-    if (polarity === 'unknown' || !mismatchWhenTrue) mismatchPath(statement.else, statement.then)
+    if (polarity === 'unknown' || mismatchWhenTrue) mismatchPath(statement.then)
+    if (polarity === 'unknown' || !mismatchWhenTrue) mismatchPath(statement.else)
     if (undelimited) {
       unparseable.push(`line ${lineAt(at)}: ${text} (the statements after it)`)
       continue
@@ -2270,11 +2587,11 @@ function scanSheetPairings(source: string): PairingScan {
       || !read.handoffs.every((h) => answeredConstant(from, h)))
     const fn = handler ? null : fnDecls.filter((f) => f.index < at).pop() ?? null
     const context = handler ? handler.key : fn ? `fn ${fn.name}` : '(module)'
-    // A mismatch path that answers ONLY a 403 is the authority refusal itself — no other status in it.
-    const answersOnlyWithAuthority = answering.every(({ path }) =>
-      AUTHORITY_REFUSAL_403.test(path) && !/\.\s*status\s*\(\s*(?!403\s*\))/.test(path))
+    // A mismatch path that is ONLY a 403 is the authority refusal itself (`isAuthorityRefusalAlone`).
+    const answersOnlyWithAuthority = answering.every(({ from, path }) =>
+      isAuthorityRefusalAlone(bare.slice(from, from + path.length)))
     const beforeAuthority = handler
-      ? !AUTHORITY_REFUSAL_403.test(code.slice(handler.start, at)) && !answersOnlyWithAuthority
+      ? !AUTHORITY_REFUSAL_403.test(bare.slice(handler.start, at)) && !answersOnlyWithAuthority
       : null
     sites.push({ key: `${context} | ${text}`, line: lineAt(at), echo, beforeAuthority })
   }
@@ -2325,8 +2642,25 @@ const SHEET_PAIRING_EXCEPTIONS: Record<string, { kind: 'MAPPED' | 'GAP'; why: st
 }
 
 /**
+ * The CEILING of SHEET_PAIRING_EXCEPTIONS: the four keys this change started it with. A key outside it reds the
+ * exceptions cell, so a new exception is not one more table row but an edit to this list as well; rows may leave
+ * the table (REDUNDANT forces that once a site no longer needs one), and this list is then shortened with them.
+ */
+const SHEET_PAIRING_EXCEPTION_CEILING: readonly string[] = [
+  RESOLVER_PAIRING_KEY,
+  'GET /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId',
+  'PATCH /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId',
+  'POST /sheets/:sheetId/views/:viewId/form-share/regenerate | String(row.sheet_id) !== sheetId',
+]
+
+/** Exception keys outside the ceiling (empty when the table holds only what the ceiling allows). */
+function exceptionsBeyondCeiling(exceptions: Readonly<Record<string, unknown>>): string[] {
+  return Object.keys(exceptions).filter((key) => !SHEET_PAIRING_EXCEPTION_CEILING.includes(key))
+}
+
+/**
  * Every sheet-pairing refusal in routes/univer-meta.ts, with its COMPUTED shape. Closed world: the
- * scan must find exactly these keys. Only the four excepted rows may read anything but
+ * scan must find exactly these keys. Only the excepted rows may read anything but
  * `echo: false, beforeAuthority: false`.
  */
 const SHEET_PAIRING_CENSUS: Record<string, CensusRow> = {
@@ -2448,7 +2782,11 @@ describe('#5946 structural — by SHAPE: a sheet-pairing refusal of the recognis
     expect(pairingViolations(scan()), 'a sheet-pairing refusal changed shape, appeared, or vanished — see the rules above').toEqual([])
   })
 
-  it('the exceptions are the resolver (MAPPED) and form-share routes (GAP) only, each with its reason', () => {
+  it('the exceptions are the resolver (MAPPED) and form-share routes (GAP) only, each with its reason, under a fixed ceiling', () => {
+    expect(exceptionsBeyondCeiling(SHEET_PAIRING_EXCEPTIONS), 'an exception outside SHEET_PAIRING_EXCEPTION_CEILING').toEqual([])
+    // The ceiling is checked, not decorative: a fifth key — even a GAP row on a form-share route — reds.
+    const fifth = 'PATCH /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== String(sheetId)'
+    expect(exceptionsBeyondCeiling({ ...SHEET_PAIRING_EXCEPTIONS, [fifth]: { kind: 'GAP', why: FORM_SHARE_GAP_WHY } })).toEqual([fifth])
     const gap = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'GAP').map(([k]) => k.split(' | ')[0]!)
     const mapped = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'MAPPED').map(([k]) => k)
     expect(mapped).toEqual([RESOLVER_PAIRING_KEY])
@@ -2476,12 +2814,14 @@ describe('#5946 structural — by SHAPE: a sheet-pairing refusal of the recognis
 /**
  * The static rows say the three form-share routes echo and answer ahead of their 403. These cells say
  * the same thing about the RESPONSES, so the GAP rows describe the product rather than the scanner.
- * For each route, a caller holding nothing asks for three views, and `formShareGapState` names what the
- * three answers show:
+ * For each route, a caller holding nothing asks — on a LIVE addressed sheet (the DELETED / ABSENT sheet
+ * states are not measured here) — for three views, and `formShareGapState` names what the three answers show:
  *   GAP      as recorded — on a view that DOES belong to the addressed sheet it is refused 403 (the route's
  *            own authority gate); on a view that belongs to ANOTHER sheet it gets a 404 instead (so the
- *            pairing answered first) that is not the shared #5946 refusal and carries both ids; on a view
- *            that does not exist it gets a different 404 text (so the two cases are told apart);
+ *            pairing answered first) that is not the shared #5946 refusal and carries the two ids the
+ *            request sent (the view's and the addressed sheet's — not the sheet the view is really on); on a
+ *            view that does not exist it gets a 404 whose text differs from the foreign one even with each
+ *            answer's own view id set aside (so the two cases are told apart by wording, not just by id);
  *   FIXED    the order FORM_SHARE_GAP_WHY prescribes, stated positively: the SAME 403 FORBIDDEN on all
  *            three views. Nothing weaker counts — in particular not "the foreign view now answers the
  *            shared refusal", which a pairing still standing ahead of the 403 can do while the own-view
@@ -2497,20 +2837,25 @@ describe('#5946 structural — by SHAPE: a sheet-pairing refusal of the recognis
 interface WitnessAnswer { status: number; body: unknown; text: string }
 type GapState = 'GAP' | 'FIXED' | 'CHANGED'
 
+/** The view the witness asks for that exists nowhere. */
+const VIEW_FORM_SHARE_NOWHERE = 'viw_5946_form_share_nowhere'
+
 function formShareGapState(own: WitnessAnswer, foreign: WitnessAnswer, missing: WitnessAnswer): GapState {
   const forbidden = (r: WitnessAnswer) => r.status === FORBIDDEN_STATUS && isDeepStrictEqual(r.body, FORBIDDEN)
   if (forbidden(own) && forbidden(foreign) && forbidden(missing)) return 'FIXED'
+  // "Told apart" by WORDING: each answer's own view id is set aside before the two texts are compared.
+  const worded = (text: string) => text.split(VIEW_ELSEWHERE).join('<view>').split(VIEW_FORM_SHARE_NOWHERE).join('<view>')
   const recorded = forbidden(own)
     && foreign.status === 404 && !isDeepStrictEqual(foreign.body, MISMATCH_BODY)
     && foreign.text.includes(VIEW_ELSEWHERE) && foreign.text.includes(SHEET_LIVE)
-    && missing.status === 404 && missing.text !== foreign.text
+    && missing.status === 404 && worded(missing.text) !== worded(foreign.text)
   return recorded ? 'GAP' : 'CHANGED'
 }
 
 const GAP_STATE_WHY: Record<GapState, string> = {
   GAP: 'still answers the GAP as recorded, but its SHEET_PAIRING_EXCEPTIONS row is gone — the route is NOT fixed: '
     + 'restore its GAP row, or fix the ORDER FORM_SHARE_GAP_WHY prescribes',
-  FIXED: 'is FIXED — a caller holding nothing gets the same 403 on its own, a foreign and a missing view: delete its '
+  FIXED: 'is FIXED — a caller holding nothing gets the same 403 on its own, a foreign and a missing view (live sheet): delete its '
     + 'SHEET_PAIRING_EXCEPTIONS row and set its SHEET_PAIRING_CENSUS row to echo:false/beforeAuthority:false; '
     + 'its FORM_SHARE_WITNESS entry stays and holds FIXED from then on',
   CHANGED: 'changed but is NOT fixed — a caller holding nothing does not get the same 403 on its own, a foreign and a '
@@ -2542,8 +2887,6 @@ const FORM_SHARE_WITNESS: Record<string, (agent: ReturnType<typeof request>, she
 }
 
 describe('GAP witness — the three form-share routes answer the hand-written pairing ahead of their 403', () => {
-  const VIEW_NOWHERE = 'viw_5946_form_share_nowhere'
-
   it('self-check: the witness covers exactly the three form-share routes, and every GAP row is one of them', () => {
     expect(Object.keys(FORM_SHARE_WITNESS).sort()).toEqual([...FORM_SHARE_ROUTES].sort())
     const gap = Object.entries(SHEET_PAIRING_EXCEPTIONS).filter(([, e]) => e.kind === 'GAP').map(([k]) => k.split(' | ')[0])
@@ -2563,12 +2906,12 @@ describe('GAP witness — the three form-share routes answer the hand-written pa
   for (const [route, expected] of witnessPlan(SHEET_PAIRING_EXCEPTIONS)) {
     const send = FORM_SHARE_WITNESS[route]!
     const title = expected === 'GAP'
-      ? 'the caller it refuses learns, before the 403, that a foreign view exists and on which sheet'
-      : 'a caller holding nothing gets the same 403 on its own, a foreign and a missing view'
+      ? 'a caller it then refuses 403 learns first, from a 404 that echoes the ids it sent, that the view exists on another sheet'
+      : 'a caller holding nothing gets the same 403 on its own, a foreign and a missing view (live sheet)'
     it(`${route} (${expected}): ${title}`, async () => {
       const own = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_ON_LIVE)
       const foreign = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_ELSEWHERE)
-      const missing = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_NOWHERE)
+      const missing = await send(on('OUTSIDER'), SHEET_LIVE, VIEW_FORM_SHARE_NOWHERE)
 
       expect([own.status, own.body], `${route}: a caller holding nothing is not refused on a view that belongs — the witness proves nothing`).toEqual([FORBIDDEN_STATUS, FORBIDDEN])
 
@@ -2803,8 +3146,11 @@ describe('by SHAPE — self-tests: a hand-written copy under new names is invisi
     plantedSite(plant('    const refuseHere = () => res.status(404).json({ ok: false, viewId: req.params.viewId })\n    if (owner.sheetId !== target) return refuseHere()'), true, 'a closure over res, echoing')
     // A closure that answers values-free is still a site (it answers), and reads as values-free.
     plantedSite(plant("    const refuseHere = () => sendSheetNotLive(res, 'absent')\n    if (owner.sheetId !== target) return refuseHere()"), false, 'a closure over res, values-free')
-    // Negative control: a mismatch path that only logs does not answer.
-    expect(siteIn(plant("    if (owner.sheetId !== target) console.warn('elsewhere')"), `${PLANTED} | `)).toBeUndefined()
+    // Negative control: a mismatch path that only logs, inside a callback whose block ends there, does not answer.
+    expect(siteIn(plant("    found.rows.forEach((row: any) => { if (row.sheet_id !== target) console.warn('elsewhere') })"), `${PLANTED} | `)).toBeUndefined()
+    // …while at the handler's own level the same log line runs on into the handler's answer, so it is read as a
+    // site (here values-free): a mismatch branch that does not end its path is followed, never assumed harmless.
+    plantedSite(plant("    if (owner.sheetId !== target) console.warn('elsewhere')"), false, 'a log line, then the handler answers')
   })
 
   /** The view-aggregate row (post-authority, values-free) with its refusal rewritten in memory. */
@@ -3024,5 +3370,155 @@ describe('by SHAPE — self-tests: a hand-written copy under new names is invisi
     expect(formShareGapState(forbidden, shared, missing)).toBe('CHANGED')
     expect(formShareGapState(forbidden, shared, shared), 'foreign and missing alike, still 404 vs the own view\'s 403').toBe('CHANGED')
     expect(formShareGapState(forbidden, forbidden, missing)).toBe('CHANGED')
+    // "Told apart" means by wording: a missing view worded like the foreign one, but for its own id, is not GAP.
+    const missingWordedAlike = answer(404, { ok: false, error: { code: 'NOT_FOUND', message: `View ${VIEW_FORM_SHARE_NOWHERE} does not belong to sheet ${SHEET_LIVE}` } })
+    expect(formShareGapState(forbidden, echoed, missingWordedAlike), 'each 404 differs only by its own view id').toBe('CHANGED')
+  })
+
+  // ── #6069 third review: deferred answers, polarity only along a monotone chain, literals left to right ──────
+
+  it('a DEFERRED refusal is followed: the mismatch branch records it and a later statement answers it', () => {
+    // P1 a failure message; P1b this file's own `if (failure) return res.status(failure.status)…` idiom.
+    plantedSite(plant("    let failure: string | null = null\n    if (!owner) failure = 'missing'\n    else if (String(owner.sheet_id) !== target) failure = `View ${req.params.viewId} does not belong to sheet ${target}`\n    if (failure) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: failure } })"), true, 'P1 a failure message')
+    plantedSite(plant("    let failure: { status: number; code: string; message: string } | null = null\n    if (String(owner.sheet_id) !== target) failure = { status: 404, code: 'NOT_FOUND', message: `View ${req.params.viewId}` }\n    if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })"), true, 'P1b a failure object')
+    // P2 an errors list; P3 a flag — answered values-free, so a site that reads values-free.
+    plantedSite(plant("    const errors: string[] = []\n    if (owner.sheet_id !== target) errors.push(`View ${req.params.viewId} is on ${owner.sheet_id}`)\n    if (errors.length > 0) return res.status(404).json({ ok: false, errors })"), true, 'P2 an errors list')
+    plantedSite(plant(`    let misplaced = false\n    if (owner.sheet_id !== target) misplaced = true\n    if (misplaced) ${FREE_REFUSAL}`), false, 'P3 a flag, answered values-free')
+    // P8 an else that does not answer but holds a callback that returns; a then-branch whose only return is conditional.
+    plantedSite(plant(`    if (owner.sheet_id === target) {\n      return res.json({ ok: true })\n    } else {\n      console.warn('x', found.rows.map((r: any) => { return r.id }))\n    }\n    ${ECHO_REFUSAL}`), true, 'P8 a nested callback\'s return does not end the branch')
+    plantedSite(plant(`    let misplaced = false\n    if (owner.sheet_id !== target) {\n      if (!owner.name) return res.json({ ok: true })\n      misplaced = true\n    }\n    if (misplaced) ${ECHO_REFUSAL}`), true, 'P8c a conditional return does not end the branch')
+    // The run CLIMBS OUT of the block the comparison sits in — an if-branch (past its else), a try (past its catch).
+    plantedSite(plant(`    let misplaced = false\n    if (owner) {\n      if (owner.sheet_id !== target) misplaced = true\n    } else {\n      console.warn('none')\n    }\n    if (misplaced) ${ECHO_REFUSAL}`), true, 'a flag set in an inner block')
+    plantedSite(plant(`    let misplaced = false\n    try {\n      if (owner.sheet_id !== target) misplaced = true\n    } catch (err) {\n      console.warn(err)\n    } finally {\n      console.warn('done')\n    }\n    if (misplaced) ${ECHO_REFUSAL}`), true, 'a flag set in a try')
+    // Only `return` / `throw` end a run: a plain `res.status(404)` does not, and the echo after it is read.
+    plantedSite(plant(`${RETURNS_WHEN_EQUAL}    res.status(404)\n    return res.json({ ok: false, viewId: req.params.viewId })`), true, 'a plain res.status(…), then the echo')
+    // A loose `==` is an equality like the others.
+    plantedSite(plant(`    if (owner.sheet_id == target) return res.json({ ok: true })\n    ${ECHO_REFUSAL}`), true, '== with the refusal after it')
+    // Stated limits (NOT FOLLOWED): the run stops at the end of a LOOP body and of a FUNCTION body.
+    expect(siteIn(plant(`    let misplaced: any = null\n    for (const row of found.rows) {\n      if (row.sheet_id !== target) { misplaced = row; break }\n    }\n    if (misplaced) ${ECHO_REFUSAL}`), `${PLANTED} | `), 'the loop limit changed — update NOT FOLLOWED').toBeUndefined()
+    expect(siteIn(plant(`    let misplaced = false\n    found.rows.forEach((row: any) => { if (row.sheet_id !== target) misplaced = true })\n    if (misplaced) ${ECHO_REFUSAL}`), `${PLANTED} | `), 'the callback limit changed — update NOT FOLLOWED').toBeUndefined()
+  })
+
+  it('polarity is read only along a monotone chain of grouping `(…)`, `!` and `&&` / `||`; anything else reads BOTH paths', () => {
+    // Two plantings of one condition. THEN_ECHOES: the then-branch echoes, what follows the `if` is values-free;
+    // AFTER_ECHOES: the reverse. Reading one path gives echo=false in one of the two; reading both gives true in both.
+    const thenEchoes = (condition: string) => plant(`    if (${condition}) {\n      ${ECHO_REFUSAL}\n    }\n    ${FREE_REFUSAL}`)
+    const afterEchoes = (condition: string) => plant(`    if (${condition}) {\n      ${FREE_REFUSAL}\n    }\n    return res.json({ ok: true, viewId: req.params.viewId })`)
+    // KNOWN, the mismatch path is the then-branch (values-free in AFTER_ECHOES) → false.
+    for (const condition of [
+      '!(owner.sheet_id === target)',
+      '!!(owner.sheet_id !== target)',
+      '!(!(owner.sheet_id !== target))',
+      'owner && owner.sheet_id !== target',
+      '(owner.sheet_id !== target) || !owner',
+    ]) {
+      plantedSite(afterEchoes(condition), false, `known, then: ${condition}`)
+    }
+    // KNOWN, the mismatch path is what follows the `if` (values-free in THEN_ECHOES) → false.
+    for (const condition of ['owner.sheet_id === target', '!(owner.sheet_id !== target)', 'owner && owner.sheet_id === target']) {
+      plantedSite(thenEchoes(condition), false, `known, after: ${condition}`)
+    }
+    // UNKNOWN: an operator glued to a group, a ternary, two equalities in one operand, a call's arguments, an
+    // array or index, arithmetic or a bitwise operator on the group, a `function` callback → true in BOTH plantings.
+    for (const condition of [
+      '(owner.sheet_id === target) === false',
+      'owner.sheet_id === target ? false : true',
+      'owner.sheet_id === target === false',
+      '!Boolean(owner.sheet_id === target)',
+      '![owner.sheet_id === target]',
+      '![owner.sheet_id === target][0]',
+      '(owner.sheet_id === target) - 1',
+      '(owner.sheet_id === target) ^ 1',
+      '!found.rows.some(function (row: any) { return row.sheet_id === target })',
+    ]) {
+      plantedSite(thenEchoes(condition), true, `unknown (then echoes): ${condition}`)
+      plantedSite(afterEchoes(condition), true, `unknown (after echoes): ${condition}`)
+    }
+    // A `??=` binding does not decide its name: unknown too.
+    const nullish = (body: string) => `    let same: boolean | undefined\n    same ??= owner.sheet_id === target\n    if (!same) {\n      ${body}\n    }\n`
+    plantedSite(plant(`${nullish(ECHO_REFUSAL)}    ${FREE_REFUSAL}`), true, 'a ??= binding (then echoes)')
+    plantedSite(plant(`${nullish(FREE_REFUSAL)}    return res.json({ ok: true, viewId: req.params.viewId })`), true, 'a ??= binding (after echoes)')
+  })
+
+  it('literals in a payload are delimited left to right: a backtick inside a quoted string does not pair with the next one', () => {
+    plantedSite(plant("    if (owner.sheet_id !== target) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View `' + req.params.viewId + '` is not on this sheet' } })"), true, 'single quotes holding backticks')
+    plantedSite(plant("    if (owner.sheet_id !== target) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: \"it's `\" + req.params.viewId + \"` here\" } })"), true, 'double quotes holding a backtick and a quote')
+    // …and a payload that really is all literals still reads values-free.
+    plantedSite(plant("    if (owner.sheet_id !== target) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'View `x` is ' + \"not `here`\" } })"), false, 'literals only')
+  })
+
+  it('the answer read: a METHOD handed `res` gives its receiver; `res` cast, non-null or aliased still answers', () => {
+    plantedSite(plant('    if (owner.sheet_id !== target) return Readable.from([JSON.stringify({ id: req.params.viewId })]).pipe(res)'), true, 'stream.pipe(res)')
+    plantedSite(plant('    if (owner.sheet_id !== target) return refusals.notFound(res)'), true, 'a method helper handed only res')
+    plantedSite(plant('    if (owner.sheet_id !== target) return (res as any).refuseWith(`View ${req.params.viewId}`)'), true, '(res as any).unlisted(…)')
+    plantedSite(plant('    if (owner.sheet_id !== target) return res!.refuseWith(`View ${req.params.viewId}`)'), true, 'res!.unlisted(…)')
+    plantedSite(plant('    const out = res\n    if (owner.sheet_id !== target) return out.addTrailers({ viewId: req.params.viewId })'), true, 'an alias, an unlisted method')
+    plantedSite(plant('    const out = res\n    if (owner.sheet_id !== target) return refuse(out, req.params.viewId)'), true, 'an alias handed to a helper')
+    // Control: a plain function handed `res` and a literal reads values-free (its body is not read — NOT FOLLOWED).
+    plantedSite(plant("    if (owner.sheet_id !== target) return sendSheetNotLive(res, 'absent')"), false, 'a plain helper handed res and a literal')
+  })
+
+  it('authority: 403 text inside a literal is no 403, and a mismatch path is the authority refusal only when it is nothing else', () => {
+    const site = (body: string) => siteIn(plant(body), `${PLANTED} | `)
+    expect(site(`    console.warn('.status(403) sendForbidden(')\n    if (owner.sheet_id !== target) ${FREE_REFUSAL}`)?.beforeAuthority, 'a 403 written inside a message').toBe(true)
+    expect(site("    if (owner.sheet_id !== target) return res.json({ ok: false, error: 'status: 403' })")?.beforeAuthority, 'a message holding status: 403').toBe(true)
+    expect(site('    if (owner.sheet_id !== target) {\n      if (!req.user) return sendForbidden(res)\n      return res.json({ ok: false })\n    }')?.beforeAuthority, 'a path that answers besides its 403').toBe(true)
+    expect(site('    if (owner.sheet_id !== target) return sendForbidden(res) || res.json(req.params.viewId)')?.beforeAuthority, 'a 403 with more after its call').toBe(true)
+    expect(site('    if (owner.sheet_id !== target) return sendForbidden(res)')?.beforeAuthority, 'a path that is only the 403').toBe(false)
+    expect(site("    if (owner.sheet_id !== target) {\n      return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'no' } })\n    }")?.beforeAuthority, 'a path that is only a status(403) chain').toBe(false)
+  })
+
+  it('the verdicts GONE, REDUNDANT and UNPARSEABLE are live: each is produced by the change it names', () => {
+    const LF_SOURCE = UNIVER_META_SOURCE.replace(/\r\n/g, '\n')
+    const rewrite = (source: string, from: number, before: string, after: string) => {
+      expect(from > 0 && source.slice(from, from + before.length) === before, `the probed text moved: ${before}`).toBe(true)
+      return source.slice(0, from) + after + source.slice(from + before.length)
+    }
+    // GONE — a census row whose comparison was rewritten.
+    const xlsxKey = 'GET /sheets/:sheetId/export-xlsx | view.sheetId !== sheetId'
+    const xlsxCond = 'if (!view || view.sheetId !== sheetId) {'
+    expect(SHEET_PAIRING_CENSUS[xlsxKey], 'the probed census row is gone — re-anchor this probe').toBeTruthy()
+    const xlsxAt = LF_SOURCE.indexOf(xlsxCond, LF_SOURCE.indexOf("router.get('/sheets/:sheetId/export-xlsx'"))
+    expect(pairingViolations(scanSheetPairings(rewrite(LF_SOURCE, xlsxAt, xlsxCond, 'if (!view || view.sheetId !== String(sheetId)) {'))))
+      .toContain(`GONE — census row matches no site: ${xlsxKey}`)
+    // …and an EXCEPTED site rewritten: its census row and its exception both go.
+    const formShareKey = 'GET /sheets/:sheetId/views/:viewId/form-share | String(row.sheet_id) !== sheetId'
+    const formShareDecl = LF_SOURCE.indexOf("router.get('/sheets/:sheetId/views/:viewId/form-share'")
+    const formShareCond = 'if (String(row.sheet_id) !== sheetId) {'
+    const renamed = pairingViolations(scanSheetPairings(rewrite(LF_SOURCE, LF_SOURCE.indexOf(formShareCond, formShareDecl), formShareCond, 'if (String(row.sheet_id) !== String(sheetId)) {')))
+    expect(renamed).toContain(`GONE — census row matches no site: ${formShareKey}`)
+    expect(renamed).toContain(`GONE — exception matches no site: ${formShareKey}`)
+
+    // REDUNDANT — the fix FORM_SHARE_GAP_WHY prescribes, on GET form-share, with the ledger left as it is: the view
+    // read moves below the 403 + liveness gates and both of its refusals become the shared one.
+    const handlerEnd = LF_SOURCE.indexOf('\n  })\n', formShareDecl)
+    const handler = LF_SOURCE.slice(formShareDecl, handlerEnd)
+    const gates = '      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)\n'
+      + '      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)\n'
+      + "      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)\n"
+    const read = '      const current = await pool.query('
+    const missingRefusal = "return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })"
+    const foreignRefusal = "return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })"
+    expect([gates, read, missingRefusal, foreignRefusal].every((t) => handler.includes(t)), 'GET form-share moved — re-anchor this probe').toBe(true)
+    const withoutGates = handler.replace(gates, '')
+    const fixedHandler = (withoutGates.slice(0, withoutGates.indexOf(read)) + gates + withoutGates.slice(withoutGates.indexOf(read)))
+      .replace(missingRefusal, "return sendSheetNotLive(res, 'absent')")
+      .replace(foreignRefusal, "return sendSheetNotLive(res, 'absent')")
+    const fixed = scanSheetPairings(LF_SOURCE.slice(0, formShareDecl) + fixedHandler + LF_SOURCE.slice(handlerEnd))
+    expect([fixed.sites.find((s) => s.key === formShareKey)?.echo, fixed.sites.find((s) => s.key === formShareKey)?.beforeAuthority]).toEqual([false, false])
+    const redundant = pairingViolations(fixed)
+    expect(redundant).toContain(`REDUNDANT exception — the site no longer needs it: ${formShareKey}`)
+    expect(redundant.join('\n')).toContain(`DECLARED ≠ COMPUTED`)
+
+    // UNPARSEABLE — text the scan cannot delimit next to a sheet-id comparison: the `if`'s branch, its condition,
+    // the statements after it. Each is reported, never skipped.
+    for (const [label, body] of [
+      ['the branch', "    if (owner.sheet_id !== target) return res.status(404).json({ ok: false, message: 'unterminated })"],
+      ['the condition', "    if (owner.sheet_id !== target && 'unterminated) return res.status(404).json({ ok: false })"],
+      ['the statements after it', `${RETURNS_WHEN_EQUAL}    const broken = 'unterminated\n    return res.status(404).json({ ok: false })`],
+    ] as const) {
+      const violations = pairingViolations(scanSheetPairings(plant(body)))
+      expect(violations.filter((v) => v.startsWith('UNPARSEABLE — ')), label).toHaveLength(1)
+    }
   })
 })
