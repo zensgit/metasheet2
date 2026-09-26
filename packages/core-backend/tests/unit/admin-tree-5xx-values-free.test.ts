@@ -28,37 +28,63 @@
  *      admin-routes-write-endpoints-structural-gate.test.ts — so for it the probe asserts the stronger
  *      thing: a non-admin who reaches its 500 gets the redacted body too.)
  *   3. STRUCTURAL GUARD over the tree's source (tests/utils/response-error-echo-scan.ts, TypeScript AST
- *      + checker symbols). The file set is discovered from admin-routes.ts by resolving every
- *      `.use(...)` argument back to a module — an imported binding or namespace member, a factory
- *      call on one, a local alias / later assignment / destructure of one, a conditional, an array,
- *      an in-file function's `return`, a relative `import()` / `require()`. Because static resolution
- *      can never see every way code hands a router to `.use()`, the routers nested in the LIVE
- *      mounted stack are cross-checked BY IDENTITY: each must be a Router exported by a discovered
- *      module (in-place `Router()` mounts have no export and are only counted — there are none in the
- *      tree today). A sub-router mounted tomorrow in a way the walk cannot follow is not such an
- *      export, so that assertion turns red instead of the router silently leaving the scan. (The
- *      earlier count-only comparison could be cancelled by a static mount that is off at runtime.)
+ *      + checker symbols). The file set is discovered from admin-routes.ts: every `.use(...)`
+ *      argument, and every Router argument of a route method called on a router
+ *      (`router.get(path, gate, sub)`, `router.all(path, sub)`, `router.route(path).post(sub)`), is
+ *      resolved back to a module — an imported binding or namespace member, a factory call on one, a
+ *      local alias / later assignment / destructure of one, a conditional, an array, an in-file
+ *      function's `return`, a relative `import()` / `require()` — and so is a router module that such
+ *      an argument reaches only THROUGH a function: an inline closure or same-file function it is or
+ *      calls, whose body refers to a binding that resolves to a module which itself calls `Router()`
+ *      (`(req, res, next) => sub(req, res, next)`). Two runtime checks back the static walk up, and
+ *      each covers only what it says:
+ *        - LIVE IDENTITY cross-check: every router OBJECT that is itself a handle in the live mounted
+ *          stack, at any depth — a `.use()` layer's handle or a handler inside a route layer
+ *          (`layer.route.stack`) — must be a Router exported by a discovered module (in-place
+ *          `Router()` mounts have no export and are only counted — there are none in the tree
+ *          today). Such a router mounted tomorrow in a way the walk cannot follow is not such an
+ *          export, so that assertion turns red instead of the router silently leaving the scan. (The
+ *          earlier count-only comparison could be cancelled by a static mount that is off at runtime.)
+ *          A router that is only CALLED from inside a function layer is not a handle anywhere in the
+ *          stack: this check cannot see it.
+ *        - USE-LEVEL REGISTRATION: every `.use()`-level function layer (not a router, not a route) in
+ *          the live tree, as `<module>:<function name>`, must be in REGISTERED_USE_LEVEL_FUNCTIONS
+ *          (today only protection-rules.ts's rate limiter). A closure or wrapper passed to `.use()`
+ *          that calls a sub-router is such a layer, so it turns red until looked at. It compares
+ *          NAMES: a wrapper that reuses a registered name in the same module is not told apart.
+ *      NOT covered by either runtime check, and by the static walk only as described above: a router
+ *      called from inside a ROUTE handler (`router.get(p, (req, res, next) => sub(req, res, next))`)
+ *      when the static rule cannot resolve it (a router passed in as a parameter, read out of a
+ *      container, handed to a wrapper defined in another module, or re-exported through a barrel
+ *      module). For that shape there is no guarantee, for routes that exist today or new ones.
  *      In the discovered files, any 5xx response — `.status(S)` chained, set earlier on the same
- *      receiver or a local bound straight to it (`res.status(S); res.json(…)`, `res.statusCode = S`,
- *      `const r = res; res.status(S); r.json(…)`), `jsonError`, a responder's `extra` — whose
- *      arguments read `.message` / `.stack` or reference a TAINTED symbol is red. Taint starts at the
- *      caught error and follows declarations, assignments (`x = …`, `obj.p = …`), Object.assign,
- *      container writes (push / Map.set / Set.add), `for…of` bindings, and arguments into same-file
- *      helpers' parameters. Log calls are not sinks and are never flagged. What the scanner does NOT
- *      model (helpers or handlers in another module, a status set in another function,
+ *      receiver (compared on the receiver's root: `res.status(S); res.json(…)`, `res.statusCode = S`,
+ *      `res.status(S); res.set(…).json(…)`, `const r = res; res.status(S); r.json(…)`), `jsonError`,
+ *      a responder's `extra` — whose arguments read `.message` / `.stack` or reference a TAINTED symbol
+ *      is red. Taint starts at the caught error (also `.catch` / `.then(_, cb)` / `'error'` listener
+ *      callbacks, and the first parameter of every 4-arity function, as Express decides error
+ *      middleware by arity) and follows declarations, assignments (`x = …`, `obj.p = …`),
+ *      Object.assign, container writes (push / unshift / splice / Map.set / Set.add), `for…of`
+ *      bindings, array callbacks, closure capture, and arguments into same-file helpers' parameters
+ *      (functions, and members of same-file objects and classes). Log calls are not sinks and are
+ *      never flagged. What the scanner does NOT model (helpers or handlers in another module,
+ *      `this.m()` / instance methods, a status set in another non-enclosing function,
  *      `.call`/`.apply`, computed member names, text built only inside a function's return, error
- *      values that do not come from a catch / rejection handler, headers, `next(err)`) is listed in
- *      its header; for the routes that exist today those shapes are pinned by layer 1's runtime
- *      probes, not by this layer, and for a NEW route this layer guarantees only the listed shapes.
+ *      values that do not come from the listed sources, headers, `next(err)`) is listed in its
+ *      header; for the routes that exist today those shapes are pinned by layer 1's runtime probes,
+ *      not by this layer, and for a NEW route this layer guarantees only the listed shapes.
  *
  * Mutation self-proof is built in and memory-level (no source file is written, so a parallel suite
  * cannot observe a mutant): every responder call site in the tree is rewritten, in memory, into each
- * of eleven echo shapes (chained `.message` / `String()`, responder `extra`, assignment-derived local,
+ * of twelve echo shapes (chained `.message` / `String()`, responder `extra`, assignment-derived local,
  * property-assigned body, split status, `statusCode =`, same-file helper, `for…of` binding, Map
- * container, split status through a receiver alias) and the guard must flag every site under every
- * shape; the live-stack cross-check must fail when a router the walk did not find is mounted, also
- * when a switched-off static mount keeps the COUNTS equal; and a live router handler is swapped for
- * the pre-change implementation and the probe's own assertion must fail on it.
+ * container, split status through a receiver alias, split status with a chained body) and the guard
+ * must flag every site under every shape; the live-stack cross-check must fail when a router the
+ * walk did not find is mounted — with `.use()` or as a route handler — also when a switched-off
+ * static mount keeps the COUNTS equal; the use-level registration must fail on a closure-wrapped
+ * mount; the discovery, run on the real tree's source with a foreign echoing router mounted in
+ * memory as a route handler or through a closure, must reach it and its echo; and a live router
+ * handler is swapped for the pre-change implementation and the probe's own assertion must fail on it.
  *
  * Values-free fixtures: RFC 5737 TEST-NET-3 documentation address and literal placeholder names.
  */
@@ -601,18 +627,30 @@ describe('admin caller: every 500 branch in the /api/admin tree is values-free',
   // duck-reads `.message` / `.stack`. An error-LIKE value that is not `instanceof Error` must keep
   // that fidelity in the log (its message, not "[object Object]"; its own stack, not the envelope's),
   // while the body stays redacted.
-  it('an error-LIKE plain object ({ code, message }) is redacted, and its message (not "[object Object]") reaches the log', async () => {
-    vi.mocked(protectionRuleService.listRules).mockRejectedValue({ code: '28P01', message: LEAKY })
+  it('an error-LIKE plain object ({ code, message, name }) is redacted, and its message (not "[object Object]") and name reach the log', async () => {
+    vi.mocked(protectionRuleService.listRules).mockRejectedValue({ code: '28P01', message: LEAKY, name: 'FixtureDriverError' })
     const res = await request(pinned.url()).get('/api/admin/safety/rules')
     expectRedacted(res.status, res.body as Record<string, unknown>, 'read')
     expect(loggedOriginal()).toBe(true)
     // Exactly what the raw pass-through gave the logger: the object had no stack, so none is logged
     // (no frames of the envelope module invented in its place).
     const logged = errorLog.mock.calls
-      .map((call) => call[1] as { message?: unknown; stack?: unknown } | undefined)
+      .map((call) => call[1] as { message?: unknown; stack?: unknown; name?: unknown } | undefined)
       .find((err) => typeof err?.message === 'string' && err.message.includes(LEAKY))
     expect(logged).toBeDefined()
     expect(logged?.stack).toBeUndefined()
+    expect(logged?.name).toBe('FixtureDriverError')
+  })
+
+  it('an error-LIKE object with a string stack and NO message is redacted, and the log keeps exactly that stack', async () => {
+    const stack = `Error: ${LEAKY}\n    at fixtureFrame (fixture-module.ts:1:1)`
+    vi.mocked(protectionRuleService.listRules).mockRejectedValue({ stack })
+    const res = await request(pinned.url()).get('/api/admin/safety/rules')
+    expectRedacted(res.status, res.body as Record<string, unknown>, 'read')
+    // What the raw pass-through gave the logger: that stack — not "[object Object]" with the
+    // envelope's own frames.
+    const stacks = errorLog.mock.calls.map((call) => (call[1] as { stack?: unknown } | undefined)?.stack)
+    expect(stacks).toContain(stack)
   })
 
   it('an Error from another realm (vm) is redacted, and the log keeps its message AND its original stack', async () => {
@@ -711,8 +749,9 @@ describe('failure responders: fixed fields cannot be overridden by `extra`', () 
     const log = { error: vi.fn() }
     const { sendAdminWriteFailure } = createAdminFailureResponders(log)
     const app = express()
+    const thrown = leakyError()
     app.get('/probe', (_req, res) => {
-      sendAdminWriteFailure(res, 'probe context', leakyError(), {
+      sendAdminWriteFailure(res, 'probe context', thrown, {
         success: true,
         code: 'OVERRIDE',
         error: LEAKY,
@@ -725,6 +764,8 @@ describe('failure responders: fixed fields cannot be overridden by `extra`', () 
     expect(res.body.pluginId).toBe('plugin-fixture')
     expect(log.error).toHaveBeenCalledTimes(1)
     expect((log.error.mock.calls[0][1] as Error).message).toBe(LEAKY)
+    // An Error of this realm reaches the logger unchanged: the very same object.
+    expect(log.error.mock.calls[0][1]).toBe(thrown)
   })
 
   it('the fixed messages are values-free', () => {
@@ -869,9 +910,11 @@ describe('mutation control: the probe fails on the pre-change implementation', (
 
 const ROUTES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/routes')
 const readRoute = (rel: string) => fs.readFileSync(path.join(ROUTES_DIR, rel), 'utf-8')
+/** An import specifier → a path relative to ROUTES_DIR: `x.ts`, else `x/index.ts` (a `.js` suffix maps to the `.ts` source). */
 const resolveRel = (from: string, spec: string) => {
-  const abs = path.resolve(path.dirname(path.join(ROUTES_DIR, from)), spec)
-  return path.relative(ROUTES_DIR, abs).split(path.sep).join('/') + '.ts'
+  const abs = path.resolve(path.dirname(path.join(ROUTES_DIR, from)), spec.replace(/\.js$/, ''))
+  const file = [`${abs}.ts`, path.join(abs, 'index.ts')].find((candidate) => fs.existsSync(candidate)) ?? `${abs}.ts`
+  return path.relative(ROUTES_DIR, file).split(path.sep).join('/')
 }
 const ENVELOPE = 'admin-failure-envelope.ts'
 
@@ -883,20 +926,61 @@ function treeFiles(): string[] {
   return [...routerTree().files, ENVELOPE]
 }
 
-/** Routers nested (at any depth) in a live express stack: every layer whose handle carries a stack. */
+const isRouterObject = (value: unknown): value is { stack: RouteLayer[] } =>
+  typeof value === 'function' && Array.isArray((value as { stack?: unknown }).stack)
+
+/** A router's live stack, typed for the walks below. */
+const layersOf = (router: unknown): RouteLayer[] => (router as { stack: RouteLayer[] }).stack
+
+/** The handles a layer runs: its own, or — for a route layer — every handler in the route's stack. */
+function layerHandles(layer: RouteLayer): unknown[] {
+  return layer.route ? layer.route.stack.map((inner) => inner.handle) : [layer.handle]
+}
+
+/**
+ * Router objects nested (at any depth) in a live express stack: every handle that is itself a router
+ * — mounted with `.use()` (the layer's own handle) or registered as a ROUTE handler
+ * (`router.get(path, gate, sub)`, where it sits in `layer.route.stack`). Each router once.
+ * A router that is only CALLED from inside a function layer (a closure / wrapper) is not a handle
+ * anywhere in the stack, so it is not found here — see the static `wrapped` rule of the discovery.
+ */
 function liveNestedRouters(stack: RouteLayer[], out: unknown[] = []): unknown[] {
   for (const layer of stack) {
-    const inner = layer.handle?.stack
-    if (Array.isArray(inner)) {
-      out.push(layer.handle)
-      liveNestedRouters(inner, out)
+    for (const handle of layerHandles(layer)) {
+      if (isRouterObject(handle) && !out.includes(handle)) {
+        out.push(handle)
+        liveNestedRouters(handle.stack, out)
+      }
     }
   }
   return out
 }
 
-const isRouterObject = (value: unknown): boolean =>
-  typeof value === 'function' && Array.isArray((value as { stack?: unknown }).stack)
+/**
+ * Every `.use()`-level FUNCTION layer (not a router, not a route) in a live stack, at any depth, as
+ * `<module that exports the router it sits in>:<function name>`. A closure that calls a sub-router
+ * (`router.use(p, (req, res, next) => sub(req, res, next))`) is such a layer, and the identity
+ * cross-check cannot see through it; this list is a registration tripwire for exactly that layer.
+ */
+function liveUseLevelFunctions(stack: RouteLayer[], owner: string, exported: Map<unknown, string>, out: string[] = []): string[] {
+  for (const layer of stack) {
+    for (const handle of layerHandles(layer)) {
+      if (isRouterObject(handle)) liveUseLevelFunctions(handle.stack, exported.get(handle) ?? '<not exported>', exported, out)
+    }
+    if (!layer.route && !isRouterObject(layer.handle)) {
+      out.push(`${owner}:${(layer.handle as { name?: string } | undefined)?.name || '<anonymous>'}`)
+    }
+  }
+  return out
+}
+
+/**
+ * The `.use()`-level function layers the tree has today, registered by name. A new one — any
+ * middleware, and in particular a closure or wrapper that calls a sub-router — turns the tripwire
+ * red until it is looked at and registered here. It compares NAMES: a wrapper that reuses a
+ * registered name in the same module is not told apart.
+ */
+const REGISTERED_USE_LEVEL_FUNCTIONS = ['protection-rules.ts:protectionRulesRateLimit']
 
 /**
  * Every Router object a discovered module EXPORTS, keyed by identity. The modules are the ones the
@@ -945,7 +1029,9 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     const live = liveNestedRouters(liveStack)
     const exported = await exportedRouters(tree.files)
     // This is the part that needs no per-router expectation: it is what turns red for a router
-    // mounted TOMORROW in a way the static walk cannot follow.
+    // mounted TOMORROW, as a layer handle (`.use()` or a route handler), in a way the static walk
+    // cannot follow. (A router only CALLED from a function layer is not a handle: see the
+    // use-level registration below and the header.)
     expect(reconcileLiveRouters(live, exported, tree)).toEqual([])
     // Today it is strict: no in-place Router() mounts, and every live router is matched to its module.
     expect(tree.mounts.filter((m) => m.inPlace)).toEqual([])
@@ -955,6 +1041,67 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     const foreign = express.Router()
     const withUnfollowed = liveNestedRouters([...liveStack, { handle: foreign as unknown as { stack: RouteLayer[] } }])
     expect(reconcileLiveRouters(withUnfollowed, exported, tree)).not.toEqual([])
+  })
+
+  it('live-stack cross-check: a router registered as a ROUTE handler (get / all / route().post, behind a gate, at any depth) is found and must be exported', async () => {
+    const liveStack = (currentRouter as unknown as { stack: RouteLayer[] }).stack
+    const tree = routerTree()
+    const exported = await exportedRouters(tree.files)
+    // Real express layers, built on a scratch router (the live admin router is module-level and is
+    // not touched): each foreign router lives INSIDE a route layer, in `layer.route.stack`.
+    const gate = (_req: Request, _res: Response, next: NextFunction) => next()
+    const viaGet = express.Router()
+    const viaAll = express.Router()
+    const viaRoute = express.Router()
+    const deeper = express.Router()
+    const holder = express.Router()
+    holder.get('/foreign-get', gate, viaGet)
+    holder.all('/foreign-all', viaAll)
+    holder.route('/foreign-route').post(viaRoute)
+    viaGet.get('/deeper', deeper)
+    const shapes: Array<{ label: string; path: string }> = [
+      { label: 'router.get(path, gate, sub)', path: '/foreign-get' },
+      { label: 'router.all(path, sub)', path: '/foreign-all' },
+      { label: 'router.route(path).post(sub)', path: '/foreign-route' },
+    ]
+    for (const { label, path: routePath } of shapes) {
+      const extra = layersOf(holder).filter((l) => l.route?.path === routePath)
+      expect({ label, layers: extra.length }).toEqual({ label, layers: 1 })
+      const live = liveNestedRouters([...liveStack, ...extra])
+      expect({ label, problems: reconcileLiveRouters(live, exported, tree).length }).toEqual({ label, problems: 1 })
+    }
+    // Nested: a router registered as a route handler INSIDE a route-handler router is found too.
+    const nested = liveNestedRouters([...liveStack, ...layersOf(holder)])
+    for (const router of [viaGet, viaAll, viaRoute, deeper]) expect(nested).toContain(router)
+    // The walk that only follows `layer.handle.stack` (the previous implementation) sees none of them.
+    const handleOnly = (stack: RouteLayer[], out: unknown[] = []): unknown[] => {
+      for (const layer of stack) {
+        const inner = layer.handle?.stack
+        if (Array.isArray(inner)) {
+          out.push(layer.handle)
+          handleOnly(inner, out)
+        }
+      }
+      return out
+    }
+    expect(reconcileLiveRouters(handleOnly([...liveStack, ...layersOf(holder)]), exported, tree)).toEqual([])
+  })
+
+  it('use-level function layers are registered: a closure that wraps a sub-router is a new, unregistered layer', async () => {
+    const liveStack = (currentRouter as unknown as { stack: RouteLayer[] }).stack
+    const exported = await exportedRouters(routerTree().files)
+    const owner = exported.get(currentRouter) as string
+    expect(owner).toBe('admin-routes.ts')
+    expect(liveUseLevelFunctions(liveStack, owner, exported).sort()).toEqual([...REGISTERED_USE_LEVEL_FUNCTIONS].sort())
+    // Mutation (on a scratch router, merged into a copy of the stack): the closure-wrapped mount that
+    // neither the identity cross-check nor a handle walk can see through.
+    const sub = express.Router()
+    const holder = express.Router()
+    holder.use('/legacy-wrap', (req, res, next) => sub(req, res, next))
+    const withWrapper = liveUseLevelFunctions([...liveStack, ...layersOf(holder)], owner, exported)
+    expect(withWrapper.filter((entry) => !REGISTERED_USE_LEVEL_FUNCTIONS.includes(entry))).toEqual(['admin-routes.ts:<anonymous>'])
+    // ...and indeed the identity cross-check stays green on it: that is why the tripwire exists.
+    expect(reconcileLiveRouters(liveNestedRouters([...liveStack, ...layersOf(holder)]), exported, routerTree())).toEqual([])
   })
 
   it('live-stack cross-check: a switched-off static mount cannot cancel a live router the walk never saw', async () => {
@@ -978,7 +1125,7 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(reconcileLiveRouters(live, await exportedRouters(tree.files), tree)).not.toEqual([])
   })
 
-  it('discovery self-check: follows aliases, factories, namespace members, destructures, assignments, returns and import()', () => {
+  it('discovery self-check: follows aliases, factories, namespace members, destructures, assignments, returns, import(), routers registered as route handlers, and routers reached through a closure or same-file function', () => {
     const subRouter = `import { Router } from 'express'\nconst r = Router()\nexport default r\nexport const make = () => Router()\n`
     const sources: Record<string, string> = {
       'root.ts': [
@@ -991,7 +1138,29 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         `import f from './f'`,
         `import g from './g'`,
         `import { guard } from './guard'`,
+        `import i from './i'`,
+        `import j from './j'`,
+        `import k from './k'`,
+        `import l from './l'`,
+        `import m from './m'`,
+        `import n from './n'`,
+        `import o from './o'`,
+        `import { handler } from './handler'`,
         `const router = Router()`,
+        // a Router registered as a ROUTE handler (it then lives in layer.route.stack)
+        `router.get('/i', guard, i)`,
+        `router.all('/j', j)`,
+        `router.route('/k').post(k)`,
+        // a Router reached only through a function: an inline closure, a same-file function, an object member
+        `router.use('/l', (req: any, res: any, next: any) => l(req, res, next))`,
+        `function wrapM(req: any, res: any, next: any) { return m(req, res, next) }`,
+        `router.get('/m', wrapM)`,
+        `const wrappers = { n: (req: any, res: any, next: any) => n.handle(req, res, next) }`,
+        `router.use('/n', (req: any, res: any, next: any) => wrappers.n(req, res, next))`,
+        // NOT mounts: another module's plain handler on a route method; .get on a Map
+        `router.get('/handler', handler)`,
+        `const lookup = new Map<unknown, unknown>()`,
+        `lookup.get(o)`,
         `router.use(express.json())`,
         `const aliasA = createA()`,
         `router.use('/a', aliasA)`,
@@ -1020,7 +1189,15 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
       'f.ts': subRouter,
       'g.ts': subRouter,
       'h.ts': subRouter,
+      'i.ts': subRouter,
+      'j.ts': subRouter,
+      'k.ts': subRouter,
+      'l.ts': subRouter,
+      'm.ts': subRouter,
+      'n.ts': subRouter,
+      'o.ts': subRouter,
       'guard.ts': `export function guard(_req: unknown, _res: unknown, next: () => void) { next() }\n`,
+      'handler.ts': `export function handler(_req: unknown, res: { json: (b: unknown) => void }) { res.json({}) }\n`,
     }
     const tree = discoverMountedRouterTree(
       'root.ts',
@@ -1031,13 +1208,42 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
       (_from, spec) => `${spec.replace(/^\.\//, '')}.ts`
     )
     expect([...tree.files].sort()).toEqual(
-      ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts', 'g.ts', 'guard.ts', 'h.ts', 'root.ts'].sort()
+      ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts', 'g.ts', 'guard.ts', 'h.ts', 'i.ts', 'j.ts', 'k.ts', 'l.ts', 'm.ts', 'n.ts', 'root.ts'].sort()
     )
-    // 8 imported sub-routers + the Router() built in place; the middleware module is scanned but is not a router.
-    expect(tree.mounts.filter((m) => m.router)).toHaveLength(9)
-    expect(tree.mounts.find((m) => m.targets.includes('guard.ts'))?.router).toBe(false)
+    // `.use`: 8 imported sub-routers + the Router() built in place; the middleware module is scanned but is not a router.
+    expect(tree.mounts.filter((m) => m.via === 'use' && m.router)).toHaveLength(9)
+    expect(tree.mounts.find((m) => m.via === 'use' && m.targets.includes('guard.ts'))?.router).toBe(false)
+    // Route methods: only the Router arguments are followed (the gate and another module's handler are not).
+    expect(tree.mounts.filter((m) => m.via === 'route' && m.router).map((m) => m.targets)).toEqual([['i.ts'], ['j.ts'], ['k.ts']])
+    expect(tree.mounts.filter((m) => m.via === 'route').flatMap((m) => m.targets)).not.toContain('guard.ts')
+    // Reached only through a function (not a layer handle, so invisible to the live cross-check).
+    expect(tree.mounts.filter((m) => m.wrapped.length > 0).map((m) => m.wrapped)).toEqual([['l.ts'], ['m.ts'], ['n.ts']])
     // Only the Router() built in place is an in-place mount (the one kind the live check can only count).
     expect(tree.mounts.filter((m) => m.inPlace).map((m) => m.targets)).toEqual([['root.ts']])
+  })
+
+  it('discovery on the REAL tree follows a router registered as a route handler or wrapped in a closure, so its echo reaches the zero-offender scan', () => {
+    const echoModule =
+      `import { Router } from 'express'\nconst r = Router()\n` +
+      `r.get('/echo', async (_req: any, res: any) => { try { await x() } catch (error) { res.status(500).json({ success: false, error: (error as Error).message }) } })\n` +
+      `export default r\n`
+    const variants: Array<{ label: string; file: string; line: string }> = [
+      { label: 'route handler behind a gate', file: 'admin-routes.ts', line: `router.get('/legacy-echo', requireAdminRole(), eadmLegacyRouter);` },
+      { label: 'router.all', file: 'admin-routes.ts', line: `router.all('/legacy-echo', eadmLegacyRouter);` },
+      { label: 'closure in .use (sub-router)', file: 'snapshot-labels.ts', line: `router.use('/legacy-wrap', (req, res, next) => eadmLegacyRouter(req, res, next));` },
+      { label: 'closure in a route method (sub-router)', file: 'protection-rules.ts', line: `router.get('/legacy-wrap', (req, res, next) => eadmLegacyRouter(req, res, next));` },
+    ]
+    const anchor = 'export default router;'
+    for (const v of variants) {
+      const source = readRoute(v.file)
+      expect(source.split(anchor)).toHaveLength(2)
+      const mutated = source.replace(anchor, `import eadmLegacyRouter from './eadm-legacy-echo';\n${v.line}\n${anchor}`)
+      const read = (rel: string) => (rel === v.file ? mutated : rel === 'eadm-legacy-echo.ts' ? echoModule : readRoute(rel))
+      const tree = discoverMountedRouterTree('admin-routes.ts', read, resolveRel)
+      expect({ label: v.label, found: tree.files.includes('eadm-legacy-echo.ts') }).toEqual({ label: v.label, found: true })
+      const offenders = tree.files.flatMap((rel) => scanResponseErrorEcho(rel, read(rel)).offenders)
+      expect({ label: v.label, offenders: offenders.map((o) => o.file) }).toEqual({ label: v.label, offenders: ['eadm-legacy-echo.ts'] })
+    }
   })
 
   it('zero offenders across every discovered file', () => {
@@ -1094,6 +1300,22 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     // flagged: split status through a receiver alias, either way round
     expect(flaggedIn(`const r = res; res.status(500); r.json({ error: String(error) })`)).toBe(1)
     expect(flaggedIn(`const r = res; const r2 = r; r2.status(500); res.json({ error: String(error) })`)).toBe(1)
+    // flagged: split status, body written through a method CHAIN on the same response
+    expect(flaggedIn(`res.status(500); res.set('X-Trace', 'fixed').json({ success: false, error: String(error) })`)).toBe(1)
+    expect(flaggedIn(`res.status(500); res.type('json').send(JSON.stringify({ error: String(error) }))`)).toBe(1)
+    expect(flaggedIn(`res.statusCode = 500; res.set('X-Trace', 'fixed').json({ error: String(error) })`)).toBe(1)
+    expect(flaggedIn(`const r = res; res.status(500); r.set('x', 'y').json({ error: String(error) })`)).toBe(1)
+    expect(flaggedIn(`const r = res.set('x', 'y'); res.status(500); r.json({ error: String(error) })`)).toBe(1)
+    // flagged: split status in an ENCLOSING function, body in an inner callback
+    expect(flaggedIn(`res.status(500); [1].forEach(() => res.json({ error: String(error) }))`)).toBe(1)
+    // flagged: a function DECLARATION that captures the caught error
+    expect(flaggedIn(`function detail() { return String(error) } res.status(500).json({ error: detail() })`)).toBe(1)
+    // flagged: every listed container writer
+    expect(flaggedIn(`const errs: unknown[] = []; errs.unshift(error); res.status(500).json({ errs })`)).toBe(1)
+    expect(flaggedIn(`const errs: unknown[] = []; errs.splice(0, 0, error); res.status(500).json({ errs })`)).toBe(1)
+    // flagged: `['message']` / `['stack']` read, whatever the receiver (no taint needed)
+    expect(flaggedFile(`function h(req: any, res: any) { const last = req.app.locals.lastFailure; res.status(500).json({ error: last['message'] }) }`)).toBe(1)
+    expect(flaggedFile(`function h(req: any, res: any) { const last = req.app.locals.lastFailure; res.status(500).json({ error: last['stack'] }) }`)).toBe(1)
     // flagged: a responder called through an alias
     expect(flaggedIn(`const fail = sendAdminWriteFailure; fail(res, 'ctx', error, { detail: String(error) })`)).toBe(1)
     // flagged: a same-file helper that receives the caught error as an argument
@@ -1109,6 +1331,18 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
           `async function h(req: any, res: any) { try { await x() } catch (error) { fail(res, error) } }`
       )
     ).toBe(1)
+    // flagged: a same-file helper that is a MEMBER — object-literal method, arrow property, later
+    // property assignment, class static method, class static arrow property
+    const inCatchFile = (body: string) => `async function h(req: any, res: any) { try { await x() } catch (error) { ${body} } }`
+    for (const [helper, call] of [
+      [`const helpers = { fail(r: any, e: unknown) { r.status(500).json({ error: String(e) }) } }`, `helpers.fail(res, error)`],
+      [`const helpers = { fail: (r: any, e: unknown) => r.status(500).json({ error: String(e) }) }`, `helpers.fail(res, error)`],
+      [`const helpers: any = {}\nhelpers.fail = (r: any, e: unknown) => r.status(500).json({ error: String(e) })`, `helpers.fail(res, error)`],
+      [`class Fail { static send(r: any, e: unknown) { r.status(500).json({ error: String(e) }) } }`, `Fail.send(res, error)`],
+      [`class Fail { static send = (r: any, e: unknown) => r.status(500).json({ error: String(e) }) }`, `Fail.send(res, error)`],
+    ]) {
+      expect({ helper, flagged: flaggedFile(`${helper}\n${inCatchFile(call)}`) }).toEqual({ helper, flagged: 1 })
+    }
     // flagged: declared outside the catch, assigned inside, answered after it
     expect(
       flaggedFile(
@@ -1119,8 +1353,14 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     // flagged: other error channels — .then(_, onErr), .catch(named), .on('error'), error middleware
     expect(flaggedFile(`function h(req: any, res: any) { x().then(() => res.json({}), (e) => res.status(500).json({ error: String(e) })) }`)).toBe(1)
     expect(flaggedFile(`function onErr(e: unknown) { out.status(500).json({ error: String(e) }) }\nfunction h() { x().catch(onErr) }`)).toBe(1)
-    expect(flaggedFile(`function h(req: any, res: any) { stream.on('error', (err) => res.status(500).json({ error: String(err) })) }`)).toBe(1)
+    for (const method of ['on', 'once', 'addListener', 'prependListener', 'prependOnceListener']) {
+      const source = `function h(req: any, res: any) { stream.${method}('error', (err) => res.status(500).json({ error: String(err) })) }`
+      expect({ method, flagged: flaggedFile(source) }).toEqual({ method, flagged: 1 })
+    }
     expect(flaggedFile(`function onError(err: any, req: any, res: any, next: any) { res.status(500).json({ error: err.toString() }) }`)).toBe(1)
+    // ...whatever the first parameter is called: Express decides by arity (fn.length === 4), not by name
+    expect(flaggedFile(`function onError(failure: any, req: any, res: any, next: any) { res.status(500).json({ error: String(failure) }) }`)).toBe(1)
+    expect(flaggedFile(`router.use((problem: any, req: any, res: any, next: any) => { res.status(500).json({ error: String(problem) }) })`)).toBe(1)
     // flagged: a responder DEFINITION that puts its caught-value parameter into the body
     expect(
       flaggedFile(
@@ -1133,6 +1373,16 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(flaggedIn(`res.status(400).json({ error: (error as Error).message })`)).toBe(0)
     expect(flaggedIn(`res.status(404); res.json({ error: String(error) })`)).toBe(0)
     expect(flaggedIn(`const r = res; r.status(404); res.json({ error: String(error) })`)).toBe(0)
+    expect(flaggedIn(`res.status(404); res.set('x', 'y').json({ error: String(error) })`)).toBe(0)
+    // Express arity 3 (`next` has a default, so fn.length === 3): Express never calls it as an error
+    // handler, its first argument is the request
+    expect(flaggedFile(`function mw(err: any, req: any, res: any, next: any = () => undefined) { res.status(500).json({ error: String(err) }) }`)).toBe(0)
+    expect(
+      flaggedFile(
+        `const helpers = { fail(r: any, id: string) { r.status(500).json({ id }) } }\n` +
+          `async function h(req: any, res: any) { try { await x() } catch (error) { log(error); helpers.fail(res, req.params.id) } }`
+      )
+    ).toBe(0)
     expect(flaggedIn(`const m = new Map(); m.set('e', error); logger.error('x', m.get('e')); res.status(500).json({ error: 'fixed' })`)).toBe(0)
     expect(flaggedIn(`res.status(503).json({ success: false, error: 'Service not available' })`)).toBe(0)
     expect(flaggedIn(`sendAdminWriteFailure(res, 'ctx', error, { pluginId: req.params.id })`)).toBe(0)
@@ -1157,7 +1407,7 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     ).toBe(0)
   })
 
-  it('mutation self-proof: at EVERY responder call site in the tree, each of eleven echo shapes is flagged', () => {
+  it('mutation self-proof: at EVERY responder call site in the tree, each of twelve echo shapes is flagged', () => {
     type Built = { expr?: string; stmts?: string; helper?: string }
     const caught = (c: ResponderCall) => c.catchVar ?? 'error'
     const shapes: Array<{ id: string; build: (c: ResponderCall, k: number) => Built }> = [
@@ -1195,8 +1445,12 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         id: 'receiver alias split status',
         build: (c, k) => ({ stmts: `const out${k} = ${c.resText}; ${c.resText}.status(500); out${k}.json({ success: false, error: String(${caught(c)}) });` }),
       },
+      {
+        id: 'split status, chained body',
+        build: (c) => ({ stmts: `${c.resText}.status(500); ${c.resText}.set('X-Trace', 'fixed').json({ success: false, error: String(${caught(c)}) });` }),
+      },
     ]
-    expect(shapes).toHaveLength(11)
+    expect(shapes).toHaveLength(12)
     const lineAt = (text: string, offset: number) => text.slice(0, offset).split('\n').length
 
     let total = 0

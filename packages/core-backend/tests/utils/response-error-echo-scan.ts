@@ -16,8 +16,11 @@
  *     down the call chain, or on a local the receiver was bound to (`const r = res.status(500)`);
  *   - SPLIT status: a body call on a receiver whose status was set by an earlier `<res>.status(S)`,
  *     `<res>.writeHead(S)` or `<res>.statusCode = S` in the same function (or an enclosing one) on the
- *     same receiver — the same symbol, or a local bound straight to it (`const r = res`, chains of
- *     such bindings);
+ *     same receiver. "Same receiver" is decided on the ROOT of the receiver expression: method calls
+ *     made on it are walked back (`res.set('X', v).json(…)` and `res.type('json').send(…)` write to
+ *     `res` — express's chainable setters return the response; any method chain is walked, an
+ *     over-approximation), and so are locals bound straight to it or to such a chain (`const r = res`,
+ *     `const r = res.set('X', v)`, chains of such bindings); the root is then compared by symbol;
  *   - `jsonError(res, S, …)`;
  *   - the `extra` argument of the admin failure responders (sendAdminReadFailure /
  *     sendAdminWriteFailure, also when called through a local alias or a renamed destructure), whose
@@ -31,19 +34,27 @@
  *
  * TAINT, file-wide and flow-insensitive, propagated to a fixpoint:
  *   sources — the binding of every `catch (x)`; the first parameter of a `.catch(cb)` callback, of the
- *     rejection handler `.then(_, cb)`, of an `.on|once('error', cb)` listener (inline or an in-file
- *     function), and of a 4-parameter express error middleware whose first parameter is named like an
- *     error; the third (`error`) parameter of a function that DEFINES sendAdminReadFailure /
- *     sendAdminWriteFailure — by the responder contract it is the caught value, so the envelope
- *     module itself is held to the same rule;
+ *     rejection handler `.then(_, cb)`, of an `.on|once|addListener|prependListener|
+ *     prependOnceListener('error', cb)` listener (the callback inline or resolved as a same-file
+ *     function, see below); the first parameter of EVERY function Express would call as an error
+ *     middleware, i.e. whose arity is 4 (`fn.length === 4`: four parameters before the first one with
+ *     a default or a rest parameter; whatever the parameters are called, registered or not —
+ *     over-approximating: a non-handler 4-parameter function, e.g. a `reduce` callback with index
+ *     and array, is treated the same); the third (`error`) parameter of a function that DEFINES
+ *     sendAdminReadFailure / sendAdminWriteFailure — by the responder contract it is the caught
+ *     value, so the envelope module itself is held to the same rule;
  *   flows — a declaration whose initializer references a tainted symbol (`const err = error as Error`,
  *     `const m = String(error)`, `const { message } = err`); an ASSIGNMENT whose right side does
  *     (`x = …`, `x += …`, `obj.p = …` / `obj[k] = …` taints `obj`, destructuring assignment);
  *     `Object.assign(target, …tainted)`; a container write `c.push|unshift|splice|set|add(…tainted)`
  *     taints `c` (arrays, Map, Set); a `for (… of tainted)` loop binding; a tainted receiver's array
- *     callback (`errs.map((e) => …)` taints `e`); an ARGUMENT passed to a function declared in the
- *     same file taints the matching parameter (`function fail(res, e) {…}` called as
- *     `fail(res, error)`); a function whose body captures a tainted symbol from outside it.
+ *     callback (`errs.map((e) => …)` taints `e`); an ARGUMENT passed to a SAME-FILE function taints
+ *     the matching parameter — the callee resolved as: a function declaration or a `const`/`let`
+ *     bound to a function (`fail(res, error)`, through local aliases), or a member `obj.m` of a
+ *     same-file object literal (method, function-valued or shorthand property, or a later
+ *     `obj.m = fn` assignment) or class (method, static method, function-valued property:
+ *     `Fail.send(res, error)`); a function whose body captures a tainted symbol from outside it
+ *     (function declarations and functions bound to a `const`/`let`).
  *
  * NOT modelled — pinned only by the runtime probes of the routes that exist today, not by this scan:
  *   - a helper declared in ANOTHER module that writes the body, and a route handler imported from
@@ -51,7 +62,11 @@
  *     file at a time; the admin failure responders are the one cross-module writer in the tree: at
  *     the call site their `extra` argument is a sink, and their own module is scanned with the
  *     `error` parameter tainted, see sources);
- *   - a status set in a different function than the body call (e.g. an earlier middleware);
+ *   - a same-file callee reached any other way than listed above: `this.m(…)`, an instance method
+ *     through `new C().m(…)` or an instance variable, a computed member `obj[k](…)`, a member of an
+ *     object that is itself a parameter or a container element;
+ *   - a status set in a different function than the body call (e.g. an earlier middleware), other
+ *     than an enclosing one;
  *   - a status or body method reached through `.call` / `.apply` / `.bind`, `Reflect.apply`, or a
  *     computed member name (`res['status'](500)`);
  *   - a value that becomes error text only through a function's RETURN (a function that builds the
@@ -108,7 +123,6 @@ const RESPONDER_NAMES = new Set(['sendAdminReadFailure', 'sendAdminWriteFailure'
 const BODY_METHODS = new Set(['json', 'jsonp', 'send', 'end', 'write'])
 const STATUS_METHODS = new Set(['status', 'writeHead'])
 const ERROR_TEXT_PROPS = new Set(['message', 'stack'])
-const ERROR_LIKE_PARAM = /^(err|error|e|ex|exception)$/i
 const ERROR_EVENT_METHODS = new Set(['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'])
 /** Calls that store their arguments in the receiver: arrays, and Map / Set (`m.set(k, v)`, `s.add(v)`). */
 const CONTAINER_WRITERS = new Set(['push', 'unshift', 'splice', 'set', 'add'])
@@ -309,11 +323,17 @@ function assignmentTargets(a: Analysis, target: ts.Expression, out: ts.Symbol[] 
   return out
 }
 
-/** A function declared in THIS file that `expr` names (directly, or through a local alias). */
+/**
+ * A function declared in THIS file that `expr` names: directly, through a local alias, or as a member
+ * `obj.m` of a same-file object or class — an object literal's method / function-valued property /
+ * shorthand property (`const helpers = { fail(r, e) {…} }`, `{ fail: (r, e) => … }`), a later
+ * assignment `obj.m = fn`, or a class's (static) method or function-valued property (`Fail.send`).
+ */
 function resolveLocalFunction(a: Analysis, expr: ts.Expression, depth = 0): FunctionLike | null {
   if (depth > MAX_ALIAS_DEPTH) return null
   const inner = unwrap(expr)
   if (ts.isArrowFunction(inner) || ts.isFunctionExpression(inner)) return inner
+  if (ts.isPropertyAccessExpression(inner)) return resolveLocalMember(a, inner.expression, inner.name.text, depth + 1)
   if (!ts.isIdentifier(inner)) return null
   const symbol = a.symbolOf(inner)
   for (const declaration of symbol?.declarations ?? []) {
@@ -325,6 +345,87 @@ function resolveLocalFunction(a: Analysis, expr: ts.Expression, depth = 0): Func
     }
   }
   return null
+}
+
+/** The function member `name` of a same-file object literal or class that `objectExpr` names. */
+function resolveLocalMember(a: Analysis, objectExpr: ts.Expression, name: string, depth: number): FunctionLike | null {
+  if (depth > MAX_ALIAS_DEPTH) return null
+  const object = unwrap(objectExpr)
+  const fromMembers = (members: ts.NodeArray<ts.ObjectLiteralElementLike> | ts.NodeArray<ts.ClassElement>): FunctionLike | null => {
+    for (const member of members) {
+      const memberName = member.name && (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) ? member.name.text : null
+      if (memberName !== name) continue
+      if (ts.isMethodDeclaration(member) && member.body) return member
+      if (ts.isPropertyAssignment(member) || ts.isPropertyDeclaration(member)) {
+        const resolved = member.initializer ? resolveLocalFunction(a, member.initializer, depth + 1) : null
+        if (resolved) return resolved
+      }
+      if (ts.isShorthandPropertyAssignment(member)) {
+        const resolved = resolveLocalFunction(a, member.name, depth + 1)
+        if (resolved) return resolved
+      }
+    }
+    return null
+  }
+  if (ts.isObjectLiteralExpression(object)) return fromMembers(object.properties)
+  if (ts.isClassExpression(object)) return fromMembers(object.members)
+  if (!ts.isIdentifier(object)) return null
+  const symbol = a.symbolOf(object)
+  if (!symbol) return null
+  for (const declaration of symbol.declarations ?? []) {
+    if (declaration.getSourceFile() !== a.sf) continue
+    if (ts.isClassDeclaration(declaration)) {
+      const resolved = fromMembers(declaration.members)
+      if (resolved) return resolved
+    }
+    if (ts.isVariableDeclaration(declaration) && declaration.initializer) {
+      const resolved = resolveLocalMember(a, declaration.initializer, name, depth + 1)
+      if (resolved) return resolved
+    }
+  }
+  // A later assignment `obj.name = fn` anywhere in the file.
+  for (const right of memberAssignments(a).get(symbol)?.get(name) ?? []) {
+    const resolved = resolveLocalFunction(a, right, depth + 1)
+    if (resolved) return resolved
+  }
+  return null
+}
+
+const memberAssignmentIndex = new WeakMap<ts.SourceFile, Map<ts.Symbol, Map<string, ts.Expression[]>>>()
+
+/** Every `obj.name = value` assignment in the file, by the symbol of `obj` and then `name`. */
+function memberAssignments(a: Analysis): Map<ts.Symbol, Map<string, ts.Expression[]>> {
+  const cached = memberAssignmentIndex.get(a.sf)
+  if (cached) return cached
+  const index = new Map<ts.Symbol, Map<string, ts.Expression[]>>()
+  walk(a.sf, (n) => {
+    if (!ts.isBinaryExpression(n) || n.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return
+    const left = unwrap(n.left)
+    if (!ts.isPropertyAccessExpression(left)) return
+    const target = unwrap(left.expression)
+    if (!ts.isIdentifier(target)) return
+    const symbol = a.symbolOf(target)
+    if (!symbol) return
+    const byName = index.get(symbol) ?? new Map<string, ts.Expression[]>()
+    byName.set(left.name.text, [...(byName.get(left.name.text) ?? []), n.right])
+    index.set(symbol, byName)
+  })
+  memberAssignmentIndex.set(a.sf, index)
+  return index
+}
+
+/**
+ * Express's own test for an error-handling middleware: `fn.length === 4`, i.e. four parameters before
+ * the first one with a default value or a rest parameter (a TypeScript `this` parameter is erased).
+ */
+function expressArity(fn: FunctionLike): number {
+  let arity = 0
+  for (const parameter of fn.parameters) {
+    if (ts.isIdentifier(parameter.name) && parameter.name.text === 'this') continue
+    if (parameter.initializer || parameter.dotDotDotToken) break
+    arity += 1
+  }
+  return arity
 }
 
 function firstParamSymbols(a: Analysis, handler: ts.Expression | undefined): ts.Symbol[] {
@@ -390,8 +491,11 @@ function computeTaint(a: Analysis): Set<ts.Symbol> {
       for (const s of bindingSymbols(a, caughtParam.name)) tainted.add(s)
     }
     if (isFunctionLike(n)) {
-      const first = n.parameters[0]
-      if (n.parameters.length === 4 && first && ts.isIdentifier(first.name) && ERROR_LIKE_PARAM.test(first.name.text)) {
+      // Any function Express would treat as an error handler (arity 4), whatever its first
+      // parameter is called — over-approximating: a 4-parameter function that is not an error
+      // handler (a `reduce` callback with index and array) has its first parameter treated the same.
+      const first = n.parameters.find((p) => !(ts.isIdentifier(p.name) && p.name.text === 'this'))
+      if (first && expressArity(n) === 4) {
         for (const s of bindingSymbols(a, first.name)) tainted.add(s)
       }
       if (ts.isFunctionDeclaration(n) && n.name && n.body) {
@@ -484,11 +588,30 @@ function computeTaint(a: Analysis): Set<ts.Symbol> {
 type ReceiverKey = ts.Symbol | string
 
 /**
- * The identity of a response receiver. A local bound straight to another identifier (`const r = res`,
- * chains of them) is the SAME receiver, so `res.status(500); r.json(…)` is one split-status sink.
+ * Walk a receiver back through method calls made ON it to the expression they start from:
+ * `res.set('X', v).type('json')` → `res`. Express's chainable response methods (`set`, `type`,
+ * `append`, `cookie`, `location`, `vary`, …) return the response itself, so the body call at the end
+ * of such a chain writes to the same response. Over-approximating: any method chain is walked.
+ */
+function chainRoot(expr: ts.Expression): ts.Expression {
+  let current = unwrap(expr)
+  for (let depth = 0; depth <= MAX_ALIAS_DEPTH * 4; depth++) {
+    if (!ts.isCallExpression(current)) break
+    const callee = unwrap(current.expression)
+    if (!ts.isPropertyAccessExpression(callee)) break
+    current = unwrap(callee.expression)
+  }
+  return current
+}
+
+/**
+ * The identity of a response receiver. A method chain on it is the same receiver
+ * (`res.status(500); res.set('X', v).json(…)`), and so is a local bound straight to it or to such a
+ * chain (`const r = res`, `const r = res.set('X', v)`, chains of such bindings), so
+ * `res.status(500); r.json(…)` is one split-status sink.
  */
 function receiverKey(a: Analysis, expr: ts.Expression, depth = 0): ReceiverKey {
-  const inner = unwrap(expr)
+  const inner = chainRoot(expr)
   if (ts.isIdentifier(inner)) {
     const symbol = a.symbolOf(inner)
     const declaration = symbol?.valueDeclaration
@@ -498,7 +621,7 @@ function receiverKey(a: Analysis, expr: ts.Expression, depth = 0): ReceiverKey {
       ts.isVariableDeclaration(declaration) &&
       ts.isIdentifier(declaration.name) &&
       declaration.initializer &&
-      ts.isIdentifier(unwrap(declaration.initializer))
+      ts.isIdentifier(chainRoot(declaration.initializer))
     ) {
       return receiverKey(a, declaration.initializer, depth + 1)
     }
@@ -692,13 +815,30 @@ export function scanResponseErrorEcho(file: string, text: string): EchoScanResul
 // ── router tree discovery ────────────────────────────────────────────────────
 
 export interface RouterMount {
-  /** File whose `.use(...)` call this is. */
+  /** File whose mount call this is. */
   from: string
   line: number
-  /** Which argument of the `.use(...)` call. */
+  /**
+   * `use` for `<x>.use(...)`; `route` for a route method (`get` / `post` / `put` / `patch` / `delete`
+   * / `all` / `options` / `head`, also `<x>.route(p).get(...)`) called on a router — Express accepts a
+   * Router as a route handler, and it then lives INSIDE the route layer (`layer.route.stack`).
+   */
+  via: 'use' | 'route'
+  /** Which argument of the call. */
   arg: number
-  /** Files that argument resolves to (the mounting file itself for a Router built in place). */
+  /**
+   * Files the argument itself resolves to (the mounting file itself for a Router built in place).
+   * For `use` every resolved module; for `route` only Router modules (a route method's other
+   * arguments are handlers, and a handler defined in another module is not followed).
+   */
   targets: string[]
+  /**
+   * Router modules the argument reaches only THROUGH a function: a closure or a same-file function
+   * that the argument is or calls, whose body refers to a binding that resolves to a Router module
+   * (`(req, res, next) => sub(req, res, next)`). Such a router is not itself a layer of the live
+   * stack, so the live cross-check cannot see it; this static rule is the only thing that does.
+   */
+  wrapped: string[]
   /** True when some target is a Router: built in place, or a module that constructs one. */
   router: boolean
   /**
@@ -712,6 +852,9 @@ export interface RouterTree {
   files: string[]
   mounts: RouterMount[]
 }
+
+/** Route methods Express accepts a Router (or any handler) on. */
+const ROUTE_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'all', 'options', 'head'])
 
 type MountTarget = { kind: 'module'; spec: string } | { kind: 'local-router' }
 
@@ -754,25 +897,39 @@ function returnedExpressions(fn: FunctionLike): ts.Expression[] {
 }
 
 /**
- * The router tree rooted at `rootFile`: the root plus every module an argument of `<x>.use(...)`
- * resolves to, followed recursively. An argument is resolved through: an imported binding (default,
- * named, or a namespace member `ns.x`), a factory call on one (`createX(deps)`), a local
- * `const`/`let` alias or a later assignment to it, a destructure, a conditional / `||` / `??`, an
- * array of handlers, a function declared in the file (through its `return`s), and a relative
- * `import()` / `require()`. A `Router()` built in place counts as a mount of the file itself.
- * `read(rel)` returns the source of a path relative to the routes directory; `resolveRel(from, spec)`
- * maps an import specifier to such a path.
+ * The router tree rooted at `rootFile`: the root plus, followed recursively,
+ *   - every module an argument of `<x>.use(...)` resolves to;
+ *   - every ROUTER module an argument of a route method called on a router resolves to
+ *     (`router.get(path, gate, sub)`, `router.all(path, sub)`, `router.route(path).post(sub)`);
+ *   - every router module a `.use` / route-method argument reaches THROUGH a function: the argument
+ *     is, or calls, an inline closure or a same-file function whose body (following further same-file
+ *     functions it refers to) refers to a binding that resolves to a Router module, or holds a
+ *     relative `import()` / `require()` of one (`(req, res, next) => sub(req, res, next)`).
+ * An argument or binding is resolved through: an imported binding (default, named, or a namespace
+ * member `ns.x`), a factory call on one (`createX(deps)`), a local `const`/`let` alias or a later
+ * assignment to it, a destructure, a conditional / `||` / `??`, an array of handlers, a function
+ * declared in the file (through its `return`s), and a relative `import()` / `require()`. A `Router()`
+ * built in place counts as a mount of the file itself. A "Router module" is a module whose own source
+ * calls `Router()` / `x.Router()`. `read(rel)` returns the source of a path relative to the routes
+ * directory; `resolveRel(from, spec)` maps an import specifier to such a path (index files and
+ * extensions are its business).
  *
  * Not followed (the list is not exhaustive): a `for…of` / `forEach` binding, a value read back out of
- * a container, a `.call` / `.apply`, a non-relative or computed specifier, a directory import
- * (`resolveRel` decides what a specifier maps to).
+ * a container, a `.call` / `.apply`, a non-relative or computed specifier, a module that only
+ * RE-EXPORTS a router (a barrel `index.ts`), a router handed to a wrapper defined in ANOTHER module
+ * (`import { wrap } from './wrap'; router.use(wrap)` where `wrap` calls the router), a router reached
+ * through a function parameter.
  *
- * Static resolution cannot see every way code can hand a router to `.use()`; the caller is expected
- * to cross-check the routers nested in the LIVE mounted stack BY IDENTITY: every one must be a Router
- * that some discovered module exports, except at most as many as there are in-place `Router()` mounts
- * (`inPlace`), which have no export and can only be counted. A router the walk cannot follow then
- * turns red there instead of silently shrinking the scanned tree. (A count-only comparison is not
- * enough: a static mount that is switched off at runtime cancels a live router the walk never saw.)
+ * Static resolution cannot see every way code can hand a router to Express; the caller is expected
+ * to cross-check the routers nested in the LIVE mounted stack BY IDENTITY — the router objects that
+ * are themselves a layer's handle, at any depth, including a route layer's handles
+ * (`layer.route.stack[i].handle`): every one must be a Router that some discovered module exports,
+ * except at most as many as there are in-place `Router()` mounts (`inPlace`), which have no export and
+ * can only be counted. A router the walk cannot follow then turns red there instead of silently
+ * shrinking the scanned tree. (A count-only comparison is not enough: a static mount that is switched
+ * off at runtime cancels a live router the walk never saw.) A router that is only CALLED from inside a
+ * function layer (a closure or wrapper) is not in the live stack at all: the cross-check cannot see
+ * it, and only the static rule above (`wrapped`) can.
  */
 export function discoverMountedRouterTree(
   rootFile: string,
@@ -875,10 +1032,62 @@ export function discoverMountedRouterTree(
       return []
     }
 
+    /** Is `expr` (the receiver of a route-method call) a router: built in place, or a Router module? */
+    const isRouterValue = (expr: ts.Expression): boolean =>
+      resolve(expr, new Set()).some((t) => t.kind === 'local-router' || isRouterModule(resolveRel(rel, t.spec)))
+
+    /**
+     * Router modules `node` reaches through what it refers to from outside itself: a binding that
+     * resolves to a Router module, a relative `import()` / `require()` of one, and — followed — the
+     * body of any same-file function it refers to.
+     */
+    const reachedRouterModules = (node: ts.Node, visited: Set<ts.Node>, out = new Set<string>()): Set<string> => {
+      walk(node, (n) => {
+        if (ts.isCallExpression(n)) {
+          const spec = relativeSpecOf(n)
+          if (spec) {
+            const to = resolveRel(rel, spec)
+            if (isRouterModule(to)) out.add(to)
+          }
+          return
+        }
+        if (ts.isPropertyAccessExpression(n)) {
+          // `helpers.mount` — a function member of a same-file object or class.
+          const member = resolveLocalFunction(a, n)
+          if (member && !visited.has(member)) {
+            visited.add(member)
+            reachedRouterModules(member, visited, out)
+          }
+          return
+        }
+        if (!ts.isIdentifier(n) || !isValueReference(n)) return
+        const symbol = a.symbolOf(n)
+        if (!symbol) return
+        // Its own parameters and locals are not references from outside.
+        if ((symbol.declarations ?? []).some((d) => d.getSourceFile() === a.sf && d !== node && isWithin(d, node))) return
+        for (const target of resolve(n, new Set())) {
+          if (target.kind !== 'module') continue
+          const to = resolveRel(rel, target.spec)
+          if (isRouterModule(to)) out.add(to)
+        }
+        const fn = resolveLocalFunction(a, n)
+        if (fn && !visited.has(fn)) {
+          visited.add(fn)
+          reachedRouterModules(fn, visited, out)
+        }
+      })
+      return out
+    }
+
     walk(a.sf, (n) => {
       if (!ts.isCallExpression(n)) return
       const callee = unwrap(n.expression)
-      if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'use') return
+      if (!ts.isPropertyAccessExpression(callee)) return
+      const method = callee.name.text
+      let via: RouterMount['via']
+      if (method === 'use') via = 'use'
+      else if (ROUTE_METHODS.has(method) && isRouterValue(callee.expression)) via = 'route'
+      else return
       n.arguments.forEach((arg, index) => {
         const targets = new Set<string>()
         let router = false
@@ -890,17 +1099,25 @@ export function discoverMountedRouterTree(
             inPlace = true
           } else {
             const to = resolveRel(rel, target.spec)
+            const isRouter = isRouterModule(to)
+            // A route method's non-router arguments are handlers: another module's handler is not
+            // followed (see the scanner header). A `.use` argument is followed whatever it is.
+            if (via === 'route' && !isRouter) continue
             targets.add(to)
-            if (isRouterModule(to)) router = true
+            if (isRouter) router = true
             queue.push(to)
           }
         }
-        if (targets.size > 0) {
+        const wrapped = [...reachedRouterModules(arg, new Set())].filter((to) => !targets.has(to))
+        for (const to of wrapped) queue.push(to)
+        if (targets.size > 0 || wrapped.length > 0) {
           mounts.push({
             from: rel,
             line: a.sf.getLineAndCharacterOfPosition(n.getStart(a.sf)).line + 1,
+            via,
             arg: index,
             targets: [...targets],
+            wrapped,
             router,
             inPlace,
           })
