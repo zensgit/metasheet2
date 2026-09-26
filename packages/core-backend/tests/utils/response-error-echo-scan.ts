@@ -20,7 +20,13 @@
  *     made on it are walked back (`res.set('X', v).json(…)` and `res.type('json').send(…)` write to
  *     `res` — express's chainable setters return the response; any method chain is walked, an
  *     over-approximation), and so are locals bound straight to it or to such a chain (`const r = res`,
- *     `const r = res.set('X', v)`, chains of such bindings); the root is then compared by symbol;
+ *     `const r = res.set('X', v)`, `const r = res.status(400)`, chains of such bindings); the root is
+ *     then compared by symbol. A status found down the chain decides alone when it is a 5xx or is
+ *     chained straight onto the body call (`res.status(200).json(…)`: nothing runs in between); when
+ *     it is a NON-5xx reached through a local's binding (`const out = res.status(400)`), a separate
+ *     setter on the same receiver placed after that status call and before the body counts too, and
+ *     the worst one decides (`const out = res.status(400); out.status(500); out.json(…)`, also
+ *     `res.status(500)`, `res.statusCode = 500`, `out.writeHead(500)` in between);
  *   - `jsonError(res, S, …)`;
  *   - the `extra` argument of the admin failure responders (sendAdminReadFailure /
  *     sendAdminWriteFailure, also when called through a local alias or a renamed destructure), whose
@@ -665,12 +671,27 @@ function collectStatusSetters(a: Analysis): StatusSetter[] {
   return setters
 }
 
+interface ChainStatus {
+  status: number | 'dynamic'
+  /** Source offset where the `.status(S)` / `.writeHead(S)` call found down the chain ends. */
+  end: number
+  /**
+   * True when that call was reached only by following a local's binding (`const out = res.status(400);
+   * … out.json(…)`): statements can run between the binding and the body call, so a status set
+   * separately in between (`out.status(500)`) may be the one the response is sent with.
+   */
+  viaBinding: boolean
+}
+
 /** For `<recv>.json(...)`, the status set down its call chain (or on the local it was bound from). */
-function statusOfChain(a: Analysis, receiverExpr: ts.Expression): number | 'dynamic' | null {
+function statusOfChain(a: Analysis, receiverExpr: ts.Expression): ChainStatus | null {
   let receiver = unwrap(receiverExpr)
+  let viaBinding = false
   for (let depth = 0; depth <= MAX_ALIAS_DEPTH; depth++) {
     if (ts.isCallExpression(receiver) && ts.isPropertyAccessExpression(receiver.expression)) {
-      if (STATUS_METHODS.has(receiver.expression.name.text)) return statusValue(receiver.arguments[0])
+      if (STATUS_METHODS.has(receiver.expression.name.text)) {
+        return { status: statusValue(receiver.arguments[0]), end: receiver.getEnd(), viaBinding }
+      }
       receiver = unwrap(receiver.expression.expression)
       continue
     }
@@ -678,6 +699,7 @@ function statusOfChain(a: Analysis, receiverExpr: ts.Expression): number | 'dyna
       const declaration = a.symbolOf(receiver)?.valueDeclaration
       if (declaration && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name) && declaration.initializer) {
         receiver = unwrap(declaration.initializer)
+        viaBinding = true
         continue
       }
     }
@@ -763,18 +785,29 @@ export function scanResponseErrorEcho(file: string, text: string): EchoScanResul
     const responder = responderName(a, n.expression)
     if (ts.isPropertyAccessExpression(callee) && BODY_METHODS.has(callee.name.text)) {
       const chained = statusOfChain(a, callee.expression)
-      if (chained !== null) {
+      if (chained !== null && (isFiveXx(chained.status) || !chained.viaBinding)) {
+        // A 5xx down the chain, or a status chained straight onto this body call
+        // (`res.status(200).json(…)`): nothing can run in between, the chain decides.
         kind = 'status-chain'
-        status = chained
+        status = chained.status
       } else {
+        // No status down the chain, or a non-5xx one reached through a local's binding
+        // (`const out = res.status(400)`): a status set separately on the same receiver AFTER that
+        // (after the binding's status call, before this body call, in the same or an enclosing
+        // function) may be the one sent — `out.status(500)`, `res.statusCode = 500`,
+        // `out.writeHead(500)`. The worst of them counts.
         const key = receiverKey(a, callee.expression)
         const scope = enclosingFunction(n)
         const start = n.getStart(sf)
-        const earlier = setters.filter((s) => s.key === key && s.pos < start && isWithin(scope, s.scope))
+        const after = chained === null ? -1 : chained.end
+        const earlier = setters.filter((s) => s.key === key && s.pos >= after && s.pos < start && isWithin(scope, s.scope))
         const split = worstStatus(earlier.map((s) => s.status))
         if (split !== null) {
           kind = 'status-split'
           status = split
+        } else if (chained !== null) {
+          kind = 'status-chain'
+          status = chained.status
         }
       }
       args = n.arguments
@@ -839,7 +872,7 @@ export interface RouterMount {
    * stack, so the live cross-check cannot see it; this static rule is the only thing that does.
    */
   wrapped: string[]
-  /** True when some target is a Router: built in place, or a module that constructs one. */
+  /** True when some target is a Router: built in place, or a Router module (builds one, or re-exports one). */
   router: boolean
   /**
    * True when some target is a `Router()` built in place in the mounting file. Such a router has no
@@ -848,9 +881,16 @@ export interface RouterMount {
   inPlace: boolean
 }
 
+/** A discovered module re-exports values from a Router module, which is then followed too. */
+export interface RouterReexport {
+  from: string
+  to: string
+}
+
 export interface RouterTree {
   files: string[]
   mounts: RouterMount[]
+  reexports: RouterReexport[]
 }
 
 /** Route methods Express accepts a Router (or any handler) on. */
@@ -883,6 +923,157 @@ function relativeSpecOf(call: ts.CallExpression): string | null {
   return null
 }
 
+function hasExportModifier(node: ts.Node): boolean {
+  return (ts.canHaveModifiers(node) ? ts.getModifiers(node) ?? [] : []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+}
+
+/**
+ * The relative specifiers a module RE-EXPORTS values from (syntactic, top level): `export … from
+ * './m'`, `export * from './m'`, `export * as ns from './m'`, and an export whose value is a binding
+ * imported from './m' — `export { x }`, `export { x as y }`, `export default x`, `export const y = x`,
+ * also through top-level `const`/`let` aliases of it (`const y = x; export { y }`), a namespace member
+ * (`ns.x`), or a relative `require()` / `import()`. Type-only exports are skipped.
+ */
+function reexportedSpecs(file: string, text: string): string[] {
+  const sf = parseSource(file, text)
+  const imported = new Map<string, string>()
+  const aliases = new Map<string, ts.Expression>()
+  for (const statement of sf.statements) {
+    if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+      const spec = statement.moduleSpecifier.text
+      const clause = statement.importClause
+      if (!spec.startsWith('.') || !clause || clause.isTypeOnly) continue
+      if (clause.name) imported.set(clause.name.text, spec)
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) imported.set(clause.namedBindings.name.text, spec)
+      if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) if (!element.isTypeOnly) imported.set(element.name.text, spec)
+      }
+    }
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer) aliases.set(declaration.name.text, declaration.initializer)
+      }
+    }
+  }
+  const specOf = (expr: ts.Expression, depth: number): string | null => {
+    if (depth > MAX_ALIAS_DEPTH) return null
+    let e = unwrap(expr)
+    while (ts.isAwaitExpression(e)) e = unwrap(e.expression)
+    if (ts.isIdentifier(e)) {
+      const spec = imported.get(e.text)
+      if (spec) return spec
+      const alias = aliases.get(e.text)
+      return alias ? specOf(alias, depth + 1) : null
+    }
+    if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) return specOf(e.expression, depth + 1)
+    if (ts.isCallExpression(e)) return relativeSpecOf(e)
+    return null
+  }
+  const out = new Set<string>()
+  const add = (spec: string | null) => {
+    if (spec) out.add(spec)
+  }
+  for (const statement of sf.statements) {
+    if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
+      if (statement.moduleSpecifier) {
+        if (ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text.startsWith('.')) add(statement.moduleSpecifier.text)
+      } else if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+        for (const element of statement.exportClause.elements) {
+          if (element.isTypeOnly) continue
+          const local = element.propertyName ?? element.name
+          if (ts.isIdentifier(local)) add(specOf(local, 0))
+        }
+      }
+    }
+    if (ts.isExportAssignment(statement) && !statement.isExportEquals) add(specOf(statement.expression, 0))
+    if (ts.isVariableStatement(statement) && hasExportModifier(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (declaration.initializer) add(specOf(declaration.initializer, 0))
+      }
+    }
+  }
+  return [...out]
+}
+
+/**
+ * The names under which a module exports a Router it BUILT ITSELF: the export's binding holds, on
+ * every value it is ever given in the file (its initializer and every later `x = …`, through local
+ * `const`/`let` aliases), the result of a `Router()` / `x.Router()` call made in this module —
+ * `const router = Router(); export default router`, `export const r = express.Router()`,
+ * `export default Router()`, `export { router as sub }`. NOT counted: anything re-exported
+ * (`export … from`, `export *`), an export whose binding is an import or an alias of one
+ * (`import x from './m'; export { x }`, `const y = x; export default y`), a binding that is also
+ * given another value (`r = imported`) or is written by a destructuring assignment or a `for` loop
+ * head, a factory's return value, a function, a class.
+ *
+ * This is the key of the live identity cross-check: a live router matched to a module through this
+ * list was constructed by that module, so that module's source is the one the scan read — a router
+ * a scanned module merely passes on (a barrel) does not match its own scanned file.
+ */
+export function localRouterExportNames(file: string, text: string): string[] {
+  const a = analyze(file, text)
+  const values = new Map<ts.Symbol, ts.Expression[]>()
+  const opaque = new Set<ts.Symbol>()
+  const markOpaque = (target: ts.Expression) => {
+    const inner = unwrap(target)
+    if (ts.isIdentifier(inner)) {
+      const symbol = a.symbolOf(inner)
+      if (symbol) opaque.add(symbol)
+    } else if (ts.isObjectLiteralExpression(inner) || ts.isArrayLiteralExpression(inner)) {
+      for (const symbol of assignmentTargets(a, inner)) opaque.add(symbol)
+    }
+  }
+  walk(a.sf, (n) => {
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      const left = unwrap(n.left)
+      if (ts.isIdentifier(left)) {
+        const symbol = a.symbolOf(left)
+        if (symbol) values.set(symbol, [...(values.get(symbol) ?? []), n.right])
+      } else {
+        markOpaque(left)
+      }
+    }
+    if ((ts.isForOfStatement(n) || ts.isForInStatement(n)) && !ts.isVariableDeclarationList(n.initializer)) markOpaque(n.initializer)
+  })
+  const builtHere = (symbol: ts.Symbol | undefined, seen: Set<ts.Symbol>): boolean => {
+    if (!symbol || seen.has(symbol) || opaque.has(symbol)) return false
+    seen.add(symbol)
+    const given: ts.Expression[] = []
+    for (const declaration of symbol.declarations ?? []) {
+      if (declaration.getSourceFile() !== a.sf || !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name)) return false
+      const list = declaration.parent
+      if (ts.isVariableDeclarationList(list) && (ts.isForOfStatement(list.parent) || ts.isForInStatement(list.parent))) return false
+      if (declaration.initializer) given.push(declaration.initializer)
+    }
+    given.push(...(values.get(symbol) ?? []))
+    return given.length > 0 && given.every((value) => isBuilt(value, new Set(seen)))
+  }
+  const isBuilt = (expr: ts.Expression, seen: Set<ts.Symbol>): boolean => {
+    const e = unwrap(expr)
+    if (ts.isCallExpression(e)) return isRouterConstruction(e)
+    if (ts.isIdentifier(e)) return builtHere(a.symbolOf(e), seen)
+    return false
+  }
+  const out = new Set<string>()
+  for (const statement of a.sf.statements) {
+    if (ts.isExportAssignment(statement) && !statement.isExportEquals && isBuilt(statement.expression, new Set())) out.add('default')
+    if (ts.isVariableStatement(statement) && hasExportModifier(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && builtHere(a.checker.getSymbolAtLocation(declaration.name), new Set())) {
+          out.add(declaration.name.text)
+        }
+      }
+    }
+    if (ts.isExportDeclaration(statement) && !statement.isTypeOnly && !statement.moduleSpecifier && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+      for (const element of statement.exportClause.elements) {
+        if (element.isTypeOnly) continue
+        if (builtHere(a.checker.getExportSpecifierLocalTargetSymbol(element), new Set())) out.add(element.name.text)
+      }
+    }
+  }
+  return [...out]
+}
+
 function returnedExpressions(fn: FunctionLike): ts.Expression[] {
   if (!fn.body) return []
   if (!ts.isBlock(fn.body)) return [fn.body]
@@ -904,32 +1095,38 @@ function returnedExpressions(fn: FunctionLike): ts.Expression[] {
  *   - every router module a `.use` / route-method argument reaches THROUGH a function: the argument
  *     is, or calls, an inline closure or a same-file function whose body (following further same-file
  *     functions it refers to) refers to a binding that resolves to a Router module, or holds a
- *     relative `import()` / `require()` of one (`(req, res, next) => sub(req, res, next)`).
+ *     relative `import()` / `require()` of one (`(req, res, next) => sub(req, res, next)`);
+ *   - every Router module a discovered module RE-EXPORTS (see reexportedSpecs: `export … from`,
+ *     `export *`, an export of an imported binding or of a top-level alias of one) — so a router
+ *     mounted through a barrel is scanned in the module that builds it, not only in the barrel.
  * An argument or binding is resolved through: an imported binding (default, named, or a namespace
  * member `ns.x`), a factory call on one (`createX(deps)`), a local `const`/`let` alias or a later
  * assignment to it, a destructure, a conditional / `||` / `??`, an array of handlers, a function
  * declared in the file (through its `return`s), and a relative `import()` / `require()`. A `Router()`
  * built in place counts as a mount of the file itself. A "Router module" is a module whose own source
- * calls `Router()` / `x.Router()`. `read(rel)` returns the source of a path relative to the routes
- * directory; `resolveRel(from, spec)` maps an import specifier to such a path (index files and
- * extensions are its business).
+ * calls `Router()` / `x.Router()`, or that re-exports (as above, transitively) from a Router module.
+ * `read(rel)` returns the source of a path relative to the routes directory; `resolveRel(from, spec)`
+ * maps an import specifier to such a path (index files and extensions are its business).
  *
  * Not followed (the list is not exhaustive): a `for…of` / `forEach` binding, a value read back out of
- * a container, a `.call` / `.apply`, a non-relative or computed specifier, a module that only
- * RE-EXPORTS a router (a barrel `index.ts`), a router handed to a wrapper defined in ANOTHER module
- * (`import { wrap } from './wrap'; router.use(wrap)` where `wrap` calls the router), a router reached
- * through a function parameter.
+ * a container, a `.call` / `.apply`, a non-relative or computed specifier, a re-export that is not one
+ * of the syntactic top-level forms reexportedSpecs lists (e.g. an export assembled inside a function,
+ * or an exported object literal holding an imported router), a router handed to a wrapper defined in
+ * ANOTHER module (`import { wrap } from './wrap'; router.use(wrap)` where `wrap` calls the router), a
+ * router reached through a function parameter.
  *
  * Static resolution cannot see every way code can hand a router to Express; the caller is expected
  * to cross-check the routers nested in the LIVE mounted stack BY IDENTITY — the router objects that
  * are themselves a layer's handle, at any depth, including a route layer's handles
- * (`layer.route.stack[i].handle`): every one must be a Router that some discovered module exports,
- * except at most as many as there are in-place `Router()` mounts (`inPlace`), which have no export and
- * can only be counted. A router the walk cannot follow then turns red there instead of silently
- * shrinking the scanned tree. (A count-only comparison is not enough: a static mount that is switched
- * off at runtime cancels a live router the walk never saw.) A router that is only CALLED from inside a
- * function layer (a closure or wrapper) is not in the live stack at all: the cross-check cannot see
- * it, and only the static rule above (`wrapped`) can.
+ * (`layer.route.stack[i].handle`): every one must be a Router that some discovered module BUILT AND
+ * exports under a name localRouterExportNames returns (a re-export does not count: a barrel or a
+ * scanned module passing on another module's router does not stand in for the module that builds
+ * it), except at most as many as there are in-place `Router()` mounts (`inPlace`), which have no
+ * export and can only be counted. A router the walk cannot follow then turns red there instead of
+ * silently shrinking the scanned tree. (A count-only comparison is not enough: a static mount that is
+ * switched off at runtime cancels a live router the walk never saw.) A router that is only CALLED from
+ * inside a function layer (a closure or wrapper) is not in the live stack at all: the cross-check
+ * cannot see it, and only the static rule above (`wrapped`) can.
  */
 export function discoverMountedRouterTree(
   rootFile: string,
@@ -938,10 +1135,38 @@ export function discoverMountedRouterTree(
 ): RouterTree {
   const files: string[] = []
   const mounts: RouterMount[] = []
+  const reexports: RouterReexport[] = []
+  const reexportCache = new Map<string, string[]>()
+  /** Paths (relative to the routes directory) that `rel` re-exports values from. */
+  const reexportTargets = (rel: string): string[] => {
+    if (!reexportCache.has(rel)) reexportCache.set(rel, reexportedSpecs(rel, read(rel)).map((spec) => resolveRel(rel, spec)))
+    return reexportCache.get(rel) as string[]
+  }
+  const builds = new Map<string, boolean>()
+  const buildsRouter = (rel: string): boolean => {
+    if (!builds.has(rel)) builds.set(rel, constructsRouter(rel, read(rel)))
+    return builds.get(rel) as boolean
+  }
   const routerModule = new Map<string, boolean>()
-  const isRouterModule = (rel: string) => {
-    if (!routerModule.has(rel)) routerModule.set(rel, constructsRouter(rel, read(rel)))
-    return routerModule.get(rel) as boolean
+  /** Builds a Router, or re-exports (transitively, cycles cut) from a module that does. */
+  const isRouterModule = (rel: string): boolean => {
+    const known = routerModule.get(rel)
+    if (known !== undefined) return known
+    const seen = new Set<string>([rel])
+    const pending = [rel]
+    let result = false
+    while (pending.length > 0 && !result) {
+      const next = pending.shift() as string
+      if (buildsRouter(next)) result = true
+      for (const to of reexportTargets(next)) {
+        if (!seen.has(to)) {
+          seen.add(to)
+          pending.push(to)
+        }
+      }
+    }
+    routerModule.set(rel, result)
+    return result
   }
   const queue = [rootFile]
   while (queue.length > 0) {
@@ -949,6 +1174,12 @@ export function discoverMountedRouterTree(
     if (files.includes(rel)) continue
     files.push(rel)
     const a = analyze(rel, read(rel))
+
+    for (const to of reexportTargets(rel)) {
+      if (!isRouterModule(to)) continue
+      reexports.push({ from: rel, to })
+      queue.push(to)
+    }
 
     const importSpec = new Map<ts.Symbol, string>()
     for (const statement of a.sf.statements) {
@@ -1125,7 +1356,7 @@ export function discoverMountedRouterTree(
       })
     })
   }
-  return { files, mounts }
+  return { files, mounts, reexports }
 }
 
 /** The files of discoverMountedRouterTree(). */
