@@ -50,16 +50,29 @@ describe('group-by from toolbar', () => {
     expect(body.groupInfo).toEqual({ fieldIds: ['f1'], fieldId: 'f1' })
   })
 
-  it('setGroupField(null) sends undefined groupInfo', async () => {
+  // #6075 round 3 (N5): this test used a view-less load fixture, so syncFromView never ran, the "only into the view it
+  // was loaded from" gate dropped the write, and the test passed while sending NOTHING. It now loads a real grouped
+  // view and asserts what is ACTUALLY sent: a PATCH with no groupInfo key at all — `groupInfo: undefined` is dropped by
+  // JSON.stringify, and PATCH /views/:id keeps a key absent from the body, so ungrouping is never saved. That is the
+  // pre-existing bug #6084, deliberately not fixed here; the correct behaviour is the it.todo below.
+  it('setGroupField(null) sends a PATCH with NO groupInfo key (known bug #6084: the server keeps the stored grouping)', async () => {
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({
         ok: true,
-        data: { id: 'v1', fields: [], rows: [], page: { offset: 0, limit: 50, total: 0, hasMore: false } },
+        data: {
+          id: 'v1',
+          fields: [{ id: 'f1', name: 'Status', type: 'select' }],
+          rows: [],
+          view: { id: 'v1', groupInfo: { fieldIds: ['f1'], fieldId: 'f1' } },
+          page: { offset: 0, limit: 50, total: 0, hasMore: false },
+        },
       }), { status: 200 }),
     )
     const client = mockClientWithFn(fetchFn)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
-    await vi.waitFor(() => expect(fetchFn).toHaveBeenCalled())
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
+    // Precondition: the view really is grouped, so the null below clears something.
+    expect(grid.groupFieldId.value).toBe('f1')
     fetchFn.mockClear()
 
     fetchFn.mockResolvedValue(
@@ -68,7 +81,16 @@ describe('group-by from toolbar', () => {
 
     await grid.setGroupField(null)
     expect(grid.groupFieldId.value).toBeNull()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchFn.mock.calls[0]
+    expect(url).toContain('/api/multitable/views/v1')
+    expect(init.method).toBe('PATCH')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({})
+    expect('groupInfo' in body).toBe(false)
   })
+
+  it.todo('setGroupField(null) saves the cleared grouping so a reload stays ungrouped (#6084)')
 })
 
 // --- CSV export logic ---

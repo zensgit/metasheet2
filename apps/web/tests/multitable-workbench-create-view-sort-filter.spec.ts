@@ -20,6 +20,12 @@
  *  - in personal mode, a column drag while the view's load is in flight writes no personal column order.
  * The MetaGridTable stub renders the sortRules the workbench hands it (data-sort-rules), so every staged edit is
  * asserted to have really happened before the step that must not persist it.
+ *
+ * #6075 review round 3 (third describe): a rejected toolbar write shows the values-free toast (S2); the 视图管理 save and
+ * the 配置历史 revert discard BEFORE their write, so a realtime reload inside that window PATCHes nothing, discard again
+ * after it succeeded, and put the staged edit back when it fails (S3); only a save of the CURRENT view that carries
+ * sortInfo / filterInfo discards (N4). The realtime reload is the one the workbench hands the (mocked)
+ * useMultitableSheetRealtime.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
@@ -140,6 +146,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { multitableClient } from '../src/multitable/api/client'
+import { useMultitableSheetRealtime } from '../src/multitable/composables/useMultitableSheetRealtime'
 
 type StoredView = {
   id: string
@@ -191,11 +198,24 @@ function otherView(): StoredView {
   }
 }
 
-function setup(opts: { personal?: boolean } = {}) {
+function setup(opts: { personal?: boolean; extraView?: boolean } = {}) {
   // In-memory view store behind the grid's client (POST /views stores `{}` facets for a blank create).
-  const store: Record<string, StoredView> = opts.personal
+  const store: Record<string, StoredView> = opts.personal || opts.extraView
     ? { view_grid: allRecords(), view_other: otherView() }
     : { view_grid: allRecords() }
+  // #6075 round 3 knobs. `forbiddenUpdates`: a view id here answers the grid's AND the workbench's PATCHes with a 403
+  // (a viewer without canManageViews), shaped like the MultitableApiError client.ts throws. `parkWorkbenchUpdates` /
+  // `parkRestore`: the workbench's own PATCH (视图管理 save) / the config-restore execute is parked until the test lands
+  // it; `failRestore`: the execute answers 403.
+  const forbiddenUpdates = new Set<string>()
+  const forbidden = () => Object.assign(new Error('Forbidden'), { name: 'MultitableApiError', status: 403, code: 'FORBIDDEN' })
+  const control = { parkWorkbenchUpdates: false, parkRestore: false, failRestore: false }
+  const parked: Array<() => void> = []
+  const landParked = () => {
+    const next = parked.shift()
+    if (!next) throw new Error('nothing is parked')
+    next()
+  }
   // A view id here makes its loads WAIT until release() — a slow network.
   let held: { viewId: string; gate: Promise<void> } | null = null
   const holdLoadsFor = (viewId: string) => {
@@ -228,12 +248,18 @@ function setup(opts: { personal?: boolean } = {}) {
   }
   // The GRID's writes (toolbar / header click / hidden columns) go through the shared multitableClient…
   const updateView = vi.spyOn(multitableClient, 'updateView').mockImplementation(async (viewId, input) => {
+    if (forbiddenUpdates.has(viewId)) throw forbidden()
     applyPatch(viewId, input)
     return {} as never
   })
   // …the workbench's own writes (视图管理 save, display prefs) through workbench.client — same server.
   const workbenchUpdateView = vi.fn(async (viewId: string, input: unknown) => {
-    applyPatch(viewId, input)
+    if (forbiddenUpdates.has(viewId)) throw forbidden()
+    if (control.parkWorkbenchUpdates) {
+      await new Promise<void>((resolve) => { parked.push(() => { applyPatch(viewId, input); resolve() }) })
+    } else {
+      applyPatch(viewId, input)
+    }
     return {}
   })
 
@@ -264,7 +290,10 @@ function setup(opts: { personal?: boolean } = {}) {
     driftConflict: false, opKind: 'safe', baselineHash: 'h1', previewToken: 'tok_sort',
   }))
   const executeConfigRestore = vi.fn(async () => {
-    store.view_grid.sortInfo = JSON.parse(JSON.stringify(revertedSort))
+    if (control.failRestore) throw forbidden()
+    const apply = () => { store.view_grid.sortInfo = JSON.parse(JSON.stringify(revertedSort)) }
+    if (control.parkRestore) await new Promise<void>((resolve) => { parked.push(() => { apply(); resolve() }) })
+    else apply()
     return {}
   })
   // Personal column order (only reached in the personal-mode setup).
@@ -327,6 +356,7 @@ function setup(opts: { personal?: boolean } = {}) {
   return {
     store, loadView, updateView, workbenchUpdateView, createView, activeViewId, holdLoadsFor, revertedSort,
     getConfigHistory, getConfigRestorePreview, executeConfigRestore, getPersonalViewConfig, putPersonalViewConfig,
+    forbiddenUpdates, control, landParked, parkedCount: () => parked.length,
   }
 }
 
@@ -531,5 +561,259 @@ describe('MultitableWorkbench #6075 round 2: a 视图管理 save / 配置历史 
     await flushUi()
     expect(env.putPersonalViewConfig).toHaveBeenCalledTimes(1)
     expect(env.putPersonalViewConfig).toHaveBeenCalledWith('view_other', { fieldOrder: ['fld_owner', 'fld_title'] })
+  })
+})
+
+// The workbench's realtime reload: useMultitableSheetRealtime is mocked, so call the reload the workbench handed it —
+// what a peer's record edit triggers at any moment, e.g. while a 视图管理 save's PATCH is in flight.
+async function realtimeReload(): Promise<void> {
+  const options = vi.mocked(useMultitableSheetRealtime).mock.calls.at(-1)?.[0] as unknown as { reloadCurrentSheetPage: () => Promise<void> }
+  await options.reloadCurrentSheetPage()
+  await flushUi()
+}
+// Click 应用 in the toolbar's sort panel (opening it first if needed). The button must be there: it shows while rules
+// exist or an edit is staged.
+async function clickSortApply(root: HTMLElement): Promise<void> {
+  let apply = document.querySelector('.meta-toolbar__sort-panel .meta-toolbar__apply') as HTMLButtonElement | null
+  if (!apply) {
+    sortTrigger(root).click()
+    await flushUi()
+    apply = document.querySelector('.meta-toolbar__sort-panel .meta-toolbar__apply') as HTMLButtonElement | null
+  }
+  expect(apply).not.toBeNull()
+  apply!.click()
+  await flushUi()
+}
+async function openViewManager(root: HTMLElement): Promise<void> {
+  ;(Array.from(root.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[])
+    .find((button) => button.textContent?.includes('Views'))!.click()
+  await flushUi()
+}
+const managerRow = (name: string) =>
+  Array.from(document.querySelectorAll('.meta-view-mgr__row'))
+    .find((row) => row.querySelector('.meta-view-mgr__name')?.textContent === name) as HTMLElement
+// 视图管理 → ⚙ on the named view → drop the dialog's FIRST sort rule → 保存视图设置.
+async function saveDialogDroppingFirstSortRule(root: HTMLElement, viewName: string): Promise<void> {
+  await openViewManager(root)
+  ;(managerRow(viewName).querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement).click()
+  await flushUi()
+  const sortSection = (document.querySelector('[data-sort-add="true"]') as HTMLElement).closest('.meta-view-mgr__field') as HTMLElement
+  ;(sortSection.querySelector('.meta-view-mgr__rule-row .meta-view-mgr__action--danger') as HTMLButtonElement).click()
+  await flushUi()
+  ;(document.querySelector('.meta-view-mgr__config-actions .meta-view-mgr__btn-add') as HTMLButtonElement).click()
+  await flushUi()
+}
+async function renameView(root: HTMLElement, viewName: string, nextName: string): Promise<void> {
+  await openViewManager(root)
+  ;(managerRow(viewName).querySelector('.meta-view-mgr__action[title="Rename"]') as HTMLButtonElement).click()
+  await flushUi()
+  const input = document.querySelector('.meta-view-mgr__rename') as HTMLInputElement
+  input.value = nextName
+  input.dispatchEvent(new Event('input'))
+  await flushUi()
+  ;(document.querySelector('.meta-view-mgr__action--ok') as HTMLButtonElement).click()
+  await flushUi()
+}
+const DIALOG_SAVED_SORT = { rules: [{ fieldId: 'fld_key', desc: true }, { fieldId: 'fld_owner', desc: false }] }
+
+describe('MultitableWorkbench #6075 round 3: rejected sort/filter writes are shown; the dialog-save / revert window; N4 scope', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    document.body.innerHTML = ''
+    showErrorSpy.mockReset()
+    vi.restoreAllMocks()
+  })
+
+  async function mountWorkbench(opts: { extraView?: boolean } = {}) {
+    const env = setup(opts)
+    app = createApp(defineComponent({ setup: () => () => h(MultitableWorkbench as Component) }))
+    app.mount(container!)
+    await flushUi()
+    return env
+  }
+
+  it('S2: 应用 answered 403 while the reload succeeds — a values-free toast says the sort was not saved', async () => {
+    const env = await mountWorkbench()
+    env.forbiddenUpdates.add('view_grid') // a viewer without canManageViews
+    await stageRemoveAllSorts(container!)
+    await clickSortApply(container!)
+
+    expect(env.updateView.mock.calls).toEqual([['view_grid', { sortInfo: { rules: [] } }]])
+    expect(env.store.view_grid).toEqual(allRecords())
+    // The reload re-synced the stored rules over the rejected edit…
+    expect(badgeOf(sortTrigger(container!))).toBe('3')
+    // …and the user is told — with the fixed label only (not the server's text, no rule / field names).
+    expect(showErrorSpy.mock.calls).toEqual([['Sort/filter could not be saved to the view']])
+  })
+
+  it('S3: a realtime reload while the 视图管理 save is IN FLIGHT does not PATCH the staged toolbar edit over it', async () => {
+    const env = await mountWorkbench()
+    await stageRemoveAllSorts(container!)
+    expect(gridSortRules(container!)).toEqual([])
+
+    env.control.parkWorkbenchUpdates = true
+    await saveDialogDroppingFirstSortRule(container!, 'All Records')
+    expect(env.workbenchUpdateView).toHaveBeenCalledTimes(1)
+    expect(env.parkedCount()).toBe(1)
+
+    // The dialog's PATCH is still in flight: a peer's edit triggers a realtime reload now.
+    await realtimeReload()
+    expect(env.updateView).not.toHaveBeenCalled()
+
+    env.landParked()
+    await flushUi()
+    expect(env.updateView).not.toHaveBeenCalled()
+    expect(env.store.view_grid.sortInfo).toEqual(DIALOG_SAVED_SORT)
+    expect(badgeOf(sortTrigger(container!))).toBe('2')
+  })
+
+  it('S3: an edit staged WHILE the 视图管理 save is in flight (after a realtime re-sync) is not PATCHed over it either', async () => {
+    const env = await mountWorkbench()
+    env.control.parkWorkbenchUpdates = true
+    await saveDialogDroppingFirstSortRule(container!, 'All Records')
+    expect(env.parkedCount()).toBe(1)
+    // A realtime reload re-syncs the toolbar to the PRE-save rules (and baseline)…
+    await realtimeReload()
+    expect(badgeOf(sortTrigger(container!))).toBe('3')
+    // …and an edit is staged against them before the save returns.
+    await stageRemoveAllSorts(container!)
+    expect(gridSortRules(container!)).toEqual([])
+
+    env.landParked()
+    await flushUi()
+    expect(env.updateView).not.toHaveBeenCalled()
+    expect(env.store.view_grid.sortInfo).toEqual(DIALOG_SAVED_SORT)
+    expect(badgeOf(sortTrigger(container!))).toBe('2')
+  })
+
+  it('S3: an edit staged WHILE the 配置历史 revert is in flight (after a realtime re-sync) is not PATCHed over it either', async () => {
+    const env = await mountWorkbench()
+    env.control.parkRestore = true
+    ;(container!.querySelector('[data-action="open-config-history"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(env.parkedCount()).toBe(1)
+    await realtimeReload()
+    expect(badgeOf(sortTrigger(container!))).toBe('3')
+    await stageRemoveAllSorts(container!)
+    expect(gridSortRules(container!)).toEqual([])
+
+    env.landParked()
+    await flushUi(12)
+    expect(env.updateView).not.toHaveBeenCalled()
+    expect(env.store.view_grid.sortInfo).toEqual(env.revertedSort)
+    expect(gridSortRules(container!)).toEqual([{ fieldId: 'fld_owner', direction: 'desc' }])
+  })
+
+  it('S3: a FAILED 视图管理 save puts the staged toolbar edit back (应用 still applies it)', async () => {
+    const env = await mountWorkbench()
+    await stageRemoveAllSorts(container!)
+    env.forbiddenUpdates.add('view_grid')
+    await saveDialogDroppingFirstSortRule(container!, 'All Records')
+    expect(env.workbenchUpdateView).toHaveBeenCalledTimes(1)
+    expect(showErrorSpy).toHaveBeenCalledWith('Forbidden')
+    expect(env.store.view_grid).toEqual(allRecords())
+    expect(gridSortRules(container!)).toEqual([])
+
+    // Restored: the staged removal is still an applicable edit against All Records' real rules.
+    env.forbiddenUpdates.clear()
+    await clickSortApply(container!)
+    expect(env.updateView.mock.calls).toEqual([['view_grid', { sortInfo: { rules: [] } }]])
+    expect(env.store.view_grid.sortInfo).toEqual({ rules: [] })
+  })
+
+  it('S3: a realtime reload while the 配置历史 revert is IN FLIGHT does not PATCH the staged toolbar edit over it', async () => {
+    const env = await mountWorkbench()
+    await stageRemoveAllSorts(container!)
+    env.control.parkRestore = true
+
+    ;(container!.querySelector('[data-action="open-config-history"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(env.executeConfigRestore).toHaveBeenCalledTimes(1)
+    expect(env.parkedCount()).toBe(1)
+
+    await realtimeReload()
+    expect(env.updateView).not.toHaveBeenCalled()
+
+    env.landParked()
+    await flushUi(12)
+    expect(env.updateView).not.toHaveBeenCalled()
+    expect(env.store.view_grid.sortInfo).toEqual(env.revertedSort)
+    expect(gridSortRules(container!)).toEqual([{ fieldId: 'fld_owner', direction: 'desc' }])
+  })
+
+  it('S3: a FAILED 配置历史 revert puts the staged toolbar edit back (应用 still applies it)', async () => {
+    const env = await mountWorkbench()
+    await stageRemoveAllSorts(container!)
+    env.control.failRestore = true
+
+    ;(container!.querySelector('[data-action="open-config-history"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(env.executeConfigRestore).toHaveBeenCalledTimes(1)
+    expect(env.store.view_grid).toEqual(allRecords())
+
+    await clickSortApply(container!)
+    expect(env.updateView.mock.calls).toEqual([['view_grid', { sortInfo: { rules: [] } }]])
+  })
+
+  // N4: only a save that rewrites the CURRENT view's sort/filter discards the toolbar's staged edits. Otherwise the
+  // save's reload keeps them — and, as every reload does (pre-existing; PR body "Known follow-ups"), flushes them into
+  // the current view. A discard would instead have re-synced the toolbar to All Records' 3 stored rules.
+  it('N4: renaming the CURRENT view (no sort/filter in the save) keeps the staged toolbar edit', async () => {
+    const env = await mountWorkbench()
+    await stageRemoveAllSorts(container!)
+    await renameView(container!, 'All Records', 'All Records 2')
+
+    expect(env.workbenchUpdateView.mock.calls).toEqual([['view_grid', { name: 'All Records 2' }]])
+    expect(gridSortRules(container!)).toEqual([])
+    expect(env.updateView.mock.calls).toEqual([['view_grid', { sortInfo: { rules: [] } }]])
+  })
+
+  it('N4: a 视图管理 sort save of ANOTHER view keeps the current view\'s staged toolbar edit', async () => {
+    const env = await mountWorkbench({ extraView: true })
+    await stageRemoveAllSorts(container!)
+    await openViewManager(container!)
+    ;(managerRow('Ops view').querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-sort-add="true"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('.meta-view-mgr__config-actions .meta-view-mgr__btn-add') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(env.workbenchUpdateView.mock.calls).toEqual([['view_other', { sortInfo: { rules: [{ fieldId: 'fld_title', desc: false }] } }]])
+    expect(gridSortRules(container!)).toEqual([])
+    expect(env.updateView.mock.calls).toEqual([['view_grid', { sortInfo: { rules: [] } }]])
+    expect(env.store.view_other.sortInfo).toEqual({ rules: [{ fieldId: 'fld_title', desc: false }] })
+  })
+
+  it('N4: a plain rename of ANOTHER view keeps the current view\'s staged toolbar edit', async () => {
+    const env = await mountWorkbench({ extraView: true })
+    await stageRemoveAllSorts(container!)
+    await renameView(container!, 'Ops view', 'Ops view 2')
+
+    expect(env.workbenchUpdateView.mock.calls).toEqual([['view_other', { name: 'Ops view 2' }]])
+    expect(gridSortRules(container!)).toEqual([])
   })
 })

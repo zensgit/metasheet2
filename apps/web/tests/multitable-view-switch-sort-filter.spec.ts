@@ -25,6 +25,14 @@
  *  - hidden columns / grouping / column order get the same "only into the view they were loaded from" gate, and a
  *    view switch resets them (the new view shows all columns until — and unless — its own load lands).
  *
+ * Review round 3 added (describe block before the MetaViewManager one):
+ *  - S1: a load waits at most SORT_FILTER_WRITE_WAIT_MS for writes it did not send (a stalled PATCH no longer freezes
+ *    the view's later loads), still awaits its own write in full, and a late success / failure after the bound does
+ *    not touch the state that load installed (fake timers drive the bound).
+ *  - S2: every rejected write reaches the onSortFilterWriteFailed callback (view id only), incl. PATCH 403 + GET OK.
+ *  - S3: discardUnappliedSortFilterEdits returns a restore that puts a failed save's staged edit back, and is a no-op
+ *    once a load re-synced or a view switch reset the state.
+ *
  * This spec drives the REAL composable (useMultitableGrid) + the REAL MetaToolbar / MetaGridTable against a
  * MultitableApiClient whose loadView/updateView are backed by an in-memory view store that mimics the
  * server's PATCH merge (a key that is absent from the body keeps the stored value). The real workbench
@@ -35,7 +43,7 @@ import { createApp, defineComponent, h, nextTick, ref, type App, type Ref } from
 import MetaToolbar from '../src/multitable/components/MetaToolbar.vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import MetaViewManager from '../src/multitable/components/MetaViewManager.vue'
-import { useMultitableGrid, type SortRule } from '../src/multitable/composables/useMultitableGrid'
+import { useMultitableGrid, SORT_FILTER_WRITE_WAIT_MS, type SortRule } from '../src/multitable/composables/useMultitableGrid'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import { useLocale } from '../src/composables/useLocale'
 import type { MetaField } from '../src/multitable/types'
@@ -151,9 +159,15 @@ function makeServer(opts: { failLoadFor?: string; withoutViewFor?: string } = {}
   // A view id in `heldUpdateViews` PARKS its PATCHes (a slow network) until the test lands or fails them, oldest
   // first. The store changes only when a PATCH LANDS — exactly when the server would apply it.
   const heldUpdateViews = new Set<string>()
+  // A view id in `forbiddenUpdates` answers every PATCH with a 403 (a viewer without canManageViews), shaped like the
+  // MultitableApiError client.ts parseJson throws. The store is not touched.
+  const forbiddenUpdates = new Set<string>()
   const parked: Array<{ land: () => void; fail: () => void }> = []
   const updateView = vi.spyOn(client, 'updateView').mockImplementation(async (viewId, input) => {
     const body = JSON.parse(JSON.stringify(input ?? {})) as Partial<StoredView>
+    if (forbiddenUpdates.has(viewId)) {
+      throw Object.assign(new Error('Forbidden'), { name: 'MultitableApiError', status: 403, code: 'FORBIDDEN' })
+    }
     if (heldUpdateViews.has(viewId)) {
       await new Promise<void>((resolve, reject) => {
         parked.push({
@@ -174,7 +188,10 @@ function makeServer(opts: { failLoadFor?: string; withoutViewFor?: string } = {}
   const landUpdate = () => nextParked().land()
   const failUpdate = () => nextParked().fail()
   const parkedCount = () => parked.length
-  return { client, store, loadView, updateView, failingLoads, holdLoadsFor, viewlessLoads, heldUpdateViews, landUpdate, failUpdate, parkedCount }
+  return {
+    client, store, loadView, updateView, failingLoads, holdLoadsFor, viewlessLoads, heldUpdateViews, forbiddenUpdates,
+    landUpdate, failUpdate, parkedCount,
+  }
 }
 
 const flush = async () => {
@@ -188,12 +205,17 @@ const flush = async () => {
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 
-function mountHarness(server: ReturnType<typeof makeServer>, initialViewId = 'view_all', isPersonalMode?: () => boolean) {
+function mountHarness(
+  server: ReturnType<typeof makeServer>,
+  initialViewId = 'view_all',
+  isPersonalMode?: () => boolean,
+  onSortFilterWriteFailed?: (viewId: string) => void,
+) {
   const viewId = ref(initialViewId)
   let grid!: ReturnType<typeof useMultitableGrid>
   const Harness = defineComponent({
     setup() {
-      grid = useMultitableGrid({ sheetId: ref('sheet_1'), viewId, client: server.client, isPersonalMode })
+      grid = useMultitableGrid({ sheetId: ref('sheet_1'), viewId, client: server.client, isPersonalMode, onSortFilterWriteFailed })
       // Same call sequence as MultitableWorkbench.vue onToggleSort (header click) / onUpdateSort / onClearFilters.
       function onToggleSort(fieldId: string) {
         const ex = grid.sortRules.value.find((r) => r.fieldId === fieldId)
@@ -252,6 +274,7 @@ afterEach(() => {
   document.body.innerHTML = ''
   useLocale().setLocale('en')
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('view switch: the loaded view is authoritative for sort + filter (客户反馈 2026-09-24 #5)', () => {
@@ -701,9 +724,13 @@ describe('#6075 round 2: in-flight writes, discarded edits, and the column / gro
     expect(headerArrows(container)).toEqual([null, null, null])
   })
 
-  it('a FAILED write is rolled back: the edit stays staged and the next load retries it', async () => {
+  // #6075 round 3 (S2) corrected this test's claim: the rollback keeps the edit staged for a retry only when the reload
+  // after the failed PATCH ALSO fails (as here). When that reload succeeds, its re-sync replaces the edit — see the
+  // round-3 "PATCH 403 + GET OK" test, which asserts the failure is surfaced instead.
+  it('a FAILED write whose reload ALSO fails is rolled back: the edit stays staged and the next load retries it', async () => {
     const server = makeServer()
-    const { grid } = mountHarness(server)
+    const onFailed = vi.fn()
+    const { grid } = mountHarness(server, 'view_all', undefined, onFailed)
     await flush()
     server.heldUpdateViews.add('view_all')
     server.failingLoads.add('view_all') // the network is down: the reload after the failed PATCH fails too
@@ -713,6 +740,7 @@ describe('#6075 round 2: in-flight writes, discarded edits, and the column / gro
     await flush()
     server.failUpdate()
     await flush()
+    expect(onFailed.mock.calls).toEqual([['view_all']])
     expect(grid().error.value).toBe('network down')
     expect(server.store.view_all.sortInfo).toEqual(viewA().sortInfo)
     expect(grid().sortRules.value).toEqual([]) // the user's edit is still on screen…
@@ -907,6 +935,275 @@ describe('#6075 round 2: in-flight writes, discarded edits, and the column / gro
     await flush()
     expect(server.updateView).not.toHaveBeenCalled()
     expect(server.store.view_cols_a).toEqual(viewColsA())
+  })
+})
+
+describe('#6075 round 3: bounded read-after-write, surfaced write failures, discard + restore', () => {
+  const removeAllSorts = (grid: ReturnType<typeof useMultitableGrid>) => {
+    for (const rule of [...grid.sortRules.value]) grid.removeSortRule(rule.fieldId)
+  }
+  const loadsOf = (server: ReturnType<typeof makeServer>, viewId: string) =>
+    server.loadView.mock.calls.filter(([params]) => params.viewId === viewId).length
+  // Only the bound's timer is faked; promises / nextTick stay real.
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+
+  it('S1: a PATCH that never settles does not freeze the view — switching back reads it within SORT_FILTER_WRITE_WAIT_MS', async () => {
+    fakeTimers()
+    const server = makeServer()
+    const { container, viewId, grid } = mountHarness(server)
+    await flush()
+    // A's PATCH is parked and never landed nor failed: a stalled request (apiFetch has no timeout; the proxy's is 300 s).
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+    expect(server.parkedCount()).toBe(1)
+
+    viewId.value = 'view_new'
+    await flush()
+    expect(grid().isViewStateLoadedFor('view_new')).toBe(true)
+
+    const before = loadsOf(server, 'view_all')
+    viewId.value = 'view_all'
+    await flush()
+    // Still read-after-write: no GET of A while its write is in flight…
+    await vi.advanceTimersByTimeAsync(SORT_FILTER_WRITE_WAIT_MS - 1)
+    await flush()
+    expect(loadsOf(server, 'view_all')).toBe(before)
+    expect(grid().loading.value).toBe(true)
+    // …but only up to the bound: then A loads anyway, while its PATCH is still stalled.
+    await vi.advanceTimersByTimeAsync(1)
+    await flush()
+    expect(loadsOf(server, 'view_all')).toBe(before + 1)
+    expect(grid().loading.value).toBe(false)
+    expect(grid().isViewStateLoadedFor('view_all')).toBe(true)
+    expect(server.parkedCount()).toBe(1)
+    // It shows what A stores — the write never landed: its 3 rules.
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+    expect(headerArrows(container)).toEqual(['▼', '▲', '▲'])
+    expect(grid().sortFilterDirty.value).toBe(false)
+  })
+
+  it('S1: 应用 #2 queued behind a stalled PATCH reads the view within the bound; #2 is still sent once #1 settles', async () => {
+    fakeTimers()
+    const server = makeServer()
+    const { grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter() // #1, stalled
+    await flush()
+    grid().addSortRule({ fieldId: 'fld_qty', direction: 'desc' })
+    grid().applySortFilter() // #2, queued behind #1
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+
+    const before = loadsOf(server, 'view_all')
+    await vi.advanceTimersByTimeAsync(SORT_FILTER_WRITE_WAIT_MS - 1)
+    await flush()
+    expect(loadsOf(server, 'view_all')).toBe(before)
+    await vi.advanceTimersByTimeAsync(1)
+    await flush()
+    expect(loadsOf(server, 'view_all')).toBe(before + 1)
+    expect(grid().loading.value).toBe(false)
+
+    // The late writes still land, in order.
+    server.landUpdate()
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(2)
+    expect(server.updateView.mock.calls[1]).toEqual(['view_all', { sortInfo: { rules: [{ fieldId: 'fld_qty', desc: true }] } }])
+    server.landUpdate()
+    await flush()
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [{ fieldId: 'fld_qty', desc: true }] })
+  })
+
+  it('S1: an 应用 with nothing new to send still waits for the write in flight (read-after-write is not cut short)', async () => {
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter() // PATCH #1 `{ rules: [] }` in flight
+    await flush()
+    // An edit that nets to nothing against the pending write: dirty, but no facet differs from what #1 sends.
+    grid().addSortRule({ fieldId: 'fld_qty', direction: 'desc' })
+    grid().removeSortRule('fld_qty')
+    expect(grid().sortFilterDirty.value).toBe(true)
+    const before = loadsOf(server, 'view_all')
+    grid().applySortFilter()
+    await flush()
+    expect(server.updateView).toHaveBeenCalledTimes(1) // nothing new was sent…
+    expect(loadsOf(server, 'view_all')).toBe(before) // …and the view is not read ahead of #1
+
+    server.landUpdate()
+    await flush()
+    expect(loadsOf(server, 'view_all')).toBeGreaterThan(before)
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+  })
+
+  it('S1: a load\'s OWN write, sent at once, is still awaited in full — a slow 应用 reads what it wrote (unchanged from main)', async () => {
+    fakeTimers()
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+
+    const before = loadsOf(server, 'view_all')
+    await vi.advanceTimersByTimeAsync(SORT_FILTER_WRITE_WAIT_MS * 3)
+    await flush()
+    expect(loadsOf(server, 'view_all')).toBe(before)
+    expect(grid().loading.value).toBe(true)
+
+    server.landUpdate()
+    await flush()
+    expect(loadsOf(server, 'view_all')).toBe(before + 1)
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+    expect(grid().loading.value).toBe(false)
+  })
+
+  it('S1: a write that FAILS after the bounded load read the view is reported, and does not roll back over that load\'s state', async () => {
+    fakeTimers()
+    const server = makeServer()
+    const onFailed = vi.fn()
+    const { container, grid } = mountHarness(server, 'view_all', undefined, onFailed)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+    // Another load of A while the PATCH is stalled (a page change, a realtime reload…), past the bound.
+    void grid().loadViewData(0)
+    await flush()
+    await vi.advanceTimersByTimeAsync(SORT_FILTER_WRITE_WAIT_MS)
+    await flush()
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+    expect(grid().sortFilterDirty.value).toBe(false)
+
+    server.failUpdate() // the late failure
+    await flush()
+    expect(onFailed.mock.calls).toEqual([['view_all']])
+    // Compare-and-set: the bounded load installed a newer baseline, so nothing is rolled back or re-staged over it.
+    expect(grid().sortFilterDirty.value).toBe(false)
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+    expect(server.store.view_all).toEqual(viewA())
+  })
+
+  it('S1: a write that LANDS after the bounded load read the view leaves the grid state alone; the next load shows it', async () => {
+    fakeTimers()
+    const server = makeServer()
+    const onFailed = vi.fn()
+    const { container, grid } = mountHarness(server, 'view_all', undefined, onFailed)
+    await flush()
+    server.heldUpdateViews.add('view_all')
+    removeAllSorts(grid())
+    grid().applySortFilter()
+    await flush()
+    void grid().loadViewData(0)
+    await flush()
+    await vi.advanceTimersByTimeAsync(SORT_FILTER_WRITE_WAIT_MS)
+    await flush()
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+
+    server.landUpdate() // the late success
+    await flush()
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+    expect(onFailed).not.toHaveBeenCalled()
+    expect(grid().sortFilterDirty.value).toBe(false)
+    // Known edge (PR body): the grid keeps showing what the bounded load read until the next load.
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+    await grid().loadViewData(0)
+    await flush()
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+  })
+
+  it('S2: PATCH 403 + GET OK — the view\'s stored rules come back and the failure is reported once, values-free', async () => {
+    const server = makeServer()
+    const onFailed = vi.fn()
+    const { container, grid } = mountHarness(server, 'view_all', undefined, onFailed)
+    await flush()
+    server.forbiddenUpdates.add('view_all') // a viewer without canManageViews
+
+    headerByName(container, '数量').click() // 数量 ▲ → ▼
+    await flush()
+
+    expect(server.updateView).toHaveBeenCalledTimes(1)
+    expect(server.updateView).toHaveBeenCalledWith('view_all', {
+      sortInfo: { rules: [{ fieldId: 'fld_proj', desc: false }, { fieldId: 'fld_key', desc: true }, { fieldId: 'fld_qty', desc: true }] },
+    })
+    expect(server.store.view_all).toEqual(viewA())
+    // The reload after it succeeded and re-synced A's stored rules over the rejected edit…
+    expect(headerArrows(container)).toEqual(['▼', '▲', '▲'])
+    expect(grid().sortFilterDirty.value).toBe(false)
+    // …not through the shared `error` ref (the load itself succeeded)…
+    expect(grid().error.value).toBeNull()
+    // …but through the failure callback: exactly once, with nothing but the view id.
+    expect(onFailed.mock.calls).toEqual([['view_all']])
+  })
+
+  it('S3: restore() after a FAILED dialog save puts the staged edit back — the next load PATCHes it as before', async () => {
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+    removeAllSorts(grid())
+    await flush()
+    expect(grid().sortFilterDirty.value).toBe(true)
+
+    const restore = grid().discardUnappliedSortFilterEdits()
+    expect(grid().sortFilterDirty.value).toBe(false)
+    restore()
+    expect(grid().sortFilterDirty.value).toBe(true)
+    // The toolbar still shows the staged removal, and the next load applies it into A — against A's real baseline.
+    expect(badgeOf(sortTrigger(container))).toBeNull()
+    await grid().loadViewData(0)
+    await flush()
+    expect(server.updateView.mock.calls).toEqual([['view_all', { sortInfo: { rules: [] } }]])
+    expect(server.store.view_all.sortInfo).toEqual({ rules: [] })
+  })
+
+  it('S3: restore() is a no-op once a load re-synced the toolbar meanwhile', async () => {
+    const server = makeServer()
+    const { container, grid } = mountHarness(server)
+    await flush()
+    removeAllSorts(grid())
+    const restore = grid().discardUnappliedSortFilterEdits()
+    // E.g. a realtime reload during the dialog's PATCH: it re-syncs the toolbar from the server.
+    await grid().loadViewData(0)
+    await flush()
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+
+    restore()
+    expect(grid().sortFilterDirty.value).toBe(false)
+    await grid().loadViewData(0)
+    await flush()
+    expect(server.updateView).not.toHaveBeenCalled()
+    expect(badgeOf(sortTrigger(container))).toBe('3')
+  })
+
+  it('S3: restore() is a no-op after a view switch (even before the new view\'s load lands)', async () => {
+    const server = makeServer()
+    const { container, viewId, grid } = mountHarness(server)
+    await flush()
+    removeAllSorts(grid())
+    const restore = grid().discardUnappliedSortFilterEdits()
+
+    const release = server.holdLoadsFor('view_new')
+    viewId.value = 'view_new'
+    await flush()
+    restore()
+    // A's discarded baseline / dirty flag must not come back under B.
+    expect(grid().sortFilterDirty.value).toBe(false)
+    release()
+    await flush()
+
+    headerByName(container, '数量').click()
+    await flush()
+    expect(server.updateView.mock.calls).toEqual([['view_new', { sortInfo: { rules: [{ fieldId: 'fld_qty', desc: false }] } }]])
+    expect(server.store.view_all).toEqual(viewA())
   })
 })
 

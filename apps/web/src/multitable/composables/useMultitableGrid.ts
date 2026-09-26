@@ -340,6 +340,22 @@ export function effectiveFilterTypeKey(field: { type: string; property?: unknown
 const DEFAULT_PAGE_SIZE = 50
 const SEARCH_DEBOUNCE_MS = 150
 
+// #6075 round 3 (S1): the longest a load waits for sort/filter writes to its view that it did not send itself — an
+// earlier 应用's still in flight, or one queued ahead of this load's own. apiFetch has no timeout and the proxy's is
+// 300 s, so an unbounded wait let ONE stalled PATCH freeze every later load of that view. Past the bound the load
+// reads anyway and the late write still lands (or fails) behind it; persistSortFilter's compare-and-set keeps a late
+// settle from touching the state that read installed.
+export const SORT_FILTER_WRITE_WAIT_MS = 4000
+
+// Resolves when `pending` settles or after `ms`, whichever is first; never rejects.
+function settleWithin(pending: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    const done = () => { clearTimeout(timer); resolve() }
+    pending.then(done, done)
+  })
+}
+
 // A1 infinite-scroll accumulation safety ceiling. Each loadMore() fetches only one page (pageSize rows)
 // via offset pagination, so we never approach the server view-load `limit` clamp (max 5000) per fetch —
 // this cap bounds total in-memory ROWS only (the DOM is already bounded by the grid windowing). Aligned
@@ -504,6 +520,14 @@ export function useMultitableGrid(opts: {
   // this option set at all (usePersonalViewToggle.isPersonalMode is itself flag-gated), so a disabled
   // session never emits a personal-config request from here (G-FE-4).
   isPersonalMode?: (viewId: string) => boolean
+  // #6075 round 3 (S2): called once for EVERY sort/filter write the server rejected — 403 for a viewer without
+  // canManageViews, 400 for a hidden-filter mismatch, a network failure — whichever path sent it (应用, header click,
+  // 清除筛选, or any reload that flushes staged edits). The load that sent it goes on to read the view and re-syncs the
+  // stored rules over the edit, so without this the edit just vanished. Values-free: the view id only, never the
+  // rules or the server's message. A callback rather than `error`: the write can settle during any other grid call,
+  // and `error` set then would read as THAT call's failure (e.g. a picker's patchCell), while every loadViewData
+  // caller would have to check it. The workbench shows it as a toast.
+  onSortFilterWriteFailed?: (viewId: string) => void
 }) {
   const client = opts.client ?? multitableClient
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
@@ -617,9 +641,14 @@ export function useMultitableGrid(opts: {
   let sortFilterBaseline: SortFilterBaseline | null = null
   // Sort/filter writes still in flight, per view: the tail of that view's write chain (#6075 round 2). Writes to
   // one view are SERIALISED — each is sent only after the previous one settled — so the server applies them in
-  // the order the user pressed 应用 (last write wins); and loadViewData reads a view only after every write
-  // already sent to it has settled, so a reload can never show (and re-baseline from) the pre-write rules.
+  // the order the user pressed 应用 (last write wins); and loadViewData reads a view only after the writes to it have
+  // settled, so a reload does not show (and re-baseline from) the pre-write rules — waiting at most
+  // SORT_FILTER_WRITE_WAIT_MS for writes it did not send itself (#6075 round 3, S1).
   const sortFilterWriteTails = new Map<string, Promise<void>>()
+  // The live discardUnappliedSortFilterEdits call (#6075 round 3, S3): only ITS restore may put the discarded
+  // baseline / dirty flag back. syncFromView and resetSortFilterState retire it (the state was re-established or
+  // forgotten since), and so does a newer discard.
+  let liveDiscard: object | null = null
   // WHICH view the column / grouping state (hiddenFieldIds, groupFieldIds, fieldOrder) was loaded from (#6075
   // round 2). null ⇒ not known: the view has just switched and its load is in flight or failed, or the response
   // carried no view. Those facets are written as WHOLE lists (hiding one column PATCHes the full hidden list), so
@@ -678,15 +707,21 @@ export function useMultitableGrid(opts: {
       // the view-switch watcher resets) or not known yet (vid's load in flight / failed). Writing it would put
       // foreign rules into vid, or wipe vid's stored rules with an empty toolbar — drop it instead; the load
       // below establishes vid's real state (客户反馈 2026-09-24 #5).
+      // Writes to vid already in flight BEFORE this load (captured before persistSortFilter queues this load's own).
+      const writesAhead = vid ? sortFilterWriteTails.get(vid) : undefined
+      let ownWrite: Promise<void> | undefined
       if (sortFilterDirty.value && vid) {
-        if (sortFilterBaseline?.viewId === vid) await persistSortFilter(vid)
+        if (sortFilterBaseline?.viewId === vid) ownWrite = persistSortFilter(vid)
         else resetSortFilterState()
       }
-      // Read-after-write (#6075 round 2): never read vid while a sort/filter write to it is still in flight. A GET
-      // that overtakes the PATCH returns the pre-write rules, and syncing from it would show — and baseline — a
-      // state the server is about to replace.
-      const inFlightWrite = vid ? sortFilterWriteTails.get(vid) : undefined
-      if (inFlightWrite) await inFlightWrite
+      // Read-after-write (#6075 round 2): do not read vid while a sort/filter write to it is in flight — a GET that
+      // overtakes the PATCH returns the pre-write rules, and syncing from it would show (and baseline) a state the
+      // server is about to replace. This load's OWN write, sent at once, is awaited in full, as it always was (a 应用
+      // then reads what it wrote). Anything it did not send — an earlier write, or one its own is queued behind —
+      // is waited for at most SORT_FILTER_WRITE_WAIT_MS (#6075 round 3, S1): past that the load reads anyway.
+      // (Both are awaited: an own write with nothing to send resolves at once, and must not cut the wait short.)
+      if (writesAhead) await settleWithin(Promise.all([writesAhead, ownWrite]), SORT_FILTER_WRITE_WAIT_MS)
+      else if (ownWrite) await ownWrite
       const data = await client.loadView({
         sheetId: sid,
         viewId: vid || undefined,
@@ -845,6 +880,7 @@ export function useMultitableGrid(opts: {
     nestedFilterNodes.value = null
     sortFilterDirty.value = false
     sortFilterBaseline = null
+    liveDiscard = null
   }
 
   // Everything a view switch must forget (客户反馈 2026-09-24 #5, #6075 round 2): the sort/filter state AND the
@@ -865,16 +901,29 @@ export function useMultitableGrid(opts: {
     return !!viewId && viewStateLoadedFor === viewId
   }
 
-  // A 视图管理 save or a config revert has just rewritten stored view config — possibly the current view's
-  // sort/filter — behind the toolbar (#6075 round 2). The toolbar's staged, unapplied edits were made against the
-  // OLD rules: drop
-  // them — the caller's follow-up loadViewData must re-sync the toolbar from the view it returns, never PATCH
-  // them over what the dialog / revert just saved (an unapplied "remove the last sort rule" would send
-  // `{ rules: [] }` and wipe the sort the dialog saved). The baseline is stale too, so it becomes "not known":
-  // nothing is written for this view until that load re-establishes it.
-  function discardUnappliedSortFilterEdits() {
+  // A 视图管理 save or a config revert is about to rewrite stored view config — possibly the current view's sort/filter
+  // — behind the toolbar (#6075 round 2). The toolbar's staged, unapplied edits were made against the OLD rules: drop
+  // them — no load may PATCH them over what the dialog / revert saves (an unapplied "remove the last sort rule" would
+  // send `{ rules: [] }` and wipe the sort the dialog saved), and the caller's follow-up loadViewData re-syncs the
+  // toolbar from the view it returns. The baseline is stale too, so it becomes "not known": nothing is written for
+  // this view until a load re-establishes it. The caller discards BEFORE it sends its write (#6075 round 3, S3): a
+  // realtime reload or a pending search reload running while that write is in flight would otherwise still PATCH the
+  // staged edits. The returned `restore` puts the discarded baseline and dirty flag back for a write that FAILED —
+  // unless a load re-synced (or a view switch reset) the state meantime, or a newer discard ran; then it does nothing.
+  // The toolbar's rules themselves are never touched here, so restoring the flag and baseline brings the edit back.
+  function discardUnappliedSortFilterEdits(): () => void {
+    const token = {}
+    const discardedBaseline = sortFilterBaseline
+    const discardedDirty = sortFilterDirty.value
+    liveDiscard = token
     sortFilterDirty.value = false
     sortFilterBaseline = null
+    return () => {
+      if (liveDiscard !== token) return
+      liveDiscard = null
+      sortFilterBaseline = discardedBaseline
+      if (discardedDirty) sortFilterDirty.value = true
+    }
   }
 
   // The toolbar's sort / filter as a persist payload. An empty list is the explicit empty
@@ -933,6 +982,8 @@ export function useMultitableGrid(opts: {
         : []
     groupFieldIds.value = normalizeGroupFieldIds(rawIds)
     sortFilterDirty.value = false
+    // Re-established from the server: a pending discard's restore must not put the stale baseline back over it.
+    liveDiscard = null
     // This state now IS the named view's stored sort/filter — the baseline persistSortFilter diffs against.
     const loadedViewId = typeof view.id === 'string' && view.id ? view.id : (forViewId ?? opts.viewId.value)
     sortFilterBaseline = loadedViewId
@@ -1000,12 +1051,15 @@ export function useMultitableGrid(opts: {
       // The write failed, so the view still stores `baseline`. Compare-and-set: roll back ONLY while `sent` is
       // still the current generation. A later 应用 (it diffed against `sent`), a load's re-sync, a view switch or a
       // discard have each installed a newer object, and restoring over it would put a stale — possibly another
-      // view's — baseline and dirty flag under the current view. Rolled back, the edit is staged again and the
-      // next load retries it.
+      // view's — baseline and dirty flag under the current view. Rolled back, the edit is staged again — but the
+      // load that sent it goes on to read the view, and its re-sync replaces the staged edit with the stored rules.
+      // Only when that read fails too does the edit stay staged for the next load to retry. So the failure is
+      // always surfaced (#6075 round 3, S2), whether or not the rollback applied.
       if (sortFilterBaseline === sent) {
         sortFilterBaseline = baseline
         sortFilterDirty.value = true
       }
+      opts.onSortFilterWriteFailed?.(viewId)
     }
   }
 

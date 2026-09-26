@@ -1004,7 +1004,15 @@ const canOpenWorkflowDesigner = computed(
 // its `isPersonalMode` getter can be threaded into useMultitableGrid's write-routing switch (G-FE-2).
 const personalViewsEnabled = computed(() => capabilitySource.value?.personalViewsEnabled === true)
 const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
-const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId, isPersonalMode: personalView.isPersonalMode })
+const grid = useMultitableGrid({
+  sheetId: workbench.activeSheetId,
+  viewId: workbench.activeViewId,
+  isPersonalMode: personalView.isPersonalMode,
+  // #6075 round 3 (S2): a rejected sort/filter write (403 for a viewer without canManageViews, 400 hidden-filter
+  // mismatch, network) — the reload after it shows the view's stored rules again, so the edit would otherwise just
+  // vanish. Shown with the toast the other grid write failures use; values-free copy (no rules, no server prose).
+  onSortFilterWriteFailed: () => showError(wb('toast.sortFilterSaveFailed', isZh.value)),
+})
 
 // W2 exact-anchor recovery entry wiring. Both capability signals already encode canManageSheetAccess; the picker
 // owns the (sheetId, exact-anchor) composition and the dialogs execute token-only. Revert keeps post-anchor-created
@@ -1499,8 +1507,18 @@ async function loadConfigHistory(entityType: string) {
 function configRestorePreview(revisionId: string) {
   return workbench.client.getConfigRestorePreview(workbench.activeSheetId.value, revisionId)
 }
-function configRestoreExecute(revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) {
-  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken, confirm)
+async function configRestoreExecute(revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) {
+  // #6075 round 3 (S3): a revert may restore the current view's sort/filter, so the toolbar's staged, unapplied edits
+  // are discarded BEFORE the revert is sent — a realtime reload or a pending search reload running while it is in
+  // flight must not PATCH them over what it restores — and put back if it fails. (onConfigReverted discards again
+  // before its reload, for whatever was staged after this point.)
+  const restoreToolbarEdits = grid.discardUnappliedSortFilterEdits()
+  try {
+    return await workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken, confirm)
+  } catch (error) {
+    restoreToolbarEdits()
+    throw error
+  }
 }
 async function onConfigReverted() {
   // A revert changes field name/order or view filter/config — reload sheet meta + grid so the field
@@ -3648,8 +3666,12 @@ async function onUpdateView(viewId: string, input: {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
 }) {
-  // A 视图管理 save wins over the toolbar's staged, unapplied sort/filter edits (#6075 round 2).
-  await updateViewInternal(viewId, input, true, { discardToolbarEdits: true })
+  // A 视图管理 save of the CURRENT view's sort/filter wins over the toolbar's staged, unapplied edits (#6075 round 2) —
+  // and only that save (round 3, N4): a rename, a config-only save or a save of another view leaves the staged edits
+  // alone. (An omitted facet is kept by the server; `undefined` is dropped by JSON, so it does not count either.)
+  const rewritesToolbarRules = viewId === workbench.activeViewId.value
+    && (input.sortInfo !== undefined || input.filterInfo !== undefined)
+  await updateViewInternal(viewId, input, true, { discardToolbarEdits: rewritesToolbarRules })
 }
 
 async function onPersistActiveViewConfig(input: {
@@ -3919,13 +3941,24 @@ async function updateViewInternal(
   notify: boolean,
   options: { discardToolbarEdits?: boolean } = {},
 ) {
+  // 客户反馈 2026-09-24 #5 / #6075 round 2: a 视图管理 save of the current view's sort/filter rewrites them behind the
+  // toolbar. Staged, unapplied toolbar edits were made against the old rules — drop them, so the reload below
+  // re-syncs the toolbar from the saved view instead of PATCHing them over it. Dropped BEFORE the PATCH is sent
+  // (round 3, S3): a realtime reload or a pending search reload that runs while it is in flight would otherwise still
+  // PATCH the staged edits over the dialog's save. If the save fails, they are put back (restore no-ops when a load
+  // re-synced the toolbar meantime).
+  const restoreToolbarEdits = options.discardToolbarEdits ? grid.discardUnappliedSortFilterEdits() : null
   try {
     await workbench.client.updateView(viewId, input)
-    // 客户反馈 2026-09-24 #5 / #6075 round 2: a 视图管理 save can rewrite the current view's sort/filter behind the
-    // toolbar. Staged, unapplied toolbar edits were made against the old rules — drop them, so the reload below
-    // re-syncs the toolbar from the saved view instead of PATCHing them over it. Whichever view the dialog saved:
-    // the reload must never apply edits the user did not press 应用 for.
-    if (options.discardToolbarEdits) grid.discardUnappliedSortFilterEdits()
+  } catch (e: any) {
+    restoreToolbarEdits?.()
+    showError(e.message ?? wb('toast.viewUpdateFailed', isZh.value))
+    return
+  }
+  // …and again once it succeeded: an edit staged WHILE the PATCH was in flight (a realtime reload may have re-synced the
+  // toolbar to the pre-save rules meanwhile) was made against those rules too — as onConfigReverted does for a revert.
+  if (options.discardToolbarEdits) grid.discardUnappliedSortFilterEdits()
+  try {
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
     if (notify) showSuccess(wb('toast.viewSettingsSaved', isZh.value))

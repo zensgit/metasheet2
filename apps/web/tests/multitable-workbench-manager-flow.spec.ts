@@ -323,8 +323,9 @@ function createGridMock() {
     deleteRecord: vi.fn(),
     resolveRowActions: vi.fn(() => null),
     loadViewData: vi.fn().mockResolvedValue(true),
-    // #6075 round 2: a 视图管理 save discards the toolbar's unapplied sort/filter edits before its reload.
-    discardUnappliedSortFilterEdits: vi.fn(),
+    // #6075 round 2/3: a 视图管理 save of the current view's sort/filter discards the toolbar's unapplied sort/filter
+    // edits before its PATCH; the real method returns a `restore` for a failed save.
+    discardUnappliedSortFilterEdits: vi.fn(() => vi.fn()),
     isViewStateLoadedFor: vi.fn(() => true),
     reloadCurrentPage: vi.fn(),
     dismissConflict: vi.fn(),
@@ -402,7 +403,9 @@ describe('MultitableWorkbench manager-driven config flow', () => {
       },
     })
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
-    expect(gridMock.discardUnappliedSortFilterEdits).toHaveBeenCalledTimes(1)
+    // #6075 round 3 (N4): a config-only save of a view that is not the current one (view_grid is) rewrites neither
+    // the current view's sort nor its filter, so the toolbar's staged edits are NOT discarded.
+    expect(gridMock.discardUnappliedSortFilterEdits).not.toHaveBeenCalled()
     expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
     // #3720 (W3-5b) added an optional `action?: ToastAction` 2nd param to the workbench's local
     // showSuccess(msg, action) wrapper (for History Center deep-link toast actions); it always
