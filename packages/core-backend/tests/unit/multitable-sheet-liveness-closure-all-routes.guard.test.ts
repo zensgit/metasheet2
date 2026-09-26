@@ -1268,17 +1268,10 @@ const OPAQUE_REGISTRATIONS: Record<string, Record<string, { handler: string; rea
       },
     },
   },
-  'routes/admin-routes.ts': {
-    'GET /safety/status': {
-      handler: 'createSafetyStatusEndpoint()',
-      reason: 'IMPORTED HANDLER FACTORY (guards/middleware.ts): reports the operation-safety switch (enabled + pending '
-        + 'confirmation count); it reads no request input and no sheet (asserted on its body).',
-      stillTrue: () => {
-        const code = functionCode('guards/middleware.ts', 'createSafetyStatusEndpoint')
-        return code.length > 0 && !/sheet|req\.(params|query|body)/i.test(code)
-      },
-    },
-  },
+  // routes/admin-routes.ts GET /safety/status used to be named here (handler `createSafetyStatusEndpoint()`,
+  // an imported factory this scan cannot read). It is now an inline wrapper that sends a synchronous
+  // throw through the admin failure envelope (admin-tree-5xx-values-free.test.ts), so its handler is
+  // readable and it is scanned like any other handler.
   'routes/metrics-demo.ts': {
     'GET /metrics': {
       handler: 'PermissionMetricsMiddleware.metricsEndpoint',
