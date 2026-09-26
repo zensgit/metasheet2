@@ -360,6 +360,14 @@ describe('項目接入 — the four-step import run', () => {
     expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_NOT_PERMITTED' })
   })
 
+  it('G-3h2: a bare 401 on the plan is its own reason — an expired session, not a permission refusal', async () => {
+    const api = makeApi({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(401, '/dry-run', {})),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_UNAUTHENTICATED' })
+  })
+
   it('G-3i: SOURCE_UNAVAILABLE (503) keeps the original transient reason unchanged', async () => {
     const api = makeApi({
       dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, '/dry-run', { code: 'SOURCE_UNAVAILABLE' })),
@@ -527,6 +535,7 @@ describe('項目接入 — the pure helpers', () => {
     expect(classifyPlanReadFailureReason(500, 'CONNECTION_CANONICAL_UNAVAILABLE')).toBe('PLAN_READ_FAILED_CONNECTION')
     expect(classifyPlanReadFailureReason(500, 'CONNECTION_LEGACY_UNAVAILABLE')).toBe('PLAN_READ_FAILED_CONNECTION')
     expect(classifyPlanReadFailureReason(409, 'TARGET_SHEET_FOREIGN_PROJECT')).toBe('PLAN_READ_FAILED_FOREIGN_PROJECT')
+    expect(classifyPlanReadFailureReason(401, null)).toBe('PLAN_READ_UNAUTHENTICATED') // 401 is its own class, not folded into 403
     expect(classifyPlanReadFailureReason(403, null)).toBe('PLAN_READ_NOT_PERMITTED')
     expect(classifyPlanReadFailureReason(503, 'SOURCE_UNAVAILABLE')).toBe('PLAN_READ_FAILED')
     expect(classifyPlanReadFailureReason(0, null)).toBe('PLAN_READ_FAILED') // raw network failure: no status, no code

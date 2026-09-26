@@ -373,6 +373,21 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(plan.textContent).toContain('没有从 PLM 拉取')
   })
 
+  it('P-07: a bare 401 on the plan is named as an expired session, not a permission refusal', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(401, '/dry-run', {})),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('登录已过期')
+    expect(plan.textContent).not.toContain('没有从 PLM 拉取')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_READ_UNAUTHENTICATED')
+  })
+
   it('P-07: SOURCE_UNAVAILABLE keeps the original "try again shortly" sentence — this IS the transient case', async () => {
     const double = api({
       dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, '/dry-run', { code: 'SOURCE_UNAVAILABLE' })),

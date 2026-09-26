@@ -1523,6 +1523,10 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '请联系管理员清理旧项目的数据,或为新项目准备新的备料表。',
     enNext: 'Ask an administrator to clear the old project’s data, or prepare a new stock-preparation sheet for the new project.',
   }),
+  PLAN_READ_UNAUTHENTICATED: Object.freeze({
+    zh: '登录已过期，请重新登录后再拉取',
+    en: 'Your session has expired. Sign in again, then retry.',
+  }),
   PLAN_READ_NOT_PERMITTED: Object.freeze({
     zh: '当前账号没有从 PLM 拉取这个项目数据的权限',
     en: 'This account is not allowed to pull this project’s data from PLM',

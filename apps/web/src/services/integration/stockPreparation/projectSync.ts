@@ -78,6 +78,7 @@ export type StockPreparationProjectSyncReason =
   // 5xx) the original sentence was written for.
   | 'PLAN_READ_FAILED_CONNECTION'
   | 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  | 'PLAN_READ_UNAUTHENTICATED'
   | 'PLAN_READ_NOT_PERMITTED'
   | 'PLAN_READ_FAILED'
   | 'PLAN_READ_FAILED_UNKNOWN'
@@ -499,19 +500,24 @@ export function writtenCountsOf(counts: Record<string, number> | undefined | nul
  *   `SOURCE_UNAVAILABLE`, no HTTP status at all (a raw network failure never reaches
  *     `StockPreparationProjectSyncCallError`, so `status` is 0), or ANY 5xx — the transient case the
  *     original sentence was written for. Kept as `PLAN_READ_FAILED`, unchanged.
- *   403 — this caller specifically is refused (checked AFTER the two code-specific cases above, since
- *     a `CONNECTION_*` refusal can itself surface at a non-403 status and must not be re-classified
- *     as a permission refusal just because some OTHER caller's 403 looks the same on the wire).
+ *   401 — this caller is not signed in at all (a stale/expired session), which is a DIFFERENT fix
+ *     from a 403 (sign in again, vs. ask an administrator for a permission), so it is its own class
+ *     rather than sharing 403's sentence.
+ *   403 — this caller IS signed in and specifically refused. Both status checks run AFTER the two
+ *     code-specific cases above, since a `CONNECTION_*` refusal can itself surface at a non-401/403
+ *     status and must not be re-classified just because some OTHER caller's 401/403 looks the same on
+ *     the wire.
  *   anything else — genuinely unclassified. Says so plainly instead of guessing a cause that is not
  *     there.
  */
 export function classifyPlanReadFailureReason(
   status: number,
   errorCode: string | null,
-): 'PLAN_READ_FAILED_FOREIGN_PROJECT' | 'PLAN_READ_FAILED_CONNECTION' | 'PLAN_READ_FAILED' | 'PLAN_READ_NOT_PERMITTED' | 'PLAN_READ_FAILED_UNKNOWN' {
+): 'PLAN_READ_FAILED_FOREIGN_PROJECT' | 'PLAN_READ_FAILED_CONNECTION' | 'PLAN_READ_FAILED' | 'PLAN_READ_UNAUTHENTICATED' | 'PLAN_READ_NOT_PERMITTED' | 'PLAN_READ_FAILED_UNKNOWN' {
   if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
   if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
   if (errorCode === 'SOURCE_UNAVAILABLE' || status === 0 || status >= 500) return 'PLAN_READ_FAILED'
+  if (status === 401) return 'PLAN_READ_UNAUTHENTICATED'
   if (status === 403) return 'PLAN_READ_NOT_PERMITTED'
   return 'PLAN_READ_FAILED_UNKNOWN'
 }
