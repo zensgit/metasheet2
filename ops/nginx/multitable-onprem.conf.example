@@ -45,6 +45,27 @@ server {
     try_files $uri $uri/ /index.html;
   }
 
+  # #5757：index.html 之前没有 Cache-Control，只有 ETag，浏览器按启发式规则把它当
+  # 静态资源长期缓存——升级后已打开的标签页（同源 SPA 内导航、甚至 DevTools 的
+  # ignoreCache 导航）都不会换包，只有带新 query 参数的 URL 才会拉到新 HTML（r48→r49
+  # 曾因此造成一次误判，见 docs/development/takeover-beiliao-20260821/autonomous-24h-run-20260915.md）。
+  # `location /` 里的 `try_files $uri $uri/ /index.html;` 落到最后一个参数时是一次
+  # 内部重定向，URI 变成 /index.html 后会重新走 location 匹配；`=` 精确匹配优先级高于
+  # 前缀匹配的 `location /`，所以这次内部重定向、以及任何直接请求 `/index.html` 的
+  # 客户端，都会命中这里而不是 `location /`。no-cache（不是 no-store）：ETag 仍然发送，
+  # 校验命中时是 304 而不是每次整包重下。root 沿用 server 级的
+  # `/opt/metasheet/apps/web/dist`，未覆盖；维护门判断复用自 `location /`，保证直接命中
+  # `/index.html` 时行为一致（不会绕过升级窗口的维护页）。/assets/ 等其它静态资源仍归
+  # `location /` 的 try_files 兜底，长缓存策略不受这条改动影响。
+  location = /index.html {
+    if (-f /opt/metasheet/output/maintenance.flag) {
+      return 503;
+    }
+    error_page 503 /maintenance.html;
+    add_header Cache-Control "no-cache, must-revalidate" always;
+    try_files $uri =404;
+  }
+
   # 静态维护页。root 指向**升级不会替换**的目录，所以升级中途它一定在。
   # 最终文件路径 = root + URI = /opt/metasheet/ops/maintenance/maintenance.html
   #
