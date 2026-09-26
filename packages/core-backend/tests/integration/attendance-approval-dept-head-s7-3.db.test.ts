@@ -248,6 +248,18 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
        ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
       [requester, orgId],
     )
+    // #5967 fail-closes an omitted approvalFlowId when this org already has more
+    // than one active time_correction flow (authoring cases leave one behind).
+    // These cases mean the flow just seeded, which is the newest row. Name it.
+    // Zero or one active flow still omits the id so the admin-queue fallback stays.
+    const activeFlows = await (pool as Pool).query<{ id: string }>(
+      `SELECT id FROM attendance_approval_flows
+        WHERE org_id = $1 AND request_type = 'time_correction' AND is_active = true
+        ORDER BY created_at DESC
+        LIMIT 2`,
+      [orgId],
+    )
+    const approvalFlowId = activeFlows.rows.length > 1 ? activeFlows.rows[0]?.id : undefined
     return requestJson(`${baseUrl}/api/attendance/requests`, {
       method: 'POST',
       headers: authHeaders(token),
@@ -258,6 +270,7 @@ describeIfDatabase('S7-3 dept_head — freeze + assignment + auth (real DB)', ()
         requestedInAt: `${workDate}T01:00:00Z`,
         requestedOutAt: `${workDate}T10:00:00Z`,
         reason,
+        ...(approvalFlowId ? { approvalFlowId } : {}),
       }),
     })
   }
