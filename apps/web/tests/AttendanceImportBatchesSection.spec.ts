@@ -12,13 +12,21 @@ type MaybePromise<T> = T | Promise<T>
 interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
   importBatches: Ref<AttendanceImportBatch[]>
+  importBatchesTotal?: Ref<number>
+  importBatchesPage?: Ref<number>
+  importBatchesLastPageCount?: Ref<number>
   importBatchImpactLoading: Ref<boolean>
   importBatchImpactReport: Ref<AttendanceImportBatchImpactReport | null>
   importBatchItems: Ref<AttendanceImportItem[]>
+  importBatchItemsTotal?: Ref<number>
+  importBatchItemsPage?: Ref<number>
+  importBatchItemsLastPageCount?: Ref<number>
   importBatchSelectedId: Ref<string>
   importBatchSnapshot: Ref<Record<string, any> | null>
   loadFullImportBatchImpact: (batchId: string) => MaybePromise<void>
   reloadImportBatches: () => MaybePromise<void>
+  loadMoreImportBatches?: () => MaybePromise<void>
+  loadMoreImportBatchItems?: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
   rollbackImportBatch: (batchId: string, confirmMessage?: string) => MaybePromise<void>
   exportImportBatchItemsCsv: (onlyAnomalies: boolean) => MaybePromise<void>
@@ -770,5 +778,51 @@ describe('AttendanceImportBatchesSection', () => {
 
     expect(container!.textContent).toContain('Batches loaded: 0')
     expect(container!.textContent).toContain('No import batches.')
+  })
+
+  it('shows import batch truncation and asks for the next page', async () => {
+    const loadMoreImportBatches = vi.fn()
+    const loadMoreImportBatchItems = vi.fn()
+    const workflow: ImportBatchesBindings = {
+      importBatchLoading: ref(false),
+      importBatches: ref([createBatch({ id: 'batch-a', rowCount: 1 })]),
+      importBatchesTotal: ref(3),
+      importBatchesPage: ref(1),
+      importBatchesLastPageCount: ref(1),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
+      importBatchSelectedId: ref('batch-a'),
+      importBatchItems: ref([createItem({ id: 'item-a', batchId: 'batch-a' })]),
+      importBatchItemsTotal: ref(4),
+      importBatchItemsPage: ref(1),
+      importBatchItemsLastPageCount: ref(1),
+      importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
+      reloadImportBatches: vi.fn(),
+      loadMoreImportBatches,
+      loadMoreImportBatchItems,
+      loadImportBatchItems: vi.fn(),
+      rollbackImportBatch: vi.fn(),
+      exportImportBatchItemsCsv: vi.fn(),
+      toggleImportBatchSnapshot: vi.fn(),
+    }
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.textContent).toContain('Batches loaded: 1 / 3')
+    expect(container!.textContent).toContain('Loaded items: 1 / 4')
+    container!.querySelector<HTMLButtonElement>('[data-attendance-list-load-more="import-batches"]')!.click()
+    container!.querySelector<HTMLButtonElement>('[data-attendance-list-load-more="import-batch-items"]')!.click()
+    expect(loadMoreImportBatches).toHaveBeenCalledTimes(1)
+    expect(loadMoreImportBatchItems).toHaveBeenCalledTimes(1)
   })
 })
