@@ -3102,6 +3102,9 @@
                 <p class="attendance__field-hint">
                   {{ tr('Which leave types deduct from which balance pool, and how to handle an insufficient balance. v1 deducts from one pool per rule. comp_time / annual leave keep their built-in deduction.', '哪些请假类型从哪个余额池扣减、余额不足如何处理。v1 每条规则扣单一池。调休/年假请假沿用内置扣减。') }}
                 </p>
+                <p class="attendance__field-hint" data-leave-offset="partial-absence-offline">
+                  {{ tr('“Partial (rest = unpaid absence)” is not online. Unpaid-absence minutes are not written to attendance records, so that mode cannot be saved or used to approve. An insufficient balance blocks the approval.', '「部分扣（余下计缺勤）」尚未上线：缺勤分钟不会写入考勤记录，因此不能保存，也不能按该模式批准。余额不足时只能阻断审批。') }}
+                </p>
                 <label class="attendance__field attendance__field--inline" for="attendance-leave-offset-enabled">
                   <input
                     type="checkbox"
@@ -3130,8 +3133,21 @@
                   </select>
                   <select v-model="rule.insufficient" data-leave-offset-rule-insufficient>
                     <option value="block">{{ tr('Block if insufficient', '不足则阻断') }}</option>
-                    <option value="partial_unpaid_absence">{{ tr('Partial (rest = unpaid absence)', '部分扣（余下计缺勤）') }}</option>
+                    <option
+                      v-if="rule.insufficient === 'partial_unpaid_absence'"
+                      value="partial_unpaid_absence"
+                      disabled
+                    >
+                      {{ tr('Partial (rest = unpaid absence) — not online', '部分扣（余下计缺勤）— 未上线') }}
+                    </option>
                   </select>
+                  <small
+                    v-if="rule.insufficient === 'partial_unpaid_absence'"
+                    class="attendance__field-hint attendance__field-hint--error"
+                    data-leave-offset-rule-insufficient-unsupported
+                  >
+                    {{ tr('This saved mode is not online. Switch it to “Block if insufficient” before saving. Approving under it is refused, so the balance is not partially deducted and the day is not projected as full leave.', '已保存的该模式尚未上线。保存前请改为「不足则阻断」。按该模式批准会被拒绝，因此不会少扣余额，也不会把当天投影成全额请假。') }}
+                  </small>
                   <button type="button" class="attendance__btn" data-leave-offset-rule-remove @click="removeLeaveOffsetRule(index)">
                     {{ tr('Remove', '删除') }}
                   </button>
@@ -24264,6 +24280,16 @@ async function saveOvertimeBankPolicy() {
 }
 
 async function saveLeaveOffsetPolicy() {
+  const hasUnsupportedPartialAbsence = leaveOffsetForm.rules.some(
+    (rule) => rule.requestLeaveType.trim() !== '' && rule.insufficient === 'partial_unpaid_absence',
+  )
+  if (hasUnsupportedPartialAbsence) {
+    setStatus(tr(
+      '“Partial (rest = unpaid absence)” is not online. Unpaid-absence minutes are not written, so this mode cannot be saved. Switch the rule to “Block if insufficient”.',
+      '「部分扣（余下计缺勤）」尚未上线：缺勤分钟不会写入考勤，因此不能保存。请把该规则改为「不足则阻断」。',
+    ), 'error')
+    return
+  }
   settingsLoading.value = true
   try {
     // PUT ONLY leaveBalanceDeductionPolicy — backend per-key merge preserves every other policy. Rules with a

@@ -14,6 +14,13 @@ const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolv
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
 const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
+const {
+  LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE,
+  LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_MESSAGE,
+  leaveOffsetRuleDeclaresPartialAbsence,
+  leaveOffsetPolicyDeclaresPartialAbsence,
+  rejectLeaveOffsetPartialAbsence,
+} = require('./lib/leave-offset-partial-absence-guard.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
@@ -14248,6 +14255,8 @@ function normalizeOvertimeBankPolicySetting(raw) {
 // { enabled:false, rules:[] } → the existing hardcoded per-type deduction (comp_time→comp_time, annual→annual)
 // is unchanged. The v1-2b wiring consumes it; v1 LOCKS single-pool (deductFrom[0]); cross-pool order is v2.
 const LEAVE_DEDUCTION_POOLS = Object.freeze(['comp_time', 'annual', 'unpaid'])
+// Read vocabulary still includes partial_unpaid_absence so a legacy stored rule stays visible on GET
+// (#6009). It is not a writable or approvable mode: see leaveOffsetRuleDeclaresPartialAbsence.
 const LEAVE_DEDUCTION_INSUFFICIENT_MODES = Object.freeze(['block', 'partial_unpaid_absence'])
 
 function normalizeLeaveBalanceDeductionPolicySetting(raw) {
@@ -14274,6 +14283,9 @@ function normalizeLeaveBalanceDeductionPolicySetting(raw) {
   }
   return { enabled: parseBoolean(value.enabled, false), rules }
 }
+
+// #6009 rejection lives in lib/leave-offset-partial-absence-guard.cjs so final
+// approval and the approval-exempt create path share one helper.
 
 const MAKEUP_PUNCH_ALLOWED_ANOMALY_TYPES = Object.freeze([
   'missing_check_in',
@@ -19304,9 +19316,9 @@ function respondShiftComplianceCapExceeded(res, error) {
 // caller's approval txn rolls back. The CALLER owns amount semantics (deductionBasis): comp_time
 // passes actual minutes; 年假 L3 will pass standard-day minutes (requestedDays × standardDayMinutes).
 // mode='block' (default, every existing caller) → throw 422 on insufficient (full-or-nothing, byte-identical).
-// mode='partial' (加班银行 v1-2b §4 partial_unpaid_absence) → deduct what's available, never throw; the
-// returned `shortfall` (requested − deducted) is the unpaid portion → 账3 real-absence (= shortfall). The
-// `block` path is unchanged: existing callers omit `mode`, and the loop still deducts the full request.
+// mode='partial' deducts what is available and returns `shortfall` without throwing. LeaveOffsetPolicy does
+// NOT call it (#6009): partial_unpaid_absence is fail-closed because the shortfall is not written as unpaid
+// absence, and loadApprovedMinutes would still project the full request minutes. The block path is unchanged.
 async function deductLeaveBalance(trx, { orgId, userId, leaveTypeCode, amountMinutes, sourceType, insufficientCode, insufficientLabel, sourceId, mode = 'block' }) {
   const deductMinutes = Math.floor(Number(amountMinutes) || 0)
   if (deductMinutes <= 0) return { deducted: 0, lots: 0, shortfall: 0 }
@@ -24703,7 +24715,10 @@ module.exports = {
   __attendanceLeaveOffsetForTests: {
     LEAVE_DEDUCTION_POOLS,
     LEAVE_DEDUCTION_INSUFFICIENT_MODES,
+    LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE,
     normalizeLeaveBalanceDeductionPolicySetting,
+    leaveOffsetRuleDeclaresPartialAbsence,
+    leaveOffsetPolicyDeclaresPartialAbsence,
   },
   __attendanceBonusPolicyForTests: {
     normalizeAttendanceBonusPolicySetting,
@@ -26612,6 +26627,7 @@ module.exports = {
         rules: z.array(z.object({
           requestLeaveType: z.string().min(1),
           deductFrom: z.array(z.enum(['comp_time', 'annual', 'unpaid'])).min(1).max(1), // §P2: v1 single-pool; v2 unlocks >1
+          // partial_unpaid_absence stays parseable so a legacy body gets a specific 422 below, not a generic 400.
           insufficient: z.enum(['block', 'partial_unpaid_absence']).optional(),
         })).optional(),
       }).optional(),
@@ -38162,10 +38178,10 @@ module.exports = {
             // so no leave type is ever deducted twice (the load-bearing invariant). DORMANT (policy disabled,
             // default) → personal_leave etc. deduct nowhere = byte-identical. ENABLED + a matching rule → deduct
             // the request's minutes from the rule's single pool (deductFrom[0]); 'unpaid' pool = no balance
-            // deduction (the leave is just unpaid). insufficient: 'block' → 422 + full rollback (no partial
-            // approval); 'partial_unpaid_absence' → deduct what's available, approve, and the shortfall
-            // (requested − deducted) = 账3 real absence (computed downstream from the deduct events; v1-2b only
-            // does the 账2 deduction).
+            // deduction (the leave is just unpaid; `insufficient` is unused). insufficient: 'block' → 422 +
+            // full rollback (no partial approval). 'partial_unpaid_absence' is NOT executed (#6009): the
+            // shortfall was never written as unpaid absence, and approving would still project the full
+            // request as leave. Fail closed before any deduction so the txn rolls back.
             const leaveOffsetCode = requestType === 'leave' ? requestMetadata.leaveType?.code : null
             if (leaveOffsetCode && leaveOffsetCode !== 'comp_time' && leaveOffsetCode !== 'annual') {
               const offsetPolicy = (await getSettings(trx))?.leaveBalanceDeductionPolicy
@@ -38173,6 +38189,7 @@ module.exports = {
                 const rule = (offsetPolicy.rules || []).find((r) => r.requestLeaveType === leaveOffsetCode)
                 const pool = rule?.deductFrom?.[0]
                 if (rule && pool && pool !== 'unpaid') {
+                  rejectLeaveOffsetPartialAbsence(rule, HttpError)
                   await deductLeaveBalance(trx, {
                     orgId,
                     userId: requestRow.user_id,
@@ -38182,7 +38199,6 @@ module.exports = {
                     insufficientCode: 'LEAVE_OFFSET_BALANCE_INSUFFICIENT',
                     insufficientLabel: `Leave offset (${leaveOffsetCode}→${pool})`,
                     sourceId: requestId,
-                    mode: rule.insufficient === 'partial_unpaid_absence' ? 'partial' : 'block',
                   })
                 }
               }
@@ -50659,6 +50675,20 @@ module.exports = {
         const parsed = settingsSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        // #6009: reject the unsupported mode on the INCOMING rules only. A partial PUT that omits `rules`
+        // (for example { enabled:false }) must still merge, or a legacy stored mode would block every
+        // other settings write. Approve fail-closes while the stored mode remains.
+        if (leaveOffsetPolicyDeclaresPartialAbsence(parsed.data.leaveBalanceDeductionPolicy)) {
+          res.status(422).json({
+            ok: false,
+            error: {
+              code: LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE,
+              message: LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_MESSAGE,
+            },
+          })
           return
         }
 
