@@ -6486,10 +6486,54 @@ function getOrgId(req) {
 
 function getAuthenticatedOrgId(req) {
   const user = req.user
-  const raw = user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId
-  if (typeof raw === 'string' && raw.trim().length > 0) return raw
-  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  // Blank claims are absent. `??` would keep `user.orgId === ''` and hide
+  // `authenticatedTenantId`, and getOrgId would then fall through to 'default'.
+  const candidates = [user?.orgId, user?.workspaceId, req.authenticatedTenantId]
+  for (const raw of candidates) {
+    if (typeof raw === 'string' && raw.trim().length > 0) return raw
+    if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  }
   return null
+}
+
+function attendanceImportOrgSelectorValues(req) {
+  return [req.body?.orgId, req.query?.orgId, req.headers?.['x-org-id']]
+    .flatMap((value) => Array.isArray(value) ? value : [value])
+    .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map((value) => String(value).trim())
+}
+
+function attendanceImportOrgSelectorMismatches(req, orgId) {
+  return attendanceImportOrgSelectorValues(req).some((value) => value !== orgId)
+}
+
+function rejectUnauthenticatedAttendanceImportOrg(res) {
+  res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Authenticated organization not found' } })
+}
+
+function rejectMismatchedAttendanceImportOrg(res) {
+  res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Organization not found' } })
+}
+
+function resolveAuthenticatedAttendanceOrg(req, res) {
+  const orgId = getAuthenticatedOrgId(req)
+  if (!orgId) {
+    rejectUnauthenticatedAttendanceImportOrg(res)
+    return null
+  }
+  if (attendanceImportOrgSelectorMismatches(req, orgId)) {
+    rejectMismatchedAttendanceImportOrg(res)
+    return null
+  }
+  return orgId
+}
+
+function attendanceBodyWithoutOrgSelector(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return {}
+  if (!Object.prototype.hasOwnProperty.call(body, 'orgId')) return body
+  const copy = { ...body }
+  delete copy.orgId
+  return copy
 }
 
 function getAuthenticatedUserId(req) {
@@ -39031,13 +39075,14 @@ module.exports = {
       'POST',
       '/api/attendance/overtime-rules',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = overtimeRuleCreateSchema.safeParse(req.body)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
+        const parsed = overtimeRuleCreateSchema.safeParse(attendanceBodyWithoutOrgSelector(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
         const payload = {
           name: parsed.data.name,
           minMinutes: parsed.data.minMinutes ?? 0,
@@ -39087,13 +39132,14 @@ module.exports = {
       'PUT',
       '/api/attendance/overtime-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = overtimeRuleUpdateSchema.safeParse(req.body ?? {})
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
+        const parsed = overtimeRuleUpdateSchema.safeParse(attendanceBodyWithoutOrgSelector(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        const orgId = getOrgId(req)
         const overtimeRuleId = normalizeUuidString(req.params.id)
         if (!overtimeRuleId) {
           respondInvalidUuid(res)
@@ -39165,7 +39211,8 @@ module.exports = {
       'DELETE',
       '/api/attendance/overtime-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const overtimeRuleId = normalizeUuidString(req.params.id)
         if (!overtimeRuleId) {
           respondInvalidUuid(res)
@@ -39301,7 +39348,9 @@ module.exports = {
       'POST',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
-        const rawPayload = normalizeApprovalFlowPayload(req.body)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
+        const rawPayload = normalizeApprovalFlowPayload(attendanceBodyWithoutOrgSelector(req.body))
         // S7-1 §7 authoring gate FIRST (before zod): a non-string `kind` (S7-1 F4 NIT) and every other
         // shape violation must surface as a DISTINCT 422 contract code, never a generic zod 400.
         // Zod still runs after for the static field types (name/requestType/approver arrays).
@@ -39312,7 +39361,6 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const steps = normalizeApprovalSteps(parsed.data.steps)
         const payload = {
           name: parsed.data.name,
@@ -39359,7 +39407,9 @@ module.exports = {
       'PUT',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const rawPayload = normalizeApprovalFlowPayload(req.body ?? {})
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
+        const rawPayload = normalizeApprovalFlowPayload(attendanceBodyWithoutOrgSelector(req.body))
         // S7-1 §7 authoring gate FIRST (before zod) — same posture as create (non-string kind → 422).
         assertApprovalStepsContract(rawPayload.steps, context)
         const parsed = approvalFlowUpdateSchema.safeParse(rawPayload)
@@ -39368,7 +39418,6 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         const flowId = normalizeUuidString(req.params.id)
         if (!flowId) {
           respondInvalidUuid(res)
@@ -39435,7 +39484,8 @@ module.exports = {
       'DELETE',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const flowId = normalizeUuidString(req.params.id)
         if (!flowId) {
           respondInvalidUuid(res)
@@ -40595,6 +40645,8 @@ module.exports = {
       'PUT',
       '/api/attendance/rules/default',
       withPermission('attendance:admin', async (req, res) => {
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const schema = z.object({
           name: z.string().optional(),
           timezone: z.string().optional(),
@@ -40609,7 +40661,7 @@ module.exports = {
           orgId: z.string().optional(),
         })
 
-        const parsed = schema.safeParse(req.body)
+        const parsed = schema.safeParse(attendanceBodyWithoutOrgSelector(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -40650,7 +40702,6 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
         try {
           const rule = await db.transaction(async (trx) => {
             await trx.query('UPDATE attendance_rules SET is_default = false WHERE is_default = true AND org_id = $1', [orgId])
@@ -46811,12 +46862,13 @@ module.exports = {
       'POST',
       '/api/attendance/scheduler-scopes',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = schedulerScopeCreateSchema.safeParse(req.body ?? {})
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
+        const parsed = schedulerScopeCreateSchema.safeParse(attendanceBodyWithoutOrgSelector(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
         const actorId = getUserId(req)
         let input
         try {
@@ -46862,12 +46914,13 @@ module.exports = {
       'PUT',
       '/api/attendance/scheduler-scopes/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = schedulerScopeSchema.safeParse(req.body ?? {})
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
+        const parsed = schedulerScopeSchema.safeParse(attendanceBodyWithoutOrgSelector(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
         const actorId = getUserId(req)
         const scopeId = normalizeUuidString(req.params.id)
         if (!scopeId) {
@@ -46926,7 +46979,8 @@ module.exports = {
       'DELETE',
       '/api/attendance/scheduler-scopes/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
+        const orgId = resolveAuthenticatedAttendanceOrg(req, res)
+        if (!orgId) return
         const actorId = getUserId(req)
         const scopeId = normalizeUuidString(req.params.id)
         if (!scopeId) {
