@@ -9,7 +9,7 @@
   - 普查 `scripts/ops/readonly-inventory-20260916/05-legacy-binding-census.sql`（+ README 一行）
   - 本文 + `legacy-binding-connection-id-backfill-verification-20260920.md`
 - 相关：#5896（live_id FK；本迁移**必须在它之后**部署）、#5783（legacy 重绑必须同写 canonical）、`zzzz20260902120000`（切换迁移，PR-1）、`data-source-live-id-fk-binding-lock-design-20260920.md` §7
-- 2026-09-26 补充（owner 已同意）：谓词 7「源已启用」、谓词 8「源类型属于 SQL 只读可解析类型」。依据 `docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §3 结论 2：原谓词不查 `ds.is_active` 和类型，会把 S2b（源未启用）/ S2c（类型不在注册表）的 legacy 行提升成报 `CONNECTION_CANONICAL_UNAVAILABLE` 的 canonical 行。普查相应多出两类。见 §2、§5、§8 与验证文档 §11。
+- 2026-09-26 补充（据任务派发，owner 已同意）：谓词 7「源已启用」、谓词 8「源类型属于 SQL 只读可解析类型」。依据 `docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §3 结论 2：原谓词不查 `ds.is_active` 和类型，会把 S2b（源未启用）/ S2c（类型不在注册表）的 legacy 行提升成报 `CONNECTION_CANONICAL_UNAVAILABLE` 的 canonical 行。普查相应多出两类。见 §2、§5、§8 与验证文档 §11。
 
 > **分类：DDL（新建账本表 `integration_external_system_connection_backfills`，`CREATE TABLE IF NOT EXISTS`）+ DML（回填 `integration_external_systems` 的行）。**
 >

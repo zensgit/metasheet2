@@ -52,7 +52,7 @@
  *      it is left alone and reported by the census. The rows this migration DOES take are the ones
  *      neither resolver branch accepts today (`resolveLegacy` denies marker FALSE at :205-216).
  *
- *   Predicates 7 and 8 (added with owner consent after the CONNECTION_CANONICAL_UNAVAILABLE
+ *   Predicates 7 and 8 (added after the CONNECTION_CANONICAL_UNAVAILABLE
  *   diagnosis, docs/development/takeover-beiliao-20260821/
  *   stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §3 conclusion 2, states S2b /
  *   S2c): a promoted row is resolved by `resolveCanonical`, which rewrites ANY facade failure into

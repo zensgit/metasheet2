@@ -143,7 +143,7 @@
 
 ## 11. 谓词 7（源已启用）/ 8（SQL 只读可解析类型）—— 2026-09-26
 
-- 缘由：owner 同意按 `docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §3 结论 2 补谓词：原谓词不查 `ds.is_active` 和类型，会把 S2b（源未启用）/ S2c（类型不在注册表）的 legacy 行提升成报 `CONNECTION_CANONICAL_UNAVAILABLE` 的 canonical 行。
+- 缘由：据任务派发，owner 已同意按 `docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §3 结论 2 补谓词：原谓词不查 `ds.is_active` 和类型，会把 S2b（源未启用）/ S2c（类型不在注册表）的 legacy 行提升成报 `CONNECTION_CANONICAL_UNAVAILABLE` 的 canonical 行。
 - 时间：本机 `date -u` 2026-09-26 13:00–13:40 UTC。
 - 基线：PR head `cb765d4e7`（与 main 的 merge-base `4189aa096`）。下文引用的 `DataSourceManager.ts`、`connection-resolver.cjs`、`data-source-plugin-facade.ts`、`BaseAdapter.ts`、插件 `index.cjs`、`external-systems.cjs` 在 `cb765d4e7` 与当时的 `origin/main`（`51acbb18f`）之间 `git diff` 为空，行号两边都成立。
 - 改动：迁移候选 CTE 的 JOIN 加 `AND ds.is_active = TRUE` 与 `AND lower(ds.type) IN (${sql.join(SQL_READONLY_CONNECTION_TYPES)})`（`:213-214`，常量 `:138`）；普查新增 `source-inactive`、`source-type-unsupported` 两类（`classes=10`）；结构钉 +4；竞争回归 +4；本节与设计文档同步。
