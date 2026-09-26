@@ -46,27 +46,38 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     expect(formatWorkDurationMinutes(null, en)).toBe('—')
   })
 
-  it('uses the existing 480-minute leave-day convention for balance display', () => {
+  it('folds annual balance days only when a positive integer bank day is passed', () => {
     expect(ATTENDANCE_LEAVE_DAY_MINUTES).toBe(480)
-    expect(formatLeaveBalanceMinutes(0, zh)).toBe('0天')
-    expect(formatLeaveBalanceMinutes(0, en)).toBe('0 days')
-    expect(formatLeaveBalanceMinutes(30, zh)).toBe('30分')
-    expect(formatLeaveBalanceMinutes(30, en)).toBe('30m')
-    expect(formatLeaveBalanceMinutes(120, zh)).toBe('2小时')
-    expect(formatLeaveBalanceMinutes(120, en)).toBe('2h')
-    expect(formatLeaveBalanceMinutes(480, zh)).toBe('1天')
-    expect(formatLeaveBalanceMinutes(480, en)).toBe('1 day')
-    expect(formatLeaveBalanceMinutes(490, zh)).toBe('1天 10分')
-    expect(formatLeaveBalanceMinutes(490, en)).toBe('1 day 10m')
-    expect(formatLeaveBalanceMinutes(600, zh)).toBe('1天 2小时')
-    expect(formatLeaveBalanceMinutes(600, en)).toBe('1 day 2h')
-    expect(formatLeaveBalanceMinutes(1800, zh)).toBe('3天 6小时')
-    expect(formatLeaveBalanceMinutes(1800, en)).toBe('3 days 6h')
-    expect(formatLeaveBalanceMinutes(2400, zh)).toBe('5天')
-    expect(formatLeaveBalanceMinutes(2400, en)).toBe('5 days')
-    expect(formatLeaveBalanceMinutes(null, en)).toBe('—')
-    expect(formatLeaveBalanceMinutes(-12, zh)).toBe('—')
-    expect(formatLeaveBalanceMinutes(1800, en, 0)).toBe('3 days 6h')
+    expect(formatLeaveBalanceMinutes(0, zh, 480)).toBe('0天')
+    expect(formatLeaveBalanceMinutes(0, en, 480)).toBe('0 days')
+    expect(formatLeaveBalanceMinutes(30, zh, 480)).toBe('30分')
+    expect(formatLeaveBalanceMinutes(30, en, 480)).toBe('30m')
+    expect(formatLeaveBalanceMinutes(120, zh, 480)).toBe('2小时')
+    expect(formatLeaveBalanceMinutes(120, en, 480)).toBe('2h')
+    expect(formatLeaveBalanceMinutes(480, zh, 480)).toBe('1天')
+    expect(formatLeaveBalanceMinutes(480, en, 480)).toBe('1 day')
+    expect(formatLeaveBalanceMinutes(490, zh, 480)).toBe('1天 10分')
+    expect(formatLeaveBalanceMinutes(490, en, 480)).toBe('1 day 10m')
+    expect(formatLeaveBalanceMinutes(600, zh, 480)).toBe('1天 2小时')
+    expect(formatLeaveBalanceMinutes(600, en, 480)).toBe('1 day 2h')
+    expect(formatLeaveBalanceMinutes(1800, zh, 480)).toBe('3天 6小时')
+    expect(formatLeaveBalanceMinutes(1800, en, 480)).toBe('3 days 6h')
+    expect(formatLeaveBalanceMinutes(2400, zh, 480)).toBe('5天')
+    expect(formatLeaveBalanceMinutes(2400, en, 480)).toBe('5 days')
+    expect(formatLeaveBalanceMinutes(2250, zh, 450)).toBe('5天')
+    expect(formatLeaveBalanceMinutes(2250, en, 450)).toBe('5 days')
+    expect(formatLeaveBalanceMinutes(null, en, 480)).toBe('—')
+    expect(formatLeaveBalanceMinutes(-12, zh, 480)).toBe('—')
+  })
+
+  it('does not guess a 480-minute day when the bank day is missing', () => {
+    expect(formatLeaveBalanceMinutes(480, zh)).toBe('8小时')
+    expect(formatLeaveBalanceMinutes(480, en)).toBe('8h')
+    expect(formatLeaveBalanceMinutes(2250, zh)).toBe('37小时30分')
+    expect(formatLeaveBalanceMinutes(2250, en)).toBe('37h 30m')
+    expect(formatLeaveBalanceMinutes(0, zh)).toBe('0分')
+    expect(formatLeaveBalanceMinutes(1800, en, 0)).toBe('30h')
+    expect(formatLeaveBalanceMinutes(1800, zh, null)).toBe('30小时')
   })
 
   it('reformats a late/early pair without changing other labels', () => {
@@ -233,13 +244,14 @@ describe('employee self-balance card copy', () => {
     grantedMinutes: number
     exhaustedMinutes: number
     expiredMinutes: number
-  } | null, trFn: (en: string, zh: string) => string = zh) {
+  } | null, trFn: (en: string, zh: string) => string = zh, extra: Record<string, unknown> = {}) {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const app = createApp(AttendanceEmployeeWorkspace, {
       ...buildEmployeeWorkspaceProps('normal'),
       tr: trFn,
       annualSelfBalanceSummary: summary,
+      ...extra,
     })
     app.mount(container)
     await nextTick()
@@ -259,7 +271,7 @@ describe('employee self-balance card copy', () => {
       grantedMinutes: 2400,
       exhaustedMinutes: 600,
       expiredMinutes: 90,
-    })
+    }, zh, { balanceDayMinutes: 480 })
     const text = card?.textContent ?? ''
     expect(card).toBeTruthy()
     expect(text).toContain('3天 6小时')
@@ -267,6 +279,7 @@ describe('employee self-balance card copy', () => {
     expect(text).toContain('已发放 5天')
     expect(text).toContain('已用 1天 2小时')
     expect(text).toContain('已过期 1小时30分')
+    expect(text).toContain('1 天 = 480 分钟（年假标准日）')
     expect(text).not.toContain('1800')
     expect(text).not.toContain('2400')
     expect(text).not.toContain('分钟剩余')
@@ -279,12 +292,13 @@ describe('employee self-balance card copy', () => {
       grantedMinutes: 2400,
       exhaustedMinutes: 600,
       expiredMinutes: 90,
-    }, en)
+    }, en, { balanceDayMinutes: 480 })
     const text = card?.textContent ?? ''
     expect(text).toContain('3 days 6h remaining')
     expect(text).toContain('Granted 5 days')
     expect(text).toContain('Used 1 day 2h')
     expect(text).toContain('Expired 1h 30m')
+    expect(text).toContain('1 day = 480 min (annual leave standard day)')
     expect(text).not.toContain('1800')
     unmount()
   })
@@ -295,7 +309,7 @@ describe('employee self-balance card copy', () => {
       grantedMinutes: 0,
       exhaustedMinutes: 0,
       expiredMinutes: 0,
-    })
+    }, zh, { balanceDayMinutes: 480 })
     const text = card?.textContent ?? ''
     expect(text).toContain('0天')
     expect(text).toContain('剩余')
@@ -310,6 +324,48 @@ describe('employee self-balance card copy', () => {
     const { container, card, unmount } = await mountBalanceCard(null)
     expect(card).toBeNull()
     expect(container.textContent).toContain('暂无年假余额。')
+    unmount()
+  })
+
+  it('prints 5 days when the live annual standard day is 450 minutes', async () => {
+    const { card, unmount } = await mountBalanceCard({
+      remainingMinutes: 2250,
+      grantedMinutes: 2250,
+      exhaustedMinutes: 0,
+      expiredMinutes: 0,
+    }, zh, { balanceDayMinutes: 450 })
+    const text = card?.textContent ?? ''
+    expect(text).toContain('5天')
+    expect(text).toContain('1 天 = 450 分钟（年假标准日）')
+    expect(text).not.toContain('4天')
+    unmount()
+  })
+
+  it('shows hours, not days, when the annual standard day is missing', async () => {
+    const { card, unmount } = await mountBalanceCard({
+      remainingMinutes: 480,
+      grantedMinutes: 480,
+      exhaustedMinutes: 0,
+      expiredMinutes: 0,
+    })
+    const text = card?.textContent ?? ''
+    expect(text).toContain('8小时')
+    expect(text).not.toContain('1天')
+    expect(text).toContain('未取得年假标准日时按小时和分钟显示')
+    unmount()
+  })
+
+  it('never prints days for comp time, even if a day length is passed', async () => {
+    const { card, unmount } = await mountBalanceCard({
+      remainingMinutes: 480,
+      grantedMinutes: 480,
+      exhaustedMinutes: 0,
+      expiredMinutes: 0,
+    }, zh, { balanceLeaveType: 'comp_time', balanceDayMinutes: 480 })
+    const text = card?.textContent ?? ''
+    expect(text).toContain('8小时')
+    expect(text).not.toContain('1天')
+    expect(text).toContain('调休按申请分钟扣减')
     unmount()
   })
 })

@@ -405,6 +405,7 @@
             {{ tr('Used', '已用') }} {{ usedBalanceLabel }} ·
             {{ tr('Expired', '已过期') }} {{ expiredBalanceLabel }}
           </small>
+          <small class="attendance__field-hint" data-self-balance-day-basis>{{ balanceDayBasisLabel }}</small>
         </div>
         <p v-else class="attendance__field-hint">
           {{ balanceLeaveType === 'comp_time' ? tr('No comp-time balance yet.', '暂无调休余额。') : tr('No annual leave balance yet.', '暂无年假余额。') }}
@@ -613,6 +614,8 @@ const props = defineProps<{
   annualSelfBalanceLoading: boolean
   annualSelfBalanceError: string | null
   annualSelfBalanceSummary: AnnualBalanceSummary | null
+  // Annual bank day from `/me` dayBasis. Null (or comp time) shows hours, never a guessed 480.
+  balanceDayMinutes?: number | null
   // W5-1 / OD-W5-7 (#4562 leaveTypeCode channel): which leave-type balance the card shows.
   // Closed set 'annual' | 'comp_time' — the PARENT validates before fetching (UI 输入自验);
   // this component only re-emits the literal the toggle button carries.
@@ -745,18 +748,40 @@ const clockStatusLine = computed(() => {
 
 const workDurationLabel = computed(() => formatWorkDurationMinutes(props.workbenchWorkMinutes, props.tr))
 
-const remainingBalanceLabel = computed(() =>
-  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.remainingMinutes, props.tr),
-)
-const grantedBalanceLabel = computed(() =>
-  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.grantedMinutes, props.tr),
-)
-const usedBalanceLabel = computed(() =>
-  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.exhaustedMinutes, props.tr),
-)
-const expiredBalanceLabel = computed(() =>
-  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.expiredMinutes, props.tr),
-)
+const foldedDayMinutes = computed(() => {
+  if (props.balanceLeaveType !== 'annual') return null
+  const value = props.balanceDayMinutes
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null
+})
+
+function balanceLabel(minutes: number | null | undefined): string {
+  return formatLeaveBalanceMinutes(minutes, props.tr, foldedDayMinutes.value)
+}
+
+const remainingBalanceLabel = computed(() => balanceLabel(props.annualSelfBalanceSummary?.remainingMinutes))
+const grantedBalanceLabel = computed(() => balanceLabel(props.annualSelfBalanceSummary?.grantedMinutes))
+const usedBalanceLabel = computed(() => balanceLabel(props.annualSelfBalanceSummary?.exhaustedMinutes))
+const expiredBalanceLabel = computed(() => balanceLabel(props.annualSelfBalanceSummary?.expiredMinutes))
+
+const balanceDayBasisLabel = computed(() => {
+  if (props.balanceLeaveType === 'comp_time') {
+    return props.tr(
+      'Shown in hours and minutes. Comp time is deducted in request minutes.',
+      '按小时和分钟显示。调休按申请分钟扣减。',
+    )
+  }
+  const perDay = foldedDayMinutes.value
+  if (perDay == null) {
+    return props.tr(
+      'Shown in hours and minutes until the annual standard day is available.',
+      '未取得年假标准日时按小时和分钟显示。',
+    )
+  }
+  return props.tr(
+    `1 day = ${perDay} min (annual leave standard day).`,
+    `1 天 = ${perDay} 分钟（年假标准日）。`,
+  )
+})
 
 const lateEarlyDisplay = computed(() => formatLateEarlyPair(props.workbenchLateEarlyLabel, props.tr))
 

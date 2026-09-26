@@ -7861,44 +7861,67 @@ attendanceIntegrationDescribe(
       expect(await lotRemaining(lotHalf)).toBe(240)
       expect(await annualDeducts(reqHalf)).toEqual([-240])
 
-      // (C) insufficient: lot 240 < 480 needed → 422, request stays PENDING, lot untouched, no event.
+      const postLeave = (token: string, workDate: string, minutes: number) => requestJson(`${baseUrl}/api/attendance/requests`, {
+        method: 'POST', headers: hdr(token), body: JSON.stringify({ workDate, requestType: 'leave', leaveTypeId, minutes }),
+      })
+      const requestCount = async (userId: string) => Number((await pool.query('SELECT count(*)::int AS n FROM attendance_requests WHERE user_id = $1', [userId])).rows[0].n)
+      const errorCode = (body: unknown) => (body as { error?: { code?: string } } | undefined)?.error?.code
+
+      // (C) insufficient at CREATE while the engine is on: 422, no pending row, lot untouched.
       const lotShort = await grantLot(uShort, 240, 'short')
       const tokShort = await tokenFor(uShort)
-      const reqShort = await createLeave(tokShort!, '2026-09-10', 600)
-      const shortRes = await approve(tokShort!, reqShort)
-      expect(shortRes.status).toBe(422)
-      expect((shortRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_BALANCE_INSUFFICIENT')
-      expect(await reqStatus(reqShort)).toBe('pending')
+      const shortCreate = await postLeave(tokShort!, '2026-09-10', 600)
+      expect(shortCreate.status).toBe(422)
+      expect(errorCode(shortCreate.body)).toBe('ANNUAL_LEAVE_BALANCE_INSUFFICIENT')
+      expect(await requestCount(uShort)).toBe(0)
       expect(await lotRemaining(lotShort)).toBe(240)
-      expect(await annualDeducts(reqShort)).toHaveLength(0)
 
-      // (D) non-whole standard-day: 7 scheduled → (7×480)/600 = 5.6 → 422 NOT_WHOLE, pending, no deduction.
+      // (D) non-whole at CREATE: 7 scheduled → (7×480)/600 is not an integer minute.
       const lotOdd = await grantLot(uOdd, 480, 'odd')
       const tokOdd = await tokenFor(uOdd)
-      const reqOdd = await createLeave(tokOdd!, '2026-09-10', 7)
-      const oddRes = await approve(tokOdd!, reqOdd)
-      expect(oddRes.status).toBe(422)
-      expect((oddRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_DEDUCTION_NOT_WHOLE')
-      expect(await reqStatus(reqOdd)).toBe('pending')
+      const oddCreate = await postLeave(tokOdd!, '2026-09-10', 7)
+      expect(oddCreate.status).toBe(422)
+      expect(errorCode(oddCreate.body)).toBe('ANNUAL_LEAVE_DEDUCTION_NOT_WHOLE')
+      expect(await requestCount(uOdd)).toBe(0)
       expect(await lotRemaining(lotOdd)).toBe(480)
-      expect(await annualDeducts(reqOdd)).toHaveLength(0)
 
-      // (D2) single-day v1 enforced: 1200 scheduled minutes > 600 defaultMinutesPerDay (a multi-day request on one
-      // workDate) → 422 MULTI_DAY_UNSUPPORTED, request stays pending, NO over-deduction.
+      // (D2) single-day v1 at CREATE: 1200 > 600 defaultMinutesPerDay. No pending row, no deduction.
       const lotMulti = await grantLot(uMulti, 4800, 'multi')
       const tokMulti = await tokenFor(uMulti)
-      const reqMulti = await createLeave(tokMulti!, '2026-09-10', 1200)
-      const multiRes = await approve(tokMulti!, reqMulti)
-      expect(multiRes.status).toBe(422)
-      expect((multiRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED')
-      expect(await reqStatus(reqMulti)).toBe('pending')
+      const multiCreate = await postLeave(tokMulti!, '2026-09-10', 1200)
+      expect(multiCreate.status).toBe(422)
+      expect(errorCode(multiCreate.body)).toBe('ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED')
+      expect(await requestCount(uMulti)).toBe(0)
       expect(await lotRemaining(lotMulti)).toBe(4800)
-      expect(await annualDeducts(reqMulti)).toHaveLength(0)
 
       // (E) replay: re-approve the resolved full-day request → 400; no double-deduct.
       expect((await approve(tokFull!, reqFull)).status).toBe(400)
       expect(await lotRemaining(lotFull)).toBe(0)
       expect(await annualDeducts(reqFull)).toHaveLength(1)
+
+      // Approve still rejects rows that were created while the engine was off (historical pending).
+      expect((await setEngine(false)).status).toBe(200)
+      const reqShort = await createLeave(tokShort!, '2026-09-11', 600)
+      const reqOdd = await createLeave(tokOdd!, '2026-09-11', 7)
+      const reqMulti = await createLeave(tokMulti!, '2026-09-11', 1200)
+      expect((await setEngine(true)).status).toBe(200)
+      const shortRes = await approve(tokShort!, reqShort)
+      expect(shortRes.status).toBe(422)
+      expect(errorCode(shortRes.body)).toBe('ANNUAL_LEAVE_BALANCE_INSUFFICIENT')
+      expect(await reqStatus(reqShort)).toBe('pending')
+      expect(await lotRemaining(lotShort)).toBe(240)
+      expect(await annualDeducts(reqShort)).toHaveLength(0)
+      const oddRes = await approve(tokOdd!, reqOdd)
+      expect(oddRes.status).toBe(422)
+      expect(errorCode(oddRes.body)).toBe('ANNUAL_LEAVE_DEDUCTION_NOT_WHOLE')
+      expect(await reqStatus(reqOdd)).toBe('pending')
+      expect(await lotRemaining(lotOdd)).toBe(480)
+      const multiRes = await approve(tokMulti!, reqMulti)
+      expect(multiRes.status).toBe(422)
+      expect(errorCode(multiRes.body)).toBe('ANNUAL_LEAVE_MULTI_DAY_UNSUPPORTED')
+      expect(await reqStatus(reqMulti)).toBe('pending')
+      expect(await lotRemaining(lotMulti)).toBe(4800)
+      expect(await annualDeducts(reqMulti)).toHaveLength(0)
 
       // ── ENGINE OFF → zero regression: approval succeeds, balance NEVER touched ──
       expect((await setEngine(false)).status).toBe(200)
