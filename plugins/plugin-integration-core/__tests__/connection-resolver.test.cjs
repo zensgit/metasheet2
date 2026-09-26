@@ -2,9 +2,16 @@
 
 const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
 const {
+  CONNECTION_RESOLUTION_ERROR_CODES,
+  FACADE_REFUSAL_REASONS,
+  REFUSAL_LOG_MESSAGE,
+  REGISTRY_UNLOADED_REASONS,
   ConnectionResolutionError,
   createConnectionResolver,
+  __internals: resolverInternals,
 } = require('../lib/connection-resolver.cjs')
 const {
   deriveStockPreparationSqlServerSourceAnchors,
@@ -55,7 +62,264 @@ async function rejectsCode(action, code) {
   })
 }
 
+// ── R1/R7: the facade's refusal reason reaches the SERVER log, and nothing else moves ──────────
+// Every value a test plants carries this marker, so "no value reached the log" is one substring check.
+const MARK = 'zq9mark'
+
+function refusalFrom(diagnostic, { enumerable = false, accessor = false } = {}) {
+  // Same shape as the host facade's refusal: its uniform not-found text names the id.
+  const error = new Error(`Data source with id '${MARK}-ds' not found`)
+  error.name = 'DataSourceUnavailableError'
+  error.code = 'DATA_SOURCE_NOT_FOUND'
+  if (diagnostic !== undefined) {
+    Object.defineProperty(error, 'refusalDiagnostic', accessor
+      ? { get() { throw new Error(`${MARK} getter ran`) }, enumerable, configurable: true }
+      : { value: diagnostic, enumerable, configurable: true })
+  }
+  return error
+}
+
+function captureLogger() {
+  const lines = []
+  return {
+    lines,
+    warn(message, detail) { lines.push({ message, detail }) },
+  }
+}
+
+async function settle(ms = 30) {
+  for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function thrownBy(action) {
+  try {
+    await action()
+  } catch (error) {
+    return error
+  }
+  throw new Error('expected a rejection')
+}
+
+// The thrown error, reduced to everything a caller (and so an HTTP response) can see of it.
+function visible(error) {
+  return {
+    ctor: error && error.constructor && error.constructor.name,
+    name: error.name,
+    code: error.code,
+    message: error.message,
+    details: JSON.stringify(error.details),
+    keys: Object.keys(error).sort().join(','),
+    json: JSON.stringify(error),
+  }
+}
+
+async function refusalDiagnosticTests() {
+  const { describeFacadeRefusal, persistedLiveProbeOf, settlePersistedLive } = resolverInternals
+  const canonical = binding({ config: { schema: 'dbo' } })
+  const refusingFacade = (makeError) => ({
+    async resolveConnectionRegistration() { throw makeError() },
+  })
+
+  // 1. Closed vocabulary: every word the facade can name passes through verbatim; anything else,
+  //    including a value-bearing string, becomes 'unclassified'.
+  for (const reason of FACADE_REFUSAL_REASONS) {
+    const record = describeFacadeRefusal(refusalFrom({ reason }))
+    assert.equal(record.reason, reason)
+  }
+  for (const loadOutcome of REGISTRY_UNLOADED_REASONS) {
+    assert.deepEqual(describeFacadeRefusal(refusalFrom({ reason: 'not_loaded', loadOutcome })),
+      { reason: 'not_loaded', loadOutcome })
+  }
+  for (const hostile of [
+    { reason: `${MARK}-owner` },
+    { reason: 'owner_mismatch ' },
+    { reason: 42 },
+    { reason: ['owner_mismatch'] },
+    { reason: 'not_loaded', loadOutcome: `${MARK}-tenant` },
+    null,
+    `${MARK}`,
+  ]) {
+    const record = describeFacadeRefusal(refusalFrom(hostile))
+    assert.doesNotMatch(JSON.stringify(record), new RegExp(MARK))
+    assert.ok(record.reason === 'unclassified' || record.loadOutcome === 'unclassified',
+      `hostile diagnostic must classify as unclassified: ${JSON.stringify(record)}`)
+  }
+  // An accessor is never invoked; an error without a diagnostic (a stub, an older host) is unclassified.
+  assert.deepEqual(describeFacadeRefusal(refusalFrom({}, { accessor: true })), { reason: 'unclassified' })
+  assert.deepEqual(describeFacadeRefusal(refusalFrom(undefined)), { reason: 'unclassified' })
+  assert.deepEqual(describeFacadeRefusal(null), { reason: 'unclassified' })
+  assert.deepEqual(describeFacadeRefusal(`${MARK} thrown string`), { reason: 'unclassified' })
+  assert.equal(persistedLiveProbeOf(refusalFrom({}, { accessor: true })), null)
+
+  // 2. Through the resolver: one log line with the facade's reason; the thrown error is exactly the
+  //    error a resolver without a logger throws (code, message, details, own keys, JSON).
+  for (const [diagnostic, expected] of [
+    [{ reason: 'owner_mismatch' }, { reason: 'owner_mismatch' }],
+    [{ reason: 'tenant_mismatch' }, { reason: 'tenant_mismatch' }],
+    [{ reason: 'tenantless_scope' }, { reason: 'tenantless_scope' }],
+    [{ reason: `${MARK}` }, { reason: 'unclassified' }],
+    [undefined, { reason: 'unclassified' }],
+  ]) {
+    const logger = captureLogger()
+    const quiet = createConnectionResolver({ facade: refusingFacade(() => refusalFrom(diagnostic)) })
+    const logged = createConnectionResolver({ facade: refusingFacade(() => refusalFrom(diagnostic)), logger })
+    const before = visible(await thrownBy(() => quiet.resolve(canonical, context())))
+    const after = visible(await thrownBy(() => logged.resolve(canonical, context())))
+    assert.deepEqual(after, before, 'the refusal a caller sees does not change with the diagnostic')
+    assert.equal(after.code, 'CONNECTION_CANONICAL_UNAVAILABLE')
+    await settle()
+    assert.deepEqual(logger.lines, [{
+      message: REFUSAL_LOG_MESSAGE,
+      detail: { phase: 'canonical', code: 'CONNECTION_CANONICAL_UNAVAILABLE', ...expected },
+    }])
+    assert.doesNotMatch(JSON.stringify(logger.lines), new RegExp(MARK))
+  }
+
+  // The legacy branch logs its own phase/code.
+  {
+    const logger = captureLogger()
+    const legacy = binding({
+      connectionId: null,
+      legacyConnectionFallbackEligible: true,
+      config: { dataSourceId: 'connection_1' },
+    })
+    const resolver = createConnectionResolver({
+      facade: refusingFacade(() => refusalFrom({ reason: 'owner_mismatch' })),
+      logger,
+    })
+    await rejectsCode(() => resolver.resolve(legacy, context()), 'CONNECTION_LEGACY_UNAVAILABLE')
+    await settle()
+    assert.deepEqual(logger.lines.map((line) => line.detail), [{
+      phase: 'legacy', code: 'CONNECTION_LEGACY_UNAVAILABLE', reason: 'owner_mismatch',
+    }])
+  }
+
+  // S1: no facade at all.
+  {
+    const logger = captureLogger()
+    await rejectsCode(() => createConnectionResolver({ logger }).resolve(canonical, context()), 'CONNECTION_CANONICAL_UNAVAILABLE')
+    await settle()
+    assert.deepEqual(logger.lines.map((line) => line.detail), [{
+      phase: 'canonical', code: 'CONNECTION_CANONICAL_UNAVAILABLE', reason: 'facade_unavailable',
+    }])
+  }
+
+  // A throwing logger costs the line, never the refusal.
+  {
+    const resolver = createConnectionResolver({
+      facade: refusingFacade(() => refusalFrom({ reason: 'owner_mismatch' })),
+      logger: { warn() { throw new Error('logger down') } },
+    })
+    await rejectsCode(() => resolver.resolve(canonical, context()), 'CONNECTION_CANONICAL_UNAVAILABLE')
+  }
+
+  // 3. R7: the table read runs only AFTER the refusal has been thrown, and its answer is folded
+  //    into the one line as exactly true / false / null.
+  for (const [answer, expected] of [
+    [true, true],
+    [false, false],
+    [null, null],
+    ['yes', null],
+    [`${MARK}`, null],
+  ]) {
+    const logger = captureLogger()
+    const order = []
+    const resolver = createConnectionResolver({
+      facade: refusingFacade(() => refusalFrom({
+        reason: 'not_loaded',
+        loadOutcome: 'inactive',
+        probePersistedLive: async () => {
+          order.push('probe')
+          return answer
+        },
+      })),
+      logger,
+    })
+    const pending = resolver.resolve(canonical, context())
+    await thrownBy(() => pending).then((error) => {
+      order.push('thrown')
+      assert.equal(error.code, 'CONNECTION_CANONICAL_UNAVAILABLE')
+    })
+    assert.deepEqual(order, ['thrown'], 'the probe must not start before the refusal is thrown')
+    assert.equal(logger.lines.length, 0, 'a not_loaded line waits for the probe')
+    await settle()
+    assert.deepEqual(order, ['thrown', 'probe'])
+    assert.deepEqual(logger.lines, [{
+      message: REFUSAL_LOG_MESSAGE,
+      detail: {
+        phase: 'canonical',
+        code: 'CONNECTION_CANONICAL_UNAVAILABLE',
+        reason: 'not_loaded',
+        loadOutcome: 'inactive',
+        persistedLive: expected,
+      },
+    }])
+  }
+  // A probe that throws, rejects, or is absent → null; the line is still written exactly once.
+  for (const probePersistedLive of [
+    () => { throw new Error(`${MARK} sync`) },
+    async () => { throw new Error(`${MARK} async`) },
+    undefined,
+    `${MARK} not a function`,
+  ]) {
+    const logger = captureLogger()
+    const resolver = createConnectionResolver({
+      facade: refusingFacade(() => refusalFrom({ reason: 'not_loaded', loadOutcome: 'absent_at_load', probePersistedLive })),
+      logger,
+    })
+    await rejectsCode(() => resolver.resolve(canonical, context()), 'CONNECTION_CANONICAL_UNAVAILABLE')
+    await settle()
+    assert.deepEqual(logger.lines.map((line) => line.detail), [{
+      phase: 'canonical',
+      code: 'CONNECTION_CANONICAL_UNAVAILABLE',
+      reason: 'not_loaded',
+      loadOutcome: 'absent_at_load',
+      persistedLive: null,
+    }])
+    assert.doesNotMatch(JSON.stringify(logger.lines), new RegExp(MARK))
+  }
+  // Without a logger the probe is never run (no table read for a line nobody writes).
+  {
+    let probed = 0
+    const resolver = createConnectionResolver({
+      facade: refusingFacade(() => refusalFrom({
+        reason: 'not_loaded', loadOutcome: 'inactive', probePersistedLive: async () => { probed += 1; return true },
+      })),
+    })
+    await rejectsCode(() => resolver.resolve(canonical, context()), 'CONNECTION_CANONICAL_UNAVAILABLE')
+    await settle()
+    assert.equal(probed, 0)
+  }
+  // A probe that never answers is cut off by the budget with null. The budget timer is unref'd (a
+  // diagnostic never keeps a process alive), so this test holds the loop open itself while it waits.
+  {
+    const keepAlive = setInterval(() => {}, 1000)
+    try {
+      const started = Date.now()
+      const value = await settlePersistedLive(() => new Promise(() => {}))
+      assert.equal(value, null)
+      assert.ok(Date.now() - started >= resolverInternals.PERSISTED_LIVE_PROBE_BUDGET_MS - 50)
+    } finally {
+      clearInterval(keepAlive)
+    }
+  }
+
+  // 4. The route-failure log admits CONNECTION_RESOLUTION_ERROR_CODES verbatim, so the list must be
+  //    exactly the set of codes this module can throw — scanned from its own source.
+  {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'connection-resolver.cjs'), 'utf8')
+    const thrown = new Set()
+    for (const match of source.matchAll(/new ConnectionResolutionError\(\s*'([A-Z_]+)'/g)) thrown.add(match[1])
+    assert.ok(thrown.size >= 10, 'the scan must find the throws it guards')
+    assert.deepEqual([...CONNECTION_RESOLUTION_ERROR_CODES].sort(), [...thrown].sort())
+  }
+
+  console.log('✓ connection-resolver refusal-diagnostic tests passed')
+}
+
 async function main() {
+  await refusalDiagnosticTests()
   const calls = []
   const facade = {
     async resolveConnectionRegistration(id, input) {
