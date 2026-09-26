@@ -16,14 +16,21 @@ import {
 import {
   applyComplete,
   applyReopen,
+  computeTaskDone,
   type TaskAssigneeRow,
+  type TaskCompletionEvent,
   type TaskCompletionMode,
   type TaskReopenScope,
 } from '../tasks/task-completion'
+import { normalizeUserText } from '../tasks/task-ids'
 import { resolveCreateAssigneeIds } from './task-create'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
 
 type Row = Record<string, unknown>
+
+interface Db {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Row[] }>
+}
 
 function fail(status: number, code: string): never {
   throw Object.assign(new Error(code), { status, code })
@@ -33,6 +40,31 @@ function asQuery(client: { query: TaskAdvisoryQuery }): TaskAdvisoryQuery {
   return (sql, params) => client.query(sql, params)
 }
 
+function sameInstant(left: Date | null, right: Date | null): boolean {
+  if (left === null || right === null) return left === right
+  return left.getTime() === right.getTime()
+}
+
+function changedAssigneeRows(before: TaskAssigneeRow[], after: TaskAssigneeRow[]): TaskAssigneeRow[] {
+  const prior = new Map(before.map((row) => [row.userId, row.completedAt]))
+  return after.filter((row) => !sameInstant(prior.get(row.userId) ?? null, row.completedAt))
+}
+
+// The structure lock is transaction-scoped. Reads of the task, the caller's
+// row role, and assignee rows must happen after it is held, on this client.
+async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promise<T>): Promise<T> {
+  return transaction(async (client) => {
+    const db: Db = {
+      query: async (sql, params) => {
+        const result = await client.query(sql, params)
+        return { rows: result.rows as Row[] }
+      },
+    }
+    await acquireTaskStructureLock(asQuery(client), orgId)
+    return run(db)
+  })
+}
+
 export async function createTask(input: {
   orgId: string
   creatorId: string
@@ -40,7 +72,8 @@ export async function createTask(input: {
   assignees: unknown
   completionMode?: unknown
 }): Promise<{ id: string }> {
-  if (typeof input.title !== 'string' || input.title.trim() === '') fail(422, 'INVALID_TITLE')
+  const title = normalizeUserText(input.title)
+  if (title === null) fail(422, 'INVALID_TITLE')
   const mode: TaskCompletionMode = input.completionMode === undefined ? 'all' : input.completionMode === 'any' ? 'any' : input.completionMode === 'all' ? 'all' : fail(422, 'INVALID_MODE')
   const assignees = resolveCreateAssigneeIds({ assignees: input.assignees, creatorId: input.creatorId })
   const id = newTaskId()
@@ -50,7 +83,7 @@ export async function createTask(input: {
     await q(
       `INSERT INTO tasks (id, org_id, title, completion_mode, created_by)
        VALUES ($1, $2, $3, $4, $5)`,
-      [id, input.orgId, input.title, mode, input.creatorId],
+      [id, input.orgId, title, mode, input.creatorId],
     )
     for (const userId of assignees) {
       await q(
@@ -108,8 +141,8 @@ export async function countPending(input: { orgId: string; actorId: string; view
   return Number(result.rows[0]?.n ?? 0)
 }
 
-async function loadTask(id: string, orgId: string): Promise<{ createdBy: string; mode: TaskCompletionMode; status: string }> {
-  const result = await query<Row>(
+async function loadTask(db: Db, id: string, orgId: string): Promise<{ createdBy: string; mode: TaskCompletionMode; status: string }> {
+  const result = await db.query(
     `SELECT created_by, completion_mode, status FROM tasks WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL`,
     [id, orgId],
   )
@@ -122,15 +155,14 @@ async function loadTask(id: string, orgId: string): Promise<{ createdBy: string;
   }
 }
 
-async function assertRowAbility(input: {
+async function assertRowAbility(db: Db, input: {
   taskId: string
-  orgId: string
   actorId: string
   createdBy: string
   ability: TaskAbility
 }): Promise<void> {
-  const assignees = await loadAssignees(input.taskId)
-  const followers = await query<Row>(
+  const assignees = await loadAssignees(db, input.taskId)
+  const followers = await db.query(
     `SELECT user_id FROM task_followers WHERE task_id = $1`,
     [input.taskId],
   )
@@ -142,8 +174,8 @@ async function assertRowAbility(input: {
   if (!can(roles, input.ability)) fail(404, 'NOT_FOUND')
 }
 
-async function loadAssignees(taskId: string): Promise<TaskAssigneeRow[]> {
-  const result = await query<Row>(
+async function loadAssignees(db: Db, taskId: string): Promise<TaskAssigneeRow[]> {
+  const result = await db.query(
     `SELECT user_id, completed_at FROM task_assignees WHERE task_id = $1`,
     [taskId],
   )
@@ -153,32 +185,50 @@ async function loadAssignees(taskId: string): Promise<TaskAssigneeRow[]> {
   }))
 }
 
+async function writeChangedAssignees(db: Db, taskId: string, before: TaskAssigneeRow[], after: TaskAssigneeRow[]): Promise<void> {
+  for (const row of changedAssigneeRows(before, after)) {
+    await db.query(
+      `UPDATE task_assignees SET completed_at = $3 WHERE task_id = $1 AND user_id = $2`,
+      [taskId, row.userId, row.completedAt],
+    )
+  }
+}
+
+async function writeTaskDoneState(db: Db, taskId: string, done: boolean, now: Date): Promise<void> {
+  if (done) {
+    await db.query(
+      `UPDATE tasks SET status = 'done', completed_at = $2, updated_at = now(), version = version + 1 WHERE id = $1`,
+      [taskId, now],
+    )
+    return
+  }
+  await db.query(
+    `UPDATE tasks SET status = 'open', completed_at = NULL, updated_at = now(), version = version + 1 WHERE id = $1`,
+    [taskId],
+  )
+}
+
+async function writeEvents(db: Db, taskId: string, events: TaskCompletionEvent[], fallbackAt: Date): Promise<void> {
+  for (const event of events) {
+    await db.query(
+      `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at) VALUES ($1, $2, $3, $4, $5)`,
+      [newTaskEventId(), taskId, event.userId, event.type, event.occurredAt ?? fallbackAt],
+    )
+  }
+}
+
 export async function completeTask(input: { orgId: string; actorId: string; taskId: string }): Promise<{ done: boolean }> {
-  const task = await loadTask(input.taskId, input.orgId)
-  await assertRowAbility({ ...input, createdBy: task.createdBy, ability: 'complete' })
-  const rows = await loadAssignees(input.taskId)
-  const now = new Date()
-  const next = applyComplete({ mode: task.mode, rows, actorId: input.actorId, createdBy: task.createdBy, now })
-  await transaction(async (client) => {
-    const q = asQuery(client)
-    await acquireTaskStructureLock(q, input.orgId)
-    for (const row of next.rows) {
-      await q(
-        `UPDATE task_assignees SET completed_at = $3 WHERE task_id = $1 AND user_id = $2`,
-        [input.taskId, row.userId, row.completedAt],
-      )
-    }
-    if (next.done) {
-      await q(`UPDATE tasks SET status = 'done', completed_at = $2, updated_at = now(), version = version + 1 WHERE id = $1`, [input.taskId, now])
-    }
-    for (const event of next.events) {
-      await q(
-        `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at) VALUES ($1, $2, $3, $4, $5)`,
-        [newTaskEventId(), input.taskId, event.userId, event.type, event.occurredAt ?? now],
-      )
-    }
+  return withOrgStructure(input.orgId, async (db) => {
+    const task = await loadTask(db, input.taskId, input.orgId)
+    await assertRowAbility(db, { ...input, createdBy: task.createdBy, ability: 'complete' })
+    const rows = await loadAssignees(db, input.taskId)
+    const now = new Date()
+    const next = applyComplete({ mode: task.mode, rows, actorId: input.actorId, createdBy: task.createdBy, now })
+    await writeChangedAssignees(db, input.taskId, rows, next.rows)
+    if ((task.status === 'done') !== next.done) await writeTaskDoneState(db, input.taskId, next.done, now)
+    await writeEvents(db, input.taskId, next.events, now)
+    return { done: next.done }
   })
-  return { done: next.done }
 }
 
 export async function reopenTask(input: {
@@ -187,32 +237,22 @@ export async function reopenTask(input: {
   taskId: string
   scope?: TaskReopenScope
 }): Promise<{ ok: true }> {
-  const task = await loadTask(input.taskId, input.orgId)
-  await assertRowAbility({ ...input, createdBy: task.createdBy, ability: 'reopen' })
-  const rows = await loadAssignees(input.taskId)
-  const next = applyReopen({
-    mode: task.mode,
-    rows,
-    actorId: input.actorId,
-    createdBy: task.createdBy,
-    scope: input.scope,
+  return withOrgStructure(input.orgId, async (db) => {
+    const task = await loadTask(db, input.taskId, input.orgId)
+    await assertRowAbility(db, { ...input, createdBy: task.createdBy, ability: 'reopen' })
+    const rows = await loadAssignees(db, input.taskId)
+    const now = new Date()
+    const next = applyReopen({
+      mode: task.mode,
+      rows,
+      actorId: input.actorId,
+      createdBy: task.createdBy,
+      scope: input.scope,
+    })
+    const done = computeTaskDone({ mode: task.mode, assigneeRows: next.rows })
+    await writeChangedAssignees(db, input.taskId, rows, next.rows)
+    if ((task.status === 'done') !== done) await writeTaskDoneState(db, input.taskId, done, now)
+    await writeEvents(db, input.taskId, next.events, now)
+    return { ok: true }
   })
-  await transaction(async (client) => {
-    const q = asQuery(client)
-    await acquireTaskStructureLock(q, input.orgId)
-    for (const row of next.rows) {
-      await q(
-        `UPDATE task_assignees SET completed_at = NULL WHERE task_id = $1 AND user_id = $2`,
-        [input.taskId, row.userId],
-      )
-    }
-    await q(`UPDATE tasks SET status = 'open', completed_at = NULL, updated_at = now(), version = version + 1 WHERE id = $1`, [input.taskId])
-    for (const event of next.events) {
-      await q(
-        `INSERT INTO task_events (id, task_id, actor_id, event_type) VALUES ($1, $2, $3, $4)`,
-        [newTaskEventId(), input.taskId, event.userId, event.type],
-      )
-    }
-  })
-  return { ok: true }
 }
