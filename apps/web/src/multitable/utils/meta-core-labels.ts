@@ -173,7 +173,10 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'export.selectAll': { en: 'Select all', zh: '全选' },
   'export.clearAll': { en: 'Clear all', zh: '清空' },
   'export.rowScope': { en: 'Rows', zh: '行' },
-  'export.allRows': { en: 'All loaded rows', zh: '全部已加载行' },
+  // A10 phase 1(客户反馈 2026-09-24 #8):这个选项走服务端路由(client.exportSheet),导出的
+  // 是这个视图按当前筛选/排序过滤后的全量记录,不是「已加载到本地网格的那一页」——旧文案
+  // 「全部已加载行」正好说反了(MultitableWorkbench.vue 的 openExportDialog 注释)。
+  'export.allRows': { en: 'All rows in this view (current filter)', zh: '当前视图的全部行（按当前筛选）' },
   'export.selectedRows': { en: 'Selected rows only', zh: '仅选中行' },
   'export.format': { en: 'Format', zh: '格式' },
   'export.formatCsv': { en: 'CSV', zh: 'CSV' },

@@ -121,6 +121,8 @@
           <strong>{{ wb('saveTpl.title', isZh) }}</strong>
           <button class="mt-save-tpl__close" data-action="save-sheet-as-template-close" @click="closeSaveSheetAsTemplate">&times;</button>
         </header>
+        <!-- A10 phase 1(客户反馈 2026-09-24 #8):对话框不点名来源,用户存错表都不知道。 -->
+        <p class="mt-save-tpl__source" data-testid="save-sheet-as-template-source">{{ fmtSaveTplSource(activeBaseName, activeSheetName, isZh) }}</p>
         <p class="mt-save-tpl__hint">{{ wb('saveTpl.hint', isZh) }}</p>
         <template v-if="!saveTemplateResult">
           <label class="mt-save-tpl__row">
@@ -150,10 +152,25 @@
                     @change="toggleSaveTemplateField(field.id)"
                   />
                   <span class="mt-save-tpl__item-name">{{ field.name }}</span>
-                  <em class="mt-save-tpl__item-type">{{ field.type }}</em>
+                  <em class="mt-save-tpl__item-type">{{ fieldTypeLabel(field.type, isZh) }}</em>
                 </label>
               </li>
             </ul>
+          </div>
+          <!-- A10 phase 1(客户反馈 2026-09-24 #8):视图清单只读展示——服务端把这张表的**全部**
+               视图都存进模板(custom-template-store.ts 不按 sheetIds/fieldIds 之外再收窄视图),
+               这里的清单必须是 workbench.views(未做权限过滤),才能和实际保存范围对得上。 -->
+          <div class="mt-save-tpl__views">
+            <div class="mt-save-tpl__fields-head">
+              <span class="mt-save-tpl__label">{{ wb('saveTpl.viewsLabel', isZh) }}</span>
+            </div>
+            <ul class="mt-save-tpl__list" data-testid="save-sheet-as-template-views">
+              <li v-for="view in saveTemplateViewChoices" :key="view.id" class="mt-save-tpl__item">
+                <span class="mt-save-tpl__item-name">{{ view.name }}</span>
+                <em class="mt-save-tpl__item-type">{{ viewTypeLabel(view.type, isZh) }}</em>
+              </li>
+            </ul>
+            <p class="mt-save-tpl__hint" data-testid="save-sheet-as-template-views-note">{{ wb('saveTpl.viewsNote', isZh) }}</p>
           </div>
           <label class="mt-save-tpl__share">
             <input v-model="saveTemplateShare" type="checkbox" data-testid="save-sheet-as-template-share" />
@@ -182,6 +199,9 @@
               <li v-for="(warning, index) in saveTemplateResult.warnings" :key="index">{{ warning }}</li>
             </ul>
           </template>
+          <!-- A10 phase 1(客户反馈 2026-09-24 #8):存完之后说清楚「装模板」是什么后果——
+               新建工作区+空表,不是把这张表复制一份数据。 -->
+          <p class="mt-save-tpl__hint" data-testid="save-sheet-as-template-install-note">{{ wb('saveTpl.installNote', isZh) }}</p>
           <footer class="mt-save-tpl__footer">
             <RouterLink
               class="mt-save-tpl__link"
@@ -767,6 +787,7 @@ import {
   sheetDeleteConfirm as fmtSheetDeleteConfirm,
   sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
   fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
+  saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
@@ -810,7 +831,8 @@ import type { SortRule, FilterConjunction } from '../composables/useMultitableGr
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
-import { metaCoreLabel } from '../utils/meta-core-labels'
+import { metaCoreLabel, fieldTypeLabel } from '../utils/meta-core-labels'
+import { viewTypeLabel } from '../utils/meta-manager-labels'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
 import { reorderViewFields } from '../utils/reorder-view-fields'
@@ -1588,6 +1610,10 @@ const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
 const templateLibraryError = ref<string | null>(null)
+// A10 phase 1(客户反馈 2026-09-24 #8):openTemplateLibrary 原来只在 templates 为空时才拉取,
+// 面板一旦加载过一次,后面新建的自定义模板就永远进不来,直到整页刷新。存模板成功后把这个
+// 标成 true,面板不管当前是不是空列表都会在下次打开时重新拉;若面板此刻正开着,直接重拉。
+const templateLibraryStale = ref(false)
 const calendarHolidays = ref<CalendarEffectiveChip[]>([])
 const calendarHolidayFetchState = ref<CalendarHolidayFetchState>('idle')
 // Composite cache key `${from}|${to}|${userId}` — when userId arrives later
@@ -4611,10 +4637,23 @@ async function loadTemplateLibrary() {
 const saveTemplateFieldChoices = computed(() =>
   workbench.fields.value.map((field) => ({ id: field.id, name: field.name, type: field.type })),
 )
+// A10 phase 1(客户反馈 2026-09-24 #8):只读展示将被保存的视图——workbench.views 是**未经
+// 视图权限过滤**的清单(与 visibleWorkbenchViews 不同),必须用这个才和服务端实际保存的范围
+// (custom-template-store.ts:整张 sheet 的全部 meta_views,不按视图权限收窄)对得上。
+const saveTemplateViewChoices = computed(() =>
+  workbench.views.value.map((view) => ({ id: view.id, name: view.name, type: view.type })),
+)
 const activeSheetName = computed(() => {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return ''
   return workbench.sheets.value.find((sheet) => sheet.id === sheetId)?.name ?? ''
+})
+// A10 phase 1:对话框头部「来源：<工作区名> / <数据表名>」用的工作区名。`bases` 是本组件自己
+// 维护的 Base 列表(loadBases 从 client.listBases() 填),不是 workbench composable 的字段。
+const activeBaseName = computed(() => {
+  const baseId = activeBaseId.value
+  if (!baseId) return ''
+  return bases.value.find((base) => base.id === baseId)?.name ?? ''
 })
 
 function openSaveSheetAsTemplate(): void {
@@ -4674,6 +4713,14 @@ async function onSaveSheetAsTemplate(): Promise<void> {
       fieldIds: [...saveTemplateFieldIds.value],
       visibility: saveTemplateShare.value ? 'tenant' : 'private',
     })
+    // A10 phase 1(客户反馈 2026-09-24 #8):存成功了,模板面板的列表要能看见它——
+    // 面板此刻正开着就立刻重拉;没开着就标 stale,下次 openTemplateLibrary 会重拉
+    // (旧逻辑只在 templates.value.length === 0 时才拉,面板加载过一次之后就再也不会重拉了)。
+    if (showTemplateLibrary.value) {
+      await loadTemplateLibrary()
+    } else {
+      templateLibraryStale.value = true
+    }
   } catch (e: any) {
     saveTemplateError.value = e?.message ?? wb('saveTpl.failed', isZh.value)
   } finally {
@@ -4687,7 +4734,8 @@ async function openTemplateLibrary() {
     return
   }
   showTemplateLibrary.value = true
-  if (templates.value.length === 0 && !templateLibraryLoading.value) {
+  if ((templates.value.length === 0 || templateLibraryStale.value) && !templateLibraryLoading.value) {
+    templateLibraryStale.value = false
     await loadTemplateLibrary()
   }
 }
@@ -6139,6 +6187,8 @@ defineExpose({
 .mt-save-tpl__header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .mt-save-tpl__header strong { font-size: 15px; color: #0f172a; }
 .mt-save-tpl__close { border: none; background: transparent; color: #64748b; font-size: 20px; line-height: 1; cursor: pointer; }
+/* A10 phase 1(客户反馈 2026-09-24 #8):来源行——比 __hint 稍重一点,先看清「存的是哪张表」。 */
+.mt-save-tpl__source { margin: 0; font-size: 12px; color: #334155; font-weight: 600; }
 .mt-save-tpl__hint { margin: 0; font-size: 12px; color: #64748b; }
 .mt-save-tpl__label { font-size: 12px; color: #334155; font-weight: 600; }
 .mt-save-tpl__row { display: flex; flex-direction: column; gap: 4px; }
@@ -6152,6 +6202,8 @@ defineExpose({
 .mt-save-tpl__item label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; cursor: pointer; }
 .mt-save-tpl__item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-save-tpl__item-type { font-size: 11px; color: #94a3b8; font-style: normal; }
+/* A10 phase 1:视图清单没有勾选框,item 本身就要 flex(字段清单的 flex 挂在内层 label 上)。 */
+.mt-save-tpl__views .mt-save-tpl__item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
 .mt-save-tpl__share { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
 .mt-save-tpl__error { margin: 0; font-size: 12px; color: #b91c1c; }
 .mt-save-tpl__footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
