@@ -235,9 +235,10 @@ export async function assertSheetLiveForUpdate(query: LivenessQuery, sheetId: st
  * (tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts, L-*). Carrying the JS
  * order in makes the lock order independent of the database locale AND of the characters in the ids.
  *
- * `FROM meta_sheets s` stays first so the whole-tree row-lock census
- * (tests/unit/multitable-permissions-txn-liveness-recheck.guard.test.ts) sees this lock; `FOR UPDATE OF s`
- * locks only the sheet rows (the `unnest` side is not a table).
+ * The whole-tree row-lock census (tests/unit/multitable-permissions-txn-liveness-recheck.guard.test.ts) names
+ * this lock and checks that it reads `s.deleted_at`; it resolves `FOR UPDATE OF s` to the sheet alias, so the
+ * relation order here no longer matters to it. `FOR UPDATE OF s` locks only the sheet rows (the `unnest` side
+ * is not a table).
  */
 export const SHEETS_ROW_LOCK_LIVENESS_SQL =
   'SELECT s.id, s.deleted_at FROM meta_sheets s JOIN unnest($1::text[]) WITH ORDINALITY AS u(id, ord) ON s.id = u.id ORDER BY u.ord FOR UPDATE OF s'
