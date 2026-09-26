@@ -63,3 +63,5 @@
 - 待 owner：#5864 字段类型转换五项；PR #5609 考勤守卫选路；#5933 授权。
 
 **待上机（R60）**：main `b7e1cbbeb` 及之后合入的全部。
+
+- R60 上机时顺带跑定时试拉 `CONNECTION_CANONICAL_UNAVAILABLE` 的只读判定（Q0–Q6 与日志检查），见 `stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §4。只判 R60 重启之后那次试拉的结果，重启前 r58/r59 日志里的报错不能拿当前库判（同文 §4 执行约定、§4.6 的 S6）。结论之一：#5933 不会消除这个错误（同文 §3）。
