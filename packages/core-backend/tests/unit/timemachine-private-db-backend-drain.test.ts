@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { PRIVATE_DB_BACKEND_CENSUS_SQL } from '../../scripts/private-db-backend-drain.ts'
+import { PRIVATE_DB_BACKEND_CENSUS_SQL } from '../../scripts/private-db-backend-drain.js'
 
 const backendRoot = join(dirname(fileURLToPath(import.meta.url)), '../..')
 const script = readFileSync(join(backendRoot, 'scripts/verify-recovery-manual-checkpoint.mts'), 'utf8')
