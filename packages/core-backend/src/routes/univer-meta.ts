@@ -19,6 +19,7 @@ import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitabl
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
+import { resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
 import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -9010,6 +9011,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
           // override / no actor. Actor-scoped (§1-B) — never reflects another user's rows.
           personalOverrideViewIds,
+          // 客户反馈 2026-09-24 #4c: the instance business timezone the web shows and parses date-times in
+          // (MULTITABLE_BUSINESS_TIMEZONE, default Asia/Shanghai). A zone id — instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
@@ -17235,6 +17239,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // allowlist / validated redirect / confirmation text), normalized by sanitizeFormLayout. Built
           // from view.config.formLayout via a whitelist — never carries publicForm or other config keys.
           ...(resolved.view ? (() => { const layout = projectPublicFormLayout(resolved.view.config); return layout ? { formLayout: layout } : {} })() : {}),
+          // 客户反馈 2026-09-24 #4c: the (public) form never loads /context, so it learns the instance business
+          // timezone here — same value as /context. A zone id only: nothing actor-, tenant- or view-derived.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           fields: visibleFields,
           capabilities: effectiveCapabilities,
           ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),

@@ -208,16 +208,24 @@
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
           />
-          <input
-            v-else-if="canEditField(field.id) && field.type === 'dateTime'"
-            :id="`drawer_field_${field.id}`"
-            class="meta-record-drawer__input"
-            type="datetime-local"
-            :value="dateTimeInputValue(controlValue(field.id))"
-            :aria-invalid="fieldAriaInvalid(field.id)"
-            :aria-describedby="fieldAriaDescribedBy(field.id)"
-            @change="emitPatch(field.id, dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
-          />
+          <!-- dateTime: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c).
+               `change` carries the parsed UTC ISO (or null) and fires only when the instant differs. -->
+          <template v-else-if="canEditField(field.id) && field.type === 'dateTime'">
+            <MetaDateTimeInput
+              :id="`drawer_field_${field.id}`"
+              class="meta-record-drawer__input"
+              :model-value="controlValue(field.id)"
+              :timezone="resolveDateTimeTimezone(field.property)"
+              :aria-invalid="fieldAriaInvalid(field.id)"
+              :aria-describedby="fieldAriaDescribedBy(field.id)"
+              @change="emitPatch(field.id, $event)"
+            />
+            <span
+              v-if="dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh)"
+              class="meta-record-drawer__tz-hint"
+              data-meta-datetime-zone-hint=""
+            >{{ dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh) }}</span>
+          </template>
           <label v-else-if="canEditField(field.id) && field.type === 'boolean'" class="meta-record-drawer__check">
             <input
               type="checkbox"
@@ -427,11 +435,11 @@ import {
 import { aiRetryCountdown, aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
-  dateTimeInputValue,
-  dateTimeValueFromLocalInput,
   locationAddressValue,
   locationValueFromAddress,
 } from '../utils/field-display'
+import { dateTimeZoneHint, resolveDateTimeTimezone } from '../utils/business-timezone'
+import MetaDateTimeInput from './cells/MetaDateTimeInput.vue'
 import { qrSvgFromText } from '../utils/qr-code'
 import {
   canEditField as canEditFieldShared,
@@ -1141,6 +1149,7 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__comment-anchor--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
+.meta-record-drawer__tz-hint { display: inline-block; margin-top: 2px; font-size: 12px; color: #909399; }
 .meta-record-drawer__input--multi { min-height: 96px; }
 /* min-height bumped 104px -> 132px (record inspector resizable-panel slice, 2026-09-05) to roughly
    match the template's `rows="6"` (was 5) at this font-size/line-height -- `resize: vertical`

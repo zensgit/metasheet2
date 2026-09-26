@@ -148,19 +148,26 @@
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
-          <input
-            v-else-if="field.type === 'dateTime'"
-            :id="`field_${field.id}`"
-            class="meta-form-view__input"
-            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
-            type="datetime-local"
-            :disabled="isFieldReadOnly(field.id)"
-            :aria-required="fieldIsRequired(field) ? 'true' : undefined"
-            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
-            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
-            :value="dateTimeInputValue(formData[field.id])"
-            @input="formData[field.id] = dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value)"
-          />
+          <!-- dateTime: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c) -->
+          <template v-else-if="field.type === 'dateTime'">
+            <MetaDateTimeInput
+              :id="`field_${field.id}`"
+              class="meta-form-view__input"
+              :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
+              :disabled="isFieldReadOnly(field.id)"
+              :aria-required="fieldIsRequired(field) ? 'true' : undefined"
+              :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+              :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
+              :model-value="formData[field.id]"
+              :timezone="resolveDateTimeTimezone(field.property)"
+              @update:model-value="formData[field.id] = $event"
+            />
+            <span
+              v-if="dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh)"
+              class="meta-form-view__tz-hint"
+              data-meta-datetime-zone-hint=""
+            >{{ dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh) }}</span>
+          </template>
           <select
             v-else-if="field.type === 'select'"
             :id="`field_${field.id}`"
@@ -398,12 +405,12 @@ import {
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 import {
-  dateTimeInputValue,
-  dateTimeValueFromLocalInput,
   formatFieldDisplay,
   locationAddressValue,
   locationValueFromAddress,
 } from '../utils/field-display'
+import { dateTimeZoneHint, resolveDateTimeTimezone } from '../utils/business-timezone'
+import MetaDateTimeInput from './cells/MetaDateTimeInput.vue'
 import { isSystemField } from '../utils/system-fields'
 import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { isFieldConditionallyRequired, isFieldVisible } from '../utils/field-visibility'
@@ -944,6 +951,7 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__comment-anchor--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-form-view__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-form-view__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+.meta-form-view__tz-hint { display: inline-block; margin-top: 4px; font-size: 12px; color: #909399; }
 .meta-form-view__input--multi { min-height: 110px; }
 .meta-form-view__textarea {
   width: 100%; min-height: 120px; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px;

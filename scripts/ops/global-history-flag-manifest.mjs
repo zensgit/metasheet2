@@ -611,6 +611,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'Poll interval for the DingTalk todo-mirror delivery worker\'s setInterval tick (runBatch). Number(process.env...) || 30_000 then Math.max(5_000, ...): an unset/blank/non-numeric value falls back to the 30s default, and any in-range or larger value is honoured verbatim — only a value below 5000 gets clamped up to the 5s floor. No-op unless DINGTALK_TODO_MIRROR_ENABLED is active (the worker is never constructed otherwise).',
     source: 'packages/core-backend/src/index.ts:3948',
   },
+  {
+    key: 'MULTITABLE_BUSINESS_TIMEZONE',
+    type: 'enum',
+    activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "客户反馈 2026-09-24 #4c (ruling PR #6074): the instance business timezone multitable date-times are DISPLAYED and PARSED in on the web — never the browser's local zone. Storage is unchanged (UTC instants); only the wall clock a person sees/types changes. Echoed as `businessTimezone` on GET /api/multitable/context and /form-context; a dateTime field's own non-UTC property.timezone still wins. Not a gate: nothing turns on or off, and the default (Asia/Shanghai) is the intended state for a China deployment, so leaving it unset needs no action. An invalid value is logged once (without echoing it) and falls back to the default.",
+    source: 'packages/core-backend/src/multitable/business-timezone.ts#resolveMultitableBusinessTimezone',
+  },
 ])
 
 /** Flat lookup by key, built once. */

@@ -12,6 +12,12 @@ import {
 } from './field-config'
 import { isSystemFieldType } from './system-fields'
 import { isEmptyValue } from './conditional-formatting'
+import {
+  formatDateTimeInZone,
+  getBusinessTimezone,
+  parseDateTimeInput,
+  resolveDateTimeTimezone,
+} from './business-timezone'
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
@@ -20,45 +26,31 @@ function formatDate(value: unknown): string {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
-export function resolveDateTimeTimezone(property?: Record<string, unknown> | null): string {
-  const timezone = typeof property?.timezone === 'string' && property.timezone.trim().length > 0
-    ? property.timezone.trim()
-    : 'UTC'
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0))
-    return timezone
-  } catch {
-    return 'UTC'
-  }
+// 客户反馈 2026-09-24 #4c: date-times are shown AND parsed in ONE business timezone, fixed
+// `YYYY-MM-DD HH:mm` 24-hour — never in the browser's zone or locale. See ./business-timezone.ts.
+export { resolveDateTimeTimezone }
+
+/**
+ * Editor text for a stored date-time: its `YYYY-MM-DD HH:mm` wall clock in `timezone` (the business
+ * timezone by default), or '' when empty / not a date-time.
+ */
+export function dateTimeInputValue(value: unknown, timezone: string = getBusinessTimezone()): string {
+  return formatDateTimeInZone(value, timezone) ?? ''
 }
 
-export function dateTimeInputValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return ''
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+/**
+ * Stored value for editor text read as a wall clock in `timezone` (the business timezone by default):
+ * the UTC ISO instant, or `null` for empty AND for unparseable text. Callers that must tell "cleared"
+ * from "still typing" use `parseDateTimeInput` instead.
+ */
+export function dateTimeValueFromInput(value: string, timezone: string = getBusinessTimezone()): string | null {
+  const parsed = parseDateTimeInput(value, timezone)
+  return parsed.ok ? parsed.value : null
 }
 
-export function dateTimeValueFromLocalInput(value: string): string | null {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const date = new Date(trimmed)
-  return Number.isNaN(date.getTime()) ? null : date.toISOString()
-}
-
-function formatDateTime(value: unknown, timezone?: string): string {
+function formatDateTime(value: unknown, timezone: string): string {
   if (value === null || value === undefined || value === '') return '—'
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: timezone,
-  })
+  return formatDateTimeInZone(value, timezone) ?? String(value)
 }
 
 function formatAutoNumber(value: unknown, property: Record<string, unknown> | undefined): string {
@@ -140,7 +132,8 @@ export function formatFieldDisplay(params: {
 
   if (field.type === 'date') return formatDate(value)
   if (field.type === 'dateTime') return formatDateTime(value, resolveDateTimeTimezone(field.property))
-  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
+  // System timestamps carry no field zone: the business timezone, same format as a dateTime cell.
+  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value, getBusinessTimezone())
   if (field.type === 'autoNumber') return formatAutoNumber(value, field.property)
   if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return isZh ? (value ? '是' : '否') : (value ? 'Yes' : 'No')

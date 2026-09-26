@@ -13,14 +13,14 @@
       @keydown.tab="onScalarTab"
       @blur="onScalarBlur"
     />
-    <!-- datetime field type -->
-    <input
+    <!-- datetime field type: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c) -->
+    <MetaDateTimeInput
       v-else-if="field.type === 'dateTime'"
       ref="inputRef"
       class="meta-cell-editor__input"
-      type="datetime-local"
-      :value="dateTimeInputValue(scalarActive ? scalarValue : modelValue)"
-      @input="commitScalar(dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
+      :model-value="scalarActive ? scalarValue : modelValue"
+      :timezone="dateTimeZone"
+      @update:model-value="commitScalar"
       @keydown.enter="onEnterScalarConfirm"
       @keydown.escape="onEscapeCancel"
       @keydown.tab="onScalarTab"
@@ -371,12 +371,12 @@ import {
 } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
 import {
-  dateTimeInputValue,
-  dateTimeValueFromLocalInput,
   formatFieldDisplay,
   locationAddressValue,
   locationValueFromAddress,
 } from '../../utils/field-display'
+import { resolveDateTimeTimezone } from '../../utils/business-timezone'
+import MetaDateTimeInput from './MetaDateTimeInput.vue'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 import { useYjsScalarCell, type YjsScalarCellBinding } from '../../composables/useYjsScalarCell'
 import { isDateLikeStringField, isYjsTextEligible } from '../../utils/yjs-text-eligibility'
@@ -611,10 +611,11 @@ const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 
 // plain string on edit — lazy convergence, no seed flip / migration needed.
 // 2a-DT-S2 (design-lock multitable-2a-datetime-live-crdt-designlock-20260618): dateTime
 // joins here. It is a string-stored atomic with the SAME Y.Text history (coerceText reads
-// old docs), but its editor handler writes the CANONICAL UTC ISO form — the dateTime
-// `@input` calls commitScalar(dateTimeValueFromLocalInput(localInput)), never the raw local
-// input — so cross-TZ collaborators converge on the canonical stored value and the flush
-// preserves the byte-identical REST shape. Display stays local via dateTimeInputValue.
+// old docs), but its editor handler writes the CANONICAL UTC ISO form — MetaDateTimeInput
+// emits `update:modelValue` with the UTC ISO instant of the typed wall clock (read in the
+// business timezone, 客户反馈 2026-09-24 #4c), never the raw text — so cross-TZ collaborators
+// converge on the canonical stored value and the flush preserves the byte-identical REST
+// shape. Every collaborator also SEES the same business-timezone wall clock.
 const STRING_STORED_ATOMIC_YJS_TYPES = ['select', 'date', 'dateTime']
 // 2a-2: duration is a plain number (seconds-backed) but commits ON CONFIRM, not per
 // keystroke — its editor's local h:mm buffer (durationText) owns the input while typing
@@ -654,6 +655,8 @@ const scalarBinding = scalarEligibleAtSetup
     })
   : inertScalarBinding
 const scalarActive = computed(() => scalarBinding.active.value)
+// dateTime: the zone the wall clock is shown/typed in — an explicit non-UTC field zone, else the business timezone.
+const dateTimeZone = computed(() => resolveDateTimeTimezone(props.field?.property))
 const scalarValue = computed(() => scalarBinding.value.value)
 
 // Mirror onTextInput: when the scalar Yjs path is live, drive the Y.Map (LWW)

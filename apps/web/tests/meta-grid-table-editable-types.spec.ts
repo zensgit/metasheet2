@@ -18,7 +18,6 @@ import { createApp, h, nextTick, type App } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
-import { dateTimeValueFromLocalInput } from '../src/multitable/utils/field-display'
 
 let app: App<Element> | null = null
 let container: HTMLDivElement | null = null
@@ -186,7 +185,7 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     expect(optionValues).toEqual(['Alpha', 'Beta'])
   })
 
-  it('dateTime: dblclick opens a datetime-local input', async () => {
+  it('dateTime: dblclick opens the business-timezone date-time input (客户反馈 2026-09-24 #4c)', async () => {
     const patchSpy = vi.fn()
     const root = mountGrid(makeRows(), patchSpy)
     await flushUi()
@@ -194,7 +193,7 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     clickThenDblclick(cellAt(root, 0, 2))
     await flushUi()
 
-    const input = root.querySelector('input[type="datetime-local"]') as HTMLInputElement | null
+    const input = root.querySelector('input[data-meta-datetime-input]') as HTMLInputElement | null
     expect(input).toBeTruthy()
   })
 
@@ -206,9 +205,9 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     clickThenDblclick(cellAt(root, 0, 2))
     await flushUi()
 
-    const input = root.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    const input = root.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
     expect(input).toBeTruthy()
-    input.value = '2026-05-06T10:30'
+    input.value = '2026-05-06 10:30'
     input.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
 
@@ -216,9 +215,9 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     await flushUi()
 
     expect(patchSpy).toHaveBeenCalledTimes(1)
-    expect(patchSpy).toHaveBeenCalledWith('r0', 'visit', dateTimeValueFromLocalInput('2026-05-06T10:30'), 1)
+    expect(patchSpy).toHaveBeenCalledWith('r0', 'visit', '2026-05-06T02:30:00.000Z', 1)
     // No dangling editor after Tab-commit.
-    expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
+    expect(root.querySelector('input[data-meta-datetime-input]')).toBeNull()
   })
 
   it('dateTime: a genuine blur to something outside the grid commits the pending draft (D2 — @blur was the OTHER half missing from this branch)', async () => {
@@ -236,9 +235,9 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     clickThenDblclick(cellAt(root, 0, 2))
     await flushUi()
 
-    const input = root.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    const input = root.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
     expect(input).toBeTruthy()
-    input.value = '2026-05-06T10:30'
+    input.value = '2026-05-06 10:30'
     input.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
 
@@ -248,9 +247,9 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     await flushUi()
 
     expect(patchSpy).toHaveBeenCalledTimes(1)
-    expect(patchSpy).toHaveBeenCalledWith('r0', 'visit', dateTimeValueFromLocalInput('2026-05-06T10:30'), 1)
+    expect(patchSpy).toHaveBeenCalledWith('r0', 'visit', '2026-05-06T02:30:00.000Z', 1)
     // No dangling editor after blur-commit — the D2 symptom this PR fixes.
-    expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
+    expect(root.querySelector('input[data-meta-datetime-input]')).toBeNull()
     outside.remove()
   })
 
@@ -261,7 +260,7 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
 
     clickThenDblclick(cellAt(root, 0, 2))
     await flushUi()
-    const input = root.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    const input = root.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
     expect(input).toBeTruthy()
     // no typing — the staged draft stays the row's original `null`
 
@@ -272,7 +271,7 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
 
     expect(patchSpy).not.toHaveBeenCalled()
     // Closing on an unchanged blur is still the fix's job: without @blur the editor would hang open.
-    expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
+    expect(root.querySelector('input[data-meta-datetime-input]')).toBeNull()
     outside.remove()
   })
 

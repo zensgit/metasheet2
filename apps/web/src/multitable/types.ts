@@ -330,6 +330,9 @@ export interface MetaContext {
   // `views`). The FE "My view" toggle initializes from this so its state reflects the server, not local
   // guesswork. Absent/empty ⇒ no personal rows / flag-off. Actor-scoped — never another user's rows.
   personalOverrideViewIds?: string[]
+  // 客户反馈 2026-09-24 #4c: the instance business timezone (IANA id) date-times are shown and parsed in.
+  // Server-provided (MULTITABLE_BUSINESS_TIMEZONE, default Asia/Shanghai); absent from an older server.
+  businessTimezone?: string
 }
 
 // --- Record context (GET /api/multitable/records/:recordId) ---
@@ -494,6 +497,8 @@ export interface MetaFormContext {
   // allowlist / validated redirect / confirmation). Absent ⇒ the form renders
   // exactly today's flat single-page form (backward-compatible).
   formLayout?: FormLayoutConfig | null
+  // 客户反馈 2026-09-24 #4c: the instance business timezone — same value and meaning as MetaContext's.
+  businessTimezone?: string
 }
 
 // --- Capabilities ---
