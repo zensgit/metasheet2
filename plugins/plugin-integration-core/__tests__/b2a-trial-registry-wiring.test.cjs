@@ -31,11 +31,14 @@ const LIB = path.join(__dirname, '..', 'lib')
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   dryRunStockPreparationAction,
+  // R-02 (contract half): the third armed caller of `computeDryRun`, driven in-process below.
+  prepareStockPreparationMvpSnapshot,
   PLM_STOCK_PREPARATION_ACTION_ID,
 } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const {
   B2A_REGISTRY_CONFIG_KEY,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
   B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
   B2A_PURPOSE_PIPELINE_RUNNER_READ,
@@ -2825,6 +2828,345 @@ async function H3_aConfigChangeBetweenAuthorizationAndAdapterCreationRefuses() {
     'H-3 control: both adapters are built when the config is unchanged')
 }
 
+// ── R-02, CONTRACT HALF: THE LOOKUP TABLE'S COLUMNS ARE PINNED ───────────────
+//
+// `TODO(R-02-LOOKUP-SCHEMA-PIN)`, closed. The object-scope half made `lookupProjection.lookupObject`
+// part of the list the guard matches; the schema contract still digested only the PLAN's objects, so
+// the lookup table's columns were never pinned and a drift in THEM passed as an identical schema.
+// Now the route resolves the list once and threads that ONE array through the table-action wrapper
+// to the guard, to the pre-read pin/compare and to the post-read check.
+//
+// The fake `getSchema` answers PER OBJECT (`state.schema[object]`) — a fake that returned one shape
+// for every object would prove nothing about which objects were asked — and `schemaReads` records
+// which objects were.
+
+const LOOKUP_COLUMNS = Object.freeze([
+  { name: 'id', type: 'nvarchar', nullable: false },
+  { name: 'FNumber', type: 'nvarchar', nullable: false },
+  { name: 'FName', type: 'nvarchar', nullable: true },
+])
+
+// The plan objects' schema PLUS the lookup table's own columns.
+function sourceSchemaWithLookup(lookupColumns = LOOKUP_COLUMNS) {
+  return { ...sourceSchema(), [LOOKUP_OBJECT]: lookupColumns.map(clone) }
+}
+
+// A registration that enumerates the lookup object too — the object-scope half already refuses one
+// that does not (the route leg of R2_theLookupProjectionObjectIsPartOfTheObjectScope).
+function lookupEnumeratedRegistration(overrides = {}) {
+  return registration({ objectScope: { sourceObjects: [...STOCK_PREP_OBJECTS, LOOKUP_OBJECT] }, ...overrides })
+}
+
+// The stock-preparation source's private config: a lookup projection off the plan's root object.
+const STOCK_PREP_LOOKUP_CONFIG = Object.freeze(lookupProjectionConfig(LOOKUP_OBJECT, 'DN_PDM_PathExAttrInfo'))
+
+// A fresh durable store carrying ONLY the pinned contract(s) forward — the shape a second Run under
+// a fresh registration sees.
+function carriedContracts(fromStorage, expectedCount = 1) {
+  const storage = Object.assign(new Map(), { durable: true })
+  for (const [key, value] of fromStorage) {
+    if (key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX)) storage.set(key, clone(value))
+  }
+  assert.equal(storage.size, expectedCount, 'the pinned contract was carried forward')
+  return storage
+}
+
+async function R02L_theLookupTableColumnsArePinnedAndDriftInThemRefuses() {
+  // PIN. One more object than the plan; the lookup table described once before the read and once
+  // after it; and exactly ONE credential-free config read — the list is resolved once by the route
+  // and threaded, not resolved again at the contract seam.
+  const first = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+  const seed = mount({
+    registrations: [lookupEnumeratedRegistration()], source: first, sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+  })
+  const pinned = await routeDryRun(seed.routes)
+  assert.equal(pinned.statusCode, 200, JSON.stringify(pinned.body))
+  const stanza = pinned.body.data.evidence.b2aSchemaContract
+  assert.equal(stanza.schemaContractPinned, true, 'the first armed read pins')
+  assert.equal(stanza.objectCount, STOCK_PREP_OBJECTS.length + 1, 'the lookup object is IN the contract')
+  // ONE LIST, TWO CONSUMERS. The wrapper's guard stanza (the one in evidence) reports the count of
+  // the list IT matched; the contract reports the count of the list IT pinned. They are the same
+  // number because they are the same array — a guard on the plan alone and a contract on the
+  // resolved list (or the reverse) would report N and N+1 here.
+  assert.equal(pinned.body.data.evidence.b2aTrialRegistration.objectCount, STOCK_PREP_OBJECTS.length + 1,
+    'the wrapper\'s guard matched the resolved list, lookup object included')
+  assert.equal(pinned.body.data.evidence.b2aTrialRegistration.objectCount, stanza.objectCount,
+    'the guard and the contract counted the same list')
+  assert.deepEqual([...new Set(first.schemaReads)].sort(), [...STOCK_PREP_OBJECTS, LOOKUP_OBJECT].sort(),
+    'the contract describes exactly the resolved list: the plan objects plus the lookup object')
+  assert.equal(first.schemaReads.filter((object) => object === LOOKUP_OBJECT).length, 2,
+    'the lookup table is described before the read (pin) and after it (E3-05)')
+  const stored = seed.context.storage.get(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`)
+  assert.equal(JSON.stringify(stored).includes(LOOKUP_OBJECT), false, 'the lookup object name is not stored in the clear')
+  assert.equal(JSON.stringify(stored).includes('FNumber'), false, 'nor its column names')
+
+  // THE FIELD COUNT MOVES BY THE LOOKUP TABLE'S COLUMNS. Same plan, a source that COULD describe the
+  // lookup table, no projection configured: the contract has exactly `LOOKUP_COLUMNS.length` fewer
+  // fields, a different digest, and never asks the source about the lookup table at all — the
+  // pre-change behaviour for a deployment without a projection, byte for byte.
+  const plain = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+  const plainMount = mount({ registrations: [registration()], source: plain })
+  const plainRes = await routeDryRun(plainMount.routes)
+  assert.equal(plainRes.statusCode, 200, JSON.stringify(plainRes.body))
+  const plainStanza = plainRes.body.data.evidence.b2aSchemaContract
+  assert.equal(plainStanza.objectCount, STOCK_PREP_OBJECTS.length, 'no projection: the plan\'s objects, as before')
+  assert.equal(stanza.fieldCount - plainStanza.fieldCount, LOOKUP_COLUMNS.length, 'the extra fields are the lookup table\'s columns')
+  assert.notEqual(stanza.schemaDigest, plainStanza.schemaDigest, 'a contract with the lookup table is a different contract')
+  assert.deepEqual([...new Set(plain.schemaReads)].sort(), [...STOCK_PREP_OBJECTS].sort(),
+    'no projection: the lookup table is never described')
+  // THE LIST IS RESOLVED ONCE AND THREADED, NOT RESOLVED AGAIN AT THE SEAM. An armed dry-run makes
+  // exactly the credential-free config reads it made before this change — the guard's resolver
+  // (one) and the read-principal peek inside `loadTableActionSourceAdapter` (one) — whether or not a
+  // projection is configured. A wrapper that re-resolved through a loader would show a third.
+  assert.deepEqual(seed.spies.configLoads, plainMount.spies.configLoads,
+    'threading the resolved list adds no config read of its own')
+  assert.deepEqual(seed.spies.configLoads, [SOURCE_SYSTEM_ID, SOURCE_SYSTEM_ID],
+    'exactly the two pre-existing credential-free reads: the guard\'s resolver and the read-principal peek')
+
+  // DRIFT IN THE LOOKUP TABLE ONLY. The plan's objects are byte-identical; only the lookup table
+  // moved. Before this change: 200, a plan and a token. Now: the SAME refusal a plan-object drift
+  // gets — status, code, reason, detail keys — before the first row and before any target touch.
+  const planObjectDrifted = sourceSchemaWithLookup()
+  planObjectDrifted.DN_PDM_PartLibraryInfo = planObjectDrifted.DN_PDM_PartLibraryInfo.slice(1)
+  const cases = [
+    ['lookup column dropped', sourceSchemaWithLookup(LOOKUP_COLUMNS.slice(1)),
+      { missingFieldCount: 1, changedFieldCount: 0, addedFieldCount: 0 }],
+    ['lookup column retyped', sourceSchemaWithLookup(LOOKUP_COLUMNS.map((column, index) => (index === 0 ? { ...column, type: 'int' } : column))),
+      { missingFieldCount: 0, changedFieldCount: 1, addedFieldCount: 0 }],
+    ['lookup column nullability changed', sourceSchemaWithLookup(LOOKUP_COLUMNS.map((column, index) => (index === 0 ? { ...column, nullable: true } : column))),
+      { missingFieldCount: 0, changedFieldCount: 1, addedFieldCount: 0 }],
+    ['lookup column added', sourceSchemaWithLookup([...LOOKUP_COLUMNS, { name: 'Extra', type: 'nvarchar', nullable: true }]),
+      { missingFieldCount: 0, changedFieldCount: 0, addedFieldCount: 1 }],
+    ['plan object column dropped (still refused)', planObjectDrifted,
+      { missingFieldCount: 1, changedFieldCount: 0, addedFieldCount: 0 }],
+  ]
+  const refusals = []
+  for (const [label, schema, counts] of cases) {
+    const source = createRecordingSourceAdapter(sourceData(), { schema })
+    const records = createRecordsApi()
+    const { routes } = mount({
+      registrations: [lookupEnumeratedRegistration()], source, records,
+      storage: carriedContracts(seed.context.storage), sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+    })
+    const res = await routeDryRun(routes)
+    assert.equal(res.statusCode, 409, `${label}: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, B2A_SCHEMA_DRIFT, label)
+    assert.equal(res.body.error.details.reason, 'schema_contract_drift', label)
+    for (const [key, expected] of Object.entries(counts)) {
+      assert.equal(res.body.error.details[key], expected, `${label}: ${key}`)
+    }
+    assert.equal(source.reads.length, 0, `${label}: refused BEFORE the first source row`)
+    assert.deepEqual(records.calls, [], `${label}: no target read or write`)
+    assert.equal(res.body.data, undefined, `${label}: no plan payload`)
+    const text = JSON.stringify(res.body)
+    for (const forbidden of [...FORBIDDEN_IN_RESPONSE, LOOKUP_OBJECT, 'FNumber', 'IdentityNo', 'DN_PDM_PartLibraryInfo']) {
+      assert.equal(text.includes(forbidden), false, `${label}: leaked ${JSON.stringify(forbidden)}`)
+    }
+    refusals.push(res.body)
+  }
+  // SAME SHAPE: every lookup-table refusal carries exactly the key set the plan-object refusal does.
+  const shapeOf = (body) => JSON.stringify({
+    top: Object.keys(body).sort(), error: Object.keys(body.error).sort(), details: Object.keys(body.error.details).sort(),
+  })
+  const planObjectShape = shapeOf(refusals[refusals.length - 1])
+  for (const body of refusals) {
+    assert.equal(shapeOf(body), planObjectShape, 'a lookup-table drift refuses in the same shape as a plan-object drift')
+  }
+
+  // UNCHANGED, SECOND RUN: passes and COMPARES. This is also the proof that the pre-read pin and the
+  // post-read check walk the SAME list — a post-read check over the plan alone would digest one
+  // object fewer than the contract and refuse every lookup-bearing read as `source_changed_mid_read`.
+  const stable = mount({
+    registrations: [lookupEnumeratedRegistration()],
+    source: createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() }),
+    storage: carriedContracts(seed.context.storage), sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+  })
+  const compared = await routeDryRun(stable.routes)
+  assert.equal(compared.statusCode, 200, JSON.stringify(compared.body))
+  assert.equal(compared.body.data.evidence.b2aSchemaContract.schemaContractPinned, false, 'the second read COMPARES')
+  assert.equal(compared.body.data.evidence.b2aSchemaContract.schemaDigest, stanza.schemaDigest)
+  assert.equal(compared.body.data.revision, pinned.body.data.revision, 'and the plan is the plan it was')
+
+  // A MID-READ CHANGE IN THE LOOKUP TABLE is caught by E3-05 as well: the post-read check
+  // re-describes the lookup table, not just the plan's objects.
+  const midRead = createRecordingSourceAdapter(sourceData(), {
+    schema: sourceSchemaWithLookup(),
+    onRead: (input, ctx) => {
+      ctx.state.schema = { ...ctx.state.schema, [LOOKUP_OBJECT]: LOOKUP_COLUMNS.slice(1).map(clone) }
+      return undefined
+    },
+  })
+  const midRecords = createRecordsApi()
+  const midRes = await routeDryRun(mount({
+    registrations: [lookupEnumeratedRegistration()], source: midRead, records: midRecords,
+    storage: carriedContracts(seed.context.storage), sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+  }).routes)
+  assertIncompleteBatchRefusal(midRes, { code: C6_FULL_BATCH_INCOMPLETE, reason: 'source_changed_mid_read' }, midRecords,
+    'R-02 contract: the lookup table changed mid-read')
+  assert.equal(midRes.body.error.details.missingFieldCount, 1)
+  assert.ok(midRead.reads.length > 0, 'the batch was read before the change was detected')
+
+  // DORMANT with the same projection and a drifted lookup table: nothing is described, nothing
+  // refuses, and not one config read.
+  const dormant = mount({
+    source: createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup(LOOKUP_COLUMNS.slice(1)) }),
+    sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+  })
+  const dormantRes = await routeDryRun(dormant.routes)
+  assert.equal(dormantRes.statusCode, 200, JSON.stringify(dormantRes.body))
+  assert.equal('b2aSchemaContract' in dormantRes.body.data.evidence, false, 'dormant: no contract stanza')
+  // The resolver's config read is ARMED-ONLY: dormant makes exactly the reads a dormant deployment
+  // without any projection makes (the read-principal peek), and one fewer than the armed run above.
+  const dormantPlain = mount({ source: createRecordingSourceAdapter() })
+  await routeDryRun(dormantPlain.routes)
+  assert.deepEqual(dormant.spies.configLoads, dormantPlain.spies.configLoads, 'dormant: a projection costs no config read')
+  assert.equal(dormant.spies.configLoads.length, seed.spies.configLoads.length - 1, 'dormant: the resolver\'s read never happens')
+}
+
+// ── R-02, CONTRACT HALF: EVERY ARMED CALLER OF computeDryRun PINS THE SAME LIST ─
+//
+// `computeDryRun` has three armed callers — dry-run, apply, MVP-persist — and each hands it the
+// route-resolved list. Apply is driven through the real route: a lookup table drifted between plan
+// and apply refuses the re-expansion before any row and before any write. MVP-persist is driven
+// in-process, the way its route calls it. And the wrapper's own fail-closed leg: an in-process caller
+// that arms the wrapper for a kind whose config can hide an object, WITHOUT the resolved list, is
+// refused before the guard — no claim, no schema probe, no row — instead of being handed a contract
+// over the plan alone; a kind that cannot hide an object keeps the plan's list, as before.
+async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWithoutIt() {
+  // APPLY, through the route. Registration A plans (and pins); registration B — same scope, its own
+  // operation — applies. B's contract is A's pinned record under B's key, so apply COMPARES; the
+  // lookup table is drifted under it between the two calls.
+  const applyRegistrations = () => [
+    lookupEnumeratedRegistration(),
+    lookupEnumeratedRegistration({ registrationId: 'b2a-factory-b-plm', operationRef: 'op-ref-b' }),
+  ]
+  const applyAfterPlan = async ({ driftLookupTable }) => {
+    const source = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+    const records = createRecordsApi()
+    const { routes, context } = mount({
+      registrations: applyRegistrations(), source, records, sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+    })
+    const planned = await routeDryRun(routes)
+    assert.equal(planned.statusCode, 200, JSON.stringify(planned.body))
+    assert.equal(planned.body.data.evidence.b2aTrialRegistration.registrationId, 'b2a-factory-a-plm')
+    const pinnedRecord = context.storage.get(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`)
+    assert.ok(pinnedRecord, 'the dry-run pinned under A')
+    context.storage.set(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-b-plm`, clone(pinnedRecord))
+    const readsAfterPlan = source.reads.length
+    if (driftLookupTable) source.state.schema = sourceSchemaWithLookup(LOOKUP_COLUMNS.slice(1))
+    const applied = await call(routes, 'POST', APPLY_ROUTE, {
+      user: ADMIN_USER, params: ACTION_PARAMS,
+      body: { parameters: { projectNo: PROJECT_NO }, confirm: { dryRunToken: planned.body.data.dryRunToken } },
+    })
+    return { applied, source, records, readsAfterPlan }
+  }
+
+  const drifted = await applyAfterPlan({ driftLookupTable: true })
+  assert.equal(drifted.applied.statusCode, 409, `apply over a drifted lookup table: ${JSON.stringify(drifted.applied.body)}`)
+  assert.equal(drifted.applied.body.error.code, B2A_SCHEMA_DRIFT)
+  assert.equal(drifted.applied.body.error.details.reason, 'schema_contract_drift')
+  assert.equal(drifted.applied.body.error.details.missingFieldCount, 1)
+  assert.equal(drifted.source.reads.length, drifted.readsAfterPlan, 'apply re-expanded ZERO rows')
+  assert.deepEqual(drifted.records.calls.filter(([name]) => name !== 'queryRecords'), [], 'apply wrote nothing')
+  assert.equal(JSON.stringify(drifted.applied.body).includes(LOOKUP_OBJECT), false, 'values-free')
+
+  // CONTROL: the identical apply with the lookup table unchanged gets past the contract and writes,
+  // so the refusal above is the drift and not something earlier in apply.
+  const control = await applyAfterPlan({ driftLookupTable: false })
+  assert.equal(control.applied.statusCode, 200, JSON.stringify(control.applied.body))
+  assert.equal(control.applied.body.data.evidence.b2aSchemaContract.schemaContractPinned, false, 'apply COMPARED under B')
+  assert.equal(control.applied.body.data.evidence.b2aSchemaContract.objectCount, STOCK_PREP_OBJECTS.length + 1)
+  assert.equal(control.applied.body.data.apply.counts.created, 1)
+
+  // MVP-PERSIST, in-process, as its route calls it: the resolved list pins the lookup table, and a
+  // drifted lookup table on the next Run is refused with the same code.
+  const mvpRegistry = createB2aRegistry({
+    config: { [B2A_REGISTRY_CONFIG_KEY]: registry([lookupEnumeratedRegistration({ purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST })]) },
+  })
+  const inProcess = (fn, { storage, source, b2aTrialRegistry, action = actionConfig(), sourceObjects }) => fn({
+    action,
+    parameters: { projectNo: PROJECT_NO },
+    sourceAdapter: source.adapter,
+    recordsApi: createRecordsApi().api,
+    tokenStore: new Map(),
+    policyStore: new Map(),
+    b2aTrialRegistry,
+    b2aClaimStore: storage,
+    b2aOperationClaim: claimForStorage(storage),
+    b2aRunId: `in-process:${storage.size}`,
+    tenantId: TENANT_ID,
+    now: Date.now(),
+    ...(sourceObjects === undefined ? {} : { b2aSourceObjects: sourceObjects }),
+  })
+  const mvpStorage = Object.assign(new Map(), { durable: true })
+  const mvpSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+  const mvpPinned = await inProcess(prepareStockPreparationMvpSnapshot, {
+    storage: mvpStorage, source: mvpSource, b2aTrialRegistry: mvpRegistry, sourceObjects: [...STOCK_PREP_OBJECTS, LOOKUP_OBJECT],
+  })
+  assert.equal(mvpPinned.evidence.b2aSchemaContract.schemaContractPinned, true)
+  assert.equal(mvpPinned.evidence.b2aSchemaContract.objectCount, STOCK_PREP_OBJECTS.length + 1, 'MVP-persist pins the lookup table too')
+  assert.equal(mvpSource.schemaReads.filter((object) => object === LOOKUP_OBJECT).length, 2)
+  const mvpDriftedSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup(LOOKUP_COLUMNS.slice(1)) })
+  const mvpDrift = await capturedRejection(inProcess(prepareStockPreparationMvpSnapshot, {
+    storage: carriedContracts(mvpStorage), source: mvpDriftedSource, b2aTrialRegistry: mvpRegistry,
+    sourceObjects: [...STOCK_PREP_OBJECTS, LOOKUP_OBJECT],
+  }))
+  assert.equal(mvpDrift.name, 'B2aReadAuthorizationError', `${mvpDrift.name}: ${mvpDrift.message}`)
+  assert.equal(mvpDrift.code, B2A_SCHEMA_DRIFT)
+  assert.equal(mvpDrift.details.reason, 'schema_contract_drift')
+  assert.deepEqual(mvpDriftedSource.reads, [], 'MVP-persist refused BEFORE the first source row')
+
+  // FAIL-CLOSED WITHOUT THE LIST. Armed, `data-source:sql-readonly` (a kind whose config can hide an
+  // object), and the caller handed the wrapper no resolved list: refused with the resolver's own
+  // reason, BEFORE the guard — no operation claim, no schema probe, no row. Both in-process wrappers.
+  const armedRegistry = createB2aRegistry({
+    config: { [B2A_REGISTRY_CONFIG_KEY]: registry([lookupEnumeratedRegistration()]) },
+  })
+  for (const [label, fn, b2aTrialRegistry] of [
+    ['dry-run', dryRunStockPreparationAction, armedRegistry],
+    ['mvp-persist', prepareStockPreparationMvpSnapshot, mvpRegistry],
+  ]) {
+    const storage = Object.assign(new Map(), { durable: true })
+    const source = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+    const error = await capturedRejection(inProcess(fn, { storage, source, b2aTrialRegistry }))
+    assertRunnerRefusal(error, B2A_SCOPE_MISMATCH, 'config_bound_object_unresolvable',
+      `${label}: armed in-process call without the resolved list`)
+    assert.deepEqual(error.details, { reason: 'config_bound_object_unresolvable', objectCount: STOCK_PREP_OBJECTS.length },
+      `${label}: values-free — a reason and a count`)
+    assert.deepEqual(source.schemaReads, [], `${label}: no schema probe`)
+    assert.deepEqual(source.reads, [], `${label}: no row`)
+    assert.equal(claimKeysIn(storage).length, 0, `${label}: no operation claim spent`)
+    assert.equal(storage.size, 0, `${label}: nothing durable at all`)
+  }
+
+  // ... and the SAME dry-run call WITH the resolved list proceeds and pins the lookup table — so the
+  // refusal above is the missing list, not the in-process shape.
+  const withListStorage = Object.assign(new Map(), { durable: true })
+  const withListSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+  const withList = await inProcess(dryRunStockPreparationAction, {
+    storage: withListStorage, source: withListSource, b2aTrialRegistry: armedRegistry,
+    sourceObjects: [...STOCK_PREP_OBJECTS, LOOKUP_OBJECT],
+  })
+  assert.equal(withList.status, 'ready', JSON.stringify(withList.evidence))
+  assert.equal(withList.evidence.b2aSchemaContract.objectCount, STOCK_PREP_OBJECTS.length + 1)
+
+  // A KIND THAT CANNOT HIDE AN OBJECT (`bridge:legacy-sql-readonly`), armed, no resolved list: the
+  // plan's list is the read's list, and the contract covers exactly the plan's objects — unchanged.
+  const BRIDGE_KIND = 'bridge:legacy-sql-readonly'
+  const bridgeRegistry = createB2aRegistry({
+    config: { [B2A_REGISTRY_CONFIG_KEY]: registry([registration({ sourceSystemType: BRIDGE_KIND })]) },
+  })
+  const bridgeStorage = Object.assign(new Map(), { durable: true })
+  const bridgeSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+  const bridge = await inProcess(dryRunStockPreparationAction, {
+    storage: bridgeStorage, source: bridgeSource, b2aTrialRegistry: bridgeRegistry,
+    action: actionConfig({ source: { externalSystemId: SOURCE_SYSTEM_ID, kind: BRIDGE_KIND } }),
+  })
+  assert.equal(bridge.status, 'ready', JSON.stringify(bridge.evidence))
+  assert.equal(bridge.evidence.b2aSchemaContract.objectCount, STOCK_PREP_OBJECTS.length, 'off the roster: the plan\'s objects')
+  assert.deepEqual([...new Set(bridgeSource.schemaReads)].sort(), [...STOCK_PREP_OBJECTS].sort())
+}
+
 const TESTS = [
   unsetEnvIsDormantAndByteIdentical,
   unsetEnvLeavesTheOtherEntryPointsUntouched,
@@ -2869,6 +3211,9 @@ const TESTS = [
   H1_aPrototypeBorneMarkerIsRefusedByTheGate,
   H3_aConfigChangeBetweenAuthorizationAndAdapterCreationRefuses,
   H4_armedArtifactReplayIsRefusedBeforeAnyReadOrClaim,
+  // R-02, contract half: the lookup table's columns are in the schema contract (TODO R-02-LOOKUP-SCHEMA-PIN closed).
+  R02L_theLookupTableColumnsArePinnedAndDriftInThemRefuses,
+  R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWithoutIt,
 ]
 
 async function main() {

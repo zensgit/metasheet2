@@ -110,6 +110,7 @@ const {
   b2aSchemaContractEvidence,
   runB2aGuardedSourceRead,
   readPlanSourceObjects,
+  requireResolvedB2aSourceObjects,
 } = require('./b2a-trial-registry.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
@@ -1816,7 +1817,34 @@ async function consumeDryRunToken(tokenStore, token, expected) {
  * Returns `null` when the registry is dormant — callers then add nothing to their evidence, which is
  * what keeps a dormant deployment byte-identical.
  */
-async function assertB2aTrialForStockPreparationRead({ registry, store, operationClaim, tenantId, action, parameters, purpose, runId, now }) {
+/**
+ * THE ONE OBJECT LIST an armed stock-preparation read is guarded and contracted against (R-02, both
+ * halves). `null` when dormant — nothing downstream reads it: the guard returns before looking, and
+ * both contract seams return on a `null` authorization.
+ *
+ * Armed, it is the ROUTE's resolved list (`input.b2aSourceObjects`: the plan's objects plus the
+ * source system's config-bound `lookupProjection.lookupObject`, resolved through the non-decrypting
+ * accessor by http-routes.cjs's `b2aTableActionSourceObjects` and matched by the route's own guard),
+ * unioned with the plan's own objects. Computed ONCE per entry point, BEFORE the guard, and handed
+ * unchanged to `assertB2aTrialForStockPreparationRead` (the guard's `objectScope` match) and to
+ * `computeDryRun` (the pre-read pin/compare AND the post-read E3-05 check), so the objects
+ * authorized, the objects pinned and the objects re-checked are one array — not three derivations
+ * that could disagree, which is how the lookup table's columns went unpinned before this seam
+ * existed. `requireResolvedB2aSourceObjects` holds the fail-closed leg: armed, a kind whose config
+ * can hide an object, and no resolved list => refused here, ahead of the guard, so no operation
+ * claim is spent on a read whose scope could not be stated.
+ */
+function stockPreparationB2aSourceObjects({ registry, action, resolvedSourceObjects }) {
+  if (registry === null || registry === undefined) return null
+  const source = (action && action.source) || {}
+  return requireResolvedB2aSourceObjects({
+    resolvedSourceObjects,
+    planSourceObjects: readPlanSourceObjects(source.readPlan),
+    sourceSystemType: source.kind,
+  })
+}
+
+async function assertB2aTrialForStockPreparationRead({ registry, store, operationClaim, tenantId, action, parameters, purpose, runId, now, sourceObjects }) {
   const source = (action && action.source) || {}
   return assertB2aReadAuthorization({
     registry,
@@ -1833,9 +1861,11 @@ async function assertB2aTrialForStockPreparationRead({ registry, store, operatio
     sourceSystemType: source.kind,
     sourceBindingRef: source.externalSystemId,
     dataScopeRef: parameters ? parameters.projectNo : null,
-    // The plan's OWN object list, so a plan repointed at one extra table stops matching a
-    // registration that did not enumerate it.
-    sourceObjects: readPlanSourceObjects(source.readPlan),
+    // The ONE list (`stockPreparationB2aSourceObjects`): the plan's own objects — so a plan repointed
+    // at one extra table stops matching a registration that did not enumerate it — plus the config-
+    // bound lookup object the route resolved. Threaded, never re-derived here: the same array goes
+    // on to the schema contract, so what this guard authorizes is what the contract pins.
+    sourceObjects,
     purpose,
     runId,
     now,
@@ -1872,16 +1902,19 @@ async function assertB2aTrialForStockPreparationRead({ registry, store, operatio
  * exactly as they are when dormant. Adding such a field was explicitly out of scope, and inventing
  * one to clamp against would be a new schema key, not a use of an existing one.
  */
-async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2aClaimStore, action, sourceAdapter, extFieldMapping, now }) {
+async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, sourceAdapter, extFieldMapping, now }) {
   if (!b2aTrialRegistration) return null
   return assertB2aSchemaContract({
     store: b2aClaimStore,
     authorization: b2aTrialRegistration,
     sourceAdapter,
-    // The PLAN's own objects — the same list the guard matched against `objectScope`, so the contract
-    // covers exactly what the read will touch and not a hardcoded roster that would keep passing
-    // when the plan grew a section.
-    sourceObjects: readPlanSourceObjects(action.source.readPlan),
+    // THE SAME LIST THE GUARD MATCHED against `objectScope` (`stockPreparationB2aSourceObjects`): the
+    // plan's own objects PLUS the source system's config-bound lookup object, resolved once by the
+    // route. So the contract covers exactly what the read will touch — not a hardcoded roster that
+    // would keep passing when the plan grew a section, and not the plan alone, which would leave the
+    // lookup table's columns unpinned (R-02, contract half). Deliberately NOT re-derived from the
+    // plan here: an armed call that arrives without the list gets `schema_scope_empty`, fail-closed.
+    sourceObjects: b2aSourceObjects,
     extFieldMapping,
     now,
   })
@@ -1898,7 +1931,7 @@ async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2a
 // which is merged and the plan recomputed once. A confirmed decision therefore
 // downgrades a hold ONLY when its stored fingerprint matches today's input —
 // any stale confirmation leaves the hold standing.
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aNow, targetFieldExistence }) {
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, b2aNow, targetFieldExistence }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   // 目标表字段存在性 — BEFORE the B2a contract, before the first source row, before any plan. A target
   // whose template/ext columns are gone refuses here (422 TARGET_SCHEMA_INCOMPLETE), so no source read,
@@ -1908,7 +1941,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
   // R-06, BEFORE the first source row. A drifted schema refuses here, which is before `expansion`,
   // before `plan`, before `revision` and before any evidence exists to be produced.
   const b2aSchemaContract = await assertB2aReadHardeningBeforeExpansion({
-    b2aTrialRegistration, b2aClaimStore, action, sourceAdapter, extFieldMapping, now: b2aNow,
+    b2aTrialRegistration, b2aClaimStore, b2aSourceObjects, sourceAdapter, extFieldMapping, now: b2aNow,
   })
   const expansion = await runB2aGuardedSourceRead(b2aTrialRegistration, () => expandPlmProjectBom({
     sourceAdapter,
@@ -1938,12 +1971,14 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
   // entries, so a truncated batch arrives as data rather than as a throw. Classified here, before
   // the plan.
   assertB2aFullBatchComplete(b2aTrialRegistration, expansion.errors)
-  // E3-05: the source must not have changed shape while the batch was being read.
+  // E3-05: the source must not have changed shape while the batch was being read. Over the SAME
+  // list the pre-read pin walked — a narrower list here would digest one object fewer than the
+  // contract and refuse every lookup-bearing read as `source_changed_mid_read`.
   await assertB2aSourceUnchangedAfterRead({
     authorization: b2aTrialRegistration,
     contract: b2aSchemaContract,
     sourceAdapter,
-    sourceObjects: readPlanSourceObjects(action.source.readPlan),
+    sourceObjects: b2aSourceObjects,
     extFieldMapping,
   })
   const hasGlobalErrors = Array.isArray(expansion.errors) && expansion.errors.length > 0
@@ -2091,6 +2126,11 @@ async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
   // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
+  // R-02: the ONE object list — resolved by the route, unioned with the plan — that the guard
+  // matches and the schema contract pins. Ahead of the guard, so its fail-closed leg spends no claim.
+  const b2aSourceObjects = stockPreparationB2aSourceObjects({
+    registry: input.b2aTrialRegistry, action, resolvedSourceObjects: input.b2aSourceObjects,
+  })
   const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
     store: input.b2aClaimStore,
@@ -2101,6 +2141,7 @@ async function dryRunStockPreparationAction(input = {}) {
     runId: input.b2aRunId,
     purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
     now: input.now,
+    sourceObjects: b2aSourceObjects,
   })
   const runOnlyReview = normalizeRunOnlyConflictPolicyReview(input.conflictPolicyReview)
   const tableScopeReview = input.policyStore
@@ -2131,6 +2172,8 @@ async function dryRunStockPreparationAction(input = {}) {
     // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
     b2aTrialRegistration,
     b2aClaimStore: input.b2aClaimStore,
+    // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
+    b2aSourceObjects,
     b2aNow: input.now,
   })
   let dryRunToken = null
@@ -2245,6 +2288,10 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
   // carries its OWN purpose: a registration written for the refresh action does not implicitly
   // authorize committing that customer's BOM into the MVP snapshot tables, and an entry with
   // `forbidReuse: true` will say so.
+  // R-02: the same one-list rule as the dry-run — see `stockPreparationB2aSourceObjects`.
+  const b2aSourceObjects = stockPreparationB2aSourceObjects({
+    registry: input.b2aTrialRegistry, action, resolvedSourceObjects: input.b2aSourceObjects,
+  })
   const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
     store: input.b2aClaimStore,
@@ -2255,6 +2302,7 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     runId: input.b2aRunId,
     purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
     now: input.now,
+    sourceObjects: b2aSourceObjects,
   })
   const dryRun = await computeDryRun({
     action,
@@ -2278,6 +2326,8 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
     b2aTrialRegistration,
     b2aClaimStore: input.b2aClaimStore,
+    // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
+    b2aSourceObjects,
     b2aNow: input.now,
   })
   if (dryRun.expansion.status === 'not_found') {
@@ -2422,6 +2472,10 @@ async function applyStockPreparationAction(input = {}) {
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
   // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
   // outside their registered scope would also lose the artifact that proves what they planned.
+  // R-02: the same one-list rule as the dry-run — see `stockPreparationB2aSourceObjects`.
+  const b2aSourceObjects = stockPreparationB2aSourceObjects({
+    registry: input.b2aTrialRegistry, action, resolvedSourceObjects: input.b2aSourceObjects,
+  })
   const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
     store: input.b2aClaimStore,
@@ -2435,6 +2489,7 @@ async function applyStockPreparationAction(input = {}) {
     // apply refused with a valid token in hand, which is a worse failure than the gate prevents.
     purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
     now: input.now,
+    sourceObjects: b2aSourceObjects,
   })
   // Column existence BEFORE the token consume as well, for the reason B2a gives above: a target whose
   // columns vanished between plan and apply is refused without burning the single-use token, so the
@@ -2487,6 +2542,8 @@ async function applyStockPreparationAction(input = {}) {
     // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
     b2aTrialRegistration,
     b2aClaimStore: input.b2aClaimStore,
+    // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
+    b2aSourceObjects,
     b2aNow: input.now,
   })
   if (tokenRecord.revision !== dryRun.revision) {
