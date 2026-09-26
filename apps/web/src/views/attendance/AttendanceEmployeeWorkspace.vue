@@ -90,6 +90,13 @@
               {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
             </button>
           </div>
+          <p
+            v-if="punchOutdoorPhotoHint"
+            class="attendance__field-hint"
+            data-attendance-punch-photo-hint
+          >
+            {{ tr('If this punch is treated as outdoor, a photo is required. You can attach an image when the punch asks for one.', '若本次打卡按外勤处理，需要上传照片。打卡提示需要照片时，可在此附上图片。') }}
+          </p>
         </div>
         <div v-if="punchOutdoorNoteRequired" class="attendance__punch-note" data-attendance-punch-note-form>
           <label class="attendance__field" for="attendance-punch-outdoor-note">
@@ -111,6 +118,27 @@
             @click="$emit('retryPunchNote')"
           >
             {{ punching ? tr('Working...', '处理中...') : tr('Retry punch with note', '补充备注后重试打卡') }}
+          </button>
+        </div>
+        <div v-if="punchOutdoorPhotoRequired" class="attendance__punch-note" data-attendance-punch-photo-form>
+          <label class="attendance__field" for="attendance-punch-outdoor-photo">
+            <span>{{ tr('Outdoor punch photo', '外勤打卡照片') }}</span>
+            <input
+              id="attendance-punch-outdoor-photo"
+              type="file"
+              accept="image/*"
+              data-attendance-punch-photo-input
+              @change="onOutdoorPhotoPicked"
+            />
+          </label>
+          <button
+            class="attendance__btn attendance__btn--inline"
+            type="button"
+            data-attendance-punch-photo-retry
+            :disabled="punching || !outdoorPhotoFile"
+            @click="outdoorPhotoFile && $emit('retryPunchPhoto', outdoorPhotoFile)"
+          >
+            {{ punching ? tr('Working...', '处理中...') : tr('Upload photo and retry punch', '上传照片后重试打卡') }}
           </button>
         </div>
 
@@ -497,7 +525,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import AttendanceEmployeeCommonIcon from './AttendanceEmployeeCommonIcon.vue'
 import type { AttendanceOverviewAttentionItem } from './attendanceOverviewPriority'
 import {
@@ -576,6 +604,8 @@ const props = defineProps<{
   heroTimeline: { checkIn: string | null; checkOut: string | null } | null
   punchOutdoorNoteRequired: boolean
   punchOutdoorNoteDraft: string
+  punchOutdoorPhotoRequired?: boolean
+  punchOutdoorPhotoHint?: boolean
   workbenchStatusDescription: string
   workbenchRecordStatus: string | null
   workbenchFocusDateLabel: string | null
@@ -644,6 +674,7 @@ const props = defineProps<{
 defineEmits<{
   punch: [eventType: 'check_in' | 'check_out']
   retryPunchNote: []
+  retryPunchPhoto: [file: File]
   'update:punchOutdoorNoteDraft': [value: string]
   statusAction: []
   selfServiceAction: [action: WorkspaceSelfServiceActionKey]
@@ -652,6 +683,16 @@ defineEmits<{
   changeBalanceLeaveType: [code: 'annual' | 'comp_time']
   openBalanceTrace: []
 }>()
+
+const outdoorPhotoFile = ref<File | null>(null)
+watch(() => props.punchOutdoorPhotoRequired, (required) => {
+  if (!required) outdoorPhotoFile.value = null
+})
+function onOutdoorPhotoPicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files && input.files.length > 0 ? input.files[0] : null
+  outdoorPhotoFile.value = file ?? null
+}
 
 const resolvedQuickIcons = computed(() => resolveEmployeeQuickActionIcons(props.employeeQuickActionIcons))
 

@@ -143,6 +143,8 @@
         :hero-timeline="heroTodayTimeline"
         :punch-outdoor-note-required="punchOutdoorNoteRequired"
         :punch-outdoor-note-draft="punchOutdoorNoteDraft"
+        :punch-outdoor-photo-required="punchOutdoorPhotoRequired"
+        :punch-outdoor-photo-hint="selfRulesOutdoorPhotoRequired"
         :workbench-status-description="activeWorkbenchStatusDescription"
         :workbench-record-status="workbenchRecordStatus"
         :workbench-focus-date-label="workbenchFocusDateLabel"
@@ -197,6 +199,7 @@
         :attendance-status-guide-items="attendanceStatusGuideItems"
         @punch="punch"
         @retry-punch-note="retryPunchWithOutdoorNote"
+        @retry-punch-photo="retryPunchWithOutdoorPhoto"
         @update:punch-outdoor-note-draft="punchOutdoorNoteDraft = $event"
         @status-action="runStatusAction"
         @self-service-action="runSelfServiceAction"
@@ -3245,7 +3248,7 @@
                   />
                 </label>
                 <p class="attendance__field-hint">
-                  {{ tr('Requires a photo-evidence upload attached to the outdoor punch; only takes effect for punch clients that submit a location or outdoor marker.', '要求外勤打卡附照片证据；对携带定位/外勤标记的打卡端生效。') }}
+                  {{ tr('When an outdoor punch needs a photo, the Web punch page asks for an image, uploads it, and retries with that file. Punches that are not outdoor candidates are unchanged.', '外勤打卡需要照片时，Web 打卡页会要求选择图片、上传并带上该文件重试。非外勤打卡不受影响。') }}
                 </p>
                 <label class="attendance__field" for="attendance-outdoor-flow">
                   <span>{{ tr('Approval flow', '审批流程') }}</span>
@@ -3264,6 +3267,13 @@
                 </label>
                 <p v-if="outdoorApprovalFlowOptions.length === 0" class="attendance__field-hint">
                   {{ tr('No active outdoor approval flow yet — create one under Approval Flows with request type outdoor_punch.', '尚无启用的外勤审批流——请在「审批流」中以请求类型 outdoor_punch 创建。') }}
+                </p>
+                <p
+                  v-if="outdoorApprovalBlockedMessage"
+                  class="attendance__field-hint attendance__field-hint--error"
+                  data-outdoor="approval-blocked"
+                >
+                  {{ outdoorApprovalBlockedMessage }}
                 </p>
                 <button
                   class="attendance__btn attendance__btn--primary"
@@ -10257,12 +10267,15 @@ import {
   xlsxConvertFailureMessage,
 } from './attendance/importXlsxConvert'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
+import { assessOutdoorApprovalSave } from './attendance/outdoorApprovalSave'
 import {
   buildPunchBasePayload,
+  buildPunchEvidencePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
   type PunchEventType,
+  type PunchEvidenceExtras,
   type PunchRetryBasePayload,
   type PunchRetryWithNotePayload,
 } from './attendance/punchOutcome'
@@ -11023,9 +11036,9 @@ interface AttendanceSettings {
     }
   }
   // ② S3 punch-policy outdoor approval (backend #2308). Frontend type only — the admin card reads/writes
-  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto is wired (S2 outdoor-punch-photo
-  // design-lock, 2026-07-10): it takes effect only on punch clients that submit a location or an
-  // outdoor marker (the web hero-punch flow does neither — see punchOutcome.ts / UI-P0 #3806 §4).
+  // these via PUT { punchPolicy: { outdoor: ... } }. requireApproval cannot be saved unless an
+  // outdoor_punch flow resolves the same way punch does (#5961). requirePhoto is enforced on
+  // outdoor candidates; the Web punch page can upload a photo and retry with photoFileId (#5977).
   punchPolicy?: {
     outdoor?: {
       requireApproval?: boolean
@@ -11970,6 +11983,7 @@ const heroClockDate = computed(() => {
 // outdoor-punch note retry state. See
 // docs/development/attendance-punch-outcome-clarity-design-lock-20260705.md.
 const punchOutdoorNoteRequired = ref(false)
+const punchOutdoorPhotoRequired = ref(false)
 const punchOutdoorNoteEventType = ref<PunchEventType | null>(null)
 const punchOutdoorNoteDraft = ref('')
 const requestSubmitting = ref(false)
@@ -16324,10 +16338,8 @@ const multiShiftDayForm = reactive({
 
 // ② S3-2 外勤打卡审批 (outdoor approval) config card. Mirrors shiftComplianceForm: saved via
 // saveOutdoorApproval, which PUTs ONLY { punchPolicy: { outdoor: ... } } so the backend per-key merge
-// leaves unscheduled / merge siblings untouched. requireApproval=false ⇒ no regression. requirePhoto
-// (S2 outdoor-punch-photo design-lock, 2026-07-10) is wired but only enforced for outdoor candidates
-// (outsideGeofence || outdoorMarker) — the web hero-punch flow never produces one, so this card alone
-// cannot cause a punch to actually require a photo (see punchOutcome.ts / UI-P0 #3806 §4).
+// leaves unscheduled / merge siblings untouched. requireApproval=false ⇒ no regression. Saving
+// requireApproval=true is refused unless the loaded active outdoor_punch flows resolve (#5961).
 const outdoorForm = reactive({
   requireApproval: false,
   requireNote: false,
@@ -16401,6 +16413,31 @@ const selectedAutoShiftPreviewItems = computed(() => {
 const outdoorApprovalFlowOptions = computed(() =>
   approvalFlows.value.filter((flow) => flow.requestType === 'outdoor_punch' && flow.isActive),
 )
+const outdoorApprovalSaveAssessment = computed(() => assessOutdoorApprovalSave({
+  requireApproval: outdoorForm.requireApproval === true,
+  approvalFlowId: outdoorForm.approvalFlowId,
+  activeOutdoorFlowIds: outdoorApprovalFlowOptions.value.map((flow) => flow.id),
+}))
+const outdoorApprovalBlockedMessage = computed(() => {
+  const assessment = outdoorApprovalSaveAssessment.value
+  if (assessment.ok || !assessment.reason) return ''
+  if (assessment.reason === 'ambiguous') {
+    return tr(
+      'More than one outdoor approval flow is active. Choose one before saving “require approval”, or turn approval off. Code: OUTDOOR_APPROVAL_FLOW_REQUIRED.',
+      '有多条启用的外勤审批流。保存「需审批」前请指定一条，或关闭审批。代码：OUTDOOR_APPROVAL_FLOW_REQUIRED。',
+    )
+  }
+  if (assessment.reason === 'missing') {
+    return tr(
+      'The selected approval flow is not an active outdoor_punch flow. Choose an active flow or turn approval off. Code: OUTDOOR_APPROVAL_FLOW_REQUIRED.',
+      '所选审批流不是启用中的 outdoor_punch 流程。请改选启用流程，或关闭审批。代码：OUTDOOR_APPROVAL_FLOW_REQUIRED。',
+    )
+  }
+  return tr(
+    'Require approval cannot be saved until exactly one active outdoor_punch flow exists, or you choose one. Code: OUTDOOR_APPROVAL_FLOW_REQUIRED.',
+    '在仅有一条启用的 outdoor_punch 审批流（或已指定一条）之前，不能保存「需审批」。代码：OUTDOOR_APPROVAL_FLOW_REQUIRED。',
+  )
+})
 const scheduleDispatchApprovalFlowOptions = computed(() =>
   approvalFlows.value.filter((flow) => flow.requestType === 'schedule_dispatch' && flow.isActive),
 )
@@ -22084,6 +22121,7 @@ async function loadAuditLogs(page: number) {
 // different error — so a stale note form never lingers across attempts.
 function resetPunchOutdoorNote() {
   punchOutdoorNoteRequired.value = false
+  punchOutdoorPhotoRequired.value = false
   punchOutdoorNoteEventType.value = null
   punchOutdoorNoteDraft.value = ''
 }
@@ -22108,13 +22146,16 @@ async function runPostPunchRefresh(task: () => Promise<unknown>): Promise<void> 
   }
 }
 
-async function punch(eventType: PunchEventType, retryNote?: string) {
+async function punch(eventType: PunchEventType, retryNoteOrEvidence?: string | PunchEvidenceExtras) {
   // Check before touching the unsaved note as well as at the final HTTP send.
   try { attendanceSessionGuard.assertCurrent() } catch { return }
   punching.value = true
-  // A fresh direct punch (not a G2 note retry) starts clean; the retry call
-  // itself (retryNote set) must NOT clear the form it is trying to resolve.
-  if (typeof retryNote !== 'string') {
+  const evidence: PunchEvidenceExtras | null = typeof retryNoteOrEvidence === 'string'
+    ? { note: retryNoteOrEvidence }
+    : retryNoteOrEvidence ?? null
+  // A fresh direct punch starts clean; a note/photo retry must NOT clear the
+  // draft it is trying to send.
+  if (!evidence) {
     resetPunchOutdoorNote()
   }
   // Punch button release (fix/attendance-punch-button-release, 2026-08-21):
@@ -22132,11 +22173,14 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
       selfServiceRuleTimezone(),
       orgValue,
     )
-    // Hard boundary (design-lock §4): no geolocation collected, no injected
-    // meta.outdoor — the only extra field ever sent is the backend-accepted
-    // meta.note string, and only as part of a G2 user-initiated retry.
+    // No geolocation and no injected meta.outdoor. A retry may add meta.note
+    // and/or photoFileId — both already accepted by the punch schema.
     const payload: PunchRetryBasePayload | PunchRetryWithNotePayload =
-      typeof retryNote === 'string' ? buildPunchRetryWithNotePayload(basePayload, retryNote) : basePayload
+      evidence
+        ? (typeof retryNoteOrEvidence === 'string'
+          ? buildPunchRetryWithNotePayload(basePayload, retryNoteOrEvidence)
+          : buildPunchEvidencePayload(basePayload, evidence))
+        : basePayload
     const response = await apiFetch('/api/attendance/punch', {
       method: 'POST',
       body: JSON.stringify(payload)
@@ -22167,9 +22211,17 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
     if (errorOutcome?.kind === 'noteRequired') {
       // G2: enum-strict — only this exact code opens the inline note form.
       punchOutdoorNoteRequired.value = true
+      punchOutdoorPhotoRequired.value = false
       punchOutdoorNoteEventType.value = eventType
       // source: 'punch' — employee-overview task-first design-lock §4.2 row 1
       // ("actionable punch failure") reads this via punchFailureActive.
+      setStatus(errorOutcome.message, 'error', { code: errorOutcome.code }, 'punch')
+    } else if (errorOutcome?.showPhotoRetry) {
+      // #5977: photo is collected here and uploaded, then the punch is retried
+      // with photoFileId. Keep any note already entered for that retry.
+      punchOutdoorNoteRequired.value = false
+      punchOutdoorPhotoRequired.value = true
+      punchOutdoorNoteEventType.value = eventType
       setStatus(errorOutcome.message, 'error', { code: errorOutcome.code }, 'punch')
     } else if (errorOutcome?.kind === 'locationRestricted') {
       // G3: a calibrated dead-end — no retry action (a retry would fail the
@@ -22201,6 +22253,35 @@ async function retryPunchWithOutdoorNote() {
   const note = punchOutdoorNoteDraft.value.trim()
   if (!note) return
   await punch(eventType, note)
+}
+
+async function retryPunchWithOutdoorPhoto(file: File) {
+  const eventType = punchOutdoorNoteEventType.value
+  if (!eventType || !(file instanceof File)) return
+  try { attendanceSessionGuard.assertCurrent() } catch { return }
+  punching.value = true
+  let photoFileId = ''
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const response = await apiFetch('/api/files/upload', { method: 'POST', body: form })
+    const data = await response.json().catch(() => null) as { file?: { id?: string } } | null
+    photoFileId = String(data?.file?.id || '').trim()
+    if (!response.ok || !photoFileId) {
+      throw createApiError(response, data, tr('Failed to upload outdoor punch photo', '外勤打卡照片上传失败'))
+    }
+  } catch (error: any) {
+    if (!attendanceSessionGuard.isCurrent()) return
+    setStatusFromError(error, tr('Failed to upload outdoor punch photo', '外勤打卡照片上传失败'), 'refresh', 'punch')
+    return
+  } finally {
+    punching.value = false
+  }
+  const note = punchOutdoorNoteDraft.value.trim()
+  await punch(eventType, {
+    ...(note ? { note } : {}),
+    photoFileId,
+  })
 }
 
 async function loadSummary() {
@@ -24423,11 +24504,21 @@ async function saveMultiShiftDay() {
 }
 
 async function saveOutdoorApproval() {
+  const assessment = outdoorApprovalSaveAssessment.value
+  if (!assessment.ok) {
+    setStatus(
+      outdoorApprovalBlockedMessage.value || tr('Failed to save outdoor approval', '保存外勤审批失败'),
+      'error',
+      { code: assessment.code || 'OUTDOOR_APPROVAL_FLOW_REQUIRED' },
+      null,
+    )
+    return
+  }
   settingsLoading.value = true
   try {
     // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings.
-    // requireApproval=false ⇒ no change to existing punching. requirePhoto only takes effect on outdoor
-    // candidates (see punchOutcome.ts / UI-P0 #3806 §4 — the web hero-punch flow never produces one).
+    // requireApproval=false always saves. requireApproval=true is refused here and on the server
+    // unless an outdoor_punch flow resolves (#5961).
     const payload = {
       punchPolicy: {
         outdoor: {
@@ -25070,6 +25161,7 @@ interface AttendanceSelfRulesData {
     unscheduledMode?: string | null
     outdoorApprovalRequired?: boolean | null
     outdoorNoteRequired?: boolean | null
+    outdoorPhotoRequired?: boolean | null
     merge?: {
       internalWinsOnIn?: boolean | null
       externalWinsOnOut?: boolean | null
@@ -25111,6 +25203,8 @@ const selfRulesWorkWindowSummary = computed(() => {
   const window = start && end ? `${start}-${end}` : tr('Default rule', '默认规则')
   return timezone ? `${window} · ${timezone}` : window
 })
+
+const selfRulesOutdoorPhotoRequired = computed(() => selfRulesData.value?.punchPolicy?.outdoorPhotoRequired === true)
 
 const selfRulesPunchPolicySummary = computed(() => {
   const policy = selfRulesData.value?.punchPolicy

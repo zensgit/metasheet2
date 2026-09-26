@@ -5418,7 +5418,7 @@ describe('Attendance admin regressions', () => {
     expect(rows[0]?.textContent || '').toContain('dingtalk_recipient_not_bound')
   })
 
-  it('loads punchPolicy.outdoor into the card and PUTs ONLY { punchPolicy: { outdoor } } (flow id round-trips)', async () => {
+  it('loads punchPolicy.outdoor into the card and refuses to save a flow id that is not an active outdoor_punch flow', async () => {
     attendanceSettingsData = {
       punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
     }
@@ -5440,17 +5440,40 @@ describe('Attendance admin regressions', () => {
 
     const saveButton = container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')
     expect(saveButton).toBeTruthy()
+    // flow-out-7 is not an active outdoor_punch flow, so requireApproval cannot be saved (#5961).
+    expect(container!.querySelector('[data-outdoor="approval-blocked"]')?.textContent).toContain('OUTDOOR_APPROVAL_FLOW_REQUIRED')
     saveButton!.click()
     await flushUi(6)
+    const settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toEqual([])
+  })
 
-    // EXACTLY { punchPolicy: { outdoor: { requireApproval, requireNote, requirePhoto, approvalFlowId } } }:
-    // no orgId, no sibling settings. toEqual (not toMatchObject) so any leak fails.
+  it('PUTs ONLY { punchPolicy: { outdoor } } when the selected flow is an active outdoor_punch flow', async () => {
+    attendanceApprovalFlowsData = [
+      { id: 'flow-out-7', name: 'Outdoor Active', requestType: 'outdoor_punch', isActive: true, steps: [] },
+    ]
+    attendanceSettingsData = {
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    expect(container!.querySelector('[data-outdoor="approval-blocked"]')).toBeNull()
+    container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
+    await flushUi(6)
+
     expect(lastSettingsPutBody()).toEqual({
       punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
     })
   })
 
   it('toggling the outdoor require-photo checkbox sends requirePhoto: true in the save payload', async () => {
+    attendanceApprovalFlowsData = [
+      { id: 'flow-out-7', name: 'Outdoor Active', requestType: 'outdoor_punch', isActive: true, steps: [] },
+    ]
     attendanceSettingsData = {
       punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
     }
@@ -5524,7 +5547,7 @@ describe('Attendance admin regressions', () => {
     })
   })
 
-  it('enabling outdoor approval from off PUTs requireApproval/requireNote=true + auto (empty) flow', async () => {
+  it('enabling outdoor approval with no active outdoor flow refuses the save', async () => {
     attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } } }
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
@@ -5538,12 +5561,62 @@ describe('Attendance admin regressions', () => {
     requireNote!.checked = true
     requireNote!.dispatchEvent(new Event('change'))
     await flushUi(2)
+    expect(container!.querySelector('[data-outdoor="approval-blocked"]')?.textContent).toContain('OUTDOOR_APPROVAL_FLOW_REQUIRED')
+    container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
+    await flushUi(6)
+
+    const settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toEqual([])
+  })
+
+  it('enabling outdoor approval with exactly one active flow PUTs requireApproval and an empty flow id', async () => {
+    attendanceApprovalFlowsData = [
+      { id: 'flow-out-only', name: 'Only Outdoor', requestType: 'outdoor_punch', isActive: true, steps: [] },
+    ]
+    attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } } }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const requireApproval = container!.querySelector<HTMLInputElement>('[data-outdoor="require-approval"]')
+    const requireNote = container!.querySelector<HTMLInputElement>('[data-outdoor="require-note"]')
+    requireApproval!.checked = true
+    requireApproval!.dispatchEvent(new Event('change'))
+    requireNote!.checked = true
+    requireNote!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    expect(container!.querySelector('[data-outdoor="approval-blocked"]')).toBeNull()
     container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
     await flushUi(6)
 
     expect(lastSettingsPutBody()).toEqual({
       punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: '' } },
     })
+  })
+
+  it('enabling outdoor approval with two active flows and no chosen id refuses the save', async () => {
+    attendanceApprovalFlowsData = [
+      { id: 'flow-out-a', name: 'Outdoor A', requestType: 'outdoor_punch', isActive: true, steps: [] },
+      { id: 'flow-out-b', name: 'Outdoor B', requestType: 'outdoor_punch', isActive: true, steps: [] },
+    ]
+    attendanceSettingsData = { punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } } }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const requireApproval = container!.querySelector<HTMLInputElement>('[data-outdoor="require-approval"]')
+    requireApproval!.checked = true
+    requireApproval!.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    expect(container!.querySelector('[data-outdoor="approval-blocked"]')?.textContent).toContain('OUTDOOR_APPROVAL_FLOW_REQUIRED')
+    container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
+    await flushUi(6)
+    const settingsPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(settingsPuts).toEqual([])
   })
 
   it('disabling requireApproval PUTs requireApproval=false (default-off, no regression)', async () => {
