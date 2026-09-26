@@ -163,6 +163,8 @@ function fakeDb(rows) {
     async select() { return [] },
     async insertOne() { return null },
     async updateRow() { return null },
+    // Required by the store since the external-system delete lock protocol; read-only here.
+    async selectOneForKeyShare(_table, where) { return { id: where.id, tenant_id: where.tenant_id } },
     async transaction(fn) { return fn(this) },
   }
 }
@@ -1865,6 +1867,10 @@ function attackerSeedPool() {
     select: async () => [],
     insertOne: async () => ({}),
     updateRow: async () => ({}),
+    // The store requires the writer's half of the external-system delete lock protocol at
+    // construction; without this key no call in the pool can form a store and the seventh brand
+    // goes invisible again (the same failure mode round 6 had for the whole shape).
+    selectOneForKeyShare: async () => null,
     transaction: async (fn) => fn(fakeDb),
   })
   return [
@@ -2641,11 +2647,15 @@ function exportSurfacesArePinned() {
   // review B1a-1 P2) that a live save path must not bind to another module's private/test
   // surface. It is a PURE FUNCTION of its argument — a key derivation, not a granter — so the
   // "checker, never a granter" property above is unchanged. `__internals` keeps its alias.
+  // DELIBERATE PIN UPDATE (external-system delete lock protocol): `SYSTEM_NOT_FOUND_CODE` is the
+  // S1-shaped refusal code `saveVersion` raises when the system it names is gone once the KEY SHARE
+  // lock is held. A string constant — a checker's vocabulary, never a granter.
   assert.deepEqual(keySet(storeModule), [
     'ReadSourceConfigConflictError',
     'ReadSourceConfigNotApprovedError',
     'ReadSourceConfigNotFoundError',
     'ReadSourceConfigValidationError',
+    'SYSTEM_NOT_FOUND_CODE',
     '__internals',
     'contentKeyFor',
     'createReadSourceConfigStore',

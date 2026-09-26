@@ -60,6 +60,15 @@
 //   M-3 judge 42P01 by message prose  -> B-06 flips to a propagated error (zh_CN server locale)
 //   M-4 drop the 073 count            -> B-12 flips to a successful delete
 //   M-5 drop 073's status filter      -> B-13 flips to 409 (terminal RETIRED read as a live pointer)
+//   M-6 ignore the pre-transaction absence probe (count the missing tables INSIDE the FOR UPDATE
+//       transaction)                  -> B-06 flips to a 25P02 refusal, row survives. The 42P01 is
+//       still swallowed by the count's tolerance, but on PostgreSQL an error inside a transaction
+//       ABORTS it, so the DELETE that follows fails 25P02 — the tolerated case silently becomes a
+//       refusal. That is why the absence set is learned by an autocommit probe BEFORE the
+//       transaction, and why this fake's transaction handle models the abort (see createMockDb).
+//
+// COMPLETION MARKER. A promise nobody settles drains the event loop and node exits 0 having printed
+// nothing — a hang that reads as a pass. This file only exits 0 when main() reached its end.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -86,7 +95,10 @@ function compileWithSource(source) {
 }
 
 function mutatedRegistryFactory(label, replacements) {
-  const source = fs.readFileSync(MODULE_PATH, 'utf8')
+  // CRLF-normalized: on a Windows checkout with core.autocrlf the working-tree file carries \r\n,
+  // and a multi-line anchor written with \n would report "anchor missing" — a local-only red that
+  // says nothing about the mutation. Anchors are authored against the LF form the repository stores.
+  const source = fs.readFileSync(MODULE_PATH, 'utf8').replace(/\r\n/g, '\n')
   let patched = source
   for (const [from, to] of replacements) {
     assert.ok(patched.includes(from), `${label}: mutation anchor is missing, the mutation would be vacuous`)
@@ -130,48 +142,104 @@ function createMockDb() {
     })
   }
 
-  return {
-    countCalls,
-    rowsOf,
-    insertRaw(table, row) { rowsOf(table).push(row) },
-    failCountWith(table, error) { countErrors.set(table, error) },
-    async selectOne(table, where) {
-      return rowsOf(table).find(row => matchesWhere(row, where)) || null
-    },
-    async select(table, options = {}) {
-      const filtered = rowsOf(table).filter(row => matchesWhere(row, options.where || {}))
-      const offset = options.offset || 0
-      return filtered.slice(offset, offset + (options.limit || 1000))
-    },
-    async insertOne(table, row) {
-      const stored = {
-        ...row,
-        created_at: row.created_at || '2026-09-20T00:00:00.000Z',
-        updated_at: row.updated_at || '2026-09-20T00:00:00.000Z',
-      }
-      rowsOf(table).push(stored)
-      return [stored]
-    },
-    async updateRow(table, set, where) {
-      const row = rowsOf(table).find(candidate => matchesWhere(candidate, where))
-      if (!row) return []
-      Object.assign(row, set)
-      return [row]
-    },
-    async deleteRows(table, where) {
-      const rows = rowsOf(table)
-      const before = rows.length
-      for (let index = rows.length - 1; index >= 0; index -= 1) {
-        if (matchesWhere(rows[index], where)) rows.splice(index, 1)
-      }
-      return before - rows.length
-    },
-    async countRows(table, where) {
-      countCalls.push([table, { ...where }])
-      if (countErrors.has(table)) throw countErrors.get(table)
-      return rowsOf(table).filter(row => matchesWhere(row, where)).length
-    },
+  // `countCalls` entries are `[table, where, inTransaction]`. Since the delete lock protocol the
+  // guard counts TWICE per table: once as an autocommit PROBE (only "does the table exist" is
+  // kept — see external-systems.cjs probeAbsentDependentTables) and once, authoritatively, INSIDE
+  // the FOR UPDATE transaction. The B-02 / B-12 filter-shape assertions below read the
+  // in-transaction call, because that is the one whose result decides the delete.
+  //
+  // THE TRANSACTION HANDLE IS ONE CONNECTION. Its statements run one at a time in issue order, and
+  // once any statement has thrown the transaction is ABORTED: every later statement throws
+  // SQLSTATE 25P02 until the transaction ends. Without this, a 42P01 raised INSIDE the transaction
+  // (a mutant that counts a missing table under the lock) would be swallowed by the count's
+  // tolerance and the in-memory delete would go through — green here, 25P02 on PostgreSQL. The
+  // autocommit handle is unaffected: each statement there is its own transaction.
+  function handle(inTransaction, txState = null) {
+    function statement(run) {
+      if (!inTransaction) return run()
+      const next = txState.chain.then(async () => {
+        if (txState.aborted) {
+          throw sqlError('错误: 当前事务被终止, 事务块结束之前的查询被忽略', '25P02')
+        }
+        try {
+          return await run()
+        } catch (error) {
+          txState.aborted = true
+          throw error
+        }
+      })
+      txState.chain = next.then(() => undefined, () => undefined)
+      return next
+    }
+    return {
+      countCalls,
+      rowsOf,
+      insertRaw(table, row) { rowsOf(table).push(row) },
+      failCountWith(table, error) { countErrors.set(table, error) },
+      selectOne(table, where) {
+        return statement(async () => rowsOf(table).find(row => matchesWhere(row, where)) || null)
+      },
+      selectOneForUpdate(table, where) {
+        return statement(async () => rowsOf(table).find(row => matchesWhere(row, where)) || null)
+      },
+      select(table, options = {}) {
+        return statement(async () => {
+          const filtered = rowsOf(table).filter(row => matchesWhere(row, options.where || {}))
+          const offset = options.offset || 0
+          return filtered.slice(offset, offset + (options.limit || 1000))
+        })
+      },
+      insertOne(table, row) {
+        return statement(async () => {
+          const stored = {
+            ...row,
+            created_at: row.created_at || '2026-09-20T00:00:00.000Z',
+            updated_at: row.updated_at || '2026-09-20T00:00:00.000Z',
+          }
+          rowsOf(table).push(stored)
+          return [stored]
+        })
+      },
+      updateRow(table, set, where) {
+        return statement(async () => {
+          const row = rowsOf(table).find(candidate => matchesWhere(candidate, where))
+          if (!row) return []
+          Object.assign(row, set)
+          return [row]
+        })
+      },
+      deleteRows(table, where) {
+        return statement(async () => {
+          const rows = rowsOf(table)
+          const before = rows.length
+          for (let index = rows.length - 1; index >= 0; index -= 1) {
+            if (matchesWhere(rows[index], where)) rows.splice(index, 1)
+          }
+          return before - rows.length
+        })
+      },
+      countRows(table, where) {
+        return statement(async () => {
+          countCalls.push([table, { ...where }, inTransaction])
+          if (countErrors.has(table)) throw countErrors.get(table)
+          return rowsOf(table).filter(row => matchesWhere(row, where)).length
+        })
+      },
+      async transaction(callback) {
+        return callback(handle(true, { chain: Promise.resolve(), aborted: false }))
+      },
+      // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+      // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+      // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+      // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+      // real-Postgres suite.
+      // It still occupies the connection as a statement (so it is serialized and aborted like one).
+      setTransactionIsolationLevel() {
+        return statement(async () => undefined)
+      },
+    }
   }
+  return handle(false)
 }
 
 async function setupSystem({ factory = createExternalSystemRegistry, workspaceId = null, id = 'sys_bound' } = {}) {
@@ -272,8 +340,8 @@ async function testStockPrepBindingBlocksDelete() {
   assertSurvives(tenantWide.db, 'B-02')
 
   // The filter that was actually sent carries the tenant and the system id, and NO workspace key.
-  const bindingCounts = tenantWide.db.countCalls.filter(([table]) => table === STOCK_PREP_BINDING_TABLE)
-  assert.equal(bindingCounts.length, 1, 'B-02: the 079 table is counted exactly once per delete')
+  const bindingCounts = tenantWide.db.countCalls.filter(([table, , inTransaction]) => table === STOCK_PREP_BINDING_TABLE && inTransaction)
+  assert.equal(bindingCounts.length, 1, 'B-02: the 079 table is counted exactly once INSIDE the delete transaction')
   assert.deepEqual(
     Object.keys(bindingCounts[0][1]).sort(),
     ['external_system_id', 'tenant_id'],
@@ -321,6 +389,16 @@ async function testAbsentTablesDoNotBlockDelete() {
   assert.equal(allowed.error, null, 'B-06: a deployment without 079/062/073 keeps deleting as before')
   assert.equal(allowed.result.deleted, true, 'B-06: the delete completes')
   assert.equal(absent.db.rowsOf('integration_external_systems').length, 0, 'B-06: the system row is gone')
+  // WHERE the absence was learned: each missing table was counted exactly once, in AUTOCOMMIT (the
+  // probe), and never inside the transaction — a 42P01 in there would abort the transaction and turn
+  // this tolerated case into a 25P02 refusal (M-6 executes exactly that).
+  const absentTables = [STOCK_PREP_BINDING_TABLE, READ_SOURCE_CONFIG_TABLE, SEALED_EXPORT_BINDING_TABLE]
+  for (const table of absentTables) {
+    const probes = absent.db.countCalls.filter(([counted, , inTransaction]) => counted === table && !inTransaction)
+    const inside = absent.db.countCalls.filter(([counted, , inTransaction]) => counted === table && inTransaction)
+    assert.ok(probes.length >= 1, `B-06: ${table} was probed in autocommit`)
+    assert.equal(inside.length, 0, `B-06: ${table} is NOT counted inside the FOR UPDATE transaction once the probe reported it absent`)
+  }
 }
 
 // --- B-07 / B-08: every other failure is fail-closed -----------------------------
@@ -375,8 +453,8 @@ async function testSealedExportBindingLifecycle() {
   assertSurvives(scoped.db, 'B-12')
 
   // The filter that was actually sent: tenant + system id + status, and NO workspace key.
-  const sealedCounts = scoped.db.countCalls.filter(([table]) => table === SEALED_EXPORT_BINDING_TABLE)
-  assert.equal(sealedCounts.length, 1, 'B-12: the 073 table is counted exactly once per delete')
+  const sealedCounts = scoped.db.countCalls.filter(([table, , inTransaction]) => table === SEALED_EXPORT_BINDING_TABLE && inTransaction)
+  assert.equal(sealedCounts.length, 1, 'B-12: the 073 table is counted exactly once INSIDE the delete transaction')
   assert.deepEqual(
     Object.keys(sealedCounts[0][1]).sort(),
     ['external_system_id', 'status', 'tenant_id'],
@@ -490,8 +568,10 @@ async function testMutationsFlipTheNamedCases() {
 
   // M-5 — the status key is dropped from the 073 filter, so terminal RETIRED history counts as a
   // live pointer and keeps the system undeletable forever.
+  // Anchor is the 073 entry of `dependentTableQueries` (the one place the status filter is built
+  // since the delete lock protocol moved the query shapes out of the count function).
   const sealedStatusIgnored = mutatedRegistryFactory('M-5', [
-    ['        status: LIVE_SEALED_EXPORT_BINDING_STATUS,\n', ''],
+    ['        external_system_id: id,\n        status: LIVE_SEALED_EXPORT_BINDING_STATUS,\n      }],', '        external_system_id: id,\n      }],'],
   ])
   const m5 = await setupSystem({ factory: sealedStatusIgnored })
   m5.db.insertRaw(SEALED_EXPORT_BINDING_TABLE, sealedExportBinding({ binding_id: 'sealed_retired', status: 'RETIRED' }))
@@ -502,6 +582,26 @@ async function testMutationsFlipTheNamedCases() {
     'M-5: counting RETIRED refuses a delete B-13 allows',
   )
   assert.equal(m5.db.rowsOf('integration_external_systems').length, 1, 'M-5: the mutant blocks the delete')
+
+  // M-6 — the pre-transaction absence probe is ignored: the missing tables are counted INSIDE the
+  // FOR UPDATE transaction. The 42P01 is still swallowed by countDependentRows, but the failed
+  // statement has ABORTED the transaction, so the next statement (the DELETE, or a later count on
+  // this one connection) fails 25P02 and the delete that B-06 allows is refused. On PostgreSQL this
+  // is exactly what happens (real-DB suite P-ABSENT records it against this mutant); the fake's
+  // transaction handle models the abort so this arm can go red here, in CI, without a database.
+  const absentTablesCountedInTransaction = mutatedRegistryFactory('M-6', [
+    ['if (absentTables.has(table)) return 0', 'if (false) return 0'],
+  ])
+  const m6 = await setupSystem({ factory: absentTablesCountedInTransaction })
+  m6.db.failCountWith(STOCK_PREP_BINDING_TABLE, sqlError('错误: 关系 "integration_stock_prep_source_binding" 不存在', '42P01'))
+  m6.db.failCountWith(READ_SOURCE_CONFIG_TABLE, sqlError('错误: 关系 "integration_read_source_configs" 不存在', '42P01'))
+  m6.db.failCountWith(SEALED_EXPORT_BINDING_TABLE, sqlError('错误: 关系 "integration_sealed_export_stock_prep_bindings" 不存在', '42P01'))
+  const m6Result = await deleteAndCatch(m6.registry, {})
+  assert.ok(m6Result.error, 'M-6: counting a missing table inside the transaction makes the delete fail — B-06 is load-bearing')
+  assert.equal(m6Result.error.code, '25P02', 'M-6: the 42P01 aborted the transaction; the statement after it fails 25P02')
+  assert.equal(m6.db.rowsOf('integration_external_systems').length, 1, 'M-6: the mutant refuses a delete B-06 allows')
+  const m6Inside = m6.db.countCalls.filter(([table, , inTransaction]) => inTransaction && table === STOCK_PREP_BINDING_TABLE)
+  assert.equal(m6Inside.length, 1, 'M-6: the mutant really counted the missing table inside the transaction')
 
   // The unpatched module is untouched by all of the above.
   const intact = await setupSystem({})
@@ -519,8 +619,17 @@ async function main() {
   await testForeignRowsAreNeverCounted()
   await testPipelineConflictWireShapeUnchanged()
   await testMutationsFlipTheNamedCases()
+  completed = true
   console.log('✓ external-systems delete guard: 079/062/073 second-order references counted')
 }
+
+let completed = false
+process.on('exit', (code) => {
+  if (code === 0 && !completed) {
+    console.error('✗ external-systems-delete-dependent-references did NOT run to completion — main() was still pending when the event loop drained (a hang, not a pass)')
+    process.exitCode = 1
+  }
+})
 
 main().catch((error) => {
   console.error('✗ external-systems-delete-dependent-references FAILED')

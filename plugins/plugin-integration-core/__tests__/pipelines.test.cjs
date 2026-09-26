@@ -54,6 +54,12 @@ function createMockDb() {
       calls.push(['selectOne', table, { ...where }])
       return tableRows(table).find(row => matchesWhere(row, where)) || null
     },
+    // Writer's half of the external-system delete lock protocol: the endpoint check reads the
+    // external system FOR KEY SHARE on the transaction handle. Same lookup as selectOne here.
+    async selectOneForKeyShare(table, where) {
+      calls.push(['selectOneForKeyShare', table, { ...where }])
+      return tableRows(table).find(row => matchesWhere(row, where)) || null
+    },
     async insertOne(table, row) {
       calls.push(['insertOne', table, { ...row }])
       const stored = {
@@ -118,6 +124,12 @@ function createMockDb() {
       calls.push(['transaction'])
       return callback(this)
     },
+    // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+    // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+    // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+    // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+    // real-Postgres suite.
+    async setTransactionIsolationLevel() {},
   }
 
   return db
