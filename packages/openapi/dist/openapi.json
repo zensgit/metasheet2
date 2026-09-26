@@ -21362,6 +21362,79 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "The batch is not an active member of the authenticated organization. details are values-free: error code, rejected count, and request indexes. They do not echo userId.\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message",
+                        "details"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "enum": [
+                            "USER_NOT_IN_ORG"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "details": {
+                          "type": "array",
+                          "minItems": 1,
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "code",
+                              "rejectedCount",
+                              "indexes"
+                            ],
+                            "additionalProperties": false,
+                            "properties": {
+                              "code": {
+                                "type": "string",
+                                "enum": [
+                                  "USER_NOT_IN_ORG"
+                                ]
+                              },
+                              "rejectedCount": {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              "indexes": {
+                                "type": "array",
+                                "items": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

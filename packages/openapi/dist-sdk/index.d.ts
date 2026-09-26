@@ -3906,6 +3906,29 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description The batch is not an active member of the authenticated organization. details are values-free: error code, rejected count, and request indexes. They do not echo userId. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: false;
+                            error: {
+                                /** @enum {string} */
+                                code: "USER_NOT_IN_ORG";
+                                message: string;
+                                details: {
+                                    /** @enum {string} */
+                                    code: "USER_NOT_IN_ORG";
+                                    rejectedCount: number;
+                                    indexes: number[];
+                                }[];
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;

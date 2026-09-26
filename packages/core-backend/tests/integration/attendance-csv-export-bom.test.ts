@@ -76,7 +76,7 @@ describeDb('attendance CSV export BOM (real server, raw bytes)', () => {
     const address = server.getAddress()
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=bom-admin&roles=admin&perms=${encodeURIComponent('attendance:import,attendance:admin')}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=bom-admin&tenantId=default&roles=admin&perms=${encodeURIComponent('attendance:import,attendance:admin')}`)
     token = (res.body as { token?: string } | undefined)?.token ?? ''
   })
 
