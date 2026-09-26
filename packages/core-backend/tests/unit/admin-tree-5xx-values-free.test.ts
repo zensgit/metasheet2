@@ -36,19 +36,28 @@
  *      function's `return`, a relative `import()` / `require()` — and so is a router module that such
  *      an argument reaches only THROUGH a function: an inline closure or same-file function it is or
  *      calls, whose body refers to a binding that resolves to a Router module
- *      (`(req, res, next) => sub(req, res, next)`). A "Router module" calls `Router()` itself, or
- *      re-exports from one; a Router module that a discovered module RE-EXPORTS (`export … from`,
- *      `export *`, an export of an imported binding or of a top-level alias of one) is followed too,
- *      so a router mounted through a barrel is scanned in the module that builds it. Two runtime
- *      checks back the static walk up, and each covers only what it says:
+ *      (`(req, res, next) => sub(req, res, next)`). A "Router module" has a call NAMED `Router`
+ *      (`Router()` / `x.Router()`) in its own source — decided by that name, not by resolving it to
+ *      express, so a router built through an aliased import (`import { Router as makeRouter }`) or
+ *      by a factory in another module is NOT one — or re-exports, transitively, from one; a Router
+ *      module that a discovered module RE-EXPORTS (`export … from`, `export *`, an export of an
+ *      imported binding, of a top-level alias of one, of a namespace member, of a relative
+ *      `require()` / awaited `import()`) is followed too, so a router mounted through a barrel is
+ *      scanned in the module that builds it. Two runtime checks back the static walk up, and each
+ *      covers only what it says:
  *        - LIVE IDENTITY cross-check: every router OBJECT that is itself a handle in the live mounted
  *          stack, at any depth — a `.use()` layer's handle or a handler inside a route layer
- *          (`layer.route.stack`) — must be a Router that a discovered module BUILT (its own
- *          `Router()`) and exports: localRouterExportNames() reads which export names those are.
- *          A router a discovered module only passes on (a barrel's `export … from`, `export *`, an
- *          imported binding exported again, also through a local alias) does NOT match that module:
- *          the module whose source the scan read did not build it. (In-place `Router()` mounts have
- *          no export and are only counted — there are none in the tree today.) Such a router mounted
+ *          (`layer.route.stack`) — must be a Router that a discovered module BUILT (the value of a
+ *          call named `Router` in its own source; by name, as above) and exports:
+ *          localRouterExportNames() reads which export names those are. A router a discovered
+ *          module only passes on (a barrel's `export … from`, `export *`, an imported binding
+ *          exported again, also through a local alias) does NOT match that module: the module whose
+ *          source the scan read did not build it. (A same-named call on something else —
+ *          `const holder = { Router: () => imported }; export default holder.Router()` — does count
+ *          as built, and then the check stays green; there is no such identifier in src/ today.)
+ *          In-place `Router()` mounts have no export and are only COUNTED — so, like any count, one
+ *          that is switched off at runtime can let one unfollowed live router through; there are
+ *          none in the tree today, and an assertion on today's tree pins that. Such a router mounted
  *          tomorrow in a way the walk cannot follow is not such an export, so that assertion turns
  *          red instead of the router silently leaving the scan. (The earlier count-only comparison
  *          could be cancelled by a static mount that is off at runtime; the earlier key, "any router
@@ -63,13 +72,16 @@
  *      NOT covered by either runtime check, and by the static walk only as described above: a router
  *      called from inside a ROUTE handler (`router.get(p, (req, res, next) => sub(req, res, next))`)
  *      when the static rule cannot resolve it (a router passed in as a parameter, read out of a
- *      container, handed to a wrapper defined in another module, or passed on by a re-export in a
- *      form the static rule does not list — e.g. inside an exported object literal). For that shape
- *      there is no guarantee, for routes that exist today or new ones.
+ *      container, handed to a wrapper defined in another module, built in a module the rule does not
+ *      recognise as a Router module — an aliased `Router` import, a factory from another module —
+ *      or passed on by a re-export in a form the static rule does not list — e.g. inside an
+ *      exported object literal, or a destructured alias `const { default: x } = ns; export { x }`).
+ *      For that shape there is no guarantee, for routes that exist today or new ones.
  *      In the discovered files, any 5xx response — `.status(S)` chained, set earlier on the same
  *      receiver (compared on the receiver's root: `res.status(S); res.json(…)`, `res.statusCode = S`,
  *      `res.status(S); res.set(…).json(…)`, `const r = res; res.status(S); r.json(…)`, and a 5xx set
- *      after a local was bound to a 4xx chain: `const r = res.status(400); r.status(500); r.json(…)`),
+ *      after a local was bound to a 4xx chain: `const r = res.status(400); r.status(500); r.json(…)`;
+ *      "earlier" / "after" are SOURCE positions, not execution order),
  *      `jsonError`, a responder's `extra` — whose arguments read `.message` / `.stack` or reference a TAINTED symbol
  *      is red. Taint starts at the caught error (also `.catch` / `.then(_, cb)` / `'error'` listener
  *      callbacks, and the first parameter of every 4-arity function, as Express decides error
@@ -80,8 +92,9 @@
  *      never flagged. What the scanner does NOT model (helpers or handlers in another module,
  *      `this.m()` / instance methods, a status set in another non-enclosing function,
  *      `.call`/`.apply`, computed member names, text built only inside a function's return, error
- *      values that do not come from the listed sources, headers, `next(err)`) is listed in its
- *      header; for the routes that exist today those shapes are pinned by layer 1's runtime probes,
+ *      values that do not come from the listed sources, headers, `next(err)`, a receiver bound other
+ *      than by a declaration's initializer) is listed in its header — the known shapes; that list is
+ *      not exhaustive; for the routes that exist today those shapes are pinned by layer 1's runtime probes,
  *      not by this layer, and for a NEW route this layer guarantees only the listed shapes.
  *
  * Mutation self-proof is built in and memory-level (no source file is written, so a parallel suite
@@ -95,7 +108,8 @@
  * scanned module (a barrel, or a scanned sub-router) merely re-exports it; the use-level
  * registration must fail on a closure-wrapped mount; the discovery, run on the real tree's source
  * with a foreign echoing router mounted in memory as a route handler, through a closure, or through
- * a re-export, must reach it and its echo; and a live router handler is swapped for the pre-change
+ * a re-export, must reach it and its echo; the discovery self-check reaches a router through each
+ * listed re-export form, also two re-export hops deep; and a live router handler is swapped for the pre-change
  * implementation and the probe's own assertion must fail on it.
  *
  * Values-free fixtures: RFC 5737 TEST-NET-3 documentation address and literal placeholder names.
@@ -1121,6 +1135,9 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     const exported = await exportedRouters(tree.files)
     // `legacy` stands for the router an UNSCANNED module builds; each source below hands it on, and
     // its namespace (what `import * as` would see) holds it. Mounted with .use() or as a route handler.
+    // `ns` is a hand-written stand-in, not a loaded module: for the `export *` shape it assumes the
+    // unscanned module exports the router under that NAMED export (`export *` does not carry a
+    // default). The key is read from `source` alone; the stand-in only supplies the value.
     const legacy = express.Router()
     const holder = express.Router()
     holder.get('/legacy-echo', legacy)
@@ -1170,7 +1187,10 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(names(`import { Router } from 'express'\nconst router = Router()\nconst alias = router\nexport { alias as sub }`)).toEqual(['sub'])
     expect(names(`import { Router } from 'express'\nlet r\nr = Router()\nexport { r }`)).toEqual(['r'])
     expect(names(`import { Router } from 'express'\nconst router: any = Router()\nrouter.extra = 1\nexport default router`)).toEqual(['default'])
-    // not counted: passed on, or ever given another value
+    // counted BY NAME, not resolved to express: any call named `Router` counts, also one that returns
+    // an imported router (no such identifier in src/ today) — a stated limit of this key, not a guarantee
+    expect(names(`import x from './m'\nconst holder = { Router: () => x }\nexport default holder.Router()`)).toEqual(['default'])
+    // not counted: passed on, ever given another value, or never given one
     for (const source of [
       `export { default as legacy } from './m'`,
       `export * from './m'`,
@@ -1187,6 +1207,7 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
       `import { Router } from 'express'\nimport xs from './m'\nlet r = Router()\nfor (r of xs) {}\nexport { r }`,
       `import { Router } from 'express'\nimport x from './m'\nexport const r = process.env.X ? Router() : x`,
       `import { Router } from 'express'\nfunction make() { return Router() }\nexport default make()`,
+      `import { Router } from 'express'\nexport let r: any`,
     ]) {
       expect({ source, names: names(source) }).toEqual({ source, names: [] })
     }
@@ -1230,7 +1251,7 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(reconcileLiveRouters(live, await exportedRouters(tree.files), tree)).not.toEqual([])
   })
 
-  it('discovery self-check: follows aliases, factories, namespace members, destructures, assignments, returns, import(), routers registered as route handlers, and routers reached through a closure or same-file function', () => {
+  it('discovery self-check: follows aliases, factories, namespace members, destructures, assignments, returns, import(), routers registered as route handlers, routers reached through a closure or same-file function, and every listed re-export form (also two hops deep)', () => {
     const subRouter = `import { Router } from 'express'\nconst r = Router()\nexport default r\nexport const make = () => Router()\n`
     const sources: Record<string, string> = {
       'root.ts': [
@@ -1262,6 +1283,11 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         `import { viaNamed } from './namedbarrel'`,
         `import { viaConst } from './constbarrel'`,
         `import sx from './sx'`,
+        `import { twoHop } from './hop1'`,
+        `import { twoHopWrapped } from './whop1'`,
+        `import { viaNs } from './nsbarrel'`,
+        `import { viaReq } from './reqbarrel'`,
+        `import viaImp from './impbarrel'`,
         `export { CONST as RE_EXPORTED_CONST } from './consts'`,
         `const router = Router()`,
         // a Router registered as a ROUTE handler (it then lives in layer.route.stack)
@@ -1292,6 +1318,15 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         `router.get('/rn', viaNamed)`,
         `router.use('/rc', viaConst)`,
         `router.use('/sx', sx)`,
+        // TRANSITIVE re-export (barrel -> barrel -> Router module): a route-method argument and a
+        // route-method closure only follow a module that IS a Router module, which takes two hops here
+        `router.get('/t2', twoHop)`,
+        `router.get('/t2w', (req: any, res: any, next: any) => twoHopWrapped(req, res, next))`,
+        // the other re-export forms reexportedSpecs lists — a namespace member, a relative require(),
+        // an awaited import() — each called from a closure, the path only the static rule sees
+        `router.get('/rq', (req: any, res: any, next: any) => viaNs(req, res, next))`,
+        `router.get('/rr', (req: any, res: any, next: any) => viaReq(req, res, next))`,
+        `router.use('/ri', (req: any, res: any, next: any) => viaImp(req, res, next))`,
         // NOT mounts: another module's plain handler on a route method; .get on a Map
         `router.get('/handler', handler)`,
         `const lookup = new Map<unknown, unknown>()`,
@@ -1351,6 +1386,18 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
       'rc.ts': subRouter,
       'sx.ts': `${subRouter}export { default as passedOn } from './sy'\n`,
       'sy.ts': subRouter,
+      'hop1.ts': `export * from './hop2'\n`,
+      'hop2.ts': `export { default as twoHop } from './hr'\n`,
+      'hr.ts': subRouter,
+      'whop1.ts': `export * from './whop2'\n`,
+      'whop2.ts': `export { default as twoHopWrapped } from './whr'\n`,
+      'whr.ts': subRouter,
+      'nsbarrel.ts': `import * as ns from './rq'\nexport const viaNs = ns.default\n`,
+      'rq.ts': subRouter,
+      'reqbarrel.ts': `export const viaReq = require('./rr').default\n`,
+      'rr.ts': subRouter,
+      'impbarrel.ts': `export default (await import('./ri')).default\n`,
+      'ri.ts': subRouter,
       'consts.ts': `export const CONST = 1\n`,
       'guard.ts': `export function guard(_req: unknown, _res: unknown, next: () => void) { next() }\n`,
       'handler.ts': `export function handler(_req: unknown, res: { json: (b: unknown) => void }) { res.json({}) }\n`,
@@ -1368,6 +1415,8 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         'a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts', 'g.ts', 'guard.ts', 'h.ts', 'i.ts', 'j.ts', 'k.ts', 'l.ts', 'm.ts', 'n.ts', 'root.ts',
         'put.ts', 'patch.ts', 'del.ts', 'opts.ts', 'head.ts', 'ci.ts', 'cr.ts', 'ur.ts',
         'barrel.ts', 'rb.ts', 'starbarrel.ts', 'rs.ts', 'aliasbarrel.ts', 'ra.ts', 'sx.ts', 'sy.ts', 'namedbarrel.ts', 'rn.ts', 'constbarrel.ts', 'rc.ts',
+        'hop1.ts', 'hop2.ts', 'hr.ts', 'whop1.ts', 'whop2.ts', 'whr.ts',
+        'nsbarrel.ts', 'rq.ts', 'reqbarrel.ts', 'rr.ts', 'impbarrel.ts', 'ri.ts',
       ].sort()
     )
     // `.use`: 8 imported sub-routers + the Router() built in place + require() + two barrels + sx; the
@@ -1377,19 +1426,24 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(tree.mounts.find((m) => m.via === 'use' && m.targets.includes('ur.ts'))?.router).toBe(true)
     // Route methods — every one of get / all / route().post / put / patch / delete / options / head —
     // follow only the Router arguments (the gate and another module's handler are not followed); a
-    // barrel that re-exports a Router module counts as one.
+    // barrel that re-exports a Router module counts as one, also two re-export hops away (hop1.ts).
     expect(tree.mounts.filter((m) => m.via === 'route' && m.router).map((m) => m.targets)).toEqual([
-      ['i.ts'], ['j.ts'], ['k.ts'], ['put.ts'], ['patch.ts'], ['del.ts'], ['opts.ts'], ['head.ts'], ['starbarrel.ts'], ['namedbarrel.ts'],
+      ['i.ts'], ['j.ts'], ['k.ts'], ['put.ts'], ['patch.ts'], ['del.ts'], ['opts.ts'], ['head.ts'], ['starbarrel.ts'], ['namedbarrel.ts'], ['hop1.ts'],
     ])
     expect(tree.mounts.filter((m) => m.via === 'route').flatMap((m) => m.targets)).not.toContain('guard.ts')
     // Reached only through a function (not a layer handle, so invisible to the live cross-check).
     expect(tree.mounts.filter((m) => m.wrapped.length > 0).map((m) => m.wrapped)).toEqual([
-      ['l.ts'], ['m.ts'], ['n.ts'], ['ci.ts'], ['cr.ts'], ['aliasbarrel.ts'],
+      ['l.ts'], ['m.ts'], ['n.ts'], ['ci.ts'], ['cr.ts'], ['aliasbarrel.ts'], ['whop1.ts'], ['nsbarrel.ts'], ['reqbarrel.ts'], ['impbarrel.ts'],
     ])
-    // Re-exports of Router modules are followed to the module that builds the router — from a barrel,
+    // Re-exports of Router modules are followed to the module that builds the router — from a barrel
+    // (also through a second barrel, and through a namespace member / require() / awaited import()),
     // and from a discovered module that is itself a router; a re-exported non-router (consts.ts) is not.
     expect([...tree.reexports].map((r) => `${r.from}->${r.to}`).sort()).toEqual(
-      ['aliasbarrel.ts->ra.ts', 'barrel.ts->rb.ts', 'constbarrel.ts->rc.ts', 'namedbarrel.ts->rn.ts', 'starbarrel.ts->rs.ts', 'sx.ts->sy.ts'].sort()
+      [
+        'aliasbarrel.ts->ra.ts', 'barrel.ts->rb.ts', 'constbarrel.ts->rc.ts', 'namedbarrel.ts->rn.ts', 'starbarrel.ts->rs.ts', 'sx.ts->sy.ts',
+        'hop1.ts->hop2.ts', 'hop2.ts->hr.ts', 'whop1.ts->whop2.ts', 'whop2.ts->whr.ts',
+        'nsbarrel.ts->rq.ts', 'reqbarrel.ts->rr.ts', 'impbarrel.ts->ri.ts',
+      ].sort()
     )
     // Only the Router() built in place is an in-place mount (the one kind the live check can only count).
     expect(tree.mounts.filter((m) => m.inPlace).map((m) => m.targets)).toEqual([['root.ts']])
@@ -1505,8 +1559,9 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(flaggedIn(`const out = res.status(400); res.statusCode = 500; out.json({ error: String(error) })`)).toBe(1)
     expect(flaggedIn(`const out = res.status(400); out.writeHead(500); out.end(String(error))`)).toBe(1)
     expect(flaggedIn(`const a = res.status(400); const b = a; b.status(500); b.json({ error: String(error) })`)).toBe(1)
-    // flagged: split status in an ENCLOSING function, body in an inner callback
+    // flagged: split status in an ENCLOSING function, body in an inner callback — also after a bound 4xx chain
     expect(flaggedIn(`res.status(500); [1].forEach(() => res.json({ error: String(error) }))`)).toBe(1)
+    expect(flaggedIn(`const out = res.status(400); out.status(500); [1].forEach(() => out.json({ error: String(error) }))`)).toBe(1)
     // flagged: a function DECLARATION that captures the caught error
     expect(flaggedIn(`function detail() { return String(error) } res.status(500).json({ error: detail() })`)).toBe(1)
     // flagged: every listed container writer
@@ -1577,6 +1632,9 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     // a bound 4xx chain with no later 5xx setter, or with the 5xx set BEFORE the 4xx (overridden by it)
     expect(flaggedIn(`const out = res.status(400); out.json({ error: String(error) })`)).toBe(0)
     expect(flaggedIn(`res.status(500); const out = res.status(400); out.json({ error: String(error) })`)).toBe(0)
+    // a setter placed (in the source) AFTER the body call does not pair with it
+    expect(flaggedIn(`res.json({ error: String(error) }); res.status(500)`)).toBe(0)
+    expect(flaggedIn(`const out = res.status(400); out.json({ error: String(error) }); out.status(500)`)).toBe(0)
     // Express arity 3 (`next` has a default, so fn.length === 3): Express never calls it as an error
     // handler, its first argument is the request
     expect(flaggedFile(`function mw(err: any, req: any, res: any, next: any = () => undefined) { res.status(500).json({ error: String(err) }) }`)).toBe(0)

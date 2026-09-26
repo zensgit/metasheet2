@@ -22,11 +22,13 @@
  *     over-approximation), and so are locals bound straight to it or to such a chain (`const r = res`,
  *     `const r = res.set('X', v)`, `const r = res.status(400)`, chains of such bindings); the root is
  *     then compared by symbol. A status found down the chain decides alone when it is a 5xx or is
- *     chained straight onto the body call (`res.status(200).json(…)`: nothing runs in between); when
- *     it is a NON-5xx reached through a local's binding (`const out = res.status(400)`), a separate
- *     setter on the same receiver placed after that status call and before the body counts too, and
- *     the worst one decides (`const out = res.status(400); out.status(500); out.json(…)`, also
- *     `res.status(500)`, `res.statusCode = 500`, `out.writeHead(500)` in between);
+ *     chained straight onto the body call (`res.status(200).json(…)`: no statement runs in between —
+ *     only the body call's own arguments, and a status set inside them is not modelled, see below);
+ *     when it is a NON-5xx reached through a local's binding (`const out = res.status(400)`), a
+ *     separate setter on the same receiver placed after that status call and before the body counts
+ *     too, and the worst one decides (`const out = res.status(400); out.status(500); out.json(…)`,
+ *     also `res.status(500)`, `res.statusCode = 500`, `out.writeHead(500)` in between). "Earlier",
+ *     "after" and "before" are SOURCE positions, not execution order;
  *   - `jsonError(res, S, …)`;
  *   - the `extra` argument of the admin failure responders (sendAdminReadFailure /
  *     sendAdminWriteFailure, also when called through a local alias or a renamed destructure), whose
@@ -73,6 +75,16 @@
  *     object that is itself a parameter or a container element;
  *   - a status set in a different function than the body call (e.g. an earlier middleware), other
  *     than an enclosing one;
+ *   - split status by EXECUTION order: the pairing is by source position, so a body call written
+ *     before the setter in the source is not paired with it even when it runs after it (a body in a
+ *     closure or function declared first and called later: `const reply = (b) => res.json(b);
+ *     res.status(500); reply(…)`), and a status set inside the body call's own arguments
+ *     (`res.status(400).json({ _: res.status(500), … })`) is not seen;
+ *   - a receiver bound other than by a `const`/`let` initializer straight to it or to a method chain
+ *     on it: a later assignment (`let r; r = res.status(500); r.json(…)`), a destructure, a
+ *     conditional or other expression (`const r = ok ? res : other`), a parameter default;
+ *   - a status written other than by `.status(S)` / `.writeHead(S)` / `statusCode = S`
+ *     (`statusCode += …`, `Object.assign(res, { statusCode: 500 })`);
  *   - a status or body method reached through `.call` / `.apply` / `.bind`, `Reflect.apply`, or a
  *     computed member name (`res['status'](500)`);
  *   - a value that becomes error text only through a function's RETURN (a function that builds the
@@ -787,14 +799,15 @@ export function scanResponseErrorEcho(file: string, text: string): EchoScanResul
       const chained = statusOfChain(a, callee.expression)
       if (chained !== null && (isFiveXx(chained.status) || !chained.viaBinding)) {
         // A 5xx down the chain, or a status chained straight onto this body call
-        // (`res.status(200).json(…)`): nothing can run in between, the chain decides.
+        // (`res.status(200).json(…)`): no statement runs in between (only this call's own arguments,
+        // not modelled — see the header), the chain decides.
         kind = 'status-chain'
         status = chained.status
       } else {
         // No status down the chain, or a non-5xx one reached through a local's binding
         // (`const out = res.status(400)`): a status set separately on the same receiver AFTER that
-        // (after the binding's status call, before this body call, in the same or an enclosing
-        // function) may be the one sent — `out.status(500)`, `res.statusCode = 500`,
+        // (after the binding's status call, before this body call — by SOURCE position — in the same
+        // or an enclosing function) may be the one sent — `out.status(500)`, `res.statusCode = 500`,
         // `out.writeHead(500)`. The worst of them counts.
         const key = receiverKey(a, callee.expression)
         const scope = enclosingFunction(n)
@@ -932,7 +945,11 @@ function hasExportModifier(node: ts.Node): boolean {
  * './m'`, `export * from './m'`, `export * as ns from './m'`, and an export whose value is a binding
  * imported from './m' — `export { x }`, `export { x as y }`, `export default x`, `export const y = x`,
  * also through top-level `const`/`let` aliases of it (`const y = x; export { y }`), a namespace member
- * (`ns.x`), or a relative `require()` / `import()`. Type-only exports are skipped.
+ * (`import * as ns from './m'; export const y = ns.x`), or a relative `require()` / awaited `import()`
+ * (`export const y = require('./m').x`, `export default (await import('./m')).default`) — each form
+ * pinned by the discovery self-check. Type-only exports are skipped. NOT followed: a destructured
+ * alias (`const { default: x } = ns; export { x }`, also `= await import('./m')`), and any export
+ * assembled otherwise (see discoverMountedRouterTree's not-followed list).
  */
 function reexportedSpecs(file: string, text: string): string[] {
   const sf = parseSource(file, text)
@@ -1004,11 +1021,15 @@ function reexportedSpecs(file: string, text: string): string[] {
  * (`export … from`, `export *`), an export whose binding is an import or an alias of one
  * (`import x from './m'; export { x }`, `const y = x; export default y`), a binding that is also
  * given another value (`r = imported`) or is written by a destructuring assignment or a `for` loop
- * head, a factory's return value, a function, a class.
+ * head, a factory's return value, a function, a class, a binding never given a value.
  *
- * This is the key of the live identity cross-check: a live router matched to a module through this
- * list was constructed by that module, so that module's source is the one the scan read — a router
- * a scanned module merely passes on (a barrel) does not match its own scanned file.
+ * "A `Router()` call" is decided by the callee's NAME (`Router` / `.Router`), not by resolving it to
+ * express: any call named `Router` counts, including one that hands back an imported router
+ * (`const holder = { Router: () => imported }; export default holder.Router()` is counted — there is
+ * no such identifier in src/ today). Within that limit this is the key of the live identity
+ * cross-check: a live router matched to a module through this list came out of a call named
+ * `Router` in that module, so that module's source is the one the scan read — a router a scanned
+ * module merely passes on (a barrel) does not match its own scanned file.
  */
 export function localRouterExportNames(file: string, text: string): string[] {
   const a = analyze(file, text)
@@ -1097,23 +1118,29 @@ function returnedExpressions(fn: FunctionLike): ts.Expression[] {
  *     functions it refers to) refers to a binding that resolves to a Router module, or holds a
  *     relative `import()` / `require()` of one (`(req, res, next) => sub(req, res, next)`);
  *   - every Router module a discovered module RE-EXPORTS (see reexportedSpecs: `export … from`,
- *     `export *`, an export of an imported binding or of a top-level alias of one) — so a router
- *     mounted through a barrel is scanned in the module that builds it, not only in the barrel.
+ *     `export *`, an export of an imported binding, of a top-level alias of one, of a namespace
+ *     member, of a relative `require()` / awaited `import()`) — so a router mounted through a barrel
+ *     is scanned in the module that builds it, not only in the barrel.
  * An argument or binding is resolved through: an imported binding (default, named, or a namespace
  * member `ns.x`), a factory call on one (`createX(deps)`), a local `const`/`let` alias or a later
  * assignment to it, a destructure, a conditional / `||` / `??`, an array of handlers, a function
  * declared in the file (through its `return`s), and a relative `import()` / `require()`. A `Router()`
  * built in place counts as a mount of the file itself. A "Router module" is a module whose own source
- * calls `Router()` / `x.Router()`, or that re-exports (as above, transitively) from a Router module.
+ * has a call NAMED `Router` (`Router()` / `x.Router()` — by name, not resolved to express), or that
+ * re-exports (as above, transitively: a barrel of a barrel of one) from a Router module.
  * `read(rel)` returns the source of a path relative to the routes directory; `resolveRel(from, spec)`
  * maps an import specifier to such a path (index files and extensions are its business).
  *
  * Not followed (the list is not exhaustive): a `for…of` / `forEach` binding, a value read back out of
  * a container, a `.call` / `.apply`, a non-relative or computed specifier, a re-export that is not one
  * of the syntactic top-level forms reexportedSpecs lists (e.g. an export assembled inside a function,
- * or an exported object literal holding an imported router), a router handed to a wrapper defined in
- * ANOTHER module (`import { wrap } from './wrap'; router.use(wrap)` where `wrap` calls the router), a
- * router reached through a function parameter.
+ * an exported object literal holding an imported router, a destructured alias
+ * `const { default: x } = ns; export { x }`), a router handed to a wrapper defined in ANOTHER module
+ * (`import { wrap } from './wrap'; router.use(wrap)` where `wrap` calls the router), a router reached
+ * through a function parameter, and — as a route-method argument or from inside a function — a router
+ * built in a module that is not a "Router module" by the name rule above (`import { Router as
+ * makeRouter } from 'express'`, or a factory imported from another module): only `.use` follows a
+ * module whatever it is.
  *
  * Static resolution cannot see every way code can hand a router to Express; the caller is expected
  * to cross-check the routers nested in the LIVE mounted stack BY IDENTITY — the router objects that
@@ -1121,8 +1148,10 @@ function returnedExpressions(fn: FunctionLike): ts.Expression[] {
  * (`layer.route.stack[i].handle`): every one must be a Router that some discovered module BUILT AND
  * exports under a name localRouterExportNames returns (a re-export does not count: a barrel or a
  * scanned module passing on another module's router does not stand in for the module that builds
- * it), except at most as many as there are in-place `Router()` mounts (`inPlace`), which have no
- * export and can only be counted. A router the walk cannot follow then turns red there instead of
+ * it; "builds" is by the callee name `Router`, see localRouterExportNames), except at most as many as
+ * there are in-place `Router()` mounts (`inPlace`), which have no export and can only be counted — and
+ * that allowance, being a count, can be cancelled the same way (a switched-off in-place mount lets one
+ * unfollowed live router through). A router the walk cannot follow then turns red there instead of
  * silently shrinking the scanned tree. (A count-only comparison is not enough: a static mount that is
  * switched off at runtime cancels a live router the walk never saw.) A router that is only CALLED from
  * inside a function layer (a closure or wrapper) is not in the live stack at all: the cross-check
