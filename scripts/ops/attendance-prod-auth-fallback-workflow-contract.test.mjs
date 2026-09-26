@@ -73,6 +73,24 @@ test('attendance strict gates default product mode matches current shared prod',
   assert.doesNotMatch(raw, /expectProductMode:\s+"attendance"/)
 })
 
+test('attendance strict gates require a tenant-bound delegated administrator before business probes', () => {
+  const workflow = readFileSync(
+    path.join(repoRoot, '.github/workflows/attendance-strict-gates-prod.yml'),
+    'utf8',
+  )
+  const runner = readFileSync(path.join(repoRoot, 'scripts/ops/attendance-run-gates.sh'), 'utf8')
+
+  assert.match(workflow, /REQUIRE_DELEGATED_ATTENDANCE_ADMIN:\s+'true'/)
+  assert.match(runner, /attendance-verify-delegated-admin\.mjs/)
+  assert.match(runner, /REQUIRE_DELEGATED_ATTENDANCE_ADMIN="\$\{REQUIRE_DELEGATED_ATTENDANCE_ADMIN:-false\}"/)
+  assert.match(runner, /REQUIRE_DELEGATED_ATTENDANCE_ADMIN="\$REQUIRE_DELEGATED_ATTENDANCE_ADMIN"/)
+  const verifier = runner.indexOf('node "${ROOT_DIR}/scripts/ops/attendance-verify-delegated-admin.mjs"')
+  const smoke = runner.indexOf('function run_api_smoke()')
+  const provision = runner.indexOf('function maybe_run_provision()')
+  assert.ok(verifier >= 0 && verifier < smoke && verifier < provision)
+  assert.match(runner, />"\$\{OUTPUT_ROOT\}\/delegated-admin-contract\.log" 2>&1/)
+})
+
 test('attendance full-flow reselects import section after payroll readiness check', () => {
   const raw = readFileSync(path.join(repoRoot, 'scripts/verify-attendance-full-flow.mjs'), 'utf8')
   const payrollSelect = raw.indexOf('payrollSection = await selectAdminSection(page, adminSectionIds.payrollCycles')

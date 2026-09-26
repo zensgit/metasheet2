@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 API_BASE="${API_BASE:-}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 USER_ID="${USER_ID:-}"
 ROLE="${ROLE:-}"
+REQUIRE_DELEGATED_ATTENDANCE_ADMIN="${REQUIRE_DELEGATED_ATTENDANCE_ADMIN:-false}"
 CURL_RETRY_ATTEMPTS="${CURL_RETRY_ATTEMPTS:-5}"
 CURL_RETRY_DELAY_SEC="${CURL_RETRY_DELAY_SEC:-1}"
 HTTP_CODE=""
@@ -209,6 +211,12 @@ function verify_token_tenant() {
 }
 
 refresh_token_if_needed
+if [[ "$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" == "true" ]]; then
+  API_BASE="$API_BASE" \
+    AUTH_TOKEN="$AUTH_TOKEN" \
+    AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+    node "${ROOT_DIR}/scripts/ops/attendance-verify-delegated-admin.mjs" >/dev/null
+fi
 verify_token_tenant
 status=0
 try_assign_role || status=$?

@@ -24,6 +24,7 @@ REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC:-false}"
 REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE:-false}"
 REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
 REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE:-true}"
+REQUIRE_DELEGATED_ATTENDANCE_ADMIN="${REQUIRE_DELEGATED_ATTENDANCE_ADMIN:-false}"
 
 function die() {
   echo "[attendance-run-gates] ERROR: $*" >&2
@@ -87,6 +88,15 @@ node "${ROOT_DIR}/scripts/ops/attendance-acceptance-preflight.mjs" \
 AUTH_TOKEN="$(API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
   "${ROOT_DIR}/scripts/ops/attendance-resolve-auth.sh")"
 
+if [[ "$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" == "true" ]]; then
+  info "Verifying tenant-bound delegated attendance administrator..."
+  API_BASE="$API_BASE" \
+    AUTH_TOKEN="$AUTH_TOKEN" \
+    AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+    node "${ROOT_DIR}/scripts/ops/attendance-verify-delegated-admin.mjs" \
+    >"${OUTPUT_ROOT}/delegated-admin-contract.log" 2>&1
+fi
+
 gate_preflight="SKIP"
 gate_api="FAIL"
 gate_provision="SKIP"
@@ -142,6 +152,7 @@ function run_api_smoke() {
     REQUIRE_IMPORT_UPSERT_STRATEGY="$REQUIRE_IMPORT_UPSERT_STRATEGY" \
     REQUIRE_PREVIEW_ASYNC="$REQUIRE_PREVIEW_ASYNC" \
     REQUIRE_BATCH_RESOLVE="$REQUIRE_BATCH_RESOLVE" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     "${ROOT_DIR}/scripts/ops/attendance-smoke-api.sh" \
     >"${OUTPUT_ROOT}/gate-api-smoke.log" 2>&1; then
     gate_api="PASS"
@@ -158,11 +169,20 @@ function maybe_run_provision() {
   fi
 
   info "Running access provisioning gate (PROVISION_USER_ID set)..."
-  if API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="employee" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
+  if API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
+    AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
+    USER_ID="$PROVISION_USER_ID" ROLE="employee" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
     >"${OUTPUT_ROOT}/gate-provision-employee.log" 2>&1 \
-    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="approver" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
+    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
+      AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+      REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
+      USER_ID="$PROVISION_USER_ID" ROLE="approver" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
       >"${OUTPUT_ROOT}/gate-provision-approver.log" 2>&1 \
-    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="admin" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
+    && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
+      AUTH_EXPECTED_TENANT_ID="${AUTH_EXPECTED_TENANT_ID:-}" \
+      REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
+      USER_ID="$PROVISION_USER_ID" ROLE="admin" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
       >"${OUTPUT_ROOT}/gate-provision-admin.log" 2>&1; then
     gate_provision="PASS"
     return 0
@@ -174,6 +194,7 @@ function maybe_run_provision() {
 function run_playwright_production_flow() {
   info "Running Playwright production flow (desktop)..."
   if AUTH_TOKEN="$AUTH_TOKEN" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-production-flow" \
@@ -190,6 +211,7 @@ function run_playwright_production_flow() {
 function run_playwright_full_flow_desktop() {
   info "Running Playwright full flow (focused desktop)..."
   if AUTH_TOKEN="$AUTH_TOKEN" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
@@ -210,6 +232,7 @@ function run_playwright_full_flow_desktop() {
 function run_playwright_full_flow_mobile() {
   info "Running Playwright full flow (focused mobile)..."
   if AUTH_TOKEN="$AUTH_TOKEN" \
+    REQUIRE_DELEGATED_ATTENDANCE_ADMIN="$REQUIRE_DELEGATED_ATTENDANCE_ADMIN" \
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
