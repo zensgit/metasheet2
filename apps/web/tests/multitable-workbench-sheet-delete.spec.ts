@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
-import { fieldDeleteErrorMessage } from '../src/multitable/utils/workbench-labels'
+import { fieldDeleteErrorMessage, sheetDeleteErrorMessage } from '../src/multitable/utils/workbench-labels'
 import type { MetaConfigRevision } from '../src/multitable/api/client'
 
 // Wire-drift lock for the sheet-delete entry (rail trash button → workbench). The rail only EMITS
@@ -493,7 +493,16 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
 
     expect(showErrorSpy).toHaveBeenCalledTimes(1)
     const msg = String(showErrorSpy.mock.calls[0]?.[0])
-    expect(msg).toBe('This sheet is managed by a plugin and cannot be deleted from the UI.')
+    // A6 (customer feedback 2026-09-24 #1b, adversarial-review round #6089 S2/S3): the copy now
+    // names a path that WORKS TODAY (filter + bulk-delete rows; restore a mistake from History →
+    // Deleted records) instead of "cannot be deleted", and does not promise anything the product
+    // does not back (no "uninstall the plugin", no "per-project cleanup is planned", no circular
+    // "contact an administrator") — see workbench-labels.ts's `toast.sheetPluginManaged`.
+    expect(msg).toBe(
+      'This sheet is maintained by a plugin and cannot be deleted as a whole table. To clean up its '
+      + 'data, filter the rows you want and delete them in bulk from the grid; rows deleted by '
+      + 'mistake can be restored from the toolbar’s History → Deleted records.',
+    )
     expect(showSuccessSpy).not.toHaveBeenCalled()
     expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
     expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
@@ -531,6 +540,46 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
 
     expect(confirmSpy).not.toHaveBeenCalled()
     expect(workbenchMock.client.deleteSheet).not.toHaveBeenCalled()
+  })
+})
+
+// A6 (customer feedback 2026-09-24 #1b, adversarial-review round #6089 S2/S3): the SHEET_PLUGIN_MANAGED
+// copy in BOTH locales, asserted directly against the pure mapping function (not only through the one
+// mounted-workbench cell above) — mirrors the 'fieldDeleteErrorMessage mapping' block below for the
+// sibling field-level refusal.
+describe('sheetDeleteErrorMessage mapping (409 SHEET_PLUGIN_MANAGED)', () => {
+  const EN = 'This sheet is maintained by a plugin and cannot be deleted as a whole table. To clean up its '
+    + 'data, filter the rows you want and delete them in bulk from the grid; rows deleted by mistake can be '
+    + 'restored from the toolbar’s History → Deleted records.'
+  const ZH = '这张表由插件维护，不能整表删除。要清理其中的数据，可以在表格里筛选后批量删除行；删错的行可在工具栏「历史 → 已删除的记录」中恢复。'
+
+  it('maps the code to the localized sentence in BOTH locales (zh-CN and en)', () => {
+    const error = { code: 'SHEET_PLUGIN_MANAGED', message: 'This sheet is provisioned and owned by a plugin.' }
+    expect(sheetDeleteErrorMessage(error, true)).toBe(ZH)
+    expect(sheetDeleteErrorMessage(error, false)).toBe(EN)
+    // the two locales must actually differ, and neither may echo the server prose
+    expect(sheetDeleteErrorMessage(error, true)).not.toBe(sheetDeleteErrorMessage(error, false))
+    expect(sheetDeleteErrorMessage(error, true)).not.toContain(error.message)
+    expect(sheetDeleteErrorMessage(error, false)).not.toContain(error.message)
+  })
+
+  it('names a path that works TODAY and makes no unapproved promise', () => {
+    // Neither locale may tell the actor to uninstall/reconfigure the plugin (the registry row that
+    // makes the sheet "managed" survives an uninstall — nothing removes it) or promise a
+    // not-yet-shipped per-project cleanup feature, and neither may say "contact an administrator" —
+    // the toast is only ever shown to an actor who already holds lifecycle authority.
+    for (const isZh of [true, false]) {
+      const copy = sheetDeleteErrorMessage({ code: 'SHEET_PLUGIN_MANAGED' }, isZh)
+      expect(copy).not.toMatch(/uninstall|reconfigure|卸载|重新配置/i)
+      expect(copy).not.toMatch(/planned|规划中/i)
+      expect(copy).not.toMatch(/administrator|管理员/i)
+    }
+    // both locales point at the SAME two real affordances: bulk-delete filtered rows, and the
+    // toolbar's History → Deleted records tab for undoing a mistake.
+    expect(EN).toMatch(/bulk/i)
+    expect(EN).toMatch(/History.*Deleted records/)
+    expect(ZH).toMatch(/批量删除/)
+    expect(ZH).toMatch(/历史.*已删除的记录/)
   })
 })
 

@@ -205,6 +205,7 @@ import {
   assertSheetLive,
   assertSheetLiveForUpdate,
   assertSheetsLiveForUpdate,
+  describeLivenessLookupError,
   loadSheetLiveness,
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
@@ -8983,6 +8984,37 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
       const viewPermissions = deriveViewPermissions(effectiveViews, capabilities, viewScopeMap)
 
+      // A6 (customer feedback 2026-09-24 #1b): DELETE /sheets/:sheetId 409s
+      // (SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED) for a managed sheet no matter who is asking —
+      // see sheet-delete-guard.ts. Reporting `canDeleteSheet: true` for one draws a trash icon
+      // (MetaSheetViewRail.vue) that can never work. Reuse the delete route's OWN check
+      // (`resolveSheetDeleteRefusal`) rather than duplicating the managed predicate, and only probe
+      // it once the actor has ALREADY cleared `hasSheetLifecycleAuthority` — an actor without that
+      // authority is refused before this point and must never learn whether the sheet is managed
+      // (mirrors the route's own authz-before-existence posture, see its DELETE handler above).
+      //
+      // S1 (adversarial-review fix, #6089): the probe is a SIDE lookup on an otherwise-successful
+      // load — the button is the only thing at stake, never the load itself. A THROWN lookup
+      // (missing table, transient connection error, …) must not 500 the whole `/context` response;
+      // it fails CLOSED to `canDeleteSheet: false` (same fail-closed direction as an actor who lacks
+      // lifecycle authority — never fails OPEN into showing a delete affordance the route cannot
+      // actually honour) and logs values-free (no sheet id, no query text).
+      const hasDeleteLifecycleAuthority = effectiveSheetId
+        ? hasSheetLifecycleAuthority(access, selectedSheetScope)
+        : false
+      let canDeleteSheet = false
+      if (hasDeleteLifecycleAuthority && effectiveSheetId) {
+        try {
+          canDeleteSheet = (await resolveSheetDeleteRefusal(pool.query.bind(pool), effectiveSheetId)) === null
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: managed-sheet probe failed for canDeleteSheet; failing closed to false',
+            { reason: 'managed_sheet_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canDeleteSheet = false
+        }
+      }
+
       return res.json({
         ok: true,
         data: {
@@ -9033,8 +9065,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // OR sheet-scoped ADMIN). Mirroring the route's own gate here is what keeps the FE delete
             // affordance from being shown to an actor the server will 403. Single-sheet by construction
             // (`selectedSheetScope` is resolved for `effectiveSheetId` only), so the FE may show a
-            // delete entry for the CURRENT sheet only, never for the rail's other rows.
-            canDeleteSheet: effectiveSheetId ? hasSheetLifecycleAuthority(access, selectedSheetScope) : false,
+            // delete entry for the CURRENT sheet only, never for the rail's other rows. Additionally
+            // ANDed with "not managed" (see the local `canDeleteSheet` computed above) — the route
+            // itself still 409s a managed sheet's delete as the backstop.
+            canDeleteSheet,
           },
           capabilityOrigin,
           fieldPermissions,

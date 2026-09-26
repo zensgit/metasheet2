@@ -2554,7 +2554,10 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [] }
         }
-        if (sql.includes('SELECT system_kind, description FROM meta_sheets WHERE id = $1')) {
+        // Column-tolerant form (#6089 B1 fix): `isSystemManagedSheet` now reads `system_kind` via
+        // `to_jsonb(meta_sheets) ->> 'system_kind'`, the same tolerant shape every other reader in
+        // univer-meta.ts already uses, so a database without the column does not 500 the route.
+        if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ system_kind: null, description: null }] }
         }

@@ -254,9 +254,24 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.baseRenameFailed': { en: 'Failed to rename base', zh: '重命名工作区失败' },
   'toast.sheetDeleted': { en: 'Sheet deleted', zh: '数据表已删除' },
   'toast.sheetDeleteFailed': { en: 'Failed to delete sheet', zh: '删除数据表失败' },
+  // A6 (customer feedback 2026-09-24 #1b): the old copy said the sheet "cannot be deleted" and
+  // stopped there, with no next step. The trash icon is now HIDDEN for a managed sheet
+  // (MetaCapabilities.canDeleteSheet, see /context), so a caller only reaches this 409 through a
+  // stale client or a direct API call.
+  //
+  // Adversarial-review round (#6089 S2/S3) removed three claims the first draft made that the
+  // product does not back: "uninstall or reconfigure the owning plugin" does not remove the sheet
+  // (the `plugin_multitable_object_registry` row survives an uninstall — nothing in this repo deletes
+  // it), "per-project cleanup is planned" is an unapproved roadmap promise, and "contact an
+  // administrator" is circular — the toast is shown to the actor with lifecycle authority, i.e.
+  // already an administrator by this route's own gate. The copy now names the path that WORKS TODAY,
+  // in terms generic enough for any plugin-managed sheet (stock-prep, staging, after-sales): filter
+  // and bulk-delete the rows in the grid (MetaGridTable.vue's `grid.deleteSelected`), and restore a
+  // mistaken delete from the toolbar's History → Deleted records (HistoryCenterModal.vue's
+  // '已删除的记录' / 'Deleted records' tab).
   'toast.sheetPluginManaged': {
-    en: 'This sheet is managed by a plugin and cannot be deleted from the UI.',
-    zh: '该表由插件托管，不能在界面删除。',
+    en: 'This sheet is maintained by a plugin and cannot be deleted as a whole table. To clean up its data, filter the rows you want and delete them in bulk from the grid; rows deleted by mistake can be restored from the toolbar’s History → Deleted records.',
+    zh: '这张表由插件维护，不能整表删除。要清理其中的数据，可以在表格里筛选后批量删除行；删错的行可在工具栏「历史 → 已删除的记录」中恢复。',
   },
   'toast.sheetSystemManaged': {
     en: 'This sheet is managed by the system and cannot be deleted.',
