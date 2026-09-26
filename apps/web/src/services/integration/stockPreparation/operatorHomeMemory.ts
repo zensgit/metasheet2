@@ -29,6 +29,15 @@
 //
 // FAILS SILENT. Every read and write is wrapped: a private-browsing profile, a full quota, or a
 // disabled storage API must degrade to "no memory", never throw into the page that called this.
+//
+// 从列表移除 (客户反馈 2026-09-24 #1a / A8). The cards this file's memory feeds were previously
+// permanent and unlabelled — no way to remove one, and no line explaining that a card is only a
+// shortcut, not the operator's only route to a project. `removeStockPrepRecentProject` below adds a
+// SIBLING hidden list (project numbers only, nothing richer) that `operatorHomeCards.ts` consults to
+// skip a card on the home page ONLY — the project's actual data, and 项目查询's own complete list,
+// are untouched. `recordStockPrepProjectVisit` clears an entry back out of that list on the next visit,
+// and `clearStockPrepOperatorHomeMemory` sweeps it on every auth transition, same as everything else
+// here.
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../../composables/authPrincipal'
 import type { StockPrepPostureKey } from './projectPosture'
 
@@ -41,6 +50,17 @@ const STORAGE_KEY_PREFIX = 'metasheet.stockPrep.operatorHomeMemory.v2'
 const LEGACY_UNSCOPED_KEY = 'metasheet.stockPrep.operatorHomeMemory.v1'
 /** Bounded so a browser that opens hundreds of projects over months does not grow this without limit. */
 const MAX_ENTRIES = 30
+
+/**
+ * A SIBLING key, deliberately built by extending `STORAGE_KEY_PREFIX` rather than starting a second
+ * prefix of its own (客户反馈 2026-09-24 #1a / A8): `clearStockPrepOperatorHomeMemory`'s sweep below
+ * matches every key with `key.startsWith(STORAGE_KEY_PREFIX)`, and a key built as
+ * `${STORAGE_KEY_PREFIX}.hidden.v1:...` still starts with `STORAGE_KEY_PREFIX` byte-for-byte — so that
+ * loop wipes this list too, with no separate case to keep in sync. Holds project numbers ONLY (no
+ * posture, no timestamp): a project a person asked to stop seeing on the home page, not a fact this
+ * browser is trying to remember about it.
+ */
+const HIDDEN_STORAGE_KEY_PREFIX = `${STORAGE_KEY_PREFIX}.hidden.v1`
 
 /** The tenant half of the storage scope. Same shape as `IntegrationScope`, structurally. */
 export interface StockPrepMemoryScope {
@@ -64,6 +84,13 @@ function resolveStorageKey(scope?: StockPrepMemoryScope): string {
   const tenant = (scope?.tenantId ?? '').trim() || 'no-tenant'
   const principal = getAuthPrincipalKey() ?? 'anonymous'
   return `${STORAGE_KEY_PREFIX}:${tenant}:${principal}`
+}
+
+/** Same tenant+principal scheme as `resolveStorageKey`, on the hidden-list's own sibling prefix. */
+function resolveHiddenStorageKey(scope?: StockPrepMemoryScope): string {
+  const tenant = (scope?.tenantId ?? '').trim() || 'no-tenant'
+  const principal = getAuthPrincipalKey() ?? 'anonymous'
+  return `${HIDDEN_STORAGE_KEY_PREFIX}:${tenant}:${principal}`
 }
 
 function readRawStorage(scope?: StockPrepMemoryScope): unknown {
@@ -107,6 +134,33 @@ export function readStockPrepRecentProjects(scope?: StockPrepMemoryScope): Stock
 }
 
 /**
+ * Every project number this principal asked the home page to stop showing (客户反馈 2026-09-24 #1a /
+ * A8) — see `removeStockPrepRecentProject`. Malformed storage degrades to "nothing hidden", the same
+ * posture every other read on this page takes.
+ */
+export function readStockPrepHiddenProjects(scope?: StockPrepMemoryScope): string[] {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return []
+    const raw = window.localStorage.getItem(resolveHiddenStorageKey(scope))
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+  } catch {
+    return []
+  }
+}
+
+function writeStockPrepHiddenProjects(projectNos: readonly string[], scope?: StockPrepMemoryScope): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return
+    window.localStorage.setItem(resolveHiddenStorageKey(scope), JSON.stringify(projectNos.slice(0, MAX_ENTRIES)))
+  } catch {
+    // Same fail-silent posture as every other write here.
+  }
+}
+
+/**
  * Record (or refresh) this browser's memory of ONE project's posture. Called whenever the workspace
  * has a fresh, live posture for the project it is currently showing (see StockPreparationProjectBoard
  * View.vue) — never speculatively, and never with anything beyond the closed enum key.
@@ -115,6 +169,11 @@ export function readStockPrepRecentProjects(scope?: StockPrepMemoryScope): Stock
  * about the project: a tab closed mid-sync would otherwise leave a card claiming 「正在跑」 forever,
  * for a run that ended (or died) minutes ago. Returning early leaves the PREVIOUS conclusion in
  * place, which is the last thing this browser actually knew.
+ *
+ * UNHIDES UNCONDITIONALLY, even for `running` (客户反馈 2026-09-24 #1a / A8): a person REOPENING a
+ * project — the only way this function is ever called — is what brings its card back, regardless of
+ * which posture that reopen happens to settle on. Doing this ahead of the `running` early-return, in
+ * its own try, means a project opened mid-sync unhides even though its posture write below is skipped.
  */
 export function recordStockPrepProjectVisit(
   projectNo: string,
@@ -123,6 +182,16 @@ export function recordStockPrepProjectVisit(
 ): void {
   const trimmed = projectNo.trim()
   if (!trimmed) return
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const hidden = readStockPrepHiddenProjects(scope)
+      if (hidden.includes(trimmed)) {
+        writeStockPrepHiddenProjects(hidden.filter((no) => no !== trimmed), scope)
+      }
+    }
+  } catch {
+    // Same fail-silent posture as every other access here.
+  }
   if (postureKey === 'running') return
   try {
     if (typeof window === 'undefined' || !window.localStorage) return
@@ -135,6 +204,35 @@ export function recordStockPrepProjectVisit(
   } catch {
     // Quota exceeded, storage disabled, private browsing — the memory is a convenience, not a
     // record; losing a write here must never surface as a page error.
+  }
+}
+
+/**
+ * 从列表移除 (客户反馈 2026-09-24 #1a / A8). Drops this project from the remembered list AND adds it
+ * to the hidden list, so a card the home page still has a DIRECTORY reason to show (see
+ * `buildOperatorHomeCards`'s `pendingDecisionCount` guard) is not resurrected by memory alone re-adding
+ * it on the next posture write for some OTHER project. This is NOT a data delete — the project's rows
+ * stay exactly where they are in the 备料表; only this browser's own shortcut list changes. Reopening
+ * the project (`recordStockPrepProjectVisit`, above) is the one thing that undoes it.
+ */
+export function removeStockPrepRecentProject(projectNo: string, scope?: StockPrepMemoryScope): void {
+  const trimmed = projectNo.trim()
+  if (!trimmed) return
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return
+    const remaining = readStockPrepRecentProjects(scope).filter((entry) => entry.projectNo !== trimmed)
+    window.localStorage.setItem(resolveStorageKey(scope), JSON.stringify(remaining))
+  } catch {
+    // Same fail-silent posture as every other write here.
+  }
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return
+    const hidden = readStockPrepHiddenProjects(scope)
+    if (!hidden.includes(trimmed)) {
+      writeStockPrepHiddenProjects([trimmed, ...hidden], scope)
+    }
+  } catch {
+    // Same fail-silent posture as every other write here.
   }
 }
 
@@ -157,6 +255,12 @@ export function readStockPrepRememberedPosture(
  * process can no longer name the principal that is leaving. Wiping the lot is the only version of
  * this that cannot leave the wrong bucket behind, and the cost is one operator re-opening a project
  * to re-learn a card they could always reach by number anyway.
+ *
+ * ALSO WIPES THE HIDDEN LIST (客户反馈 2026-09-24 #1a / A8), with no separate case needed: the loop
+ * below matches by `startsWith(STORAGE_KEY_PREFIX)`, and `HIDDEN_STORAGE_KEY_PREFIX` is built by
+ * EXTENDING `STORAGE_KEY_PREFIX` rather than starting a prefix of its own, so every hidden-list key
+ * already satisfies that check. Confirmed by the "auth transition wipes every principal's memory"
+ * spec, extended to also assert the hidden list is gone.
  */
 export function clearStockPrepOperatorHomeMemory(): void {
   try {

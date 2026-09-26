@@ -93,11 +93,24 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
  *   pendingDecisionCount  → always the directory's (live ledger beats a remembered enum)
  *   everything else       → this browser's remembered conclusion when it has one, otherwise
  *                           `unknown` (§4.4's `? 看不到`), NEVER an archive-derived ready/not_pulled.
+ *
+ * `hidden` (客户反馈 2026-09-24 #1a / A8, optional — every existing caller keeps passing two
+ * arguments). A project number this principal asked 从列表移除 for, via `operatorHomeMemory.ts`'s
+ * sibling hidden list. Skips that project's card ON THE HOME PAGE ONLY:
+ *   - `StockPreparationProjectQueryView.vue`'s 项目查询 goes through `projectQuery.ts`'s
+ *     `buildStockPrepProjectQueryRows`, which calls this function WITHOUT a third argument — it stays
+ *     the complete list, by construction, not by a flag this function has to check on its behalf.
+ *   - NEVER hides a directory row whose LIVE `pendingDecisionCount > 0`: a card the ledger says is
+ *     waiting on this operator right now must not vanish because of a click made before that became
+ *     true. Once the count drops back to 0 the hide takes effect on the next render.
  */
 export function buildOperatorHomeCards(
   directoryProjects: readonly StockPreparationOperatorProject[],
   memory: readonly StockPrepRecentProjectEntry[],
+  hidden?: ReadonlySet<string> | readonly string[],
 ): StockPrepHomeCard[] {
+  const hiddenSet = hidden ? (hidden instanceof Set ? hidden : new Set(hidden)) : null
+
   const remembered = new Map<string, StockPrepPostureKey>()
   for (const entry of memory) {
     if (!remembered.has(entry.projectNo)) remembered.set(entry.projectNo, entry.postureKey)
@@ -111,8 +124,9 @@ export function buildOperatorHomeCards(
     if (!no || seen.has(no)) continue
     seen.add(no)
     const pending = project.pendingDecisionCount
-    const memoryKey = remembered.get(no) ?? null
     const live = pending > 0
+    if (hiddenSet && hiddenSet.has(no) && !live) continue
+    const memoryKey = remembered.get(no) ?? null
     cards.push({
       projectNo: no,
       projectName: project.projectName,
@@ -128,6 +142,7 @@ export function buildOperatorHomeCards(
   for (const entry of memory) {
     if (seen.has(entry.projectNo)) continue
     seen.add(entry.projectNo)
+    if (hiddenSet && hiddenSet.has(entry.projectNo)) continue
     cards.push({
       projectNo: entry.projectNo,
       projectName: null,

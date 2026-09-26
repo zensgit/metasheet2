@@ -22,6 +22,9 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //        overwrite this browser's own live conclusion, and a project neither source can speak for
 //        renders the honest `unknown` third state rather than a guess in either direction.
 //   H-08 §4.2 rule 4 survives the tab unmount that is the ONLY way to reach it in this release.
+//   H-09 从列表移除 (客户反馈 2026-09-24 #1a / A8): removing a card drops it from memory AND hides it;
+//        reopening a hidden project unhides it; a card is NEVER hidden while its LIVE
+//        `pendingDecisionCount > 0`; and an auth transition wipes the hidden list too.
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -63,9 +66,11 @@ import {
 } from '../src/services/integration/stockPreparation/operatorHomeCards'
 import {
   clearStockPrepOperatorHomeMemory,
+  readStockPrepHiddenProjects,
   readStockPrepRecentProjects,
   readStockPrepRememberedPosture,
   recordStockPrepProjectVisit,
+  removeStockPrepRecentProject,
 } from '../src/services/integration/stockPreparation/operatorHomeMemory'
 import type { StockPreparationOperatorDirectory, StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
 import {
@@ -296,6 +301,64 @@ describe('本机记忆 (D1=A 的本机那一半 / D8) — operatorHomeMemory.ts'
     expect(readStockPrepRecentProjects(SCOPE)).toEqual([])
     expect(readStockPrepRecentProjects(OTHER_SCOPE)).toEqual([])
   })
+
+  // ---- 从列表移除 (客户反馈 2026-09-24 #1a / A8) — H-09 ---------------------------------------------
+
+  it('removeStockPrepRecentProject drops the memory entry AND hides the project number', () => {
+    recordStockPrepProjectVisit(PROJECT_NO, 'ready', SCOPE)
+    removeStockPrepRecentProject(PROJECT_NO, SCOPE)
+    expect(readStockPrepRecentProjects(SCOPE)).toEqual([])
+    expect(readStockPrepHiddenProjects(SCOPE)).toEqual([PROJECT_NO])
+  })
+
+  it('removal is scoped to one tenant+principal, same as every other write here', () => {
+    recordStockPrepProjectVisit(PROJECT_NO, 'ready', SCOPE)
+    removeStockPrepRecentProject(PROJECT_NO, SCOPE)
+    expect(readStockPrepHiddenProjects(OTHER_SCOPE)).toEqual([])
+  })
+
+  it('reopening a hidden project (recordStockPrepProjectVisit) unhides it', () => {
+    recordStockPrepProjectVisit(PROJECT_NO, 'ready', SCOPE)
+    removeStockPrepRecentProject(PROJECT_NO, SCOPE)
+    expect(readStockPrepHiddenProjects(SCOPE)).toEqual([PROJECT_NO])
+    recordStockPrepProjectVisit(PROJECT_NO, 'blocked', SCOPE)
+    expect(readStockPrepHiddenProjects(SCOPE)).toEqual([])
+    expect(readStockPrepRememberedPosture(PROJECT_NO, SCOPE)).toBe('blocked')
+  })
+
+  it('unhiding happens even when the reopen settles on `running` — the transient posture is skipped, the unhide is not', () => {
+    recordStockPrepProjectVisit(PROJECT_NO, 'ready', SCOPE)
+    removeStockPrepRecentProject(PROJECT_NO, SCOPE)
+    recordStockPrepProjectVisit(PROJECT_NO, 'running', SCOPE)
+    expect(readStockPrepHiddenProjects(SCOPE)).toEqual([])
+    // The posture write itself is still skipped for `running` (pre-existing behaviour, unchanged).
+    expect(readStockPrepRecentProjects(SCOPE)).toEqual([])
+  })
+
+  it('a corrupt hidden-list payload degrades to "nothing hidden", never a throw', () => {
+    recordStockPrepProjectVisit(PROJECT_NO, 'ready', SCOPE)
+    removeStockPrepRecentProject(PROJECT_NO, SCOPE)
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const storageKey = window.localStorage.key(index)
+      if (storageKey && storageKey.includes('operatorHomeMemory') && storageKey.includes('hidden')) {
+        window.localStorage.setItem(storageKey, '{ not json at all')
+      }
+    }
+    expect(() => readStockPrepHiddenProjects(SCOPE)).not.toThrow()
+    expect(readStockPrepHiddenProjects(SCOPE)).toEqual([])
+  })
+
+  it('an auth transition ALSO wipes the hidden list — the same startsWith sweep already catches it', () => {
+    recordStockPrepProjectVisit(PROJECT_NO, 'ready', SCOPE)
+    removeStockPrepRecentProject(PROJECT_NO, SCOPE)
+    recordStockPrepProjectVisit('P2026-002', 'ready', OTHER_SCOPE)
+    removeStockPrepRecentProject('P2026-002', OTHER_SCOPE)
+    expect(readStockPrepHiddenProjects(SCOPE)).toEqual([PROJECT_NO])
+    expect(readStockPrepHiddenProjects(OTHER_SCOPE)).toEqual(['P2026-002'])
+    clearStockPrepOperatorHomeMemory()
+    expect(readStockPrepHiddenProjects(SCOPE)).toEqual([])
+    expect(readStockPrepHiddenProjects(OTHER_SCOPE)).toEqual([])
+  })
 })
 
 describe('目录 ∪ 本机记忆的合并方向 (D1=A) — operatorHomeCards.ts', () => {
@@ -343,6 +406,45 @@ describe('目录 ∪ 本机记忆的合并方向 (D1=A) — operatorHomeCards.ts
       { projectNo: 'P2026-009', updatedAt: '2026-09-08T00:00:00.000Z', postureKey: 'pending_decision' },
     ])
     expect(countActionableOperatorHomeCards(cards)).toEqual({ live: 0, any: 1 })
+  })
+
+  // ---- 从列表移除's third argument (客户反馈 2026-09-24 #1a / A8) — H-09 -----------------------------
+
+  it('a project number in `hidden` is skipped entirely when the directory has nothing live for it', () => {
+    const cards = buildOperatorHomeCards(
+      [directoryRow({ pendingDecisionCount: 0 })],
+      [],
+      new Set([PROJECT_NO]),
+    )
+    expect(cards).toHaveLength(0)
+  })
+
+  it('a hidden MEMORY-only project is skipped too', () => {
+    const cards = buildOperatorHomeCards([], [
+      { projectNo: 'P2026-009', updatedAt: '2026-09-08T00:00:00.000Z', postureKey: 'ready' },
+    ], ['P2026-009'])
+    expect(cards).toHaveLength(0)
+  })
+
+  it('NEVER hides a directory row whose LIVE pendingDecisionCount > 0, even if it is in `hidden`', () => {
+    const cards = buildOperatorHomeCards(
+      [directoryRow({ pendingDecisionCount: 3 })],
+      [],
+      new Set([PROJECT_NO]),
+    )
+    expect(cards).toHaveLength(1)
+    expect(cards[0].posture.key).toBe('pending_decision')
+  })
+
+  it('a plain array works the same as a Set — callers are not required to construct one', () => {
+    const cards = buildOperatorHomeCards([directoryRow({ pendingDecisionCount: 0 })], [], [PROJECT_NO])
+    expect(cards).toHaveLength(0)
+  })
+
+  it('an EMPTY hidden list changes nothing — every existing two-argument caller keeps its old shape', () => {
+    const withEmptySet = buildOperatorHomeCards([directoryRow({ pendingDecisionCount: 0 })], [], new Set())
+    const withoutThirdArg = buildOperatorHomeCards([directoryRow({ pendingDecisionCount: 0 })], [])
+    expect(withEmptySet).toEqual(withoutThirdArg)
   })
 })
 
@@ -581,6 +683,114 @@ describe('打开备料多维表 — 首页那一个入口', () => {
     mounted.unmount()
   })
 })
+
+describe('从列表移除 (客户反馈 2026-09-24 #1a / A8) — StockPreparationOperatorHome.vue', () => {
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    try { window.localStorage.clear() } catch { /* jsdom always has it; guard anyway */ }
+  })
+
+  it('the caption no longer claims "recently opened" — it names the state, not a visit', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: emptyDirectory(),
+      directoryLoaded: true,
+      memory: [{ projectNo: PROJECT_NO, updatedAt: '2026-09-08T00:00:00.000Z', postureKey: 'ready' }],
+    })
+    try {
+      const note = root.querySelector('[data-testid="stock-prep-operator-home-card"] .sp-home__card-note')
+      expect(note?.textContent).toBe('这台电脑上次打开时的状态')
+      expect(root.textContent ?? '').not.toContain('这台电脑上最近开过的')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('the always-on shortcuts explainer is shown above the card grid whenever there is a card', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: emptyDirectory(),
+      directoryLoaded: true,
+      memory: [{ projectNo: PROJECT_NO, updatedAt: '2026-09-08T00:00:00.000Z', postureKey: 'ready' }],
+    })
+    try {
+      const explainer = root.querySelector('[data-testid="stock-prep-operator-home-cards-explainer"]')
+      expect(explainer).not.toBeNull()
+      expect(explainer!.textContent).toContain('这些卡片只是快捷入口')
+      expect(explainer!.textContent).toContain('移除不会删除任何数据')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('clicking 从列表移除 on a memory-only card removes it from the grid and shows the confirmation line', async () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      scope: SCOPE,
+      directory: emptyDirectory(),
+      directoryLoaded: true,
+      memory: [{ projectNo: PROJECT_NO, updatedAt: '2026-09-08T00:00:00.000Z', postureKey: 'ready' }],
+    })
+    try {
+      expect(root.querySelector('[data-testid="stock-prep-operator-home-card"]')).not.toBeNull()
+      const removeButton = root.querySelector('[data-testid="stock-prep-operator-home-card-remove"]') as HTMLButtonElement
+      expect(removeButton).not.toBeNull()
+      removeButton.click()
+      await nextTick()
+      expect(root.querySelector('[data-testid="stock-prep-operator-home-card"]')).toBeNull()
+      const notice = root.querySelector('[data-testid="stock-prep-operator-home-removed-notice"]')
+      expect(notice).not.toBeNull()
+      expect(notice!.textContent).toContain('已从这台电脑的列表里移除')
+      expect(notice!.textContent).toContain('数据没有删除')
+      // And the write actually reached storage — not merely local component state.
+      expect(readStockPrepRecentProjects(SCOPE)).toEqual([])
+      expect(readStockPrepHiddenProjects(SCOPE)).toEqual([PROJECT_NO])
+    } finally {
+      unmount()
+    }
+  })
+
+  it('a directory card with a LIVE pendingDecisionCount > 0 is NEVER hidden by the remove click', async () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: directoryWith({ pendingDecisionCount: 2 }),
+      directoryLoaded: true,
+    })
+    try {
+      const removeButton = root.querySelector('[data-testid="stock-prep-operator-home-card-remove"]') as HTMLButtonElement
+      removeButton.click()
+      await nextTick()
+      // Still on screen — the ledger says this operator has something waiting right now.
+      expect(root.querySelector('[data-testid="stock-prep-operator-home-card"]')).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-operator-home-card-badge"]')?.textContent)
+        .toBe(stockPrepPosture({ pendingDecisionCount: 2 }).zh)
+    } finally {
+      unmount()
+    }
+  })
+
+  it('the quick-open fallback hint now says the list also carries projects with data in the sheet, whoever pulled them', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, { directory: emptyDirectory(), directoryLoaded: true })
+    try {
+      const hint = root.querySelector('[data-testid="stock-prep-operator-home-quick-open"] .sp-home__quick-open-hint')
+      expect(hint?.textContent).toContain('备料表里已经有数据的项目')
+      expect(hint?.textContent).toContain('不论是谁拉进去的')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('the 打开备料多维表 fill-hint no longer claims the sheet holds "所有项目"', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...directoryWith({}), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } },
+      directoryLoaded: true,
+    })
+    try {
+      const hint = root.querySelector('.sp-home__fill-hint')
+      expect(hint?.textContent ?? '').not.toContain('所有项目')
+      expect(hint?.textContent ?? '').toContain('按项目号')
+    } finally {
+      unmount()
+    }
+  })
+})
+
 describe('预读失败静默 (G3) + 空态三值互不共享文案 (P0-2)', () => {
   beforeEach(() => {
     h.locale = 'zh-CN'
