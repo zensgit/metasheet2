@@ -84,7 +84,12 @@ async function main() {
   const publicKeys = Object.keys(db).sort()
   const expected = [
     'ALLOWED_PREFIX', 'countRows', 'deleteRows', 'insertMany', 'insertOne',
-    'select', 'selectOne', 'selectOneForUpdate', 'transaction', 'updateRow',
+    'select', 'selectOne',
+    // selectOneForKeyShare: the writer's half of the external-system delete lock protocol
+    // (external-system-pointer-lock.cjs). Same whitelist, same parameterization as
+    // selectOneForUpdate; only the locking clause differs.
+    'selectOneForKeyShare',
+    'selectOneForUpdate', 'transaction', 'updateRow',
     // upsertOne is the module header's sanctioned extension form ("added here as a new validated
     // method"), NOT a raw-SQL hook: table, row columns and conflict columns all pass the same
     // identifier whitelist, and every value stays parameterized.
@@ -291,6 +296,33 @@ async function main() {
   )
   assert.deepEqual(mockDb6b_lock.calls[0].params, ['p1', 'approved'])
 
+  // selectOneForKeyShare renders the KEY SHARE clause — not FOR SHARE, not FOR UPDATE — and is
+  // otherwise byte-identical in shape to selectOneForUpdate (whitelist, quoting, parameters).
+  const mockDb6b_keyShare = mockDatabase({ nextRows: [
+    [{ id: 'sys_1', tenant_id: 't1' }],
+  ] })
+  const db6b_keyShare = createDb({ database: mockDb6b_keyShare })
+  const pinned = await db6b_keyShare.selectOneForKeyShare(
+    'integration_external_systems',
+    { tenant_id: 't1', id: 'sys_1' },
+  )
+  assert.equal(pinned.id, 'sys_1')
+  assert.match(
+    mockDb6b_keyShare.calls[0].sql,
+    /^SELECT \* FROM "integration_external_systems" WHERE "tenant_id" = \$1 AND "id" = \$2 LIMIT 1 FOR KEY SHARE$/,
+  )
+  assert.deepEqual(mockDb6b_keyShare.calls[0].params, ['t1', 'sys_1'])
+  await assert.rejects(
+    () => db6b_keyShare.selectOneForKeyShare('users', { id: 'x' }),
+    /outside the "integration_" scope/,
+    'selectOneForKeyShare enforces the same table whitelist',
+  )
+  await assert.rejects(
+    () => db6b_keyShare.selectOneForKeyShare('integration_external_systems'),
+    /where clause is required/,
+    'selectOneForKeyShare refuses an unbounded lock',
+  )
+
   const mockDb6b_count = mockDatabase({ nextRows: [
     [{ count: 42 }],
   ] })
@@ -320,7 +352,7 @@ async function main() {
     const trxKeys = Object.keys(trx).sort()
     assert.deepEqual(
       trxKeys,
-      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForUpdate', 'updateRow', 'upsertOne'],
+      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate', 'updateRow', 'upsertOne'],
       'transaction exposes scoped surface only, no rawQuery',
     )
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })

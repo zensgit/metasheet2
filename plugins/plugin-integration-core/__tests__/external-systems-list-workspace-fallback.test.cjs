@@ -158,6 +158,16 @@ function createMockDb() {
       }
       return before - tableRows.length
     },
+    // Delete lock protocol: deleteExternalSystem opens a transaction with selectOneForUpdate. The
+    // EXACT-scope where it sends is what L-07 pins; the lock itself is exercised elsewhere.
+    async selectOneForUpdate(table, where) {
+      calls.push(['selectOneForUpdate', table, { ...where }])
+      return rows.find(row => matchesWhere(row, where)) || null
+    },
+    async transaction(callback) {
+      calls.push(['transaction'])
+      return callback(this)
+    },
   }
 }
 

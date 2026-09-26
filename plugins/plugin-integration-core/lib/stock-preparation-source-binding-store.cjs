@@ -41,7 +41,17 @@
 
 const crypto = require('node:crypto')
 
+const { lockExternalSystemForPointerWrite } = require('./external-system-pointer-lock.cjs')
+
 const BINDING_TABLE = 'integration_stock_prep_source_binding'
+// The error code a bind gets when the system it names is not there ONCE THE ROW LOCK IS HELD —
+// i.e. it never existed in this tenant, or its delete committed while this write waited on it.
+// 409, not 404: the route already 404s a system it cannot see BEFORE calling `set`
+// (`assertBindableSource` → SOURCE_BINDING_SOURCE_NOT_FOUND), so a refusal from inside the write
+// transaction is by construction a CONFLICT with a concurrent delete, the same class as
+// SOURCE_BINDING_WRITE_CONFLICT and as external-systems.cjs's EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE.
+// Values-free: the details carry the action id, never the system id that was not found.
+const SOURCE_NOT_LIVE_CODE = 'SOURCE_BINDING_SOURCE_NOT_LIVE'
 
 // The unique index from migration 079 — (tenant_id, COALESCE(workspace_id,''), action_id).
 const SCOPE_CONSTRAINT = 'uniq_integration_stock_prep_source_binding_scope'
@@ -113,15 +123,20 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     typeof db.select !== 'function' ||
     typeof db.insertOne !== 'function' ||
     typeof db.updateRow !== 'function' ||
-    typeof db.transaction !== 'function'
+    typeof db.transaction !== 'function' ||
+    typeof db.selectOneForKeyShare !== 'function'
   ) {
     // `transaction` is REQUIRED, not nice-to-have: read-then-write on a single row races, and the
     // caller needs the PREVIOUS value back to audit the change. Reading it in one statement and
     // writing in another would let a concurrent rebind make the audit trail name a source that was
     // never actually replaced. `select` (plural) is required too: `get()`'s null-workspace scope
     // fallback below has to enumerate this (tenant, action)'s OTHER rows, which a single-row
-    // `selectOne` cannot do.
-    throw new Error('createStockPreparationSourceBindingStore: scoped db helper (incl. transaction) is required')
+    // `selectOne` cannot do. `selectOneForKeyShare` is required for the same reason `transaction`
+    // is: `set` is a POINTER WRITE at an external system, and the external-system delete lock
+    // protocol (`external-system-pointer-lock.cjs`) needs the writer to pin that row inside its
+    // transaction — a helper that cannot lock would write the unprotected pointer this protocol
+    // exists to refuse.
+    throw new Error('createStockPreparationSourceBindingStore: scoped db helper (incl. transaction, selectOneForKeyShare) is required')
   }
 
   function normalizeScope(input = {}) {
@@ -276,6 +291,17 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
    * transaction, where it now sees the winner's row and takes the UPDATE path — reporting the
    * winner's id as the previous one, which is the truth. Bounded, because an unbounded retry on a
    * violation we may have misdiagnosed is a spin.
+   *
+   * THE EXTERNAL-SYSTEM ROW IS PINNED FIRST. Before this transaction reads or writes the binding
+   * row it takes `FOR KEY SHARE` on the external system the pointer is about to name
+   * (`lockExternalSystemForPointerWrite`). That is the writer's half of the delete lock protocol:
+   * a concurrent `deleteExternalSystem` holds `FOR UPDATE` on that row for the whole of its
+   * count-then-delete, so this write WAITS until the delete commits, re-reads, finds no row, and
+   * refuses SOURCE_BINDING_SOURCE_NOT_LIVE with nothing written; conversely a delete that arrives
+   * while this KEY SHARE is held waits for THIS commit and then counts the row. The route's own
+   * eligibility check (`assertBindableSource`) still runs before `set` — this lock judges
+   * existence-under-lock only, never kind/role/status. LOCK ORDER: system row first, binding row
+   * second; the delete side never locks a binding row, so the two cannot form a cycle.
    */
   async function set(input = {}) {
     const scope = normalizeScope(input)
@@ -286,6 +312,15 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     for (let attempt = 1; attempt <= MAX_SET_ATTEMPTS; attempt += 1) {
       try {
         return await db.transaction(async (trx) => {
+          const system = await lockExternalSystemForPointerWrite(trx, {
+            tenantId: scope.tenantId,
+            id: externalSystemId,
+          })
+          if (!system) {
+            throw new StockPreparationSourceBindingStoreError(409, SOURCE_NOT_LIVE_CODE, 'source external system is not live: it does not exist in this tenant (or its delete committed while this bind waited); pick a live source', {
+              actionId: scope.actionId,
+            })
+          }
           const existing = await trx.selectOne(BINDING_TABLE, where)
           const previousExternalSystemId = existing ? existing.external_system_id : null
           const row = existing
@@ -334,6 +369,7 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
 
 module.exports = {
   BINDING_TABLE,
+  SOURCE_NOT_LIVE_CODE,
   StockPreparationSourceBindingStoreError,
   createStockPreparationSourceBindingStore,
   __internals: {

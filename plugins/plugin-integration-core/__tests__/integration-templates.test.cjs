@@ -22,6 +22,12 @@ function createFakeDb() {
       calls.push(['selectOne', table, { ...where }])
       return rows.find((r) => r._table === table && matches(r, where)) || null
     },
+    // Writer's half of the external-system delete lock protocol: writePipelineRow reads both
+    // endpoint systems FOR KEY SHARE on the transaction handle. Same lookup as selectOne here.
+    async selectOneForKeyShare(table, where) {
+      calls.push(['selectOneForKeyShare', table, { ...where }])
+      return rows.find((r) => r._table === table && matches(r, where)) || null
+    },
     async insertOne(table, row) {
       calls.push(['insertOne', table, { ...row }])
       const rec = { ...row, _table: table, created_at: 'now', updated_at: 'now' }

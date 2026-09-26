@@ -114,6 +114,18 @@ function createMockDb() {
       }
       return before - tableRows.length
     },
+    // The delete lock protocol runs deleteExternalSystem inside `transaction` and opens it with
+    // `selectOneForUpdate`. This in-memory fake has no concurrency to lock against; the lock
+    // semantics themselves are exercised in external-systems-delete-bind-lock-protocol.test.cjs
+    // (simulated lock manager) and the real-Postgres competition suite.
+    async selectOneForUpdate(table, where) {
+      calls.push(['selectOneForUpdate', table, { ...where }])
+      return rows.find(row => matchesWhere(row, where)) || null
+    },
+    async transaction(callback) {
+      calls.push(['transaction'])
+      return callback(this)
+    },
   }
 }
 

@@ -136,6 +136,13 @@ function makeDb() {
       Object.assign(target, set)
       return result(target)
     },
+    // Required by the store since the external-system delete lock protocol; answers "live" for
+    // any id unless a system row was seeded — existence-under-lock is tested in the protocol suite.
+    async selectOneForKeyShare(table, where) {
+      calls.push({ op: 'selectOneForKeyShare', table, where })
+      const seeded = rows.find((row) => row.__table === table && matches(row, where))
+      return seeded ? { ...seeded } : { id: where.id, tenant_id: where.tenant_id }
+    },
     async transaction(callback) {
       calls.push({ op: 'transaction' })
       return callback(handle)
@@ -298,7 +305,7 @@ async function main() {
     const { select: _select, ...withoutSelect } = makeDb()
     assert.throws(
       () => createStockPreparationSourceBindingStore({ db: withoutSelect }),
-      /scoped db helper \(incl\. transaction\) is required/,
+      /scoped db helper \(incl\. transaction, selectOneForKeyShare\) is required/,
     )
   })
 

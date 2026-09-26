@@ -7580,6 +7580,9 @@ async function testReadSourceConfigRoutes() {
   const store = createReadSourceConfigStore({
     db: {
       async selectOne(table, where) { return dbTables[table].find((row) => matchesWhere(row, where)) || null },
+      // Required by the store since the external-system delete lock protocol: answers "live" for
+      // any id — the existence-under-lock refusal is tested in the protocol's own suites.
+      async selectOneForKeyShare(_table, where) { return { id: where.id, tenant_id: where.tenant_id } },
       async insertOne(table, row) {
         const stored = { ...row, created_at: '2026-07-01T00:00:00.000Z', updated_at: '2026-07-01T00:00:00.000Z' }
         dbTables[table].push(stored)

@@ -59,6 +59,18 @@ function createMockDb() {
       const filtered = tables[table].filter((row) => matchesWhere(row, options.where || {}))
       return filtered.slice(options.offset || 0, (options.offset || 0) + (options.limit || 1000))
     },
+    // Writer's half of the external-system delete lock protocol: `saveVersion` pins the named
+    // system with KEY SHARE before minting. This fake answers "live" for any id unless the test
+    // seeded an `integration_external_systems` table — the existence-under-lock refusal is the
+    // subject of external-systems-delete-bind-lock-protocol.test.cjs, not of the minting semantics
+    // under test here.
+    async selectOneForKeyShare(table, where) {
+      calls.push(['selectOneForKeyShare', table, { ...where }])
+      if (Array.isArray(tables[table])) {
+        return tables[table].find((row) => matchesWhere(row, where)) || null
+      }
+      return { id: where.id, tenant_id: where.tenant_id }
+    },
     async transaction(callback) {
       calls.push(['transaction'])
       return callback(this)

@@ -70,6 +70,15 @@ const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
 // store is dormant: `createWriteTargetConfigStore` is defined at `lib/write-target-config-store.cjs:134`
 // and exported at `:356`, and nothing outside `__tests__/` instantiates it, so production carries no
 // rows. Wiring that store is what must also add its count here.
+//
+// COUNTING IS NOT ENOUGH ON ITS OWN. The counts above were, until the lock protocol, two autocommit
+// statements away from the DELETE: a pointer committed in between left a dangling reference and no
+// foreign key refused it. `deleteExternalSystem` now takes `SELECT ... FOR UPDATE` on the system row
+// as the FIRST statement of ONE transaction and counts under that lock; every pointer-writing path
+// takes `FOR KEY SHARE` on the same row inside ITS transaction before writing
+// (`lib/external-system-pointer-lock.cjs` is the writer half and holds the protocol's full account;
+// 073's writer is the registered exception, see the design doc). A guard that counts without the
+// lock is the hole, not the fix.
 const STOCK_PREP_SOURCE_BINDING_TABLE = 'integration_stock_prep_source_binding'
 const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
 const SEALED_EXPORT_STOCK_PREP_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
@@ -1216,14 +1225,17 @@ function createExternalSystemRegistry({
     return crypto.createHmac('sha256', INSTANCE_DIGEST_KEY).update(material).digest('hex')
   }
 
-  async function countPipelineReferences({ tenantId, workspaceId, id }) {
+  // `executor` is the scoped db helper the count runs on: the TRANSACTION handle when called from
+  // `deleteExternalSystem` (so the count is taken under the FOR UPDATE row lock and sees exactly the
+  // pipelines that committed before that lock was granted), the root helper otherwise.
+  async function countPipelineReferences(executor, { tenantId, workspaceId, id }) {
     const where = scopeWhere({ tenantId, workspaceId })
     const [sourcePipelineCount, targetPipelineCount] = await Promise.all([
-      db.countRows('integration_pipelines', {
+      executor.countRows('integration_pipelines', {
         ...where,
         source_system_id: id,
       }),
-      db.countRows('integration_pipelines', {
+      executor.countRows('integration_pipelines', {
         ...where,
         target_system_id: id,
       }),
@@ -1246,14 +1258,52 @@ function createExternalSystemRegistry({
    * other failure (permission, connection, syntax, a timeout) PROPAGATES, which is the fail-closed
    * half: a guard that cannot read its own evidence must not let the delete proceed as if the
    * evidence said zero.
+   *
+   * Returns `{ count, undefinedTable }` so the caller can tell a real zero from a tolerated absence:
+   * the absence is learned OUTSIDE the delete transaction (see `probeAbsentDependentTables`), because
+   * a 42P01 raised INSIDE a PostgreSQL transaction aborts it — every later statement fails 25P02 and
+   * the delete could never proceed, which would silently turn the tolerated case into a refusal.
    */
-  async function countDependentRows(table, where) {
+  async function countDependentRows(executor, table, where) {
     try {
-      return Number(await db.countRows(table, where)) || 0
+      return { count: Number(await executor.countRows(table, where)) || 0, undefinedTable: false }
     } catch (error) {
-      if (isUndefinedTableError(error)) return 0
+      if (isUndefinedTableError(error)) return { count: 0, undefinedTable: true }
       throw error
     }
+  }
+
+  function dependentTableQueries({ tenantId, id }) {
+    return [
+      [STOCK_PREP_SOURCE_BINDING_TABLE, { tenant_id: tenantId, external_system_id: id }],
+      [SEALED_EXPORT_STOCK_PREP_BINDING_TABLE, {
+        tenant_id: tenantId,
+        external_system_id: id,
+        status: LIVE_SEALED_EXPORT_BINDING_STATUS,
+      }],
+      ...LIVE_READ_SOURCE_CONFIG_STATUSES.map((status) => [READ_SOURCE_CONFIG_TABLE, {
+        tenant_id: tenantId,
+        system_id: id,
+        status,
+      }]),
+    ]
+  }
+
+  /**
+   * Which of the three dependent tables this deployment does NOT have — decided by SQLSTATE 42P01
+   * on an autocommit COUNT, BEFORE the delete transaction opens. The counts this probe produces are
+   * DISCARDED on purpose: they were taken with no row lock and are exactly the unprotected snapshot
+   * the lock protocol exists to replace. Only the absence set is kept; the authoritative counts are
+   * re-taken inside the transaction, under FOR UPDATE, skipping the absent tables. Any non-42P01
+   * failure propagates here exactly as it did before (fail-closed: the delete does not happen).
+   */
+  async function probeAbsentDependentTables({ tenantId, id }) {
+    const absent = new Set()
+    await Promise.all(dependentTableQueries({ tenantId, id }).map(async ([table, where]) => {
+      const result = await countDependentRows(db, table, where)
+      if (result.undefinedTable) absent.add(table)
+    }))
+    return absent
   }
 
   /**
@@ -1293,27 +1343,15 @@ function createExternalSystemRegistry({
    * the delete instead of silently counting zero. That is the fail-closed direction on purpose; the
    * fix is a SELECT grant, not a swallowed error (see the design doc's residuals).
    */
-  async function countDependentBindingReferences({ tenantId, id }) {
+  async function countDependentBindingReferences(executor, { tenantId, id }, { absentTables = new Set() } = {}) {
     const [
       stockPrepSourceBindingMatches,
       sealedExportBindingMatches,
       ...readSourceConfigMatches
-    ] = await Promise.all([
-      countDependentRows(STOCK_PREP_SOURCE_BINDING_TABLE, {
-        tenant_id: tenantId,
-        external_system_id: id,
-      }),
-      countDependentRows(SEALED_EXPORT_STOCK_PREP_BINDING_TABLE, {
-        tenant_id: tenantId,
-        external_system_id: id,
-        status: LIVE_SEALED_EXPORT_BINDING_STATUS,
-      }),
-      ...LIVE_READ_SOURCE_CONFIG_STATUSES.map((status) => countDependentRows(READ_SOURCE_CONFIG_TABLE, {
-        tenant_id: tenantId,
-        system_id: id,
-        status,
-      })),
-    ])
+    ] = await Promise.all(dependentTableQueries({ tenantId, id }).map(async ([table, where]) => {
+      if (absentTables.has(table)) return 0
+      return (await countDependentRows(executor, table, where)).count
+    }))
     return {
       stockPrepSourceBindingCount: stockPrepSourceBindingMatches,
       sealedExportBindingCount: sealedExportBindingMatches,
@@ -1321,6 +1359,34 @@ function createExternalSystemRegistry({
     }
   }
 
+  /**
+   * Delete an external system — the DELETE SIDE of the lock protocol
+   * (`lib/external-system-pointer-lock.cjs` holds the whole protocol; this comment is the half that
+   * lives here).
+   *
+   * ONE transaction whose FIRST statement is `SELECT ... FOR UPDATE` on the system row, THEN every
+   * reference count on the SAME transaction handle, THEN the DELETE. The lock is what turns the
+   * counts from a snapshot a concurrent writer is free to invalidate into a decision:
+   *   * writer in flight, then delete → the FOR UPDATE WAITS on the writer's KEY SHARE until it
+   *     commits; the count then SEES that pointer and refuses 409. Nothing was deleted.
+   *   * delete in flight, then writer → the writer's KEY SHARE WAITS on this FOR UPDATE until COMMIT;
+   *     its re-read then finds no row and it refuses in its own path's error shape. No pointer lands.
+   * `integration_pipelines` (057) participates through its REAL foreign key — PostgreSQL's RI check
+   * takes the same KEY SHARE — and additionally through `pipelines.cjs` requireExternalSystem's
+   * explicit KEY SHARE, so a pipeline write that loses the race refuses as the values-free
+   * PipelineValidationError it always raised, not as a bare 23503.
+   *
+   * The 409 is thrown INSIDE the transaction, which rolls it back: a refusal never leaves the row
+   * lock held and never writes. The not-found is decided under the same lock (a row that vanished
+   * while we waited reads as absent), so the "not found during delete" branch below is a posture
+   * check, not a live path.
+   *
+   * 42P01 TOLERANCE, MOVED IN FRONT. The dependent counts tolerate a MISSING table (a deployment that
+   * never ran 079/062/073) — but a 42P01 inside the transaction would abort it. So the absence set is
+   * learned by an autocommit probe BEFORE the transaction (`probeAbsentDependentTables`; its counts
+   * are discarded, only "which tables exist" is kept) and the transaction skips those tables. Every
+   * non-42P01 failure of the probe still propagates, so the delete does not happen — unchanged.
+   */
   async function deleteExternalSystem(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
@@ -1330,55 +1396,69 @@ function createExternalSystemRegistry({
       workspace_id: workspaceId,
       id,
     }
-    const row = await db.selectOne(TABLE, where)
-    if (!row) {
-      throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+    if (typeof db.transaction !== 'function') {
+      // FAIL CLOSED: a helper that cannot open a transaction cannot take the row lock, and an
+      // unlocked count-then-delete is exactly the race this protocol closes. No degraded path.
+      throw new Error('deleteExternalSystem: scoped db helper with transaction is required (external-system delete lock protocol)')
     }
 
-    // BOTH count sets run BEFORE the delete, and either one being non-zero refuses it. The
-    // dependent counts are NOT a second, weaker check bolted after the pipeline one: they raise the
-    // SAME ExternalSystemConflictError (409 — `http-routes.cjs:871` maps any `*Conflict*` name), so
-    // a caller cannot tell "referenced by a pipeline" from "referenced by a binding" by status code
-    // and then treat one of them as retryable.
-    const references = await countPipelineReferences({ tenantId, workspaceId, id })
-    const dependents = await countDependentBindingReferences({ tenantId, id })
-    const referencedPipelineCount = references.sourcePipelineCount + references.targetPipelineCount
-    const referencedBindingCount = dependents.stockPrepSourceBindingCount
-      + dependents.sealedExportBindingCount
-      + dependents.readSourceConfigCount
-    if (referencedPipelineCount > 0 || referencedBindingCount > 0) {
-      throw new ExternalSystemConflictError(
-        // The pipeline wording is preserved EXACTLY when pipelines are what refuse, because it is
-        // already on the wire (`__tests__/http-routes.test.cjs:974`).
-        referencedPipelineCount > 0
-          ? 'external system is used by pipelines'
-          : 'external system is used by source bindings or read-source configs',
-        {
-          id,
-          tenantId,
-          workspaceId,
-          referencedPipelineCount,
-          referencedBindingCount,
-          ...references,
-          ...dependents,
-        },
-      )
-    }
+    const absentTables = await probeAbsentDependentTables({ tenantId, id })
 
-    const deleted = await publicRow(credentialStore, row)
-    const deleteResult = await db.deleteRows(TABLE, where)
-    const deletedCount = Array.isArray(deleteResult)
-      ? deleteResult.length
-      : Array.isArray(deleteResult?.rows)
-        ? deleteResult.rows.length
-        : Number(deleteResult) || 0
-    if (deletedCount < 1) {
-      throw new ExternalSystemNotFoundError('external system not found during delete', { id, tenantId, workspaceId })
-    }
-    return {
-      deleted: true,
-      system: deleted,
-    }
+    return db.transaction(async (trx) => {
+      if (typeof trx.selectOneForUpdate !== 'function') {
+        throw new Error('deleteExternalSystem: transaction handle with selectOneForUpdate is required (external-system delete lock protocol)')
+      }
+      // LOCK FIRST. Nothing is read or counted before this statement returns.
+      const row = await trx.selectOneForUpdate(TABLE, where)
+      if (!row) {
+        throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+      }
+
+      // BOTH count sets run under the lock and BEFORE the delete, and either one being non-zero
+      // refuses it. The dependent counts are NOT a second, weaker check bolted after the pipeline
+      // one: they raise the SAME ExternalSystemConflictError (409 — `http-routes.cjs:871` maps any
+      // `*Conflict*` name), so a caller cannot tell "referenced by a pipeline" from "referenced by a
+      // binding" by status code and then treat one of them as retryable.
+      const references = await countPipelineReferences(trx, { tenantId, workspaceId, id })
+      const dependents = await countDependentBindingReferences(trx, { tenantId, id }, { absentTables })
+      const referencedPipelineCount = references.sourcePipelineCount + references.targetPipelineCount
+      const referencedBindingCount = dependents.stockPrepSourceBindingCount
+        + dependents.sealedExportBindingCount
+        + dependents.readSourceConfigCount
+      if (referencedPipelineCount > 0 || referencedBindingCount > 0) {
+        throw new ExternalSystemConflictError(
+          // The pipeline wording is preserved EXACTLY when pipelines are what refuse, because it is
+          // already on the wire (`__tests__/http-routes.test.cjs:974`).
+          referencedPipelineCount > 0
+            ? 'external system is used by pipelines'
+            : 'external system is used by source bindings or read-source configs',
+          {
+            id,
+            tenantId,
+            workspaceId,
+            referencedPipelineCount,
+            referencedBindingCount,
+            ...references,
+            ...dependents,
+          },
+        )
+      }
+
+      const deleted = await publicRow(credentialStore, row)
+      const deleteResult = await trx.deleteRows(TABLE, where)
+      const deletedCount = Array.isArray(deleteResult)
+        ? deleteResult.length
+        : Array.isArray(deleteResult?.rows)
+          ? deleteResult.rows.length
+          : Number(deleteResult) || 0
+      if (deletedCount < 1) {
+        throw new ExternalSystemNotFoundError('external system not found during delete', { id, tenantId, workspaceId })
+      }
+      return {
+        deleted: true,
+        system: deleted,
+      }
+    })
   }
 
   // LIST, with the SAME non-null-hint widening `selectScopedRow` already does for a by-id read.

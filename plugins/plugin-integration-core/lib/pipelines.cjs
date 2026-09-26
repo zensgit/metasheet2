@@ -450,8 +450,23 @@ async function conflictFromRunningRun(db, normalized, details = {}) {
   })
 }
 
+// The endpoint check is also the WRITER'S HALF of the external-system delete lock protocol
+// (`external-system-pointer-lock.cjs`): the row is read `FOR KEY SHARE` on the caller's transaction
+// handle, so a concurrent `deleteExternalSystem` (which holds FOR UPDATE for its whole
+// count-then-delete) makes this read WAIT; when it resumes the row is gone and the pipeline write
+// refuses as the SAME values-free PipelineValidationError it always raised for a missing endpoint —
+// instead of reaching the INSERT and dying on 057's foreign key as a bare 23503. Conversely a delete
+// that arrives while this KEY SHARE is held waits for this transaction to commit, then counts the
+// pipeline and refuses 409. Only meaningful because `upsertPipeline` and `instantiateTemplate` run
+// this INSIDE `db.transaction`; a helper that cannot lock is refused rather than degraded to the
+// unprotected `selectOne` this replaces. LOCK ORDER: source system, target system, pipeline row,
+// field mappings — KEY SHARE is compatible with KEY SHARE, so two pipeline writers naming the same
+// two systems in opposite orders cannot deadlock.
 async function requireExternalSystem(db, normalized, systemId, expectedRoles, field) {
-  const row = await db.selectOne(EXTERNAL_SYSTEMS_TABLE, {
+  if (!db || typeof db.selectOneForKeyShare !== 'function') {
+    throw new Error('pipelines: transaction handle with selectOneForKeyShare is required to write a pipeline (external-system delete lock protocol)')
+  }
+  const row = await db.selectOneForKeyShare(EXTERNAL_SYSTEMS_TABLE, {
     ...scopeWhere(normalized),
     id: systemId,
   })
@@ -576,13 +591,14 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
 
     const write = (scopedDb) => writePipelineRow(scopedDb, normalized, idGenerator)
 
-    if (normalized.fieldMappings !== undefined) {
-      if (typeof db.transaction !== 'function') {
-        throw new Error('createPipelineRegistry: db.transaction is required when fieldMappings are provided')
-      }
-      return db.transaction(write)
+    // ALWAYS one transaction, not only when field mappings ride along: the endpoint check inside
+    // `writePipelineRow` takes KEY SHARE on both external systems, and a lock taken in autocommit is
+    // released at statement end — which would leave the INSERT/UPDATE one statement later exactly as
+    // unprotected as before. A helper without `transaction` is refused rather than written around.
+    if (typeof db.transaction !== 'function') {
+      throw new Error('createPipelineRegistry: db.transaction is required to write a pipeline (external-system delete lock protocol)')
     }
-    return write(db)
+    return db.transaction(write)
   }
 
   async function getPipeline(input) {

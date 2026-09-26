@@ -86,7 +86,10 @@ function compileWithSource(source) {
 }
 
 function mutatedRegistryFactory(label, replacements) {
-  const source = fs.readFileSync(MODULE_PATH, 'utf8')
+  // CRLF-normalized: on a Windows checkout with core.autocrlf the working-tree file carries \r\n,
+  // and a multi-line anchor written with \n would report "anchor missing" — a local-only red that
+  // says nothing about the mutation. Anchors are authored against the LF form the repository stores.
+  const source = fs.readFileSync(MODULE_PATH, 'utf8').replace(/\r\n/g, '\n')
   let patched = source
   for (const [from, to] of replacements) {
     assert.ok(patched.includes(from), `${label}: mutation anchor is missing, the mutation would be vacuous`)
@@ -130,48 +133,62 @@ function createMockDb() {
     })
   }
 
-  return {
-    countCalls,
-    rowsOf,
-    insertRaw(table, row) { rowsOf(table).push(row) },
-    failCountWith(table, error) { countErrors.set(table, error) },
-    async selectOne(table, where) {
-      return rowsOf(table).find(row => matchesWhere(row, where)) || null
-    },
-    async select(table, options = {}) {
-      const filtered = rowsOf(table).filter(row => matchesWhere(row, options.where || {}))
-      const offset = options.offset || 0
-      return filtered.slice(offset, offset + (options.limit || 1000))
-    },
-    async insertOne(table, row) {
-      const stored = {
-        ...row,
-        created_at: row.created_at || '2026-09-20T00:00:00.000Z',
-        updated_at: row.updated_at || '2026-09-20T00:00:00.000Z',
-      }
-      rowsOf(table).push(stored)
-      return [stored]
-    },
-    async updateRow(table, set, where) {
-      const row = rowsOf(table).find(candidate => matchesWhere(candidate, where))
-      if (!row) return []
-      Object.assign(row, set)
-      return [row]
-    },
-    async deleteRows(table, where) {
-      const rows = rowsOf(table)
-      const before = rows.length
-      for (let index = rows.length - 1; index >= 0; index -= 1) {
-        if (matchesWhere(rows[index], where)) rows.splice(index, 1)
-      }
-      return before - rows.length
-    },
-    async countRows(table, where) {
-      countCalls.push([table, { ...where }])
-      if (countErrors.has(table)) throw countErrors.get(table)
-      return rowsOf(table).filter(row => matchesWhere(row, where)).length
-    },
+  // `countCalls` entries are `[table, where, inTransaction]`. Since the delete lock protocol the
+  // guard counts TWICE per table: once as an autocommit PROBE (only "does the table exist" is
+  // kept — see external-systems.cjs probeAbsentDependentTables) and once, authoritatively, INSIDE
+  // the FOR UPDATE transaction. The B-02 / B-12 filter-shape assertions below read the
+  // in-transaction call, because that is the one whose result decides the delete.
+  function handle(inTransaction) {
+    return {
+      countCalls,
+      rowsOf,
+      insertRaw(table, row) { rowsOf(table).push(row) },
+      failCountWith(table, error) { countErrors.set(table, error) },
+      async selectOne(table, where) {
+        return rowsOf(table).find(row => matchesWhere(row, where)) || null
+      },
+      async selectOneForUpdate(table, where) {
+        return rowsOf(table).find(row => matchesWhere(row, where)) || null
+      },
+      async select(table, options = {}) {
+        const filtered = rowsOf(table).filter(row => matchesWhere(row, options.where || {}))
+        const offset = options.offset || 0
+        return filtered.slice(offset, offset + (options.limit || 1000))
+      },
+      async insertOne(table, row) {
+        const stored = {
+          ...row,
+          created_at: row.created_at || '2026-09-20T00:00:00.000Z',
+          updated_at: row.updated_at || '2026-09-20T00:00:00.000Z',
+        }
+        rowsOf(table).push(stored)
+        return [stored]
+      },
+      async updateRow(table, set, where) {
+        const row = rowsOf(table).find(candidate => matchesWhere(candidate, where))
+        if (!row) return []
+        Object.assign(row, set)
+        return [row]
+      },
+      async deleteRows(table, where) {
+        const rows = rowsOf(table)
+        const before = rows.length
+        for (let index = rows.length - 1; index >= 0; index -= 1) {
+          if (matchesWhere(rows[index], where)) rows.splice(index, 1)
+        }
+        return before - rows.length
+      },
+      async countRows(table, where) {
+        countCalls.push([table, { ...where }, inTransaction])
+        if (countErrors.has(table)) throw countErrors.get(table)
+        return rowsOf(table).filter(row => matchesWhere(row, where)).length
+      },
+      async transaction(callback) {
+        return callback(handle(true))
+      },
+    }
   }
+  return handle(false)
 }
 
 async function setupSystem({ factory = createExternalSystemRegistry, workspaceId = null, id = 'sys_bound' } = {}) {
@@ -272,8 +289,8 @@ async function testStockPrepBindingBlocksDelete() {
   assertSurvives(tenantWide.db, 'B-02')
 
   // The filter that was actually sent carries the tenant and the system id, and NO workspace key.
-  const bindingCounts = tenantWide.db.countCalls.filter(([table]) => table === STOCK_PREP_BINDING_TABLE)
-  assert.equal(bindingCounts.length, 1, 'B-02: the 079 table is counted exactly once per delete')
+  const bindingCounts = tenantWide.db.countCalls.filter(([table, , inTransaction]) => table === STOCK_PREP_BINDING_TABLE && inTransaction)
+  assert.equal(bindingCounts.length, 1, 'B-02: the 079 table is counted exactly once INSIDE the delete transaction')
   assert.deepEqual(
     Object.keys(bindingCounts[0][1]).sort(),
     ['external_system_id', 'tenant_id'],
@@ -375,8 +392,8 @@ async function testSealedExportBindingLifecycle() {
   assertSurvives(scoped.db, 'B-12')
 
   // The filter that was actually sent: tenant + system id + status, and NO workspace key.
-  const sealedCounts = scoped.db.countCalls.filter(([table]) => table === SEALED_EXPORT_BINDING_TABLE)
-  assert.equal(sealedCounts.length, 1, 'B-12: the 073 table is counted exactly once per delete')
+  const sealedCounts = scoped.db.countCalls.filter(([table, , inTransaction]) => table === SEALED_EXPORT_BINDING_TABLE && inTransaction)
+  assert.equal(sealedCounts.length, 1, 'B-12: the 073 table is counted exactly once INSIDE the delete transaction')
   assert.deepEqual(
     Object.keys(sealedCounts[0][1]).sort(),
     ['external_system_id', 'status', 'tenant_id'],
@@ -490,8 +507,10 @@ async function testMutationsFlipTheNamedCases() {
 
   // M-5 — the status key is dropped from the 073 filter, so terminal RETIRED history counts as a
   // live pointer and keeps the system undeletable forever.
+  // Anchor is the 073 entry of `dependentTableQueries` (the one place the status filter is built
+  // since the delete lock protocol moved the query shapes out of the count function).
   const sealedStatusIgnored = mutatedRegistryFactory('M-5', [
-    ['        status: LIVE_SEALED_EXPORT_BINDING_STATUS,\n', ''],
+    ['        external_system_id: id,\n        status: LIVE_SEALED_EXPORT_BINDING_STATUS,\n      }],', '        external_system_id: id,\n      }],'],
   ])
   const m5 = await setupSystem({ factory: sealedStatusIgnored })
   m5.db.insertRaw(SEALED_EXPORT_BINDING_TABLE, sealedExportBinding({ binding_id: 'sealed_retired', status: 'RETIRED' }))
