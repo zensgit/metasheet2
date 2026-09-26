@@ -120,11 +120,14 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     'THE helper. The one statement that locks the row and re-reads `deleted_at` together.',
   ],
   [
-    'multitable/sheet-liveness.ts :: SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE',
-    'THE multi-sheet helper (#5954). Locks every named row in byte `id` order (`COLLATE "C"` — the same order '
-    + 'the JS-sorted sheet lockers use, on any database locale) and re-reads each `deleted_at` in '
-    + 'the same statement. Its caller is the cross-base mirror RECORD op (routes/univer-meta.ts), whose '
-    + 'lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaced — that site is closed, not ledgered.',
+    'multitable/sheet-liveness.ts :: SELECT s.id, s.deleted_at FROM meta_sheets s JOIN unnest($1::text[]) WITH ORDINALITY AS u(id, ord) ON s.id = u.id ORDER BY u.ord FOR UPDATE OF s',
+    'THE multi-sheet helper (#5954). Locks every named row in the order of the array it is handed '
+    + '(`WITH ORDINALITY … ORDER BY u.ord`), which the helper sorts in JS code-unit order — the order the '
+    + 'JS-sorted sheet lockers use, whatever the database locale and whatever characters the (client-chosen) '
+    + 'ids carry; no SQL-side sort of `id`, since both collation order and byte (`COLLATE "C"`) order can cross '
+    + 'JS order — and re-reads each `deleted_at` in the same statement. Its caller is the cross-base mirror '
+    + 'RECORD op (routes/univer-meta.ts), whose lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaced — '
+    + 'that site is closed, not ledgered.',
   ],
   [
     'multitable/link-writer-fence.ts :: SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE NOWAIT',
@@ -462,6 +465,10 @@ describe('#5938 — permission write transactions re-check sheet liveness under 
     expect(locksSheetRowAnyMode('SELECT id FROM meta_sheets WHERE id = $1 FOR NO KEY UPDATE')).toBe(true)
     expect(locksSheetRowAnyMode('SELECT deleted_at FROM meta_sheets WHERE id = $1')).toBe(false)
     expect(locksSheetRowAnyMode('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE')).toBe(false)
+    // #5954: the multi-sheet helper's statement joins meta_sheets to an `unnest … WITH ORDINALITY`; it keeps
+    // `FROM meta_sheets s` FIRST so this recognizer (which keys on `FROM meta_sheets`) sees it, and the
+    // census equality above reds if a rewrite ever spells it so it is not seen.
+    expect(locksSheetRowAnyMode(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
   })
 
   it('the ledger is EMPTY — the cross-base mirror op\'s former lock-only residual is closed, not licensed (#5954)', () => {
@@ -743,12 +750,34 @@ describe('#5954 — the multi-sheet helper actually locks, reads and refuses', (
     // Caller order B, A, B — the statement still receives each id ONCE, in sorted order.
     await expect(assertSheetsLiveForUpdate(query, [SHEET_B, SHEET_A, SHEET_B])).resolves.toBeUndefined()
     expect(seen).toEqual([{ sql: SHEETS_ROW_LOCK_LIVENESS_SQL, params: [[SHEET_A, SHEET_B]] }])
-    // The statement locks (FOR UPDATE), orders the lock (ORDER BY id) in BYTE order (COLLATE "C" — the order
-    // the JS-sorted sheet lockers use, whatever the database locale), and READS deleted_at — all of it, in the
-    // one text the helper issues. A lock-only `SELECT id … FOR UPDATE` is what #5954 replaced; a bare
-    // `ORDER BY id` sorts by the column's (database default) collation and can lock in the opposite order to
-    // `lockRecordLinkTargetSheetsOnQuery` on a non-C database (the real-DB suite reproduces that deadlock).
-    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(/^SELECT id, deleted_at FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\) ORDER BY id COLLATE "C" FOR UPDATE$/)
+    // The statement locks (FOR UPDATE OF the sheet rows), orders the lock by each id's POSITION in the array it
+    // is handed (WITH ORDINALITY … ORDER BY u.ord — so the JS sort above IS the lock order, whatever the
+    // database locale and whatever characters the ids carry), and READS deleted_at — all of it, in the one text
+    // the helper issues. A lock-only `SELECT id … FOR UPDATE` is what #5954 replaced; any SQL-side sort of `id`
+    // (a bare `ORDER BY id` by collation, or `COLLATE "C"` by bytes) can lock in the opposite order to
+    // `lockRecordLinkTargetSheetsOnQuery` (the real-DB suite reproduces both deadlocks, L-2 and L-4).
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(
+      /^SELECT s\.id, s\.deleted_at FROM meta_sheets s JOIN unnest\(\$1::text\[\]\) WITH ORDINALITY AS u\(id, ord\) ON s\.id = u\.id ORDER BY u\.ord FOR UPDATE OF s$/,
+    )
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).not.toMatch(/ORDER BY\s+(?:s\.)?id\b/i)
+  })
+
+  it('hands the statement the ids in JS CODE-UNIT order, not byte order — an emoji id sorts before a full-width one', async () => {
+    // Sheet ids are client-chosen (POST /sheets takes any 1–50 character `id`). An id with a character above
+    // U+FFFF (a surrogate pair, lead unit 0xD83D here) sorts BEFORE one with U+FF01 in JS, but AFTER it in
+    // UTF-8 byte order (F0… > EF…). The lock order is the array order, so it must be the JS one — the order
+    // `lockRecordLinkTargetSheetsOnQuery` takes the same rows in (real-DB L-3 races the two).
+    const astral = 'sheet_guard_5954_\u{1F600}'
+    const fullwidth = 'sheet_guard_5954_\uFF01'
+    expect(Buffer.compare(Buffer.from(fullwidth), Buffer.from(astral))).toBe(-1) // byte order: full-width first
+    const { query, seen } = scriptedQuery([
+      { id: astral, deleted_at: null },
+      { id: fullwidth, deleted_at: null },
+    ])
+    await expect(assertSheetsLiveForUpdate(query, [fullwidth, astral])).resolves.toBeUndefined()
+    expect(seen).toEqual([{ sql: SHEETS_ROW_LOCK_LIVENESS_SQL, params: [[astral, fullwidth]] }])
+    // …and the same order the production share locker's own sort gives.
+    expect([fullwidth, astral].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))).toEqual([astral, fullwidth])
   })
 
   it('an EMPTY list is a caller bug: a values-free TypeError, and no statement at all (it would lock nothing and pass)', async () => {

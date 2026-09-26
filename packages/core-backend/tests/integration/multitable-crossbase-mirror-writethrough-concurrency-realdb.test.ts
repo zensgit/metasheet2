@@ -612,39 +612,67 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
     })
   }
 
-  // ── L-*: lock ORDER on a non-C collation (#5954) ──────────────────────────────────────────────────────
-  // The multi-sheet lock must take its rows in the order the other sheet lockers take theirs: JS code-unit
-  // order. `lockRecordLinkTargetSheetsOnQuery` (the record-link write path) takes `meta_sheets … FOR SHARE`
-  // one id at a time in that order. A bare `ORDER BY id` sorts by the column's collation — the database
-  // default — and under any linguistic collation 'sheet_a…' sorts before 'sheet_B…', the reverse of JS order.
-  // The case builds that collation itself (a scratch schema whose `meta_sheets.id` is ICU en-US, reached via
-  // `SET LOCAL search_path`) so it holds on any cluster locale; CI's may well be C, where the hazard is hidden.
-  describe('L — the two-sheet lock takes rows in JS order on a non-C collation', () => {
+  // ── L-*: lock ORDER against the JS-order share locker (#5954) ─────────────────────────────────────────
+  // The multi-sheet lock must take its rows in the order the other WAITING sheet lockers take theirs: JS
+  // code-unit order. `lockRecordLinkTargetSheetsOnQuery` (the record-link write path) takes `meta_sheets …
+  // FOR SHARE` one id at a time in that order. Any order the DATABASE derives from the id text can cross it,
+  // and sheet ids are client-chosen (POST /sheets accepts any 1–50 character string as `id`, routes/univer-meta.ts):
+  //   - by the column's collation (a bare `ORDER BY id` — the database default): under a linguistic collation
+  //     'sheet_a…' sorts before 'sheet_B…', the reverse of JS order. L-0/L-1/L-2 build that collation in a
+  //     scratch schema (`meta_sheets.id` ICU en-US, reached via `SET LOCAL search_path`) so they hold on any
+  //     cluster locale; CI's may well be C, where this one is hidden;
+  //   - by bytes (`ORDER BY id COLLATE "C"`, the round-1 statement of this PR): UTF-8 byte order is code-POINT
+  //     order, JS order is UTF-16 code-UNIT order, and they cross when, at the first differing position, one
+  //     id has a character above U+FFFF (a surrogate pair, lead unit 0xD800–0xDBFF) and the other a character
+  //     in U+E000–U+FFFF — an emoji against a full-width '！' (U+FF01), say. L-3/L-4 run that pair on the
+  //     REAL, migrated `meta_sheets`, whatever the database locale.
+  // The helper no longer sorts in SQL at all: it hands the statement the ids ALREADY in JS order, and the
+  // statement locks them in that array order (`unnest … WITH ORDINALITY … ORDER BY u.ord`).
+  describe('L — the two-sheet lock takes rows in JS order, whatever the collation or the characters', () => {
     const SCHEMA = `mlrd5954_l_${TS}`
     const S_UPPER = `sheet_B_${TS}` // JS order: first ('B' is 0x42, 'a' is 0x61)
     const S_LOWER = `sheet_a_${TS}` // linguistic order: first
+    // Real table: JS order puts the emoji first (lead surrogate 0xD83D < 0xFF01); byte order puts '！' first
+    // (UTF-8 EF BC 81 < F0 9F 98 80). Both well inside POST /sheets' 50-character `id` limit.
+    const S_ASTRAL = `sheet_\u{1F600}_${TS}` // JS order: first
+    const S_FULLWIDTH = `sheet_\uFF01_${TS}` // byte (COLLATE "C") order: first
+    const ICU_PAIR = { jsFirst: S_UPPER, jsSecond: S_LOWER }
+    const ASTRAL_PAIR = { jsFirst: S_ASTRAL, jsSecond: S_FULLWIDTH }
+    // The two id-SORTED statements the controls race. Production issues neither any more, so they are spelled
+    // out here: L-2's sorts by the column collation, L-4's (this PR's round-1 helper) by bytes.
+    const SORTED_BY_COLLATION_SQL = 'SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE'
+    const SORTED_BY_BYTES_SQL = 'SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE'
     type Settled = { ok: true; code: null } | { ok: false; code: string | null }
     const settle = (p: Promise<unknown>): Promise<Settled> =>
       p.then((): Settled => ({ ok: true, code: null }), (err: unknown): Settled => ({ ok: false, code: pgCode(err) }))
     type LockQuery = (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>
+    const ids = (res: { rows: unknown[] }) => res.rows.map((r) => (r as { id: string }).id)
 
     beforeAll(async () => {
       await q(`CREATE SCHEMA ${SCHEMA}`)
       await q(`CREATE COLLATION ${SCHEMA}.linguistic (provider = icu, locale = 'en-US')`)
       await q(`CREATE TABLE ${SCHEMA}.meta_sheets (id text COLLATE ${SCHEMA}.linguistic PRIMARY KEY, deleted_at timestamptz)`)
       await q(`INSERT INTO ${SCHEMA}.meta_sheets (id) VALUES ($1), ($2)`, [S_UPPER, S_LOWER])
+      await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3),($4,$5,$6)', [S_ASTRAL, BASE_A, 'L astral', S_FULLWIDTH, BASE_A, 'L fullwidth'])
     })
 
     afterAll(async () => {
       await q(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {})
+      await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[S_ASTRAL, S_FULLWIDTH]]).catch(() => {})
     })
 
     /**
-     * X = the production share locker on [S_LOWER, S_UPPER], paused between its two row locks (it has taken
-     * S_UPPER, JS order's first). Y = `multiLock` on the pair; it must park behind X. A NOWAIT probe then
-     * shows whether parked Y already holds S_LOWER. X is released to its second row; both sides settle.
+     * X = the production share locker on the pair, handed in REVERSE JS order (so its own sort does the work)
+     * and paused between its two row locks — it has taken `jsFirst`. Y = `multiLock` on the pair; it must
+     * park behind X. A NOWAIT probe then shows whether parked Y already holds `jsSecond`, i.e. took the rows
+     * in the opposite order. X is released to its second row; both sides settle. `searchPath` null races the
+     * real, migrated `meta_sheets`; otherwise the scratch schema's table.
      */
-    async function raceShareLocker(multiLock: (query: LockQuery) => Promise<unknown>) {
+    async function raceShareLocker(
+      pair: { jsFirst: string; jsSecond: string },
+      searchPath: string | null,
+      multiLock: (query: LockQuery) => Promise<unknown>,
+    ) {
       const x = await connect()
       const y = await connect()
       const probe = await connect()
@@ -656,7 +684,7 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
         const yPid = await backendPid(y)
         for (const c of [x, y]) {
           await c.query('BEGIN')
-          await c.query(`SET LOCAL search_path TO ${SCHEMA}`)
+          if (searchPath) await c.query(`SET LOCAL search_path TO ${searchPath}`)
           await c.query("SET LOCAL lock_timeout = '10s'")
         }
         const gate = new Promise<void>((resolve) => { openGate = resolve })
@@ -670,7 +698,7 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
           if (requestedByX.length === 1) firstHeld()
           return res
         }
-        locker = settle(lockRecordLinkTargetSheetsOnQuery(xQuery, [S_LOWER, S_UPPER]))
+        locker = settle(lockRecordLinkTargetSheetsOnQuery(xQuery, [pair.jsSecond, pair.jsFirst]))
         await withTimeout(firstHeldP, 10_000, 'the share locker took its first row')
 
         let ySettled = false
@@ -678,8 +706,8 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
         const parkedQuery = await waitForLockWaiter(yPid, xPid, () => ySettled)
 
         await probe.query('BEGIN')
-        await probe.query(`SET LOCAL search_path TO ${SCHEMA}`)
-        const probeCode = await probe.query('SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE NOWAIT', [S_LOWER])
+        if (searchPath) await probe.query(`SET LOCAL search_path TO ${searchPath}`)
+        const probeCode = await probe.query('SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE NOWAIT', [pair.jsSecond])
           .then(() => null, (err: unknown) => pgCode(err))
         await probe.query('ROLLBACK')
 
@@ -703,13 +731,12 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
 
     test('L-0 fixture: the column collation orders the pair OPPOSITE to JS order; COLLATE "C" gives JS order back', async () => {
       expect([S_LOWER, S_UPPER].sort()).toEqual([S_UPPER, S_LOWER])
-      const ids = (res: { rows: unknown[] }) => res.rows.map((r) => (r as { id: string }).id)
       expect(ids(await q(`SELECT id FROM ${SCHEMA}.meta_sheets ORDER BY id`))).toEqual([S_LOWER, S_UPPER])
       expect(ids(await q(`SELECT id FROM ${SCHEMA}.meta_sheets ORDER BY id COLLATE "C"`))).toEqual([S_UPPER, S_LOWER])
     })
 
     test('L-1 the helper, racing the JS-order share locker: same lock order, no deadlock, both complete', async () => {
-      const r = await raceShareLocker((query) => assertSheetsLiveForUpdate(query, [S_LOWER, S_UPPER]))
+      const r = await raceShareLocker(ICU_PAIR, SCHEMA, (query) => assertSheetsLiveForUpdate(query, [S_LOWER, S_UPPER]))
       // Neither side was a deadlock victim (40P01) — nor failed in any other way.
       expect({ locker: r.locker.code, multi: r.multi.code }).toEqual({ locker: null, multi: null })
       expect(r.locker.ok && r.multi.ok).toBe(true)
@@ -719,12 +746,31 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
       expect(r.probeCode).toBeNull()
     })
 
-    test('L-2 control: the same statement WITHOUT the collate takes the rows in collation order and deadlocks', async () => {
-      const uncollated = SHEETS_ROW_LOCK_LIVENESS_SQL.replace(' COLLATE "C"', '')
-      expect(uncollated).not.toBe(SHEETS_ROW_LOCK_LIVENESS_SQL)
-      expect(uncollated).toContain('ORDER BY id FOR UPDATE')
-      const r = await raceShareLocker((query) => query(uncollated, [[S_LOWER, S_UPPER].sort()]))
+    test('L-2 control: a lock sorted by the column collation (bare `ORDER BY id`) takes the rows in the other order and deadlocks', async () => {
+      const r = await raceShareLocker(ICU_PAIR, SCHEMA, (query) => query(SORTED_BY_COLLATION_SQL, [[S_LOWER, S_UPPER].sort()]))
       // Parked behind X on S_UPPER, it already holds S_LOWER (its collation's first) — the crossed order…
+      expect(r.probeCode).toBe('55P03')
+      // …so X's second row closes the cycle and Postgres kills one side.
+      expect([r.locker.code, r.multi.code].filter((c) => c === '40P01')).toHaveLength(1)
+    })
+
+    test('L-3 real meta_sheets, an emoji id against a full-width one: the helper locks in JS order — no deadlock', async () => {
+      // Fixture: in the migrated table, this pair's JS order and its byte order really are opposite.
+      expect([S_FULLWIDTH, S_ASTRAL].sort()).toEqual([S_ASTRAL, S_FULLWIDTH])
+      expect(ids(await q('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C"', [[S_ASTRAL, S_FULLWIDTH]])))
+        .toEqual([S_FULLWIDTH, S_ASTRAL])
+      const r = await raceShareLocker(ASTRAL_PAIR, null, (query) => assertSheetsLiveForUpdate(query, [S_FULLWIDTH, S_ASTRAL]))
+      expect({ locker: r.locker.code, multi: r.multi.code }).toEqual({ locker: null, multi: null })
+      expect(r.locker.ok && r.multi.ok).toBe(true)
+      expect(r.requestedByX).toEqual([S_ASTRAL, S_FULLWIDTH]) // the share locker really went in JS order
+      expect(r.parkedQuery.startsWith(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
+      // Parked behind X on the emoji row, the helper holds NOTHING yet: it asked for that row first, as X did.
+      expect(r.probeCode).toBeNull()
+    })
+
+    test('L-4 control: the byte-sorted lock (`ORDER BY id COLLATE "C"`, round 1) on the same pair takes the rows in the other order and deadlocks', async () => {
+      const r = await raceShareLocker(ASTRAL_PAIR, null, (query) => query(SORTED_BY_BYTES_SQL, [[S_FULLWIDTH, S_ASTRAL].sort()]))
+      // Parked behind X on the emoji row, it already holds the full-width row (byte order's first)…
       expect(r.probeCode).toBe('55P03')
       // …so X's second row closes the cycle and Postgres kills one side.
       expect([r.locker.code, r.multi.code].filter((c) => c === '40P01')).toHaveLength(1)

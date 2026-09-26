@@ -55,15 +55,19 @@ const collapse = (sql: string): string => sql.replace(/\s+/g, ' ').trim()
 type SheetRow = { id: string; base_id: string | null; deleted_at: unknown }
 
 /**
- * `SELECT <cols> FROM meta_sheets WHERE id = ANY($1::text[]) …` answered from a table, projecting ONLY the
- * selected columns. Returns null for any other statement. `AND …` predicates are not modelled (they belong
- * to other readers — the approval-projection probe — which must see nothing here).
+ * `SELECT <cols> FROM meta_sheets WHERE id = ANY($1::text[]) …`, and the multi-sheet helper's
+ * `SELECT s.<col>, … FROM meta_sheets s JOIN unnest($1::text[]) WITH ORDINALITY … ORDER BY u.ord FOR UPDATE OF s`,
+ * answered from a table in the order of `$1`, projecting ONLY the selected columns. Returns null for any other
+ * statement. `AND …` predicates are not modelled (they belong to other readers — the approval-projection
+ * probe — which must see nothing here).
  */
 function answerMultiSheetSelect(table: ReadonlyMap<string, SheetRow>, sql: string, params: unknown[]): { rows: unknown[] } | null {
-  const m = /^SELECT (.+?) FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\)(.*)$/i.exec(collapse(sql))
+  const text = collapse(sql)
+  const m = /^SELECT (.+?) FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\)(.*)$/i.exec(text)
+    ?? /^SELECT (.+?) FROM meta_sheets s JOIN unnest\(\$1::text\[\]\) WITH ORDINALITY AS u\(id, ord\) ON s\.id = u\.id( ORDER BY u\.ord FOR UPDATE OF s)$/i.exec(text)
   if (!m) return null
   if (/\bAND\b/i.test(m[2]!)) return { rows: [] }
-  const cols = m[1]!.split(',').map((c) => c.trim().split(/\s+/).pop()!)
+  const cols = m[1]!.split(',').map((c) => c.trim().split(/\s+/).pop()!.replace(/^s\./, ''))
   const ids = Array.isArray(params[0]) ? (params[0] as unknown[]) : []
   const rows: unknown[] = []
   for (const id of ids) {

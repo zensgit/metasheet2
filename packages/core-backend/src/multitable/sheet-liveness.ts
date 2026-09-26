@@ -201,31 +201,46 @@ export async function assertSheetLiveForUpdate(query: LivenessQuery, sheetId: st
 }
 
 /**
- * The MULTI-sheet row lock: ONE statement that locks every named `meta_sheets` row, in `id` order, AND reads
- * each row's `deleted_at` (#5954).
+ * The MULTI-sheet row lock: ONE statement that locks every named `meta_sheets` row, in the ORDER OF THE ARRAY
+ * IT IS HANDED, AND reads each row's `deleted_at` (#5954). {@link loadSheetsLivenessForUpdate} hands it the ids
+ * already sorted in JS code-unit order, so that is the lock order.
  *
  * EXPORTED for the same reason as {@link SHEET_ROW_LOCK_LIVENESS_SQL}: a real-DB probe that proves a writer is
  * PARKED on these rows can derive its pattern from this text instead of copying it.
  *
- * `ORDER BY id` is what makes the lock order deterministic. Passing a sorted array to `= ANY($1)` does not:
- * the row-lock order is the order the plan hands rows to the lock step, which for a sequential scan is the
- * physical order, not the array order. With `ORDER BY` the rows are sorted BEFORE they are locked, so every
- * caller of this statement acquires the same set of rows in the same order — two concurrent multi-sheet
- * writers on the same pair cannot each hold one row and wait for the other.
+ * `ORDER BY u.ord` is what makes the lock order the array order. Passing a sorted array to `= ANY($1)` alone
+ * does not: the row-lock order is the order the plan hands rows to the lock step, which for a sequential scan
+ * is the physical order. With an `ORDER BY` the rows are sorted BEFORE they are locked (the lock step sits
+ * above the sort), and `u.ord` is each id's 1-based position in `$1` (`unnest … WITH ORDINALITY`), so the
+ * rows are locked exactly in the order the caller sorted them. Every caller of this statement therefore takes
+ * the same set of rows in the same order — two concurrent multi-sheet writers on the same pair cannot each
+ * hold one row and wait for the other.
  *
- * `COLLATE "C"` makes that order the SAME order the JS-sorted sheet lockers use. A bare `ORDER BY id` sorts
- * by the column's collation, which is the database default — and on a non-C database (an ICU locale, or the
- * Chinese libc locale a deployment may run) `'sheet_a' < 'sheet_B'`, while JS code-unit order (`.sort()`,
- * `a < b`) puts `'sheet_B'` first. `lockRecordLinkTargetSheetsOnQuery` (services/approval-record-link-txn-auth.ts)
- * takes `meta_sheets … FOR SHARE` one id at a time in JS order; against it, a collation-ordered lock here
- * takes the rows in the OPPOSITE order and the two transactions deadlock (40P01) — measured on real Postgres
- * with an ICU en-US collation, and pinned by the real-DB suite
- * (tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts). `"C"` is byte order,
- * which for the ASCII ids sheets carry is exactly JS order — the order `acquireCanonicalSheetFencesInOrder`
- * (multitable/canonical-sheet-fence.ts) takes its fences in as well — whatever the database's locale is.
+ * Why the order is carried in from JS instead of computed from `id` in SQL: it must be the SAME order the other
+ * waiting sheet lockers use, and they sort in JS. `lockRecordLinkTargetSheetsOnQuery`
+ * (services/approval-record-link-txn-auth.ts) takes `meta_sheets … FOR SHARE` one id at a time in JS code-unit
+ * order (`a < b`); `acquireCanonicalSheetFencesInOrder` (multitable/canonical-sheet-fence.ts) sorts its fences
+ * with `.sort()` too. Any order the DATABASE derives from the id text can cross that one, and sheet ids are
+ * client-chosen — `POST /sheets` accepts any 1–50 character string as `id` (routes/univer-meta.ts), so they are
+ * NOT guaranteed to be generated ASCII:
+ *   - a bare `ORDER BY id` sorts by the column's collation, the database default: on a non-C database (an ICU
+ *     locale, or the Chinese libc locale a deployment may run) `'sheet_a' < 'sheet_B'`, the reverse of JS order;
+ *   - `ORDER BY id COLLATE "C"` (this helper's round-1 statement) is byte order, i.e. code-POINT order, while JS
+ *     order is UTF-16 code-UNIT order. They cross when, at the first differing position, one id has a character
+ *     above U+FFFF (a surrogate pair, lead unit 0xD800–0xDBFF) and the other a character in U+E000–U+FFFF (an
+ *     emoji against a full-width '！', U+FF01).
+ * Against the JS-order share locker, either SQL-side order takes such a pair in the OPPOSITE order and the two
+ * transactions deadlock (40P01) — measured on real Postgres (an ICU en-US column, and the emoji/full-width pair
+ * in the migrated `meta_sheets` on both a C and a Chinese-locale database) and pinned by the real-DB suite
+ * (tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts, L-*). Carrying the JS
+ * order in makes the lock order independent of the database locale AND of the characters in the ids.
+ *
+ * `FROM meta_sheets s` stays first so the whole-tree row-lock census
+ * (tests/unit/multitable-permissions-txn-liveness-recheck.guard.test.ts) sees this lock; `FOR UPDATE OF s`
+ * locks only the sheet rows (the `unnest` side is not a table).
  */
 export const SHEETS_ROW_LOCK_LIVENESS_SQL =
-  'SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE'
+  'SELECT s.id, s.deleted_at FROM meta_sheets s JOIN unnest($1::text[]) WITH ORDINALITY AS u(id, ord) ON s.id = u.id ORDER BY u.ord FOR UPDATE OF s'
 
 /**
  * {@link loadSheetLivenessForUpdate} for SEVERAL sheets locked together — the verdict for each, read UNDER the
@@ -233,9 +248,10 @@ export const SHEETS_ROW_LOCK_LIVENESS_SQL =
  *
  * Why a multi-id arity at all: a write that spans two sheets (the cross-base mirror op writes an edge whose
  * ends live on two sheets) must lock both rows in one deterministic order. Two single-id calls would lock
- * them in CALLER order, and two writers that name the pair in opposite orders would deadlock. This takes the
- * locks in ONE statement, in byte (JS) id order, and still reads every row's `deleted_at` under its lock — the
- * lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaces took the locks and never looked, which is the
+ * them in CALLER order, and two writers that name the pair in opposite orders would deadlock. This sorts the ids
+ * in JS code-unit order (the order the other sheet lockers use, see {@link SHEETS_ROW_LOCK_LIVENESS_SQL}), takes
+ * the locks in ONE statement in exactly that order, and still reads every row's `deleted_at` under its lock —
+ * the lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaces took the locks and never looked, which is the
  * #5938 TOCTOU window on two rows at once.
  *
  * Every id passed in gets an entry: ids with no `meta_sheets` row, and ids that are not usable strings
@@ -262,7 +278,8 @@ export async function loadSheetsLivenessForUpdate(
     }
   }
   if (lookups.length === 0) return result
-  lookups.sort()
+  // JS code-unit order — THE lock order: the statement locks the rows in this array's order (`u.ord`).
+  lookups.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
   const res = await query(SHEETS_ROW_LOCK_LIVENESS_SQL, [lookups])
   for (const row of res.rows as Array<{ id?: unknown; deleted_at?: unknown } | undefined>) {
     if (!row || typeof row.id !== 'string' || !result.has(row.id)) continue
@@ -276,7 +293,7 @@ export async function loadSheetsLivenessForUpdate(
  * {@link assertSheetLiveForUpdate} (#5954).
  *
  * Throws {@link SheetNotLiveError} for the FIRST non-live id in the CALLER's order. The lock order is not the
- * caller's order (it is byte `id` order, see {@link SHEETS_ROW_LOCK_LIVENESS_SQL}); the caller's order only
+ * caller's order (it is JS code-unit `id` order, see {@link SHEETS_ROW_LOCK_LIVENESS_SQL}); the caller's order only
  * decides WHICH refusal is reported when more than one sheet died, so a route can keep the same precedence its
  * pre-transaction gate uses. Either way the refusal is the values-free one: the error message never carries
  * an id, and routes map it through `sendSheetNotLive(res, err.liveness)`.

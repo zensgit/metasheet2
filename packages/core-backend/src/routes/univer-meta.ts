@@ -19912,12 +19912,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // replaced then wrote when sheet B had died (200: an `add` wrote the forward edge and bumped rec_A's
         // version, a `remove` removed it); when sheet A had died it was refused only incidentally, by Lock
         // C's readability derivation (the uniform 403, after the base-A authority check and the quota call),
-        // never by a liveness check. The helper locks both rows in byte (JS) `id` order in ONE statement and
-        // throws SheetNotLiveError — mapped below to the same values-free sendSheetNotLive 404 the
+        // never by a liveness check. The helper locks both rows in JS code-unit `id` order in ONE statement
+        // and throws SheetNotLiveError — mapped below to the same values-free sendSheetNotLive 404 the
         // pre-transaction gates answer, and rolling this transaction back. The argument order is the refusal
         // PRECEDENCE (B, then A — the same order the gates above run in): it picks which 404 body is answered
         // when both ends died with different verdicts (pinned by the mirror-op guard test and real-DB F-8).
-        // The lock order is the helper's own (`ORDER BY id COLLATE "C"`), whatever the database locale.
+        // The lock order is the helper's own: it sorts the ids in JS and the statement locks them in that
+        // array order (`WITH ORDINALITY … ORDER BY u.ord`) — the order lockRecordLinkTargetSheetsOnQuery
+        // uses — whatever the database locale and whatever characters the ids carry (sheet ids are
+        // client-chosen: POST /sheets accepts any 1–50 character `id`).
         await assertSheetsLiveForUpdate(query, [sheetB, sheetA])
         // §4: re-derive the base-B sheet capability UNDER the lock so a concurrent sheet-B grant revoke
         // cannot be missed. capsB/scopeB above were resolved PRE-transaction; because a sheet-B write grant
