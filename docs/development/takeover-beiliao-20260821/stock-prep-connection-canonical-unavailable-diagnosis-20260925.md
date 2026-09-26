@@ -495,10 +495,35 @@ WHERE name = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id';
 
 **S6 的判定**（Q3 给出 `DATA_OK`，或者给出的 S 态按 §4.3 处置后仍报错时做；在 S1 之前做）：
 
-1. **取后端这次启动的时间 T0**：`pm2 describe metasheet-backend` 的 `created at`；或者后端日志里**最后一行**
-   `[DataSourceManager] Loaded <N> data sources from database` 的时间戳。仓库里的 pm2 配置带 `time: true`，每行都有
-   时间（`ecosystem.config.cjs:73`）；它还开着 `autorestart` 和内存上限重启（`:62`、`:64`），所以要取最后一行。
-   把 T0 填进会话变量 `backend_started_at`。
+1. **取后端最后一次启动的时间 T0**：取 `pm2 jlist` 里该进程的 `pm2_env.pm_uptime`（毫秒时间戳）。pm2 每次拉起进程
+   （`executeApp`）都会刷新它，`pm2 restart`、内存上限重启、崩溃后被 `autorestart` 自动拉起都算（`lib/God.js:181`；
+   本步的 pm2 行号都按 pm2 7.0.4）。仓库里的 pm2 配置开着 `autorestart` 和内存上限重启（`ecosystem.config.cjs:62`、`:64`）。
+   `jlist` 会打出该进程的全部环境变量，所以只取这一个数，不要显示整段输出，也不要外传。下面这条命令由 node 调
+   `pm2 jlist`、只打印这一个数，读取或解析失败时只打印 `READ_FAILED`，不会带出整段输出。在运维机的 PowerShell 里执行
+   （`PM2_HOME` 见本节标题；cmd 和 Git Bash 里同样可用）：
+
+   ```powershell
+   node -e "let a;try{const o=require('child_process').execSync('pm2 jlist',{encoding:'utf8',maxBuffer:1<<26});const l=o.split(/\r?\n/).map(x=>x.trim()).filter(x=>x.startsWith('[{')||x==='[]').pop();a=JSON.parse(l).filter(p=>p.name==='metasheet-backend')}catch(e){console.log('READ_FAILED');process.exit(1)}console.log(a.length?a.map(p=>new Date(p.pm2_env.pm_uptime).toISOString().replace('T',' ').replace('Z','+00')).join(' '):'NOT_FOUND')"
+   ```
+
+   输出是一个形如 `YYYY-MM-DD HH:MM:SS.mmm+00` 的 UTC 时间，原样填进会话变量 `backend_started_at`（带 `+00`，
+   不用换算成 `+08`）。输出 `NOT_FOUND`、`READ_FAILED` 或多于一个时间时不要继续，先查清后端由哪个 pm2 托管。
+   不要改成 `pm2 jlist | node …` 的管道写法：本机实测，PowerShell 5.1 的管道在内容前加了 BOM，解析失败，而 node 的报错
+   会把整段输出（含环境变量）打到屏幕上。只在后端正在运行时执行：本机实测，没有 pm2 守护进程在跑时，这条命令会新起
+   一个空的守护进程，输出 `NOT_FOUND`（§6）。
+   - **不要用 `pm2 describe` 的 `created at`**。它显示的是 `pm2_env.created_at`（`lib/API/UX/pm2-describe.js:44-45`、
+     `:74`），只在没有值时才写（`lib/God.js:189-190`）。崩溃后被 `autorestart` 拉起时，走的是 `handleExit` 里的
+     `executeApp`（`:535-538`），不刷新它，这时它早于真实的启动时间：第 2 步会放过上一个进程的报错，Q6 会多标 `t`。
+     `pm2 reset` 不重启进程，却把它改成当时的时间（`lib/God/ActionMethods.js:348`），这时它晚于真实的启动时间：
+     启动之后、重置之前的写入会被 Q6 漏标，可能把 S6 错误地排除。`pm2 restart` 会同时刷新它和 `pm_uptime`
+     （`resetState`，`ActionMethods.js:398`、`lib/God/Methods.js:273-274`）；`pm2 reload` 和内存上限重启在 fork 模式下
+     也走这里（`lib/Worker.js:95` → `lib/God/Reload.js:296`）。以上按 pm2 5.0.4、5.3.1、5.4.3、6.0.14、7.0.4 的源码核对过，逻辑相同，并在本机用 5.4.3、
+     7.0.4 实测（§6）；演示机上的 pm2 版本没有核对。
+   - 后端日志里**最后一行** `[DataSourceManager] Loaded <N> data sources from database`（装载失败时是
+     `Could not load from database`）只用来核对 T0 取的是不是这次启动，它应该在 T0 之后不久。不要拿它当 T0：它打在
+     装载查询之后（查询在 `DataSourceManager.ts:321-326`，这一行在 `:358`，中间还有逐行装载和 `auto_connect` 的连接），
+     晚于注册表的快照，用它当 T0 会漏掉这段时间里的写入；而且 `time: true`（`ecosystem.config.cjs:73`）加的前缀是运维机
+     本地时间，只到秒，不带时区。
 2. **取报错那次试拉的时间 T1**，即计划任务的上次运行时间。**T1 早于 T0 的报错不能用当前库判**，要等 T0 之后的下一次试拉。
 3. **跑 Q6**，看试拉行所指的源在 T0 之后有没有被写过：
 
@@ -602,7 +627,8 @@ ORDER BY 2 DESC, 1;
 环境：便携 PostgreSQL 16.10，新建数据目录，只监听本机回环地址，`initdb --no-locale -E UTF8`；全部为合成值。
 本节的 SQL 都是从本文的 sql 代码块原样抽取后执行的；修订后（S6、`pulled` 取行规则、`DATA_OK` 文案、Q6）全部重跑了一遍，
 下面的数字是重跑的结果。第 3 轮修订没有改动任何 sql 代码块（7 个代码块与上一版逐字相同），并在修订后的文本上重跑了
-17 个用例、试拉行认定和 S6 三组，数字与下文一致。
+17 个用例、试拉行认定和 S6 三组，数字与下文一致。第 4 轮修订只改 §4.6「S6 的判定」第 1 步，并在本节新增「T0 的取法」
+一条，同样没有改动 sql 代码块。
 
 - **建表**：按部署顺序跑真实迁移：`20251206000001`（data_sources）→ `057`、`079`（SQL）→ `zzzz20260902120000`
   （cutover）→ 植入数据 → `zzzz20260920120000`（live_id，`NOT VALID`）。S2a/S2f 的行在 live_id 迁移之前软删，
@@ -661,6 +687,30 @@ ORDER BY 2 DESC, 1;
     §4.6 第 3 步只对运维记录，日志表里也没有批量接口的行。按原文，这四例在重启之前会被当作「已排除 S6」引向 S1，
     只有第 4 步的重启能纠正。修订后，§4.6 日志表里的 `Bulk data update requested` / `Bulk update completed` 与实测日志行
     匹配并指向 S6，「S6 的判定」第 3 步也要求查这两行（由一次性脚本对照实测日志行检查，见第 3 轮 PR 评论）。
+- **T0 的取法**（第 4 轮修订新增）：从 npm registry 取 pm2 7.0.4 与 5.4.3，装在本机临时目录；5.0.4、5.3.1、6.0.14
+  只读了源码。用一个合成进程代替后端：第一次运行 6 秒后以退出码 1 崩溃，之后常驻；每次启动记下自己的启动时间，并打一行
+  `Loaded` 日志。pm2 配置与仓库同形（fork、单实例、`autorestart`、`max_memory_restart`、`time: true`）。7.0.4 另用
+  `pm2-runtime` 托管，再跑一遍。库用一次性 PG，开 `track_commit_timestamp`，只建 Q6 用到的列。Q6 和第 1 步的命令都从本文
+  代码块原样抽取，命令在 Windows PowerShell 5.1 里执行。三次运行（7.0.4、7.0.4 + `pm2-runtime`、5.4.3）结论相同：
+  - 崩溃后被 `autorestart` 拉起：`restart_time` 加 1，`created_at` 不变，比新进程的启动早 6.1–6.3 秒；`pm_uptime`
+    刷新到新进程启动前 50–134 毫秒。`pm2 describe` 的 `created at` 就是 `created_at`。
+  - `pm2 reset`：进程没有重启，`pm_uptime` 不变，`created_at` 被改到重置的时刻，比真实启动晚 6.2–9.7 秒。
+  - `pm2 reload` 和 `pm2 restart`：`created_at` 与 `pm_uptime` 一起刷新。内存上限重启调用的是同一个
+    `God.reloadProcessId`。内存上限重启本身在本机没有触发（本机没有 `wmic`，pm2 依赖的 pidusage 在 Windows 上靠它取
+    内存用量；7.0.4 下一个占 220 MB、上限 100 MB 的进程 60 秒内没有被重启），这一项只核对了源码。
+  - Q6 对照：在「`autorestart` 之后」「`pm2 reset` 之后」「`pm2 restart` 之后」三种状态下，各判 3 个源：一个在旧进程
+    运行期间被 SQL 改过，一个在新进程启动后被 SQL 改过，一个启动前写入后再没改过。以「最后一次写入的提交时间是否晚于
+    进程自己记下的启动时间」为准。修订前（取 `created at`）：`autorestart` 之后，旧进程期间写入的源被标 `t`，第 2 步
+    也放过了旧进程运行期间的报错；`pm2 reset` 之后，新进程启动后写入的源被标 `f`，按第 3 步会被当作「可以排除 S6」；
+    `pm2 restart` 之后一致。修订前 4 项里对 1 项，修订后 5 项全对（三种状态的 Q6、第 2 步、下面的泄露检查）。
+  - 变异（各 5 项）：命令里的 `pm_uptime` 换回 `created_at`，错 3 项（`autorestart` 与 `pm2 reset` 两种状态重新出现上面
+    的不一致）；进程名过滤取反，错 4 项；换回 `pm2 jlist | node …` 的管道写法，5 项全错（PowerShell 管道在内容前加了 BOM，
+    解析失败）。
+  - 泄露检查：在 PATH 上放一个假的 `pm2`，打印截断的 JSON，里面带一个标记环境变量。本文的命令只打印 `READ_FAILED`，
+    输出里没有标记；管道写法把整段内容连同标记打到了 stderr。
+  - 没有 pm2 守护进程时执行这条命令：输出 `NOT_FOUND`，同时新起了一个 pm2 守护进程（两个版本都是）。
+  - `time: true` 的日志前缀是本机时间，只到秒，不带时区；每次启动各有一行 `Loaded`。
+  - 本轮没有改动 sql 代码块，17 个用例、试拉行认定和 S6 三组没有重跑。
 - **`track_commit_timestamp`**：以上在该参数开启时运行。改为关闭并重启后，整段清单照常执行，`ds_committed_after_start`
   全为 NULL；把 Q6 里的 `CASE` 守卫去掉的变异在关闭时报 `could not get commit timestamp data`，psql 退出码 3。
   关闭期间写过的行，重新开启后该列为 NULL；开启、关闭、再开启之后，第一次开启期间写入的行也是 NULL。
