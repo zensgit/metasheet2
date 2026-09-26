@@ -13,6 +13,7 @@
     "./verify-recovery-local-backup.mts",
     "./verify-recovery-local-startup.mts",
     "./verify-recovery-manual-source.mts",
+    "./private-db-backend-drain.ts",
     "./verify-recovery-manual-checkpoint.mts",
     "./verify-recovery-attachment-stage.mts",
     "./start-recovery-local.mts"

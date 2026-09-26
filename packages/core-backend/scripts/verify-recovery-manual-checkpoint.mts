@@ -10,6 +10,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client, Pool } from 'pg'
 import { Kysely, PostgresDialect, sql } from 'kysely'
+import { assertPrivateDatabaseBackendsExited } from './private-db-backend-drain'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
@@ -54,46 +55,6 @@ let db: Kysely<unknown> | undefined
 let downloadPools: typeof import('../src/integration/db/connection-pool').poolManager | undefined
 let applicationClosedDownloadPool = false
 let shutdownAuthMessaging: (() => Promise<void>) | undefined
-
-// Backend exit after client.end()/pool destroy is asynchronous. One immediate
-// pg_stat_activity read can still see a backend that has already been asked to
-// quit. Wait, then fail with identity columns if anything is still attached.
-const PRIVATE_DB_BACKEND_DRAIN_MS = 10_000
-const PRIVATE_DB_BACKEND_POLL_MS = 200
-async function assertPrivateDatabaseBackendsExited(adminClient: Client, databaseName: string) {
-  const deadline = Date.now() + PRIVATE_DB_BACKEND_DRAIN_MS
-  const censusSql = `SELECT pid, usename, application_name, backend_type, state, query, backend_start
-    FROM pg_stat_activity WHERE datname = $1 ORDER BY pid`
-  let rows: Array<{
-    pid: number
-    usename: string | null
-    application_name: string | null
-    backend_type: string | null
-    state: string | null
-    query: string | null
-    backend_start: Date | string | null
-  }> = []
-  for (;;) {
-    rows = (await adminClient.query(censusSql, [databaseName])).rows
-    if (rows.length === 0) return
-    if (Date.now() >= deadline) break
-    await new Promise((resolve) => setTimeout(resolve, Math.min(PRIVATE_DB_BACKEND_POLL_MS, deadline - Date.now())))
-  }
-  const detail = rows.map((row) => {
-    const started = row.backend_start instanceof Date ? row.backend_start.toISOString() : String(row.backend_start ?? '')
-    const statement = String(row.query ?? '').replaceAll(/\s+/g, ' ').slice(0, 240)
-    return [
-      `pid=${row.pid}`,
-      `usename=${row.usename ?? ''}`,
-      `application_name=${row.application_name ?? ''}`,
-      `backend_type=${row.backend_type ?? ''}`,
-      `state=${row.state ?? ''}`,
-      `backend_start=${started}`,
-      `query=${statement}`,
-    ].join(' ')
-  }).join(' | ')
-  assert.equal(rows.length, 0, `private database backends remain after ${PRIVATE_DB_BACKEND_DRAIN_MS}ms: ${detail}`)
-}
 
 try {
   await admin.connect()

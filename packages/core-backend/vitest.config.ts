@@ -1833,6 +1833,10 @@ export default defineConfig({
       // CI-executed lane to land in without a workflow edit, which this change deliberately does not
       // make). That wiring is a disclosed follow-up, not a silent gap.
       'tests/integration/b2a-operation-claim-078-realdb.test.ts',
+      // Private-database backend drain proof. Requires a throwaway database.
+      // Excluded here so the no-DB job cannot skip-green it. Wired as a whole
+      // file in plugin-tests.yml step "Run private-db backend drain proof".
+      'tests/integration/timemachine-private-db-backend-drain.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

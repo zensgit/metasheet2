@@ -1054,6 +1054,14 @@ jobs:
         run: |
           createdb -U postgres metasheet_test || true
 
+      - name: Run private-db backend drain proof
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/timemachine-private-db-backend-drain.db.test.ts \
+            --reporter=verbose
+
       - name: Run isolated manual checkpoint acceptance
         run: |
           TM_TEST_PG_BIN="$(pg_config --bindir)" node scripts/ops/run-recovery-manual-checkpoint.mjs
