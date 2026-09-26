@@ -1424,7 +1424,7 @@ function onCellClick(ri: number, ci: number, rid: string) {
     // parser rejected. Closing it here would drop that text silently (confirmEdit commits the stale
     // staged value). Keep the editor — and its inline error — where it is and hand focus back to it;
     // the person fixes the text or presses Escape.
-    if (editorInvalidDraft.value) {
+    if (invalidDateTimeDraftIsOnScreen()) {
       refocusEditorInput()
       return
     }
@@ -1439,11 +1439,30 @@ function onCellClick(ri: number, ci: number, rid: string) {
 }
 
 // B2: set by MetaCellEditor's `update:invalidDraft` while its dateTime draft is unparseable-and-flagged.
-// Cleared whenever the editor closes (confirm / cancel / a new edit starts).
+// Cleared whenever the editor closes (confirm / cancel / a new edit starts) and by the editor itself on
+// unmount.
 const editorInvalidDraft = ref(false)
+/** The dateTime editor's input while the editor is rendered — null once its row/field left the rendered set. */
+function mountedDateTimeEditorInput(): HTMLInputElement | null {
+  return gridRoot.value?.querySelector<HTMLInputElement>('.meta-cell-editor input[data-meta-datetime-input]') ?? null
+}
+/**
+ * Re-judge of PR #6083 (must-fix): block a cell switch ONLY while the editor that flagged the draft is
+ * still on screen. A page change / filter / sort under virtualization / row delete / hide-field / view
+ * switch can unmount the editor after it flagged the draft; trusting the flag alone would then send every
+ * click to a `focus()` on nothing and lock the grid out of edit mode until a remount. When the editor is
+ * gone the flag is stale: clear it and fall through to the pre-existing `confirmEdit()` path (which also
+ * clears the stale `editCell`). The editor additionally reports `false` on unmount — two independent guards.
+ */
+function invalidDateTimeDraftIsOnScreen(): boolean {
+  if (!editorInvalidDraft.value) return false
+  if (mountedDateTimeEditorInput()) return true
+  editorInvalidDraft.value = false
+  return false
+}
 function refocusEditorInput() {
   nextTick(() => {
-    gridRoot.value?.querySelector<HTMLInputElement>('.meta-cell-editor input[data-meta-datetime-input]')?.focus()
+    mountedDateTimeEditorInput()?.focus()
   })
 }
 
@@ -1459,8 +1478,9 @@ function startEdit(row: MetaRecord, field: MetaField) {
   // let two drafts exist at once. A no-op when the previous draft's value is
   // unchanged (confirmEdit's own `value !== row.data[fieldId]` guard).
   if (editCell.value && (editCell.value.recordId !== row.id || editCell.value.fieldId !== field.id)) {
-    // B2: never swap out an editor that is showing an invalid dateTime draft (see onCellClick).
-    if (editorInvalidDraft.value) {
+    // B2: never swap out an editor that is SHOWING an invalid dateTime draft (see onCellClick); a stale
+    // flag from an editor that was torn down is cleared inside the check and the old path runs.
+    if (invalidDateTimeDraftIsOnScreen()) {
       refocusEditorInput()
       return
     }

@@ -19,12 +19,15 @@ export type XlsxColumnMapping = {
 type WorkbookLike = {
   SheetNames: string[]
   Sheets: Record<string, unknown>
+  /** Workbook properties; `WBProps.date1904` = serials count from 1904-01-01 (Mac Excel legacy). */
+  Workbook?: { WBProps?: { date1904?: boolean } }
 }
 
 /** The subset of SheetJS's SSF (number-format) library the date-cell normaliser needs. */
 type XlsxSsfLike = {
   is_date(fmt: string): boolean
-  parse_date_code(v: number): { D: number; y: number; m: number; d: number; H: number; M: number; S: number } | null
+  /** `date1904` selects the 1904 epoch; without it a 1904-system workbook's serials read 4 years and a day early. */
+  parse_date_code(v: number, opts?: { date1904?: boolean }): { D: number; y: number; m: number; d: number; H: number; M: number; S: number } | null
 }
 
 type XlsxModule = {
@@ -80,12 +83,20 @@ function pad2(value: number): string {
  * `m/d/yy`, …); `sheet_to_json({ raw: false })` renders it as `"9/24/26 9:00"`, which the importer's grammar
  * rejects. Rewrite such cells IN PLACE into the grammar's text from SheetJS's SSF date arithmetic on the
  * serial — the Excel wall clock as written, no timezone: time format → `YYYY-MM-DD HH:mm[:ss]`; date-only
- * format → `YYYY-MM-DD` (a `date` field stores that day verbatim); time-only serial → `HH:mm[:ss]`. Text
- * cells are never touched. Needs `read(…, { cellNF: true })`; without SSF the sheet is left as is.
+ * format → `YYYY-MM-DD` (`calendarDayFromText` then keeps that day for a `date` field); time-only serial →
+ * `HH:mm[:ss]`. `options.date1904` must be the workbook's `WBProps.date1904` (Mac Excel's 1904 epoch: the
+ * same serial is a different day, and SheetJS's own text hides it). Text cells are never touched. Known nit:
+ * elapsed-time formats (`[h]:mm`) pass `SSF.is_date` and become a meaningless day text. Needs
+ * `read(…, { cellNF: true })`; without SSF the sheet is left as is.
  */
-export function normalizeXlsxDateCells(xlsx: Pick<XlsxModule, 'SSF'>, ws: unknown): number {
+export function normalizeXlsxDateCells(
+  xlsx: Pick<XlsxModule, 'SSF'>,
+  ws: unknown,
+  options?: { date1904?: boolean },
+): number {
   const ssf = xlsx.SSF
   if (!ssf || !ws || typeof ws !== 'object') return 0
+  const dateOpts = { date1904: options?.date1904 === true }
   let rewritten = 0
   for (const [address, raw] of Object.entries(ws as Record<string, unknown>)) {
     if (address.startsWith('!') || !raw || typeof raw !== 'object') continue
@@ -93,7 +104,7 @@ export function normalizeXlsxDateCells(xlsx: Pick<XlsxModule, 'SSF'>, ws: unknow
     let parts: { D: number; y: number; m: number; d: number; H: number; M: number; S: number } | null = null
     let dateOnly = false
     if (cell.t === 'n' && typeof cell.v === 'number' && Number.isFinite(cell.v) && typeof cell.z === 'string' && ssf.is_date(cell.z)) {
-      parts = ssf.parse_date_code(cell.v)
+      parts = ssf.parse_date_code(cell.v, dateOpts)
       dateOnly = !numberFormatHasTimeTokens(cell.z)
     } else if (cell.t === 'd' && cell.v instanceof Date && !Number.isNaN(cell.v.getTime())) {
       const v = cell.v
@@ -142,8 +153,9 @@ export function parseXlsxBuffer(
     return { headers: [], rows: [], sheetName, truncated: false }
   }
 
-  // Excel-native date cells → the importer's own `YYYY-MM-DD[ HH:mm]` text BEFORE the formatted read below.
-  normalizeXlsxDateCells(xlsx, ws)
+  // Excel-native date cells → the importer's own `YYYY-MM-DD[ HH:mm]` text BEFORE the formatted read below,
+  // in the workbook's own date system (1900 default, 1904 for Mac-legacy workbooks).
+  normalizeXlsxDateCells(xlsx, ws, { date1904: workbook.Workbook?.WBProps?.date1904 === true })
   const aoa = xlsx.utils.sheet_to_json(ws, {
     header: 1,
     raw: false,

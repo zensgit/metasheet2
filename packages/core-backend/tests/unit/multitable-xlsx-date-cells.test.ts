@@ -83,6 +83,33 @@ describe('XLSX import — Excel native date cells become the import grammar text
     expect(normalizeXlsxDateCells(xlsx, null)).toBe(0)
   })
 
+  // Re-judge of PR #6083 (item 2): Mac Excel's 1904 date system. The SAME serial is a different day in the two
+  // systems and SheetJS's own formatted text hides it — read without the workbook flag, 2026-09-24 09:00
+  // silently becomes 2022-09-23 09:00.
+  it('honours a 1904-date-system workbook: the serial is read against the 1904 epoch (negative control shows the 4-year slip)', () => {
+    const SERIAL_1904_0900 = 44827.375 // 2026-09-24 09:00 in the 1904 system (= 46289.375 in the 1900 system)
+    const ws = XLSX.utils.aoa_to_sheet([['Name', 'When', 'Day'], ['Alpha', SERIAL_1904_0900, 44827]])
+    ;(ws as Record<string, any>).B2.z = 'm/d/yy h:mm'
+    ;(ws as Record<string, any>).C2.z = 'm/d/yy'
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Rows')
+    wb.Workbook = { WBProps: { date1904: true } }
+    const buffer = Buffer.from(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }))
+
+    const reread = XLSX.read(buffer, { type: 'buffer', cellNF: true })
+    expect(reread.Workbook?.WBProps?.date1904).toBe(true) // the flag survives the round trip
+    // SheetJS's formatted text is identical in both systems — nothing downstream could tell.
+    expect((XLSX.utils.sheet_to_json(reread.Sheets.Rows, { header: 1, raw: false, defval: '' }) as string[][])[1]).toEqual(['Alpha', '9/24/26 9:00', '9/24/26'])
+    // Negative control: the serial read against the default 1900 epoch is 2022-09-23.
+    expect(XLSX.SSF.parse_date_code(SERIAL_1904_0900)).toMatchObject({ y: 2022, m: 9, d: 23, H: 9 })
+    expect(normalizeXlsxDateCells(xlsx, XLSX.read(buffer, { type: 'buffer', cellNF: true }).Sheets.Rows)).toBe(2)
+    expect((XLSX.read(buffer, { type: 'buffer', cellNF: true }).Sheets.Rows as Record<string, any>).B2.v).toBe(SERIAL_1904_0900)
+
+    const parsed = parseXlsxBuffer(xlsx, buffer)
+    expect(parsed.rows).toEqual([['Alpha', '2026-09-24 09:00', '2026-09-24']])
+    expect(validateDateTimeValue(parsed.rows[0][1], 'fld_when')).toBe('2026-09-24T01:00:00.000Z')
+  })
+
   it('a SheetJS Date-typed cell (t: "d") takes the same route from its UTC parts', () => {
     const ws: Record<string, any> = {
       '!ref': 'A1:B1',

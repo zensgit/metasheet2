@@ -363,7 +363,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, toRef } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, toRef } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaCommentMentionSearch, MetaCommentMentionSuggestion, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
@@ -686,6 +686,14 @@ function onDateTimeInvalid(invalid: boolean) {
   dateTimeInvalid.value = invalid
   emit('update:invalidDraft', invalid)
 }
+// Re-judge of PR #6083 (must-fix): this editor can be torn down by something other than the person
+// finishing the edit — a page change, filter/search, sort under virtualization, row delete, hide-field or
+// view switch removes its row/field from the rendered set — AFTER it reported an invalid draft. Without
+// this, the host's flag would outlive the editor and lock the grid out of edit mode. Always report
+// `false` on the way out (harmless when nothing was flagged; the host also checks the DOM — defence in depth).
+onBeforeUnmount(() => {
+  emit('update:invalidDraft', false)
+})
 function dateTimeDraftIsInvalid(): boolean {
   const el = inputRef.value as unknown as { flagInvalidDraft?: () => boolean } | null
   return !!el?.flagInvalidDraft?.()

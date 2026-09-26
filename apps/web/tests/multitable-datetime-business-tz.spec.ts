@@ -18,7 +18,7 @@
  *      reverted browser-local parse/format can never coincide with the expected value.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { createApp, h, nextTick, reactive } from 'vue'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -1064,6 +1064,18 @@ describe('XLSX import — Excel native date cells (review must-fix 1) and date-o
     }])
   })
 
+  it('honours a 1904-date-system workbook (re-judge item 2): the same serial is 2026-09-24, not 2022-09-23', () => {
+    const ws = XLSX.utils.aoa_to_sheet([['When', 'Day'], [44827.375, 44827]]) as Record<string, any> // 1904-system serials
+    ws.A2.z = 'm/d/yy h:mm'
+    ws.B2.z = 'm/d/yy'
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Rows')
+    wb.Workbook = { WBProps: { date1904: true } }
+    const buffer = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer)
+    expect(XLSX.SSF.parse_date_code(44827.375)).toMatchObject({ y: 2022, m: 9, d: 23 }) // the trap, without the flag
+    expect(parseXlsxBuffer(xlsxModule, buffer).rows).toEqual([['2026-09-24 09:00', '2026-09-24']])
+  })
+
   it('date-only import (item 2): the calendar day as written, never shifted by the browser zone', async () => {
     expect(calendarDayFromText('2026-09-24')).toBe('2026-09-24')
     expect(calendarDayFromText('2026/9/24')).toBe('2026-09-24')
@@ -1213,6 +1225,116 @@ describe('grid (review item 3): moving to another cell never drops an invalid da
     await flushUi()
     expect(editorInput(root)).not.toBeNull()
     view.unmount()
+  })
+
+  // Re-judge of PR #6083 (must-fix): the flag must not outlive the editor. A toolbar action (page change,
+  // filter/search, sort under virtualization, row delete, hide-field, view switch) can remove the editing
+  // row or field from the rendered set while the draft is invalid; the grid must still enter edit mode
+  // afterwards. Both defences are exercised end to end here; multitable-datetime-grid-lockout.spec.ts
+  // isolates the grid-side one with an editor stub that never reports back.
+  function mountReactiveGrid(patchSpy: ReturnType<typeof vi.fn>) {
+    const state = reactive({
+      rows: [
+        { id: 'r1', version: 1, data: { fld_name: 'a', fld_dt: STORED } },
+        { id: 'r2', version: 1, data: { fld_name: 'b', fld_dt: null } },
+      ] as MetaRecord[],
+      fields: [dtField, nameField] as MetaField[],
+    })
+    const view = mount(() => h(MetaGridTable, {
+      rows: state.rows,
+      visibleFields: state.fields,
+      sortRules: [],
+      loading: false,
+      currentPage: 1,
+      totalPages: 1,
+      startIndex: 0,
+      selectedRecordId: null,
+      canEdit: true,
+      canDelete: true,
+      onPatchCell: patchSpy,
+    }))
+    return { state, view }
+  }
+  async function openInvalidDraft(root: HTMLElement) {
+    const dtCell = cellAt(root, 0, 0)
+    dtCell.click()
+    dtCell.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    const input = editorInput(root)!
+    typeInto(input, 'garbage')
+    input.dispatchEvent(new FocusEvent('blur'))
+    await flushUi()
+    expect(errorEl(root)).not.toBeNull()
+    // The block is armed: a click elsewhere keeps this editor.
+    cellAt(root, 1, 1).click()
+    await flushUi()
+    expect(editorInput(root)).toBe(input)
+  }
+
+  it('editor torn down by a ROW change (page / filter / delete) while its draft is invalid: the next click and double-click open an editor again', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const patchSpy = vi.fn()
+    const { state, view } = mountReactiveGrid(patchSpy)
+    await flushUi()
+    const root = view.container
+    await openInvalidDraft(root)
+
+    state.rows = state.rows.filter((row) => row.id !== 'r2' ? false : true) // only r2 remains — r1 (the editing row) left the rendered set
+    await flushUi()
+    expect(editorInput(root)).toBeNull()
+
+    const target = cellAt(root, 0, 1) // r2 / Name
+    target.click()
+    await flushUi()
+    target.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    expect(root.querySelector('.meta-cell-editor input')).not.toBeNull() // edit mode is available again
+    expect(patchSpy).not.toHaveBeenCalled() // the garbage never became data; r1 was gone, so nothing stale was committed
+    view.unmount()
+  })
+
+  it('editor torn down by HIDING the field while its draft is invalid: the next double-click opens an editor again', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const patchSpy = vi.fn()
+    const { state, view } = mountReactiveGrid(patchSpy)
+    await flushUi()
+    const root = view.container
+    await openInvalidDraft(root)
+
+    state.fields = [nameField] // the dateTime column is hidden
+    await flushUi()
+    expect(editorInput(root)).toBeNull()
+
+    const target = cellAt(root, 0, 0) // r1 / Name (now column 0)
+    target.click()
+    await flushUi()
+    target.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    expect(root.querySelector('.meta-cell-editor input')).not.toBeNull()
+    expect(patchSpy).not.toHaveBeenCalled() // the staged value was still the stored one — no patch
+    view.unmount()
+  })
+
+  it('MetaCellEditor reports invalidDraft=false on unmount (the editor-side half of the defence)', async () => {
+    const invalidSpy = vi.fn()
+    const view = mount(() => h(MetaCellEditor, {
+      field: dtField,
+      modelValue: STORED,
+      hostCommitPolicy: 'grid',
+      'onUpdate:modelValue': vi.fn(),
+      'onUpdate:invalidDraft': invalidSpy,
+      onConfirm: vi.fn(),
+      onCancel: vi.fn(),
+      onOpenLinkPicker: vi.fn(),
+    }))
+    await flushUi()
+    const input = view.container.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
+    typeInto(input, 'garbage')
+    input.dispatchEvent(new FocusEvent('blur'))
+    await flushUi()
+    expect(invalidSpy).toHaveBeenLastCalledWith(true)
+    view.unmount()
+    expect(invalidSpy).toHaveBeenLastCalledWith(false)
   })
 
   it('a VALID draft still commits when another cell is clicked (the D2 click-away behaviour is unchanged)', async () => {
