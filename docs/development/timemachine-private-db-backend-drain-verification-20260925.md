@@ -6,13 +6,17 @@ Design: `docs/development/timemachine-private-db-backend-drain-design-20260925.m
 
 | Check | Result |
 |---|---|
-| Checkpoint calls `assertPrivateDatabaseBackendsExited` and no longer reads `pg_stat_activity` itself | unit guard `guards the checkpoint call site and the values-free census columns` |
+| Checkpoint calls `assertPrivateDatabaseBackendsExited` and no longer uses the one-shot count | unit guard `guards the checkpoint call site and the values-free census columns` |
 | Census SQL is `pid, application_name, backend_type, state, backend_start` and does not name `query` or `usename` | same guard, imported `PRIVATE_DB_BACKEND_CENSUS_SQL` |
 | Default unit Vitest excludes the DB proof, and plugin-tests.yml step `Run private-db backend drain proof` runs the file | same guard |
 | A backend closed after ~1.5 s: helper returns inside 8 s and the wait is visible in elapsed time | integration `positive: waits for a backend that exits after a short delay and returns clean` |
 | A backend held past 400 ms: helper throws with pid, backend_type, state, application_name, backend_start, and without the statement marker | integration `negative: fails when a backend is still held, with values-free identifiers and no query text` |
 
 The integration file runs in CI on job `test` (`test (18.x)` and `test (20.x)`), step `Run private-db backend drain proof`.
+
+The checkpoint imports `packages/core-backend/scripts/private-db-backend-drain.js`. That file assigns `exports.assertPrivateDatabaseBackendsExited`, which Node can link from the ESM script. A `.ts` helper compiled by tsx does not, and the checkpoint exits at startup before any census.
+
+Local re-run after that load-path change: positive 1607 ms, negative 446 ms, 2 passed. `tsc -p scripts/tsconfig.recovery-archive-acceptance.json --noEmit` exited 0. Starting the checkpoint script under tsx gets past the helper import.
 
 ## Commands
 
