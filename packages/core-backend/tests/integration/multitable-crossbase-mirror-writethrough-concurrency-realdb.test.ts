@@ -38,6 +38,21 @@
  *   F-8 refusal precedence — BOTH ends die in the window with DIFFERENT verdicts (sheet B soft-deleted, sheet
  *       A hard-deleted, one deleter transaction): B's 404 SHEET_DELETED is answered, not A's 404 NOT_FOUND,
  *       the same order the pre-transaction gates run in (B first). Runs on a disposable pair of its own.
+ *   F-9/F-10 the same window on the `remove` verb (#5954) — an existing edge, a soft delete of sheet A (F-9) or
+ *       sheet B (F-10) committed while the remove is parked on the sheet lock: the same 404 SHEET_DELETED, and
+ *       the edge, rec_A's version and its revisions are untouched. With the pre-#5954 lock-only statement the
+ *       remove answered 200 and removed the edge when sheet B died, and the incidental 403 when sheet A died.
+ *   F-11 control for the remove verb — the delete rolls back: the parked remove proceeds (200), edge gone.
+ *   H-A/H-B the helper itself, two raw connections, no route (#5954) — a session holding an uncommitted soft
+ *       delete of sheet A (H-A) or B (H-B); `assertSheetsLiveForUpdate` parks behind it. On COMMIT the
+ *       locking statement hands back the COMMITTED row version (deleted_at set) and the helper refuses; on
+ *       ROLLBACK it passes and really HOLDS both rows (a third session's FOR UPDATE NOWAIT gets 55P03).
+ *   L-0/L-1/L-2 lock ORDER on a non-C collation (#5954) — in a scratch schema whose `meta_sheets.id` carries
+ *       an ICU en-US collation (so the case does not depend on the database's own locale), the production
+ *       JS-order share locker `lockRecordLinkTargetSheetsOnQuery` and the multi-sheet lock race on the pair
+ *       ('sheet_B…', 'sheet_a…'). L-1: the helper's `ORDER BY id COLLATE "C"` takes the rows in the SAME order
+ *       as the share locker, so neither side deadlocks. L-2 (control): the same statement WITHOUT the collate
+ *       (derived from the constant) takes them in the opposite order and one side gets 40P01.
  *
  * Runs only with DATABASE_URL (describeIfDatabase) via the plugin-tests.yml real-DB runner list, and is
  * two-point wired (vitest.config.ts no-DB exclusion + whole-file real-DB step), pinned by
@@ -45,17 +60,22 @@
  * DATABASE_URL instead of letting the suite skip green.
  */
 import express, { type Express } from 'express'
+import type { PoolClient } from 'pg'
 import request from 'supertest'
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { __resetSharedCrossBaseWriteQuotaForTest } from '../../src/multitable/automation-executor'
 import {
   SHEETS_ROW_LOCK_LIVENESS_SQL,
   SHEET_DELETED_CODE,
   SHEET_DELETED_MESSAGE,
   SHEET_NOT_FOUND_MESSAGE,
+  SheetNotLiveError,
+  assertSheetsLiveForUpdate,
 } from '../../src/multitable/sheet-liveness'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { lockRecordLinkTargetSheetsOnQuery } from '../../src/services/approval-record-link-txn-auth'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -94,6 +114,47 @@ const OWNER = `u_c2df_owner_${TS}` // owns BASE_A ⇒ base-A writable + full mul
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+const SHEET_DELETED_BODY = { ok: false, error: { code: SHEET_DELETED_CODE, message: SHEET_DELETED_MESSAGE } }
+
+const connect = (): Promise<PoolClient> => poolManager.get().getInternalPool().connect()
+const backendPid = async (client: PoolClient): Promise<number> =>
+  Number(((await client.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: unknown }).pid)
+/** The SQLSTATE of a driver error (40P01 deadlock, 55P03 lock not available), or null. */
+const pgCode = (err: unknown): string | null => {
+  const code = (err as { code?: unknown } | null)?.code
+  return typeof code === 'string' ? code : null
+}
+
+/** Every wait in the #5954 cases is bounded: a regression reds in seconds instead of hanging the lane. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms: ${label}`)), ms)
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error: unknown) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
+/**
+ * Poll until backend `waiterPid` is WAITING ON A LOCK held by `holderPid` (by `pg_blocking_pids`, so the probe
+ * cannot go blind if a statement is reworded), and return the statement it is parked in. Throws if the
+ * waiter settles first (it never waited — the failure this probe exists to see) or never parks in budget.
+ */
+async function waitForLockWaiter(waiterPid: number, holderPid: number, settled: () => boolean): Promise<string> {
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    if (settled()) throw new Error('the waiter settled before parking behind the holder')
+    if (Date.now() > deadline) throw new Error('the waiter never parked behind the holder')
+    const res = await q(
+      "SELECT query FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock' AND $2::int = ANY(pg_blocking_pids(pid))",
+      [waiterPid, holderPid],
+    )
+    if (res.rows.length === 1) return String((res.rows[0] as { query: unknown }).query)
+    await sleep(20)
+  }
+}
 
 let app: Express
 let currentUser: { id: string; roles: string[]; perms: string[] } = {
@@ -179,11 +240,11 @@ const hardDeleteSheet = (sheetId: string): SheetDeleter => async (client) => {
  * the delete commits before the lock request and the lock is simply free. Either way only a re-read under
  * the lock can see the delete.
  */
-async function runWithSheetDeleteInWindow<T>(
+async function runWithSheetDeleteInWindow(
   deleter: SheetDeleter,
   outcome: 'commit' | 'rollback',
-  start: () => PromiseLike<T>,
-): Promise<{ result: T; parkedQuery: string }> {
+  start: () => PromiseLike<request.Response>,
+): Promise<{ result: request.Response; parkedQuery: string }> {
   const client = await poolManager.get().getInternalPool().connect()
   let open = false
   try {
@@ -215,7 +276,7 @@ async function runWithSheetDeleteInWindow<T>(
 
     await client.query(outcome === 'commit' ? 'COMMIT' : 'ROLLBACK')
     open = false
-    return { result: await started, parkedQuery }
+    return { result: await withTimeout(started, 15_000, `mirror op after the deleter ${outcome}`), parkedQuery }
   } finally {
     if (open) await client.query('ROLLBACK').catch(() => {})
     client.release()
@@ -260,6 +321,12 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
     await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE_A, BASE_B]]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [OWNER]).catch(() => {})
     await poolManager.get().end?.()
+  })
+
+  // Every mirror op draws on the shared per-target-base cross-base write quota (a process-wide window). Reset
+  // it per case so a red here is about the case, never about how many ops the cases before it ran.
+  beforeEach(() => {
+    __resetSharedCrossBaseWriteQuotaForTest()
   })
 
   afterEach(async () => {
@@ -409,5 +476,258 @@ describeIfDatabase('C2 Decision-F — forward-edit ↔ mirror-op concurrency (re
       await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SA8, SB8]]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SA8, SB8]]).catch(() => {})
     }
+  })
+
+  // F-9/F-10 (#5954): the same window on the REMOVE verb. The edge exists; a soft delete of either end commits
+  // while the remove is parked on the sheet lock ⇒ the same values-free 404, and the edge is NOT removed.
+  const seedEdge = () => q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [F_A, REC_A1, REC_B1])
+  for (const [label, sheetId] of [['F-9 remove, sheet A (forward / base-A end)', SA], ['F-10 remove, sheet B (mirror / base-B end)', SB]] as const) {
+    test(`${label}: a soft delete committed while the remove is parked on the sheet lock is refused and the edge stays`, async () => {
+      await seedEdge()
+      const versionBefore = await recordVersion(REC_A1)
+      const revisionsBefore = await revisionCount(REC_A1)
+      try {
+        const { result: res, parkedQuery } = await runWithSheetDeleteInWindow(
+          softDeleteSheet(sheetId),
+          'commit',
+          () => mirrorOp({ action: 'remove', foreignRecordId: REC_A1 }),
+        )
+        // Pre-#5954 (lock-only statement): sheet A ⇒ the incidental 403 MIRROR_LINK_TARGET_UNAVAILABLE; sheet
+        // B ⇒ 200 with the edge removed from a deleted sheet's record.
+        expect(res.status).toBe(404)
+        expect(res.body).toEqual(SHEET_DELETED_BODY)
+        for (const id of [SA, SB, REC_A1, REC_B1, F_A, M_B, BASE_A, BASE_B]) expect(JSON.stringify(res.body)).not.toContain(id)
+        // Nothing written: the edge survives, rec_A's version and revision history are untouched.
+        expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(1)
+        expect(await forwardTargets(REC_A1)).toEqual([REC_B1])
+        expect(await recordVersion(REC_A1)).toBe(versionBefore)
+        expect(await revisionCount(REC_A1)).toBe(revisionsBefore)
+        expect(parkedQuery.startsWith(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
+      } finally {
+        await q('UPDATE meta_sheets SET deleted_at = NULL WHERE id = $1', [sheetId])
+      }
+    })
+  }
+
+  // F-11 control for the remove verb: the delete rolls back ⇒ the parked remove proceeds and the edge is gone.
+  // (Without it a 404 in F-9/F-10 could not be told apart from a remove that never worked in this fixture.)
+  test('F-11 remove control: the concurrent delete rolls back ⇒ the parked remove proceeds (200) and removes the edge', async () => {
+    await seedEdge()
+    const { result: res, parkedQuery } = await runWithSheetDeleteInWindow(
+      softDeleteSheet(SB),
+      'rollback',
+      () => mirrorOp({ action: 'remove', foreignRecordId: REC_A1 }),
+    )
+    expect(parkedQuery.startsWith(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
+    expect(res.status).toBe(200)
+    expect(await forwardEdgeCount(REC_A1, REC_B1)).toBe(0)
+    expect(await mirrorRows()).toBe(0)
+  })
+
+  // ── H-A/H-B (#5954): the helper itself, two raw connections, no route ──────────────────────────────────
+  // D holds an uncommitted production soft delete of `target`; M runs the helper on [SA, SB] and must PARK
+  // behind D in the helper's own statement. `inspect` sees M's outcome, and the rows M's ONE locking statement
+  // actually returned, while M's transaction is still open (so a passed helper still holds its locks).
+  type HelperOutcome = { ok: true } | { ok: false; err: unknown }
+  type HelperRace = { outcome: HelperOutcome; lockedRows: unknown[][]; probe: PoolClient }
+  async function raceHelper(target: string, finish: 'COMMIT' | 'ROLLBACK', inspect: (race: HelperRace) => Promise<void>): Promise<void> {
+    const d = await connect()
+    const m = await connect()
+    const probe = await connect()
+    let mOutcome: Promise<HelperOutcome> | null = null
+    try {
+      const dPid = await backendPid(d)
+      const mPid = await backendPid(m)
+      await d.query('BEGIN')
+      const deleted = await d.query('UPDATE meta_sheets SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL', [target])
+      expect(deleted.rowCount).toBe(1) // D really holds a new, uncommitted row version of the target
+
+      await m.query('BEGIN')
+      await m.query("SET LOCAL lock_timeout = '10s'") // bounded, whatever goes wrong
+      const lockedRows: unknown[][] = []
+      const mQuery = async (sql: string, params: unknown[]) => {
+        const res = await m.query(sql, params)
+        if (sql === SHEETS_ROW_LOCK_LIVENESS_SQL) lockedRows.push(res.rows)
+        return res
+      }
+      let settled = false
+      mOutcome = assertSheetsLiveForUpdate(mQuery, [SA, SB])
+        .then((): HelperOutcome => ({ ok: true }), (err: unknown): HelperOutcome => ({ ok: false, err }))
+        .finally(() => { settled = true })
+
+      const parkedQuery = await waitForLockWaiter(mPid, dPid, () => settled)
+      expect(parkedQuery.startsWith(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
+
+      await d.query(finish)
+      const outcome = await withTimeout(mOutcome, 10_000, `helper after D ${finish}`)
+      await inspect({ outcome, lockedRows, probe })
+    } finally {
+      // D first: if M is still parked behind it, this is what lets M finish before it is released.
+      await d.query('ROLLBACK').catch(() => {})
+      if (mOutcome) await withTimeout(mOutcome, 10_000, 'drain M').catch(() => {})
+      await m.query('ROLLBACK').catch(() => {})
+      await probe.query('ROLLBACK').catch(() => {})
+      d.release()
+      m.release()
+      probe.release()
+    }
+  }
+  const rowOf = (rows: unknown[], id: string) => (rows as Array<{ id: string; deleted_at: unknown }>).find((r) => r.id === id)
+
+  for (const [label, target, other] of [['A', SA, SB], ['B', SB, SA]] as const) {
+    test(`H-${label} COMMIT: the helper parks on sheet ${label}'s row; the soft delete commits ⇒ the lock returns the COMMITTED row and the helper refuses`, async () => {
+      try {
+        await raceHelper(target, 'COMMIT', async ({ outcome, lockedRows }) => {
+          expect(outcome.ok, 'the helper PASSED on a sheet whose soft delete committed while it waited').toBe(false)
+          const err = (outcome as { ok: false; err: unknown }).err
+          expect(err).toBeInstanceOf(SheetNotLiveError)
+          expect((err as SheetNotLiveError).liveness).toBe('deleted')
+          expect((err as SheetNotLiveError).sheetId).toBe(target)
+          expect((err as SheetNotLiveError).message).not.toContain(target)
+          // What the ONE locking statement handed back: both rows, the target in its COMMITTED version.
+          expect(lockedRows.length).toBe(1)
+          expect(lockedRows[0]!.length).toBe(2)
+          const targetRow = rowOf(lockedRows[0]!, target)
+          expect(targetRow).toHaveProperty('deleted_at')
+          expect(targetRow?.deleted_at).not.toBeNull()
+          expect(rowOf(lockedRows[0]!, other)).toHaveProperty('deleted_at', null)
+        })
+      } finally {
+        await q('UPDATE meta_sheets SET deleted_at = NULL WHERE id = $1', [target])
+      }
+    })
+
+    test(`H-${label} ROLLBACK: the helper parks on sheet ${label}'s row; the soft delete rolls back ⇒ it passes and HOLDS both rows`, async () => {
+      await raceHelper(target, 'ROLLBACK', async ({ outcome, lockedRows, probe }) => {
+        expect(outcome).toEqual({ ok: true })
+        expect(lockedRows.length).toBe(1)
+        expect(rowOf(lockedRows[0]!, SA)).toHaveProperty('deleted_at', null)
+        expect(rowOf(lockedRows[0]!, SB)).toHaveProperty('deleted_at', null)
+        // …and the pass is a HELD lock, not a read: a third session cannot take either row.
+        for (const id of [SA, SB]) {
+          await expect(probe.query('SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE NOWAIT', [id]))
+            .rejects.toMatchObject({ code: '55P03' })
+        }
+      })
+    })
+  }
+
+  // ── L-*: lock ORDER on a non-C collation (#5954) ──────────────────────────────────────────────────────
+  // The multi-sheet lock must take its rows in the order the other sheet lockers take theirs: JS code-unit
+  // order. `lockRecordLinkTargetSheetsOnQuery` (the record-link write path) takes `meta_sheets … FOR SHARE`
+  // one id at a time in that order. A bare `ORDER BY id` sorts by the column's collation — the database
+  // default — and under any linguistic collation 'sheet_a…' sorts before 'sheet_B…', the reverse of JS order.
+  // The case builds that collation itself (a scratch schema whose `meta_sheets.id` is ICU en-US, reached via
+  // `SET LOCAL search_path`) so it holds on any cluster locale; CI's may well be C, where the hazard is hidden.
+  describe('L — the two-sheet lock takes rows in JS order on a non-C collation', () => {
+    const SCHEMA = `mlrd5954_l_${TS}`
+    const S_UPPER = `sheet_B_${TS}` // JS order: first ('B' is 0x42, 'a' is 0x61)
+    const S_LOWER = `sheet_a_${TS}` // linguistic order: first
+    type Settled = { ok: true; code: null } | { ok: false; code: string | null }
+    const settle = (p: Promise<unknown>): Promise<Settled> =>
+      p.then((): Settled => ({ ok: true, code: null }), (err: unknown): Settled => ({ ok: false, code: pgCode(err) }))
+    type LockQuery = (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>
+
+    beforeAll(async () => {
+      await q(`CREATE SCHEMA ${SCHEMA}`)
+      await q(`CREATE COLLATION ${SCHEMA}.linguistic (provider = icu, locale = 'en-US')`)
+      await q(`CREATE TABLE ${SCHEMA}.meta_sheets (id text COLLATE ${SCHEMA}.linguistic PRIMARY KEY, deleted_at timestamptz)`)
+      await q(`INSERT INTO ${SCHEMA}.meta_sheets (id) VALUES ($1), ($2)`, [S_UPPER, S_LOWER])
+    })
+
+    afterAll(async () => {
+      await q(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {})
+    })
+
+    /**
+     * X = the production share locker on [S_LOWER, S_UPPER], paused between its two row locks (it has taken
+     * S_UPPER, JS order's first). Y = `multiLock` on the pair; it must park behind X. A NOWAIT probe then
+     * shows whether parked Y already holds S_LOWER. X is released to its second row; both sides settle.
+     */
+    async function raceShareLocker(multiLock: (query: LockQuery) => Promise<unknown>) {
+      const x = await connect()
+      const y = await connect()
+      const probe = await connect()
+      let openGate: () => void = () => {}
+      let locker: Promise<Settled> | null = null
+      let multi: Promise<Settled> | null = null
+      try {
+        const xPid = await backendPid(x)
+        const yPid = await backendPid(y)
+        for (const c of [x, y]) {
+          await c.query('BEGIN')
+          await c.query(`SET LOCAL search_path TO ${SCHEMA}`)
+          await c.query("SET LOCAL lock_timeout = '10s'")
+        }
+        const gate = new Promise<void>((resolve) => { openGate = resolve })
+        let firstHeld: () => void = () => {}
+        const firstHeldP = new Promise<void>((resolve) => { firstHeld = resolve })
+        const requestedByX: unknown[] = []
+        const xQuery = async (sql: string, params?: unknown[]) => {
+          requestedByX.push(params?.[0])
+          if (requestedByX.length === 2) await gate
+          const res = await x.query(sql, params)
+          if (requestedByX.length === 1) firstHeld()
+          return res
+        }
+        locker = settle(lockRecordLinkTargetSheetsOnQuery(xQuery, [S_LOWER, S_UPPER]))
+        await withTimeout(firstHeldP, 10_000, 'the share locker took its first row')
+
+        let ySettled = false
+        multi = settle(multiLock((sql, params) => y.query(sql, params))).finally(() => { ySettled = true })
+        const parkedQuery = await waitForLockWaiter(yPid, xPid, () => ySettled)
+
+        await probe.query('BEGIN')
+        await probe.query(`SET LOCAL search_path TO ${SCHEMA}`)
+        const probeCode = await probe.query('SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE NOWAIT', [S_LOWER])
+          .then(() => null, (err: unknown) => pgCode(err))
+        await probe.query('ROLLBACK')
+
+        openGate()
+        const lockerOutcome = await withTimeout(locker, 15_000, 'the share locker, second row')
+        await x.query('ROLLBACK')
+        const multiOutcome = await withTimeout(multi, 15_000, 'the multi-sheet lock')
+        return { requestedByX, parkedQuery, probeCode, locker: lockerOutcome, multi: multiOutcome }
+      } finally {
+        openGate()
+        await x.query('ROLLBACK').catch(() => {})
+        if (multi) await withTimeout(multi, 15_000, 'drain Y').catch(() => {})
+        if (locker) await withTimeout(locker, 15_000, 'drain X').catch(() => {})
+        await y.query('ROLLBACK').catch(() => {})
+        await probe.query('ROLLBACK').catch(() => {})
+        x.release()
+        y.release()
+        probe.release()
+      }
+    }
+
+    test('L-0 fixture: the column collation orders the pair OPPOSITE to JS order; COLLATE "C" gives JS order back', async () => {
+      expect([S_LOWER, S_UPPER].sort()).toEqual([S_UPPER, S_LOWER])
+      const ids = (res: { rows: unknown[] }) => res.rows.map((r) => (r as { id: string }).id)
+      expect(ids(await q(`SELECT id FROM ${SCHEMA}.meta_sheets ORDER BY id`))).toEqual([S_LOWER, S_UPPER])
+      expect(ids(await q(`SELECT id FROM ${SCHEMA}.meta_sheets ORDER BY id COLLATE "C"`))).toEqual([S_UPPER, S_LOWER])
+    })
+
+    test('L-1 the helper, racing the JS-order share locker: same lock order, no deadlock, both complete', async () => {
+      const r = await raceShareLocker((query) => assertSheetsLiveForUpdate(query, [S_LOWER, S_UPPER]))
+      // Neither side was a deadlock victim (40P01) — nor failed in any other way.
+      expect({ locker: r.locker.code, multi: r.multi.code }).toEqual({ locker: null, multi: null })
+      expect(r.locker.ok && r.multi.ok).toBe(true)
+      expect(r.requestedByX).toEqual([S_UPPER, S_LOWER]) // the share locker really went in JS order
+      expect(r.parkedQuery.startsWith(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
+      // Parked behind X on S_UPPER, the helper holds NOTHING yet: it asked for S_UPPER first, as X did.
+      expect(r.probeCode).toBeNull()
+    })
+
+    test('L-2 control: the same statement WITHOUT the collate takes the rows in collation order and deadlocks', async () => {
+      const uncollated = SHEETS_ROW_LOCK_LIVENESS_SQL.replace(' COLLATE "C"', '')
+      expect(uncollated).not.toBe(SHEETS_ROW_LOCK_LIVENESS_SQL)
+      expect(uncollated).toContain('ORDER BY id FOR UPDATE')
+      const r = await raceShareLocker((query) => query(uncollated, [[S_LOWER, S_UPPER].sort()]))
+      // Parked behind X on S_UPPER, it already holds S_LOWER (its collation's first) — the crossed order…
+      expect(r.probeCode).toBe('55P03')
+      // …so X's second row closes the cycle and Postgres kills one side.
+      expect([r.locker.code, r.multi.code].filter((c) => c === '40P01')).toHaveLength(1)
+    })
   })
 })

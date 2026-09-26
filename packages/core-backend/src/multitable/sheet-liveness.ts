@@ -212,9 +212,20 @@ export async function assertSheetLiveForUpdate(query: LivenessQuery, sheetId: st
  * physical order, not the array order. With `ORDER BY` the rows are sorted BEFORE they are locked, so every
  * caller of this statement acquires the same set of rows in the same order — two concurrent multi-sheet
  * writers on the same pair cannot each hold one row and wait for the other.
+ *
+ * `COLLATE "C"` makes that order the SAME order the JS-sorted sheet lockers use. A bare `ORDER BY id` sorts
+ * by the column's collation, which is the database default — and on a non-C database (an ICU locale, or the
+ * Chinese libc locale a deployment may run) `'sheet_a' < 'sheet_B'`, while JS code-unit order (`.sort()`,
+ * `a < b`) puts `'sheet_B'` first. `lockRecordLinkTargetSheetsOnQuery` (services/approval-record-link-txn-auth.ts)
+ * takes `meta_sheets … FOR SHARE` one id at a time in JS order; against it, a collation-ordered lock here
+ * takes the rows in the OPPOSITE order and the two transactions deadlock (40P01) — measured on real Postgres
+ * with an ICU en-US collation, and pinned by the real-DB suite
+ * (tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts). `"C"` is byte order,
+ * which for the ASCII ids sheets carry is exactly JS order — the order `acquireCanonicalSheetFencesInOrder`
+ * (multitable/canonical-sheet-fence.ts) takes its fences in as well — whatever the database's locale is.
  */
 export const SHEETS_ROW_LOCK_LIVENESS_SQL =
-  'SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE'
+  'SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE'
 
 /**
  * {@link loadSheetLivenessForUpdate} for SEVERAL sheets locked together — the verdict for each, read UNDER the
@@ -223,7 +234,7 @@ export const SHEETS_ROW_LOCK_LIVENESS_SQL =
  * Why a multi-id arity at all: a write that spans two sheets (the cross-base mirror op writes an edge whose
  * ends live on two sheets) must lock both rows in one deterministic order. Two single-id calls would lock
  * them in CALLER order, and two writers that name the pair in opposite orders would deadlock. This takes the
- * locks in ONE statement, sorted by id, and still reads every row's `deleted_at` under its lock — the
+ * locks in ONE statement, in byte (JS) id order, and still reads every row's `deleted_at` under its lock — the
  * lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaces took the locks and never looked, which is the
  * #5938 TOCTOU window on two rows at once.
  *
@@ -265,12 +276,17 @@ export async function loadSheetsLivenessForUpdate(
  * {@link assertSheetLiveForUpdate} (#5954).
  *
  * Throws {@link SheetNotLiveError} for the FIRST non-live id in the CALLER's order. The lock order is not the
- * caller's order (it is `id` order, see {@link SHEETS_ROW_LOCK_LIVENESS_SQL}); the caller's order only decides
- * WHICH refusal is reported when more than one sheet died, so a route can keep the same precedence its
+ * caller's order (it is byte `id` order, see {@link SHEETS_ROW_LOCK_LIVENESS_SQL}); the caller's order only
+ * decides WHICH refusal is reported when more than one sheet died, so a route can keep the same precedence its
  * pre-transaction gate uses. Either way the refusal is the values-free one: the error message never carries
  * an id, and routes map it through `sendSheetNotLive(res, err.liveness)`.
+ *
+ * An EMPTY list is a caller bug, not a request: it would lock nothing and pass. It throws a values-free
+ * `TypeError('SHEET_LIVENESS_NO_SHEET_IDS')` before any statement is issued, so the transaction rolls back
+ * instead of writing under no lock at all.
  */
 export async function assertSheetsLiveForUpdate(query: LivenessQuery, sheetIds: readonly string[]): Promise<void> {
+  if (!Array.isArray(sheetIds) || sheetIds.length === 0) throw new TypeError('SHEET_LIVENESS_NO_SHEET_IDS')
   const verdicts = await loadSheetsLivenessForUpdate(query, sheetIds)
   for (const sheetId of sheetIds) {
     const liveness = verdicts.get(sheetId) ?? 'absent'

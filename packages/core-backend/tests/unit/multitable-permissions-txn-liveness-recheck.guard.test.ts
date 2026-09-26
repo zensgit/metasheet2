@@ -120,8 +120,9 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     'THE helper. The one statement that locks the row and re-reads `deleted_at` together.',
   ],
   [
-    'multitable/sheet-liveness.ts :: SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE',
-    'THE multi-sheet helper (#5954). Locks every named row in `id` order and re-reads each `deleted_at` in '
+    'multitable/sheet-liveness.ts :: SELECT id, deleted_at FROM meta_sheets WHERE id = ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE',
+    'THE multi-sheet helper (#5954). Locks every named row in byte `id` order (`COLLATE "C"` — the same order '
+    + 'the JS-sorted sheet lockers use, on any database locale) and re-reads each `deleted_at` in '
     + 'the same statement. Its caller is the cross-base mirror RECORD op (routes/univer-meta.ts), whose '
     + 'lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaced — that site is closed, not ledgered.',
   ],
@@ -716,7 +717,7 @@ describe('#5938 — the real-DB waiter probe derives its pattern instead of copy
 })
 
 /**
- * #5954 — the MULTI-sheet helper: one statement that locks every named row in `id` order and reads each
+ * #5954 — the MULTI-sheet helper: one statement that locks every named row in byte `id` order and reads each
  * `deleted_at` under that lock. Asserted on behaviour, for the same reason as rule C above: a structural
  * rule that the route calls the helper is worthless if the helper does nothing.
  */
@@ -742,9 +743,35 @@ describe('#5954 — the multi-sheet helper actually locks, reads and refuses', (
     // Caller order B, A, B — the statement still receives each id ONCE, in sorted order.
     await expect(assertSheetsLiveForUpdate(query, [SHEET_B, SHEET_A, SHEET_B])).resolves.toBeUndefined()
     expect(seen).toEqual([{ sql: SHEETS_ROW_LOCK_LIVENESS_SQL, params: [[SHEET_A, SHEET_B]] }])
-    // The statement locks (FOR UPDATE), orders the lock (ORDER BY id), and READS deleted_at — all three,
-    // in the one text the helper issues. A lock-only `SELECT id … FOR UPDATE` is what #5954 replaced.
-    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(/^SELECT id, deleted_at FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\) ORDER BY id FOR UPDATE$/)
+    // The statement locks (FOR UPDATE), orders the lock (ORDER BY id) in BYTE order (COLLATE "C" — the order
+    // the JS-sorted sheet lockers use, whatever the database locale), and READS deleted_at — all of it, in the
+    // one text the helper issues. A lock-only `SELECT id … FOR UPDATE` is what #5954 replaced; a bare
+    // `ORDER BY id` sorts by the column's (database default) collation and can lock in the opposite order to
+    // `lockRecordLinkTargetSheetsOnQuery` on a non-C database (the real-DB suite reproduces that deadlock).
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(/^SELECT id, deleted_at FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\) ORDER BY id COLLATE "C" FOR UPDATE$/)
+  })
+
+  it('an EMPTY list is a caller bug: a values-free TypeError, and no statement at all (it would lock nothing and pass)', async () => {
+    const { query, seen } = scriptedQuery([{ id: SHEET_A, deleted_at: null }])
+    const err = await assertSheetsLiveForUpdate(query, []).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TypeError)
+    expect(err).not.toBeInstanceOf(SheetNotLiveError)
+    expect((err as TypeError).message).toBe('SHEET_LIVENESS_NO_SHEET_IDS')
+    expect(seen).toEqual([])
+    // Not an array at all is the same caller bug.
+    const notArray = await assertSheetsLiveForUpdate(query, undefined as unknown as string[]).catch((e: unknown) => e)
+    expect((notArray as TypeError).message).toBe('SHEET_LIVENESS_NO_SHEET_IDS')
+    expect(seen).toEqual([])
+  })
+
+  it('a list of only unusable ids is refused as absent — never skipped into a pass, never sent to the database', async () => {
+    const { query, seen } = scriptedQuery([{ id: SHEET_A, deleted_at: null }])
+    for (const ids of [[''], [undefined as unknown as string], [null as unknown as string, '']]) {
+      const err = await assertSheetsLiveForUpdate(query, ids).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(SheetNotLiveError)
+      expect((err as SheetNotLiveError).liveness).toBe('absent')
+    }
+    expect(seen).toEqual([])
   })
 
   it('refuses when EITHER sheet was soft-deleted — the first sheet', async () => {
