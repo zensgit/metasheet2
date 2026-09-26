@@ -14,8 +14,9 @@
 //   真  lib/http-routes.cjs                      externalSystemsUpsert / readSourceConfigsSave /
 //                                                readSourceConfigsApprove / stockPreparationPlmBomSourceRun /
 //                                                stockPreparationSnapshotBatchList / …Diff / …DiffRows
-//   真  lib/read-source-config-store.cjs         saveVersion（内容幂等 + reused）/ approve（仅 draft→approved）/
-//                                                getForRuntime（作用域精确匹配、不回退）
+//   真  lib/read-source-config-store.cjs         saveVersion（内容幂等 + reused；铸新指针前在事务内对目标外部系统行取
+//                                                FOR KEY SHARE —— 删除锁协议的写入方半边，external-system-pointer-lock.cjs）/
+//                                                approve（仅 draft→approved）/ getForRuntime（作用域精确匹配、不回退）
 //   真  lib/adapters/data-source-sql-readonly-source-adapter.cjs、sync-run persist、snapshot reads、diff 引擎
 // 被替身的只有：
 //   · 部署预检（/preflight）—— 固定回答一个沙箱形状；门本身由 scenario-b-replay.test.mjs 覆盖。
@@ -23,6 +24,9 @@
 //     回退，与 external-systems.cjs 的 selectScopedRow 语义一致（#5472）。
 //   · 宿主 data-source facade（按 rows 回放合成表）与 multitable records/provisioning（内存 staging）。
 //   · 配置仓的 db：有作用域语义的内存表 —— where 里的 null 只匹配 null/undefined，别的值精确相等。
+//     它的 selectOneForKeyShare（写入方锁）对 integration_external_systems 按 tenant_id + id 去**登记替身**里解析
+//     （系统登记在替身里、不在这张 db 的表中），查不到返回 null：未登记 / 已删除的 systemId 在这条车道上照样被
+//     真 saveVersion 拒绝（400 READ_SOURCE_CONFIG_INVALID / READ_SOURCE_SYSTEM_NOT_FOUND），不是「任何 id 都活」的桩。
 // 没有网络、没有真数据库、没有写仓库文件。autopersist flag 只在本进程内置 'true'，跑完还原。
 //
 // Run: node --test scripts/ops/scenario-b-replay-contract.test.mjs
@@ -44,6 +48,7 @@ const require = createRequire(import.meta.url)
 const fixture = require(path.join(PLUGIN_DIR, 'fixtures', 'scenario-b-synthetic-bom', 'scenario-b-synthetic-bom.cjs'))
 const httpRoutes = require(path.join(LIB_DIR, 'http-routes.cjs'))
 const { createReadSourceConfigStore } = require(path.join(LIB_DIR, 'read-source-config-store.cjs'))
+const { EXTERNAL_SYSTEMS_TABLE } = require(path.join(LIB_DIR, 'external-system-pointer-lock.cjs'))
 const {
   ADAPTER_KIND,
   createDataSourceSqlReadonlySourceAdapter,
@@ -60,7 +65,11 @@ const ADMIN_USER = Object.freeze({
 const DEFAULT_WORKSPACE_OF_OLD_SCRIPT = 'workspace_scenario_b'
 
 // ── 有作用域语义的内存 db（配置仓用）───────────────────────────────────────────────────────
-function createScopedMemoryDb() {
+// `externalSystems`：登记替身的行数组（createExternalSystemRegistryDouble().systems）。真 saveVersion 铸新指针前
+// 会在事务内对目标外部系统行取 FOR KEY SHARE（删除锁协议的写入方半边）；这张 db 里没有 integration_external_systems
+// 表，系统登记在替身里，所以锁读按 tenant_id + id（与真锁的 where 同形、不带 workspace）去替身里解析，查不到就
+// 返回 null —— 「未登记 / 已删除即拒绝」的语义在这条车道上是真的。刻意不写成「任何 id 都活」的桩。
+function createScopedMemoryDb({ externalSystems = [] } = {}) {
   const tables = {}
   const tableOf = (name) => { if (!tables[name]) tables[name] = []; return tables[name] }
   const matches = (row, where) => Object.entries(where || {}).every(([key, value]) => {
@@ -89,6 +98,17 @@ function createScopedMemoryDb() {
       return filtered.slice(from, from + (options.limit || 1000))
     },
     async transaction(callback) { return callback(db) },
+    async selectOneForKeyShare(table, where) {
+      if (table !== EXTERNAL_SYSTEMS_TABLE) return db.selectOne(table, where)
+      const keys = Object.keys(where || {}).sort()
+      if (keys.join(',') !== 'id,tenant_id') {
+        // 锁协议的作用域就是 tenant_id + id（external-system-pointer-lock.cjs「SCOPE OF THE LOCK」）；别的形状不是这条协议。
+        throw new Error(`replay contract: KEY SHARE on ${table} must be keyed by tenant_id + id, got ${keys.join(',')}`)
+      }
+      const row = externalSystems.find((s) => s.tenantId === where.tenant_id && s.id === where.id)
+      if (!row) return null
+      return { id: row.id, tenant_id: row.tenantId, workspace_id: row.workspaceId, kind: row.kind, role: row.role, config: { ...row.config } }
+    },
   }
   return db
 }
@@ -181,7 +201,9 @@ function createExternalSystemRegistryDouble() {
 
 // 一整台「后端」：真 handler + 真配置仓 + 替身登记表/facade/staging。`source.rows` 是合成表当前内容。
 function createBackend() {
-  const db = createScopedMemoryDb()
+  const registry = createExternalSystemRegistryDouble()
+  // 配置仓的写入方锁按 tenant_id + id 去登记替身里解析目标系统（见 createScopedMemoryDb 头注）。
+  const db = createScopedMemoryDb({ externalSystems: registry.systems })
   let configSeq = 0
   const readSourceConfigStore = createReadSourceConfigStore({ db, idGenerator: () => `replay_contract_cfg_${++configSeq}` })
   const staging = createInMemoryStagingStore()
@@ -209,7 +231,6 @@ function createBackend() {
     storage: { durable: false, async get() { return null }, async set() {}, async delete() {}, async list() { return [] } },
     config: {},
   }
-  const registry = createExternalSystemRegistryDouble()
   const services = {
     externalSystemRegistry: {
       ...throwingStub('externalSystemRegistry', ['getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
@@ -302,6 +323,24 @@ function replayArgs(extra = []) {
   return parseArgs(['node', 'scenario-b-replay.mjs', '--base-url', 'http://127.0.0.1:8900', '--token', 'contract', '--mode', 'v1v2', ...extra])
 }
 
+const BASE_URL = 'http://127.0.0.1:8900'
+
+// 用真 externalSystemsUpsert handler 登记一个外部系统 —— 与脚本 REGISTER_SYSTEM 步同一请求形状。
+async function registerSystem(backend, id = 'syn-bom-source-b1') {
+  const res = await backend.fetchImpl(`${BASE_URL}/api/integration/external-systems`, {
+    method: 'POST',
+    body: JSON.stringify({ id, name: 'scenario-b-synthetic-bom', kind: ADAPTER_KIND, role: 'source', config: { dataSourceId: 'syn-bom-postgres-b1' } }),
+  })
+  const body = JSON.parse(await res.text())
+  assert.ok(res.status === 200 || res.status === 201, `register ${id}: ${res.status} ${JSON.stringify(body)}`)
+  return body
+}
+
+async function saveConfig(backend, config) {
+  const res = await backend.fetchImpl(`${BASE_URL}/api/integration/read-source-configs`, { method: 'POST', body: JSON.stringify({ config }) })
+  return { status: res.status, body: JSON.parse(await res.text()) }
+}
+
 async function withAutoPersist(run) {
   const prev = process.env[AUTOPERSIST_FLAG]
   process.env[AUTOPERSIST_FLAG] = 'true'
@@ -361,6 +400,8 @@ test('F3：显式 --workspace 时，登记/保存/审批/源运行/读取全链�
 
 test('F3 反例钉住：store 作用域没被放宽 —— 配置存在 NULL、却按 workspace 取，真 getForRuntime 仍 404', async () => {
   const backend = createBackend()
+  // 真 saveVersion 铸指针前先解析目标系统（写入方锁），所以和脚本一样先 REGISTER_SYSTEM 再 SAVE_CONFIG。
+  await registerSystem(backend)
   const saved = await backend.fetchImpl('http://127.0.0.1:8900/api/integration/read-source-configs', {
     method: 'POST', body: JSON.stringify({ config: fixture.readSourceConfig({ systemId: 'syn-bom-source-b1' }) }),
   })
@@ -379,6 +420,42 @@ test('F3 反例钉住：store 作用域没被放宽 —— 配置存在 NULL、�
     })
     assert.equal(run.status, 404, '作用域不一致时真仓照旧拒绝 —— 修的是脚本，不是仓')
   })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// 写入方锁协议（外部系统删除 × 指针写入）—— 真 saveVersion 铸新指针前先在事务内解析目标外部系统行。
+// 这条车道上解析落到登记替身（按 tenant_id + id），所以「未登记 / 已删除即 400」在这里是真的；
+// 若把假件改成「任何 id 都活」，下面两条会红。
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+
+const SYSTEM_NOT_FOUND_TUPLE = Object.freeze([{ code: 'READ_SOURCE_SYSTEM_NOT_FOUND', field: 'systemId', reason: 'not_found' }])
+
+test('锁协议：未登记的 systemId → 真 saveVersion 拒 400 READ_SOURCE_CONFIG_INVALID（tuple READ_SOURCE_SYSTEM_NOT_FOUND），不落行、不落审计、不回显 id', async () => {
+  const backend = createBackend()
+  const { status, body } = await saveConfig(backend, fixture.readSourceConfig({ systemId: 'syn-bom-source-never-registered' }))
+  assert.equal(status, 400, JSON.stringify(body))
+  assert.equal(body.error.code, 'READ_SOURCE_CONFIG_INVALID')
+  assert.deepEqual(body.error.details.errors, SYSTEM_NOT_FOUND_TUPLE)
+  assert.ok(!JSON.stringify(body).includes('never-registered'), 'values-free：拒绝面不回显 systemId')
+  assert.equal((backend.db.tables.integration_read_source_configs || []).length, 0, '没有铸出指向未登记系统的指针')
+  assert.equal((backend.db.tables.integration_read_source_config_audit || []).length, 0, '没有审计行')
+})
+
+test('锁协议：登记过又删掉的 systemId → 新内容再存同样 400；别的租户里的同 id 登记不算（按 tenant_id + id 解析）', async () => {
+  const backend = createBackend()
+  await registerSystem(backend)
+  const live = await saveConfig(backend, fixture.readSourceConfig())
+  assert.equal(live.status, 201, JSON.stringify(live.body))
+  // 「删除已提交」在替身里就是行消失；同时放一条别的租户的同 id 登记，证明解析不跨租户。
+  backend.registry.systems.splice(0, backend.registry.systems.length, {
+    tenantId: 'tenant_someone_else', workspaceId: null, id: 'syn-bom-source-b1', kind: ADAPTER_KIND, role: 'source', config: {},
+  })
+  // 同内容再存会命中内容幂等复用（reuseExisting 不铸指针、不加锁），所以换一个 object 走铸造路径。
+  const minted = await saveConfig(backend, fixture.readSourceConfig({ object: 'scenario_b_bom_rows_probe' }))
+  assert.equal(minted.status, 400, JSON.stringify(minted.body))
+  assert.equal(minted.body.error.code, 'READ_SOURCE_CONFIG_INVALID')
+  assert.deepEqual(minted.body.error.details.errors, SYSTEM_NOT_FOUND_TUPLE)
+  assert.equal(backend.db.tables.integration_read_source_configs.length, 1, '只剩系统存活时铸的那一版')
 })
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════

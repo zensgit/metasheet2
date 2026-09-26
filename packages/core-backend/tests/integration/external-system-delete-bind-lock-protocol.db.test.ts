@@ -52,6 +52,16 @@ const PLUGIN_LIB = path.join(PLUGIN_ROOT, 'lib')
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
+// Anti-skip-green sentinel — deliberately OUTSIDE `describeIfDatabase`. Inside it, the sentinel
+// would be skipped together with every other case exactly when DATABASE_URL is missing, so it could
+// never fire (that was the shape as first shipped). Lanes that export EXPECT_DB=1 (the real-DB step
+// this suite is written for) must be RED when DATABASE_URL is missing; the default no-DB job, which
+// does not set EXPECT_DB, skips it visibly. Same shape as approval-can-decide-current-node.db.test.ts.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
 const MIGRATIONS = [
   '057_create_integration_core_tables.sql',
   '062_create_integration_read_source_configs.sql',
@@ -360,12 +370,6 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     }
     await seedSystem('sys_1')
     await seedSystem('sys_target', 'target')
-  })
-
-  it('sentinel: DATABASE_URL set', () => {
-    // Armed by lanes that export EXPECT_DB=1: a missing DATABASE_URL must be RED there, never a
-    // skip-green. In the default no-DB job this whole describe is skipped, not passed.
-    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
   it('NEC: the unlocked count-then-delete shape (#5923 as shipped) dangles on this schema', async () => {

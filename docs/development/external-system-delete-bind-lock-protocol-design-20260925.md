@@ -100,7 +100,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 - `lib/stock-preparation-source-binding-store.cjs`、`lib/read-source-config-store.cjs`：构造时要求 `selectOneForKeyShare`（与既有「transaction 必需」同一姿态）；写事务第一条语句取锁。
 - `lib/pipelines.cjs`：如上。
 - `lib/http-routes.cjs`、`index.cjs`、`package.json`、`.github/`：未动。
-- 测试假件：13 个既有套件的内存 db 补 `selectOneForKeyShare` / `selectOneForUpdate` / `transaction`（凡不是本刀主题的假件一律「任何 id 都活」，并注明存在性语义由协议套件负责）；`db.test.cjs` 的方法面清单与 `gip-server-bound-source-executor.test.cjs` 的导出面清单按新增项更新；`external-systems-delete-dependent-references.test.cjs` 的 B-02/B-12 改为断言**事务内**那一次计数（探针使每张表计数两次），并把内存变异器改为 CRLF 归一（本机 `core.autocrlf=true` 检出下 M-5 的多行锚点本就假红）。
+- 测试假件：13 个既有套件的内存 db 补 `selectOneForKeyShare` / `selectOneForUpdate` / `transaction`（凡不是本刀主题的假件一律「任何 id 都活」，并注明存在性语义由协议套件负责）；**插件目录之外还有一个消费者**——`scripts/ops/scenario-b-replay-contract.test.mjs`（把回放脚本接到真 `http-routes` + 真 `read-source-config-store` 上，由 `scenario-b-replay-verify.yml` 按 `plugins/plugin-integration-core/lib/**` 触发），第一版漏补、把该车道打红（5/5）；补法**不是**「任何 id 都活」：它的 `selectOneForKeyShare` 按 tenant_id + id 去登记替身里解析（系统登记在替身、不在内存 db 的表中），查不到返回 null，并新增两条用例钉住「未登记 / 已删除 / 别租户的同 id → 400 `READ_SOURCE_CONFIG_INVALID` + `READ_SOURCE_SYSTEM_NOT_FOUND` tuple，不落行不落审计不回显 id」；其 F3 反例用例因此改为先经真 `externalSystemsUpsert` 登记再保存（与脚本 REGISTER_SYSTEM → SAVE_CONFIG 同序）；`db.test.cjs` 的方法面清单与 `gip-server-bound-source-executor.test.cjs` 的导出面清单按新增项更新；`external-systems-delete-dependent-references.test.cjs` 的 B-02/B-12 改为断言**事务内**那一次计数（探针使每张表计数两次），并把内存变异器改为 CRLF 归一（本机 `core.autocrlf=true` 检出下 M-5 的多行锚点本就假红）。
 
 ## 5. 残余：073 sealed-export 绑定写入方未参与（owner 决定）
 
@@ -117,6 +117,8 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 
 - **插件内存套件**（`__tests__/external-systems-delete-bind-lock-protocol.test.cjs`，登记于 `test-chain.txt:40`，紧接同族 `:39`）：带行锁冲突表与缓冲事务的内存 db，跑 `integration-guard` 的「hermetic, no DB」链与 `plugin-tests.yml`。覆盖 L-01…L-10、R-073、M-D1/M-W079/M-W062/M-WPIPE 四个内存级变异（源文本 → `_compile`，不落盘）。
 - **真 PG 套件**（`packages/core-backend/tests/integration/external-system-delete-bind-lock-protocol.db.test.ts`）：仓库里所有真库套件都是**逐文件**写进 `plugin-tests.yml`（该文件是 S6-A 证据 pin 输入、且本分支的 gh 令牌无 workflow 权限），没有任何按 glob 跑 `tests/integration` 的车道；默认 `vitest.config.ts` 未排除它，所以在无 DB 的 `test (20.x)` 默认步骤里它以 **skipped** 出现（不是假绿，是可见的跳过）。**待办：需 workflow 权限**——在 `plugin-tests.yml` 的「Run DB migrations」之后按 S3/S4 真库步骤同形加一步（`DATABASE_URL` + `EXPECT_DB=1` + `--config vitest.integration.config.ts run tests/integration/external-system-delete-bind-lock-protocol.db.test.ts --reporter=verbose`），并在同一提交把该文件加进 `vitest.config.ts` 的排除表（仓库的「两点登记」惯例）。CI 的 PG 是 14（`ankane/setup-postgres` 14），`FOR KEY SHARE` 9.3 起可用。
+- 真 PG 套件的**防跳过哨兵**放在 `describeIfDatabase` **外面**、按 `EXPECT_DB === '1'` 开关（`approval-can-decide-current-node.db.test.ts:50-53` 同形）。第一版把它写在 describe 里面，没有 DATABASE_URL 时随整个 describe 一起 `describe.skip`，从来不看 EXPECT_DB——实测 `EXPECT_DB=1` 且无 DATABASE_URL 时 11 skipped、退出码 0，哨兵形同虚设。移出后同一命令 1 failed、退出码 1；无 EXPECT_DB 无 DATABASE_URL 时全部 skipped、退出码 0；有 DATABASE_URL + EXPECT_DB=1 时 11/11 通过。
+- `scripts/ops` 的回放契约车道（`scenario-b-replay-verify.yml` → `node --test scripts/ops/scenario-b-replay.test.mjs scripts/ops/scenario-b-replay-contract.test.mjs`）由 `plugins/plugin-integration-core/lib/**` 触发，不是 required check，但被本刀打红过；补假件后 35/35 通过（第 7.4 节）。
 - 套件里的 `EXTERNAL_SYSTEM_LOCK_PROTOCOL_PLUGIN_ROOT` 只用于第 7 节的旧红与变异运行，CI 不设。
 
 ## 7. 验证（全部执行型）
@@ -127,7 +129,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 
 | 用例 | `origin/main` 插件代码（旧） | 本分支（新） |
 |---|---|---|
-| sentinel | ✓ | ✓ |
+| sentinel（现在在 describe 外、按 EXPECT_DB=1 开关，第 6 节） | ✓ | ✓ |
 | NEC 无锁形状悬空（原生 SQL） | ✓（悬空=1） | ✓（悬空=1，必要性成立） |
 | P-079-A 删除计数零后 bind | ✗ 未等锁 | ✓ 等锁 → 409 `SOURCE_BINDING_SOURCE_NOT_LIVE`，指针 0 |
 | P-079-B bind 持 KEY SHARE 后删除 | ✗ | ✓ 等锁 → 409，`stockPrepSourceBindingCount=1` |
@@ -157,6 +159,8 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 
 改动前后对照（本机，CRLF 检出）：`db`、`external-systems`、`external-systems-delete-dependent-references`（B-01…B-14 + M-1…M-5）、`external-systems-list-workspace-fallback`、`stock-preparation-source-binding`（12/12）、`-scope-fallback`（16/16）、`-routes`、`read-source-config-store`、四个 `gip-*`、`pipelines`、`integration-templates`、`http-routes`、`http-routes-plm-k3wise-poc`、`pipeline-runner`、`sealed-export-package-provenance`（pin 重算后绿）、`sealed-export-s6a-initial-provisioning`、`sealed-export-s6a-lifecycle-provisioning`、`test-chain-completeness`（230 套件）——改动前因新增必需方法而红的 14 个套件，补假件后全绿；整条 `pnpm --filter plugin-integration-core test` 结果见 PR 正文。
 
+插件目录之外（第一版漏掉、被 CI 的 `replay self-test + producer/consumer contract (hermetic)` 抓到）：`node --test scripts/ops/scenario-b-replay.test.mjs scripts/ops/scenario-b-replay-contract.test.mjs` 在补假件前 28 通过 / 5 失败（契约套件 5/5 报 `createReadSourceConfigStore: scoped db helper (incl. transaction, selectOneForKeyShare) is required`），补后 35/35 通过（契约套件 5 条旧用例 + 2 条新的锁协议用例）；`scripts/ops/scenario-b-replay-ci-wiring.test.mjs` 通过（未新增 require 闭包之外的文件）。变异自证：把契约套件假件的 `selectOneForKeyShare` 改成「任何 id 都活」（恒返回一行）→ 2 条新用例红、5 条旧用例仍绿，证明存在性语义只由新用例钉住；再把该方法整个删掉 → 回到 7 条全红（构造器 fail-closed）。
+
 ## 8. 没有做 / 已知代价
 
 - 073 未参与（第 5 节）。
@@ -164,4 +168,5 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 - 每次外部系统删除多 4 条探针 COUNT；每次 079/062/pipeline 写入多 1–2 条 `SELECT … FOR KEY SHARE`（主键点查）。
 - 写入方在删除进行中会**等待**（不是立刻失败）——等的时间等于删除事务的长度（毫秒级：一把行锁 + 6 条 COUNT + 1 条 DELETE）。
 - 真 PG 套件在 CI 里尚未真跑（第 6 节待办）；本机 PG 16.10 与 CI 的 PG 14 之间，本刀用到的语法（`FOR KEY SHARE`、`GENERATED … STORED` 属迁移既有）均在 14 支持范围内。
-- 内存假件里「任何 id 都活」的 13 处 stub 是为了把既有套件的主题与本刀解耦；它们不证明存在性语义，协议套件才证明。
+- 内存假件里「任何 id 都活」的 13 处 stub 是为了把既有套件的主题与本刀解耦；它们不证明存在性语义，协议套件才证明。`scripts/ops/scenario-b-replay-contract.test.mjs` 的假件不在此列——它按登记替身解析，存在性语义在那条车道上是真的（第 4 节）。
+- **行为变化（对外可见）**：`saveVersion` 现在对本租户内不存在的 `systemId` **一律**返回 400 `READ_SOURCE_CONFIG_INVALID`（details.errors 里是 `{ code: READ_SOURCE_SYSTEM_NOT_FOUND, field: systemId, reason: not_found }`），不只是并发删除时的输家——第一版 PR 正文只写了并发一侧。之前先存配置、后登记系统也能 201（指针可以先于系统存在）；现在必须先登记。同内容再存仍走内容幂等复用（不铸指针、不加锁），不受影响。
