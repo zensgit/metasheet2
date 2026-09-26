@@ -19,7 +19,8 @@ import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitabl
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
-import { resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
+import { resolveDateTimeFieldTimeZone, resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
+import { dateTimeMinuteKey, formatDateTimeValue } from '../multitable/date-time-wall-clock'
 import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -4256,6 +4257,36 @@ export function evaluateMetaFilterCondition(
 
   if (opNorm === 'isempty') return isNullishSortValue(cellValue)
   if (opNorm === 'isnotempty') return !isNullishSortValue(cellValue)
+
+  // 客户反馈 2026-09-24 #4c (PR #6083 review S2): dateTime compares INSTANTS, not strings. Before this the
+  // type fell through to the string branch below, so `is` compared the stored ISO text against whatever the
+  // user typed (never equal) and greater/less hit the catch-all `return true` (matched every row). The filter
+  // value is parsed with the same rule as a cell edit: a zone-less wall clock (`2026-09-24 09:00`) is the
+  // instance BUSINESS timezone (the web sends an absolute instant when a field carries its own explicit
+  // zone, so per-field zones are honoured by the web's conversion; an API caller's zone-less text is
+  // business time). Both sides are floored to the MINUTE — the displayed precision — so a cell stored as
+  // 09:00:30 `is` 09:00. Relative-date operators stay `date`-only (day math is UTC there, see
+  // evaluateRelativeDateOp); an unknown operator keeps the pre-existing match-all catch-all.
+  if (effectiveType === 'dateTime') {
+    const businessZone = resolveMultitableBusinessTimezone()
+    const left = dateTimeMinuteKey(cellValue, businessZone)
+    const right = dateTimeMinuteKey(value, businessZone)
+    if (opNorm === 'is' || opNorm === 'equal') return left !== null && right !== null && left === right
+    if (opNorm === 'isnot' || opNorm === 'notequal') return left !== right
+    if (opNorm === 'greater' || opNorm === 'isgreater') return left !== null && right !== null && left > right
+    if (opNorm === 'greaterequal' || opNorm === 'isgreaterequal') return left !== null && right !== null && left >= right
+    if (opNorm === 'less' || opNorm === 'isless') return left !== null && right !== null && left < right
+    if (opNorm === 'lessequal' || opNorm === 'islessequal') return left !== null && right !== null && left <= right
+    if (opNorm === 'between') {
+      const arr = Array.isArray(condition.value) ? condition.value : []
+      if (arr.length < 2) return true
+      const a = dateTimeMinuteKey(arr[0], businessZone); const b = dateTimeMinuteKey(arr[1], businessZone)
+      if (a === null || b === null) return true
+      if (left === null) return false
+      return left >= Math.min(a, b) && left <= Math.max(a, b)
+    }
+    return true
+  }
 
   if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') {
     const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
@@ -15957,6 +15988,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // call — `fieldIds` is the fully-masked set (field_permissions ∧ view-hidden ∧ §2a.3-taint ∧
       // selection). Keeping it a single call-site preserves the egress-coverage + taint-chokepoint
       // guard counts (a denied/tainted column never reaches a cell regardless of which branch ran).
+      // 客户反馈 2026-09-24 #4c (PR #6083 review B1): date-times export as the SAME `YYYY-MM-DD HH:mm` (24h)
+      // business-zone wall clock the grid shows — not the raw stored `…T01:00:00.000Z`. Zone rule per column:
+      // a dateTime field's explicit non-'UTC' zone, else the instance business timezone; createdTime /
+      // modifiedTime carry no field zone → business timezone. Resolved ONCE per export, not per cell. The
+      // import side (`validateDateTimeValue`) parses this exact wall-clock form back in the same zone, so an
+      // export re-imports to the same instant (minute precision — the displayed precision).
+      const exportDateTimeZoneById = new Map<string, string>()
+      for (const field of fields) {
+        if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
+        else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
+      }
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -15965,6 +16007,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // (a cell must read as text, never `<p>…</p>`).
           if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
             return serializeXlsxCell(richLongTextToPlainText(cell))
+          }
+          const dateTimeZone = exportDateTimeZoneById.get(field.id)
+          if (dateTimeZone) {
+            const wallClock = formatDateTimeValue(cell, dateTimeZone)
+            // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
+            if (wallClock !== null) return wallClock
           }
           return serializeXlsxCell(cell)
         })

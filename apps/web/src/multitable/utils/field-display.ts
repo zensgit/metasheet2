@@ -53,6 +53,27 @@ function formatDateTime(value: unknown, timezone: string): string {
   return formatDateTimeInZone(value, timezone) ?? String(value)
 }
 
+/** True for the field types whose values are UTC instants shown as business wall clocks. */
+export function isDateTimeLikeFieldType(type: string): boolean {
+  return type === 'dateTime' || type === 'createdTime' || type === 'modifiedTime'
+}
+
+/** The zone a field's date-time values are shown in: a dateTime field's zone rule, else the business zone. */
+export function dateTimeFieldTimezone(field: Pick<MetaField, 'type' | 'property'>): string {
+  return field.type === 'dateTime' ? resolveDateTimeTimezone(field.property) : getBusinessTimezone()
+}
+
+/**
+ * Export / group-header / filter text of a date-time cell: the SAME `YYYY-MM-DD HH:mm` business wall clock
+ * the grid shows (客户反馈 2026-09-24 #4c, B1/N5). `null` when the field is not date-time-like or the value is
+ * not a date-time — the caller keeps its raw projection (never drops the cell).
+ */
+export function dateTimeExportText(field: Pick<MetaField, 'type' | 'property'>, value: unknown): string | null {
+  if (!isDateTimeLikeFieldType(field.type)) return null
+  if (value === null || value === undefined || value === '') return null
+  return formatDateTimeInZone(value, dateTimeFieldTimezone(field))
+}
+
 function formatAutoNumber(value: unknown, property: Record<string, unknown> | undefined): string {
   const num = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(num)) return String(value)

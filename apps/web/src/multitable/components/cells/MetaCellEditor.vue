@@ -13,19 +13,32 @@
       @keydown.tab="onScalarTab"
       @blur="onScalarBlur"
     />
-    <!-- datetime field type: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c) -->
-    <MetaDateTimeInput
-      v-else-if="field.type === 'dateTime'"
-      ref="inputRef"
-      class="meta-cell-editor__input"
-      :model-value="scalarActive ? scalarValue : modelValue"
-      :timezone="dateTimeZone"
-      @update:model-value="commitScalar"
-      @keydown.enter="onEnterScalarConfirm"
-      @keydown.escape="onEscapeCancel"
-      @keydown.tab="onScalarTab"
-      @blur="onScalarBlur"
-    />
+    <!-- datetime field type: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c).
+         Text box on purpose (a popover picker fights the grid's click-away commit). B2: a non-empty draft
+         the parser rejects is never committed, reverted or dropped — Enter/Tab/blur keep the editor open
+         with the values-free error below; Escape is the explicit discard. -->
+    <div v-else-if="field.type === 'dateTime'" class="meta-cell-editor__datetime-wrap">
+      <MetaDateTimeInput
+        ref="inputRef"
+        class="meta-cell-editor__input"
+        :class="{ 'meta-cell-editor__input--invalid': dateTimeInvalid }"
+        :model-value="scalarActive ? scalarValue : modelValue"
+        :timezone="dateTimeZone"
+        :aria-invalid="dateTimeInvalid ? 'true' : undefined"
+        @update:model-value="commitScalar"
+        @update:invalid="dateTimeInvalid = $event"
+        @keydown.enter="onDateTimeEnter"
+        @keydown.escape="onEscapeCancel"
+        @keydown.tab="onDateTimeTab"
+        @blur="onDateTimeBlur"
+      />
+      <span
+        v-if="dateTimeInvalid"
+        class="meta-cell-editor__error meta-cell-editor__error--datetime"
+        role="alert"
+        data-meta-datetime-error=""
+      >{{ l('cell.dateTimeInvalid') }}</span>
+    </div>
     <!-- string: date-like -->
     <input
       v-else-if="field.type === 'string' && isDateLike"
@@ -657,6 +670,40 @@ const scalarBinding = scalarEligibleAtSetup
 const scalarActive = computed(() => scalarBinding.active.value)
 // dateTime: the zone the wall clock is shown/typed in — an explicit non-UTC field zone, else the business timezone.
 const dateTimeZone = computed(() => resolveDateTimeTimezone(props.field?.property))
+// B2 (客户反馈 2026-09-24 #4c): MetaDateTimeInput reports a non-empty draft the parser rejected on a commit
+// attempt. While set, Enter / Tab / blur do NOT confirm (the last valid staged value is not silently
+// committed over a visible error and the garbage is not dropped); the error span renders; Escape discards.
+const dateTimeInvalid = ref(false)
+function dateTimeDraftIsInvalid(): boolean {
+  const el = inputRef.value as unknown as { flagInvalidDraft?: () => boolean } | null
+  return !!el?.flagInvalidDraft?.()
+}
+function onDateTimeEnter(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  if (dateTimeDraftIsInvalid()) {
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+  onEnterScalarConfirm(e)
+}
+function onDateTimeTab(e: KeyboardEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (isComposingEvent(e)) return
+  if (dateTimeDraftIsInvalid()) {
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
+  onScalarTab(e)
+}
+function onDateTimeBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (shouldIgnoreBlur(e)) return
+  // Keep the editor open with the error visible rather than click-away-committing the stale value.
+  if (dateTimeDraftIsInvalid()) return
+  onScalarBlur(e)
+}
 const scalarValue = computed(() => scalarBinding.value.value)
 
 // Mirror onTextInput: when the scalar Yjs path is live, drive the Y.Map (LWW)
@@ -1283,6 +1330,21 @@ onMounted(() => {
 .meta-cell-editor__clear-btn:disabled { opacity: 0.5; cursor: default; }
 .meta-cell-editor__uploading { padding: 4px 0; font-size: 11px; color: #409eff; }
 .meta-cell-editor__error { font-size: 11px; color: #d14343; }
+.meta-cell-editor__datetime-wrap { position: relative; display: flex; align-items: center; width: 100%; }
+.meta-cell-editor__input--invalid { border-color: #d14343 !important; }
+/* Sits below the cell's input, over the next row, so the message is readable inside a grid cell. */
+.meta-cell-editor__error--datetime {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 5;
+  margin-top: 2px;
+  padding: 2px 6px;
+  white-space: nowrap;
+  background: var(--ms-bg-card, #fff);
+  border: 1px solid #d14343;
+  border-radius: 3px;
+}
 .meta-cell-editor__readonly { color: #999; font-size: 13px; }
 .meta-cell-editor__rating { display: flex; align-items: center; gap: 2px; }
 .meta-cell-editor__rating-star {

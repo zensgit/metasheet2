@@ -209,17 +209,27 @@
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
           />
           <!-- dateTime: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c).
-               `change` carries the parsed UTC ISO (or null) and fires only when the instant differs. -->
+               `change` carries the parsed UTC ISO (or null) and fires only when the instant differs. B2: a
+               draft the parser rejects stays in the box, patches nothing, and the field error below names the
+               format (values-free). S3: the calendar button opens the Element Plus date-time panel. -->
           <template v-else-if="canEditField(field.id) && field.type === 'dateTime'">
-            <MetaDateTimeInput
-              :id="`drawer_field_${field.id}`"
-              class="meta-record-drawer__input"
-              :model-value="controlValue(field.id)"
-              :timezone="resolveDateTimeTimezone(field.property)"
-              :aria-invalid="fieldAriaInvalid(field.id)"
-              :aria-describedby="fieldAriaDescribedBy(field.id)"
-              @change="emitPatch(field.id, $event)"
-            />
+            <div class="meta-record-drawer__datetime">
+              <MetaDateTimeInput
+                :id="`drawer_field_${field.id}`"
+                class="meta-record-drawer__input"
+                :model-value="controlValue(field.id)"
+                :timezone="resolveDateTimeTimezone(field.property)"
+                :aria-invalid="fieldAriaInvalid(field.id)"
+                :aria-describedby="fieldAriaDescribedBy(field.id)"
+                @change="emitPatch(field.id, $event)"
+                @update:invalid="setDateTimeDraftInvalid(field.id, $event)"
+              />
+              <MetaDateTimePicker
+                :model-value="controlValue(field.id)"
+                :timezone="resolveDateTimeTimezone(field.property)"
+                @update:model-value="emitPatch(field.id, $event)"
+              />
+            </div>
             <span
               v-if="dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh)"
               class="meta-record-drawer__tz-hint"
@@ -440,6 +450,7 @@ import {
 } from '../utils/field-display'
 import { dateTimeZoneHint, resolveDateTimeTimezone } from '../utils/business-timezone'
 import MetaDateTimeInput from './cells/MetaDateTimeInput.vue'
+import MetaDateTimePicker from './cells/MetaDateTimePicker.vue'
 import { qrSvgFromText } from '../utils/qr-code'
 import {
   canEditField as canEditFieldShared,
@@ -540,7 +551,21 @@ function emitPatch(fieldId: string, value: unknown) {
   emit('patch', fieldId, value)
 }
 
+// B2 (客户反馈 2026-09-24 #4c): dateTime drafts the parser rejected on a commit attempt, per field. Local to
+// this panel (no server round trip happened — nothing was patched), shown through the SAME field-error slot
+// the server-rejection path uses, with a values-free message. Cleared by MetaDateTimeInput itself the moment
+// the text parses / empties / the value changes from outside.
+const dateTimeDraftInvalid = ref<Record<string, boolean>>({})
+function setDateTimeDraftInvalid(fieldId: string, invalid: boolean) {
+  if (!!dateTimeDraftInvalid.value[fieldId] === invalid) return
+  const next = { ...dateTimeDraftInvalid.value }
+  if (invalid) next[fieldId] = true
+  else delete next[fieldId]
+  dateTimeDraftInvalid.value = next
+}
+
 function fieldError(fieldId: string): string | null {
+  if (dateTimeDraftInvalid.value[fieldId]) return lc('cell.dateTimeInvalid')
   const message = props.fieldErrors?.[fieldId]
   return typeof message === 'string' && message.length > 0 ? message : null
 }
@@ -1150,6 +1175,10 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
 .meta-record-drawer__tz-hint { display: inline-block; margin-top: 2px; font-size: 12px; color: #909399; }
+/* dateTime composite (客户反馈 2026-09-24 #4c): the strict text box takes the width, the picker button sits beside it. */
+.meta-record-drawer__datetime { display: flex; align-items: center; gap: 6px; }
+.meta-record-drawer__datetime .meta-record-drawer__input { flex: 1; min-width: 0; }
+.meta-record-drawer__datetime .meta-datetime-input--invalid { border-color: #d14343; }
 .meta-record-drawer__input--multi { min-height: 96px; }
 /* min-height bumped 104px -> 132px (record inspector resizable-panel slice, 2026-09-05) to roughly
    match the template's `rows="6"` (was 5) at this font-size/line-height -- `resize: vertical`

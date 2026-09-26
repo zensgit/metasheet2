@@ -1,6 +1,7 @@
 import type { MetaField } from '../types'
-import { importCancelled, importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
+import { importCancelled, importDateTimeInvalid, importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
+import { parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
 
 export type DelimitedParseResult = {
   delimiter: ',' | '\t'
@@ -186,6 +187,25 @@ export async function buildImportedRecords(params: {
       else if (field?.type === 'date' && val !== '') {
         const d = new Date(val)
         data[fieldId] = !Number.isNaN(d.getTime()) ? d.toISOString().split('T')[0] : val
+      } else if (field?.type === 'dateTime') {
+        // 客户反馈 2026-09-24 #4c (B1): a dateTime cell is the SAME `YYYY-MM-DD HH:mm` business wall clock the
+        // export writes (zone rule: explicit non-UTC field zone, else the business zone); an absolute ISO
+        // string keeps its instant. Parsed HERE (not left to the server) so the row failure names the field
+        // in the import preview instead of a generic 400, and so a zone-less string is never read in the
+        // browser's zone. Unparseable non-empty text fails the ROW (values-free message) — never dropped,
+        // never stored as raw text.
+        const rawValue = val.trim()
+        if (!rawValue) {
+          data[fieldId] = null
+          continue
+        }
+        const ms = parseDateTimeTextToUtcMs(rawValue, resolveDateTimeTimezone(field.property))
+        if (ms === null) {
+          rowFailure = importDateTimeInvalid(field.name, isZh)
+          failingField = field
+          break
+        }
+        data[fieldId] = new Date(ms).toISOString()
       } else if (field && (isLinkField(field) || isNativePersonField(field))) {
         // Link, legacy link-backed person (isLinkField), OR native person (isNativePersonField).
         // All three resolve a delimited token to an id[] via the injected resolver; the resolver

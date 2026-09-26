@@ -42,3 +42,29 @@ export function resolveMultitableBusinessTimezone(env: NodeJS.ProcessEnv = proce
   }
   return DEFAULT_BUSINESS_TIMEZONE
 }
+
+/**
+ * The zone a `dateTime` FIELD's wall clocks are read and written in — the same rule the web applies:
+ *
+ *   1. `property.timezone`, when it names a valid IANA zone OTHER THAN the literal `'UTC'`;
+ *   2. else the instance business timezone ({@link resolveMultitableBusinessTimezone}).
+ *
+ * `'UTC'` counts as UNSET, not as a choice: `field-codecs.ts` `sanitizeFieldProperty` (dateTime branch)
+ * stamps `timezone: 'UTC'` on every zone-less dateTime property whenever fields are READ through the shared
+ * loader (`loaders.ts` loadFieldsForSheet → `serializeFieldRow`), and no UI has ever offered a zone picker,
+ * so a stored `'UTC'` is the legacy default marker. An integrator who really wants UTC wall clocks writes
+ * `'Etc/UTC'`.
+ *
+ * CONTRAST (S4, do not unify): an automation rule's `triggerConfig.timezone === 'UTC'` means REAL UTC —
+ * legacy rules were scheduled in UTC and must keep firing at the same instants (see automation-timezone.ts,
+ * "the UTC default scheduling path NEVER calls into this module"). The two `'UTC'`s carry different
+ * meanings on purpose.
+ */
+export function resolveDateTimeFieldTimeZone(property: unknown, env: NodeJS.ProcessEnv = process.env): string {
+  const raw = property && typeof property === 'object'
+    ? (property as { timezone?: unknown }).timezone
+    : undefined
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  if (trimmed && trimmed !== 'UTC' && isValidIanaTimeZone(trimmed)) return trimmed
+  return resolveMultitableBusinessTimezone(env)
+}

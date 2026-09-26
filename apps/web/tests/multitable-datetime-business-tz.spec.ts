@@ -24,22 +24,33 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import MetaCellEditor from '../src/multitable/components/cells/MetaCellEditor.vue'
 import MetaCellRenderer from '../src/multitable/components/cells/MetaCellRenderer.vue'
+import MetaDateTimePicker from '../src/multitable/components/cells/MetaDateTimePicker.vue'
+import MetaFieldHeader from '../src/multitable/components/MetaFieldHeader.vue'
+import MetaFilterConditionRow from '../src/multitable/components/MetaFilterConditionRow.vue'
 import MetaFormView from '../src/multitable/components/MetaFormView.vue'
+import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
+import { buildImportedRecords } from '../src/multitable/import/delimited'
 import {
   DEFAULT_BUSINESS_TIMEZONE,
   browserTimezoneDiffers,
   businessTimezoneLabel,
   dateTimeZoneHint,
   getBusinessTimezone,
+  normalizeDateTimeInput,
   parseDateTimeInput,
+  parseDateTimeTextToUtcMs,
+  pickerDateForValue,
   resetBusinessTimezone,
   resolveDateTimeTimezone,
   setBusinessTimezone,
+  utcMsFromWallClock,
+  valueForPickerDate,
   wallClockToUtcMs,
 } from '../src/multitable/utils/business-timezone'
 import {
+  dateTimeExportText,
   dateTimeInputValue,
   dateTimeValueFromInput,
   formatFieldDisplay,
@@ -339,7 +350,7 @@ describe('business timezone — editors and displays', () => {
     expect(input.type).toBe('text')
     expect(input.classList.contains('meta-cell-editor__input')).toBe(true)
     expect(input.value).toBe('2026-09-24 06:45')
-    expect(input.placeholder).toBe('YYYY-MM-DD HH:mm')
+    expect(input.placeholder).toBe('e.g. 2026-09-24 09:00') // the format by example (zh: 如 2026-09-24 09:00)
 
     typeInto(input, '2026-09-24 1') // partial
     typeInto(input, '2026-09-24 10:0') // still partial
@@ -360,21 +371,90 @@ describe('business timezone — editors and displays', () => {
     view.unmount()
   })
 
-  it('grid cell editor: an unparseable leftover reverts on blur to the stored value', async () => {
+  it('grid cell editor (B2): an unparseable draft is never dropped — Enter/Tab/blur keep it visible with an error, Escape discards', async () => {
+    const confirmSpy = vi.fn()
+    const blurCommitSpy = vi.fn()
+    const tabCommitSpy = vi.fn()
+    const cancelSpy = vi.fn()
+    const updateSpy = vi.fn()
     const view = mount(() => h(MetaCellEditor, {
       field: { id: 'fld_dt', name: 'When', type: 'dateTime' },
       modelValue: STORED,
+      hostCommitPolicy: 'grid',
+      'onUpdate:modelValue': updateSpy,
+      onConfirm: confirmSpy,
+      onBlurCommit: blurCommitSpy,
+      onTabCommit: tabCommitSpy,
+      onCancel: cancelSpy,
+      onOpenLinkPicker: vi.fn(),
+    }))
+    await flushUi()
+    const input = view.container.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
+    const errorEl = () => view.container.querySelector('[data-meta-datetime-error]')
+    // Still typing: no error yet, nothing emitted.
+    typeInto(input, '2026-09-24 25:00')
+    await flushUi()
+    expect(errorEl()).toBeNull()
+    expect(updateSpy).not.toHaveBeenCalled()
+
+    // Enter on garbage: blocked, error shown, draft kept — NOT reverted to the stored value.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(input.value).toBe('2026-09-24 25:00')
+    expect(errorEl()?.textContent).toBe('Invalid date-time — use the form 2026-09-24 09:00')
+    expect(errorEl()?.textContent).not.toContain('25:00') // values-free
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+
+    // Tab and click-away (blur) do not commit the stale staged value over a visible error either.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    input.dispatchEvent(new FocusEvent('blur'))
+    await flushUi()
+    expect(tabCommitSpy).not.toHaveBeenCalled()
+    expect(blurCommitSpy).not.toHaveBeenCalled()
+    expect(input.value).toBe('2026-09-24 25:00')
+
+    // Fixing the text clears the error at once; Enter then confirms the corrected instant.
+    typeInto(input, '2026-09-24 21:00')
+    await flushUi()
+    expect(errorEl()).toBeNull()
+    expect(updateSpy).toHaveBeenLastCalledWith('2026-09-24T13:00:00.000Z')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+
+    // Escape is the explicit discard path.
+    typeInto(input, 'garbage')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(cancelSpy).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
+
+  it('grid cell editor: a VALID draft still click-away-commits and Tab-commits as before', async () => {
+    const blurCommitSpy = vi.fn()
+    const tabCommitSpy = vi.fn()
+    const view = mount(() => h(MetaCellEditor, {
+      field: { id: 'fld_dt', name: 'When', type: 'dateTime' },
+      modelValue: STORED,
+      hostCommitPolicy: 'grid',
       'onUpdate:modelValue': vi.fn(),
       onConfirm: vi.fn(),
+      onBlurCommit: blurCommitSpy,
+      onTabCommit: tabCommitSpy,
       onCancel: vi.fn(),
       onOpenLinkPicker: vi.fn(),
     }))
     await flushUi()
     const input = view.container.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
-    typeInto(input, '2026-09-24 25:00')
+    typeInto(input, '2026-09-24 10:30')
     input.dispatchEvent(new FocusEvent('blur'))
     await flushUi()
-    expect(input.value).toBe('2026-09-24 09:00')
+    expect(blurCommitSpy).toHaveBeenCalledTimes(1)
+    expect(input.value).toBe('2026-09-24 10:30')
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    await flushUi()
+    expect(tabCommitSpy).toHaveBeenCalledTimes(1)
     view.unmount()
   })
 
@@ -498,4 +578,477 @@ describe('business timezone — editors and displays', () => {
     expect(view.container.querySelector('[data-meta-datetime-input]')).toBeNull()
     view.unmount()
   })
+})
+
+// ---------------------------------------------------------------------------------------------------------
+// PR #6083 adversarial review follow-ups (B1 / B2 / S1 / S2 / S3 / S6 / N1 / N3 / N5 / N6 / N7).
+// ---------------------------------------------------------------------------------------------------------
+
+describe('parser normalisation (B2 / N7) — what people type is read, what cannot be read is refused', () => {
+  const tz = 'Asia/Shanghai'
+  afterEach(() => resetBusinessTimezone())
+
+  it('accepts full-width digits / colon, 年月日 / 时分 words, `/` and `.`, `T`, seconds and millis', () => {
+    for (const text of [
+      '２０２６－０９－２４　０９：００',
+      '２０２６-０９-２４ ０９：００',
+      '2026年9月24日 9:00',
+      '2026年09月24日09:00',
+      '2026年9月24日9时0分',
+      '2026年9月24日 9点00分',
+      '2026/9/24 9:00',
+      '2026.09.24 09:00',
+      '2026-09-24T09:00:00',
+      '2026-09-24T09:00:00.000',
+    ]) {
+      expect(parseDateTimeInput(text, tz), text).toEqual({ ok: true, value: STORED })
+    }
+    expect(normalizeDateTimeInput('2026年9月24日 9时5分7秒')).toBe('2026-9-24 9:05:07')
+  })
+
+  it('an ISO string with Z / ±hh:mm / millis is an ABSOLUTE instant — not re-read as a business wall clock', () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    expect(parseDateTimeInput('2026-09-24T01:00:00.000Z', getBusinessTimezone())).toEqual({ ok: true, value: STORED })
+    expect(parseDateTimeInput('2026-09-24T01:00:00Z', getBusinessTimezone())).toEqual({ ok: true, value: STORED })
+    expect(parseDateTimeInput('2026-09-24T09:00:00+08:00', getBusinessTimezone())).toEqual({ ok: true, value: STORED })
+    expect(parseDateTimeInput('2026-09-24 09:00+0800', getBusinessTimezone())).toEqual({ ok: true, value: STORED })
+    expect(parseDateTimeInput('2026-09-23T21:00:00.250-04:00', getBusinessTimezone())).toEqual({ ok: true, value: '2026-09-24T01:00:00.250Z' })
+    expect(parseDateTimeTextToUtcMs('Thu, 24 Sep 2026 01:00:00 GMT', getBusinessTimezone())).toBe(Date.parse(STORED))
+  })
+
+  it('rejects MIXED separators (N7), impossible dates, zone-less free text, a bare date, 12-hour suffixes', () => {
+    for (const text of ['2026-09/24 09:00', '2026/09.24 09:00', '2026.09-24 09:00', '2026-02-30 09:00', '2026-09-24 24:00', 'Sep 24 2026 09:00', 'tomorrow 9am', '2026-09-24', '2026-09-24 9:00 PM', '20260924 0900']) {
+      expect(parseDateTimeInput(text, tz), text).toEqual({ ok: false })
+    }
+    // A bare date IS accepted for a stored / prefilled value (midnight in the zone) — only the editor requires the time.
+    expect(dateTimeInputValue('2026-09-24')).toBe('2026-09-24 00:00')
+  })
+
+  it('years 0000–0099 are not remapped to 19xx (N3)', () => {
+    expect(new Date(utcMsFromWallClock({ year: 99, month: 1, day: 1, hour: 0, minute: 0 })).toISOString()).toBe('0099-01-01T00:00:00.000Z')
+    expect(new Date(Date.UTC(99, 0, 1)).toISOString()).toBe('1999-01-01T00:00:00.000Z') // the trap
+    expect(parseDateTimeInput('0099-01-01 08:00', 'Etc/GMT-8')).toEqual({ ok: true, value: '0099-01-01T00:00:00.000Z' })
+    expect(dateTimeInputValue('0099-01-01T00:00:00.000Z', 'Etc/GMT-8')).toBe('0099-01-01 08:00')
+    // Asia/Shanghai in year 99 is on LMT (+08:05:43) — the wall clock still round-trips, in year 0099.
+    const ms = wallClockToUtcMs({ year: 99, month: 1, day: 1, hour: 8, minute: 0 }, tz)
+    expect(new Date(ms).getUTCFullYear()).toBe(98)
+    expect(dateTimeInputValue(new Date(ms).toISOString(), tz)).toBe('0099-01-01 08:00')
+  })
+})
+
+describe('DST rule (N1 / S6): gap → post-transition instant, overlap → earlier instant — same rule as the server', () => {
+  const NY = 'America/New_York'
+  const ny = (text: string) => dateTimeValueFromInput(text, NY)
+
+  it('spring-forward GAP: 02:30 (does not exist) → 07:30Z, shown as 03:30 EDT', () => {
+    expect(ny('2026-03-08 02:30')).toBe('2026-03-08T07:30:00.000Z')
+    expect(dateTimeInputValue('2026-03-08T07:30:00.000Z', NY)).toBe('2026-03-08 03:30')
+    expect(dateTimeValueFromInput('2026-03-29 02:30', 'Europe/Berlin')).toBe('2026-03-29T01:30:00.000Z')
+  })
+
+  it('fall-back OVERLAP: 01:30 (exists twice) → the earlier instant 05:30Z (EDT), never 06:30Z', () => {
+    expect(ny('2026-11-01 01:30')).toBe('2026-11-01T05:30:00.000Z')
+    expect(dateTimeValueFromInput('2026-10-25 02:30', 'Europe/Berlin')).toBe('2026-10-25T00:30:00.000Z') // CEST, the earlier one
+  })
+
+  it('is exact for the hours after a transition and well away from it', () => {
+    expect(ny('2026-03-08 03:30')).toBe('2026-03-08T07:30:00.000Z')
+    expect(ny('2026-03-08 06:00')).toBe('2026-03-08T10:00:00.000Z')
+    expect(ny('2026-11-01 02:00')).toBe('2026-11-01T07:00:00.000Z')
+    expect(ny('2026-07-01 09:00')).toBe('2026-07-01T13:00:00.000Z')
+    expect(ny('2026-12-01 09:00')).toBe('2026-12-01T14:00:00.000Z')
+    for (const [day, month] of [[8, 3], [1, 11]]) {
+      for (let hour = 0; hour < 24; hour += 1) {
+        if (month === 3 && hour === 2) continue // the non-existent gap hour
+        const text = `2026-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${String(hour).padStart(2, '0')}:30`
+        expect(dateTimeInputValue(ny(text), NY), text).toBe(text)
+      }
+    }
+  })
+})
+
+describe('picker bridge (S3): the Element Plus panel works in browser-local Dates, the value never does', () => {
+  it('pickerDateForValue gives a Date whose LOCAL components are the business wall clock; valueForPickerDate reads them back', () => {
+    const tz = 'Asia/Kathmandu'
+    const picked = pickerDateForValue(STORED, tz)!
+    expect([picked.getFullYear(), picked.getMonth() + 1, picked.getDate(), picked.getHours(), picked.getMinutes()]).toEqual([2026, 9, 24, 6, 45])
+    expect(valueForPickerDate(picked, tz)).toBe(STORED)
+    expect(valueForPickerDate(new Date(2026, 8, 25, 8, 0), tz)).toBe('2026-09-25T02:15:00.000Z')
+    expect(valueForPickerDate(new Date(2026, 8, 24, 9, 0), 'Asia/Shanghai')).toBe(STORED)
+    expect(pickerDateForValue(null, tz)).toBeNull()
+    expect(pickerDateForValue('junk', tz)).toBeNull()
+    expect(valueForPickerDate(null, tz)).toBeNull()
+  })
+
+  it('MetaDateTimePicker: the trigger opens the panel; confirming emits the business-zone instant, never a browser-local one', async () => {
+    const updateSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(MetaDateTimePicker, { modelValue: STORED, timezone: 'Asia/Kathmandu', 'onUpdate:modelValue': updateSpy })
+    const instance = app.mount(container) as unknown as { applyPickedDate: (d: Date | null) => string | null }
+    await flushUi()
+    const trigger = container.querySelector('[data-meta-datetime-picker-trigger]') as HTMLButtonElement
+    expect(trigger).not.toBeNull()
+    expect(document.body.querySelector('[data-meta-datetime-picker-panel]')).toBeNull()
+    trigger.click()
+    await flushUi()
+    const panel = document.body.querySelector('[data-meta-datetime-picker-panel]')
+    expect(panel).not.toBeNull()
+    expect(panel?.querySelector('.el-picker-panel, .el-date-picker, [class*="el-"]')).not.toBeNull() // the Element Plus panel rendered
+    // What the panel would hand back for the highlighted value: 06:45 local components → the SAME stored instant.
+    expect(instance.applyPickedDate(new Date(2026, 8, 24, 6, 45))).toBe(STORED)
+    expect(updateSpy).toHaveBeenLastCalledWith(STORED)
+    expect(instance.applyPickedDate(new Date(2026, 8, 25, 8, 0))).toBe('2026-09-25T02:15:00.000Z')
+    expect(instance.applyPickedDate(null)).toBeNull()
+    expect(updateSpy).toHaveBeenCalledTimes(2)
+    ;(document.body.querySelector('[data-meta-datetime-picker-cancel]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(document.body.querySelector('[data-meta-datetime-picker-panel]')).toBeNull()
+    app.unmount()
+    container.remove()
+  })
+})
+
+// The tests in THIS describe are the ones the S6 child runs re-execute under TZ=UTC and TZ=America/New_York
+// (see "UI surfaces under a foreign process zone" below): keep them free of anything that depends on the host
+// zone other than through the code under test. Kathmandu (UTC+05:45) is used as the business zone so a
+// browser-local regression can never coincide with the expected values on ANY host.
+describe('business timezone — UI surfaces (TZ-independent)', () => {
+  beforeEach(() => resetBusinessTimezone())
+  afterEach(() => {
+    document.body.innerHTML = ''
+    resetBusinessTimezone()
+    vi.restoreAllMocks()
+  })
+
+  it('form view: typing 06:45 in a Kathmandu business zone submits 01:00Z and shows 06:45 back', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const submitSpy = vi.fn()
+    const view = mount(() => h(MetaFormView, {
+      fields: [{ id: 'fld_dt', name: 'Visit time', type: 'dateTime', property: { timezone: 'UTC' } }],
+      record: { id: 'rec_1', version: 1, data: { fld_dt: '2026-09-23T02:30:00.000Z' } },
+      loading: false,
+      readOnly: false,
+      onSubmit: submitSpy,
+      onOpenLinkPicker: vi.fn(),
+    }))
+    await flushUi()
+    const input = view.container.querySelector('#field_fld_dt') as HTMLInputElement
+    expect(input.value).toBe('2026-09-23 08:15')
+    typeInto(input, '2026-09-24 06:45')
+    await flushUi()
+    view.container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+    expect(submitSpy).toHaveBeenCalledWith({ fld_dt: STORED })
+    expect(view.container.querySelector('[data-meta-datetime-picker-trigger]')).not.toBeNull() // S3: picker beside the box
+    view.unmount()
+  })
+
+  it('form view (B2): an unparseable draft shows an inline error, blocks submit, and never submits as empty or stale', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const submitSpy = vi.fn()
+    const view = mount(() => h(MetaFormView, {
+      fields: [{ id: 'fld_dt', name: 'Visit time', type: 'dateTime' }],
+      record: { id: 'rec_1', version: 1, data: { fld_dt: STORED } },
+      loading: false,
+      readOnly: false,
+      onSubmit: submitSpy,
+      onOpenLinkPicker: vi.fn(),
+    }))
+    await flushUi()
+    const input = view.container.querySelector('#field_fld_dt') as HTMLInputElement
+    typeInto(input, '2026-09-24 25:00')
+    input.dispatchEvent(new FocusEvent('blur'))
+    await flushUi()
+    const error = () => view.container.querySelector('#error_fld_dt')
+    expect(error()?.textContent).toBe('Invalid date-time — use the form 2026-09-24 09:00')
+    expect(input.value).toBe('2026-09-24 25:00') // kept visible
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    view.container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+    expect(submitSpy).not.toHaveBeenCalled()
+    expect(error()?.textContent).toBe('Invalid date-time — use the form 2026-09-24 09:00')
+    // A garbage draft typed WITHOUT blurring first is caught by submit's own validate() too.
+    typeInto(input, '2026-09-24 07:00')
+    await flushUi()
+    expect(error()).toBeNull()
+    typeInto(input, 'next week')
+    view.container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+    expect(submitSpy).not.toHaveBeenCalled()
+    expect(error()).not.toBeNull()
+    // Fix → error gone → submit carries the corrected instant.
+    typeInto(input, '2026-09-24 07:00')
+    await flushUi()
+    expect(error()).toBeNull()
+    view.container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+    expect(submitSpy).toHaveBeenCalledWith({ fld_dt: '2026-09-24T01:15:00.000Z' })
+    view.unmount()
+  })
+
+  it('form view (S1): a wall-clock prefill is normalised to the business instant; an unreadable prefill is not seeded', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const submitSpy = vi.fn()
+    const view = mount(() => h(MetaFormView, {
+      fields: [
+        { id: 'fld_dt', name: 'Visit time', type: 'dateTime' },
+        { id: 'fld_bad', name: 'Other time', type: 'dateTime' },
+        { id: 'fld_txt', name: 'Note', type: 'string' },
+      ],
+      record: null,
+      initialValues: { fld_dt: '2026-09-24 06:45', fld_bad: 'whenever', fld_txt: 'hello' },
+      loading: false,
+      readOnly: false,
+      onSubmit: submitSpy,
+      onOpenLinkPicker: vi.fn(),
+    }))
+    await flushUi()
+    expect((view.container.querySelector('#field_fld_dt') as HTMLInputElement).value).toBe('2026-09-24 06:45')
+    expect((view.container.querySelector('#field_fld_bad') as HTMLInputElement).value).toBe('')
+    view.container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+    expect(submitSpy).toHaveBeenCalledWith({ fld_dt: STORED, fld_txt: 'hello' })
+    view.unmount()
+  })
+
+  it('record drawer (B2): garbage on change shows the field error, keeps the draft, patches nothing; fixing clears it', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const patchSpy = vi.fn()
+    const view = mount(() => h(MetaRecordDrawer, {
+      visible: true,
+      record: { id: 'rec_1', version: 1, data: { fld_dt: STORED } },
+      fields: [{ id: 'fld_dt', name: 'Visit time', type: 'dateTime', property: { timezone: 'UTC' } }],
+      canEdit: true,
+      canComment: false,
+      canDelete: false,
+      onPatch: patchSpy,
+    }))
+    await flushUi()
+    const input = view.container.querySelector('#drawer_field_fld_dt') as HTMLInputElement
+    const error = () => view.container.querySelector('[data-test="drawer-field-error"][data-field-id="fld_dt"]')
+    expect(input.value).toBe('2026-09-24 06:45')
+    expect(view.container.querySelector('[data-meta-datetime-picker-trigger]')).not.toBeNull() // S3
+
+    typeInto(input, 'next tuesday')
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patchSpy).not.toHaveBeenCalled()
+    expect(input.value).toBe('next tuesday') // NOT reverted
+    expect(error()?.textContent).toBe('Invalid date-time — use the form 2026-09-24 09:00')
+    expect(error()?.textContent).not.toContain('tuesday')
+
+    typeInto(input, '2026-09-25 08:00')
+    await flushUi()
+    expect(error()).toBeNull()
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(patchSpy).toHaveBeenCalledTimes(1)
+    expect(patchSpy).toHaveBeenCalledWith('fld_dt', '2026-09-25T02:15:00.000Z')
+    view.unmount()
+  })
+
+  it('grid group header (N5) shows the business wall clock, not the raw ISO key', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const dtField = { id: 'fld_dt', name: 'When', type: 'dateTime', property: { timezone: 'UTC' } } as MetaField
+    const nameField = { id: 'fld_name', name: 'Name', type: 'string' } as MetaField
+    const view = mount(() => h(MetaGridTable, {
+      rows: [
+        { id: 'r1', version: 1, data: { fld_name: 'a', fld_dt: STORED } },
+        { id: 'r2', version: 1, data: { fld_name: 'b', fld_dt: STORED } },
+        { id: 'r3', version: 1, data: { fld_name: 'c', fld_dt: 'not a date' } },
+      ],
+      visibleFields: [nameField, dtField],
+      groupFields: [dtField],
+      sortRules: [],
+      loading: false,
+      currentPage: 1,
+      totalPages: 1,
+      startIndex: 0,
+      selectedRecordId: null,
+      canEdit: true,
+      canDelete: true,
+      onPatchCell: vi.fn(),
+    }))
+    await flushUi()
+    const labels = Array.from(view.container.querySelectorAll('[data-test="group-header"] .meta-grid__group-label')).map((el) => el.textContent)
+    expect(labels).toEqual(['2026-09-24 06:45', 'not a date'])
+    expect(view.container.textContent).not.toContain('T01:00:00.000Z')
+    view.unmount()
+  })
+
+  it('grid paste (S1): Ctrl+V of a wall clock patches the business-zone instant; unreadable text is passed through for the server to refuse', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const readText = vi.fn().mockResolvedValue('2026-09-24 06:45')
+    Object.defineProperty(navigator, 'clipboard', { value: { readText }, configurable: true })
+    const dtField = { id: 'fld_dt', name: 'When', type: 'dateTime', property: { timezone: 'UTC' } } as MetaField
+    const patchSpy = vi.fn()
+    const view = mount(() => h(MetaGridTable, {
+      rows: [{ id: 'r1', version: 3, data: { fld_dt: null } }],
+      visibleFields: [dtField],
+      sortRules: [],
+      loading: false,
+      currentPage: 1,
+      totalPages: 1,
+      startIndex: 0,
+      selectedRecordId: null,
+      canEdit: true,
+      canDelete: true,
+      onPatchCell: patchSpy,
+    }))
+    await flushUi()
+    const cell = view.container.querySelector('tbody tr.meta-grid__row .meta-grid__cell') as HTMLElement
+    cell.click() // focus without opening the editor
+    await flushUi()
+    const paste = () => (view.container.querySelector('.meta-grid') as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }))
+    paste()
+    await flushUi()
+    expect(patchSpy).toHaveBeenCalledWith('r1', 'fld_dt', STORED, 3) // 06:45 Kathmandu = 01:00Z, never the browser's 06:45
+
+    readText.mockResolvedValue('next tuesday')
+    paste()
+    await flushUi()
+    expect(patchSpy).toHaveBeenLastCalledWith('r1', 'fld_dt', 'next tuesday', 3) // server grammar refuses → 400 → toast, not a silent drop
+    view.unmount()
+  })
+
+  it('column header (N6): the zone hint appears once, in the dateTime header tooltip, only when the browser clock differs', async () => {
+    const spy = vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(240) // browser in New York
+    const field = { id: 'fld_dt', name: 'When', type: 'dateTime' } as MetaField
+    const away = mount(() => h(MetaFieldHeader, { field }))
+    await flushUi()
+    const awayName = away.container.querySelector('.meta-field-header__name') as HTMLElement
+    expect(awayName.getAttribute('title')).toMatch(/^When · (北京时间|Beijing time)$/)
+    expect(awayName.getAttribute('data-meta-datetime-zone-hint')).toMatch(/^(北京时间|Beijing time)$/)
+    away.unmount()
+    const text = mount(() => h(MetaFieldHeader, { field: { id: 'fld_s', name: 'Note', type: 'string' } as MetaField }))
+    await flushUi()
+    expect((text.container.querySelector('.meta-field-header__name') as HTMLElement).getAttribute('title')).toBe('Note')
+    text.unmount()
+
+    spy.mockReturnValue(-480) // browser already at UTC+8
+    const home = mount(() => h(MetaFieldHeader, { field }))
+    await flushUi()
+    const homeName = home.container.querySelector('.meta-field-header__name') as HTMLElement
+    expect(homeName.getAttribute('title')).toBe('When')
+    expect(homeName.hasAttribute('data-meta-datetime-zone-hint')).toBe(false)
+    home.unmount()
+  })
+
+  it('filter row (S2): a dateTime value is shown and typed as the business wall clock and stored as the instant', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const fields = [{ id: 'fld_dt', name: 'When', type: 'dateTime', property: { timezone: 'UTC' } }] as MetaField[]
+    const updates: Array<{ value?: unknown }> = []
+    const view = mount(() => h(MetaFilterConditionRow, {
+      rule: { fieldId: 'fld_dt', operator: 'is', value: STORED },
+      fields,
+      onUpdate: (rule: { value?: unknown }) => updates.push(rule),
+    }))
+    await flushUi()
+    const input = view.container.querySelector('input[data-filter-datetime]') as HTMLInputElement
+    expect(input.type).toBe('text')
+    expect(input.value).toBe('2026-09-24 06:45')
+    expect(input.placeholder).toBe('e.g. 2026-09-24 09:00')
+    expect(input.hasAttribute('aria-invalid')).toBe(false)
+    input.value = '2026-09-25 08:00'
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(updates.at(-1)?.value).toBe('2026-09-25T02:15:00.000Z')
+    input.value = 'whenever'
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(updates.at(-1)?.value).toBe('whenever') // kept verbatim, never silently dropped
+    input.value = ''
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(updates.at(-1)?.value).toBe('')
+    view.unmount()
+
+    const junk = mount(() => h(MetaFilterConditionRow, { rule: { fieldId: 'fld_dt', operator: 'is', value: 'whenever' }, fields, onUpdate: vi.fn() }))
+    await flushUi()
+    const junkInput = junk.container.querySelector('input[data-filter-datetime]') as HTMLInputElement
+    expect(junkInput.value).toBe('whenever')
+    expect(junkInput.getAttribute('aria-invalid')).toBe('true')
+    junk.unmount()
+  })
+
+  it('export text (B1) and import parse (B1) agree: both use the business wall clock and round-trip', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const dt = { id: 'fld_dt', name: 'When', type: 'dateTime', property: { timezone: 'UTC' } } as MetaField
+    const tokyo = { id: 'fld_tk', name: 'Tokyo', type: 'dateTime', property: { timezone: 'Asia/Tokyo' } } as MetaField
+    const created = { id: 'fld_ct', name: 'Created', type: 'createdTime' } as MetaField
+    const text = { id: 'fld_s', name: 'Note', type: 'string' } as MetaField
+    expect(dateTimeExportText(dt, STORED)).toBe('2026-09-24 06:45')
+    expect(dateTimeExportText(tokyo, STORED)).toBe('2026-09-24 10:00')
+    expect(dateTimeExportText(created, '2026-09-24T13:05:00.000Z')).toBe('2026-09-24 18:50')
+    expect(dateTimeExportText(text, STORED)).toBeNull() // not a date-time field → caller keeps raw
+    expect(dateTimeExportText(dt, 'not a date')).toBeNull()
+    expect(dateTimeExportText(dt, null)).toBeNull()
+
+    const built = await buildImportedRecords({
+      parsedRows: [
+        ['Alpha', dateTimeExportText(dt, STORED)!, dateTimeExportText(tokyo, STORED)!],
+        ['Beta', '2026年9月25日 8:00', ''],
+        ['Gamma', 'whenever', '2026-09-24 10:00'],
+        ['Delta', STORED, '2026-09-24T01:00:00Z'],
+      ],
+      fieldMapping: { 0: 'fld_s', 1: 'fld_dt', 2: 'fld_tk' },
+      fields: [text, dt, tokyo],
+    })
+    expect(built.records).toEqual([
+      { fld_s: 'Alpha', fld_dt: STORED, fld_tk: STORED }, // export → import: identical instants
+      { fld_s: 'Beta', fld_dt: '2026-09-25T02:15:00.000Z', fld_tk: null },
+      { fld_s: 'Delta', fld_dt: STORED, fld_tk: STORED }, // absolute ISO kept
+    ])
+    expect(built.rowIndexes).toEqual([0, 1, 3])
+    expect(built.failures).toEqual([
+      { rowIndex: 2, message: 'Invalid date-time for When — use the form 2026-09-24 09:00', retryable: false, fieldId: 'fld_dt', fieldName: 'When' },
+    ])
+    expect(built.failures[0].message).not.toContain('whenever') // values-free
+  })
+})
+
+describe('UI surfaces under a foreign process zone (S6 — child vitest runs)', { timeout: 240_000 }, () => {
+  const VITEST_ENTRY = path.resolve(TESTS_DIR, '../node_modules/vitest/vitest.mjs')
+  const SPEC = path.relative(path.resolve(TESTS_DIR, '..'), fileURLToPath(import.meta.url))
+  interface ChildSummary { numTotalTests: number; numPassedTests: number; numFailedTests: number; numPendingTests: number }
+
+  function runChild(tz: string): ChildSummary {
+    // `-t` selects ONLY the "UI surfaces (TZ-independent)" describe above; META_BUSINESS_TZ_CHILD stops the
+    // child from spawning grandchildren. The JSON reporter is the machine-readable result; a failing child
+    // exits non-zero, so its stdout is read off the error to keep the failure legible (counts, not "Command
+    // failed").
+    let stdout: string
+    try {
+      stdout = execFileSync(process.execPath, [VITEST_ENTRY, 'run', SPEC, '-t', 'UI surfaces \\(TZ-independent\\)', '--reporter=json'], {
+        cwd: path.resolve(TESTS_DIR, '..'),
+        env: { ...process.env, TZ: tz, META_BUSINESS_TZ_CHILD: '1', CI: process.env.CI ?? '1' },
+        encoding: 'utf8',
+        timeout: 220_000,
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      const failed = error as { stdout?: string | Buffer; stderr?: string | Buffer; message?: string }
+      stdout = String(failed.stdout ?? '')
+      if (!stdout.includes('"numTotalTests"')) {
+        throw new Error(`child vitest (TZ=${tz}) produced no JSON summary: ${failed.message ?? ''}\n${String(failed.stderr ?? '').slice(-2000)}`)
+      }
+    }
+    const start = stdout.indexOf('{"numTotalTestSuites"')
+    const json = JSON.parse(stdout.slice(start === -1 ? stdout.indexOf('{') : start)) as ChildSummary & { testResults?: Array<{ assertionResults?: Array<{ status: string; fullName: string; failureMessages?: string[] }> }> }
+    if (json.numFailedTests > 0) {
+      const failures = (json.testResults ?? []).flatMap((file) => (file.assertionResults ?? []).filter((t) => t.status === 'failed').map((t) => `${t.fullName}: ${(t.failureMessages ?? []).join(' ').slice(0, 400)}`))
+      throw new Error(`child vitest (TZ=${tz}) failed ${json.numFailedTests} test(s):\n${failures.join('\n')}`)
+    }
+    return json
+  }
+
+  it.skipIf(process.env.META_BUSINESS_TZ_CHILD === '1').each(['UTC', 'America/New_York'])(
+    'the form view / drawer / grid / filter / export surfaces pass with the process (browser) zone forced to %s',
+    (tz) => {
+      const summary = runChild(tz)
+      expect(summary.numFailedTests).toBe(0)
+      // The UI-surfaces describe holds 9 tests; `-t` leaves the rest "skipped" (the JSON reporter's own
+      // bookkeeping of filtered tests varies by version, so only the floor is asserted).
+      expect(summary.numPassedTests).toBeGreaterThanOrEqual(9)
+    },
+  )
 })

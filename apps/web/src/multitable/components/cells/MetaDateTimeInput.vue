@@ -8,16 +8,19 @@
 
     Single root on purpose: the host's class / id / aria-* / keydown / blur listeners fall through onto
     the <input> itself, and so does the host's scoped-style id — the grid editor, form view and record
-    drawer keep their existing input styling and keyboard handling unchanged.
+    drawer keep their existing input styling and keyboard handling unchanged. The host renders the
+    invalid-draft message (it owns the layout around the box); this component only reports the state.
   -->
   <input
     ref="inputEl"
     type="text"
     class="meta-datetime-input"
+    :class="{ 'meta-datetime-input--invalid': invalid }"
     data-meta-datetime-input=""
+    :data-invalid="invalid ? 'true' : undefined"
     autocomplete="off"
     spellcheck="false"
-    :placeholder="DATE_TIME_INPUT_PLACEHOLDER"
+    :placeholder="placeholder"
     :title="zoneHint || undefined"
     :value="draft"
     @input="onInput"
@@ -29,14 +32,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
+import { metaCoreLabel } from '../../utils/meta-core-labels'
 import {
   dateTimeValueToUtcMs,
   dateTimeZoneHint,
   formatDateTimeInZone,
   parseDateTimeInput,
 } from '../../utils/business-timezone'
-
-const DATE_TIME_INPUT_PLACEHOLDER = 'YYYY-MM-DD HH:mm'
 
 const props = defineProps<{
   /** The stored value: a UTC ISO instant, or null/'' when empty. */
@@ -50,10 +52,25 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: string | null): void
   /** Native `change` (commit on blur/Enter), only when the typed instant differs from `modelValue`. */
   (e: 'change', value: string | null): void
+  /**
+   * B2 — the invalid-draft contract. `true` when the person tried to COMMIT (change / blur / Enter via
+   * `flagInvalidDraft`) a non-empty draft the parser rejects; the draft stays in the box (never reverted,
+   * never turned into a clear, never handed on as a value) and the host shows the values-free message.
+   * `false` as soon as the draft becomes valid or empty, or the value changes from outside.
+   */
+  (e: 'update:invalid', invalid: boolean): void
+  /**
+   * B2 — the LIVE gate. `true` whenever the box holds non-empty text the parser rejects, touched or not
+   * (a half-typed value counts). A host that submits a whole form (MetaFormView) blocks on this, so a person
+   * who types garbage and clicks Submit without ever leaving the box is still stopped; `update:invalid`
+   * above is the quieter, display-oriented signal.
+   */
+  (e: 'update:unparseable', unparseable: boolean): void
 }>()
 
 const { isZh } = useLocale()
 const zoneHint = computed(() => dateTimeZoneHint(props.timezone, isZh.value))
+const placeholder = computed(() => metaCoreLabel('cell.dateTimePlaceholder', isZh.value))
 
 function formatForInput(value: unknown): string {
   return formatDateTimeInZone(value, props.timezone) ?? ''
@@ -69,15 +86,39 @@ function sameInstant(a: unknown, b: unknown): boolean {
 // denoting the same instant — i.e. the value changed from somewhere else (a collaborator, a reset).
 const draft = ref(formatForInput(props.modelValue))
 
+// `touched`: a commit was attempted on the current unparseable draft. The error is not shown while a
+// person is still typing a partial value; it appears when they try to leave / commit garbage, and
+// disappears the moment the text parses (or is emptied).
+const touched = ref(false)
+const invalid = ref(false)
+const unparseable = ref(false)
+
+function refreshInvalid() {
+  const parsed = parseDateTimeInput(draft.value, props.timezone)
+  const nextUnparseable = !parsed.ok
+  if (nextUnparseable !== unparseable.value) {
+    unparseable.value = nextUnparseable
+    emit('update:unparseable', nextUnparseable)
+  }
+  const next = touched.value && !parsed.ok
+  if (next === invalid.value) return
+  invalid.value = next
+  emit('update:invalid', next)
+}
+
 watch([() => props.modelValue, () => props.timezone], () => {
   const parsed = parseDateTimeInput(draft.value, props.timezone)
   if (parsed.ok && sameInstant(parsed.value, props.modelValue)) return
   draft.value = formatForInput(props.modelValue)
+  touched.value = false
+  refreshInvalid()
 })
 
 function onInput(event: Event) {
   draft.value = (event.target as HTMLInputElement).value
   const parsed = parseDateTimeInput(draft.value, props.timezone)
+  if (parsed.ok) touched.value = false
+  refreshInvalid()
   // A partial / invalid draft emits NOTHING — it must never turn into a clear of the stored value.
   if (!parsed.ok || sameInstant(parsed.value, props.modelValue)) return
   emit('update:modelValue', parsed.value)
@@ -85,8 +126,8 @@ function onInput(event: Event) {
 
 // `change` / `blur` re-read the element: a `change` is not always preceded by an `input` event
 // (autofill, IME commit, a script setting `.value`), and the element — not the draft — is the truth.
-function syncDraftFromElement(event: Event) {
-  const target = event.target
+function syncDraftFromElement(event?: Event) {
+  const target = event?.target ?? inputEl.value
   if (target instanceof HTMLInputElement) draft.value = target.value
 }
 
@@ -94,20 +135,49 @@ function onChange(event: Event) {
   syncDraftFromElement(event)
   const parsed = parseDateTimeInput(draft.value, props.timezone)
   if (!parsed.ok) {
-    draft.value = formatForInput(props.modelValue)
+    // B2: keep the garbage visible and flag it — do NOT revert to the stored value.
+    touched.value = true
+    refreshInvalid()
     return
   }
   const changed = !sameInstant(parsed.value, props.modelValue)
   draft.value = formatForInput(parsed.value)
+  touched.value = false
+  refreshInvalid()
   if (changed) emit('change', parsed.value)
 }
 
 function onBlur(event: Event) {
-  // Settle the box on the canonical spelling of what it denotes; an unparseable leftover reverts to
-  // the stored value (which is what the host commits — the last VALID draft, never the garbage).
+  // Settle the box on the canonical spelling of what it denotes. An unparseable leftover STAYS (with the
+  // invalid flag) so the person sees what was refused; the host never commits it.
   syncDraftFromElement(event)
   const parsed = parseDateTimeInput(draft.value, props.timezone)
-  draft.value = parsed.ok ? formatForInput(parsed.value) : formatForInput(props.modelValue)
+  if (!parsed.ok) {
+    touched.value = true
+    refreshInvalid()
+    return
+  }
+  draft.value = formatForInput(parsed.value)
+  touched.value = false
+  refreshInvalid()
+}
+
+/**
+ * Host hook for Enter / Tab: re-read the element and, when the current non-empty draft is unparseable,
+ * flag it (shows the error) and return `true` so the host blocks its commit. Returns `false` when the draft
+ * is valid or empty (the host proceeds as usual).
+ */
+function flagInvalidDraft(): boolean {
+  syncDraftFromElement()
+  const parsed = parseDateTimeInput(draft.value, props.timezone)
+  if (parsed.ok) {
+    touched.value = false
+    refreshInvalid()
+    return false
+  }
+  touched.value = true
+  refreshInvalid()
+  return true
 }
 
 // Hosts hold a ref to THIS component where they used to hold the <input> (MetaCellEditor focuses its
@@ -117,5 +187,8 @@ defineExpose({
   focus: () => inputEl.value?.focus(),
   blur: () => inputEl.value?.blur(),
   select: () => inputEl.value?.select(),
+  flagInvalidDraft,
+  isInvalid: () => invalid.value,
+  isUnparseable: () => unparseable.value,
 })
 </script>

@@ -71,7 +71,7 @@ async function createApp(args: {
   return { app, mockPool }
 }
 
-function defaultQueryHandler(records: any[] = []): QueryHandler {
+function defaultQueryHandler(records: any[] = [], fieldRows: any[] = FIELD_ROWS): QueryHandler {
   return async (sql, params) => {
     if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
       expect(params).toEqual([SHEET_ID])
@@ -83,11 +83,11 @@ function defaultQueryHandler(records: any[] = []): QueryHandler {
     }
     if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
       expect(params).toEqual([SHEET_ID])
-      return { rows: FIELD_ROWS }
+      return { rows: fieldRows }
     }
     if (sql.includes('SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1')) {
       expect(params).toEqual([SHEET_ID])
-      return { rows: FIELD_ROWS }
+      return { rows: fieldRows }
     }
     if (
       sql.includes('FROM meta_records') &&
@@ -190,5 +190,70 @@ describe('multitable xlsx routes', () => {
       ['Name', 'Amount'],
       ['Alpha', '12'],
     ])
+  })
+
+  // 客户反馈 2026-09-24 #4c (PR #6083 review B1/S1): a dateTime column exports as the business-zone wall clock
+  // the grid shows (`YYYY-MM-DD HH:mm`, Asia/Shanghai by default) — not the raw stored `…T01:00:00.000Z` — and
+  // that exact text imports back to the same instant. createdTime/modifiedTime use the same format.
+  test('dateTime exports as YYYY-MM-DD HH:mm in the business zone (xlsx AND csv) and re-imports to the same instant', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_when', name: 'When', type: 'dateTime', property: { timezone: 'UTC' }, order: 2 },
+      { id: 'fld_tokyo', name: 'Tokyo', type: 'dateTime', property: { timezone: 'Asia/Tokyo' }, order: 3 },
+      { id: 'fld_created', name: 'Created', type: 'createdTime', property: {}, order: 4 },
+    ]
+    const stored = '2026-09-24T01:00:00.000Z' // 09:00 Beijing, 10:00 Tokyo
+    // createdTime is record METADATA: query-service `mapRecordRow` → `injectSystemFieldValues` fills it from
+    // the row's `created_at`, never from `data` (a `data.fld_created` key would be overwritten).
+    const records = [
+      { id: 'rec_1', sheet_id: SHEET_ID, version: 1, created_at: new Date('2026-09-24T13:05:00.000Z'), data: { fld_name: 'Alpha', fld_when: stored, fld_tokyo: stored } },
+      { id: 'rec_2', sheet_id: SHEET_ID, version: 1, created_at: null, data: { fld_name: 'Junk', fld_when: 'not a date', fld_tokyo: null } },
+    ]
+    const parseBody = (res: any, callback: any) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)))
+      res.on('end', () => callback(null, Buffer.concat(chunks)))
+    }
+
+    const exporter = await createApp({ tokenPerms: ['multitable:read'], queryHandler: defaultQueryHandler(records, fieldRows) })
+    const xlsxResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const parsed = xlsx.read(xlsxResponse.body, { type: 'buffer' })
+    const rows = xlsx.utils.sheet_to_json(parsed.Sheets[parsed.SheetNames[0]], { header: 1, raw: false, defval: '' })
+    expect(rows).toEqual([
+      ['Name', 'When', 'Tokyo', 'Created'],
+      ['Alpha', '2026-09-24 09:00', '2026-09-24 10:00', '2026-09-24 21:05'], // createdTime: business zone too
+      ['Junk', 'not a date', '', ''], // a non-date-time value keeps the raw projection, never dropped
+    ])
+
+    const csvResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?format=csv`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const csvText = Buffer.from(csvResponse.body).toString('utf8').replace(/^﻿/, '')
+    expect(csvText.split(/\r?\n/)[1]).toBe('Alpha,2026-09-24 09:00,2026-09-24 10:00,2026-09-24 21:05')
+    expect(csvText).not.toContain('T01:00:00.000Z')
+    expect(csvText).not.toContain('T13:05:00.000Z')
+
+    // Round trip: the exported wall clock is what the import receives, and the write path reads it in the
+    // SAME zone rule (field zone, else business zone) → the identical instant is stored.
+    const importer = await createApp({ tokenPerms: ['multitable:read', 'multitable:write'], queryHandler: defaultQueryHandler([], fieldRows) })
+    const buffer = buildXlsxBuffer(xlsx, {
+      sheetName: 'Rows',
+      headers: ['Name', 'When', 'Tokyo'],
+      rows: [['Alpha', '2026-09-24 09:00', '2026-09-24 10:00']],
+    })
+    const importResponse = await request(importer.app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/import-xlsx`)
+      .attach('file', buffer, 'rows.xlsx')
+      .expect(200)
+    expect(importResponse.body.ok).toBe(true)
+    expect(importResponse.body.data.imported).toBe(1)
+    const insertCall = importer.mockPool.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO meta_records'))
+    expect(JSON.parse(String(insertCall?.[1]?.[2]))).toEqual({ fld_name: 'Alpha', fld_when: stored, fld_tokyo: stored })
   })
 })
