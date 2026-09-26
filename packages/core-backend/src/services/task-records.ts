@@ -7,7 +7,10 @@ import { acquireTaskStructureLock, type TaskAdvisoryQuery } from '../db/task-adv
 import {
   buildTaskPendingCondition,
   buildTaskScopeCondition,
+  can,
+  resolveTaskRoles,
   TASK_VIEWS,
+  type TaskAbility,
   type TaskView,
 } from '../tasks/task-access'
 import {
@@ -119,6 +122,26 @@ async function loadTask(id: string, orgId: string): Promise<{ createdBy: string;
   }
 }
 
+async function assertRowAbility(input: {
+  taskId: string
+  orgId: string
+  actorId: string
+  createdBy: string
+  ability: TaskAbility
+}): Promise<void> {
+  const assignees = await loadAssignees(input.taskId)
+  const followers = await query<Row>(
+    `SELECT user_id FROM task_followers WHERE task_id = $1`,
+    [input.taskId],
+  )
+  const roles = resolveTaskRoles({
+    createdBy: input.createdBy,
+    assigneeIds: assignees.map((row) => row.userId),
+    followerIds: followers.rows.map((row) => String(row.user_id)),
+  }, input.actorId)
+  if (!can(roles, input.ability)) fail(404, 'NOT_FOUND')
+}
+
 async function loadAssignees(taskId: string): Promise<TaskAssigneeRow[]> {
   const result = await query<Row>(
     `SELECT user_id, completed_at FROM task_assignees WHERE task_id = $1`,
@@ -132,6 +155,7 @@ async function loadAssignees(taskId: string): Promise<TaskAssigneeRow[]> {
 
 export async function completeTask(input: { orgId: string; actorId: string; taskId: string }): Promise<{ done: boolean }> {
   const task = await loadTask(input.taskId, input.orgId)
+  await assertRowAbility({ ...input, createdBy: task.createdBy, ability: 'complete' })
   const rows = await loadAssignees(input.taskId)
   const now = new Date()
   const next = applyComplete({ mode: task.mode, rows, actorId: input.actorId, createdBy: task.createdBy, now })
@@ -164,6 +188,7 @@ export async function reopenTask(input: {
   scope?: TaskReopenScope
 }): Promise<{ ok: true }> {
   const task = await loadTask(input.taskId, input.orgId)
+  await assertRowAbility({ ...input, createdBy: task.createdBy, ability: 'reopen' })
   const rows = await loadAssignees(input.taskId)
   const next = applyReopen({
     mode: task.mode,
