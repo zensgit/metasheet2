@@ -88,6 +88,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import request from 'supertest'
+import ts from 'typescript'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
@@ -1139,15 +1140,22 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  * `resolvedSheetId &&`, `config.foreignSheetId &&`) — when it fails there is no row or id to pair (see OTHER below).
  * A `!` before a grouping bracket that holds exactly the next operand, and a `!` on the bound boolean, flip it. A
  * bound boolean is settled only if its initialiser is AND each testing `if` is, through the same rule — AND only while
- * its name is ONE binding in the handler (`oneDeclaration`): one `const` / `let` declaration, which is then the binding
- * statement, and nothing else anywhere in the handler that binds it — no other declaration, `var`, parameter or
- * destructured name, and no write (`=`, `||=`, `&&=`, `??=`, `++`, a destructuring assignment), before the binding
- * (a closure) or after it. So `x &&= a !== b`, `x ||= a === b` (the comparison cannot decide them), `let x = false`
- * then `if (c) x = a !== b` or `if (c) x ||= a !== b` (`c` decides whether the comparison reaches `x`), a `var` in a
- * block, and a name written again before a testing `if` (`if (verbose) x = false`, `x = verbose ? false : x`) all read
- * BOTH paths. A guard in a testing `if` is asked there, after the comparison ran, so it counts only while every name it
- * reads is ONE binding in the handler too (`heldName`: one declaration or parameter, nothing written to it or through
- * it — `row = null`, `owner.sheet_id = ''`). The one other reading is `quantifiedOperand`: a `!rows.some((row) => …)`
+ * its name is ONE binding in the handler (`oneDeclaration`), read off the handler's SYNTAX TREE (the TypeScript parser,
+ * `bindingSiteList`), not matched by pattern: one `const` / `let` declaration, which is then the binding statement, and
+ * nothing else anywhere in the handler that binds it — no other declaration (in a comma list too), `var`, `function`,
+ * `class`, parameter, `catch` or destructured name, and no write (`=`, a compound assignment, `++` / `--`, a
+ * destructuring assignment, a `for (x of / in …)` or `for ([x] of …)` head), however its target is spelled (in
+ * parentheses, cast or asserted — `(x) = …`, `(x as T) = …`, `x! = …` — as an escaped identifier, or inside a template
+ * hole), before the binding (a closure) or after it. So `x &&= a !== b`, `x ||= a === b` (the comparison cannot decide
+ * them), `let x = false` then `if (c) x = a !== b` or `if (c) x ||= a !== b` (`c` decides whether the comparison
+ * reaches `x`), a `var` in a block, and a name written again before a testing `if` (`if (verbose) x = false`, `x =
+ * verbose ? false : x`, `(x) = false`) all read BOTH paths; so does every bound boolean in a handler the parser rejects,
+ * and every one outside every handler (there is no handler to parse). A guard in a testing `if` is asked there, after
+ * the comparison ran, so it counts only while every name it reads is ONE binding in the handler too (`heldName`: one
+ * declaration or parameter, nothing written to it or through it however spelled — `row = null`, `(row) = null`,
+ * `owner.sheet_id = ''`, `(owner as any).sheet_id = ''`, `delete owner.sheet_id`). An `if` tests the name where its
+ * condition names it outside literal text — inside a template hole too. The one other reading is `quantifiedOperand`:
+ * a `!rows.some((row) => …)`
  * / `rows.every(…)` whose one-parameter arrow body IS the comparison, as a whole `&&` / `||` operand of the
  * condition, settled by the same rule at that level (both, taken to be Array's, are monotone in the predicate).
  * Anything else — an operand that can overturn it, a call's arguments (`Boolean(…)`, `.filter(…)`, a `function`
@@ -1176,9 +1184,12 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *                    read too, exactly as a mismatch branch's is. In the consumer's own branch the value's name
  *                    (`err.message`, `failure.status`) stands for the value, whose payload is read at the handoff —
  *                    only while nothing binds that name again from the binding the value lands in to the end of
- *                    the branch (`failure = { … }`, `failure.message = …`, `err = …`: then it reads as echo); in the
- *                    run after the branch the name is read like any other local (past a `catch` it is another
- *                    binding). Where the
+ *                    the branch (`failure = { … }`, `failure.message = …`, `(failure as any).message = …`, `(err) =
+ *                    …`: then it reads as echo), read off the handler's syntax tree as for a bound boolean, and, for
+ *                    a value returned into a binding, nothing inside ANY closure of the handler binds it either (one
+ *                    declared before the binding, a hoisted `function` after the branch: either may run inside the
+ *                    branch); a handler the parser rejects reads as echo. In the run after the branch the name is
+ *                    read like any other local (past a `catch` it is another binding). Where the
  *                    handler has no such place — `next` / `reject`, a throw with no `catch`, a status object
  *                    returned any other way — it reads as echo. A payload is constant only if every leaf is a
  *                    literal — literals delimited left to right by the same scanner as everywhere here, so a
@@ -1228,8 +1239,10 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     (`ids.includes(view.sheetId)`, `set.has(…)`), or one whose operands are both named for something
  *     other than a sheet id (`row.owner !== target`, a destructured `{ sheet_id: owning }`);
  *   - a bound boolean tested only in a different handler, only by an `if` written BEFORE the binding (a loop's
- *     next iteration), or more than 4000 characters past a comparison outside every handler; a comparison inside
- *     a template-literal hole.
+ *     next iteration), or more than 4000 characters past a comparison outside every handler; one read by anything
+ *     but an `if` condition (`x && res.status(404)…`, `x ? … : …`, `while (x)`, `return x`), or by an `if` that names
+ *     it only through another name (`const again = x`) or as an escaped identifier; a comparison inside a
+ *     template-literal hole.
  * NOT FOLLOWED (the mismatch path is read only as delimited above):
  *   - past the end of a LOOP body or a FUNCTION body: a flag / failure set inside a loop (`{ bad = row; break }`)
  *     or a callback (`rows.forEach(…)`, `pool.transaction(async () => { failure = …; return })`) and answered
@@ -1257,11 +1270,12 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     echo;
  *   - a returned status object is followed only into an `if (<binding>)` after the binding it is
  *     returned into; `if (!failure)`, a caller of a named function, or any other consumer reads as echo;
- *   - a name is taken to change only through a binding SPELLED in the handler's text on that name (`bindingSites`):
- *     a call that mutates an object a guard reads (`reset(owner)`, `Object.assign(owner, …)`), a write through
- *     another name for it (`const o = owner; o.sheet_id = ''`) or through a cast (`(owner as any).sheet_id = ''`),
- *     and a write made outside the handler are not seen. A bound boolean holds a primitive, so only a write to
- *     its own name can change it; a guard that reads a name declared outside the handler is not a guard there.
+ *   - a name is taken to change only through a binding of THAT NAME in the handler's syntax tree (`bindingSiteList`):
+ *     a call that mutates an object a guard reads or a handed-off value (`reset(owner)`, `Object.assign(failure,
+ *     …)`), a write through another name for it (`const o = owner; o.sheet_id = ''`), code in a string (`eval(…)`,
+ *     `new Function(…)`), and a write made outside the handler are not seen. A bound boolean holds a primitive, so
+ *     only a write to its own name can change it; a guard that reads a name declared outside the handler is not a
+ *     guard there.
  * OTHER:
  *   - Authority is recognised BY NAME and by TEXTUAL position, as in the closure guard: a 403 sent any other
  *     way (`res.sendStatus(403)`, `requireSheetRead(req, res)`) is not seen — the site then reads as before
@@ -1289,9 +1303,11 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     into the handler's own success answer (a mismatch branch that only logs, at the handler's top level, is
  *     then a site). And the ONE-binding rule reads a name, not a path through the code: a bound boolean declared
  *     apart from the statement that binds it (`let x: boolean` then `x = a !== b`), bound by `x ||= a !== b` /
- *     `x &&= a === b` where that statement always runs, or bound again only in code that never runs before its
- *     testing `if`, reads BOTH paths; a guard whose name is also a parameter of a callback in the handler (or
- *     is bound in two blocks) no longer guards.
+ *     `x &&= a === b` where that statement always runs, bound again only in code that never runs before its
+ *     testing `if`, or shadowed by a name of its own in some closure, reads BOTH paths; a guard whose name is also a
+ *     parameter of a callback in the handler (or is bound in two blocks) no longer guards; a handed-off value whose
+ *     name any closure of the handler binds — even a parameter or local of its own — reads as echo. A bound boolean
+ *     outside every handler, and one in a handler the parser rejects, reads BOTH paths.
  */
 
 const ROUTES_DIR = join(__dirname, '../../src/routes')
@@ -2029,58 +2045,122 @@ function bindingAround(
   return null
 }
 
-/** The operators that assign to what stands before them (`=`, `||=`, `&&=`, `??=`, `+=` …), never `==` / `=>`. */
-const ASSIGNS = String.raw`(?:\*\*|>>>|>>|<<|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])`
+/** One place a name is BOUND in a parsed scope: how, where (an offset into the scope's text), and whether it stands
+ *  inside a function nested in the scope's own (a closure or a callback in a handler). */
+interface BindingSite {
+  /** `lexical`: a `const` / `let` declaration of the name itself. `listed`: a parameter, a `catch` parameter, or a
+   *  name inside a declared destructuring pattern. `other`: everything else that gives it a value (`bindingSites`). */
+  kind: 'lexical' | 'listed' | 'other'
+  at: number
+  nested: boolean
+}
 
 interface BindingSites {
-  /** `const` / `let` declarations of the name. */
   lexical: number
-  /** Parameter lists and destructuring patterns that hold it (`bindingLists`), and a bare `name =>`. */
   listed: number
-  /** Everything else that can give it a value (see `bindingSites`). */
   other: number
 }
 
+/** Parsed scopes of the scan in progress, by text (`scanSheetPairings` clears it); null for one that did not parse. */
+const PARSED_SCOPES = new Map<string, ts.SourceFile | null>()
+
 /**
- * Where `name` is BOUND in `text`, literals blanked first. `other` counts a `var` / `function` / `class` of it, every
- * write — `name = …`, a compound assignment (`||=` `&&=` `??=` `+=` …), `++` / `--` — a destructuring assignment
- * that names it (`[a, name] = …`, `({ name } = …)`), a `for (name of / in …)` head, and, with `through`, a write or
- * `delete` through it (`name.x = …`, `name!.x = …`, `name[k] ??= …`, `delete name.x`). A write inside a callback or
- * a closure counts wherever it stands, before the binding or after it: when it runs is not read.
+ * `text` PARSED as TypeScript — not matched by pattern — or null when the parser reports a syntax error (a slice
+ * cut mid-statement, as the text around a comparison outside every handler usually is). A null scope binds every
+ * name: its bound booleans read both paths, its guards do not guard, its handed-off values read as echo.
  */
-function bindingSites(text: string, name: string, through: boolean): BindingSites {
-  const bare = blankLiterals(text)
-  const n = escapeName(name)
-  const target = through ? String.raw`${n}(?:\s*!?\s*\??\.\s*[A-Za-z_$][\w$]*|\s*!?\s*\[[^\]\n]*\])*` : n
-  const id = new RegExp(String.raw`(?<![\w$.])${n}(?![\w$])`)
-  const count = (pattern: string) => (bare.match(new RegExp(pattern, 'g')) ?? []).length
-  // A destructuring assignment: a `[…]` / `{…}` (not after `const` / `let` / `var`, which `bindingLists` holds)
-  // directly followed by `=`, its opening bracket found by counting back. An index write `a[name] = …` counts too.
-  let destructured = 0
-  for (const m of bare.matchAll(/[}\]]\s*=(?![=>])/g)) {
-    let depth = 0
-    let open = -1
-    for (let j = m.index!; j >= 0 && open === -1; j -= 1) {
-      const c = bare[j]!
-      if (c === '}' || c === ']' || c === ')') depth += 1
-      else if ((c === '{' || c === '[' || c === '(') && (depth -= 1) === 0) open = j
-    }
-    if (open === -1 || /(?:const|let|var)\s*$/.test(bare.slice(Math.max(0, open - 8), open))) continue
-    if (id.test(bare.slice(open + 1, m.index!))) destructured += 1
+function parseScope(text: string): ts.SourceFile | null {
+  if (!PARSED_SCOPES.has(text)) {
+    const file = ts.createSourceFile('scope.ts', text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS)
+    const errors = (file as unknown as { parseDiagnostics?: readonly unknown[] }).parseDiagnostics
+    PARSED_SCOPES.set(text, errors !== undefined && errors.length === 0 ? file : null)
   }
-  return {
-    lexical: count(String.raw`(?<![\w$.])(?:const|let)\s+${n}(?![\w$])`),
-    listed: bindingLists(bare).filter((list) => id.test(list)).length + count(String.raw`(?<![\w$.])${n}\s*=>`),
-    other: destructured
-      + count(String.raw`(?<![\w$.])(?:var|function\s*\*?|class)\s+${n}(?![\w$])`)
-      + count(String.raw`(?<![\w$.])(?<!(?:const|let|var)\s+)${target}\s*${ASSIGNS}`)
-      + count(String.raw`(?<![\w$.])${target}\s*(?:\+\+|--)|(?<![\w$.])(?:\+\+|--|delete\s+)\s*${target}(?![\w$])`)
-      + count(String.raw`(?<![\w$.])for\s*\(\s*${n}\s+(?:of|in)(?![\w$])`),
-  }
+  return PARSED_SCOPES.get(text)!
 }
 
-/** Nothing in the text binds the name. */
-const unbound = (sites: BindingSites): boolean => sites.lexical + sites.listed + sites.other === 0
+/**
+ * Every place `name` is BOUND in `text`, read off its syntax tree (`parseScope`; null when it does not parse), so
+ * however it is spelled: a declaration of it (`const` / `let` / `var` — in a comma list too — `function`, `class`,
+ * `enum`, `import`), a parameter or `catch` parameter, a name in a destructuring pattern; and every WRITE to it — an
+ * assignment, compound (`||=` `&&=` `??=` `+=` …) or not, `++` / `--`, a destructuring assignment that names it
+ * (`[a, name] = …`, `({ name } = …)`, `for ([name] of …)`), a `for (name of / in …)` head — with the target
+ * parenthesised, cast or asserted (`(name) = …`, `(name as T) = …`, `name! = …`), with the identifier spelled with
+ * escapes, and inside a template literal's `${…}` hole. With `through`, also a write, `++` / `--` or `delete` THROUGH
+ * it (`name.x = …`, `(name as any).x = …`, `name[k] ??= …`, `delete name.x`). A write inside a callback or a closure
+ * counts wherever it stands, before the binding or after it: when it runs is not read.
+ */
+function bindingSiteList(text: string, name: string, through: boolean): BindingSite[] | null {
+  const file = parseScope(text)
+  if (!file) return null
+  const sites: BindingSite[] = []
+  const isName = (node: ts.Node | undefined): boolean => node !== undefined && ts.isIdentifier(node) && ts.idText(node) === name
+  // What an expression writes to is the same reference under parentheses, a cast or an assertion.
+  const peel = (expression: ts.Expression): ts.Expression => {
+    let x = expression
+    while (ts.isParenthesizedExpression(x) || ts.isAsExpression(x) || ts.isNonNullExpression(x) || ts.isTypeAssertionExpression(x) || ts.isSatisfiesExpression(x)) x = x.expression
+    return x
+  }
+  const reaches = (target: ts.Expression): boolean => {
+    let x = peel(target)
+    if (through) while (ts.isPropertyAccessExpression(x) || ts.isElementAccessExpression(x)) x = peel(x.expression)
+    return isName(x)
+  }
+  // An assignment TARGET: the name, or (destructuring) an array / object literal that holds it as a target.
+  const assigns = (target: ts.Expression): boolean => {
+    const x = peel(target)
+    if (ts.isArrayLiteralExpression(x)) return x.elements.some((e) => assigns(ts.isSpreadElement(e) ? e.expression : e))
+    if (ts.isObjectLiteralExpression(x)) {
+      return x.properties.some((p) => (ts.isShorthandPropertyAssignment(p) ? isName(p.name)
+        : ts.isPropertyAssignment(p) ? assigns(p.initializer)
+          : ts.isSpreadAssignment(p) ? assigns(p.expression)
+            : false))
+    }
+    if (ts.isBinaryExpression(x) && x.operatorToken.kind === ts.SyntaxKind.EqualsToken) return assigns(x.left)
+    return reaches(x)
+  }
+  const declares = (pattern: ts.BindingName): boolean => (ts.isIdentifier(pattern)
+    ? isName(pattern)
+    : pattern.elements.some((e) => !ts.isOmittedExpression(e) && declares(e.name)))
+  const visit = (node: ts.Node, depth: number): void => {
+    const push = (kind: BindingSite['kind'], at: ts.Node) => sites.push({ kind, at: at.getStart(file), nested: depth > 1 })
+    if (ts.isVariableDeclarationList(node)) {
+      const scoped = node.flags & ts.NodeFlags.BlockScoped
+      const lexical = scoped === ts.NodeFlags.Let || scoped === ts.NodeFlags.Const
+      for (const d of node.declarations) {
+        if (declares(d.name)) push(!ts.isIdentifier(d.name) ? 'listed' : lexical ? 'lexical' : 'other', d)
+      }
+    } else if (ts.isCatchClause(node)) {
+      if (node.variableDeclaration && declares(node.variableDeclaration.name)) push('listed', node.variableDeclaration)
+    } else if (ts.isParameter(node)) {
+      if (declares(node.name)) push('listed', node)
+    } else if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node)
+      || ts.isEnumDeclaration(node) || ts.isModuleDeclaration(node) || ts.isImportEqualsDeclaration(node) || ts.isImportClause(node)
+      || ts.isImportSpecifier(node) || ts.isNamespaceImport(node)) {
+      if (isName(node.name)) push('other', node)
+    } else if (ts.isBinaryExpression(node)) {
+      const op = node.operatorToken.kind
+      if (op >= ts.SyntaxKind.FirstAssignment && op <= ts.SyntaxKind.LastAssignment && assigns(node.left)) push('other', node)
+    } else if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) {
+      if ((node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) && reaches(node.operand)) push('other', node)
+    } else if (ts.isDeleteExpression(node)) {
+      if (reaches(node.expression)) push('other', node)
+    } else if (ts.isForOfStatement(node) || ts.isForInStatement(node)) {
+      if (!ts.isVariableDeclarationList(node.initializer) && assigns(node.initializer)) push('other', node)
+    }
+    const inner = ts.isFunctionLike(node) ? depth + 1 : depth
+    ts.forEachChild(node, (child) => visit(child, inner))
+  }
+  visit(file, 0)
+  return sites
+}
+
+/** `bindingSiteList`, counted by kind; null when the scope does not parse. */
+function bindingSites(text: string, name: string, through: boolean): BindingSites | null {
+  const list = bindingSiteList(text, name, through)
+  if (!list) return null
+  const count = (kind: BindingSite['kind']) => list.filter((s) => s.kind === kind).length
+  return { lexical: count('lexical'), listed: count('listed'), other: count('other') }
+}
 
 /**
  * A BOUND BOOLEAN's name is ONE binding in its handler: one `const` / `let` declaration of it and nothing else that
@@ -2089,16 +2169,17 @@ const unbound = (sites: BindingSites): boolean => sites.lexical + sites.listed +
  * reads the initialiser's: a `const` / `let` cannot sit in a branch apart from the `if`s that can see it, and nothing
  * writes it. A second site of any kind — `let x = false` then `if (c) x = a !== b` (`c` decides whether the comparison
  * reaches `x`), `x ||= …` / `x &&= …` / `x ??= …` (they keep the value from before, and may not run), `if (verbose) x
- * = false`, a closure that writes it, a `var` — and the testing `if`s read BOTH paths.
+ * = false`, a closure that writes it, a `var` — and the testing `if`s read BOTH paths. A scope that does not parse
+ * holds no one binding.
  */
-const oneDeclaration = (sites: BindingSites): boolean => sites.lexical === 1 && sites.listed === 0 && sites.other === 0
+const oneDeclaration = (sites: BindingSites | null): boolean => sites !== null && sites.lexical === 1 && sites.listed === 0 && sites.other === 0
 
 /**
  * A name a GUARD reads is ONE binding in its handler: one declaration or parameter, and no write — not even through
  * it (`owner.sheet_id = ''`). Asked where a guard stands in the `if` that tests a bound boolean, AFTER the comparison
  * ran: only then is its truth there its truth when the comparison ran.
  */
-const heldName = (sites: BindingSites): boolean => sites.lexical + sites.listed === 1 && sites.other === 0
+const heldName = (sites: BindingSites | null): boolean => sites !== null && sites.lexical + sites.listed === 1 && sites.other === 0
 
 /** The names `text` reads: every identifier in it that is not a property name (`owner` in `owner?.sheet_id`). */
 const namesIn = (text: string): string[] =>
@@ -2533,6 +2614,43 @@ function isAuthorityRefusalAlone(bareText: string): boolean {
   }
 }
 
+/**
+ * `text` with the TEXT of every string and template literal blanked to spaces (line breaks kept), but every template's
+ * `${…}` hole kept as code (its own literals blanked in turn): where a bound name is looked for in an `if`'s condition.
+ * Literals are delimited as `literalSpans` delimits them — a regex literal, and a quote that never closes, are left as
+ * they are — so a name anywhere the old reading counted as a use still is one; a name in a hole now is one too.
+ */
+function blankLiteralText(text: string): string {
+  const out = text.split('')
+  let prev = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i]!
+    const end = literalEnd(text, i, prev)
+    if (end > 0) {
+      for (let j = i + 1; c !== '/' && j < end - 1; j += 1) {
+        if (c === '`' && text[j] === '\\') {
+          out[j] = ' '
+          out[j + 1] = out[j + 1] === '\n' ? '\n' : ' '
+          j += 1
+        } else if (c === '`' && text[j] === '$' && text[j + 1] === '{') {
+          const close = matchBracket(text, j + 1)
+          if (close === -1) break
+          const hole = blankLiteralText(text.slice(j + 2, close))
+          for (let k = 0; k < hole.length; k += 1) out[j + 2 + k] = hole[k]!
+          j = close
+        } else if (out[j] !== '\n') {
+          out[j] = ' '
+        }
+      }
+      i = end - 1
+      prev = 'x'
+      continue
+    }
+    if (!/\s/.test(c)) prev = c
+  }
+  return out.join('')
+}
+
 /** `text` with the inside of every string, template and regex literal blanked to spaces (line breaks kept). */
 function blankLiterals(text: string): string {
   const out = text.split('')
@@ -2607,6 +2725,12 @@ interface Consumer {
    * or everything from the end of the binding statement the value is returned into.
    */
   since: number
+  /**
+   * A closure ANYWHERE in the handler can reach the name: true for a value returned into a binding (a closure
+   * declared before the binding, a hoisted `function` after the branch, a callback in the initialiser may all run
+   * inside the branch), false for a `catch`, whose parameter nothing outside its body can reach.
+   */
+  closuresReach: boolean
 }
 
 /**
@@ -2656,6 +2780,7 @@ function consumerOf(
       span: [bodyOpen, bodyClose + 1],
       after: bodyClose + 1,
       since: bodyOpen,
+      closuresReach: false,
     }
   }
   // return: the innermost function body holding the `return`, then the binding its initialiser sits in.
@@ -2676,7 +2801,9 @@ function consumerOf(
     // The first `if` that names the binding is the consumer; only `if (<binding>)` is read as one.
     if (code.slice(condition[0] + 1, condition[1]).trim() !== bound.name) return null
     const consumer = parseIf(code, start)
-    return consumer ? { text: code.slice(consumer.then[0], consumer.then[1]), name: bound.name, span: consumer.then, after: consumer.end, since: bound.end } : null
+    return consumer
+      ? { text: code.slice(consumer.then[0], consumer.then[1]), name: bound.name, span: consumer.then, after: consumer.end, since: bound.end, closuresReach: true }
+      : null
   }
   return null
 }
@@ -2713,6 +2840,9 @@ function scanSheetPairings(source: string): PairingScan {
   const inLiteral = withinSpans(literalSpans(code))
   /** The code with every literal's inside blanked: where a 403 is looked for, so no message text can pass for one. */
   const bare = blankLiterals(code)
+  /** The code with literal TEXT blanked but template holes kept: where a bound name is looked for in an `if`. */
+  const codeText = blankLiteralText(code)
+  PARSED_SCOPES.clear()
   const openers = bracketOpeners(code)
   const closuresByHandler = new Map<HandlerSpan, Map<string, string>>()
   const sites: PairingSite[] = []
@@ -2787,14 +2917,16 @@ function scanSheetPairings(source: string): PairingScan {
     if (binding) {
       const limit = handler ? handler.end : at + 4000
       // The name must be ONE binding in the handler (`oneDeclaration`), and a guard asked at a testing `if` only
-      // counts while every name it reads is too (`heldName`). Outside every handler, the text around it stands in.
-      const scope = handler ? code.slice(handler.start, handler.end) : code.slice(Math.max(0, at - 4000), limit)
-      if (!oneDeclaration(bindingSites(scope, binding.name, false))) settled = null
-      const heldGuards = settled === null
+      // counts while every name it reads is too (`heldName`), both read off the handler's syntax tree. Outside every
+      // handler there is no handler to parse: the testing `if`s read BOTH paths.
+      const scope = handler ? code.slice(handler.start, handler.end) : null
+      if (scope === null || !oneDeclaration(bindingSites(scope, binding.name, false))) settled = null
+      const heldGuards = settled === null || scope === null
         ? guards
         : new Set([...guards].filter((g) => namesIn(g).every((name) => heldName(bindingSites(scope, name, true)))))
       const use = new RegExp(String.raw`(?<![\w$.])${escapeName(binding.name)}(?![\w$])`, 'g')
-      const usedAt = (from: number, to: number) => [...code.slice(from, to).matchAll(use)].filter((u) => !inLiteral(from + u.index!))
+      // A use inside a template's hole is a use (a condition may test `x` through `${x}`); one in literal text is not.
+      const usedAt = (from: number, to: number) => [...codeText.slice(from, to).matchAll(use)]
       for (let k = firstIfAfter; k < ifStarts.length && ifStarts[k]! < limit; k += 1) {
         const start = ifStarts[k]!
         if (start < binding.end) continue
@@ -2884,8 +3016,18 @@ function scanSheetPairings(source: string): PairingScan {
       if (!consumed.some((r) => r.answers) || consumed.some((r) => r.payloads === null || r.handoffs.length > 0)) return false
       // The name stands for the value only in the consumer's own branch (a `catch` parameter's scope ends there; in the
       // run after it the name is read like any other local), and only while nothing binds it again from the handoff's
-      // binding to the end of that branch (`failure = { …, message: … }`, `err = …`).
-      if (consumer.name && !unbound(bindingSites(code.slice(consumer.since, consumer.span[1]), consumer.name, true))) return false
+      // binding to the end of that branch (`failure = { …, message: … }`, `err = …`), read off the handler's syntax
+      // tree (`bindingSiteList`) — and, for a value returned into a binding, nothing inside ANY closure of the handler
+      // binds it either (one declared before the binding, a hoisted `function` after the branch, a callback in the
+      // initialiser: any of them may run inside the branch). A handler that does not parse reads as echo.
+      if (consumer.name) {
+        const sites = bindingSiteList(code.slice(handler!.start, handler!.end), consumer.name, true)
+        if (sites === null) return false
+        if (sites.some(({ at, nested }) => {
+          const where = handler!.start + at
+          return (where >= consumer.since && where < consumer.span[1]) || (consumer.closuresReach && nested)
+        })) return false
+      }
       const value = consumer.name
         ? new RegExp(String.raw`(?<![\w$.])${escapeName(consumer.name)}(?![\w$])(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*`, 'g')
         : null
@@ -4180,5 +4322,130 @@ describe('by SHAPE — self-tests: a hand-written copy under new names is invisi
     plantedSite(plant('    const err = { message: `View ${req.params.viewId} is on ${owner.sheetId}` }\n'
       + "    try {\n      if (owner.sheetId !== target) throw new NotFoundError('View not found')\n    } catch (err) {\n      res.status(404)\n    }\n"
       + '    return res.json({ ok: false, error: err.message })'), true, 'the run after the catch reads the name as any other')
+  })
+
+  // ── #6069 seventh review: the ONE-binding rule read off the handler's syntax tree ────────────────────────────────────
+  // Red on 0eba4fba8: a write the name patterns did not spell — a target in parentheses, cast or asserted, an escaped
+  // identifier, a `for ([x] of …)` head, a comma-list declaration, a write inside a template hole — left a bound boolean
+  // (or a guard's name) settled; a closure declared before the binding, or a hoisted `function` after the branch, that
+  // writes a handed-off value's name let the name stand for the value; an `if` testing the name only inside a template
+  // hole was not read at all. Every kind the rule names also gets a cell of its own here (a second declaration, a
+  // parameter, a destructured or `catch` name, `++` / `--`, a `for (x of / in …)` head, a `var` / `function` / `class`,
+  // a guard bound twice or also a parameter), so dropping any one of them from the rule reds.
+
+  /** A `\` built at run time, so this file carries no escape sequence the planted code needs. */
+  const BACKSLASH = String.fromCharCode(92)
+  const WHEN = "if (req.query.verbose === '1')"
+
+  it('a bound boolean is ONE binding by the handler\'s syntax tree: every kind of second binding, however spelled, reads BOTH paths', () => {
+    for (const [label, bound] of [
+      // Each kind the rule names, on its own.
+      ['another const in a block', `    const elsewhere = owner.sheet_id !== target\n    ${WHEN} {\n      const elsewhere = false\n      void elsewhere\n    }\n`],
+      ['a parameter of a callback', '    const elsewhere = owner.sheet_id !== target\n    const kept = [false].filter((elsewhere) => elsewhere)\n    void kept\n'],
+      ['a destructured name', `    const elsewhere = owner.sheet_id !== target\n    ${WHEN} {\n      const { elsewhere } = { elsewhere: false }\n      void elsewhere\n    }\n`],
+      ['a catch parameter', '    const elsewhere = owner.sheet_id !== target\n    try {\n      JSON.parse(String(req.query.filter))\n    } catch (elsewhere) {\n      void elsewhere\n    }\n'],
+      ['x++', `    let elsewhere: any = owner.sheet_id !== target\n    ${WHEN} elsewhere++\n`],
+      ['--x', `    let elsewhere: any = owner.sheet_id !== target\n    ${WHEN} --elsewhere\n`],
+      ['for (x of …)', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} for (elsewhere of [false]);\n`],
+      ['for (x in …)', `    let elsewhere: any = owner.sheet_id !== target\n    ${WHEN} for (elsewhere in { k: 0 });\n`],
+      ['a var in a closure', '    const elsewhere = owner.sheet_id !== target\n    const reset = () => {\n      var elsewhere = false\n      return elsewhere\n    }\n    void reset\n'],
+      ['a function of the name', `    const elsewhere = owner.sheet_id !== target\n    ${WHEN} {\n      function elsewhere() { return false }\n      void elsewhere\n    }\n`],
+      ['a class of the name', `    const elsewhere = owner.sheet_id !== target\n    ${WHEN} {\n      class elsewhere {}\n      void elsewhere\n    }\n`],
+      // Spellings of a write the name patterns did not see (red on 0eba4fba8).
+      ['(x) = …', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} (elsewhere) = false\n`],
+      ['((x)) = …', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} ((elsewhere)) = false\n`],
+      ['(x as T) = …', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} (elsewhere as boolean) = false\n`],
+      ['(<T>x) = …', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} (<boolean>elsewhere) = false\n`],
+      ['x! = …', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} elsewhere! = false\n`],
+      ['(x as T)--', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} (elsewhere as any)--\n`],
+      ['an escaped identifier', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} ${BACKSLASH}u0065lsewhere = false\n`],
+      ['for ([x] of …)', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} for ([elsewhere] of [[false]]);\n`],
+      ['for ({ x } of …)', `    let elsewhere = owner.sheet_id !== target\n    ${WHEN} for ({ elsewhere } of [{ elsewhere: false }]);\n`],
+      ['a write inside a template hole', "    let elsewhere = owner.sheet_id !== target\n    const note = `${req.query.verbose === '1' ? (elsewhere = false) : ''}`\n    void note\n"],
+      ['a comma-list declaration in a block', `    const elsewhere = owner.sheet_id !== target\n    ${WHEN} {\n      let shown = true, elsewhere\n      void shown, elsewhere\n    }\n`],
+    ] as const) plantedSite(freeThenEcho(bound, 'elsewhere'), true, label)
+  })
+
+  it('…and a GUARD\'s name by the same tree: bound twice, also a parameter, or written to or through in any spelling, it no longer guards', () => {
+    const rowGuard = (extra: string) => `    let row = owner\n    const elsewhere = !row || row.sheet_id !== target\n${extra}`
+    for (const [label, bound, condition] of [
+      ['declared again in a block', rowGuard(`    ${WHEN} {\n      const row = null\n      void row\n    }\n`), 'row && elsewhere'],
+      ['also a callback parameter (stated under OTHER)', rowGuard('    const pick = (row: unknown) => row\n    void pick\n'), 'row && elsewhere'],
+      ['(x) = …', rowGuard(`    ${WHEN} (row) = null\n`), 'row && elsewhere'],
+      ['(x as T) = …', rowGuard(`    ${WHEN} (row as any) = null\n`), 'row && elsewhere'],
+      ['written through a cast', `    const elsewhere = !owner || owner.sheet_id !== target\n    ${WHEN} (owner as any).sheet_id = ''\n`, 'owner && elsewhere'],
+      ['written through parentheses', `    const elsewhere = !owner || owner.sheet_id !== target\n    ${WHEN} (owner).sheet_id = ''\n`, 'owner && elsewhere'],
+      ['written through an index', `    const elsewhere = !owner || owner.sheet_id !== target\n    ${WHEN} owner['sheet_id'] = ''\n`, 'owner && elsewhere'],
+      ['deleted through', `    const elsewhere = !owner || owner.sheet_id !== target\n    ${WHEN} delete owner.sheet_id\n`, 'owner && elsewhere'],
+    ] as const) plantedSite(freeThenEcho(bound, condition), true, label)
+    // Control: the guard's name bound once and never written still guards.
+    plantedSite(freeThenEcho('    const elsewhere = !owner || owner.sheet_id !== target\n', 'owner && elsewhere'), false, 'control: `owner`, bound once')
+  })
+
+  it('an `if` that tests the bound name only inside a template hole is a testing `if`: it reads BOTH paths', () => {
+    const tested = (hole: string) => plant('    const elsewhere = owner.sheet_id !== target\n'
+      + "    if (`${" + hole + "}` === 'true' && req.query.verbose === '1') {\n"
+      + `      ${ECHO_REFUSAL}\n    }\n    if (elsewhere) {\n      ${FREE_REFUSAL}\n    }`)
+    plantedSite(tested('elsewhere'), true, 'tested through a template hole')
+    plantedSite(tested('target'), false, 'control: the hole reads another name')
+  })
+
+  it('a handed-off value\'s name by the same tree: written in any spelling, or by a closure anywhere in the handler, it no longer stands for the value', () => {
+    const answer = '      return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })\n'
+    const detail = '`View ${req.params.viewId} is on ${owner.sheetId}`'
+    const transaction = (before: string, rest: string, after = '') => plant(`${before}    let failure = await poolManager.get().transaction(async () => {\n`
+      + "      if (owner.sheetId !== target) return { status: 404, code: 'NOT_FOUND', message: 'View not found' }\n      return null\n    })\n"
+      + rest + after)
+    const branch = (body: string) => `    if (failure) {\n${body}${answer}    }\n`
+    for (const [label, mutated] of [
+      ['a closure declared BEFORE the binding writes through it', transaction(`    const louder = () => { failure.message = ${detail} }\n`, branch(`      ${WHEN} louder()\n`))],
+      ['a hoisted function AFTER the branch writes through it', transaction('', branch(`      ${WHEN} louder()\n`), `    function louder() { failure.message = ${detail} }\n`)],
+      ['(x).k = … in the branch', transaction('', branch(`      ${WHEN} (failure).message = ${detail}\n`))],
+      ['(x as T).k = … in the branch', transaction('', branch(`      ${WHEN} (failure as any).message = ${detail}\n`))],
+      ['(x) = … before the branch', transaction('', `    ${WHEN} (failure) = { status: 404, code: 'NOT_FOUND', message: ${detail} }\n${branch('')}`)],
+      ['a write inside a template hole in the branch', transaction('', branch("      const note = `${req.query.verbose === '1' ? (failure.message = " + detail + ") : ''}`\n      void note\n"))],
+    ] as const) plantedSite(mutated, true, label)
+    // Control: a closure elsewhere in the handler that binds nothing of that name.
+    plantedSite(transaction('    const louder = () => req.params.viewId\n    void louder\n', branch('')), false, 'control: a closure that does not bind the name')
+    const caught = (outside: string, body: string) => plant(`${outside}    const detail = ${detail}\n`
+      + "    try {\n      if (owner.sheetId !== target) throw new NotFoundError('View not found')\n    } catch (err) {\n"
+      + `${body}      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })\n    }`)
+    plantedSite(caught('', `      ${WHEN} (err) = { message: detail }\n`), true, 'the catch parameter re-assigned in parentheses')
+    plantedSite(caught('', `      ${WHEN} (err as any).message = detail\n`), true, 'the catch parameter written through a cast')
+    // Control: nothing outside a `catch` body reaches its parameter, so a same-named local in a closure elsewhere does not count.
+    plantedSite(caught('    const forget = () => { let err = null; return err }\n    void forget\n', ''), false, 'control: a same-named local in a closure outside the catch')
+  })
+
+  it('a handler that does not parse holds no ONE binding: its bound booleans read BOTH paths and its handed-off values read as echo', () => {
+    const broken = '    const unparsed = (1 +)\n    void unparsed\n'
+    plantedSite(freeThenEcho(`${broken}    const elsewhere = owner.sheet_id !== target\n`, 'elsewhere'), true, 'a bound boolean')
+    plantedSite(freeThenEcho('    const elsewhere = owner.sheet_id !== target\n', 'elsewhere'), false, 'control: the same, parsing')
+    const handedOff = (extra: string) => plant(`${extra}    let failure = await poolManager.get().transaction(async () => {\n`
+      + "      if (owner.sheetId !== target) return { status: 404, code: 'NOT_FOUND', message: 'View not found' }\n      return null\n    })\n"
+      + '    if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })')
+    plantedSite(handedOff(broken), true, 'a handed-off value')
+    plantedSite(handedOff(''), false, 'control: the same, parsing')
+  })
+
+  it('outside every handler there is no handler to parse: a bound boolean there reads BOTH paths (a false alarm, stated under OTHER)', () => {
+    const helper = '  function probeOwnerHelper(res: Response, owner: { id: string; sheet_id: string }, target: string) {\n'
+      + `    const elsewhere = owner.sheet_id !== target\n    if (elsewhere) {\n      ${FREE_REFUSAL}\n    }\n`
+      + '    return res.json({ ok: true, viewId: owner.id })\n  }\n\n'
+    expect(UNIVER_META_SOURCE).toContain(ANCHOR)
+    const site = scanSheetPairings(UNIVER_META_SOURCE.replace(ANCHOR, helper + ANCHOR)).sites.find((s) => s.key === 'fn probeOwnerHelper | owner.sheet_id !== target')
+    expect([site?.echo, site?.beforeAuthority], 'a bound boolean outside every handler: [echo, beforeAuthority]').toEqual([true, null])
+  })
+
+  it('…and the EXISTING values-free row rewritten with a write the name patterns did not spell reds declared = computed', () => {
+    const tested = [DELIVERIES_IF_FREE('elsewhere'), DELIVERIES_ECHO('rule')]
+    expectDeliveries(rewriteDeliveries(['let elsewhere = !rule || rule.sheet_id !== sheetId', `${WHEN} (elsewhere) = false`, ...tested]), true, '(x) = … between')
+    expectDeliveries(rewriteDeliveries(['let elsewhere = !rule || rule.sheet_id !== sheetId', `${WHEN} for ([elsewhere] of [[false]]);`, ...tested]), true, 'for ([x] of …) between')
+    expectDeliveries(rewriteDeliveries([
+      'const elsewhere = !rule || rule.sheet_id !== sheetId',
+      'const fetched = rule',
+      `${WHEN} (rule as any) = null`,
+      DELIVERIES_IF_FREE('rule && elsewhere'),
+      DELIVERIES_ECHO('fetched'),
+    ], true), true, 'the guard\'s name re-assigned through a cast')
   })
 })
