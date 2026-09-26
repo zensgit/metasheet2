@@ -8,6 +8,8 @@
  *
  * Generated ids use the four-conjunct printable check. org_id / created_by /
  * user_id / actor_id / assigned_by use only the single printable check.
+ * `task_events.id` is a `tev_…` id from `generateTaskDomainId('event', …)`
+ * (owner 2026-09-26). This migration does not insert rows.
  */
 import { sql, type Kysely } from 'kysely'
 
