@@ -16,6 +16,42 @@
 # are skipped and the not-applicable branch is asserted instead.
 $ErrorActionPreference = 'Stop'
 
+# >>> co-hosted suite: multitable-onprem-package-upgrade-inplace (Windows lanes) >>>
+# The stock-prep-powershell51 workflow job runs THIS file on windows-latest under
+# Windows PowerShell 5.1 and under pwsh 7 -- the only CI lanes on Windows. The on-prem
+# in-place upgrade script's node:test suite has checks that only mean something there
+# (the real \\.\pipe\ query behind its pm2 daemon check, and 5.1's native-stderr
+# semantics), so it rides along here: the co-hosted runner runs it with THIS file's
+# own host shell as the shell under test. Off Windows it is a SKIP -- the ubuntu
+# `test` job runs that suite under pwsh 7 in its R12-C step.
+# It is the FIRST thing this file runs and it exits 1 on the spot when the runner
+# fails, so no line below it can turn that failure into exit 0 (an early exit, a
+# skipped verdict, a re-assigned flag). Everything from the top of this file down to
+# the end marker is pinned verbatim (comment and blank lines aside) by the
+# "CI wiring (Windows lanes)" test in scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs.
+if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+  $cohostedRunner = Join-Path $PSScriptRoot 'multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1'
+  $cohostedShell = (Get-Process -Id $PID).Path
+  $savedErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $global:LASTEXITCODE = -1
+    & $cohostedShell -NoProfile -ExecutionPolicy Bypass -File $cohostedRunner
+    $cohostedExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+  }
+  if ($cohostedExit -ne 0) {
+    Write-Host "  FAIL  co-hosted: multitable-onprem-package-upgrade-inplace suite under $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) (exit=$cohostedExit)"
+    Write-Host 'FAILED: the co-hosted suite failed; the S6-A ACL checks were not run'
+    exit 1
+  }
+  Write-Host "  PASS  co-hosted: multitable-onprem-package-upgrade-inplace suite under $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) (exit=0)"
+} else {
+  Write-Host '  SKIP  co-hosted: multitable-onprem-package-upgrade-inplace suite (Windows only; the ubuntu test job runs it under pwsh 7)'
+}
+# <<< co-hosted suite <<<
+
 $opsDir = Join-Path $PSScriptRoot '..'
 $helperPath = Join-Path $opsDir 'multitable-onprem-s6a-artifact-root-acl.ps1'
 $applyPath = Join-Path $opsDir 'multitable-onprem-apply-package.ps1'
@@ -452,33 +488,6 @@ finally {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
-
-# >>> co-hosted suite: multitable-onprem-package-upgrade-inplace (Windows lanes) >>>
-# The stock-prep-powershell51 workflow job runs THIS file on windows-latest under
-# Windows PowerShell 5.1 and under pwsh 7 -- the only CI lanes on Windows. The on-prem
-# in-place upgrade script's node:test suite has checks that only mean something there
-# (the real \\.\pipe\ enumeration behind its pm2 daemon check, and 5.1's native-stderr
-# semantics), so it rides along here: the co-hosted runner runs it with THIS file's
-# own host shell as the shell under test. Off Windows it is a SKIP -- the ubuntu
-# `test` job runs that suite under pwsh 7 in its R12-C step. Pinned by the
-# "CI wiring (Windows lanes)" test in scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs.
-if ($isWindowsHost) {
-  $cohostedRunner = Join-Path $PSScriptRoot 'multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1'
-  $cohostedShell = (Get-Process -Id $PID).Path
-  $savedErrorActionPreference = $ErrorActionPreference
-  $ErrorActionPreference = 'Continue'
-  try {
-    $global:LASTEXITCODE = -1
-    & $cohostedShell -NoProfile -ExecutionPolicy Bypass -File $cohostedRunner
-    $cohostedExit = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $savedErrorActionPreference
-  }
-  Check "co-hosted: multitable-onprem-package-upgrade-inplace suite passes under $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) (exit=$cohostedExit)" ($cohostedExit -eq 0)
-} else {
-  Skip 'co-hosted: multitable-onprem-package-upgrade-inplace suite (Windows only; the ubuntu test job runs it under pwsh 7)'
-}
-# <<< co-hosted suite <<<
 
 if ($fail -gt 0) {
   Write-Host "FAILED: $fail check(s); $pass passed; $skip skipped"

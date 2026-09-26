@@ -89,9 +89,10 @@
        the task's pm2-runtime, which then only attaches to it as a client, so
        that session-bound daemon (not the task) would host the backend, and
        the backend would live only as long as the upgrade session's process
-       tree. The task is started only once the pipe is seen closed (or, when
-       the pipe namespace cannot be listed, only if `pm2 kill` exited 0), and
-       by the folder it was found in (-TaskPath).
+       tree. The task is started only once pm2's pipe is seen closed, and by
+       the folder it was found in (-TaskPath). `pm2 kill`'s exit code is not
+       evidence of anything: on Windows pm2 exits 0 after a fixed 3 s wait
+       whether or not the daemon exited.
     8. Print a final report: package name, backup path, migration exit,
        health, and the exact operator commands to run next (preflight +
        acceptance bootstrap).
@@ -361,9 +362,12 @@ function Test-ScheduledTaskPresent {
 }
 
 function ConvertTo-PsSingleQuotedLiteral {
-  # 'value' with every ' doubled, so a printed command stays pasteable.
+  # 'value' with every single-quote character doubled, so a printed command
+  # stays pasteable. PowerShell reads not only ' but also the typographic
+  # U+2018, U+2019, U+201A and U+201B as single quotes (a path like
+  # C:\Users\<name>'s can carry one), so the escaping is PowerShell's own.
   param([string]$Value)
-  return "'" + ($Value -replace "'", "''") + "'"
+  return "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Value) + "'"
 }
 
 function Resolve-Pm2Home {
@@ -528,12 +532,21 @@ function Test-Pm2ProcessNotFound {
 function Test-Pm2DaemonPipePresent {
   <#
     Windows only: $true while something listens on pm2's RPC pipe, $false
-    when nothing does, $null when the pipe namespace cannot be listed. pm2
-    (paths.js) uses the SAME pipe, \\.\pipe\rpc.sock, for every PM2_HOME on a
-    Windows machine, so this sees any pm2 daemon on the host, including a
-    pm2-runtime's in-process one. Listing the pipe namespace does not connect
-    to anything. Always $false off Windows: pm2's sockets there are files
-    inside PM2_HOME, and `pm2 kill` returns only after the daemon's SIGQUIT.
+    when nothing does, $null when the pipe cannot be queried. pm2 (paths.js)
+    uses the SAME pipe, \\.\pipe\rpc.sock, for every PM2_HOME on a Windows
+    machine, so this sees any pm2 daemon on the host, including a
+    pm2-runtime's in-process one. Querying the pipe namespace does not
+    connect to anything. Always $false off Windows: pm2's sockets there are
+    files inside PM2_HOME, and `pm2 kill` returns only after the daemon's
+    SIGQUIT.
+
+    It asks for that ONE name ($PipeName as GetFiles' search pattern) and
+    never lists the whole namespace: Windows PowerShell 5.1 (.NET Framework)
+    cannot list \\.\pipe\ at all while ANY pipe on the host has a name with a
+    character that is illegal in a path ('<', '|', ...) -- GetFiles throws
+    ArgumentException -- whereas a query for one name only ever returns that
+    name. $null (so 'unknown', so no task start) is left for a query that
+    fails anyway.
   #>
   param([string]$PipeName = 'rpc.sock')
 
@@ -542,7 +555,7 @@ function Test-Pm2DaemonPipePresent {
   }
   try {
     $suffix = '\' + $PipeName
-    foreach ($pipe in [System.IO.Directory]::GetFiles('\\.\pipe\')) {
+    foreach ($pipe in [System.IO.Directory]::GetFiles('\\.\pipe\', $PipeName)) {
       if ($pipe.EndsWith($suffix, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $true
       }
@@ -557,7 +570,7 @@ function Wait-Pm2DaemonPipeClosed {
   <#
     Polls Test-Pm2DaemonPipePresent for up to $TimeoutSec seconds. Returns
     'closed' (nothing listens), 'still-open' (something still listened when
-    the time ran out), or 'unknown' (the pipe namespace could not be listed).
+    the time ran out), or 'unknown' (the pipe could not be queried).
   #>
   param(
     [int]$TimeoutSec = 15,
@@ -606,14 +619,15 @@ function Restart-Pm2AppOrScheduledTask {
     host whose restart answers "not found", that daemon does not hold the
     backend.
 
-    The task is started only on positive evidence that no daemon is left:
+    The task is started only on positive evidence that no daemon is left,
+    and the pipe is the only evidence:
       - pipe 'closed'                          -> start the task;
-      - pipe 'unknown' (namespace not listable)
-        AND `pm2 kill` exited 0                -> start the task, logged as
-                                                  unverified (pm2's own word
-                                                  that it killed the daemon);
-      - pipe 'unknown' AND `pm2 kill` failed   -> PM2_DAEMON_STATE_UNKNOWN;
+      - pipe 'unknown' (pipe not queryable)    -> PM2_DAEMON_STATE_UNKNOWN;
       - pipe 'still-open', or anything else    -> PM2_DAEMON_STILL_RUNNING.
+    `pm2 kill`'s exit code is logged and never consulted: on Windows it is 0
+    whether or not the daemon exited (pm2 7.0.4 / 5.4.3 CLI.js `kill` exits
+    SUCCESS_EXIT from killDaemon's callback, which Client.js calls after a
+    fixed 3000 ms timer even when the daemon is still there).
     The task is the one Get-Pm2ScheduledTask found, started by its own
     TaskPath (a task in a subfolder cannot be started by name alone).
 
@@ -656,10 +670,7 @@ function Restart-Pm2AppOrScheduledTask {
   }
   $pipeState = Wait-Pm2DaemonPipeClosed
   if ($pipeState -eq 'unknown') {
-    if ($kill.ExitCode -ne 0) {
-      throw "PM2_DAEMON_STATE_UNKNOWN: the pm2 pipe namespace could not be listed and 'pm2 kill' failed (exit=$($kill.ExitCode)); nothing shows the session's pm2 daemon is gone, so '$ScheduledTaskName' was NOT started."
-    }
-    Write-Info "pm2 pipe check unavailable (the pipe namespace could not be listed); 'pm2 kill' exited 0, so the task is started without the pipe check (UNVERIFIED)."
+    throw "PM2_DAEMON_STATE_UNKNOWN: pm2's pipe \\.\pipe\rpc.sock could not be queried after 'pm2 kill', so nothing shows the session's pm2 daemon is gone (pm2 kill's exit code does not: on Windows it is 0 whether or not the daemon exited). '$ScheduledTaskName' was NOT started."
   } elseif ($pipeState -ne 'closed') {
     throw "PM2_DAEMON_STILL_RUNNING: a pm2 daemon still listens on \\.\pipe\rpc.sock after 'pm2 kill' (pipe state: $pipeState); starting '$ScheduledTaskName' now would make its pm2-runtime attach to that daemon instead of hosting '$Name' itself. The task was NOT started."
   }
