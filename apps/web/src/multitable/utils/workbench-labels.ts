@@ -254,9 +254,14 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.baseRenameFailed': { en: 'Failed to rename base', zh: '重命名工作区失败' },
   'toast.sheetDeleted': { en: 'Sheet deleted', zh: '数据表已删除' },
   'toast.sheetDeleteFailed': { en: 'Failed to delete sheet', zh: '删除数据表失败' },
+  // A6 (customer feedback 2026-09-24 #1b): the old copy said the sheet "cannot be deleted" and
+  // stopped there, with no next step. The trash icon is now HIDDEN for a managed sheet
+  // (MetaCapabilities.canDeleteSheet, see /context), so a caller only reaches this 409 through a
+  // stale client or a direct API call. Do not claim the sheet holds "all projects" — since #5868 a
+  // plugin-provisioned sheet holds ONE project's rows.
   'toast.sheetPluginManaged': {
-    en: 'This sheet is managed by a plugin and cannot be deleted from the UI.',
-    zh: '该表由插件托管，不能在界面删除。',
+    en: 'This sheet is maintained by an installed plugin (for example, the stock-preparation workbench) and cannot be deleted from the UI or the API. To clean up one project’s rows, contact an administrator — per-project cleanup is planned. To remove the sheet itself, uninstall or reconfigure the owning plugin.',
+    zh: '这张表由已安装的插件维护（例如备料工作台），不能整表删除。要清理某个项目的数据，请联系管理员（按项目清理功能在规划中）；如需彻底移除该表，请联系插件管理员卸载或重新配置对应插件。',
   },
   'toast.sheetSystemManaged': {
     en: 'This sheet is managed by the system and cannot be deleted.',

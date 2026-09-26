@@ -493,7 +493,14 @@ describe('MultitableWorkbench sheet-delete handler wiring (rail delete-sheet →
 
     expect(showErrorSpy).toHaveBeenCalledTimes(1)
     const msg = String(showErrorSpy.mock.calls[0]?.[0])
-    expect(msg).toBe('This sheet is managed by a plugin and cannot be deleted from the UI.')
+    // A6 (customer feedback 2026-09-24 #1b): the copy now names a next step instead of stopping at
+    // "cannot be deleted" — see workbench-labels.ts's `toast.sheetPluginManaged`.
+    expect(msg).toBe(
+      'This sheet is maintained by an installed plugin (for example, the stock-preparation workbench) '
+      + 'and cannot be deleted from the UI or the API. To clean up one project’s rows, contact an '
+      + 'administrator — per-project cleanup is planned. To remove the sheet itself, uninstall or '
+      + 'reconfigure the owning plugin.',
+    )
     expect(showSuccessSpy).not.toHaveBeenCalled()
     expect(workbenchMock.loadBaseContext).not.toHaveBeenCalled()
     expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
