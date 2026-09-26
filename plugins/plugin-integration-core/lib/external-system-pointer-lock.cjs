@@ -39,16 +39,16 @@
 // fact the code cannot see. Every transaction that takes part in this protocol therefore issues
 // `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` as its FIRST statement, through
 // `pinLockProtocolIsolation` below (`lib/db.cjs` setTransactionIsolationLevel, a whitelisted
-// fixed-literal method on the transaction handle only). PostgreSQL refuses the SET with 25001 if
-// anything ran before it, so a participant that gets the order wrong aborts instead of running at
-// the inherited level. Participants: `deleteExternalSystem`, 079 `set`, 062 `saveVersion` (mint
-// transaction), `upsertPipeline`, `instantiateTemplate`.
+// fixed-literal method on the transaction handle only). Inherited level NOT read committed: a SET
+// after any query fails 25001 and aborts, so a wrong-order participant never runs on at that level;
+// inherited level already read committed: a late SET is a no-op (it ran at read committed anyway).
+// Participants: `deleteExternalSystem`, 079 `set`, 062 `saveVersion` (mint), `upsertPipeline`, `instantiateTemplate`.
 //   Why SET rather than READ-AND-REFUSE (`current_setting('transaction_isolation')` first, 409/500 on
 //   anything but read committed): refusing keeps the protocol sound but turns a database whose
 //   default is REPEATABLE READ / SERIALIZABLE into one where no external system can be deleted and
 //   no pointer can be written at all; pinning makes the protocol hold on such a database with no
 //   operator action, costs the same one round trip, and fails closed in the same situations
-//   (method missing → refused before any statement; issued late → 25001). The host transaction API
+//   (method missing → refused before any statement; late at a non-RC default → 25001). The host transaction API
 //   (`packages/core-backend/src/index.ts` context.api.database.transaction →
 //   `src/integration/db/connection-pool.ts` transaction: `BEGIN`, then the callback) runs nothing
 //   between BEGIN and the callback's first statement, so the SET can always be first.
@@ -130,8 +130,8 @@ async function lockExternalSystemForPointerWrite(executor, { tenantId, id } = {}
 
 /**
  * Pin the calling transaction to READ COMMITTED — the level the lock protocol is proven at. MUST be
- * the transaction's FIRST statement (PostgreSQL enforces it: 25001 otherwise, which aborts the
- * transaction). Call it on the TRANSACTION handle, before the FOR UPDATE (delete side) or the
+ * the transaction's FIRST statement (issued late: 25001 + abort at a non-RC default, a no-op at RC —
+ * see the file header). Call it on the TRANSACTION handle, before the FOR UPDATE (delete side) or the
  * KEY SHARE (writer side) and before anything else the transaction reads.
  *
  * FAIL-CLOSED on a handle that cannot pin: an executor without `setTransactionIsolationLevel` (a

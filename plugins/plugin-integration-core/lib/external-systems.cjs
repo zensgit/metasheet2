@@ -1413,9 +1413,9 @@ function createExternalSystemRegistry({
       if (typeof trx.selectOneForUpdate !== 'function') {
         throw new Error('deleteExternalSystem: transaction handle with selectOneForUpdate is required (external-system delete lock protocol)')
       }
-      // PIN, THEN LOCK. The SET is the transaction's first statement (PostgreSQL refuses it with
-      // 25001 otherwise); nothing is read or counted before the FOR UPDATE returns. A handle that
-      // cannot pin is refused by pinLockProtocolIsolation before it issues anything.
+      // PIN, THEN LOCK. The SET is the transaction's first statement (late, it fails 25001 at a non-RC
+      // default and is a no-op at RC); nothing is read or counted before the FOR UPDATE returns. A
+      // handle that cannot pin is refused by pinLockProtocolIsolation before it issues anything.
       await pinLockProtocolIsolation(trx)
       const row = await trx.selectOneForUpdate(TABLE, where)
       if (!row) {

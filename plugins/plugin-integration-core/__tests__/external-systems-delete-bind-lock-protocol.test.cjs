@@ -59,10 +59,11 @@
 //               062 constructors, pipeline endpoint check) -> the matching FC assertion flips
 // ISOLATION PIN (#6076 third-round verification: the protocol held only at READ COMMITTED and the code
 // merely ASSUMED that level; under a REPEATABLE READ default the writer-first interleaving dangled on
-// PostgreSQL 16). The fake now models REPEATABLE READ (one snapshot at the first statement) and
-// SET TRANSACTION's "must be first" rule (25001):
-//   F-ISO       the fake's RR model asserted directly (snapshot at the first statement, SET after a
-//               statement -> 25001 + abort, KEY SHARE on a row deleted after the snapshot -> 40001,
+// PostgreSQL 16). The fake now models REPEATABLE READ (one snapshot at the first statement) and a
+// STRICTER form of SET TRANSACTION's "must be first" rule (25001 on ANY late SET; PostgreSQL refuses
+// only a late SET that CHANGES the level — see the ISOLATION model note below):
+//   F-ISO       the fake's RR model asserted directly (snapshot at the first statement, a level-changing
+//               SET after a statement -> 25001 + abort, KEY SHARE on a row deleted after the snapshot -> 40001,
 //               no setTransactionIsolationLevel on the ROOT helper)
 //   I-RR / I-SER every participant (delete, 079, 062, pipeline, TEMPLATE instantiation) in BOTH
 //               interleavings under a repeatable-read and a serializable server default: no dangle,
@@ -166,7 +167,13 @@ const MODULES = {
 //   * ISOLATION (`createLockingDb({ defaultIsolation })`, default 'read committed' = the behaviour
 //     above). A transaction starts at the default level; `setTransactionIsolationLevel(level)` (on
 //     TRANSACTION handles only, like lib/db.cjs) changes it and throws `{ code: '25001' }` — which
-//     aborts the transaction — once any other statement has run. At 'repeatable read' /
+//     aborts the transaction — once any other statement has run. That is STRICTER than PostgreSQL,
+//     which refuses a late SET only when it would CHANGE the transaction's level and accepts a late
+//     SET naming the level already in force as a no-op (PG 16.10: at a read-committed default,
+//     `BEGIN; SELECT ...; SET TRANSACTION ISOLATION LEVEL READ COMMITTED` succeeds). No case here
+//     relies on the difference: the one case that issues a late SET on purpose, F-ISO (3), changes repeatable read
+//     to read committed, where PostgreSQL refuses too, and the whole file passes unchanged when the
+//     guard is narrowed to PostgreSQL's rule (checked in memory, #6076 final review). At 'repeatable read' /
 //     'serializable' the transaction takes ONE snapshot of the committed rows at its first statement
 //     (the SET excluded: it takes none), BEFORE that statement's lock wait, and every read in it
 //     (selectOne / select / countRows / the lock reads) sees that snapshot; a lock read whose row
@@ -1400,7 +1407,8 @@ async function testFakeModelsRepeatableRead() {
     return [before, after]
   })
   assert.deepEqual(pinned, [0, 1], 'F-ISO: pinned to read committed, every statement reads the latest commits')
-  // (3) SET after any other statement: 25001, and the transaction is aborted.
+  // (3) a level-CHANGING SET (repeatable read default → read committed) after any other statement:
+  //     25001, and the transaction is aborted — PostgreSQL refuses this case too.
   const late = createLockingDb({ defaultIsolation: 'repeatable read' })
   late.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
   const lateOutcome = await settle(late.transaction(async (trx) => {

@@ -441,11 +441,11 @@ function createDb({ database, logger } = {}) {
        * lock protocol is the first such caller (`external-system-pointer-lock.cjs`
        * pinLockProtocolIsolation).
        *
-       * MUST be the transaction's FIRST statement. PostgreSQL enforces that itself: issued after any
-       * query it fails with SQLSTATE 25001 and aborts the transaction — so a caller that gets the
-       * order wrong fails closed, it never runs at the wrong level. Offered ONLY on the transaction
-       * handle, never on the root helper: outside a transaction block PostgreSQL merely WARNS and
-       * ignores it, which is exactly the silent no-op this method must never be.
+       * MUST be the transaction's FIRST statement. PostgreSQL enforces it where it matters: when the
+       * inherited level differs from the requested one, a SET issued after any query fails with SQLSTATE
+       * 25001 and aborts the transaction; when it already IS the requested one, a late SET is a no-op
+       * (the transaction ran at that level all along) — a caller that gets the order wrong never completes
+       * at another level. Offered ONLY on the transaction handle: outside a block PostgreSQL merely WARNS.
        */
       async function setTransactionIsolationLevel(level) {
         const statement = transactionIsolationStatement(level)
