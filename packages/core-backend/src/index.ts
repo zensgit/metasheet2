@@ -239,6 +239,7 @@ import {
   correlationIdMiddleware,
 } from './middleware/correlation'
 import { approvalsRouter } from './routes/approvals'
+import { tasksRouter } from './routes/tasks'
 import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
@@ -1837,6 +1838,8 @@ export class MetaSheetServer {
       injector: this.injector,
       afterSalesApprovalBridgeService: this.afterSalesApprovalBridgeService,
     }))
+    const taskRoutes = tasksRouter()
+    if (taskRoutes) this.app.use(taskRoutes)
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
