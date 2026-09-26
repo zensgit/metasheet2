@@ -1126,18 +1126,26 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  * LOOP body or a FUNCTION body, where it stops (this file writes a body's `{` on its header's line).
  * So a refusal DEFERRED to a later statement — a failure message or `{ status, … }` object, an errors list, a
  * flag, set in the branch and answered by an `if` further down — is read where it is answered.
- * THE POLARITY — which branch that is — is read only along a chain that is monotone at every level
- * (`polarityOf`): the comparison is one whole operand of a top level that joins operands with `&&` / `||`
- * only, inside nothing but GROUPING `(…)` — each a whole `&&` / `||` operand one level up in turn — up to the
- * condition (or the binding's initialiser). A `!` before a grouping bracket that holds exactly the next operand,
- * and a `!` on the bound boolean, flip it. The one other reading is `quantifiedPolarity`: a `!rows.some((row) => …)`
- * / `rows.every(…)` whose one-parameter arrow body IS the comparison, as a whole `&&` / `||` operand of a
- * condition with no `?` / `:` / `??` at its top level (both, taken to be Array's, are monotone in the
- * predicate). Anything else — a call's arguments (`Boolean(…)`, `.filter(…)`, a `function` callback), an
- * array or index `[…]`, an operator glued to a group (`(a === b) === false`, `x - (a === b)`), a ternary, `??`,
- * a comma, two equalities in one operand (`a === b === c`), a `!(…)` that holds more than the comparison
- * (`!(owner && owner.sheetId === x)`), a `??=` binding, the boolean tested as more than a bare name — reads
- * BOTH paths.
+ * THE POLARITY — which branch that is — is SETTLED only where the comparison DECIDES the condition
+ * (`mismatchValue`): along a chain that is monotone at every level — the comparison is one whole operand of a top
+ * level that joins operands with `&&` / `||` only, inside nothing but GROUPING `(…)`, each a whole `&&` / `||`
+ * operand one level up in turn, up to the condition (or the binding's initialiser) — AND at every level no other
+ * operand can overturn it (`levelValue`): `&&` binds tighter than `||`; a "different" that makes its operand false
+ * decides its `&&` group, one that makes it true decides the `||`. So `a !== b || x` and `a === b && x` are settled,
+ * while `a !== b && x` and `a === b || x` are not — `x` sends a mismatch to either branch — and neither is `x && a
+ * !== b` / `x || a === b`: when `x` settles it the comparison never runs, yet the ids the request sent still differ.
+ * The one operand that does not unsettle it is a GUARD (`guardValue`): a truth test, written BEFORE the comparison,
+ * of one of its own operands or of a name an operand dereferences (`owner &&`, `!view ||`, GET /context's
+ * `resolvedSheetId &&`, `config.foreignSheetId &&`) — when it fails there is no row or id to pair (see OTHER below).
+ * A `!` before a grouping bracket that holds exactly the next operand, and a `!` on the bound boolean, flip it. A
+ * bound boolean is settled only if its initialiser is AND each testing `if` is, through the same rule. The one other reading is `quantifiedOperand`: a `!rows.some((row) => …)`
+ * / `rows.every(…)` whose one-parameter arrow body IS the comparison, as a whole `&&` / `||` operand of the
+ * condition, settled by the same rule at that level (both, taken to be Array's, are monotone in the predicate).
+ * Anything else — an operand that can overturn it, a call's arguments (`Boolean(…)`, `.filter(…)`, a `function`
+ * callback), an array or index `[…]`, an operator glued to a group (`(a === b) === false`, `x - (a === b)`), a
+ * ternary, `??`, a comma, two equalities in one operand (`a === b === c`), a `!(…)` that holds more than the
+ * comparison (`!(owner && owner.sheetId === x)`), a `??=` binding, the boolean tested as more than a bare name —
+ * reads BOTH paths.
  *
  * Two properties of every site are COMPUTED from the code, never taken from the table:
  *   echo             the answer's payload is not provably constant. Every construct that makes a path
@@ -1242,6 +1250,10 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     authority (a false alarm); and a 403 written earlier in the handler (outside literals) counts wherever it
  *     sits and whether or not it runs before the site — a branch, a closure, an object never answered. The
  *     pairing side is found by shape; this side is not.
+ *   - A GUARD is taken to pass whenever there is a pairing to tell apart: a name the comparison dereferences is a
+ *     row or view object — never `0`, `''` or `false` — and an operand it compares is empty only when nothing is
+ *     addressed. Only a guard written BEFORE the comparison counts (the comparison then runs only once it has
+ *     passed); one after it (`a !== b && owner`) unsettles it like any other operand.
  *   - A pairing pushed into SQL is covered by the SQL cell below for a `meta_views` SELECT that binds
  *     `id = $n` and `sheet_id = $n` in one literal or `+`-joined literals, the SELECT anywhere in it
  *     (a CTE, `INSERT … SELECT`); not for SQL assembled through `${…}` holes or other builders.
@@ -1255,7 +1267,7 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     defined from another constant, a TS cast in a payload, a response method name on an unrelated
  *     object (`map.set(k, v)` on the path), a method helper handed `res`, or a `catch` whose other branches
  *     answer a local (the `getDbNotReadyMessage` hint most handlers carry) reads as echo — false alarms in that
- *     direction. So does reading BOTH paths where the polarity is unknown, and a fall-through run that goes on
+ *     direction. So does reading BOTH paths where the polarity is not settled, and a fall-through run that goes on
  *     into the handler's own success answer (a mismatch branch that only logs, at the handler's top level, is
  *     then a site).
  */
@@ -1763,62 +1775,113 @@ function unitAt(code: string, from: number, to: number, at: number, length: numb
   return held ? unit(to) : null
 }
 
-type Polarity = 'direct' | 'flipped' | 'unknown'
-
 /**
- * Whether the unit being TRUE pushes the region — the `if` condition, or a binding's initialiser — toward true
- * (`direct`), toward false (`flipped`), or cannot be told from the text (`unknown`). It is told only along a
- * chain that is monotone at every level, from the unit out to the region:
- *   - the unit holds ONE equality at its own top level (`a === b === c` is unknown);
+ * What the region — the `if` condition, or a binding's initialiser — is when the comparison says "different":
+ * `true`, `false`, or null when the text does not SETTLE it (the scan then reads BOTH paths). `value` is what the
+ * unit itself is then: for a comparison, `true` for `!==` / `!=` and `false` for `===` / `==`; for a bound boolean,
+ * the binding's settled value with the `!`s written right before it applied. Settled only along a chain that is
+ * monotone at every level, from the unit out to the region, and DECIDED by the unit at every level:
+ *   - the unit holds ONE equality at its own top level (`a === b === c` is unsettled);
  *   - every level is the region itself or a GROUPING `(…)` (`isGroupingParen`) — never a call's arguments
  *     (`Boolean(…)`, `.filter(…)`), an index / array `[…]`, or a `{…}` (a callback or function body);
  *   - at every level the unit (or the next inner `!…!(…)`) is a WHOLE operand of a top level that joins its
  *     operands with `&&` / `||` and nothing else — no `?` `:` `??` `,` `;` `=` `=>` `&` `|` `^` there, and no
  *     operator glued to the bracket (`(a === b) === false`, `x + (a === b)`, `await (a === b)`);
+ *   - at every level no other operand can overturn it (`levelValue`): `a !== b && x` and `x && a !== b` are
+ *     unsettled, `a !== b || x` and `owner && a !== b` (a guard) are settled;
  *   - a `!` before a grouping bracket flips it, but only when that bracket holds exactly the next operand
- *     (`!(a === b)`), not a conjunction (`!(owner && a === b)` is unknown); `bangs` counts the `!` written right
- *     before the unit itself (a bound boolean's `!elsewhere`).
- * Everything else is `unknown`, and the scan then reads BOTH paths.
+ *     (`!(a === b)`), not a conjunction (`!(owner && a === b)` is unsettled).
+ * `guards` are the names the comparison reads (`namesRead`).
  */
-function polarityOf(code: string, unit: ExpressionUnit, bangs: number): Polarity {
-  if ((topLevelOnly(code.slice(unit.start, unit.end)).match(/!==|===|!=|==/g) ?? []).length > 1) return 'unknown'
-  let flips = bangs
+function mismatchValue(code: string, unit: ExpressionUnit, value: boolean, guards: ReadonlySet<string>): boolean | null {
+  if ((topLevelOnly(code.slice(unit.start, unit.end)).match(/!==|===|!=|==/g) ?? []).length > 1) return null
+  let current = value
   let operand: [number, number] = [unit.start, unit.end]
   for (let k = unit.frames.length - 1; k >= 0; k -= 1) {
     const frame = unit.frames[k]!
-    if (!frame.grouping || frame.arrow) return 'unknown'
+    if (!frame.grouping || frame.arrow) return null
     const inner: [number, number] = [frame.open + 1, k === 0 ? unit.regionEnd : matchBracket(code, frame.open)]
-    if (inner[1] === -1) return 'unknown'
-    const joined = andOrOperand(code, inner, operand)
-    if (joined === null) return 'unknown'
-    if (k === 0) break
-    if (frame.negated) {
-      if (joined === 'among') return 'unknown'
-      flips += 1
-    }
+    if (inner[1] === -1) return null
+    const level = levelValue(code, inner, operand, current, guards)
+    if (level === null || level.value === null) return null
+    if (k === 0) return level.value
+    if (frame.negated && level.joined === 'among') return null
+    current = frame.negated ? !level.value : level.value
     let start = frame.open
     for (let j = frame.open - 1; j >= 0 && /[\s!]/.test(code[j]!); j -= 1) if (code[j] === '!') start = j
     operand = [start, inner[1] + 1]
   }
-  return flips % 2 === 1 ? 'flipped' : 'direct'
+  return null
 }
 
 /**
- * How `operand` sits in `inner`: `alone` — it is all of it; `among` — a whole operand of a top level that joins
- * operands with `&&` / `||` only; null — anything else (another operator at that top level, or one glued to it).
+ * How `operand` sits in `inner`, and what `inner` is when `operand` is `value`. null — `operand` is not a whole
+ * operand of a top level that joins operands with `&&` / `||` only (another operator at that top level, or one glued
+ * to it). Otherwise `joined` is `alone` (it is all of `inner`) or `among`, and `value` is null unless `operand`
+ * DECIDES `inner`: `&&` binds tighter than `||`, a `false` decides its `&&` group, a `true` group decides the whole,
+ * and every other operand is unknown — one written after `operand`, and one written before it (when that one settles
+ * the level the comparison never runs, yet the ids the request sent still differ) — except a GUARD written before it
+ * (`guardValue`).
  */
-function andOrOperand(code: string, inner: [number, number], operand: [number, number]): 'alone' | 'among' | null {
+function levelValue(
+  code: string,
+  inner: [number, number],
+  operand: [number, number],
+  value: boolean,
+  guards: ReadonlySet<string>,
+): { joined: 'alone' | 'among'; value: boolean | null } | null {
   const top = topLevelOnly(code.slice(inner[0], inner[1])).replace(/;\s*$/, (tail) => ' '.repeat(tail.length))
   const others = top.replace(/&&|\|\|/g, '  ')
   if (/\?(?!\.(?!\d))|:|,|;|(?<![=!<>])=(?!=)|&|\||\^/.test(others)) return null
-  const before = top.slice(0, operand[0] - inner[0])
+  const at = operand[0] - inner[0]
+  const before = top.slice(0, at)
   const after = top.slice(operand[1] - inner[0])
-  if (before.trim() === '' && after.trim() === '') return 'alone'
-  return /(?:^|&&|\|\|)\s*$/.test(before) && /^\s*(?:$|&&|\|\|)/.test(after) ? 'among' : null
+  if (before.trim() === '' && after.trim() === '') return { joined: 'alone', value }
+  if (!/(?:^|&&|\|\|)\s*$/.test(before) || !/^\s*(?:$|&&|\|\|)/.test(after)) return null
+  // The operands of this level in order, as `||` of `&&` groups: the unit's own value, a guard's before it, else unknown.
+  const operators = [...top.matchAll(/&&|\|\|/g)]
+  const groups: Array<Array<boolean | null>> = [[]]
+  let from = 0
+  for (let n = 0; n <= operators.length; n += 1) {
+    const to = n < operators.length ? operators[n]!.index! : top.length
+    const own = from <= at && at < to
+    groups[groups.length - 1]!.push(own ? value : to <= at ? guardValue(code.slice(inner[0] + from, inner[0] + to), guards) : null)
+    if (n === operators.length) break
+    if (operators[n]![0] === '||') groups.push([])
+    from = to + 2
+  }
+  const all = (vs: Array<boolean | null>): boolean | null => (vs.includes(false) ? false : vs.every((v) => v === true) ? true : null)
+  const any = groups.map(all)
+  return { joined: 'among', value: any.includes(true) ? true : any.every((v) => v === false) ? false : null }
 }
 
-const combinePolarity = (a: Polarity, b: Polarity): Polarity =>
-  a === 'unknown' || b === 'unknown' ? 'unknown' : (a === 'flipped') !== (b === 'flipped') ? 'flipped' : 'direct'
+/**
+ * A GUARD: a truth test — `x`, `!x`, `!!x` — of what the comparison itself reads (`namesRead`): one of its own
+ * operands as written (`config.foreignSheetId` in `config.foreignSheetId && config.foreignSheetId !==
+ * linkCfg.foreignSheetId`, `resolvedSheetId` in GET /context's `resolvedSheetId && !rows.some((row) => String(row.id)
+ * === resolvedSheetId)`), or a name an operand dereferences (`owner` in `owner && owner.sheet_id !== target`, `!view`
+ * in `!view || view.sheetId !== sheetId`). Only one written BEFORE the comparison is asked (`levelValue`): when the
+ * comparison runs it has passed, and when it fails there is no row or id to pair (the assumption is stated under
+ * OTHER). Its value is then `true` for `x` / `!!x`, `false` for `!x`; null for anything that is not a guard.
+ */
+function guardValue(text: string, guards: ReadonlySet<string>): boolean | null {
+  const test = /^\s*((?:!\s*)*)(\S[\s\S]*?)\s*$/.exec(text)
+  if (!test || !guards.has(test[2]!.replace(/\s+/g, ''))) return null
+  return (test[1]!.match(/!/g) ?? []).length % 2 === 0
+}
+
+/**
+ * What a comparison READS, whitespace removed: each operand as written, and each name an operand dereferences
+ * (`owner` in `String(owner.sheet_id)`, `row` in `row['sheet_id']`, `view` in `view?.sheetId`).
+ */
+function namesRead(operands: readonly string[]): Set<string> {
+  const names = new Set<string>()
+  for (const operand of operands) {
+    names.add(operand.replace(/\s+/g, ''))
+    for (const m of blankLiterals(operand).matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\??\.(?![.\d])|\[)/g)) names.add(m[1]!)
+  }
+  return names
+}
 
 /** `text` with every literal and every bracket's content blanked to spaces in place: its top level only. */
 function topLevelOnly(text: string): string {
@@ -1849,14 +1912,14 @@ function topLevelOnly(text: string): string {
 }
 
 /**
- * The polarity of a comparison that is the WHOLE body of a one-parameter, expression-bodied arrow handed
- * straight to `.some(…)` / `.every(…)` on a dotted name — `!rows.some((row) => String(row.id) === x)`.
- * Both are monotone in their predicate, so the comparison keeps the polarity of the call, `!`s before its
- * receiver counted. Read through only when that call is a whole operand of `&&` / `||` at the region's top
- * level (region start, `&&` or `||` before it; region end, `&&` or `||` after it) and that top level holds
- * no `?` / `:` / `??` — otherwise, and for every other callback, null (the caller keeps `unknown`).
+ * A comparison that is the WHOLE body of a one-parameter, expression-bodied arrow handed straight to `.some(…)` /
+ * `.every(…)` on a dotted name, the call standing directly in the region — `!rows.some((row) => String(row.id) === x)`.
+ * Both are monotone in their predicate, so on a mismatch (every row different) the call is what the comparison is,
+ * flipped by the `!`s before its receiver. Returns that call as an operand of the region (the `!`s included) and
+ * their count; the caller settles the region at that level with `levelValue`, like any other operand. null for
+ * every other callback (the caller then reads the frames, and a callback there leaves it unsettled).
  */
-function quantifiedPolarity(code: string, unit: ExpressionUnit, region: [number, number]): Polarity | null {
+function quantifiedOperand(code: string, unit: ExpressionUnit, region: [number, number]): { operand: [number, number]; bangs: number } | null {
   if (unit.frames.length !== 2) return null
   const [outer, call] = unit.frames as [Frame, Frame]
   if (outer.arrow || !call.arrow || call.negated) return null
@@ -1866,10 +1929,8 @@ function quantifiedPolarity(code: string, unit: ExpressionUnit, region: [number,
   if (code.slice(call.arrowAt + 2, unit.start).trim() !== '') return null
   const head = code.slice(region[0], call.open)
   const receiver = /(?<![\w$.!])(!*)\s*[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*\s*\??\.\s*(?:some|every)\s*$/.exec(head)
-  if (!receiver || !/(?:^|&&|\|\|)\s*$/.test(head.slice(0, receiver.index))) return null
-  if (!/^\s*(?:;?\s*$|&&(?!=)|\|\|(?!=))/.test(code.slice(close + 1, region[1]))) return null
-  if (/\?(?!\.)|:/.test(topLevelOnly(code.slice(region[0], region[1])))) return null
-  return receiver[1]!.length % 2 === 1 ? 'flipped' : 'direct'
+  if (!receiver) return null
+  return { operand: [region[0] + receiver.index, close + 1], bangs: receiver[1]!.length }
 }
 
 /**
@@ -2609,12 +2670,18 @@ function scanSheetPairings(source: string): PairingScan {
     if (isLiteralOperand(left) || isLiteralOperand(right)) continue
     const text = `${left} ${op} ${right}`.replace(/\s+/g, ' ')
 
-    // 3. The `if`s that decide, each with the comparison's polarity in it: the one whose condition holds it, or —
-    //    for a bound boolean — EVERY later `if` in the same handler that tests the name (a first test that only skips
-    //    a loop iteration or labels a row does not hide a later one that refuses).
-    let polarity = quantifiedPolarity(code, unit, region) ?? polarityOf(code, unit, 0)
-    if (binding?.nullish) polarity = 'unknown'
-    const deciders: Array<{ statement: IfStatement; polarity: Polarity }> = statement ? [{ statement, polarity }] : []
+    // 3. The `if`s that decide, each with what its condition is when the comparison says "different" (null: not
+    //    settled, read both): the one whose condition holds it, or — for a bound boolean — EVERY later `if` in the
+    //    same handler that tests the name (a first test that only skips a loop iteration or labels a row does not
+    //    hide a later one that refuses).
+    const differs = op === '!==' || op === '!='
+    const guards = namesRead([left, right])
+    const quantified = quantifiedOperand(code, unit, region)
+    let settled: boolean | null = quantified
+      ? levelValue(code, region, quantified.operand, differs !== (quantified.bangs % 2 === 1), guards)?.value ?? null
+      : mismatchValue(code, unit, differs, guards)
+    if (binding?.nullish) settled = null
+    const deciders: Array<{ statement: IfStatement; whenMismatch: boolean | null }> = statement ? [{ statement, whenMismatch: settled }] : []
     if (binding) {
       const limit = handler ? handler.end : at + 4000
       const use = new RegExp(String.raw`(?<![\w$.])${escapeName(binding.name)}(?![\w$])`, 'g')
@@ -2642,10 +2709,11 @@ function scanSheetPairings(source: string): PairingScan {
         const aliasUnit = unitAt(code, condition[0] + 1, condition[1], aliasAt, binding.name.length)
         const prefix = aliasUnit ? code.slice(aliasUnit.start, aliasAt) : ''
         const suffix = aliasUnit ? code.slice(aliasAt + binding.name.length, aliasUnit.end) : ''
-        const aliasPolarity: Polarity = !aliasUnit || uses.length > 1 || !/^[\s!]*$/.test(prefix) || suffix.trim() !== ''
-          ? 'unknown'
-          : polarityOf(code, aliasUnit, (prefix.match(/!/g) ?? []).length)
-        deciders.push({ statement: decider, polarity: combinePolarity(polarity, aliasPolarity) })
+        // Settled only if the initialiser is AND this `if` is, the bound name taking the initialiser's value.
+        const whenMismatch = settled === null || !aliasUnit || uses.length > 1 || !/^[\s!]*$/.test(prefix) || suffix.trim() !== ''
+          ? null
+          : mismatchValue(code, aliasUnit, settled !== ((prefix.match(/!/g) ?? []).length % 2 === 1), guards)
+        deciders.push({ statement: decider, whenMismatch })
       }
     }
     if (deciderFailed) {
@@ -2657,7 +2725,7 @@ function scanSheetPairings(source: string): PairingScan {
       continue
     }
 
-    // 4. The mismatch path(s) of every deciding `if` — both branches when the polarity is unknown — and whether any
+    // 4. The mismatch path(s) of every deciding `if` — both branches when it is not settled — and whether any
     //    answers. A mismatch branch that does not END the path (`endsPath`) — whatever the other branch does, and
     //    with no else the empty else-branch — continues into the FALL-THROUGH RUN after that `if`.
     const responseNames = handler ? handler.responseNames : DEFAULT_RESPONSE_NAMES
@@ -2670,7 +2738,6 @@ function scanSheetPairings(source: string): PairingScan {
     const paths: Array<[number, number]> = []
     let undelimited = false
     for (const decider of deciders) {
-      const mismatchWhenTrue = (op === '!==' || op === '!=') !== (decider.polarity === 'flipped')
       const mismatchPath = (branch: [number, number] | null) => {
         if (branch) paths.push(branch)
         if (endsPath(code, branch)) return
@@ -2678,8 +2745,8 @@ function scanSheetPairings(source: string): PairingScan {
         if (run) paths.push(...run)
         else undelimited = true
       }
-      if (decider.polarity === 'unknown' || mismatchWhenTrue) mismatchPath(decider.statement.then)
-      if (decider.polarity === 'unknown' || !mismatchWhenTrue) mismatchPath(decider.statement.else)
+      if (decider.whenMismatch !== false) mismatchPath(decider.statement.then)
+      if (decider.whenMismatch !== true) mismatchPath(decider.statement.else)
     }
     if (undelimited) {
       unparseable.push(`line ${lineAt(at)}: ${text} (the statements after it)`)
@@ -3773,5 +3840,110 @@ describe('by SHAPE — self-tests: a hand-written copy under new names is invisi
     expect(formShareGapState(forbidden, sheetOnly, missing), 'the view id is not echoed').toBe('CHANGED')
     const sheetTwice = plant("    const probe = await poolManager.get().query('SELECT id FROM meta_views WHERE sheet_id = $1 OR sheet_id = $2', [target, target])")
     expect(sqlViewPairings(sheetTwice), 'sheet_id read as id').toEqual([])
+  })
+
+  // ── #6069 fifth review: an operand that can overturn the comparison; the binding probes on an existing row ────
+  // The two polarity cells were red on 471f671bf: the scan there read one branch wherever the chain was monotone, so
+  // an extra conjunct / disjunct could send a mismatch to the branch it did not read, and the ledger stayed green.
+  // The third holds the review's binding probes verbatim (red on 84f4a786d; 471f671bf already reads every `if`).
+
+  /** A view-aggregate census row (post-authority, values-free), its `if (!view || view.sheetId !== sheetId) { … }` rewritten. */
+  const rewriteAggregatePairing = (rewrite: (condition: string, block: string) => string): string => {
+    const LF_SOURCE = UNIVER_META_SOURCE.replace(/\r\n/g, '\n')
+    const decl = LF_SOURCE.indexOf("router.get('/sheets/:sheetId/view-aggregate'")
+    const cond = 'if (!view || view.sheetId !== sheetId) {'
+    const at = LF_SOURCE.indexOf(cond, decl)
+    const close = at > decl ? matchBracket(LF_SOURCE, at + cond.length - 1) : -1
+    expect(decl > 0 && at > decl && close > at && close - at < 400, 'the view-aggregate pairing this probe rewrites moved — re-anchor it').toBe(true)
+    return LF_SOURCE.slice(0, at) + rewrite(cond, LF_SOURCE.slice(at, close + 1)) + LF_SOURCE.slice(close + 1)
+  }
+  const expectAggregateRed = (mutated: string, label: string) => {
+    expect(SHEET_PAIRING_CENSUS[AGGREGATE_KEY], 'the probed row left the census — pick another post-authority row').toEqual({ echo: false, beforeAuthority: false })
+    const scanned = scanSheetPairings(mutated)
+    const site = scanned.sites.find((s) => s.key === AGGREGATE_KEY)
+    expect([site?.echo, site?.beforeAuthority], `${label}: computed [echo, beforeAuthority]`).toEqual([true, false])
+    const violations = pairingViolations(scanned).join('\n')
+    expect(violations, label).toContain(`DECLARED ≠ COMPUTED (line ${site!.line}): ${AGGREGATE_KEY}`)
+    expect(violations, label).toContain(`UNEXCUSED (line ${site!.line}): ${AGGREGATE_KEY}`)
+  }
+  const AGGREGATE_ECHO = "if (req.query.verbose === '1' && view) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} is on ${view.sheetId}` } })"
+
+  it('polarity is SETTLED only where the comparison decides: an operand after it, or one before it that is not a guard, reads BOTH paths', () => {
+    const thenEchoes = (condition: string) => plant(`    if (${condition}) {\n      ${ECHO_REFUSAL}\n    }\n    ${FREE_REFUSAL}`)
+    const afterEchoes = (condition: string) => plant(`    if (${condition}) {\n      ${FREE_REFUSAL}\n    }\n    return res.json({ ok: true, viewId: req.params.viewId })`)
+    // UNSETTLED — another operand can send a "different" to either branch → echo in BOTH plantings.
+    for (const condition of [
+      "owner.sheet_id !== target && req.query.verbose !== '1'",
+      'owner.sheet_id === target || req.query.verbose',
+      '(owner.sheet_id !== target) && !req.query.verbose',
+      'owner && owner.sheet_id !== target && !req.query.verbose',
+      '!req.query.verbose && owner.sheet_id !== target',
+      'req.query.verbose || owner.sheet_id === target',
+      'owner.sheet_id !== target && owner',
+      '(owner && owner.sheet_id !== target) && !req.query.verbose',
+      '!found.rows.some((row: any) => row.sheet_id === target) && !req.query.verbose',
+      'req.query.verbose && found.rows.every((row: any) => row.sheet_id !== target)',
+    ]) {
+      plantedSite(thenEchoes(condition), true, `unsettled (then echoes): ${condition}`)
+      plantedSite(afterEchoes(condition), true, `unsettled (after echoes): ${condition}`)
+    }
+    // A bound boolean: unsettled in its initialiser, or in the `if` that tests it.
+    for (const [where, initialiser, condition] of [
+      ['its initialiser', 'owner.sheet_id !== target && !req.query.verbose', 'elsewhere'],
+      ['the testing if', 'owner.sheet_id !== target', 'elsewhere && !req.query.verbose'],
+      ['the testing if, before it', 'owner.sheet_id !== target', '!req.query.verbose && elsewhere'],
+    ] as const) {
+      const bound = `    const elsewhere = ${initialiser}\n`
+      plantedSite(plant(`${bound}    if (${condition}) {\n      ${ECHO_REFUSAL}\n    }\n    ${FREE_REFUSAL}`), true, `bound, unsettled in ${where} (then echoes)`)
+      plantedSite(plant(`${bound}    if (${condition}) {\n      ${FREE_REFUSAL}\n    }\n    return res.json({ ok: true, viewId: req.params.viewId })`), true, `bound, unsettled in ${where} (after echoes)`)
+    }
+    // SETTLED — the operand that absorbs (`||` after a true, `&&` after a false), and a GUARD before it: only the
+    // mismatch path is read, so the planting whose mismatch path is values-free reads values-free.
+    for (const condition of [
+      'owner.sheet_id !== target || req.query.verbose',
+      'req.query.verbose || owner.sheet_id !== target',
+      '!owner || owner.sheet_id !== target',
+      'owner && owner?.sheet_id !== target',
+      'target && owner.sheet_id !== target',
+      'owner.sheet_id && owner.sheet_id !== target',
+      'owner && (owner.sheet_id !== target || req.query.verbose)',
+      'req.query.verbose || !found.rows.some((row: any) => row.sheet_id === target)',
+    ]) plantedSite(afterEchoes(condition), false, `settled, then-branch: ${condition}`)
+    for (const condition of [
+      'owner.sheet_id === target && req.query.verbose',
+      'req.query.verbose && owner.sheet_id === target',
+      '!owner || owner.sheet_id === target',
+      '!!owner && owner.sheet_id === target',
+    ]) plantedSite(thenEchoes(condition), false, `settled, what follows: ${condition}`)
+    const guardedBinding = '    const elsewhere = !owner || owner.sheet_id !== target\n    if (owner && elsewhere) {\n'
+    plantedSite(plant(`${guardedBinding}      ${FREE_REFUSAL}\n    }\n    return res.json({ ok: true, viewId: req.params.viewId })`), false, 'bound, settled: a guard before it in the testing if')
+  })
+
+  it('…and an EXISTING values-free row rewritten so an extra operand sends the mismatch to an echo reds declared = computed', () => {
+    // A2: the condition gains a trailing conjunct; the refusal after it answers the request whose conjunct was false.
+    expectAggregateRed(rewriteAggregatePairing((cond, block) => block.replace(cond, "if ((!view || view.sheetId !== sheetId) && req.query.verbose !== '1') {")
+      + `\n        ${AGGREGATE_ECHO}`), 'A2 a trailing conjunct, then an echo')
+    // The same through a bound boolean, and with a disjunct on an equality.
+    expectAggregateRed(rewriteAggregatePairing((cond, block) => "const elsewhere = !view || view.sheetId !== sheetId\n        "
+      + block.replace(cond, "if (elsewhere && req.query.verbose !== '1') {") + `\n        ${AGGREGATE_ECHO}`), 'a bound boolean with a trailing conjunct')
+    expectAggregateRed(rewriteAggregatePairing((cond, block) => block.replace(cond, "if (!view || (view.sheetId !== sheetId && req.query.verbose !== '1')) {")
+      + `\n        ${AGGREGATE_ECHO}`), 'a conjunct inside the disjunct')
+  })
+
+  it('the binding probes verbatim: a first test in a forEach callback or a for-of body hides nothing, and an existing row rewritten into a binding reds', () => {
+    const tested = "return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${req.params.viewId} does not belong to sheet ${target}` } })"
+    // C1 / C2: the first `if` testing the name only logs, inside a callback / a loop body; the refusal after them echoes.
+    plantedSite(plant(`    const elsewhere = String(owner.sheet_id) !== target\n    found.rows.forEach((r: any) => { if (elsewhere) console.warn('row', r.id) })\n    if (elsewhere) ${tested}`), true, 'C1 first tested inside a forEach callback')
+    plantedSite(plant(`    const elsewhere = String(owner.sheet_id) !== target\n    for (const r of found.rows) { if (elsewhere) console.warn('row', r.id) }\n    if (elsewhere) ${tested}`), true, 'C2 first tested inside a for-of body')
+    // C4: view-aggregate's pairing bound to a name, first tested inside a dry-run block that answers values-free,
+    // then refused with both ids — the key (the comparison as written) is unchanged, so the row itself must red.
+    expectAggregateRed(rewriteAggregatePairing(() => 'const elsewhere = !view || view.sheetId !== sheetId\n'
+      + "        if (req.query.probe === '1') {\n"
+      + "          if (elsewhere) console.warn('[view-aggregate] probe: view elsewhere')\n"
+      + '          return res.json({ ok: true, data: { probe: true } })\n'
+      + '        }\n'
+      + '        if (elsewhere) {\n'
+      + "          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })\n"
+      + '        }'), 'C4 an existing row, first tested in a dry-run block')
   })
 })
