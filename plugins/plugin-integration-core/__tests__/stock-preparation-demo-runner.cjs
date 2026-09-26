@@ -578,8 +578,8 @@ async function main() {
   say(`     ${DIM("mintStockPreparationBatchIdentity")})。按部署声明 opt-in:readPlan.batchIdentity = { mode: 'material_create_hour' },`)
   say(`     ${DIM('缺省仍是今天的内容修订版本号做法(source_revision),逐字节不变;声明后源缺 Createtime 会显式降级,不会静默换算法。')}`)
   say(`  2. ${BOLD('多人审批 hand-off 链到备料')}:平台有审批运行时,但 owner 裁决先上轻量版(应用内游标 + 群通知,#5442),不绑定完整审批图 —— 未接线到备料流。属净新,未接线。`)
-  say(`  3. ${BOLD('钉钉个人待办推送')}:2026-09-02 owner 裁决${BOLD('不做')}(A 工作通知冒充待办 / B 单向待办镜像两案均推后);第 3 步「通知下一步」现状 = 应用内游标 + 钉钉${BOLD('群')}webhook(#5442),这个在范围内 —— 不是个人待办。`)
-  say(`  ${DIM('若观众追问:第 1 条已发货但默认关闭,需部署方显式开启;第 2 条未接线,是范围内的下一步;第 3 条是不做,不是路线图,不要摆成"即将上"。')}`)
+  say(`  3. ${BOLD('钉钉个人待办推送')}:owner 2026-09-02 裁决本轮${BOLD('不做')}(A 工作通知冒充待办 / B 单向待办镜像两案均推后);备料接力(#5442)现状仍只有钉钉${BOLD('群')}webhook,不是个人待办;平台侧审批待办单向镜像(#5772)已合入但${BOLD('默认关闭')}、只覆盖审批席位、owner 前置(其设计文档 §8)未满足,不适用于备料。`)
+  say(`  ${DIM('若观众追问:第 1 条已发货但默认关闭,需部署方显式开启;第 2 条未接线,是范围内的下一步;第 3 条本轮不做,不要摆成在跑。')}`)
 
   // ── values-free self-check over the printed export projection ─────────────────
   const FORBIDDEN = [
