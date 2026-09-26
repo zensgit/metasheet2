@@ -140,6 +140,17 @@ export type AutomationRuleValidationCode =
   | 'RECIPIENT_NOT_AUTHORIZED'
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
+  | typeof DELETED_TRIGGER_SELF_MUTATION_CODE
+
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
+ * update/delete/lock of the trigger record". Under a `record.deleted` trigger the trigger record no longer
+ * exists, so such an action can only ever be a 0-row no-op (and, before the executor fix, a self-chaining
+ * ghost event: one user delete ⇒ three execution logs). Stable code for clients; ONE fixed, values-free
+ * Chinese message (the editor shows the same sentence as its inline hint).
+ */
+export const DELETED_TRIGGER_SELF_MUTATION_CODE = 'DELETED_TRIGGER_SELF_MUTATION'
+export const DELETED_TRIGGER_SELF_MUTATION_MESSAGE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
 
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
@@ -826,6 +837,49 @@ function validateCrossBaseWriteActionConfigs(
   return null
 }
 
+const RECORD_DELETED_TRIGGER = 'record.deleted'
+
+/**
+ * The record-mutating actions whose SAME-BASE form addresses the TRIGGER record (automation-executor.ts:
+ * `effectiveRecordId = context.recordId` unless the cross-base gate fires). `update_field` is the v0 alias
+ * of `update_record` (normalizeLegacyActionPair) and is listed so a raw legacy payload cannot slip past.
+ */
+const TRIGGER_RECORD_MUTATING_ACTION_TYPES = new Set<string>(['update_record', 'delete_record', 'lock_record', 'update_field'])
+
+/**
+ * Does this action resolve to the TRIGGER record at run time? Mirrors the executor's addressing: only a
+ * COMPLETE explicit cross-base triple (`targetBaseId` + `targetSheetId` + `targetRecordId`) retargets the
+ * write; anything less falls back to `context.recordId`. (An INCOMPLETE triple is refused earlier by
+ * validateCrossBaseWriteConfig with its own, more specific message.)
+ */
+function actionTargetsTriggerRecord(actionType: string, config: Record<string, unknown> | null | undefined): boolean {
+  if (!TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(actionType)) return false
+  const text = (key: string): string => (typeof config?.[key] === 'string' ? (config[key] as string).trim() : '')
+  return !(text('targetBaseId') && text('targetSheetId') && text('targetRecordId'))
+}
+
+/**
+ * 客户反馈 2026-09-24 #3 — refuse "record.deleted + same-base update_record / delete_record / lock_record of
+ * the trigger record" at SAVE, top level and nested (condition_branch / parallel_branch sub-actions —
+ * `nestedActions` is the collectNestedAutomationActions flattening). Returns the fixed message or null.
+ * Deliberately NOT applied to a disable-only / name-only / conditions-only edit or to deleteRule: an
+ * operator must always be able to turn such a rule off (setRuleEnabled routes through updateRule) — see
+ * the updateRule gate for the exact input shapes that run this check.
+ */
+export function validateDeletedTriggerSelfMutation(
+  triggerType: string,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  nestedActions: AutomationAction[] | null | undefined,
+): string | null {
+  if (triggerType !== RECORD_DELETED_TRIGGER) return null
+  if (actionTargetsTriggerRecord(actionType, actionConfig)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  for (const action of nestedActions ?? []) {
+    if (actionTargetsTriggerRecord(action.type, action.config)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  }
+  return null
+}
+
 function validateActionObject(action: unknown, path: string): AutomationAction {
   if (!isRecord(action)) {
     throw new AutomationRuleValidationError(`${path} must be an object`)
@@ -1483,6 +1537,16 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // 客户反馈 2026-09-24 #3: a record.deleted rule cannot update/delete/lock its own (already gone) trigger record.
+    const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+      input.triggerType,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+    )
+    if (deletedTriggerSelfMutationError) {
+      throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+    }
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
@@ -1925,6 +1989,53 @@ export class AutomationService {
         recipientPair.actionConfig,
         approvalActions,
       )
+    }
+
+    // 客户反馈 2026-09-24 #3 (裁定 PR #6074): refuse the RESULTING shape "record.deleted + same-base
+    // update/delete/lock of the trigger record" whenever the edit touches the shape — trigger type, action
+    // type/config/list, execution mode — or RE-ENABLES the rule (F9c precedent: `enabled` is not a bypass
+    // for arming a rule that can only ever no-op). Deliberately NOT gated like the T1-2/T1-3 blocks above
+    // (every write shape): a DISABLE-only `{ enabled: false }`, a rename, a conditions-only or a
+    // triggerConfig-only edit of an EXISTING such rule must still succeed — `setRuleEnabled` routes through
+    // this method, and the customer's way out of the self-chain is exactly "turn it off" (or deleteRule,
+    // which validates nothing). Existing rules stay loadable; they cannot be saved forward with this shape.
+    if (
+      input.triggerType !== undefined
+      || input.actionType !== undefined
+      || input.actionConfig !== undefined
+      || input.actions !== undefined
+      || input.executionMode !== undefined
+      || input.enabled === true
+    ) {
+      // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
+      // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
+      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForDeletedTrigger
+      if (!existingForDeletedTrigger || existingForDeletedTrigger.sheet_id !== sheetId) return null
+      const nextTriggerType = input.triggerType ?? existingForDeletedTrigger.trigger_type
+      const nextPair = normalizeLegacyActionPair(
+        input.actionType ?? existingForDeletedTrigger.action_type,
+        (input.actionConfig ?? existingForDeletedTrigger.action_config ?? null) as Record<string, unknown> | null,
+      )
+      const nextActions = input.actions !== undefined ? input.actions : existingForDeletedTrigger.actions ?? null
+      const nextExecutionMode = input.executionMode !== undefined
+        ? normalizeExecutionMode(input.executionMode)
+        : existingForDeletedTrigger.execution_mode ?? null
+      const nestedForDeletedTrigger = collectNestedAutomationActions(
+        nextPair.actionType,
+        (nextPair.actionConfig ?? {}) as Record<string, unknown>,
+        nextActions,
+        nextExecutionMode,
+      )
+      const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+        nextTriggerType,
+        nextPair.actionType,
+        nextPair.actionConfig,
+        nestedForDeletedTrigger,
+      )
+      if (deletedTriggerSelfMutationError) {
+        throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
     }
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)

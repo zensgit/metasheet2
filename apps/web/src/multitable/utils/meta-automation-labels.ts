@@ -149,6 +149,7 @@ export type AutomationLabelKey =
   | 'actionConfig.deleteRecordAck'
   | 'actionConfig.deleteRecordWarningCrossBase'
   | 'actionConfig.deleteRecordAckCrossBase'
+  | 'actionConfig.deletedTriggerSelfMutation'
   | 'actionConfig.crossBaseTargetWarning'
   | 'actionConfig.crossBaseTargetIncomplete'
   | 'actionConfig.crossBaseCreateTargetWarning'
@@ -924,6 +925,14 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.deleteRecordAckCrossBase': {
     en: 'I understand this permanently deletes the target record in another base.',
     zh: '我确认此动作会永久删除另一个 base 中的目标记录。',
+  },
+  // 客户反馈 2026-09-24 #3 (裁定 PR #6074): under a `record.deleted` trigger the trigger record is already gone,
+  // so a same-base update/delete/lock of it can only no-op (and used to self-chain into three execution logs).
+  // The zh sentence is byte-identical to the backend refusal message (automation-service.ts
+  // DELETED_TRIGGER_SELF_MUTATION_MESSAGE) so the inline hint and the 400 read the same.
+  'actionConfig.deletedTriggerSelfMutation': {
+    en: 'When a record is deleted its trigger record no longer exists, so it cannot be updated, deleted or locked. Pick another action, or another trigger.',
+    zh: '记录删除时触发记录已不存在，不能再修改/删除/锁定它。请改用其他动作，或换一个触发条件。',
   },
   'actionConfig.crossBaseTargetWarning': {
     en: 'This action targets a record in ANOTHER base, not the trigger record in this table. The target below is kept exactly as loaded — this editor cannot change it.',

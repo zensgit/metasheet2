@@ -1642,6 +1642,30 @@ export type CrossBaseWriteGate =
   | { crossBase: true; ok: true }
   | { crossBase: true; ok: false; error: string }
 
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — a SAME-BASE record-mutating action whose target is the TRIGGER
+ * record, and that record is already gone (the canonical case: a `record.deleted` rule whose action is
+ * `delete_record` on the same table — the trigger record cannot exist any more by definition).
+ *
+ * Before this fix the 0-row DELETE was reported as `success` AND still emitted a fresh
+ * `multitable.record.deleted` (new `_eventId`, depth+1) — which re-triggered the same rule until the depth
+ * guard (MAX_AUTOMATION_DEPTH = 3) dropped it: ONE user delete ⇒ THREE execution logs, and up to four
+ * webhook deliveries (the webhook bridge has no depth guard). Deleting nothing must publish nothing.
+ *
+ * Thrown INSIDE the write transaction so everything taken so far rolls back — including the #4196 Class-A
+ * claim (a committed claim for a no-op would turn a legitimate retry into a false duplicate) — and caught
+ * by the action method, which converts it into a values-free `skipped` step. Control flow, never a failure.
+ */
+export class SameBaseTargetRecordMissingSignal extends Error {
+  constructor(readonly actionType: AutomationActionType) {
+    super(`${actionType}: same-base target (trigger) record no longer exists`)
+    this.name = 'SameBaseTargetRecordMissingSignal'
+  }
+}
+
+/** Values-free reason carried by a step skipped through {@link SameBaseTargetRecordMissingSignal}. */
+export const TARGET_RECORD_MISSING_SKIP_REASON = 'target_record_missing'
+
 // ── Executor class ────────────────────────────────────────────────────────
 
 export class AutomationExecutor {
@@ -3103,6 +3127,9 @@ export class AutomationExecutor {
       // `poolManager.get().transaction(...)` — is re-verified for THIS slice by the atomicity golden,
       // not assumed from D-1). A failed revision INSERT rolls the UPDATE back too — no half-write (an
       // updated `meta_records` row with no matching `meta_record_revisions` row) is possible.
+      // 客户反馈 2026-09-24 #3: did the UPDATE touch a row? Decided INSIDE the transaction (RETURNING), read
+      // after it: a 0-row update publishes NO chain event and NO real-time invalidation (see below).
+      let recordUpdated = false
       const txResult = await this.withTransaction(effectiveSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the mutation+revision below. A
         // duplicate (retry/replay) short-circuits: return the already-applied success and skip the UPDATE
@@ -3190,18 +3217,37 @@ export class AutomationExecutor {
             snapshot: normalizeJson(updatedRow.data),
           })
         }
+        recordUpdated = updatedRow !== undefined
         // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
         // UPDATE + revision (any throw above rolls it back; the duplicate-claim early-return above skips it,
-        // exactly as it skips the legacy emit). Unconditional on `updatedRow` to mirror the legacy emit
-        // 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op (legacy emit below fires).
-        await enqueueRecordEventIfDurable(
-          { query, isTransaction: true } as unknown as TransactionalQueryable,
-          'multitable.record.updated',
-          chainEventPayload,
-        )
+        // exactly as it skips the legacy emit). Flag OFF ⇒ no-op (legacy emit below fires).
+        // 客户反馈 2026-09-24 #3: GATED on `updatedRow` (was "unconditional … to mirror the legacy emit").
+        // A 0-row same-base UPDATE (trigger record already gone — e.g. a `record.deleted` rule) changed
+        // nothing, so it must not manufacture a `multitable.record.updated` for downstream rules/webhooks:
+        // that ghost event re-fires record.updated rules on a record that does not exist, depth by depth.
+        // The step's reported status is unchanged (same-base 0-row leniency, see the comment above) — the
+        // defect was the emit, and `output.noop` now says so in the execution log.
+        if (updatedRow) {
+          await enqueueRecordEventIfDurable(
+            { query, isTransaction: true } as unknown as TransactionalQueryable,
+            'multitable.record.updated',
+            chainEventPayload,
+          )
+        }
         return null
       })
       if (txResult) return txResult
+
+      if (!recordUpdated) {
+        // 客户反馈 2026-09-24 #3: nothing changed ⇒ no legacy emit, no real-time invalidation. Same
+        // leniency on the reported status as before (pinned by the executor unit suites); the log carries a
+        // values-free marker instead of a bare success.
+        return {
+          actionType: 'update_record',
+          status: 'success',
+          output: { updatedFields: Object.keys(fields), noop: true, reason: TARGET_RECORD_MISSING_SKIP_REASON },
+        }
+      }
 
       // P1#2c REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the
       // same-txn enqueue above is the delivery path — keep-both would double-deliver the webhook sink).
@@ -3233,11 +3279,12 @@ export class AutomationExecutor {
     // shared per-target-base quota bucket).
     const targetSheetId = (config.targetSheetId as string) || context.sheetId
     const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
+    // Hoisted out of the try so the catch below can name the addressed record in the `skipped` result.
+    let effectiveSheetId = context.sheetId
+    let effectiveRecordId = context.recordId
 
     try {
       const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
-      let effectiveSheetId = context.sheetId
-      let effectiveRecordId = context.recordId
       if (gate.crossBase) {
         if (gate.ok === false) {
           return { actionType: 'delete_record', status: 'failed', error: gate.error }
@@ -3311,21 +3358,28 @@ export class AutomationExecutor {
           | undefined
         // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
         // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
-        // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
-        // reported as success) to avoid any behavior regression vs the other same-base sinks.
-        if (gate.crossBase && !lockRow) {
-          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
-          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
-          // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
-          // ledger exists to prevent). The method's outer catch reports the identical failed result.
-          // Consistent with the lock-conflict check just below, which already throws to roll back.
-          throw new Error(
-            `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          )
+        // no-op success).
+        // 客户反馈 2026-09-24 #3 (裁定 PR #6074): a SAME-BASE delete of a missing trigger record used to keep a
+        // "0-row DELETE reported as success" leniency — and still emitted a fresh `multitable.record.deleted`
+        // (new `_eventId`, depth+1), so a `record.deleted → delete_record` rule re-triggered itself until the
+        // depth guard cut it: ONE user delete ⇒ THREE execution logs. Now: no row ⇒ nothing to delete ⇒ the
+        // step is `skipped` (values-free reason) and NOTHING is published — no outbox row, no legacy emit, no
+        // real-time invalidation, no revision. The signal THROWS for the same reason the cross-base branch
+        // does: the transaction, and the Class-A claim taken above, roll back (no claim for a no-op).
+        if (!lockRow) {
+          if (gate.crossBase) {
+            // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+            // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+            // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
+            // ledger exists to prevent). The method's outer catch reports the identical failed result.
+            // Consistent with the lock-conflict check just below, which already throws to roll back.
+            throw new Error(
+              `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+            )
+          }
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
         }
-        if (lockRow) {
-          ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
-        }
+        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
 
         // D-2 (side-door delete recoverability, #4004; default OFF ⇒ every `sideDoorTrash` branch below is
         // dead and this method behaves byte-identically to D-1, §1.9). §1.2 anchor: ONE pre-generated uuid
@@ -3344,9 +3398,9 @@ export class AutomationExecutor {
         // §1.3: capture the INBOUND edges BEFORE the links DELETE below destroys both directions. No-op
         // unless BOTH the D-2 flag and the capture flag are on (§1.5 nesting). Over-cap ⇒
         // TombstoneCaptureCapExceededError propagates out of withTransaction to this method's catch ⇒ step
-        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). Skipped when
-        // there is no row: a same-base delete of a missing record must not anchor tombstones to a delete
-        // revision that will never be written.
+        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). (`lockRow` is
+        // always present from here on — the no-row case threw above; the guard is kept so the D-2 block
+        // reads as written and audited.)
         if (lockRow) {
           await captureSideDoorInboundTombstones(query, {
             sheetId: effectiveSheetId,
@@ -3414,15 +3468,24 @@ export class AutomationExecutor {
         // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
         // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
         // revision-emitted: automation delete_record, D-1 — recordRecordRevision(action:'delete') @2365.
-        await query(
+        const deleteRes = await query(
           'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [effectiveRecordId, effectiveSheetId],
         )
+        // 客户反馈 2026-09-24 #3 belt-and-braces: the row was locked FOR UPDATE above, so inside a real
+        // transaction this DELETE always removes it. On the autocommit fallback (no `deps.transaction`) a
+        // concurrent delete can land between the SELECT and this statement — a driver-reported 0 rows then
+        // means nothing was deleted, and nothing may be published (the throw also drops the revision written
+        // above when a real transaction is present). A driver that reports no rowCount is trusted.
+        if (typeof deleteRes.rowCount === 'number' && deleteRes.rowCount === 0) {
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
+        }
 
         // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
         // link cleanup + revision + DELETE (any throw above rolls it back; the duplicate-claim early-return
-        // above skips it, exactly as it skips the legacy emit). Unconditional on `lockRow` to mirror the
-        // legacy emit 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op.
+        // above skips it, exactly as it skips the legacy emit). Reached ONLY when a row was actually deleted
+        // (客户反馈 2026-09-24 #3 — the former "unconditional on lockRow" 0-row emit was the self-chain).
+        // Flag OFF ⇒ no-op.
         await enqueueRecordEventIfDurable(
           { query, isTransaction: true } as unknown as TransactionalQueryable,
           'multitable.record.deleted',
@@ -3443,7 +3506,30 @@ export class AutomationExecutor {
 
       return { actionType: 'delete_record', status: 'success', output: { recordId: effectiveRecordId, sheetId: effectiveSheetId } }
     } catch (err) {
+      // 客户反馈 2026-09-24 #3: the transaction rolled back with nothing deleted and nothing published —
+      // report `skipped`, not `failed` (a missing trigger record is the expected state under `record.deleted`).
+      if (err instanceof SameBaseTargetRecordMissingSignal) {
+        return this.targetRecordMissingSkippedResult('delete_record', effectiveSheetId, effectiveRecordId)
+      }
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * 客户反馈 2026-09-24 #3: the step result for a same-base record action whose target — the trigger record —
+   * no longer exists. `skipped` (so the execution log says what happened and a whole-rule run of only such
+   * steps reads `skipped`, not `success`), with a values-free reason and the ids the success path already
+   * reports. NO mutation, NO revision, NO event/outbox row, NO real-time fan-out ran.
+   */
+  private targetRecordMissingSkippedResult(
+    actionType: AutomationActionType,
+    sheetId: string,
+    recordId: string,
+  ): AutomationStepResult {
+    return {
+      actionType,
+      status: 'skipped',
+      output: { recordId, sheetId, reason: TARGET_RECORD_MISSING_SKIP_REASON },
     }
   }
 
