@@ -11,7 +11,7 @@ import {
 describe('task-ids', () => {
   describe('TASK_ID_PREFIXES', () => {
     it('is the closed three-kind set', () => {
-      expect(TASK_ID_PREFIXES).toEqual({ task: 'tsk', list: 'tlst', comment: 'tcmt' })
+      expect(TASK_ID_PREFIXES).toEqual({ task: 'tsk', list: 'tlst', comment: 'tcmt', event: 'tev' })
     })
   })
 
@@ -26,6 +26,12 @@ describe('task-ids', () => {
 
     it('list kind produces a tlst_-prefixed id matching the format', () => {
       expect(generateTaskDomainId('list', fixedRandom)).toMatch(/^tlst_[A-Za-z0-9]+$/)
+    })
+
+    it('event kind produces a tev_-prefixed id that passes the four-conjunct CHECK', () => {
+      const id = generateTaskDomainId('event', fixedRandom)
+      expect(id).toMatch(/^tev_[A-Za-z0-9]+$/)
+      expect(isValidTaskDomainId(id)).toBe(true)
     })
 
     it('comment kind produces a tcmt_-prefixed id matching the format', () => {
