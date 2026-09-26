@@ -11,6 +11,12 @@ import {
   type EmployeeQuickActionIcons,
   resolveEmployeeQuickActionIcons,
 } from './attendanceEmployeeWorkspaceCommonIcons'
+import {
+  geoFenceClearedMessage,
+  geoFenceIncompleteMessage,
+  resolveGeoFenceSave,
+  type GeoFencePayload,
+} from './attendanceGeoFenceSave'
 
 type Translate = (en: string, zh: string) => string
 type SetStatusFn = (message: string, kind?: 'info' | 'error') => void
@@ -183,6 +189,8 @@ export function useAttendanceAdminConfig({
   tr,
 }: UseAttendanceAdminConfigOptions) {
   const settingsLoading = ref(false)
+  const geoFenceSaveError = ref('')
+  const persistedGeoFence = ref<GeoFencePayload | null>(null)
   const holidaySyncLoading = ref(false)
   const holidaySyncLastRun = ref<HolidaySyncLastRun | null>(null)
   const ruleLoading = ref(false)
@@ -282,6 +290,12 @@ export function useAttendanceAdminConfig({
     settingsForm.geoFenceLat = settings.geoFence?.lat?.toString() ?? ''
     settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
     settingsForm.geoFenceRadius = settings.geoFence?.radiusMeters?.toString() ?? ''
+    const rememberedFence = resolveGeoFenceSave({
+      lat: settingsForm.geoFenceLat,
+      lng: settingsForm.geoFenceLng,
+      radius: settingsForm.geoFenceRadius,
+    })
+    persistedGeoFence.value = rememberedFence.ok ? rememberedFence.geoFence : null
     settingsForm.minPunchIntervalMinutes = settings.minPunchIntervalMinutes ?? 1
     const icons = resolveEmployeeQuickActionIcons(settings.employeeQuickActionIcons)
     settingsForm.employeeQuickActionIcons.makeup = icons.makeup
@@ -345,22 +359,25 @@ export function useAttendanceAdminConfig({
   }
 
   async function saveSettings() {
+    const geoFenceDecision = resolveGeoFenceSave({
+      lat: settingsForm.geoFenceLat,
+      lng: settingsForm.geoFenceLng,
+      radius: settingsForm.geoFenceRadius,
+    })
+    if (!geoFenceDecision.ok) {
+      geoFenceSaveError.value = geoFenceIncompleteMessage(tr)
+      setStatus(geoFenceSaveError.value, 'error')
+      return
+    }
+    geoFenceSaveError.value = ''
+    const clearingExistingFence = geoFenceDecision.explicitClear && Boolean(persistedGeoFence.value)
+    const geoFence = geoFenceDecision.geoFence
     settingsLoading.value = true
     try {
       const ipAllowlist = settingsForm.ipAllowlist
         .split(/[\n,]/)
         .map((item) => item.trim())
         .filter(Boolean)
-
-      const latValue = settingsForm.geoFenceLat.trim()
-      const lngValue = settingsForm.geoFenceLng.trim()
-      const radiusValue = settingsForm.geoFenceRadius.trim()
-      const lat = latValue.length > 0 ? Number(latValue) : Number.NaN
-      const lng = lngValue.length > 0 ? Number(lngValue) : Number.NaN
-      const radius = radiusValue.length > 0 ? Number(radiusValue) : Number.NaN
-      const geoFence = Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radius)
-        ? { lat, lng, radiusMeters: radius }
-        : null
 
       const overtimeSourceValue = settingsForm.holidayOvertimeSource
       const overtimeSource = overtimeSourceValue === 'approval' || overtimeSourceValue === 'clock' || overtimeSourceValue === 'both'
@@ -459,7 +476,7 @@ export function useAttendanceAdminConfig({
       }
       adminForbidden.value = false
       applySettingsToForm((data.data || payload) as AttendanceSettings)
-      setStatus(tr('Settings updated.', '设置已更新。'))
+      setStatus(clearingExistingFence ? geoFenceClearedMessage(tr) : tr('Settings updated.', '设置已更新。'))
     } catch (error: unknown) {
       setStatusFromError(error, tr('Failed to save settings', '保存设置失败'), 'save-settings')
     } finally {
@@ -614,6 +631,7 @@ export function useAttendanceAdminConfig({
     ruleLoading,
     saveRule,
     saveSettings,
+    geoFenceSaveError,
     settingsForm,
     settingsLoading,
     syncHolidays,

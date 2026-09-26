@@ -50,6 +50,9 @@
           :placeholder="tr('One per line or comma separated', '每行一个或逗号分隔')"
         />
       </label>
+      <p class="attendance__field-hint" data-attendance-geo-fence-hint>
+        {{ tr('Latitude, longitude, and radius save together. Leave all three empty to turn the fence off. A partial fill is rejected and does not clear an existing fence.', '纬度、经度和半径需一起保存。三项都留空才会关闭围栏。只填一部分会被拒绝，且不会清掉已有围栏。') }}
+      </p>
       <label class="attendance__field" for="attendance-geo-lat">
         <span>{{ tr('Geo fence lat', '地理围栏纬度') }}</span>
         <input id="attendance-geo-lat" v-model="settingsForm.geoFenceLat" name="geoFenceLat" type="number" step="0.000001" />
