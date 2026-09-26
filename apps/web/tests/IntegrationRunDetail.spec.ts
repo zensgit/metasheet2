@@ -1168,12 +1168,20 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       return Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''))
     }
 
-    async function setWorkspace(host: HTMLDivElement, value: string): Promise<void> {
-      const input = host.querySelector('[data-testid="workspace-id"]') as HTMLInputElement
+    async function setScopeInput(host: HTMLDivElement, testId: 'tenant-id' | 'workspace-id', value: string): Promise<void> {
+      const input = host.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement
       expect(input).not.toBeNull()
       input.value = value
       input.dispatchEvent(new Event('input', { bubbles: true }))
       await flushUi()
+    }
+
+    async function setWorkspace(host: HTMLDivElement, value: string): Promise<void> {
+      await setScopeInput(host, 'workspace-id', value)
+    }
+
+    async function setTenant(host: HTMLDivElement, value: string): Promise<void> {
+      await setScopeInput(host, 'tenant-id', value)
     }
 
     async function openDetailInWorkspace(host: HTMLDivElement, workspace: string): Promise<void> {
@@ -1242,6 +1250,44 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       await flushUi()
       expect(detailCalls.length).toBe(detailCallsBefore + 1)
       expect(queryOf(detailCalls[detailCalls.length - 1].url)).toEqual({ tenantId: 'default', workspaceId: OTHER_WORKSPACE })
+    })
+
+    // f-prov200 review w1b fix2: the TENANT half of the same pin. Every case above leaves the
+    // tenant input at 'default', so a 加载更多 that hard-coded 'default', or froze the tenant of the
+    // first page while still reading the workspace at click time, looked exactly like a correct
+    // one. Here the tenant is changed after page one — padded, so the click must go through
+    // currentScope()'s trim rather than the raw input — and the server answers that tenant's 404:
+    // the client shows the failure, keeps the events it has and appends nothing.
+    it('加载更多 evaluates the TENANT at click time too (same currentScope() as 刷新); a tenant changed after page one gets that tenant\'s 404, visibly', async () => {
+      const OTHER_TENANT = 'tenant_other'
+      const fake = pagedProvenance(201, WORKSPACE)
+      installWorkspaceMocks((url) => {
+        if (queryOf(url).tenantId === OTHER_TENANT) {
+          return errorResponse(404, 'RUN_NOT_FOUND', 'pipeline run not found')
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetailInWorkspace(host, WORKSPACE)
+      await expandProvenance(host)
+      expect(queryOf(provenanceCalls[0].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+
+      await setTenant(host, `  ${OTHER_TENANT}  `)
+      await clickLoadMore(host)
+      const cursorRequests = provenanceCalls.filter((call) => hasCursor(call.url))
+      expect(cursorRequests).toHaveLength(1)
+      expect(queryOf(cursorRequests[0].url)).toEqual({ tenantId: OTHER_TENANT, workspaceId: WORKSPACE, cursor: '200' })
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).not.toBeNull()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+
+      // One source: a 刷新 issued at the same moment reads the detail under that same tenant.
+      const detailCallsBefore = detailCalls.length
+      ;(host.querySelector('[data-testid="refresh-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(detailCalls.length).toBe(detailCallsBefore + 1)
+      expect(queryOf(detailCalls[detailCalls.length - 1].url)).toEqual({ tenantId: OTHER_TENANT, workspaceId: WORKSPACE })
     })
   })
 })
