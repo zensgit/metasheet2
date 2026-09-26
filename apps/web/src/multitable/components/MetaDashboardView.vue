@@ -2,6 +2,14 @@
   <div class="meta-dashboard">
     <!-- Dashboard selector / header -->
     <div class="meta-dashboard__header">
+      <!-- A2 (2026-09-25): the workbench had no way back to the grid once the dashboard was open
+           other than re-clicking the toolbar toggle. This is the first control in the header. -->
+      <button
+        class="meta-dashboard__btn meta-dashboard__btn--sm"
+        type="button"
+        data-action="back-to-table"
+        @click="$emit('close')"
+      >{{ viewRenderLabel('dashboard.backToTable', isZh) }}</button>
       <div class="meta-dashboard__selector">
         <template v-if="editingName">
           <input
@@ -547,6 +555,9 @@ const props = defineProps<{
   fields?: MetaField[]
   client?: MultitableApiClient
 }>()
+
+// A2 (2026-09-25): lets the parent workbench return to the grid view.
+defineEmits<{ close: [] }>()
 
 const loading = ref(false)
 const dashboards = ref<Dashboard[]>([])

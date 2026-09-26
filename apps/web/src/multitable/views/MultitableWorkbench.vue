@@ -48,7 +48,7 @@
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
       <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
       <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" :aria-pressed="showDashboardView" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
@@ -271,6 +271,7 @@
           :sheet-id="workbench.activeSheetId.value"
           :fields="scopedAllFields"
           :client="workbench.client"
+          @close="exitDashboard"
         />
         <MetaFormView
           v-else-if="activeViewType === 'form'"
@@ -3629,6 +3630,7 @@ async function onCreateView(input: {
     })
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     workbench.selectView(res.view.id)
+    exitDashboard()
     await grid.loadViewData(grid.page.value.offset)
   } catch (e: any) { showError(e.message ?? wb('toast.viewCreateFailed', isZh.value)) }
 }
@@ -3921,7 +3923,10 @@ async function onDeleteView(viewId: string) {
   try {
     await workbench.client.deleteView(viewId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
-    if (workbench.activeViewId.value === viewId) workbench.selectView(workbench.views.value[0]?.id ?? '')
+    if (workbench.activeViewId.value === viewId) {
+      workbench.selectView(workbench.views.value[0]?.id ?? '')
+      exitDashboard()
+    }
   } catch (e: any) { showError(e.message ?? wb('toast.viewDeleteFailed', isZh.value)) }
 }
 
@@ -4055,7 +4060,17 @@ async function loadBases() {
   } catch { /* silent */ }
 }
 
+// A2 (2026-09-25, 客户反馈 2026-09-24 #6, 裁定见 PR #6074): once the dashboard is open, none of the
+// sidebar navigation paths reset `showDashboardView` — there was no way back to the grid short of
+// re-clicking the toggle button itself. This one-line helper is called from every path below
+// (including the early-return "already active" branches, so re-clicking the current sheet/view
+// while the dashboard is open also returns to the grid instead of doing nothing).
+function exitDashboard() {
+  showDashboardView.value = false
+}
+
 async function onSelectBase(baseId: string) {
+  exitDashboard()
   if (baseId === workbench.activeBaseId.value) return
   if (!confirmDiscardContextChanges()) return
   const ok = await workbench.switchBase(baseId)
@@ -4078,6 +4093,7 @@ function rememberWorkbenchBaseOpen(baseId: string) {
 // user cancelled the discard-unsaved-changes confirm. Callers that depend on the switch (e.g. the
 // notification bell's click-to-locate) MUST honor a false return.
 function onSelectSheet(sheetId: string): boolean {
+  exitDashboard()
   if (sheetId === workbench.activeSheetId.value) return true
   if (!confirmDiscardContextChanges()) return false
   workbench.selectSheet(sheetId)
@@ -4089,6 +4105,10 @@ function onSelectSheet(sheetId: string): boolean {
 // switch is cancelled (unsaved-changes discard declined), do NOT locate — that would look the record
 // up in the wrong sheet and report not-found.
 async function onNotificationNavigate(payload: { sheetId: string; recordId: string }) {
+  // A2: a same-sheet locate skips onSelectSheet (and its own exitDashboard call) entirely, so this
+  // path needs its own reset — otherwise locating a record while the dashboard is open would leave
+  // the dashboard showing instead of surfacing the record.
+  exitDashboard()
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
     if (!onSelectSheet(payload.sheetId)) return
   }
@@ -4096,6 +4116,7 @@ async function onNotificationNavigate(payload: { sheetId: string; recordId: stri
 }
 
 function onSelectView(viewId: string) {
+  exitDashboard()
   if (viewId === workbench.activeViewId.value) return
   if (!confirmDiscardContextChanges()) return
   workbench.selectView(viewId)
@@ -5955,6 +5976,9 @@ defineExpose({
 .mt-workbench__mgr-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
 .mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
+/* A2 (2026-09-25): the toggle-dashboard button had a `--active` class bound but no matching rule —
+   it visually looked identical whether the dashboard was open or not. */
+.mt-workbench__mgr-btn--active { background: #ecf5ff; color: #409eff; border-color: #409eff; }
 .mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
