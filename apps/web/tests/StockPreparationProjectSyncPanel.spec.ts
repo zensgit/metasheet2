@@ -322,6 +322,78 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect((root.textContent || '')).not.toContain('失败')
   })
 
+  // ---- P-07: 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) —————————————————————————
+  // a dry-run failure names its ACTUAL cause instead of always printing the same "try again" line.
+  // The OLD, always-the-same sentence — asserted absent for the two classes it used to wrongly cover.
+  const OLD_GENERIC_PLAN_READ_FAILED_ZH = '没能连上取数,试算没有跑起来'
+
+  it('P-07: a CONNECTION_* dry-run refusal names the broken connection, not the generic retry line', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(500, '/dry-run', { code: 'CONNECTION_CANONICAL_UNAVAILABLE' }),
+      ),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('连接配置失效')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+    // The code stays visible in 技术详情 for whoever quotes it to an administrator.
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_READ_FAILED_CONNECTION')
+    expect(tech.textContent).toContain('CONNECTION_CANONICAL_UNAVAILABLE')
+  })
+
+  it('P-07: a TARGET_SHEET_FOREIGN_PROJECT refusal names the other project, not the generic retry line', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'TARGET_SHEET_FOREIGN_PROJECT' }),
+      ),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('其他项目的有效数据')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_READ_FAILED_FOREIGN_PROJECT')
+    expect(tech.textContent).toContain('TARGET_SHEET_FOREIGN_PROJECT')
+  })
+
+  it('P-07: a bare 403 on the plan is named as a permission refusal', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(403, '/dry-run', {})),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('没有从 PLM 拉取')
+  })
+
+  it('P-07: SOURCE_UNAVAILABLE keeps the original "try again shortly" sentence — this IS the transient case', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, '/dry-run', { code: 'SOURCE_UNAVAILABLE' })),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.textContent).toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+  })
+
+  it('P-07: an unrecognized dry-run failure asks the operator to screenshot the technical details', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(400, '/dry-run', { code: 'SOME_OTHER_CODE' })),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.textContent).toContain('截图')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+  })
+
   // ---- P-06: the partial-write headline tells the truth ------------------------------------
   it('P-06: a partial write says rows landed, counts what did not, and KEEPS the sheet link', async () => {
     const double = api({

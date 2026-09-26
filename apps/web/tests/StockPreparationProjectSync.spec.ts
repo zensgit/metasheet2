@@ -24,6 +24,7 @@ import {
   BATCH_ARCHIVE_DISABLED_CODE,
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   StockPreparationProjectSyncCallError,
+  classifyPlanReadFailureReason,
   classifyPlanStep,
   clampErrorCode,
   plannedCountsOf,
@@ -323,6 +324,64 @@ describe('項目接入 — the four-step import run', () => {
     expect(api.apply).not.toHaveBeenCalled()
   })
 
+  // 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) — A DRY-RUN FAILURE NAMES ITS ACTUAL CAUSE.
+  // These five specs are the "code → reason" half of the fix; StockPreparationProjectSyncPanel.spec.ts
+  // pins the "reason → rendered message" half.
+  it('G-3f: a CONNECTION_* refusal on the plan is its own reason, not the generic transient one', async () => {
+    const api = makeApi({
+      dryRun: vi.fn().mockRejectedValue(
+        // The real load path answers this at 500 (inferHttpStatus's default for the connection
+        // resolver's own error, which no instanceof/name check there claims) — status alone cannot
+        // tell this apart from a genuine server fault, which is exactly why the code is checked first.
+        new StockPreparationProjectSyncCallError(500, '/dry-run', { code: 'CONNECTION_CANONICAL_UNAVAILABLE' }),
+      ),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_FAILED_CONNECTION' })
+    expect(api.apply).not.toHaveBeenCalled()
+  })
+
+  it('G-3g: a 409 TARGET_SHEET_FOREIGN_PROJECT refusal on the plan is its own reason', async () => {
+    const api = makeApi({
+      dryRun: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'TARGET_SHEET_FOREIGN_PROJECT' }),
+      ),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_FAILED_FOREIGN_PROJECT' })
+    expect(api.apply).not.toHaveBeenCalled()
+  })
+
+  it('G-3h: a bare 403 on the plan is a permission refusal, not the generic transient reason', async () => {
+    const api = makeApi({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(403, '/dry-run', {})),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_NOT_PERMITTED' })
+  })
+
+  it('G-3i: SOURCE_UNAVAILABLE (503) keeps the original transient reason unchanged', async () => {
+    const api = makeApi({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, '/dry-run', { code: 'SOURCE_UNAVAILABLE' })),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_FAILED' })
+  })
+
+  it('G-3j: a raw network failure (no status, no code) also keeps the original transient reason', async () => {
+    const api = makeApi({ dryRun: vi.fn().mockRejectedValue(new TypeError('Failed to fetch')) })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_FAILED' })
+  })
+
+  it('G-3k: an unrecognized code/status is its own UNKNOWN reason, never guessed as transient', async () => {
+    const api = makeApi({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(400, '/dry-run', { code: 'SOME_OTHER_CODE' })),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'dry-run')).toMatchObject({ status: 'fail', reason: 'PLAN_READ_FAILED_UNKNOWN' })
+  })
+
   it('G-3: a malformed 2xx is its own failure, never a silent success', async () => {
     const api = makeApi({
       dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(200, '/dry-run', { malformed: true })),
@@ -459,6 +518,21 @@ describe('項目接入 — the pure helpers', () => {
     expect(clampErrorCode('connection failed for host=erp pwd=secret')).toBeNull()
     expect(clampErrorCode(42)).toBeNull()
     expect(clampErrorCode(undefined)).toBeNull()
+  })
+
+  it('classifyPlanReadFailureReason sorts a failed dry run by CODE first, then STATUS', () => {
+    // CODE wins even at a status (500) that would otherwise fall into the transient bucket — the
+    // connection resolver's own error surfaces there today (inferHttpStatus has no instanceof/name
+    // check for it), and that must not blur it into "server had a generic fault".
+    expect(classifyPlanReadFailureReason(500, 'CONNECTION_CANONICAL_UNAVAILABLE')).toBe('PLAN_READ_FAILED_CONNECTION')
+    expect(classifyPlanReadFailureReason(500, 'CONNECTION_LEGACY_UNAVAILABLE')).toBe('PLAN_READ_FAILED_CONNECTION')
+    expect(classifyPlanReadFailureReason(409, 'TARGET_SHEET_FOREIGN_PROJECT')).toBe('PLAN_READ_FAILED_FOREIGN_PROJECT')
+    expect(classifyPlanReadFailureReason(403, null)).toBe('PLAN_READ_NOT_PERMITTED')
+    expect(classifyPlanReadFailureReason(503, 'SOURCE_UNAVAILABLE')).toBe('PLAN_READ_FAILED')
+    expect(classifyPlanReadFailureReason(0, null)).toBe('PLAN_READ_FAILED') // raw network failure: no status, no code
+    expect(classifyPlanReadFailureReason(500, 'INTERNAL_ERROR')).toBe('PLAN_READ_FAILED') // generic 5xx
+    expect(classifyPlanReadFailureReason(400, 'SOME_OTHER_CODE')).toBe('PLAN_READ_FAILED_UNKNOWN')
+    expect(classifyPlanReadFailureReason(404, null)).toBe('PLAN_READ_FAILED_UNKNOWN')
   })
 
   it('summarizeProjectSync computes `imported` from the write step alone', () => {

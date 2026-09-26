@@ -69,7 +69,18 @@ export type StockPreparationProjectSyncReason =
   | 'PLAN_PROJECT_NOT_FOUND'
   | 'PLAN_LARGE_BOM_BOUNDED'
   | 'PLAN_NOT_APPLYABLE'
+  // 客户反馈 2026-09-24 #2 — a dry-run failure used to collapse into ONE reason regardless of what the
+  // server actually said, so 「数据来源的连接坏了」、「这张表被别的项目占了」 and 「服务暂时连不上」 all
+  // rendered the SAME sentence, 「没能连上取数,稍后再试一次」 — which is actionable for exactly the last
+  // of those three and a dead end (or a lie) for the other two. `classifyPlanReadFailureReason` below
+  // sorts a failed dry run into the outcome a person can actually act on differently; `PLAN_READ_FAILED`
+  // itself is KEPT, unchanged, as the transient bucket (`SOURCE_UNAVAILABLE`, a network failure, any
+  // 5xx) the original sentence was written for.
+  | 'PLAN_READ_FAILED_CONNECTION'
+  | 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  | 'PLAN_READ_NOT_PERMITTED'
   | 'PLAN_READ_FAILED'
+  | 'PLAN_READ_FAILED_UNKNOWN'
   | 'PLAN_MALFORMED_RESPONSE'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
@@ -466,6 +477,46 @@ export function writtenCountsOf(counts: Record<string, number> | undefined | nul
 }
 
 /**
+ * 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) — WHICH SENTENCE A FAILED DRY RUN GETS.
+ *
+ * Before this function existed, `classifyPlanStep`'s `!plan` branch always answered
+ * `PLAN_READ_FAILED`, so the panel printed the SAME 「没能连上取数,稍后再试一次」 whether the real cause
+ * was a dead connection, another project already sitting in the target sheet, a permission refusal,
+ * or the source genuinely being down — the last of those is the ONLY one retrying can fix, and it is
+ * what that sentence promises. This function reads nothing new: `classifyPlanStep`'s caller already
+ * carries a clamped, identifier-shaped error CODE (`clampErrorCode`) and an HTTP STATUS in `options`,
+ * and never a server message. Sorted by CODE first, because a `CONNECTION_*` or
+ * `TARGET_SHEET_FOREIGN_PROJECT` refusal is meaningful regardless of which HTTP status the load path
+ * happens to answer with today (`inferHttpStatus` in http-routes.cjs falls back to 500 for the
+ * connection-resolver's own error, which — read by status alone — would otherwise be
+ * indistinguishable from a genuine server fault).
+ *
+ *   `TARGET_SHEET_FOREIGN_PROJECT` (409, stock-preparation-table-actions.cjs) — the target sheet
+ *     already holds another project's active rows. Retrying never helps; an administrator has to
+ *     clear the old data or point the new project at a fresh sheet.
+ *   `CONNECTION_*` (connection-resolver.cjs) — the binding's own connection cannot be resolved
+ *     (deleted, not authorized, or no owner bound). Retrying never helps either.
+ *   `SOURCE_UNAVAILABLE`, no HTTP status at all (a raw network failure never reaches
+ *     `StockPreparationProjectSyncCallError`, so `status` is 0), or ANY 5xx — the transient case the
+ *     original sentence was written for. Kept as `PLAN_READ_FAILED`, unchanged.
+ *   403 — this caller specifically is refused (checked AFTER the two code-specific cases above, since
+ *     a `CONNECTION_*` refusal can itself surface at a non-403 status and must not be re-classified
+ *     as a permission refusal just because some OTHER caller's 403 looks the same on the wire).
+ *   anything else — genuinely unclassified. Says so plainly instead of guessing a cause that is not
+ *     there.
+ */
+export function classifyPlanReadFailureReason(
+  status: number,
+  errorCode: string | null,
+): 'PLAN_READ_FAILED_FOREIGN_PROJECT' | 'PLAN_READ_FAILED_CONNECTION' | 'PLAN_READ_FAILED' | 'PLAN_READ_NOT_PERMITTED' | 'PLAN_READ_FAILED_UNKNOWN' {
+  if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
+  if (errorCode === 'SOURCE_UNAVAILABLE' || status === 0 || status >= 500) return 'PLAN_READ_FAILED'
+  if (status === 403) return 'PLAN_READ_NOT_PERMITTED'
+  return 'PLAN_READ_FAILED_UNKNOWN'
+}
+
+/**
  * THE PLAN CLASSIFICATION — one function, so no caller can decide `held` means something else.
  *
  * The distinction that matters: `manual_confirm_required` is NOT a failure. The server issues a
@@ -482,9 +533,11 @@ export function classifyPlanStep(
     return result(index, 'dry-run', 'fail', 'PLAN_MALFORMED_RESPONSE', { status: options.status ?? 0 })
   }
   if (!plan) {
-    const detail: Record<string, string | number> = { status: options.status ?? 0 }
+    const status = options.status ?? 0
+    const detail: Record<string, string | number> = { status }
     if (options.errorCode) detail.code = options.errorCode
-    return result(index, 'dry-run', 'fail', 'PLAN_READ_FAILED', detail)
+    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null)
+    return result(index, 'dry-run', 'fail', reason, detail)
   }
   const status = clampToken(plan.status, STOCK_PREPARATION_DRY_RUN_STATUSES)
   const planned = plannedCountsOf(plan.counts)

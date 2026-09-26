@@ -1498,11 +1498,42 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '源数据里有拦路的问题。什么都没有改动,可以稍后再试一次。',
     enNext: 'Something in the source data is blocking it. Nothing was changed; you can try again later.',
   }),
+  /**
+   * 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) — THE FOUR ROWS BELOW, split out of what
+   * used to be a single always-the-same sentence. `classifyPlanReadFailureReason` in projectSync.ts
+   * is what decides WHICH of these five keys (this one plus the four below it) a failed dry run gets;
+   * this row itself stays the TRANSIENT bucket (`SOURCE_UNAVAILABLE`, a network failure, any 5xx) —
+   * the one case where 「稍后再试一次」 is actually true.
+   */
   PLAN_READ_FAILED: Object.freeze({
     zh: '没能连上取数,试算没有跑起来',
     en: 'Could not reach the source, so nothing was planned',
     zhNext: '稍后再试一次。什么都没有改动。',
     enNext: 'Try again shortly. Nothing was changed.',
+  }),
+  PLAN_READ_FAILED_CONNECTION: Object.freeze({
+    zh: '数据来源的连接配置失效(被删除、无权使用或未绑定属主)',
+    en: 'The data source’s connection is unusable (deleted, not authorized to use it, or has no owner bound)',
+    zhNext: '重试没用,请联系管理员在「数据来源与体检」处理。',
+    enNext: 'Retrying will not help — ask an administrator to fix it under "Data sources & health check".',
+  }),
+  PLAN_READ_FAILED_FOREIGN_PROJECT: Object.freeze({
+    zh: '这张备料表里已有其他项目的有效数据,按规定一张表只放一个项目',
+    en: 'This stock-preparation sheet already holds another project’s active data — by rule, one sheet holds exactly one project',
+    zhNext: '请联系管理员清理旧项目的数据,或为新项目准备新的备料表。',
+    enNext: 'Ask an administrator to clear the old project’s data, or prepare a new stock-preparation sheet for the new project.',
+  }),
+  PLAN_READ_NOT_PERMITTED: Object.freeze({
+    zh: '当前账号没有从 PLM 拉取这个项目数据的权限',
+    en: 'This account is not allowed to pull this project’s data from PLM',
+    zhNext: '请联系管理员补充「备料操作」权限,或换有权限的账号再试;重试本身不会自动获得权限。',
+    enNext: 'Ask an administrator to grant the stock-prep operate permission, or try again with an account that already has it — retrying alone will not grant it.',
+  }),
+  PLAN_READ_FAILED_UNKNOWN: Object.freeze({
+    zh: '没能连上取数,原因暂时无法判断',
+    en: 'Could not reach the source, and the cause could not be identified',
+    zhNext: '请把下面的技术详情截图发给管理员;什么都没有改动。',
+    enNext: 'Please screenshot the technical details below and send them to an administrator; nothing was changed.',
   }),
   PLAN_MALFORMED_RESPONSE: Object.freeze({
     zh: '服务器回了一个看不懂的答复',
