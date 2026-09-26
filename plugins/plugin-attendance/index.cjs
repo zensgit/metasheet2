@@ -19743,6 +19743,64 @@ function isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED, false)
 }
 
+// Admin honesty snapshot for the two env dual-gates (#5976 digest, #5981 annual accrual).
+// Read at call time. Not persisted — callers attach it beside settings `data`.
+// Each flag matches the reader that actually gates the feature:
+// - digest producer and annual-accrual env: parseBoolean (true / 1 / yes)
+// - scheduler process and delivery worker: exact literal 'true'
+//   (startAttendanceScheduler / resolveAttendanceNotificationDeliveryJob)
+// Channel credentials are not read here.
+const ATTENDANCE_REPORT_DIGEST_REQUIRED_ENV = Object.freeze([
+  'ATTENDANCE_REPORT_DIGEST_ENABLED',
+  'ATTENDANCE_SCHEDULER_ENABLED',
+  'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+])
+const ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_REQUIRED_ENV = Object.freeze([
+  'ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED',
+  'ATTENDANCE_SCHEDULER_ENABLED',
+])
+
+function isAttendanceSchedulerProcessEnabled() {
+  return process.env.ATTENDANCE_SCHEDULER_ENABLED === 'true'
+}
+
+function isAttendanceNotificationDeliveryWorkerEnabled() {
+  return process.env.ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED === 'true'
+}
+
+function buildAttendanceDualGateRuntimeStatus() {
+  const producerEnabled = isAttendanceReportDigestRuntimeEnabled()
+  const schedulerEnabled = isAttendanceSchedulerProcessEnabled()
+  const deliveryWorkerEnabled = isAttendanceNotificationDeliveryWorkerEnabled()
+  const accrualScheduledEnabled = isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled()
+  const digestOn = {
+    ATTENDANCE_REPORT_DIGEST_ENABLED: producerEnabled,
+    ATTENDANCE_SCHEDULER_ENABLED: schedulerEnabled,
+    ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: deliveryWorkerEnabled,
+  }
+  const annualOn = {
+    ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED: accrualScheduledEnabled,
+    ATTENDANCE_SCHEDULER_ENABLED: schedulerEnabled,
+  }
+  return {
+    reportDigest: {
+      producerEnabled,
+      schedulerEnabled,
+      deliveryWorkerEnabled,
+      live: producerEnabled && schedulerEnabled && deliveryWorkerEnabled,
+      requiredEnv: [...ATTENDANCE_REPORT_DIGEST_REQUIRED_ENV],
+      offEnv: ATTENDANCE_REPORT_DIGEST_REQUIRED_ENV.filter((name) => digestOn[name] !== true),
+    },
+    annualLeaveAccrualScheduled: {
+      accrualScheduledEnabled,
+      schedulerEnabled,
+      live: accrualScheduledEnabled && schedulerEnabled,
+      requiredEnv: [...ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_REQUIRED_ENV],
+      offEnv: ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_REQUIRED_ENV.filter((name) => annualOn[name] !== true),
+    },
+  }
+}
+
 // G4 org fan-out throttle. Not exposed as an org-configurable setting (unlike reportSync's
 // maxOrgsPerRun) — the S3 lock's FE scope (G7) is a single enabled switch only. 50 mirrors the
 // reportSync zod schema's real maxOrgsPerRun ceiling. Precision note: the shared resolver returns a
@@ -24860,6 +24918,7 @@ module.exports = {
     runAnnualLeaveAccrual,
     ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_TRIGGER_MAX_ORGS_PER_RUN,
     isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled,
+    buildAttendanceDualGateRuntimeStatus,
     resolveAnnualLeaveAccrualScheduledTriggerPeriod,
     isAnnualLeaveAccrualScheduledTriggerDue,
     loadAnnualLeaveAccrualLatestRealRunCreatedAt,
@@ -50300,7 +50359,7 @@ module.exports = {
       withPermission('attendance:admin', async (_req, res) => {
         try {
           const settings = await getSettings(db)
-          res.json({ ok: true, data: settings })
+          res.json({ ok: true, data: settings, runtimeGates: buildAttendanceDualGateRuntimeStatus() })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -50686,7 +50745,7 @@ module.exports = {
           emitEvent('attendance.settings.updated', {
             settings: saved,
           })
-          res.json({ ok: true, data: saved })
+          res.json({ ok: true, data: saved, runtimeGates: buildAttendanceDualGateRuntimeStatus() })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })

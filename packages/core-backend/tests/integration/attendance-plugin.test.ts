@@ -10815,8 +10815,28 @@ attendanceIntegrationDescribe(
         }
         // (1) full PUT → GET returns the complete latent shape — locks DEFAULT_SETTINGS + normalizeSettings
         // + zod + mergeSettings. No scheduler producer reads this policy until RD-3.
-        expect((await putSettings({ attendanceReportDigestPolicy: full })).status).toBe(200)
+        // #5976: enabling the org switch still saves (200). The env half is disclosed beside `data`,
+        // never stored inside the settings document.
+        const enabledPut = await putSettings({ attendanceReportDigestPolicy: full })
+        expect(enabledPut.status).toBe(200)
+        const enabledBody = enabledPut.body as {
+          data?: Record<string, unknown>
+          runtimeGates?: { reportDigest?: { live?: boolean; requiredEnv?: string[]; offEnv?: string[] } }
+        }
+        expect(enabledBody.data).not.toHaveProperty('runtimeGates')
+        expect(enabledBody.runtimeGates?.reportDigest?.requiredEnv).toEqual([
+          'ATTENDANCE_REPORT_DIGEST_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+          'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+        ])
+        expect(enabledBody.runtimeGates?.reportDigest?.live).toBe(
+          (enabledBody.runtimeGates?.reportDigest?.offEnv ?? ['missing']).length === 0,
+        )
         expect((await loadSettingsForTest(adminToken)).attendanceReportDigestPolicy).toEqual(full)
+        const digestGet = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        const digestGetBody = digestGet.body as { data?: Record<string, unknown>; runtimeGates?: { reportDigest?: { requiredEnv?: string[] } } }
+        expect(digestGetBody.data).not.toHaveProperty('runtimeGates')
+        expect(digestGetBody.runtimeGates?.reportDigest?.requiredEnv).toContain('ATTENDANCE_REPORT_DIGEST_ENABLED')
         // (2) top-level partial PUT preserves siblings.
         expect((await putSettings({ attendanceReportDigestPolicy: { enabled: false } })).status).toBe(200)
         expect((await loadSettingsForTest(adminToken)).attendanceReportDigestPolicy).toEqual({ ...full, enabled: false })
@@ -19154,6 +19174,20 @@ attendanceIntegrationDescribe(
           body: JSON.stringify({ annualLeavePolicy: annualSchedPolicy({ timezone: 'Asia/Shanghai' }) }),
         })
         expect(putRes.status).toBe(200)
+        // #5981: saving scheduledTrigger.enabled=true stays 200 while the env gate is disclosed
+        // beside `data`. The snapshot is not part of the persisted policy.
+        const accrualGates = (putRes.body as {
+          data?: Record<string, unknown>
+          runtimeGates?: { annualLeaveAccrualScheduled?: { requiredEnv?: string[]; offEnv?: string[]; live?: boolean } }
+        })
+        expect(accrualGates.data).not.toHaveProperty('runtimeGates')
+        expect(accrualGates.runtimeGates?.annualLeaveAccrualScheduled?.requiredEnv).toEqual([
+          'ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED',
+          'ATTENDANCE_SCHEDULER_ENABLED',
+        ])
+        expect(accrualGates.runtimeGates?.annualLeaveAccrualScheduled?.live).toBe(
+          (accrualGates.runtimeGates?.annualLeaveAccrualScheduled?.offEnv ?? ['missing']).length === 0,
+        )
         expect((putRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy).toEqual({
           enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
           tiers: [{ minYears: 1, maxYears: 10, days: 5 }, { minYears: 10, maxYears: 20, days: 10 }, { minYears: 20, maxYears: null, days: 15 }],
