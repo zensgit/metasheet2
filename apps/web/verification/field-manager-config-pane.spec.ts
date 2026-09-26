@@ -11,7 +11,9 @@ import { mkdirSync } from 'node:fs'
 // add-field row and the delete confirmation's 取消/删除 pushed out of the dialog at 640x360, and
 // 放大→缩小 storing a height the user never chose; and, from #6077's adversarial review, the upgrade
 // from r59's polluted storage (B1), gestures on a short config that draw nothing (S1), a clamp
-// overwriting a height chosen on a taller window (S2), and a click with a wobble (N1).
+// overwriting a height chosen on a taller window (S2), and a click with a wobble (N1); and, from the
+// second review, grow steps on a config between the default and the ceiling (SF1), the untouched
+// split on a sheet with few fields (SF2), and a ceiling below the pane's own padding (nit 5).
 
 const OUT = 'verification-output'
 const HARNESS = '/verification/field-manager-config-pane-harness.html'
@@ -29,7 +31,11 @@ type Metrics = {
   dialogScrollHeight: number
   dialogClientHeight: number
   list: Box | null
+  listScrollHeight: number
+  listClientHeight: number
   pane: Box | null
+  /** The pane's natural border-box height: what it would draw with no ceiling (#7a round 3). */
+  paneNatural: number
   addRow: Box | null
   addError: Box | null
   confirm: Box | null
@@ -51,6 +57,7 @@ async function openHarness(
   height: number,
   errors: string[],
   seed: Record<string, string> = {},
+  query = '',
 ) {
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`) })
   page.on('pageerror', (e) => errors.push(`pageerror: ${String(e)}`))
@@ -61,7 +68,7 @@ async function openHarness(
     }, seed)
   }
   await page.setViewportSize({ width, height })
-  await page.goto(HARNESS, { waitUntil: 'domcontentloaded' })
+  await page.goto(`${HARNESS}${query}`, { waitUntil: 'domcontentloaded' })
   await expect(page.locator('.meta-field-mgr')).toBeVisible()
 }
 
@@ -101,13 +108,18 @@ async function metrics(page: Page): Promise<Metrics> {
     }
     const dialog = q('.meta-field-mgr') as HTMLElement
     const splitter = q('[data-test="field-mgr-splitter"]')
+    const list = q('.meta-field-mgr__body') as HTMLElement | null
+    const pane = q('.meta-field-mgr__config--scrollable') as HTMLElement | null
     return {
       vh: window.innerHeight,
       dialog: box(dialog)!,
       dialogScrollHeight: dialog.scrollHeight,
       dialogClientHeight: dialog.clientHeight,
-      list: box(q('.meta-field-mgr__body')),
-      pane: box(q('.meta-field-mgr__config--scrollable')),
+      list: box(list),
+      listScrollHeight: list?.scrollHeight ?? 0,
+      listClientHeight: list?.clientHeight ?? 0,
+      pane: box(pane),
+      paneNatural: pane ? pane.scrollHeight + (pane.getBoundingClientRect().height - pane.clientHeight) : 0,
       addRow: box(q('.meta-field-mgr__add-row')),
       addError: box(q('[data-test="add-conflict-error"]')),
       confirm: box(q('.meta-field-mgr__confirm')),
@@ -414,6 +426,124 @@ test.describe('管理字段 config pane height (客户反馈 2026-09-24 #7a)', (
     const after = await metrics(page)
     expect(after.stored).toBeNull()
     expect(Math.abs(after.pane!.height - before.pane!.height)).toBeLessThanOrEqual(PX)
+
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  // --- #7a round 3 (second adversarial review) ------------------------------------------------------
+
+  // SF1: a grow step stops at the pane's content, so the stored height is always one that was drawn.
+  // Before, End on this config stored the 439 ceiling while drawing ~345, and the tall config then
+  // opened at 439 with nothing left for ⤢ -- the #7a symptom, recreated by the fix.
+  test('1280x800 mid config: End, a 150px drag up and a held ArrowUp all stop at its content and store what they draw; the tall config reopens there and ⤢ still travels', async ({ page }) => {
+    const errors: string[] = []
+    await openHarness(page, 1280, 800, errors)
+    const splitter = page.locator('[data-test="field-mgr-splitter"]')
+    const gestures: Array<[string, () => Promise<void>]> = [
+      ['End', async () => { await splitter.focus(); await page.keyboard.press('End'); await settle(page) }],
+      ['drag up 150', () => dragSplitter(page, -150)],
+      ['held ArrowUp', async () => {
+        await splitter.focus()
+        for (let i = 0; i < 20; i += 1) await page.keyboard.down('ArrowUp')
+        await page.keyboard.up('ArrowUp')
+        await settle(page)
+      }],
+    ]
+    const storedBy: string[] = []
+    for (const [label, gesture] of gestures) {
+      await page.evaluate((key) => window.localStorage.removeItem(key), STORAGE_KEY)
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await openConfig(page, 'Mid config')
+      const before = await metrics(page)
+      // The case itself: content taller than the default split, well below the ceiling.
+      expect(before.paneNatural, `${label}: content ${before.paneNatural} above the default ${before.now}`).toBeGreaterThan(before.now + 30)
+      expect(before.paneNatural, `${label}: content ${before.paneNatural} below the ceiling ${before.max}`).toBeLessThan(before.max - 60)
+
+      await gesture()
+      const after = await metrics(page)
+      expect(Math.abs(after.pane!.height - before.paneNatural), `${label}: drew ${after.pane!.height}, content ${before.paneNatural}`).toBeLessThanOrEqual(PX)
+      expect(after.stored, `${label} is a visible choice`).not.toBeNull()
+      expect(Math.abs(Number(after.stored) - after.pane!.height), `${label}: stored ${after.stored}, drawn ${after.pane!.height}`).toBeLessThanOrEqual(PX)
+      storedBy.push(after.stored!)
+    }
+    expect(new Set(storedBy).size, `keyboard and pointer agree: ${storedBy.join(' / ')}`).toBe(1)
+
+    await openConfig(page, 'Select field')
+    const tall = await metrics(page)
+    expect(Math.abs(tall.pane!.height - Number(storedBy[0])), `tall config reopens at ${storedBy[0]}`).toBeLessThanOrEqual(PX)
+    await page.locator('[data-test="field-mgr-config-expand"]').click()
+    await settle(page)
+    const expanded = await metrics(page)
+    expect(expanded.pane!.height - tall.pane!.height, `⤢ ${tall.pane!.height} -> ${expanded.pane!.height}`).toBeGreaterThan(60)
+
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  // SF2: an untouched split gives the list only what its rows need. r8-B drew round(0.52 * vh) --
+  // 416 / 562 / 749 -- on a sheet this small; half and half would have given 267 / 385 / 536.
+  for (const height of [800, 1080, 1440]) {
+    test(`1280x${height}, 3 fields: the list shows every row and the pane gets the rest (at least r8-B's ${Math.round(0.52 * height)}); with 48 fields it is half and ⤢ travels >100px`, async ({ page }) => {
+      const errors: string[] = []
+      await openHarness(page, 1280, height, errors, {}, '?fields=3')
+      await openConfig(page, 'Select field')
+      const few = await metrics(page)
+      expect(few.listScrollHeight, 'all three rows fit, no list scrollbar').toBeLessThanOrEqual(few.listClientHeight)
+      expect(few.now, `default ${few.now} vs r8-B ${Math.round(0.52 * height)}`).toBeGreaterThanOrEqual(Math.round(0.52 * height))
+      expect(Math.abs(few.pane!.height - few.now), 'drawn at the published default').toBeLessThanOrEqual(PX)
+      expectNoFrameOverflow(few, 'few fields')
+      expect(few.stored).toBeNull()
+
+      await openHarness(page, 1280, height, errors)
+      await openConfig(page, 'Select field')
+      const many = await metrics(page)
+      expect(many.max - many.now, `48 fields: ⤢ has room (${many.now} -> ${many.max})`).toBeGreaterThan(100)
+      expect(Math.abs(many.pane!.height - many.now)).toBeLessThanOrEqual(PX)
+
+      expect(errors, errors.join('\n')).toEqual([])
+    })
+  }
+
+  // Nit 5: the add-field row with the 自动编号 system hint (109.5px) plus a pending delete leaves the
+  // pane a 25px ceiling at 640x360 -- below its own 29px of padding + border.
+  test('640x360 with 自动编号 selected and a pending delete: the pane is drawn at its ceiling and 取消/删除 stay inside the dialog', async ({ page }) => {
+    const errors: string[] = []
+    await openHarness(page, 640, 360, errors)
+    await page.selectOption('.meta-field-mgr__add-row select', 'autoNumber')
+    await expect(page.locator('.meta-field-mgr__hint--system')).toBeVisible()
+    await expect(page.locator('[data-test="field-mgr-splitter"]')).toBeVisible()
+    await fieldRow(page, 'Field 05').locator('.meta-field-mgr__action--danger').click()
+    await settle(page)
+    const m = await metrics(page)
+    expect(m.max, 'the ceiling is below the pane\'s own padding + border').toBeLessThan(29)
+    expect(m.pane!.height, `drawn ${m.pane!.height} within the published ${m.now}`).toBeLessThanOrEqual(m.now + PX)
+    expectInsideDialog(m, m.addRow, 'add-field row')
+    expectInsideDialog(m, m.confirm, 'confirmation row')
+    expectInsideDialog(m, m.confirmCancel, '取消')
+    expectInsideDialog(m, m.confirmDelete, '删除')
+    expect(m.confirmCancelHit, '取消 is hit-testable').toBe(true)
+    expect(m.confirmDeleteHit, '删除 is hit-testable').toBe(true)
+    expectNoFrameOverflow(m, '自动编号 + pending delete')
+    await page.screenshot({ path: `${OUT}/field-config-pane-autonumber-confirm-640x360.png` })
+
+    expect(errors, errors.join('\n')).toEqual([])
+  })
+
+  // Nit 5, last resort: at 640x260 the fixed rows alone (257px) outgrow the 218px frame. The frame
+  // scrolls, so 取消/删除 can be reached instead of sitting below the window.
+  test('640x260 with 自动编号 selected and a pending delete: the dialog stays inside the window and scrolls 取消/删除 into reach', async ({ page }) => {
+    const errors: string[] = []
+    await openHarness(page, 640, 260, errors)
+    await page.selectOption('.meta-field-mgr__add-row select', 'autoNumber')
+    await fieldRow(page, 'Field 05').locator('.meta-field-mgr__action--danger').click()
+    await settle(page)
+    await page.locator('.meta-field-mgr__confirm .meta-field-mgr__btn-delete').scrollIntoViewIfNeeded()
+    await settle(page)
+    const m = await metrics(page)
+    expect(m.dialog.bottom, 'the dialog itself stays inside the window').toBeLessThanOrEqual(m.vh + 0.5)
+    expectInsideDialog(m, m.confirmCancel, '取消')
+    expectInsideDialog(m, m.confirmDelete, '删除')
+    expect(m.confirmCancelHit, '取消 is hit-testable').toBe(true)
+    expect(m.confirmDeleteHit, '删除 is hit-testable').toBe(true)
 
     expect(errors, errors.join('\n')).toEqual([])
   })
