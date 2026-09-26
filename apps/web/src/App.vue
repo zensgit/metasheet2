@@ -38,6 +38,7 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
+            <router-link v-if="canUseTasks" to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -173,6 +174,10 @@ const canUseApprovals = computed(() => {
   void route.fullPath
   return hasPermission('approvals:read')
 })
+const canUseTasks = computed(() => {
+  void route.fullPath
+  return hasPermission('tasks:read')
+})
 const isLoggedIn = computed(() => {
   void route.fullPath
   return Boolean(getToken())
@@ -185,6 +190,7 @@ const navLabels = computed(() => {
       multitable: '多维表',
       workflows: '流程',
       approvals: '审批中心',
+      tasks: '任务',
       // Values-free: names the surface, never the count or any row content.
       approvalTodo: '待办审批',
       apps: '应用',
@@ -213,6 +219,7 @@ const navLabels = computed(() => {
     multitable: 'Multitable',
     workflows: 'Workflows',
     approvals: 'Approvals',
+    tasks: 'Tasks',
     approvalTodo: 'Pending approvals',
     apps: 'Apps',
     users: 'Users',

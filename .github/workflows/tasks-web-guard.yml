@@ -1,0 +1,48 @@
+# Tasks web guard. The step lists spec files one by one. The paths filter
+# may use a glob; gate 21 does not treat that glob as a discovered spec.
+name: Tasks Web Guard
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/web/src/views/tasks/**'
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/src/router/guardPolicy.ts'
+      - 'apps/web/src/App.vue'
+      - 'apps/web/tests/tasks*.spec.ts'
+      - '.github/workflows/tasks-web-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/src/views/tasks/**'
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/src/router/guardPolicy.ts'
+      - 'apps/web/src/App.vue'
+      - 'apps/web/tests/tasks*.spec.ts'
+      - '.github/workflows/tasks-web-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tasks-web:
+    name: tasks-web
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Tasks guard spec
+        run: >-
+          pnpm --filter @metasheet/web exec vitest run
+          apps/web/tests/tasksGuardPolicy.spec.ts
+          --reporter=dot
