@@ -119,8 +119,6 @@ export function buildEmployeeWorkspaceProps(state: OverviewHarnessState) {
     workbenchWorkMinutes: isEmpty ? 0 : 444,
     workbenchLateEarlyLabel: isLate ? '18 / 18' : '0 / 0',
     workbenchHasLateEarly: isLate,
-    selfServiceNeedsSetupHint: isEmpty,
-    selfServiceSetupFollowupHint: '如果刚入职或按预期应有排班，可能还没有被分配到考勤组。请让考勤管理员确认分组和班次。',
     formatStatus: (value: string) => ({
       late_early: '迟到早退',
       late: '迟到',
@@ -149,9 +147,7 @@ export function buildEmployeeWorkspaceProps(state: OverviewHarnessState) {
     requestDecisionCommentText: () => '',
     requestDecisionCommentLabel: () => 'Comment',
     describeRequestStatus: () => '',
-    selfServiceQuickActionHint: isEmpty
-      ? '如果刚入职或按预期应有排班，可能还没有被分配到考勤组。请让考勤管理员确认分组和班次。'
-      : '无需离开总览，直接进入申请或记录。',
+    selfServiceQuickActionHint: '无需离开总览，直接进入申请或记录。',
     annualSelfBalanceLoading: false,
     annualSelfBalanceError: null,
     annualSelfBalanceSummary: null,
