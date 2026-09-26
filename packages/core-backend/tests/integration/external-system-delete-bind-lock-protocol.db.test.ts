@@ -818,7 +818,8 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
         }).toEqual({ systemRows: 1, pointerRows: 1 })
         expect(deleterWaited).toBe(true)
         expect(written.error).toBeNull()
-        expect(deleted.error?.name).toBe('ExternalSystemConflictError')
+        // name AND code, so a regression reports the SQLSTATE it surfaced (e.g. SSI's 40001), not just "error"
+        expect({ name: deleted.error?.name, code: deleted.error?.code }).toEqual({ name: 'ExternalSystemConflictError', code: undefined })
         expect(deleted.error?.details?.[spec.countKey]).toBe(1)
         expect(parkedIsolation).toBe('read committed') // observed INSIDE the parked writer transaction
         expect(pinnedAfterEveryBegin(pair.deleter, deleterFrom)).toEqual({ begins: 1, pinned: 1 })

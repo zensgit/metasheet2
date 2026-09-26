@@ -126,7 +126,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 |---|---|---|
 | 默认 RR / SERIALIZABLE 的库 | 协议照常成立，不需要运维动作 | 外部系统删除与 079 / 062 / pipeline / template 写入**全部拒绝**：不悬空，但功能停摆 |
 | 代价 | 每个参与事务多 1 次往返 | 同 |
-| 缺方法 / 顺序写错 | 抛错拒绝 / PG `25001` 中止，都是 fail-closed | 抛错拒绝；但读放到后面也照样读得出当前级别——B 的「第一条」没有数据库强制 |
+| 缺方法 / 顺序写错 | 抛错拒绝 / PG `25001` 中止，都是 fail-closed | 抛错拒绝；位置不受数据库约束（检查放到后面照样读得出级别，只是之前的语句已按继承级别执行，随后整个事务被拒） |
 | 对运维意图 | 覆盖运维给这五类事务设的 RR / SERIALIZABLE（它们的正确性本来就只在 RC 下被证明；SERIALIZABLE 下旧代码的表现是 SSI 的 `40001`，也不是 409） | 不覆盖，但把「配置不同」变成「不可用」 |
 | 宿主前提 | 宿主 `transaction` 在 `BEGIN` 与回调第一条语句之间不执行任何语句：`src/integration/db/connection-pool.ts:182` BEGIN → `:194` 调回调，`src/index.ts:785` 原样转交。成立，所以 A 可行。仓库先例：`src/directory/org-transfer-service.ts:279`、`plugins/plugin-attendance/index.cjs:10063` 都经同一宿主事务 API 首条 SET | 同 |
 
@@ -243,21 +243,21 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 
 插件目录之外（第一版漏掉、被 CI 的 `replay self-test + producer/consumer contract (hermetic)` 抓到）：`node --test scripts/ops/scenario-b-replay.test.mjs scripts/ops/scenario-b-replay-contract.test.mjs` 在补假件前 28 通过 / 5 失败（契约套件 5/5 报 `createReadSourceConfigStore: scoped db helper (incl. transaction, selectOneForKeyShare) is required`），补后 35/35 通过（契约套件 5 条旧用例 + 2 条新的锁协议用例），第二轮再加「登记例外 A/B」后 **37/37**（契约车道的 fetchImpl 为此多路由了 `/read-source-configs/:id/retire` 到真 `readSourceConfigsRetire`）；`scripts/ops/scenario-b-replay-ci-wiring.test.mjs` 通过（未新增 require 闭包之外的文件）。变异自证：把契约套件假件的 `selectOneForKeyShare` 改成「任何 id 都活」（恒返回一行）→ 2 条新用例红、5 条旧用例仍绿，证明存在性语义只由新用例钉住；再把该方法整个删掉 → 回到 7 条全红（构造器 fail-closed）。
 
-### 7.5 第三轮：隔离级别钉定（本机 PG 16.10，`127.0.0.1:61681`，`initdb --locale=C -E UTF8`）
+### 7.5 第三轮：隔离级别钉定（本机便携 PG 16.10，只监听回环，`initdb --locale=C -E UTF8`）
 
 两个库：`g5923_rc`（默认 read committed）与 `g5923_rr`（`ALTER DATABASE g5923_rr SET default_transaction_isolation = 'repeatable read'`，`SHOW` 确认）。
 
 | 运行 | `g5923_rc` | `g5923_rr` |
 |---|---|---|
 | 旧 head `488888daa`（旧套件 14 例） | 14 / 14 通过 | **8 失败 / 6 通过**：P-079-A/B/C、P-062-A/B、P-PIPE-A/B、P-MIX。P-079-B、P-062-B 是删除成功（悬空）；P-079-C 为裸 `40001` |
-| 旧插件代码 + 新套件（32 例，`EXTERNAL_SYSTEM_LOCK_PROTOCOL_PLUGIN_ROOT` 指向 `git archive 488888daa` 的 lib） | **16 失败 / 16 通过**：16 条 I-* 全红，两条哨兵与原 14 例绿。I-RR-079-B、I-RR-062-B 报 `{ systemRows: 0, pointerRows: 1 }`（悬空）；8 条 A 为裸 `40001`；PIPE-B / TPL-B 与 SER 的 B 为删除报错而非 409 | **24 失败 / 8 通过**（上述 16 条 + 原套件那 8 条） |
+| 旧插件代码 + 新套件（32 例，`EXTERNAL_SYSTEM_LOCK_PROTOCOL_PLUGIN_ROOT` 指向 `git archive 488888daa` 的 lib） | **16 失败 / 16 通过**：16 条 I-* 全红，两条哨兵与原 14 例绿。I-RR-079-B、I-RR-062-B 报 `{ systemRows: 0, pointerRows: 1 }`（悬空）；8 条 A 为裸 `40001`；RR 的 PIPE-B / TPL-B 删除撞 057 FK 得 `23503`（无悬空，非 409）；SER 的四条 B 删除得 SSI 的 `40001`（非 409） | **24 失败 / 8 通过**（上述 16 条 + 原套件那 8 条） |
 | 新 head（32 例） | **32 / 32 通过**（另重复 3 次，均 32 / 32） | **32 / 32 通过**（另重复 3 次，均 32 / 32） |
 
 变异自证（新套件，`g5923_rc` 库；插件 lib 整份复制到 scratchpad 后单点改动，工作树未动）：
 
 | 变异 | 改动 | 结果 |
 |---|---|---|
-| M-ISO-DEL | 删掉 `external-systems.cjs` 的钉定调用 | **16 红**：RR / SER 的 079-B、062-B 悬空 `{0,1}`；8 条 A 在删除事务内查到继承级别；PIPE-B / TPL-B 删除报错非 409 |
+| M-ISO-DEL | 删掉 `external-systems.cjs` 的钉定调用 | **16 红**：RR / SER 的 079-B、062-B 悬空 `{0,1}`（写入方已钉 RC、不进 SSI，SERIALIZABLE 也兜不住）；8 条 A 在删除事务内查到继承级别；RR / SER 的 PIPE-B、TPL-B 删除撞 057 FK 得 `23503`（无悬空，非 409） |
 | M-ISO-079 | 删掉 079 `set` 的钉定 | **4 红**：I-RR/SER-079-A 裸 `40001`；079-B 写入事务内查到继承级别 |
 | M-ISO-062 | 删掉 062 的钉定 | **4 红**（同形） |
 | M-ISO-PIPE | 删掉 `upsertPipeline` 的钉定 | **4 红**（同形） |
