@@ -1347,22 +1347,52 @@ export async function listIntegrationProvenanceByRow(
 // runs, not events). Scope is passed as query params, never as an `x-tenant-id` header: apiFetch
 // attaches the session JWT and the route derives the tenant from the verified claim.
 //
-// The route answers `{ items: [...] }`, not a bare array — an unknown or foreign run is a 404
-// (RUN_NOT_FOUND), never an empty list, so callers must branch on the error code rather than
-// reading "no events" as "no such run".
+// The route answers `{ items, total, truncated, nextCursor }`, not a bare array — an unknown or
+// foreign run is a 404 (RUN_NOT_FOUND), never an empty list, so callers must branch on the error
+// code rather than reading "no events" as "no such run".
+//
+// f-prov200: one call returns ONE PAGE (server default 200 events). `total` / `truncated` /
+// `nextCursor` are what tell the first page from the whole timeline; pass `cursor` (the previous
+// page's nextCursor) to read the next page.
+export interface IntegrationRunProvenancePage {
+  items: IntegrationProvenanceTimelineEntry[]
+  /** Every event this run has in scope, counted server-side; null when the answer carried none. */
+  total: number | null
+  /**
+   * True when events exist beyond this page. Fail-closed: an answer that does not state
+   * `truncated: false` explicitly is treated as truncated, so a response missing the disclosure
+   * can never be rendered as a complete audit timeline.
+   */
+  truncated: boolean
+  /** Opaque cursor for the next page; null when there is no next page to ask for. */
+  nextCursor: string | null
+}
+
 export async function getIntegrationRunProvenance(
   runId: string,
   scope: IntegrationScope = {},
-  options: { limit?: number } = {},
-): Promise<IntegrationProvenanceTimelineEntry[]> {
+  options: { limit?: number; cursor?: string | null } = {},
+): Promise<IntegrationRunProvenancePage> {
   const suffix = buildQuerySuffix({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
     limit: options.limit,
+    cursor: options.cursor,
   })
   const response = await apiFetch(`/api/integration/runs/${encodeURIComponent(runId)}/provenance${suffix}`)
-  const data = await parseIntegrationResponse<{ items?: IntegrationProvenanceTimelineEntry[] }>(response)
-  return Array.isArray(data?.items) ? data.items : []
+  const data = await parseIntegrationResponse<{
+    items?: IntegrationProvenanceTimelineEntry[]
+    total?: unknown
+    truncated?: unknown
+    nextCursor?: unknown
+  }>(response)
+  const items = Array.isArray(data?.items) ? data.items : []
+  const total = typeof data?.total === 'number' && Number.isSafeInteger(data.total) && data.total >= 0
+    ? data.total
+    : null
+  const nextCursor = typeof data?.nextCursor === 'string' && data.nextCursor.length > 0 ? data.nextCursor : null
+  const truncated = data?.truncated !== false || nextCursor !== null
+  return { items, total, truncated, nextCursor }
 }
 
 export interface IntegrationDeadLetterReplayPayload extends IntegrationScope {

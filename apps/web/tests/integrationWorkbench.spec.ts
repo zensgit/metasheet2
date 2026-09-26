@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   getDefaultIntegrationScope,
   getExternalSystemSchema,
+  getIntegrationRunProvenance,
   listIntegrationDeadLetters,
   listExternalSystemObjects,
   listIntegrationAdapters,
@@ -513,6 +514,82 @@ describe('integration provenance read service (DF-N2-3)', () => {
     expect(calls[0]).not.toContain('from=')
     expect(calls[0]).not.toContain('limit=')
     expect(calls[0]).toContain('rowId=MAT-1')
+  })
+})
+
+// f-prov200 review w1b: getIntegrationRunProvenance's normalization of the page envelope, asserted
+// on the service's own return value. The view spec (IntegrationRunDetail) sees these only through
+// what renders, and a negative total, for one, renders nothing different — so the rule is pinned
+// here, at the one place it is applied.
+describe('per-run provenance page service (f-prov200)', () => {
+  const PAGE_ITEMS = [
+    {
+      runId: 'run_1', pipelineId: 'pipe_1', rowId: 'ROW-1', eventType: 'row_cleaned',
+      at: '2026-09-19T02:00:00.500Z', attrs: {}, eventIndex: 1,
+      runStatus: 'partial', runMode: 'dry-run', runCreatedAt: '2026-09-19T02:00:00.000Z',
+    },
+  ]
+
+  beforeEach(() => {
+    apiFetchMock.mockReset()
+  })
+
+  function answerWith(body: unknown): string[] {
+    const urls: string[] = []
+    apiFetchMock.mockImplementation(async (url: string) => {
+      urls.push(url)
+      return jsonResponse(body)
+    })
+    return urls
+  }
+
+  it.each([
+    [0, 0],
+    [2, 2],
+    [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+    [2.5, null],
+    [-1, null],
+    [1e21, null],
+    [2 ** 53, null],
+    ['5', null],
+    ['', null],
+    [true, null],
+    [null, null],
+    [undefined, null],
+  ])('total %j is kept only when it is a non-negative safe integer (→ %j)', async (total, expected) => {
+    answerWith({ items: PAGE_ITEMS, total, truncated: false, nextCursor: null })
+    const page = await getIntegrationRunProvenance('run_1', { tenantId: 'default' })
+    expect(page.total).toBe(expected)
+    // The total never decides `truncated` on its own in the service — that is the view's job.
+    expect(page.truncated).toBe(false)
+  })
+
+  it.each([
+    // [label, body disclosure, expected { truncated, nextCursor }]
+    ['explicit complete', { truncated: false, nextCursor: null }, { truncated: false, nextCursor: null }],
+    ['an empty-string cursor is no cursor', { truncated: false, nextCursor: '' }, { truncated: false, nextCursor: null }],
+    ['a non-string cursor is no cursor', { truncated: false, nextCursor: 5 }, { truncated: false, nextCursor: null }],
+    ['a truncated page with its cursor', { truncated: true, nextCursor: '200' }, { truncated: true, nextCursor: '200' }],
+    ['truncated:false that still hands out a cursor', { truncated: false, nextCursor: '7' }, { truncated: true, nextCursor: '7' }],
+    ['a truncated page with an empty-string cursor', { truncated: true, nextCursor: '' }, { truncated: true, nextCursor: null }],
+    ['no disclosure at all', {}, { truncated: true, nextCursor: null }],
+    ['a non-boolean truncated ("false")', { truncated: 'false', nextCursor: null }, { truncated: true, nextCursor: null }],
+  ])('%s → truncated / nextCursor fail closed', async (_label, disclosure, expected) => {
+    answerWith({ items: PAGE_ITEMS, total: 1, ...disclosure })
+    const page = await getIntegrationRunProvenance('run_1', { tenantId: 'default' })
+    expect({ truncated: page.truncated, nextCursor: page.nextCursor }).toEqual(expected)
+  })
+
+  it('sends the cursor with the caller scope on the per-run path, and no cursor when none is given', async () => {
+    const urls = answerWith({ items: PAGE_ITEMS, total: 1, truncated: false, nextCursor: null })
+    await getIntegrationRunProvenance('run 1', { tenantId: 'default', workspaceId: 'ws_a' }, { cursor: '200' })
+    await getIntegrationRunProvenance('run 1', { tenantId: 'default', workspaceId: 'ws_a' })
+    await getIntegrationRunProvenance('run 1', { tenantId: 'default', workspaceId: 'ws_a' }, { cursor: null })
+    expect(urls).toEqual([
+      '/api/integration/runs/run%201/provenance?tenantId=default&workspaceId=ws_a&cursor=200',
+      '/api/integration/runs/run%201/provenance?tenantId=default&workspaceId=ws_a',
+      '/api/integration/runs/run%201/provenance?tenantId=default&workspaceId=ws_a',
+    ])
   })
 })
 
