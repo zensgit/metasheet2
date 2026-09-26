@@ -27,6 +27,17 @@
 //   R-073    the REGISTERED RESIDUAL: sealed-export provisioning (frozen S6-A module, provisioning
 //            role with no privilege on integration_external_systems) takes no lock and DANGLES —
 //            asserted so fixing it must retire this arm with the design doc's residual entry
+//   P-ABSENT a schema that ran ONLY 057 (no 079 / 062 / 073): the delete still goes through, because
+//            the absence is learned by the autocommit probe BEFORE the transaction. A mutant that
+//            counts the missing tables inside the FOR UPDATE transaction (external-systems.cjs
+//            `if (absentTables.has(table)) return 0` → `if (false) return 0`) fails this arm with
+//            25P02 and leaves the row — the 42P01 aborts the transaction (design doc §2.3 / §7.2)
+//   P-062-REUSE-A/B the REGISTERED reuse-path outcomes of saveVersion: identical content that already
+//            exists as a RETIRED version at a since-deleted system → ReadSourceConfigConflictError
+//            content_retired with ZERO `FOR KEY SHARE` statements (the reuse lookup runs before the
+//            lock); a pre-protocol LIVE row at a system that does not exist → reused, reuse_version
+//            audit, again no lock. New content at the same missing system → the lock's not_found
+//            tuple. Registered so the guarantee stays scoped to the MINT path (design doc §2.6)
 //
 // PLUGIN ROOT OVERRIDE (test-only, documented in the design doc): the modules are loaded from
 // `EXTERNAL_SYSTEM_LOCK_PROTOCOL_PLUGIN_ROOT` when set, else from this repository. That is how the
@@ -93,6 +104,9 @@ type Session = {
     transaction: <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<QueryRows>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>) => Promise<T>
   }
   gateBefore: (sqlPrefix: string) => Gate
+  // Every statement text this session issued through the plugin seam, in order (shape only: the
+  // parameters are not recorded). Lets an arm assert "no FOR KEY SHARE was issued on this path".
+  statements: string[]
   db: any
 }
 
@@ -173,6 +187,9 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
   let deleter: Session
   let writer: Session
   let secondWriter: Session
+  // A schema that ran ONLY 057 — a deployment without 079 / 062 / 073 — and a session on it.
+  let schema057: string
+  let deleter057: Session
   let plugin: {
     createDb: (args: { database: Session['database'] }) => any
     createExternalSystemRegistry: (args: any) => any
@@ -181,17 +198,25 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     createPipelineRegistry: (args: any) => any
     createSealedExportLifecycleProvisioning: (args: any) => any
     createEd25519SignerMaterial: () => { publicKey: unknown }
+    contentKeyFor: (normalized: unknown) => string
+    validateReadSourceConfig: (config: unknown) => { valid: boolean; normalized: any }
   }
 
   function loadPlugin() {
+    const readSourceConfigStore = requireCjs(path.join(PLUGIN_LIB, 'read-source-config-store.cjs'))
     return {
       createDb: requireCjs(path.join(PLUGIN_LIB, 'db.cjs')).createDb,
       createExternalSystemRegistry: requireCjs(path.join(PLUGIN_LIB, 'external-systems.cjs')).createExternalSystemRegistry,
       createStockPreparationSourceBindingStore: requireCjs(path.join(PLUGIN_LIB, 'stock-preparation-source-binding-store.cjs')).createStockPreparationSourceBindingStore,
-      createReadSourceConfigStore: requireCjs(path.join(PLUGIN_LIB, 'read-source-config-store.cjs')).createReadSourceConfigStore,
+      createReadSourceConfigStore: readSourceConfigStore.createReadSourceConfigStore,
       createPipelineRegistry: requireCjs(path.join(PLUGIN_LIB, 'pipelines.cjs')).createPipelineRegistry,
       createSealedExportLifecycleProvisioning: requireCjs(path.join(PLUGIN_LIB, 'sealed-export', 'sealed-export-lifecycle-provisioning.cjs')).createSealedExportLifecycleProvisioning,
       createEd25519SignerMaterial: requireCjs(path.join(PLUGIN_LIB, 'sealed-export', 'sealed-export-signer-authority.cjs')).createEd25519SignerMaterial,
+      // `contentKeyFor` is a public export of the store (the C6 gate binds to it); the pre-#6076
+      // plugin copy used for the "old red" runs has it too. `__internals.contentKeyFor` is the same
+      // function under its older alias.
+      contentKeyFor: readSourceConfigStore.contentKeyFor ?? readSourceConfigStore.__internals.contentKeyFor,
+      validateReadSourceConfig: requireCjs(path.join(PLUGIN_LIB, 'read-source-config.cjs')).validateReadSourceConfig,
     }
   }
 
@@ -199,12 +224,14 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
   // `transaction` runs the callback on ONE client inside BEGIN/COMMIT (ROLLBACK on throw). The gate
   // is the test's scheduling seam: the next statement whose text starts with `sqlPrefix` parks
   // until released, and `reached` resolves when it parks.
-  async function openSession(): Promise<Session> {
+  async function openSession(targetSchema: string = schema): Promise<Session> {
     const client = await ownerPool.connect()
-    await client.query(`SET search_path TO ${quotedIdentifier(schema)}, public`)
+    await client.query(`SET search_path TO ${quotedIdentifier(targetSchema)}, public`)
     const pid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
     const gates = new Map<string, Gate & { arrived: () => void; open: Promise<void> }>()
+    const statements: string[] = []
     async function beforeStatement(sql: string) {
+      statements.push(sql)
       for (const [prefix, gate] of gates) {
         if (sql.startsWith(prefix)) {
           gates.delete(prefix)
@@ -220,6 +247,7 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
         return (await client.query(sql, params)).rows
       },
       transaction: async (callback) => {
+        statements.push('BEGIN')
         await client.query('BEGIN')
         try {
           const result = await callback({
@@ -230,9 +258,11 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
             commit: async () => {},
             rollback: async () => {},
           })
+          statements.push('COMMIT')
           await client.query('COMMIT')
           return result
         } catch (error) {
+          statements.push('ROLLBACK')
           await client.query('ROLLBACK').catch(() => {})
           throw error
         }
@@ -242,6 +272,7 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
       client,
       pid,
       database,
+      statements,
       db: null,
       gateBefore(sqlPrefix) {
         let arrived!: () => void
@@ -342,13 +373,20 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     for (const name of MIGRATIONS) {
       await owner.query(readFileSync(path.join(repoRoot, 'packages', 'core-backend', 'migrations', name), 'utf8'))
     }
+    // 057 only — the "never ran 079 / 062 / 073" deployment P-ABSENT drives.
+    schema057 = `${schema}_057only`
+    await owner.query(`CREATE SCHEMA ${quotedIdentifier(schema057)}`)
+    await owner.query(`SET search_path TO ${quotedIdentifier(schema057)}, public`)
+    await owner.query(readFileSync(path.join(repoRoot, 'packages', 'core-backend', 'migrations', MIGRATIONS[0]), 'utf8'))
+    await owner.query(`SET search_path TO ${quotedIdentifier(schema)}, public`)
     deleter = await openSession()
     writer = await openSession()
     secondWriter = await openSession()
+    deleter057 = await openSession(schema057)
   })
 
   afterAll(async () => {
-    for (const session of [deleter, writer, secondWriter]) {
+    for (const session of [deleter, writer, secondWriter, deleter057]) {
       if (session) {
         await session.client.query('ROLLBACK').catch(() => {})
         session.client.release()
@@ -357,6 +395,7 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     if (observer) observer.release()
     if (owner) {
       await owner.query('SET search_path TO public').catch(() => {})
+      if (schema057) await owner.query(`DROP SCHEMA IF EXISTS ${quotedIdentifier(schema057)} CASCADE`).catch(() => {})
       if (schema) await owner.query(`DROP SCHEMA IF EXISTS ${quotedIdentifier(schema)} CASCADE`).catch(() => {})
       owner.release()
     }
@@ -511,5 +550,84 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     expect(deleted.error).toBeNull()
     expect(await count(EXTERNAL_SYSTEMS, "id = 'sys_1'")).toBe(0)
     expect(await count(SEALED_EXPORT_BINDINGS, "external_system_id = 'sys_1' AND status = 'ACTIVE'")).toBe(1)
+  })
+
+  it('P-ABSENT: a deployment that ran only 057 (no 079 / 062 / 073) still deletes — the absence is learned by the autocommit probe, never inside the FOR UPDATE transaction', async () => {
+    const table057 = (name: string) => `${quotedIdentifier(schema057)}.${quotedIdentifier(name)}`
+    for (const missing of [STOCK_PREP_BINDINGS, READ_SOURCE_CONFIGS, SEALED_EXPORT_BINDINGS]) {
+      const { rows } = await owner.query('SELECT to_regclass($1) AS rel', [`${schema057}.${missing}`])
+      expect(rows[0].rel).toBeNull() // the schema really lacks the three dependent tables
+    }
+    await owner.query(
+      `INSERT INTO ${table057(EXTERNAL_SYSTEMS)} (id, tenant_id, workspace_id, name, kind, role, config, status)
+       VALUES ('sys_1', 't1', NULL, 'sys_1', 'erp:k3-wise-webapi', 'source', '{"baseUrl":"https://plm.example.test"}'::jsonb, 'active')`,
+    )
+    const issuedBefore = deleter057.statements.length
+    const deleted = await settle(registryOn(deleter057).deleteExternalSystem(deleteInput))
+    expect(deleted.error).toBeNull() // the X4 mutant fails here with SQLSTATE 25P02 (the 42P01 aborted its transaction)
+    expect(deleted.value.deleted).toBe(true)
+    const { rows } = await owner.query(`SELECT count(*)::int AS n FROM ${table057(EXTERNAL_SYSTEMS)} WHERE id = 'sys_1'`)
+    expect(Number(rows[0].n)).toBe(0)
+    // Shape of the run: the probe's three dependent COUNTs (four statements: 062 is counted per live
+    // status) came BEFORE `BEGIN`, and inside the transaction only the pipeline counts ran.
+    const issued = deleter057.statements.slice(issuedBefore)
+    const begin = issued.indexOf('BEGIN')
+    expect(begin).toBeGreaterThan(0)
+    const dependentCount = (sql: string) => /^SELECT COUNT\(\*\)::int AS count FROM "integration_(stock_prep_source_binding|sealed_export_stock_prep_bindings|read_source_configs)"/.test(sql)
+    expect(issued.slice(0, begin).filter(dependentCount)).toHaveLength(4)
+    expect(issued.slice(begin).filter(dependentCount)).toHaveLength(0)
+  })
+
+  it('P-062-REUSE-A (registered): identical content that exists as a RETIRED version at a since-deleted system is refused 409 content_retired by the pre-lock reuse path, with no FOR KEY SHARE issued — not the 400 not_found tuple', async () => {
+    const store = plugin.createReadSourceConfigStore({ db: writer.db })
+    const scope = { tenantId: 't1', workspaceId: null, actor: 'consultant' }
+    const minted = await store.saveVersion({ ...scope, config: readSourceConfig() })
+    await store.approve({ ...scope, id: minted.id })
+    await store.retire({ ...scope, id: minted.id })
+    const deleted = await settle(registryOn(deleter).deleteExternalSystem(deleteInput))
+    expect(deleted.error).toBeNull() // retired is not a live pointer: the delete goes through
+    expect(await count(EXTERNAL_SYSTEMS, "id = 'sys_1'")).toBe(0)
+
+    const rowsBefore = await count(READ_SOURCE_CONFIGS, 'TRUE')
+    const auditBefore = await count(READ_SOURCE_AUDIT, 'TRUE')
+    const issuedBefore = writer.statements.length
+    const same = await settle(store.saveVersion({ ...scope, config: readSourceConfig() }))
+    expect(same.error?.name).toBe('ReadSourceConfigConflictError')
+    expect(same.error?.details).toEqual({ id: minted.id, reason: 'content_retired' })
+    expect(writer.statements.slice(issuedBefore).filter((sql) => sql.includes('FOR KEY SHARE'))).toHaveLength(0)
+    expect(writer.statements.slice(issuedBefore)).not.toContain('BEGIN')
+    expect(await count(READ_SOURCE_CONFIGS, 'TRUE')).toBe(rowsBefore)
+    expect(await count(READ_SOURCE_AUDIT, 'TRUE')).toBe(auditBefore)
+    // New content at the same deleted system takes the MINT path and gets the lock's tuple.
+    const different = await settle(store.saveVersion({ ...scope, config: { ...readSourceConfig(), object: 'bom' } }))
+    expect(different.error?.name).toBe('ReadSourceConfigValidationError')
+    expect(different.error?.details?.errors).toEqual([{ code: 'READ_SOURCE_SYSTEM_NOT_FOUND', field: 'systemId', reason: 'not_found' }])
+    expect(await count(READ_SOURCE_CONFIGS, 'TRUE')).toBe(rowsBefore)
+  })
+
+  it('P-062-REUSE-B (registered): a pre-protocol LIVE row at a system that does not exist is reused by identical content — reuse_version audit written, no FOR KEY SHARE; new content is refused by the lock', async () => {
+    const ghost = readSourceConfig('sys_ghost')
+    const normalized = plugin.validateReadSourceConfig(ghost).normalized
+    const stored = { ...normalized, version: 1 }
+    await owner.query(
+      `INSERT INTO ${quotedIdentifier(READ_SOURCE_CONFIGS)} (id, tenant_id, workspace_id, system_id, object, mode, config, content_key, version, status)
+       VALUES ('legacy_1', 't1', NULL, 'sys_ghost', $1, $2, $3::jsonb, $4, 1, 'draft')`,
+      [normalized.object, normalized.mode, JSON.stringify(stored), plugin.contentKeyFor(normalized)],
+    )
+    expect(await count(EXTERNAL_SYSTEMS, "id = 'sys_ghost'")).toBe(0)
+    const store = plugin.createReadSourceConfigStore({ db: writer.db })
+    const scope = { tenantId: 't1', workspaceId: null, actor: 'consultant' }
+    const issuedBefore = writer.statements.length
+    const reused = await settle(store.saveVersion({ ...scope, config: ghost }))
+    expect(reused.error).toBeNull()
+    expect(reused.value.reused).toBe(true)
+    expect(reused.value.id).toBe('legacy_1')
+    expect(writer.statements.slice(issuedBefore).filter((sql) => sql.includes('FOR KEY SHARE'))).toHaveLength(0)
+    expect(await count(READ_SOURCE_CONFIGS, "system_id = 'sys_ghost'")).toBe(1)
+    expect(await count(READ_SOURCE_AUDIT, "config_id = 'legacy_1' AND action = 'reuse_version'")).toBe(1)
+    const different = await settle(store.saveVersion({ ...scope, config: { ...ghost, object: 'bom' } }))
+    expect(different.error?.name).toBe('ReadSourceConfigValidationError')
+    expect(different.error?.details?.errors).toEqual([{ code: 'READ_SOURCE_SYSTEM_NOT_FOUND', field: 'systemId', reason: 'not_found' }])
+    expect(await count(READ_SOURCE_CONFIGS, "system_id = 'sys_ghost'")).toBe(1)
   })
 })

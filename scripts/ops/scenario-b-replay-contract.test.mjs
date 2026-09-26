@@ -47,7 +47,8 @@ const require = createRequire(import.meta.url)
 
 const fixture = require(path.join(PLUGIN_DIR, 'fixtures', 'scenario-b-synthetic-bom', 'scenario-b-synthetic-bom.cjs'))
 const httpRoutes = require(path.join(LIB_DIR, 'http-routes.cjs'))
-const { createReadSourceConfigStore } = require(path.join(LIB_DIR, 'read-source-config-store.cjs'))
+const { createReadSourceConfigStore, contentKeyFor } = require(path.join(LIB_DIR, 'read-source-config-store.cjs'))
+const { validateReadSourceConfig } = require(path.join(LIB_DIR, 'read-source-config.cjs'))
 const { EXTERNAL_SYSTEMS_TABLE } = require(path.join(LIB_DIR, 'external-system-pointer-lock.cjs'))
 const {
   ADAPTER_KIND,
@@ -296,6 +297,9 @@ function createBackend() {
     else if (method === 'POST' && (match = p.match(/^\/api\/integration\/read-source-configs\/([^/]+)\/approve$/))) {
       handlerName = 'readSourceConfigsApprove'
       params = { id: decodeURIComponent(match[1]) }
+    } else if (method === 'POST' && (match = p.match(/^\/api\/integration\/read-source-configs\/([^/]+)\/retire$/))) {
+      handlerName = 'readSourceConfigsRetire'
+      params = { id: decodeURIComponent(match[1]) }
     } else if (method === 'POST' && p === '/api/integration/stock-preparation/mvp/source-runs/plm-bom') handlerName = 'stockPreparationPlmBomSourceRun'
     else if (method === 'GET' && p === '/api/integration/stock-preparation/snapshot-batches') handlerName = 'stockPreparationSnapshotBatchList'
     else if (method === 'GET' && (match = p.match(/^\/api\/integration\/stock-preparation\/snapshot-batches\/([^/]+)\/diff$/))) {
@@ -456,6 +460,66 @@ test('锁协议：登记过又删掉的 systemId → 新内容再存同样 400�
   assert.equal(minted.body.error.code, 'READ_SOURCE_CONFIG_INVALID')
   assert.deepEqual(minted.body.error.details.errors, SYSTEM_NOT_FOUND_TUPLE)
   assert.equal(backend.db.tables.integration_read_source_configs.length, 1, '只剩系统存活时铸的那一版')
+})
+
+// ── 登记的复用路径例外（第二轮复审：保证 9 只对「铸新版本」成立）──────────────────────────────
+// 真 saveVersion 的内容键复用查找在事务与锁**之前**执行、不看系统是否存在（read-source-config-store.cjs
+// reuseExisting）。所以「系统不存在 → 400」只对内容键未命中家族的铸造路径成立；相同内容命中既有行时走复用分支，
+// 路由映射是 409（retired）或 200（活行），不是 400。两条用例把这两个出口钉在真 handler 上，
+// 与设计文档 §2.6 的登记同步；owner 若裁定「一律 400」，须把存在性检查挪到复用分支之前，并连同这两条一起退掉。
+
+test('登记例外 A：相同内容已有 retired 版本、系统随后删除 → 再存同内容走锁之前的内容复用分支，真路由 409 READ_SOURCE_CONFIG_STATUS_CONFLICT（reason content_retired），不是 400；不落行、不落审计', async () => {
+  const backend = createBackend()
+  await registerSystem(backend)
+  const config = fixture.readSourceConfig()
+  const saved = await saveConfig(backend, config)
+  assert.equal(saved.status, 201, JSON.stringify(saved.body))
+  const approved = await backend.fetchImpl(`${BASE_URL}/api/integration/read-source-configs/${saved.body.data.id}/approve`, { method: 'POST', body: '{}' })
+  assert.equal(approved.status, 200)
+  const retired = await backend.fetchImpl(`${BASE_URL}/api/integration/read-source-configs/${saved.body.data.id}/retire`, { method: 'POST', body: '{}' })
+  assert.equal(retired.status, 200, await retired.text())
+  // 系统的删除已提交（retired 行不被删除守卫计数，所以删除放行）——在替身里就是登记行消失。
+  backend.registry.systems.splice(0, backend.registry.systems.length)
+  const rowsBefore = backend.db.tables.integration_read_source_configs.length
+  const auditBefore = backend.db.tables.integration_read_source_config_audit.length
+
+  const again = await saveConfig(backend, config)
+  assert.equal(again.status, 409, JSON.stringify(again.body))
+  assert.equal(again.body.error.code, 'READ_SOURCE_CONFIG_STATUS_CONFLICT')
+  assert.equal(again.body.error.details.reason, 'content_retired')
+  assert.equal(again.body.error.details.id, saved.body.data.id, 'details 带的是配置 id（既有形状），不是系统 id')
+  assert.ok(!JSON.stringify(again.body).includes('syn-bom-source-b1'), 'values-free：不回显 systemId')
+  assert.equal(backend.db.tables.integration_read_source_configs.length, rowsBefore, '没有铸新行')
+  assert.equal(backend.db.tables.integration_read_source_config_audit.length, auditBefore, '没有审计行')
+  // 换新内容走铸造路径，才是锁守的那条：400 tuple。
+  const fresh = await saveConfig(backend, fixture.readSourceConfig({ object: 'scenario_b_bom_rows_probe' }))
+  assert.equal(fresh.status, 400, JSON.stringify(fresh.body))
+  assert.deepEqual(fresh.body.error.details.errors, SYSTEM_NOT_FOUND_TUPLE)
+})
+
+test('登记例外 B：存量活行（协议之前铸的、系统已不存在）以相同内容再存 → 真路由 200 reused:true 并写 reuse_version 审计（不加锁）；换新内容才 400', async () => {
+  const backend = createBackend()
+  const config = fixture.readSourceConfig({ systemId: 'syn-bom-source-legacy' })
+  const normalized = validateReadSourceConfig(config).normalized
+  // 直接落一条协议之前的活行：系统从未在替身里登记过。
+  backend.db.tables.integration_read_source_configs = [{
+    id: 'legacy_cfg_1', tenant_id: TENANT_ID, workspace_id: null, system_id: 'syn-bom-source-legacy',
+    object: normalized.object, mode: normalized.mode, config: { ...normalized, version: 1 },
+    content_key: contentKeyFor(normalized), version: 1, status: 'draft', created_by: null, updated_by: null,
+    created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
+  }]
+  const reused = await saveConfig(backend, config)
+  assert.equal(reused.status, 200, JSON.stringify(reused.body))
+  assert.equal(reused.body.data.reused, true)
+  assert.equal(reused.body.data.id, 'legacy_cfg_1')
+  const audits = backend.db.tables.integration_read_source_config_audit || []
+  assert.equal(audits.length, 1)
+  assert.equal(audits[0].action, 'reuse_version')
+  assert.equal(backend.db.tables.integration_read_source_configs.length, 1, '没有铸新指针')
+  const fresh = await saveConfig(backend, fixture.readSourceConfig({ systemId: 'syn-bom-source-legacy', object: 'scenario_b_bom_rows_probe' }))
+  assert.equal(fresh.status, 400, JSON.stringify(fresh.body))
+  assert.deepEqual(fresh.body.error.details.errors, SYSTEM_NOT_FOUND_TUPLE)
+  assert.equal(backend.db.tables.integration_read_source_configs.length, 1)
 })
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════

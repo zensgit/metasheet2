@@ -47,6 +47,15 @@
 // tenant's row with that id, whichever workspace it lives in. `id` is the primary key, so this is at
 // most one row, and it is the SAME physical row the delete side locks with its exact scope.
 //
+// NOT EVERY WRITER GOES THROUGH THIS HELPER. The 079 and 062 writers do. `pipelines.cjs`
+// requireExternalSystem (pipelines and template instantiation) takes its KEY SHARE directly with the
+// pipeline's OWN scope — `scopeWhere(normalized)` + id, i.e. tenant + workspace + id — which is the
+// scope the delete side counts pipelines with (`countPipelineReferences`) and the pairing 057's real
+// foreign key backs. A pipeline can only name a system in its own workspace: when that where misses,
+// the write is refused before anything is written, so the row it pins is still the one physical row
+// the delete locks, or none. (`__tests__/external-systems-delete-bind-lock-protocol.test.cjs` L-10
+// pins the 079 shape, L-11 the pipeline shape.)
+//
 // WHAT THIS DOES NOT DO. It does not judge eligibility (kind / role / status) — each caller still
 // runs its own eligibility check where it always did. It does not create the row lock outside a
 // transaction (autocommit releases it at statement end, which is why every caller requires
