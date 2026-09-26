@@ -225,6 +225,28 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
     expect(failedSql).toMatch(/WHERE id = \$1::uuid AND org_id = \$2/)
     expect(failedSql).toMatch(/status = 'failed', error = NULL/)
     expect(failed.query.mock.calls[0]?.[1]).toEqual([JOB_ID, ORG_ID, 'ATTENDANCE_IMPORT_LEGACY_PLAN_MISSING'])
+
+    const roster = queryStub([[{ id: JOB_ID }]])
+    const rosterDetail = JSON.stringify({
+      code: 'USER_NOT_IN_ORG',
+      message: 'Target user is not an active member of this org',
+      details: [{ code: 'USER_NOT_IN_ORG', rejectedCount: 1, indexes: [0] }],
+    })
+    await createAttendanceLegacyPlanWorkerRepositoryV1(roster.db).markPlanFailed(
+      JOB_ID,
+      ORG_ID,
+      'USER_NOT_IN_ORG',
+      rosterDetail,
+    )
+    const rosterSql = String(roster.query.mock.calls[0]?.[0])
+    expect(rosterSql).toMatch(/error = \$4/)
+    expect(rosterSql).not.toMatch(/error = NULL/)
+    expect(roster.query.mock.calls[0]?.[1]).toEqual([
+      JOB_ID,
+      ORG_ID,
+      'USER_NOT_IN_ORG',
+      rosterDetail,
+    ])
   })
 
   it('stores a normal response before atomically terminalizing the queued job', async () => {

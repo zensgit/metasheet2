@@ -1,0 +1,220 @@
+# 考勤组花名册写入：活跃组织成员门（fail-closed）
+
+> **文档性质：实现设计（design lock for this PR）**  
+> **日期**：2026-09-24  
+> **基准**：`main` @ `f2d5331d605d1e155f8dd5ffe7f880be9f93480f`  
+> **谱系**：#5899 O3（`attendance-group-acl-write-o3-design-20260920.md`）把 `add_members` 下放给组负责人之后，成员/负责人写入仍把 `userId` 原样 INSERT。  
+> **本 PR**：设计 + 实现 + 验证；**draft，不合并**。修 #6045、#6047。
+
+---
+
+## 0. 一句话结论
+
+| 写路径 | main 在本 PR 前 | 本 PR |
+|---|---|---|
+| `POST /api/attendance/groups/:id/members` | trim 后 `INSERT … ON CONFLICT DO NOTHING`，不查组织成员 | 同一事务内先查活跃组织成员；任一 id 不通过则 **整批 404 `USER_NOT_IN_ORG`，零 INSERT** |
+| `POST /api/attendance/groups/:id/managers` | trim 后 `INSERT … ON CONFLICT DO UPDATE`，不查组织成员 | 同一事务内先查；不通过则 **404 `USER_NOT_IN_ORG`，不写、不触碰已有行** |
+| `POST /api/attendance/schedule-groups/:id/members` | 事务内按 userId 查重叠后直接 INSERT | 同一事务内、任何重叠查询和 INSERT 之前先查整批；任一 id 不通过则 **整批 404 `USER_NOT_IN_ORG`，零 INSERT** |
+| CSV `autoAssignMembers`（preview / commit / `insertAttendanceGroupMembers`） | 解析出的 userId 直接进入 `ensure_member` 或 `attendance_group_members` INSERT | 会落成员的行先过同一门；任一 id 不通过则 **整批 404，零成员 INSERT，也不把 ensure_member 交给同步计划** |
+| 谁可以写（O3 / OW8） | owner/sub_owner 可 `add_members`；managers POST 仍 `attendance:admin` | **不改 ACL** |
+
+谓词与年假手工调账 `applyAnnualLeaveManualAdjustment` 相同：`user_orgs.is_active = true AND users.is_active = true`，且 `user_orgs.org_id` 等于 actor 的已认证组织。真源表是 `user_orgs`（`user_id`/`org_id` 均为 text）JOIN `users`。
+
+---
+
+## 1. 目标 / 非目标
+
+### 1.1 问题
+
+#5899 之后组负责人可以粘贴 userId 加人。两条写路径都不检查目标是不是**该组织的活跃成员**：
+
+- 停用用户（`users.is_active = false` 或 `user_orgs.is_active = false`）
+- 只属于别的组织的用户
+- 不存在的 id
+
+都会落进 `attendance_group_members` / `attendance_group_managers`。`user_id` 是 text、无 FK。负责人行一旦写入，该 id 就进入 O3 的 `add_members` / `list_*` ACL。
+
+### 1.2 目标
+
+1. 成员 POST 与负责人 POST 在写入前 fail-closed。
+2. 错误是 **404 `USER_NOT_IN_ORG`**，不是 500。文案与年假调账一致：`Target user is not an active member of this org`。
+3. 批量成员写入 **全有或全无**：任一 id 不通过，包括本批里合格的 id 也不插入。
+4. #5899 的正常路径仍可用：本组 owner/sub_owner 把**本组织活跃成员**加进自己的组，仍 200，并继续发 values-free `attendance.group.members.changed`。
+
+### 1.3 非目标
+
+- 不改 O3：谁可以 `add_members` / `remove_members` / `list_*` / preview。
+- 不改 OW8：负责人 POST/DELETE 仍仅 `attendance:admin`。
+- 不改 DELETE 成员/负责人（删除不是授予）。
+- 不回扫、不删除历史上已经写入的幽灵行。只在验证记录里留一条只读查找 SQL。
+- 不把 `users.activation_status` 加进谓词。年假调账与本门只看两列 `is_active`。W4 事务内 liveness 另有 `activation_status`，那是另一条写路径。
+- 不改管理端 picker / global-scope 搜索。API 拒绝即可；UI 会看到 404。
+- 不新增 env flag。
+
+---
+
+## 2. 当前 main 基线
+
+权威路径：`plugins/plugin-attendance/index.cjs`。
+
+| 面 | 本 PR 前 |
+|---|---|
+| 成员 POST | `withAttendanceGroupMemberAccess('add_members')` 之后直接 INSERT（约 45391–45404，基准 SHA） |
+| 负责人 POST | `withPermission('attendance:admin')` 之后直接 INSERT（约 45553–45563，基准 SHA） |
+| 对照门 | `applyAnnualLeaveManualAdjustment`：`user_orgs` ∩ `users.is_active`，否则 `404 USER_NOT_IN_ORG` |
+| 事务回滚 | 插件 `database.transaction` 在 callback 抛错时 `ROLLBACK`（`packages/core-backend/src/integration/db/connection-pool.ts`） |
+
+---
+
+## 3. 批量语义（本 PR 锁定）
+
+`POST /api/attendance/groups/:id/members` 接受 `userId` 和/或 `userIds`。去重、trim 之后：
+
+1. 在**同一个事务**里、**任何 INSERT 之前**，用一条查询取出本批中属于该 org 的活跃成员：
+
+```sql
+SELECT uo.user_id
+  FROM user_orgs uo
+  JOIN users u ON u.id = uo.user_id
+ WHERE uo.org_id = $1
+   AND uo.user_id = ANY($2::text[])
+   AND uo.is_active = true
+   AND u.is_active = true
+```
+
+`$1` 是 actor 已认证 `orgId`（`resolveAttendanceGroupRouteActorContext`），不是 body 里的 org 选择器。
+
+2. 请求顺序里凡是不在结果集中的 id，整批失败：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "USER_NOT_IN_ORG",
+    "message": "Target user is not an active member of this org",
+    "details": [{
+      "code": "USER_NOT_IN_ORG",
+      "rejectedCount": 1,
+      "indexes": [0]
+    }]
+  }
+}
+```
+
+HTTP **404**。`details` 不含 `userId`、日期或其他提交值。`indexes` 是去重后请求顺序里未通过的下标；`rejectedCount` 是这个下标数组的长度。不区分「停用 / 他组织 / 不存在」。
+
+3. 全部通过才执行既有 `INSERT … ON CONFLICT DO NOTHING`。已是成员不是错误：冲突行不出现在 `data.items`，与现在一致。成功才发 `attendance.group.members.changed`。
+
+4. 抛 `HttpError` 时事务回滚。实现上拒绝发生在 INSERT 之前，所以合格 id 也不会先写入再回滚。单测锁定的是「拒绝路径上没有 INSERT 调用」。
+
+`POST /api/attendance/groups/:id/managers` 的 schema 仍是**单个** `userId`（没有 `userIds` 批）。同一谓词、同一 404、同一 `details: [{ userId }]`。检查在 INSERT 之前、同一事务内，因此 `ON CONFLICT DO UPDATE` 不会去摸一条被拒绝的幽灵行。
+
+空 id 列表仍是 400 `VALIDATION_ERROR`（`userId is required`），发生在事务之前。非法 role 仍是 400，且不查库。
+
+缺 `user_orgs` / `users` 表仍走既有 `isDatabaseSchemaError` → 503 `DB_NOT_READY`，不插入。
+
+---
+
+## 4. 实现要点
+
+1. 模块级 `assertActiveOrgMemberUserIds(client, orgId, userIds)`（`index.cjs`，年假调账函数上方）。返回去重后的 id；否则抛 `HttpError(404, 'USER_NOT_IN_ORG', …, details)`。
+2. 成员 POST：事务内先 assert，再按返回列表 INSERT。catch 里 `HttpError` 原样抛出，由 `withAttendanceGroupMemberAccess` 写成 4xx JSON（避免被内层 catch 收成 500）。
+3. 负责人 POST：组存在性检查仍在前（不存在 → 404 `NOT_FOUND`，不查成员）。通过后开事务：assert，再 INSERT。`HttpError` 同样原样抛出，由 `withPermission` 写成 4xx。
+4. 年假调账函数本体不改，避免动它的 SQL 形状；本门的 WHERE 与它逐字对齐（两列 `is_active` + org + user）。
+
+---
+
+## 5. 变异（测试必须能抓住）
+
+| 刀 | 预期 |
+|---|---|
+| 成员 POST 去掉 `assertActiveOrgMemberUserIds`，恢复「直接 INSERT」 | 负向与混合批变成 200；#5899 正向腿因 SQL 不再含 `FROM user_orgs uo` 而红 |
+| 负责人 POST 去掉同一调用 | 停用 / 他组织 / 不存在的负责人写入变成 200，且出现 `INSERT INTO attendance_group_managers` |
+| 谓词删掉 `u.is_active = true` 或 `uo.is_active = true` 或 `JOIN users` | `expectActiveOrgMemberPredicate` 红 |
+| 先 INSERT 再检查 | 混合批负向腿断言「没有 INSERT」而红（单测事务桩不会真的 ROLLBACK） |
+
+本地已做成员 POST 去门变异：`inactive user` 与 `mixed member batch` 得到 200 而不是 404；owner 正向腿缺少 `FROM user_orgs uo`。恢复断言后套件回到绿。详见验证记录。
+
+排班组 POST 与 CSV 自动入组的负向腿同样锁「404 且没有成员 INSERT」。CSV 正向腿锁同步计划里仍有 `ensure_member`，且计划发出前 SQL 含 `FROM user_orgs uo`。
+
+---
+
+## 6. 排班组成员与 CSV 自动入组
+
+同一谓词、同一 404、同一全有或全无。空结果不区分停用、他组织、不存在。
+
+### 6.1 `POST /api/attendance/schedule-groups/:id/members`
+
+事务开头、重叠 `SELECT` 和 `INSERT` 之前：
+
+`assertActiveOrgMemberUserIds(trx, orgId, input.userIds)`
+
+`details` 仍是 values-free 的 `{ code, rejectedCount, indexes }`。坏 id 与合格 id 同批时，合格 id 不插入，后续重叠检查也不跑。调度范围 / admin ACL 仍在这道门之前，不改。这条路由的 `HttpError` JSON 现在带上 `details`。
+
+### 6.2 CSV `autoAssignMembers`
+
+只有**真的会写成考勤组成员**的行进门。与原来的分配分支相同：`autoAssignMembers`，行有 `userId` 和 `workDate`，通过必填校验，不是同 payload 里的重复行，并且考勤组可解析（组已存在，或 prepareOnly 且 `autoCreate` 会建这个组）。没有考勤组字段、组不存在且不自动创建、无效行、重复行：不分配成员，也不因为这些行 404。
+
+三处都查，任一失败则**整批**失败，零成员 INSERT：
+
+1. `POST /api/attendance/import/preview`：在成功 JSON 之前。失败则整次 preview 是 404，不是 200 里夹一条 warning。
+2. `commitAttendanceImportPayload`：行扫描之后、`flushRecordUpserts` 与 `insertAttendanceGroupMembers` 之前。失败则抛出，prepareOnly 计划不返回，`commitSyncImportPlan` 收不到这个用户的 `ensure_member`，同批合格用户的成员效果也不发出。
+3. `insertAttendanceGroupMembers` 在任何 chunk `INSERT` 之前再查一次，挡住 `prepareOnly: false` 的直接调用。
+
+`details` 用导入跳过行的形状。同一个 userId 的每一条会被分配的日期各一条；重复行不计入：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "USER_NOT_IN_ORG",
+    "message": "Target user is not an active member of this org",
+    "details": [{
+      "code": "USER_NOT_IN_ORG",
+      "rejectedCount": 1,
+      "indexes": [0]
+    }]
+  }
+}
+```
+
+`indexes` 是源行下标，不是 userId。preview、sync commit、legacy `POST /api/attendance/import`、async commit 入队、integration sync 的 `HttpError` 响应都带上这份 `details`。
+
+导入路由的组织来自已认证 `user.orgId`。body、query、`x-org-id` 只做一致性断言：与认证组织不同则 404 `NOT_FOUND`，不拿选择器去查成员、也不拿它做导入权限范围。同步 `/preview`、`POST /api/attendance/import/preview-async` 入队之前、以及异步 `buildAsyncPreviewResult` 都走同一成员门。入队前失败是 404，job 不入库。已经入队后成员失效时，job `error` 是 `{ code, message, details }` JSON，`details` 仍是上面的 index 形状，preview 不标成 completed。
+
+W4 冻结计划仍不重算组是否存在。`ensure_member` 在执行前条件复检里再查一次；效果适配器在**任何** group 或 member `INSERT` 之前用同一谓词批量再查。失败抛 `W4C3A_MEMBER_NOT_ACTIVE_IN_ORG`，`status = 404`，`details` 为 index 形状。Worker 把 job 标成 `failed`，`w4_execution_reason_code = USER_NOT_IN_ORG`，`error` 为这份 JSON。既有计划失败原因仍写 `error = NULL`。迁移 `zzzz20260924180000_attendance_roster_org_gate_job_reason` 只为这个 reason 允许非空 `error`。W4 没有 `ensure_manager`。
+
+组织成员未命中时，条件复检和执行适配器记**同一个**终态：`USER_NOT_IN_ORG`，`error` 为上面的 index JSON。结构漂移（指纹、行数、组被改掉）仍是 `ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED` 且 `error` 为空。同一条 `ensure_member` 上，结构检查先于活跃成员查询：结构失败先返回 false，不会被改写成 `USER_NOT_IN_ORG`。活跃成员查询未命中则先记下该 userId，循环结束后一次抛出，indexes 覆盖本批全部未命中的 `ensure_member`。Worker 在 `recheckPreconditions` 和 `executeVerifiedPlan` 两处都捕获这个错误，所以入队后停用无论被哪一阶段拦住，终态 reason 和 details 相同。
+
+成员查询与随后的成员 INSERT 在同一事务里，并对命中的 `user_orgs` / `users` 行加 `FOR SHARE OF uo, u`。并发把 `is_active` 改成 false 的 `UPDATE` 会等到该事务提交。检查通过后、INSERT 之前，停用不能先提交。锁只打在本批 userId 对应的行上，不锁整张表。查不到行时没有锁；那种情况直接 404，不会 INSERT。插件同步写入、W4 条件复检、W4 效果适配器三处 SQL 都带这把锁。
+
+### 6.3 历史行
+
+不删除、不更新已经落库的成员、负责人、排班组成员。只读查找 SQL 写在验证记录里。
+
+### 6.4 导入链读接口的组织
+
+`withAttendanceImportPermission` 在权限码之后调用 `resolveAttendanceImportActor`。没有已认证组织是 403 `FORBIDDEN` “Authenticated organization not found”。body / query / `x-org-id` 与已认证组织不一致是 404 `NOT_FOUND` “Organization not found”，处理函数不跑。处理函数用 `req.attendanceImportAccess.orgId`，不再调用 `getOrgId(req)`。
+
+没有选择器，以及选择器是空字符串或只含空白时，不把选择器当成另一个组织，也不回落到 `'default'`。`getOrgId` 对空字符串选择器会落到 `DEFAULT_ORG_ID`（`'default'`）；导入链不用它。已认证组织按 `user.orgId`、`user.workspaceId`、`req.authenticatedTenantId` 取第一个去空白后非空的值。空字符串 claim 会跳过，所以它不会挡住后面的 token 租户。JWT 写入 `tenantId` / `authenticatedTenantId`，不写 `user.orgId`。这种 token、且请求里没有组织选择器时，`POST /api/attendance/import/prepare`、legacy `POST /api/attendance/import`、`POST /api/attendance/integrations/:id/sync` 使用 token 租户。
+
+改过的导入链入口：
+
+- `GET /api/attendance/import/jobs/:id`
+- `GET /api/attendance/import/batches`
+- `GET /api/attendance/import/batches/:id`
+- `GET /api/attendance/import/batches/:id/items`
+- `GET /api/attendance/import/batches/:id/export.csv`
+- `GET` / `PUT /api/attendance/import/template-prefs`
+- `POST /api/attendance/import/upload`
+- `POST /api/attendance/import/upload-artifact`
+- `GET /api/attendance/integrations`
+- `GET /api/attendance/integrations/:id/runs`
+- `POST /api/attendance/integrations/:id/sync`
+- `POST /api/attendance/import/prepare` 与 `POST /api/attendance/import`：token 和后续查询用 `importAccess.orgId`
+- `POST` / `PUT` / `DELETE /api/attendance/integrations`：`resolveAuthenticatedAttendanceOrg`（admin 权限包装器，同一 403/404）
+- `POST /api/attendance/import/rollback/:id`：已认证组织，并拒绝不一致的选择器
+
+静态 `GET /api/attendance/import/template` 与 `template.csv` 不读组织数据，但走同一个权限包装器，因此也要求已认证组织；选择器不一致同样 404，响应里没有组织数据。
+
+未改、仍用 `getOrgId(req)` 的不是导入链：排班范围 actor、打卡、记录、薪资模板等。

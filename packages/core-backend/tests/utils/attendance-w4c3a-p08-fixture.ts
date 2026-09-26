@@ -233,6 +233,16 @@ export async function seedP08ActorsAndConfig(
       [orgId, JSON.stringify({ profile: 'original' })],
     )
   }
+  // The frozen plan's ensure_member is rechecked against active user_orgs ∩ users
+  // at write time. The target must already be an active member of the plan org.
+  await pool.query(
+    `INSERT INTO users (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`,
+    [ids.targetUserId],
+  )
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [ids.targetUserId, ids.orgId],
+  )
 }
 
 export async function loadP08Org(

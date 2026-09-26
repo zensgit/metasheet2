@@ -941,6 +941,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     })
     expect(group.status, group.raw).toBe(200)
     const groupId = group.body.data.id as string
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const members = await postJson(`/api/attendance/groups/${groupId}/members`, token, orgId, { userIds: [`${orgId}-worker`] })
     expect(members.status, members.raw).toBe(200)
 
@@ -1792,6 +1793,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
       })
       expect(group.status, group.raw).toBe(200)
       const groupId = group.body.data.id as string
+      await seedActiveIdentity(userId, orgId)
       const members = await postJson(`/api/attendance/groups/${groupId}/members`, token, orgId, { userIds: [userId] })
       expect(members.status, members.raw).toBe(200)
       const inId = randomUUID()
