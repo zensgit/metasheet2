@@ -159,7 +159,9 @@
         :status-action-label="statusActionLabel"
         :status-action-busy="statusActionBusy"
         :attention-item="attendanceOverviewAttentionItem"
-        :requests-total="requests.length"
+        :requests-total="employeeRequestBadgeCount"
+        :request-window-note="requestsWindowNote"
+        :request-window-loading="overviewRequestsLoadingMore || loading"
         :self-service-request-status-items="selfServiceRequestStatusItems"
         :self-service-request-followup="selfServiceRequestFollowup"
         :self-service-recent-requests="selfServiceRecentRequests"
@@ -200,6 +202,7 @@
         @update:punch-outdoor-note-draft="punchOutdoorNoteDraft = $event"
         @status-action="runStatusAction"
         @self-service-action="runSelfServiceAction"
+        @load-more-requests="loadMoreOverviewRequests"
         @change-balance-leave-type="handleChangeSelfBalanceLeaveType"
         @open-balance-trace="handleOpenSelfBalanceTrace"
       >
@@ -631,6 +634,13 @@
             </div>
           </div>
           <small class="attendance__field-hint">{{ calendarTimezoneContextHint }}</small>
+          <OverviewRangeNotice
+            kind="records"
+            :note="recordsWindowNote"
+            :load-more-label="tr('Load earlier days', '加载更早日期')"
+            :loading="overviewRecordsLoadingMore || loading"
+            @load-more="loadMoreOverviewRecords"
+          />
           <div class="attendance__calendar-weekdays">
             <span v-for="day in weekDays" :key="day">{{ day }}</span>
           </div>
@@ -890,6 +900,13 @@
               <span>{{ tr('Recent requests', '最近申请') }}</span>
               <button class="attendance__btn" :disabled="loading" @click="reloadRequestsWithStatus">{{ tr('Reload', '重载') }}</button>
             </div>
+            <OverviewRangeNotice
+              kind="requests"
+              :note="requestsWindowNote"
+              :load-more-label="tr('Load older requests', '加载更早申请')"
+              :loading="overviewRequestsLoadingMore || loading"
+              @load-more="loadMoreOverviewRequests"
+            />
             <div v-if="requests.length === 0" class="attendance__empty">{{ tr('No requests.', '暂无申请。') }}</div>
             <ul v-else class="attendance__request-list">
               <li
@@ -1052,6 +1069,13 @@
               {{ tr('Owed punch only', '仅欠卡') }}
             </button>
           </div>
+          <OverviewRangeNotice
+            kind="anomalies"
+            :note="anomaliesWindowNote"
+            :load-more-label="tr('Load more anomalies', '加载更多异常')"
+            :loading="overviewAnomaliesLoadingMore || anomaliesLoading || loading"
+            @load-more="loadMoreOverviewAnomalies"
+          />
           <div v-if="anomalies.length > 0" class="attendance__batch-toolbar" data-attendance-batch-toolbar>
             <button
               v-if="attendanceResultEditCapabilityUnknown"
@@ -10287,6 +10311,21 @@ import {
   type BatchAnomalyRowResult,
   type BatchAnomalyRowSnapshot,
 } from './attendance/batchAnomalyResolution'
+import OverviewRangeNotice from './attendance/OverviewRangeNotice.vue'
+import {
+  OVERVIEW_ANOMALIES_PAGE_FLOOR,
+  OVERVIEW_RECORDS_PAGE_FLOOR,
+  OVERVIEW_REQUESTS_PAGE_FLOOR,
+  REPORT_RECORDS_PAGE_SIZE,
+  emptyOverviewWindow,
+  nextOverviewPage,
+  overviewRangeNotice,
+  overviewWindowPageSize,
+  readPagedPayload,
+  reduceOverviewPage,
+  type OverviewRangeKind,
+  type OverviewWindow,
+} from './attendance/overviewRangeWindow'
 import {
   BULK_BALANCE_ADJUST_MAX_USERS,
   bulkBalanceAdjustErrorText,
@@ -15873,9 +15912,35 @@ const toDate = ref(toDateInput(today))
 const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(fromDate.value, toDate.value))
 
 const recordsPage = ref(1)
-const recordsPageSize = 20
 const recordsTotal = ref(0)
-const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
+const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / REPORT_RECORDS_PAGE_SIZE)))
+const recordsWindow = ref<OverviewWindow>(emptyOverviewWindow())
+const requestsWindow = ref<OverviewWindow>(emptyOverviewWindow())
+const anomaliesWindow = ref<OverviewWindow>(emptyOverviewWindow())
+const overviewRecordsLoadingMore = ref(false)
+const overviewRequestsLoadingMore = ref(false)
+const overviewAnomaliesLoadingMore = ref(false)
+let recordsWindowGeneration = 0
+let requestsWindowGeneration = 0
+let anomaliesWindowGeneration = 0
+
+const employeeRequestBadgeCount = computed(() => (
+  requestsWindow.value.truncated ? requestsWindow.value.total : requests.value.length
+))
+
+function formatOverviewNotice(kind: OverviewRangeKind, window: OverviewWindow, pendingInLoaded = 0): string {
+  if (!showOverview.value) return ''
+  const copy = overviewRangeNotice(kind, window, pendingInLoaded)
+  return copy ? tr(copy.en, copy.zh) : ''
+}
+
+const recordsWindowNote = computed(() => formatOverviewNotice('records', recordsWindow.value))
+const requestsWindowNote = computed(() => formatOverviewNotice(
+  'requests',
+  requestsWindow.value,
+  countRequestsByStatus('pending'),
+))
+const anomaliesWindowNote = computed(() => formatOverviewNotice('anomalies', anomaliesWindow.value))
 const calendarDisplayPrefs = loadCalendarDisplayPrefs()
 const showLunarLabel = ref(calendarDisplayPrefs.showLunar)
 const showHolidayBadge = ref(calendarDisplayPrefs.showHoliday)
@@ -22267,12 +22332,22 @@ async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
   }
 }
 
-async function loadRecords() {
+async function loadRecords(options?: { append?: boolean }) {
+  const append = Boolean(options?.append && showOverview.value)
+  if (append && nextOverviewPage(recordsWindow.value) == null) return
+  if (!append) recordsWindowGeneration += 1
+  const generation = recordsWindowGeneration
+  const pageSize = showOverview.value
+    ? overviewWindowPageSize(fromDate.value, toDate.value, OVERVIEW_RECORDS_PAGE_FLOOR)
+    : REPORT_RECORDS_PAGE_SIZE
+  const page = append
+    ? (nextOverviewPage(recordsWindow.value) ?? recordsWindow.value.page)
+    : (showOverview.value ? 1 : recordsPage.value)
   const query = buildQuery({
     from: fromDate.value,
     to: toDate.value,
-    page: String(recordsPage.value),
-    pageSize: String(recordsPageSize),
+    page: String(page),
+    pageSize: String(pageSize),
     orgId: normalizedOrgId(),
     userId: normalizedUserId(),
   })
@@ -22281,11 +22356,31 @@ async function loadRecords() {
   if (!response.ok || !data.ok) {
     throw createApiError(response, data, tr('Failed to load records', '加载记录失败'))
   }
-  resetRecordTimelineState()
-  records.value = data.data.items
-  recordsTotal.value = data.data.total
-  recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
-  recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
+  if (generation !== recordsWindowGeneration) return
+  const payload = readPagedPayload(data)
+  if (!append) resetRecordTimelineState()
+  if (showOverview.value) {
+    const next = reduceOverviewPage({
+      previousItems: append ? records.value : [],
+      previousFetched: append ? recordsWindow.value.fetched : 0,
+      incoming: payload.items as AttendanceRecord[],
+      page,
+      pageSize,
+      total: payload.total,
+      append,
+      keyOf: record => String(record.work_date || '').slice(0, 10) || String(record.id || ''),
+    })
+    records.value = next.items
+    recordsWindow.value = next.window
+    recordsTotal.value = next.window.total
+  } else {
+    records.value = payload.items as AttendanceRecord[]
+    recordsTotal.value = payload.total
+    recordsWindow.value = emptyOverviewWindow()
+  }
+  const reportFields = data?.data?.reportFields
+  recordReportFields.value = Array.isArray(reportFields) ? reportFields : []
+  recordReportFieldConfig.value = data?.data?.reportFieldConfig ?? null
 }
 
 async function toggleRecordTimeline(record: AttendanceRecord): Promise<void> {
@@ -22305,12 +22400,28 @@ async function toggleRecordTimeline(record: AttendanceRecord): Promise<void> {
   await loadRecordTimeline(record)
 }
 
-async function loadRequests() {
+function applyFocusedAttendanceRequest(
+  items: AttendanceRequest[],
+  focused: AttendanceRequest | null,
+): AttendanceRequest[] {
+  if (!focused) return items
+  return [focused, ...items.filter(item => item.id !== focused.id)]
+}
+
+async function loadRequests(options?: { append?: boolean }) {
+  const append = Boolean(options?.append && showOverview.value)
+  if (append && nextOverviewPage(requestsWindow.value) == null) return
+  if (!append) requestsWindowGeneration += 1
+  const generation = requestsWindowGeneration
+  const pageSize = showOverview.value
+    ? overviewWindowPageSize(fromDate.value, toDate.value, OVERVIEW_REQUESTS_PAGE_FLOOR)
+    : 10
+  const page = append ? (nextOverviewPage(requestsWindow.value) ?? 1) : 1
   const query = buildQuery({
     from: fromDate.value,
     to: toDate.value,
-    page: '1',
-    pageSize: '10',
+    page: String(page),
+    pageSize: String(pageSize),
     orgId: normalizedOrgId(),
     userId: normalizedUserId(),
   })
@@ -22319,11 +22430,28 @@ async function loadRequests() {
   if (!response.ok || !data.ok) {
     throw new Error(readErrorMessage(data, tr('Failed to load requests', '加载申请失败')))
   }
-  const loadedRequests = Array.isArray(data.data.items) ? data.data.items as AttendanceRequest[] : []
+  if (generation !== requestsWindowGeneration) return
+  const payload = readPagedPayload(data)
+  const loadedRequests = payload.items as AttendanceRequest[]
   const focusedRequest = await loadFocusedAttendanceRequestBestEffort()
-  requests.value = focusedRequest
-    ? [focusedRequest, ...loadedRequests.filter(item => item.id !== focusedRequest.id)]
-    : loadedRequests
+  if (generation !== requestsWindowGeneration) return
+  if (!showOverview.value) {
+    requests.value = applyFocusedAttendanceRequest(loadedRequests, focusedRequest)
+    requestsWindow.value = emptyOverviewWindow()
+    return
+  }
+  const next = reduceOverviewPage({
+    previousItems: append ? requests.value : [],
+    previousFetched: append ? requestsWindow.value.fetched : 0,
+    incoming: loadedRequests,
+    page,
+    pageSize,
+    total: payload.total,
+    append,
+    keyOf: item => String(item.id || ''),
+  })
+  requests.value = applyFocusedAttendanceRequest(next.items, focusedRequest)
+  requestsWindow.value = next.window
 }
 
 function normalizeShiftSwapRequest(row: Record<string, any>): AttendanceShiftSwapRequest | null {
@@ -22678,16 +22806,26 @@ async function confirmMissedPunchReminder(): Promise<void> {
   }
 }
 
-async function loadAnomalies() {
-  clearAttendanceResultEditTransientState()
-  anomalies.value = []
-  anomaliesLoading.value = true
+async function loadAnomalies(options?: { append?: boolean }) {
+  const append = Boolean(options?.append && showOverview.value)
+  if (append && nextOverviewPage(anomaliesWindow.value) == null) return
+  if (!append) {
+    clearAttendanceResultEditTransientState()
+    anomalies.value = []
+    anomaliesLoading.value = true
+    anomaliesWindowGeneration += 1
+  }
+  const generation = anomaliesWindowGeneration
   try {
+    const pageSize = showOverview.value
+      ? overviewWindowPageSize(fromDate.value, toDate.value, OVERVIEW_ANOMALIES_PAGE_FLOOR)
+      : 50
+    const page = append ? (nextOverviewPage(anomaliesWindow.value) ?? 1) : 1
     const query = buildQuery({
       from: fromDate.value,
       to: toDate.value,
-      page: '1',
-      pageSize: '50',
+      page: String(page),
+      pageSize: String(pageSize),
       orgId: normalizedOrgId(),
       userId: normalizedUserId(),
       filter: anomalyFilter.value === 'owed_punch' ? 'owed_punch' : undefined,
@@ -22697,9 +22835,27 @@ async function loadAnomalies() {
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load anomalies', '加载异常失败')))
     }
-    anomalies.value = data.data?.items ?? []
+    if (generation !== anomaliesWindowGeneration) return
+    const payload = readPagedPayload(data)
+    if (!showOverview.value) {
+      anomalies.value = payload.items as AttendanceAnomaly[]
+      anomaliesWindow.value = emptyOverviewWindow()
+      return
+    }
+    const next = reduceOverviewPage({
+      previousItems: append ? anomalies.value : [],
+      previousFetched: append ? anomaliesWindow.value.fetched : 0,
+      incoming: payload.items as AttendanceAnomaly[],
+      page,
+      pageSize,
+      total: payload.total,
+      append,
+      keyOf: item => String(item.recordId || ''),
+    })
+    anomalies.value = next.items
+    anomaliesWindow.value = next.window
   } finally {
-    anomaliesLoading.value = false
+    if (!append) anomaliesLoading.value = false
   }
 }
 
@@ -22708,11 +22864,17 @@ async function setAnomalyFilter(filter: AttendanceAnomalyFilter): Promise<void> 
   anomalyFilter.value = filter
   try {
     await loadAnomalies()
+    const count = showOverview.value && anomaliesWindow.value.truncated
+      ? `${anomaliesWindow.value.fetched} of ${anomaliesWindow.value.total}`
+      : String(anomalies.value.length)
+    const countZh = showOverview.value && anomaliesWindow.value.truncated
+      ? `${anomaliesWindow.value.fetched}/${anomaliesWindow.value.total}`
+      : `${anomalies.value.length} 条`
     setStatus(
       appendStatusContext(
         tr(
-          `Anomalies loaded (${anomalyFilterLabel(filter)}: ${anomalies.value.length}).`,
-          `异常已加载（${anomalyFilterLabel(filter)}：${anomalies.value.length} 条）。`,
+          `Anomalies loaded (${anomalyFilterLabel(filter)}: ${count}).`,
+          `异常已加载（${anomalyFilterLabel(filter)}：${countZh}）。`,
         ),
         anomaliesTimezoneContextHint.value,
       ),
@@ -22853,14 +23015,25 @@ async function refreshVisibleSurfaceWithStatus() {
   await refreshOverviewWithStatus()
 }
 
+function overviewStatusCount(window: OverviewWindow, loadedLength: number): { en: string; zh: string } {
+  if (showOverview.value && window.truncated) {
+    return {
+      en: `${window.fetched} of ${window.total}`,
+      zh: `${window.fetched}/${window.total}`,
+    }
+  }
+  return { en: String(loadedLength), zh: `${loadedLength} 条` }
+}
+
 async function reloadAnomaliesWithStatus() {
   try {
     await loadAnomalies()
+    const count = overviewStatusCount(anomaliesWindow.value, anomalies.value.length)
     setStatus(
       appendStatusContext(
         tr(
-          `Anomalies loaded (${anomalyFilterLabel()}: ${anomalies.value.length}).`,
-          `异常已加载（${anomalyFilterLabel()}：${anomalies.value.length} 条）。`,
+          `Anomalies loaded (${anomalyFilterLabel()}: ${count.en}).`,
+          `异常已加载（${anomalyFilterLabel()}：${count.zh}）。`,
         ),
         anomaliesTimezoneContextHint.value,
       ),
@@ -22899,9 +23072,10 @@ async function reloadRequestReportWithStatus() {
 async function reloadRecordsWithStatus() {
   try {
     await loadRecords()
+    const count = overviewStatusCount(recordsWindow.value, records.value.length)
     setStatus(
       appendStatusContext(
-        tr(`Records loaded (${records.value.length}).`, `记录已加载（${records.value.length} 条）。`),
+        tr(`Records loaded (${count.en}).`, `记录已加载（${count.zh}）。`),
         recordsTimezoneContextHint.value,
       ),
     )
@@ -22918,9 +23092,10 @@ async function reloadRecordsWithStatus() {
 async function reloadRequestsWithStatus() {
   try {
     await loadRequests()
+    const count = overviewStatusCount(requestsWindow.value, requests.value.length)
     setStatus(
       appendStatusContext(
-        tr(`Requests loaded (${requests.value.length}).`, `申请已加载（${requests.value.length} 条）。`),
+        tr(`Requests loaded (${count.en}).`, `申请已加载（${count.zh}）。`),
         requestTimezoneContextHint.value,
       ),
     )
@@ -22931,6 +23106,84 @@ async function reloadRequestsWithStatus() {
       requestTimezoneContextHint.value,
       'refresh',
     )
+  }
+}
+
+async function loadMoreOverviewRecords() {
+  if (!showOverview.value || overviewRecordsLoadingMore.value || loading.value) return
+  if (nextOverviewPage(recordsWindow.value) == null) return
+  overviewRecordsLoadingMore.value = true
+  try {
+    await loadRecords({ append: true })
+    const count = overviewStatusCount(recordsWindow.value, records.value.length)
+    setStatus(
+      appendStatusContext(
+        tr(`Earlier records loaded (${count.en}).`, `已加载更早记录（${count.zh}）。`),
+        recordsTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load records', '加载记录失败'),
+      recordsTimezoneContextHint.value,
+      'refresh',
+    )
+  } finally {
+    overviewRecordsLoadingMore.value = false
+  }
+}
+
+async function loadMoreOverviewRequests() {
+  if (!showOverview.value || overviewRequestsLoadingMore.value || loading.value) return
+  if (nextOverviewPage(requestsWindow.value) == null) return
+  overviewRequestsLoadingMore.value = true
+  try {
+    await loadRequests({ append: true })
+    const count = overviewStatusCount(requestsWindow.value, requests.value.length)
+    setStatus(
+      appendStatusContext(
+        tr(`Older requests loaded (${count.en}).`, `已加载更早申请（${count.zh}）。`),
+        requestTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load requests', '加载申请失败'),
+      requestTimezoneContextHint.value,
+      'refresh',
+    )
+  } finally {
+    overviewRequestsLoadingMore.value = false
+  }
+}
+
+async function loadMoreOverviewAnomalies() {
+  if (!showOverview.value || overviewAnomaliesLoadingMore.value || anomaliesLoading.value || loading.value) return
+  if (nextOverviewPage(anomaliesWindow.value) == null) return
+  overviewAnomaliesLoadingMore.value = true
+  try {
+    await loadAnomalies({ append: true })
+    const count = overviewStatusCount(anomaliesWindow.value, anomalies.value.length)
+    setStatus(
+      appendStatusContext(
+        tr(
+          `More anomalies loaded (${anomalyFilterLabel()}: ${count.en}).`,
+          `已加载更多异常（${anomalyFilterLabel()}：${count.zh}）。`,
+        ),
+        anomaliesTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load anomalies', '加载异常失败'),
+      anomaliesTimezoneContextHint.value,
+      'refresh',
+    )
+  } finally {
+    overviewAnomaliesLoadingMore.value = false
   }
 }
 
