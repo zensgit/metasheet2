@@ -88,6 +88,20 @@ const scriptExecPath = scriptExecPathFor(scriptPath)
 // Without PSModulePath it builds its own default. Every child of this file inherits
 // process.env (childEnv copies it), so dropping it here covers every spawn.
 if (process.env.UPGRADE_INPLACE_TEST_SHELL) delete process.env.PSModulePath
+// GitHub's windows-latest TEMP is C:\Users\RUNNER~1\AppData\Local\Temp, an 8.3 SHORT
+// spelling. The script's walk-based relative paths (Copy-TreeExcludingNodeModules,
+// Assert-PluginTreesMatchPackage, ...) take `$_.FullName.Substring($root.Length)`
+// with $root from Resolve-Path, which keeps a short spelling, while Get-ChildItem
+// returns long FullNames (both 5.1 and pwsh 7 on Windows): every relative path comes
+// out shifted. That is a pre-existing limit of the script for GIVEN paths that contain
+// 8.3 segments -- the pre-R59 script fails the same five tests the same way under a
+// short TEMP -- and not what this file tests, so on Windows every fixture lives under
+// the long spelling of the temp dir (children inherit it).
+if (process.platform === 'win32') {
+  const longTempDir = fs.realpathSync.native(os.tmpdir())
+  process.env.TEMP = longTempDir
+  process.env.TMP = longTempDir
+}
 
 // Strips PowerShell `<# ... #>` block comments (used here for rich, deliberately
 // quotes-the-forbidden-syntax documentation of WHY -Exclude is banned) before the
