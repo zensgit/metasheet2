@@ -110,6 +110,18 @@ type RemoteRecordPatchOptions = {
 
 // --- Serialisation helpers ---
 
+// The explicit "no sort" / "no filter" payloads persistSortFilter sends when the toolbar holds no rules.
+// buildSortInfo / buildFilterInfoFromNodes return `undefined` for an empty list, and `undefined` is dropped
+// by JSON.stringify — the PATCH then carries no such key and the server KEEPS the stored rules, so clearing
+// the last sort/filter was never saved (客户反馈 2026-09-24 #5). An explicit empty value is stored as-is by
+// PATCH /views/:id and, on the personal path, overrides the shared facet instead of falling back to it.
+export function emptySortInfo(): { rules: [] } {
+  return { rules: [] }
+}
+export function emptyFilterInfo(conjunction: FilterConjunction = 'and'): { conjunction: FilterConjunction; conditions: [] } {
+  return { conjunction, conditions: [] }
+}
+
 export function buildSortInfo(rules: SortRule[]): { rules: Array<{ fieldId: string; desc: boolean }> } | undefined {
   if (!rules.length) return undefined
   return { rules: rules.map((r) => ({ fieldId: r.fieldId, desc: r.direction === 'desc' })) }
@@ -679,7 +691,9 @@ export function useMultitableGrid(opts: {
       rowActions.value = data.meta?.permissions?.rowActions ?? null
       rowActionOverrides.value = data.meta?.permissions?.rowActionOverrides ?? {}
       if (serverPage) page.value = serverPage
+      // No view ⇒ the server applied no sort/filter, so the toolbar must not claim any (客户反馈 2026-09-24 #5).
       if (data.view) syncFromView(data.view)
+      else resetSortFilterState()
     } catch (e: any) {
       if (requestId !== latestLoadRequestId) return
       error.value = e.message ?? fallback('grid.errorLoadViewData')
@@ -785,25 +799,40 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  // Empty sort/filter state — what a view with no stored rules (e.g. a freshly created, blank view) means.
+  function resetSortFilterState() {
+    sortRules.value = []
+    filterRules.value = []
+    filterGroups.value = []
+    filterConjunction.value = 'and'
+    nestedFilterNodes.value = null
+    sortFilterDirty.value = false
+  }
+
   function syncFromView(view: { filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[]; fieldOrder?: string[] }) {
+    // The loaded view is AUTHORITATIVE for sort + filter (客户反馈 2026-09-24 #5): a view whose sortInfo has no
+    // `rules` array (a new view is created with `sortInfo: {}`) or whose filterInfo has no `conditions` means
+    // "no sort" / "no filter", NOT "keep whatever the previous view left in the toolbar". Keeping it showed the
+    // previous view's 排序 badge + header arrows on the new view, and the next 应用 / header click / 清除筛选
+    // then PERSISTED those foreign rules into it.
     // Parse server sort
-    if (view.sortInfo && Array.isArray((view.sortInfo as any).rules)) {
-      sortRules.value = ((view.sortInfo as any).rules as any[]).map((r: any) => ({
-        fieldId: String(r.fieldId ?? ''),
-        direction: r.desc ? 'desc' as const : 'asc' as const,
-      })).filter((r) => r.fieldId)
-    }
+    const rawSortRules = view.sortInfo && Array.isArray((view.sortInfo as any).rules)
+      ? ((view.sortInfo as any).rules as any[])
+      : []
+    sortRules.value = rawSortRules.map((r: any) => ({
+      fieldId: String(r?.fieldId ?? ''),
+      direction: r?.desc ? 'desc' as const : 'asc' as const,
+    })).filter((r) => r.fieldId)
     // Parse server filter (nesting-aware). The flat `filterRules` mirror the top-level LEAF conditions for
     // the current flat toolbar; if the stored filter has any subgroup, the full ordered tree is kept in
     // `nestedFilterNodes` so save round-trips faithfully (the old flat parse silently dropped group nodes —
     // a group has no fieldId, so `.filter(r => r.fieldId)` discarded it and the next save lost it).
-    if (view.filterInfo && Array.isArray((view.filterInfo as any).conditions)) {
-      const tree = parseFilterTree(view.filterInfo)
-      filterConjunction.value = tree?.conjunction ?? 'and'
-      filterRules.value = tree ? tree.nodes.filter((n): n is FilterRule => !isFilterGroup(n)) : []
-      filterGroups.value = tree ? tree.nodes.filter((n): n is FilterGroup => isFilterGroup(n)) : []
-      nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
-    }
+    // parseFilterTree returns null for an absent / `{}` / no-conditions filterInfo ⇒ everything cleared.
+    const tree = parseFilterTree(view.filterInfo)
+    filterConjunction.value = tree?.conjunction ?? 'and'
+    filterRules.value = tree ? tree.nodes.filter((n): n is FilterRule => !isFilterGroup(n)) : []
+    filterGroups.value = tree ? tree.nodes.filter((n): n is FilterGroup => isFilterGroup(n)) : []
+    nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
     if (view.hiddenFieldIds) hiddenFieldIds.value = [...view.hiddenFieldIds]
     // Slice 3b: capture the effective (server-resolved, personal-overlay-applied) column order for this view.
     // Only string ids are kept; membership is NOT validated here — visibleFields fail-softs stale/unknown ids.
@@ -839,11 +868,17 @@ export function useMultitableGrid(opts: {
 
   async function persistSortFilter(viewId: string) {
     try {
+      // Always send BOTH facets with an explicit value: an empty toolbar persists the explicit empty
+      // (emptySortInfo / emptyFilterInfo) so clearing the last rule is actually saved — an omitted key
+      // would leave the stored rules in place (shared PATCH) or fall back to the shared rules (personal).
+      const sortInfo = buildSortInfo(sortRules.value) ?? emptySortInfo()
+      const filterInfo = (nestedFilterNodes.value
+        ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
+        : buildFilterInfoFromNodes([...filterRules.value, ...filterGroups.value], filterConjunction.value))
+        ?? emptyFilterInfo(filterConjunction.value)
       await persistViewConfig(viewId, {
-        sortInfo: buildSortInfo(sortRules.value) as Record<string, unknown> | undefined,
-        filterInfo: (nestedFilterNodes.value
-          ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
-          : buildFilterInfoFromNodes([...filterRules.value, ...filterGroups.value], filterConjunction.value)) as Record<string, unknown> | undefined,
+        sortInfo: sortInfo as Record<string, unknown>,
+        filterInfo: filterInfo as Record<string, unknown>,
       })
       sortFilterDirty.value = false
     } catch {
@@ -1420,7 +1455,10 @@ export function useMultitableGrid(opts: {
   watch(
     [opts.sheetId, opts.viewId],
     () => {
-      sortFilterDirty.value = false
+      // Drop the previous view's sort/filter the moment the view changes (客户反馈 2026-09-24 #5). Waiting for
+      // the load's syncFromView is not enough: until it lands — or forever, if the load fails — the toolbar
+      // and header arrows would show the OLD view's rules, and a header click / 应用 would persist them here.
+      resetSortFilterState()
       clearEditHistory()
       dismissConflict()
       if (opts.sheetId.value) loadViewData(0)
