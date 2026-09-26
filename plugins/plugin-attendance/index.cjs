@@ -579,6 +579,8 @@ const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
 let rbacDegraded = false
 let autoAbsenceTimeout = null
 let autoAbsenceInterval = null
+let autoAbsenceScheduleGeneration = 0
+const autoAbsenceTimers = new Set()
 let lastAutoAbsenceKey = ''
 let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
@@ -7541,18 +7543,37 @@ function detectCsvHeaderIndex(csvText, delimiter) {
   return found ? detectedIndex : 0
 }
 
-function normalizeCsvWorkDate(value) {
+function resolveImportCsvWorkDateTimeZone({ ruleTimezone, payloadTimezone, groupTimezone } = {}) {
+  const candidates = [ruleTimezone, payloadTimezone, groupTimezone]
+  for (const candidate of candidates) {
+    const zone = typeof candidate === 'string' ? candidate.trim() : ''
+    if (zone && isValidTimeZoneIdentifier(zone)) return zone
+  }
+  return null
+}
+
+function isCsvEpochWorkDateValue(value) {
+  if (value === undefined || value === null) return false
+  const text = String(value).trim()
+  if (!text) return false
+  const numeric = text.replace(/[^0-9]/g, '')
+  return /^\d{13}$/.test(numeric) || /^\d{10}$/.test(numeric)
+}
+
+const CSV_EPOCH_TIMEZONE_WARNING = 'CSV date epoch requires an attendance IANA timezone'
+
+function normalizeCsvWorkDate(value, timeZone) {
   if (value === undefined || value === null) return null
   const text = String(value).trim()
   if (!text) return null
   const numeric = text.replace(/[^0-9]/g, '')
-  if (/^\d{13}$/.test(numeric)) {
-    const date = new Date(Number(numeric))
-    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
-  }
-  if (/^\d{10}$/.test(numeric)) {
-    const date = new Date(Number(numeric) * 1000)
-    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
+  if (/^\d{13}$/.test(numeric) || /^\d{10}$/.test(numeric)) {
+    const epochMs = /^\d{13}$/.test(numeric) ? Number(numeric) : Number(numeric) * 1000
+    const date = new Date(epochMs)
+    if (Number.isNaN(date.getTime())) return null
+    const zone = resolveImportCsvWorkDateTimeZone({ ruleTimezone: timeZone })
+    if (!zone) return null
+    return toWorkDate(date, zone)
   }
   const cleaned = text.split(' ')[0].trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned
@@ -7681,7 +7702,7 @@ function resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows }) {
   }
 }
 
-function buildImportRowFromCsvRawRow(header, rawRow) {
+function buildImportRowFromCsvRawRow(header, rawRow, timeZone) {
   const fields = {}
   let hasValue = false
   header.forEach((key, index) => {
@@ -7692,10 +7713,17 @@ function buildImportRowFromCsvRawRow(header, rawRow) {
   })
   if (!hasValue) return null
 
-  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.work_date ?? fields.date)
+  const rawWorkDate = fields['日期'] ?? fields.workDate ?? fields.work_date ?? fields.date
+  const workDate = normalizeCsvWorkDate(rawWorkDate, timeZone)
+  const workDateWarning = !workDate
+    && isCsvEpochWorkDateValue(rawWorkDate)
+    && !resolveImportCsvWorkDateTimeZone({ ruleTimezone: timeZone })
+    ? CSV_EPOCH_TIMEZONE_WARNING
+    : undefined
   const userId = fields.UserId ?? fields.userId ?? fields.user_id ?? fields['用户ID']
   return {
     workDate: workDate ?? '',
+    ...(workDateWarning ? { workDateWarning } : {}),
     fields,
     userId: userId ? String(userId).trim() : undefined,
   }
@@ -7716,7 +7744,7 @@ function finalizeImportCsvIteration({ seenRows, header, rowCount, limitExceeded,
   return { rowCount, warnings, limitExceeded, maxRows }
 }
 
-function iterateImportRowsFromCsv({ csvText, csvOptions, maxRows, onRow }) {
+function iterateImportRowsFromCsv({ csvText, csvOptions, maxRows, onRow, timeZone }) {
   const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
   if (typeof csvText !== 'string' || !csvText.trim()) {
     return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
@@ -7739,7 +7767,7 @@ function iterateImportRowsFromCsv({ csvText, csvOptions, maxRows, onRow }) {
       limitExceeded = true
       return false
     }
-    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    const row = buildImportRowFromCsvRawRow(header, rawRow, timeZone)
     if (!row) return true
     const nextIndex = rowCount
     rowCount += 1
@@ -7756,7 +7784,7 @@ function iterateImportRowsFromCsv({ csvText, csvOptions, maxRows, onRow }) {
   })
 }
 
-async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onRow }) {
+async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onRow, timeZone }) {
   const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
   if (typeof csvText !== 'string' || !csvText.trim()) {
     return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
@@ -7779,7 +7807,7 @@ async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onR
       limitExceeded = true
       return false
     }
-    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    const row = buildImportRowFromCsvRawRow(header, rawRow, timeZone)
     if (!row) return true
     const nextIndex = rowCount
     rowCount += 1
@@ -7828,7 +7856,7 @@ async function detectCsvHeaderRowIndexFromFile(csvPath, delimiter) {
   return firstNonEmptyIndex !== null ? firstNonEmptyIndex : 0
 }
 
-async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow }) {
+async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow, timeZone }) {
   const delimiter = csvOptions?.delimiter || ','
   const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
   const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
@@ -7860,7 +7888,7 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
       limitExceeded = true
       return false
     }
-    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    const row = buildImportRowFromCsvRawRow(header, rawRow, timeZone)
     if (!row) return true
     const nextIndex = rowCount
     rowCount += 1
@@ -8047,18 +8075,43 @@ async function validateImportUploadCsvOrThrow({ csvPath, csvOptions }) {
   }
 }
 
-function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
+function buildRowsFromCsv({ csvText, csvOptions, maxRows, timeZone }) {
   const rows = []
   const result = iterateImportRowsFromCsv({
     csvText,
     csvOptions,
     maxRows,
+    timeZone,
     onRow: (row) => {
       rows.push(row)
       return true
     },
   })
   return { rows, warnings: result.warnings, limitExceeded: result.limitExceeded, maxRows: result.maxRows }
+}
+
+async function resolveImportCsvCalendarTimeZone(db, orgId, payload) {
+  let ruleTimezone = null
+  try {
+    const baseRule = await loadDefaultRule(db, orgId)
+    ruleTimezone = baseRule?.timezone ?? null
+    const ruleSetId = typeof payload?.ruleSetId === 'string' ? payload.ruleSetId.trim() : ''
+    if (ruleSetId) {
+      const config = await loadRuleSetConfigById(db, orgId, ruleSetId)
+      const override = normalizeRuleOverride(config?.rule)
+      if (override?.timezone && isValidTimeZoneIdentifier(override.timezone)) {
+        ruleTimezone = override.timezone
+      }
+    }
+  } catch (_error) {
+    ruleTimezone = null
+  }
+  const groupSync = payload?.groupSync && typeof payload.groupSync === 'object' ? payload.groupSync : null
+  return resolveImportCsvWorkDateTimeZone({
+    ruleTimezone,
+    payloadTimezone: payload?.timezone,
+    groupTimezone: groupSync?.timezone,
+  })
 }
 
 function ensureCsvRowsWithinLimit(result) {
@@ -12886,6 +12939,28 @@ function computeNextRunTime({ now, timeZone, hour, minute }) {
   return targetUtc
 }
 
+function parseScheduleClock(runAt) {
+  const [hourStr, minuteStr] = String(runAt ?? '').split(':')
+  const parsedHour = parseInt(hourStr, 10)
+  const parsedMinute = parseInt(minuteStr ?? '0', 10)
+  return {
+    hours: Number.isFinite(parsedHour) ? Math.min(23, Math.max(0, parsedHour)) : 0,
+    minutes: Number.isFinite(parsedMinute) ? Math.min(59, Math.max(0, parsedMinute)) : 0,
+  }
+}
+
+function computeAutoAbsenceNextRunAt({ now, timeZone, runAt }) {
+  const zone = resolveTimeZone(timeZone, '')
+  if (!zone) return null
+  const { hours, minutes } = parseScheduleClock(runAt)
+  return computeNextRunTime({
+    now: now || new Date(),
+    timeZone: zone,
+    hour: hours,
+    minute: minutes,
+  })
+}
+
 async function performHolidaySync({ db, logger, orgId, settings, payload }) {
   const syncConfig = resolveHolidaySyncConfig(settings, payload)
   const years = resolveHolidaySyncYears(settings, payload)
@@ -14924,6 +14999,10 @@ async function loadSettings(db, { failClosed = false } = {}) {
 // settings per case (the 60s TTL would otherwise leak settings across tests).
 function resetAttendanceSettingsCacheForTests() {
   settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
+}
+
+function primeAttendanceSettingsCacheForTests(raw) {
+  settingsCache = { value: normalizeSettings(raw ?? {}), loadedAt: Date.now() }
 }
 
 async function getSettings(db) {
@@ -23296,6 +23375,7 @@ async function generateAbsenceRecords(db, orgId, workDate, timezone, userIds) {
 }
 
 function clearAutoAbsenceSchedule() {
+  autoAbsenceScheduleGeneration += 1
   if (autoAbsenceTimeout) {
     clearTimeout(autoAbsenceTimeout)
     autoAbsenceTimeout = null
@@ -23304,6 +23384,8 @@ function clearAutoAbsenceSchedule() {
     clearInterval(autoAbsenceInterval)
     autoAbsenceInterval = null
   }
+  for (const timer of autoAbsenceTimers) clearTimeout(timer)
+  autoAbsenceTimers.clear()
 }
 
 function clearHolidaySyncSchedule() {
@@ -23533,85 +23615,135 @@ async function runAutoAbsenceForOrgDate(db, options) {
   }
 }
 
+const AUTO_ABSENCE_SCHEDULE_RETRY_MS = 60 * 1000
+
+async function loadAutoAbsenceOrgTimeZoneGroups(db, logger) {
+  const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
+  const orgIds = orgRows.length > 0
+    ? [...new Set(orgRows.map(row => row.org_id || DEFAULT_ORG_ID))]
+    : [DEFAULT_ORG_ID]
+  const groups = new Map()
+  for (const orgId of orgIds) {
+    let rule
+    try {
+      rule = await loadDefaultRule(db, orgId)
+    } catch (error) {
+      logger.error('Auto absence schedule skipped org (rule load)', { orgId, error })
+      continue
+    }
+    const timeZone = resolveTimeZone(rule?.timezone, DEFAULT_RULE.timezone)
+    if (!groups.has(timeZone)) groups.set(timeZone, [])
+    groups.get(timeZone).push(orgId)
+  }
+  return groups
+}
+
+async function runAutoAbsenceTick({ db, logger, emit, w4Boundary, orgIds, lookbackDays }) {
+  // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
+  // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
+  if (!w4Boundary) {
+    logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
+    return
+  }
+  // Per (org, offset) isolation: one org/date failure must not skip the rest of the tick.
+  for (const orgId of orgIds) {
+    let rule
+    try {
+      rule = await loadDefaultRule(db, orgId)
+    } catch (error) {
+      logger.error('Auto absence job failed for org (rule load)', { orgId, error })
+      continue
+    }
+    for (let offset = 1; offset <= lookbackDays; offset += 1) {
+      const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
+      const workDate = toWorkDate(targetDate, rule.timezone)
+      try {
+        await runAutoAbsenceForOrgDate(db, {
+          orgId,
+          workDate,
+          rule,
+          logger,
+          emit,
+          w4Boundary,
+          initiator: 'cron',
+        })
+      } catch (error) {
+        // Values-free: orgId/workDate are already-logged identifiers elsewhere in this
+        // module, never the offending business value.
+        logger.error('Auto absence job failed for org/date', { orgId, workDate, error })
+      }
+    }
+  }
+}
+
 function scheduleAutoAbsence({ db, logger, emit, w4Boundary }) {
   clearAutoAbsenceSchedule()
+  const generation = autoAbsenceScheduleGeneration
   const settings = settingsCache.value
   if (!settings.autoAbsence?.enabled) return
 
-  const [hourStr, minuteStr] = settings.autoAbsence.runAt.split(':')
-  const hours = Math.min(23, Math.max(0, parseInt(hourStr, 10)))
-  const minutes = Math.min(59, Math.max(0, parseInt(minuteStr ?? '0', 10)))
-  const now = new Date()
-  const next = new Date(now)
-  next.setHours(hours, minutes, 0, 0)
-  if (next <= now) {
-    next.setDate(next.getDate() + 1)
-  }
-  const delay = next.getTime() - now.getTime()
+  const runAt = settings.autoAbsence.runAt
+  const lookbackDays = settings.autoAbsence.lookbackDays || 1
 
-  const run = async () => {
-    // W4C-2 (#4556 lock §12.3): the cron initiator (P03) never bypasses the canonical
-    // writer — a missing boundary is fail-closed (no silent direct insert), values-free.
-    if (!w4Boundary) {
-      logger.error('Auto absence job skipped: W4 canonical write boundary unavailable')
+  const armRetry = () => {
+    if (generation !== autoAbsenceScheduleGeneration) return
+    const retry = setTimeout(() => {
+      autoAbsenceTimers.delete(retry)
+      if (generation !== autoAbsenceScheduleGeneration) return
+      void arm()
+    }, AUTO_ABSENCE_SCHEDULE_RETRY_MS)
+    autoAbsenceTimers.add(retry)
+  }
+
+  const armZone = (timeZone, orgIds, now) => {
+    if (generation !== autoAbsenceScheduleGeneration) return
+    const nextTimestamp = computeAutoAbsenceNextRunAt({ now, timeZone, runAt })
+    if (!Number.isFinite(nextTimestamp)) {
+      logger.error('Auto absence schedule skipped zone (invalid IANA timezone)', { timeZone })
       return
     }
-    // P1-1 fix, item 3 (#4612 verdict second gate round): the org-list query itself is a
-    // single legitimate whole-tick failure (nothing per-org to isolate before org ids exist).
-    // Everything AFTER this point is isolated PER (org, offset) below — a prior revision wrapped
-    // the entire double loop in ONE try, so a single org's `AttendanceW4ScheduledRunIdentityError`
-    // (e.g. the target-set-drift fail-closed remediation, amendment section 1.7 step 3) or the
-    // new `W4C2_SCHEDULED_RUN_TARGET_CONTENDED` retry-exhaustion outcome (P1-2 fix) aborted the
-    // REST of that tick's orgs and lookback days too, repeating every day the stuck workDate
-    // stayed inside the lookback window.
-    let orgIds
-    try {
-      const orgRows = await db.query('SELECT DISTINCT org_id FROM attendance_rules')
-      orgIds = orgRows.length > 0
-        ? orgRows.map(row => row.org_id || DEFAULT_ORG_ID)
-        : [DEFAULT_ORG_ID]
-    } catch (error) {
-      logger.error('Auto absence job failed (org list)', error)
-      return
-    }
-    const lookbackDays = settings.autoAbsence.lookbackDays || 1
-    for (const orgId of orgIds) {
-      let rule
-      try {
-        rule = await loadDefaultRule(db, orgId)
-      } catch (error) {
-        logger.error('Auto absence job failed for org (rule load)', { orgId, error })
-        continue
-      }
-      for (let offset = 1; offset <= lookbackDays; offset += 1) {
-        const targetDate = new Date(Date.now() - offset * 24 * 60 * 60 * 1000)
-        const workDate = toWorkDate(targetDate, rule.timezone)
+    const delay = Math.max(0, nextTimestamp - now.getTime())
+    const timer = setTimeout(() => {
+      autoAbsenceTimers.delete(timer)
+      void (async () => {
+        if (generation !== autoAbsenceScheduleGeneration) return
         try {
-          await runAutoAbsenceForOrgDate(db, {
-            orgId,
-            workDate,
-            rule,
-            logger,
-            emit,
-            w4Boundary,
-            initiator: 'cron',
-          })
+          await runAutoAbsenceTick({ db, logger, emit, w4Boundary, orgIds, lookbackDays })
         } catch (error) {
-          // Values-free: orgId/workDate are already-logged identifiers elsewhere in this
-          // module (e.g. "Auto absence generated for ${workDate}" a few lines below), never
-          // the offending business value. One org/date's failure (drift wedge, target-set
-          // contention exhaustion, or any other error) must not skip the remaining orgs/dates
-          // in this tick.
-          logger.error('Auto absence job failed for org/date', { orgId, workDate, error })
+          logger.error('Auto absence job failed', error)
         }
-      }
+        if (generation !== autoAbsenceScheduleGeneration) return
+        scheduleAutoAbsence({ db, logger, emit, w4Boundary })
+      })()
+    }, delay)
+    autoAbsenceTimers.add(timer)
+  }
+
+  const arm = async () => {
+    if (generation !== autoAbsenceScheduleGeneration) return
+    let groups
+    try {
+      groups = await loadAutoAbsenceOrgTimeZoneGroups(db, logger)
+    } catch (error) {
+      // Org-list failure is a whole-schedule failure. Retry later instead of
+      // falling back to the process-local clock.
+      logger.error('Auto absence job failed (org list)', error)
+      armRetry()
+      return
+    }
+    if (generation !== autoAbsenceScheduleGeneration) return
+    if (groups.size === 0) {
+      logger.error('Auto absence schedule has no org timezone')
+      armRetry()
+      return
+    }
+    const now = new Date()
+    for (const [timeZone, orgIds] of groups) {
+      armZone(timeZone, orgIds, now)
     }
   }
 
-  autoAbsenceTimeout = setTimeout(async () => {
-    await run()
-    autoAbsenceInterval = setInterval(run, 24 * 60 * 60 * 1000)
-  }, delay)
+  void arm()
 }
 
 function scheduleHolidaySync({ db, logger, emit }) {
@@ -24496,6 +24628,19 @@ module.exports = {
   // exported nested one bag down, so the top-level optional call silently no-op'd
   // and the 60s settings cache leaked across tests in the shared attendance suite.
   resetAttendanceSettingsCacheForTests,
+  primeAttendanceSettingsCacheForTests,
+  __attendanceTimezoneContractForTests: {
+    computeNextRunTime,
+    computeAutoAbsenceNextRunAt,
+    normalizeCsvWorkDate,
+    resolveImportCsvWorkDateTimeZone,
+    resolveImportCsvCalendarTimeZone,
+    iterateImportRowsFromCsv,
+    scheduleAutoAbsence,
+    clearAutoAbsenceSchedule,
+    toWorkDate,
+    CSV_EPOCH_TIMEZONE_WARNING,
+  },
   // W4C-2 Stage D: runtime probe for the env-gated outbox drain worker. `getState().gated`
   // is true ONLY when activate saw ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED non-empty
   // (no env => no worker); `runOnce()` is the EXACT closure the shared scheduler ticks, so
@@ -27494,17 +27639,18 @@ module.exports = {
 	      let csvWarnings = []
 	      let csvFileId = null
 		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
+		      const importCsvTimeZone = await resolveImportCsvCalendarTimeZone(db, orgId, payload)
 		      const resolvedCsvFileId = resolveImportUploadFileId(payload)
 		      if (resolvedCsvFileId) {
 		        csvFileId = resolvedCsvFileId
 		        const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
-		        const result = buildRowsFromCsv({ csvText, csvOptions: payload.csvOptions })
+		        const result = buildRowsFromCsv({ csvText, csvOptions: payload.csvOptions, timeZone: importCsvTimeZone })
 		        ensureCsvRowsWithinLimit(result)
 		        csvWarnings = result.warnings
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
 		      if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
-		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions })
+		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions, timeZone: importCsvTimeZone })
 		        ensureCsvRowsWithinLimit(result)
 		        csvWarnings = result.warnings
 		        return { rows: result.rows, csvWarnings, csvFileId }
@@ -27547,12 +27693,14 @@ module.exports = {
 	      if (csvFileId) {
 	        await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
 	        const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
+	        const importCsvTimeZone = await resolveImportCsvCalendarTimeZone(db, orgId, payload)
 	        return {
 	          csvFileId,
 	          iterateRows: async (onRow) => {
 	            const result = await iterateImportRowsFromCsvFileAsync({
 	              csvPath,
 	              csvOptions: payload.csvOptions,
+	              timeZone: importCsvTimeZone,
 	              onRow,
 	            })
 	            ensureCsvRowsWithinLimit(result)
@@ -29100,7 +29248,7 @@ module.exports = {
               userMapSourceFields: payload.userMapSourceFields,
             }))
           }
-          if (!workDate) importWarnings.push('Missing workDate')
+          if (!workDate) importWarnings.push(row.workDateWarning || 'Missing workDate')
 	          if (requiredFields.length) {
 	            const missingRequired = requiredFields.filter((field) => {
 	              const value = resolveRequiredFieldValue(row, field)
@@ -41787,7 +41935,7 @@ module.exports = {
                 userMapSourceFields: parsed.data.userMapSourceFields,
               }))
             }
-            if (!workDate) importWarnings.push('Missing workDate')
+            if (!workDate) importWarnings.push(row.workDateWarning || 'Missing workDate')
             if (requiredFields.length) {
               const missingRequired = requiredFields.filter((field) => {
                 const value = resolveRequiredFieldValue(row, field)
