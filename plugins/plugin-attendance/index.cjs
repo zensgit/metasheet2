@@ -25518,41 +25518,11 @@ module.exports = {
     // Assigned later once request adapters are closed over; outdoor punch may
     // call it before the assignment line in source order but only after activate.
     let w4RequestOperationBoundary = null
-    // Values-free HTTP mapping for typed W4 boundary/registry/command/authorization errors
-    // (closed codes only; the raw caller value is never echoed). Returns true when handled.
-    const W4_ERROR_NAMES = new Set([
-      'AttendanceW4OperationError',
-      'AttendanceW4RegistryError',
-      'AttendanceW4CommandError',
-      'AttendanceW4AuthorizationError',
-      'AttendanceW4LiveScheduledBoundaryError',
-      'AttendanceW4RequestBoundaryError',
-      'ApprovedLeaveCancellationError',
-      'AttendanceW4MergePolicyError',
-      // W4C-2 caller cutover (owner ruling 2026-07-28, "(b-narrow)"): the
-      // durable run-creation/resume/outcome/finalization machine's own
-      // values-free error class (w4c2-scheduled-run.ts).
-      'AttendanceW4ScheduledRunIdentityError',
-      // W4C-3c manual / recompute / ops_retirement apply modules.
-      'AttendanceW4ManualOverrideError',
-      'AttendanceW4RecomputeError',
-      'AttendanceW4OpsRetirementError',
-      'AttendanceW4RecordBoundaryError',
-      // Gate D2 (#4556/#4844): the authoritative result-write core's own product-coded errors
-      // (VERSION_CONFLICT / REPLAY_CONFLICT / COMPLETED_SHAPE_INVALID / PREIMAGE_INVALID / …)
-      // become caller-reachable the moment the live_punch authoritative branch calls the core.
-      // Without this entry they would fall through to a raw 500 instead of their own typed
-      // status — the exact "no raw SQLSTATE/untyped failure reaches the caller" doctrine this
-      // core was built to satisfy.
-      'AttendanceW4AuthoritativeCalculationError',
-    ])
-    const respondIfW4BoundaryError = (res, error) => {
-      if (!error || typeof error !== 'object' || !W4_ERROR_NAMES.has(error.name)) return false
-      const code = typeof error.code === 'string' && error.code ? error.code : 'W4_OPERATION_FAILED'
-      const status = Number.isInteger(error.httpStatus) ? error.httpStatus : 422
-      res.status(status).json({ ok: false, error: { code, message: code } })
-      return true
-    }
+    // Values-free HTTP mapping for typed W4 boundary errors. The name set and the
+    // responder live in lib/ so routes and the unit test share one function
+    // (#5992: AttendanceW4IdentityError must be in that set, or fail-closed W4C0_*
+    // codes fall through to 500 INTERNAL_ERROR). Missing httpStatus stays 422.
+    const { respondIfW4BoundaryError } = require('./lib/attendance-w4-boundary-error-response.cjs')
 
     // T3-2: register the working-day calendar provider (adapter) the approval SLA path consults through
     // the WorkdayCalendarPort. This is the ONLY approval↔attendance coupling — approval never reads

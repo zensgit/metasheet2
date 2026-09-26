@@ -174,6 +174,11 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-report-managed-content-drift.cjs',
   'plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs',
   'plugins/plugin-attendance/lib/attendance-shift-service.cjs',
+  // HTTP mapping for typed W4 boundary errors (#5992). Classified
+  // `calculation_path` — the HONEST bucket, not a carve-out: index.cjs
+  // require()s it from the punch and other writer catches, so both W6
+  // aggregate bans apply even though the module only writes a status code.
+  'plugins/plugin-attendance/lib/attendance-w4-boundary-error-response.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs',
 ] as const)
