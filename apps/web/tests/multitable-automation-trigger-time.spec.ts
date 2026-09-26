@@ -17,11 +17,14 @@ import { createApp, h, nextTick } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
 import {
+  analyzeCronForBusinessSwitch,
   automationBusinessTimezone,
   convertLegacyUtcTimeOfDay,
   dateReminderExample,
   effectiveTriggerTimezone,
   isLegacyUtcScheduleRule,
+  legacyUtcSwitchImpact,
+  timezoneOffsetMinutes,
   triggerTimeOfDayOptions,
   triggerTimezoneForSave,
   utcTimeOfDayInZone,
@@ -30,10 +33,14 @@ import {
   automationCronPresetLabel,
   automationCronTimezoneHint,
   automationDateReminderExampleText,
+  automationLegacyUtcScheduleNotice,
   automationReminderTimeHint,
   automationReminderTimeLabel,
   automationSwitchToBusinessTimezoneConfirm,
 } from '../src/multitable/utils/meta-automation-labels'
+// Review S1: the confirm text must match what the BACKEND actually does, so the parity block below runs the
+// backend's own pure occurrence function (no DB, no imports beyond its sibling automation-timezone.ts).
+import { computeDateReminderOccurrence } from '../../../packages/core-backend/src/multitable/automation-date-reminder'
 import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRule } from '../src/multitable/types'
 import { epOptions, epSelectValue, epSetSelect } from './helpers/epControls'
@@ -45,6 +52,7 @@ function flushPromises() {
 const fields = [
   { id: 'fld_name', name: 'Name', type: 'string' },
   { id: 'fld_due', name: 'Due date', type: 'date' },
+  { id: 'fld_due_at', name: 'Due at', type: 'dateTime' },
 ]
 
 const REF_MS = Date.UTC(2026, 8, 25, 12, 0)
@@ -212,26 +220,240 @@ describe('A7a schedule timezone helpers', () => {
     expect(automationCronPresetLabel('0 0 * * 1', true, 'UTC')).toBe('每周一 00:00 UTC（北京时间 08:00）')
   })
 
-  it('the switch confirm text carries the day-shift caveats', () => {
-    const plain = automationSwitchToBusinessTimezoneConfirm(
-      { triggerType: 'schedule.date_field', fromTimeOfDay: '01:00', toTimeOfDay: '09:00', dayShift: 0 },
-      true,
-    )
-    expect(plain).toContain('01:00 UTC')
-    expect(plain).toContain('09:00（北京时间）')
-    expect(plain).toContain('00:00–08:00')
-    expect(plain).toContain('相差一天')
-    expect(plain).not.toContain('提前一天')
-    const wrapped = automationSwitchToBusinessTimezoneConfirm(
-      { triggerType: 'schedule.date_field', fromTimeOfDay: '18:00', toTimeOfDay: '02:00', dayShift: 1 },
-      true,
-    )
-    expect(wrapped).toContain('次日')
-    expect(wrapped).toContain('提前一天')
-    const cron = automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron' }, true)
-    expect(cron).toContain('cron 表达式不变')
-    expect(cron).toContain('北京时间 08:00')
+  it('switch impact: Asia/Shanghai is +480 min; dayShift 0 vs 1 move the two dateTime groups oppositely', () => {
+    expect(timezoneOffsetMinutes('Asia/Shanghai', REF_MS)).toBe(480)
+    expect(legacyUtcSwitchImpact('01:00', 'Asia/Shanghai', REF_MS)).toEqual({
+      fromTimeOfDay: '01:00',
+      toTimeOfDay: '09:00',
+      dayShift: 0,
+      dateFieldShiftDays: 0,
+      dateTimeWindow: { start: '00:00', end: '08:00' },
+      dateTimeInsideShiftDays: 1,
+      dateTimeOutsideShiftDays: 0,
+    })
+    expect(legacyUtcSwitchImpact('18:00', 'Asia/Shanghai', REF_MS)).toEqual({
+      fromTimeOfDay: '18:00',
+      toTimeOfDay: '02:00',
+      dayShift: 1,
+      dateFieldShiftDays: -1,
+      dateTimeWindow: { start: '00:00', end: '08:00' },
+      dateTimeInsideShiftDays: 0,
+      dateTimeOutsideShiftDays: -1,
+    })
+    expect(legacyUtcSwitchImpact('', 'Asia/Shanghai', REF_MS)).toMatchObject({ fromTimeOfDay: '09:00', toTimeOfDay: '17:00', dayShift: 0 })
   })
+
+  it('S1/S2: full confirm text, dayShift=0 (01:00 UTC → 09:00), zh + en, field type unknown/date/dateTime', () => {
+    const impact = legacyUtcSwitchImpact('01:00', 'Asia/Shanghai', REF_MS)
+    const confirm = (fieldType: string | null, isZh: boolean) =>
+      automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.date_field', impact, fieldType }, isZh)
+    expect(confirm(null, true)).toBe(
+      '提醒时间将由 01:00 UTC 换算为北京时间 09:00。'
+      + '“日期”字段：每条提醒的时刻不变。'
+      + '“日期时间”字段：北京时间 00:00 至 08:00 之前的记录会比原来晚一天提醒，其余记录提醒时刻不变。'
+      + '提醒日变了的记录，保存后可能会多提醒一次。',
+    )
+    expect(confirm(null, false)).toBe(
+      'The reminder time will be converted from 01:00 UTC to 09:00 Beijing time. '
+      + 'On a "date" field, every reminder fires at the same moment as before. '
+      + 'On a "date & time" field, records whose Beijing time is before 08:00 fire one day later than before; '
+      + 'all other records fire at the same moment as before. '
+      + 'Records whose reminder day changes may get one extra reminder after you save.',
+    )
+    // a date field alone: nothing moves → no extra-reminder sentence
+    expect(confirm('date', true)).toBe('提醒时间将由 01:00 UTC 换算为北京时间 09:00。“日期”字段：每条提醒的时刻不变。')
+    expect(confirm('date', false)).toBe(
+      'The reminder time will be converted from 01:00 UTC to 09:00 Beijing time. On a "date" field, every reminder fires at the same moment as before.',
+    )
+    expect(confirm('dateTime', true)).toBe(
+      '提醒时间将由 01:00 UTC 换算为北京时间 09:00。'
+      + '“日期时间”字段：北京时间 00:00 至 08:00 之前的记录会比原来晚一天提醒，其余记录提醒时刻不变。'
+      + '提醒日变了的记录，保存后可能会多提醒一次。',
+    )
+  })
+
+  it('S1/S2: full confirm text, dayShift=1 (18:00 UTC → 02:00 next day), zh + en, field type unknown/date/dateTime', () => {
+    const impact = legacyUtcSwitchImpact('18:00', 'Asia/Shanghai', REF_MS)
+    const confirm = (fieldType: string | null, isZh: boolean) =>
+      automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.date_field', impact, fieldType }, isZh)
+    expect(confirm(null, true)).toBe(
+      '提醒时间将由 18:00 UTC 换算为北京时间 02:00（跨到次日）。'
+      + '“日期”字段：每条提醒都会比原来早一天。'
+      + '“日期时间”字段：北京时间 00:00 至 08:00 之前的记录提醒时刻不变，其余记录会比原来早一天提醒。'
+      + '提醒日变了的记录，保存后可能会多提醒一次。',
+    )
+    expect(confirm(null, false)).toBe(
+      'The reminder time will be converted from 18:00 UTC to 02:00 Beijing time (the next day). '
+      + 'On a "date" field, every reminder fires one day earlier than before. '
+      + 'On a "date & time" field, records whose Beijing time is before 08:00 fire at the same moment as before; '
+      + 'all other records fire one day earlier than before. '
+      + 'Records whose reminder day changes may get one extra reminder after you save.',
+    )
+    expect(confirm('date', true)).toBe(
+      '提醒时间将由 18:00 UTC 换算为北京时间 02:00（跨到次日）。“日期”字段：每条提醒都会比原来早一天。提醒日变了的记录，保存后可能会多提醒一次。',
+    )
+    expect(confirm('dateTime', false)).toBe(
+      'The reminder time will be converted from 18:00 UTC to 02:00 Beijing time (the next day). '
+      + 'On a "date & time" field, records whose Beijing time is before 08:00 fire at the same moment as before; '
+      + 'all other records fire one day earlier than before. '
+      + 'Records whose reminder day changes may get one extra reminder after you save.',
+    )
+    // S2: never both "unchanged" and "one day earlier" for the date field in the same dialog
+    expect(confirm(null, true)).not.toContain('每条提醒的时刻不变')
+    expect(confirm(null, false)).not.toContain('every reminder fires at the same moment')
+  })
+
+  it('S4: cron confirm names the rule’s own expression and its concrete before/after times', () => {
+    const daily1 = analyzeCronForBusinessSwitch('0 1 * * *', 'Asia/Shanghai', REF_MS)
+    expect(daily1).toMatchObject({ timezoneIndependent: false, restrictsDays: false, offsetMinutes: 480 })
+    expect(automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: daily1 }, true)).toBe(
+      'cron 表达式“0 1 * * *”不变，改按北京时间计时：原来在北京时间 09:00 执行，改后在北京时间 01:00 执行，每次都比原来早 8 小时。保存后生效。',
+    )
+    expect(automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: daily1 }, false)).toBe(
+      'The cron expression "0 1 * * *" stays the same but runs on Beijing time: it used to run at 09:00 Beijing time and will run at 01:00 Beijing time, 8 hours earlier each time. Takes effect after saving.',
+    )
+    const twice = analyzeCronForBusinessSwitch('30 9,18 * * *', 'Asia/Shanghai', REF_MS)
+    expect(automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: twice }, true)).toBe(
+      'cron 表达式“30 9,18 * * *”不变，改按北京时间计时：原来在北京时间 02:30、17:30 执行，改后在北京时间 09:30、18:30 执行，每次都比原来早 8 小时。保存后生效。',
+    )
+    // day-restricted + crossing midnight: the old Beijing run is on the day AFTER the one the expression names
+    const monday20 = analyzeCronForBusinessSwitch('0 20 * * 1', 'Asia/Shanghai', REF_MS)
+    expect(automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: monday20 }, true)).toBe(
+      'cron 表达式“0 20 * * 1”不变，改按北京时间计时：原来在北京时间 次日 04:00 执行（“次日”指表达式所写日期的第二天），改后在北京时间 20:00 执行，每次都比原来早 8 小时。保存后生效。',
+    )
+    // too many runs to list → generic, still names the expression and the 8 hours
+    const every15 = analyzeCronForBusinessSwitch('*/15 9-17 * * 1-5', 'Asia/Shanghai', REF_MS)
+    expect(every15.runs).toBeNull()
+    expect(automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: every15 }, true)).toBe(
+      'cron 表达式“*/15 9-17 * * 1-5”不变，改按北京时间计时，每次执行都会比原来早 8 小时。保存后生效。',
+    )
+  })
+
+  it('N1: timezone-independent cron expressions are detected; anything else keeps the warning', () => {
+    const independent = (expr: string) => analyzeCronForBusinessSwitch(expr, 'Asia/Shanghai', REF_MS).timezoneIndependent
+    // same instants on UTC and Beijing: no fixed hour and no day restriction (or an hour set +8h maps onto itself)
+    expect(independent('*/5 * * * *')).toBe(true)
+    expect(independent('0 * * * *')).toBe(true)
+    expect(independent('15,45 * * * *')).toBe(true)
+    expect(independent('0 */2 * * *')).toBe(true)
+    expect(independent('0 */4 * * *')).toBe(true)
+    expect(independent('0 */8 * * *')).toBe(true)
+    // depends on the clock
+    expect(independent('0 0 * * *')).toBe(false)
+    expect(independent('0 1 * * *')).toBe(false)
+    expect(independent('0 */3 * * *')).toBe(false)
+    expect(independent('0 */6 * * *')).toBe(false)
+    expect(independent('0 * * * 1')).toBe(false) // hourly, but only on Mondays — the day is read on the clock
+    expect(independent('*/5 * 1 * *')).toBe(false)
+    expect(independent('0 0 * * 1')).toBe(false)
+    // backend semantics: 'n/step' without a range is the single value n (NOT vixie's n..max)
+    expect(independent('0 0/2 * * *')).toBe(false)
+    // junk / unparseable → treated as dependent (the warning stays)
+    expect(independent('')).toBe(false)
+    expect(independent('0 0 * *')).toBe(false)
+    expect(independent('0 25 * * *')).toBe(false)
+    expect(independent('@daily')).toBe(false)
+  })
+
+  it('N3: legacy notices have no nested brackets and name the concrete run time', () => {
+    const cronNotice = automationLegacyUtcScheduleNotice(
+      { triggerType: 'schedule.cron', cron: analyzeCronForBusinessSwitch('0 1 * * *', 'Asia/Shanghai', REF_MS) },
+      true,
+    )
+    expect(cronNotice).toBe('这条规则创建较早，cron 表达式“0 1 * * *”按 UTC 计时，实际在北京时间 09:00 执行。可一键改为北京时间。')
+    expect(automationLegacyUtcScheduleNotice(
+      { triggerType: 'schedule.cron', cron: analyzeCronForBusinessSwitch('0 1 * * *', 'Asia/Shanghai', REF_MS) },
+      false,
+    )).toBe('This rule was created earlier and its cron expression "0 1 * * *" runs on UTC, i.e. at 09:00 Beijing time. You can switch it to Beijing time.')
+    expect(automationLegacyUtcScheduleNotice(
+      { triggerType: 'schedule.cron', cron: analyzeCronForBusinessSwitch('*/15 9-17 * * 1-5', 'Asia/Shanghai', REF_MS) },
+      true,
+    )).toBe('这条规则创建较早，cron 表达式“*/15 9-17 * * 1-5”按 UTC 计时，表达式里的时间加 8 小时才是北京时间。可一键改为北京时间。')
+    const dateNotice = automationLegacyUtcScheduleNotice({ triggerType: 'schedule.date_field', timeOfDay: '04:33' }, true)
+    expect(dateNotice).toBe('这条规则创建较早，按 UTC 计时：当前提醒时间 04:33 UTC（北京时间 12:33）。可一键改为北京时间。')
+    for (const text of [cronNotice, dateNotice]) {
+      // no bracket opened inside another bracket
+      let depth = 0
+      for (const ch of text) {
+        if (ch === '（' || ch === '(') { depth += 1; expect(depth).toBe(1) }
+        if (ch === '）' || ch === ')') depth -= 1
+      }
+    }
+    // N3 en grammar: no "between 00:00–08:00"
+    const en = automationSwitchToBusinessTimezoneConfirm(
+      { triggerType: 'schedule.date_field', impact: legacyUtcSwitchImpact('01:00', 'Asia/Shanghai', REF_MS), fieldType: null },
+      false,
+    )
+    expect(en).not.toMatch(/between \d/)
+  })
+})
+
+/**
+ * Review S1 parity: the confirm text is generated from `legacyUtcSwitchImpact`; this proves those numbers
+ * against the BACKEND's own occurrence function over a matrix of legacy times × values across a whole day ×
+ * offsets, for both field types — and that the generated zh sentence names exactly the observed shift.
+ */
+describe('A7a switch impact ≡ backend computeDateReminderOccurrence', () => {
+  const SH = 'Asia/Shanghai'
+  const DAY = 86_400_000
+  const TIMES = ['00:00', '01:00', '04:33', '07:59', '08:00', '12:00', '15:59', '16:00', '18:00', '23:45', '']
+  const CONFIGS = [
+    { offsetDays: 0, direction: 'before' as const },
+    { offsetDays: 3, direction: 'before' as const },
+    { offsetDays: 2, direction: 'after' as const },
+  ]
+  const zhShift = (days: number) => (days === 0 ? '提醒时刻不变' : `会比原来${days < 0 ? '早' : '晚'}一天提醒`)
+  const shiftDays = (legacy: string | null, switched: string | null) => {
+    expect(legacy).not.toBeNull()
+    expect(switched).not.toBeNull()
+    const diff = Date.parse(switched as string) - Date.parse(legacy as string)
+    // always whole days: the instant of day is preserved by the conversion (`=== 0` also accepts -0)
+    expect(diff % DAY === 0).toBe(true)
+    return diff / DAY + 0
+  }
+
+  for (const legacyTime of TIMES) {
+    it(`legacy ${legacyTime || "'' (09:00 default)"} UTC`, () => {
+      const impact = legacyUtcSwitchImpact(legacyTime, SH, REF_MS)
+      const legacyCfg = legacyTime ? { timeOfDay: legacyTime } : {}
+      const switchedCfg = { timeOfDay: impact.toTimeOfDay, timezone: SH }
+      const window = impact.dateTimeWindow as { start: string; end: string }
+      const observedInside = new Set<number>()
+      const observedOutside = new Set<number>()
+      for (const cfg of CONFIGS) {
+        // date field (floating literal day)
+        for (const day of ['2026-09-30', '2026-01-01', '2026-12-31']) {
+          const got = shiftDays(
+            computeDateReminderOccurrence(day, { ...cfg, ...legacyCfg }, { floating: true }),
+            computeDateReminderOccurrence(day, { ...cfg, ...switchedCfg }, { floating: true }),
+          )
+          expect(got, `date ${day}`).toBe(impact.dateFieldShiftDays)
+        }
+        // dateTime field: every 15 minutes across a UTC day
+        for (let m = 0; m < 1440; m += 15) {
+          const value = new Date(Date.UTC(2026, 8, 30, 0, m)).toISOString()
+          const got = shiftDays(
+            computeDateReminderOccurrence(value, { ...cfg, ...legacyCfg }),
+            computeDateReminderOccurrence(value, { ...cfg, ...switchedCfg }),
+          )
+          const beijingMinutes = (m + 480) % 1440
+          const [eh, em] = window.end.split(':').map(Number)
+          const inside = beijingMinutes < eh * 60 + em
+          expect(got, `dateTime ${value} (Beijing ${beijingMinutes} min)`).toBe(
+            inside ? impact.dateTimeInsideShiftDays : impact.dateTimeOutsideShiftDays,
+          )
+          ;(inside ? observedInside : observedOutside).add(got)
+        }
+      }
+      // the confirm text names exactly the shifts the backend produced
+      const text = automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.date_field', impact, fieldType: null }, true)
+      expect([...observedInside]).toEqual([impact.dateTimeInsideShiftDays])
+      expect([...observedOutside]).toEqual([impact.dateTimeOutsideShiftDays])
+      expect(text).toContain(`北京时间 00:00 至 08:00 之前的记录${zhShift(impact.dateTimeInsideShiftDays)}`)
+      expect(text).toContain(`其余记录${zhShift(impact.dateTimeOutsideShiftDays)}`)
+      expect(text).toContain(impact.dateFieldShiftDays === 0 ? '“日期”字段：每条提醒的时刻不变' : '“日期”字段：每条提醒都会比原来早一天')
+    })
+  }
 })
 
 // The first mount pays the editor's cold transform; allow slow CI runners more than the 5s default.
@@ -371,10 +593,8 @@ describe('A7a MetaAutomationRuleEditor schedule time', { timeout: 20_000 }, () =
     ;(container.querySelector('[data-action="switchScheduleToBusinessTimezone"]') as HTMLButtonElement).click()
     await flushPromises()
     expect(confirmSpy).toHaveBeenCalledTimes(2)
-    const message = String(confirmSpy.mock.calls[1][0])
-    expect(message).toContain('01:00 UTC')
-    expect(message).toContain('09:00（北京时间）')
-    expect(message).toContain('相差一天')
+    // fld_due is a `date` field → only the date sentence; 01:00 → 09:00 moves nothing
+    expect(String(confirmSpy.mock.calls[1][0])).toBe('提醒时间将由 01:00 UTC 换算为北京时间 09:00。“日期”字段：每条提醒的时刻不变。')
     expect(epSelectValue(container.querySelector('[data-field="timeOfDay"]'))).toBe('09:00')
     expect(container.querySelector('[data-field="scheduleLegacyUtcNotice"]')).toBeNull()
     expect(container.querySelector('[data-field="timeOfDayLabel"]')?.textContent?.trim()).toBe('提醒时间')
@@ -412,10 +632,57 @@ describe('A7a MetaAutomationRuleEditor schedule time', { timeout: 20_000 }, () =
     await flushPromises()
     ;(late.container.querySelector('[data-action="switchScheduleToBusinessTimezone"]') as HTMLButtonElement).click()
     await flushPromises()
-    const message = String(confirmSpy.mock.calls[1][0])
-    expect(message).toContain('18:00 UTC')
-    expect(message).toContain('02:00（北京时间）')
-    expect(message).toContain('提前一天')
+    expect(String(confirmSpy.mock.calls[1][0])).toBe(
+      '提醒时间将由 18:00 UTC 换算为北京时间 02:00（跨到次日）。“日期”字段：每条提醒都会比原来早一天。提醒日变了的记录，保存后可能会多提醒一次。',
+    )
+  })
+
+  it('S1: a dateTime reminder at dayShift=1 gets the dateTime sentence (before 08:00 unchanged, others earlier), en', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
+    const { container } = mount({
+      visible: true,
+      sheetId: 'sheet_1',
+      fields,
+      rule: savedRule({ triggerConfig: { dateFieldId: 'fld_due_at', offsetDays: 0, direction: 'before', timeOfDay: '18:00' } }),
+    })
+    await flushPromises()
+    ;(container.querySelector('[data-action="switchScheduleToBusinessTimezone"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(String(confirmSpy.mock.calls[0][0])).toBe(
+      'The reminder time will be converted from 18:00 UTC to 02:00 Beijing time (the next day). '
+      + 'On a "date & time" field, records whose Beijing time is before 08:00 fire at the same moment as before; '
+      + 'all other records fire one day earlier than before. '
+      + 'Records whose reminder day changes may get one extra reminder after you save.',
+    )
+  })
+
+  it('S3: the customer’s legacy 04:33 UTC reminder shows 04:33, and a rename keeps 04:33 with no timezone', async () => {
+    useLocale().setLocale('zh-CN')
+    const onSave = vi.fn()
+    const rule = savedRule({
+      id: 'rule_customer',
+      name: '到期提醒',
+      triggerConfig: { dateFieldId: 'fld_due', offsetDays: 3, direction: 'before', timeOfDay: '04:33' },
+    })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave })
+    await flushPromises()
+    const timeSelect = container.querySelector('[data-field="timeOfDay"]') as HTMLElement
+    expect(epSelectValue(timeSelect)).toBe('04:33')
+    // the off-grid stored value is a real, selected option — not snapped to 04:30/04:45
+    expect(epOptions(timeSelect).filter((option) => option.value === '04:33')).toHaveLength(1)
+    expect(container.querySelector('[data-field="timeOfDayLabel"]')?.textContent?.trim()).toBe('提醒时间（UTC）')
+    expect(container.querySelector('[data-field="scheduleLegacyUtcNotice"]')?.textContent)
+      .toContain('这条规则创建较早，按 UTC 计时：当前提醒时间 04:33 UTC（北京时间 12:33）。可一键改为北京时间。')
+
+    setName(container, '到期提醒（改名）')
+    await flushPromises()
+    await save(container)
+    expect(onSave).toHaveBeenCalledTimes(1)
+    const payload = onSave.mock.calls[0][0] as AutomationRule
+    expect(payload.name).toBe('到期提醒（改名）')
+    expect(payload.triggerConfig.timeOfDay).toBe('04:33')
+    expect('timezone' in payload.triggerConfig).toBe(false)
+    expect(payload.trigger?.config && 'timezone' in payload.trigger.config).toBe(false)
   })
 
   it('cron: a new rule saves Asia/Shanghai and the daily preset says 00:00 北京时间', async () => {
@@ -468,18 +735,68 @@ describe('A7a MetaAutomationRuleEditor schedule time', { timeout: 20_000 }, () =
     expect(onSave.mock.calls[0][0].triggerConfig).toMatchObject({ cron: '30 9 * * 1-5', timezone: 'Asia/Shanghai' })
   })
 
-  it('cron 改为北京时间 keeps the expression and sets Asia/Shanghai', async () => {
+  it('cron 改为北京时间 keeps the expression and sets Asia/Shanghai; the confirm names this rule’s times', async () => {
     useLocale().setLocale('zh-CN')
-    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const onSave = vi.fn()
     const rule = savedRule({ id: 'rule_cron3', triggerType: 'schedule.cron', triggerConfig: { cron: '0 0 * * *' } })
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave })
     await flushPromises()
     ;(container.querySelector('[data-action="switchScheduleToBusinessTimezone"]') as HTMLButtonElement).click()
     await flushPromises()
+    expect(String(confirmSpy.mock.calls[0][0])).toBe(
+      'cron 表达式“0 0 * * *”不变，改按北京时间计时：原来在北京时间 08:00 执行，改后在北京时间 00:00 执行，每次都比原来早 8 小时。保存后生效。',
+    )
     expect(epOptions(container.querySelector('[data-field="cronPreset"]')).find((option) => option.value === '0 0 * * *')?.textContent?.trim())
       .toBe('每天 00:00（北京时间）')
     await save(container)
     expect(onSave.mock.calls[0][0].triggerConfig).toMatchObject({ cron: '0 0 * * *', timezone: 'Asia/Shanghai' })
+  })
+
+  it('S4: a legacy custom cron "0 1 * * *" shows 北京时间 09:00 and the confirm says 09:00 → 01:00, 8 hours earlier', async () => {
+    useLocale().setLocale('zh-CN')
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const onSave = vi.fn()
+    const rule = savedRule({ id: 'rule_cron4', triggerType: 'schedule.cron', triggerConfig: { cron: '0 1 * * *' } })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave })
+    await flushPromises()
+    expect(epSelectValue(container.querySelector('[data-field="cronPreset"]'))).toBe('custom')
+    expect(container.querySelector('[data-field="scheduleLegacyUtcNotice"]')?.textContent)
+      .toContain('这条规则创建较早，cron 表达式“0 1 * * *”按 UTC 计时，实际在北京时间 09:00 执行。可一键改为北京时间。')
+    ;(container.querySelector('[data-action="switchScheduleToBusinessTimezone"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(String(confirmSpy.mock.calls[0][0])).toBe(
+      'cron 表达式“0 1 * * *”不变，改按北京时间计时：原来在北京时间 09:00 执行，改后在北京时间 01:00 执行，每次都比原来早 8 小时。保存后生效。',
+    )
+    await save(container)
+    expect(onSave.mock.calls[0][0].triggerConfig).toMatchObject({ cron: '0 1 * * *', timezone: 'Asia/Shanghai' })
+  })
+
+  it('N1: a legacy every-5-minutes / hourly cron shows no UTC warning or switch, and a rename keeps it as is', async () => {
+    useLocale().setLocale('zh-CN')
+    for (const cron of ['*/5 * * * *', '0 * * * *']) {
+      const onSave = vi.fn()
+      const rule = savedRule({ id: `rule_${cron}`, triggerType: 'schedule.cron', triggerConfig: { cron } })
+      const { container, app } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave })
+      await flushPromises()
+      expect(epSelectValue(container.querySelector('[data-field="cronPreset"]'))).toBe(cron)
+      expect(container.querySelector('[data-field="scheduleLegacyUtcNotice"]'), cron).toBeNull()
+      expect(container.querySelector('[data-action="switchScheduleToBusinessTimezone"]'), cron).toBeNull()
+      setName(container, `renamed ${cron}`)
+      await flushPromises()
+      await save(container)
+      const payload = onSave.mock.calls[0][0] as AutomationRule
+      expect(payload.triggerConfig.cron).toBe(cron)
+      expect('timezone' in payload.triggerConfig).toBe(false)
+      app.unmount()
+      document.body.innerHTML = ''
+    }
+    // …but picking a clock-dependent preset on that legacy rule brings the warning back (it would run on UTC)
+    const rule = savedRule({ id: 'rule_hourly', triggerType: 'schedule.cron', triggerConfig: { cron: '0 * * * *' } })
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule })
+    await flushPromises()
+    epSetSelect(container.querySelector('[data-field="cronPreset"]'), '0 0 * * *')
+    await flushPromises()
+    expect(container.querySelector('[data-field="scheduleLegacyUtcNotice"]')?.textContent).toContain('实际在北京时间 08:00 执行')
   })
 })

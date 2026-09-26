@@ -410,11 +410,50 @@ describe('A7a: Asia/Shanghai reminders and the legacy UTC → Beijing switch', (
     expect(switched).toBe('2026-09-26T18:00:00.000Z')
   })
 
-  test('dateTime between 00:00 and 08:00 Beijing: the day bucket moves one day under Asia/Shanghai (confirm caveat)', () => {
+  // dateTime field, dayShift = 0 (01:00 UTC → 09:00 Beijing). The web confirm says: Beijing time before 08:00
+  // → one day LATER; all other records → unchanged.
+  test('dateTime, dayShift=0: a value before 08:00 Beijing fires one day LATER after the switch', () => {
     // 2026-09-29T23:00Z = Sep 30 07:00 Beijing: UTC buckets it on Sep 29, Asia/Shanghai on Sep 30.
     const legacy = computeDateReminderOccurrence('2026-09-29T23:00:00.000Z', { ...base, timeOfDay: '01:00' })
     const switched = computeDateReminderOccurrence('2026-09-29T23:00:00.000Z', { ...base, timeOfDay: '09:00', timezone: SH })
     expect(legacy).toBe('2026-09-26T01:00:00.000Z')
     expect(switched).toBe('2026-09-27T01:00:00.000Z')
+  })
+
+  test('dateTime, dayShift=0: a value at/after 08:00 Beijing is unchanged by the switch', () => {
+    // 2026-09-30T04:00Z = Sep 30 12:00 Beijing: both zones bucket it on Sep 30.
+    const legacy = computeDateReminderOccurrence('2026-09-30T04:00:00.000Z', { ...base, timeOfDay: '01:00' })
+    const switched = computeDateReminderOccurrence('2026-09-30T04:00:00.000Z', { ...base, timeOfDay: '09:00', timezone: SH })
+    expect(legacy).toBe('2026-09-27T01:00:00.000Z')
+    expect(switched).toBe(legacy)
+  })
+
+  // dateTime field, dayShift = 1 (18:00 UTC → 02:00 Beijing, the converted time crosses midnight). The web
+  // confirm says: Beijing time before 08:00 → unchanged; all other records → one day EARLIER. (Review S1: the
+  // first version of the confirm had these two groups the wrong way round.)
+  test('dateTime, dayShift=1: a value at/after 08:00 Beijing fires one day EARLIER after the switch', () => {
+    // 2026-09-30T02:00Z = Sep 30 10:00 Beijing (offset 0 → reminder on the bucket day itself).
+    const cfg0 = { offsetDays: 0, direction: 'before' as const }
+    const legacy = computeDateReminderOccurrence('2026-09-30T02:00:00.000Z', { ...cfg0, timeOfDay: '18:00' })
+    const switched = computeDateReminderOccurrence('2026-09-30T02:00:00.000Z', { ...cfg0, timeOfDay: '02:00', timezone: SH })
+    expect(legacy).toBe('2026-09-30T18:00:00.000Z')
+    expect(switched).toBe('2026-09-29T18:00:00.000Z')
+  })
+
+  test('dateTime, dayShift=1: a value before 08:00 Beijing is unchanged by the switch', () => {
+    // 2026-09-29T18:00Z = Sep 30 02:00 Beijing: UTC buckets Sep 29 (fires Sep 29 18:00Z); Asia/Shanghai buckets
+    // Sep 30 and fires Sep 30 02:00 Beijing = Sep 29 18:00Z — the same instant.
+    const cfg0 = { offsetDays: 0, direction: 'before' as const }
+    const legacy = computeDateReminderOccurrence('2026-09-29T18:00:00.000Z', { ...cfg0, timeOfDay: '18:00' })
+    const switched = computeDateReminderOccurrence('2026-09-29T18:00:00.000Z', { ...cfg0, timeOfDay: '02:00', timezone: SH })
+    expect(legacy).toBe('2026-09-29T18:00:00.000Z')
+    expect(switched).toBe(legacy)
+  })
+
+  test('customer value 04:33 UTC → 12:33 Asia/Shanghai: date field fires at the same instant', () => {
+    const legacy = computeDateReminderOccurrence('2026-09-30', { ...base, timeOfDay: '04:33' }, { floating: true })
+    const switched = computeDateReminderOccurrence('2026-09-30', { ...base, timeOfDay: '12:33', timezone: SH }, { floating: true })
+    expect(legacy).toBe('2026-09-27T04:33:00.000Z')
+    expect(switched).toBe(legacy)
   })
 })

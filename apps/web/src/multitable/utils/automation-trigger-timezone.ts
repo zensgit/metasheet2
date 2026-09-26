@@ -198,8 +198,8 @@ export function utcTimeOfDayInZone(
 /**
  * The explicit "switch to business time" conversion for a legacy UTC date reminder: the SAME instant
  * re-expressed in the business zone ((hh + 8) mod 24 for Asia/Shanghai). An empty time was the backend's
- * 09:00 UTC default, so it becomes 17:00. `dayShift` = 1 when the converted time crossed midnight — the
- * reminder DAY does not move with it, so such a reminder fires one day earlier than before.
+ * 09:00 UTC default, so it becomes 17:00. `dayShift` = 1 when the converted time crossed midnight. What that
+ * does to each reminder is `legacyUtcSwitchImpact` below.
  */
 export function convertLegacyUtcTimeOfDay(
   utcTimeOfDay: unknown,
@@ -208,6 +208,186 @@ export function convertLegacyUtcTimeOfDay(
 ): { timeOfDay: string; dayShift: number } {
   const { time, dayShift } = utcTimeOfDayInZone(utcTimeOfDay, businessTimezone, referenceMs)
   return { timeOfDay: time, dayShift }
+}
+
+/**
+ * UTC offset of `timezone` in minutes at `referenceMs` (local = UTC + offset). Asia/Shanghai = +480, no DST;
+ * for a DST zone this is the offset "as of the reference instant".
+ */
+export function timezoneOffsetMinutes(timezone: string, referenceMs: number = Date.now()): number {
+  if (isUtcTriggerTimezone(timezone)) return 0
+  const minuteMs = Math.floor(referenceMs / 60_000) * 60_000
+  const local = zonedWallClock(minuteMs, timezone)
+  const localAsUtc = Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute)
+  return Math.round((localAsUtc - minuteMs) / 60_000)
+}
+
+function formatMinutesOfDay(minutes: number): string {
+  return formatTriggerTimeOfDay(Math.floor(minutes / 60), minutes % 60)
+}
+
+/**
+ * What the explicit UTC → business switch does to a date reminder's fire instants, derived from the backend's
+ * day-bucketing (automation-date-reminder.ts computeDateReminderOccurrence): a legacy rule buckets by the UTC
+ * calendar day, the switched rule by the business calendar day, and `timeOfDay` is the SAME instant re-expressed.
+ *
+ * With offset o (business = UTC + o) and k = the converted time's civil-day move (`dayShift`):
+ *   - `date` field (literal calendar day): every reminder moves by -k days.
+ *   - `dateTime` field: a value whose business-local time falls in the window (o > 0: [00:00, o); o < 0:
+ *     [24:00 + o, 24:00)) sits on a different civil day in the two zones and moves by (±1 - k) days; every
+ *     other value moves by -k days.
+ * Asia/Shanghai (o = +8h): 01:00 UTC → 09:00 (k = 0): date unchanged; dateTime before 08:00 one day LATER,
+ * others unchanged. 18:00 UTC → 02:00 (k = 1): date one day EARLIER; dateTime before 08:00 unchanged, others
+ * one day EARLIER. A shift is in whole days (positive = later). The web spec cross-checks these numbers
+ * against the backend function itself.
+ */
+export interface LegacyUtcSwitchImpact {
+  /** The legacy time the backend uses now ('' → its 09:00 default). */
+  fromTimeOfDay: string
+  /** The same instant on the business clock. */
+  toTimeOfDay: string
+  /** Civil-day move of the converted time-of-day (k). */
+  dayShift: number
+  dateFieldShiftDays: number
+  /** Business-local window of `dateTime` values that shift differently; null when the offset is 0. */
+  dateTimeWindow: { start: string; end: string } | null
+  dateTimeInsideShiftDays: number
+  dateTimeOutsideShiftDays: number
+}
+
+export function legacyUtcSwitchImpact(
+  utcTimeOfDay: unknown,
+  businessTimezone: string = automationBusinessTimezone(),
+  referenceMs: number = Date.now(),
+): LegacyUtcSwitchImpact {
+  const fromTimeOfDay = effectiveTriggerTimeOfDay(utcTimeOfDay)
+  const { timeOfDay: toTimeOfDay, dayShift } = convertLegacyUtcTimeOfDay(utcTimeOfDay, businessTimezone, referenceMs)
+  const offset = timezoneOffsetMinutes(businessTimezone, referenceMs)
+  const outside = 0 - dayShift // `0 -` keeps +0 (a bare `-0` would leak into equality checks)
+  if (offset === 0) {
+    return {
+      fromTimeOfDay,
+      toTimeOfDay,
+      dayShift,
+      dateFieldShiftDays: outside,
+      dateTimeWindow: null,
+      dateTimeInsideShiftDays: outside,
+      dateTimeOutsideShiftDays: outside,
+    }
+  }
+  const window = offset > 0
+    ? { start: '00:00', end: formatMinutesOfDay(offset) }
+    : { start: formatMinutesOfDay(1440 + offset), end: '24:00' }
+  return {
+    fromTimeOfDay,
+    toTimeOfDay,
+    dayShift,
+    dateFieldShiftDays: outside,
+    dateTimeWindow: window,
+    dateTimeInsideShiftDays: (offset > 0 ? 1 : -1) - dayShift,
+    dateTimeOutsideShiftDays: outside,
+  }
+}
+
+/**
+ * Mirror of the backend cron field parser (automation-scheduler.ts parseCronField): comma list of `*`, `n`,
+ * `a-b`, each optionally `/step`. As in the backend, `n/step` (no range) is the single value n. null = junk.
+ */
+function parseCronFieldValues(raw: string, min: number, max: number): number[] | null {
+  if (!raw) return null
+  const values = new Set<number>()
+  for (const piece of raw.split(',')) {
+    if (!piece) return null
+    const slashParts = piece.split('/')
+    if (slashParts.length > 2) return null
+    const [rangePart, stepPart] = slashParts
+    const step = stepPart === undefined ? 1 : Number(stepPart)
+    if (!Number.isInteger(step) || step < 1) return null
+    let start: number
+    let end: number
+    if (rangePart === '*') {
+      start = min
+      end = max
+    } else if (rangePart.includes('-')) {
+      const range = rangePart.split('-')
+      if (range.length !== 2 || !range[0] || !range[1]) return null
+      start = Number(range[0])
+      end = Number(range[1])
+    } else {
+      start = Number(rangePart)
+      end = start
+    }
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return null
+    if (start < min || start > max || end < min || end > max || start > end) return null
+    for (let v = start; v <= end; v += step) values.add(v)
+  }
+  return values.size ? [...values].sort((a, b) => a - b) : null
+}
+
+/** Max distinct run times a cron confirm/notice lists before falling back to the generic wording. */
+const MAX_LISTED_CRON_TIMES = 6
+
+export interface CronSwitchImpact {
+  expression: string
+  /** Business offset in minutes; every run moves by -offset when the rule switches from UTC. */
+  offsetMinutes: number
+  /**
+   * The expression fires at the same instants on UTC and on the business clock (e.g. every 5 minutes, hourly,
+   * every 2 hours under a +8h zone), so a legacy rule needs no warning and no switch.
+   */
+  timezoneIndependent: boolean
+  /** Day-of-month / month / day-of-week restrict the days (the day is also read on the rule's clock). */
+  restrictsDays: boolean
+  /**
+   * Concrete run times when the expression is a fixed minute and at most MAX_LISTED_CRON_TIMES hours:
+   * `before` = the business-clock time a legacy UTC rule runs at now (dayShift relative to the expression's
+   * day), `after` = the business-clock time after the switch. null = too complex to list.
+   */
+  runs: Array<{ before: string; beforeDayShift: number; after: string }> | null
+}
+
+/**
+ * How switching a legacy UTC cron rule to the business clock changes it. The expression is kept verbatim and
+ * re-read on the business clock, so every run moves by -offset in absolute time. Detection of timezone
+ * independence is exact for what it accepts: all day fields `*`, a whole-hour offset, and an hour set that the
+ * offset maps onto itself; anything it cannot parse is treated as dependent (the warning stays).
+ */
+export function analyzeCronForBusinessSwitch(
+  expression: unknown,
+  businessTimezone: string = automationBusinessTimezone(),
+  referenceMs: number = Date.now(),
+): CronSwitchImpact {
+  const expr = typeof expression === 'string' ? expression.trim() : ''
+  const offsetMinutes = timezoneOffsetMinutes(businessTimezone, referenceMs)
+  const fields = expr.split(/\s+/)
+  const dependent: CronSwitchImpact = {
+    expression: expr,
+    offsetMinutes,
+    timezoneIndependent: offsetMinutes === 0,
+    restrictsDays: true,
+    runs: null,
+  }
+  if (fields.length !== 5) return dependent
+  const [minuteField, hourField, domField, monthField, dowField] = fields
+  const minutes = parseCronFieldValues(minuteField, 0, 59)
+  const hours = parseCronFieldValues(hourField, 0, 23)
+  if (!minutes || !hours) return dependent
+  const restrictsDays = domField !== '*' || monthField !== '*' || dowField !== '*'
+  let timezoneIndependent = offsetMinutes === 0
+  if (!timezoneIndependent && !restrictsDays && offsetMinutes % 60 === 0) {
+    const shiftHours = ((offsetMinutes / 60) % 24 + 24) % 24
+    const hourSet = new Set(hours)
+    timezoneIndependent = hours.every((h) => hourSet.has((h + shiftHours) % 24))
+  }
+  let runs: CronSwitchImpact['runs'] = null
+  if (minutes.length === 1 && hours.length <= MAX_LISTED_CRON_TIMES) {
+    runs = hours.map((h) => {
+      const utc = formatTriggerTimeOfDay(h, minutes[0])
+      const before = utcTimeOfDayInZone(utc, businessTimezone, referenceMs)
+      return { before: before.time, beforeDayShift: before.dayShift, after: utc }
+    })
+  }
+  return { expression: expr, offsetMinutes, timezoneIndependent, restrictsDays, runs }
 }
 
 /** Fixed sample anchor for the live example line (Sep 30): deterministic, never "today". */
