@@ -20,6 +20,7 @@
 const crypto = require('node:crypto')
 // S3-2: reuse the single tx-aware pipeline write path + input normalizer (no row-builder drift).
 const { writePipelineRow, normalizePipelineInput } = require('./pipelines.cjs')
+const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 
 const TEMPLATES_TABLE = 'integration_templates'
 // S3-2: instantiation reads this table for the idempotency pre-check. The pipeline WRITE goes
@@ -469,7 +470,11 @@ function createIntegrationTemplateRegistry({ db, idGenerator = crypto.randomUUID
 
     // 6) Single transaction: pipeline row + field-mappings are all-or-nothing. writePipelineRow
     //    re-validates both systems (existence + role) inside the tx as defense-in-depth.
+    //    The transaction is pinned to READ COMMITTED by its FIRST statement, before the clash read:
+    //    writePipelineRow's KEY SHARE endpoint checks are the writer half of the external-system
+    //    delete lock protocol, which holds at READ COMMITTED only (see external-system-pointer-lock.cjs).
     return db.transaction(async (scopedDb) => {
+      await pinLockProtocolIsolation(scopedDb)
       const clash = await scopedDb.selectOne(PIPELINES_TABLE, {
         tenant_id: tenantId,
         workspace_id: workspaceId,

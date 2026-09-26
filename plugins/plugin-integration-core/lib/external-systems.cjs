@@ -16,6 +16,7 @@ const crypto = require('node:crypto')
 // restarts and removes the account set from anything that might leak.
 const INSTANCE_DIGEST_KEY = crypto.randomBytes(32)
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 
 const TABLE = 'integration_external_systems'
 const SQL_READONLY_SOURCE_KIND = 'data-source:sql-readonly'
@@ -1364,8 +1365,12 @@ function createExternalSystemRegistry({
    * (`lib/external-system-pointer-lock.cjs` holds the whole protocol; this comment is the half that
    * lives here).
    *
-   * ONE transaction whose FIRST statement is `SELECT ... FOR UPDATE` on the system row, THEN every
-   * reference count on the SAME transaction handle, THEN the DELETE. The lock is what turns the
+   * ONE transaction, pinned to READ COMMITTED by its FIRST statement (`pinLockProtocolIsolation`),
+   * whose first READ is `SELECT ... FOR UPDATE` on the system row, THEN every reference count on
+   * the SAME transaction handle, THEN the DELETE. The pin is load-bearing: under an inherited
+   * REPEATABLE READ the snapshot is taken by the FOR UPDATE statement BEFORE its lock wait, so the
+   * counts after it cannot see a pointer that committed while it waited and the delete goes through
+   * — the writer-first interleaving dangles (see the protocol header). The lock is what turns the
    * counts from a snapshot a concurrent writer is free to invalidate into a decision:
    *   * writer in flight, then delete → the FOR UPDATE WAITS on the writer's KEY SHARE until it
    *     commits; the count then SEES that pointer and refuses 409. Nothing was deleted.
@@ -1408,7 +1413,10 @@ function createExternalSystemRegistry({
       if (typeof trx.selectOneForUpdate !== 'function') {
         throw new Error('deleteExternalSystem: transaction handle with selectOneForUpdate is required (external-system delete lock protocol)')
       }
-      // LOCK FIRST. Nothing is read or counted before this statement returns.
+      // PIN, THEN LOCK. The SET is the transaction's first statement (PostgreSQL refuses it with
+      // 25001 otherwise); nothing is read or counted before the FOR UPDATE returns. A handle that
+      // cannot pin is refused by pinLockProtocolIsolation before it issues anything.
+      await pinLockProtocolIsolation(trx)
       const row = await trx.selectOneForUpdate(TABLE, where)
       if (!row) {
         throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })

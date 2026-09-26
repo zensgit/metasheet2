@@ -41,7 +41,7 @@
 
 const crypto = require('node:crypto')
 
-const { lockExternalSystemForPointerWrite } = require('./external-system-pointer-lock.cjs')
+const { lockExternalSystemForPointerWrite, pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 
 const BINDING_TABLE = 'integration_stock_prep_source_binding'
 // The error code a bind gets when the system it names is not there ONCE THE ROW LOCK IS HELD —
@@ -302,6 +302,12 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
    * eligibility check (`assertBindableSource`) still runs before `set` — this lock judges
    * existence-under-lock only, never kind/role/status. LOCK ORDER: system row first, binding row
    * second; the delete side never locks a binding row, so the two cannot form a cycle.
+   *
+   * AND THE TRANSACTION IS PINNED TO READ COMMITTED FIRST (`pinLockProtocolIsolation`, before the
+   * KEY SHARE): under an inherited REPEATABLE READ the KEY SHARE's snapshot predates the delete it
+   * waits on, and the resumed read fails as a bare SQLSTATE 40001 instead of this path's
+   * SOURCE_BINDING_SOURCE_NOT_LIVE. Every attempt of the retry loop is a fresh transaction and pins
+   * again.
    */
   async function set(input = {}) {
     const scope = normalizeScope(input)
@@ -312,6 +318,7 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     for (let attempt = 1; attempt <= MAX_SET_ATTEMPTS; attempt += 1) {
       try {
         return await db.transaction(async (trx) => {
+          await pinLockProtocolIsolation(trx)
           const system = await lockExternalSystemForPointerWrite(trx, {
             tenantId: scope.tenantId,
             id: externalSystemId,

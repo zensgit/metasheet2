@@ -306,6 +306,12 @@ function createFakeDb() {
     async transaction(callback) {
       return callback(handle)
     },
+    // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+    // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+    // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+    // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+    // real-Postgres suite.
+    async setTransactionIsolationLevel() {},
   }
   return handle
 }

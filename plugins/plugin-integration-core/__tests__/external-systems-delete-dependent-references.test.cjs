@@ -66,6 +66,9 @@
 //       ABORTS it, so the DELETE that follows fails 25P02 — the tolerated case silently becomes a
 //       refusal. That is why the absence set is learned by an autocommit probe BEFORE the
 //       transaction, and why this fake's transaction handle models the abort (see createMockDb).
+//
+// COMPLETION MARKER. A promise nobody settles drains the event loop and node exits 0 having printed
+// nothing — a hang that reads as a pass. This file only exits 0 when main() reached its end.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -224,6 +227,15 @@ function createMockDb() {
       },
       async transaction(callback) {
         return callback(handle(true, { chain: Promise.resolve(), aborted: false }))
+      },
+      // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+      // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+      // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+      // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+      // real-Postgres suite.
+      // It still occupies the connection as a statement (so it is serialized and aborted like one).
+      setTransactionIsolationLevel() {
+        return statement(async () => undefined)
       },
     }
   }
@@ -607,8 +619,17 @@ async function main() {
   await testForeignRowsAreNeverCounted()
   await testPipelineConflictWireShapeUnchanged()
   await testMutationsFlipTheNamedCases()
+  completed = true
   console.log('✓ external-systems delete guard: 079/062/073 second-order references counted')
 }
+
+let completed = false
+process.on('exit', (code) => {
+  if (code === 0 && !completed) {
+    console.error('✗ external-systems-delete-dependent-references did NOT run to completion — main() was still pending when the event loop drained (a hang, not a pass)')
+    process.exitCode = 1
+  }
+})
 
 main().catch((error) => {
   console.error('✗ external-systems-delete-dependent-references FAILED')

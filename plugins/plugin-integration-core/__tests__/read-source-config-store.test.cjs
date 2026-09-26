@@ -64,6 +64,12 @@ function createMockDb() {
     // seeded an `integration_external_systems` table — the existence-under-lock refusal is the
     // subject of external-systems-delete-bind-lock-protocol.test.cjs, not of the minting semantics
     // under test here.
+    // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+    // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+    // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+    // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+    // real-Postgres suite.
+    async setTransactionIsolationLevel() {},
     async selectOneForKeyShare(table, where) {
       calls.push(['selectOneForKeyShare', table, { ...where }])
       if (Array.isArray(tables[table])) {

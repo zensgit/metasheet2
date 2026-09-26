@@ -9,6 +9,8 @@
 
 const crypto = require('node:crypto')
 
+const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
+
 const PIPELINES_TABLE = 'integration_pipelines'
 const FIELD_MAPPINGS_TABLE = 'integration_field_mappings'
 const EXTERNAL_SYSTEMS_TABLE = 'integration_external_systems'
@@ -461,7 +463,10 @@ async function conflictFromRunningRun(db, normalized, details = {}) {
 // this INSIDE `db.transaction`; a helper that cannot lock is refused rather than degraded to the
 // unprotected `selectOne` this replaces. LOCK ORDER: source system, target system, pipeline row,
 // field mappings — KEY SHARE is compatible with KEY SHARE, so two pipeline writers naming the same
-// two systems in opposite orders cannot deadlock.
+// two systems in opposite orders cannot deadlock. ISOLATION: this check cannot pin the level itself —
+// `SET TRANSACTION` must be a transaction's FIRST statement and `instantiateTemplate` reads its
+// name clash before calling `writePipelineRow` — so BOTH transaction openers pin READ COMMITTED as
+// their first statement (`upsertPipeline` below, `integration-templates.cjs` instantiateTemplate).
 async function requireExternalSystem(db, normalized, systemId, expectedRoles, field) {
   if (!db || typeof db.selectOneForKeyShare !== 'function') {
     throw new Error('pipelines: transaction handle with selectOneForKeyShare is required to write a pipeline (external-system delete lock protocol)')
@@ -589,7 +594,12 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   async function upsertPipeline(input) {
     const normalized = normalizePipelineInput(input)
 
-    const write = (scopedDb) => writePipelineRow(scopedDb, normalized, idGenerator)
+    // READ COMMITTED is pinned as the transaction's FIRST statement (the lock protocol's isolation
+    // premise, enforced — see `external-system-pointer-lock.cjs`), then the KEY SHARE endpoint checks.
+    const write = async (scopedDb) => {
+      await pinLockProtocolIsolation(scopedDb)
+      return writePipelineRow(scopedDb, normalized, idGenerator)
+    }
 
     // ALWAYS one transaction, not only when field mappings ride along: the endpoint check inside
     // `writePipelineRow` takes KEY SHARE on both external systems, and a lock taken in autocommit is

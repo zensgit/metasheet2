@@ -22,10 +22,40 @@
 //     pointer is about to name. KEY SHARE waits for an in-flight delete to commit; when it resumes,
 //     the row is gone, the read returns null, and the writer refuses in ITS path's existing
 //     values-free error shape without writing anything.
-//   Both orderings are therefore closed by the database's lock manager, not by timing. READ
-//   COMMITTED (the deployment's level) is sufficient: each statement takes a fresh snapshot after
-//   its lock wait, so the count sees exactly the pointers that committed while it waited, and the
-//   writer's re-read sees exactly the delete that committed while it waited.
+//   Both orderings are therefore closed by the database's lock manager, not by timing — AT READ
+//   COMMITTED, where each statement takes a fresh snapshot after its lock wait, so the count sees
+//   exactly the pointers that committed while it waited, and the writer's re-read sees exactly the
+//   delete that committed while it waited.
+//
+// ISOLATION IS PINNED, NOT ASSUMED (#6076 independent verification, third round). Under REPEATABLE
+// READ the transaction snapshot is taken at its FIRST statement — for the delete side that is the
+// FOR UPDATE itself, i.e. BEFORE the lock wait. A writer that committed its pointer while the delete
+// waited is then invisible to the counts that follow, the delete counts zero and removes the row:
+// the writer-first interleaving DANGLES (proven on PostgreSQL 16 with
+// `ALTER DATABASE ... SET default_transaction_isolation = 'repeatable read'`). The writer side under
+// REPEATABLE READ does not dangle but refuses as a bare SQLSTATE 40001 instead of its own
+// values-free shape. A bare `BEGIN` inherits whatever `default_transaction_isolation` the server,
+// database, role or connection says, so "the deployment runs READ COMMITTED" is a configuration
+// fact the code cannot see. Every transaction that takes part in this protocol therefore issues
+// `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` as its FIRST statement, through
+// `pinLockProtocolIsolation` below (`lib/db.cjs` setTransactionIsolationLevel, a whitelisted
+// fixed-literal method on the transaction handle only). PostgreSQL refuses the SET with 25001 if
+// anything ran before it, so a participant that gets the order wrong aborts instead of running at
+// the inherited level. Participants: `deleteExternalSystem`, 079 `set`, 062 `saveVersion` (mint
+// transaction), `upsertPipeline`, `instantiateTemplate`.
+//   Why SET rather than READ-AND-REFUSE (`current_setting('transaction_isolation')` first, 409/500 on
+//   anything but read committed): refusing keeps the protocol sound but turns a database whose
+//   default is REPEATABLE READ / SERIALIZABLE into one where no external system can be deleted and
+//   no pointer can be written at all; pinning makes the protocol hold on such a database with no
+//   operator action, costs the same one round trip, and fails closed in the same situations
+//   (method missing → refused before any statement; issued late → 25001). The host transaction API
+//   (`packages/core-backend/src/index.ts` context.api.database.transaction →
+//   `src/integration/db/connection-pool.ts` transaction: `BEGIN`, then the callback) runs nothing
+//   between BEGIN and the callback's first statement, so the SET can always be first.
+//   What pinning cannot fix: a host whose `transaction` is not a real transaction block on ONE
+//   connection. There PostgreSQL only WARNS on SET TRANSACTION — and the row locks are released at
+//   statement end anyway, so the protocol is void for a reason isolation cannot address. That host
+//   contract is a premise, recorded in the design doc.
 //
 // WHY KEY SHARE (see `lib/db.cjs` selectOneForKeyShare): it conflicts with FOR UPDATE / DELETE and
 // with nothing weaker, so pointer writes never serialize against an ordinary non-key UPDATE of the
@@ -64,6 +94,8 @@
 // ---------------------------------------------------------------------------
 
 const EXTERNAL_SYSTEMS_TABLE = 'integration_external_systems'
+// The one isolation level every protocol participant pins (`lib/db.cjs` whitelist key).
+const LOCK_PROTOCOL_ISOLATION_LEVEL = 'read committed'
 
 function requiredText(value, field) {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -96,7 +128,29 @@ async function lockExternalSystemForPointerWrite(executor, { tenantId, id } = {}
   })
 }
 
+/**
+ * Pin the calling transaction to READ COMMITTED — the level the lock protocol is proven at. MUST be
+ * the transaction's FIRST statement (PostgreSQL enforces it: 25001 otherwise, which aborts the
+ * transaction). Call it on the TRANSACTION handle, before the FOR UPDATE (delete side) or the
+ * KEY SHARE (writer side) and before anything else the transaction reads.
+ *
+ * FAIL-CLOSED on a handle that cannot pin: an executor without `setTransactionIsolationLevel` (a
+ * root helper, an older host binding, a fake) is refused with a thrown Error rather than allowed to
+ * run at whatever level it inherited, because an inherited REPEATABLE READ is exactly the
+ * configuration under which the delete side's count misses a pointer that committed while it waited.
+ */
+async function pinLockProtocolIsolation(executor) {
+  if (!executor || typeof executor.setTransactionIsolationLevel !== 'function') {
+    throw new Error(
+      'pinLockProtocolIsolation: a transaction handle with setTransactionIsolationLevel is required (external-system delete lock protocol)',
+    )
+  }
+  await executor.setTransactionIsolationLevel(LOCK_PROTOCOL_ISOLATION_LEVEL)
+}
+
 module.exports = {
   EXTERNAL_SYSTEMS_TABLE,
+  LOCK_PROTOCOL_ISOLATION_LEVEL,
   lockExternalSystemForPointerWrite,
+  pinLockProtocolIsolation,
 }

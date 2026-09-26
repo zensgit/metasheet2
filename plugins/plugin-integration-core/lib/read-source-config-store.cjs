@@ -17,7 +17,7 @@
 const crypto = require('node:crypto')
 const { validateReadSourceConfig } = require('./read-source-config.cjs')
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
-const { lockExternalSystemForPointerWrite } = require('./external-system-pointer-lock.cjs')
+const { lockExternalSystemForPointerWrite, pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
 
 const CONFIG_TABLE = 'integration_read_source_configs'
 const AUDIT_TABLE = 'integration_read_source_config_audit'
@@ -261,7 +261,10 @@ function createReadSourceConfigStore({ db, idGenerator = crypto.randomUUID } = {
       }
       try {
         return await db.transaction(async (trx) => {
-          // THE EXTERNAL-SYSTEM ROW IS PINNED FIRST (writer half of the delete lock protocol): KEY
+          // READ COMMITTED IS PINNED FIRST (the protocol's isolation premise, enforced — see
+          // `external-system-pointer-lock.cjs`): the SET must be the transaction's first statement.
+          await pinLockProtocolIsolation(trx)
+          // THE EXTERNAL-SYSTEM ROW IS PINNED NEXT (writer half of the delete lock protocol): KEY
           // SHARE on the system this version is about to point at, before the family scan and the
           // INSERT. A delete holding FOR UPDATE makes this wait; when it resumes the row is gone,
           // the read is null, and the mint refuses as the S1 validator's own values-free tuple

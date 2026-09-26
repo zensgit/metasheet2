@@ -38,6 +38,20 @@
 //            lock); a pre-protocol LIVE row at a system that does not exist → reused, reuse_version
 //            audit, again no lock. New content at the same missing system → the lock's not_found
 //            tuple. Registered so the guarantee stays scoped to the MINT path (design doc §2.6)
+//   I-RR-* / I-SER-*  THE ISOLATION PIN (#6076 third-round independent verification). Every protocol
+//            participant — delete, 079 bind, 062 mint, pipeline upsert, TEMPLATE instantiation — in
+//            BOTH interleavings, driven through a second and third pair of sessions whose
+//            `default_transaction_isolation` is 'repeatable read' / 'serializable' (SET SESSION on the
+//            connection — a bare BEGIN there inherits it, which the I-*-SENTINEL arms prove first).
+//            Before the pin, the writer-first interleaving DANGLED at repeatable read: the delete's
+//            FOR UPDATE waited correctly, but its statement had taken the transaction snapshot BEFORE
+//            the wait, so the counts after it could not see the pointer. Each arm asserts no dangle,
+//            the refusal in the path's own shape (never a bare 40001), `transaction_isolation` =
+//            'read committed' observed INSIDE the parked transaction, and that the statement right
+//            after every BEGIN is `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`. The same arms
+//            (and every arm above) are what an `ALTER DATABASE ... SET default_transaction_isolation
+//            = 'repeatable read'` run exercises: on that database the whole file runs at a hostile
+//            default (verification record: design doc §7.5).
 //
 // PLUGIN ROOT OVERRIDE (test-only, documented in the design doc): the modules are loaded from
 // `EXTERNAL_SYSTEM_LOCK_PROTOCOL_PLUGIN_ROOT` when set, else from this repository. That is how the
@@ -75,6 +89,9 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
 
 const MIGRATIONS = [
   '057_create_integration_core_tables.sql',
+  // 061: integration_templates — the I-*-TPL arms instantiate a template (the pipeline writer whose
+  // transaction READS its name clash before the KEY SHARE, so it must pin the level itself).
+  '061_create_integration_templates.sql',
   '062_create_integration_read_source_configs.sql',
   '068_create_integration_sealed_export_ingestion.sql',
   '069_create_integration_sealed_export_generation_kernel.sql',
@@ -91,6 +108,15 @@ const READ_SOURCE_CONFIGS = 'integration_read_source_configs'
 const READ_SOURCE_AUDIT = 'integration_read_source_config_audit'
 const PIPELINES = 'integration_pipelines'
 const SEALED_EXPORT_BINDINGS = 'integration_sealed_export_stock_prep_bindings'
+const TEMPLATES = 'integration_templates'
+const PIN_STATEMENT = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED'
+// The hostile server defaults the I-* arms run under, set per CONNECTION with SET SESSION (a value
+// from this fixed table only — never interpolated from elsewhere).
+const HOSTILE_DEFAULTS = [
+  { tag: 'RR', level: 'repeatable read' },
+  { tag: 'SER', level: 'serializable' },
+] as const
+type HostileLevel = (typeof HOSTILE_DEFAULTS)[number]['level']
 const ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const NOW = Date.parse('2026-07-31T00:00:00Z')
 
@@ -190,12 +216,15 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
   // A schema that ran ONLY 057 — a deployment without 079 / 062 / 073 — and a session on it.
   let schema057: string
   let deleter057: Session
+  // One deleter/writer pair per hostile default (I-* arms).
+  const hostile = {} as Record<string, { deleter: Session; writer: Session }>
   let plugin: {
     createDb: (args: { database: Session['database'] }) => any
     createExternalSystemRegistry: (args: any) => any
     createStockPreparationSourceBindingStore: (args: any) => any
     createReadSourceConfigStore: (args: any) => any
     createPipelineRegistry: (args: any) => any
+    createIntegrationTemplateRegistry: (args: any) => any
     createSealedExportLifecycleProvisioning: (args: any) => any
     createEd25519SignerMaterial: () => { publicKey: unknown }
     contentKeyFor: (normalized: unknown) => string
@@ -210,6 +239,7 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
       createStockPreparationSourceBindingStore: requireCjs(path.join(PLUGIN_LIB, 'stock-preparation-source-binding-store.cjs')).createStockPreparationSourceBindingStore,
       createReadSourceConfigStore: readSourceConfigStore.createReadSourceConfigStore,
       createPipelineRegistry: requireCjs(path.join(PLUGIN_LIB, 'pipelines.cjs')).createPipelineRegistry,
+      createIntegrationTemplateRegistry: requireCjs(path.join(PLUGIN_LIB, 'integration-templates.cjs')).createIntegrationTemplateRegistry,
       createSealedExportLifecycleProvisioning: requireCjs(path.join(PLUGIN_LIB, 'sealed-export', 'sealed-export-lifecycle-provisioning.cjs')).createSealedExportLifecycleProvisioning,
       createEd25519SignerMaterial: requireCjs(path.join(PLUGIN_LIB, 'sealed-export', 'sealed-export-signer-authority.cjs')).createEd25519SignerMaterial,
       // `contentKeyFor` is a public export of the store (the C6 gate binds to it); the pre-#6076
@@ -224,9 +254,13 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
   // `transaction` runs the callback on ONE client inside BEGIN/COMMIT (ROLLBACK on throw). The gate
   // is the test's scheduling seam: the next statement whose text starts with `sqlPrefix` parks
   // until released, and `reached` resolves when it parks.
-  async function openSession(targetSchema: string = schema): Promise<Session> {
+  async function openSession(targetSchema: string = schema, defaultIsolation?: HostileLevel): Promise<Session> {
     const client = await ownerPool.connect()
     await client.query(`SET search_path TO ${quotedIdentifier(targetSchema)}, public`)
+    if (defaultIsolation) {
+      if (!HOSTILE_DEFAULTS.some((entry) => entry.level === defaultIsolation)) throw new Error('openSession: level outside HOSTILE_DEFAULTS')
+      await client.query(`SET SESSION default_transaction_isolation = '${defaultIsolation}'`)
+    }
     const pid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
     const gates = new Map<string, Gate & { arrived: () => void; open: Promise<void> }>()
     const statements: string[] = []
@@ -334,37 +368,80 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
       sourceSystemId: 'sys_1', sourceObject: 'materials', targetSystemId: 'sys_target', targetObject: 't_material',
     })
   }
+  // Template instantiation: same pointer (integration_pipelines) through the same writePipelineRow,
+  // but its transaction READS the name clash before the KEY SHARE (integration-templates.cjs step 6).
+  function templateInstantiate(session: Session) {
+    const templates = plugin.createIntegrationTemplateRegistry({
+      db: session.db,
+      idGenerator: () => 'pipe_from_template',
+      externalSystemRegistry: registryOn(session),
+    })
+    return () => templates.instantiateTemplate({
+      tenantId: 't1', workspaceId: null, templateId: 'tpl_1', sourceSystemId: 'sys_1', targetSystemId: 'sys_target', pipelineName: 'from template',
+    })
+  }
   const deleteInput = { tenantId: 't1', workspaceId: null, id: 'sys_1' }
+
+  // `transaction_isolation` INSIDE a transaction that is parked at a gate: the session's client is
+  // idle-in-transaction (the plugin's next statement is held in JS before it is sent), so a query on
+  // the same client runs inside that very transaction.
+  async function isolationInside(session: Session): Promise<string> {
+    const { rows } = await session.client.query("SELECT current_setting('transaction_isolation') AS iso")
+    return String(rows[0].iso)
+  }
 
   // Interleaving A — the owner's: delete side has taken FOR UPDATE and counted ZERO; the writer
   // starts while the delete is parked between its count and its DELETE.
-  async function deleteFirst(write: () => Promise<unknown>, waitWindowMs?: number) {
-    const beforeDelete = deleter.gateBefore(`DELETE FROM ${quotedIdentifier(EXTERNAL_SYSTEMS)}`)
-    const deletion = settle(registryOn(deleter).deleteExternalSystem(deleteInput))
+  async function deleteFirst(
+    write: () => Promise<unknown>,
+    waitWindowMs?: number,
+    pair: { deleter: Session; writer: Session } = { deleter, writer },
+  ) {
+    const beforeDelete = pair.deleter.gateBefore(`DELETE FROM ${quotedIdentifier(EXTERNAL_SYSTEMS)}`)
+    const deletion = settle(registryOn(pair.deleter).deleteExternalSystem(deleteInput))
     await beforeDelete.reached
+    const parkedIsolation = await isolationInside(pair.deleter)
     const writing = settle(write())
-    const writerWaited = await waitsOnLock(writer.pid, waitWindowMs)
+    const writerWaited = await waitsOnLock(pair.writer.pid, waitWindowMs)
     beforeDelete.release()
     const [deleted, written] = await Promise.all([deletion, writing])
-    return { deleted, written, writerWaited }
+    return { deleted, written, writerWaited, parkedIsolation }
   }
 
   // Interleaving B — writer holds KEY SHARE and is parked before its pointer INSERT; the delete
   // starts and must wait for it.
-  async function writeFirst(write: () => Promise<unknown>, insertPrefix: string) {
-    const beforeInsert = writer.gateBefore(insertPrefix)
+  async function writeFirst(
+    write: () => Promise<unknown>,
+    insertPrefix: string,
+    pair: { deleter: Session; writer: Session } = { deleter, writer },
+  ) {
+    const beforeInsert = pair.writer.gateBefore(insertPrefix)
     const writing = settle(write())
     await beforeInsert.reached
-    const deletion = settle(registryOn(deleter).deleteExternalSystem(deleteInput))
-    const deleterWaited = await waitsOnLock(deleter.pid)
+    const parkedIsolation = await isolationInside(pair.writer)
+    const deletion = settle(registryOn(pair.deleter).deleteExternalSystem(deleteInput))
+    const deleterWaited = await waitsOnLock(pair.deleter.pid)
     beforeInsert.release()
     const [written, deleted] = await Promise.all([writing, deletion])
-    return { deleted, written, deleterWaited }
+    return { deleted, written, deleterWaited, parkedIsolation }
+  }
+
+  // Every BEGIN a session issued in [from, end) is immediately followed by the pin.
+  function pinnedAfterEveryBegin(session: Session, from: number): { begins: number; pinned: number } {
+    const slice = session.statements.slice(from)
+    let begins = 0
+    let pinned = 0
+    slice.forEach((statement, index) => {
+      if (statement !== 'BEGIN') return
+      begins += 1
+      if (slice[index + 1] === PIN_STATEMENT) pinned += 1
+    })
+    return { begins, pinned }
   }
 
   beforeAll(async () => {
     plugin = loadPlugin()
-    ownerPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 6 })
+    ownerPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 6 + HOSTILE_DEFAULTS.length * 2 })
     owner = await ownerPool.connect()
     observer = await ownerPool.connect()
     schema = `es_lock_${process.pid}_${Date.now().toString(36)}`
@@ -383,10 +460,13 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     writer = await openSession()
     secondWriter = await openSession()
     deleter057 = await openSession(schema057)
+    for (const { tag, level } of HOSTILE_DEFAULTS) {
+      hostile[tag] = { deleter: await openSession(schema, level), writer: await openSession(schema, level) }
+    }
   })
 
   afterAll(async () => {
-    for (const session of [deleter, writer, secondWriter, deleter057]) {
+    for (const session of [deleter, writer, secondWriter, deleter057, ...Object.values(hostile).flatMap((pair) => [pair.deleter, pair.writer])]) {
       if (session) {
         await session.client.query('ROLLBACK').catch(() => {})
         session.client.release()
@@ -404,11 +484,15 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
 
   beforeEach(async () => {
     for (const table of [PIPELINES, STOCK_PREP_BINDINGS, READ_SOURCE_AUDIT, READ_SOURCE_CONFIGS, SEALED_EXPORT_BINDINGS,
-      'integration_sealed_export_authority_state', 'integration_sealed_export_signer_public_keys', EXTERNAL_SYSTEMS]) {
+      'integration_sealed_export_authority_state', 'integration_sealed_export_signer_public_keys', TEMPLATES, EXTERNAL_SYSTEMS]) {
       await owner.query(`DELETE FROM ${quotedIdentifier(table)}`)
     }
     await seedSystem('sys_1')
     await seedSystem('sys_target', 'target')
+    await owner.query(
+      `INSERT INTO ${quotedIdentifier(TEMPLATES)} (id, tenant_id, workspace_id, name, source_kind, source_object, target_kind, target_object, key_fields, mapping_def, status)
+       VALUES ('tpl_1', 't1', NULL, 'material sync template', 'erp:k3-wise-webapi', 'materials', 'erp:k3-wise-webapi', 't_material', '["code"]'::jsonb, '[]'::jsonb, 'active')`,
+    )
   })
 
   it('NEC: the unlocked count-then-delete shape (#5923 as shipped) dangles on this schema', async () => {
@@ -630,4 +714,116 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     expect(different.error?.details?.errors).toEqual([{ code: 'READ_SOURCE_SYSTEM_NOT_FOUND', field: 'systemId', reason: 'not_found' }])
     expect(await count(READ_SOURCE_CONFIGS, "system_id = 'sys_ghost'")).toBe(1)
   })
+
+  // ------------------------------------------------------------------------------------------------
+  // I-RR-* / I-SER-* — the isolation pin under hostile server defaults (see the header).
+  // ------------------------------------------------------------------------------------------------
+  const PROTOCOL_WRITERS = [
+    {
+      tag: '079',
+      label: '079 bind',
+      write: (session: Session) => stockPrepBind(session),
+      insertPrefix: `INSERT INTO ${quotedIdentifier(STOCK_PREP_BINDINGS)}`,
+      pointerTable: STOCK_PREP_BINDINGS,
+      pointerWhere: "external_system_id = 'sys_1'",
+      countKey: 'stockPrepSourceBindingCount',
+      assertOwnRefusal: (error: any) => {
+        expect(error?.code).toBe('SOURCE_BINDING_SOURCE_NOT_LIVE')
+        expect(error?.name).toBe('StockPreparationSourceBindingStoreError')
+        expect(error?.status).toBe(409)
+      },
+    },
+    {
+      tag: '062',
+      label: '062 mint',
+      write: (session: Session) => readSourceMint(session),
+      insertPrefix: `INSERT INTO ${quotedIdentifier(READ_SOURCE_CONFIGS)}`,
+      pointerTable: READ_SOURCE_CONFIGS,
+      pointerWhere: "system_id = 'sys_1'",
+      countKey: 'readSourceConfigCount',
+      assertOwnRefusal: (error: any) => {
+        expect(error?.code).toBeUndefined()
+        expect(error?.name).toBe('ReadSourceConfigValidationError')
+        expect(error?.details?.errors).toEqual([{ code: 'READ_SOURCE_SYSTEM_NOT_FOUND', field: 'systemId', reason: 'not_found' }])
+      },
+    },
+    {
+      tag: 'PIPE',
+      label: 'pipeline upsert',
+      write: (session: Session) => pipelineWrite(session),
+      insertPrefix: `INSERT INTO ${quotedIdentifier(PIPELINES)}`,
+      pointerTable: PIPELINES,
+      pointerWhere: "source_system_id = 'sys_1'",
+      countKey: 'sourcePipelineCount',
+      assertOwnRefusal: (error: any) => {
+        expect(error?.code).toBeUndefined() // never a SQLSTATE (40001 / 23503)
+        expect(error?.name).toBe('PipelineValidationError')
+        expect(error?.message).toBe('sourceSystemId does not exist in this tenant/workspace')
+      },
+    },
+    {
+      tag: 'TPL',
+      label: 'template instantiation',
+      write: (session: Session) => templateInstantiate(session),
+      insertPrefix: `INSERT INTO ${quotedIdentifier(PIPELINES)}`,
+      pointerTable: PIPELINES,
+      pointerWhere: "source_system_id = 'sys_1'",
+      countKey: 'sourcePipelineCount',
+      assertOwnRefusal: (error: any) => {
+        expect(error?.code).toBeUndefined()
+        expect(error?.name).toBe('PipelineValidationError')
+        expect(error?.message).toBe('sourceSystemId does not exist in this tenant/workspace')
+      },
+    },
+  ]
+
+  for (const { tag, level } of HOSTILE_DEFAULTS) {
+    it(`I-${tag}-SENTINEL: the ${level} sessions really default to ${level} — a bare BEGIN inherits it (the harness is hostile, not merely labelled)`, async () => {
+      for (const session of [hostile[tag].deleter, hostile[tag].writer]) {
+        await session.client.query('BEGIN')
+        const { rows } = await session.client.query("SELECT current_setting('transaction_isolation') AS iso")
+        await session.client.query('ROLLBACK')
+        expect(rows[0].iso).toBe(level)
+      }
+    })
+
+    for (const spec of PROTOCOL_WRITERS) {
+      it(`I-${tag}-${spec.tag}-A: ${level} default, delete first → the ${spec.label} waits on the FOR UPDATE, then refuses in its own shape (never a bare 40001); no dangle; both sides ran at read committed`, async () => {
+        const pair = hostile[tag]
+        const deleterFrom = pair.deleter.statements.length
+        const writerFrom = pair.writer.statements.length
+        const { deleted, written, writerWaited, parkedIsolation } = await deleteFirst(spec.write(pair.writer), undefined, pair)
+        // The outcome FIRST, so a regression reports the dangle itself, not a downstream symptom.
+        expect({
+          systemRows: await count(EXTERNAL_SYSTEMS, "id = 'sys_1'"),
+          pointerRows: await count(spec.pointerTable, spec.pointerWhere),
+        }).toEqual({ systemRows: 0, pointerRows: 0 })
+        expect(writerWaited).toBe(true)
+        expect(deleted.error).toBeNull()
+        spec.assertOwnRefusal(written.error)
+        expect(parkedIsolation).toBe('read committed') // observed INSIDE the parked delete transaction
+        expect(pinnedAfterEveryBegin(pair.deleter, deleterFrom)).toEqual({ begins: 1, pinned: 1 })
+        expect(pinnedAfterEveryBegin(pair.writer, writerFrom)).toEqual({ begins: 1, pinned: 1 })
+      })
+
+      it(`I-${tag}-${spec.tag}-B: ${level} default, ${spec.label} first → the delete waits on the KEY SHARE, then COUNTS the pointer and refuses 409; system and pointer kept`, async () => {
+        const pair = hostile[tag]
+        const deleterFrom = pair.deleter.statements.length
+        const writerFrom = pair.writer.statements.length
+        const { deleted, written, deleterWaited, parkedIsolation } = await writeFirst(spec.write(pair.writer), spec.insertPrefix, pair)
+        // Before the pin this was { systemRows: 0, pointerRows: 1 } at repeatable read — the dangle.
+        expect({
+          systemRows: await count(EXTERNAL_SYSTEMS, "id = 'sys_1'"),
+          pointerRows: await count(spec.pointerTable, spec.pointerWhere),
+        }).toEqual({ systemRows: 1, pointerRows: 1 })
+        expect(deleterWaited).toBe(true)
+        expect(written.error).toBeNull()
+        expect(deleted.error?.name).toBe('ExternalSystemConflictError')
+        expect(deleted.error?.details?.[spec.countKey]).toBe(1)
+        expect(parkedIsolation).toBe('read committed') // observed INSIDE the parked writer transaction
+        expect(pinnedAfterEveryBegin(pair.deleter, deleterFrom)).toEqual({ begins: 1, pinned: 1 })
+        expect(pinnedAfterEveryBegin(pair.writer, writerFrom)).toEqual({ begins: 1, pinned: 1 })
+      })
+    }
+  }
 })

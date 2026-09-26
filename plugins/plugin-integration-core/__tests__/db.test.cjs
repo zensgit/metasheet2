@@ -14,7 +14,9 @@
 //      parameterized SQL with whitelisted identifiers and never concatenate
 //      user values into the statement.
 //   6. updateRow / deleteRows refuse empty where clauses (no unbounded ops).
-//   7. transaction() exposes the same scoped surface, no rawQuery.
+//   7. transaction() exposes the same scoped surface, no rawQuery — plus ONE handle-only method,
+//      setTransactionIsolationLevel, whose level is a whitelist key rendering a fixed literal
+//      (never on the root helper: outside a transaction block PostgreSQL only warns and ignores).
 //   8. No rawQuery export at all.
 //
 // Run: node __tests__/db.test.cjs
@@ -352,12 +354,69 @@ async function main() {
     const trxKeys = Object.keys(trx).sort()
     assert.deepEqual(
       trxKeys,
-      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate', 'updateRow', 'upsertOne'],
+      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForKeyShare', 'selectOneForUpdate',
+        // setTransactionIsolationLevel: HANDLE-ONLY (asserted absent from the root surface in 4.),
+        // the external-system delete lock protocol's isolation pin (external-system-pointer-lock.cjs).
+        'setTransactionIsolationLevel',
+        'updateRow', 'upsertOne'],
       'transaction exposes scoped surface only, no rawQuery',
     )
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })
   })
   assert.ok(mockDb9.calls.some((c) => c.tx && /INSERT INTO "integration_runs"/.test(c.sql)))
+
+  // --- 7b. setTransactionIsolationLevel: whitelist key -> fixed literal, on the tx connection ----
+  assert.equal(typeof db9.setTransactionIsolationLevel, 'undefined',
+    'setTransactionIsolationLevel is NOT on the root helper (autocommit would make it a silent no-op)')
+  const mockDb9b = mockDatabase()
+  const db9b = createDb({ database: mockDb9b })
+  await db9b.transaction(async (trx) => {
+    await trx.setTransactionIsolationLevel('read committed')
+    await trx.setTransactionIsolationLevel('repeatable read')
+    await trx.setTransactionIsolationLevel('serializable')
+  })
+  assert.deepEqual(
+    mockDb9b.calls.map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })),
+    [
+      { sql: 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', params: [], tx: true },
+      { sql: 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', params: [], tx: true },
+      { sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE', params: [], tx: true },
+    ],
+    'each whitelisted level renders its ONE fixed statement, on the transaction connection, with no parameters',
+  )
+  const hostile = [
+    'READ COMMITTED', // case is part of the key: only the exact whitelist spellings pass
+    'read uncommitted', // deliberately absent (PostgreSQL runs it as read committed)
+    "read committed; DROP TABLE users; --",
+    'read committed ',
+    '',
+    null,
+    undefined,
+    42,
+    { toString: () => 'read committed' },
+    ['read committed'],
+    'constructor',
+    '__proto__',
+    'hasOwnProperty',
+  ]
+  const mockDb9c = mockDatabase()
+  const db9c = createDb({ database: mockDb9c })
+  await db9c.transaction(async (trx) => {
+    for (const level of hostile) {
+      await assert.rejects(
+        () => trx.setTransactionIsolationLevel(level),
+        (error) => error instanceof ScopeViolationError
+          && /not one of the whitelisted levels/.test(error.message)
+          // values-free: the refusal never echoes what it was handed
+          && !error.message.includes('DROP') && !error.message.includes('READ COMMITTED'),
+        `setTransactionIsolationLevel refuses ${JSON.stringify(String(level))}`,
+      )
+    }
+  })
+  assert.equal(mockDb9c.calls.length, 0, 'a refused level issues NO statement at all')
+  assert.deepEqual(Object.keys(__internals.TRANSACTION_ISOLATION_STATEMENTS).sort(),
+    ['read committed', 'repeatable read', 'serializable'], 'the isolation whitelist is exactly three levels')
+  assert.ok(Object.isFrozen(__internals.TRANSACTION_ISOLATION_STATEMENTS), 'the isolation whitelist is frozen')
 
   // --- 8. No rawQuery export ------------------------------------------
   assert.equal(typeof db.rawQuery, 'undefined', 'db has no rawQuery')

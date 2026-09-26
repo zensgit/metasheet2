@@ -57,7 +57,33 @@
 //   M-WPIPE     mutation: pipeline endpoint check with plain SELECT -> dangles
 //   M-FC-*      mutations that DEGRADE a fail-closed guard to an unlocked read (lock helper, 079 and
 //               062 constructors, pipeline endpoint check) -> the matching FC assertion flips
-// The mutations are in-memory (source text -> `_compile`), the working-tree files are never written.
+// ISOLATION PIN (#6076 third-round verification: the protocol held only at READ COMMITTED and the code
+// merely ASSUMED that level; under a REPEATABLE READ default the writer-first interleaving dangled on
+// PostgreSQL 16). The fake now models REPEATABLE READ (one snapshot at the first statement) and
+// SET TRANSACTION's "must be first" rule (25001):
+//   F-ISO       the fake's RR model asserted directly (snapshot at the first statement, SET after a
+//               statement -> 25001 + abort, KEY SHARE on a row deleted after the snapshot -> 40001,
+//               no setTransactionIsolationLevel on the ROOT helper)
+//   I-RR / I-SER every participant (delete, 079, 062, pipeline, TEMPLATE instantiation) in BOTH
+//               interleavings under a repeatable-read and a serializable server default: no dangle,
+//               each refusal in its own values-free shape (never a bare 40001), and every
+//               participating transaction's FIRST statement is SET ... READ COMMITTED
+//   FC-08..13   FAIL-CLOSED on a handle that cannot pin: pinLockProtocolIsolation refuses null / {} /
+//               the ROOT helper; delete, 079, 062, pipeline and template refuse a transaction handle
+//               without setTransactionIsolationLevel with NOTHING issued inside the transaction
+//   M-ISO-DEL   delete side without the pin, RR default -> writer-first DANGLES (the lock still waits;
+//               the counts read the snapshot the FOR UPDATE took before its wait)
+//   M-ISO-079 / -062 / -PIPE / -TPL  writer without the pin, RR default -> delete-first refusal becomes
+//               a bare 40001 (the I-matrix's own-shape assertion flips)
+//   M-ISO-LEVEL the helper pins REPEATABLE READ instead -> writer-first dangles on a READ COMMITTED
+//               default database (the LEVEL is load-bearing, not merely "some SET")
+//   M-FC-ISO    the pin helper degraded to "skip when the method is missing" -> FC-08 and FC-10 flip
+// The mutations are in-memory (source text -> `_compile`, or a module compiled against a mutant
+// pointer-lock export via a scoped require.cache swap); the working-tree files are never written.
+//
+// COMPLETION MARKER: every wait in this file is on a promise (a gate, a lock). A promise nobody
+// settles drains the event loop and node exits 0 having printed nothing — a hang that reads as a
+// pass. This file only exits 0 when main() reached its end (see the bottom).
 //
 // The in-memory transaction handle models ONE PostgreSQL connection: statements run one at a time
 // in issue order, and once a statement has failed the transaction is ABORTED — every later statement
@@ -84,16 +110,23 @@ const {
 } = require('../lib/read-source-config-store.cjs')
 const { validateReadSourceConfig } = require('../lib/read-source-config.cjs')
 const { createPipelineRegistry } = require('../lib/pipelines.cjs')
+const { createIntegrationTemplateRegistry } = require('../lib/integration-templates.cjs')
 const {
   createSealedExportLifecycleProvisioning,
 } = require('../lib/sealed-export/sealed-export-lifecycle-provisioning.cjs')
 const { createEd25519SignerMaterial } = require('../lib/sealed-export/sealed-export-signer-authority.cjs')
-const { EXTERNAL_SYSTEMS_TABLE, lockExternalSystemForPointerWrite } = require('../lib/external-system-pointer-lock.cjs')
+const {
+  EXTERNAL_SYSTEMS_TABLE,
+  LOCK_PROTOCOL_ISOLATION_LEVEL,
+  lockExternalSystemForPointerWrite,
+  pinLockProtocolIsolation,
+} = require('../lib/external-system-pointer-lock.cjs')
 
 const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
 const READ_SOURCE_AUDIT_TABLE = 'integration_read_source_config_audit'
 const PIPELINES_TABLE = 'integration_pipelines'
 const SEALED_EXPORT_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
+const TEMPLATES_TABLE = 'integration_templates'
 const ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const NOW = Date.parse('2026-07-31T00:00:00Z')
 
@@ -130,8 +163,23 @@ const MODULES = {
 //     `{ code: '25P02' }` until the transaction ends (PostgreSQL: "current transaction is aborted,
 //     commands ignored until end of transaction block"). `failCountWith(table, error)` makes the
 //     next COUNT of that table throw, on any handle.
+//   * ISOLATION (`createLockingDb({ defaultIsolation })`, default 'read committed' = the behaviour
+//     above). A transaction starts at the default level; `setTransactionIsolationLevel(level)` (on
+//     TRANSACTION handles only, like lib/db.cjs) changes it and throws `{ code: '25001' }` — which
+//     aborts the transaction — once any other statement has run. At 'repeatable read' /
+//     'serializable' the transaction takes ONE snapshot of the committed rows at its first statement
+//     (the SET excluded: it takes none), BEFORE that statement's lock wait, and every read in it
+//     (selectOne / select / countRows / the lock reads) sees that snapshot; a lock read whose row
+//     was deleted by a transaction that committed after the snapshot throws `{ code: '40001' }`
+//     (PostgreSQL: "could not serialize access due to concurrent delete"). SSI is NOT modelled —
+//     'serializable' behaves as 'repeatable read' here; the real-Postgres suite runs the real one.
+//     In-place UPDATEs of committed rows are not versioned (the protocol is about pointer INSERTs
+//     and system DELETEs, which are).
 // ---------------------------------------------------------------------------------------------------
-function createLockingDb() {
+const FAKE_ISOLATION_LEVELS = new Set(['read committed', 'repeatable read', 'serializable'])
+
+function createLockingDb({ defaultIsolation = 'read committed' } = {}) {
+  assert.ok(FAKE_ISOLATION_LEVELS.has(defaultIsolation), 'createLockingDb: unknown defaultIsolation')
   const committed = new Map()
   const locks = new Map() // rowKey -> { exclusive: txId | null, keyShare: Set<txId> }
   const calls = [] // { tx, op, table, where }
@@ -144,6 +192,16 @@ function createLockingDb() {
   function rowsOf(table) {
     if (!committed.has(table)) committed.set(table, [])
     return committed.get(table)
+  }
+  // One snapshot of every committed row: a COPY of the row (what the snapshot reads) plus the
+  // committed object it was copied from (so a later lock read can tell whether that row version
+  // was deleted after the snapshot).
+  function takeSnapshot() {
+    const snapshot = new Map()
+    for (const [table, tableRows] of committed) {
+      snapshot.set(table, tableRows.map((row) => ({ row: { ...row }, origin: row })))
+    }
+    return snapshot
   }
   function matches(row, where) {
     return Object.entries(where || {}).every(([key, value]) => {
@@ -188,14 +246,29 @@ function createLockingDb() {
     function record(op, table, where) {
       calls.push({ tx: txId, op, table, where: where ? { ...where } : undefined })
     }
+    // What this handle's reads see: the transaction's snapshot at repeatable read / serializable,
+    // the committed rows otherwise (read committed, and autocommit).
+    function visibleEntries(table) {
+      if (txState && txState.snapshot) return txState.snapshot.get(table) || []
+      return rowsOf(table).map((row) => ({ row, origin: row }))
+    }
+    function visibleRows(table) {
+      return visibleEntries(table).map((entry) => entry.row)
+    }
     // One connection per transaction: serialize, and abort on the first failure (25P02 after).
-    function statement(run) {
+    // The first statement that is not SET TRANSACTION takes the snapshot (when the level wants one)
+    // BEFORE it runs — i.e. before any lock wait it is about to do, as PostgreSQL does.
+    function statement(run, { isolationStatement = false } = {}) {
       if (autocommit) return run()
       const next = txState.chain.then(async () => {
         if (txState.aborted) {
           throw Object.assign(new Error('错误: 当前事务被终止, 事务块结束之前的查询被忽略'), { code: '25P02' })
         }
         try {
+          if (!isolationStatement) {
+            if (txState.statements === 0 && txState.isolation !== 'read committed') txState.snapshot = takeSnapshot()
+            txState.statements += 1
+          }
           return await run()
         } catch (error) {
           txState.aborted = true
@@ -208,33 +281,38 @@ function createLockingDb() {
     async function acquire(table, where, mode) {
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const row = rowsOf(table).find((candidate) => matches(candidate, where))
-        if (!row) return null
-        const lock = lockOf(rowKey(table, row))
+        const entry = visibleEntries(table).find((candidate) => matches(candidate.row, where))
+        if (!entry) return null
+        const lock = lockOf(rowKey(table, entry.origin))
         const othersKeyShare = [...lock.keyShare].some((holder) => holder !== txId)
         const otherExclusive = lock.exclusive !== null && lock.exclusive !== txId
         const conflict = mode === 'exclusive' ? (otherExclusive || othersKeyShare) : otherExclusive
         if (!conflict) {
+          if (txState && txState.snapshot && !rowsOf(table).includes(entry.origin)) {
+            // repeatable read: the row version this snapshot sees was deleted by a transaction that
+            // committed after the snapshot — PostgreSQL refuses to lock it.
+            throw Object.assign(new Error('could not serialize access due to concurrent delete'), { code: '40001' })
+          }
           if (mode === 'exclusive') lock.exclusive = txId
           else lock.keyShare.add(txId)
-          return { ...row }
+          return { ...entry.row }
         }
         if (autocommit) throw new Error('lock wait in autocommit is not modelled')
         await waitForLockChange(txId)
       }
     }
-    return {
+    const api = {
       selectOne(table, where) {
         return statement(async () => {
           record('selectOne', table, where)
-          const row = rowsOf(table).find((candidate) => matches(candidate, where))
+          const row = visibleRows(table).find((candidate) => matches(candidate, where))
           return row ? { ...row } : null
         })
       },
       select(table, options = {}) {
         return statement(async () => {
           record('select', table, options.where)
-          const filtered = rowsOf(table).filter((row) => matches(row, options.where || {}))
+          const filtered = visibleRows(table).filter((row) => matches(row, options.where || {}))
           const offset = options.offset || 0
           return filtered.slice(offset, offset + (options.limit || 1000)).map((row) => ({ ...row }))
         })
@@ -243,7 +321,7 @@ function createLockingDb() {
         return statement(async () => {
           record('countRows', table, where)
           if (countErrors.has(table)) throw countErrors.get(table)
-          return rowsOf(table).filter((row) => matches(row, where)).length
+          return visibleRows(table).filter((row) => matches(row, where)).length
         })
       },
       selectOneForUpdate(table, where) {
@@ -314,7 +392,13 @@ function createLockingDb() {
         const writes = []
         calls.push({ tx: id, op: 'BEGIN' })
         try {
-          const result = await callback(handle(id, writes, { chain: Promise.resolve(), aborted: false }))
+          const result = await callback(handle(id, writes, {
+            chain: Promise.resolve(),
+            aborted: false,
+            isolation: defaultIsolation,
+            statements: 0,
+            snapshot: null,
+          }))
           for (const write of writes) write()
           calls.push({ tx: id, op: 'COMMIT' })
           return result
@@ -326,6 +410,19 @@ function createLockingDb() {
         }
       },
     }
+    if (!autocommit) {
+      // HANDLE-ONLY, as in lib/db.cjs: outside a transaction block PostgreSQL only warns and ignores
+      // SET TRANSACTION, so the root helper does not offer it.
+      api.setTransactionIsolationLevel = (level) => statement(async () => {
+        calls.push({ tx: txId, op: 'setTransactionIsolationLevel', level })
+        if (!FAKE_ISOLATION_LEVELS.has(level)) throw new Error('fake: isolation level outside the whitelist')
+        if (txState.statements > 0) {
+          throw Object.assign(new Error('SET TRANSACTION ISOLATION LEVEL must be called before any query'), { code: '25001' })
+        }
+        txState.isolation = level
+      }, { isolationStatement: true })
+    }
+    return api
   }
 
   const root = handle(null, null)
@@ -460,7 +557,12 @@ function newRegistry(db, factory = createExternalSystemRegistry) {
 async function deleteFirst({ db, registry, writer }) {
   const beforeDelete = db.gateBefore('deleteRows', EXTERNAL_SYSTEMS_TABLE)
   const deletion = settle(registry.deleteExternalSystem(deleteInput()))
-  await beforeDelete.reached
+  // A delete that fails before its DELETE never reaches the gate. Racing the gate against the
+  // delete's own settlement makes that a visible assertion failure instead of a silent hang.
+  if (!(await Promise.race([beforeDelete.reached.then(() => true), deletion.then(() => false)]))) {
+    beforeDelete.release()
+    return { deleted: await deletion, written: { value: null, error: new Error('interleaving not reached: the delete settled before its DELETE; the writer never ran') }, writerBlocked: false }
+  }
   const write = settle(writer())
   const writerBlocked = await db.waitUntilBlocked()
   beforeDelete.release()
@@ -472,7 +574,11 @@ async function deleteFirst({ db, registry, writer }) {
 async function writeFirst({ db, registry, writer, pointerTable }) {
   const beforeInsert = db.gateBefore('insertOne', pointerTable)
   const write = settle(writer())
-  await beforeInsert.reached
+  // Same anti-hang race as deleteFirst: a writer that fails before its pointer INSERT.
+  if (!(await Promise.race([beforeInsert.reached.then(() => true), write.then(() => false)]))) {
+    beforeInsert.release()
+    return { written: await write, deleted: { value: null, error: new Error('interleaving not reached: the writer settled before its INSERT; the delete never ran') }, deleterBlocked: false }
+  }
   const deletion = settle(registry.deleteExternalSystem(deleteInput()))
   const deleterBlocked = await db.waitUntilBlocked()
   beforeInsert.release()
@@ -695,23 +801,27 @@ async function testLockOrderAndScopePins() {
   assert.equal(begins.length, 2, 'L-10: exactly one delete transaction and one bind transaction')
   const [deleteTx, bindTx] = begins
   const deleteOps = db.txCalls(deleteTx).filter((call) => call.op !== 'BEGIN' && call.op !== 'COMMIT' && call.op !== 'ROLLBACK')
-  assert.equal(deleteOps[0].op, 'selectOneForUpdate', 'L-10: the delete transaction\'s FIRST statement is the FOR UPDATE')
-  assert.equal(deleteOps[0].table, EXTERNAL_SYSTEMS_TABLE)
+  assert.deepEqual([deleteOps[0].op, deleteOps[0].level], ['setTransactionIsolationLevel', 'read committed'],
+    'L-10: the delete transaction\'s FIRST statement pins READ COMMITTED')
+  assert.equal(deleteOps[1].op, 'selectOneForUpdate', 'L-10: ...and its first READ is the FOR UPDATE')
+  assert.equal(deleteOps[1].table, EXTERNAL_SYSTEMS_TABLE)
   const countOps = deleteOps.filter((call) => call.op === 'countRows')
   assert.equal(countOps.length, 6, 'L-10: pipelines ×2 + 079 + 073 + 062 ×2 are all counted INSIDE the transaction')
   assert.equal(deleteOps[deleteOps.length - 1].op, 'deleteRows', 'L-10: the DELETE is the last statement')
-  assert.ok(deleteOps.every((call) => call.op !== 'selectOneForUpdate' || call === deleteOps[0]),
+  assert.ok(deleteOps.every((call) => call.op !== 'selectOneForUpdate' || call === deleteOps[1]),
     'L-10: the delete side takes exactly ONE row lock — it never locks a pointer row (no lock cycle is possible)')
   const probeCounts = db.calls.filter((call) => call.tx === null && call.op === 'countRows')
   assert.equal(probeCounts.length, 4, 'L-10: the 42P01 existence probe runs the 4 dependent counts in autocommit, before the transaction')
 
   const bindOps = db.txCalls(bindTx).filter((call) => call.op !== 'BEGIN' && call.op !== 'COMMIT' && call.op !== 'ROLLBACK')
-  assert.equal(bindOps[0].op, 'selectOneForKeyShare', 'L-10: the bind transaction\'s FIRST statement is the KEY SHARE on the system row')
-  assert.equal(bindOps[0].table, EXTERNAL_SYSTEMS_TABLE)
-  assert.deepEqual(Object.keys(bindOps[0].where).sort(), ['id', 'tenant_id'],
+  assert.deepEqual([bindOps[0].op, bindOps[0].level], ['setTransactionIsolationLevel', 'read committed'],
+    'L-10: the bind transaction\'s FIRST statement pins READ COMMITTED')
+  assert.equal(bindOps[1].op, 'selectOneForKeyShare', 'L-10: ...and its first READ is the KEY SHARE on the system row')
+  assert.equal(bindOps[1].table, EXTERNAL_SYSTEMS_TABLE)
+  assert.deepEqual(Object.keys(bindOps[1].where).sort(), ['id', 'tenant_id'],
     'L-10: the 079 writer (via lockExternalSystemForPointerWrite) pins tenant + id ONLY — the delete guard\'s dependent-count scope; no workspace key')
-  assert.equal(bindOps.length, 1, 'L-10: the refused bind issued nothing after the lock returned null')
-  console.log('  L-10 lock order pinned: delete = FOR UPDATE → 6 counts → DELETE; 079 writer = KEY SHARE(tenant,id) first')
+  assert.equal(bindOps.length, 2, 'L-10: the refused bind issued nothing after the lock returned null')
+  console.log('  L-10 lock order pinned: delete = SET READ COMMITTED → FOR UPDATE → 6 counts → DELETE; 079 writer = SET READ COMMITTED → KEY SHARE(tenant,id)')
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -734,9 +844,11 @@ async function testPipelineScopePins() {
 
   const [deleteTx, writeTx] = db.calls.filter((call) => call.op === 'BEGIN').map((call) => call.tx)
   const writeOps = db.txCalls(writeTx).filter(opFilter)
-  assert.equal(writeOps[0].op, 'selectOneForKeyShare', 'L-11: the pipeline transaction\'s FIRST statement is the KEY SHARE on the source system')
-  assert.equal(writeOps[0].table, EXTERNAL_SYSTEMS_TABLE)
-  assert.deepEqual(Object.keys(writeOps[0].where).sort(), ['id', 'tenant_id', 'workspace_id'],
+  assert.deepEqual([writeOps[0].op, writeOps[0].level], ['setTransactionIsolationLevel', 'read committed'],
+    'L-11: the pipeline transaction\'s FIRST statement pins READ COMMITTED')
+  assert.equal(writeOps[1].op, 'selectOneForKeyShare', 'L-11: ...and its first READ is the KEY SHARE on the source system')
+  assert.equal(writeOps[1].table, EXTERNAL_SYSTEMS_TABLE)
+  assert.deepEqual(Object.keys(writeOps[1].where).sort(), ['id', 'tenant_id', 'workspace_id'],
     'L-11: the pipeline writer locks with ITS OWN scope — tenant + workspace + id — not the 079/062 writers\' tenant + id')
 
   const deleteCounts = db.txCalls(deleteTx).filter((call) => call.op === 'countRows')
@@ -867,8 +979,8 @@ async function testFailClosedGuards() {
     (error) => FAIL_CLOSED_RE.test(error.message) && /transaction handle with selectOneForKeyShare is required to write a pipeline/.test(error.message),
     'FC-05: a transaction handle that cannot lock is refused',
   )
-  assert.equal(noLock.calls.filter((call) => call.op !== 'BEGIN' && call.op !== 'ROLLBACK').length, 0,
-    'FC-05: the transaction issued no statement — never a plain selectOne endpoint check, never an INSERT')
+  assert.deepEqual(noLock.calls.filter((call) => call.op !== 'BEGIN' && call.op !== 'ROLLBACK').map((call) => call.op), ['setTransactionIsolationLevel'],
+    'FC-05: the transaction issued nothing but the isolation pin — never a plain selectOne endpoint check, never an INSERT')
   assert.ok(noLock.calls.some((call) => call.op === 'ROLLBACK'), 'FC-05: and it rolled back')
   assert.equal(noLock.rows(PIPELINES_TABLE).length, 0)
   console.log('  FC-04/05 upsertPipeline refuses a db without transaction and a handle without selectOneForKeyShare; nothing issued')
@@ -1145,6 +1257,349 @@ async function testMutationFailClosedGuardsDegraded() {
   console.log('  M-FC-PIPE endpoint check degraded to selectOne on a handle without the lock method: FC-05 flips (pipeline written unlocked)')
 }
 
+// ---------------------------------------------------------------------------------------------------
+// ISOLATION PIN — every participant pins READ COMMITTED as its transaction's FIRST statement.
+//
+// #6076's third-round independent verification: on PostgreSQL 16 with
+// `ALTER DATABASE ... SET default_transaction_isolation = 'repeatable read'`, the writer-first
+// interleaving DANGLED — the delete's FOR UPDATE waited correctly, but at REPEATABLE READ the
+// snapshot is taken by that very statement BEFORE the wait, so the counts after it could not see the
+// pointer that committed meanwhile. The code had only ASSUMED read committed. Now every participant
+// pins it (`pinLockProtocolIsolation`); these arms run the whole protocol under hostile defaults.
+// ---------------------------------------------------------------------------------------------------
+
+// Template instantiation as a BEHAVIOURAL writer (L-09 is only the structural pin). It matters here:
+// instantiateTemplate's transaction READS its name clash BEFORE writePipelineRow's KEY SHARE, so under
+// an inherited repeatable read that first read would fix the snapshot — the template transaction has
+// to pin the level itself, and only a run shows that it does.
+function seedTemplateSystems(db) {
+  seedPipelineSystems(db)
+  db.seed(TEMPLATES_TABLE, [{
+    id: 'tpl_1', tenant_id: 't1', workspace_id: null, project_id: null, name: 'material sync template', version: 1,
+    description: null, source_kind: 'erp:k3-wise-webapi', source_object: 'materials', target_kind: 'erp:k3-wise-webapi',
+    target_object: 't_material', key_fields: ['code'], mapping_def: [], orchestration_config: {}, status: 'active', created_by: null,
+  }])
+}
+
+function templateWriter(db, factory = createIntegrationTemplateRegistry) {
+  const registry = factory({
+    db,
+    idGenerator: () => 'pipe_tpl',
+    // Kind resolution is the template registry's own pre-transaction check, not the protocol's.
+    externalSystemRegistry: { async getExternalSystem({ id }) { return { id, kind: 'erp:k3-wise-webapi' } } },
+  })
+  return () => registry.instantiateTemplate({
+    tenantId: 't1', workspaceId: null, templateId: 'tpl_1', sourceSystemId: 'sys_1', targetSystemId: 'sys_target', pipelineName: 'from template',
+  })
+}
+
+// Every pointer writer that takes part in the protocol, with what its refusal looks like and where
+// its pin sits (the mutation anchor — removed verbatim by the M-ISO arms).
+const PROTOCOL_WRITERS = [
+  {
+    tag: '079',
+    label: '079 bind',
+    seed: (db) => db.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()]),
+    writer: stockPrepWriter,
+    module: MODULES.stockPrepBindingStore,
+    factoryName: 'createStockPreparationSourceBindingStore',
+    pinAnchor: 'await pinLockProtocolIsolation(trx)\n',
+    pointerTable: STOCK_PREP_BINDING_TABLE,
+    pointerColumn: 'external_system_id',
+    countKey: 'stockPrepSourceBindingCount',
+    refusedInOwnShape: (error) => Boolean(error) && error.name === 'StockPreparationSourceBindingStoreError'
+      && error.code === SOURCE_NOT_LIVE_CODE && error.status === 409,
+  },
+  {
+    tag: '062',
+    label: '062 mint',
+    seed: (db) => db.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()]),
+    writer: readSourceWriter,
+    module: MODULES.readSourceConfigStore,
+    factoryName: 'createReadSourceConfigStore',
+    pinAnchor: 'await pinLockProtocolIsolation(trx)\n',
+    pointerTable: READ_SOURCE_CONFIG_TABLE,
+    pointerColumn: 'system_id',
+    countKey: 'readSourceConfigCount',
+    refusedInOwnShape: (error) => Boolean(error) && error.name === 'ReadSourceConfigValidationError'
+      && JSON.stringify(error.details.errors) === JSON.stringify([{ code: SYSTEM_NOT_FOUND_CODE, field: 'systemId', reason: 'not_found' }]),
+  },
+  {
+    tag: 'PIPE',
+    label: 'pipeline upsert',
+    seed: seedPipelineSystems,
+    writer: pipelineWriter,
+    module: MODULES.pipelines,
+    factoryName: 'createPipelineRegistry',
+    pinAnchor: 'await pinLockProtocolIsolation(scopedDb)\n',
+    pointerTable: PIPELINES_TABLE,
+    pointerColumn: 'source_system_id',
+    countKey: 'sourcePipelineCount',
+    refusedInOwnShape: (error) => Boolean(error) && error.name === 'PipelineValidationError'
+      && error.message === 'sourceSystemId does not exist in this tenant/workspace',
+  },
+  {
+    tag: 'TPL',
+    label: 'template instantiation',
+    seed: seedTemplateSystems,
+    writer: templateWriter,
+    module: MODULES.integrationTemplates,
+    factoryName: 'createIntegrationTemplateRegistry',
+    pinAnchor: 'await pinLockProtocolIsolation(scopedDb)\n',
+    pointerTable: PIPELINES_TABLE,
+    pointerColumn: 'source_system_id',
+    countKey: 'sourcePipelineCount',
+    refusedInOwnShape: (error) => Boolean(error) && error.name === 'PipelineValidationError'
+      && error.message === 'sourceSystemId does not exist in this tenant/workspace',
+  },
+]
+
+function errorTag(error) {
+  return error ? (error.code || error.name || 'Error') : 'none'
+}
+
+function pointerRowsAt(db, spec) {
+  return db.rows(spec.pointerTable).filter((row) => row[spec.pointerColumn] === 'sys_1').length
+}
+
+// Every transaction the run opened must have pinned READ COMMITTED as its FIRST statement.
+function assertEveryTransactionPinnedFirst(db, label) {
+  const transactions = db.calls.filter((call) => call.op === 'BEGIN').map((call) => call.tx)
+  assert.ok(transactions.length > 0, `${label}: at least one transaction ran`)
+  for (const tx of transactions) {
+    const [first] = db.txCalls(tx).filter(opFilter)
+    assert.ok(first, `${label}: transaction ${tx} issued a statement`)
+    assert.deepEqual([first.op, first.level], ['setTransactionIsolationLevel', LOCK_PROTOCOL_ISOLATION_LEVEL],
+      `${label}: transaction ${tx}'s FIRST statement is SET TRANSACTION ISOLATION LEVEL READ COMMITTED`)
+  }
+  return transactions.length
+}
+
+// F-ISO — the fake's isolation model, asserted directly, so the arms below cannot go vacuous by a
+// later "simplification" of the fake (the same reason F-25P02 exists).
+async function testFakeModelsRepeatableRead() {
+  // (1) repeatable read: one snapshot at the first statement.
+  const rr = createLockingDb({ defaultIsolation: 'repeatable read' })
+  rr.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const pointer = { id: 'bind_late', tenant_id: 't1', workspace_id: null, action_id: ACTION_ID, external_system_id: 'sys_1' }
+  const unpinned = await rr.transaction(async (trx) => {
+    const before = await trx.countRows(STOCK_PREP_BINDING_TABLE, { external_system_id: 'sys_1' })
+    rr.seed(STOCK_PREP_BINDING_TABLE, [pointer]) // "another transaction" commits a pointer
+    const after = await trx.countRows(STOCK_PREP_BINDING_TABLE, { external_system_id: 'sys_1' })
+    return [before, after]
+  })
+  assert.deepEqual(unpinned, [0, 0], 'F-ISO: at repeatable read the second count still reads the first statement\'s snapshot')
+  // (2) the same transaction pinned to read committed first sees the late commit.
+  const pinnedDb = createLockingDb({ defaultIsolation: 'repeatable read' })
+  pinnedDb.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const pinned = await pinnedDb.transaction(async (trx) => {
+    await trx.setTransactionIsolationLevel('read committed')
+    const before = await trx.countRows(STOCK_PREP_BINDING_TABLE, { external_system_id: 'sys_1' })
+    pinnedDb.seed(STOCK_PREP_BINDING_TABLE, [pointer])
+    const after = await trx.countRows(STOCK_PREP_BINDING_TABLE, { external_system_id: 'sys_1' })
+    return [before, after]
+  })
+  assert.deepEqual(pinned, [0, 1], 'F-ISO: pinned to read committed, every statement reads the latest commits')
+  // (3) SET after any other statement: 25001, and the transaction is aborted.
+  const late = createLockingDb({ defaultIsolation: 'repeatable read' })
+  late.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const lateOutcome = await settle(late.transaction(async (trx) => {
+    await trx.selectOne(EXTERNAL_SYSTEMS_TABLE, { id: 'sys_1' })
+    await assert.rejects(trx.setTransactionIsolationLevel('read committed'), (error) => error.code === '25001',
+      'F-ISO: SET TRANSACTION after a query fails 25001')
+    await assert.rejects(trx.selectOne(EXTERNAL_SYSTEMS_TABLE, { id: 'sys_1' }), (error) => error.code === '25P02',
+      'F-ISO: ...and aborts the transaction')
+    return 'reached'
+  }))
+  assert.equal(lateOutcome.error, null)
+  // (4) a lock read on a row deleted after the snapshot: 40001.
+  const deleted = createLockingDb({ defaultIsolation: 'repeatable read' })
+  deleted.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const lockOutcome = await settle(deleted.transaction(async (trx) => {
+    await trx.selectOne(EXTERNAL_SYSTEMS_TABLE, { id: 'sys_1' }) // snapshot: the row is there
+    await deleted.transaction(async (other) => other.deleteRows(EXTERNAL_SYSTEMS_TABLE, { id: 'sys_1' })) // committed delete
+    return trx.selectOneForKeyShare(EXTERNAL_SYSTEMS_TABLE, { tenant_id: 't1', id: 'sys_1' })
+  }))
+  assert.equal(errorTag(lockOutcome.error), '40001', 'F-ISO: KEY SHARE on a row deleted after the snapshot fails 40001')
+  // (5) read committed (the default) keeps the old semantics: the same lock read returns null.
+  const rc = createLockingDb()
+  rc.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const rcOutcome = await settle(rc.transaction(async (trx) => {
+    await trx.selectOne(EXTERNAL_SYSTEMS_TABLE, { id: 'sys_1' })
+    await rc.transaction(async (other) => other.deleteRows(EXTERNAL_SYSTEMS_TABLE, { id: 'sys_1' }))
+    return trx.selectOneForKeyShare(EXTERNAL_SYSTEMS_TABLE, { tenant_id: 't1', id: 'sys_1' })
+  }))
+  assert.deepEqual([rcOutcome.error, rcOutcome.value], [null, null], 'F-ISO: at read committed the lock read re-finds nothing (null)')
+  // (6) handle-only, like lib/db.cjs.
+  assert.equal(typeof rc.setTransactionIsolationLevel, 'undefined', 'F-ISO: the ROOT helper offers no setTransactionIsolationLevel')
+  console.log('  F-ISO the fake models repeatable read (snapshot at first statement, 25001 on a late SET, 40001 on a deleted row); root has no SET')
+}
+
+// I-RR / I-SER — every participant, both interleavings, under a hostile server default.
+async function testIsolationMatrix(defaultIsolation, tag) {
+  let transactionsChecked = 0
+  for (const spec of PROTOCOL_WRITERS) {
+    // Delete first: the writer waits on the FOR UPDATE, then refuses in its OWN shape.
+    const dbA = createLockingDb({ defaultIsolation })
+    spec.seed(dbA)
+    const a = await deleteFirst({ db: dbA, registry: newRegistry(dbA), writer: spec.writer(dbA) })
+    assertNoDangle(dbA, spec.pointerTable, spec.pointerColumn)
+    assert.equal(a.writerBlocked, true, `${tag} ${spec.label} delete-first: the writer WAITED on the FOR UPDATE`)
+    assert.equal(a.deleted.error, null, `${tag} ${spec.label} delete-first: the delete that counted zero goes through`)
+    assert.ok(spec.refusedInOwnShape(a.written.error),
+      `${tag} ${spec.label} delete-first: refused in its own values-free shape, not a bare serialization failure (got ${errorTag(a.written.error)})`)
+    assert.equal(pointerRowsAt(dbA, spec), 0, `${tag} ${spec.label} delete-first: no pointer row`)
+    transactionsChecked += assertEveryTransactionPinnedFirst(dbA, `${tag} ${spec.label} delete-first`)
+
+    // Writer first: the delete waits on the KEY SHARE, then COUNTS the pointer and refuses 409.
+    const dbB = createLockingDb({ defaultIsolation })
+    spec.seed(dbB)
+    const b = await writeFirst({ db: dbB, registry: newRegistry(dbB), writer: spec.writer(dbB), pointerTable: spec.pointerTable })
+    assertNoDangle(dbB, spec.pointerTable, spec.pointerColumn)
+    assert.equal(b.deleterBlocked, true, `${tag} ${spec.label} write-first: the delete WAITED on the KEY SHARE`)
+    assert.equal(b.written.error, null, `${tag} ${spec.label} write-first: the pointer lands`)
+    assert.equal(b.deleted.error && b.deleted.error.name, 'ExternalSystemConflictError',
+      `${tag} ${spec.label} write-first: the delete is refused 409 (got ${errorTag(b.deleted.error)})`)
+    assert.equal(b.deleted.error.details[spec.countKey], 1, `${tag} ${spec.label} write-first: the count taken after the wait sees the pointer`)
+    assert.equal(pointerRowsAt(dbB, spec), 1)
+    transactionsChecked += assertEveryTransactionPinnedFirst(dbB, `${tag} ${spec.label} write-first`)
+  }
+  console.log(`  ${tag} ${defaultIsolation} default: delete/079/062/pipeline/template, both interleavings — no dangle, own refusal shapes, ${transactionsChecked} transactions all pinned READ COMMITTED first`)
+}
+
+// FC-08..FC-13 — a handle that cannot pin is REFUSED, never run at the inherited level.
+async function testIsolationFailClosedGuards() {
+  const PIN_REFUSAL = (error) => FAIL_CLOSED_RE.test(error.message) && /setTransactionIsolationLevel is required/.test(error.message)
+  // FC-08: the helper itself — including on the ROOT helper, which has no SET (autocommit would make
+  // it a silent no-op on PostgreSQL).
+  for (const executor of [null, undefined, {}, createLockingDb()]) {
+    await assert.rejects(pinLockProtocolIsolation(executor), PIN_REFUSAL, 'FC-08: pinLockProtocolIsolation refuses a handle that cannot pin')
+  }
+  console.log('  FC-08 pinLockProtocolIsolation refuses null / {} / the root helper')
+
+  // FC-09: the delete side.
+  const del = createLockingDb()
+  del.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  await assert.rejects(
+    newRegistry(withTransactionHandleWithout(del, 'setTransactionIsolationLevel')).deleteExternalSystem(deleteInput()),
+    PIN_REFUSAL,
+    'FC-09: a delete on a transaction handle that cannot pin is refused',
+  )
+  assert.equal(del.calls.filter((call) => call.tx !== null && opFilter(call)).length, 0,
+    'FC-09: nothing issued inside the transaction — no FOR UPDATE, no count, no DELETE at the inherited level')
+  assert.ok(del.calls.some((call) => call.op === 'ROLLBACK'), 'FC-09: and it rolled back')
+  assert.equal(del.rows(EXTERNAL_SYSTEMS_TABLE).length, 1, 'FC-09: the row survives')
+
+  // FC-10..FC-13: every writer.
+  const fcIds = { '079': 'FC-10', '062': 'FC-11', PIPE: 'FC-12', TPL: 'FC-13' }
+  for (const spec of PROTOCOL_WRITERS) {
+    const db = createLockingDb()
+    spec.seed(db)
+    const outcome = await settle(spec.writer(withTransactionHandleWithout(db, 'setTransactionIsolationLevel'))())
+    const id = fcIds[spec.tag]
+    assert.ok(outcome.error && PIN_REFUSAL(outcome.error), `${id}: the ${spec.label} on a handle that cannot pin is refused (got ${errorTag(outcome.error)})`)
+    assert.equal(db.calls.filter((call) => call.tx !== null && opFilter(call)).length, 0,
+      `${id}: nothing issued inside the transaction — no KEY SHARE, no read, no write at the inherited level`)
+    assert.ok(db.calls.some((call) => call.op === 'ROLLBACK'), `${id}: and it rolled back`)
+    assert.equal(pointerRowsAt(db, spec), 0, `${id}: no pointer row`)
+  }
+  console.log('  FC-09..13 delete / 079 / 062 / pipeline / template refuse a transaction handle without setTransactionIsolationLevel; nothing issued')
+}
+
+// M-ISO-* — remove ONE pin and run the interleaving it protects under a repeatable-read default.
+async function testMutationIsolationPinRemoved() {
+  // M-ISO-DEL: the delete side without the pin. The FOR UPDATE still WAITS — the lock is intact — but
+  // its statement took the snapshot before the wait, the counts read it, and the delete goes through.
+  const deleteMutant = compileMutant(MODULES.externalSystems, [['await pinLockProtocolIsolation(trx)\n', '']], 'M-ISO-DEL')
+  const rr = createLockingDb({ defaultIsolation: 'repeatable read' })
+  rr.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const mutated = await writeFirst({
+    db: rr, registry: newRegistry(rr, deleteMutant.createExternalSystemRegistry), writer: stockPrepWriter(rr), pointerTable: STOCK_PREP_BINDING_TABLE,
+  })
+  assert.equal(mutated.deleterBlocked, true, 'M-ISO-DEL: the FOR UPDATE still waited on the bind\'s KEY SHARE')
+  assert.equal(mutated.written.error, null, 'M-ISO-DEL: the bind lands')
+  assert.equal(mutated.deleted.error, null, 'M-ISO-DEL: ...and the delete, counting from its pre-wait snapshot, goes through')
+  assertDangle(rr, STOCK_PREP_BINDING_TABLE, 'external_system_id', 'M-ISO-DEL')
+  // Control: the SAME mutant on a read-committed default does not dangle — the inherited level is
+  // what breaks it, which is exactly what the pin removes from the equation.
+  const rc = createLockingDb()
+  rc.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const control = await writeFirst({
+    db: rc, registry: newRegistry(rc, deleteMutant.createExternalSystemRegistry), writer: stockPrepWriter(rc), pointerTable: STOCK_PREP_BINDING_TABLE,
+  })
+  assert.equal(control.deleted.error && control.deleted.error.name, 'ExternalSystemConflictError', 'M-ISO-DEL control: at read committed the unpinned delete still refuses')
+  console.log('  M-ISO-DEL delete side without the pin, repeatable-read default: writer-first DANGLES (read-committed control: 409)')
+
+  // M-ISO-<writer>: the writer without its pin → the delete-first refusal is a bare 40001.
+  for (const spec of PROTOCOL_WRITERS) {
+    const label = `M-ISO-${spec.tag}`
+    const mutant = compileMutant(spec.module, [[spec.pinAnchor, '']], label)
+    const db = createLockingDb({ defaultIsolation: 'repeatable read' })
+    spec.seed(db)
+    const run = await deleteFirst({ db, registry: newRegistry(db), writer: spec.writer(db, mutant[spec.factoryName]) })
+    assert.equal(run.writerBlocked, true, `${label}: the writer still waited on the FOR UPDATE`)
+    assert.equal(run.deleted.error, null)
+    assert.equal(errorTag(run.written.error), '40001', `${label}: without the pin the writer inherits repeatable read and fails as a bare 40001`)
+    assert.equal(spec.refusedInOwnShape(run.written.error), false, `${label}: the I-RR own-shape assertion flips`)
+    assert.equal(pointerRowsAt(db, spec), 0, `${label}: (no dangle — the lock still holds; the SHAPE is what the pin protects on this side)`)
+  }
+  console.log('  M-ISO-079/062/PIPE/TPL writer without the pin, repeatable-read default: delete-first refusal becomes a bare 40001 (I-RR flips)')
+}
+
+// Compile a module against a MUTANT pointer-lock export: the cached pointer-lock module's exports are
+// swapped for the duration of the compile only, so the mutant's `require('./external-system-pointer-lock.cjs')`
+// binds the mutant, and the genuine module (and every other consumer) is restored before anything runs.
+function compileAgainstPointerLock(modulePath, pointerLockExports) {
+  const key = require.resolve(MODULES.pointerLock)
+  const cached = require.cache[key]
+  assert.ok(cached, 'the pointer-lock module is loaded')
+  const original = cached.exports
+  cached.exports = pointerLockExports
+  try {
+    const compiled = new Module(modulePath, null)
+    compiled.filename = modulePath
+    compiled.paths = Module._nodeModulePaths(path.dirname(modulePath))
+    compiled._compile(fs.readFileSync(modulePath, 'utf8'), modulePath)
+    return compiled.exports
+  } finally {
+    cached.exports = original
+  }
+}
+
+async function testMutationIsolationLevelAndFailClosedDegraded() {
+  // M-ISO-LEVEL: the helper pins REPEATABLE READ instead. On a database whose default IS read committed,
+  // the pinned delete takes its snapshot at the FOR UPDATE, before the wait → writer-first dangles.
+  const wrongLevel = compileMutant(MODULES.pointerLock, [
+    ["const LOCK_PROTOCOL_ISOLATION_LEVEL = 'read committed'", "const LOCK_PROTOCOL_ISOLATION_LEVEL = 'repeatable read'"],
+  ], 'M-ISO-LEVEL')
+  const esWrongLevel = compileAgainstPointerLock(MODULES.externalSystems, wrongLevel)
+  const rc = createLockingDb()
+  rc.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const run = await writeFirst({
+    db: rc, registry: newRegistry(rc, esWrongLevel.createExternalSystemRegistry), writer: stockPrepWriter(rc), pointerTable: STOCK_PREP_BINDING_TABLE,
+  })
+  assert.equal(run.deleterBlocked, true)
+  assert.equal(run.deleted.error, null, 'M-ISO-LEVEL: the delete pinned to repeatable read counts its pre-wait snapshot')
+  assertDangle(rc, STOCK_PREP_BINDING_TABLE, 'external_system_id', 'M-ISO-LEVEL')
+  console.log('  M-ISO-LEVEL helper pins repeatable read: writer-first dangles even on a read-committed database (the LEVEL is load-bearing)')
+
+  // M-FC-ISO: the helper degraded to "skip the pin when the handle cannot do it".
+  const degraded = compileMutant(MODULES.pointerLock, [
+    ["if (!executor || typeof executor.setTransactionIsolationLevel !== 'function') {", 'if (!executor) {'],
+    ['  await executor.setTransactionIsolationLevel(LOCK_PROTOCOL_ISOLATION_LEVEL)',
+      "  if (typeof executor.setTransactionIsolationLevel === 'function') await executor.setTransactionIsolationLevel(LOCK_PROTOCOL_ISOLATION_LEVEL)"],
+  ], 'M-FC-ISO')
+  const skipped = await settle(degraded.pinLockProtocolIsolation({}))
+  assert.equal(skipped.error, null, 'M-FC-ISO: the degraded helper "succeeds" on a handle that cannot pin — FC-08 flips')
+  const storeDegraded = compileAgainstPointerLock(MODULES.stockPrepBindingStore, degraded)
+  const db = createLockingDb()
+  db.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const written = await settle(stockPrepWriter(withTransactionHandleWithout(db, 'setTransactionIsolationLevel'), storeDegraded.createStockPreparationSourceBindingStore)())
+  assert.equal(written.error, null, 'M-FC-ISO: ...and a 079 bind on such a handle now LANDS at whatever level it inherited — FC-10 flips')
+  assert.equal(db.rows(STOCK_PREP_BINDING_TABLE).length, 1)
+  console.log('  M-FC-ISO pin helper degraded to skip-when-missing: FC-08 and FC-10 flip (a write runs unpinned)')
+}
+
 async function main() {
   await testStockPrepDeleteFirst()
   await testStockPrepWriteFirst()
@@ -1166,11 +1621,30 @@ async function main() {
   await testMutationReadSourceWriterUnlocked()
   await testMutationPipelineWriterUnlocked()
   await testMutationFailClosedGuardsDegraded()
-  // The genuine modules are untouched by the in-memory mutants: L-01 still refuses, FC-03 still refuses.
+  await testFakeModelsRepeatableRead()
+  await testIsolationMatrix('repeatable read', 'I-RR')
+  await testIsolationMatrix('serializable', 'I-SER')
+  await testIsolationFailClosedGuards()
+  await testMutationIsolationPinRemoved()
+  await testMutationIsolationLevelAndFailClosedDegraded()
+  // The genuine modules are untouched by the in-memory mutants: L-01 still refuses, FC-03 still
+  // refuses, and the isolation pin still holds under RR and still refuses a handle that cannot pin.
   await testStockPrepDeleteFirst()
   await testFailClosedGuards()
-  console.log('✓ external-systems delete × bind lock protocol: 079/062/pipelines participate; scope + fail-closed pinned; 062 reuse path + 073 residual registered; 8 mutants flip')
+  await testIsolationMatrix('repeatable read', 'I-RR (genuine, after mutants)')
+  await testIsolationFailClosedGuards()
+  completed = true
+  console.log('✓ external-systems delete × bind lock protocol: 079/062/pipelines/templates participate at a PINNED read committed; scope + fail-closed pinned; 062 reuse path + 073 residual registered; 15 mutants flip')
 }
+
+// COMPLETION MARKER (see the file header): exit 0 only if main() ran to its last line.
+let completed = false
+process.on('exit', (code) => {
+  if (code === 0 && !completed) {
+    console.error('✗ external-systems-delete-bind-lock-protocol did NOT run to completion — main() was still pending when the event loop drained (a hang, not a pass)')
+    process.exitCode = 1
+  }
+})
 
 main().catch((error) => {
   console.error(error)

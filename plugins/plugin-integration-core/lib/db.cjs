@@ -25,6 +25,17 @@
 const ALLOWED_PREFIX = 'integration_'
 const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 
+// Transaction isolation levels a caller may PIN on a transaction handle
+// (`setTransactionIsolationLevel`), each mapped to the ONE fixed statement it renders. The level
+// is a lookup key, never interpolated: anything outside this table is refused before any SQL is
+// built. READ UNCOMMITTED is deliberately absent (PostgreSQL runs it as READ COMMITTED, so naming
+// it would only mislead a reader).
+const TRANSACTION_ISOLATION_STATEMENTS = Object.freeze({
+  'read committed': 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED',
+  'repeatable read': 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ',
+  serializable: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE',
+})
+
 class ScopeViolationError extends Error {
   constructor(message, { table, column } = {}) {
     super(message)
@@ -88,6 +99,19 @@ function prepareParamValue(value) {
   // text and let PostgreSQL cast them to JSONB.
   if (Array.isArray(value) || isPlainObject(value)) return JSON.stringify(value)
   return value
+}
+
+function transactionIsolationStatement(level) {
+  const statement = typeof level === 'string' && Object.prototype.hasOwnProperty.call(TRANSACTION_ISOLATION_STATEMENTS, level)
+    ? TRANSACTION_ISOLATION_STATEMENTS[level]
+    : null
+  if (!statement) {
+    throw new ScopeViolationError(
+      'plugin-integration-core: transaction isolation level is not one of the whitelisted levels',
+      {},
+    )
+  }
+  return statement
 }
 
 function buildWhereClause(where, startParamIndex) {
@@ -402,7 +426,33 @@ function createDb({ database, logger } = {}) {
           transaction: database.transaction.bind(database),
         },
       })
+      /**
+       * `SET TRANSACTION ISOLATION LEVEL <whitelisted level>` on THIS transaction.
+       *
+       * Added under the module header's extension clause ("added here as a new validated method"):
+       * the level is a key into TRANSACTION_ISOLATION_STATEMENTS and the statement is a fixed
+       * literal from that table — no caller text reaches the SQL, and nothing is parameterized
+       * because nothing varies.
+       *
+       * It exists so a caller whose correctness DEPENDS on an isolation level can pin it instead of
+       * inheriting whatever the server / database / role default is (a bare BEGIN inherits
+       * `default_transaction_isolation`; `ALTER DATABASE ... SET default_transaction_isolation =
+       * 'repeatable read'` silently changes every such transaction). The external-system delete
+       * lock protocol is the first such caller (`external-system-pointer-lock.cjs`
+       * pinLockProtocolIsolation).
+       *
+       * MUST be the transaction's FIRST statement. PostgreSQL enforces that itself: issued after any
+       * query it fails with SQLSTATE 25001 and aborts the transaction — so a caller that gets the
+       * order wrong fails closed, it never runs at the wrong level. Offered ONLY on the transaction
+       * handle, never on the root helper: outside a transaction block PostgreSQL merely WARNS and
+       * ignores it, which is exactly the silent no-op this method must never be.
+       */
+      async function setTransactionIsolationLevel(level) {
+        const statement = transactionIsolationStatement(level)
+        await trx.query(statement, [])
+      }
       return callback({
+        setTransactionIsolationLevel,
         select: scoped.select,
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,
@@ -448,6 +498,8 @@ module.exports = {
     buildRangeClause,
     quoteIdent,
     prepareParamValue,
+    transactionIsolationStatement,
+    TRANSACTION_ISOLATION_STATEMENTS,
     IDENT_RE,
   },
 }

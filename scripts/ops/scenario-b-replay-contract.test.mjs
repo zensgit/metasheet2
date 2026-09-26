@@ -99,6 +99,10 @@ function createScopedMemoryDb({ externalSystems = [] } = {}) {
       return filtered.slice(from, from + (options.limit || 1000))
     },
     async transaction(callback) { return callback(db) },
+    // 锁协议的隔离级别钉定（external-system-pointer-lock.cjs pinLockProtocolIsolation：参与事务的第一条语句
+    // SET TRANSACTION ISOLATION LEVEL READ COMMITTED）。这里是空操作——内存 db 没有隔离级别可设；钉定的顺序与效果
+    // 由 external-systems-delete-bind-lock-protocol.test.cjs 与真 PG 套件负责。
+    async setTransactionIsolationLevel() {},
     async selectOneForKeyShare(table, where) {
       if (table !== EXTERNAL_SYSTEMS_TABLE) return db.selectOne(table, where)
       const keys = Object.keys(where || {}).sort()
