@@ -1138,14 +1138,23 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  * of one of its own operands or of a name an operand dereferences (`owner &&`, `!view ||`, GET /context's
  * `resolvedSheetId &&`, `config.foreignSheetId &&`) — when it fails there is no row or id to pair (see OTHER below).
  * A `!` before a grouping bracket that holds exactly the next operand, and a `!` on the bound boolean, flip it. A
- * bound boolean is settled only if its initialiser is AND each testing `if` is, through the same rule. The one other reading is `quantifiedOperand`: a `!rows.some((row) => …)`
+ * bound boolean is settled only if its initialiser is AND each testing `if` is, through the same rule — AND only while
+ * its name is ONE binding in the handler (`oneDeclaration`): one `const` / `let` declaration, which is then the binding
+ * statement, and nothing else anywhere in the handler that binds it — no other declaration, `var`, parameter or
+ * destructured name, and no write (`=`, `||=`, `&&=`, `??=`, `++`, a destructuring assignment), before the binding
+ * (a closure) or after it. So `x &&= a !== b`, `x ||= a === b` (the comparison cannot decide them), `let x = false`
+ * then `if (c) x = a !== b` or `if (c) x ||= a !== b` (`c` decides whether the comparison reaches `x`), a `var` in a
+ * block, and a name written again before a testing `if` (`if (verbose) x = false`, `x = verbose ? false : x`) all read
+ * BOTH paths. A guard in a testing `if` is asked there, after the comparison ran, so it counts only while every name it
+ * reads is ONE binding in the handler too (`heldName`: one declaration or parameter, nothing written to it or through
+ * it — `row = null`, `owner.sheet_id = ''`). The one other reading is `quantifiedOperand`: a `!rows.some((row) => …)`
  * / `rows.every(…)` whose one-parameter arrow body IS the comparison, as a whole `&&` / `||` operand of the
  * condition, settled by the same rule at that level (both, taken to be Array's, are monotone in the predicate).
  * Anything else — an operand that can overturn it, a call's arguments (`Boolean(…)`, `.filter(…)`, a `function`
  * callback), an array or index `[…]`, an operator glued to a group (`(a === b) === false`, `x - (a === b)`), a
  * ternary, `??`, a comma, two equalities in one operand (`a === b === c`), a `!(…)` that holds more than the
- * comparison (`!(owner && owner.sheetId === x)`), a `??=` binding, the boolean tested as more than a bare name —
- * reads BOTH paths.
+ * comparison (`!(owner && owner.sheetId === x)`), a bound name that is not ONE binding, the boolean tested as more
+ * than a bare name — reads BOTH paths.
  *
  * Two properties of every site are COMPUTED from the code, never taken from the table:
  *   echo             the answer's payload is not provably constant. Every construct that makes a path
@@ -1164,8 +1173,12 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *                    object returned out of a callback into a binding (`const failure = await
  *                    pool.transaction(async … => …)`), the then-branch of the first later `if (failure)`.
  *                    When that answer does not END (no top-level `return` / `throw`), the run after it is
- *                    read too, exactly as a mismatch branch's is. There the value's own name (`err.message`,
- *                    `failure.status`) stands for the value, whose payload is read at the handoff. Where the
+ *                    read too, exactly as a mismatch branch's is. In the consumer's own branch the value's name
+ *                    (`err.message`, `failure.status`) stands for the value, whose payload is read at the handoff —
+ *                    only while nothing binds that name again from the binding the value lands in to the end of
+ *                    the branch (`failure = { … }`, `failure.message = …`, `err = …`: then it reads as echo); in the
+ *                    run after the branch the name is read like any other local (past a `catch` it is another
+ *                    binding). Where the
  *                    handler has no such place — `next` / `reject`, a throw with no `catch`, a status object
  *                    returned any other way — it reads as echo. A payload is constant only if every leaf is a
  *                    literal — literals delimited left to right by the same scanner as everywhere here, so a
@@ -1243,7 +1256,12 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     run after it when it does not end, and one that does not answer, rethrows, or hands the error on reads as
  *     echo;
  *   - a returned status object is followed only into an `if (<binding>)` after the binding it is
- *     returned into; `if (!failure)`, a caller of a named function, or any other consumer reads as echo.
+ *     returned into; `if (!failure)`, a caller of a named function, or any other consumer reads as echo;
+ *   - a name is taken to change only through a binding SPELLED in the handler's text on that name (`bindingSites`):
+ *     a call that mutates an object a guard reads (`reset(owner)`, `Object.assign(owner, …)`), a write through
+ *     another name for it (`const o = owner; o.sheet_id = ''`) or through a cast (`(owner as any).sheet_id = ''`),
+ *     and a write made outside the handler are not seen. A bound boolean holds a primitive, so only a write to
+ *     its own name can change it; a guard that reads a name declared outside the handler is not a guard there.
  * OTHER:
  *   - Authority is recognised BY NAME and by TEXTUAL position, as in the closure guard: a 403 sent any other
  *     way (`res.sendStatus(403)`, `requireSheetRead(req, res)`) is not seen — the site then reads as before
@@ -1269,7 +1287,11 @@ describe('#5946 structural — the wrapped call is the only door', () => {
  *     answer a local (the `getDbNotReadyMessage` hint most handlers carry) reads as echo — false alarms in that
  *     direction. So does reading BOTH paths where the polarity is not settled, and a fall-through run that goes on
  *     into the handler's own success answer (a mismatch branch that only logs, at the handler's top level, is
- *     then a site).
+ *     then a site). And the ONE-binding rule reads a name, not a path through the code: a bound boolean declared
+ *     apart from the statement that binds it (`let x: boolean` then `x = a !== b`), bound by `x ||= a !== b` /
+ *     `x &&= a === b` where that statement always runs, or bound again only in code that never runs before its
+ *     testing `if`, reads BOTH paths; a guard whose name is also a parameter of a callback in the handler (or
+ *     is bound in two blocks) no longer guards.
  */
 
 const ROUTES_DIR = join(__dirname, '../../src/routes')
@@ -1985,7 +2007,7 @@ function bindingAround(
   at: number,
   inLiteral: (at: number) => boolean,
   seen: { undelimited: boolean } = { undelimited: false },
-): { name: string; from: number; end: number; nullish: boolean } | null {
+): { name: string; from: number; end: number } | null {
   const lo = Math.max(0, at - 3000)
   const candidates = [...code.slice(lo, at).matchAll(BINDING)]
   for (let k = candidates.length - 1; k >= 0; k -= 1) {
@@ -2001,11 +2023,86 @@ function bindingAround(
       seen.undelimited = true
       continue
     }
-    // `x ??= …` keeps x whenever it is already set, so the comparison does not decide it.
-    if (at < end) return { name, from, end, nullish: /\?\?\s*=$/.test(m[0]) }
+    // Whether its value is the initialiser's where the name is tested is the caller's question (`oneDeclaration`).
+    if (at < end) return { name, from, end }
   }
   return null
 }
+
+/** The operators that assign to what stands before them (`=`, `||=`, `&&=`, `??=`, `+=` …), never `==` / `=>`. */
+const ASSIGNS = String.raw`(?:\*\*|>>>|>>|<<|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])`
+
+interface BindingSites {
+  /** `const` / `let` declarations of the name. */
+  lexical: number
+  /** Parameter lists and destructuring patterns that hold it (`bindingLists`), and a bare `name =>`. */
+  listed: number
+  /** Everything else that can give it a value (see `bindingSites`). */
+  other: number
+}
+
+/**
+ * Where `name` is BOUND in `text`, literals blanked first. `other` counts a `var` / `function` / `class` of it, every
+ * write — `name = …`, a compound assignment (`||=` `&&=` `??=` `+=` …), `++` / `--` — a destructuring assignment
+ * that names it (`[a, name] = …`, `({ name } = …)`), a `for (name of / in …)` head, and, with `through`, a write or
+ * `delete` through it (`name.x = …`, `name!.x = …`, `name[k] ??= …`, `delete name.x`). A write inside a callback or
+ * a closure counts wherever it stands, before the binding or after it: when it runs is not read.
+ */
+function bindingSites(text: string, name: string, through: boolean): BindingSites {
+  const bare = blankLiterals(text)
+  const n = escapeName(name)
+  const target = through ? String.raw`${n}(?:\s*!?\s*\??\.\s*[A-Za-z_$][\w$]*|\s*!?\s*\[[^\]\n]*\])*` : n
+  const id = new RegExp(String.raw`(?<![\w$.])${n}(?![\w$])`)
+  const count = (pattern: string) => (bare.match(new RegExp(pattern, 'g')) ?? []).length
+  // A destructuring assignment: a `[…]` / `{…}` (not after `const` / `let` / `var`, which `bindingLists` holds)
+  // directly followed by `=`, its opening bracket found by counting back. An index write `a[name] = …` counts too.
+  let destructured = 0
+  for (const m of bare.matchAll(/[}\]]\s*=(?![=>])/g)) {
+    let depth = 0
+    let open = -1
+    for (let j = m.index!; j >= 0 && open === -1; j -= 1) {
+      const c = bare[j]!
+      if (c === '}' || c === ']' || c === ')') depth += 1
+      else if ((c === '{' || c === '[' || c === '(') && (depth -= 1) === 0) open = j
+    }
+    if (open === -1 || /(?:const|let|var)\s*$/.test(bare.slice(Math.max(0, open - 8), open))) continue
+    if (id.test(bare.slice(open + 1, m.index!))) destructured += 1
+  }
+  return {
+    lexical: count(String.raw`(?<![\w$.])(?:const|let)\s+${n}(?![\w$])`),
+    listed: bindingLists(bare).filter((list) => id.test(list)).length + count(String.raw`(?<![\w$.])${n}\s*=>`),
+    other: destructured
+      + count(String.raw`(?<![\w$.])(?:var|function\s*\*?|class)\s+${n}(?![\w$])`)
+      + count(String.raw`(?<![\w$.])(?<!(?:const|let|var)\s+)${target}\s*${ASSIGNS}`)
+      + count(String.raw`(?<![\w$.])${target}\s*(?:\+\+|--)|(?<![\w$.])(?:\+\+|--|delete\s+)\s*${target}(?![\w$])`)
+      + count(String.raw`(?<![\w$.])for\s*\(\s*${n}\s+(?:of|in)(?![\w$])`),
+  }
+}
+
+/** Nothing in the text binds the name. */
+const unbound = (sites: BindingSites): boolean => sites.lexical + sites.listed + sites.other === 0
+
+/**
+ * A BOUND BOOLEAN's name is ONE binding in its handler: one `const` / `let` declaration of it and nothing else that
+ * binds it (`bindingSites`). The binding statement is then that declaration — one written `x = …` / `x ||= …` is itself
+ * a write, so its name has a second site or no declaration in the handler — and only then is the value a testing `if`
+ * reads the initialiser's: a `const` / `let` cannot sit in a branch apart from the `if`s that can see it, and nothing
+ * writes it. A second site of any kind — `let x = false` then `if (c) x = a !== b` (`c` decides whether the comparison
+ * reaches `x`), `x ||= …` / `x &&= …` / `x ??= …` (they keep the value from before, and may not run), `if (verbose) x
+ * = false`, a closure that writes it, a `var` — and the testing `if`s read BOTH paths.
+ */
+const oneDeclaration = (sites: BindingSites): boolean => sites.lexical === 1 && sites.listed === 0 && sites.other === 0
+
+/**
+ * A name a GUARD reads is ONE binding in its handler: one declaration or parameter, and no write — not even through
+ * it (`owner.sheet_id = ''`). Asked where a guard stands in the `if` that tests a bound boolean, AFTER the comparison
+ * ran: only then is its truth there its truth when the comparison ran.
+ */
+const heldName = (sites: BindingSites): boolean => sites.lexical + sites.listed === 1 && sites.other === 0
+
+/** The names `text` reads: every identifier in it that is not a property name (`owner` in `owner?.sheet_id`). */
+const namesIn = (text: string): string[] =>
+  [...blankLiterals(text).matchAll(/(?<![\w$])(?<!\.\s*)[A-Za-z_$][\w$]*/g)].map((m) => m[0])
 
 // ── the answer ────────────────────────────────────────────────────────────────
 
@@ -2505,6 +2602,11 @@ interface Consumer {
   span: [number, number]
   /** Where execution goes on when that branch does not END: just past the `catch` body, or past the whole `if`. */
   after: number
+  /**
+   * From here to the end of `span`, `name` must not be bound again for it to stand for the value: the `catch` body,
+   * or everything from the end of the binding statement the value is returned into.
+   */
+  since: number
 }
 
 /**
@@ -2553,6 +2655,7 @@ function consumerOf(
       name: clause[1] ?? null,
       span: [bodyOpen, bodyClose + 1],
       after: bodyClose + 1,
+      since: bodyOpen,
     }
   }
   // return: the innermost function body holding the `return`, then the binding its initialiser sits in.
@@ -2573,7 +2676,7 @@ function consumerOf(
     // The first `if` that names the binding is the consumer; only `if (<binding>)` is read as one.
     if (code.slice(condition[0] + 1, condition[1]).trim() !== bound.name) return null
     const consumer = parseIf(code, start)
-    return consumer ? { text: code.slice(consumer.then[0], consumer.then[1]), name: bound.name, span: consumer.then, after: consumer.end } : null
+    return consumer ? { text: code.slice(consumer.then[0], consumer.then[1]), name: bound.name, span: consumer.then, after: consumer.end, since: bound.end } : null
   }
   return null
 }
@@ -2680,10 +2783,16 @@ function scanSheetPairings(source: string): PairingScan {
     let settled: boolean | null = quantified
       ? levelValue(code, region, quantified.operand, differs !== (quantified.bangs % 2 === 1), guards)?.value ?? null
       : mismatchValue(code, unit, differs, guards)
-    if (binding?.nullish) settled = null
     const deciders: Array<{ statement: IfStatement; whenMismatch: boolean | null }> = statement ? [{ statement, whenMismatch: settled }] : []
     if (binding) {
       const limit = handler ? handler.end : at + 4000
+      // The name must be ONE binding in the handler (`oneDeclaration`), and a guard asked at a testing `if` only
+      // counts while every name it reads is too (`heldName`). Outside every handler, the text around it stands in.
+      const scope = handler ? code.slice(handler.start, handler.end) : code.slice(Math.max(0, at - 4000), limit)
+      if (!oneDeclaration(bindingSites(scope, binding.name, false))) settled = null
+      const heldGuards = settled === null
+        ? guards
+        : new Set([...guards].filter((g) => namesIn(g).every((name) => heldName(bindingSites(scope, name, true)))))
       const use = new RegExp(String.raw`(?<![\w$.])${escapeName(binding.name)}(?![\w$])`, 'g')
       const usedAt = (from: number, to: number) => [...code.slice(from, to).matchAll(use)].filter((u) => !inLiteral(from + u.index!))
       for (let k = firstIfAfter; k < ifStarts.length && ifStarts[k]! < limit; k += 1) {
@@ -2712,7 +2821,7 @@ function scanSheetPairings(source: string): PairingScan {
         // Settled only if the initialiser is AND this `if` is, the bound name taking the initialiser's value.
         const whenMismatch = settled === null || !aliasUnit || uses.length > 1 || !/^[\s!]*$/.test(prefix) || suffix.trim() !== ''
           ? null
-          : mismatchValue(code, aliasUnit, settled !== ((prefix.match(/!/g) ?? []).length % 2 === 1), guards)
+          : mismatchValue(code, aliasUnit, settled !== ((prefix.match(/!/g) ?? []).length % 2 === 1), heldGuards)
         deciders.push({ statement: decider, whenMismatch })
       }
     }
@@ -2773,10 +2882,14 @@ function scanSheetPairings(source: string): PairingScan {
       }
       const consumed = texts.map((t) => readAnswer(t, responseNames, closures, nextNames))
       if (!consumed.some((r) => r.answers) || consumed.some((r) => r.payloads === null || r.handoffs.length > 0)) return false
+      // The name stands for the value only in the consumer's own branch (a `catch` parameter's scope ends there; in the
+      // run after it the name is read like any other local), and only while nothing binds it again from the handoff's
+      // binding to the end of that branch (`failure = { …, message: … }`, `err = …`).
+      if (consumer.name && !unbound(bindingSites(code.slice(consumer.since, consumer.span[1]), consumer.name, true))) return false
       const value = consumer.name
         ? new RegExp(String.raw`(?<![\w$.])${escapeName(consumer.name)}(?![\w$])(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*`, 'g')
         : null
-      return consumed.every((r) => r.payloads!.every((p) => constant(value ? p.replace(value, ' null ') : p)))
+      return consumed.every((r, k) => r.payloads!.every((p) => constant(value && k === 0 ? p.replace(value, ' null ') : p)))
     }
     const echo = answering.some(({ from, read }) => read.payloads === null
       || !read.payloads.every(constant)
@@ -3945,5 +4058,127 @@ describe('by SHAPE — self-tests: a hand-written copy under new names is invisi
       + '        if (elsewhere) {\n'
       + "          return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View ${viewId} does not belong to sheet ${sheetId}` } })\n"
       + '        }'), 'C4 an existing row, first tested in a dry-run block')
+  })
+
+  // ── #6069 sixth review: a compound binding, and a name bound again after the comparison ran ─────────────────────
+  // Red on 7e44fce48 (and on 471f671bf): `x &&= a !== b` / `x ||= a === b` took the comparison's value for the name's, a
+  // testing `if` took the initialiser's value however the name — or a name its guard reads — was written before it,
+  // and a handed-off value's name stood for the value wherever it was read. Each cell below plants the writing; the
+  // census-row cell rewrites a row no earlier self-test anchored.
+
+  /** The branch after a testing `if` is values-free; the statement after the `if` echoes. */
+  const freeThenEcho = (bound: string, condition: string) =>
+    plant(`${bound}    if (${condition}) {\n      ${FREE_REFUSAL}\n    }\n    return res.json({ ok: true, viewId: req.params.viewId })`)
+
+  it('a compound binding is not settled: `x &&= …`, `x ||= …`, `x ??= …` read BOTH paths, spelled short or expanded', () => {
+    for (const [label, bound, condition] of [
+      // The comparison cannot decide the result: `x && (a !== b)`, `x || (a === b)`.
+      ['&&= with !==', "    let elsewhere = req.query.verbose !== '1'\n    elsewhere &&= owner.sheet_id !== target\n", 'elsewhere'],
+      ['= x && with !==', "    let elsewhere = req.query.verbose !== '1'\n    elsewhere = elsewhere && owner.sheet_id !== target\n", 'elsewhere'],
+      ['||= with ===', "    let belongs = req.query.verbose === '1'\n    belongs ||= owner.sheet_id === target\n", '!belongs'],
+      ['= x || with ===', "    let belongs = req.query.verbose === '1'\n    belongs = belongs || owner.sheet_id === target\n", '!belongs'],
+      // The absorbing side decides the compound statement, not whether the statement ran: `if (c) x ||= a !== b`
+      // leaves `x` false on a mismatch whenever `c` is false.
+      ['||= with !==, in a conditional statement', "    let elsewhere = false\n    if (req.query.fast !== '1') elsewhere ||= owner.sheet_id !== target\n", 'elsewhere'],
+      ['&&= with ===, in a conditional statement', "    let belongs = true\n    if (req.query.fast !== '1') belongs &&= owner.sheet_id === target\n", '!belongs'],
+      // …so the rule is the NAME's (`oneDeclaration`), not the statement's: unconditional, these read both paths too
+      // (a false alarm, stated under OTHER).
+      ['||= with !==', '    let elsewhere = false\n    elsewhere ||= owner.sheet_id !== target\n', 'elsewhere'],
+      ['&&= with ===', '    let belongs = true\n    belongs &&= owner.sheet_id === target\n', '!belongs'],
+      ['??=', '    let elsewhere: boolean | undefined\n    elsewhere ??= owner.sheet_id !== target\n', 'elsewhere'],
+    ] as const) plantedSite(freeThenEcho(bound, condition), true, label)
+  })
+
+  it('a bound boolean is ONE binding: written again anywhere in the handler, bound in a branch, declared apart or a `var`, its testing `if`s read BOTH paths', () => {
+    for (const [label, bound, condition] of [
+      ['re-assigned between', "    let elsewhere = owner.sheet_id !== target\n    if (req.query.verbose === '1') elsewhere = false\n", 'elsewhere'],
+      ['re-written by a ternary', "    let elsewhere = owner.sheet_id !== target\n    elsewhere = req.query.verbose === '1' ? false : elsewhere\n", 'elsewhere'],
+      ['destructured again', "    let elsewhere = owner.sheet_id !== target\n    if (req.query.verbose === '1') [elsewhere] = [false]\n", 'elsewhere'],
+      ['written by a closure declared before it', "    const forget = () => { elsewhere = false }\n    let elsewhere = owner.sheet_id !== target\n    if (req.query.verbose === '1') forget()\n", 'elsewhere'],
+      ['bound only in a branch', "    let elsewhere = false\n    if (req.query.fast !== '1') elsewhere = owner.sheet_id !== target\n", 'elsewhere'],
+      ['a var in a block', "    if (req.query.fast !== '1') {\n      var elsewhere = owner.sheet_id !== target\n    }\n", 'elsewhere'],
+      // Unconditional, but declared apart from its binding: read both paths as well (a false alarm, stated under OTHER).
+      ['declared apart', '    let elsewhere: boolean\n    elsewhere = owner.sheet_id !== target\n', 'elsewhere'],
+      // A GUARD at the testing `if` is asked after the comparison ran: a name it reads, written since, no longer guards.
+      ['a guard\'s name re-assigned', "    let row = owner\n    const elsewhere = !row || row.sheet_id !== target\n    if (req.query.verbose === '1') row = null\n", 'row && elsewhere'],
+      ['a guard written through', "    const elsewhere = !owner || owner.sheet_id !== target\n    if (req.query.verbose === '1') owner.sheet_id = ''\n", 'owner.sheet_id && elsewhere'],
+    ] as const) plantedSite(freeThenEcho(bound, condition), true, label)
+    // Controls: one `const` / `let`, never bound again — with a guard whose names are too — still settle the `if`. The
+    // names are the handler's own: `row` is bound in other handlers of this file, which do not count.
+    expect(UNIVER_META_SOURCE.replace(/\r\n/g, '\n').match(/const row = /g)?.length ?? 0, 'the control needs `row` bound elsewhere in the file').toBeGreaterThan(1)
+    for (const [label, bound, condition] of [
+      ['const', '    const elsewhere = owner.sheet_id !== target\n', 'elsewhere'],
+      ['let, never written again', '    let elsewhere = owner.sheet_id !== target\n', 'elsewhere'],
+      ['a guard declared once with let', '    let row = owner\n    const elsewhere = !row || row.sheet_id !== target\n', 'row && elsewhere'],
+    ] as const) plantedSite(freeThenEcho(bound, condition), false, `control: ${label}`)
+  })
+
+  /** The dingtalk-person-deliveries census row (post-authority, values-free), its refusal block rewritten line by line. */
+  const DELIVERIES_KEY = 'GET /sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries | rule.sheet_id !== sheetId'
+  const DELIVERIES_FREE = "return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })"
+  const DELIVERIES_IF_FREE = (condition: string) => `if (${condition}) {\n        ${DELIVERIES_FREE}\n      }`
+  const DELIVERIES_ECHO = (rule: string) => `if (${rule} && req.query.verbose === '1') return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: \`Rule \${ruleId} is on \${${rule}.sheet_id}\` } })`
+  const rewriteDeliveries = (lines: readonly string[], ruleByLet = false): string => {
+    const LF_SOURCE = UNIVER_META_SOURCE.replace(/\r\n/g, '\n')
+    const decl = LF_SOURCE.indexOf("router.get('/sheets/:sheetId/automations/:ruleId/dingtalk-person-deliveries'")
+    const fetched = LF_SOURCE.indexOf('const rule = await automationService.getRule(ruleId)', decl)
+    const block = DELIVERIES_IF_FREE('!rule || rule.sheet_id !== sheetId')
+    const at = LF_SOURCE.indexOf(block, fetched)
+    expect(decl > 0 && fetched > decl && at > fetched && at - decl < 2000, 'the dingtalk-person-deliveries refusal this probe rewrites moved — re-anchor it').toBe(true)
+    const rewritten = LF_SOURCE.slice(0, at) + lines.join('\n      ') + LF_SOURCE.slice(at + block.length)
+    return ruleByLet ? `${rewritten.slice(0, fetched)}let${rewritten.slice(fetched + 'const'.length)}` : rewritten
+  }
+  const expectDeliveries = (mutated: string, echo: boolean, label: string) => {
+    expect(SHEET_PAIRING_CENSUS[DELIVERIES_KEY], 'the probed row left the census — pick another post-authority row').toEqual({ echo: false, beforeAuthority: false })
+    const scanned = scanSheetPairings(mutated)
+    const site = scanned.sites.find((s) => s.key === DELIVERIES_KEY)
+    expect([site?.echo, site?.beforeAuthority], `${label}: computed [echo, beforeAuthority]`).toEqual([echo, false])
+    const violations = pairingViolations(scanned)
+    if (!echo) {
+      expect(violations, label).toEqual([])
+      return
+    }
+    expect(violations.join('\n'), label).toContain(`DECLARED ≠ COMPUTED (line ${site!.line}): ${DELIVERIES_KEY}`)
+    expect(violations.join('\n'), label).toContain(`UNEXCUSED (line ${site!.line}): ${DELIVERIES_KEY}`)
+  }
+
+  it('…and an EXISTING values-free row rewritten each of those ways reds declared = computed; bound once, it stays green', () => {
+    const tested = [DELIVERIES_IF_FREE('elsewhere'), DELIVERIES_ECHO('rule')]
+    expectDeliveries(rewriteDeliveries(["let elsewhere = req.query.verbose !== '1'", 'elsewhere &&= !rule || rule.sheet_id !== sheetId', ...tested]), true, '&&=')
+    expectDeliveries(rewriteDeliveries(["let elsewhere = req.query.verbose !== '1'", 'elsewhere = elsewhere && (!rule || rule.sheet_id !== sheetId)', ...tested]), true, 'the same, expanded')
+    expectDeliveries(rewriteDeliveries(['let elsewhere = !rule || rule.sheet_id !== sheetId', "if (req.query.verbose === '1') elsewhere = false", ...tested]), true, 're-assigned between')
+    expectDeliveries(rewriteDeliveries(['let elsewhere = !rule || rule.sheet_id !== sheetId', "elsewhere = req.query.verbose === '1' ? false : elsewhere", ...tested]), true, 're-written by a ternary')
+    expectDeliveries(rewriteDeliveries([
+      'const elsewhere = !rule || rule.sheet_id !== sheetId',
+      'const fetched = rule',
+      "if (req.query.verbose === '1') rule = null",
+      DELIVERIES_IF_FREE('rule && elsewhere'),
+      DELIVERIES_ECHO('fetched'),
+    ], true), true, 'the guard\'s name re-assigned')
+    // Controls: the same row bound once, tested bare or behind a guard that is also bound once.
+    expectDeliveries(rewriteDeliveries(['const elsewhere = !rule || rule.sheet_id !== sheetId', ...tested]), false, 'control: const, tested bare')
+    expectDeliveries(rewriteDeliveries(['const elsewhere = !rule || rule.sheet_id !== sheetId', DELIVERIES_IF_FREE('rule && elsewhere'), DELIVERIES_ECHO('rule')]), false, 'control: behind a guard')
+  })
+
+  it('a handed-off value\'s name stands for it only in its consumer\'s own branch, and only while nothing binds it again', () => {
+    const consumer = '    if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })'
+    const transaction = (rest: string) => plant('    let failure = await poolManager.get().transaction(async () => {\n'
+      + "      if (owner.sheetId !== target) return { status: 404, code: 'NOT_FOUND', message: 'View not found' }\n      return null\n    })\n"
+      + rest)
+    plantedSite(transaction(consumer), false, 'control: bound once, answered with its own fields')
+    plantedSite(transaction("    if (req.query.verbose === '1') failure = { status: 404, code: 'NOT_FOUND', message: `View ${req.params.viewId} is on ${owner.sheetId}` }\n"
+      + consumer), true, 're-assigned before its consumer')
+    plantedSite(transaction("    if (failure) {\n      if (req.query.verbose === '1') failure.message = `View ${req.params.viewId} is on ${owner.sheetId}`\n"
+      + '      return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })\n    }'), true, 'written through inside its consumer')
+    const caught = (body: string) => plant('    const detail = `View ${req.params.viewId} is on ${owner.sheetId}`\n'
+      + "    try {\n      if (owner.sheetId !== target) throw new NotFoundError('View not found')\n    } catch (err) {\n"
+      + `${body}    }`)
+    plantedSite(caught("      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })\n"), false, 'control: a catch answering its own error')
+    plantedSite(caught("      if (req.query.verbose === '1') err = { message: detail }\n"
+      + "      return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })\n"), true, 'the catch parameter re-assigned')
+    // Past the `catch`, its parameter is out of scope: the same name there is another binding (here one holding both ids).
+    plantedSite(plant('    const err = { message: `View ${req.params.viewId} is on ${owner.sheetId}` }\n'
+      + "    try {\n      if (owner.sheetId !== target) throw new NotFoundError('View not found')\n    } catch (err) {\n      res.status(404)\n    }\n"
+      + '    return res.json({ ok: false, error: err.message })'), true, 'the run after the catch reads the name as any other')
   })
 })
