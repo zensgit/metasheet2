@@ -49,13 +49,40 @@ export interface AdminFailureLogger {
   error(message: string, error?: Error): void;
 }
 
+/** Logged in place of a thrown value that cannot be read or turned into text at all. */
+const UNRENDERABLE_THROWN_VALUE = 'thrown value could not be rendered as text';
+
 /**
- * core/logger.ts's error() reads `.message` and `.stack` off its second argument, so a thrown
- * non-Error (a string, a plain object) would otherwise reach the log as `undefined`. Wrap it so the
- * detail still lands SERVER SIDE — this value never reaches the response.
+ * core/logger.ts's error() duck-reads `.message` and `.stack` off its second argument. Before this
+ * envelope existed every site in the tree passed the caught value straight through (`error as Error`),
+ * so the log already carried the detail of any error-LIKE value. This keeps that and adds the cases
+ * the raw pass-through lost, all SERVER SIDE — the value returned here never reaches the response:
+ *   - an Error of this realm is passed through unchanged;
+ *   - an error-like object (a string `message` or `stack`: a plain `{ message }` rejection, an Error
+ *     from another realm such as a `vm` context, where `instanceof Error` is false) keeps its own
+ *     message, name and ORIGINAL stack — the stack is not replaced by this module's frames;
+ *   - anything else (a string, a number, an object without a message) is rendered with String();
+ *   - a value that cannot be read or rendered at all (`Object.create(null)`, a throwing `toString`
+ *     or property getter, a revoked Proxy) yields a fixed placeholder instead of throwing.
+ * This function never throws, so an odd thrown value can no longer stop a responder before it
+ * reaches `res.status(500)` (the raw `String(error)` it replaces threw on `Object.create(null)`).
  */
 function toLoggableError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+  try {
+    if (error instanceof Error) return error;
+    if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
+      const { message, stack, name } = error as { message?: unknown; stack?: unknown; name?: unknown };
+      if (typeof message === 'string' || typeof stack === 'string') {
+        const wrapped = new Error(typeof message === 'string' ? message : '');
+        if (typeof name === 'string') wrapped.name = name;
+        if (typeof stack === 'string') wrapped.stack = stack;
+        return wrapped;
+      }
+    }
+    return new Error(String(error));
+  } catch {
+    return new Error(UNRENDERABLE_THROWN_VALUE);
+  }
 }
 
 export interface AdminFailureResponders {

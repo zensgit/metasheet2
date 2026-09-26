@@ -16,7 +16,8 @@
  *     down the call chain, or on a local the receiver was bound to (`const r = res.status(500)`);
  *   - SPLIT status: a body call on a receiver whose status was set by an earlier `<res>.status(S)`,
  *     `<res>.writeHead(S)` or `<res>.statusCode = S` in the same function (or an enclosing one) on the
- *     same receiver symbol;
+ *     same receiver — the same symbol, or a local bound straight to it (`const r = res`, chains of
+ *     such bindings);
  *   - `jsonError(res, S, …)`;
  *   - the `extra` argument of the admin failure responders (sendAdminReadFailure /
  *     sendAdminWriteFailure, also when called through a local alias or a renamed destructure), whose
@@ -38,19 +39,29 @@
  *   flows — a declaration whose initializer references a tainted symbol (`const err = error as Error`,
  *     `const m = String(error)`, `const { message } = err`); an ASSIGNMENT whose right side does
  *     (`x = …`, `x += …`, `obj.p = …` / `obj[k] = …` taints `obj`, destructuring assignment);
- *     `Object.assign(target, …tainted)`; `arr.push|unshift|splice(…tainted)`; a tainted receiver's
- *     array callback (`errs.map((e) => …)` taints `e`); an ARGUMENT passed to a function declared in
- *     the same file taints the matching parameter (`function fail(res, e) {…}` called as
+ *     `Object.assign(target, …tainted)`; a container write `c.push|unshift|splice|set|add(…tainted)`
+ *     taints `c` (arrays, Map, Set); a `for (… of tainted)` loop binding; a tainted receiver's array
+ *     callback (`errs.map((e) => …)` taints `e`); an ARGUMENT passed to a function declared in the
+ *     same file taints the matching parameter (`function fail(res, e) {…}` called as
  *     `fail(res, error)`); a function whose body captures a tainted symbol from outside it.
  *
- * NOT modelled — pinned only by the runtime probes of the routes that exist today:
- *   - a helper declared in ANOTHER module that writes the body (the scanner reads one file at a time;
- *     the admin failure responders are the one cross-module writer in the tree: at the call site
- *     their `extra` argument is a sink, and their own module is scanned with the `error` parameter
- *     tainted, see sources);
+ * NOT modelled — pinned only by the runtime probes of the routes that exist today, not by this scan:
+ *   - a helper declared in ANOTHER module that writes the body, and a route handler imported from
+ *     another module or registered on a scanned router from another module (the scanner reads one
+ *     file at a time; the admin failure responders are the one cross-module writer in the tree: at
+ *     the call site their `extra` argument is a sink, and their own module is scanned with the
+ *     `error` parameter tainted, see sources);
  *   - a status set in a different function than the body call (e.g. an earlier middleware);
+ *   - a status or body method reached through `.call` / `.apply` / `.bind`, `Reflect.apply`, or a
+ *     computed member name (`res['status'](500)`);
  *   - a value that becomes error text only through a function's RETURN (a function that builds the
  *     text from its own internal catch) unless the call site's arguments reference the taint;
+ *   - error values that do not enter through the sources above: a `Promise.allSettled` result's
+ *     `.reason`, an error some other module stored on an object (e.g. a plugin runtime's `error`
+ *     field), a container read back through a DIFFERENT object than the one written;
+ *   - `for (… in …)` loops (keys, not values) and any other flow not listed above;
+ *   - response HEADERS (`res.set`, `res.setHeader`, `res.writeHead(S, headers)`): only bodies are
+ *     sinks;
  *   - `next(err)` into an error handler, and any exception that escapes to Express's final handler.
  */
 import ts from 'typescript'
@@ -99,7 +110,8 @@ const STATUS_METHODS = new Set(['status', 'writeHead'])
 const ERROR_TEXT_PROPS = new Set(['message', 'stack'])
 const ERROR_LIKE_PARAM = /^(err|error|e|ex|exception)$/i
 const ERROR_EVENT_METHODS = new Set(['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'])
-const ARRAY_MUTATORS = new Set(['push', 'unshift', 'splice'])
+/** Calls that store their arguments in the receiver: arrays, and Map / Set (`m.set(k, v)`, `s.add(v)`). */
+const CONTAINER_WRITERS = new Set(['push', 'unshift', 'splice', 'set', 'add'])
 const ARRAY_CALLBACKS = new Set([
   'forEach', 'map', 'flatMap', 'filter', 'find', 'findLast', 'findIndex', 'some', 'every', 'reduce', 'reduceRight',
 ])
@@ -399,6 +411,14 @@ function computeTaint(a: Analysis): Set<ts.Symbol> {
     ) {
       addFlow(n.right, assignmentTargets(a, n.left))
     }
+    if (ts.isForOfStatement(n)) {
+      // `for (const e of [error])` / `for (x of errs)`: the loop binding carries what it iterates.
+      const init = n.initializer
+      const targets = ts.isVariableDeclarationList(init)
+        ? init.declarations.flatMap((d) => bindingSymbols(a, d.name))
+        : assignmentTargets(a, init)
+      addFlow(n.expression, targets)
+    }
     if (ts.isCallExpression(n)) {
       const callee = unwrap(n.expression)
       if (ts.isPropertyAccessExpression(callee)) {
@@ -412,7 +432,7 @@ function computeTaint(a: Analysis): Set<ts.Symbol> {
           if (event && ts.isStringLiteralLike(event) && event.text === 'error') {
             for (const s of firstParamSymbols(a, n.arguments[1])) tainted.add(s)
           }
-        } else if (ARRAY_MUTATORS.has(method)) {
+        } else if (CONTAINER_WRITERS.has(method)) {
           for (const arg of n.arguments) addFlow(arg, assignmentTargets(a, callee.expression))
         } else if (ARRAY_CALLBACKS.has(method)) {
           const fn = n.arguments[0] ? resolveLocalFunction(a, n.arguments[0]) : null
@@ -463,9 +483,27 @@ function computeTaint(a: Analysis): Set<ts.Symbol> {
 
 type ReceiverKey = ts.Symbol | string
 
-function receiverKey(a: Analysis, expr: ts.Expression): ReceiverKey {
+/**
+ * The identity of a response receiver. A local bound straight to another identifier (`const r = res`,
+ * chains of them) is the SAME receiver, so `res.status(500); r.json(…)` is one split-status sink.
+ */
+function receiverKey(a: Analysis, expr: ts.Expression, depth = 0): ReceiverKey {
   const inner = unwrap(expr)
-  if (ts.isIdentifier(inner)) return a.symbolOf(inner) ?? inner.text
+  if (ts.isIdentifier(inner)) {
+    const symbol = a.symbolOf(inner)
+    const declaration = symbol?.valueDeclaration
+    if (
+      depth < MAX_ALIAS_DEPTH &&
+      declaration &&
+      ts.isVariableDeclaration(declaration) &&
+      ts.isIdentifier(declaration.name) &&
+      declaration.initializer &&
+      ts.isIdentifier(unwrap(declaration.initializer))
+    ) {
+      return receiverKey(a, declaration.initializer, depth + 1)
+    }
+    return symbol ?? inner.text
+  }
   return inner.getText(a.sf).replace(/\s+/g, '')
 }
 
@@ -663,6 +701,11 @@ export interface RouterMount {
   targets: string[]
   /** True when some target is a Router: built in place, or a module that constructs one. */
   router: boolean
+  /**
+   * True when some target is a `Router()` built in place in the mounting file. Such a router has no
+   * module export a live router can be compared against, so a live cross-check can only COUNT it.
+   */
+  inPlace: boolean
 }
 
 export interface RouterTree {
@@ -720,10 +763,16 @@ function returnedExpressions(fn: FunctionLike): ts.Expression[] {
  * `read(rel)` returns the source of a path relative to the routes directory; `resolveRel(from, spec)`
  * maps an import specifier to such a path.
  *
+ * Not followed (the list is not exhaustive): a `for…of` / `forEach` binding, a value read back out of
+ * a container, a `.call` / `.apply`, a non-relative or computed specifier, a directory import
+ * (`resolveRel` decides what a specifier maps to).
+ *
  * Static resolution cannot see every way code can hand a router to `.use()`; the caller is expected
- * to cross-check `mounts.filter((m) => m.router).length` against the routers nested in the LIVE
- * mounted stack, so a mount this walk cannot follow turns red there instead of silently shrinking
- * the scanned tree.
+ * to cross-check the routers nested in the LIVE mounted stack BY IDENTITY: every one must be a Router
+ * that some discovered module exports, except at most as many as there are in-place `Router()` mounts
+ * (`inPlace`), which have no export and can only be counted. A router the walk cannot follow then
+ * turns red there instead of silently shrinking the scanned tree. (A count-only comparison is not
+ * enough: a static mount that is switched off at runtime cancels a live router the walk never saw.)
  */
 export function discoverMountedRouterTree(
   rootFile: string,
@@ -833,10 +882,12 @@ export function discoverMountedRouterTree(
       n.arguments.forEach((arg, index) => {
         const targets = new Set<string>()
         let router = false
+        let inPlace = false
         for (const target of resolve(arg, new Set())) {
           if (target.kind === 'local-router') {
             targets.add(rel)
             router = true
+            inPlace = true
           } else {
             const to = resolveRel(rel, target.spec)
             targets.add(to)
@@ -851,6 +902,7 @@ export function discoverMountedRouterTree(
             arg: index,
             targets: [...targets],
             router,
+            inPlace,
           })
         }
       })

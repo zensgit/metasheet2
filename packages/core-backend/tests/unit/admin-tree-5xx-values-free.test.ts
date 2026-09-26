@@ -32,26 +32,33 @@
  *      `.use(...)` argument back to a module — an imported binding or namespace member, a factory
  *      call on one, a local alias / later assignment / destructure of one, a conditional, an array,
  *      an in-file function's `return`, a relative `import()` / `require()`. Because static resolution
- *      can never see every way code hands a router to `.use()`, the count of routers nested in the
- *      LIVE mounted stack must equal the count of static router mounts: a sub-router mounted tomorrow
- *      in a way the walk cannot follow turns that assertion red instead of silently leaving the scan.
+ *      can never see every way code hands a router to `.use()`, the routers nested in the LIVE
+ *      mounted stack are cross-checked BY IDENTITY: each must be a Router exported by a discovered
+ *      module (in-place `Router()` mounts have no export and are only counted — there are none in the
+ *      tree today). A sub-router mounted tomorrow in a way the walk cannot follow is not such an
+ *      export, so that assertion turns red instead of the router silently leaving the scan. (The
+ *      earlier count-only comparison could be cancelled by a static mount that is off at runtime.)
  *      In the discovered files, any 5xx response — `.status(S)` chained, set earlier on the same
- *      receiver (`res.status(S); res.json(…)`, `res.statusCode = S`), `jsonError`, a responder's
- *      `extra` — whose arguments read `.message` / `.stack` or reference a TAINTED symbol is red.
- *      Taint starts at the caught error and follows declarations, assignments (`x = …`,
- *      `obj.p = …`), Object.assign / push, and arguments into same-file helpers' parameters. Log
- *      calls are not sinks and are never flagged. What the scanner does NOT model (helpers in another
- *      module, a status set in another function, text built only inside a function's return,
- *      `next(err)`) is listed in its header; for the routes that exist today those shapes are pinned
- *      by layer 1's runtime probes, not by this layer.
+ *      receiver or a local bound straight to it (`res.status(S); res.json(…)`, `res.statusCode = S`,
+ *      `const r = res; res.status(S); r.json(…)`), `jsonError`, a responder's `extra` — whose
+ *      arguments read `.message` / `.stack` or reference a TAINTED symbol is red. Taint starts at the
+ *      caught error and follows declarations, assignments (`x = …`, `obj.p = …`), Object.assign,
+ *      container writes (push / Map.set / Set.add), `for…of` bindings, and arguments into same-file
+ *      helpers' parameters. Log calls are not sinks and are never flagged. What the scanner does NOT
+ *      model (helpers or handlers in another module, a status set in another function,
+ *      `.call`/`.apply`, computed member names, text built only inside a function's return, error
+ *      values that do not come from a catch / rejection handler, headers, `next(err)`) is listed in
+ *      its header; for the routes that exist today those shapes are pinned by layer 1's runtime
+ *      probes, not by this layer, and for a NEW route this layer guarantees only the listed shapes.
  *
  * Mutation self-proof is built in and memory-level (no source file is written, so a parallel suite
  * cannot observe a mutant): every responder call site in the tree is rewritten, in memory, into each
- * of eight echo shapes (chained `.message` / `String()`, responder `extra`, assignment-derived local,
- * property-assigned body, split status, `statusCode =`, same-file helper) and the guard must flag
- * every site under every shape; the live-stack cross-check must fail when one router more is mounted
- * than the walk found; and a live router handler is swapped for the pre-change implementation and
- * the probe's own assertion must fail on it.
+ * of eleven echo shapes (chained `.message` / `String()`, responder `extra`, assignment-derived local,
+ * property-assigned body, split status, `statusCode =`, same-file helper, `for…of` binding, Map
+ * container, split status through a receiver alias) and the guard must flag every site under every
+ * shape; the live-stack cross-check must fail when a router the walk did not find is mounted, also
+ * when a switched-off static mount keeps the COUNTS equal; and a live router handler is swapped for
+ * the pre-change implementation and the probe's own assertion must fail on it.
  *
  * Values-free fixtures: RFC 5737 TEST-NET-3 documentation address and literal placeholder names.
  */
@@ -60,13 +67,15 @@ import express, { type Express, type Request, type Response, type NextFunction }
 import request from 'supertest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isAdmin } from '../../src/rbac/service'
 import { usePinnedServer } from '../utils/pinned-server'
 import {
   discoverMountedRouterTree,
   scanResponseErrorEcho,
   type ResponderCall,
+  type RouterTree,
 } from '../utils/response-error-echo-scan'
 
 vi.mock('../../src/rbac/service', () => ({
@@ -588,6 +597,68 @@ describe('admin caller: every 500 branch in the /api/admin tree is values-free',
     expect(loggedOriginal()).toBe(true)
   })
 
+  // Before the envelope, each site handed the caught value straight to logger.error(), which
+  // duck-reads `.message` / `.stack`. An error-LIKE value that is not `instanceof Error` must keep
+  // that fidelity in the log (its message, not "[object Object]"; its own stack, not the envelope's),
+  // while the body stays redacted.
+  it('an error-LIKE plain object ({ code, message }) is redacted, and its message (not "[object Object]") reaches the log', async () => {
+    vi.mocked(protectionRuleService.listRules).mockRejectedValue({ code: '28P01', message: LEAKY })
+    const res = await request(pinned.url()).get('/api/admin/safety/rules')
+    expectRedacted(res.status, res.body as Record<string, unknown>, 'read')
+    expect(loggedOriginal()).toBe(true)
+  })
+
+  it('an Error from another realm (vm) is redacted, and the log keeps its message AND its original stack', async () => {
+    const foreign = vm.runInNewContext('new Error(text)', { text: LEAKY }) as { message: string; stack: string }
+    // The precondition that makes this case different from every other probe.
+    expect(foreign instanceof Error).toBe(false)
+    expect(typeof foreign.stack).toBe('string')
+    vi.mocked(protectionRuleService.listRules).mockRejectedValue(foreign)
+    const res = await request(pinned.url()).get('/api/admin/safety/rules')
+    expectRedacted(res.status, res.body as Record<string, unknown>, 'read')
+    expect(loggedOriginal()).toBe(true)
+    const stacks = errorLog.mock.calls.map((call) => (call[1] as { stack?: unknown } | undefined)?.stack)
+    expect(stacks).toContain(foreign.stack)
+  })
+
+  /** Thrown values that cannot be read or rendered as text; `String()` throws on each of them. */
+  function unrenderableValues(): Array<[string, unknown]> {
+    const revoked = Proxy.revocable({}, {})
+    revoked.revoke()
+    return [
+      ['Object.create(null)', Object.create(null)],
+      ['an object whose toString throws', { toString: () => { throw new Error('unrenderable') } }],
+      ['a revoked Proxy', revoked.proxy],
+    ]
+  }
+
+  for (const [label, route] of [
+    ['async GET /safety/rules (protection-rules)', 'async'],
+    ['sync GET /plugins/health', 'sync'],
+  ] as const) {
+    it(`${label}: a thrown value that cannot be rendered still gets the redacted 500 — the responder itself does not throw`, async () => {
+      for (const [what, thrown] of unrenderableValues()) {
+        errorLog.mockClear()
+        if (route === 'async') {
+          vi.mocked(protectionRuleService.listRules).mockRejectedValue(thrown)
+        } else {
+          vi.spyOn(pluginHealthService, 'getAllPluginHealth').mockImplementation(() => { throw thrown })
+        }
+        // A responder that throws leaves the async request unanswered (a timeout here) and sends the
+        // sync one to the global error middleware (a non-envelope body + globalErrorLog call).
+        const res = await request(pinned.url())
+          .get(route === 'async' ? '/api/admin/safety/rules' : '/api/admin/plugins/health')
+          .timeout(3000)
+        expect({ what, status: res.status, code: res.body.code }).toEqual({ what, status: 500, code: ADMIN_READ_FAILED_CODE })
+        expectRedacted(res.status, res.body as Record<string, unknown>, 'read')
+        expect(globalErrorLog.error).not.toHaveBeenCalled()
+        // Something textual still reached the log for the operator.
+        const logged = errorLog.mock.calls.map((call) => (call[1] as { message?: unknown } | undefined)?.message)
+        expect(logged.some((m) => typeof m === 'string' && m.length > 0)).toBe(true)
+      }
+    })
+  }
+
   it('#5903 read side is unchanged: a GET in admin-routes.ts still answers ADMIN_READ_FAILED', async () => {
     vi.spyOn(getHealthAggregator(), 'checkHealth').mockRejectedValue(leakyError())
     const res = await request(pinned.url()).get('/api/admin/health/detailed')
@@ -806,13 +877,45 @@ function treeFiles(): string[] {
 }
 
 /** Routers nested (at any depth) in a live express stack: every layer whose handle carries a stack. */
-function liveNestedRouters(stack: RouteLayer[]): number {
-  let count = 0
+function liveNestedRouters(stack: RouteLayer[], out: unknown[] = []): unknown[] {
   for (const layer of stack) {
     const inner = layer.handle?.stack
-    if (Array.isArray(inner)) count += 1 + liveNestedRouters(inner)
+    if (Array.isArray(inner)) {
+      out.push(layer.handle)
+      liveNestedRouters(inner, out)
+    }
   }
-  return count
+  return out
+}
+
+const isRouterObject = (value: unknown): boolean =>
+  typeof value === 'function' && Array.isArray((value as { stack?: unknown }).stack)
+
+/**
+ * Every Router object a discovered module EXPORTS, keyed by identity. The modules are the ones the
+ * mounted tree already loaded (same module instances), so a live router that one of them exports is
+ * the very object found here.
+ */
+async function exportedRouters(files: string[]): Promise<Map<unknown, string>> {
+  const out = new Map<unknown, string>()
+  for (const rel of files) {
+    const mod = (await import(pathToFileURL(path.join(ROUTES_DIR, rel)).href)) as Record<string, unknown>
+    for (const value of Object.values(mod)) if (isRouterObject(value)) out.set(value, rel)
+  }
+  return out
+}
+
+/**
+ * The live-stack cross-check, by identity. Every router nested in the live tree must be one that a
+ * scanned module exports; only in-place `Router()` mounts (no export to compare with) may account for
+ * the rest, and only by count. Returns the problems; empty means consistent.
+ */
+function reconcileLiveRouters(live: unknown[], exported: Map<unknown, string>, tree: RouterTree): string[] {
+  const unmatched = live.filter((router) => !exported.has(router))
+  const inPlace = tree.mounts.filter((m) => m.inPlace).length
+  return unmatched.length > inPlace
+    ? [`${unmatched.length} live router(s) are not exported by any scanned module (in-place Router() mounts: ${inPlace})`]
+    : []
 }
 
 /** Offenders in a probe handler whose catch binds `error`. */
@@ -829,22 +932,43 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     }
   })
 
-  it('live-stack cross-check: the routers nested in the mounted tree are exactly the static router mounts', () => {
+  it('live-stack cross-check, by identity: every router nested in the mounted tree is exported by a scanned module', async () => {
     const liveStack = (currentRouter as unknown as { stack: RouteLayer[] }).stack
-    const staticRouterMounts = routerTree().mounts.filter((m) => m.router)
+    const tree = routerTree()
     const live = liveNestedRouters(liveStack)
-    // The count comparison is the part that needs no per-router expectation: it is what turns red
-    // for a router mounted TOMORROW in a way the static walk cannot follow.
-    expect(staticRouterMounts).toHaveLength(live)
-    // Today: /snapshots -> snapshot-labels.ts and /safety/rules -> protection-rules.ts.
-    expect(live).toBeGreaterThanOrEqual(2)
-    expect(staticRouterMounts.map((m) => m.targets).flat()).toEqual(
-      expect.arrayContaining(['snapshot-labels.ts', 'protection-rules.ts'])
+    const exported = await exportedRouters(tree.files)
+    // This is the part that needs no per-router expectation: it is what turns red for a router
+    // mounted TOMORROW in a way the static walk cannot follow.
+    expect(reconcileLiveRouters(live, exported, tree)).toEqual([])
+    // Today it is strict: no in-place Router() mounts, and every live router is matched to its module.
+    expect(tree.mounts.filter((m) => m.inPlace)).toEqual([])
+    expect(live.map((router) => exported.get(router)).sort()).toEqual(['protection-rules.ts', 'snapshot-labels.ts'])
+    // Mutation: a router the walk did not find, added to a copy of the live stack (the live router is
+    // not touched), is not an export of any scanned module.
+    const foreign = express.Router()
+    const withUnfollowed = liveNestedRouters([...liveStack, { handle: foreign as unknown as { stack: RouteLayer[] } }])
+    expect(reconcileLiveRouters(withUnfollowed, exported, tree)).not.toEqual([])
+  })
+
+  it('live-stack cross-check: a switched-off static mount cannot cancel a live router the walk never saw', async () => {
+    // The shape an earlier count-only comparison missed: static side +1 (a mount that is off at
+    // runtime), live side +1 (a mount the walk cannot follow). Built in memory on the real source.
+    const source = readRoute('admin-routes.ts')
+    const anchor = 'export default router;'
+    expect(source.split(anchor)).toHaveLength(2)
+    const mutated = source.replace(
+      anchor,
+      `if (process.env.EADM_LEGACY_LABELS_MOUNT === 'true') router.use('/legacy-labels', snapshotLabelsRouter);\n` +
+        `for (const unfollowed of [foreignRouter]) router.use('/foreign', unfollowed);\n` +
+        anchor
     )
-    // Mutation: one router more in the live stack than the walk found (a mount it could not follow)
-    // must make the counts disagree. Built on a copy; the live router is not touched.
-    const withUnfollowed = [...liveStack, { handle: express.Router() as unknown as { stack: RouteLayer[] } }]
-    expect(liveNestedRouters(withUnfollowed)).not.toBe(staticRouterMounts.length)
+    const tree = discoverMountedRouterTree('admin-routes.ts', (rel) => (rel === 'admin-routes.ts' ? mutated : readRoute(rel)), resolveRel)
+    const liveStack = (currentRouter as unknown as { stack: RouteLayer[] }).stack
+    const live = liveNestedRouters([...liveStack, { handle: express.Router() as unknown as { stack: RouteLayer[] } }])
+    // The counts agree (3 static router mounts, 3 live routers): a count-only check stays green here.
+    expect(tree.mounts.filter((m) => m.router)).toHaveLength(live.length)
+    // The identity check does not.
+    expect(reconcileLiveRouters(live, await exportedRouters(tree.files), tree)).not.toEqual([])
   })
 
   it('discovery self-check: follows aliases, factories, namespace members, destructures, assignments, returns and import()', () => {
@@ -905,6 +1029,8 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     // 8 imported sub-routers + the Router() built in place; the middleware module is scanned but is not a router.
     expect(tree.mounts.filter((m) => m.router)).toHaveLength(9)
     expect(tree.mounts.find((m) => m.targets.includes('guard.ts'))?.router).toBe(false)
+    // Only the Router() built in place is an in-place mount (the one kind the live check can only count).
+    expect(tree.mounts.filter((m) => m.inPlace).map((m) => m.targets)).toEqual([['root.ts']])
   })
 
   it('zero offenders across every discovered file', () => {
@@ -947,12 +1073,20 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(flaggedIn(`let m = ''; ({ message: m } = error as Error); res.status(500).json({ error: m })`)).toBe(1)
     expect(flaggedIn(`const describe = () => String(error); res.status(500).json({ error: describe() })`)).toBe(1)
     expect(flaggedIn(`[error].forEach((e) => res.status(500).json({ error: String(e) }))`)).toBe(1)
+    // flagged: a for…of binding over the caught error, and Map / Set containers that hold it
+    expect(flaggedIn(`for (const e of [error]) { res.status(500).json({ error: String(e) }) }`)).toBe(1)
+    expect(flaggedIn(`let e: unknown; for (e of [error]) { res.status(500).json({ error: String(e) }) }`)).toBe(1)
+    expect(flaggedIn(`const m = new Map(); m.set('e', error); res.status(500).json({ error: String(m.get('e')) })`)).toBe(1)
+    expect(flaggedIn(`const s = new Set(); s.add(error); res.status(500).json({ errors: [...s].map(String) })`)).toBe(1)
     // flagged: the status set in an EARLIER statement on the same receiver
     expect(flaggedIn(`res.status(500); res.json({ success: false, error: String(error) })`)).toBe(1)
     expect(flaggedIn(`res.statusCode = 500; res.json({ success: false, error: String(error) })`)).toBe(1)
     expect(flaggedIn(`res.writeHead(500); res.end(String(error))`)).toBe(1)
     expect(flaggedIn('res.status(503); if (retry) { res.send(`failed: ${error}`) }')).toBe(1)
     expect(flaggedIn(`const r = res.status(500); r.json({ error: String(error) })`)).toBe(1)
+    // flagged: split status through a receiver alias, either way round
+    expect(flaggedIn(`const r = res; res.status(500); r.json({ error: String(error) })`)).toBe(1)
+    expect(flaggedIn(`const r = res; const r2 = r; r2.status(500); res.json({ error: String(error) })`)).toBe(1)
     // flagged: a responder called through an alias
     expect(flaggedIn(`const fail = sendAdminWriteFailure; fail(res, 'ctx', error, { detail: String(error) })`)).toBe(1)
     // flagged: a same-file helper that receives the caught error as an argument
@@ -991,6 +1125,8 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(flaggedIn(`logger.error(\`failed: \${(error as Error).message}\`, error as Error); res.status(500).json({ error: 'fixed' })`)).toBe(0)
     expect(flaggedIn(`res.status(400).json({ error: (error as Error).message })`)).toBe(0)
     expect(flaggedIn(`res.status(404); res.json({ error: String(error) })`)).toBe(0)
+    expect(flaggedIn(`const r = res; r.status(404); res.json({ error: String(error) })`)).toBe(0)
+    expect(flaggedIn(`const m = new Map(); m.set('e', error); logger.error('x', m.get('e')); res.status(500).json({ error: 'fixed' })`)).toBe(0)
     expect(flaggedIn(`res.status(503).json({ success: false, error: 'Service not available' })`)).toBe(0)
     expect(flaggedIn(`sendAdminWriteFailure(res, 'ctx', error, { pluginId: req.params.id })`)).toBe(0)
     expect(flaggedIn(`res.json({ error: (error as Error).message })`)).toBe(0)
@@ -1014,7 +1150,7 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     ).toBe(0)
   })
 
-  it('mutation self-proof: at EVERY responder call site in the tree, each of eight echo shapes is flagged', () => {
+  it('mutation self-proof: at EVERY responder call site in the tree, each of eleven echo shapes is flagged', () => {
     type Built = { expr?: string; stmts?: string; helper?: string }
     const caught = (c: ResponderCall) => c.catchVar ?? 'error'
     const shapes: Array<{ id: string; build: (c: ResponderCall, k: number) => Built }> = [
@@ -1038,7 +1174,22 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
           helper: `function echoFail${k}(r: any, e: unknown): void { r.status(500).json({ success: false, error: String(e) }) }`,
         }),
       },
+      {
+        id: 'for…of binding',
+        build: (c, k) => ({ stmts: `for (const each${k} of [${caught(c)}]) { ${c.resText}.status(500).json({ success: false, error: String(each${k}) }); }` }),
+      },
+      {
+        id: 'Map container',
+        build: (c, k) => ({
+          stmts: `const bag${k} = new Map<string, unknown>(); bag${k}.set('e', ${caught(c)}); ${c.resText}.status(500).json({ success: false, error: String(bag${k}.get('e')) });`,
+        }),
+      },
+      {
+        id: 'receiver alias split status',
+        build: (c, k) => ({ stmts: `const out${k} = ${c.resText}; ${c.resText}.status(500); out${k}.json({ success: false, error: String(${caught(c)}) });` }),
+      },
     ]
+    expect(shapes).toHaveLength(11)
     const lineAt = (text: string, offset: number) => text.slice(0, offset).split('\n').length
 
     let total = 0
