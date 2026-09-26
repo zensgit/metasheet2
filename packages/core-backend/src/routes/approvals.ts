@@ -34,6 +34,7 @@ import {
 } from '../services/ApprovalCardDeliveryAction'
 import {
   ApprovalProductService,
+  applyTemplateVisibilityFilter,
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
@@ -76,6 +77,15 @@ import {
   listApprovalDepartments,
 } from '../services/approval-directory'
 import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
+import {
+  archiveApprovalTemplateGroup,
+  createApprovalTemplateGroup,
+  linkApprovalTemplateToGroup,
+  listApprovalTemplateGroups,
+  renameApprovalTemplateGroup,
+  unarchiveApprovalTemplateGroup,
+  unlinkApprovalTemplateFromGroup,
+} from '../services/ApprovalTemplateGroupService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -314,6 +324,57 @@ function resolveApprovalTenantId(req: Request): string | undefined {
   return normalized.length > 0 ? normalized : undefined
 }
 
+/**
+ * Approval form grouping — design lock v2.13 §2 "org 从哪来" (acceptance A‴). Every group/link
+ * endpoint below calls this FIRST, before touching the database. `orgId` appearing in the request
+ * body or query string is REJECTED outright (400 `ORG_ID_NOT_ACCEPTED`) — this router's own
+ * `/directory/member-groups` `orgId` is CALLER-SUPPLIED (self-documented as such at that route)
+ * and is NOT the precedent to copy here. The only accepted source is `req.authenticatedTenantId`
+ * (`jwt-middleware.ts`), set ONLY from the verified token's own `tenantId` claim — never
+ * `req.user.tenantId`, which the `x-tenant-id` request header can backfill when the token itself
+ * carries no tenant, and which this router therefore never reads for this purpose. Missing it is
+ * fail-closed 403 `SESSION_ORG_REQUIRED`, zero writes on every path (a multi-org member with no
+ * selected session-org — `AuthService.resolveSessionTenantId` mints `authenticatedTenantId` only
+ * when the caller belongs to exactly one org — gets exactly this response on every one of these
+ * endpoints; that IS this slice's J acceptance row, since no session-org picker UI exists yet).
+ *
+ * Returns the resolved org id, or `undefined` after already writing the error response — callers
+ * must `return` immediately in that case without writing anything else.
+ */
+// Any appearance of `orgId` counts as "supplied", not just a non-empty string — Express's default
+// query parser turns a repeated `?orgId=a&orgId=b` into an array, and a JSON body can carry any
+// shape. Treating only `typeof value === 'string'` as detectable would let `?orgId=a&orgId=b` (an
+// array) or a non-string body value through un-rejected even though the lock's text is "orgId
+// appears in the body or query string" with no type qualifier. Blank is still tolerated (an empty
+// string, or an array of only empty strings) since that is indistinguishable from the field simply
+// not being set by a client that always includes the key.
+function isOrgIdValuePresent(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (Array.isArray(value)) return value.some((entry) => isOrgIdValuePresent(entry))
+  return true
+}
+
+function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string | undefined {
+  const bodyOrgId = isPlainRecord(req.body) ? req.body.orgId : undefined
+  const queryOrgId = (req.query as Record<string, unknown> | undefined)?.orgId
+  const orgIdSupplied = isOrgIdValuePresent(bodyOrgId) || isOrgIdValuePresent(queryOrgId)
+  if (orgIdSupplied) {
+    res.status(400).json(
+      approvalErrorResponse('ORG_ID_NOT_ACCEPTED', 'orgId is not accepted in the request body or query string'),
+    )
+    return undefined
+  }
+  const authenticatedTenantId = req.authenticatedTenantId
+  if (typeof authenticatedTenantId !== 'string' || authenticatedTenantId.trim().length === 0) {
+    res.status(403).json(
+      approvalErrorResponse('SESSION_ORG_REQUIRED', 'An authenticated session organization is required'),
+    )
+    return undefined
+  }
+  return authenticatedTenantId.trim()
+}
+
 // Exported for the approval-attachment upload route (§4.1 template-access gate): the attachment
 // runtime evaluates the SAME request-derived visibility actor this router feeds into
 // applyTemplateVisibilityFilter — one actor derivation, no drift between create and upload.
@@ -334,6 +395,77 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
       || permissions.includes('approvals:admin-templates')
       || permissions.includes('approval-templates:manage'),
   }
+}
+
+// §2 (ratified) "模板可见性仍走原权限谓词……一个组织只能给自己能看到的模板归组(挂接时按原谓词
+// 校验可见)": exported (not inlined at the one call site) so a real-DB test can exercise the
+// predicate directly with a NON-manager actor.
+//
+// CORRECTED (design-gate-A3-phase2-20260918.md §2 Q2 / P2-5; corrected AGAIN
+// impl-gate-A-slice1-round4-20260918.md §2 P2-1, 2026-09-18): an earlier version of this comment
+// claimed "`approvalTemplateAdminGuard` makes every actor that can reach the link endpoint today
+// `isTemplateManager` (guard population ⊆ manager ⊆ sees everything)". Round 2's gate already
+// real-DB falsified that once (a wildcard-code actor measured 403, not admitted — see round 3's
+// report §3 P3-3). This round's own fix (the single commit this comment lives in) flipped ⊆ to ⊋,
+// but grounded it in a SECOND false claim — copied verbatim from A-3's static-code-reading
+// conclusion, without re-checking round 2's own real-DB result — that a wildcard
+// `approval-templates:*` permission code, by itself, gets an actor past the guard. Round 4's gate
+// (reviewing this very comment) independently re-tested that and real-DB falsified it a SECOND
+// time, end-to-end, on this head:
+//   (1) a wildcard permission code does NOT, by itself, pass the guard. `hasPermissionCode`
+//       (`rbac/rbac.ts:21-25`) does expand `approval-templates:*` to match the guard's literal
+//       `approval-templates:manage` string, but that is only ONE conjunct of `rbacGuardAny`'s
+//       permission leg (`rbac/rbac.ts:134-142`): `requestUserHasResolvedPermission(requestUser,
+//       code) && await isPermissionAllowedByNamespaceAdmission(userId, code)`. `approval-templates`
+//       IS an admission-controlled resource (`approvals` is NOT — see
+//       `namespace-admission.ts`'s `NON_NAMESPACED_PERMISSION_RESOURCES`), so absent an extra
+//       namespace-admission grant, the second conjunct fails and BOTH `approval-templates:*` and
+//       the guard's own literal `approval-templates:manage` get 403 — measured end-to-end on this
+//       head, not inferred. This actor shape exists only if the same principal ALSO holds a
+//       namespace-admission grant for `approval-templates`; repo-wide grants of
+//       `approval-templates:*` are 0 today (all repo hits are commentary, not real grants).
+//   (2) a DB-side admin — `rbacGuardAny`'s final fallback calls `isAdmin(userId)`
+//       (`rbac/service.ts`, `user_roles WHERE role_id = 'admin'`), independent of anything on the
+//       JWT/`req.user` this function reads (`req.user.role`, `.roles`, `.permissions`). A principal
+//       admitted ONLY through that DB row is invisible to `isTemplateManager` above — this is the
+//       ONLY actor shape actually demonstrated end-to-end this round (lifecycle suite's "§2(c): a
+//       DB-side-admin actor" HTTP case, plus a negative control that removes the `user_roles` grant
+//       and turns it 403 again).
+// CORRECTED A THIRD TIME (impl-gate-A-slice1-round6-20260918.md §2 P2-1, 2026-09-18): the "strict
+// superset" conclusion above is itself false — it silently required that EVERY isTemplateManager
+// actor also pass the guard, which this file's own §23.6 record contradicts
+// (`ZZR4-EXACT-RESULT status=403` for `perms='approval-templates:manage'` alone, the guard's own
+// literal code). The two populations are mutually non-inclusive — neither contains the other —
+// with one measured counterexample per direction: guard-pass/non-manager is the DB-side `isAdmin`
+// leg above (§2(c)); manager/guard-fail is a principal holding only `approval-templates:manage`,
+// whose permission leg here (`resolveApprovalActorPermissions` above) carries no admission
+// conjunct while `rbacGuardAny`'s SAME-named leg is conjoined with
+// `isPermissionAllowedByNamespaceAdmission` (`rbac/rbac.ts:134-142,146-152`) — see the lifecycle
+// suite's "§2(d)" case (real HTTP + a direct call to this function on the identical claim shape,
+// plus a negative control). Whether production provisioning always pairs the two grants is NOT
+// measured and NOT asserted here. Correcting this CLAIM changes no runtime behavior; only what
+// this comment asserts about existing behavior changes. This is exactly why exporting the
+// predicate for a direct, non-manager-actor unit test (below)
+// was never sufficient on its own — see the lifecycle suite's REAL, guard-passing, non-manager
+// HTTP case ("§2(c): a DB-side-admin actor" block), which proves the filter still narrows what
+// such an actor's link REQUEST can see, not merely what the
+// predicate returns when called directly with a hand-built actor object.
+//
+// LINK ONLY (the lock's clause names 挂接, not unlink) — an implementer's choice to mask "exists
+// but invisible" the SAME way as every other actor-gated template lookup in this router (`:921`'s
+// `APPROVAL_TEMPLATE_NOT_FOUND`), not a second ratified code; a nonexistent template also returns
+// `false` here (the `id = $1` predicate matches nobody), so this doubles as the group-link path's
+// template-existence check — today unreachable another way (`mapGroupConstraintError` has no
+// 23503 branch for `template_id`).
+export async function isApprovalTemplateVisibleForGroupLink(
+  templateId: string,
+  actor: ApprovalTemplateVisibilityActor | undefined,
+): Promise<boolean> {
+  const conditions: string[] = ['id = $1']
+  const params: unknown[] = [templateId]
+  applyTemplateVisibilityFilter(conditions, params, 2, actor)
+  const result = await query(`SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`, params)
+  return (result.rowCount ?? 0) > 0
 }
 
 function approvalVersionConflictResponse(currentVersion: number) {
@@ -1025,6 +1157,112 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_TEMPLATE_VERSION_RESTORE_FAILED',
         'Failed to restore approval template version',
       )
+    }
+  })
+
+  // ── Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 ────────────
+  // I7: writes gated by `approvalTemplateAdminGuard` (same as `/api/approval-templates` itself,
+  // `:803/:851/:940/:954`); the one read below by `rbacGuard('approvals:read')` (same as `:531`).
+  // Every handler resolves `orgId` via `resolveApprovalTemplateGroupOrgId` FIRST — before any
+  // service call — so a rejected/missing org never reaches the database (A‴, zero writes).
+
+  r.get('/api/approval-template-groups', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const groups = await listApprovalTemplateGroups(orgId)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_LIST_FAILED', 'Failed to list approval template groups')
+    }
+  })
+
+  r.post('/api/approval-template-groups', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
+      }
+      const name = typeof req.body?.name === 'string' ? req.body.name : ''
+      const group = await createApprovalTemplateGroup(orgId, name, actorId)
+      res.status(201).json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED', 'Failed to create approval template group')
+    }
+  })
+
+  r.patch('/api/approval-template-groups/:id', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const name = typeof req.body?.name === 'string' ? req.body.name : ''
+      const group = await renameApprovalTemplateGroup(orgId, req.params.id, name)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_RENAME_FAILED', 'Failed to rename approval template group')
+    }
+  })
+
+  r.post('/api/approval-template-groups/:id/archive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const group = await archiveApprovalTemplateGroup(orgId, req.params.id)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_ARCHIVE_FAILED', 'Failed to archive approval template group')
+    }
+  })
+
+  r.post('/api/approval-template-groups/:id/unarchive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const group = await unarchiveApprovalTemplateGroup(orgId, req.params.id)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNARCHIVE_FAILED', 'Failed to unarchive approval template group')
+    }
+  })
+
+  // Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success.
+  r.post('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
+      }
+      const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : ''
+      if (!groupId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_GROUP_ID_REQUIRED', 'groupId is required'))
+      }
+      // §2 "挂接时按原谓词校验可见" (ratified) — zero rows written if the caller cannot see the
+      // template under the ordinary visibility predicate (see isApprovalTemplateVisibleForGroupLink).
+      const visibilityActor = resolveApprovalTemplateVisibilityActor(req)
+      if (!(await isApprovalTemplateVisibleForGroupLink(req.params.id, visibilityActor))) {
+        return res.status(404).json(approvalErrorResponse('APPROVAL_TEMPLATE_NOT_FOUND', 'Approval template not found'))
+      }
+      const link = await linkApprovalTemplateToGroup(orgId, req.params.id, groupId, actorId)
+      res.status(201).json({ link })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_LINK_FAILED', 'Failed to link approval template to group')
+    }
+  })
+
+  // Unlink is an INDEPENDENT UPDATE, never routed through the upsert above (§2). Idempotent 204
+  // whether the template was linked, already unlinked, or never linked at all (acceptance H).
+  r.delete('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      await unlinkApprovalTemplateFromGroup(orgId, req.params.id)
+      res.status(204).end()
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED', 'Failed to unlink approval template from group')
     }
   })
 
