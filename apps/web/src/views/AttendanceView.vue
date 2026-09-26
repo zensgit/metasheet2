@@ -319,8 +319,8 @@
         <p class="attendance__field-hint attendance__field-hint--strong">
           {{
             tr(
-              'Exports follow the active date range, org/user filters, and the server-side dataset. Local pills only refine what is visible on this page.',
-              '导出遵循当前日期区间、组织/用户筛选和服务端数据集；本地筛选只影响当前页面可见内容。',
+              'Exports follow the date range, org/user, and record-status pill, up to 5000 rows. Request pills only change this page. If the cap is hit, the file footer and status bar say the export was truncated.',
+              '导出遵循日期区间、组织/用户和记录状态筛选，单次最多 5000 行。申请筛选只影响本页。若触及上限，文件页脚和状态栏会标明已截断。',
             )
           }}
         </p>
@@ -340,7 +340,7 @@
             </button>
           </div>
           <small class="attendance__field-hint">
-            {{ tr('Snapshot combines filtered request totals with the current records page.', '快照结合了筛选后的申请汇总与当前记录页。') }}
+            {{ tr('Request totals follow the request pills. Record totals follow the loaded date range.', '申请合计跟随申请筛选。记录合计跟随已加载的日期区间。') }}
           </small>
           <p class="attendance__field-hint attendance__field-hint--strong">
             {{ reportRangeLabel }}
@@ -373,16 +373,16 @@
               <strong>{{ filteredRequestReport.length }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>{{ tr('Visible records', '筛选后记录') }}</span>
-              <strong>{{ filteredRecords.length }}</strong>
+              <span>{{ tr('Range records', '区间记录') }}</span>
+              <strong data-report-snapshot="records">{{ reportRangeSnapshot.records }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>{{ tr('Flagged records', '异常记录') }}</span>
-              <strong>{{ filteredFlaggedRecordsCount }}</strong>
+              <span>{{ tr('Range flagged', '区间异常') }}</span>
+              <strong data-report-snapshot="flagged">{{ reportRangeSnapshot.flagged }}</strong>
             </div>
             <div class="attendance__summary-item">
-              <span>{{ tr('Work minutes', '工时分钟') }}</span>
-              <strong>{{ filteredRecordsWorkMinutes }}</strong>
+              <span>{{ tr('Range work minutes', '区间工时') }}</span>
+              <strong data-report-snapshot="work-minutes">{{ reportRangeSnapshot.workMinutes }}</strong>
             </div>
           </div>
         </div>
@@ -1339,6 +1339,24 @@
             </button>
           </div>
         </div>
+        <p
+          v-if="lastExportDisclosure?.known"
+          class="attendance__field-hint"
+          :class="{ 'attendance__field-hint--error': lastExportDisclosure.truncated }"
+          data-report-export-disclosure
+        >
+          {{
+            lastExportDisclosure.truncated
+              ? tr(
+                `Last export truncated: ${lastExportDisclosure.returned} of ${lastExportDisclosure.matchedTotal} rows (limit ${lastExportDisclosure.limit}).`,
+                `最近一次导出已截断：${lastExportDisclosure.returned} / ${lastExportDisclosure.matchedTotal} 行（上限 ${lastExportDisclosure.limit}）。`,
+              )
+              : tr(
+                `Last export: ${lastExportDisclosure.returned} of ${lastExportDisclosure.matchedTotal} rows.`,
+                `最近一次导出：${lastExportDisclosure.returned} / ${lastExportDisclosure.matchedTotal} 行。`,
+              )
+          }}
+        </p>
         <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
         <p class="attendance__field-hint attendance__field-hint--strong">
           {{
@@ -10378,6 +10396,13 @@ import {
 import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
 import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestReviewEntitlement'
 import { shouldRevealOverviewRequestTools } from './attendance/attendanceOverviewRequestReveal'
+import {
+  attendanceRangeSnapshotMetrics,
+  readAttendanceExportDisclosure,
+  reportExportStatusParam,
+  resolveReportExportLimit,
+  type AttendanceExportDisclosure,
+} from './attendance/reportRangeContract'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch as sendApiFetch } from '../utils/api'
 import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
@@ -13172,13 +13197,7 @@ const filteredRecords = computed(() =>
   })
 )
 
-const filteredFlaggedRecordsCount = computed(() =>
-  filteredRecords.value.filter(record => !['normal', 'off'].includes(record.status)).length
-)
-
-const filteredRecordsWorkMinutes = computed(() =>
-  filteredRecords.value.reduce((sum, record) => sum + (Number(record.work_minutes) || 0), 0)
-)
+const reportRangeSnapshot = computed(() => attendanceRangeSnapshotMetrics(summary.value))
 
 const reportTrendItems = computed(() => {
   const current = summary.value
@@ -15875,6 +15894,7 @@ const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(
 const recordsPage = ref(1)
 const recordsPageSize = 20
 const recordsTotal = ref(0)
+const lastExportDisclosure = ref<AttendanceExportDisclosure | null>(null)
 const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
 const calendarDisplayPrefs = loadCalendarDisplayPrefs()
 const showLunarLabel = ref(calendarDisplayPrefs.showLunar)
@@ -23231,6 +23251,60 @@ async function changeRecordsPage(delta: number) {
   }
 }
 
+function buildReportExportQuery(): URLSearchParams {
+  return buildQuery({
+    from: fromDate.value,
+    to: toDate.value,
+    orgId: normalizedOrgId(),
+    userId: normalizedUserId(),
+    header: exportCsvHeaderMode.value,
+    limit: String(resolveReportExportLimit(recordsTotal.value)),
+    status: reportExportStatusParam(recordStatusFilter.value),
+  })
+}
+
+function noteReportExportDisclosure(response: Response, format: 'csv' | 'xlsx'): void {
+  const disclosure = readAttendanceExportDisclosure(response.headers)
+  lastExportDisclosure.value = disclosure.known ? disclosure : null
+  if (!disclosure.known || disclosure.matchedTotal == null || disclosure.returned == null) {
+    setStatus(appendStatusContext(
+      format === 'xlsx'
+        ? tr('Excel export ready.', 'Excel 导出完成。')
+        : tr('Export ready.', '导出完成。'),
+      recordsTimezoneContextHint.value,
+    ))
+    return
+  }
+  const limit = disclosure.limit ?? resolveReportExportLimit(recordsTotal.value)
+  if (disclosure.truncated) {
+    setStatus(appendStatusContext(
+      format === 'xlsx'
+        ? tr(
+          `Excel export truncated: ${disclosure.returned} of ${disclosure.matchedTotal} rows (limit ${limit}).`,
+          `Excel 导出已截断：${disclosure.returned} / ${disclosure.matchedTotal} 行（上限 ${limit}）。`,
+        )
+        : tr(
+          `Export truncated: ${disclosure.returned} of ${disclosure.matchedTotal} rows (limit ${limit}).`,
+          `导出已截断：${disclosure.returned} / ${disclosure.matchedTotal} 行（上限 ${limit}）。`,
+        ),
+      recordsTimezoneContextHint.value,
+    ), 'error')
+    return
+  }
+  setStatus(appendStatusContext(
+    format === 'xlsx'
+      ? tr(
+        `Excel export ready (${disclosure.returned} of ${disclosure.matchedTotal} rows).`,
+        `Excel 导出完成（${disclosure.returned} / ${disclosure.matchedTotal} 行）。`,
+      )
+      : tr(
+        `Export ready (${disclosure.returned} of ${disclosure.matchedTotal} rows).`,
+        `导出完成（${disclosure.returned} / ${disclosure.matchedTotal} 行）。`,
+      ),
+    recordsTimezoneContextHint.value,
+  ))
+}
+
 async function exportCsv() {
   if (reportsExportBlocked.value) {
     setStatus(
@@ -23246,13 +23320,7 @@ async function exportCsv() {
   }
   exporting.value = true
   try {
-    const query = buildQuery({
-      from: fromDate.value,
-      to: toDate.value,
-      orgId: normalizedOrgId(),
-      userId: normalizedUserId(),
-      header: exportCsvHeaderMode.value,
-    })
+    const query = buildReportExportQuery()
     const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
     const text = await response.text()
     if (!response.ok) {
@@ -23303,7 +23371,7 @@ async function exportCsv() {
       sheetId,
       viewId,
     }
-    setStatus(appendStatusContext(tr('Export ready.', '导出完成。'), recordsTimezoneContextHint.value))
+    noteReportExportDisclosure(response, 'csv')
   } catch (error: any) {
     setStatus(
       appendStatusContext(readErrorMessage(error, tr('Export failed', '导出失败')), recordsTimezoneContextHint.value),
@@ -23331,13 +23399,7 @@ async function exportXlsx() {
   }
   exportingXlsx.value = true
   try {
-    const query = buildQuery({
-      from: fromDate.value,
-      to: toDate.value,
-      orgId: normalizedOrgId(),
-      userId: normalizedUserId(),
-      header: exportCsvHeaderMode.value,
-    })
+    const query = buildReportExportQuery()
     const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
     const text = await response.text()
     if (!response.ok) {
@@ -23362,7 +23424,7 @@ async function exportXlsx() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus(appendStatusContext(tr('Excel export ready.', 'Excel 导出完成。'), recordsTimezoneContextHint.value))
+    noteReportExportDisclosure(response, 'xlsx')
   } catch (error: any) {
     setStatus(
       appendStatusContext(readErrorMessage(error, tr('Export failed', '导出失败')), recordsTimezoneContextHint.value),

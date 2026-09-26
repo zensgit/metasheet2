@@ -1956,6 +1956,7 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('SELECT DISTINCT m.schedule_group_id')) {
         return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
       }
+      if (sql.includes('COUNT(*)') && sql.includes('FROM attendance_current_records ar')) return [{ total: 1 }]
       if (sql.includes('FROM attendance_current_records ar')) return [attendanceRecordRow()]
       if (sql.includes('FROM attendance_requests') && sql.includes('GROUP BY work_date, request_type')) return []
       if (sql.includes('FROM attendance_leave_types')) return []
@@ -1979,11 +1980,21 @@ describe('attendance UUID route validation', () => {
       ok: true,
       data: {
         total: 1,
+        matchedTotal: 1,
+        returned: 1,
+        limit: 5000,
+        truncated: false,
+        status: 'all',
         from: '2026-06-01',
         to: '2026-06-30',
         format: 'json',
       },
     })
+    expect(res.headers['X-Attendance-Export-Truncated']).toBe('false')
+    expect(res.headers['X-Attendance-Export-Total']).toBe('1')
+    expect(res.headers['X-Attendance-Export-Returned']).toBe('1')
+    expect(res.headers['X-Attendance-Export-Limit']).toBe('5000')
+    expect(res.headers['X-Attendance-Export-Status']).toBe('all')
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('FROM attendance_scheduler_scopes'),
       ['default', 'scheduler-1', [], []],
@@ -1999,8 +2010,119 @@ describe('attendance UUID route validation', () => {
     expect(scheduleScopeSql).toContain("COALESCE(m.effective_to, DATE '9999-12-31') >= $4::date")
     expect(db.query).toHaveBeenCalledWith(
       expect.stringContaining('FROM attendance_current_records ar'),
-      ['worker-1', 'default', '2026-06-01', '2026-06-30', 1000],
+      ['worker-1', 'default', '2026-06-01', '2026-06-30', 5000],
     )
+  })
+
+  it('rejects an unsafe attendance export status before reading records', async () => {
+    const { db, routes } = await createHarness('true')
+    const res = await invokeRoute(routes, 'GET /api/attendance/export', {
+      query: {
+        status: 'late;drop',
+        from: '2026-06-01',
+        to: '2026-06-30',
+        format: 'json',
+      },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toMatchObject({ ok: false, error: { code: 'VALIDATION_ERROR' } })
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_current_records'))).toBe(false)
+  })
+
+  it('discloses a capped status-filtered attendance export in JSON and CSV', async () => {
+    const { db, routes } = await createHarness('true')
+    db.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('COUNT(*)') && sql.includes('FROM attendance_current_records ar')) return [{ total: 6 }]
+      if (sql.includes('FROM attendance_current_records ar')) {
+        return [attendanceRecordRow(), attendanceRecordRow({ id: 'record-2', work_date: '2026-06-02' })]
+      }
+      if (sql.includes('FROM attendance_requests') && sql.includes('GROUP BY work_date, request_type')) return []
+      if (sql.includes('FROM attendance_leave_types')) return []
+      if (sql.includes('FROM attendance_overtime_rules')) return []
+      if (sql.includes('SELECT value FROM system_configs')) return []
+      throw new Error(`unexpected query: ${sql}`)
+    })
+
+    const jsonRes = await invokeRoute(routes, 'GET /api/attendance/export', {
+      query: {
+        from: '2026-06-01',
+        to: '2026-06-30',
+        status: 'late',
+        limit: '2',
+        format: 'json',
+      },
+    })
+    expect(jsonRes.statusCode).toBe(200)
+    expect(jsonRes.headers['X-Attendance-Export-Truncated']).toBe('true')
+    expect(jsonRes.headers['X-Attendance-Export-Total']).toBe('6')
+    expect(jsonRes.headers['X-Attendance-Export-Returned']).toBe('2')
+    expect(jsonRes.headers['X-Attendance-Export-Limit']).toBe('2')
+    expect(jsonRes.headers['X-Attendance-Export-Status']).toBe('late')
+    expect(jsonRes.body).toMatchObject({
+      ok: true,
+      data: {
+        total: 2,
+        matchedTotal: 6,
+        returned: 2,
+        limit: 2,
+        truncated: true,
+        status: 'late',
+      },
+    })
+    const select = db.query.mock.calls.find(([sql]) => String(sql).includes('ORDER BY ar.work_date DESC'))
+    expect(String(select?.[0])).toContain('AND ar.status = $5')
+    expect(select?.[1]).toEqual(['attendance-user-1', 'default', '2026-06-01', '2026-06-30', 'late', 2])
+
+    const csvRes = await invokeRoute(routes, 'GET /api/attendance/export', {
+      query: {
+        from: '2026-06-01',
+        to: '2026-06-30',
+        status: 'ALL',
+        limit: '9000',
+      },
+    })
+    expect(csvRes.statusCode).toBe(200)
+    const csv = String(csvRes.body)
+    const lines = csv.replace(/^\uFEFF/, '').trim().split('\n')
+    expect(csv).not.toContain('# META')
+    expect(lines[0]).not.toContain('# META')
+    expect(lines.at(-1)).not.toContain('# META')
+    expect(csvRes.headers['X-Attendance-Export-Total']).toBe('6')
+    expect(csvRes.headers['X-Attendance-Export-Returned']).toBe('2')
+    expect(csvRes.headers['X-Attendance-Export-Truncated']).toBe('true')
+    expect(csvRes.headers['X-Attendance-Export-Limit']).toBe('5000')
+    expect(csvRes.headers['X-Attendance-Export-Status']).toBe('all')
+
+    const imported: Array<{ fields: Record<string, string> }> = []
+    const importResult = attendancePlugin.__attendanceImportCsvHeaderForTests.iterateImportRowsFromCsv({
+      csvText: csv,
+      onRow(row: { fields: Record<string, string> }) {
+        imported.push(row)
+      },
+    }) as { rowCount: number }
+    expect(importResult.rowCount).toBe(2)
+    expect(imported).toHaveLength(2)
+
+    const XLSX = await import('xlsx')
+    const workbook = XLSX.read(csv, { type: 'string', raw: true })
+    const matrix = XLSX.utils.sheet_to_json<(string | number)[]>(
+      workbook.Sheets[workbook.SheetNames[0]],
+      { header: 1, raw: true, defval: '' },
+    )
+    expect(matrix).toHaveLength(1 + importResult.rowCount)
+    const headerWidth = matrix[0].length
+    expect(headerWidth).toBeGreaterThan(1)
+    for (const dataRow of matrix.slice(1)) {
+      expect(dataRow).toHaveLength(headerWidth)
+    }
+    for (const row of imported) {
+      expect(Object.keys(row.fields).length).toBe(headerWidth)
+    }
+    expect(matrix.flat().some((cell) => String(cell).includes('# META'))).toBe(false)
+    const cappedSelect = db.query.mock.calls.filter(([sql]) => String(sql).includes('ORDER BY ar.work_date DESC')).at(-1)
+    expect(String(cappedSelect?.[0])).not.toContain('ar.status =')
+    expect(cappedSelect?.[1]).toEqual(['attendance-user-1', 'default', '2026-06-01', '2026-06-30', 5000])
   })
 
   it('rejects scoped attendance export outside scheduler scope before reading records', async () => {
