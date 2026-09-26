@@ -11,7 +11,7 @@ import { Client } from 'pg'
 import {
   assertPrivateDatabaseBackendsExited,
   type PrivateDbAdminQueryable,
-} from '../../scripts/private-db-backend-drain.ts'
+} from '../../scripts/private-db-backend-drain.js'
 
 const dbUrl = process.env.DATABASE_URL
 if (!dbUrl) {
