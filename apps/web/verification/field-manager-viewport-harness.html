@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Field manager viewport-height verification</title>
+    <!-- No favicon request: the spec fails on ANY console error, and a 404 for /favicon.ico is noise. -->
+    <link rel="icon" href="data:," />
+    <!--
+      #5864 ② (field list / field config pane height follows the window). The component under test
+      is the REAL apps/web/src/multitable/components/MetaFieldManager.vue, compiled by Vite with its
+      own <style scoped> block -- nothing of it is copied here. The only CSS below is copied VERBATIM
+      from apps/web/src/App.vue's global (unscoped) <style> reset, which every page of the real app
+      carries and which this component's box arithmetic depends on (`box-sizing: border-box`,
+      zeroed margins). The element-plus stylesheet and tokens.css are imported for real by
+      field-manager-viewport-harness.ts, in the same order apps/web/src/main.ts imports them.
+    -->
+    <style>
+      /* Reset and base styles */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html, body {
+        height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        color: #333;
+        background-color: var(--ms-bg-page);
+      }
+
+      #app {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/verification/field-manager-viewport-harness.ts"></script>
+  </body>
+</html>

@@ -9,14 +9,16 @@
          on the splitter itself was reproducibly flaky under this vitest/jsdom harness; see that
          file's `onInspectorKeydown` comment). Only the four splitter resize keys are consumed, and
          only when the event originates inside `[role="separator"]`, so the rename input's own
-         Enter/Escape handling above is untouched. -->
+         Enter/Escape handling above is untouched.
+         #5864 ②: the header, the add-field footer and the delete confirmation carry template refs so
+         their REAL heights feed the config pane's ceiling (see `measureChromeHeight`). -->
     <div
       class="meta-field-mgr"
       :style="{ '--meta-field-mgr-config-height': configPaneHeight + 'px' }"
       @keydown="onManagerKeydown"
       @keyup="onManagerKeyup"
     >
-      <div class="meta-field-mgr__header">
+      <div ref="headerRef" class="meta-field-mgr__header">
         <h4 class="meta-field-mgr__title">{{ ml('field.title') }}</h4>
         <MtIconButton class="meta-field-mgr__close" @click="requestClose">&times;</MtIconButton>
       </div>
@@ -874,7 +876,7 @@
         </div>
       </div>
 
-      <div class="meta-field-mgr__add-section">
+      <div ref="addSectionRef" class="meta-field-mgr__add-section">
         <div class="meta-field-mgr__add-row">
           <input
             v-model="newFieldName"
@@ -917,7 +919,7 @@
         </div>
       </div>
 
-      <div v-if="deleteTarget" class="meta-field-mgr__confirm">
+      <div v-if="deleteTarget" ref="confirmRef" class="meta-field-mgr__confirm">
         <p>{{ deleteFieldConfirm(deleteTarget.name, isZh) }}</p>
         <div class="meta-field-mgr__confirm-actions">
           <MtButton class="meta-field-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</MtButton>
@@ -3110,38 +3112,106 @@ const CONFIG_PANE_STEP = 16
 // one (the same call MetaRecordInspector.vue made for its own width key).
 const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
 
-// Viewport-tracked (not read once) so the ceiling -- and with it Home/End, the drag clamp and the
-// enlarge target -- stays correct across a live window resize.
+// ---------------------------------------------------------------------------
+// #5864 ② (customer feedback 2026-09-18 #6: "字段列表与设置面板高度固定，浏览不便，需可拉伸或随窗口高度
+// 自适应"). r8-B made the split resizable, but three things were still NOT tied to the window height:
+//   1. the dialog frame capped at `84vh`, so 16% of every window was never usable by either half;
+//   2. the config pane height was a px SNAPSHOT: seeded once at mount (default or stored), only ever
+//      clamped DOWN by a shrinking window, and never given back when the window grew again -- one
+//      short window and the pane stayed short for the rest of the session;
+//   3. the ceiling subtracted a hardcoded 160px guess for "header + list floor" and ignored the
+//      add-field footer (and the delete confirmation) entirely, so End / 放大 targeted a height the
+//      layout could not honour -- and the pane, being flex-shrinkable, was rendered smaller than
+//      aria-valuenow whenever its content was tall (see the `flex-shrink: 0` note in <style>).
+// Now the frame is the viewport minus a fixed gutter (CSS `calc(100vh - 32px)`, mirrored by
+// FRAME_VIEWPORT_GUTTER); the ceiling is that frame minus the MEASURED header / footer / confirmation
+// rows, the splitter, and the list's own CSS floor; and the rendered height is DERIVED on every read
+// from (viewport, last manual choice) instead of being kept as a number that goes stale.
+// The overlay is `position: fixed; inset: 0`, so no page header or toolbar sits inside the box the
+// dialog is centred in -- the gutter is the only viewport offset there is.
+// Each of these three mirrors one CSS literal in the <style> block below (the frame's
+// `max-height: calc(100vh - 32px)`, the list's `min-height: 96px`, the splitter's `height: 6px`);
+// multitable-field-manager-viewport-height.spec.ts reads both sides and fails if they drift apart.
+const FRAME_VIEWPORT_GUTTER = 32
+const FIELD_LIST_MIN_HEIGHT = 96
+const SPLITTER_HEIGHT = 6
+// Header + add-field footer, used ONLY while real layout is unavailable (jsdom, SSR, before the first
+// measurement lands). Chromium with the app's global reset measures the header at 57px and the
+// footer at 74px (its "name required" hint is on by default; 53px without it). The real numbers
+// replace this as soon as `measureChromeHeight` sees a laid-out row.
+const FALLBACK_CHROME_HEIGHT = 131
+
+// Viewport-tracked (not read once) so the ceiling -- and with it Home/End, the drag clamp, the
+// enlarge target and the default split -- stays correct across a live window resize.
 const viewportHeight = ref(typeof window !== 'undefined' ? window.innerHeight : 900)
+
+// The dialog's fixed-size rows. Measured, not guessed: the footer alone changes height as its hints
+// come and go, and the confirmation row only exists while a delete is pending.
+const headerRef = ref<HTMLElement | null>(null)
+const addSectionRef = ref<HTMLElement | null>(null)
+const confirmRef = ref<HTMLElement | null>(null)
+const measuredChromeHeight = ref(0)
+function measureChromeHeight() {
+  measuredChromeHeight.value = [headerRef.value, addSectionRef.value, confirmRef.value]
+    .reduce((sum, row) => sum + (row?.offsetHeight ?? 0), 0)
+}
 function syncViewportHeight() {
   viewportHeight.value = window.innerHeight
+  measureChromeHeight()
 }
-// Mirrors the CSS fallback this drives (`min(52vh, calc(84vh - 160px))`, see the
-// `.meta-field-mgr__config--scrollable` rule): 84vh is the dialog's own max-height and ~160px covers
-// the header plus the list's minimum, so this is the tallest the config pane may get without eating
-// the list outright.
+let chromeObserver: ResizeObserver | null = null
+function disconnectChromeObserver() {
+  chromeObserver?.disconnect()
+  chromeObserver = null
+}
+// Re-armed whenever one of the rows mounts or unmounts (the dialog's own `v-if`, the confirmation's
+// `v-if`). ResizeObserver is optional: without it (jsdom) the window `resize` listener and this watch
+// still re-measure, and an all-zero measurement falls back to FALLBACK_CHROME_HEIGHT below.
+watch(
+  [headerRef, addSectionRef, confirmRef],
+  (rows) => {
+    disconnectChromeObserver()
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => measureChromeHeight())
+      for (const row of rows) if (row) observer.observe(row)
+      chromeObserver = observer
+    }
+    measureChromeHeight()
+  },
+  { flush: 'post' },
+)
+const chromeHeight = computed(() =>
+  (measuredChromeHeight.value > 0 ? measuredChromeHeight.value : FALLBACK_CHROME_HEIGHT) + SPLITTER_HEIGHT,
+)
+// What the field list and the config pane share: the frame's ceiling minus every fixed-size row.
+const splitAvailableHeight = computed(() => viewportHeight.value - FRAME_VIEWPORT_GUTTER - chromeHeight.value)
+// The tallest the config pane may get while the list keeps its CSS floor.
 const maxConfigPaneHeight = computed(() =>
-  Math.max(CONFIG_PANE_MIN_HEIGHT, Math.round(viewportHeight.value * 0.84 - 160)),
+  Math.max(CONFIG_PANE_MIN_HEIGHT, Math.round(splitAvailableHeight.value - FIELD_LIST_MIN_HEIGHT)),
 )
 function clampConfigPaneHeight(height: number): number {
   return Math.max(CONFIG_PANE_MIN_HEIGHT, Math.min(maxConfigPaneHeight.value, height))
 }
+// An untouched split gives each half the same share, recomputed live with the window (it is never
+// stored). Mirrored by the CSS fallback `calc((100vh - 169px) / 2)` = (100vh - 32 - 131 - 6) / 2.
 const defaultConfigPaneHeight = computed(() =>
-  clampConfigPaneHeight(Math.round(viewportHeight.value * 0.52)),
+  clampConfigPaneHeight(Math.round(splitAvailableHeight.value / 2)),
 )
 
-// Corrupt-safe: absent / non-numeric / non-finite / non-positive falls back to the default; a value
-// outside the CURRENT range (e.g. saved on a taller screen) is CLAMPED rather than discarded.
-function readStoredConfigPaneHeight(): number {
-  if (typeof window === 'undefined') return defaultConfigPaneHeight.value
+// Corrupt-safe: absent / non-numeric / non-finite / non-positive means "no manual choice" (null), so
+// the live default applies. A valid value is kept AS STORED and clamped at render time (see
+// `configPaneHeight`): a height saved on a taller window is clamped on a shorter one, and comes
+// back in full once the window is tall enough again.
+function readStoredConfigPaneHeight(): number | null {
+  if (typeof window === 'undefined') return null
   try {
     const raw = window.localStorage?.getItem(CONFIG_PANE_STORAGE_KEY)
-    if (!raw) return defaultConfigPaneHeight.value
+    if (!raw) return null
     const parsed = Number(raw)
-    if (!Number.isFinite(parsed) || parsed <= 0) return defaultConfigPaneHeight.value
-    return clampConfigPaneHeight(parsed)
+    if (!Number.isFinite(parsed) || parsed <= 0) return null
+    return parsed
   } catch {
-    return defaultConfigPaneHeight.value
+    return null
   }
 }
 
@@ -3154,54 +3224,49 @@ function persistConfigPaneHeight(height: number) {
   }
 }
 
-const configPaneHeight = ref(readStoredConfigPaneHeight())
-// The height to restore when the enlarge toggle is switched back off: the most recent MANUALLY
-// chosen one (drag or keyboard), not the mount-time one.
-const lastChosenConfigPaneHeight = ref(configPaneHeight.value)
-
-/** The ONLY thing ever written to localStorage is the last MANUAL height.
- *
- *  r8-B follow-up: persisting `configPaneHeight` instead made the enlarge/collapse pair dead ACROSS
- *  MOUNTS -- enlarge wrote the ceiling, and the next mount seeded BOTH `configPaneHeight` and
- *  `lastChosenConfigPaneHeight` from that same stored number, so collapse "restored" the ceiling it
- *  was already at and neither button changed anything. Routing every persist through the chosen
- *  value keeps the stored number and the restore target the same thing by construction. */
-function persistChosenConfigPaneHeight() {
-  persistConfigPaneHeight(lastChosenConfigPaneHeight.value)
-}
+// The most recent MANUAL height (drag, keyboard, or a collapse fallback), or null while the user has
+// never chosen one. This -- not the rendered px -- is the state; it is also the collapse target.
+const chosenConfigPaneHeight = ref<number | null>(readStoredConfigPaneHeight())
 // Presentation state only -- deliberately not persisted (the px height already is, and a reload
 // that comes back "pressed" without the user having pressed anything is worse than starting off).
 const isConfigPaneExpanded = ref(false)
+// The rendered height, derived on every read: expanded pins it to the CURRENT ceiling; otherwise it
+// is the manual choice (or the live default) clamped into the CURRENT range. Deriving it is what
+// hands a chosen height back after a shrink-then-grow of the window, and what keeps
+// aria-valuenow <= aria-valuemax with no viewport watcher writing a clamped copy (r8-B's
+// `watch(maxConfigPaneHeight)` could only ever lower the value, never restore it).
+const configPaneHeight = computed(() =>
+  isConfigPaneExpanded.value
+    ? maxConfigPaneHeight.value
+    : clampConfigPaneHeight(chosenConfigPaneHeight.value ?? defaultConfigPaneHeight.value),
+)
 
-/** Manual resize (drag or keyboard): clamp, apply, remember for a later collapse, and always leave
- *  the expanded state -- a manual choice is no longer "the max" even when it lands exactly on it, so
+/** The ONLY thing ever written to localStorage is the last MANUAL height.
+ *
+ *  r8-B follow-up: persisting the rendered height instead made the enlarge/collapse pair dead ACROSS
+ *  MOUNTS -- enlarge wrote the ceiling, and the next mount seeded both the live height and the
+ *  restore target from that same stored number, so collapse "restored" the ceiling it was already at
+ *  and neither button changed anything. Routing every persist through the chosen value keeps the
+ *  stored number and the restore target the same thing by construction.
+ *
+ *  #5864 ②: while there is no manual choice nothing is written at all -- persisting the live default
+ *  would freeze a viewport-derived number into a px preference, the staleness removed above. */
+function persistChosenConfigPaneHeight() {
+  if (chosenConfigPaneHeight.value === null) return
+  persistConfigPaneHeight(chosenConfigPaneHeight.value)
+}
+
+/** Manual resize (drag or keyboard): clamp, remember as the manual choice, and always leave the
+ *  expanded state -- a manual choice is no longer "the max" even when it lands exactly on it, so
  *  the toggle's aria-pressed must not keep claiming otherwise. Does NOT persist: it runs on every
  *  intermediate pointermove/keydown step; the localStorage write waits for the gesture's release. */
 function applyConfigPaneHeight(next: number) {
-  const clamped = clampConfigPaneHeight(next)
-  configPaneHeight.value = clamped
-  lastChosenConfigPaneHeight.value = clamped
+  chosenConfigPaneHeight.value = clampConfigPaneHeight(next)
   isConfigPaneExpanded.value = false
 }
 
-// A shrinking viewport lowers the ceiling; without this the JS-tracked height (and the aria trio it
-// drives) stayed GREATER than the new aria-valuemax -- an invalid ARIA state no CSS clamp fixes.
-// Writes `configPaneHeight` directly rather than through `applyConfigPaneHeight`: a viewport change
-// is not a user choice, so it must not clear `isConfigPaneExpanded`, must not overwrite
-// `lastChosenConfigPaneHeight`, and must not persist.
-watch(maxConfigPaneHeight, (max) => {
-  if (isConfigPaneExpanded.value) {
-    // Expanded means "pinned to the max" by definition -- follow the NEW max, up or down.
-    configPaneHeight.value = max
-    return
-  }
-  if (configPaneHeight.value > max) {
-    configPaneHeight.value = clampConfigPaneHeight(configPaneHeight.value)
-  }
-})
-
 /** 放大/缩小: enlarge pins the pane to the current ceiling, collapse returns to the last MANUAL
- *  height ("记住上一次手动值").
+ *  height ("记住上一次手动值"), or to the live default when there never was one.
  *
  *  The collapse fallback is what keeps the pair from being a dead control when the remembered manual
  *  height IS the ceiling (the user dragged, or pressed End, all the way up, possibly in an earlier
@@ -3211,18 +3276,14 @@ watch(maxConfigPaneHeight, (max) => {
  *  genuinely no room to resize there, and no ARIA state is violated. */
 function toggleConfigPaneExpand() {
   if (isConfigPaneExpanded.value) {
-    const remembered = lastChosenConfigPaneHeight.value
-    const restored = clampConfigPaneHeight(
-      remembered >= maxConfigPaneHeight.value
-        ? Math.min(defaultConfigPaneHeight.value, maxConfigPaneHeight.value - CONFIG_PANE_STEP)
-        : remembered,
-    )
-    configPaneHeight.value = restored
-    lastChosenConfigPaneHeight.value = restored
     isConfigPaneExpanded.value = false
+    // `configPaneHeight` reads the remembered height again from here on.
+    if (configPaneHeight.value >= maxConfigPaneHeight.value) {
+      chosenConfigPaneHeight.value = clampConfigPaneHeight(
+        Math.min(defaultConfigPaneHeight.value, maxConfigPaneHeight.value - CONFIG_PANE_STEP),
+      )
+    }
   } else {
-    lastChosenConfigPaneHeight.value = configPaneHeight.value
-    configPaneHeight.value = maxConfigPaneHeight.value
     isConfigPaneExpanded.value = true
   }
   // A click is itself one discrete release -- persist here directly. Note this writes the CHOSEN
@@ -3321,6 +3382,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('resize', syncViewportHeight)
+  disconnectChromeObserver()
 })
 
 onBeforeUnmount(() => {
@@ -3332,13 +3394,25 @@ onBeforeUnmount(() => {
 .meta-field-mgr__overlay { position: fixed; inset: 0; background: rgba(0,0,0,.3); z-index: 100; display: flex; align-items: center; justify-content: center; }
 /* r8-B (2026-09-11): the width was a bare `720px`, so on a narrow window the dialog ran off both
    edges with no way to shrink it. It is now a custom property (same idiom as MetaRecordInspector's
-   `--meta-record-drawer-width`) with the SAME 720px default, bounded by the viewport. */
+   `--meta-record-drawer-width`) with the SAME 720px default, bounded by the viewport.
+   #5864 ② (customer feedback 2026-09-18 #6, "字段列表与设置面板高度固定"): the height ceiling was a
+   bare `84vh`, leaving 16% of every window unusable. It is now the viewport minus the SAME 32px
+   gutter the width uses (FRAME_VIEWPORT_GUTTER in the script mirrors it), with `dvh` as a
+   progressive enhancement so a mobile browser's collapsing toolbar cannot push the footer
+   off-screen. The frame itself is deliberately NOT a scroll container: only the field list
+   (`__body`) and the config pane (`__config--scrollable`) scroll, side by side, never nested in a
+   scrolling frame -- so there is never a second scrollbar around them. */
 .meta-field-mgr {
   width: var(--meta-field-mgr-width, 720px);
   max-width: calc(100vw - 32px);
-  max-height: 84vh; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); display: flex; flex-direction: column;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); display: flex; flex-direction: column;
 }
-.meta-field-mgr__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
+/* #5864 ②: header, add-field footer and delete confirmation never shrink -- the space a short window
+   takes away comes out of the two scroll regions, so the close button, the add-field row and the
+   confirm/cancel buttons stay on screen at every window height. */
+.meta-field-mgr__header { flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .meta-field-mgr__title { font-size: 15px; font-weight: 600; margin: 0; }
 /* .meta-field-mgr__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
    its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
@@ -3390,7 +3464,7 @@ onBeforeUnmount(() => {
 .meta-field-mgr__config { padding: 14px 16px; border-top: 1px solid #eee; background: #fbfdff; display: flex; flex-direction: column; gap: 12px; }
 /* r4 item 5: the formula config panel (expression box + AI generate + insert-field chips +
    formula reference catalog) has no bound on its own, so — inside a modal whose OUTER box
-   merely caps at max-height:84vh with default (visible) overflow — it was free to grow past
+   merely capped its max-height with default (visible) overflow — it was free to grow past
    the modal, pushing the save/cancel row (__config-actions, the LAST child inside this same
    container) below the viewport with no scrollbar to reach it. Bounding height here
    (relative to the viewport, not a fixed px) turns this panel into its own scroll region
@@ -3399,9 +3473,24 @@ onBeforeUnmount(() => {
    `.meta-field-mgr`, in px). The previous expression stays as the var's FALLBACK, so the rule is
    still viewport-relative whenever JS has not set the property (SSR, a stale/absent var, or the
    var being unsupported) -- never a hardcoded px ceiling, which multitable-field-config-panel.spec
-   pins at source level. */
+   pins at source level.
+   #5864 ②: the fallback now mirrors the script's default split (half of what the frame leaves after
+   its fixed rows: (100vh - 32px gutter - 137px rows) / 2), and `border-box` makes the px the script
+   publishes the pane's WHOLE height, padding and border included -- the same box the script's
+   ceiling arithmetic and aria-valuenow describe (the app's global reset already sets border-box;
+   stating it here keeps the contract true wherever this component is mounted).
+   `flex-shrink: 0` is the other half of that contract, and the part a user could actually see. As a
+   flex item with the default shrink of 1, this pane was shrunk in proportion to its CONTENT height,
+   not its max-height, whenever its content was taller than the room left: measured in Chromium on
+   the pre-#5864 code with a 48-option select field at an 800px window, the splitter reported 416px
+   (default) and then 512px (End) while the pane rendered 296.8px both times -- dragging it taller,
+   End and 放大 moved nothing, the pane only ever got SMALLER. It now renders exactly the published
+   height, and the field list -- the one flex:1 region -- absorbs every px a window takes away (down
+   to its 96px floor, which the script's ceiling already reserves). */
 .meta-field-mgr__config--scrollable {
-  max-height: var(--meta-field-mgr-config-height, min(52vh, calc(84vh - 160px)));
+  box-sizing: border-box;
+  flex-shrink: 0;
+  max-height: var(--meta-field-mgr-config-height, calc((100vh - 169px) / 2));
   overflow-y: auto;
 }
 /* Keeps Save/Cancel reachable without scrolling to the very bottom of a long panel (e.g.
@@ -3442,7 +3531,7 @@ onBeforeUnmount(() => {
 .meta-field-mgr__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .meta-field-mgr__stack { display: flex; flex-direction: column; gap: 8px; }
 .meta-field-mgr__option-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
-.meta-field-mgr__add-section { padding: 10px 16px; border-top: 1px solid #eee; }
+.meta-field-mgr__add-section { flex-shrink: 0; padding: 10px 16px; border-top: 1px solid #eee; }
 .meta-field-mgr__add-row { display: flex; gap: 8px; }
 .meta-field-mgr__input, .meta-field-mgr__select, .meta-field-mgr__textarea { width: 100%; padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; background: #fff; }
 .meta-field-mgr__textarea { min-height: 88px; resize: vertical; }
@@ -3460,7 +3549,7 @@ onBeforeUnmount(() => {
    resolve before accept/reject/regenerate even render, unlike the single-hop dry-run/preview/bulk-fill
    triggers). __btn-inline stays bespoke (T3-GATED). */
 .meta-field-mgr__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
-.meta-field-mgr__confirm { padding: 12px 16px; border-top: 1px solid #eee; background: #fef0f0; }
+.meta-field-mgr__confirm { flex-shrink: 0; padding: 12px 16px; border-top: 1px solid #eee; background: #fef0f0; }
 .meta-field-mgr__confirm p { margin: 0 0 8px; font-size: 13px; color: #333; }
 .meta-field-mgr__confirm-actions, .meta-field-mgr__config-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .meta-field-mgr__error { color: #f56c6c; font-size: 12px; }

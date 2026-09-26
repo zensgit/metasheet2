@@ -1470,6 +1470,7 @@ exec npx vitest run \
   multitable-field-config-i18n \
   multitable-field-display-i18n \
   multitable-field-manager \
+  multitable-field-manager-viewport-height \
   multitable-field-validation-panel \
   multitable-field-visibility \
   multitable-form-layout \

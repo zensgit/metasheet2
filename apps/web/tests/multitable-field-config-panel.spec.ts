@@ -244,13 +244,25 @@ describe('MetaFieldManager <style> — the config panel scroll rules (item 5 is 
 const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
 const CONFIG_PANE_MIN = 120
 const CONFIG_PANE_STEP = 16
-/** Component: `Math.round(viewportHeight * 0.84 - 160)`, floored at the minimum. */
+// #5864 ② re-based these two helpers (they used to read `viewport * 0.84 - 160` and
+// `viewport * 0.52`): the frame is now `viewport - 32px`, and the rows that are not the list or the
+// config pane are MEASURED. jsdom lays nothing out, so every row measures 0 here and the component
+// uses its documented fallback (header + footer 131px, plus the 6px splitter); the list keeps its
+// 96px floor. The measured path and the real-browser numbers are pinned separately, in
+// multitable-field-manager-viewport-height.spec.ts and verification/field-manager-viewport.spec.ts.
+const FRAME_GUTTER = 32
+const FALLBACK_ROWS = 131 + 6
+const LIST_FLOOR = 96
+/** Component: `viewport - 32 - rows - 96`, floored at the minimum. */
 function expectedMax(viewportHeight: number): number {
-  return Math.max(CONFIG_PANE_MIN, Math.round(viewportHeight * 0.84 - 160))
+  return Math.max(CONFIG_PANE_MIN, Math.round(viewportHeight - FRAME_GUTTER - FALLBACK_ROWS - LIST_FLOOR))
 }
-/** Component: `clamp(Math.round(viewportHeight * 0.52))`. */
+/** Component: `clamp(round((viewport - 32 - rows) / 2))` -- an untouched split gives each half the same share. */
 function expectedDefault(viewportHeight: number): number {
-  return Math.max(CONFIG_PANE_MIN, Math.min(expectedMax(viewportHeight), Math.round(viewportHeight * 0.52)))
+  return Math.max(
+    CONFIG_PANE_MIN,
+    Math.min(expectedMax(viewportHeight), Math.round((viewportHeight - FRAME_GUTTER - FALLBACK_ROWS) / 2)),
+  )
 }
 
 // Same jsdom idiom as multitable-record-inspector-resize.spec.ts's `setViewportWidth`: redefine the
@@ -652,7 +664,7 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
       corrupt.app.unmount()
       corrupt.container.remove()
 
-      // `-50` exercises the `parsed <= 0` guard specifically: the floor (120) and the default (520)
+      // `-50` exercises the `parsed <= 0` guard specifically: the floor (120) and the default (416)
       // differ here, so a missing guard would land on 120 and this assertion would fail.
       window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '-50')
       const negative = await mountWithConfigOpen(1000)
@@ -707,8 +719,12 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
       expandToggle(first.container).click()
       await flushUi()
       expect(configPaneHeightPx(first.container)).toBe(expectedMax(1000))
-      // The reload will read THIS number: the last manual height, not the ceiling it is showing.
-      expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(expectedDefault(1000)))
+      // The reload must not come back with the ceiling it is showing. No manual height was ever
+      // chosen here, so nothing at all is stored (#5864 ②: this used to read
+      // `String(expectedDefault(1000))` -- the untouched default was written out as a px number,
+      // which froze a viewport-derived value into a preference that no longer followed the window).
+      // The reload therefore uses the live default, asserted right below.
+      expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBeNull()
       first.app.unmount()
       first.container.remove()
 
