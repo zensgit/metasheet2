@@ -606,6 +606,13 @@ describe('admin caller: every 500 branch in the /api/admin tree is values-free',
     const res = await request(pinned.url()).get('/api/admin/safety/rules')
     expectRedacted(res.status, res.body as Record<string, unknown>, 'read')
     expect(loggedOriginal()).toBe(true)
+    // Exactly what the raw pass-through gave the logger: the object had no stack, so none is logged
+    // (no frames of the envelope module invented in its place).
+    const logged = errorLog.mock.calls
+      .map((call) => call[1] as { message?: unknown; stack?: unknown } | undefined)
+      .find((err) => typeof err?.message === 'string' && err.message.includes(LEAKY))
+    expect(logged).toBeDefined()
+    expect(logged?.stack).toBeUndefined()
   })
 
   it('an Error from another realm (vm) is redacted, and the log keeps its message AND its original stack', async () => {

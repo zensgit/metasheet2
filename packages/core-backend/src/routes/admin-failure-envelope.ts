@@ -60,7 +60,8 @@ const UNRENDERABLE_THROWN_VALUE = 'thrown value could not be rendered as text';
  *   - an Error of this realm is passed through unchanged;
  *   - an error-like object (a string `message` or `stack`: a plain `{ message }` rejection, an Error
  *     from another realm such as a `vm` context, where `instanceof Error` is false) keeps its own
- *     message, name and ORIGINAL stack — the stack is not replaced by this module's frames;
+ *     message, name and ORIGINAL stack (no stack when it had none) — never this module's frames, so
+ *     the logger reads exactly what it read from the raw value before;
  *   - anything else (a string, a number, an object without a message) is rendered with String();
  *   - a value that cannot be read or rendered at all (`Object.create(null)`, a throwing `toString`
  *     or property getter, a revoked Proxy) yields a fixed placeholder instead of throwing.
@@ -75,7 +76,8 @@ function toLoggableError(error: unknown): Error {
       if (typeof message === 'string' || typeof stack === 'string') {
         const wrapped = new Error(typeof message === 'string' ? message : '');
         if (typeof name === 'string') wrapped.name = name;
-        if (typeof stack === 'string') wrapped.stack = stack;
+        // Its own stack, or none (as the direct pass-through logged it) — never this module's frames.
+        wrapped.stack = typeof stack === 'string' ? stack : undefined;
         return wrapped;
       }
     }
