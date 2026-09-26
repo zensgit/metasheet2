@@ -5,30 +5,55 @@ import {
   acquireTasksSchedulerLeaderLock,
 } from '../../src/db/task-advisory-locks'
 
+const SQL = 'SELECT pg_advisory_xact_lock(hashtext($1))'
+
+async function capture(
+  run: (query: (sql: string, params?: unknown[]) => Promise<unknown>) => Promise<void>,
+): Promise<{ sql: string; params?: unknown[] }> {
+  let seen: { sql: string; params?: unknown[] } | undefined
+  await run(async (sql, params) => {
+    seen = { sql, params }
+  })
+  if (!seen) throw new Error('query was not awaited')
+  return seen
+}
+
 describe('task advisory locks', () => {
-  it('asks the injected query for the structure key', async () => {
-    const calls: Array<{ sql: string; params?: unknown[] }> = []
-    await acquireTaskStructureLock(async (sql, params) => {
-      calls.push({ sql, params })
-    }, 'org-1')
-    expect(calls).toEqual([
-      { sql: 'SELECT pg_advisory_xact_lock(hashtext($1))', params: ['task-structure:org-1'] },
-    ])
+  it('structure lock awaits one-arg xact lock', async () => {
+    const seen = await capture((query) => acquireTaskStructureLock(query, 'org-1'))
+    expect(seen).toEqual({ sql: SQL, params: ['task-structure:org-1'] })
   })
 
-  it('asks the injected query for the projection key', async () => {
-    const calls: string[] = []
-    await acquireTaskProjectionLock(async (_sql, params) => {
-      calls.push(String(params?.[0]))
-    }, 'list-1', 'task-1')
-    expect(calls).toEqual(['task-projection:list-1:task-1'])
+  it('projection lock awaits one-arg xact lock', async () => {
+    const seen = await capture((query) => acquireTaskProjectionLock(query, 'list-1', 'task-1'))
+    expect(seen).toEqual({ sql: SQL, params: ['task-projection:list-1:task-1'] })
   })
 
-  it('asks the injected query for the scheduler leader key', async () => {
-    const calls: string[] = []
-    await acquireTasksSchedulerLeaderLock(async (_sql, params) => {
-      calls.push(String(params?.[0]))
-    })
-    expect(calls).toEqual(['tasks-scheduler:leader'])
+  it('scheduler lock awaits one-arg xact lock', async () => {
+    const seen = await capture((query) => acquireTasksSchedulerLeaderLock(query))
+    expect(seen).toEqual({ sql: SQL, params: ['tasks-scheduler:leader'] })
+  })
+
+  it('does not resolve before the query settles (missing await would pass too early)', async () => {
+    let settled = false
+    const pending = acquireTaskStructureLock(
+      () => new Promise((resolve) => {
+        setTimeout(() => {
+          settled = true
+          resolve(undefined)
+        }, 20)
+      }),
+      'org-1',
+    )
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    await pending
+    expect(settled).toBe(true)
+  })
+
+  it('propagates query rejection (a swallowed error would resolve)', async () => {
+    await expect(acquireTaskStructureLock(async () => {
+      throw new Error('db down')
+    }, 'org-1')).rejects.toThrow('db down')
   })
 })
