@@ -86,7 +86,24 @@ describe('view filter — dateTime (business wall clock, minute precision)', () 
     expect(dt(STORED, 'isNotEmpty', undefined)).toBe(true)
   })
 
-  test('an unknown operator keeps the pre-existing match-all catch-all', () => {
-    expect(dt(STORED, 'contains', '2026')).toBe(true)
+  test('contains / doesNotContain match against the DISPLAYED wall clock, not the raw ISO (review item 4)', () => {
+    expect(dt(STORED, 'contains', '2026-09-24')).toBe(true)
+    expect(dt(STORED, 'contains', '09:00')).toBe(true) // what the grid shows
+    expect(dt(STORED, 'contains', ' 09:0')).toBe(true) // substring, trimmed
+    expect(dt(STORED, 'contains', '01:00')).toBe(false) // the raw UTC hour is NOT shown, so it does not match
+    expect(dt(STORED, 'contains', 'T01')).toBe(false)
+    expect(dt(STORED, 'doesNotContain', '01:00')).toBe(true)
+    expect(dt(STORED, 'doesNotContain', '09:00')).toBe(false)
+    expect(dt(STORED, 'contains', '')).toBe(true) // empty needle = inactive, like the string branch
+    expect(dt(STORED, 'doesNotContain', '')).toBe(true)
+    expect(dt('junk', 'contains', 'jun')).toBe(true) // a non-date-time cell keeps its raw text
+    expect(dt(null, 'contains', '2026')).toBe(false)
+    process.env[ENV_KEY] = 'America/New_York'
+    expect(dt(STORED, 'contains', '2026-09-23 21:00')).toBe(true) // displayed in the business zone
+    expect(dt(STORED, 'contains', '09:00')).toBe(false)
+  })
+
+  test('a truly unknown operator keeps the pre-existing match-all catch-all', () => {
+    expect(dt(STORED, 'startsWith', '2026')).toBe(true)
   })
 })

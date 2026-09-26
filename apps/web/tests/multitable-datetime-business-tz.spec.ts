@@ -32,10 +32,13 @@ import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
 import { buildImportedRecords } from '../src/multitable/import/delimited'
+import { normalizeXlsxDateCells, parseXlsxBuffer } from '../src/multitable/import/xlsx-mapping'
+import * as XLSX from 'xlsx'
 import {
   DEFAULT_BUSINESS_TIMEZONE,
   browserTimezoneDiffers,
   businessTimezoneLabel,
+  calendarDayFromText,
   dateTimeZoneHint,
   getBusinessTimezone,
   normalizeDateTimeInput,
@@ -1002,6 +1005,199 @@ describe('business timezone — UI surfaces (TZ-independent)', () => {
       { rowIndex: 2, message: 'Invalid date-time for When — use the form 2026-09-24 09:00', retryable: false, fieldId: 'fld_dt', fieldName: 'When' },
     ])
     expect(built.failures[0].message).not.toContain('whenever') // values-free
+  })
+})
+
+describe('XLSX import — Excel native date cells (review must-fix 1) and date-only days as written (item 2)', () => {
+  const xlsxModule = XLSX as unknown as Parameters<typeof parseXlsxBuffer>[0]
+  const SERIAL_DAY = 46289 // 2026-09-24
+  const SERIAL_0900 = 46289.375 // 2026-09-24 09:00
+  afterEach(() => resetBusinessTimezone())
+
+  function workbookWithDateCells(): Uint8Array {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['Name', 'When', 'Day', 'Typed'],
+      ['Alpha', SERIAL_0900, SERIAL_DAY, '2026-09-24 09:00'],
+    ]) as Record<string, any>
+    ws.B2.z = 'm/d/yy h:mm' // built-in numFmt 22
+    ws.C2.z = 'm/d/yy' // built-in numFmt 14
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Rows')
+    return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer)
+  }
+
+  it('negative control: SheetJS renders those cells as "9/24/26 9:00" / "9/24/26" — text the importer grammar rejects', () => {
+    const wb = XLSX.read(workbookWithDateCells(), { type: 'array' })
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets.Rows, { header: 1, raw: false, defval: '' }) as string[][]
+    expect(rows[1]).toEqual(['Alpha', '9/24/26 9:00', '9/24/26', '2026-09-24 09:00'])
+    expect(parseDateTimeInput('9/24/26 9:00', 'Asia/Shanghai')).toEqual({ ok: false })
+    expect(normalizeXlsxDateCells({ SSF: undefined }, wb.Sheets.Rows)).toBe(0) // no SSF → left alone
+  })
+
+  it('parseXlsxBuffer + buildImportedRecords: numFmt 22 → business-zone instant, numFmt 14 → the day as written', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const parsed = parseXlsxBuffer(xlsxModule, workbookWithDateCells())
+    expect(parsed.rows).toEqual([['Alpha', '2026-09-24 09:00', '2026-09-24', '2026-09-24 09:00']])
+    const built = await buildImportedRecords({
+      parsedRows: parsed.rows,
+      fieldMapping: { 0: 'fld_s', 1: 'fld_dt', 2: 'fld_d', 3: 'fld_dt2' },
+      fields: [
+        { id: 'fld_s', name: 'Name', type: 'string' },
+        { id: 'fld_dt', name: 'When', type: 'dateTime', property: { timezone: 'UTC' } },
+        { id: 'fld_d', name: 'Day', type: 'date' },
+        { id: 'fld_dt2', name: 'Typed', type: 'dateTime', property: { timezone: 'Asia/Tokyo' } },
+      ] as MetaField[],
+    })
+    expect(built.failures).toEqual([])
+    expect(built.records).toEqual([{
+      fld_s: 'Alpha',
+      fld_dt: '2026-09-24T03:15:00.000Z', // 09:00 in the Kathmandu business zone — the Excel wall clock
+      fld_d: '2026-09-24', // the calendar day as written, no zone math
+      fld_dt2: '2026-09-24T00:00:00.000Z', // the TEXT cell, untouched by the normaliser, read in the field's own zone (Tokyo)
+    }])
+  })
+
+  it('date-only import (item 2): the calendar day as written, never shifted by the browser zone', async () => {
+    expect(calendarDayFromText('2026-09-24')).toBe('2026-09-24')
+    expect(calendarDayFromText('2026/9/24')).toBe('2026-09-24')
+    expect(calendarDayFromText('2026年9月24日')).toBe('2026-09-24')
+    expect(calendarDayFromText('２０２６－０９－２４')).toBe('2026-09-24')
+    expect(calendarDayFromText('2026-09-24 23:30')).toBe('2026-09-24') // a time part never moves the day
+    expect(calendarDayFromText('9/24/26')).toBe('2026-09-24') // an Excel-rendered US date: local components, not toISOString
+    expect(calendarDayFromText('2026-09-24T00:00:00Z')).toBe('2026-09-24') // explicit zone → UTC day
+    expect(calendarDayFromText('2026-02-30')).toBeNull()
+    expect(calendarDayFromText('2026-09/24')).toBeNull() // mixed separators
+    expect(calendarDayFromText('whenever')).toBeNull()
+    expect(calendarDayFromText('')).toBeNull()
+    // The old `new Date(val).toISOString().split('T')[0]` moved a locally-parsed day to the previous UTC day on
+    // any UTC+ browser; the 年月日 spelling it could not read at all.
+    const built = await buildImportedRecords({
+      parsedRows: [['2026年9月24日', '9/24/26', '2026-09-24 23:30', 'whenever']],
+      fieldMapping: { 0: 'a', 1: 'b', 2: 'c', 3: 'd' },
+      fields: [
+        { id: 'a', name: 'A', type: 'date' }, { id: 'b', name: 'B', type: 'date' }, { id: 'c', name: 'C', type: 'date' }, { id: 'd', name: 'D', type: 'date' },
+      ] as MetaField[],
+    })
+    expect(built.records).toEqual([{ a: '2026-09-24', b: '2026-09-24', c: '2026-09-24', d: 'whenever' }])
+  })
+})
+
+describe('grid (review item 3): moving to another cell never drops an invalid dateTime draft', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    resetBusinessTimezone()
+  })
+
+  const dtField = { id: 'fld_dt', name: 'When', type: 'dateTime', property: { timezone: 'UTC' } } as MetaField
+  const nameField = { id: 'fld_name', name: 'Name', type: 'string' } as MetaField
+  function mountGrid(patchSpy: ReturnType<typeof vi.fn>) {
+    return mount(() => h(MetaGridTable, {
+      rows: [
+        { id: 'r1', version: 1, data: { fld_name: 'a', fld_dt: STORED } },
+        { id: 'r2', version: 1, data: { fld_name: 'b', fld_dt: null } },
+      ],
+      visibleFields: [dtField, nameField],
+      sortRules: [],
+      loading: false,
+      currentPage: 1,
+      totalPages: 1,
+      startIndex: 0,
+      selectedRecordId: null,
+      canEdit: true,
+      canDelete: true,
+      onPatchCell: patchSpy,
+    }))
+  }
+  const cellAt = (root: HTMLElement, r: number, c: number) =>
+    root.querySelectorAll('tbody tr.meta-grid__row')[r]!.querySelectorAll('.meta-grid__cell')[c] as HTMLElement
+  const editorInput = (root: HTMLElement) => root.querySelector('input[data-meta-datetime-input]') as HTMLInputElement | null
+  const errorEl = (root: HTMLElement) => root.querySelector('[data-meta-datetime-error]')
+
+  it('single-click and double-click on other cells are blocked while the draft is invalid; fixing it commits; Escape discards', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const patchSpy = vi.fn()
+    const view = mountGrid(patchSpy)
+    await flushUi()
+    const root = view.container
+    const dtCell = cellAt(root, 0, 0)
+    dtCell.click()
+    dtCell.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    const input = editorInput(root)!
+    expect(input).not.toBeNull()
+    expect(input.value).toBe('2026-09-24 06:45')
+
+    // Type garbage, then do what a browser does when the mouse goes to another cell: blur, then click.
+    typeInto(input, '2026-09-24 25:00')
+    input.dispatchEvent(new FocusEvent('blur'))
+    await flushUi()
+    expect(errorEl(root)).not.toBeNull()
+    cellAt(root, 0, 1).click()
+    await flushUi()
+    expect(editorInput(root)).toBe(input) // the SAME editor is still mounted
+    expect(input.value).toBe('2026-09-24 25:00') // the draft is still there
+    expect(errorEl(root)).not.toBeNull()
+    expect(patchSpy).not.toHaveBeenCalled()
+
+    // Double-click on a different cell (startEdit) is blocked the same way.
+    const other = cellAt(root, 1, 0)
+    other.click()
+    other.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    expect(editorInput(root)).toBe(input)
+    expect(root.querySelectorAll('input[data-meta-datetime-input]').length).toBe(1) // never two drafts
+    expect(patchSpy).not.toHaveBeenCalled()
+
+    // Fix the text: the block lifts; Enter commits the corrected instant and closes the editor.
+    typeInto(input, '2026-09-24 10:30')
+    await flushUi()
+    expect(errorEl(root)).toBeNull()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+    expect(patchSpy).toHaveBeenCalledWith('r1', 'fld_dt', '2026-09-24T04:45:00.000Z', 1)
+    expect(editorInput(root)).toBeNull()
+
+    // Escape on an invalid draft is the explicit discard: the editor closes, nothing is patched, and the
+    // next cell can be edited normally.
+    const again = cellAt(root, 0, 0)
+    again.click()
+    again.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    const input2 = editorInput(root)!
+    typeInto(input2, 'garbage')
+    input2.dispatchEvent(new FocusEvent('blur'))
+    await flushUi()
+    expect(errorEl(root)).not.toBeNull()
+    input2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(editorInput(root)).toBeNull()
+    expect(patchSpy).toHaveBeenCalledTimes(1)
+    other.click()
+    other.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    expect(editorInput(root)).not.toBeNull()
+    view.unmount()
+  })
+
+  it('a VALID draft still commits when another cell is clicked (the D2 click-away behaviour is unchanged)', async () => {
+    setBusinessTimezone('Asia/Kathmandu')
+    const patchSpy = vi.fn()
+    const view = mountGrid(patchSpy)
+    await flushUi()
+    const root = view.container
+    const dtCell = cellAt(root, 0, 0)
+    dtCell.click()
+    dtCell.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await flushUi()
+    const input = editorInput(root)!
+    typeInto(input, '2026-09-25 08:00')
+    input.dispatchEvent(new FocusEvent('blur'))
+    await flushUi()
+    cellAt(root, 0, 1).click()
+    await flushUi()
+    expect(editorInput(root)).toBeNull()
+    expect(patchSpy).toHaveBeenCalledWith('r1', 'fld_dt', '2026-09-25T02:15:00.000Z', 1)
+    view.unmount()
   })
 })
 

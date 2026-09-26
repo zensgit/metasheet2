@@ -293,6 +293,42 @@ export function parseDateTimeTextToUtcMs(text: unknown, timeZone: string, option
   return null
 }
 
+// A calendar day (date-only `date` field, #3417 floating day): `YYYY<sep>M<sep>D` with ONE separator, an
+// optional trailing time part that is IGNORED (the day is the day as written).
+const CALENDAR_DAY_RE = /^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})(?:[T ].*)?$/
+
+/**
+ * The calendar day named by import text for a date-only field — `YYYY-MM-DD`, or `null` when the text
+ * names no day. NO timezone math (PR #6083 review item 2): the previous
+ * `new Date(text).toISOString().split('T')[0]` turned a locally-parsed `9/24/26` into UTC midnight-shifted
+ * text, i.e. the PREVIOUS day on any UTC+ browser. Rules, in order:
+ *   1. the ISO-ish grammar (also 年月日, full-width, `/` `.`) → the day as written;
+ *   2. text that names its own zone (`Z`, `±hh:mm`, `GMT`) → the UTC calendar day of that instant;
+ *   3. anything else `Date.parse` accepts (`9/24/26`, `Sep 24 2026`) → its LOCAL calendar components, which
+ *      are the day as written for a zone-less spelling regardless of where the browser is.
+ */
+export function calendarDayFromText(input: unknown): string | null {
+  const text = normalizeDateTimeInput(input)
+  if (!text) return null
+  const match = CALENDAR_DAY_RE.exec(text)
+  if (match) {
+    const [, y, , mo, d] = match
+    const clock: WallClock = { year: Number(y), month: Number(mo), day: Number(d), hour: 0, minute: 0, second: 0 }
+    if (!isValidWallClock(clock)) return null
+    return `${pad(clock.year, 4)}-${pad(clock.month)}-${pad(clock.day)}`
+  }
+  // An ISO-like shape that failed the grammar (mixed separators `2026-09/24`, impossible day) is refused
+  // outright (N7) — V8's lenient legacy parser would otherwise accept it below.
+  if (/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T ]|$)/.test(text)) return null
+  const ms = Date.parse(text)
+  if (!Number.isFinite(ms)) return null
+  const date = new Date(ms)
+  if (EXPLICIT_ZONE_MARKER_RE.test(text)) {
+    return `${pad(date.getUTCFullYear(), 4)}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
+  }
+  return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
 /** UTC epoch-ms of a stored date-time value, or `null` when it is empty / not a date-time. */
 export function dateTimeValueToUtcMs(value: unknown, timeZone: string): number | null {
   if (value === null || value === undefined || value === '') return null

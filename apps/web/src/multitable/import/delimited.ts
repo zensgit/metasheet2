@@ -1,7 +1,7 @@
 import type { MetaField } from '../types'
 import { importCancelled, importDateTimeInvalid, importResolverMissing, importValueResolveFailed } from '../utils/meta-import-labels'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
-import { parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
+import { calendarDayFromText, parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
 
 export type DelimitedParseResult = {
   delimiter: ',' | '\t'
@@ -185,8 +185,10 @@ export async function buildImportedRecords(params: {
       if (field?.type === 'number' && val !== '') data[fieldId] = Number(val)
       else if (field?.type === 'boolean') data[fieldId] = val.toLowerCase() === 'true' || val === '1'
       else if (field?.type === 'date' && val !== '') {
-        const d = new Date(val)
-        data[fieldId] = !Number.isNaN(d.getTime()) ? d.toISOString().split('T')[0] : val
+        // A date-only field is a floating calendar day (#3417): the day AS WRITTEN, no timezone math. The
+        // former `new Date(val).toISOString().split('T')[0]` moved a locally-parsed `9/24/26` (an Excel
+        // date cell's text) to the previous day on every UTC+ browser (PR #6083 review item 2).
+        data[fieldId] = calendarDayFromText(val) ?? val
       } else if (field?.type === 'dateTime') {
         // 客户反馈 2026-09-24 #4c (B1): a dateTime cell is the SAME `YYYY-MM-DD HH:mm` business wall clock the
         // export writes (zone rule: explicit non-UTC field zone, else the business zone); an absolute ISO

@@ -4285,6 +4285,15 @@ export function evaluateMetaFilterCondition(
       if (left === null) return false
       return left >= Math.min(a, b) && left <= Math.max(a, b)
     }
+    // contains / doesNotContain: mirror the string branch, but against the DISPLAYED wall-clock text
+    // (`2026-09-24 09:00`), never the raw stored ISO — the person is matching what the grid shows. A cell
+    // that is not a date-time keeps its raw text. Empty needle = inactive (match all), like the string branch.
+    if (opNorm === 'contains' || opNorm === 'doesnotcontain') {
+      const shown = (formatDateTimeValue(cellValue, businessZone) ?? toComparableString(cellValue)).trim().toLowerCase()
+      const needle = toComparableString(value).trim().toLowerCase()
+      if (needle === '') return true
+      return opNorm === 'contains' ? shown.includes(needle) : !shown.includes(needle)
+    }
     return true
   }
 

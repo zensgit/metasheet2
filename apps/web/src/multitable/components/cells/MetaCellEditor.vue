@@ -26,7 +26,7 @@
         :timezone="dateTimeZone"
         :aria-invalid="dateTimeInvalid ? 'true' : undefined"
         @update:model-value="commitScalar"
-        @update:invalid="dateTimeInvalid = $event"
+        @update:invalid="onDateTimeInvalid"
         @keydown.enter="onDateTimeEnter"
         @keydown.escape="onEscapeCancel"
         @keydown.tab="onDateTimeTab"
@@ -518,6 +518,13 @@ const emit = defineEmits<{
    * doc.
    */
   (e: 'tab-commit', shiftKey: boolean): void
+  /**
+   * B2 (客户反馈 2026-09-24 #4c, PR #6083 review item 3): the editor holds a non-empty dateTime draft the
+   * parser rejected on a commit attempt. While `true` the HOST must not close this editor on its own
+   * (clicking / double-clicking another cell) — that would drop the draft silently; the inline error is
+   * showing and Escape is the explicit discard. `false` again as soon as the text parses / empties.
+   */
+  (e: 'update:invalidDraft', invalid: boolean): void
 }>()
 
 const { isZh } = useLocale()
@@ -674,6 +681,11 @@ const dateTimeZone = computed(() => resolveDateTimeTimezone(props.field?.propert
 // attempt. While set, Enter / Tab / blur do NOT confirm (the last valid staged value is not silently
 // committed over a visible error and the garbage is not dropped); the error span renders; Escape discards.
 const dateTimeInvalid = ref(false)
+function onDateTimeInvalid(invalid: boolean) {
+  if (dateTimeInvalid.value === invalid) return
+  dateTimeInvalid.value = invalid
+  emit('update:invalidDraft', invalid)
+}
 function dateTimeDraftIsInvalid(): boolean {
   const el = inputRef.value as unknown as { flagInvalidDraft?: () => boolean } | null
   return !!el?.flagInvalidDraft?.()

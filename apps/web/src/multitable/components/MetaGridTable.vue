@@ -115,6 +115,7 @@
                   @confirm="onEditorConfirm"
                   @blur-commit="onEditorBlurCommit"
                   @tab-commit="onEditorTabCommit"
+                  @update:invalid-draft="editorInvalidDraft = $event"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(item.row.id, field)"
                   @open-person-picker="openPersonPickerFromCell(item.row.id, field)"
@@ -289,6 +290,7 @@
                   @confirm="onEditorConfirm"
                   @blur-commit="onEditorBlurCommit"
                   @tab-commit="onEditorTabCommit"
+                  @update:invalid-draft="editorInvalidDraft = $event"
                   @yjs-commit="markYjsHandled(row.id, field.id)"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
@@ -1418,6 +1420,14 @@ function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: 
 function onCellClick(ri: number, ci: number, rid: string) {
   const fieldId = props.visibleFields[ci]?.id
   if (editCell.value && (editCell.value.recordId !== rid || editCell.value.fieldId !== fieldId)) {
+    // B2 (客户反馈 2026-09-24 #4c, PR #6083 review item 3): the open editor holds a dateTime draft the
+    // parser rejected. Closing it here would drop that text silently (confirmEdit commits the stale
+    // staged value). Keep the editor — and its inline error — where it is and hand focus back to it;
+    // the person fixes the text or presses Escape.
+    if (editorInvalidDraft.value) {
+      refocusEditorInput()
+      return
+    }
     confirmEdit()
     // The old editor's <input> just unmounted (its own DOM focus goes to
     // `document.body` per spec); return focus to the grid root so keyboard
@@ -1426,6 +1436,15 @@ function onCellClick(ri: number, ci: number, rid: string) {
   }
   focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
   if (fieldId) emit('cursor-focus', { recordId: rid, fieldId })
+}
+
+// B2: set by MetaCellEditor's `update:invalidDraft` while its dateTime draft is unparseable-and-flagged.
+// Cleared whenever the editor closes (confirm / cancel / a new edit starts).
+const editorInvalidDraft = ref(false)
+function refocusEditorInput() {
+  nextTick(() => {
+    gridRoot.value?.querySelector<HTMLInputElement>('.meta-cell-editor input[data-meta-datetime-input]')?.focus()
+  })
 }
 
 // Live cell-cursors: remote collaborators currently occupying a given cell (presentational highlight).
@@ -1440,9 +1459,15 @@ function startEdit(row: MetaRecord, field: MetaField) {
   // let two drafts exist at once. A no-op when the previous draft's value is
   // unchanged (confirmEdit's own `value !== row.data[fieldId]` guard).
   if (editCell.value && (editCell.value.recordId !== row.id || editCell.value.fieldId !== field.id)) {
+    // B2: never swap out an editor that is showing an invalid dateTime draft (see onCellClick).
+    if (editorInvalidDraft.value) {
+      refocusEditorInput()
+      return
+    }
     confirmEdit()
   }
   yjsHandledCellKey.value = null
+  editorInvalidDraft.value = false
   editCell.value = { recordId: row.id, fieldId: field.id, value: row.data[field.id] ?? null }
 }
 
@@ -1484,9 +1509,10 @@ function confirmEdit() {
   }
   editCell.value = null
   yjsHandledCellKey.value = null
+  editorInvalidDraft.value = false
 }
 
-function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null }
+function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null; editorInvalidDraft.value = false }
 
 // D3: Enter commits via the same confirmEdit() as blur/Tab, then explicitly
 // returns DOM focus to the grid root — the editor's <input> just unmounted,

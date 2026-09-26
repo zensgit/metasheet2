@@ -256,4 +256,42 @@ describe('multitable xlsx routes', () => {
     const insertCall = importer.mockPool.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO meta_records'))
     expect(JSON.parse(String(insertCall?.[1]?.[2]))).toEqual({ fld_name: 'Alpha', fld_when: stored, fld_tokyo: stored })
   })
+
+  // PR #6083 review must-fix item 1: a workbook whose dateTime / date columns are Excel NATIVE date cells
+  // (numFmt 22 `m/d/yy h:mm`, numFmt 14 `m/d/yy`) — what a person gets by typing a date into Excel — must
+  // import: the dateTime cell as the Excel wall clock in the business zone, the date cell as that calendar day.
+  test('imports Excel native date cells (numFmt 22 dateTime, numFmt 14 date-only) through the record create path', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_when', name: 'When', type: 'dateTime', property: {}, order: 2 },
+      { id: 'fld_day', name: 'Day', type: 'date', property: {}, order: 3 },
+    ]
+    const ws = xlsx.utils.aoa_to_sheet([
+      ['Name', 'When', 'Day'],
+      ['Alpha', 46289.375, 46289], // 2026-09-24 09:00 / 2026-09-24 as Excel serials
+    ]) as Record<string, any>
+    ws.B2.z = 'm/d/yy h:mm'
+    ws.C2.z = 'm/d/yy'
+    const wb = xlsx.utils.book_new()
+    xlsx.utils.book_append_sheet(wb, ws, 'Rows')
+    const buffer = Buffer.from(xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer)
+    // The fixture really is a native date cell: SheetJS's own formatted read shows the US-locale text.
+    const control = xlsx.read(buffer, { type: 'buffer' })
+    expect((xlsx.utils.sheet_to_json(control.Sheets.Rows, { header: 1, raw: false, defval: '' }) as string[][])[1]).toEqual(['Alpha', '9/24/26 9:00', '9/24/26'])
+
+    const { app, mockPool } = await createApp({ tokenPerms: ['multitable:read', 'multitable:write'], queryHandler: defaultQueryHandler([], fieldRows) })
+    const response = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/import-xlsx`)
+      .attach('file', buffer, 'rows.xlsx')
+      .expect(200)
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.imported).toBe(1)
+    expect(response.body.data.failures).toEqual([])
+    const insertCall = mockPool.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO meta_records'))
+    expect(JSON.parse(String(insertCall?.[1]?.[2]))).toEqual({
+      fld_name: 'Alpha',
+      fld_when: '2026-09-24T01:00:00.000Z', // 09:00 北京时间 — the Excel wall clock, not the process zone
+      fld_day: '2026-09-24', // the calendar day as written
+    })
+  })
 })
