@@ -10376,6 +10376,7 @@ import {
   type AttendanceLeaveQuickFillShiftWindow,
 } from './attendance/halfDayLeaveHelper'
 import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
+import { formatSelfServiceWorkWindowSummary } from './attendance/attendanceEmployeeWorkspacePresentation'
 import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestReviewEntitlement'
 import { shouldRevealOverviewRequestTools } from './attendance/attendanceOverviewRequestReveal'
 import { usePlugins } from '../composables/usePlugins'
@@ -25105,11 +25106,12 @@ const selfRulesScheduleGroupSummary = computed(() =>
 
 const selfRulesWorkWindowSummary = computed(() => {
   const rule = selfRulesData.value?.runtimeRule
-  const start = String(rule?.workStartTime || '').trim()
-  const end = String(rule?.workEndTime || '').trim()
-  const timezone = String(rule?.timezone || '').trim()
-  const window = start && end ? `${start}-${end}` : tr('Default rule', '默认规则')
-  return timezone ? `${window} · ${timezone}` : window
+  return formatSelfServiceWorkWindowSummary({
+    workStartTime: rule?.workStartTime,
+    workEndTime: rule?.workEndTime,
+    timezone: rule?.timezone,
+    defaultRuleLabel: tr('Default rule', '默认规则'),
+  })
 })
 
 const selfRulesPunchPolicySummary = computed(() => {

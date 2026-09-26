@@ -5,6 +5,7 @@ import {
   ATTENDANCE_LEAVE_DAY_MINUTES,
   formatLateEarlyPair,
   formatLeaveBalanceMinutes,
+  formatSelfServiceWorkWindowSummary,
   formatWorkDurationMinutes,
   greetingHeadline,
   isClockedIn,
@@ -22,6 +23,7 @@ import {
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from '../src/views/attendance/attendanceDateTimePresentation'
+import { formatTimezoneLabel } from '../src/utils/timezones'
 
 const en = (english: string, _zh: string) => english
 const zh = (_english: string, chinese: string) => chinese
@@ -78,10 +80,43 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
 
   it('reads a work-window label for chrome only', () => {
     expect(workWindowShortLabel('09:00-18:00 · Asia/Shanghai')).toBe('09:00-18:00')
+    expect(workWindowShortLabel('09:00-18:00 · UTC+08:00 · Asia/Shanghai')).toBe('09:00-18:00')
     expect(workWindowShortLabel('09:00–18:00')).toBe('09:00–18:00')
     expect(workWindowShortLabel('—')).toBeNull()
     expect(suggestOffDutyTime('09:00-12:00 / 13:00-18:00 · Asia/Shanghai')).toBe('18:00')
+    expect(suggestOffDutyTime('09:00-18:00 · UTC+00:00 · UTC')).toBe('18:00')
     expect(suggestOffDutyTime('—')).toBeNull()
+  })
+
+  it('prints the work window with the same offset label as overview hints', () => {
+    const shanghai = formatSelfServiceWorkWindowSummary({
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      timezone: 'Asia/Shanghai',
+      defaultRuleLabel: 'Default rule',
+    })
+    const utc = formatSelfServiceWorkWindowSummary({
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      timezone: 'UTC',
+      defaultRuleLabel: 'Default rule',
+    })
+    expect(shanghai).toBe(`09:00-18:00 · ${formatTimezoneLabel('Asia/Shanghai')}`)
+    expect(utc).toBe(`09:00-18:00 · ${formatTimezoneLabel('UTC')}`)
+    expect(formatTimezoneLabel('Asia/Shanghai')).toBe('UTC+08:00 · Asia/Shanghai')
+    expect(formatTimezoneLabel('UTC')).toBe('UTC+00:00 · UTC')
+    expect(shanghai).not.toBe('09:00-18:00 · Asia/Shanghai')
+    expect(utc).not.toBe('09:00-18:00 · UTC')
+    expect(formatSelfServiceWorkWindowSummary({
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      timezone: 'Not/AZone',
+      defaultRuleLabel: 'Default rule',
+    })).toBe('09:00-18:00')
+    expect(formatSelfServiceWorkWindowSummary({
+      timezone: 'Asia/Shanghai',
+      defaultRuleLabel: '默认规则',
+    })).toBe(`默认规则 · ${formatTimezoneLabel('Asia/Shanghai')}`)
   })
 
   it('treats only an open check-in as clocked in', () => {
