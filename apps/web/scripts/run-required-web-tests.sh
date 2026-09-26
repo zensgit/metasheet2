@@ -1232,6 +1232,14 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # of any of them, and it matches exactly one file under apps/web/tests. Verified green in isolation
 # (`npx vitest run StockPreparationDiffSummaryExport --reporter=dot`) and in this batch before wiring.
 #
+# 客户反馈 2026-09-24 #3 final review F1 (2026-09-25): `MetaAutomationLogViewer` — tests/MetaAutomationLogViewer.spec.ts
+# pins the rule log panel a customer actually sees (已跳过 count/badge, trigger-record-gone step sentences instead of
+# the raw `target_record_missing` code). It was selected by NO token here and by no workflow, i.e. green only on a
+# laptop (its sibling meta-automation-log-viewer-migration.spec.ts already runs via the `migration` token).
+# CamelCase token: no existing token is a substring of it, it is a substring of none, and it matches exactly
+# one file (the kebab-case sibling does not contain it). Not added to multitable-web-guard.yml: that workflow
+# was out of scope for the change that added it.
+#
 # ============================================================================================
 # 登记行形状（Q8 / C4 P1，2026-09-21）— 一行一个 token，大小写不敏感字母序
 # ============================================================================================
@@ -1404,6 +1412,7 @@ exec npx vitest run \
   meta-toolbar-filter-builder \
   meta-toolbar-group-picker \
   meta-view-render-labels \
+  MetaAutomationLogViewer \
   migration \
   mount-behind-flow \
   multitable-agg-footer-grid \
@@ -1573,6 +1582,7 @@ exec npx vitest run \
   multitable-view-manager \
   multitable-workbench-1672-1673 \
   multitable-workbench-bulk-delete \
+  multitable-workbench-dashboard-exit \
   multitable-workbench-drawer-button-wiring \
   multitable-workbench-history-field-scope-wiring \
   multitable-workbench-i18n \

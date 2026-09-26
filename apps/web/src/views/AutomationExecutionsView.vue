@@ -104,8 +104,13 @@
                   {{ branch.label ? `${branch.label} (${branch.key})` : branch.key }}: {{ automationStatusLabel(branch.status, isZh) }}
                 </span>
               </div>
-              <div v-if="step.result !== undefined && step.result !== null && !conditionBranchSelection(step) && !parallelBranchSummary(step)" class="automation-runs__step-output" data-field="step-output">
-                {{ summarizeStepOutput(step.result) }}
+              <!-- 客户反馈 2026-09-24 #3 final review F1: a recognised values-free reason code (trigger record gone)
+                   renders as a sentence and is dropped from the JSON line below. -->
+              <div v-if="stepOutputView(step).reason" class="automation-runs__step-reason" data-field="step-reason">
+                {{ stepOutputView(step).reason }}
+              </div>
+              <div v-if="stepOutputView(step).output !== undefined && stepOutputView(step).output !== null && !conditionBranchSelection(step) && !parallelBranchSummary(step)" class="automation-runs__step-output" data-field="step-output">
+                {{ summarizeStepOutput(stepOutputView(step).output) }}
               </div>
             </div>
 
@@ -186,7 +191,7 @@ import { getAuthPrincipalKey, onAuthPrincipalChange } from '../composables/authP
 import { authHeaders } from '../utils/api'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
 import type { AutomationActionType, AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
-import { automationActionTypeLabel, automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
+import { automationActionTypeLabel, automationLabel, automationStatusLabel, automationStepOutputView, type AutomationLabelKey, type AutomationStepOutputView } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import StatusTag from '../components/status/StatusTag.vue'
 import EmptyState from '../components/status/EmptyState.vue'
@@ -262,6 +267,9 @@ function conditionBranchSelection(step: AutomationRunStepView): { key: string; l
     }
   }
   return null
+}
+function stepOutputView(step: AutomationRunStepView): AutomationStepOutputView {
+  return automationStepOutputView(step.result, isZh.value)
 }
 function branchChildStep(stepKey: string): { branchKey: string; actionIndex: string } | null {
   const m = /\.branch\.([A-Za-z0-9_-]+)\.(\d+)$/.exec(stepKey)
@@ -422,8 +430,10 @@ const RERUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
   RULE_MISSING_OR_DISABLED: 'runs.rerunError.ruleMissingOrDisabled',
   RULE_CHANGED: 'runs.rerunError.ruleChanged',
   RETRY_LEDGER_EVIDENCE_MISSING: 'runs.rerunError.ledgerEvidenceMissing',
-  // #5803: item 10 of the enumeration below.
+  // #5803: item 11 of the enumeration below.
   SHEET_DELETED: 'runs.rerunError.sheetDeleted',
+  // 客户反馈 2026-09-24 #3 final review F2: item 4 of the enumeration below (normally mirrored, never sent).
+  TARGET_RECORD_MISSING_NOT_RETRYABLE: 'runs.rerunError.targetRecordMissing',
   // Round-2 B5 — the route guard's 403 body is `{ error: 'AccessDenied', code: 'ADMIN_REQUIRED',
   // message: '<English>' }` (routes/automation.ts:793 requireAdminRole). The SHARED normalizer
   // (multitable/api/client.ts normalizeApiErrorPayload) only reads a top-level `code` when `error`
@@ -473,19 +483,27 @@ function mapRerunError(err: unknown): string {
  *      event, and a record-less `{ _triggeredBy: 'schedule' }` — not proven equivalent over all
  *      inputs. It fails CLOSED on `undefined`/absent, which the current detail path cannot produce.
  *      → button DISABLED + reason.
+ *   4. 409 TARGET_RECORD_MISSING_NOT_RETRYABLE  客户反馈 2026-09-24 #3 final review F2,
+ *      `isTargetRecordMissingSkippedExecution` (multitable/automation-retry-eligibility.ts) — the run is
+ *      `skipped` and EVERY step was skipped with the values-free `reason: 'target_record_missing'` (a
+ *      record.deleted rule acting on its own, already-gone, trigger record): a retry can only skip again.
+ *      The detail GET carries each step's `output` as the step view's `result` (routes/automation.ts
+ *      toWorkflowJobView, and the persisted-jobs path stores the same redacted output), so
+ *      `isTargetRecordMissingSkippedRun` below restates the predicate over the loaded detail. → button
+ *      DISABLED + reason.
  *
  *  NOT PREDICTABLE (still sent; the server's refusal is surfaced verbatim-by-code via mapRerunError):
- *   4. 404 NOT_FOUND                     :2721 — the row can be deleted between list and click.
- *   5. 409 RETRY_WINDOW_EXPIRED          :2748-2753 — measured on the LINEAGE ROOT's triggeredAt
+ *   5. 404 NOT_FOUND                     :2721 — the row can be deleted between list and click.
+ *   6. 409 RETRY_WINDOW_EXPIRED          :2748-2753 — measured on the LINEAGE ROOT's triggeredAt
  *      (a row this view may never have loaded) against a backend-only window
  *      (multitable/automation-retry-eligibility.ts:111, not imported by apps/web).
- *   6. 409 START_APPROVAL_ALREADY_CREATED :2757-2760 — approval-bridge query over the lineage.
- *   7. 409 RULE_MISSING_OR_DISABLED      :2764-2765 — CURRENT rule state; the run only carries a
+ *   7. 409 START_APPROVAL_ALREADY_CREATED :2757-2760 — approval-bridge query over the lineage.
+ *   8. 409 RULE_MISSING_OR_DISABLED      :2764-2765 — CURRENT rule state; the run only carries a
  *      historical snapshot.
- *   8. 409 RULE_CHANGED                  :2775-2781 — fingerprint of the CURRENT rule vs the one
+ *   9. 409 RULE_CHANGED                  :2775-2781 — fingerprint of the CURRENT rule vs the one
  *      stored at run time; the stored fingerprint is not on the run view at all.
- *   9. 409 RETRY_LEDGER_EVIDENCE_MISSING :2790-2795 — retry-ledger evidence query.
- *  10. 409 SHEET_DELETED                 #5803, `ruleSheetLive` in retryExecution (code
+ *  10. 409 RETRY_LEDGER_EVIDENCE_MISSING :2790-2795 — retry-ledger evidence query.
+ *  11. 409 SHEET_DELETED                 #5803, `ruleSheetLive` in retryExecution (code
  *      `SHEET_DELETED_CODE`) — the rule's sheet is soft-deleted. Sheet state is not on the run
  *      view, and the sheet can be deleted between list and click. Nothing runs or is recorded and the
  *      first-retry marker is not spent, so the same re-run works once the sheet is restored.
@@ -505,13 +523,32 @@ function hasUsableStoredTriggerEvent(value: unknown): boolean {
 }
 
 /**
+ * Class 4 above — mirror of automation-retry-eligibility.ts `isTargetRecordMissingSkippedExecution` over the
+ * loaded detail: status `skipped`, at least one step, and every step `skipped` with a plain-object result
+ * whose `reason` is the values-free `target_record_missing`. Never wider than the backend: a skipped run with
+ * any other skip reason, or a failed run containing such a step, stays enabled.
+ */
+function isTargetRecordMissingSkippedRun(run: AutomationRunView): boolean {
+  if (run.status !== 'skipped') return false
+  const steps = detail.value?.id === run.id ? detail.value.steps ?? [] : []
+  return steps.length > 0 && steps.every((step) => (
+    step.status === 'skipped'
+    && typeof step.result === 'object'
+    && step.result !== null
+    && !Array.isArray(step.result)
+    && (step.result as Record<string, unknown>).reason === 'target_record_missing'
+  ))
+}
+
+/**
  * Round-2 B1 — the refusal this row would deterministically get, or null when the request is worth
- * sending. Only classes 2 and 3 above; `detail` is always THIS run's detail where the button
+ * sending. Only classes 2, 3 and 4 above; `detail` is always THIS run's detail where the button
  * renders (toggleExpand nulls it before each fetch and drops stale responses).
  */
 function rerunBlockedReasonKey(run: AutomationRunView): AutomationLabelKey | null {
   if (run.triggeredBy === 'manual_test') return 'runs.rerunError.testRunNotRetryable'
   if (!hasUsableStoredTriggerEvent(detail.value?.triggerEvent)) return 'runs.rerunError.missingTriggerEvent'
+  if (isTargetRecordMissingSkippedRun(run)) return 'runs.rerunError.targetRecordMissing'
   return null
 }
 
@@ -742,5 +779,6 @@ if (isAdmin) void loadData()
 .automation-runs__branch-selection { width: 100%; padding: 4px 8px; background: var(--el-color-primary-light-9); color: var(--el-color-primary-dark-2); border-radius: 4px; font-size: 11px; font-weight: 600; }
 .automation-runs__step-error { width: 100%; padding: 4px 8px; background: var(--el-color-danger-light-9); color: var(--ms-color-danger); border-radius: 4px; font-size: 11px; }
 .automation-runs__step-output { width: 100%; padding: 4px 8px; background: var(--ms-bg-page); color: var(--ms-text-2); border-radius: 4px; font-size: 11px; word-break: break-all; }
+.automation-runs__step-reason { width: 100%; padding: 4px 8px; background: var(--ms-bg-page); color: var(--ms-text-1); border-radius: 4px; font-size: 12px; }
 .automation-runs__json { width: 100%; margin: 0; padding: 8px; background: var(--ms-bg-page); color: var(--ms-text-2); border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
 </style>

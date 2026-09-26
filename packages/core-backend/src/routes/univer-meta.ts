@@ -204,6 +204,7 @@ import {
   SheetNotLiveError,
   assertSheetLive,
   assertSheetLiveForUpdate,
+  assertSheetsLiveForUpdate,
   loadSheetLiveness,
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
@@ -19904,7 +19905,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Gating-row locks FIRST, deterministic order (sheets sorted, then records): serializes against
         // permission grant/revoke (which take the sheet FOR UPDATE) and against concurrent instances of
         // this op. The forward writer re-locks rec_A later in this same transaction (no-op).
-        await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])
+        //
+        // #5954: the sheet locks RE-READ LIVENESS under the lock, for BOTH ends. `livenessA`/`livenessB`
+        // above were read PRE-transaction; a soft delete of either sheet that commits after those reads
+        // leaves this lock free (or hands it over once the deleter commits). The lock-only statement this
+        // replaced then wrote when sheet B had died (200: an `add` wrote the forward edge and bumped rec_A's
+        // version, a `remove` removed it); when sheet A had died it was refused only incidentally, by Lock
+        // C's readability derivation (the uniform 403, after the base-A authority check and the quota call),
+        // never by a liveness check. The helper locks both rows in JS code-unit `id` order in ONE statement
+        // and throws SheetNotLiveError — mapped below to the same values-free sendSheetNotLive 404 the
+        // pre-transaction gates answer, and rolling this transaction back. The argument order is the refusal
+        // PRECEDENCE (B, then A — the same order the gates above run in): it picks which 404 body is answered
+        // when both ends died with different verdicts (pinned by the mirror-op guard test and real-DB F-8).
+        // The lock order is the helper's own: it sorts the ids in JS and the statement locks them in that
+        // array order (`WITH ORDINALITY … ORDER BY u.ord`) — the order lockRecordLinkTargetSheetsOnQuery
+        // uses — whatever the database locale and whatever characters the ids carry (sheet ids are
+        // client-chosen: POST /sheets accepts any 1–50 character `id`).
+        await assertSheetsLiveForUpdate(query, [sheetB, sheetA])
         // §4: re-derive the base-B sheet capability UNDER the lock so a concurrent sheet-B grant revoke
         // cannot be missed. capsB/scopeB above were resolved PRE-transaction; because a sheet-B write grant
         // LIFTS the capability (applyContextSheetSchemaWriteGrant), a revoke committing between that resolve

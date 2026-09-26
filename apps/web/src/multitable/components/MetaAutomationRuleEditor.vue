@@ -351,7 +351,7 @@
                   :key="type"
                   :value="type"
                   :data-value="type"
-                  :disabled="isUnsupportedSelectableActionType(type)"
+                  :disabled="isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)"
                   :label="automationActionTypeLabel(type, isZh)"
                 />
               </el-select>
@@ -417,6 +417,19 @@
               >
                 {{ automationLabel(crossBaseTargets[action.draftId].kind === 'create' ? 'actionConfig.crossBaseCreateTargetIncomplete' : 'actionConfig.crossBaseTargetIncomplete', isZh) }}
               </div>
+            </div>
+
+            <!-- 客户反馈 2026-09-24 #3 (裁定 PR #6074): under `record.deleted` the trigger record is already gone, so a
+                 same-base update/delete/lock of it (top level or inside a branch) can only no-op — and used to
+                 self-chain into three execution logs. The option is disabled in the selects above/below; a
+                 LOADED rule keeps its action visible (loadable) and shows this hint, and the same sentence blocks
+                 save (automationSaveBlockReasons.ts) exactly as the backend refuses it (DELETED_TRIGGER_SELF_MUTATION). -->
+            <div
+              v-if="deletedTriggerSelfMutationOf(action)"
+              class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              data-field="deletedTriggerSelfMutationHint"
+            >
+              {{ automationLabel('actionConfig.deletedTriggerSelfMutation', isZh) }}
             </div>
 
             <!-- update_record config -->
@@ -1425,7 +1438,7 @@
                   <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1498,7 +1511,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-default-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1582,7 +1595,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-parallel-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -3699,9 +3712,65 @@ const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
   return out
 })
 
+// 客户反馈 2026-09-24 #3 (裁定 PR #6074) — under a `record.deleted` trigger the trigger record no longer exists,
+// so a SAME-BASE update_record / delete_record / lock_record (which the executor addresses at
+// `context.recordId`) can only be a 0-row no-op; before the executor fix it also re-emitted a ghost
+// record.deleted and chained itself to the depth cap (ONE user delete ⇒ THREE execution logs). The backend
+// now refuses that shape at save (automation-service.ts validateDeletedTriggerSelfMutation, code
+// DELETED_TRIGGER_SELF_MUTATION); this editor mirrors it three ways: the option is disabled while the trigger
+// is record.deleted, the action card shows the same sentence as a hint, and save is blocked with an anchored
+// reason. A LOADED rule of that shape stays loadable (its type is still rendered/selected) — it just cannot be
+// saved forward until the action or the trigger changes; disabling it goes through the manager toggle, which
+// the backend lets through.
+const TRIGGER_RECORD_MUTATING_ACTION_TYPES: ReadonlySet<string> = new Set(['update_record', 'delete_record', 'lock_record'])
+
+function isDeletedTriggerBlockedActionType(type: string): boolean {
+  return draft.value.triggerType === 'record.deleted' && TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type)
+}
+
+/**
+ * Does this draft action (or a branch sub-action inside it) mutate the trigger record under a
+ * `record.deleted` trigger? Mirrors the backend rule: a COMPLETE explicit cross-base triple retargets the
+ * write (allowed); anything else resolves to the trigger record. Branch sub-actions are editor-authored and
+ * carry no cross-base target, so their type alone decides.
+ */
+function deletedTriggerSelfMutationOf(action: DraftAction): boolean {
+  if (draft.value.triggerType !== 'record.deleted') return false
+  if (TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(action.type)) {
+    const target = crossBaseTargetOf(action)
+    return !(target && target.kind === 'mutate' && !crossBaseTargetIncomplete(target))
+  }
+  const nestedTypes: string[] = [
+    ...(action.config.branches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+    ...(action.config.defaultBranch?.actions ?? []).map((sub) => sub.type),
+    ...(action.config.parallelBranches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+    // A loaded branch the v1 UI cannot round-trip is kept READ-ONLY with its raw config preserved verbatim
+    // (branchOriginal / parallelBranchOriginal); its sub-actions still run, so they still count here.
+    ...rawBranchActionTypes(action.config.branchOriginal),
+    ...rawBranchActionTypes(action.config.parallelBranchOriginal),
+  ]
+  return nestedTypes.some((type) => TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type))
+}
+
+/** The `type` of every sub-action inside a RAW (as-loaded) condition_branch / parallel_branch config. */
+function rawBranchActionTypes(raw: unknown): string[] {
+  if (!isPlainRecord(raw)) return []
+  const out: string[] = []
+  const collect = (branch: unknown): void => {
+    if (!isPlainRecord(branch) || !Array.isArray(branch.actions)) return
+    for (const sub of branch.actions) {
+      if (isPlainRecord(sub) && typeof sub.type === 'string') out.push(sub.type)
+    }
+  }
+  if (Array.isArray(raw.branches)) raw.branches.forEach(collect)
+  collect(raw.defaultBranch)
+  return out
+}
+
 const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
   return draft.value.actions.map((action, index) => {
     const snapshot: SaveBlockActionSnapshot = { index, type: action.type }
+    if (deletedTriggerSelfMutationOf(action)) snapshot.deletedTriggerSelfMutation = true
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
       const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)

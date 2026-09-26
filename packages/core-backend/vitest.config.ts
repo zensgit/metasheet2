@@ -1210,6 +1210,12 @@ export default defineConfig({
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
       'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
       'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
+      // C2 cross-base mirror Decision-F concurrency goldens, incl. the #5954 sheet-liveness-under-lock race
+      // (a soft delete of either end committed while the op is parked on its sheet lock). Real Postgres
+      // only (pg_blocking_pids-observed interleavings) — excluded HERE so the no-DB lane cannot
+      // collect-and-skip it green; whole-file wired into `Run multitable real-DB integration`, and both
+      // points pinned by the exact-anchor CI wiring contract.
+      'tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

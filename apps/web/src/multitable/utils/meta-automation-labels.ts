@@ -62,6 +62,13 @@ export type AutomationLabelKey =
   | 'log.retry'
   | 'log.loading'
   | 'log.empty'
+  // 客户反馈 2026-09-24 #3 final review F1: the rule log panel labels a skipped run 已跳过 (stats + badge) and
+  // renders the backend's values-free step reason codes as sentences, never as the raw internal code.
+  | 'log.skipped'
+  | 'log.statusSkipped'
+  | 'log.reason.targetRecordMissing'
+  | 'log.reason.targetRecordMissingNoop'
+  | 'log.reason.backwriteTargetRecordMissing'
   | 'support.copyPacket'
   | 'support.downloadJson'
   | 'support.clipboardUnavailable'
@@ -149,6 +156,7 @@ export type AutomationLabelKey =
   | 'actionConfig.deleteRecordAck'
   | 'actionConfig.deleteRecordWarningCrossBase'
   | 'actionConfig.deleteRecordAckCrossBase'
+  | 'actionConfig.deletedTriggerSelfMutation'
   | 'actionConfig.crossBaseTargetWarning'
   | 'actionConfig.crossBaseTargetIncomplete'
   | 'actionConfig.crossBaseCreateTargetWarning'
@@ -388,6 +396,8 @@ export type AutomationLabelKey =
   | 'runs.rerunError.ledgerEvidenceMissing'
   // #5803: the rule's sheet is soft-deleted; nothing ran or was recorded.
   | 'runs.rerunError.sheetDeleted'
+  // 客户反馈 2026-09-24 #3 final review F2: every step was skipped because the trigger record is gone.
+  | 'runs.rerunError.targetRecordMissing'
   // Round-2 B5: the route's requireAdminRole() 403 body carries `code` BESIDE the string `error`,
   // so the shared normalizer keys the thrown error as `AccessDenied` and the raw English server
   // string would otherwise render verbatim in a zh session.
@@ -425,6 +435,11 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.retry',
   'log.loading',
   'log.empty',
+  'log.skipped',
+  'log.statusSkipped',
+  'log.reason.targetRecordMissing',
+  'log.reason.targetRecordMissingNoop',
+  'log.reason.backwriteTargetRecordMissing',
   'support.copyPacket',
   'support.downloadJson',
   'support.clipboardUnavailable',
@@ -737,6 +752,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.rerunError.ruleChanged',
   'runs.rerunError.ledgerEvidenceMissing',
   'runs.rerunError.sheetDeleted',
+  'runs.rerunError.targetRecordMissing',
   'runs.rerunError.adminRequired',
   'runs.rerunError.generic',
   'resultWriteback.title',
@@ -770,6 +786,24 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'log.retry': { en: 'Retry', zh: '重试' },
   'log.loading': { en: 'Loading logs...', zh: '正在加载日志...' },
   'log.empty': { en: 'No execution logs found.', zh: '暂无执行日志。' },
+  // Stats-bar column (capitalised like Total / Success / Failed) and the run/step badge + filter wording.
+  'log.skipped': { en: 'Skipped', zh: '已跳过' },
+  'log.statusSkipped': { en: 'skipped', zh: '已跳过' },
+  // Values-free reason codes (automation-executor.ts TARGET_RECORD_MISSING_SKIP_REASON). The skipped step:
+  'log.reason.targetRecordMissing': {
+    en: 'The trigger record no longer exists; skipped (nothing was changed).',
+    zh: '触发记录已不存在，已跳过（未做任何修改）',
+  },
+  // …the update_record no-op, which keeps its `success` status (so it does not say "skipped"):
+  'log.reason.targetRecordMissingNoop': {
+    en: 'The trigger record no longer exists; nothing was changed.',
+    zh: '触发记录已不存在，未做任何修改',
+  },
+  // …and a same-base approval-result writeback whose record was gone (`backwriteSkipped`):
+  'log.reason.backwriteTargetRecordMissing': {
+    en: 'Approval result not written back: the trigger record no longer exists (nothing was changed).',
+    zh: '审批结果未写回：触发记录已不存在（未做任何修改）',
+  },
   'support.copyPacket': { en: 'Copy redacted packet', zh: '复制脱敏包' },
   'support.downloadJson': { en: 'Download JSON', zh: '下载 JSON' },
   'support.clipboardUnavailable': { en: 'Clipboard unavailable', zh: '剪贴板不可用' },
@@ -924,6 +958,14 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.deleteRecordAckCrossBase': {
     en: 'I understand this permanently deletes the target record in another base.',
     zh: '我确认此动作会永久删除另一个 base 中的目标记录。',
+  },
+  // 客户反馈 2026-09-24 #3 (裁定 PR #6074): under a `record.deleted` trigger the trigger record is already gone,
+  // so a same-base update/delete/lock of it can only no-op (and used to self-chain into three execution logs).
+  // The zh sentence is byte-identical to the backend refusal message (automation-service.ts
+  // DELETED_TRIGGER_SELF_MUTATION_MESSAGE) so the inline hint and the 400 read the same.
+  'actionConfig.deletedTriggerSelfMutation': {
+    en: 'When a record is deleted its trigger record no longer exists, so it cannot be updated, deleted or locked. Pick another action, or another trigger.',
+    zh: '记录删除时触发记录已不存在，不能再修改/删除/锁定它。请改用其他动作，或换一个触发条件。',
   },
   'actionConfig.crossBaseTargetWarning': {
     en: 'This action targets a record in ANOTHER base, not the trigger record in this table. The target below is kept exactly as loaded — this editor cannot change it.',
@@ -1200,6 +1242,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.rerunError.ruleChanged': { en: "The rule's actions changed since this run; cannot re-run safely.", zh: '规则动作在此次运行后已变更，无法安全重新执行。' },
   'runs.rerunError.ledgerEvidenceMissing': { en: 'Retry evidence for this execution is missing.', zh: '该执行的重试证据缺失。' },
   'runs.rerunError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was re-run. Restore the sheet and try again.", zh: '规则所在的表已被删除，未重新执行。请先恢复该表后重试。' },
+  'runs.rerunError.targetRecordMissing': {
+    en: 'Every step was skipped because the trigger record no longer exists; re-running cannot change that.',
+    zh: '触发记录已不存在，该执行的所有步骤均已跳过，重新执行也不会有任何变化。',
+  },
   'runs.rerunError.adminRequired': { en: 'Re-running an execution requires admin privileges.', zh: '重新执行需要管理员权限。' },
   'runs.rerunError.generic': { en: 'Re-run failed.', zh: '重新执行失败。' },
   'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },
@@ -1284,6 +1330,48 @@ export function automationStatusLabel(status: AutomationStatus | UnknownAutomati
   if (status === 'rejected') return automationLabel('status.rejected', isZh)
   if (status === 'errored') return automationLabel('status.errored', isZh)
   return String(status)
+}
+
+/** The backend's values-free "trigger record is gone" code (automation-executor.ts TARGET_RECORD_MISSING_SKIP_REASON). */
+const TARGET_RECORD_MISSING_REASON = 'target_record_missing'
+
+export interface AutomationStepOutputView {
+  /** Localised sentence for a recognised values-free reason code in the step output, else null. */
+  reason: string | null
+  /** The output with the recognised marker keys removed (null when nothing is left), else the output as-is. */
+  output: unknown
+}
+
+/**
+ * 客户反馈 2026-09-24 #3 final review F1 — a step's `output` is rendered as one-line JSON, so the backend's
+ * internal reason codes reached a zh customer verbatim ("reason":"target_record_missing"). This recognises the
+ * three values-free markers the #3 fix writes and returns a sentence for each, plus the output WITHOUT those
+ * keys (ids and any other keys stay raw — this module's scope keeps ids raw). Anything else is untouched:
+ *   { reason: 'target_record_missing', noop: true } → update_record no-op (status stays success)
+ *   { reason: 'target_record_missing' }             → skipped same-base delete of a vanished trigger record
+ *   { backwriteSkipped: 'target_record_missing' }   → same-base approval-result writeback found its record gone
+ * A cross-base `backwriteSkipped` carries an error sentence, not this code, and is left raw on purpose.
+ */
+export function automationStepOutputView(output: unknown, isZh: boolean): AutomationStepOutputView {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return { reason: null, output }
+  const record = output as Record<string, unknown>
+  let key: AutomationLabelKey | null = null
+  let strip: string[] = []
+  if (record.reason === TARGET_RECORD_MISSING_REASON) {
+    if (record.noop === true) {
+      key = 'log.reason.targetRecordMissingNoop'
+      strip = ['reason', 'noop']
+    } else {
+      key = 'log.reason.targetRecordMissing'
+      strip = ['reason']
+    }
+  } else if (record.backwriteSkipped === TARGET_RECORD_MISSING_REASON) {
+    key = 'log.reason.backwriteTargetRecordMissing'
+    strip = ['backwriteSkipped']
+  }
+  if (!key) return { reason: null, output }
+  const rest = Object.fromEntries(Object.entries(record).filter(([k]) => !strip.includes(k)))
+  return { reason: automationLabel(key, isZh), output: Object.keys(rest).length > 0 ? rest : null }
 }
 
 export function automationActionTypeLabel(type: AutomationActionType | UnknownAutomationString, isZh: boolean): string {
