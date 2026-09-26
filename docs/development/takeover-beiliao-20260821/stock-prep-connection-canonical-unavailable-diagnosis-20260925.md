@@ -3,12 +3,16 @@
 > values-free：本文只写表名、列名、条件、文件行号，不含主机、口令、令牌、连接 id、属主 id。
 > 演示服务器统称「演示机」。
 >
-> **基线**：所有 `path:line` 在 origin/main `4189aa096` 上成立。下列文件在演示机当前版本 r59
+> **基线**：所有 `path:line` 在 `4189aa096`（本分支的 merge-base）上成立。下列文件在演示机当前版本 r59
 > （`05461c739`）与 `4189aa096` 之间 `git diff --stat` 为空，因此本文的调用链同样适用于演示机上跑的代码：
 > `connection-resolver.cjs`、`external-systems.cjs`、`http-routes.cjs`、`stock-preparation-table-actions.cjs`、
 > `stock-preparation-source-binding-store.cjs`、插件 `index.cjs`、`data-source-plugin-facade.ts`、
-> `DataSourceManager.ts`、`routes/data-sources.ts`、core `index.ts`、`scripts/ops/stock-preparation-scheduled-pull.mjs`、
-> `db/migration-provider.ts`、`migrations/040_data_sources.sql`、`ecosystem.config.cjs`。
+> `DataSourceManager.ts`、`routes/data-sources.ts`、`routes/admin-routes.ts`、core `index.ts`、
+> `scripts/ops/stock-preparation-scheduled-pull.mjs`、`db/migration-provider.ts`、`migrations/040_data_sources.sql`、
+> `ecosystem.config.cjs`。
+>
+> origin/main 在 `4189aa096` 之后又前进了。截至 `b736c7f5c`，上列文件里只有 core `index.ts` 有改动：在文中引用的
+> 各行之前共插入 6 行，所以文中 `index.ts` 的行号在该版本上都要加 6，其余文件的行号不变。合并前按基线纪律 rebase 后重核。
 >
 > 背景：交接文档 `handoff-r59-two-machine-20260924.md:16` 记录「备料定时试拉报
 > `CONNECTION_CANONICAL_UNAVAILABLE`（r58 日志末尾已出现）」，定性为已知、非 r59 引入。本文是对这条记录的代码侧诊断。
@@ -19,20 +23,22 @@
    `resolveCanonical` 里的 `catch`。其余命中是一处注释、测试和文档（见 §1.1 的 grep）。
 2. **能走到这个抛出点，说明被加载的那一行外接系统是 canonical 形态**，即 `integration_external_systems.connection_id` 非空。
    这由 `connection-resolver.cjs:270-279` 的分派决定。`connection_id IS NULL` 的 legacy 行进 `resolveLegacy`
-   （`:205-267`），报的是 `CONNECTION_LEGACY_*`，不会是这个码。
+   （`:205-267`），报的是 `CONNECTION_LEGACY_*` 等别的码，不会是这个码。
 3. **这个码的含义只有一句：主机侧 facade 的 `resolveConnectionRegistration` 抛了异常**，原因不限。原因在
    `connection-resolver.cjs:178` 的 `catch {}` 处被丢弃。facade 自己也按设计把「没加载 / 不是属主 / 租户不符」
    几种拒绝都归成同一个 not-found（`data-source-plugin-facade.ts:507-525`）。所以不管从 HTTP 响应、服务端日志还是前端，
    都看不出命中的是哪一种（§5 R1–R3）。
 4. **定时试拉路径上，能触发它的状态有 9 种数据状态、1 种进程状态，外加 2 种部署状态**（§2）。进程状态是 S6：
-   内存里的数据源注册表只在后端启动时从库装载一次，之后只随本进程经 API 的写入更新。启动后经 SQL 或恢复改了
-   `data_sources`，试拉仍按启动时的快照判，而 §4 的 SQL 读的是当前的库，两边就对不上。真实 PG 上逐一复现过，
-   9 种数据状态和 S6 都实测报这个码（§6）。
+   内存里的数据源注册表只在后端启动时从库装载一次，之后只随本进程经 `DataSourceManager` 写方法的修改更新
+   （`/api/data-sources` 路由）。启动后经 SQL、恢复，或者经管理员批量接口 `PUT /api/admin/data/bulk`（它直接改表，
+   不经过 `DataSourceManager`）改了 `data_sources`，试拉仍按启动时的快照判，而 §4 的 SQL 读的是当前的库，两边就对不上。
+   本机一次性 PG（合成数据）上逐一复现过，9 种数据状态和 S6 都实测报这个码（§6）。
 5. **PR #5933 合入并在演示机执行后，不会消除这个错误**（§3）。#5933 只改 `connection_id IS NULL` 的行；
    报这个码的行按第 2 条一定是 `connection_id` 非空的行，两者不相交。#5933 反而可能新增这个码：
    它会把「源已停用（`is_active=false`）」一类 legacy 行提升成 canonical，这些行原来报 `CONNECTION_LEGACY_FALLBACK_DENIED`，
-   提升后改报 `CONNECTION_CANONICAL_UNAVAILABLE`。真实 PG 实测：消除 0 个，新增 1 个。
-6. 演示机实际属于哪种状态，**只能上机判定**。§4 给出只读 SQL 与日志检查清单，SQL 的判定列已在真实 PG 上用 17 个
+   提升后改报 `CONNECTION_CANONICAL_UNAVAILABLE`。本机一次性 PG（合成数据）实测：消除 0 个，新增 1 个。这两个数
+   只反映合成夹具，不代表演示机；「不会消除」由代码直接得出，不依赖这两个数。
+6. 演示机实际属于哪种状态，**只能上机判定**。§4 给出只读 SQL 与日志检查清单，SQL 的判定列已在本机一次性 PG 上用 17 个
    合成用例对照实际运行结果（17/17 一致），9 个变异各至少让 1 个用例不一致；试拉行的认定已对照真实的绑定表取行逻辑
    （7 种绑定形态 7/7 一致，§6）。SQL 只能读库，所以它只适用于**最近一次重启之后**的报错，并且要先按 §4.6 排除 S6。
    R60 升级本身会重启后端，r58/r59 日志里的历史报错，要等重启后的下一次试拉复现了，才能拿 Q3 判。
@@ -61,7 +67,7 @@ git grep -n "CONNECTION_CANONICAL_UNAVAILABLE" origin/main -- .
 | 5a | 取动作时按 `(tenant, workspace, action)` 查 `integration_stock_prep_source_binding` 覆盖 `source.externalSystemId`；查不到就用部署默认值 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON` | `stock-preparation-table-actions.cjs:918-927`、`:888-907`；`stock-preparation-source-binding-store.cjs:44`；`migrations/079_…sql` 表注释 |
 | 5b | B2a 门用的是**不解析连接**的访问器，这一步不会产生本错误码 | `http-routes.cjs:4291-4294` → `external-systems.cjs:1007-1025` |
 | 6 | `loadTableActionSourceAdapter`：先确定读身份，再加载一次 | `http-routes.cjs:4614-4673` |
-| 6a | 读身份：动作 id 等于冻结 id 时，取外接系统行上服务端写入的 `config.dataSourceOwnerId`（归属戳）；没有戳就用请求者本人（令牌用户 `user.id`） | `http-routes.cjs:4506-4519`（等值比较在 `:4512`，冻结 id 定义在 `stock-preparation-workbench-access.cjs:243`）；peek 失败时回落为请求者 `:4535-4547`；`requestPrincipal` `:892-895` |
+| 6a | 读身份：动作 id 等于冻结 id 时，取外接系统行上服务端写入的 `config.dataSourceOwnerId`（归属戳）；没有戳就用请求者本人（令牌用户的 `user.id`，没有 id 时取 `user.email`） | `http-routes.cjs:4506-4519`（等值比较在 `:4512`，冻结 id 定义在 `stock-preparation-workbench-access.cjs:243`）；peek 失败时回落为请求者 `:4535-4547`；`requestPrincipal` `:892-895` |
 | 6b | 以该身份、`runAs: 'user'` 加载 | `http-routes.cjs:4639-4645`；`scopedAdapterInput` `:1272-1278` |
 | 7 | `getExternalSystemForAdapter`：按 `(tenant_id, workspace_id, id)` 取行（无 workspace 提示时不放宽）；`data-source:sql-readonly` 走连接解析器；解析器抛的 `code` 原样放进 `ExternalSystemValidationError.details.code`，并被提升为 `.code` | `external-systems.cjs:1027-1058`；`selectScopedRow` `:970-976`；行映射 `:290-311`（`connectionId` `:294`）；错误类 `:92-99` |
 | 8 | 解析器：非 `sql-readonly` 直接放行；`connectionId` 非空进 `resolveCanonical`，为 NULL 进 `resolveLegacy` | `connection-resolver.cjs:368-378`、`:269-289`（分派 `:270-279`） |
@@ -72,7 +78,7 @@ git grep -n "CONNECTION_CANONICAL_UNAVAILABLE" origin/main -- .
 | 13 | 回到 HTTP：`inferErrorCode` 取 `error.code`；`name` 含 `Validation` → **400** | `http-routes.cjs:745-757`、`:848-852`、`:875` |
 | 14 | 脚本把 `error.code` 记进该项目的 JSON 行（`error: "CONNECTION_CANONICAL_UNAVAILABLE"`, `dryRunHttpStatus: 400`, `failed: true`），整轮以退出码 1 结束 | `…scheduled-pull.mjs:473-477`、`:517-525`、`:696` |
 
-补充三点：
+补充几点：
 
 - **内存注册表的来源**：进程启动时 `startOnce()`（`index.ts:3787`）在 `:4020-4028` 先 await
   `initializeDataSourceManager` → `loadFromDatabase`，之后才在 `:4397` 装插件、在 `:4861` listen。所以这不是
@@ -81,10 +87,23 @@ git grep -n "CONNECTION_CANONICAL_UNAVAILABLE" origin/main -- .
   唯一的调用在启动时（`index.ts:4024` → `routes/data-sources.ts:224-228`）。构造器的 `autoLoadFromDb`（`:295-299`）
   没有调用方使用（`src` 里唯一的 `new DataSourceManager(` 在 `routes/data-sources.ts:210`，不带参数）。内存的写入只有
   三处：启动装载 `:337`、`addDataSource` `:511`、`updateDataSource` `:592`（适配器表在 `addDataSourceInternal` `:861`
-  写入，也只由这三处调用：`:335`、`:510`、`:591`）。删除只在 `removeDataSource` `:1133-1135`。所以后端运行期间，
-  经 SQL 直改、备份恢复、迁移或 ops SQL 对 `data_sources` 的改动，要到下次重启才进入注册表（§2 的 S6）。
-  `integration_external_systems` 与绑定表不同，每次请求都读库（`external-systems.cjs:970-976`；绑定表见
-  `http-routes.cjs:3695-3700` 的说明），改了立即生效。
+  写入，也只由这三处调用：`:335`、`:510`、`:591`）。从内存移除的只有 `removeDataSource` `:1133-1135`（`dispose()` `:1637-1644` 会整体清空，但 `src` 里没有调用方）；`updateDataSource`
+  在 `:588-589` 先删、`:591` 再加回，属于替换。这几个写方法在 `src` 里只由 `/api/data-sources` 路由调用
+  （`routes/data-sources.ts:545`、`:715`、`:809`、`:905`）。
+- **绕过注册表写 `data_sources` 的应用内途径**：管理员批量接口 `PUT /api/admin/data/bulk` 与 `DELETE /api/admin/data/bulk`
+  （`routes/admin-routes.ts:1500-1625`、`:1381-1494`，挂在 `index.ts:1984`）。两者的表名白名单都含 `data_sources`
+  （`:1528-1532`、`:1408-1412`），直接执行 `db.updateTable(table).set(updates)`（`:1583`）或 `db.deleteFrom(table)`
+  （`:1449`），`updates` 不限列。这个文件只从 `DataSourceManager` 引入了一个错误码常量和一个外键判别函数
+  （`:39-42`），不碰注册表。按全仓 grep，应用运行时代码（不含迁移）里直接写这张表的只有 `DataSourceManager` 自己和这两个接口；
+  `DataSourceManager` 的 `updateStatus`（`:922-946`）只写连接状态列和 `updated_at`，不影响装载与判定。
+  批量删除先做引用预检，目标源仍被 canonical 行引用就拒绝（`:1434-1445`，§6 实测 409）；预检查询本身失败时退到外键兜底
+  （`:1478-1486`），外键只护活的源（`live_id`）。所以批量删除删不掉试拉行所指的活源；最多删掉一个已软删、本来就没装载的源，
+  删后内存和库里都没有它，两边仍一致。对试拉行所指的源，能造成 S6 的是批量更新：它只在设置非空 `deleted_at` 时才做引用
+  预检（`:1564-1579`），改 `is_active`、`owner_id`、`tenant_id`、`scope_kind`、`type` 或清空 `deleted_at` 都不做预检，直接执行。
+  所以后端运行期间，经这两个接口、SQL 直改、备份恢复、迁移或 ops SQL 对 `data_sources` 的改动，要到下次重启才进入
+  注册表（§2 的 S6）。
+- **每次请求都读库的表**：与内存注册表不同，`integration_external_systems` 和绑定表都是每次请求读库
+  （`external-systems.cjs:970-976`；绑定表见 `http-routes.cjs:3695-3700` 的说明），改了立即生效。
 - **加载阶段的过滤**：`DataSourceManager.ts:314-363` 只装载 `is_active = true AND deleted_at IS NULL` 的行（`:324-325`）。
   类型不在注册表里的行跳过（`:331-333`，注册表见 `:193-200`）。凭据解密失败的行也跳过（`recordToConfig` `:417` →
   `decryptCredentials` `:401-403`），逐行 `catch` 并打日志（`:352-354`）。汇总日志在 `:358`，整体查询失败在 `:359-362`。
@@ -104,11 +123,11 @@ git grep -n "CONNECTION_CANONICAL_UNAVAILABLE" origin/main -- .
 | **S2d** | 源凭据解密失败（加密密钥与写入时不同） | `recordToConfig` 抛（`:417` → `:401-403`），逐行 `catch` 跳过（`:352-354`）→ `:623-624` | **SQL 看不出来**，只能看日志（§4.6） |
 | **S2e** | 整个注册表没装载（初始化失败，或查询 `data_sources` 失败） | `index.ts:4026-4028` 降级继续运行；或 `DataSourceManager.ts:359-362` → 所有 id 都 not found | 部署状态。特征：**所有** canonical 行都报这个码，包括 SQL 判定为正常的行 |
 | **S2f** | 源行不存在（被硬删） | `:623-624` | 引用中的**活**源不能硬删（`ON DELETE RESTRICT`）；已软删的源可以硬删（`zzzz20260920120000_…:47-52`），硬删后留下的悬空行进入本态 |
-| **S3a** | 外接系统行**没有**归属戳，且令牌用户 ≠ `data_sources.owner_id` | R = 令牌用户（`http-routes.cjs:4510`、`:4518`）→ `DataSourceManager.ts:628-629` | 即 2026-09-05/06 的历史状态（`customer-delivery-guide-20260904.md:308-313`）。应用代码里写这张表的只有 `external-systems.cjs` 的 upsert（`:891`、`:935`）；迁移和 ops 脚本（如 `scripts/ops/live-id-fk-validate-20260920/02-remediate.sql`）属于 API 之外的写入。cutover 迁移只回填「戳 = 属主」的行（`zzzz20260902120000_…:97-106`），回填出的行本来就带戳。#5505 起，经 API 新建或重绑的 canonical 行都会写戳（`:916-923`、`:875-883`），不重绑的更新沿用已存的戳。所以没戳的 canonical 行，只能来自 #5452 与 #5505 之间经 API 建的行，或 API 之外的直写/恢复 |
-| **S3b** | 有归属戳，但戳 ≠ 当前 `data_sources.owner_id` | R = 戳 → `:628-629` | 戳只写被 facade 证明过的属主（`external-systems.cjs:553-567`）；编辑数据源时保留原属主（`routes/data-sources.ts:712-718`）。但**同 id 重建会改属主**：`POST /api/data-sources` 的 id 由客户端给（`routes/data-sources.ts:84`），`addDataSource` 只查内存（`DataSourceManager.ts:481-483`），落库是按 id upsert，会覆盖 `owner_id`/`tenant_id` 并清空 `deleted_at`（`:895-915`）。所以一个已软删或未装载的源，被另一个人用同一个 id 重建后，原有的戳就进入本态（租户不同时还会同时进入 S4）。另一个来源是库级直改或恢复 |
-| **S4** | 源有租户，且 ≠ 试拉租户 | `data-source-plugin-facade.ts:517-519` | 试拉租户 = `MS_TENANT_ID`，已经过令牌租户声明核对（`http-routes.cjs:1037-1061`）。外接系统行本身就是按这个租户取的（`external-systems.cjs:971`）。经 API 新建的源，租户取自建源者令牌的租户声明（`routes/data-sources.ts:533-549`） |
+| **S3a** | 外接系统行**没有**归属戳，且令牌用户 ≠ `data_sources.owner_id` | R = 令牌用户（`http-routes.cjs:4510`、`:4518`）→ `DataSourceManager.ts:628-629` | 即 2026-09-05/06 的历史状态（`customer-delivery-guide-20260904.md:308-313`）。应用代码里写这张表 `config` 的只有 `external-systems.cjs` 的 upsert（`:891`、`:935`；同文件另有删行 `:1369`）；迁移和 ops 脚本（如 `scripts/ops/live-id-fk-validate-20260920/02-remediate.sql`）属于 API 之外的写入。cutover 迁移只回填「戳 = 属主」的行（`zzzz20260902120000_…:97-106`），回填出的行本来就带戳。#5505 起，经 API 新建或重绑的 canonical 行都会写戳（`:916-923`、`:875-883`），不重绑的更新沿用已存的戳。#5452 的代码则相反：新建时不写戳（`external-systems.cjs@4da258c78:581`），经 upsert 更新标记非 TRUE 的 canonical 行时，不论改的是什么都会删掉戳（同版本 `:549-550`）。所以没戳的 canonical 行，只能来自 #5452 与 #5505 之间经 API 新建或更新过的行，或 API 之外的直写/恢复 |
+| **S3b** | 有归属戳，但戳 ≠ 当前 `data_sources.owner_id` | R = 戳 → `:628-629` | 戳只写被 facade 证明过的属主（`external-systems.cjs:553-567`）；编辑数据源时保留原属主（`routes/data-sources.ts:712-718`）。但**同 id 重建会改属主**：`POST /api/data-sources` 的 id 由客户端给（`routes/data-sources.ts:84`），`addDataSource` 只查内存（`DataSourceManager.ts:481-483`），落库是按 id upsert，会覆盖 `owner_id`/`tenant_id` 并清空 `deleted_at`（`:895-915`）。所以一个已软删或未装载的源，被另一个人用同一个 id 重建后，原有的戳就进入本态（租户不同时还会同时进入 S4）。另一个来源是库级直改或恢复，以及管理员批量接口改了 `owner_id`（§1.2 补充） |
+| **S4** | 源有租户，且 ≠ 试拉租户 | `data-source-plugin-facade.ts:517-519` | 试拉租户 = `MS_TENANT_ID`，经过 `resolveTenantId` 核对（`http-routes.cjs:1037-1061`；令牌不带租户声明的平台管理员不做这项比对，`:1045`）。外接系统行本身就是按这个租户取的（`external-systems.cjs:971`）。经 API 新建的源，租户取自建源者令牌的租户声明（`routes/data-sources.ts:533-549`） |
 | **S5** | 源无租户（`tenant_id` 为 NULL），且 `scope_kind` ≠ `legacy_private` | `data-source-plugin-facade.ts:520-522` | 同样是无租户，`scope_kind = 'legacy_private'` 在 `runAs: 'user'` 下可以通过（`:523` 只拦 service；解析器侧放行在 `connection-resolver.cjs:185-193`、`:113-118`） |
-| **S6** | 内存注册表与库不一致：后端这次启动之后，`data_sources` 经 API 以外的途径（SQL 直改、备份恢复、后端运行期间执行的迁移或 ops SQL）被改过，改的是 `is_active` / `deleted_at` / `type` / `owner_id` / `tenant_id` / `scope_kind`，或新插入了行 | 注册表只在启动时装载一次，之后只随本进程经 API 的写入更新（§1.2 补充）。`assertAccess`（`DataSourceManager.ts:621-631`）和 facade 的租户、作用域校验（`data-source-plugin-facade.ts:507-525`）都只读内存。所以试拉按**启动时的快照**判，§4 的 SQL 按**当前的库**判 | 进程状态，不是数据状态。**SQL 看不出来**：Q3 可能给出 `DATA_OK`，也可能给出一个 S 态，但它和内存里的实际原因不同（§6 实测：一个源启动时停用、没装载，之后被 SQL 启用并改了属主，Q3 判 `S3b`，内存里的原因却是没装载）。日志也看不出来：装载日志只在启动时打。重启后注册表按当前库重新装载，S6 随之消失，或者变成库里真实对应的那一态。判定见 §4.6「S6 的判定」。内存每个进程各有一份：多个后端进程并存时，一个进程经 API 的写入，也进不了另一个进程的内存。仓库里的 pm2 配置是单实例 fork（`ecosystem.config.cjs:60-61`） |
+| **S6** | 内存注册表与库不一致：后端这次启动之后，`data_sources` 经 `DataSourceManager` 以外的途径被改过，改的是 `is_active` / `deleted_at` / `type` / `owner_id` / `tenant_id` / `scope_kind`，或新插入了行。途径包括：管理员批量接口 `PUT /api/admin/data/bulk`（`table` 为 `data_sources`，`routes/admin-routes.ts:1500-1625`）、SQL 直改、备份恢复、后端运行期间执行的迁移或 ops SQL | 注册表只在启动时装载一次，之后只随本进程经 `DataSourceManager` 写方法的修改更新（`/api/data-sources` 路由）；批量接口直接改表，不经过它（§1.2 补充）。`assertAccess`（`DataSourceManager.ts:621-631`）和 facade 的租户、作用域校验（`data-source-plugin-facade.ts:507-525`）都只读内存。所以试拉按**启动时的快照**判，§4 的 SQL 按**当前的库**判 | 进程状态，不是数据状态。**SQL 看不出来**：Q3 可能给出 `DATA_OK`，也可能给出一个 S 态，但它和内存里的实际原因不同（§6 实测：一个源启动时停用、没装载，之后被 SQL 启用并改了属主，Q3 判 `S3b`，内存里的原因却是没装载）。经批量接口的「修复」同样不生效：§6 实测把停用源启用、把属主改成戳、把租户改成试拉租户、把软删源恢复，四例落库后 Q3 都判 `DATA_OK`，同一进程里仍然报本码，重启后才 OK。装载日志只在启动时打，看不出本态；批量接口会留日志行，见 §4.6。重启后注册表按当前库重新装载，S6 随之消失，或者变成库里真实对应的那一态。判定见 §4.6「S6 的判定」。内存每个进程各有一份：多个后端进程并存时，一个进程经 `DataSourceManager` 的写入，也进不了另一个进程的内存。仓库里的 pm2 配置是单实例 fork（`ecosystem.config.cjs:60-61`） |
 
 **在这条路径上不可达、已排除的分支**（亲读代码）：
 
@@ -136,8 +155,9 @@ git grep -n "CONNECTION_CANONICAL_UNAVAILABLE" origin/main -- .
   （`data-source-plugin-facade.ts:508`），`normalizeActor` 不会给出 `platformAdmin`（`DataSourceManager.ts:85-89`），
   所以只做属主等值比较（`:627-629`）。后来真正生效的修法是归属戳委派（`customer-delivery-guide-20260904.md:308-315`）。
 - 令牌过期或缺租户声明：前者即使主机鉴权放行到了处理器，请求上也没有用户，`requireTableActionAccess` 会先报 401
-  `UNAUTHENTICATED`（`http-routes.cjs:1002-1006`，在加载之前的 `:5873`）；后者脚本自己拒绝运行（`…scheduled-pull.mjs:640-651`）。
-  都不会报这个码。
+  `UNAUTHENTICATED`（`http-routes.cjs:1002-1006`，在加载之前的 `:5873`）。后者在没传 `--allow-tenantless` 时脚本自己拒绝运行
+  （`…scheduled-pull.mjs:640-651`）；传了则只告警、照常发请求（`:652-656`），租户由 `resolveTenantId`（`http-routes.cjs:1037-1061`）
+  核对，不通过时报的是 `TENANT_CONTEXT_REQUIRED`、`TENANT_MISMATCH` 等租户类的码（`:1047-1052`、`:1059`）。令牌过期、缺租户声明本身都不会变成这个码。
 
 ## 3. PR #5933（legacy 行 `connection_id` 回填）能消除什么
 
@@ -161,7 +181,7 @@ git grep -n "CONNECTION_CANONICAL_UNAVAILABLE" origin/main -- .
 | **不排除** | S2b（未查 `is_active`）、S2c（未查类型）、S2d（SQL 无法判断）、S2e/S1（部署状态） |
 
 所以一行源已停用的 legacy 行，经 #5933 提升后，会从 `LEGACY_FALLBACK_DENIED` 变成 `CANONICAL_UNAVAILABLE`。
-这一行在提升前后都不可用，只是报错码换了，但会让「按错误码归因」的排查多出一个来源。真实 PG 实测见 §6。
+这一行在提升前后都不可用，只是报错码换了，但会让「按错误码归因」的排查多出一个来源。本机合成库实测见 §6。
 
 **结论 3：#5933 真正带来的改变**，是让「可证明、标记非 TRUE」的 legacy 行从一律被拒变为可用。实测 1 行从
 `LEGACY_FALLBACK_DENIED` 变为可用。这与本错误码无关。
@@ -213,7 +233,9 @@ SELECT
     WHERE conname = 'fk_integration_external_systems_live_connection_id')              AS live_fk_validated;
 ```
 
-期望：前 6 列都为 `t`。`live_fk_validated` 为 `f` 表示存量悬空行还没清，这是 `NOT VALID` 的正常状态。
+期望：前 6 列都为 `t`。`live_fk_validated` 为 `f` 只表示这个外键还没执行过 `VALIDATE CONSTRAINT`（建时是 `NOT VALID`，
+执行见 `scripts/ops/live-id-fk-validate-20260920/03-validate.sql`），并不说明有没有悬空行；有没有悬空行要跑同目录的
+`01-inventory.sql`（只读）。
 
 ### 4.2 Q1 试拉用的是哪一行；Q2 令牌用户是否存在
 
@@ -337,6 +359,10 @@ ORDER BY j.used_by_pull DESC, verdict;
 （S3，`:628`），再看租户（S4，facade `:517`），最后看无租户作用域（S5，facade `:520`）。这几种状态报的都是同一个码，
 代码里先命中哪条并不影响结论。
 
+一处边缘差异：SQL 用 `BTRIM`，默认只去两端的空格；代码用 JS 的 `trim()`（例如 `connection-resolver.cjs:24-26`、
+`DataSourceManager.ts:243-245`），会去掉两端所有空白字符。`connection_id`、租户等值两端带制表符或换行时，两边的判定
+可能不同，这时以代码为准。
+
 **Q3 的前提**：库与内存注册表一致。Q3 读当前的库，试拉读后端这次启动时装载的注册表（§2 S6）。所以只拿它判最近一次
 重启之后的报错；即使给出了 S 态，按下表处置后仍报错的，也要回到 §4.6 做 S6 的判定。
 
@@ -348,13 +374,15 @@ ORDER BY j.used_by_pull DESC, verdict;
 | `S2b` | 源未启用 | 查清停用原因（软删路径会同时置 `is_active=false`）后再决定 |
 | `S2c` | 源类型不在注册表 | 以受支持类型重建源并重绑 |
 | `S3a` | 没有戳，且令牌用户不是属主 | 绑定者本人重新提交一次绑定（带 `connectionId`）来补写戳，见 `onsite-connection-test-runbook-20260901.md` §1.1（`:89` 起） |
-| `S3b` | 戳不是当前属主 | 先查来历（是同 id 重建，还是库级直改/恢复），再由当前属主重绑 |
+| `S3b` | 戳不是当前属主 | 先查来历（是同 id 重建，还是库级直改/恢复，或管理员批量接口改了属主），再由当前属主重绑 |
 | `S4` / `S5` | 源的租户或作用域与试拉租户不符 | 租户归属属于 owner 决定，不在本文范围 |
 | `DATA_OK:…` | 按当前的库能解析 | 转 §4.6：先做 S6 的判定，再看日志判断 S2d、S2e，最后才是 S1 |
 | `NOT_THIS_CODE:…` | 这一行不会报本错误码 | 说明试拉用的不是这一行，或者码已经变了。回到 Q1 核对；Q1 核对无误、试拉仍报本码时，按 §4.6 做 S6 的判定 |
 
-**修复何时生效**：`data_sources` 上的库级修复（SQL 直改、恢复），要等后端重启、注册表重新装载之后才生效，重启前
-试拉仍按旧快照判（S6）。经界面或 API 改数据源，会同时更新内存，不需要重启。`integration_external_systems` 与绑定表
+**修复何时生效**：`data_sources` 上的修复，只有经 `/api/data-sources` 路由做的（它调 `DataSourceManager` 的写方法，
+`routes/data-sources.ts:545`、`:715`、`:809`、`:905`）会同时更新内存，不需要重启。其它途径——管理员批量接口
+`PUT /api/admin/data/bulk`、SQL 直改、恢复——都要等后端重启、注册表重新装载之后才生效，重启前试拉仍按旧快照判（S6）。
+§6 实测：经批量接口的四种修复，落库后同一进程里仍报本码，重启后才 OK。`integration_external_systems` 与绑定表
 每次请求都读库，改了立即生效（§1.2 补充）。
 
 ### 4.4 Q4 汇总（可直接对外报的 values-free 形态）
@@ -446,7 +474,8 @@ WHERE name = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id';
 
 ### 4.6 日志检查与 S6 的判定（只读，在运维机本地看后端 pm2 日志；注意 `PM2_HOME` 用 pm2-runtime 那一份，见交接 §2）
 
-装载相关的几行只在启动时打。后端重启过多次时，只看**最后一次启动**的那一段。
+装载相关的几行只在启动时打。后端重启过多次时，只看**最后一次启动**的那一段。批量接口的几行（表中 `Bulk` 开头的）
+随时都可能出现，看 T0 之后的全部日志。
 
 | 查什么 | 出处 | 指向 |
 |---|---|---|
@@ -456,6 +485,9 @@ WHERE name = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id';
 | `[DataSourceManager] Loaded <N> data sources from database (<M> skipped)`，M > 0 | `DataSourceManager.ts:358` | 有行被跳过，对照下一行 |
 | `[DataSourceManager] Failed to load data source …`，后面跟 `Unsupported persisted data source type` | `:353` / `:332` | **S2c** |
 | 同上，后面跟 `Failed to decrypt credential` | `:353` / `:401-403` | **S2d**（加密密钥与写入凭据时的不一致） |
+| 同上，后面跟其它原因（例如 `config` 列是 JSON `null` 时 `recordToConfig`（`:410-420`）抛出的错） | `:353` | 这一行同样没装载，结果与 S2c、S2d 相同。Q3 不检查 `config`，可能给出 `DATA_OK` |
+| `Bulk data update requested` / `Bulk update completed`，且同一行有 `"table":"data_sources"` | `routes/admin-routes.ts:1517`、`:1592` | 管理员批量接口直接改过 `data_sources`，没经过注册表。行内的 `timestamp`（UTC）晚于 T0 的，是 **S6** 的线索（见下文「S6 的判定」第 3 步）。默认日志级别下两行都会打（`LOG_LEVEL` 未设时为 `info`，`core/logger.ts:78`）。这两行带 `filters`、`updates`、`initiator`，只数次数，不要抄内容 |
+| `Bulk data deletion requested` / `Bulk deletion completed`，且同一行有 `"table":"data_sources"` | `:1398`、`:1458` | 批量删除。仍被 canonical 行引用的源会被拒，这时紧跟着一行 `Bulk deletion refused` 开头的日志（`:1437`、`:1479`），所以一般不影响试拉行所指的源 |
 | `[plugin-integration-core] route failed: POST /api/integration/table-actions/:actionId/dry-run` | `http-routes.cjs:10096` | 只能说明试拉失败，**不带错误码** |
 | 计划任务自己的日志行：`"error":"CONNECTION_CANONICAL_UNAVAILABLE"`、`"dryRunHttpStatus":400` | `…scheduled-pull.mjs:517-525` | 确认错误来自试拉路径 |
 
@@ -511,17 +543,23 @@ ORDER BY 2 DESC, 1;
   按本仓库的迁移链，`data_sources` 上没有自动刷新 `updated_at` 的触发器：带这个触发器的 `040_data_sources.sql`
   （`:206-209`）在迁移链里只是一个不执行的历史标记（`migration-provider.ts:29-35`、`:86`）。上机可以用
   `SELECT count(*) FROM pg_trigger WHERE tgrelid = 'data_sources'::regclass AND NOT tgisinternal` 确认（应为 0）。
-  直接用 SQL 改库时不顺手写 `updated_at`，这一列就不会变（§6 实测）。
-- 任何一列为 `t`，也**不等于 S6**。经界面或 API 的修改同样会写这些列，但同时更新了内存（`persistDataSource`
+  直接用 SQL 改库时不顺手写 `updated_at`，这一列就不会变（§6 实测）。经管理员批量接口改也一样：它只写请求里给出的列
+  （`routes/admin-routes.ts:1583`），不会顺带写 `updated_at`（§6 实测四例都为 `f`）。
+- 任何一列为 `t`，也**不等于 S6**。经 `/api/data-sources` 的修改同样会写这些列，但同时更新了内存（`persistDataSource`
   `DataSourceManager.ts:913`，软删 `:1088`）；已装载的源每次连上、断开或出错时，`updateStatus` 也会刷新 `updated_at`
-  （`:922-946`，§6 实测）。所以 `t` 时要对运维记录：T0 之后有没有人直接改库、恢复备份，或者在后端运行期间跑过迁移或
-  `scripts/ops` 下的 SQL。
+  （`:922-946`，§6 实测）。所以只要 `ds_committed_after_start` 不是 `f`（为 `t`，或者参数关闭时为 NULL），都要对两样东西：
+  - 运维记录：T0 之后有没有人直接改库、恢复备份，或者在后端运行期间跑过迁移或 `scripts/ops` 下的 SQL；
+  - 后端日志：T0 之后有没有上表中带 `"table":"data_sources"` 的 `Bulk data update requested` / `Bulk update completed` 行
+    （只数次数，不抄内容）。日志被轮转或清理过、覆盖不到 T0 之后的全部时间时，这一项不能用来排除。
+
+  任何一项有，都按 S6 处理，以第 4 步的重启为准。
 
 4. **决定性的检验是重启**。重启后注册表按当前库重新装载（R60 升级的重启就算一次）。重启之后的下一次试拉不再报这个码，
    就是 S6；重启后仍然报，才按当前库回到 Q3 判定。不需要为这一步单独重启，等 R60 的那次即可。
 
 **S1 的判定**：日志显示最后一次启动时注册表已装载、没有跳过，Q3 对试拉行给出 `DATA_OK`，并且已按上一步排除 S6
-（报错发生在最近一次重启之后，Q6 或运维记录显示源在重启后没有被 API 以外的途径改过），错误却依旧——这时再核对部署包里
+（报错发生在最近一次重启之后，Q6、运维记录和日志显示源在重启后没有经 `DataSourceManager` 以外的途径改过，包括
+管理员批量接口 `/api/admin/data/bulk`），错误却依旧——这时再核对部署包里
 `plugins/plugin-integration-core/plugin.json` 的 `name`。标准包下 S1 不可达，见 §2。
 
 ## 5. 建议修复（本 PR 不改代码）
@@ -540,8 +578,10 @@ ORDER BY 2 DESC, 1;
 - **R5 前端没有对应文案**：前端把它归为 `PLAN_READ_FAILED` 并附上原始码（`apps/web/src/services/integration/stockPreparation/projectSync.ts:484-487`、
   `:713-717`）。`apps/web/src` 对 `connection-resolver.cjs` 里的错误码零命中
   （`grep -rnE "CONNECTION_(CANONICAL|LEGACY|ID_REQUIRED|TYPE_UNSUPPORTED|BINDING_MISMATCH|TENANT_MISMATCH|RESOLUTION|REGISTRATION|SEALED)" apps/web/src` 计数 0），也就没有对应文案。建议补一句「连接不可用，请管理员按检查清单排查」，并给出本文链接。
-- **重试风暴：不存在**。脚本每轮每个项目只发一次 POST，顺序执行，失败不重试（`…scheduled-pull.mjs:502-526`、`:675-692`）。
-  计划任务每日一次。可选改进：在汇总行里按错误码计数，现在只有 `failed` 总数（`:592-605`）。
+- **重试风暴：不存在**。脚本每轮按项目顺序执行，dry-run 失败（本码就是 dry-run 失败）时该项目只发这一次 POST，
+  不重试（`…scheduled-pull.mjs:502-526`、`:675-692`）；只有带 `--apply` 且 dry-run 成功、可执行时，才会再发一次 apply
+  POST（`:553-563`）。「计划任务每日一次」来自交付说明（`customer-delivery-guide-20260904.md:232-234`），计划任务的
+  注册不在库内。可选改进：在汇总行里按错误码计数，现在只有 `failed` 总数（`:592-605`）。
 - **R6 同 id 重建会悄悄换属主**：创建路由只在内存里查重（`DataSourceManager.ts:481-483`），落库时按 id upsert，
   并复活软删行（`:895-915`）。所以对一个已软删或未装载的 id 再「新建」一次，就会把 `owner_id`/`tenant_id` 换成新建者。
   重建者不是原戳上的属主时，仍然引用这个 id 的 canonical 绑定会从 S2a/S2b/S2c/S2d 转成 S3b（租户不同时还会同时是 S4），
@@ -552,17 +592,22 @@ ORDER BY 2 DESC, 1;
 - **R7 注册表看不见库级改动（S6）**：注册表启动后不再从库刷新（§1.2 补充），而 SQL 侧只有 Q6 这种间接线索。
   建议在 R1 的 `not_loaded` 原因上附一个布尔：库里这个 id 是否存在且为活行（按主键的一次只读查询，只写服务端日志）。
   这样「库里是活的、内存里没有」就能直接从日志看出是 S6。
+- **R8 管理员批量接口绕过注册表**：`PUT/DELETE /api/admin/data/bulk` 的表名白名单含 `data_sources`
+  （`routes/admin-routes.ts:1408-1412`、`:1528-1532`），改库后不刷新注册表，是 S6 在应用内的来源（§1.2 补充，§6 实测）。
+  建议二选一，由 owner 定：把 `data_sources` 移出这两个白名单，数据源的修改一律走 `/api/data-sources`；或者保留，
+  但改完后按受影响的 id 让注册表重新装载这些行。
 
 ## 6. 验证（本机合成数据，一次性集群）
 
 环境：便携 PostgreSQL 16.10，新建数据目录，只监听本机回环地址，`initdb --no-locale -E UTF8`；全部为合成值。
 本节的 SQL 都是从本文的 sql 代码块原样抽取后执行的；修订后（S6、`pulled` 取行规则、`DATA_OK` 文案、Q6）全部重跑了一遍，
-下面的数字是重跑的结果。
+下面的数字是重跑的结果。第 2 轮修订没有改动任何 sql 代码块（7 个代码块与上一版逐字相同），并在修订后的文本上重跑了
+17 个用例、试拉行认定和 S6 三组，数字与下文一致。
 
 - **建表**：按部署顺序跑真实迁移：`20251206000001`（data_sources）→ `057`、`079`（SQL）→ `zzzz20260902120000`
   （cutover）→ 植入数据 → `zzzz20260920120000`（live_id，`NOT VALID`）。S2a/S2f 的行在 live_id 迁移之前软删，
   以复现「存量被容忍」。S2f 在迁移之后硬删。
-- **运行链路全部是真实代码**：`DataSourceManager.initialize` → `loadFromDatabase`、`createDataSourcePluginFacade`、
+- **运行链路除读身份取值外都是真实模块**：`DataSourceManager.initialize` → `loadFromDatabase`、`createDataSourcePluginFacade`、
   插件 `createConnectionResolver`、`createDb`、`createExternalSystemRegistry`。对每一行调
   `getExternalSystemForAdapter({ runAs: 'user', principal })`，principal 按 `http-routes.cjs:4515-4518` 取「戳或请求者」。
   这一步是在验证脚本里照该处逻辑复刻的，没有经过 HTTP 路由；其余环节都调用真实模块。验证脚本是一次性的，放在本机临时目录，不入库。
@@ -594,13 +639,28 @@ ORDER BY 2 DESC, 1;
     改属主并同步改戳、启动后用 SQL 新插入源和绑定。同一进程里都实测报本码，Q3 都判 `DATA_OK`；重启后都变为 OK。
   - 1 个遮蔽用例：源启动时停用，之后用 SQL 启用并改了属主。Q3 判 `S3b`，内存里这个源却没装载。重启后仍报本码，
     因为这时库里的状态就是 S3b。
-  - 2 个对照用例：经 `DataSourceManager.updateDataSource` 改名（API 路径），以及经 `connectDataSource` 连上
+  - 2 个对照用例：经 `DataSourceManager.updateDataSource` 改名（`/api/data-sources` 路由用的写方法），以及经 `connectDataSource` 连上
     （`updateStatus` 回写状态）。实测都 OK，但 `ds_updated_after_start` 都为 `t`。所以 `t` 不等于 S6。
   - Q6：`ds_committed_after_start` 对 5 个 SQL 写入用例都为 `t`，对未改动的对照源为 `f`。`ds_updated_after_start` 对
     3 个不写 `updated_at` 的 SQL 改动都为 `f`，所以 `f` 不能排除 S6。8 个用例与 §4.6 的判读 **8/8 一致**。修订前原文
     0/8：它没有 Q6，`DATA_OK` 的文案也不含 S6。Q6 的 4 个变异（提交时间改用 `updated_at`、比较方向反过来、按 legacy
     指针 JOIN、`ds_created_after_start` 恒为假），以及把 `DATA_OK` 文案退回旧文案的 1 个变异，各自至少让 1 个用例不一致
     （依次为 3/8/8/1，文案为 4）。
+- **管理员批量接口**（第 2 轮修订新增）：库与上面相同的建法，另起一个新库。处理函数取自真实的 `routes/admin-routes.ts`：
+  从它导出的路由里找到 `PUT` / `DELETE /data/bulk`，直接调用最后一层处理函数，跳过前面的管理员鉴权与安全确认两层中间件。
+  启动前植入 5 个源及其绑定：对照源；停用源；属主与戳不符；租户与试拉租户不符；软删但仍被引用（在 live_id 迁移之前软删）。
+  注册表装载后，经批量更新逐个「修好」：启用；把属主改成戳；把租户改成试拉租户；清空 `deleted_at` 并启用。结果：
+  - 四例都返回 200，落库后都已修好；Q3 都判 `DATA_OK`；Q6 的 `ds_updated_after_start` 都为 `f`，`ds_committed_after_start`
+    都为 `t`。同一进程里四例仍然全部报本码（内存里两例没装载，一例属主、一例租户仍是旧值）；重启后四例都 OK。对照源始终 OK。
+  - 对被引用的对照源做批量删除：返回 409（`DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS`），库不变，试拉仍 OK。
+  - 日志：四次批量更新各有一行 `Bulk data update requested` 和一行 `Bulk update completed`，批量删除有一行
+    `Bulk data deletion requested` 和一行 `Bulk deletion refused …`，每行都带 `"table":"data_sources"`。
+  - 自检：把同样四个改动换成经 `DataSourceManager`（`addDataSource` / `updateDataSource`）写入，同一进程里四例都变为 OK。
+    所以上面同一进程仍报错，是批量接口没经过注册表造成的，不是验证脚本的问题。
+  - 修订前的原文漏掉这条来源：它的 S6 只列 SQL 直改、恢复、迁移、ops SQL；§4.3 说经界面或 API 的修改不需要重启；
+    §4.6 第 3 步只对运维记录，日志表里也没有批量接口的行。按原文，这四例在重启之前会被当作「已排除 S6」引向 S1，
+    只有第 4 步的重启能纠正。修订后，§4.6 日志表里的 `Bulk data update requested` / `Bulk update completed` 与实测日志行
+    匹配并指向 S6，第 3 步也要求查这两行（由一次性脚本对照实测日志行检查，见第 2 轮 PR 评论）。
 - **`track_commit_timestamp`**：以上在该参数开启时运行。改为关闭并重启后，整段清单照常执行，`ds_committed_after_start`
   全为 NULL；把 Q6 里的 `CASE` 守卫去掉的变异在关闭时报 `could not get commit timestamp data`，psql 退出码 3。
   关闭期间写过的行，重新开启后该列为 NULL；开启、关闭、再开启之后，第一次开启期间写入的行也是 NULL。
