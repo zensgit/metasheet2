@@ -477,6 +477,46 @@ async function resolveB2aSourceObjects({ sourceObjects, sourceSystemType, loadSo
   return [...named, lookupObject]
 }
 
+/**
+ * R-02, CONTRACT HALF (closes `TODO(R-02-LOOKUP-SCHEMA-PIN)`): the ONE object list an in-process
+ * stock-preparation seam is guarded AND contracted against, when the ROUTE has already resolved it.
+ *
+ * `resolveB2aSourceObjects` above needs the NON-DECRYPTING config accessor, which only the route
+ * layer holds; the table-action wrappers (stock-preparation-table-actions.cjs) cannot resolve the
+ * list themselves. They receive the RESOLVED list instead — one platform read, one array — and hand
+ * that same array to the guard (`objectScope` match), to the schema contract's pre-read pin/compare
+ * and to the post-read E3-05 check, so the objects authorized, the objects pinned and the objects
+ * re-checked are one list and not three derivations that could disagree. The plan's own objects are
+ * UNIONED in rather than trusted to be present: a resolved list can only widen the contract, never
+ * narrow it below what the expansion will read.
+ *
+ * FAIL-CLOSED WITHOUT THE RESOLVED LIST. When the caller passed none and the kind is on
+ * `B2A_CONFIG_BOUND_LOOKUP_KINDS`, the plan's list is NOT an acceptable substitute — it is exactly
+ * the under-covered contract the TODO refused to ship half-done. The refusal is the resolver's own
+ * (`B2A_SCOPE_MISMATCH` / `config_bound_object_unresolvable`): "the caller could not say what the
+ * read touches" and "the config could not be read" are the same fact from the guard's side, and it
+ * lands BEFORE the guard so no operation claim is spent. A kind OFF the roster has no hidden object
+ * (the roster is the honest bound stated above), so the plan's list is the read's list and is
+ * returned — the pre-change behaviour, unchanged for every kind that never had a second read.
+ *
+ * @param {string[]|null} o.resolvedSourceObjects  the route's `resolveB2aSourceObjects` result, or absent
+ * @param {string[]}      o.planSourceObjects      `readPlanSourceObjects(action.source.readPlan)`
+ * @param {string}        o.sourceSystemType       the source system's kind
+ * @returns {string[]} frozen, sorted, de-duplicated — the list for BOTH the guard and the contract
+ */
+function requireResolvedB2aSourceObjects({ resolvedSourceObjects, planSourceObjects, sourceSystemType } = {}) {
+  const normalize = (list) => (Array.isArray(list) ? list : []).map(optionalString).filter(Boolean)
+  const planned = normalize(planSourceObjects)
+  if (Array.isArray(resolvedSourceObjects)) {
+    return Object.freeze([...new Set([...planned, ...normalize(resolvedSourceObjects)])].sort())
+  }
+  const kind = optionalString(sourceSystemType)
+  if (!kind || !B2A_CONFIG_BOUND_LOOKUP_KINDS.includes(kind)) return Object.freeze([...new Set(planned)].sort())
+  refuse(B2A_SCOPE_MISMATCH, 'config_bound_object_unresolvable',
+    'a B2a-gated read over a source whose server-side configuration can add a second object must be handed the resolved object list its route authorized',
+    { objectCount: planned.length })
+}
+
 // A deterministic, key-order-independent serialization, so a digest over it depends on VALUE and not
 // on the order a JSON column happened to deserialize its keys in. Used only to bind a config subtree
 // to itself across two reads (H-3) — never surfaced, so it carries no discipline concern of its own.
@@ -1654,21 +1694,24 @@ function refuseB2aArmedSqlServerRequestTimeoutDisabled(authorization) {
 // "identical schema passes". A source that grew a column is a source that changed under a
 // one-time authorization; refusing is the fail-closed reading and re-pinning is a deliberate act.
 //
-// COST, stated: an ARMED read now makes one `getSchema` call per plan object before the read (to pin
-// or compare) and one after it (E3-05's mid-read check). A DORMANT read makes none — the whole path
-// is skipped when the authorization is `null`.
+// COST, stated: an ARMED read makes one `getSchema` call per object in the RESOLVED list before the
+// read (to pin or compare) and one after it (E3-05's mid-read check). The resolved list is the
+// plan's objects plus, for a `data-source:sql-readonly` source with a configured `lookupProjection`,
+// its `lookupObject` — so such a source pays one extra `getSchema` before the read and one after it,
+// on top of the one credential-free config read the guard already made. A DORMANT read makes none —
+// the whole path is skipped when the authorization is `null`.
 //
-// TODO(R-02-LOOKUP-SCHEMA-PIN): the OBJECT SCOPE half of R-02's config-bound second read is closed
-// (see `resolveB2aSourceObjects` above — the `lookupProjection.lookupObject` now has to be
-// enumerated by the registration or the read is refused). The CONTRACT half is not. This contract
-// digests one `getSchema` per object in the list its CALLER passes, and every caller passes the
-// PLAN's objects (`readPlanSourceObjects(action.source.readPlan)` in
-// stock-preparation-table-actions.cjs's `assertB2aReadHardeningBeforeExpansion`), so the lookup
-// table's columns are not pinned and a drift in THEM is not detected. Closing it means threading the
-// source system's private config into that seam so the contract covers the same list the guard
-// matched — a change in a module outside this wave's file set, and one extra `getSchema` per armed
-// read. It is recorded here rather than half-done: an under-covered contract that looked total would
-// be worse than one whose bound is written down.
+// WHICH OBJECTS (R-02, contract half — formerly `TODO(R-02-LOOKUP-SCHEMA-PIN)`). This contract
+// digests one `getSchema` per object in the list its CALLER passes, and the caller is
+// stock-preparation-table-actions.cjs's `assertB2aReadHardeningBeforeExpansion`, which passes the
+// SAME list the guard matched against `objectScope`: the route resolves it once
+// (`resolveB2aSourceObjects` above, lookup object included) and threads that one array through the
+// table-action wrapper to the guard, to this pin/compare and to the post-read check. A drift in the
+// lookup table's columns is therefore the same `B2A_SCHEMA_DRIFT` / `schema_contract_drift` refusal
+// a drift in a plan object's columns is. An in-process caller that arms the wrapper for such a kind
+// WITHOUT the resolved list is refused before the guard (`requireResolvedB2aSourceObjects`) rather
+// than given a contract over the plan alone — an under-covered contract that looked total would be
+// worse than a refusal.
 
 const SCHEMA_CONTRACT_KEY_PREFIX = 'integration:b2a:schema-contract:'
 const B2A_SCHEMA_CONTRACT_VERSION = 1
@@ -1940,6 +1983,8 @@ module.exports = {
   B2A_CONFIG_BOUND_LOOKUP_KINDS,
   lookupProjectionSourceObject,
   resolveB2aSourceObjects,
+  // R-02 (contract half): the route-resolved list is the ONE list the wrapper guards and pins.
+  requireResolvedB2aSourceObjects,
   // H-3 (finding 3): bind the config-bound second read across authorize -> adapter creation.
   sourceConfigAuthorizationSnapshot,
   refuseB2aSourceConfigChangedAfterAuthorization,

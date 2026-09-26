@@ -4417,11 +4417,24 @@ function requireStockPreparationAudit() {
    * `parameters` is normalized here purely to resolve `projectNo` before the adapter load. The
    * wrapper normalizes again from the same raw body — `normalizeActionParameters` is pure and
    * idempotent, so the two cannot disagree.
+   *
+   * RETURNS `{ authorization, sourceObjects }` — the guard's stanza AND the resolved object list it
+   * matched — rather than the stanza alone, because the SAME array must then reach the table-action
+   * wrapper (`b2aSourceObjects`), where the schema contract pins it (R-02, contract half: the lookup
+   * table's columns are digested only if the contract walks the list the guard authorized, and a
+   * second resolution there would be a second list that could disagree). Both are `null` when
+   * dormant, and every caller DESTRUCTURES: the envelope itself is truthy, so handing it whole to
+   * `loadTableActionSourceAdapter` as `b2aAuthorization` would arm the W-5 floors on a dormant read.
    */
+  const B2A_DORMANT_STOCK_PREPARATION_READ = Object.freeze({ authorization: null, sourceObjects: null })
   async function assertB2aStockPreparationReadAuthorized(action, rawParameters, { req, tenantScope, purpose, runId }) {
-    if (!b2aTrialRegistry) return null
+    if (!b2aTrialRegistry) return B2A_DORMANT_STOCK_PREPARATION_READ
     const parameters = normalizeActionParameters(rawParameters)
-    return assertB2aReadAuthorization({
+    // R-02 (finding 3): the read plan's own objects PLUS any the source system's server-side config
+    // adds behind it. `req` is required only to scope that config read — armed-only, one extra
+    // credential-free platform read, and a dormant deployment returns above without doing it.
+    const sourceObjects = await b2aTableActionSourceObjects(req, action, { tenantId: tenantScope })
+    const authorization = await assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: context.storage,
       operationClaim: b2aOperationClaim,
@@ -4429,14 +4442,12 @@ function requireStockPreparationAudit() {
       sourceSystemType: action.source.kind,
       sourceBindingRef: action.source.externalSystemId,
       dataScopeRef: parameters.projectNo,
-      // R-02 (finding 3): the read plan's own objects PLUS any the source system's server-side config
-      // adds behind it. `req` is required only to scope that config read — armed-only, one extra
-      // credential-free platform read, and a dormant deployment returns above without doing it.
-      sourceObjects: await b2aTableActionSourceObjects(req, action, { tenantId: tenantScope }),
+      sourceObjects,
       purpose,
       runId,
       now: Date.now(),
     })
+    return { authorization, sourceObjects }
   }
 
   /**
@@ -5929,8 +5940,12 @@ function requireStockPreparationAudit() {
       // drift from the proof.
       const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
-      // B2a entry point (1), ahead of the credential reload inside the adapter load below.
-      const dryRunB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
+      // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
+      const {
+        authorization: dryRunB2aAuthorization,
+        sourceObjects: dryRunB2aSourceObjects,
+      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: dryRunTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
@@ -5972,6 +5987,9 @@ function requireStockPreparationAudit() {
         b2aClaimStore: context.storage,
         b2aOperationClaim,
         b2aRunId: dryRunB2aRunId,
+        // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
+        // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
+        b2aSourceObjects: dryRunB2aSourceObjects,
         tenantId: dryRunTenantId,
         now: Date.now(),
       }))
@@ -6086,7 +6104,11 @@ function requireStockPreparationAudit() {
       //
       // NO DOUBLE BURN: the prepare handoff below holds no B2a guard of its own, so this route's
       // claim is the only one taken on the path.
-      const reconcileB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      // R-02 (contract half): the resolved object list is NOT threaded here, deliberately — the
+      // prepare handoff below plans through `computeDryRun` with no B2a inputs at all (no
+      // registration, no contract), so there is no schema contract on this path to hand it to.
+      // That is the pre-existing shape of the reconcile read, recorded rather than widened.
+      const { authorization: reconcileB2aAuthorization } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
@@ -6187,7 +6209,10 @@ function requireStockPreparationAudit() {
       const mvpPersistB2aRunId = b2aRunId('table-action-mvp-persist')
       // B2a entry point (1), MVP-persist half — its OWN purpose, because committing a customer's BOM
       // into the internal snapshot tables is a different consumer from an interactive refresh.
-      const mvpPersistB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const {
+        authorization: mvpPersistB2aAuthorization,
+        sourceObjects: mvpPersistB2aSourceObjects,
+      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
@@ -6211,6 +6236,8 @@ function requireStockPreparationAudit() {
         b2aClaimStore: context.storage,
         b2aOperationClaim,
         b2aRunId: mvpPersistB2aRunId,
+        // R-02 (contract half): same list as the guard above — see the dry-run route.
+        b2aSourceObjects: mvpPersistB2aSourceObjects,
         tenantId,
         now: Date.now(),
       })
@@ -6297,7 +6324,10 @@ function requireStockPreparationAudit() {
       const applyB2aRunId = b2aRunId('table-action-apply')
       // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
       // so a refusal never burns a single-use dry-run token.
-      const applyB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const {
+        authorization: applyB2aAuthorization,
+        sourceObjects: applyB2aSourceObjects,
+      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: applyTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
@@ -6344,6 +6374,8 @@ function requireStockPreparationAudit() {
         b2aClaimStore: context.storage,
         b2aOperationClaim,
         b2aRunId: applyB2aRunId,
+        // R-02 (contract half): same list as the guard above — see the dry-run route.
+        b2aSourceObjects: applyB2aSourceObjects,
         tenantId: applyTenantId,
         now: Date.now(),
       }))
