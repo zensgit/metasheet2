@@ -80,9 +80,11 @@
             (visibleFields filters visible===false), so preview mirrors the
             backend's record-read gate; run additionally requires
             canEditField — the same layer the backend's run pre-check
-            enforces (#2106 F3).
+            enforces (#2106 F3). A11: nothing renders unless the server reports AI
+            available (`aiAvailable`, fail-closed) — the buttons could only answer
+            AI_BLOCKED otherwise.
           -->
-          <div v-if="fieldHasAiShortcut(field)" class="meta-record-drawer__ai-actions">
+          <div v-if="aiAvailable && fieldHasAiShortcut(field)" class="meta-record-drawer__ai-actions">
             <button
               type="button"
               class="meta-record-drawer__ai-btn"
@@ -458,6 +460,10 @@ const props = withDefaults(defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
+  /** A11 (customer feedback 2026-09-24 #7c): the server reports the AI surfaces available
+   *  (GET /api/multitable/ai/availability). FAIL-CLOSED default false: absent ⇒ no AI
+   *  preview/run buttons, whatever the field's saved aiShortcut config says. */
+  aiAvailable?: boolean
   /** B1-e: in-flight button runs keyed `${recordId}:${fieldId}` — the SAME ref
    *  the grid (MetaGridTable) and the drawer receive, so a run from any surface
    *  disables the button on all of them. Matches the workbench `onRunButton`
@@ -479,6 +485,7 @@ const props = withDefaults(defineProps<{
    *  ever handed to MetaCellRenderer — this panel never calls it. Absent → chips are not clickable. */
   fetchRecord?: (recordId: string) => Promise<MetaRecordContext>
 }>(), {
+  aiAvailable: false,
   buttonRunPending: () => [],
   fieldErrors: null,
   inspectorFieldLayout: null,

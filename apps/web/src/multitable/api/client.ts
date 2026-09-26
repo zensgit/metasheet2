@@ -1863,6 +1863,11 @@ export interface AiBulkJobCancelData {
   state: AiBulkJobStatus
 }
 
+/** A11: GET /api/multitable/ai/availability — one bit, nothing else. */
+export interface AiAvailability {
+  available: boolean
+}
+
 export interface AiUsageSummary {
   callerDayTokens: number
   callerWeekTokens: number
@@ -2934,6 +2939,14 @@ export class MultitableApiClient implements CommentsApiClient {
   // precedent). 403 for non-admins — callers cache the probe per session.
   async aiUsageSummary(): Promise<AiUsageSummary> {
     const res = await this.fetch('/api/multitable/ai/usage-summary')
+    return this.parseJson(res)
+  }
+
+  // A11 (customer feedback 2026-09-24 #7c): may the AI surfaces be shown at all?
+  // Any signed-in user; a values-free flat `{ available }`. Callers go through
+  // resolveAiAvailability (useAiShortcut.ts), which fails closed.
+  async aiAvailability(): Promise<AiAvailability> {
+    const res = await this.fetch('/api/multitable/ai/availability')
     return this.parseJson(res)
   }
 
