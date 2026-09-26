@@ -1039,10 +1039,49 @@ describe('GET /context capabilities.canDeleteSheet — same gate as DELETE /shee
   // AUTHZ-FIRST, mirrored from the DELETE route's own posture (sheet-delete-guard.ts): an actor who
   // holds no lifecycle authority at all never learns whether the sheet is managed — the bit is
   // simply false either way, same as before this fix.
-  it('plugin-managed sheet (registry row) => canDeleteSheet stays FALSE for an actor without lifecycle authority (no managed-status probe implied)', async () => {
-    const app = await buildApp('T2_write_only', freshFields())
+  // N2 (adversarial-review round, #6089): proves the authority-first ORDERING, not just the final
+  // bit — an actor without lifecycle authority must never even ASK the registry whether the sheet is
+  // managed (the same posture the DELETE route itself already holds, asserted on `pool.query` further
+  // below in "T2 write-only operator on the managed sheet"). `buildAppWithPool` (not `buildApp`) so
+  // the mock pool's own call log is inspectable here.
+  it('plugin-managed sheet (registry row) => canDeleteSheet stays FALSE for an actor without lifecycle authority, and the registry is never even queried (authority-first)', async () => {
+    const { app, pool } = await buildAppWithPool('T2_write_only', freshFields())
     const res = await on(app).get('/api/multitable/context').query({ sheetId: MANAGED_SHEET_ID })
     expect(res.status).toBe(200)
     expect(res.body.data.capabilities.canDeleteSheet).toBe(false)
+    expect(pool.query.mock.calls.filter((c) => /FROM\s+plugin_multitable_object_registry/i.test(String(c[0])))).toEqual([])
+  })
+
+  // S1 (adversarial-review round, #6089): the managed-sheet probe is a SIDE lookup on an otherwise-
+  // successful load — only the delete button is at stake, never the load itself. A THROWN lookup
+  // (missing table, transient connection error, …) must not 500 the whole /context response; it
+  // fails CLOSED to canDeleteSheet: false and logs values-free (see univer-meta.ts's try/catch
+  // around resolveSheetDeleteRefusal). Contrast with the field-delete guard's OWN "registry table
+  // missing" cell above, which fails closed by PROPAGATION (503) — /context's shape is different
+  // (200, bit zeroed) because unlike a destructive write, a stale trash-button visibility is safely
+  // recoverable and the rest of the page is still useful without it.
+  it('GET /context: the managed-sheet probe THROWS (registry unreadable) => still 200, canDeleteSheet fails closed to false (not a 500), logged values-free', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const original = pool.query.getMockImplementation()!
+    pool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (/FROM\s+plugin_multitable_object_registry/i.test(sql)) {
+        throw new Error('relation "plugin_multitable_object_registry" does not exist')
+      }
+      return original(sql, params)
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await on(app).get('/api/multitable/context').query({ sheetId: SHEET_ID })
+      expect(res.status).toBe(200)
+      expect(res.body.data.capabilities.canDeleteSheet).toBe(false)
+      // schema authority itself is untouched — the probe failure only zeroes the delete bit
+      expect(res.body.data.capabilities.canManageFields).toBe(true)
+      // values-free: no sheet id (or anything else request-specific) reaches the log line
+      expect(errorSpy).toHaveBeenCalled()
+      const logged = errorSpy.mock.calls.map((call) => call.map((arg) => JSON.stringify(arg)).join(' ')).join('\n')
+      expect(logged).not.toContain(SHEET_ID)
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 })

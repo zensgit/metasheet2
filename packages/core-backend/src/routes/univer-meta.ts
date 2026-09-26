@@ -205,6 +205,7 @@ import {
   assertSheetLive,
   assertSheetLiveForUpdate,
   assertSheetsLiveForUpdate,
+  describeLivenessLookupError,
   loadSheetLiveness,
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
@@ -8991,12 +8992,28 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // it once the actor has ALREADY cleared `hasSheetLifecycleAuthority` — an actor without that
       // authority is refused before this point and must never learn whether the sheet is managed
       // (mirrors the route's own authz-before-existence posture, see its DELETE handler above).
+      //
+      // S1 (adversarial-review fix, #6089): the probe is a SIDE lookup on an otherwise-successful
+      // load — the button is the only thing at stake, never the load itself. A THROWN lookup
+      // (missing table, transient connection error, …) must not 500 the whole `/context` response;
+      // it fails CLOSED to `canDeleteSheet: false` (same fail-closed direction as an actor who lacks
+      // lifecycle authority — never fails OPEN into showing a delete affordance the route cannot
+      // actually honour) and logs values-free (no sheet id, no query text).
       const hasDeleteLifecycleAuthority = effectiveSheetId
         ? hasSheetLifecycleAuthority(access, selectedSheetScope)
         : false
-      const canDeleteSheet = hasDeleteLifecycleAuthority && effectiveSheetId
-        ? (await resolveSheetDeleteRefusal(pool.query.bind(pool), effectiveSheetId)) === null
-        : false
+      let canDeleteSheet = false
+      if (hasDeleteLifecycleAuthority && effectiveSheetId) {
+        try {
+          canDeleteSheet = (await resolveSheetDeleteRefusal(pool.query.bind(pool), effectiveSheetId)) === null
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: managed-sheet probe failed for canDeleteSheet; failing closed to false',
+            { reason: 'managed_sheet_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canDeleteSheet = false
+        }
+      }
 
       return res.json({
         ok: true,

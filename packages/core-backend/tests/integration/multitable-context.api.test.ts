@@ -66,6 +66,26 @@ function createMockPool(queryHandler: QueryHandler) {
     if (sql.includes('source_base_id')) {
       return { rows: [], rowCount: 0 }
     }
+    // #6089 B2: GET /context now probes the managed-sheet guard (resolveSheetDeleteRefusal) for any
+    // actor who already holds sheet-lifecycle authority, so it issues BOTH of this guard's reads on
+    // every such call, not only on DELETE — the "derives multitable capabilities from req.user role…"
+    // test (admin, no registry/system_kind branch of its own) hit the FIRST one and got an
+    // unhandled-SQL 500 before this fix; fixing only that query left the SECOND (`isSystemManagedSheet`)
+    // unhandled too, which the S1 fail-closed wrapper in the route swallows into a wrong
+    // `canDeleteSheet: false` instead of a 500 — same root cause, worth naming explicitly so a future
+    // reader does not have to rediscover it. Answering "not managed" for BOTH reads HERE, ahead of
+    // every per-test `queryHandler`, is a universal default for THIS file: no /context-reaching test
+    // here wants a MANAGED sheet (the one existing test that special-cased these two queries, the
+    // DELETE soft-delete test below, also answered "not managed" for both — this default is
+    // byte-identical to it, so that test's own now-unreachable branches are dead but not wrong). A
+    // future test that DOES want a managed sheet for /context needs its own mock pool, the same way
+    // tests/unit/multitable-manage-schema-permission-matrix.test.ts's MANAGED_SHEET_ID does.
+    if (sql.includes('FROM plugin_multitable_object_registry')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
+      return { rows: [{ system_kind: null, description: null }] }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
@@ -1127,7 +1147,10 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [] }
         }
-        if (sql.includes('SELECT system_kind, description FROM meta_sheets WHERE id = $1')) {
+        // Column-tolerant form (#6089 B1 fix): `isSystemManagedSheet` now reads `system_kind` via
+        // `to_jsonb(meta_sheets) ->> 'system_kind'`, the same tolerant shape every other reader in
+        // univer-meta.ts already uses, so a database without the column does not 500 the route.
+        if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ system_kind: null, description: null }] }
         }

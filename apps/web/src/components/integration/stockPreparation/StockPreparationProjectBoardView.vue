@@ -404,8 +404,8 @@
           </button>
           <p class="sp-board__fill-hint">
             {{ bi(
-              '打开的是这次部署的备料表,表里是这次部署的备料行。请核对项目号确认这是您要填写的项目。',
-              'This opens this deployment’s stock-preparation table, holding this deployment’s stock-prep rows. Confirm the project number matches before you fill it in.',
+              '这是这套部署的备料表,请按项目号确认是您要处理的项目。',
+              'This is this deployment’s stock-preparation table — confirm the project number before you work on it.',
             ) }}
           </p>
         </template>
