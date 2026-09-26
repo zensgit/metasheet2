@@ -46,6 +46,7 @@ import {
   viewerRolesFailClosed,
 } from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
+import { countApprovalPendingForViewer } from '../services/approval-pending-query'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -259,7 +260,11 @@ function extractRequesterChoices(value: unknown): Record<string, string[]> | und
   return value as Record<string, string[]>
 }
 
-function resolveApprovalActorId(req: Request): string | null {
+// Exported so `routes/todo.ts` (待办中心, todo-center-design-lock §3.0) can build the SAME
+// `{ actorId, roles, permissions }` viewer contract this route uses, rather than a second
+// hand-copy of actor-identity extraction. Body unchanged — every existing call site in this file
+// keeps its exact current behavior.
+export function resolveApprovalActorId(req: Request): string | null {
   const candidate = req.user?.id ?? req.user?.userId ?? req.user?.sub
   if (typeof candidate !== 'string') return null
   const normalized = candidate.trim()
@@ -273,7 +278,8 @@ function resolveApprovalActorName(req: Request, fallbackId: string): string {
   return normalized.length > 0 ? normalized : fallbackId
 }
 
-function resolveApprovalActorPermissions(req: Request): string[] {
+// Exported for the same reason as `resolveApprovalActorId` above (`routes/todo.ts` consumer).
+export function resolveApprovalActorPermissions(req: Request): string[] {
   const permissions = Array.isArray(req.user?.permissions)
     ? req.user!.permissions.filter((permission): permission is string => typeof permission === 'string')
     : []
@@ -2014,50 +2020,21 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
         ? null
         : (rawSourceSystem as 'platform' | 'plm')
-      const actorRoles = resolveApprovalActorRoles(req)
-      const actorRolesParam = actorRoles.length > 0 ? actorRoles : ['__none__']
-      const actorPermissions = resolveApprovalActorPermissions(req)
-      const actorPermissionsParam = actorPermissions.length > 0 ? actorPermissions : ['__none__']
 
-      const conditions: string[] = [
-        `a.is_active = TRUE`,
-        `i.status = 'pending'`,
-        `(
-          (a.assignment_type = 'user' AND a.assignee_id = $1)
-          OR (a.assignment_type = 'role' AND a.assignee_id = ANY($2))
-          OR (a.assignment_type = 'source_queue' AND a.assignee_id = ANY($3))
-        )`,
-        // Lock-3 §2.2 — a handler (办理) seat is NOT an approval task and must not inflate the member's
-        // pending-APPROVAL badge (approve/reject 409 on it). Exclude any assignment whose node is a
-        // `handler` node in the instance's frozen runtime graph. `@>` containment never errors on a
-        // null/empty graph (unlike jsonb_array_elements) and is GIN-index-friendly.
-        `NOT EXISTS (
-          SELECT 1 FROM approval_published_definitions pd
-          WHERE pd.id = i.published_definition_id
-            AND pd.runtime_graph @> jsonb_build_object('nodes', jsonb_build_array(jsonb_build_object('key', a.node_key, 'type', 'handler')))
-        )`,
-      ]
-      const params: unknown[] = [userId, actorRolesParam, actorPermissionsParam]
-
-      if (sourceSystem) {
-        conditions.push(`COALESCE(i.source_system, 'platform') = $${params.length + 1}`)
-        params.push(sourceSystem)
-      }
-
-      const countResult = await pool.query<{ count: string; unread_count: string }>(
-        `SELECT COUNT(DISTINCT a.instance_id)::text AS count,
-                COUNT(DISTINCT a.instance_id) FILTER (WHERE r.instance_id IS NULL)::text AS unread_count
-         FROM approval_assignments a
-         INNER JOIN approval_instances i ON i.id = a.instance_id
-         LEFT JOIN approval_reads r ON r.instance_id = a.instance_id AND r.user_id = $1
-         WHERE ${conditions.join(' AND ')}`,
-        params,
+      // todo-center-design-lock §3.0 — extracted to the ONE shared "pending" query so this route,
+      // the todo-center approval source, and any future consumer cannot drift from each other.
+      // Same viewer contract, same WHERE, same two aggregate outputs as before extraction.
+      const { count, unreadCount } = await countApprovalPendingForViewer(
+        pool,
+        {
+          actorId: userId,
+          roles: resolveApprovalActorRoles(req),
+          permissions: resolveApprovalActorPermissions(req),
+        },
+        sourceSystem,
       )
 
-      res.json({
-        count: parseInt(countResult.rows[0]?.count || '0', 10),
-        unreadCount: parseInt(countResult.rows[0]?.unread_count || '0', 10),
-      })
+      res.json({ count, unreadCount })
     } catch (error) {
       handleApprovalsError(
         res,

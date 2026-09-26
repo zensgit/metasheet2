@@ -56,6 +56,9 @@ export type WorkbenchLabelKey =
   // picked by CODE, exactly like the sheet-level toast.sheetPluginManaged above.
   | 'toast.fieldManagedRefused'
   | 'toast.viewCreateFailed' | 'toast.viewUpdateFailed' | 'toast.viewDeleteFailed'
+  // #6075 round 3 (S2): the toolbar's sort/filter write was rejected (403 without canManageViews, 400 hidden-filter
+  // mismatch, network) — values-free on purpose: no rules, no field names, no server prose.
+  | 'toast.sortFilterSaveFailed'
   | 'toast.sheetAccessRefreshFailed'
   | 'toast.sheetCreateBlocked' | 'toast.sheetRefreshFailed' | 'toast.sheetCreateFailed'
   | 'toast.baseLoadFailed' | 'toast.contextSyncFailed'
@@ -217,6 +220,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.viewCreateFailed': { en: 'Failed to create view', zh: '创建视图失败' },
   'toast.viewUpdateFailed': { en: 'Failed to update view', zh: '更新视图失败' },
   'toast.viewDeleteFailed': { en: 'Failed to delete view', zh: '删除视图失败' },
+  'toast.sortFilterSaveFailed': { en: 'Sort/filter could not be saved to the view', zh: '排序/筛选未能保存到视图' },
   'toast.sheetAccessRefreshFailed': { en: 'Failed to refresh sheet access', zh: '刷新数据表权限失败' },
   'toast.sheetCreateBlocked': {
     en: 'Sheet creation requires multitable write access.',

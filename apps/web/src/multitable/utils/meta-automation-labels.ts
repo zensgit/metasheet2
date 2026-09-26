@@ -11,6 +11,14 @@ import type {
   ConditionOperator,
   WorkflowJobStatus,
 } from '../types'
+import {
+  automationBusinessTimezone,
+  isUtcTriggerTimezone,
+  utcTimeOfDayInZone,
+  type CronSwitchImpact,
+  type DateReminderExample,
+  type LegacyUtcSwitchImpact,
+} from './automation-trigger-timezone'
 
 // Legacy execution/step statuses (success/failed/skipped) + the converged C1
 // WorkflowJobStatus set surfaced by the A2 runs API (resolved/queued/suspended/…).
@@ -62,6 +70,13 @@ export type AutomationLabelKey =
   | 'log.retry'
   | 'log.loading'
   | 'log.empty'
+  // 客户反馈 2026-09-24 #3 final review F1: the rule log panel labels a skipped run 已跳过 (stats + badge) and
+  // renders the backend's values-free step reason codes as sentences, never as the raw internal code.
+  | 'log.skipped'
+  | 'log.statusSkipped'
+  | 'log.reason.targetRecordMissing'
+  | 'log.reason.targetRecordMissingNoop'
+  | 'log.reason.backwriteTargetRecordMissing'
   | 'support.copyPacket'
   | 'support.downloadJson'
   | 'support.clipboardUnavailable'
@@ -149,6 +164,7 @@ export type AutomationLabelKey =
   | 'actionConfig.deleteRecordAck'
   | 'actionConfig.deleteRecordWarningCrossBase'
   | 'actionConfig.deleteRecordAckCrossBase'
+  | 'actionConfig.deletedTriggerSelfMutation'
   | 'actionConfig.crossBaseTargetWarning'
   | 'actionConfig.crossBaseTargetIncomplete'
   | 'actionConfig.crossBaseCreateTargetWarning'
@@ -388,6 +404,8 @@ export type AutomationLabelKey =
   | 'runs.rerunError.ledgerEvidenceMissing'
   // #5803: the rule's sheet is soft-deleted; nothing ran or was recorded.
   | 'runs.rerunError.sheetDeleted'
+  // 客户反馈 2026-09-24 #3 final review F2: every step was skipped because the trigger record is gone.
+  | 'runs.rerunError.targetRecordMissing'
   // Round-2 B5: the route's requireAdminRole() 403 body carries `code` BESIDE the string `error`,
   // so the shared normalizer keys the thrown error as `AccessDenied` and the raw English server
   // string would otherwise render verbatim in a zh session.
@@ -425,6 +443,11 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'log.retry',
   'log.loading',
   'log.empty',
+  'log.skipped',
+  'log.statusSkipped',
+  'log.reason.targetRecordMissing',
+  'log.reason.targetRecordMissingNoop',
+  'log.reason.backwriteTargetRecordMissing',
   'support.copyPacket',
   'support.downloadJson',
   'support.clipboardUnavailable',
@@ -737,6 +760,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.rerunError.ruleChanged',
   'runs.rerunError.ledgerEvidenceMissing',
   'runs.rerunError.sheetDeleted',
+  'runs.rerunError.targetRecordMissing',
   'runs.rerunError.adminRequired',
   'runs.rerunError.generic',
   'resultWriteback.title',
@@ -770,6 +794,24 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'log.retry': { en: 'Retry', zh: '重试' },
   'log.loading': { en: 'Loading logs...', zh: '正在加载日志...' },
   'log.empty': { en: 'No execution logs found.', zh: '暂无执行日志。' },
+  // Stats-bar column (capitalised like Total / Success / Failed) and the run/step badge + filter wording.
+  'log.skipped': { en: 'Skipped', zh: '已跳过' },
+  'log.statusSkipped': { en: 'skipped', zh: '已跳过' },
+  // Values-free reason codes (automation-executor.ts TARGET_RECORD_MISSING_SKIP_REASON). The skipped step:
+  'log.reason.targetRecordMissing': {
+    en: 'The trigger record no longer exists; skipped (nothing was changed).',
+    zh: '触发记录已不存在，已跳过（未做任何修改）',
+  },
+  // …the update_record no-op, which keeps its `success` status (so it does not say "skipped"):
+  'log.reason.targetRecordMissingNoop': {
+    en: 'The trigger record no longer exists; nothing was changed.',
+    zh: '触发记录已不存在，未做任何修改',
+  },
+  // …and a same-base approval-result writeback whose record was gone (`backwriteSkipped`):
+  'log.reason.backwriteTargetRecordMissing': {
+    en: 'Approval result not written back: the trigger record no longer exists (nothing was changed).',
+    zh: '审批结果未写回：触发记录已不存在（未做任何修改）',
+  },
   'support.copyPacket': { en: 'Copy redacted packet', zh: '复制脱敏包' },
   'support.downloadJson': { en: 'Download JSON', zh: '下载 JSON' },
   'support.clipboardUnavailable': { en: 'Clipboard unavailable', zh: '剪贴板不可用' },
@@ -924,6 +966,14 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.deleteRecordAckCrossBase': {
     en: 'I understand this permanently deletes the target record in another base.',
     zh: '我确认此动作会永久删除另一个 base 中的目标记录。',
+  },
+  // 客户反馈 2026-09-24 #3 (裁定 PR #6074): under a `record.deleted` trigger the trigger record is already gone,
+  // so a same-base update/delete/lock of it can only no-op (and used to self-chain into three execution logs).
+  // The zh sentence is byte-identical to the backend refusal message (automation-service.ts
+  // DELETED_TRIGGER_SELF_MUTATION_MESSAGE) so the inline hint and the 400 read the same.
+  'actionConfig.deletedTriggerSelfMutation': {
+    en: 'When a record is deleted its trigger record no longer exists, so it cannot be updated, deleted or locked. Pick another action, or another trigger.',
+    zh: '记录删除时触发记录已不存在，不能再修改/删除/锁定它。请改用其他动作，或换一个触发条件。',
   },
   'actionConfig.crossBaseTargetWarning': {
     en: 'This action targets a record in ANOTHER base, not the trigger record in this table. The target below is kept exactly as loaded — this editor cannot change it.',
@@ -1200,6 +1250,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.rerunError.ruleChanged': { en: "The rule's actions changed since this run; cannot re-run safely.", zh: '规则动作在此次运行后已变更，无法安全重新执行。' },
   'runs.rerunError.ledgerEvidenceMissing': { en: 'Retry evidence for this execution is missing.', zh: '该执行的重试证据缺失。' },
   'runs.rerunError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was re-run. Restore the sheet and try again.", zh: '规则所在的表已被删除，未重新执行。请先恢复该表后重试。' },
+  'runs.rerunError.targetRecordMissing': {
+    en: 'Every step was skipped because the trigger record no longer exists; re-running cannot change that.',
+    zh: '触发记录已不存在，该执行的所有步骤均已跳过，重新执行也不会有任何变化。',
+  },
   'runs.rerunError.adminRequired': { en: 'Re-running an execution requires admin privileges.', zh: '重新执行需要管理员权限。' },
   'runs.rerunError.generic': { en: 'Re-run failed.', zh: '重新执行失败。' },
   'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },
@@ -1284,6 +1338,48 @@ export function automationStatusLabel(status: AutomationStatus | UnknownAutomati
   if (status === 'rejected') return automationLabel('status.rejected', isZh)
   if (status === 'errored') return automationLabel('status.errored', isZh)
   return String(status)
+}
+
+/** The backend's values-free "trigger record is gone" code (automation-executor.ts TARGET_RECORD_MISSING_SKIP_REASON). */
+const TARGET_RECORD_MISSING_REASON = 'target_record_missing'
+
+export interface AutomationStepOutputView {
+  /** Localised sentence for a recognised values-free reason code in the step output, else null. */
+  reason: string | null
+  /** The output with the recognised marker keys removed (null when nothing is left), else the output as-is. */
+  output: unknown
+}
+
+/**
+ * 客户反馈 2026-09-24 #3 final review F1 — a step's `output` is rendered as one-line JSON, so the backend's
+ * internal reason codes reached a zh customer verbatim ("reason":"target_record_missing"). This recognises the
+ * three values-free markers the #3 fix writes and returns a sentence for each, plus the output WITHOUT those
+ * keys (ids and any other keys stay raw — this module's scope keeps ids raw). Anything else is untouched:
+ *   { reason: 'target_record_missing', noop: true } → update_record no-op (status stays success)
+ *   { reason: 'target_record_missing' }             → skipped same-base delete of a vanished trigger record
+ *   { backwriteSkipped: 'target_record_missing' }   → same-base approval-result writeback found its record gone
+ * A cross-base `backwriteSkipped` carries an error sentence, not this code, and is left raw on purpose.
+ */
+export function automationStepOutputView(output: unknown, isZh: boolean): AutomationStepOutputView {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return { reason: null, output }
+  const record = output as Record<string, unknown>
+  let key: AutomationLabelKey | null = null
+  let strip: string[] = []
+  if (record.reason === TARGET_RECORD_MISSING_REASON) {
+    if (record.noop === true) {
+      key = 'log.reason.targetRecordMissingNoop'
+      strip = ['reason', 'noop']
+    } else {
+      key = 'log.reason.targetRecordMissing'
+      strip = ['reason']
+    }
+  } else if (record.backwriteSkipped === TARGET_RECORD_MISSING_REASON) {
+    key = 'log.reason.backwriteTargetRecordMissing'
+    strip = ['backwriteSkipped']
+  }
+  if (!key) return { reason: null, output }
+  const rest = Object.fromEntries(Object.entries(record).filter(([k]) => !strip.includes(k)))
+  return { reason: automationLabel(key, isZh), output: Object.keys(rest).length > 0 ? rest : null }
 }
 
 export function automationActionTypeLabel(type: AutomationActionType | UnknownAutomationString, isZh: boolean): string {
@@ -1371,21 +1467,294 @@ export function automationTriggerConditionLabel(condition: AutomationTriggerCond
   }
 }
 
-export function automationCronPresetLabel(value: AutomationCronPresetValue | UnknownAutomationString, isZh: boolean): string {
+// ---------------------------------------------------------------------------------------------------------
+// A7a (客户反馈 2026-09-24 #4c): schedule-trigger time copy. Every string that names a time says WHICH
+// clock it is on. A rule on the business timezone never mentions UTC; a legacy rule still on UTC says so
+// and shows the business-time equivalent. The time math lives in automation-trigger-timezone.ts.
+// ---------------------------------------------------------------------------------------------------------
+
+/** Human name of a trigger timezone: Asia/Shanghai → 北京时间 / Beijing time; UTC → UTC; else the IANA id. */
+export function automationTimezoneDisplayName(timezone: string, isZh: boolean): string {
+  if (timezone === 'Asia/Shanghai') return isZh ? '北京时间' : 'Beijing time'
+  if (isUtcTriggerTimezone(timezone)) return 'UTC'
+  return timezone
+}
+
+function dayShiftPrefix(dayShift: number, isZh: boolean): string {
+  if (dayShift > 0) return isZh ? '次日 ' : 'next day '
+  if (dayShift < 0) return isZh ? '前一天 ' : 'previous day '
+  return ''
+}
+
+/** "00:00 (北京时间)" / "00:00 UTC (北京时间 08:00)" — a wall-clock time labelled with its clock. */
+function automationClockTimeLabel(time: string, timezone: string, isZh: boolean): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (timezone === business) return isZh ? `${time}（${businessName}）` : `${time} (${businessName})`
+  if (isUtcTriggerTimezone(timezone) && !isUtcTriggerTimezone(business)) {
+    const inBusiness = utcTimeOfDayInZone(time, business)
+    const prefix = dayShiftPrefix(inBusiness.dayShift, isZh)
+    return isZh
+      ? `${time} UTC（${businessName} ${prefix}${inBusiness.time}）`
+      : `${time} UTC (${prefix}${inBusiness.time} ${businessName})`
+  }
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `${time}（${name}）` : `${time} (${name})`
+}
+
+/**
+ * Cron preset labels. The two wall-clock presets name their clock (A7a: the old "每天午夜 / Daily at
+ * midnight" was untrue for the UTC rules the editor used to save — `0 0 * * *` fired at 08:00 Beijing).
+ * `timezone` = the rule's effective timezone; omitted = the business timezone new rules are saved with.
+ */
+export function automationCronPresetLabel(
+  value: AutomationCronPresetValue | UnknownAutomationString,
+  isZh: boolean,
+  timezone: string = automationBusinessTimezone(),
+): string {
   switch (value) {
     case '*/5 * * * *':
       return isZh ? '每 5 分钟' : 'Every 5 minutes'
     case '0 * * * *':
       return isZh ? '每小时' : 'Every hour'
-    case '0 0 * * *':
-      return isZh ? '每天午夜' : 'Daily at midnight'
-    case '0 0 * * 1':
-      return isZh ? '每周一' : 'Weekly (Monday)'
+    case '0 0 * * *': {
+      const at = automationClockTimeLabel('00:00', timezone, isZh)
+      return isZh ? `每天 ${at}` : `Daily at ${at}`
+    }
+    case '0 0 * * 1': {
+      const at = automationClockTimeLabel('00:00', timezone, isZh)
+      return isZh ? `每周一 ${at}` : `Weekly, Monday ${at}`
+    }
     case 'custom':
       return isZh ? '自定义' : 'Custom'
     default:
       return String(value)
   }
+}
+
+/** The cron section's clock line. */
+export function automationCronTimezoneHint(timezone: string, isZh: boolean): string {
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `执行时间按${name}计算（24 小时制）。` : `Run times are on ${name} (24-hour clock).`
+}
+
+/** Label above the reminder-time picker: plain "提醒时间" on the business timezone, else names the clock. */
+export function automationReminderTimeLabel(timezone: string, isZh: boolean): string {
+  if (timezone === automationBusinessTimezone()) return isZh ? '提醒时间' : 'Reminder time'
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `提醒时间（${name}）` : `Reminder time (${name})`
+}
+
+/** Placeholder of the reminder-time picker (an empty value = the backend's 09:00 default). */
+export function automationReminderTimePlaceholder(isZh: boolean): string {
+  return isZh ? '09:00（默认）' : '09:00 (default)'
+}
+
+export function automationReminderTimeHint(timezone: string, isZh: boolean): string {
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh
+    ? `每天到这个时间（${name}）检查一次，到期的记录会收到提醒；系统重启错过了，当天会补发。`
+    : `Checked once a day at this time (${name}); records that are due get their reminder. If a restart misses it, it is sent later the same day.`
+}
+
+const EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function exampleDay(day: { year: number; month: number; day: number }, anchorYear: number, isZh: boolean): string {
+  if (isZh) return day.year === anchorYear ? `${day.month}月${day.day}日` : `${day.year}年${day.month}月${day.day}日`
+  const base = `${EN_MONTHS[day.month - 1]} ${day.day}`
+  return day.year === anchorYear ? base : `${base}, ${day.year}`
+}
+
+/** The live example line: "例：日期为 9月30日、提前 3 天 → 9月27日 09:00 提醒". */
+export function automationDateReminderExampleText(
+  example: DateReminderExample,
+  timezone: string,
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const anchorYear = example.anchor.year
+  const anchor = exampleDay(example.anchor, anchorYear, isZh)
+  const reminderDay = exampleDay(example.reminder, anchorYear, isZh)
+  const offset = example.offsetDays === 0
+    ? (isZh ? '当天' : 'same day')
+    : example.direction === 'after'
+      ? (isZh ? `延后 ${example.offsetDays} 天` : `${example.offsetDays} day${example.offsetDays === 1 ? '' : 's'} after`)
+      : (isZh ? `提前 ${example.offsetDays} 天` : `${example.offsetDays} day${example.offsetDays === 1 ? '' : 's'} before`)
+  if (timezone === business) {
+    return isZh
+      ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time} 提醒`
+      : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time}`
+  }
+  if (isUtcTriggerTimezone(timezone) && !isUtcTriggerTimezone(business)) {
+    const businessName = automationTimezoneDisplayName(business, isZh)
+    const businessDay = exampleDay(example.business, anchorYear, isZh)
+    return isZh
+      ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time} UTC 提醒（即${businessName} ${businessDay} ${example.business.time}）`
+      : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time} UTC (${businessDay} ${example.business.time} ${businessName})`
+  }
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh
+    ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time}（${name}）提醒`
+    : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time} (${name})`
+}
+
+function offsetDurationText(offsetMinutes: number, isZh: boolean): string {
+  const abs = Math.abs(offsetMinutes)
+  const hours = Math.floor(abs / 60)
+  const minutes = abs % 60
+  if (isZh) return minutes ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
+  const h = `${hours} hour${hours === 1 ? '' : 's'}`
+  return minutes ? `${h} ${minutes} minutes` : h
+}
+
+/** Business-clock run times of a cron rule, "次日 " / "next day " marked only when the expression restricts days. */
+function cronRunTimesText(
+  runs: Array<{ time: string; dayShift: number }>,
+  restrictsDays: boolean,
+  isZh: boolean,
+): { text: string; marked: boolean } {
+  // A daily expression has no "day" to be relative to: clock order. A day-restricted one: same-day runs first.
+  const sorted = [...runs].sort((a, b) =>
+    (restrictsDays ? a.dayShift - b.dayShift : 0) || a.time.localeCompare(b.time))
+  let marked = false
+  const items = sorted.map((run) => {
+    if (!restrictsDays || run.dayShift === 0) return run.time
+    marked = true
+    return `${dayShiftPrefix(run.dayShift, isZh)}${run.time}`
+  })
+  return { text: items.join(isZh ? '、' : ', '), marked }
+}
+
+function cronDayMarkNote(isZh: boolean): string {
+  return isZh ? '（“次日”指表达式所写日期的第二天）' : ' ("next day" = the day after the date the expression names)'
+}
+
+/** Notice on a legacy rule that is still on UTC (saved before the editor wrote a timezone). */
+export function automationLegacyUtcScheduleNotice(
+  input:
+    | { triggerType: 'schedule.date_field'; timeOfDay: string }
+    | { triggerType: 'schedule.cron'; cron: CronSwitchImpact },
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (input.triggerType === 'schedule.date_field') {
+    const at = automationClockTimeLabel(input.timeOfDay, 'UTC', isZh)
+    return isZh
+      ? `这条规则创建较早，按 UTC 计时：当前提醒时间 ${at}。可一键改为${businessName}。`
+      : `This rule was created earlier and runs on UTC: the reminder time is ${at}. You can switch it to ${businessName}.`
+  }
+  const { cron } = input
+  const quoted = cron.expression ? (isZh ? `“${cron.expression}”` : ` "${cron.expression}"`) : ''
+  if (cron.runs) {
+    const before = cronRunTimesText(cron.runs.map((run) => ({ time: run.before, dayShift: run.beforeDayShift })), cron.restrictsDays, isZh)
+    const note = before.marked ? cronDayMarkNote(isZh) : ''
+    return isZh
+      ? `这条规则创建较早，cron 表达式${quoted}按 UTC 计时，实际在${businessName} ${before.text} 执行${note}。可一键改为${businessName}。`
+      : `This rule was created earlier and its cron expression${quoted} runs on UTC, i.e. at ${before.text} ${businessName}${note}. You can switch it to ${businessName}.`
+  }
+  const duration = offsetDurationText(cron.offsetMinutes, isZh)
+  const sign = cron.offsetMinutes >= 0
+  return isZh
+    ? `这条规则创建较早，cron 表达式${quoted}按 UTC 计时，表达式里的时间${sign ? '加' : '减'} ${duration}才是${businessName}。可一键改为${businessName}。`
+    : `This rule was created earlier and its cron expression${quoted} runs on UTC: ${sign ? 'add' : 'subtract'} ${duration} to the times in it to get ${businessName}. You can switch it to ${businessName}.`
+}
+
+export function automationSwitchToBusinessTimezoneLabel(isZh: boolean): string {
+  const name = automationTimezoneDisplayName(automationBusinessTimezone(), isZh)
+  return isZh ? `改为${name}` : `Switch to ${name}`
+}
+
+export function automationSwitchToBusinessTimezoneTitle(isZh: boolean): string {
+  const name = automationTimezoneDisplayName(automationBusinessTimezone(), isZh)
+  return isZh ? `改为${name}？` : `Switch to ${name}?`
+}
+
+const ZH_DAY_COUNT = ['零', '一', '两', '三']
+
+/** A whole-day shift of a reminder: 0 = same moment, < 0 = earlier, > 0 = later. */
+function reminderShiftText(days: number, isZh: boolean): string {
+  const abs = Math.abs(days)
+  if (isZh) {
+    if (days === 0) return '提醒时刻不变'
+    return `会比原来${days < 0 ? '早' : '晚'}${ZH_DAY_COUNT[abs] ?? String(abs)}天提醒`
+  }
+  if (days === 0) return 'fire at the same moment as before'
+  return `fire ${abs === 1 ? 'one day' : `${abs} days`} ${days < 0 ? 'earlier' : 'later'} than before`
+}
+
+/**
+ * Confirm text for the explicit UTC → business-timezone switch. Every sentence is generated from the computed
+ * impact (automation-trigger-timezone.ts legacyUtcSwitchImpact / analyzeCronForBusinessSwitch), which mirrors
+ * the backend's day-bucketing; the web spec cross-checks it against the backend function. `fieldType` = the
+ * rule's date field type when known (the backend buckets a `date` field by its literal day and a `dateTime`
+ * field by the zone's calendar day); unknown → both sentences.
+ */
+export function automationSwitchToBusinessTimezoneConfirm(
+  input:
+    | { triggerType: 'schedule.date_field'; impact: LegacyUtcSwitchImpact; fieldType?: string | null }
+    | { triggerType: 'schedule.cron'; cron: CronSwitchImpact },
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (input.triggerType === 'schedule.cron') {
+    const { cron } = input
+    const quoted = isZh ? `“${cron.expression}”` : `"${cron.expression}"`
+    const duration = offsetDurationText(cron.offsetMinutes, isZh)
+    const direction = cron.offsetMinutes >= 0 ? (isZh ? '早' : 'earlier') : (isZh ? '晚' : 'later')
+    if (cron.runs) {
+      const before = cronRunTimesText(cron.runs.map((run) => ({ time: run.before, dayShift: run.beforeDayShift })), cron.restrictsDays, isZh)
+      const after = cronRunTimesText(cron.runs.map((run) => ({ time: run.after, dayShift: 0 })), cron.restrictsDays, isZh)
+      const note = before.marked ? cronDayMarkNote(isZh) : ''
+      return isZh
+        ? `cron 表达式${quoted}不变，改按${businessName}计时：原来在${businessName} ${before.text} 执行${note}，改后在${businessName} ${after.text} 执行，每次都比原来${direction} ${duration}。保存后生效。`
+        : `The cron expression ${quoted} stays the same but runs on ${businessName}: it used to run at ${before.text} ${businessName}${note} and will run at ${after.text} ${businessName}, ${duration} ${direction} each time. Takes effect after saving.`
+    }
+    return isZh
+      ? `cron 表达式${quoted}不变，改按${businessName}计时，每次执行都会比原来${direction} ${duration}。保存后生效。`
+      : `The cron expression ${quoted} stays the same but runs on ${businessName}, so every run moves ${duration} ${direction}. Takes effect after saving.`
+  }
+
+  const { impact } = input
+  const showDate = input.fieldType !== 'dateTime'
+  const showDateTime = input.fieldType !== 'date' && impact.dateTimeWindow !== null
+  const parts: string[] = []
+  const crossed = impact.dayShift > 0
+    ? (isZh ? '（跨到次日）' : ' (the next day)')
+    : impact.dayShift < 0
+      ? (isZh ? '（跨到前一天）' : ' (the previous day)')
+      : ''
+  parts.push(isZh
+    ? `提醒时间将由 ${impact.fromTimeOfDay} UTC 换算为${businessName} ${impact.toTimeOfDay}${crossed}。`
+    : `The reminder time will be converted from ${impact.fromTimeOfDay} UTC to ${impact.toTimeOfDay} ${businessName}${crossed}.`)
+  let anyShift = false
+  if (showDate) {
+    const days = impact.dateFieldShiftDays
+    if (days !== 0) anyShift = true
+    const abs = Math.abs(days)
+    parts.push(isZh
+      ? `“日期”字段：${days === 0 ? '每条提醒的时刻不变' : `每条提醒都会比原来${days < 0 ? '早' : '晚'}${ZH_DAY_COUNT[abs] ?? String(abs)}天`}。`
+      : `On a "date" field, every reminder ${days === 0 ? 'fires at the same moment as before' : `fires ${abs === 1 ? 'one day' : `${abs} days`} ${days < 0 ? 'earlier' : 'later'} than before`}.`)
+  }
+  if (showDateTime && impact.dateTimeWindow) {
+    const { start, end } = impact.dateTimeWindow
+    const inside = impact.dateTimeInsideShiftDays
+    const outside = impact.dateTimeOutsideShiftDays
+    if (inside !== 0 || outside !== 0) anyShift = true
+    const windowText = start === '00:00'
+      ? (isZh ? `${start} 至 ${end} 之前` : `before ${end}`)
+      : (isZh ? `${start} 及以后` : `${start} or later`)
+    parts.push(isZh
+      ? `“日期时间”字段：${businessName} ${windowText}的记录${reminderShiftText(inside, true)}，其余记录${reminderShiftText(outside, true)}。`
+      : `On a "date & time" field, records whose ${businessName} is ${windowText} ${reminderShiftText(inside, false)}; all other records ${reminderShiftText(outside, false)}.`)
+  }
+  if (anyShift) {
+    parts.push(isZh
+      ? '提醒日变了的记录，保存后可能会多提醒一次。'
+      : 'Records whose reminder day changes may get one extra reminder after you save.')
+  }
+  return parts.join(isZh ? '' : ' ')
 }
 
 export function automationConditionOperatorLabel(operator: ConditionOperator | UnknownAutomationString, isZh: boolean): string {

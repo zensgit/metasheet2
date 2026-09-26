@@ -66,7 +66,7 @@ import {
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificationRecipients, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
+import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificationRecipients, TARGET_RECORD_MISSING_SKIP_REASON, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode, type CrossBaseWriteTarget } from './automation-executor'
 // F9c: the save-time recipient gate resolves the SAME roster as the execution path and the button
 // route (one resolver, zero drift) — see assertNotificationRecipientsAtSave.
 import { loadSheetMemberUserIdSet } from './permission-service'
@@ -94,6 +94,7 @@ import {
   automationRetryLedgerRetentionCutoffIso,
   claimFirstAutomationRetryAttempt,
   hasAutomationRetryLedgerEvidence,
+  isTargetRecordMissingSkippedExecution,
   isWithinAutomationRetryWindow,
   realFireTestRunEligibility,
   retryLedgerFamiliesForActions,
@@ -140,6 +141,17 @@ export type AutomationRuleValidationCode =
   | 'RECIPIENT_NOT_AUTHORIZED'
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
+  | typeof DELETED_TRIGGER_SELF_MUTATION_CODE
+
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
+ * update/delete/lock of the trigger record". Under a `record.deleted` trigger the trigger record no longer
+ * exists, so such an action can only ever be a 0-row no-op (and, before the executor fix, a self-chaining
+ * ghost event: one user delete ⇒ three execution logs). Stable code for clients; ONE fixed, values-free
+ * Chinese message (the editor shows the same sentence as its inline hint).
+ */
+export const DELETED_TRIGGER_SELF_MUTATION_CODE = 'DELETED_TRIGGER_SELF_MUTATION'
+export const DELETED_TRIGGER_SELF_MUTATION_MESSAGE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
 
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
@@ -703,9 +715,12 @@ function declaredApprovalResultWriteback(
 }
 
 // Discriminated result of a backwrite: same-base returns the `patch` (merged into the resume tail context);
-// cross-base returns only the target triple (its patch is NOT merged into the tail — §3.3).
+// cross-base returns only the target triple (its patch is NOT merged into the tail — §3.3); same-base-missing
+// (客户反馈 2026-09-24 #3 final review F3) = a CONFIGURED same-base writeback found its record gone (lock-check
+// SELECT saw no row, or the UPDATE affected 0 rows) and wrote nothing — surfaced as a values-free marker.
 type ApprovalBackwriteOutcome =
   | { kind: 'same-base'; patch: Record<string, unknown> }
+  | { kind: 'same-base-missing' }
   | { kind: 'cross-base'; target: { targetBaseId: string; targetSheetId: string; targetRecordId: string } }
 
 // The backwrite patch: DECLARED fixed field→value mapping. approver = the approval actor and completedAt =
@@ -822,6 +837,98 @@ function validateCrossBaseWriteActionConfigs(
   for (const [index, action] of (actions ?? []).entries()) {
     const error = validateCrossBaseWriteConfig(action.config, action.type, `actions[${index}].config`)
     if (error) return error
+  }
+  return null
+}
+
+const RECORD_DELETED_TRIGGER = 'record.deleted'
+
+/**
+ * The record-mutating actions whose SAME-BASE form addresses the TRIGGER record (automation-executor.ts:
+ * `effectiveRecordId = context.recordId` unless the cross-base gate fires). `update_field` is the v0 alias
+ * of `update_record` (normalizeLegacyActionPair) and is listed so a raw legacy payload cannot slip past.
+ */
+const TRIGGER_RECORD_MUTATING_ACTION_TYPES = new Set<string>(['update_record', 'delete_record', 'lock_record', 'update_field'])
+
+/**
+ * Does this action STRUCTURALLY resolve to the TRIGGER record at run time? Mirrors the executor's
+ * addressing: without a COMPLETE explicit triple (`targetBaseId` + `targetSheetId` + `targetRecordId`) the
+ * write falls back to `context.recordId`. (An INCOMPLETE triple is refused earlier by
+ * validateCrossBaseWriteConfig with its own, more specific message.) A complete triple is only NECESSARY for
+ * retargeting, not sufficient: if the gate resolves it as same-base the executor still writes the trigger
+ * record — that half needs the database and lives in validateDeletedTriggerSelfMutationTargets.
+ */
+function actionTargetsTriggerRecord(actionType: string, config: Record<string, unknown> | null | undefined): boolean {
+  if (!TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(actionType)) return false
+  const text = (key: string): string => (typeof config?.[key] === 'string' ? (config[key] as string).trim() : '')
+  return !(text('targetBaseId') && text('targetSheetId') && text('targetRecordId'))
+}
+
+/**
+ * 客户反馈 2026-09-24 #3 — refuse "record.deleted + same-base update_record / delete_record / lock_record of
+ * the trigger record" at SAVE, top level and nested (condition_branch / parallel_branch sub-actions —
+ * `nestedActions` is the collectNestedAutomationActions flattening). Returns the fixed message or null.
+ * Deliberately NOT applied to a disable-only / name-only / conditions-only edit or to deleteRule: an
+ * operator must always be able to turn such a rule off (setRuleEnabled routes through updateRule) — see
+ * the updateRule gate for the exact input shapes that run this check.
+ */
+export function validateDeletedTriggerSelfMutation(
+  triggerType: string,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  nestedActions: AutomationAction[] | null | undefined,
+): string | null {
+  if (triggerType !== RECORD_DELETED_TRIGGER) return null
+  if (actionTargetsTriggerRecord(actionType, actionConfig)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  for (const action of nestedActions ?? []) {
+    if (actionTargetsTriggerRecord(action.type, action.config)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  }
+  return null
+}
+
+/**
+ * The addressing verdict of the executor's cross-base write gate, injected so this module never re-derives
+ * it: `AutomationExecutor.resolveCrossBaseWriteTarget` bound to the service's `queryFn`.
+ */
+export type CrossBaseWriteTargetResolver = (
+  triggerSheetId: string,
+  targetSheetId: string,
+  declaredTargetBaseId: string | undefined,
+) => Promise<CrossBaseWriteTarget>
+
+/**
+ * 客户反馈 2026-09-24 #3, final review F4 — the half of the save gate that needs the database. A COMPLETE
+ * triple (`targetBaseId` + `targetSheetId` + `targetRecordId`) passes the structural check in
+ * {@link validateDeletedTriggerSelfMutation}, but at run time the executor only retargets when its
+ * cross-base gate says `crossBase`. When the target sheet resolves to the rule's OWN base (for example
+ * `targetBaseId` equal to the rule sheet's base), the gate answers same-base and update / delete / lock
+ * address `context.recordId`: the deleted trigger record again. So each complete triple on a
+ * trigger-record-mutating action is resolved with the gate's own addressing verdict (`resolveTarget`,
+ * never a local copy) against the rule's sheet, with the SAME raw inputs the executor passes
+ * (`config.targetSheetId`, `config.targetBaseId` if a string). A same-base verdict is refused with the same
+ * message. A cross-base or unresolvable verdict is left alone: at run time it either retargets or fails
+ * closed, and neither touches the trigger record. Top level and nested, like the structural check.
+ */
+export async function validateDeletedTriggerSelfMutationTargets(
+  ruleSheetId: string,
+  triggerType: string,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  nestedActions: AutomationAction[] | null | undefined,
+  resolveTarget: CrossBaseWriteTargetResolver,
+): Promise<string | null> {
+  if (triggerType !== RECORD_DELETED_TRIGGER) return null
+  const candidates: Array<{ type: string; config: Record<string, unknown> | null | undefined }> = [
+    { type: actionType, config: actionConfig },
+    ...(nestedActions ?? []).map((action) => ({ type: action.type, config: action.config })),
+  ]
+  for (const { type, config } of candidates) {
+    // Only the shape the structural check lets through: a mutating action WITH a complete triple.
+    if (!TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type) || actionTargetsTriggerRecord(type, config)) continue
+    const targetSheetId = config?.targetSheetId as string
+    const declaredTargetBaseId = typeof config?.targetBaseId === 'string' ? config.targetBaseId : undefined
+    const target = await resolveTarget(ruleSheetId, targetSheetId, declaredTargetBaseId)
+    if (!target.crossBase) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
   }
   return null
 }
@@ -1483,6 +1590,28 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // 客户反馈 2026-09-24 #3: a record.deleted rule cannot update/delete/lock its own (already gone) trigger record.
+    const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+      input.triggerType,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+    )
+    if (deletedTriggerSelfMutationError) {
+      throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+    }
+    // Final review F4: a complete triple the executor's gate resolves as SAME-base still writes the trigger record.
+    const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
+      sheetId,
+      input.triggerType,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+      this.crossBaseWriteTargetResolver(),
+    )
+    if (deletedTriggerSameBaseTargetError) {
+      throw new AutomationRuleValidationError(deletedTriggerSameBaseTargetError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+    }
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
@@ -1925,6 +2054,65 @@ export class AutomationService {
         recipientPair.actionConfig,
         approvalActions,
       )
+    }
+
+    // 客户反馈 2026-09-24 #3 (裁定 PR #6074): refuse the RESULTING shape "record.deleted + same-base
+    // update/delete/lock of the trigger record" whenever the edit touches the shape — trigger type, action
+    // type/config/list, execution mode — or RE-ENABLES the rule (F9c precedent: `enabled` is not a bypass
+    // for arming a rule that can only ever no-op). Deliberately NOT gated like the T1-2/T1-3 blocks above
+    // (every write shape): a DISABLE-only `{ enabled: false }`, a rename, a conditions-only or a
+    // triggerConfig-only edit of an EXISTING such rule must still succeed — `setRuleEnabled` routes through
+    // this method, and the customer's way out of the self-chain is exactly "turn it off" (or deleteRule,
+    // which validates nothing). Existing rules stay loadable; they cannot be saved forward with this shape.
+    if (
+      input.triggerType !== undefined
+      || input.actionType !== undefined
+      || input.actionConfig !== undefined
+      || input.actions !== undefined
+      || input.executionMode !== undefined
+      || input.enabled === true
+    ) {
+      // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
+      // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
+      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForDeletedTrigger
+      if (!existingForDeletedTrigger || existingForDeletedTrigger.sheet_id !== sheetId) return null
+      const nextTriggerType = input.triggerType ?? existingForDeletedTrigger.trigger_type
+      const nextPair = normalizeLegacyActionPair(
+        input.actionType ?? existingForDeletedTrigger.action_type,
+        (input.actionConfig ?? existingForDeletedTrigger.action_config ?? null) as Record<string, unknown> | null,
+      )
+      const nextActions = input.actions !== undefined ? input.actions : existingForDeletedTrigger.actions ?? null
+      const nextExecutionMode = input.executionMode !== undefined
+        ? normalizeExecutionMode(input.executionMode)
+        : existingForDeletedTrigger.execution_mode ?? null
+      const nestedForDeletedTrigger = collectNestedAutomationActions(
+        nextPair.actionType,
+        (nextPair.actionConfig ?? {}) as Record<string, unknown>,
+        nextActions,
+        nextExecutionMode,
+      )
+      const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+        nextTriggerType,
+        nextPair.actionType,
+        nextPair.actionConfig,
+        nestedForDeletedTrigger,
+      )
+      if (deletedTriggerSelfMutationError) {
+        throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
+      // Final review F4 (same gate condition as above, so disable-only / rename / conditions-only edits still skip it).
+      const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
+        sheetId,
+        nextTriggerType,
+        nextPair.actionType,
+        nextPair.actionConfig,
+        nestedForDeletedTrigger,
+        this.crossBaseWriteTargetResolver(),
+      )
+      if (deletedTriggerSameBaseTargetError) {
+        throw new AutomationRuleValidationError(deletedTriggerSameBaseTargetError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
     }
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
@@ -3263,6 +3451,17 @@ export class AutomationService {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
     }
+    // 客户反馈 2026-09-24 #3 final review F2: every step skipped because the trigger record is gone — a retry
+    // replays the same trigger against the same record id and can only skip again. Decided from the stored row
+    // alone, like the three refusals above: before the sweep kick, the rule read and the one-shot first-retry
+    // marker, and nothing is recorded.
+    if (isTargetRecordMissingSkippedExecution(original)) {
+      return {
+        status: 409,
+        code: 'TARGET_RECORD_MISSING_NOT_RETRYABLE',
+        message: 'Every step of this execution was skipped because its trigger record no longer exists; a retry cannot change that',
+      }
+    }
     this.kickAutomationRetryLedgerSweepIfDue(Date.now())
     const lineage = await this.collectExecutionLineage(original)
     const lineageIds = lineage.map((execution) => execution.id)
@@ -3730,6 +3929,18 @@ export class AutomationService {
     try {
       const outcome = await this.writeApprovalResultBack(bridge, startApprovalConfig, event)
       if (!outcome) return null
+      if (outcome.kind === 'same-base-missing') {
+        // 客户反馈 2026-09-24 #3 final review F3: the same-base twin of the cross-base `backwriteSkipped` below.
+        // A configured writeback whose record vanished used to return null with NO trace on the step, so the run
+        // history could not tell "not configured" from "configured, record gone, nothing written". VALUES-FREE:
+        // the marker is the fixed reason code (never an id, a field value or an error string). The step status is
+        // unchanged (same-base leniency) and nothing is merged into the tail's recordData.
+        result.output = {
+          ...(isRecord(result.output) ? result.output : {}),
+          backwriteSkipped: TARGET_RECORD_MISSING_SKIP_REASON,
+        }
+        return null
+      }
       if (outcome.kind === 'cross-base') {
         // Q3 audit: extend the start_approval step output with the target triple. §3.3: the cross-base
         // patch is NOT merged into the resume `recordData` the tail actions see (unlike the same-base
@@ -3953,7 +4164,8 @@ export class AutomationService {
     // W7-1a parity: the shared tail lock-checks the SOURCE record (actor = the approval actor), writes the
     // patch, and emits the chaining event + realtime fan-out (actor passed through) so UI / subscribers /
     // downstream record.updated automations see the backwrite live. onMissing: 'skip' — a gone record
-    // returns null (the resume's own missing-record path already handled it), NOT an error.
+    // is NOT an error (the resume's own missing-record path already handled it); it comes back as
+    // `same-base-missing` so the step output carries a values-free marker (final review F3).
     const actorId = event.actor?.id ?? null
     const wrote = await this.applyResultWritebackPatch(bridge.sheetId, bridge.recordId, patch, {
       lockActorId: actorId,
@@ -3963,7 +4175,9 @@ export class AutomationService {
       lockedMessage: 'source record is locked',
       onMissing: 'skip',
     })
-    if (!wrote) return null
+    // Final review F3: `false` here only ever means "the record is gone" (SELECT saw no row, or the UPDATE
+    // affected 0 rows) — say so instead of the silent null that "no writeback configured" also returns.
+    if (!wrote) return { kind: 'same-base-missing' }
     return { kind: 'same-base', patch }
   }
 
@@ -4040,6 +4254,13 @@ export class AutomationService {
     return (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
   }
 
+  // Rule-save F4: the executor's OWN cross-base addressing verdict, on the same `queryFn` the executor's gate
+  // uses at run time (the constructor wires `deps.queryFn = queryFn`). Read-only; takes no quota slot.
+  private crossBaseWriteTargetResolver(): CrossBaseWriteTargetResolver {
+    return (triggerSheetId, targetSheetId, declaredTargetBaseId) =>
+      this.executor.resolveCrossBaseWriteTarget(this.queryFn, triggerSheetId, targetSheetId, declaredTargetBaseId)
+  }
+
   /**
    * D-1c W0 slice ④ helper (same shape as `AutomationExecutor.withTransaction`, and the SAME production
    * wiring this class already hard-wires for the executor's `deps.transaction` in the constructor above:
@@ -4095,13 +4316,22 @@ export class AutomationService {
    * longer exists" guard on the SOURCE record proves the authors already expect mid-flight deletes here).
    * The PRE-EXISTING contract for a 0-row UPDATE (proven by the fact that no RETURNING/rowCount check
    * existed at all before this slice) was SILENT SUCCESS for both same-base and cross-base callers — the
-   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Regressing that
-   * into a thrown error would be an unrelated behavior change outside this slice's mandate. So the guard
-   * fails closed on the REVISION ONLY (`if (updatedRow) { ...write revision... }`): a 0-row UPDATE still
-   * reports success and still emits the chaining/realtime events (unchanged), but writes NO spurious
-   * revision for a record this UPDATE never touched — a fabricated one would persist forever
-   * (`meta_record_revisions.record_id` carries no FK) and could resurrect the deleted record via
-   * `reconstructRecordsAtT`.
+   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Slice ④ therefore
+   * failed closed on the REVISION ONLY: a 0-row UPDATE writes NO spurious revision for a record this
+   * UPDATE never touched — a fabricated one would persist forever (`meta_record_revisions.record_id`
+   * carries no FK) and could resurrect the deleted record via `reconstructRecordsAtT`.
+   *
+   * 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3, 裁定 PR #6074 A1): a 0-row UPDATE now ALSO publishes nothing —
+   * no same-txn outbox enqueue, no legacy `multitable.record.updated` emit, no realtime invalidation. The
+   * old "still emits" leg was the same shape as the executor's ghost `record.deleted` self-chain: a fresh
+   * event (new `_eventId`, depth+1) for a record nobody wrote, re-firing downstream rules on a row that
+   * no longer exists. The gone-record POLICY is unchanged and stays the caller's `opts.onMissing` — the
+   * UPDATE seeing 0 rows is the identical fact the lock-check SELECT decides on, observed one statement
+   * later: same-base 'skip' returns false (the resume's own missing-record path already handled it, the
+   * step stays success — leniency preserved — and, since final review F3, `writeApprovalResultBack` turns
+   * that `false` into `same-base-missing` so the step output carries the values-free
+   * `backwriteSkipped: 'target_record_missing'`), cross-base 'throw' fails closed exactly as a not-found
+   * target does (`tryWriteApprovalResultBack` surfaces it as `backwriteSkipped`; never a crash).
    */
   private async applyResultWritebackPatch(
     sheetId: string,
@@ -4147,23 +4377,30 @@ export class AutomationService {
         [JSON.stringify(patch), recordId, sheetId],
       )
       const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
-      if (updatedRow) {
-        const nextVersion = Number(updatedRow.version)
-        await recordRecordRevision(query, {
-          sheetId,
-          recordId,
-          version: Number.isFinite(nextVersion) ? nextVersion : 0,
-          action: 'update',
-          source: 'approval',
-          actorId: opts.chainActorId ?? null,
-          changedFieldIds: Object.keys(patch),
-          patch,
-          snapshot: normalizeJson(updatedRow.data),
-        })
+      if (!updatedRow) {
+        // 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3): the record vanished between the non-locking SELECT above
+        // and this UPDATE. Nothing was written ⇒ nothing is announced: no revision, no enqueue (below is
+        // skipped), no legacy emit / realtime publish (the caller skips both on `false`). Same gone-record
+        // policy as the SELECT branch — the caller's `onMissing`.
+        if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
+        return false
       }
+      const nextVersion = Number(updatedRow.version)
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version: Number.isFinite(nextVersion) ? nextVersion : 0,
+        action: 'update',
+        source: 'approval',
+        actorId: opts.chainActorId ?? null,
+        changedFieldIds: Object.keys(patch),
+        patch,
+        snapshot: normalizeJson(updatedRow.data),
+      })
       // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
       // writeback UPDATE + revision. A rollback (locked / gone target throws or returns false above) enqueues
-      // nothing by construction. Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      // nothing by construction — and so does the 0-row guard above. Flag OFF ⇒ no-op (the legacy emit
+      // below fires instead).
       await enqueueRecordEventIfDurable(
         {
           isTransaction: true,

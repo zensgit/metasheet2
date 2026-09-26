@@ -125,7 +125,7 @@ export type MetaManagerLabelKey =
   | 'field.error.aiTargetLangTooLong' | 'field.error.aiInstructionTooLong'
   | 'field.aiUsage.title' | 'field.aiUsage.today' | 'field.aiUsage.week' | 'field.aiUsage.instance'
   | 'view.title' | 'view.empty' | 'view.saveSettings'
-  | 'view.namePlaceholder' | 'view.addButton'
+  | 'view.namePlaceholder' | 'view.addButton' | 'view.newViewBlankHint'
   | 'view.titleField' | 'view.coverField' | 'view.cardFields'
   | 'view.columns' | 'view.cardSize' | 'view.dateField'
   | 'view.endDateField' | 'view.weekStartsOn' | 'view.startField'
@@ -473,6 +473,11 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'view.saveSettings': { en: 'Save view settings', zh: '保存视图设置' },
   'view.namePlaceholder': { en: 'View name', zh: '视图名称' },
   'view.addButton': { en: '+ Add', zh: '+ 添加' },
+  // 客户反馈 2026-09-24 #5: a new view does NOT copy the current view's sort / filter / hidden columns.
+  'view.newViewBlankHint': {
+    en: 'New views start blank: all columns shown, in entry order, no filter.',
+    zh: '新视图从空白开始：显示全部列、按录入顺序、无筛选',
+  },
   'view.titleField': { en: 'Title field', zh: '标题字段' },
   'view.coverField': { en: 'Cover field', zh: '封面字段' },
   'view.cardFields': { en: 'Card fields', zh: '卡片字段' },
