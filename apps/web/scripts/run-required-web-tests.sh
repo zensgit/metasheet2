@@ -1432,6 +1432,7 @@ exec npx vitest run \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
   multitable-automation-rule-editor \
+  multitable-automation-trigger-time \
   multitable-b4-field-always-readonly \
   multitable-barcode-field \
   multitable-base-local-state \
