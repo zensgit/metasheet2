@@ -1601,8 +1601,8 @@ exec npx vitest run \
   multitable-view-switch-sort-filter \
   multitable-workbench-1672-1673 \
   multitable-workbench-bulk-delete \
-  multitable-workbench-dashboard-exit \
   multitable-workbench-create-view-sort-filter \
+  multitable-workbench-dashboard-exit \
   multitable-workbench-drawer-button-wiring \
   multitable-workbench-history-field-scope-wiring \
   multitable-workbench-i18n \
