@@ -281,12 +281,47 @@ describe('批量转交 outcome helpers', () => {
     })
   })
 
-  it('names every skip code the server declares, and falls back for an unrecognised one', () => {
-    // The server union, transcribed from ApprovalProductService's ApprovalBulkReassignSkipReason.
-    const serverCodes = [
-      'not-found', 'not-pending', 'not-assigned',
-      'target-is-requester', 'target-already-assignee', 'target-user-invalid', 'error',
-    ]
+  // Design lock §14.3 #12 (approval-change-request-design-lock-draft-20260915.md, v5.9): "同 PR
+  // 必改三处——后端字面量、FE 联合 api.ts:1646 + 映射 batchTransfer.ts:28、同步钉
+  // approvalBatchTransferView.spec.ts:284-298". This used to be a HAND-TRANSCRIBED literal array
+  // (the comment it replaces said so itself: "transcribed") — a server-side addition (e.g. the
+  // lock's own `cancel_round` skip reason, landing separately for #12/#13) would silently miss
+  // this guard until someone remembered to edit the array by hand. Converted to a readFileSync
+  // source pin, modeled on approval-comments-client.spec.ts:430-450's cross-package regex read —
+  // `join(__dirname, '../../../packages/core-backend/…')`, NOT
+  // AttendanceReportFieldsSection.spec.ts's `resolve(process.cwd(), …)` (only resolves correctly
+  // under the CI working-directory convention; supplementary checklist item 15, lock v5.5).
+  // `apps/web` has zero cross-package import specifiers (only `@metasheet/sdk` and the `@` → src
+  // alias), so this reads the backend's SOURCE TEXT, not a compiled/runtime import.
+  it('names every skip code the server declares, and falls back for an unrecognised one', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const serviceSrc = readFileSync(
+      join(__dirname, '../../../packages/core-backend/src/services/ApprovalProductService.ts'),
+      'utf8',
+    )
+    // Strip block comments BEFORE matching the union: the `cancel_round` member (lock §14.3 #12)
+    // is preceded by a multi-line `/** … */` JSDoc explaining the byte-exact literal, and `\s*`
+    // between union members does not cross a `/** … */` block — the un-stripped regex silently
+    // stopped at the last member before the comment (`target-user-invalid`) and never saw
+    // `cancel_round`/`error`, so this pin passed while missing the exact code it exists to catch.
+    // (impl-gate-C-slice1-round1-20260918.md P1-A.)
+    const serviceSrcNoComments = serviceSrc.replace(/\/\*[\s\S]*?\*\//g, '')
+    const unionMatch = serviceSrcNoComments.match(
+      /export type ApprovalBulkReassignSkipReason\s*=\s*((?:\s*\|\s*'[^']+')+)/,
+    )
+    expect(
+      unionMatch,
+      "ApprovalBulkReassignSkipReason union not found in ApprovalProductService.ts — update this guard's regex if the type was renamed or reshaped",
+    ).toBeTruthy()
+    const serverCodes = Array.from(unionMatch![1].matchAll(/'([^']+)'/g)).map((m) => m[1])
+    expect(serverCodes.length, 'regex matched the union header but extracted zero literals').toBeGreaterThan(0)
+    // Direct proof the comment-stripping didn't just widen the match harmlessly: the member the
+    // JSDoc guards against being missed must actually be present in what we extracted.
+    expect(serverCodes).toContain('cancel_round')
+    // Bidirectional by construction (toEqual on two sorted arrays): a server literal with no FE
+    // label reds this exactly as much as an FE label with no server literal — that symmetry is the
+    // mechanism §14.3 #12's mutation relies on ("mutation: 去掉 FE 映射 ⇒ 同步钉红").
     expect(Object.keys(APPROVAL_BATCH_TRANSFER_SKIP_LABELS).sort()).toEqual([...serverCodes].sort())
     const rendered = serverCodes.map((code) => describeSkipReason(code, true))
     expect(new Set(rendered).size).toBe(serverCodes.length)
@@ -296,6 +331,14 @@ describe('批量转交 outcome helpers', () => {
     }
     expect(isKnownSkipReason('a-code-added-later')).toBe(false)
     expect(describeSkipReason('a-code-added-later', true)).toBe('未转交（原因未知）')
+    // Lock §14.3 #12's FE acceptance line verbatim: `cancel_round` must render the dedicated
+    // copy, not the unknown-reason fallback — `not.toBe('')` above would not have caught a
+    // fallback string (the fallback is non-empty), so this needs its own assertion.
+    expect(describeSkipReason('cancel_round', true)).toBe('该审批处于撤销轮中，暂不可改派')
+    expect(describeSkipReason('cancel_round', true)).not.toBe('未转交（原因未知）')
+    expect(describeSkipReason('cancel_round', false)).toBe(
+      'This approval is in a cancel round and cannot be reassigned',
+    )
   })
 
   it('blocks a submit for each refusal the endpoint itself makes', () => {

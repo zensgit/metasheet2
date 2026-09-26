@@ -1642,6 +1642,17 @@ export async function listPendingApprovalsForApprover(
  * value outside this set is rendered through the unknown-code fallback rather
  * than being dropped, so a future server-side addition surfaces instead of
  * silently disappearing from the per-row report.
+ *
+ * `cancel_round` (design lock §14.3 #12,
+ * approval-change-request-design-lock-draft-20260915.md v5.9): the backend's
+ * `rejectIfCancelRound` guard on `bulkReassignApprovals` (`APS:8916`) reports a
+ * skipped seat for an instance that is mid cancel-round via this literal.
+ * `ApprovalProductService.ts`'s own `ApprovalBulkReassignSkipReason` now
+ * declares it too (both landed on this branch), so the readFileSync sync-pin
+ * in `apps/web/tests/approvalBatchTransferView.spec.ts` compares this literal
+ * against the backend union byte-for-byte — the pin is bidirectional, and an
+ * FE label with no server literal reds it exactly as an unmapped server
+ * literal would.
  */
 export type ApprovalBulkReassignSkipReason =
   | 'not-found'
@@ -1651,6 +1662,7 @@ export type ApprovalBulkReassignSkipReason =
   | 'target-already-assignee'
   | 'target-user-invalid'
   | 'error'
+  | 'cancel_round'
 
 export interface ApprovalBulkReassignPayload {
   fromUserId: string
