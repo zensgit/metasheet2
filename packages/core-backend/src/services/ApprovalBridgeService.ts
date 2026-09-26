@@ -20,6 +20,7 @@ import {
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
 import { resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { readCancelRoundDurableProjectionV1 } from '../core/attendance-cancellation-execution-port'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
@@ -45,6 +46,7 @@ import {
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
+  isCancelRoundInstance,
 } from '../attendance/w4c3b-central-approval-hooks'
 
 /**
@@ -1014,6 +1016,43 @@ export class ApprovalBridgeService {
         queryFn,
       )
     }
+    // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
+    // 暴露整个 metadata。」 THIS is the `GET /api/approvals/:id` handler's `getApproval` (the route
+    // builds an `ApprovalBridgeService`, `routes/approvals.ts`'s `getBridgeService`), so this is the
+    // 刷新 path the ruling names. It shares ONE reader with `ApprovalProductService.getApproval`,
+    // the action-response builder, so the two cannot disagree about what a reload shows.
+    //
+    // Runs AFTER the per-instance admission the route applies ahead of this call
+    // (`canReadApprovalInstance`, Lock-10 S1) — a non-participant is 404'd before any of this, so
+    // the fence over these values is the existing one, unchanged and not re-implemented here.
+    //
+    // PLATFORM IDS ONLY — the SAME `isPlmId` branch this method opens with (`:915`), the route
+    // applies before its fence, and Lock-10 OD-S1-18(a) pins ("`plm:` ids are NEVER routed through
+    // the predicate — platform posture only"). A cancel round is minted by
+    // `createCancelRoundInstance` as a PLATFORM instance with a bare-UUID id (the verification
+    // measured `idHasPlmPrefix = false` on a real one), so for a `plm:` mirror this read can only
+    // ever match zero rows. Skipping it there is the architectural branch, not a new predicate.
+    // ⚠️ Deliberately NOT gated on `isCancelRoundInstance(row)` / `workflow_key`, which would be a
+    // tempting second narrowing: `workflow_key` is MUTABLE on an existing row (this corpus's own
+    // fixtures re-key instances with a bare UPDATE), and a read gated on a mutable column fails by
+    // SILENT ABSENCE — the exact defect shape this change exists to close.
+    // ⚠️ ASYMMETRY (gate round1 P3-2, OWNER-OPEN — not yet ruled on): `ApprovalProductService
+    // .getApproval`'s call to the SAME shared reader below has NO matching `isPlmId` guard; it runs
+    // unconditionally. That is not a correctness gap today — a `plm:`-mirror instance's
+    // `approval_records` rows are written by this service's own `insertApprovalRecord`, and no
+    // cancel-round writer ever attaches either whitelisted key to one, so the product-service side's
+    // extra query also matches zero rows, just without the short-circuit. Deleting THIS guard (M-F)
+    // leaves the whole redemption suite green: it is uncovered by construction, not by omission. The
+    // choice between (a) adding the same guard on the product-service side for textual symmetry with
+    // the claim two paragraphs above, or (b) dropping it here too and rewriting this branch as a bare
+    // performance short-circuit rather than an architectural one, is left to the owner — this
+    // comment documents the asymmetry that exists today; it does not resolve it.
+    if (dto && !isPlmId(id)) {
+      Object.assign(dto, await readCancelRoundDurableProjectionV1(
+        (text, values) => pool!.query(text, values),
+        id,
+      ))
+    }
     return dto
   }
 
@@ -1069,6 +1108,11 @@ export class ApprovalBridgeService {
       if (bridgeDispatchTestBarrierForTests) {
         await bridgeDispatchTestBarrierForTests('after_instance_lock', { instanceId: id })
       }
+
+      // Lock §14.3 outlet #8 — a cancel-round instance never terminalizes through the generic
+      // bridge dispatch (it only ever moves through `ApprovalProductService.dispatchAction`'s
+      // dedicated cancel-round handling, WI-7/WI-12).
+      rejectIfCancelRound(instance, 'ApprovalBridgeService.dispatchAction')
 
       // P17/P22: attendance instances cannot terminalize through the generic bridge.
       // Classify + lock request before any instance/assignment DML (including
@@ -1566,4 +1610,44 @@ export class ServiceError extends Error {
     super(message)
     this.name = 'ServiceError'
   }
+}
+
+/**
+ * Approval change-request design lock v5.9 §14.3 — thrown by every one of the 8 chokepoints that
+ * must reject a cancel-round instance (outlets #2/#4/#6/#7/#7'/#8; #12/#13 land as a typed skip
+ * reason instead, per the lock's own distinction). `extends ServiceError` (not
+ * `AttendanceCentralApprovalError`) so `handleApprovalsError`'s `error instanceof ServiceError`
+ * branch (routes.ts) and this file's own callers funnel it through the standard envelope; extending
+ * `AttendanceCentralApprovalError` instead would get it silently absorbed into `skipped_stale` at
+ * `ApprovalProductService.ts:9637`, which is the one behavior this class must never have.
+ */
+export class CancelRoundOutletForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_OUTLET_FORBIDDEN')
+    this.name = 'CancelRoundOutletForbiddenError'
+  }
+}
+
+/** Lock §9-5 (lock:143) — creation-time suite gate: `suite='forbidden'` rejects before any write. */
+export class CancelRoundSuiteForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_SUITE_FORBIDDEN')
+    this.name = 'CancelRoundSuiteForbiddenError'
+  }
+}
+
+/**
+ * Shared outlet guard (lock §14.3, WI-7) — every chokepoint that must reject a cancel-round
+ * instance outright (as opposed to #12/#13's typed-skip treatment) calls this instead of
+ * hand-rolling the `isCancelRoundInstance` check, so the rejected action set stays centrally
+ * auditable. No-op for a non-cancel-round instance.
+ */
+export function rejectIfCancelRound(
+  instance: { workflow_key?: string | null },
+  outletLabel: string,
+): void {
+  if (!isCancelRoundInstance(instance)) return
+  throw new CancelRoundOutletForbiddenError(
+    `Cancel-round instances cannot be actioned through ${outletLabel}`,
+  )
 }

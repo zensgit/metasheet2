@@ -11,6 +11,10 @@ import { canReadApprovalInstance } from '../services/approval-instance-readabili
 import { parsePagination } from '../util/response'
 import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
 import { isApprovalAttachmentsEnabled } from './approval-attachments'
+import {
+  projectCancelRoundCancellationOutcomeForReadV1,
+  projectCancelRoundCloseReasonForReadV1,
+} from '../core/attendance-cancellation-execution-port'
 
 interface ApprovalHistoryRouterOptions {
   injector?: Injector
@@ -203,11 +207,16 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
         [id, APPROVAL_POLICY_DENIED_ACTION],
       )
       const total = Number(countRes.rows[0]?.c || 0)
-      // Lock-9 FE read-half companion — the ONLY new projection is `metadata->'attachmentIds'`
-      // (a single jsonb key path, never `metadata` itself). This changes neither the WHERE clause
-      // (S2's pointer-row exclusion, `metadata->>'commentId' IS NULL`, is untouched on both queries
-      // above/below) nor the row set nor the ORDER/LIMIT/OFFSET — only one additional expression is
-      // read per row, aliased so it never collides with a real column name.
+      // Lock-9 FE read-half companion + the owner's 2026-09-20 ruling on the cancel-round durable
+      // read — every metadata projection here is a SINGLE JSONB KEY PATH, never `metadata` itself.
+      // THREE key paths now (`attachmentIds`, `cancellationOutcome`, `cancelRoundCloseReason`), and
+      // the list is exhaustive at this head: no other metadata key is projected, so the
+      // internal ones (`w4ActorPosture`, `parallelCancelledAssignees`, `cancelRoundBlockDetail`,
+      // `approvalThreshold`, `channel`/`cardDeliveryId`, …) cannot reach a client from this route
+      // even if the map below were wrong. This changes neither the WHERE clause (S2's pointer-row
+      // exclusion, `metadata->>'commentId' IS NULL`, is untouched on both queries above/below) nor
+      // the row set nor the ORDER/LIMIT/OFFSET — only three additional expressions are read per
+      // row, each aliased so it never collides with a real column name.
       const { rows } = await pool.query(
         `SELECT
            id,
@@ -221,7 +230,9 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
            COALESCE(to_version, version) AS version,
            from_version,
            to_version,
-           metadata->'attachmentIds' AS lock9_attachment_ids_raw
+           metadata->'attachmentIds' AS lock9_attachment_ids_raw,
+           metadata->'cancellationOutcome' AS cancel_round_outcome_raw,
+           metadata->>'cancelRoundCloseReason' AS cancel_round_close_reason_raw
          FROM approval_records
          WHERE instance_id = $1
            AND action <> $4
@@ -232,26 +243,54 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       )
 
       // The row shape is bounded by the explicit SELECT list above (no bare `metadata` column is
-      // ever projected there) — the destructure below only strips the ONE internal
-      // `lock9_attachment_ids_raw` alias so it can never itself leak onto the wire; it is not what
-      // keeps other metadata keys out (the SELECT list already never asked the DB for them).
+      // ever projected there) — the destructure below only strips the THREE internal `*_raw`
+      // aliases so they can never themselves leak onto the wire; it is not what keeps other
+      // metadata keys out (the SELECT list already never asked the DB for them). Each projector
+      // then REBUILDS its value field by field from a fixed key set (see
+      // `projectCancelRoundCancellationOutcomeForReadV1`), so a key nested INSIDE a whitelisted
+      // object — which the SELECT list cannot exclude on its own — is dropped here.
       //
-      // Fix-round P2-1: gated on `isApprovalAttachmentsEnabled()`, checked ONCE per request (the
-      // flag can't change mid-request) so that with the flag OFF this map produces byte-for-byte
-      // the SAME `item` shape as before this field existed — no `metadata` key is ever attached,
-      // regardless of what a row's `lock9_attachment_ids_raw` holds. This matches the "Flag OFF
-      // remains a byte-for-byte no-op" doctrine this route's SQL comment above already claimed but
-      // did not, until now, enforce in code (see `isApprovalAttachmentsEnabled` in
-      // `./approval-attachments`, the SAME flag `/refs`, `/download` and `dispatchAction` gate on).
+      // TWO INDEPENDENT GATES, deliberately not one:
+      //  - `attachmentIds` stays gated on `isApprovalAttachmentsEnabled()`, checked ONCE per
+      //    request (the flag can't change mid-request) — the SAME flag `/refs`, `/download` and
+      //    `dispatchAction` gate on (`./approval-attachments`).
+      //  - the cancel-round keys are NOT gated on it. The attachments flag is a different feature
+      //    and reusing it would make the durable read of a cancellation outcome depend on whether
+      //    approval attachments happen to be switched on (`M-1`'s own warning in
+      //    `verify-c2-history-dto-cancellation-outcome-20260920.md` §5: 「不该复用(语义无关)」).
+      //
+      // ⚠️ CORRECTED CLAIM (owner ruling 2026-09-20). Until this change the comment here said the
+      // flag-OFF map produces 「byte-for-byte the SAME `item` shape as before this field existed」.
+      // That was true while `attachmentIds` was the only projected key and is NOT true any more:
+      // a row carrying `cancellationOutcome` or `cancelRoundCloseReason` now gets a `metadata` key
+      // with the flag OFF. What remains exactly true, and is what the flag is for, is narrower:
+      // with the flag OFF no `attachmentIds` key is ever attached, regardless of what a row's
+      // `lock9_attachment_ids_raw` holds.
+      //
+      // A row with none of the three whitelisted values gets NO `metadata` key at all (omitted,
+      // never `metadata: {}`) — Lock-9's original shape choice, preserved.
       const attachmentsEnabled = isApprovalAttachmentsEnabled()
       const items = rows.map((row) => {
         const {
           lock9_attachment_ids_raw: attachmentIdsRaw,
+          cancel_round_outcome_raw: cancellationOutcomeRaw,
+          cancel_round_close_reason_raw: cancelRoundCloseReasonRaw,
           ...item
-        } = row as Record<string, unknown> & { lock9_attachment_ids_raw?: unknown }
-        if (!attachmentsEnabled) return item
-        const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
-        return attachmentIds.length > 0 ? { ...item, metadata: { attachmentIds } } : item
+        } = row as Record<string, unknown> & {
+          lock9_attachment_ids_raw?: unknown
+          cancel_round_outcome_raw?: unknown
+          cancel_round_close_reason_raw?: unknown
+        }
+        const metadata: Record<string, unknown> = {}
+        const cancellationOutcome = projectCancelRoundCancellationOutcomeForReadV1(cancellationOutcomeRaw)
+        if (cancellationOutcome) metadata.cancellationOutcome = cancellationOutcome
+        const cancelRoundCloseReason = projectCancelRoundCloseReasonForReadV1(cancelRoundCloseReasonRaw)
+        if (cancelRoundCloseReason !== null) metadata.cancelRoundCloseReason = cancelRoundCloseReason
+        if (attachmentsEnabled) {
+          const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
+          if (attachmentIds.length > 0) metadata.attachmentIds = attachmentIds
+        }
+        return Object.keys(metadata).length > 0 ? { ...item, metadata } : item
       })
 
       return res.json({

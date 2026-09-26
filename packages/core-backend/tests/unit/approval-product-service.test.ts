@@ -250,6 +250,21 @@ function mockInsertOnlyClient() {
 // per-test mock router's "Unhandled" throw. This keeps the strict routers useful without copying
 // infrastructure-only fixtures into every behavioral test.
 function commonApprovalClientMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+  // dispatchAction's cancel-round rollout-lock pre-read (lock §3 C-2 全局锁序). It runs BEFORE
+  // `BEGIN` on EVERY dispatch and short-circuits on the first row for anything that is not a
+  // cancel round, which is what every fixture in this file is — so the honest mock is a real row
+  // carrying a non-cancel-round `workflow_key`, and the three further reads the resolver would do
+  // for a cancel round are deliberately NOT mocked: a fixture that ever reached them would fail
+  // loudly here rather than silently taking the `none` branch.
+  //
+  // This is a MOCK, not the contract (`feedback_mock_is_not_the_contract.md`). The production
+  // behaviour of that resolver — including WHICH org it returns and when it demands no lock at
+  // all — is measured against real PostgreSQL in the Q-F census legs of
+  // `tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, not here.
+  if (statement.startsWith('SELECT id, workflow_key FROM approval_instances')) {
+    return { rows: [{ id: 'approval-1', workflow_key: null }], rowCount: 1 }
+  }
+
   // nodeEntryEpoch (2026-07-03): use a stable activation sequence and keep legacy mock instances
   // on the NULL cutoff fallback so pre-existing round-scoping assertions stay unchanged.
   if (statement.startsWith('UPDATE approval_instances SET node_activation_seq = node_activation_seq + 1')) {
@@ -4732,6 +4747,13 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
 
@@ -4956,6 +4978,13 @@ describe('ApprovalProductService', () => {
           }],
           rowCount: 1,
         }
+      }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
       }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
@@ -8554,5 +8583,135 @@ describe('ApprovalProductService', () => {
       await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
         .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
     })
+  })
+
+  /**
+   * Lock §3 C-2 step ④'s replay key. These four assertions are the ones the integration
+   * double-backed cases structurally CANNOT make: a test double never normalizes its input, so the
+   * raw-`roundId` defect (`approval_rounds.id` is `text`, minted `apr_<uuid>`; the boundary's
+   * `uuidOrNull` refuses it with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`, 500) was green in four of
+   * them until the end-to-end case ran the real boundary.
+   */
+  describe('deriveCancelRoundW4OperationIdV1 (lock §3 C-2 step ④ replay key)', () => {
+    it('derives a UUIDv5 from a round id, deterministically and distinctly, and refuses an empty one', async () => {
+      const { deriveCancelRoundW4OperationIdV1 } = await import('../../src/core/attendance-cancellation-execution-port')
+      const roundId = 'apr_2f1f2ad0-9f3d-4b3c-8e6a-1b6b6a2a7c11'
+
+      // UUID-shaped, version 5, RFC 4122 variant — what the boundary's `uuidOrNull` accepts and
+      // what `approval_rounds.id` is NOT.
+      const derived = deriveCancelRoundW4OperationIdV1(roundId)
+      expect(derived).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+      expect(derived).not.toBe(roundId)
+
+      // Deterministic: a retry of the SAME round after a rolled-back attempt replays under the
+      // same W4 operation rather than minting a second one.
+      expect(deriveCancelRoundW4OperationIdV1(roundId)).toBe(derived)
+
+      // Distinct: two rounds must never share a replay key, or the second would replay the first's
+      // response and report a cancellation it never performed.
+      expect(deriveCancelRoundW4OperationIdV1(`${roundId}x`)).not.toBe(derived)
+
+      // Fail closed rather than hand every empty identity one shared key.
+      expect(() => deriveCancelRoundW4OperationIdV1('')).toThrow()
+
+      // ── GOLDEN VALUE. The three assertions above are self-consistency: they hold for ANY
+      // derivation, including one whose namespace, name-bytes framing or hash changed. This one
+      // pins the ACTUAL key. It matters because the key is durable state: a round that already
+      // cancelled real business rows must replay under the same W4 operation, so a silent change
+      // here would make every already-redeemed round mint a second operation. The port module
+      // calls the namespace 「frozen from here on」 — this is the test that makes that sentence
+      // more than an asserted invariant.
+      expect(derived).toBe('46c05da2-ae5a-53c4-ac85-61190e0571ff')
+    })
+  })
+})
+
+// Gate round1 20260920 NIT-1: `business_refused.code` is accepted by
+// `takeBusinessRefusal` (`attendance/w4c3b-request-operation-boundary.ts`) with only a
+// `typeof string && length > 0` check — no charset constraint, because a charset regex
+// would silently drop a legitimate code and `AttendanceRequestOperationBusinessRefusalV1
+// .code` has no charset property to check against. That is safe ONLY because today's
+// codomain is a CLOSED, single-element set. This pins the census as data, not as an
+// argument: it fails on a second constructor written in the same literal-inline shape
+// (see `docs/development/approval-cancel-round-phase2-verification-20260918.md` for this
+// slice's verification record), scanned anywhere under `plugins/` or
+// `packages/core-backend/src/`. This file is collected by core-backend's default vitest
+// run — the required `test (20.x)` job's "Run core-backend tests" step
+// (`plugin-tests.yml:842-844`, `pnpm --filter @metasheet/core-backend test`); a second
+// producer written in the matched shape reds that required check.
+//
+// The pattern below deliberately requires a QUOTED code literal immediately after
+// `kind: 'business_refused'` — `takeBusinessRefusal`'s own pass-through construction
+// (`w4c3b-request-operation-boundary.ts:616`, `{ kind: 'business_refused' as const,
+// code: result.code, ... }`) also spells `kind: 'business_refused'` but forwards an
+// IDENTIFIER (`result.code`), never mints a literal, and must NOT count as a second
+// producer — it is the boundary the report names, not a duplicate mint site.
+describe('business_refused production-constructor census (gate round1 NIT-1)', () => {
+  const path = require('path') as typeof import('path')
+  const fs = require('fs') as typeof import('fs')
+
+  // Resolved off this file's own location, never `process.cwd()` — this suite's worktree
+  // symlinks `node_modules` in from elsewhere, so a naive walk must explicitly refuse to
+  // follow it rather than relying on cwd happening to be the repo root.
+  const repoRoot = path.resolve(__dirname, '../../../..')
+  const SCAN_ROOTS = [
+    path.join(repoRoot, 'plugins'),
+    path.join(repoRoot, 'packages', 'core-backend', 'src'),
+  ]
+  const SKIP_DIR_NAMES = new Set(['node_modules', 'dist', '.git', 'coverage', 'tests', '__tests__'])
+  const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
+  // Requires a QUOTED literal for `code:` right after `kind: 'business_refused'` (an
+  // optional `as const` tolerated in between) — an identifier (`code: result.code`) does
+  // NOT match, so a pass-through/validator that only forwards an already-minted code is
+  // correctly excluded. `s` (dotall) lets the two fields span a line break.
+  const CONSTRUCTOR_PATTERN = /kind:\s*['"]business_refused['"](?:\s*as\s*const)?\s*,\s*code:\s*(['"])((?:(?!\1).)*)\1/gs
+
+  function walk(dir: string, out: string[]): void {
+    let entries: import('fs').Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (SKIP_DIR_NAMES.has(entry.name)) continue
+      const full = path.join(dir, entry.name)
+      if (entry.isSymbolicLink()) continue // node_modules is symlinked in this worktree
+      if (entry.isDirectory()) {
+        walk(full, out)
+      } else if (SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+        out.push(full)
+      }
+    }
+  }
+
+  it('has exactly one production constructor of `business_refused` that MINTS a literal ' +
+    'code, and that literal is the sole known value — a second constructor MUST re-open ' +
+    'the close-reason projection domain-closure review, not pass silently', () => {
+    const files: string[] = []
+    for (const root of SCAN_ROOTS) walk(root, files)
+    expect(files.length).toBeGreaterThan(0) // sanity: the walk actually found source files
+    // Per-root sanity, not just the total: if EITHER root silently resolved to nothing (the
+    // `walk` try/catch swallows a missing/unreadable directory), the sole real producer could
+    // vanish along with it and this test would go red on a bare `0`, indistinguishable from
+    // "the census broke" rather than "a root disappeared". Each root must contribute >=1 file.
+    for (const root of SCAN_ROOTS) {
+      const inRoot = files.filter((f) => f.startsWith(root + path.sep))
+      expect(inRoot.length, `scan root contributed no files (missing/unreadable?): ${root}`)
+        .toBeGreaterThan(0)
+    }
+
+    const hits: Array<{ file: string; code: string }> = []
+    for (const file of files) {
+      const content = fs.readFileSync(file, 'utf8')
+      let match: RegExpExecArray | null
+      CONSTRUCTOR_PATTERN.lastIndex = 0
+      while ((match = CONSTRUCTOR_PATTERN.exec(content))) {
+        hits.push({ file, code: match[2] })
+      }
+    }
+
+    expect(hits, JSON.stringify(hits, null, 2)).toHaveLength(1)
+    expect(hits[0].code).toBe('ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
   })
 })

@@ -159,6 +159,16 @@ const RESERVED_EVENT_SOURCES = new Set([OUTDOOR_APPROVAL_EVENT_SOURCE])
 const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
 const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance:admin']
 
+// Approval change-request design lock v5.9 §14.1/§14.3 #10-#11 (lane decision 2, 2026-09-17):
+// mirrors the core-side `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY`
+// (packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts) — SAME identifier, same
+// value, by the same convention `ATTENDANCE_APPROVAL_WORKFLOW_KEY` above already follows for that
+// core file (CJS boundary: this module has zero import of the TS side, so the value is duplicated
+// rather than imported). A pinning test asserts both the name and the value are byte-identical to
+// the core constant on every CI run
+// (packages/core-backend/tests/unit/approval-cancel-round-plugin-mirror-constant.test.ts).
+const APPROVAL_CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+
 // ── S7-1 dynamic approval-assignee sources (RATIFIED attendance-approval-s7 resolver design-lock) ──
 // The whole capability is a default-OFF, flag-gated opt-in (§5). Read the flag at REQUEST time (not at
 // activate) so a test / operator flip takes effect without a restart.
@@ -24308,7 +24318,30 @@ function buildAttendanceApprovalInstancePayload({
   }
 }
 
+// Approval change-request design lock v5.9 §14.3 #10/#11 defensive check (lane decision 2,
+// 2026-09-17): `upsertAttendanceApprovalInstance` below is the SAME chokepoint that feeds both
+// #10's attendance_requests FK-pairing column write and #11's `approval_instances.workflow_key`
+// write (both derive from this one `payload.workflowKey`). The
+// lock's own account of #11 calls its protection "structural" — every caller reaches this function
+// through `buildAttendanceApprovalInstancePayload`, the SOLE site in this file that sets the
+// payload's workflow-key property, always with the literal `ATTENDANCE_APPROVAL_WORKFLOW_KEY`
+// (mechanically pinned by the "assigned exactly once" unit test alongside this constant's mirror
+// test), so this assertion is PROVABLY unreachable for every current caller — it changes no
+// behavior today. It exists as a fail-closed trip-wire alongside #10's DB-level
+// `atr_not_cancel_round` CHECK, in case a future change ever threads a caller-supplied workflow
+// key through this path.
+function assertAttendanceApprovalPayloadNotCancelRound(payload) {
+  if (payload && payload.workflowKey === APPROVAL_CANCEL_ROUND_WORKFLOW_KEY) {
+    throw new HttpError(
+      500,
+      'ATTENDANCE_APPROVAL_INSTANCE_CANCEL_ROUND_FORBIDDEN',
+      'Attendance approval instance write must never target the cancel-round workflow key',
+    )
+  }
+}
+
 async function upsertAttendanceApprovalInstance(client, payload) {
+  assertAttendanceApprovalPayloadNotCancelRound(payload)
   // Lock-11 §10 W-4: derive the org to stamp BEFORE the INSERT, same transaction (TOCTOU
   // discipline matching W-1/W-2). A refusal here throws (values-free HttpError) and the whole
   // boundary transaction rolls back — no approval_instances row, no attendance_requests row,
@@ -24936,6 +24969,8 @@ module.exports = {
   __attendanceApprovalCenterForTests: {
     ATTENDANCE_APPROVAL_WORKFLOW_KEY,
     ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS,
+    APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
+    assertAttendanceApprovalPayloadNotCancelRound,
     attendanceRequestTypeLabel,
     buildAttendanceApprovalNodeKey,
     buildAttendanceApprovalAssignments,
@@ -24995,6 +25030,41 @@ module.exports = {
       if (context.api?.events?.emit) {
         context.api.events.emit(type, data)
       }
+    }
+
+    /**
+     * Codex 审阅第 3 条修复 (2026-09-19) — THE single `attendance.request.cancelled` send site.
+     *
+     * Both the HTTP cancel route and the approval side's cancel-round redemption reach the event
+     * through THIS function and nothing else, so the gate and the payload exist once. Previously
+     * the gate and payload were inline in `cancelRequest`, and the redemption path (which never
+     * calls `cancelRequest` — its only two callers are the two HTTP routes) therefore emitted the
+     * event ZERO times under the `legacy` / `legacy_compat` postures, which are the only postures
+     * any org runs today. Measured: `{sendsAfterA: 0, sendsAfterB: 1}` over the twin fixture.
+     *
+     * ⚠️ THE GATE IS DERIVED, NOT COPIED FORWARD. Only `legacy` and `legacy_compat` emit here:
+     *   - `executed`  ⇒ the boundary enqueued `attendance_result_event_outbox` and the W4C-2
+     *                   dispatcher (`w4c2-outbox-dispatcher.ts:85-168`) emits it on drain. Emitting
+     *                   here as well would DOUBLE-send.
+     *   - `replay`    ⇒ the boundary returned at its replay preflight, BEFORE the enqueue
+     *                   (`w4c3b-request-operation-boundary.ts:870-874`); the original run already
+     *                   delivered. Emitting here would make a replay a duplicate delivery. This is
+     *                   the idempotency, reusing the W4 replay preflight — no new table, no new key.
+     *   - business_refused / anything else ⇒ nothing was cancelled; there is nothing to announce.
+     *
+     * Returns whether it sent, so callers can be asserted against rather than trusted.
+     */
+    const emitRequestCancelledEventForOutcomeV1 = (outcome, fallbackRequestId) => {
+      const kind = outcome?.kind
+      if (kind !== 'legacy' && kind !== 'legacy_compat') return false
+      const result = outcome.response?.data
+      emitEvent('attendance.request.cancelled', {
+        requestId: result?.requestId ?? fallbackRequestId,
+        status: result?.status ?? 'cancelled',
+        orgId: result?.orgId,
+        userId: result?.userId,
+      })
+      return true
     }
 
     // W4C-2 (#4556 lock §12.2 last sentence; #4607 gate handover P3-4): default-rule and
@@ -33722,8 +33792,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33736,6 +33806,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -33964,8 +34035,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33978,6 +34049,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -34239,8 +34311,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34249,6 +34321,7 @@ module.exports = {
           input.startDate,
           input.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34524,8 +34597,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34534,6 +34607,7 @@ module.exports = {
           requesterSource.workDate,
           route.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34865,7 +34939,8 @@ module.exports = {
         const rows = await trx.query(
           `UPDATE attendance_requests
            SET work_date = $2, request_type = $3, requested_in_at = $4, requested_out_at = $5,
-               reason = $6, metadata = $7::jsonb, approval_instance_id = $8, updated_at = now()
+               reason = $6, metadata = $7::jsonb, approval_instance_id = $8,
+               approval_workflow_key = $9, updated_at = now()
            WHERE id = $1
            RETURNING *`,
           [
@@ -34877,6 +34952,7 @@ module.exports = {
             draft.reason,
             JSON.stringify(draft.metadata),
             approvalId,
+            approvalPayload.workflowKey,
           ],
         )
         const snapshotToken = buildRequestSnapshotToken(snapshotAppend)
@@ -35154,6 +35230,33 @@ module.exports = {
       },
       execute: async function executeRequestCancel(trx, prepared, operation) {
         const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
+        // ── Lock §3 C-2 全局锁序 — the ORIGINAL approval instance is locked BEFORE the request row.
+        // lock:110 「建议全局顺序 rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → attendance_requests
+        // → 余额批次，现有适配器改为同序」; lock:227 repeats it as the row-lock class order.
+        // Until this commit this adapter took `attendance_requests FOR UPDATE` first and the
+        // original `approval_instances` row second, while the core approval side takes them the
+        // other way round (`classifyAndLockAttendanceRequestForInstance`, always reached with the
+        // instance row already `FOR UPDATE`-held by `dispatchAction` / `bulkReassignApprovals`).
+        // That is a cycle on the SAME (request, instance) pair, and it is not theoretical: it is
+        // CONSTRUCTED and deadlocks deterministically (40P01) in census Q-G,
+        // `packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts`.
+        // Behaviour note (disclosed, not buried): when BOTH rows are mutated concurrently between
+        // prepare and execute, the 409 that surfaces is now 'Approval changed during cancellation
+        // preparation' where it used to be 'Request changed during cancellation preparation' —
+        // same status and same code (`REQUEST_STATE_CONFLICT`), and no test asserts the
+        // precedence. The one row lock this now takes before the authorization calls below has the
+        // same blast radius as the request-row lock that was already taken before them.
+        let lockedApproval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [approvalId],
+          )
+          lockedApproval = approvalRows[0] ?? null
+          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
+          }
+        }
         const lockedRequestRows = await trx.query(
           'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
           [route.requestId],
@@ -35183,17 +35286,6 @@ module.exports = {
           },
         )
         await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
-        let lockedApproval = null
-        if (approvalId) {
-          const approvalRows = await trx.query(
-            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-            [approvalId],
-          )
-          lockedApproval = approvalRows[0] ?? null
-          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
-            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
-          }
-        }
         if (requestRow.status !== 'pending' && !approvedLeave) {
           throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
         }
@@ -35219,12 +35311,31 @@ module.exports = {
             mode: operation.acceptedWritePosture === 'authoritative' ? 'authoritative' : 'shadow',
           })
           if (cancellationCalculation.kind === 'review_required') {
-            throw new HttpError(
-              409,
-              'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
-              'Approved leave cancellation requires attendance review',
-              singleValidationDetail('calculation', cancellationCalculation.reason),
-            )
+            // Lock §3 C-3 / §11-④ (approval-change-request lock:126-130). This used to `throw` the
+            // 409 straight from here. A throw is the WRONG shape for a business outcome that the
+            // approval side has to be able to decide on: an approved document's cancel round must
+            // be able to PERSIST a `blocked` closure in the same transaction, and a throw unwinds
+            // the transaction it would have to be written in. So the business outcome is RETURNED,
+            // and the boundary — which is the only thing that knows which entry it is serving —
+            // decides what to do with it.
+            //
+            // The HTTP entry is unchanged in observable behaviour: the boundary throws THIS error
+            // object, constructed here with the same four arguments as before (status 409, code,
+            // message, `singleValidationDetail('calculation', reason)`), so the response body is
+            // byte-for-byte what it was. Oracle:
+            // `attendance-w4c3b-request-operation-routes.db.test.ts`, "rolls back approved-leave
+            // cancellation when P14 has no frozen parent calculation".
+            return {
+              kind: 'business_refused',
+              code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+              detail: cancellationCalculation.reason,
+              httpError: new HttpError(
+                409,
+                'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+                'Approved leave cancellation requires attendance review',
+                singleValidationDetail('calculation', cancellationCalculation.reason),
+              ),
+            }
           }
         }
 
@@ -35789,6 +35900,29 @@ module.exports = {
             },
           })
         : null
+
+    // Approval-change-request lock §3 C-1 — hand the SAME boundary to the approval side's
+    // cancel-round redemption. Not a second boundary and not a cancel-only shim: the object bound
+    // here is the one the HTTP routes above already call, so 判据 II's 完整业务取消 and an ordinary
+    // `POST /requests/:id/cancel` run the identical W4 protocol (prepare/prepareIdentity → identity
+    // congruence → rollout-locked posture → authorization → replay preflight → adapter.execute →
+    // seal/outbox), differing only in who owns the connection and the transaction.
+    if (
+      w4RequestOperationBoundary
+      && attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary === 'function'
+    ) {
+      attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary(w4RequestOperationBoundary)
+      // Codex 审阅第 3 条修复 (2026-09-19) — bind the POST-COMMIT `attendance.request.cancelled`
+      // delivery to the SAME function the HTTP route calls. The approval side owns the transaction
+      // and calls this only after its COMMIT; the gate and the payload live here, once, so the two
+      // paths cannot drift into two event constructions.
+      if (typeof attendanceW4SegmentCalculationPort.registerCancelRoundCancelledEventDelivery === 'function') {
+        attendanceW4SegmentCalculationPort.registerCancelRoundCancelledEventDelivery(
+          (result, fallbackRequestId) => emitRequestCancelledEventForOutcomeV1(result, fallbackRequestId),
+        )
+      }
+    }
 
     // W4C-3c: manual_edit / recompute / ops_retirement adapters — only entrypoints for these writes.
 	    async function loadW4c3cRecordSubjectForOperation(trx, orgId, recordId) {
@@ -38584,15 +38718,7 @@ module.exports = {
           },
         })
 
-        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
-          const result = outcome.response?.data
-          emitEvent('attendance.request.cancelled', {
-            requestId: result?.requestId ?? requestId,
-            status: result?.status ?? 'cancelled',
-            orgId: result?.orgId,
-            userId: result?.userId,
-          })
-        }
+        emitRequestCancelledEventForOutcomeV1(outcome, requestId)
         res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {

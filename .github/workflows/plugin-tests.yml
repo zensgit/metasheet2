@@ -1569,12 +1569,21 @@ jobs:
             tests/integration/b2a-operation-claim-078-realdb.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens + cancel-round Q-A census/creation/redemption/seat-guards/FK-migration/outlet-guards/node-timeout/seed-template-visibility)
         id: approval-real-db-integration
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
         # default test job, so this is its real CI lane.
+        #
+        # The seven `approval-cancel-round-*.db.test.ts` files at the tail of this run-list were
+        # promoted here from a standalone (non-required) `approval-realdb-cancel-round.yml` lane,
+        # which is DELETED in the same commit — per the #5095 precedent
+        # (`docs/development/approval-lock11-writer-org-derivation-20260822.md` §4.1), this is the
+        # one legitimate-touch case for the s6a `pluginTestsWorkflow` pin: the digest below was
+        # recomputed via `computePackageProvenancePinSet(repoRoot)` in the same commit that made
+        # this edit, and verified to be the only key that moved. Keeping both lanes would have run
+        # the same seven files twice per PR for no additional coverage.
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -1658,6 +1667,14 @@ jobs:
             tests/integration/approval-instance-readability-s1.db.test.ts \
             tests/integration/approval-comments.db.test.ts \
             tests/integration/approval-lock9-process-attachments-realdb.db.test.ts \
+            tests/integration/approval-cancel-round-lock-order-census.db.test.ts \
+            tests/integration/approval-cancel-round-creation.db.test.ts \
+            tests/integration/approval-cancel-round-redemption.db.test.ts \
+            tests/integration/approval-cancel-round-seat-guards.db.test.ts \
+            tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts \
+            tests/integration/approval-cancel-round-outlet-guards.db.test.ts \
+            tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts \
+            tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
