@@ -36,6 +36,7 @@
     :sheet-id="sheetId"
     :api-client="apiClient"
     :ai-shortcut="aiShortcut"
+    :ai-available="aiAvailable"
     :button-run-pending="buttonRunPending"
     :mention-suggestions="mentionSuggestions"
     :mention-search="mentionSearch"
@@ -113,6 +114,9 @@ withDefaults(defineProps<{
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
+  /** A11: forwarded 1:1 to MetaRecordInspector's own prop. Optional with the SAME fail-closed
+   *  default (absent ⇒ no AI preview/run buttons), the canSubmitApproval precedent above. */
+  aiAvailable?: boolean
   /** B1-e: in-flight button runs keyed `${recordId}:${fieldId}` — the SAME ref
    *  the grid (MetaGridTable) receives, so a run from either surface disables
    *  the button on both. Matches the workbench `onRunButton` pending-key format. */
@@ -128,6 +132,7 @@ withDefaults(defineProps<{
   openerEl?: HTMLElement | null
 }>(), {
   recordIds: () => [],
+  aiAvailable: false,
   buttonRunPending: () => [],
   openerEl: null,
 })

@@ -440,7 +440,7 @@
           </div>
           <!-- M4 / Lane B2: NL→formula suggest. Describe → generate ONE candidate →
                accept (copies into the expression textarea) → Test validates. -->
-          <div v-if="formulaSuggestFn" class="meta-field-mgr__field meta-field-mgr__formula-suggest" data-test="formula-suggest">
+          <div v-if="formulaSuggestFn && aiSurfacesAvailable" class="meta-field-mgr__field meta-field-mgr__formula-suggest" data-test="formula-suggest">
             <span>{{ ml('field.formulaSuggest.heading') }}</span>
             <textarea
               v-model="formulaSuggestInstruction"
@@ -747,14 +747,50 @@
 
         <!-- A3 §2.1: AI shortcut config section (string/longText targets only) -->
         <div v-if="aiShortcutSectionVisible" class="meta-field-mgr__ai" data-test="ai-shortcut-section">
-          <div class="meta-field-mgr__ai-header">
+          <!-- A11 (customer feedback 2026-09-24 #7c): AI is not available on this deployment → the
+               section collapses to ONE line + a 了解更多 expander. This is a RENDER-ONLY gate
+               (`aiSurfacesAvailable`), deliberately NOT `aiShortcutSectionVisible`: that computed also
+               decides the no-config fallback above, the dirty leg and the bulk-fill leg. The draft is
+               still hydrated, serialized and re-emitted on save, so a saved config is kept as-is. -->
+          <div v-if="aiSurfacesAvailable" class="meta-field-mgr__ai-header">
             <strong>{{ ml('field.ai.title') }}</strong>
           </div>
-          <label class="meta-field-mgr__toggle">
+          <template v-else>
+            <div class="meta-field-mgr__ai-unavailable" data-test="ai-shortcut-unavailable">
+              <span>{{ ml('field.ai.unavailable') }}</span>
+              <button
+                type="button"
+                class="meta-field-mgr__btn-inline"
+                :aria-expanded="aiHelpOpen ? 'true' : 'false'"
+                data-test="ai-shortcut-learn-more"
+                @click="aiHelpOpen = !aiHelpOpen"
+              >{{ aiHelpOpen ? ml('field.ai.hideHelp') : ml('field.ai.learnMore') }}</button>
+            </div>
+            <ul v-if="aiHelpOpen" class="meta-field-mgr__ai-help" data-test="ai-shortcut-help">
+              <li>{{ ml('field.ai.help.kinds') }}</li>
+              <li>{{ ml('field.ai.help.sources') }}</li>
+              <li>{{ ml('field.ai.help.preview') }}</li>
+              <li>{{ ml('field.ai.help.manual') }}</li>
+              <li>{{ ml('field.ai.help.local') }}</li>
+            </ul>
+            <p v-if="aiSavedConfigPresent" class="meta-field-mgr__hint" data-test="ai-shortcut-saved-kept">
+              {{ ml('field.ai.savedConfigKept') }}
+            </p>
+          </template>
+          <!-- The toggle stays reachable while collapsed WHEN a saved config exists: a saved config whose
+               source fields were all deleted blocks every save of this field (resolveAiShortcutDraft),
+               and turning the shortcut off is then the only way out. -->
+          <label v-if="aiSurfacesAvailable || aiSavedConfigPresent" class="meta-field-mgr__toggle">
             <input v-model="aiDraft.enabled" type="checkbox" data-test="ai-shortcut-enable" />
             <span>{{ ml('field.ai.enable') }}</span>
           </label>
-          <template v-if="aiDraft.enabled">
+          <p
+            v-if="!aiSurfacesAvailable && aiSourceAllDeletedBlocked"
+            class="meta-field-mgr__ai-source-deleted-warning"
+            data-test="ai-source-deleted-warning"
+            role="alert"
+          >{{ ml('field.error.aiSourceAllDeleted') }}</p>
+          <template v-if="aiSurfacesAvailable && aiDraft.enabled">
             <label class="meta-field-mgr__field">
               <span>{{ ml('field.ai.kind') }}</span>
               <select v-model="aiDraft.kind" class="meta-field-mgr__select" data-test="ai-shortcut-kind">
@@ -864,7 +900,8 @@
               <div v-if="aiBulkFillDisabledHint" class="meta-field-mgr__hint" data-test="ai-bulk-fill-disabled-hint">{{ aiBulkFillDisabledHint }}</div>
             </div>
           </template>
-          <!-- §2.4 admin usage card (automation stats-card styling family; hidden after a cached 403 probe) -->
+          <!-- §2.4 admin usage card (automation stats-card styling family; hidden after a cached 403 probe).
+               A11: never loaded — so never shown — while AI is unavailable (see the usage watch below). -->
           <div v-if="aiUsageSummary" class="meta-field-mgr__ai-usage" data-test="ai-usage-card">
             <strong>{{ ml('field.aiUsage.title') }}</strong>
             <div class="meta-field-mgr__ai-usage-stats">
@@ -1153,6 +1190,12 @@ const props = defineProps<{
   // in-flight guard + countdown cover this entry point too. null outcome =
   // guarded no-op (another AI request is in flight / countdown active).
   formulaSuggestFn?: (params: { instruction: string }) => Promise<AiFormulaSuggestOutcome | null>
+  // A11 (customer feedback 2026-09-24 #7c): the server reports the AI surfaces available
+  // (GET /api/multitable/ai/availability, resolved fail-closed by the workbench). Absent/false ⇒
+  // the AI section collapses to a one-line "not enabled" notice + help, and the usage card, the
+  // config-time preview, the bulk-fill trigger and the formula AI-suggest panel are not rendered.
+  // RENDER-ONLY: a saved `property.aiShortcut` still hydrates, serializes and is re-emitted on save.
+  aiAvailable?: boolean
   // Cross-base link picker (design 2026-06-14). The base-read gate is the FE's
   // source of truth: these fns are the ONLY way the picker learns what bases /
   // foreign sheets exist, and both are backend base-read-gated (listBases returns
@@ -2292,6 +2335,14 @@ const aiShortcutSectionVisible = computed(() =>
   configTargetType.value === 'string' || configTargetType.value === 'longText',
 )
 
+// A11 (customer feedback 2026-09-24 #7c): RENDER-ONLY availability gate — fail-closed (only an
+// explicit `true` from the workbench counts). It decides what is OFFERED (config controls, preview,
+// bulk fill, usage card, formula AI-suggest); it never touches the draft, the dirty leg or the save
+// payload, so `aiShortcutSectionVisible` above keeps its three jobs unchanged.
+const aiSurfacesAvailable = computed(() => props.aiAvailable === true)
+// A11: the collapsed section's 了解更多 expander (session-local, closed by default).
+const aiHelpOpen = ref(false)
+
 // Constraint mirror (A2): existing, non-computed, not the target field itself.
 const aiSourceFieldCandidates = computed(() =>
   props.fields.filter((field) =>
@@ -2459,6 +2510,10 @@ const aiBulkPersistedConfig = computed(() => {
   const cfg = baseline?.aiShortcut
   return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : null
 })
+// A11: the field being edited carries a SAVED aiShortcut (read from the baseline, so it stays true
+// while the user unticks the toggle and only changes after a save). While AI is unavailable this keeps
+// the enable toggle — and the all-sources-deleted warning — reachable in the collapsed section.
+const aiSavedConfigPresent = computed(() => aiBulkPersistedConfig.value !== null)
 const aiBulkFillVisible = computed(
   () => Boolean(configTarget.value) && aiShortcutSectionVisible.value && aiBulkPersistedConfig.value !== null,
 )
@@ -2543,7 +2598,9 @@ async function loadAiUsageSummary() {
   }
 }
 
-watch(aiShortcutSectionVisible, (visible) => {
+// A11: no admin usage probe (and no card) while AI is unavailable — the watch source includes the
+// availability gate, so the card also loads if availability resolves after the section opened.
+watch(() => aiShortcutSectionVisible.value && aiSurfacesAvailable.value, (visible) => {
   if (visible) void loadAiUsageSummary()
   else aiUsageSummary.value = null
 })
@@ -3847,6 +3904,9 @@ onBeforeUnmount(() => {
 /* A3: AI shortcut config section */
 .meta-field-mgr__ai { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid #e0e7ff; border-radius: 8px; background: #fafbff; }
 .meta-field-mgr__ai-header { font-size: 12px; color: #4338ca; }
+/* A11: collapsed "AI not enabled" line + its 了解更多 help list. */
+.meta-field-mgr__ai-unavailable { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: #475569; }
+.meta-field-mgr__ai-help { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #475569; }
 .meta-field-mgr__ai-sources { display: flex; flex-wrap: wrap; gap: 6px 12px; }
 .meta-field-mgr__ai-source { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #444; }
 /* r2 item 6: all-sources-deleted needs-attention banner ON the AI section. */

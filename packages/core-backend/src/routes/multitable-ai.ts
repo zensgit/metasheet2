@@ -61,6 +61,7 @@ import {
   type PoolLike,
   type ShortcutRequestContext,
 } from '../services/ai-bulk-shared'
+import { resolveShortcutAvailability } from '../services/ai-shortcut-availability'
 import {
   BulkFillJobService,
   resolveBulkJobMaxRows,
@@ -95,6 +96,8 @@ import type { QueueService } from '../types/plugin'
  *
  * Guard posture is PER-ROUTE (A1 precedent, never router.use):
  *   - GET  /ai/readiness                          → requireAdminRole() (A1, unchanged)
+ *   - GET  /ai/availability                       → any authenticated caller (A11): a
+ *     values-free `{ available }` boolean; no provider call, no env value echoed.
  *   - POST /sheets/:sheetId/ai/shortcut/preview   → record-read RBAC (requireRecordReadable)
  *     + source-field read mask (masked fields never enter the prompt). Zero write.
  *   - POST /sheets/:sheetId/ai/shortcut/run       → preview gates + canEditRecord +
@@ -230,6 +233,28 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
   router.get('/ai/readiness', requireAdminRole(), (_req: Request, res: Response) => {
     const report = resolveAiProviderReadiness(process.env)
     res.json(redactValue(report))
+  })
+
+  /**
+   * A11 (customer feedback 2026-09-24 #7c) — may the web client show the AI
+   * surfaces at all? Readiness stays admin-only; this answers ONE bit to any
+   * authenticated caller: `{ available }`, true only when a shortcut request
+   * would pass the same preflight + data-class routing gates `runShortcutCore`
+   * applies (see `resolveShortcutAvailability`). Nothing else leaves: no
+   * provider, model, host, env name or env value, no messages. The answer is a
+   * deployment-wide fact, not a per-sheet one, so the route takes no sheet id
+   * and reads no sheet data. No provider call, no ledger row, no burst limiter.
+   */
+  router.get('/ai/availability', (req: Request, res: Response) => {
+    // The global /api JWT middleware authenticates first; this re-check keeps
+    // the route closed if it is ever mounted without it.
+    if (!resolveRequestUserKey(req)) {
+      return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } })
+    }
+    // The predicate is total (preflight and authorizeAiRoute never throw); were it ever to throw,
+    // the request answers 500 and the web client's resolver reads that as unavailable (fail-closed).
+    const available = resolveShortcutAvailability(aiClient) === true
+    return res.json({ available })
   })
 
   /**

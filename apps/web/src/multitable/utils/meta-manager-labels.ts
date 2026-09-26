@@ -124,6 +124,10 @@ export type MetaManagerLabelKey =
   | 'field.error.aiOptionsTooMany' | 'field.error.aiOptionTooLong'
   | 'field.error.aiTargetLangTooLong' | 'field.error.aiInstructionTooLong'
   | 'field.aiUsage.title' | 'field.aiUsage.today' | 'field.aiUsage.week' | 'field.aiUsage.instance'
+  // A11 (customer feedback 2026-09-24 #7c): collapsed state when AI is not available on this deployment.
+  | 'field.ai.unavailable' | 'field.ai.learnMore' | 'field.ai.hideHelp' | 'field.ai.savedConfigKept'
+  | 'field.ai.help.kinds' | 'field.ai.help.sources' | 'field.ai.help.preview'
+  | 'field.ai.help.manual' | 'field.ai.help.local'
   | 'view.title' | 'view.empty' | 'view.saveSettings'
   | 'view.namePlaceholder' | 'view.addButton' | 'view.newViewBlankHint'
   | 'view.titleField' | 'view.coverField' | 'view.cardFields'
@@ -433,10 +437,11 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.error.autoNumberDigits': { en: 'Auto number digits must be between 0 and 12', zh: '自动编号位数必须在 0 到 12 之间' },
   'field.error.autoNumberStart': { en: 'Auto number start must be at least 1', zh: '自动编号起始值至少为 1' },
 
-  // --- AI shortcut config section (A3 §2.1). zh keeps the product term
-  // "AI shortcut" / "token" raw (same convention as persisted enum values). ---
-  'field.ai.title': { en: 'AI shortcut', zh: 'AI shortcut' },
-  'field.ai.enable': { en: 'Enable AI shortcut', zh: '启用 AI shortcut' },
+  // --- AI shortcut config section (A3 §2.1). zh names the feature 「AI 自动填写」 (owner decision,
+  // customer feedback 2026-09-24 #7c — it previously kept the English "AI shortcut" raw). "token"
+  // stays raw. The persisted enum values and the property key `aiShortcut` are unchanged. ---
+  'field.ai.title': { en: 'AI shortcut', zh: 'AI 自动填写' },
+  'field.ai.enable': { en: 'Enable AI shortcut', zh: '启用 AI 自动填写' },
   'field.ai.kind': { en: 'Task type', zh: '任务类型' },
   'field.ai.sourceFields': { en: 'Source fields', zh: '来源字段' },
   'field.ai.sourceHint': { en: 'Up to 20 source fields. Computed fields (formula/lookup/rollup) and the target field itself are excluded.', zh: '最多 20 个来源字段；公式/查找/汇总等计算字段及目标字段自身不可选。' },
@@ -453,12 +458,12 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.ai.previewing': { en: 'Previewing...', zh: '正在预览...' },
   'field.ai.previewResult': { en: 'Preview result', zh: '预览结果' },
   // Client-side constraint mirrors of the A2 config governance caps.
-  'field.error.aiSourceRequired': { en: 'Select at least one source field for the AI shortcut', zh: '请为 AI shortcut 至少选择一个来源字段' },
+  'field.error.aiSourceRequired': { en: 'Select at least one source field for the AI shortcut', zh: '请为 AI 自动填写至少选择一个来源字段' },
   // r2 item 6: ALL persisted AI source fields were deleted. We block (do NOT silently auto-disable the
   // shortcut), but the message must be actionable + name the AI section as the blocker.
-  'field.error.aiSourceAllDeleted': { en: 'All AI source fields were deleted — pick new sources or turn off the AI shortcut', zh: 'AI 来源字段均已被删除——请重新选择来源字段，或关闭 AI shortcut' },
-  'field.error.aiSourceTooMany': { en: 'AI shortcut allows at most 20 source fields', zh: 'AI shortcut 来源字段最多 20 个' },
-  'field.error.aiOptionsTooMany': { en: 'AI shortcut allows at most 50 categories', zh: 'AI shortcut 分类选项最多 50 个' },
+  'field.error.aiSourceAllDeleted': { en: 'All AI source fields were deleted — pick new sources or turn off the AI shortcut', zh: 'AI 来源字段均已被删除——请重新选择来源字段，或关闭 AI 自动填写' },
+  'field.error.aiSourceTooMany': { en: 'AI shortcut allows at most 20 source fields', zh: 'AI 自动填写来源字段最多 20 个' },
+  'field.error.aiOptionsTooMany': { en: 'AI shortcut allows at most 50 categories', zh: 'AI 自动填写分类选项最多 50 个' },
   'field.error.aiOptionTooLong': { en: 'Each category must be at most 100 characters', zh: '每个分类选项最长 100 字符' },
   'field.error.aiTargetLangTooLong': { en: 'Target language must be at most 32 characters', zh: '目标语言最长 32 字符' },
   'field.error.aiInstructionTooLong': { en: 'Instruction must be at most 500 characters', zh: '附加指令最长 500 字符' },
@@ -467,6 +472,39 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.aiUsage.today': { en: 'My tokens today', zh: '我今日 tokens' },
   'field.aiUsage.week': { en: 'My tokens this week', zh: '我本周 tokens' },
   'field.aiUsage.instance': { en: 'Instance USD today', zh: '实例今日 USD' },
+  // A11 (customer feedback 2026-09-24 #7c): shown INSTEAD of the AI section when the server reports
+  // the AI surfaces unavailable (GET /api/multitable/ai/availability). Values-free: no host, model or
+  // env value — enabling it is an administrator/owner action on the server.
+  'field.ai.unavailable': {
+    en: 'AI shortcut is not enabled: an administrator must connect a model hosted on the internal network before it can be used.',
+    zh: 'AI 自动填写未开通：需要管理员在服务器接入部署在内网的模型后才能使用',
+  },
+  'field.ai.learnMore': { en: 'Learn more', zh: '了解更多' },
+  'field.ai.hideHelp': { en: 'Hide', zh: '收起' },
+  'field.ai.help.kinds': {
+    en: 'What it does: fills this text field from other fields in the same record — Summarize, Classify, Extract or Translate.',
+    zh: '用途：根据同一条记录里其他字段的内容填写本字段，支持摘要、分类、提取、翻译四种任务。',
+  },
+  'field.ai.help.sources': {
+    en: 'Setup: pick the source fields the model may read (up to 20; formula/lookup/rollup fields and this field itself are excluded).',
+    zh: '配置：勾选模型可以读取的来源字段（最多 20 个；公式/查找/汇总字段和本字段不可选）。',
+  },
+  'field.ai.help.preview': {
+    en: 'Preview is a real model call on the selected record and uses quota; it writes nothing.',
+    zh: '预览：用当前选中的记录真实调用一次模型，会消耗配额，但不写入数据。',
+  },
+  'field.ai.help.manual': {
+    en: 'Nothing runs automatically: values are written only when someone clicks "AI run" in the record drawer, or confirms a whole-column fill after reviewing it.',
+    zh: '不会自动运行：只有在记录详情里点「AI 运行」，或整列填充预览后确认，才会写入。',
+  },
+  'field.ai.help.local': {
+    en: 'Data stays internal: record content is only sent to a model deployed on the internal network; public cloud AI services are refused by design.',
+    zh: '数据不出内网：记录内容只会发送给部署在内网的模型，公有云 AI 服务按设计一律拒绝。',
+  },
+  'field.ai.savedConfigKept': {
+    en: 'This field keeps a saved AI shortcut configuration. It stays saved and takes effect once AI is enabled; untick below to remove it.',
+    zh: '本字段保留了已保存的 AI 自动填写配置，开通后即生效；如需移除，取消下方勾选后保存。',
+  },
 
   'view.title': { en: 'Manage Views', zh: '管理视图' },
   'view.empty': { en: 'No views defined', zh: '暂无视图' },

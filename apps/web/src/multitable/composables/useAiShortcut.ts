@@ -191,6 +191,25 @@ export async function fetchAiUsageSummaryWithProbeCache(
   }
 }
 
+/**
+ * A11 (customer feedback 2026-09-24 #7c): resolve whether the AI surfaces may be
+ * shown. FAIL-CLOSED — only a body whose `available` is the boolean `true` counts;
+ * a missing fn, a thrown/rejected call (old backend 404, network, 401) or any
+ * other shape answers false. The server still gates every AI request; this only
+ * decides what the UI offers.
+ */
+export async function resolveAiAvailability(
+  fetchFn: (() => Promise<unknown>) | null | undefined,
+): Promise<boolean> {
+  if (typeof fetchFn !== 'function') return false
+  try {
+    const body = await fetchFn()
+    return typeof body === 'object' && body !== null && (body as { available?: unknown }).available === true
+  } catch {
+    return false
+  }
+}
+
 export function useAiShortcut(opts: UseAiShortcutOptions) {
   const state = reactive<AiShortcutState>({
     pending: null,
