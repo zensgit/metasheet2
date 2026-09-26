@@ -719,6 +719,39 @@ const {
 // FOS-4b-2: validate action-binding REFERENCES (registry ∩ preset.permittedActionIds) for the dry-run path.
 // Used ONLY in dryRun mode — no apply/write/execution (that's a later, separately-gated sub-slice).
 const { normalizeFieldOptionActionBinding } = require('./field-option-action-registry.cjs')
+const { CONNECTION_RESOLUTION_ERROR_CODES } = require('./connection-resolver.cjs')
+
+// R2 — WHICH ERROR CODE A ROUTE-FAILURE LOG LINE MAY NAME. The route wrapper's warn used to carry
+// only method + path, so a 400 from the connection layer and a 500 from a bug read the same in the
+// server log. It now names the code — but only a code from THIS closed list, verbatim; anything else
+// is logged as ROUTE_FAILURE_UNLISTED_CODE. `error.code` is free text on an arbitrary thrown error
+// (a driver, a dependency, a message someone interpolated a value into), so admitting it unfiltered
+// would let any string reach the log. The response is not affected: `sendError` still answers with
+// `inferErrorCode(error)` exactly as before.
+// The DATA_SOURCE_* / SOURCE_UNAVAILABLE words are the host facade's and DataSourceManager's coded
+// refusals (packages/core-backend/src/data-adapters/); CONNECTION_RESOLUTION_FAILED is
+// external-systems.cjs's fallback when the resolver threw something uncoded.
+const ROUTE_FAILURE_LOGGABLE_CODES = new Set([
+  ...CONNECTION_RESOLUTION_ERROR_CODES,
+  'CONNECTION_RESOLUTION_FAILED',
+  'DATA_SOURCE_PRINCIPAL_REQUIRED',
+  'DATA_SOURCE_NOT_FOUND',
+  'DATA_SOURCE_NOT_READ_ONLY',
+  'DATA_SOURCE_NOT_WRITABLE',
+  'DATA_SOURCE_NOT_C6_WRITE_TARGET',
+  'DATA_SOURCE_QUERY_INVALID',
+  'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED',
+  'DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID',
+  'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED',
+  'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED',
+  'SOURCE_UNAVAILABLE',
+  // `inferErrorCode` falls back to the error's class name when it carries no code.
+  'ExternalSystemValidationError',
+  'ExternalSystemNotFoundError',
+  'ExternalSystemConflictError',
+  'INTERNAL_ERROR',
+])
+const ROUTE_FAILURE_UNLISTED_CODE = 'UNLISTED'
 
 class HttpRouteError extends Error {
   constructor(status, code, message, details = {}) {
@@ -849,6 +882,18 @@ function inferErrorCode(error) {
   const dataSourceCode = inferDataSourceBridgeErrorCode(error)
   if (dataSourceCode) return dataSourceCode
   return error.code || error.name || 'INTERNAL_ERROR'
+}
+
+// The code a route-failure log line carries: the response's own code when it is in the closed list
+// above, the fixed placeholder otherwise. Never throws — a thrown `null` or a hostile getter costs
+// the word, never the response that `sendError` builds right after it.
+function loggableRouteFailureCode(error) {
+  try {
+    const code = inferErrorCode(error)
+    return typeof code === 'string' && ROUTE_FAILURE_LOGGABLE_CODES.has(code) ? code : ROUTE_FAILURE_UNLISTED_CODE
+  } catch {
+    return ROUTE_FAILURE_UNLISTED_CODE
+  }
 }
 
 function inferHttpStatus(error) {
@@ -4519,13 +4564,31 @@ function requireStockPreparationAudit() {
     // triggered it), then the requester.
     const fallback = firstString(storedPrincipal) || requestPrincipal(req)
     const actionId = action && action.actionId ? String(action.actionId) : ''
-    if (actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return fallback
+    // `bindingShape` is null off the frozen action: no peek happens there, so there is no shape to
+    // report (and the R3 failure record below is scoped to the same one action).
+    if (actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return { principal: fallback, bindingShape: null }
     const binding = await peekTableActionSourceBinding(sourceScope)
     const config = binding && isPlainObject(binding.config) ? binding.config : {}
     const bindingOwner = firstString(config.dataSourceOwnerId)
     // The binding owner OVERRIDES even a stored principal, and that is the point: on this one action
     // the read must run as the identity the host will actually authorize, whoever queued the job.
-    return bindingOwner || fallback
+    return { principal: bindingOwner || fallback, bindingShape: tableActionPeekedBindingShape(binding) }
+  }
+
+  /**
+   * R3 — the SHAPE of the row the identity peek read, as one closed word, for the server log only.
+   * Mirrors the resolver's own routing (connection-resolver.cjs resolveSqlBinding): a non-null
+   * `connectionId` is canonical — blank is its own word because the resolver refuses it with a
+   * different code — otherwise a `config.dataSourceId` pointer is legacy, otherwise unbound.
+   * `unreadable` is the peek's fail-open null (missing row, wrong scope, no accessor).
+   */
+  function tableActionPeekedBindingShape(binding) {
+    if (!binding || typeof binding !== 'object') return 'unreadable'
+    if (binding.connectionId !== null && binding.connectionId !== undefined) {
+      return firstString(binding.connectionId) ? 'canonical' : 'blank_connection_id'
+    }
+    const config = isPlainObject(binding.config) ? binding.config : {}
+    return firstString(config.dataSourceId) ? 'legacy' : 'unbound'
   }
 
   /**
@@ -4646,13 +4709,36 @@ function requireStockPreparationAudit() {
     // run BEFORE the load, because `getExternalSystemForAdapter` resolves the bound Connection under
     // whatever principal it is handed — deciding the identity after the load would decide it after
     // the refusal. See resolveTableActionReadPrincipal.
-    const principal = await resolveTableActionReadPrincipal(
+    const readIdentity = await resolveTableActionReadPrincipal(
       req,
       action,
       scopedInput(req, sourceScope),
       Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
     )
-    const system = await loadSystem(scopedAdapterInput(req, sourceScope, principal))
+    const principal = readIdentity.principal
+    let system
+    try {
+      system = await loadSystem(scopedAdapterInput(req, sourceScope, principal))
+    } catch (error) {
+      // R3 — THE DELEGATION, RECORDED ON FAILURE TOO. The success record below is written only after
+      // the load returns, so the one case an operator most needs it for — the load refused — left no
+      // trace of whether the read ran as the stamp or as the requester. Same values-free contract as
+      // that record: the frozen action id, a boolean and one closed word (tableActionPeekedBindingShape);
+      // never an id, a principal or a tenant. Scoped to the frozen action (the only one that peeks),
+      // written before the rethrow, and unable to change what is thrown.
+      if (readIdentity.bindingShape !== null && routeLogger && typeof routeLogger.warn === 'function') {
+        try {
+          routeLogger.warn('[plugin-integration-core] table action source load failed', {
+            actionId: STOCK_PREP_OPERATOR_PULL_ACTION_ID,
+            delegated: principal !== requestPrincipal(req),
+            bindingShape: readIdentity.bindingShape,
+          })
+        } catch {
+          // a logging failure costs the record, never the error below
+        }
+      }
+      throw error
+    }
     if (options.requireActive === true && (!system || system.status !== 'active')) {
       throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
     }
@@ -10124,7 +10210,11 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
         return await handler(req, res)
       } catch (error) {
         if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError)) {
-          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`)
+          // R2: method + route TEMPLATE + a closed-vocabulary code (loggableRouteFailureCode). No
+          // request value — no param, no query, no id — is ever interpolated here.
+          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`, {
+            code: loggableRouteFailureCode(error),
+          })
         }
         return sendError(res, error)
       }
