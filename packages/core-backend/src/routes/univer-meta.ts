@@ -8306,8 +8306,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
         [sheetIds],
       )
+      // ORDER BY created_at, id (客户反馈 2026-09-24 #8 / A10 phase 1): 没有排序时 Postgres
+      // 不保证返回顺序,extractTemplateSheets 按这个数组的原样顺序把视图挂进模板 —— 顺序不稳会让
+      // 同一张表两次存出的模板视图次序不一样。created_at 主排、id 兜底(同一批写入的 created_at
+      // 可能打平),装回去时 installMultitableTemplate 原样保留这个顺序(见 template-library.ts)。
       const viewResult = await pool.query(
-        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[])',
+        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[]) ORDER BY created_at, id',
         [sheetIds],
       )
 

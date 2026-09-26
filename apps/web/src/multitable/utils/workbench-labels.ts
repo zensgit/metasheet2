@@ -106,6 +106,9 @@ export type WorkbenchLabelKey =
   | 'saveTpl.submit' | 'saveTpl.saving' | 'saveTpl.cancel' | 'saveTpl.close'
   | 'saveTpl.errorNoName' | 'saveTpl.errorNoFields' | 'saveTpl.failed'
   | 'saveTpl.successTitle' | 'saveTpl.warningsTitle' | 'saveTpl.openCenter'
+  // A10 phase 1(客户反馈 2026-09-24 #8):对话框说清楚存的是哪张表/哪些视图,
+  // 且成功后给一句「装出来是什么」的说明。
+  | 'saveTpl.viewsLabel' | 'saveTpl.viewsNote' | 'saveTpl.installNote'
   // final audit closure follow-up: composable fallback messages (backend e.message remains raw)
   | 'error.loadSheets' | 'error.loadSheetMetadata' | 'error.loadBaseMetadata'
 
@@ -347,6 +350,17 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'saveTpl.fieldsLabel': { en: 'Fields to include', zh: '包含的字段' },
   'saveTpl.selectAll': { en: 'Select all', zh: '全选' },
   'saveTpl.selectNone': { en: 'Clear all', zh: '全不选' },
+  // A10 phase 1(客户反馈 2026-09-24 #8):视图清单只读展示,说清楚保存/不保存的边界
+  // (与 custom-template-store.ts 的实际抽取范围逐字对应——filter_info/sort_info 确实不读)。
+  'saveTpl.viewsLabel': { en: 'Views included', zh: '包含的视图' },
+  'saveTpl.viewsNote': {
+    en: 'Views only save name, type, grouping, and hidden columns — filters and sort are not saved.',
+    zh: '视图只保存名称、类型、分组和隐藏列；筛选和排序不保存',
+  },
+  'saveTpl.installNote': {
+    en: 'Using this template creates a new base with an empty table that has the same headers and views.',
+    zh: '使用模板会新建一个工作区，里面是表头和视图相同的空表',
+  },
   'saveTpl.shareLabel': { en: 'Share with this tenant', zh: '共享给本租户' },
   'saveTpl.shareHint': {
     en: 'Unchecked: only you can see this template.',
@@ -377,6 +391,12 @@ export function workbenchLabel(key: WorkbenchLabelKey, isZh: boolean): string {
 }
 
 // --- Interpolation helpers (not keys) ---
+
+// saveTplSource: A10 phase 1(客户反馈 2026-09-24 #8)——「把当前数据表存为模板」对话框的
+// 来源行,baseName/sheetName 都是用户数据,原样拼进去不翻译。
+export function saveTplSource(baseName: string, sheetName: string, isZh: boolean): string {
+  return isZh ? `来源：${baseName} / ${sheetName}` : `Source: ${baseName} / ${sheetName}`
+}
 
 // conflictMessage: `{field} changed elsewhere.[ Latest version is {v}.] Reload
 // the row or retry your edit.` — the version segment is OPTIONAL (omitted when

@@ -218,7 +218,15 @@ function createStore(opts: StoreOptions = {}) {
     if (normalized.includes('FROM meta_views') && normalized.includes('sheet_id = ANY($1::text[])')) {
       const [sheetIds] = params as [string[]]
       const idSet = new Set(sheetIds)
-      return { rows: views.filter((view) => idSet.has(view.sheet_id as string)) }
+      let rows = views.filter((view) => idSet.has(view.sheet_id as string))
+      // wire-vs-fixture (客户反馈 2026-09-24 #8 / A10):排序只在**被测 SQL 自己**写了
+      // `ORDER BY created_at, id` 时才生效。把这句 ORDER BY 从路由里删掉,新增的顺序用例就会红,
+      // 而不是被 fake 兜住——fixture 没有真实 created_at 列,这里用 id 兜底排序模拟同批写入
+      // created_at 打平、按 id 兜底的那一支。
+      if (normalized.includes('ORDER BY created_at, id')) {
+        rows = [...rows].sort((a, b) => String(a.id).localeCompare(String(b.id)))
+      }
+      return { rows }
     }
     if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_views') && normalized.includes('WHERE id = $1')) {
       const [id] = params as [string]
@@ -965,5 +973,45 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     expect(field.options).toEqual(['待处理', '已完成', '直接是字符串'])
     // 老形状里的源库 option id 不进模板
     expect(JSON.stringify(store.customTemplates[0].definition)).not.toContain('opt_1')
+  })
+
+  // ── A10 phase 1(客户反馈 2026-09-24 #8):meta_views 查询补 ORDER BY created_at, id ──
+  it('A10: 视图顺序稳定 —— 存模板与装模板都不受 DB 返回顺序摆动,ORDER BY 真的下推进了 SQL', async () => {
+    // 故意按与 id 字典序相反的顺序写入(seed 数组顺序 = push 顺序),证明抽出来的顺序不是
+    // 「凑巧和 push 顺序一样」,而是 SQL 自己排的序。
+    const store = createStore({
+      baseSheets: [{
+        id: 'sheet_view_order',
+        name: '视图排序表',
+        fields: [{ id: 'fld_x', name: '列', type: 'string', order: 0 }],
+        views: [
+          { id: 'viw_zeta', name: '视图Z', type: 'grid' },
+          { id: 'viw_alpha', name: '视图A', type: 'grid' },
+          { id: 'viw_mid', name: '视图M', type: 'grid' },
+        ],
+      }],
+    })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const created = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '视图排序' })
+    expect(created.status).toBe(201)
+
+    // 下推证据:发给 meta_views 的那条 SQL 自己带着 ORDER BY created_at, id(不是事后在 JS 里排)。
+    const viewQuery = store.sqlLog.find((entry) => entry.sql.includes('FROM meta_views') && entry.sql.includes('sheet_id = ANY($1::text[])'))
+    expect(viewQuery?.sql).toContain('ORDER BY created_at, id')
+
+    const sheet = created.body.data.template.sheets[0]
+    expect(sheet.views.map((v: any) => v.name)).toEqual(['视图A', '视图M', '视图Z'])
+
+    // 装回去:template-library.ts 的 installMultitableTemplate 原样按 template.sheets[].views
+    // 的数组顺序建 —— 装出来的视图顺序必须和存下来的模板顺序逐字一致。
+    const installed = await request(pinned.url())
+      .post(`/api/multitable/templates/${created.body.data.template.id}/install`)
+      .send({ baseName: '视图排序装回去' })
+    expect(installed.status).toBe(201)
+    expect(installed.body.data.views.map((v: any) => v.name)).toEqual(['视图A', '视图M', '视图Z'])
   })
 })
