@@ -4,7 +4,7 @@ Base: `main` @ `ba6300ce4034515320026ec365bbc6e43f858cb4`, merged into this bran
 
 ## Contract
 
-`packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts` drops its private database only after `assertPrivateDatabaseBackendsExited` reports no backend whose `datname` is that database. The function lives in `packages/core-backend/scripts/private-db-backend-drain.ts`. `client.end()` and Kysely `db.destroy()` return when the client has asked to quit. PostgreSQL removes the backend from `pg_stat_activity` later. One immediate count can observe a backend that is already exiting.
+`packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts` drops its private database only after `assertPrivateDatabaseBackendsExited` reports no backend whose `datname` is that database. The function lives in `packages/core-backend/scripts/private-db-backend-drain.ts`. The checkpoint script loads it with `require()`, the same way it loads the other local TypeScript modules. The nearest tsconfig emits `.ts` as CommonJS, and a static ESM import of that file does not expose the named export under tsx. `client.end()` and Kysely `db.destroy()` return when the client has asked to quit. PostgreSQL removes the backend from `pg_stat_activity` later. One immediate count can observe a backend that is already exiting.
 
 The clean check polls for up to 10 seconds (200 ms interval). Zero rows ends the wait and the existing `DROP DATABASE` follows. A backend that is still attached when the deadline passes throws. The script does not call `pg_terminate_backend`. A held client, an autovacuum worker, or any other backend still counts as a failure.
 
