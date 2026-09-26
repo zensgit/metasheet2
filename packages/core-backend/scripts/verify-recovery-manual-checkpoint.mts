@@ -2585,7 +2585,16 @@ try {
   await shutdownAuthMessaging?.()
   if (!applicationClosedDownloadPool) await downloadPools?.close()
   if (created) {
-    assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
+    const readRemaining = async () => (await admin.query(`SELECT state,
+      round(extract(epoch FROM now()-backend_start))::int AS age_seconds
+      FROM pg_stat_activity WHERE datname=$1`, [database])).rows
+    let remaining = await readRemaining()
+    for (let attempt = 0; remaining.length && attempt < 40; attempt++) {
+      await new Promise<void>(resolve => setTimeout(resolve, 50))
+      remaining = await readRemaining()
+    }
+    if (remaining.length) console.error('SYNTHETIC_DATABASE_CONNECTIONS_REMAIN', remaining)
+    assert.equal(remaining.length, 0)
     await admin.query(`DROP DATABASE "${database}"`)
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_database WHERE datname=$1', [database])).rows[0].n, 0)
     console.log('CLEAN: owned database and connections = 0')
