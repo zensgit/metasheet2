@@ -1643,6 +1643,16 @@ export type CrossBaseWriteGate =
   | { crossBase: true; ok: false; error: string }
 
 /**
+ * The addressing verdict `AutomationExecutor.resolveCrossBaseWriteTarget` returns — the first half of
+ * {@link CrossBaseWriteGate}, before any authority / quota check. `crossBase: false` ⇒ update / delete / lock
+ * address the TRIGGER record (`context.sheetId` / `context.recordId`), whatever the config's target ids say.
+ */
+export type CrossBaseWriteTarget =
+  | { crossBase: false }
+  | { crossBase: true; resolved: false; error: string }
+  | { crossBase: true; resolved: true; targetBaseId: string | null; declaredBaseClaim: string | null }
+
+/**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — a SAME-BASE record-mutating action whose target is the TRIGGER
  * record, and that record is already gone (the canonical case: a `record.deleted` rule whose action is
  * `delete_record` on the same table — the trigger record cannot exist any more by definition).
@@ -2872,19 +2882,21 @@ export class AutomationExecutor {
   }
 
   /**
-   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
-   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
-   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
-   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
-   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   * The ADDRESSING half of the ②b write gate, and the ONLY place that decides it: is a write addressed at
+   * `targetSheetId` (with the raw `declaredTargetBaseId` claim) a same-base write relative to
+   * `triggerSheetId`, a cross-base write, or unresolvable? Read-only (at most two `meta_sheets` lookups), no
+   * authority check, no quota slot. `evaluateCrossBaseWriteGate` consumes it first; the rule-save check
+   * for 客户反馈 2026-09-24 #3 (`validateDeletedTriggerSelfMutationTargets` in automation-service.ts) consumes
+   * it too, because a same-base verdict means update/delete/lock address `context.recordId` — the TRIGGER
+   * record — whatever `targetSheetId` / `targetRecordId` say (executeUpdateRecord / executeDeleteRecord /
+   * executeLockRecord only retarget when `gate.crossBase`).
    */
-  async evaluateCrossBaseWriteGate(
+  async resolveCrossBaseWriteTarget(
     queryFn: AutomationDeps['queryFn'],
-    actorId: string | null,
     triggerSheetId: string,
     targetSheetId: string,
     declaredTargetBaseId: string | undefined,
-  ): Promise<CrossBaseWriteGate> {
+  ): Promise<CrossBaseWriteTarget> {
     // Fast-path: a write to the SAME sheet as the trigger, with no explicit cross-base `targetBaseId`,
     // is DEFINITIONALLY same-base — a sheet cannot exist in two bases — so skip the base lookups
     // entirely. This keeps a legitimate same-sheet write from fail-closing when the sheet row is
@@ -2908,7 +2920,7 @@ export class AutomationExecutor {
     if (rawTargetBaseId === undefined) {
       return {
         crossBase: true,
-        ok: false,
+        resolved: false,
         error: `Cross-base write target sheet ${targetSheetId} is missing or soft-deleted (no resolvable base)`,
       }
     }
@@ -2920,11 +2932,36 @@ export class AutomationExecutor {
     // same-set are same-base; a null/legacy base vs a set base is cross-base.
     if (triggerBaseId === targetBaseId) return { crossBase: false }
 
+    return { crossBase: true, resolved: true, targetBaseId, declaredBaseClaim }
+  }
+
+  /**
+   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
+   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
+   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
+   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
+   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   */
+  async evaluateCrossBaseWriteGate(
+    queryFn: AutomationDeps['queryFn'],
+    actorId: string | null,
+    triggerSheetId: string,
+    targetSheetId: string,
+    declaredTargetBaseId: string | undefined,
+  ): Promise<CrossBaseWriteGate> {
+    // Addressing half (same-base vs cross-base vs unresolvable) — shared, byte-for-byte, with the rule-save
+    // check `validateDeletedTriggerSelfMutationTargets` (see resolveCrossBaseWriteTarget). Same queries in the
+    // same order as before the extraction.
+    const target = await this.resolveCrossBaseWriteTarget(queryFn, triggerSheetId, targetSheetId, declaredTargetBaseId)
+    if (!target.crossBase) return { crossBase: false }
+    if (target.resolved === false) return { crossBase: true, ok: false, error: target.error }
+    const { targetBaseId, declaredBaseClaim } = target
+
     // Cross-base AUTHORITY decision — claim==truth then base-write — via the shared, context-agnostic primitive
     // (C1: `resolveCrossBaseWriteAuthority`, the SAME primitive the cross-base mirror write-through consumes; see
     // the design-lock §3/§10). The primitive returns a structured reason; this adapter maps it back to the EXACT,
     // unchanged `CrossBaseWriteGate` error strings (order preserved: claim before writable). (`declaredBaseClaim`
-    // computed at the top, reused here.)
+    // is the trimmed claim computed by resolveCrossBaseWriteTarget, reused here.)
     const claimed = declaredBaseClaim
     const authority = await resolveCrossBaseWriteAuthority({
       actorId,

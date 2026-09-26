@@ -11,12 +11,13 @@
  *
  * Pinned here (mock DB through the real `withTransaction` seam, REAL EventBus, producer enqueue + realtime
  * publish spied, revision writes counted):
- *   W1 same-base, SELECT sees the row, UPDATE 0 rows → `writeApprovalResultBack` returns null; ZERO enqueue,
+ *   W1 same-base, SELECT sees the row, UPDATE 0 rows → `writeApprovalResultBack` returns
+ *      `{ kind: 'same-base-missing' }` (final review F3; was a bare null); ZERO enqueue,
  *      ZERO legacy emit, ZERO realtime publish, ZERO revision INSERT (the UPDATE itself DID run).
  *   W2 same-base control, UPDATE 1 row     → `{ kind: 'same-base', patch }`; ONE enqueue call, ONE legacy emit
  *      (depth = trigger depth + 1, approval actor), ONE realtime publish (actor surfaced), ONE revision.
- *   W3 same-base, SELECT already sees no row → null, nothing published, and NO UPDATE sent (the pre-existing
- *      gone-record branch, unchanged).
+ *   W3 same-base, SELECT already sees no row → `{ kind: 'same-base-missing' }`, nothing published, and NO UPDATE
+ *      sent (the pre-existing gone-record branch, otherwise unchanged).
  *   W4 cross-base, SELECT sees the row, UPDATE 0 rows → the caller's `onMissing: 'throw'` policy applies
  *      exactly as for a not-found target: rejects with the not-found message, nothing published, no revision;
  *      `tryWriteApprovalResultBack` turns it into `backwriteSkipped` on the step output (a handled
@@ -173,7 +174,7 @@ afterEach(() => {
 })
 
 describe('客户反馈 2026-09-24 #3 — approval resultWriteback: a 0-row UPDATE publishes nothing', () => {
-  it('W1 same-base: SELECT sees the row, UPDATE affects 0 rows → null, ZERO enqueue / emit / publish / revision', async () => {
+  it('W1 same-base: SELECT sees the row, UPDATE affects 0 rows → same-base-missing, ZERO enqueue / emit / publish / revision', async () => {
     const bus = new EventBus()
     const emitSpy = vi.spyOn(bus, 'emit')
     const state = makeState(true, false)
@@ -186,8 +187,9 @@ describe('客户反馈 2026-09-24 #3 — approval resultWriteback: a 0-row UPDAT
     expect(updatedEmits(emitSpy)).toHaveLength(0)
     expect(emitSpy).not.toHaveBeenCalled()
     expect(realtimeMocks.publish).not.toHaveBeenCalled()
-    // Then the outcome the resume sees: "nothing written" (leniency: the caller treats null as handled).
-    expect(outcome).toBeNull()
+    // Then the outcome the resume sees: "configured, record gone, nothing written" (final review F3 — it used to be
+    // a bare null, indistinguishable from "no writeback configured"; the caller still treats it as handled).
+    expect(outcome).toEqual({ kind: 'same-base-missing' })
     expect(state.updates).toBe(1) // the UPDATE ran — and touched nothing
     expect(state.revisionInserts).toBe(0)
   })
@@ -225,7 +227,7 @@ describe('客户反馈 2026-09-24 #3 — approval resultWriteback: a 0-row UPDAT
     })
   })
 
-  it('W3 same-base: SELECT already sees no row → null, no UPDATE sent, nothing published (pre-existing branch unchanged)', async () => {
+  it('W3 same-base: SELECT already sees no row → same-base-missing, no UPDATE sent, nothing published (pre-existing branch otherwise unchanged)', async () => {
     const bus = new EventBus()
     const emitSpy = vi.spyOn(bus, 'emit')
     const state = makeState(false, false)
@@ -233,7 +235,7 @@ describe('客户反馈 2026-09-24 #3 — approval resultWriteback: a 0-row UPDAT
 
     const outcome = await internals.writeApprovalResultBack(bridge(), SAME_BASE_CONFIG, approvedEvent())
 
-    expect(outcome).toBeNull()
+    expect(outcome).toEqual({ kind: 'same-base-missing' })
     expect(state.updates).toBe(0)
     expect(state.revisionInserts).toBe(0)
     expect(emitSpy).not.toHaveBeenCalled()
@@ -284,5 +286,79 @@ describe('客户反馈 2026-09-24 #3 — approval resultWriteback: a 0-row UPDAT
     expect(realtimeMocks.publish).toHaveBeenCalledTimes(1)
     expect(realtimeMocks.publish.mock.calls[0]?.[0]).toMatchObject({ kind: 'record-updated', spreadsheetId: TGT_SHEET, recordId: TGT_RECORD })
     expect((realtimeMocks.publish.mock.calls[0]?.[0] as { actorId?: unknown }).actorId).toBeUndefined()
+  })
+})
+
+/**
+ * Final review F3 — a same-base writeback that wrote nothing because its record is gone left NO trace on the
+ * start_approval step (the cross-base twin records `backwriteSkipped`). Pinned on the handled path the resume
+ * actually takes (`tryWriteApprovalResultBack`):
+ *   W6 UPDATE 0 rows      → step output gains EXACTLY `backwriteSkipped: 'target_record_missing'` (values-free:
+ *                           the fixed code — no record id, no field value, no error prose), status unchanged,
+ *                           returns null (nothing merged into the tail), nothing published.
+ *   W7 SELECT sees no row → the same marker (the non-approved branch reaches this without a prior record check).
+ *   W8 control, 1 row     → no marker; the patch is returned for the tail merge.
+ *   W9 control, no writeback configured → no marker (null still means "nothing to do", not "record gone").
+ */
+describe('final review F3 — a same-base writeback that found its record gone leaves a values-free marker', () => {
+  function startStep(): StepResultLike {
+    return { actionType: 'start_approval', status: 'success', output: { outcome: 'approved', approvalInstanceId: 'ai_wb_1' } }
+  }
+
+  it('W6 UPDATE affects 0 rows → backwriteSkipped: target_record_missing, status unchanged, null, nothing published', async () => {
+    const bus = new EventBus()
+    const emitSpy = vi.spyOn(bus, 'emit')
+    const state = makeState(true, false)
+    const { internals } = makeService(state, bus)
+    const result = startStep()
+
+    const backwritten = await internals.tryWriteApprovalResultBack(bridge(), SAME_BASE_CONFIG, approvedEvent(), result)
+
+    expect(backwritten).toBeNull()
+    expect(result.status).toBe('success')
+    expect(result.output).toEqual({ outcome: 'approved', approvalInstanceId: 'ai_wb_1', backwriteSkipped: 'target_record_missing' })
+    // Values-free: the marker names no record, no field and no value.
+    const marker = String(result.output?.backwriteSkipped)
+    for (const leaked of [SRC_RECORD, SRC_SHEET, 'fld_status', 'approved', APPROVER]) expect(marker).not.toContain(leaked)
+    expect(state.updates).toBe(1)
+    expect(state.revisionInserts).toBe(0)
+    expect(emitSpy).not.toHaveBeenCalled()
+    expect(producerEmitMocks.enqueue).not.toHaveBeenCalled()
+    expect(realtimeMocks.publish).not.toHaveBeenCalled()
+  })
+
+  it('W7 SELECT already sees no row → the same marker, no UPDATE sent', async () => {
+    const state = makeState(false, false)
+    const { internals } = makeService(state, new EventBus())
+    const result = startStep()
+
+    const backwritten = await internals.tryWriteApprovalResultBack(bridge(), SAME_BASE_CONFIG, approvedEvent(), result)
+
+    expect(backwritten).toBeNull()
+    expect(result.output).toMatchObject({ backwriteSkipped: 'target_record_missing' })
+    expect(state.updates).toBe(0)
+  })
+
+  it('W8 control: UPDATE affects 1 row → no marker, the patch is returned for the tail merge', async () => {
+    const state = makeState(true, true)
+    const { internals } = makeService(state, new EventBus())
+    const result = startStep()
+
+    const backwritten = await internals.tryWriteApprovalResultBack(bridge(), SAME_BASE_CONFIG, approvedEvent(), result)
+
+    expect(backwritten).toEqual({ fld_status: 'approved' })
+    expect(result.output).toEqual({ outcome: 'approved', approvalInstanceId: 'ai_wb_1' })
+  })
+
+  it('W9 control: no resultWriteback configured → null and no marker (nothing to do is not "record gone")', async () => {
+    const state = makeState(false, false)
+    const { internals } = makeService(state, new EventBus())
+    const result = startStep()
+
+    const backwritten = await internals.tryWriteApprovalResultBack(bridge(), { templateId: 'tpl_1' }, approvedEvent(), result)
+
+    expect(backwritten).toBeNull()
+    expect(result.output).toEqual({ outcome: 'approved', approvalInstanceId: 'ai_wb_1' })
+    expect(state.sql).toHaveLength(0)
   })
 })

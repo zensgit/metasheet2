@@ -486,11 +486,14 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
     const emitSpy = vi.spyOn(eventBus, 'emit')
     try {
       const RW = { statusField: FLD_STATUS, approverField: FLD_APPROVER, completedAtField: FLD_COMPLETED }
-      await executeAndApprove(svc, SHEET, RECORD, `d1c4-g1-${TS}`, RW, 'Q4 plan')
+      const { executionId } = await executeAndApprove(svc, SHEET, RECORD, `d1c4-g1-${TS}`, RW, 'Q4 plan')
 
       // 客户反馈 2026-09-24 #3 positive control for the race golden's zero: a REAL 1-row writeback publishes
       // exactly one `multitable.record.updated` (on whichever delivery leg this job's flag selects).
       expect(await recordUpdatedPublications(emitSpy, RECORD)).toBe(1)
+      // …and (final review F3 control) a writeback that DID land carries no skip marker.
+      const g1StartStep = (await svc.logs.getById(executionId))!.steps.find((s) => s.actionType === 'start_approval')
+      expect(g1StartStep?.output).not.toHaveProperty('backwriteSkipped')
 
       const row = await recordRow(RECORD)
       expect(row?.version).toBe(2)
@@ -650,7 +653,12 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
         holder.release()
       }
 
-      await waitForExecutionStatus(svc, execution.id, 'success')
+      const finished = await waitForExecutionStatus(svc, execution.id, 'success')
+
+      // Final review F3: the zero-row writeback is no longer SILENT — the start_approval step carries the
+      // values-free marker (the fixed reason code only), exactly as the unit W6 pins on the mock seam.
+      const raceStartStep = finished.steps.find((s) => s.actionType === 'start_approval')
+      expect(raceStartStep?.output).toMatchObject({ backwriteSkipped: 'target_record_missing' })
 
       // THE discriminating assertion: exactly the original fixture create revision — no spurious `update`.
       const revs = await revisionsOf(RECORD_RACE)

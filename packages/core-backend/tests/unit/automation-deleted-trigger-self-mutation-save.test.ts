@@ -9,6 +9,9 @@
  *     through updateRule — otherwise the rule could never be turned off);
  *   - a rename / conditions-only edit succeeds (no shape change);
  *   - deleteRule succeeds (it validates nothing).
+ * Final review F4 (bottom of the file): a COMPLETE triple that the executor's cross-base gate resolves as
+ * SAME-base still addresses the trigger record at run time, so it is refused too — decided by the executor's
+ * own `resolveCrossBaseWriteTarget`, never a copy of it; the disable / rename / delete exits stay open.
  *
  * Every assertion is on the service's two outbound seams: the Kysely mock (was a row written / updated /
  * deleted?) and the thrown AutomationRuleValidationError (code + message).
@@ -21,7 +24,9 @@ import {
   DELETED_TRIGGER_SELF_MUTATION_CODE,
   DELETED_TRIGGER_SELF_MUTATION_MESSAGE,
   validateDeletedTriggerSelfMutation,
+  validateDeletedTriggerSelfMutationTargets,
 } from '../../src/multitable/automation-service'
+import type { AutomationExecutor, CrossBaseWriteTarget } from '../../src/multitable/automation-executor'
 import { EventBus } from '../../src/integration/events/event-bus'
 
 const SHEET_ID = 'sheet_dt_1'
@@ -36,9 +41,17 @@ interface Harness {
   /** The stored rule every getRule() returns (a fixed row, not a strict queue — fetch count is not the subject here). */
   setStored: (row: Record<string, unknown> | undefined) => void
   pushExecute: (rows: unknown) => void
+  /** How many `meta_sheets` base lookups the save path issued (the executor gate's addressing half). */
+  sheetBaseLookups: () => number
 }
 
-function makeHarness(): Harness {
+const SHEET_BASE_LOOKUP = /SELECT base_id FROM meta_sheets/i
+
+/**
+ * `sheetBases` answers the executor gate's `SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL`
+ * (id → base; `null` = a legacy null-base sheet; an id absent from the map = missing / soft-deleted sheet).
+ */
+function makeHarness(sheetBases: Record<string, string | null> = {}): Harness {
   const insertRows: Record<string, unknown>[] = []
   const setCalls: Record<string, unknown>[] = []
   const deleteFromCalls: unknown[] = []
@@ -48,8 +61,16 @@ function makeHarness(): Harness {
 
   // No rule in this suite carries a send_notification / DingTalk / approval action, so every other save-time
   // reader is contractually zero-DB; a blanket empty result keeps that honest (a gate that suddenly read the
-  // DB would still pass, but nothing here depends on it).
-  const queryFn = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [], rowCount: 0 }))
+  // DB would still pass, but nothing here depends on it). The one modelled read is the sheet → base lookup.
+  const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
+    if (SHEET_BASE_LOOKUP.test(sql)) {
+      const id = String(params?.[0])
+      return Object.prototype.hasOwnProperty.call(sheetBases, id)
+        ? { rows: [{ base_id: sheetBases[id] }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
+    return { rows: [], rowCount: 0 }
+  })
 
   const chain: Record<string, unknown> = {}
   const chainFn = (..._args: unknown[]) => chain
@@ -79,6 +100,7 @@ function makeHarness(): Harness {
     deleteFromCalls: () => deleteFromCalls,
     setStored: (row) => { stored = row },
     pushExecute: (rows) => { executeResults.push(rows) },
+    sheetBaseLookups: () => queryFn.mock.calls.filter(([sql]) => SHEET_BASE_LOOKUP.test(String(sql))).length,
   }
 }
 
@@ -366,5 +388,190 @@ describe('deleteRule — always allowed', () => {
 
     expect(await h.service.deleteRule(RULE_ID, SHEET_ID)).toBe(true)
     expect(h.deleteFromCalls()).toEqual(['automation_rules'])
+  })
+})
+
+/**
+ * Final review F4 — a COMPLETE triple is only necessary for retargeting, not sufficient. The executor retargets
+ * update / delete / lock only when its cross-base gate answers `crossBase`; a triple whose target sheet resolves
+ * to the rule's OWN base is same-base there, so the action writes `context.recordId` — the deleted trigger record.
+ * The save gate resolves every such triple with the executor's own addressing verdict (no local copy of it) and
+ * refuses a same-base one with the same code + message. Bases below: the rule's sheet and SHEET_A2 live in
+ * BASE_A, SHEET_B in BASE_B, the two legacy sheets have a null base, and SHEET_GONE is missing.
+ */
+const BASE_A = 'base_a'
+const SHEET_A2 = 'sheet_a2'
+const SHEET_GONE = 'sheet_gone'
+const LEGACY_RULE_SHEET = 'sheet_legacy_1'
+const LEGACY_TARGET_SHEET = 'sheet_legacy_2'
+const SHEET_BASES: Record<string, string | null> = {
+  [SHEET_ID]: BASE_A,
+  [SHEET_A2]: BASE_A,
+  sheet_b: 'base_b',
+  [LEGACY_RULE_SHEET]: null,
+  [LEGACY_TARGET_SHEET]: null,
+}
+const OWN_SHEET_TRIPLE = { targetBaseId: BASE_A, targetSheetId: SHEET_ID, targetRecordId: 'rec_x' }
+const SAME_BASE_OTHER_SHEET_TRIPLE = { targetBaseId: BASE_A, targetSheetId: SHEET_A2, targetRecordId: 'rec_x' }
+
+function deleteWith(config: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+  return createInput({ actionConfig: config, actions: [{ type: 'delete_record', config }], ...overrides })
+}
+
+describe('final review F4 — createRule refuses a complete triple the gate resolves as SAME-base', () => {
+  let h: Harness
+  beforeEach(() => { h = makeHarness(SHEET_BASES) })
+
+  it('targetBaseId = the rule sheet base, target sheet = the rule sheet → refused, no insert', async () => {
+    expectSelfMutationRefusal(await rejection(h.service.createRule(SHEET_ID, deleteWith(OWN_SHEET_TRIPLE))))
+    expect(h.insertedRows()).toHaveLength(0)
+  })
+
+  it('another sheet of the SAME base → refused (same-base ⇒ the executor ignores targetSheetId/targetRecordId)', async () => {
+    expectSelfMutationRefusal(await rejection(h.service.createRule(SHEET_ID, deleteWith(SAME_BASE_OTHER_SHEET_TRIPLE))))
+    expect(h.insertedRows()).toHaveLength(0)
+  })
+
+  it('a claim naming ANOTHER base on the rule\'s own sheet → refused (the gate decides by the sheets\' real bases)', async () => {
+    const claimMismatch = { targetBaseId: 'base_b', targetSheetId: SHEET_ID, targetRecordId: 'rec_x' }
+    expectSelfMutationRefusal(await rejection(h.service.createRule(SHEET_ID, deleteWith(claimMismatch))))
+    expect(h.insertedRows()).toHaveLength(0)
+  })
+
+  it('legacy null base on both sheets → same-base (null-aware) → refused', async () => {
+    const legacy = { targetBaseId: 'base_any', targetSheetId: LEGACY_TARGET_SHEET, targetRecordId: 'rec_x' }
+    expectSelfMutationRefusal(await rejection(h.service.createRule(LEGACY_RULE_SHEET, deleteWith(legacy))))
+    expect(h.insertedRows()).toHaveLength(0)
+  })
+
+  it('update_record and lock_record with a same-base triple → refused', async () => {
+    const updateConfig = { fields: { status: 'archived' }, ...SAME_BASE_OTHER_SHEET_TRIPLE }
+    expectSelfMutationRefusal(await rejection(h.service.createRule(SHEET_ID, createInput({
+      actionType: 'update_record',
+      actionConfig: updateConfig,
+      actions: [{ type: 'update_record', config: updateConfig }],
+    }))))
+    const lockConfig = { locked: true, ...OWN_SHEET_TRIPLE }
+    expectSelfMutationRefusal(await rejection(h.service.createRule(SHEET_ID, createInput({
+      actionType: 'lock_record',
+      actionConfig: lockConfig,
+      actions: [{ type: 'lock_record', config: lockConfig }],
+    }))))
+    expect(h.insertedRows()).toHaveLength(0)
+  })
+
+  it('a same-base triple NESTED in a parallel_branch → refused', async () => {
+    const branchConfig = {
+      joinMode: 'all',
+      branches: [
+        // A genuinely cross-base sibling passes; the same-base one in the other branch is what is refused.
+        { key: 'a', actions: [{ type: 'update_record', config: { fields: { status: 'a' }, ...CROSS_BASE_TRIPLE } }] },
+        { key: 'b', actions: [{ type: 'update_record', config: { fields: { status: 'b' }, ...SAME_BASE_OTHER_SHEET_TRIPLE } }] },
+      ],
+    }
+    expectSelfMutationRefusal(await rejection(h.service.createRule(SHEET_ID, createInput({
+      actionType: 'parallel_branch',
+      actionConfig: branchConfig,
+      actions: [{ type: 'parallel_branch', config: branchConfig }],
+      executionMode: 'workflow_job_v1',
+    }))))
+    expect(h.insertedRows()).toHaveLength(0)
+  })
+
+  it('ALLOWS a triple into a DIFFERENT base (the gate resolves both bases — it really was consulted)', async () => {
+    const rule = await h.service.createRule(SHEET_ID, deleteWith(CROSS_BASE_TRIPLE))
+    expect(rule.trigger_type).toBe('record.deleted')
+    expect(h.insertedRows()).toHaveLength(1)
+    expect(h.sheetBaseLookups()).toBeGreaterThanOrEqual(2)
+  })
+
+  it('ALLOWS a triple whose target sheet is missing (run time fails closed as cross-base; never the trigger record)', async () => {
+    const gone = { targetBaseId: 'base_b', targetSheetId: SHEET_GONE, targetRecordId: 'rec_x' }
+    await h.service.createRule(SHEET_ID, deleteWith(gone))
+    expect(h.insertedRows()).toHaveLength(1)
+  })
+
+  it('the verdict is the EXECUTOR\'s: overriding resolveCrossBaseWriteTarget flips the outcome both ways', async () => {
+    const executor = (h.service as unknown as { executor: AutomationExecutor }).executor
+    const spy = vi.spyOn(executor, 'resolveCrossBaseWriteTarget')
+
+    // A genuinely cross-base triple, but the executor says same-base → refused at the first (top-level) triple.
+    spy.mockResolvedValueOnce({ crossBase: false } satisfies CrossBaseWriteTarget)
+    expectSelfMutationRefusal(await rejection(h.service.createRule(SHEET_ID, deleteWith(CROSS_BASE_TRIPLE))))
+    // A same-base triple, but the executor says cross-base (for both the top-level config and actions[0]) → allowed.
+    spy.mockResolvedValue({ crossBase: true, resolved: true, targetBaseId: 'base_b', declaredBaseClaim: 'base_b' })
+    await h.service.createRule(SHEET_ID, deleteWith(SAME_BASE_OTHER_SHEET_TRIPLE))
+    expect(h.insertedRows()).toHaveLength(1)
+    // Called with the RULE sheet as the trigger sheet and the raw config target — the executor's own inputs.
+    expect(spy.mock.calls.map((call) => call.slice(1))).toEqual([
+      [SHEET_ID, 'sheet_b', 'base_b'],
+      [SHEET_ID, SHEET_A2, BASE_A],
+      [SHEET_ID, SHEET_A2, BASE_A],
+    ])
+  })
+})
+
+describe('final review F4 — updateRule: shape changes are checked, the way out stays open', () => {
+  let h: Harness
+  beforeEach(() => { h = makeHarness(SHEET_BASES) })
+  const sameBaseStored = () => storedRow({ action_config: SAME_BASE_OTHER_SHEET_TRIPLE, actions: [{ type: 'delete_record', config: SAME_BASE_OTHER_SHEET_TRIPLE }] })
+
+  it('switching a cross-base delete to a same-base triple is refused', async () => {
+    h.setStored(storedRow({ action_config: CROSS_BASE_TRIPLE, actions: [{ type: 'delete_record', config: CROSS_BASE_TRIPLE }] }))
+    const err = await rejection(h.service.updateRule(RULE_ID, SHEET_ID, {
+      actionConfig: SAME_BASE_OTHER_SHEET_TRIPLE,
+      actions: [{ type: 'delete_record', config: SAME_BASE_OTHER_SHEET_TRIPLE }],
+    }))
+    expectSelfMutationRefusal(err)
+    expect(h.updateSets()).toHaveLength(0)
+  })
+
+  it('RE-ENABLING an existing same-base-triple rule is refused', async () => {
+    h.setStored({ ...sameBaseStored(), enabled: false })
+    expectSelfMutationRefusal(await rejection(h.service.setRuleEnabled(RULE_ID, SHEET_ID, true)))
+    expect(h.updateSets()).toHaveLength(0)
+  })
+
+  it('DISABLE-only `{ enabled: false }` of it SUCCEEDS without even resolving a base', async () => {
+    h.setStored(sameBaseStored())
+    h.pushExecute([{ ...sameBaseStored(), enabled: false }])
+
+    const updated = await h.service.setRuleEnabled(RULE_ID, SHEET_ID, false)
+
+    expect(updated?.enabled).toBe(false)
+    expect(h.updateSets()).toEqual([expect.objectContaining({ enabled: false })])
+    expect(h.sheetBaseLookups()).toBe(0)
+  })
+
+  it('a rename of it succeeds, and deleteRule removes it', async () => {
+    h.setStored(sameBaseStored())
+    h.pushExecute([{ ...sameBaseStored(), name: 'renamed' }])
+    expect((await h.service.updateRule(RULE_ID, SHEET_ID, { name: 'renamed' }))?.name).toBe('renamed')
+    expect(h.sheetBaseLookups()).toBe(0)
+
+    h.pushExecute([{ numDeletedRows: 1n }])
+    expect(await h.service.deleteRule(RULE_ID, SHEET_ID)).toBe(true)
+  })
+})
+
+describe('validateDeletedTriggerSelfMutationTargets — the pure rule over an injected verdict', () => {
+  it('resolves only complete triples on mutating actions under record.deleted, and refuses on crossBase:false', async () => {
+    const seen: unknown[][] = []
+    const sameBase = async (...args: unknown[]): Promise<CrossBaseWriteTarget> => { seen.push(args); return { crossBase: false } }
+
+    // Not record.deleted / not a mutating action / structural (incomplete) cases are not resolved at all.
+    expect(await validateDeletedTriggerSelfMutationTargets(SHEET_ID, 'record.created', 'delete_record', OWN_SHEET_TRIPLE, null, sameBase)).toBeNull()
+    expect(await validateDeletedTriggerSelfMutationTargets(SHEET_ID, 'record.deleted', 'send_webhook', OWN_SHEET_TRIPLE, null, sameBase)).toBeNull()
+    expect(await validateDeletedTriggerSelfMutationTargets(SHEET_ID, 'record.deleted', 'delete_record', { targetBaseId: BASE_A }, null, sameBase)).toBeNull()
+    expect(seen).toHaveLength(0)
+
+    // Nested complete triple → resolved with the raw config values → refused.
+    expect(await validateDeletedTriggerSelfMutationTargets(SHEET_ID, 'record.deleted', 'send_webhook', {}, [
+      { type: 'lock_record', config: { locked: true, targetBaseId: ' base_a ', targetSheetId: SHEET_A2, targetRecordId: 'r' } },
+    ] as never, sameBase)).toBe(DELETED_TRIGGER_SELF_MUTATION_MESSAGE)
+    expect(seen).toEqual([[SHEET_ID, SHEET_A2, ' base_a ']])
+
+    const crossBase = async (): Promise<CrossBaseWriteTarget> => ({ crossBase: true, resolved: false, error: 'gone' })
+    expect(await validateDeletedTriggerSelfMutationTargets(SHEET_ID, 'record.deleted', 'delete_record', OWN_SHEET_TRIPLE, null, crossBase)).toBeNull()
   })
 })
