@@ -37,6 +37,49 @@ export function formatAttendanceDateKey(
   return null
 }
 
+const ATTENDANCE_DATE_KEY = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/** Civil-day shift of a YYYY-MM-DD key. Not 24h×N, so a DST boundary cannot skip a work date. */
+export function shiftAttendanceDateKey(dateKey: string, deltaDays: number): string | null {
+  if (!Number.isInteger(deltaDays)) return null
+  const match = ATTENDANCE_DATE_KEY.exec(dateKey.trim())
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const utc = new Date(Date.UTC(year, month - 1, day))
+  if (
+    utc.getUTCFullYear() !== year
+    || utc.getUTCMonth() !== month - 1
+    || utc.getUTCDate() !== day
+  ) return null
+  utc.setUTCDate(utc.getUTCDate() + deltaDays)
+  const shiftedYear = String(utc.getUTCFullYear()).padStart(4, '0')
+  const shiftedMonth = String(utc.getUTCMonth() + 1).padStart(2, '0')
+  const shiftedDay = String(utc.getUTCDate()).padStart(2, '0')
+  return `${shiftedYear}-${shiftedMonth}-${shiftedDay}`
+}
+
+/** Lookback used by the manual missed-punch reminder default window. */
+export const ATTENDANCE_CIVIL_DATE_LOOKBACK_DAYS = 30
+
+/**
+ * Inclusive work-date window in an attendance rule IANA zone.
+ * Returns null when the zone is missing or invalid — callers must not substitute UTC.
+ */
+export function attendanceCivilDateWindow(
+  now: Date,
+  timeZone: string | null | undefined,
+  lookbackDays = ATTENDANCE_CIVIL_DATE_LOOKBACK_DAYS,
+): { from: string; to: string } | null {
+  if (!Number.isInteger(lookbackDays) || lookbackDays < 0) return null
+  const to = formatAttendanceDateKey(now, timeZone)
+  if (!to) return null
+  const from = shiftAttendanceDateKey(to, -lookbackDays)
+  if (!from) return null
+  return { from, to }
+}
+
 export function formatAttendanceClockTime(
   value: string | Date | null | undefined,
   timeZone: string | null | undefined,

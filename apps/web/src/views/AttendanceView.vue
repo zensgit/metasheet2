@@ -1272,7 +1272,7 @@
           </label>
           <label v-if="selfTraceTargetKind === 'workDate'" class="attendance__field" for="attendance-decision-trace-self-date">
             <span>{{ tr('Work date', '工作日期') }}</span>
-            <input id="attendance-decision-trace-self-date" v-model="selfTraceWorkDate" type="date" data-decision-trace-self-date />
+            <input id="attendance-decision-trace-self-date" v-model="selfTraceWorkDate" type="date" data-decision-trace-self-date @input="markSelfTraceWorkDateTouched" />
           </label>
           <label v-if="selfTraceTargetKind === 'requestId'" class="attendance__field" for="attendance-decision-trace-self-request">
             <span>{{ tr('Overtime request ID', '加班申请 ID') }}</span>
@@ -1716,7 +1716,7 @@
                 </label>
                 <label v-if="adminTraceTargetKind === 'workDate'" class="attendance__field" for="attendance-decision-trace-admin-date">
                   <span>{{ tr('Work date', '工作日期') }}</span>
-                  <input id="attendance-decision-trace-admin-date" v-model="adminTraceWorkDate" type="date" data-decision-trace-admin-date />
+                  <input id="attendance-decision-trace-admin-date" v-model="adminTraceWorkDate" type="date" data-decision-trace-admin-date @input="markAdminTraceWorkDateTouched" />
                 </label>
                 <label v-if="adminTraceTargetKind === 'requestId'" class="attendance__field" for="attendance-decision-trace-admin-request">
                   <span>{{ tr('Overtime request ID', '加班申请 ID') }}</span>
@@ -2067,11 +2067,11 @@
                 <div class="attendance__missed-reminder-toolbar" data-missed-punch-reminder-toolbar>
                   <label class="attendance__field" for="attendance-missed-reminder-from">
                     <span>{{ tr('From', '开始日期') }}</span>
-                    <input id="attendance-missed-reminder-from" v-model="missedPunchReminderForm.from" type="date" data-missed-punch-reminder-from />
+                    <input id="attendance-missed-reminder-from" v-model="missedPunchReminderForm.from" type="date" data-missed-punch-reminder-from @input="markMissedPunchReminderFromTouched" />
                   </label>
                   <label class="attendance__field" for="attendance-missed-reminder-to">
                     <span>{{ tr('To', '结束日期') }}</span>
-                    <input id="attendance-missed-reminder-to" v-model="missedPunchReminderForm.to" type="date" data-missed-punch-reminder-to />
+                    <input id="attendance-missed-reminder-to" v-model="missedPunchReminderForm.to" type="date" data-missed-punch-reminder-to @input="markMissedPunchReminderToTouched" />
                   </label>
                   <label class="attendance__field" for="attendance-missed-reminder-user">
                     <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
@@ -2090,6 +2090,13 @@
                 </div>
                 <p class="attendance__field-hint">
                   {{ tr('Candidates are loaded through the scheduler-scope remind endpoint; the producer only enqueues delivery rows and never mutates attendance facts.', '候选通过排班范围 remind 权限接口加载；生产者只写投递队列，不修改考勤事实。') }}
+                </p>
+                <p
+                  v-if="!missedPunchReminderForm.from || !missedPunchReminderForm.to"
+                  class="attendance__field-hint"
+                  data-missed-punch-reminder-date-pending
+                >
+                  {{ tr('Date defaults appear after the attendance rule timezone loads. Until then, choose the work-date range yourself.', '考勤规则时区加载后会填入默认日期。在此之前请自行选择工作日范围。') }}
                 </p>
                 <p v-if="missedPunchReminderError" class="attendance__field-hint attendance__field-hint--error" data-missed-punch-reminder-error>
                   {{ missedPunchReminderError }}
@@ -5350,6 +5357,17 @@
                           </tbody>
                         </table>
                       </div>
+                      <div v-if="attendanceGroupMembersTruncated" class="attendance__admin-actions">
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          :disabled="attendanceGroupMemberLoading"
+                          data-attendance-group-members-load-more
+                          @click="loadMoreAttendanceGroupMembers"
+                        >
+                          {{ attendanceGroupMemberLoading ? tr('Loading...', '加载中...') : tr('Load more members', '加载更多成员') }}
+                        </button>
+                      </div>
                     </template>
                   </section>
 
@@ -5476,6 +5494,17 @@
                             </tr>
                           </tbody>
                         </table>
+                      </div>
+                      <div v-if="attendanceGroupManagersTruncated" class="attendance__admin-actions">
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          :disabled="attendanceGroupManagerLoading"
+                          data-attendance-group-managers-load-more
+                          @click="loadMoreAttendanceGroupManagers"
+                        >
+                          {{ attendanceGroupManagerLoading ? tr('Loading...', '加载中...') : tr('Load more owners', '加载更多负责人') }}
+                        </button>
                       </div>
                     </template>
                   </section>
@@ -10384,12 +10413,21 @@ import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessi
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
 import {
+  attendanceCivilDateWindow,
   formatAttendanceClockTime,
   formatAttendanceDateKey,
   formatAttendanceDateTime,
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
+import {
+  attendanceCatalogAppendRequested,
+  attendanceCatalogHasMore,
+  attendanceCatalogListQuery,
+  mergeAttendanceCatalogItems,
+  readAttendanceCatalogPageNumber,
+  readAttendanceCatalogTotal,
+} from './attendance/attendanceCatalogPage'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -12022,13 +12060,21 @@ const batchAnomalyModal = reactive({
 })
 const missedPunchReminderCandidates = ref<MissedPunchReminderCandidate[]>([])
 const missedPunchReminderLoading = ref(false)
-const missedPunchReminderDefaultTo = new Date()
-const missedPunchReminderDefaultFrom = new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)
+// Empty until an attendance rule IANA is known. applyAttendanceCivilDateDefaults fills these
+// from formatAttendanceDateKey — never Date#toISOString.
 const missedPunchReminderForm = reactive({
-  from: missedPunchReminderDefaultFrom.toISOString().slice(0, 10),
-  to: missedPunchReminderDefaultTo.toISOString().slice(0, 10),
+  from: '',
+  to: '',
   userId: '',
 })
+const missedPunchReminderFromTouched = ref(false)
+const missedPunchReminderToTouched = ref(false)
+function markMissedPunchReminderFromTouched() {
+  missedPunchReminderFromTouched.value = true
+}
+function markMissedPunchReminderToTouched() {
+  missedPunchReminderToTouched.value = true
+}
 const missedPunchReminderSelectedIds = ref<string[]>([])
 const missedPunchReminderMessage = ref('Please submit a missed-punch request for the selected attendance record(s).')
 const missedPunchReminderSubmitting = ref(false)
@@ -12261,6 +12307,12 @@ const resolvedAttendanceTimezone = computed<string | null>(() => {
   }
   return normalizeAttendanceTimeZone(selfServiceRuleTimezone())
 })
+// Org default rule IANA from GET /rules/default, only when the server sent a real zone.
+// The rule form's browser-local fallback is not a civil-date source.
+const loadedAttendanceDefaultRuleTimezone = ref<string | null>(null)
+const attendanceCivilDateTimezone = computed(() =>
+  resolvedAttendanceTimezone.value ?? loadedAttendanceDefaultRuleTimezone.value,
+)
 const overviewTimezoneLabel = computed(() => {
   if (showReports.value && reportHasInvalidRecordTimezone.value) {
     return tr('Some report record timezones are unavailable', '部分报告记录时区不可用')
@@ -13756,6 +13808,11 @@ const attendanceGroupMemberUserIds = ref('')
 const attendanceGroupPendingMemberIds = ref<string[]>([])
 const attendanceGroupMemberDuplicateNotice = ref('')
 const attendanceGroupMemberTotal = ref(0)
+const attendanceGroupMemberPage = ref(0)
+const attendanceGroupManagerTotal = ref(0)
+const attendanceGroupManagerPage = ref(0)
+let attendanceGroupMemberLoadGeneration = 0
+let attendanceGroupManagerLoadGeneration = 0
 const attendanceGroupMemberResolvedUsers = ref<AttendanceGroupMemberResolvedUsers>({})
 const attendanceGroupManagerSelectedUserId = ref('')
 const attendanceGroupManagerRole = ref<AttendanceGroupManagerRole>('owner')
@@ -13932,15 +13989,26 @@ const attendanceGroupMemberCountLabel = computed(() => {
   if (count === 1) return tr('1 member', '1 位成员')
   return tr(`${count} members`, `${count} 位成员`)
 })
+const attendanceGroupMembersTruncated = computed(() =>
+  attendanceCatalogHasMore(attendanceGroupMembers.value.length, attendanceGroupMemberTotal.value),
+)
 const attendanceGroupManagerCountLabel = computed(() => {
+  const visible = attendanceGroupManagers.value.length
+  const total = attendanceGroupManagerTotal.value
+  if (total > visible) {
+    return tr(`Showing ${visible} of ${total} owners`, `显示 ${visible}/${total} 位负责人`)
+  }
   const ownerCount = attendanceGroupManagers.value.filter(manager => normalizeAttendanceGroupManagerRole(manager.role) === 'owner').length
   const subOwnerCount = attendanceGroupManagers.value.filter(manager => normalizeAttendanceGroupManagerRole(manager.role) === 'sub_owner').length
-  if (attendanceGroupManagers.value.length === 0) return tr('0 owners', '0 位负责人')
+  if (visible === 0) return tr('0 owners', '0 位负责人')
   return tr(
     `${ownerCount} owner(s) · ${subOwnerCount} sub-owner(s)`,
     `${ownerCount} 位负责人 · ${subOwnerCount} 位子负责人`,
   )
 })
+const attendanceGroupManagersTruncated = computed(() =>
+  attendanceCatalogHasMore(attendanceGroupManagers.value.length, attendanceGroupManagerTotal.value),
+)
 
 function normalizeAttendanceGroupMemberResolvedUsers(payload: any, requestedUserIds: string[]): AttendanceGroupMemberResolvedUsers {
   const requested = new Set(requestedUserIds)
@@ -15183,7 +15251,11 @@ function decisionTraceTargetKind(category: AttendanceDecisionTraceCategory): 'wo
 const adminTrace = useAttendanceDecisionTrace({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const adminTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
 const adminTraceUserId = ref('')
-const adminTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
+const adminTraceWorkDate = ref('')
+const adminTraceWorkDateTouched = ref(false)
+function markAdminTraceWorkDateTouched() {
+  adminTraceWorkDateTouched.value = true
+}
 const adminTraceRequestId = ref('')
 const adminTraceInstanceId = ref('')
 const adminTraceTargetKind = computed(() => decisionTraceTargetKind(adminTraceCategory.value))
@@ -15209,12 +15281,25 @@ function loadAdminDecisionTrace(): void {
 // 400 ORG_ID_REQUIRED, self four-leg contract P2-d) ---
 const selfTrace = useAttendanceDecisionTrace({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const selfTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
-const selfTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
+const selfTraceWorkDate = ref('')
+const selfTraceWorkDateTouched = ref(false)
+function markSelfTraceWorkDateTouched() {
+  selfTraceWorkDateTouched.value = true
+}
 const selfTraceRequestId = ref('')
 const selfTraceInstanceId = ref('')
 const selfTraceOrgId = ref('')
 const selfTraceTargetKind = computed(() => decisionTraceTargetKind(selfTraceCategory.value))
 const selfTraceNeedsOrg = computed(() => selfTrace.errorKind.value === 'org_required' || selfTraceOrgId.value.trim().length > 0)
+
+function applyAttendanceCivilDateDefaults(now = new Date()): void {
+  const dateWindow = attendanceCivilDateWindow(now, attendanceCivilDateTimezone.value)
+  if (!dateWindow) return
+  if (!missedPunchReminderFromTouched.value) missedPunchReminderForm.from = dateWindow.from
+  if (!missedPunchReminderToTouched.value) missedPunchReminderForm.to = dateWindow.to
+  if (!adminTraceWorkDateTouched.value) adminTraceWorkDate.value = dateWindow.to
+  if (!selfTraceWorkDateTouched.value) selfTraceWorkDate.value = dateWindow.to
+}
 
 function loadSelfDecisionTrace(): void {
   void selfTrace.loadTrace(
@@ -24901,6 +24986,7 @@ async function loadRule() {
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || 'Default'
     ruleForm.timezone = rule.timezone || defaultTimezone
+    loadedAttendanceDefaultRuleTimezone.value = normalizeAttendanceTimeZone(rule.timezone)
     ruleForm.workStartTime = rule.workStartTime || '09:00'
     ruleForm.workEndTime = rule.workEndTime || '18:00'
     ruleForm.lateGraceMinutes = rule.lateGraceMinutes ?? 10
@@ -24943,6 +25029,7 @@ async function saveRule() {
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || ruleForm.name
     ruleForm.timezone = rule.timezone || ruleForm.timezone
+    loadedAttendanceDefaultRuleTimezone.value = normalizeAttendanceTimeZone(rule.timezone) ?? loadedAttendanceDefaultRuleTimezone.value
     ruleForm.workStartTime = rule.workStartTime || ruleForm.workStartTime
     ruleForm.workEndTime = rule.workEndTime || ruleForm.workEndTime
     ruleForm.lateGraceMinutes = rule.lateGraceMinutes ?? ruleForm.lateGraceMinutes
@@ -25085,6 +25172,11 @@ const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
 const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
+// Registered only after selfRulesData exists: the timezone computed reads it, and an earlier
+// immediate watch would hit that ref before initialization.
+watch(attendanceCivilDateTimezone, () => {
+  applyAttendanceCivilDateDefaults()
+}, { immediate: true })
 const selfRulesHasData = computed(() => selfRulesData.value !== null)
 
 function summarizeSelfRulesGroups(groups: AttendanceSelfRulesGroupSummary[] | undefined, emptyLabel: string): string {
@@ -27977,6 +28069,9 @@ function resetAttendanceGroupForm() {
   attendanceGroupMembers.value = []
   attendanceGroupManagers.value = []
   attendanceGroupMemberTotal.value = 0
+  attendanceGroupMemberPage.value = 0
+  attendanceGroupManagerTotal.value = 0
+  attendanceGroupManagerPage.value = 0
   attendanceGroupMemberResolvedUsers.value = {}
   attendanceGroupManagerResolvedUsers.value = {}
   resetAttendanceGroupFixedSchedulePreview()
@@ -28006,6 +28101,9 @@ function editAttendanceGroup(item: AttendanceGroup, stage: AttendanceGroupWorkfl
     attendanceGroupMembers.value = []
     attendanceGroupManagers.value = []
     attendanceGroupMemberTotal.value = 0
+    attendanceGroupMemberPage.value = 0
+    attendanceGroupManagerTotal.value = 0
+    attendanceGroupManagerPage.value = 0
     attendanceGroupMemberResolvedUsers.value = {}
     attendanceGroupManagerResolvedUsers.value = {}
     resetAttendanceGroupFixedSchedulePreview()
@@ -28250,17 +28348,31 @@ async function saveAttendanceGroup() {
   }
 }
 
-async function loadAttendanceGroupMembers() {
+function clearAttendanceGroupMembers() {
+  attendanceGroupMemberLoadGeneration += 1
+  attendanceGroupMembers.value = []
+  attendanceGroupMemberTotal.value = 0
+  attendanceGroupMemberPage.value = 0
+  attendanceGroupMemberResolvedUsers.value = {}
+  attendanceGroupMemberLoading.value = false
+}
+
+async function loadAttendanceGroupMembers(options?: { append?: boolean } | Event) {
   const groupId = attendanceGroupMemberGroupId.value
+  const append = attendanceCatalogAppendRequested(options)
   if (!groupId) {
-    attendanceGroupMembers.value = []
-    attendanceGroupMemberTotal.value = 0
-    attendanceGroupMemberResolvedUsers.value = {}
+    clearAttendanceGroupMembers()
     return
   }
+  if (append && !attendanceGroupMembersTruncated.value) return
+  const generation = ++attendanceGroupMemberLoadGeneration
+  const page = append ? attendanceGroupMemberPage.value + 1 : 1
   attendanceGroupMemberLoading.value = true
   try {
-    const response = await apiFetch(`/api/attendance/groups/${groupId}/members`)
+    const query = buildQuery(attendanceCatalogListQuery(page))
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/members?${query.toString()}`)
+    if (generation !== attendanceGroupMemberLoadGeneration) return
+    if (attendanceGroupMemberGroupId.value !== groupId) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
@@ -28270,16 +28382,33 @@ async function loadAttendanceGroupMembers() {
       throw new Error(readErrorMessage(data, tr('Failed to load group members', '加载分组成员失败')))
     }
     adminForbidden.value = false
-    const items = Array.isArray(data.data?.items) ? data.data.items : []
-    attendanceGroupMembers.value = items
-    attendanceGroupMemberTotal.value = Number(data.data?.total ?? items.length) || items.length
+    const items = Array.isArray(data.data?.items) ? data.data.items as AttendanceGroupMember[] : []
+    const merged = append
+      ? mergeAttendanceCatalogItems(attendanceGroupMembers.value, items, member => member.id)
+      : items
+    if (append && merged.length === attendanceGroupMembers.value.length) {
+      attendanceGroupMemberTotal.value = merged.length
+      attendanceGroupMemberPage.value = readAttendanceCatalogPageNumber(data.data?.page, page)
+      syncAttendanceGroupMemberCount(groupId, attendanceGroupMemberTotal.value)
+      return
+    }
+    attendanceGroupMembers.value = merged
+    attendanceGroupMemberTotal.value = readAttendanceCatalogTotal(data.data?.total, merged.length)
+    attendanceGroupMemberPage.value = readAttendanceCatalogPageNumber(data.data?.page, page)
     syncAttendanceGroupMemberCount(groupId, attendanceGroupMemberTotal.value)
-    void resolveAttendanceGroupMemberLabels(groupId, items)
+    void resolveAttendanceGroupMemberLabels(groupId, merged)
   } catch (error: any) {
+    if (generation !== attendanceGroupMemberLoadGeneration) return
     setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
-    attendanceGroupMemberLoading.value = false
+    if (generation === attendanceGroupMemberLoadGeneration) {
+      attendanceGroupMemberLoading.value = false
+    }
   }
+}
+
+function loadMoreAttendanceGroupMembers() {
+  void loadAttendanceGroupMembers({ append: true })
 }
 
 function syncAttendanceGroupMemberCount(groupId: string, count: number) {
@@ -28303,16 +28432,31 @@ function normalizeAttendanceGroupManagerRow(value: any): AttendanceGroupManager 
   }
 }
 
-async function loadAttendanceGroupManagers() {
+function clearAttendanceGroupManagers() {
+  attendanceGroupManagerLoadGeneration += 1
+  attendanceGroupManagers.value = []
+  attendanceGroupManagerTotal.value = 0
+  attendanceGroupManagerPage.value = 0
+  attendanceGroupManagerResolvedUsers.value = {}
+  attendanceGroupManagerLoading.value = false
+}
+
+async function loadAttendanceGroupManagers(options?: { append?: boolean } | Event) {
   const groupId = attendanceGroupMemberGroupId.value
+  const append = attendanceCatalogAppendRequested(options)
   if (!groupId) {
-    attendanceGroupManagers.value = []
-    attendanceGroupManagerResolvedUsers.value = {}
+    clearAttendanceGroupManagers()
     return
   }
+  if (append && !attendanceGroupManagersTruncated.value) return
+  const generation = ++attendanceGroupManagerLoadGeneration
+  const page = append ? attendanceGroupManagerPage.value + 1 : 1
   attendanceGroupManagerLoading.value = true
   try {
-    const response = await apiFetch(`/api/attendance/groups/${groupId}/managers`)
+    const query = buildQuery(attendanceCatalogListQuery(page))
+    const response = await apiFetch(`/api/attendance/groups/${groupId}/managers?${query.toString()}`)
+    if (generation !== attendanceGroupManagerLoadGeneration) return
+    if (attendanceGroupMemberGroupId.value !== groupId) return
     if (response.status === 403) {
       adminForbidden.value = true
       return
@@ -28322,16 +28466,34 @@ async function loadAttendanceGroupManagers() {
       throw new Error(readErrorMessage(data, tr('Failed to load group owners', '加载考勤组负责人失败')))
     }
     adminForbidden.value = false
-    const items = Array.isArray(data.data?.items)
-      ? data.data.items.map(normalizeAttendanceGroupManagerRow).filter(Boolean) as AttendanceGroupManager[]
-      : []
-    attendanceGroupManagers.value = items
-    void resolveAttendanceGroupManagerLabels(groupId, items)
+    const rawManagerItems: unknown[] = Array.isArray(data.data?.items) ? data.data.items : []
+    const items = rawManagerItems
+      .map(item => normalizeAttendanceGroupManagerRow(item))
+      .filter((row): row is AttendanceGroupManager => row !== null)
+    const merged = append
+      ? mergeAttendanceCatalogItems(attendanceGroupManagers.value, items, manager => manager.id)
+      : items
+    if (append && merged.length === attendanceGroupManagers.value.length) {
+      attendanceGroupManagerTotal.value = merged.length
+      attendanceGroupManagerPage.value = readAttendanceCatalogPageNumber(data.data?.page, page)
+      return
+    }
+    attendanceGroupManagers.value = merged
+    attendanceGroupManagerTotal.value = readAttendanceCatalogTotal(data.data?.total, merged.length)
+    attendanceGroupManagerPage.value = readAttendanceCatalogPageNumber(data.data?.page, page)
+    void resolveAttendanceGroupManagerLabels(groupId, merged)
   } catch (error: any) {
+    if (generation !== attendanceGroupManagerLoadGeneration) return
     setStatus(readErrorMessage(error, tr('Failed to load group owners', '加载考勤组负责人失败')), 'error')
   } finally {
-    attendanceGroupManagerLoading.value = false
+    if (generation === attendanceGroupManagerLoadGeneration) {
+      attendanceGroupManagerLoading.value = false
+    }
   }
+}
+
+function loadMoreAttendanceGroupManagers() {
+  void loadAttendanceGroupManagers({ append: true })
 }
 
 async function previewAttendanceGroupFixedSchedule() {
@@ -29800,6 +29962,7 @@ async function loadAdminData() {
       loadAutoShiftAutoWriteRuns(),
       loadAttendanceNotificationDeliveries(),
       loadHolidays(),
+      loadSelfAttendanceRules(),
     ])
   } catch (error) {
     setStatusFromError(error, tr('Failed to load admin data', '加载管理数据失败'), 'admin')
