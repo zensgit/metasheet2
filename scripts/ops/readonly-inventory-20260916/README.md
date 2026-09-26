@@ -1,6 +1,7 @@
 # 只读盘点包（2026-09-16，2026-09-18 复核返修，2026-09-20 TRG-04 收窄）— CRED-06 / TRG-04 / ADM-08 / ADM-13
 
-这是一个**只读盘点包**：四个 `.sql` 文件加一个共享前言 `_preamble.sql`，全部只含
+这是一个**只读盘点包**：四个 `.sql` 文件（2026-09-20 追加第五个 `05-legacy-binding-census.sql`，
+同一执行契约）加一个共享前言 `_preamble.sql`，全部只含
 `SELECT` / `WITH … SELECT`，没有任何 `INSERT` / `UPDATE` / `DELETE` / DDL。目的是在合并
 四条在飞/待裁决工作之前，先知道生产库上现在有多少行会受影响——**不做任何回填、不做任何
 清理、不改任何表结构**。
@@ -45,6 +46,7 @@
 | `02-trg04-http-targets.sql` | TRG-04 | PR #5619、PR #5649 | 自动化规则（`automation_rules.actions`）和 webhook 订阅（`multitable_webhooks.url`）里还有多少条 `http://`（非 https）目标；**窄口径 = 会坏的条数，另给一列参考上界**（见 §0b / §4b） |
 | `03-adm08-wildcard-permissions.sql` | ADM-08 | 喂 ADM-07 的裁决 | `users.permissions`（两种列形状）、`user_permissions`、`role_permissions`（含经 `user_roles` 继承）里现在有多少行/多少用户持有 `*:*` |
 | `04-adm13-declared-admins.sql` | ADM-13 | PR #5665 / #5677 的**盘点段**（不回填） | 有多少用户满足声明式 admin 字段，但 `user_roles` 里没有 `role_id='admin'` 那一行 |
+| `05-legacy-binding-census.sql` | Q5（#5896 后续） | 喂 DML 迁移 `zzzz20260920150000_backfill_sql_readonly_legacy_connection_id`（**须 owner 明示才合**） | `integration_external_systems` 里还有多少行是 legacy 形态（`connection_id IS NULL` + `config.dataSourceId`），按十个互斥类分组：只有 `backfillable` 会被迁移改写，其余九类（非 sql-readonly / 回滚标记 TRUE / 指针悬空 / 源已软删 / owner 不匹配 / 租户未证 / 租户不符 / 源未启用 / 源类型不支持）原样列给 owner。最后两类（2026-09-26 随迁移谓词 7、8 加入）排在 `backfillable` 之前，只计数，恰好是「只因源未启用 / 类型不支持而不回填」的行数。计数（Q2）与 id（Q3）共用同一个 `hit` CTE。设计与实证见 `docs/development/legacy-binding-connection-id-backfill-{design,verification}-20260920.md` |
 
 每个 `.sql` 顶部有更详细的背景、逐条查询的“目的 / 依据代码 / 预期输出”，以及本轮返修说明。
 
@@ -148,6 +150,7 @@ scripts/ops/readonly-inventory-20260916/
 ├── 02-trg04-http-targets.sql
 ├── 03-adm08-wildcard-permissions.sql
 ├── 04-adm13-declared-admins.sql
+├── 05-legacy-binding-census.sql  （2026-09-20 追加：sql-readonly legacy 绑定行普查，接入 verify 静态契约）
 ├── verify/
 │   ├── fixture-modern.sql        （合成新 schema：全假值）
 │   ├── fixture-legacy.sql        （合成旧 schema：缺 actions / is_admin / is_active）
