@@ -569,6 +569,31 @@ async function main() {
     assert.deepEqual(db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()[2].range,
       { event_index: { gte } }, `cursor ${JSON.stringify(goodCursor)} is accepted as "strictly after ${gte - 1}"`)
   }
+  // f-prov200 review w1b: the REGISTRY itself takes undefined, null and '' as the first page. The
+  // route maps '' to undefined before it gets here and the route tests mock the registry, so
+  // without this loop nothing reaches the null / '' branches at all — refusing either, or reading
+  // '' as cursor 0, used to pass every suite.
+  for (const firstPageCursor of [undefined, null, '']) {
+    let firstPageError = null
+    let firstPage = null
+    try {
+      firstPage = await registry.listProvenanceByRun({
+        tenantId: 'tenant_1', workspaceId: null, runId: 'id_4', cursor: firstPageCursor,
+      })
+    } catch (error) {
+      firstPageError = error
+    }
+    assert.equal(firstPageError, null, `cursor ${JSON.stringify(firstPageCursor)} is the first page, not a refusal`)
+    const firstPageSelect = db.calls.filter(call => call[0] === 'select' && call[1] === 'integration_provenance_by_row').pop()
+    assert.equal(firstPageSelect[2].range, undefined,
+      `cursor ${JSON.stringify(firstPageCursor)} carries no keyset range (not "after 0", not anything)`)
+    assert.deepEqual(firstPageSelect[2].where, { tenant_id: 'tenant_1', workspace_id: null, run_id: 'id_4' },
+      `cursor ${JSON.stringify(firstPageCursor)} keeps the three-key WHERE`)
+    assert.deepEqual(firstPage, runPage,
+      `cursor ${JSON.stringify(firstPageCursor)} answers exactly the page an omitted cursor answers`)
+    assert.equal(__internals.normalizeProvenanceRunCursor(firstPageCursor), null,
+      `normalizeProvenanceRunCursor(${JSON.stringify(firstPageCursor)}) is "no cursor"`)
+  }
 
   // --- 8e. f-prov200: the 199 / 200 / 201 boundary of the default page -----------------------
   // One run per size, seeded out of order and next to a same-run-id row under ANOTHER tenant, so
@@ -680,6 +705,53 @@ async function main() {
   assert.deepEqual({ first: gapMid.items[0].eventIndex, count: gapMid.items.length, truncated: gapMid.truncated, nextCursor: gapMid.nextCursor },
     { first: 51, count: 100, truncated: true, nextCursor: '151' },
     'gapped run, limit 100 after #50: #51..#99 + #101..#151, cursor #151 (an offset cursor would say 150)')
+
+  // f-prov200 review w1b: `truncated` comes from the look-ahead row, never from `total`. Every
+  // gapped case above has its cursor BEFORE the hole (or more events left than holes), where
+  // "total > cursor + returned" happens to agree with the look-ahead. Here the cursor sits AFTER
+  // the hole: #102..#202 remain (101 events), a 100-event page returns #102..#201, and
+  // cursor(101) + returned(100) = 201 = total — so a total-inferred flag would call the page
+  // complete while #202 is still unread.
+  const gapAfterHole = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'gapped_run', limit: 100, cursor: '101',
+  })
+  assert.deepEqual({
+    first: gapAfterHole.items[0].eventIndex,
+    last: gapAfterHole.items[gapAfterHole.items.length - 1].eventIndex,
+    count: gapAfterHole.items.length,
+    total: gapAfterHole.total,
+    truncated: gapAfterHole.truncated,
+    nextCursor: gapAfterHole.nextCursor,
+  }, { first: 102, last: 201, count: 100, total: 201, truncated: true, nextCursor: '201' },
+  'gapped run, limit 100 after #101 (past the hole): #102..#201 is NOT the end — #202 remains, so truncated and cursor #201')
+  const gapAfterHoleNext = await registry.listProvenanceByRun({
+    tenantId: 'tenant_1', workspaceId: null, runId: 'gapped_run', limit: 100, cursor: gapAfterHole.nextCursor,
+  })
+  assert.deepEqual({ items: gapAfterHoleNext.items.map(entry => entry.eventIndex), truncated: gapAfterHoleNext.truncated, nextCursor: gapAfterHoleNext.nextCursor },
+    { items: [202], truncated: false, nextCursor: null },
+    'gapped run: the page after #201 is exactly the #202 a total-inferred flag would have hidden')
+
+  // ...and the flag does not move with a count that disagrees with the page (the count is a second
+  // statement — see the PR residual on READ COMMITTED): a stale SMALL total with a look-ahead row
+  // present is still truncated, and a stale LARGE total with no look-ahead row is still not.
+  for (const [label, staleTotal, limit, expected] of [
+    ['a stale total BELOW the events read', 1, 2, { items: [1, 2], total: 1, truncated: true, nextCursor: '2' }],
+    ['a stale total ABOVE every event', 10, 5, { items: [1, 2, 3], total: 10, truncated: false, nextCursor: null }],
+  ]) {
+    const staleDb = createMockDb()
+    staleDb.seed('integration_provenance_by_row', boundaryRows('stale_count_run', 'tenant_1', 3))
+    staleDb.countRows = async () => staleTotal
+    const staleRegistry = createPipelineRegistry({ db: staleDb, idGenerator: createIdGenerator() })
+    const stalePage = await staleRegistry.listProvenanceByRun({
+      tenantId: 'tenant_1', workspaceId: null, runId: 'stale_count_run', limit,
+    })
+    assert.deepEqual({
+      items: stalePage.items.map(entry => entry.eventIndex),
+      total: stalePage.total,
+      truncated: stalePage.truncated,
+      nextCursor: stalePage.nextCursor,
+    }, expected, `${label}: truncated / nextCursor follow the look-ahead row, not the count (total is reported as counted)`)
+  }
 
   // a count the db layer cannot produce is a server fault, never "0 events"
   const brokenCountDb = createMockDb()

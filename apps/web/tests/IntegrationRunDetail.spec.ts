@@ -603,7 +603,10 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
     // slice answered, mirroring the plugin registry (keyset strictly after `cursor`, server
     // default page 200, `truncated` iff an event exists past the page). A client that drops or
     // reuses a stale cursor is answered the wrong slice — visibly — instead of a canned page.
-    function pagedProvenance(totalEvents: number) {
+    // `workspaceId` is the workspace every request is expected under (null = the default scope,
+    // where buildQueryString drops the key) — so a request that loses or invents a workspace is
+    // answered with a failed expectation, not a page.
+    function pagedProvenance(totalEvents: number, workspaceId: string | null = null) {
       const events = Array.from({ length: totalEvents }, (_, i) => provenanceEvent(i + 1))
       const requests: URLSearchParams[] = []
       function answer(url: string): Response {
@@ -615,6 +618,7 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
           expect(['tenantId', 'workspaceId', 'limit', 'cursor']).toContain(key)
         }
         expect(params.get('tenantId')).toBe('default')
+        expect(params.get('workspaceId')).toBe(workspaceId)
         const limit = params.has('limit') ? Number(params.get('limit')) : 200
         const cursor = params.has('cursor') ? Number(params.get('cursor')) : 0
         const after = events.filter((event) => event.eventIndex > cursor)
@@ -742,6 +746,29 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       // No cursor was handed out, so there is nothing to page to — but the notice still stands.
       expect(loadMoreButton(host)).toBeNull()
       // ...and "no events" is never claimed while the page says events exist / may exist.
+      expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
+    })
+
+    // f-prov200 review w1b: the other half of the service's normalization. A `total` that is not a
+    // non-negative safe integer is DROPPED (not rendered as "showing 2 of 2.5" / "of 1e+21" / "of 5"),
+    // and an empty-string `nextCursor` is NO cursor (not a "may be incomplete" notice plus a
+    // 加载更多 that does nothing when clicked). Each page below states `truncated: false` and hands
+    // out no usable cursor, so what is on screen is the complete timeline.
+    it.each([
+      ['a fractional total (2.5)', { items: PROVENANCE_ITEMS, total: 2.5, truncated: false, nextCursor: null }],
+      ['a negative total (-1)', { items: PROVENANCE_ITEMS, total: -1, truncated: false, nextCursor: null }],
+      ['a total past the safe-integer range (1e21)', { items: PROVENANCE_ITEMS, total: 1e21, truncated: false, nextCursor: null }],
+      ['a numeric-string total ("5")', { items: PROVENANCE_ITEMS, total: '5', truncated: false, nextCursor: null }],
+      ['an empty-string nextCursor', { items: PROVENANCE_ITEMS, total: 2, truncated: false, nextCursor: '' }],
+    ])('normalization: truncated:false with %s renders the two events as complete — no notice, no 加载更多', async (_label, body) => {
+      installMocks(() => jsonResponse(DETAIL_RUN), () => jsonResponse(body))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+      expect(notice(host)).toBeNull()
+      expect(loadMoreButton(host)).toBeNull()
+      // Complete and non-empty: neither the notice nor the "no events" line.
       expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
     })
 
@@ -1108,6 +1135,113 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    // --- f-prov200 review w1b: 加载更多 under a NON-EMPTY workspace -----------------------------
+    // Every case above runs in the default scope, where workspaceId is null and buildQueryString
+    // drops the key — so a 加载更多 that forwarded only the tenant looked exactly like a correct
+    // one. Here the operator works in a named workspace and the mock dispatches on the PATH and
+    // records the full URL, so the workspace each request carried is observable.
+    const WORKSPACE = 'ws_prov'
+
+    function installWorkspaceMocks(answerProvenance: (url: string) => Response | Promise<Response>): void {
+      apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        const path = url.split('?')[0]
+        if (url === '/api/integration/adapters') return jsonResponse([])
+        if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+        if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+        if (path === '/api/integration/runs') return jsonResponse([LIST_RUN])
+        if (path === '/api/integration/dead-letters') return jsonResponse([])
+        if (path === PROVENANCE_PATH) {
+          provenanceCalls.push({ url, init })
+          return answerProvenance(url)
+        }
+        if (path === `/api/integration/runs/${RUN_ID}`) {
+          detailCalls.push({ url, init })
+          return jsonResponse(DETAIL_RUN)
+        }
+        throw new Error(`unexpected URL ${url}`)
+      })
+    }
+
+    function queryOf(url: string): Record<string, string> {
+      return Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''))
+    }
+
+    async function setWorkspace(host: HTMLDivElement, value: string): Promise<void> {
+      const input = host.querySelector('[data-testid="workspace-id"]') as HTMLInputElement
+      expect(input).not.toBeNull()
+      input.value = value
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+
+    async function openDetailInWorkspace(host: HTMLDivElement, workspace: string): Promise<void> {
+      await setWorkspace(host, workspace)
+      ;(host.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+      await flushUi()
+      await openDetail(host)
+    }
+
+    it('加载更多 in a named workspace carries the SAME tenant + workspace as the detail read and the first page', async () => {
+      const fake = pagedProvenance(201, WORKSPACE)
+      installWorkspaceMocks(fake.answer)
+      const host = await mountAndListRuns()
+      await openDetailInWorkspace(host, WORKSPACE)
+      await expandProvenance(host)
+      expect(detailCalls.length).toBeGreaterThan(0)
+      for (const call of detailCalls) {
+        expect(queryOf(call.url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      }
+      expect(provenanceCalls).toHaveLength(1)
+      expect(queryOf(provenanceCalls[0].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+
+      await clickLoadMore(host)
+      expect(provenanceCalls).toHaveLength(2)
+      // Exactly the first page's scope plus the cursor — the workspace is not dropped, widened or
+      // replaced by the cursor.
+      expect(queryOf(provenanceCalls[1].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE, cursor: '200' })
+      expect(renderedIndexes(host)).toEqual(range(1, 201))
+      expect(notice(host)).toBeNull()
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).toBeNull()
+    })
+
+    // The PR residual, pinned as behaviour rather than left implicit: 加载更多 reads currentScope()
+    // WHEN CLICKED — the one source the detail read and 刷新 use too — not a scope remembered from
+    // the first page. Changing the workspace input between the first page and the click therefore
+    // sends the new workspace; the server answers that scope's 404 (the run is not in it), and the
+    // client shows the failure while keeping the events it has, instead of appending anything.
+    it('加载更多 evaluates the scope at click time (same currentScope() as 刷新); a workspace changed after page one gets that scope\'s 404, visibly', async () => {
+      const OTHER_WORKSPACE = 'ws_other'
+      const fake = pagedProvenance(201, WORKSPACE)
+      installWorkspaceMocks((url) => {
+        if (queryOf(url).workspaceId === OTHER_WORKSPACE) {
+          return errorResponse(404, 'RUN_NOT_FOUND', 'pipeline run not found')
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetailInWorkspace(host, WORKSPACE)
+      await expandProvenance(host)
+      expect(queryOf(provenanceCalls[0].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+
+      await setWorkspace(host, OTHER_WORKSPACE)
+      await clickLoadMore(host)
+      const cursorRequests = provenanceCalls.filter((call) => hasCursor(call.url))
+      expect(cursorRequests).toHaveLength(1)
+      expect(queryOf(cursorRequests[0].url)).toEqual({ tenantId: 'default', workspaceId: OTHER_WORKSPACE, cursor: '200' })
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).not.toBeNull()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+
+      // One source: a 刷新 issued at the same moment reads the detail under that same workspace.
+      const detailCallsBefore = detailCalls.length
+      ;(host.querySelector('[data-testid="refresh-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(detailCalls.length).toBe(detailCallsBefore + 1)
+      expect(queryOf(detailCalls[detailCalls.length - 1].url)).toEqual({ tenantId: 'default', workspaceId: OTHER_WORKSPACE })
     })
   })
 })

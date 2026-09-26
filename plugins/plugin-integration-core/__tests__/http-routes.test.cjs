@@ -3983,19 +3983,58 @@ async function testRunProvenanceSubRoute() {
 
   // f-prov200: a malformed cursor is a typed 400 that never reaches the probe or the registry,
   // and its body does not echo the value. `''` is "no cursor" (first page), not an error.
+  //
+  // f-prov200 review w1b: the WHOLE wire body is pinned, not just the code — a message that grew
+  // the cursor value (or the runId) on the end used to pass here. And it is pinned for two runIds,
+  // one the probe would find and one it would 404 on: the two 400s must be byte-identical, which is
+  // what "INVALID_CURSOR says nothing about which runs exist" means on the wire.
+  const INVALID_CURSOR_WIRE_BODY = {
+    ok: false,
+    error: { code: 'INVALID_CURSOR', message: 'cursor must be a non-negative integer string', details: {} },
+  }
   for (const badCursor of ['abc', '-1', '1.5', ' 1', '1e3', '0x10', '1234567890123456', ['1', '2']]) {
-    const bad = createMockServices()
-    const { routes: badRoutes } = mountRoutes(bad.services)
-    const badRes = await invoke(badRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+    const wireBodies = []
+    for (const runId of ['run_1', 'run_does_not_exist']) {
+      const bad = createMockServices()
+      const { routes: badRoutes } = mountRoutes(bad.services)
+      const badRes = await invoke(badRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
+        user: READ_USER,
+        params: { runId },
+        query: { cursor: badCursor },
+      })
+      const label = `cursor ${JSON.stringify(badCursor)} on ${runId}`
+      assertErrorResponse(badRes, [400])
+      assert.equal(badRes.body.error.code, 'INVALID_CURSOR', `${label} → INVALID_CURSOR`)
+      assert.equal(Object.keys(badRes.body.error.details || {}).length, 0, 'the 400 carries no details echoing the cursor')
+      // What actually goes on the wire: exactly the fixed code + message and the empty details
+      // HttpRouteError defaults to — nothing derived from the cursor or the runId.
+      const wireBody = JSON.parse(JSON.stringify(badRes.body))
+      assert.deepEqual(wireBody, INVALID_CURSOR_WIRE_BODY,
+        `${label}: the 400 body is the fixed code + message, echoing neither the cursor nor the runId`)
+      const serialized = JSON.stringify(badRes.body)
+      for (const echoed of [].concat(badCursor).filter((value) => value.trim() !== '').concat(runId)) {
+        assert.equal(serialized.includes(echoed), false, `${label}: the 400 body does not contain ${JSON.stringify(echoed)}`)
+      }
+      assert.equal(findCalls(bad.calls, 'getPipelineRun').length, 0, 'a bad cursor never reaches the existence probe')
+      assert.equal(findCalls(bad.calls, 'listProvenanceByRun').length, 0, 'a bad cursor never reaches the registry')
+      wireBodies.push({ status: badRes.statusCode, body: serialized })
+    }
+    assert.deepEqual(wireBodies[1], wireBodies[0],
+      `cursor ${JSON.stringify(badCursor)}: an existing run and an unknown run get the byte-identical 400 (no existence oracle)`)
+  }
+  // Control for the pair above: WITHOUT a bad cursor the same unknown runId does reach the probe
+  // and 404s — so the identical 400s are the cursor gate answering first, not a mock that cannot
+  // tell the two runs apart.
+  {
+    const control = createMockServices()
+    const { routes: controlRoutes } = mountRoutes(control.services)
+    const controlRes = await invoke(controlRoutes, 'GET', '/api/integration/runs/:runId/provenance', {
       user: READ_USER,
-      params: { runId: 'run_1' },
-      query: { cursor: badCursor },
+      params: { runId: 'run_does_not_exist' },
+      query: { cursor: '5' },
     })
-    assertErrorResponse(badRes, [400])
-    assert.equal(badRes.body.error.code, 'INVALID_CURSOR', `cursor ${JSON.stringify(badCursor)} → INVALID_CURSOR`)
-    assert.equal(Object.keys(badRes.body.error.details || {}).length, 0, 'the 400 carries no details echoing the cursor')
-    assert.equal(findCalls(bad.calls, 'getPipelineRun').length, 0, 'a bad cursor never reaches the existence probe')
-    assert.equal(findCalls(bad.calls, 'listProvenanceByRun').length, 0, 'a bad cursor never reaches the registry')
+    assertErrorResponse(controlRes, [404])
+    assert.equal(controlRes.body.error.code, 'RUN_NOT_FOUND', 'a well-formed cursor on an unknown run is the probe\'s 404')
   }
   const emptyCursor = createMockServices()
   const { routes: emptyCursorRoutes } = mountRoutes(emptyCursor.services)
