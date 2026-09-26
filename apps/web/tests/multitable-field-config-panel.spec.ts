@@ -244,13 +244,23 @@ describe('MetaFieldManager <style> — the config panel scroll rules (item 5 is 
 const CONFIG_PANE_STORAGE_KEY = 'metasheet.fieldManager.configPaneHeight'
 const CONFIG_PANE_MIN = 120
 const CONFIG_PANE_STEP = 16
-/** Component: `Math.round(viewportHeight * 0.84 - 160)`, floored at the minimum. */
-function expectedMax(viewportHeight: number): number {
-  return Math.max(CONFIG_PANE_MIN, Math.round(viewportHeight * 0.84 - 160))
+// jsdom lays nothing out, so the component falls back to FALLBACK_FIXED_ROWS_HEIGHT (64) for its
+// header + splitter + add-field row; with the list's 96px floor that is r8-B's `0.84vh - 160`.
+// (Every viewport used by this block leaves room for both floors, so neither is scaled down here --
+// the short-window regime is covered by the #7a block with a stubbed layout.)
+const FALLBACK_FIXED_ROWS = 64
+const FIELD_LIST_MIN = 96
+/** Component: the room the list and the pane share = 84vh minus the fixed rows. */
+function expectedRoom(viewportHeight: number): number {
+  return viewportHeight * 0.84 - FALLBACK_FIXED_ROWS
 }
-/** Component: `clamp(Math.round(viewportHeight * 0.52))`. */
+/** Component: `floor(room - 96)`. */
+function expectedMax(viewportHeight: number): number {
+  return Math.floor(expectedRoom(viewportHeight) - FIELD_LIST_MIN)
+}
+/** Component (#7a): an untouched split gives each half `floor(room / 2)`, clamped. */
 function expectedDefault(viewportHeight: number): number {
-  return Math.max(CONFIG_PANE_MIN, Math.min(expectedMax(viewportHeight), Math.round(viewportHeight * 0.52)))
+  return Math.max(CONFIG_PANE_MIN, Math.min(expectedMax(viewportHeight), Math.floor(expectedRoom(viewportHeight) / 2)))
 }
 
 // Same jsdom idiom as multitable-record-inspector-resize.spec.ts's `setViewportWidth`: redefine the
@@ -652,7 +662,7 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
       corrupt.app.unmount()
       corrupt.container.remove()
 
-      // `-50` exercises the `parsed <= 0` guard specifically: the floor (120) and the default (520)
+      // `-50` exercises the `parsed <= 0` guard specifically: the floor (120) and the default (388)
       // differ here, so a missing guard would land on 120 and this assertion would fail.
       window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '-50')
       const negative = await mountWithConfigOpen(1000)
@@ -707,8 +717,9 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
       expandToggle(first.container).click()
       await flushUi()
       expect(configPaneHeightPx(first.container)).toBe(expectedMax(1000))
-      // The reload will read THIS number: the last manual height, not the ceiling it is showing.
-      expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(expectedDefault(1000)))
+      // Never the ceiling it is showing -- and (#7a) not the default either: the user chose no height,
+      // so nothing is stored and the reload starts from the live default.
+      expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBeNull()
       first.app.unmount()
       first.container.remove()
 
@@ -845,7 +856,9 @@ describe('MetaFieldManager <style> — the split is half CSS (r8-B)', () => {
     // `overflow-y: auto` resolves `min-height: auto` to 0 for a flex item — this is the ONLY thing
     // standing between a tall config pane and a zero-height field list.
     expect(body).toMatch(/overflow-y:\s*auto/)
-    expect(body).toMatch(/min-height:\s*\d+px/)
+    // #7a: the floor is published by the script (so a very short window can lower it), with the same
+    // 96px as the CSS fallback.
+    expect(body).toMatch(/min-height:\s*var\(--meta-field-mgr-list-min-height,\s*96px\)/)
   })
 
   it('drives the dialog width through a custom property with a viewport bound, not a bare 720px', () => {
@@ -869,5 +882,417 @@ describe('MetaFieldManager <style> — the split is half CSS (r8-B)', () => {
     // Without this a touch drag scrolls the field list instead of moving the boundary.
     expect(body).toMatch(/touch-action:\s*none/)
     expect(SFC_SOURCE).toMatch(/\.meta-field-mgr__splitter:focus-visible\s*\{/)
+  })
+})
+
+// ==============================================================================================
+// 客户反馈 2026-09-24 #7a (also #5864 ②): "配置区高度调不了、⤢ 无效".
+//
+// The splitter and ⤢/⤡ only moved the pane's max-height, and the pane -- a shrinkable flex item in an
+// 84vh flex column -- was drawn below that ceiling whenever its content was tall, so nothing moved on
+// screen. The drawn heights themselves are asserted in a real browser
+// (apps/web/verification/field-manager-config-pane.spec.ts). This block pins the arithmetic that
+// makes the ceiling honourable and the state rules around it, against a STUBBED layout: jsdom lays
+// nothing out, so `getBoundingClientRect` reports the row heights Chromium measures (header 57,
+// splitter 6, add-field row 74, delete confirmation 84.5).
+// ==============================================================================================
+type StubRows = {
+  header: number
+  splitter: number
+  add: number
+  addError: number
+  confirm: number
+  /** The pane's DRAWN height; null = not laid out (the component then uses the published px). */
+  pane: number | null
+}
+const CHROMIUM_ROWS: StubRows = { header: 57, splitter: 6, add: 74, addError: 18, confirm: 84.5, pane: null }
+
+function stubLayout(overrides: Partial<StubRows> = {}) {
+  const rows: StubRows = { ...CHROMIUM_ROWS, ...overrides }
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const cl = this.classList
+    let height = 0
+    if (cl.contains('meta-field-mgr__header')) height = rows.header
+    else if (cl.contains('meta-field-mgr__splitter')) height = rows.splitter
+    else if (cl.contains('meta-field-mgr__add-section')) {
+      height = rows.add + (this.querySelector('[data-test="add-conflict-error"]') ? rows.addError : 0)
+    } else if (cl.contains('meta-field-mgr__confirm')) height = rows.confirm
+    else if (cl.contains('meta-field-mgr__config--scrollable') && rows.pane !== null) height = rows.pane
+    return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: height, width: 0, height, toJSON: () => ({}) } as DOMRect
+  })
+  return rows
+}
+
+function listFloorPx(container: HTMLElement): number {
+  const root = container.querySelector<HTMLElement>('.meta-field-mgr')!
+  return Number(root.style.getPropertyValue('--meta-field-mgr-list-min-height').replace('px', ''))
+}
+
+function ariaTrio(container: HTMLElement) {
+  const el = splitter(container)
+  return {
+    now: Number(el.getAttribute('aria-valuenow')),
+    min: Number(el.getAttribute('aria-valuemin')),
+    max: Number(el.getAttribute('aria-valuemax')),
+  }
+}
+
+function rowByName(container: HTMLElement, name: string): HTMLElement {
+  const row = Array.from(container.querySelectorAll<HTMLElement>('.meta-field-mgr__row'))
+    .find((r) => r.querySelector('.meta-field-mgr__name')?.textContent === name)
+  expect(row, `row ${name}`).toBeTruthy()
+  return row!
+}
+
+async function openDeleteConfirm(container: HTMLElement, name: string) {
+  rowByName(container, name).querySelector<HTMLButtonElement>('.meta-field-mgr__action--danger')!.click()
+  await flushUi()
+  expect(container.querySelector('.meta-field-mgr__confirm'), 'confirmation row shown').toBeTruthy()
+}
+
+const TWO_FIELDS = [
+  { id: 'fld_qty', name: 'Qty', type: 'number', property: {} },
+  { id: 'fld_note', name: 'Note', type: 'string', property: {} },
+]
+
+async function mountMeasured(viewportHeight: number, overrides: Partial<StubRows> = {}) {
+  stubLayout(overrides)
+  setViewportHeight(viewportHeight)
+  const { container, app } = mountFieldManager(TWO_FIELDS)
+  await openFieldConfig(container, 'Qty')
+  return { container, app }
+}
+
+describe('MetaFieldManager — #7a the config pane height actually applies (客户反馈 2026-09-24)', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    setViewportHeight(768)
+  })
+
+  describe('the ceiling comes from MEASURED rows', () => {
+    it('at 800px: 84vh minus header/splitter/add-field row minus the 96px list floor, and the default is half of the room', async () => {
+      const { container, app } = await mountMeasured(800)
+      try {
+        // room = 672 - (57 + 6 + 74) = 535; max = 535 - 96 = 439; default = floor(535 / 2) = 267.
+        // (r8-B's estimate `0.84vh - 160` claimed 512 here, 73px more than the frame could give.)
+        expect(ariaTrio(container)).toEqual({ now: 267, min: 120, max: 439 })
+        expect(configPaneHeightPx(container)).toBe(267)
+        expect(listFloorPx(container)).toBe(96)
+        // ⤢ has a real distance to travel from the default.
+        expandToggle(container).click()
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(439)
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('a delete confirmation opened under the open pane lowers the ceiling by its height; cancelling restores it', async () => {
+      const { container, app } = await mountMeasured(800)
+      try {
+        keydown(splitter(container), 'End')
+        keyup(splitter(container), 'End')
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(439)
+
+        await openDeleteConfirm(container, 'Note')
+        // The pane stays open; rows = ceil(57 + 6 + 74 + 84.5) = 222 -> room 450 -> max 354.
+        expect(container.querySelector('.meta-field-mgr__config--scrollable')).toBeTruthy()
+        expect(ariaTrio(container).max).toBe(354)
+        expect(configPaneHeightPx(container)).toBe(354)
+        expect(ariaTrio(container).now).toBeLessThanOrEqual(ariaTrio(container).max)
+
+        container.querySelector<HTMLButtonElement>('.meta-field-mgr__confirm .meta-field-mgr__btn-cancel')!.click()
+        await flushUi()
+        expect(container.querySelector('.meta-field-mgr__confirm')).toBeFalsy()
+        expect(ariaTrio(container).max).toBe(439)
+        // The manual End choice comes back in full: the confirmation only clamped it for display.
+        expect(configPaneHeightPx(container)).toBe(439)
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('the add-name conflict error re-measures the add-field row (no ResizeObserver needed)', async () => {
+      const { container, app } = await mountMeasured(800)
+      try {
+        expect(ariaTrio(container).max).toBe(439)
+        const input = container.querySelector<HTMLInputElement>('.meta-field-mgr__add-row input')!
+        input.value = 'Note'
+        input.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(container.querySelector('[data-test="add-conflict-error"]')).toBeTruthy()
+        // add-field row 74 + 18 -> room 672 - 155 = 517 -> max 421.
+        expect(ariaTrio(container).max).toBe(421)
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  describe('short windows: the fixed rows always fit', () => {
+    it('rows + list floor + published pane never exceed the 84vh frame, with or without a pending delete', async () => {
+      const { container, app } = await mountMeasured(1000)
+      try {
+        for (const confirming of [false, true]) {
+          if (confirming) await openDeleteConfirm(container, 'Note')
+          const rows = 57 + 6 + 74 + (confirming ? 84.5 : 0)
+          for (let vh = 1200; vh >= 300; vh -= 20) {
+            setViewportHeight(vh)
+            await flushUi()
+            const trio = ariaTrio(container)
+            const floor = listFloorPx(container)
+            const published = configPaneHeightPx(container)
+            const label = `vh=${vh} confirming=${confirming}`
+            // Against the CEILING, not just the current height: even ⤢ / End must fit.
+            expect(Math.ceil(rows) + floor + trio.max, label).toBeLessThanOrEqual(vh * 0.84)
+            expect(floor, label).toBeLessThanOrEqual(96)
+            expect(trio.min, label).toBeLessThanOrEqual(trio.now)
+            expect(trio.now, label).toBeLessThanOrEqual(trio.max)
+            expect(published, label).toBe(trio.now)
+          }
+        }
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('at 360px the two floors shrink in proportion instead of pushing rows out (the #6072 regression)', async () => {
+      const { container, app } = await mountMeasured(360)
+      try {
+        // room = 302.4 - 137 = 165.4 < 96 + 120 -> list floor floor(165.4 * 96 / 216) = 73, pane 92.
+        expect(listFloorPx(container)).toBe(73)
+        expect(ariaTrio(container)).toEqual({ now: 92, min: 92, max: 92 })
+
+        await openDeleteConfirm(container, 'Note')
+        // room = 302.4 - 222 = 80.4 -> list floor 35, pane 45: the confirmation still fits.
+        expect(listFloorPx(container)).toBe(35)
+        expect(ariaTrio(container)).toEqual({ now: 45, min: 45, max: 45 })
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('with no config pane open the list alone gives way (floor = what is left, at most 96)', async () => {
+      stubLayout()
+      setViewportHeight(360)
+      const { container, app } = mountFieldManager(TWO_FIELDS)
+      try {
+        await flushUi()
+        expect(listFloorPx(container)).toBe(96) // room 302.4 - 131 = 171.4
+        await openDeleteConfirm(container, 'Note')
+        // room = 302.4 - ceil(57 + 74 + 84.5) = 86.4 -> 86.
+        expect(listFloorPx(container)).toBe(86)
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  describe('nothing is stored unless the user chose a height', () => {
+    for (const vh of [360, 1000]) {
+      it(`at ${vh}px ⤢/⤡ without a manual height never writes localStorage, and the default keeps following the window`, async () => {
+        const { container, app } = await mountMeasured(vh)
+        try {
+          const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+          expandToggle(container).click()
+          await flushUi()
+          expandToggle(container).click()
+          await flushUi()
+          expect(setItemSpy).not.toHaveBeenCalled()
+          expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBeNull()
+
+          setViewportHeight(900)
+          await flushUi()
+          // room = 756 - 137 = 619 -> default floor(619 / 2) = 309: still the live default.
+          expect(configPaneHeightPx(container)).toBe(309)
+          expect(setItemSpy).not.toHaveBeenCalled()
+        } finally {
+          app.unmount()
+        }
+      })
+    }
+
+    it('also in the unmeasured fallback at 360px (the case #6072 stored "120" in)', async () => {
+      const { container, app } = await mountWithConfigOpen(360)
+      try {
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        expandToggle(container).click()
+        await flushUi()
+        expandToggle(container).click()
+        await flushUi()
+        expect(setItemSpy).not.toHaveBeenCalled()
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('a click on the splitter with no drag (pointerdown + pointerup) chooses nothing and writes nothing', async () => {
+      const { container, app } = await mountMeasured(800)
+      try {
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        const el = splitter(container)
+        el.dispatchEvent(pointer('pointerdown', 500, 23))
+        el.dispatchEvent(pointer('pointerup', 500, 23))
+        await flushUi()
+        expect(setItemSpy).not.toHaveBeenCalled()
+        // ...so the default still follows the window afterwards.
+        setViewportHeight(900)
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(309)
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('window resizes never write, with or without a manual height', async () => {
+      const { container, app } = await mountMeasured(800)
+      try {
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        for (const vh of [500, 1200, 360, 900]) {
+          setViewportHeight(vh)
+          await flushUi()
+        }
+        expect(setItemSpy).not.toHaveBeenCalled()
+
+        keydown(splitter(container), 'ArrowDown')
+        keyup(splitter(container), 'ArrowDown')
+        await flushUi()
+        expect(setItemSpy).toHaveBeenCalledTimes(1)
+        for (const vh of [500, 1200, 360, 900]) {
+          setViewportHeight(vh)
+          await flushUi()
+        }
+        expect(setItemSpy).toHaveBeenCalledTimes(1)
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('a stored height is clamped only for display: a short window (and ⤢/⤡ there) never overwrites it, a tall one gives it back', async () => {
+      window.localStorage.setItem(CONFIG_PANE_STORAGE_KEY, '500')
+      const { container, app } = await mountMeasured(360)
+      try {
+        expect(configPaneHeightPx(container)).toBe(92)
+        const setItemSpy = vi.spyOn(window.localStorage, 'setItem')
+        expandToggle(container).click()
+        await flushUi()
+        expandToggle(container).click()
+        await flushUi()
+        expect(setItemSpy).not.toHaveBeenCalled()
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe('500')
+
+        setViewportHeight(1000)
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(500)
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  describe('drag and key steps start from the DRAWN height', () => {
+    it('a short pane (drawn 200 under a 267 ceiling): dragging down 30 lands on 170, not 237', async () => {
+      const { container, app } = await mountMeasured(800, { pane: 200 })
+      try {
+        expect(configPaneHeightPx(container)).toBe(267)
+        const el = splitter(container)
+        el.dispatchEvent(pointer('pointerdown', 500, 21))
+        el.dispatchEvent(pointer('pointermove', 530, 21))
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(170)
+        el.dispatchEvent(pointer('pointerup', 530, 21))
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('ArrowDown steps from the drawn height as well', async () => {
+      const { container, app } = await mountMeasured(800, { pane: 200 })
+      try {
+        keydown(splitter(container), 'ArrowDown')
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(200 - CONFIG_PANE_STEP)
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('never starts ABOVE the published ceiling, whatever the drawn box reports', async () => {
+      const { container, app } = await mountMeasured(800, { pane: 1000 })
+      try {
+        const el = splitter(container)
+        el.dispatchEvent(pointer('pointerdown', 500, 22))
+        el.dispatchEvent(pointer('pointermove', 530, 22))
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(267 - 30)
+        el.dispatchEvent(pointer('pointerup', 530, 22))
+      } finally {
+        app.unmount()
+      }
+    })
+  })
+
+  describe('ResizeObserver wiring', () => {
+    it('re-arms when a row mounts, re-measures from its callback, and disconnects everything on unmount', async () => {
+      const observers: Array<{ callback: () => void; targets: Element[]; disconnected: boolean }> = []
+      class FakeResizeObserver {
+        record: { callback: () => void; targets: Element[]; disconnected: boolean }
+        constructor(callback: () => void) {
+          this.record = { callback, targets: [], disconnected: false }
+          observers.push(this.record)
+        }
+        observe(target: Element) { this.record.targets.push(target) }
+        unobserve() {}
+        disconnect() { this.record.disconnected = true }
+      }
+      vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+      const rows = stubLayout()
+      setViewportHeight(800)
+      const { container, app } = mountFieldManager(TWO_FIELDS)
+      await openFieldConfig(container, 'Qty')
+      const live = () => observers.filter((o) => !o.disconnected)
+
+      expect(live()).toHaveLength(1)
+      expect(live()[0].targets.map((t) => t.className)).toEqual(expect.arrayContaining([
+        expect.stringContaining('meta-field-mgr__header'),
+        expect.stringContaining('meta-field-mgr__splitter'),
+        expect.stringContaining('meta-field-mgr__add-section'),
+      ]))
+
+      await openDeleteConfirm(container, 'Note')
+      expect(live()).toHaveLength(1)
+      expect(live()[0].targets.some((t) => t.classList.contains('meta-field-mgr__confirm'))).toBe(true)
+      expect(ariaTrio(container).max).toBe(354)
+
+      // A row growing on its own (no mount/unmount) is caught by the observer callback alone.
+      rows.add = 100
+      live()[0].callback()
+      await flushUi()
+      // rows = ceil(57 + 6 + 100 + 84.5) = 248 -> room 424 -> max 328.
+      expect(ariaTrio(container).max).toBe(328)
+
+      app.unmount()
+      expect(live()).toHaveLength(0)
+    })
+  })
+})
+
+// --- #7a, source-level half ---------------------------------------------------------------------
+describe('MetaFieldManager <style> — #7a the pane does not shrink, and the script mirrors the CSS it bounds', () => {
+  it('the config pane is out of the flex shrink distribution and border-box', () => {
+    const body = ruleBody(SCROLLABLE_RULE)
+    expect(body).toMatch(/flex:\s*0 0 auto/)
+    expect(body).toMatch(/box-sizing:\s*border-box/)
+  })
+
+  it('the script constants mirror the CSS they bound (frame 84vh, list floor 96px)', () => {
+    const root = SFC_SOURCE.match(ROOT_RULE)?.[1] ?? ''
+    expect(root).toMatch(/max-height:\s*84vh/)
+    expect(SFC_SOURCE).toMatch(/const FRAME_MAX_HEIGHT_VH_RATIO = 0\.84\b/)
+    expect(SFC_SOURCE).toMatch(/const FIELD_LIST_MIN_HEIGHT = 96\b/)
+    expect(SFC_SOURCE.match(BODY_RULE)?.[1] ?? '').toMatch(/min-height:\s*var\(--meta-field-mgr-list-min-height,\s*96px\)/)
   })
 })
