@@ -472,7 +472,7 @@ FROM kysely_migration
 WHERE name = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id';
 ```
 
-### 4.6 日志检查与 S6 的判定（只读，在运维机本地看后端 pm2 日志；注意 `PM2_HOME` 用 pm2-runtime 那一份，见交接 §2）
+### 4.6 日志检查与 S6 的判定（只读，经 ssh 在演示机上看后端 pm2 日志，结果只在运维机本地看；pm2 命令先按交接 §2 设 `PM2_HOME`）
 
 装载相关的几行只在启动时打。后端重启过多次时，只看**最后一次启动**的那一段。批量接口的几行（表中 `Bulk` 开头的）
 随时都可能出现，看 T0 之后的全部日志。
@@ -499,8 +499,13 @@ WHERE name = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id';
    （`executeApp`）都会刷新它，`pm2 restart`、内存上限重启、崩溃后被 `autorestart` 自动拉起都算（`lib/God.js:181`；
    本步的 pm2 行号都按 pm2 7.0.4）。仓库里的 pm2 配置开着 `autorestart` 和内存上限重启（`ecosystem.config.cjs:62`、`:64`）。
    `jlist` 会打出该进程的全部环境变量，所以只取这一个数，不要显示整段输出，也不要外传。下面这条命令由 node 调
-   `pm2 jlist`、只打印这一个数，读取或解析失败时只打印 `READ_FAILED`，不会带出整段输出。在运维机的 PowerShell 里执行
-   （`PM2_HOME` 见本节标题；cmd 和 Git Bash 里同样可用）：
+   `pm2 jlist`、只打印这一个数，读取或解析失败时只打印 `READ_FAILED`，不会带出整段输出。**在演示机上执行**：pm2 守护进程
+   和后端都在演示机上，`pm2 jlist` 只连本机的命名管道，在运维机本地执行连不到它。经 ssh 进入演示机的 PowerShell 5.1
+   会话，先按交接 §2 把 `$env:PM2_HOME` 设为 pm2-runtime 那一份；再确认有 pm2 守护进程在跑：
+   `@([System.IO.Directory]::GetFiles('\\.\pipe\')) -contains '\\.\pipe\rpc.sock'` 输出 `True` 才执行下面这条命令，
+   输出 `False` 或报错就停下。也可以写成 .ps1，按交接 §3 的远端约定 scp 过去后用 `-File` 运行：第一行设
+   `$env:PM2_HOME`，第二行是 `if (<预检>) { <这条命令> } else { 'NO_PM2_DAEMON' }`。输出只在运维机的 ssh 终端里看，
+   不外传：
 
    ```powershell
    node -e "let a;try{const o=require('child_process').execSync('pm2 jlist',{encoding:'utf8',maxBuffer:1<<26});const l=o.split(/\r?\n/).map(x=>x.trim()).filter(x=>x.startsWith('[{')||x==='[]').pop();a=JSON.parse(l).filter(p=>p.name==='metasheet-backend')}catch(e){console.log('READ_FAILED');process.exit(1)}console.log(a.length?a.map(p=>new Date(p.pm2_env.pm_uptime).toISOString().replace('T',' ').replace('Z','+00')).join(' '):'NOT_FOUND')"
@@ -509,8 +514,10 @@ WHERE name = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id';
    输出是一个形如 `YYYY-MM-DD HH:MM:SS.mmm+00` 的 UTC 时间，原样填进会话变量 `backend_started_at`（带 `+00`，
    不用换算成 `+08`）。输出 `NOT_FOUND`、`READ_FAILED` 或多于一个时间时不要继续，先查清后端由哪个 pm2 托管。
    不要改成 `pm2 jlist | node …` 的管道写法：本机实测，PowerShell 5.1 的管道在内容前加了 BOM，解析失败，而 node 的报错
-   会把整段输出（含环境变量）打到屏幕上。只在后端正在运行时执行：本机实测，没有 pm2 守护进程在跑时，这条命令会新起
-   一个空的守护进程，输出 `NOT_FOUND`（§6）。
+   会把整段输出（含环境变量）打到屏幕上。先做管道预检，是因为本机实测没有 pm2 守护进程在跑时，这条命令会新起一个空的
+   守护进程，输出 `NOT_FOUND`（§6）；在演示机上执行，这个守护进程就起在演示机上。预检看管道，不看 `PM2_HOME`：Windows
+   上 pm2 的管道名是固定的（`paths.js:79-84`），与 `PM2_HOME` 无关。本机实测，`PM2_HOME` 设成另一个空目录，这条命令照样
+   连到正在跑的守护进程、取到同一个时间，只是在那个目录下新建了 `logs`、`pids` 等文件（§6）；所以 `PM2_HOME` 仍按交接 §2 设。
    - **不要用 `pm2 describe` 的 `created at`**。它显示的是 `pm2_env.created_at`（`lib/API/UX/pm2-describe.js:44-45`、
      `:74`），只在没有值时才写（`lib/God.js:189-190`）。崩溃后被 `autorestart` 拉起时，走的是 `handleExit` 里的
      `executeApp`（`:535-538`），不刷新它，这时它早于真实的启动时间：第 2 步会放过上一个进程的报错，Q6 会多标 `t`。
@@ -522,8 +529,9 @@ WHERE name = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id';
    - 后端日志里**最后一行** `[DataSourceManager] Loaded <N> data sources from database`（装载失败时是
      `Could not load from database`）只用来核对 T0 取的是不是这次启动，它应该在 T0 之后不久。不要拿它当 T0：它打在
      装载查询之后（查询在 `DataSourceManager.ts:321-326`，这一行在 `:358`，中间还有逐行装载和 `auto_connect` 的连接），
-     晚于注册表的快照，用它当 T0 会漏掉这段时间里的写入；而且 `time: true`（`ecosystem.config.cjs:73`）加的前缀是运维机
-     本地时间，只到秒，不带时区。
+     晚于注册表的快照，用它当 T0 会漏掉这段时间里的写入；而且 `time: true`（`ecosystem.config.cjs:73`）加的前缀是演示机
+     （pm2 守护进程所在主机）的本地时间：pm2 守护进程写日志时当场取时间（`lib/Common.js:769-770`、
+     `lib/God/ForkMode.js:148-153`），只到秒，不带时区。拿它和 T0 比之前，先按演示机的时区换成 UTC。
 2. **取报错那次试拉的时间 T1**，即计划任务的上次运行时间。**T1 早于 T0 的报错不能用当前库判**，要等 T0 之后的下一次试拉。
 3. **跑 Q6**，看试拉行所指的源在 T0 之后有没有被写过：
 
@@ -628,7 +636,8 @@ ORDER BY 2 DESC, 1;
 本节的 SQL 都是从本文的 sql 代码块原样抽取后执行的；修订后（S6、`pulled` 取行规则、`DATA_OK` 文案、Q6）全部重跑了一遍，
 下面的数字是重跑的结果。第 3 轮修订没有改动任何 sql 代码块（7 个代码块与上一版逐字相同），并在修订后的文本上重跑了
 17 个用例、试拉行认定和 S6 三组，数字与下文一致。第 4 轮修订只改 §4.6「S6 的判定」第 1 步，并在本节新增「T0 的取法」
-一条，同样没有改动 sql 代码块。
+一条，同样没有改动 sql 代码块。第 5 轮修订只改 §4.6 的标题，以及第 1 步里的执行位置和日志前缀的归属，并在本节新增
+「执行位置与日志前缀的时钟」一条；sql 代码块和第 1 步的命令代码块都没有改。
 
 - **建表**：按部署顺序跑真实迁移：`20251206000001`（data_sources）→ `057`、`079`（SQL）→ `zzzz20260902120000`
   （cutover）→ 植入数据 → `zzzz20260920120000`（live_id，`NOT VALID`）。S2a/S2f 的行在 live_id 迁移之前软删，
@@ -709,8 +718,30 @@ ORDER BY 2 DESC, 1;
   - 泄露检查：在 PATH 上放一个假的 `pm2`，打印截断的 JSON，里面带一个标记环境变量。本文的命令只打印 `READ_FAILED`，
     输出里没有标记；管道写法把整段内容连同标记打到了 stderr。
   - 没有 pm2 守护进程时执行这条命令：输出 `NOT_FOUND`，同时新起了一个 pm2 守护进程（两个版本都是）。
-  - `time: true` 的日志前缀是本机时间，只到秒，不带时区；每次启动各有一行 `Loaded`。
+  - `time: true` 的日志前缀是本机时间（单机运行；前缀跟的是哪台主机的时钟，见下一条），只到秒，不带时区；每次启动各有
+    一行 `Loaded`。
   - 本轮没有改动 sql 代码块，17 个用例、试拉行认定和 S6 三组没有重跑。
+- **执行位置与日志前缀的时钟**（第 5 轮修订新增）：pm2 7.0.4。Windows 上 pm2 的管道名是固定的，所以在同一台机器上先后
+  模拟两台主机：「演示机」由 `pm2-runtime` 托管合成后端，进程时区设为 `Asia/Tokyo`；「运维机」上没有 pm2 守护进程托管
+  后端，进程时区设为 `America/New_York`。第 1 步的命令、管道预检和 .ps1 的第二行都从本文原样抽取，在 Windows PowerShell 5.1
+  里执行。没有经过真实的 ssh：交互会话用 `powershell -Command -` 从标准输入逐行送入代替。
+  - 按修订后的做法在「演示机」上执行（设 `PM2_HOME`、预检、命令）：预检输出 `True`；逐行送入和 .ps1 `-File` 两种形式都
+    输出与 `pm_uptime` 相同的时间。按修订前的做法在「运维机」上执行：输出 `NOT_FOUND`，并在「运维机」上新起了一个 pm2
+    守护进程。
+  - `time: true` 的前缀是东京时间，不是纽约时间，也不是本机时区的时间。另用守护进程模式：守护进程从东京时区的命令行启动，
+    再从纽约时区的命令行执行 `pm2 restart --update-env`，新启动那一行的前缀仍是东京时间。前缀跟的是 pm2 守护进程的时钟，
+    与执行 pm2 命令、查看日志的一方无关。以上按 pm2 5.0.4、5.3.1、5.4.3、6.0.14、7.0.4 的源码核对过，管道名与前缀的
+    写法相同。
+  - 守护进程在跑时，把 `PM2_HOME` 设成另一个空目录再执行第 1 步的命令，照样取到同一个时间；那个目录下没有 `pm2.pid`，
+    只新建了 `logs`、`modules`、`pids` 等文件。
+  - 没有守护进程时，按修订后的做法：预检输出 `False`，.ps1 形式输出 `NO_PM2_DAEMON`，没有新起守护进程。按修订前的做法
+    直接执行命令：输出 `NOT_FOUND`，并新起了一个守护进程。
+  - 9 项检查（§4.6 标题、执行位置、「cmd 和 Git Bash」一句、前缀归属、守护进程在跑时预检为 `True`、没有守护进程时不新起、
+    .ps1 与逐行两种形式、命令代码块未改、sql 代码块未改）：修订前 2 绿 7 红（绿的是两项「未改」），修订后 9 项全绿。
+    8 个变异各自让对应的检查变红：标题换回、执行位置换回、加回「cmd 和 Git Bash」一句、前缀归属换回，各红 1 项；预检的
+    管道名写错红 2 项，`-contains` 取反红 3 项；命令里 `pm_uptime` 换成 `created_at`、改动一个 sql 代码块，各红 1 项
+    （对应的「未改」）。
+  - 没有核对：演示机的时区；经 ssh 登录的会话能否连上计划任务拉起的 `pm2-runtime` 的管道（两边的登录会话、权限可能不同）。
 - **`track_commit_timestamp`**：以上在该参数开启时运行。改为关闭并重启后，整段清单照常执行，`ds_committed_after_start`
   全为 NULL；把 Q6 里的 `CASE` 守卫去掉的变异在关闭时报 `could not get commit timestamp data`，psql 退出码 3。
   关闭期间写过的行，重新开启后该列为 NULL；开启、关闭、再开启之后，第一次开启期间写入的行也是 NULL。
