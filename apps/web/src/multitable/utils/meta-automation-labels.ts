@@ -11,6 +11,12 @@ import type {
   ConditionOperator,
   WorkflowJobStatus,
 } from '../types'
+import {
+  automationBusinessTimezone,
+  isUtcTriggerTimezone,
+  utcTimeOfDayInZone,
+  type DateReminderExample,
+} from './automation-trigger-timezone'
 
 // Legacy execution/step statuses (success/failed/skipped) + the converged C1
 // WorkflowJobStatus set surfaced by the A2 runs API (resolved/queued/suspended/…).
@@ -1459,21 +1465,201 @@ export function automationTriggerConditionLabel(condition: AutomationTriggerCond
   }
 }
 
-export function automationCronPresetLabel(value: AutomationCronPresetValue | UnknownAutomationString, isZh: boolean): string {
+// ---------------------------------------------------------------------------------------------------------
+// A7a (客户反馈 2026-09-24 #4c): schedule-trigger time copy. Every string that names a time says WHICH
+// clock it is on. A rule on the business timezone never mentions UTC; a legacy rule still on UTC says so
+// and shows the business-time equivalent. The time math lives in automation-trigger-timezone.ts.
+// ---------------------------------------------------------------------------------------------------------
+
+/** Human name of a trigger timezone: Asia/Shanghai → 北京时间 / Beijing time; UTC → UTC; else the IANA id. */
+export function automationTimezoneDisplayName(timezone: string, isZh: boolean): string {
+  if (timezone === 'Asia/Shanghai') return isZh ? '北京时间' : 'Beijing time'
+  if (isUtcTriggerTimezone(timezone)) return 'UTC'
+  return timezone
+}
+
+function dayShiftPrefix(dayShift: number, isZh: boolean): string {
+  if (dayShift > 0) return isZh ? '次日 ' : 'next day '
+  if (dayShift < 0) return isZh ? '前一天 ' : 'previous day '
+  return ''
+}
+
+/** "00:00 (北京时间)" / "00:00 UTC (北京时间 08:00)" — a wall-clock time labelled with its clock. */
+function automationClockTimeLabel(time: string, timezone: string, isZh: boolean): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (timezone === business) return isZh ? `${time}（${businessName}）` : `${time} (${businessName})`
+  if (isUtcTriggerTimezone(timezone) && !isUtcTriggerTimezone(business)) {
+    const inBusiness = utcTimeOfDayInZone(time, business)
+    const prefix = dayShiftPrefix(inBusiness.dayShift, isZh)
+    return isZh
+      ? `${time} UTC（${businessName} ${prefix}${inBusiness.time}）`
+      : `${time} UTC (${prefix}${inBusiness.time} ${businessName})`
+  }
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `${time}（${name}）` : `${time} (${name})`
+}
+
+/**
+ * Cron preset labels. The two wall-clock presets name their clock (A7a: the old "每天午夜 / Daily at
+ * midnight" was untrue for the UTC rules the editor used to save — `0 0 * * *` fired at 08:00 Beijing).
+ * `timezone` = the rule's effective timezone; omitted = the business timezone new rules are saved with.
+ */
+export function automationCronPresetLabel(
+  value: AutomationCronPresetValue | UnknownAutomationString,
+  isZh: boolean,
+  timezone: string = automationBusinessTimezone(),
+): string {
   switch (value) {
     case '*/5 * * * *':
       return isZh ? '每 5 分钟' : 'Every 5 minutes'
     case '0 * * * *':
       return isZh ? '每小时' : 'Every hour'
-    case '0 0 * * *':
-      return isZh ? '每天午夜' : 'Daily at midnight'
-    case '0 0 * * 1':
-      return isZh ? '每周一' : 'Weekly (Monday)'
+    case '0 0 * * *': {
+      const at = automationClockTimeLabel('00:00', timezone, isZh)
+      return isZh ? `每天 ${at}` : `Daily at ${at}`
+    }
+    case '0 0 * * 1': {
+      const at = automationClockTimeLabel('00:00', timezone, isZh)
+      return isZh ? `每周一 ${at}` : `Weekly, Monday ${at}`
+    }
     case 'custom':
       return isZh ? '自定义' : 'Custom'
     default:
       return String(value)
   }
+}
+
+/** The cron section's clock line. */
+export function automationCronTimezoneHint(timezone: string, isZh: boolean): string {
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `执行时间按${name}计算（24 小时制）。` : `Run times are on ${name} (24-hour clock).`
+}
+
+/** Label above the reminder-time picker: plain "提醒时间" on the business timezone, else names the clock. */
+export function automationReminderTimeLabel(timezone: string, isZh: boolean): string {
+  if (timezone === automationBusinessTimezone()) return isZh ? '提醒时间' : 'Reminder time'
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh ? `提醒时间（${name}）` : `Reminder time (${name})`
+}
+
+/** Placeholder of the reminder-time picker (an empty value = the backend's 09:00 default). */
+export function automationReminderTimePlaceholder(isZh: boolean): string {
+  return isZh ? '09:00（默认）' : '09:00 (default)'
+}
+
+export function automationReminderTimeHint(timezone: string, isZh: boolean): string {
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh
+    ? `每天到这个时间（${name}）检查一次，到期的记录会收到提醒；系统重启错过了，当天会补发。`
+    : `Checked once a day at this time (${name}); records that are due get their reminder. If a restart misses it, it is sent later the same day.`
+}
+
+const EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+function exampleDay(day: { year: number; month: number; day: number }, anchorYear: number, isZh: boolean): string {
+  if (isZh) return day.year === anchorYear ? `${day.month}月${day.day}日` : `${day.year}年${day.month}月${day.day}日`
+  const base = `${EN_MONTHS[day.month - 1]} ${day.day}`
+  return day.year === anchorYear ? base : `${base}, ${day.year}`
+}
+
+/** The live example line: "例：日期为 9月30日、提前 3 天 → 9月27日 09:00 提醒". */
+export function automationDateReminderExampleText(
+  example: DateReminderExample,
+  timezone: string,
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const anchorYear = example.anchor.year
+  const anchor = exampleDay(example.anchor, anchorYear, isZh)
+  const reminderDay = exampleDay(example.reminder, anchorYear, isZh)
+  const offset = example.offsetDays === 0
+    ? (isZh ? '当天' : 'same day')
+    : example.direction === 'after'
+      ? (isZh ? `延后 ${example.offsetDays} 天` : `${example.offsetDays} day${example.offsetDays === 1 ? '' : 's'} after`)
+      : (isZh ? `提前 ${example.offsetDays} 天` : `${example.offsetDays} day${example.offsetDays === 1 ? '' : 's'} before`)
+  if (timezone === business) {
+    return isZh
+      ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time} 提醒`
+      : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time}`
+  }
+  if (isUtcTriggerTimezone(timezone) && !isUtcTriggerTimezone(business)) {
+    const businessName = automationTimezoneDisplayName(business, isZh)
+    const businessDay = exampleDay(example.business, anchorYear, isZh)
+    return isZh
+      ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time} UTC 提醒（即${businessName} ${businessDay} ${example.business.time}）`
+      : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time} UTC (${businessDay} ${example.business.time} ${businessName})`
+  }
+  const name = automationTimezoneDisplayName(timezone, isZh)
+  return isZh
+    ? `例：日期为 ${anchor}、${offset} → ${reminderDay} ${example.time}（${name}）提醒`
+    : `e.g. date ${anchor}, ${offset} → reminder on ${reminderDay} at ${example.time} (${name})`
+}
+
+/** Notice on a legacy rule that is still on UTC (saved before the editor wrote a timezone). */
+export function automationLegacyUtcScheduleNotice(
+  triggerType: 'schedule.date_field' | 'schedule.cron',
+  timeOfDay: string,
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  if (triggerType === 'schedule.date_field') {
+    const at = automationClockTimeLabel(timeOfDay, 'UTC', isZh)
+    return isZh
+      ? `这条规则创建较早，按 UTC 计时：当前提醒时间 ${at}。可一键改为${businessName}。`
+      : `This rule was created earlier and runs on UTC: the reminder time is ${at}. You can switch it to ${businessName}.`
+  }
+  const at = automationClockTimeLabel('00:00', 'UTC', isZh)
+  return isZh
+    ? `这条规则创建较早，cron 表达式按 UTC 计时（例如 ${at}）。可一键改为${businessName}。`
+    : `This rule was created earlier and its cron expression runs on UTC (e.g. ${at}). You can switch it to ${businessName}.`
+}
+
+export function automationSwitchToBusinessTimezoneLabel(isZh: boolean): string {
+  const name = automationTimezoneDisplayName(automationBusinessTimezone(), isZh)
+  return isZh ? `改为${name}` : `Switch to ${name}`
+}
+
+export function automationSwitchToBusinessTimezoneTitle(isZh: boolean): string {
+  const name = automationTimezoneDisplayName(automationBusinessTimezone(), isZh)
+  return isZh ? `改为${name}？` : `Switch to ${name}?`
+}
+
+/**
+ * Confirm text for the explicit UTC → business-timezone switch. States every day-shift the switch can
+ * cause, because the backend day-buckets in the rule's timezone (automation-date-reminder.ts).
+ */
+export function automationSwitchToBusinessTimezoneConfirm(
+  input:
+    | { triggerType: 'schedule.date_field'; fromTimeOfDay: string; toTimeOfDay: string; dayShift: number }
+    | { triggerType: 'schedule.cron' },
+  isZh: boolean,
+): string {
+  const business = automationBusinessTimezone()
+  const businessName = automationTimezoneDisplayName(business, isZh)
+  const midnightUtc = utcTimeOfDayInZone('00:00', business)
+  if (input.triggerType === 'schedule.cron') {
+    const was = `${dayShiftPrefix(midnightUtc.dayShift, isZh)}${midnightUtc.time}`
+    return isZh
+      ? `cron 表达式不变，但改按${businessName}计时：例如“0 0 * * *”原来在${businessName} ${was} 执行，改后在${businessName} 00:00 执行。保存后生效。`
+      : `The cron expression stays the same but runs on ${businessName}: e.g. "0 0 * * *" used to run at ${was} ${businessName} and will run at 00:00 ${businessName}. Takes effect after saving.`
+  }
+  // Records whose business-local time falls in this window sit on a different civil day in UTC.
+  const window = midnightUtc.dayShift < 0 ? `${midnightUtc.time}–24:00` : `00:00–${midnightUtc.time}`
+  const parts: string[] = []
+  parts.push(isZh
+    ? `提醒时间将由 ${input.fromTimeOfDay} UTC 换算为 ${input.toTimeOfDay}（${businessName}），“日期”字段的提醒时刻保持不变。`
+    : `The reminder time will be converted from ${input.fromTimeOfDay} UTC to ${input.toTimeOfDay} (${businessName}); reminders on a "date" field keep firing at the same moment.`)
+  if (input.dayShift !== 0) {
+    parts.push(isZh
+      ? `注意：换算后跨到了${input.dayShift > 0 ? '次日' : '前一天'}，但提醒日期仍按原来的日期计算，所以“日期”字段的提醒会比原来${input.dayShift > 0 ? '提前' : '推后'}一天。`
+      : `Note: the converted time crosses into the ${input.dayShift > 0 ? 'next' : 'previous'} day, but the reminder day is still counted from the same date, so reminders on a "date" field will fire one day ${input.dayShift > 0 ? 'earlier' : 'later'} than before.`)
+  }
+  parts.push(isZh
+    ? `若是“日期时间”字段，时间在${businessName} ${window} 之间的记录，提醒日期可能与原来相差一天。保存后当天可能会重复提醒一次。`
+    : `On a "date & time" field, records whose time is between ${window} ${businessName} may be reminded on a day one off from before. A reminder may repeat once on the day you save.`)
+  return parts.join(isZh ? '' : ' ')
 }
 
 export function automationConditionOperatorLabel(operator: ConditionOperator | UnknownAutomationString, isZh: boolean): string {

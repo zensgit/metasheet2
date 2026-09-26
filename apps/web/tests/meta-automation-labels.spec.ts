@@ -108,7 +108,11 @@ describe('meta-automation-labels', () => {
     expect(automationTriggerConditionLabel('future_condition', true)).toBe('future_condition')
 
     expect(automationCronPresetLabel('*/5 * * * *', true)).toBe('每 5 分钟')
-    expect(automationCronPresetLabel('0 0 * * 1', true)).toBe('每周一')
+    // A7a: wall-clock presets name their clock — default = the business timezone new rules are saved with;
+    // a legacy UTC rule shows both clocks (the old "每天午夜" fired at 08:00 Beijing).
+    expect(automationCronPresetLabel('0 0 * * 1', true)).toBe('每周一 00:00（北京时间）')
+    expect(automationCronPresetLabel('0 0 * * *', true)).toBe('每天 00:00（北京时间）')
+    expect(automationCronPresetLabel('0 0 * * *', true, 'UTC')).toBe('每天 00:00 UTC（北京时间 08:00）')
     expect(automationCronPresetLabel('custom', true)).toBe('自定义')
     expect(automationCronPresetLabel('0 30 9 * *', true)).toBe('0 30 9 * *')
   })
