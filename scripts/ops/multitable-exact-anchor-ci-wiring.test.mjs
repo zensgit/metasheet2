@@ -50,6 +50,9 @@ const FILES = [
   'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
   // D-H1 cross-sheet link writers must keep their no-skip real-DB lane in the same two-point contract.
   'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
+  // #5954: the cross-base mirror op's sheet-liveness-under-lock race (and the C2 Decision-F goldens it
+  // lives with) — a behaviour only real Postgres can show, so it must not skip-green either.
+  'tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts',
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 
