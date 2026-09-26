@@ -2,6 +2,10 @@ if (!process.env.DATABASE_URL) {
   throw new Error('tasks auth gate requires DATABASE_URL; refusing skip-shaped green')
 }
 
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  process.env.JWT_SECRET = 'tasks-auth-gate-jwt-secret-min-32b!'
+}
+
 process.env.RBAC_BYPASS = 'false'
 process.env.RBAC_TOKEN_TRUST = 'false'
 process.env.PRODUCT_MODE = 'plm-workbench'

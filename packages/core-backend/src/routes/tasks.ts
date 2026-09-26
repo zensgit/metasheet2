@@ -105,7 +105,7 @@ export function tasksRouter(): Router | null {
         assignees: body.assignees,
         completionMode: body.completionMode,
       })
-      res.status(201).json(created)
+      res.status(200).json(created)
     } catch (err) {
       sendError(res, err)
     }
