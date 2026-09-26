@@ -4206,13 +4206,20 @@ export class AutomationService {
    * longer exists" guard on the SOURCE record proves the authors already expect mid-flight deletes here).
    * The PRE-EXISTING contract for a 0-row UPDATE (proven by the fact that no RETURNING/rowCount check
    * existed at all before this slice) was SILENT SUCCESS for both same-base and cross-base callers — the
-   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Regressing that
-   * into a thrown error would be an unrelated behavior change outside this slice's mandate. So the guard
-   * fails closed on the REVISION ONLY (`if (updatedRow) { ...write revision... }`): a 0-row UPDATE still
-   * reports success and still emits the chaining/realtime events (unchanged), but writes NO spurious
-   * revision for a record this UPDATE never touched — a fabricated one would persist forever
-   * (`meta_record_revisions.record_id` carries no FK) and could resurrect the deleted record via
-   * `reconstructRecordsAtT`.
+   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Slice ④ therefore
+   * failed closed on the REVISION ONLY: a 0-row UPDATE writes NO spurious revision for a record this
+   * UPDATE never touched — a fabricated one would persist forever (`meta_record_revisions.record_id`
+   * carries no FK) and could resurrect the deleted record via `reconstructRecordsAtT`.
+   *
+   * 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3, 裁定 PR #6074 A1): a 0-row UPDATE now ALSO publishes nothing —
+   * no same-txn outbox enqueue, no legacy `multitable.record.updated` emit, no realtime invalidation. The
+   * old "still emits" leg was the same shape as the executor's ghost `record.deleted` self-chain: a fresh
+   * event (new `_eventId`, depth+1) for a record nobody wrote, re-firing downstream rules on a row that
+   * no longer exists. The gone-record POLICY is unchanged and stays the caller's `opts.onMissing` — the
+   * UPDATE seeing 0 rows is the identical fact the lock-check SELECT decides on, observed one statement
+   * later: same-base 'skip' returns false (the resume's own missing-record path already handled it, the
+   * step stays success — leniency preserved), cross-base 'throw' fails closed exactly as a not-found
+   * target does (`tryWriteApprovalResultBack` surfaces it as `backwriteSkipped`; never a crash).
    */
   private async applyResultWritebackPatch(
     sheetId: string,
@@ -4258,23 +4265,30 @@ export class AutomationService {
         [JSON.stringify(patch), recordId, sheetId],
       )
       const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
-      if (updatedRow) {
-        const nextVersion = Number(updatedRow.version)
-        await recordRecordRevision(query, {
-          sheetId,
-          recordId,
-          version: Number.isFinite(nextVersion) ? nextVersion : 0,
-          action: 'update',
-          source: 'approval',
-          actorId: opts.chainActorId ?? null,
-          changedFieldIds: Object.keys(patch),
-          patch,
-          snapshot: normalizeJson(updatedRow.data),
-        })
+      if (!updatedRow) {
+        // 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3): the record vanished between the non-locking SELECT above
+        // and this UPDATE. Nothing was written ⇒ nothing is announced: no revision, no enqueue (below is
+        // skipped), no legacy emit / realtime publish (the caller skips both on `false`). Same gone-record
+        // policy as the SELECT branch — the caller's `onMissing`.
+        if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
+        return false
       }
+      const nextVersion = Number(updatedRow.version)
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version: Number.isFinite(nextVersion) ? nextVersion : 0,
+        action: 'update',
+        source: 'approval',
+        actorId: opts.chainActorId ?? null,
+        changedFieldIds: Object.keys(patch),
+        patch,
+        snapshot: normalizeJson(updatedRow.data),
+      })
       // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
       // writeback UPDATE + revision. A rollback (locked / gone target throws or returns false above) enqueues
-      // nothing by construction. Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      // nothing by construction — and so does the 0-row guard above. Flag OFF ⇒ no-op (the legacy emit
+      // below fires instead).
       await enqueueRecordEventIfDurable(
         {
           isTransaction: true,
