@@ -300,3 +300,45 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
     })
   }
 })
+
+// 客户反馈 2026-09-24 #3 final review F1 — the step result used to be rendered as raw one-line JSON, so a zh
+// admin read `"reason":"target_record_missing"`. Recognised values-free codes render as a sentence, and the
+// code key is dropped from the JSON line (ids stay raw).
+describe('AutomationExecutionsView — values-free step reasons render as copy (F1)', () => {
+  const REASON_DETAIL: AutomationRunView = {
+    ...RUN_DETAIL,
+    id: 'axe_1',
+    status: 'skipped',
+    statusLegacy: 'skipped',
+    steps: [
+      { id: 'axe_1:step:0', executionId: 'axe_1', stepKey: '0', status: 'skipped', upstreamJobId: null, result: { recordId: 'rec_gone', sheetId: 'sheet-a', reason: 'target_record_missing' } },
+      { id: 'axe_1:step:1', executionId: 'axe_1', stepKey: '1', status: 'resolved', upstreamJobId: 'axe_1:step:0', result: { approvalInstanceId: 'ai_1', backwriteSkipped: 'target_record_missing' } },
+      { id: 'axe_1:step:2', executionId: 'axe_1', stepKey: '2', status: 'skipped', upstreamJobId: 'axe_1:step:1', result: { reason: 'APPROVAL_FWB_WRITEBACK_ENABLED is OFF' } },
+    ],
+  }
+
+  for (const locale of [
+    { name: 'zh', set: 'zh-CN', skipped: '触发记录已不存在，已跳过（未做任何修改）', backwrite: '审批结果未写回：触发记录已不存在（未做任何修改）' },
+    { name: 'en', set: 'en', skipped: 'The trigger record no longer exists; skipped (nothing was changed).', backwrite: 'Approval result not written back: the trigger record no longer exists (nothing was changed).' },
+  ] as const) {
+    it(`${locale.name}: the reason sentences replace the internal code, ids stay, unknown reasons stay raw`, async () => {
+      useLocale().setLocale(locale.set)
+      const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue(REASON_DETAIL) })
+      mounted = mount(client)
+      await settle()
+      ;(mounted.container.querySelector('[data-run-id="axe_1"]') as HTMLElement).click()
+      await settle()
+
+      const reasons = [...mounted.container.querySelectorAll('[data-field="step-reason"]')].map((el) => el.textContent?.trim())
+      expect(reasons).toEqual([locale.skipped, locale.backwrite])
+      const outputs = [...mounted.container.querySelectorAll('[data-field="step-output"]')].map((el) => el.textContent?.trim() ?? '')
+      expect(outputs).toHaveLength(3)
+      expect(outputs[0]).toContain('rec_gone')
+      expect(outputs[1]).toContain('ai_1')
+      for (const text of outputs.slice(0, 2)) expect(text).not.toContain('target_record_missing')
+      // Positive control: a reason this change does not know is left exactly as before.
+      expect(outputs[2]).toContain('APPROVAL_FWB_WRITEBACK_ENABLED is OFF')
+      useLocale().setLocale('en')
+    })
+  }
+})

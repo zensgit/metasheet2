@@ -24,6 +24,7 @@ import {
   automationLastRunChip,
   automationLastRunRelativeTime,
   automationStatusLabel,
+  automationStepOutputView,
   automationTestRunFailed,
   automationTestRunRequestFailed,
   automationTestRunSkipped,
@@ -107,7 +108,11 @@ describe('meta-automation-labels', () => {
     expect(automationTriggerConditionLabel('future_condition', true)).toBe('future_condition')
 
     expect(automationCronPresetLabel('*/5 * * * *', true)).toBe('每 5 分钟')
-    expect(automationCronPresetLabel('0 0 * * 1', true)).toBe('每周一')
+    // A7a: wall-clock presets name their clock — default = the business timezone new rules are saved with;
+    // a legacy UTC rule shows both clocks (the old "每天午夜" fired at 08:00 Beijing).
+    expect(automationCronPresetLabel('0 0 * * 1', true)).toBe('每周一 00:00（北京时间）')
+    expect(automationCronPresetLabel('0 0 * * *', true)).toBe('每天 00:00（北京时间）')
+    expect(automationCronPresetLabel('0 0 * * *', true, 'UTC')).toBe('每天 00:00 UTC（北京时间 08:00）')
     expect(automationCronPresetLabel('custom', true)).toBe('自定义')
     expect(automationCronPresetLabel('0 30 9 * *', true)).toBe('0 30 9 * *')
   })
@@ -288,5 +293,59 @@ describe('meta-automation-labels', () => {
     expect(automationDingTalkAllowlistSummary(1, 0, false)).toBe('1 local user')
     expect(automationDingTalkAllowlistSummary(2, 1, false)).toBe('2 local users and 1 local member group')
     expect(automationDingTalkAllowlistSummary(1, 2, true)).toBe('1 个本地用户和 2 个本地成员组')
+  })
+})
+
+// 客户反馈 2026-09-24 #3 final review F1 — the three values-free markers the #3 fix writes into a step output.
+describe('automationStepOutputView', () => {
+  it('skipped delete of a vanished trigger record → the 已跳过 sentence, reason key dropped, ids kept', () => {
+    const output = { recordId: 'rec_gone', sheetId: 'sheet_1', reason: 'target_record_missing' }
+    expect(automationStepOutputView(output, true)).toEqual({
+      reason: '触发记录已不存在，已跳过（未做任何修改）',
+      output: { recordId: 'rec_gone', sheetId: 'sheet_1' },
+    })
+    expect(automationStepOutputView(output, false).reason).toBe('The trigger record no longer exists; skipped (nothing was changed).')
+    expect(output).toEqual({ recordId: 'rec_gone', sheetId: 'sheet_1', reason: 'target_record_missing' }) // not mutated
+  })
+
+  it('update_record no-op (status success) → its own sentence without "skipped", reason + noop dropped', () => {
+    expect(automationStepOutputView({ updatedFields: ['fld_1'], noop: true, reason: 'target_record_missing' }, true)).toEqual({
+      reason: '触发记录已不存在，未做任何修改',
+      output: { updatedFields: ['fld_1'] },
+    })
+    expect(automationStepOutputView({ noop: true, reason: 'target_record_missing' }, false)).toEqual({
+      reason: 'The trigger record no longer exists; nothing was changed.',
+      output: null,
+    })
+  })
+
+  it('same-base approval writeback marker → the writeback sentence, marker dropped', () => {
+    expect(automationStepOutputView({ outcome: 'approved', backwriteSkipped: 'target_record_missing' }, true)).toEqual({
+      reason: '审批结果未写回：触发记录已不存在（未做任何修改）',
+      output: { outcome: 'approved' },
+    })
+  })
+
+  it('leaves everything else untouched (same reference), including a cross-base backwriteSkipped sentence', () => {
+    const others: unknown[] = [
+      null,
+      undefined,
+      'target_record_missing',
+      ['target_record_missing'],
+      { reason: 'APPROVAL_FWB_WRITEBACK_ENABLED is OFF' },
+      { backwriteSkipped: 'cross-base resultWriteback target record not found: rec_1 ∉ sheet_1' },
+      { ok: true },
+    ]
+    for (const output of others) {
+      const view = automationStepOutputView(output, true)
+      expect(view.reason, JSON.stringify(output)).toBeNull()
+      expect(view.output).toBe(output)
+    }
+  })
+
+  it('the log panel wording for a skipped run is 已跳过 in zh', () => {
+    expect(automationLabel('log.skipped', true)).toBe('已跳过')
+    expect(automationLabel('log.statusSkipped', true)).toBe('已跳过')
+    expect(automationLabel('log.skipped', false)).toBe('Skipped')
   })
 })

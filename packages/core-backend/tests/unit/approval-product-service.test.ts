@@ -854,7 +854,24 @@ describe('ApprovalProductService', () => {
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
-    const service = new ApprovalProductService()
+    // H-1: the node-activation metrics hook is now AWAITED (see
+    // `ApprovalProductService.emitNodeActivationMetric`). With the real shared metrics singleton, that
+    // hook's own short transaction borrows and returns THIS SAME mocked client (both sides import
+    // `pool` from `src/db/pg`, which this file mocks with ONE client), so `pgState.client.release`
+    // would stop being a measure of dispatchAction's own connection discipline — which is exactly what
+    // the assertion at the end of this test is for. Inject a metrics stub so the two accountings stay
+    // separate. The metrics writes keep their own coverage: tests/unit/approval-metrics-service.test.ts
+    // (SQL shape) and tests/integration/approval-dedup-return-round-scoping.db.test.ts (real DB,
+    // including that the activation stamp is durable before the action response returns).
+    const metricsStub = {
+      recordInstanceStart: vi.fn(async () => {}),
+      recordNodeActivation: vi.fn(async () => {}),
+      recordNodeDecision: vi.fn(async () => {}),
+      recordTerminal: vi.fn(async () => {}),
+    }
+    const service = new ApprovalProductService(
+      metricsStub as unknown as ConstructorParameters<typeof ApprovalProductService>[0],
+    )
     vi.spyOn(service, 'getApproval').mockResolvedValue(
       buildApprovalDto({
         currentStep: 1,
@@ -900,7 +917,11 @@ describe('ApprovalProductService', () => {
       nextNodeKey: 'approval_1',
     })
     expect(completionEventState.emitApprovalCompletionEvent).not.toHaveBeenCalled()
+    // dispatchAction's OWN connection: taken once, released exactly once (no leak, no double release).
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
+    // H-1: the return branch still emits the re-entered node's activation stamp, and dispatchAction
+    // does not resolve until that call has settled.
+    expect(metricsStub.recordNodeActivation).toHaveBeenCalledTimes(1)
   })
 
   it('keeps all-mode approvals pending until every assignee has acted', async () => {

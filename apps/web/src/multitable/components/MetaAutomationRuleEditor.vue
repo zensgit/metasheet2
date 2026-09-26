@@ -93,14 +93,19 @@
             <el-select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
               <el-option value="*/5 * * * *" data-value="*/5 * * * *" :label="automationCronPresetLabel('*/5 * * * *', isZh)" />
               <el-option value="0 * * * *" data-value="0 * * * *" :label="automationCronPresetLabel('0 * * * *', isZh)" />
-              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh)" />
-              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh)" />
+              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh, scheduleTriggerTimezone)" />
+              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh, scheduleTriggerTimezone)" />
               <el-option value="custom" data-value="custom" :label="automationCronPresetLabel('custom', isZh)" />
             </el-select>
             <template v-if="cronPreset === 'custom'">
               <label class="meta-rule-editor__label">{{ automationLabel('trigger.cronExpression', isZh) }}</label>
               <el-input v-model="(draft.triggerConfig.cron as string)" type="text" placeholder="* * * * *" data-field="cronExpression" />
             </template>
+            <div class="meta-rule-editor__hint" data-field="cronTimezoneHint">{{ automationCronTimezoneHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.cron', cron: cronSwitchImpact }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- schedule.interval config -->
@@ -123,9 +128,28 @@
               <el-option value="before" data-value="before" :label="isZh ? '日期之前' : 'Before the date'" />
               <el-option value="after" data-value="after" :label="isZh ? '日期之后' : 'After the date'" />
             </el-select>
-            <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
-            <el-input v-model="(draft.triggerConfig.timeOfDay as string)" type="time" placeholder="09:00" data-field="timeOfDay" />
-            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ isZh ? '每天按此 UTC 时间触发；服务重启后会补发当天到点的提醒。' : 'Fires daily at this UTC time; a restart catches up today\'s due reminders.' }}</div>
+            <!--
+              A7a (客户反馈 2026-09-24 #4c): a 24-hour picker that does not follow the browser locale (the old
+              native type="time" input rendered am/pm), on the rule's schedule timezone — the business timezone
+              for new rules; a legacy rule stays on UTC until the explicit switch below.
+            -->
+            <label class="meta-rule-editor__label" data-field="timeOfDayLabel">{{ automationReminderTimeLabel(scheduleTriggerTimezone, isZh) }}</label>
+            <el-select
+              v-model="timeOfDayModel"
+              class="meta-rule-editor__select"
+              clearable
+              filterable
+              :placeholder="automationReminderTimePlaceholder(isZh)"
+              data-field="timeOfDay"
+            >
+              <el-option v-for="t in timeOfDayOptions" :key="t" :value="t" :data-value="t" :label="t" />
+            </el-select>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ automationReminderTimeHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeExample">{{ dateReminderExampleText }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.date_field', timeOfDay: effectiveTriggerTimeOfDay(draft.triggerConfig.timeOfDay) }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- webhook.received (signed inbound) config -->
@@ -351,7 +375,7 @@
                   :key="type"
                   :value="type"
                   :data-value="type"
-                  :disabled="isUnsupportedSelectableActionType(type)"
+                  :disabled="isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)"
                   :label="automationActionTypeLabel(type, isZh)"
                 />
               </el-select>
@@ -417,6 +441,19 @@
               >
                 {{ automationLabel(crossBaseTargets[action.draftId].kind === 'create' ? 'actionConfig.crossBaseCreateTargetIncomplete' : 'actionConfig.crossBaseTargetIncomplete', isZh) }}
               </div>
+            </div>
+
+            <!-- 客户反馈 2026-09-24 #3 (裁定 PR #6074): under `record.deleted` the trigger record is already gone, so a
+                 same-base update/delete/lock of it (top level or inside a branch) can only no-op — and used to
+                 self-chain into three execution logs. The option is disabled in the selects above/below; a
+                 LOADED rule keeps its action visible (loadable) and shows this hint, and the same sentence blocks
+                 save (automationSaveBlockReasons.ts) exactly as the backend refuses it (DELETED_TRIGGER_SELF_MUTATION). -->
+            <div
+              v-if="deletedTriggerSelfMutationOf(action)"
+              class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              data-field="deletedTriggerSelfMutationHint"
+            >
+              {{ automationLabel('actionConfig.deletedTriggerSelfMutation', isZh) }}
             </div>
 
             <!-- update_record config -->
@@ -1425,7 +1462,7 @@
                   <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1498,7 +1535,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-default-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1582,7 +1619,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-parallel-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1790,6 +1827,8 @@ import {
   automationConditionOperatorLabel,
   automationConditionValuePlaceholder,
   automationCronPresetLabel,
+  automationCronTimezoneHint,
+  automationDateReminderExampleText,
   automationDingTalkDestinationScopeLabel,
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
@@ -1797,13 +1836,32 @@ import {
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
+  automationLegacyUtcScheduleNotice,
+  automationReminderTimeHint,
+  automationReminderTimeLabel,
+  automationReminderTimePlaceholder,
   automationResultWritebackOptionMissingMessage,
   automationResultWritebackOutcomeLabel,
+  automationSwitchToBusinessTimezoneConfirm,
+  automationSwitchToBusinessTimezoneLabel,
+  automationSwitchToBusinessTimezoneTitle,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
   AUTOMATION_RESULT_WRITEBACK_OUTCOMES,
   type AutomationResultWritebackOutcome,
 } from '../utils/meta-automation-labels'
+import {
+  analyzeCronForBusinessSwitch,
+  automationBusinessTimezone,
+  dateReminderExample,
+  effectiveTriggerTimeOfDay,
+  effectiveTriggerTimezone,
+  isTimezoneAwareTriggerType,
+  isUtcTriggerTimezone,
+  legacyUtcSwitchImpact,
+  triggerTimeOfDayOptions,
+  triggerTimezoneForSave,
+} from '../utils/automation-trigger-timezone'
 import {
   type BranchActionDraft,
   type BranchDraft,
@@ -1986,7 +2044,20 @@ const fwbConfirmationGeneration = new Map<string, number>()
 const fwbConfirmingRequestGeneration = new Map<string, number>()
 let fwbTemplateLoadGeneration = 0
 const fwbCreateTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
-const cronPreset = ref('0 * * * *')
+const DEFAULT_CRON_PRESET = '0 * * * *'
+const CRON_PRESET_VALUES: readonly string[] = ['*/5 * * * *', '0 * * * *', '0 0 * * *', '0 0 * * 1']
+const cronPreset = ref(DEFAULT_CRON_PRESET)
+/**
+ * A7a: the preset select must open on the SAVED cron. It used to keep whatever the previous open left
+ * (initially hourly), and buildPayload writes the preset over `cron`, so renaming a saved daily rule silently
+ * turned it hourly. A saved expression that is not a preset opens as 'custom' (edited in place, not rewritten).
+ */
+function cronPresetForDraft(d: Draft): string {
+  if (d.triggerType !== 'schedule.cron') return DEFAULT_CRON_PRESET
+  const cron = typeof d.triggerConfig.cron === 'string' ? d.triggerConfig.cron.trim() : ''
+  if (!cron) return props.rule?.id ? 'custom' : DEFAULT_CRON_PRESET
+  return CRON_PRESET_VALUES.includes(cron) ? cron : 'custom'
+}
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
@@ -2639,6 +2710,89 @@ const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 const dateReminderCandidateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
+
+// A7a (客户反馈 2026-09-24 #4c): the timezone this schedule trigger will be SAVED with, i.e. the clock the
+// backend will run it on. The UI labels and buildPayload read the same helper, so what the editor shows is
+// what gets saved: new schedule config → the business timezone; a saved rule of this schedule type with no
+// stored timezone → stays UTC (legacy-preserve) until the explicit switch below.
+const scheduleTriggerTimezone = computed(() => effectiveTriggerTimezone({
+  triggerType: draft.value.triggerType,
+  draftTimezone: draft.value.triggerConfig.timezone,
+  storedRule: props.rule ?? null,
+}))
+// The cron expression that will be saved (buildPayload writes a non-custom preset over `cron`).
+const effectiveCronExpression = computed(() => (
+  cronPreset.value !== 'custom'
+    ? cronPreset.value
+    : (typeof draft.value.triggerConfig.cron === 'string' ? draft.value.triggerConfig.cron.trim() : '')
+))
+const cronSwitchImpact = computed(() => analyzeCronForBusinessSwitch(effectiveCronExpression.value, automationBusinessTimezone()))
+const scheduleOnLegacyUtc = computed(() =>
+  isTimezoneAwareTriggerType(draft.value.triggerType)
+  && isUtcTriggerTimezone(scheduleTriggerTimezone.value)
+  && !isUtcTriggerTimezone(automationBusinessTimezone())
+  // N1: a cron expression that fires at the same instants on either clock (every 5 minutes, hourly, …)
+  // needs no warning and no switch — the rule stays exactly as it is.
+  && !(draft.value.triggerType === 'schedule.cron' && cronSwitchImpact.value.timezoneIndependent),
+)
+const dateReminderFieldType = computed(() => {
+  const fieldId = typeof draft.value.triggerConfig.dateFieldId === 'string' ? draft.value.triggerConfig.dateFieldId : ''
+  const type = props.fields.find((field) => field.id === fieldId)?.type
+  return type === 'date' || type === 'dateTime' ? type : null
+})
+const timeOfDayModel = computed<string>({
+  get: () => (typeof draft.value.triggerConfig.timeOfDay === 'string' ? draft.value.triggerConfig.timeOfDay : ''),
+  // Cleared (Element Plus emits undefined/null) → '' = the backend's 09:00 default, as the old input saved.
+  set: (value) => { draft.value.triggerConfig.timeOfDay = typeof value === 'string' ? value : '' },
+})
+const timeOfDayOptions = computed(() => triggerTimeOfDayOptions(draft.value.triggerConfig.timeOfDay))
+const dateReminderExampleText = computed(() => automationDateReminderExampleText(
+  dateReminderExample({
+    offsetDays: draft.value.triggerConfig.offsetDays,
+    direction: draft.value.triggerConfig.direction,
+    timeOfDay: draft.value.triggerConfig.timeOfDay,
+    timezone: scheduleTriggerTimezone.value,
+    businessTimezone: automationBusinessTimezone(),
+  }),
+  scheduleTriggerTimezone.value,
+  isZh.value,
+))
+
+/**
+ * The ONLY path that moves a legacy UTC schedule onto the business timezone: explicit, confirmed, and for a
+ * date reminder it re-expresses the stored time as the same instant ((hh + 8) mod 24 for Asia/Shanghai; an
+ * empty time was the 09:00 UTC default → 17:00). A cron expression is kept verbatim and re-read on the
+ * business clock (the confirm text says so).
+ */
+async function switchScheduleToBusinessTimezone(): Promise<void> {
+  const triggerType = draft.value.triggerType
+  if (triggerType !== 'schedule.date_field' && triggerType !== 'schedule.cron') return
+  const businessTimezone = automationBusinessTimezone()
+  const impact = triggerType === 'schedule.date_field'
+    ? legacyUtcSwitchImpact(draft.value.triggerConfig.timeOfDay, businessTimezone)
+    : null
+  try {
+    await ElMessageBox.confirm(
+      impact
+        ? automationSwitchToBusinessTimezoneConfirm({
+          triggerType: 'schedule.date_field',
+          impact,
+          fieldType: dateReminderFieldType.value,
+        }, isZh.value)
+        : automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: cronSwitchImpact.value }, isZh.value),
+      automationSwitchToBusinessTimezoneTitle(isZh.value),
+      {
+        type: 'warning',
+        confirmButtonText: automationSwitchToBusinessTimezoneLabel(isZh.value),
+        cancelButtonText: automationLabel('editor.cancel', isZh.value),
+      },
+    )
+  } catch {
+    return
+  }
+  if (impact) draft.value.triggerConfig.timeOfDay = impact.toTimeOfDay
+  draft.value.triggerConfig.timezone = businessTimezone
+}
 const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
 // #5859: Test Run always executes the PERSISTED rule (client.testAutomationRule sends no body),
 // so an already-saved rule with unsaved draft edits must not offer Test Run — it would silently
@@ -3483,6 +3637,7 @@ watch(
   async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      cronPreset.value = cronPresetForDraft(draft.value)
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
       error.value = ''
@@ -3699,9 +3854,65 @@ const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
   return out
 })
 
+// 客户反馈 2026-09-24 #3 (裁定 PR #6074) — under a `record.deleted` trigger the trigger record no longer exists,
+// so a SAME-BASE update_record / delete_record / lock_record (which the executor addresses at
+// `context.recordId`) can only be a 0-row no-op; before the executor fix it also re-emitted a ghost
+// record.deleted and chained itself to the depth cap (ONE user delete ⇒ THREE execution logs). The backend
+// now refuses that shape at save (automation-service.ts validateDeletedTriggerSelfMutation, code
+// DELETED_TRIGGER_SELF_MUTATION); this editor mirrors it three ways: the option is disabled while the trigger
+// is record.deleted, the action card shows the same sentence as a hint, and save is blocked with an anchored
+// reason. A LOADED rule of that shape stays loadable (its type is still rendered/selected) — it just cannot be
+// saved forward until the action or the trigger changes; disabling it goes through the manager toggle, which
+// the backend lets through.
+const TRIGGER_RECORD_MUTATING_ACTION_TYPES: ReadonlySet<string> = new Set(['update_record', 'delete_record', 'lock_record'])
+
+function isDeletedTriggerBlockedActionType(type: string): boolean {
+  return draft.value.triggerType === 'record.deleted' && TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type)
+}
+
+/**
+ * Does this draft action (or a branch sub-action inside it) mutate the trigger record under a
+ * `record.deleted` trigger? Mirrors the backend rule: a COMPLETE explicit cross-base triple retargets the
+ * write (allowed); anything else resolves to the trigger record. Branch sub-actions are editor-authored and
+ * carry no cross-base target, so their type alone decides.
+ */
+function deletedTriggerSelfMutationOf(action: DraftAction): boolean {
+  if (draft.value.triggerType !== 'record.deleted') return false
+  if (TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(action.type)) {
+    const target = crossBaseTargetOf(action)
+    return !(target && target.kind === 'mutate' && !crossBaseTargetIncomplete(target))
+  }
+  const nestedTypes: string[] = [
+    ...(action.config.branches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+    ...(action.config.defaultBranch?.actions ?? []).map((sub) => sub.type),
+    ...(action.config.parallelBranches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+    // A loaded branch the v1 UI cannot round-trip is kept READ-ONLY with its raw config preserved verbatim
+    // (branchOriginal / parallelBranchOriginal); its sub-actions still run, so they still count here.
+    ...rawBranchActionTypes(action.config.branchOriginal),
+    ...rawBranchActionTypes(action.config.parallelBranchOriginal),
+  ]
+  return nestedTypes.some((type) => TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type))
+}
+
+/** The `type` of every sub-action inside a RAW (as-loaded) condition_branch / parallel_branch config. */
+function rawBranchActionTypes(raw: unknown): string[] {
+  if (!isPlainRecord(raw)) return []
+  const out: string[] = []
+  const collect = (branch: unknown): void => {
+    if (!isPlainRecord(branch) || !Array.isArray(branch.actions)) return
+    for (const sub of branch.actions) {
+      if (isPlainRecord(sub) && typeof sub.type === 'string') out.push(sub.type)
+    }
+  }
+  if (Array.isArray(raw.branches)) raw.branches.forEach(collect)
+  collect(raw.defaultBranch)
+  return out
+}
+
 const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
   return draft.value.actions.map((action, index) => {
     const snapshot: SaveBlockActionSnapshot = { index, type: action.type }
+    if (deletedTriggerSelfMutationOf(action)) snapshot.deletedTriggerSelfMutation = true
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
       const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
@@ -5216,6 +5427,16 @@ function buildPayload(): Partial<AutomationRule> {
     // Normalize the date-reminder config so an unset/garbage direction or offset can't persist a no-op rule.
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
     triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
+  }
+  if (isTimezoneAwareTriggerType(d.triggerType)) {
+    // A7a: new schedule config is saved on the business timezone. `undefined` = a legacy UTC rule (saved
+    // with this schedule type and no timezone) — write nothing, so an edit never shifts its fire time.
+    const timezone = triggerTimezoneForSave({
+      triggerType: d.triggerType,
+      draftTimezone: triggerConfig.timezone,
+      storedRule: props.rule ?? null,
+    })
+    if (timezone) triggerConfig.timezone = timezone
   }
   if (d.triggerType === 'approval.task_created') {
     // A-2a: trimmed templateId is the only config key.

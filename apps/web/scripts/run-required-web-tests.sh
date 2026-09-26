@@ -1232,6 +1232,32 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # of any of them, and it matches exactly one file under apps/web/tests. Verified green in isolation
 # (`npx vitest run StockPreparationDiffSummaryExport --reporter=dot`) and in this batch before wiring.
 #
+# 客户反馈 2026-09-24 #3 final review F1 (2026-09-25): `MetaAutomationLogViewer` — tests/MetaAutomationLogViewer.spec.ts
+# pins the rule log panel a customer actually sees (已跳过 count/badge, trigger-record-gone step sentences instead of
+# the raw `target_record_missing` code). It was selected by NO token here and by no workflow, i.e. green only on a
+# laptop (its sibling meta-automation-log-viewer-migration.spec.ts already runs via the `migration` token).
+# CamelCase token: no existing token is a substring of it, it is a substring of none, and it matches exactly
+# one file (the kebab-case sibling does not contain it). Not added to multitable-web-guard.yml: that workflow
+# was out of scope for the change that added it.
+# 客户反馈 2026-09-24 #5 视图排序/筛选残留 (2026-09-25): ONE token added, `multitable-view-switch-sort-filter`
+# — the NEW spec drives the real useMultitableGrid + MetaToolbar + MetaGridTable through a view switch
+# (A with 3 sorts + 1 filter → blank B) and asserts no badge / no header arrows in B, that a header
+# click / 应用 / 清除筛选 in B never persists A's rules, and that clearing the last rule saves an
+# explicit empty value. Substring-collision checked both directions: `multitable-view-manager` and
+# `multitable-view-display-prefs-util` diverge right after `multitable-view-`, the token is not a
+# substring of any existing token, and it matches exactly one file under apps/web. The
+# multitable-web-guard.yml mirror (two-point discipline) needs a workflow-scope push and is left to a
+# follow-up; this required lane is what executes the spec on every PR.
+# Same item, review follow-up (2026-09-26): ONE more token, `multitable-workbench-create-view-sort-filter`
+# — mounts the real MultitableWorkbench with the REAL useMultitableGrid + MetaToolbar + MetaViewManager and
+# creates a view through 视图管理 → 添加 (onCreateView: selectView + an explicit loadViewData that runs
+# BEFORE the view-switch watcher), asserting a staged, unapplied sort edit of the previous view is never
+# PATCHed into the new one. Substring-collision checked both directions: `multitable-workbench-view` /
+# `multitable-workbench-bulk-delete` / `multitable-workbench-drawer-button-wiring` diverge right after
+# `multitable-workbench-`, `multitable-view-switch-sort-filter` is not a substring of it, the token is not a
+# substring of any existing token, and it matches exactly one file under apps/web. Same workflow-scope
+# caveat for the multitable-web-guard.yml mirror.
+#
 # ============================================================================================
 # 登记行形状（Q8 / C4 P1，2026-09-21）— 一行一个 token，大小写不敏感字母序
 # ============================================================================================
@@ -1404,6 +1430,7 @@ exec npx vitest run \
   meta-toolbar-filter-builder \
   meta-toolbar-group-picker \
   meta-view-render-labels \
+  MetaAutomationLogViewer \
   migration \
   mount-behind-flow \
   multitable-agg-footer-grid \
@@ -1423,6 +1450,7 @@ exec npx vitest run \
   multitable-automation-manager \
   multitable-automation-manager-roundtrip \
   multitable-automation-rule-editor \
+  multitable-automation-trigger-time \
   multitable-b4-field-always-readonly \
   multitable-barcode-field \
   multitable-base-local-state \
@@ -1571,8 +1599,11 @@ exec npx vitest run \
   multitable-ui \
   multitable-view-display-prefs-util \
   multitable-view-manager \
+  multitable-view-switch-sort-filter \
   multitable-workbench-1672-1673 \
   multitable-workbench-bulk-delete \
+  multitable-workbench-create-view-sort-filter \
+  multitable-workbench-dashboard-exit \
   multitable-workbench-drawer-button-wiring \
   multitable-workbench-history-field-scope-wiring \
   multitable-workbench-i18n \

@@ -80,6 +80,8 @@ function gridClient(personalConfig: unknown) {
   vi.spyOn(client, 'getPersonalViewConfig').mockResolvedValue({ viewId: 'v1', config: personalConfig as never, updatedAt: null })
   vi.spyOn(client, 'putPersonalViewConfig').mockResolvedValue({ viewId: 'v1', config: personalConfig as never, updatedAt: null })
   vi.spyOn(client, 'updateView').mockResolvedValue({} as never)
+  // #6075 round 2: hidden/group state is written only into the view it was LOADED from, so the load returns v1.
+  vi.spyOn(client, 'loadView').mockResolvedValue({ fields: [], rows: [], view: { id: 'v1' }, page: { offset: 0, limit: 50, total: 0, hasMore: false } } as never)
   return client
 }
 
@@ -87,6 +89,7 @@ describe('useMultitableGrid — personal in-place edit is additive (Slice 3d wir
   it('personal ON: toggling a hidden field merges over the existing personal config (sort preserved), not updateView', async () => {
     const client = gridClient({ sortInfo: { fieldId: 'b', direction: 'desc' } })
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client, isPersonalMode: () => true })
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     grid.toggleFieldVisibility('f1')
     await vi.waitFor(() => expect(client.putPersonalViewConfig).toHaveBeenCalled())
     expect(client.putPersonalViewConfig).toHaveBeenCalledWith('v1', { sortInfo: { fieldId: 'b', direction: 'desc' }, hiddenFieldIds: ['f1'] })
@@ -96,6 +99,7 @@ describe('useMultitableGrid — personal in-place edit is additive (Slice 3d wir
   it('personal OFF: toggling a hidden field uses the shared updateView path, no personal-config calls', async () => {
     const client = gridClient(null)
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client, isPersonalMode: () => false })
+    await vi.waitFor(() => expect(grid.isViewStateLoadedFor('v1')).toBe(true))
     grid.toggleFieldVisibility('f1')
     await vi.waitFor(() => expect(client.updateView).toHaveBeenCalled())
     expect(client.updateView).toHaveBeenCalledWith('v1', { hiddenFieldIds: ['f1'] })
