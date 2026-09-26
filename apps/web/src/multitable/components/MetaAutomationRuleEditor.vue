@@ -93,14 +93,19 @@
             <el-select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
               <el-option value="*/5 * * * *" data-value="*/5 * * * *" :label="automationCronPresetLabel('*/5 * * * *', isZh)" />
               <el-option value="0 * * * *" data-value="0 * * * *" :label="automationCronPresetLabel('0 * * * *', isZh)" />
-              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh)" />
-              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh)" />
+              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh, scheduleTriggerTimezone)" />
+              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh, scheduleTriggerTimezone)" />
               <el-option value="custom" data-value="custom" :label="automationCronPresetLabel('custom', isZh)" />
             </el-select>
             <template v-if="cronPreset === 'custom'">
               <label class="meta-rule-editor__label">{{ automationLabel('trigger.cronExpression', isZh) }}</label>
               <el-input v-model="(draft.triggerConfig.cron as string)" type="text" placeholder="* * * * *" data-field="cronExpression" />
             </template>
+            <div class="meta-rule-editor__hint" data-field="cronTimezoneHint">{{ automationCronTimezoneHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.cron', cron: cronSwitchImpact }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- schedule.interval config -->
@@ -123,9 +128,28 @@
               <el-option value="before" data-value="before" :label="isZh ? '日期之前' : 'Before the date'" />
               <el-option value="after" data-value="after" :label="isZh ? '日期之后' : 'After the date'" />
             </el-select>
-            <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
-            <el-input v-model="(draft.triggerConfig.timeOfDay as string)" type="time" placeholder="09:00" data-field="timeOfDay" />
-            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ isZh ? '每天按此 UTC 时间触发；服务重启后会补发当天到点的提醒。' : 'Fires daily at this UTC time; a restart catches up today\'s due reminders.' }}</div>
+            <!--
+              A7a (客户反馈 2026-09-24 #4c): a 24-hour picker that does not follow the browser locale (the old
+              native type="time" input rendered am/pm), on the rule's schedule timezone — the business timezone
+              for new rules; a legacy rule stays on UTC until the explicit switch below.
+            -->
+            <label class="meta-rule-editor__label" data-field="timeOfDayLabel">{{ automationReminderTimeLabel(scheduleTriggerTimezone, isZh) }}</label>
+            <el-select
+              v-model="timeOfDayModel"
+              class="meta-rule-editor__select"
+              clearable
+              filterable
+              :placeholder="automationReminderTimePlaceholder(isZh)"
+              data-field="timeOfDay"
+            >
+              <el-option v-for="t in timeOfDayOptions" :key="t" :value="t" :data-value="t" :label="t" />
+            </el-select>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ automationReminderTimeHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeExample">{{ dateReminderExampleText }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.date_field', timeOfDay: effectiveTriggerTimeOfDay(draft.triggerConfig.timeOfDay) }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- webhook.received (signed inbound) config -->
@@ -1803,6 +1827,8 @@ import {
   automationConditionOperatorLabel,
   automationConditionValuePlaceholder,
   automationCronPresetLabel,
+  automationCronTimezoneHint,
+  automationDateReminderExampleText,
   automationDingTalkDestinationScopeLabel,
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
@@ -1810,13 +1836,32 @@ import {
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
+  automationLegacyUtcScheduleNotice,
+  automationReminderTimeHint,
+  automationReminderTimeLabel,
+  automationReminderTimePlaceholder,
   automationResultWritebackOptionMissingMessage,
   automationResultWritebackOutcomeLabel,
+  automationSwitchToBusinessTimezoneConfirm,
+  automationSwitchToBusinessTimezoneLabel,
+  automationSwitchToBusinessTimezoneTitle,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
   AUTOMATION_RESULT_WRITEBACK_OUTCOMES,
   type AutomationResultWritebackOutcome,
 } from '../utils/meta-automation-labels'
+import {
+  analyzeCronForBusinessSwitch,
+  automationBusinessTimezone,
+  dateReminderExample,
+  effectiveTriggerTimeOfDay,
+  effectiveTriggerTimezone,
+  isTimezoneAwareTriggerType,
+  isUtcTriggerTimezone,
+  legacyUtcSwitchImpact,
+  triggerTimeOfDayOptions,
+  triggerTimezoneForSave,
+} from '../utils/automation-trigger-timezone'
 import {
   type BranchActionDraft,
   type BranchDraft,
@@ -1999,7 +2044,20 @@ const fwbConfirmationGeneration = new Map<string, number>()
 const fwbConfirmingRequestGeneration = new Map<string, number>()
 let fwbTemplateLoadGeneration = 0
 const fwbCreateTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
-const cronPreset = ref('0 * * * *')
+const DEFAULT_CRON_PRESET = '0 * * * *'
+const CRON_PRESET_VALUES: readonly string[] = ['*/5 * * * *', '0 * * * *', '0 0 * * *', '0 0 * * 1']
+const cronPreset = ref(DEFAULT_CRON_PRESET)
+/**
+ * A7a: the preset select must open on the SAVED cron. It used to keep whatever the previous open left
+ * (initially hourly), and buildPayload writes the preset over `cron`, so renaming a saved daily rule silently
+ * turned it hourly. A saved expression that is not a preset opens as 'custom' (edited in place, not rewritten).
+ */
+function cronPresetForDraft(d: Draft): string {
+  if (d.triggerType !== 'schedule.cron') return DEFAULT_CRON_PRESET
+  const cron = typeof d.triggerConfig.cron === 'string' ? d.triggerConfig.cron.trim() : ''
+  if (!cron) return props.rule?.id ? 'custom' : DEFAULT_CRON_PRESET
+  return CRON_PRESET_VALUES.includes(cron) ? cron : 'custom'
+}
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
@@ -2652,6 +2710,89 @@ const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 const dateReminderCandidateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
+
+// A7a (客户反馈 2026-09-24 #4c): the timezone this schedule trigger will be SAVED with, i.e. the clock the
+// backend will run it on. The UI labels and buildPayload read the same helper, so what the editor shows is
+// what gets saved: new schedule config → the business timezone; a saved rule of this schedule type with no
+// stored timezone → stays UTC (legacy-preserve) until the explicit switch below.
+const scheduleTriggerTimezone = computed(() => effectiveTriggerTimezone({
+  triggerType: draft.value.triggerType,
+  draftTimezone: draft.value.triggerConfig.timezone,
+  storedRule: props.rule ?? null,
+}))
+// The cron expression that will be saved (buildPayload writes a non-custom preset over `cron`).
+const effectiveCronExpression = computed(() => (
+  cronPreset.value !== 'custom'
+    ? cronPreset.value
+    : (typeof draft.value.triggerConfig.cron === 'string' ? draft.value.triggerConfig.cron.trim() : '')
+))
+const cronSwitchImpact = computed(() => analyzeCronForBusinessSwitch(effectiveCronExpression.value, automationBusinessTimezone()))
+const scheduleOnLegacyUtc = computed(() =>
+  isTimezoneAwareTriggerType(draft.value.triggerType)
+  && isUtcTriggerTimezone(scheduleTriggerTimezone.value)
+  && !isUtcTriggerTimezone(automationBusinessTimezone())
+  // N1: a cron expression that fires at the same instants on either clock (every 5 minutes, hourly, …)
+  // needs no warning and no switch — the rule stays exactly as it is.
+  && !(draft.value.triggerType === 'schedule.cron' && cronSwitchImpact.value.timezoneIndependent),
+)
+const dateReminderFieldType = computed(() => {
+  const fieldId = typeof draft.value.triggerConfig.dateFieldId === 'string' ? draft.value.triggerConfig.dateFieldId : ''
+  const type = props.fields.find((field) => field.id === fieldId)?.type
+  return type === 'date' || type === 'dateTime' ? type : null
+})
+const timeOfDayModel = computed<string>({
+  get: () => (typeof draft.value.triggerConfig.timeOfDay === 'string' ? draft.value.triggerConfig.timeOfDay : ''),
+  // Cleared (Element Plus emits undefined/null) → '' = the backend's 09:00 default, as the old input saved.
+  set: (value) => { draft.value.triggerConfig.timeOfDay = typeof value === 'string' ? value : '' },
+})
+const timeOfDayOptions = computed(() => triggerTimeOfDayOptions(draft.value.triggerConfig.timeOfDay))
+const dateReminderExampleText = computed(() => automationDateReminderExampleText(
+  dateReminderExample({
+    offsetDays: draft.value.triggerConfig.offsetDays,
+    direction: draft.value.triggerConfig.direction,
+    timeOfDay: draft.value.triggerConfig.timeOfDay,
+    timezone: scheduleTriggerTimezone.value,
+    businessTimezone: automationBusinessTimezone(),
+  }),
+  scheduleTriggerTimezone.value,
+  isZh.value,
+))
+
+/**
+ * The ONLY path that moves a legacy UTC schedule onto the business timezone: explicit, confirmed, and for a
+ * date reminder it re-expresses the stored time as the same instant ((hh + 8) mod 24 for Asia/Shanghai; an
+ * empty time was the 09:00 UTC default → 17:00). A cron expression is kept verbatim and re-read on the
+ * business clock (the confirm text says so).
+ */
+async function switchScheduleToBusinessTimezone(): Promise<void> {
+  const triggerType = draft.value.triggerType
+  if (triggerType !== 'schedule.date_field' && triggerType !== 'schedule.cron') return
+  const businessTimezone = automationBusinessTimezone()
+  const impact = triggerType === 'schedule.date_field'
+    ? legacyUtcSwitchImpact(draft.value.triggerConfig.timeOfDay, businessTimezone)
+    : null
+  try {
+    await ElMessageBox.confirm(
+      impact
+        ? automationSwitchToBusinessTimezoneConfirm({
+          triggerType: 'schedule.date_field',
+          impact,
+          fieldType: dateReminderFieldType.value,
+        }, isZh.value)
+        : automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: cronSwitchImpact.value }, isZh.value),
+      automationSwitchToBusinessTimezoneTitle(isZh.value),
+      {
+        type: 'warning',
+        confirmButtonText: automationSwitchToBusinessTimezoneLabel(isZh.value),
+        cancelButtonText: automationLabel('editor.cancel', isZh.value),
+      },
+    )
+  } catch {
+    return
+  }
+  if (impact) draft.value.triggerConfig.timeOfDay = impact.toTimeOfDay
+  draft.value.triggerConfig.timezone = businessTimezone
+}
 const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
 // #5859: Test Run always executes the PERSISTED rule (client.testAutomationRule sends no body),
 // so an already-saved rule with unsaved draft edits must not offer Test Run — it would silently
@@ -3496,6 +3637,7 @@ watch(
   async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      cronPreset.value = cronPresetForDraft(draft.value)
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
       error.value = ''
@@ -5285,6 +5427,16 @@ function buildPayload(): Partial<AutomationRule> {
     // Normalize the date-reminder config so an unset/garbage direction or offset can't persist a no-op rule.
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
     triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
+  }
+  if (isTimezoneAwareTriggerType(d.triggerType)) {
+    // A7a: new schedule config is saved on the business timezone. `undefined` = a legacy UTC rule (saved
+    // with this schedule type and no timezone) — write nothing, so an edit never shifts its fire time.
+    const timezone = triggerTimezoneForSave({
+      triggerType: d.triggerType,
+      draftTimezone: triggerConfig.timezone,
+      storedRule: props.rule ?? null,
+    })
+    if (timezone) triggerConfig.timezone = timezone
   }
   if (d.triggerType === 'approval.task_created') {
     // A-2a: trimmed templateId is the only config key.
