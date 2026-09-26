@@ -479,6 +479,127 @@ test('CI wiring: this test file is actually invoked by the required `test` job (
 const WINDOWS_SHELL_RUNNER = 'scripts/ops/__tests__/multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1'
 const WINDOWS_ACL_SUITE = 'scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1'
 
+// What decides whether a Windows lane CAN fail: the runner's verdict (its exit code
+// from the TAP counts, node's exit code and the three required tests) and the ACL
+// suite's handling of that exit code. Only the Linux lane sees a change to them before
+// it lands, and a runner that exits 0 on a red suite -- or an ACL block that
+// overwrites the runner's exit code -- keeps the Windows job green on a failing suite.
+// So that code is pinned here VERBATIM (comment and blank lines aside, line endings
+// normalised): changing the runner, the co-hosted block, the ACL suite's Check or
+// its final verdict means changing these lines in the same commit.
+const WINDOWS_SHELL_RUNNER_CODE = String.raw`
+$ErrorActionPreference = 'Stop'
+$isWindowsHost = ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+if (-not $isWindowsHost) {
+  Write-Host 'SKIP multitable-onprem-package-upgrade-inplace Windows-shell lane (not Windows)'
+  exit 0
+}
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).ProviderPath
+$testFile = Join-Path $repoRoot 'scripts\ops\multitable-onprem-package-upgrade-inplace.test.mjs'
+$node = (Get-Command -Name 'node' -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+$env:UPGRADE_INPLACE_TEST_SHELL = (Get-Process -Id $PID).Path
+$env:UPGRADE_INPLACE_TEST_EXPECT_EDITION = $PSVersionTable.PSEdition
+$env:PSExecutionPolicyPreference = 'Bypass'
+Write-Host ("== multitable-onprem-package-upgrade-inplace suite under {0} {1} ({2})" -f $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, $env:UPGRADE_INPLACE_TEST_SHELL)
+Push-Location -LiteralPath $repoRoot
+$ErrorActionPreference = 'Continue'
+try {
+  $global:LASTEXITCODE = -1
+  $output = & $node --test $testFile 2>&1
+  $nodeExit = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = 'Stop'
+  Pop-Location
+}
+$lines = @($output | ForEach-Object { [string]$_ })
+foreach ($line in $lines) {
+  Write-Host $line
+}
+function Get-TapCount {
+  param([string[]]$Lines, [string]$Name)
+  foreach ($line in $Lines) {
+    if ($line -match ('^# ' + $Name + ' (\d+)\s*$')) {
+      return [int]$Matches[1]
+    }
+  }
+  return -1
+}
+$tests = Get-TapCount -Lines $lines -Name 'tests'
+$pass = Get-TapCount -Lines $lines -Name 'pass'
+$fail = Get-TapCount -Lines $lines -Name 'fail'
+$skipped = Get-TapCount -Lines $lines -Name 'skipped'
+$todo = Get-TapCount -Lines $lines -Name 'todo'
+$cancelled = Get-TapCount -Lines $lines -Name 'cancelled'
+$requiredOk = @(
+  '^ok \d+ - shell under test:',
+  '^ok \d+ - Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed:',
+  '^ok \d+ - end-to-end \(acid fixture, R59 replay\):'
+)
+$missing = @()
+foreach ($pattern in $requiredOk) {
+  if (-not ($lines | Where-Object { $_ -match $pattern })) {
+    $missing += $pattern
+  }
+}
+$problems = @()
+if ($nodeExit -ne 0) { $problems += "node --test exit=$nodeExit" }
+if ($tests -le 0) { $problems += "no test count reported (tests=$tests)" }
+if ($pass -ne $tests) { $problems += "pass=$pass of tests=$tests" }
+if ($fail -ne 0) { $problems += "fail=$fail" }
+if ($skipped -ne 0) { $problems += "skipped=$skipped" }
+if ($todo -ne 0) { $problems += "todo=$todo" }
+if ($cancelled -ne 0) { $problems += "cancelled=$cancelled" }
+foreach ($pattern in $missing) { $problems += "required test not ok: $pattern" }
+if ($problems.Count -gt 0) {
+  Write-Host ("FAILED multitable-onprem-package-upgrade-inplace suite under {0} {1}: {2}" -f $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, ($problems -join '; '))
+  exit 1
+}
+Write-Host ("PASSED multitable-onprem-package-upgrade-inplace suite under {0} {1}: {2}/{3} tests" -f $PSVersionTable.PSEdition, $PSVersionTable.PSVersion, $pass, $tests)
+exit 0
+`
+const ACL_COHOSTED_BLOCK_CODE = String.raw`
+if ($isWindowsHost) {
+  $cohostedRunner = Join-Path $PSScriptRoot 'multitable-onprem-package-upgrade-inplace.windows-shell.tests.ps1'
+  $cohostedShell = (Get-Process -Id $PID).Path
+  $savedErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $global:LASTEXITCODE = -1
+    & $cohostedShell -NoProfile -ExecutionPolicy Bypass -File $cohostedRunner
+    $cohostedExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+  }
+  Check "co-hosted: multitable-onprem-package-upgrade-inplace suite passes under $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion) (exit=$cohostedExit)" ($cohostedExit -eq 0)
+} else {
+  Skip 'co-hosted: multitable-onprem-package-upgrade-inplace suite (Windows only; the ubuntu test job runs it under pwsh 7)'
+}
+`
+const ACL_CHECK_FUNCTION_CODE = String.raw`
+function Check {
+  param([string]$Name, [bool]$Ok)
+  if ($Ok) { $script:pass++; Write-Host "  PASS  $Name" }
+  else { $script:fail++; Write-Host "  FAIL  $Name" }
+}
+`
+const ACL_VERDICT_CODE = String.raw`
+if ($fail -gt 0) {
+  Write-Host "FAILED: $fail check(s); $pass passed; $skip skipped"
+  exit 1
+}
+Write-Host "ALL S6-A ARTIFACT-ROOT ACL CHECKS PASS ($pass checks; $skip skipped)"
+exit 0
+`
+
+// PowerShell source -> its code lines: no comment-only lines, no blank lines, no
+// trailing whitespace, CRLF or LF.
+function psCodeLines(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+$/, ''))
+    .filter((line) => line !== '' && !/^\s*#/.test(line))
+}
+
 test('CI wiring (Windows lanes): stock-prep-powershell51 -> the S6-A ACL suite under 5.1 AND pwsh 7 -> the co-hosted runner -> this file, under that same shell', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8')
   const winJobMatch = workflow.match(/\n {2}stock-prep-powershell51:\n[\s\S]*?(?=\n {2}\S)/)
@@ -486,15 +607,18 @@ test('CI wiring (Windows lanes): stock-prep-powershell51 -> the S6-A ACL suite u
   const winJob = winJobMatch[0]
   assert.match(winJob, /\n {4}runs-on: windows-latest\n/)
   const aclSuiteWin = WINDOWS_ACL_SUITE.replace(/\//g, '[\\\\/]')
+  // Each run is followed at once by the exit-code check: without it the 5.1 run's
+  // failure would be overwritten by the pwsh 7 run that follows it.
+  const exitCheck = '\\s*\\n\\s*if \\(\\$LASTEXITCODE -ne 0\\) \\{ exit \\$LASTEXITCODE \\}'
   assert.match(
     winJob,
-    new RegExp(`& \\$powershell51 -NoProfile -ExecutionPolicy Bypass -File \`?\\s*\\n?\\s*${aclSuiteWin}`),
-    'the Windows job must run the S6-A ACL suite under Windows PowerShell 5.1',
+    new RegExp(`& \\$powershell51 -NoProfile -ExecutionPolicy Bypass -File \`?\\s*\\n?\\s*${aclSuiteWin}${exitCheck}`),
+    'the Windows job must run the S6-A ACL suite under Windows PowerShell 5.1 and fail on its exit code',
   )
   assert.match(
     winJob,
-    new RegExp(`& pwsh -NoProfile -ExecutionPolicy Bypass -File \`?\\s*\\n?\\s*${aclSuiteWin}`),
-    'the Windows job must run the S6-A ACL suite under pwsh 7',
+    new RegExp(`& pwsh -NoProfile -ExecutionPolicy Bypass -File \`?\\s*\\n?\\s*${aclSuiteWin}${exitCheck}`),
+    'the Windows job must run the S6-A ACL suite under pwsh 7 and fail on its exit code',
   )
 
   const aclSuite = fs.readFileSync(path.join(repoRoot, WINDOWS_ACL_SUITE), 'utf8')
@@ -510,8 +634,29 @@ test('CI wiring (Windows lanes): stock-prep-powershell51 -> the S6-A ACL suite u
   assert.match(cohostCode, /\$global:LASTEXITCODE = -1\s*\n\s*& \$cohostedShell -NoProfile -ExecutionPolicy Bypass -File \$cohostedRunner\s*\n\s*\$cohostedExit = \$LASTEXITCODE/)
   assert.match(cohostCode, /Check "co-hosted: multitable-onprem-package-upgrade-inplace[^"\n]*" \(\$cohostedExit -eq 0\)/, 'its exit code must count as a check')
   assert.ok(blockEnd < aclSuite.lastIndexOf('if ($fail -gt 0) {'), 'the co-hosted check must run BEFORE the ACL suite decides its exit code')
+  // The ACL side of the verdict, verbatim: the co-hosted block, the Check that counts
+  // its result, and the suite's final exit -- and nothing else may touch the runner's
+  // exit code or the failure count.
+  assert.deepEqual(psCodeLines(cohost), psCodeLines(ACL_COHOSTED_BLOCK_CODE), 'the co-hosted block is pinned verbatim')
+  assert.equal((aclSuite.match(/\$cohostedExit\s*=/g) || []).length, 1, '$cohostedExit must be assigned exactly once, from the runner\'s $LASTEXITCODE')
+  const checkStart = aclSuite.indexOf('function Check {')
+  assert.ok(checkStart > -1, 'the ACL suite must define Check')
+  const checkEnd = aclSuite.indexOf('\n}', checkStart)
+  assert.deepEqual(psCodeLines(aclSuite.slice(checkStart, checkEnd + 2)), psCodeLines(ACL_CHECK_FUNCTION_CODE), 'Check must count every failed check')
+  assert.deepEqual(psCodeLines(aclSuite.slice(blockEnd)), psCodeLines(ACL_VERDICT_CODE), 'after the co-hosted block comes the suite\'s verdict and nothing else')
+  assert.equal((aclSuite.match(/\$fail\s*=/g) || []).length, 1, '$fail is only ever initialised (to 0); Check alone increments it')
+  assert.equal((aclSuite.match(/\$script:fail\b/g) || []).length, 1, 'only Check touches $script:fail')
 
+  // The runner side, verbatim (see WINDOWS_SHELL_RUNNER_CODE): the suite under the
+  // runner's own shell, then exit 1 on ANY problem -- node's exit code, the TAP counts,
+  // a required test that is not `ok` -- and exit 0 only after that.
   const runner = fs.readFileSync(path.join(repoRoot, WINDOWS_SHELL_RUNNER), 'utf8')
+  assert.deepEqual(psCodeLines(runner), psCodeLines(WINDOWS_SHELL_RUNNER_CODE), 'the co-hosted runner is pinned verbatim')
+  const runnerCode = psCodeLines(runner)
+  assert.deepEqual(runnerCode.filter((line) => /^\s*exit\b/i.test(line)).map((line) => line.trim()), ['exit 0', 'exit 1', 'exit 0'], 'exit 0 off Windows, exit 1 on problems, exit 0 after that')
+  const problemsIdx = runnerCode.indexOf('if ($problems.Count -gt 0) {')
+  assert.ok(problemsIdx > -1 && runnerCode[problemsIdx + 2] === '  exit 1' && runnerCode[problemsIdx + 3] === '}', 'the only exit 1 is the problems block\'s')
+  assert.equal(runnerCode.lastIndexOf('exit 0'), runnerCode.length - 1, 'the success exit is the last line, after the problems block')
   assert.match(runner, /\$env:UPGRADE_INPLACE_TEST_SHELL = \(Get-Process -Id \$PID\)\.Path/)
   assert.match(runner, /\$env:UPGRADE_INPLACE_TEST_EXPECT_EDITION = \$PSVersionTable\.PSEdition/)
   assert.match(runner, /& \$node --test \$testFile/)
@@ -1138,7 +1283,40 @@ test('Invoke-Pm2 runs pm2 under the given PM2_HOME for that one call and restore
   }
 })
 
-test('Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed: on Windows they see a listening pipe by name without connecting to it and report still-open / closed; elsewhere always closed', async () => {
+function listenOnPipe(server, pipePath) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(pipePath, resolve)
+  })
+}
+
+// The fallback run with the REAL pipe probe (Wait-Pm2DaemonPipeClosed is not stubbed)
+// against a pm2 stub whose restart answers "not found" and whose kill exits
+// killExitCode, one case per entry, each with its own logs. Returns the harness lines;
+// every case prints `<label>=RETURNED <how>` or `<label>=THREW <message>`.
+function realProbeFallbackCases(scratch, home, cases) {
+  const lines = []
+  for (const c of cases) {
+    const dir = path.join(scratch, c.label)
+    c.pm2Log = path.join(dir, 'pm2-calls.log')
+    c.taskLog = path.join(dir, 'task-calls.log')
+    c.daemonMarker = path.join(dir, 'stray-daemon.marker')
+    c.started = path.join(dir, 'runtime-started.marker')
+    const stub = writePm2Stub(dir, c.pm2Log, null, {
+      restartNeedsHomeMarker: true,
+      strayDaemonMarkerPath: c.daemonMarker,
+      killExitCode: c.killExitCode,
+    })
+    lines.push(
+      scheduledTaskStubSource({ taskPresent: true, runtimeStartedMarker: c.started, taskLogPath: c.taskLog, strayDaemonMarkerPath: c.daemonMarker }),
+      `try { $r = Restart-Pm2AppOrScheduledTask -Pm2Command ${psSingleQuote(stub)} -Name 'metasheet-backend' -Pm2Home ${psSingleQuote(home)} -ScheduledTaskName 'MetaSheet-PM2'; ` +
+        `Write-Host ('${c.label}=RETURNED ' + $r) } catch { Write-Host ('${c.label}=THREW ' + $_.Exception.Message) }`,
+    )
+  }
+  return lines
+}
+
+test('Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed: on Windows they see a listening pipe by name without connecting to it and report still-open / closed; a pipe namespace Windows PowerShell 5.1 cannot list is unknown (null), and the real fallback then refuses to start the task when pm2 kill failed; elsewhere always closed', async () => {
   const scratch = mkLongTempDir('ms2-upgrade-unit-')
   // A pipe of our own, never pm2's real \\.\pipe\rpc.sock: that name is machine-wide
   // and must not be touched by a test.
@@ -1150,10 +1328,7 @@ test('Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed: on Windows they see 
       connections += 1
       socket.destroy()
     })
-    await new Promise((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(`\\\\.\\pipe\\${pipeName}`, resolve)
-    })
+    await listenOnPipe(server, `\\\\.\\pipe\\${pipeName}`)
   }
   try {
     const harness =
@@ -1175,6 +1350,77 @@ test('Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed: on Windows they see 
       assert.ok(Number(waited[1]) >= 900, `the wait must actually last its timeout, took ${waited[1]} ms`)
       assert.match(result.stdout, /WAIT_ABSENT=closed/)
       assert.equal(connections, 0, 'listing the pipe namespace must never connect to the daemon behind it')
+
+      // The ONE real source of 'unknown' (so of the fallback's PM2_DAEMON_STATE_UNKNOWN
+      // refusal): Windows PowerShell 5.1 (.NET Framework) cannot list \\.\pipe\ while any
+      // pipe name in it contains a character that is illegal in a path -- GetFiles throws
+      // "Illegal characters in path." -- whereas pwsh 7 (.NET) lists it. Only the Windows
+      // 5.1 lane can reach Test-Pm2DaemonPipePresent's catch at runtime; the "R59 wiring"
+      // test pins that catch statically for every lane. The pipe below is held only for
+      // this block, and closed in its finally: while it exists every 5.1 listing of the
+      // namespace on this host fails -- so two runs of this file at the same time on one
+      // Windows host can fail each other's pipe checks; run them one after another.
+      const badServer = net.createServer((socket) => {
+        connections += 1
+        socket.destroy()
+      })
+      await listenOnPipe(badServer, `\\\\.\\pipe\\ms2-upgrade-inplace-bad<${process.pid}>`)
+      try {
+        const home = path.join(scratch, 'runtime-home')
+        fs.mkdirSync(home, { recursive: true })
+        const cases = [
+          { label: 'FALLBACK_KILL_FAILED', killExitCode: 1 },
+          { label: 'FALLBACK_KILL_OK', killExitCode: 0 },
+        ]
+        const badHarness =
+          dotSourcePrelude(scratch) +
+          [
+            "Write-Host ('EDITION=' + $PSVersionTable.PSEdition)",
+            "try { [void][System.IO.Directory]::GetFiles('\\\\.\\pipe\\'); Write-Host 'LISTING=ok' } catch { $e = $_.Exception; while ($null -ne $e.InnerException) { $e = $e.InnerException }; Write-Host ('LISTING=threw ' + $e.GetType().FullName + ': ' + $e.Message) }",
+            `$p = Test-Pm2DaemonPipePresent -PipeName ${psSingleQuote(pipeName)}; Write-Host ('BAD_PRESENT=' + $(if ($null -eq $p) { 'null' } else { [string]$p }))`,
+            `Write-Host ('BAD_WAIT=' + (Wait-Pm2DaemonPipeClosed -PipeName ${psSingleQuote(pipeName)} -TimeoutSec 1))`,
+            ...realProbeFallbackCases(scratch, home, cases),
+          ].join('\n')
+        const bad = await runPwshHarnessAsync(badHarness)
+        assert.equal(bad.status, 0, bad.stderr || bad.stdout)
+        const edition = (bad.stdout.match(/EDITION=(\w+)/) || [])[1]
+        const value = (key) => (bad.stdout.split(/\r?\n/).find((l) => l.startsWith(`${key}=`)) || '').slice(key.length + 1)
+        const byLabel = Object.fromEntries(cases.map((c) => [c.label, c]))
+        const pm2Calls = (label) => readLogLines(byLabel[label].pm2Log).map((l) => l.split(/\s+/)[0])
+        const starts = (label) => readLogLines(byLabel[label].taskLog).filter((l) => l.startsWith('start'))
+        if (edition === 'Desktop') {
+          // ArgumentException ("Illegal characters in path." on an English host): the
+          // type, not the localised message, is what is asserted.
+          assert.match(value('LISTING'), /^threw System\.ArgumentException: /, `under Windows PowerShell 5.1 this pipe name must make the namespace unlistable, or this block covers nothing:\n${bad.stdout}`)
+          assert.equal(value('BAD_PRESENT'), 'null', `an unlistable namespace must be null (unknown), never False (no daemon):\n${bad.stdout}`)
+          assert.equal(value('BAD_WAIT'), 'unknown', bad.stdout)
+          // unknown + a failed kill: nothing shows the session's daemon is gone.
+          assert.match(value('FALLBACK_KILL_FAILED'), /^THREW PM2_DAEMON_STATE_UNKNOWN: .*'pm2 kill' failed \(exit=1\).*was NOT started/, bad.stdout)
+          assert.deepEqual(pm2Calls('FALLBACK_KILL_FAILED'), ['restart', 'kill'])
+          assert.deepEqual(starts('FALLBACK_KILL_FAILED'), [], 'the task must not be started when the pipe state is unknown and pm2 kill failed')
+          // unknown + kill exited 0: started on pm2's own word, logged as unverified.
+          assert.equal(value('FALLBACK_KILL_OK'), 'RETURNED scheduled-task', bad.stdout)
+          assert.match(bad.stdout, /'pm2 kill' exited 0, so the task is started without the pipe check \(UNVERIFIED\)/)
+          assert.deepEqual(starts('FALLBACK_KILL_OK'), ['start MetaSheet-PM2', 'start-path=\\', 'start-saw-daemon=no'])
+        } else {
+          assert.equal(edition, 'Core', bad.stdout)
+          // pwsh 7 lists the same namespace: never unknown here, so the pipe check decides.
+          assert.equal(value('LISTING'), 'ok', bad.stdout)
+          assert.equal(value('BAD_PRESENT'), 'True', bad.stdout)
+          assert.equal(value('BAD_WAIT'), 'still-open', bad.stdout)
+          // No daemon holds pm2's rpc.sock on a test host (see setUpR59Fixture's note), so
+          // the pipe is closed: that is the evidence, whatever pm2 kill answered.
+          for (const c of cases) {
+            assert.equal(value(c.label), 'RETURNED scheduled-task', `${c.label}:\n${bad.stdout}`)
+            assert.deepEqual(pm2Calls(c.label), ['restart', 'kill'], c.label)
+            assert.deepEqual(starts(c.label).slice(0, 2), ['start MetaSheet-PM2', 'start-path=\\'], c.label)
+          }
+          assert.doesNotMatch(bad.stdout, /UNVERIFIED/)
+        }
+        assert.equal(connections, 0, 'listing the pipe namespace must never connect to anything behind it')
+      } finally {
+        await new Promise((resolve) => badServer.close(resolve))
+      }
     } else {
       // pm2's sockets are files inside PM2_HOME off Windows, and `pm2 kill` there
       // returns only after the daemon's SIGQUIT: nothing to wait for.
@@ -1522,6 +1768,22 @@ test('R59 wiring: pm2 is invoked in exactly one place (Invoke-Pm2), and every pm
   )
   assert.match(scriptCodeOnly, /function Test-Pm2DaemonPipePresent \{\s*param\(\[string\]\$PipeName = 'rpc\.sock'\)/)
   assert.match(scriptCodeOnly, /function Wait-Pm2DaemonPipeClosed \{[\s\S]*?\[string\]\$PipeName = 'rpc\.sock'/)
+  // Where 'unknown' comes from: a pipe namespace that cannot be listed is $null
+  // (Wait-Pm2DaemonPipeClosed -> 'unknown' -> the task starts only if pm2 kill exited
+  // 0), never $false ('closed' -> the task starts even after a failed kill). Only
+  // Windows PowerShell 5.1 reaches this catch at runtime (the pipe test above, on the
+  // Windows 5.1 lane), so it is also pinned here, where every lane sees a change to it.
+  const probeStart = scriptCodeOnly.indexOf('function Test-Pm2DaemonPipePresent {')
+  const probeEnd = scriptCodeOnly.indexOf('\nfunction ', probeStart + 1)
+  assert.ok(probeStart > -1 && probeEnd > probeStart)
+  const probeBody = scriptCodeOnly.slice(probeStart, probeEnd)
+  assert.match(
+    probeBody,
+    /\n\s*try \{\s*\n[\s\S]*\[System\.IO\.Directory\]::GetFiles\('\\\\\.\\pipe\\'\)[\s\S]*\n\s*return \$false\s*\n\s*\} catch \{\s*\n\s*return \$null\s*\n\s*\}\s*\n\}\s*$/,
+    'Test-Pm2DaemonPipePresent must list the pipe namespace inside its try and answer $null (unknown) from its catch',
+  )
+  assert.equal((probeBody.match(/\bcatch\b/g) || []).length, 1, 'exactly one catch in Test-Pm2DaemonPipePresent')
+  assert.equal((probeBody.match(/return \$null/g) || []).length, 1, 'the catch is the only $null answer')
 
   const main = scriptSource.slice(scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
   const stopCalls = main.match(/Stop-Pm2App -Pm2Command[^\n]*/g) || []
@@ -2884,6 +3146,91 @@ test('end-to-end (acid fixture, R59): an explicit -Pm2Home that does not exist r
     assert.ok(!fs.existsSync(fx.backupRoot) || fs.readdirSync(fx.backupRoot).length === 0, 'no backup should be written')
     assert.ok(!fs.existsSync(path.join(root, 'typo-pm2-home')), 'the typo home must not be created')
   } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// The R59 lines of the restore block are pasted by an operator into a PowerShell
+// prompt. Each value in them is a single-quoted literal, so a quote inside the pm2
+// home, the task name or the task folder must be doubled -- or the pasted
+// $env:PM2_HOME line does not parse and the Start-ScheduledTask line starts a task
+// that is not the one named.
+test('Write-RestoreBlock (R59): the $env:PM2_HOME and Start-ScheduledTask lines are single-quoted literals that parse back to exactly the pm2 home, task name and task folder, even with single quotes, $ and backticks in them; order PM2_HOME, pm2 restart, pm2 kill, Start-ScheduledTask (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const home = "C:\\ops\\it's $pm2 `home"
+    const taskName = "O'Brien-PM2"
+    const taskPath = "\\Team's ''folder''\\"
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        `$out = Write-RestoreBlock -BackupPath ${psSingleQuote(path.join(scratch, 'backup'))} -RootDir ${psSingleQuote(path.join(scratch, 'live'))} -ReplacedRelativePaths @() -Pm2AppName 'metasheet-backend' ` +
+          `-Pm2Home ${psSingleQuote(home)} -ScheduledTaskName ${psSingleQuote(taskName)} -ScheduledTaskPath ${psSingleQuote(taskPath)} 6>&1`,
+        'foreach ($item in @($out)) {',
+        '  $line = ([string]$item).Trim()',
+        "  Write-Host ('PRINTED|' + $line)",
+        "  if ($line -like '$env:PM2_HOME*' -or $line -like 'Start-ScheduledTask*') {",
+        '    $tokens = $null',
+        '    $errors = $null',
+        '    $ast = [System.Management.Automation.Language.Parser]::ParseInput($line, [ref]$tokens, [ref]$errors)',
+        '    $literals = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq \'SingleQuoted\' }, $true) | ForEach-Object { $_.Value })',
+        '    $expandable = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }, $true)).Count',
+        "    Write-Host ('PARSED|' + ($line -split ' ')[0] + '|' + $errors.Count + '|' + $expandable + '|' + (ConvertTo-Json -InputObject @($literals) -Compress))",
+        '  }',
+        '}',
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const printed = result.stdout.split(/\r?\n/).filter((l) => l.startsWith('PRINTED|')).map((l) => l.slice('PRINTED|'.length))
+    // The literal text an operator pastes, quotes doubled.
+    assert.ok(printed.includes("$env:PM2_HOME = 'C:\\ops\\it''s $pm2 `home'"), `the pm2 home line:\n${printed.join('\n')}`)
+    assert.ok(printed.includes("Start-ScheduledTask -TaskName 'O''Brien-PM2' -TaskPath '\\Team''s ''''folder''''\\'"), `the task line:\n${printed.join('\n')}`)
+    // ...and what PowerShell makes of it: no parse error, nothing expanded, exactly the values given.
+    const parsed = Object.fromEntries(
+      result.stdout
+        .split(/\r?\n/)
+        .filter((l) => l.startsWith('PARSED|'))
+        .map((l) => {
+          const [, kind, errors, expandable, json] = l.split('|')
+          return [kind, { errors: Number(errors), expandable: Number(expandable), literals: JSON.parse(json) }]
+        }),
+    )
+    assert.deepEqual(parsed['$env:PM2_HOME'], { errors: 0, expandable: 0, literals: [home] }, result.stdout)
+    assert.deepEqual(parsed['Start-ScheduledTask'], { errors: 0, expandable: 0, literals: [taskName, taskPath] }, result.stdout)
+    const order = printed.filter((l) => /^(\$env:PM2_HOME = |pm2 restart |pm2 kill$|Start-ScheduledTask )/.test(l)).map((l) => l.split(' ').slice(0, 2).join(' '))
+    assert.deepEqual(order, ['$env:PM2_HOME =', 'pm2 restart', 'pm2 kill', 'Start-ScheduledTask -TaskName'])
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R59): RestartService=0 on a pm2-runtime host reaches the final report with "backend started: skipped (RestartService=0)" -- pm2 is stopped and never restarted or killed, the task is never started, there is no health polling', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r59-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, RestartService: '0', HealthcheckAttempts: '1', HealthcheckDelaySec: '1' },
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.match(result.stdout, /===== multitable-onprem-package-upgrade-inplace: final report =====/)
+    assert.match(result.stdout, /\nbackend started:\s+skipped \(RestartService=0\)\s*\r?\n/)
+    assert.match(result.stdout, /backend health:\s+OK \(attempt=0,/)
+    assert.match(result.stdout, /\nhealth:\s+OK \(attempt=0,/)
+    // The stop, under the auto-detected home -- and no other pm2 call at all.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), [`stop@${fx.runtimeHome}`])
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'the task must never be started')
+    assert.doesNotMatch(combined, /PM2_RESTART_NOT_FOUND_FALLBACK|RESTORE REQUIRED/)
+    assert.ok(!fs.existsSync(fx.strayDaemonMarker), 'no pm2 call that could leave a daemon behind')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling when the restart is skipped')
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
