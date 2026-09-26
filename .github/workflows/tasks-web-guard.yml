@@ -1,0 +1,86 @@
+# Task feature line M2 frontend guard (targeted gate, design lock §5.3①).
+#
+# Why this exists: the required PR gate (plugin-tests.yml, `test (20.x)`) runs core-backend tests
+# and only `pnpm --filter @metasheet/web build` for the web app — it never runs apps/web vitest
+# specs. The always-on `web-tests` job (`web-tests.yml`) runs
+# apps/web/scripts/run-required-web-tests.sh, which also carries these two spec files (§5.3②).
+# This guard is the domain path-filtered sibling — both registration points must name the tasks
+# spec files as whole files; a name filter matching zero tests is skip-shaped green.
+#
+# Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
+# plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
+# regression on the /tasks skeleton surface into a visible red.
+#
+# Deliberately no `merge_group` (lock §5.2.1② / §5.3①: this lane keeps `paths` and does not opt
+# into merge-queue evaluation).
+name: Tasks Web Guard
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/src/tasks/**'
+      - 'apps/web/src/views/tasks/**'
+      - 'apps/web/tests/tasks*.spec.ts'
+      - 'apps/web/src/router/guardPolicy.ts'
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/src/App.vue'
+      - '.github/workflows/tasks-web-guard.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'apps/web/src/tasks/**'
+      - 'apps/web/src/views/tasks/**'
+      - 'apps/web/tests/tasks*.spec.ts'
+      - 'apps/web/src/router/guardPolicy.ts'
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/src/App.vue'
+      - '.github/workflows/tasks-web-guard.yml'
+
+jobs:
+  tasks-web-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tasks web guard specs (targeted)
+        # Two whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
+        # continue-on-error — a filter matching zero tests exits green.
+        run: |
+          pnpm --filter @metasheet/web exec vitest run \
+            tests/tasks-context.spec.ts \
+            tests/tasks-routes.spec.ts \
+            --reporter=verbose

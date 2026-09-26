@@ -479,6 +479,21 @@ export const appRoutes: RouteRecordRaw[] = [
     component: () => import('../views/ElearningManualGradingView.vue'),
     meta: { title: 'Manual Grading', titleZh: '人工阅卷', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:grade'] }
   },
+  // Task feature line M2 skeleton (design lock §5.2): both routes are gated on tasks:read only —
+  // deliberately NO requiredFeature. §13-38 缺省乙 renders "not enabled / unsupported" off a plain
+  // 404 from GET /api/tasks/context instead of a second flag-driven route gate.
+  {
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, permissions: ['tasks:read'] }
+  },
+  {
+    path: '/tasks/:id',
+    name: 'task-detail',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, permissions: ['tasks:read'] }
+  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',

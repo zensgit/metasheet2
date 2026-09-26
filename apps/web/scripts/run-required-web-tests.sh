@@ -1668,6 +1668,8 @@ exec npx vitest run \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
   stockPrepPermissionMatrix \
+  tasks-context.spec.ts \
+  tasks-routes.spec.ts \
   templateArchiveConfirm \
   templateCenterI18n \
   templateDetailI18n \
