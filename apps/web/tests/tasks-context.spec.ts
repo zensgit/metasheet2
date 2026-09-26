@@ -39,6 +39,10 @@ describe('classifyTasksContext (pure classifier)', () => {
     expect(classifyTasksContext(200, { orgId: 42 })).toEqual({ state: 'error' })
   })
 
+  it('classifies a 200 with an empty-string orgId as error, not ready', () => {
+    expect(classifyTasksContext(200, { orgId: '' })).toEqual({ state: 'error' })
+  })
+
   it('classifies a 200 with a non-object body as error', () => {
     expect(classifyTasksContext(200, null)).toEqual({ state: 'error' })
   })

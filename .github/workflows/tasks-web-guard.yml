@@ -77,10 +77,11 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tasks web guard specs (targeted)
-        # Two whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
+        # Three whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
         # continue-on-error — a filter matching zero tests exits green.
         run: |
           pnpm --filter @metasheet/web exec vitest run \
             tests/tasks-context.spec.ts \
             tests/tasks-routes.spec.ts \
+            tests/tasks-view.spec.ts \
             --reporter=verbose
