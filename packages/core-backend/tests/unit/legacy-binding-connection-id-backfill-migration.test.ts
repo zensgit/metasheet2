@@ -13,17 +13,51 @@
  * evidence (six planted rows, census classes, up / replay /
  * down round trip, no 23503) lives in
  * docs/development/legacy-binding-connection-id-backfill-verification-20260920.md.
+ *
+ * Predicates 7 (source active) and 8 (source type in the SQL read-only set) are pinned here too, and
+ * the type set is RE-DERIVED from the two runtime modules it comes from (the host adapter registry
+ * and the plugin's connection resolver), so a drift on either side reds this file.
  */
 import { promises as fs } from 'fs'
+import { createRequire } from 'module'
 import * as path from 'path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
+
+import { DEFAULT_ADAPTER_REGISTRY } from '../../src/data-adapters/DataSourceManager'
 import * as migration from '../../src/db/migrations/zzzz20260920150000_backfill_sql_readonly_legacy_connection_id'
 
 const MIGRATION_PATH = path.join(
   __dirname,
   '../../src/db/migrations/zzzz20260920150000_backfill_sql_readonly_legacy_connection_id.ts',
 )
+const CENSUS_PATH = path.join(
+  __dirname,
+  '../../../../scripts/ops/readonly-inventory-20260916/05-legacy-binding-census.sql',
+)
 const LEDGER_TABLE = 'integration_external_system_connection_backfills'
+
+const require_ = createRequire(__filename)
+// The plugin's SQL read-only resolver — required directly so the accepted-type half of predicate 8
+// is a VALUE pin against the module the canonical path actually runs, not a by-convention copy.
+const RESOLVER = require_('../../../../plugins/plugin-integration-core/lib/connection-resolver.cjs') as {
+  DEFAULT_SQL_CONNECTION_TYPES: Set<string>
+}
+
+/** Runtime truth: loadable (registry keys, lowercased as registerAdapterType does) ∩ accepted (lowercased as the resolver does). */
+function derivedSqlReadonlyConnectionTypes(): string[] {
+  const loadable = new Set(Object.keys(DEFAULT_ADAPTER_REGISTRY).map((type) => type.toLowerCase()))
+  const accepted = new Set(Array.from(RESOLVER.DEFAULT_SQL_CONNECTION_TYPES, (type) => String(type).toLowerCase()))
+  return [...loadable].filter((type) => accepted.has(type)).sort()
+}
+
+/** The literal list the migration declares (`const SQL_READONLY_CONNECTION_TYPES = [...]`). */
+function declaredTypes(content: string): string[] {
+  const m = content.match(/const SQL_READONLY_CONNECTION_TYPES = \[([^\]]*)\]/)
+  expect(m).not.toBeNull()
+  return Array.from(m![1].matchAll(/'([^']*)'/g), (x) => x[1]).sort()
+}
 
 function stripComments(content: string): string {
   return content
@@ -103,6 +137,45 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
     expect(stmt).toMatch(/AND ds\.tenant_id = b\.tenant_id/)
   })
 
+  it('up(): predicate 7 — the source must be active (the host loads only is_active = true rows)', async () => {
+    // scoped to the candidate CTE: that is where FOR SHARE OF ds re-checks it under the lock
+    const stmt = hitCte(backfillStatement(section(await source(), 'up')))
+    expect(stmt).toMatch(/AND ds\.is_active = TRUE/)
+  })
+
+  it('up(): predicate 8 — the source type must be loadable AND accepted by the SQL read-only resolver (lowercased like both)', async () => {
+    const stmt = hitCte(backfillStatement(section(await source(), 'up')))
+    expect(stmt).toMatch(/AND lower\(ds\.type\) IN \(\$\{sql\.join\(SQL_READONLY_CONNECTION_TYPES\)\}\)/)
+  })
+
+  it('predicate 8 — the declared type set equals DEFAULT_ADAPTER_REGISTRY keys ∩ DEFAULT_SQL_CONNECTION_TYPES (re-derived from the runtime modules)', async () => {
+    const derived = derivedSqlReadonlyConnectionTypes()
+    // sanity: the derivation itself is non-trivial (both halves contribute a type the other lacks)
+    expect(Object.keys(DEFAULT_ADAPTER_REGISTRY).some((t) => !derived.includes(t.toLowerCase()))).toBe(true)
+    expect(derived.length).toBeGreaterThan(0)
+    expect(declaredTypes(await source())).toEqual(derived)
+  })
+
+  it('census 05: counts source-inactive / source-type-unsupported separately, with the SAME type list, right before backfillable', async () => {
+    const census = await fs.readFile(CENSUS_PATH, 'utf-8')
+    const list = `(${derivedSqlReadonlyConnectionTypes().map((t) => `'${t}'`).join(', ')})`
+    // both hit CTEs (Q2 counts, Q3 ids) classify with the migration's list and lower() comparison
+    const escaped = list.replace(/[()]/g, '\\$&')
+    expect(census.match(new RegExp(`WHEN ds\\.is_active IS NOT TRUE\\s+THEN 'source-inactive'`, 'g'))?.length).toBe(2)
+    expect(census.match(new RegExp(`WHEN \\(lower\\(ds\\.type\\) IN ${escaped}\\) IS NOT TRUE\\s+THEN 'source-type-unsupported'`, 'g'))?.length).toBe(2)
+    // no other type list anywhere in the census (a second, diverging list would be a silent drift)
+    expect(census.match(/lower\(ds\.type\) IN \(([^)]*)\)/g)?.every((m) => m.endsWith(list))).toBe(true)
+    // ordered after every other class, so the counts mean "not backfilled BECAUSE of 7 / 8"
+    for (const q of census.split('WITH hit AS').slice(1, 3)) {
+      const order = ['tenant-mismatch', 'source-inactive', 'source-type-unsupported', 'backfillable'].map((c) => q.indexOf(`'${c}'`))
+      expect(order.every((i) => i > 0)).toBe(true)
+      expect([...order].sort((a, b) => a - b)).toEqual(order)
+    }
+    expect(census).toMatch(/count\(\*\) FILTER \(WHERE class = 'source-inactive'\)::int\s+AS source_inactive/)
+    expect(census).toMatch(/count\(\*\) FILTER \(WHERE class = 'source-type-unsupported'\)::int\s+AS source_type_unsupported/)
+    expect(census).toContain("THEN 'complete classes=10'")
+  })
+
   it('up(): the cutover\'s rollback shape (marker TRUE + connection_id NULL) is left alone', async () => {
     const stmt = backfillStatement(section(await source(), 'up'))
     expect(hitCte(stmt)).toMatch(/AND b\.legacy_connection_fallback_eligible IS NOT TRUE/)
@@ -110,10 +183,12 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
     expect(stmt).not.toMatch(/legacy_connection_fallback_eligible\s*=/)
   })
 
-  it('up(): writes the insert-path shape — connection_id from the join, pointer removed, owner stamp kept, updated_at untouched', async () => {
+  it('up(): writes the insert-path shape — connection_id from the join, pointer removed, owner stamp kept, updated_at not SET by the statement', async () => {
     const stmt = backfillStatement(section(await source(), 'up'))
     expect(stmt).toMatch(/SET connection_id = hit\.connection_id,\s*config = b\.config - 'dataSourceId'/)
     expect(stmt).not.toContain("- 'dataSourceOwnerId'")
+    // the statement never sets it; the table's 057 BEFORE UPDATE trigger still stamps NOW() on the
+    // rows it writes (migration header, NOT TOUCHED)
     expect(stmt).not.toMatch(/updated_at\s*=/)
   })
 
@@ -144,6 +219,9 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
     expect(upd).toMatch(/AND b\.config->>'dataSourceOwnerId' = hit\.legacy_data_source_owner_id/)
     const hit = stmt.slice(0, stmt.indexOf('upd AS ('))
     expect(hit).toMatch(/FOR SHARE OF ds\s*\)/)
+    // source-side predicates (3-8) are re-checked ONLY under that lock: a data_sources read inside
+    // the UPDATE would see the statement snapshot, not the committed new version (see migration)
+    expect(upd).not.toMatch(/data_sources/)
   })
 
   it('up(): guarded by table/column existence (pre-cutover schema is a no-op, not an error)', async () => {

@@ -12,8 +12,10 @@
  *   * the UPDATE re-checks the binding-side predicates against the row it actually writes, so any
  *     concurrent change to kind / connection_id / pointer / owner stamp / tenant / rollback marker
  *     makes the backfill SKIP the row;
- *   * the candidate CTE takes `FOR SHARE OF ds`, so a concurrent source soft-delete / owner change
- *     either lands first (candidate drops out) or waits for the backfill;
+ *   * the candidate CTE takes `FOR SHARE OF ds`, so a concurrent source soft-delete / owner change /
+ *     deactivation / type change either lands first (candidate drops out) or waits for the backfill
+ *     (predicates 7 `is_active` and 8 SQL read-only type, added after the CONNECTION_CANONICAL_
+ *     UNAVAILABLE diagnosis, are re-checked there like the others);
  *   * the ledger is fed by the UPDATE's RETURNING, so a skipped row is never recorded.
  *
  * Each race: connection W opens a transaction and changes the row (or its source) without
@@ -79,8 +81,10 @@ describeDb('zzzz20260920150000 backfill vs concurrent writers (real DB, two conn
     await observer.query(`
       CREATE TABLE data_sources (
         id text PRIMARY KEY,
+        type text NOT NULL DEFAULT 'postgresql',
         owner_id text NOT NULL,
         tenant_id text,
+        is_active boolean NOT NULL DEFAULT true,
         deleted_at timestamptz,
         live_id text GENERATED ALWAYS AS (CASE WHEN deleted_at IS NULL THEN id ELSE NULL END) STORED UNIQUE
       );
@@ -296,6 +300,78 @@ describeDb('zzzz20260920150000 backfill vs concurrent writers (real DB, two conn
     const race = await raceUpAgainst(`UPDATE data_sources SET deleted_at = NOW() WHERE id = 'source_a'`)
     expect(await binding()).toMatchObject({ connection_id: null, config: { dataSourceId: 'source_a' } })
     expect(await ledger()).toEqual([])
+    expectInterleavedAndCommitted(race)
+  })
+
+  // ── Predicates 7 / 8 (source active, source type in the SQL read-only set) ─────────────────────
+  // Diagnosis doc stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §3 conclusion 2:
+  // without them the backfill promoted S2b (inactive source) and S2c (unloadable type) rows into
+  // canonical rows that fail with CONNECTION_CANONICAL_UNAVAILABLE.
+
+  it('predicates 7/8: inactive-source and unsupported-type rows are NOT promoted; the eligible rows are, and only they are recorded', async () => {
+    await observer.query(`
+      INSERT INTO data_sources (id, type, owner_id, tenant_id, is_active) VALUES
+        ('source_off',   'postgresql', 'owner_a', 'tenant_a', false),
+        ('source_mongo', 'mongodb',    'owner_a', 'tenant_a', true),
+        ('source_http',  'http',       'owner_a', 'tenant_a', true),
+        ('source_pad',   ' mysql',     'owner_a', 'tenant_a', true),
+        ('source_upper', 'SQLServer',  'owner_a', 'tenant_a', true);
+      INSERT INTO integration_external_systems (id, tenant_id, kind, config) VALUES
+        ('binding_off',   'tenant_a', '${READONLY}', '{"dataSourceId":"source_off","dataSourceOwnerId":"owner_a"}'),
+        ('binding_mongo', 'tenant_a', '${READONLY}', '{"dataSourceId":"source_mongo","dataSourceOwnerId":"owner_a"}'),
+        ('binding_http',  'tenant_a', '${READONLY}', '{"dataSourceId":"source_http","dataSourceOwnerId":"owner_a"}'),
+        ('binding_pad',   'tenant_a', '${READONLY}', '{"dataSourceId":"source_pad","dataSourceOwnerId":"owner_a"}'),
+        ('binding_upper', 'tenant_a', '${READONLY}', '{"dataSourceId":"source_upper","dataSourceOwnerId":"owner_a"}');
+    `)
+    await migrationDb.transaction().execute((tx) => up(tx))
+    const rows = await observer.query<{ id: string; connection_id: string | null; pointer: string | null }>(
+      `SELECT id, connection_id, config->>'dataSourceId' AS pointer
+         FROM integration_external_systems ORDER BY id`,
+    )
+    expect(rows.rows).toEqual([
+      // eligible: postgresql (default type) and a mixed-case SQL type (runtime lowercases both sides)
+      { id: 'binding_a', connection_id: 'source_a', pointer: null },
+      // S2c: loadable but not a SQL type -> would be CONNECTION_TYPE_UNSUPPORTED
+      { id: 'binding_http', connection_id: null, pointer: 'source_http' },
+      // S2c: not in the adapter registry -> never loaded
+      { id: 'binding_mongo', connection_id: null, pointer: 'source_mongo' },
+      // S2b: inactive -> never loaded
+      { id: 'binding_off', connection_id: null, pointer: 'source_off' },
+      // the loader lowercases but does NOT trim, so a padded type is never loaded either
+      { id: 'binding_pad', connection_id: null, pointer: 'source_pad' },
+      { id: 'binding_upper', connection_id: 'source_upper', pointer: null },
+    ])
+    expect(await ledger()).toEqual([
+      { binding_id: 'binding_a', connection_id: 'source_a' },
+      { binding_id: 'binding_upper', connection_id: 'source_upper' },
+    ])
+  })
+
+  it('predicate 7 under the lock: a concurrent deactivation of the SOURCE drops the candidate', async () => {
+    const race = await raceUpAgainst(`UPDATE data_sources SET is_active = FALSE WHERE id = 'source_a'`)
+    expect(await binding()).toMatchObject({
+      connection_id: null,
+      config: { dataSourceId: 'source_a', dataSourceOwnerId: 'owner_a' },
+    })
+    expect(await ledger()).toEqual([])
+    expectInterleavedAndCommitted(race)
+  })
+
+  it('predicate 8 under the lock: a concurrent type change of the SOURCE to a non-SQL type drops the candidate', async () => {
+    const race = await raceUpAgainst(`UPDATE data_sources SET type = 'http' WHERE id = 'source_a'`)
+    expect(await binding()).toMatchObject({
+      connection_id: null,
+      config: { dataSourceId: 'source_a', dataSourceOwnerId: 'owner_a' },
+    })
+    expect(await ledger()).toEqual([])
+    expectInterleavedAndCommitted(race)
+  })
+
+  it('positive control (source side): a concurrent source write that keeps predicates 7/8 true (type re-cased) still backfills', async () => {
+    const race = await raceUpAgainst(`UPDATE data_sources SET type = 'PostgreSQL', is_active = TRUE WHERE id = 'source_a'`)
+    expect(await binding()).toMatchObject({ connection_id: 'source_a', config: { dataSourceOwnerId: 'owner_a' } })
+    expect((await binding()).config).not.toHaveProperty('dataSourceId')
+    expect(await ledger()).toEqual([{ binding_id: 'binding_a', connection_id: 'source_a' }])
     expectInterleavedAndCommitted(race)
   })
 

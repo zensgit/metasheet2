@@ -36,12 +36,32 @@
 --   tenant-unproven              data_sources.tenant_id IS NULL (pre-existing source  untouched
 --                                whose tenant membership was never proven).
 --   tenant-mismatch              data_sources.tenant_id <> binding tenant_id.         untouched
---   backfillable                 all six predicates hold: sql-readonly, marker not    REWRITTEN
---                                TRUE, pointer resolves, owner matches, source live,
---                                same tenant.
+--   source-inactive              data_sources.is_active is not TRUE. The host never   untouched
+--                                loads such a source (DataSourceManager.ts :324), so
+--                                a promoted row would only trade
+--                                CONNECTION_LEGACY_FALLBACK_DENIED for
+--                                CONNECTION_CANONICAL_UNAVAILABLE (diagnosis doc
+--                                stock-prep-connection-canonical-unavailable-
+--                                diagnosis-20260925.md §3, state S2b).
+--   source-type-unsupported      lower(data_sources.type) is not one of mysql /       untouched
+--                                postgres / postgresql / sqlserver = the adapter
+--                                registry (DataSourceManager.ts :193-200, loader
+--                                :331) INTERSECT the SQL read-only resolver's types
+--                                (connection-resolver.cjs :8, :126). Not loadable
+--                                (state S2c) or loadable but not SQL (http / plm,
+--                                CONNECTION_TYPE_UNSUPPORTED). Same list, same
+--                                lower() comparison as the migration.
+--   backfillable                 every migration predicate holds: sql-readonly,       REWRITTEN
+--                                marker not TRUE, pointer resolves, owner matches,
+--                                source live, same tenant, source active, SQL type.
 --
 -- The classification is applied in the order listed (first match wins), so the
--- eight counts partition the legacy population and sum to `legacy_rows_total`.
+-- ten counts partition the legacy population and sum to `legacy_rows_total`.
+-- `source-inactive` and `source-type-unsupported` come LAST on purpose: a row
+-- lands there only if it passes every other predicate, so their counts are
+-- exactly the rows NOT backfilled BECAUSE the source is inactive / of an
+-- unsupported type (rows the migration promoted before predicates 7-8 existed),
+-- and the seven classes above keep the meaning they had before.
 -- The count query (Q2) and the id query (Q3) read the SAME `hit` CTE, so
 -- `|ids per class| == count per class` is an assertable invariant.
 --
@@ -64,8 +84,8 @@
 
 -- ── Q1. Column probe + automatic dispatch ───────────────────────────────────
 -- The census needs the cutover columns (connection_id, the rollback marker) on
--- integration_external_systems and (owner_id, deleted_at, tenant_id) on
--- data_sources. A schema that predates zzzz20260902120000 has no legacy /
+-- integration_external_systems and (owner_id, deleted_at, tenant_id, is_active,
+-- type) on data_sources. A schema that predates zzzz20260902120000 has no legacy /
 -- canonical distinction yet; the file then reports `incomplete` rather than a
 -- misleading zero.
 SELECT table_name, column_name, data_type
@@ -75,7 +95,8 @@ SELECT table_name, column_name, data_type
          AND column_name IN ('id', 'tenant_id', 'kind', 'config', 'connection_id',
                              'legacy_connection_fallback_eligible'))
      OR (table_name = 'data_sources'
-         AND column_name IN ('id', 'owner_id', 'deleted_at', 'tenant_id', 'live_id')))
+         AND column_name IN ('id', 'owner_id', 'deleted_at', 'tenant_id', 'live_id',
+                             'is_active', 'type')))
  ORDER BY table_name, column_name;
 
 SELECT EXISTS (SELECT 1 FROM information_schema.tables
@@ -110,9 +131,12 @@ SELECT :'has_bindings'::boolean AND :'has_sources'::boolean AND :'has_connection
 \if :census_ready
 
 -- ── Q2. Legacy population — COUNT per class (one hit CTE, shared with Q3) ──
--- `legacy_rows_total` is the whole legacy shape; the eight class columns
+-- `legacy_rows_total` is the whole legacy shape; the ten class columns
 -- partition it. `backfillable` is the exact row count the migration's UPDATE
 -- will report. Everything else stays untouched by the migration.
+-- `source_inactive` + `source_type_unsupported` = the rows left alone ONLY
+-- because the source is not loadable / not a SQL read-only type (counts only,
+-- values-free; Q3 lists ids for local use, never for an evidence surface).
 WITH hit AS (
   SELECT b.id,
          b.tenant_id,
@@ -124,6 +148,8 @@ WITH hit AS (
          ds.tenant_id                          AS source_tenant_id,
          (ds.deleted_at IS NOT NULL)           AS source_soft_deleted,
          (b.config->>'dataSourceOwnerId' = ds.owner_id) AS owner_matches,
+         ds.is_active                          AS source_active,
+         (lower(ds.type) IN ('mysql', 'postgres', 'postgresql', 'sqlserver')) AS source_type_supported,
          CASE
            WHEN b.kind <> 'data-source:sql-readonly'          THEN 'non-sql-readonly-kind'
            WHEN b.legacy_connection_fallback_eligible IS TRUE THEN 'rollback-shape-marker-true'
@@ -133,6 +159,9 @@ WITH hit AS (
                                                               THEN 'owner-mismatch'
            WHEN ds.tenant_id IS NULL                          THEN 'tenant-unproven'
            WHEN ds.tenant_id <> b.tenant_id                   THEN 'tenant-mismatch'
+           WHEN ds.is_active IS NOT TRUE                      THEN 'source-inactive'
+           WHEN (lower(ds.type) IN ('mysql', 'postgres', 'postgresql', 'sqlserver')) IS NOT TRUE
+                                                              THEN 'source-type-unsupported'
            ELSE                                                    'backfillable'
          END AS class
     FROM integration_external_systems b
@@ -149,6 +178,8 @@ SELECT count(*)::int                                                     AS lega
        count(*) FILTER (WHERE class = 'owner-mismatch')::int             AS owner_mismatch,
        count(*) FILTER (WHERE class = 'tenant-unproven')::int            AS tenant_unproven,
        count(*) FILTER (WHERE class = 'tenant-mismatch')::int            AS tenant_mismatch,
+       count(*) FILTER (WHERE class = 'source-inactive')::int            AS source_inactive,
+       count(*) FILTER (WHERE class = 'source-type-unsupported')::int    AS source_type_unsupported,
        count(*) FILTER (WHERE class = 'backfillable')::int               AS backfillable
   FROM hit;
 
@@ -166,6 +197,8 @@ WITH hit AS (
          ds.tenant_id                          AS source_tenant_id,
          (ds.deleted_at IS NOT NULL)           AS source_soft_deleted,
          (b.config->>'dataSourceOwnerId' = ds.owner_id) AS owner_matches,
+         ds.is_active                          AS source_active,
+         (lower(ds.type) IN ('mysql', 'postgres', 'postgresql', 'sqlserver')) AS source_type_supported,
          CASE
            WHEN b.kind <> 'data-source:sql-readonly'          THEN 'non-sql-readonly-kind'
            WHEN b.legacy_connection_fallback_eligible IS TRUE THEN 'rollback-shape-marker-true'
@@ -175,6 +208,9 @@ WITH hit AS (
                                                               THEN 'owner-mismatch'
            WHEN ds.tenant_id IS NULL                          THEN 'tenant-unproven'
            WHEN ds.tenant_id <> b.tenant_id                   THEN 'tenant-mismatch'
+           WHEN ds.is_active IS NOT TRUE                      THEN 'source-inactive'
+           WHEN (lower(ds.type) IN ('mysql', 'postgres', 'postgresql', 'sqlserver')) IS NOT TRUE
+                                                              THEN 'source-type-unsupported'
            ELSE                                                    'backfillable'
          END AS class
     FROM integration_external_systems b
@@ -193,7 +229,9 @@ SELECT class,
        source_id,
        source_tenant_id,
        source_soft_deleted,
-       owner_matches
+       owner_matches,
+       source_active,
+       source_type_supported
   FROM hit
  ORDER BY class, tenant_id, id;
 
@@ -230,7 +268,7 @@ SELECT count(*)::int                                                            
 -- `live_id` is reported as a note only: the census itself reads deleted_at, but
 -- its absence means #5896 has not run here yet and the backfill must wait.
 SELECT 'INVENTORY_RESULT file=05-legacy-binding-census.sql status=' ||
-       CASE WHEN p.missing = '' THEN 'complete classes=8'
+       CASE WHEN p.missing = '' THEN 'complete classes=10'
             ELSE 'incomplete reason=missing-column:' || p.missing
        END ||
        CASE WHEN NOT p.has_live_id THEN ' note=data_sources.live_id-absent(#5896-not-applied)' ELSE '' END

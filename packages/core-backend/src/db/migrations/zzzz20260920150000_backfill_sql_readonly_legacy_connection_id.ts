@@ -20,7 +20,7 @@
  *     NULL by the next save. They are NOT touched here; the census (scripts/ops/
  *     readonly-inventory-20260916/05-legacy-binding-census.sql) lists them for the owner.
  *
- * WHICH ROWS (all six predicates are required, see the structural test):
+ * WHICH ROWS (predicates 1-8 and the marker predicate are all required, see the structural test):
  *   1. `b.kind = 'data-source:sql-readonly'`
  *   2. `b.connection_id IS NULL`                             — legacy shape
  *   3. `b.config->>'dataSourceId' = ds.id`                   — the pointer resolves
@@ -52,6 +52,45 @@
  *      it is left alone and reported by the census. The rows this migration DOES take are the ones
  *      neither resolver branch accepts today (`resolveLegacy` denies marker FALSE at :205-216).
  *
+ *   Predicates 7 and 8 (added with owner consent after the CONNECTION_CANONICAL_UNAVAILABLE
+ *   diagnosis, docs/development/takeover-beiliao-20260821/
+ *   stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §3 conclusion 2, states S2b /
+ *   S2c): a promoted row is resolved by `resolveCanonical`, which rewrites ANY facade failure into
+ *   CONNECTION_CANONICAL_UNAVAILABLE (connection-resolver.cjs :166-183). A source the host never
+ *   loaded fails there, so promoting a row that points at one would only swap today's
+ *   CONNECTION_LEGACY_FALLBACK_DENIED for that code. Such rows are left alone and counted by the
+ *   census (`source-inactive`, `source-type-unsupported`).
+ *   7. `ds.is_active = TRUE`                                 — the host loads only
+ *      `is_active = true AND deleted_at IS NULL` rows (src/data-adapters/DataSourceManager.ts
+ *      `loadFromDatabase` :324-325); an unloaded id gets the uniform not-found from `assertAccess`
+ *      (:621-631), which the facade passes on (data-source-plugin-facade.ts :507-513).
+ *   8. `lower(ds.type) IN (SQL_READONLY_CONNECTION_TYPES)`  — the type must be one the canonical
+ *      path can both LOAD and ACCEPT. The set is DERIVED from the two runtime checks (the unit test
+ *      re-derives it from those modules and fails on drift):
+ *        * LOAD: keys of `DEFAULT_ADAPTER_REGISTRY` (DataSourceManager.ts :193-200 — postgresql,
+ *          postgres, http, sqlserver, mysql, plm), registered by `registerDefaultAdapters`
+ *          (:453-459) through `registerAdapterType`, which lowercases the key (:461-462); `git grep`
+ *          finds no other `registerAdapterType(` call in source code (only an example in
+ *          docs/DATA_SOURCE_ADAPTERS.md). The loader tests
+ *          `record.type.toLowerCase()` (:331-333) — lowercased, NOT trimmed.
+ *        * ACCEPT: `DEFAULT_SQL_CONNECTION_TYPES` (plugin-integration-core/lib/
+ *          connection-resolver.cjs :8 — mysql, postgres, postgresql, sqlserver); the plugin does
+ *          not override it (index.cjs :308-314 passes no `allowedSqlConnectionTypes`).
+ *          `assertRegistration` trims and lowercases the registration type (:125-126, `nonBlankString`
+ *          :24-26), and that type is the raw persisted column (facade :584 `adapter.getType()` ->
+ *          BaseAdapter.ts :555-557 -> `recordToConfig` DataSourceManager.ts :415).
+ *        * Intersection: mysql, postgres, postgresql, sqlserver. Compared as `lower(ds.type)`,
+ *          untrimmed: case-insensitive like both runtime checks, and a type with surrounding
+ *          whitespace fails the (untrimmed) loader, so it is not taken either. A loadable non-SQL
+ *          type (http, plm) would be promoted into CONNECTION_TYPE_UNSUPPORTED instead
+ *          (connection-resolver.cjs :125-132); an unloadable one into CONNECTION_CANONICAL_UNAVAILABLE.
+ *      The four targets are plain ASCII letters; for them PostgreSQL `lower()` and JavaScript
+ *      `toLowerCase()` pick out the same strings (checked code point by code point in the
+ *      verification note, §11).
+ *   What 7 and 8 still cannot see: a source whose credentials fail to decrypt (diagnosis state
+ *   S2d, the loader skips it per row) and the deployment states S1 / S2e are invisible to SQL, so a
+ *   promoted row can still meet CONNECTION_CANONICAL_UNAVAILABLE for those reasons.
+ *
  * TARGET SHAPE = the insert path's shape (external-systems.cjs :862-879): `connection_id` set,
  * `config` WITHOUT `dataSourceId`, `config.dataSourceOwnerId` KEPT. The stamp is kept on purpose:
  * `withoutLegacyDataSourcePointer` (:483-488) drops only the pointer, and the insert branch
@@ -78,8 +117,14 @@
  * binding re-bound by a human after the backfill is left as the human left it, with its ledger
  * row kept as evidence.
  *
- * NOT TOUCHED: `updated_at` (this is not a user edit), `legacy_connection_fallback_eligible`,
- * credentials, capabilities, every other kind, every row whose pointer does not resolve.
+ * NOT TOUCHED: `legacy_connection_fallback_eligible`, credentials, capabilities, every other kind,
+ * every row whose pointer does not resolve, every row whose source is inactive or of a type outside
+ * SQL_READONLY_CONNECTION_TYPES, and data_sources itself (read and share-locked only).
+ * `updated_at` is not SET by this migration, but the table's own BEFORE UPDATE trigger
+ * `trg_integration_external_systems_updated_at` (packages/core-backend/migrations/
+ * 057_create_integration_core_tables.sql :182-195) stamps NOW() on every row an UPDATE writes. On a
+ * schema built by the full migration chain the backfilled rows (and the rows down() restores)
+ * therefore carry the migration time in `updated_at`; rows the statement skips keep theirs.
  */
 import { sql, type Kysely } from 'kysely'
 import { checkColumnExists, checkTableExists } from './_patterns'
@@ -87,6 +132,10 @@ import { checkColumnExists, checkTableExists } from './_patterns'
 const MIGRATION_NAME = 'zzzz20260920150000_backfill_sql_readonly_legacy_connection_id'
 const LEDGER_TABLE = 'integration_external_system_connection_backfills'
 const SQL_READONLY_KIND = 'data-source:sql-readonly'
+// Predicate 8: DEFAULT_ADAPTER_REGISTRY keys (DataSourceManager.ts :193-200) INTERSECT
+// DEFAULT_SQL_CONNECTION_TYPES (connection-resolver.cjs :8), both compared lowercased at runtime.
+// Derivation and path:line evidence in the header; the unit test re-derives it from both modules.
+const SQL_READONLY_CONNECTION_TYPES = ['mysql', 'postgres', 'postgresql', 'sqlserver']
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   if (!(await checkTableExists(db, 'integration_external_systems'))) return
@@ -115,18 +164,25 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // CONCURRENCY (F1 of the window-8 review). Under READ COMMITTED the `hit` candidates come from the
   // statement snapshot. A concurrent writer may commit a change to a candidate between that
   // snapshot and the UPDATE — e.g. a legitimate legacy -> canonical rebind to another source. Two
-  // guards make the write re-prove all seven predicates against the CURRENT rows:
+  // guards make the write re-prove every predicate against the CURRENT rows:
   //   * binding side (predicates 1, 2, 3, 4, 6 and the marker): repeated in the UPDATE's own WHERE,
   //     against `b` = the row being written. When the UPDATE waits on a writer's row lock,
   //     PostgreSQL re-evaluates this WHERE on the committed new row version (EvalPlanQual), so a
   //     row that was rebound, re-kinded, re-pointed, re-stamped, moved tenant or flagged in between
   //     is SKIPPED, not overwritten. (The `hit` columns are frozen CTE values; they are compared
   //     against the live row, never written blindly.)
-  //   * source side (predicates 3-6 on `ds`): `FOR SHARE OF ds` locks every joined source for the
+  //   * source side (predicates 3-8 on `ds`): `FOR SHARE OF ds` locks every joined source for the
   //     rest of the transaction and, if a source was being changed, re-evaluates the join against
-  //     the committed new version. A concurrent soft-delete / owner change / tenant change of the
-  //     source therefore either finishes first (and the candidate drops out) or waits until the
-  //     backfill commits.
+  //     the committed new version. A concurrent soft-delete / owner change / tenant change /
+  //     deactivation / type change of the source therefore either finishes first (and the
+  //     candidate drops out) or waits until the backfill commits.
+  //     These source-side predicates are deliberately NOT repeated in the UPDATE: the UPDATE does
+  //     not lock data_sources, and a data_sources predicate there (join or sub-select) is evaluated
+  //     against the statement snapshot, not the newest committed version — it cannot see a
+  //     deactivation the CTE's lock wait has already seen. The CTE's locked re-check is the one
+  //     that holds, and from it until COMMIT the share lock keeps the source rows unchanged.
+  //     (Executed evidence: moving predicate 7 or 8 out of the CTE into an UPDATE sub-select lets
+  //     the concurrent deactivation / type change through — the race suite reds exactly that case.)
   //
   // LOCKING COST (operator note). The share lock on every candidate source is held until the
   // migrate batch COMMITS; for that whole time UPDATE/DELETE on those data_sources rows (edit,
@@ -154,6 +210,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
        AND b.config->>'dataSourceOwnerId' = ds.owner_id
        AND ds.deleted_at IS NULL
        AND ds.tenant_id = b.tenant_id
+       AND ds.is_active = TRUE
+       AND lower(ds.type) IN (${sql.join(SQL_READONLY_CONNECTION_TYPES)})
       WHERE b.kind = ${SQL_READONLY_KIND}
         AND b.connection_id IS NULL
         AND b.legacy_connection_fallback_eligible IS NOT TRUE
