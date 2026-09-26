@@ -2,48 +2,55 @@
   <div class="meta-dashboard">
     <!-- Dashboard selector / header -->
     <div class="meta-dashboard__header">
-      <!-- A2 (2026-09-25): the workbench had no way back to the grid once the dashboard was open
-           other than re-clicking the toolbar toggle. This is the first control in the header. -->
-      <button
-        class="meta-dashboard__btn meta-dashboard__btn--sm"
-        type="button"
-        data-action="back-to-table"
-        @click="$emit('close')"
-      >{{ viewRenderLabel('dashboard.backToTable', isZh) }}</button>
-      <div class="meta-dashboard__selector">
-        <template v-if="editingName">
-          <input
-            ref="nameInputRef"
-            v-model="nameInput"
-            class="meta-dashboard__name-input"
-            type="text"
-            data-field="dashboard-name"
-            @blur="finishRename"
-            @keydown.enter="finishRename"
-            @keydown.escape="editingName = false"
-          />
-        </template>
-        <template v-else>
-          <select
-            v-if="dashboards.length > 1"
-            v-model="activeDashboardId"
-            class="meta-dashboard__select"
-            data-field="dashboard-select"
-          >
-            <option v-for="d in dashboards" :key="d.id" :value="d.id">{{ d.name }}</option>
-          </select>
-          <span v-else-if="activeDashboard" class="meta-dashboard__active-name" @dblclick="startRename">
-            {{ activeDashboard.name }}
-          </span>
-        </template>
+      <!-- N2 (2026-09-25 review): `.meta-dashboard__header` is `justify-content: space-between`, so a
+           bare third child would push `.meta-dashboard__selector` into the centre instead of leaving
+           it pinned to the left edge next to the actions on the right. Grouping the back button with
+           the selector under one `.meta-dashboard__header-left` keeps the header back to its original
+           two-child space-between layout (left group vs. `.meta-dashboard__actions`). -->
+      <div class="meta-dashboard__header-left">
+        <!-- A2 (2026-09-25): the workbench had no way back to the grid once the dashboard was open
+             other than re-clicking the toolbar toggle. -->
         <button
-          v-if="activeDashboard && !editingName"
           class="meta-dashboard__btn meta-dashboard__btn--sm"
           type="button"
-          :title="viewRenderLabel('dashboard.rename', isZh)"
-          data-action="rename"
-          @click="startRename"
-        >{{ viewRenderLabel('dashboard.rename', isZh) }}</button>
+          data-action="back-to-table"
+          @click="$emit('close')"
+        >{{ viewRenderLabel('dashboard.backToTable', isZh) }}</button>
+        <div class="meta-dashboard__selector">
+          <template v-if="editingName">
+            <input
+              ref="nameInputRef"
+              v-model="nameInput"
+              class="meta-dashboard__name-input"
+              type="text"
+              data-field="dashboard-name"
+              @blur="finishRename"
+              @keydown.enter="finishRename"
+              @keydown.escape="editingName = false"
+            />
+          </template>
+          <template v-else>
+            <select
+              v-if="dashboards.length > 1"
+              v-model="activeDashboardId"
+              class="meta-dashboard__select"
+              data-field="dashboard-select"
+            >
+              <option v-for="d in dashboards" :key="d.id" :value="d.id">{{ d.name }}</option>
+            </select>
+            <span v-else-if="activeDashboard" class="meta-dashboard__active-name" @dblclick="startRename">
+              {{ activeDashboard.name }}
+            </span>
+          </template>
+          <button
+            v-if="activeDashboard && !editingName"
+            class="meta-dashboard__btn meta-dashboard__btn--sm"
+            type="button"
+            :title="viewRenderLabel('dashboard.rename', isZh)"
+            data-action="rename"
+            @click="startRename"
+          >{{ viewRenderLabel('dashboard.rename', isZh) }}</button>
+        </div>
       </div>
       <div class="meta-dashboard__actions">
         <button
@@ -1409,6 +1416,7 @@ onBeforeUnmount(resetChartPreview)
 .meta-dashboard { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
 
 .meta-dashboard__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.meta-dashboard__header-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .meta-dashboard__selector { display: flex; align-items: center; gap: 8px; }
 .meta-dashboard__actions { display: flex; gap: 8px; }
 

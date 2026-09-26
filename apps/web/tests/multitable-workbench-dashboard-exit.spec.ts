@@ -1,8 +1,20 @@
 // A2 (2026-09-25, 客户反馈 2026-09-24 #6, 裁定见 PR #6074): once the dashboard toolbar toggle opened
-// MetaDashboardView, none of the sidebar navigation paths (select a different/the-same view, switch
-// base) reset `showDashboardView`, and MetaDashboardView itself had no back control — there was no
-// way back to the grid short of re-clicking the toggle button. This spec pins the fix: every listed
-// navigation path (plus the dashboard's own new `close` emit) returns to the grid.
+// MetaDashboardView, none of the sidebar navigation paths reset `showDashboardView`, and
+// MetaDashboardView itself had no back control — there was no way back to the grid short of
+// re-clicking the toggle button. This spec pins the fix across every navigation path that switches
+// context away from the grid: select a different/the-same view, select a different/the-same sheet,
+// switch base, the notification bell's click-to-locate (same-sheet and delegated-to-onSelectSheet
+// branches), the History Center's click-through (same-sheet branch), create/delete a view,
+// create/delete a sheet, install a template, an external-context sync (embed postMessage / the
+// baseId+sheetId+viewId props watcher) that actually switches context, and the dashboard's own new
+// `close` emit.
+//
+// S1 (2026-09-25 review): this spec stubs out MetaDashboardView itself, so it proves nothing about
+// the real component's back-to-table button — that half is pinned separately in
+// tests/multitable-dashboard-view.spec.ts (mounts the real component).
+//
+// N1 (2026-09-25 review): a cancelled discard-unsaved-changes confirm must leave the dashboard
+// exactly as it was — see "a cancelled context switch leaves the dashboard open" below.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
@@ -25,9 +37,9 @@ function stubComponent(name: string) {
   })
 }
 
-// The rail stub exposes two controls: re-selecting the ALREADY-active view (the early-return branch
-// `onSelectView` takes) and selecting a genuinely different one — the two "click the rail" scenarios
-// this fix covers.
+// The rail stub exposes controls for re-selecting the ALREADY-active view/sheet (the early-return
+// branches `onSelectView`/`onSelectSheet` take), selecting a genuinely different view, and creating
+// or deleting a sheet — the "click the rail" scenarios this fix covers.
 function stubMetaSheetViewRail() {
   return defineComponent({
     name: 'MetaSheetViewRail',
@@ -44,6 +56,120 @@ function stubMetaSheetViewRail() {
           'data-testid': 'stub-select-view-other',
           onClick: () => emit('select-view', 'view_grid_2'),
         }, 'select-view-other'),
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-select-sheet-same',
+          onClick: () => emit('select-sheet', 'sheet_orders'),
+        }, 'select-sheet-same'),
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-create-sheet',
+          onClick: () => emit('create-sheet', 'New Sheet'),
+        }, 'create-sheet'),
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-delete-sheet-active',
+          onClick: () => emit('delete-sheet', 'sheet_orders'),
+        }, 'delete-sheet-active'),
+      ])
+    },
+  })
+}
+
+// S2 (2026-09-25 review): a minimal stub for the notification bell — exposes the same-sheet
+// click-to-locate (its own exitDashboard call, S4) and the different-sheet one (delegates to
+// onSelectSheet, N1-gated).
+function stubMetaNotificationBell() {
+  return defineComponent({
+    name: 'MetaNotificationBell',
+    props: ['apiClient'],
+    emits: ['navigate'],
+    setup(_, { emit }) {
+      return () => h('div', { 'data-stub-MetaNotificationBell': 'true' }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-notification-navigate-same-sheet',
+          onClick: () => emit('navigate', { sheetId: 'sheet_orders', recordId: 'rec_1' }),
+        }, 'navigate-same-sheet'),
+      ])
+    },
+  })
+}
+
+// S2/S3 (2026-09-25 review): a minimal stub for the view manager modal — exposes create-view and
+// delete-view (targeting the currently active view, the S3 bug fix).
+function stubMetaViewManager() {
+  return defineComponent({
+    name: 'MetaViewManager',
+    emits: ['close', 'create-view', 'update-view', 'delete-view', 'update:dirty'],
+    setup(_, { emit }) {
+      return () => h('div', { 'data-stub-MetaViewManager': 'true' }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-create-view',
+          onClick: () => emit('create-view', { sheetId: 'sheet_orders', name: 'New View', type: 'grid' }),
+        }, 'create-view'),
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-delete-view-active',
+          onClick: () => emit('delete-view', 'view_grid'),
+        }, 'delete-view-active'),
+      ])
+    },
+  })
+}
+
+// S4 (2026-09-25 review): a minimal stub for the History Center modal — exposes the same-sheet
+// click-through branch of onHistoryOpenRecord.
+function stubHistoryCenterModal() {
+  return defineComponent({
+    name: 'HistoryCenterModal',
+    props: ['open', 'baseId', 'sheetId', 'fields', 'linkSummaries', 'personSummaries', 'initialBatchId', 'canRestoreRecords'],
+    emits: ['close', 'open-record', 'restored'],
+    setup(_, { emit }) {
+      return () => h('div', { 'data-stub-HistoryCenterModal': 'true' }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-history-open-record-same-sheet',
+          onClick: () => emit('open-record', { sheetId: 'sheet_orders', recordId: 'rec_1' }),
+        }, 'open-record-same-sheet'),
+      ])
+    },
+  })
+}
+
+// S4 (2026-09-25 review): a minimal stub for the template card so the template-library install
+// button can be driven without the real card's chart/badge computed properties.
+function stubMetaTemplateCard() {
+  return defineComponent({
+    name: 'MetaTemplateCard',
+    props: ['template', 'installing'],
+    emits: ['install', 'detail', 'delete'],
+    setup(props, { emit }) {
+      return () => h('div', { 'data-stub-MetaTemplateCard': 'true' }, [
+        h('button', {
+          type: 'button',
+          'data-testid': `stub-install-template-${(props as any).template?.id}`,
+          onClick: () => emit('install', (props as any).template),
+        }, 'install'),
+      ])
+    },
+  })
+}
+
+// N1/S2 (2026-09-25 review): a minimal stub for the field manager modal — exposes `update:dirty` so
+// a test can force `hasUnsavedWorkbenchDrafts` true and drive the discard-changes confirm gate.
+function stubMetaFieldManagerDirty() {
+  return defineComponent({
+    name: 'MetaFieldManager',
+    emits: ['update:dirty', 'bulk-fill', 'close', 'create-field', 'update-field', 'delete-field'],
+    setup(_, { emit }) {
+      return () => h('div', { 'data-stub-MetaFieldManager': 'true' }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-field-manager-mark-dirty',
+          onClick: () => emit('update:dirty', true),
+        }, 'mark-dirty'),
       ])
     },
   })
@@ -146,6 +272,19 @@ vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
 }))
 
+// S4/N1 (2026-09-25 review): onCreateSheet/onInstallTemplate gate on canCreateBasesAndSheets, which
+// reads auth.getAccessSnapshot() directly (not through any of the composables already mocked above).
+// Grant isAdmin so the toolbar's template-library button and the rail's create-sheet path are live.
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getAccessSnapshot: () => ({ email: 'test@example.com', roles: ['admin'], permissions: [], isAdmin: true }),
+    getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+    // useMultitableSheetPresence/comments-realtime (reached through this component's own setup, not
+    // through any of the composables already mocked above) also call these two.
+    getToken: () => null,
+  }),
+}))
+
 vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({
   useMultitableSheetRealtime: vi.fn(),
 }))
@@ -161,7 +300,7 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubC
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
 vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
 vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
-vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
+vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubMetaFieldManagerDirty() }))
 vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
 vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
 vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
@@ -169,6 +308,10 @@ vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: s
 vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
 vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubMetaBasePicker() }))
 vi.mock('../src/multitable/components/MetaDashboardView.vue', () => ({ default: stubMetaDashboardView() }))
+vi.mock('../src/multitable/components/MetaNotificationBell.vue', () => ({ default: stubMetaNotificationBell() }))
+vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({ default: stubMetaViewManager() }))
+vi.mock('../src/multitable/components/HistoryCenterModal.vue', () => ({ default: stubHistoryCenterModal() }))
+vi.mock('../src/multitable/components/MetaTemplateCard.vue', () => ({ default: stubMetaTemplateCard() }))
 
 vi.mock('../src/multitable/components/MetaToast.vue', () => ({
   default: defineComponent({
@@ -211,14 +354,26 @@ function createWorkbenchMock() {
       updateView: vi.fn(),
       loadFormContext: vi.fn(),
       getRecord: vi.fn(),
-      createSheet: vi.fn(),
+      createSheet: vi.fn().mockResolvedValue({ sheet: { id: 'sheet_new', baseId: 'base_ops', name: 'New Sheet' } }),
+      deleteSheet: vi.fn().mockResolvedValue(undefined),
       createBase: vi.fn(),
       createField: vi.fn(),
       preparePersonField: vi.fn(),
       updateField: vi.fn(),
       deleteField: vi.fn(),
-      createView: vi.fn(),
-      deleteView: vi.fn(),
+      createView: vi.fn().mockResolvedValue({ view: { id: 'view_new', sheetId: 'sheet_orders', name: 'New View', type: 'grid' } }),
+      // S3 (2026-09-25 review): actually removes the view, the same shape as the real server call, so
+      // the loadSheetMeta mock below can faithfully reproduce the bug this fixes (activeViewId already
+      // reset to the fallback by the time onDeleteView's OWN check used to run).
+      deleteView: vi.fn(async (viewId: string) => { views.value = views.value.filter((view) => view.id !== viewId) }),
+      // S4 (2026-09-25 review): onInstallTemplate/loadTemplateLibrary.
+      listTemplates: vi.fn().mockResolvedValue({ templates: [{ id: 'tpl_1', name: 'Tpl', sheets: [], fields: [], views: [] }] }),
+      installTemplate: vi.fn().mockResolvedValue({
+        base: { id: 'base_tpl', name: 'Templated Base' },
+        sheets: [{ id: 'sheet_tpl', baseId: 'base_tpl', name: 'Templated Sheet' }],
+        views: [{ id: 'view_tpl', sheetId: 'sheet_tpl', name: 'Templated View', type: 'grid' }],
+        template: { id: 'tpl_1', name: 'Tpl' },
+      }),
       patchRecords: vi.fn(),
       submitForm: vi.fn(),
       renameSheet: vi.fn(),
@@ -242,6 +397,8 @@ function createWorkbenchMock() {
       canManageViews: true,
       canComment: true,
       canManageAutomation: false, canExport: true,
+      // S4 (2026-09-25 review): onDeleteSheet's own capability gate.
+      canDeleteSheet: true,
     }),
     capabilityOrigin: ref(null),
     fieldPermissions: ref({}),
@@ -251,7 +408,17 @@ function createWorkbenchMock() {
     error: ref<string | null>(null),
     loadSheets: vi.fn().mockResolvedValue(true),
     loadBaseContext: vi.fn().mockResolvedValue(true),
-    loadSheetMeta: vi.fn().mockResolvedValue(true),
+    // S3 (2026-09-25 review): the real useMultitableWorkbench.loadSheetMeta falls activeViewId back
+    // to views[0] once the requested/active view is no longer in the reloaded list — reproduce that
+    // one fallback bit here (nothing else this spec needs) so onDeleteView's "was it active" check
+    // sees the SAME already-moved-on activeViewId a real deleteView -> loadSheetMeta round trip would
+    // leave behind.
+    loadSheetMeta: vi.fn(async () => {
+      if (!views.value.some((view) => view.id === activeViewId.value)) {
+        activeViewId.value = views.value[0]?.id ?? ''
+      }
+      return true
+    }),
     switchBase: vi.fn(async (baseId: string) => { activeBaseId.value = baseId; return true }),
     syncExternalContext: vi.fn().mockResolvedValue(true),
     selectBase: vi.fn((baseId: string) => { activeBaseId.value = baseId }),
@@ -319,12 +486,18 @@ function createGridMock() {
 describe('MultitableWorkbench dashboard exit (A2)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
+  // S4 (2026-09-25 review): the public surface `defineExpose`s — including requestExternalContextSync,
+  // the external-context-sync entry point reached from the props watcher and the embed's postMessage
+  // handler — captured off a template ref so the test can call it directly, the same way an embed host
+  // (or the watcher) would through this exact function.
+  let workbenchInstance: { requestExternalContextSync: (...args: any[]) => Promise<unknown> } | null = null
 
   beforeEach(() => {
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     container = document.createElement('div')
     document.body.appendChild(container)
+    workbenchInstance = null
   })
 
   afterEach(() => {
@@ -332,13 +505,16 @@ describe('MultitableWorkbench dashboard exit (A2)', () => {
     if (container) container.remove()
     app = null
     container = null
+    workbenchInstance = null
     vi.clearAllMocks()
   })
 
   function mountWorkbench(): HTMLDivElement {
     const Host = defineComponent({
       setup() {
-        return () => h(MultitableWorkbench as Component)
+        return () => h(MultitableWorkbench as Component, {
+          ref: (el: any) => { workbenchInstance = el },
+        })
       },
     })
     app = createApp(Host)
@@ -434,5 +610,213 @@ describe('MultitableWorkbench dashboard exit (A2)', () => {
 
     expect(isDashboardShown(root)).toBe(false)
     expect(isGridShown(root)).toBe(true)
+  })
+
+  // S2 (2026-09-25 review): the rail's OTHER navigation emit.
+  it('selecting the same sheet from the rail returns to the grid', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-select-sheet-same"]')!.click()
+    await flushUi()
+
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+    // The early-return branch never calls workbench.selectSheet — it is already the active sheet.
+    expect(workbenchMock.selectSheet).not.toHaveBeenCalled()
+  })
+
+  // S2 (2026-09-25 review): the notification bell's same-sheet locate — its own exitDashboard call
+  // (A2), separate from the delegated-to-onSelectSheet different-sheet branch.
+  it("the notification bell's same-sheet locate returns to the grid", async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-notification-navigate-same-sheet"]')!.click()
+    await flushUi()
+
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+    expect(workbenchMock.selectSheet).not.toHaveBeenCalled()
+  })
+
+  // S2 (2026-09-25 review): create view (onCreateView already called exitDashboard() before this
+  // review round — this pins that it is actually wired up and reachable end to end).
+  it('creating a view returns to the grid', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-create-view"]')!.click()
+    await flushUi()
+
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+    expect(workbenchMock.client.createView).toHaveBeenCalledWith(
+      expect.objectContaining({ sheetId: 'sheet_orders', name: 'New View', type: 'grid' }),
+    )
+    expect(workbenchMock.selectView).toHaveBeenCalledWith('view_new')
+  })
+
+  // S3 (2026-09-25 review): onDeleteView's exit never ran on success — loadSheetMeta resets
+  // activeViewId (to the fallback view) BEFORE onDeleteView's own "was it active" check, so that
+  // check always read the fallback, never the deleted view's id. The mock's loadSheetMeta reproduces
+  // exactly that fallback so this test would have failed before the wasActive capture.
+  it('deleting the active view returns to the grid (S3)', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+    expect(workbenchMock.activeViewId.value).toBe('view_grid')
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-delete-view-active"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.deleteView).toHaveBeenCalledWith('view_grid')
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+    // The fallback loadSheetMeta leaves behind — the only view left is view_grid_2.
+    expect(workbenchMock.activeViewId.value).toBe('view_grid_2')
+  })
+
+  // S4 (2026-09-25 review): create sheet.
+  it('creating a sheet returns to the grid', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-create-sheet"]')!.click()
+    await flushUi()
+
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+    expect(workbenchMock.client.createSheet).toHaveBeenCalledWith(expect.objectContaining({ name: 'New Sheet' }))
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith(expect.objectContaining({ sheetId: 'sheet_new' }))
+  })
+
+  // S4 (2026-09-25 review): delete the active sheet.
+  it('deleting the active sheet returns to the grid', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      root.querySelector<HTMLButtonElement>('[data-testid="stub-delete-sheet-active"]')!.click()
+      await flushUi()
+    } finally {
+      confirmSpy.mockRestore()
+    }
+
+    expect(workbenchMock.client.deleteSheet).toHaveBeenCalledWith('sheet_orders')
+    expect(workbenchMock.loadBaseContext).toHaveBeenCalledWith('base_ops')
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+  })
+
+  // S4 (2026-09-25 review): install a template.
+  it('installing a template returns to the grid', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+    await flushUi()
+    const installBtn = root.querySelector<HTMLButtonElement>('[data-testid="stub-install-template-tpl_1"]')
+    expect(installBtn).toBeTruthy()
+    installBtn!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.installTemplate).toHaveBeenCalledWith('tpl_1')
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+  })
+
+  // S4 (2026-09-25 review): the external-context sync path, reached from the baseId/sheetId/viewId
+  // props watcher and the embed's postMessage handler alike — both call this exact exposed function.
+  // Calling it directly here is the same entry point either caller uses.
+  it('an external context sync that switches context returns to the grid', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+    expect(workbenchInstance).toBeTruthy()
+
+    const result: any = await workbenchInstance!.requestExternalContextSync({
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid_2',
+    })
+    await flushUi()
+
+    expect(result.status).toBe('applied')
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith(
+      expect.objectContaining({ baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_grid_2' }),
+    )
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+  })
+
+  // S4 (2026-09-25 review): the same-sheet branch of onHistoryOpenRecord — skips onSelectSheet (and
+  // its own exitDashboard call) entirely, the same gap onNotificationNavigate's same-sheet case had.
+  it('opening a same-sheet history record returns to the grid', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-history-open-record-same-sheet"]')!.click()
+    await flushUi()
+
+    expect(isDashboardShown(root)).toBe(false)
+    expect(isGridShown(root)).toBe(true)
+    expect(workbenchMock.selectSheet).not.toHaveBeenCalled()
+  })
+
+  // N1 (2026-09-25 review): exitDashboard() used to run BEFORE confirmDiscardContextChanges(), so a
+  // user who declined the discard-unsaved-changes prompt still lost the dashboard even though nothing
+  // switched. Force hasUnsavedWorkbenchDrafts true (the field manager's dirty flag) and decline the
+  // confirm — the dashboard must stay exactly as it was.
+  it('a cancelled context switch (declined discard-changes confirm) leaves the dashboard open', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+    toggleButton(root).click()
+    await flushUi()
+    expect(isDashboardShown(root)).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-field-manager-mark-dirty"]')!.click()
+    await flushUi()
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      root.querySelector<HTMLButtonElement>('[data-testid="stub-select-view-other"]')!.click()
+      await flushUi()
+      expect(confirmSpy).toHaveBeenCalled()
+    } finally {
+      confirmSpy.mockRestore()
+    }
+
+    // The switch was cancelled — it never happened — so the dashboard must still be showing, not the
+    // grid, and the view must not have switched either.
+    expect(workbenchMock.selectView).not.toHaveBeenCalled()
+    expect(isDashboardShown(root)).toBe(true)
+    expect(isGridShown(root)).toBe(false)
   })
 })

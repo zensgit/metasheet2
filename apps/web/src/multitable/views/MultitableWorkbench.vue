@@ -1452,6 +1452,11 @@ function openHistoryForBatch(batchId: string) {
 async function onHistoryOpenRecord(payload: { sheetId: string; recordId: string }) {
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
     if (!onSelectSheet(payload.sheetId)) return
+  } else {
+    // S4 (2026-09-25 review): the same-sheet branch skips onSelectSheet (and its own exitDashboard
+    // call) entirely — same gap as onNotificationNavigate's same-sheet case. No confirm gates this
+    // branch (nothing is switching), so exiting unconditionally here is safe.
+    exitDashboard()
   }
   closeHistory()
   await resolveDeepLink(payload.recordId)
@@ -3920,10 +3925,15 @@ async function updateViewInternal(
 }
 
 async function onDeleteView(viewId: string) {
+  // S3 (2026-09-25 review): loadSheetMeta below re-syncs the view list AND resets activeViewId (it
+  // falls back to views[0] once the deleted view is gone), so checking `activeViewId.value ===
+  // viewId` AFTER the reload never matches — the exit (and the fallback selectView) silently never
+  // ran. Capture whether the deleted view was active BEFORE the reload.
+  const wasActive = workbench.activeViewId.value === viewId
   try {
     await workbench.client.deleteView(viewId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
-    if (workbench.activeViewId.value === viewId) {
+    if (wasActive) {
       workbench.selectView(workbench.views.value[0]?.id ?? '')
       exitDashboard()
     }
@@ -3989,6 +3999,7 @@ async function onCreateSheet(name: string) {
       showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
       return
     }
+    exitDashboard() // S4 (2026-09-25 review)
   } catch (e: any) { showError(e.message ?? wb('toast.sheetCreateFailed', isZh.value)) }
 }
 
@@ -4035,6 +4046,7 @@ async function onDeleteSheet(sheetId: string) {
   if (sheetId === workbench.activeSheetId.value) {
     const ok = await workbench.loadBaseContext(workbench.activeBaseId.value)
     if (!ok) showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+    exitDashboard() // S4 (2026-09-25 review)
   } else {
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
   }
@@ -4070,9 +4082,16 @@ function exitDashboard() {
 }
 
 async function onSelectBase(baseId: string) {
-  exitDashboard()
-  if (baseId === workbench.activeBaseId.value) return
+  // N1 (2026-09-25 review): exitDashboard() must not run until the switch actually happens — a
+  // discard-changes confirm the user CANCELS must leave the dashboard exactly as it was. The
+  // already-active equality branch never prompts, so it still exits immediately (re-clicking the
+  // current base while the dashboard is open returns to the grid instead of doing nothing).
+  if (baseId === workbench.activeBaseId.value) {
+    exitDashboard()
+    return
+  }
   if (!confirmDiscardContextChanges()) return
+  exitDashboard()
   const ok = await workbench.switchBase(baseId)
   if (!ok) {
     showError(workbench.error.value ?? wb('toast.baseLoadFailed', isZh.value))
@@ -4093,9 +4112,14 @@ function rememberWorkbenchBaseOpen(baseId: string) {
 // user cancelled the discard-unsaved-changes confirm. Callers that depend on the switch (e.g. the
 // notification bell's click-to-locate) MUST honor a false return.
 function onSelectSheet(sheetId: string): boolean {
-  exitDashboard()
-  if (sheetId === workbench.activeSheetId.value) return true
+  // N1 (2026-09-25 review): same reasoning as onSelectBase — do not exit until the switch is
+  // actually going to happen, so a cancelled discard-changes confirm leaves the dashboard open.
+  if (sheetId === workbench.activeSheetId.value) {
+    exitDashboard()
+    return true
+  }
   if (!confirmDiscardContextChanges()) return false
+  exitDashboard()
   workbench.selectSheet(sheetId)
   return true
 }
@@ -4105,20 +4129,29 @@ function onSelectSheet(sheetId: string): boolean {
 // switch is cancelled (unsaved-changes discard declined), do NOT locate — that would look the record
 // up in the wrong sheet and report not-found.
 async function onNotificationNavigate(payload: { sheetId: string; recordId: string }) {
-  // A2: a same-sheet locate skips onSelectSheet (and its own exitDashboard call) entirely, so this
-  // path needs its own reset — otherwise locating a record while the dashboard is open would leave
-  // the dashboard showing instead of surfacing the record.
-  exitDashboard()
   if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
+    // The different-sheet case delegates entirely to onSelectSheet, which (N1, 2026-09-25 review)
+    // only exits the dashboard once the switch actually happens — a cancelled discard-changes
+    // confirm here must leave the dashboard open, not close it and then abort the navigate.
     if (!onSelectSheet(payload.sheetId)) return
+  } else {
+    // A2: a same-sheet locate skips onSelectSheet (and its own exitDashboard call) entirely, so this
+    // path needs its own reset — otherwise locating a record while the dashboard is open would leave
+    // the dashboard showing instead of surfacing the record. No confirm gates this branch (nothing is
+    // switching), so exiting unconditionally here is safe.
+    exitDashboard()
   }
   await resolveDeepLink(payload.recordId)
 }
 
 function onSelectView(viewId: string) {
-  exitDashboard()
-  if (viewId === workbench.activeViewId.value) return
+  // N1 (2026-09-25 review): same reasoning as onSelectBase/onSelectSheet.
+  if (viewId === workbench.activeViewId.value) {
+    exitDashboard()
+    return
+  }
   if (!confirmDiscardContextChanges()) return
+  exitDashboard()
   workbench.selectView(viewId)
 }
 
@@ -4482,6 +4515,12 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
+  // S4 (2026-09-25 review): a real context switch just landed (from the props watcher or the embed's
+  // postMessage handler) — same "you actually navigated" trigger as onSelectSheet/onSelectView, so the
+  // dashboard should not still be covering the grid. NOT called on the fast 'applied' path above (the
+  // requested context already matched — nothing moved) nor on 'blocked'/'deferred'/'failed' — those
+  // never navigated, and 'blocked' in particular is the user cancelling the discard-changes confirm.
+  exitDashboard()
   // #5750 follow-up: same as the replay echo above -- report the RESOLVED triple, never the requested
   // one, whenever what is on screen is this request's own resolution. The fast-path 'applied' return
   // at the top of this function already reports the live triple (it has just proved the refs equal the
@@ -4633,6 +4672,7 @@ async function onInstallTemplate(template: MetaTemplate) {
       showError(workbench.error.value ?? wb('toast.templateRefreshFailed', isZh.value))
       return
     }
+    exitDashboard() // S4 (2026-09-25 review)
     rememberWorkbenchBaseOpen(result.base.id)
     showTemplateLibrary.value = false
     showSuccess(fmtTemplateInstalled(result.template.name, isZh.value))
