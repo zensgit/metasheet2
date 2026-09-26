@@ -167,7 +167,9 @@ function globalHistoryFlagsInSource() {
   const dingtalkTodoMirror = grepFlagTokens('DINGTALK_TODO_MIRROR_[A-Z_0-9]+')
     .filter((t) => !t.endsWith('_'))
     .filter((t) => !NON_GH_EXACT.has(t))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror])].sort()
+  // Task routes mount only when this flag is the exact string true (AGENTS.md: every new env flag).
+  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {

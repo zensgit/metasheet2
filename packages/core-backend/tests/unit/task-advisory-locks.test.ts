@@ -1,9 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   acquireTaskProjectionLock,
   acquireTaskStructureLock,
   acquireTasksSchedulerLeaderLock,
 } from '../../src/db/task-advisory-locks'
+
+vi.mock('../../src/tasks/task-lock-keys', () => ({
+  taskStructureLockKey: (orgId: string) => `sentinel-structure:${orgId}`,
+  taskProjectionLockKey: (listId: string, taskId: string) => `sentinel-projection:${listId}:${taskId}`,
+  tasksSchedulerLeaderLockKey: () => 'sentinel-scheduler',
+}))
 
 const SQL = 'SELECT pg_advisory_xact_lock(hashtext($1))'
 
@@ -21,17 +27,17 @@ async function capture(
 describe('task advisory locks', () => {
   it('structure lock awaits one-arg xact lock', async () => {
     const seen = await capture((query) => acquireTaskStructureLock(query, 'org-1'))
-    expect(seen).toEqual({ sql: SQL, params: ['task-structure:org-1'] })
+    expect(seen).toEqual({ sql: SQL, params: ['sentinel-structure:org-1'] })
   })
 
   it('projection lock awaits one-arg xact lock', async () => {
     const seen = await capture((query) => acquireTaskProjectionLock(query, 'list-1', 'task-1'))
-    expect(seen).toEqual({ sql: SQL, params: ['task-projection:list-1:task-1'] })
+    expect(seen).toEqual({ sql: SQL, params: ['sentinel-projection:list-1:task-1'] })
   })
 
   it('scheduler lock awaits one-arg xact lock', async () => {
     const seen = await capture((query) => acquireTasksSchedulerLeaderLock(query))
-    expect(seen).toEqual({ sql: SQL, params: ['tasks-scheduler:leader'] })
+    expect(seen).toEqual({ sql: SQL, params: ['sentinel-scheduler'] })
   })
 
   it('does not resolve before the query settles (missing await would pass too early)', async () => {

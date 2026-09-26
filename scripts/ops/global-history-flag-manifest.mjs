@@ -611,6 +611,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'Poll interval for the DingTalk todo-mirror delivery worker\'s setInterval tick (runBatch). Number(process.env...) || 30_000 then Math.max(5_000, ...): an unset/blank/non-numeric value falls back to the 30s default, and any in-range or larger value is honoured verbatim — only a value below 5000 gets clamped up to the 5s floor. No-op unless DINGTALK_TODO_MIRROR_ENABLED is active (the worker is never constructed otherwise).',
     source: 'packages/core-backend/src/index.ts:3948',
   },
+  {
+    key: 'TASKS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks.',
+    source: 'packages/core-backend/src/routes/tasks.ts:35',
+  },
 ])
 
 /** Flat lookup by key, built once. */

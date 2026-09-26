@@ -1,6 +1,6 @@
 /**
- * P0-A task routes. The factory returns null unless TASKS_ENABLED is the
- * exact string 'true'.
+ * P0-A task routes. The factory returns null unless the tasks feature flag
+ * is the exact string 'true'.
  */
 import type { Request, Response } from 'express'
 import { Router } from 'express'

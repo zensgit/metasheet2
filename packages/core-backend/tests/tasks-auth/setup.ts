@@ -1,7 +1,10 @@
 if (!process.env.DATABASE_URL) {
-  throw new Error('tasks auth gate requires DATABASE_URL')
+  throw new Error('tasks auth gate requires DATABASE_URL; refusing skip-shaped green')
 }
 
+process.env.RBAC_BYPASS = 'false'
+process.env.RBAC_TOKEN_TRUST = 'false'
+process.env.PRODUCT_MODE = 'plm-workbench'
 process.env.TASKS_ENABLED = 'true'
 process.env.TASKS_AUTH_GATE_SETUP = '1'
 
