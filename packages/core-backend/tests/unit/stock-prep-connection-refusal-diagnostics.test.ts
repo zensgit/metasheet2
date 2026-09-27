@@ -18,30 +18,40 @@
  *       (R3) and the response code on the route-failure line (R2) — each exactly once.
  *   (c) no fixture value — id, tenant, owner, login, database name, password — is in any log line.
  */
-import { beforeAll, describe, expect, it } from 'vitest'
+import util from 'node:util'
+
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import {
   CANONICAL_REFUSAL_RESPONSE,
   HOSTILE_ERROR_CODE,
   HOSTILE_ERROR_MESSAGE,
   LOAD_FAILED_MESSAGE,
+  OTHER_OWNER,
   OWNER,
+  PASSWORD,
   PULL_ACTION_ID,
   REFUSAL_LOG_MESSAGE,
   ROUTE_FAILED_MESSAGE,
   SCHEDULER_USER,
   SENTINEL,
+  SHAPED_UNLISTED_ERROR_CODE,
+  SHAPED_UNLISTED_ERROR_NAME,
   TENANT,
   createMemoryDataSourcesKysely,
   createMemoryPluginDb,
+  createPluginStorage,
   createRefusalStack,
   dataSourceRow,
   externalSystemRow,
   hostileReadError,
   logLinesSince,
   postScheduledDryRun,
+  postTableActionRoute,
   refusalStates,
   resolvableState,
+  shapedUnlistedCodeError,
+  shapedUnlistedNameError,
   type CapturedResponse,
   type DataSourceRow,
   type LogEntry,
@@ -293,45 +303,362 @@ describe('facade: the refusal itself is unchanged, and it never waits for the R7
   })
 })
 
-describe('R2 — an error code outside the closed list is logged as the fixed placeholder (no database)', () => {
+// R2 admits a code from a closed LIST. The first case is free text that no identifier filter would
+// pass either; the other two are well-formed identifiers that a shape filter (a character-class
+// regex) WOULD pass — so only these two tell "a list" from "a shape".
+for (const hostile of [
+  { key: 'r2', label: 'free text carrying values and a forged line', error: hostileReadError, code: HOSTILE_ERROR_CODE },
+  { key: 'r2-code', label: 'a well-formed code that is not on the list', error: shapedUnlistedCodeError, code: SHAPED_UNLISTED_ERROR_CODE },
+  { key: 'r2-name', label: 'a well-formed class name (no code) that is not on the list', error: shapedUnlistedNameError, code: SHAPED_UNLISTED_ERROR_NAME },
+]) {
+  describe(`R2 — ${hostile.label}: logged as the fixed placeholder (no database)`, () => {
+    let response: CapturedResponse
+    let entries: LogEntry[]
+
+    beforeAll(async () => {
+      const source = dataSourceRow(hostile.key)
+      const stack = await createRefusalStack({
+        kysely: createMemoryDataSourcesKysely([source]),
+        pluginDb: createMemoryPluginDb([externalSystemRow(hostile.key, source.id, OWNER)], { failWith: hostile.error() }),
+      })
+      ;({ response, entries } = await pull(stack, `${SENTINEL}-es-${hostile.key}`, false))
+    }, SETUP_TIMEOUT_MS)
+
+    it('(a) the response is what the code before this change answered (it is not this change\'s to alter)', () => {
+      expect(response).toEqual({
+        status: 500,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify({ ok: false, error: { code: hostile.code, message: HOSTILE_ERROR_MESSAGE } }),
+      })
+    })
+
+    it('(b) the route-failure line names UNLISTED, and the failed load records an unreadable peek', () => {
+      expect(only(entries, ROUTE_FAILED_MESSAGE)).toEqual([{
+        level: 'warn',
+        message: ROUTE_FAILED_MESSAGE,
+        detail: { code: 'UNLISTED' },
+      }])
+      expect(only(entries, LOAD_FAILED_MESSAGE)).toEqual([{
+        level: 'warn',
+        message: LOAD_FAILED_MESSAGE,
+        detail: { actionId: PULL_ACTION_ID, delegated: false, bindingShape: 'unreadable' },
+      }])
+      expect(only(entries, REFUSAL_LOG_MESSAGE)).toEqual([])
+    })
+
+    it('(c) values-free: the unlisted code never reaches the log', () => {
+      const everything = JSON.stringify(entries)
+      expect(everything.toLowerCase()).not.toContain(SENTINEL)
+      expect(everything).not.toContain('FORGED')
+      expect(entries.length).toBeGreaterThan(0)
+    })
+  })
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+const macrotask = () => new Promise<void>((resolve) => setImmediate(resolve))
+async function macrotasks(count = 5): Promise<void> {
+  for (let i = 0; i < count; i += 1) await macrotask()
+}
+function persistedLiveOf(entries: LogEntry[]): unknown[] {
+  return only(entries, REFUSAL_LOG_MESSAGE).map((entry) => (entry.detail as { persistedLive?: unknown }).persistedLive)
+}
+
+describe('R7 bounds — the table read behind persistedLive: 2s, at most 4 in flight, a slot held until its query settles (no database)', () => {
+  // Restated here, NOT imported: a test that reads a bound off the code under test keeps passing
+  // whatever that bound is changed to.
+  const PROBE_TIMEOUT_MS = 2000
+  const PROBE_MAX_IN_FLIGHT = 4
+
+  it('the 5th concurrent read answers null at once without reading; the 4 hung reads answer null at exactly 2s; their slots stay held until the queries settle', async () => {
+    const row = dataSourceRow('r7-bounds', { is_active: false })
+    let open!: () => void
+    const probe = { calls: 0, gate: new Promise<void>((resolve) => { open = resolve }) }
+    const manager = new DataSourceManager()
+    await manager.initialize(createMemoryDataSourcesKysely([row], { probe }))
+
+    // Only the timeout's own clock is faked; setImmediate stays real so `macrotasks()` drains the
+    // promise chains without moving time.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const answers: Array<boolean | null | 'pending'> = []
+      const ask = () => {
+        const index = answers.push('pending') - 1
+        void manager.probePersistedLiveRow(row.id).then((value) => { answers[index] = value })
+      }
+
+      for (let i = 0; i <= PROBE_MAX_IN_FLIGHT; i += 1) ask()
+      await macrotasks()
+      expect(probe.calls).toBe(PROBE_MAX_IN_FLIGHT)
+      expect(answers).toEqual(['pending', 'pending', 'pending', 'pending', null])
+
+      await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS - 1)
+      expect(answers.slice(0, PROBE_MAX_IN_FLIGHT)).toEqual(['pending', 'pending', 'pending', 'pending'])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(answers.slice(0, PROBE_MAX_IN_FLIGHT)).toEqual([null, null, null, null])
+
+      // The timeout answered, but the four queries are still running: their slots are still held,
+      // so a slow database cannot accumulate reads past the cap by timing each one out.
+      ask()
+      await macrotasks()
+      expect(answers[5]).toBe(null)
+      expect(probe.calls).toBe(PROBE_MAX_IN_FLIGHT)
+
+      // The queries settle: the slots come back, and the next read is issued and answered.
+      open()
+      await macrotasks()
+      ask()
+      await macrotasks()
+      expect(answers[6]).toBe(false)
+      expect(probe.calls).toBe(PROBE_MAX_IN_FLIGHT + 1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('R7 end to end — a hung table read never holds the response, and its line comes from the manager\'s 2s timeout (no database)', () => {
+  it('four refusals answer at once; their lines arrive with null well before the resolver\'s 3s budget; a fifth logs null with no fifth read', async () => {
+    const rows: DataSourceRow[] = []
+    const systems: Array<Record<string, unknown>> = []
+    for (let i = 0; i < 6; i += 1) {
+      const row = dataSourceRow(`hang${i}`, { is_active: false })
+      rows.push(row)
+      systems.push(externalSystemRow(`hang${i}`, row.id, OWNER))
+    }
+    let open!: () => void
+    const probe = { calls: 0, gate: new Promise<void>((resolve) => { open = resolve }) }
+    const stack = await createRefusalStack({
+      kysely: createMemoryDataSourcesKysely(rows, { probe }),
+      pluginDb: createMemoryPluginDb(systems),
+    })
+    const refusalLines = () => only(stack.logger.entries, REFUSAL_LOG_MESSAGE)
+
+    for (let i = 0; i < 4; i += 1) {
+      pinned.setApp(stack.buildApp({ externalSystemId: `${SENTINEL}-es-hang${i}`, user: SCHEDULER_USER }))
+      const started = Date.now()
+      const response = await postScheduledDryRun(pinned.url(), TENANT)
+      expect(Date.now() - started).toBeLessThan(1000)
+      expect(response).toEqual(CANONICAL_REFUSAL_RESPONSE)
+    }
+    expect(refusalLines()).toEqual([])
+
+    const waitStarted = Date.now()
+    while (refusalLines().length < 4 && Date.now() - waitStarted < 5000) await sleep(5)
+    const waited = Date.now() - waitStarted
+    expect(persistedLiveOf(stack.logger.entries)).toEqual([null, null, null, null])
+    expect(probe.calls).toBe(4)
+    // The manager's own 2s timeout answered, not the resolver's 3s budget.
+    expect(waited).toBeGreaterThanOrEqual(1500)
+    expect(waited).toBeLessThan(2800)
+
+    // All four reads are still hung: a fifth refusal logs null at once and issues no fifth read.
+    const fifthStarted = Date.now()
+    const fifth = await pull(stack, `${SENTINEL}-es-hang4`, true)
+    expect(Date.now() - fifthStarted).toBeLessThan(1500)
+    expect(fifth.response).toEqual(CANONICAL_REFUSAL_RESPONSE)
+    expect(persistedLiveOf(fifth.entries)).toEqual([null])
+    expect(probe.calls).toBe(4)
+
+    // Once the hung queries settle, the next refusal reads the table again and gets its answer.
+    open()
+    await sleep(50)
+    const sixth = await pull(stack, `${SENTINEL}-es-hang5`, true)
+    expect(persistedLiveOf(sixth.entries)).toEqual([false])
+    expect(probe.calls).toBe(5)
+    expect(JSON.stringify(stack.logger.entries).toLowerCase()).not.toContain(SENTINEL)
+  }, 30_000)
+})
+
+describe('startup — the load-filter snapshot failing costs the diagnostic, never the load (no database)', () => {
+  // Restated verbatim: the ONE line this failure may write, with nothing after it.
+  const SNAPSHOT_UNAVAILABLE_WARNING =
+    '[DataSourceManager] Load-filter snapshot unavailable; unloaded-source diagnostics degrade to unknown_at_load'
+  // A driver-style error whose text carries a host, a login and a password (synthetic, SENTINEL-marked).
+  const DRIVER_ERROR_TEXT = `connect ECONNREFUSED ${SENTINEL}-db-host:5432 user=${SENTINEL}_login password=${PASSWORD}`
+
+  async function initialized(snapshotFails: boolean) {
+    const live = dataSourceRow('snap-live')
+    const inactive = dataSourceRow('snap-inactive', { is_active: false })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    try {
+      const manager = new DataSourceManager()
+      await manager.initialize(createMemoryDataSourcesKysely([live, inactive], {
+        snapshot: snapshotFails ? { failWith: new Error(DRIVER_ERROR_TEXT) } : undefined,
+      }))
+      return { manager, live, inactive, warns: warn.mock.calls.map((args) => [...args]) }
+    } finally {
+      warn.mockRestore()
+      log.mockRestore()
+    }
+  }
+
+  it('the load completes and serves the loaded source; exactly one fixed, values-free warn; unloaded ids read unknown_at_load', async () => {
+    const { manager, live, inactive, warns } = await initialized(true)
+    expect(manager.describeAccessRefusal(live.id, OWNER)).toBeNull()
+    expect(warns).toEqual([[SNAPSHOT_UNAVAILABLE_WARNING]])
+    expect(util.inspect(warns, { depth: 8 }).toLowerCase()).not.toContain(SENTINEL)
+    expect(manager.describeAccessRefusal(inactive.id, OWNER)).toEqual({ reason: 'not_loaded', loadOutcome: 'unknown_at_load' })
+    expect(manager.describeAccessRefusal(`${SENTINEL}-ds-never-existed`, OWNER))
+      .toEqual({ reason: 'not_loaded', loadOutcome: 'unknown_at_load' })
+  })
+
+  it('control: with the snapshot answering, the same rows read inactive / absent_at_load and nothing is warned', async () => {
+    const { manager, live, inactive, warns } = await initialized(false)
+    expect(manager.describeAccessRefusal(live.id, OWNER)).toBeNull()
+    expect(warns).toEqual([])
+    expect(manager.describeAccessRefusal(inactive.id, OWNER)).toEqual({ reason: 'not_loaded', loadOutcome: 'inactive' })
+    expect(manager.describeAccessRefusal(`${SENTINEL}-ds-never-existed`, OWNER))
+      .toEqual({ reason: 'not_loaded', loadOutcome: 'absent_at_load' })
+  })
+})
+
+describe('unloaded outcomes recorded at runtime: removed, and an update whose re-add failed (no database)', () => {
+  function runtimeConfig(key: string) {
+    return {
+      id: `${SENTINEL}-ds-${key}`,
+      name: `${SENTINEL} runtime ${key}`,
+      type: 'postgresql',
+      connection: { host: 'localhost', port: 5432, database: `${SENTINEL}_never_connected` },
+      credentials: { username: `${SENTINEL}_login`, password: PASSWORD },
+      options: { readOnly: true, autoConnect: false },
+    }
+  }
+
+  it('removed through the manager: the id reads removed, not registry_not_loaded', async () => {
+    const manager = new DataSourceManager()
+    const config = runtimeConfig('rt-removed')
+    await manager.addDataSource(config as never, { ownerId: OWNER, tenantId: TENANT, persist: false })
+    expect(manager.describeAccessRefusal(config.id, OWNER)).toBeNull()
+    await manager.removeDataSource(config.id)
+    expect(manager.describeAccessRefusal(config.id, OWNER)).toEqual({ reason: 'not_loaded', loadOutcome: 'removed' })
+  })
+
+  it('an update whose re-add throws: the error is rethrown untouched, and the id reads load_failed', async () => {
+    const manager = new DataSourceManager()
+    const unconstructible = 'refusal-probe-unconstructible'
+    manager.registerAdapterType(unconstructible, class {
+      constructor() {
+        throw new Error('adapter construction refused')
+      }
+    } as never)
+    const config = runtimeConfig('rt-readd')
+    await manager.addDataSource(config as never, { ownerId: OWNER, tenantId: TENANT, persist: false })
+    await expect(manager.updateDataSource(config.id, { ...config, type: unconstructible } as never))
+      .rejects.toThrow('adapter construction refused')
+    expect(manager.describeAccessRefusal(config.id, OWNER)).toEqual({ reason: 'not_loaded', loadOutcome: 'load_failed' })
+  })
+})
+
+describe('R3 — a logger that throws on the load-failure line changes nothing a caller sees (no database)', () => {
   let response: CapturedResponse
   let entries: LogEntry[]
+  let attempts = 0
 
   beforeAll(async () => {
-    const source = dataSourceRow('r2')
+    const source = dataSourceRow('r3-throw')
     const stack = await createRefusalStack({
       kysely: createMemoryDataSourcesKysely([source]),
-      pluginDb: createMemoryPluginDb([externalSystemRow('r2', source.id, OWNER)], { failWith: hostileReadError() }),
+      pluginDb: createMemoryPluginDb([externalSystemRow('r3-throw', source.id, OTHER_OWNER)]),
     })
-    ;({ response, entries } = await pull(stack, `${SENTINEL}-es-r2`, false))
+    // The resolver and the route table hold this same logger object and look `warn` up per call.
+    const write = stack.logger.warn
+    stack.logger.warn = (message: string, detail?: unknown) => {
+      if (message === LOAD_FAILED_MESSAGE) {
+        attempts += 1
+        throw new Error(`${SENTINEL} logger down`)
+      }
+      write(message, detail)
+    }
+    ;({ response, entries } = await pull(stack, `${SENTINEL}-es-r3-throw`, true))
   }, SETUP_TIMEOUT_MS)
 
-  it('(a) the response is what the code before this change answered (it is not this change\'s to alter)', () => {
-    expect(response).toEqual({
-      status: 500,
-      contentType: 'application/json; charset=utf-8',
-      body: JSON.stringify({ ok: false, error: { code: HOSTILE_ERROR_CODE, message: HOSTILE_ERROR_MESSAGE } }),
-    })
+  it('(a) the response is byte-identical to every other refusal', () => {
+    expect(response).toEqual(CANONICAL_REFUSAL_RESPONSE)
   })
 
-  it('(b) the route-failure line names UNLISTED, and the failed load records an unreadable peek', () => {
-    expect(only(entries, ROUTE_FAILED_MESSAGE)).toEqual([{
-      level: 'warn',
-      message: ROUTE_FAILED_MESSAGE,
-      detail: { code: 'UNLISTED' },
+  it('(b) the load-failure line was attempted once and cost only itself: the refusal and route-failure lines are each written once', () => {
+    expect(attempts).toBe(1)
+    expect(only(entries, LOAD_FAILED_MESSAGE)).toEqual([])
+    expect(only(entries, REFUSAL_LOG_MESSAGE).map((entry) => entry.detail)).toEqual([{
+      phase: 'canonical',
+      code: 'CONNECTION_CANONICAL_UNAVAILABLE',
+      reason: 'owner_mismatch',
     }])
-    expect(only(entries, LOAD_FAILED_MESSAGE)).toEqual([{
+    expect(only(entries, ROUTE_FAILED_MESSAGE).map((entry) => entry.detail)).toEqual([{ code: 'CONNECTION_CANONICAL_UNAVAILABLE' }])
+    expect(JSON.stringify(entries).toLowerCase()).not.toContain(SENTINEL)
+  })
+})
+
+describe('R3 — scoped to the frozen action: no other action id reaches the source load (no database)', () => {
+  // WHY THE SCOPE HOLDS. The R3 record is written only when the identity peek ran, and the peek runs
+  // only for the frozen pull id. What keeps every OTHER action id away from the load is upstream:
+  // all five call sites of the source load take their action from assertStockPreparationTargetReady,
+  // which re-normalizes it and admits only the frozen id (stock-preparation-table-actions.cjs,
+  // normalizeStockPreparationActionConfig). The one door that does not come from the configured
+  // registry is a stored large-BOM job, whose run route loads from the job's own action SNAPSHOT —
+  // so that is the door tested here: two jobs on one binding the host refuses, one as stored, one
+  // with its snapshot's action id rewritten. If that fence is ever relaxed, the second case goes red
+  // and the R3 scope has to be re-examined.
+  const OTHER_ACTION_ID = 'plm.stock-preparation.not-the-frozen-pull.v1'
+  type Run = { response: CapturedResponse; entries: LogEntry[] }
+  let control: Run
+  let offAction: Run
+
+  beforeAll(async () => {
+    const source = dataSourceRow('r3-scope')
+    const stack = await createRefusalStack({
+      kysely: createMemoryDataSourcesKysely([source]),
+      pluginDb: createMemoryPluginDb([externalSystemRow('r3-scope', source.id, OTHER_OWNER)]),
+    })
+    const storage = createPluginStorage()
+    pinned.setApp(stack.buildApp({ externalSystemId: `${SENTINEL}-es-r3-scope`, user: SCHEDULER_USER, storage }))
+
+    async function startJob(): Promise<string> {
+      const started = await postTableActionRoute(pinned.url(), TENANT, 'large-bom/expansion-jobs', {
+        parameters: { projectNo: 'P-SYNTH-0001' },
+      })
+      expect(started.status).toBe(202)
+      return String((JSON.parse(started.body) as { data: { jobId: string } }).data.jobId)
+    }
+    async function runJob(jobId: string, expectRefusal: boolean): Promise<Run> {
+      const from = stack.logger.entries.length
+      const response = await postTableActionRoute(
+        pinned.url(), TENANT, `large-bom/expansion-jobs/${encodeURIComponent(jobId)}/run`, {},
+      )
+      return { response, entries: await logLinesSince(stack.logger, from, { expectRefusal }) }
+    }
+
+    const controlJob = await startJob()
+    const offActionJob = await startJob()
+    let rewritten = 0
+    for (const [key, job] of [...storage.entries()] as Array<[string, Record<string, unknown>]>) {
+      if (!key.endsWith(`:${offActionJob}`)) continue
+      const snapshot = job.actionSnapshot as Record<string, unknown>
+      Map.prototype.set.call(storage, key, { ...job, actionSnapshot: { ...snapshot, actionId: OTHER_ACTION_ID } })
+      rewritten += 1
+    }
+    expect(rewritten).toBe(1)
+
+    control = await runJob(controlJob, true)
+    offAction = await runJob(offActionJob, false)
+  }, SETUP_TIMEOUT_MS)
+
+  it('control: the frozen action\'s refused load writes the record (the negative below is not vacuous)', () => {
+    expect(control.response).toEqual(CANONICAL_REFUSAL_RESPONSE)
+    expect(only(control.entries, LOAD_FAILED_MESSAGE)).toEqual([{
       level: 'warn',
       message: LOAD_FAILED_MESSAGE,
-      detail: { actionId: PULL_ACTION_ID, delegated: false, bindingShape: 'unreadable' },
+      detail: { actionId: PULL_ACTION_ID, delegated: true, bindingShape: 'canonical' },
     }])
-    expect(only(entries, REFUSAL_LOG_MESSAGE)).toEqual([])
   })
 
-  it('(c) values-free: the hostile code (values and a forged line) never reaches the log', () => {
-    const everything = JSON.stringify(entries)
-    expect(everything.toLowerCase()).not.toContain(SENTINEL)
-    expect(everything).not.toContain('FORGED')
-    expect(entries.length).toBeGreaterThan(0)
+  it('another action id is refused before any source load: the host is never asked, and no load-failure record is written', () => {
+    expect(offAction.response.status).toBe(422)
+    expect((JSON.parse(offAction.response.body) as { error: { code: string } }).error.code).toBe('TABLE_ACTION_CONFIG_INVALID')
+    expect(only(offAction.entries, REFUSAL_LOG_MESSAGE)).toEqual([])
+    expect(only(offAction.entries, LOAD_FAILED_MESSAGE)).toEqual([])
+    expect(JSON.stringify([control.entries, offAction.entries]).toLowerCase()).not.toContain(SENTINEL)
   })
 })

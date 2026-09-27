@@ -117,6 +117,60 @@ async function runMockResponse(handler) {
   })
 }
 
+// R1 WIRING. connection-resolver.cjs writes a host-facade refusal's closed-vocabulary reason to the
+// logger it is CONSTRUCTED with, and index.cjs is the one place that constructs it for the running
+// plugin. The resolver's own suite hands it a logger directly, so only an activation through
+// index.cjs shows the line is written in production at all: drop `logger` from that call and this
+// goes red while every resolver test stays green.
+async function assertConnectionResolverGetsThePluginLogger(entry) {
+  const { REFUSAL_LOG_MESSAGE } = require('../lib/connection-resolver.cjs')
+  const { context, inspect } = createMockContext()
+  const lines = []
+  context.logger = {
+    info() {},
+    warn(message, detail) { lines.push({ message, detail }) },
+    error() {},
+  }
+  let facadeCalls = 0
+  context.api.dataSources = {
+    async resolveConnectionRegistration() {
+      facadeCalls += 1
+      const refusal = new Error('data source not found')
+      Object.defineProperty(refusal, 'refusalDiagnostic', {
+        value: Object.freeze({ reason: 'owner_mismatch' }),
+        enumerable: false,
+      })
+      throw refusal
+    },
+  }
+  await entry.activate(context)
+  try {
+    const commApi = inspect.namespaces.get('integration-core')
+    await assert.rejects(
+      commApi.upsertExternalSystem({
+        tenantId: 'tenant_1',
+        workspaceId: null,
+        name: 'wiring probe',
+        kind: 'data-source:sql-readonly',
+        role: 'source',
+        connectionId: 'connection_1',
+        config: {},
+      }),
+      (error) => Boolean(error && error.details && error.details.code === 'CONNECTION_CANONICAL_UNAVAILABLE'),
+      'the canonical bind is refused by the host facade',
+    )
+    assert.equal(facadeCalls, 1, 'the bind reached the host facade through the resolver')
+    for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(
+      lines.filter((line) => line.message === REFUSAL_LOG_MESSAGE).map((line) => line.detail),
+      [{ phase: 'canonical', code: 'CONNECTION_CANONICAL_UNAVAILABLE', reason: 'owner_mismatch' }],
+      'index.cjs hands the plugin logger to createConnectionResolver',
+    )
+  } finally {
+    await entry.deactivate()
+  }
+}
+
 async function main() {
   const previousFeatureFlag =
     process.env[STOCK_PREPARATION_FEATURE_FLAG]
@@ -274,6 +328,11 @@ async function main() {
     'S6 initialization refusal emits a values-free warning',
   )
   await entry.deactivate()
+
+  // --- 8. The plugin logger reaches the connection resolver (R1) -------
+  process.env[STOCK_PREPARATION_FEATURE_FLAG] = 'false'
+  await assertConnectionResolverGetsThePluginLogger(entry)
+
   if (previousFeatureFlag === undefined) {
     delete process.env[STOCK_PREPARATION_FEATURE_FLAG]
   } else {

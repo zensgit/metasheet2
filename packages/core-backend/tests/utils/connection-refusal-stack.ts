@@ -88,10 +88,17 @@ export type DataSourceRow = Record<string, unknown> & { id: string }
  * A REAL Kysely instance (Postgres compiler) whose driver answers from an array. Only the
  * statements DataSourceManager issues on this path are understood; anything else throws, so a
  * silently-unanswered query cannot pass for an empty table.
+ *
+ * `hooks.probe` counts the R7 primary-key reads and can hold them open on `gate`.
+ * `hooks.snapshot.failWith` makes the load-filter snapshot statement reject with that error (a
+ * driver failure after the registry load itself succeeded).
  */
 export function createMemoryDataSourcesKysely(
   rows: DataSourceRow[],
-  hooks: { probe?: { calls: number; gate?: Promise<void> } } = {},
+  hooks: {
+    probe?: { calls: number; gate?: Promise<void> }
+    snapshot?: { failWith?: Error }
+  } = {},
 ): Kysely<unknown> {
   const connection: DatabaseConnection = {
     async executeQuery<R>(compiled: CompiledQuery): Promise<QueryResult<R>> {
@@ -109,6 +116,7 @@ export function createMemoryDataSourcesKysely(
       }
       // The load-filter snapshot (diagnostics only), when the code under test issues it.
       if (text === 'select "id", "is_active", "deleted_at" from "data_sources" where (is_active IS NOT TRUE OR deleted_at IS NOT NULL)') {
+        if (hooks.snapshot && hooks.snapshot.failWith) throw hooks.snapshot.failWith
         return {
           rows: rows
             .filter((row) => row.is_active !== true || (row.deleted_at !== null && row.deleted_at !== undefined))
@@ -206,11 +214,31 @@ const credentialStore = {
   async fingerprint() { return null },
 }
 
+export type PluginStorage = Map<string, unknown> & {
+  durable: true
+  get(key: string): Promise<unknown>
+  set(key: string, value: unknown): Promise<unknown>
+  delete(key: string): Promise<boolean>
+}
+
+/** The plugin's durable key-value store, in memory (large-BOM jobs live here). */
+export function createPluginStorage(): PluginStorage {
+  return Object.assign(new Map(), {
+    durable: true as const,
+    async get(this: Map<string, unknown>, key: string) { return Map.prototype.get.call(this, key) ?? null },
+    async set(this: Map<string, unknown>, key: string, value: unknown) { Map.prototype.set.call(this, key, value); return value },
+    async delete(this: Map<string, unknown>, key: string) { return Map.prototype.delete.call(this, key) },
+  }) as unknown as PluginStorage
+}
+
 export interface RefusalStack {
   manager: DataSourceManager
   logger: CaptureLogger
-  /** Build an express app whose frozen pull action reads from `externalSystemId`. */
-  buildApp(input: { externalSystemId: string; user: Record<string, unknown> }): express.Express
+  /**
+   * Build an express app whose frozen pull action reads from `externalSystemId`. `storage` is the
+   * plugin's durable store; pass one to keep large-BOM jobs across two apps (a fresh one otherwise).
+   */
+  buildApp(input: { externalSystemId: string; user: Record<string, unknown>; storage?: PluginStorage }): express.Express
 }
 
 /**
@@ -246,7 +274,11 @@ export async function createRefusalStack(input: {
     connectionResolver,
   })
 
-  function buildApp({ externalSystemId, user }: { externalSystemId: string; user: Record<string, unknown> }) {
+  function buildApp({ externalSystemId, user, storage }: {
+    externalSystemId: string
+    user: Record<string, unknown>
+    storage?: PluginStorage
+  }) {
     const app = express()
     app.use(express.json())
     app.use((req, _res, next) => {
@@ -273,12 +305,7 @@ export async function createRefusalStack(input: {
           },
         },
       },
-      storage: Object.assign(new Map(), {
-        durable: true,
-        async get(this: Map<string, unknown>, key: string) { return Map.prototype.get.call(this, key) ?? null },
-        async set(this: Map<string, unknown>, key: string, value: unknown) { Map.prototype.set.call(this, key, value); return value },
-        async delete(this: Map<string, unknown>, key: string) { return Map.prototype.delete.call(this, key) },
-      }),
+      storage: storage || createPluginStorage(),
       config: {
         stockPreparationTableActions: [{
           actionId: PULL_ACTION_ID,
@@ -470,6 +497,26 @@ export function hostileReadError(): Error {
   return Object.assign(new Error(HOSTILE_ERROR_MESSAGE), { code: HOSTILE_ERROR_CODE })
 }
 
+/**
+ * R2 is a closed LIST, not a shape filter. These two are well-formed identifiers — letters, digits
+ * and underscores, exactly what a character-class allowlist such as /^[A-Za-z][A-Za-z0-9_]*$/ would
+ * admit — that are NOT on the list, and they carry values (SENTINEL, upper-cased). The first is an
+ * error `code`; the second an error class name, which `inferErrorCode` falls back to when there is
+ * no code. Both must be logged as the fixed placeholder.
+ */
+export const SHAPED_UNLISTED_ERROR_CODE = `${SENTINEL.toUpperCase()}_OWNER_A_TENANT_A`
+export const SHAPED_UNLISTED_ERROR_NAME = `${SENTINEL.charAt(0).toUpperCase()}${SENTINEL.slice(1)}OwnerError`
+
+export function shapedUnlistedCodeError(): Error {
+  return Object.assign(new Error(HOSTILE_ERROR_MESSAGE), { code: SHAPED_UNLISTED_ERROR_CODE })
+}
+
+export function shapedUnlistedNameError(): Error {
+  const error = new Error(HOSTILE_ERROR_MESSAGE)
+  error.name = SHAPED_UNLISTED_ERROR_NAME
+  return error
+}
+
 export interface CapturedResponse {
   status: number
   contentType: string | null
@@ -481,11 +528,24 @@ export interface CapturedResponse {
  * rather than `fetch`: the no-DB vitest setup stubs the global `fetch` (tests/setup.ts).
  */
 export function postScheduledDryRun(baseUrl: string, tenantId: string): Promise<CapturedResponse> {
+  return postTableActionRoute(baseUrl, tenantId, 'dry-run', { parameters: { projectNo: 'P-SYNTH-0001' } })
+}
+
+/**
+ * POST `/api/integration/table-actions/<frozen action>/<suffix>` with the scheduled pull's tenant
+ * scoping (`?tenantId=` + `x-tenant-id`) and a JSON body.
+ */
+export function postTableActionRoute(
+  baseUrl: string,
+  tenantId: string,
+  suffix: string,
+  body: Record<string, unknown>,
+): Promise<CapturedResponse> {
   const url = new URL(
-    `/api/integration/table-actions/${encodeURIComponent(PULL_ACTION_ID)}/dry-run?tenantId=${encodeURIComponent(tenantId)}`,
+    `/api/integration/table-actions/${encodeURIComponent(PULL_ACTION_ID)}/${suffix}?tenantId=${encodeURIComponent(tenantId)}`,
     baseUrl,
   )
-  const payload = Buffer.from(JSON.stringify({ parameters: { projectNo: 'P-SYNTH-0001' } }), 'utf8')
+  const payload = Buffer.from(JSON.stringify(body), 'utf8')
   return new Promise((resolve, reject) => {
     const request = http.request(url, {
       method: 'POST',

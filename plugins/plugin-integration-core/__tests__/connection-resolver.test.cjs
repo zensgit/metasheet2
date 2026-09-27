@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
+const util = require('node:util')
 const {
   CONNECTION_RESOLUTION_ERROR_CODES,
   FACADE_REFUSAL_REASONS,
@@ -101,7 +102,10 @@ async function thrownBy(action) {
   throw new Error('expected a rejection')
 }
 
-// The thrown error, reduced to everything a caller (and so an HTTP response) can see of it.
+// The thrown error, reduced to everything a caller (and so an HTTP response, a logger or a
+// debugger) can see of it — including NON-enumerable and symbol-keyed own properties and `cause`,
+// which Object.keys and JSON.stringify both miss: a facade error hung on the thrown one as a hidden
+// `cause` would pass a keys/JSON comparison untouched.
 function visible(error) {
   return {
     ctor: error && error.constructor && error.constructor.name,
@@ -110,8 +114,22 @@ function visible(error) {
     message: error.message,
     details: JSON.stringify(error.details),
     keys: Object.keys(error).sort().join(','),
+    ownNames: Object.getOwnPropertyNames(error).sort().join(','),
+    ownSymbols: Object.getOwnPropertySymbols(error).length,
+    hasCause: 'cause' in error,
     json: JSON.stringify(error),
   }
+}
+
+// The resolver's own refusal, built directly — what a caller must see, whatever the facade threw.
+function plainRefusal(code, message, phase) {
+  return new ConnectionResolutionError(code, message, { phase })
+}
+
+// Nothing of the facade's error — its message names a planted id — survives on the thrown one,
+// under any key, enumerable or not.
+function assertCarriesNothingOfTheFacade(error) {
+  assert.doesNotMatch(util.inspect(error, { showHidden: true, depth: 8 }), new RegExp(MARK))
 }
 
 async function refusalDiagnosticTests() {
@@ -145,6 +163,19 @@ async function refusalDiagnosticTests() {
     assert.ok(record.reason === 'unclassified' || record.loadOutcome === 'unclassified',
       `hostile diagnostic must classify as unclassified: ${JSON.stringify(record)}`)
   }
+  // A closed LIST, not a shape: every word below is well-formed — lowercase letters and underscores,
+  // exactly what a character-class filter such as /^[a-z_]+$/ would admit — and none is on the
+  // list, so each is unclassified. (The hostile cases above all fail a shape filter too — a dash, a
+  // digit, a space or a non-string — so they cannot tell a list from a shape.)
+  for (const reason of ['owner_mismatched', 'not_loaded_yet', 'tenant_owner', 'facade_unavailable']) {
+    assert.deepEqual(describeFacadeRefusal(refusalFrom({ reason })), { reason: 'unclassified' },
+      `an unlisted well-formed reason is unclassified: ${reason}`)
+  }
+  for (const loadOutcome of ['inactive_since', 'removed_by_owner', 'tenant_leak']) {
+    assert.deepEqual(describeFacadeRefusal(refusalFrom({ reason: 'not_loaded', loadOutcome })),
+      { reason: 'not_loaded', loadOutcome: 'unclassified' },
+      `an unlisted well-formed loadOutcome is unclassified: ${loadOutcome}`)
+  }
   // An accessor is never invoked; an error without a diagnostic (a stub, an older host) is unclassified.
   assert.deepEqual(describeFacadeRefusal(refusalFrom({}, { accessor: true })), { reason: 'unclassified' })
   assert.deepEqual(describeFacadeRefusal(refusalFrom(undefined)), { reason: 'unclassified' })
@@ -159,14 +190,25 @@ async function refusalDiagnosticTests() {
     [{ reason: 'tenant_mismatch' }, { reason: 'tenant_mismatch' }],
     [{ reason: 'tenantless_scope' }, { reason: 'tenantless_scope' }],
     [{ reason: `${MARK}` }, { reason: 'unclassified' }],
+    [{ reason: 'owner_mismatched' }, { reason: 'unclassified' }],
     [undefined, { reason: 'unclassified' }],
   ]) {
     const logger = captureLogger()
     const quiet = createConnectionResolver({ facade: refusingFacade(() => refusalFrom(diagnostic)) })
     const logged = createConnectionResolver({ facade: refusingFacade(() => refusalFrom(diagnostic)), logger })
-    const before = visible(await thrownBy(() => quiet.resolve(canonical, context())))
-    const after = visible(await thrownBy(() => logged.resolve(canonical, context())))
+    const quietError = await thrownBy(() => quiet.resolve(canonical, context()))
+    const loggedError = await thrownBy(() => logged.resolve(canonical, context()))
+    const before = visible(quietError)
+    const after = visible(loggedError)
     assert.deepEqual(after, before, 'the refusal a caller sees does not change with the diagnostic')
+    // …and neither resolver passes the facade's error on, under any key: both equal the resolver's
+    // own refusal built directly (a comparison of the two resolvers alone would pass if BOTH
+    // carried it).
+    assert.deepEqual(after, visible(plainRefusal(
+      'CONNECTION_CANONICAL_UNAVAILABLE', 'canonical connection is unavailable', 'canonical',
+    )))
+    assertCarriesNothingOfTheFacade(quietError)
+    assertCarriesNothingOfTheFacade(loggedError)
     assert.equal(after.code, 'CONNECTION_CANONICAL_UNAVAILABLE')
     await settle()
     assert.deepEqual(logger.lines, [{
@@ -188,7 +230,11 @@ async function refusalDiagnosticTests() {
       facade: refusingFacade(() => refusalFrom({ reason: 'owner_mismatch' })),
       logger,
     })
-    await rejectsCode(() => resolver.resolve(legacy, context()), 'CONNECTION_LEGACY_UNAVAILABLE')
+    const refusal = await thrownBy(() => resolver.resolve(legacy, context()))
+    assert.deepEqual(visible(refusal), visible(plainRefusal(
+      'CONNECTION_LEGACY_UNAVAILABLE', 'legacy connection is unavailable', 'legacy',
+    )))
+    assertCarriesNothingOfTheFacade(refusal)
     await settle()
     assert.deepEqual(logger.lines.map((line) => line.detail), [{
       phase: 'legacy', code: 'CONNECTION_LEGACY_UNAVAILABLE', reason: 'owner_mismatch',
