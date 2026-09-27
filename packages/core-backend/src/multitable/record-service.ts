@@ -852,19 +852,21 @@ export class RecordService {
         type: field.type,
         property: field.property,
       }))))
-      // revision-emitted: REST createRecord — recordRecordRevision(action:'create') below, same txn.
       // Copy-sheet (CS-13 / §7.3): `created_at` is the copy transaction's start + the row ordinal in
       // MICROSECONDS, so the new sheet's default list order (created_at ASC, id ASC) reproduces the source
       // order exactly — `DEFAULT now()` is the transaction start for EVERY row of a single transaction, so
       // 2000 rows would tie and sort by random id. `created_by` keeps the SOURCE creator (write-own row
-      // policy keys on it); `modified_by` is the copier.
+      // policy keys on it); `modified_by` is the copier. Both INSERTs below are followed by the SAME
+      // recordRecordRevision(action:'create') in this transaction (OD-6 disposition markers per statement).
       const inserted = copy
+        // revision-emitted: copy-sheet createRecord — recordRecordRevision(action:'create', source:'copy-sheet', batchId) below, same txn.
         ? await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at)
            VALUES ($1, $2, $3::jsonb, 1, $4, $5, $6::timestamptz + ($7::int * interval '1 microsecond'))
            RETURNING version`,
           [recordId, sheetId, JSON.stringify(patch), copy.createdBy, actorId, copy.startedAt.toISOString(), copy.ordinal],
         )
+        // revision-emitted: REST createRecord — recordRecordRevision(action:'create') below, same txn.
         : await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
            VALUES ($1, $2, $3::jsonb, 1, $4, $4)
