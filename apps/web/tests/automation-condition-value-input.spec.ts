@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import ConditionValueInput from '../src/multitable/components/ConditionValueInput.vue'
 import { useLocale } from '../src/composables/useLocale'
-import { resetBusinessTimezone } from '../src/multitable/utils/business-timezone'
+import { dateTimeZoneHint, formatDateTimeInZone, resetBusinessTimezone } from '../src/multitable/utils/business-timezone'
 import type { ConditionFieldLike } from '../src/multitable/utils/automation-condition-values'
 import type { ConditionOperator } from '../src/multitable/types'
 import { epOptions, epSelectValue, epSelectValues, epSetSelect } from './helpers/epControls'
@@ -336,6 +336,37 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     ;(single.container.querySelector('[data-action="pick-condition-record"]') as HTMLButtonElement).click()
     await flush()
     expect(pickerProps.link?.selectionMode).toBe('single')
+  }, EP_MOUNT_TIMEOUT_MS)
+
+  it('`in` on a date-time field: a loaded list shows each instant as its wall clock in the field zone, with the zone named', async () => {
+    // A zone that is surely not the test process's own, so the zone hint is shown (it is hidden when the
+    // browser already runs in the field's zone, exactly like the single-value date-time control).
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone === 'America/New_York' ? 'Asia/Tokyo' : 'America/New_York'
+    const field: ConditionFieldLike = { id: 'fld_start_tz', name: 'Start', type: 'dateTime', property: { timezone: zone } }
+    const stored = ['2026-09-24T13:30:00.000Z', '2026-09-25T14:00:00Z']
+    const { container, emitted } = mountInput({ field, operator: 'in', value: stored })
+    await flush()
+    const input = container.querySelector('[data-condition-value="text-list"]') as HTMLInputElement
+    const expected = stored.map((iso) => formatDateTimeInZone(iso, zone)).join(', ')
+    expect(expected).toBe(zone === 'America/New_York' ? '2026-09-24 09:30, 2026-09-25 10:00' : '2026-09-24 22:30, 2026-09-25 23:00')
+    expect(input.value).toBe(expected) // not the raw UTC ISO strings
+    const hint = container.querySelector('[data-condition-value-zone]')
+    expect(hint?.textContent).toBe(dateTimeZoneHint(zone, true))
+    expect(hint?.textContent).toBeTruthy()
+    expect(emitted).toEqual([]) // shown, not rewritten
+
+    // A field with no zone of its own reads its list in the business zone (Asia/Shanghai).
+    const shanghai = mountInput({ field: dateTimeField, operator: 'not_in', value: ['2026-09-24T01:30:00.000Z'] })
+    await flush()
+    expect((shanghai.container.querySelector('[data-condition-value="text-list"]') as HTMLInputElement).value).toBe('2026-09-24 09:30')
+  }, EP_MOUNT_TIMEOUT_MS)
+
+  it('`in` on a date field: a loaded zoned entry is shown as its day in the field zone (the day the evaluator reads)', async () => {
+    const { container, emitted } = mountInput({ field: dateField, operator: 'in', value: ['2026-09-23T16:00:00.000Z', '2026-09-25'] })
+    await flush()
+    expect((container.querySelector('[data-condition-value="text-list"]') as HTMLInputElement).value).toBe('2026-09-24, 2026-09-25')
+    expect(container.querySelector('[data-condition-value-zone]')).toBeNull() // a date list names no zone
+    expect(emitted).toEqual([])
   }, EP_MOUNT_TIMEOUT_MS)
 
   it('`in` on a number / date / text field is a comma-separated text box (the save path coerces each entry)', async () => {

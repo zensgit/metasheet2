@@ -66,6 +66,22 @@ describe('coerceConditionValue — the saved shape per field type', () => {
     expect(coerceConditionValue(cond('x', 'equals', '是'), F.bool)).toEqual({ ok: false })
   })
 
+  it('checkbox fields: every spelling the backend reads as a boolean (any case, trimmed) saves a real boolean', () => {
+    // A9-be (#6107) isBooleanConditionValue / booleanKeyOf accept 'true' / 'false' in any case with spaces
+    // around them. The editor must read the same spellings, or a legacy 'TRUE' blocks the save of a rule the
+    // backend accepts.
+    expect(coerceConditionValue(cond('x', 'equals', 'TRUE'), F.bool)).toEqual({ ok: true, value: true })
+    expect(coerceConditionValue(cond('x', 'equals', ' true '), F.bool)).toEqual({ ok: true, value: true })
+    expect(coerceConditionValue(cond('x', 'not_equals', 'False'), F.bool)).toEqual({ ok: true, value: false })
+    expect(coerceConditionValue(cond('x', 'in', ['TRUE', ' False ']), F.bool)).toEqual({ ok: true, value: [true, false] })
+    expect(coerceConditionValue(cond('x', 'in', 'true, FALSE'), F.bool)).toEqual({ ok: true, value: [true, false] })
+    // Still only those two words: anything else is incomplete, never guessed.
+    expect(coerceConditionValue(cond('x', 'equals', 'yes'), F.bool)).toEqual({ ok: false })
+    expect(coerceConditionValue(cond('x', 'equals', '1'), F.bool)).toEqual({ ok: false })
+    expect(coerceConditionValue(cond('x', 'equals', 1), F.bool)).toEqual({ ok: false })
+    expect(coerceConditionValue(cond('x', 'equals', ' '), F.bool)).toEqual({ ok: false })
+  })
+
   it("date fields save 'YYYY-MM-DD' (floating day, no zone math)", () => {
     expect(coerceConditionValue(cond('x', 'equals', '2026-05-11'), F.date)).toEqual({ ok: true, value: '2026-05-11' })
     expect(coerceConditionValue(cond('x', 'less_than', '2026/5/1'), F.date)).toEqual({ ok: true, value: '2026-05-01' })
@@ -85,6 +101,9 @@ describe('coerceConditionValue — the saved shape per field type', () => {
     expect(coerceConditionValue(cond('x', 'less_than', '2026-09-23T16:00:00.000Z'), F.date)).toEqual({ ok: true, value: '2026-09-24' })
     expect(coerceConditionValue(cond('x', 'equals', '2026-09-23T15:59:59Z'), F.date)).toEqual({ ok: true, value: '2026-09-23' })
     expect(coerceConditionValue(cond('x', 'equals', '2026-09-24T00:30:00+09:00'), F.date)).toEqual({ ok: true, value: '2026-09-23' }) // 23:30 in Shanghai
+    // The explicit-marker fallback of the same grammar (`GMT` / `UTC` / a spaced offset) names an instant too.
+    expect(coerceConditionValue(cond('x', 'equals', '2026-09-23 16:00 GMT'), F.date)).toEqual({ ok: true, value: '2026-09-24' })
+    expect(coerceConditionValue(cond('x', 'equals', '2026/09/23 16:00 +0000'), F.date)).toEqual({ ok: true, value: '2026-09-24' })
     expect(coerceConditionValue(cond('x', 'in', ['2026-09-23T16:00:00.000Z', '2026-09-25']), F.date)).toEqual({ ok: true, value: ['2026-09-24', '2026-09-25'] })
     // The field's own zone wins over the business zone (America/New_York is UTC-4 in September) …
     const dateNy: ConditionFieldLike = { id: 'fld_date_ny', name: 'Due (NY)', type: 'date', property: { timezone: 'America/New_York' } }
@@ -237,6 +256,7 @@ describe('condition_branch build seam with fields (typed branch values)', () => 
             { fieldId: 'fld_person', operator: 'equals', value: 'u1' },
             { fieldId: 'fld_num', operator: 'in', value: ['1', '2'] },
             { fieldId: 'fld_date', operator: 'less_than', value: '2026-09-23T16:00:00.000Z' },
+            { fieldId: 'fld_bool', operator: 'not_equals', value: ' FALSE ' },
           ],
         },
         actions: [],
@@ -253,6 +273,8 @@ describe('condition_branch build seam with fields (typed branch values)', () => 
         { fieldId: 'fld_num', operator: 'in', value: [1, 2] },
         // A zoned instant on a date field → its day in the field's zone (Asia/Shanghai), the day the evaluator reads.
         { fieldId: 'fld_date', operator: 'less_than', value: '2026-09-24' },
+        // Any-case / padded boolean spelling (what the backend reads as false) → a real boolean.
+        { fieldId: 'fld_bool', operator: 'not_equals', value: false },
       ],
     })
   })

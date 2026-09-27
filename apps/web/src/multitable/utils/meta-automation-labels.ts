@@ -19,6 +19,7 @@ import {
   type DateReminderExample,
   type LegacyUtcSwitchImpact,
 } from './automation-trigger-timezone'
+import { isTemporalConditionFieldType } from './automation-condition-values'
 
 // Legacy execution/step statuses (success/failed/skipped) + the converged C1
 // WorkflowJobStatus set surfaced by the A2 runs API (resolved/queued/suspended/…).
@@ -143,6 +144,7 @@ export type AutomationLabelKey =
   | 'condition.pickPeople'
   | 'condition.pickRecords'
   | 'condition.removeValueTitle'
+  | 'condition.fieldMissing'
   | 'actionConfig.targetSheetId'
   | 'actionConfig.sheetIdPlaceholder'
   | 'actionConfig.targetSheetManualToggle'
@@ -523,6 +525,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'condition.pickPeople',
   'condition.pickRecords',
   'condition.removeValueTitle',
+  'condition.fieldMissing',
   'actionConfig.targetSheetId',
   'actionConfig.sheetIdPlaceholder',
   'actionConfig.targetSheetManualToggle',
@@ -918,6 +921,11 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'condition.pickPeople': { en: 'Choose people', zh: '选择人员' },
   'condition.pickRecords': { en: 'Choose records', zh: '选择记录' },
   'condition.removeValueTitle': { en: 'Remove', zh: '移除' },
+  // A condition_branch row whose field the sheet no longer has (the backend refuses it on every save).
+  'condition.fieldMissing': {
+    en: 'This condition uses a field that was deleted (or hidden). Choose another field or remove this condition.',
+    zh: '该条件引用的字段已删除（或已被隐藏），请重新选择字段或删除此条件。',
+  },
   // W1 G-10: '工作表' was a fifth term (neither old nor ratified) that visually collides with
   // '工作区' (Base) — the label noun follows the dictionary; the ID value itself stays raw.
   'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标数据表 ID' },
@@ -1788,19 +1796,19 @@ export function automationSwitchToBusinessTimezoneConfirm(
   return parts.join(isZh ? '' : ' ')
 }
 
-const TEMPORAL_CONDITION_FIELD_TYPES: ReadonlySet<string> = new Set(['date', 'dateTime', 'createdTime', 'modifiedTime'])
-
 /**
  * Operator label. With a `fieldType` of a date / date-time field (客户反馈 2026-09-24 #4b) the ordering
  * operators read in time — 晚于 / 早于 (after / before), 不早于 / 不晚于 (on or after / on or before) — instead
- * of 大于 / 小于; the stored operator CODES are unchanged.
+ * of 大于 / 小于; the stored operator CODES are unchanged. Which types are temporal is decided in ONE place,
+ * automation-condition-values.ts `isTemporalConditionFieldType`, built on the same date-time type predicate the
+ * value coercion uses, so the labels and the saved value shape cannot disagree on what is a date-time.
  */
 export function automationConditionOperatorLabel(
   operator: ConditionOperator | UnknownAutomationString,
   isZh: boolean,
   fieldType?: string | null,
 ): string {
-  if (fieldType && TEMPORAL_CONDITION_FIELD_TYPES.has(fieldType)) {
+  if (fieldType && isTemporalConditionFieldType(fieldType)) {
     switch (operator) {
       case 'greater_than':
         return isZh ? '晚于' : 'After'

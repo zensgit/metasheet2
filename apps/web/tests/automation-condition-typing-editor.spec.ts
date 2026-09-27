@@ -49,6 +49,25 @@ function rowSelects(row: HTMLElement) {
   }
 }
 
+/**
+ * jsdom has no scrollIntoView. Install a recording stub for one test (restored by the returned function), so a
+ * test can assert WHICH element a save-block reason scrolls to (the anchor selector resolved in the real DOM).
+ */
+function stubScrollIntoView() {
+  const targets: Element[] = []
+  const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    writable: true,
+    value(this: Element) { targets.push(this) },
+  })
+  const restore = () => {
+    if (original) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', original)
+    else delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView
+  }
+  return { targets, restore }
+}
+
 /** The text an el-select shows in its closed box: the selected label, else its placeholder. */
 function selectDisplayText(select: HTMLElement): string {
   return (select.querySelector('.el-select__selected-item:not(.el-select__input-wrapper)')?.textContent ?? '').trim()
@@ -282,6 +301,15 @@ describe('condition_branch rows are typed and saved in the typed shape', () => {
     await flush()
     expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
     expect(container.querySelector('[data-field="saveBlockReasons"]')?.textContent).toContain('请完善条件分支中的所有条件')
+    // The reason's anchor resolves to THIS row in the rendered editor: clicking the reason scrolls to it.
+    const scroll = stubScrollIntoView()
+    try {
+      ;(container.querySelector('[data-action="save-block-reason"][data-reason-key="branchConditionsIncomplete"]') as HTMLButtonElement).click()
+      await flush()
+      expect(scroll.targets).toEqual([row])
+    } finally {
+      scroll.restore()
+    }
 
     input.value = '2026-09-24 09:30'
     input.dispatchEvent(new Event('input'))
@@ -349,6 +377,69 @@ describe('condition_branch rows are typed and saved in the typed shape', () => {
     ])
     // ...and the loaded rule object itself was never mutated by the editor.
     expect(legacy.branches[0].conditions.conditions[0].value).toBe('5')
+  }, EDITOR_MOUNT_TIMEOUT_MS)
+
+  it('a loaded branch row on a DELETED field: the row says so, save is blocked and anchored at it, and re-picking a field clears it', async () => {
+    // The backend (#6107 validateConditionGroupAgainstFields) refuses a branch condition whose field is not on
+    // the sheet, on EVERY save of the rule. The editor must say which row and why, instead of a 400.
+    const config = {
+      branches: [{
+        key: 'gone',
+        conditions: {
+          conjunction: 'AND',
+          conditions: [
+            { fieldId: 'fld_score', operator: 'greater_than', value: 1 },
+            { fieldId: 'fld_deleted', operator: 'equals', value: 'x' },
+          ],
+        },
+        actions: [{ type: 'update_record', config: { fields: { fld_name: 'vip' } } }],
+      }],
+    }
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule: ruleWithBranch(config), onSave: saved })
+    await flush()
+    const branchRow = (index: number) => container.querySelector(`[data-branch-index="0"] [data-branch-condition-index="${index}"]`) as HTMLElement
+    expect(container.querySelector('[data-branch-condition-field-missing="0"]')).toBeNull() // fld_score exists
+    const message = container.querySelector('[data-branch-condition-field-missing="1"]')
+    expect(message?.textContent?.trim()).toBe('该条件引用的字段已删除（或已被隐藏），请重新选择字段或删除此条件。')
+    const save = container.querySelector('[data-action="save"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    expect(container.querySelector('[data-field="saveBlockReasons"]')?.textContent).toContain('请完善条件分支中的所有条件')
+    const scroll = stubScrollIntoView()
+    try {
+      ;(container.querySelector('[data-action="save-block-reason"][data-reason-key="branchConditionsIncomplete"]') as HTMLButtonElement).click()
+      await flush()
+      expect(scroll.targets).toEqual([branchRow(1)])
+    } finally {
+      scroll.restore()
+    }
+
+    // Re-pick a field that exists and give it a value: the message goes and the rule saves.
+    epSetSelect(rowSelects(branchRow(1)).field, 'fld_name')
+    await flush()
+    const text = branchRow(1).querySelector('[data-condition-value="text"] input, input[data-condition-value="text"]') as HTMLInputElement
+    text.value = 'vip'
+    text.dispatchEvent(new Event('input'))
+    await flush()
+    expect(container.querySelector('[data-branch-condition-field-missing]')).toBeNull()
+    expect(save.disabled).toBe(false)
+    save.click()
+    await flush()
+    expect(saved.mock.calls[0][0].actions[0].config.branches[0].conditions.conditions[1]).toEqual({ fieldId: 'fld_name', operator: 'equals', value: 'vip' })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
+
+  it('an EMPTY field list (not loaded yet) does not flag every branch row as deleted', async () => {
+    const config = {
+      branches: [{
+        key: 'unloaded',
+        conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_score', operator: 'greater_than', value: 1 }] },
+        actions: [{ type: 'update_record', config: { fields: { fld_name: 'vip' } } }],
+      }],
+    }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: [], rule: ruleWithBranch(config) })
+    await flush()
+    expect(container.querySelector('[data-branch-condition-field-missing]')).toBeNull()
+    expect(container.querySelector('[data-reason-key="branchConditionsIncomplete"]')).toBeNull()
   }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('untouched save: a date condition stored as a zoned instant keeps the day the evaluator reads (rule-level and branch)', async () => {

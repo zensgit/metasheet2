@@ -1413,30 +1413,39 @@
                     <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'AND' }" :type="branch.conjunction === 'AND' ? 'primary' : 'default'" @click="branch.conjunction = 'AND'">{{ automationLabel('condition.and', isZh) }}</el-button>
                     <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'OR' }" :type="branch.conjunction === 'OR' ? 'primary' : 'default'" @click="branch.conjunction = 'OR'">{{ automationLabel('condition.or', isZh) }}</el-button>
                   </div>
-                  <div v-for="(cond, cIdx) in branch.conditions" :key="cIdx" class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
-                    <!-- 客户反馈 2026-09-24 #4b: the same field → operator → typed value row as the rule-level
-                         conditions (was a bare text box whose values were saved as strings). -->
-                    <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" data-condition-field="" @change="onConditionFieldChange(cond, $event)">
-                      <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
-                      <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
-                        <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
-                        <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
-                      </el-option>
-                    </el-select>
-                    <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" :disabled="!cond.fieldId" :placeholder="automationLabel('condition.selectFieldFirst', isZh)" data-condition-operator="" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
-                      <el-option v-for="op in conditionOperatorOptionsForRow(cond)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(cond, op.value)" />
-                    </el-select>
-                    <ConditionValueInput
-                      v-if="!isUnaryOperator(cond.operator)"
-                      :model-value="cond.value"
-                      :operator="cond.operator"
-                      :field="conditionField(cond) ?? null"
-                      :pending="isConditionRowPending(cond)"
-                      :sheet-id="sheetId"
-                      @update:model-value="cond.value = $event"
-                    />
-                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
-                  </div>
+                  <template v-for="(cond, cIdx) in branch.conditions" :key="cIdx">
+                    <div class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
+                      <!-- 客户反馈 2026-09-24 #4b: the same field → operator → typed value row as the rule-level
+                           conditions (was a bare text box whose values were saved as strings). -->
+                      <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" data-condition-field="" @change="onConditionFieldChange(cond, $event)">
+                        <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                        <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
+                          <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
+                          <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
+                        </el-option>
+                      </el-select>
+                      <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" :disabled="!cond.fieldId" :placeholder="automationLabel('condition.selectFieldFirst', isZh)" data-condition-operator="" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
+                        <el-option v-for="op in conditionOperatorOptionsForRow(cond)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(cond, op.value)" />
+                      </el-select>
+                      <ConditionValueInput
+                        v-if="!isUnaryOperator(cond.operator)"
+                        :model-value="cond.value"
+                        :operator="cond.operator"
+                        :field="conditionField(cond) ?? null"
+                        :pending="isConditionRowPending(cond)"
+                        :sheet-id="sheetId"
+                        @update:model-value="cond.value = $event"
+                      />
+                      <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
+                    </div>
+                    <!-- #4b (review of #6107): a row whose field is not on the sheet any more. The backend refuses it
+                         on EVERY save of the rule (even a rename), so the row says why and the save is blocked. -->
+                    <div
+                      v-if="isBranchConditionFieldMissing(cond)"
+                      class="meta-rule-editor__hint meta-rule-editor__hint--error"
+                      :data-branch-condition-field-missing="cIdx"
+                    >{{ automationLabel('condition.fieldMissing', isZh) }}</div>
+                  </template>
                   <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
@@ -3317,15 +3326,30 @@ const conditionBranchReadOnlyReason = computed<string | null>(() => {
   }
   return null
 })
+/**
+ * #4b (review of #6107): a condition_branch row whose field is not among the sheet's fields. The backend save
+ * gate (#6107 `validateConditionGroupAgainstFields`) refuses such a row with a 400 on EVERY save of the rule,
+ * even a rename, and its message is an English JSON path. The editor instead flags the row (its own message)
+ * and counts it as incomplete, so save is blocked with the row anchored. Caveat: `fields` is the grid's field
+ * list, which omits a field hidden at the property level (layer-2 `hidden` / `visible: false`), so a row on
+ * such a field is flagged too — the message says 已删除（或已被隐藏）. An empty `fields` (not loaded yet)
+ * flags nothing: every row would otherwise read as deleted.
+ */
+function isBranchConditionFieldMissing(condition: AutomationCondition): boolean {
+  if (!condition.fieldId || props.fields.length === 0) return false
+  return conditionField(condition) === undefined
+}
+
 // 客户反馈 2026-09-24 #4b: a condition_branch condition row must be complete (field + operator + a value in its
 // field type's shape) exactly like a rule-level row — the branch rows used to save whatever the text box held
-// (and a blank row reached the backend as a 400). Anchor = the first incomplete branch row, in render order.
+// (and a blank row reached the backend as a 400). A row on a field the sheet no longer has is incomplete too
+// (isBranchConditionFieldMissing). Anchor = the first incomplete branch row, in render order.
 const firstIncompleteBranchConditionAnchor = computed<string | undefined>(() => {
   for (const [actionIndex, action] of draft.value.actions.entries()) {
     if (action.type !== 'condition_branch' || action.config.branchUnsupportedReason) continue
     for (const [branchIndex, branch] of (action.config.branches ?? []).entries()) {
       for (const [conditionIndex, condition] of branch.conditions.entries()) {
-        if (!isConditionLeafComplete(condition)) {
+        if (isBranchConditionFieldMissing(condition) || !isConditionLeafComplete(condition)) {
           return `[data-action-index="${actionIndex}"] [data-branch-index="${branchIndex}"] [data-branch-condition-index="${conditionIndex}"]`
         }
       }

@@ -154,14 +154,17 @@
       />
     </template>
 
-    <ElInput
-      v-else
-      :model-value="textValue"
-      class="meta-condition-value__control"
-      :placeholder="placeholder"
-      :data-condition-value="kind === 'textList' ? 'text-list' : 'text'"
-      @update:model-value="emitValue"
-    />
+    <template v-else>
+      <ElInput
+        :model-value="textValue"
+        class="meta-condition-value__control"
+        :placeholder="placeholder"
+        :title="listZoneLabel || undefined"
+        :data-condition-value="kind === 'textList' ? 'text-list' : 'text'"
+        @update:model-value="emitValue"
+      />
+      <span v-if="listZoneLabel" class="meta-condition-value__hint" data-condition-value-zone="">{{ listZoneLabel }}</span>
+    </template>
   </div>
 </template>
 
@@ -248,14 +251,34 @@ const kind = computed<ConditionValueKind>(() => {
 
 const placeholder = computed(() => automationConditionValuePlaceholder(widget.value, isArray.value, isZh.value))
 
+// The field's zone (field property → business timezone, #6083): date-time values are typed / shown in it,
+// and a date value that names its own zone (`…T16:00:00.000Z`) is shown as its day in it.
+const dateTimeZone = computed(() => conditionDateTimeZone(props.field))
+
 function emitValue(value: unknown) {
   emit('update:modelValue', value)
 }
 
 // ---- text / text list ----
+// A loaded LIST on a date-time / date field (`in` / `not_in`) is shown the way it is typed, like the
+// single-value controls show it: a date-time entry (stored as a UTC ISO instant) as its wall clock in the
+// field's zone, a date entry as its day in the field's zone. Left untouched, the stored list is saved as is;
+// once edited, the save path reads every typed entry in that same zone, so the box and the value agree.
+function listEntryText(entry: unknown): string {
+  if (widget.value === 'dateTime' && parseDateTimeConditionValue(entry, dateTimeZone.value) !== null) {
+    return formatDateTimeInZone(entry, dateTimeZone.value) ?? String(entry)
+  }
+  if (widget.value === 'date') {
+    const day = parseDateConditionValue(entry, dateTimeZone.value)
+    if (day !== null) return day
+  }
+  return String(entry)
+}
+/** The zone a date-time LIST is typed in (the same hint the single-value date-time control shows). */
+const listZoneLabel = computed(() => (kind.value === 'textList' && widget.value === 'dateTime' ? dateTimeZoneLabel.value : ''))
 const textValue = computed(() => {
   const value = props.modelValue
-  if (Array.isArray(value)) return value.map((entry) => String(entry)).join(', ')
+  if (Array.isArray(value)) return value.map(listEntryText).join(', ')
   if (value === null || value === undefined) return ''
   return typeof value === 'string' ? value : String(value)
 })
@@ -310,11 +333,7 @@ function onNumberInput(text: string) {
   emitValue(parsed === null ? text : parsed)
 }
 
-// The field's zone (field property → business timezone, #6083): date-time values are typed / shown in it,
-// and a date value that names its own zone (`…T16:00:00.000Z`) is shown as its day in it.
-const dateTimeZone = computed(() => conditionDateTimeZone(props.field))
-
-// ---- date (floating calendar day, 'YYYY-MM-DD') ----
+// ---- date (floating calendar day, 'YYYY-MM-DD'; a zoned value is shown as its day in `dateTimeZone`) ----
 const dateValue = computed(() => parseDateConditionValue(props.modelValue, dateTimeZone.value) ?? '')
 function onDateChange(value: unknown) {
   emitValue(typeof value === 'string' ? value : '')

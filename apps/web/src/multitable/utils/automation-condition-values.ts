@@ -30,6 +30,12 @@
  * editor treats such a row as incomplete (save is blocked and the row is anchored) — it never silently
  * saves `null` / `[]` in its place. A value ALREADY in the saved shape comes back unchanged (same primitive,
  * same string spelling), so an untouched load → save of a typed value is byte-identical.
+ *
+ * A value NOT in the saved shape is rewritten by an untouched load → save, on rule-level and branch rows
+ * alike: `'5'` → `5`; `'true'` / `' TRUE '` → `true` (the spellings the backend reads as a boolean); a
+ * zone-less date-time wall clock → its UTC instant in the field's zone (#6083); a zoned instant on a date
+ * field → its day in the field's zone; a text value is trimmed. An empty or whitespace-only value does not
+ * coerce, so such a row is incomplete and blocks the save (the old branch text box could save `''`).
  */
 import type { AutomationCondition, ConditionOperator } from '../types'
 import type { AutomationConditionValueWidget } from './meta-automation-labels'
@@ -174,10 +180,18 @@ export function parseNumberConditionValue(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+/**
+ * `true` / `false`, or the strings `'true'` / `'false'` in any case and with surrounding spaces: exactly the
+ * spellings the backend accepts and reads as a boolean (A9-be `isBooleanConditionValue` / `booleanKeyOf`,
+ * PR #6107). A legacy `'TRUE'` from the old branch text box is therefore saved as `true`, rather than
+ * blocking the save of a rule the backend accepts and evaluates. Anything else is null.
+ */
 export function parseBooleanConditionValue(value: unknown): boolean | null {
   if (value === true || value === false) return value
-  if (value === 'true') return true
-  if (value === 'false') return false
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'true') return true
+  if (normalized === 'false') return false
   return null
 }
 
