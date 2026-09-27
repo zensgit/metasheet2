@@ -115,7 +115,10 @@ function table(headers, rows) {
 // ── the per-action read-plan OVERRIDE: the customer's own vocabulary ──────────
 // On site this is action.source.readPlan in the table-action config; here it is
 // the one config that adapts the shipped 7-object traversal to the fixture's
-// (== the customer's) column names. Identical to the rehearsal's REBIND_READ_PLAN.
+// (== the customer's) column names. Same shape as the rehearsal's REBIND_READ_PLAN
+// (stock-preparation-structure-exact-rehearsal.test.cjs), including specField below —
+// this runner used to omit it, which left the demo export's 规格/名称及规格 columns
+// blank even though the fixture declares Specification.
 const REBIND_READ_PLAN = normalizeStockPreparationBomReadPlan({
   id: 'plm.stock-preparation.bom-read.dn-view.demo',
   sourceKind: 'data-source:sql-readonly',
@@ -137,6 +140,11 @@ const REBIND_READ_PLAN = normalizeStockPreparationBomReadPlan({
     nameField: 'TargetName',
     materialField: 'Material',
     versionField: 'SysVer',
+    // DECLARED, matching the rehearsal: turns `Specification` into a canonical `spec` on
+    // the expansion row (stock-preparation-bom-expansion.cjs), which the conflict planner
+    // then carries onto the record as `componentSpec` (stock-preparation-conflict-planner.cjs).
+    // Undeclared, both the 规格 and 名称及规格 export columns print blank.
+    specField: 'Specification',
     // DECLARED (shipped, opt-in): carries Createtime far enough for the batch-identity
     // module (mintStockPreparationBatchIdentity) below to bucket it by hour. Absent this,
     // the module falls back to the legacy content-revision id and says `degraded: true`.
@@ -554,6 +562,9 @@ async function main() {
   const colIndex = (id) => REAL_EXPORT_COLUMNS.findIndex((c) => c.id === id)
   for (const r of exportRows) {
     assert.ok(String(r[colIndex('componentCode')]).startsWith('TZ-'))
+    // readPlan.part.specField 声明后,规格 不再是空列(见上面 REBIND_READ_PLAN 的注释;
+    // 缺 specField 时 componentSpec 不存在、ext_spec 也没进 record,这一断言会先红)。
+    assert.ok(String(r[colIndex('componentSpec')] ?? '').trim() !== '', '规格列不应为空(readPlan.part.specField 已声明)')
     assert.equal(r[colIndex('stockPreparationStatus')], '20 - 已下单')
     assert.equal(r[colIndex('ext_stockPrepDate')], '2026-09-02')
     // 五个部门完成列(#5447):自制/外购 + 采购完成对(布尔渲染为是/否)+ 仓库完成对,人填值原样导出。
@@ -579,7 +590,7 @@ async function main() {
   say(`     ${DIM('缺省仍是今天的内容修订版本号做法(source_revision),逐字节不变;声明后源缺 Createtime 会显式降级,不会静默换算法。')}`)
   say(`  2. ${BOLD('多人审批 hand-off 链到备料')}:平台有审批运行时,但 owner 裁决先上轻量版(应用内游标 + 群通知,#5442),不绑定完整审批图 —— 未接线到备料流。属净新,未接线。`)
   say(`  3. ${BOLD('钉钉个人待办推送')}:owner 2026-09-02 裁决本轮${BOLD('不做')}(A 工作通知冒充待办 / B 单向待办镜像两案均推后);备料接力(#5442)现状仍只有钉钉${BOLD('群')}webhook,不是个人待办;平台侧审批待办单向镜像(#5772)已合入但${BOLD('默认关闭')}、只覆盖审批席位、owner 前置(其设计文档 §8)未满足,不适用于备料。`)
-  say(`  ${DIM('若观众追问:第 1 条已发货但默认关闭,需部署方显式开启;第 2 条未接线,是范围内的下一步;第 3 条本轮不做,不要摆成在跑。')}`)
+  say(`  ${DIM('若观众追问:第 1 条已发货但默认关闭,需部署方显式开启;第 2 条 owner R8 裁决本轮不做审批引擎,#5442 轻量接力即现状,接力顺序跑稳后再换审批模板,不要摆成即将上;第 3 条本轮不做,不要摆成在跑。')}`)
 
   // ── values-free self-check over the printed export projection ─────────────────
   const FORBIDDEN = [
