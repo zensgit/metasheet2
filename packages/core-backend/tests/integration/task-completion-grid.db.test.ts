@@ -2,7 +2,7 @@ import '../helpers/assert-rbac-optional-off'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { completeTask, createTask } from '../../src/services/task-records'
+import { completeTask, createTask, reopenTask } from '../../src/services/task-records'
 
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('task-completion-grid.db.test.ts requires EXPECT_DB=1')
@@ -26,7 +26,7 @@ async function assigneeCount(id: string): Promise<string> {
   return result.rows[0]?.n ?? '0'
 }
 
-async function assertAnyOpenInvariant(id: string): Promise<void> {
+async function anyRow(id: string): Promise<{ status: string; completion_mode: string; stamped: string } | undefined> {
   const result = await poolManager.get().query<{ status: string; completion_mode: string; stamped: string }>(
     `SELECT status, completion_mode,
             (SELECT count(*) FROM task_assignees a
@@ -34,7 +34,19 @@ async function assertAnyOpenInvariant(id: string): Promise<void> {
      FROM tasks WHERE id = $1`,
     [id],
   )
-  const row = result.rows[0]
+  return result.rows[0]
+}
+
+// §6.2: open + any ⇒ no non-empty completed_at. A done any task makes the implication true.
+async function assertAnyInvariant(id: string): Promise<void> {
+  const row = await anyRow(id)
+  expect(row?.completion_mode).toBe('any')
+  if (row?.status === 'open') expect(row.stamped).toBe('0')
+  else expect(row?.status).toBe('done')
+}
+
+async function assertAnyOpenInvariant(id: string): Promise<void> {
+  const row = await anyRow(id)
   expect(row?.status).toBe('open')
   expect(row?.completion_mode).toBe('any')
   expect(row?.stamped).toBe('0')
@@ -74,8 +86,13 @@ describe('gate 3 surviving completion cells', () => {
     const stranger = `usrS_${stamp}`
     await expect(completeTask({ orgId, actorId: stranger, taskId: created.id })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(await statusOf(created.id)).toBe('open')
+    await assertAnyOpenInvariant(created.id)
     await completeTask({ orgId, actorId: creator, taskId: created.id })
     expect(await statusOf(created.id)).toBe('done')
+    await assertAnyInvariant(created.id)
+    await reopenTask({ orgId, actorId: creator, taskId: created.id, scope: 'all' })
+    expect(await statusOf(created.id)).toBe('open')
+    await assertAnyOpenInvariant(created.id)
   })
 
   it('all x 1: omitting assignees inserts the creator, and that row completes the task', async () => {
@@ -102,6 +119,10 @@ describe('gate 3 surviving completion cells', () => {
     await assertAnyOpenInvariant(created.id)
     await completeTask({ orgId, actorId: creator, taskId: created.id })
     expect(await statusOf(created.id)).toBe('done')
+    await assertAnyInvariant(created.id)
+    await reopenTask({ orgId, actorId: creator, taskId: created.id, scope: 'all' })
+    expect(await statusOf(created.id)).toBe('open')
+    await assertAnyOpenInvariant(created.id)
   })
 
   it('all x n: one of two assignees does not finish the task', async () => {
@@ -133,5 +154,9 @@ describe('gate 3 surviving completion cells', () => {
     await assertAnyOpenInvariant(created.id)
     await completeTask({ orgId, actorId: a, taskId: created.id })
     expect(await statusOf(created.id)).toBe('done')
+    await assertAnyInvariant(created.id)
+    await reopenTask({ orgId, actorId: a, taskId: created.id, scope: 'self' })
+    expect(await statusOf(created.id)).toBe('open')
+    await assertAnyOpenInvariant(created.id)
   })
 })

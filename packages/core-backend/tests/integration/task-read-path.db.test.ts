@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { completeTask, countPending, createTask, listPending, listTasks } from '../../src/services/task-records'
 import { isOverdueOrToday, resolveViewerTimeZone } from '../../src/tasks/task-dates'
@@ -221,8 +221,8 @@ describe('gate 19 view grid', () => {
     'gate19|none|following|of'
   ]
 
-  for (const name of cells) {
-    it(name, async () => {
+  // Gate 17② counts each array row of this it.each (49 names, no header).
+  it.each(cells)('%s', async (name) => {
       const { roles, view, suffix } = parseCell(name)
       const stamp = randomUUID()
       const orgId = `org_g19_${stamp}`
@@ -255,37 +255,44 @@ describe('gate 19 view grid', () => {
       }, me, view)
       const rows = await listTasks({ orgId, actorId: me, view })
       expect(rows.map((row) => row.id).includes(created.id)).toBe(expectRow)
-    })
-  }
+  })
 })
 
-function restore(file: string, backup: string): void {
-  copyFileSync(backup, file)
+function packageRoot(file: string): string {
+  const at = file.lastIndexOf('/src/')
+  if (at < 0) throw new Error(`not a package source file: ${file}`)
+  return file.slice(0, at)
 }
 
 function runSourceMutant(file: string, needle: string, replacement: string, body: string): void {
   const backup = `/tmp/task-mutant-${randomUUID()}.bak`
+  const script = `/tmp/task-probe-${randomUUID()}.mts`
   copyFileSync(file, backup)
   const original = readFileSync(file, 'utf8')
-  expect(original.includes(needle)).toBe(true)
-  writeFileSync(file, original.replace(needle, replacement))
-  const script = `/tmp/task-probe-${randomUUID()}.mts`
-  writeFileSync(script, body)
-  const tsx = createRequire(import.meta.url).resolve('tsx/cli')
-  const cwd = file.slice(0, file.indexOf('/src/tasks/'))
+  let failed: unknown
   try {
+    expect(original.includes(needle)).toBe(true)
+    writeFileSync(file, original.replace(needle, replacement))
+    writeFileSync(script, body)
+    const tsx = createRequire(import.meta.url).resolve('tsx/cli')
     execFileSync(process.execPath, [tsx, script], {
-      cwd, env: process.env, stdio: 'inherit', timeout: 120000,
+      cwd: packageRoot(file), env: process.env, stdio: 'inherit', timeout: 120000,
     })
+  } catch (err) {
+    failed = err
   } finally {
-    restore(file, backup)
-    expect(readFileSync(file, 'utf8')).toBe(original)
+    copyFileSync(backup, file)
+    for (const path of [script, backup]) {
+      try { unlinkSync(path) } catch { /* already removed */ }
+    }
   }
+  expect(readFileSync(file, 'utf8')).toBe(original)
+  if (failed) throw failed
 }
 
 describe('gate 19 probes', () => {
   const file = ACCESS.pathname
-  const cwd = file.slice(0, file.indexOf('/src/tasks/'))
+  const cwd = packageRoot(file)
 
   afterAll(() => {
     const live = readFileSync(file, 'utf8')

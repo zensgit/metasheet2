@@ -77,7 +77,21 @@
 | `tests/integration/task-completion-grid.db.test.ts` | 6 |
 | 合计 | 83 |
 
-这四个文件没有 `it.each` / `test.each`。展开后的静态计数就是 `it(` 的个数，与收集数相同。
+上面这次跑在 `b27cf9208`。四个文件当时没有 `it.each` / `test.each`，但门 19 网格是 `for` 里的一个 `it(name)`，vitest 收集成 49 条。按锁的展开规则，静态 `it(` 是 35，不是 83。收集数不等于展开后静态计数。那句「静态计数等于收集数」不成立。
+
+评论 5857450153 之后，同一台已有的一次性库 `metasheet_tasks_gate_tmp`（不是 `metasheet_v2`，这次没有建库、没有迁移）再跑四个文件，exit 0，89 通过：
+
+| 文件 | 收集到的通过用例 |
+|---|---|
+| `tests/integration/task-p0a.db.test.ts` | 13 |
+| `tests/integration/task-read-path.db.test.ts` | 57 |
+| `tests/integration/task-rbac-trust.db.test.ts` | 13 |
+| `tests/integration/task-completion-grid.db.test.ts` | 6 |
+| 合计 | 89 |
+
+`task-read-path.db.test.ts` 的 `it.each(cells)` 展开 49 行，没有表头。这 49 个名字就是 `cells` 里的 `gate19|…`，与 `i-m2` 相同。其余是普通 `it(`：p0a 13、read-path 8、rbac-trust 13、completion-grid 6，共 40。展开后静态计数 = 40 + 49 = 89，与收集数相同。
+
+这一轮还做了：两个 `view` 的 HTTP 行集不同；未知 `view` 是 `predicate_error`；没有租户时 `/pending` 与 `/pending-count` 是 `org_missing`，不会去读 org `default`；门 8 的生产路径是 `/pending-count` 的全天 overdue（非法头和缺头与任务时区相同，路由回退改成 `UTC` 后 `{"gate8route":"red","explicit":1,"invalid":0,"missing":0}`）；门 13 用 `MetaSheetServer` 的 `index.ts` 挂载，把挂载改成 `null` 后这一格是 404 而不是 200，随后已还原。any 模式三格在 complete 和 reopen 之后都断言 §6.2。`src/tasks` 没有改。M2 仍没有写入 `time_zone` 的路由，非法 IANA ⇒ 422 还没有写路径。
 
 `vitest.tasks-auth.config.ts` exit 0：8 通过。其中门 1 四格（无 org 写、跨 org 写、org 隔离读、无 admission 403）和原先的 401/403/200 对照。
 
@@ -110,11 +124,13 @@ pnpm exec tsx tests/helpers/gate19-identities.ts /tmp/tasks-m2-db-verbose.txt \
 
 ## 6. CI run id 与收集数
 
-本地收集数见第 5 节：四个 `task-*.db.test.ts` 一共 83，没有 `.each`。
+`b27cf9208` 的本地收集数是 83，但那不是展开后静态计数（见第 5 节）。当前工作树的本地收集数是 89，展开后静态计数也是 89：`it.each(cells)` 49 行，加上 40 个普通 `it(`。
 
-`5362170a8` 的 `tasks-realdb` run [36329492872](https://github.com/zensgit/metasheet2/actions/runs/36329492872) 失败：`task-rbac-trust.db.test.ts` 在模块装载时要求 `JWT_SECRET` 至少 32 字符，这条 lane 没有设置它。同一日志里另外三个真库文件是通过的。探针②的红结果已经打出来。Plugin System Tests run [36329492901](https://github.com/zensgit/metasheet2/actions/runs/36329492901) 被下一笔只改文档的推送取消。
+`5362170a8` 的 `tasks-realdb` run [36329492872](https://github.com/zensgit/metasheet2/actions/runs/36329492872) 失败：`task-rbac-trust.db.test.ts` 在模块装载时要求 `JWT_SECRET` 至少 32 字符，这条 lane 没有设置它。同一日志里另外三个真库文件是通过的。这不是还开着的缺陷。探针②的红结果已经打出来。Plugin System Tests run [36329492901](https://github.com/zensgit/metasheet2/actions/runs/36329492901) 被下一笔只改文档的推送取消。
 
-下一笔把 lane 夹具 `JWT_SECRET` 写进 `tasks-realdb.yml`。那不是生产口令。新 run 的收集数等该 job 结束后再记。
+`b27cf9208` 把 lane 夹具 `JWT_SECRET` 写进 `tasks-realdb.yml`。那不是生产口令。`tasks-realdb` run [36329710616](https://github.com/zensgit/metasheet2/actions/runs/36329710616) 在这个 head 上成功，83 个测试。没有重跑。
+
+Plugin System Tests run [36329710574](https://github.com/zensgit/metasheet2/actions/runs/36329710574) 已结束，结论 success。其中 job `test (20.x)` 也是 success。这一 job 里 `pnpm --filter @metasheet/core-backend test` 的收集数是 18200（16590 passed，1610 skipped）。同 job 的 tasks auth gate 步骤收集 8，8 passed。这是 `b27cf9208` 的日志，不是上面 89 这条本地结果。
 
 门 17③（把 `tasks-realdb` 加进 main required checks）是合并后的 owner 步骤，本 PR 不做。
 

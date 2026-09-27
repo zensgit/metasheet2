@@ -3,12 +3,17 @@
  * Tokens do not carry perms. Static paths are registered before /:id.
  */
 import '../helpers/assert-rbac-optional-off'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { copyFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { MetaSheetServer } from '../../src/index'
+import { countPending, createTask } from '../../src/services/task-records'
 import { tasksRouter } from '../../src/routes/tasks'
 
 if (process.env.EXPECT_DB !== '1') {
@@ -184,4 +189,262 @@ describe('gate 2 and gate 13 under token trust', () => {
     expect(missing.status).toBe(404)
     expect(missing.body).toEqual({ error: { code: 'NOT_FOUND' } })
   })
+
+  it('returns different rows for assigned and created', async () => {
+    const actor = await userWith({ label: 'views', codes: ['tasks:read'], admission: true })
+    const other = `usr_other_views_${stamp}`
+    const createdOnly = await createTask({
+      orgId, creatorId: actor.userId, title: '备料复核', assignees: [other], completionMode: 'all',
+    })
+    const assignedOnly = await createTask({
+      orgId, creatorId: other, title: '备料复核', assignees: [actor.userId], completionMode: 'all',
+    })
+    const server = app()
+    const assigned = await request(server)
+      .get('/api/tasks')
+      .query({ view: 'assigned' })
+      .set('Authorization', `Bearer ${actor.bearer}`)
+    const created = await request(server)
+      .get('/api/tasks')
+      .query({ view: 'created' })
+      .set('Authorization', `Bearer ${actor.bearer}`)
+    expect(assigned.status).toBe(200)
+    expect(created.status).toBe(200)
+    const assignedIds = (assigned.body.items as { id: string }[]).map((row) => row.id)
+    const createdIds = (created.body.items as { id: string }[]).map((row) => row.id)
+    expect(assignedIds).toContain(assignedOnly.id)
+    expect(assignedIds).not.toContain(createdOnly.id)
+    expect(createdIds).toContain(createdOnly.id)
+    expect(createdIds).not.toContain(assignedOnly.id)
+  })
+
+  it('degrades an unknown view instead of failing the request', async () => {
+    const actor = await userWith({ label: 'badview', codes: ['tasks:read'], admission: true })
+    const response = await request(app())
+      .get('/api/tasks')
+      .query({ view: 'not-a-view' })
+      .set('Authorization', `Bearer ${actor.bearer}`)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ items: [], degraded: true, reason: 'predicate_error' })
+  })
+
+  it('pending routes degrade when the tenant is missing and do not read org default', async () => {
+    const actor = await userWith({ label: 'notenant', codes: ['tasks:read'], admission: true })
+    const bare = jwt.sign({
+      userId: actor.userId,
+      sub: actor.userId,
+      email: `${actor.userId}@tasks-trust.test`,
+      role: 'user',
+      roles: [actor.roleId],
+    }, JWT_SECRET, { expiresIn: '1h' })
+    const planted = await createTask({
+      orgId: 'default',
+      creatorId: `usr_def_${stamp}`,
+      title: '备料复核',
+      assignees: [actor.userId],
+      completionMode: 'all',
+    })
+    try {
+      await poolManager.get().query(
+        `UPDATE tasks
+         SET due_date = ((now() AT TIME ZONE 'UTC')::date - 1),
+             due_time = TIME '12:00',
+             due_at = now() - interval '2 hours',
+             time_zone = 'UTC'
+         WHERE id = $1`,
+        [planted.id],
+      )
+      const server = app()
+      const pending = await request(server)
+        .get('/api/tasks/pending')
+        .set('Authorization', `Bearer ${bare}`)
+      const count = await request(server)
+        .get('/api/tasks/pending-count')
+        .set('Authorization', `Bearer ${bare}`)
+      expect(pending.status).toBe(200)
+      expect(pending.body).toEqual({ items: [], degraded: true, reason: 'org_missing' })
+      expect(count.status).toBe(200)
+      expect(count.body).toEqual({ count: 0, degraded: true, reason: 'org_missing' })
+    } finally {
+      await poolManager.get().query('DELETE FROM tasks WHERE id = $1', [planted.id])
+    }
+  })
+
+  it('gate 8: invalid and missing viewer zones follow the task zone on pending-count', async () => {
+    const actor = await userWith({ label: 'g8', codes: ['tasks:read'], admission: true })
+    const picked = zoneThatDisagreesWithUtc(new Date())
+    const created = await createTask({
+      orgId, creatorId: `usr_g8c_${stamp}`, title: '备料复核', assignees: [actor.userId], completionMode: 'all',
+    })
+    await poolManager.get().query(
+      `UPDATE tasks SET due_date = $2, due_time = NULL, due_at = NULL, time_zone = $3 WHERE id = $1`,
+      [created.id, picked.dueDate, picked.timeZone],
+    )
+    expect(await countPending({ orgId, actorId: actor.userId, viewerTz: picked.timeZone })).toBe(picked.taskCount)
+    expect(await countPending({ orgId, actorId: actor.userId, viewerTz: null })).toBe(picked.taskCount)
+    expect(await countPending({ orgId, actorId: actor.userId, viewerTz: 'UTC' })).toBe(picked.utcCount)
+    const server = app()
+    const explicit = await httpCount(server, actor.bearer, picked.timeZone)
+    const invalid = await httpCount(server, actor.bearer, 'Not/AZone')
+    const missing = await httpCount(server, actor.bearer)
+    expect(explicit).toBe(picked.taskCount)
+    expect(invalid).toBe(explicit)
+    expect(missing).toBe(explicit)
+  })
+
+  it('gate 8 negative: a UTC fallback on the count route separates invalid and missing headers', async () => {
+    const actor = await userWith({ label: 'g8neg', codes: ['tasks:read'], admission: true })
+    const picked = zoneThatDisagreesWithUtc(new Date())
+    const created = await createTask({
+      orgId, creatorId: `usr_g8n_${stamp}`, title: '备料复核', assignees: [actor.userId], completionMode: 'all',
+    })
+    await poolManager.get().query(
+      `UPDATE tasks SET due_date = $2, due_time = NULL, due_at = NULL, time_zone = $3 WHERE id = $1`,
+      [created.id, picked.dueDate, picked.timeZone],
+    )
+    const route = new URL('../../src/routes/tasks.ts', import.meta.url)
+    const nodeRequire = createRequire(import.meta.url)
+    const expressEntry = nodeRequire.resolve('express')
+    const supertestEntry = nodeRequire.resolve('supertest')
+    const jwtEntry = nodeRequire.resolve('jsonwebtoken')
+    const needle = `const viewerTz = validateViewerTimeZoneHeader(req.header('x-viewer-time-zone'))
+      const count = await countPending({ orgId: org, actorId: actorId(req), viewerTz })`
+    runRouteMutant(route.pathname, needle, needle.replace(
+      'validateViewerTimeZoneHeader(req.header(\'x-viewer-time-zone\'))',
+      'validateViewerTimeZoneHeader(req.header(\'x-viewer-time-zone\')) ?? \'UTC\'',
+    ), `
+      const expressMod = await import(${JSON.stringify(expressEntry)})
+      const supertestMod = await import(${JSON.stringify(supertestEntry)})
+      const jwtMod = await import(${JSON.stringify(jwtEntry)})
+      const express = expressMod.default ?? expressMod
+      const request = supertestMod.default ?? supertestMod
+      const jwt = jwtMod.default ?? jwtMod
+      const { tasksRouter } = await import(${JSON.stringify(route.pathname)})
+      const token = jwt.sign({
+        userId: process.env.GATE8_USER,
+        sub: process.env.GATE8_USER,
+        email: process.env.GATE8_USER + '@tasks-trust.test',
+        role: 'user',
+        roles: [process.env.GATE8_ROLE],
+        tenantId: process.env.GATE8_ORG,
+      }, process.env.JWT_SECRET, { expiresIn: '1h' })
+      const router = tasksRouter()
+      if (!router) process.exit(1)
+      const server = express()
+      server.use(express.json())
+      server.use(router)
+      async function count(header) {
+        const req = request(server).get('/api/tasks/pending-count').set('Authorization', 'Bearer ' + token)
+        if (header) req.set('x-viewer-time-zone', header)
+        const res = await req
+        if (res.status !== 200 || typeof res.body.count !== 'number') process.exit(1)
+        return res.body.count
+      }
+      const explicit = await count(process.env.GATE8_TZ)
+      const invalid = await count('Not/AZone')
+      const missing = await count('')
+      console.log(JSON.stringify({ gate8route: 'red', explicit, invalid, missing }))
+      if (invalid === explicit || missing === explicit) process.exit(1)
+      process.exit(0)
+    `, {
+      GATE8_USER: actor.userId,
+      GATE8_ROLE: actor.roleId,
+      GATE8_ORG: orgId,
+      GATE8_TZ: picked.timeZone,
+    })
+  }, 180000)
+
+  it('gate 13: MetaSheetServer mounts the tasks router from index.ts', async () => {
+    const actor = await userWith({ label: 'mount', codes: ['tasks:read'], admission: true })
+    const server = new MetaSheetServer({
+      port: 0,
+      host: '127.0.0.1',
+      pluginDirs: [],
+      manageProcessSignals: false,
+    })
+    const mounted = (server as unknown as { app: express.Express }).app
+    const response = await request(mounted)
+      .get('/api/tasks/context')
+      .set('Authorization', `Bearer ${actor.bearer}`)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ orgId })
+  })
 })
+
+function httpCount(server: express.Express, bearer: string, header?: string): Promise<number> {
+  const req = request(server).get('/api/tasks/pending-count').set('Authorization', `Bearer ${bearer}`)
+  if (header !== undefined) req.set('x-viewer-time-zone', header)
+  return req.then((response) => {
+    expect(response.status).toBe(200)
+    return response.body.count as number
+  })
+}
+
+function civilDate(now: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now)
+}
+
+function minutesInZone(now: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now)
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value)
+  const minute = Number(parts.find((part) => part.type === 'minute')?.value)
+  return hour * 60 + minute
+}
+
+function zoneThatDisagreesWithUtc(now: Date): {
+  timeZone: string
+  dueDate: string
+  taskCount: number
+  utcCount: number
+} {
+  const utcDate = civilDate(now, 'UTC')
+  for (const timeZone of ['Pacific/Kiritimati', 'Pacific/Pago_Pago', 'Asia/Shanghai']) {
+    const localDate = civilDate(now, timeZone)
+    if (localDate === utcDate) continue
+    const minutes = minutesInZone(now, timeZone)
+    if (minutes < 2 || minutes > 24 * 60 - 2) continue
+    if (localDate > utcDate) return { timeZone, dueDate: utcDate, taskCount: 1, utcCount: 0 }
+    return { timeZone, dueDate: localDate, taskCount: 0, utcCount: 1 }
+  }
+  throw new Error('no viewer zone is a different civil date from UTC')
+}
+
+function runRouteMutant(
+  file: string,
+  needle: string,
+  replacement: string,
+  body: string,
+  extraEnv: Record<string, string>,
+): void {
+  const backup = `/tmp/task-mutant-${randomUUID()}.bak`
+  const script = `/tmp/task-probe-${randomUUID()}.mts`
+  copyFileSync(file, backup)
+  const original = readFileSync(file, 'utf8')
+  let failed: unknown
+  try {
+    expect(original.includes(needle)).toBe(true)
+    writeFileSync(file, original.replace(needle, replacement))
+    writeFileSync(script, body)
+    const tsx = createRequire(import.meta.url).resolve('tsx/cli')
+    const at = file.lastIndexOf('/src/')
+    execFileSync(process.execPath, [tsx, script], {
+      cwd: file.slice(0, at),
+      env: { ...process.env, ...extraEnv },
+      stdio: 'inherit',
+      timeout: 120000,
+    })
+  } catch (err) {
+    failed = err
+  } finally {
+    copyFileSync(backup, file)
+    for (const path of [script, backup]) {
+      try { unlinkSync(path) } catch { /* already removed */ }
+    }
+  }
+  expect(readFileSync(file, 'utf8')).toBe(original)
+  if (failed) throw failed
+}
