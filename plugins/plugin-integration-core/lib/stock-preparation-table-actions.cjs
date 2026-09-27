@@ -1827,10 +1827,13 @@ async function consumeDryRunToken(tokenStore, token, expected) {
  * accessor by http-routes.cjs's `b2aTableActionSourceObjects` and matched by the route's own guard),
  * unioned with the plan's own objects. Computed ONCE per entry point, BEFORE the guard, and handed
  * unchanged to `assertB2aTrialForStockPreparationRead` (the guard's `objectScope` match) and to
- * `computeDryRun` (the pre-read pin/compare AND the post-read E3-05 check), so the objects
- * authorized, the objects pinned and the objects re-checked are one array — not three derivations
- * that could disagree, which is how the lookup table's columns went unpinned before this seam
- * existed. `requireResolvedB2aSourceObjects` holds the fail-closed leg: armed, a kind whose config
+ * `computeDryRun` (the pre-read pin/compare AND the post-read E3-05 check), so the guard, the pin
+ * and the re-check consume one array — not three derivations that could disagree, which is how the
+ * lookup table's columns went unpinned before this seam existed. That array comes from the
+ * authorization-time, non-decrypting config read; these stock-prep paths have no H-3 config
+ * snapshot binding (only pipeline-runner has one), so if lookupProjection changes between that read
+ * and the adapter's own (decrypting) config read, the contract covers the authorization-time lookup
+ * table, not the one the adapter reads. `requireResolvedB2aSourceObjects` holds the fail-closed leg: armed, a kind whose config
  * can hide an object, and no resolved list => refused here, ahead of the guard, so no operation
  * claim is spent on a read whose scope could not be stated.
  */

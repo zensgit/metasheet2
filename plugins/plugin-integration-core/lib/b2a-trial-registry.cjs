@@ -1703,9 +1703,13 @@ function refuseB2aArmedSqlServerRequestTimeoutDisabled(authorization) {
 // COST, stated: an ARMED read makes one `getSchema` call per object in the RESOLVED list before the
 // read (to pin or compare) and one after it (E3-05's mid-read check). The resolved list is the
 // plan's objects plus, for a `data-source:sql-readonly` source with a configured `lookupProjection`,
-// its `lookupObject` — so such a source pays one extra `getSchema` before the read and one after it,
-// on top of the one credential-free config read the guard already made. A DORMANT read makes none —
-// the whole path is skipped when the authorization is `null`.
+// its `lookupObject` — so such a source pays one extra `getSchema` before the read and, only when the
+// read completes, one after it, on top of the one credential-free config read the guard already made.
+// Today the post-read call is reached only on the fake source: the real `data-source:sql-readonly`
+// adapter refuses a lookupProjection read plan on the first read (object !== baseObject, or
+// limit > maxRows), assertB2aFullBatchComplete throws before E3-05, so in production the added cost
+// is exactly one pre-read `getSchema`. A DORMANT read makes none — the whole path is skipped when the
+// authorization is `null`.
 //
 // WHICH OBJECTS (R-02, contract half — formerly `TODO(R-02-LOOKUP-SCHEMA-PIN)`). This contract
 // digests one `getSchema` per object in the list its CALLER passes, and the caller is
