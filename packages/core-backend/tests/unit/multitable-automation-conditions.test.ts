@@ -164,9 +164,15 @@ describe('multitable automation conditions', () => {
       conditions: [{ fieldId: 'score', operator: 'contains', value: '3' }],
     }, fields)).toThrow('conditions.conditions[0].operator contains is not supported for field type number')
 
+    // 客户反馈 2026-09-24 #4b: a NUMERIC string ('3', what a text input produces) is now accepted for a number
+    // field — the evaluator coerces it safely; a non-numeric string is still refused.
     expect(() => validateConditionGroupAgainstFields({
       conjunction: 'AND',
       conditions: [{ fieldId: 'score', operator: 'greater_than', value: '3' }],
+    }, fields)).not.toThrow()
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'score', operator: 'greater_than', value: 'abc' }],
     }, fields)).toThrow('conditions.conditions[0].value must be a number')
 
     expect(() => validateConditionGroupAgainstFields({

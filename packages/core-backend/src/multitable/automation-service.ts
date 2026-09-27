@@ -60,6 +60,7 @@ import { extractSelectOptions, isPlainObject, normalizeJson } from './field-code
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
+  AUTOMATION_CONDITION_VALUE_INVALID_CODE,
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
   validateConditionGroupAgainstFields,
@@ -142,6 +143,8 @@ export type AutomationRuleValidationCode =
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
   | typeof DELETED_TRIGGER_SELF_MUTATION_CODE
+  // 客户反馈 2026-09-24 #4b: a condition VALUE that does not fit its field's type (automation-conditions.ts).
+  | typeof AUTOMATION_CONDITION_VALUE_INVALID_CODE
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -1394,6 +1397,16 @@ export class AutomationService {
     const deps: AutomationDeps = {
       eventBus,
       queryFn,
+      // 客户反馈 2026-09-24 #4b — the sheet's field types for TYPED condition evaluation (same read as the
+      // save-time preflight). The executor caches one read per execution and degrades to the untyped
+      // legacy evaluation (with a values-free warning) if this read fails — it never fails a run.
+      loadConditionFields: async (sheetId) => {
+        const fieldRes = await queryFn(
+          'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
+          [sheetId],
+        )
+        return serializeAutomationConditionFieldRows(fieldRes.rows)
+      },
       transaction: async (handler) => poolManager.get().transaction(async ({ query }) => {
         const txQuery: AutomationQueryFn = async (sqlText, params) => {
           const result = await query(sqlText, params)
@@ -5239,31 +5252,83 @@ export async function preflightDingTalkAutomationCreate(
   return { ...input, actionConfig, actions }
 }
 
+/** The action side of a create/update input, as far as the condition preflight reads it (#4b). */
+export interface AutomationConditionPreflightActions {
+  actionType?: string | null
+  actionConfig?: Record<string, unknown> | null
+  actions?: AutomationAction[] | null
+}
+
+/** A condition_branch condition group found in a rule's action tree, with the request path it came from. */
+interface ConditionBranchGroupRef {
+  path: string
+  group: ConditionGroup
+}
+
+/**
+ * 客户反馈 2026-09-24 #4b — every `condition_branch` condition group in a rule input, at every nesting the
+ * save path accepts: the top-level `actionConfig` when the rule's action IS a condition_branch, and each
+ * `actions[i]` of that type (the A6-3-1 shape forbids a condition_branch nested inside a branch, so those two
+ * levels are exhaustive). A branch whose `conditions` is not even a valid group is SKIPPED here — the
+ * service's own shape validation (`validateConditionBranchConfig`) reports it with its established message and
+ * path, so the refusal a client sees for a malformed branch is unchanged.
+ */
+function collectConditionBranchGroups(input: AutomationConditionPreflightActions): ConditionBranchGroupRef[] {
+  const refs: ConditionBranchGroupRef[] = []
+  const visitConfig = (config: unknown, path: string): void => {
+    if (!isRecord(config) || !Array.isArray(config.branches)) return
+    config.branches.forEach((branch, index) => {
+      if (!isRecord(branch) || branch.conditions === undefined) return
+      const groupPath = `${path}.branches[${index}].conditions`
+      try {
+        refs.push({ path: groupPath, group: normalizeConditionGroupInput(branch.conditions, groupPath) })
+      } catch (error) {
+        if (!(error instanceof ConditionGroupValidationError)) throw error
+      }
+    })
+  }
+  if (input.actionType === 'condition_branch') visitConfig(input.actionConfig, 'actionConfig')
+  for (const [index, action] of (input.actions ?? []).entries()) {
+    if (isRecord(action) && action.type === 'condition_branch') visitConfig(action.config, `actions[${index}].config`)
+  }
+  return refs
+}
+
 /**
  * Validate automation conditions against the sheet's current fields. The
  * route parser only validates JSON shape; this preflight closes the API gap
  * where direct clients could persist unknown fields, unsupported operators, or
  * frontend-incompatible scalar value types.
+ *
+ * 客户反馈 2026-09-24 #4b (裁定 PR #6074): `condition_branch` conditions (`actionsInput`) are validated against
+ * the SAME fields, from ONE `meta_fields` read, with their request path (`actions[0].config.branches[1].
+ * conditions…`); before, a branch condition was only shape-checked and a number field could be saved with
+ * `'abc'`. A value that does not fit its field's type is refused with the stable code
+ * `AUTOMATION_CONDITION_VALUE_INVALID` (date `YYYY-MM-DD`, dateTime wall clock / ISO, number, boolean).
+ * Nothing to validate ⇒ no DB read.
  */
 export async function preflightAutomationConditionFields(
   queryFn: AutomationQueryFn,
   sheetId: string,
   conditions: ConditionGroup | null | undefined,
+  actionsInput?: AutomationConditionPreflightActions | null,
 ): Promise<void> {
-  if (!conditions) return
+  const branchGroups = actionsInput ? collectConditionBranchGroups(actionsInput) : []
+  if (!conditions && branchGroups.length === 0) return
 
   const fieldRes = await queryFn(
     'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
     [sheetId],
   )
+  const fields = serializeAutomationConditionFieldRows(fieldRes.rows)
   try {
-    validateConditionGroupAgainstFields(
-      conditions,
-      serializeAutomationConditionFieldRows(fieldRes.rows),
-    )
+    validateConditionGroupAgainstFields(conditions, fields)
+    for (const ref of branchGroups) {
+      validateConditionGroupAgainstFields(ref.group, fields, ref.path)
+    }
   } catch (error) {
     if (error instanceof ConditionGroupValidationError) {
-      throw new AutomationRuleValidationError(error.message)
+      throw new AutomationRuleValidationError(error.message, error.code)
     }
     throw error
   }

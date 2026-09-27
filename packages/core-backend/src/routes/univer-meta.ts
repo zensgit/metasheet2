@@ -20466,7 +20466,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
       const rule = await automationService.createRule(sheetId, input)
 
       return res.json({
@@ -20518,7 +20519,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!input) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
 
       const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)
       if (!updated) {
