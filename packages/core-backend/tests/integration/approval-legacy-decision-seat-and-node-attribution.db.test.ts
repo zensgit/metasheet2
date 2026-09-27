@@ -419,7 +419,7 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
     })
   })
 
-  it('(3) POSITIVE CONTROL — the seated approver still succeeds, writes exactly one row, and that row carries the server nodeKey + nodeEntryEpoch', async () => {
+  it('(3) POSITIVE CONTROL — the seated approver still succeeds, writes exactly one row carrying the server nodeKey + nodeEntryEpoch, and the instance ADVANCES to the next node instead of ending', async () => {
     const admin = freshId('admin')
     const requester = freshId('req')
     const approverA = freshId('appr-a')
@@ -452,10 +452,16 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
     // The ROUND half. Its exact integer is an internal activation sequence, so the assertion is
     // that it is a real epoch (an integer), not a pinned literal.
     expect(Number.isInteger(rows[0].metadata?.nodeEntryEpoch)).toBe(true)
-    expect((await rawRow(created.id)).status).toBe('approved')
+    // SETTLEMENT (H-5): this decision is node A of an A -> B graph, so it is NOT terminal. Before
+    // the settlement-parity slice this route wrote `status = 'approved'` here with B never decided
+    // and the cursor still on A — a bare status flip, not a decision. The instance must now be
+    // `pending` at `approval_b`, which is exactly what the `/actions` door does with the same call.
+    const settled = await rawRow(created.id)
+    expect(settled.status).toBe('pending')
+    expect(settled.current_node_key).toBe('approval_b')
   })
 
-  it('(4) DISCRIMINATOR — a seated approver naming a DIFFERENT node/round has the server values stored instead, while their unrelated metadata keys survive intact', async () => {
+  it('(4) DISCRIMINATOR — a seated approver naming a DIFFERENT node/round has the server values stored instead, and none of their metadata is echoed into the audit row', async () => {
     const admin = freshId('admin')
     const requester = freshId('req')
     const approverA = freshId('appr-a')
@@ -480,8 +486,11 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
           // The forgery: a node this actor never decided, and a round that is not this one.
           nodeKey: 'approval_b',
           nodeEntryEpoch: 99999,
-          // A caller's own unrelated payload — must be preserved byte-for-byte, so the strip is
-          // shown to be key-scoped rather than a blanket metadata wipe.
+          // A caller's own unrelated payload. H-5: the shared settlement path builds the audit
+          // row's metadata entirely server-side and never forwards the request blob, so these keys
+          // are absent from the stored row — the strip is no longer key-scoped, it is total. That
+          // is a NARROWING of this route's published behaviour, asserted below (both keys absent)
+          // together with a positive control that the server's own keys are still there.
           clientNote: 'keep-me',
           nested: { a: 1 },
         },
@@ -495,8 +504,11 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
     expect(metadata.nodeKey).toBe('approval_a')
     expect(metadata.nodeEntryEpoch).not.toBe(99999)
     expect(Number.isInteger(metadata.nodeEntryEpoch)).toBe(true)
-    expect(metadata.clientNote).toBe('keep-me')
-    expect(metadata.nested).toEqual({ a: 1 })
+    expect(metadata.clientNote).toBeUndefined()
+    expect(metadata.nested).toBeUndefined()
+    // Positive control for the two assertions above: they must fail because the CALLER's keys are
+    // gone, not because the row itself is empty. The server's own keys are present.
+    expect(metadata.nextNodeKey).toBe('approval_b')
   })
 
   it('(5) ROLE SEAT — the SAME viewer with the SAME token flips from refused to accepted on the one fact of a `user_roles` ROW, so the gate is shown to cover role seats and to read them from the database', async () => {
@@ -772,10 +784,14 @@ describeIfDatabase('legacy /approve + /reject: seat, round, status, and server-d
     expect(rows).toHaveLength(1)
     const metadata = rows[0].metadata ?? {}
     expect(metadata.nodeKey).toBe('approval_a')
-    expect(metadata.nodeEntryEpoch).not.toBe(99999)
-    expect(Number.isInteger(metadata.nodeEntryEpoch)).toBe(true)
-    expect(metadata.clientNote).toBe('keep-me')
-    expect(metadata.nested).toEqual({ a: 1 })
+    // H-5: `/actions`'s reject arm stamps `nodeKey` and nothing else — a reject is terminal, so
+    // there is no later round for a `nodeEntryEpoch` to disambiguate. Routing this door through
+    // the same settlement path means its row now has the SAME shape: the forged round key is gone
+    // and no server round key replaces it. The `nodeKey` assertion above is this narrowing's
+    // positive control — the row is not simply empty.
+    expect(metadata.nodeEntryEpoch).toBeUndefined()
+    expect(metadata.clientNote).toBeUndefined()
+    expect(metadata.nested).toBeUndefined()
     expect((await rawRow(created.id)).status).toBe('rejected')
   })
 })
