@@ -1,6 +1,6 @@
 # Private-database backend drain before the checkpoint clean assertion
 
-Base: `main` @ `ba6300ce4034515320026ec365bbc6e43f858cb4`, merged into this branch.
+Base: `main` @ `5e3e0b25ad45ce50cf73331fbf5170fb30015673`, merged into this branch. The earlier merge of `ba6300ce4034515320026ec365bbc6e43f858cb4` is an ancestor of that commit.
 
 ## Contract
 
