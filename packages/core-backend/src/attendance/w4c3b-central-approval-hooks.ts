@@ -15,6 +15,28 @@
 export const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
 export const ATTENDANCE_REQUEST_BUSINESS_KEY_PREFIX = 'attendance-request:'
 
+/**
+ * Approval change-request design lock v5.9 §9-8 — the dedicated cancel-round runtime instance's
+ * `workflow_key`. This module has zero imports (a deliberate leaf), so it is the shared home for
+ * `isCancelRoundInstance` below: both `ApprovalProductService.ts` and `ApprovalBridgeService.ts`
+ * already import FROM this file (see `AttendanceCentralApprovalError` / `attendanceCentralApprovalErrorToServiceFields`
+ * consumers), and `ApprovalProductService.ts` also imports `ServiceError` FROM `ApprovalBridgeService.ts`
+ * — so defining the predicate here (instead of in either service file) is the only placement that
+ * adds no new import edge and cannot create a require cycle.
+ */
+export const APPROVAL_CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+
+/**
+ * Judgment I (lock §14.1, lock:104): true only for the dedicated cancel-round creation path
+ * (`createCancelRoundInstance`); an instance created through the public `createApproval` never
+ * carries this `workflow_key`, so this predicate is false for it.
+ */
+export function isCancelRoundInstance(
+  instance: { workflow_key?: string | null } | null | undefined,
+): boolean {
+  return instance?.workflow_key === APPROVAL_CANCEL_ROUND_WORKFLOW_KEY
+}
+
 /** Values-free typed codes for central attendance guards. */
 export const W4C3B_CENTRAL_APPROVAL_ERROR_CODES = Object.freeze({
   /** Attendance instance reached a central mutation/terminal path that R0 does not implement. */

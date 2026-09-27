@@ -159,6 +159,16 @@ const RESERVED_EVENT_SOURCES = new Set([OUTDOOR_APPROVAL_EVENT_SOURCE])
 const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
 const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance:admin']
 
+// Approval change-request design lock v5.9 §14.1/§14.3 #10-#11 (lane decision 2, 2026-09-17):
+// mirrors the core-side `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY`
+// (packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts) — SAME identifier, same
+// value, by the same convention `ATTENDANCE_APPROVAL_WORKFLOW_KEY` above already follows for that
+// core file (CJS boundary: this module has zero import of the TS side, so the value is duplicated
+// rather than imported). A pinning test asserts both the name and the value are byte-identical to
+// the core constant on every CI run
+// (packages/core-backend/tests/unit/approval-cancel-round-plugin-mirror-constant.test.ts).
+const APPROVAL_CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+
 // ── S7-1 dynamic approval-assignee sources (RATIFIED attendance-approval-s7 resolver design-lock) ──
 // The whole capability is a default-OFF, flag-gated opt-in (§5). Read the flag at REQUEST time (not at
 // activate) so a test / operator flip takes effect without a restart.
@@ -24308,7 +24318,30 @@ function buildAttendanceApprovalInstancePayload({
   }
 }
 
+// Approval change-request design lock v5.9 §14.3 #10/#11 defensive check (lane decision 2,
+// 2026-09-17): `upsertAttendanceApprovalInstance` below is the SAME chokepoint that feeds both
+// #10's attendance_requests FK-pairing column write and #11's `approval_instances.workflow_key`
+// write (both derive from this one `payload.workflowKey`). The
+// lock's own account of #11 calls its protection "structural" — every caller reaches this function
+// through `buildAttendanceApprovalInstancePayload`, the SOLE site in this file that sets the
+// payload's workflow-key property, always with the literal `ATTENDANCE_APPROVAL_WORKFLOW_KEY`
+// (mechanically pinned by the "assigned exactly once" unit test alongside this constant's mirror
+// test), so this assertion is PROVABLY unreachable for every current caller — it changes no
+// behavior today. It exists as a fail-closed trip-wire alongside #10's DB-level
+// `atr_not_cancel_round` CHECK, in case a future change ever threads a caller-supplied workflow
+// key through this path.
+function assertAttendanceApprovalPayloadNotCancelRound(payload) {
+  if (payload && payload.workflowKey === APPROVAL_CANCEL_ROUND_WORKFLOW_KEY) {
+    throw new HttpError(
+      500,
+      'ATTENDANCE_APPROVAL_INSTANCE_CANCEL_ROUND_FORBIDDEN',
+      'Attendance approval instance write must never target the cancel-round workflow key',
+    )
+  }
+}
+
 async function upsertAttendanceApprovalInstance(client, payload) {
+  assertAttendanceApprovalPayloadNotCancelRound(payload)
   // Lock-11 §10 W-4: derive the org to stamp BEFORE the INSERT, same transaction (TOCTOU
   // discipline matching W-1/W-2). A refusal here throws (values-free HttpError) and the whole
   // boundary transaction rolls back — no approval_instances row, no attendance_requests row,
@@ -24936,6 +24969,8 @@ module.exports = {
   __attendanceApprovalCenterForTests: {
     ATTENDANCE_APPROVAL_WORKFLOW_KEY,
     ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS,
+    APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
+    assertAttendanceApprovalPayloadNotCancelRound,
     attendanceRequestTypeLabel,
     buildAttendanceApprovalNodeKey,
     buildAttendanceApprovalAssignments,
@@ -33722,8 +33757,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33736,6 +33771,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -33964,8 +34000,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33978,6 +34014,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -34239,8 +34276,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34249,6 +34286,7 @@ module.exports = {
           input.startDate,
           input.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34524,8 +34562,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34534,6 +34572,7 @@ module.exports = {
           requesterSource.workDate,
           route.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34865,7 +34904,8 @@ module.exports = {
         const rows = await trx.query(
           `UPDATE attendance_requests
            SET work_date = $2, request_type = $3, requested_in_at = $4, requested_out_at = $5,
-               reason = $6, metadata = $7::jsonb, approval_instance_id = $8, updated_at = now()
+               reason = $6, metadata = $7::jsonb, approval_instance_id = $8,
+               approval_workflow_key = $9, updated_at = now()
            WHERE id = $1
            RETURNING *`,
           [
@@ -34877,6 +34917,7 @@ module.exports = {
             draft.reason,
             JSON.stringify(draft.metadata),
             approvalId,
+            approvalPayload.workflowKey,
           ],
         )
         const snapshotToken = buildRequestSnapshotToken(snapshotAppend)
