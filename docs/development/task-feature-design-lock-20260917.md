@@ -196,7 +196,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 ② 的「paths、不加 `branches:`、不声明 `merge_group`」只在 paths 保留时成立。§13-12 **已裁 (b)**：该形状被取代（去 paths、声明 `merge_group`、四步 POST-append）。
 
-③ **点名哪个 required context 真正执行该文件**。独立 lane 只是证据。**已裁 (b)**（见 §13-12）。§12 门表里的 TBD 句本轮不改。
+③ **点名哪个 required context 真正执行该文件**。独立 lane 只是证据。**已裁 (b)**（见 §13-12）。把 `tasks-realdb` 追加进 `main` 的 required checks 只能发生在该 job 已在 `main` 上跑过之后，是**合并后的 owner 步骤**，不挡 M2 退出。
 
 ④ **发现式覆盖枚举（已定，来源 计划 v5 §8-1 ④）**：自建 `task-ci-coverage-enumeration.test.ts`（`readdirSync`）：磁盘 `task-*.db.test.ts` 集合 = `vitest.config.ts` `test.exclude` 中匹配 `^tests/integration/task-.*\.db\.test\.ts$` 的条目 = 证据 lane 文件清单，**三者相等**；**每个磁盘文件源文本含** `assert-rbac-optional-off` import 说明符。各配扫描负控（集合非空、正则未失效，照 `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts:579-581`；删任一文件该 import 行 ⇒ ④ 红）。本文件**不**进 `test.exclude`、**不**进任何逐文件 run-list。中间集合不得拿整个 exclude 数组比（本 SHA exclude 行首路径条目 400 / glob 3；naive 数组体引号 456 / 含 `*` 5）。**非空负控与 import 负控自首个 `task-*.db.test.ts` 落地的 PR 起武装**；此前 **NOT RUN**、不计分（空集上 `length > 0` 恒红，无判别力）。计划 §8-10 写 db/web lane 都断言 OPTIONAL；web lane 无后端三读点，不装该 import（§9 偏离）。
 
@@ -210,7 +210,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 
 新 spec 必须两处齐才不是 skip-shaped green：
 
-① `.github/workflows/tasks-web-guard.yml`：paths 型（`apps/web/src/tasks/**`、`apps/web/src/views/tasks/**`、`apps/web/tests/tasks*.spec.ts`、`apps/web/src/router/guardPolicy.ts`、`apps/web/src/App.vue`、workflow 自身），`push main` 同 paths，**不声明 `merge_group`**。不抄 `.github/workflows/attendance-web-guard.yml:2-3` 的无 paths 形状。**step 行**必须逐文件写出 `apps/web/tests/tasks….spec.ts`（不得在 step 用 glob）。形状：`pnpm --filter @metasheet/web exec vitest run apps/web/tests/tasksFoo.spec.ts … --reporter=verbose`。
+① `.github/workflows/tasks-web-guard.yml`：paths 型（`apps/web/src/tasks/**`、`apps/web/src/views/tasks/**`、`apps/web/tests/tasks*.spec.ts`、`apps/web/src/router/guardPolicy.ts`、`apps/web/src/App.vue`、workflow 自身），`push main` 同 paths，**不声明 `merge_group`**。不抄 `.github/workflows/attendance-web-guard.yml:2-3` 的无 paths 形状。**step 行**必须逐文件写出，cwd 是 `apps/web`，所以路径是 `tests/tasks….spec.ts`（不得在 step 用 glob，也不要再加 `apps/web/` 前缀）。形状：`vitest run tests/tasksFoo.spec.ts … --reporter=verbose`。`--filter @metasheet/web` 会把 cwd 改成 `apps/web`，再写 `apps/web/tests/…` 会 `No test files found`。
 
 ② token 加进 `apps/web/scripts/run-required-web-tests.sh` 的 `exec npx vitest run …` 行（本 SHA 在 **`:1186`**，计划写的 `:1069` **已漂**；执行者 = always-on 必需 job `web-tests`，`.github/workflows/web-tests.yml:77`）。双向碰撞检查覆盖 vitest 实际收集的人口（不只 `apps/web/tests`）：
 
@@ -533,7 +533,7 @@ i. `must_change_password=false`（`jwt-middleware.ts:83-99`）。
    **对照格（有效 org 写 200）**：a–d、f–i 适用；**e 适用**（写路由约束）。
    **真隔离读格**（先跑正控）：未 mutation 时读路由 **200** 且行集**只含 org A 且非空**。A/B 两行除 `org_id` 外同形：`status='open'`、夹具用户 `task_assignees` 行且 `completed_at IS NULL`、`due_at`/`due_date` 使默认 pending 谓词（`view=assigned` 派生）为真——即**去掉 org 子句后** `view=any_role` 与 `/pending` **每个读面都会选中 A 和 B**。B 行只能 harness 直发 SQL 播种。然后断言两读面不含 B。负控删 `tasks.org_id = :orgId` 后，对 **any_role 面**与 **/pending 面分别**证红。a–d、f–i 适用；**e 不适用**（读格，写路由约束不适用，与门 16 判别格同一标注）。与 §13-1c 关系：B 行是测试播种的同用户跨 org **任务行**，不是产品写路径上的跨 org 负责人/关注人；§13-1c 仍由 owner 裁。
 2. 非 admin：**②③ 齐全 + ① 已作为 FK 前置存在 ⇒ 200**（正控；夹具 `role_id` **不得**以 `_admin` 结尾）。403 格响应体逐字 `{ error: 'Insufficient permissions' }`（`packages/core-backend/src/rbac/rbac.ts:108`）。负控三格**各用独立用户**（`listUserPermissions` 按 `userId` 缓存，`RBAC_CACHE_TTL_MS` 默认 60000；禁止三格共用一行用户而不 `invalidateUserPerms`）。缺 ②、缺 ③，各 **403**（响应体逐字 `{ error: 'Insufficient permissions' }`）；第三格（码面）：角色 `role_permissions` **只有**同 namespace 另一码（建议 `tasks:write`，不得 `tasks:*`）、**无**所需码、admission 行在 ⇒ **403**，响应体逐字 `{ error: 'Insufficient permissions' }`，拒绝点 `packages/core-backend/src/rbac/service.ts:44-61`。第三格钉 token **不带** `perms`（本门 `TRUST='true'`）。与门 16 相反：门 16 在 `TRUST='false'` 下**要** token 带 DB 未授予的 `tasks:read`；本门禁止 perms。排除 `*:*`、`user_permissions` 直授、`users.permissions` jsonb。一格 provisioning 前置：无 ① 插 ② 须**直接 SQL INSERT**，断言 SQLSTATE **23503** 且 `constraint === 'role_permissions_permission_code_fkey'`。**直授+admission 仍 403**，响应体逐字 `{ error: 'Insufficient permissions' }`：任何角色不带 `tasks:*` 任一码 **且** 无 `_admin` 形角色名；机制 = `controlledNamespaces` 不含 `'tasks'`（`:345`）。码名与 seed 待 §13-10 裁；**§13-10 落槌前本门不进验收计分**。required 承载: TBD（§13-12 未裁）。harness：`setup.integration.ts:8` `TRUST='true'`。lane env：`RBAC_OPTIONAL_ON` 为真则本门红。执行点：每个 `task-*.db.test.ts` import `assert-rbac-optional-off.ts`（逐字 `process.env.RBAC_OPTIONAL === '1'` 则抛）；**不改** `setup.integration.ts`。
-3. 完成判定网格。增删人格与切模式格同受 §13-9 **未裁**阻断（见 §6.2）。**存活六格**（创建后未切模式、**不调用增删人 API**）。通道（harness 播种若用，必须在任何 complete/reopen **之前**）：
+3. 完成判定网格。**存活六格**仍是 M2（创建后未切模式、**不调用增删人 API**）。增删执行人与切换完成模式的首个可跑里程碑是 **M3**（`arm-set` 的 `M3|3|增删人切模式`；P0-A 路由没有这两类端点）。通道（harness 播种若用，必须在任何 complete/reopen **之前**）：
    - `all×0`：`POST /api/tasks` 显式 `assignees: []`。创建后断言 `COUNT(task_assignees)=0`。期望：公式不判 done；仅创建人可 complete/reopen；创建人 complete ⇒ handler 写 `status='done'`。
    - `any×0`：同通道。创建后 `COUNT=0`。any 谓词无行可完成 ⇒ 不判 done；创建人 complete ⇒ done。
    - `all×1`：`POST` 省略 `assignees`。创建后 `COUNT=1` 且该行 `user_id=creator`。该行 `completed_at` 非空 ⇔ done。
@@ -559,7 +559,7 @@ POSIX ERE：`pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*
 9. deny 注错。**首个可跑 = M5**（P2 投影读）。M5 前本门 NOT RUN，**不阻断 M2 退出**。§13-11 未裁时即使到了 M5 也不进计分（裁题 ≠ 武装键）。正控：未注错投影读 `status === 200`，可见行非空、被拒行不在。注入点：§13-11 裁定的**任务** deny 加载函数（不是审批 `loadApprovalProjectionDeniedRecordIds`）；该函数**不得**照 `permission-service.ts:1272-1279` 形吞表缺失错。`:1277` rethrow 与 `:1288` 无捕获冒泡是审批路径**先例**，不是本门注入点。负控甲：deny 查询**抛错** ⇒ 整个投影读失败，HTTP **500**。负控乙：deny 集合被注成空集或反相 ⇒ 正控「被拒行不在」断言**必须红**（HTTP 仍 200，属泄漏格）。**禁止**写「注空集 ⇒ 500」。**禁止**仅 `expect(status).not.toBe(200)`。required 承载: TBD（§13-12 未裁）。
 10. **M2 可测子集**（本门 M2 计分）：标题正控「备料复核」过；四格必须 **422**：`'\t'`、`'  \n '`、U+3000、零宽（U+200B/U+200C/U+200D/U+FEFF）。负控：停掉归一函数（`cp` 备份）后空白四格不再 422 ⇒ 红。CHECK `btrim(col) <> ''` 只拦空串。`[!-~]` 不在 title/name。
     **P2 子集**（武装表 M5 行的 `10|P2子集`，首个可跑 = M5）：id 两格 422（前导 `_`、尾随 `_`）；投影写回 `recordId` 解析失败 422，产生处 = `parseTaskProjectionRecordId`（§7）。
-11. 前端两点接线；flag OFF 与零任务不同形；404 不断言开关。
+11. 前端两点接线；flag OFF 与零任务不同形；404 不断言开关。step 在 `apps/web` 下跑：`vitest run tests/tasksFoo.spec.ts`（不要 `apps/web/tests/…`，也不要靠 `--filter` 再叠一层 `apps/web/`）。
 12. 前端引导三触发 + `predicate_error` 不引导。取证 = **组件 spec**（可 stub `hasPermission`）；不是真机。真机冒烟见 §11，带 §13-10 + 权限快照前置。
 13. 真起服务器静态路径；非 admin 打通一条任务路由（正控依赖门 2 的 ②③ 齐全）。**§13-10 落槌前本门不进验收计分**（见 §12 尾）。required 承载: TBD（§13-12 未裁）。本门所在 harness 信任姿态：`tests/setup.integration.ts:8` `TRUST='true'`。lane env：`RBAC_OPTIONAL_ON` 为真则本门红（执行点同门 2）。
 14. 含 DDL 的 PR 首段标明未应用未合并；遵守 §5.4 五段部署链（合并≠发布≠部署≠迁移）。
@@ -593,7 +593,7 @@ POSIX ERE：`pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*
 ⑥ `(400, —)` `express.json` 体解析失败（`index.ts:1697`）；
 ⑦ `(413, —)` 体过大（同 `:1697` `limit: '10mb'`）；
 ⑧ `(422, —)` org 缺失（rbacGuard 之后的 handler）。② 完全缺失且 token 无 perms 的夹具在两姿态同形 403，**不得充当信任面证据**。夹具层不得使 `RBAC_OPTIONAL_ON`。**§13-10 落槌前本门不进验收计分**。
-17. 真库接线齐备：①（no-DB 对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped）+ ②（lane 绿后从 verbose 日志读出**收集用例数 == 展开后静态计数**，写进 PR body）+ ④（三集合相等、扫描负控、正则未失效；④ 自身收集数 == 展开后静态计数；承载 `.github/workflows/plugin-tests.yml:842-844`；required 是否含 `test (20.x)` 以 §5.2.1 ④ 带日期实读为准，M2 接线 PR 重读）。④ 非空负控自首个 `task-*.db.test.ts` PR 起武装，此前 **NOT RUN** 不计分。③ 的 required 承载: TBD（§13-12 未裁）。**.each 计数规则**：展开后静态计数 = 无 table 的 `it(` / `test(` 数 + 每个 `it.each` / `test.each` 的表行数（不含表头）。含 `.each` 的文件必须在 PR body 写出展开表行数；未写或收集数 ≠ 展开后计数 ⇒ 本门红。不禁用 `.each`（本 SHA `tests/integration/*.db.test.ts` 260 文件中 13 个使用）。**门 17 只证执行发生，不证行为。**
+17. 真库接线齐备：①（no-DB 对 `task-*.db.test.ts` 报 `No test files found`，不是 skipped）+ ②（lane 绿后从 verbose 日志读出**收集用例数 == 展开后静态计数**，写进 PR body）+ ④（三集合相等、扫描负控、正则未失效；④ 自身收集数 == 展开后静态计数；承载 `.github/workflows/plugin-tests.yml:842-844`；required 是否含 `test (20.x)` 以 §5.2.1 ④ 带日期实读为准，M2 接线 PR 重读）。④ 非空负控自首个 `task-*.db.test.ts` PR 起武装，此前 **NOT RUN** 不计分。③ 把 `tasks-realdb` 追加进 `main` required checks 是**合并后的 owner 步骤**（该 job 先在 `main` 上跑过），不挡 M2 退出。**.each 计数规则**：展开后静态计数 = 无 table 的 `it(` / `test(` 数 + 每个 `it.each` / `test.each` 的表行数（不含表头）。含 `.each` 的文件必须在 PR body 写出展开表行数；未写或收集数 ≠ 展开后计数 ⇒ 本门红。不禁用 `.each`（本 SHA `tests/integration/*.db.test.ts` 260 文件中 13 个使用）。**门 17 只证执行发生，不证行为。**
 18. **首个**在 `packages/core-backend/src` 引入 `TASKS_*` 源码读的 PR 必须同 PR 扩 `globalHistoryFlagsInSource()` 覆盖 `TASKS_*_ENABLED` 并补 `scripts/ops/global-history-flag-manifest.mjs` 条目。负控：删掉该正则扩展（mutation `cp` 备份）后 `pnpm verify:global-history-flag-manifest:test` 必须红。本门在 M0（无源码读）不适用；从该 PR 起适用。
 19. 谓词从属链（计划 v5 §3 `:116`）。M2 身份集合 `I_M2` 见 §6.1。正控：`GET /api/tasks?view=v` 的行集 **等于** `taskMatchesView(row, me, v)=true` 的夹具行，**不比** `resolveTaskRoles` 可见性。ambient 钉法 = §6.1 唯一句（不在本门另写）。
     **探针①**（列表读路径，首个可跑 = M2）：具体改法 = 把 assigned 臂的 `EXISTS (task_assignees.user_id = :me)` **整段换成 `FALSE`**，其它臂不动。正控端 = `{ GET /api/tasks?view=assigned, GET /api/tasks/pending, GET /api/tasks/pending-count }`（count 无额外 query，默认 `badge_scope=overdue`）。夹具：creator ≠ me、我是 assignee、未完成、`due_at < now()`。未改三端绿，count **= 1**；改后三端红，count **= 0**。
@@ -633,8 +633,8 @@ grep -n -E 'new Pool\(|new pg\.Pool\(' \
 期望恰好三行：`connection-pool.ts:76`、`PostgresAdapter.ts:81`、`sharded-pool-manager.ts:191`。自首个 `src/tasks/*.ts` PR 起武装。
 21. 前端发现式枚举。三集合各一条可 diff 命令（`LC_ALL=C sort`；token **即文件名**，必须匹配 `^tasks.*\.spec\.ts$`）：
     - D：`find apps/web/tests -maxdepth 1 -name 'tasks*.spec.ts' -print | sed 's|.*/||' | LC_ALL=C sort`
-    - T：按模式抽 `^exec npx vitest run` 行（断言该模式命中**恰 1 行**），再拆 token：`grep -c -E '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh` 必须 `= 1`；`grep -E '^exec npx vitest run' apps/web/scripts/run-required-web-tests.sh | tr ' ' '\n' | grep -E '^tasks.*\.spec\.ts$' | LC_ALL=C sort`
-    - G：只抽 **step 行**（含 `vitest run`、不含 `paths:`）：`awk '/vitest run/{p=1} p{print} /reporter=/{exit}' .github/workflows/tasks-web-guard.yml | grep -oE 'apps/web/tests/tasks[^[:space:]*]+\.spec\.ts' | sed 's|.*/||' | LC_ALL=C sort`
+    - T：读取以 `exec npx vitest run` 开头的**整个续行块**（从该行起到第一个不以 `\` 结尾的行为止），再拆 token。只抽开头那一行会得到空集，因为 token 已经写成每行一个、用 `\` 续行。`awk 'found{print} /^exec npx vitest run/{found=1; print} found && !/\\$/ {exit}' apps/web/scripts/run-required-web-tests.sh | tr -d '\\' | tr -s ' \n' '\n' | grep -E '^tasks.*\.spec\.ts$' | LC_ALL=C sort`
+    - G：只抽 **step 行**（含 `vitest run`、不含 `paths:`）。接受 `apps/web/tests/tasks….spec.ts` 与 `tests/tasks….spec.ts`，比较前去掉 `apps/web/`：`awk '/vitest run/{p=1} p{print} /reporter=/{exit}' .github/workflows/tasks-web-guard.yml | grep -oE '(apps/web/)?tests/tasks[^[:space:]*]+\.spec\.ts' | sed 's|^apps/web/||; s|.*/||' | LC_ALL=C sort`
     `diff <(D) <(T)` 与 `diff <(T) <(G)` 皆空。**paths glob 正负控**（字符类；yml 未建时用 stdin 可跑）：
 
 ```bash
@@ -658,7 +658,7 @@ printf '%s\n' 'apps/web/tests/tasksFoo.spec.ts' 'apps/web/tests/tasks*.spec.ts' 
 M2|1|整门
 M2|2|整门
 M2|3|存活六格
-M2|3|增删人切模式
+M3|3|增删人切模式
 M2|4|整门
 M2|5|整门
 M3|6|整门
