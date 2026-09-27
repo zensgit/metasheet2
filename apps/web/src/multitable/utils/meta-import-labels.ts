@@ -288,6 +288,16 @@ export function importValueResolveFailed(
 }
 
 /**
+ * 客户反馈 2026-09-24 #4c — a dateTime cell the import cannot read as a wall clock. Values-free: names the
+ * field and the expected form, never the cell text (the preview table already shows the row).
+ */
+export function importDateTimeInvalid(fieldName: string, isZh: boolean): string {
+  return isZh
+    ? `${fieldName} 的时间格式不正确，请按 2026-09-24 09:00 填写`
+    : `Invalid date-time for ${fieldName} — use the form 2026-09-24 09:00`
+}
+
+/**
  * #5809 — a person token the bounded directory could not settle: the answer was clamped (more
  * candidates than one lookup returns) and nothing in it matched the token exactly, so the importer
  * cannot tell "not a member" from "not in this page". Deliberately distinct from
