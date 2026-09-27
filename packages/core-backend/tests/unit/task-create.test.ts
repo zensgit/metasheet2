@@ -14,6 +14,17 @@ describe('task create assignees', () => {
   it('inserts only the listed users', () => {
     expect(resolveCreateAssigneeIds({ assignees: ['u2', 'u2'], creatorId: 'u1' })).toEqual(['u2'])
   })
+
+  it('rejects an assignee id the table check would refuse', () => {
+    for (const assignees of [['bad id'], ['备料'], ['usr\n'], ['usr\u0000']]) {
+      expect(() => resolveCreateAssigneeIds({ assignees, creatorId: 'u1' })).toThrowError(
+        expect.objectContaining({ status: 422, code: 'INVALID_ASSIGNEES' }),
+      )
+    }
+    expect(() => resolveCreateAssigneeIds({ assignees: undefined, creatorId: 'bad id' })).toThrowError(
+      expect.objectContaining({ status: 422, code: 'INVALID_ASSIGNEES' }),
+    )
+  })
 })
 
 describe('task event ids', () => {

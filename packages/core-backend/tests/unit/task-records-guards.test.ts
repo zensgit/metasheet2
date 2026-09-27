@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createTask } from '../../src/services/task-records'
+import { createTask, toTaskPendingItem } from '../../src/services/task-records'
 
 const state = vi.hoisted(() => ({
   calls: [] as { sql: string; params?: unknown[] }[],
@@ -58,6 +58,7 @@ describe('createTask guards', () => {
       completionMode: 'any',
     })
     expect(created.id.startsWith('tsk_')).toBe(true)
+    expect(state.calls[0]?.sql).toBe('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     expect(insertedTitle()).toBe('备料复核')
     expect(insertedMode()).toBe('any')
 
@@ -81,5 +82,33 @@ describe('createTask guards', () => {
       completionMode: 'nope',
     })).rejects.toMatchObject({ status: 422, code: 'INVALID_MODE' })
     expect(state.transactions).toBe(0)
+  })
+})
+
+describe('pending items', () => {
+  it('omits dueAt when the task has no due date and keeps the five keys', () => {
+    expect(toTaskPendingItem({
+      id: 'tsk_a',
+      title: '备料复核',
+      updated_at: new Date('2026-09-27T00:00:00.000Z'),
+      due_at: null,
+    })).toEqual({
+      source: 'task',
+      id: 'tsk_a',
+      title: '备料复核',
+      href: '/tasks/tsk_a',
+      updatedAt: '2026-09-27T00:00:00.000Z',
+    })
+  })
+
+  it('adds dueAt only when a due instant exists', () => {
+    const item = toTaskPendingItem({
+      id: 'tsk_b',
+      title: '备料复核',
+      updated_at: new Date('2026-09-27T00:00:00.000Z'),
+      due_at: new Date('2026-09-28T01:02:03.000Z'),
+    })
+    expect(item.dueAt).toBe('2026-09-28T01:02:03.000Z')
+    expect(Object.keys(item).sort()).toEqual(['dueAt', 'href', 'id', 'source', 'title', 'updatedAt'])
   })
 })

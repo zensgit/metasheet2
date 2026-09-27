@@ -2,7 +2,7 @@ import '../helpers/assert-rbac-optional-off'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { completeTask, createTask, listTasks, reopenTask } from '../../src/services/task-records'
+import { completeTask, createTask, getTask, listTasks, reopenTask } from '../../src/services/task-records'
 import { taskStructureLockKey } from '../../src/tasks/task-lock-keys'
 
 if (process.env.EXPECT_DB !== '1') {
@@ -191,6 +191,25 @@ describe('tasks P0-A real db', () => {
       [created.id],
     )
     expect(events.rows.map((row) => row.event_type)).toEqual(['completed', 'self_completed'])
+  })
+
+  it('returns one task to a participant and 404 to everyone else', async () => {
+    const { orgId, userA, outsider } = ids('get')
+    const created = await createTask({
+      orgId,
+      creatorId: userA,
+      title: '备料复核',
+      assignees: [userA],
+    })
+    const visible = await getTask({ orgId, actorId: userA, taskId: created.id })
+    expect(visible).toMatchObject({ id: created.id, title: '备料复核', status: 'open' })
+    await expect(getTask({ orgId, actorId: outsider, taskId: created.id })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    await expect(getTask({
+      orgId: `${ORG_PREFIX}other_${randomUUID()}`,
+      actorId: userA,
+      taskId: created.id,
+    })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    await expect(getTask({ orgId, actorId: userA, taskId: 'tsk_missing' })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
   })
 
   it('hides complete and reopen from a follower, an outsider, and another org', async () => {

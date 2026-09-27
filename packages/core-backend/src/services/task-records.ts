@@ -13,6 +13,7 @@ import {
   type TaskAbility,
   type TaskView,
 } from '../tasks/task-access'
+import { computeDueAt } from '../tasks/task-dates'
 import {
   applyComplete,
   applyReopen,
@@ -60,6 +61,8 @@ async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promise<T>): 
         return { rows: result.rows as Row[] }
       },
     }
+    // First statement, so a REPEATABLE READ database default cannot freeze the snapshot.
+    await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     await acquireTaskStructureLock(asQuery(client), orgId)
     return run(db)
   })
@@ -79,6 +82,7 @@ export async function createTask(input: {
   const id = newTaskId()
   await transaction(async (client) => {
     const q = asQuery(client)
+    await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
     await acquireTaskStructureLock(q, input.orgId)
     await q(
       `INSERT INTO tasks (id, org_id, title, completion_mode, created_by)
@@ -113,7 +117,40 @@ export async function listTasks(input: { orgId: string; actorId: string; view: s
   return result.rows
 }
 
-export async function listPending(input: { orgId: string; actorId: string; viewerTz: string | null }): Promise<Row[]> {
+function calendarDate(value: unknown): string | null {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10)
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10)
+  return null
+}
+
+function clockTime(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const match = /^(\d{2}:\d{2}(?::\d{2})?)/.exec(value)
+  return match ? match[1] : null
+}
+
+export function toTaskPendingItem(row: Row): Record<string, string> {
+  const id = String(row.id)
+  const updatedAt = row.updated_at instanceof Date ? row.updated_at : new Date(String(row.updated_at))
+  const item: Record<string, string> = {
+    source: 'task',
+    id,
+    title: String(row.title),
+    href: `/tasks/${id}`,
+    updatedAt: updatedAt.toISOString(),
+  }
+  const storedDue = row.due_at instanceof Date ? row.due_at : row.due_at ? new Date(String(row.due_at)) : null
+  const dueDate = calendarDate(row.due_date)
+  const dueAt = storedDue && !Number.isNaN(storedDue.getTime())
+    ? storedDue
+    : dueDate && typeof row.time_zone === 'string'
+      ? computeDueAt({ dueDate, dueTime: clockTime(row.due_time), timeZone: row.time_zone })
+      : null
+  if (dueAt && !Number.isNaN(dueAt.getTime())) item.dueAt = dueAt.toISOString()
+  return item
+}
+
+export async function listPending(input: { orgId: string; actorId: string; viewerTz: string | null }): Promise<Record<string, string>[]> {
   const cond = buildTaskPendingCondition({
     actorParam: input.actorId,
     orgParam: input.orgId,
@@ -121,10 +158,25 @@ export async function listPending(input: { orgId: string; actorId: string; viewe
     viewerTzParam: input.viewerTz,
   })
   const result = await query<Row>(
-    `SELECT id, title, status, due_at FROM tasks WHERE ${cond.sql} ORDER BY updated_at DESC LIMIT 100`,
+    `SELECT id, title, updated_at, due_at, due_date, due_time, time_zone FROM tasks WHERE ${cond.sql} ORDER BY updated_at DESC LIMIT 100`,
     cond.params,
   )
-  return result.rows
+  return result.rows.map(toTaskPendingItem)
+}
+
+export async function getTask(input: { orgId: string; actorId: string; taskId: string }): Promise<Row> {
+  const cond = buildTaskScopeCondition({
+    view: 'any_role',
+    actorParam: input.actorId,
+    orgParam: input.orgId,
+  })
+  const result = await query<Row>(
+    `SELECT id, title, status, completion_mode, created_by, due_at FROM tasks WHERE tasks.id = $3 AND ${cond.sql}`,
+    [...cond.params, input.taskId],
+  )
+  const row = result.rows[0]
+  if (!row) fail(404, 'NOT_FOUND')
+  return row
 }
 
 export async function countPending(input: { orgId: string; actorId: string; viewerTz: string | null }): Promise<number> {

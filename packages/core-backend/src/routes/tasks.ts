@@ -11,6 +11,7 @@ import {
   completeTask,
   countPending,
   createTask,
+  getTask,
   listPending,
   listTasks,
   reopenTask,
@@ -65,6 +66,20 @@ export function tasksRouter(): Router | null {
       const viewerTz = validateViewerTimeZoneHeader(req.header('x-viewer-time-zone'))
       const count = await countPending({ orgId: org, actorId: actorId(req), viewerTz })
       res.json({ count })
+    } catch (err) {
+      sendError(res, err)
+    }
+  })
+
+  router.get('/api/tasks/:id', authenticate, rbacGuard('tasks', 'read'), async (req, res) => {
+    try {
+      const org = orgId(req)
+      if (!org) {
+        res.status(404).json({ error: { code: 'NOT_FOUND' } })
+        return
+      }
+      const item = await getTask({ orgId: org, actorId: actorId(req), taskId: req.params.id })
+      res.json(item)
     } catch (err) {
       sendError(res, err)
     }
