@@ -3167,6 +3167,138 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
   assert.deepEqual([...new Set(bridgeSource.schemaReads)].sort(), [...STOCK_PREP_OBJECTS].sort())
 }
 
+// ── R-02, CONTRACT HALF: THE MVP-PERSIST ROUTE HANDS ITS RESOLVED LIST TO THE WRAPPER ─
+//
+// The case above drives MVP-persist IN-PROCESS with a hand-built list, which pins the wrapper and
+// nothing about the route. The one line in the route that threads `sourceObjects` into
+// `prepareStockPreparationMvpSnapshot` had no witness: a route that threaded the plan's list instead
+// (a contract over N objects, the lookup table never described) and a route that threaded nothing
+// (every armed call refused `config_bound_object_unresolvable`) both left this suite green. This case
+// is the witness: the REAL route, armed, flag on, a projection configured.
+//
+// The harness's provisioning has no persist API, so the route stops at the persist step with a
+// values-free 503 — AFTER the guard, the contract pin, the full read and the post-read check, which
+// is everything this case is about. The durable store and the recording source are the oracle, not
+// the response body; the 503 is asserted so that a refusal AHEAD of the read can never pass as it.
+async function R02L_theMvpPersistRouteThreadsTheResolvedListIntoTheContract() {
+  const FLAG = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
+  const previousFlag = process.env[FLAG]
+  process.env[FLAG] = 'true'
+  try {
+    const mvpRegistrations = () => [lookupEnumeratedRegistration({ purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST })]
+    const routeMvpPersist = (routes) => call(routes, 'POST', MVP_PERSIST_ROUTE, {
+      user: ADMIN_USER, params: ACTION_PARAMS, body: { parameters: { projectNo: PROJECT_NO } },
+    })
+    const contractKeysIn = (store) => [...store.keys()].filter((key) => key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX))
+    const assertStoppedAtPersist = (res, source, label) => {
+      assert.equal(res.statusCode, 503, `${label}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'PERSIST_PROVISIONING_API_UNAVAILABLE', `${label}: stopped at the persist step`)
+      assert.ok(source.reads.length > 0, `${label}: the source WAS read — the 503 is the persist step, not a refusal ahead of the read`)
+      const text = JSON.stringify(res.body)
+      for (const forbidden of [...FORBIDDEN_IN_RESPONSE, LOOKUP_OBJECT, 'FNumber']) {
+        assert.equal(text.includes(forbidden), false, `${label}: leaked ${JSON.stringify(forbidden)}`)
+      }
+    }
+
+    // PIN, through the route. One more object than the plan; the lookup table described once before
+    // the read and once after it; exactly ONE operation claim for the route's and the wrapper's guard
+    // entries; and the same TWO credential-free config reads the dry-run route makes.
+    const source = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+    const seed = mount({ registrations: mvpRegistrations(), source, sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG })
+    assertStoppedAtPersist(await routeMvpPersist(seed.routes), source, 'armed mvp-persist with a projection')
+    assert.deepEqual(contractKeysIn(seed.context.storage), [`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`],
+      'the route pinned exactly one contract, under the matched registration, before the persist step')
+    const stored = seed.context.storage.get(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`)
+    assert.equal(stored.objectCount, STOCK_PREP_OBJECTS.length + 1,
+      'the route threaded the resolved list: the lookup object is IN the contract')
+    assert.deepEqual([...new Set(source.schemaReads)].sort(), [...STOCK_PREP_OBJECTS, LOOKUP_OBJECT].sort(),
+      'the contract describes exactly the resolved list: the plan objects plus the lookup object')
+    assert.equal(source.schemaReads.filter((object) => object === LOOKUP_OBJECT).length, 2,
+      'the lookup table is described before the read (pin) and after it (E3-05)')
+    assert.equal(JSON.stringify(stored).includes(LOOKUP_OBJECT), false, 'the lookup object name is not stored in the clear')
+    assert.equal(JSON.stringify(stored).includes('FNumber'), false, 'nor its column names')
+    assert.equal(claimKeysIn(seed.context.storage).length, 1, 'the route and the wrapper rode ONE operation claim')
+    assert.deepEqual(seed.spies.configLoads, [SOURCE_SYSTEM_ID, SOURCE_SYSTEM_ID],
+      'the list is resolved once by the route and threaded — the guard\'s resolver and the read-principal peek, nothing more')
+
+    // SAME CONTRACT AS THE DRY-RUN ROUTE. The dry-run route over the same source pins a contract with
+    // the same digest: the two routes hand the wrapper the same list, not two lists that happen to
+    // have the same length.
+    const dryRunSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+    const dryRunMount = mount({
+      registrations: [lookupEnumeratedRegistration()], source: dryRunSource, sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+    })
+    const dryRun = await routeDryRun(dryRunMount.routes)
+    assert.equal(dryRun.statusCode, 200, JSON.stringify(dryRun.body))
+    assert.equal(dryRun.body.data.evidence.b2aSchemaContract.schemaDigest, stored.schemaDigest,
+      'the mvp-persist route pins the contract the dry-run route pins')
+    assert.equal(dryRun.body.data.evidence.b2aSchemaContract.fieldCount, stored.fieldCount)
+
+    // NO PROJECTION, through the route: the plan's objects only, the lookup table never described, a
+    // different contract — the pre-change behaviour for a deployment without a projection.
+    const plain = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+    const plainMount = mount({ registrations: [registration({ purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST })], source: plain })
+    assertStoppedAtPersist(await routeMvpPersist(plainMount.routes), plain, 'armed mvp-persist without a projection')
+    const plainStored = plainMount.context.storage.get(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`)
+    assert.equal(plainStored.objectCount, STOCK_PREP_OBJECTS.length, 'no projection: the plan\'s objects, as before')
+    assert.equal(stored.fieldCount - plainStored.fieldCount, LOOKUP_COLUMNS.length, 'the extra fields are the lookup table\'s columns')
+    assert.notEqual(plainStored.schemaDigest, stored.schemaDigest, 'a contract with the lookup table is a different contract')
+    assert.deepEqual([...new Set(plain.schemaReads)].sort(), [...STOCK_PREP_OBJECTS].sort(),
+      'no projection: the lookup table is never described')
+
+    // DRIFT IN THE LOOKUP TABLE ONLY, through the route: the contract pinned above is carried into a
+    // fresh deployment whose lookup table lost a column. Refused with the SAME refusal a plan-object
+    // drift gets — before the first row, before any target touch, no persist attempted.
+    const driftedSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup(LOOKUP_COLUMNS.slice(1)) })
+    const driftedRecords = createRecordsApi()
+    const driftedMount = mount({
+      registrations: mvpRegistrations(), source: driftedSource, records: driftedRecords,
+      storage: carriedContracts(seed.context.storage), sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+    })
+    const drifted = await routeMvpPersist(driftedMount.routes)
+    assert.equal(drifted.statusCode, 409, `mvp-persist over a drifted lookup table: ${JSON.stringify(drifted.body)}`)
+    assert.equal(drifted.body.error.code, B2A_SCHEMA_DRIFT)
+    assert.equal(drifted.body.error.details.reason, 'schema_contract_drift')
+    assert.deepEqual(
+      [drifted.body.error.details.missingFieldCount, drifted.body.error.details.changedFieldCount, drifted.body.error.details.addedFieldCount],
+      [1, 0, 0],
+    )
+    assert.equal(driftedSource.reads.length, 0, 'refused BEFORE the first source row')
+    assert.deepEqual(driftedRecords.calls, [], 'no target read or write')
+    assert.equal(drifted.body.data, undefined, 'no payload')
+    const driftedText = JSON.stringify(drifted.body)
+    for (const forbidden of [...FORBIDDEN_IN_RESPONSE, LOOKUP_OBJECT, 'FNumber', 'DN_PDM_PartLibraryInfo']) {
+      assert.equal(driftedText.includes(forbidden), false, `drift refusal leaked ${JSON.stringify(forbidden)}`)
+    }
+
+    // UNCHANGED, SECOND RUN, through the route: COMPARES (no second pin, same digest) and gets on to
+    // the read and the persist step — the proof that the pre-read pin and the post-read check walk the
+    // same list on this route too.
+    const stableSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup() })
+    const stableMount = mount({
+      registrations: mvpRegistrations(), source: stableSource,
+      storage: carriedContracts(seed.context.storage), sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG,
+    })
+    assertStoppedAtPersist(await routeMvpPersist(stableMount.routes), stableSource, 'armed mvp-persist, schema unchanged')
+    assert.equal(stableMount.context.storage.get(`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`).schemaDigest, stored.schemaDigest,
+      'the second run COMPARED against the carried contract')
+    assert.equal(stableSource.schemaReads.filter((object) => object === LOOKUP_OBJECT).length, 2,
+      'the lookup table is re-described before and after the read on the compare path too')
+
+    // DORMANT, flag on, same projection, a drifted lookup table: nothing described, nothing pinned,
+    // nothing refused — the route still runs to the persist step.
+    const dormantSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup(LOOKUP_COLUMNS.slice(1)) })
+    const dormant = mount({ source: dormantSource, sourceSystemConfig: STOCK_PREP_LOOKUP_CONFIG })
+    assertStoppedAtPersist(await routeMvpPersist(dormant.routes), dormantSource, 'dormant mvp-persist')
+    assert.deepEqual(dormantSource.schemaReads, [], 'dormant: nothing is described')
+    assert.deepEqual(contractKeysIn(dormant.context.storage), [], 'dormant: no contract')
+    assert.deepEqual(dormant.spies.configLoads, [SOURCE_SYSTEM_ID], 'dormant: the resolver\'s read never happens')
+  } finally {
+    if (previousFlag === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = previousFlag
+  }
+}
+
 const TESTS = [
   unsetEnvIsDormantAndByteIdentical,
   unsetEnvLeavesTheOtherEntryPointsUntouched,
@@ -3214,6 +3346,7 @@ const TESTS = [
   // R-02, contract half: the lookup table's columns are in the schema contract (TODO R-02-LOOKUP-SCHEMA-PIN closed).
   R02L_theLookupTableColumnsArePinnedAndDriftInThemRefuses,
   R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWithoutIt,
+  R02L_theMvpPersistRouteThreadsTheResolvedListIntoTheContract,
 ]
 
 async function main() {
