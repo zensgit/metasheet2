@@ -53,12 +53,12 @@
 
 ## 5. 与 #6076 的关系、合并顺序、要同步改的用例（要求 3）
 
-两个 PR **改动文件零重叠**（本 PR 不碰插件、不碰 #6076 的测试与文档）。CI 上也互不打红（下面的行号按 #6076 头部 `effae715c`）：
+两个 PR **改动文件零重叠**（本 PR 不碰插件、不碰 #6076 的测试与文档）。CI 上也互不打红（下面的行号按 #6076 当前头部 `8ec811fb2`；本文初稿按 `effae715c` 写，两个头部之间 R-073 相关处只有内存用例整体下移 7 行，真 PG 用例行号与 #6076 设计文档 §5 / §7 行号不变）：
 
-- #6076 的真 PG 套件（`packages/core-backend/tests/integration/external-system-delete-bind-lock-protocol.db.test.ts`）只按 SQL 迁移清单建 schema（057…073、079），**不跑 TS 迁移**，所以本外键合入后它的 `R-073`（:623）照旧「悬空」通过；插件内存套件的 `R-073`（`__tests__/external-systems-delete-bind-lock-protocol.test.cjs:1084-1110`）是内存模型，也照旧通过。
+- #6076 的真 PG 套件（`packages/core-backend/tests/integration/external-system-delete-bind-lock-protocol.db.test.ts`）只按 SQL 迁移清单建 schema（057…073、079），**不跑 TS 迁移**，所以本外键合入后它的 `R-073`（:623）照旧「悬空」通过；插件内存套件的 `R-073`（`__tests__/external-systems-delete-bind-lock-protocol.test.cjs:1091-1117`，调用点 `:1626`）是内存模型，也照旧通过。
 - 但两者合入后，「073 悬空确实发生」对**真实部署**（会跑 TS 迁移）已不成立——这两条登记会变成过期陈述，必须翻转。
 
-组合实证（执行型，scratch 脚本，未入库）：把 #6076 头部 `effae715c` 的插件 `lib/` 抽到 scratchpad，用 #6076 自己的迁移清单建 schema，一份不加、一份加上本迁移 `up()` 的 SQL（`verify/migration-up.sql`，与 `up()` 有漂移检查），跑 #6076 R-073 的「删除在前」交错与其镜像「写入在前」，删除方用 #6076 的 `deleteExternalSystem`（事务内 FOR UPDATE → 计数 → DELETE），写入方用冻结 provisioning 模块：
+组合实证（执行型，scratch 脚本，未入库）：把 #6076 头部的插件 `lib/` 抽到 scratchpad（`effae715c` 与 `8ec811fb2` 各跑一次，结果相同），用 #6076 自己的迁移清单建 schema，一份不加、一份加上本迁移 `up()` 的 SQL（`verify/migration-up.sql`，与 `up()` 有漂移检查），跑 #6076 R-073 的「删除在前」交错与其镜像「写入在前」，删除方用 #6076 的 `deleteExternalSystem`（事务内 FOR UPDATE → 计数 → DELETE），写入方用冻结 provisioning 模块：
 
 | 场景 | 旧（无外键） | 新（有外键） |
 | --- | --- | --- |
@@ -71,7 +71,7 @@
 - **推荐：#6076 先合 → 本 PR rebase 后合 → 同一个后续小 PR（或本 PR 追加提交，届时文件已在 main 上，不碰 #6076 分支）翻转 R-073**：
   1. 真 PG `R-073`：在建 schema 时（`MIGRATIONS` 之后）套本迁移 `up()`（导入 TS 模块经 Kysely 执行，或执行 `scripts/ops/sealed-export-binding-live-fk-validate-20260926/verify/migration-up.sql`），断言改为：`writerWaited === true`、`written.error.reason === 'SEALED_EXPORT_INTERNAL_ERROR'`、`deleted.error === null`、系统 0、ACTIVE 绑定 0；并补「写入在前」镜像：`deleterWaited === true`、删除 `ExternalSystemConflictError` 且 `sealedExportBindingCount === 1`、系统 1、绑定 1。用例名去掉 residual。
   2. 内存 `R-073`：内存 db 不建模外键；把它改名为「应用层：073 写入方不取应用层锁（数据库层由外键关闭，见本 PR）」，断言保留，日志文案去掉「dangles — registered residual」。
-  3. 设计文档 §5：残余改为「数据库层由 `fk_sealed_export_stock_prep_binding_live_external_system` 关闭（本 PR）；应用层写入方仍不取锁；存量悬空由普查包处理」，并删掉「修掉它的人必须连同这条登记一起退掉」的待办。
+  3. 设计文档（`docs/development/external-system-delete-bind-lock-protocol-design-20260925.md`）§5（:169-178）：残余改为「数据库层由 `fk_sealed_export_stock_prep_binding_live_external_system` 关闭（本 PR）；应用层写入方仍不取锁；存量悬空由普查包处理」，并删掉「修掉它的人必须连同这条登记一起退掉」的待办；§7 验证表「R-073 残余悬空」一行（:211）随 1、2 的新断言改写。
   4. §4 的 23503→409 映射（可同一 PR），翻转本 PR `B-10` 的三条 500 断言。
 - **若本 PR 先合**：#6076 合入前在其分支上做上面 1–3（本 PR 不改 #6076 分支）。
 
