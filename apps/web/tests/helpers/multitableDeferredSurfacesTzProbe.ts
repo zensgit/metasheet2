@@ -16,8 +16,10 @@ import {
   dateTimeValueDayKey,
   formatBusinessTimestamp,
   getBusinessTimezone,
+  zoneDayRangeUtcMs,
 } from '../../src/multitable/utils/business-timezone'
-import { dateTimeExportText, formatFieldDisplay, viewDayZone } from '../../src/multitable/utils/field-display'
+import { dateTimeExportText, formatFieldDisplay, viewDayZone, viewTodayKey } from '../../src/multitable/utils/field-display'
+import { evaluateRule } from '../../src/multitable/utils/conditional-formatting'
 import { setLookupTargetFields } from '../../src/multitable/utils/lookup-target-fields'
 import { configHistoryTime } from '../../src/multitable/utils/meta-config-history-labels'
 import type { MetaField } from '../../src/multitable/types'
@@ -37,6 +39,15 @@ const lookupField = {
 setLookupTargetFields({ fld_lookup_dt: { type: 'dateTime', property: { timezone: 'UTC' } } })
 
 const zone = viewDayZone(dateTimeField)
+
+// 2026-09-24 01:30 北京时间 (UTC day 09-23): the conditional-formatting / view-today "now".
+const NOW = Date.parse('2026-09-23T17:30:00.000Z')
+// 2026-09-23 23:30 北京时间: YESTERDAY in the business zone, "today" by the UTC day and a New York browser's day.
+const LATE_YESTERDAY = '2026-09-23T15:30:00.000Z'
+const cfRule = (operator: string) => ({ id: 'r', order: 0, fieldId: 'f', operator, style: { backgroundColor: '#ff0000' }, enabled: true }) as never
+const cfDateTimeField = { ...dateTimeField, id: 'f' } as MetaField
+const cfDateField = { id: 'f', name: 'D', type: 'date' } as MetaField
+const historyRange = zoneDayRangeUtcMs('2026-09-24')
 
 // OLD paths, reproduced verbatim as the negative control.
 function oldBrowserDayKey(value: string): string {
@@ -62,6 +73,12 @@ process.stdout.write(
     historyTimeText: configHistoryTime(EVENING, true).slice(0, 19),
     lookupDisplay: formatFieldDisplay({ field: lookupField, value: [EARLY_MORNING, EVENING] }),
     lookupExport: dateTimeExportText(lookupField, [EARLY_MORNING, EVENING]),
+    viewTodayDate: viewTodayKey({ type: 'date' }, NOW),
+    cfDateTimeIsToday: evaluateRule(cfRule('is_today'), { f: LATE_YESTERDAY }, cfDateTimeField, { now: NOW }),
+    cfDateTimeOverdue: evaluateRule(cfRule('is_overdue'), { f: LATE_YESTERDAY }, cfDateTimeField, { now: NOW }),
+    cfDateIsToday: evaluateRule(cfRule('is_today'), { f: '2026-09-24' }, cfDateField, { now: NOW }),
+    historyFrom: historyRange ? new Date(historyRange.startMs).toISOString() : null,
+    historyTo: historyRange ? new Date(historyRange.endMs - 1).toISOString() : null,
     // OLD paths — independently computed negative control.
     oldUtcDay: new Date(EARLY_MORNING).toISOString().slice(0, 10),
     oldBrowserDay: oldBrowserDayKey(EARLY_MORNING),

@@ -334,6 +334,24 @@ describe('GET /api/comments/inbox and /unread-count list only readable, live, no
     }
   })
 
+  // 客户反馈 2026-09-24 #4c follow-up: the inbox page loads no /context, so each page carries the instance business
+  // timezone (a zone id — same resolver and env contract as /context); the item scope is untouched.
+  it('each inbox page carries the instance businessTimezone (default, env override, invalid env → default)', async () => {
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+      expect((await inboxPage(50, 0) as unknown as { businessTimezone?: string }).businessTimezone).toBe('Asia/Shanghai')
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      const page = await inboxPage(2, 0) as unknown as { businessTimezone?: string; items: unknown[]; total: number }
+      expect(page.businessTimezone).toBe('Asia/Tokyo')
+      expect(page.items).toHaveLength(2)
+      expect(page.total).toBe(5)
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      expect((await inboxPage(50, 0) as unknown as { businessTimezone?: string }).businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('unread-count counts with the same scope: 4 unread, 1 of them mentioning the reader', async () => {
     expect(await unreadCount()).toEqual({ unreadCount: 4, mentionUnreadCount: 1, count: 4 })
     const inboxScope = service.getUnreadSummary.mock.calls[0]![1]

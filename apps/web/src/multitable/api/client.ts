@@ -3760,7 +3760,9 @@ export class MultitableApiClient implements CommentsApiClient {
 
   async listCommentInbox(params?: { limit?: number; offset?: number }): Promise<MultitableCommentInboxPage> {
     const res = await this.fetch(`/api/comments/inbox${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number }>(res)
+    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the inbox page loads no /context; adopt the zone its page carries.
+    setBusinessTimezone(data?.businessTimezone)
     return normalizeCommentInbox(data)
   }
 
@@ -3980,7 +3982,9 @@ export class MultitableApiClient implements CommentsApiClient {
     limit?: number
   }): Promise<AutomationRunView[]> {
     const res = await this.fetch(`/api/multitable/automation-executions${qs({ ...filters })}`)
-    const data = await this.parseJson<{ executions: AutomationRunView[] }>(res)
+    const data = await this.parseJson<{ executions: AutomationRunView[]; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the runs page loads no /context; adopt the zone the list carries.
+    setBusinessTimezone(data?.businessTimezone)
     return Array.isArray(data?.executions) ? data.executions : []
   }
 

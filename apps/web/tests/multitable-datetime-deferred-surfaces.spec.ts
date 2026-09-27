@@ -34,19 +34,23 @@ import MetaAutomationPersonDeliveryViewer from '../src/multitable/components/Met
 import ResetToPointPicker from '../src/multitable/components/ResetToPointPicker.vue'
 import MetaCommentsDrawer from '../src/multitable/components/MetaCommentsDrawer.vue'
 import SharedMetaCommentsPanel from '../src/shared/comments/components/MetaCommentsPanel.vue'
-import { MultitableApiClient } from '../src/multitable/api/client'
+import HistoryCenterModal from '../src/multitable/components/HistoryCenterModal.vue'
+import { MultitableApiClient, multitableClient } from '../src/multitable/api/client'
 import { useLocale } from '../src/composables/useLocale'
 import {
   businessTodayKey,
   dateTimeValueDayKey,
   dateTimeZoneHint,
   dayKeyInZone,
+  dayKeyOrdinal,
   formatBusinessTimestamp,
   getBusinessTimezone,
   resetBusinessTimezone,
   setBusinessTimezone,
+  zoneDayRangeUtcMs,
 } from '../src/multitable/utils/business-timezone'
-import { dateTimeExportText, formatFieldDisplay, lookupDateTimeTexts, viewDayZone } from '../src/multitable/utils/field-display'
+import { dateTimeExportText, formatFieldDisplay, lookupDateTimeTexts, viewDayZone, viewTodayKey } from '../src/multitable/utils/field-display'
+import { evaluateRule } from '../src/multitable/utils/conditional-formatting'
 import {
   getLookupTargetField,
   loadLookupTargetFields,
@@ -251,6 +255,46 @@ describe('deferred date-time surfaces — helpers', () => {
     expect(formatFieldDisplay({ field, value: EARLY_MORNING })).toBe('2026-09-24 02:00')
     await client.getRecord('r')
     expect(getBusinessTimezone()).toBe('Asia/Tokyo')
+  })
+
+  it('S4: the comment inbox and the automation runs list adopt the businessTimezone they carry', async () => {
+    const bodies = [
+      { ok: true, data: { items: [], total: 0, limit: 50, offset: 0, businessTimezone: 'Asia/Tokyo' } },
+      { executions: [], businessTimezone: 'Asia/Kolkata' },
+      { ok: true, data: { items: [], total: 0, limit: 50, offset: 0 } }, // older server: no key → zone kept
+    ]
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(bodies.shift()), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const client = new MultitableApiClient({ fetchFn: fetchFn as unknown as typeof fetch })
+    await client.listCommentInbox()
+    expect(getBusinessTimezone()).toBe('Asia/Tokyo')
+    expect(formatBusinessTimestamp(EVENING)).toBe('2026-09-24 22:05')
+    await client.listAutomationRuns()
+    expect(getBusinessTimezone()).toBe('Asia/Kolkata')
+    expect(formatBusinessTimestamp(EVENING)).toBe('2026-09-24 18:35')
+    await client.listCommentInbox()
+    expect(getBusinessTimezone()).toBe('Asia/Kolkata')
+  })
+
+  it('view "today", day ordinals and zone day ranges are pure calendar / zone arithmetic', () => {
+    const now = Date.parse(NOW_BEIJING_NEXT_DAY) // 2026-09-24 01:30 北京时间, 09-23 in UTC
+    expect(viewTodayKey({ type: 'date' }, now)).toBe('2026-09-24')
+    expect(viewTodayKey({ type: 'dateTime', property: { timezone: 'UTC' } }, now)).toBe('2026-09-24')
+    expect(viewTodayKey({ type: 'dateTime', property: { timezone: 'America/New_York' } }, now)).toBe('2026-09-23')
+    expect(viewTodayKey(null, now)).toBe('2026-09-24')
+    expect(dayKeyOrdinal('1970-01-02')).toBe(1)
+    expect(dayKeyOrdinal('2026-09-24')! - dayKeyOrdinal('2026-09-23')!).toBe(1)
+    expect(dayKeyOrdinal('2026-03-01')! - dayKeyOrdinal('2026-02-28')!).toBe(1)
+    expect(dayKeyOrdinal('2026-02-30')).toBeNull()
+    expect(dayKeyOrdinal('2026-9-24')).toBeNull()
+    expect(zoneDayRangeUtcMs('2026-09-24', 'Asia/Shanghai')).toEqual({
+      startMs: Date.parse('2026-09-23T16:00:00.000Z'),
+      endMs: Date.parse('2026-09-24T16:00:00.000Z'),
+    })
+    // A DST day is 23 / 25 hours long in its own zone.
+    const spring = zoneDayRangeUtcMs('2026-03-08', 'America/New_York')!
+    expect((spring.endMs - spring.startMs) / 3_600_000).toBe(23)
+    expect(zoneDayRangeUtcMs('2026-12-31', 'Asia/Shanghai')!.endMs).toBe(Date.parse('2026-12-31T16:00:00.000Z'))
+    expect(zoneDayRangeUtcMs('nope')).toBeNull()
   })
 })
 
@@ -462,12 +506,171 @@ describe('deferred date-time surfaces — UI surfaces (TZ-independent)', () => {
       version: 7,
       startFieldId: 'fld_start',
       endFieldId: 'fld_end',
-      startValue: '2026-09-24', // unchanged start, compared as the business day
-      endValue: '2026-09-27', // UTC day: 09-26
+      // S5: the start did not move — its stored instant goes back VERBATIM (01:00 北京时间 kept), never as a bare
+      // `2026-09-24`, which would have been read back as 00:00 and wiped the time of day.
+      startValue: EARLY_MORNING,
+      endValue: '2026-09-27', // the day the end handle landed on (UTC day: 09-26)
     })
 
     ;(container.querySelector('.meta-gantt__create') as HTMLElement).click()
     expect(createSpy).toHaveBeenCalledWith({ fld_start: '2026-09-24', fld_end: '2026-09-24' })
+  })
+
+  it('gantt (S5): a start-only resize writes the untouched end back verbatim', async () => {
+    const patchSpy = vi.fn()
+    const container = mount(() => h(MetaGanttView, {
+      loading: false,
+      canEdit: true,
+      fields: DT_FIELDS,
+      rows: [row('rec_build', { fld_title: 'Build', fld_start: EARLY_MORNING, fld_end: LATER_EARLY_MORNING }, 7)],
+      viewConfig: { startFieldId: 'fld_start', endFieldId: 'fld_end', titleFieldId: 'fld_title' },
+      onPatchDates: patchSpy,
+    }))
+    await flushUi()
+    const barArea = container.querySelector('.meta-gantt__bar-area') as HTMLElement
+    const startHandle = container.querySelector('.meta-gantt__resize-handle--start') as HTMLElement
+    Object.defineProperty(barArea, 'getBoundingClientRect', {
+      value: () => ({ left: 0, width: 300, top: 0, height: 40, right: 300, bottom: 40 }),
+    })
+    // Range = [start − 1d, end + 1d]; x=0/300 → start − 1d = 2026-09-22T17:00Z = 09-23 01:00 in Beijing.
+    startHandle.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 150 }))
+    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 0 }))
+    window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: 0 }))
+    await flushUi()
+    expect(patchSpy).toHaveBeenCalledWith({
+      recordId: 'rec_build',
+      version: 7,
+      startFieldId: 'fld_start',
+      endFieldId: 'fld_end',
+      startValue: '2026-09-23',
+      endValue: LATER_EARLY_MORNING,
+    })
+  })
+
+  it('N6: timeline / Gantt `date` fields — quick-create seeds the business today, a drop writes the day it lands on', async () => {
+    // 2026-09-23T17:30Z = 2026-09-24 01:30 北京时间. The old seed (local midnight → UTC date) wrote 09-23 on a
+    // Beijing laptop (and in UTC / New York); the old drop snap wrote the previous day on UTC+ browsers.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW_BEIJING_NEXT_DAY))
+    const patchSpy = vi.fn()
+    const createSpy = vi.fn()
+    const timeline = mount(() => h(MetaTimelineView, {
+      rows: [row('rec_1', { fld_title: 'Plain', fld_day: '2026-09-24', fld_day_end: '2026-09-26' }, 4)],
+      fields: [...DT_FIELDS, { id: 'fld_day_end', name: 'Day end', type: 'date' }],
+      loading: false,
+      canEdit: true,
+      canCreate: true,
+      viewConfig: { startFieldId: 'fld_day', endFieldId: 'fld_day_end', labelFieldId: 'fld_title', zoom: 'week' },
+      onPatchDates: patchSpy,
+      onCreateRecord: createSpy,
+    }))
+    await flushUi()
+    ;(timeline.querySelector('.meta-timeline__create-btn') as HTMLElement).click()
+    expect(createSpy).toHaveBeenCalledWith({ fld_day: '2026-09-24', fld_day_end: '2026-09-24' })
+
+    const bar = timeline.querySelector('.meta-timeline__bar') as HTMLElement
+    const barArea = timeline.querySelector('.meta-timeline__bar-area') as HTMLElement
+    Object.defineProperty(barArea, 'getBoundingClientRect', {
+      value: () => ({ left: 0, width: 264, top: 0, height: 24, right: 264, bottom: 24 }),
+    })
+    // `date` bars sit at UTC midnight of the day as written: range = [09-24T00Z − 2.4h, 09-26T00Z + 2.4h] =
+    // 52.8h over 264px (0.2h/px); x=162 → 32.4h after 09-23T21:36Z = 09-25T06:00Z → day 2026-09-25 (a Beijing
+    // browser's old snap: 14:00 local → local midnight = 09-24T16:00Z → 2026-09-24, a day early).
+    bar.dispatchEvent(new Event('dragstart', { bubbles: true }))
+    barArea.dispatchEvent(new MouseEvent('drop', { bubbles: true, clientX: 162 }))
+    expect(patchSpy).toHaveBeenCalledTimes(1)
+    expect(patchSpy.mock.calls[0]![0]).toMatchObject({ startValue: '2026-09-25', endValue: '2026-09-27' })
+
+    unmountAll()
+    const ganttCreate = vi.fn()
+    const gantt = mount(() => h(MetaGanttView, {
+      loading: false,
+      canCreate: true,
+      fields: [...DT_FIELDS, { id: 'fld_day_end', name: 'Day end', type: 'date' }],
+      rows: [row('rec_1', { fld_title: 'Plain', fld_day: '2026-09-24', fld_day_end: '2026-09-26' })],
+      viewConfig: { startFieldId: 'fld_day', endFieldId: 'fld_day_end', titleFieldId: 'fld_title' },
+      onCreateRecord: ganttCreate,
+    }))
+    await flushUi()
+    ;(gantt.querySelector('.meta-gantt__create') as HTMLElement).click()
+    expect(ganttCreate).toHaveBeenCalledWith({ fld_day: '2026-09-24', fld_day_end: '2026-09-24' })
+  })
+
+  it('B1: a `date` calendar opens its day view on the business today, not the browser / UTC day', async () => {
+    // 2026-09-27T18:34Z (the CI failure time): UTC / New York still say 09-27, the business day is 09-28.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-27T18:34:00.000Z'))
+    const createSpy = vi.fn()
+    const container = mount(() => h(MetaCalendarView, {
+      rows: [
+        row('rec_today', { fld_title: 'Business today', fld_day: '2026-09-28' }),
+        row('rec_utc', { fld_title: 'UTC today', fld_day: '2026-09-27' }),
+      ],
+      fields: DT_FIELDS,
+      loading: false,
+      canCreate: true,
+      viewConfig: { dateFieldId: 'fld_day', endDateFieldId: 'fld_day', titleFieldId: 'fld_title', defaultView: 'day', weekStartsOn: 0 },
+      onCreateRecord: createSpy,
+    }))
+    await flushUi()
+    const titles = Array.from(container.querySelectorAll('.meta-calendar__day-event')).map((el) => el.textContent ?? '').join('|')
+    expect(titles).toContain('Business today')
+    expect(titles).not.toContain('UTC today')
+    ;(container.querySelector('.meta-calendar__create-btn') as HTMLButtonElement).click()
+    expect(createSpy).toHaveBeenCalledWith({ fld_day: '2026-09-28' })
+  })
+
+  it('S2: conditional formatting day rules — date-time by the day its cell shows, `date` by the day as written', () => {
+    const now = Date.parse(NOW_BEIJING_NEXT_DAY) // business today = 2026-09-24
+    const dtField = DT_FIELDS[1]! // dateTime, zone unset → Asia/Shanghai
+    const dayField = DT_FIELDS[3]! // date
+    const rule = (operator: string, value?: unknown) => ({
+      id: 'r', order: 0, fieldId: 'f', operator, value, style: { backgroundColor: '#ff0000' }, enabled: true,
+    }) as never
+    const at = (value: unknown) => ({ f: value })
+    // 2026-09-23T15:30Z = 09-23 23:30 北京时间: YESTERDAY in the business zone, although it is "today" by the UTC
+    // day and by a New York browser's day.
+    const lateYesterday = '2026-09-23T15:30:00.000Z'
+    expect(evaluateRule(rule('is_today'), at(lateYesterday), dtField, { now })).toBe(false)
+    expect(evaluateRule(rule('is_overdue'), at(lateYesterday), dtField, { now })).toBe(true)
+    expect(evaluateRule(rule('is_in_last_n_days', 2), at(lateYesterday), dtField, { now })).toBe(true)
+    expect(evaluateRule(rule('is_in_last_n_days', 1), at(lateYesterday), dtField, { now })).toBe(false)
+    // 01:00 北京时间 today (UTC day 09-23).
+    expect(evaluateRule(rule('is_today'), at(EARLY_MORNING), dtField, { now })).toBe(true)
+    expect(evaluateRule(rule('is_overdue'), at(EARLY_MORNING), dtField, { now })).toBe(false)
+    // Next 2 days = 09-24 and 09-25 (business): 09-25 23:59 in, 09-26 00:00 out.
+    expect(evaluateRule(rule('is_in_next_n_days', 2), at('2026-09-25T15:59:00.000Z'), dtField, { now })).toBe(true)
+    expect(evaluateRule(rule('is_in_next_n_days', 2), at('2026-09-25T16:00:00.000Z'), dtField, { now })).toBe(false)
+    // createdTime / modifiedTime: business zone too.
+    expect(evaluateRule(rule('is_today'), at(lateYesterday), { id: 'f', name: 'c', type: 'createdTime' }, { now })).toBe(false)
+    // An explicit field zone wins: 15:30Z is 09-24 00:30 in Tokyo, and Tokyo's today is 09-24.
+    expect(evaluateRule(rule('is_today'), at(lateYesterday), { id: 'f', name: 't', type: 'dateTime', property: { timezone: 'Asia/Tokyo' } }, { now })).toBe(true)
+    // `date` (floating day): the day as written, against the business today.
+    expect(evaluateRule(rule('is_today'), at('2026-09-24'), dayField, { now })).toBe(true)
+    expect(evaluateRule(rule('is_overdue'), at('2026-09-23'), dayField, { now })).toBe(true)
+    expect(evaluateRule(rule('is_overdue'), at('2026-09-24'), dayField, { now })).toBe(false)
+    expect(evaluateRule(rule('is_in_next_n_days', 3), at('2026-09-26'), dayField, { now })).toBe(true)
+    expect(evaluateRule(rule('is_in_next_n_days', 3), at('2026-09-27'), dayField, { now })).toBe(false)
+    // Unreadable text keeps the legacy path (no match, no throw).
+    expect(evaluateRule(rule('is_today'), at('not a date'), dtField, { now })).toBe(false)
+  })
+
+  it('S3: history-center from / to filter sends business-day bounds', async () => {
+    const listHistoryEvents = vi.spyOn(multitableClient, 'listHistoryEvents').mockResolvedValue({ batches: [], total: 0, nextCursor: null, searchTruncated: false } as never)
+    const container = mount(() => h(HistoryCenterModal, { open: true, baseId: 'base_1' }))
+    await flushMacrotask()
+    const from = container.querySelector('[data-test="hist-filter-from"]') as HTMLInputElement
+    const to = container.querySelector('[data-test="hist-filter-to"]') as HTMLInputElement
+    from.value = '2026-09-24'
+    from.dispatchEvent(new Event('input'))
+    to.value = '2026-09-24'
+    to.dispatchEvent(new Event('input'))
+    to.dispatchEvent(new Event('change'))
+    await flushMacrotask()
+    const params = listHistoryEvents.mock.calls.at(-1)![1] as { from?: string; to?: string }
+    // 2026-09-24 00:00 北京时间 = 09-23T16:00Z; the day ends at 09-24T15:59:59.999Z.
+    expect(params.from).toBe('2026-09-23T16:00:00.000Z')
+    expect(params.to).toBe('2026-09-24T15:59:59.999Z')
   })
 
   it('lookup cell: the grid renderer shows the target column wall clock once the target is known', async () => {
@@ -598,6 +801,12 @@ interface ProbeResult {
   historyTimeText: string
   lookupDisplay: string
   lookupExport: string | null
+  viewTodayDate: string
+  cfDateTimeIsToday: boolean
+  cfDateTimeOverdue: boolean
+  cfDateIsToday: boolean
+  historyFrom: string | null
+  historyTo: string | null
   oldUtcDay: string
   oldBrowserDay: string
   oldTimestamp: string
@@ -655,6 +864,13 @@ describe('deferred date-time surfaces — independent of the browser zone (out-o
     expect(r.historyTimeText).toBe('2026-09-24 21:05:07')
     expect(r.lookupDisplay).toBe('2026-09-24 01:00, 2026-09-24 21:05')
     expect(r.lookupExport).toBe('2026-09-24 01:00; 2026-09-24 21:05')
+    // Views' "today" for a `date` field, conditional-formatting day rules, history day bounds (S2 / S3 / N4).
+    expect(r.viewTodayDate).toBe('2026-09-24')
+    expect(r.cfDateTimeIsToday).toBe(false)
+    expect(r.cfDateTimeOverdue).toBe(true)
+    expect(r.cfDateIsToday).toBe(true)
+    expect(r.historyFrom).toBe('2026-09-23T16:00:00.000Z')
+    expect(r.historyTo).toBe('2026-09-24T15:59:59.999Z')
   })
 
   it.skipIf(process.env.META_BUSINESS_TZ_CHILD === '1')('negative control: the OLD code diverges across the same zones — the probe can see the bug', async () => {
@@ -700,13 +916,14 @@ describe('deferred UI surfaces under a foreign process zone (child vitest runs)'
     return json
   }
 
-  it.skipIf(process.env.META_BUSINESS_TZ_CHILD === '1').each(['UTC', 'America/New_York'])(
+  it.skipIf(process.env.META_BUSINESS_TZ_CHILD === '1').each(['UTC', 'America/New_York', 'Asia/Shanghai'])(
     'calendar / timeline / Gantt / lookup / timestamp surfaces pass with the process (browser) zone forced to %s',
     async (tz) => {
       const summary = await runChild(tz)
       expect(summary.numFailedTests).toBe(0)
-      // The UI-surfaces describe holds 11 tests; `-t` leaves the rest skipped.
-      expect(summary.numPassedTests).toBeGreaterThanOrEqual(11)
+      // The UI-surfaces describe holds 16 tests; `-t` leaves the rest skipped. Asia/Shanghai is the UTC+ zone the old
+      // `date` drop snap and quick-create seed wrote the previous day in (N6).
+      expect(summary.numPassedTests).toBeGreaterThanOrEqual(16)
     },
   )
 })

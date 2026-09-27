@@ -147,8 +147,8 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGanttViewConfig, MetaRecord } from '../types'
 import { useLocale } from '../../composables/useLocale'
-import { dateTimeExportText, formatFieldDisplay, viewDayZone } from '../utils/field-display'
-import { businessTodayKey, dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
+import { dateTimeExportText, formatFieldDisplay, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
 import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
 import { managerLabel } from '../utils/meta-manager-labels'
 import { MtButton } from '../ui'
@@ -208,6 +208,9 @@ const resizeState = ref<{
   axisWidth: number
   originalStartMs: number
   originalEndMs: number
+  /** The stored values at resize start — written back verbatim for the edge that did not move (S5). */
+  originalStartValue: unknown
+  originalEndValue: unknown
   nextStartMs: number
   nextEndMs: number
 } | null>(null)
@@ -528,6 +531,8 @@ function onResizeStart(task: ScheduledTask, edge: ResizeEdge, event: MouseEvent)
     axisWidth: rect.width,
     originalStartMs: task.startMs,
     originalEndMs: task.endMs,
+    originalStartValue: task.record.data[startFieldId.value],
+    originalEndValue: task.record.data[endFieldId.value],
     nextStartMs: task.startMs,
     nextEndMs: task.endMs,
   }
@@ -551,19 +556,24 @@ function onResizeEnd() {
     cleanupResize()
     return
   }
-  // A date-time field is written as the business day the handle lands on (read back as that day's midnight in
-  // its zone), compared against the day it showed before; a `date` field keeps the UTC-day value.
-  const startValue = isoDateFromMs(state.nextStartMs, startDayZone.value)
-  const endValue = isoDateFromMs(state.nextEndMs, endDayZone.value)
-  if (startValue !== isoDateFromMs(state.originalStartMs, startDayZone.value)
-    || endValue !== isoDateFromMs(state.originalEndMs, endDayZone.value)) {
+  // The moved edge is written as the day the handle lands on in the SAME frame the bar is drawn in: a date-time
+  // field's zone day (read back as that day's 00:00 there), a `date` field's UTC day. Days are compared with
+  // the day the edge showed before.
+  const startDay = isoDateFromMs(state.nextStartMs, startDayZone.value)
+  const endDay = isoDateFromMs(state.nextEndMs, endDayZone.value)
+  const startMoved = startDay !== isoDateFromMs(state.originalStartMs, startDayZone.value)
+  const endMoved = endDay !== isoDateFromMs(state.originalEndMs, endDayZone.value)
+  if (startMoved || endMoved) {
+    // S5: the edge that did NOT move is written back as its stored value, verbatim — re-sending it as a bare
+    // `YYYY-MM-DD` would wipe a date-time's time of day (e.g. 01:00 → 00:00) on every end-only resize.
+    const unmoved = (value: unknown, day: string) => (typeof value === 'string' && value.trim() ? value : day)
     emit('patch-dates', {
       recordId: state.recordId,
       version: state.version,
       startFieldId: startFieldId.value,
       endFieldId: endFieldId.value,
-      startValue,
-      endValue,
+      startValue: startMoved ? startDay : unmoved(state.originalStartValue, startDay),
+      endValue: endMoved ? endDay : unmoved(state.originalEndValue, endDay),
     })
   }
   cleanupResize()
@@ -579,15 +589,12 @@ function cleanupResize() {
 onBeforeUnmount(cleanupResize)
 
 function onQuickCreate() {
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const value = today.toISOString().slice(0, 10)
-  // A date-time field is seeded with the business today (read back as that day's midnight in its zone); a
-  // `date` field keeps the existing seed.
-  const seedFor = (zone: string | null) => (zone ? businessTodayKey(zone) : value)
+  // Seeded with the view's "today" (viewTodayKey): a date-time field with today in its zone (read back as that
+  // day's 00:00 there), a `date` field with the business today. The old seed took local midnight's UTC date —
+  // the PREVIOUS day on any UTC+ browser.
   const data: Record<string, unknown> = {}
-  if (startFieldId.value) data[startFieldId.value] = seedFor(startDayZone.value)
-  if (endFieldId.value) data[endFieldId.value] = seedFor(endDayZone.value)
+  if (startFieldId.value) data[startFieldId.value] = viewTodayKey(props.fields.find((field) => field.id === startFieldId.value))
+  if (endFieldId.value) data[endFieldId.value] = viewTodayKey(props.fields.find((field) => field.id === endFieldId.value))
   emit('create-record', data)
 }
 </script>

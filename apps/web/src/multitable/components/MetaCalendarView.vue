@@ -351,8 +351,8 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
-import { formatFieldDisplay, viewDayZone } from '../utils/field-display'
-import { businessTodayKey, dateTimeValueDayKey } from '../utils/business-timezone'
+import { formatFieldDisplay, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { dateTimeValueDayKey } from '../utils/business-timezone'
 import {
   buildCalendarDay,
   buildCalendarDays,
@@ -429,10 +429,6 @@ const emit = defineEmits<{
 
 const dateFieldId = ref<string | null>(null)
 const viewMode = ref<'month' | 'week' | 'day'>('month')
-// "Today" is the business calendar's today (客户反馈 2026-09-24 #4c follow-up), the same calendar the date-time
-// buckets below use — not the browser's day, which differs from it for part of every day when the browser is
-// not in the business timezone.
-const viewDate = ref(parseDateForCell(businessTodayKey()))
 const pendingConfigKey = ref<string | null>(null)
 const { isZh } = useLocale()
 const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
@@ -477,6 +473,18 @@ const dateFields = computed(() =>
 const dateField = computed(() =>
   dateFieldId.value ? props.fields.find((f) => f.id === dateFieldId.value) ?? null : null,
 )
+
+/**
+ * The calendar's "today" (客户反馈 2026-09-24 #4c follow-up): today in the date field's day zone, else the
+ * business timezone — for `date` calendars too (viewTodayKey). The day the view opens on, the today highlight,
+ * "Today" and quick-create all use it, the same calendar the date-time buckets below use; never the browser's
+ * day, which differs from it for part of every day when the browser is not in the business timezone.
+ */
+function calendarTodayKey(): string {
+  return viewTodayKey(dateField.value)
+}
+
+const viewDate = ref(parseDateForCell(calendarTodayKey()))
 
 const endDateField = computed(() => {
   const endFieldId = calendarConfig.value.endDateFieldId
@@ -584,8 +592,8 @@ function buildCell(date: Date, inMonth: boolean): CalendarCell {
     holidays: props.calendarHolidays ?? [],
     isCurrentMonth: inMonth,
     showLunarCalendar: true,
-    // The "today" highlight marks the business today — the calendar the date-time buckets use.
-    today: parseDateForCell(businessTodayKey()),
+    // The "today" highlight marks the calendar's today (business day) — the calendar the date-time buckets use.
+    today: parseDateForCell(calendarTodayKey()),
   })
   const dateStr = calendarDay.date
   const all = eventsByDate.value[dateStr] ?? []
@@ -599,11 +607,6 @@ function buildCell(date: Date, inMonth: boolean): CalendarCell {
     overflow: Math.max(0, all.length - MAX_EVENTS_PER_CELL),
   }
 }
-
-const todayStr = computed(() => {
-  const today = new Date()
-  return fmt(today.getFullYear(), today.getMonth() + 1, today.getDate())
-})
 
 const monthCells = computed<CalendarCell[]>(() => {
   const first = new Date(viewDate.value.getFullYear(), viewDate.value.getMonth(), 1)
@@ -803,7 +806,7 @@ function goNext() {
 }
 
 function goToday() {
-  viewDate.value = parseDateForCell(businessTodayKey())
+  viewDate.value = parseDateForCell(calendarTodayKey())
 }
 
 function cellAriaLabel(cell: CalendarCell): string {

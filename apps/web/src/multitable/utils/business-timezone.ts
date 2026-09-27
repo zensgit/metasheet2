@@ -371,6 +371,35 @@ export function businessTodayKey(timeZone: string = getBusinessTimezone(), nowMs
   return dayKeyInZone(nowMs, timeZone)
 }
 
+const DAY_KEY_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/**
+ * Whole-day ordinal of a `YYYY-MM-DD` key (days since 1970-01-01), or `null` for anything else. Pure calendar
+ * arithmetic — no zone — so "is this day before / within N days of that day" never depends on the browser.
+ */
+export function dayKeyOrdinal(dayKey: string): number | null {
+  const match = DAY_KEY_RE.exec(dayKey)
+  if (!match) return null
+  const clock: WallClock = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]), hour: 0, minute: 0, second: 0 }
+  if (!isValidWallClock(clock)) return null
+  return Math.round(utcMsFromWallClock(clock) / ONE_DAY_MS)
+}
+
+/**
+ * The UTC instants bounding the calendar day `dayKey` in `timeZone`: `startMs` = that day's 00:00, `endMs` = the
+ * next day's 00:00 (exclusive). `null` when `dayKey` is not a real `YYYY-MM-DD`. Used where a person picks a
+ * DAY (history from / to filter) against event times shown in the business timezone.
+ */
+export function zoneDayRangeUtcMs(dayKey: string, timeZone: string = getBusinessTimezone()): { startMs: number; endMs: number } | null {
+  const match = DAY_KEY_RE.exec(dayKey)
+  if (!match) return null
+  const clock: WallClock = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]), hour: 0, minute: 0, second: 0 }
+  if (!isValidWallClock(clock)) return null
+  const next = new Date(utcMsFromWallClock(clock) + ONE_DAY_MS)
+  const nextClock = { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate(), hour: 0, minute: 0 }
+  return { startMs: wallClockToUtcMs(clock, timeZone), endMs: wallClockToUtcMs(nextClock, timeZone) }
+}
+
 // A trailing hour-only offset (`…+00`, PostgreSQL's text form) is an explicit zone; the grammar wants `±hh:mm`.
 // Anchored on the time part before it, so a bare date's `-DD` (`2026-09-24`) is never mistaken for an offset.
 const HOUR_ONLY_OFFSET_RE = /(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?)([+-]\d{2})$/

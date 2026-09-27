@@ -4,11 +4,11 @@ import MetaCalendarView from '../src/multitable/components/MetaCalendarView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { businessTodayKey } from '../src/multitable/utils/business-timezone'
 
+// Days relative to the day the calendar opens on — the business today (客户反馈 2026-09-24 #4c follow-up), never
+// the browser's day (the old local-midnight + UTC-date form was also a day early on UTC+ hosts).
 function isoDate(offsetDays = 0): string {
-  const date = new Date()
-  date.setHours(0, 0, 0, 0)
-  date.setDate(date.getDate() + offsetDays)
-  return date.toISOString().slice(0, 10)
+  const [year, month, day] = businessTodayKey().split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, day + offsetDays)).toISOString().slice(0, 10)
 }
 
 describe('MetaCalendarView', () => {

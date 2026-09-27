@@ -181,8 +181,8 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig, MultitableCommentPresenceSummary } from '../types'
 import { resolveTimelineViewConfig } from '../utils/view-config'
-import { formatFieldDisplay, viewDayZone } from '../utils/field-display'
-import { businessTodayKey, dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
+import { formatFieldDisplay, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
 import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
@@ -431,19 +431,15 @@ function onZoomChange(event: Event) {
   emitConfigUpdate({ zoom: nextZoom })
 }
 
-function todayIsoDate(): string {
-  const date = new Date()
-  date.setHours(0, 0, 0, 0)
-  return date.toISOString().slice(0, 10)
-}
-
 function onQuickCreate() {
-  // A date-time field is seeded with the business today (read back as that day's midnight in its zone); a
-  // `date` field keeps the existing seed.
-  const seedFor = (zone: string | null) => (zone ? businessTodayKey(zone) : todayIsoDate())
+  // Seeded with the view's "today" (viewTodayKey): a date-time field with today in its zone (read back as that
+  // day's 00:00 there), a `date` field with the business today. The old seed took local midnight's UTC date —
+  // the PREVIOUS day on any UTC+ browser (a Beijing laptop created yesterday's record).
   const data: Record<string, unknown> = {}
-  if (startFieldId.value) data[startFieldId.value] = seedFor(startDayZone.value)
-  if (endFieldId.value) data[endFieldId.value] = seedFor(endDayZone.value)
+  const startField = props.fields.find((f) => f.id === startFieldId.value)
+  const endField = props.fields.find((f) => f.id === endFieldId.value)
+  if (startFieldId.value) data[startFieldId.value] = viewTodayKey(startField)
+  if (endFieldId.value) data[endFieldId.value] = viewTodayKey(endField)
   emit('create-record', data)
 }
 
@@ -527,12 +523,11 @@ function onSelect(recordId: string) {
 }
 
 function snapToIsoDate(timestamp: number, zone: string | null = null): string {
-  // A date-time field snaps to the business day the drop lands on (read back as that day's midnight in its
-  // zone); a `date` field keeps the existing snap.
-  if (zone) return dayKeyInZone(timestamp, zone)
-  const date = new Date(timestamp)
-  date.setHours(0, 0, 0, 0)
-  return date.toISOString().slice(0, 10)
+  // The day the drop lands on, in the SAME frame the bars are placed in (dayKeyOf): a date-time field's zone
+  // day (written as that day, read back as its 00:00 there); for a `date` field the UTC day — its bars sit at
+  // UTC midnight of the day as written. The old `setHours(0)` + UTC date wrote the PREVIOUS day on UTC+
+  // browsers.
+  return dayKeyOf(new Date(timestamp), zone)
 }
 
 function onDragStart(item: ScheduledItem, event: DragEvent) {

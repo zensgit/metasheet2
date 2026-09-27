@@ -13,6 +13,7 @@ import {
 import { isSystemFieldType } from './system-fields'
 import { isEmptyValue } from './conditional-formatting'
 import {
+  businessTodayKey,
   formatDateTimeInZone,
   getBusinessTimezone,
   parseDateTimeInput,
@@ -71,6 +72,16 @@ export function dateTimeFieldTimezone(field: Pick<MetaField, 'type' | 'property'
  */
 export function viewDayZone(field: Pick<MetaField, 'type' | 'property'> | null | undefined): string | null {
   return field && isDateTimeLikeFieldType(field.type) ? dateTimeFieldTimezone(field) : null
+}
+
+/**
+ * "Today" for a calendar / timeline / Gantt keyed on `field`: today's day in that field's day zone (a date-time
+ * field's zone rule), else in the business timezone — for `date` fields too, so the day a view opens on,
+ * highlights and quick-creates on is the SAME business day in every browser (a floating `date` names a day,
+ * and the organisation's "today" is the business day). Never the browser's day or the UTC day.
+ */
+export function viewTodayKey(field: Pick<MetaField, 'type' | 'property'> | null | undefined, nowMs: number = Date.now()): string {
+  return businessTodayKey(viewDayZone(field) ?? getBusinessTimezone(), nowMs)
 }
 
 /**
