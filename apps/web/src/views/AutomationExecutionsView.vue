@@ -367,6 +367,11 @@ const RESUME_ERROR_LABELS: Record<string, AutomationLabelKey> = {
   // #5803: 409 from resumeExecution() when the rule's sheet is soft-deleted. The token is NOT claimed, so
   // the same resume works once the sheet is restored. Without this entry a zh session saw the raw English.
   SHEET_DELETED: 'runs.resumeError.sheetDeleted',
+  // 409 from resumeExecution() when the suspended execution record (read before the token claim) is gone.
+  EXECUTION_GONE: 'runs.resumeError.executionGone',
+  // 409 from resumeExecution() when the stored resume cursor is structurally invalid or does not match the
+  // current branch position; resuming would risk continuing the wrong step, so it fails closed instead.
+  SUSPENSION_CURSOR_INVALID: 'runs.resumeError.suspensionCursorInvalid',
 }
 
 /** Map the resume endpoint's discriminated code → an inline localized message (never a generic toast). */
