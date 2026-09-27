@@ -139,4 +139,17 @@ describe('pending items', () => {
     expect(item.dueAt).toBe('2026-09-28T01:02:03.000Z')
     expect(Object.keys(item).sort()).toEqual(['dueAt', 'href', 'id', 'source', 'title', 'updatedAt'])
   })
+
+  it('reads an all-day due_date string in the task time zone, not as a Date', () => {
+    const item = toTaskPendingItem({
+      id: 'tsk_c',
+      title: '备料复核',
+      updated_at: new Date('2026-09-27T00:00:00.000Z'),
+      due_at: null,
+      due_date: '2026-09-28',
+      due_time: null,
+      time_zone: 'Asia/Shanghai',
+    })
+    expect(item.dueAt).toBe('2026-09-28T15:59:59.999Z')
+  })
 })
