@@ -277,6 +277,97 @@ describe('Multitable view config API', () => {
     }))
   })
 
+  // #6084: the client clears grouping by sending an explicit empty value; PATCH must actually persist that
+  // as "no grouping" instead of falling back to the row's stored value. `??` alone conflates an ABSENT key
+  // (undefined) with an explicit clear — this is the regression these three tests pin down. The mock "row"
+  // is STATEFUL (mutated by each UPDATE, like the real table) so the "explicit empty clears" and "absent
+  // keeps" assertions are checked against what a FOLLOWING read of the SAME row would see, not just the one
+  // UPDATE call — the closest equivalent of "GET afterwards returns no grouping" this mock-pool harness can
+  // exercise without standing up the full read path's dependency chain (apiTokenAuth/oapiScopeGuard/
+  // resolveMetaSheetId/...) that backs the frontend's actual GET /view.
+  function statefulKanbanRow(initialGroupInfo: Record<string, unknown>) {
+    const row = {
+      id: 'view_kanban',
+      sheet_id: 'sheet_ops',
+      name: 'Kanban',
+      type: 'kanban',
+      filter_info: {},
+      sort_info: {},
+      group_info: initialGroupInfo,
+      hidden_field_ids: [],
+      config: {},
+    }
+    return {
+      row,
+      queryHandler: async (sql: string, params?: unknown[]): Promise<QueryResult> => {
+        if (sql.includes('SELECT sp.sheet_id, sp.perm_code, sp.subject_type')) return { rows: [] }
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          return { rows: [{ ...row }] }
+        }
+        const allowed = matchAllowedFieldQueries(sql, params, { sheet_ops: SHEET_OPS_FIELDS })
+        if (allowed) return allowed
+        if (sql.includes('UPDATE meta_views')) {
+          const p = params ?? []
+          row.name = String(p[1])
+          row.type = String(p[2])
+          row.filter_info = JSON.parse(String(p[3]))
+          row.sort_info = JSON.parse(String(p[4]))
+          row.group_info = JSON.parse(String(p[5]))
+          row.hidden_field_ids = JSON.parse(String(p[6]))
+          row.config = JSON.parse(String(p[7]))
+          return { rows: [], rowCount: 1 }
+        }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    }
+  }
+
+  test('PATCH with explicit empty groupInfo ({}) clears the stored grouping, and it stays cleared for the next read (#6084)', async () => {
+    const { row, queryHandler } = statefulKanbanRow({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    const { app } = await createApp({ tokenPerms: ['multitable:write'], queryHandler })
+
+    const first = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ groupInfo: {} })
+      .expect(200)
+    expect(first.body.data.view.groupInfo).toEqual({})
+    expect(row.group_info).toEqual({})
+
+    // A second, unrelated PATCH (no groupInfo key) must see — and keep — the now-cleared grouping, proving
+    // the clear was actually written to the row rather than only echoed back in the first response.
+    const second = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ name: 'Kanban renamed' })
+      .expect(200)
+    expect(second.body.data.view.groupInfo).toEqual({})
+    expect(row.group_info).toEqual({})
+  })
+
+  test('PATCH with explicit null groupInfo also clears the stored grouping (#6084)', async () => {
+    const { row, queryHandler } = statefulKanbanRow({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    const { app } = await createApp({ tokenPerms: ['multitable:write'], queryHandler })
+
+    const response = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ groupInfo: null })
+      .expect(200)
+    expect(response.body.data.view.groupInfo).toEqual({})
+    expect(row.group_info).toEqual({})
+  })
+
+  test('PATCH with NO groupInfo key keeps the stored grouping unchanged (#6084)', async () => {
+    const { row, queryHandler } = statefulKanbanRow({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    const { app } = await createApp({ tokenPerms: ['multitable:write'], queryHandler })
+
+    const response = await request(app)
+      .patch('/api/multitable/views/view_kanban')
+      .send({ name: 'Kanban renamed' })
+      .expect(200)
+    expect(response.body.data.view.groupInfo).toEqual({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+    expect(row.group_info).toEqual({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
+  })
+
   test('rejects Gantt dependency config when dependency field links to another sheet', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: ['multitable:write'],
