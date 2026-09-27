@@ -119,6 +119,14 @@ describe('tasks auth gate', () => {
     expect(response.body).toEqual({ error: 'Insufficient permissions' })
   })
 
+  it('rejects GET /api/tasks/:id when the database does not grant tasks:read', async () => {
+    const response = await request(app())
+      .get('/api/tasks/tsk_missing')
+      .set('Authorization', `Bearer ${token()}`)
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ error: 'Insufficient permissions' })
+  })
+
   it('allows POST /api/tasks when the database grants tasks:write', async () => {
     const response = await request(app())
       .post('/api/tasks')

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createTask, toTaskPendingItem } from '../../src/services/task-records'
+import { completeTask, createTask, reopenTask, toTaskPendingItem } from '../../src/services/task-records'
 
 const state = vi.hoisted(() => ({
   calls: [] as { sql: string; params?: unknown[] }[],
@@ -82,6 +82,34 @@ describe('createTask guards', () => {
       completionMode: 'nope',
     })).rejects.toMatchObject({ status: 422, code: 'INVALID_MODE' })
     expect(state.transactions).toBe(0)
+  })
+})
+
+describe('structure-lock isolation', () => {
+  beforeEach(() => {
+    state.calls.length = 0
+    state.transactions = 0
+  })
+
+  it('starts complete with READ COMMITTED before any other statement', async () => {
+    await expect(completeTask({
+      orgId: 'org-1',
+      actorId: 'usr-1',
+      taskId: 'tsk_missing',
+    })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(state.calls[0]?.sql).toBe('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    expect(state.transactions).toBe(1)
+  })
+
+  it('starts reopen with READ COMMITTED before any other statement', async () => {
+    await expect(reopenTask({
+      orgId: 'org-1',
+      actorId: 'usr-1',
+      taskId: 'tsk_missing',
+      scope: 'all',
+    })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(state.calls[0]?.sql).toBe('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    expect(state.transactions).toBe(1)
   })
 })
 

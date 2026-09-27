@@ -275,7 +275,14 @@ export async function completeTask(input: { orgId: string; actorId: string; task
     await assertRowAbility(db, { ...input, createdBy: task.createdBy, ability: 'complete' })
     const rows = await loadAssignees(db, input.taskId)
     const now = new Date()
-    const next = applyComplete({ mode: task.mode, rows, actorId: input.actorId, createdBy: task.createdBy, now })
+    const next = applyComplete({
+      mode: task.mode,
+      rows,
+      actorId: input.actorId,
+      createdBy: task.createdBy,
+      now,
+      wasDone: task.status === 'done',
+    })
     await writeChangedAssignees(db, input.taskId, rows, next.rows)
     if ((task.status === 'done') !== next.done) await writeTaskDoneState(db, input.taskId, next.done, now)
     await writeEvents(db, input.taskId, next.events, now)
@@ -300,6 +307,7 @@ export async function reopenTask(input: {
       actorId: input.actorId,
       createdBy: task.createdBy,
       scope: input.scope,
+      wasDone: task.status === 'done',
     })
     const done = computeTaskDone({ mode: task.mode, assigneeRows: next.rows })
     await writeChangedAssignees(db, input.taskId, rows, next.rows)
