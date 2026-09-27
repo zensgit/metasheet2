@@ -88,64 +88,57 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
     })
   })
 
-  it('copy POSTs to /sheets/:id/copy and reads Idempotent-Replayed, formulaRecompute and the new sheet', async () => {
+  // Exact route bodies of backend PR #6112 (routes/multitable-copy-sheet.ts @ 2b95e1f70): `buildSuccessBody`
+  // + post-commit `formulaRecompute`, the dry-run's `{ summary: plan.summary }`, and `fail()`'s
+  // `{ code, message, details? }` with the service's CopySheetError details.
+  const ROUTE_SUMMARY = {
+    sourceSheetId: 'sheet_orders', sourceName: '订单', baseId: 'base_ops', targetName: '订单 副本',
+    copiedFromKind: 'user', rowCount: 10, fieldCount: 5, builtFieldCount: 4, viewCount: 2,
+    disclosures: [{ fieldId: 'fld_m', code: 'MIRROR_NOT_BUILT' }],
+    droppedViewFilterLeaves: [{ viewId: 'view_b', count: 1 }],
+    autoNumberRenumberedRows: 3, nullCellsOmitted: 6,
+    permissionRowCount: 3, fieldPermissionRowCount: 2, viewPermissionRowCount: 1, recordPermissionRowCount: 4,
+    rowLevelReadEnabled: false, conditionalRuleCount: 0,
+    notCopied: ['automations', 'comments'], limits: { maxRows: 2000, maxFields: 500 },
+  }
+
+  it('copy POSTs to /sheets/:id/copy and reads the route 201: sheet, Idempotent-Replayed, formulaRecompute, summary', async () => {
     const body = {
       ok: true,
       data: {
-        sheet: { id: 'sheet_copy', baseId: 'base_ops', name: 'Orders copy', copiedFrom: { kind: 'user', at: '2026-09-27T00:00:00Z' } },
-        formulaRecompute: { attempted: 3, recomputed: 2, failed: true, errorCode: 'BULK_RECOMPUTE_FAILED' },
-        rowCount: 10,
-        fieldCount: 4,
-        permissionRowCount: 3,
-        recordPermissionRowCount: 1,
+        sheet: { id: 'sheet_copy', baseId: 'base_ops', name: '订单 副本', copiedFrom: { kind: 'user', at: null, sheetId: 'sheet_orders' } },
+        summary: ROUTE_SUMMARY,
+        batchId: 'batch_1',
+        formulaRecompute: { attempted: 10, recomputed: 8, failed: true, errorCode: 'BULK_RECOMPUTE_FAILED' },
       },
     }
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(jsonResponse(201, body, { 'Idempotent-Replayed': 'true' }))
-      .mockResolvedValueOnce(jsonResponse(201, body))
+      .mockResolvedValueOnce(jsonResponse(201, { ok: true, data: { ...body.data, formulaRecompute: undefined } }))
     const client = new MultitableApiClient({ fetchFn })
 
-    const replay = await client.copySheet('sheet_orders', { name: 'Orders copy', withData: false, permissionMode: 'inherit' })
+    const replay = await client.copySheet('sheet_orders', { name: '订单 副本', withData: false, permissionMode: 'inherit' })
     const [url, init] = fetchFn.mock.calls[0]
     expect(url).toBe('/api/multitable/sheets/sheet_orders/copy')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body)).toEqual({ name: 'Orders copy', withData: false, permissionMode: 'inherit' })
+    expect(JSON.parse(init.body)).toEqual({ name: '订单 副本', withData: false, permissionMode: 'inherit' })
     expect(replay.replayed).toBe(true)
-    expect(replay.sheet).toMatchObject({ id: 'sheet_copy', baseId: 'base_ops', name: 'Orders copy' })
-    expect(replay.formulaRecompute).toEqual({ attempted: 3, recomputed: 2, failed: true, errorCode: 'BULK_RECOMPUTE_FAILED' })
-    expect(replay.summary).toEqual({ rowCount: 10, fieldCount: 4, permissionRowCount: 3, recordPermissionRowCount: 1 })
+    expect(replay.sheet).toMatchObject({ id: 'sheet_copy', baseId: 'base_ops', name: '订单 副本' })
+    expect(replay.formulaRecompute).toEqual({ attempted: 10, recomputed: 8, failed: true, errorCode: 'BULK_RECOMPUTE_FAILED' })
+    // columns = builtFieldCount (the mirror is not built); grants = table 3 + field 2 + view 1 + record 4,
+    // so 「10 条授权（含 4 条记录级）」 really contains the record-level ones (ADR §3).
+    expect(replay.summary).toEqual({ rowCount: 10, fieldCount: 4, permissionRowCount: 10, recordPermissionRowCount: 4 })
 
     const fresh = await client.copySheet('sheet_orders', { withData: true, permissionMode: 'inherit' })
     expect(fresh.replayed).toBe(false)
+    expect(fresh.formulaRecompute).toBeNull()
     expect(JSON.parse(fetchFn.mock.calls[1][1].body)).toEqual({ withData: true, permissionMode: 'inherit' })
   })
 
-  it('reads the backend branch shapes: CopySheetPlanSummary (nested under summary) and the flat CopySheetResult', async () => {
-    // Shapes of copy-sheet-service.ts on feat/multitable-copy-sheet-s1 (CopySheetPlanSummary / CopySheetResult).
-    const fetchFn = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(200, {
-        ok: true,
-        data: {
-          summary: {
-            rowCount: 12, fieldCount: 5, builtFieldCount: 4,
-            disclosures: [{ fieldId: 'fld_m', code: 'MIRROR_NOT_BUILT' }],
-            droppedViewFilterLeaves: [{ viewId: 'view_b', count: 1 }],
-            autoNumberRenumberedRows: 3,
-            limits: { maxRows: 2000, maxFields: 500 },
-            notCopied: ['automations'],
-          },
-        },
-      }))
-      .mockResolvedValueOnce(jsonResponse(201, {
-        ok: true,
-        data: {
-          sheetId: 'sheet_new', baseId: 'base_ops', name: '订单 副本',
-          summary: { rowCount: 12, fieldCount: 5, builtFieldCount: 4, permissionRowCount: 2, recordPermissionRowCount: 1 },
-        },
-      }))
-    const client = new MultitableApiClient({ fetchFn })
+  it('reads the route dry-run 200 `{ summary: CopySheetPlanSummary }`', async () => {
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data: { summary: ROUTE_SUMMARY } })) })
     expect(await client.dryRunCopySheet('s', { withData: true, permissionMode: 'inherit' })).toEqual<CopySheetDryRunResult>({
-      rowCount: 12,
+      rowCount: 10,
       fieldCount: 5,
       overLimit: false,
       rowLimit: 2000,
@@ -153,37 +146,40 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
       viewFilterLeavesDropped: [{ viewId: 'view_b', count: 1 }],
       autoNumberRenumberedRows: 3,
     })
-    const result = await client.copySheet('s', { withData: true, permissionMode: 'inherit' })
-    expect(result.sheet).toEqual({ id: 'sheet_new', baseId: 'base_ops', name: '订单 副本' })
-    expect(result.summary).toEqual({ rowCount: 12, fieldCount: 4, permissionRowCount: 2, recordPermissionRowCount: 1 })
   })
 
-  it('backend error details: flat-spread row failure, field cap, structural column id — and none of them on a 403', () => {
-    // The service's row failure is { rowIndex, fieldId, code: <record code> } and its route doc says
-    // `{ code, ...details }`: the inner code can overwrite the outer one. Still read as the row failure.
-    const collided = buildCopySheetError(422, { ok: false, error: { code: 'VALIDATION_ERROR', rowIndex: 7, fieldId: 'fld_qty', message: leakyMessage } }, true)
-    expect(collided).toMatchObject({ code: 'COPY_ROW_VALIDATION_FAILED', rowIndex: 7, fieldId: 'fld_qty' })
-    const permissionRow = buildCopySheetError(500, { ok: false, error: { code: 'RECORD_PERMISSION', rowIndex: 0, fieldId: null } }, true)
+  it('reads the route refusals: nested details, the outer code wins, and no extras outside their own code', () => {
+    // Row failure: fail(422, 'COPY_ROW_VALIDATION_FAILED', { rowIndex, fieldId, code: <record code> }).
+    const row = buildCopySheetError(422, { ok: false, error: { code: 'COPY_ROW_VALIDATION_FAILED', message: 'x', details: { rowIndex: 7, fieldId: 'fld_qty', code: 'VALIDATION_ERROR' } } }, true)
+    expect(row).toMatchObject({ code: 'COPY_ROW_VALIDATION_FAILED', rowIndex: 7, fieldId: 'fld_qty' })
+    const permissionRow = buildCopySheetError(500, { ok: false, error: { code: 'COPY_ROW_VALIDATION_FAILED', details: { rowIndex: 0, fieldId: null, code: 'RECORD_PERMISSION' } } }, true)
     expect(permissionRow).toMatchObject({ code: 'COPY_ROW_VALIDATION_FAILED', rowIndex: 0 })
     expect(permissionRow.fieldId).toBeUndefined()
 
-    const fields = buildCopySheetError(413, { ok: false, error: { code: 'COPY_TOO_MANY_FIELDS', fieldCount: 612, limit: 500 } }, true)
+    const fields = buildCopySheetError(413, { ok: false, error: { code: 'COPY_TOO_MANY_FIELDS', details: { fieldCount: 612, limit: 500 } } }, true)
     expect(fields).toMatchObject({ code: 'COPY_TOO_MANY_FIELDS', fieldCount: 612, limit: 500 })
     expect(fields.rowCount).toBeUndefined()
+    const rows = buildCopySheetError(413, { ok: false, error: { code: 'COPY_TOO_LARGE', details: { rowCount: 2400, limit: 2000 } } }, true)
+    expect(rows).toMatchObject({ code: 'COPY_TOO_LARGE', rowCount: 2400, limit: 2000 })
 
     const structural = buildCopySheetError(422, { ok: false, error: { code: 'COPY_LINK_TARGET_NOT_LIVE', details: { fieldId: 'fld_link' } } }, true)
     expect(structural).toMatchObject({ code: 'COPY_LINK_TARGET_NOT_LIVE', fieldId: 'fld_link' })
 
-    const gate = buildCopySheetError(403, { ok: false, error: { code: 'VALIDATION_ERROR', rowIndex: 2, fieldId: 'fld_hidden', fieldCount: 3, limit: 9 } }, true)
-    expect(gate.code).toBe('VALIDATION_ERROR')
+    // A non-COPY code carrying row-shaped extras is NOT promoted to a row failure, and a 403 carries nothing.
+    const other = buildCopySheetError(422, { ok: false, error: { code: 'VALIDATION_ERROR', details: { rowIndex: 7, fieldId: 'fld_qty' } } }, true)
+    expect(other.code).toBe('VALIDATION_ERROR')
+    expect([other.rowIndex, other.fieldId]).toEqual([undefined, undefined])
+    const gate = buildCopySheetError(403, { ok: false, error: { code: 'COPY_SOURCE_NOT_FULLY_READABLE', details: { rowIndex: 2, fieldId: 'fld_hidden', fieldCount: 3, rowCount: 4, limit: 9 } } }, true)
     expect([gate.rowIndex, gate.fieldId, gate.fieldCount, gate.rowCount, gate.limit]).toEqual([undefined, undefined, undefined, undefined, undefined])
-    const gateStructural = buildCopySheetError(403, { ok: false, error: { code: 'COPY_UNMAPPED_FIELD_REF', fieldId: 'fld_hidden' } }, true)
+    const gateStructural = buildCopySheetError(403, { ok: false, error: { code: 'COPY_UNMAPPED_FIELD_REF', details: { fieldId: 'fld_hidden' } } }, true)
     expect(gateStructural.fieldId).toBeUndefined()
   })
 
-  it('a 201 without sheet.id is a broken answer and throws (never a phantom navigation)', async () => {
-    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(jsonResponse(201, { ok: true, data: {} })) })
-    await expect(client.copySheet('sheet_orders', { withData: true, permissionMode: 'inherit' })).rejects.toThrow('Invalid copy sheet response')
+  it('a 201 whose data has no `sheet` object is a broken answer and throws (the route always sends one)', async () => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(jsonResponse(201, { ok: true, data: { sheetId: 'sheet_new', baseId: 'base_ops', name: 'x', summary: ROUTE_SUMMARY } })),
+    })
+    await expect(client.copySheet('s', { withData: true, permissionMode: 'inherit' })).rejects.toThrow('Invalid copy sheet response')
   })
 
   it('pins permissionMode to "inherit" and withData to strict-boolean whatever the caller passes', () => {
@@ -345,7 +341,8 @@ describe('MetaCopySheetDialog', () => {
     expect(q('copy-sheet-with-data-label')!.textContent).toBe('包含数据（共 1239 行）')
     // one zero-write probe, WITH data, inherit
     expect(client.dryRunCopySheet).toHaveBeenCalledTimes(1)
-    expect(client.dryRunCopySheet).toHaveBeenCalledWith('sheet_orders', { name: '订单 副本', withData: true, permissionMode: 'inherit' })
+    // probed WITHOUT a name: the route refuses a mangled name, and the plan does not depend on it
+    expect(client.dryRunCopySheet).toHaveBeenCalledWith('sheet_orders', { withData: true, permissionMode: 'inherit' })
   })
 
   it('en default name is "<name> copy"', async () => {
@@ -501,8 +498,9 @@ describe('MetaCopySheetDialog', () => {
     { code: 'COPY_TOO_LARGE', status: 413, extra: { fieldCount: 612, limit: 500 }, zh: '这张数据表超出单次复制上限（行数或列数过多）。' },
     { code: 'COPY_ROW_VALIDATION_FAILED', status: 422, extra: { details: { firstFailure: { rowIndex: 4, fieldId: 'fld_qty', code: 'VALIDATION_ERROR' } } }, zh: '第 5 行（按创建顺序）的「数量」列未通过校验，复制已整体取消，未创建任何数据表。' },
     { code: 'COPY_ROW_VALIDATION_FAILED', status: 422, extra: { rowIndex: 0, fieldId: 'fld_unknown' }, zh: '第 1 行（按创建顺序）的某一列未通过校验，复制已整体取消，未创建任何数据表。' },
-    // backend flat spread `{ code, ...details }` where the inner record code overwrote the outer one
-    { code: 'VALIDATION_ERROR', status: 422, extra: { rowIndex: 2, fieldId: 'fld_qty' }, zh: '第 3 行（按创建顺序）的「数量」列未通过校验，复制已整体取消，未创建任何数据表。' },
+    // the route's real nesting: fail(422, code, { rowIndex, fieldId, code: <record code> }) -> error.details
+    { code: 'COPY_ROW_VALIDATION_FAILED', status: 422, extra: { details: { rowIndex: 2, fieldId: 'fld_qty', code: 'VALIDATION_ERROR' } }, zh: '第 3 行（按创建顺序）的「数量」列未通过校验，复制已整体取消，未创建任何数据表。' },
+    { code: 'NAME_INVALID_CHARACTERS', status: 400, zh: '新数据表名称包含无法使用的字符，请重新输入名称后重试。' },
     { code: 'COPY_TOO_MANY_FIELDS', status: 413, extra: { fieldCount: 612, limit: 500 }, zh: '这张数据表的列数超出单次复制上限（共 612 列，上限 500 列）。' },
     { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, extra: { fieldId: 'fld_lookup' }, zh: '「供应商名称」列：有列的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
     { code: 'COPY_LINK_TARGET_NOT_LIVE', status: 422, extra: { fieldId: 'fld_self' }, zh: '「父项」列：有关联列指向的数据表已不存在，未做任何复制。请先修正或删除该关联列。' },
@@ -531,6 +529,43 @@ describe('MetaCopySheetDialog', () => {
       if (refusal.status === 403) expect(errorText()).not.toMatch(/\d/)
     })
   }
+
+  it('a source whose own name is mangled still gets its probe: count + disclosures shown, and a name refusal clears on edit', async () => {
+    // The probe carries no name, so a mangled source name cannot 400 it; only the copy's own name can,
+    // and only on submit — where editing the name retracts that refusal (other refusals would stay).
+    state.sheetName = '订单�'
+    client.copySheet
+      .mockRejectedValueOnce(copyErr(400, { code: 'NAME_INVALID_CHARACTERS' }))
+      .mockResolvedValueOnce(copyOk())
+    await mount()
+    expect(client.dryRunCopySheet.mock.calls[0][1]).not.toHaveProperty('name')
+    expect(q('copy-sheet-with-data-label')!.textContent).toBe('包含数据（共 1239 行）')
+    submitButton().click()
+    await flush()
+    expect(errorText()).toBe('新数据表名称包含无法使用的字符，请重新输入名称后重试。')
+    const name = q<HTMLInputElement>('copy-sheet-name')!
+    name.value = '订单 副本'
+    name.dispatchEvent(new Event('input'))
+    await flush()
+    expect(q('copy-sheet-error')).toBeNull()
+    submitButton().click()
+    await flush()
+    expect(client.copySheet).toHaveBeenLastCalledWith('sheet_orders', { name: '订单 副本', withData: true, permissionMode: 'inherit' })
+    expect(onCopied).toHaveBeenCalledTimes(1)
+  })
+
+  it('editing the name does NOT retract a non-name refusal', async () => {
+    client.copySheet.mockRejectedValueOnce(copyErr(409, { code: 'COPY_SOURCE_CHANGED' }))
+    await mount()
+    submitButton().click()
+    await flush()
+    expect(errorText()).toBe('复制期间源数据表被修改，已整体回滚，未创建任何数据表。请重试。')
+    const name = q<HTMLInputElement>('copy-sheet-name')!
+    name.value = '别的名字'
+    name.dispatchEvent(new Event('input'))
+    await flush()
+    expect(errorText()).toBe('复制期间源数据表被修改，已整体回滚，未创建任何数据表。请重试。')
+  })
 
   it('a non-CopySheetError (network) shows the generic line, never its message', async () => {
     client.copySheet.mockRejectedValue(new TypeError(`fetch failed ${SENTINEL_EN}`))

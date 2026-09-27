@@ -178,9 +178,11 @@ async function runDryRun(gen: number): Promise<void> {
   dryRunLoading.value = true
   try {
     // Always probed WITH data: N (the row count) and the value-level disclosures are what the checkbox
-    // and the list render. Zero-write on the server.
+    // and the list render. Zero-write on the server. Probed WITHOUT a name: the plan does not depend on
+    // it, and the route refuses (400 NAME_INVALID_CHARACTERS) any name it is given that carries a mangled
+    // code point — which the default 「<源表名> 副本」 would for a source whose own name is mangled, and
+    // the whole probe (count + disclosures) would be lost to a problem only the copy's name has.
     const result = await props.client.dryRunCopySheet(props.sheetId, {
-      name: name.value,
       withData: true,
       permissionMode: 'inherit',
     })
@@ -256,7 +258,12 @@ const busy = computed(() => dryRunLoading.value || submitting.value)
 // An empty name is NOT folded in here: onSubmit reports it (errorNoName) instead of a silently dead button.
 const canSubmit = computed(() => !busy.value && !dryRunBlocks.value)
 
-watch(name, () => { localError.value = null })
+// Editing the name answers a name refusal (local empty-name, or the server's 400 NAME_INVALID_CHARACTERS),
+// so both stop showing; any other refusal stays until the next submit replaces it.
+watch(name, () => {
+  localError.value = null
+  if (isCopySheetError(submitError.value) && submitError.value.code === 'NAME_INVALID_CHARACTERS') submitError.value = null
+})
 
 const errorText = computed(() => {
   if (localError.value) return l(localError.value)

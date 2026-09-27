@@ -49,6 +49,7 @@ export type MetaCopySheetLabelKey =
   | 'copySheet.error.tooManyFields'
   | 'copySheet.error.linkTargetNotLive'
   | 'copySheet.error.unsupportedFieldType'
+  | 'copySheet.error.nameInvalid'
   | 'copySheet.error.sourceGone'
   | 'copySheet.error.forbidden'
   | 'copySheet.error.busy'
@@ -128,6 +129,13 @@ const META_COPY_SHEET_LABELS: Record<MetaCopySheetLabelKey, LocaleText> = {
   'copySheet.error.linkTargetNotLive': {
     en: 'A link column points to a table that no longer exists, so nothing was copied. Fix or remove that link column first.',
     zh: '有关联列指向的数据表已不存在，未做任何复制。请先修正或删除该关联列。',
+  },
+  // 400 NAME_INVALID_CHARACTERS (display-name-hygiene.ts): the typed name carries control / replacement /
+  // unpaired-surrogate code points (usually an encoding mishap). The server's message lists code points —
+  // never shown; this line just asks for a clean name.
+  'copySheet.error.nameInvalid': {
+    en: 'The new table name contains characters that can\'t be used. Retype the name and try again.',
+    zh: '新数据表名称包含无法使用的字符，请重新输入名称后重试。',
   },
   'copySheet.error.unsupportedFieldType': {
     en: 'A column type can\'t be copied yet, so nothing was copied.',
@@ -263,6 +271,8 @@ export function copySheetErrorMessage(error: unknown, isZh: boolean, ctx: CopySh
       return copySheetRowFailureText(error.rowIndex, error.fieldId, isZh, ctx)
     case 'COPY_SOURCE_SYSTEM_SHEET':
       return copySheetLabel('copySheet.error.systemSheet', isZh)
+    case 'NAME_INVALID_CHARACTERS':
+      return copySheetLabel('copySheet.error.nameInvalid', isZh)
     case 'SHEET_NOT_LIVE':
     case 'SHEET_DELETED':
     case 'NOT_FOUND':

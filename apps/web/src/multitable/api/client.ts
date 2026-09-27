@@ -343,10 +343,12 @@ export function isRecordApprovalInFlightError(value: unknown): value is RecordAp
 // (§3/§8) and `buildCopySheetError` (§8). If the merged backend spells a key differently, the fix is a
 // one-line change in one of these, never a hunt through components.
 //
-// Aligned (2026-09-27) to the backend branch feat/multitable-copy-sheet-s1 @ 0aa7d8768 (S1a: service,
-// /context `canCopySheet` + `copiedFrom`, no HTTP copy routes yet): provenance, capability, dry-run summary
-// keys, result shape and error codes/details follow its copy-sheet-service.ts / copy-sheet-remap.ts /
-// univer-meta.ts; the ROUTE envelope (bare vs `summary`-nested, `sheet` vs flat) is read both ways.
+// Aligned (2026-09-28) to the backend PR #6112, branch feat/multitable-copy-sheet-s1 @ 2b95e1f70:
+//   routes/multitable-copy-sheet.ts — dry-run 200 `{ ok, data: { summary: CopySheetPlanSummary } }`;
+//   copy 201 `{ ok, data: { sheet: { id, baseId, name, copiedFrom }, summary, batchId, formulaRecompute? } }`
+//   (+ `Idempotent-Replayed: true` on replay); refusals `{ ok:false, error: { code, message, details? } }`
+//   with position/count extras under `details`; 404 / 403 from sheet-refusals.ts; 400 NAME_INVALID_CHARACTERS
+//   from display-name-hygiene.ts. /context `canCopySheet` + `copiedFrom` from univer-meta.ts.
 // -------------------------------------------------------------------------------------------------
 
 export const COPY_SHEET_ERROR_NAME = 'MultitableCopySheetError'
@@ -426,12 +428,12 @@ export function buildCopySheetRequestBody(input: CopySheetInput): { name?: strin
 }
 
 /**
- * Dry-run answer (ADR §3). Aligned to the backend's `CopySheetPlanSummary` (copy-sheet-service.ts on
- * feat/multitable-copy-sheet-s1): `{ rowCount, fieldCount, disclosures: [{ fieldId, code }],
- * droppedViewFilterLeaves: [{ viewId, count }], autoNumberRenumberedRows, limits: { maxRows } }`, read
- * either bare or nested under `summary` (the route envelope is not written yet). ADR spellings are still
- * accepted (`reason`, `fieldDisclosures`, `viewFilterLeavesDropped`, `rowLimit`, `overLimit`). Note the
- * backend reports the row cap as a 413 COPY_TOO_LARGE, not as `overLimit`. Malformed items are skipped.
+ * Dry-run answer (ADR §3). The route answers `{ ok, data: { summary } }` where summary is the service's
+ * `CopySheetPlanSummary`: `{ rowCount, fieldCount, disclosures: [{ fieldId, code }], droppedViewFilterLeaves:
+ * [{ viewId, count }], autoNumberRenumberedRows, limits: { maxRows } }` (a bare summary is read too). ADR
+ * spellings are still accepted (`reason`, `fieldDisclosures`, `viewFilterLeavesDropped`, `rowLimit`,
+ * `overLimit`). The backend reports the row cap as a 413 COPY_TOO_LARGE, not as `overLimit`. Malformed
+ * items are skipped.
  */
 export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
   const outer = isPlainObject(body) ? body : {}
@@ -472,20 +474,20 @@ export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
 }
 
 /**
- * 201 answer (ADR §3/§8). The new sheet is required (a body without an id is a broken answer and
- * throws); it is read from `sheet: { id, baseId, name }` (ADR) or from the backend service's flat
- * `CopySheetResult` `{ sheetId, baseId, name, summary }` (copy-sheet-service.ts on
- * feat/multitable-copy-sheet-s1). `Idempotent-Replayed: true` -> `replayed`; `formulaRecompute: {
- * attempted, recomputed, failed, errorCode? }`; values-free toast counts from `summary` (or top level),
- * columns preferring `builtFieldCount` (mirror columns are not built) over the source `fieldCount`.
+ * 201 answer (ADR §3/§8; route `buildSuccessBody`): `{ sheet: { id, baseId, name, copiedFrom }, summary,
+ * batchId, formulaRecompute? }`. The new sheet is required — a body without `sheet.id` is a broken answer
+ * and throws. `Idempotent-Replayed: true` -> `replayed`; `formulaRecompute: { attempted, recomputed,
+ * failed, errorCode? }` (absent when nothing needed recomputing). Values-free toast counts come from
+ * `summary`: columns prefer `builtFieldCount` (mirror columns are not built) over the source `fieldCount`,
+ * and the grant total is ADR §3's 「Z 条授权（含 R 条记录级）」 — the summary's per-table counters
+ * (`permissionRowCount` is table-level only; `fieldPermissionRowCount`, `viewPermissionRowCount`,
+ * `recordPermissionRowCount`) summed, so Z really contains R.
  */
 export function normalizeCopySheetResult(body: unknown, replayedHeader: string | null): CopySheetResult {
   const data = isPlainObject(body) ? body : {}
-  const rawSheet: Record<string, unknown> = isPlainObject(data.sheet)
-    ? data.sheet
-    : { id: data.sheetId, baseId: data.baseId, name: data.name }
-  const id = optionalStringValue(rawSheet.id)
-  if (!id) {
+  const rawSheet = isPlainObject(data.sheet) ? data.sheet : null
+  const id = rawSheet ? optionalStringValue(rawSheet.id) : undefined
+  if (!rawSheet || !id) {
     const error = new Error('Invalid copy sheet response') as Error & { status?: number }
     error.name = 'MultitableApiError'
     throw error
@@ -498,6 +500,9 @@ export function normalizeCopySheetResult(body: unknown, replayedHeader: string |
   }
   const recompute = isPlainObject(data.formulaRecompute) ? data.formulaRecompute : null
   const counts = isPlainObject(data.summary) ? data.summary : data
+  const grantParts = [counts.permissionRowCount, counts.fieldPermissionRowCount, counts.viewPermissionRowCount, counts.recordPermissionRowCount]
+    .map(copySheetCount)
+    .filter((n): n is number => n !== null)
   return {
     sheet,
     replayed: (replayedHeader ?? '').trim().toLowerCase() === 'true',
@@ -512,7 +517,7 @@ export function normalizeCopySheetResult(body: unknown, replayedHeader: string |
     summary: {
       rowCount: copySheetCount(counts.rowCount),
       fieldCount: copySheetCount(counts.builtFieldCount) ?? copySheetCount(counts.fieldCount),
-      permissionRowCount: copySheetCount(counts.permissionRowCount),
+      permissionRowCount: grantParts.length > 0 ? grantParts.reduce((sum, n) => sum + n, 0) : null,
       recordPermissionRowCount: copySheetCount(counts.recordPermissionRowCount),
     },
   }
@@ -524,11 +529,8 @@ export function normalizeCopySheetResult(body: unknown, replayedHeader: string |
  * same tolerance `recordApprovalConflictFields` uses). The first-failure row may sit flat or under
  * `firstFailure` / `failure`. Server `message` is dropped on purpose (see CopySheetError).
  *
- * Backend alignment (copy-sheet-service.ts on feat/multitable-copy-sheet-s1): the service's row failure is
- * `CopySheetError(422|500, 'COPY_ROW_VALIDATION_FAILED', { rowIndex, fieldId, code: <record error code> })`
- * and its doc says the route maps it to `{ code, ...details }` — a flat spread in that order lets the
- * INNER record code overwrite the outer one. So a 422/500 that carries a numeric `rowIndex` but no COPY_*
- * code is read as the row failure it is (only row failures carry `rowIndex`).
+ * The code is always the OUTER `error.code`: the route's `fail()` nests extras under `details`, so the
+ * row failure's inner record code (`details.code`) never replaces `COPY_ROW_VALIDATION_FAILED`.
  */
 export function buildCopySheetError(status: number, body: unknown, isZh: boolean): CopySheetError {
   const envelope = isPlainObject(body) ? body : {}
@@ -538,12 +540,9 @@ export function buildCopySheetError(status: number, body: unknown, isZh: boolean
   const failure = isPlainObject(fields.firstFailure)
     ? fields.firstFailure
     : isPlainObject(fields.failure) ? fields.failure : fields
-  const rawCode = typeof errorValue === 'string'
+  const code = typeof errorValue === 'string'
     ? optionalStringValue(errorValue)
     : optionalStringValue(errorObject.code)
-  const code = (status === 422 || status === 500) && copySheetCount(failure.rowIndex) !== null && !rawCode?.startsWith('COPY_')
-    ? 'COPY_ROW_VALIDATION_FAILED'
-    : rawCode
   const error = new Error(apiDefaultErrorMessage(code, status, isZh)) as CopySheetError
   error.name = COPY_SHEET_ERROR_NAME
   error.status = status
