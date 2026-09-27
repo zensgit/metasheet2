@@ -36,6 +36,8 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_tasks_realdb
       EXPECT_DB: '1'
       TASKS_ENABLED: 'true'
+      # Gate 2 signs its own tokens. CI has no developer .env. This is a lane fixture, not a production secret.
+      JWT_SECRET: tasks-rbac-trust-jwt-secret-min-32b!
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

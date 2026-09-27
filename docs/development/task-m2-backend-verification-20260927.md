@@ -112,12 +112,9 @@ pnpm exec tsx tests/helpers/gate19-identities.ts /tmp/tasks-m2-db-verbose.txt \
 
 本地收集数见第 5 节：四个 `task-*.db.test.ts` 一共 83，没有 `.each`。
 
-推送 `5362170a8` 时 GitHub 建了这两个 run，日志里的收集数当时还没有：
+`5362170a8` 的 `tasks-realdb` run [36329492872](https://github.com/zensgit/metasheet2/actions/runs/36329492872) 失败：`task-rbac-trust.db.test.ts` 在模块装载时要求 `JWT_SECRET` 至少 32 字符，这条 lane 没有设置它。同一日志里另外三个真库文件是通过的。探针②的红结果已经打出来。Plugin System Tests run [36329492901](https://github.com/zensgit/metasheet2/actions/runs/36329492901) 被下一笔只改文档的推送取消。
 
-| 检查 | run | 当时状态 | 日志收集数 |
-|---|---|---|---|
-| `tasks-realdb` | [36329492872](https://github.com/zensgit/metasheet2/actions/runs/36329492872) | 已开始 | NOT YET |
-| Plugin System Tests（其中 `test (20.x)` 跑单元枚举） | [36329492901](https://github.com/zensgit/metasheet2/actions/runs/36329492901) | 排队 | NOT YET |
+下一笔把 lane 夹具 `JWT_SECRET` 写进 `tasks-realdb.yml`。那不是生产口令。新 run 的收集数等该 job 结束后再记。
 
 门 17③（把 `tasks-realdb` 加进 main required checks）是合并后的 owner 步骤，本 PR 不做。
 
