@@ -6,8 +6,10 @@ import {
   PENDING_CONDITION_OPERATOR,
   buildConditionLeafForSave,
   coerceConditionValue,
+  conditionFieldDisplayType,
   conditionValueWidget,
   isConditionLeafComplete,
+  isLegacyPersonLinkConditionField,
   parseDateConditionValue,
   parseDateTimeConditionValue,
   type ConditionFieldLike,
@@ -71,7 +73,33 @@ describe('coerceConditionValue — the saved shape per field type', () => {
     expect(coerceConditionValue(cond('x', 'in', '2026-05-11, 2026-05-12'), F.date)).toEqual({ ok: true, value: ['2026-05-11', '2026-05-12'] })
     expect(coerceConditionValue(cond('x', 'equals', '5'), F.date)).toEqual({ ok: false }) // not year-first
     expect(coerceConditionValue(cond('x', 'equals', '2026-02-30'), F.date)).toEqual({ ok: false })
-    expect(parseDateConditionValue('2026-05-11T23:30')).toBe('2026-05-11') // the day as written
+    // A zone-less value is the day as written, whatever zone it is read in.
+    expect(parseDateConditionValue('2026-05-11T23:30', 'Asia/Shanghai')).toBe('2026-05-11')
+    expect(parseDateConditionValue('2026-05-11T23:30', 'America/New_York')).toBe('2026-05-11')
+  })
+
+  it("date fields: a value that NAMES its zone is the day of that instant in the field's zone — the day the evaluator reads", () => {
+    // Business zone Asia/Shanghai (UTC+8). A9-be dayKeyOf buckets a zoned value with getZonedParts in the
+    // field's zone, so it reads '…-23T16:00:00.000Z' as the 24th; saving the day as written ('…-23') would move
+    // the rule by a day on an untouched load → save.
+    expect(coerceConditionValue(cond('x', 'less_than', '2026-09-23T16:00:00.000Z'), F.date)).toEqual({ ok: true, value: '2026-09-24' })
+    expect(coerceConditionValue(cond('x', 'equals', '2026-09-23T15:59:59Z'), F.date)).toEqual({ ok: true, value: '2026-09-23' })
+    expect(coerceConditionValue(cond('x', 'equals', '2026-09-24T00:30:00+09:00'), F.date)).toEqual({ ok: true, value: '2026-09-23' }) // 23:30 in Shanghai
+    expect(coerceConditionValue(cond('x', 'in', ['2026-09-23T16:00:00.000Z', '2026-09-25']), F.date)).toEqual({ ok: true, value: ['2026-09-24', '2026-09-25'] })
+    // The field's own zone wins over the business zone (America/New_York is UTC-4 in September) …
+    const dateNy: ConditionFieldLike = { id: 'fld_date_ny', name: 'Due (NY)', type: 'date', property: { timezone: 'America/New_York' } }
+    expect(coerceConditionValue(cond('x', 'less_than', '2026-09-23T16:00:00.000Z'), dateNy)).toEqual({ ok: true, value: '2026-09-23' })
+    // … and the server-provided business zone is honoured.
+    setBusinessTimezone('Pacific/Auckland') // UTC+12 on 2026-09-23
+    expect(coerceConditionValue(cond('x', 'less_than', '2026-09-23T11:00:00.000Z'), F.date)).toEqual({ ok: true, value: '2026-09-23' })
+    expect(coerceConditionValue(cond('x', 'less_than', '2026-09-23T12:00:00.000Z'), F.date)).toEqual({ ok: true, value: '2026-09-24' })
+    resetBusinessTimezone()
+    // The rewrite is idempotent: the saved day comes back unchanged on the next save.
+    expect(coerceConditionValue(cond('x', 'less_than', '2026-09-24'), F.date)).toEqual({ ok: true, value: '2026-09-24' })
+    // A zoned value that names no real instant is incomplete (save blocked) — never read "as written".
+    expect(coerceConditionValue(cond('x', 'equals', '2026-09-23T25:00:00Z'), F.date)).toEqual({ ok: false })
+    expect(parseDateConditionValue('2026-09-23T16:00:00.000Z', 'Asia/Shanghai')).toBe('2026-09-24')
+    expect(parseDateConditionValue('2026-09-23T16:00:00.000Z', 'UTC')).toBe('2026-09-23')
   })
 
   it('date-time fields save a UTC ISO instant; a zone-less wall clock is read in the BUSINESS timezone', () => {
@@ -141,6 +169,19 @@ describe('isConditionLeafComplete / the pending blank row', () => {
     expect(conditionValueWidget(F.text, 'contains')).toBe('text')
     expect(conditionValueWidget(null, 'equals')).toBe('text')
   })
+
+  it('a LEGACY link-backed person keeps the record picker (people-sheet record ids) but is presented as a person', () => {
+    const legacyPerson: ConditionFieldLike = { id: 'fld_owner', name: '负责人', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people' } }
+    expect(isLegacyPersonLinkConditionField(legacyPerson)).toBe(true)
+    expect(isLegacyPersonLinkConditionField(F.link)).toBe(false)
+    expect(isLegacyPersonLinkConditionField(F.person)).toBe(false)
+    expect(conditionValueWidget(legacyPerson, 'in')).toBe('link')
+    expect(conditionFieldDisplayType(legacyPerson)).toBe('person')
+    expect(conditionFieldDisplayType(F.link)).toBe('link')
+    expect(conditionFieldDisplayType(F.person)).toBe('person')
+    // Its `in` value is a list of record ids like any link.
+    expect(coerceConditionValue(cond('x', 'in', ['rec_zhang', 'rec_li']), legacyPerson)).toEqual({ ok: true, value: ['rec_zhang', 'rec_li'] })
+  })
 })
 
 describe('buildConditionLeafForSave', () => {
@@ -195,6 +236,7 @@ describe('condition_branch build seam with fields (typed branch values)', () => 
             { fieldId: 'fld_dt', operator: 'greater_than', value: '2026-09-24T09:30' },
             { fieldId: 'fld_person', operator: 'equals', value: 'u1' },
             { fieldId: 'fld_num', operator: 'in', value: ['1', '2'] },
+            { fieldId: 'fld_date', operator: 'less_than', value: '2026-09-23T16:00:00.000Z' },
           ],
         },
         actions: [],
@@ -209,6 +251,8 @@ describe('condition_branch build seam with fields (typed branch values)', () => 
         { fieldId: 'fld_dt', operator: 'greater_than', value: '2026-09-24T01:30:00.000Z' },
         { fieldId: 'fld_person', operator: 'equals', value: 'u1' }, // a single id is already the saved shape
         { fieldId: 'fld_num', operator: 'in', value: [1, 2] },
+        // A zoned instant on a date field → its day in the field's zone (Asia/Shanghai), the day the evaluator reads.
+        { fieldId: 'fld_date', operator: 'less_than', value: '2026-09-24' },
       ],
     })
   })

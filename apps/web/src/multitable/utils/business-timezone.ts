@@ -293,6 +293,18 @@ export function parseDateTimeTextToUtcMs(text: unknown, timeZone: string, option
   return null
 }
 
+/**
+ * Whether date-time TEXT names its own zone (`…Z`, `…+08:00`, `GMT` / `UTC`), i.e. it is an absolute instant
+ * whose calendar day depends on the zone it is read in — as opposed to a zone-less wall clock / bare day.
+ * Same grammar and precedence as `parseDateTimeTextToUtcMs` (a string the wall-clock grammar accepts is
+ * zone-less even if a `+hh:mm`-looking run appears in it).
+ */
+export function dateTimeTextNamesZone(text: unknown): boolean {
+  const normalized = normalizeDateTimeInput(text)
+  if (!normalized || WALL_CLOCK_RE.test(normalized)) return false
+  return ABSOLUTE_RE.test(normalized) || EXPLICIT_ZONE_MARKER_RE.test(normalized)
+}
+
 // A calendar day (date-only `date` field, #3417 floating day): `YYYY<sep>M<sep>D` with ONE separator, an
 // optional trailing time part that is IGNORED (the day is the day as written).
 const CALENDAR_DAY_RE = /^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})(?:[T ].*)?$/

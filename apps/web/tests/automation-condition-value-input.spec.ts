@@ -42,7 +42,7 @@ vi.mock('../src/multitable/components/MetaLinkPicker.vue', async () => {
   return {
     default: define({
       name: 'MetaLinkPickerStub',
-      props: ['visible', 'field', 'currentValue'],
+      props: ['visible', 'field', 'currentValue', 'selectionMode'],
       emits: ['close', 'confirm'],
       setup(props, { emit }) {
         return () => {
@@ -198,6 +198,15 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     expect(emitted.at(-1)).toBe('2026-05-11')
   }, EP_MOUNT_TIMEOUT_MS)
 
+  it("date: a LOADED value that names its zone shows the day the evaluator reads (its day in the field's zone), not the day as written", async () => {
+    // Asia/Shanghai: '2026-09-23T16:00:00.000Z' is 2026-09-24 00:00 — the backend's dayKeyOf reads the 24th.
+    const { container, emitted } = mountInput({ field: dateField, operator: 'less_than', value: '2026-09-23T16:00:00.000Z' })
+    await flush()
+    const input = container.querySelector('[data-condition-value="date"] input') as HTMLInputElement
+    expect(input.value).toBe('2026-09-24')
+    expect(emitted).toEqual([]) // shown, not rewritten: the save path converts it (coerceConditionValue)
+  }, EP_MOUNT_TIMEOUT_MS)
+
   it('date-time → the #6083 business-timezone wall clock, stored as a UTC ISO instant', async () => {
     const { container, emitted, value } = mountInput({ field: dateTimeField, operator: 'greater_than' })
     await flush()
@@ -299,10 +308,34 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     await flush()
     expect((pickerProps.link?.field as { id: string }).id).toBe('fld_project')
     expect((pickerProps.link?.field as { property: Record<string, unknown> }).property.limitSingleRecord).toBe(true)
+    expect(pickerProps.link?.selectionMode).toBe('single')
     ;(container.querySelector('[data-stub-link-confirm]') as HTMLButtonElement).click()
     await flush()
     expect(emitted.at(-1)).toBe('rec_9')
     expect(container.querySelector('[data-condition-value-id="rec_9"]')?.textContent).toContain('Project Nine')
+  }, EP_MOUNT_TIMEOUT_MS)
+
+  it('a LEGACY link-backed person (link + refKind user): the record picker, labelled 选择人员, multi-pick for `in`', async () => {
+    // ensurePeopleSheetPreset fields: type link + refKind user; values are people-sheet record ids. The record
+    // picker is single-select for refKind user by default, so the condition hands it the operator's cap.
+    const legacyPerson: ConditionFieldLike = { id: 'fld_lead', name: '负责人', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true } }
+    const list = mountInput({ field: legacyPerson, operator: 'in' })
+    await flush()
+    const pick = list.container.querySelector('[data-action="pick-condition-record"]') as HTMLButtonElement
+    expect(pick.textContent?.trim()).toBe('选择人员')
+    pick.click()
+    await flush()
+    expect(pickerProps.link?.selectionMode).toBe('multiple')
+    // refKind stays, so the picker's own title / search copy read 人员.
+    expect((pickerProps.link?.field as { property: Record<string, unknown> }).property.refKind).toBe('user')
+    list.app.unmount()
+
+    pickerProps.link = null
+    const single = mountInput({ field: legacyPerson, operator: 'not_equals' })
+    await flush()
+    ;(single.container.querySelector('[data-action="pick-condition-record"]') as HTMLButtonElement).click()
+    await flush()
+    expect(pickerProps.link?.selectionMode).toBe('single')
   }, EP_MOUNT_TIMEOUT_MS)
 
   it('`in` on a number / date / text field is a comma-separated text box (the save path coerces each entry)', async () => {

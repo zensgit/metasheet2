@@ -1379,6 +1379,7 @@ exec npx vitest run \
   attendanceRequestReviewEntitlement \
   attendanceUserPickerEndpoint \
   automation-action-summary \
+  automation-condition-legacy-person-picker \
   automation-condition-typing-editor \
   automation-condition-value-input \
   automation-condition-values \

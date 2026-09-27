@@ -5,9 +5,10 @@
     bare text box whose values were saved as strings). What it emits is already in the saved shape of the
     field type (../utils/automation-condition-values.ts): number → number, boolean → boolean,
     date → 'YYYY-MM-DD', date-time → UTC ISO read in the business timezone (#6083), person / link → ONE id
-    string for equals / not_equals (single-pick) and a string[] of ids for in / not_in (multi-pick). `in` /
-    `not_in` on a text / number / date / date-time field keeps a comma-separated text box; the save path
-    coerces each entry the same way.
+    string for equals / not_equals (single-pick) and a string[] of ids for in / not_in (multi-pick). A legacy
+    link-backed person (type link + refKind user) keeps the record picker (its values are people-sheet record
+    ids) but reads 选择人员 and is multi-pick for in / not_in too. `in` / `not_in` on a text / number / date /
+    date-time field keeps a comma-separated text box; the save path coerces each entry the same way.
 
     A draft that cannot be expressed in the field's shape (a half-typed number, an unparseable date-time) is
     emitted AS TYPED: the row then reads as incomplete and save is blocked with the row anchored, instead of
@@ -131,7 +132,7 @@
         :data-condition-value="kind"
         :data-action="kind === 'person' ? 'pick-condition-person' : 'pick-condition-record'"
         @click="pickerOpen = true"
-      >{{ kind === 'person' ? label('condition.pickPeople') : label('condition.pickRecords') }}</ElButton>
+      >{{ picksPeople ? label('condition.pickPeople') : label('condition.pickRecords') }}</ElButton>
       <MetaPersonPicker
         v-if="kind === 'person'"
         :visible="pickerOpen"
@@ -146,6 +147,7 @@
         v-else
         :visible="pickerOpen"
         :field="pickerField"
+        :selection-mode="isArray ? 'multiple' : 'single'"
         :current-value="idValues"
         @close="pickerOpen = false"
         @confirm="onLinkConfirm"
@@ -181,6 +183,7 @@ import {
   conditionDateTimeZone,
   conditionValueWidget,
   isArrayConditionOperator,
+  isLegacyPersonLinkConditionField,
   parseBooleanConditionValue,
   parseConditionArrayValue,
   parseDateConditionValue,
@@ -307,14 +310,17 @@ function onNumberInput(text: string) {
   emitValue(parsed === null ? text : parsed)
 }
 
+// The field's zone (field property → business timezone, #6083): date-time values are typed / shown in it,
+// and a date value that names its own zone (`…T16:00:00.000Z`) is shown as its day in it.
+const dateTimeZone = computed(() => conditionDateTimeZone(props.field))
+
 // ---- date (floating calendar day, 'YYYY-MM-DD') ----
-const dateValue = computed(() => parseDateConditionValue(props.modelValue) ?? '')
+const dateValue = computed(() => parseDateConditionValue(props.modelValue, dateTimeZone.value) ?? '')
 function onDateChange(value: unknown) {
   emitValue(typeof value === 'string' ? value : '')
 }
 
 // ---- date-time (business-timezone wall clock ⇄ UTC ISO; the #6083 helpers, not the browser's zone) ----
-const dateTimeZone = computed(() => conditionDateTimeZone(props.field))
 const dateTimeZoneLabel = computed(() => dateTimeZoneHint(dateTimeZone.value, isZh.value))
 const dateTimePlaceholder = computed(() => metaCoreLabel('cell.dateTimePlaceholder', isZh.value))
 const dateTimeInvalidLabel = computed(() => metaCoreLabel('cell.dateTimeInvalid', isZh.value))
@@ -368,6 +374,8 @@ function onDateTimePicked(value: string) {
 // `equals` / `not_equals` compare against ONE id (saved as a string, the shape the backend validates for a
 // single-value person / link condition); `in` / `not_in` against a list (saved as string[]).
 const pickerOpen = ref(false)
+/** A native person, or a legacy link-backed person (record picker, but it picks people). */
+const picksPeople = computed(() => kind.value === 'person' || isLegacyPersonLinkConditionField(props.field))
 const summaries = ref<Record<string, string>>({})
 const idValues = computed<string[]>(() => {
   if (isArray.value) return parseIdListConditionValue(props.modelValue) ?? []
@@ -381,7 +389,9 @@ const currentSummaries = computed<PersonSummary[]>(() => idValues.value
   .filter((id) => summaries.value[id])
   .map((id) => ({ id, display: summaries.value[id] })))
 // The picker's cap follows the OPERATOR, not the field: `in` / `not_in` pick a list, `equals` / `not_equals`
-// pick exactly one — whatever the field's own single / multiple setting is.
+// pick exactly one — whatever the field's own single / multiple setting is. The person picker reads it from
+// `limitSingleRecord`; the record picker also forces single-select for a legacy person (`refKind: 'user'`,
+// kept here so its title reads 选择人员), so it gets the cap explicitly as `selectionMode` as well.
 const pickerField = computed<MetaField | null>(() => {
   const field = props.field
   if (!field) return null

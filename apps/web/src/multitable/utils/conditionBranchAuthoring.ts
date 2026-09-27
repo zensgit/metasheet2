@@ -18,9 +18,11 @@
 // ALREADY in that shape (it round-trips byte-identically, and every other key of the condition rides
 // through). The one deliberate difference is a LEGACY branch value saved by the old bare text box in the
 // wrong shape — `'5'` on a number field, `'true'` on a checkbox, a zone-less `datetime-local` string on a
-// date-time field: an untouched save rewrites it to the typed shape it always meant (the evaluator compares
-// with `===`, so the string form never matched). A value that cannot be expressed in its field's shape is
-// never rewritten: the editor blocks the save and anchors the row instead.
+// date-time field, a zoned instant (`'…T16:00:00.000Z'`) on a date field: an untouched save rewrites it to
+// the typed shape it always meant (the evaluator compares with `===`, so the string form never matched; a
+// zoned instant on a date field becomes the day the evaluator reads it as — its day in the field's zone,
+// NOT the day as written, so the rewrite never moves the rule by a day). A value that cannot be expressed
+// in its field's shape is never rewritten: the editor blocks the save and anchors the row instead.
 import type {
   AutomationAction,
   AutomationActionType,

@@ -179,6 +179,31 @@ describe('field dropdown and operator labels', () => {
     }
   }, EDITOR_MOUNT_TIMEOUT_MS)
 
+  it('a LEGACY link-backed person field (link + refKind user) is hinted 人员, a plain link 关联; its value button reads 选择人员', async () => {
+    const withLinks = [
+      ...fields,
+      { id: 'fld_lead', name: 'Lead', type: 'link', property: { refKind: 'user', foreignSheetId: 'sheet_people' } },
+      { id: 'fld_project', name: 'Project', type: 'link', property: { foreignSheetId: 'sheet_projects' } },
+    ]
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields: withLinks })
+    await flush()
+    ;(container.querySelector('[data-action="add-condition"]') as HTMLButtonElement).click()
+    await flush()
+    const mainRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
+    const branchRow = await addBranchCondition(container)
+    for (const row of [mainRow, branchRow]) {
+      const hintOf = (fieldId: string) => epOptions(rowSelects(row).field)
+        .find((option) => option.value === fieldId)?.el.querySelector('[data-field-type-hint]')?.textContent?.trim()
+      expect(hintOf('fld_lead')).toBe('人员')
+      expect(hintOf('fld_project')).toBe('关联')
+      epSetSelect(rowSelects(row).field, 'fld_lead')
+      await flush()
+      epSetSelect(rowSelects(row).operator, 'in')
+      await flush()
+      expect(row.querySelector('[data-action="pick-condition-record"]')?.textContent?.trim()).toBe('选择人员')
+    }
+  }, EDITOR_MOUNT_TIMEOUT_MS)
+
   it('date / date-time rows label greater/less as 晚于 / 早于 (codes unchanged); a number row keeps 大于 / 小于', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
     await flush()
@@ -324,6 +349,35 @@ describe('condition_branch rows are typed and saved in the typed shape', () => {
     ])
     // ...and the loaded rule object itself was never mutated by the editor.
     expect(legacy.branches[0].conditions.conditions[0].value).toBe('5')
+  }, EDITOR_MOUNT_TIMEOUT_MS)
+
+  it('untouched save: a date condition stored as a zoned instant keeps the day the evaluator reads (rule-level and branch)', async () => {
+    // Business zone Asia/Shanghai. '2026-09-23T16:00:00.000Z' is 2026-09-24 00:00 there, and the backend
+    // evaluator (A9-be dayKeyOf) reads a zoned value on a date field as its day in the field's zone: the 24th.
+    // Rename + save must keep the 24th — the day as written ('2026-09-23') would move the rule by a day.
+    const zoned = { fieldId: 'fld_due', operator: 'less_than', value: '2026-09-23T16:00:00.000Z' }
+    const config = {
+      branches: [{
+        key: 'zoned',
+        conditions: { conjunction: 'AND', conditions: [{ ...zoned }] },
+        actions: [{ type: 'update_record', config: { fields: { fld_name: 'vip' } } }],
+      }],
+    }
+    const rule = { ...ruleWithBranch(config), conditions: { conjunction: 'AND', conditions: [{ ...zoned }] } } as AutomationRule
+    const saved = vi.fn()
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flush()
+    const mainDate = container.querySelector('[data-condition-index="0"] [data-condition-value="date"] input') as HTMLInputElement
+    const branchDate = container.querySelector('[data-branch-index="0"] [data-branch-condition-index="0"] [data-condition-value="date"] input') as HTMLInputElement
+    expect(mainDate.value).toBe('2026-09-24')
+    expect(branchDate.value).toBe('2026-09-24')
+    setInput(container, '[data-field="name"]', 'Renamed')
+    await flush()
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flush()
+    const payload = saved.mock.calls[0][0]
+    expect(payload.conditions.conditions).toEqual([{ fieldId: 'fld_due', operator: 'less_than', value: '2026-09-24' }])
+    expect(payload.actions[0].config.branches[0].conditions.conditions).toEqual([{ fieldId: 'fld_due', operator: 'less_than', value: '2026-09-24' }])
   }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('a rule-level date-time row saves the business-timezone instant (not the browser-local datetime-local string)', async () => {

@@ -291,7 +291,7 @@
                   <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
                   <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
                     <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
-                    <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(f.type, isZh) }}</span>
+                    <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
                   </el-option>
                 </el-select>
                 <el-select
@@ -1420,7 +1420,7 @@
                       <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
                       <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
                         <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
-                        <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(f.type, isZh) }}</span>
+                        <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
                       </el-option>
                     </el-select>
                     <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" :disabled="!cond.fieldId" :placeholder="automationLabel('condition.selectFieldFirst', isZh)" data-condition-operator="" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
@@ -1873,6 +1873,7 @@ import { fieldTypeLabel } from '../utils/meta-core-labels'
 import {
   PENDING_CONDITION_OPERATOR,
   coerceConditionValue,
+  conditionFieldDisplayType,
   isArrayConditionOperator,
   isConditionLeafComplete as isConditionValueComplete,
   isPendingConditionOperator,

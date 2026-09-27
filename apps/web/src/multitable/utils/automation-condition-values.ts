@@ -11,7 +11,9 @@
  * The SAVED shape per field type (the contract the backend condition evaluator accepts):
  *   - number / currency / percent / rating / duration / autoNumber → a finite `number`
  *   - boolean                                                     → a `boolean`
- *   - date                                                        → `'YYYY-MM-DD'` (floating calendar day)
+ *   - date                                                        → `'YYYY-MM-DD'` (floating calendar day); a
+ *     value that names its own zone (`…T16:00:00.000Z`, API-authored / pasted) is the day of that instant in
+ *     the field's zone — the day the backend evaluator compares (A9-be `dayKeyOf`), never the day as written
  *   - dateTime / createdTime / modifiedTime                       → a UTC ISO instant (`…Z`); a zone-less wall
  *     clock is read in the field's business timezone (business-timezone.ts, #6083), never the browser's
  *   - person / link, `equals` / `not_equals`                      → ONE id `string` (a user id / record id)
@@ -31,7 +33,14 @@
  */
 import type { AutomationCondition, ConditionOperator } from '../types'
 import type { AutomationConditionValueWidget } from './meta-automation-labels'
-import { calendarDayFromText, parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from './business-timezone'
+import {
+  calendarDayFromText,
+  dateTimeTextNamesZone,
+  formatWallClock,
+  parseDateTimeTextToUtcMs,
+  resolveDateTimeTimezone,
+  wallClockInZone,
+} from './business-timezone'
 
 export type ConditionValueWidget = AutomationConditionValueWidget
 
@@ -95,6 +104,22 @@ export function isIdConditionFieldType(fieldType: string | undefined): boolean {
   return fieldType === 'person' || fieldType === 'link'
 }
 
+/**
+ * A LEGACY person field: stored as `type: 'link'` + `property.refKind: 'user'` (link-fields.ts
+ * `isPersonField`; produced by `ensurePeopleSheetPreset`). Its cell value is a list of people-sheet RECORD
+ * ids, so its condition value is picked with the record picker (widget `link`) — but it is a person field to
+ * the person using it: the dropdown hint reads 人员 and the button 选择人员, and `in` / `not_in` pick several
+ * people even though the record picker is single-select for `refKind: 'user'` by default.
+ */
+export function isLegacyPersonLinkConditionField(field: ConditionFieldLike | null | undefined): boolean {
+  return field?.type === 'link' && field.property?.refKind === 'user'
+}
+
+/** The type a condition field is presented as (the field dropdown's type hint): a legacy person reads `person`. */
+export function conditionFieldDisplayType(field: ConditionFieldLike): string {
+  return isLegacyPersonLinkConditionField(field) ? 'person' : field.type
+}
+
 /** Which value control a row shows for its field + operator (unary operators show none). */
 export function conditionValueWidget(
   field: ConditionFieldLike | null | undefined,
@@ -114,7 +139,10 @@ export function conditionValueWidget(
   return 'text'
 }
 
-/** The IANA zone a dateTime condition value is typed / shown in (field property → business timezone). */
+/**
+ * The IANA zone a date / dateTime condition value is read in (field property → business timezone) — the
+ * same resolution as the backend's `resolveDateTimeFieldTimeZone`, which the evaluator uses for both types.
+ */
 export function conditionDateTimeZone(field: ConditionFieldLike | null | undefined): string {
   return resolveDateTimeTimezone(field?.property ?? null)
 }
@@ -157,11 +185,22 @@ export function parseBooleanConditionValue(value: unknown): boolean | null {
 // falls back to the engine's lenient `Date.parse`, which would read a stray `5` as a day in 2001.
 const YEAR_FIRST_RE = /^[0-9０-９]{4}/
 
-/** `'YYYY-MM-DD'` of a date-only condition value, or null. */
-export function parseDateConditionValue(value: unknown): string | null {
+/**
+ * `'YYYY-MM-DD'` of a date-only condition value, or null. A zone-less value is the day as written. A value
+ * that names its own zone (`'2026-09-23T16:00:00.000Z'`, `…+08:00` — API-authored, or pasted into the old
+ * branch text box) is an INSTANT, and its day is the day of that instant in `timeZone` (the field's zone,
+ * `conditionDateTimeZone`): that is the day the backend evaluator compares (A9-be `dayKeyOf` buckets such a
+ * value with `getZonedParts` in the field's zone). Reading it as written would drop the zone, and an
+ * untouched load → save would silently move the rule by a day (Asia/Shanghai: `…-23T16:00Z` is the 24th).
+ */
+export function parseDateConditionValue(value: unknown, timeZone: string): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   if (!trimmed || !YEAR_FIRST_RE.test(trimmed)) return null
+  if (dateTimeTextNamesZone(trimmed)) {
+    const ms = parseDateTimeTextToUtcMs(trimmed, timeZone)
+    return ms === null ? null : formatWallClock(wallClockInZone(ms, timeZone)).slice(0, 10)
+  }
   return calendarDayFromText(trimmed)
 }
 
@@ -236,7 +275,10 @@ export function coerceConditionValue(
   if (isArrayConditionOperator(condition.operator)) {
     if (isNumericConditionFieldType(fieldType)) return coerced(allOrNull(parseConditionArrayValue(value), parseNumberConditionValue))
     if (fieldType === 'boolean') return coerced(allOrNull(parseConditionArrayValue(value), parseBooleanConditionValue))
-    if (fieldType === 'date') return coerced(allOrNull(parseConditionArrayValue(value), parseDateConditionValue))
+    if (fieldType === 'date') {
+      const zone = conditionDateTimeZone(field)
+      return coerced(allOrNull(parseConditionArrayValue(value), (entry) => parseDateConditionValue(entry, zone)))
+    }
     if (isDateTimeConditionFieldType(fieldType)) {
       const zone = conditionDateTimeZone(field)
       return coerced(allOrNull(parseConditionArrayValue(value), (entry) => parseDateTimeConditionValue(entry, zone)))
@@ -247,7 +289,7 @@ export function coerceConditionValue(
   }
   if (isNumericConditionFieldType(fieldType)) return coerced(parseNumberConditionValue(value))
   if (fieldType === 'boolean') return coerced(parseBooleanConditionValue(value))
-  if (fieldType === 'date') return coerced(parseDateConditionValue(value))
+  if (fieldType === 'date') return coerced(parseDateConditionValue(value, conditionDateTimeZone(field)))
   if (isDateTimeConditionFieldType(fieldType)) return coerced(parseDateTimeConditionValue(value, conditionDateTimeZone(field)))
   if (isIdConditionFieldType(fieldType)) return coerced(parseSingleIdConditionValue(value))
   if (typeof value === 'string') {
