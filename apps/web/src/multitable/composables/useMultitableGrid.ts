@@ -121,6 +121,13 @@ export function emptySortInfo(): { rules: [] } {
 export function emptyFilterInfo(conjunction: FilterConjunction = 'and'): { conjunction: FilterConjunction; conditions: [] } {
   return { conjunction, conditions: [] }
 }
+// Same shape as the two above, for grouping (#6084): setGroupFields sent `groupInfo: undefined` for "no
+// group", which JSON.stringify drops — the PATCH then carried no such key and the server KEPT the stored
+// grouping, so clearing it was never saved. `{}` is what `normalizeJson` already treats as "no grouping"
+// (server GET /views and syncFromView both read groupInfo.fieldId / .fieldIds off it, absent on `{}`).
+export function emptyGroupInfo(): Record<string, unknown> {
+  return {}
+}
 
 export function buildSortInfo(rules: SortRule[]): { rules: Array<{ fieldId: string; desc: boolean }> } | undefined {
   if (!rules.length) return undefined
@@ -1102,7 +1109,10 @@ export function useMultitableGrid(opts: {
 
   // Set the ordered group fields (1..MAX_GROUP_LEVELS). Persists groupInfo.fieldIds (NEW shape) and the
   // legacy groupInfo.fieldId = level-1 so other views (Kanban/Gantt) reading the single-field shape and
-  // any older reader keep working. Empty list clears grouping (groupInfo: undefined).
+  // any older reader keep working. Empty list clears grouping — sent as the explicit emptyGroupInfo()
+  // (`{}`), never `undefined` (#6084: `undefined` is dropped by JSON.stringify, the PATCH then carries no
+  // groupInfo key, and the server KEPT the stored grouping — clearing was never saved). Same fix shape as
+  // #6075's emptySortInfo()/emptyFilterInfo(): a changed facet always goes out with an explicit value.
   async function setGroupFields(fieldIds: string[]) {
     const next = normalizeGroupFieldIds(fieldIds)
     groupFieldIds.value = next
@@ -1113,7 +1123,7 @@ export function useMultitableGrid(opts: {
     if (viewStateLoadedFor !== vid) return
     try {
       await persistViewConfig(vid, {
-        groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : undefined,
+        groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : emptyGroupInfo(),
       })
     } catch { /* silent */ }
   }
