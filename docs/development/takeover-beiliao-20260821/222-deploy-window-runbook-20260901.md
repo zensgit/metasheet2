@@ -203,7 +203,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
      > **2026-09-10 订正**:上面这段此前只教"把 `target` 整段贴进 action 配置",漏了 `--action-fragment` 输出的另一半 `extensionFieldIds`——已按脚本自述与 `assertExtFieldMappingAgreesWithAction`/`assertTargetFieldMapCompleteness` 的实际校验补全。
 
-     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
+     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒,按项目导出物料也会被 `PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH` 拒。)
 
      > **2026-09-10 订正**:本节此前写的是"调 ensure,把它返回的 `targetBinding` 整段贴进 action 配置,一条路,别的都别走",与文末 r7 实际执行记录第 8 条(:110 附近)矛盾且会丢客户 pack 的 21 个 `ext_` 列——已按第 8 条的合并口径改写为上面这版,并补充指向 `stock-preparation-derive-target-binding.mjs --pack` 这个可以直接产出合并结果的脚本,避免手工 JSON 拼接出错。依据:该脚本已支持 `--pack`/`--pack-id`(`scripts/ops/stock-preparation-derive-target-binding.mjs`),以及本文件 :110 的 r7 实际记录(33+21=54)。
 
@@ -213,7 +213,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
   - 三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);
   - **action 绑定里的 `sheetId` 等于这次 ensure 返回的那个**(再调一次 ensure,它是幂等的,把 `data.targetBinding.sheetId` 和配置里的值对一下;不一致说明 objectId 换了而绑定没重算);
   - Step 3-3 部署预检 `ready: true`、`blockers` 为空。**特别确认这两条不在里面**:
-    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒;`detail.carryRouteCode` 里写的就是点击会看到的那个 code。修法就是上面的 ensure。
+    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒,按项目导出物料也会被拒(导出与结转走同一道租户墙);`detail.carryRouteCode` / `detail.exportRouteCode` 里写的就是两个点击各自会看到的 code。修法就是上面的 ensure。
     - `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` —— 人工列没绑全。
     (`posture.carryTargetBinding.state` 是 `not_derived` **不是**故障、也不拦任何操作,它只提示绑定两半指向不同的表;结转允不允许看 `checks.carryTargetBinding.ownershipState`。)
 - 失败处理:三处不一致 → 以 action 绑定里的 `target.objectId` 为准改另外两处(action 绑定是唯一决定"apply 写到哪"的配置,allowlist 和 pack 目标都要跟着它,不是反过来)。
