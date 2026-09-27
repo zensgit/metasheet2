@@ -17275,14 +17275,15 @@ attendanceIntegrationDescribe(
       requestIds.push(requestId)
       await pool.query(
         `INSERT INTO approval_instances
-           (id, status, version, current_step, total_steps, current_node_key, metadata)
-         VALUES ($1, 'pending', 0, 0, 0, 'attendance_request_step_0', '{}'::jsonb)`,
+           (id, status, version, current_step, total_steps, current_node_key, metadata, workflow_key)
+         VALUES ($1, 'pending', 0, 0, 0, 'attendance_request_step_0', '{}'::jsonb, 'attendance.request')`,
         [approvalId]
       )
       await pool.query(
         `INSERT INTO attendance_requests
-           (id, org_id, user_id, work_date, request_type, status, reason, metadata, approval_instance_id)
-         VALUES ($1, $2, $3, $4, 'leave', 'pending', $5, $6::jsonb, $7)`,
+           (id, org_id, user_id, work_date, request_type, status, reason, metadata, approval_instance_id,
+            approval_workflow_key)
+         VALUES ($1, $2, $3, $4, 'leave', 'pending', $5, $6::jsonb, $7, 'attendance.request')`,
         [
           requestId,
           orgId,

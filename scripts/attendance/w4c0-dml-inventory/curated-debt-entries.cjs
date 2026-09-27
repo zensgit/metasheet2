@@ -670,6 +670,34 @@ const CURATED_DEBT_ENTRIES = [
       site.relPath === 'packages/core-backend/src/services/AttendanceExpiryService.ts' &&
       (site.table === 'attendance_leave_balances' || site.table === 'attendance_leave_balance_events'),
   },
+  {
+    id: 'X08',
+    title:
+      'Approval change-request design lock v5.9 §14.3 #10 (Q1c, WI-3): one-time migration ' +
+      'backfill UPDATE that pairs pre-existing attendance_requests.approval_instance_id rows ' +
+      'with the referenced approval_instances.workflow_key, BEFORE the composite FK ' +
+      '(approval_instance_id, approval_workflow_key) and the atr_instance_key_pair / ' +
+      'atr_not_cancel_round CHECKs are added in the same migration (lock:371 "回填先于约束").',
+    owningSlice: 'approval-cancel-round-wi3',
+    sharedHook: false,
+    canonicalizedBy: 'approval-cancel-round-wi3',
+    // Runs exactly once, inside this migration's own transaction, before the constraints it
+    // backfills for exist — not a runtime writer reachable from any request path (the five
+    // runtime writers that DO reach this table on every attendance submission are already
+    // claimed by P12's bySymbol match on their enclosing function names, unaffected by this
+    // migration adding a new column to their existing INSERT/UPDATE statements).
+    //
+    // Claimed by relPath ALONE, not by enclosingSymbol: every migration file's data-mutating
+    // function is named `up` (and `down`), so a bare bySymbol(/^up$/) match would silently
+    // swallow a future, unrelated migration's own attendance_requests DML under this same entry
+    // — the exact nearest-symbol collision trap
+    // (finding_p26_census_nearest_symbol_collision in project memory: "same-name local closure
+    // folds into an already-reviewed entry"). This migration's relPath is unique in the tree, so
+    // relPath alone is a precise, non-generalizing discriminator.
+    claims: (site) =>
+      site.relPath ===
+      'packages/core-backend/src/db/migrations/zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts',
+  },
 ]
 
 // Non-attendance generic-shared-function allowlist (§8.4: "Shared tables such as

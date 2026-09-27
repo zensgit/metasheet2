@@ -1,7 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 
-import { PYTHON_CANDIDATES, PYTHON_CANDIDATE_LABEL, spawnPythonSync } from './python-interpreter.mjs'
+import {
+  PYTHON_CANDIDATES,
+  PYTHON_CANDIDATE_LABEL,
+  spawnPythonSync,
+  spawnPython,
+  spawnPythonOrThrow,
+} from './python-interpreter.mjs'
 
 // ---------------------------------------------------------------------------
 // `spawnPythonSync` contract (scripts/ops/python-interpreter.mjs)
@@ -161,4 +168,126 @@ test('the caller’s args array is not mutated by the `py -3` prefix', () => {
   const { spawn } = recordingSpawn((command) => (command === 'py' ? exited(0) : enoent(command)))
   spawnPythonSync(args, {}, spawn)
   assert.deepEqual(args, ['-c', 'PY'])
+})
+
+// ---------------------------------------------------------------------------
+// `spawnPython` / `spawnPythonOrThrow` contract — the async counterpart used by call sites that
+// need a live, non-blocking child (e.g. a Python HTTP mock server a test talks to while it keeps
+// running). Same fixture style as the sync suite above: a stub `spawn` stands in for
+// `node:child_process.spawn`, driven by a fake EventEmitter so nothing here launches a real
+// process.
+// ---------------------------------------------------------------------------
+
+/** A fake ChildProcess: emits 'spawn' (success) or 'error' (failure) on the next microtask. */
+function fakeChild() {
+  const child = new EventEmitter()
+  child.pid = 4321
+  child.kill = () => {}
+  return child
+}
+
+function succeedingSpawn(commandsThatWork) {
+  const calls = []
+  const spawn = (command, args, options) => {
+    calls.push({ command, args, options })
+    const child = fakeChild()
+    queueMicrotask(() => {
+      if (commandsThatWork.has(command)) child.emit('spawn')
+      else {
+        const error = new Error(`spawn ${command} ENOENT`)
+        error.code = 'ENOENT'
+        child.emit('error', error)
+      }
+    })
+    return child
+  }
+  return { calls, spawn }
+}
+
+test('async: python3 present resolves on the first candidate, nothing else attempted', async () => {
+  const { calls, spawn } = succeedingSpawn(new Set(['python3']))
+  const { child, error } = await spawnPython(['-c', 'PY'], {}, spawn)
+  assert.equal(error, null)
+  assert.equal(child.pid, 4321)
+  assert.deepEqual(calls.map((c) => c.command), ['python3'])
+  assert.deepEqual(calls[0].args, ['-c', 'PY'])
+})
+
+test('async: python3 ENOENT falls through to `py -3`, prefix precedes the caller’s args', async () => {
+  const { calls, spawn } = succeedingSpawn(new Set(['py']))
+  const { child, error } = await spawnPython(['-c', 'PY'], {}, spawn)
+  assert.equal(error, null)
+  assert.ok(child)
+  assert.deepEqual(calls.map((c) => c.command), ['python3', 'py'])
+  assert.deepEqual(calls[1].args, ['-3', '-c', 'PY'])
+})
+
+test('async: python3 and `py` both ENOENT falls through to bare `python`', async () => {
+  const { calls, spawn } = succeedingSpawn(new Set(['python']))
+  const { child, error } = await spawnPython(['-c', 'PY'], {}, spawn)
+  assert.equal(error, null)
+  assert.ok(child)
+  assert.deepEqual(calls.map((c) => c.command), ['python3', 'py', 'python'])
+})
+
+test('async: every candidate ENOENT resolves { child: null, error } — it does not hang or reject', async () => {
+  const { calls, spawn } = succeedingSpawn(new Set())
+  const { child, error } = await spawnPython(['-c', 'PY'], {}, spawn)
+  assert.equal(child, null)
+  assert.ok(error, 'must still carry an error so callers keep failing CLOSED')
+  assert.equal(error.code, 'ENOENT')
+  assert.deepEqual(calls.map((c) => c.command), ['python3', 'py', 'python'])
+})
+
+test('async: a non-ENOENT spawn error (EACCES) on python3 is NOT retried on py/python', async () => {
+  const calls = []
+  const spawn = (command, args) => {
+    calls.push({ command, args })
+    const child = fakeChild()
+    queueMicrotask(() => {
+      const error = new Error(`spawn ${command} EACCES`)
+      error.code = 'EACCES'
+      child.emit('error', error)
+    })
+    return child
+  }
+  const { child, error } = await spawnPython(['-c', 'PY'], {}, spawn)
+  assert.equal(child, null)
+  assert.equal(error.code, 'EACCES')
+  assert.deepEqual(calls.map((c) => c.command), ['python3'])
+})
+
+test('async: spawnPython forwards options unchanged to every attempted candidate', async () => {
+  const options = { stdio: ['ignore', 'pipe', 'pipe'], env: { X: '1' } }
+  const calls = []
+  const spawn = (command, args, opts) => {
+    calls.push(opts)
+    const child = fakeChild()
+    queueMicrotask(() => {
+      if (command === 'python') child.emit('spawn')
+      else {
+        const error = new Error('ENOENT')
+        error.code = 'ENOENT'
+        child.emit('error', error)
+      }
+    })
+    return child
+  }
+  await spawnPython(['-c', 'PY'], options, spawn)
+  assert.equal(calls.length, 3)
+  for (const opts of calls) assert.equal(opts, options)
+})
+
+test('async: spawnPythonOrThrow returns the live child on success', async () => {
+  const { spawn } = succeedingSpawn(new Set(['python3']))
+  const child = await spawnPythonOrThrow(['-c', 'PY'], {}, spawn)
+  assert.equal(child.pid, 4321)
+})
+
+test('async: spawnPythonOrThrow throws a fail-closed error naming every tried candidate when none exist', async () => {
+  const { spawn } = succeedingSpawn(new Set())
+  await assert.rejects(
+    () => spawnPythonOrThrow(['-c', 'PY'], {}, spawn),
+    /no Python interpreter could be spawned \(tried python3, py -3, python/,
+  )
 })

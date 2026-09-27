@@ -26,6 +26,16 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
+            <!-- B-2 (todo-center-design-lock v2.14 §2 "前端壳" row: 中心替换/推广该徽标) — the
+                 badge above is now DATA-wired to the todo center's own aggregate, but that alone
+                 left the page it aggregates into reachable only by typing /todo — no nav entry
+                 anywhere pointed at it. Same gate as the badge/审批中心 link (both read the same
+                 `approvals:read`-gated data; today's ONLY registered source is `approval`), same
+                 nav-link styling, kept as its OWN entry rather than folded into `nav-approvals` or
+                 made the badge's own href — deliberately, so this addition cannot regress the
+                 existing "badge is a sibling of the link, never a child of it" contract the P1b
+                 comment above and approvalNavTodoBadge.spec.ts already pin. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -38,6 +48,8 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
+            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -187,6 +199,8 @@ const navLabels = computed(() => {
       approvals: '审批中心',
       // Values-free: names the surface, never the count or any row content.
       approvalTodo: '待办审批',
+      // B-2: the nav entry point into the cross-source todo center page (/todo).
+      todoCenter: '待办中心',
       apps: '应用',
       users: '用户',
       roles: '角色',
@@ -214,6 +228,7 @@ const navLabels = computed(() => {
     workflows: 'Workflows',
     approvals: 'Approvals',
     approvalTodo: 'Pending approvals',
+    todoCenter: 'Todo Center',
     apps: 'Apps',
     users: 'Users',
     roles: 'Roles',

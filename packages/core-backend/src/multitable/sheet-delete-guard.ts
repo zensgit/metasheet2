@@ -79,13 +79,27 @@ export async function isPluginManagedSheet(
 /**
  * Is `sheetId` a system-managed sheet (server-owned `system_kind`, or the People directory sentinel)?
  * Only ever used to REFUSE a delete — never as a trust/exclusion signal.
+ *
+ * COLUMN-TOLERANT (adversarial-review fix, #6089): reads `system_kind` via
+ * `to_jsonb(meta_sheets) ->> 'system_kind'`, the SAME column-tolerant form every other reader in
+ * `routes/univer-meta.ts` already uses (#5825's own convention — see its doc comment there), rather
+ * than a bare `SELECT system_kind`. A bare column read 500s on a database that has not yet run the
+ * migration adding it; `GET /context` now reaches this function for every admin-tier actor (via
+ * `resolveSheetDeleteRefusal`), so a bare read there turned "the column is not migrated yet" into a
+ * 500 on the WHOLE route (CI run 36239235636,
+ * `tests/unit/multitable-system-sheet-list-visibility.test.ts`). `DELETE /sheets/:sheetId`'s
+ * behaviour is UNCHANGED on a database that HAS the column (identical value, identical refusal);
+ * on one that does not, it now falls back to the description sentinel instead of 500ing — a widening
+ * only in the same fail-closed direction the guard's own doc comment already claims for the sentinel
+ * (never grants anything; can only ever make a sheet MORE refused, not less, and this repo has never
+ * shipped without the column since #5825 landed).
  */
 export async function isSystemManagedSheet(
   query: SheetDeleteGuardQueryFn,
   sheetId: string,
 ): Promise<boolean> {
   const result = await query(
-    'SELECT system_kind, description FROM meta_sheets WHERE id = $1',
+    "SELECT (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind, description FROM meta_sheets WHERE id = $1",
     [sheetId],
   )
   const row = result.rows[0] as { system_kind?: unknown; description?: unknown } | undefined

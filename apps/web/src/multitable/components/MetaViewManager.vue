@@ -417,6 +417,7 @@
           </select>
           <MtButton variant="primary" class="meta-view-mgr__btn-add" :disabled="!newViewName.trim()" @click="onAddView">{{ ml('view.addButton') }}</MtButton>
         </div>
+        <p class="meta-view-mgr__add-hint" data-new-view-blank-hint="true">{{ ml('view.newViewBlankHint') }}</p>
       </div>
 
       <div v-if="deleteTarget" class="meta-view-mgr__confirm">
@@ -1451,6 +1452,7 @@ onBeforeUnmount(() => {
 .meta-view-mgr__check { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #444; }
 .meta-view-mgr__add-section { padding: 10px 16px; border-top: 1px solid #eee; }
 .meta-view-mgr__add-row { display: flex; gap: 8px; }
+.meta-view-mgr__add-hint { margin: 6px 0 0; font-size: 12px; color: var(--ms-text-3); }
 .meta-view-mgr__input, .meta-view-mgr__select { width: 100%; padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; background: #fff; }
 .meta-view-mgr__select--compact { width: auto; min-width: 130px; }
 /* .meta-view-mgr__btn-add: both uses (add-section addView + config-panel saveConfig) are now <MtButton

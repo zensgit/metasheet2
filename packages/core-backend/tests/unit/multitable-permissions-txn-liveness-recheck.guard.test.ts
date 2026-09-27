@@ -49,10 +49,13 @@ import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 import {
+  SHEETS_ROW_LOCK_LIVENESS_SQL,
   SHEET_ROW_LOCK_LIVENESS_SQL,
   SheetNotLiveError,
   assertSheetLiveForUpdate,
+  assertSheetsLiveForUpdate,
   loadSheetLivenessForUpdate,
+  loadSheetsLivenessForUpdate,
 } from '../../src/multitable/sheet-liveness'
 
 const SRC = join(__dirname, '..', '..', 'src')
@@ -92,18 +95,15 @@ const RECHECK = 'assertSheetLiveForUpdate'
  * NAMED exemptions from rule A — a raw `meta_sheets … FOR UPDATE` that is NOT a permission write.
  *
  * Keyed by the collapsed SQL text so a new lock cannot inherit an old entry's licence. Each is a
- * standing statement that this lock guards something other than a grant table; the RESIDUAL is reported
- * rather than hidden (the mirror op re-derives its own per-row gating under the lock, but it does NOT
- * re-read sheet liveness — tracked for its own issue, not silently blessed here).
+ * standing statement that this lock guards something other than a grant table.
+ *
+ * EMPTY since #5954. Its one entry was the cross-base mirror op's lock-only multi-sheet
+ * `SELECT id … = ANY($1) … FOR UPDATE`, which never re-read sheet liveness. That lock now goes through
+ * `assertSheetsLiveForUpdate` (multitable/sheet-liveness.ts), so no guarded file spells a raw
+ * `meta_sheets` row lock at all; a new one reds rule A until it is either routed through a helper or
+ * named here with its reason.
  */
-const RAW_LOCK_LEDGER = new Map<string, string>([
-  [
-    'SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE',
-    'cross-base mirror record op (routes/univer-meta.ts) — a RECORD write, not a permission write, and a '
-    + 'MULTI-sheet lock that the single-id helper cannot express. It re-derives base-B capability under the '
-    + 'lock but does not re-read sheet liveness; RESIDUAL, tracked for its own issue.',
-  ],
-])
+const RAW_LOCK_LEDGER = new Map<string, string>([])
 
 /**
  * The WHOLE-TREE census of `meta_sheets` row locks (#5938 round 2).
@@ -120,8 +120,14 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     'THE helper. The one statement that locks the row and re-reads `deleted_at` together.',
   ],
   [
-    'routes/univer-meta.ts :: SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE',
-    'cross-base mirror RECORD op — ledgered above; a multi-sheet lock the single-id helper cannot express.',
+    'multitable/sheet-liveness.ts :: SELECT s.id, s.deleted_at FROM meta_sheets s JOIN unnest($1::text[]) WITH ORDINALITY AS u(id, ord) ON s.id = u.id ORDER BY u.ord FOR UPDATE OF s',
+    'THE multi-sheet helper (#5954). Locks every named row in the order of the array it is handed '
+    + '(`WITH ORDINALITY … ORDER BY u.ord`), which the helper sorts in JS code-unit order — the order the '
+    + 'JS-sorted sheet lockers use, whatever the database locale and whatever characters the (client-chosen) '
+    + 'ids carry; no SQL-side sort of `id`, since both collation order and byte (`COLLATE "C"`) order can cross '
+    + 'JS order — and re-reads each `deleted_at` in the same statement. Its caller is the cross-base mirror '
+    + 'RECORD op (routes/univer-meta.ts), whose lock-only `SELECT id … = ANY($1) … FOR UPDATE` it replaced — '
+    + 'that site is closed, not ledgered.',
   ],
   [
     'multitable/link-writer-fence.ts :: SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE NOWAIT',
@@ -459,15 +465,18 @@ describe('#5938 — permission write transactions re-check sheet liveness under 
     expect(locksSheetRowAnyMode('SELECT id FROM meta_sheets WHERE id = $1 FOR NO KEY UPDATE')).toBe(true)
     expect(locksSheetRowAnyMode('SELECT deleted_at FROM meta_sheets WHERE id = $1')).toBe(false)
     expect(locksSheetRowAnyMode('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE')).toBe(false)
+    // #5954: the multi-sheet helper's statement joins meta_sheets to an `unnest … WITH ORDINALITY`; it keeps
+    // `FROM meta_sheets s` FIRST so this recognizer (which keys on `FROM meta_sheets`) sees it, and the
+    // census equality above reds if a rewrite ever spells it so it is not seen.
+    expect(locksSheetRowAnyMode(SHEETS_ROW_LOCK_LIVENESS_SQL)).toBe(true)
   })
 
-  it('the ledgered exemption is the cross-base mirror RECORD op, not a permission write', () => {
-    // Named, with its reason, so the residual is reportable rather than invisible.
-    expect([...RAW_LOCK_LEDGER.keys()]).toEqual([
-      'SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE',
-    ])
-    const [reason] = [...RAW_LOCK_LEDGER.values()]
-    expect(reason).toContain('RECORD write')
+  it('the ledger is EMPTY — the cross-base mirror op\'s former lock-only residual is closed, not licensed (#5954)', () => {
+    // The one entry this ledger used to carry (the mirror op's `SELECT id … = ANY($1) … FOR UPDATE`) is
+    // gone because the site is gone. Re-adding it — or any other raw lock — must be a visible choice here.
+    expect([...RAW_LOCK_LEDGER.keys()]).toEqual([])
+    // …and the guarded files really do spell no raw sheet-row lock any more (rule A with nothing to excuse).
+    expect(scan.rawLocks.map((l) => `${l.file}:${l.line} ${l.sql}`)).toEqual([])
   })
 })
 
@@ -711,5 +720,284 @@ describe('#5938 — the real-DB waiter probe derives its pattern instead of copy
     // The FOR SHARE leg (the foreign record-permission writer) is a different statement in a file this
     // PR does not touch; it stays a literal, and it stays present.
     expect(block).toContain("query LIKE 'SELECT id FROM meta_sheets WHERE id = $1 FOR SHARE%'")
+  })
+})
+
+/**
+ * #5954 — the MULTI-sheet helper: one statement that locks every named row in byte `id` order and reads each
+ * `deleted_at` under that lock. Asserted on behaviour, for the same reason as rule C above: a structural
+ * rule that the route calls the helper is worthless if the helper does nothing.
+ */
+describe('#5954 — the multi-sheet helper actually locks, reads and refuses', () => {
+  const SHEET_A = 'sheet_guard_5954_a'
+  const SHEET_B = 'sheet_guard_5954_b'
+  const DELETED_AT = '2026-09-25T10:00:00.000Z'
+
+  function scriptedQuery(rows: unknown[]) {
+    const seen: Array<{ sql: string; params: unknown[] }> = []
+    const query = async (sql: string, params: unknown[]) => {
+      seen.push({ sql: collapse(sql), params })
+      return { rows }
+    }
+    return { query, seen }
+  }
+
+  it('locks every row and reads deleted_at in ONE statement, ids sorted and de-duplicated', async () => {
+    const { query, seen } = scriptedQuery([
+      { id: SHEET_A, deleted_at: null },
+      { id: SHEET_B, deleted_at: null },
+    ])
+    // Caller order B, A, B — the statement still receives each id ONCE, in sorted order.
+    await expect(assertSheetsLiveForUpdate(query, [SHEET_B, SHEET_A, SHEET_B])).resolves.toBeUndefined()
+    expect(seen).toEqual([{ sql: SHEETS_ROW_LOCK_LIVENESS_SQL, params: [[SHEET_A, SHEET_B]] }])
+    // The statement locks (FOR UPDATE OF the sheet rows), orders the lock by each id's POSITION in the array it
+    // is handed (WITH ORDINALITY … ORDER BY u.ord — so the JS sort above IS the lock order, whatever the
+    // database locale and whatever characters the ids carry), and READS deleted_at — all of it, in the one text
+    // the helper issues. A lock-only `SELECT id … FOR UPDATE` is what #5954 replaced; any SQL-side sort of `id`
+    // (a bare `ORDER BY id` by collation, or `COLLATE "C"` by bytes) can lock in the opposite order to
+    // `lockRecordLinkTargetSheetsOnQuery` (the real-DB suite reproduces both deadlocks, L-2 and L-4).
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).toMatch(
+      /^SELECT s\.id, s\.deleted_at FROM meta_sheets s JOIN unnest\(\$1::text\[\]\) WITH ORDINALITY AS u\(id, ord\) ON s\.id = u\.id ORDER BY u\.ord FOR UPDATE OF s$/,
+    )
+    expect(SHEETS_ROW_LOCK_LIVENESS_SQL).not.toMatch(/ORDER BY\s+(?:s\.)?id\b/i)
+  })
+
+  it('hands the statement the ids in JS CODE-UNIT order, not byte order — an emoji id sorts before a full-width one', async () => {
+    // Sheet ids are client-chosen (POST /sheets takes any 1–50 character `id`). An id with a character above
+    // U+FFFF (a surrogate pair, lead unit 0xD83D here) sorts BEFORE one with U+FF01 in JS, but AFTER it in
+    // UTF-8 byte order (F0… > EF…). The lock order is the array order, so it must be the JS one — the order
+    // `lockRecordLinkTargetSheetsOnQuery` takes the same rows in (real-DB L-3 races the two).
+    const astral = 'sheet_guard_5954_\u{1F600}'
+    const fullwidth = 'sheet_guard_5954_\uFF01'
+    expect(Buffer.compare(Buffer.from(fullwidth), Buffer.from(astral))).toBe(-1) // byte order: full-width first
+    const { query, seen } = scriptedQuery([
+      { id: astral, deleted_at: null },
+      { id: fullwidth, deleted_at: null },
+    ])
+    await expect(assertSheetsLiveForUpdate(query, [fullwidth, astral])).resolves.toBeUndefined()
+    expect(seen).toEqual([{ sql: SHEETS_ROW_LOCK_LIVENESS_SQL, params: [[astral, fullwidth]] }])
+    // …and the same order the production share locker's own sort gives.
+    expect([fullwidth, astral].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))).toEqual([astral, fullwidth])
+  })
+
+  it('an EMPTY list is a caller bug: a values-free TypeError, and no statement at all (it would lock nothing and pass)', async () => {
+    const { query, seen } = scriptedQuery([{ id: SHEET_A, deleted_at: null }])
+    const err = await assertSheetsLiveForUpdate(query, []).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TypeError)
+    expect(err).not.toBeInstanceOf(SheetNotLiveError)
+    expect((err as TypeError).message).toBe('SHEET_LIVENESS_NO_SHEET_IDS')
+    expect(seen).toEqual([])
+    // Not an array at all is the same caller bug.
+    const notArray = await assertSheetsLiveForUpdate(query, undefined as unknown as string[]).catch((e: unknown) => e)
+    expect((notArray as TypeError).message).toBe('SHEET_LIVENESS_NO_SHEET_IDS')
+    expect(seen).toEqual([])
+  })
+
+  it('a list of only unusable ids is refused as absent — never skipped into a pass, never sent to the database', async () => {
+    const { query, seen } = scriptedQuery([{ id: SHEET_A, deleted_at: null }])
+    for (const ids of [[''], [undefined as unknown as string], [null as unknown as string, '']]) {
+      const err = await assertSheetsLiveForUpdate(query, ids).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(SheetNotLiveError)
+      expect((err as SheetNotLiveError).liveness).toBe('absent')
+    }
+    expect(seen).toEqual([])
+  })
+
+  it('refuses when EITHER sheet was soft-deleted — the first sheet', async () => {
+    const { query } = scriptedQuery([{ id: SHEET_A, deleted_at: DELETED_AT }, { id: SHEET_B, deleted_at: null }])
+    const err = await assertSheetsLiveForUpdate(query, [SHEET_B, SHEET_A]).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(SheetNotLiveError)
+    expect((err as SheetNotLiveError).liveness).toBe('deleted')
+    expect((err as SheetNotLiveError).sheetId).toBe(SHEET_A)
+  })
+
+  it('refuses when EITHER sheet was soft-deleted — the second sheet', async () => {
+    const { query } = scriptedQuery([{ id: SHEET_A, deleted_at: null }, { id: SHEET_B, deleted_at: DELETED_AT }])
+    const err = await assertSheetsLiveForUpdate(query, [SHEET_B, SHEET_A]).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(SheetNotLiveError)
+    expect((err as SheetNotLiveError).liveness).toBe('deleted')
+    expect((err as SheetNotLiveError).sheetId).toBe(SHEET_B)
+  })
+
+  it('refuses a row that did not come back as absent (hard-deleted in the window)', async () => {
+    const { query } = scriptedQuery([{ id: SHEET_B, deleted_at: null }])
+    const err = await assertSheetsLiveForUpdate(query, [SHEET_B, SHEET_A]).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(SheetNotLiveError)
+    expect((err as SheetNotLiveError).liveness).toBe('absent')
+    expect((err as SheetNotLiveError).code).toBe('NOT_FOUND')
+  })
+
+  it('reports the FIRST non-live id in CALLER order, whatever the lock order', async () => {
+    // Both dead: the caller's order decides which verdict is reported (the route passes B first, the same
+    // precedence its pre-transaction gates run in), independent of the sorted lock order.
+    const rows = [{ id: SHEET_A, deleted_at: DELETED_AT }]
+    const bFirst = await assertSheetsLiveForUpdate(scriptedQuery(rows).query, [SHEET_B, SHEET_A]).catch((e: unknown) => e)
+    expect((bFirst as SheetNotLiveError).sheetId).toBe(SHEET_B)
+    expect((bFirst as SheetNotLiveError).liveness).toBe('absent')
+    const aFirst = await assertSheetsLiveForUpdate(scriptedQuery(rows).query, [SHEET_A, SHEET_B]).catch((e: unknown) => e)
+    expect((aFirst as SheetNotLiveError).sheetId).toBe(SHEET_A)
+    expect((aFirst as SheetNotLiveError).liveness).toBe('deleted')
+  })
+
+  it('the thrown error never echoes a sheet id — the SAME values-free bodies as the single-id helper', async () => {
+    const { query } = scriptedQuery([{ id: SHEET_A, deleted_at: DELETED_AT }, { id: SHEET_B, deleted_at: null }])
+    const err = (await assertSheetsLiveForUpdate(query, [SHEET_B, SHEET_A]).catch((e: unknown) => e)) as SheetNotLiveError
+    expect(err.message).not.toContain(SHEET_A)
+    expect(err.message).not.toContain(SHEET_B)
+    expect(err.code).toBe('SHEET_DELETED')
+    const single = (await assertSheetLiveForUpdate(scriptedQuery([{ deleted_at: DELETED_AT }]).query, SHEET_A)
+      .catch((e: unknown) => e)) as SheetNotLiveError
+    expect(err.message).toBe(single.message)
+    expect(err.code).toBe(single.code)
+  })
+
+  it('never sends an unusable id to the database, and maps it to absent', async () => {
+    const { query, seen } = scriptedQuery([{ id: SHEET_A, deleted_at: null }])
+    const verdicts = await loadSheetsLivenessForUpdate(query, ['', SHEET_A])
+    expect(verdicts.get('')).toBe('absent')
+    expect(verdicts.get(SHEET_A)).toBe('live')
+    expect(seen).toEqual([{ sql: SHEETS_ROW_LOCK_LIVENESS_SQL, params: [[SHEET_A]] }])
+    // A row the database returns for an id nobody asked about cannot vouch for anything.
+    const stray = await loadSheetsLivenessForUpdate(scriptedQuery([{ id: 'other', deleted_at: null }]).query, [SHEET_A])
+    expect([...stray.entries()]).toEqual([[SHEET_A, 'absent']])
+  })
+})
+
+/**
+ * #5954 — the cross-base mirror op's in-transaction guard re-reads liveness for BOTH sheets under the lock.
+ *
+ * The real-DB race (tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts,
+ * F-5/F-6/F-8) proves the behaviour; this leg pins the WIRING without a database, so dropping either sheet
+ * from the call, swapping their order, or handing the helper the pool reds in the no-DB lane too:
+ *   - the FIRST statement of `preWriteGuard` is `await assertSheetsLiveForUpdate(<its own query>, [...])`;
+ *   - the array names BOTH `sheetA` and `sheetB` (the two ids the pre-transaction gates resolved), and in
+ *     EXACTLY the order `[sheetB, sheetA]`: the helper reports the first non-live id in caller order, so this
+ *     order IS the refusal precedence when both ends die with different verdicts (one hard-deleted =>
+ *     `absent` 404 NOT_FOUND, the other soft-deleted => `deleted` 404 SHEET_DELETED). B first is the order
+ *     the pre-transaction gates run in; the real-DB F-8 case shows the body it decides;
+ *   - the handler spells no raw `meta_sheets` row lock;
+ *   - its catch maps SheetNotLiveError to the values-free `sendSheetNotLive(res, err.liveness)`.
+ */
+describe('#5954 — the cross-base mirror op re-reads BOTH sheets under its lock', () => {
+  const MIRROR_ROUTE = "'/crossbase/mirror-link'"
+
+  function mirrorOpViolations(text: string): string[] {
+    type Fn = ts.ArrowFunction | ts.FunctionExpression
+    const isFn = (n: ts.Node | undefined): n is Fn => !!n && (ts.isArrowFunction(n) || ts.isFunctionExpression(n))
+    const source = ts.createSourceFile('mirror.ts', text.replace(/\r\n/g, '\n'), ts.ScriptTarget.Latest, true)
+    const routes: Fn[] = []
+    const findRoute = (n: ts.Node) => {
+      if (ts.isCallExpression(n) && calleeName(n) === 'post' && n.arguments[0]?.getText(source) === MIRROR_ROUTE) {
+        const last = n.arguments[n.arguments.length - 1]
+        if (isFn(last)) routes.push(last)
+      }
+      ts.forEachChild(n, findRoute)
+    }
+    findRoute(source)
+    if (routes.length !== 1) return [`expected exactly one ${MIRROR_ROUTE} handler, found ${routes.length}`]
+    const route = routes[0]
+
+    const out: string[] = []
+    for (const { text: sql } of literalsIn(route.body)) {
+      if (locksSheetRowAnyMode(sql)) out.push(`raw meta_sheets row lock in the mirror op: ${sql}`)
+    }
+
+    const guards: Fn[] = []
+    const findGuard = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'preWriteGuard' && isFn(n.initializer)) {
+        guards.push(n.initializer)
+      }
+      ts.forEachChild(n, findGuard)
+    }
+    findGuard(route.body)
+    if (guards.length !== 1) return [...out, `expected exactly one preWriteGuard in the mirror op, found ${guards.length}`]
+    const g = guards[0]
+    // The guard's parameter IS the transaction's query (a QueryFn), so the helper must be handed that name.
+    const own = g.parameters[0] && ts.isIdentifier(g.parameters[0].name) ? g.parameters[0].name.text : ''
+    if (!ts.isBlock(g.body) || g.body.statements.length === 0) return [...out, 'preWriteGuard has no statements']
+
+    const first = g.body.statements[0]
+    const call = ts.isExpressionStatement(first) && ts.isAwaitExpression(first.expression)
+      && ts.isCallExpression(first.expression.expression)
+      ? first.expression.expression
+      : null
+    if (!call || calleeName(call) !== 'assertSheetsLiveForUpdate') {
+      out.push(`preWriteGuard's first statement is not \`await assertSheetsLiveForUpdate(...)\`: ${first.getText(source).slice(0, 120)}`)
+    } else {
+      const handed = firstArgText(call, source)
+      if (own === '' || handed !== own) out.push(`assertSheetsLiveForUpdate is handed \`${handed}\` instead of preWriteGuard's own \`${own}\``)
+      const ids = call.arguments[1]
+      const names = ids && ts.isArrayLiteralExpression(ids)
+        ? ids.elements.map((e) => (ts.isIdentifier(e) ? e.text : e.getText(source)))
+        : []
+      // NOT sorted: the caller order is observable (it picks which verdict is reported when both ends are
+      // dead), so the analyzer must see it.
+      if (!names.includes('sheetA') || !names.includes('sheetB')) {
+        out.push(`assertSheetsLiveForUpdate re-reads [${names.join(', ')}], not both sheetA and sheetB`)
+      } else if (names.join(',') !== 'sheetB,sheetA') {
+        out.push(`assertSheetsLiveForUpdate re-reads [${names.join(', ')}], not exactly [sheetB, sheetA] (the refusal precedence: B first, as the pre-transaction gates run)`)
+      }
+    }
+
+    if (!/if \(err instanceof SheetNotLiveError\) return sendSheetNotLive\(res, err\.liveness\)/.test(route.body.getText(source))) {
+      out.push('the mirror op no longer maps SheetNotLiveError to sendSheetNotLive(res, err.liveness)')
+    }
+    return out
+  }
+
+  const routeSource = readFileSync(join(SRC, 'routes/univer-meta.ts'), 'utf8')
+
+  it('the real route: first guard statement re-reads BOTH sheets, on the guard\'s own query', () => {
+    expect(mirrorOpViolations(routeSource)).toEqual([])
+  })
+
+  const wrap = (guardBody: string, catchBody = 'if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)') => `
+    router.post('/crossbase/mirror-link', async (req: any, res: any) => {
+      try {
+        const preWriteGuard = async (query: QueryFn): Promise<void> => {
+          ${guardBody}
+          await query('SELECT id, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE', [recB, sheetB])
+        }
+      } catch (err) {
+        ${catchBody}
+      }
+    })
+  `
+
+  it('the analyzer ACCEPTS the fixed shape', () => {
+    expect(mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetB, sheetA])'))).toEqual([])
+  })
+
+  it('the analyzer REJECTS the pre-#5954 lock-only statement', () => {
+    const found = mirrorOpViolations(wrap("await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])"))
+    expect(found.join('\n')).toContain('raw meta_sheets row lock')
+    expect(found.join('\n')).toContain('first statement is not')
+  })
+
+  it('the analyzer REJECTS a re-read that drops sheet A, and one that drops sheet B', () => {
+    expect(mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetB])')).join('\n')).toContain('not both sheetA and sheetB')
+    expect(mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetA])')).join('\n')).toContain('not both sheetA and sheetB')
+  })
+
+  it('the analyzer REJECTS both sheets in the swapped order (A first flips which verdict wins when both are dead)', () => {
+    const swapped = mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetA, sheetB])'))
+    expect(swapped).toEqual([
+      'assertSheetsLiveForUpdate re-reads [sheetA, sheetB], not exactly [sheetB, sheetA] (the refusal precedence: B first, as the pre-transaction gates run)',
+    ])
+  })
+
+  it('the analyzer REJECTS a re-read handed the pool instead of the guard\'s own query', () => {
+    expect(mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(q, [sheetB, sheetA])')).join('\n'))
+      .toContain('instead of preWriteGuard\'s own `query`')
+  })
+
+  it('the analyzer REJECTS a re-read that is not the FIRST statement', () => {
+    const late = wrap("await query('SELECT 1', [])\n          await assertSheetsLiveForUpdate(query, [sheetB, sheetA])")
+    expect(mirrorOpViolations(late).join('\n')).toContain('first statement is not')
+  })
+
+  it('the analyzer REJECTS a catch that stops mapping the refusal to the values-free 404', () => {
+    expect(mirrorOpViolations(wrap('await assertSheetsLiveForUpdate(query, [sheetB, sheetA])', 'throw err')).join('\n'))
+      .toContain('no longer maps SheetNotLiveError')
   })
 })

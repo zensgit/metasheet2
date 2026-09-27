@@ -5703,4 +5703,218 @@ describe('MetaAutomationRuleEditor', () => {
       expect([...rebuilt].filter((type) => !declared.has(type))).toEqual([])
     }, ROUND_TRIP_TIMEOUT_MS)
   })
+
+  // 客户反馈 2026-09-24 #3 (裁定 PR #6074): under a `record.deleted` trigger the trigger record is already gone,
+  // so a same-base update_record / delete_record / lock_record of it can only no-op — and used to self-chain
+  // into three execution logs. The backend refuses the shape at save (DELETED_TRIGGER_SELF_MUTATION); the
+  // editor mirrors it: options disabled, an inline hint carrying the same sentence, save blocked. Existing
+  // rules of that shape stay LOADABLE.
+  describe('record.deleted cannot mutate its own (gone) trigger record', () => {
+    const HINT_ZH = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
+    const HINT_EN = 'cannot be updated, deleted or locked'
+    // Each case mounts the full editor and scans every option list; on a loaded CI runner that exceeds the
+    // 5 s default (same reason the round-trip block above runs at 30 s).
+    const SELF_MUTATION_TIMEOUT_MS = 30_000
+    const hintOf = (container: HTMLElement, index = 0) =>
+      container.querySelector(`[data-action-index="${index}"] [data-field="deletedTriggerSelfMutationHint"]`) as HTMLElement | null
+    const actionSelectOf = (container: HTMLElement, index = 0) =>
+      container.querySelector(`[data-action-index="${index}"] .meta-rule-editor__action-header .el-select`) as HTMLElement
+
+    it('switching the trigger to record.deleted disables update/delete/lock, hints on the default update_record action and blocks save', async () => {
+      useLocale().setLocale('zh-CN')
+      const saved = vi.fn()
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
+      await flushPromises()
+
+      ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = '删除时清理'
+      ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
+      // Fresh draft: no hint under record.created.
+      expect(hintOf(container)).toBeNull()
+
+      epSetSelect(container.querySelector('[data-field="triggerType"]') as HTMLElement, 'record.deleted')
+      await flushPromises()
+
+      const actionSelect = actionSelectOf(container)
+      const optionOf = (value: string) => epOptions(actionSelect).find((option) => option.value === value)
+      expect(optionOf('update_record')?.disabled).toBe(true)
+      expect(optionOf('delete_record')?.disabled).toBe(true)
+      expect(optionOf('lock_record')?.disabled).toBe(true)
+      expect(optionOf('send_webhook')?.disabled).toBe(false)
+      expect(optionOf('send_notification')?.disabled).toBe(false)
+      expect(optionOf('create_record')?.disabled).toBe(false)
+
+      // The default new-rule action is update_record → it is now a self-mutation: hint + blocked save.
+      expect(hintOf(container)?.textContent).toContain(HINT_ZH)
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+      saveBtn.click()
+      expect(saved).not.toHaveBeenCalled()
+
+      // Picking a non-mutating action clears the hint and unblocks save; the payload carries the new shape.
+      epSetSelect(actionSelect, 'send_webhook')
+      await flushPromises()
+      expect(hintOf(container)).toBeNull()
+      expect(saveBtn.disabled).toBe(false)
+      saveBtn.click()
+      expect(saved).toHaveBeenCalledTimes(1)
+      expect(saved.mock.calls[0][0].triggerType).toBe('record.deleted')
+      expect(saved.mock.calls[0][0].actions[0].type).toBe('send_webhook')
+    }, SELF_MUTATION_TIMEOUT_MS)
+
+    it('an EXISTING record.deleted → delete_record rule stays loadable: action shown, hint shown, save blocked until the trigger changes', async () => {
+      const saved = vi.fn()
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        rule: fakeRule({
+          name: 'Cleanup on delete',
+          triggerType: 'record.deleted',
+          actionType: 'delete_record',
+          actionConfig: {},
+          actions: [{ type: 'delete_record', config: {} }],
+        }),
+        onSave: saved,
+      })
+      await flushPromises()
+
+      // Loadable: the persisted action is still the selected value (its option is disabled, not dropped).
+      const actionSelect = actionSelectOf(container)
+      expect(epSelectValue(actionSelect)).toBe('delete_record')
+      expect(epOptions(actionSelect).find((option) => option.value === 'delete_record')?.disabled).toBe(true)
+      expect(hintOf(container)?.textContent).toContain(HINT_EN)
+      // The persisted delete keeps its pre-checked acknowledgement — the ONLY blocker is the self-mutation.
+      expect((container.querySelector('[data-field="deleteRecordAck"] input') as HTMLInputElement).checked).toBe(true)
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+      saveBtn.click()
+      expect(saved).not.toHaveBeenCalled()
+
+      // Moving the trigger away is a valid fix: hint gone, option re-enabled, save unblocked.
+      epSetSelect(container.querySelector('[data-field="triggerType"]') as HTMLElement, 'record.created')
+      await flushPromises()
+      expect(hintOf(container)).toBeNull()
+      expect(epOptions(actionSelect).find((option) => option.value === 'delete_record')?.disabled).toBe(false)
+      expect(saveBtn.disabled).toBe(false)
+      saveBtn.click()
+      expect(saved).toHaveBeenCalledTimes(1)
+      expect(saved.mock.calls[0][0].triggerType).toBe('record.created')
+      expect(saved.mock.calls[0][0].actions).toEqual([{ type: 'delete_record', config: {} }])
+    }, SELF_MUTATION_TIMEOUT_MS)
+
+    it('a loaded record.deleted rule whose delete_record carries a COMPLETE cross-base target is NOT flagged', async () => {
+      const crossBase = { targetBaseId: 'base_b', targetSheetId: 'sheet_b', targetRecordId: 'rec_b' }
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        rule: fakeRule({
+          name: 'Cross-base cleanup',
+          triggerType: 'record.deleted',
+          actionType: 'delete_record',
+          actionConfig: crossBase,
+          actions: [{ type: 'delete_record', config: crossBase }],
+        }),
+      })
+      await flushPromises()
+
+      expect(epSelectValue(actionSelectOf(container))).toBe('delete_record')
+      expect(container.querySelector('[data-action-index="0"] [data-field="crossBaseTarget"]')).toBeTruthy()
+      expect(hintOf(container)).toBeNull()
+    }, SELF_MUTATION_TIMEOUT_MS)
+
+    it('a loaded record.deleted rule with update_record nested in an EDITABLE condition_branch is flagged on the branch action card', async () => {
+      const branchConfig = {
+        branches: [
+          {
+            key: 'b1',
+            label: 'B1',
+            conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_1', operator: 'equals', value: 'x' }] },
+            actions: [{ type: 'update_record', config: { fields: { fld_2: 'cleaned' } } }],
+          },
+        ],
+      }
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        rule: fakeRule({
+          name: 'Branching cleanup',
+          triggerType: 'record.deleted',
+          actionType: 'condition_branch',
+          actionConfig: branchConfig,
+          actions: [{ type: 'condition_branch', config: branchConfig }],
+          executionMode: 'workflow_job_v1',
+        } as never),
+      })
+      await flushPromises()
+
+      expect(epSelectValue(actionSelectOf(container))).toBe('condition_branch')
+      // Editable (not read-only): the branch builder rendered its sub-action select.
+      expect(container.querySelector('[data-action-index="0"] [data-field="condition-branch-readonly"]')).toBeNull()
+      expect(hintOf(container)?.textContent).toContain(HINT_EN)
+      expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(true)
+      // The nested select also refuses to offer the mutating type while the trigger is record.deleted.
+      const nestedSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__branch-action .el-select') as HTMLElement
+      expect(epOptions(nestedSelect).find((option) => option.value === 'update_record')?.disabled).toBe(true)
+      expect(epOptions(nestedSelect).find((option) => option.value === 'send_notification')?.disabled).toBe(false)
+    }, SELF_MUTATION_TIMEOUT_MS)
+
+    it('a loaded READ-ONLY condition_branch (shape the v1 UI cannot edit) is still flagged from its preserved original', async () => {
+      // `send_email` is outside the v1 branch-editable set → the branch is kept read-only with its raw config
+      // preserved verbatim; the nested update_record inside it still RUNS, so the hint must still name it.
+      const branchConfig = {
+        branches: [
+          {
+            key: 'b1',
+            conditions: { conjunction: 'AND', conditions: [{ fieldId: 'fld_1', operator: 'equals', value: 'x' }] },
+            actions: [
+              { type: 'update_record', config: { fields: { fld_2: 'cleaned' } } },
+              { type: 'send_email', config: { recipients: ['ops@example.test'], subjectTemplate: 's', bodyTemplate: 'b' } },
+            ],
+          },
+        ],
+      }
+      const { container } = mount({
+        visible: true,
+        sheetId: 'sheet_1',
+        fields,
+        rule: fakeRule({
+          name: 'Read-only branching cleanup',
+          triggerType: 'record.deleted',
+          actionType: 'condition_branch',
+          actionConfig: branchConfig,
+          actions: [{ type: 'condition_branch', config: branchConfig }],
+          executionMode: 'workflow_job_v1',
+        } as never),
+      })
+      await flushPromises()
+
+      expect(container.querySelector('[data-action-index="0"] [data-field="condition-branch-readonly"]')).toBeTruthy()
+      expect(hintOf(container)?.textContent).toContain(HINT_EN)
+    }, SELF_MUTATION_TIMEOUT_MS)
+
+    it('authoring a condition_branch under record.deleted flags its default update_record sub-action until it is changed', async () => {
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+      await flushPromises()
+      ;(container.querySelector('[data-field="name"]') as HTMLInputElement).value = 'Branching cleanup'
+      ;(container.querySelector('[data-field="name"]') as HTMLInputElement).dispatchEvent(new Event('input'))
+      epSetSelect(container.querySelector('[data-field="triggerType"]') as HTMLElement, 'record.deleted')
+      await flushPromises()
+
+      const actionSelect = actionSelectOf(container)
+      epSetSelect(actionSelect, 'condition_branch')
+      await flushPromises()
+      // A fresh condition_branch opens with one branch whose default sub-action is update_record.
+      expect(hintOf(container)?.textContent).toContain(HINT_EN)
+      const nestedSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__branch-action .el-select') as HTMLElement
+      expect(epSelectValue(nestedSelect)).toBe('update_record')
+      expect(epOptions(nestedSelect).find((option) => option.value === 'update_record')?.disabled).toBe(true)
+
+      // Swapping the sub-action for a non-mutating one clears the hint.
+      epSetSelect(nestedSelect, 'send_notification')
+      await flushPromises()
+      expect(hintOf(container)).toBeNull()
+    }, SELF_MUTATION_TIMEOUT_MS)
+  })
 })

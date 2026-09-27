@@ -153,33 +153,64 @@
                   class="integration-workbench__run-error"
                   data-testid="run-provenance-error"
                 >{{ runProvenanceError }}</p>
-                <ol
-                  v-else-if="runProvenanceEntries.length > 0"
-                  class="integration-workbench__record-list"
-                  data-testid="run-provenance-timeline"
-                >
-                  <li
-                    v-for="(entry, index) in runProvenanceEntries"
-                    :key="`${entry.runId}-${entry.eventIndex}`"
-                    :data-testid="`run-provenance-entry-${index}`"
+                <template v-else>
+                  <ol
+                    v-if="runProvenanceEntries.length > 0"
+                    class="integration-workbench__record-list"
+                    data-testid="run-provenance-timeline"
                   >
-                    <div class="integration-workbench__provenance-event-head">
-                      <strong>{{ entry.eventType }}</strong>
-                      <span>#{{ entry.eventIndex }}</span>
-                      <span>{{ entry.at }}</span>
-                    </div>
-                    <small>rowId {{ entry.rowId }}</small>
-                    <p
-                      v-if="rowProvenanceAttrsSummary(entry.attrs)"
-                      class="integration-workbench__provenance-attrs"
-                    >{{ rowProvenanceAttrsSummary(entry.attrs) }}</p>
-                  </li>
-                </ol>
-                <div
-                  v-else
-                  class="integration-workbench__empty"
-                  data-testid="run-provenance-empty"
-                >{{ bi('这条运行没有溯源事件。', 'This run recorded no provenance events.') }}</div>
+                    <li
+                      v-for="(entry, index) in runProvenanceEntries"
+                      :key="`${entry.runId}-${entry.eventIndex}`"
+                      :data-testid="`run-provenance-entry-${index}`"
+                    >
+                      <div class="integration-workbench__provenance-event-head">
+                        <strong>{{ entry.eventType }}</strong>
+                        <span>#{{ entry.eventIndex }}</span>
+                        <span>{{ entry.at }}</span>
+                      </div>
+                      <small>rowId {{ entry.rowId }}</small>
+                      <p
+                        v-if="rowProvenanceAttrsSummary(entry.attrs)"
+                        class="integration-workbench__provenance-attrs"
+                      >{{ rowProvenanceAttrsSummary(entry.attrs) }}</p>
+                    </li>
+                  </ol>
+                  <!-- "No events" is claimed only when the timeline is also known to be complete;
+                       an empty page that discloses more events gets the notice below instead. -->
+                  <div
+                    v-else-if="!runProvenanceTruncationNotice"
+                    class="integration-workbench__empty"
+                    data-testid="run-provenance-empty"
+                  >{{ bi('这条运行没有溯源事件。', 'This run recorded no provenance events.') }}</div>
+                  <!-- f-prov200: the route answers one page (server default 200 events). Whenever
+                       the page says more exist — or does not say it is complete — the operator is
+                       told the timeline on screen is NOT the whole audit trail, and gets a way to
+                       read the next page when the server handed out a cursor. -->
+                  <div
+                    v-if="runProvenanceTruncationNotice"
+                    class="integration-workbench__hint integration-workbench__run-provenance-truncated"
+                    role="status"
+                    data-testid="run-provenance-truncated"
+                  >
+                    <span>{{ runProvenanceTruncationNotice }}</span>
+                    <button
+                      v-if="runProvenanceCanLoadMore"
+                      type="button"
+                      class="integration-workbench__link-button"
+                      data-testid="run-provenance-load-more"
+                      :disabled="runProvenanceLoadingMore"
+                      @click="loadMoreRunProvenance"
+                    >{{ runProvenanceLoadingMore
+                      ? bi('加载中…', 'Loading…')
+                      : bi('加载更多', 'Load more') }}</button>
+                  </div>
+                  <p
+                    v-if="runProvenanceLoadMoreError"
+                    class="integration-workbench__run-error"
+                    data-testid="run-provenance-load-more-error"
+                  >{{ runProvenanceLoadMoreError }}</p>
+                </template>
               </div>
             </div>
           </div>
@@ -353,6 +384,14 @@ defineProps<{
   runProvenanceLoading: boolean
   runProvenanceError: string
   runProvenanceEntries: IntegrationProvenanceTimelineEntry[]
+  // f-prov200: '' only when the timeline on screen is known to be complete; otherwise the copy
+  // the truncation notice shows. `runProvenanceCanLoadMore` is true when the last page handed out
+  // a cursor; `loadMoreRunProvenance` appends that page (the parent owns the fetch).
+  runProvenanceTruncationNotice: string
+  runProvenanceCanLoadMore: boolean
+  runProvenanceLoadingMore: boolean
+  runProvenanceLoadMoreError: string
+  loadMoreRunProvenance: () => Promise<void>
   toggleRunProvenance: () => Promise<void>
   deadLetterErrorLabel: (deadLetter: IntegrationDeadLetter) => string
   deadLetterErrorHint: (deadLetter: IntegrationDeadLetter) => string | null
@@ -638,6 +677,14 @@ defineProps<{
   margin-top: 8px;
   display: grid;
   gap: 4px;
+}
+
+/* f-prov200: the "timeline is not complete" notice + its 加载更多 button, on one wrapping line. */
+.integration-workbench__run-provenance-truncated {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 /* DF-N2-3 (read-only): cross-run provenance timeline (per dead-letter row). */

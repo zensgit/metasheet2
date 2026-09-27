@@ -346,13 +346,82 @@ SELECT id, active, created_by
 \endif
 
 
+-- ── Q7 host set: ONE definition, used by all three Q7 predicates below ──────
+-- 2026-09-27: the three Q7 predicates each carried the literal
+--   '^https?://(127[.]|10[.]|192[.]168[.]|169[.]254[.]|0[.]0[.]0[.]0|localhost|\[::1\])'
+--   which was NARROWER than the runtime guard it stands in for (no 172.16/12,
+--   no `*.internal` / `*.local` / `*.localhost`, no IPv6 ULA / link-local /
+--   `::ffff:`-mapped IPv4, no URL with userinfo) and, being a bare PREFIX
+--   test, also counted DNS names such as `10.x.example` or
+--   `localhost.example`. It is now this one pattern, stored with \gset and
+--   used as   <url> ~* :'inv_internal_target_re'
+-- THE SET, class by class from
+--   packages/core-backend/src/multitable/webhook-ssrf-guard.ts, which judges
+--   the WHATWG-parsed `new URL(raw).hostname` (:93, :98):
+--     IPv4 literal (:32-37)  0/8, 127/8, 10/8, 172.16/12 (second octet 16..31
+--                            exactly), 192.168/16, 169.254/16
+--     name (:78-83)          localhost, *.localhost, *.internal, *.local
+--                            (one trailing dot stripped)
+--     IPv6 literal (:43-69)  ::1, ::, ::ffff:<internal IPv4> (dotted or two
+--                            hex pieces), ULA fc00::/7 (first piece
+--                            fc00-fdff), link-local fe80::/10 (fe80-febf)
+--   The guard's DNS half (:109-118) is not a property of stored data.
+-- URL SHAPES mirrored from the parser: any case; any run of / or \ after the
+--   scheme; optional userinfo (the LAST @ wins); optional port 0..65535
+--   (leading zeros or empty allowed). EXACT, not prefix: the host must end
+--   where the authority ends (/ ? # \ or end of string), so `172.15.x`,
+--   `172.32.x`, `172.016.0.1` (octal = 172.14.0.1), `10.x.example`,
+--   `[fec0::1]`, an IPv6 the parser rejects, or a port > 65535 do NOT match.
+-- STILL A FLOOR (it can miss, it never adds): spellings the parser
+--   normalises — `127.1`, `2130706433`, `0x7f.0.0.1`, leading-zero octets,
+--   `[::0.0.0.1]`, percent-encoded / non-ASCII hosts, `xn--` labels — are
+--   not counted.
+-- A constant SELECT (reads no table, prints nothing). Like every other literal
+--   in this file it assumes standard_conforming_strings = on (the default).
+WITH atom AS (
+  SELECT '(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'::text AS o,  -- 0..255, no leading zero (0NN is octal to the parser)
+         '[0-9a-f]{1,4}'::text                                 AS h   -- one IPv6 piece
+), part AS (
+  SELECT h,
+         '(?:(?:0|10|127)(?:[.]' || o || '){3}'                         -- internal IPv4 (guard :32-37)
+           || '|172[.](?:1[6-9]|2[0-9]|3[01])(?:[.]' || o || '){2}'
+           || '|(?:192[.]168|169[.]254)(?:[.]' || o || '){2})' AS v4,
+         o || '(?:[.]' || o || '){3}'                          AS d4    -- dotted tail inside an IPv6
+    FROM atom
+), v6 AS (
+  SELECT h, v4,
+         -- lookahead: the brackets hold an IPv6 the parser accepts — 8 pieces;
+         -- 6 + dotted tail; or ONE `::` with <= 7 pieces (<= 5 + dotted tail)
+         '(?=(?:(?:' || h || ':){7}' || h
+           || '|(?:' || h || ':){6}' || d4
+           || '|(?=(?::*' || h || '){0,7}:*\])(?:' || h || '(?::' || h || ')*)?::(?:' || h || '(?::' || h || ')*)?'
+           || '|(?=(?::*' || h || '){0,5}:*' || d4 || '\])(?:' || h || '(?::' || h || ')*)?::(?:' || h || ':)*' || d4
+           || ')\])' AS valid
+    FROM part
+)
+SELECT '^https?:[/\\]*'                                   -- scheme, then any run of / or \
+    || '(?:[^/?#\\]*@)?'                                  -- userinfo
+    || '(?:' || v4 || '[.]?'                              -- IPv4 literal (a trailing dot is dropped)
+    || '|(?![-a-z0-9_.]*xn--)(?:(?:[-a-z0-9_.]*[.])?localhost|[-a-z0-9_.]*[.](?:internal|local))[.]?'  -- name (:78-83)
+    || '|\[' || valid || '(?:'                            -- IPv6 literal (:43-69):
+    ||      '[0:]*(?:0{0,3}1)?'                           --   :: and ::1
+    ||   '|[0:]*ffff:(?:' || v4                           --   ::ffff: + internal IPv4, dotted or hex
+    ||      '|(?:0{0,2}[0-9a-f]{1,2}|0?a[0-9a-f]{2}|7f[0-9a-f]{2}|ac1[0-9a-f]|c0a8|a9fe):' || h || ')'
+    ||   '|(?:f[cd][0-9a-f]|fe[89ab])[0-9a-f]:[0-9a-f:.]*'  --   ULA fc00::/7, link-local fe80::/10
+    || ')\])'
+    || '(?::0*(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])?)?'  -- port
+    || '(?:[/?#\\]|$)'                                    -- the authority ends
+       AS inv_internal_target_re
+  FROM v6
+\gset
+
+
 \if :has_rules_actions
 -- ── Q7 (SUPPLEMENTARY, denominator context). Rows aimed at an obvious ──────
 -- ── internal literal, EITHER scheme — already failing to deliver before   ──
 -- ── either guard lands; context, not new breakage.                        ──
--- Caveat: this is a FLOOR, not the guard's real predicate (misses 172.16/12,
---   `*.internal`/`*.local` names, IPv6 ULA/link-local, `::ffff:`-mapped IPv4,
---   all of which `webhook-ssrf-guard.ts` DOES refuse once wired).
+-- Caveat: a FLOOR of the guard's literal / name refusals (the host set above);
+--   targets that only resolve to an internal address are out of reach.
 -- F6: narrowed to the SAME read paths as Q2 — an internal-looking literal in a
 --   `body` member is a payload value, not something this process dials. The
 --   `$.**` reading is kept alongside as the labelled upper bound.
@@ -369,7 +438,7 @@ SELECT 'automation_rules' AS source,
                     ]) AS p(read_path)
                CROSS JOIN LATERAL jsonb_path_query(ar.actions, p.read_path) AS v(url_value)
               WHERE jsonb_typeof(v.url_value) = 'string'
-                AND btrim(v.url_value #>> '{}') ~* '^https?://(127[.]|10[.]|192[.]168[.]|169[.]254[.]|0[.]0[.]0[.]0|localhost|\[::1\])'
+                AND btrim(v.url_value #>> '{}') ~* :'inv_internal_target_re'
            ) AS narrow_hit,
            EXISTS (
              SELECT 1
@@ -379,7 +448,7 @@ SELECT 'automation_rules' AS source,
                    ) AS m(key, val)
               WHERE lower(regexp_replace(m.key, '[^A-Za-z0-9]', '', 'g'))
                     IN ('url', 'weburl', 'webhookurl', 'endpoint', 'endpointurl', 'targeturl', 'callbackurl')
-                AND btrim(m.val) ~* '^https?://(127[.]|10[.]|192[.]168[.]|169[.]254[.]|0[.]0[.]0[.]0|localhost|\[::1\])'
+                AND btrim(m.val) ~* :'inv_internal_target_re'
            ) AS upper_bound_hit
       FROM automation_rules ar
   ) q7;
@@ -388,7 +457,7 @@ SELECT 'automation_rules' AS source,
 \if :has_webhooks_url
 SELECT 'multitable_webhooks' AS source, count(*)::int AS internal_target_rows
   FROM multitable_webhooks
- WHERE btrim(url) ~* '^https?://(127[.]|10[.]|192[.]168[.]|169[.]254[.]|0[.]0[.]0[.]0|localhost|\[::1\])';
+ WHERE btrim(url) ~* :'inv_internal_target_re';
 \endif
 
 

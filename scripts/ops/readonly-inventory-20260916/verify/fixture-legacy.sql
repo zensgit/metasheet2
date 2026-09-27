@@ -63,7 +63,10 @@ CREATE TABLE multitable_webhooks (
 
 INSERT INTO multitable_webhooks VALUES
   ('w-b-http',  'fake http',  'http://fake-sub-b.invalid/hook',  true,  'user-fake-9'),
-  ('w-b-https', 'fake https', 'https://fake-secure-b.invalid/h', true,  'user-fake-9');
+  ('w-b-https', 'fake https', 'https://fake-secure-b.invalid/h', true,  'user-fake-9'),
+-- F7: link-local IPv6 (https, so Q5/Q6 skip it) — Q7's webhook half must still
+--     count it on this schema, where Q7's automation_rules half is skipped.
+  ('w-b-internal', 'fake internal', 'https://[fe80::1]/h',        true,  'user-fake-9');
 
 CREATE TABLE users (
   id          text PRIMARY KEY,

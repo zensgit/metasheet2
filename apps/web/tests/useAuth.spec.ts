@@ -79,6 +79,33 @@ describe('useAuth', () => {
     expect(store.workspaceId).toBe('org-a')
   })
 
+  // Judge E (todo-center-design-lock v2.14 §5) wiring fact: `ApprovalTodoBadge.vue` and
+  // `useApprovalAdminCapability` both subscribe to `onAuthPrincipalChange` (from
+  // `composables/authPrincipal`) to void an in-flight read on any principal transition. This test
+  // is the actual proof for the org-switch half of that wiring -- until now nothing asserted
+  // whether `setExplicitSessionOrg` reaches `onAuthPrincipalChange` at all, and it was documented
+  // (incorrectly, see the corrected note in ApprovalTodoBadge.vue) as NOT doing so.
+  it('fires the auth-principal-change notification synchronously on a successful org switch, storage already updated', () => {
+    const jwt = (tenantId: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    const original = jwt('org-a')
+    const next = jwt('org-b')
+    auth.setToken(original)
+    // Subscribe only AFTER `setToken` (which notifies too) so this isolates the org-switch call.
+    let tokenAtNotify: string | null = null
+    const changed = vi.fn(() => { tokenAtNotify = auth.getToken() })
+    const unsubscribe = onAuthPrincipalChange(changed)
+    try {
+      expect(auth.setExplicitSessionOrg(next, 'org-b', original)).toBe(true)
+      expect(changed).toHaveBeenCalledTimes(1)
+      // Ordering claim this test also pins: unlike `setToken`/`clearToken` (which notify BEFORE
+      // writing storage, requiring subscribers to defer their re-read to a microtask),
+      // `setExplicitSessionOrg` writes `auth_token`/`jwt` first and notifies last -- a subscriber
+      // reading storage synchronously inside the callback already sees the new org's token.
+      expect(tokenAtNotify).toBe(next)
+    } finally { unsubscribe() }
+  })
+
   it.each(['', 'invalid', 'a.b.c'])('rejects invalid explicit-session responses without changing storage: %s', (token) => {
     const auth = useAuth()
     auth.setToken('original')
