@@ -74,6 +74,12 @@ import type {
   InstallTemplateInput,
   InstallTemplateResult,
   TemplateDryRunResult,
+  CopySheetInput,
+  CopySheetDryRunResult,
+  CopySheetFieldDisclosure,
+  CopySheetViewFilterDrop,
+  CopySheetResult,
+  MetaSheetCopiedFrom,
   ApiToken,
   ApiTokenCreateResult,
   MetaTemplate,
@@ -326,6 +332,200 @@ export const RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME = 'MultitableRecordApprovalInF
 
 export function isRecordApprovalInFlightError(value: unknown): value is RecordApprovalInFlightError {
   return value instanceof Error && value.name === RECORD_APPROVAL_IN_FLIGHT_ERROR_NAME
+}
+
+// -------------------------------------------------------------------------------------------------
+// 复制数据表（含数据）S1 — wire adapters (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md)
+//
+// The S1 backend is built in parallel against the same ADR, so EVERY wire -> UI mapping for this
+// feature lives in the functions below and nowhere else: `readSheetCopiedFrom` (sheet provenance, ADR
+// §6), `buildCopySheetRequestBody` (§7.1), `normalizeCopySheetDryRun` (§3), `normalizeCopySheetResult`
+// (§3/§8) and `buildCopySheetError` (§8). If the merged backend spells a key differently, the fix is a
+// one-line change in one of these, never a hunt through components.
+// -------------------------------------------------------------------------------------------------
+
+export const COPY_SHEET_ERROR_NAME = 'MultitableCopySheetError'
+
+/**
+ * A refused copy / dry-run. Carries only what the dialog renders from: the HTTP status, the stable
+ * `code`, and the values-free structured extras the ADR allows (§8: `{ rowIndex, fieldId }` of the
+ * FIRST failing row; `{ rowCount, limit }` of a size refusal). The server's `message` is deliberately
+ * NOT carried: `RecordValidationError` prose can contain cell values (ADR §1.6 / §7.3), so `.message`
+ * is always this client's own code-based fallback, never server text.
+ */
+export interface CopySheetError extends Error {
+  status: number
+  code?: string
+  rowIndex?: number
+  fieldId?: string
+  rowCount?: number
+  limit?: number
+}
+
+export function isCopySheetError(value: unknown): value is CopySheetError {
+  return value instanceof Error && value.name === COPY_SHEET_ERROR_NAME
+}
+
+function copySheetCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * THE one place the sheet-provenance wire shape is read (ADR §6: `copiedFrom: { kind, at, sheetId? }`
+ * on /context `sheet` / `sheets[]` and GET /sheets items; DB columns `copied_from_kind` / `copied_at`).
+ * Returns null for anything that is not a copy (absent / null / non-object / empty kind), so the
+ * badge fails closed. `sheetId` is intentionally not surfaced — the badge does not need it and the
+ * server only sends it to readers of the source (§6).
+ */
+export function readSheetCopiedFrom(sheet: unknown): MetaSheetCopiedFrom | null {
+  if (!isPlainObject(sheet)) return null
+  const wire = sheet.copiedFrom
+  if (!isPlainObject(wire)) return null
+  const kind = typeof wire.kind === 'string' ? wire.kind.trim() : ''
+  if (!kind) return null
+  return {
+    kind,
+    pluginManaged: kind === 'plugin-managed',
+    at: typeof wire.at === 'string' && wire.at.trim() ? wire.at : null,
+  }
+}
+
+/**
+ * Request body for BOTH `…/copy` and `…/copy/dry-run` (ADR §7.1: `{ name?, withData, permissionMode }`).
+ * `permissionMode` is pinned to the literal 'inherit' — the only S1 mode — regardless of what a caller
+ * passes, and `withData` is strict-boolean (anything but `true` is `false`). A blank name is omitted so
+ * the server applies its own default-name hygiene (CS-4).
+ */
+export function buildCopySheetRequestBody(input: CopySheetInput): { name?: string; withData: boolean; permissionMode: 'inherit' } {
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  return {
+    ...(name ? { name } : {}),
+    withData: input.withData === true,
+    permissionMode: 'inherit',
+  }
+}
+
+/**
+ * Dry-run answer (ADR §3). Column disclosures are read from `disclosures` (`{ fieldId, reason|code }`)
+ * and/or `fieldDisclosures`; dropped view-filter leaves from `viewFilterLeavesDropped` (`{ viewId,
+ * count }`) and/or `disclosures` items shaped `{ code|reason: 'VIEW_FILTER_LEAF_DROPPED', viewId,
+ * count }`. Anything malformed is skipped rather than guessed at.
+ */
+export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
+  const data = isPlainObject(body) ? body : {}
+  const fieldDisclosures: CopySheetFieldDisclosure[] = []
+  const viewFilterLeavesDropped: CopySheetViewFilterDrop[] = []
+  const items: unknown[] = [
+    ...(Array.isArray(data.disclosures) ? data.disclosures : []),
+    ...(Array.isArray(data.fieldDisclosures) ? data.fieldDisclosures : []),
+    ...(Array.isArray(data.viewFilterLeavesDropped)
+      ? data.viewFilterLeavesDropped.map((item) => (isPlainObject(item) ? { reason: 'VIEW_FILTER_LEAF_DROPPED', ...item } : item))
+      : []),
+  ]
+  for (const item of items) {
+    if (!isPlainObject(item)) continue
+    const reason = (optionalStringValue(item.reason) ?? optionalStringValue(item.code) ?? '').trim()
+    const viewId = optionalStringValue(item.viewId)
+    if (reason === 'VIEW_FILTER_LEAF_DROPPED') {
+      const count = copySheetCount(item.count)
+      if (viewId && count !== null && count > 0) viewFilterLeavesDropped.push({ viewId, count })
+      continue
+    }
+    const fieldId = optionalStringValue(item.fieldId)
+    if (fieldId && reason) fieldDisclosures.push({ fieldId, reason })
+  }
+  return {
+    rowCount: copySheetCount(data.rowCount),
+    fieldCount: copySheetCount(data.fieldCount),
+    overLimit: data.overLimit === true || data.exceedsLimit === true,
+    rowLimit: copySheetCount(data.rowLimit) ?? copySheetCount(data.limit),
+    fieldDisclosures,
+    viewFilterLeavesDropped,
+    autoNumberRenumberedRows: copySheetCount(data.autoNumberRenumberedRows) ?? 0,
+  }
+}
+
+/**
+ * 201 answer (ADR §3/§8): the new sheet (required — a body without `sheet.id` is a broken answer and
+ * throws), `Idempotent-Replayed: true` -> `replayed`, `formulaRecompute: { attempted, recomputed,
+ * failed, errorCode? }`, and optional values-free counts for the toast (top-level or under `summary`).
+ */
+export function normalizeCopySheetResult(body: unknown, replayedHeader: string | null): CopySheetResult {
+  const data = isPlainObject(body) ? body : {}
+  const rawSheet = isPlainObject(data.sheet) ? data.sheet : null
+  const id = rawSheet ? optionalStringValue(rawSheet.id) : undefined
+  if (!rawSheet || !id) {
+    const error = new Error('Invalid copy sheet response') as Error & { status?: number }
+    error.name = 'MultitableApiError'
+    throw error
+  }
+  const sheet: MetaSheet = {
+    ...(rawSheet as Partial<MetaSheet>),
+    id,
+    name: stringValue(rawSheet.name),
+    baseId: optionalStringValue(rawSheet.baseId) ?? null,
+  }
+  const recompute = isPlainObject(data.formulaRecompute) ? data.formulaRecompute : null
+  const counts = isPlainObject(data.summary) ? data.summary : data
+  return {
+    sheet,
+    replayed: (replayedHeader ?? '').trim().toLowerCase() === 'true',
+    formulaRecompute: recompute
+      ? {
+        attempted: copySheetCount(recompute.attempted),
+        recomputed: copySheetCount(recompute.recomputed),
+        failed: recompute.failed === true || (copySheetCount(recompute.failed) ?? 0) > 0,
+        errorCode: optionalStringValue(recompute.errorCode) ?? null,
+      }
+      : null,
+    summary: {
+      rowCount: copySheetCount(counts.rowCount),
+      fieldCount: copySheetCount(counts.fieldCount),
+      permissionRowCount: copySheetCount(counts.permissionRowCount),
+      recordPermissionRowCount: copySheetCount(counts.recordPermissionRowCount),
+    },
+  }
+}
+
+/**
+ * Non-2xx -> CopySheetError. Reads the code from the shared `{ error: { code } }` / `{ error: 'CODE' }`
+ * envelopes, and the structured extras from the error object and its `details` (innermost wins, the
+ * same tolerance `recordApprovalConflictFields` uses). The first-failure row may sit flat or under
+ * `firstFailure` / `failure` (it cannot sit flat AND keep its own inner `code`, so the inner code is
+ * never read — the UI never shows it). Server `message` is dropped on purpose (see CopySheetError).
+ */
+export function buildCopySheetError(status: number, body: unknown, isZh: boolean): CopySheetError {
+  const envelope = isPlainObject(body) ? body : {}
+  const errorValue = envelope.error
+  const errorObject = isPlainObject(errorValue) ? errorValue : {}
+  const code = typeof errorValue === 'string'
+    ? optionalStringValue(errorValue)
+    : optionalStringValue(errorObject.code)
+  const fields: Record<string, unknown> = { ...errorObject, ...(isPlainObject(errorObject.details) ? errorObject.details : {}) }
+  const failure = isPlainObject(fields.firstFailure)
+    ? fields.firstFailure
+    : isPlainObject(fields.failure) ? fields.failure : fields
+  const error = new Error(apiDefaultErrorMessage(code, status, isZh)) as CopySheetError
+  error.name = COPY_SHEET_ERROR_NAME
+  error.status = status
+  if (code) error.code = code
+  // Extras are carried ONLY for the refusal they belong to: the row position/column of the first
+  // failing row only for COPY_ROW_VALIDATION_FAILED, counts only for a size refusal. Anything else —
+  // above all the 403 gate refusal — can never transport a count or a column id to the UI, even if a
+  // backend attached one (a hidden column's id on a 403 would be exactly the oracle ADR §1.9 forbids).
+  if (code === 'COPY_ROW_VALIDATION_FAILED') {
+    const rowIndex = copySheetCount(failure.rowIndex)
+    if (rowIndex !== null) error.rowIndex = rowIndex
+    const fieldId = optionalStringValue(failure.fieldId)
+    if (fieldId) error.fieldId = fieldId
+  }
+  if (code === 'COPY_TOO_LARGE' || status === 413) {
+    const rowCount = copySheetCount(fields.rowCount)
+    if (rowCount !== null) error.rowCount = rowCount
+    const limit = copySheetCount(fields.limit)
+    if (limit !== null) error.limit = limit
+  }
+  return error
 }
 
 // The 409 body may arrive flat (`{ code, approvalInstanceId, ... }`), under the shared
@@ -2390,6 +2590,38 @@ export class MultitableApiClient implements CommentsApiClient {
   async restoreSheet(sheetId: string): Promise<{ restored: string; sheet: MetaSheet }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore`, { method: 'POST' })
     return this.parseJson(res)
+  }
+
+  // 复制数据表（含数据）S1 (ADR multitable-copy-sheet-with-data-adr-20260926.md §3/§7.1). Session-only
+  // routes; the server runs the full-table-read gate on the source and the Base-writable gate on the
+  // target BEFORE counting anything, so a refusal (403 COPY_SOURCE_NOT_FULLY_READABLE) never carries a
+  // count. Both methods throw CopySheetError (never the server's message) on any non-2xx.
+  async dryRunCopySheet(sheetId: string, input: CopySheetInput): Promise<CopySheetDryRunResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/copy/dry-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildCopySheetRequestBody(input)),
+    })
+    return normalizeCopySheetDryRun(await this.readCopySheetBody(res))
+  }
+
+  // 201 (or a 201 replay with `Idempotent-Replayed: true` inside the server's dedupe window) returns the
+  // new sheet. The caller refreshes the sheet list and selects it; this client caches no sheet list.
+  async copySheet(sheetId: string, input: CopySheetInput): Promise<CopySheetResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/copy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildCopySheetRequestBody(input)),
+    })
+    const body = await this.readCopySheetBody(res)
+    return normalizeCopySheetResult(body, res.headers.get('Idempotent-Replayed'))
+  }
+
+  private async readCopySheetBody(res: Response): Promise<unknown> {
+    const raw = await res.text()
+    const body = raw ? safeParseJson(raw) : null
+    if (!res.ok) throw buildCopySheetError(res.status, body, this.resolveIsZh())
+    return unwrapDataBody(body) ?? body
   }
 
   async listSheetPermissions(sheetId: string): Promise<{ items: MetaSheetPermissionEntry[] }> {

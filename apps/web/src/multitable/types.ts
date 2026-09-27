@@ -68,6 +68,31 @@ export interface MetaSheet {
   baseId?: string | null
   name: string
   description?: string | null
+  /**
+   * 「复制数据表」provenance, as the server sends it on /context `sheets[]` / `sheet` and GET /sheets
+   * (ADR multitable-copy-sheet-with-data-adr-20260926.md §6: `copiedFrom: { kind, at, sheetId? }`).
+   * Never read this directly — go through `readSheetCopiedFrom` in api/client.ts, the ONE place the
+   * wire shape is mapped (so a backend casing change is a one-line fix there). Absent/null = not a copy.
+   */
+  copiedFrom?: MetaSheetCopiedFromWire | null
+}
+
+/** Wire shape of `MetaSheet.copiedFrom` (ADR §6). Loosely typed on purpose: the adapter validates it. */
+export interface MetaSheetCopiedFromWire {
+  kind?: unknown
+  at?: unknown
+  sheetId?: unknown
+}
+
+/**
+ * Normalized copy provenance (output of `readSheetCopiedFrom`). `kind` is the server's
+ * `copied_from_kind` ('user' | 'plugin-managed' in S1); `pluginManaged` is true only for the exact
+ * 'plugin-managed' kind — the 「不随 PLM 刷新」 badge keys on it. `at` is the copy timestamp, if sent.
+ */
+export interface MetaSheetCopiedFrom {
+  kind: string
+  pluginManaged: boolean
+  at: string | null
 }
 
 export interface MetaField {
@@ -543,6 +568,14 @@ export interface MetaCapabilities {
    * `createApproval` checks on its own side). Never derived from canEditRecord or a role string.
    */
   canSubmitApproval?: boolean
+  /**
+   * 「复制数据表」entry visibility (ADR multitable-copy-sheet-with-data-adr-20260926.md §3): set by
+   * /context as `hasFullTableReadAccess` on the CURRENT sheet ∧ `resolveBaseWritable` on its Base.
+   * OPTIONAL and fail-closed — absent/false hides every copy entry (rail action + the 存为模板 hand-off
+   * link). Display only: POST /sheets/:id/copy re-runs both gates server-side. Single-sheet by
+   * construction, like canDeleteSheet — never applied to the rail's other rows.
+   */
+  canCopySheet?: boolean
 }
 
 export interface YjsPresenceUser {
@@ -898,6 +931,76 @@ export interface TemplateDryRunResult {
   wouldCreate: TemplateDryRunWouldCreate
   conflicts: TemplateDryRunConflict[]
   installable: boolean
+}
+
+// --- 复制数据表（含数据）S1 (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md) ---
+// Request body of BOTH `POST /api/multitable/sheets/:sheetId/copy` and `…/copy/dry-run` (ADR §7.1).
+// S1 accepts only `permissionMode: 'inherit'` and always targets the source sheet's own Base (no
+// `targetBaseId` until S2). The api client builds the body — callers never hand-assemble it.
+export type CopySheetPermissionMode = 'inherit'
+
+export interface CopySheetInput {
+  name?: string
+  withData: boolean
+  permissionMode: CopySheetPermissionMode
+}
+
+/** Per-column disclosure reason codes the dry-run returns (ADR §3). Unknown codes are kept as strings. */
+export type CopySheetFieldDisclosureReason =
+  | 'ATTACHMENT_BLANKED'
+  | 'SELF_LINK_BLANKED'
+  | 'MIRROR_NOT_BUILT'
+  | 'DEPENDS_ON_BLANKED_COLUMN'
+  | 'BUTTON_DISABLED'
+  | 'PROPERTY_HIDDEN_BLANKED'
+
+export interface CopySheetFieldDisclosure {
+  fieldId: string
+  reason: string
+}
+
+export interface CopySheetViewFilterDrop {
+  viewId: string
+  count: number
+}
+
+/**
+ * Normalized dry-run answer (zero-write). Only produced AFTER the server's two-sided gate passed —
+ * a gate refusal is a 403 with no counts at all, so every count here is safe to show the caller.
+ * `rowCount`/`fieldCount`/`rowLimit` are null when the server did not send them.
+ */
+export interface CopySheetDryRunResult {
+  rowCount: number | null
+  fieldCount: number | null
+  overLimit: boolean
+  rowLimit: number | null
+  fieldDisclosures: CopySheetFieldDisclosure[]
+  viewFilterLeavesDropped: CopySheetViewFilterDrop[]
+  autoNumberRenumberedRows: number
+}
+
+/** Post-commit formula recompute status carried by the 201 body (ADR §3/§8). */
+export interface CopySheetFormulaRecompute {
+  attempted: number | null
+  recomputed: number | null
+  failed: boolean
+  errorCode: string | null
+}
+
+/** Optional values-free counts for the success toast (ADR §3). Each is null when not sent. */
+export interface CopySheetResultSummary {
+  rowCount: number | null
+  fieldCount: number | null
+  permissionRowCount: number | null
+  recordPermissionRowCount: number | null
+}
+
+export interface CopySheetResult {
+  sheet: MetaSheet
+  /** True when the server answered 201 with `Idempotent-Replayed: true` (same intent within the window). */
+  replayed: boolean
+  formulaRecompute: CopySheetFormulaRecompute | null
+  summary: CopySheetResultSummary
 }
 
 // --- Input types ---
