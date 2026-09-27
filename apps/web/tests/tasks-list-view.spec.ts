@@ -33,6 +33,7 @@ vi.mock('../src/tasks/tasksBadgeBus', () => ({
 }))
 
 import TasksView from '../src/views/tasks/TasksView.vue'
+import { formatViewerInstant } from '../src/tasks/tasksDateDisplay'
 
 let app: App | null = null
 let host: HTMLElement | null = null
@@ -113,6 +114,26 @@ describe('TasksView ready-state list rendering (gate: empty vs error must never 
     expect(shown(el, 'tasks-list-empty')).toBeNull()
     expect(shown(el, 'tasks-list-error')).toBeNull()
     expect(el.textContent).toContain('Task One')
+  })
+
+  // `due_at` used to render as the raw ISO instant. It now goes through the SAME viewer-local
+  // formatter the detail page already uses (`tasksDateDisplay.ts`) — mirrored here for the list
+  // row, comparing against a live call to the same function (not a hardcoded string) so this
+  // stays correct regardless of the host machine's own time zone.
+  it('formats a row due_at viewer-local (not the raw ISO instant)', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', due_at: '2026-10-01T09:00:00Z' })] })
+    const el = await mountReady()
+
+    const due = shown(el, 'tasks-list-item-due')
+    expect(due?.textContent).toBe(formatViewerInstant('2026-10-01T09:00:00Z'))
+    expect(due?.textContent).not.toBe('2026-10-01T09:00:00Z')
+  })
+
+  it('renders no due element for a row with due_at: null', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', due_at: null })] })
+    const el = await mountReady()
+
+    expect(shown(el, 'tasks-list-item-due')).toBeNull()
   })
 
   it('renders tasks-list-empty for a 200 with zero items', async () => {
@@ -447,6 +468,160 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
 
     expect(shown(el, 'tasks-view-org-missing')).toBeNull()
     expect(shown(el, 'tasks-list-empty')).toBeTruthy()
+  })
+})
+
+// Mirrors the detail page's own navigate-away guard (`taskId.value !== id`, see
+// `tasks-detail-view.spec.ts`'s "navigate-away while a complete/reopen request is pending" block)
+// for the LIST side: a row action (or the create form) started on one list VIEW must not paint its
+// banner/guidance over a DIFFERENT view the viewer switched to before the response landed. The
+// navigate-to-`/tasks/:id` half of this guard needs a REAL router (a mocked, non-reactive `route`
+// object here can't simulate that transition) and lives in `tasks-view-transitions.spec.ts`
+// instead.
+describe('TasksView list — late action result after switching list view (M2 list-page-token guard)', () => {
+  it('a PENDING error from complete that settles AFTER switching list view shows no banner, and does not reload the new view', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
+    const pendingComplete = deferred<{ kind: 'error'; status: number }>()
+    h.completeTask.mockReturnValue(pendingComplete.promise)
+    const el = await mountReady()
+
+    const completeButton = shown(el, 'tasks-complete-button') as HTMLButtonElement
+    completeButton.click()
+    await flush()
+
+    const followingButton = shown(el, 'tasks-view-switch-following') as HTMLButtonElement
+    followingButton.click()
+    await flush()
+    expect(el.textContent).toContain('Following Item')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+
+    pendingComplete.resolve({ kind: 'error', status: 500 })
+    await flush()
+
+    // A mutant that drops the page-token check would set `actionErrorKind` here (the ONLY thing
+    // that could produce this banner) and leave the abandoned "Following Item" view undisturbed
+    // either way — the banner is what proves the guard fired, not the list content.
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(el.textContent).toContain('Following Item')
+    expect(h.notifyTasksChanged).not.toHaveBeenCalled()
+  })
+
+  it('a PENDING org_missing from complete that settles AFTER switching list view shows no guidance banner', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
+    const pendingComplete = deferred<{ kind: 'org_missing' }>()
+    h.completeTask.mockReturnValue(pendingComplete.promise)
+    const el = await mountReady()
+
+    const completeButton = shown(el, 'tasks-complete-button') as HTMLButtonElement
+    completeButton.click()
+    await flush()
+
+    const followingButton = shown(el, 'tasks-view-switch-following') as HTMLButtonElement
+    followingButton.click()
+    await flush()
+
+    pendingComplete.resolve({ kind: 'org_missing' })
+    await flush()
+
+    // Without the guard, `applyActionOutcome('org_missing')` sets `orgMissingFromAction`, which
+    // replaces the ENTIRE ready UI (including the "Following Item" view the viewer switched to).
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(el.textContent).toContain('Following Item')
+  })
+
+  it('a PENDING ok from reopen that settles AFTER switching list view still notifies the badge bus but does not issue a needless extra reload', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
+    const pendingReopen = deferred<{ kind: 'ok' }>()
+    h.reopenTask.mockReturnValue(pendingReopen.promise)
+    const el = await mountReady()
+
+    const reopenButton = shown(el, 'tasks-reopen-button') as HTMLButtonElement
+    reopenButton.click()
+    await flush()
+
+    const followingButton = shown(el, 'tasks-view-switch-following') as HTMLButtonElement
+    followingButton.click()
+    await flush()
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+
+    pendingReopen.resolve({ kind: 'ok' })
+    await flush()
+
+    // Still exactly 2 list reads — "following" is now the CURRENT view (the viewer switched TO
+    // it), so a mutant that drops the guard wouldn't show wrong data here; it would just let this
+    // stale 'ok' call `loadList()` a needless THIRD time, re-fetching the same current view. The
+    // badge bus still hears about it: the mutation really happened server-side.
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(h.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(el.textContent).toContain('Following Item')
+  })
+
+  it('a PENDING org_missing from create that settles AFTER switching list view shows no guidance banner', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
+    const pendingCreate = deferred<{ kind: 'org_missing' }>()
+    h.createTask.mockReturnValue(pendingCreate.promise)
+    const el = await mountReady()
+
+    const titleInput = shown(el, 'tasks-create-title') as HTMLInputElement
+    titleInput.value = 'New task'
+    titleInput.dispatchEvent(new Event('input'))
+    await flush()
+    const form = shown(el, 'tasks-create-form') as HTMLFormElement
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+
+    const followingButton = shown(el, 'tasks-view-switch-following') as HTMLButtonElement
+    followingButton.click()
+    await flush()
+
+    pendingCreate.resolve({ kind: 'org_missing' })
+    await flush()
+
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(el.textContent).toContain('Following Item')
+  })
+
+  // The task really was created server-side even though the viewer switched away before hearing
+  // back — leaving the typed title sitting in the input would invite a duplicate submit the next
+  // time they're back on the list, even though nothing failed.
+  it('a PENDING ok from create that settles AFTER switching list view still clears the title and notifies, without a needless extra reload', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
+    const pendingCreate = deferred<{ kind: 'ok'; id: string }>()
+    h.createTask.mockReturnValue(pendingCreate.promise)
+    const el = await mountReady()
+
+    const titleInput = shown(el, 'tasks-create-title') as HTMLInputElement
+    titleInput.value = 'New task'
+    titleInput.dispatchEvent(new Event('input'))
+    await flush()
+    const form = shown(el, 'tasks-create-form') as HTMLFormElement
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+
+    const followingButton = shown(el, 'tasks-view-switch-following') as HTMLButtonElement
+    followingButton.click()
+    await flush()
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+
+    pendingCreate.resolve({ kind: 'ok', id: 't10' })
+    await flush()
+
+    expect(titleInput.value).toBe('')
+    expect(h.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    // Still exactly 2 list reads — a mutant that drops the guard would let this stale 'ok' call
+    // `loadList()` a needless THIRD time.
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(el.textContent).toContain('Following Item')
   })
 })
 

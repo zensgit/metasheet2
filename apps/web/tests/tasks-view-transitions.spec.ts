@@ -16,6 +16,12 @@ import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-
  *   2. The list-generation guard (`listGeneration`) — switching views while a previous view's
  *      request is still pending, then resolving the OLDER (superseded) request LAST, must not
  *      overwrite the newer view's already-rendered data.
+ *   3. The list-page-token guard (`listPageToken`) — a list row's complete/reopen (or the create
+ *      form) started while showing `/tasks`, then navigating to `/tasks/:id` BEFORE the response
+ *      lands, must not paint a late forbidden/error/org_missing banner over the detail page now
+ *      showing. Mirrors `tasks-detail-view.spec.ts`'s own "navigate-away while a complete/reopen
+ *      request is pending" block, from the list side. The switch-list-view half of this same guard
+ *      needs no real navigation and is covered in `tasks-list-view.spec.ts` instead.
  *
  * Mount pattern follows this repo's established real-router idiom (see
  * `approval-form-builder-route-leak.spec.ts` / `dataSourcesRouteRedirect.spec.ts`): a real
@@ -27,6 +33,10 @@ const h_ = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
   listTasks: vi.fn(),
   getTask: vi.fn(),
+  createTask: vi.fn(),
+  completeTask: vi.fn(),
+  reopenTask: vi.fn(),
+  notifyTasksChanged: vi.fn(),
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -36,9 +46,13 @@ vi.mock('../src/tasks/tasksContext', () => ({
 vi.mock('../src/tasks/tasksApi', () => ({
   listTasks: h_.listTasks,
   getTask: h_.getTask,
-  createTask: vi.fn(),
-  completeTask: vi.fn(),
-  reopenTask: vi.fn(),
+  createTask: h_.createTask,
+  completeTask: h_.completeTask,
+  reopenTask: h_.reopenTask,
+}))
+
+vi.mock('../src/tasks/tasksBadgeBus', () => ({
+  notifyTasksChanged: h_.notifyTasksChanged,
 }))
 
 import TasksView from '../src/views/tasks/TasksView.vue'
@@ -51,6 +65,39 @@ function taskItem(over: Partial<{ id: string; title: string; status: 'open' | 'd
     completion_mode: 'all' as const,
     created_by: 'u1',
     due_at: null,
+    ...over,
+  }
+}
+
+interface TaskDetailFixture {
+  id: string
+  title: string
+  status: 'open' | 'done'
+  completionMode: 'all' | 'any'
+  createdBy: string
+  dueAt: string | null
+  dueDate: string | null
+  dueTime: string | null
+  timeZone: string | null
+  assignees: { userId: string; completedAt: string | null }[]
+  canComplete: boolean
+  canReopen: boolean
+}
+
+function taskDetail(over: Partial<TaskDetailFixture> = {}): TaskDetailFixture {
+  return {
+    id: 't1',
+    title: 'Task One',
+    status: 'open',
+    completionMode: 'all',
+    createdBy: 'u1',
+    dueAt: null,
+    dueDate: null,
+    dueTime: null,
+    timeZone: null,
+    assignees: [],
+    canComplete: true,
+    canReopen: true,
     ...over,
   }
 }
@@ -97,10 +144,18 @@ async function mountAt(path: string): Promise<HTMLElement> {
   return container
 }
 
+function shown(el: HTMLElement, testid: string): HTMLElement | null {
+  return el.querySelector(`[data-testid="${testid}"]`)
+}
+
 beforeEach(() => {
   h_.loadTasksContext.mockReset().mockResolvedValue({ state: 'ready', orgId: 'org1' })
   h_.listTasks.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
   h_.getTask.mockReset().mockResolvedValue({ kind: 'not_found' })
+  h_.createTask.mockReset()
+  h_.completeTask.mockReset()
+  h_.reopenTask.mockReset()
+  h_.notifyTasksChanged.mockReset()
 })
 
 afterEach(() => {
@@ -202,5 +257,107 @@ describe('TasksView list-generation guard — out-of-order resolution (P2-2)', (
 
     expect(el.querySelector('[data-testid="tasks-list-error"]')).toBeNull()
     expect(el.textContent).toContain('Following Item')
+  })
+})
+
+// P2-2 item 3 (see file header) — the list-page-token guard's navigate-to-detail half. Mirrors
+// `tasks-detail-view.spec.ts`'s "navigate-away while a complete/reopen request is pending" block,
+// from the list side: a row action started on `/tasks` must not paint its outcome over the
+// `/tasks/:id` page the viewer navigated to before the response landed.
+describe('TasksView list row action — navigate to /tasks/:id while pending (list-page-token guard)', () => {
+  it('completing t1 on the list, then navigating to /tasks/t2 before it resolves: a late ok notifies the badge but does not reload the abandoned list', async () => {
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+    h_.getTask.mockImplementation(async (id: string) =>
+      ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    const pendingComplete = deferred<{ kind: 'ok'; done: boolean }>()
+    h_.completeTask.mockReturnValue(pendingComplete.promise)
+    const el = await mountAt('/tasks')
+
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    await router!.push('/tasks/t2')
+    await flush()
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
+
+    pendingComplete.resolve({ kind: 'ok', done: true })
+    await flush()
+
+    // Still t2, and only the ONE list read from mounting — a mutant that drops the page-token
+    // check would call `loadList()` again here (the ONLY thing that could produce a second read).
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
+    expect(h_.listTasks).toHaveBeenCalledTimes(1)
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('reopening t2 on the list, then navigating to /tasks/t1 before it resolves: a late ok notifies the badge but does not reload the abandoned list', async () => {
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+    h_.getTask.mockImplementation(async (id: string) =>
+      ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    const pendingReopen = deferred<{ kind: 'ok' }>()
+    h_.reopenTask.mockReturnValue(pendingReopen.promise)
+    const el = await mountAt('/tasks')
+
+    ;(shown(el, 'tasks-reopen-button') as HTMLButtonElement).click()
+    await flush()
+    await router!.push('/tasks/t1')
+    await flush()
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t1')
+
+    pendingReopen.resolve({ kind: 'ok' })
+    await flush()
+
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t1')
+    expect(h_.listTasks).toHaveBeenCalledTimes(1)
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['forbidden', { kind: 'forbidden' as const }],
+    ['error', { kind: 'error' as const, status: 500 }],
+    ['org_missing', { kind: 'org_missing' as const }],
+  ])('a PENDING %s from a list COMPLETE that settles AFTER navigating to /tasks/t2 shows NO banner/guidance on t2', async (_label, result) => {
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+    h_.getTask.mockImplementation(async (id: string) =>
+      ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    const pendingComplete = deferred<typeof result>()
+    h_.completeTask.mockReturnValueOnce(pendingComplete.promise)
+    const el = await mountAt('/tasks')
+
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    await router!.push('/tasks/t2')
+    await flush()
+
+    pendingComplete.resolve(result)
+    await flush()
+
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
+  })
+
+  it.each([
+    ['forbidden', { kind: 'forbidden' as const }],
+    ['error', { kind: 'error' as const, status: 500 }],
+    ['org_missing', { kind: 'org_missing' as const }],
+  ])('a PENDING %s from a list REOPEN that settles AFTER navigating to /tasks/t2 shows NO banner/guidance on t2', async (_label, result) => {
+    h_.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+    h_.getTask.mockImplementation(async (id: string) =>
+      ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    const pendingReopen = deferred<typeof result>()
+    h_.reopenTask.mockReturnValueOnce(pendingReopen.promise)
+    const el = await mountAt('/tasks')
+
+    ;(shown(el, 'tasks-reopen-button') as HTMLButtonElement).click()
+    await flush()
+    await router!.push('/tasks/t2')
+    await flush()
+
+    pendingReopen.resolve(result)
+    await flush()
+
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
   })
 })

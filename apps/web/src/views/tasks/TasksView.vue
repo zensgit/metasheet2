@@ -153,7 +153,7 @@
               data-testid="tasks-list-item-link"
             >{{ task.title }}</router-link>
             <span class="tasks-view__item-status">{{ task.status === 'done' ? '已完成' : '进行中' }}</span>
-            <span v-if="task.due_at" class="tasks-view__item-due">{{ task.due_at }}</span>
+            <span v-if="task.due_at" class="tasks-view__item-due" data-testid="tasks-list-item-due">{{ formatViewerInstant(task.due_at) }}</span>
             <button
               v-if="task.status === 'open'"
               type="button"
@@ -287,6 +287,14 @@ const actionErrorMessage = computed(() => {
 // newer one's result — the same shape as this codebase's other transition-safe reads.
 let listGeneration = 0
 
+// Identifies "the list page" a row action (complete/reopen) — or the create form — started from,
+// mirroring the detail page's own `taskId.value !== id` guard (see `onDetailComplete`/
+// `onDetailReopen` below). Bumped whenever the viewer leaves the list for a reason an in-flight
+// action can't see coming: navigating to `/tasks/:id` (the `watch(taskId, ...)` handler below) or
+// switching to a different list view (`switchView`). A captured token that no longer matches after
+// an await means the response belongs to a page the viewer isn't looking at anymore.
+let listPageToken = 0
+
 async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
@@ -324,6 +332,7 @@ async function loadDetail(id: string): Promise<void> {
 
 function switchView(view: TaskView): void {
   if (view === currentView.value) return
+  listPageToken += 1
   currentView.value = view
   void loadList()
 }
@@ -333,8 +342,22 @@ async function onCreate(): Promise<void> {
   if (!title || creating.value) return
   creating.value = true
   createErrorVisible.value = false
+  const page = listPageToken
   try {
     const result = await createTask({ title, completionMode: newCompletionMode.value })
+    // Same page-moved-on guard as `onComplete`/`onReopen` below — a late org_missing here would
+    // otherwise flip `orgMissingFromAction`, which the detail-page template checks FIRST (before
+    // its own states), painting the guidance block over whatever the viewer navigated to. A late
+    // 'ok' still clears the typed title (the task really was created — leaving stale text sitting
+    // in the input invites a duplicate submit next time the viewer is back on the list) and still
+    // notifies the badge bus; it just has no current list to reload.
+    if (page !== listPageToken) {
+      if (result.kind === 'ok') {
+        newTitle.value = ''
+        notifyTasksChanged()
+      }
+      return
+    }
     if (result.kind === 'ok') {
       newTitle.value = ''
       notifyTasksChanged()
@@ -377,13 +400,29 @@ function applyActionOutcome(kind: 'ok' | 'org_missing' | 'forbidden' | 'not_foun
 
 async function onComplete(id: string): Promise<void> {
   actionErrorKind.value = null
+  const page = listPageToken
   const result = await completeTask(id)
+  // Guard against the viewer having moved on WHILE the request was in flight — navigated to a
+  // task's detail page, or switched to a different list view — mirroring the detail page's own
+  // `taskId.value !== id` guard below. A late forbidden/error/org_missing must not paint its
+  // banner/guidance over wherever the viewer is looking now, and a late 'ok' has no list left to
+  // reload here (wherever they moved to already loaded its own data) — but it really did happen
+  // server-side, so the shared badge bus still needs to hear about it.
+  if (page !== listPageToken) {
+    if (result.kind === 'ok') notifyTasksChanged()
+    return
+  }
   if (applyActionOutcome(result.kind) === 'ok') await loadList()
 }
 
 async function onReopen(id: string): Promise<void> {
   actionErrorKind.value = null
+  const page = listPageToken
   const result = await reopenTask(id, 'self')
+  if (page !== listPageToken) {
+    if (result.kind === 'ok') notifyTasksChanged()
+    return
+  }
   if (applyActionOutcome(result.kind) === 'ok') await loadList()
 }
 
@@ -452,6 +491,11 @@ watch(taskId, (id) => {
   // viewer just navigated to (there is no still-in-flight request FOR that page yet).
   detailActionToken += 1
   detailActionPending.value = false
+  // Same idea for the LIST page's own row actions / create form (see `listPageToken` above) — any
+  // route change away from (or between) `/tasks/:id` routes also means "the list" is no longer
+  // what's showing, so a list action still in flight from before this navigation must be treated
+  // as stale too.
+  listPageToken += 1
   if (id) {
     void loadDetail(id)
   } else {
