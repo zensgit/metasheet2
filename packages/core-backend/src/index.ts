@@ -116,6 +116,7 @@ import {
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
 import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
+import { assertSheetNotCopiedFromPluginManaged } from './multitable/copied-sheet-plugin-scope'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
   validateStockPreparationPersistUnitOfWorkInput,
@@ -2320,6 +2321,11 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
+              // Copy-sheet CS-14 / §6 (S8): a snapshot copied FROM a plugin-managed sheet has no
+              // registry row (it is deliberately unmanaged), which under the default 'observe' mode
+              // below would make it reachable by EVERY plugin. Refuse it FIRST, in every mode, off the
+              // server-written `meta_sheets.copied_from_kind` column — before the registry/mode decision.
+              await assertSheetNotCopiedFromPluginManaged(txQuery, { pluginName, sheetId })
               // P0-S S4 — sheet-scope enforcement mode. `assertPluginOwnsSheet` throws on a
               // DIFFERENT-owner sheet in every mode; for an UNREGISTERED sheet it returns
               // false (test-pinned legacy tolerance). Default 'observe' logs+continues (zero

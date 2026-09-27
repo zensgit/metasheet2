@@ -58,6 +58,7 @@ import {
   requiresOwnWriteRowPolicy,
   resolveBaseReadable,
   resolveBaseReadableForAccess,
+  resolveBaseWritable,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
   resolveSheetCapabilitiesForAccess,
@@ -1636,7 +1637,7 @@ export function expressionHasRelationAggregationButNotSole(expression: string): 
 // extractor misses (the link arg is a string literal, not a {fld} ref). Registering it makes a link-field
 // edit recompute the aggregation; the criteria's {fld} value ref is caught by the normal extractor. The
 // FOREIGN target/criteria deps are handled parse-side by the taint (read mask) + fan-out paths.
-function extractRelationAggregationLinkFieldId(expression: string): string | null {
+export function extractRelationAggregationLinkFieldId(expression: string): string | null {
   const e = expression.startsWith('=') ? expression.slice(1) : expression
   return parseRelationAggregationCall(e.trim())?.linkFieldId ?? null
 }
@@ -3332,6 +3333,34 @@ export async function recalculateFormulaFieldsForActor(
 }
 
 /**
+ * Copy-sheet S1 (ADR §3 / §7.2 step 7): recompute EVERY formula field of a freshly copied sheet for the
+ * given (chunk of) new record ids, after the copy transaction COMMITTED. Same chokepoint as the
+ * expression-change bulk recompute (`explicitFormulaFieldIds` = all formula fields, `changedFieldIds`
+ * `[]`), same writer-taint discipline under the copier's actor context — a field the copier may not read
+ * is skipped, never persisted degraded. Exported for `routes/multitable-copy-sheet.ts`.
+ */
+export async function recalculateAllFormulaFieldsForActor(
+  actorId: string | null,
+  query: QueryFn,
+  sheetId: string,
+  fields: UniverMetaField[],
+  recordIds: string[],
+): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
+  const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
+  if (formulaFieldIds.size === 0 || recordIds.length === 0) return []
+  return recalculateFormulaFields(
+    buildWriterTaintContext(actorId),
+    query,
+    sheetId,
+    fields,
+    recordIds,
+    [],
+    undefined,
+    formulaFieldIds,
+  )
+}
+
+/**
  * A-min-create (design #2255): compute a NEWLY created / submitted record's same-record formulas
  * for the FIRST time, with lookup/rollup hydrated in-memory so a formula-over-lookup sees the
  * actual value instead of the absent-on-reload `0`. Run only AFTER insert + meta_links exist.
@@ -4504,7 +4533,7 @@ function toDashboardMetricNumber(value: unknown): number | null {
   return toComparableNumber(value)
 }
 
-function getDbNotReadyMessage(err: unknown): string | null {
+export function getDbNotReadyMessage(err: unknown): string | null {
   const msg = err instanceof Error ? err.message : String(err ?? '')
   // SQLSTATE 为主信号:42P01 缺表 / 42703 缺列。中文 locale 下 PG 的散文被翻译成
   // 「关系 "x" 不存在」/「字段 x 不存在」,英文整句匹配会漏判 → 原来会退化成 500。
@@ -4710,7 +4739,7 @@ const INVALID_DISPLAY_NAME_MESSAGE =
  * 等于把租户交给请求方自选。没有可信租户时返回 null,而 null 在 SQL 里用
  * `IS NOT DISTINCT FROM` 匹配,只会匹到同样没有租户的行 —— 不会跨到任何具体租户。
  */
-function resolveTemplateTenantId(req: Request): string | null {
+export function resolveTemplateTenantId(req: Request): string | null {
   const tenantId = req.authenticatedTenantId
   return typeof tenantId === 'string' && tenantId.trim().length > 0 ? tenantId.trim() : null
 }
@@ -4825,7 +4854,7 @@ function sendInvalidDisplayName(res: Response) {
  *
  * `name` must already be TRIMMED by the caller; trimming is unchanged by this gate.
  */
-function sendDisplayNameHygieneRefusal(res: Response, name: string): Response | null {
+export function sendDisplayNameHygieneRefusal(res: Response, name: string): Response | null {
   const refusal = checkDisplayNameHygiene(name)
   if (!refusal) return null
   return res.status(400).json({ ok: false, error: { code: refusal.code, message: refusal.message } })
@@ -5645,12 +5674,14 @@ function asProducerTxnQueryable(
   }
 }
 
-const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
-const FIELD_PERMISSION_HISTORY_KEYS = ['fieldId', 'subjectType', 'subjectId', 'visible', 'readOnly'] as const
-const VIEW_PERMISSION_HISTORY_KEYS = ['viewId', 'subjectType', 'subjectId', 'permission'] as const
-const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
+// Exported (copy-sheet S1): routes/multitable-copy-sheet.ts records the copied permission / view rows with the
+// SAME snapshot shapes + key lists the authoring PUT routes below use, so Time Machine reads one vocabulary.
+export const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
+export const FIELD_PERMISSION_HISTORY_KEYS = ['fieldId', 'subjectType', 'subjectId', 'visible', 'readOnly'] as const
+export const VIEW_PERMISSION_HISTORY_KEYS = ['viewId', 'subjectType', 'subjectId', 'permission'] as const
+export const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
 
-function permissionConfigEntityId(scope: 'field' | 'sheet' | 'view', parts: string[]): string {
+export function permissionConfigEntityId(scope: 'field' | 'sheet' | 'view', parts: string[]): string {
   return `${scope}:${JSON.stringify(parts)}`
 }
 
@@ -5670,7 +5701,7 @@ function viewConfigSnapshotFromRow(row: any): Record<string, unknown> {
   }
 }
 
-function viewConfigSnapshot(view: {
+export function viewConfigSnapshot(view: {
   name: string
   type: string
   filterInfo?: Record<string, unknown>
@@ -5690,7 +5721,7 @@ function viewConfigSnapshot(view: {
   }
 }
 
-function fieldPermissionSnapshot(args: {
+export function fieldPermissionSnapshot(args: {
   fieldId: string
   subjectType: string
   subjectId: string
@@ -5706,7 +5737,7 @@ function fieldPermissionSnapshot(args: {
   }
 }
 
-function viewPermissionSnapshot(args: {
+export function viewPermissionSnapshot(args: {
   viewId: string
   subjectType: string
   subjectId: string
@@ -5720,7 +5751,7 @@ function viewPermissionSnapshot(args: {
   }
 }
 
-function sheetPermissionSnapshot(args: {
+export function sheetPermissionSnapshot(args: {
   subjectType: string
   subjectId: string
   accessLevel: string
@@ -5742,6 +5773,27 @@ function isImageMimeType(mimeType: string | null | undefined): boolean {
 }
 
 const serializeAttachmentRow = serializeAttachmentRowShared
+
+/**
+ * Copy-sheet S1 provenance (ADR CS-14 / §6): `copiedFrom: { kind, at, sheetId? } | null` from the three
+ * column-tolerant `to_jsonb(...) ->> '...'` reads (`copied_from_kind` / `copied_at` / `copied_from_sheet_id`).
+ * `kind` ∈ 'user' | 'plugin-managed' drives the「快照副本」/「不随 PLM 刷新」badges; `sheetId` is included ONLY
+ * when the caller passed `includeSourceSheetId` (= the caller proved the actor can read the source sheet) —
+ * the source id is never handed to someone who may not read that sheet. Null for a non-copy (or a database
+ * that has not run the provenance migration: the tolerant read answers NULL there).
+ */
+export function serializeCopiedFrom(
+  row: { copied_from_kind?: unknown; copied_at?: unknown; copied_from_sheet_id?: unknown } | null | undefined,
+  includeSourceSheetId = false,
+): { kind: string; at: string | null; sheetId?: string } | null {
+  const kind = typeof row?.copied_from_kind === 'string' && row.copied_from_kind.length > 0 ? row.copied_from_kind : null
+  if (!kind) return null
+  const at = typeof row?.copied_at === 'string' && row.copied_at.length > 0 ? row.copied_at : null
+  const sheetId = includeSourceSheetId && typeof row?.copied_from_sheet_id === 'string' && row.copied_from_sheet_id.length > 0
+    ? row.copied_from_sheet_id
+    : undefined
+  return { kind, at, ...(sheetId ? { sheetId } : {}) }
+}
 
 function serializeBaseRow(row: any): UniverMetaBase {
   return {
@@ -7334,7 +7386,7 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *      equals the set with that axis lifted.
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
  */
-async function hasFullTableReadAccess(
+export async function hasFullTableReadAccess(
   req: Request | undefined,
   query: QueryFn,
   sheetId: string,
@@ -8940,6 +8992,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const sheetRowResult = resolvedSheetId
         ? await pool.query(
           `SELECT s.id, s.base_id, s.name, s.description, (to_jsonb(s) ->> 'system_kind') AS system_kind,
+                  (to_jsonb(s) ->> 'copied_from_kind') AS copied_from_kind,
+                  (to_jsonb(s) ->> 'copied_at') AS copied_at,
+                  (to_jsonb(s) ->> 'copied_from_sheet_id') AS copied_from_sheet_id,
                   b.id AS base_ref_id, b.name AS base_name, b.icon AS base_icon,
                   b.color AS base_color, b.owner_id AS base_owner_id, b.workspace_id AS base_workspace_id
            FROM meta_sheets s
@@ -8978,7 +9033,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const baseRow = (baseRowResult as any).rows?.[0]
       const sheetListResult = resolvedBaseId
         ? await pool.query(
-          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind
+          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
+                  (to_jsonb(meta_sheets) ->> 'copied_from_kind') AS copied_from_kind,
+                  (to_jsonb(meta_sheets) ->> 'copied_at') AS copied_at
            FROM meta_sheets
            WHERE base_id = $1 AND deleted_at IS NULL
            ORDER BY created_at ASC`,
@@ -9130,6 +9187,40 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
       }
 
+      // Copy-sheet S1 (ADR §3): `canCopySheet` = the SAME two gates the copy route enforces —
+      // hasFullTableReadAccess (source, three axes, no counts) ∧ resolveBaseWritable (the current base) ∧ not
+      // a projection base. Display-only: the server re-gates on POST …/copy. Same fail-closed posture as
+      // canDeleteSheet: a thrown probe hides the entry, never 500s the load, and logs values-free.
+      let canCopySheet = false
+      if (effectiveSheetId && resolvedBaseId && access.userId && resolvedBaseId !== APPROVAL_PROJECTION_BASE_ID
+        && !isElearningProjectionBaseIdCandidate(resolvedBaseId)) {
+        try {
+          canCopySheet = (await hasFullTableReadAccess(req, pool.query.bind(pool), effectiveSheetId, access, capabilities))
+            && (await resolveBaseWritable(access.userId, pool.query.bind(pool), resolvedBaseId))
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: copy-sheet gate probe failed for canCopySheet; failing closed to false',
+            { reason: 'copy_sheet_gate_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canCopySheet = false
+        }
+      }
+      // Copy-sheet provenance on the SELECTED sheet: the source id is disclosed only to an actor who can read
+      // that source sheet (ADR §6 — `sheetId` 只对能读源表者透出); the badge fields (kind, at) need no gate.
+      let selectedCopiedFrom: ReturnType<typeof serializeCopiedFrom> = null
+      if (selectedSheet) {
+        const sourceSheetId = typeof selectedSheet.copied_from_sheet_id === 'string' ? selectedSheet.copied_from_sheet_id : ''
+        let canReadSource = false
+        if (sourceSheetId) {
+          try {
+            canReadSource = (await resolveReadableSheetIds(req, pool.query.bind(pool), [sourceSheetId], access)).has(sourceSheetId)
+          } catch {
+            canReadSource = false
+          }
+        }
+        selectedCopiedFrom = serializeCopiedFrom(selectedSheet, canReadSource)
+      }
+
       return res.json({
         ok: true,
         data: {
@@ -9140,6 +9231,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               baseId: typeof selectedSheet.base_id === 'string' ? selectedSheet.base_id : null,
               name: String(selectedSheet.name),
               description: typeof selectedSheet.description === 'string' ? selectedSheet.description : null,
+              copiedFrom: selectedCopiedFrom,
             }
             : null,
           // #5825: filter the RAW rows (they carry `system_kind`; the serialized shape below does not).
@@ -9151,6 +9243,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
+            copiedFrom: serializeCopiedFrom(row),
           })),
           views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
           // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
@@ -9187,6 +9280,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // ANDed with "not managed" (see the local `canDeleteSheet` computed above) — the route
             // itself still 409s a managed sheet's delete as the backstop.
             canDeleteSheet,
+            // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
+            canCopySheet,
           },
           capabilityOrigin,
           fieldPermissions,
@@ -9212,7 +9307,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(401).json({ error: 'Authentication required' })
       }
       const result = await pool.query(
-        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
+        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
+                (to_jsonb(meta_sheets) ->> 'copied_from_kind') AS copied_from_kind,
+                (to_jsonb(meta_sheets) ->> 'copied_at') AS copied_at
+           FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
       )
       const readableSheetRows = await filterReadableSheetRowsForAccess(
         pool.query.bind(pool),
@@ -9224,6 +9322,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         baseId: typeof r.base_id === 'string' ? r.base_id : null,
         name: String(r.name),
         description: typeof r.description === 'string' ? r.description : null,
+        // Copy-sheet S1 badge (ADR CS-14): kind/at only — the source id is never listed here.
+        copiedFrom: serializeCopiedFrom(r),
       }))
       return res.json({ ok: true, data: { sheets } })
     } catch (err) {

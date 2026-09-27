@@ -66,9 +66,13 @@ import express from 'express'
 import request from 'supertest'
 
 import {
+  COPY_SHEET_INTENT_KIND,
   TemplateInstallLedgerUnavailableError,
+  buildIntentScopeDigest,
   buildTemplateInstallScopeDigest,
+  runDeduplicatedIntent,
   runDeduplicatedTemplateInstall,
+  toIntentScope,
 } from '../../src/multitable/template-install-dedupe'
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -159,8 +163,10 @@ function createStore(opts: StoreOptions = {}) {
       if (opts.ledgerError) throwLedgerError()
 
       if (normalized.startsWith('INSERT INTO meta_multitable_template_installs')) {
-        const [digest, tenantId, actorId, templateId, workspaceId, baseId, sheetIds, response] =
-          params as [string, string | null, string, string, string | null, string, string[], string]
+        // 第 9 个参数是一般化后的 intent_kind(迁移 zzzz20260927121000);fake 照真库一样存下来,
+        // 读侧逐列核对 intent_kind 时才有东西可比。
+        const [digest, tenantId, actorId, templateId, workspaceId, baseId, sheetIds, response, intentKind] =
+          params as [string, string | null, string, string, string | null, string, string[], string, string]
         ledger.set(digest, {
           scope_digest: digest,
           tenant_id: tenantId,
@@ -171,6 +177,7 @@ function createStore(opts: StoreOptions = {}) {
           sheet_ids: sheetIds,
           response: JSON.parse(response),
           installed_at: clock,
+          intent_kind: intentKind,
         })
         return { rows: [], rowCount: 1 }
       }
@@ -806,6 +813,7 @@ describe('#5861 — runDeduplicatedTemplateInstall(模块级)', () => {
           sheet_ids: params[6],
           response: JSON.parse(String(params[7])),
           tenant_id: params[1], actor_id: params[2], template_id: params[3], workspace_id: params[4],
+          intent_kind: params[8],
         }
         return { rows: [] as unknown[] }
       }
@@ -847,6 +855,13 @@ describe('#5861 — runDeduplicatedTemplateInstall(模块级)', () => {
     expect(insert).toContain('$7::text[]')
     expect(insert).toContain('$8::jsonb')
     expect(insert).toContain('ON CONFLICT (scope_digest) DO UPDATE')
+    // ④b 一般化(ADR CS-16):intent_kind 随行写入且 UPSERT 时一并覆盖;模板安装写 'template-install'。
+    expect(insert).toContain('intent_kind')
+    expect(insert).toContain('intent_kind = EXCLUDED.intent_kind')
+    const insertCall = query.mock.calls.find(([sql]) => String(sql).replace(/\s+/g, ' ').trim().startsWith('INSERT INTO meta_multitable_template_installs'))
+    expect(insertCall?.[1]?.[8]).toBe('template-install')
+    // 读账本也把 intent_kind 读回来(读侧逐列核对它)。
+    expect(find((sql) => sql.startsWith('SELECT base_id'))).toContain('intent_kind')
     // ⑤ 过期清理跑在安装事务里(锁还握着),所以**不能**去等别人的行锁:
     //    SKIP LOCKED + LIMIT,永不阻塞,也就不可能和另一个安装事务互相等成死锁。
     const sweep = find((sql) => sql.startsWith('DELETE') && sql.includes('installed_at <'))
@@ -963,6 +978,7 @@ describe('#5861 — runDeduplicatedTemplateInstall(模块级)', () => {
             sheet_ids: params[6],
             response: JSON.parse(String(params[7])),
             tenant_id: params[1], actor_id: params[2], template_id: params[3], workspace_id: params[4],
+            intent_kind: params[8],
           })
           return { rows: [] as unknown[] }
         }
@@ -1072,6 +1088,96 @@ describe('#5861 — runDeduplicatedTemplateInstall(模块级)', () => {
       scope,
       install: async () => freshResult('base_module'),
     })).rejects.toBeInstanceOf(TemplateInstallLedgerUnavailableError)
+  })
+
+  it('D13b: 账本缺 intent_kind 列(一般化迁移未跑,42703)→ TemplateInstallLedgerUnavailableError(fail-open,同 42P01)', async () => {
+    const query = vi.fn(async (sql: string) => {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+      if (isLockSql(normalized)) return lockAnswer(true)
+      if (normalized.includes('meta_multitable_template_installs')) {
+        // 中文 locale 散文 —— 只有按 SQLSTATE 判的实现能过。
+        const err = new Error('字段 "intent_kind" 不存在') as Error & { code?: string }
+        err.code = '42703'
+        throw err
+      }
+      return { rows: [] as unknown[] }
+    })
+
+    await expect(runDeduplicatedTemplateInstall({
+      query,
+      scope,
+      install: async () => freshResult('base_module'),
+    })).rejects.toBeInstanceOf(TemplateInstallLedgerUnavailableError)
+  })
+
+  it('D13c: 别的表缺列(42703 不是账本自己的)照常上抛,不伪装成「去重不可用」', async () => {
+    let installs = 0
+    const query = vi.fn(async (sql: string) => {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+      if (isLockSql(normalized)) return lockAnswer(true)
+      if (normalized.startsWith('SELECT id FROM meta_bases')) {
+        const err = new Error('字段 "deleted_at" 不存在') as Error & { code?: string }
+        err.code = '42703'
+        throw err
+      }
+      if (normalized.startsWith('SELECT base_id')) {
+        return {
+          rows: [{
+            base_id: 'base_prior', sheet_ids: ['sheet_prior'], response: { ok: true },
+            tenant_id: scope.tenantId, actor_id: scope.actorId, template_id: scope.templateId,
+            workspace_id: scope.workspaceId, intent_kind: 'template-install',
+          }],
+        }
+      }
+      return { rows: [] as unknown[] }
+    })
+
+    await expect(runDeduplicatedTemplateInstall({
+      query,
+      scope,
+      install: async () => { installs++; return freshResult('base_module') },
+    })).rejects.toMatchObject({ code: '42703' })
+    expect(installs).toBe(0)
+  })
+
+  it('D21: 一般化 —— copy-sheet 与 template-install 同键不同 kind:指纹不同、账本行互不重放', async () => {
+    const templateScope = toIntentScope(scope)
+    const copyScope = { ...templateScope, intentKind: COPY_SHEET_INTENT_KIND }
+    // 指纹命名空间不同。
+    expect(buildIntentScopeDigest(copyScope)).not.toBe(buildIntentScopeDigest(templateScope))
+    // 模板安装的指纹**字节不变**(仍是 #5861 的六段)。
+    expect(buildIntentScopeDigest(templateScope)).toBe(buildTemplateInstallScopeDigest(scope))
+    expect(copyScope.intentKind).toBe('copy-sheet')
+
+    // 账本里躺着一条 kind 不同、其余全等的行(模拟 sha256 撞车):逐列核对必须把它当没命中。
+    let installs = 0
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+      if (isLockSql(normalized)) return lockAnswer(true)
+      if (normalized.startsWith('SELECT base_id')) {
+        return {
+          rows: [{
+            base_id: 'base_prior', sheet_ids: ['sheet_prior'], response: { ok: true, replayedFrom: 'template' },
+            tenant_id: copyScope.tenantId, actor_id: copyScope.actorId, template_id: copyScope.intentKey,
+            workspace_id: copyScope.workspaceId, intent_kind: 'template-install',
+          }],
+        }
+      }
+      if (normalized.startsWith('SELECT id FROM meta_bases')) return { rows: [{ id: params[0] }] }
+      if (normalized.includes('FROM meta_sheets')) return { rows: ((params[0] as string[]) ?? []).map((id) => ({ id })) }
+      return { rows: [] as unknown[] }
+    })
+
+    const result = await runDeduplicatedIntent({
+      query,
+      scope: copyScope,
+      install: async () => { installs++; return freshResult('base_copy_target', ['sheet_copy']) },
+    })
+    expect(result.replayed).toBe(false)
+    expect(installs).toBe(1)
+    const insertCall = query.mock.calls.find(([sql]) => String(sql).replace(/\s+/g, ' ').trim().startsWith('INSERT INTO meta_multitable_template_installs'))
+    expect(insertCall?.[1]?.[8]).toBe('copy-sheet')
+    expect(insertCall?.[1]?.[3]).toBe(copyScope.intentKey)
   })
 
   it('D14: 指纹把每一段作用域都编进去 —— 任一段变了指纹就变', async () => {

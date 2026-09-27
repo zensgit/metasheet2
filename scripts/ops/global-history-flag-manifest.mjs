@@ -633,6 +633,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "客户反馈 2026-09-24 #4a: operator switch for the WRITE leg of the managed-table display-name relabel (「把系统表的英文表头改成中文」, stock-prep 数据来源与体检). Default OFF; exact literal 'true' only (no trim, no case folding). Off: the dry run still works (it writes nothing), the plugin route answers 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED, and the host primitive itself refuses the write leg (409 MULTITABLE_RELABEL_APPLY_DISABLED) before any statement — enforced at the one place that writes, not only in the route. On: stock-prep:admin (or platform admin) may rename still-English managed-table columns and sheet names to their template Chinese names, compare-and-set, only after a preview whose planDigest the apply must match. Danger=medium: it renames the customer's production managed tables (field renames are revertible from the config history; sheet renames are recorded but not revertible there), and while an apply runs, record inserts to that sheet wait for it to commit.",
     source: 'packages/core-backend/src/multitable/object-display-name-relabel.ts#isManagedTableRelabelApplyEnabled',
   },
+  {
+    key: 'MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS',
+    type: 'numeric',
+    activationValue: 'numeric row count (default 2000; unset / blank / non-integer / < 1 = 2000; capped at 50000 = XLSX_MAX_ROWS)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "「复制数据表（含数据）」(design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-15 / §7.5): the SYNCHRONOUS copy row cap N. A source sheet with more than N live rows is refused 413 COPY_TOO_LARGE before any write (the S3 async job is the path above N and is not built yet). Number(env) parsed once per request via resolveCopySheetSyncMaxRows: unset/blank/non-integer/<1 fall back to 2000, anything above 50000 is clamped to 50000 (the ADR's absolute ceiling, = XLSX_MAX_ROWS). Not a gate: nothing turns on or off; the default covers the customer table (1239 rows). Raising it lengthens one synchronous transaction that holds the source sheet row lock + every participating sheet fence for its duration.",
+    source: 'packages/core-backend/src/multitable/copy-sheet-limits.ts#resolveCopySheetSyncMaxRows',
+  },
 ])
 
 /** Flat lookup by key, built once. */
