@@ -485,10 +485,16 @@ async function resolveB2aSourceObjects({ sourceObjects, sourceSystemType, loadSo
  * layer holds; the table-action wrappers (stock-preparation-table-actions.cjs) cannot resolve the
  * list themselves. They receive the RESOLVED list instead — one platform read, one array — and hand
  * that same array to the guard (`objectScope` match), to the schema contract's pre-read pin/compare
- * and to the post-read E3-05 check, so the objects authorized, the objects pinned and the objects
- * re-checked are one list and not three derivations that could disagree. The plan's own objects are
- * UNIONED in rather than trusted to be present: a resolved list can only widen the contract, never
- * narrow it below what the expansion will read.
+ * and to the post-read E3-05 check, so the guard, the pin and the re-check consume one array and not
+ * three derivations that could disagree. The plan's own objects are UNIONED in rather than trusted to
+ * be present: a resolved list can only widen the contract, never narrow it below what the expansion
+ * will read. That array is, however, only as fresh as the route's AUTHORIZATION-TIME config read: no
+ * H-3 config-snapshot binding ties it to the adapter's own (decrypting) config read the way
+ * pipeline-runner.cjs:443,651 binds pipeline-runner reads — the table-action/MVP-persist/apply
+ * paths have none (nor does the large-BOM background path, which has no schema contract of this
+ * kind to begin with — it never calls this seam). A `lookupProjection` edit between the two reads
+ * leaves this contract covering the lookup table as authorized, not necessarily the one the adapter
+ * goes on to read.
  *
  * FAIL-CLOSED WITHOUT THE RESOLVED LIST. When the caller passed none and the kind is on
  * `B2A_CONFIG_BOUND_LOOKUP_KINDS`, the plan's list is NOT an acceptable substitute — it is exactly
@@ -1712,6 +1718,15 @@ function refuseB2aArmedSqlServerRequestTimeoutDisabled(authorization) {
 // WITHOUT the resolved list is refused before the guard (`requireResolvedB2aSourceObjects`) rather
 // than given a contract over the plan alone — an under-covered contract that looked total would be
 // worse than a refusal.
+//
+// THE READ THIS CONTRACT COVERS IS THE AUTHORIZATION-TIME READ, NOT NECESSARILY THE ADAPTER'S. The
+// array above is what the route read via the non-decrypting config accessor when it authorized the
+// call. The table-action/MVP-persist/apply paths carry no H-3 config-snapshot binding between that
+// authorization read and the adapter-creating (decrypting) reload the way pipeline-runner.cjs:443,651
+// binds pipeline-runner reads (the large-BOM background path has no schema contract of this kind at
+// all — it never calls this seam). If `lookupProjection` is changed, added or removed between the two
+// reads, this contract still pins the lookup table as authorized — not the one
+// `loadTableActionSourceAdapter` actually goes on to read. Pre-existing gap, not introduced here.
 
 const SCHEMA_CONTRACT_KEY_PREFIX = 'integration:b2a:schema-contract:'
 const B2A_SCHEMA_CONTRACT_VERSION = 1

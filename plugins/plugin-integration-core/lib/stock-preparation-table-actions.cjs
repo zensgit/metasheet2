@@ -1910,10 +1910,18 @@ async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2a
     sourceAdapter,
     // THE SAME LIST THE GUARD MATCHED against `objectScope` (`stockPreparationB2aSourceObjects`): the
     // plan's own objects PLUS the source system's config-bound lookup object, resolved once by the
-    // route. So the contract covers exactly what the read will touch — not a hardcoded roster that
-    // would keep passing when the plan grew a section, and not the plan alone, which would leave the
-    // lookup table's columns unpinned (R-02, contract half). Deliberately NOT re-derived from the
-    // plan here: an armed call that arrives without the list gets `schema_scope_empty`, fail-closed.
+    // route. The guard, this pre-read pin and the post-read E3-05 check all consume this one array —
+    // not a hardcoded roster that would keep passing when the plan grew a section, and not the plan
+    // alone, which would leave the lookup table's columns unpinned (R-02, contract half). But the
+    // array is what the route read through the NON-DECRYPTING config accessor AT AUTHORIZATION TIME.
+    // This path (table-action dry-run/MVP-persist/apply) carries no H-3 config-snapshot
+    // binding between that authorization read and the adapter's own decrypting
+    // reload the way pipeline-runner.cjs:443,651 binds pipeline-runner reads. If `lookupProjection` is
+    // changed, added or removed between the two reads, the contract still covers the lookup table AS
+    // AUTHORIZED — not necessarily the one `loadTableActionSourceAdapter` actually goes on to read.
+    // Deliberately NOT re-derived from the plan here: an armed call that arrives without the list gets
+    // `schema_scope_empty`, fail-closed (i.e. fail-closed when no list was passed — not a claim about
+    // the authorization-vs-adapter-read gap above, which this contract does not close).
     sourceObjects: b2aSourceObjects,
     extFieldMapping,
     now,
