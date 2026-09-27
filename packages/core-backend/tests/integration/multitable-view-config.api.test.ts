@@ -277,14 +277,18 @@ describe('Multitable view config API', () => {
     }))
   })
 
-  // #6084: the client clears grouping by sending an explicit empty value; PATCH must actually persist that
-  // as "no grouping" instead of falling back to the row's stored value. `??` alone conflates an ABSENT key
-  // (undefined) with an explicit clear — this is the regression these three tests pin down. The mock "row"
-  // is STATEFUL (mutated by each UPDATE, like the real table) so the "explicit empty clears" and "absent
-  // keeps" assertions are checked against what a FOLLOWING read of the SAME row would see, not just the one
-  // UPDATE call — the closest equivalent of "GET afterwards returns no grouping" this mock-pool harness can
-  // exercise without standing up the full read path's dependency chain (apiTokenAuth/oapiScopeGuard/
-  // resolveMetaSheetId/...) that backs the frontend's actual GET /view.
+  // #6084/#6110: these characterize the PRE-EXISTING backend contract for groupInfo that the web-only fix
+  // (#6110) relies on — they do NOT pin the regression itself. `parsed.data.groupInfo ?? normalizeJson(row.
+  // group_info)` already treats an explicit `{}` as present (it is not nullish) and clears the stored value;
+  // an ABSENT key is genuinely `undefined` and keeps it. The actual bug was the WEB client sending
+  // `groupInfo: undefined` (dropped by JSON.stringify) instead of an explicit `{}` when clearing — #6110
+  // fixed that one line in useMultitableGrid.ts; the backend needed no change. `groupInfo` stays
+  // non-nullable here like filterInfo/sortInfo/hiddenFieldIds/config — see the "explicit null is rejected"
+  // test below. The mock "row" is STATEFUL (mutated by each UPDATE, like the real table) so the "explicit
+  // empty clears" and "absent keeps" assertions are checked against what a FOLLOWING read of the SAME row
+  // would see, not just the one UPDATE call — the closest equivalent of "GET afterwards returns no grouping"
+  // this mock-pool harness can exercise without standing up the full read path's dependency chain
+  // (apiTokenAuth/oapiScopeGuard/resolveMetaSheetId/...) that backs the frontend's actual GET /view.
   function statefulKanbanRow(initialGroupInfo: Record<string, unknown>) {
     const row = {
       id: 'view_kanban',
@@ -344,16 +348,18 @@ describe('Multitable view config API', () => {
     expect(row.group_info).toEqual({})
   })
 
-  test('PATCH with explicit null groupInfo also clears the stored grouping (#6084)', async () => {
+  test('PATCH with explicit null groupInfo is rejected with 400 (groupInfo stays non-nullable, like filterInfo/sortInfo/hiddenFieldIds/config)', async () => {
     const { row, queryHandler } = statefulKanbanRow({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
     const { app } = await createApp({ tokenPerms: ['multitable:write'], queryHandler })
 
     const response = await request(app)
       .patch('/api/multitable/views/view_kanban')
       .send({ groupInfo: null })
-      .expect(200)
-    expect(response.body.data.view.groupInfo).toEqual({})
-    expect(row.group_info).toEqual({})
+      .expect(400)
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('VALIDATION_ERROR')
+    // Rejected before the handler ever ran — the stored row is untouched.
+    expect(row.group_info).toEqual({ fieldIds: ['fld_status_old'], fieldId: 'fld_status_old' })
   })
 
   test('PATCH with NO groupInfo key keeps the stored grouping unchanged (#6084)', async () => {

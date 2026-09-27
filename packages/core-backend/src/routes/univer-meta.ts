@@ -14590,9 +14590,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       type: z.string().min(1).max(50).optional(),
       filterInfo: z.record(z.unknown()).optional(),
       sortInfo: z.record(z.unknown()).optional(),
-      // #6084: nullable so an explicit `null` (like an explicit `{}`) can mean "clear the stored grouping" —
-      // distinct from the key being ABSENT (undefined), which still means "keep". See nextGroup below.
-      groupInfo: z.record(z.unknown()).nullable().optional(),
+      groupInfo: z.record(z.unknown()).optional(),
       hiddenFieldIds: z.array(z.string().min(1)).optional(),
       config: z.record(z.unknown()).optional(),
     })
@@ -14632,13 +14630,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         nextFilter = mergedFilter
       }
       const nextSort = parsed.data.sortInfo ?? normalizeJson(row.sort_info)
-      // #6084: the client clears grouping by sending an explicit empty value (`{}`, or `null` per the
-      // schema above) — `??` alone would treat that `null` the same as an ABSENT key and wrongly fall
-      // back to the stored value, so the presence check must be `!== undefined`, not nullish coalescing.
-      // `normalizeJson` folds both the explicit `{}` and `null` cases down to `{}` (= "no grouping").
-      const nextGroup = parsed.data.groupInfo === undefined
-        ? normalizeJson(row.group_info)
-        : normalizeJson(parsed.data.groupInfo)
+      const nextGroup = parsed.data.groupInfo ?? normalizeJson(row.group_info)
       const nextHiddenFieldIds = parsed.data.hiddenFieldIds ?? normalizeJsonArray(row.hidden_field_ids)
       const nextConfig = normalizeHierarchyViewConfig(
         nextType,
