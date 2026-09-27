@@ -250,6 +250,13 @@ async function onComplete(id: string): Promise<void> {
     return
   }
   if (result.kind === 'ok') {
+    // P3(iii): a later action succeeding must clear a stale guidance flag left by an EARLIER
+    // action (or an earlier list read) — nothing else ever flips this back to false, so without
+    // this the view would stay stuck on the org-guidance block for the rest of the mounted
+    // instance even after the org context recovers. Reset BEFORE `loadList()`, not after:
+    // `loadList()` can legitimately set this flag itself (its own org_missing branch), and
+    // resetting after it would clobber that fresh `true` back to `false`.
+    orgMissingFromAction.value = false
     notifyTasksChanged()
     await loadList()
     return
@@ -267,6 +274,8 @@ async function onReopen(id: string): Promise<void> {
     return
   }
   if (result.kind === 'ok') {
+    // See `onComplete`'s matching comment — same reset, same ordering rationale.
+    orgMissingFromAction.value = false
     notifyTasksChanged()
     await loadList()
     return

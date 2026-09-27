@@ -55,6 +55,16 @@ function shown(el: HTMLElement, testid: string): HTMLElement | null {
   return el.querySelector(`[data-testid="${testid}"]`)
 }
 
+/** A manually-resolvable promise, for tests that need to hold one action "in flight" while a
+ *  SECOND, independent action resolves first (P3-iii below). */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolveFn!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolveFn = res
+  })
+  return { promise, resolve: resolveFn }
+}
+
 function taskItem(over: Partial<{
   id: string
   title: string
@@ -248,6 +258,42 @@ describe('TasksView create / complete / reopen mutations', () => {
     expect(shown(el, 'tasks-action-error')).toBeNull()
   })
 
+  // P2-a: `completeTask`/`reopenTask` reporting `org_missing` (the same 422 ORG_MISSING trigger
+  // `createTask` already covers above) must show the SAME org-guidance block, not a silently
+  // dropped click or the generic action-error message.
+  it('completing a task that reports org_missing shows the org-missing guidance (not the generic action error)', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+    h.completeTask.mockResolvedValue({ kind: 'org_missing' })
+    const el = await mountReady()
+
+    const completeButton = shown(el, 'tasks-complete-button') as HTMLButtonElement
+    completeButton.click()
+    await flush()
+
+    expect(shown(el, 'tasks-view-org-missing')).toBeTruthy()
+    expect(shown(el, 'tasks-list')).toBeNull()
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    // No refresh on org_missing — same discipline as every other non-ok action result.
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    expect(h.notifyTasksChanged).not.toHaveBeenCalled()
+  })
+
+  it('reopening a task that reports org_missing shows the org-missing guidance (not the generic action error)', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+    h.reopenTask.mockResolvedValue({ kind: 'org_missing' })
+    const el = await mountReady()
+
+    const reopenButton = shown(el, 'tasks-reopen-button') as HTMLButtonElement
+    reopenButton.click()
+    await flush()
+
+    expect(shown(el, 'tasks-view-org-missing')).toBeTruthy()
+    expect(shown(el, 'tasks-list')).toBeNull()
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    expect(h.notifyTasksChanged).not.toHaveBeenCalled()
+  })
+
   // P2-4: complete/reopen results other than ok/org_missing used to be silently dropped — the
   // click just did nothing. Each must now render a visible, per-result error AND leave the list
   // (the row the action failed on) exactly as it was, so a retry is still possible.
@@ -313,6 +359,91 @@ describe('TasksView create / complete / reopen mutations', () => {
       await flush()
       expect(shown(el, 'tasks-action-error')).toBeNull()
     })
+
+    // P3(iv): the mirror of the test above, for `onReopen`'s OWN `actionErrorKind.value = null`
+    // reset (~:263) — the complete-only test above cannot exercise this: it never calls
+    // `reopenTask` at all, so it would stay green even if reopen's own reset were deleted.
+    it('a fresh reopen clears a stale action error from a PREVIOUS reopen', async () => {
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      h.reopenTask
+        .mockResolvedValueOnce({ kind: 'forbidden' })
+        .mockResolvedValueOnce({ kind: 'ok' })
+      const el = await mountReady()
+
+      const reopenButton = shown(el, 'tasks-reopen-button') as HTMLButtonElement
+      reopenButton.click()
+      await flush()
+      expect(shown(el, 'tasks-action-error')).toBeTruthy()
+
+      reopenButton.click()
+      await flush()
+      expect(shown(el, 'tasks-action-error')).toBeNull()
+    })
+  })
+})
+
+// P3(iii): once EITHER action sets `orgMissingFromAction`, the guidance block replaces the entire
+// ready UI — including the complete/reopen buttons themselves — so the only way to reach "a LATER
+// action succeeds while the flag is stuck true" is for a SECOND, independent action to already be
+// in flight when the first one flips the flag. Each test below holds one action pending with a
+// `deferred()`, triggers the OTHER action to set the guidance flag, then resolves the pending one
+// with 'ok' and checks the guidance clears.
+describe('TasksView resets a stale orgMissingFromAction when a later action succeeds (P3-iii)', () => {
+  it('a pending complete resolving ok AFTER a reopen set org_missing clears the guidance block', async () => {
+    h.listTasks.mockResolvedValue({
+      kind: 'ok',
+      items: [taskItem({ id: 't1', status: 'open' }), taskItem({ id: 't2', status: 'done' })],
+    })
+    const completeDeferred = deferred<{ kind: 'ok'; done: boolean }>()
+    h.completeTask.mockReturnValue(completeDeferred.promise)
+    h.reopenTask.mockResolvedValue({ kind: 'org_missing' })
+    const el = await mountReady()
+
+    const completeButton = shown(el, 'tasks-complete-button') as HTMLButtonElement
+    completeButton.click()
+    await flush()
+    expect(h.completeTask).toHaveBeenCalledWith('t1')
+
+    const reopenButton = shown(el, 'tasks-reopen-button') as HTMLButtonElement
+    reopenButton.click()
+    await flush()
+    expect(shown(el, 'tasks-view-org-missing')).toBeTruthy()
+
+    // The list read the guidance-clearing `loadList()` below triggers.
+    h.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [] })
+    completeDeferred.resolve({ kind: 'ok', done: true })
+    await flush()
+
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(shown(el, 'tasks-list-empty')).toBeTruthy()
+  })
+
+  it('a pending reopen resolving ok AFTER a complete set org_missing clears the guidance block', async () => {
+    h.listTasks.mockResolvedValue({
+      kind: 'ok',
+      items: [taskItem({ id: 't1', status: 'open' }), taskItem({ id: 't2', status: 'done' })],
+    })
+    const reopenDeferred = deferred<{ kind: 'ok' }>()
+    h.reopenTask.mockReturnValue(reopenDeferred.promise)
+    h.completeTask.mockResolvedValue({ kind: 'org_missing' })
+    const el = await mountReady()
+
+    const reopenButton = shown(el, 'tasks-reopen-button') as HTMLButtonElement
+    reopenButton.click()
+    await flush()
+    expect(h.reopenTask).toHaveBeenCalledWith('t2', 'self')
+
+    const completeButton = shown(el, 'tasks-complete-button') as HTMLButtonElement
+    completeButton.click()
+    await flush()
+    expect(shown(el, 'tasks-view-org-missing')).toBeTruthy()
+
+    h.listTasks.mockResolvedValueOnce({ kind: 'ok', items: [] })
+    reopenDeferred.resolve({ kind: 'ok' })
+    await flush()
+
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(shown(el, 'tasks-list-empty')).toBeTruthy()
   })
 })
 

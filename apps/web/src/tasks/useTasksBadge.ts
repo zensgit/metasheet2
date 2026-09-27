@@ -24,10 +24,13 @@
  * after the component owning this composable has unmounted, writes nothing.
  *
  * A 404 means the feature itself is off (there is no `/api/tasks/pending-count` route to ask), not
- * a transient failure — polling every 60s in that case is a request that can never succeed again
- * for the life of this session. The polling timer is torn down the first time a 404 lands, the same
- * way `onUnmounted` tears it down; `refresh()` itself stays callable afterward (a `notifyTasksChanged`
- * nudge or a manual retry can still ask once), only the STEADY clock stops.
+ * a transient failure — polling every 60s while every attempt still 404s is a request that can
+ * never succeed. The polling timer is torn down the first time a 404 lands, the same way
+ * `onUnmounted` tears it down; `refresh()` itself stays callable afterward (a `notifyTasksChanged`
+ * nudge or a manual retry can still ask once), and if THAT later call comes back `ok`, the steady
+ * 60s clock is restarted (see the `timer === null` check in `refresh()`'s `ok` branch) — the route
+ * exists after all, so the poll should go back to sustaining itself instead of depending on a nudge
+ * for the rest of the session.
  *
  * Also listens on `tasksBadgeBus` so a task the viewer just created/completed/reopened is reflected
  * without waiting out the rest of the current 60s window.
@@ -77,13 +80,19 @@ export function useTasksBadge(): TasksBadgeHandle {
     if (result.kind === 'ok') {
       state.value = 'ready'
       count.value = result.count
+      // P3(i): restart the steady clock if a prior 404 tore it down. `disposed` is already
+      // checked above, so this never fires for an unmounted composable.
+      if (timer === null) {
+        timer = setInterval(poll, POLL_INTERVAL_MS)
+      }
     } else {
       state.value = 'unavailable'
       count.value = null
       // See this module's docblock — a 404 means the route does not exist at all, so the steady
-      // poll is stopped for good. Any other failure (network error, 403, org_missing, …) keeps
-      // polling: those are all conditions that can change on the NEXT tick (session recovers,
-      // caller picks an org, network comes back).
+      // poll stops here; the `ok` branch above restarts it if a LATER refresh ever succeeds. Any
+      // other failure (network error, 403, org_missing, …) never stops it in the first place:
+      // those are all conditions that can change on the NEXT tick (session recovers, caller picks
+      // an org, network comes back).
       if (result.kind === 'not_found' && timer !== null) {
         clearInterval(timer)
         timer = null
