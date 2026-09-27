@@ -218,6 +218,21 @@ describe('task-completion', () => {
       ).toThrow()
     })
 
+    describe('wasDone is ignored when the task has assignee rows', () => {
+      it('applyReopen: wasDone=false does not suppress a real self reopen', () => {
+        const rows = [row('u1', NOW), row('u2', null)]
+        const result = applyReopen({ mode: 'all', rows, actorId: 'u1', scope: 'self', createdBy: 'creator1', wasDone: false })
+        expect(result.rows.find((r) => r.userId === 'u1')?.completedAt).toBeNull()
+        expect(result.events).toEqual([{ type: 'self_reopened', userId: 'u1' }])
+      })
+      it('applyComplete: wasDone=true does not suppress a real self complete', () => {
+        const rows = [row('u1', null), row('u2', null)]
+        const result = applyComplete({ mode: 'all', rows, actorId: 'u1', createdBy: 'creator1', now: NOW, wasDone: true })
+        expect(result.rows.find((r) => r.userId === 'u1')?.completedAt).toEqual(NOW)
+        expect(result.events).toEqual([{ type: 'self_completed', userId: 'u1', occurredAt: NOW }])
+      })
+    })
+
     describe('zero-assignee task: reopening a task that was not done is a no-op', () => {
       it('wasDone=false: no rows, NO event', () => {
         const result = applyReopen({ mode: 'all', rows: [], actorId: 'creator1', scope: 'all', createdBy: 'creator1', wasDone: false })

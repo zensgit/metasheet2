@@ -52,6 +52,9 @@ export interface ApplyCompleteResult {
   events: TaskCompletionEvent[]
 }
 
+// NOTE(task-b, own choice, owner 2026-09-27 「按建议执行」 on the gate's proposal): zero-assignee
+// complete/reopen take a required `wasDone` so a repeat call is a no-op with no event, the same
+// no-op-means-no-events rule as the non-zero branches.
 // NOTE(task-b, own choice — not one of design §3's assumptions): re-completing an
 // already-completed row is idempotent — an existing `completedAt` is preserved rather than
 // overwritten with a new `now`, keeping the first completion instant stable across repeat calls.
@@ -69,13 +72,14 @@ export function applyComplete(input: {
   createdBy: string
   now: Date
   /**
-   * Whether the task was ALREADY done before this call. Only consulted for zero-assignee tasks,
-   * whose done state lives on the task row rather than on any assignee row (so it cannot be
-   * derived from `rows`). `true` makes a repeat creator-direct complete a no-op with no event,
-   * matching the no-op-means-no-events rule of the non-zero branches below. Omitted keeps the
-   * previous behaviour (always emit), so callers that do not know the task state are unaffected.
+   * Whether the task was ALREADY done before this call. Required so every caller has to decide.
+   * Only consulted for zero-assignee tasks, whose done state lives on the task row rather than on
+   * any assignee row (so it cannot be derived from `rows`); ignored when `rows` is non-empty.
+   * `true` makes a repeat creator-direct complete a no-op with no event. MUST come from the task
+   * row read AFTER the structure lock is held: a stale `true` would silently drop a real
+   * open-to-done transition's event.
    */
-  wasDone?: boolean
+  wasDone: boolean
 }): ApplyCompleteResult {
   const { mode, rows, actorId, createdBy, now, wasDone } = input
 
@@ -157,11 +161,11 @@ export function applyReopen(input: {
   scope?: TaskReopenScope
   createdBy: string
   /**
-   * Whether the task was done before this call. Only consulted for zero-assignee tasks (see
-   * `applyComplete`). `false` makes reopening an already-open zero-assignee task a no-op with no
-   * event. Omitted keeps the previous behaviour (always emit).
+   * Whether the task was done before this call. Required; same rules as `applyComplete`'s
+   * `wasDone` (zero-assignee only, ignored when `rows` is non-empty, read under the structure
+   * lock). `false` makes reopening an already-open zero-assignee task a no-op with no event.
    */
-  wasDone?: boolean
+  wasDone: boolean
 }): ApplyReopenResult {
   const { mode, rows, actorId, scope, createdBy, wasDone } = input
 
@@ -176,9 +180,9 @@ export function applyReopen(input: {
   }
 
   if (mode === 'any') {
-    const wasDone = rows.some(isCompleted)
+    const anyRowDone = rows.some(isCompleted)
     const newRows = rows.map((row) => ({ ...row, completedAt: null }))
-    return { rows: newRows, events: wasDone ? [{ type: 'reopened', userId: actorId }] : [] }
+    return { rows: newRows, events: anyRowDone ? [{ type: 'reopened', userId: actorId }] : [] }
   }
 
   // mode === 'all'
