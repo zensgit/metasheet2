@@ -1288,6 +1288,11 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         `import { viaNs } from './nsbarrel'`,
         `import { viaReq } from './reqbarrel'`,
         `import viaImp from './impbarrel'`,
+        `import g2 from './g2'`,
+        `import o2 from './o2'`,
+        `import nn from './nn'`,
+        `import p1 from './p1'`,
+        `import p2 from './p2'`,
         `export { CONST as RE_EXPORTED_CONST } from './consts'`,
         `const router = Router()`,
         // a Router registered as a ROUTE handler (it then lives in layer.route.stack)
@@ -1346,6 +1351,13 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         `function pick() { return f }`,
         `router.use('/f', pick())`,
         `router.use('/g', process.env.FLAG ? g : undefined)`,
+        // discovery follows BOTH branches of a conditional and of `||` / `??`, and every element of an
+        // array of handlers — not just the first branch / operand / element
+        `const maybe = undefined`,
+        `router.use('/g2', process.env.FLAG ? undefined : g2)`,
+        `router.use('/o', maybe || o2)`,
+        `router.use('/nn', maybe ?? nn)`,
+        `router.use('/arr', [p1, p2])`,
         `router.use('/h', (await import('./h')).default)`,
         `router.use('/local', Router())`,
         `router.use(guard)`,
@@ -1366,6 +1378,11 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
       'm.ts': subRouter,
       'n.ts': subRouter,
       'o.ts': subRouter,
+      'g2.ts': subRouter,
+      'o2.ts': subRouter,
+      'nn.ts': subRouter,
+      'p1.ts': subRouter,
+      'p2.ts': subRouter,
       'put.ts': subRouter,
       'patch.ts': subRouter,
       'del.ts': subRouter,
@@ -1417,13 +1434,23 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
         'barrel.ts', 'rb.ts', 'starbarrel.ts', 'rs.ts', 'aliasbarrel.ts', 'ra.ts', 'sx.ts', 'sy.ts', 'namedbarrel.ts', 'rn.ts', 'constbarrel.ts', 'rc.ts',
         'hop1.ts', 'hop2.ts', 'hr.ts', 'whop1.ts', 'whop2.ts', 'whr.ts',
         'nsbarrel.ts', 'rq.ts', 'reqbarrel.ts', 'rr.ts', 'impbarrel.ts', 'ri.ts',
+        'g2.ts', 'o2.ts', 'nn.ts', 'p1.ts', 'p2.ts',
       ].sort()
     )
-    // `.use`: 8 imported sub-routers + the Router() built in place + require() + two barrels + sx; the
-    // middleware module is scanned but is not a router.
-    expect(tree.mounts.filter((m) => m.via === 'use' && m.router)).toHaveLength(13)
+    // `.use`: 8 imported sub-routers + the Router() built in place + require() + two barrels + sx
+    // + the false branch of a conditional + the right side of `||` and of `??` + an array of two
+    // handlers; the middleware module is scanned but is not a router.
+    expect(tree.mounts.filter((m) => m.via === 'use' && m.router)).toHaveLength(17)
     expect(tree.mounts.find((m) => m.via === 'use' && m.targets.includes('guard.ts'))?.router).toBe(false)
     expect(tree.mounts.find((m) => m.via === 'use' && m.targets.includes('ur.ts'))?.router).toBe(true)
+    // discovery follows BOTH branches of a conditional and BOTH sides of `||` / `??`, and EVERY
+    // element of an array of handlers — pinned per-branch/side/element, not by an aggregate count:
+    // a mutant that resolves only the true branch, only the left operand, or no array elements at
+    // all leaves these mounts absent (or short a target) rather than merely off by one elsewhere.
+    expect(tree.mounts.find((m) => m.targets.includes('g2.ts'))?.targets).toEqual(['g2.ts'])
+    expect(tree.mounts.find((m) => m.targets.includes('o2.ts'))?.targets).toEqual(['o2.ts'])
+    expect(tree.mounts.find((m) => m.targets.includes('nn.ts'))?.targets).toEqual(['nn.ts'])
+    expect(tree.mounts.find((m) => m.targets.includes('p1.ts'))?.targets).toEqual(['p1.ts', 'p2.ts'])
     // Route methods — every one of get / all / route().post / put / patch / delete / options / head —
     // follow only the Router arguments (the gate and another module's handler are not followed); a
     // barrel that re-exports a Router module counts as one, also two re-export hops away (hop1.ts).
@@ -1515,6 +1542,9 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(flaggedIn(`res.status(500).json({ success: false, error: (error as Error).message })`)).toBe(1)
     expect(flaggedIn(`const err = error as Error; res.status(500).json({ error: err.message })`)).toBe(1)
     expect(flaggedIn(`res.status(500).json({ error: String(error) })`)).toBe(1)
+    // flagged: every listed BODY_METHODS sink, not only `.json` — `.jsonp` and `.write` too
+    expect(flaggedIn(`res.status(500).jsonp({ error: String(error) })`)).toBe(1)
+    expect(flaggedIn(`res.status(500).write(String(error))`)).toBe(1)
     expect(flaggedIn('res.status(500).json({ error: `failed: ${error}` })')).toBe(1)
     expect(flaggedIn(`const m = String(error); res.status(502).send(m)`)).toBe(1)
     expect(flaggedIn(`const { message } = error as Error; res.status(500).json({ error: message })`)).toBe(1)
@@ -1572,6 +1602,21 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(flaggedFile(`function h(req: any, res: any) { const last = req.app.locals.lastFailure; res.status(500).json({ error: last['stack'] }) }`)).toBe(1)
     // flagged: a responder called through an alias
     expect(flaggedIn(`const fail = sendAdminWriteFailure; fail(res, 'ctx', error, { detail: String(error) })`)).toBe(1)
+    // flagged: a responder reached through a destructured, RENAMED binding (`{ name: alias }`) —
+    // the `extra` argument is still the sink, by the responder's canonical name behind the rename
+    expect(
+      flaggedIn(
+        `const { sendAdminReadFailure: failRead } = createAdminFailureResponders({ error: () => {} }); ` +
+          `failRead(res, 'ctx', error, { detail: String(error) })`
+      )
+    ).toBe(1)
+    // flagged (member-call form the header also names): `responders.sendAdminReadFailure(...)`
+    expect(
+      flaggedIn(
+        `const responders = createAdminFailureResponders({ error: () => {} }); ` +
+          `responders.sendAdminReadFailure(res, 'ctx', error, { detail: String(error) })`
+      )
+    ).toBe(1)
     // flagged: a same-file helper that receives the caught error as an argument
     expect(
       flaggedFile(
