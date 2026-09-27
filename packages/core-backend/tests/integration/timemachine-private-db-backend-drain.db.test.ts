@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 import {
   assertPrivateDatabaseBackendsExited,
+  PRIVATE_DB_BACKEND_DRAIN_MS,
   type PrivateDbAdminQueryable,
 } from '../../scripts/private-db-backend-drain.js'
 
@@ -154,4 +155,71 @@ describe('private-database backend drain', () => {
       await inflight
     }
   })
+
+  it('negative: default timeout fails when a backend is held past 10s, with values-free identifiers and no query text', async () => {
+    const name = await createScratch()
+    const marker = `LEAKMARKER${randomUUID().replace(/-/g, '')}`
+    const holder = new Client({
+      connectionString: urlFor(name),
+      application_name: 'tm-drain-default',
+    })
+    holder.on('error', () => undefined)
+    await holder.connect()
+    const inflight = holder.query(`SELECT pg_sleep(30) /* ${marker} */`).catch(() => undefined)
+    try {
+      const readyDeadline = Date.now() + 2_000
+      let ready = false
+      while (Date.now() < readyDeadline) {
+        const seen = await admin.query(
+          'SELECT state FROM pg_stat_activity WHERE datname = $1 AND application_name = $2',
+          [name, 'tm-drain-default'],
+        )
+        if (seen.rows.some((row: { state?: string }) => row.state === 'active')) {
+          ready = true
+          break
+        }
+        await sleep(50)
+      }
+      expect(ready).toBe(true)
+
+      const issued: string[] = []
+      const proxy: PrivateDbAdminQueryable = {
+        async query(text: string, values?: unknown[]) {
+          issued.push(text)
+          return admin.query(text, values)
+        },
+      }
+      const started = Date.now()
+      let caught: unknown = null
+      try {
+        await assertPrivateDatabaseBackendsExited(proxy, name)
+      } catch (err) {
+        caught = err
+      }
+      const elapsed = Date.now() - started
+      expect(caught).toBeInstanceOf(Error)
+      const message = (caught as Error).message
+      expect(message).toContain(`private database backends remain after ${PRIVATE_DB_BACKEND_DRAIN_MS}ms:`)
+      expect(elapsed).toBeGreaterThanOrEqual(PRIVATE_DB_BACKEND_DRAIN_MS - 250)
+      expect(elapsed).toBeLessThan(PRIVATE_DB_BACKEND_DRAIN_MS + 2_500)
+      expect(message).toMatch(/pid=\d+/)
+      expect(message).toMatch(/backend_type=client backend/)
+      expect(message).toMatch(/state=active/)
+      expect(message).toMatch(/application_name=tm-drain-default/)
+      expect(message).toMatch(/backend_start=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+      expect(message).not.toContain(marker)
+      expect(message).not.toContain('pg_sleep')
+      expect(message).not.toContain('SELECT')
+      expect(message).not.toContain('usename')
+      expect(message).not.toMatch(/\bquery=/)
+      expect(issued.length).toBeGreaterThan(0)
+      for (const sql of issued) {
+        expect(sql.toLowerCase()).not.toContain('usename')
+        expect(sql.toLowerCase()).not.toContain('query')
+      }
+    } finally {
+      await holder.end().catch(() => undefined)
+      await inflight
+    }
+  }, 25_000)
 })

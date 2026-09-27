@@ -24,7 +24,8 @@ On draft #6051 head `abfb1f824`, `test (20.x)` job `108158496668` failed the pre
 
 The source-string test is only a wiring guard. Behavior is proved on a throwaway database:
 
-- Positive: a client stays connected for about 1.5 seconds and is then closed. The helper returns inside an 8 second limit, and the elapsed time shows it waited.
-- Negative: a client runs `pg_sleep` past a 400 ms limit. The helper throws. The message contains `pid`, `backend_type`, `state`, `application_name`, and `backend_start`, and it does not contain the statement text.
+- Positive: a client stays connected for about 1.5 seconds and is then closed. The call passes `drainTimeoutMs: 8000` and `pollIntervalMs: 100`. The helper returns inside that 8 second limit, and the elapsed time shows it waited. That limit is not the default.
+- Negative, short limit: a client runs `pg_sleep` past an explicit `drainTimeoutMs: 400` (`pollIntervalMs: 50`). The helper throws. The message contains `pid`, `backend_type`, `state`, `application_name`, and `backend_start`, and it does not contain the statement text. That 400 ms limit is not the default.
+- Negative, default limit: the same held client, and the call passes no options. The helper uses `PRIVATE_DB_BACKEND_DRAIN_MS` (10 seconds) and `PRIVATE_DB_BACKEND_POLL_MS` (200 ms). It throws at about 10 seconds with the same values-free identifiers and without the statement text.
 
 CI runs that file from plugin-tests.yml job `test` (check names `test (18.x)` and `test (20.x)`), step `Run private-db backend drain proof`, after Postgres is up. The default unit Vitest config excludes the file so the no-database job cannot skip it.
