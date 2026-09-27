@@ -1434,6 +1434,7 @@ exec npx vitest run \
   migration \
   mount-behind-flow \
   multitable-agg-footer-grid \
+  multitable-ai-availability-gate \
   multitable-ai-bulk-fill-composable \
   multitable-ai-bulk-fill-dialog \
   multitable-ai-bulk-fill-job-composable \
@@ -1489,7 +1490,9 @@ exec npx vitest run \
   multitable-crossbase-link-picker \
   multitable-crossbase-workbench-wiring \
   multitable-dashboard-view \
+  multitable-datetime-business-tz \
   multitable-datetime-field \
+  multitable-datetime-grid-lockout \
   multitable-duration-field \
   multitable-embed-host \
   multitable-embed-route \
@@ -1601,6 +1604,7 @@ exec npx vitest run \
   multitable-view-manager \
   multitable-view-switch-sort-filter \
   multitable-workbench-1672-1673 \
+  multitable-workbench-ai-availability-wiring \
   multitable-workbench-bulk-delete \
   multitable-workbench-create-view-sort-filter \
   multitable-workbench-dashboard-exit \
@@ -1672,6 +1676,9 @@ exec npx vitest run \
   templateCenterI18n \
   templateDetailI18n \
   templateGalleryFilter \
+  todoApi \
+  TodoCenterView \
+  todoCountsRealtime \
   ui-foundation-style-guard \
   uiFoundationTexture \
   useApprovalBatchActions \

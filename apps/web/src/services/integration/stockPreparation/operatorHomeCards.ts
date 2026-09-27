@@ -93,11 +93,24 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
  *   pendingDecisionCount  → always the directory's (live ledger beats a remembered enum)
  *   everything else       → this browser's remembered conclusion when it has one, otherwise
  *                           `unknown` (§4.4's `? 看不到`), NEVER an archive-derived ready/not_pulled.
+ *
+ * `hidden` (客户反馈 2026-09-24 #1a / A8, optional — every existing caller keeps passing two
+ * arguments). A project number this principal asked 从列表移除 for, via `operatorHomeMemory.ts`'s
+ * sibling hidden list. Skips that project's card ON THE HOME PAGE ONLY:
+ *   - `StockPreparationProjectQueryView.vue`'s 项目查询 goes through `projectQuery.ts`'s
+ *     `buildStockPrepProjectQueryRows`, which calls this function WITHOUT a third argument — it stays
+ *     the complete list, by construction, not by a flag this function has to check on its behalf.
+ *   - NEVER hides a directory row whose LIVE `pendingDecisionCount > 0`: a card the ledger says is
+ *     waiting on this operator right now must not vanish because of a click made before that became
+ *     true. Once the count drops back to 0 the hide takes effect on the next render.
  */
 export function buildOperatorHomeCards(
   directoryProjects: readonly StockPreparationOperatorProject[],
   memory: readonly StockPrepRecentProjectEntry[],
+  hidden?: ReadonlySet<string> | readonly string[],
 ): StockPrepHomeCard[] {
+  const hiddenSet = hidden ? (hidden instanceof Set ? hidden : new Set(hidden)) : null
+
   const remembered = new Map<string, StockPrepPostureKey>()
   for (const entry of memory) {
     if (!remembered.has(entry.projectNo)) remembered.set(entry.projectNo, entry.postureKey)
@@ -111,8 +124,9 @@ export function buildOperatorHomeCards(
     if (!no || seen.has(no)) continue
     seen.add(no)
     const pending = project.pendingDecisionCount
-    const memoryKey = remembered.get(no) ?? null
     const live = pending > 0
+    if (hiddenSet && hiddenSet.has(no) && !live) continue
+    const memoryKey = remembered.get(no) ?? null
     cards.push({
       projectNo: no,
       projectName: project.projectName,
@@ -128,6 +142,7 @@ export function buildOperatorHomeCards(
   for (const entry of memory) {
     if (seen.has(entry.projectNo)) continue
     seen.add(entry.projectNo)
+    if (hiddenSet && hiddenSet.has(entry.projectNo)) continue
     cards.push({
       projectNo: entry.projectNo,
       projectName: null,
@@ -209,20 +224,33 @@ export type StockPrepHomeEmptyState = 'no_projects' | 'nothing_today' | 'directo
  *   1. directory_unavailable — the directory read genuinely failed (G3: silently, no red banner —
  *      this IS the silent degradation). Checked first among the settled cases: with no directory in
  *      hand nothing below can be claimed either way, memory-only cards notwithstanding.
- *   2. no_projects — nothing known at all, from either source.
+ *   2. no_projects — nothing known at all, from either source, AND nothing is merely hidden either
+ *      (see `hiddenCount` below — [S2] this is the one case this function refuses to claim on its
+ *      own).
  *   3. nothing_today — there are cards, but none of them are waiting on the operator.
  *
  * Returns null when the card grid should render with no banner above it.
+ *
+ * `hiddenCount` [S2, adversarial review 2026-09-26]: the number of projects THIS BROWSER chose to hide
+ * via 从列表移除 (`operatorHomeMemory.ts`'s hidden list), whether or not any of them still has a card
+ * (`buildOperatorHomeCards`'s own `pendingDecisionCount` guard can keep one visible regardless). When
+ * every visible card happens to be hidden, `cardCount` reaches 0 the same way it would if there were
+ * genuinely nothing — but 「这里还没有您的项目」 would be FALSE in that case: there are projects, this
+ * browser just asked not to see them. So `cardCount === 0 && hiddenCount > 0` returns `null` here
+ * instead of `'no_projects'`, and `StockPreparationOperatorHome.vue`'s own persistent hidden-count line
+ * (shown whenever `hiddenCount > 0`, regardless of `cardCount`) is what actually explains the empty
+ * grid and offers 全部恢复 — ONE honest message in that spot, not a second one contradicting it.
  */
 export function resolveOperatorHomeEmptyState(input: {
   directorySettled: boolean
   directoryAvailable: boolean
   cardCount: number
   actionableCount: number
+  hiddenCount: number
 }): StockPrepHomeEmptyState | null {
   if (!input.directorySettled) return null
   if (!input.directoryAvailable) return 'directory_unavailable'
-  if (input.cardCount === 0) return 'no_projects'
+  if (input.cardCount === 0) return input.hiddenCount > 0 ? null : 'no_projects'
   if (input.actionableCount === 0) return 'nothing_today'
   return null
 }

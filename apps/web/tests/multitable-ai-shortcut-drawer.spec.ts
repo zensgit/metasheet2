@@ -44,6 +44,9 @@ function mountDrawer(options: HarnessOptions = {}): { container: HTMLElement; ap
           fld_hidden: { visible: false, readOnly: false },
         },
         aiShortcut: options.aiShortcut ?? null,
+        // A11: this suite covers the AVAILABLE state (the prop is fail-closed; the hidden state
+        // is covered by multitable-ai-availability-gate.spec.ts).
+        aiAvailable: true,
         ...(options.onAiPreview ? { onAiPreview: options.onAiPreview } : {}),
         ...(options.onAiRun ? { onAiRun: options.onAiRun } : {}),
       })

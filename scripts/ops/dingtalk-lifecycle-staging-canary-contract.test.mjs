@@ -44,6 +44,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { spawnPythonSync, spawnPythonOrThrow, PYTHON_CANDIDATE_LABEL } from './python-interpreter.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, '..', '..')
@@ -94,11 +95,16 @@ function loadYaml(text) {
       // try next
     }
   }
-  const py = spawnSync(
-    'python3',
+  const py = spawnPythonSync(
     ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'],
     { input: text, encoding: 'utf8' },
   )
+  if (py.error) {
+    throw new Error(
+      `YAML parse: no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; ` +
+        `last error: ${py.error.message})`,
+    )
+  }
   if (py.status !== 0) {
     throw new Error(`YAML parse failed: ${py.stderr || py.stdout}`)
   }
@@ -1690,7 +1696,7 @@ with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
     print(httpd.server_address[1], flush=True)
     httpd.handle_request()
 `
-    serverProc = spawn('python3', ['-c', serverPy], {
+    serverProc = await spawnPythonOrThrow(['-c', serverPy], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     })
@@ -2617,7 +2623,7 @@ with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
     print(httpd.server_address[1], flush=True)
     httpd.handle_request()
 `
-    serverProc = spawn('python3', ['-c', serverPy], {
+    serverProc = await spawnPythonOrThrow(['-c', serverPy], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     })
@@ -3467,7 +3473,7 @@ s = HTTPServer(("127.0.0.1", 0), H)
 print(s.server_port, flush=True)
 s.serve_forever()
 `
-  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const server = await spawnPythonOrThrow(['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('empty-fetch run server did not start')), 5000)
     server.once('exit', (code) => {
@@ -4088,7 +4094,7 @@ s = HTTPServer(("127.0.0.1", 0), H)
 print(s.server_port, flush=True)
 s.serve_forever()
 `
-  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const server = await spawnPythonOrThrow(['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('sync-fail run server did not start')), 5000)
     server.once('exit', (code) => {
@@ -4246,7 +4252,7 @@ s = HTTPServer(("127.0.0.1", 0), H)
 print(s.server_port, flush=True)
 s.serve_forever()
 `
-  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const server = await spawnPythonOrThrow(['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('sync-fail allowlist server did not start')), 5000)
     server.once('exit', (code) => {
@@ -4354,7 +4360,7 @@ s = HTTPServer(("127.0.0.1", 0), H)
 print(s.server_port, flush=True)
 s.serve_forever()
 `
-  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const server = await spawnPythonOrThrow(['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('sync-fail refuse server did not start')), 5000)
     server.once('exit', (code) => {
@@ -4775,7 +4781,7 @@ test('FUNCTIONAL: preview gate refuses when wouldDeactivateAccounts is 2 (collat
     'linked=preview["wouldDeactivateLinkedAccounts"]',
     'print("false|would_deactivate_not_exactly_one|%s|%s"%(would,linked) if would!=1 else ("false|would_deactivate_linked_not_exactly_one|%s|%s"%(would,linked) if linked!=1 else "true|ok|1|1"))',
   ].join('\n')
-  const result = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  const result = spawnPythonSync(['-c', py], { encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr + result.stdout)
   assert.match(result.stdout, /false\|would_deactivate_not_exactly_one/)
 })
@@ -4853,7 +4859,7 @@ with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
   /** @type {import('node:child_process').ChildProcess | null} */
   let serverProc = null
   try {
-    serverProc = spawn('python3', ['-c', serverPy], {
+    serverProc = await spawnPythonOrThrow(['-c', serverPy], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     })
@@ -4946,7 +4952,7 @@ if type(is_active) is not bool:
     raise SystemExit(0)
 print("true|ok|" + ("true" if is_active is True else "false"))
 `
-    return spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+    return spawnPythonSync(['-c', py], { encoding: 'utf8' })
   }
   for (const bad of [{}, { is_active: null }, { is_active: 'false' }, { isActive: 'false' }, { is_active: 0 }]) {
     const r = runPayload(bad)
@@ -4995,7 +5001,7 @@ for code, err in [(403, "CSRF token missing"), (401, "Unauthorized"), (401, "Inv
     ok = err in CLOSED_LOGIN_ERRORS
     print(f"{code}|{err}|{'true' if ok else 'false'}")
 `
-  const r = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  const r = spawnPythonSync(['-c', py], { encoding: 'utf8' })
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stdout, /403\|CSRF token missing\|false/)
   assert.match(r.stdout, /401\|Unauthorized\|false/)
@@ -5232,7 +5238,7 @@ expected_after = False
 ok_dep = mem_active_target_dep == expected_after
 print("deprov_ok" if ok_dep else "deprov_fail")
 `
-  const r = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  const r = spawnPythonSync(['-c', py], { encoding: 'utf8' })
   assert.equal(r.status, 0, r.stderr)
   assert.match(r.stdout, /restore_fail/)
   assert.match(r.stdout, /deprov_ok/)
@@ -5401,7 +5407,7 @@ cases = [
 for c in cases:
     print(check(c))
 `
-  const r = spawnSync('python3', ['-c', py], { encoding: 'utf8' })
+  const r = spawnPythonSync(['-c', py], { encoding: 'utf8' })
   assert.equal(r.status, 0, r.stderr)
   const lines = r.stdout.trim().split('\n')
   assert.deepEqual(lines, ['ok', 'type', 'ba'])
@@ -5645,7 +5651,7 @@ s = HTTPServer(("127.0.0.1", 0), H)
 print(s.server_port, flush=True)
 s.serve_forever()
 `
-  const server = spawn('python3', ['-u', '-c', serverSource], {
+  const server = await spawnPythonOrThrow(['-u', '-c', serverSource], {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const port = await new Promise((resolve, reject) => {
@@ -5758,7 +5764,7 @@ s = HTTPServer(("127.0.0.1", 0), H)
 print(s.server_port, flush=True)
 s.serve_forever()
 `
-  const server = spawn('python3', ['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const server = await spawnPythonOrThrow(['-u', '-c', serverSource], { stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('lost-202 server did not start')), 5000)
     server.once('exit', (code) => {
@@ -6639,7 +6645,7 @@ with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
     for _ in range(6):
         httpd.handle_request()
 `
-  const serverProc = spawn('python3', ['-c', serverPy], {
+  const serverProc = await spawnPythonOrThrow(['-c', serverPy], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: process.env,
   })
@@ -6804,7 +6810,7 @@ with socketserver.TCPServer(('127.0.0.1', 0), H) as httpd:
     for _ in range(8):
         httpd.handle_request()
 `
-    const serverProc = spawn('python3', ['-c', serverPy], {
+    const serverProc = await spawnPythonOrThrow(['-c', serverPy], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
     })

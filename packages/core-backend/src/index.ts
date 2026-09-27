@@ -206,6 +206,10 @@ import {
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
 import {
+  registerAttendanceCancellationExecutionProvider,
+  registerCancelRoundCancelledEventDelivery,
+} from './core/attendance-cancellation-execution-port'
+import {
   deriveApprovalInstanceOrgIdWithSelector,
   ApprovalOrgUnresolvedError,
 } from './services/approval-instance-org-derivation'
@@ -2800,6 +2804,20 @@ export class MetaSheetServer {
                       return { client, release: () => client.release() }
                     },
                   }),
+                // Approval-change-request lock §3 C-1 — bind the boundary the plugin just built as
+                // the cancel-round 完整业务取消 provider. One line, because the object registered is
+                // the same boundary the plugin already uses for its HTTP routes: 判据 II's C-1 call
+                // and every HTTP cancellation run the IDENTICAL W4 protocol, differing only in who
+                // owns the connection and the transaction.
+                registerCancelRoundExecutionBoundary: (boundary) =>
+                  registerAttendanceCancellationExecutionProvider(boundary),
+                // Codex 审阅第 3 条修复 (2026-09-19) — the sibling POST-COMMIT delivery. One line
+                // for the same reason the line above is one line: what is bound is the plugin's
+                // own single `attendance.request.cancelled` send site, the one its HTTP cancel
+                // route already calls, so the redemption path announces the cancellation with the
+                // identical gate and the identical payload instead of not announcing it at all.
+                registerCancelRoundCancelledEventDelivery: (deliver) =>
+                  registerCancelRoundCancelledEventDelivery(deliver),
                 // W4C-3c: manual_edit / recompute / ops_retirement boundary.
                 createRecordOperationBoundary: (config: {
                   adapters: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1
@@ -4677,7 +4695,10 @@ export class MetaSheetServer {
                   const prop = f.property || {}
                   const isReadOnly = isFieldAlwaysReadOnly(f)
                   const isHidden = prop.hidden === true || prop.permissionHidden === true
-                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden }
+                  // `property` rides along exactly as routes/univer-meta.ts buildFieldMutationGuardMap carries it:
+                  // RecordWriteService.validateChanges reads it for person `limitSingleRecord`, longText config and
+                  // the dateTime field zone (客户反馈 2026-09-24 #4c) — the realtime path must not lose it.
+                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden, property: prop }
                   if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
                     guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')
                   }
