@@ -175,7 +175,17 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'export.selectAll': { en: 'Select all', zh: '全选' },
   'export.clearAll': { en: 'Clear all', zh: '清空' },
   'export.rowScope': { en: 'Rows', zh: '行' },
-  'export.allRows': { en: 'All loaded rows', zh: '全部已加载行' },
+  // A10 phase 1(客户反馈 2026-09-24 #8):这个选项走服务端路由(client.exportSheet),导出的
+  // 是这个视图按当前视图筛选/排序过滤后的全量记录,不是「已加载到本地网格的那一页」——旧文案
+  // 「全部已加载行」正好说反了(MultitableWorkbench.vue 的 openExportDialog 注释)。
+  // S2(2026-09-26 对抗评审):不能写成「按当前筛选」——工具栏的搜索框(searchText)不会跟着
+  // 发给导出路由(client.ts exportSheet 的参数只有 sheetId/viewId/fieldIds/format,没有 search;
+  // export-xlsx 路由本身也不接收 search),所以文案必须明说「不含搜索」,否则用户会以为搜索词
+  // 也筛过了。
+  'export.allRows': {
+    en: 'All rows in this view (view filter, search not applied)',
+    zh: '当前视图的全部行（按视图筛选，不含搜索）',
+  },
   'export.selectedRows': { en: 'Selected rows only', zh: '仅选中行' },
   'export.format': { en: 'Format', zh: '格式' },
   'export.formatCsv': { en: 'CSV', zh: 'CSV' },
