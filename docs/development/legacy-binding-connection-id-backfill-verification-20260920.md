@@ -237,7 +237,7 @@ schema 用仓库自己的 `tsx src/db/migrate.ts` 在空库上跑完整链（416
 
 ### 12.1 blocking ①：`down()` 不复核回滚标记
 
-- 缺陷：`up()` 的 UPDATE 复核 `legacy_connection_fallback_eligible IS NOT TRUE`，`down()` 的 WHERE 没有，但注释写「mirrors up()'s re-checks」，保证 8 与 PR 正文写「人改过的行一律不动」。
+- 缺陷：`up()` 的 UPDATE 复核 `legacy_connection_fallback_eligible IS NOT TRUE`，`down()` 的 WHERE 没有，但注释写「mirrors up()'s re-checks」，保证 8 写「A binding someone changed by hand is left alone」，PR 正文写「仍是本迁移留下形状的行」。
 - 复现（新测试 + 旧迁移 `5470736a2` 原文）：竞争回归文件 **2 红 / 25 绿**，红的正是两条 `down()` 标记用例。完整迁移链块那条的实际结果：`binding_a` 变成 `connection_id = NULL`、`pointer = source_a`、`marker = true`，即切换迁移的回滚形态（`resolveLegacy` 的标记门 `connection-resolver.cjs:205-216` 放行它；回填前这行标记是 FALSE，在那里被拒），账本行被删。
 - 修法：`down()` 的 UPDATE WHERE 加 `AND b.legacy_connection_fallback_eligible IS NOT TRUE`；注释与头注释 IDEMPOTENT 段同步。
 - 用例：

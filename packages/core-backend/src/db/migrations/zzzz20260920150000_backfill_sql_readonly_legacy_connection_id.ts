@@ -256,16 +256,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 export async function down(db: Kysely<unknown>): Promise<void> {
   if (!(await checkTableExists(db, LEDGER_TABLE))) return
   if (await checkTableExists(db, 'integration_external_systems')) {
-    // Restore ONLY rows this migration changed and that still look the way it left them:
-    // same connection id, no pointer regained, still sql-readonly, still the SAME tenant and the
+    // Restore ONLY rows this migration changed and that still look the way it left them on these
+    // axes: same connection id, no pointer regained, still sql-readonly, still the SAME tenant and the
     // SAME owner stamp the ledger recorded, and the rollback marker still not TRUE — the same
     // binding-side axes up()'s UPDATE re-checks. A binding moved to another tenant, or re-stamped to
     // another owner, after the backfill must not be turned back into a legacy pointer at the old
     // tenant's / old owner's source; a binding whose marker was set TRUE must not be turned into
     // marker TRUE + connection_id NULL + pointer — the cutover's rollback shape, which passes
     // resolveLegacy's marker gate (connection-resolver.cjs :205-216) where the same row, marker
-    // FALSE before the backfill, was denied. Anything a human changed in between is left alone (its
-    // ledger row stays as evidence and keeps the table from dropping). These are all predicates on
+    // FALSE before the backfill, was denied. A binding changed on any of these axes in between is left
+    // alone (its ledger row stays as evidence and keeps the table from dropping). Changes elsewhere
+    // (another config key, the name, capabilities) do not block the restore; they survive it, and
+    // the 057 trigger stamps updated_at on every restored row. These are all predicates on
     // `b`, so they are re-evaluated on the committed row if down() waits on a concurrent writer's
     // row lock.
     await sql`

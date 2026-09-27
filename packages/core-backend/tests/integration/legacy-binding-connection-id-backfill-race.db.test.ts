@@ -23,7 +23,8 @@
  *   * the ledger is fed by the UPDATE's RETURNING, so a skipped row is never recorded;
  *   * down() re-checks the same binding-side axes on the row it restores (kind, recorded connection
  *     id, tenant, owner stamp, no regained pointer, rollback marker not TRUE), so a binding changed
- *     after the backfill — including one whose marker was set TRUE — keeps its ledger row as evidence.
+ *     on one of those axes after the backfill — including one whose marker was set TRUE — is left
+ *     alone and keeps its ledger row as evidence.
  *
  * Each race: connection W opens a transaction and changes the row (or its source) without
  * committing; the migration runs in its own transaction on a pool connection; a third connection

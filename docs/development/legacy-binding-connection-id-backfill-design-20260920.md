@@ -77,7 +77,7 @@
 ## 6. 幂等与 `down()` 的选择性
 
 - 重放：谓词 2 让第二次 `up()` 命中 0 行、账本 0 插入（PG 实证：行与账本逐字节相同，`backfilled_at` 不变）。
-- `down()` 只恢复**账本里有、且行仍是本迁移留下的样子**的行：`kind` 仍 sql-readonly、`connection_id` 仍等于账本记录值、`tenant_id` 与 owner 戳（`config->>'dataSourceOwnerId'`）仍等于账本记录值（与 `up()` 的复核对齐，复审 Sf4/Sf5）、回滚标记 `legacy_connection_fallback_eligible` 仍不是 TRUE、`config` 里没有重新出现 `dataSourceId`、`migration_name` 匹配。这些都是 `b` 上的条件，`down()` 在并发写入者的行锁上等过之后，PG 按提交后的新行版本重判。恢复即删对应账本行；账本**空了才 DROP**。人在回填后重绑过的行原样保留，其账本行留作证据、表不删（PG 实证：重绑 `b_ok2` 后 `down()` 只恢复 `b_ok1`，账本剩 `b_ok2` 一行）。
+- `down()` 只恢复**账本里有、且下列各项仍是本迁移留下的样子**的行：`kind` 仍 sql-readonly、`connection_id` 仍等于账本记录值、`tenant_id` 与 owner 戳（`config->>'dataSourceOwnerId'`）仍等于账本记录值（与 `up()` 的复核对齐，复审 Sf4/Sf5）、回滚标记 `legacy_connection_fallback_eligible` 仍不是 TRUE、`config` 里没有重新出现 `dataSourceId`、`migration_name` 匹配。这些都是 `b` 上的条件，`down()` 在并发写入者的行锁上等过之后，PG 按提交后的新行版本重判。恢复即删对应账本行；账本**空了才 DROP**。人在回填后重绑过的行原样保留，其账本行留作证据、表不删（PG 实证：重绑 `b_ok2` 后 `down()` 只恢复 `b_ok1`，账本剩 `b_ok2` 一行）。只看上面这几项：回填后手改的是别的东西（`config` 里其它键、名称、capabilities），不拦恢复，手改内容在恢复后保留；被恢复的行 `updated_at` 由 057 触发器盖成执行时间（§4）。
 - 回滚标记这一条是 2026-09-27 补的（复审）：此前 `down()` 不查它。回填后若有人把这行的标记改成 TRUE，`down()` 会把它还原成「标记 TRUE + `connection_id` NULL + 指针」，这正是切换迁移的回滚形态，`resolveLegacy` 的标记门（`plugins/plugin-integration-core/lib/connection-resolver.cjs:205-216`）放行它；而同一行回填前标记是 FALSE，在那里被拒。现在这类行与其它「回填后被人改过」的行一样原样保留，账本行留作证据。可达性低：标记是服务端专有列，插件只保留原值或置 FALSE（`external-systems.cjs:803`、`:854`），唯一写 TRUE 的代码是切换迁移 `up()`（`zzzz20260902120000:100`），它要求 `connection_id IS NULL`，碰不到回填过的行；只有运维手写 SQL 能造出这个状态。
 - 切换迁移的 `down()` 会不会撞上本账本？切换迁移 `down()` 只删自己加的列/约束，账本是独立表，互不影响；但**回滚顺序必须是本迁移先 down**（否则 `connection_id` 列被删，本 `down()` 的 UPDATE 会失败——迁移框架本身就按逆序回滚）。
 
