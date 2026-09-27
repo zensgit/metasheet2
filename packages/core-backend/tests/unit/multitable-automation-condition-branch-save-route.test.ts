@@ -5,9 +5,9 @@
  * `preflightAutomationConditionFields` only sees a rule's action tree through its 4th argument, and the two
  * univer-meta save routes are its only callers that pass one:
  *   POST  /sheets/:sheetId/automations          → `preflightAutomationConditionFields(query, sheetId, input.conditions, input)`
- *   PATCH /sheets/:sheetId/automations/:ruleId  → the same, with `actionType` resolved to the EFFECTIVE type
- *                                                 (request ?? stored) by `preflightAutomationRuleUpdate`.
- * Drop the 4th argument at either site, or hand the PATCH the raw request instead of the effective type, and every
+ *   PATCH /sheets/:sheetId/automations/:ruleId  → the same, with `actionType` AND `actionConfig` resolved to the
+ *                                                 EFFECTIVE pair (request ?? stored) by `preflightAutomationRuleUpdate`.
+ * Drop the 4th argument at either site, or hand the PATCH the raw request instead of the effective pair, and every
  * function-level test stays green while a branch condition is persisted unchecked. So these cases go through the
  * real router: the mocked pool answers the liveness / permission / `meta_fields` reads, the automation service is a
  * mock (the only question about it is whether createRule / updateRule was reached), and the transport is the pinned
@@ -85,9 +85,14 @@ function storedRule(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function createMockAutomationService(existing = storedRule()) {
+/**
+ * Stateful on purpose: what createRule / updateRule "persist" is what the next getRule reads back, so a two-step
+ * sequence (save, then PATCH) sees its own first step — the two-step re-type tests depend on it.
+ */
+function createMockAutomationService(existing: ReturnType<typeof storedRule> | null = storedRule()) {
+  let current = existing
   return {
-    createRule: vi.fn(async (sheetId: string, input: Record<string, unknown>) => storedRule({
+    createRule: vi.fn(async (sheetId: string, input: Record<string, unknown>) => (current = storedRule({
       sheet_id: sheetId,
       name: input.name ?? null,
       trigger_type: input.triggerType,
@@ -99,16 +104,16 @@ function createMockAutomationService(existing = storedRule()) {
       conditions: input.conditions,
       actions: input.actions,
       execution_mode: input.executionMode ?? null,
-    })),
-    getRule: vi.fn(async (ruleId: string) => (ruleId === RULE_ID ? existing : null)),
-    updateRule: vi.fn(async (ruleId: string, sheetId: string, input: Record<string, unknown>) => storedRule({
+    }))),
+    getRule: vi.fn(async (ruleId: string) => (ruleId === RULE_ID ? current : null)),
+    updateRule: vi.fn(async (ruleId: string, sheetId: string, input: Record<string, unknown>) => (current = storedRule({
       id: ruleId,
       sheet_id: sheetId,
-      action_type: input.actionType ?? existing.action_type,
-      action_config: input.actionConfig ?? existing.action_config,
-      actions: input.actions ?? existing.actions,
-      execution_mode: existing.execution_mode,
-    })),
+      action_type: input.actionType ?? current?.action_type,
+      action_config: input.actionConfig ?? current?.action_config,
+      actions: input.actions ?? current?.actions ?? null,
+      execution_mode: input.executionMode ?? current?.execution_mode ?? null,
+    }))),
   }
 }
 
@@ -293,6 +298,63 @@ describe('客户反馈 #4b — condition_branch conditions are field-checked at 
     expect(res.body.ok).toBe(true)
     expect(automationService.updateRule).toHaveBeenCalledTimes(1)
     expect(pool.fieldReads()).toBe(0)
+  })
+
+  it('two-step re-type: an update_record rule saved with never-checked `branches`, then PATCHed to condition_branch WITHOUT actionConfig, is refused on the STORED branches', async () => {
+    // Step 1 is allowed on purpose (the case above): an update_record rule's actionConfig is not a branch config,
+    // so its `branches` are not field-checked. Step 2 re-types the rule and resends no actionConfig — updateRule
+    // keeps the stored config, so those stored branches go live and are what must be checked (the effective pair).
+    const automationService = createMockAutomationService(null)
+    const { pool } = await mountApp({ automationService })
+
+    const created = await request(pinned.url())
+      .post(AUTOMATIONS)
+      .send({
+        name: 'Plain rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'update_record',
+        actionConfig: { fields: { fld_title: 'x' }, ...branchAction(group(qty('equals', 'abc'))).config },
+      })
+    expect(created.status).toBe(200)
+    expect(automationService.createRule).toHaveBeenCalledTimes(1)
+    expect(pool.fieldReads()).toBe(0)
+
+    const retyped = await request(pinned.url())
+      .patch(`${AUTOMATIONS}/${RULE_ID}`)
+      .send({ actionType: 'condition_branch', executionMode: 'workflow_job_v1' })
+    expect(retyped.status).toBe(400)
+    expect(retyped.body.error).toEqual({
+      code: INVALID,
+      message: 'actionConfig.branches[0].conditions.conditions[0].value must be a number',
+    })
+    expect(automationService.getRule).toHaveBeenCalledTimes(1)
+    expect(automationService.updateRule).not.toHaveBeenCalled()
+    expect(pool.fieldReads()).toBe(1)
+  })
+
+  it('two-step re-type discriminator: the same sequence with a VALID stored branch value ("5") saves — the stored branches are checked, a re-type is not refused as such', async () => {
+    const automationService = createMockAutomationService(null)
+    const { pool } = await mountApp({ automationService })
+
+    const created = await request(pinned.url())
+      .post(AUTOMATIONS)
+      .send({
+        name: 'Plain rule',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'update_record',
+        actionConfig: { fields: { fld_title: 'x' }, ...branchAction(group(qty('equals', '5'))).config },
+      })
+    expect(created.status).toBe(200)
+
+    const retyped = await request(pinned.url())
+      .patch(`${AUTOMATIONS}/${RULE_ID}`)
+      .send({ actionType: 'condition_branch', executionMode: 'workflow_job_v1' })
+    expect(retyped.status).toBe(200)
+    expect(retyped.body.ok).toBe(true)
+    expect(automationService.updateRule).toHaveBeenCalledTimes(1)
+    expect(pool.fieldReads()).toBe(1)
   })
 
   it('PATCH: a checkbox branch "done equals \'true\'" — the text the branch editor sends — saves; "yes" is refused', async () => {

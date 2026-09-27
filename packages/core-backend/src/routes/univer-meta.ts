@@ -20521,11 +20521,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       const input = preflight.input
       // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
-      // The action type is the EFFECTIVE one (request ?? stored): a PATCH that sends only `actionConfig` for a
-      // rule stored as condition_branch must still have its branch values checked, not slip past unvalidated.
+      // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
+      // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to
+      // re-type a rule whose stored `actionConfig` carries never-checked `branches`, must still have those branch
+      // values checked, not slip past unvalidated.
       await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, {
         ...input,
         actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
       })
 
       const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)

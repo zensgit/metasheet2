@@ -5273,10 +5273,14 @@ interface ConditionBranchGroupRef {
  * service's own shape validation (`validateConditionBranchConfig`) reports it with its established message and
  * path, so the refusal a client sees for a malformed branch is unchanged.
  *
- * `input.actionType` must be the EFFECTIVE type. On a PATCH that carries `actionConfig` without `actionType`
- * the stored type applies (`updateRule` merges `input.actionType ?? existing.action_type`), so the route
- * resolves it through `preflightAutomationRuleUpdate` before calling the preflight — otherwise a rule stored
- * as `condition_branch` with `actions: null` could take an unvalidated branch value through a partial PATCH.
+ * `input.actionType` and `input.actionConfig` must be the EFFECTIVE pair. `updateRule` merges BOTH
+ * (`input.actionType ?? existing.action_type`, `input.actionConfig ?? existing.action_config`), so the PATCH
+ * route resolves them through `preflightAutomationRuleUpdate` before calling the preflight — otherwise
+ *   - a rule stored as `condition_branch` with `actions: null` could take an unvalidated branch value through a
+ *     PATCH that carries only `actionConfig`, and
+ *   - an `update_record` rule whose `actionConfig` carries `branches` (never checked: it is not a branch rule)
+ *     could be re-typed to `condition_branch` by a PATCH that carries only `actionType` (+ `executionMode`),
+ *     turning those stored, never-checked branches live.
  */
 function collectConditionBranchGroups(input: AutomationConditionPreflightActions): ConditionBranchGroupRef[] {
   const refs: ConditionBranchGroupRef[] = []
@@ -5354,6 +5358,13 @@ export interface AutomationRuleUpdatePreflight {
    * whose PATCH carries only `actionConfig`.
    */
   effectiveActionType?: string
+  /**
+   * The rule's legacy `actionConfig` AFTER the update — the request's (normalized) when it sent one, else the
+   * STORED one — under the same condition as `effectiveActionType`. The condition preflight needs this for a
+   * PATCH that re-types a rule to `condition_branch` WITHOUT resending `actionConfig`: `updateRule` keeps the
+   * stored config, whose `branches` were never field-checked while the rule was not a branch rule.
+   */
+  effectiveActionConfig?: Record<string, unknown> | null
 }
 
 /**
@@ -5427,5 +5438,5 @@ export async function preflightAutomationRuleUpdate(
   const out: UpdateRuleInput = { ...input }
   if (input.actionConfig !== undefined) out.actionConfig = normalizedActionConfig
   if (input.actions !== undefined) out.actions = Array.isArray(input.actions) ? normalizedActions : null
-  return { input: out, effectiveActionType: nextActionType }
+  return { input: out, effectiveActionType: nextActionType, effectiveActionConfig: normalizedActionConfig }
 }

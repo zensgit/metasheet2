@@ -688,6 +688,38 @@ describe('preflightAutomationConditionFields validates condition_branch conditio
       await expect(preflightAutomationConditionFields(query, 'sheet_1', input.conditions, input)).resolves.toBeUndefined()
       expect(query).not.toHaveBeenCalled()
     })
+
+    it('a PATCH that re-types to condition_branch WITHOUT actionConfig resolves the STORED config; the composed check refuses its never-checked branches', async () => {
+      // Two-step bypass: an update_record rule may carry `branches` in its actionConfig (not a branch config, so not
+      // checked); re-typing it with only { actionType, executionMode } makes updateRule keep that stored config live.
+      const storedPlain = {
+        id: 'rule_1',
+        sheet_id: 'sheet_1',
+        action_type: 'update_record',
+        action_config: { fields: { title: 'x' }, ...partialPatch.actionConfig },
+        actions: null,
+      }
+      const service = { getRule: vi.fn(async () => storedPlain) }
+      const retype = { actionType: 'condition_branch', executionMode: 'workflow_job_v1' }
+      const preflight = await preflightAutomationRuleUpdate(noLinkQuery as never, 'sheet_1', 'rule_1', retype as never, service as never)
+      expect(preflight?.effectiveActionType).toBe('condition_branch')
+      expect(preflight?.effectiveActionConfig).toEqual(storedPlain.action_config)
+      expect(preflight?.input).toEqual(retype)
+      expect(service.getRule).toHaveBeenCalledTimes(1)
+      const input = preflight!.input
+      const bad = await rejection(() => preflightAutomationConditionFields(queryFn(), 'sheet_1', input.conditions, {
+        ...input,
+        actionType: preflight!.effectiveActionType ?? input.actionType,
+        actionConfig: preflight!.effectiveActionConfig ?? input.actionConfig,
+      }))
+      expect(bad).toEqual({
+        code: 'AUTOMATION_CONDITION_VALUE_INVALID',
+        message: 'actionConfig.branches[0].conditions.conditions[0].value must be a number',
+      })
+      // When the request DOES send actionConfig, the effective config is the request's (normalized) one.
+      const sent = await preflightAutomationRuleUpdate(noLinkQuery as never, 'sheet_1', 'rule_1', partialPatch as never, service as never)
+      expect(sent?.effectiveActionConfig).toEqual(partialPatch.actionConfig)
+    })
   })
 })
 
