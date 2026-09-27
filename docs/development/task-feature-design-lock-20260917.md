@@ -764,7 +764,7 @@ raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,23)) els
 **已裁 2026-09-26**（见评论 5835498504）：(a) 共用 WHERE 文本生成器 + deny 失败必抛。不选 (b) 存 `visibleUserIds`。读路径 = 复用 `loadDeniedRecordIds` 的新 sibling。**不得自行发明**第二条读路径。该函数**不得**照 `permission-service.ts:1272-1279` 形吞表缺失错。实现在 M5；§12 门 9 文字本轮不动。
 
 **12. §8-1 ③ required 承载**
-**已裁 2026-09-26**（见评论 5835498504）：取 (b)。任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。(a) 不采用。下面保留代价说明。§12 里原先写「§13-12 未裁」的 TBD 已改成这条已裁措辞。门表整体仍是 PROPOSED。
+**已裁 2026-09-26**（见评论 5835498504）：取 (b)。任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。(a) 不采用。下面保留代价说明。§12 里原先指向未裁承载的 TBD 已改成这条已裁措辞。门表整体仍是 PROPOSED。
 - **(a)** 整文件加进 `.github/workflows/plugin-tests.yml` `test` job run-list。代价：s6a pin 重算（`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json:90` 钉住该文件）+ 与在飞 PR 串行化。本切片禁止改该文件。裁 (a) 时 ④ 必须扩成**四集合**相等（三集合 + 该 run-list）。
 - **(b)** 任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。代价：lane 须先单独合进 main 才有同名 job；在飞 PR 要 rebase 才出现 context。裁 (b) 时 §5.2.1 ② 的「保留 paths、不声明 merge_group」形状被本项取代。
 - 已采纳 (b)，避免动 s6a。
