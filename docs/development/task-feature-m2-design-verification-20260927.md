@@ -1,5 +1,7 @@
 # 任务 M2 设计验证（2026-09-27）
 
+后续记录在 `docs/development/task-m2-backend-design-20260927.md` 与 `docs/development/task-m2-backend-verification-20260927.md`。下文是较早一轮的过程笔记。
+
 对照 `docs/development/task-feature-design-lock-20260917.md`（锁 PR #5845，head `f2f095d0f`）与后端 PR #6062。本文件只记录已经跑过的命令和还没做的门。不构成合并授权，也不表示 `TASKS_ENABLED` 已打开。
 
 ## 范围

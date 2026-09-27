@@ -64,6 +64,6 @@ jobs:
           --config vitest.integration.config.ts run
           tests/integration/task-p0a.db.test.ts
           tests/integration/task-read-path.db.test.ts
-          tests/integration/task-gate19.db.test.ts
           tests/integration/task-completion-grid.db.test.ts
+          tests/integration/task-rbac-trust.db.test.ts
           --reporter=verbose
