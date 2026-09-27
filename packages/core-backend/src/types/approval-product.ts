@@ -1016,6 +1016,38 @@ export interface ApprovalActionRequest {
    * `undefined`) stays a 200 no-op.
    */
   attachmentIds?: string[]
+  /**
+   * H-5 (settlement parity) — the legacy `POST /api/approvals/:id/reject` door's OWN column.
+   *
+   * `approval_records.reason` is a persisted audit column that ONLY that door has ever written
+   * (`/actions` has no `reason` field and never has), and that door enforces its presence with a
+   * 400 `APPROVAL_REJECTION_REASON_REQUIRED`. Routing that door through `dispatchAction` without
+   * this rider would collect the text and then drop it on the floor — "mandatory then discarded".
+   *
+   * INTERNAL-ONLY, exactly like `channelOrigin`: the `/actions` route builds its request from an
+   * explicit field whitelist that does not include this key, so an HTTP body can never reach it
+   * through that door. Absent ⇒ the column is written NULL, which is what every caller other than
+   * the legacy reject door produces today — a pure widening, byte-identical for them.
+   *
+   * Read by the `reject` arm only. Present on any other action it is simply not read (the other
+   * arms build their own `insertApprovalRecord` payloads and none of them names `reason`).
+   */
+  reason?: string | null
+  /**
+   * H-5 (settlement parity) — an OPTIONAL optimistic-lock PRECONDITION, checked under the
+   * settlement transaction's OWN `FOR UPDATE` lock on the instance row.
+   *
+   * The legacy decision doors publish a `version` precondition (409 `APPROVAL_VERSION_CONFLICT`).
+   * They must release their row lock before calling this method — `dispatchAction` re-locks the
+   * same row on a SECOND pool connection, so holding it across the call is a deterministic
+   * self-deadlock — which means the version they validated under their own lock is no longer the
+   * version the write lands on. Passing it here makes it a real precondition again: the check and
+   * the write happen in ONE transaction under ONE lock, the way the doors' inline DML used to.
+   *
+   * Absent ⇒ no version check at all (`/actions`, the DingTalk card wrapper and the after-sales
+   * bridge have no version concept and never set it) — byte-identical to today for them.
+   */
+  expectedVersion?: number
 }
 
 export interface ApprovalTemplateListItemDTO {
