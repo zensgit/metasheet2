@@ -110,7 +110,14 @@ pnpm exec tsx tests/helpers/gate19-identities.ts /tmp/tasks-m2-db-verbose.txt \
 
 ## 6. CI run id 与收集数
 
-推送这一 head 之前，GitHub 上还没有它的 `tasks-realdb` 或 `test (20.x)` run。本地收集数见第 5 节。run id 与 CI 日志里的收集数在 PR body 里补；job 还没跑完时记 NOT YET。
+本地收集数见第 5 节：四个 `task-*.db.test.ts` 一共 83，没有 `.each`。
+
+推送 `5362170a8` 时 GitHub 建了这两个 run，日志里的收集数当时还没有：
+
+| 检查 | run | 当时状态 | 日志收集数 |
+|---|---|---|---|
+| `tasks-realdb` | [36329492872](https://github.com/zensgit/metasheet2/actions/runs/36329492872) | 已开始 | NOT YET |
+| Plugin System Tests（其中 `test (20.x)` 跑单元枚举） | [36329492901](https://github.com/zensgit/metasheet2/actions/runs/36329492901) | 排队 | NOT YET |
 
 门 17③（把 `tasks-realdb` 加进 main required checks）是合并后的 owner 步骤，本 PR 不做。
 
