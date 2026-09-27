@@ -93,4 +93,28 @@ describe('tasks read path', () => {
     expect(pending.map((row) => row.id)).toEqual([created.id])
     expect(await countPending({ orgId, actorId: me, viewerTz: null })).toBe(0)
   })
+
+  it('gate 5: one all-day task has the same dueAt bytes for UTC+14 and UTC-11 viewers', async () => {
+    const { orgId, creator, me } = ids('g5')
+    const created = await createTask({
+      orgId,
+      creatorId: creator,
+      title: '备料复核',
+      assignees: [me],
+      completionMode: 'all',
+    })
+    await poolManager.get().query(
+      `UPDATE tasks
+       SET due_date = '2026-09-28', due_time = NULL, due_at = NULL, time_zone = 'Asia/Shanghai'
+       WHERE id = $1`,
+      [created.id],
+    )
+    const east = await listPending({ orgId, actorId: me, viewerTz: 'Pacific/Kiritimati' })
+    const west = await listPending({ orgId, actorId: me, viewerTz: 'Pacific/Pago_Pago' })
+    const eastItem = east.find((row) => row.id === created.id)
+    const westItem = west.find((row) => row.id === created.id)
+    expect(eastItem?.dueAt).toBe('2026-09-28T15:59:59.999Z')
+    expect(westItem?.dueAt).toBe(eastItem?.dueAt)
+    expect(eastItem && 'description' in eastItem).toBe(false)
+  })
 })

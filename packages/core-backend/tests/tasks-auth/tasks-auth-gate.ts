@@ -127,6 +127,58 @@ describe('tasks auth gate', () => {
     expect(response.body).toEqual({ error: 'Insufficient permissions' })
   })
 
+  it('gate 1: a read with no tenant is org_missing and a write is 422', async () => {
+    const bare = `usr_tasks_notenant_${stamp}`
+    const bareRole = `tasks_both_${stamp}`
+    const db = poolManager.get()
+    await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [bareRole, bareRole])
+    await db.query(
+      `INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'tasks:read'), ($1, 'tasks:write')`,
+      [bareRole],
+    )
+    await db.query(
+      `INSERT INTO users (
+         id, email, name, password_hash, role, permissions,
+         is_active, activation_status, local_password_set, must_change_password
+       ) VALUES (
+         $1, $2, $3, 'x', 'user', '[]'::jsonb,
+         TRUE, 'activated', TRUE, FALSE
+       )`,
+      [bare, `${bare}@tasks-auth-gate.test`, 'tasks-no-tenant'],
+    )
+    await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [bare, bareRole])
+    await db.query(
+      `INSERT INTO user_namespace_admissions (
+         user_id, namespace, enabled, source, created_at, updated_at
+       ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
+      [bare],
+    )
+    const bareToken = jwt.sign({
+      userId: bare,
+      sub: bare,
+      email: `${bare}@tasks-auth-gate.test`,
+      role: 'user',
+      roles: [bareRole],
+      perms: ['tasks:read'],
+    }, JWT_SECRET, { expiresIn: '1h' })
+    const read = await request(app())
+      .get('/api/tasks')
+      .set('Authorization', `Bearer ${bareToken}`)
+    expect(read.status).toBe(200)
+    expect(read.body).toEqual({ items: [], degraded: true, reason: 'org_missing' })
+    const write = await request(app())
+      .post('/api/tasks')
+      .set('Authorization', `Bearer ${bareToken}`)
+      .send({ title: '备料复核' })
+    expect(write.status).toBe(422)
+    expect(write.body).toEqual({ error: { code: 'ORG_MISSING' } })
+    await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [bare])
+    await db.query('DELETE FROM user_roles WHERE user_id = $1', [bare])
+    await db.query('DELETE FROM users WHERE id = $1', [bare])
+    await db.query('DELETE FROM role_permissions WHERE role_id = $1', [bareRole])
+    await db.query('DELETE FROM roles WHERE id = $1', [bareRole])
+  })
+
   it('allows POST /api/tasks when the database grants tasks:write', async () => {
     const response = await request(app())
       .post('/api/tasks')
