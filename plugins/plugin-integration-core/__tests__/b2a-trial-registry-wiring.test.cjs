@@ -3076,6 +3076,15 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
   assert.equal(control.applied.statusCode, 200, JSON.stringify(control.applied.body))
   assert.equal(control.applied.body.data.evidence.b2aSchemaContract.schemaContractPinned, false, 'apply COMPARED under B')
   assert.equal(control.applied.body.data.evidence.b2aSchemaContract.objectCount, STOCK_PREP_OBJECTS.length + 1)
+  // ONE LIST, TWO CONSUMERS — in APPLY's own wrapper. The dry-run case pins this for its entry; apply
+  // has a guard line of its own, and an apply that matched the plan's list while the contract compared
+  // the resolved list would report N here against the contract's N+1 and still get past the compare
+  // (the plan's objects are a subset of the resolved list). Both numbers, both from apply's evidence.
+  assert.equal(control.applied.body.data.evidence.b2aTrialRegistration.objectCount, STOCK_PREP_OBJECTS.length + 1,
+    'apply\'s guard matched the resolved list, lookup object included')
+  assert.equal(control.applied.body.data.evidence.b2aTrialRegistration.objectCount,
+    control.applied.body.data.evidence.b2aSchemaContract.objectCount,
+    'apply\'s guard and apply\'s contract counted the same list')
   assert.equal(control.applied.body.data.apply.counts.created, 1)
 
   // MVP-PERSIST, in-process, as its route calls it: the resolved list pins the lookup table, and a
@@ -3105,6 +3114,14 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
   })
   assert.equal(mvpPinned.evidence.b2aSchemaContract.schemaContractPinned, true)
   assert.equal(mvpPinned.evidence.b2aSchemaContract.objectCount, STOCK_PREP_OBJECTS.length + 1, 'MVP-persist pins the lookup table too')
+  // ONE LIST, TWO CONSUMERS — in MVP-PERSIST's own wrapper. Its route stops at the persist step in
+  // this harness (503, no evidence body), so the wrapper's evidence in-process is the only place the
+  // guard's count is visible for this entry; the route case next door pins that the route hands the
+  // wrapper the resolved list, and this line pins that the wrapper's guard matched that same list.
+  assert.equal(mvpPinned.evidence.b2aTrialRegistration.objectCount, STOCK_PREP_OBJECTS.length + 1,
+    'MVP-persist\'s guard matched the resolved list, lookup object included')
+  assert.equal(mvpPinned.evidence.b2aTrialRegistration.objectCount, mvpPinned.evidence.b2aSchemaContract.objectCount,
+    'MVP-persist\'s guard and MVP-persist\'s contract counted the same list')
   assert.equal(mvpSource.schemaReads.filter((object) => object === LOOKUP_OBJECT).length, 2)
   const mvpDriftedSource = createRecordingSourceAdapter(sourceData(), { schema: sourceSchemaWithLookup(LOOKUP_COLUMNS.slice(1)) })
   const mvpDrift = await capturedRejection(inProcess(prepareStockPreparationMvpSnapshot, {
@@ -3149,6 +3166,8 @@ async function R02L_applyAndMvpPersistPinTheSameListAndTheWrapperFailsClosedWith
   })
   assert.equal(withList.status, 'ready', JSON.stringify(withList.evidence))
   assert.equal(withList.evidence.b2aSchemaContract.objectCount, STOCK_PREP_OBJECTS.length + 1)
+  assert.equal(withList.evidence.b2aTrialRegistration.objectCount, withList.evidence.b2aSchemaContract.objectCount,
+    'in-process dry-run: the guard and the contract counted the same list')
 
   // A KIND THAT CANNOT HIDE AN OBJECT (`bridge:legacy-sql-readonly`), armed, no resolved list: the
   // plan's list is the read's list, and the contract covers exactly the plan's objects — unchanged.
