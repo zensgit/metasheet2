@@ -2,7 +2,8 @@ import '../helpers/assert-rbac-optional-off'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { completeTask, createTask, getTask, listTasks, reopenTask } from '../../src/services/task-records'
+import { completeTask, createTask, getTask, listPending, listTasks, reopenTask } from '../../src/services/task-records'
+import { computeDueAt } from '../../src/tasks/task-dates'
 import { taskStructureLockKey } from '../../src/tasks/task-lock-keys'
 
 if (process.env.EXPECT_DB !== '1') {
@@ -336,6 +337,152 @@ describe('tasks P0-A real db', () => {
     const rows = await assigneeRows(created.id)
     expect(rows.find((row) => row.user_id === userA)?.completed_at).toBeNull()
     expect(rows.find((row) => row.user_id === userB)?.completed_at).toBeNull()
+  })
+
+  it('keeps one completed and one reopened event when a zero-assignee task is repeated', async () => {
+    const { orgId, userA } = ids('zero')
+    const created = await createTask({
+      orgId,
+      creatorId: userA,
+      title: '备料复核',
+      assignees: [],
+    })
+    expect(await assigneeRows(created.id)).toEqual([])
+    await completeTask({ orgId, actorId: userA, taskId: created.id })
+    await completeTask({ orgId, actorId: userA, taskId: created.id })
+    await reopenTask({ orgId, actorId: userA, taskId: created.id, scope: 'self' })
+    await reopenTask({ orgId, actorId: userA, taskId: created.id, scope: 'self' })
+    const events = await poolManager.get().query<{ event_type: string; n: string }>(
+      `SELECT event_type, count(*)::text AS n
+       FROM task_events
+       WHERE task_id = $1 AND event_type IN ('completed', 'reopened')
+       GROUP BY event_type
+       ORDER BY event_type`,
+      [created.id],
+    )
+    expect(events.rows).toEqual([
+      { event_type: 'completed', n: '1' },
+      { event_type: 'reopened', n: '1' },
+    ])
+    expect(await taskRow(created.id)).toMatchObject({ status: 'open', version: 3 })
+  })
+
+  it('records one completed event when two creator completes wait on the structure lock', async () => {
+    const { orgId, userA } = ids('zero-lock')
+    const created = await createTask({
+      orgId,
+      creatorId: userA,
+      title: '备料复核',
+      assignees: [],
+    })
+    const pool = poolManager.get().getInternalPool()
+    const holder = await pool.connect()
+    let pending: Promise<unknown> | undefined
+    let stopWaiting = false
+    try {
+      if (!holder.processID) throw new Error('holder pid missing')
+      await holder.query('BEGIN')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [taskStructureLockKey(orgId)])
+      pending = Promise.all([
+        completeTask({ orgId, actorId: userA, taskId: created.id }),
+        completeTask({ orgId, actorId: userA, taskId: created.id }),
+      ])
+      const outcome = await Promise.race([
+        waitUntilBlocked(holder.processID, 2, () => stopWaiting).then(() => 'waiting' as const),
+        pending.then(() => 'finished' as const),
+      ])
+      expect(outcome).toBe('waiting')
+      await holder.query('COMMIT')
+      await pending
+    } finally {
+      stopWaiting = true
+      try {
+        await holder.query('ROLLBACK')
+      } catch {
+        // The holder transaction was already committed.
+      }
+      if (pending) await pending.catch(() => undefined)
+      holder.release()
+    }
+    const events = await poolManager.get().query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM task_events WHERE task_id = $1 AND event_type = 'completed'`,
+      [created.id],
+    )
+    expect(events.rows[0]?.n).toBe('1')
+    expect(await taskRow(created.id)).toMatchObject({ status: 'done', version: 2 })
+  })
+
+  it('shows a non-creator assignee and a follower the same detail, without complete for the follower', async () => {
+    const { orgId, userA, userB, outsider } = ids('detail')
+    const follower = `usrF_detail_${randomUUID()}`
+    const created = await createTask({
+      orgId,
+      creatorId: userA,
+      title: '备料复核',
+      assignees: [userB],
+    })
+    await poolManager.get().query(
+      'INSERT INTO task_followers (task_id, user_id) VALUES ($1, $2)',
+      [created.id, follower],
+    )
+    const asAssignee = await getTask({ orgId, actorId: userB, taskId: created.id })
+    expect(asAssignee).toEqual({
+      id: created.id,
+      title: '备料复核',
+      status: 'open',
+      completionMode: 'all',
+      createdBy: userA,
+      dueAt: null,
+      dueDate: null,
+      dueTime: null,
+      timeZone: null,
+      assignees: [{ userId: userB, completedAt: null }],
+      canComplete: true,
+      canReopen: true,
+    })
+    const asCreator = await getTask({ orgId, actorId: userA, taskId: created.id })
+    expect(asCreator.canComplete).toBe(true)
+    expect(asCreator.canReopen).toBe(true)
+    expect(asCreator.assignees).toEqual([{ userId: userB, completedAt: null }])
+    const asFollower = await getTask({ orgId, actorId: follower, taskId: created.id })
+    expect(asFollower.canComplete).toBe(false)
+    expect(asFollower.canReopen).toBe(false)
+    expect(asFollower.assignees).toEqual([{ userId: userB, completedAt: null }])
+    await expect(getTask({ orgId, actorId: outsider, taskId: created.id })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+  })
+
+  it('reads an all-day due_date as that calendar day when the process is east of UTC', async () => {
+    const { orgId, userA } = ids('duedate')
+    const created = await createTask({
+      orgId,
+      creatorId: userA,
+      title: '备料复核',
+      assignees: [userA],
+    })
+    await poolManager.get().query(
+      `UPDATE tasks
+       SET due_date = '2026-09-28', due_time = NULL, due_at = NULL, time_zone = 'Asia/Shanghai'
+       WHERE id = $1`,
+      [created.id],
+    )
+    const previousTz = process.env.TZ
+    process.env.TZ = 'Asia/Shanghai'
+    try {
+      const detail = await getTask({ orgId, actorId: userA, taskId: created.id })
+      expect(detail.dueDate).toBe('2026-09-28')
+      expect(detail.dueAt).toBeNull()
+      expect(detail.timeZone).toBe('Asia/Shanghai')
+      const items = await listPending({ orgId, actorId: userA, viewerTz: null })
+      const item = items.find((row) => row.id === created.id)
+      expect(item?.dueAt).toBe(computeDueAt({
+        dueDate: '2026-09-28',
+        dueTime: null,
+        timeZone: 'Asia/Shanghai',
+      }).toISOString())
+    } finally {
+      if (previousTz === undefined) delete process.env.TZ
+      else process.env.TZ = previousTz
+    }
   })
 })
 
