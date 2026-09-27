@@ -4,7 +4,9 @@
  *   POST /api/multitable/sheets/:sheetId/copy           body { name?, withData: boolean, permissionMode: 'inherit' }
  *   POST /api/multitable/sheets/:sheetId/copy/dry-run   同形，零写
  *
- * **仅会话认证**（CS-1）：不挂 `apiTokenAuth` / `oapiScopeGuard`（多维表路由逐个 opt-in，这两条不 opt-in）。
+ * **仅会话认证**（CS-1）：不挂 `mst_` API-token 鉴权中间件、不挂 OAPI scope 门（多维表路由对这两者逐个 opt-in，
+ * 这两条**不** opt-in；tests/unit/multitable-copy-sheet-routes.test.ts H8 以整文件文本钉住，
+ * tests/unit/multitable-oapi-allowlist-guard-tripwire.test.ts 的 ROUTE_FILES 扫描因此看不到本文件）。
  * `rbacGuard('multitable','write')` 之后再做两侧门（§7.1）。
  *
  * GATE ORDER（每一步 fail-closed、每个拒绝 values-free）：

@@ -252,9 +252,11 @@ describe('copy-sheet routes (ADR #6094 S1)', () => {
 
   it('H8: session-only registration — no apiTokenAuth / oapiScopeGuard on either route (CS-1)', () => {
     const source = readFileSync(join(__dirname, '../../src/routes/multitable-copy-sheet.ts'), 'utf8')
-    // CODE lines only — the header comment names the middlewares it deliberately does not mount.
-    const code = source.split(/\r?\n/).filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line)).join('\n')
-    expect(code).not.toMatch(/apiTokenAuth|oapiScopeGuard|requireScope|apiTokenWriteRateLimit/)
-    expect(code.match(/router\.post\('\/sheets\/:sheetId\/copy(\/dry-run)?', rbacGuard\('multitable', 'write'\)/g)).toHaveLength(2)
+    // WHOLE file, comments included: the #3365 OAPI tripwire (multitable-oapi-allowlist-guard-tripwire.test.ts)
+    // scans every route source for the token-auth identifier and demands a ROUTE_FILES entry for any hit — a
+    // header comment that merely NAMED the middleware it does not mount turned CI red on 2b95e1f70. The
+    // posture is therefore pinned as "the identifiers do not appear in this file at all".
+    expect(source).not.toMatch(/apiTokenAuth|oapiScopeGuard|requireScope|apiTokenWriteRateLimit/)
+    expect(source.match(/router\.post\('\/sheets\/:sheetId\/copy(\/dry-run)?', rbacGuard\('multitable', 'write'\)/g)).toHaveLength(2)
   })
 })
