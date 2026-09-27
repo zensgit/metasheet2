@@ -221,13 +221,17 @@ describe('App guest bootstrap', () => {
     expect(mocks.clearStoredAuthState).toHaveBeenCalledTimes(1)
     expect(fetchLog.filter((call) => call.url.includes('/api/auth/logout')).map((call) => call.authToken))
       .toEqual([null])
-    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added exactly one —
-    // the DB-backed approval-administrator capability read, issued once per page load and only for
-    // a principal the token gate already admits (`user_roles: ["admin"]` here), because the
-    // 批量转交 nav entry must not be shown off a predicate the approval list scope does not use.
-    // A stray request added later still reddens this line.
+    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added one — the
+    // DB-backed approval-administrator capability read, issued once per page load and only for a
+    // principal the token gate already admits (`user_roles: ["admin"]` here), because the 批量转交
+    // nav entry must not be shown off a predicate the approval list scope does not use. Task-feature
+    // M2 added a second — the tasks nav badge's `GET /api/tasks/pending-count` (unlike the
+    // pre-existing approvals nav badge, `tasksApi` has no `USE_MOCK`, so this one is a REAL request
+    // even under vitest's `DEV`). It appears FIRST because the tasks nav entry (with its badge) sits
+    // earlier in App.vue's template than the admin-only 批量转交 entry, and Vue mounts sibling nav
+    // children in that document order. A stray request added later still reddens this line.
     expect(fetchLog.map((call) => new URL(call.url).pathname))
-      .toEqual(['/api/approvals/admin/capability', '/api/auth/logout'])
+      .toEqual(['/api/tasks/pending-count', '/api/approvals/admin/capability', '/api/auth/logout'])
     for (const key of [
       'auth_token',
       'jwt',

@@ -38,7 +38,16 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
-            <router-link v-if="canUseTasks" to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
+            <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
+                 the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` the same way the
+                 approvals nav badge is, so a badge-only failure cannot blank the shell, and gated
+                 on `!isPublicRoute` so it never polls off an anonymous/guest route. -->
+            <span v-if="canUseTasks" class="nav-tasks">
+              <router-link to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
+              <ShellChromeBoundary>
+                <TasksTodoBadge v-if="!isPublicRoute" :label="navLabels.tasksTodo" />
+              </ShellChromeBoundary>
+            </span>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -124,6 +133,7 @@ import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
 import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
+import TasksTodoBadge from './tasks/TasksTodoBadge.vue'
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
@@ -201,6 +211,8 @@ const navLabels = computed(() => {
       approvalMetrics: '审批 SLA',
       approvalBatchTransfer: '批量转交',
       tasks: '任务',
+      // Values-free, same convention as `approvalTodo`: names the surface, never the count.
+      tasksTodo: '待办任务',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
@@ -229,6 +241,7 @@ const navLabels = computed(() => {
     approvalMetrics: 'Approval SLA',
     approvalBatchTransfer: 'Batch Transfer',
     tasks: 'Tasks',
+    tasksTodo: 'Pending tasks',
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',
