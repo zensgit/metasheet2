@@ -132,6 +132,8 @@ pnpm exec tsx tests/helpers/gate19-identities.ts /tmp/tasks-m2-db-verbose.txt \
 
 Plugin System Tests run [36329710574](https://github.com/zensgit/metasheet2/actions/runs/36329710574) 已结束，结论 success。其中 job `test (20.x)` 也是 success。这一 job 里 `pnpm --filter @metasheet/core-backend test` 的收集数是 18200（16590 passed，1610 skipped）。同 job 的 tasks auth gate 步骤收集 8，8 passed。这是 `b27cf9208` 的日志，不是上面 89 这条本地结果。
 
+`d1b76c711` 的 Plugin System Tests run [36333266243](https://github.com/zensgit/metasheet2/actions/runs/36333266243) 已结束，结论 success。job `test (20.x)` 也是 success。这一 job 里 `pnpm --filter @metasheet/core-backend test` 收集 18200（16590 passed，1610 skipped）。同 job 的 tasks auth gate 收集 8，8 passed。同一 head 的 `tasks-realdb` run [36333265859](https://github.com/zensgit/metasheet2/actions/runs/36333265859) 成功：4 个文件，89 个测试。这两次运行都在 `d1b76c711`，不在记录它们的后续文档提交上。评论 5858154058 的裁决是 APPROVE-with-hardening（0 P1 / 1 P2）。这一笔只补 CI 数字，不关闭那条 P2，也不声称 M2 退出。
+
 门 17③（把 `tasks-realdb` 加进 main required checks）是合并后的 owner 步骤，本 PR 不做。
 
 ## 7. 未验证
