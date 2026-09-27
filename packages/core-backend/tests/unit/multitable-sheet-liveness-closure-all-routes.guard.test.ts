@@ -1221,8 +1221,8 @@ const SIBLING_GUARDED: Record<string, string> = {
 const PLUGIN_ROUTE_BRIDGE = 'PLUGIN ROUTE BRIDGE — out of scope by design: method, path and handler are handed in at '
   + 'runtime by a plugin (plugins/**), whose code this closed world does not read (it scans src/ only). The bridge '
   + 'function itself only wraps the plugin handler with error handling and metrics and reads no sheet and no request '
-  + 'params/query/body (asserted on its body). Known GAP — tracked in #5833 — the plugin SDK getRecord path reads a '
-  + 'record without asking whether its sheet is live.'
+  + 'params/query/body (asserted on its body). The plugin SDK getRecord path this bridge used to leave open now '
+  + 'checks sheet liveness itself (#5834, closing #5833), so the bridge no longer carries an open tracker.'
 
 /** The bridge wrapper forwards to the plugin handler and does nothing sheet-shaped itself. */
 const pluginBridgeStillTrue = (o: OpaqueRegistration) => /\bawait handler\(req, res, next\)/.test(o.code)
@@ -2141,9 +2141,10 @@ describe('sheet-liveness closure over EVERY route file', () => {
     // now, see LEGACY SPREADSHEET SHEETS); 2 after #5829 closed the three legacy
     // spreadsheet-permissions GAPs (GUARDED now — routes/spreadsheet-permissions.ts carries the
     // same capability/liveness pair as the forward routes, so its `exempt` table is empty). The two
-    // that remain are the PLUGIN ROUTE BRIDGE pair (#5833), both in index.ts. A branch that closes
-    // another GAP lowers this floor by the number it removes.
-    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBeGreaterThanOrEqual(2)
+    // that remained were the PLUGIN ROUTE BRIDGE pair (#5833), both in index.ts; #5834 closed that GAP
+    // (the plugin SDK getRecord path now checks sheet liveness), so none remain. Registering a NEW GAP
+    // must raise this count deliberately in the same change.
+    expect(reasons.filter(([, e]) => /\bGAP — tracked in #\d+/.test(e.reason)).length).toBe(0)
   })
 
   it('vetted guards count only under their real exported name; an inline sheet filter must bind the sheet id', () => {
