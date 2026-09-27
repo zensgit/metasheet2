@@ -113,6 +113,23 @@ describe('task-completion', () => {
       expect(result.events).toEqual([{ type: 'completed', userId: 'creator1', occurredAt: NOW }])
     })
 
+    describe('zero-assignee task: a repeat complete is a no-op when the caller says the task was already done', () => {
+      it('wasDone=true: done stays true, no rows, NO event', () => {
+        const result = applyComplete({ mode: 'all', rows: [], actorId: 'creator1', createdBy: 'creator1', now: NOW, wasDone: true })
+        expect(result).toEqual({ rows: [], done: true, via: 'creator-direct', events: [] })
+      })
+      it('wasDone=false: the first complete still emits exactly one "completed" event', () => {
+        const result = applyComplete({ mode: 'any', rows: [], actorId: 'creator1', createdBy: 'creator1', now: NOW, wasDone: false })
+        expect(result.done).toBe(true)
+        expect(result.events).toEqual([{ type: 'completed', userId: 'creator1', occurredAt: NOW }])
+      })
+      it('wasDone=true does not bypass the creator-only rule', () => {
+        expect(() =>
+          applyComplete({ mode: 'all', rows: [], actorId: 'someone_else', createdBy: 'creator1', now: NOW, wasDone: true }),
+        ).toThrow()
+      })
+    })
+
     it('zero-assignee task: a non-creator actor is rejected', () => {
       expect(() =>
         applyComplete({ mode: 'all', rows: [], actorId: 'someone_else', createdBy: 'creator1', now: NOW }),
@@ -199,6 +216,37 @@ describe('task-completion', () => {
       expect(() =>
         applyReopen({ mode: 'all', rows: [], actorId: 'someone_else', scope: 'all', createdBy: 'creator1' }),
       ).toThrow()
+    })
+
+    describe('wasDone is ignored when the task has assignee rows', () => {
+      it('applyReopen: wasDone=false does not suppress a real self reopen', () => {
+        const rows = [row('u1', NOW), row('u2', null)]
+        const result = applyReopen({ mode: 'all', rows, actorId: 'u1', scope: 'self', createdBy: 'creator1', wasDone: false })
+        expect(result.rows.find((r) => r.userId === 'u1')?.completedAt).toBeNull()
+        expect(result.events).toEqual([{ type: 'self_reopened', userId: 'u1' }])
+      })
+      it('applyComplete: wasDone=true does not suppress a real self complete', () => {
+        const rows = [row('u1', null), row('u2', null)]
+        const result = applyComplete({ mode: 'all', rows, actorId: 'u1', createdBy: 'creator1', now: NOW, wasDone: true })
+        expect(result.rows.find((r) => r.userId === 'u1')?.completedAt).toEqual(NOW)
+        expect(result.events).toEqual([{ type: 'self_completed', userId: 'u1', occurredAt: NOW }])
+      })
+    })
+
+    describe('zero-assignee task: reopening a task that was not done is a no-op', () => {
+      it('wasDone=false: no rows, NO event', () => {
+        const result = applyReopen({ mode: 'all', rows: [], actorId: 'creator1', scope: 'all', createdBy: 'creator1', wasDone: false })
+        expect(result).toEqual({ rows: [], events: [] })
+      })
+      it('wasDone=true: reopening a done task still emits exactly one "reopened" event', () => {
+        const result = applyReopen({ mode: 'any', rows: [], actorId: 'creator1', createdBy: 'creator1', wasDone: true })
+        expect(result.events).toEqual([{ type: 'reopened', userId: 'creator1' }])
+      })
+      it('wasDone=false does not bypass the creator-only rule', () => {
+        expect(() =>
+          applyReopen({ mode: 'all', rows: [], actorId: 'someone_else', scope: 'all', createdBy: 'creator1', wasDone: false }),
+        ).toThrow()
+      })
     })
 
     // Same no-op-means-no-events choice as `applyComplete`'s all-mode fix (P2 finding, generalized).
