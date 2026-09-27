@@ -351,7 +351,8 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatFieldDisplay, viewDayZone } from '../utils/field-display'
+import { businessTodayKey, dateTimeValueDayKey } from '../utils/business-timezone'
 import {
   buildCalendarDay,
   buildCalendarDays,
@@ -428,7 +429,10 @@ const emit = defineEmits<{
 
 const dateFieldId = ref<string | null>(null)
 const viewMode = ref<'month' | 'week' | 'day'>('month')
-const viewDate = ref(new Date())
+// "Today" is the business calendar's today (客户反馈 2026-09-24 #4c follow-up), the same calendar the date-time
+// buckets below use — not the browser's day, which differs from it for part of every day when the browser is
+// not in the business timezone.
+const viewDate = ref(parseDateForCell(businessTodayKey()))
 const pendingConfigKey = ref<string | null>(null)
 const { isZh } = useLocale()
 const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
@@ -473,6 +477,11 @@ const dateFields = computed(() =>
 const dateField = computed(() =>
   dateFieldId.value ? props.fields.find((f) => f.id === dateFieldId.value) ?? null : null,
 )
+
+const endDateField = computed(() => {
+  const endFieldId = calendarConfig.value.endDateFieldId
+  return endFieldId ? props.fields.find((f) => f.id === endFieldId) ?? null : null
+})
 
 const activeDayStr = computed(() => fmt(viewDate.value.getFullYear(), viewDate.value.getMonth() + 1, viewDate.value.getDate()))
 
@@ -530,9 +539,9 @@ const eventsByDate = computed(() => {
       })
       : row.id
     const title = titleDisplay === '—' ? row.id : titleDisplay
-    const startDate = normalizeDate(String(row.data[dateField.value.id] ?? ''))
+    const startDate = recordDayKey(dateField.value, row.data[dateField.value.id])
     const endFieldId = calendarConfig.value.endDateFieldId
-    const endDate = endFieldId ? normalizeDate(String(row.data[endFieldId] ?? '')) : null
+    const endDate = endFieldId ? recordDayKey(endDateField.value, row.data[endFieldId]) : null
     if (!startDate) continue
     const start = new Date(`${startDate}T00:00:00`)
     const end = new Date(`${(endDate ?? startDate)}T00:00:00`)
@@ -575,6 +584,8 @@ function buildCell(date: Date, inMonth: boolean): CalendarCell {
     holidays: props.calendarHolidays ?? [],
     isCurrentMonth: inMonth,
     showLunarCalendar: true,
+    // The "today" highlight marks the business today — the calendar the date-time buckets use.
+    today: parseDateForCell(businessTodayKey()),
   })
   const dateStr = calendarDay.date
   const all = eventsByDate.value[dateStr] ?? []
@@ -681,6 +692,19 @@ function normalizeDate(raw: string): string | null {
   return normalizeDateKey(raw)
 }
 
+/**
+ * The calendar day a record's value falls on. A date-time (dateTime / createdTime / modifiedTime) lands on the
+ * day its cell SHOWS — its wall clock in the field / business timezone (客户反馈 2026-09-24 #4c follow-up) —
+ * never on the UTC day (`normalizeDateKey` reads the first ten characters of the stored `…Z` instant) nor on
+ * the browser's day. Every other field type — a `date` (floating day, #3417) included — keeps `normalizeDate`.
+ */
+function recordDayKey(field: MetaField | null, value: unknown): string | null {
+  const zone = viewDayZone(field)
+  // A date-time value the grammar cannot read (legacy junk) keeps the old day logic rather than vanishing.
+  const businessDay = zone ? dateTimeValueDayKey(value, zone) : null
+  return businessDay ?? normalizeDate(String(value ?? ''))
+}
+
 function parseDateForCell(dateStr: string): Date {
   const [year, month, day] = dateStr.split('-').map(Number)
   return new Date(year, month - 1, day)
@@ -779,7 +803,7 @@ function goNext() {
 }
 
 function goToday() {
-  viewDate.value = new Date()
+  viewDate.value = parseDateForCell(businessTodayKey())
 }
 
 function cellAriaLabel(cell: CalendarCell): string {

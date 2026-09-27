@@ -345,6 +345,58 @@ export function formatDateTimeInZone(value: unknown, timeZone: string): string |
   return ms === null ? null : formatWallClock(wallClockInZone(ms, timeZone))
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Calendar days and event timestamps (客户反馈 2026-09-24 #4c follow-up — the surfaces PR #6083 deferred).
+// Built only on the converters above; no second zone converter.
+// ---------------------------------------------------------------------------------------------------------
+
+/** `YYYY-MM-DD` — the calendar day a UTC instant falls on in `timeZone`. */
+export function dayKeyInZone(utcMs: number, timeZone: string): string {
+  const clock = wallClockInZone(utcMs, timeZone)
+  return `${pad(clock.year, 4)}-${pad(clock.month)}-${pad(clock.day)}`
+}
+
+/**
+ * The calendar day (`YYYY-MM-DD`) a stored date-time value falls on in `timeZone`, or `null` when the value is
+ * not a date-time. This is how the calendar / timeline / Gantt views bucket a `dateTime` record: by the day
+ * the grid's wall clock shows, never by the browser's day or the UTC day.
+ */
+export function dateTimeValueDayKey(value: unknown, timeZone: string): string | null {
+  const ms = dateTimeValueToUtcMs(value, timeZone)
+  return ms === null ? null : dayKeyInZone(ms, timeZone)
+}
+
+/** Today's calendar day (`YYYY-MM-DD`) in `timeZone` — the business timezone by default. */
+export function businessTodayKey(timeZone: string = getBusinessTimezone(), nowMs: number = Date.now()): string {
+  return dayKeyInZone(nowMs, timeZone)
+}
+
+// A trailing hour-only offset (`…+00`, PostgreSQL's text form) is an explicit zone; the grammar wants `±hh:mm`.
+// Anchored on the time part before it, so a bare date's `-DD` (`2026-09-24`) is never mistaken for an offset.
+const HOUR_ONLY_OFFSET_RE = /(\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?)([+-]\d{2})$/
+
+/**
+ * Event-timestamp text (history, audit, config history, automation logs, notifications, comments): the
+ * instant's wall clock in the business timezone, fixed 24-hour `YYYY-MM-DD HH:mm` — `YYYY-MM-DD HH:mm:ss` at
+ * `precision: 'second'` (audit trails that listed seconds keep them), `YYYY-MM-DD` at `precision: 'day'`
+ * (surfaces that only ever showed a date). Replaces `new Date(x).toLocaleString()` / `toLocaleDateString()`,
+ * which used the browser's zone and locale (12-hour `AM/PM` under en-US). `null` when the value names no
+ * instant — the caller keeps its own fallback (raw text / "unavailable").
+ */
+export function formatBusinessTimestamp(
+  value: unknown,
+  options?: { precision?: 'day' | 'minute' | 'second'; timeZone?: string },
+): string | null {
+  const timeZone = options?.timeZone ?? getBusinessTimezone()
+  const input = typeof value === 'string' ? value.trim().replace(HOUR_ONLY_OFFSET_RE, '$1$2:00') : value
+  const ms = dateTimeValueToUtcMs(input, timeZone)
+  if (ms === null) return null
+  if (options?.precision === 'day') return dayKeyInZone(ms, timeZone)
+  const clock = wallClockInZone(ms, timeZone)
+  const text = formatWallClock(clock)
+  return options?.precision === 'second' ? `${text}:${pad(clock.second)}` : text
+}
+
 export type DateTimeInputParse =
   | { ok: true; value: string | null }
   | { ok: false }

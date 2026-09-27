@@ -147,7 +147,8 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGanttViewConfig, MetaRecord } from '../types'
 import { useLocale } from '../../composables/useLocale'
-import { formatFieldDisplay } from '../utils/field-display'
+import { dateTimeExportText, formatFieldDisplay, viewDayZone } from '../utils/field-display'
+import { businessTodayKey, dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
 import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
 import { managerLabel } from '../utils/meta-manager-labels'
 import { MtButton } from '../ui'
@@ -238,11 +239,27 @@ const numericFields = computed(() => props.fields.filter((field) => ['number', '
 const groupableFields = computed(() => props.fields.filter((field) => ['select', 'string', 'boolean', 'date', 'dateTime'].includes(field.type)))
 const dependencyFields = computed(() => props.fields.filter((field) => isSelfTableLinkField(field, props.sheetId)))
 const canResizeTasks = computed(() => Boolean(props.canEdit && startFieldId.value && endFieldId.value && startFieldId.value !== endFieldId.value))
+// 客户反馈 2026-09-24 #4c follow-up: a date-time start / end field is put onto days in its field / business
+// timezone (the day its cell shows), not the UTC day; a `date` field (floating day) keeps the UTC-day math.
+const startDayZone = computed(() => viewDayZone(props.fields.find((field) => field.id === startFieldId.value)))
+const endDayZone = computed(() => viewDayZone(props.fields.find((field) => field.id === endFieldId.value)))
 
-function parseDate(value: unknown): Date | null {
+function parseDate(value: unknown, zone: string | null = null): Date | null {
   if (!value) return null
+  // A date-time value is read in its zone (a zone-less legacy string is a business wall clock, never a
+  // browser-local read); text the grammar cannot read falls back to the old parse rather than vanishing.
+  const zonedMs = zone ? dateTimeValueToUtcMs(value, zone) : null
+  if (zonedMs !== null) return new Date(zonedMs)
   const date = new Date(String(value))
   return Number.isNaN(date.getTime()) ? null : date
+}
+
+function parseStart(record: MetaRecord): Date | null {
+  return parseDate(record.data[startFieldId.value], startDayZone.value)
+}
+
+function parseEnd(record: MetaRecord): Date | null {
+  return parseDate(record.data[endFieldId.value], endDayZone.value)
 }
 
 function displayTitle(record: MetaRecord): string {
@@ -273,8 +290,8 @@ const timeRange = computed(() => {
   let min = Infinity
   let max = -Infinity
   for (const row of props.rows) {
-    const start = parseDate(row.data[startFieldId.value])
-    const end = parseDate(row.data[endFieldId.value])
+    const start = parseStart(row)
+    const end = parseEnd(row)
     if (start) { min = Math.min(min, start.getTime()); max = Math.max(max, start.getTime()) }
     if (end) { min = Math.min(min, end.getTime()); max = Math.max(max, end.getTime()) }
   }
@@ -302,15 +319,15 @@ const scheduledTasks = computed<ScheduledTask[]>(() => {
   const range = max - min || 1
   return props.rows
     .map((record) => {
-      const start = parseDate(record.data[startFieldId.value])
-      const end = parseDate(record.data[endFieldId.value])
+      const start = parseStart(record)
+      const end = parseEnd(record)
       if (!start || !end) return null
       const left = ((start.getTime() - min) / range) * 100
       const width = Math.max(1, ((end.getTime() - start.getTime()) / range) * 100)
       return {
         record,
-        startDate: start.toISOString().slice(0, 10),
-        endDate: end.toISOString().slice(0, 10),
+        startDate: isoDateFromMs(start.getTime(), startDayZone.value),
+        endDate: isoDateFromMs(end.getTime(), endDayZone.value),
         startMs: start.getTime(),
         endMs: end.getTime(),
         left: Math.max(0, left),
@@ -324,7 +341,7 @@ const scheduledTasks = computed<ScheduledTask[]>(() => {
 
 const unscheduledRows = computed(() => {
   if (!startFieldId.value || !endFieldId.value) return props.rows
-  return props.rows.filter((row) => !parseDate(row.data[startFieldId.value]) || !parseDate(row.data[endFieldId.value]))
+  return props.rows.filter((row) => !parseStart(row) || !parseEnd(row))
 })
 
 const groupedSections = computed(() => {
@@ -332,12 +349,19 @@ const groupedSections = computed(() => {
   for (const item of scheduledTasks.value) {
     const raw = groupFieldId.value ? item.record.data[groupFieldId.value] : viewRenderLabel('gantt.allTasks', isZh.value)
     const key = raw === null || raw === undefined || raw === '' ? 'ungrouped' : String(raw)
-    const label = key === 'ungrouped' ? viewRenderLabel('gantt.ungrouped', isZh.value) : key
+    // A date-time group shows the wall clock its cells show (as the grid's group header does), not the raw
+    // stored ISO; the KEY stays the raw value.
+    const label = key === 'ungrouped' ? viewRenderLabel('gantt.ungrouped', isZh.value) : groupLabelFor(key)
     if (!buckets.has(key)) buckets.set(key, { key, label, items: [] })
     buckets.get(key)?.items.push(item)
   }
   return [...buckets.values()]
 })
+
+function groupLabelFor(key: string): string {
+  const field = groupFieldId.value ? props.fields.find((item) => item.id === groupFieldId.value) : undefined
+  return (field ? dateTimeExportText(field, key) : null) ?? key
+}
 
 const scheduledTaskById = computed(() => new Map(scheduledTasks.value.map((task) => [task.record.id, task])))
 
@@ -402,16 +426,18 @@ function activeTaskRange(task: ScheduledTask) {
   }
 }
 
-function isoDateFromMs(timestamp: number): string {
+/** `YYYY-MM-DD` of an instant: the business day for a date-time field, the UTC day otherwise (unchanged). */
+function isoDateFromMs(timestamp: number, zone: string | null = null): string {
+  if (zone) return dayKeyInZone(timestamp, zone)
   return new Date(timestamp).toISOString().slice(0, 10)
 }
 
 function displayStartDate(task: ScheduledTask): string {
-  return isoDateFromMs(activeTaskRange(task).startMs)
+  return isoDateFromMs(activeTaskRange(task).startMs, startDayZone.value)
 }
 
 function displayEndDate(task: ScheduledTask): string {
-  return isoDateFromMs(activeTaskRange(task).endMs)
+  return isoDateFromMs(activeTaskRange(task).endMs, endDayZone.value)
 }
 
 function barStyle(task: ScheduledTask) {
@@ -432,13 +458,16 @@ const axisTicks = computed(() => {
   const range = max - min || 1
   const step = zoom.value === 'day' ? 86400000 : zoom.value === 'week' ? 86400000 * 7 : 86400000 * 30
   const ticks: Array<{ key: string; label: string; left: number }> = []
+  // A date-time axis labels its ticks with the business day the bars are placed on; a `date` axis keeps the
+  // existing labels.
+  const tickZone = startDayZone.value ?? undefined
   for (let ts = min; ts <= max; ts += step) {
     const date = new Date(ts)
     ticks.push({
       key: String(ts),
       label: zoom.value === 'month'
-        ? date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' })
-        : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+        ? date.toLocaleDateString(undefined, { month: 'short', year: '2-digit', timeZone: tickZone })
+        : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: tickZone }),
       left: ((ts - min) / range) * 100,
     })
   }
@@ -522,9 +551,12 @@ function onResizeEnd() {
     cleanupResize()
     return
   }
-  const startValue = isoDateFromMs(state.nextStartMs)
-  const endValue = isoDateFromMs(state.nextEndMs)
-  if (startValue !== isoDateFromMs(state.originalStartMs) || endValue !== isoDateFromMs(state.originalEndMs)) {
+  // A date-time field is written as the business day the handle lands on (read back as that day's midnight in
+  // its zone), compared against the day it showed before; a `date` field keeps the UTC-day value.
+  const startValue = isoDateFromMs(state.nextStartMs, startDayZone.value)
+  const endValue = isoDateFromMs(state.nextEndMs, endDayZone.value)
+  if (startValue !== isoDateFromMs(state.originalStartMs, startDayZone.value)
+    || endValue !== isoDateFromMs(state.originalEndMs, endDayZone.value)) {
     emit('patch-dates', {
       recordId: state.recordId,
       version: state.version,
@@ -550,9 +582,12 @@ function onQuickCreate() {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   const value = today.toISOString().slice(0, 10)
+  // A date-time field is seeded with the business today (read back as that day's midnight in its zone); a
+  // `date` field keeps the existing seed.
+  const seedFor = (zone: string | null) => (zone ? businessTodayKey(zone) : value)
   const data: Record<string, unknown> = {}
-  if (startFieldId.value) data[startFieldId.value] = value
-  if (endFieldId.value) data[endFieldId.value] = value
+  if (startFieldId.value) data[startFieldId.value] = seedFor(startDayZone.value)
+  if (endFieldId.value) data[endFieldId.value] = seedFor(endDayZone.value)
   emit('create-record', data)
 }
 </script>

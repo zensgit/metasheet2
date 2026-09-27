@@ -418,6 +418,7 @@
       >
         <MetaCommentsPanel
           :comments="comments"
+          :timestamp-formatter="formatCommentTimestamp"
           :loading="commentsLoading"
           :can-comment="canComment"
           :can-resolve="canResolveComments"
@@ -550,6 +551,7 @@ import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
 // imported directly here rather than through the old-path re-export shim.
 import MetaCommentsPanel from '../../shared/comments/components/MetaCommentsPanel.vue'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import MetaRecordAttachmentsPanel from './MetaRecordAttachmentsPanel.vue'
 import {
   resolveCommentAffordanceStateClass,
@@ -1561,6 +1563,10 @@ function canAnchorFieldError(recordId: string, fieldId: string): boolean {
 
 defineExpose({ canAnchorFieldError })
 
+// 客户反馈 2026-09-24 #4c follow-up: comment times in the business timezone, 24-hour (raw text if unreadable).
+function formatCommentTimestamp(iso: string): string {
+  return formatBusinessTimestamp(iso) ?? iso
+}
 </script>
 
 <style scoped>

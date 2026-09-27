@@ -283,6 +283,12 @@ describe('RecoveryArchiveModal', () => {
     await flush()
     expect(q('.archive-recovery__entry-meta')?.textContent).toBe(expected)
   })
+  it('shows the recovery point in the business timezone, 24-hour, to the second (客户反馈 2026-09-24 #4c follow-up)', async () => {
+    mount()
+    await flush()
+    // recoveryPointAt 2026-08-29T00:00:00Z → 08:00 北京时间 (Asia/Shanghai default), whatever the browser zone.
+    expect(q('.archive-recovery__entry-time')?.textContent?.trim()).toBe('2026-08-29 08:00:00')
+  })
   it('wires manual completion to catalog rediscovery without starting a restore', async () => {
     const captureArchive = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))
     const readCapture = vi.fn(async (_sheet, requestId) => ({ requestId, generationId, state: 'recoverable' as const }))

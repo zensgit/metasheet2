@@ -889,6 +889,7 @@ import {
 } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
 import { dateTimeExportText } from '../utils/field-display'
+import { loadLookupTargetFields, lookupTargetSignature } from '../utils/lookup-target-fields'
 import {
   MAX_FIELD_NAME_LENGTH,
   MAX_SHEET_FIELDS,
@@ -3819,6 +3820,16 @@ const listForeignSheetsForFieldFn = async (baseId: string) =>
 // 3c foreign-field picker: read-gated source for the lookup/rollup target + filter field pickers.
 const listForeignFieldsForFieldFn = async (sheetId: string) =>
   (await workbench.client.listFields(sheetId)).fields
+// 客户反馈 2026-09-24 #4c follow-up: a lookup of a dateTime field shows / exports the target column's wall clock.
+// The target's TYPE is not on the lookup field, so resolve it through the same read-gated field listing the
+// lookup target picker uses — once per change of the lookup wiring, not per render (lookup-target-fields.ts).
+watch(
+  () => lookupTargetSignature(grid.fields.value),
+  (signature) => {
+    if (signature) void loadLookupTargetFields(grid.fields.value, listForeignFieldsForFieldFn)
+  },
+  { immediate: true },
+)
 const activeAggregationConfig = computed<Record<string, string>>(() => {
   const raw = workbench.activeView.value?.config?.aggregations
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}

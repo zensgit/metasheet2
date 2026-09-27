@@ -9,6 +9,7 @@ import { createApp, h, nextTick, reactive } from 'vue'
 
 import MetaConfigHistoryModal from '../src/multitable/components/MetaConfigHistoryModal.vue'
 import { MultitableApiClient, type MetaConfigRevision, type ConfigRestorePreview } from '../src/multitable/api/client'
+import { dateTimeZoneHint } from '../src/multitable/utils/business-timezone'
 
 const previewOf = (over: Partial<ConfigRestorePreview>): ConfigRestorePreview => ({
   revisionId: 'a', entityType: 'field', entityId: 'fld_1', changedKeys: ['name'],
@@ -201,17 +202,17 @@ describe('MetaConfigHistoryModal — readable configuration operations', () => {
     expect(actors).toEqual(['操作人 张三', '操作人 unknown-user'])
   })
 
-  it.each([true, false])('shows time in the viewer device timezone with a zone label (isZh=%s)', async (isZh) => {
+  // 客户反馈 2026-09-24 #4c follow-up (裁定见 PR #6074): history times are shown in the business timezone
+  // (Asia/Shanghai by default), fixed 24-hour `YYYY-MM-DD HH:mm:ss`, naming the zone only when the viewer's
+  // clock reads differently — no longer the viewer's device zone.
+  it.each([true, false])('shows time in the business timezone, 24-hour, zone named only when the browser differs (isZh=%s)', async (isZh) => {
     const createdAt = '2026-09-14T08:00:00.000Z'
     mountModal({ isZh, items: [rev({ createdAt })] })
     await nextTick()
     const time = q('.cfg-history__time')
     expect(time?.tagName).toBe('TIME')
-    expect(time?.textContent).toBe(new Date(createdAt).toLocaleString(isZh ? 'zh-CN' : 'en-US', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-      hourCycle: 'h23', timeZoneName: 'short',
-    }))
+    const hint = dateTimeZoneHint('Asia/Shanghai', isZh, new Date(createdAt))
+    expect(time?.textContent).toBe(hint ? `2026-09-14 16:00:00 ${hint}` : '2026-09-14 16:00:00')
     expect(time?.getAttribute('datetime')).toBe(createdAt)
     expect(time?.getAttribute('title')).toBe(createdAt)
     expect(time?.textContent).not.toBe(createdAt)
