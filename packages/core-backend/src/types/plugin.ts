@@ -402,6 +402,15 @@ export interface MultitableRepairTransactionSurface {
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
 }
 
+/** The per-entity outcome vocabulary of `relabelObjectDisplayNames` (values-free by construction). */
+export type MultitableRelabelDisplayNameStatus =
+  | 'renamed'
+  | 'would_rename'
+  | 'already_target'
+  | 'skipped_name_changed'
+  | 'skipped_name_taken'
+  | 'missing'
+
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
   /**
@@ -582,6 +591,36 @@ export interface MultitableProvisioningAPI {
     type: MultitableProvisioningFieldType
     property: Record<string, unknown>
     order: number
+  }>
+  /**
+   * RELABEL an already-provisioned object's DISPLAY NAMES — compare-and-set, one transaction, one
+   * `meta_config_revisions` row per rename (multitable/object-display-name-relabel.ts).
+   *
+   * Renames a field (or the sheet) ONLY while its current name equals `expectedName`; a name a
+   * person already changed is reported `skipped_name_changed` and left alone, and a target another
+   * field on the sheet already carries is `skipped_name_taken`. Nothing but `name` is written: the
+   * field id, type, property, order and permissions are untouched. `apply` must be exactly `true`
+   * to write; anything else is a dry run that writes nothing.
+   *
+   * Scoped like every other write here — project namespace, then object scope — and the host
+   * additionally refuses unless the plugin object registry binds the derived sheet to this very
+   * (project, object). OPTIONAL like `ensureSystemBase`: a plugin newer than its host must degrade.
+   */
+  relabelObjectDisplayNames?(input: {
+    projectId: string
+    objectId: string
+    sheetName?: { expectedName: string; nextName: string } | null
+    fields: Array<{ fieldId: string; expectedName: string; nextName: string }>
+    apply?: boolean
+    actorId?: string | null
+  }): Promise<{
+    present: boolean
+    applied: boolean
+    sheetId: string
+    sheetName: { status: MultitableRelabelDisplayNameStatus } | null
+    fields: Array<{ fieldId: string; status: MultitableRelabelDisplayNameStatus }>
+    revisionCount: number
+    batchId: string | null
   }>
   // FOS-2b-pre: read-only — returns a field's current property (incl. select options), or null if absent.
   getObjectField(input: {

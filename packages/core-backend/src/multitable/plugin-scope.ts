@@ -474,6 +474,31 @@ export function createPluginScopedMultitableApi(
             },
           }
         : {}),
+      // Display-name relabel — a WRITE against the plugin's own object, so it takes the same two
+      // assertions every other object write here takes (project namespace, then object scope) and is
+      // never bare-forwarded. Exposed iff the host exposes it (the optional-capability idiom above).
+      // projectId/objectId are read ONCE and the checked values are what the host receives, so a
+      // getter cannot show the scope checks one object and the host another.
+      ...(typeof multitable.provisioning?.relabelObjectDisplayNames === 'function'
+        ? {
+            relabelObjectDisplayNames: async (
+              input: Parameters<NonNullable<MultitableAPI['provisioning']['relabelObjectDisplayNames']>>[0],
+            ) => {
+              const projectId = input.projectId
+              const objectId = input.objectId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+              return multitable.provisioning.relabelObjectDisplayNames!({
+                projectId,
+                objectId,
+                sheetName: input.sheetName,
+                fields: input.fields,
+                apply: input.apply,
+                actorId: input.actorId,
+              })
+            },
+          }
+        : {}),
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         if (hooks.ensureObjectInScope) {

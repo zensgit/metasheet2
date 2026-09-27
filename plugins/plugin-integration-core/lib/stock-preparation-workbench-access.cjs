@@ -56,7 +56,14 @@ const STOCK_PREP_PERMISSION_NAMESPACE = 'stock-prep'
 const STOCK_PREP_READ = 'stock-prep:read'
 /** OPERATE — confirm a decision (the frozen action vocabulary) and the O1'-A value-entry surface. */
 const STOCK_PREP_OPERATE = 'stock-prep:operate'
-/** ADMIN — the workbench-scoped ceiling. Deliberately BELOW platform admin: it opens nothing outside this manifest. */
+/**
+ * ADMIN — the workbench-scoped ceiling. Deliberately BELOW platform admin: it opens nothing outside
+ * this manifest EXCEPT the 安装/体检 page's 「把系统表的英文表头改成中文」 relabel
+ * (POST /api/integration/stock-preparation/managed-tables/relabel-zh), which is gated on this code
+ * directly and manifest-exempt with its reason in the permission-matrix suite (M-07/M-08). It
+ * provisions nothing and installs nothing: it only renames still-English managed-table columns to
+ * their template's Chinese names, compare-and-set.
+ */
 const STOCK_PREP_ADMIN = 'stock-prep:admin'
 
 const STOCK_PREP_PERMISSION_CODES = Object.freeze([STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN])
