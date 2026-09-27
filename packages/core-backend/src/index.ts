@@ -4677,7 +4677,10 @@ export class MetaSheetServer {
                   const prop = f.property || {}
                   const isReadOnly = isFieldAlwaysReadOnly(f)
                   const isHidden = prop.hidden === true || prop.permissionHidden === true
-                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden }
+                  // `property` rides along exactly as routes/univer-meta.ts buildFieldMutationGuardMap carries it:
+                  // RecordWriteService.validateChanges reads it for person `limitSingleRecord`, longText config and
+                  // the dateTime field zone (客户反馈 2026-09-24 #4c) — the realtime path must not lose it.
+                  const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden, property: prop }
                   if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
                     guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')
                   }

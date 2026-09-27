@@ -93,7 +93,8 @@ export function assertExactRestorableScalarValue(field: ExactRestoreField, histo
         canonical = historicalValue
         break
       case 'dateTime':
-        canonical = validateDateTimeValue(historicalValue, field.id)
+        // Historical values are canonical UTC ISO already; the property only matters for a zone-less legacy string.
+        canonical = validateDateTimeValue(historicalValue, field.id, field.property)
         break
       case 'person': {
         // Shape + limitSingleRecord only (membership is plan-auth). Pass the historical ids as the

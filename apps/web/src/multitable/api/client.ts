@@ -4,6 +4,7 @@
  */
 import { requireRecoveryArchiveCaptureStatus, requireRecoveryArchiveRequestId,
   type RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+import { setBusinessTimezone } from '../utils/business-timezone'
 export type { RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
 
 import type {
@@ -2324,7 +2325,10 @@ export class MultitableApiClient implements CommentsApiClient {
   // --- Context ---
   async loadContext(params: { baseId?: string; sheetId?: string; viewId?: string }): Promise<MetaContext> {
     const res = await this.fetch(`/api/multitable/context${qs(params)}`)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaContext>(res)
+    // 客户反馈 2026-09-24 #4c: adopt the server's business timezone for every date-time display/editor.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   // --- Sheets ---
@@ -2943,7 +2947,10 @@ export class MultitableApiClient implements CommentsApiClient {
     const res = params.publicToken && this.fetch === apiFetch
       ? await apiFetch(path, { suppressUnauthorizedRedirect: true })
       : await this.fetch(path)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaFormContext>(res)
+    // The (public) form never loads /context — it learns the business timezone here.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   // --- Records ---
