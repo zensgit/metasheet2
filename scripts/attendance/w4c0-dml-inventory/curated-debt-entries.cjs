@@ -362,7 +362,12 @@ const CURATED_DEBT_ENTRIES = [
       bySymbol(PLUGIN, /^resolveLockedAttendanceApprovalFlowState$/)(site) ||
       bySymbol(PLUGIN, /^upsertAttendanceApprovalInstance$/)(site) ||
       bySymbol(PLUGIN, /^deactivateAttendanceApprovalAssignments$/)(site) ||
-      bySymbol(PLUGIN, /^replaceAttendanceApprovalAssignments$/)(site),
+      bySymbol(PLUGIN, /^replaceAttendanceApprovalAssignments$/)(site) ||
+      // #5967 approval-exempt create writes the same terminal adjustment event
+      // final approval writes. Claimed on P13 (request terminal handling) so
+      // the new site is classified rather than left as open debt. A second
+      // attendance_events insert under a different symbol still fails CI.
+      bySymbol(PLUGIN, /^applyExemptedLeaveOrOvertimeEffects$/)(site),
   },
   {
     id: 'P14',

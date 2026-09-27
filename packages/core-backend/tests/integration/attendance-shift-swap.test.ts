@@ -81,6 +81,21 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
+  // #5967: omitted approvalFlowId is 422 when the shared default org already has
+  // more than one active flow for this request type. Name the newest flow so the
+  // generic missed_check_in create still returns 201. Zero or one flow omits the id.
+  // Dedicated shift_swap creates stay unnamed so they still hit SHIFT_SWAP_DEDICATED_ROUTE_ONLY.
+  async function approvalFlowIdWhenAmbiguous(requestType: string): Promise<string | undefined> {
+    const found = await pool.query<{ id: string }>(
+      `SELECT id FROM attendance_approval_flows
+        WHERE org_id = $1 AND request_type = $2 AND is_active = true
+        ORDER BY created_at DESC
+        LIMIT 2`,
+      [ORG, requestType],
+    )
+    return found.rows.length > 1 ? found.rows[0]?.id : undefined
+  }
+
   async function cleanupPrefix(prefix: string) {
     const userPattern = `${prefix}%`
     await pool.query(
@@ -313,6 +328,7 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
       )).rows[0].n)
       expect(createdCount).toBe(0)
 
+      const missedFlowId = await approvalFlowIdWhenAmbiguous('missed_check_in')
       const normal = await requestJson(`${baseUrl}/api/attendance/requests`, {
         method: 'POST',
         headers: authHeaders(token),
@@ -321,6 +337,7 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
           requestType: 'missed_check_in',
           requestedInAt: '2049-06-13T09:00:00.000Z',
           reason: userId,
+          ...(missedFlowId ? { approvalFlowId: missedFlowId } : {}),
         }),
       })
       expect(normal.status).toBe(201)

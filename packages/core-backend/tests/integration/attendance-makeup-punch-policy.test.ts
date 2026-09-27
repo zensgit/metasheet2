@@ -122,8 +122,29 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
   const putSettings = (body: Record<string, unknown>) =>
     requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
   const getSettings = () => requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(adminToken) })
-  const createReq = (token: string, body: Record<string, unknown>) =>
-    requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
+  // #5967: omitted approvalFlowId is 422 when the shared default org already has
+  // more than one active flow for this request type (other suites leave them).
+  // Name the newest flow so makeup policy still returns its own 422 codes.
+  // Zero or one active flow still omits the id.
+  async function approvalFlowIdWhenAmbiguous(requestType: string): Promise<string | undefined> {
+    const found = await pool.query<{ id: string }>(
+      `SELECT id FROM attendance_approval_flows
+        WHERE org_id = $1 AND request_type = $2 AND is_active = true
+        ORDER BY created_at DESC
+        LIMIT 2`,
+      [ORG, requestType],
+    )
+    return found.rows.length > 1 ? found.rows[0]?.id : undefined
+  }
+  const createReq = async (token: string, body: Record<string, unknown>) => {
+    const requestType = typeof body.requestType === 'string' ? body.requestType : ''
+    const approvalFlowId = body.approvalFlowId ?? (requestType ? await approvalFlowIdWhenAmbiguous(requestType) : undefined)
+    return requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify({ ...body, ...(approvalFlowId ? { approvalFlowId } : {}) }),
+    })
+  }
   const updateReq = (token: string, id: string, body: Record<string, unknown>) =>
     requestJson(`${baseUrl}/api/attendance/requests/${id}`, { method: 'PUT', headers: authHeaders(token), body: JSON.stringify(body) })
   const approve = (token: string, id: string) =>

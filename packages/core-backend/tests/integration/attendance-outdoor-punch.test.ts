@@ -103,6 +103,21 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
   const reject = (id: string) =>
     requestJson(`${baseUrl}/api/attendance/requests/${id}/reject`, { method: 'POST', headers: authHeaders(adminToken), body: JSON.stringify({ comment: 'no' }) })
 
+  // #5967: omitted approvalFlowId is 422 when the shared default org already has
+  // more than one active flow for this request type. Name the newest flow so the
+  // generic missed_check_in create still returns 201. Zero or one flow omits the id.
+  // Dedicated outdoor_punch creates stay unnamed so they still hit OUTDOOR_PUNCH_VIA_PUNCH_ONLY.
+  async function approvalFlowIdWhenAmbiguous(requestType: string): Promise<string | undefined> {
+    const found = await pool.query<{ id: string }>(
+      `SELECT id FROM attendance_approval_flows
+        WHERE org_id = $1 AND request_type = $2 AND is_active = true
+        ORDER BY created_at DESC
+        LIMIT 2`,
+      [ORG, requestType],
+    )
+    return found.rows.length > 1 ? found.rows[0]?.id : undefined
+  }
+
   const deleteOutdoorFlows = () => pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1 AND request_type = 'outdoor_punch'`, [ORG])
   async function addOutdoorFlow(): Promise<string> {
     const res = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
@@ -410,9 +425,15 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       expect(c1.outdoorReqs).toHaveLength(0)
       expect(c1.events).toHaveLength(0)
       // create a normal request, then try to UPDATE its type to outdoor_punch → 422 (same chokepoint)
+      const missedFlowId = await approvalFlowIdWhenAmbiguous('missed_check_in')
       const normal = await requestJson(`${baseUrl}/api/attendance/requests`, {
         method: 'POST', headers: authHeaders(t),
-        body: JSON.stringify({ workDate: '2026-09-26', requestType: 'missed_check_in', requestedInAt: '2026-09-26T09:00:00.000Z' }),
+        body: JSON.stringify({
+          workDate: '2026-09-26',
+          requestType: 'missed_check_in',
+          requestedInAt: '2026-09-26T09:00:00.000Z',
+          ...(missedFlowId ? { approvalFlowId: missedFlowId } : {}),
+        }),
       })
       expect(normal.status).toBe(201)
       const reqId = (normal.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string

@@ -19492,8 +19492,17 @@ attendanceIntegrationDescribe(
          VALUES ('default', $1, 'comp_time', $2, $2, 'overtime_conversion', $3, 'active', '2026-01-01', NULL) RETURNING id`,
         [uid, amount, `l7:${runSuffix}:${tag}`],
       )).rows[0].id as string
+      // #5967: more than one active leave flow is fail-closed unless approvalFlowId is set.
+      // This case is about comp-time balance, so pin one active flow when the shared org has any.
+      const activeLeaveFlow = await pool.query(
+        `SELECT id FROM attendance_approval_flows
+          WHERE org_id = 'default' AND request_type = 'leave' AND is_active = true
+          ORDER BY created_at DESC
+          LIMIT 1`,
+      )
+      const approvalFlowId = activeLeaveFlow.rows[0]?.id as string | undefined
       const createLeave = async (t: string, uid: string, minutes: number) => {
-        const r = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes }) })
+        const r = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(t), body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes, ...(approvalFlowId ? { approvalFlowId } : {}) }) })
         expect(r.status).toBe(201)
         const id = (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
         createdRequestIds.push(id)
@@ -19600,7 +19609,14 @@ attendanceIntegrationDescribe(
 
       // userId's legit deduct: grant 240, approve a 120 leave → remaining 120 + a real deduct event (user→own lot).
       const ownLot = await insertLot(userId, 240, 240, 'own')
-      const createRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr, body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes: 120 }) })
+      const activeLeaveFlow = await pool.query(
+        `SELECT id FROM attendance_approval_flows
+          WHERE org_id = 'default' AND request_type = 'leave' AND is_active = true
+          ORDER BY created_at DESC
+          LIMIT 1`,
+      )
+      const approvalFlowId = activeLeaveFlow.rows[0]?.id as string | undefined
+      const createRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr, body: JSON.stringify({ workDate: '2026-09-20', requestType: 'leave', leaveTypeId, minutes: 120, ...(approvalFlowId ? { approvalFlowId } : {}) }) })
       expect(createRes.status).toBe(201)
       const req = (createRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
       createdRequestIds.push(req)
@@ -19683,7 +19699,14 @@ attendanceIntegrationDescribe(
       expect(leaveTypeId).toBeTruthy()
 
       // admin owns a leave request (pending is enough — the authority gate fires before any reverse)
-      const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ workDate: '2026-09-25', requestType: 'leave', leaveTypeId, minutes: 60 }) })
+      const activeLeaveFlow = await pool.query(
+        `SELECT id FROM attendance_approval_flows
+          WHERE org_id = 'default' AND request_type = 'leave' AND is_active = true
+          ORDER BY created_at DESC
+          LIMIT 1`,
+      )
+      const approvalFlowId = activeLeaveFlow.rows[0]?.id as string | undefined
+      const reqRes = await requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ workDate: '2026-09-25', requestType: 'leave', leaveTypeId, minutes: 60, ...(approvalFlowId ? { approvalFlowId } : {}) }) })
       expect(reqRes.status).toBe(201)
       const reqId = (reqRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id as string
       createdRequestIds.push(reqId)
