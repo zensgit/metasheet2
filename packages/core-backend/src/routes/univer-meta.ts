@@ -4635,6 +4635,17 @@ function invalidateViewConfigCache(viewId?: string): void {
   metaViewConfigCache.clear()
 }
 
+/**
+ * Copy-sheet S1 (ADR §7.2 step 7): the SAME three cache drops `DELETE /sheets/:sheetId` performs, for a
+ * sheet that was just created by the copy route in another module. Exported for
+ * `routes/multitable-copy-sheet.ts`; the three caches stay module-private.
+ */
+export function invalidateSheetCachesAfterCopy(sheetId: string): void {
+  invalidateSheetSummaryCache(sheetId)
+  invalidateFieldCache(sheetId)
+  invalidateViewConfigCache()
+}
+
 async function loadSheetSummary(
   pool: { query: QueryFn },
   sheetId: string,

@@ -412,11 +412,19 @@ export interface ViewCopyPlan {
   droppedFilterLeaves: number
 }
 
-/** 叶子 fieldId 可用 = 在映射表里、且不是被清空 / 未建的列。 */
+/** filter 叶子可用 = 在映射表里、且不是被清空 / 未建的列（对空列过滤会把行集过滤成空 —— ADR §5.2 整条删除）。 */
 function leafFieldUsable(ctx: FieldRemapContext, fieldId: unknown): string | null {
   const id = typeof fieldId === 'string' ? fieldId.trim() : ''
   if (!id) return null
   if (ctx.blankedFieldIds.has(id) || ctx.unbuiltFieldIds.has(id)) return null
+  return ctx.fieldIdMap.get(id) ?? null
+}
+
+/** config / sort / group 引用可用 = 列**建了**（被清空但建了的列照样能排序 / 分组 / 做看板字段）。 */
+function builtFieldId(ctx: FieldRemapContext, fieldId: unknown): string | null {
+  const id = typeof fieldId === 'string' ? fieldId.trim() : ''
+  if (!id) return null
+  if (ctx.unbuiltFieldIds.has(id)) return null
   return ctx.fieldIdMap.get(id) ?? null
 }
 
@@ -462,8 +470,8 @@ const FIELD_IDS_KEY = /(^fieldIds$)|(FieldIds$)/
 /**
  * 视图 `config` / `sortInfo` / `groupInfo` 的 remap：
  *   - `publicForm` 整段剥离（分享令牌）；
- *   - 键名为 `fieldId` 或以 `FieldId` 结尾 → remap（指向清空 / 未建 / 未知列 → 删键）；
- *   - 键名为 `fieldIds` 或以 `FieldIds` 结尾且为数组 → 逐个 remap、丢不可用；
+ *   - 键名为 `fieldId` 或以 `FieldId` 结尾 → remap（指向未建 / 未知列 → 删键；被清空但建了的列照常 remap）；
+ *   - 键名为 `fieldIds` 或以 `FieldIds` 结尾且为数组 → 逐个 remap、丢未建 / 未知；
  *   - `conditionalFormattingRules[*]`（及嵌套）落在同一规则里（数组递归）；
  *   - 其它位置残留的 `fld_` 形状字符串 → COPY_UNMAPPED_FIELD_REF。
  */
@@ -479,14 +487,14 @@ export function remapViewConfig(ctx: FieldRemapContext, config: Record<string, u
       if (key === 'publicForm') continue
       if (FIELD_ID_KEY.test(key) && (typeof value === 'string' || value === null)) {
         if (value === null) { next[key] = null; continue }
-        const mapped = leafFieldUsable(ctx, value)
-        if (!mapped) continue // 指向清空 / 未建 / 未知列 → 删键
+        const mapped = builtFieldId(ctx, value)
+        if (!mapped) continue // 指向未建 / 未知列 → 删键
         next[key] = mapped
         continue
       }
       if (FIELD_IDS_KEY.test(key) && Array.isArray(value)) {
         next[key] = value
-          .map((id) => leafFieldUsable(ctx, id))
+          .map((id) => builtFieldId(ctx, id))
           .filter((id): id is string => typeof id === 'string')
         continue
       }
@@ -516,9 +524,9 @@ export function planViewCopies(
     const sortInfo = remapViewConfig(ctx, view.sortInfo, view.id)
     const groupInfo = remapViewConfig(ctx, view.groupInfo, view.id)
     const config = remapViewConfig(ctx, view.config, view.id)
-    // 隐藏列：被清空的列仍然建了，照样可以隐藏 → 只要在映射表里就 remap；未建 / 未知列丢弃。
+    // 隐藏列：被清空的列仍然建了，照样可以隐藏 → 只要建了就 remap；未建 / 未知列丢弃。
     const hiddenFieldIds = view.hiddenFieldIds
-      .map((id) => (ctx.unbuiltFieldIds.has(id) ? null : ctx.fieldIdMap.get(id) ?? null))
+      .map((id) => builtFieldId(ctx, id))
       .filter((id): id is string => typeof id === 'string')
     return {
       sourceViewId: view.id,

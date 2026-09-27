@@ -411,6 +411,7 @@ import { createMultitableAiRoutes } from './routes/multitable-ai'
 import { QueueServiceImpl } from './services/QueueService'
 import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { createMultitableRecordApprovalRoutes } from './routes/multitable-record-approvals'
+import { createMultitableCopySheetRoutes } from './routes/multitable-copy-sheet'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
@@ -1969,6 +1970,9 @@ export class MetaSheetServer {
     // Record-level submit-for-approval (multitable x approval phase 2):
     //   POST/GET /sheets/:sheetId/records/:recordId/approvals. See routes/multitable-record-approvals.ts.
     this.app.use('/api/multitable', createMultitableRecordApprovalRoutes())
+    // 「复制数据表（含数据）」S1 (design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md):
+    //   POST /sheets/:sheetId/copy + /copy/dry-run — session auth only (CS-1). See routes/multitable-copy-sheet.ts.
+    this.app.use('/api/multitable', createMultitableCopySheetRoutes())
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {

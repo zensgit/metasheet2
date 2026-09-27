@@ -679,6 +679,19 @@ export default defineConfig({
       // tests/unit/multitable-record-approval-routes.test.ts (real router, faked collaborators) so the
       // contract is not entirely unexecuted while the lane is missing.
       'tests/integration/multitable-record-approval-realdb.test.ts',
+      // 「复制数据表（含数据）」S1 (design-lock ADR #6094) — real-Postgres end-to-end: the READ COMMITTED copy
+      // transaction (advisory lock → source row FOR UPDATE → fences → tripwire → DB-fresh gates → structure /
+      // records / permissions → deny-set parity), the row-level deny parity re-read against the REAL
+      // loadDeniedRecordIds, the real partial replay through the dedupe ledger under two concurrent connections,
+      // and all-or-nothing rollback measured as real rowcounts. Same two-point wiring as the record-approval entry
+      // above: excluded here so it cannot skip-green; the standalone lane file
+      // (.github/workflows/multitable-copy-sheet-realdb.yml) could NOT be pushed with this branch — the pushing
+      // token has no `workflow` OAuth scope — so until a workflow-scoped push adds it the suite runs ON DEMAND
+      // (`vitest --config vitest.integration.config.ts run tests/integration/multitable-copy-sheet-realdb.test.ts`
+      // against a migrated DATABASE_URL). The same code path is executed in THIS lane, end to end, on a
+      // table-aware in-memory Postgres double (tests/unit/multitable-copy-sheet-service.test.ts +
+      // multitable-copy-sheet-routes.test.ts, tests/utils/copy-sheet-fake-pg.ts) — a stand-in, not a replacement.
+      'tests/integration/multitable-copy-sheet-realdb.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
