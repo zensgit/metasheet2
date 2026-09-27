@@ -21,6 +21,135 @@ class ConnectionResolutionError extends Error {
   }
 }
 
+// ── Why the host facade refused: a SERVER-LOG-ONLY diagnostic (R1/R7) ───────────────────────────
+// The facade refuses "not loaded", "not the owner", "wrong tenant" and "tenantless scope" with one
+// uniform not-found so a caller cannot learn a source exists, and this module rewrites every facade
+// refusal to one code (`CONNECTION_CANONICAL_UNAVAILABLE` / `CONNECTION_LEGACY_UNAVAILABLE`). Both
+// stay exactly as they are: the thrown error, its code, message and details do not change.
+// What changes is that the facade's own reason — a non-enumerable `refusalDiagnostic` on the error
+// it throws (packages/core-backend/src/data-adapters/data-source-plugin-facade.ts) — is now written
+// to the server log here instead of being dropped by a bare `catch {}`.
+//
+// Only words from these closed lists (and booleans) are ever logged. Anything else — a facade that
+// predates the diagnostic, a stub, a value this module does not know — is logged as `unclassified`,
+// so no id, tenant, principal or free text can reach the log through this path.
+// See docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §2/§5.
+const FACADE_REFUSAL_REASONS = Object.freeze([
+  'principal_missing',
+  'tenant_missing',
+  'run_as_invalid',
+  'not_loaded',
+  'owner_mismatch',
+  'scope_missing',
+  'tenant_mismatch',
+  'tenantless_scope',
+  'tenantless_service',
+])
+const REGISTRY_UNLOADED_REASONS = Object.freeze([
+  'soft_deleted',
+  'inactive',
+  'unsupported_type',
+  'decrypt_failed',
+  'load_failed',
+  'removed',
+  'absent_at_load',
+  'unknown_at_load',
+  'registry_not_loaded',
+])
+const FACADE_REFUSAL_REASON_SET = new Set(FACADE_REFUSAL_REASONS)
+const REGISTRY_UNLOADED_REASON_SET = new Set(REGISTRY_UNLOADED_REASONS)
+const REFUSAL_LOG_MESSAGE = '[plugin-integration-core] connection resolution refused'
+// R7's table read is the facade's; this is only the longest the log line waits for its answer
+// before it is written with `persistedLive: null` ("could not tell").
+const PERSISTED_LIVE_PROBE_BUDGET_MS = 3000
+
+function readOwnDiagnostic(error) {
+  if (error === null || (typeof error !== 'object' && typeof error !== 'function')) return undefined
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, 'refusalDiagnostic')
+    // A data descriptor only: an accessor could run arbitrary code while we are building a log line.
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Map whatever the facade threw to a values-free, closed-vocabulary record. Never throws.
+ * `facade_unavailable` is this module's own S1 (no facade injected), not a facade answer.
+ * `persistedLive` (R7) is not part of this record: it is a table read, settled separately
+ * (settlePersistedLive) after the refusal has been thrown.
+ */
+function describeFacadeRefusal(error) {
+  try {
+    if (error instanceof ConnectionResolutionError && error.code === 'CONNECTION_RESOLUTION_UNAVAILABLE') {
+      return { reason: 'facade_unavailable' }
+    }
+    const raw = readOwnDiagnostic(error)
+    if (!raw || typeof raw !== 'object') return { reason: 'unclassified' }
+    const rawReason = typeof raw.reason === 'string' ? raw.reason : ''
+    const reason = FACADE_REFUSAL_REASON_SET.has(rawReason) ? rawReason : 'unclassified'
+    if (reason !== 'not_loaded') return { reason }
+    const rawOutcome = typeof raw.loadOutcome === 'string' ? raw.loadOutcome : ''
+    return {
+      reason,
+      loadOutcome: REGISTRY_UNLOADED_REASON_SET.has(rawOutcome) ? rawOutcome : 'unclassified',
+    }
+  } catch {
+    // A hostile getter on the diagnostic costs the classification, never the refusal.
+    return { reason: 'unclassified' }
+  }
+}
+
+/** The facade's R7 probe, when its diagnostic carries one (a function); otherwise null. Never throws. */
+function persistedLiveProbeOf(error) {
+  try {
+    const raw = readOwnDiagnostic(error)
+    if (!raw || typeof raw !== 'object') return null
+    const probe = raw.probePersistedLive
+    return typeof probe === 'function' ? probe : null
+  } catch {
+    return null
+  }
+}
+
+const deferTask = typeof setImmediate === 'function' ? setImmediate : (task) => setTimeout(task, 0)
+
+/**
+ * R7: run the facade's table read AFTER the refusal has been thrown and answered, and resolve to
+ * exactly true / false / null. Deferred to a macrotask, so it starts only once the rejection has
+ * run through the (microtask-only) chain up to the route's response; nothing on the refusal path
+ * waits for it. Bounded by PERSISTED_LIVE_PROBE_BUDGET_MS. Never rejects.
+ */
+function settlePersistedLive(probe) {
+  return new Promise((resolve) => {
+    if (!probe) {
+      resolve(null)
+      return
+    }
+    let settled = false
+    let timer
+    const done = (value) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(value === true ? true : (value === false ? false : null))
+    }
+    deferTask(() => {
+      timer = setTimeout(() => done(null), PERSISTED_LIVE_PROBE_BUDGET_MS)
+      if (timer && typeof timer.unref === 'function') timer.unref()
+      let pending
+      try {
+        pending = probe()
+      } catch {
+        done(null)
+        return
+      }
+      Promise.resolve(pending).then(done, () => done(null))
+    })
+  })
+}
+
 function nonBlankString(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
@@ -148,13 +277,17 @@ function adapterBinding(binding, dataSourceId) {
 /**
  * Creates a resolver for the integration binding -> host Connection boundary.
  *
- * @param {{ facade: { resolveConnectionRegistration: Function }, sealedSnapshotFacade?: { resolveSqlServerConnection: Function }, allowedSqlConnectionTypes?: Iterable<string>, legacyKindAllowlist?: Iterable<string> }} deps
+ * `logger` is optional and receives ONLY the values-free refusal record (see describeFacadeRefusal);
+ * without it the resolver behaves exactly as it always has.
+ *
+ * @param {{ facade: { resolveConnectionRegistration: Function }, sealedSnapshotFacade?: { resolveSqlServerConnection: Function }, allowedSqlConnectionTypes?: Iterable<string>, legacyKindAllowlist?: Iterable<string>, logger?: { warn?: Function } }} deps
  */
 function createConnectionResolver({
   facade,
   sealedSnapshotFacade,
   allowedSqlConnectionTypes = DEFAULT_SQL_CONNECTION_TYPES,
   legacyKindAllowlist = DEFAULT_LEGACY_KIND_ALLOWLIST,
+  logger,
 } = {}) {
   // Keep activation compatible for deployments that do not expose the host facade. Only a SQL
   // binding needs this capability, and that path still fails closed at the first resolution call.
@@ -162,6 +295,29 @@ function createConnectionResolver({
   const sealedFacade = sealedSnapshotFacade
   const allowedTypes = new Set(Array.from(allowedSqlConnectionTypes, (type) => String(type).toLowerCase()))
   const legacyKinds = new Set(Array.from(legacyKindAllowlist, (kind) => String(kind)))
+
+  // The refusal is decided before this runs and is thrown after it whatever happens here: a missing
+  // logger, a throwing logger or an unreadable diagnostic costs the log line, never the refusal.
+  // Exactly one line per refusal. A `not_loaded` line is written once the R7 table read settles
+  // (after the refusal was answered, see settlePersistedLive); every other line is written here.
+  function emitFacadeRefusal(record) {
+    try {
+      logger.warn(REFUSAL_LOG_MESSAGE, record)
+    } catch {
+      // intentionally empty — see above
+    }
+  }
+
+  function logFacadeRefusal(phase, code, error) {
+    if (!logger || typeof logger.warn !== 'function') return
+    const record = { phase, code, ...describeFacadeRefusal(error) }
+    if (record.reason !== 'not_loaded') {
+      emitFacadeRefusal(record)
+      return
+    }
+    settlePersistedLive(persistedLiveProbeOf(error))
+      .then((persistedLive) => emitFacadeRefusal({ ...record, persistedLive }))
+  }
 
   async function resolveCanonical(binding, context, connectionId) {
     const tenantId = assertExecutionTenant(binding, context.tenantId)
@@ -175,7 +331,8 @@ function createConnectionResolver({
         principal: context.principal,
         runAs: context.runAs,
       })
-    } catch {
+    } catch (error) {
+      logFacadeRefusal('canonical', 'CONNECTION_CANONICAL_UNAVAILABLE', error)
       throw new ConnectionResolutionError(
         'CONNECTION_CANONICAL_UNAVAILABLE',
         'canonical connection is unavailable',
@@ -241,7 +398,8 @@ function createConnectionResolver({
         principal: context.principal,
         runAs: context.runAs,
       })
-    } catch {
+    } catch (error) {
+      logFacadeRefusal('legacy', 'CONNECTION_LEGACY_UNAVAILABLE', error)
       throw new ConnectionResolutionError(
         'CONNECTION_LEGACY_UNAVAILABLE',
         'legacy connection is unavailable',
@@ -328,6 +486,7 @@ function createConnectionResolver({
       })
     } catch (error) {
       if (error instanceof ConnectionResolutionError) throw error
+      logFacadeRefusal('sealed_snapshot', 'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', error)
       throw new ConnectionResolutionError(
         'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',
         'sealed snapshot connection is unavailable',
@@ -380,10 +539,42 @@ function createConnectionResolver({
   }
 }
 
+// Every code a ConnectionResolutionError can carry, so a consumer (the route-failure log) can admit
+// exactly these words and nothing else. Kept in step with the throws above by
+// __tests__/connection-refusal-diagnostics.test.cjs, which scans this file for them.
+const CONNECTION_RESOLUTION_ERROR_CODES = Object.freeze([
+  'CONNECTION_RESOLUTION_INVALID_BINDING',
+  'CONNECTION_RESOLUTION_UNAVAILABLE',
+  'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',
+  'CONNECTION_TENANT_MISMATCH',
+  'CONNECTION_REGISTRATION_INVALID',
+  'CONNECTION_ID_MISMATCH',
+  'CONNECTION_TYPE_UNSUPPORTED',
+  'CONNECTION_CANONICAL_UNAVAILABLE',
+  'CONNECTION_BINDING_MISMATCH',
+  'CONNECTION_LEGACY_FALLBACK_DENIED',
+  'CONNECTION_LEGACY_POINTER_REQUIRED',
+  'CONNECTION_LEGACY_UNAVAILABLE',
+  'CONNECTION_ID_REQUIRED',
+  'CONNECTION_SEALED_SNAPSHOT_KIND_UNSUPPORTED',
+  'CONNECTION_SEALED_SNAPSHOT_USER_REQUIRED',
+  'CONNECTION_SEALED_SNAPSHOT_INVALID',
+])
+
 module.exports = {
   SQL_READONLY_KIND,
   DEFAULT_SQL_CONNECTION_TYPES,
   DEFAULT_LEGACY_KIND_ALLOWLIST,
+  CONNECTION_RESOLUTION_ERROR_CODES,
+  FACADE_REFUSAL_REASONS,
+  REGISTRY_UNLOADED_REASONS,
+  REFUSAL_LOG_MESSAGE,
   ConnectionResolutionError,
   createConnectionResolver,
+  __internals: {
+    describeFacadeRefusal,
+    persistedLiveProbeOf,
+    settlePersistedLive,
+    PERSISTED_LIVE_PROBE_BUDGET_MS,
+  },
 }

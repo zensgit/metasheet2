@@ -244,6 +244,60 @@ function normalizeTenantId(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
+// ── Why an id is NOT in the in-memory registry (server-log diagnostics only) ─────────────────
+// `assertAccess` answers "not found" for a source that is missing from the registry and for one
+// owned by somebody else, in the same words, so a non-owner cannot learn that a source exists. That
+// invariant is kept: nothing below changes a thrown error, a status or a message. What it adds is
+// a CLOSED vocabulary the host facade can put in the SERVER log, because the registry is loaded once
+// at startup and "why is this id not loaded" was otherwise answerable only by re-deriving the load
+// filters by hand against a database that may have changed since
+// (docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §5 R1/R7).
+//
+// Load-time outcomes, one per filter the load actually applies:
+//   soft_deleted / inactive   — the load query's `deleted_at IS NULL` / `is_active = true` filters
+//   unsupported_type          — the adapter-type check
+//   decrypt_failed            — credential decryption (ENCRYPTION_KEY differs from the writer's)
+//   load_failed               — any other failure while building the adapter: a row at load, or
+//                               the re-add of a runtime update (updateDataSource) that threw
+// and the ones that are not a filter:
+//   removed                   — loaded, then removed at runtime through this manager
+//   absent_at_load            — the load completed and the id was not in the table at all
+//   unknown_at_load           — the load completed but the filtered-row snapshot was unavailable,
+//                               so "filtered" and "absent" cannot be told apart
+//   registry_not_loaded       — the registry load itself never completed (query or init failure)
+export const DATA_SOURCE_LOAD_FILTER_OUTCOMES = [
+  'soft_deleted',
+  'inactive',
+  'unsupported_type',
+  'decrypt_failed',
+  'load_failed',
+] as const
+export type DataSourceLoadFilterOutcome = typeof DATA_SOURCE_LOAD_FILTER_OUTCOMES[number]
+export const DATA_SOURCE_UNLOADED_REASONS = [
+  ...DATA_SOURCE_LOAD_FILTER_OUTCOMES,
+  'removed',
+  'absent_at_load',
+  'unknown_at_load',
+  'registry_not_loaded',
+] as const
+export type DataSourceUnloadedReason = typeof DATA_SOURCE_UNLOADED_REASONS[number]
+
+/** Values-free explanation of an `assertAccess` refusal. Never contains an id, owner or tenant. */
+export type DataSourceAccessRefusal =
+  | { reason: 'not_loaded'; loadOutcome: DataSourceUnloadedReason }
+  | { reason: 'owner_mismatch' }
+
+// Credential-decrypt failures, tagged by identity rather than by class or message so the thrown
+// error (its name, message and stack line) stays byte-identical to before.
+const decryptFailures = new WeakSet<object>()
+
+// The R7 probe runs after a refusal has already been answered (the facade hands it to the log
+// writer as a function), so these bound only what it may cost the database and the process: one
+// answer within the timeout, and at most this many reads in flight at once — a burst of refusals
+// beyond that logs `null` ("could not tell") instead of queueing primary-key reads.
+const PERSISTED_ROW_PROBE_TIMEOUT_MS = 2000
+const PERSISTED_ROW_PROBE_MAX_IN_FLIGHT = 4
+
 interface DataSourceRecord {
   id: string
   name: string
@@ -285,6 +339,12 @@ export class DataSourceManager extends EventEmitter {
   }> = new Map()
   private db?: Kysely<unknown>
   private initialized = false
+  // Server-log diagnostics only (see DataSourceUnloadedReason). Never consulted by any access
+  // decision, never returned to a client.
+  private loadOutcomes: Map<string, DataSourceLoadFilterOutcome | 'removed'> = new Map()
+  private registryLoadCompleted = false
+  private loadFilterSnapshotAvailable = false
+  private persistedRowProbesInFlight = 0
 
   constructor(options: DataSourceManagerOptions = {}) {
     super()
@@ -317,6 +377,11 @@ export class DataSourceManager extends EventEmitter {
       return
     }
 
+    // A (re)load is a new snapshot: forget the previous one's diagnostics before taking it.
+    this.loadOutcomes.clear()
+    this.registryLoadCompleted = false
+    this.loadFilterSnapshotAvailable = false
+
     try {
       const records = await this.db
         .selectFrom('data_sources' as never)
@@ -327,8 +392,11 @@ export class DataSourceManager extends EventEmitter {
 
       let loadedCount = 0
       for (const record of records) {
+        // Diagnostics only: which load step refused this row. Assigned BEFORE the step throws.
+        let outcome: DataSourceLoadFilterOutcome = 'load_failed'
         try {
           if (!this.adapterTypes.has(record.type.toLowerCase())) {
+            outcome = 'unsupported_type'
             throw new Error(`Unsupported persisted data source type: ${record.type}`)
           }
           const config = this.recordToConfig(record)
@@ -350,15 +418,130 @@ export class DataSourceManager extends EventEmitter {
           }
           loadedCount += 1
         } catch (err) {
+          if (outcome === 'load_failed' && err !== null && typeof err === 'object' && decryptFailures.has(err)) {
+            outcome = 'decrypt_failed'
+          }
+          this.recordLoadOutcome(record.id, outcome)
           console.error(`[DataSourceManager] Failed to load data source ${record.id}:`, err)
         }
       }
 
       const skippedCount = records.length - loadedCount
       console.log(`[DataSourceManager] Loaded ${loadedCount} data sources from database${skippedCount > 0 ? ` (${skippedCount} skipped)` : ''}`)
+      this.registryLoadCompleted = true
+      await this.snapshotLoadFilteredRows()
     } catch (err) {
       // Table might not exist yet
       console.warn('[DataSourceManager] Could not load from database:', err)
+    }
+  }
+
+  private recordLoadOutcome(id: unknown, outcome: DataSourceLoadFilterOutcome | 'removed'): void {
+    if (typeof id === 'string' && id.length > 0) this.loadOutcomes.set(id, outcome)
+  }
+
+  /**
+   * Which rows the load query's own filters (`is_active = true`, `deleted_at IS NULL`) left out, so
+   * a later refusal can say `inactive` / `soft_deleted` instead of guessing. Diagnostics only: one
+   * read after the load, classified in JS from the returned columns, and NEVER able to affect the
+   * load — any failure just leaves `unknown_at_load` as the answer for ids nobody recorded.
+   */
+  private async snapshotLoadFilteredRows(): Promise<void> {
+    const db = this.db
+    if (!db) return
+    try {
+      const rows = await db
+        .selectFrom('data_sources' as never)
+        .select(['id', 'is_active', 'deleted_at'] as never)
+        .where(sql<boolean>`(is_active IS NOT TRUE OR deleted_at IS NOT NULL)`)
+        .execute() as Array<{ id?: unknown; is_active?: unknown; deleted_at?: unknown }>
+      if (!Array.isArray(rows)) return
+      for (const row of rows) {
+        if (!row || typeof row.id !== 'string' || this.adapters.has(row.id)) continue
+        if (row.deleted_at !== null && row.deleted_at !== undefined) {
+          this.recordLoadOutcome(row.id, 'soft_deleted')
+        } else if (row.is_active !== true) {
+          this.recordLoadOutcome(row.id, 'inactive')
+        }
+      }
+      this.loadFilterSnapshotAvailable = true
+    } catch {
+      // Values-free on purpose: the driver's text can carry host/database/login.
+      console.warn('[DataSourceManager] Load-filter snapshot unavailable; unloaded-source diagnostics degrade to unknown_at_load')
+    }
+  }
+
+  /**
+   * Values-free explanation of why `assertAccess(id, actor)` refuses, or `null` when it would not.
+   * It mirrors `assertAccess` branch for branch and reads only in-memory state, so a caller that
+   * invokes it synchronously right after catching that refusal gets the reason for THAT refusal.
+   * It is for the SERVER LOG only: returning it to a client would undo the no-existence-leak
+   * invariant `assertAccess` exists to keep.
+   */
+  describeAccessRefusal(id: string, actor: DataSourceActor): DataSourceAccessRefusal | null {
+    const scope = this.scopes.get(id)
+    if (!this.adapters.has(id) || !scope) {
+      return { reason: 'not_loaded', loadOutcome: this.unloadedReason(id) }
+    }
+    const { userId, platformAdmin } = normalizeActor(actor)
+    if (platformAdmin === true) return null
+    if (userId === undefined || scope.ownerId !== userId) return { reason: 'owner_mismatch' }
+    return null
+  }
+
+  private unloadedReason(id: string): DataSourceUnloadedReason {
+    const recorded = this.loadOutcomes.get(id)
+    if (recorded) return recorded
+    if (!this.registryLoadCompleted) return 'registry_not_loaded'
+    return this.loadFilterSnapshotAvailable ? 'absent_at_load' : 'unknown_at_load'
+  }
+
+  /**
+   * R7: is this id a LIVE row in `data_sources` right now (exists, `is_active`, not soft-deleted)?
+   * One read by primary key. Distinguishes "the table says live but the registry, loaded at startup,
+   * does not have it" (the table was changed after startup without going through this manager).
+   * `null` means "could not tell" — no database, a failed query, or no answer within the timeout.
+   * It never throws, so a caller's refusal path and response cannot depend on it.
+   */
+  async probePersistedLiveRow(id: string): Promise<boolean | null> {
+    const db = this.db
+    if (!db || typeof id !== 'string' || id.length === 0) return null
+    if (this.persistedRowProbesInFlight >= PERSISTED_ROW_PROBE_MAX_IN_FLIGHT) return null
+    // The slot is held until the QUERY settles — not until the timeout answers — so a slow database
+    // cannot accumulate reads past the cap by timing each one out.
+    this.persistedRowProbesInFlight += 1
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      this.persistedRowProbesInFlight -= 1
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const query = db
+        .selectFrom('data_sources' as never)
+        .select(['id', 'is_active', 'deleted_at'] as never)
+        .where('id' as never, '=', id as never)
+        .limit(1)
+        .execute() as Promise<Array<{ id?: unknown; is_active?: unknown; deleted_at?: unknown }>>
+      // Also keeps the query's own later rejection (after a timeout won) from surfacing as unhandled.
+      query.then(release, release)
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), PERSISTED_ROW_PROBE_TIMEOUT_MS)
+        // Never keep a process alive just to finish a diagnostic.
+        if (timer && typeof timer.unref === 'function') timer.unref()
+      })
+      const rows = await Promise.race([query, timeout])
+      if (rows === 'timeout' || !Array.isArray(rows)) return null
+      const row = rows.find((candidate) => candidate && candidate.id === id)
+      if (!row) return false
+      return row.is_active === true && (row.deleted_at === null || row.deleted_at === undefined)
+    } catch {
+      // Building or running the query failed: no query is pending any more.
+      release()
+      return null
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
 
@@ -398,9 +581,11 @@ export class DataSourceManager extends EventEmitter {
         try {
           out[key] = decryptStoredSecretValue(v)
         } catch (err) {
-          throw new Error(
+          const failure = new Error(
             `Failed to decrypt credential '${key}' (ENCRYPTION_KEY may have changed): ${err instanceof Error ? err.message : String(err)}`
           )
+          decryptFailures.add(failure)
+          throw failure
         }
       }
     }
@@ -514,6 +699,7 @@ export class DataSourceManager extends EventEmitter {
       tenantId,
       scopeKind
     })
+    this.loadOutcomes.delete(config.id)
     return adapter
   }
 
@@ -588,7 +774,15 @@ export class DataSourceManager extends EventEmitter {
     this.adapters.delete(id)
     this.connectionPool.delete(id)
 
-    const adapter = await this.addDataSourceInternal(config, false)
+    let adapter: BaseDataAdapter
+    try {
+      adapter = await this.addDataSourceInternal(config, false)
+    } catch (err) {
+      // Diagnostics only (the same error is rethrown untouched): the id just left the registry, so
+      // a later refusal must not describe it as never having been in the table.
+      this.recordLoadOutcome(id, 'load_failed')
+      throw err
+    }
     this.scopes.set(id, {
       ownerId,
       workspaceId: workspaceId ?? null,
@@ -1133,6 +1327,7 @@ export class DataSourceManager extends EventEmitter {
     this.adapters.delete(id)
     this.connectionPool.delete(id)
     this.scopes.delete(id)
+    this.recordLoadOutcome(id, 'removed')
 
     // ④ resource release last, and never a reason to undo ② / ③.
     adapter.removeAllListeners()

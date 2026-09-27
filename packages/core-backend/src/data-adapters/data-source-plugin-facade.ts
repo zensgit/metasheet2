@@ -1,5 +1,5 @@
 import type { DataSourceManager } from './DataSourceManager'
-import type { DataSourceScopeKind } from './DataSourceManager'
+import type { DataSourceAccessRefusal, DataSourceScopeKind, DataSourceUnloadedReason } from './DataSourceManager'
 import {
   isC6WriteTargetConfig,
   isGenericQueryDisabledConfig,
@@ -268,6 +268,100 @@ export class DataSourceUnavailableError extends DataSourceBridgeConfigError {
   }
 }
 
+// ── Refusal diagnostics for connection-registration resolution (SERVER LOG ONLY) ───────────────
+// `resolveConnectionRegistration` deliberately refuses several distinct states with one uniform
+// not-found, so a caller cannot learn whether a source exists. That stays exactly as it is: every
+// refusal below throws the same class, code, message and status it always threw. What changes is
+// that the thrown error additionally carries a NON-ENUMERABLE `refusalDiagnostic` property — a
+// frozen object whose every field is a word from a closed vocabulary or a boolean — which the
+// integration plugin's connection resolver writes to the SERVER log and nowhere else
+// (docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §5 R1/R7).
+// Non-enumerable so `JSON.stringify`, object spread and default `util.inspect` never carry it into a
+// response body or a persisted error document by accident.
+export const DATA_SOURCE_REFUSAL_REASONS = [
+  'principal_missing',
+  'tenant_missing',
+  'run_as_invalid',
+  'not_loaded',
+  'owner_mismatch',
+  'scope_missing',
+  'tenant_mismatch',
+  'tenantless_scope',
+  'tenantless_service',
+  'unclassified',
+] as const
+export type DataSourceRefusalReason = typeof DATA_SOURCE_REFUSAL_REASONS[number]
+
+export interface DataSourceRefusalDiagnostic {
+  reason: DataSourceRefusalReason
+  /** Only for `not_loaded`: why the id is not in the in-memory registry. */
+  loadOutcome?: DataSourceUnloadedReason
+  /**
+   * Only for `not_loaded` (R7): asks the TABLE, by primary key, whether the id is a live row right
+   * now (true / false; null = could not tell). It is a function the log writer calls AFTER the refusal
+   * has been thrown, never a value the refusal waits for: awaiting a database read on this one branch
+   * would make "not loaded" answer measurably later than "not yours", i.e. a timing side channel on
+   * exactly the existence question the uniform not-found hides — and a slow database would delay
+   * every refusal. It resolves to a boolean or null and never rejects.
+   */
+  probePersistedLive?: () => Promise<boolean | null>
+}
+
+export const DATA_SOURCE_REFUSAL_DIAGNOSTIC_PROPERTY = 'refusalDiagnostic'
+
+function withRefusalDiagnostic<E>(error: E, diagnostic: DataSourceRefusalDiagnostic): E {
+  if (error !== null && typeof error === 'object') {
+    try {
+      Object.defineProperty(error, DATA_SOURCE_REFUSAL_DIAGNOSTIC_PROPERTY, {
+        value: Object.freeze({ ...diagnostic }),
+        enumerable: false,
+        configurable: true,
+        writable: false,
+      })
+    } catch {
+      // A frozen / exotic error object costs the diagnostic, never the refusal.
+    }
+  }
+  return error
+}
+
+/**
+ * Explain a registry refusal that was JUST caught. Synchronous and in-memory only, so it describes
+ * the same state `assertAccess` refused on and adds no await to the refusal path. The R7 table read
+ * is handed over as a function (`probePersistedLive`) and runs only if and when the log writer asks
+ * for it, after the refusal is on its way. Never throws.
+ */
+function explainRegistryRefusal(
+  manager: DataSourceManager,
+  dataSourceId: string,
+  principal: string
+): DataSourceRefusalDiagnostic {
+  let refusal: DataSourceAccessRefusal | null = null
+  try {
+    refusal = typeof manager.describeAccessRefusal === 'function'
+      ? manager.describeAccessRefusal(dataSourceId, principal)
+      : null
+  } catch {
+    refusal = null
+  }
+  if (!refusal) return { reason: 'unclassified' }
+  if (refusal.reason !== 'not_loaded') return { reason: refusal.reason }
+  if (typeof manager.probePersistedLiveRow !== 'function') {
+    return { reason: 'not_loaded', loadOutcome: refusal.loadOutcome }
+  }
+  return {
+    reason: 'not_loaded',
+    loadOutcome: refusal.loadOutcome,
+    probePersistedLive: async () => {
+      try {
+        return await manager.probePersistedLiveRow(dataSourceId)
+      } catch {
+        return null
+      }
+    },
+  }
+}
+
 function requirePrincipal(principal: string | undefined): string {
   // Fail-closed: a read MUST carry an owner principal. We deliberately do NOT fall back to a
   // default / system / tenant / admin identity — that would bypass per-source ownership.
@@ -492,14 +586,27 @@ export function createDataSourcePluginFacade(
     dataSourceId: string,
     options: ResolveConnectionRegistrationOptions | undefined
   ) {
-    const principal = requirePrincipal(options?.principal)
+    // Every refusal below throws EXACTLY what it threw before (same class, code, message); each one
+    // only gains the non-enumerable, server-log-only `refusalDiagnostic` (see withRefusalDiagnostic).
+    let principal: string
+    try {
+      principal = requirePrincipal(options?.principal)
+    } catch (err) {
+      throw withRefusalDiagnostic(err, { reason: 'principal_missing' })
+    }
     const requestedTenant = typeof options?.tenantId === 'string' ? options.tenantId.trim() : ''
     if (!requestedTenant) {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw withRefusalDiagnostic(
+        new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`),
+        { reason: 'tenant_missing' }
+      )
     }
     const runAs = options?.runAs ?? 'service'
     if (runAs !== 'user' && runAs !== 'owner' && runAs !== 'service') {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw withRefusalDiagnostic(
+        new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`),
+        { reason: 'run_as_invalid' }
+      )
     }
     const manager = getManager()
     let scope
@@ -509,19 +616,32 @@ export function createDataSourcePluginFacade(
       scope = manager.getScope(dataSourceId)
       adapter = manager.getDataSource(dataSourceId)
     } catch (err) {
-      throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      const refusal = new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      throw withRefusalDiagnostic(refusal, explainRegistryRefusal(manager, dataSourceId, principal))
     }
     if (!scope) {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw withRefusalDiagnostic(
+        new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`),
+        { reason: 'scope_missing' }
+      )
     }
     if (scope.tenantId !== null && scope.tenantId !== requestedTenant) {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw withRefusalDiagnostic(
+        new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`),
+        { reason: 'tenant_mismatch' }
+      )
     }
     if (scope.tenantId === null && scope.scopeKind !== 'legacy_private') {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw withRefusalDiagnostic(
+        new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`),
+        { reason: 'tenantless_scope' }
+      )
     }
     if (scope.tenantId === null && runAs === 'service') {
-      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+      throw withRefusalDiagnostic(
+        new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`),
+        { reason: 'tenantless_service' }
+      )
     }
     return { adapter, manager, scope }
   }

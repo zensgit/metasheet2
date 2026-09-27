@@ -1587,6 +1587,15 @@ export default defineConfig({
       // how it went un-run entirely) and wired as a WHOLE FILE into plugin-tests.yml's multitable
       // real-DB step, where DATABASE_URL is set and the in-suite sentinel fails-not-skips.
       'tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts',
+      // 备料定时试拉 CONNECTION_CANONICAL_UNAVAILABLE refusal diagnostics (R1/R2/R3/R7) on real
+      // Postgres: seeds data_sources / integration_external_systems rows (two of them with FK triggers
+      // off, as the tolerated NOT VALID stored rows) and asserts the response bytes + server-log words
+      // per state. It THROWS without DATABASE_URL, so it is excluded here. Two-point wiring: the SECOND
+      // point (a whole-file entry in a real-DB step of .github/workflows/plugin-tests.yml, after
+      // db:migrate) is still MISSING and must be added by someone allowed to touch .github/workflows —
+      // until then only its no-DB twin (tests/unit/stock-prep-connection-refusal-diagnostics.test.ts)
+      // runs in CI. Do not read this exclude as "it is wired".
+      'tests/integration/stock-prep-connection-refusal-diagnostics.db.test.ts',
       // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and
       // self-contains its RBAC mocking — it runs under the default config + setup.ts, so
       // it stays IN the standard `test` job (runs on every PR, Node 18 + 20). Excluding it

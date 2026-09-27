@@ -311,6 +311,9 @@ module.exports = {
       // The host injects it only for this plugin; ordinary Connection resolution
       // remains values-free and never receives this capability's projection.
       sealedSnapshotFacade,
+      // Server log only: a closed-vocabulary reason for each facade refusal (R1/R7). The HTTP
+      // response for a refusal is unchanged; see connection-resolver.cjs describeFacadeRefusal.
+      logger,
     })
     externalSystemRegistry = createExternalSystemRegistry({
       db,
