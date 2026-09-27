@@ -115,6 +115,7 @@
                   @confirm="onEditorConfirm"
                   @blur-commit="onEditorBlurCommit"
                   @tab-commit="onEditorTabCommit"
+                  @update:invalid-draft="editorInvalidDraft = $event"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(item.row.id, field)"
                   @open-person-picker="openPersonPickerFromCell(item.row.id, field)"
@@ -289,6 +290,7 @@
                   @confirm="onEditorConfirm"
                   @blur-commit="onEditorBlurCommit"
                   @tab-commit="onEditorTabCommit"
+                  @update:invalid-draft="editorInvalidDraft = $event"
                   @yjs-commit="markYjsHandled(row.id, field.id)"
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
@@ -436,6 +438,8 @@ interface ConditionalFormattingByRecord {
 }
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
+import { dateTimeExportText } from '../utils/field-display'
+import { parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
 import MetaFieldHeader from './MetaFieldHeader.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
 import {
@@ -916,8 +920,13 @@ const GROUP_UNGROUPED = '__ungrouped__'
 function levelKey(val: unknown): string {
   return val == null || val === '' ? GROUP_UNGROUPED : String(val)
 }
-function groupLabel(key: string): string {
-  return key === GROUP_UNGROUPED ? groupNoValue(isZh.value) : key
+// The KEY stays the raw String(val) (server-tree agreement, above); only the LABEL is humanised. 客户反馈
+// 2026-09-24 #4c (N5): a date-time group header shows the business wall clock the cells show, not the raw
+// stored `…T01:00:00.000Z`; an unparseable key keeps its raw text.
+function groupLabel(key: string, field?: MetaField): string {
+  if (key === GROUP_UNGROUPED) return groupNoValue(isZh.value)
+  if (field) return dateTimeExportText(field, key) ?? key
+  return key
 }
 
 // Nested group node over the current page rows. `path` is the composite key (ancestor keys + own key).
@@ -947,7 +956,7 @@ function buildGroupTree(rows: MetaRecord[], level: number, parentPath: string): 
     groups.push({
       key,
       path,
-      label: groupLabel(key),
+      label: groupLabel(key, field),
       level,
       rows: groupRows,
       count: groupRows.length,
@@ -1411,6 +1420,14 @@ function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: 
 function onCellClick(ri: number, ci: number, rid: string) {
   const fieldId = props.visibleFields[ci]?.id
   if (editCell.value && (editCell.value.recordId !== rid || editCell.value.fieldId !== fieldId)) {
+    // B2 (客户反馈 2026-09-24 #4c, PR #6083 review item 3): the open editor holds a dateTime draft the
+    // parser rejected. Closing it here would drop that text silently (confirmEdit commits the stale
+    // staged value). Keep the editor — and its inline error — where it is and hand focus back to it;
+    // the person fixes the text or presses Escape.
+    if (invalidDateTimeDraftIsOnScreen()) {
+      refocusEditorInput()
+      return
+    }
     confirmEdit()
     // The old editor's <input> just unmounted (its own DOM focus goes to
     // `document.body` per spec); return focus to the grid root so keyboard
@@ -1419,6 +1436,34 @@ function onCellClick(ri: number, ci: number, rid: string) {
   }
   focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
   if (fieldId) emit('cursor-focus', { recordId: rid, fieldId })
+}
+
+// B2: set by MetaCellEditor's `update:invalidDraft` while its dateTime draft is unparseable-and-flagged.
+// Cleared whenever the editor closes (confirm / cancel / a new edit starts) and by the editor itself on
+// unmount.
+const editorInvalidDraft = ref(false)
+/** The dateTime editor's input while the editor is rendered — null once its row/field left the rendered set. */
+function mountedDateTimeEditorInput(): HTMLInputElement | null {
+  return gridRoot.value?.querySelector<HTMLInputElement>('.meta-cell-editor input[data-meta-datetime-input]') ?? null
+}
+/**
+ * Re-judge of PR #6083 (must-fix): block a cell switch ONLY while the editor that flagged the draft is
+ * still on screen. A page change / filter / sort under virtualization / row delete / hide-field / view
+ * switch can unmount the editor after it flagged the draft; trusting the flag alone would then send every
+ * click to a `focus()` on nothing and lock the grid out of edit mode until a remount. When the editor is
+ * gone the flag is stale: clear it and fall through to the pre-existing `confirmEdit()` path (which also
+ * clears the stale `editCell`). The editor additionally reports `false` on unmount — two independent guards.
+ */
+function invalidDateTimeDraftIsOnScreen(): boolean {
+  if (!editorInvalidDraft.value) return false
+  if (mountedDateTimeEditorInput()) return true
+  editorInvalidDraft.value = false
+  return false
+}
+function refocusEditorInput() {
+  nextTick(() => {
+    mountedDateTimeEditorInput()?.focus()
+  })
 }
 
 // Live cell-cursors: remote collaborators currently occupying a given cell (presentational highlight).
@@ -1433,9 +1478,16 @@ function startEdit(row: MetaRecord, field: MetaField) {
   // let two drafts exist at once. A no-op when the previous draft's value is
   // unchanged (confirmEdit's own `value !== row.data[fieldId]` guard).
   if (editCell.value && (editCell.value.recordId !== row.id || editCell.value.fieldId !== field.id)) {
+    // B2: never swap out an editor that is SHOWING an invalid dateTime draft (see onCellClick); a stale
+    // flag from an editor that was torn down is cleared inside the check and the old path runs.
+    if (invalidDateTimeDraftIsOnScreen()) {
+      refocusEditorInput()
+      return
+    }
     confirmEdit()
   }
   yjsHandledCellKey.value = null
+  editorInvalidDraft.value = false
   editCell.value = { recordId: row.id, fieldId: field.id, value: row.data[field.id] ?? null }
 }
 
@@ -1477,9 +1529,10 @@ function confirmEdit() {
   }
   editCell.value = null
   yjsHandledCellKey.value = null
+  editorInvalidDraft.value = false
 }
 
-function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null }
+function cancelEdit() { editCell.value = null; yjsHandledCellKey.value = null; editorInvalidDraft.value = false }
 
 // D3: Enter commits via the same confirmEdit() as blur/Tab, then explicitly
 // returns DOM focus to the grid root — the editor's <input> just unmounted,
@@ -1596,12 +1649,18 @@ async function pasteFocusedCell() {
   if (!row || !field || !isEditable(row.id, field)) return
   // person/multiSelect store array values server-side; pasting raw clipboard
   // text would be rejected by record-write-service's field validation (400).
-  // dateTime is left to fall through — validateDateTimeValue on the server
-  // is the backstop for whatever text lands there.
   if (field.type === 'person' || field.type === 'multiSelect') return
   try {
     const text = await navigator.clipboard.readText()
-    const value = field.type === 'number' && text !== '' ? Number(text) : text
+    let value: unknown = field.type === 'number' && text !== '' ? Number(text) : text
+    // 客户反馈 2026-09-24 #4c (S1): pasted date-time text is a BUSINESS wall clock (zone rule: explicit
+    // non-UTC field zone, else the business zone), converted here to the UTC instant — never read in the
+    // browser's zone. Text the parser rejects is sent as-is: the server applies the same grammar and
+    // answers 400, which the grid surfaces as an error toast — not a silent drop.
+    if (field.type === 'dateTime' && typeof text === 'string' && text.trim() !== '') {
+      const ms = parseDateTimeTextToUtcMs(text, resolveDateTimeTimezone(field.property))
+      if (ms !== null) value = new Date(ms).toISOString()
+    }
     emit('patch-cell', row.id, field.id, value, row.version)
   } catch { /* clipboard access denied */ }
 }

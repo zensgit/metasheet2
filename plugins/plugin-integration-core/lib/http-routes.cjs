@@ -1497,6 +1497,16 @@ function asListOffset(value) {
   return Math.min(n, MAX_LIST_OFFSET)
 }
 
+// f-prov200: the per-run provenance page cursor — a decimal eventIndex string, exactly the shape
+// the route hands out as `nextCursor`. Same rule the registry re-checks
+// (pipelines.cjs normalizeProvenanceRunCursor); kept here so a bad cursor is a typed 400 that
+// never reaches the existence probe or the db.
+function isProvenanceRunCursor(value) {
+  return typeof value === 'string'
+    && /^[0-9]{1,15}$/.test(value)
+    && Number.isSafeInteger(Number(value))
+}
+
 function asSampleLimit(value) {
   const n = asPositiveInt(value)
   if (n === undefined) return undefined
@@ -9986,23 +9996,44 @@ function requireStockPreparationAudit() {
       if (!runId) {
         throw new HttpRouteError(400, 'RUN_ID_REQUIRED', 'runId is required')
       }
+      const query = requestQuery(req)
+      // The tenant/workspace scope is resolved exactly where it was before the cursor existed
+      // (ahead of the existence probe), so a missing or foreign tenant keeps its 400/403 whatever
+      // the cursor says — the cursor check below never reorders the pre-existing gates.
+      const probeInput = scopedInput(req, { id: runId })
+      // f-prov200: `cursor` is the previous page's `nextCursor` (the last returned eventIndex).
+      // Refused BEFORE the existence probe and without echoing the value: a 400 here is the same
+      // for every runId, so it says nothing about which runs exist. A repeated `?cursor=` (array)
+      // is refused too rather than guessing which one was meant.
+      const cursor = query.cursor
+      if (cursor !== undefined && cursor !== '' && !isProvenanceRunCursor(cursor)) {
+        throw new HttpRouteError(400, 'INVALID_CURSOR', 'cursor must be a non-negative integer string')
+      }
       try {
-        await pipelineRegistry.getPipelineRun(scopedInput(req, { id: runId }))
+        await pipelineRegistry.getPipelineRun(probeInput)
       } catch (error) {
         if (error && /NotFound/.test(String(error.name))) {
           throw new HttpRouteError(404, 'RUN_NOT_FOUND', 'pipeline run not found')
         }
         throw error
       }
-      const query = requestQuery(req)
       // asListLimit caps at MAX_LIST_LIMIT (500), below the registry's own 1000 ceiling; the
       // registry still applies its default when nothing usable arrives, so the tighter of the
       // two always wins and no caller-supplied value can widen the page.
-      const items = await pipelineRegistry.listProvenanceByRun(scopedInput(req, {
+      const page = await pipelineRegistry.listProvenanceByRun(scopedInput(req, {
         runId,
         limit: asListLimit(query.limit),
+        cursor: cursor === '' ? undefined : cursor,
       }))
-      return sendOk(res, { items })
+      // f-prov200: the disclosure travels WITH the items — `total` / `truncated` / `nextCursor`
+      // are what let a client tell "the first page" from "the whole timeline". Projected
+      // explicitly so nothing else the registry might carry reaches the wire.
+      return sendOk(res, {
+        items: page.items,
+        total: page.total,
+        truncated: page.truncated,
+        nextCursor: page.nextCursor,
+      })
     },
 
     // DF-N2-2c: read-only by-rowId provenance timeline (cross-run). Reads the

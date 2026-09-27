@@ -885,6 +885,7 @@ import {
   type ImportValueResolver,
 } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
+import { dateTimeExportText } from '../utils/field-display'
 import {
   MAX_FIELD_NAME_LENGTH,
   MAX_SHEET_FIELDS,
@@ -5095,12 +5096,18 @@ function triggerDownloadNamed(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+// 客户反馈 2026-09-24 #4c (B1): the "selected rows" client export writes date-times as the SAME
+// `YYYY-MM-DD HH:mm` business wall clock the grid shows (dateTime: explicit non-UTC field zone, else the
+// business zone; createdTime/modifiedTime: business zone) — matching the server's "all rows" route, so
+// both files re-import to the same instants. A non-date-time value keeps its raw projection.
 function doExportCsv(fields: GridExportField[], rowList: GridExportRow[]) {
   const header = fields.map((f) => csvEscape(f.name)).join(',')
   const rows = rowList.map((row) =>
     fields.map((f) => {
       const v = row.data[f.id]
       if (v === null || v === undefined) return ''
+      const wallClock = dateTimeExportText(f, v)
+      if (wallClock !== null) return csvEscape(wallClock)
       if (typeof v === 'boolean') return v ? 'true' : 'false'
       if (Array.isArray(v)) return csvEscape(v.map(String).join('; '))
       return csvEscape(String(v))
@@ -5123,6 +5130,8 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
       fields.map((f) => {
         const v = row.data[f.id]
         if (v === null || v === undefined) return ''
+        const wallClock = dateTimeExportText(f, v)
+        if (wallClock !== null) return wallClock
         if (typeof v === 'boolean') return v
         if (typeof v === 'number') return v
         if (Array.isArray(v)) return v.map((item) => (typeof item === 'object' ? JSON.stringify(item) : String(item))).join('; ')
