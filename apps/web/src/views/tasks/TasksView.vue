@@ -496,6 +496,9 @@ watch(taskId, (id) => {
   // what's showing, so a list action still in flight from before this navigation must be treated
   // as stale too.
   listPageToken += 1
+  // A list READ still in flight from before this navigation is stale too: bump the generation so
+  // its late result (including a late org_missing) cannot paint over the page now showing.
+  listGeneration += 1
   if (id) {
     void loadDetail(id)
   } else {

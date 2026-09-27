@@ -1,6 +1,6 @@
 /**
- * Polling composable behind the top-nav tasks badge (design lock §5.2 "红点：常驻
- * `<span data-testid="tasks-todo-badge">` 三态；不照抄审批 `applyCount(0)`").
+ * Polling composable behind the top-nav tasks badge (design lock §5.2: a persistent
+ * `<span data-testid="tasks-todo-badge">` with three states, where a failed read is never shown as 0).
  *
  * Three states, deliberately NOT collapsed into a number:
  *   - 'loading'     nothing answered yet (mount, or the read has not settled).
@@ -9,8 +9,8 @@
  *   - 'unavailable' the read failed outright (network error, 403, 404, any non-2xx) OR degraded
  *                   with `reason: 'org_missing'` — `tasksApi.fetchPendingCount` folds all of these
  *                   into a non-`ok` result kind. The count is UNKNOWN here, not zero: a caller must
- *                   never render '0' for this state (that is exactly the `applyCount(0)` collapse
- *                   the lock calls out and forbids — see `TasksTodoBadge.vue`, which renders an
+ *                   never render '0' for this state (folding "failed" into "zero" is exactly what
+ *                   the lock forbids — see `TasksTodoBadge.vue`, which renders an
  *                   empty `data-count` for this state, never `"0"`).
  *
  * Polling: every 60s, but the fetch itself is skipped while the document is hidden (a background
@@ -19,8 +19,7 @@
  * still exists as a single steady clock rather than one that is torn down and rebuilt around every
  * visibility flip.
  *
- * Generation-guarded like this codebase's other transition-safe composables
- * (`useApprovalAdminCapability`): a response that arrives after a newer request was issued, or
+ * Generation-guarded: a response that arrives after a newer request was issued, or
  * after the component owning this composable has unmounted, writes nothing.
  *
  * A 404 means the feature itself is off (there is no `/api/tasks/pending-count` route to ask), not
@@ -65,7 +64,7 @@ export function useTasksBadge(): TasksBadgeHandle {
     generation += 1
     const mine = generation
     // `fetchPendingCount` is contracted to never throw, but this composable is a nav-shell
-    // surface — the same defensive posture as `ApprovalTodoBadge`'s realtime guard — so a thrown
+    // surface, so a thrown
     // rejection is treated exactly like any other non-`ok` result (`unavailable`), not left to
     // become an unhandled rejection that could take the shell down with it.
     let result: Awaited<ReturnType<typeof fetchPendingCount>>

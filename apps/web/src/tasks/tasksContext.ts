@@ -2,7 +2,7 @@
  * Task-feature-line M2 frontend skeleton (design lock §5.2 / §5.3).
  *
  * Loads `GET /api/tasks/context` through the app's shared authenticated fetch helper — the same
- * `apiFetch` approvals and every other authenticated view use (`apps/web/src/utils/api.ts`). No
+ * `apiFetch` every other authenticated view uses (`apps/web/src/utils/api.ts`). No
  * bespoke HTTP client, no mock data: the real endpoint is asked and its answer is classified.
  *
  * Five states, per the lock:

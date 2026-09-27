@@ -361,3 +361,21 @@ describe('TasksView list row action — navigate to /tasks/:id while pending (li
     expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
   })
 })
+
+describe('TasksView list READ in flight when navigating to /tasks/:id', () => {
+  it('a late org_missing from the list read does not show org guidance on the detail page', async () => {
+    const pendingList = deferred<{ kind: 'org_missing' }>()
+    h_.listTasks.mockReturnValueOnce(pendingList.promise)
+    h_.getTask.mockImplementation(async (id: string) =>
+      ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    const el = await mountAt('/tasks')
+
+    await router!.push('/tasks/t2')
+    await flush()
+    pendingList.resolve({ kind: 'org_missing' })
+    await flush()
+
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
+  })
+})

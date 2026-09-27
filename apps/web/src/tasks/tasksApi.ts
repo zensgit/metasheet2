@@ -3,7 +3,7 @@
  *
  * Typed wrappers over the (not-yet-merged, `TASKS_ENABLED`-gated) `/api/tasks*` endpoints, using
  * the SAME authenticated `apiFetch` helper every other view uses — no bespoke transport, no
- * `USE_MOCK` (unlike `approvals/api.ts`): the real endpoint is always asked.
+ * mock short-circuit: the real endpoint is always asked, in development and tests too.
  *
  * Every function below returns a discriminated result and NEVER throws on an HTTP status or a
  * transport failure — the caller switches on `kind` instead of catching. The lock's org-guidance
