@@ -751,13 +751,15 @@
                section collapses to ONE line + a 了解更多 expander. This is a RENDER-ONLY gate
                (`aiSurfacesAvailable`), deliberately NOT `aiShortcutSectionVisible`: that computed also
                decides the no-config fallback above, the dirty leg and the bulk-fill leg. The draft is
-               still hydrated, serialized and re-emitted on save, so a saved config is kept as-is. -->
+               still hydrated, serialized and re-emitted on save, so a saved config is kept — in the
+               same canonical form every save already writes (resolveAiShortcutDraft drops deleted
+               sources and inert params), never removed. -->
           <div v-if="aiSurfacesAvailable" class="meta-field-mgr__ai-header">
             <strong>{{ ml('field.ai.title') }}</strong>
           </div>
           <template v-else>
             <div class="meta-field-mgr__ai-unavailable" data-test="ai-shortcut-unavailable">
-              <span>{{ ml('field.ai.unavailable') }}</span>
+              <span>{{ ml(aiUnavailableConfirmed === true ? 'field.ai.unavailable' : 'field.ai.unconfirmed') }}</span>
               <button
                 type="button"
                 class="meta-field-mgr__btn-inline"
@@ -1196,6 +1198,10 @@ const props = defineProps<{
   // config-time preview, the bulk-fill trigger and the formula AI-suggest panel are not rendered.
   // RENDER-ONLY: a saved `property.aiShortcut` still hydrates, serializes and is re-emitted on save.
   aiAvailable?: boolean
+  // A11: WORDING ONLY (never the gate). True only when the server EXPLICITLY answered
+  // `{ available: false }` → the collapsed line says 「未开通」. Absent/false (the availability read
+  // failed, or has not answered yet) → neutral 「AI 状态暂时无法确认」: an error is not "not enabled".
+  aiUnavailableConfirmed?: boolean
   // Cross-base link picker (design 2026-06-14). The base-read gate is the FE's
   // source of truth: these fns are the ONLY way the picker learns what bases /
   // foreign sheets exist, and both are backend base-read-gated (listBases returns

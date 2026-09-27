@@ -5,9 +5,12 @@
  *
  * Covered here (component level; the workbench → component wiring is pinned separately in
  * multitable-workbench-ai-availability-wiring.spec.ts):
- *   - resolveAiAvailability is fail-closed (only `{ available: true }` counts);
+ *   - resolveAiAvailability is fail-closed and three-state (only `{ available: true }` shows AI; only
+ *     an explicit `false` is 'unavailable'; errors are 'unknown'), retrying a network/5xx failure
+ *     exactly once after a short delay and never retrying a 4xx;
  *   - client.aiAvailability() GETs the right path;
- *   - MetaFieldManager: collapsed one-line notice + 了解更多 help; no config controls, preview,
+ *   - MetaFieldManager: collapsed one-line notice + 了解更多 help — 「未开通」 only when the server
+ *     explicitly said false, neutral wording otherwise; no config controls, preview,
  *     bulk fill, usage card (and no usage probe) or formula AI-suggest while unavailable; the
  *     AVAILABLE state still renders all of them;
  *   - a SAVED aiShortcut survives a save while collapsed (never dropped), and a saved config whose
@@ -21,8 +24,14 @@ import MetaRecordFieldsPanel from '../src/multitable/components/MetaRecordFields
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
-import { resetAiUsageSummarySessionCache, resolveAiAvailability } from '../src/multitable/composables/useAiShortcut'
+import {
+  AI_AVAILABILITY_RETRY_DELAY_MS,
+  resetAiUsageSummarySessionCache,
+  resolveAiAvailability,
+} from '../src/multitable/composables/useAiShortcut'
 import { managerLabel } from '../src/multitable/utils/meta-manager-labels'
+import { recordLabel } from '../src/multitable/utils/meta-record-labels'
+import { metaCoreLabel as coreLabel } from '../src/multitable/utils/meta-core-labels'
 import { useLocale } from '../src/composables/useLocale'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 
@@ -49,6 +58,7 @@ function fieldsWithSavedConfig(): MetaField[] {
 interface ManagerOptions {
   fields?: MetaField[]
   aiAvailable?: boolean
+  aiUnavailableConfirmed?: boolean
   currentRecordId?: string | null
   aiPreviewFn?: (params: { recordId: string; config: unknown }) => Promise<unknown>
   aiUsageSummaryFn?: () => Promise<unknown>
@@ -72,6 +82,7 @@ function mountManager(options: ManagerOptions = {}): HTMLElement {
         currentRecordId: options.currentRecordId ?? 'rec_1',
         // Omitted entirely when undefined, to exercise the fail-closed DEFAULT.
         ...(options.aiAvailable !== undefined ? { aiAvailable: options.aiAvailable } : {}),
+        ...(options.aiUnavailableConfirmed !== undefined ? { aiUnavailableConfirmed: options.aiUnavailableConfirmed } : {}),
         aiPreviewFn: options.aiPreviewFn ?? vi.fn().mockResolvedValue({ data: { output: 'x' } }),
         aiUsageSummaryFn: options.aiUsageSummaryFn ?? vi.fn().mockResolvedValue({
           callerDayTokens: 1, callerWeekTokens: 2, instanceDayUsd: 0,
@@ -134,19 +145,87 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('resolveAiAvailability (fail-closed)', () => {
-  it('only an explicit { available: true } counts', async () => {
-    expect(await resolveAiAvailability(async () => ({ available: true }))).toBe(true)
-    for (const body of [{ available: false }, { available: 'true' }, { available: 1 }, {}, null, undefined, 'true', true]) {
-      expect(await resolveAiAvailability(async () => body), JSON.stringify(body)).toBe(false)
+/** An injected, instant sleep that records the delays it was asked for. */
+function recordingSleep() {
+  const delays: number[] = []
+  const sleep = vi.fn(async (ms: number) => { delays.push(ms) })
+  return { sleep, delays }
+}
+
+const httpError = (status: number) => Object.assign(new Error(`HTTP ${status}`), { status })
+
+describe('resolveAiAvailability (fail-closed, three states)', () => {
+  it("only an explicit { available: true } is 'available'; only an explicit false is 'unavailable'", async () => {
+    expect(await resolveAiAvailability(async () => ({ available: true }))).toBe('available')
+    expect(await resolveAiAvailability(async () => ({ available: false }))).toBe('unavailable')
+    for (const body of [{ available: 'true' }, { available: 1 }, { available: 0 }, {}, null, undefined, 'true', true, false]) {
+      expect(await resolveAiAvailability(async () => body), JSON.stringify(body)).toBe('unknown')
     }
   })
 
-  it('a rejected call (old backend 404, network, 401), a sync throw or a missing fn is false', async () => {
-    expect(await resolveAiAvailability(async () => { throw Object.assign(new Error('Not found'), { status: 404 }) })).toBe(false)
-    expect(await resolveAiAvailability(() => { throw new TypeError('client.aiAvailability is not a function') })).toBe(false)
-    expect(await resolveAiAvailability(undefined)).toBe(false)
-    expect(await resolveAiAvailability(null)).toBe(false)
+  it("a missing fn is 'unknown' without any call", async () => {
+    expect(await resolveAiAvailability(undefined)).toBe('unknown')
+    expect(await resolveAiAvailability(null)).toBe('unknown')
+  })
+
+  it('a 4xx (old backend 404, expired 401, 403) is an answer: NOT retried, settles on unknown (never "unavailable")', async () => {
+    for (const status of [400, 401, 403, 404]) {
+      const { sleep } = recordingSleep()
+      const fetchFn = vi.fn(async () => { throw httpError(status) })
+      expect(await resolveAiAvailability(fetchFn, { sleep })).toBe('unknown')
+      expect(fetchFn, `status ${status}`).toHaveBeenCalledTimes(1)
+      expect(sleep).not.toHaveBeenCalled()
+    }
+  })
+
+  it('a transient failure (network error without status, or 5xx) is retried ONCE after the delay; the retry answer wins', async () => {
+    for (const first of [new TypeError('Failed to fetch'), httpError(500), httpError(502), httpError(503)]) {
+      const { sleep, delays } = recordingSleep()
+      const fetchFn = vi.fn()
+        .mockRejectedValueOnce(first)
+        .mockResolvedValueOnce({ available: true })
+      expect(await resolveAiAvailability(fetchFn, { sleep, retryDelayMs: 1234 })).toBe('available')
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+      expect(delays).toEqual([1234])
+    }
+  })
+
+  it('the retry is ordered AFTER the delay (not fired before the sleep resolves)', async () => {
+    let release: () => void = () => undefined
+    const sleep = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    const fetchFn = vi.fn()
+      .mockRejectedValueOnce(httpError(503))
+      .mockResolvedValueOnce({ available: false })
+    const pending = resolveAiAvailability(fetchFn, { sleep })
+    await flush()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    release()
+    expect(await pending).toBe('unavailable')
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  it("the default delay is AI_AVAILABILITY_RETRY_DELAY_MS (short, but not zero)", async () => {
+    const { sleep, delays } = recordingSleep()
+    const fetchFn = vi.fn().mockRejectedValueOnce(httpError(500)).mockResolvedValueOnce({ available: true })
+    await resolveAiAvailability(fetchFn, { sleep })
+    expect(delays).toEqual([AI_AVAILABILITY_RETRY_DELAY_MS])
+    expect(AI_AVAILABILITY_RETRY_DELAY_MS).toBeGreaterThan(0)
+    expect(AI_AVAILABILITY_RETRY_DELAY_MS).toBeLessThanOrEqual(3000)
+  })
+
+  it("a transient failure that persists: exactly two calls, then 'unknown' (never 'unavailable')", async () => {
+    const { sleep } = recordingSleep()
+    const fetchFn = vi.fn(async () => { throw httpError(500) })
+    expect(await resolveAiAvailability(fetchFn, { sleep })).toBe('unknown')
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(sleep).toHaveBeenCalledTimes(1)
+  })
+
+  it('a synchronous throw from the fn is handled like a network failure (retried once, then unknown)', async () => {
+    const { sleep } = recordingSleep()
+    const fetchFn = vi.fn(() => { throw new TypeError('boom') })
+    expect(await resolveAiAvailability(fetchFn as unknown as () => Promise<unknown>, { sleep })).toBe('unknown')
+    expect(fetchFn).toHaveBeenCalledTimes(2)
   })
 
   it('client.aiAvailability() GETs /api/multitable/ai/availability and returns the flat body', async () => {
@@ -176,7 +255,6 @@ describe('MetaFieldManager — AI unavailable (default / false)', () => {
       expect(section, 'the section itself still renders (it is also the no-config fallback)').toBeTruthy()
       const notice = q(container, 'ai-shortcut-unavailable')
       expect(notice).toBeTruthy()
-      expect(notice!.textContent).toContain(managerLabel('field.ai.unavailable', false))
       expect(q(container, 'ai-shortcut-enable'), 'no toggle without a saved config').toBeNull()
       for (const id of AVAILABLE_ONLY_TEST_IDS) expect(q(container, id), id).toBeNull()
       expect(container.querySelector('.meta-field-mgr__ai-header')).toBeNull()
@@ -185,6 +263,38 @@ describe('MetaFieldManager — AI unavailable (default / false)', () => {
       expect(q(container, 'field-config-no-options')).toBeNull()
     })
   }
+
+  it('wording: 「未开通」 ONLY when the server explicitly said false; otherwise the neutral "cannot confirm" line', async () => {
+    const confirmed = mountManager({ aiUnavailableConfirmed: true })
+    await openConfigFor(confirmed, 'Plain')
+    expect(q(confirmed, 'ai-shortcut-unavailable')!.textContent).toContain(managerLabel('field.ai.unavailable', false))
+    expect(q(confirmed, 'ai-shortcut-unavailable')!.textContent).not.toContain(managerLabel('field.ai.unconfirmed', false))
+    mounted?.unmount()
+    mounted = null
+    document.body.innerHTML = ''
+
+    for (const aiUnavailableConfirmed of [undefined, false]) {
+      const container = mountManager({ aiUnavailableConfirmed })
+      await openConfigFor(container, 'Plain')
+      const text = q(container, 'ai-shortcut-unavailable')!.textContent ?? ''
+      expect(text, String(aiUnavailableConfirmed)).toContain(managerLabel('field.ai.unconfirmed', false))
+      expect(text, String(aiUnavailableConfirmed)).not.toContain(managerLabel('field.ai.unavailable', false))
+      expect(text).not.toMatch(/not enabled/i)
+      mounted?.unmount()
+      mounted = null
+      document.body.innerHTML = ''
+    }
+  })
+
+  it('zh neutral wording never says 未开通', async () => {
+    const container = mountManager()
+    await openConfigFor(container, 'Plain')
+    useLocale().setLocale('zh-CN')
+    await flush()
+    const text = q(container, 'ai-shortcut-unavailable')!.textContent ?? ''
+    expect(text).toContain('AI 状态暂时无法确认')
+    expect(text).not.toContain('未开通')
+  })
 
   it('了解更多 expands the five-point help (and collapses again)', async () => {
     const container = mountManager()
@@ -213,8 +323,8 @@ describe('MetaFieldManager — AI unavailable (default / false)', () => {
     expect(q(container, 'ai-shortcut-help')).toBeNull()
   })
 
-  it('zh: the collapsed line reads 「AI 自动填写未开通：…」 and the help names the four task types', async () => {
-    const container = mountManager()
+  it('zh (server said false): 「AI 自动填写未开通：…」; the help names the four task types and all three write paths', async () => {
+    const container = mountManager({ aiUnavailableConfirmed: true })
     await openConfigFor(container, 'Plain') // row lookup uses the en "Configure" title
     useLocale().setLocale('zh-CN')
     await flush()
@@ -227,6 +337,26 @@ describe('MetaFieldManager — AI unavailable (default / false)', () => {
     for (const kind of ['摘要', '分类', '提取', '翻译']) expect(help).toContain(kind)
     expect(help).toContain('消耗配额')
     expect(help).toContain('内网')
+    // The three manual write paths, named with the SAME labels the buttons use.
+    expect(help).toContain(`「${recordLabel('record.aiRun', true)}」`)
+    expect(help).toContain(`「${coreLabel('cell.aiRun', true)}」`)
+    expect(help).toContain('整列填充')
+    // Scoped claim (review of #6095): never "always refused".
+    expect(help).not.toContain('一律拒绝')
+    expect(help).toContain('默认拒绝')
+  })
+
+  it('en help: all three write paths, and the cloud refusal is stated as a default, not an absolute', async () => {
+    const container = mountManager()
+    await openConfigFor(container, 'Plain')
+    ;(q(container, 'ai-shortcut-learn-more') as HTMLButtonElement).click()
+    await nextTick()
+    const help = q(container, 'ai-shortcut-help')!.textContent ?? ''
+    expect(help).toContain(`"${recordLabel('record.aiRun', false)}"`)
+    expect(help).toContain(`"${coreLabel('cell.aiRun', false)}"`)
+    expect(help).toMatch(/whole-column fill/)
+    expect(help).toMatch(/refused by default/)
+    expect(help).not.toMatch(/by design/)
   })
 
   it('formula AI-suggest is not rendered even with a formulaSuggestFn wired', async () => {

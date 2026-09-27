@@ -606,6 +606,7 @@
       :ai-usage-summary-fn="aiUsageSummaryFn"
       :formula-suggest-fn="formulaSuggestFn"
       :ai-available="aiAvailable"
+      :ai-unavailable-confirmed="aiUnavailableConfirmed"
       :list-bases-fn="listBasesForFieldFn"
       :list-foreign-sheets-fn="listForeignSheetsForFieldFn"
       :list-foreign-fields-fn="listForeignFieldsForFieldFn"
@@ -920,7 +921,7 @@ import {
   mergeRowDensity,
   mergeGroupCollapse,
 } from '../utils/view-display-prefs'
-import { resolveAiAvailability, useAiShortcut } from '../composables/useAiShortcut'
+import { resolveAiAvailability, useAiShortcut, type AiAvailabilityState } from '../composables/useAiShortcut'
 import { useAiBulkFill } from '../composables/useAiBulkFill'
 import type { AiShortcutConfigInput } from '../api/client'
 import { buildFieldScaleMap, buildRecordFormattingMap, decideScaleStatsRefetch, extractRulesFromConfig, extractScaleRulesFromConfig, scaleStatsFieldIds, type FieldScaleServerStats } from '../utils/conditional-formatting'
@@ -1215,10 +1216,13 @@ const aiShortcut = useAiShortcut({
 const aiShortcutBusy = aiShortcut.busy
 // A11 (customer feedback 2026-09-24 #7c): the AI surfaces (drawer preview/run, cell-editor run,
 // field-manager AI section + bulk fill + usage card, formula AI-suggest) render only when the server
-// reports AI available. Starts FALSE and stays false on any failure (resolveAiAvailability is
-// fail-closed); set once per mount in onMounted below. UI-only — every AI request is still gated
-// server-side.
-const aiAvailable = ref(false)
+// reports AI available. Starts 'unknown' (hidden) and stays hidden on any failure
+// (resolveAiAvailability is fail-closed, one retry for network/5xx); set once per mount in onMounted
+// below. UI-only — every AI request is still gated server-side. The field manager says 「未开通」
+// only when the server EXPLICITLY answered available:false; an error gets neutral wording.
+const aiAvailabilityState = ref<AiAvailabilityState>('unknown')
+const aiAvailable = computed(() => aiAvailabilityState.value === 'available')
+const aiUnavailableConfirmed = computed(() => aiAvailabilityState.value === 'unavailable')
 
 function onAiPreviewField(field: MetaField) {
   const recordId = selectedRecordId.value
@@ -5877,9 +5881,10 @@ onMounted(async () => {
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
   }).catch(() => undefined)
-  // A11: one values-free availability read per mount, off the critical path (never awaited).
-  void resolveAiAvailability(() => workbench.client.aiAvailability()).then((available) => {
-    aiAvailable.value = available
+  // A11: one values-free availability read per mount (one retry on network/5xx), off the critical
+  // path (never awaited). Any throw — including a client without the method — settles on 'unknown'.
+  void resolveAiAvailability(() => workbench.client.aiAvailability()).then((state) => {
+    aiAvailabilityState.value = state
   })
   try {
     // Perf: the bases rail must NOT gate the sheet's own context load — it only

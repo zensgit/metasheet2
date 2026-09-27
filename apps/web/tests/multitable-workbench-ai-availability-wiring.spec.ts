@@ -101,6 +101,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { AI_AVAILABILITY_RETRY_DELAY_MS } from '../src/multitable/composables/useAiShortcut'
 
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) { await Promise.resolve(); await nextTick() }
@@ -170,8 +171,16 @@ function gateState() {
     cellEditorAiRun: attr(capturedGridAttrs, 'ai-run-enabled', 'aiRunEnabled'),
     drawerAiButtons: attr(capturedInspectorAttrs, 'ai-available', 'aiAvailable'),
     fieldManagerAi: attr(capturedFieldManagerAttrs, 'ai-available', 'aiAvailable'),
+    // Wording only: 「未开通」 is allowed only when the server EXPLICITLY answered false.
+    fieldManagerSaysNotEnabled: attr(capturedFieldManagerAttrs, 'ai-unavailable-confirmed', 'aiUnavailableConfirmed'),
   }
 }
+
+const SHOWN = { cellEditorAiRun: true, drawerAiButtons: true, fieldManagerAi: true, fieldManagerSaysNotEnabled: false }
+const HIDDEN_NOT_ENABLED = { cellEditorAiRun: false, drawerAiButtons: false, fieldManagerAi: false, fieldManagerSaysNotEnabled: true }
+const HIDDEN_UNKNOWN = { cellEditorAiRun: false, drawerAiButtons: false, fieldManagerAi: false, fieldManagerSaysNotEnabled: false }
+
+const httpError = (status: number) => Object.assign(new Error(`HTTP ${status}`), { status })
 
 describe('MultitableWorkbench AI availability wiring (A11)', () => {
   let app: VueApp<Element> | null = null
@@ -206,43 +215,74 @@ describe('MultitableWorkbench AI availability wiring (A11)', () => {
     await mountWorkbench()
 
     expect(aiAvailability).toHaveBeenCalledTimes(1)
-    expect(gateState()).toEqual({ cellEditorAiRun: true, drawerAiButtons: true, fieldManagerAi: true })
+    expect(gateState()).toEqual(SHOWN)
   })
 
-  it('server says unavailable → every AI host receives false', async () => {
+  it('server says available:false → hidden everywhere, and only then may the field manager say 「未开通」', async () => {
     const aiAvailability = vi.fn().mockResolvedValue({ available: false })
     workbenchMock = createWorkbenchMock(aiAvailability)
     await mountWorkbench()
 
     expect(aiAvailability).toHaveBeenCalledTimes(1)
-    expect(gateState()).toEqual({ cellEditorAiRun: false, drawerAiButtons: false, fieldManagerAi: false })
+    expect(gateState()).toEqual(HIDDEN_NOT_ENABLED)
   })
 
-  it('availability call fails (old backend 404) → false everywhere (fail-closed)', async () => {
-    const aiAvailability = vi.fn().mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }))
+  it('old backend 404 → hidden, NOT retried, neutral wording (an error is not "not enabled")', async () => {
+    const aiAvailability = vi.fn().mockRejectedValue(httpError(404))
+    workbenchMock = createWorkbenchMock(aiAvailability)
+    await mountWorkbench()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await flushUi()
+
+    expect(aiAvailability).toHaveBeenCalledTimes(1)
+    expect(gateState()).toEqual(HIDDEN_UNKNOWN)
+  })
+
+  it('a 5xx is retried once after the short delay; a successful retry shows the AI surfaces', async () => {
+    const aiAvailability = vi.fn()
+      .mockRejectedValueOnce(httpError(503))
+      .mockResolvedValueOnce({ available: true })
     workbenchMock = createWorkbenchMock(aiAvailability)
     await mountWorkbench()
 
-    expect(aiAvailability).toHaveBeenCalledTimes(1)
-    expect(gateState()).toEqual({ cellEditorAiRun: false, drawerAiButtons: false, fieldManagerAi: false })
+    expect(gateState()).toEqual(HIDDEN_UNKNOWN) // still waiting for the retry
+    await vi.waitFor(() => { expect(aiAvailability).toHaveBeenCalledTimes(2) }, { timeout: 4000, interval: 50 })
+    await flushUi()
+    expect(gateState()).toEqual(SHOWN)
   })
 
-  it('client without the method → false everywhere, and the workbench still mounts', async () => {
-    workbenchMock = createWorkbenchMock(undefined)
+  it('a network failure that persists → exactly two calls, then hidden with neutral wording', async () => {
+    const aiAvailability = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    workbenchMock = createWorkbenchMock(aiAvailability)
     await mountWorkbench()
 
-    expect(gateState()).toEqual({ cellEditorAiRun: false, drawerAiButtons: false, fieldManagerAi: false })
+    await vi.waitFor(() => { expect(aiAvailability).toHaveBeenCalledTimes(2) }, { timeout: 4000, interval: 50 })
+    await flushUi()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(aiAvailability).toHaveBeenCalledTimes(2)
+    expect(gateState()).toEqual(HIDDEN_UNKNOWN)
   })
 
-  it('before the answer lands the hosts already get false (no flash of AI buttons)', async () => {
+  it('client without the method → hidden with neutral wording, and the workbench still mounts', async () => {
+    workbenchMock = createWorkbenchMock(undefined)
+    await mountWorkbench()
+    expect(gateState()).toEqual(HIDDEN_UNKNOWN)
+
+    // The TypeError is treated like a network failure (one retry after the delay) — still unknown after.
+    await new Promise((resolve) => setTimeout(resolve, AI_AVAILABILITY_RETRY_DELAY_MS + 200))
+    await flushUi()
+    expect(gateState()).toEqual(HIDDEN_UNKNOWN)
+  })
+
+  it('before the answer lands the hosts already get hidden + neutral (no flash of AI buttons, no premature 「未开通」)', async () => {
     let resolveAnswer: (value: unknown) => void = () => undefined
     const aiAvailability = vi.fn(() => new Promise((resolve) => { resolveAnswer = resolve }))
     workbenchMock = createWorkbenchMock(aiAvailability)
     await mountWorkbench()
 
-    expect(gateState()).toEqual({ cellEditorAiRun: false, drawerAiButtons: false, fieldManagerAi: false })
+    expect(gateState()).toEqual(HIDDEN_UNKNOWN)
     resolveAnswer({ available: true })
     await flushUi()
-    expect(gateState()).toEqual({ cellEditorAiRun: true, drawerAiButtons: true, fieldManagerAi: true })
+    expect(gateState()).toEqual(SHOWN)
   })
 })

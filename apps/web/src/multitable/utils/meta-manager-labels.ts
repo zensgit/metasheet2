@@ -125,7 +125,7 @@ export type MetaManagerLabelKey =
   | 'field.error.aiTargetLangTooLong' | 'field.error.aiInstructionTooLong'
   | 'field.aiUsage.title' | 'field.aiUsage.today' | 'field.aiUsage.week' | 'field.aiUsage.instance'
   // A11 (customer feedback 2026-09-24 #7c): collapsed state when AI is not available on this deployment.
-  | 'field.ai.unavailable' | 'field.ai.learnMore' | 'field.ai.hideHelp' | 'field.ai.savedConfigKept'
+  | 'field.ai.unavailable' | 'field.ai.unconfirmed' | 'field.ai.learnMore' | 'field.ai.hideHelp' | 'field.ai.savedConfigKept'
   | 'field.ai.help.kinds' | 'field.ai.help.sources' | 'field.ai.help.preview'
   | 'field.ai.help.manual' | 'field.ai.help.local'
   | 'view.title' | 'view.empty' | 'view.saveSettings'
@@ -479,6 +479,12 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
     en: 'AI shortcut is not enabled: an administrator must connect a model hosted on the internal network before it can be used.',
     zh: 'AI 自动填写未开通：需要管理员在服务器接入部署在内网的模型后才能使用',
   },
+  // A11: the availability read failed (network / server error / old backend) — the UI does not know
+  // whether AI is enabled, so it must not say "not enabled".
+  'field.ai.unconfirmed': {
+    en: 'AI status could not be confirmed right now. Refresh the page to try again.',
+    zh: 'AI 状态暂时无法确认，请稍后刷新页面重试',
+  },
   'field.ai.learnMore': { en: 'Learn more', zh: '了解更多' },
   'field.ai.hideHelp': { en: 'Hide', zh: '收起' },
   'field.ai.help.kinds': {
@@ -494,12 +500,14 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
     zh: '预览：用当前选中的记录真实调用一次模型，会消耗配额，但不写入数据。',
   },
   'field.ai.help.manual': {
-    en: 'Nothing runs automatically: values are written only when someone clicks "AI run" in the record drawer, or confirms a whole-column fill after reviewing it.',
-    zh: '不会自动运行：只有在记录详情里点「AI 运行」，或整列填充预览后确认，才会写入。',
+    en: 'Nothing runs automatically. Values are written only by one of three manual actions: "AI run" in the record drawer, "Run AI" while editing a grid cell, or confirming a whole-column fill after reviewing it.',
+    zh: '不会自动运行：只有三种手动操作会写入——记录详情里点「AI 运行」、表格单元格编辑时点「运行 AI」、整列填充预览后确认。',
   },
+  // Scoped on purpose (review of #6095): the cloud refusal holds UNLESS an operator lists a public
+  // host in the routing policy's localHosts — so this must not promise "always refused".
   'field.ai.help.local': {
-    en: 'Data stays internal: record content is only sent to a model deployed on the internal network; public cloud AI services are refused by design.',
-    zh: '数据不出内网：记录内容只会发送给部署在内网的模型，公有云 AI 服务按设计一律拒绝。',
+    en: 'Where data goes: record content is only sent to a model the administrator has registered as internal. Public cloud AI services are refused by default, unless an administrator registers their address as an internal host (which must not be done).',
+    zh: '数据去向：记录内容只发送给管理员登记为内网的模型；公有云 AI 服务默认拒绝，除非管理员把它的地址登记为内网主机（不应这样做）。',
   },
   'field.ai.savedConfigKept': {
     en: 'This field keeps a saved AI shortcut configuration. It stays saved and takes effect once AI is enabled; untick below to remove it.',
