@@ -271,3 +271,24 @@ schema 用仓库自己的 `tsx src/db/migrate.ts` 在空库上跑完整链（416
 - 竞争回归文件的写入者 / 迁移 / 观察者三方竞争逻辑提成文件级函数 `raceMigrationAgainst`，两块共用；最小表形块原有用例的断言不变。
 - 迁移头注释谓词 4 一段更正：删除守卫用的是同一对未去空白的比较；切换迁移用的是更宽的 `NULLIF(BTRIM(...), '')` 形式（此前写成「同一个谓词」，与 PR 正文后文矛盾）。
 - 车道头注释 `.github/workflows/legacy-binding-backfill-race-realdb.yml` 仍写「套件自建两表，不需要 db:migrate 步骤」；完整链块在测试里自己建库跑链，不需要改车道步骤，但这句注释已不完整。本机令牌没有 workflow 权限，未改，列为待办。
+
+### 12.4 复跑、措辞收窄、合 main（2026-09-27 23:00–23:30 UTC）
+
+- 这一步从本地提交 `610e0db50` 开始（上一次修复尝试留下，未推送）。该尝试还开了一个 `origin/main` 合并，停在 `vitest.config.ts` 冲突上。本次先逐行审读 `610e0db50` 并接手；中断的合并用 `git merge --abort` 丢弃，之后对最新 `origin/main`（`739de0ac4`）重新合并。
+- 独立复跑：同一便携 PG 16.10（中文 locale，只监听 127.0.0.1，数据全假）。变异文件由脚本从当前 head 和 `5470736a2` 原文重新生成，生成前核对过：它们的 sha256 与 `git show` 出的原文一致。
+
+| 组合 | 竞争回归文件 | 结构钉 |
+|---|---|---|
+| 新 head | 27/27 | 19/19 |
+| 旧测试 + 旧迁移施加 m01（缺口复现） | 18/18 全绿（缺口成立） | 19/19 全绿（缺口成立） |
+| 新测试 + 旧迁移 `5470736a2` 原文 | 2 红（两条 `down()` 标记用例；完整链那条收到 `connection_id = null`、`pointer = source_a`、`marker = true`） | — |
+| m01 | 4 红（完整链块 2 条：谓词 6 静态、源租户改 NULL） | 1 红 |
+| m02 | 6 红（完整链块 3 条） | 1 红 |
+| d01 | 2 红（完整链块 1 条） | 1 红 |
+
+- 措辞收窄（只动注释和文档）：`down()` 只复核所列几项：kind、记录的 connection id、tenant、owner 戳、没有重新出现指针、标记不为 TRUE。回填后若手改的是别的东西（`config` 里其它键、名称、capabilities），不会拦住恢复，手改的内容恢复后仍在。因此迁移 `down()` 注释、竞争回归文件头、设计文档 §6 原来「人改过的一律不动」的写法，都改成只指这几项。
+- 合 `origin/main`（`739de0ac4`）：唯一冲突是 `packages/core-backend/vitest.config.ts` 的 exclude 列表，两边都只是追加条目，合并时两边都保留。合并后：
+  - 按 CI 车道原样命令（`vitest --config vitest.integration.config.ts run <文件>`，`EXPECT_DB=1`）跑竞争回归：27/27。完整链块这次建库跑的是合并后的整条链，包括 main 新加的迁移。
+  - 默认配置下，结构钉 19/19，迁移时间戳唯一性守卫 20/20。
+  - core-backend `tsc --noEmit` exit 0。
+  - 只读盘点包静态契约：9 pass / 1 fail / 1 skip。唯一的红是 F4（02-trg04），这是 Windows 检出下 `core.autocrlf` 造成的已知假红，与本 PR 无关。
