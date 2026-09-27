@@ -612,6 +612,16 @@ export async function installMultitableTemplate(
   const fields: MultitableProvisioningField[] = []
   const views: MultitableProvisioningView[] = []
 
+  // S1 (adversarial review of #6091, 2026-09-26): this whole install runs inside one transaction
+  // (univer-meta.ts install route), so Postgres's now() — the DB default createView would
+  // otherwise rely on — is the SAME transaction-start instant for every view created here. A later
+  // "save as template" query orders by `ORDER BY created_at, id`; with every view sharing one
+  // timestamp, the tie-break becomes a sha1 view id (stableChildId) that has nothing to do with
+  // template order. Stamping a strictly increasing created_at per view (in template order) makes
+  // that later ORDER BY reproduce install order without touching any other createView caller.
+  let installedViewSequence = 0
+  const installBaseTimestampMs = Date.now()
+
   for (const templateSheet of template.sheets) {
     const sheetId = stableChildId('sheet', baseId, template.id, templateSheet.id)
     const sheetResult = await createSheet({
@@ -642,6 +652,8 @@ export async function installMultitableTemplate(
       const hiddenFieldIds = (templateView.hiddenFieldIds ?? [])
         .map((fieldId) => fieldIds[fieldId])
         .filter((fieldId): fieldId is string => typeof fieldId === 'string' && fieldId.length > 0)
+      const viewCreatedAt = new Date(installBaseTimestampMs + installedViewSequence)
+      installedViewSequence += 1
       const viewResult = await createView({
         query: input.query,
         viewId,
@@ -651,6 +663,7 @@ export async function installMultitableTemplate(
         groupInfo: buildGroupInfo(templateView, fieldIds),
         hiddenFieldIds,
         config: buildViewConfig(templateView, fieldIds),
+        createdAt: viewCreatedAt,
       })
       if (!viewResult.created || !viewResult.view) {
         throw new MultitableTemplateConflictError(`View already exists: ${viewId}`)

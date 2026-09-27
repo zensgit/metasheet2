@@ -117,6 +117,13 @@ export type CreateViewInput = {
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
   config?: Record<string, unknown>
+  // S1 (adversarial review of #6091, 2026-09-26): optional explicit created_at. Omitted by every
+  // caller except installMultitableTemplate — COALESCE($n, now()) below means every other call
+  // site keeps its exact previous behavior (DB default `now()`). template-library.ts passes a
+  // strictly increasing value per view so a later `ORDER BY created_at, id` reproduces install
+  // order; without it every view created inside one transaction shares now()'s transaction-start
+  // timestamp and the tie-break (a sha1 view id, unrelated to template order) would win instead.
+  createdAt?: Date | string | null
 }
 
 export type CreateViewResult =
@@ -722,8 +729,8 @@ export async function createView(
 ): Promise<CreateViewResult> {
   await fenceWriterEntry(input.query, input.sheetId)
   const insert = await input.query(
-    `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+    `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config, created_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, COALESCE($10::timestamptz, now()))
      ON CONFLICT (id) DO NOTHING`,
     [
       input.viewId,
@@ -735,6 +742,7 @@ export async function createView(
       JSON.stringify(normalizeJson(input.groupInfo)),
       JSON.stringify(Array.isArray(input.hiddenFieldIds) ? input.hiddenFieldIds : []),
       JSON.stringify(normalizeJson(input.config)),
+      input.createdAt instanceof Date ? input.createdAt.toISOString() : (input.createdAt ?? null),
     ],
   )
 

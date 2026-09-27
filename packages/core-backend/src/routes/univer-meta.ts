@@ -8308,8 +8308,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       )
       // ORDER BY created_at, id (客户反馈 2026-09-24 #8 / A10 phase 1): 没有排序时 Postgres
       // 不保证返回顺序,extractTemplateSheets 按这个数组的原样顺序把视图挂进模板 —— 顺序不稳会让
-      // 同一张表两次存出的模板视图次序不一样。created_at 主排、id 兜底(同一批写入的 created_at
-      // 可能打平),装回去时 installMultitableTemplate 原样保留这个顺序(见 template-library.ts)。
+      // 同一张表两次存出的模板视图次序不一样。created_at 主排、id 兜底。
+      // S1(2026-09-26 对抗评审):id 兜底不是空话——installMultitableTemplate 在**一个事务**里
+      // 建完一张模板的全部视图,事务内 now() 是同一个时刻,所有视图的 created_at 若都交给 DB
+      // 默认值会打成一片,这时真正生效的排序键就是 id(sha1,和模板顺序无关)。为此
+      // template-library.ts 给每个视图显式传一个按模板顺序递增的 created_at(provisioning.ts
+      // createView 新增可选 createdAt 参数,其它调用方不传等于沿用原来的 DB 默认值),
+      // 装回去的视图顺序才会等于存下来的模板顺序,这条 ORDER BY 重新读出来时才对得上。
       const viewResult = await pool.query(
         'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[]) ORDER BY created_at, id',
         [sheetIds],
@@ -8929,10 +8934,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const viewsResult = effectiveSheetId
         ? await pool.query(
+          // S1 (adversarial review of #6091): same ORDER BY as the save-as-template query
+          // (~:8314) — the dialog's "views included" list reads views through THIS query, so it
+          // must sort the same way the save path does, or the dialog order and the saved order
+          // can disagree even though both are individually "stable".
           `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config
            FROM meta_views
            WHERE sheet_id = $1
-           ORDER BY created_at ASC`,
+           ORDER BY created_at, id`,
           [effectiveSheetId],
         )
         : { rows: [] }

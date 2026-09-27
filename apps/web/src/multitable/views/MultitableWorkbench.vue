@@ -1611,9 +1611,20 @@ const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
 const templateLibraryError = ref<string | null>(null)
 // A10 phase 1(客户反馈 2026-09-24 #8):openTemplateLibrary 原来只在 templates 为空时才拉取,
-// 面板一旦加载过一次,后面新建的自定义模板就永远进不来,直到整页刷新。存模板成功后把这个
-// 标成 true,面板不管当前是不是空列表都会在下次打开时重新拉;若面板此刻正开着,直接重拉。
-const templateLibraryStale = ref(false)
+// 面板一旦加载过一次,后面新建的自定义模板就永远进不来,直到整页刷新。存模板成功后打一个
+// "需要刷新"的标记,面板不管当前是不是空列表都会在下次打开时重新拉;若面板此刻正开着,直接重拉。
+//
+// S3/N4(2026-09-26 对抗评审):用两个单调递增的标记而不是一个布尔值——一个更早发起、比较晚才
+// 落地的成功响应,不能把**它开始之后**才打上的"需要刷新"标记误清掉(那样会看着像刷新过了,
+// 其实还是漏了刚存的那条)。loadTemplateLibrary 在**发起时**记下当时的 dirty 值,只有响应落地
+// 时这个值仍然是"最新的"才把 loaded 赶上去;如果中途又有新的存模板事件把 dirty 继续推高,
+// loaded 就追不上,下一次开面板/存模板还会再重试。两者都不进模板、不进任何 computed,只在这段
+// 脚本逻辑内部读写,不用 ref。
+let templateLibraryDirtyMark = 0
+let templateLibraryLoadedMark = 0
+function markTemplateLibraryStale(): void {
+  templateLibraryDirtyMark += 1
+}
 const calendarHolidays = ref<CalendarEffectiveChip[]>([])
 const calendarHolidayFetchState = ref<CalendarHolidayFetchState>('idle')
 // Composite cache key `${from}|${to}|${userId}` — when userId arrives later
@@ -4622,11 +4633,30 @@ async function onRenameBase(baseId: string, name: string) {
 }
 
 async function loadTemplateLibrary() {
+  // N4 (adversarial review of #6091, 2026-09-26): loadTemplateLibrary is now called from more than
+  // one path in quick succession (save-while-panel-open below, and openTemplateLibrary's own
+  // auto-reload gate) — without this guard two concurrent calls would both flip
+  // templateLibraryLoading and race on templates.value, and whichever network response lands LAST
+  // wins regardless of which call was actually launched last. Skipping while one is already in
+  // flight is safe: a skipped call never had a chance to mark itself needed in the first place —
+  // whoever tried to trigger it already called markTemplateLibraryStale() beforehand (see
+  // onSaveSheetAsTemplate), so the need-to-refresh survives the skip.
+  if (templateLibraryLoading.value) return
+  // S3/N4: snapshot the dirty mark BEFORE awaiting the network call. If something calls
+  // markTemplateLibraryStale() again WHILE this request is in flight, templateLibraryDirtyMark
+  // moves past this snapshot — on success below we only advance templateLibraryLoadedMark up to
+  // what we captured here, so a same-or-newer dirty mark keeps the panel "needs refresh" instead
+  // of a stale (pre-save) response silently marking it fresh.
+  const requestedMark = templateLibraryDirtyMark
   templateLibraryLoading.value = true
   templateLibraryError.value = null
   try {
     const data = await workbench.client.listTemplates()
     templates.value = data.templates ?? []
+    // Only a SUCCESSFUL load advances the loaded mark — a failed reload (network blip / 5xx) must
+    // leave the panel retryable, see the throw-site comment in onSaveSheetAsTemplate and the gate
+    // in openTemplateLibrary below.
+    if (requestedMark > templateLibraryLoadedMark) templateLibraryLoadedMark = requestedMark
   } catch (e: any) {
     templateLibraryError.value = e.message ?? wb('tpl.errorLoad', isZh.value)
   } finally {
@@ -4714,12 +4744,15 @@ async function onSaveSheetAsTemplate(): Promise<void> {
       visibility: saveTemplateShare.value ? 'tenant' : 'private',
     })
     // A10 phase 1(客户反馈 2026-09-24 #8):存成功了,模板面板的列表要能看见它——
-    // 面板此刻正开着就立刻重拉;没开着就标 stale,下次 openTemplateLibrary 会重拉
+    // 面板此刻正开着就立刻重拉;没开着就打一个"需要刷新"的标记,下次 openTemplateLibrary 会重拉
     // (旧逻辑只在 templates.value.length === 0 时才拉,面板加载过一次之后就再也不会重拉了)。
+    // S3(2026-09-26 对抗评审):先打标记再重拉,不是反过来——loadTemplateLibrary 只有在这次重拉
+    // 结束时"赶上"了发起时的标记才会消掉待刷新状态,所以哪怕这次重拉失败(网络抖动/服务端 5xx),
+    // 待刷新状态仍然成立,下次开面板(openTemplateLibrary 的门)或再存一次模板都会重试,不会卡死
+    // 在一条失败的错误提示上、也不会让面板看起来"刷新过了"但其实还是旧列表。
+    markTemplateLibraryStale()
     if (showTemplateLibrary.value) {
       await loadTemplateLibrary()
-    } else {
-      templateLibraryStale.value = true
     }
   } catch (e: any) {
     saveTemplateError.value = e?.message ?? wb('saveTpl.failed', isZh.value)
@@ -4734,8 +4767,13 @@ async function openTemplateLibrary() {
     return
   }
   showTemplateLibrary.value = true
-  if ((templates.value.length === 0 || templateLibraryStale.value) && !templateLibraryLoading.value) {
-    templateLibraryStale.value = false
+  // N4: loadTemplateLibrary itself now no-ops while a load is already in flight (e.g. the
+  // save-while-open path just kicked one off), so calling it here is always safe — it either runs
+  // or is a harmless skip, never a second race. S3: also retry when the LAST load errored
+  // (templateLibraryError set) — a failed load never advances templateLibraryLoadedMark, but
+  // checking the error flag explicitly here too means a caller that ever sets error without going
+  // through the mark bookkeeping still gets retried on next open, not stuck on a dead error state.
+  if (templates.value.length === 0 || templateLibraryLoadedMark < templateLibraryDirtyMark || templateLibraryError.value) {
     await loadTemplateLibrary()
   }
 }
@@ -5066,7 +5104,11 @@ function onGridSelectionChange(recordIds: string[]) {
 //     fieldIds selection (selection narrows within the permitted set, never
 //     widens). NOTE: "all rows" exports the view's FULL set respecting the view's
 //     row filter + sort + hidden-fields (#3010) — the entire (filtered) view, not
-//     just the loaded page; a view with no filter exports the full sheet.
+//     just the loaded page; a view with no filter exports the full sheet. The
+//     toolbar's search box (searchText) is NOT part of that filter: exportSheet's
+//     params are sheetId/viewId/fieldIds/format only, and export-xlsx accepts no
+//     search param — a search-narrowed grid still exports the view's UNsearched
+//     rows (S2, adversarial review of #6091; export.allRows's label says so).
 //   - "selected rows" → stays CLIENT-SIDE over grid.rows. Those rows are the
 //     /view response, already field-permission AND §2a.3-taint masked at read
 //     time (univer-meta.ts GET /view: filterRecordDataByFieldIds over the

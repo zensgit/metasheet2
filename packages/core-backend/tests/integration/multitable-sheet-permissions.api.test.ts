@@ -1366,7 +1366,7 @@ describe('Multitable sheet-scoped permissions API', () => {
           fields.set(fieldId, row)
           return { rows: [{ id: row.id, name: row.name, type: row.type, property: row.property, order: row.order }] }
         }
-        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1') && sql.includes('ORDER BY created_at ASC')) {
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1') && (sql.includes('ORDER BY created_at ASC') || sql.includes('ORDER BY created_at, id'))) {
           const sheetId = String(params?.[0] ?? '')
           return { rows: viewsForSheet(sheetId) }
         }

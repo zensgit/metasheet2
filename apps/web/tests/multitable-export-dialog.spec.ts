@@ -137,7 +137,7 @@ describe('MetaExportDialog', () => {
     const { app, root } = mountDialog({})
     await nextTick()
     expect(root.querySelector('.meta-export__header strong')?.textContent).toBe('导出选项')
-    expect(root.textContent).toContain('当前视图的全部行（按当前筛选）')
+    expect(root.textContent).toContain('当前视图的全部行（按视图筛选，不含搜索）')
     expect(root.textContent).toContain('Name') // raw field name unchanged
     app.unmount()
   })

@@ -223,8 +223,14 @@ function createStore(opts: StoreOptions = {}) {
       // `ORDER BY created_at, id` 时才生效。把这句 ORDER BY 从路由里删掉,新增的顺序用例就会红,
       // 而不是被 fake 兜住——fixture 没有真实 created_at 列,这里用 id 兜底排序模拟同批写入
       // created_at 打平、按 id 兜底的那一支。
+      // N5(2026-09-26 对抗评审):真的按 SQL 里写的方向排,不是永远 ASC——否则把生产 SQL 悄悄
+      // 改成 `ORDER BY created_at, id DESC` 这种子串仍包含 'ORDER BY created_at, id' 的变异,
+      // 断言会继续假绿。
       if (normalized.includes('ORDER BY created_at, id')) {
-        rows = [...rows].sort((a, b) => String(a.id).localeCompare(String(b.id)))
+        const desc = normalized.includes('ORDER BY created_at, id DESC')
+        rows = [...rows].sort((a, b) => desc
+          ? String(b.id).localeCompare(String(a.id))
+          : String(a.id).localeCompare(String(b.id)))
       }
       return { rows }
     }
