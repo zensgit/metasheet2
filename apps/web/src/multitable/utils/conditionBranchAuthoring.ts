@@ -9,11 +9,23 @@
 // `conditionBranchUnsupportedReason` → the editor opens read-only and never flattens. Mirrors the
 // backend `validateConditionBranchConfig` boundaries (SAFE_BRANCH_KEY; A6-3-3 allows ONLY a
 // branch-local zero-param `wait_for_callback`, still rejects nested branch/parallel/start_approval).
+//
+// Typed condition values (客户反馈 2026-09-24 #4b): branch condition rows now use the same typed value
+// control as the rule-level rows, and `buildConditionBranchConfig(draft, { fields })` saves each branch
+// condition value in its field type's shape (automation-condition-values.ts — number → number, checkbox →
+// boolean, date → 'YYYY-MM-DD', date-time → UTC ISO, person / link → id[]), exactly like the rule-level rows.
+// The invariant above still holds for every value ALREADY in that shape (it round-trips byte-identically,
+// and every other key of the condition rides through). The one deliberate difference is a LEGACY branch
+// value saved by the old bare text box in the wrong shape — `'5'` on a number field, `'true'` on a checkbox,
+// a bare user id on a person field: an untouched save rewrites it to the typed shape it always meant (the
+// evaluator compares with `===`, so the string form never matched). A value that cannot be expressed in its
+// field's shape is never rewritten: the editor blocks the save and anchors the row instead.
 import type {
   AutomationAction,
   AutomationActionType,
   AutomationCondition,
 } from '../types'
+import { buildConditionLeafForSave, type ConditionFieldLike } from './automation-condition-values'
 
 // Mirror of backend automation-service.ts SAFE_BRANCH_KEY.
 export const SAFE_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
@@ -206,7 +218,10 @@ export function parseConditionBranchDraft(config: Record<string, unknown>): Cond
       key: typeof b.key === 'string' ? b.key : '',
       label: typeof b.label === 'string' ? b.label : '',
       conjunction,
-      conditions: (Array.isArray(group.conditions) ? group.conditions : []) as AutomationCondition[],
+      // Shallow copies: the editor edits these rows in place, and that must never reach back into the
+      // loaded rule the config came from.
+      conditions: (Array.isArray(group.conditions) ? group.conditions : [])
+        .map((condition) => ({ ...(condition as AutomationCondition) })),
       actions: (Array.isArray(b.actions) ? b.actions : []).map((a) => actionToDraft(a as AutomationAction)),
     }
   })
@@ -221,12 +236,26 @@ export function parseConditionBranchDraft(config: Record<string, unknown>): Cond
   return { branches, defaultBranch }
 }
 
+export interface BuildConditionBranchOptions {
+  /**
+   * The sheet's fields. When given, each branch condition value is saved in its field type's shape (see the
+   * header). Omitted → condition rows are emitted verbatim (the pure A6-3-2a seam, unchanged).
+   */
+  fields?: readonly ConditionFieldLike[]
+}
+
 /** Build the executor-shaped config from draft. `conjunction` is the canonical form (mirrors the rule editor). */
-export function buildConditionBranchConfig(draft: ConditionBranchDraft): Record<string, unknown> {
+export function buildConditionBranchConfig(
+  draft: ConditionBranchDraft,
+  options: BuildConditionBranchOptions = {},
+): Record<string, unknown> {
+  const fieldsById = options.fields ? new Map(options.fields.map((field) => [field.id, field])) : null
+  const buildCondition = (condition: AutomationCondition): AutomationCondition =>
+    fieldsById ? buildConditionLeafForSave(condition, fieldsById.get(condition.fieldId)) : condition
   const branches = draft.branches.map((b) => ({
     key: b.key.trim(),
     ...(b.label.trim() ? { label: b.label.trim() } : {}),
-    conditions: { conjunction: b.conjunction, conditions: b.conditions },
+    conditions: { conjunction: b.conjunction, conditions: b.conditions.map(buildCondition) },
     actions: b.actions.map(draftToAction),
   }))
   const config: Record<string, unknown> = { branches }

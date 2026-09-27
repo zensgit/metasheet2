@@ -278,76 +278,41 @@
                 :data-condition-index="entry.pathKey"
                 :data-condition-path="entry.pathKey"
               >
+                <!-- 客户反馈 2026-09-24 #4b: field → operator → typed value. Until a field is chosen the
+                     operator and value stay disabled and ask for a field (the row used to seed `equals`,
+                     which the field-less operator select showed as the raw code). -->
                 <el-select
                   :model-value="entry.condition.fieldId"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
                   :placeholder="automationLabel('condition.selectField', isZh)"
+                  data-condition-field=""
                   @change="onConditionFieldChange(entry.condition, $event)"
                 >
                   <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
-                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
+                    <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
+                    <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(f.type, isZh) }}</span>
+                  </el-option>
                 </el-select>
                 <el-select
                   :model-value="entry.condition.operator"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
+                  :disabled="!entry.condition.fieldId"
+                  :placeholder="automationLabel('condition.selectFieldFirst', isZh)"
+                  data-condition-operator=""
                   @change="onConditionOperatorChange(entry.condition, $event as ConditionOperator)"
                 >
-                  <el-option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
+                  <el-option v-for="op in conditionOperatorOptionsForRow(entry.condition)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(entry.condition, op.value)" />
                 </el-select>
-                <template v-if="!isUnaryOperator(entry.condition.operator)">
-                  <el-select
-                    v-if="conditionValueWidget(entry.condition) === 'booleanMultiSelect'"
-                    :model-value="booleanMultiSelectConditionValues(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    data-condition-value="boolean-multi-select"
-                    multiple
-                    @change="onBooleanMultiSelectConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option value="true" data-value="true" label="true" />
-                    <el-option value="false" data-value="false" label="false" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'boolean'"
-                    :model-value="booleanConditionValue(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    :placeholder="automationLabel('condition.selectValue', isZh)"
-                    data-condition-value="boolean"
-                    @change="onBooleanConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
-                    <el-option value="true" data-value="true" label="true" />
-                    <el-option value="false" data-value="false" label="false" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'select'"
-                    :model-value="singleSelectConditionValue(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    :placeholder="automationLabel('condition.selectValue', isZh)"
-                    data-condition-value="select"
-                    @change="entry.condition.value = $event"
-                  >
-                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
-                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'multiSelect'"
-                    :model-value="multiSelectConditionValues(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    data-condition-value="multi-select"
-                    multiple
-                    @change="onMultiSelectConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
-                  </el-select>
-                  <el-input
-                    v-else
-                    v-model="(entry.condition.value as string)"
-                    class="meta-rule-editor__input--sm"
-                    :type="conditionValueInputType(entry.condition)"
-                    :inputmode="conditionValueInputMode(entry.condition)"
-                    :placeholder="conditionValuePlaceholder(entry.condition)"
-                  />
-                </template>
+                <ConditionValueInput
+                  v-if="!isUnaryOperator(entry.condition.operator)"
+                  :model-value="entry.condition.value"
+                  :operator="entry.condition.operator"
+                  :field="conditionField(entry.condition) ?? null"
+                  :pending="isConditionRowPending(entry.condition)"
+                  :sheet-id="sheetId"
+                  @update:model-value="entry.condition.value = $event"
+                />
                 <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeConditionTitle', isZh)">&times;</el-button>
               </div>
             </template>
@@ -1449,14 +1414,27 @@
                     <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'OR' }" :type="branch.conjunction === 'OR' ? 'primary' : 'default'" @click="branch.conjunction = 'OR'">{{ automationLabel('condition.or', isZh) }}</el-button>
                   </div>
                   <div v-for="(cond, cIdx) in branch.conditions" :key="cIdx" class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
-                    <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" @change="onConditionFieldChange(cond, $event)">
+                    <!-- 客户反馈 2026-09-24 #4b: the same field → operator → typed value row as the rule-level
+                         conditions (was a bare text box whose values were saved as strings). -->
+                    <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" data-condition-field="" @change="onConditionFieldChange(cond, $event)">
                       <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
-                      <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                      <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
+                        <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
+                        <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(f.type, isZh) }}</span>
+                      </el-option>
                     </el-select>
-                    <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
-                      <el-option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
+                    <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" :disabled="!cond.fieldId" :placeholder="automationLabel('condition.selectFieldFirst', isZh)" data-condition-operator="" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
+                      <el-option v-for="op in conditionOperatorOptionsForRow(cond)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(cond, op.value)" />
                     </el-select>
-                    <el-input v-if="!isUnaryOperator(cond.operator)" v-model="(cond.value as string)" class="meta-rule-editor__input--sm" :placeholder="automationLabel('condition.selectValue', isZh)" />
+                    <ConditionValueInput
+                      v-if="!isUnaryOperator(cond.operator)"
+                      :model-value="cond.value"
+                      :operator="cond.operator"
+                      :field="conditionField(cond) ?? null"
+                      :pending="isConditionRowPending(cond)"
+                      :sheet-id="sheetId"
+                      @update:model-value="cond.value = $event"
+                    />
                     <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
                   </div>
                   <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
@@ -1825,7 +1803,6 @@ import {
 import {
   automationActionTypeLabel,
   automationConditionOperatorLabel,
-  automationConditionValuePlaceholder,
   automationCronPresetLabel,
   automationCronTimezoneHint,
   automationDateReminderExampleText,
@@ -1892,6 +1869,16 @@ import {
   type ActionSummarySnapshot,
 } from '../automationActionSummary'
 import { automationTargetSheetOptions, type AutomationTargetSheetOption } from '../utils/automation-target-sheet-options'
+import { fieldTypeLabel } from '../utils/meta-core-labels'
+import {
+  PENDING_CONDITION_OPERATOR,
+  coerceConditionValue,
+  isArrayConditionOperator,
+  isConditionLeafComplete as isConditionValueComplete,
+  isPendingConditionOperator,
+  isUnaryConditionOperator,
+} from '../utils/automation-condition-values'
+import ConditionValueInput from './ConditionValueInput.vue'
 
 interface FieldPair {
   fieldId: string
@@ -2806,7 +2793,6 @@ function dingTalkTestRunConfirmMessage(): string {
 }
 
 type ConditionOperatorOption = { value: ConditionOperator; label: string }
-type ConditionValueWidget = 'text' | 'number' | 'date' | 'dateTime' | 'boolean' | 'booleanMultiSelect' | 'select' | 'multiSelect'
 type ConditionPath = number[]
 type ConditionEditorEntry =
   | {
@@ -2924,93 +2910,34 @@ function conditionField(condition: AutomationCondition): AutomationRuleEditorFie
   return props.fields.find((field) => field.id === condition.fieldId)
 }
 
-function conditionFieldOptions(condition: AutomationCondition): FieldOption[] {
-  return conditionField(condition)?.options ?? []
+// 客户反馈 2026-09-24 #4b: the value control (ConditionValueInput.vue) and the saved value shape per field
+// type (../utils/automation-condition-values.ts) are shared by the rule-level rows and the condition_branch
+// rows, so both kinds of row save the same value for the same input.
+/** A row with no field chosen yet: operator and value stay disabled and ask for a field first. */
+function isConditionRowPending(condition: AutomationCondition): boolean {
+  return !condition.fieldId || isPendingConditionOperator(condition.operator)
 }
 
-function optionLabel(option: FieldOption): string {
-  return option.label ?? option.value
+/**
+ * The operator choices of a row: the field type's operators, plus the row's current operator when the field
+ * no longer allows it (a deleted / retyped field) so the select shows its label instead of the raw code.
+ */
+function conditionOperatorOptionsForRow(condition: AutomationCondition): ConditionOperatorOption[] {
+  const options = conditionOperatorsForField(condition.fieldId)
+  if (!condition.fieldId || isPendingConditionOperator(condition.operator)) return options
+  if (options.some((option) => option.value === condition.operator)) return options
+  const current = CONDITION_OPERATOR_LOOKUP.get(condition.operator)
+  return current ? [...options, current] : options
 }
 
-function conditionValueWidget(condition: AutomationCondition): ConditionValueWidget {
-  const field = conditionField(condition)
-  if (!field) return 'text'
-  if (field.type === 'boolean') return isArrayOperator(condition.operator) ? 'booleanMultiSelect' : 'boolean'
-  if (isNumericConditionFieldType(field.type)) return 'number'
-  if (field.type === 'date') return 'date'
-  if (field.type === 'dateTime' || field.type === 'createdTime' || field.type === 'modifiedTime') return 'dateTime'
-  if ((field.type === 'select' || field.type === 'multiSelect') && conditionFieldOptions(condition).length > 0) {
-    return isArrayOperator(condition.operator) ? 'multiSelect' : 'select'
-  }
-  return 'text'
-}
-
-function conditionValueInputType(condition: AutomationCondition): string {
-  if (isArrayOperator(condition.operator)) return 'text'
-  const widget = conditionValueWidget(condition)
-  if (widget === 'number') return 'number'
-  if (widget === 'date') return 'date'
-  if (widget === 'dateTime') return 'datetime-local'
-  return 'text'
-}
-
-function conditionValueInputMode(condition: AutomationCondition): 'decimal' | undefined {
-  if (isArrayOperator(condition.operator)) return undefined
-  return conditionValueWidget(condition) === 'number' ? 'decimal' : undefined
-}
-
-function booleanConditionValue(condition: AutomationCondition): string {
-  if (condition.value === true) return 'true'
-  if (condition.value === false) return 'false'
-  if (condition.value === 'true' || condition.value === 'false') return condition.value
-  return ''
-}
-
-function booleanMultiSelectConditionValues(condition: AutomationCondition): string[] {
-  return (parseBooleanConditionArrayValue(condition.value) ?? [])
-    .map((entry) => entry ? 'true' : 'false')
-}
-
-function singleSelectConditionValue(condition: AutomationCondition): string {
-  return typeof condition.value === 'string' ? condition.value : ''
-}
-
-function multiSelectConditionValues(condition: AutomationCondition): string[] {
-  return parseConditionArrayValue(condition.value).map(String)
-}
-
-function onBooleanConditionValueChange(condition: AutomationCondition, value: string) {
-  if (value === 'true') {
-    condition.value = true
-  } else if (value === 'false') {
-    condition.value = false
-  } else {
-    condition.value = ''
-  }
-}
-
-function onBooleanMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
-  condition.value = [...values]
-}
-
-function onMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
-  condition.value = [...values]
-}
-
-function isNumericConditionFieldType(fieldType: string | undefined): boolean {
-  return fieldType === 'number' ||
-    fieldType === 'currency' ||
-    fieldType === 'percent' ||
-    fieldType === 'rating' ||
-    fieldType === 'duration' ||
-    fieldType === 'autoNumber'
+/** Operator label for a row: on a date / date-time field the ordering operators read 晚于 / 早于 (after / before). */
+function conditionOperatorLabelForRow(condition: AutomationCondition, operator: ConditionOperator): string {
+  return automationConditionOperatorLabel(operator, isZh.value, conditionField(condition)?.type)
 }
 
 function resetConditionValue(condition: AutomationCondition) {
   if (isUnaryOperator(condition.operator)) {
     delete condition.value
-  } else if (isArrayOperator(condition.operator)) {
-    condition.value = ''
   } else {
     condition.value = ''
   }
@@ -3019,8 +2946,18 @@ function resetConditionValue(condition: AutomationCondition) {
 function onConditionFieldChange(condition: AutomationCondition, fieldId: string) {
   const previousFieldId = condition.fieldId
   condition.fieldId = fieldId
+  if (!fieldId) {
+    // Back to "-- field --": the row is pending again (no operator, no value) until a field is chosen.
+    condition.operator = PENDING_CONDITION_OPERATOR
+    condition.value = ''
+    return
+  }
   const allowedOperators = conditionOperatorsForField(fieldId)
-  if (!previousFieldId || !allowedOperators.some((operator) => operator.value === condition.operator)) {
+  if (
+    !previousFieldId
+    || isPendingConditionOperator(condition.operator)
+    || !allowedOperators.some((operator) => operator.value === condition.operator)
+  ) {
     condition.operator = firstOperatorForField(fieldId)
   }
   if (previousFieldId !== fieldId) {
@@ -3034,15 +2971,11 @@ function onConditionOperatorChange(condition: AutomationCondition, operator: Con
 }
 
 function isUnaryOperator(op: ConditionOperator): boolean {
-  return op === 'is_empty' || op === 'is_not_empty'
+  return isUnaryConditionOperator(op)
 }
 
 function isArrayOperator(op: ConditionOperator): boolean {
-  return op === 'in' || op === 'not_in'
-}
-
-function conditionValuePlaceholder(condition: AutomationCondition): string {
-  return automationConditionValuePlaceholder(conditionValueWidget(condition), isArrayOperator(condition.operator), isZh.value)
+  return isArrayConditionOperator(op)
 }
 
 function isConditionGroupNode(node: AutomationConditionNode): node is ConditionGroup {
@@ -3086,83 +3019,15 @@ function conditionGroupFromRule(group: ConditionGroup | undefined): Draft['condi
   }
 }
 
-function parseConditionArrayValue(value: unknown): unknown[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => typeof entry === 'string' ? entry.trim() : entry)
-      .filter((entry) => typeof entry === 'string' ? entry.length > 0 : entry !== null && entry !== undefined)
-  }
-  if (typeof value !== 'string') return []
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-}
-
-function parseNumberConditionValue(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const parsed = Number(trimmed)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function parseNumericConditionArrayValue(value: unknown): number[] | null {
-  const values = parseConditionArrayValue(value)
-  if (!values.length) return null
-  const numbers = values.map(parseNumberConditionValue)
-  return numbers.every((entry): entry is number => entry !== null) ? numbers : null
-}
-
-function parseBooleanConditionValue(value: unknown): boolean | null {
-  if (value === true || value === false) return value
-  if (value === 'true') return true
-  if (value === 'false') return false
-  return null
-}
-
-function parseBooleanConditionArrayValue(value: unknown): boolean[] | null {
-  const values = parseConditionArrayValue(value)
-  if (!values.length) return null
-  const booleans = values.map(parseBooleanConditionValue)
-  return booleans.every((entry): entry is boolean => entry !== null) ? booleans : null
-}
-
-function conditionFieldType(fieldId: string): string | undefined {
-  return props.fields.find((field) => field.id === fieldId)?.type
-}
-
+/** The value a rule-level condition is saved with, in its field type's shape (automation-condition-values.ts). */
 function buildConditionValuePayload(condition: AutomationCondition): unknown {
-  const fieldType = conditionFieldType(condition.fieldId)
-  if (isArrayOperator(condition.operator)) {
-    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) ?? []
-    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) ?? []
-    return parseConditionArrayValue(condition.value)
-  }
-  if (isNumericConditionFieldType(fieldType)) {
-    return parseNumberConditionValue(condition.value)
-  }
-  if (fieldType === 'boolean') {
-    return parseBooleanConditionValue(condition.value)
-  }
-  return typeof condition.value === 'string' ? condition.value.trim() : condition.value
+  const result = coerceConditionValue(condition, conditionField(condition))
+  // Not coercible → save is blocked (isConditionLeafComplete); never invent a null / [] in its place.
+  return result.ok ? result.value : condition.value
 }
 
 function isConditionLeafComplete(condition: AutomationCondition): boolean {
-  if (!condition.fieldId.trim()) return false
-  if (isUnaryOperator(condition.operator)) return true
-  const fieldType = conditionFieldType(condition.fieldId)
-  if (isArrayOperator(condition.operator)) {
-    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) !== null
-    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) !== null
-    return parseConditionArrayValue(condition.value).length > 0
-  }
-  if (isNumericConditionFieldType(fieldType)) return parseNumberConditionValue(condition.value) !== null
-  if (fieldType === 'boolean') return parseBooleanConditionValue(condition.value) !== null
-  return typeof condition.value === 'string'
-    ? condition.value.trim().length > 0
-    : condition.value !== undefined && condition.value !== null
+  return isConditionValueComplete(condition, conditionField(condition))
 }
 
 function areConditionsComplete(node: AutomationConditionNode): boolean {
@@ -3451,6 +3316,22 @@ const conditionBranchReadOnlyReason = computed<string | null>(() => {
   }
   return null
 })
+// 客户反馈 2026-09-24 #4b: a condition_branch condition row must be complete (field + operator + a value in its
+// field type's shape) exactly like a rule-level row — the branch rows used to save whatever the text box held
+// (and a blank row reached the backend as a 400). Anchor = the first incomplete branch row, in render order.
+const firstIncompleteBranchConditionAnchor = computed<string | undefined>(() => {
+  for (const [actionIndex, action] of draft.value.actions.entries()) {
+    if (action.type !== 'condition_branch' || action.config.branchUnsupportedReason) continue
+    for (const [branchIndex, branch] of (action.config.branches ?? []).entries()) {
+      for (const [conditionIndex, condition] of branch.conditions.entries()) {
+        if (!isConditionLeafComplete(condition)) {
+          return `[data-action-index="${actionIndex}"] [data-branch-index="${branchIndex}"] [data-branch-condition-index="${conditionIndex}"]`
+        }
+      }
+    }
+  }
+  return undefined
+})
 const conditionBranchKeyError = computed<string | null>(() => {
   for (const a of draft.value.actions) {
     if (a.type === 'condition_branch' && !a.config.branchUnsupportedReason) {
@@ -3497,7 +3378,8 @@ function removeBranch(action: DraftAction, index: number): void {
   action.config.branches?.splice(index, 1)
 }
 function addBranchCondition(branch: BranchDraft): void {
-  branch.conditions.push({ fieldId: '', operator: 'equals', value: '' })
+  // #4b: pending until a field is chosen (see createBlankCondition).
+  branch.conditions.push({ fieldId: '', operator: PENDING_CONDITION_OPERATOR, value: '' })
 }
 function removeBranchCondition(branch: BranchDraft, index: number): void {
   branch.conditions.splice(index, 1)
@@ -3563,8 +3445,10 @@ function conditionIndentStyle(depth: number): Record<string, string> {
   return { '--condition-depth': String(Math.max(0, depth)) }
 }
 
+// 客户反馈 2026-09-24 #4b: a new row has NO operator until a field is chosen — seeding 'equals' made the
+// field-less operator select show the raw code. The row is incomplete (save blocked) while pending.
 function createBlankCondition(): AutomationCondition {
-  return { fieldId: '', operator: 'equals', value: '' }
+  return { fieldId: '', operator: PENDING_CONDITION_OPERATOR, value: '' }
 }
 
 function createBlankConditionGroup(): ConditionGroup {
@@ -4142,6 +4026,9 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     parallelBranchActionError: parallelBranchActionError.value, // W3-2a: nested branch actions must be executable, not executor-failing shells
     conditionsComplete: draft.value.conditions.conditions.every(areConditionsComplete),
     firstIncompleteConditionAnchor: firstIncompleteConditionAnchor.value,
+    // #4b: condition_branch rows must be complete like the rule-level rows.
+    branchConditionsComplete: firstIncompleteBranchConditionAnchor.value === undefined,
+    firstIncompleteBranchConditionAnchor: firstIncompleteBranchConditionAnchor.value,
     actions: saveBlockActionSnapshots.value,
     // #5742: client mirror of the backend select-option check on the approval-result writeback.
     startApprovalOutcomeValueBlocks: resultWritebackOutcomeBlocks.value,
@@ -5472,10 +5359,14 @@ function buildPayload(): Partial<AutomationRule> {
         type: action.type,
         config: buildActionConfigFromOriginal(
           action,
-          buildConditionBranchConfig({
-            branches: action.config.branches ?? [],
-            defaultBranch: action.config.defaultBranch ?? null,
-          }),
+          buildConditionBranchConfig(
+            {
+              branches: action.config.branches ?? [],
+              defaultBranch: action.config.defaultBranch ?? null,
+            },
+            // #4b: branch condition values are saved in their field type's shape, like the rule-level rows.
+            { fields: props.fields },
+          ),
         ),
       }
     }
@@ -5892,6 +5783,13 @@ async function onTestRun(): Promise<void> {
 .meta-rule-editor__condition-row,
 .meta-rule-editor__condition-group {
   margin-left: calc(var(--condition-depth, 0) * 18px);
+}
+
+/* #4b: the field type next to each field name in a condition row's field dropdown. */
+.meta-rule-editor__field-type-hint {
+  margin-left: 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
 }
 
 .meta-rule-editor__condition-group {

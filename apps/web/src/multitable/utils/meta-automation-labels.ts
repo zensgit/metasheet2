@@ -24,7 +24,7 @@ import {
 // WorkflowJobStatus set surfaced by the A2 runs API (resolved/queued/suspended/…).
 export type AutomationStatus = AutomationExecution['status'] | WorkflowJobStatus
 
-// Keep in sync with MetaAutomationRuleEditor.vue ConditionValueWidget.
+// The value control of an automation condition row (automation-condition-values.ts conditionValueWidget).
 export type AutomationConditionValueWidget =
   | 'text'
   | 'number'
@@ -34,6 +34,8 @@ export type AutomationConditionValueWidget =
   | 'booleanMultiSelect'
   | 'select'
   | 'multiSelect'
+  | 'person'
+  | 'link'
 
 export type AutomationTriggerCondition = 'any' | 'equals' | 'changed_to'
 
@@ -134,6 +136,13 @@ export type AutomationLabelKey =
   | 'condition.addCondition'
   | 'condition.addGroup'
   | 'condition.removeConditionTitle'
+  | 'condition.selectFieldFirst'
+  | 'condition.booleanTrue'
+  | 'condition.booleanFalse'
+  | 'condition.pickDate'
+  | 'condition.pickPeople'
+  | 'condition.pickRecords'
+  | 'condition.removeValueTitle'
   | 'actionConfig.targetSheetId'
   | 'actionConfig.sheetIdPlaceholder'
   | 'actionConfig.targetSheetManualToggle'
@@ -507,6 +516,13 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'condition.addCondition',
   'condition.addGroup',
   'condition.removeConditionTitle',
+  'condition.selectFieldFirst',
+  'condition.booleanTrue',
+  'condition.booleanFalse',
+  'condition.pickDate',
+  'condition.pickPeople',
+  'condition.pickRecords',
+  'condition.removeValueTitle',
   'actionConfig.targetSheetId',
   'actionConfig.sheetIdPlaceholder',
   'actionConfig.targetSheetManualToggle',
@@ -893,6 +909,15 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'condition.addCondition': { en: '+ Add condition', zh: '+ 添加条件' },
   'condition.addGroup': { en: '+ Add group', zh: '+ 添加条件组' },
   'condition.removeConditionTitle': { en: 'Remove condition', zh: '移除条件' },
+  // 客户反馈 2026-09-24 #4b: typed condition values (ConditionValueInput.vue). A checkbox value reads 是 / 否,
+  // never the raw `true` / `false`; a row with no field yet asks for one instead of showing an operator.
+  'condition.selectFieldFirst': { en: 'Select a field first', zh: '请先选择字段' },
+  'condition.booleanTrue': { en: 'Yes', zh: '是' },
+  'condition.booleanFalse': { en: 'No', zh: '否' },
+  'condition.pickDate': { en: 'Pick a date', zh: '选择日期' },
+  'condition.pickPeople': { en: 'Choose people', zh: '选择人员' },
+  'condition.pickRecords': { en: 'Choose records', zh: '选择记录' },
+  'condition.removeValueTitle': { en: 'Remove', zh: '移除' },
   // W1 G-10: '工作表' was a fifth term (neither old nor ratified) that visually collides with
   // '工作区' (Base) — the label noun follows the dictionary; the ID value itself stays raw.
   'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标数据表 ID' },
@@ -1763,7 +1788,32 @@ export function automationSwitchToBusinessTimezoneConfirm(
   return parts.join(isZh ? '' : ' ')
 }
 
-export function automationConditionOperatorLabel(operator: ConditionOperator | UnknownAutomationString, isZh: boolean): string {
+const TEMPORAL_CONDITION_FIELD_TYPES: ReadonlySet<string> = new Set(['date', 'dateTime', 'createdTime', 'modifiedTime'])
+
+/**
+ * Operator label. With a `fieldType` of a date / date-time field (客户反馈 2026-09-24 #4b) the ordering
+ * operators read in time — 晚于 / 早于 (after / before), 不早于 / 不晚于 (on or after / on or before) — instead
+ * of 大于 / 小于; the stored operator CODES are unchanged.
+ */
+export function automationConditionOperatorLabel(
+  operator: ConditionOperator | UnknownAutomationString,
+  isZh: boolean,
+  fieldType?: string | null,
+): string {
+  if (fieldType && TEMPORAL_CONDITION_FIELD_TYPES.has(fieldType)) {
+    switch (operator) {
+      case 'greater_than':
+        return isZh ? '晚于' : 'After'
+      case 'less_than':
+        return isZh ? '早于' : 'Before'
+      case 'greater_or_equal':
+        return isZh ? '不早于' : 'On or after'
+      case 'less_or_equal':
+        return isZh ? '不晚于' : 'On or before'
+      default:
+        break
+    }
+  }
   switch (operator) {
     case 'equals':
       return isZh ? '等于' : 'Equals'
@@ -1799,6 +1849,8 @@ export function automationConditionValuePlaceholder(widget: AutomationConditionV
   if (widget === 'number') return isZh ? '数字' : 'Number'
   if (widget === 'date') return 'YYYY-MM-DD'
   if (widget === 'dateTime') return isZh ? '日期和时间' : 'Date and time'
+  if (widget === 'person') return isZh ? '人员' : 'People'
+  if (widget === 'link') return isZh ? '关联记录' : 'Linked records'
   return isZh ? '值' : 'Value'
 }
 
