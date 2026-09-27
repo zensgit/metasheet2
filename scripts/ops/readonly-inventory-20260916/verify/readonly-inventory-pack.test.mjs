@@ -29,7 +29,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { psqlAvailable, verifyAll } from './run-verify.mjs'
+import { INTERNAL_TARGET_CASES, psqlAvailable, verifyAll } from './run-verify.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PACK = path.resolve(HERE, '..')
@@ -189,7 +189,7 @@ if (!DATABASE_URL || !psqlAvailable()) {
       'Point DATABASE_URL at a THROWAWAY local/container Postgres to run it. ***\n'
   )
 } else {
-  test('synthetic PostgreSQL: F3 / F4 / F5 / F6 on both schema shapes', async () => {
+  test('synthetic PostgreSQL: F3 / F4 / F5 / F6 / F7 on both schema shapes', async () => {
     const r = await verifyAll()
     // F3 — the repaired predicate finds every shape of http target on a read
     // path (top level, branch, defaultBranch, spaced layout, HTTP:// value) …
@@ -217,5 +217,48 @@ if (!DATABASE_URL || !psqlAvailable()) {
     // F5 — an aborted run leaves no completion line behind.
     assert.notEqual(r.lockTimeout.exit, 0)
     assert.match(r.permissionDenied.resultLine ?? '', /status=incomplete/)
+    // F7 — Q7's host set agrees with every guard-derived case (asserted case
+    // by case inside checkInternalTargetCases), end to end on both fixtures,
+    // and the old prefix literal was wrong in BOTH directions on the same table.
+    assert.equal(r.internalTargets.cases, INTERNAL_TARGET_CASES.length)
+    assert.ok(r.internalTargets.oldMissed > 0, 'the old literal missed guard-refused hosts')
+    assert.ok(r.internalTargets.oldExtra > 0, 'the old literal counted hosts the guard lets through')
+    assert.equal(r.modern.f7.q7Webhooks, 3)
+    assert.notEqual(r.modern.f7.oldQ7Webhooks, r.modern.f7.q7Webhooks)
   })
 }
+
+// ── LAYER 1 (cont.) — F7, hermetic ──────────────────────────────────────────
+// Placed after LAYER 2 so the line numbers ops-sql-pack-verify.yml cites for
+// the sentinel above stay where they are.
+
+test('F7: all three Q7 predicates use ONE \\gset host pattern, defined outside any \\if', () => {
+  const src = fs.readFileSync(path.join(PACK, '02-trg04-http-targets.sql'), 'utf8').replace(/\r\n/g, '\n')
+  const code = src.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
+  const defs = [...code.matchAll(/AS inv_internal_target_re\n\s*FROM v6\n\\gset$/gm)]
+  assert.equal(defs.length, 1, 'exactly one definition of the Q7 host pattern')
+  const use = "~* :'inv_internal_target_re'"
+  assert.equal(code.split(use).length - 1, 3, 'Q7 narrow, Q7 upper bound and Q7 webhooks all use it')
+  assert.ok(!/~\*\s*'/.test(code), 'no inline host regex literal may sit beside it')
+  // The webhook half of Q7 also runs on schemas where the automation_rules
+  // half is skipped, so the definition must precede every use and sit at
+  // \if depth 0.
+  const before = code.slice(0, defs[0].index)
+  assert.ok(!before.includes(use), 'the pattern must be defined before its first use')
+  const depth = (before.match(/^\\if /gm) || []).length - (before.match(/^\\endif\b/gm) || []).length
+  assert.equal(depth, 0, 'the \\gset must not sit inside an \\if block')
+})
+
+test('F7: the guard-derived case table covers every host class at its exact edges', () => {
+  const counted = new Set(INTERNAL_TARGET_CASES.filter(c => c[1]).map(c => c[0]))
+  const skipped = new Set(INTERNAL_TARGET_CASES.filter(c => !c[1]).map(c => c[0]))
+  for (const u of ['https://172.16.0.0/', 'https://172.31.255.255/', 'https://fake-svc.internal/x',
+    'https://printer.local', 'https://api.localhost/', 'https://[fc00::1]/', 'https://[febf:ffff::1]/',
+    'https://[::ffff:ac1f:ffff]/', 'https://a@b@172.16.0.1/', 'https://10.0.0.1:0065535/']) {
+    assert.ok(counted.has(u), `case table must count ${u}`)
+  }
+  for (const u of ['https://172.15.255.255/', 'https://172.32.0.0/', 'https://[::ffff:ac0f:ffff]/',
+    'https://[::ffff:ac20:0]/', 'https://[fec0::1]/', 'https://10.fake.invalid/', 'https://10.0.0.1:65536/']) {
+    assert.ok(skipped.has(u), `case table must NOT count ${u}`)
+  }
+})
