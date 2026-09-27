@@ -134,7 +134,9 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
 
   it('up(): predicate 6 — the source must belong to the binding\'s tenant', async () => {
     const stmt = backfillStatement(section(await source(), 'up'))
-    expect(stmt).toMatch(/AND ds\.tenant_id = b\.tenant_id/)
+    // anchored at end of line: `ds.tenant_id = b.tenant_id IS NOT FALSE` would admit a NULL-tenant
+    // source and still match an unanchored pattern (behaviour: race suite, predicate 6 cases)
+    expect(stmt).toMatch(/AND ds\.tenant_id = b\.tenant_id\r?$/m)
   })
 
   it('up(): predicate 7 — the source must be active (the host loads only is_active = true rows)', async () => {
@@ -250,9 +252,14 @@ describe('zzzz20260920150000_backfill_sql_readonly_legacy_connection_id migratio
     expect(down).toMatch(/FROM \$\{sql\.raw\(LEDGER_TABLE\)\} AS l\s+WHERE b\.id = l\.binding_id/)
     expect(down).toMatch(/AND b\.kind = \$\{SQL_READONLY_KIND\}/)
     expect(down).toMatch(/AND b\.connection_id = l\.connection_id/)
-    // mirrors up()'s re-checks: same tenant and same owner stamp as recorded (Sf4 / Sf5)
+    // mirrors up()'s re-checks: same tenant and same owner stamp as recorded (Sf4 / Sf5), and the
+    // rollback marker still not TRUE (a restored row with marker TRUE would be the cutover's
+    // rollback shape, which passes resolveLegacy's marker gate)
     expect(down).toMatch(/AND b\.tenant_id = l\.tenant_id/)
     expect(down).toMatch(/AND b\.config->>'dataSourceOwnerId' = l\.legacy_data_source_owner_id/)
+    expect(down).toMatch(/AND b\.legacy_connection_fallback_eligible IS NOT TRUE/)
+    // and down() never writes the marker
+    expect(down).not.toMatch(/legacy_connection_fallback_eligible\s*=/)
     expect(down).toMatch(/AND NOT \(b\.config \? 'dataSourceId'\)/)
     expect(down).toMatch(/AND l\.migration_name = \$\{MIGRATION_NAME\}/)
     expect(down).toMatch(/DELETE FROM \$\{sql\.raw\(LEDGER_TABLE\)\} AS l\s+WHERE l\.binding_id IN \(SELECT binding_id FROM restored\)/)

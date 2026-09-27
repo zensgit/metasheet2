@@ -25,10 +25,11 @@
  *   2. `b.connection_id IS NULL`                             — legacy shape
  *   3. `b.config->>'dataSourceId' = ds.id`                   — the pointer resolves
  *   4. `b.config->>'dataSourceOwnerId' = ds.owner_id`        — the server stamp names THAT
- *      source's owner; this is the same predicate the delete guard counts by
+ *      source's owner; this is the same untrimmed predicate the delete guard counts by
  *      (DataSourceManager.countExternalSystemReferences, src/data-adapters/DataSourceManager.ts
- *      :713-718) and the cutover migration backfilled by (zzzz20260902120000 :97-106). Without it
- *      a foreign pin would be promoted into a canonical reference.
+ *      :713-718). The cutover migration backfilled by a looser form of the same pair (pointer and
+ *      stamp both `NULLIF(BTRIM(...), '')`, zzzz20260902120000 :97-106). Without it a foreign pin
+ *      would be promoted into a canonical reference.
  *   5. `ds.deleted_at IS NULL`                               — since #5896 the FK targets
  *      `data_sources(live_id)` (NULL once soft-deleted) and is NOT VALID: every UPDATE is checked
  *      row by row, so one pointer at a soft-deleted source would raise 23503 and abort the whole
@@ -112,10 +113,11 @@
  * CLASSIFICATION: DDL (the ledger table, CREATE TABLE IF NOT EXISTS) + DML (the backfill).
  *
  * IDEMPOTENT: predicate 2 makes a replay a no-op (0 rows, 0 ledger inserts). `down()` restores
- * only ledger rows whose binding still carries the connection id, tenant and owner stamp the ledger
- * recorded and has not regained a pointer, deletes those ledger rows, and drops the ledger only when it is empty — a
- * binding re-bound by a human after the backfill is left as the human left it, with its ledger
- * row kept as evidence.
+ * only ledger rows whose binding is still sql-readonly, still carries the connection id, tenant and
+ * owner stamp the ledger recorded, has not regained a pointer and whose rollback marker is still not
+ * TRUE; it deletes those ledger rows, and drops the ledger only when it is empty — a binding changed
+ * by a human after the backfill (re-bound, moved, re-stamped, re-kinded or flagged) is left as the
+ * human left it, with its ledger row kept as evidence.
  *
  * NOT TOUCHED: `legacy_connection_fallback_eligible`, credentials, capabilities, every other kind,
  * every row whose pointer does not resolve, every row whose source is inactive or of a type outside
@@ -256,12 +258,16 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   if (await checkTableExists(db, 'integration_external_systems')) {
     // Restore ONLY rows this migration changed and that still look the way it left them:
     // same connection id, no pointer regained, still sql-readonly, still the SAME tenant and the
-    // SAME owner stamp the ledger recorded (mirrors up()'s re-checks: a binding moved to another
-    // tenant, or re-stamped to another owner, after the backfill must not be turned back into a
-    // legacy pointer at the old tenant's / old owner's source). Anything a human changed in between
-    // is left alone (its ledger row stays as evidence and keeps the table from dropping). These are
-    // all predicates on `b`, so they are re-evaluated on the committed row if down() waits on a
-    // concurrent writer's row lock.
+    // SAME owner stamp the ledger recorded, and the rollback marker still not TRUE — the same
+    // binding-side axes up()'s UPDATE re-checks. A binding moved to another tenant, or re-stamped to
+    // another owner, after the backfill must not be turned back into a legacy pointer at the old
+    // tenant's / old owner's source; a binding whose marker was set TRUE must not be turned into
+    // marker TRUE + connection_id NULL + pointer — the cutover's rollback shape, which passes
+    // resolveLegacy's marker gate (connection-resolver.cjs :205-216) where the same row, marker
+    // FALSE before the backfill, was denied. Anything a human changed in between is left alone (its
+    // ledger row stays as evidence and keeps the table from dropping). These are all predicates on
+    // `b`, so they are re-evaluated on the committed row if down() waits on a concurrent writer's
+    // row lock.
     await sql`
       WITH restored AS (
         UPDATE integration_external_systems AS b
@@ -272,6 +278,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
           AND b.kind = ${SQL_READONLY_KIND}
           AND b.connection_id = l.connection_id
           AND b.tenant_id = l.tenant_id
+          AND b.legacy_connection_fallback_eligible IS NOT TRUE
           AND b.config->>'dataSourceOwnerId' = l.legacy_data_source_owner_id
           AND NOT (b.config ? 'dataSourceId')
           AND l.migration_name = ${MIGRATION_NAME}

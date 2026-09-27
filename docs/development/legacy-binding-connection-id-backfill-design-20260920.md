@@ -66,7 +66,7 @@
 
 **账本与 UPDATE 同一条语句，账本只由 UPDATE 的 `RETURNING` 喂**（`hit` → `upd`（UPDATE … RETURNING 实际写入行的 id / tenant / connection_id / owner 戳与被移除指针）→ `INSERT … SELECT … FROM upd`），「记账的行」和「改了的行」不可能漂移；UPDATE 跳过的候选不进账本。
 
-**并发（窗口 8 复审 F1）**：READ COMMITTED 下 `hit` 候选来自语句快照；UPDATE 等到并发写入者的行锁后，是在对方已提交的新行版本上写。初版 UPDATE 只按 `b.id = hit.binding_id` 写，会把期间已提交的合法重绑（legacy → canonical B）覆盖回 A，账本也记 A。修法两道：① UPDATE 自己的 WHERE 对**正在写的当前行**逐条复核绑定侧条件（kind、`connection_id IS NULL`、回滚标记、tenant、指针 == 候选、owner 戳 == 候选），PG 在锁等待后会对新行版本重新求值（EvalPlanQual），不满足即跳过；② 候选 CTE `FOR SHARE OF ds` 锁住所 join 的源行，源的软删 / owner 变更 / 租户变更要么先提交（候选按新版本重判后掉出），要么等本迁移提交。两道各有两连接实库回归（`tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts`），逐条去掉均红。
+**并发（窗口 8 复审 F1）**：READ COMMITTED 下 `hit` 候选来自语句快照；UPDATE 等到并发写入者的行锁后，是在对方已提交的新行版本上写。初版 UPDATE 只按 `b.id = hit.binding_id` 写，会把期间已提交的合法重绑（legacy → canonical B）覆盖回 A，账本也记 A。修法两道：① UPDATE 自己的 WHERE 对**正在写的当前行**逐条复核绑定侧条件（kind、`connection_id IS NULL`、回滚标记、tenant、指针 == 候选、owner 戳 == 候选），PG 在锁等待后会对新行版本重新求值（EvalPlanQual），不满足即跳过；② 候选 CTE `FOR SHARE OF ds` 锁住所 join 的源行，源的软删 / owner 变更 / 租户变更要么先提交（候选按新版本重判后掉出），要么等本迁移提交。两道各有两连接实库回归（`tests/integration/legacy-binding-connection-id-backfill-race.db.test.ts`），逐条去掉均红。（2026-09-27 更正：谓词 6 这一支此前只有结构钉——竞争回归的夹具里所有源都在同一租户，没有 NULL 租户或外租户的源，也没有「源租户变更」的并发用例，所以把谓词 6 改成 `IS NOT FALSE` 或整条删掉，竞争回归仍全绿。已补：NULL 租户 / 外租户源的静态用例，以及迁移等锁期间源租户改成 NULL、改成别的租户两条竞争，在最小表形与**完整迁移链建出的真实表形**上各一套；见 §10 与验证文档 §12。）
 
 **谓词 7、8 的锁下复核（2026-09-26）**：两条都写在候选 CTE 的 JOIN 条件里，所以和谓词 3–6 一样由 `FOR SHARE OF ds` 复核：迁移在源行锁上等待期间，另一会话把源停用或把类型改成非 SQL 类型并提交，PG 按提交后的新版本重判 JOIN 条件，该候选掉出，不提升、不记账；从锁住到本迁移提交，源行不能再被改。**UPDATE 的 WHERE 不重复这两条（也不重复谓词 3–6 的源侧部分）**：UPDATE 不锁 `data_sources`，在 UPDATE 里 join 或子查询 `data_sources` 读的是语句快照，看不到 CTE 锁等待已经看到的新版本。这点有执行型证据：把谓词 7 或 8 从 CTE 挪到 UPDATE 的子查询里，竞争回归里「并发停用 / 并发改类型」那一条就红（验证文档 §11）。结构钉同时断言 UPDATE 段不读 `data_sources`，防止以后有人加一条看似复核、实际读快照的条件。
 
@@ -77,7 +77,8 @@
 ## 6. 幂等与 `down()` 的选择性
 
 - 重放：谓词 2 让第二次 `up()` 命中 0 行、账本 0 插入（PG 实证：行与账本逐字节相同，`backfilled_at` 不变）。
-- `down()` 只恢复**账本里有、且行仍是本迁移留下的样子**的行：`kind` 仍 sql-readonly、`connection_id` 仍等于账本记录值、`tenant_id` 与 owner 戳（`config->>'dataSourceOwnerId'`）仍等于账本记录值（与 `up()` 的复核对齐，复审 Sf4/Sf5）、`config` 里没有重新出现 `dataSourceId`、`migration_name` 匹配。恢复即删对应账本行；账本**空了才 DROP**。人在回填后重绑过的行原样保留，其账本行留作证据、表不删（PG 实证：重绑 `b_ok2` 后 `down()` 只恢复 `b_ok1`，账本剩 `b_ok2` 一行）。
+- `down()` 只恢复**账本里有、且行仍是本迁移留下的样子**的行：`kind` 仍 sql-readonly、`connection_id` 仍等于账本记录值、`tenant_id` 与 owner 戳（`config->>'dataSourceOwnerId'`）仍等于账本记录值（与 `up()` 的复核对齐，复审 Sf4/Sf5）、回滚标记 `legacy_connection_fallback_eligible` 仍不是 TRUE、`config` 里没有重新出现 `dataSourceId`、`migration_name` 匹配。这些都是 `b` 上的条件，`down()` 在并发写入者的行锁上等过之后，PG 按提交后的新行版本重判。恢复即删对应账本行；账本**空了才 DROP**。人在回填后重绑过的行原样保留，其账本行留作证据、表不删（PG 实证：重绑 `b_ok2` 后 `down()` 只恢复 `b_ok1`，账本剩 `b_ok2` 一行）。
+- 回滚标记这一条是 2026-09-27 补的（复审）：此前 `down()` 不查它。回填后若有人把这行的标记改成 TRUE，`down()` 会把它还原成「标记 TRUE + `connection_id` NULL + 指针」，这正是切换迁移的回滚形态，`resolveLegacy` 的标记门（`plugins/plugin-integration-core/lib/connection-resolver.cjs:205-216`）放行它；而同一行回填前标记是 FALSE，在那里被拒。现在这类行与其它「回填后被人改过」的行一样原样保留，账本行留作证据。可达性低：标记是服务端专有列，插件只保留原值或置 FALSE（`external-systems.cjs:803`、`:854`），唯一写 TRUE 的代码是切换迁移 `up()`（`zzzz20260902120000:100`），它要求 `connection_id IS NULL`，碰不到回填过的行；只有运维手写 SQL 能造出这个状态。
 - 切换迁移的 `down()` 会不会撞上本账本？切换迁移 `down()` 只删自己加的列/约束，账本是独立表，互不影响；但**回滚顺序必须是本迁移先 down**（否则 `connection_id` 列被删，本 `down()` 的 UPDATE 会失败——迁移框架本身就按逆序回滚）。
 
 ## 7. 与切换迁移在指针匹配上的一处刻意差异
@@ -101,6 +102,10 @@ owner 要求四类（可回填 / 指向软删源 / owner 不匹配 / 非 sql-rea
 - F1 两连接竞争回归（真 PG，12 条，独立 CI 车道 `legacy-binding-backfill-race-realdb.yml`，`EXPECT_DB=1` 防跳绿）：见 verification §9。
 - 便携 PG 16.9：真迁移建 schema（`20251206000001` → 057 DDL → `zzzz20260902120000` → `zzzz20260920120000`），植入 11 行（八类各一 + 可回填两行 + canonical 对照两行），普查八类计数与 id 正确 → `up()` 只改 2 行无 23503 → 重放 0 行 → `down()` 逐字节恢复（那次只搭了 057 的建表语句、没有它的 `updated_at` 触发器；完整迁移链上 `updated_at` 除外，见 §4）→ 再 `up()` → 人为重绑后 `down()` 只恢复一行；六个迁移级变异各按预期偏离（去谓词 5 → 23503；去其余任一谓词 → 对应那一行被错误回填）。
 - 谓词 7、8（2026-09-26）：便携 PG 16.10（中文 locale）用**完整迁移链**（`tsx src/db/migrate.ts`，416 支）建库，植入正常 / S2b / S2c / http 各一行：PR 旧 head 提升 4 行、账本记 4 行；新 head 只提升正常行、账本只记它，普查 `source_inactive=1`、`source_type_unsupported=2`、`backfillable=1`；迁移持锁期间另一会话停用源或把类型改成 http → 不提升。竞争回归套件增至 18 条；结构钉增至 19 条；变异自证见验证文档 §11。
+- 复审（2026-09-27）：`down()` 的 WHERE 补 `b.legacy_connection_fallback_eligible IS NOT TRUE`（§6）。竞争回归文件（同一 CI 车道）两块：
+  - 最小表形块补谓词 6 的三条（NULL 租户 / 外租户源静态、源租户改 NULL、源租户改别的租户）与「`down()` 等锁期间标记被改成 TRUE」一条；
+  - 新增**完整迁移链块**：每次运行新建一个临时库，用 `src/db/migrate.ts`（即 `db:migrate`，不带 `MIGRATION_EXCLUDE`）跑完整链，在真实表形（真实 NOT NULL / 默认值、057 的 `updated_at` 触发器、NOT VALID 的 live_id 外键）上再证谓词 6（静态 + 两条竞争）与 `down()` 的标记复核，外加一条 schema 前提（`data_sources.tenant_id` 可空、触发器与外键在位），共 5 条；结束时删库。
+  - 整个文件 27 条（含 `EXPECT_DB` 哨兵）。结构钉条数不变（19）：谓词 6 的正则改为行尾锚定（`… = b.tenant_id IS NOT FALSE` 不再命中），`down()` 那条加标记复核与「`down()` 不写标记」两条断言。旧红新绿与变异自证见验证文档 §12。
 
 ## 11. 留给 owner 的决定
 

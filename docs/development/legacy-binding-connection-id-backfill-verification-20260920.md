@@ -228,3 +228,46 @@ schema 用仓库自己的 `tsx src/db/migrate.ts` 在空库上跑完整链（416
 - 没在任何真实库上跑普查或迁移；`source_inactive`、`source_type_unsupported`、`backfillable` 在演示机或生产上各是多少，未知。**生产普查与执行仍须 owner 授权。**
 - S2d（源凭据解密失败）和部署状态 S1 / S2e 在 SQL 里看不见，谓词 7、8 管不到；被提升的行仍可能因此报 `CONNECTION_CANONICAL_UNAVAILABLE`。
 - 诊断文档 §2 的 S6（内存注册表与库不一致）同样是 SQL 看不见的：迁移按库判，运行中的后端按启动时的快照判。在后端运行期间执行本迁移，若之前有绕过 `DataSourceManager` 的 `data_sources` 改动，重启前仍可能不一致。
+
+## 12. 复审（2026-09-27）：`down()` 补标记复核；谓词 6 补行为级用例（含完整迁移链）
+
+- 时间：本机 `date -u` 2026-09-27 18:37–19:40 UTC。起点：PR head `5470736a2`。
+- values-free：本机一次性便携 PG 16.10 集群（scratchpad 数据目录、只监听 127.0.0.1、中文 locale），数据全部是假值。**没有连接任何真实数据库、演示机或客户系统。**
+- 变异与旧版本都在内存里替换（vite 加载钩子换迁移模块 / 测试文件源码，setupFile 包 `fs.promises.readFile` 给结构钉换迁移源码），工作区文件不动。
+
+### 12.1 blocking ①：`down()` 不复核回滚标记
+
+- 缺陷：`up()` 的 UPDATE 复核 `legacy_connection_fallback_eligible IS NOT TRUE`，`down()` 的 WHERE 没有，但注释写「mirrors up()'s re-checks」，保证 8 与 PR 正文写「人改过的行一律不动」。
+- 复现（新测试 + 旧迁移 `5470736a2` 原文）：竞争回归文件 **2 红 / 25 绿**，红的正是两条 `down()` 标记用例。完整迁移链块那条的实际结果：`binding_a` 变成 `connection_id = NULL`、`pointer = source_a`、`marker = true`，即切换迁移的回滚形态（`resolveLegacy` 的标记门 `connection-resolver.cjs:205-216` 放行它；回填前这行标记是 FALSE，在那里被拒），账本行被删。
+- 修法：`down()` 的 UPDATE WHERE 加 `AND b.legacy_connection_fallback_eligible IS NOT TRUE`；注释与头注释 IDEMPOTENT 段同步。
+- 用例：
+  - 最小表形块：`up()` 后，写入者开事务把标记改成 TRUE 不提交 → `down()` 起跑并被确认在锁上等待 → 写入者提交 → 行保持 `connection_id = source_a`、标记 TRUE、无指针，账本行保留。
+  - 完整迁移链块：两条可回填行都 `up()` 后，把其中一条的标记改成 TRUE 并提交，再跑 `down()` → 这一条原样保留、账本行保留（所以账本表不删）；另一条（正对照）照常恢复成指针形态。
+  - 结构钉：`down()` 那条加两条断言（有标记复核；`down()` 不写标记）。
+- 结果：新 head 两条都绿；去掉 `down()` 的标记条件（`d01`）→ 竞争回归 2 红（就是这两条）、结构钉 1 红。
+
+### 12.2 blocking ②：谓词 6 与「源租户变更」没有行为级 CI 用例
+
+- 缺陷：竞争回归夹具里所有源都在 `tenant_a`，没有 NULL 租户或外租户的源，也没有源租户变更的竞争；结构钉的正则 `AND ds\.tenant_id = b\.tenant_id` 不锚行尾，`… = b.tenant_id IS NOT FALSE` 也能命中。
+- 复现（旧测试 + 在旧迁移上施加 m01：`AND ds.tenant_id = b.tenant_id IS NOT FALSE`）：结构钉 **19/19 绿**，竞争回归 **18/18 绿**，缺口成立。
+- 补的用例：
+  - 最小表形块 3 条：NULL 租户源、`tenant_b` 源各绑一条 `tenant_a` 的 legacy 绑定，`up()` 后两条都不提升，账本只记同租户那条；迁移在源行锁上等待期间，源租户改成 NULL / 改成 `tenant_b` 并提交 → 不提升、账本空、确认等过锁且迁移已提交。
+  - **完整迁移链块**（同一文件、同一 CI 车道）：`beforeAll` 新建临时库，用 `node node_modules/tsx/dist/cli.mjs src/db/migrate.ts`（即 `db:migrate`，删掉 `MIGRATION_EXCLUDE`）跑完整链，断言本迁移在链里执行成功；`afterAll` `DROP DATABASE … WITH (FORCE)`。在这张真实表形上跑：schema 前提（`data_sources.tenant_id` 可空、057 的 `updated_at` 触发器在位、live_id 外键 `convalidated = false`）、谓词 6 静态（NULL 租户 / 外租户两行不提升，而且 `updated_at` 没动，即根本没被写到）、两条源租户竞争、12.1 那条 `down()` 用例。本机完整链 416 支，建库约 190 s；GitHub 上同类车道的 `db:migrate` 约 7 s。
+  - 结构钉：谓词 6 的正则改为行尾锚定 `/AND ds\.tenant_id = b\.tenant_id\r?$/m`。
+- 结果（新测试）：
+
+| 迁移 | 竞争回归文件（27 条） | 结构钉（19 条） |
+|---|---|---|
+| 新 head | 27/27 | 19/19 |
+| m01 `… = b.tenant_id IS NOT FALSE` | **4 红**：两块各自的「谓词 6 静态」与「源租户改 NULL」 | **1 红**：谓词 6 |
+| m02 删掉候选 CTE 的谓词 6 | **6 红**：两块各自的三条谓词 6 用例 | **1 红**：谓词 6 |
+| d01 删掉 `down()` 的标记条件 | **2 红**：两条 `down()` 标记用例 | **1 红**：`down()` 那条 |
+| 旧 head `5470736a2` 原文 | **2 红**：同 d01（谓词 6 在旧 head 上行为本来就对，缺的只是用例） | — |
+
+  m01 下「源租户改成 `tenant_b`」一条是绿的，这是对的：`'tenant_b' = 'tenant_a'` 是 FALSE，`IS NOT FALSE` 仍然挡住；只有 NULL 才会被 m01 放过。
+
+### 12.3 其它
+
+- 竞争回归文件的写入者 / 迁移 / 观察者三方竞争逻辑提成文件级函数 `raceMigrationAgainst`，两块共用；最小表形块原有用例的断言不变。
+- 迁移头注释谓词 4 一段更正：删除守卫用的是同一对未去空白的比较；切换迁移用的是更宽的 `NULLIF(BTRIM(...), '')` 形式（此前写成「同一个谓词」，与 PR 正文后文矛盾）。
+- 车道头注释 `.github/workflows/legacy-binding-backfill-race-realdb.yml` 仍写「套件自建两表，不需要 db:migrate 步骤」；完整链块在测试里自己建库跑链，不需要改车道步骤，但这句注释已不完整。本机令牌没有 workflow 权限，未改，列为待办。
