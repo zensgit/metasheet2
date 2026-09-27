@@ -38,6 +38,14 @@
 //            lock); a pre-protocol LIVE row at a system that does not exist → reused, reuse_version
 //            audit, again no lock. New content at the same missing system → the lock's not_found
 //            tuple. Registered so the guarantee stays scoped to the MINT path (design doc §2.6)
+//   P-062-APPROVE-BETWEEN a 062 APPROVE (draft -> approved; takes NO lock on the system row — it mints
+//            no new live pointer) commits while the delete is parked right before its SECOND 062
+//            COUNT (#6076 fourth-round final review). The delete still refuses 409 and counts the
+//            one row TWICE (as draft, then as approved — the proof the approve landed between the
+//            counts); system and config kept. This holds only because external-systems.cjs counts
+//            062 in lifecycle order (draft THEN approved) one statement at a time: with the order
+//            reversed (M-ORDER, `LIVE_READ_SOURCE_CONFIG_STATUSES` = approved, draft) the approve
+//            slips past both counts and the delete commits under an approved pointer (design doc §2.8)
 //   I-RR-* / I-SER-*  THE ISOLATION PIN (#6076 third-round independent verification). Every protocol
 //            participant — delete, 079 bind, 062 mint, pipeline upsert, TEMPLATE instantiation — in
 //            BOTH interleavings, driven through a second and third pair of sessions whose
@@ -122,6 +130,10 @@ const NOW = Date.parse('2026-07-31T00:00:00Z')
 
 type QueryRows = Record<string, unknown>[]
 type Gate = { reached: Promise<void>; release: () => void }
+// `inTransaction`: only statements issued inside the plugin's `transaction` callback match (the
+// delete side's autocommit 42P01 probe issues the same COUNT texts first). `skip`: let the first n
+// matching statements through and park the next one.
+type GateOptions = { inTransaction?: boolean; skip?: number }
 type Session = {
   client: PoolClient
   pid: number
@@ -129,7 +141,7 @@ type Session = {
     query: (sql: string, params?: unknown[]) => Promise<QueryRows>
     transaction: <T>(callback: (trx: { query: (sql: string, params?: unknown[]) => Promise<QueryRows>; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>) => Promise<T>
   }
-  gateBefore: (sqlPrefix: string) => Gate
+  gateBefore: (sqlPrefix: string, options?: GateOptions) => Gate
   // Every statement text this session issued through the plugin seam, in order (shape only: the
   // parameters are not recorded). Lets an arm assert "no FOR KEY SHARE was issued on this path".
   statements: string[]
@@ -262,12 +274,17 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
       await client.query(`SET SESSION default_transaction_isolation = '${defaultIsolation}'`)
     }
     const pid = Number((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
-    const gates = new Map<string, Gate & { arrived: () => void; open: Promise<void> }>()
+    const gates = new Map<string, Gate & { arrived: () => void; open: Promise<void>; inTransaction: boolean; skip: number }>()
     const statements: string[] = []
-    async function beforeStatement(sql: string) {
+    async function beforeStatement(sql: string, inTransaction = false) {
       statements.push(sql)
       for (const [prefix, gate] of gates) {
         if (sql.startsWith(prefix)) {
+          if (gate.inTransaction && !inTransaction) continue
+          if (gate.skip > 0) {
+            gate.skip -= 1
+            continue
+          }
           gates.delete(prefix)
           gate.arrived()
           await gate.open
@@ -286,7 +303,7 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
         try {
           const result = await callback({
             query: async (sql, params) => {
-              await beforeStatement(sql)
+              await beforeStatement(sql, true)
               return (await client.query(sql, params)).rows
             },
             commit: async () => {},
@@ -308,12 +325,12 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
       database,
       statements,
       db: null,
-      gateBefore(sqlPrefix) {
+      gateBefore(sqlPrefix, { inTransaction = false, skip = 0 } = {}) {
         let arrived!: () => void
         let release!: () => void
         const reached = new Promise<void>((resolve) => { arrived = resolve })
         const open = new Promise<void>((resolve) => { release = resolve })
-        gates.set(sqlPrefix, { reached, release, arrived, open })
+        gates.set(sqlPrefix, { reached, release, arrived, open, inTransaction, skip })
         return { reached, release }
       },
     }
@@ -713,6 +730,38 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     expect(different.error?.name).toBe('ReadSourceConfigValidationError')
     expect(different.error?.details?.errors).toEqual([{ code: 'READ_SOURCE_SYSTEM_NOT_FOUND', field: 'systemId', reason: 'not_found' }])
     expect(await count(READ_SOURCE_CONFIGS, "system_id = 'sys_ghost'")).toBe(1)
+  })
+
+  it('P-062-APPROVE-BETWEEN: a 062 approve (no system lock) commits between the delete side\'s two 062 COUNTs → the delete still refuses 409 with the row counted as draft AND as approved; system and config kept', async () => {
+    const store = plugin.createReadSourceConfigStore({ db: writer.db })
+    const scope = { tenantId: 't1', workspaceId: null, actor: 'consultant' }
+    const minted = await store.saveVersion({ ...scope, config: readSourceConfig() })
+    expect(minted.status).toBe('draft')
+    const count062 = `SELECT COUNT(*)::int AS count FROM ${quotedIdentifier(READ_SOURCE_CONFIGS)}`
+    const deleterFrom = deleter.statements.length
+    // The SECOND 062 COUNT inside the delete transaction (the autocommit probe's two do not match).
+    const beforeSecondCount = deleter.gateBefore(count062, { inTransaction: true, skip: 1 })
+    const deletion = settle(registryOn(deleter).deleteExternalSystem(deleteInput))
+    await beforeSecondCount.reached
+    // The approve runs to COMMIT on another session while the delete holds FOR UPDATE and is parked.
+    const approved = await settle(store.approve({ ...scope, id: minted.id }))
+    beforeSecondCount.release()
+    const deleted = await deletion
+    // The outcome FIRST: M-ORDER (the two counts reversed) reports { systemRows: 0, approvedRows: 1 } here.
+    expect({
+      systemRows: await count(EXTERNAL_SYSTEMS, "id = 'sys_1'"),
+      approvedRows: await count(READ_SOURCE_CONFIGS, "system_id = 'sys_1' AND status = 'approved'"),
+    }).toEqual({ systemRows: 1, approvedRows: 1 })
+    expect(approved.error).toBeNull()
+    expect(approved.value.status).toBe('approved')
+    expect({ name: deleted.error?.name, code: deleted.error?.code }).toEqual({ name: 'ExternalSystemConflictError', code: undefined })
+    // Counted twice — as draft by the first COUNT, as approved by the second: the approve really
+    // committed between them (before both: 1; after both: 1). An over-count only ever refuses.
+    expect(deleted.error?.details?.readSourceConfigCount).toBe(2)
+    const issued = deleter.statements.slice(deleterFrom)
+    const begin = issued.indexOf('BEGIN')
+    expect(begin).toBeGreaterThan(0)
+    expect(issued.slice(begin).filter((sql) => sql.startsWith(count062))).toHaveLength(2)
   })
 
   // ------------------------------------------------------------------------------------------------

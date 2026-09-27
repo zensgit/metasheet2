@@ -23,13 +23,15 @@
 
 | 侧 | 位置 | 做法 |
 |---|---|---|
-| 删除方 | `lib/external-systems.cjs` `deleteExternalSystem`（`:1395`） | **一个事务**（`:1412`），**第一条语句**把隔离级别钉为 READ COMMITTED（`:1419`，第 2.7 节），**第一条读**是 `SELECT … FOR UPDATE` 锁住外部系统行（`:1420`），然后在**同一事务句柄**上计数 pipelines ×2 + 079 + 073 + 062 ×2（`:1232`、`:1347`），然后 DELETE（`:1456`）。任一计数非零 → 事务内抛 409 `ExternalSystemConflictError` → 回滚。 |
+| 删除方 | `lib/external-systems.cjs` `deleteExternalSystem`（`:1434`） | **一个事务**（`:1451`），**第一条语句**把隔离级别钉为 READ COMMITTED（`:1458`，第 2.7 节），**第一条读**是 `SELECT … FOR UPDATE` 锁住外部系统行（`:1459`），然后在**同一事务句柄**上计数 pipelines ×2 + 079 + 073 + 062 ×2（`:1250`、`:1372`），然后 DELETE（`:1495`）。任一计数非零 → 事务内抛 409 `ExternalSystemConflictError` → 回滚。 |
 | 写入方 | `lib/external-system-pointer-lock.cjs` `lockExternalSystemForPointerWrite`（`:117`，落到 `db.selectOneForKeyShare`，`lib/db.cjs:268` 渲染 `… LIMIT 1 FOR KEY SHARE`，`:275`）——079 与 062 经它；pipelines/templates **不经它**：`pipelines.cjs` `requireExternalSystem`（`:470`）直接调 `db.selectOneForKeyShare`，where 是 pipeline 自己的 `scopeWhere(normalized)` + id（第 2.5 节） | 在**自己的写事务内**、隔离级别钉定之后（第 2.7 节）、碰指针行之前，对将要指向的外部系统行取 `FOR KEY SHARE`；读回 `null`（本租户不存在，或删除在自己等锁期间已提交——刻意不区分）→ 按该路径**既有的 values-free 错误形状**拒绝，且不写任何东西。 |
 
 两种交错都由数据库锁管理器封闭，不靠时序：
 
 - **删除在前**：D 持 FOR UPDATE，计数为零，W 的 KEY SHARE 等待；D COMMIT 后 W 恢复、重读（PG 的 EvalPlanQual 重查）得 `null` → W 拒绝，指针 0 行。
 - **写入在前**：W 持 KEY SHARE，D 的 FOR UPDATE 等待；W COMMIT 后 D 恢复、计数（READ COMMITTED 下每条语句在等锁之后取新快照）看见指针 → 409，系统行保留。
+
+**不取锁的 062 approve 靠计数顺序封住，不靠锁**（第四轮终审补记）：062 的 `approve`（draft→approved）不对系统行取锁（第 3 节），所以它可以在删除方两条 062 计数**之间**提交。删除方按生命周期顺序、逐条 await 地数——先 draft 后 approved——才让这种交错无害；顺序反过来就悬空。这是一条**顺序依赖**，第一至三轮的覆盖矩阵没有记录，见第 2.8 节。
 
 **隔离级别**：协议只在 READ COMMITTED 下成立（等锁之后的每条语句取新快照）。第一、二轮把它写成「部署实际级别，足够」——只是假定，代码不强制；第三轮独立核验在 `default_transaction_isolation = 'repeatable read'` 的库上证明写入在前的交错会悬空。现在五个参与方事务的**第一条语句**都是 `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`，不再依赖服务器 / 库 / 角色 / 连接的默认值——见第 2.7 节。
 
@@ -53,7 +55,7 @@ PG 对任何锁子句都要求目标表**至少一列的 UPDATE 权限**（`SELE
 |---|---|---|
 | 数据源删除（#5784 PR-A） | `data_sources` FOR UPDATE → 只 COUNT 外部系统（不取锁） | `packages/core-backend/src/data-adapters/DataSourceManager.ts:1070` |
 | 外部系统写入（绑定 connection_id） | `data_sources` KEY SHARE（FK RI） → 外部系统行 | `external-systems.cjs` upsert；FK `fk_integration_external_systems_live_connection_id` |
-| **外部系统删除（本刀）** | 外部系统行 FOR UPDATE → 只 COUNT 指针表（COUNT 不取行锁） → DELETE 自己那一行 | `external-systems.cjs:1420` → `:1232/:1347` → `:1456`；删除子表行不对父表取锁 |
+| **外部系统删除（本刀）** | 外部系统行 FOR UPDATE → 只 COUNT 指针表（COUNT 不取行锁） → DELETE 自己那一行 | `external-systems.cjs:1459` → `:1250/:1372` → `:1495`；删除子表行不对父表取锁 |
 | 079 `set` | 外部系统 KEY SHARE → 绑定行（select / update / insert） | `stock-preparation-source-binding-store.cjs:322` 在 `trx.selectOne(BINDING_TABLE)` 之前 |
 | 062 `saveVersion` | 外部系统 KEY SHARE → 家族扫描 → INSERT 版本 → INSERT 审计 | `read-source-config-store.cjs:274` 在 `trx.select(CONFIG_TABLE)` 之前 |
 | pipelines `upsertPipeline` / templates `instantiateTemplate` | 源系统 KEY SHARE → 目标系统 KEY SHARE → pipeline 行 → field mappings | `pipelines.cjs:470-474`（`writePipelineRow :521` 内）；templates 在 `integration-templates.cjs:476` 的事务里调用 `:489` |
@@ -63,7 +65,7 @@ PG 对任何锁子句都要求目标表**至少一列的 UPDATE 权限**（`SELE
 
 ### 2.3 42P01 容忍搬到事务前面
 
-前一刀容忍「部署没跑过 079/062/073」（按 SQLSTATE `42P01` 判、放行删除）。事务内的 42P01 会让 PG 中止事务（后续语句 25P02），放行会静默变成拒绝。所以 `probeAbsentDependentTables`（`external-systems.cjs:1301`）在事务**之前**用 autocommit COUNT 探一次三张表是否存在——**探针的计数值丢弃**（没有锁、正是本协议要替换的那个快照），只保留缺失集合；事务内按缺失集合跳过。非 42P01 错误（42501、08006…）仍从探针处传播、删除不发生，与前一刀一致（B-07/B-08/B-14 仍绿）。代价：每次删除多 4 条 COUNT（删除是低频路径）。
+前一刀容忍「部署没跑过 079/062/073」（按 SQLSTATE `42P01` 判、放行删除）。事务内的 42P01 会让 PG 中止事务（后续语句 25P02），放行会静默变成拒绝。所以 `probeAbsentDependentTables`（`external-systems.cjs:1323`）在事务**之前**用 autocommit COUNT 探一次三张表是否存在——**探针的计数值丢弃**（没有锁、正是本协议要替换的那个快照），只保留缺失集合；事务内按缺失集合跳过。非 42P01 错误（42501、08006…）仍从探针处传播、删除不发生，与前一刀一致（B-07/B-08/B-14 仍绿）。代价：每次删除多 4 条 COUNT（删除是低频路径）。
 
 ### 2.4 错误形状（全部沿用各路径既有词表）
 
@@ -72,7 +74,7 @@ PG 对任何锁子句都要求目标表**至少一列的 UPDATE 权限**（`SELE
 | 079 `set` | `StockPreparationSourceBindingStoreError` code **`SOURCE_BINDING_SOURCE_NOT_LIVE`**，details 只带 `actionId` | 409（`sendError` 优先取 `.status`；与 `SOURCE_BINDING_WRITE_CONFLICT`、#5784 的 `EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE` 同类） | `stock-preparation-source-binding-store.cjs:54`；路由在调用 `set` 之前已用 `assertBindableSource` 404 过看不见的系统，所以事务内的拒绝按构造就是与并发删除的冲突 |
 | 062 `saveVersion` | `ReadSourceConfigValidationError`，`errors: [{ code: 'READ_SOURCE_SYSTEM_NOT_FOUND', field: 'systemId', reason: 'not_found' }]` | 400 `READ_SOURCE_CONFIG_INVALID`（`http-routes.cjs mapReadSourceConfigError`，形状不变） | `read-source-config-store.cjs:111` |
 | pipelines / templates | `PipelineValidationError('sourceSystemId does not exist in this tenant/workspace')`（原句逐字） | 400（`/Validation/`） | `pipelines.cjs:477-479`。之前这条路径若输掉竞争会一路走到 INSERT 撞 057 的 FK，以裸 23503 上抛（`P-PIPE-A` 在 WPIPE 变异体上实测就是这个形状） |
-| 删除方 | `ExternalSystemConflictError`，message/details 与前一刀逐字相同（pipeline 命中仍是 `external system is used by pipelines`） | 409 | `external-systems.cjs:1435-1451` |
+| 删除方 | `ExternalSystemConflictError`，message/details 与前一刀逐字相同（pipeline 命中仍是 `external system is used by pipelines`） | 409 | `external-systems.cjs:1475-1492` |
 
 values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；062 的 tuple 只有 field/reason；`L-10` 断言 079 写入方（经 `lockExternalSystemForPointerWrite`）锁的 where 键恰为 `['id','tenant_id']`（无 workspace 键，与删除守卫的依赖计数同域）；`L-11` 断言 pipelines 写入方锁的 where 键为 `['id','tenant_id','workspace_id']`、删除方 pipelines 计数为 `['source_system_id'|'target_system_id','tenant_id','workspace_id']`、079/073/062 计数无 workspace 键（第 2.5 节）。
 
@@ -83,8 +85,8 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 | 079 `set` 锁 | `tenant_id` + `id` | `external-system-pointer-lock.cjs:125-128` | `WHERE "tenant_id" = $1 AND "id" = $2 LIMIT 1 FOR KEY SHARE` |
 | 062 `saveVersion` 锁（铸新版本时） | `tenant_id` + `id` | 同上 | 同上 |
 | pipelines / templates `requireExternalSystem` 锁 | `tenant_id` + `workspace_id` + `id`（`scopeWhere(normalized)` + id——**原有形状**，本刀只把 `selectOne` 换成 KEY SHARE 读） | `pipelines.cjs:474-477` | `WHERE "tenant_id" = $1 AND "workspace_id" IS NULL AND "id" = $2 LIMIT 1 FOR KEY SHARE`（源、目标各一条） |
-| 删除方 079 / 073 / 062 计数 | `tenant_id` + 指针列（073、062 另带 `status`），**无 workspace** | `external-systems.cjs:1277-1291`、`:1347` | `WHERE "tenant_id" = $1 AND "external_system_id" = $2`（073 另 `AND "status" = $3`；062 按两个活状态各一条） |
-| 删除方 pipelines 计数 | `tenant_id` + `workspace_id` + 指针列（`scopeWhere`，#5923 **原有**——前一刀设计文档第 (a) 条本来就写着「与 `countPipelineReferences` 不同」） | `external-systems.cjs:1232-1243` | `WHERE "tenant_id" = $1 AND "workspace_id" IS NULL AND "source_system_id" = $2`（target 同形） |
+| 删除方 079 / 073 / 062 计数 | `tenant_id` + 指针列（073、062 另带 `status`），**无 workspace** | `external-systems.cjs:1299-1313`、`:1372` | `WHERE "tenant_id" = $1 AND "external_system_id" = $2`（073 另 `AND "status" = $3`；062 按两个活状态各一条） |
+| 删除方 pipelines 计数 | `tenant_id` + `workspace_id` + 指针列（`scopeWhere`，#5923 **原有**——前一刀设计文档第 (a) 条本来就写着「与 `countPipelineReferences` 不同」） | `external-systems.cjs:1250-1261` | `WHERE "tenant_id" = $1 AND "workspace_id" IS NULL AND "source_system_id" = $2`（target 同形） |
 
 **为什么不是协议漏洞**：pipeline 写入方的 where 与删除方 pipelines 计数是**同一个作用域**——一条 pipeline 只能命名它自己 workspace 里的系统，where 不命中就在写任何东西之前被 `PipelineValidationError` 拒绝；命中时锁住的就是删除方 `FOR UPDATE` 的同一物理行（`id` 是主键）。作用域之外的配对由 057 的真 FK 兜底：一条 ws2 的 pipeline 行指向租户级系统**只能靠裸 INSERT 造出来**，删除方计数不到它，DELETE 撞 FK 以 `23503` 失败、系统行保留（真 PG 实证：不是 409，也不是悬空；旧代码同样如此）。
 
@@ -110,7 +112,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 
 | 参与方 | 钉定位置 | 钉定之后的第一条读 |
 |---|---|---|
-| 删除 `deleteExternalSystem` | `lib/external-systems.cjs:1419` | FOR UPDATE |
+| 删除 `deleteExternalSystem` | `lib/external-systems.cjs:1458` | FOR UPDATE |
 | 079 `set` | `lib/stock-preparation-source-binding-store.cjs:321`（唯一索引冲突的重试循环每次开新事务，每次都钉） | KEY SHARE |
 | 062 `saveVersion` 铸造事务 | `lib/read-source-config-store.cjs:266` | KEY SHARE |
 | pipelines `upsertPipeline` | `lib/pipelines.cjs:600` | 源系统 KEY SHARE |
@@ -139,6 +141,36 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 
 **执行型见证**：第 6 节（内存 F-ISO / I-RR / I-SER / FC-08…13 / 7 个隔离变异体）与第 7.5 节（真 PG：RR、SERIALIZABLE 会话默认下 16 条 I-* 用例 + 两条哨兵；整份套件在 `ALTER DATABASE … repeatable read` 的库上跑）。
 
+### 2.8 062 两条计数的顺序：draft 先于 approved，逐条发出（第四轮终审）
+
+**终审结论（成立）**：`LIVE_READ_SOURCE_CONFIG_STATUSES = ['draft', 'approved']`（`external-systems.cjs:107`）决定删除方两条 062 COUNT 的发出顺序（`dependentTableQueries`，`:1299`，按它展开），而 062 的 `approve`（`read-source-config-store.cjs` `transition`，draft→approved）不取系统行锁。终审探针（真 PG 16.10、RC 库，删除方停在事务内第二条 062 COUNT 之前、让 approve 提交）：正品 → 409、系统行保留；把数组倒成 `['approved', 'draft']` 的变异体 → 删除成功、系统行 0、指向它的 approved 行 1（悬空）。同一变异体下真 PG 套件 32/32、内存协议套件全绿——**没有任何用例见证这条顺序依赖**；第 3 节覆盖矩阵只写了「approve 不需要锁」。
+
+**为什么 draft 先于 approved 就够**（三个前提都在代码里成立）：
+
+1. 状态只前进：`STATUS_TRANSITIONS` 只有 draft→approved、approved→retired（`read-source-config-store.cjs:26-29`），没有回退。
+2. 删除方持 FOR UPDATE 期间不会出现新的 062 行：铸造取 KEY SHARE 被挡住（第 2 节）；登记的复用路径（第 2.6 节）不写行。
+3. READ COMMITTED 下每条 COUNT 取自己的快照（第 2.7 节钉定）。
+
+于是第二条（approved）计数执行时仍是活状态的行，要么那时已是 approved（第二条数到），要么那时仍是 draft——那么第一条执行时它也是 draft（只前进），第一条数到。approve 夹在两条之间最多让同一行被数两次（`readSourceConfigCount = 2`），只会多拒、不会漏。顺序反过来（approved 先）：第一条执行时行还是 draft、第二条执行时已是 approved，两条都数不到，合计 0，DELETE 提交后留下一条**可被消费的 approved** 指针。若将来给 062 加状态，或加任何让行在这张列表里「往回走」的转换（例如 un-retire），这条论证要重做。
+
+**做法（运行时改动仅限计数顺序显式化，锁协议不动）**：
+
+- `countDependentBindingReferences`（`external-systems.cjs:1372`）从 `Promise.all` 改为逐条 `await`：一条计数返回之后才发下一条。之前的 draft 先于 approved 来自「同一连接上 pg 客户端按调用顺序排队」，现在不依赖这一点。删除事务上发出的语句与顺序和之前相同，往返次数不变（pg 客户端本来就是一条返回再发下一条）。
+- 注释写明这条顺序依赖：`LIVE_READ_SOURCE_CONFIG_STATUSES`（`:86-107`）、`dependentTableQueries`（`:1295-1298`）、`countDependentBindingReferences` 的文档注释与函数体、`deleteExternalSystem` 的协议注释。
+- 既有变异锚点保持命中：`dependent-references` 的 M-2（`Object.freeze(['draft', 'approved'])`）与 M-6 / X4（`if (absentTables.has(table)) return 0`，逐条改写时保留在 `countOne` 里）。
+
+**见证**：
+
+| 见证 | 套件 | 断言 |
+|---|---|---|
+| L-10 / L-11 | 内存协议套件 | 删除事务里两条 062 计数的 `status` 依次为 draft、approved（L-11：且是 DELETE 之前的最后两条计数） |
+| L-12 | 内存协议套件 | 假件门新增 `{ skip, inTransaction }`：删除方停在事务内第二条 062 计数之前，approve 提交；删除 409、`readSourceConfigCount = 2`（同一行先按 draft、再按 approved 各数一次——approve 确实落在两条之间的证据）、系统与配置都在；依赖计数逐条：079、073、062 draft、062 approved 各自 settle 之后才 issue 下一条 |
+| M-ORDER | 内存（常驻变异体） | 数组倒序 → L-12 的交错悬空（删除成功、approved 行 1），计数顺序变为 approved、draft |
+| M-PAR | 内存（常驻变异体） | 计数退回 `Promise.all` → L-12 的逐条断言翻红（四条依赖计数一次全部 issue）。结果本身在假件上仍是 409：假件与 pg 客户端一样按调用顺序执行同一连接上的语句，所以 M-PAR 证明的是「逐条」断言在见证显式串行，不是说旧写法在当前驱动上会悬空 |
+| P-062-APPROVE-BETWEEN | 真 PG 套件 | 会话门新增 `{ inTransaction, skip }`，与 L-12 同形：409、`readSourceConfigCount = 2`、系统 1 行、approved 配置 1 行；删除事务内恰有两条 062 COUNT |
+
+执行记录见第 7.6 节。
+
 ## 3. 写入点穷举（先 grep 再动手）
 
 口径：`grep -rn "integration_stock_prep_source_binding\|integration_read_source_configs\|integration_sealed_export_stock_prep_bindings\|integration_pipelines"` 于 `plugins/plugin-integration-core/lib`、`index.cjs`、`scripts/`、`packages/core-backend/src`（排除测试与 docs），加上 `packages/core-backend/migrations` / `scripts/ops` 的 `INSERT INTO` 扫描。命中并逐条交代：
@@ -146,7 +178,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 | 指针表 | 写入点 | 本刀 | 说明 |
 |---|---|---|---|
 | 079 | `stock-preparation-source-binding-store.cjs` `set`（insert 分支 + update/rebind 分支） | **参与**（`:322`，两个分支共用） | 唯一写入者；`get` 只读。`stock-preparation-handoff-store.cjs:25` 只是注释里引用 079 作先例，不写它 |
-| 062 | `read-source-config-store.cjs` `saveVersion`（铸新 draft） | **参与**（`:274`） | `reuseExisting`（`:214`）返回既有行、不写指针；`transition` approve（draft→approved，两者都是活状态）/ retire（活→终态）不制造新的活指针，不需要锁（若未来加「un-retire」，必须进协议） |
+| 062 | `read-source-config-store.cjs` `saveVersion`（铸新 draft） | **参与**（`:274`） | `reuseExisting`（`:214`）返回既有行、不写指针；`transition` approve（draft→approved，两者都是活状态）/ retire（活→终态）不制造新的活指针，不需要锁（若未来加「un-retire」，必须进协议）。**approve 不取锁之所以安全，靠的是删除方的计数顺序**：它可以落在删除方两条 062 计数之间，删除方先数 draft、后数 approved 且逐条发出才数得到它（第 2.8 节；倒序即悬空，M-ORDER / P-062-APPROVE-BETWEEN） |
 | 062 | `read-source-composition-config-store` | 不写 `system_id` | 只引用 config id |
 | pipelines | `pipelines.cjs` `upsertPipeline`（create + update） | **参与**（`requireExternalSystem :470` 改为 KEY SHARE 读；`upsertPipeline :594` 改为**恒**在 `db.transaction` 内，`:611`；之前只有带 fieldMappings 时才开事务，autocommit 下的锁在语句结束即释放） | 057 有真 FK：PG 的 RI 检查本就对被引用行取 KEY SHARE。显式锁的增益是：输掉竞争时以既有 `PipelineValidationError` 拒绝而不是裸 23503（WPIPE 变异体实测：去掉显式锁后 `P-PIPE-A` 得到的是 pg `DatabaseError`——FK 兜底仍无悬空，但错误形状退化） |
 | pipelines | `integration-templates.cjs` `instantiateTemplate` | **同一代码路径**（`:476` 事务内 `:489` 调 `writePipelineRow`） | `L-09` 结构钉 + `integration-templates.test.cjs` 的假件已带 `selectOneForKeyShare` |
@@ -190,6 +222,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 - **第三轮新增（内存协议套件）**：假件按 `createLockingDb({ defaultIsolation })` 建模 REPEATABLE READ（事务第一条非 SET 语句取一次快照、在它的等锁之前；此后读都读快照；锁读遇到快照之后被已提交事务删掉的行抛 `40001`）与 `SET TRANSACTION` 必须第一条（假件对**任何**晚到的 SET 抛 `25001` 并中止，比 PG 严——PG 只拒绝改变级别的晚到 SET，见第 2.7 节；故意晚发 SET 的只有 F-ISO (3)，它是 RR 默认下晚到的 SET READ COMMITTED，PG 同样拒绝；第三轮终审订正时把假件这一条在内存里改成与 PG 同义——只在级别不同时抛——整个套件照样通过、用例输出行逐行相同）；SSI 不建模（SERIALIZABLE 按 RR 处理，真 PG 套件跑真的）。新增 **F-ISO**（直接断言上述模型，防止以后「简化」假件使下列用例空转）、**I-RR / I-SER**（删除、079、062、pipeline、template 五方 × 两种交错，在 RR / SERIALIZABLE 默认下：不悬空、各自既有拒绝形状、不出裸 `40001`、每个事务第一条都是 SET READ COMMITTED——各 16 个事务）、**FC-08…13**（钉定入口拒绝 null / `{}` / 根句柄；删除与四个写入方在缺 `setTransactionIsolationLevel` 的事务句柄上拒绝，事务内零语句、回滚、无指针）、7 个隔离变异体（M-ISO-DEL：删除方去钉定 → RR 下写入在前悬空，同一变异体在 RC 默认下仍 409 作对照；M-ISO-079 / 062 / PIPE / TPL：写入方去钉定 → RR 下删除在前的拒绝变成裸 `40001`；M-ISO-LEVEL：入口钉成 repeatable read → RC 库上写入在前也悬空；M-FC-ISO：入口降级为「缺方法就跳过」→ FC-08、FC-10 翻）。L-10 / L-11 / FC-05 改为断言「第一条是 SET READ COMMITTED、第一条读是锁」。`deleteFirst` / `writeFirst` 把「等门」与对方自己的结束赛跑，任何一方没走到门就返回可见的失败而不是挂住。
 - **完成标记（两个内存套件）**：`external-systems-delete-bind-lock-protocol` 与 `external-systems-delete-dependent-references` 只有 `main()` 走到最后一行才以 0 退出；否则 `process.on('exit')` 把退出码改为 1 并打印未完成。原因：一个永不结束的 promise 会让事件循环排空、node 以 0 退出且无输出——挂住读起来像通过。执行型见证：用预加载脚本让 `deleteExternalSystem` 永不结束，旧文件两套件均「退出 0、输出 0 行」，新文件均「退出 1、打印未完成」。本轮改代码时实际撞上过一次：钉定落地、假件尚未补方法时，协议套件就是「0 行输出、退出 0」。
 - **第三轮新增（真 PG 套件）**：每种敌意默认（`repeatable read`、`serializable`）各开一对会话，连接上 `SET SESSION default_transaction_isolation`；**I-RR-SENTINEL / I-SER-SENTINEL** 先证明裸 BEGIN 在这对会话上确实继承该级别；**I-RR-* / I-SER-*** 16 条（五方里的 079 / 062 / PIPE / TPL × A / B；删除方在每一条里都参与）断言：先断言结局 `{ systemRows, pointerRows }`（回归时报告的就是悬空本身），再断言等锁、各自拒绝形状（永远不是裸 SQLSTATE）、在**停在门口的事务内部**查到的 `transaction_isolation` 是 `read committed`、两个会话每个 BEGIN 之后紧跟 SET。迁移表加 061（模板表）。
+- **第四轮新增（第 2.8 节）**：内存协议套件加 L-12（approve 落在两条 062 计数之间）、L-10 / L-11 的 062 计数顺序断言、两个常驻变异体 M-ORDER / M-PAR（变异体 15 → 17，正品回归末尾再跑 L-12）；假件的 `gateBefore` 支持 `countRows` 与 `{ skip, inTransaction }`。真 PG 套件加 P-062-APPROVE-BETWEEN（32 → 33 例），会话门同样支持 `{ inTransaction, skip }`。CI 接线不变（内存套件仍在 `integration-guard.yml` 插件链；真 PG 套件仍待 workflow 权限接线）。
 - 套件里的 `EXTERNAL_SYSTEM_LOCK_PROTOCOL_PLUGIN_ROOT` 只用于第 7 节的旧红与变异运行，CI 不设。
 
 ## 7. 验证（全部执行型）
@@ -273,6 +306,33 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 
 回归（本机，CRLF 检出）：整条插件链 230 个套件 225 通过 / 5 失败，失败的 5 个（`sealed-export-s3-private-ingestion-migration`、`gip-sqlserver-snapshot-paged-read-profile`、`stock-preparation-department-fields-and-write-scoping`、`sealed-export-s4-generation-migration`、`sealed-export-s6a-source-authority-adapter-projection`）与改动前在旧 head 上跑出的失败集合完全相同（本机既有红，与本刀无关）；改动后、补假件前因钉定新红的 13 个套件补后全绿（其中 `sealed-export-package-provenance` / `-s5-evidence` 是 pin 重算）。`node --test scripts/ops/scenario-b-replay.test.mjs scripts/ops/scenario-b-replay-contract.test.mjs` 37 / 37；`scripts/ops/scenario-b-replay-ci-wiring.test.mjs` 7 / 7。
 
+### 7.6 第四轮：062 两条计数的顺序（本机便携 PG 16.10，只监听回环，`initdb --locale=C -E UTF8`；`g5923_rc` 默认 read committed，`g5923_rr` 默认 repeatable read）
+
+**先复现**（终审探针，删除方停在事务内第二条 062 COUNT 之前，另一会话 approve 提交）：
+
+| 插件代码 | 删除结果 | 系统行 | approved 配置 |
+|---|---|---|---|
+| 旧 head `8ec811fb2`（`git archive`） | 409 `ExternalSystemConflictError` | 1 | 1 |
+| 旧 head，数组倒成 `['approved', 'draft']` | 删除成功 | **0** | 1（悬空） |
+| 新 head | 409 `ExternalSystemConflictError` | 1 | 1 |
+
+**旧 → 新**：
+
+| 运行 | 旧 head `8ec811fb2` 的 lib | 新 head |
+|---|---|---|
+| 内存协议套件（新文件） | **L-12 红**，红在「逐条」断言：四条依赖计数一次全部 issue、之后才依次 settle。L-12 的结局断言（409、`readSourceConfigCount = 2`、draft 先于 approved）在旧代码上是绿的：旧代码的顺序本来就对，只是来自驱动排队、没有注释也没有见证 | 全绿（17 个变异体），连续 5 次；`external-systems-delete-dependent-references` 连续 5 次绿 |
+| 真 PG 套件（33 例，`g5923_rc`） | 33 / 33：P-062-APPROVE-BETWEEN 在旧代码上也绿（原因同上），这一条的红只在变异体上出现 | 33 / 33（共 3 次）；`g5923_rr` 33 / 33 |
+
+**变异自证**（新 head 的插件目录整份复制到 scratchpad 后单点改动，工作树未动）：
+
+| 变异 | 改动 | 内存协议套件 | `dependent-references` | 真 PG（`g5923_rc`，33 例） |
+|---|---|---|---|---|
+| M-ORDER | `['draft', 'approved']` → `['approved', 'draft']` | L-10 红（计数顺序变为 approved、draft）；L-12 交错悬空由常驻 M-ORDER 臂断言 | M-2 锚点缺失红（M-2 就锚在这个常量上，预期） | **1 红**：P-062-APPROVE-BETWEEN 报 `{ systemRows: 0, approvedRows: 1 }`（悬空），其余 32 绿 |
+| M-PAR | 逐条 → `Promise.all(dependentTableQueries(…).map(countOne))` | L-12 逐条断言红 | 绿 | 33 / 33：pg 客户端按调用顺序排队，结局不变——所以显式串行只能由内存的逐条断言见证 |
+| X4（逐条改写后回归） | `if (absentTables.has(table)) return 0` → `if (false) return 0` | 绿 | B-06 红 | **1 红**：P-ABSENT |
+
+**回归**：插件链逐套件跑 225 / 230，失败的 5 个与第 7.5 节记录的本机既有红相同（`sealed-export-s3-private-ingestion-migration`、`stock-preparation-department-fields-and-write-scoping`、`sealed-export-s4-generation-migration` 是 real-DB step contract 找不到 Python 而 fail-closed；`gip-sqlserver-snapshot-paged-read-profile`、`sealed-export-s6a-source-authority-adapter-projection` 在旧 head 上同一断言红）；`external-systems` 绿；`node --test scripts/ops/scenario-b-replay.test.mjs scripts/ops/scenario-b-replay-contract.test.mjs` 37 / 37。哨兵四种组合（33 例）：`DATABASE_URL` + `EXPECT_DB=1` → 33 / 33；只有 `DATABASE_URL` → 32 通过 + 1 skipped（哨兵）；`EXPECT_DB=1` 无 `DATABASE_URL` → 1 failed + 32 skipped、退出码 1；两者都无 → 33 skipped、退出码 0。
+
 ## 8. 没有做 / 已知代价
 
 - 073 未参与（第 5 节）。
@@ -314,3 +374,10 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 | 顺手 2 | 「所有真库套件都逐文件写进 `plugin-tests.yml`」 | 不成立：还有 `approval-realdb-*.yml` 等专用 workflow。改为「CI 里跑真库套件的步骤都按文件点名（`plugin-tests.yml` 真库步骤或专用 workflow），没有按目录 / glob 收集的车道」 |
 | 顺手 3 | 哨兵四种组合的数字停在 14 例（PR 正文 14/14、13 + 1 skipped）/ 11 例（第 6 节 11/11）；PR 正文「原 11 + P-ABSENT + P-062-REUSE-A/B + 哨兵」把哨兵数了两次 | 本机 PG 16.10 对当前 32 例重跑四种组合：32 passed / 31 passed + 1 skipped / 1 failed + 31 skipped（退出 1）/ 32 skipped。PR 正文改为「原 11（含哨兵）+ P-ABSENT + P-062-REUSE-A/B = 14，再加两条 I-*-SENTINEL 与 16 条 I-* = 32」 |
 | 顺手 4 | 「可见的跳过」 | 默认报告器下只在汇总行计数（`Test Files 1 skipped` / `Tests 32 skipped`），没有逐文件行。改为「计入 skipped 文件数」 |
+
+## 12. 第四轮终审处置记录（2026-09-28）
+
+| # | 终审结论 | 处置 |
+|---|---|---|
+| blocking 1 | 062 `approve` 落在删除方两条 062 计数之间的封闭，依赖一条未注明、未见证的计数顺序（draft 先于 approved）：数组倒序的变异体在真 PG 上悬空，同一变异体下真 PG 套件 32 / 32、内存协议套件全绿；覆盖矩阵只写「approve 不需要锁」 | 成立，先复现（第 7.6 节）。运行时只把计数顺序显式化：`countDependentBindingReferences` 逐条 `await`，不再依赖 `Promise.all` 加驱动排队；锁协议不动。注释写明顺序依赖（常量、`dependentTableQueries`、计数函数、删除方协议注释）；第 2.8 节写论证与三个前提，第 3 节覆盖矩阵 062 行补记。见证：L-10 / L-11 顺序断言、L-12、M-ORDER、M-PAR（内存），P-062-APPROVE-BETWEEN（真 PG） |
+| 顺手 | `external-systems.cjs` 与 `external-systems-delete-dependent-references` 注释里的 `read-source-config-store.cjs:23-28`：本 PR 给该文件加了一行 require 之后指错一行 | 改为 `:24-29`；本文 `external-systems.cjs` 的行号引用按新行号重算（§2.4 删除方 409 的范围顺带订正为 `if` 块本身 `:1475-1492`） |

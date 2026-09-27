@@ -83,9 +83,27 @@ const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
 const STOCK_PREP_SOURCE_BINDING_TABLE = 'integration_stock_prep_source_binding'
 const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
 const SEALED_EXPORT_STOCK_PREP_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
-// 062's lifecycle is draft -> approved -> retired (`lib/read-source-config-store.cjs:23-28`).
+// 062's lifecycle is draft -> approved -> retired (`lib/read-source-config-store.cjs:24-29`).
 // `retired` is the terminal, deliberately non-consumable state: a retired version can never go back
 // to approved, so it is history, not a live pointer, and must NOT keep a system undeletable forever.
+//
+// THE ORDER OF THIS ARRAY IS LOAD-BEARING (#6076 fourth-round final review). The delete side counts
+// 062 once per status, in THIS order, as two statements on its transaction (each one a fresh READ
+// COMMITTED snapshot), and `approve` (draft -> approved) takes NO lock on the system row
+// (`read-source-config-store.cjs` transition: it keeps a live pointer live, it mints none). So an
+// approve CAN commit between the two counts. Counting in lifecycle order — draft, THEN approved —
+// is what makes that harmless: a status only moves forward, and no new 062 row can appear while the
+// delete holds FOR UPDATE (the mint takes KEY SHARE; the registered reuse path writes no row). A row
+// that is live when the approved-count runs is either approved then (that count sees it) or still
+// draft — and then it was draft at the draft-count too (that count saw it). The most an approve in
+// between does is get the same row counted twice, which only refuses. REVERSED (approved, then
+// draft) the approve slips past BOTH counts — the approved-count runs while the row is still draft,
+// the draft-count after it became approved, the total is zero — and the DELETE commits under an
+// approved pointer: a dangle (real PostgreSQL 16.10 and the in-memory suite: mutant M-ORDER against
+// P-062-APPROVE-BETWEEN / L-12).
+// The counts are also issued SERIALLY (`countDependentBindingReferences` awaits each before sending
+// the next), so this order never rests on how a driver queues concurrent queries on one connection.
+// Adding a status here, or a transition that moves a 062 row BACKWARDS in this list, reopens it.
 const LIVE_READ_SOURCE_CONFIG_STATUSES = Object.freeze(['draft', 'approved'])
 // 073's status vocabulary is ACTIVE / RETIRED (`migrations/073_..._runtime_authority.sql:32`), and the
 // reader qualifies a binding ONLY while it is ACTIVE and unexpired
@@ -1274,6 +1292,10 @@ function createExternalSystemRegistry({
     }
   }
 
+  // The list order IS the order the delete transaction issues these counts in
+  // (`countDependentBindingReferences` runs them one at a time). The two 062 entries follow
+  // LIVE_READ_SOURCE_CONFIG_STATUSES — draft BEFORE approved — and that order is load-bearing: an
+  // approve (no system lock) may commit between them, see the note on that constant.
   function dependentTableQueries({ tenantId, id }) {
     return [
       [STOCK_PREP_SOURCE_BINDING_TABLE, { tenant_id: tenantId, external_system_id: id }],
@@ -1337,6 +1359,9 @@ function createExternalSystemRegistry({
    * where-builder renders a plain equality per key with no IN support (`lib/db.cjs:buildWhereClause`
    * — an array value would be JSON-stringified into `= $n` and silently match nothing), so 062's two
    * live statuses are counted as two equality queries and summed rather than smuggled in as a list.
+   * Those two queries run SERIALLY and draft FIRST (`dependentTableQueries` order): an approve can
+   * commit between them, and only lifecycle order keeps that row inside the sum (see
+   * LIVE_READ_SOURCE_CONFIG_STATUSES; L-12 / P-062-APPROVE-BETWEEN witness it, M-ORDER flips it).
    *
    * 073 is the one table here whose migration REVOKEs ALL FROM PUBLIC and grants only two named
    * deployment roles (`073:432-446`). Where the API's own role is neither the table owner nor one of
@@ -1345,14 +1370,25 @@ function createExternalSystemRegistry({
    * fix is a SELECT grant, not a swallowed error (see the design doc's residuals).
    */
   async function countDependentBindingReferences(executor, { tenantId, id }, { absentTables = new Set() } = {}) {
+    // ONE AT A TIME, in `dependentTableQueries` order: each count is awaited before the next is
+    // issued. NOT Promise.all — the 062 pair must run draft THEN approved (an approve may commit
+    // between them; LIVE_READ_SOURCE_CONFIG_STATUSES), and Promise.all would take that order only
+    // from the driver queueing concurrent queries on one connection in call order. On the delete
+    // transaction the statements and their order are the same as before; they just no longer depend
+    // on that queue (the in-memory L-12 pins "approved-count issued only after draft-count settled").
+    const countOne = async ([table, where]) => {
+      if (absentTables.has(table)) return 0
+      return (await countDependentRows(executor, table, where)).count
+    }
+    const counts = []
+    for (const query of dependentTableQueries({ tenantId, id })) {
+      counts.push(await countOne(query))
+    }
     const [
       stockPrepSourceBindingMatches,
       sealedExportBindingMatches,
       ...readSourceConfigMatches
-    ] = await Promise.all(dependentTableQueries({ tenantId, id }).map(async ([table, where]) => {
-      if (absentTables.has(table)) return 0
-      return (await countDependentRows(executor, table, where)).count
-    }))
+    ] = counts
     return {
       stockPrepSourceBindingCount: stockPrepSourceBindingMatches,
       sealedExportBindingCount: sealedExportBindingMatches,
@@ -1376,6 +1412,9 @@ function createExternalSystemRegistry({
    *     commits; the count then SEES that pointer and refuses 409. Nothing was deleted.
    *   * delete in flight, then writer → the writer's KEY SHARE WAITS on this FOR UPDATE until COMMIT;
    *     its re-read then finds no row and it refuses in its own path's error shape. No pointer lands.
+   *   * a 062 APPROVE (draft -> approved) takes no lock and may commit between the delete's two 062
+   *     counts; counting draft THEN approved, serially, still sees that row (it may count it twice,
+   *     which only refuses). The order is load-bearing — see LIVE_READ_SOURCE_CONFIG_STATUSES.
    * `integration_pipelines` (057) participates through its REAL foreign key — PostgreSQL's RI check
    * takes the same KEY SHARE — and additionally through `pipelines.cjs` requireExternalSystem's
    * explicit KEY SHARE, so a pipeline write that loses the race refuses as the values-free

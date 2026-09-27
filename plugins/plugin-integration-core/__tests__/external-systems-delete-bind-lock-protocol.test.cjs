@@ -32,6 +32,13 @@
 //               scope), and the 079/073/062 counts carry NO workspace key. A pipeline written under a
 //               workspace hint cannot name a tenant-level system at all (refused before any write),
 //               so the row it pins is still the one physical row the delete locks — or none.
+//               L-10 and L-11 also pin the delete side's two 062 counts as draft THEN approved.
+//   L-12        a 062 APPROVE (draft -> approved; takes NO lock on the system row) committing BETWEEN
+//               the delete side's two 062 counts (#6076 fourth-round final review): the delete still
+//               refuses 409 with the row counted twice (draft, then approved — the proof the approve
+//               landed in between), system and config kept; and the dependent counts are issued ONE
+//               AT A TIME (each settled before the next is issued), so the draft-first order does not
+//               rest on a driver queueing concurrent queries on one connection
 //   FC-01..07   FAIL-CLOSED witnesses (a helper that cannot lock is REFUSED, never degraded to an
 //               unlocked read): 079 / 062 constructors reject a db lacking ONLY selectOneForKeyShare;
 //               lockExternalSystemForPointerWrite rejects an executor without it and never calls
@@ -57,6 +64,13 @@
 //   M-WPIPE     mutation: pipeline endpoint check with plain SELECT -> dangles
 //   M-FC-*      mutations that DEGRADE a fail-closed guard to an unlocked read (lock helper, 079 and
 //               062 constructors, pipeline endpoint check) -> the matching FC assertion flips
+//   M-ORDER     mutation: LIVE_READ_SOURCE_CONFIG_STATUSES reversed to (approved, draft) -> L-12's
+//               interleaving DANGLES (the approve slips past both counts: total zero, DELETE commits
+//               under an approved pointer) and the L-10 / L-11 status order flips
+//   M-PAR       mutation: the dependent counts back on Promise.all -> L-12's one-at-a-time pin flips
+//               (the approved count is issued before the draft count settled). The outcome itself
+//               still holds on this fake, which — like pg's client queue — runs one connection's
+//               statements in call order: M-PAR shows that pin is what witnesses the serialization.
 // ISOLATION PIN (#6076 third-round verification: the protocol held only at READ COMMITTED and the code
 // merely ASSUMED that level; under a REPEATABLE READ default the writer-first interleaving dangled on
 // PostgreSQL 16). The fake now models REPEATABLE READ (one snapshot at the first statement) and a
@@ -156,6 +170,10 @@ const MODULES = {
 //   * Every lock is released at COMMIT / ROLLBACK.
 //   * `gateBefore(op, table)`: the next such statement (any tx) parks until `release()`; `reached`
 //     resolves when it parks. This is how the interleavings are scheduled deterministically.
+//     `op` is insertOne, deleteRows or countRows. Options: `{ inTransaction: true }` lets autocommit
+//     statements through (the delete side's pre-transaction 42P01 probe counts the same tables), and
+//     `{ skip: n }` lets the first n matching statements through and parks the next one (L-12 parks
+//     the SECOND 062 count inside the delete transaction).
 //   * `waitUntilBlocked()`: resolves `true` once some tx is parked on a LOCK (not a gate), `false`
 //     after a bounded number of turns with nobody blocked — which is what a mutant that skipped its
 //     lock looks like.
@@ -232,10 +250,15 @@ function createLockingDb({ defaultIsolation = 'read committed' } = {}) {
     blocked.add(txId)
     return new Promise((resolve) => lockWaiters.push(() => { blocked.delete(txId); resolve() }))
   }
-  async function gate(op, table) {
+  async function gate(op, table, txId) {
     const key = `${op}:${table}`
     const pending = gates.get(key)
     if (!pending) return
+    if (pending.inTransaction && txId === null) return
+    if (pending.skip > 0) {
+      pending.skip -= 1
+      return
+    }
     gates.delete(key)
     pending.arrived()
     await pending.open
@@ -327,6 +350,7 @@ function createLockingDb({ defaultIsolation = 'read committed' } = {}) {
       countRows(table, where) {
         return statement(async () => {
           record('countRows', table, where)
+          await gate('countRows', table, txId)
           if (countErrors.has(table)) throw countErrors.get(table)
           return visibleRows(table).filter((row) => matches(row, where)).length
         })
@@ -346,7 +370,7 @@ function createLockingDb({ defaultIsolation = 'read committed' } = {}) {
       insertOne(table, row) {
         return statement(async () => {
           record('insertOne', table)
-          await gate('insertOne', table)
+          await gate('insertOne', table, txId)
           const stored = { created_at: '2026-09-25T00:00:00.000Z', updated_at: '2026-09-25T00:00:00.000Z', ...row }
           if (autocommit) rowsOf(table).push(stored)
           else buffer.push(() => rowsOf(table).push(stored))
@@ -376,7 +400,7 @@ function createLockingDb({ defaultIsolation = 'read committed' } = {}) {
       deleteRows(table, where) {
         return statement(async () => {
           record('deleteRows', table, where)
-          await gate('deleteRows', table)
+          await gate('deleteRows', table, txId)
           const victims = []
           for (const row of rowsOf(table).filter((candidate) => matches(candidate, where))) {
             const locked = await acquire(table, { id: row.id }, 'exclusive')
@@ -438,12 +462,12 @@ function createLockingDb({ defaultIsolation = 'read committed' } = {}) {
     rows(table) { return rowsOf(table).map((row) => ({ ...row })) },
     seed(table, rows) { rowsOf(table).push(...rows.map((row) => ({ ...row }))) },
     failCountWith(table, error) { countErrors.set(table, error) },
-    gateBefore(op, table) {
+    gateBefore(op, table, { skip = 0, inTransaction = false } = {}) {
       let arrived
       let release
       const reached = new Promise((resolve) => { arrived = resolve })
       const open = new Promise((resolve) => { release = resolve })
-      gates.set(`${op}:${table}`, { open, release, arrived })
+      gates.set(`${op}:${table}`, { open, release, arrived, skip, inTransaction })
       return { reached, release }
     },
     async waitUntilBlocked(turns = 200) {
@@ -814,6 +838,11 @@ async function testLockOrderAndScopePins() {
   assert.equal(deleteOps[1].table, EXTERNAL_SYSTEMS_TABLE)
   const countOps = deleteOps.filter((call) => call.op === 'countRows')
   assert.equal(countOps.length, 6, 'L-10: pipelines ×2 + 079 + 073 + 062 ×2 are all counted INSIDE the transaction')
+  assert.deepEqual(
+    countOps.filter((call) => call.table === READ_SOURCE_CONFIG_TABLE).map((call) => call.where.status),
+    ['draft', 'approved'],
+    'L-10: the two 062 counts run draft THEN approved — the lifecycle order an approve committing between them cannot slip past (L-12)',
+  )
   assert.equal(deleteOps[deleteOps.length - 1].op, 'deleteRows', 'L-10: the DELETE is the last statement')
   assert.ok(deleteOps.every((call) => call.op !== 'selectOneForUpdate' || call === deleteOps[1]),
     'L-10: the delete side takes exactly ONE row lock — it never locks a pointer row (no lock cycle is possible)')
@@ -828,7 +857,7 @@ async function testLockOrderAndScopePins() {
   assert.deepEqual(Object.keys(bindOps[1].where).sort(), ['id', 'tenant_id'],
     'L-10: the 079 writer (via lockExternalSystemForPointerWrite) pins tenant + id ONLY — the delete guard\'s dependent-count scope; no workspace key')
   assert.equal(bindOps.length, 2, 'L-10: the refused bind issued nothing after the lock returned null')
-  console.log('  L-10 lock order pinned: delete = SET READ COMMITTED → FOR UPDATE → 6 counts → DELETE; 079 writer = SET READ COMMITTED → KEY SHARE(tenant,id)')
+  console.log('  L-10 lock order pinned: delete = SET READ COMMITTED → FOR UPDATE → 6 counts (062: draft, then approved) → DELETE; 079 writer = SET READ COMMITTED → KEY SHARE(tenant,id)')
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -871,6 +900,11 @@ async function testPipelineScopePins() {
     ],
     'L-11: the delete-side pipeline count IS workspace-filtered (the scope the pipeline writer locks with); 079/073/062 are NOT',
   )
+  assert.deepEqual(
+    deleteCounts.slice(-2).map((call) => [call.table, call.where.status]),
+    [[READ_SOURCE_CONFIG_TABLE, 'draft'], [READ_SOURCE_CONFIG_TABLE, 'approved']],
+    'L-11: the 062 pair closes the count sequence, draft THEN approved (L-12: an approve between them is still counted)',
+  )
 
   // Scope consistency, executed: a pipeline written under a workspace hint cannot name a tenant-level
   // (workspace NULL) system — refused before any write — while a 079 bind under the same hint lands,
@@ -889,6 +923,92 @@ async function testPipelineScopePins() {
   }))
   assert.equal(bound.error, null, 'L-11: a ws_1 079 bind at the same tenant-level system lands (tenant + id)')
   console.log('  L-11 scope pinned: pipelines lock/count = tenant+workspace+id (same scope, 057 FK behind it); 079/073/062 counts carry no workspace key')
+}
+
+// ---------------------------------------------------------------------------------------------------
+// L-12 — a 062 APPROVE committing BETWEEN the delete side's two 062 counts (#6076 fourth-round final
+// review). `approve` (draft -> approved, read-source-config-store.cjs transition) takes NO lock on
+// the system row: it mints no new live pointer, so the protocol leaves it out. Nothing therefore
+// stops it from committing while the delete sits between its draft-count and its approved-count
+// (each a fresh READ COMMITTED read). The delete stays correct ONLY because it counts in lifecycle
+// order — draft, then approved — one count at a time (external-systems.cjs
+// LIVE_READ_SOURCE_CONFIG_STATUSES / countDependentBindingReferences). Reversed, the approve slips
+// past both counts and the delete dangles (M-ORDER); the real-PG twin is P-062-APPROVE-BETWEEN.
+// ---------------------------------------------------------------------------------------------------
+const DEPENDENT_COUNT_TABLES = new Set([STOCK_PREP_BINDING_TABLE, SEALED_EXPORT_BINDING_TABLE, READ_SOURCE_CONFIG_TABLE])
+
+// Wraps each TRANSACTION handle's countRows to log when a count is ISSUED (called) and when it
+// SETTLES — the call log of the fake only records when a statement RUNS, which on one connection is
+// always in call order, so it cannot tell "issued one at a time" from "issued all at once".
+function withCountIssueLog(db, log) {
+  return {
+    ...db,
+    transaction: (callback) => db.transaction((trx) => callback({
+      ...trx,
+      countRows(table, where) {
+        const status = where && where.status
+        log.push(['issue', table, status])
+        return trx.countRows(table, where).then((count) => {
+          log.push(['settle', table, status])
+          return count
+        })
+      },
+    })),
+  }
+}
+
+async function approveBetweenReadSourceCounts(factory = createExternalSystemRegistry) {
+  const db = createLockingDb()
+  db.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
+  const store = createReadSourceConfigStore({ db, idGenerator: () => 'rsc_1' })
+  const minted = await store.saveVersion({ tenantId: 't1', workspaceId: null, actor: 'consultant', config: readSourceConfig() })
+  assert.equal(minted.status, 'draft', 'L-12 setup: one DRAFT 062 version at sys_1')
+  const issueLog = []
+  const registry = newRegistry(withCountIssueLog(db, issueLog), factory)
+  // Park the SECOND 062 count issued inside a transaction: the delete side's pre-transaction probe
+  // counts 062 twice in autocommit, and those must pass.
+  const beforeSecond = db.gateBefore('countRows', READ_SOURCE_CONFIG_TABLE, { skip: 1, inTransaction: true })
+  const deletion = settle(registry.deleteExternalSystem(deleteInput()))
+  if (!(await Promise.race([beforeSecond.reached.then(() => true), deletion.then(() => false)]))) {
+    beforeSecond.release()
+    return { reached: false, deleted: await deletion, approved: null, issueLog, db }
+  }
+  // The approve runs to COMMIT while the delete holds FOR UPDATE and is parked between its counts.
+  const approved = await settle(store.approve({ tenantId: 't1', workspaceId: null, id: minted.id, actor: 'approver' }))
+  beforeSecond.release()
+  const deleted = await deletion
+  const [deleteTx] = db.calls.filter((call) => call.op === 'BEGIN' && db.txCalls(call.tx).some((c) => c.op === 'selectOneForUpdate')).map((call) => call.tx)
+  const readSourceCountStatuses = db.txCalls(deleteTx)
+    .filter((call) => call.op === 'countRows' && call.table === READ_SOURCE_CONFIG_TABLE)
+    .map((call) => call.where.status)
+  return { reached: true, deleted, approved, issueLog, readSourceCountStatuses, db }
+}
+
+async function testApproveBetweenReadSourceCounts() {
+  const { reached, deleted, approved, issueLog, readSourceCountStatuses, db } = await approveBetweenReadSourceCounts()
+  assert.equal(reached, true, 'L-12: the delete reached its second 062 count')
+  // The outcome FIRST, so a regression reports the dangle itself.
+  assert.deepEqual(assertNoDangle(db, READ_SOURCE_CONFIG_TABLE, 'system_id'), { systemPresent: true, pointerRows: 1 },
+    'L-12: system kept, the (now approved) config kept')
+  assert.equal(approved.error, null, 'L-12: the approve takes no system lock and commits while the delete is parked')
+  assert.equal(approved.value.status, 'approved')
+  assert.deepEqual(db.rows(READ_SOURCE_CONFIG_TABLE).map((row) => row.status), ['approved'])
+  assert.equal(deleted.error && deleted.error.name, 'ExternalSystemConflictError', 'L-12: the delete is refused 409')
+  assert.equal(deleted.error.details.readSourceConfigCount, 2,
+    'L-12: the one row is counted TWICE — as draft by the first count, as approved by the second: the approve really landed between them, and an over-count only refuses')
+  assert.deepEqual(readSourceCountStatuses, ['draft', 'approved'], 'L-12: draft counted first, approved second')
+  // One at a time: every dependent count settles before the next one is issued.
+  assert.deepEqual(
+    issueLog.filter(([, table]) => DEPENDENT_COUNT_TABLES.has(table)),
+    [
+      ['issue', STOCK_PREP_BINDING_TABLE, undefined], ['settle', STOCK_PREP_BINDING_TABLE, undefined],
+      ['issue', SEALED_EXPORT_BINDING_TABLE, 'ACTIVE'], ['settle', SEALED_EXPORT_BINDING_TABLE, 'ACTIVE'],
+      ['issue', READ_SOURCE_CONFIG_TABLE, 'draft'], ['settle', READ_SOURCE_CONFIG_TABLE, 'draft'],
+      ['issue', READ_SOURCE_CONFIG_TABLE, 'approved'], ['settle', READ_SOURCE_CONFIG_TABLE, 'approved'],
+    ],
+    'L-12: the dependent counts are issued ONE AT A TIME — the approved count is not issued until the draft count has settled',
+  )
+  console.log('  L-12 062 approve (no system lock) committed between the two 062 counts: delete refused 409 with the row counted as draft AND approved; counts issued one at a time; no dangle')
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1207,6 +1327,53 @@ async function testMutationPipelineWriterUnlocked() {
   assert.equal(written.error, null, 'M-WPIPE: the pipeline lands')
   assertDangle(db, PIPELINES_TABLE, 'source_system_id', 'M-WPIPE')
   console.log('  M-WPIPE pipeline endpoint check with a plain SELECT: dangles (the KEY SHARE is load-bearing; the real FK is what saves this on PostgreSQL — see the real-DB suite)')
+}
+
+// M-ORDER — the 062 live statuses counted in REVERSE lifecycle order. Every lock is still taken; only
+// the order of the two 062 counts changes. L-12's interleaving then dangles: the approved-count runs
+// while the row is still draft, the draft-count after it became approved, the total is zero.
+const LIVE_STATUSES_ANCHOR = "const LIVE_READ_SOURCE_CONFIG_STATUSES = Object.freeze(['draft', 'approved'])"
+
+async function testMutationReadSourceCountOrder() {
+  const mutant = compileMutant(MODULES.externalSystems, [
+    [LIVE_STATUSES_ANCHOR, "const LIVE_READ_SOURCE_CONFIG_STATUSES = Object.freeze(['approved', 'draft'])"],
+  ], 'M-ORDER')
+  const { reached, deleted, approved, readSourceCountStatuses, db } = await approveBetweenReadSourceCounts(mutant.createExternalSystemRegistry)
+  assert.equal(reached, true, 'M-ORDER: the delete reached its second 062 count')
+  assert.equal(approved.error, null, 'M-ORDER: the approve commits between the counts')
+  assert.deepEqual(readSourceCountStatuses, ['approved', 'draft'], 'M-ORDER: the L-10 / L-11 / L-12 draft-first order flips')
+  assert.equal(deleted.error, null, 'M-ORDER: both counts read zero and the delete goes through')
+  assertDangle(db, READ_SOURCE_CONFIG_TABLE, 'system_id', 'M-ORDER')
+  assert.deepEqual(db.rows(READ_SOURCE_CONFIG_TABLE).map((row) => row.status), ['approved'], 'M-ORDER: the dangling pointer is an APPROVED (consumable) version')
+  console.log('  M-ORDER 062 counted approved-then-draft: an approve between the counts slips past both; delete commits, approved pointer dangles (the order is load-bearing)')
+}
+
+// M-PAR — the dependent counts back on Promise.all (the shape before #6076 round four). The outcome
+// still holds here, because this fake — like pg's client — runs one connection's statements in call
+// order; what flips is L-12's one-at-a-time pin, which is the witness that the order no longer rests
+// on that queue.
+const SERIAL_COUNTS_ANCHOR = [
+  '    const counts = []',
+  '    for (const query of dependentTableQueries({ tenantId, id })) {',
+  '      counts.push(await countOne(query))',
+  '    }',
+].join('\n')
+
+async function testMutationDependentCountsConcurrent() {
+  const mutant = compileMutant(MODULES.externalSystems, [
+    [SERIAL_COUNTS_ANCHOR, '    const counts = await Promise.all(dependentTableQueries({ tenantId, id }).map(countOne))'],
+  ], 'M-PAR')
+  const { reached, deleted, issueLog, db } = await approveBetweenReadSourceCounts(mutant.createExternalSystemRegistry)
+  assert.equal(reached, true)
+  assert.equal(deleted.error && deleted.error.name, 'ExternalSystemConflictError', 'M-PAR: on one serialized connection the outcome still holds')
+  assert.deepEqual(assertNoDangle(db, READ_SOURCE_CONFIG_TABLE, 'system_id'), { systemPresent: true, pointerRows: 1 })
+  const dependent = issueLog.filter(([, table]) => DEPENDENT_COUNT_TABLES.has(table))
+  const approvedIssued = dependent.findIndex(([event, table, status]) => event === 'issue' && table === READ_SOURCE_CONFIG_TABLE && status === 'approved')
+  const draftSettled = dependent.findIndex(([event, table, status]) => event === 'settle' && table === READ_SOURCE_CONFIG_TABLE && status === 'draft')
+  assert.ok(approvedIssued >= 0 && draftSettled >= 0)
+  assert.ok(approvedIssued < draftSettled, 'M-PAR: the approved count is issued BEFORE the draft count settled — L-12’s one-at-a-time pin flips')
+  assert.deepEqual(dependent.slice(0, 4).map(([event]) => event), ['issue', 'issue', 'issue', 'issue'], 'M-PAR: all four dependent counts are issued at once')
+  console.log('  M-PAR dependent counts on Promise.all: all four issued at once — L-12’s one-at-a-time pin flips (the outcome holds only on a connection that queues in call order)')
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1620,6 +1787,7 @@ async function main() {
   testTemplateInstantiationSharesThePath()
   await testLockOrderAndScopePins()
   await testPipelineScopePins()
+  await testApproveBetweenReadSourceCounts()
   await testFakeAbortsTransactionAfterAFailedStatement()
   await testFailClosedGuards()
   await testReadSourceReusePathRegistered()
@@ -1628,6 +1796,8 @@ async function main() {
   await testMutationStockPrepWriterUnlocked()
   await testMutationReadSourceWriterUnlocked()
   await testMutationPipelineWriterUnlocked()
+  await testMutationReadSourceCountOrder()
+  await testMutationDependentCountsConcurrent()
   await testMutationFailClosedGuardsDegraded()
   await testFakeModelsRepeatableRead()
   await testIsolationMatrix('repeatable read', 'I-RR')
@@ -1636,13 +1806,15 @@ async function main() {
   await testMutationIsolationPinRemoved()
   await testMutationIsolationLevelAndFailClosedDegraded()
   // The genuine modules are untouched by the in-memory mutants: L-01 still refuses, FC-03 still
-  // refuses, and the isolation pin still holds under RR and still refuses a handle that cannot pin.
+  // refuses, the isolation pin still holds under RR and still refuses a handle that cannot pin, and
+  // an approve between the two 062 counts is still refused with the counts issued one at a time.
   await testStockPrepDeleteFirst()
   await testFailClosedGuards()
   await testIsolationMatrix('repeatable read', 'I-RR (genuine, after mutants)')
   await testIsolationFailClosedGuards()
+  await testApproveBetweenReadSourceCounts()
   completed = true
-  console.log('✓ external-systems delete × bind lock protocol: 079/062/pipelines/templates participate at a PINNED read committed; scope + fail-closed pinned; 062 reuse path + 073 residual registered; 15 mutants flip')
+  console.log('✓ external-systems delete × bind lock protocol: 079/062/pipelines/templates participate at a PINNED read committed; scope + fail-closed pinned; 062 counted draft-then-approved one at a time; 062 reuse path + 073 residual registered; 17 mutants flip')
 }
 
 // COMPLETION MARKER (see the file header): exit 0 only if main() ran to its last line.

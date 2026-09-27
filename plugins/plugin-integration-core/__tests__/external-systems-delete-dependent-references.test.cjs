@@ -364,7 +364,7 @@ async function testReadSourceConfigLifecycle() {
     assertSurvives(live.db, `B-03/04 (${status})`)
   }
 
-  // B-05: retired is TERMINAL (draft -> approved -> retired, `lib/read-source-config-store.cjs:23-28`).
+  // B-05: retired is TERMINAL (draft -> approved -> retired, `lib/read-source-config-store.cjs:24-29`).
   // A retired version can never become approved again, so it is history; counting it would make the
   // system permanently undeletable for a pointer that can never be used.
   const retired = await setupSystem({})
