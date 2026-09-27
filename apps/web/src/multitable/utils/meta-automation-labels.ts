@@ -373,6 +373,8 @@ export type AutomationLabelKey =
   | 'runs.resumeError.recordGone'
   // #5803: the rule's sheet is soft-deleted; nothing ran and the resume token was not consumed.
   | 'runs.resumeError.sheetDeleted'
+  | 'runs.resumeError.executionGone'
+  | 'runs.resumeError.suspensionCursorInvalid'
   | 'runs.resumeError.generic'
   // P3-4: whole-execution re-run button (distinct from Resume above, which only continues a
   // suspended step's remaining actions). Confirm dialog enumerates the consequences from data
@@ -736,6 +738,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.resumeError.ruleMissingOrDisabled',
   'runs.resumeError.recordGone',
   'runs.resumeError.sheetDeleted',
+  'runs.resumeError.executionGone',
+  'runs.resumeError.suspensionCursorInvalid',
   'runs.resumeError.generic',
   'runs.rerun',
   'runs.rerunConfirmTitle',
@@ -1211,6 +1215,8 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.resumeError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot resume.', zh: '规则缺失或已停用，无法恢复。' },
   'runs.resumeError.recordGone': { en: 'The record no longer exists; cannot resume.', zh: '记录已不存在，无法恢复。' },
   'runs.resumeError.sheetDeleted': { en: "The rule's sheet has been deleted, so nothing was resumed. Restore the sheet and try again.", zh: '规则所在的表已被删除，未恢复执行。请先恢复该表后重试。' },
+  'runs.resumeError.executionGone': { en: 'The suspended execution record no longer exists; cannot resume.', zh: '挂起的执行记录已不存在，无法恢复。' },
+  'runs.resumeError.suspensionCursorInvalid': { en: 'The suspension resume cursor is invalid; cannot resume safely. Trigger the rule again.', zh: '挂起游标无效，无法安全恢复，请重新触发该规则。' },
   'runs.resumeError.generic': { en: 'Resume failed.', zh: '恢复失败。' },
   // P3-4 — whole-execution re-run. Textually distinct from the load-error "Retry" (log.retry, which
   // only reloads the list) and from Resume above (which continues one suspended step).
