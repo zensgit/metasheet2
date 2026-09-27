@@ -14,6 +14,7 @@ import {
   completeTask,
   createTask,
   fetchPendingCount,
+  getTask,
   listTasks,
   reopenTask,
 } from '../src/tasks/tasksApi'
@@ -88,6 +89,97 @@ describe('listTasks', () => {
   it('resolves error when apiFetch rejects (network failure)', async () => {
     h.apiFetch.mockRejectedValue(new TypeError('Failed to fetch'))
     await expect(listTasks('assigned')).resolves.toEqual({ kind: 'error', status: 0 })
+  })
+})
+
+describe('getTask', () => {
+  function fullTaskBody(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: 't1',
+      title: 'x',
+      status: 'open',
+      completionMode: 'all',
+      createdBy: 'u1',
+      dueAt: null,
+      dueDate: null,
+      dueTime: null,
+      timeZone: null,
+      assignees: [],
+      canComplete: true,
+      canReopen: false,
+      ...over,
+    }
+  }
+
+  it('requests GET /api/tasks/:id (URI-encoded) and resolves ok with the full camelCase task', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, fullTaskBody({ id: 't 1' })))
+    const result = await getTask('t 1')
+    expect(lastCall()[0]).toBe('/api/tasks/t%201')
+    expect(result).toEqual({ kind: 'ok', task: fullTaskBody({ id: 't 1' }) })
+  })
+
+  it('resolves ok with a populated assignees array, each carrying userId and completedAt', async () => {
+    const body = fullTaskBody({
+      assignees: [
+        { userId: 'u1', completedAt: '2026-09-20T10:00:00Z' },
+        { userId: 'u2', completedAt: null },
+      ],
+    })
+    h.apiFetch.mockResolvedValue(jsonResponse(200, body))
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'ok', task: body })
+  })
+
+  it('resolves forbidden for a 403', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(403, null))
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'forbidden' })
+  })
+
+  // Per the backend contract, a missing task, an invisible one and one in another org are ALL a
+  // plain 404 — deliberately never distinguished — so this is the ONLY not-found trigger.
+  it('resolves not_found for a 404', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(404, null))
+    await expect(getTask('missing')).resolves.toEqual({ kind: 'not_found' })
+  })
+
+  it('resolves error for a 500', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(500, null))
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'error', status: 500 })
+  })
+
+  // A single-task READ has no org-guidance trigger — unlike listTasks/createTask/completeTask/
+  // reopenTask, this endpoint has no 'org_missing' kind at all (see GetTaskResult's docblock).
+  it('has no org_missing kind: even a 422 with error.code ORG_MISSING resolves as a plain error', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'ORG_MISSING' } }))
+    const result = await getTask('t1')
+    expect(result).toEqual({ kind: 'error', status: 422 })
+    expect(result.kind).not.toBe('org_missing')
+  })
+
+  it.each([
+    ['missing id', (b: Record<string, unknown>) => { delete b.id }],
+    ['missing title', (b: Record<string, unknown>) => { delete b.title }],
+    ['bad status literal', (b: Record<string, unknown>) => { b.status = 'closed' }],
+    ['bad completionMode literal', (b: Record<string, unknown>) => { b.completionMode = 'some' }],
+    ['missing createdBy', (b: Record<string, unknown>) => { delete b.createdBy }],
+    ['dueAt wrong type', (b: Record<string, unknown>) => { b.dueAt = 123 }],
+    ['dueDate wrong type', (b: Record<string, unknown>) => { b.dueDate = 123 }],
+    ['dueTime wrong type', (b: Record<string, unknown>) => { b.dueTime = 123 }],
+    ['timeZone wrong type', (b: Record<string, unknown>) => { b.timeZone = 123 }],
+    ['assignees not an array', (b: Record<string, unknown>) => { b.assignees = {} }],
+    ['assignee missing userId', (b: Record<string, unknown>) => { b.assignees = [{ completedAt: null }] }],
+    ['assignee completedAt wrong type', (b: Record<string, unknown>) => { b.assignees = [{ userId: 'u1', completedAt: 1 }] }],
+    ['canComplete wrong type', (b: Record<string, unknown>) => { b.canComplete = 'yes' }],
+    ['canReopen wrong type', (b: Record<string, unknown>) => { b.canReopen = 'no' }],
+  ])('resolves error for a malformed 200 body: %s', async (_label, corrupt) => {
+    const body = fullTaskBody()
+    corrupt(body)
+    h.apiFetch.mockResolvedValue(jsonResponse(200, body))
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'error', status: 200 })
+  })
+
+  it('resolves error when apiFetch rejects (network failure)', async () => {
+    h.apiFetch.mockRejectedValue(new TypeError('Failed to fetch'))
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'error', status: 0 })
   })
 })
 

@@ -1,16 +1,92 @@
 <template>
   <section class="tasks-view" aria-labelledby="tasks-view-title">
     <template v-if="contextState?.state === 'ready'">
-      <!-- `/tasks/:id` loads this SAME component (tasks-routes.spec.ts gate 22) but there is no
-           `GET /api/tasks/:id` yet (backend PR #6062 does not ship one) — this stays a skeleton
-           that says so, and issues no list read. -->
+      <!-- `/tasks/:id` loads this SAME component (tasks-routes.spec.ts gate 22). Backend PR #6062
+           ships `GET /api/tasks/:id`; this renders its real states. Design lock §5.2 "引导流三触发"
+           still applies to the WRITE actions available here (complete/reopen can 422 ORG_MISSING) —
+           that reuses the SAME `orgMissingFromAction` flag / guidance block the list branch uses, so
+           it is checked first, before the detail read's own states. -->
       <template v-if="taskId">
         <header class="tasks-view__header">
-          <h1 id="tasks-view-title">任务</h1>
+          <h1 id="tasks-view-title">任务详情</h1>
+          <router-link class="tasks-view__back-link" to="/tasks" data-testid="tasks-detail-back-link">
+            &larr; 返回任务列表
+          </router-link>
         </header>
-        <p class="tasks-view__placeholder" data-testid="tasks-view-placeholder">
-          任务详情功能尚未提供
-        </p>
+
+        <template v-if="orgMissingFromAction">
+          <p class="tasks-view__message" data-testid="tasks-view-org-missing" role="status">
+            请先选择一个组织后再查看任务
+          </p>
+        </template>
+        <template v-else>
+          <p v-if="actionErrorMessage" class="tasks-view__message" data-testid="tasks-action-error" role="alert">
+            {{ actionErrorMessage }}
+          </p>
+
+          <div v-if="detailResult.kind === 'ok'" class="tasks-view__detail" data-testid="tasks-detail">
+            <h2 class="tasks-view__detail-title" data-testid="tasks-detail-title">{{ detailResult.task.title }}</h2>
+            <p class="tasks-view__detail-status" data-testid="tasks-detail-status">
+              {{ detailResult.task.status === 'done' ? '已完成' : '进行中' }}
+            </p>
+            <p class="tasks-view__detail-completion-mode" data-testid="tasks-detail-completion-mode">
+              {{ detailResult.task.completionMode === 'all' ? '全部负责人完成' : '任一负责人完成' }}
+            </p>
+            <p class="tasks-view__detail-due" data-testid="tasks-detail-due">
+              {{ formatDueDisplay(detailResult.task) }}
+            </p>
+
+            <ul class="tasks-view__detail-assignees" data-testid="tasks-detail-assignees">
+              <li
+                v-for="assignee in detailResult.task.assignees"
+                :key="assignee.userId"
+                class="tasks-view__detail-assignee"
+                data-testid="tasks-detail-assignee"
+              >
+                <span class="tasks-view__detail-assignee-id">{{ assignee.userId }}</span>
+                <span class="tasks-view__detail-assignee-status" data-testid="tasks-detail-assignee-status">
+                  {{ assignee.completedAt ? `已完成于 ${formatViewerInstant(assignee.completedAt)}` : '未完成' }}
+                </span>
+              </li>
+            </ul>
+
+            <button
+              v-if="detailResult.task.status === 'open' && detailResult.task.canComplete"
+              type="button"
+              data-testid="tasks-detail-complete-button"
+              :disabled="detailActionPending"
+              @click="onDetailComplete"
+            >完成</button>
+            <button
+              v-if="detailResult.task.status === 'done' && detailResult.task.canReopen"
+              type="button"
+              data-testid="tasks-detail-reopen-button"
+              :disabled="detailActionPending"
+              @click="onDetailReopen"
+            >重启</button>
+          </div>
+          <p
+            v-else-if="detailResult.kind === 'not_found'"
+            class="tasks-view__message"
+            data-testid="tasks-detail-not-found"
+            role="status"
+          >未找到该任务</p>
+          <p
+            v-else-if="detailResult.kind === 'forbidden'"
+            class="tasks-view__message"
+            data-testid="tasks-detail-forbidden"
+            role="status"
+          >您没有权限查看此任务</p>
+          <p
+            v-else-if="detailResult.kind === 'error'"
+            class="tasks-view__message"
+            data-testid="tasks-detail-error"
+            role="alert"
+          >加载任务详情失败，请稍后重试</p>
+          <p v-else class="tasks-view__message" data-testid="tasks-detail-loading">
+            加载中…
+          </p>
+        </template>
       </template>
 
       <!-- Design lock §5.2 "引导流三触发": a list read or a write (create/complete/reopen) that
@@ -71,7 +147,11 @@
 
         <ul v-if="listResult.kind === 'ok'" class="tasks-view__list" data-testid="tasks-list">
           <li v-for="task in listResult.items" :key="task.id" class="tasks-view__item" data-testid="tasks-list-item">
-            <span class="tasks-view__item-title">{{ task.title }}</span>
+            <router-link
+              class="tasks-view__item-title"
+              :to="`/tasks/${encodeURIComponent(task.id)}`"
+              data-testid="tasks-list-item-link"
+            >{{ task.title }}</router-link>
             <span class="tasks-view__item-status">{{ task.status === 'done' ? '已完成' : '进行中' }}</span>
             <span v-if="task.due_at" class="tasks-view__item-due">{{ task.due_at }}</span>
             <button
@@ -133,13 +213,16 @@ import { loadTasksContext, type TasksContextResult } from '../../tasks/tasksCont
 import {
   completeTask,
   createTask,
+  getTask,
   listTasks,
   reopenTask,
   type CompletionMode,
+  type TaskDetail,
   type TaskListItem,
   type TaskView,
 } from '../../tasks/tasksApi'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
+import { formatDueDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 
 const route = useRoute()
 
@@ -171,6 +254,16 @@ type ListRenderState =
   | { kind: 'error' }
 
 const listResult = ref<ListRenderState>({ kind: 'loading' })
+
+type DetailRenderState =
+  | { kind: 'loading' }
+  | { kind: 'ok'; task: TaskDetail }
+  | { kind: 'not_found' }
+  | { kind: 'forbidden' }
+  | { kind: 'error' }
+
+const detailResult = ref<DetailRenderState>({ kind: 'loading' })
+
 const orgMissingFromAction = ref(false)
 
 const newTitle = ref('')
@@ -215,6 +308,20 @@ async function loadList(): Promise<void> {
   listResult.value = { kind: 'error' }
 }
 
+// Same out-of-order-resolution discipline as `listGeneration` above, for the detail read: a
+// superseded `getTask` response (an OLDER id's request resolving AFTER a NEWER id's already did)
+// must never overwrite the currently-displayed task.
+let detailGeneration = 0
+
+async function loadDetail(id: string): Promise<void> {
+  detailGeneration += 1
+  const mine = detailGeneration
+  detailResult.value = { kind: 'loading' }
+  const result = await getTask(id)
+  if (mine !== detailGeneration) return
+  detailResult.value = result.kind === 'ok' ? { kind: 'ok', task: result.task } : { kind: result.kind }
+}
+
 function switchView(view: TaskView): void {
   if (view === currentView.value) return
   currentView.value = view
@@ -242,60 +349,122 @@ async function onCreate(): Promise<void> {
   }
 }
 
+/** Shared result-classification for `completeTask`/`reopenTask` outcomes, used by BOTH the list
+ *  row actions and the detail-page actions below. Returns `'ok'` when the caller should reload its
+ *  own data source; any other outcome has already fully updated the shared `orgMissingFromAction` /
+ *  `actionErrorKind` state and the caller does nothing further. */
+function applyActionOutcome(kind: 'ok' | 'org_missing' | 'forbidden' | 'not_found' | 'error'): 'ok' | 'other' {
+  if (kind === 'org_missing') {
+    orgMissingFromAction.value = true
+    return 'other'
+  }
+  if (kind === 'ok') {
+    // P3(iii): a later action succeeding must clear a stale guidance flag left by an EARLIER
+    // action (or an earlier list/detail read) — nothing else ever flips this back to false, so
+    // without this the view would stay stuck on the org-guidance block for the rest of the mounted
+    // instance even after the org context recovers. Reset BEFORE the reload, not after: the reload
+    // can legitimately set this flag itself (its own org_missing branch), and resetting after it
+    // would clobber that fresh `true` back to `false`.
+    orgMissingFromAction.value = false
+    notifyTasksChanged()
+    return 'ok'
+  }
+  // 'forbidden' | 'not_found' | 'error' — surfaced via `actionErrorMessage`; the caller leaves its
+  // own data exactly as it is (no reload), so whatever the action failed on stays visible.
+  actionErrorKind.value = kind
+  return 'other'
+}
+
 async function onComplete(id: string): Promise<void> {
   actionErrorKind.value = null
   const result = await completeTask(id)
-  if (result.kind === 'org_missing') {
-    orgMissingFromAction.value = true
-    return
-  }
-  if (result.kind === 'ok') {
-    // P3(iii): a later action succeeding must clear a stale guidance flag left by an EARLIER
-    // action (or an earlier list read) — nothing else ever flips this back to false, so without
-    // this the view would stay stuck on the org-guidance block for the rest of the mounted
-    // instance even after the org context recovers. Reset BEFORE `loadList()`, not after:
-    // `loadList()` can legitimately set this flag itself (its own org_missing branch), and
-    // resetting after it would clobber that fresh `true` back to `false`.
-    orgMissingFromAction.value = false
-    notifyTasksChanged()
-    await loadList()
-    return
-  }
-  // 'forbidden' | 'not_found' | 'error' — surfaced via `actionErrorMessage`; the list is left
-  // exactly as it is (no `loadList()` call), so the row the action failed on stays visible.
-  actionErrorKind.value = result.kind
+  if (applyActionOutcome(result.kind) === 'ok') await loadList()
 }
 
 async function onReopen(id: string): Promise<void> {
   actionErrorKind.value = null
   const result = await reopenTask(id, 'self')
-  if (result.kind === 'org_missing') {
-    orgMissingFromAction.value = true
-    return
+  if (applyActionOutcome(result.kind) === 'ok') await loadList()
+}
+
+// True while a detail complete/reopen request is in flight — disables both detail action buttons
+// so a second click can't fire a second overlapping request. A per-request token (rather than a
+// bare boolean flip in `finally`) so a STALE request's `finally` can never clear a NEWER request's
+// pending flag out from under it.
+const detailActionPending = ref(false)
+let detailActionToken = 0
+
+async function onDetailComplete(): Promise<void> {
+  const id = taskId.value
+  if (!id || detailActionPending.value) return
+  actionErrorKind.value = null
+  const token = ++detailActionToken
+  detailActionPending.value = true
+  try {
+    const result = await completeTask(id)
+    // Guard against a navigation (to a different id, OR back to the list) that happened WHILE the
+    // request was in flight. Checked BEFORE `applyActionOutcome` — not just before the reload:
+    // a late 403/error/org_missing result must not paint its banner/guidance over whatever the
+    // viewer is looking at now, and reloading a no-longer-current id would bump `detailGeneration`
+    // and briefly paint the OLD task's data over it too. The watch below already issued its own
+    // `loadDetail`/`loadList` for wherever the viewer navigated to, so this action has nothing
+    // left to do there — except a late 'ok' really did happen server-side, so the shared badge
+    // still needs to hear about it.
+    if (taskId.value !== id) {
+      if (result.kind === 'ok') notifyTasksChanged()
+      return
+    }
+    if (applyActionOutcome(result.kind) === 'ok') await loadDetail(id)
+  } finally {
+    if (token === detailActionToken) detailActionPending.value = false
   }
-  if (result.kind === 'ok') {
-    // See `onComplete`'s matching comment — same reset, same ordering rationale.
-    orgMissingFromAction.value = false
-    notifyTasksChanged()
-    await loadList()
-    return
+}
+
+async function onDetailReopen(): Promise<void> {
+  const id = taskId.value
+  if (!id || detailActionPending.value) return
+  actionErrorKind.value = null
+  const token = ++detailActionToken
+  detailActionPending.value = true
+  try {
+    const result = await reopenTask(id, 'self')
+    if (taskId.value !== id) {
+      if (result.kind === 'ok') notifyTasksChanged()
+      return
+    }
+    if (applyActionOutcome(result.kind) === 'ok') await loadDetail(id)
+  } finally {
+    if (token === detailActionToken) detailActionPending.value = false
   }
-  actionErrorKind.value = result.kind
 }
 
 // Vue Router reuses this component instance across `/tasks` <-> `/tasks/:id` navigations (both
-// resolve to the same file), so `onMounted` alone would miss a same-instance transition back to
-// the list. Re-issuing the list read only on that specific transition (id -> none) keeps the
-// detail skeleton's own "no list call" rule intact for the other direction.
+// resolve to the same file), so `onMounted` alone would miss a same-instance transition. This
+// fires on every edge: list -> detail and detail -> detail load the new id's detail; detail -> list
+// reloads the list. Also clears any action-error state left over from whatever the viewer was
+// looking at before — it belongs to that stale id, not the one now showing.
 watch(taskId, (id) => {
-  if (!id && contextState.value?.state === 'ready') {
+  if (contextState.value?.state !== 'ready') return
+  actionErrorKind.value = null
+  // A navigation away invalidates whatever detail action was in flight for the PREVIOUS id — bump
+  // the token so that request's own `finally` (see `onDetailComplete`/`onDetailReopen`) can no
+  // longer be the one that clears `detailActionPending`, and unblock the buttons on wherever the
+  // viewer just navigated to (there is no still-in-flight request FOR that page yet).
+  detailActionToken += 1
+  detailActionPending.value = false
+  if (id) {
+    void loadDetail(id)
+  } else {
     void loadList()
   }
 })
 
 onMounted(async () => {
   contextState.value = await loadTasksContext()
-  if (contextState.value.state === 'ready' && !taskId.value) {
+  if (contextState.value.state !== 'ready') return
+  if (taskId.value) {
+    await loadDetail(taskId.value)
+  } else {
     await loadList()
   }
 })
@@ -310,9 +479,26 @@ onMounted(async () => {
   margin: 0 0 8px;
 }
 
-.tasks-view__placeholder,
 .tasks-view__message {
   color: var(--el-text-color-secondary, #666);
+}
+
+.tasks-view__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tasks-view__detail-assignees {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tasks-view__detail-assignee {
+  display: flex;
+  gap: 12px;
+  padding: 4px 0;
 }
 
 .tasks-view__switcher {

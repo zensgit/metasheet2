@@ -6,13 +6,16 @@ import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-
  * P2-2 — two TasksView.vue guards that `tasks-view.spec.ts` / `tasks-list-view.spec.ts` cannot
  * exercise because both mock `vue-router` with a plain, non-reactive `{ params }` object:
  *
- *   1. The `watch(taskId, ...)` at ~:246 — navigating from `/tasks/:id` back to `/tasks` on the
- *      SAME component instance must (re)load the list. This needs a REAL router: Vue only reuses
- *      one component instance across a route change when the matched record's `component` is the
- *      same reference, which a static params object can never simulate.
- *   2. The list-generation guard at ~:182 (`listGeneration`) — switching views while a previous
- *      view's request is still pending, then resolving the OLDER (superseded) request LAST, must
- *      not overwrite the newer view's already-rendered data.
+ *   1. The `watch(taskId, ...)` — navigating between `/tasks` and `/tasks/:id` (either direction,
+ *      including detail -> a DIFFERENT detail id) on the SAME component instance must (re)load the
+ *      right data source (list vs. detail). This needs a REAL router: Vue only reuses one component
+ *      instance across a route change when the matched record's `component` is the same reference,
+ *      which a static params object can never simulate. M2's own detail-generation guard (the
+ *      analogous stale-response race, scoped to `getTask`) is covered in `tasks-detail-view.spec.ts`
+ *      instead, alongside the rest of the detail surface.
+ *   2. The list-generation guard (`listGeneration`) — switching views while a previous view's
+ *      request is still pending, then resolving the OLDER (superseded) request LAST, must not
+ *      overwrite the newer view's already-rendered data.
  *
  * Mount pattern follows this repo's established real-router idiom (see
  * `approval-form-builder-route-leak.spec.ts` / `dataSourcesRouteRedirect.spec.ts`): a real
@@ -23,6 +26,7 @@ import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-
 const h_ = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
   listTasks: vi.fn(),
+  getTask: vi.fn(),
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -31,6 +35,7 @@ vi.mock('../src/tasks/tasksContext', () => ({
 
 vi.mock('../src/tasks/tasksApi', () => ({
   listTasks: h_.listTasks,
+  getTask: h_.getTask,
   createTask: vi.fn(),
   completeTask: vi.fn(),
   reopenTask: vi.fn(),
@@ -95,6 +100,7 @@ async function mountAt(path: string): Promise<HTMLElement> {
 beforeEach(() => {
   h_.loadTasksContext.mockReset().mockResolvedValue({ state: 'ready', orgId: 'org1' })
   h_.listTasks.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
+  h_.getTask.mockReset().mockResolvedValue({ kind: 'not_found' })
 })
 
 afterEach(() => {
@@ -108,7 +114,9 @@ afterEach(() => {
 describe('TasksView route-id watch — real router, SAME component instance (P2-2)', () => {
   it('loads the list when navigating from /tasks/:id back to /tasks without remounting', async () => {
     const el = await mountAt('/tasks/tsk_1')
-    expect(el.querySelector('[data-testid="tasks-view-placeholder"]')).toBeTruthy()
+    expect(el.querySelector('[data-testid="tasks-detail-not-found"]')).toBeTruthy()
+    expect(h_.getTask).toHaveBeenCalledTimes(1)
+    expect(h_.getTask).toHaveBeenCalledWith('tsk_1')
     expect(h_.listTasks).not.toHaveBeenCalled()
 
     h_.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Reloaded' })] })
@@ -117,16 +125,19 @@ describe('TasksView route-id watch — real router, SAME component instance (P2-
 
     expect(h_.listTasks).toHaveBeenCalledTimes(1)
     expect(el.textContent).toContain('Reloaded')
-    expect(el.querySelector('[data-testid="tasks-view-placeholder"]')).toBeNull()
+    expect(el.querySelector('[data-testid="tasks-detail-not-found"]')).toBeNull()
   })
 
-  it('does NOT reload the list when navigating between two DIFFERENT /tasks/:id detail routes (still in detail)', async () => {
+  it('reloads the detail (does NOT reload the list) when navigating between two DIFFERENT /tasks/:id detail routes', async () => {
     const el = await mountAt('/tasks/tsk_1')
     await router!.push('/tasks/tsk_2')
     await flush()
 
     expect(h_.listTasks).not.toHaveBeenCalled()
-    expect(el.querySelector('[data-testid="tasks-view-placeholder"]')).toBeTruthy()
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(h_.getTask).toHaveBeenNthCalledWith(1, 'tsk_1')
+    expect(h_.getTask).toHaveBeenNthCalledWith(2, 'tsk_2')
+    expect(el.querySelector('[data-testid="tasks-detail-not-found"]')).toBeTruthy()
   })
 
   it('does NOT reload the list a second time when navigating /tasks -> /tasks/:id -> /tasks (only the id->none edge reloads)', async () => {
@@ -136,7 +147,8 @@ describe('TasksView route-id watch — real router, SAME component instance (P2-
     await router!.push('/tasks/tsk_1')
     await flush()
     expect(h_.listTasks).toHaveBeenCalledTimes(1) // list -> detail: no new read
-    expect(el.querySelector('[data-testid="tasks-view-placeholder"]')).toBeTruthy()
+    expect(h_.getTask).toHaveBeenCalledTimes(1) // list -> detail: exactly one detail read
+    expect(el.querySelector('[data-testid="tasks-detail-not-found"]')).toBeTruthy()
 
     await router!.push('/tasks')
     await flush()

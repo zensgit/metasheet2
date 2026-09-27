@@ -30,6 +30,47 @@ export interface TaskListItem {
   due_at: string | null
 }
 
+/** One row of `TaskDetail.assignees`. */
+export interface TaskAssignee {
+  userId: string
+  completedAt: string | null
+}
+
+/** The `GET /api/tasks/:id` 200 body — camelCase, a DELIBERATELY separate shape from
+ *  `TaskListItem` (snake_case, from the list endpoint). Do not reuse one type for both: the two
+ *  endpoints do not share a wire contract, only overlapping field names in different cases. */
+export interface TaskDetail {
+  id: string
+  title: string
+  status: TaskStatus
+  completionMode: CompletionMode
+  createdBy: string
+  /** Non-null for a TIMED task; null for an all-day task (use `dueDate`/`timeZone` instead). */
+  dueAt: string | null
+  /** `'YYYY-MM-DD'`, set for an all-day task. */
+  dueDate: string | null
+  /** `'HH:MM:SS'`, set alongside `dueDate` when the backend also tracked a time-of-day. */
+  dueTime: string | null
+  timeZone: string | null
+  assignees: TaskAssignee[]
+  /** ROLE-only: whether the viewer is PERMITTED to complete this task, independent of its current
+   *  `status`. The caller must additionally check `status === 'open'` before offering the action —
+   *  this field alone does not mean the button should render. */
+  canComplete: boolean
+  /** Same ROLE-only caveat as `canComplete`, gated by `status === 'done'` instead. */
+  canReopen: boolean
+}
+
+/** `getTask`'s result kinds — deliberately NOT `BaseResultKind`: `GET /api/tasks/:id` has no
+ *  org-guidance trigger (the lock's three triggers are `context`, `listTasks`'s `org_missing`
+ *  degraded reason, and a WRITE's 422 `ORG_MISSING` — a single-task READ is none of those; per the
+ *  backend contract a missing org resolves to a plain 404, same as "not found"/"invisible"). */
+export type GetTaskResult =
+  | { kind: 'ok'; task: TaskDetail }
+  | { kind: 'not_found' }
+  | { kind: 'forbidden' }
+  | { kind: 'error'; status?: number }
+
 /** The subset of result kinds every one of this module's functions can resolve to. `predicate_error`
  *  is added only to `ListTasksResult` (list-only, per the lock). */
 type BaseResultKind = 'org_missing' | 'forbidden' | 'not_found' | 'error'
@@ -127,6 +168,58 @@ export async function listTasks(view: TaskView): Promise<ListTasksResult> {
   }
 
   if (Array.isArray(record.items)) return { kind: 'ok', items: record.items as TaskListItem[] }
+  return { kind: 'error', status: response.status }
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string'
+}
+
+function isTaskAssignee(value: unknown): value is TaskAssignee {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.userId === 'string' && isNullableString(record.completedAt)
+}
+
+/** Validates the FULL `GET /api/tasks/:id` 200 body against `TaskDetail`'s contract — every field,
+ *  not just a subset. A malformed body (wrong type, missing field, an unrecognized `status`/
+ *  `completionMode` literal, a non-array `assignees`, a malformed assignee row, …) must resolve to
+ *  `{ kind: 'error' }`, never masquerade as a real task the caller can render. */
+function isTaskDetail(value: unknown): value is TaskDetail {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string') return false
+  if (typeof record.title !== 'string') return false
+  if (record.status !== 'open' && record.status !== 'done') return false
+  if (record.completionMode !== 'all' && record.completionMode !== 'any') return false
+  if (typeof record.createdBy !== 'string') return false
+  if (!isNullableString(record.dueAt)) return false
+  if (!isNullableString(record.dueDate)) return false
+  if (!isNullableString(record.dueTime)) return false
+  if (!isNullableString(record.timeZone)) return false
+  if (!Array.isArray(record.assignees) || !record.assignees.every(isTaskAssignee)) return false
+  if (typeof record.canComplete !== 'boolean') return false
+  if (typeof record.canReopen !== 'boolean') return false
+  return true
+}
+
+/** `GET /api/tasks/:id`. Per the backend contract, a missing task, an invisible one and one in
+ *  another org are ALL a plain 404 — deliberately never distinguished server-side — so this never
+ *  produces an `org_missing` kind; see `GetTaskResult`'s docblock. */
+export async function getTask(id: string): Promise<GetTaskResult> {
+  let response: Response
+  try {
+    response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}`)
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 404) return { kind: 'not_found' }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+
+  const body = await safeJson(response)
+  if (isTaskDetail(body)) return { kind: 'ok', task: body }
   return { kind: 'error', status: response.status }
 }
 

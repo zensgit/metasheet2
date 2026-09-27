@@ -255,6 +255,36 @@ describe('TasksTodoBadge polling', () => {
     host = null
   })
 
+  // P3-4: `disposed` (useTasksBadge.ts ~:78, `if (disposed || mine !== generation) return`) must
+  // independently gate the 'ok' branch, not just the generation check — an in-flight poll that
+  // resolves 'ok' AFTER the badge unmounted is still the LATEST (only) generation, so `mine !==
+  // generation` alone would let it through and re-arm the 60s clock for a badge that no longer
+  // exists.
+  it("a refresh resolving 'ok' AFTER unmount does not restart the poll timer (no further fetches)", async () => {
+    vi.useFakeTimers()
+    let resolveFirst!: (value: unknown) => void
+    h.fetchPendingCount.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+    mount()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.fetchPendingCount).toHaveBeenCalledTimes(1)
+
+    app?.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+
+    resolveFirst({ kind: 'ok', count: 3 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount()).toBe(0)
+
+    h.fetchPendingCount.mockResolvedValue({ kind: 'ok', count: 4 })
+    await vi.advanceTimersByTimeAsync(180_000)
+    expect(h.fetchPendingCount).toHaveBeenCalledTimes(1)
+
+    // Prevent the shared afterEach from unmounting an already-unmounted app.
+    app = null
+    host?.remove()
+    host = null
+  })
+
   // P3: a 404 means the feature is off — the route does not exist — so continuing to poll every
   // 60s can never succeed again this session. Distinct from every OTHER failure kind (network
   // error, 403, org_missing, …), which keep polling (see the three-states describe above).

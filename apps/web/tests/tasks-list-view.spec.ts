@@ -4,6 +4,7 @@ import { createApp, nextTick, type App } from 'vue'
 const h = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
   listTasks: vi.fn(),
+  getTask: vi.fn(),
   createTask: vi.fn(),
   completeTask: vi.fn(),
   reopenTask: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock('../src/tasks/tasksContext', () => ({
 
 vi.mock('../src/tasks/tasksApi', () => ({
   listTasks: h.listTasks,
+  getTask: h.getTask,
   createTask: h.createTask,
   completeTask: h.completeTask,
   reopenTask: h.reopenTask,
@@ -88,6 +90,7 @@ beforeEach(() => {
   h.route.params = {}
   h.loadTasksContext.mockReset().mockResolvedValue({ state: 'ready', orgId: 'org1' })
   h.listTasks.mockReset()
+  h.getTask.mockReset().mockResolvedValue({ kind: 'not_found' })
   h.createTask.mockReset()
   h.completeTask.mockReset()
   h.reopenTask.mockReset()
@@ -447,13 +450,15 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
   })
 })
 
-describe('TasksView /tasks/:id (no detail endpoint yet)', () => {
-  it('shows a detail-not-available skeleton and issues no list read', async () => {
+// The full `/tasks/:id` render/action/guard surface (backend PR #6062, `GET /api/tasks/:id`) lives
+// in `tasks-detail-view.spec.ts`. This file keeps only the boundary check that matters HERE: a
+// detail-route mount must never trigger the LIST read this file otherwise exercises exhaustively.
+describe('TasksView /tasks/:id boundary', () => {
+  it('issues no list read for a /tasks/:id route (it loads the detail instead)', async () => {
     h.route.params = { id: 'tsk_1' }
     const el = await mountReady()
 
-    expect(shown(el, 'tasks-view-placeholder')).toBeTruthy()
-    expect(el.textContent).toContain('尚未提供')
+    expect(h.getTask).toHaveBeenCalledWith('tsk_1')
     expect(h.listTasks).not.toHaveBeenCalled()
     expect(shown(el, 'tasks-list')).toBeNull()
     expect(shown(el, 'tasks-list-empty')).toBeNull()

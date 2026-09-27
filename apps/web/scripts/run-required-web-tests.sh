@@ -1673,6 +1673,7 @@ exec npx vitest run \
   tasks-api.spec.ts \
   tasks-badge.spec.ts \
   tasks-context.spec.ts \
+  tasks-detail-view.spec.ts \
   tasks-list-view.spec.ts \
   tasks-nav-badge.spec.ts \
   tasks-routes.spec.ts \

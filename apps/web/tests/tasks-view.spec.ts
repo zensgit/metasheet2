@@ -4,12 +4,14 @@ import { createApp, nextTick, type App } from 'vue'
 const h = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
   listTasks: vi.fn(),
+  getTask: vi.fn(),
   route: { params: {} as Record<string, string> },
 }))
 
 // M2: TasksView now also reads the route (to tell `/tasks` apart from `/tasks/:id`, both of which
 // load this same component per tasks-routes.spec.ts) and, for the ready + list route case, the
-// tasksApi list read. Both are mocked here the same way tasksContext already is.
+// tasksApi list read; the ready + detail route case reads `getTask` instead. All are mocked here
+// the same way tasksContext already is.
 vi.mock('vue-router', () => ({
   useRoute: () => h.route,
 }))
@@ -20,6 +22,7 @@ vi.mock('../src/tasks/tasksContext', () => ({
 
 vi.mock('../src/tasks/tasksApi', () => ({
   listTasks: h.listTasks,
+  getTask: h.getTask,
   createTask: vi.fn(),
   completeTask: vi.fn(),
   reopenTask: vi.fn(),
@@ -48,6 +51,7 @@ async function mountWith(result: unknown): Promise<HTMLElement> {
 beforeEach(() => {
   h.route.params = {}
   h.listTasks.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
+  h.getTask.mockReset().mockResolvedValue({ kind: 'not_found' })
 })
 
 afterEach(() => {
@@ -59,7 +63,11 @@ afterEach(() => {
 })
 
 const TESTIDS = [
-  'tasks-view-placeholder',
+  'tasks-detail',
+  'tasks-detail-not-found',
+  'tasks-detail-forbidden',
+  'tasks-detail-error',
+  'tasks-detail-loading',
   'tasks-view-org-missing',
   'tasks-view-unavailable',
   'tasks-view-forbidden',
@@ -80,10 +88,36 @@ describe('TasksView renders exactly one block per context state (gates 11/12)', 
     expect(el.querySelector('h1')?.textContent).toBe('任务')
   })
 
-  it('ready with a /tasks/:id route param shows the detail-not-available placeholder only, and issues no list read', async () => {
+  it('ready with a /tasks/:id route param loads and shows the task detail, and issues no list read', async () => {
     h.route.params = { id: 'tsk_1' }
+    h.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: {
+        id: 'tsk_1',
+        title: 'x',
+        status: 'open',
+        completionMode: 'all',
+        createdBy: 'u1',
+        dueAt: null,
+        dueDate: null,
+        dueTime: null,
+        timeZone: null,
+        assignees: [],
+        canComplete: true,
+        canReopen: false,
+      },
+    })
     const el = await mountWith({ state: 'ready', orgId: 'org1' })
-    expect(shown(el)).toEqual(['tasks-view-placeholder'])
+    expect(shown(el)).toEqual(['tasks-detail'])
+    expect(h.getTask).toHaveBeenCalledWith('tsk_1')
+    expect(h.listTasks).not.toHaveBeenCalled()
+  })
+
+  it('ready with a /tasks/:id route param shows the not-found state distinctly on a 404', async () => {
+    h.route.params = { id: 'tsk_missing' }
+    h.getTask.mockResolvedValue({ kind: 'not_found' })
+    const el = await mountWith({ state: 'ready', orgId: 'org1' })
+    expect(shown(el)).toEqual(['tasks-detail-not-found'])
     expect(h.listTasks).not.toHaveBeenCalled()
   })
 
