@@ -34,7 +34,9 @@ import {
 } from '../../src/multitable/automation-executor'
 import {
   AutomationRuleValidationError,
+  AutomationService,
   preflightAutomationConditionFields,
+  preflightAutomationRuleUpdate,
 } from '../../src/multitable/automation-service'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { Logger } from '../../src/core/logger'
@@ -181,6 +183,54 @@ describe('date fields compare by calendar day in the business timezone', () => {
     ])
     // Values-free: the report carries ids and type names only.
     for (const call of r.calls) expect(Object.keys(call).sort()).toEqual(['fieldId', 'fieldType', 'operator', 'side'])
+  })
+
+  it('an epoch ms no Date can hold (|ms| > 8.64e15) is unreadable — reported as the record side, never a RangeError', () => {
+    // A `date` cell gets no write-side validation (field-codecs.ts coerces only dateTime), so `{openedAt: 1e20}`
+    // can be stored through the API; `Intl.DateTimeFormat#formatToParts(1e20)` throws RangeError.
+    const r = reporter()
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'equals', value: '2026-09-25' }, { openedAt: 1e20 }, typed(fields, r))).toBe(false)
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'not_equals', value: '2026-09-25' }, { openedAt: -1e20 }, typed(fields, r))).toBe(true)
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'in', value: ['2026-09-25'] }, { openedAt: 8.64e15 + 1 }, typed(fields, r))).toBe(false)
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'is_empty' }, { openedAt: 1e20 }, typed(fields, r))).toBe(false)
+    // The boundary itself IS representable (+275760-09-13T00:00Z) and compares as a day.
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'greater_than', value: '2026-09-25' }, { openedAt: 8.64e15 }, typed(fields, r))).toBe(true)
+    // Precisely the RANGE GUARD, not the safety net: the side is known ('record'), so the guard is what answered.
+    expect(r.calls).toEqual([
+      { fieldId: 'openedAt', fieldType: 'date', operator: 'equals', side: 'record' },
+      { fieldId: 'openedAt', fieldType: 'date', operator: 'not_equals', side: 'record' },
+      { fieldId: 'openedAt', fieldType: 'date', operator: 'in', side: 'record' },
+    ])
+    // A dateTime cell follows the same range rule.
+    const dt = reporter()
+    const dtFields: AutomationConditionField[] = [{ id: 'dueAt', type: 'dateTime' }]
+    expect(evaluateCondition({ fieldId: 'dueAt', operator: 'equals', value: '2026-09-25 02:00' }, { dueAt: 1e20 }, typed(dtFields, dt))).toBe(false)
+    expect(dt.calls).toEqual([{ fieldId: 'dueAt', fieldType: 'dateTime', operator: 'equals', side: 'record' }])
+  })
+
+  it('never-throws safety net: a comparator exception evaluates as unmatched and is reported with side "unknown"', () => {
+    // Nothing in the comparators is expected to throw any more; this pins the last line of defence for a
+    // value shape nobody anticipated — here a Date whose time getter throws.
+    class ThrowingDate extends Date {
+      override getTime(): number { throw new Error('boom: secret-cell-text') }
+    }
+    const r = reporter()
+    const record = { openedAt: new ThrowingDate(OPENED_AT_INSTANT) }
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'equals', value: '2026-09-25' }, record, typed(fields, r))).toBe(false)
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'not_equals', value: '2026-09-25' }, record, typed(fields, r))).toBe(true)
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'in', value: ['2026-09-25'] }, record, typed(fields, r))).toBe(false)
+    expect(evaluateCondition({ fieldId: 'openedAt', operator: 'not_in', value: ['2026-09-25'] }, record, typed(fields, r))).toBe(true)
+    const dtFields: AutomationConditionField[] = [{ id: 'dueAt', type: 'dateTime' }]
+    expect(evaluateCondition({ fieldId: 'dueAt', operator: 'greater_than', value: '2026-09-25 02:00' }, { dueAt: new ThrowingDate(OPENED_AT_INSTANT) }, typed(dtFields, r))).toBe(false)
+    expect(r.calls).toEqual([
+      { fieldId: 'openedAt', fieldType: 'date', operator: 'equals', side: 'unknown' },
+      { fieldId: 'openedAt', fieldType: 'date', operator: 'not_equals', side: 'unknown' },
+      { fieldId: 'openedAt', fieldType: 'date', operator: 'in', side: 'unknown' },
+      { fieldId: 'openedAt', fieldType: 'date', operator: 'not_in', side: 'unknown' },
+      { fieldId: 'dueAt', fieldType: 'dateTime', operator: 'greater_than', side: 'unknown' },
+    ])
+    // Values-free even here: the exception text never reaches the report.
+    expect(JSON.stringify(r.calls)).not.toContain('secret-cell-text')
   })
 })
 
@@ -432,8 +482,29 @@ describe('save-time validation of condition values by field type', () => {
       .toThrow('conditions.conditions[0].value must be a number')
     expect(codeOf(() => validateConditionGroupAgainstFields(group({ fieldId: 'qty', operator: 'equals', value: 'abc' }), fields)))
       .toBe(AUTOMATION_CONDITION_VALUE_INVALID_CODE)
-    expect(codeOf(() => validateConditionGroupAgainstFields(group({ fieldId: 'done', operator: 'equals', value: 'false' }), fields)))
+  })
+
+  it('boolean fields accept true/false AND the strings "true"/"false" the branch editor sends; anything else is refused', () => {
+    // Save and evaluate must agree: booleanKeyOf reads 'true'/'false' at run time, and the branch-row value
+    // control is a text input, so refusing the strings at save made a checkbox branch impossible to (re)save.
+    for (const ok of [true, false, 'true', 'false', 'TRUE', ' False ']) {
+      expect(() => validateConditionGroupAgainstFields(group({ fieldId: 'done', operator: 'equals', value: ok }), fields)).not.toThrow()
+    }
+    expect(() => validateConditionGroupAgainstFields(group({ fieldId: 'done', operator: 'in', value: ['true', false] }), fields)).not.toThrow()
+    for (const bad of ['yes', '', 1, 0, null]) {
+      expect(() => validateConditionGroupAgainstFields(group({ fieldId: 'done', operator: 'equals', value: bad }), fields))
+        .toThrow('conditions.conditions[0].value must be a boolean (true/false)')
+    }
+    expect(() => validateConditionGroupAgainstFields(group({ fieldId: 'done', operator: 'not_in', value: [true, 'no'] }), fields))
+      .toThrow('conditions.conditions[0].value[1] must be a boolean (true/false)')
+    expect(codeOf(() => validateConditionGroupAgainstFields(group({ fieldId: 'done', operator: 'equals', value: 'yes' }), fields)))
       .toBe(AUTOMATION_CONDITION_VALUE_INVALID_CODE)
+    // Every spelling the gate accepts is one the evaluator compares.
+    const doneField: AutomationConditionField[] = [{ id: 'done', type: 'boolean' }]
+    for (const ok of ['true', 'TRUE', ' False ']) {
+      const expected = ok.trim().toLowerCase() === 'true'
+      expect(evaluateCondition({ fieldId: 'done', operator: 'equals', value: ok }, { done: expected }, typed(doneField))).toBe(true)
+    }
   })
 
   it('field-existence and operator refusals keep the generic VALIDATION_ERROR code', () => {
@@ -539,6 +610,84 @@ describe('preflightAutomationConditionFields validates condition_branch conditio
     })).resolves.toBeUndefined()
     await expect(preflightAutomationConditionFields(query, 'sheet_1', null, undefined)).resolves.toBeUndefined()
     expect(query).not.toHaveBeenCalled()
+  })
+
+  it('when a request carries both `actions` and the mirrored legacy `actionConfig`, the first refusal names the actions[0] path', async () => {
+    // parseCreateRuleInput copies actions[0].config into actionConfig; the executor runs `actions`, so the path
+    // a client is told to fix is the one it edits.
+    const branch = branchAction({ conjunction: 'AND', conditions: [{ fieldId: 'qty', operator: 'equals', value: 'abc' }] })
+    const bad = await rejection(() => preflightAutomationConditionFields(queryFn(), 'sheet_1', null, {
+      actionType: 'condition_branch',
+      actionConfig: branch.config,
+      actions: [branch] as never,
+    }))
+    expect(bad?.message).toBe('actions[0].config.branches[0].conditions.conditions[0].value must be a number')
+  })
+
+  describe('the PATCH route composition: preflightAutomationRuleUpdate resolves the EFFECTIVE action type first', () => {
+    const noLinkQuery = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    const storedBranchRule = {
+      id: 'rule_1',
+      sheet_id: 'sheet_1',
+      action_type: 'condition_branch',
+      action_config: { branches: [] },
+      actions: null,
+    }
+    const partialPatch = {
+      actionConfig: {
+        branches: [{
+          key: 'a',
+          conditions: { conjunction: 'AND', conditions: [{ fieldId: 'qty', operator: 'equals', value: 'abc' }] },
+          actions: [],
+        }],
+      },
+    }
+
+    it('a PATCH with only actionConfig inherits the STORED condition_branch type from the one getRule read', async () => {
+      const service = { getRule: vi.fn(async () => storedBranchRule) }
+      const out = await preflightAutomationRuleUpdate(noLinkQuery as never, 'sheet_1', 'rule_1', partialPatch as never, service as never)
+      expect(out?.effectiveActionType).toBe('condition_branch')
+      expect(out?.input).toEqual(partialPatch)
+      expect(service.getRule).toHaveBeenCalledTimes(1)
+      expect(noLinkQuery).not.toHaveBeenCalled()
+    })
+
+    it('a request actionType wins over the stored one; an update that does not touch actions resolves nothing and reads no rule', async () => {
+      const service = { getRule: vi.fn(async () => storedBranchRule) }
+      const retyped = await preflightAutomationRuleUpdate(
+        noLinkQuery as never, 'sheet_1', 'rule_1', { actionType: 'update_record', actionConfig: { fields: {} } } as never, service as never,
+      )
+      expect(retyped?.effectiveActionType).toBe('update_record')
+      const rename = await preflightAutomationRuleUpdate(noLinkQuery as never, 'sheet_1', 'rule_1', { name: 'renamed' } as never, service as never)
+      expect(rename).toEqual({ input: { name: 'renamed' } })
+      expect(service.getRule).toHaveBeenCalledTimes(1)
+      // Missing / cross-sheet rule ⇒ null, as before.
+      const gone = await preflightAutomationRuleUpdate(noLinkQuery as never, 'sheet_1', 'rule_1', partialPatch as never, { getRule: async () => null } as never)
+      expect(gone).toBeNull()
+      const foreign = await preflightAutomationRuleUpdate(
+        noLinkQuery as never, 'sheet_1', 'rule_1', partialPatch as never, { getRule: async () => ({ ...storedBranchRule, sheet_id: 'other' }) } as never,
+      )
+      expect(foreign).toBeNull()
+    })
+
+    it('composed as the route does, the partial-PATCH bypass is closed: stored condition_branch + actionConfig-only "abc" is refused', async () => {
+      const service = { getRule: vi.fn(async () => storedBranchRule) }
+      const preflight = await preflightAutomationRuleUpdate(noLinkQuery as never, 'sheet_1', 'rule_1', partialPatch as never, service as never)
+      expect(preflight).not.toBeNull()
+      const input = preflight!.input
+      const bad = await rejection(() => preflightAutomationConditionFields(queryFn(), 'sheet_1', input.conditions, {
+        ...input,
+        actionType: preflight!.effectiveActionType ?? input.actionType,
+      }))
+      expect(bad).toEqual({
+        code: 'AUTOMATION_CONDITION_VALUE_INVALID',
+        message: 'actionConfig.branches[0].conditions.conditions[0].value must be a number',
+      })
+      // The hole this closes, pinned: the raw input (no actionType) finds no branch group and reads no field.
+      const query = queryFn()
+      await expect(preflightAutomationConditionFields(query, 'sheet_1', input.conditions, input)).resolves.toBeUndefined()
+      expect(query).not.toHaveBeenCalled()
+    })
   })
 })
 
@@ -651,6 +800,29 @@ describe('AutomationExecutor evaluates rule and branch conditions with the sheet
     expect(warn.mock.calls.filter((c) => /could not be read as the field type/i.test(String(c[0])))).toHaveLength(2)
   })
 
+  it('a stored epoch no Date can hold never throws out of the run: the rule is skipped and warned once, values-free', async () => {
+    // Before the range guard this RangeError escaped execute() — handleEvent logged an "action failed" and a
+    // workflow_job_v1 execution persisted by onExecutionStarted was left 'running'.
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const onExecutionStarted = vi.fn(async () => undefined)
+    const lifecycle: ActionJobLifecycle = {
+      onExecutionStarted,
+      onStart: vi.fn(async () => undefined),
+      onSettled: vi.fn(async () => undefined),
+      onSkipped: vi.fn(async () => undefined),
+    }
+    const executor = new AutomationExecutor(deps({ loadConditionFields: async () => DATE_FIELDS }))
+    const outOfRange = { ...event, data: { ...RECORD, openedAt: 1e20 } }
+    const execution = await executor.execute(rule({ executionMode: 'workflow_job_v1' }), outOfRange, () => lifecycle)
+    expect(onExecutionStarted).toHaveBeenCalledTimes(1)
+    expect(execution.status).toBe('skipped')
+    expect(execution.finishedAt).toBeTruthy()
+    const valueWarns = warn.mock.calls.filter((c) => /could not be read as the field type/i.test(String(c[0])))
+    expect(valueWarns).toHaveLength(1)
+    expect(valueWarns[0]?.[1]).toMatchObject({ fieldId: 'openedAt', fieldType: 'date', operator: 'equals', side: 'record' })
+    expect(JSON.stringify(valueWarns[0])).not.toContain('1e+20')
+  })
+
   it('condition_branch conditions are evaluated with the same field types', async () => {
     const lifecycle: ActionJobLifecycle = {
       onStart: vi.fn(async () => undefined),
@@ -680,5 +852,87 @@ describe('AutomationExecutor evaluates rule and branch conditions with the sheet
 
     const legacyRun = await new AutomationExecutor(deps()).execute(branchRule, event, () => lifecycle)
     expect(legacyRun.steps[0]?.output).toMatchObject({ selectedBranchKey: 'fallback', matched: false })
+  })
+
+  it('top-level conditions AND a condition_branch in one run share ONE field read; the next run reads again (the cache is per execution)', async () => {
+    // Both evaluation sites ask for the options; only the first may load. A run that read fields for the
+    // top-level conditions and again for the branch would pass every other test here (each reads once anyway).
+    process.env.MULTITABLE_BUSINESS_TIMEZONE = 'Asia/Shanghai'
+    const lifecycle: ActionJobLifecycle = {
+      onStart: vi.fn(async () => undefined),
+      onSettled: vi.fn(async () => undefined),
+      onSkipped: vi.fn(async () => undefined),
+    }
+    const loadConditionFields = vi.fn(async () => DATE_FIELDS)
+    const executor = new AutomationExecutor(deps({ loadConditionFields }))
+    const both = rule({
+      executionMode: 'workflow_job_v1',
+      // Top level: a typed day match (skipped untyped). Branch: a typed person membership (fallback untyped).
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'openedAt', operator: 'equals', value: '2026-09-25' }] },
+      actions: [{
+        type: 'condition_branch',
+        config: {
+          branches: [{
+            key: 'hit',
+            conditions: { conjunction: 'AND', conditions: [{ fieldId: 'owner', operator: 'in', value: ['u2', 'u9'] }] },
+            actions: [],
+          }],
+          defaultBranch: { key: 'fallback', actions: [] },
+        },
+      }],
+    })
+
+    const run = await executor.execute(both, event, () => lifecycle)
+    expect(run.status).toBe('success')
+    expect(run.steps[0]?.output).toMatchObject({ selectedBranchKey: 'hit', matched: true })
+    expect(loadConditionFields).toHaveBeenCalledTimes(1)
+    expect(loadConditionFields).toHaveBeenCalledWith('sheet_1')
+
+    const again = await executor.execute(both, event, () => lifecycle)
+    expect(again.steps[0]?.output).toMatchObject({ selectedBranchKey: 'hit', matched: true })
+    expect(loadConditionFields).toHaveBeenCalledTimes(2)
+  })
+
+  it('production wiring: the executor AutomationService builds reads `SELECT id, type, property FROM meta_fields WHERE sheet_id = $1` and evaluates typed', async () => {
+    // The service binds `loadConditionFields` to its own queryFn (automation-service.ts constructor). This pins
+    // that binding through the executor the service actually constructs: the same run is `success` (typed day
+    // match) when meta_fields answers, and `skipped` (untyped `===`) when the sheet has no such field row.
+    process.env.MULTITABLE_BUSINESS_TIMEZONE = 'Asia/Shanghai'
+    const FIELDS_SQL = 'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1'
+    const serviceExecutor = (fieldRows: unknown[]) => {
+      const chain: Record<string, unknown> = {}
+      const chainFn = (..._args: unknown[]) => chain
+      for (const m of [
+        'selectFrom', 'selectAll', 'select', 'where', 'orderBy', 'limit', 'offset', 'groupBy', 'onConflict',
+        'columns', 'doUpdateSet', 'deleteFrom', 'returningAll', 'leftJoin', 'insertInto', 'updateTable', 'values', 'set',
+      ]) {
+        chain[m] = vi.fn(chainFn)
+      }
+      chain.execute = vi.fn(async () => [])
+      chain.executeTakeFirst = vi.fn(async () => undefined)
+      const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
+        if (sql === FIELDS_SQL) {
+          const rows = params?.[0] === 'sheet_1' ? fieldRows : []
+          return { rows, rowCount: rows.length }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+      const service = new AutomationService(new EventBus(), chain as never, queryFn as never)
+      const executor = (service as unknown as { executor: AutomationExecutor }).executor
+      expect(executor).toBeInstanceOf(AutomationExecutor)
+      return { executor, queryFn }
+    }
+
+    const typedRule = rule({ actions: [] })
+    const wired = serviceExecutor([{ id: 'openedAt', type: 'date', property: {} }])
+    const run = await wired.executor.execute(typedRule, event)
+    expect(run.status).toBe('success')
+    const fieldReads = wired.queryFn.mock.calls.filter(([sql]) => sql === FIELDS_SQL)
+    expect(fieldReads).toHaveLength(1)
+    expect(fieldReads[0]?.[1]).toEqual(['sheet_1'])
+
+    const unwired = serviceExecutor([])
+    expect((await unwired.executor.execute(typedRule, event)).status).toBe('skipped')
+    expect(unwired.queryFn.mock.calls.filter(([sql]) => sql === FIELDS_SQL)).toHaveLength(1)
   })
 })

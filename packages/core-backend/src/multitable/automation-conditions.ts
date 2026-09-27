@@ -20,7 +20,8 @@
  *                   cell edit and the view filter).
  *   - `person` / `user` / `link` / `multiSelect` → SET semantics over the stored `id[]`: equals = same
  *                   set, in/not_in = intersection, contains = membership, is_empty also true for `[]`.
- *   - `boolean`   → `true`/`false` and the strings `'true'`/`'false'` compare equal.
+ *   - `boolean`   → `true`/`false` and the strings `'true'`/`'false'` compare equal — and the save gate
+ *                   accepts the same spellings, so what saves is exactly what evaluates.
  *   - number-like (`number`, `currency`, `percent`, `rating`, `duration`, `autoNumber`) → numeric compare
  *                   with safe string→number coercion (`'5'` equals `5`; `'abc'` never matches).
  *
@@ -28,6 +29,10 @@
  * byte-for-byte (`evaluateLegacyCondition`). A typed path NEVER throws on a legacy / malformed stored
  * value: the side that cannot be read as the type is reported through `onUnreadableValue` (values-free —
  * ids and type names only) and the comparison evaluates as "no match" (`equals` false, `not_equals` true).
+ * Two layers keep that promise: an epoch-ms value outside the representable `Date` range (|ms| > 8.64e15,
+ * where `Intl` throws `RangeError`) is unreadable by construction, and `evaluateCondition` wraps the typed
+ * comparison so an exception from any comparator still evaluates as unmatched (reported with side
+ * `'unknown'`) instead of failing the automation run.
  */
 import { getZonedParts } from './automation-timezone'
 import { resolveDateTimeFieldTimeZone } from './business-timezone'
@@ -156,12 +161,15 @@ export class ConditionGroupValidationError extends Error {
   }
 }
 
-/** Which side of a typed comparison could not be read as the field's type (values-free diagnostics). */
+/**
+ * Which side of a typed comparison could not be read as the field's type (values-free diagnostics).
+ * `'unknown'` = a comparator threw (the never-throws safety net caught it), so the side is not known.
+ */
 export interface ConditionUnreadableValueInfo {
   fieldId: string
   fieldType: string
   operator: ConditionOperator
-  side: 'record' | 'condition'
+  side: 'record' | 'condition' | 'unknown'
 }
 
 export interface ConditionEvaluationOptions {
@@ -386,6 +394,37 @@ function assertNumericValue(value: unknown, path: string): void {
   throw new ConditionGroupValidationError(`${path} must be a number`, AUTOMATION_CONDITION_VALUE_INVALID_CODE)
 }
 
+/**
+ * `true`/`false`, or the strings `'true'`/`'false'` (any case, trimmed) — exactly the spellings
+ * `booleanKeyOf` evaluates, so a value the save gate accepts is a value the evaluator can compare. The
+ * strings matter because the branch-condition editor's value control is a text input: refusing `'true'`
+ * at save while evaluating it at run time made an existing checkbox-branch rule impossible to re-save.
+ */
+function isBooleanConditionValue(value: unknown): boolean {
+  if (typeof value === 'boolean') return true
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    return normalized === 'true' || normalized === 'false'
+  }
+  return false
+}
+
+function assertBooleanValue(value: unknown, path: string): void {
+  if (isBooleanConditionValue(value)) return
+  throw new ConditionGroupValidationError(`${path} must be a boolean (true/false)`, AUTOMATION_CONDITION_VALUE_INVALID_CODE)
+}
+
+/**
+ * The largest |epoch ms| a `Date` can represent (ECMAScript §21.4.1.1). `Intl.DateTimeFormat#formatToParts`
+ * throws `RangeError: Invalid time value` beyond it, and a `date` cell gets no write-side validation
+ * (field-codecs.ts only coerces `dateTime`), so a stored `1e20` must be treated as unreadable, not thrown on.
+ */
+const MAX_EPOCH_MS = 8.64e15
+
+function isRepresentableEpochMs(value: number): boolean {
+  return Number.isFinite(value) && Math.abs(value) <= MAX_EPOCH_MS
+}
+
 // A bare calendar day — the #3417 floating-day spelling a `date` field stores and a person types.
 const CALENDAR_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/
 
@@ -440,9 +479,7 @@ function assertConditionValueType(
       return
     }
     if (expectedKind === 'boolean') {
-      if (typeof value !== 'boolean') {
-        throw new ConditionGroupValidationError(`${valuePath} must be a boolean`, AUTOMATION_CONDITION_VALUE_INVALID_CODE)
-      }
+      assertBooleanValue(value, valuePath)
       return
     }
     if (typeof value !== 'string') {
@@ -604,11 +641,14 @@ function dayKeyOf(value: unknown, timeZone: string): OrderedKey {
     const zoned = getZonedParts(parsed.ms, timeZone)
     return calendarDayKey(zoned.year, zoned.month, zoned.day)
   }
-  if (typeof value === 'number' && Number.isFinite(value)) {
+  if (typeof value === 'number') {
+    // Out of the representable range ⇒ unreadable (`null`), never handed to `Intl` (which would throw).
+    if (!isRepresentableEpochMs(value)) return null
     const zoned = getZonedParts(value, timeZone)
     return calendarDayKey(zoned.year, zoned.month, zoned.day)
   }
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    // A Date's time value is always representable or NaN — the NaN case was excluded above.
     const zoned = getZonedParts(value.getTime(), timeZone)
     return calendarDayKey(zoned.year, zoned.month, zoned.day)
   }
@@ -617,6 +657,8 @@ function dayKeyOf(value: unknown, timeZone: string): OrderedKey {
 
 function minuteKeyOf(value: unknown, timeZone: string): OrderedKey {
   if (isEmptyTypedValue(value)) return undefined
+  // Same range rule as `dayKeyOf`: a number no `Date` can hold is not an instant.
+  if (typeof value === 'number' && !isRepresentableEpochMs(value)) return null
   return dateTimeMinuteKey(value, timeZone)
 }
 
@@ -689,6 +731,14 @@ function isSubset(subset: ReadonlySet<string>, superset: ReadonlySet<string>): b
 }
 
 type UnreadableReporter = (side: 'record' | 'condition') => void
+
+/** Negated operators are TRUE when nothing could be compared (`not_equals`, `not_in`, `not_contains`). */
+const NEGATED_OPERATORS = new Set<ConditionOperator>(['not_equals', 'not_in', 'not_contains'])
+
+/** The "no match" outcome for `operator` — what every unreadable typed comparison evaluates to. */
+function unmatchedResult(operator: ConditionOperator): boolean {
+  return NEGATED_OPERATORS.has(operator)
+}
 
 /**
  * Ordered comparison shared by day / minute / number / boolean keys. `null` when the operator has no typed
@@ -948,7 +998,18 @@ export function evaluateCondition(
 
   const field = lookupField(options, condition.fieldId)
   if (field && options) {
-    const typed = evaluateTypedCondition(condition, fieldValue, field, options)
+    let typed: boolean | null
+    try {
+      typed = evaluateTypedCondition(condition, fieldValue, field, options)
+    } catch {
+      // The never-throws safety net. The comparators are written not to throw (range-guarded epoch ms,
+      // `null` for every unreadable shape), so this is reached only by a value shape nobody anticipated —
+      // e.g. a `Date` subclass whose getter throws. The run must not fail on it (handleEvent would log it
+      // as an action failure and a workflow_job_v1 execution would be left 'running'); it is reported
+      // values-free with side `'unknown'` and evaluates as unmatched.
+      options.onUnreadableValue?.({ fieldId: field.id, fieldType: field.type, operator: condition.operator, side: 'unknown' })
+      return unmatchedResult(condition.operator)
+    }
     if (typed !== null) return typed
   }
 

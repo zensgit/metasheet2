@@ -336,8 +336,8 @@ import {
   parseDingTalkAutomationDeliveryLimit,
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
+  preflightAutomationRuleUpdate,
   preflightDingTalkAutomationCreate,
-  preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
@@ -20509,18 +20509,24 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!parsed) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
-      const input = await preflightDingTalkAutomationUpdate(
+      const preflight = await preflightAutomationRuleUpdate(
         pool.query.bind(pool),
         sheetId,
         ruleId,
         parsed,
         automationService,
       )
-      if (!input) {
+      if (!preflight) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
+      const input = preflight.input
       // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
+      // The action type is the EFFECTIVE one (request ?? stored): a PATCH that sends only `actionConfig` for a
+      // rule stored as condition_branch must still have its branch values checked, not slip past unvalidated.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, {
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+      })
 
       const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)
       if (!updated) {

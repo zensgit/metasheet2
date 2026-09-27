@@ -175,10 +175,17 @@ describe('multitable automation conditions', () => {
       conditions: [{ fieldId: 'score', operator: 'greater_than', value: 'abc' }],
     }, fields)).toThrow('conditions.conditions[0].value must be a number')
 
+    // 客户反馈 2026-09-24 #4b: the strings 'true'/'false' are accepted for a boolean field — they are exactly what
+    // the evaluator compares (booleanKeyOf) and what the branch-condition text input sends; any other spelling
+    // is still refused.
     expect(() => validateConditionGroupAgainstFields({
       conjunction: 'AND',
       conditions: [{ fieldId: 'done', operator: 'equals', value: 'false' }],
-    }, fields)).toThrow('conditions.conditions[0].value must be a boolean')
+    }, fields)).not.toThrow()
+    expect(() => validateConditionGroupAgainstFields({
+      conjunction: 'AND',
+      conditions: [{ fieldId: 'done', operator: 'equals', value: 'yes' }],
+    }, fields)).toThrow('conditions.conditions[0].value must be a boolean (true/false)')
 
     expect(() => validateConditionGroupAgainstFields({
       conjunction: 'AND',

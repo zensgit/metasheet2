@@ -5272,6 +5272,11 @@ interface ConditionBranchGroupRef {
  * levels are exhaustive). A branch whose `conditions` is not even a valid group is SKIPPED here — the
  * service's own shape validation (`validateConditionBranchConfig`) reports it with its established message and
  * path, so the refusal a client sees for a malformed branch is unchanged.
+ *
+ * `input.actionType` must be the EFFECTIVE type. On a PATCH that carries `actionConfig` without `actionType`
+ * the stored type applies (`updateRule` merges `input.actionType ?? existing.action_type`), so the route
+ * resolves it through `preflightAutomationRuleUpdate` before calling the preflight — otherwise a rule stored
+ * as `condition_branch` with `actions: null` could take an unvalidated branch value through a partial PATCH.
  */
 function collectConditionBranchGroups(input: AutomationConditionPreflightActions): ConditionBranchGroupRef[] {
   const refs: ConditionBranchGroupRef[] = []
@@ -5287,10 +5292,14 @@ function collectConditionBranchGroups(input: AutomationConditionPreflightActions
       }
     })
   }
-  if (input.actionType === 'condition_branch') visitConfig(input.actionConfig, 'actionConfig')
+  // `actions[i]` first: when a V1 request carries `actions`, the legacy `actionConfig` column is a mirror of
+  // `actions[0].config` (parseCreateRuleInput copies it) and the executor runs `actions`, so the first refusal
+  // a client sees names the path it actually edits. A condition_branch stored in the legacy columns alone
+  // (actions null / []) is still reached through `actionConfig`.
   for (const [index, action] of (input.actions ?? []).entries()) {
     if (isRecord(action) && action.type === 'condition_branch') visitConfig(action.config, `actions[${index}].config`)
   }
+  if (input.actionType === 'condition_branch') visitConfig(input.actionConfig, 'actionConfig')
   return refs
 }
 
@@ -5334,6 +5343,19 @@ export async function preflightAutomationConditionFields(
   }
 }
 
+/** What the PATCH route learns from the update preflight, beyond the normalized input (#4b). */
+export interface AutomationRuleUpdatePreflight {
+  /** `input` with DingTalk action values normalized where the request provided them. */
+  input: UpdateRuleInput
+  /**
+   * The rule's action type AFTER the update — `input.actionType ?? existing.action_type` — when the request
+   * touches the action tree (`actionType` / `actionConfig` / `actions`); `undefined` when it does not (no rule
+   * row was read). The condition preflight needs this to find the branches of a `condition_branch` rule
+   * whose PATCH carries only `actionConfig`.
+   */
+  effectiveActionType?: string
+}
+
 /**
  * PATCH-time DingTalk pre-flight. Only runs when the update touches
  * `actionType`, `actionConfig`, or `actions` — otherwise no link validation
@@ -5349,11 +5371,27 @@ export async function preflightDingTalkAutomationUpdate(
   input: UpdateRuleInput,
   service: Pick<AutomationService, 'getRule'>,
 ): Promise<UpdateRuleInput | null> {
+  const preflight = await preflightAutomationRuleUpdate(queryFn, sheetId, ruleId, input, service)
+  return preflight ? preflight.input : null
+}
+
+/**
+ * The full PATCH-time preflight: `preflightDingTalkAutomationUpdate` plus the EFFECTIVE action type the
+ * same rule read resolved (one `getRule` call either way — no extra fetch). `null` when the existing rule is
+ * missing or belongs to a different sheet.
+ */
+export async function preflightAutomationRuleUpdate(
+  queryFn: AutomationQueryFn,
+  sheetId: string,
+  ruleId: string,
+  input: UpdateRuleInput,
+  service: Pick<AutomationService, 'getRule'>,
+): Promise<AutomationRuleUpdatePreflight | null> {
   const touchesAction =
     input.actionType !== undefined ||
     input.actionConfig !== undefined ||
     input.actions !== undefined
-  if (!touchesAction) return input
+  if (!touchesAction) return { input }
 
   const existing = await service.getRule(ruleId)
   if (!existing || existing.sheet_id !== sheetId) return null
@@ -5389,5 +5427,5 @@ export async function preflightDingTalkAutomationUpdate(
   const out: UpdateRuleInput = { ...input }
   if (input.actionConfig !== undefined) out.actionConfig = normalizedActionConfig
   if (input.actions !== undefined) out.actions = Array.isArray(input.actions) ? normalizedActions : null
-  return out
+  return { input: out, effectiveActionType: nextActionType }
 }
