@@ -256,7 +256,9 @@ MS_DS_USER=<只读账号>  MS_DS_PASSWORD=<只读口令>  MS_DS_SCHEMA=<schema>
 ## 附录 A — 已验证 runner 完整输出（证据）
 
 命令:`cd plugins/plugin-integration-core && node __tests__/stock-preparation-demo-runner.cjs`
-（终端有颜色;下面是去色文本，尾行 `... OK` 即成功）。
+（终端有颜色;下面是去色文本，尾行 `... OK` 即成功。去色、去掉 12 条 `═` 分隔线
+（runner.cjs 的 `banner()` 总会打印，与是否 TTY 无关）与行尾空白后，与下方文本逐行
+一致，不是逐字节 diff 为空）。
 
 ```
 备料 DEMO — 客户步骤 1-2-3 走查(结构一致合成 PLM 源 · 驱动发货管线)

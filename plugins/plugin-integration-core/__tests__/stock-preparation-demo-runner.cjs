@@ -117,8 +117,9 @@ function table(headers, rows) {
 // the one config that adapts the shipped 7-object traversal to the fixture's
 // (== the customer's) column names. Same shape as the rehearsal's REBIND_READ_PLAN
 // (stock-preparation-structure-exact-rehearsal.test.cjs), including specField below —
-// this runner used to omit it, which left the demo export's 规格/名称及规格 columns
-// blank even though the fixture declares Specification.
+// this runner used to omit it, which left the demo export's 规格 column blank even
+// though the fixture declares Specification. (名称及规格/ext_nameAndSpec is a
+// separate column, unaffected by specField — see the note by specField below.)
 const REBIND_READ_PLAN = normalizeStockPreparationBomReadPlan({
   id: 'plm.stock-preparation.bom-read.dn-view.demo',
   sourceKind: 'data-source:sql-readonly',
@@ -143,7 +144,12 @@ const REBIND_READ_PLAN = normalizeStockPreparationBomReadPlan({
     // DECLARED, matching the rehearsal: turns `Specification` into a canonical `spec` on
     // the expansion row (stock-preparation-bom-expansion.cjs), which the conflict planner
     // then carries onto the record as `componentSpec` (stock-preparation-conflict-planner.cjs).
-    // Undeclared, both the 规格 and 名称及规格 export columns print blank.
+    // Undeclared, the 规格 export column prints blank.
+    // 名称及规格(ext_nameAndSpec) stays blank in this demo for an unrelated reason: it is
+    // one of the F1c derived ext_ columns (stock-preparation-conflict-planner.cjs
+    // denormalizedPlmFields / canDeriveExtensionField), gated on `extensionFieldIds` being
+    // threaded into planStockPreparationConflicts — this runner doesn't pass it, so the
+    // column is left alone on both sides. Not something specField controls.
     specField: 'Specification',
     // DECLARED (shipped, opt-in): carries Createtime far enough for the batch-identity
     // module (mintStockPreparationBatchIdentity) below to bucket it by hour. Absent this,
