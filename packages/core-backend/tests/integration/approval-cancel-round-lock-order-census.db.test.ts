@@ -191,6 +191,11 @@ import {
   parseCanonicalAttendanceRolloutOrgKeyV1,
 } from '../../src/attendance/w4c0-identity'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../../src/services/approval-record-link-row-auth-lock'
+import {
+  classifyAndLockAttendanceRequestForInstance,
+  classifyAttendanceRequestForInstanceV1,
+} from '../../src/attendance/w4c3b-central-approval-hooks'
+import { resolveCancelRoundRolloutLockRequirementV1 } from '../../src/services/ApprovalProductService'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
 const dbUrl = process.env.DATABASE_URL
@@ -671,6 +676,1025 @@ describeIfDatabase(
         a.release()
         b.release()
       }
+    })
+  },
+)
+
+describeIfDatabase(
+  'WI-0 lock-order census (Q-D, phase 2): the NEW pair — original document instance row vs. the ' +
+    '`approval_rounds` pending row, introduced by the 判据 IV close at outlet #5′',
+  () => {
+    /**
+     * Why this leg exists, and why it is not covered by Q-A/Q-B/Q-C.
+     *
+     * Phase 2's `evaluateCancelRoundFinalInLock` is the first site in the tree that takes a
+     * `FOR UPDATE` on an `approval_rounds` row at all (`git grep -n "FROM approval_rounds" -- src`
+     * before it: every other read is unlocked, and 判据 III's terminations are bare `UPDATE`s). It
+     * takes that lock in the same transaction as a `FOR UPDATE` on the ORIGINAL document instance,
+     * so it creates a lock PAIR that no census leg had a denominator for — precisely the closed-
+     * world hazard this lane keeps hitting. Q-A/Q-B/Q-C are all {row lock, advisory lock} pairs;
+     * this one is {row lock, row lock} across two different tables.
+     *
+     * The counterparty is `createCancelRoundInstance`, which locks the original document FIRST and
+     * only then touches `approval_rounds` — and its INSERT does not merely "touch" it: the partial
+     * unique index `uq_approval_rounds_pending_document … WHERE outcome = 'pending'` makes that
+     * INSERT WAIT on any uncommitted change to that document's pending round. That is the second
+     * edge, and it is invisible to a reading that only looks for explicit `FOR UPDATE`s.
+     *
+     * The three legs below are the same technique as Q-A/Q-B: the reversed order proven to
+     * deadlock deterministically (the standing proof), the shipped order proven not to, and the
+     * shipped order's own outcome asserted so the "no deadlock" is not just "nothing happened".
+     */
+    let pool: Pool
+    const createdInstanceIds: string[] = []
+    const createdRoundIds: string[] = []
+
+    beforeAll(async () => {
+      await ensureApprovalSchemaReady()
+      pool = new Pool({ connectionString: dbUrl })
+    }, 60000)
+
+    afterAll(async () => {
+      if (createdRoundIds.length > 0) {
+        await pool
+          .query('DELETE FROM approval_rounds WHERE id = ANY($1::text[])', [createdRoundIds])
+          .catch(() => undefined)
+      }
+      if (createdInstanceIds.length > 0) {
+        await pool
+          .query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
+          .catch(() => undefined)
+      }
+      await pool?.end().catch(() => undefined)
+    })
+
+    /** An `approved` document with one `pending` cancel round on it, and its engine instance. */
+    async function seedDocumentWithPendingRound(): Promise<{ documentId: string; engineId: string }> {
+      const documentId = `census-qd-doc-${randomUUID()}`
+      const engineId = `census-qd-eng-${randomUUID()}`
+      const roundId = `apr_qd_${randomUUID().replace(/-/g, '')}`
+      await pool.query(
+        `INSERT INTO approval_instances (id, status) VALUES ($1, 'approved'), ($2, 'pending')`,
+        [documentId, engineId],
+      )
+      createdInstanceIds.push(documentId, engineId)
+      await pool.query(
+        `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+         VALUES ($1, $2, 'cancel', $3, 'census-qd', 'pending', '{}'::jsonb)`,
+        [roundId, documentId, engineId],
+      )
+      createdRoundIds.push(roundId)
+      return { documentId, engineId }
+    }
+
+    /** The creator's side: lock the original document, then INSERT a second pending round for it. */
+    async function creatorInsert(client: PoolClient, documentId: string): Promise<void> {
+      const roundId = `apr_qd2_${randomUUID().replace(/-/g, '')}`
+      createdRoundIds.push(roundId)
+      await client.query(
+        `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+         VALUES ($1, $2, 'cancel', NULL, 'census-qd', 'pending', '{}'::jsonb)`,
+        [roundId, documentId],
+      )
+    }
+
+    it('the REVERSED order (closer takes the ROUND row before the document row) deadlocks DETERMINISTICALLY (40P01)', async () => {
+      const { documentId, engineId } = await seedDocumentWithPendingRound()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        // A = creator: document row FIRST.
+        await a.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+        // B = closer, REVERSED: the round row first, then the document row.
+        await b.query(
+          `SELECT id FROM approval_rounds WHERE engine_instance_id = $1 AND outcome = 'pending' FOR UPDATE`,
+          [engineId],
+        )
+        await b.query(
+          `UPDATE approval_rounds SET outcome = 'expired', ended_at = now()
+            WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+          [engineId],
+        )
+        const bSecond = b.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+        // A's INSERT now waits on B's uncommitted change to the SAME document's pending round,
+        // via the partial unique index — closing the cycle.
+        const aSecond = creatorInsert(a, documentId)
+
+        const outcomes = await Promise.allSettled([aSecond, bSecond])
+        const deadlocks = outcomes.filter(
+          (outcome) => outcome.status === 'rejected' && (outcome.reason as { code?: string }).code === '40P01',
+        )
+        expect(deadlocks.length, 'the constructed reverse order did not deadlock').toBe(1)
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    })
+
+    it('POSITIVE CONTROL — the SHIPPED order (closer takes the document row before the round row) does NOT deadlock, and BOTH sides reach a defined outcome', async () => {
+      const { documentId, engineId } = await seedDocumentWithPendingRound()
+      const a = await pool.connect()
+      const b = await pool.connect()
+      try {
+        await a.query('BEGIN')
+        await b.query('BEGIN')
+        await a.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+        // B follows the shipped order: it blocks on the DOCUMENT row before it can touch the round.
+        const bClose = (async () => {
+          await b.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [documentId])
+          await b.query(
+            `SELECT id FROM approval_rounds WHERE engine_instance_id = $1 AND outcome = 'pending' FOR UPDATE`,
+            [engineId],
+          )
+          await b.query(
+            `UPDATE approval_rounds SET outcome = 'expired', ended_at = now()
+              WHERE engine_instance_id = $1 AND outcome = 'pending'`,
+            [engineId],
+          )
+        })()
+
+        // A's INSERT does NOT wait on B (B has not touched the round row — it is still queued on
+        // the document row), so A resolves on its own merits: the existing pending round makes it
+        // a 23505 on the partial unique index, which `createCancelRoundInstance` already
+        // translates into `CANCEL_ROUND_ALREADY_PENDING`.
+        const aOutcome = await creatorInsert(a, documentId).then(
+          () => 'inserted',
+          (error: { code?: string }) => error.code,
+        )
+        expect(aOutcome).toBe('23505')
+        await a.query('COMMIT')
+
+        // Neither side deadlocked: B proceeds once A releases the document row.
+        await expect(bClose).resolves.toBeUndefined()
+        await b.query('COMMIT')
+
+        const round = await pool.query<{ outcome: string }>(
+          `SELECT outcome FROM approval_rounds WHERE engine_instance_id = $1`,
+          [engineId],
+        )
+        expect(round.rows[0]?.outcome).toBe('expired')
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined)
+        await b.query('ROLLBACK').catch(() => undefined)
+        a.release()
+        b.release()
+      }
+    })
+
+    it('the production closer takes the two in the shipped order (source scan, anchored at both ends)', () => {
+      const source = readFileSync(
+        join(__dirname, '../../src/services/ApprovalProductService.ts'),
+        'utf8',
+      )
+      const method = source.slice(source.indexOf('private async evaluateCancelRoundFinalInLock('))
+      const body = method.slice(0, method.indexOf('private async closeCancelRoundSystemTerminalInTxn('))
+      expect(body.length).toBeGreaterThan(500)
+      const docLock = body.indexOf('FROM approval_instances WHERE id = $1 FOR UPDATE')
+      const roundLock = body.indexOf("WHERE engine_instance_id = $1 AND outcome = 'pending'\n        FOR UPDATE")
+      expect(docLock, 'the document-instance FOR UPDATE was not found in the evaluator').toBeGreaterThan(-1)
+      expect(roundLock, 'the round-row FOR UPDATE was not found in the evaluator').toBeGreaterThan(-1)
+      // The whole point of Q-D: document row FIRST.
+      expect(docLock).toBeLessThan(roundLock)
+    })
+  },
+)
+
+/**
+ * Q-E (2026-09-18) — WHICH org key must 判据 II take the rollout lock on?
+ *
+ * Opened because §3.3b of the phase-2 verification MD named the rollout-lock ordering as 判据 II's
+ * prerequisite but did NOT say which org the lock is keyed by, and the lock's own rule is
+ * 「census 未做前不实现」. The answer decides what the `dispatchAction` pre-read must SELECT, so it
+ * is settled here — with rows, not by reading one line of a type — BEFORE the restructure.
+ *
+ * The naive answer is `approval_instances.org_id`: the cancel round carries one
+ * (`createCancelRoundInstance` copies `original.org_id`), it is one hop from the instance
+ * `dispatchAction` already loads, and it is the column the approval side thinks in. **It is the
+ * wrong column.** The demand comes from `assertExternalTransactionRolloutLockHeldV1`, which the
+ * protocol calls with `identityPrepared.orgId` — the org the ADAPTER resolved in
+ * `prepareIdentity`, whose contract (`AttendanceRequestOperationAdapterV1`) restricts it to
+ * 「durable route identity (for example request org/subject)」, i.e. the `attendance_requests`
+ * row. Leg 1 proves the two columns can hold different values on the very row shape a cancel
+ * round runs on, so this is a live divergence and not a naming quibble.
+ *
+ * Leg 3 is the reason this census could not be answered by 「reuse the existing helper」: the repo
+ * already contains TWO joins from an approval instance to its attendance request, and they do not
+ * agree. Per `feedback_single_definition_does_not_make_a_narrow_predicate_correct.md`, picking one
+ * by name would have inherited its predicate silently.
+ */
+describeIfDatabase('WI-0 lock-order census (Q-E): which org key 判据 II must take the rollout lock on', () => {
+  let pool: Pool
+  const createdInstanceIds: string[] = []
+  const createdRequestIds: string[] = []
+  const ATTENDANCE_WORKFLOW_KEY = 'attendance.request'
+  const CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+
+  beforeAll(async () => {
+    await ensureApprovalSchemaReady()
+    pool = new Pool({ connectionString: dbUrl })
+  }, 60000)
+
+  afterAll(async () => {
+    if (createdRequestIds.length > 0) {
+      await pool
+        .query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds])
+        .catch(() => undefined)
+    }
+    if (createdInstanceIds.length > 0) {
+      await pool
+        .query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
+        .catch(() => undefined)
+    }
+    await pool?.end().catch(() => undefined)
+  })
+
+  function rolloutKeyFor(orgId: string): bigint {
+    return buildAttendanceCalculationRolloutAdvisoryKey(parseCanonicalAttendanceRolloutOrgKeyV1(orgId))
+  }
+
+  /**
+   * The row shape a cancel round actually runs on: an ORIGINAL attendance approval instance whose
+   * `org_id` is stamped independently of the `attendance_requests` row it points at, plus the
+   * cancel-round engine instance that `createCancelRoundInstance` builds from it (`business_key`
+   * = the original's id, `org_id` copied from the original).
+   *
+   * `instanceOrg` and `requestOrg` are deliberately DIFFERENT canonical UUIDs. That is not a
+   * contrived fixture: §the immutability census in the phase-2 verification MD found FOUR
+   * `org_id = EXCLUDED.org_id` writers on `attendance_requests` and none on this path that keeps
+   * the two in step, so nothing in the schema or the code pins them together.
+   */
+  async function seedCancelRoundOverAttendanceRequest(): Promise<{
+    roundInstanceId: string
+    originalInstanceId: string
+    requestId: string
+    instanceOrg: string
+    requestOrg: string
+  }> {
+    const instanceOrg = randomUUID()
+    const requestOrg = randomUUID()
+    const originalInstanceId = `census-qe-original-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, org_id) VALUES ($1, 'approved', $2, $3)`,
+      [originalInstanceId, ATTENDANCE_WORKFLOW_KEY, instanceOrg],
+    )
+    createdInstanceIds.push(originalInstanceId)
+
+    const requestId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+       VALUES ($1, $2, CURRENT_DATE, 'leave', 'approved', $3, $4, $5)`,
+      [requestId, `census-qe-user-${randomUUID()}`, requestOrg, originalInstanceId, ATTENDANCE_WORKFLOW_KEY],
+    )
+    createdRequestIds.push(requestId)
+
+    const roundInstanceId = `census-qe-round-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+       VALUES ($1, 'pending', $2, $3, $4)`,
+      [roundInstanceId, CANCEL_ROUND_WORKFLOW_KEY, originalInstanceId, instanceOrg],
+    )
+    createdInstanceIds.push(roundInstanceId)
+
+    return { roundInstanceId, originalInstanceId, requestId, instanceOrg, requestOrg }
+  }
+
+  it('LEG 1: the cancel round`s own org_id and the attendance request`s org_id can DIVERGE — so a pre-read on approval_instances.org_id would take the WRONG rollout lock', async () => {
+    const seeded = await seedCancelRoundOverAttendanceRequest()
+
+    // What the approval side would reach for (one hop from the instance dispatchAction loads).
+    const roundRow = await pool.query<{ org_id: string | null; business_key: string | null }>(
+      `SELECT org_id::text AS org_id, business_key::text AS business_key FROM approval_instances WHERE id = $1`,
+      [seeded.roundInstanceId],
+    )
+    expect(roundRow.rows[0]?.org_id).toBe(seeded.instanceOrg)
+    expect(roundRow.rows[0]?.business_key).toBe(seeded.originalInstanceId)
+
+    // What `prepareIdentity` resolves, and therefore what the entry demands.
+    const requestRow = await pool.query<{ org_id: string }>(
+      `SELECT org_id::text AS org_id FROM attendance_requests WHERE id = $1`,
+      [seeded.requestId],
+    )
+    expect(requestRow.rows[0]?.org_id).toBe(seeded.requestOrg)
+
+    // The two orgs are different, and — the part that actually bites — they derive DIFFERENT
+    // class-`00` advisory keys through the real production builder. A pre-read on the instance
+    // column would take key(instanceOrg); the entry would then look for key(requestOrg) in
+    // `pg_locks` and fail closed with W4C3B_REQUEST_EXTERNAL_TRANSACTION_ROLLOUT_LOCK_NOT_HELD.
+    expect(seeded.instanceOrg).not.toBe(seeded.requestOrg)
+    expect(rolloutKeyFor(seeded.instanceOrg)).not.toBe(rolloutKeyFor(seeded.requestOrg))
+  })
+
+  it('LEG 2 (POSITIVE CONTROL for leg 1`s key comparison): the SAME org derives the SAME key, so leg 1`s inequality is a real divergence and not a builder that never repeats', async () => {
+    const org = randomUUID()
+    expect(rolloutKeyFor(org)).toBe(rolloutKeyFor(org))
+    // …and the builder is the production one, so a formula change cannot leave this census stale.
+    expect(typeof rolloutKeyFor(org)).toBe('bigint')
+  })
+
+  it('LEG 3: the repo`s TWO existing instance→request joins DISAGREE on a two-candidate fixture — so 「reuse the existing helper」 is not a single well-defined instruction', async () => {
+    // Both rows point at the SAME original instance, with different orgs. Row A is reachable only
+    // through `approval_instance_id`; row B is reachable through BOTH `approval_instance_id` and
+    // the `attendance-request:<id>` business_key form.
+    const instanceOrg = randomUUID()
+    const orgA = randomUUID()
+    const orgB = randomUUID()
+    const originalInstanceId = `census-qe3-original-${randomUUID()}`
+    const requestB = randomUUID()
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+       VALUES ($1, 'approved', $2, $3, $4)`,
+      [originalInstanceId, ATTENDANCE_WORKFLOW_KEY, `attendance-request:${requestB}`, instanceOrg],
+    )
+    createdInstanceIds.push(originalInstanceId)
+
+    const requestA = randomUUID()
+    for (const [id, org] of [
+      [requestA, orgA],
+      [requestB, orgB],
+    ] as const) {
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+         VALUES ($1, $2, CURRENT_DATE, 'leave', 'approved', $3, $4, $5)`,
+        [id, `census-qe3-user-${randomUUID()}`, org, originalInstanceId, ATTENDANCE_WORKFLOW_KEY],
+      )
+      createdRequestIds.push(id)
+    }
+
+    // Derivation 1 — the REAL production function, called, not transcribed. (An earlier draft of
+    // this leg re-typed its SQL into the test; that would have gone on passing if production
+    // drifted, which is the whole failure mode this census exists to prevent.) It takes
+    // `FOR UPDATE`, so it needs a transaction of its own.
+    const classifierClient = await pool.connect()
+    let classified: Awaited<ReturnType<typeof classifyAndLockAttendanceRequestForInstance>>
+    try {
+      await classifierClient.query('BEGIN')
+      classified = await classifyAndLockAttendanceRequestForInstance(classifierClient, {
+        id: originalInstanceId,
+        workflow_key: ATTENDANCE_WORKFLOW_KEY,
+        business_key: `attendance-request:${requestB}`,
+      })
+      await classifierClient.query('COMMIT')
+    } finally {
+      await classifierClient.query('ROLLBACK').catch(() => undefined)
+      classifierClient.release()
+    }
+    expect(classified.kind).toBe('attendance')
+    const classifiedRequest = classified.kind === 'attendance' ? classified.request : null
+    expect(classifiedRequest).not.toBeNull()
+    // Business-key match is PREFERRED by its explicit ORDER BY, then LIMIT 1. Deterministic: row B.
+    expect(classifiedRequest?.requestId).toBe(requestB)
+    expect(classifiedRequest?.orgId).toBe(orgB)
+
+    // Derivation 2 — `filterBulkReassignDiscoveryForAttendance`'s LEFT JOIN (hooks:452-463). It
+    // carries NO `approval_instance_id IS NULL OR = i.id` safety clause, NO ORDER BY and NO LIMIT,
+    // so on this fixture it returns BOTH rows. Its consumer folds them into a Map keyed by
+    // instance id, so whichever row Postgres hands back LAST silently wins the org.
+    const joined = await pool.query<{ id: string; org_id: string }>(
+      `SELECT r.id::text AS id, r.org_id::text AS org_id
+         FROM approval_instances i
+         LEFT JOIN attendance_requests r
+           ON i.workflow_key = $2
+          AND ((i.business_key IS NOT NULL AND i.business_key = ($3 || r.id::text))
+               OR r.approval_instance_id = i.id)
+        WHERE i.id = ANY($1::text[])`,
+      [[originalInstanceId], ATTENDANCE_WORKFLOW_KEY, 'attendance-request:'],
+    )
+    expect(joined.rows).toHaveLength(2)
+    const joinedOrgs = new Set(joined.rows.map((row) => row.org_id))
+    expect(joinedOrgs).toEqual(new Set([orgA, orgB]))
+
+    // The discriminating claim: one derivation pins a single org, the other admits an org the
+    // first one REJECTED. A pre-read built on derivation 2 could take key(orgA) while the entry
+    // demands key(orgB).
+    expect(joinedOrgs.has(orgA)).toBe(true)
+    expect(classifiedRequest?.orgId).not.toBe(orgA)
+  })
+
+  it('LEG 4: the entry demands the org `prepareIdentity` resolved — source scan, anchored at both ends', () => {
+    const source = readFileSync(
+      join(__dirname, '../../src/attendance/w4c3b-request-operation-boundary.ts'),
+      'utf8',
+    )
+    const protocolStart = source.indexOf('async function runRequestOperationProtocolV1(')
+    expect(protocolStart, 'the protocol runner was not found').toBeGreaterThan(-1)
+    const body = source.slice(protocolStart)
+    expect(body.length).toBeGreaterThan(500)
+
+    // ⚠️ P3-hygiene (2026-09-19, positive format for impl-gate-C-slice2-round1 P3-5): a closed-
+    // world count on the WHOLE FILE, not just the sliced `body`. Without this, a second call site
+    // added OUTSIDE this function (or this leg's anchor drifting onto a stale one) would make the
+    // `.toContain` below vacuously true regardless of which call it actually found.
+    expect(
+      source.split('assertExternalTransactionRolloutLockHeldV1(trx,').length - 1,
+      'expected exactly one call site in this file — a second one would mean this leg no longer censuses the whole population',
+    ).toBe(1)
+
+    // The assert is fed `identityPrepared.orgId` — NOT any approval-side column, and not a field
+    // of the caller-supplied input (which `normalizeExternalTransactionInput` has no org in).
+    expect(body).toContain('await assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)')
+    const prepareIdentityCall = body.indexOf('await adapter.prepareIdentity(')
+    const assertCall = body.indexOf('assertExternalTransactionRolloutLockHeldV1(trx, identityPrepared.orgId)')
+    expect(prepareIdentityCall).toBeGreaterThan(-1)
+    expect(assertCall).toBeGreaterThan(-1)
+    // The org cannot be known before the adapter resolves it — which is exactly why the approval
+    // side has to derive the SAME org itself, one transaction earlier, to take the lock in order.
+    expect(prepareIdentityCall).toBeLessThan(assertCall)
+
+    // And the entry's own input type carries no org field to short-circuit that derivation.
+    const inputType = source.slice(
+      source.indexOf('export interface AttendanceRequestOperationExternalTransactionInputV1 {'),
+    )
+    const inputBody = inputType.slice(0, inputType.indexOf('\n}'))
+    expect(inputBody.length).toBeGreaterThan(100)
+    expect(inputBody).not.toContain('orgId')
+  })
+})
+
+/**
+ * WI-0 lock-order census — **Q-F**: the `dispatchAction` restructure that makes §3 C-2's global
+ * order 「rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → …」 achievable at outlet #5/#5′.
+ *
+ * Q-E (above) settled WHICH org key. Q-F is about the SITE: `dispatchAction` used to open `BEGIN`
+ * and immediately take `approval_instances … FOR UPDATE` with nothing in between, so any advisory
+ * lock taken later on that path was taken AFTER a row lock. That violation is invisible to the W4
+ * entry's own `assertExternalTransactionRolloutLockHeldV1`, which queries `pg_locks` for
+ * HELD-ness only and has no notion of acquisition order — it would PASS while the order is broken.
+ *
+ * Four legs, deliberately split between RUNTIME behaviour and a both-ends-anchored source scan,
+ * because they establish different things and only one of them can be established each way:
+ *   - legs 1/2 drive the REAL production resolver (`resolveCancelRoundRolloutLockRequirementV1`,
+ *     `dispatchAction`'s own, exported for this census) — what org, and when NOT to lock at all;
+ *   - leg 3 is the ordering proof: source text is the only thing that can speak about the order of
+ *     two acquisitions inside one method without racing a live dispatch;
+ *   - leg 4 binds the pre-read's non-locking mode to the LOCKING path's own predicate.
+ *
+ * WHAT Q-F DOES NOT ESTABLISH, stated so no reader takes leg 3 for more than it is: leg 3 proves
+ * the production ORDER of the two calls in `dispatchAction`'s source, not that a live concurrent
+ * dispatch cannot deadlock against a counterparty. That would need the two-connection technique
+ * Q-A/Q-D use, and it needs a driveable cancel-round dispatch over an attendance-owned original —
+ * which is 判据 II's own fixture, not this unit's.
+ */
+describeIfDatabase('WI-0 lock-order census (Q-F): the dispatchAction entry restructure (判据 II prerequisite)', () => {
+  let pool: Pool
+  const createdRoundIds: string[] = []
+  const createdInstanceIds: string[] = []
+  const createdRequestIds: string[] = []
+  const ATTENDANCE_WORKFLOW_KEY = 'attendance.request'
+  const CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+
+  beforeAll(async () => {
+    await ensureApprovalSchemaReady()
+    pool = new Pool({ connectionString: dbUrl })
+  }, 60000)
+
+  afterAll(async () => {
+    if (createdRoundIds.length > 0) {
+      await pool.query('DELETE FROM approval_rounds WHERE id = ANY($1::text[])', [createdRoundIds]).catch(() => undefined)
+    }
+    if (createdRequestIds.length > 0) {
+      await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
+    }
+    if (createdInstanceIds.length > 0) {
+      await pool.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds]).catch(() => undefined)
+    }
+    await pool?.end().catch(() => undefined)
+  })
+
+  /**
+   * The full three-hop shape the resolver walks: cancel-round engine instance → its ONE pending
+   * `approval_rounds` row → the ORIGINAL document instance → that instance's `attendance_requests`
+   * row.
+   *
+   * `originalWorkflowKey` is a parameter so leg 2 can flip the original document's ownership. It
+   * feeds TWO columns, not one, and that is a schema fact rather than a fixture convenience:
+   * `attendance_requests` carries a COMPOSITE foreign key
+   * `(approval_instance_id, approval_workflow_key) → approval_instances (id, workflow_key)`
+   * (`attendance_requests_instance_workflow_fkey`), so a request row cannot point at an instance
+   * whose `workflow_key` disagrees with its own mirror column. The first draft of leg 2 moved only
+   * the instance column and was refused with `23503`; recorded here rather than quietly widened,
+   * because it means 「一个字段之差」 is not literally available on this table.
+   */
+  async function seedResolvableCancelRound(originalWorkflowKey: string): Promise<{
+    roundInstanceId: string
+    originalInstanceId: string
+    requestId: string
+    instanceOrg: string
+    requestOrg: string
+  }> {
+    const instanceOrg = randomUUID()
+    const requestOrg = randomUUID()
+    const originalInstanceId = `census-qf-original-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, org_id) VALUES ($1, 'approved', $2, $3)`,
+      [originalInstanceId, originalWorkflowKey, instanceOrg],
+    )
+    createdInstanceIds.push(originalInstanceId)
+
+    const requestId = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_requests
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+       VALUES ($1, $2, CURRENT_DATE, 'leave', 'approved', $3, $4, $5)`,
+      [requestId, `census-qf-user-${randomUUID()}`, requestOrg, originalInstanceId, originalWorkflowKey],
+    )
+    createdRequestIds.push(requestId)
+
+    const roundInstanceId = `census-qf-round-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+       VALUES ($1, 'pending', $2, $3, $4)`,
+      [roundInstanceId, CANCEL_ROUND_WORKFLOW_KEY, originalInstanceId, instanceOrg],
+    )
+    createdInstanceIds.push(roundInstanceId)
+
+    const roundId = `census-qf-roundrow-${randomUUID()}`
+    await pool.query(
+      `INSERT INTO approval_rounds
+         (id, document_id, kind, engine_instance_id, requested_by, outcome, policy_snapshot_at_create)
+       VALUES ($1, $2, 'cancel', $3, $4, 'pending', '{}'::jsonb)`,
+      [roundId, originalInstanceId, roundInstanceId, `census-qf-requester-${randomUUID()}`],
+    )
+    createdRoundIds.push(roundId)
+
+    return { roundInstanceId, originalInstanceId, requestId, instanceOrg, requestOrg }
+  }
+
+  it('LEG 1: the production resolver returns the REQUEST row`s org — not the cancel round`s own org_id, which is one hop closer and wrong', async () => {
+    const seeded = await seedResolvableCancelRound(ATTENDANCE_WORKFLOW_KEY)
+    const client = await pool.connect()
+    try {
+      const requirement = await resolveCancelRoundRolloutLockRequirementV1(
+        client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
+        seeded.roundInstanceId,
+        'approve',
+      )
+      expect(requirement.kind).toBe('required')
+      if (requirement.kind !== 'required') throw new Error('unreachable — narrowed above')
+      // The load-bearing assertion of this whole census: Q-E leg 1 proved the two orgs derive
+      // DIFFERENT class-`00` keys, so picking the wrong one is a 500 at the W4 entry, not a
+      // cosmetic difference.
+      expect(requirement.orgId).toBe(seeded.requestOrg)
+      expect(requirement.orgId).not.toBe(seeded.instanceOrg)
+      expect(requirement.documentId).toBe(seeded.originalInstanceId)
+      expect(requirement.requestId).toBe(seeded.requestId)
+    } finally {
+      client.release()
+    }
+  })
+
+  it('LEG 2 (the fail-closed-in-the-WRONG-direction control): a cancel round whose ORIGINAL is not attendance-owned demands NO lock', async () => {
+    // One CONCEPT differs from leg 1's fixture — the ORIGINAL document instance's ownership —
+    // carried by the two columns the composite FK binds together (see the seeder's note). The
+    // cancel round itself, its pending `approval_rounds` row, and the request row's org are all
+    // built by the same code path as leg 1.
+    //
+    // This is the control for the failure the advisor named: if the pre-read (or the post-lock
+    // re-assert) asked the WIDER question 「is this a cancel round?」 instead of the resolver's own,
+    // this fixture would demand a rollout lock that nothing can supply — and a legitimate cancel
+    // round over a non-attendance document would fail closed for ever. The predicate is ONE
+    // function called twice precisely so the two evaluations cannot answer differently here.
+    const seeded = await seedResolvableCancelRound('platform.generic-document')
+    const client = await pool.connect()
+    try {
+      const requirement = await resolveCancelRoundRolloutLockRequirementV1(
+        client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
+        seeded.roundInstanceId,
+        'approve',
+      )
+      expect(requirement.kind).toBe('none')
+    } finally {
+      client.release()
+    }
+  })
+
+  it('LEG 3: in dispatchAction`s production source the pre-read precedes BEGIN and the rollout lock precedes the instance row lock (source scan, both ends anchored)', () => {
+    const source = readFileSync(
+      join(__dirname, '../../src/services/ApprovalProductService.ts'),
+      'utf8',
+    )
+    const methodStart = source.indexOf('  async dispatchAction(')
+    expect(methodStart).toBeGreaterThan(-1)
+    // Anchored at BOTH ends: the slice stops at the method's own catch, so a later method's text
+    // cannot satisfy any of the offsets below.
+    const methodEnd = source.indexOf('      await rollbackQuietly(client)', methodStart)
+    expect(methodEnd).toBeGreaterThan(methodStart)
+    const body = source.slice(methodStart, methodEnd)
+
+    const preRead = body.indexOf('rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)')
+    const serializableBegin = body.indexOf("await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')")
+    const plainBegin = body.indexOf("await client.query('BEGIN')")
+    const rolloutAcquire = body.indexOf('await acquireAttendanceCalculationRolloutLock(')
+    const instanceRowLock = body.indexOf('FROM approval_instances WHERE id = $1')
+    const reAssert = body.indexOf('const rolloutLockUnderRowLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)')
+
+    for (const offset of [preRead, serializableBegin, plainBegin, rolloutAcquire, instanceRowLock, reAssert]) {
+      expect(offset).toBeGreaterThan(-1)
+    }
+    // The pre-read is OUTSIDE the transaction — before BOTH `BEGIN` forms. PostgreSQL fixes the
+    // isolation level at the transaction's first statement, so this is not a style preference.
+    expect(preRead).toBeLessThan(serializableBegin)
+    expect(preRead).toBeLessThan(plainBegin)
+    // §3 C-2's global order, the thing this whole leg exists for.
+    expect(rolloutAcquire).toBeLessThan(instanceRowLock)
+    // …and the fail-closed re-assert comes AFTER the row lock (a re-assert before it would be a
+    // second pre-read, not a re-assert).
+    expect(instanceRowLock).toBeLessThan(reAssert)
+  })
+
+  it('LEG 4: the pre-read`s non-locking mode and the LOCKING path resolve the SAME row — one predicate, two lock modes, no transcribed copy', async () => {
+    // Two candidate request rows for one instance, the same shape Q-E leg 3 uses to show the repo's
+    // OTHER join disagrees. Row B is reachable through the `attendance-request:<id>` business_key
+    // form, which the shared ORDER BY prefers.
+    const originalInstanceId = `census-qf-modes-${randomUUID()}`
+    const rowBId = randomUUID()
+    await pool.query(
+      `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+       VALUES ($1, 'approved', $2, $3, $4)`,
+      [originalInstanceId, ATTENDANCE_WORKFLOW_KEY, `attendance-request:${rowBId}`, randomUUID()],
+    )
+    createdInstanceIds.push(originalInstanceId)
+
+    const rowAId = randomUUID()
+    for (const [id, org] of [[rowAId, randomUUID()], [rowBId, randomUUID()]] as const) {
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+         VALUES ($1, $2, CURRENT_DATE, 'leave', 'approved', $3, $4, $5)`,
+        [id, `census-qf-user-${randomUUID()}`, org, originalInstanceId, ATTENDANCE_WORKFLOW_KEY],
+      )
+      createdRequestIds.push(id)
+    }
+
+    const instanceRef = {
+      id: originalInstanceId,
+      workflow_key: ATTENDANCE_WORKFLOW_KEY,
+      business_key: `attendance-request:${rowBId}`,
+    }
+
+    const client = await pool.connect()
+    try {
+      const unlocked = await classifyAttendanceRequestForInstanceV1(client, instanceRef, { lock: 'none' })
+      // The locking mode has to run inside a transaction to hold anything; it is the historical
+      // wrapper, called by name, so this compares the PRODUCTION locking path — not a copy of it.
+      await client.query('BEGIN')
+      const locked = await classifyAndLockAttendanceRequestForInstance(client, instanceRef)
+      await client.query('ROLLBACK')
+
+      expect(unlocked.kind).toBe('attendance')
+      expect(locked.kind).toBe('attendance')
+      if (unlocked.kind !== 'attendance' || locked.kind !== 'attendance') {
+        throw new Error('unreachable — narrowed above')
+      }
+      // Both must pin row B, and must agree. A transcribed non-locking copy that lost the
+      // business-key preference from the ORDER BY would pin row A here (that is M-11's probe).
+      expect(unlocked.request?.requestId).toBe(rowBId)
+      expect(locked.request?.requestId).toBe(rowBId)
+      expect(unlocked.request?.orgId).toBe(locked.request?.orgId)
+      expect(unlocked.request?.requestId).not.toBe(rowAId)
+    } finally {
+      client.release()
+    }
+  })
+
+  it('LEG 5 (the ACTION axis — the control for 判据 III`s already-shipped behaviour): the SAME fixture leg 1 resolves `required` for demands NO lock on revoke/reject/comment/a forbidden verb', async () => {
+    // Leg 2 varies the DOCUMENT axis (attendance-owned or not). This leg varies the ACTION axis on
+    // a fixture leg 1 has already proven resolves `required`, so the two together say the resolver
+    // is narrow on BOTH and not merely on one.
+    //
+    // Why it is load-bearing rather than tidy: only the approve fall-through (outlet #5/#5′) can
+    // reach W4. 判据 III's revoke/reject terminate the round row with a bare UPDATE and shipped in
+    // phase 1. A resolver keyed on the instance alone would have moved them to SERIALIZABLE, given
+    // them an org-wide advisory lock and a 40001 failure mode they never had, made a FORBIDDEN verb
+    // take an org lock before `assertCancelRoundActionAllowed` refuses it, and put the re-assert's
+    // 409 ahead of §14.3 #4/#6's outlet-guard codes. None of that is 判据 II's to change.
+    const seeded = await seedResolvableCancelRound(ATTENDANCE_WORKFLOW_KEY)
+    const client = await pool.connect()
+    try {
+      // Positive control FIRST, on this very fixture: without it a green `none` below could mean
+      // 「the fixture never demanded a lock」 rather than 「the action axis refused it」.
+      const onApprove = await resolveCancelRoundRolloutLockRequirementV1(
+        client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
+        seeded.roundInstanceId,
+        'approve',
+      )
+      expect(onApprove.kind).toBe('required')
+
+      for (const action of ['reject', 'revoke', 'comment', 'transfer', 'handle'] as const) {
+        const requirement = await resolveCancelRoundRolloutLockRequirementV1(
+          client as unknown as Parameters<typeof resolveCancelRoundRolloutLockRequirementV1>[0],
+          seeded.roundInstanceId,
+          action,
+        )
+        expect(requirement, `action ${action} must demand no rollout lock`).toEqual({ kind: 'none' })
+      }
+    } finally {
+      client.release()
+    }
+  })
+
+  it('LEG 6: the 40001/40P01 mapping exists, is gated on the branch that created the surface, and uses the repo`s single predicate (source scan, both ends anchored)', () => {
+    // DISCLOSURE, so this leg is not read as more than it is: this is a SOURCE scan, not a driven
+    // serialization failure. `CANCEL_ROUND_DISPATCH_CONTENDED` has no runtime coverage — no test
+    // in this repo makes a real 40001 reach it. The leg exists so that DELETING the mapping
+    // reddens something (the `finding_o2_x2_fix_site_has_zero_test_coverage.md` shape), not so
+    // that anyone can call the mapping exercised.
+    const source = readFileSync(
+      join(__dirname, '../../src/services/ApprovalProductService.ts'),
+      'utf8',
+    )
+    const methodStart = source.indexOf('  async dispatchAction(')
+    expect(methodStart).toBeGreaterThan(-1)
+    const catchStart = source.indexOf('      await rollbackQuietly(client)', methodStart)
+    expect(catchStart).toBeGreaterThan(methodStart)
+    // Both ends anchored: the catch block only, ending at its own rethrow.
+    const catchEnd = source.indexOf('    } finally {', catchStart)
+    expect(catchEnd).toBeGreaterThan(catchStart)
+    const catchBody = source.slice(catchStart, catchEnd)
+
+    // ⚠️ P3-hygiene (2026-09-19, positive format for impl-gate-C-slice2-round1 P3-8): a closed-
+    // world count on the WHOLE FILE, not just the sliced `catchBody`. Without this, a second throw
+    // site added OUTSIDE `dispatchAction`'s catch block would leave this leg blind to it while
+    // still reading green off the one site it already knows about.
+    expect(
+      source.split('CANCEL_ROUND_DISPATCH_CONTENDED').length - 1,
+      'expected exactly one reference in this file — a second one would mean this leg no longer censuses the whole population',
+    ).toBe(1)
+
+    expect(catchBody).toContain('CANCEL_ROUND_DISPATCH_CONTENDED')
+    // Gated on the branch that opened SERIALIZABLE — NOT a repo-wide retry-semantics change.
+    expect(catchBody).toContain("rolloutLock.kind === 'required' && isRetryableSqlState(error)")
+    // The ordinary dispatch's bare rethrow survives the mapping.
+    expect(catchBody).toContain('throw error')
+  })
+})
+
+describeIfDatabase(
+  'WI-0 lock-order census (Q-G): {原单据实例, attendance_requests} — the adapter reorder (判据 II prerequisite)',
+  () => {
+    /**
+     * Lock §3 C-2 (lock:110) fixes the global order
+     *   `rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → attendance_requests → 余额批次`
+     * and ends with 「现有适配器改为同序」; lock:227 restates it as the row-lock class order.
+     *
+     * Q-D covered {原单据实例, 轮次行}. This leg covers the NEXT pair on the same path, and unlike
+     * Q-D's — whose cancel-round side does not exist until 判据 II lands — BOTH sides of this one
+     * are LIVE production code today:
+     *
+     *   core side    `classifyAndLockAttendanceRequestForInstance` — always reached with the
+     *                `approval_instances` row already `FOR UPDATE`-held (`dispatchAction`'s entry
+     *                read, `bulkReassignApprovals`, `assertAttendanceCentralMutationFailClosed`),
+     *                so it runs 原单据实例 → `attendance_requests`.
+     *   plugin side  `executeRequestCancel` in `plugins/plugin-attendance/index.cjs` — took
+     *                `attendance_requests` FIRST and the `approval_instances` row second.
+     *
+     * That is an inversion between two live paths on the SAME (request, instance) pair, and both
+     * are reachable while the request is still `pending` (a pending request's cancel vs. a bulk
+     * reassign / admin jump on its pending instance). LEG 1 CONSTRUCTS it and it deadlocks
+     * deterministically; LEG 2 is the positive control on the shipped order; LEG 3 anchors the
+     * production source; LEG 4 enumerates what is still NOT in the ratified order, so this block
+     * cannot be read as 「全仓已同序」.
+     */
+    let pool: Pool
+    const createdInstanceIds: string[] = []
+    const createdRequestIds: string[] = []
+    const ATTENDANCE_WORKFLOW_KEY = 'attendance.request'
+
+    beforeAll(async () => {
+      await ensureApprovalSchemaReady()
+      pool = new Pool({ connectionString: dbUrl })
+    }, 60000)
+
+    afterAll(async () => {
+      if (createdRequestIds.length > 0) {
+        await pool
+          .query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds])
+          .catch(() => undefined)
+      }
+      if (createdInstanceIds.length > 0) {
+        await pool
+          .query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
+          .catch(() => undefined)
+      }
+      await pool?.end().catch(() => undefined)
+    })
+
+    /** One attendance-owned `approval_instances` row and the `attendance_requests` row joined to it. */
+    async function seedAttendanceRequestWithInstance(): Promise<{
+      instanceId: string
+      requestId: string
+      orgId: string
+    }> {
+      const orgId = randomUUID()
+      const instanceId = `census-qg-inst-${randomUUID()}`
+      await pool.query(
+        `INSERT INTO approval_instances (id, status, workflow_key, business_key, org_id)
+         VALUES ($1, 'pending', $2, $3, $4)`,
+        [instanceId, ATTENDANCE_WORKFLOW_KEY, null, orgId],
+      )
+      createdInstanceIds.push(instanceId)
+
+      const requestId = randomUUID()
+      await pool.query(
+        `INSERT INTO attendance_requests
+           (id, user_id, work_date, request_type, status, org_id, approval_instance_id, approval_workflow_key)
+         VALUES ($1, $2, CURRENT_DATE, 'leave', 'pending', $3, $4, $5)`,
+        [requestId, `census-qg-user-${randomUUID()}`, orgId, instanceId, ATTENDANCE_WORKFLOW_KEY],
+      )
+      createdRequestIds.push(requestId)
+      return { instanceId, requestId, orgId }
+    }
+
+    /**
+     * The CORE side's second lock, taken through the REAL production predicate rather than a
+     * transcribed copy of its SQL — so a future change to that predicate is picked up here instead
+     * of drifting away from it silently.
+     */
+    async function coreLocksRequestForInstance(client: PoolClient, instanceId: string): Promise<void> {
+      await classifyAndLockAttendanceRequestForInstance(
+        client as unknown as Parameters<typeof classifyAndLockAttendanceRequestForInstance>[0],
+        { id: instanceId, workflow_key: ATTENDANCE_WORKFLOW_KEY, business_key: null },
+      )
+    }
+
+    /**
+     * Polls until PostgreSQL itself reports the given backend as waiting on a lock. Throws (rather
+     * than returning false) on timeout, so a leg that silently stopped contending goes RED with a
+     * message that says what it failed to establish instead of quietly proving nothing.
+     */
+    async function expectBackendBlockedOnLock(pid: number, timeoutMs = 5000): Promise<void> {
+      const deadline = Date.now() + timeoutMs
+      for (;;) {
+        const probe = await pool.query<{ blocked: boolean }>(
+          `SELECT count(*) > 0 AS blocked
+             FROM pg_stat_activity
+            WHERE pid = $1 AND wait_event_type = 'Lock'`,
+          [pid],
+        )
+        if (probe.rows[0]?.blocked === true) return
+        if (Date.now() > deadline) {
+          throw new Error(
+            `backend ${pid} never blocked on a lock within ${timeoutMs}ms — the two sides did not `
+              + 'contend, so this leg proved nothing',
+          )
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
+
+    it('LEG 1: the PRE-FIX adapter order (attendance_requests before the instance row) deadlocks DETERMINISTICALLY (40P01) against the core order', async () => {
+      const { instanceId, requestId } = await seedAttendanceRequestWithInstance()
+      const core = await pool.connect()
+      const adapter = await pool.connect()
+      try {
+        await core.query('BEGIN')
+        await adapter.query('BEGIN')
+        // CORE (ratified order): 原单据实例 first.
+        await core.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
+        // ADAPTER as it stood BEFORE the reorder: `attendance_requests` first. Written out by
+        // hand deliberately. NOT because the order is gone from the repo — LEG 4 reads it off the
+        // DECISION adapter, which still runs request-first — but so that this leg stays
+        // independent of any one production site: it proves the SHAPE deadlocks, and LEG 4
+        // separately reports who still has that shape.
+        await adapter.query('SELECT id FROM attendance_requests WHERE id = $1::uuid FOR UPDATE', [requestId])
+
+        // Each side now reaches for the row the other holds — the cycle.
+        const coreSecond = coreLocksRequestForInstance(core, instanceId)
+        const adapterSecond = adapter.query(
+          'SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE',
+          [instanceId],
+        )
+
+        const outcomes = await Promise.allSettled([coreSecond, adapterSecond])
+        const deadlocks = outcomes.filter(
+          (outcome) => outcome.status === 'rejected' && (outcome.reason as { code?: string }).code === '40P01',
+        )
+        expect(deadlocks.length, 'the constructed pre-fix order did not deadlock').toBe(1)
+      } finally {
+        await core.query('ROLLBACK').catch(() => undefined)
+        await adapter.query('ROLLBACK').catch(() => undefined)
+        core.release()
+        adapter.release()
+      }
+    })
+
+    it('POSITIVE CONTROL (LEG 2): the SHIPPED order (both sides take the instance row first) does NOT deadlock, and BOTH sides reach a defined outcome', async () => {
+      const { instanceId, requestId } = await seedAttendanceRequestWithInstance()
+      const core = await pool.connect()
+      const adapter = await pool.connect()
+      try {
+        await core.query('BEGIN')
+        await adapter.query('BEGIN')
+        await core.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
+
+        // The adapter, in its SHIPPED order, blocks on the INSTANCE row before it can touch the
+        // request row — so it can never hold half the cycle.
+        const adapterPid = (await adapter.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid
+        const adapterRun = (async () => {
+          await adapter.query('SELECT id FROM approval_instances WHERE id = $1 FOR UPDATE', [instanceId])
+          const locked = await adapter.query(
+            'SELECT id FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
+            [requestId],
+          )
+          return locked.rowCount
+        })()
+
+        // The core side proceeds on its own merits: it takes the request row and returns the
+        // attendance classification — a DEFINED outcome, not merely "nothing happened".
+        await expect(coreLocksRequestForInstance(core, instanceId)).resolves.toBeUndefined()
+        // CONTENTION PROOF, MEASURED on the server rather than inferred from JS timing. Without it
+        // this leg would pass just as happily on a fixture where the two sides never overlapped,
+        // and "no deadlock" would have no discriminating power at all.
+        //
+        // An earlier draft used a `settled` flag flipped in `adapterRun.then(...)` and asserted it
+        // was still false here. That was VACUOUS and was caught by its own mutation: pointing the
+        // adapter at a DIFFERENT (request, instance) pair — so it contends with nothing and
+        // finishes immediately — left the flag `false` anyway, because the callback had not been
+        // scheduled yet. `pg_stat_activity.wait_event_type` is the server's own answer and does
+        // not depend on which promise the event loop happened to reach first.
+        await expectBackendBlockedOnLock(adapterPid)
+        await core.query('COMMIT')
+
+        await expect(adapterRun).resolves.toBe(1)
+        await adapter.query('COMMIT')
+      } finally {
+        await core.query('ROLLBACK').catch(() => undefined)
+        await adapter.query('ROLLBACK').catch(() => undefined)
+        core.release()
+        adapter.release()
+      }
+    })
+
+    it('LEG 3: the production cancel adapter takes the two in the ratified order (source scan, anchored at both ends)', () => {
+      const source = readFileSync(
+        join(__dirname, '../../../../plugins/plugin-attendance/index.cjs'),
+        'utf8',
+      )
+      const start = source.indexOf('execute: async function executeRequestCancel(')
+      expect(start, 'executeRequestCancel was not found').toBeGreaterThan(-1)
+      // Far end anchored on the adapter's own terminal write, so the slice cannot run past the
+      // function and pick up some other site's statements.
+      const end = source.indexOf("SET status = 'cancelled', resolved_by = $2", start)
+      expect(end, 'the adapter`s attendance_requests terminal write was not found').toBeGreaterThan(start)
+      const body = source.slice(start, end)
+
+      const instanceLock = body.indexOf("'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE'")
+      const requestLock = body.indexOf("'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE'")
+      expect(instanceLock, 'the instance FOR UPDATE was not found in executeRequestCancel').toBeGreaterThan(-1)
+      expect(requestLock, 'the request FOR UPDATE was not found in executeRequestCancel').toBeGreaterThan(-1)
+      expect(instanceLock, '原单据实例 must be locked BEFORE attendance_requests').toBeLessThan(requestLock)
+    })
+
+    it('LEG 4 (registered, NOT buried): among the `FOR UPDATE` sites, the plugin`s OTHER both-row path is still in the pre-fix order — this fix is one site, not a repo-wide sweep', () => {
+      const source = readFileSync(
+        join(__dirname, '../../../../plugins/plugin-attendance/index.cjs'),
+        'utf8',
+      )
+      // Mechanical enumeration, so the claim is a count and not a memory. Comment/doc lines are
+      // excluded by requiring the quoted statement form the adapters actually execute.
+      //
+      // SCOPE, stated so the counts are not read as the whole population: this enumerates
+      // EXPLICIT `FOR UPDATE` reads ONLY. A bare `UPDATE approval_instances …` / `UPDATE
+      // attendance_requests …` takes a row lock too (`feedback_writer_audit_both_query_syntaxes`),
+      // and the plugin has 3 and 5 of those respectively. They are NOT enumerated here and NOT
+      // ordered by this commit — registered as a residual in the phase-2 verification MD §3.10.2.
+      const requestLocks = [...source.matchAll(/SELECT \* FROM attendance_requests WHERE id = \$1(?:::uuid)? FOR UPDATE/g)]
+      const instanceLocks = [...source.matchAll(/SELECT \* FROM approval_instances WHERE id = \$1 FOR UPDATE/g)]
+      expect(requestLocks.length, 'attendance_requests FOR UPDATE site count changed').toBe(3)
+      expect(instanceLocks.length, 'approval_instances FOR UPDATE site count changed').toBe(3)
+
+      // The decision adapter (`attendance_requests` → `approval_instances`) is the residual: it is
+      // the approve/reject path, which runs only while the request is `pending`, so it is NOT on
+      // 判据 II's approved-document path and is deliberately left to the attendance line.
+      //
+      // ⚠️ READ THE FAILURE MESSAGE BEFORE "FIXING" ANYTHING. This leg pins PRODUCTION SOURCE to a
+      // state that is known-wrong-but-out-of-scope, which is the opposite polarity from every other
+      // leg in this file. A RED here does NOT mean something broke: it almost certainly means
+      // someone correctly reordered the decision adapter, and the right response is to DELETE this
+      // assertion and update the phase-2 verification MD's residual list in the same commit — not
+      // to put the old order back. It exists only so that the residual cannot be silently closed
+      // while the MD goes on calling it open.
+      const decisionStart = source.indexOf('const decisionReferenceSegments = operation?.referenceSegments === true')
+      expect(decisionStart, 'the decision adapter anchor was not found').toBeGreaterThan(-1)
+      const decisionEnd = source.indexOf('const requestMetadata = normalizeMetadata(requestRow.metadata)', decisionStart)
+      expect(decisionEnd).toBeGreaterThan(decisionStart)
+      const decisionBody = source.slice(decisionStart, decisionEnd)
+      const dRequest = decisionBody.indexOf("'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE'")
+      const dInstance = decisionBody.indexOf("'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE'")
+      expect(dRequest).toBeGreaterThan(-1)
+      expect(dInstance).toBeGreaterThan(-1)
+      expect(
+        dRequest,
+        'the decision adapter is no longer request-first: if that was a deliberate reorder, DELETE '
+          + 'this assertion and update the phase-2 verification MD residual list — do not revert it',
+      ).toBeLessThan(dInstance)
     })
   },
 )

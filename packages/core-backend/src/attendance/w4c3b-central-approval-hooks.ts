@@ -136,13 +136,31 @@ export function parseAttendanceRequestIdFromBusinessKey(businessKey: unknown): s
 }
 
 /**
- * Classify from a already-FOR UPDATE-locked approval_instances row.
- * published_definition_id is intentionally ignored (adversarial fixture must still classify).
- * Locks the matching attendance_requests row FOR UPDATE before returning org.
+ * Lock mode for the ONE instance->request predicate below.
+ *
+ * `'for_update'` is what every in-transaction caller uses (the historical behaviour, reached
+ * through the `classifyAndLockAttendanceRequestForInstance` wrapper). `'none'` exists for the
+ * cancel-round rollout-lock pre-read (lock section 3 C-2 global lock order), which by construction
+ * must run BEFORE `BEGIN` -- PostgreSQL fixes a transaction's isolation level at its first
+ * statement, so a pre-read inside the transaction would foreclose
+ * `BEGIN ISOLATION LEVEL SERIALIZABLE`. A `FOR UPDATE` outside a transaction would also block
+ * indefinitely on a contended request row for no benefit: nothing is held across it.
+ *
+ * The two modes share ONE row-selection predicate (the WHERE / ORDER BY / LIMIT below). That is
+ * the point of the parameter: a transcribed non-locking copy would drift away from the locking
+ * one silently, which is exactly the failure census leg Q-E/M-10 was built to catch.
  */
-export async function classifyAndLockAttendanceRequestForInstance(
+export type AttendanceInstanceClassificationLockModeV1 = 'for_update' | 'none'
+
+/**
+ * Classify from an approval_instances row (FOR UPDATE-locked by the caller on the locking path).
+ * published_definition_id is intentionally ignored (adversarial fixture must still classify).
+ * With `lock: 'for_update'` the matching attendance_requests row is locked before org is returned.
+ */
+export async function classifyAttendanceRequestForInstanceV1(
   client: W4c3bQueryClient,
   instance: W4c3bApprovalInstanceRef,
+  options: { readonly lock: AttendanceInstanceClassificationLockModeV1 },
 ): Promise<AttendanceInstanceClassificationV1> {
   const workflowKey = asText(instance.workflow_key)
   if (workflowKey !== ATTENDANCE_APPROVAL_WORKFLOW_KEY) {
@@ -150,6 +168,9 @@ export async function classifyAndLockAttendanceRequestForInstance(
   }
 
   const requestIdFromBusinessKey = parseAttendanceRequestIdFromBusinessKey(instance.business_key)
+  // The ONLY difference between the two modes. Not interpolated from caller input: `options.lock`
+  // is a closed two-member union, so this cannot carry anything but one of these two constants.
+  const lockClause = options.lock === 'for_update' ? '\n      FOR UPDATE' : ''
   const locked = await client.query(
     `SELECT id::text AS id,
             org_id::text AS org_id,
@@ -168,8 +189,7 @@ export async function classifyAndLockAttendanceRequestForInstance(
       ORDER BY
         CASE WHEN $1::text IS NOT NULL AND id::text = $1::text THEN 0 ELSE 1 END,
         created_at ASC NULLS LAST
-      LIMIT 1
-      FOR UPDATE`,
+      LIMIT 1${lockClause}`,
     [requestIdFromBusinessKey, instance.id],
   )
 
@@ -194,6 +214,18 @@ export async function classifyAndLockAttendanceRequestForInstance(
       userId: asText(row.user_id),
     },
   }
+}
+
+/**
+ * The historical name and signature, unchanged for its in-transaction call sites: a thin wrapper
+ * that pins `lock: 'for_update'`. Kept so this parameterisation is a pure extraction -- every
+ * existing caller keeps the locking behaviour it had, with no call-site edit.
+ */
+export async function classifyAndLockAttendanceRequestForInstance(
+  client: W4c3bQueryClient,
+  instance: W4c3bApprovalInstanceRef,
+): Promise<AttendanceInstanceClassificationV1> {
+  return classifyAttendanceRequestForInstanceV1(client, instance, { lock: 'for_update' })
 }
 
 /** True when the locked instance is attendance-owned (including orphaned join). */

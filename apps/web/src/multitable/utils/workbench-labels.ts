@@ -106,6 +106,9 @@ export type WorkbenchLabelKey =
   | 'saveTpl.submit' | 'saveTpl.saving' | 'saveTpl.cancel' | 'saveTpl.close'
   | 'saveTpl.errorNoName' | 'saveTpl.errorNoFields' | 'saveTpl.failed'
   | 'saveTpl.successTitle' | 'saveTpl.warningsTitle' | 'saveTpl.openCenter'
+  // A10 phase 1(客户反馈 2026-09-24 #8):对话框说清楚存的是哪张表/哪些视图,
+  // 且成功后给一句「装出来是什么」的说明。
+  | 'saveTpl.viewsLabel' | 'saveTpl.viewsNote' | 'saveTpl.installNote'
   // final audit closure follow-up: composable fallback messages (backend e.message remains raw)
   | 'error.loadSheets' | 'error.loadSheetMetadata' | 'error.loadBaseMetadata'
 
@@ -362,6 +365,28 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'saveTpl.fieldsLabel': { en: 'Fields to include', zh: '包含的字段' },
   'saveTpl.selectAll': { en: 'Select all', zh: '全选' },
   'saveTpl.selectNone': { en: 'Clear all', zh: '全不选' },
+  // A10 phase 1(客户反馈 2026-09-24 #8):视图清单只读展示,说清楚保存/不保存的边界。
+  // N1(2026-09-26 对抗评审):上一版文案说"与实际抽取范围逐字对应"是假话——custom-template-store.ts
+  // 的 extractTemplateSheets 只认 groupInfo.fieldId / groupInfo.fieldIds[0](嵌套分组的第 2/3 级
+  // 一律丢),而且日历/看板会用到 dateFieldId/titleFieldId/groupByFieldId,旧文案一个字都没提。
+  // 这里按实际抽取逻辑逐项列出,不再用一句空泛的"分组"糊弄过去。
+  // N-5(第二轮对抗评审):「不保存」也要列全——extractTemplateSheets 从 view.config 只读
+  // dateFieldId/titleFieldId,时间轴/甘特的起止字段、层级视图的 parentFieldId、列顺序/列宽
+  // 全部不进模板,旧文案只说了筛选和排序。
+  'saveTpl.viewsLabel': { en: 'Views included', zh: '包含的视图' },
+  'saveTpl.viewsNote': {
+    en: 'Views save name, type, grouping (first level only), hidden columns, and the calendar/kanban fields. Not saved: filters, sort, column order and widths, timeline/gantt start and end fields, hierarchy parent field.',
+    zh: '视图保存名称、类型、分组（仅第一级）、隐藏列及日历/看板所用字段；不保存筛选、排序、列顺序与列宽、时间轴/甘特的起止字段、层级的父级字段',
+  },
+  // N3(2026-09-26 对抗评审):旧文案"表头和视图相同的空表"过度承诺——link/lookup/rollup/formula/
+  // button 这些字段会被降级成文本列(DOWNGRADED_FIELD_TYPES,custom-template-store.ts),装出来的
+  // 表头**不是**逐字一样。用"关联/公式等列会变成文本列"说清楚这一半真相。
+  // N-5(第二轮对抗评审):英文版原来漏了 button(以及模板不支持的其它类型,同样降级为文本),
+  // 中英两版都点名按钮。
+  'saveTpl.installNote': {
+    en: 'Using this template creates a new base with an empty table. Link, lookup, rollup, formula, button and other unsupported columns become plain text columns.',
+    zh: '使用模板会新建工作区，其中是空表；关联/公式/按钮等列会变成文本列',
+  },
   'saveTpl.shareLabel': { en: 'Share with this tenant', zh: '共享给本租户' },
   'saveTpl.shareHint': {
     en: 'Unchecked: only you can see this template.',
@@ -392,6 +417,18 @@ export function workbenchLabel(key: WorkbenchLabelKey, isZh: boolean): string {
 }
 
 // --- Interpolation helpers (not keys) ---
+
+// saveTplSource: A10 phase 1(客户反馈 2026-09-24 #8)——「把当前数据表存为模板」对话框的
+// 来源行,baseName/sheetName 都是用户数据,原样拼进去不翻译。
+// N7(2026-09-26 对抗评审):bases 列表是异步加载的(loadBases() 在 onMounted 里跑),对话框在
+// 那次请求落地前打开时 baseName 会是空串——`来源：/ 订单`(空前缀 + 斜杠)比不写工作区名更难看、
+// 更像是坏了。工作区名未知时只显示数据表名,不留一个空的 "/" 前缀。
+export function saveTplSource(baseName: string, sheetName: string, isZh: boolean): string {
+  const trimmedBase = baseName.trim()
+  const trimmedSheet = sheetName.trim()
+  if (!trimmedBase) return isZh ? `来源：${trimmedSheet}` : `Source: ${trimmedSheet}`
+  return isZh ? `来源：${trimmedBase} / ${trimmedSheet}` : `Source: ${trimmedBase} / ${trimmedSheet}`
+}
 
 // conflictMessage: `{field} changed elsewhere.[ Latest version is {v}.] Reload
 // the row or retry your edit.` — the version segment is OPTIONAL (omitted when
