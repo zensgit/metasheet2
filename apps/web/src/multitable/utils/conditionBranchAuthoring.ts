@@ -13,13 +13,14 @@
 // Typed condition values (客户反馈 2026-09-24 #4b): branch condition rows now use the same typed value
 // control as the rule-level rows, and `buildConditionBranchConfig(draft, { fields })` saves each branch
 // condition value in its field type's shape (automation-condition-values.ts — number → number, checkbox →
-// boolean, date → 'YYYY-MM-DD', date-time → UTC ISO, person / link → id[]), exactly like the rule-level rows.
-// The invariant above still holds for every value ALREADY in that shape (it round-trips byte-identically,
-// and every other key of the condition rides through). The one deliberate difference is a LEGACY branch
-// value saved by the old bare text box in the wrong shape — `'5'` on a number field, `'true'` on a checkbox,
-// a bare user id on a person field: an untouched save rewrites it to the typed shape it always meant (the
-// evaluator compares with `===`, so the string form never matched). A value that cannot be expressed in its
-// field's shape is never rewritten: the editor blocks the save and anchors the row instead.
+// boolean, date → 'YYYY-MM-DD', date-time → UTC ISO, person / link → one id for equals / not_equals and id[]
+// for in / not_in), exactly like the rule-level rows. The invariant above still holds for every value
+// ALREADY in that shape (it round-trips byte-identically, and every other key of the condition rides
+// through). The one deliberate difference is a LEGACY branch value saved by the old bare text box in the
+// wrong shape — `'5'` on a number field, `'true'` on a checkbox, a zone-less `datetime-local` string on a
+// date-time field: an untouched save rewrites it to the typed shape it always meant (the evaluator compares
+// with `===`, so the string form never matched). A value that cannot be expressed in its field's shape is
+// never rewritten: the editor blocks the save and anchors the row instead.
 import type {
   AutomationAction,
   AutomationActionType,

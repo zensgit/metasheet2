@@ -70,6 +70,12 @@ async function addBranchCondition(container: HTMLElement) {
   return container.querySelector('[data-branch-index="0"] [data-branch-condition-index="0"]') as HTMLElement
 }
 
+// Explicit per-test timeout (same reasoning as ROUND_TRIP_TIMEOUT_MS in multitable-automation-rule-editor.spec.ts):
+// every case mounts the FULL rule editor and most drive a save — sub-second on an idle box, but the CI web
+// lane shares the runner across hundreds of spec files and the first mount of a file can overrun vitest's 5s
+// default. The global testTimeout stays 5s so a hung editor still fails fast elsewhere.
+const EDITOR_MOUNT_TIMEOUT_MS = 30_000
+
 beforeEach(() => useLocale().setLocale('zh-CN'))
 afterEach(() => {
   document.body.innerHTML = ''
@@ -100,7 +106,7 @@ describe('blank condition row: no operator until a field is chosen', () => {
 
     expect(row.textContent).not.toContain('equals')
     expect(document.body.textContent).not.toMatch(/\bequals\b/)
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('condition_branch row: the same disabled pending state, its own save-block reason, no raw `equals`', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
@@ -122,7 +128,7 @@ describe('blank condition row: no operator until a field is chosen', () => {
 
     expect(row.textContent).not.toContain('equals')
     expect(document.body.textContent).not.toMatch(/\bequals\b/)
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('choosing a field enables the operator (the type\'s first) and the typed value; clearing it goes back to pending', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
@@ -143,7 +149,7 @@ describe('blank condition row: no operator until a field is chosen', () => {
     await flush()
     expect(operator.querySelector('.el-select__wrapper')?.classList.contains('is-disabled')).toBe(true)
     expect(row.querySelector('[data-condition-value="pending"]')).toBeTruthy()
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 })
 
 describe('field dropdown and operator labels', () => {
@@ -171,7 +177,7 @@ describe('field dropdown and operator labels', () => {
         ['Status', '单选'],
       ])
     }
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('date / date-time rows label greater/less as 晚于 / 早于 (codes unchanged); a number row keeps 大于 / 小于', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
@@ -198,7 +204,7 @@ describe('field dropdown and operator labels', () => {
     await flush()
     expect(labelOf('greater_than')).toBe('大于')
     expect(labelOf('less_than')).toBe('小于')
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 })
 
 describe('condition_branch rows are typed and saved in the typed shape', () => {
@@ -236,7 +242,7 @@ describe('condition_branch rows are typed and saved in the typed shape', () => {
       { fieldId: 'fld_score', operator: 'greater_than', value: 100 },
       { fieldId: 'fld_done', operator: 'equals', value: true },
     ])
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('an unparseable branch value blocks save with the branch reason, anchored at the row', async () => {
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
@@ -256,7 +262,7 @@ describe('condition_branch rows are typed and saved in the typed shape', () => {
     input.dispatchEvent(new Event('input'))
     await flush()
     expect((container.querySelector('[data-action="save"]') as HTMLButtonElement).disabled).toBe(false)
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('round-trip: a loaded typed branch saves byte-identically; legacy string values save typed', async () => {
     const typed = {
@@ -314,11 +320,11 @@ describe('condition_branch rows are typed and saved in the typed shape', () => {
     expect(savedLegacy.mock.calls[0][0].actions[0].config.branches[0].conditions.conditions).toEqual([
       { fieldId: 'fld_score', operator: 'equals', value: 5 },
       { fieldId: 'fld_done', operator: 'equals', value: true },
-      { fieldId: 'fld_owner', operator: 'equals', value: ['user_1'] },
+      { fieldId: 'fld_owner', operator: 'equals', value: 'user_1' }, // one id is already the saved shape
     ])
     // ...and the loaded rule object itself was never mutated by the editor.
     expect(legacy.branches[0].conditions.conditions[0].value).toBe('5')
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 
   it('a rule-level date-time row saves the business-timezone instant (not the browser-local datetime-local string)', async () => {
     const saved = vi.fn()
@@ -343,5 +349,5 @@ describe('condition_branch rows are typed and saved in the typed shape', () => {
       conjunction: 'AND',
       conditions: [{ fieldId: 'fld_start', operator: 'greater_than', value: '2026-09-24T01:30:00.000Z' }],
     })
-  })
+  }, EDITOR_MOUNT_TIMEOUT_MS)
 })

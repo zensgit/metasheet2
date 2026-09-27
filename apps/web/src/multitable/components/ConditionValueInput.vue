@@ -4,9 +4,10 @@
     condition rows and the condition_branch rows of MetaAutomationRuleEditor.vue (the branch rows used to be a
     bare text box whose values were saved as strings). What it emits is already in the saved shape of the
     field type (../utils/automation-condition-values.ts): number → number, boolean → boolean,
-    date → 'YYYY-MM-DD', date-time → UTC ISO read in the business timezone (#6083), person / link → string[]
-    of ids. `in` / `not_in` on a text / number / date / date-time field keeps a comma-separated text box; the
-    save path coerces each entry the same way.
+    date → 'YYYY-MM-DD', date-time → UTC ISO read in the business timezone (#6083), person / link → ONE id
+    string for equals / not_equals (single-pick) and a string[] of ids for in / not_in (multi-pick). `in` /
+    `not_in` on a text / number / date / date-time field keeps a comma-separated text box; the save path
+    coerces each entry the same way.
 
     A draft that cannot be expressed in the field's shape (a half-typed number, an unparseable date-time) is
     emitted AS TYPED: the row then reads as incomplete and save is blocked with the row anchored, instead of
@@ -186,6 +187,7 @@ import {
   parseDateTimeConditionValue,
   parseIdListConditionValue,
   parseNumberConditionValue,
+  parseSingleIdConditionValue,
   type ConditionFieldLike,
 } from '../utils/automation-condition-values'
 import MetaDateTimePicker from './cells/MetaDateTimePicker.vue'
@@ -332,14 +334,19 @@ function draftMatchesValue(text: string, value: unknown): boolean {
   const stored = iso === null ? null : Date.parse(iso)
   return typed === stored
 }
+function dateTimeDraftUnparseable(text: string): boolean {
+  return !parseDateTimeInput(text, dateTimeZone.value).ok
+}
 const dateTimeDraft = ref(dateTimeText(props.modelValue))
-const dateTimeTouched = ref(false)
+// A LOADED value that names no instant (e.g. a bare date typed into the old branch text box) is flagged at
+// once: the row blocks save, so the box must say why without needing a focus / blur first.
+const dateTimeTouched = ref(dateTimeDraftUnparseable(dateTimeDraft.value))
 watch([() => props.modelValue, dateTimeZone], ([value]) => {
   if (draftMatchesValue(dateTimeDraft.value, value)) return
   dateTimeDraft.value = dateTimeText(value)
-  dateTimeTouched.value = false
+  dateTimeTouched.value = dateTimeDraftUnparseable(dateTimeDraft.value)
 })
-const dateTimeInvalid = computed(() => dateTimeTouched.value && !parseDateTimeInput(dateTimeDraft.value, dateTimeZone.value).ok)
+const dateTimeInvalid = computed(() => dateTimeTouched.value && dateTimeDraftUnparseable(dateTimeDraft.value))
 function onDateTimeInput(text: string) {
   dateTimeDraft.value = text
   const parsed = parseDateTimeInput(text, dateTimeZone.value)
@@ -358,18 +365,28 @@ function onDateTimePicked(value: string) {
 }
 
 // ---- person / link (ids picked with the existing person picker / record picker) ----
+// `equals` / `not_equals` compare against ONE id (saved as a string, the shape the backend validates for a
+// single-value person / link condition); `in` / `not_in` against a list (saved as string[]).
 const pickerOpen = ref(false)
 const summaries = ref<Record<string, string>>({})
-const idValues = computed(() => parseIdListConditionValue(props.modelValue) ?? [])
+const idValues = computed<string[]>(() => {
+  if (isArray.value) return parseIdListConditionValue(props.modelValue) ?? []
+  const id = parseSingleIdConditionValue(props.modelValue)
+  return id === null ? [] : [id]
+})
+function emitIds(ids: readonly string[]) {
+  emitValue(isArray.value ? [...ids] : (ids[0] ?? ''))
+}
 const currentSummaries = computed<PersonSummary[]>(() => idValues.value
   .filter((id) => summaries.value[id])
   .map((id) => ({ id, display: summaries.value[id] })))
-// `in` / `not_in` is a list by definition, so the picker is multi-select there whatever the field's own cap.
+// The picker's cap follows the OPERATOR, not the field: `in` / `not_in` pick a list, `equals` / `not_equals`
+// pick exactly one — whatever the field's own single / multiple setting is.
 const pickerField = computed<MetaField | null>(() => {
   const field = props.field
   if (!field) return null
   const property: Record<string, unknown> = { ...(field.property ?? {}) }
-  if (isArray.value) property.limitSingleRecord = false
+  property.limitSingleRecord = !isArray.value
   return { id: field.id, name: field.name ?? '', type: field.type as MetaFieldType, property }
 })
 function idDisplay(id: string): string {
@@ -383,17 +400,17 @@ function rememberSummaries(items: Array<PersonSummary | LinkedRecordSummary>) {
   summaries.value = next
 }
 function removeId(id: string) {
-  emitValue(idValues.value.filter((entry) => entry !== id))
+  emitIds(idValues.value.filter((entry) => entry !== id))
 }
 function onPersonConfirm(payload: { userIds: string[]; summaries: PersonSummary[] }) {
   rememberSummaries(payload.summaries)
   pickerOpen.value = false
-  emitValue([...payload.userIds])
+  emitIds(payload.userIds)
 }
 function onLinkConfirm(payload: { recordIds: string[]; summaries: LinkedRecordSummary[] }) {
   rememberSummaries(payload.summaries)
   pickerOpen.value = false
-  emitValue([...payload.recordIds])
+  emitIds(payload.recordIds)
 }
 </script>
 

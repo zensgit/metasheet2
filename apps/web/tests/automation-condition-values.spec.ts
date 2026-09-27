@@ -95,13 +95,17 @@ describe('coerceConditionValue — the saved shape per field type', () => {
     expect(parseDateTimeConditionValue('2026-09-24 25:00', 'Asia/Shanghai')).toBeNull()
   })
 
-  it('person / link fields save a non-empty array of ids — for equals as well as in', () => {
-    expect(coerceConditionValue(cond('x', 'equals', ['u1']), F.person)).toEqual({ ok: true, value: ['u1'] })
-    expect(coerceConditionValue(cond('x', 'equals', 'u1'), F.person)).toEqual({ ok: true, value: ['u1'] }) // legacy text box
-    expect(coerceConditionValue(cond('x', 'in', 'u1, u2'), F.person)).toEqual({ ok: true, value: ['u1', 'u2'] })
-    expect(coerceConditionValue(cond('x', 'not_equals', ['rec_1', 'rec_2']), F.link)).toEqual({ ok: true, value: ['rec_1', 'rec_2'] })
+  it('person / link save ONE id string for equals / not_equals (the shape the backend validates) and an id array for in / not_in', () => {
+    expect(coerceConditionValue(cond('x', 'equals', 'u1'), F.person)).toEqual({ ok: true, value: 'u1' }) // already the shape: unchanged
+    expect(coerceConditionValue(cond('x', 'equals', ['u1']), F.person)).toEqual({ ok: true, value: 'u1' }) // a picker's one-element list
+    expect(coerceConditionValue(cond('x', 'not_equals', ' rec_1 '), F.link)).toEqual({ ok: true, value: 'rec_1' })
+    expect(coerceConditionValue(cond('x', 'equals', ['u1', 'u2']), F.person)).toEqual({ ok: false }) // two ids are not one id
     expect(coerceConditionValue(cond('x', 'equals', []), F.person)).toEqual({ ok: false })
-    expect(coerceConditionValue(cond('x', 'equals', [{ id: 'u1' }]), F.link)).toEqual({ ok: false })
+    expect(coerceConditionValue(cond('x', 'equals', ''), F.link)).toEqual({ ok: false })
+    expect(coerceConditionValue(cond('x', 'in', 'u1, u2'), F.person)).toEqual({ ok: true, value: ['u1', 'u2'] })
+    expect(coerceConditionValue(cond('x', 'not_in', ['rec_1', 'rec_2']), F.link)).toEqual({ ok: true, value: ['rec_1', 'rec_2'] })
+    expect(coerceConditionValue(cond('x', 'in', [{ id: 'u1' }]), F.link)).toEqual({ ok: false })
+    expect(coerceConditionValue(cond('x', 'in', []), F.person)).toEqual({ ok: false })
   })
 
   it('select / text save a trimmed string; lists split on commas; a vanished field keeps the value as typed', () => {
@@ -163,7 +167,7 @@ describe('condition_branch build seam with fields (typed branch values)', () => 
           { fieldId: 'fld_date', operator: 'less_than', value: '2026-12-31' },
           { fieldId: 'fld_dt', operator: 'greater_or_equal', value: '2026-09-24T01:30:00Z' },
           { fieldId: 'fld_person', operator: 'in', value: ['u1', 'u2'] },
-          { fieldId: 'fld_link', operator: 'equals', value: ['rec_1'] },
+          { fieldId: 'fld_link', operator: 'equals', value: 'rec_1' },
           { fieldId: 'fld_sel', operator: 'equals', value: 'done' },
           { fieldId: 'fld_text', operator: 'is_not_empty' },
         ],
@@ -203,7 +207,7 @@ describe('condition_branch build seam with fields (typed branch values)', () => 
         { fieldId: 'fld_num', operator: 'equals', value: 5 },
         { fieldId: 'fld_bool', operator: 'equals', value: true },
         { fieldId: 'fld_dt', operator: 'greater_than', value: '2026-09-24T01:30:00.000Z' },
-        { fieldId: 'fld_person', operator: 'equals', value: ['u1'] },
+        { fieldId: 'fld_person', operator: 'equals', value: 'u1' }, // a single id is already the saved shape
         { fieldId: 'fld_num', operator: 'in', value: [1, 2] },
       ],
     })

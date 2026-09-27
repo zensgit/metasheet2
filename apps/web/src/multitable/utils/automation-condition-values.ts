@@ -14,9 +14,15 @@
  *   - date                                                        → `'YYYY-MM-DD'` (floating calendar day)
  *   - dateTime / createdTime / modifiedTime                       → a UTC ISO instant (`…Z`); a zone-less wall
  *     clock is read in the field's business timezone (business-timezone.ts, #6083), never the browser's
- *   - person / link                                               → a non-empty `string[]` of ids
+ *   - person / link, `equals` / `not_equals`                      → ONE id `string` (a user id / record id)
+ *   - person / link, `in` / `not_in`                              → a non-empty `string[]` of ids
  *   - select / text / anything else                               → a trimmed non-empty `string`
  *   - `in` / `not_in`                                             → a non-empty array of the above
+ *
+ * Person / link keep the single-id STRING for `equals` / `not_equals` because that is what the backend's
+ * save-time validator accepts for a single-value condition (`validateConditionGroupAgainstFields`: a
+ * person / link field expects a string value, an array only for `in` / `not_in` — unchanged by A9-be,
+ * PR #6107, which compares that string as a one-element id set against the stored `id[]`).
  *
  * `coerceConditionValue` returns `{ ok: false }` for a value that cannot be expressed in that shape; the
  * editor treats such a row as incomplete (save is blocked and the row is anchored) — it never silently
@@ -84,8 +90,8 @@ export function isTemporalConditionFieldType(fieldType: string | undefined): boo
   return fieldType === 'date' || isDateTimeConditionFieldType(fieldType)
 }
 
-/** Field types whose condition value is a list of ids picked from the person / record picker. */
-export function isIdListConditionFieldType(fieldType: string | undefined): boolean {
+/** Field types whose condition value is picked (as ids) from the person / record picker. */
+export function isIdConditionFieldType(fieldType: string | undefined): boolean {
   return fieldType === 'person' || fieldType === 'link'
 }
 
@@ -179,7 +185,23 @@ export function parseDateTimeConditionValue(value: unknown, timeZone: string): s
   return UTC_ISO_RE.test(trimmed) ? trimmed : new Date(ms).toISOString()
 }
 
-/** A non-empty list of ids (person user ids / linked record ids), or null. */
+function idOf(entry: unknown): string | null {
+  if (typeof entry === 'string') return entry.trim() || null
+  if (typeof entry === 'number' && Number.isFinite(entry)) return String(entry)
+  return null
+}
+
+/**
+ * ONE id (person user id / linked record id) for `equals` / `not_equals`, or null. A one-element id list
+ * (what a picker hands back) is that id; a list of two or more cannot be one id — the row is incomplete
+ * (use `in` / `not_in` for "any of these").
+ */
+export function parseSingleIdConditionValue(value: unknown): string | null {
+  if (Array.isArray(value)) return value.length === 1 ? idOf(value[0]) : null
+  return idOf(value)
+}
+
+/** A non-empty list of ids (person user ids / linked record ids) for `in` / `not_in`, or null. */
 export function parseIdListConditionValue(value: unknown): string[] | null {
   const raw = Array.isArray(value) || typeof value === 'string' ? parseConditionArrayValue(value) : []
   const ids = raw
@@ -219,7 +241,7 @@ export function coerceConditionValue(
       const zone = conditionDateTimeZone(field)
       return coerced(allOrNull(parseConditionArrayValue(value), (entry) => parseDateTimeConditionValue(entry, zone)))
     }
-    if (isIdListConditionFieldType(fieldType)) return coerced(parseIdListConditionValue(value))
+    if (isIdConditionFieldType(fieldType)) return coerced(parseIdListConditionValue(value))
     const list = parseConditionArrayValue(value)
     return list.length > 0 ? { ok: true, value: list } : { ok: false }
   }
@@ -227,7 +249,7 @@ export function coerceConditionValue(
   if (fieldType === 'boolean') return coerced(parseBooleanConditionValue(value))
   if (fieldType === 'date') return coerced(parseDateConditionValue(value))
   if (isDateTimeConditionFieldType(fieldType)) return coerced(parseDateTimeConditionValue(value, conditionDateTimeZone(field)))
-  if (isIdListConditionFieldType(fieldType)) return coerced(parseIdListConditionValue(value))
+  if (isIdConditionFieldType(fieldType)) return coerced(parseSingleIdConditionValue(value))
   if (typeof value === 'string') {
     const trimmed = value.trim()
     return trimmed ? { ok: true, value: trimmed } : { ok: false }

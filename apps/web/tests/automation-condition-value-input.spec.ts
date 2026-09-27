@@ -110,6 +110,10 @@ const selectField: ConditionFieldLike = { id: 'fld_status', name: 'Status', type
 const personField: ConditionFieldLike = { id: 'fld_owner', name: 'Owner', type: 'person', property: { limitSingleRecord: true } }
 const linkField: ConditionFieldLike = { id: 'fld_project', name: 'Project', type: 'link', property: { foreignSheetId: 'sheet_projects' } }
 
+// Explicit per-test timeout: the first Element Plus select / date picker mounted in a worker is the slow one
+// (~0.9s idle, well past 5s on a loaded shared CI runner). The global testTimeout stays 5s elsewhere.
+const EP_MOUNT_TIMEOUT_MS = 30_000
+
 beforeEach(() => {
   useLocale().setLocale('zh-CN')
   pickerProps.person = null
@@ -131,7 +135,7 @@ describe('ConditionValueInput — pending (no field yet)', () => {
     expect(input.placeholder).toBe('请先选择字段')
     expect(container.querySelectorAll('input').length).toBe(1)
     expect(emitted).toEqual([])
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 })
 
 describe('ConditionValueInput — emitted value shape per widget', () => {
@@ -147,7 +151,7 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     typeInto(input, '')
     await flush()
     expect(emitted.at(-1)).toBe('')
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it('boolean → true / false, with the options labelled 是 / 否 (never the raw true / false)', async () => {
     const { container, emitted } = mountInput({ field: boolField, operator: 'equals' })
@@ -166,7 +170,7 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     epSetSelect(select, 'true')
     await flush()
     expect(emitted.at(-1)).toBe(true)
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it('boolean `in` → boolean[] from a 是 / 否 multi-select', async () => {
     const { container, emitted } = mountInput({ field: boolField, operator: 'in' })
@@ -179,7 +183,7 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     await flush()
     expect(emitted.at(-1)).toEqual([true, false])
     expect(epSelectValues(select)).toEqual(['true', 'false'])
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it("date → an Element Plus date picker whose value is 'YYYY-MM-DD'", async () => {
     const { container, emitted } = mountInput({ field: dateField, operator: 'less_than' })
@@ -192,7 +196,7 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     input.dispatchEvent(new Event('change'))
     await flush()
     expect(emitted.at(-1)).toBe('2026-05-11')
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it('date-time → the #6083 business-timezone wall clock, stored as a UTC ISO instant', async () => {
     const { container, emitted, value } = mountInput({ field: dateTimeField, operator: 'greater_than' })
@@ -206,7 +210,7 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     expect(emitted.at(-1)).toBe('2026-09-24T01:30:00.000Z')
     expect(value.value).toBe('2026-09-24T01:30:00.000Z')
     expect(input.value).toBe('2026-09-24 09:30') // the box keeps the wall clock
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it('date-time: a stored UTC instant is shown as the business wall clock; garbage is flagged, emitted as typed', async () => {
     const { container, emitted } = mountInput({ field: dateTimeField, operator: 'equals', value: '2026-09-24T01:30:00.000Z' })
@@ -219,7 +223,16 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     expect(emitted.at(-1)).toBe('2026-09-24 25:99') // not an instant → the row is incomplete, save blocked
     expect(input.value).toBe('2026-09-24 25:99') // never reverted / cleared
     expect(container.querySelector('[data-condition-value-invalid]')).toBeTruthy()
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
+
+  it('date-time: a LOADED value that names no instant (a bare date from the old text box) is flagged at once, never rewritten', async () => {
+    const { container, emitted } = mountInput({ field: dateTimeField, operator: 'greater_than', value: '2026-09-24' })
+    await flush()
+    const input = container.querySelector('[data-condition-value="date-time"]') as HTMLInputElement
+    expect(input.value).toBe('2026-09-24') // kept as typed — not cleared, not silently read as midnight
+    expect(container.querySelector('[data-condition-value-invalid]')).toBeTruthy() // no focus / blur needed
+    expect(emitted).toEqual([])
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it('select → the option value; select `in` → string[]', async () => {
     const single = mountInput({ field: selectField, operator: 'equals' })
@@ -237,7 +250,7 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     epSetSelect(multi, 'done')
     await flush()
     expect(list.emitted.at(-1)).toEqual(['todo', 'done'])
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it('person → string[] of user ids from the existing person picker (multi-select for `in`)', async () => {
     const { container, emitted } = mountInput({ field: personField, operator: 'in' })
@@ -259,20 +272,25 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     ;(container.querySelector('[data-condition-value-id="user_1"] button') as HTMLButtonElement).click()
     await flush()
     expect(emitted.at(-1)).toEqual(['user_2'])
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
-  it('person `equals` keeps the field cap (single) and still saves an id ARRAY', async () => {
-    const { container, emitted } = mountInput({ field: personField, operator: 'equals' })
+  it('person `equals` is single-pick whatever the field cap, and saves ONE user id string (the backend-validated shape)', async () => {
+    const multiPersonField: ConditionFieldLike = { ...personField, property: { limitSingleRecord: false } }
+    const { container, emitted } = mountInput({ field: multiPersonField, operator: 'equals' })
     await flush()
     ;(container.querySelector('[data-action="pick-condition-person"]') as HTMLButtonElement).click()
     await flush()
     expect((pickerProps.person?.field as { property: Record<string, unknown> }).property.limitSingleRecord).toBe(true)
     ;(container.querySelector('[data-stub-person-confirm]') as HTMLButtonElement).click()
     await flush()
-    expect(Array.isArray(emitted.at(-1))).toBe(true)
-  })
+    expect(emitted.at(-1)).toBe('user_1')
+    expect(Array.from(container.querySelectorAll('[data-condition-value-id]')).map((chip) => chip.getAttribute('data-condition-value-id'))).toEqual(['user_1'])
+    ;(container.querySelector('[data-condition-value-id="user_1"] button') as HTMLButtonElement).click()
+    await flush()
+    expect(emitted.at(-1)).toBe('')
+  }, EP_MOUNT_TIMEOUT_MS)
 
-  it('link → string[] of record ids from the existing record picker', async () => {
+  it('link `equals` → ONE record id string from the existing record picker', async () => {
     const { container, emitted } = mountInput({ field: linkField, operator: 'equals' })
     await flush()
     const pick = container.querySelector('[data-action="pick-condition-record"]') as HTMLButtonElement
@@ -280,11 +298,12 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     pick.click()
     await flush()
     expect((pickerProps.link?.field as { id: string }).id).toBe('fld_project')
+    expect((pickerProps.link?.field as { property: Record<string, unknown> }).property.limitSingleRecord).toBe(true)
     ;(container.querySelector('[data-stub-link-confirm]') as HTMLButtonElement).click()
     await flush()
-    expect(emitted.at(-1)).toEqual(['rec_9'])
+    expect(emitted.at(-1)).toBe('rec_9')
     expect(container.querySelector('[data-condition-value-id="rec_9"]')?.textContent).toContain('Project Nine')
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 
   it('`in` on a number / date / text field is a comma-separated text box (the save path coerces each entry)', async () => {
     const { container, emitted } = mountInput({ field: numberField, operator: 'in', value: [1, 2] })
@@ -295,5 +314,5 @@ describe('ConditionValueInput — emitted value shape per widget', () => {
     typeInto(input, '1, 2, 3')
     await flush()
     expect(emitted.at(-1)).toBe('1, 2, 3')
-  })
+  }, EP_MOUNT_TIMEOUT_MS)
 })
