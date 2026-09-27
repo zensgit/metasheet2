@@ -46,6 +46,9 @@ export type MetaCopySheetLabelKey =
   | 'copySheet.error.sourceChanged'
   | 'copySheet.error.tooLarge'
   | 'copySheet.error.systemSheet'
+  | 'copySheet.error.tooManyFields'
+  | 'copySheet.error.linkTargetNotLive'
+  | 'copySheet.error.unsupportedFieldType'
   | 'copySheet.error.sourceGone'
   | 'copySheet.error.forbidden'
   | 'copySheet.error.busy'
@@ -71,10 +74,11 @@ const META_COPY_SHEET_LABELS: Record<MetaCopySheetLabelKey, LocaleText> = {
   },
   'copySheet.dryRunLoading': { en: 'Checking what will be copied…', zh: '正在预检复制内容…' },
   'copySheet.disclosuresTitle': { en: 'What changes in the copy', zh: '复制说明' },
-  // ADR §3 / §10: never copied, whatever the options.
+  // ADR §3 / §10: never copied, whatever the options — the backend's fixed COPY_SHEET_NOT_COPIED list
+  // (copy-sheet-service.ts on feat/multitable-copy-sheet-s1), in the same order.
   'copySheet.notCopied': {
-    en: 'Not copied: automations, comments, subscriptions, form sharing, record locks, revision history.',
-    zh: '不会复制：自动化、评论、订阅、表单分享、记录锁定、修订历史。',
+    en: 'Not copied: automations, comments, subscriptions, form sharing, record locks, revision history, personal view settings, attachment files.',
+    zh: '不会复制：自动化、评论、订阅、表单分享、记录锁定、修订历史、个人视图设置、附件文件。',
   },
   'copySheet.cancel': { en: 'Cancel', zh: '取消' },
   'copySheet.submit': { en: 'Copy', zh: '复制' },
@@ -117,6 +121,18 @@ const META_COPY_SHEET_LABELS: Record<MetaCopySheetLabelKey, LocaleText> = {
     zh: '这张数据表超出单次复制上限（行数或列数过多）。',
   },
   'copySheet.error.systemSheet': { en: 'System tables can\'t be copied.', zh: '系统数据表不能复制。' },
+  'copySheet.error.tooManyFields': {
+    en: 'This table has more columns than a single copy allows.',
+    zh: '这张数据表的列数超出单次复制上限。',
+  },
+  'copySheet.error.linkTargetNotLive': {
+    en: 'A link column points to a table that no longer exists, so nothing was copied. Fix or remove that link column first.',
+    zh: '有关联列指向的数据表已不存在，未做任何复制。请先修正或删除该关联列。',
+  },
+  'copySheet.error.unsupportedFieldType': {
+    en: 'A column type can\'t be copied yet, so nothing was copied.',
+    zh: '有列的类型暂不支持复制，未做任何复制。',
+  },
   'copySheet.error.sourceGone': {
     en: 'The source table no longer exists or was deleted.',
     zh: '源数据表不存在或已被删除。',
@@ -219,21 +235,30 @@ export interface CopySheetErrorContext {
  */
 export function copySheetErrorMessage(error: unknown, isZh: boolean, ctx: CopySheetErrorContext = {}): string {
   if (!isCopySheetError(error)) return copySheetLabel('copySheet.error.generic', isZh)
+  // Post-gate structural refusals name the source column at fault when the client carried its id
+  // (only these codes can — see buildCopySheetError) and the caller can resolve it to a schema name.
+  const column = (key: MetaCopySheetLabelKey): string => withColumn(copySheetLabel(key, isZh), error.fieldId, isZh, ctx)
   switch (error.code) {
     case 'COPY_SOURCE_NOT_FULLY_READABLE':
       return copySheetLabel('copySheet.error.notFullyReadable', isZh)
     case 'COPY_UNMAPPED_FIELD_REF':
-      return copySheetLabel('copySheet.error.unmappedFieldRef', isZh)
+      return column('copySheet.error.unmappedFieldRef')
+    case 'COPY_UNSUPPORTED_FIELD_TYPE':
+      return column('copySheet.error.unsupportedFieldType')
+    case 'COPY_LINK_TARGET_NOT_LIVE':
+      return column('copySheet.error.linkTargetNotLive')
     case 'COPY_SOURCE_RULE_UNBUILDABLE':
-      return copySheetLabel('copySheet.error.ruleUnbuildable', isZh)
+      return column('copySheet.error.ruleUnbuildable')
     case 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD':
-      return copySheetLabel('copySheet.error.ruleOnRenumberedField', isZh)
+      return column('copySheet.error.ruleOnRenumberedField')
     case 'COPY_PERMISSION_PARITY_FAILED':
       return copySheetLabel('copySheet.error.permissionParityFailed', isZh)
     case 'COPY_SOURCE_CHANGED':
       return copySheetLabel('copySheet.error.sourceChanged', isZh)
     case 'COPY_TOO_LARGE':
       return copySheetTooLargeText(error.rowCount, error.limit, isZh)
+    case 'COPY_TOO_MANY_FIELDS':
+      return copySheetTooManyFieldsText(error.fieldCount, error.limit, isZh)
     case 'COPY_ROW_VALIDATION_FAILED':
       return copySheetRowFailureText(error.rowIndex, error.fieldId, isZh, ctx)
     case 'COPY_SOURCE_SYSTEM_SHEET':
@@ -250,6 +275,19 @@ export function copySheetErrorMessage(error: unknown, isZh: boolean, ctx: CopySh
   if (error.status === 409) return copySheetLabel('copySheet.error.busy', isZh)
   if (error.status === 413) return copySheetTooLargeText(error.rowCount, error.limit, isZh)
   return copySheetLabel('copySheet.error.generic', isZh)
+}
+
+function withColumn(sentence: string, fieldId: string | undefined, isZh: boolean, ctx: CopySheetErrorContext): string {
+  const name = fieldId ? (ctx.fieldName?.(fieldId) ?? null) : null
+  if (!name) return sentence
+  return isZh ? `「${name}」列：${sentence}` : `Column “${name}”: ${sentence}`
+}
+
+function copySheetTooManyFieldsText(fieldCount: number | undefined, limit: number | undefined, isZh: boolean): string {
+  if (typeof fieldCount !== 'number' || typeof limit !== 'number') return copySheetLabel('copySheet.error.tooManyFields', isZh)
+  return isZh
+    ? `这张数据表的列数超出单次复制上限（共 ${fieldCount} 列，上限 ${limit} 列）。`
+    : `This table has too many columns to copy at once (${fieldCount} columns, limit ${limit}).`
 }
 
 function copySheetTooLargeText(rowCount: number | undefined, limit: number | undefined, isZh: boolean): string {

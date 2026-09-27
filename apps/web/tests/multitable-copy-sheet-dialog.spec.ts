@@ -120,6 +120,67 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
     expect(JSON.parse(fetchFn.mock.calls[1][1].body)).toEqual({ withData: true, permissionMode: 'inherit' })
   })
 
+  it('reads the backend branch shapes: CopySheetPlanSummary (nested under summary) and the flat CopySheetResult', async () => {
+    // Shapes of copy-sheet-service.ts on feat/multitable-copy-sheet-s1 (CopySheetPlanSummary / CopySheetResult).
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          summary: {
+            rowCount: 12, fieldCount: 5, builtFieldCount: 4,
+            disclosures: [{ fieldId: 'fld_m', code: 'MIRROR_NOT_BUILT' }],
+            droppedViewFilterLeaves: [{ viewId: 'view_b', count: 1 }],
+            autoNumberRenumberedRows: 3,
+            limits: { maxRows: 2000, maxFields: 500 },
+            notCopied: ['automations'],
+          },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(201, {
+        ok: true,
+        data: {
+          sheetId: 'sheet_new', baseId: 'base_ops', name: '订单 副本',
+          summary: { rowCount: 12, fieldCount: 5, builtFieldCount: 4, permissionRowCount: 2, recordPermissionRowCount: 1 },
+        },
+      }))
+    const client = new MultitableApiClient({ fetchFn })
+    expect(await client.dryRunCopySheet('s', { withData: true, permissionMode: 'inherit' })).toEqual<CopySheetDryRunResult>({
+      rowCount: 12,
+      fieldCount: 5,
+      overLimit: false,
+      rowLimit: 2000,
+      fieldDisclosures: [{ fieldId: 'fld_m', reason: 'MIRROR_NOT_BUILT' }],
+      viewFilterLeavesDropped: [{ viewId: 'view_b', count: 1 }],
+      autoNumberRenumberedRows: 3,
+    })
+    const result = await client.copySheet('s', { withData: true, permissionMode: 'inherit' })
+    expect(result.sheet).toEqual({ id: 'sheet_new', baseId: 'base_ops', name: '订单 副本' })
+    expect(result.summary).toEqual({ rowCount: 12, fieldCount: 4, permissionRowCount: 2, recordPermissionRowCount: 1 })
+  })
+
+  it('backend error details: flat-spread row failure, field cap, structural column id — and none of them on a 403', () => {
+    // The service's row failure is { rowIndex, fieldId, code: <record code> } and its route doc says
+    // `{ code, ...details }`: the inner code can overwrite the outer one. Still read as the row failure.
+    const collided = buildCopySheetError(422, { ok: false, error: { code: 'VALIDATION_ERROR', rowIndex: 7, fieldId: 'fld_qty', message: leakyMessage } }, true)
+    expect(collided).toMatchObject({ code: 'COPY_ROW_VALIDATION_FAILED', rowIndex: 7, fieldId: 'fld_qty' })
+    const permissionRow = buildCopySheetError(500, { ok: false, error: { code: 'RECORD_PERMISSION', rowIndex: 0, fieldId: null } }, true)
+    expect(permissionRow).toMatchObject({ code: 'COPY_ROW_VALIDATION_FAILED', rowIndex: 0 })
+    expect(permissionRow.fieldId).toBeUndefined()
+
+    const fields = buildCopySheetError(413, { ok: false, error: { code: 'COPY_TOO_MANY_FIELDS', fieldCount: 612, limit: 500 } }, true)
+    expect(fields).toMatchObject({ code: 'COPY_TOO_MANY_FIELDS', fieldCount: 612, limit: 500 })
+    expect(fields.rowCount).toBeUndefined()
+
+    const structural = buildCopySheetError(422, { ok: false, error: { code: 'COPY_LINK_TARGET_NOT_LIVE', details: { fieldId: 'fld_link' } } }, true)
+    expect(structural).toMatchObject({ code: 'COPY_LINK_TARGET_NOT_LIVE', fieldId: 'fld_link' })
+
+    const gate = buildCopySheetError(403, { ok: false, error: { code: 'VALIDATION_ERROR', rowIndex: 2, fieldId: 'fld_hidden', fieldCount: 3, limit: 9 } }, true)
+    expect(gate.code).toBe('VALIDATION_ERROR')
+    expect([gate.rowIndex, gate.fieldId, gate.fieldCount, gate.rowCount, gate.limit]).toEqual([undefined, undefined, undefined, undefined, undefined])
+    const gateStructural = buildCopySheetError(403, { ok: false, error: { code: 'COPY_UNMAPPED_FIELD_REF', fieldId: 'fld_hidden' } }, true)
+    expect(gateStructural.fieldId).toBeUndefined()
+  })
+
   it('a 201 without sheet.id is a broken answer and throws (never a phantom navigation)', async () => {
     const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(jsonResponse(201, { ok: true, data: {} })) })
     await expect(client.copySheet('sheet_orders', { withData: true, permissionMode: 'inherit' })).rejects.toThrow('Invalid copy sheet response')
@@ -392,6 +453,43 @@ describe('MetaCopySheetDialog', () => {
     expect(dialogText).not.toContain(SENTINEL_EN)
   })
 
+  // The probe always runs WITH data, so a refusal that exists only because rows are included must stop
+  // blocking once 「包含数据」 is unticked (its own sentence tells the user to do exactly that).
+  for (const dataOnly of [
+    { code: 'COPY_TOO_LARGE', status: 413, extra: { rowCount: 2400, limit: 2000 } },
+    { code: 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD', status: 422, extra: { fieldId: 'fld_title' } },
+  ]) {
+    it(`dry-run ${dataOnly.code}: blocks while data is included, lifts for a structure-only copy`, async () => {
+      client.dryRunCopySheet.mockRejectedValue(copyErr(dataOnly.status, { code: dataOnly.code, ...dataOnly.extra }))
+      await mount()
+      expect(errorText()).toContain('可取消勾选「包含数据」只复制结构')
+      expect(submitButton().disabled).toBe(true)
+      q<HTMLInputElement>('copy-sheet-with-data')!.click()
+      await flush()
+      expect(submitButton().disabled).toBe(false)
+      submitButton().click()
+      await flush()
+      expect(client.copySheet).toHaveBeenCalledWith('sheet_orders', { name: '订单 副本', withData: false, permissionMode: 'inherit' })
+    })
+  }
+
+  it('dry-run COPY_TOO_MANY_FIELDS / structural 422: blocks even for a structure-only copy', async () => {
+    for (const refusal of [
+      { status: 413, error: { code: 'COPY_TOO_MANY_FIELDS', fieldCount: 612, limit: 500 } },
+      { status: 422, error: { code: 'COPY_UNMAPPED_FIELD_REF', fieldId: 'fld_title' } },
+    ]) {
+      client.dryRunCopySheet.mockRejectedValue(copyErr(refusal.status, refusal.error))
+      await mount()
+      q<HTMLInputElement>('copy-sheet-with-data')!.click()
+      await flush()
+      expect(submitButton().disabled).toBe(true)
+      mounted!.app.unmount()
+      mounted!.container.remove()
+      mounted = null
+    }
+    expect(client.copySheet).not.toHaveBeenCalled()
+  })
+
   const SUBMIT_REFUSALS: Array<{ code: string; status: number; extra?: Record<string, unknown>; zh: string }> = [
     { code: 'COPY_SOURCE_NOT_FULLY_READABLE', status: 403, zh: '你对这张数据表没有完整的读取权限（有列、行或公式结果对你不可见），不能复制。请联系表管理员。' },
     { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, zh: '有列的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
@@ -403,6 +501,13 @@ describe('MetaCopySheetDialog', () => {
     { code: 'COPY_TOO_LARGE', status: 413, extra: { fieldCount: 612, limit: 500 }, zh: '这张数据表超出单次复制上限（行数或列数过多）。' },
     { code: 'COPY_ROW_VALIDATION_FAILED', status: 422, extra: { details: { firstFailure: { rowIndex: 4, fieldId: 'fld_qty', code: 'VALIDATION_ERROR' } } }, zh: '第 5 行（按创建顺序）的「数量」列未通过校验，复制已整体取消，未创建任何数据表。' },
     { code: 'COPY_ROW_VALIDATION_FAILED', status: 422, extra: { rowIndex: 0, fieldId: 'fld_unknown' }, zh: '第 1 行（按创建顺序）的某一列未通过校验，复制已整体取消，未创建任何数据表。' },
+    // backend flat spread `{ code, ...details }` where the inner record code overwrote the outer one
+    { code: 'VALIDATION_ERROR', status: 422, extra: { rowIndex: 2, fieldId: 'fld_qty' }, zh: '第 3 行（按创建顺序）的「数量」列未通过校验，复制已整体取消，未创建任何数据表。' },
+    { code: 'COPY_TOO_MANY_FIELDS', status: 413, extra: { fieldCount: 612, limit: 500 }, zh: '这张数据表的列数超出单次复制上限（共 612 列，上限 500 列）。' },
+    { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, extra: { fieldId: 'fld_lookup' }, zh: '「供应商名称」列：有列的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
+    { code: 'COPY_LINK_TARGET_NOT_LIVE', status: 422, extra: { fieldId: 'fld_self' }, zh: '「父项」列：有关联列指向的数据表已不存在，未做任何复制。请先修正或删除该关联列。' },
+    { code: 'COPY_UNSUPPORTED_FIELD_TYPE', status: 422, extra: { fieldId: 'fld_gone' }, zh: '有列的类型暂不支持复制，未做任何复制。' },
+    { code: 'NOT_FOUND', status: 404, zh: '源数据表不存在或已被删除。' },
     { code: 'COPY_SOURCE_SYSTEM_SHEET', status: 422, zh: '系统数据表不能复制。' },
     { code: 'SHEET_NOT_LIVE', status: 404, zh: '源数据表不存在或已被删除。' },
     { code: 'FORBIDDEN', status: 403, zh: '你没有在当前工作区新建数据表的权限。' },

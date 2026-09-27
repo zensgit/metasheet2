@@ -238,15 +238,18 @@ const disclosureLines = computed<DisclosureLine[]>(() => {
   return lines
 })
 
-// A dry-run refusal the copy would repeat verbatim (gate / unbuildable source / system sheet / gone)
-// blocks submit. A size refusal only blocks while data is included. Transport / 5xx failures of the
-// probe do not block — the copy route re-gates anyway and reports its own refusal.
+// A dry-run refusal the copy would repeat verbatim (gate / unbuildable source / system sheet / gone /
+// column cap) blocks submit. Two refusals exist only BECAUSE rows are included — the row cap and a
+// row-visibility rule on an auto-number column that renumbering would change (the probe always runs
+// with data) — so they block only while 「包含数据」 is ticked; their copy tells the user to untick it.
+// Transport / 5xx failures of the probe do not block — the copy route re-gates and reports its own refusal.
+const DATA_ONLY_REFUSALS: ReadonlySet<string> = new Set(['COPY_TOO_LARGE', 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD'])
 const dryRunBlocks = computed(() => {
   if (withData.value && dryRun.value?.overLimit) return true
   const error = dryRunError.value
   if (!isCopySheetError(error)) return false
-  if (error.status === 413 || error.code === 'COPY_TOO_LARGE') return withData.value
-  return error.status === 403 || error.status === 404 || error.status === 422
+  if (error.code && DATA_ONLY_REFUSALS.has(error.code)) return withData.value
+  return error.status === 403 || error.status === 404 || error.status === 413 || error.status === 422
 })
 
 const busy = computed(() => dryRunLoading.value || submitting.value)

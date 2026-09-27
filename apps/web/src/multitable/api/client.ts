@@ -342,6 +342,11 @@ export function isRecordApprovalInFlightError(value: unknown): value is RecordAp
 // §6), `buildCopySheetRequestBody` (§7.1), `normalizeCopySheetDryRun` (§3), `normalizeCopySheetResult`
 // (§3/§8) and `buildCopySheetError` (§8). If the merged backend spells a key differently, the fix is a
 // one-line change in one of these, never a hunt through components.
+//
+// Aligned (2026-09-27) to the backend branch feat/multitable-copy-sheet-s1 @ 0aa7d8768 (S1a: service,
+// /context `canCopySheet` + `copiedFrom`, no HTTP copy routes yet): provenance, capability, dry-run summary
+// keys, result shape and error codes/details follow its copy-sheet-service.ts / copy-sheet-remap.ts /
+// univer-meta.ts; the ROUTE envelope (bare vs `summary`-nested, `sheet` vs flat) is read both ways.
 // -------------------------------------------------------------------------------------------------
 
 export const COPY_SHEET_ERROR_NAME = 'MultitableCopySheetError'
@@ -359,8 +364,23 @@ export interface CopySheetError extends Error {
   rowIndex?: number
   fieldId?: string
   rowCount?: number
+  fieldCount?: number
   limit?: number
 }
+
+/**
+ * Post-gate structural refusals (422) whose `fieldId` names the source column at fault (backend
+ * `CopySheetRemapError` / link-target checks, `copy-sheet-remap.ts` / `copy-sheet-service.ts` on
+ * feat/multitable-copy-sheet-s1). They are only reachable after the full-table-read gate passed, so the
+ * copier can read every column and naming one is not an oracle. Nothing outside this set carries a fieldId.
+ */
+const COPY_SHEET_STRUCTURAL_FIELD_CODES: ReadonlySet<string> = new Set([
+  'COPY_UNMAPPED_FIELD_REF',
+  'COPY_UNSUPPORTED_FIELD_TYPE',
+  'COPY_LINK_TARGET_NOT_LIVE',
+  'COPY_SOURCE_RULE_UNBUILDABLE',
+  'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD',
+])
 
 export function isCopySheetError(value: unknown): value is CopySheetError {
   return value instanceof Error && value.name === COPY_SHEET_ERROR_NAME
@@ -406,21 +426,27 @@ export function buildCopySheetRequestBody(input: CopySheetInput): { name?: strin
 }
 
 /**
- * Dry-run answer (ADR §3). Column disclosures are read from `disclosures` (`{ fieldId, reason|code }`)
- * and/or `fieldDisclosures`; dropped view-filter leaves from `viewFilterLeavesDropped` (`{ viewId,
- * count }`) and/or `disclosures` items shaped `{ code|reason: 'VIEW_FILTER_LEAF_DROPPED', viewId,
- * count }`. Anything malformed is skipped rather than guessed at.
+ * Dry-run answer (ADR §3). Aligned to the backend's `CopySheetPlanSummary` (copy-sheet-service.ts on
+ * feat/multitable-copy-sheet-s1): `{ rowCount, fieldCount, disclosures: [{ fieldId, code }],
+ * droppedViewFilterLeaves: [{ viewId, count }], autoNumberRenumberedRows, limits: { maxRows } }`, read
+ * either bare or nested under `summary` (the route envelope is not written yet). ADR spellings are still
+ * accepted (`reason`, `fieldDisclosures`, `viewFilterLeavesDropped`, `rowLimit`, `overLimit`). Note the
+ * backend reports the row cap as a 413 COPY_TOO_LARGE, not as `overLimit`. Malformed items are skipped.
  */
 export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
-  const data = isPlainObject(body) ? body : {}
+  const outer = isPlainObject(body) ? body : {}
+  const data = isPlainObject(outer.summary) ? outer.summary : outer
+  const limits = isPlainObject(data.limits) ? data.limits : {}
   const fieldDisclosures: CopySheetFieldDisclosure[] = []
   const viewFilterLeavesDropped: CopySheetViewFilterDrop[] = []
+  const asViewDrops = (list: unknown): unknown[] => (Array.isArray(list)
+    ? list.map((item) => (isPlainObject(item) ? { reason: 'VIEW_FILTER_LEAF_DROPPED', ...item } : item))
+    : [])
   const items: unknown[] = [
     ...(Array.isArray(data.disclosures) ? data.disclosures : []),
     ...(Array.isArray(data.fieldDisclosures) ? data.fieldDisclosures : []),
-    ...(Array.isArray(data.viewFilterLeavesDropped)
-      ? data.viewFilterLeavesDropped.map((item) => (isPlainObject(item) ? { reason: 'VIEW_FILTER_LEAF_DROPPED', ...item } : item))
-      : []),
+    ...asViewDrops(data.droppedViewFilterLeaves),
+    ...asViewDrops(data.viewFilterLeavesDropped),
   ]
   for (const item of items) {
     if (!isPlainObject(item)) continue
@@ -438,7 +464,7 @@ export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
     rowCount: copySheetCount(data.rowCount),
     fieldCount: copySheetCount(data.fieldCount),
     overLimit: data.overLimit === true || data.exceedsLimit === true,
-    rowLimit: copySheetCount(data.rowLimit) ?? copySheetCount(data.limit),
+    rowLimit: copySheetCount(limits.maxRows) ?? copySheetCount(data.rowLimit) ?? copySheetCount(data.limit),
     fieldDisclosures,
     viewFilterLeavesDropped,
     autoNumberRenumberedRows: copySheetCount(data.autoNumberRenumberedRows) ?? 0,
@@ -446,15 +472,20 @@ export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
 }
 
 /**
- * 201 answer (ADR §3/§8): the new sheet (required — a body without `sheet.id` is a broken answer and
- * throws), `Idempotent-Replayed: true` -> `replayed`, `formulaRecompute: { attempted, recomputed,
- * failed, errorCode? }`, and optional values-free counts for the toast (top-level or under `summary`).
+ * 201 answer (ADR §3/§8). The new sheet is required (a body without an id is a broken answer and
+ * throws); it is read from `sheet: { id, baseId, name }` (ADR) or from the backend service's flat
+ * `CopySheetResult` `{ sheetId, baseId, name, summary }` (copy-sheet-service.ts on
+ * feat/multitable-copy-sheet-s1). `Idempotent-Replayed: true` -> `replayed`; `formulaRecompute: {
+ * attempted, recomputed, failed, errorCode? }`; values-free toast counts from `summary` (or top level),
+ * columns preferring `builtFieldCount` (mirror columns are not built) over the source `fieldCount`.
  */
 export function normalizeCopySheetResult(body: unknown, replayedHeader: string | null): CopySheetResult {
   const data = isPlainObject(body) ? body : {}
-  const rawSheet = isPlainObject(data.sheet) ? data.sheet : null
-  const id = rawSheet ? optionalStringValue(rawSheet.id) : undefined
-  if (!rawSheet || !id) {
+  const rawSheet: Record<string, unknown> = isPlainObject(data.sheet)
+    ? data.sheet
+    : { id: data.sheetId, baseId: data.baseId, name: data.name }
+  const id = optionalStringValue(rawSheet.id)
+  if (!id) {
     const error = new Error('Invalid copy sheet response') as Error & { status?: number }
     error.name = 'MultitableApiError'
     throw error
@@ -480,7 +511,7 @@ export function normalizeCopySheetResult(body: unknown, replayedHeader: string |
       : null,
     summary: {
       rowCount: copySheetCount(counts.rowCount),
-      fieldCount: copySheetCount(counts.fieldCount),
+      fieldCount: copySheetCount(counts.builtFieldCount) ?? copySheetCount(counts.fieldCount),
       permissionRowCount: copySheetCount(counts.permissionRowCount),
       recordPermissionRowCount: copySheetCount(counts.recordPermissionRowCount),
     },
@@ -491,35 +522,53 @@ export function normalizeCopySheetResult(body: unknown, replayedHeader: string |
  * Non-2xx -> CopySheetError. Reads the code from the shared `{ error: { code } }` / `{ error: 'CODE' }`
  * envelopes, and the structured extras from the error object and its `details` (innermost wins, the
  * same tolerance `recordApprovalConflictFields` uses). The first-failure row may sit flat or under
- * `firstFailure` / `failure` (it cannot sit flat AND keep its own inner `code`, so the inner code is
- * never read — the UI never shows it). Server `message` is dropped on purpose (see CopySheetError).
+ * `firstFailure` / `failure`. Server `message` is dropped on purpose (see CopySheetError).
+ *
+ * Backend alignment (copy-sheet-service.ts on feat/multitable-copy-sheet-s1): the service's row failure is
+ * `CopySheetError(422|500, 'COPY_ROW_VALIDATION_FAILED', { rowIndex, fieldId, code: <record error code> })`
+ * and its doc says the route maps it to `{ code, ...details }` — a flat spread in that order lets the
+ * INNER record code overwrite the outer one. So a 422/500 that carries a numeric `rowIndex` but no COPY_*
+ * code is read as the row failure it is (only row failures carry `rowIndex`).
  */
 export function buildCopySheetError(status: number, body: unknown, isZh: boolean): CopySheetError {
   const envelope = isPlainObject(body) ? body : {}
   const errorValue = envelope.error
   const errorObject = isPlainObject(errorValue) ? errorValue : {}
-  const code = typeof errorValue === 'string'
-    ? optionalStringValue(errorValue)
-    : optionalStringValue(errorObject.code)
   const fields: Record<string, unknown> = { ...errorObject, ...(isPlainObject(errorObject.details) ? errorObject.details : {}) }
   const failure = isPlainObject(fields.firstFailure)
     ? fields.firstFailure
     : isPlainObject(fields.failure) ? fields.failure : fields
+  const rawCode = typeof errorValue === 'string'
+    ? optionalStringValue(errorValue)
+    : optionalStringValue(errorObject.code)
+  const code = (status === 422 || status === 500) && copySheetCount(failure.rowIndex) !== null && !rawCode?.startsWith('COPY_')
+    ? 'COPY_ROW_VALIDATION_FAILED'
+    : rawCode
   const error = new Error(apiDefaultErrorMessage(code, status, isZh)) as CopySheetError
   error.name = COPY_SHEET_ERROR_NAME
   error.status = status
   if (code) error.code = code
-  // Extras are carried ONLY for the refusal they belong to: the row position/column of the first
-  // failing row only for COPY_ROW_VALIDATION_FAILED, counts only for a size refusal. Anything else —
-  // above all the 403 gate refusal — can never transport a count or a column id to the UI, even if a
-  // backend attached one (a hidden column's id on a 403 would be exactly the oracle ADR §1.9 forbids).
+  // Extras are carried ONLY for the refusal they belong to: the row position/column of the first failing
+  // row only for COPY_ROW_VALIDATION_FAILED, the column at fault only for a post-gate 422 structural code,
+  // counts only for a size refusal. Anything else — above all the 403 gate refusal — can never transport a
+  // count or a column id to the UI, even if a backend attached one (a hidden column's id on a 403 would be
+  // exactly the oracle ADR §1.9 forbids).
   if (code === 'COPY_ROW_VALIDATION_FAILED') {
     const rowIndex = copySheetCount(failure.rowIndex)
     if (rowIndex !== null) error.rowIndex = rowIndex
     const fieldId = optionalStringValue(failure.fieldId)
     if (fieldId) error.fieldId = fieldId
   }
-  if (code === 'COPY_TOO_LARGE' || status === 413) {
+  if (status === 422 && code && COPY_SHEET_STRUCTURAL_FIELD_CODES.has(code)) {
+    const fieldId = optionalStringValue(fields.fieldId)
+    if (fieldId) error.fieldId = fieldId
+  }
+  if (code === 'COPY_TOO_MANY_FIELDS') {
+    const fieldCount = copySheetCount(fields.fieldCount)
+    if (fieldCount !== null) error.fieldCount = fieldCount
+    const limit = copySheetCount(fields.limit)
+    if (limit !== null) error.limit = limit
+  } else if (code === 'COPY_TOO_LARGE' || status === 413) {
     const rowCount = copySheetCount(fields.rowCount)
     if (rowCount !== null) error.rowCount = rowCount
     const limit = copySheetCount(fields.limit)
