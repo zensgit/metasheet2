@@ -343,14 +343,21 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 
 **#5757(2026-09-26 加,`location = /index.html` 的 Cache-Control)同样只改了仓库示例,但 222 只能同步其中的缓存头,不能把整段原样搬过去。** 仓库示例里的 `location = /index.html` 复用了 `location /` 的维护门判断(`if (-f .../maintenance.flag) { return 503; }` + `error_page 503 /maintenance.html;`)——这是因为示例文件里 `location /` 本身有这道门、`location = /maintenance.html` 也存在,三者配套。**222 现网两样都没有**(上一段已经说明)。如果把仓库这一整段原样搬到 222:维护窗口内,`/`(以及任何落到 `location /` 的 `try_files $uri $uri/ /index.html;` 兜底的 URL,包括所有 SPA 路由)会先内部重定向命中新加的 `location = /index.html`,门判断为真、触发 `error_page 503 /maintenance.html`;但 222 没有 `location = /maintenance.html` 接住它,请求退回 `location /` 的 `try_files`,再次内部重定向到 `/index.html`,再次命中同一条门判断——这是第二层 error_page,而 `recursive_error_pages` 默认 off,不会再映射回自定义 503,客户端拿到的是 nginx 自带的英文 503 页,不是 200。这和上面「`curl.exe -i http://127.0.0.1/` 在 222 上期望的是 200,不是 503」直接矛盾,**不能这样同步**。
 
-**222 正确的同步内容(只要这四行,不带门判断,不带 error_page)**:
+**222 正确的同步内容(只要这四行,不带门判断,不带 error_page)——但这四行不继承 `location /` 的 `root`/`add_header`,上机前必看下面两条(2026-09-27 加)。**
+
+`location = /index.html` 是精确匹配,命中的是 `location /` 的 `try_files $uri $uri/ /index.html;` 触发的内部重定向;它是独立的 location,**不会继承 `location /` 里声明的 `root` 或 `add_header`**,只继承 server 级的。真实 nginx 1.26.2 实测复现:如果 222 现网的 `root` 是写在 `location /` 内部而不是 server 级(标准 Windows zip 安装的默认 `nginx.conf` 就是 `location / { root html; ... }` 这种写法),四行版本一上,这条新 location 就会退回 nginx 编译期默认根目录——`/`、`/index.html`、所有 SPA 深层路由、乃至任意不存在的路径,全部变成 200 的 nginx 自带欢迎页(只有 `/assets/*` 之类不落到这条 location 的请求还正常),`nginx -t` 照样通过,**状态码检查完全看不出来**,和下一段「`/` 在维护窗口内仍然是 200」的字面意思矛盾但实质南辕北辙。**上机前必须先确认 222 现网 `location /` 用的 `root` 其实是 server 级声明**;确认不了,就显式带上 `root`,不依赖继承:
+
 ```nginx
 location = /index.html {
+  root C:/metasheet/apps/web/dist;
   add_header Cache-Control "no-cache, must-revalidate" always;
   try_files $uri =404;
 }
 ```
-这样同步之后 `/` 在维护窗口内仍然是 200(上面「怎么验证这道门真的在」那份配方不用改),只是 `index.html` 不再被浏览器当静态资源长期缓存。**不要**把示例里带 `if (-f ...)` / `error_page` 的完整版本搬到 222,除非先把 `location /` 的门判断和 `location = /maintenance.html` 一起补齐(见下面「新机器」小节——那是范围更大的另一个变更,需要单独评估,不是这次 #5757 的一部分)。`nginx -t` 通过后按上面「Windows 上怎么 reload」一节以 SYSTEM 身份 reload;这是一个上机动作,尚未执行,见对应 PR 正文的「待上机」清单。
+
+同理,如果 222 现网在 server 级还有别的 `add_header`(例如安全相关的响应头),这些头**也不会**被这条新 location 继承——没有显式带上的头,对 `index.html` 的响应就相当于没发(`/assets/*`、`/api/*` 等不经过这条 location 的路径不受影响)。补这四行时,把 222 现网 server 级已有的 `add_header` 行原样抄一份进这条 location。
+
+这样同步之后 `/` 在维护窗口内应当仍然是 200 且是前端首页,只是 `index.html` 不再被浏览器当静态资源长期缓存(上面「怎么验证这道门真的在」那份配方不用改)。**但光看状态码不够**——上一段已经证明 200 也可能是 nginx 欢迎页而不是 SPA。reload 前后都按 `customer-delivery-guide-20260904.md` §2.1「升级后必查:前端 smoke」的方法核对响应体:`curl.exe -s http://127.0.0.1/ | findstr assets`,`index.html` 里的 `<script src>` 必须以 `/assets/` 开头;再对该资源文件发一次请求,`Content-Type` 必须是 `application/javascript`/`text/css` 而不是 `text/html`。**不要**把示例里带 `if (-f ...)` / `error_page` 的完整版本搬到 222,除非先把 `location /` 的门判断和 `location = /maintenance.html` 一起补齐(见下面「新机器」小节——那是范围更大的另一个变更,需要单独评估,不是这次 #5757 的一部分)。`nginx -t` 通过后按上面「Windows 上怎么 reload」一节以 SYSTEM 身份 reload,reload 前后都做一次上面的前端 smoke;这是一个上机动作,尚未执行,见对应 PR 正文的「待上机」清单。
 
 **flag 路径为什么是 `output\maintenance.flag`。** 升级会把 `apps/web/dist`、`packages/core-backend/dist`、`packages/core-backend/migrations` 整体删掉重建(脚本参数 `-ReplaceDirs`)。flag 落在这三个目录里的任何位置,都会在升级中途被删掉——门在最需要它的几十秒里自己塌了。`output\` 不在替换清单里。脚本对此有静态断言:`-MaintenanceFlagPath` 落在任一 `ReplaceDirs` 下时,**开工前**就抛 `MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR` 拒绝启动(那时还没碰 pm2、没建备份目录)。维护页放 `ops/maintenance/` 同理。
 
