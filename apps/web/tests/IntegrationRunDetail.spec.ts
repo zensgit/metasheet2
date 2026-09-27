@@ -47,6 +47,7 @@ const DETAIL_URL = `/api/integration/runs/${RUN_ID}?tenantId=default`
 // null in the default scope and buildQueryString drops it), and `provenance` is a PATH segment —
 // a `/runs/<id>?provenance=1` shaped call would hit the single-run read instead.
 const PROVENANCE_URL = `/api/integration/runs/${RUN_ID}/provenance?tenantId=default`
+const PROVENANCE_PATH = `/api/integration/runs/${RUN_ID}/provenance`
 const PROVENANCE_ITEMS = [
   {
     runId: RUN_ID, pipelineId: PIPELINE_ID, rowId: 'DEMO-001',
@@ -59,6 +60,8 @@ const PROVENANCE_ITEMS = [
     eventIndex: 2, runStatus: 'partial', runMode: 'dry-run', runCreatedAt: '2026-09-19T02:00:00.000Z',
   },
 ]
+// f-prov200: the route's page envelope for a complete two-event run.
+const PROVENANCE_PAGE = { items: PROVENANCE_ITEMS, total: 2, truncated: false, nextCursor: null }
 
 const LIST_RUN = {
   id: RUN_ID,
@@ -153,9 +156,13 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
 
   // `answerDetail` decides what the SINGLE read returns; everything else is the same bootstrap +
   // list answer for all four cases.
+  // The provenance branch dispatches on the PATH and hands the full URL (query included) to
+  // `answerProvenance`, so a paged fake can decide its answer from the `cursor` / `limit` it was
+  // actually sent — a prefix-only mock would answer page one to every request and could not see a
+  // client that forgot the cursor.
   function installMocks(
     answerDetail: () => Response,
-    answerProvenance: () => Response = () => jsonResponse({ items: PROVENANCE_ITEMS }),
+    answerProvenance: (url: string) => Response | Promise<Response> = () => jsonResponse(PROVENANCE_PAGE),
   ): void {
     apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
@@ -163,9 +170,9 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === LIST_URL) return jsonResponse([LIST_RUN])
       if (url === DEAD_LETTERS_URL) return jsonResponse([])
-      if (url === PROVENANCE_URL) {
+      if (url.split('?')[0] === PROVENANCE_PATH) {
         provenanceCalls.push({ url, init })
-        return answerProvenance()
+        return answerProvenance(url)
       }
       if (url === DETAIL_URL) {
         detailCalls.push({ url, init })
@@ -343,6 +350,9 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
     // Read-only: the provenance section adds no replay/retry control.
     const section = host.querySelector('[data-testid="run-provenance"]') as HTMLElement
     expect(section.querySelector('[data-testid^="replay-"]')).toBeNull()
+    // f-prov200: a page that states it is complete (total 2, truncated false) shows NO notice.
+    expect(section.querySelector('[data-testid="run-provenance-truncated"]')).toBeNull()
+    expect(section.querySelector('[data-testid="run-provenance-load-more"]')).toBeNull()
     // Values-free: no URL- or host-shaped strings reach the rendered timeline.
     const sectionText = section.textContent ?? ''
     expect(sectionText).not.toMatch(/https?:\/\//)
@@ -522,7 +532,7 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
         () => jsonResponse(RUNNING_RUN),
         () => {
           provenanceCall += 1
-          return (provenanceCall === 2 ? repull.promise : jsonResponse({ items: PROVENANCE_ITEMS })) as unknown as Response
+          return (provenanceCall === 2 ? repull.promise : jsonResponse(PROVENANCE_PAGE)) as unknown as Response
         },
       )
       const host = await mountAndListRuns()
@@ -536,7 +546,7 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       expect(provenanceCalls).toHaveLength(2)
       app!.unmount()
       app = null
-      repull.resolve(jsonResponse({ items: PROVENANCE_ITEMS }))
+      repull.resolve(jsonResponse(PROVENANCE_PAGE))
       await flushUi()
       expect(vi.getTimerCount(), 'no interval may be armed after unmount').toBe(0)
       await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS * 2)
@@ -570,6 +580,714 @@ describe('IntegrationWorkbenchView run detail (SC-04)', () => {
       await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
       await flushUi()
       expect(detailCalls).toHaveLength(4)
+    })
+  })
+
+  // --- f-prov200: per-run provenance truncation disclosure + 加载更多 -------------------------
+  // The route answers ONE page (server default 200 events) plus `total` / `truncated` /
+  // `nextCursor`. These cases drive the real view against a paged fake and pin: no notice at
+  // 199/200, a notice + 加载更多 at 201, the cursor actually sent on 加载更多, fail-closed handling
+  // of an answer that does not state completeness, and that a late page never lands in a
+  // different dialog.
+  describe('f-prov200 provenance truncation disclosure', () => {
+    function provenanceEvent(eventIndex: number) {
+      return {
+        runId: RUN_ID, pipelineId: PIPELINE_ID, rowId: `ROW-${eventIndex}`,
+        eventType: 'row_cleaned', at: '2026-09-19T02:00:00.500Z', attrs: {},
+        eventIndex, runStatus: 'partial', runMode: 'dry-run', runCreatedAt: '2026-09-19T02:00:00.000Z',
+      }
+    }
+
+    // A paged fake of GET /api/integration/runs/:runId/provenance that DISPATCHES ON THE QUERY:
+    // `cursor` and `limit` are parsed out of the URL the client actually sent and decide the
+    // slice answered, mirroring the plugin registry (keyset strictly after `cursor`, server
+    // default page 200, `truncated` iff an event exists past the page). A client that drops or
+    // reuses a stale cursor is answered the wrong slice — visibly — instead of a canned page.
+    // `workspaceId` is the workspace every request is expected under (null = the default scope,
+    // where buildQueryString drops the key) — so a request that loses or invents a workspace is
+    // answered with a failed expectation, not a page.
+    function pagedProvenance(totalEvents: number, workspaceId: string | null = null) {
+      const events = Array.from({ length: totalEvents }, (_, i) => provenanceEvent(i + 1))
+      const requests: URLSearchParams[] = []
+      function answer(url: string): Response {
+        const [path, query = ''] = url.split('?')
+        expect(path).toBe(PROVENANCE_PATH)
+        const params = new URLSearchParams(query)
+        requests.push(params)
+        for (const key of params.keys()) {
+          expect(['tenantId', 'workspaceId', 'limit', 'cursor']).toContain(key)
+        }
+        expect(params.get('tenantId')).toBe('default')
+        expect(params.get('workspaceId')).toBe(workspaceId)
+        const limit = params.has('limit') ? Number(params.get('limit')) : 200
+        const cursor = params.has('cursor') ? Number(params.get('cursor')) : 0
+        const after = events.filter((event) => event.eventIndex > cursor)
+        const items = after.slice(0, limit)
+        const truncated = after.length > limit
+        return jsonResponse({
+          items,
+          total: events.length,
+          truncated,
+          nextCursor: truncated ? String(items[items.length - 1].eventIndex) : null,
+        })
+      }
+      return { answer, requests }
+    }
+
+    function hasCursor(url: string): boolean {
+      return new URLSearchParams(url.split('?')[1] ?? '').has('cursor')
+    }
+
+    function deferredResponse(): { promise: Promise<Response>; resolve: (value: Response) => void } {
+      let resolve!: (value: Response) => void
+      const promise = new Promise<Response>((r) => { resolve = r })
+      return { promise, resolve }
+    }
+
+    function renderedIndexes(host: HTMLDivElement): number[] {
+      // The entry head renders `<strong>type</strong><span>#N</span><span>at</span>`; read the
+      // `#N` span on its own (the concatenated textContent runs N into the timestamp).
+      return Array.from(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).map((el) => {
+        const ordinal = el.querySelector('.integration-workbench__provenance-event-head span')
+        const match = /^#(\d+)$/.exec((ordinal?.textContent ?? '').trim())
+        return match ? Number(match[1]) : Number.NaN
+      })
+    }
+
+    function range(from: number, to: number): number[] {
+      return Array.from({ length: to - from + 1 }, (_, i) => from + i)
+    }
+
+    function notice(host: HTMLDivElement): HTMLElement | null {
+      return host.querySelector('[data-testid="run-provenance-truncated"]')
+    }
+
+    function loadMoreButton(host: HTMLDivElement): HTMLButtonElement | null {
+      return host.querySelector('[data-testid="run-provenance-load-more"]')
+    }
+
+    async function clickLoadMore(host: HTMLDivElement): Promise<void> {
+      const button = loadMoreButton(host)
+      expect(button).not.toBeNull()
+      button!.click()
+      await flushUi()
+    }
+
+    it.each([199, 200])('%i events (not more than one page): all rendered, NO truncation notice, no 加载更多', async (size) => {
+      const fake = pagedProvenance(size)
+      installMocks(() => jsonResponse(DETAIL_RUN), fake.answer)
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(renderedIndexes(host)).toEqual(range(1, size))
+      expect(notice(host)).toBeNull()
+      expect(loadMoreButton(host)).toBeNull()
+      expect(fake.requests).toHaveLength(1)
+      expect(fake.requests[0].has('cursor')).toBe(false)
+    })
+
+    it.each([
+      ['en' as const, 'showing 200 of 201'],
+      ['zh-CN' as const, '已显示 200 条，共 201 条'],
+    ])('201 events: discloses 200 of 201, and 加载更多 sends the cursor and completes the timeline (%s)', async (locale, copy) => {
+      setLocale(locale)
+      const fake = pagedProvenance(201)
+      installMocks(() => jsonResponse(DETAIL_RUN), fake.answer)
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)).not.toBeNull()
+      expect(notice(host)!.textContent).toContain(copy)
+      expect(notice(host)!.getAttribute('role')).toBe('status')
+      expect(fake.requests).toHaveLength(1)
+
+      await clickLoadMore(host)
+      expect(fake.requests).toHaveLength(2)
+      expect(fake.requests[1].get('cursor')).toBe('200')
+      // Same scope on the follow-up page: the cursor never replaces or widens it.
+      expect(fake.requests[1].get('tenantId')).toBe('default')
+      expect(renderedIndexes(host)).toEqual(range(1, 201))
+      // Complete now: the notice and the button are gone.
+      expect(notice(host)).toBeNull()
+      expect(loadMoreButton(host)).toBeNull()
+    })
+
+    it('450 events: each 加载更多 sends the LATEST page cursor (200, then 400) and no event repeats', async () => {
+      const fake = pagedProvenance(450)
+      installMocks(() => jsonResponse(DETAIL_RUN), fake.answer)
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(notice(host)!.textContent).toContain('showing 200 of 450')
+      await clickLoadMore(host)
+      expect(fake.requests[1].get('cursor')).toBe('200')
+      expect(renderedIndexes(host)).toEqual(range(1, 400))
+      expect(notice(host)!.textContent).toContain('showing 400 of 450')
+      await clickLoadMore(host)
+      expect(fake.requests[2].get('cursor')).toBe('400')
+      expect(renderedIndexes(host)).toEqual(range(1, 450))
+      expect(notice(host)).toBeNull()
+      expect(fake.requests).toHaveLength(3)
+    })
+
+    it.each([
+      ['an answer with no disclosure fields at all', { items: PROVENANCE_ITEMS }, 'may be incomplete', 2],
+      ['truncated:false with a total above what was returned', { items: PROVENANCE_ITEMS, total: 5, truncated: false, nextCursor: null }, 'showing 2 of 5', 2],
+      ['an empty page whose total says events exist', { items: [], total: 3, truncated: false, nextCursor: null }, 'showing 0 of 3', 0],
+    ])('fail-closed: %s is NOT rendered as a complete timeline', async (_label, body, copy, shown) => {
+      installMocks(() => jsonResponse(DETAIL_RUN), () => jsonResponse(body))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(shown)
+      expect(notice(host)).not.toBeNull()
+      expect(notice(host)!.textContent).toContain(copy)
+      // No cursor was handed out, so there is nothing to page to — but the notice still stands.
+      expect(loadMoreButton(host)).toBeNull()
+      // ...and "no events" is never claimed while the page says events exist / may exist.
+      expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
+    })
+
+    // f-prov200 review w1b: the other half of the service's normalization. A `total` that is not a
+    // non-negative safe integer is DROPPED (not rendered as "showing 2 of 2.5" / "of 1e+21" / "of 5"),
+    // and an empty-string `nextCursor` is NO cursor (not a "may be incomplete" notice plus a
+    // 加载更多 that does nothing when clicked). Each page below states `truncated: false` and hands
+    // out no usable cursor, so what is on screen is the complete timeline.
+    it.each([
+      ['a fractional total (2.5)', { items: PROVENANCE_ITEMS, total: 2.5, truncated: false, nextCursor: null }],
+      ['a negative total (-1)', { items: PROVENANCE_ITEMS, total: -1, truncated: false, nextCursor: null }],
+      ['a total past the safe-integer range (1e21)', { items: PROVENANCE_ITEMS, total: 1e21, truncated: false, nextCursor: null }],
+      ['a numeric-string total ("5")', { items: PROVENANCE_ITEMS, total: '5', truncated: false, nextCursor: null }],
+      ['an empty-string nextCursor', { items: PROVENANCE_ITEMS, total: 2, truncated: false, nextCursor: '' }],
+    ])('normalization: truncated:false with %s renders the two events as complete — no notice, no 加载更多', async (_label, body) => {
+      installMocks(() => jsonResponse(DETAIL_RUN), () => jsonResponse(body))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+      expect(notice(host)).toBeNull()
+      expect(loadMoreButton(host)).toBeNull()
+      // Complete and non-empty: neither the notice nor the "no events" line.
+      expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
+    })
+
+    // f-prov200 review r2: an answer that says `truncated: false` yet still hands out a cursor
+    // contradicts itself. The service resolves that toward "not complete" (the `|| nextCursor`
+    // half of its truncated rule): the notice shows, the cursor is offered, and it pages normally.
+    it('fail-closed: truncated:false that still carries a nextCursor is disclosed as incomplete and the cursor is offered', async () => {
+      const answers: unknown[] = [
+        { items: PROVENANCE_ITEMS, total: 2, truncated: false, nextCursor: '2' },
+        { items: [], total: 2, truncated: false, nextCursor: null },
+      ]
+      installMocks(() => jsonResponse(DETAIL_RUN), () => jsonResponse(answers.shift()))
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+      expect(notice(host)).not.toBeNull()
+      expect(notice(host)!.textContent).toContain('may be incomplete')
+      expect(host.querySelector('[data-testid="run-provenance-empty"]')).toBeNull()
+      expect(loadMoreButton(host)).not.toBeNull()
+      await clickLoadMore(host)
+      const cursorRequests = provenanceCalls.filter((call) => hasCursor(call.url))
+      expect(cursorRequests).toHaveLength(1)
+      expect(new URLSearchParams(cursorRequests[0].url.split('?')[1]).get('cursor')).toBe('2')
+      // The follow-up is consistent and complete, so the timeline now is too.
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(2)
+      expect(notice(host)).toBeNull()
+    })
+
+    it('a failed 加载更多 keeps the loaded events, the notice and the button; a retry resumes from the same cursor', async () => {
+      const fake = pagedProvenance(201)
+      let failCursorOnce = true
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (hasCursor(url) && failCursorOnce) {
+          failCursorOnce = false
+          return errorResponse(500, 'INTERNAL_ERROR', 'provenance page failed')
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).not.toBeNull()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+
+      await clickLoadMore(host)
+      const cursorRequests = provenanceCalls.filter((call) => hasCursor(call.url))
+      expect(cursorRequests).toHaveLength(2)
+      expect(new URLSearchParams(cursorRequests[1].url.split('?')[1]).get('cursor')).toBe('200')
+      expect(renderedIndexes(host)).toEqual(range(1, 201))
+      expect(notice(host)).toBeNull()
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).toBeNull()
+    })
+
+    it('a 加载更多 answer that lands after the dialog was closed and re-opened is discarded, not appended', async () => {
+      const fake = pagedProvenance(201)
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (hasCursor(url) && !heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(heldUrl).not.toBe('')
+      expect(loadMoreButton(host)!.disabled).toBe(true)
+      ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      // The earlier dialog's next page lands now — it must not extend this dialog's timeline.
+      held.resolve(fake.answer(heldUrl))
+      await flushUi()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+    })
+
+    it('a next page that overlaps what is already shown never duplicates an event', async () => {
+      const fake = pagedProvenance(201)
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (!hasCursor(url)) return fake.answer(url)
+        // A misbehaving server re-sends #150..#201 for cursor=200.
+        return jsonResponse({
+          items: range(150, 201).map(provenanceEvent),
+          total: 201,
+          truncated: false,
+          nextCursor: null,
+        })
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(renderedIndexes(host)).toEqual(range(1, 201))
+      expect(notice(host)).toBeNull()
+    })
+
+    it('a manual 刷新 while 加载更多 is in flight re-reads page one, releases the button, and fences the late page out', async () => {
+      const fake = pagedProvenance(201)
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (hasCursor(url) && !heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(loadMoreButton(host)!.disabled).toBe(true)
+      ;(host.querySelector('[data-testid="refresh-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      // The refresh replaced the timeline with its first page: the orphaned 加载更多 must not keep
+      // the button stuck in "loading" waiting for an answer that can no longer apply.
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+      held.resolve(fake.answer(heldUrl))
+      await flushUi()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+    })
+
+    // --- f-prov200 review round 1: a 加载更多 issued DURING a replacing re-read ------------------
+    // The case above issues 加载更多 BEFORE the re-read starts, so the request token alone fences
+    // it. Here the polling re-read starts first (bumping the token), and only THEN does the
+    // operator click 加载更多 on the 1..400 timeline still on screen: the click captures the NEW
+    // token and sends cursor=400. The token cannot tell that answer apart, so the page must be
+    // fenced against the timeline it was issued for — appending #401.. after the re-read's #1..#200
+    // would silently drop #201..#400 from the middle and take the button away (nextCursor null).
+    function pollingRaceMocks(fake: ReturnType<typeof pagedProvenance>, cursorAnswer?: () => Response) {
+      const state = {
+        holdFirstPage: false,
+        holdCursorPage: false,
+        heldFirst: deferredResponse(),
+        heldFirstUrl: '',
+        heldMore: deferredResponse(),
+        heldMoreUrl: '',
+      }
+      installMocks(() => jsonResponse({ ...DETAIL_RUN, status: 'running', finishedAt: null }), (url) => {
+        if (state.holdFirstPage && !hasCursor(url)) {
+          state.holdFirstPage = false
+          state.heldFirstUrl = url
+          return state.heldFirst.promise
+        }
+        if (state.holdCursorPage && hasCursor(url)) {
+          state.holdCursorPage = false
+          state.heldMoreUrl = url
+          return state.heldMore.promise
+        }
+        return fake.answer(url)
+      })
+      return {
+        state,
+        releaseFirst: () => state.heldFirst.resolve(fake.answer(state.heldFirstUrl)),
+        releaseMore: () => state.heldMore.resolve(cursorAnswer ? cursorAnswer() : fake.answer(state.heldMoreUrl)),
+      }
+    }
+
+    // Drives: 1..400 shown → polling re-read held → 加载更多 (cursor 400) held → re-read lands.
+    async function clickLoadMoreDuringPollingReread(
+      race: ReturnType<typeof pollingRaceMocks>,
+    ): Promise<HTMLDivElement> {
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(renderedIndexes(host)).toEqual(range(1, 400))
+      race.state.holdFirstPage = true
+      await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+      await flushUi()
+      expect(race.state.heldFirstUrl).not.toBe('')
+      // The re-read is in flight, the 1..400 timeline and its cursor are still on screen, and the
+      // button is live — this is the click the token alone cannot fence.
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+      race.state.holdCursorPage = true
+      await clickLoadMore(host)
+      expect(race.state.heldMoreUrl).not.toBe('')
+      expect(new URLSearchParams(race.state.heldMoreUrl.split('?')[1]).get('cursor')).toBe('400')
+      race.releaseFirst()
+      await flushUi()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      return host
+    }
+
+    it('a 加载更多 clicked while a polling re-read is in flight, landing AFTER the re-read replaced the timeline, is discarded (no silent gap)', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      try {
+        const fake = pagedProvenance(450)
+        const race = pollingRaceMocks(fake)
+        const host = await clickLoadMoreDuringPollingReread(race)
+        // The cursor-400 page lands last: it extends a timeline that is no longer on screen.
+        race.releaseMore()
+        await flushUi()
+        const shown = renderedIndexes(host)
+        expect(shown).toEqual(range(1, 200))
+        expect(notice(host)!.textContent).toContain('showing 200 of 450')
+        // The button survives (the late page did not clear nextCursor) and is not stuck loading...
+        expect(loadMoreButton(host)!.disabled).toBe(false)
+        expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).toBeNull()
+        // ...and paging resumes from the NEW timeline's own cursor, contiguously.
+        await clickLoadMore(host)
+        expect(fake.requests[fake.requests.length - 1].get('cursor')).toBe('200')
+        expect(renderedIndexes(host)).toEqual(range(1, 400))
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a 加载更多 clicked during a polling re-read that FAILS after the re-read landed does not flag the new timeline', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      try {
+        const fake = pagedProvenance(450)
+        const race = pollingRaceMocks(fake, () => errorResponse(500, 'INTERNAL_ERROR', 'provenance page failed'))
+        const host = await clickLoadMoreDuringPollingReread(race)
+        race.releaseMore()
+        await flushUi()
+        // The failure belongs to a page of the replaced timeline; the one on screen never asked.
+        expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).toBeNull()
+        expect(renderedIndexes(host)).toEqual(range(1, 200))
+        expect(notice(host)!.textContent).toContain('showing 200 of 450')
+        expect(loadMoreButton(host)!.disabled).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // --- f-prov200 review round 1: close + reopen, released while the section is COLLAPSED -------
+    // The earlier close/reopen case re-expands BEFORE releasing the held page, and that expand
+    // issues its own read (bumping the token), which would hide a reset that forgot to fence. Here
+    // the late answer lands while the reopened dialog is still collapsed, so only the reset itself
+    // stands between it and the new dialog — and a painted-in timeline would also make the next
+    // expand skip its read (the section reuses what it holds).
+    it('a held 加载更多 page released after close + reopen, before re-expanding, never reaches the reopened dialog', async () => {
+      const fake = pagedProvenance(201)
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (hasCursor(url) && !heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      await clickLoadMore(host)
+      expect(heldUrl).not.toBe('')
+      ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      await openDetail(host)
+      held.resolve(fake.answer(heldUrl))
+      await flushUi()
+      await expandProvenance(host)
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+      // The reopened dialog read its own first page rather than reusing anything painted in.
+      expect(fake.requests.filter((params) => !params.has('cursor'))).toHaveLength(2)
+    })
+
+    // f-prov200 review r2: every read that REPLACES the timeline releases an orphaned 加载更多. The
+    // polling re-read and 刷新 already did; a collapse + re-expand re-reads page one too whenever
+    // the section holds no events (an empty page that still handed out a cursor), and it must not
+    // leave the button stuck on 加载中 waiting for an answer its own token bump will discard.
+    it('a collapse + re-expand that re-reads page one while 加载更多 is in flight releases the button', async () => {
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (hasCursor(url) && !heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return jsonResponse({ items: [], total: 3, truncated: true, nextCursor: '0' })
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(notice(host)!.textContent).toContain('showing 0 of 3')
+      await clickLoadMore(host)
+      expect(heldUrl).not.toBe('')
+      expect(loadMoreButton(host)!.disabled).toBe(true)
+      await expandProvenance(host) // collapse
+      await expandProvenance(host) // re-expand: no events held, so page one is read again
+      expect(provenanceCalls.filter((call) => !hasCursor(call.url))).toHaveLength(2)
+      expect(notice(host)!.textContent).toContain('showing 0 of 3')
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+      // The orphaned page lands now: discarded (stale token), and it does not re-lock the button.
+      held.resolve(jsonResponse({ items: [provenanceEvent(1)], total: 3, truncated: true, nextCursor: '1' }))
+      await flushUi()
+      expect(host.querySelectorAll('[data-testid^="run-provenance-entry-"]')).toHaveLength(0)
+      expect(loadMoreButton(host)!.disabled).toBe(false)
+    })
+
+    it('a held FIRST-page read released after close + reopen, before re-expanding, never reaches the reopened dialog', async () => {
+      // Two distinguishable answers: the earlier dialog's read is answered from a 201-event run,
+      // everything after the reopen from a 450-event one.
+      const earlier = pagedProvenance(201)
+      const current = pagedProvenance(450)
+      const held = deferredResponse()
+      let heldUrl = ''
+      installMocks(() => jsonResponse(DETAIL_RUN), (url) => {
+        if (!heldUrl) {
+          heldUrl = url
+          return held.promise
+        }
+        return current.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetail(host)
+      await expandProvenance(host)
+      expect(heldUrl).not.toBe('')
+      ;(host.querySelector('[data-testid="close-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      await openDetail(host)
+      held.resolve(earlier.answer(heldUrl))
+      await flushUi()
+      await expandProvenance(host)
+      expect(current.requests).toHaveLength(1)
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 450')
+    })
+
+    it('a polling re-read replaces the entries AND their disclosure together (0 events while running, 201 once terminal)', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      try {
+        const finished = pagedProvenance(201)
+        let detailCall = 0
+        let terminal = false
+        installMocks(
+          () => {
+            detailCall += 1
+            terminal = detailCall >= 2
+            return jsonResponse(terminal ? DETAIL_RUN : { ...DETAIL_RUN, status: 'running', finishedAt: null })
+          },
+          (url) => (terminal
+            ? finished.answer(url)
+            : jsonResponse({ items: [], total: 0, truncated: false, nextCursor: null })),
+        )
+        const host = await mountAndListRuns()
+        await openDetail(host)
+        await expandProvenance(host)
+        // While running the persisted timeline is still empty — and complete: no notice.
+        expect(host.querySelector('[data-testid="run-provenance-empty"]')).not.toBeNull()
+        expect(notice(host)).toBeNull()
+        await vi.advanceTimersByTimeAsync(RUN_DETAIL_POLL_MS)
+        await flushUi()
+        expect(detailCalls).toHaveLength(2)
+        expect(renderedIndexes(host)).toEqual(range(1, 200))
+        expect(notice(host)!.textContent).toContain('showing 200 of 201')
+        expect(loadMoreButton(host)).not.toBeNull()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // --- f-prov200 review w1b: 加载更多 under a NON-EMPTY workspace -----------------------------
+    // Every case above runs in the default scope, where workspaceId is null and buildQueryString
+    // drops the key — so a 加载更多 that forwarded only the tenant looked exactly like a correct
+    // one. Here the operator works in a named workspace and the mock dispatches on the PATH and
+    // records the full URL, so the workspace each request carried is observable.
+    const WORKSPACE = 'ws_prov'
+
+    function installWorkspaceMocks(answerProvenance: (url: string) => Response | Promise<Response>): void {
+      apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        const path = url.split('?')[0]
+        if (url === '/api/integration/adapters') return jsonResponse([])
+        if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+        if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+        if (path === '/api/integration/runs') return jsonResponse([LIST_RUN])
+        if (path === '/api/integration/dead-letters') return jsonResponse([])
+        if (path === PROVENANCE_PATH) {
+          provenanceCalls.push({ url, init })
+          return answerProvenance(url)
+        }
+        if (path === `/api/integration/runs/${RUN_ID}`) {
+          detailCalls.push({ url, init })
+          return jsonResponse(DETAIL_RUN)
+        }
+        throw new Error(`unexpected URL ${url}`)
+      })
+    }
+
+    function queryOf(url: string): Record<string, string> {
+      return Object.fromEntries(new URLSearchParams(url.split('?')[1] ?? ''))
+    }
+
+    async function setScopeInput(host: HTMLDivElement, testId: 'tenant-id' | 'workspace-id', value: string): Promise<void> {
+      const input = host.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement
+      expect(input).not.toBeNull()
+      input.value = value
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+
+    async function setWorkspace(host: HTMLDivElement, value: string): Promise<void> {
+      await setScopeInput(host, 'workspace-id', value)
+    }
+
+    async function setTenant(host: HTMLDivElement, value: string): Promise<void> {
+      await setScopeInput(host, 'tenant-id', value)
+    }
+
+    async function openDetailInWorkspace(host: HTMLDivElement, workspace: string): Promise<void> {
+      await setWorkspace(host, workspace)
+      ;(host.querySelector('[data-testid="refresh-observation"]') as HTMLButtonElement).click()
+      await flushUi()
+      await openDetail(host)
+    }
+
+    it('加载更多 in a named workspace carries the SAME tenant + workspace as the detail read and the first page', async () => {
+      const fake = pagedProvenance(201, WORKSPACE)
+      installWorkspaceMocks(fake.answer)
+      const host = await mountAndListRuns()
+      await openDetailInWorkspace(host, WORKSPACE)
+      await expandProvenance(host)
+      expect(detailCalls.length).toBeGreaterThan(0)
+      for (const call of detailCalls) {
+        expect(queryOf(call.url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      }
+      expect(provenanceCalls).toHaveLength(1)
+      expect(queryOf(provenanceCalls[0].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+
+      await clickLoadMore(host)
+      expect(provenanceCalls).toHaveLength(2)
+      // Exactly the first page's scope plus the cursor — the workspace is not dropped, widened or
+      // replaced by the cursor.
+      expect(queryOf(provenanceCalls[1].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE, cursor: '200' })
+      expect(renderedIndexes(host)).toEqual(range(1, 201))
+      expect(notice(host)).toBeNull()
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).toBeNull()
+    })
+
+    // The PR residual, pinned as behaviour rather than left implicit: 加载更多 reads currentScope()
+    // WHEN CLICKED — the one source the detail read and 刷新 use too — not a scope remembered from
+    // the first page. Changing the workspace input between the first page and the click therefore
+    // sends the new workspace; the server answers that scope's 404 (the run is not in it), and the
+    // client shows the failure while keeping the events it has, instead of appending anything.
+    it('加载更多 evaluates the scope at click time (same currentScope() as 刷新); a workspace changed after page one gets that scope\'s 404, visibly', async () => {
+      const OTHER_WORKSPACE = 'ws_other'
+      const fake = pagedProvenance(201, WORKSPACE)
+      installWorkspaceMocks((url) => {
+        if (queryOf(url).workspaceId === OTHER_WORKSPACE) {
+          return errorResponse(404, 'RUN_NOT_FOUND', 'pipeline run not found')
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetailInWorkspace(host, WORKSPACE)
+      await expandProvenance(host)
+      expect(queryOf(provenanceCalls[0].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+
+      await setWorkspace(host, OTHER_WORKSPACE)
+      await clickLoadMore(host)
+      const cursorRequests = provenanceCalls.filter((call) => hasCursor(call.url))
+      expect(cursorRequests).toHaveLength(1)
+      expect(queryOf(cursorRequests[0].url)).toEqual({ tenantId: 'default', workspaceId: OTHER_WORKSPACE, cursor: '200' })
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).not.toBeNull()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+
+      // One source: a 刷新 issued at the same moment reads the detail under that same workspace.
+      const detailCallsBefore = detailCalls.length
+      ;(host.querySelector('[data-testid="refresh-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(detailCalls.length).toBe(detailCallsBefore + 1)
+      expect(queryOf(detailCalls[detailCalls.length - 1].url)).toEqual({ tenantId: 'default', workspaceId: OTHER_WORKSPACE })
+    })
+
+    // f-prov200 review w1b fix2: the TENANT half of the same pin. Every case above leaves the
+    // tenant input at 'default', so a 加载更多 that hard-coded 'default', or froze the tenant of the
+    // first page while still reading the workspace at click time, looked exactly like a correct
+    // one. Here the tenant is changed after page one — padded, so the click must go through
+    // currentScope()'s trim rather than the raw input — and the server answers that tenant's 404:
+    // the client shows the failure, keeps the events it has and appends nothing.
+    it('加载更多 evaluates the TENANT at click time too (same currentScope() as 刷新); a tenant changed after page one gets that tenant\'s 404, visibly', async () => {
+      const OTHER_TENANT = 'tenant_other'
+      const fake = pagedProvenance(201, WORKSPACE)
+      installWorkspaceMocks((url) => {
+        if (queryOf(url).tenantId === OTHER_TENANT) {
+          return errorResponse(404, 'RUN_NOT_FOUND', 'pipeline run not found')
+        }
+        return fake.answer(url)
+      })
+      const host = await mountAndListRuns()
+      await openDetailInWorkspace(host, WORKSPACE)
+      await expandProvenance(host)
+      expect(queryOf(provenanceCalls[0].url)).toEqual({ tenantId: 'default', workspaceId: WORKSPACE })
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+
+      await setTenant(host, `  ${OTHER_TENANT}  `)
+      await clickLoadMore(host)
+      const cursorRequests = provenanceCalls.filter((call) => hasCursor(call.url))
+      expect(cursorRequests).toHaveLength(1)
+      expect(queryOf(cursorRequests[0].url)).toEqual({ tenantId: OTHER_TENANT, workspaceId: WORKSPACE, cursor: '200' })
+      expect(host.querySelector('[data-testid="run-provenance-load-more-error"]')).not.toBeNull()
+      expect(renderedIndexes(host)).toEqual(range(1, 200))
+      expect(notice(host)!.textContent).toContain('showing 200 of 201')
+
+      // One source: a 刷新 issued at the same moment reads the detail under that same tenant.
+      const detailCallsBefore = detailCalls.length
+      ;(host.querySelector('[data-testid="refresh-run-detail"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(detailCalls.length).toBe(detailCallsBefore + 1)
+      expect(queryOf(detailCalls[detailCalls.length - 1].url)).toEqual({ tenantId: OTHER_TENANT, workspaceId: WORKSPACE })
     })
   })
 })

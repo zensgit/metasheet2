@@ -64,6 +64,7 @@ import {
 } from '../services/approval-bridge-types'
 import { sanitizeCsvRow, CSV_LINE_TERMINATOR } from '../services/csv-cell'
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
+import { publishTodoCountsUpdate } from '../services/todo-realtime'
 import {
   searchDirectoryUsers,
   listDirectoryRoles,
@@ -467,7 +468,14 @@ async function listDirectApprovalAssigneeIds(instanceId: string): Promise<string
     .filter((userId) => typeof userId === 'string' && userId.trim().length > 0)
 }
 
-async function publishApprovalCountsForUsers(
+// Exported (additive-only; no behavior change) so gate `impl-gate-B2-round1-20260918.md`'s P1-1
+// finding can be gated directly: all eight approval-action call sites funnel through this ONE
+// function to fire both `publishApprovalCountsUpdate` and `publishTodoCountsUpdate` on the same
+// `uniqueUsers` set (design MD §5.1's by-construction argument), so a wiring test gating THIS
+// function's own body is the right anchor — it does not, by itself, prove any given call site
+// actually reaches this function; that half stays the grep/by-construction argument. Mirrors
+// `isPlmApprovalId`'s export.
+export async function publishApprovalCountsForUsers(
   options: ApprovalRouterOptions | undefined,
   users: Array<{ userId: string; roles?: string[] }>,
   reason: string,
@@ -479,13 +487,27 @@ async function publishApprovalCountsForUsers(
     uniqueUsers.set(userId, user.roles ?? [])
   }
 
-  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => publishApprovalCountsUpdate({
-    injector: options?.injector,
-    logger,
-    userId,
-    roles,
-    reason,
-  })))
+  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => Promise.all([
+    publishApprovalCountsUpdate({
+      injector: options?.injector,
+      logger,
+      userId,
+      roles,
+      reason,
+    }),
+    // todo-center-design-lock v2.14 §3/§4: reuses `pendingSourceRegistry.countPendingForUser` — the
+    // SAME query `GET /api/todo/count` reads — never a second copy of the pending predicate. See
+    // `services/todo-realtime.ts`'s docblock for why this is NOT the P1-1 mistake B-1's fix-round
+    // removed (that version was wired onto `approval-realtime.ts`'s divergent
+    // `computeApprovalPendingCounts` instead).
+    publishTodoCountsUpdate({
+      injector: options?.injector,
+      logger,
+      userId,
+      roles,
+      reason,
+    }),
+  ])))
 }
 
 export function approvalsRouter(options?: ApprovalRouterOptions): Router {

@@ -77,7 +77,10 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import StockPreparationProjectQueryView from '../src/components/integration/stockPreparation/StockPreparationProjectQueryView.vue'
-import { recordStockPrepProjectVisit } from '../src/services/integration/stockPreparation/operatorHomeMemory'
+import {
+  recordStockPrepProjectVisit,
+  removeStockPrepRecentProject,
+} from '../src/services/integration/stockPreparation/operatorHomeMemory'
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 import {
   buildStockPrepProjectQueryRows,
@@ -289,6 +292,23 @@ describe('项目查询 · 两级筛选(Q-01)', () => {
     // 记忆行没有来源可言 —— 服务端没为它答过,所以是「看不到」,不是「没有」。
     const memoryRow = root.querySelector(`[data-project-no="${PROJECT_B}"]`) as HTMLElement
     expect(memoryRow.textContent).toContain('看不到')
+  })
+
+  it('B1 回归(客户反馈 2026-09-24 #1a 的对抗评审, 2026-09-26): 首页「从列表移除」不会让项目从这里消失, 也不会丢掉它的姿态', async () => {
+    // 首页记了一个从没归档过的项目(F1 的那类自助拉取项目),把它标为 ready。
+    recordStockPrepProjectVisit(PROJECT_B, 'ready', SCOPE)
+    // 操作员在首页点了「从列表移除」——那只该改首页自己用的隐藏名单(见 operatorHomeMemory.ts 的
+    // removeStockPrepRecentProject 文档),不该动这份 项目查询/rule-4 都要读的记忆本身。
+    const result = removeStockPrepRecentProject(PROJECT_B, SCOPE)
+    expect(result).toBe('hidden')
+    routeApi({ directory: directory([row({ projectNo: PROJECT_A, sources: ['mvp'] })]) })
+    const root = await mount()
+    // 项目查询自己不传隐藏名单给 buildOperatorHomeCards/buildStockPrepProjectQueryRows(projectQuery.ts
+    // 只传两个参数),所以这里必须还是全量——乙项目仍在,而且仍然是 ready,不是删除记忆后才会出现的
+    // 「看不到」。
+    expect(rowNumbers(root).sort()).toEqual([PROJECT_A, PROJECT_B])
+    const memoryRow = root.querySelector(`[data-project-no="${PROJECT_B}"]`) as HTMLElement
+    expect(memoryRow.getAttribute('data-posture')).toBe('ready')
   })
 
   it('点姿态 chip 之后清单收窄,再点同一个 chip 回到全部', async () => {
