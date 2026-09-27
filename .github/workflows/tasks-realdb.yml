@@ -63,4 +63,5 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest
           --config vitest.integration.config.ts run
           tests/integration/task-p0a.db.test.ts
+          tests/integration/task-read-path.db.test.ts
           --reporter=verbose
