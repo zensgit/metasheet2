@@ -313,6 +313,10 @@ async function main() {
   await run('X-02 the OTHER tenant\'s operator is refused 409 with zero records reads (same deployment)', async () => {
     const harness = mount()
     const res = await exportAs(harness, OPERATOR_B)
+    // THE LEAK ITSELF, asserted FIRST: on the pre-wall route this is the line that fails, naming what
+    // crossed the tenant line rather than only a status mismatch.
+    assert.equal(everythingSent(res).includes(A_MATERIAL), false, 'tenant A\'s material name must not reach tenant B\'s operator')
+    assert.deepEqual(harness.recordsReads, [], 'tenant B\'s click must not read tenant A\'s sheet at all')
     assertRefusedWithZeroReads(harness, res, 409, PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES[CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED])
     assert.equal(res.body.error.code, 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
     // Values-free details: the public objectId and nothing else — no sheet id, no project id.

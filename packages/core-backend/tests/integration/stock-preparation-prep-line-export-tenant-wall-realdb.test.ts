@@ -372,14 +372,16 @@ describeIfDatabase('prep-line export tenant wall (real registry, real records, r
   test('R-02 the other tenant\'s operator is refused before a single records read, and sees nothing', async () => {
     const mounted = mountExport({ sheetId: handSheetId, fieldIdMap: handFieldIdMap })
     const res = await exportAs(mounted, OPERATOR_B)
+    // THE LEAK ITSELF, asserted FIRST so that on the pre-wall route the failure names what crossed the
+    // tenant line (tenant A's canary in tenant B's workbook), not merely a status mismatch.
+    const sent = everythingSent(res)
+    expect(sent.includes(A_MATERIAL), 'tenant A\'s material name must not reach tenant B\'s operator').toBe(false)
     expect(res.statusCode, JSON.stringify(res.body)).toBe(409)
     expect((res.body as { error?: { code?: string } }).error?.code).toBe('PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
     expect(recordsReads, 'ZERO reads of the target sheet').toEqual([])
     expect(registryCalls, 'the registry was asked about tenant B\'s OWN staging project').toEqual([{ sheetId: handSheetId, projectId: STAGING_B }])
     expect(mounted.auditAppends).toEqual([])
     expect(mounted.xlsxCalls).toEqual([])
-    const sent = everythingSent(res)
-    expect(sent).not.toContain(A_MATERIAL)
     expect(sent).not.toContain(handSheetId)
     expect(sent).not.toContain(STAGING_A)
   })
