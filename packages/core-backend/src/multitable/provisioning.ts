@@ -117,13 +117,18 @@ export type CreateViewInput = {
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
   config?: Record<string, unknown>
-  // S1 (adversarial review of #6091, 2026-09-26): optional explicit created_at. Omitted by every
-  // caller except installMultitableTemplate — COALESCE($n, now()) below means every other call
-  // site keeps its exact previous behavior (DB default `now()`). template-library.ts passes a
-  // strictly increasing value per view so a later `ORDER BY created_at, id` reproduces install
-  // order; without it every view created inside one transaction shares now()'s transaction-start
-  // timestamp and the tie-break (a sha1 view id, unrelated to template order) would win instead.
-  createdAt?: Date | string | null
+  // S1 (adversarial review of #6091, 2026-09-26): optional created_at offset, in MICROSECONDS, added
+  // to the DATABASE clock: created_at = now() + offset. Omitted by every caller except
+  // installMultitableTemplate — COALESCE(offset, 0) below means every other call site still gets
+  // exactly `now()`, the column's own default. template-library.ts passes 0, 1, 2, ... per view so
+  // a later `ORDER BY created_at, id` reproduces install order; without it every view created
+  // inside one transaction shares now()'s transaction-start timestamp and the tie-break (a sha1
+  // view id, unrelated to template order) would win instead.
+  // N-4 (second adversarial review): an offset, NOT an app-computed timestamp. The earlier
+  // `Date.now()`-based value came from the app server's clock while every other view's created_at
+  // comes from the DB server's now(); under clock skew a view a user creates right after an install
+  // could sort BEFORE the template's views. Deriving from now() keeps one clock for all rows.
+  createdAtOffsetMicros?: number | null
 }
 
 export type CreateViewResult =
@@ -730,7 +735,7 @@ export async function createView(
   await fenceWriterEntry(input.query, input.sheetId)
   const insert = await input.query(
     `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config, created_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, COALESCE($10::timestamptz, now()))
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, now() + (COALESCE($10::int, 0) * interval '1 microsecond'))
      ON CONFLICT (id) DO NOTHING`,
     [
       input.viewId,
@@ -742,7 +747,7 @@ export async function createView(
       JSON.stringify(normalizeJson(input.groupInfo)),
       JSON.stringify(Array.isArray(input.hiddenFieldIds) ? input.hiddenFieldIds : []),
       JSON.stringify(normalizeJson(input.config)),
-      input.createdAt instanceof Date ? input.createdAt.toISOString() : (input.createdAt ?? null),
+      input.createdAtOffsetMicros ?? null,
     ],
   )
 

@@ -619,8 +619,11 @@ export async function installMultitableTemplate(
   // timestamp, the tie-break becomes a sha1 view id (stableChildId) that has nothing to do with
   // template order. Stamping a strictly increasing created_at per view (in template order) makes
   // that later ORDER BY reproduce install order without touching any other createView caller.
+  // N-4 (second adversarial review): the stamp is now() + <sequence> microseconds, computed BY THE
+  // DATABASE (createView's createdAtOffsetMicros), not an app-side Date.now() — one clock for
+  // template views and for every view users create later, so clock skew between the app and DB
+  // servers cannot sort a later user view ahead of the template's own views.
   let installedViewSequence = 0
-  const installBaseTimestampMs = Date.now()
 
   for (const templateSheet of template.sheets) {
     const sheetId = stableChildId('sheet', baseId, template.id, templateSheet.id)
@@ -652,7 +655,7 @@ export async function installMultitableTemplate(
       const hiddenFieldIds = (templateView.hiddenFieldIds ?? [])
         .map((fieldId) => fieldIds[fieldId])
         .filter((fieldId): fieldId is string => typeof fieldId === 'string' && fieldId.length > 0)
-      const viewCreatedAt = new Date(installBaseTimestampMs + installedViewSequence)
+      const createdAtOffsetMicros = installedViewSequence
       installedViewSequence += 1
       const viewResult = await createView({
         query: input.query,
@@ -663,7 +666,7 @@ export async function installMultitableTemplate(
         groupInfo: buildGroupInfo(templateView, fieldIds),
         hiddenFieldIds,
         config: buildViewConfig(templateView, fieldIds),
-        createdAt: viewCreatedAt,
+        createdAtOffsetMicros,
       })
       if (!viewResult.created || !viewResult.view) {
         throw new MultitableTemplateConflictError(`View already exists: ${viewId}`)

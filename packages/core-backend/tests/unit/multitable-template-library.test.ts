@@ -36,13 +36,22 @@ type FakeView = {
   group_info: Record<string, unknown>
   hidden_field_ids: string[]
   config: Record<string, unknown>
-  // S1 (adversarial review of #6091): epoch ms. Mirrors the DB column's semantics closely enough
-  // to reproduce the bug this table exists to catch — every INSERT inside one `installMultitableTemplate`
-  // call shares the SAME `sharedNow` unless createView's caller passes an explicit createdAt
-  // (COALESCE($10, now()) in provisioning.ts), exactly like every view in one Postgres transaction
-  // would see the identical transaction-start `now()`.
+  // S1 (adversarial review of #6091): epoch MICROseconds. Mirrors the DB column's semantics closely
+  // enough to reproduce the bug this table exists to catch — every INSERT inside one
+  // `installMultitableTemplate` call shares the SAME `sharedNowMicros` (one Postgres transaction =>
+  // one transaction-start `now()`), plus whatever offset createView's caller passed
+  // (`now() + (COALESCE($10::int, 0) * interval '1 microsecond')` in provisioning.ts).
   created_at: number
 }
+
+// N-6 (second adversarial review of #6091): the exact column list and VALUES clause createView must
+// send. The fake below REFUSES any other shape instead of blindly reading params[9]: swapping the
+// COALESCE arguments (`COALESCE(0, $10::int)` — offset silently ignored), pointing the expression at
+// the wrong placeholder, or going back to an app-clock timestamp all throw here, so every install
+// test in this file goes red rather than passing on a fixture that invents the ordering itself.
+const CREATE_VIEW_COLUMNS = '(id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config, created_at)'
+const CREATE_VIEW_VALUES =
+  "VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, now() + (COALESCE($10::int, 0) * interval '1 microsecond'))"
 
 function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
   query: MultitableProvisioningQueryFn
@@ -56,8 +65,8 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
   const fields: FakeField[] = []
   const views: FakeView[] = []
   // S1: captured ONCE per createQuery() call — stands in for "this whole install runs inside one
-  // Postgres transaction, so every un-stamped INSERT sees the identical transaction-start now()".
-  const sharedNow = Date.now()
+  // Postgres transaction, so every INSERT sees the identical transaction-start now()".
+  const sharedNowMicros = Date.now() * 1000
 
   const query: MultitableProvisioningQueryFn = async (sql, params = []) => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
@@ -157,7 +166,23 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
     }
 
     if (normalized.startsWith('INSERT INTO meta_views')) {
-      const [id, sheetId, name, type, filterInfoJson, sortInfoJson, groupInfoJson, hiddenFieldIdsJson, configJson, createdAtParam] = params as [
+      // N-6: shape gate first — see CREATE_VIEW_VALUES. Anything else is a createView regression.
+      if (!normalized.startsWith(`INSERT INTO meta_views ${CREATE_VIEW_COLUMNS} ${CREATE_VIEW_VALUES}`)) {
+        throw new Error(`createView INSERT no longer stamps created_at as now() + COALESCE(offset, 0) µs: ${normalized}`)
+      }
+      // The offset placeholder is read from the expression the SQL actually carries (then checked
+      // against the column position), not assumed to be params[9].
+      const offsetPlaceholder = /now\(\) \+ \(COALESCE\(\$(\d+)::int, 0\) \* interval '1 microsecond'\)/.exec(normalized)
+      const offsetIndex = Number(offsetPlaceholder?.[1]) - 1
+      if (offsetIndex !== 9 || params.length !== 10) {
+        throw new Error(`createView created_at offset is bound to $${offsetIndex + 1} of ${params.length} params`)
+      }
+      const offsetParam = params[offsetIndex]
+      if (offsetParam !== null && offsetParam !== undefined && !(Number.isInteger(offsetParam) && (offsetParam as number) >= 0)) {
+        // `$10::int` in Postgres would reject a timestamp string / fraction the same way.
+        throw new Error(`createView created_at offset must be a non-negative integer or null, got ${String(offsetParam)}`)
+      }
+      const [id, sheetId, name, type, filterInfoJson, sortInfoJson, groupInfoJson, hiddenFieldIdsJson, configJson] = params as [
         string,
         string,
         string,
@@ -167,7 +192,6 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
         string,
         string,
         string,
-        (string | null)?,
       ]
       if (views.some((view) => view.id === id)) {
         return { rows: [], rowCount: 0 }
@@ -182,9 +206,9 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
         group_info: JSON.parse(groupInfoJson),
         hidden_field_ids: JSON.parse(hiddenFieldIdsJson),
         config: JSON.parse(configJson),
-        // S1: COALESCE($10::timestamptz, now()) — a real `now()` param mirrors provisioning.ts;
-        // omitted (undefined/null, every pre-S1 caller) falls back to the one shared instant.
-        created_at: createdAtParam ? Date.parse(createdAtParam) : sharedNow,
+        // now() + (COALESCE($10::int, 0) * 1µs): the one shared transaction instant plus the offset;
+        // omitted (null, every caller except installMultitableTemplate) => exactly now().
+        created_at: sharedNowMicros + ((offsetParam as number | null | undefined) ?? 0),
       })
       return { rows: [], rowCount: 1 }
     }
@@ -194,9 +218,11 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
       return { rows: views.filter((view) => view.id === viewId) }
     }
 
-    // S1: the read-back path the save-as-template extraction and the /context route both use —
+    // S1: the read-back path the save-as-template extraction uses (POST /templates) —
     // ORDER BY created_at, id, wire-gated the same way the rest of this suite gates on literal SQL
     // text (a mis-authored fixture that always sorts would make this test pass for the wrong reason).
+    // /context deliberately does NOT use this ORDER BY (second review S-1): it keeps
+    // `ORDER BY created_at ASC`, pinned in tests/unit/multitable-context-view-order.test.ts.
     if (normalized.includes('FROM meta_views') && normalized.includes('sheet_id = ANY($1::text[])')) {
       const [sheetIds] = params as [string[]]
       const idSet = new Set(sheetIds)
@@ -284,7 +310,7 @@ describe('multitable template library', () => {
   // S1 (adversarial review of #6091, 2026-09-26): the returned `result.views` array is ALWAYS in
   // template order (it's built by push()-ing inside the template's own loop) — that was never the
   // bug. The bug only shows up on a SECOND look at the DB, through the exact `ORDER BY created_at,
-  // id` query the save-as-template extraction and the /context route both use: pre-fix, every view
+  // id` query the save-as-template extraction uses (/context keeps `created_at ASC`): pre-fix, every view
   // installMultitableTemplate creates in one call shares createView's DB-default `now()` (one
   // Postgres transaction => one instant), so that query's real sort key degenerates to `id` — a
   // sha1 hash with no relation to template order.
@@ -341,6 +367,12 @@ describe('multitable template library', () => {
     expect((readBack.rows as Array<{ name: string }>).map((row) => row.name)).toEqual([
       'View One', 'View Two', 'View Three',
     ])
+
+    // N-4: the stamps are the ONE transaction instant (DB clock) + 0, 1, 2 µs in template order —
+    // not app-clock values, and not all equal.
+    const byName = new Map(views.map((view) => [view.name, view.created_at]))
+    const firstStamp = byName.get('View One')!
+    expect(['View One', 'View Two', 'View Three'].map((name) => byName.get(name)! - firstStamp)).toEqual([0, 1, 2])
   })
 
   it('rejects unknown templates', async () => {

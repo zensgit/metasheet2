@@ -4639,9 +4639,9 @@ async function loadTemplateLibrary() {
   // auto-reload gate) — without this guard two concurrent calls would both flip
   // templateLibraryLoading and race on templates.value, and whichever network response lands LAST
   // wins regardless of which call was actually launched last. Skipping while one is already in
-  // flight is safe: a skipped call never had a chance to mark itself needed in the first place —
-  // whoever tried to trigger it already called markTemplateLibraryStale() beforehand (see
-  // onSaveSheetAsTemplate), so the need-to-refresh survives the skip.
+  // flight does not lose the refresh: whoever tried to trigger it already called
+  // markTemplateLibraryStale() beforehand (see onSaveSheetAsTemplate), and the in-flight load
+  // notices that mark when it settles and runs one follow-up load (N-1, the tail of this function).
   if (templateLibraryLoading.value) return
   // S3/N4: snapshot the dirty mark BEFORE awaiting the network call. If something calls
   // markTemplateLibraryStale() again WHILE this request is in flight, templateLibraryDirtyMark
@@ -4662,6 +4662,18 @@ async function loadTemplateLibrary() {
     templateLibraryError.value = e.message ?? wb('tpl.errorLoad', isZh.value)
   } finally {
     templateLibraryLoading.value = false
+  }
+  // N-1 (second adversarial review of #6091): a save that succeeded WHILE this request was in flight
+  // bumped the dirty mark past what this request captured, and its own reload call was skipped by
+  // the single-flight guard above — so this response predates the new template. With the panel
+  // still open, run exactly one follow-up load now instead of leaving the stale list up until the
+  // user closes and reopens the panel. Loop guard: the trigger is "the dirty mark moved DURING this
+  // request", never "the panel is still stale" — a follow-up that fails does not schedule another
+  // one (only a further save during it would), so a persistently failing endpoint is not hammered.
+  // Panel closed meanwhile: nothing is fetched behind the user's back; the stale mark makes the
+  // next openTemplateLibrary() reload.
+  if (templateLibraryDirtyMark > requestedMark && showTemplateLibrary.value) {
+    await loadTemplateLibrary()
   }
 }
 

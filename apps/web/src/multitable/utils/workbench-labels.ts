@@ -355,17 +355,22 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   // 的 extractTemplateSheets 只认 groupInfo.fieldId / groupInfo.fieldIds[0](嵌套分组的第 2/3 级
   // 一律丢),而且日历/看板会用到 dateFieldId/titleFieldId/groupByFieldId,旧文案一个字都没提。
   // 这里按实际抽取逻辑逐项列出,不再用一句空泛的"分组"糊弄过去。
+  // N-5(第二轮对抗评审):「不保存」也要列全——extractTemplateSheets 从 view.config 只读
+  // dateFieldId/titleFieldId,时间轴/甘特的起止字段、层级视图的 parentFieldId、列顺序/列宽
+  // 全部不进模板,旧文案只说了筛选和排序。
   'saveTpl.viewsLabel': { en: 'Views included', zh: '包含的视图' },
   'saveTpl.viewsNote': {
-    en: 'Views save name, type, grouping (first level only), hidden columns, and the field(s) used by calendar/kanban — filters and sort are not saved.',
-    zh: '视图保存名称、类型、分组（仅第一级）、隐藏列及日历/看板所用字段；筛选和排序不保存',
+    en: 'Views save name, type, grouping (first level only), hidden columns, and the calendar/kanban fields. Not saved: filters, sort, column order and widths, timeline/gantt start and end fields, hierarchy parent field.',
+    zh: '视图保存名称、类型、分组（仅第一级）、隐藏列及日历/看板所用字段；不保存筛选、排序、列顺序与列宽、时间轴/甘特的起止字段、层级的父级字段',
   },
   // N3(2026-09-26 对抗评审):旧文案"表头和视图相同的空表"过度承诺——link/lookup/rollup/formula/
   // button 这些字段会被降级成文本列(DOWNGRADED_FIELD_TYPES,custom-template-store.ts),装出来的
   // 表头**不是**逐字一样。用"关联/公式等列会变成文本列"说清楚这一半真相。
+  // N-5(第二轮对抗评审):英文版原来漏了 button(以及模板不支持的其它类型,同样降级为文本),
+  // 中英两版都点名按钮。
   'saveTpl.installNote': {
-    en: 'Using this template creates a new base with an empty table. Link/lookup/rollup/formula columns become plain text columns.',
-    zh: '使用模板会新建工作区，其中是空表；关联/公式等列会变成文本列',
+    en: 'Using this template creates a new base with an empty table. Link, lookup, rollup, formula, button and other unsupported columns become plain text columns.',
+    zh: '使用模板会新建工作区，其中是空表；关联/公式/按钮等列会变成文本列',
   },
   'saveTpl.shareLabel': { en: 'Share with this tenant', zh: '共享给本租户' },
   'saveTpl.shareHint': {

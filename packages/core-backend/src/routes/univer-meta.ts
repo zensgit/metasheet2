@@ -8353,9 +8353,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // S1(2026-09-26 对抗评审):id 兜底不是空话——installMultitableTemplate 在**一个事务**里
       // 建完一张模板的全部视图,事务内 now() 是同一个时刻,所有视图的 created_at 若都交给 DB
       // 默认值会打成一片,这时真正生效的排序键就是 id(sha1,和模板顺序无关)。为此
-      // template-library.ts 给每个视图显式传一个按模板顺序递增的 created_at(provisioning.ts
-      // createView 新增可选 createdAt 参数,其它调用方不传等于沿用原来的 DB 默认值),
-      // 装回去的视图顺序才会等于存下来的模板顺序,这条 ORDER BY 重新读出来时才对得上。
+      // template-library.ts 给每个视图传一个按模板顺序递增的微秒偏移,created_at = 数据库
+      // now() + 偏移(provisioning.ts createView 的可选 createdAtOffsetMicros;其它调用方不传,
+      // 偏移为 0,等于原来的 DB 默认值 now()),装回去的视图顺序才会等于存下来的模板顺序,
+      // 这条 ORDER BY 重新读出来时才对得上。
+      // 已知残留(第二轮对抗评审 S-1,不做回填迁移):#6091 之前从模板装出来的 Base,视图
+      // created_at 全部打平,这里会按 id 排;/context(工作台标签顺序)刻意保持 created_at ASC
+      // 不加 id,所以这类老 Base 存模板时的视图顺序可能与用户看到的标签顺序不同。
       const viewResult = await pool.query(
         'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[]) ORDER BY created_at, id',
         [sheetIds],
@@ -8975,14 +8979,20 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const viewsResult = effectiveSheetId
         ? await pool.query(
-          // S1 (adversarial review of #6091): same ORDER BY as the save-as-template query
-          // (~:8314) — the dialog's "views included" list reads views through THIS query, so it
-          // must sort the same way the save path does, or the dialog order and the saved order
-          // can disagree even though both are individually "stable".
+          // S-1 (second adversarial review of #6091): `ORDER BY created_at ASC` EXACTLY, with NO
+          // `, id` tie-breaker. Bases installed from a template before #6091 have every view on ONE
+          // timestamp (installMultitableTemplate ran inside one transaction on the DB default
+          // now()); an `id` tie-break would make the sha1 view id (stableChildId) their effective
+          // sort key and reshuffle the tabs / flip the default view (views[0]) of bases that already
+          // exist. Kept byte-identical to the pre-#6091 query and ordered exactly like GET /views
+          // (the two `... ORDER BY created_at ASC LIMIT 200` reads below); both are pinned by
+          // tests/unit/multitable-context-view-order.test.ts. Installs since #6091 stamp strictly
+          // increasing created_at per view (template-library.ts), so they have no ties at all.
+          // The save-as-template read (POST /templates) still breaks ties by id — see its note.
           `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config
            FROM meta_views
            WHERE sheet_id = $1
-           ORDER BY created_at, id`,
+           ORDER BY created_at ASC`,
           [effectiveSheetId],
         )
         : { rows: [] }
