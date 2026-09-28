@@ -417,6 +417,19 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     }
   })
 
+  test('3 token: the type discriminator is checked on its own — a validly signed token carrying EVERY claim of a real preview, under another type, is 401', async () => {
+    // The foreign-type tokens above also lack claims, so the missing-claim check alone would refuse them. This one
+    // lacks nothing: only its `type` is wrong (or absent).
+    for (const type of ['config-restore-preview', 'field-retype-convert-execute', 'FIELD-RETYPE-CONVERT-PREVIEW', '', undefined]) {
+      const { res } = await expectRefused(world(), (token) => {
+        const { iat: _iat, exp: _exp, type: _type, ...claims } = jwt.decode(token) as Record<string, unknown>
+        const payload = type === undefined ? claims : { ...claims, type }
+        return execute({ previewToken: jwt.sign(payload, SECRET, { algorithm: 'HS256', expiresIn: '10m' }), confirm: CONFIRM })
+      }, { status: 401, code: 'PREVIEW_IDENTITY_INVALID', transactions: 0 })
+      expect([String(type), res.body.error.details]).toEqual([String(type), undefined])
+    }
+  })
+
   test('3 token expired ⇒ 401 PREVIEW_IDENTITY_INVALID with details.reason "expired", no transaction', async () => {
     await expectRefused(world(), (token) => {
       const { iat: _iat, exp: _exp, ...claims } = jwt.decode(token) as Record<string, unknown>

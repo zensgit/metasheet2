@@ -30,8 +30,8 @@ import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { db } from '../../src/db/db'
-import { up as relaxTombstoneReason } from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
-import { up as createConversionsTable } from '../../src/db/migrations/zzzz20260928150100_create_meta_field_retype_conversions'
+import { down as relaxTombstoneReasonDown, up as relaxTombstoneReason } from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
+import { down as createConversionsTableDown, up as createConversionsTable } from '../../src/db/migrations/zzzz20260928150100_create_meta_field_retype_conversions'
 import { up as backfillApprovalProjectionKind } from '../../src/db/migrations/zzzz20260928150200_backfill_approval_projection_system_kind'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
@@ -268,6 +268,28 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       } finally {
         await q('DELETE FROM meta_field_value_tombstones WHERE sheet_id = $1', [sheetId]).catch(() => {})
       }
+    })
+
+    test('migration: both down() refuse while conversion data exists — the constraint and the job table are left exactly as they were', async () => {
+      const column = await seedColumn([])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [column.rec(1), column.sheetId, JSON.stringify({ [column.fieldId]: 'VAL-ALPHA' })])
+      const id = await convert(column, 'multiSelect')
+      const constraint = async () => (await q(
+        `SELECT conname, convalidated, pg_get_constraintdef(oid, true) AS def FROM pg_constraint
+          WHERE conrelid = 'meta_field_value_tombstones'::regclass AND conname = 'meta_field_value_tombstones_reason_check'`,
+      )).rows
+      const before = { constraint: await constraint(), column: await snapshot(column) }
+      expect(before.constraint).toHaveLength(1)
+      expect(String((before.constraint[0] as { def: string }).def)).toContain('retype_convert')
+
+      // a pre-image of this conversion exists ⇒ narrowing the CHECK is refused; a job row exists ⇒ dropping the table is refused
+      await expect(db.transaction().execute((trx) => relaxTombstoneReasonDown(trx as never))).rejects.toThrow(/retype_convert pre-images/)
+      await expect(db.transaction().execute((trx) => createConversionsTableDown(trx as never))).rejects.toThrow(/not empty/)
+
+      expect({ constraint: await constraint(), column: await snapshot(column) }).toEqual(before)
+      expect((await q(`SELECT to_regclass('meta_field_retype_conversions') IS NOT NULL AS present`)).rows).toEqual([{ present: true }])
+      // and the conversion is still undoable
+      expect((await undo(column.fieldId, { convertRevisionId: id, confirm: UNDO_CONFIRM })).status).toBe(200)
     })
 
     test('migration: the system_kind backfill is evidence-bound — only a NULL-kind sheet in the approval base WITH projection rows', async () => {
