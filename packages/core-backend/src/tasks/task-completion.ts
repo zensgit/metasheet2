@@ -73,10 +73,11 @@ export function applyComplete(input: {
   now: Date
   /**
    * Whether the task was ALREADY done before this call. Required so every caller has to decide.
-   * Only consulted for zero-assignee tasks, whose done state lives on the task row rather than on
-   * any assignee row (so it cannot be derived from `rows`); ignored when `rows` is non-empty.
-   * `true` makes a repeat creator-direct complete a no-op with no event. MUST come from the task
-   * row read AFTER the structure lock is held: a stale `true` would silently drop a real
+   * The task row is the source of truth for done-ness (task-c A6): a done task can legitimately
+   * hold null rows (an assignee added to a done `any` task, task-c A1, then possibly switched to
+   * `all`, which keeps done per §5-4), so it cannot always be derived from `rows`. `true` makes a
+   * repeat complete a no-op with no event, in every mode. MUST come from
+   * the task row read AFTER the structure lock is held: a stale `true` would silently drop a real
    * open-to-done transition's event.
    */
   wasDone: boolean
@@ -99,6 +100,12 @@ export function applyComplete(input: {
   }
 
   if (mode === 'any') {
+    // task-c A6: the task row is the source of truth for an `any` task's done state. A done task
+    // may hold null rows (an assignee added after it was done, A1), so re-completing it must be a
+    // no-op instead of stamping those rows and emitting a second `completed_by_any`.
+    if (wasDone === true) {
+      return { rows: rows.map((row) => ({ ...row })), done: true, via: 'formula', events: [] }
+    }
     // An already-done any-mode task (every row stamped) is a no-op: no rows change, no event.
     const alreadyDone = computeTaskDone({ mode: 'all', assigneeRows: rows })
     const newRows = rows.map((row) => (isCompleted(row) ? { ...row } : { ...row, completedAt: now }))
@@ -110,6 +117,11 @@ export function applyComplete(input: {
     }
   }
 
+  // task-c A6: a task that is already done stays a no-op in `all` mode too, even if some rows are
+  // null (carried over from `any`), so completing cannot re-announce `completed`.
+  if (wasDone === true) {
+    return { rows: rows.map((row) => ({ ...row })), done: true, via: 'formula', events: [] }
+  }
   // mode === 'all': only the actor's own row is stamped.
   // NOTE(task-b, design-gap — flag for owner ratification, alongside lock §13-9): `changed` tracks
   // whether this call actually stamped a row. Without it, an actor with NO row at all (e.g. the
@@ -162,8 +174,9 @@ export function applyReopen(input: {
   createdBy: string
   /**
    * Whether the task was done before this call. Required; same rules as `applyComplete`'s
-   * `wasDone` (zero-assignee only, ignored when `rows` is non-empty, read under the structure
-   * lock). `false` makes reopening an already-open zero-assignee task a no-op with no event.
+   * `wasDone` (the task row's state, read under the structure lock). `false` makes reopening an
+   * already-open zero-assignee task a no-op with no event; `true` lets a done task reopen with
+   * scope `all` (or in `any` mode) even when no row is stamped.
    */
   wasDone: boolean
 }): ApplyReopenResult {
@@ -180,9 +193,11 @@ export function applyReopen(input: {
   }
 
   if (mode === 'any') {
-    const anyRowDone = rows.some(isCompleted)
+    // task-c A6: a done `any` task reopens from the task row's state, not only from stamped rows,
+    // so a done task whose rows are all null (assignee added after it was done, A1) is not stuck.
+    const wasTaskDone = wasDone === true || rows.some(isCompleted)
     const newRows = rows.map((row) => ({ ...row, completedAt: null }))
-    return { rows: newRows, events: anyRowDone ? [{ type: 'reopened', userId: actorId }] : [] }
+    return { rows: newRows, events: wasTaskDone ? [{ type: 'reopened', userId: actorId }] : [] }
   }
 
   // mode === 'all'
@@ -199,7 +214,8 @@ export function applyReopen(input: {
       if (isCompleted(row)) changed = true
       return { ...row, completedAt: null }
     })
-    return { rows: newRows, events: changed ? [{ type: 'reopened', userId: actorId }] : [] }
+    // task-c A6: a done task whose rows are all null (carried over from `any`) still reopens.
+    return { rows: newRows, events: changed || wasDone === true ? [{ type: 'reopened', userId: actorId }] : [] }
   }
   let changedSelf = false
   const newRows = rows.map((row) => {
@@ -209,7 +225,17 @@ export function applyReopen(input: {
     }
     return { ...row }
   })
-  return { rows: newRows, events: changedSelf ? [{ type: 'self_reopened', userId: actorId }] : [] }
+  if (changedSelf) {
+    return { rows: newRows, events: [{ type: 'self_reopened', userId: actorId }] }
+  }
+  // task-c A7: a done `all` task whose rows are all null (carried over from `any`) is no longer
+  // done once recomputed, so the service flips it to open. That flip must be recorded even though
+  // the actor's own row did not change; `reopened` names what happened to the task.
+  // ASSUMPTION(task-c): A7 event name `reopened` (not `self_reopened`) for this edge; owner to confirm.
+  if (wasDone === true && !computeTaskDone({ mode, assigneeRows: newRows })) {
+    return { rows: newRows, events: [{ type: 'reopened', userId: actorId }] }
+  }
+  return { rows: newRows, events: [] }
 }
 
 /**
