@@ -96,10 +96,16 @@ psql "$DATABASE_URL" -v APPLY=1 -f 02-remediate.sql > 02-apply.log 2>&1
 | --- | --- | --- |
 | 守卫 | 表 / 外键必须存在，否则 `REMEDIATE_ABORT reason=missing-…`、零写入 | —— |
 | STEP0 | 快照（`CREATE TEMP TABLE s073_dangling ON COMMIT DROP`） | `dangling` 应等于 01 的 `dangling_active`；`inflight_runs` 等于 01 的 `inflight_runs_on_dangling` |
-| STEP1 | 这些行 `status = 'RETIRED'`（UPDATE 上重述整条悬空谓词） | `rows` == STEP0 的 `dangling` |
+| STEP1 | 这些行、且**只有**这些行 `status = 'RETIRED'`（UPDATE 上重述整条悬空谓词） | `rows` == STEP0 的 `dangling` |
 | STEP2 | 从**活表**重数悬空 | `0` |
 | STEP3 | `APPLY=1` 且 STEP2 ≠ 0 → `REMEDIATE_ABORT reason=still-dangling`，整单回滚 | 只在真写时执行 |
 | 末尾 | `REMEDIATE_RESULT … mode=apply\|dry-run dangling_before=N retired=N remaining=0` + `REMEDIATE_TX=committed\|rolled-back` | 两行都要看 |
+
+**只退役悬空行**。活绑定（系统行存在——不论它属于绑定自己的租户还是别的租户）一条都不动：
+没有悬空时 `APPLY=1` 是一次空提交，`REMEDIATE_RESULT … dangling_before=0 retired=0 remaining=0`、
+`STEP1_RETIRED` 为 0、绑定表逐行不变。073 全表至多一条 ACTIVE，它就是客户唯一的活绑定——多退役
+一条，备料 sealed-export 路径即停。钉子：静态层把快照语句与 STEP1 整句钉死（含「系统不存在」子查询的
+体），执行层 S12 用两个各含一条活 ACTIVE 的夹具跑 `APPLY=1`（§6）。
 
 为什么是**退役**：
 
@@ -205,10 +211,17 @@ DATABASE_URL=postgresql://<user>@<host>:<port>/<throwaway-db> \
 
 `verify/run-verify.mjs` 用**真实** SQL 迁移 057 + 068…075 建 `s073fx_*` 临时 schema（不设 S6-A 角色
 GUC，073/074/075 以「潜伏」形态安装），在迁移前植入合成的 `fx-` 行，再套上 `verify/migration-up.sql`
-（与迁移 `up()` 逐句一致，静态层有漂移检查且证明检查会咬）。跑 S1…S11 十一个场景与 PM1…PM7
-七个变异；变异全在内存里做（改过的 SQL 走 psql 的 stdin，cwd 设成包目录让 `\ir` 仍能解析），不落盘。
-S11 扫描本包文件在 S1…S10 打印过的全部输出，断言其中不含任何 `fx-` 植入值；PM7（01 多打印一列
+（与迁移 `up()` 逐句一致，静态层有漂移检查且证明检查会咬）。跑 S1…S12 十二个场景与 PM1…PM9
+九个变异；变异全在内存里做（改过的 SQL 走 psql 的 stdin，cwd 设成包目录让 `\ir` 仍能解析），不落盘。
+S11 扫描本包文件在 S1…S10 与 S12 打印过的全部输出，断言其中不含任何 `fx-` 植入值；PM7（01 多打印一列
 binding id）证明这条扫描会红、不是空转。
+
+S12 是「02 **只**退役悬空行」的执行证明：073 的单客户索引全表只允许一条 ACTIVE，所以用两个夹具，
+各放**一条** ACTIVE 活绑定——(a) 系统在绑定自己的租户下，(b) 系统存在但属于另一个租户——各跑一次
+`02 -v APPLY=1`，断言：绑定仍 ACTIVE、整表行摘要不变（连 `updated_at` 都没动）、`STEP0` 快照为空、
+`STEP1_RETIRED` 为 0、`REMEDIATE_RESULT … dangling_before=0 retired=0 remaining=0`、已提交、01 仍数到
+一条 ACTIVE。主夹具里唯一的 ACTIVE 恰好就是悬空那条，S10 的租户错配夹具不跑 02——所以 S1…S11 对
+「多退役一条活绑定」的 02 是瞎的，PM8 / PM9 就是这种 02。
 
 | 变异 | 改动 | 红的断言 |
 | --- | --- | --- |
@@ -219,3 +232,7 @@ binding id）证明这条扫描会红、不是空转。
 | PM5 | 03 的 lock_timeout 置 0 | S8（等锁、无 RESULT 行） |
 | PM6 | **迁移**的生成列去掉 status 过滤 | S1（`generated_drift`=2）；02 之后 03 仍 23503——RETIRED 历史会挡 VALIDATE、让系统删不掉 |
 | PM7 | 01 多打印 binding id | S11 values-free 扫描 |
+| PM8 | 02 的 STEP1 退役**全部** ACTIVE（不连快照、不看系统是否存在） | S12 两个夹具都红，活绑定被提交成 RETIRED；S1…S11 全绿 |
+| PM9 | 02 的「系统不存在」子查询体被削弱，快照与 STEP1 两处一起改：`tenant-scoped`（按绑定租户判存在）/ `always-absent`（`WHERE false`） | `tenant-scoped`：S12(b) 红、S12(a) 绿；`always-absent`：S12 两个都红。STEP2/3 仍用正确谓词，守卫放行、错退役**会提交**。只改一处是等价变异（另一处照样过滤） |
+
+静态层另有一条「钉子会咬」：把 PM8 与 PM9 两种变体的 02 源码喂给快照 / STEP1 整句钉子，三份都被拒。

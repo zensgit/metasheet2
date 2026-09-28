@@ -55,9 +55,13 @@
 //               guarantee stays scoped to the mint path; moving the existence check in front of the
 //               reuse lookup is an externally visible behaviour change that is the owner's to make,
 //               and whoever makes it must retire this arm with the design doc's entry.
-//   R-073       the REGISTERED RESIDUAL: sealed-export 073 provisioning (frozen S6-A module, runs as
-//               a role with no privilege on integration_external_systems) does NOT participate; the
-//               dangle is asserted so the day it is fixed this registration must be retired with it
+//   R-073       APPLICATION LAYER ONLY: sealed-export 073 provisioning (frozen S6-A module, runs as a
+//               role with no privilege on integration_external_systems) takes no APPLICATION lock,
+//               so on this in-memory db (which models no foreign key) the delete-first interleaving
+//               dangles. In PostgreSQL the residual is closed at the DATABASE layer by migration
+//               zzzz20260926140000 (generated column + NOT VALID FK; proof: core-backend
+//               sealed-export-binding-live-external-system-fk.db.test.ts B-8/B-9/B-12/B-13). The
+//               asserts stay so a change to the frozen writer cannot pass unnoticed
 //   M-D1        mutation: delete side without FOR UPDATE            -> L-01's interleaving dangles
 //   M-W079      mutation: 079 writer with an unlocked read         -> dangles
 //   M-W062      mutation: 062 writer with an unlocked read         -> dangles
@@ -1208,18 +1212,25 @@ async function testReadSourceReusePathRegistered() {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// R-073 — the REGISTERED RESIDUAL, asserted so it cannot silently drift.
+// R-073 — APPLICATION LAYER: the frozen 073 writer takes no application lock (the database layer
+// closes it; this in-memory db cannot show that).
 //
 // `sealed-export-lifecycle-provisioning.cjs` is a FROZEN S6-A module (pinned in
 // s6a-package-provenance-pins.json, never re-pinned since #4694) and its writer runs as the
 // provisioning role, which migrations 073/074/075 grant NOTHING on integration_external_systems —
-// and PostgreSQL requires UPDATE privilege on some column for any locking clause. Making it
-// participate needs either a grant migration + frozen re-pin, or a NOT VALID foreign key on a
-// generated live-pointer column (the #5784 `live_id` shape) — both DDL, both owner-gated. Until then
-// the 073 writer takes no lock and the delete-first interleaving DANGLES. This test asserts that
-// dangle: fixing 073 must retire this arm together with the design doc's residual entry.
+// and PostgreSQL requires UPDATE privilege on some column for any locking clause. The owner chose
+// the database-layer fix (option 1): migration zzzz20260926140000 gives 073 a STORED generated
+// column `live_external_system_id` (the id while ACTIVE, NULL once RETIRED) and a NOT VALID foreign
+// key from it to integration_external_systems(id). In PostgreSQL the binding INSERT's RI check then
+// takes KEY SHARE on the system row, which the delete's FOR UPDATE waits for (write-first → 409) and
+// which waits for it (delete-first → the writer is refused); real-PG proof in core-backend
+// tests/integration/sealed-export-binding-live-external-system-fk.db.test.ts B-8/B-9/B-12/B-13.
+// This in-memory db models no foreign key, so here the writer — which still takes no APPLICATION
+// lock, by design — lands and the delete-first interleaving dangles. The asserts are kept as they
+// were: they pin the frozen writer's application-layer behaviour, and they go red the day it starts
+// taking an application lock (a change to a pinned S6-A module, which needs an S6-A re-pin).
 // ---------------------------------------------------------------------------------------------------
-async function testSealedExportResidualTripwire() {
+async function testSealedExportWriterTakesNoAppLock() {
   const db = createLockingDb()
   db.seed(EXTERNAL_SYSTEMS_TABLE, [systemRow()])
   const registry = newRegistry(db)
@@ -1228,13 +1239,13 @@ async function testSealedExportResidualTripwire() {
   const writer = () => provisioning.provisionInitialStockPreparationBinding(sealedExportProvisionInput(material.publicKey))
   const { deleted, written, writerBlocked } = await deleteFirst({ db, registry, writer })
 
-  assert.equal(writerBlocked, false, 'R-073: the frozen 073 writer takes NO lock on the system row (residual, not a regression)')
-  assert.equal(written.error, null, 'R-073: provisioning lands')
+  assert.equal(writerBlocked, false, 'R-073: the frozen 073 writer takes NO application lock on the system row (by design; the database layer closes it)')
+  assert.equal(written.error, null, 'R-073: provisioning lands (this in-memory db models no foreign key)')
   assert.equal(deleted.error, null, 'R-073: and the delete that counted zero lands too')
   const dangling = db.rows(SEALED_EXPORT_BINDING_TABLE).filter((row) => row.external_system_id === 'sys_1' && row.status === 'ACTIVE')
-  assert.equal(dangling.length, 1, 'R-073: one ACTIVE sealed-export binding now points at a deleted system — the registered residual')
+  assert.equal(dangling.length, 1, 'R-073: one ACTIVE sealed-export binding now points at a deleted system (application layer; no FK in this in-memory db)')
   assert.equal(db.rows(EXTERNAL_SYSTEMS_TABLE).length, 0)
-  console.log('  R-073 sealed-export provisioning (frozen S6-A, provisioning role) still dangles — registered residual, asserted')
+  console.log('  R-073 sealed-export provisioning (frozen S6-A, provisioning role) takes no application lock and dangles on this FK-less in-memory db — closed in PostgreSQL by migration zzzz20260926140000')
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1791,7 +1802,7 @@ async function main() {
   await testFakeAbortsTransactionAfterAFailedStatement()
   await testFailClosedGuards()
   await testReadSourceReusePathRegistered()
-  await testSealedExportResidualTripwire()
+  await testSealedExportWriterTakesNoAppLock()
   await testMutationDeleteSideWithoutForUpdate()
   await testMutationStockPrepWriterUnlocked()
   await testMutationReadSourceWriterUnlocked()
@@ -1814,7 +1825,7 @@ async function main() {
   await testIsolationFailClosedGuards()
   await testApproveBetweenReadSourceCounts()
   completed = true
-  console.log('✓ external-systems delete × bind lock protocol: 079/062/pipelines/templates participate at a PINNED read committed; scope + fail-closed pinned; 062 counted draft-then-approved one at a time; 062 reuse path + 073 residual registered; 17 mutants flip')
+  console.log('✓ external-systems delete × bind lock protocol: 079/062/pipelines/templates participate at a PINNED read committed; scope + fail-closed pinned; 062 counted draft-then-approved one at a time; 062 reuse path registered; 073 writer takes no app lock (FK-closed in PG); 17 mutants flip')
 }
 
 // COMPLETION MARKER (see the file header): exit 0 only if main() ran to its last line.

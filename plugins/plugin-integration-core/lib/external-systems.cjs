@@ -50,12 +50,18 @@ const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
 //
 // `countPipelineReferences` below counts `integration_pipelines` and nothing else, so a system that
 // nothing pipelines at but that a stock-prep SOURCE BINDING (079), a read-source CONFIG (062) or a
-// sealed-export stock-prep BINDING (073) points at was deletable. All three store the external-system
+// sealed-export stock-prep BINDING (073) points at was deletable. 079 and 062 store the external-system
 // id as a plain TEXT reference and DELIBERATELY carry no foreign key (079's own header says so at
 // `migrations/079_create_integration_stock_prep_source_binding.sql:16-23`), so the database will not
 // refuse the delete either — the row just goes dangling, and the read path only discovers it at the
-// next request (`TABLE_ACTION_SOURCE_INVALID` for 079, `SEALED_EXPORT_BINDING_UNQUALIFIED` for 073 —
-// `lib/sealed-export/stock-preparation-runtime-store.cjs:113-125`).
+// next request (`TABLE_ACTION_SOURCE_INVALID` for 079). 073 was the same until core-backend migration
+// zzzz20260926140000: an ACTIVE 073 binding now carries its id in the STORED generated column
+// `live_external_system_id` (NULL once RETIRED), and the NOT VALID foreign key
+// `fk_sealed_export_stock_prep_binding_live_external_system` (ON DELETE RESTRICT) makes the database
+// refuse, with SQLSTATE 23503, a delete of a system an ACTIVE binding names — whatever this guard
+// counted. A schema that has not run that migration still dangles the 073 way
+// (`SEALED_EXPORT_BINDING_UNQUALIFIED` — `lib/sealed-export/stock-preparation-runtime-store.cjs:113-125`),
+// so the count below stays: it is what turns the common, same-tenant case into the typed 409.
 //
 // That dangle is also what opens the SECOND-ORDER hole on the data source underneath: the external
 // system is what `DataSourceManager.countExternalSystemReferences` counts when a data source is
@@ -77,9 +83,13 @@ const CONNECTION_NOT_LIVE_CODE = 'EXTERNAL_SYSTEM_CONNECTION_NOT_LIVE'
 // foreign key refused it. `deleteExternalSystem` now takes `SELECT ... FOR UPDATE` on the system row
 // as the FIRST statement of ONE transaction and counts under that lock; every pointer-writing path
 // takes `FOR KEY SHARE` on the same row inside ITS transaction before writing
-// (`lib/external-system-pointer-lock.cjs` is the writer half and holds the protocol's full account;
-// 073's writer is the registered exception, see the design doc). A guard that counts without the
-// lock is the hole, not the fix.
+// (`lib/external-system-pointer-lock.cjs` is the writer half and holds the protocol's full account).
+// 073's writer — the frozen S6-A provisioning module, whose role has no privilege on this table —
+// takes no application lock; it participates through the foreign key above instead (its binding
+// INSERT's RI check takes the same KEY SHARE, so the FOR UPDATE below waits for it and the count
+// then sees it). That holds once migration zzzz20260926140000 has run; before it, 073 is the
+// residual the design doc registers (docs/development/external-system-delete-bind-lock-protocol-
+// design-20260925.md §5). A guard that counts without the lock is the hole, not the fix.
 const STOCK_PREP_SOURCE_BINDING_TABLE = 'integration_stock_prep_source_binding'
 const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
 const SEALED_EXPORT_STOCK_PREP_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'

@@ -12,13 +12,20 @@
 //   * 02's apply gate is the exact literal '1', its default is ROLLBACK, it
 //     only ever sets status = 'RETIRED', requires the FK, and aborts APPLY=1
 //     unless the live table is left with zero dangling rows;
+//   * WHAT 02 retires is pinned to the letter: the snapshot statement and the
+//     STEP 1 UPDATE are pinned whole, INCLUDING the body of the "system is
+//     absent" sub-select, and every such sub-select in 02 has that exact body
+//     — and the pin is shown to reject the PM8 / PM9 mutant sources;
 //   * 03 classifies 23503 and 55P03 by name, owns its lock_timeout, and does
 //     not swallow query_canceled or use a catch-all handler;
 //   * verify/migration-up.sql still reproduces every sql`…` statement of the
 //     migration's up() — and that drift check bites.
 //
-// LAYER 2 (DATABASE_URL-gated): run-verify.mjs — scenarios S1..S11 and mutants
-//   PM1..PM7 on synthetic schemas built from the real SQL migrations. Skipped
+// LAYER 2 (DATABASE_URL-gated): run-verify.mjs — scenarios S1..S12 and mutants
+//   PM1..PM9 on synthetic schemas built from the real SQL migrations. S12 is
+//   the "retires DANGLING bindings only" proof (a live same-tenant binding and a
+//   live tenant-mismatched binding both stay ACTIVE through 02 APPLY=1); PM8 /
+//   PM9 are the mutants that retire a live binding and pass S1..S11. Skipped
 //   LOUDLY without DATABASE_URL; with METASHEET_REAL_DB_TEST_STEP=1 a missing
 //   DATABASE_URL or `psql` FAILS instead of skipping (same discipline as the
 //   live-id-fk-validate-20260920 pack).
@@ -36,7 +43,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { psqlAvailable, verifyAll } from './run-verify.mjs'
+import {
+  PM9_VARIANTS,
+  mutate02RetireAllActive,
+  mutate02WeakenSystemAbsent,
+  psqlAvailable,
+  verifyAll,
+} from './run-verify.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PACK = path.resolve(HERE, '..')
@@ -158,6 +171,47 @@ test('02 gates writing on the exact literal 1 and rolls back by default', () => 
   assert.equal((body.match(/^BEGIN;$/gm) || []).length, 1, 'the whole remediation must be one explicit transaction')
 })
 
+// WHAT 02 RETIRES, pinned to the letter (whitespace-normalised, comments stripped). The single
+// ACTIVE row 073's single-customer index allows is the customer's only live binding, so a 02 that
+// retires one row too many stops the stock-prep sealed-export path. The dynamic proof is
+// run-verify.mjs S12 (two live-binding fixtures) with mutants PM8 / PM9; this is the static half,
+// and it pins the sub-select BODY, not only the `AND NOT EXISTS` that precedes it.
+const SYSTEM_ABSENT = 'NOT EXISTS ( SELECT 1 FROM integration_external_systems s WHERE s.id = b.external_system_id )'
+const PINNED_SNAPSHOT =
+  'CREATE TEMP TABLE s073_dangling ON COMMIT DROP AS SELECT b.binding_id AS key_id, b.external_system_id AS target_id ' +
+  `FROM integration_sealed_export_stock_prep_bindings b WHERE b.status = 'ACTIVE' AND ${SYSTEM_ABSENT};`
+const PINNED_STEP1 =
+  "WITH upd AS ( UPDATE integration_sealed_export_stock_prep_bindings b SET status = 'RETIRED' FROM s073_dangling d " +
+  `WHERE b.binding_id = d.key_id AND b.status = 'ACTIVE' AND b.external_system_id = d.target_id AND ${SYSTEM_ABSENT} ` +
+  "RETURNING b.binding_id ) SELECT 'STEP1_RETIRED' AS step, count(*)::int AS rows FROM upd;"
+const FK_PRESENCE_GUARD = 'NOT EXISTS ( SELECT 1 FROM pg_constraint WHERE conname = '
+
+function assertRetireTargetPinned(src) {
+  const flat = norm(code(src))
+  for (const [label, anchor, pinned] of [
+    ['snapshot', 'CREATE TEMP TABLE s073_dangling', PINNED_SNAPSHOT],
+    ['STEP 1 UPDATE', 'WITH upd AS (', PINNED_STEP1],
+  ]) {
+    assert.equal(flat.split(anchor).length - 1, 1, `02 must hold exactly one ${label}`)
+    const at = flat.indexOf(anchor)
+    assert.equal(flat.slice(at, at + pinned.length), pinned, `02 ${label} must be exactly the pinned statement`)
+  }
+  let guards = 0
+  let systemAbsent = 0
+  for (const m of flat.matchAll(/NOT EXISTS \(/g)) {
+    const rest = flat.slice(m.index)
+    if (rest.startsWith(FK_PRESENCE_GUARD)) {
+      guards += 1
+      continue
+    }
+    assert.ok(rest.startsWith(SYSTEM_ABSENT), `02 every system-absent sub-select must read exactly: ${SYSTEM_ABSENT}`)
+    systemAbsent += 1
+  }
+  assert.equal(guards, 1, '02 must hold exactly one FK-presence guard')
+  // snapshot, STEP 1 re-check, STEP 2 re-count, STEP 3 guard, REMEDIATE_RESULT remaining=
+  assert.equal(systemAbsent, 5, '02 must spell the system-absent predicate exactly five times')
+}
+
 test('02 only ever retires: one UPDATE, SET status = RETIRED, re-stating the dangling predicate; no DELETE', () => {
   const body = code(pack('02-remediate.sql'))
   const updates = body.match(/\bUPDATE\s+integration_\w+/g) || []
@@ -166,6 +220,27 @@ test('02 only ever retires: one UPDATE, SET status = RETIRED, re-stating the dan
   assert.ok(!/\bDELETE\s+FROM\b/i.test(body), '02 must not delete rows')
   assert.ok(!/SET\s+(external_system_id|binding_id|tenant_id|expires_at)\b/.test(body), '02 must not touch any other column')
   assert.match(body, /CREATE TEMP TABLE s073_dangling ON COMMIT DROP/)
+})
+
+test('02 retires exactly the dangling rows: snapshot and STEP 1 pinned whole, sub-select body included', () => {
+  assertRetireTargetPinned(pack('02-remediate.sql'))
+})
+
+test('the retire-target pin bites: the PM8 and PM9 sources are rejected (in memory)', () => {
+  const original = pack('02-remediate.sql')
+  const mutants = [
+    ['PM8 retire every ACTIVE row', mutate02RetireAllActive(original)],
+    ...Object.keys(PM9_VARIANTS).map(variant => [`PM9 ${variant}`, mutate02WeakenSystemAbsent(original, variant)]),
+  ]
+  assert.equal(mutants.length, 3)
+  for (const [name, doctored] of mutants) {
+    assert.notEqual(doctored, original, `${name}: mutation anchor not found`)
+    assert.throws(
+      () => assertRetireTargetPinned(doctored),
+      /02 (snapshot|STEP 1 UPDATE) must be exactly the pinned statement|02 every system-absent sub-select must read exactly/,
+      `${name} must be rejected by the static pin`,
+    )
+  }
 })
 
 test('02 requires the FK and aborts APPLY=1 unless zero dangling rows remain', () => {
@@ -247,7 +322,7 @@ test('the drift check bites: a fixture without NOT VALID, or without the status 
 
 const REQUIRE_DB = process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 
-test('synthetic-PostgreSQL verification (scenarios S1..S11 + mutants PM1..PM7)', async t => {
+test('synthetic-PostgreSQL verification (scenarios S1..S12 + mutants PM1..PM9)', async t => {
   if (!process.env.DATABASE_URL) {
     if (REQUIRE_DB) assert.fail('METASHEET_REAL_DB_TEST_STEP=1 but DATABASE_URL is unset')
     t.skip('SKIPPED LOUDLY: set DATABASE_URL to a THROWAWAY database to run layer 2')
@@ -269,4 +344,18 @@ test('synthetic-PostgreSQL verification (scenarios S1..S11 + mutants PM1..PM7)',
   assert.equal(report.PM4.red, true)
   assert.equal(report.PM6.drift, 2, 'PM6 must show generation drift on both RETIRED rows')
   assert.equal(report.PM7.red, true, 'PM7 must turn the values-free scan red')
+  // S12: remediation retires DANGLING bindings only — a live binding (same tenant, and tenant
+  // mismatched) is still ACTIVE after 02 APPLY=1.
+  assert.deepEqual(report.S12, {
+    sameTenant: { status: 'ACTIVE', activeTotal: 1 },
+    tenantMismatch: { status: 'ACTIVE', activeTotal: 1 },
+  })
+  assert.deepEqual(report.PM8, {
+    sameTenant: { red: true, status: 'RETIRED' },
+    tenantMismatch: { red: true, status: 'RETIRED' },
+  }, 'PM8 (retire every ACTIVE row) must turn S12 red on both fixtures')
+  assert.deepEqual(report.PM9, {
+    tenantScoped: { sameTenant: { red: false, status: 'ACTIVE' }, tenantMismatch: { red: true, status: 'RETIRED' } },
+    alwaysAbsent: { sameTenant: { red: true, status: 'RETIRED' }, tenantMismatch: { red: true, status: 'RETIRED' } },
+  }, 'PM9 (weakened sub-select body) must turn S12 red wherever it retires a live binding')
 })

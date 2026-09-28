@@ -1,0 +1,129 @@
+name: Sealed-export 073 binding live external-system FK (real Postgres)
+
+# EVIDENCE ONLY. Ephemeral first-party PostgreSQL container, synthetic rows. This lane runs the
+# real-PostgreSQL suite of migration zzzz20260926140000 (the STORED generated column
+# live_external_system_id on the 073 sealed-export binding table and its NOT VALID foreign key to
+# integration_external_systems — #6076 residual R-073, owner ruling "option 1"):
+# packages/core-backend/tests/integration/sealed-export-binding-live-external-system-fk.db.test.ts.
+# It does not connect a customer source, deploy a package, enable a flag, or run the ops pack's
+# 02 / 03 against any real database.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml step: plugin-tests.yml is a sha256-pinned S6-A
+# provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES
+# 'pluginTestsWorkflow'), so every edit forces an s6a re-pin and races every other PR that touches
+# it. Same precedent as sealed-export-s6a-grant-repair.yml and the approval-realdb-*.yml lanes.
+# plugin-tests.yml is left byte-identical.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (20.x)` job no longer collects it as skipped. This workflow is where it EXECUTES, with
+# EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel: a run here with a missing
+# DATABASE_URL is RED, never a silently skipped file.
+#
+# The suite builds every schema it needs from the SQL migrations 057 + 068..075 plus the migration
+# module's real up()/down(); it needs nothing in `public`, so there is no "Run DB migrations" step.
+
+on:
+  workflow_dispatch:
+  # No `merge_group:` and no `branches:` filter, matching the approval-realdb-* lanes: a brand-new
+  # workflow cannot be dispatched until it has run once, and `paths` keeps it off unrelated PRs.
+  pull_request:
+    paths:
+      - 'packages/core-backend/tests/integration/sealed-export-binding-live-external-system-fk.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260926140000_sealed_export_binding_live_external_system_fk.ts'
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
+      - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
+      - 'packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql'
+      - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
+      - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
+      - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
+      - 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql'
+      - 'packages/core-backend/migrations/074_repair_sealed_export_runtime_authority_privileges.sql'
+      - 'packages/core-backend/migrations/075_grant_sealed_export_runtime_authority_row_lock.sql'
+      # The suite drives the frozen provisioning module, its role-bound handle, the plugin db seam,
+      # the external-system delete path and the route's sendError — and http-routes.cjs requires most
+      # of lib/, so the whole directory is the honest trigger.
+      - 'plugins/plugin-integration-core/lib/**'
+      - 'packages/core-backend/vitest.integration.config.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/sealed-export-binding-live-fk.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/sealed-export-binding-live-external-system-fk.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260926140000_sealed_export_binding_live_external_system_fk.ts'
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
+      - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
+      - 'packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql'
+      - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
+      - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
+      - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
+      - 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql'
+      - 'packages/core-backend/migrations/074_repair_sealed_export_runtime_authority_privileges.sql'
+      - 'packages/core-backend/migrations/075_grant_sealed_export_runtime_authority_row_lock.sql'
+      - 'plugins/plugin-integration-core/lib/**'
+      - 'packages/core-backend/vitest.integration.config.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/sealed-export-binding-live-fk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  live-fk-realdb:
+    name: Sealed-export 073 live external-system FK (pg${{ matrix.pg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Generated-column foreign keys and RI lock behaviour on both supported majors.
+        pg: ['16', '17']
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_s073_live_fk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_s073_live_fk"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s073_live_fk
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run real-Postgres 073 live external-system FK suite
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/sealed-export-binding-live-external-system-fk.db.test.ts
+          --reporter=verbose

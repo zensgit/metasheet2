@@ -15,10 +15,10 @@
 // grows without a matching `paths` entry is a failing test, not a comment.
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
-import { readFileSync as readFileSyncRaw, readdirSync } from 'node:fs'
+import { existsSync, readFileSync as readFileSyncRaw, readdirSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const require = createRequire(import.meta.url)
 const yaml = require('js-yaml')
@@ -34,7 +34,18 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..', '..')
 const workflowPath = join(repoRoot, '.github', 'workflows', 'ops-sql-pack-verify.yml')
 
-const PACKS = ['readonly-inventory-20260916', 'live-id-fk-validate-20260920']
+const PACKS = [
+  'readonly-inventory-20260916',
+  'live-id-fk-validate-20260920',
+  'sealed-export-binding-live-fk-validate-20260926',
+]
+
+// The core-backend SQL migrations directory a pack's `verify/run-verify.mjs` builds its fixtures
+// from when it exports `BASE_MIGRATIONS` (sealed-export-binding-live-fk-validate-20260926 does:
+// `MIGRATIONS_DIR = path.join(REPO, 'packages', 'core-backend', 'migrations')`). The derivation in
+// `externalReadsOf` below scans only `*.test.mjs`, so those reads are covered from the EXPORTED list
+// instead — the very array the harness iterates — not from a second hand-typed copy.
+const CORE_BACKEND_MIGRATIONS_DIR = 'packages/core-backend/migrations'
 
 function repoRelative(absolutePath) {
   return relative(repoRoot, absolutePath).split(sep).join('/')
@@ -140,6 +151,60 @@ test('the migration live-id-fk-validate-pack.test.mjs reads directly is a real, 
   ])
 })
 
+test('the TS migration sealed-export-binding-live-fk-validate-pack.test.mjs reads directly is derived too', () => {
+  const [testFile] = verifyTestFiles('sealed-export-binding-live-fk-validate-20260926')
+  assert.deepEqual(externalReadsOf(testFile), [
+    'packages/core-backend/src/db/migrations/zzzz20260926140000_sealed_export_binding_live_external_system_fk.ts',
+  ])
+})
+
+/**
+ * The SQL migrations a pack's `verify/run-verify.mjs` applies, read from the array it EXPORTS and
+ * iterates (`BASE_MIGRATIONS`), as repo-relative paths. Packs whose harness exports no such list
+ * contribute nothing. The harness module is side-effect free on import (it only runs `verifyAll()`
+ * when it is the process entry point).
+ */
+async function harnessMigrationReads(packName) {
+  const harness = join(repoRoot, 'scripts', 'ops', packName, 'verify', 'run-verify.mjs')
+  if (!existsSync(harness)) return []
+  const mod = await import(pathToFileURL(harness).href)
+  if (!Array.isArray(mod.BASE_MIGRATIONS)) return []
+  // The list is only a list of NAMES; this pins the directory it is joined onto.
+  assert.match(
+    readFileSync(harness),
+    /const MIGRATIONS_DIR = path\.join\(REPO, 'packages', 'core-backend', 'migrations'\)/,
+    `${packName}: run-verify.mjs exports BASE_MIGRATIONS but no longer reads them from ${CORE_BACKEND_MIGRATIONS_DIR}`,
+  )
+  return mod.BASE_MIGRATIONS.map((name) => `${CORE_BACKEND_MIGRATIONS_DIR}/${name}`)
+}
+
+test('every SQL migration a pack harness applies (its exported BASE_MIGRATIONS) is in BOTH trigger path lists', async () => {
+  const workflow = loadWorkflow()
+  const reads = new Set()
+  for (const packName of PACKS) {
+    for (const dep of await harnessMigrationReads(packName)) reads.add(dep)
+  }
+  // Floor: the 073 live-FK pack builds from 057 + 068..075. A harness that stops exporting the list
+  // must not turn this test vacuously green.
+  assert.ok(reads.size >= 9, `expected at least the 9 migrations of the 073 live-FK pack, derived ${reads.size}`)
+  for (const dep of reads) {
+    assert.ok(existsSync(join(repoRoot, dep)), `${dep} is applied by a pack harness but does not exist`)
+    assert.ok(pathsMatch(workflow.on.pull_request.paths, dep), `pull_request.paths does not cover ${dep} (applied by a pack harness)`)
+    assert.ok(pathsMatch(workflow.on.push.paths, dep), `push.paths does not cover ${dep} (applied by a pack harness)`)
+  }
+})
+
+test('the harness-migration check bites: deleting one migration entry from the yml text un-triggers it (in-memory)', async () => {
+  const [first] = await harnessMigrationReads('sealed-export-binding-live-fk-validate-20260926')
+  assert.ok(first, 'the 073 live-FK pack harness must export BASE_MIGRATIONS')
+  const source = readFileSync(workflowPath)
+  const entryLine = `      - '${first}'\n`
+  assert.equal(source.split(entryLine).length - 1, 2, 'mutation anchor: expected the entry once in each trigger list')
+  const mutated = yaml.load(source.split(entryLine).join(''))
+  assert.ok(!pathsMatch(mutated.on.pull_request.paths, first), 'removing the entry must un-match pull_request.paths')
+  assert.ok(!pathsMatch(mutated.on.push.paths, first), 'removing the entry must un-match push.paths')
+})
+
 test('every path a verify suite reads from outside its own pack directory is in BOTH trigger path lists', () => {
   const workflow = loadWorkflow()
   const prPaths = workflow.on.pull_request.paths
@@ -205,7 +270,7 @@ test('the drift check bites: deleting the migration path entry from the yml text
   }
 })
 
-test('both packs still keep their own directory glob in both trigger path lists', () => {
+test('every pack still keeps its own directory glob in both trigger path lists', () => {
   const workflow = loadWorkflow()
   for (const packName of PACKS) {
     const pattern = `scripts/ops/${packName}/**`

@@ -24,10 +24,16 @@
 //        23503; the system and the ACTIVE binding both remain.
 //   B-10 the plugin delete guard in front of it: a same-tenant ACTIVE binding is still the 409 the
 //        count raises; a TENANT-MISMATCHED binding (invisible to the tenant-scoped count) now meets
-//        the constraint — a raw 23503 on this constraint, system kept. REGISTERED and asserted: the
-//        route's `sendError` turns that driver error into an untyped, values-free 500 (design note
-//        docs/development/sealed-export-binding-live-external-system-fk-20260926.md §4).
+//        the constraint — a raw 23503 on this constraint, system kept. REGISTERED REMAINING ITEM and
+//        asserted: the route's `sendError` turns that driver error into an untyped, values-free 500
+//        (design note docs/development/sealed-export-binding-live-external-system-fk-20260926.md §4).
 //   B-11 up() is idempotent.
+//   B-12 write-first against the plugin's REAL delete path (#6076 `deleteExternalSystem`, FOR UPDATE
+//        then counts): the delete WAITS on the in-flight same-tenant binding's RI lock, then counts it
+//        and answers ExternalSystemConflictError — the route's 409, never a raw 23503 / 500.
+//   B-13 delete-first against the same path (#6076's R-073 interleaving): provisioning WAITS on the
+//        delete's FOR UPDATE, then is refused (INTERNAL_ERROR over 23503); the delete lands; zero
+//        dangling.
 //   C-1  NOT VALID: a pre-existing dangling ACTIVE row does not block up(); a non-key UPDATE of it
 //        still works; VALIDATE fails 23503 until it is retired, then succeeds.
 //   D-1  down() with data present (live ACTIVE, RETIRED at a missing system) succeeds, restores
@@ -421,19 +427,31 @@ describeIfDatabase('073 sealed-export binding -> external system live FK (real P
     }
   }
 
-  // The plugin's own delete guard, over an owner session (the API role is the table owner).
-  async function registryOn(schema: string) {
-    const { client } = await ownerSession(schema)
+  // The plugin's own delete path (`deleteExternalSystem`: autocommit absence probe, then ONE
+  // transaction pinned to READ COMMITTED whose first read is SELECT ... FOR UPDATE on the system
+  // row, the counts, then the DELETE), over an owner session (the API role is the table owner).
+  // `app` names the session for lock-wait observation; `gateBefore` parks the next statement whose
+  // text starts with a registered prefix until released (same seam as provisioningSession).
+  async function registrySession(schema: string) {
+    const { client, app } = await ownerSession(schema)
+    const gates = new Map<string, { arrived: () => void; open: Promise<void> }>()
+    async function run(sql: string, params?: unknown[]) {
+      for (const [prefix, gate] of gates) {
+        if (sql.startsWith(prefix)) {
+          gates.delete(prefix)
+          gate.arrived()
+          await gate.open
+          break
+        }
+      }
+      return (await client.query(sql, params)).rows
+    }
     const database = {
-      query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows,
+      query: run,
       async transaction(callback: (trx: unknown) => Promise<unknown>) {
         await client.query('BEGIN')
         try {
-          const result = await callback({
-            query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows,
-            commit: async () => {},
-            rollback: async () => {},
-          })
+          const result = await callback({ query: run, commit: async () => {}, rollback: async () => {} })
           await client.query('COMMIT')
           return result
         } catch (error) {
@@ -442,7 +460,34 @@ describeIfDatabase('073 sealed-export binding -> external system live FK (real P
         }
       },
     }
-    return createExternalSystemRegistry({ db: createDb({ database }), credentialStore: credentialStore() })
+    return {
+      app,
+      registry: createExternalSystemRegistry({ db: createDb({ database }), credentialStore: credentialStore() }),
+      gateBefore(prefix: string): Gate {
+        let arrived!: () => void
+        let release!: () => void
+        const reached = new Promise<void>((resolve) => { arrived = resolve })
+        const open = new Promise<void>((resolve) => { release = resolve })
+        gates.set(prefix, { arrived, open })
+        return { reached, release }
+      },
+    }
+  }
+
+  async function registryOn(schema: string) {
+    return (await registrySession(schema)).registry
+  }
+
+  // What the HTTP route makes of an error the delete path threw: the route wrapper hands every thrown
+  // error to `sendError` (http-routes.cjs registerIntegrationRoutes), which infers the status.
+  function routeResponse(error: unknown): { status?: number; body?: any } {
+    const { __internals: routeInternals } = requireCjs(libPath('http-routes.cjs'))
+    const wire: { status?: number; body?: any } = {}
+    routeInternals.sendError(
+      { status(code: number) { wire.status = code; return { json(body: unknown) { wire.body = body } } } },
+      error,
+    )
+    return wire
   }
 
   beforeAll(async () => {
@@ -738,18 +783,14 @@ describeIfDatabase('073 sealed-export binding -> external system live FK (real P
     expect(await count(schema, SYSTEMS)).toBe(1)
     expect(await dangling(schema)).toBe(0)
 
-    // REGISTERED, not fixed here: what the HTTP route makes of that raw driver error. The route
-    // wrapper hands every thrown error to `sendError` (http-routes.cjs registerIntegrationRoutes),
-    // whose status inference has no branch for a driver error — so the admin sees an untyped 500.
-    // It is values-free (pg's `message` names the table and the constraint, never the key; the key is
-    // in `detail`, which `sendError` does not forward). Whoever maps this 23503 to the guard's 409
-    // (external-systems.cjs, after #6076) must flip these three assertions.
-    const { __internals: routeInternals } = requireCjs(libPath('http-routes.cjs'))
-    const wire: { status?: number; body?: any } = {}
-    routeInternals.sendError(
-      { status(code: number) { wire.status = code; return { json(body: unknown) { wire.body = body } } } },
-      crossTenant.error,
-    )
+    // REGISTERED REMAINING ITEM, not fixed here (design note §4): what the HTTP route makes of that
+    // raw driver error. The route wrapper hands every thrown error to `sendError`
+    // (http-routes.cjs registerIntegrationRoutes), whose status inference has no branch for a driver
+    // error — so the admin sees an untyped 500. It is values-free (pg's `message` names the table and
+    // the constraint, never the key; the key is in `detail`, which `sendError` does not forward).
+    // Whoever maps this 23503 to the guard's 409 inside `deleteExternalSystem` (external-systems.cjs;
+    // #6076 is merged, so the mapping has a home) must flip these three assertions.
+    const wire = routeResponse(crossTenant.error)
     expect(wire.status).toBe(500)
     expect(wire.body?.error?.code).toBe(FK_VIOLATION)
     const serialized = JSON.stringify(wire.body)
@@ -764,6 +805,61 @@ describeIfDatabase('073 sealed-export binding -> external system live FK (real P
     expect(await fkState(schema)).toEqual({ present: true, validated: false, restrict: true, generated: true })
     const rows = await q(schema, 'SELECT count(*)::int AS n FROM pg_constraint WHERE conrelid = to_regclass($1) AND contype = $2', [BINDINGS, 'f'])
     expect(Number(rows[0].n)).toBe(1)
+  }, 60000)
+
+  // B-12 / B-13: the two interleavings of the FROZEN writer against the plugin's REAL delete path
+  // (#6076's `deleteExternalSystem`, on main since e535702e6), not against a raw DELETE (B-8 / B-9).
+  // Without this migration both dangle — B-13's interleaving is exactly #6076's R-073.
+
+  it('B-12 write-first through the plugin delete path: the delete waits on the in-flight same-tenant binding, then answers 409 (not a raw 23503); system and binding both remain', async () => {
+    const schema = await migratedSchema('b12')
+    await insertSystem(schema, LIVE_SYSTEM)
+    const writer = provisioningSession(schema)
+    const gate = writer.gateBefore(`INSERT INTO "${PUBLIC_KEYS}"`)
+    const written = settle(writer.provision(LIVE_SYSTEM))
+    await gate.reached // the binding INSERT ran, uncommitted: its RI check holds KEY SHARE on the system row
+    const deleter = await registrySession(schema)
+    const deleted = settle(deleter.registry.deleteExternalSystem({ tenantId: TENANT, workspaceId: null, id: LIVE_SYSTEM }))
+    // The delete's FOR UPDATE on the system row conflicts with that KEY SHARE: it WAITS, so its
+    // counts run after the binding committed and see it.
+    expect(await waitsOnLock(deleter.app)).toBe(true)
+    gate.release()
+    const writeOutcome = await withTimeout(written, 10000, 'B-12 provisioning')
+    expect(writeOutcome.error).toBeNull()
+    expect(writeOutcome.value).toMatchObject({ changed: true, operation: 'INITIAL_PROVISIONED' })
+    const deleteOutcome = await withTimeout(deleted, 10000, 'B-12 delete')
+    expect(deleteOutcome.error?.name).toBe('ExternalSystemConflictError')
+    expect(deleteOutcome.error?.code).not.toBe(FK_VIOLATION)
+    expect(deleteOutcome.error?.details?.sealedExportBindingCount).toBe(1)
+    const wire = routeResponse(deleteOutcome.error)
+    expect(wire.status).toBe(409)
+    expect(await count(schema, SYSTEMS)).toBe(1)
+    expect(await count(schema, BINDINGS, "status = 'ACTIVE'")).toBe(1)
+    expect(await dangling(schema)).toBe(0)
+  }, 60000)
+
+  it('B-13 delete-first through the plugin delete path (#6076 R-073 interleaving): provisioning waits on the FOR UPDATE, then is refused; the delete lands; zero dangling', async () => {
+    const schema = await migratedSchema('b13')
+    await insertSystem(schema, LIVE_SYSTEM)
+    const deleter = await registrySession(schema)
+    // Park the delete between its counts (zero: nothing points at the system yet) and its DELETE,
+    // with the FOR UPDATE on the system row held.
+    const beforeDelete = deleter.gateBefore(`DELETE FROM "${SYSTEMS}"`)
+    const deleted = settle(deleter.registry.deleteExternalSystem({ tenantId: TENANT, workspaceId: null, id: LIVE_SYSTEM }))
+    await beforeDelete.reached
+    const writer = provisioningSession(schema)
+    const written = settle(writer.provision(LIVE_SYSTEM))
+    expect(await waitsOnLock(writer.app)).toBe(true)
+    beforeDelete.release()
+    const deleteOutcome = await withTimeout(deleted, 10000, 'B-13 delete')
+    expect(deleteOutcome.error).toBeNull()
+    expect(deleteOutcome.value).toMatchObject({ deleted: true })
+    const writeOutcome = await withTimeout(written, 10000, 'B-13 provisioning')
+    expect(writeOutcome.error?.reason).toBe(INTERNAL_ERROR)
+    expect(writer.failures.map((failure) => [failure.code, failure.constraint])).toEqual([[FK_VIOLATION, LIVE_FK]])
+    expect(await count(schema, SYSTEMS)).toBe(0)
+    expect(await count(schema, BINDINGS)).toBe(0)
+    expect(await dangling(schema)).toBe(0)
   }, 60000)
 
   // ---------------------------------------------------------------------------------------------

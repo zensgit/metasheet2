@@ -33,8 +33,19 @@
 //   S10 A tenant-MISMATCHED ACTIVE binding (system exists under another
 //       tenant) is reported as tenant_mismatch_active, is NOT a VALIDATE
 //       blocker, and the database refuses to delete its system (23503).
-//   S11 Values-free: nothing any pack file printed in S1..S10 contains a
-//       fixture value (`fx-` ids / tenants).
+//   S12 02 with APPLY=1 retires DANGLING bindings ONLY. Two fixtures, each
+//       holding exactly ONE ACTIVE binding (073's single-customer index
+//       uniq_integration_sealed_export_stock_prep_single_customer allows no
+//       more, so one fixture cannot hold both): (a) a LIVE binding whose system
+//       exists in the binding's own tenant, (b) a LIVE binding whose system
+//       exists under ANOTHER tenant. After 02 APPLY=1 each is still ACTIVE, the
+//       whole bindings table is byte-identical (row digest, so not even
+//       updated_at moved), REMEDIATE_RESULT is dangling_before=0 retired=0
+//       remaining=0 and the file committed. That single ACTIVE row is the
+//       customer's only live binding: retiring it would stop the stock-prep
+//       sealed-export path.
+//   S11 Values-free: nothing any pack file printed in S1..S10 and S12 contains
+//       a fixture value (`fx-` ids / tenants).
 //
 //   PM1 MUTANT of 01 whose dangling count drops the status filter: RETIRED
 //       history at an absent system is counted as dangling; S1 goes red and the
@@ -54,6 +65,18 @@
 //       — RETIRED history would block VALIDATE and keep systems undeletable.
 //   PM7 MUTANT of 01 that also prints the binding ids: S11's values-free scan
 //       goes red on its output — the scan is not vacuous.
+//   PM8 MUTANT of 02 whose STEP 1 retires EVERY ACTIVE binding (it ignores the
+//       snapshot and the system-absent predicate). The main fixture's only
+//       ACTIVE row is the dangling one, so S1..S11 stay green against it; S12
+//       goes red on BOTH fixtures and the live binding is committed RETIRED.
+//   PM9 MUTANT of 02 whose "system is absent" sub-select body is weakened, in
+//       the snapshot AND in STEP 1's re-check (weakening only one of the two is
+//       an equivalent mutant: the other still filters), two ways:
+//         tenant-scoped  `WHERE s.id = b.external_system_id AND s.tenant_id =
+//                        b.tenant_id` — S12(b) goes red, S12(a) stays green;
+//         always-absent  `WHERE false` — S12(a) and S12(b) both go red.
+//       STEP 2/3 keep the true predicate, so the fail-closed guard is satisfied
+//       and the wrong retire COMMITS: only S12 can see it.
 //
 // EVERY MUTANT IS IN MEMORY. Mutated SQL is piped to psql on stdin with cwd set
 // to the pack directory (so `\ir` still resolves); no mutated file is written.
@@ -252,6 +275,24 @@ export const MISMATCH_ROWS = `
     ${bindingValues('fx-b-mismatch', 'fx-sys-other', 'ACTIVE', 'fx-t1')};`
 
 /**
+ * S12(a) fixture: ONE ACTIVE binding, LIVE, its system in the binding's own tenant — plus RETIRED
+ * history at an absent system, so the table is not trivially "one row". 073's single-customer
+ * index allows no second ACTIVE row, which is why S12(b) needs its own fixture (MISMATCH_ROWS).
+ */
+export const LIVE_SAME_TENANT_ROWS = `
+  INSERT INTO integration_external_systems (id, tenant_id, name, kind, role)
+  VALUES ('fx-sys-live', 'fx-t1', 'fx-sys-live', 'erp:k3-wise-sqlserver', 'source');
+  INSERT INTO integration_sealed_export_stock_prep_bindings (${BINDING_COLUMNS}) VALUES
+    ${bindingValues('fx-b-live', 'fx-sys-live', 'ACTIVE', 'fx-t1')},
+    ${bindingValues('fx-b-ret-gone', 'fx-sys-gone', 'RETIRED')};`
+
+/** The two S12 fixtures, by the label S12 reports them under. */
+export const S12_FIXTURES = Object.freeze([
+  { label: 'sameTenant', rows: LIVE_SAME_TENANT_ROWS, bindingId: 'fx-b-live' },
+  { label: 'tenantMismatch', rows: MISMATCH_ROWS, bindingId: 'fx-b-mismatch' },
+])
+
+/**
  * A throwaway schema: the real SQL migrations, then `rows` (pre-migration),
  * then — unless `migrate: false` — the migration's up() SQL (or a mutant of it).
  */
@@ -295,6 +336,12 @@ export function danglingCount(schema) {
   return Number(q(schema, `SELECT count(*) FROM integration_sealed_export_stock_prep_bindings b
      WHERE b.status = 'ACTIVE'
        AND NOT EXISTS (SELECT 1 FROM integration_external_systems s WHERE s.id = b.external_system_id)`))
+}
+
+/** Digest of every bindings row, whole-row text, in key order (a no-op UPDATE would move updated_at). */
+export function bindingsDigest(schema) {
+  return q(schema, `SELECT coalesce(md5(string_agg(b::text, '|' ORDER BY b.binding_id)), '<empty>')
+                      FROM integration_sealed_export_stock_prep_bindings b`)
 }
 
 export function statusOf(schema, bindingId) {
@@ -401,6 +448,49 @@ export function mutate03DropLockTimeout(src) {
   const marker = "\\echo '-- effective lock_timeout for the VALIDATE below:'"
   assert.ok(src.includes(marker), 'PM5 anchor not found in 03-validate.sql')
   return src.replace(marker, `SET lock_timeout = 0;\n${marker}`)
+}
+
+/** PM8 — 02's STEP 1 retires EVERY ACTIVE binding: no snapshot join, no system-absent predicate. */
+export function mutate02RetireAllActive(src) {
+  assert.match(src, STEP1_RE, 'PM8 anchor (STEP 1 statement) not found in 02-remediate.sql')
+  return src.replace(
+    STEP1_RE,
+    `WITH upd AS (
+  UPDATE integration_sealed_export_stock_prep_bindings b
+     SET status = 'RETIRED'
+   WHERE b.status = 'ACTIVE'
+  RETURNING b.binding_id
+)
+SELECT 'STEP1_RETIRED' AS step, count(*)::int AS rows FROM upd;`,
+  )
+}
+
+const SYSTEM_ABSENT_BODY = 'WHERE s.id = b.external_system_id'
+const SNAPSHOT_RE = /CREATE TEMP TABLE s073_dangling ON COMMIT DROP AS[\s\S]*?\);\n/
+
+/** The two sub-select bodies that decide WHAT 02 retires: the snapshot's and STEP 1's re-check. */
+function replaceInRegion(src, re, label, from, to) {
+  const m = re.exec(src)
+  assert.ok(m, `${label} anchor not found in 02-remediate.sql`)
+  const region = m[0]
+  assert.equal(region.split(from).length - 1, 1, `${label}: expected exactly one "${from}" in the region`)
+  return src.slice(0, m.index) + region.replace(from, to) + src.slice(m.index + region.length)
+}
+
+export const PM9_VARIANTS = Object.freeze({
+  // Existence judged inside the binding's tenant: a live binding whose system sits under another
+  // tenant reads as "absent" and is retired.
+  tenantScoped: `${SYSTEM_ABSENT_BODY} AND s.tenant_id = b.tenant_id`,
+  // Existence never found: every ACTIVE binding reads as dangling.
+  alwaysAbsent: 'WHERE false',
+})
+
+/** PM9 — 02's system-absent sub-select body weakened in the snapshot AND in STEP 1. */
+export function mutate02WeakenSystemAbsent(src, variant) {
+  const body = PM9_VARIANTS[variant]
+  assert.ok(body, `unknown PM9 variant ${variant}`)
+  const snapshotDone = replaceInRegion(src, SNAPSHOT_RE, 'PM9 snapshot', SYSTEM_ABSENT_BODY, body)
+  return replaceInRegion(snapshotDone, STEP1_RE, 'PM9 STEP 1', SYSTEM_ABSENT_BODY, body)
 }
 
 /** PM6 — the MIGRATION's generated column without the status filter. */
@@ -579,6 +669,47 @@ export function checkTenantMismatch() {
   }
 }
 
+/**
+ * S12 — 02 APPLY=1 against a table whose only ACTIVE binding is LIVE must change nothing.
+ * `source` is a MUTATED 02 (PM8 / PM9) or null for the pack's own file.
+ */
+export function checkLiveBindingSurvivesRemediation(schema, bindingId, source = null) {
+  assert.equal(statusOf(schema, bindingId), 'ACTIVE', 'S12: fixture precondition — the live binding starts ACTIVE')
+  assert.equal(danglingCount(schema), 0, 'S12: fixture precondition — nothing dangles')
+  const before = bindingsDigest(schema)
+  const out = source
+    ? runPackSource(source, schema, ['-v', 'APPLY=1'], { env: { PGAPPNAME: 's073fx-mutant' } })
+    : runPackFile('02-remediate.sql', schema, ['-v', 'APPLY=1'])
+  assert.equal(out.status, 0, `S12: 02 APPLY exited ${out.status}: ${out.stderr}`)
+  assert.ok(line(out.stdout, 'REMEDIATE_TX=committed'), 'S12: with nothing dangling, APPLY=1 still commits (a no-op)')
+  assert.equal(statusOf(schema, bindingId), 'ACTIVE', 'S12: a LIVE binding must still be ACTIVE after 02 APPLY=1')
+  assert.equal(bindingsDigest(schema), before, 'S12: 02 APPLY=1 must not touch any bindings row when nothing dangles')
+  assert.deepEqual(rowOf(out.stdout, STEP0), { step: 'STEP0_SNAPSHOT', dangling: 0, inflight_runs: 0 }, 'S12: the snapshot must be empty')
+  assert.equal(stepsByName(out.stdout).STEP1_RETIRED, 0, 'S12: STEP 1 must retire nothing')
+  assert.match(
+    line(out.stdout, 'REMEDIATE_RESULT') || '',
+    /mode=apply dangling_before=0 retired=0 remaining=0$/,
+    'S12: REMEDIATE_RESULT must report nothing to do',
+  )
+  const after = rowOf(inventory(schema).stdout, Q2)
+  assert.equal(after.active_total, 1, 'S12: 01 must still count the live binding as ACTIVE')
+  assert.equal(after.dangling_active, 0)
+  return { status: statusOf(schema, bindingId), activeTotal: after.active_total }
+}
+
+export function checkRemediationKeepsLiveBindings() {
+  const report = {}
+  for (const { label, rows, bindingId } of S12_FIXTURES) {
+    const schema = createFixture({ rows })
+    try {
+      report[label] = checkLiveBindingSurvivesRemediation(schema, bindingId)
+    } finally {
+      dropFixture(schema)
+    }
+  }
+  return report
+}
+
 /** The S11 predicate, factored out so PM7 can prove it bites. */
 export function assertValuesFree(runs) {
   for (const { what, text } of runs) {
@@ -712,6 +843,56 @@ export function mutantPM7() {
   }
 }
 
+/**
+ * Run a MUTATED 02 against one S12 fixture: S12 must go red, and the table then shows what the
+ * mutant committed (the live binding's status). `red` is false when S12 stayed green.
+ */
+function s12AgainstMutant(fixture, source) {
+  const schema = createFixture({ rows: fixture.rows })
+  try {
+    let red = false
+    try {
+      checkLiveBindingSurvivesRemediation(schema, fixture.bindingId, source)
+    } catch (error) {
+      if (!(error instanceof assert.AssertionError) || !/^S12: /.test(error.message)) throw error
+      red = true
+    }
+    return { red, status: statusOf(schema, fixture.bindingId) }
+  } finally {
+    dropFixture(schema)
+  }
+}
+
+export function mutantPM8() {
+  const src = mutate02RetireAllActive(packSource('02-remediate.sql'))
+  const report = {}
+  for (const fixture of S12_FIXTURES) {
+    const outcome = s12AgainstMutant(fixture, src)
+    assert.equal(outcome.red, true, `S12(${fixture.label}) must go red against PM8`)
+    assert.equal(outcome.status, 'RETIRED', `PM8 commits the ${fixture.label} live binding as RETIRED — that is the defect`)
+    report[fixture.label] = outcome
+  }
+  return report
+}
+
+export function mutantPM9() {
+  const report = {}
+  for (const variant of Object.keys(PM9_VARIANTS)) {
+    const src = mutate02WeakenSystemAbsent(packSource('02-remediate.sql'), variant)
+    report[variant] = {}
+    for (const fixture of S12_FIXTURES) {
+      report[variant][fixture.label] = s12AgainstMutant(fixture, src)
+    }
+  }
+  // tenant-scoped: only the tenant-mismatched live binding is (wrongly) judged absent.
+  assert.deepEqual(report.tenantScoped.sameTenant, { red: false, status: 'ACTIVE' }, 'PM9 tenant-scoped leaves a same-tenant live binding alone')
+  assert.deepEqual(report.tenantScoped.tenantMismatch, { red: true, status: 'RETIRED' }, 'S12(tenantMismatch) must go red against PM9 tenant-scoped')
+  // always-absent: every ACTIVE binding is judged absent.
+  assert.deepEqual(report.alwaysAbsent.sameTenant, { red: true, status: 'RETIRED' }, 'S12(sameTenant) must go red against PM9 always-absent')
+  assert.deepEqual(report.alwaysAbsent.tenantMismatch, { red: true, status: 'RETIRED' }, 'S12(tenantMismatch) must go red against PM9 always-absent')
+  return report
+}
+
 // ── entry point ─────────────────────────────────────────────────────────────
 
 export function verifyAll() {
@@ -746,6 +927,8 @@ export function verifyAll() {
 
   report.S9 = checkPreMigration()
   report.S10 = checkTenantMismatch()
+  // S12 runs BEFORE S11 so its genuine pack runs are part of the values-free scan too.
+  report.S12 = checkRemediationKeepsLiveBindings()
   report.S11 = checkValuesFree()
 
   report.PM1 = mutantPM1()
@@ -755,6 +938,8 @@ export function verifyAll() {
   report.PM5 = mutantPM5()
   report.PM6 = mutantPM6()
   report.PM7 = mutantPM7()
+  report.PM8 = mutantPM8()
+  report.PM9 = mutantPM9()
   return report
 }
 

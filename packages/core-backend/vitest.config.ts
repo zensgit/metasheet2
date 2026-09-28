@@ -59,6 +59,12 @@ export default defineConfig({
       // #6076 external-system delete x pointer-write lock protocol: two-session real-PG races,
       // excluded from the no-DB job and wired as a whole file in plugin-tests.yml (EXPECT_DB=1).
       'tests/integration/external-system-delete-bind-lock-protocol.db.test.ts',
+      // 073 sealed-export binding -> external system live FK (migration zzzz20260926140000, #6076
+      // residual R-073): two-session real-PG races, NOT VALID / VALIDATE and up()/down() with data.
+      // Excluded from the no-DB job so describeIfDatabase cannot skip-green it; wired as a WHOLE FILE
+      // into the standalone .github/workflows/sealed-export-binding-live-fk.yml lane (EXPECT_DB=1),
+      // NOT plugin-tests.yml, which is an s6a sha256-pinned provenance input.
+      'tests/integration/sealed-export-binding-live-external-system-fk.db.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.

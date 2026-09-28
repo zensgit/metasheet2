@@ -1,9 +1,10 @@
 name: Ops SQL Pack Verify
 
 # Independent CI lane for the read-only SQL packs' own `verify/` self-tests
-# (scripts/ops/readonly-inventory-20260916/verify/ and
-# scripts/ops/live-id-fk-validate-20260920/verify/). Neither pack's verify
-# suite is wired into plugin-tests.yml's matrix real-DB step — both are
+# (scripts/ops/readonly-inventory-20260916/verify/,
+# scripts/ops/live-id-fk-validate-20260920/verify/ and
+# scripts/ops/sealed-export-binding-live-fk-validate-20260926/verify/). No pack's verify
+# suite is wired into plugin-tests.yml's matrix real-DB step — all are
 # standalone `node --test` files with a fail-not-skip DATABASE_URL /
 # METASHEET_REAL_DB_TEST_STEP=1 sentinel of their own (see
 # readonly-inventory-pack.test.mjs:173-192 and the equivalent sentinel in
@@ -26,9 +27,9 @@ name: Ops SQL Pack Verify
 #                    app dependencies — these suites use only Node built-ins
 #                    plus the runner's own `psql`), with a literal
 #                    DATABASE_URL and METASHEET_REAL_DB_TEST_STEP: '1' so a
-#                    missing DB fails rather than silently skip-greens. Both
-#                    packs' `run-verify.mjs` create and drop their own
-#                    throwaway `*_fixture_*` schemas/roles against the
+#                    missing DB fails rather than silently skip-greens. Every
+#                    pack's `run-verify.mjs` creates and drops its own
+#                    throwaway `*_fixture_*` / `s073fx_*` schemas/roles against the
 #                    service's default `postgres` superuser (createFixture /
 #                    checkPermissionDeniedIsIncomplete at
 #                    readonly-inventory-20260916/verify/run-verify.mjs:132,
@@ -59,6 +60,21 @@ on:
       # scripts/ops/ops-sql-pack-verify-wiring.test.mjs, which derives this
       # exact dependency from the test source rather than trusting this list.
       - 'packages/core-backend/src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock.ts'
+      - 'scripts/ops/sealed-export-binding-live-fk-validate-20260926/**'
+      # sealed-export-binding-live-fk-validate-pack.test.mjs reads the TS migration directly (its
+      # MIGRATION_TS drift check, derived by the wiring test), and verify/run-verify.mjs builds every
+      # fixture from these real SQL migrations (its exported BASE_MIGRATIONS, checked by the wiring
+      # test from that list, because the path derivation only scans *.test.mjs).
+      - 'packages/core-backend/src/db/migrations/zzzz20260926140000_sealed_export_binding_live_external_system_fk.ts'
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
+      - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
+      - 'packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql'
+      - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
+      - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
+      - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
+      - 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql'
+      - 'packages/core-backend/migrations/074_repair_sealed_export_runtime_authority_privileges.sql'
+      - 'packages/core-backend/migrations/075_grant_sealed_export_runtime_authority_row_lock.sql'
       - 'scripts/ops/ops-sql-pack-verify-wiring.test.mjs'
   push:
     branches: [main]
@@ -67,6 +83,17 @@ on:
       - 'scripts/ops/readonly-inventory-20260916/**'
       - 'scripts/ops/live-id-fk-validate-20260920/**'
       - 'packages/core-backend/src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock.ts'
+      - 'scripts/ops/sealed-export-binding-live-fk-validate-20260926/**'
+      - 'packages/core-backend/src/db/migrations/zzzz20260926140000_sealed_export_binding_live_external_system_fk.ts'
+      - 'packages/core-backend/migrations/057_create_integration_core_tables.sql'
+      - 'packages/core-backend/migrations/068_create_integration_sealed_export_ingestion.sql'
+      - 'packages/core-backend/migrations/069_create_integration_sealed_export_generation_kernel.sql'
+      - 'packages/core-backend/migrations/070_create_integration_sealed_export_signer_authority.sql'
+      - 'packages/core-backend/migrations/071_harden_integration_sealed_export_authority_lifecycle.sql'
+      - 'packages/core-backend/migrations/072_harden_integration_sealed_export_terminal_signer_history.sql'
+      - 'packages/core-backend/migrations/073_create_sealed_export_stock_prep_runtime_authority.sql'
+      - 'packages/core-backend/migrations/074_repair_sealed_export_runtime_authority_privileges.sql'
+      - 'packages/core-backend/migrations/075_grant_sealed_export_runtime_authority_row_lock.sql'
       - 'scripts/ops/ops-sql-pack-verify-wiring.test.mjs'
 
 permissions:
@@ -108,6 +135,7 @@ jobs:
         pack:
           - readonly-inventory-20260916
           - live-id-fk-validate-20260920
+          - sealed-export-binding-live-fk-validate-20260926
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -125,6 +153,7 @@ jobs:
         pack:
           - readonly-inventory-20260916
           - live-id-fk-validate-20260920
+          - sealed-export-binding-live-fk-validate-20260926
     services:
       postgres:
         image: postgres:16
