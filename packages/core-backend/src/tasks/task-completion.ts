@@ -228,10 +228,10 @@ export function applyReopen(input: {
   if (changedSelf) {
     return { rows: newRows, events: [{ type: 'self_reopened', userId: actorId }] }
   }
-  // task-c A7: a done `all` task whose rows are all null (carried over from `any`) is no longer
-  // done once recomputed, so the service flips it to open. That flip must be recorded even though
-  // the actor's own row did not change; `reopened` names what happened to the task.
-  // ASSUMPTION(task-c): A7 event name `reopened` (not `self_reopened`) for this edge; owner to confirm.
+  // task-c A7 (owner accepted 2026-09-28): the actor's own row did not change, yet the task was
+  // done and no longer counts as done once recomputed (e.g. rows carried over from `any` include a
+  // null row), so the service flips it to open. That flip is recorded as `reopened`. If the task
+  // still counts as done (every row complete, actor has no row), nothing happens and no event fires.
   if (wasDone === true && !computeTaskDone({ mode, assigneeRows: newRows })) {
     return { rows: newRows, events: [{ type: 'reopened', userId: actorId }] }
   }
