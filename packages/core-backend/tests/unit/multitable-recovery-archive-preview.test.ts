@@ -112,11 +112,6 @@ const KEY_ID = 'key-preview'
 const RECORD_ID = 'record-preview'
 const FIELD_ID = 'field-preview'
 const EXPIRES_AT = '2026-09-28T10:00:00.000Z'
-// One hour before EXPIRES_AT. asyncIdentityTtlSeconds is
-// min(600, floor((expiresAt - Date.now()) / 1000) - 1). At this instant the
-// remaining window is 3599s, so the minted async identity TTL is the
-// deterministic 600s cap and the JWT expiry stays strictly before EXPIRES_AT.
-const FROZEN_NOW_MS = Date.parse('2026-09-28T09:00:00.000Z')
 
 const runtime = {
   keyCustody: {},
@@ -272,9 +267,6 @@ function makeTransaction(
 
 describe('Time Machine recovery archive preview authority', () => {
   beforeEach(() => {
-    // Date only: this suite awaits real promises. Faking the timer queue can stall them.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    vi.setSystemTime(FROZEN_NOW_MS)
     vi.stubEnv('JWT_SECRET', 'unit-test-recovery-archive-preview-secret')
     for (const dependency of Object.values(dependencies)) dependency.mockReset()
     dependencies.readRecoveryArchiveCompleteSectionState.mockResolvedValue({
@@ -323,7 +315,7 @@ describe('Time Machine recovery archive preview authority', () => {
   })
 
   afterEach(() => {
-    vi.useRealTimers()
+    vi.restoreAllMocks()
     vi.unstubAllEnvs()
   })
 
@@ -580,6 +572,7 @@ describe('Time Machine recovery archive preview authority', () => {
   })
 
   it('freezes and registers over-threshold effective writes before returning an executable async token', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(new Date(EXPIRES_AT).getTime() - 60_000)
     const largeTarget = new Map(
       Array.from({ length: 5001 }, (_, index) => [
         `record-${index}`,
@@ -644,6 +637,27 @@ describe('Time Machine recovery archive preview authority', () => {
         },
       }),
     )
+
+    now.mockReturnValue(new Date(EXPIRES_AT).getTime() + 1_000)
+    dependencies.prepareMaterializedArchiveRecoveryPreviewScopeInternal.mockReturnValueOnce({
+      ok: true,
+      anchorTarget: largeTarget,
+      targetRecords,
+      liveById,
+    })
+    dependencies.buildPreviewPlanDetails.mockReturnValueOnce({
+      summary: summary({ effectiveWriteCount: 5001 }),
+      plan: { reverts: [], resurrects: [], createdAfterAnchor: [], deletedAtAnchorLiveNow: [] },
+      revertWrites: [],
+      deleteRecordIds: [],
+    })
+    await expect(previewRecoveryArchive(
+      makeTransaction(fixture.query, { inTransaction: false }),
+      fixture.query,
+      runtime,
+      makeInput(),
+    )).rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND' })
+    expect(dependencies.prepareRecoveryArchiveRestorePlan).toHaveBeenCalledTimes(1)
   })
 
   it('keeps a 5001-record scope on sync when only one record is an effective write', async () => {
