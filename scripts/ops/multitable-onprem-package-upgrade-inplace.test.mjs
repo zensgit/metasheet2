@@ -58,11 +58,13 @@ const scriptSource = fs.readFileSync(scriptPath, 'utf8')
 // -- see the "CI wiring" test.
 const PWSH = process.env.UPGRADE_INPLACE_TEST_SHELL || 'pwsh'
 // Windows PowerShell 5.1 decodes a BOM-less script in the machine's ANSI code page;
-// under 1252 (windows-latest) the em-dashes inside the script's strings end them
-// early and the script does not parse. The copy deployed to the demo host carries a
-// BOM (handoff §3 step 1). So under 5.1 every run executes a byte-identical copy of
-// the script with a UTF-8 BOM prepended; the static checks below always read the
-// repo file itself.
+// under 1252 (windows-latest) the em-dashes the script used to carry inside its
+// strings ended them early and the script did not parse. Since R60 review (#6079)
+// the script is pure ASCII (pinned by the "encoding" test), so it parses under any
+// code page. The copy deployed to the demo host still gets a BOM prepended (handoff
+// §3 step 1), so under 5.1 every run executes a byte-identical copy of the script with
+// a UTF-8 BOM prepended, as deployed; the static checks below always read the repo
+// file itself.
 const PWSH_IS_WINDOWS_POWERSHELL = /(^|[\\/])powershell(\.exe)?$/i.test(PWSH)
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf])
 function writeRunnableScript(filePath, source) {
@@ -970,15 +972,21 @@ test('Write-RestoreBlock prints the backup path and an exact copy-back command p
     // this test does not need the paths to exist, only to be valid on the host OS.
     const backupPath = path.join(scratch, 'backup', 'x')
     const rootDir = path.join(scratch, 'live')
+    // The recipe restores only what the backup holds (R60 review, #6079).
+    fs.mkdirSync(path.join(backupPath, 'packages', 'core-backend', 'dist'), { recursive: true })
+    fs.mkdirSync(path.join(backupPath, 'plugins'), { recursive: true })
     const harness =
       dotSourcePrelude(scratch) +
-      `Write-RestoreBlock -BackupPath '${backupPath}' -RootDir '${rootDir}' -ReplacedRelativePaths @('packages/core-backend/dist', 'plugins') -Pm2AppName 'metasheet-backend'`
+      `Write-RestoreBlock -BackupPath '${backupPath}' -RootDir '${rootDir}' -ReplacedRelativePaths @('packages/core-backend/dist', 'plugins') -BackedUpRelativePaths @('packages/core-backend/dist', 'plugins') -Pm2AppName 'metasheet-backend'`
     const result = runPwshHarness(harness)
     assert.equal(result.status, 0, result.stderr || result.stdout)
     assert.match(result.stdout, /RESTORE REQUIRED/)
     assert.ok(result.stdout.includes(`Backup path: ${backupPath}`))
-    assert.ok(result.stdout.includes(`Copy-Item -LiteralPath '${path.join(backupPath, 'packages', 'core-backend', 'dist')}'`))
-    assert.ok(result.stdout.includes(`Copy-Item -LiteralPath '${path.join(backupPath, 'plugins')}'`))
+    assert.ok(result.stdout.includes(`Remove-Item -LiteralPath '${path.join(rootDir, 'packages', 'core-backend', 'dist')}'`))
+    assert.ok(result.stdout.includes(`Copy-Item -LiteralPath '${path.join(backupPath, 'packages', 'core-backend', 'dist')}' -Destination '${path.join(rootDir, 'packages', 'core-backend', 'dist')}'`))
+    // plugins/ is copied back over the live tree, never deleted first (its live node_modules stay).
+    assert.ok(result.stdout.includes(`Get-ChildItem -LiteralPath '${path.join(backupPath, 'plugins')}' -Force | Copy-Item -Destination '${path.join(rootDir, 'plugins')}' -Recurse -Force`))
+    assert.ok(!result.stdout.includes(`Remove-Item -LiteralPath '${path.join(rootDir, 'plugins')}'`), 'plugins/ must never be deleted by the recipe')
     assert.match(result.stdout, /pm2 restart metasheet-backend --update-env/)
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true })
@@ -2096,6 +2104,23 @@ function grepTreeForMarker(root, marker) {
   return hits
 }
 
+// R60 review (#6079): the failure handler's pm2 stop. On Windows it first asks pm2's
+// machine-wide pipe (\\.\pipe\rpc.sock) whether any pm2 daemon is there and, with none,
+// runs no pm2 at all -- a pm2 call then would start a daemon inside the upgrade session.
+// A test host never has one: the fixture's pm2 is a stub, and a real pm2 on the same
+// machine already breaks the R59 tests (see setUpR59Fixture). So on Windows the
+// handler's stop is skipped, and says so; elsewhere the pipe is not pm2's IPC and the
+// handler stops pm2 exactly as before. Every branch of that decision is tested on every
+// OS in the Stop-Pm2App -AfterFailure test below.
+const FAILURE_HANDLER_PM2_CALLS = process.platform === 'win32' ? [] : ['stop']
+function assertFailureHandlerPm2Stop(combined) {
+  if (process.platform === 'win32') {
+    assert.match(combined, /PM2_STOP_SKIPPED_NO_DAEMON: no pm2 daemon listens on \\\\\.\\pipe\\rpc\.sock/, 'on Windows the failure handler must skip pm2 when no daemon pipe is there, and say so')
+  } else {
+    assert.doesNotMatch(combined, /PM2_STOP_SKIPPED_NO_DAEMON/, 'off Windows the failure handler stops pm2 as before')
+  }
+}
+
 function runUpgradeScript(args, envOverrides = {}) {
   return spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', scriptExecPath, ...args], {
     encoding: 'utf8',
@@ -2397,9 +2422,11 @@ test('end-to-end (acid fixture): a package missing the preflight file fails the 
     const backupDirs = fs.existsSync(backupRoot) ? fs.readdirSync(backupRoot) : []
     assert.equal(backupDirs.length, 1, 'a backup snapshot must exist even though the upgrade ultimately refused')
 
-    // pm2 was stopped at step 2, AND again by the failure handler.
+    // pm2 was stopped at step 2, AND again by the failure handler (off Windows; on
+    // Windows the handler finds no pm2 daemon pipe and runs no pm2 -- R60 review, #6079).
     const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
-    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 2)
+    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 1 + FAILURE_HANDLER_PM2_CALLS.length)
+    assertFailureHandlerPm2Stop(combined)
     assert.doesNotMatch(pm2Log, /restart/, 'pm2 restart must never be reached after the tripwire fires')
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -2451,7 +2478,8 @@ test('end-to-end (acid fixture): a mid-swap exception (before ANY assertion runs
     )
     assert.match(combined, /BACKUP_PATH=/)
     const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
-    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 2, 'pm2 stop must be attempted even on the earliest possible failure')
+    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 1 + FAILURE_HANDLER_PM2_CALLS.length, 'the failure handler must deal with pm2 even on the earliest possible failure')
+    assertFailureHandlerPm2Stop(combined)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -2499,10 +2527,11 @@ test('end-to-end (acid fixture): a failed nginx healthcheck stops the now-broken
 
     // pm2 sequence: stop (step 2), restart (step 7, BEFORE the healthcheck that
     // then fails), stop again (the failure handler — a broken deployment must not
-    // be left running).
+    // be left running; on Windows only when pm2's daemon pipe is there -- R60 review).
     const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
     const calls = pm2Log.trim().split('\n').map((line) => line.trim().split(/\s+/)[0])
-    assert.deepEqual(calls, ['stop', 'restart', 'stop'])
+    assert.deepEqual(calls, ['stop', 'restart', ...FAILURE_HANDLER_PM2_CALLS])
+    assertFailureHandlerPm2Stop(combined)
   } finally {
     backend.server.close()
     fs.rmSync(root, { recursive: true, force: true })
@@ -2883,7 +2912,8 @@ test(`end-to-end (acid fixture, R59): if the scheduled task (in folder ${taskFol
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', `start-path=${taskFolder}`, 'start-saw-daemon=no'])
 
     const homes = readPm2HomeLog(fx.homeLogPath)
-    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill', 'stop'], 'the failure handler must still stop pm2')
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill', ...FAILURE_HANDLER_PM2_CALLS], 'the failure handler must still deal with pm2')
+    assertFailureHandlerPm2Stop(combined)
     for (const entry of homes) assert.equal(entry.home, fx.runtimeHome)
     assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling after a task that never started')
     assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally must drop the gate')
@@ -2970,7 +3000,8 @@ test('end-to-end (acid fixture, R59): if the task starts but the backend never a
     assert.match(combined, /BACKEND_HEALTHCHECK_FAILED/)
     assert.match(combined, /RESTORE REQUIRED/)
     assert.equal(health.requests.filter((entry) => entry.url === '/health').length, 2, 'the normal backend-direct polling must have run, attempts included')
-    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill', 'stop'])
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill', ...FAILURE_HANDLER_PM2_CALLS])
+    assertFailureHandlerPm2Stop(combined)
     assert.ok(!fs.existsSync(fx.witness.flagPath))
   } finally {
     health.server.close()
@@ -3003,9 +3034,10 @@ test('end-to-end (acid fixture, R59): an UNMANAGED host (a stray .pm2-runtime bu
     const homes = readPm2HomeLog(fx.homeLogPath)
     assert.deepEqual(
       homes.map((entry) => `${entry.command}@${entry.home}`),
-      ['stop@', 'restart@', 'stop@'],
+      ['stop@', 'restart@', ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@`)],
       'no PM2_HOME may be injected on an unmanaged host, and no daemon may be killed there',
     )
+    assertFailureHandlerPm2Stop(combined)
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'no task may be started on an unmanaged host')
     assert.doesNotMatch(combined, /\$env:PM2_HOME = /)
     assert.doesNotMatch(combined, /Start-ScheduledTask -TaskName/)
@@ -3042,7 +3074,8 @@ test('end-to-end (acid fixture, R59): on a pm2-runtime host a restart failure th
     assert.doesNotMatch(combined, /PM2_RESTART_NOT_FOUND_FALLBACK/)
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'only "not found" may trigger the task fallback')
     assert.match(combined, /RESTORE REQUIRED/)
-    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'stop'])
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', ...FAILURE_HANDLER_PM2_CALLS])
+    assertFailureHandlerPm2Stop(combined)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -3107,9 +3140,10 @@ test('end-to-end (acid fixture, R59): -Pm2ScheduledTaskName \'\' disables the fa
     assert.deepEqual(readLogLines(fx.taskLogPath), [], 'with the fallback disabled by name the scheduler must be neither queried nor started')
     assert.deepEqual(
       readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`),
-      [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`, `stop@${fx.runtimeHome}`],
+      [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`, ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@${fx.runtimeHome}`)],
       'the explicit home must still apply to every pm2 call, and nothing may be killed',
     )
+    assertFailureHandlerPm2Stop(combined)
     assert.doesNotMatch(combined, /Start-ScheduledTask -TaskName/)
     assert.ok(!fs.existsSync(fx.witness.flagPath))
   } finally {
@@ -3331,6 +3365,395 @@ test('end-to-end (acid fixture, R59): RestartService=0 on a pm2-runtime host rea
   } finally {
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ── 3c. R60 review (#6079): the restore recipe, the failure handler's pm2 stop, encoding ──
+//
+// The ops machine's adversarial check of the R60 upgrade wrapper (issue #6079,
+// 2026-09-28) found: the restore block deleted packages/core-backend/migrations,
+// which -BackupPaths never backed up, and deleted plugins/, whose backup skips
+// node_modules (the plugins' drivers); the failure handler's `pm2 stop` started a
+// pm2 daemon inside the upgrade session after pm2-runtime had exited (the #6071
+// session-binding shape); and the script's non-ASCII bytes made it depend on the
+// ANSI code page Windows PowerShell 5.1 reads it with.
+
+// The default of a [string[]] parameter of the script under test, read from its source.
+function scriptDefaultList(name) {
+  const match = scriptSource.match(new RegExp(`\\[string\\[\\]\\]\\$${name} = @\\(([^)]*)\\)`))
+  assert.ok(match, `the script must declare a default for -${name}`)
+  return [...match[1].matchAll(/'([^']*)'/g)].map((m) => m[1])
+}
+
+// The commands of a printed restore recipe: every non-comment line after
+// "then restart pm2:" up to the first pm2 line.
+function restoreRecipeCommands(output) {
+  const lines = output.split(/\r?\n/).map((line) => line.trim())
+  const start = lines.indexOf('then restart pm2:')
+  assert.ok(start > -1, `no restore recipe in:\n${output}`)
+  const commands = []
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith('$env:PM2_HOME') || line.startsWith('pm2 ') || /^=+$/.test(line)) break
+    if (line === '' || line.startsWith('#')) continue
+    commands.push(line)
+  }
+  return commands
+}
+
+// The paths the recipe's Remove-Item lines delete (single-quoted literals).
+function removeItemTargets(commands) {
+  return commands
+    .filter((command) => command.startsWith('Remove-Item '))
+    .map((command) => {
+      const match = command.match(/^Remove-Item -LiteralPath '((?:[^']|'')*)'/)
+      assert.ok(match, `unparseable Remove-Item line: ${command}`)
+      return match[1].replace(/''/g, "'")
+    })
+}
+
+function slashRelative(root, target) {
+  return path.relative(root, target).split(path.sep).join('/')
+}
+
+// Every file under dir, node_modules included: relative path ('/') -> content.
+function snapshotFiles(dir) {
+  const files = {}
+  if (!fs.existsSync(dir)) return files
+  const stack = [dir]
+  while (stack.length) {
+    const current = stack.pop()
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) stack.push(full)
+      else if (entry.isFile()) files[slashRelative(dir, full)] = fs.readFileSync(full, 'utf8')
+    }
+  }
+  return files
+}
+
+test('encoding (R60 review #6079): the upgrade script is pure ASCII with no BOM -- Windows PowerShell 5.1 reads a BOM-less script in the ANSI code page (936 on the demo host, 1252 on windows-latest), and the deploy procedure prepends a BOM itself, which a second BOM would break', () => {
+  const bytes = fs.readFileSync(scriptPath)
+  const offendingLines = new Set()
+  let line = 1
+  for (const byte of bytes) {
+    if (byte === 0x0a) {
+      line += 1
+    } else if (!(byte === 0x09 || byte === 0x0d || (byte >= 0x20 && byte <= 0x7e))) {
+      offendingLines.add(line)
+    }
+  }
+  assert.deepEqual([...offendingLines], [], `the script must be pure ASCII (no BOM, no control characters); offending lines: ${[...offendingLines].join(', ')}`)
+})
+
+test('R60 wiring (#6079): Main refuses a -BackupPaths that misses a replaced or overlaid path before anything is touched; the failure handler looks the task up first, then stops pm2 with -AfterFailure (killing only on a pm2-runtime host); the restore block gets the backed-up and overlaid lists', () => {
+  const backupPaths = scriptDefaultList('BackupPaths')
+  assert.ok(backupPaths.includes('packages/core-backend/migrations'), 'the default -BackupPaths must back up migrations/')
+  for (const rel of [...scriptDefaultList('ReplaceDirs'), 'plugins']) {
+    assert.ok(backupPaths.includes(rel), `the default -BackupPaths must back up ${rel}, which the upgrade replaces or overlays`)
+  }
+
+  const main = scriptSource.slice(scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
+  assert.match(main, /\$overlaidRelativePaths = @\('plugins'\)\s*\$restoredRelativePaths = @\(\$ReplaceDirs\) \+ \$overlaidRelativePaths\s/)
+  const guardIdx = main.indexOf('Assert-ReplacedPathsBackedUp -RestoredRelativePaths $restoredRelativePaths -BackupPaths $BackupPaths')
+  assert.ok(guardIdx > -1, 'Main must refuse a -BackupPaths that misses a replaced path')
+  for (const later of ['New-Item -ItemType Directory -Force -Path $resolvedBackupRoot', 'New-MaintenanceFlag -FlagPath $maintenanceFlagPath', 'Stop-Pm2App -Pm2Command', 'New-TimestampedBackup -RootDir']) {
+    const idx = main.indexOf(later)
+    assert.ok(idx > guardIdx, `the -BackupPaths refusal must come before ${later}`)
+  }
+
+  const stopCalls = (main.match(/Stop-Pm2App -Pm2Command[^\n]*/g) || []).map((call) => call.trim())
+  assert.equal(stopCalls.length, 2)
+  assert.equal(stopCalls[0], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home', 'the step 2 stop stays unconditional')
+  assert.equal(stopCalls[1], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -AfterFailure -KillDaemonAfterStop:($null -ne $restoreTask)')
+  const handler = main.slice(main.indexOf('Write-Err $_.Exception.Message'))
+  const lookupIdx = handler.indexOf('$restoreTask = Get-Pm2ScheduledTask -TaskName $Pm2ScheduledTaskName')
+  const handlerStopIdx = handler.indexOf('Stop-Pm2App -Pm2Command')
+  assert.ok(lookupIdx > -1 && lookupIdx < handlerStopIdx, 'the task lookup must come before the stop that depends on it')
+  assert.match(handler, /Write-RestoreBlock [^\n]* -BackedUpRelativePaths \$BackupPaths -OverlaidRelativePaths \$overlaidRelativePaths\s/)
+})
+
+test('Assert-ReplacedPathsBackedUp (R60 review #6079): the defaults back up every replaced or overlaid path; a -BackupPaths that misses one is refused, naming it; separators, case and extra slashes do not matter (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    // Main's own lists, as dot-sourcing leaves them: the parameter defaults.
+    const restored = "(@($ReplaceDirs) + @('plugins'))"
+    const call = (label, backupPaths) =>
+      `try { Assert-ReplacedPathsBackedUp -RestoredRelativePaths ${restored} -BackupPaths ${backupPaths}; Write-Host '${label}=OK' } catch { Write-Host ('${label}=THREW ' + $_.Exception.Message) }`
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        call('DEFAULTS', '$BackupPaths'),
+        call('PRE_R60', "@('docker', 'config', 'packages/core-backend/dist', 'apps/web/dist', 'plugins')"),
+        call('NO_PLUGINS', "@('packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations')"),
+        call('SPELLINGS', "@('packages\\core-backend\\dist\\', 'APPS/web/dist', 'packages//core-backend/migrations/', ' plugins ')"),
+        call('NOTHING', '@()'),
+      ].join('\n')
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const outcome = (label) => (result.stdout.split(/\r?\n/).find((l) => l.startsWith(`${label}=`)) || '').slice(label.length + 1)
+    assert.equal(outcome('DEFAULTS'), 'OK', result.stdout)
+    assert.match(outcome('PRE_R60'), /^THREW RESTORE_PATH_NOT_BACKED_UP: packages\/core-backend\/migrations would be replaced or overlaid by this upgrade but is not in -BackupPaths/, result.stdout)
+    assert.match(outcome('NO_PLUGINS'), /^THREW RESTORE_PATH_NOT_BACKED_UP: plugins would be replaced/, result.stdout)
+    assert.equal(outcome('SPELLINGS'), 'OK', result.stdout)
+    assert.match(outcome('NOTHING'), /^THREW RESTORE_PATH_NOT_BACKED_UP: packages\/core-backend\/dist, apps\/web\/dist, packages\/core-backend\/migrations, plugins would be/, result.stdout)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('Write-RestoreBlock (R60 review #6079): a path is deleted only when -BackedUpRelativePaths lists it AND the backup folder holds it -- otherwise no command at all, only a note; plugins/ is copied back over the live tree and never deleted (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const backupPath = path.join(scratch, 'backup')
+    const rootDir = path.join(scratch, 'live')
+    // The backup folder holds both dists, plugins AND migrations -- but migrations is
+    // not listed below, and config is listed but absent from the backup folder (a path
+    // absent on the host at backup time).
+    for (const rel of ['packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations', 'plugins']) {
+      fs.mkdirSync(path.join(backupPath, ...rel.split('/')), { recursive: true })
+    }
+    const harness =
+      dotSourcePrelude(scratch) +
+      `Write-RestoreBlock -BackupPath ${psSingleQuote(backupPath)} -RootDir ${psSingleQuote(rootDir)} ` +
+      "-ReplacedRelativePaths @('packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations', 'config', 'plugins') " +
+      "-BackedUpRelativePaths @('packages/core-backend/dist', 'apps/web/dist', 'config', 'plugins') -Pm2AppName 'metasheet-backend'"
+    const result = runPwshHarness(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    const commands = restoreRecipeCommands(result.stdout)
+
+    assert.deepEqual(removeItemTargets(commands).map((target) => slashRelative(rootDir, target)).sort(), ['apps/web/dist', 'packages/core-backend/dist'], commands.join('\n'))
+    for (const rel of ['packages/core-backend/migrations', 'config']) {
+      const live = path.join(rootDir, ...rel.split('/'))
+      assert.deepEqual(commands.filter((command) => command.includes(live)), [], `${rel}: no command may touch a path the backup cannot put back:\n${commands.join('\n')}`)
+      assert.ok(result.stdout.includes(`# ${rel}: NOT restored here`), `${rel}: the block must say it is not restored:\n${result.stdout}`)
+    }
+    const livePlugins = path.join(rootDir, 'plugins')
+    assert.deepEqual(commands.filter((command) => command.includes(livePlugins)), [
+      `New-Item -ItemType Directory -Force -Path '${livePlugins}' | Out-Null`,
+      `Get-ChildItem -LiteralPath '${path.join(backupPath, 'plugins')}' -Force | Copy-Item -Destination '${livePlugins}' -Recurse -Force`,
+    ])
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R60 review #6079): the printed restore recipe, run on the tree the failed upgrade left, puts migrations/ and both dists back exactly and every pre-upgrade plugins/ file back, keeps each plugin\'s live node_modules, and deletes only paths -BackupPaths holds -- never plugins/ (RED on the pre-fix script)', () => {
+  const root = mkLongTempDir('ms2-upgrade-restore-')
+  try {
+    const liveRoot = path.join(root, 'live')
+    const backupRoot = path.join(root, 'backups')
+    const stagingRoot = path.join(root, 'staging')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+
+    buildAcidLiveRoot(liveRoot, { pm2LogPath })
+    // A plugin the package does not ship, with a driver in its live node_modules.
+    writeFixtureFile(liveRoot, 'plugins/plugin-live-only/index.cjs', 'LIVE_ONLY_PLUGIN')
+    writeFixtureFile(liveRoot, 'plugins/plugin-live-only/node_modules/driver/index.js', 'LIVE_ONLY_DRIVER')
+    // The F22 tripwire fails AFTER the swap: dists and migrations replaced, plugins overlaid.
+    fs.rmSync(path.join(liveRoot, ...PREFLIGHT_FILE.split('/')))
+    const { archivePath } = buildAcidArchive(root, { omitPreflightFile: true })
+
+    const replacedInFull = ['packages/core-backend/dist', 'apps/web/dist', 'packages/core-backend/migrations']
+    const before = Object.fromEntries([...replacedInFull, 'plugins'].map((rel) => [rel, snapshotFiles(path.join(liveRoot, ...rel.split('/')))]))
+    assert.ok(Object.keys(before.plugins).filter((rel) => rel.split('/').includes('node_modules')).length === 2, 'the fixture must carry live plugin node_modules')
+
+    const result = runUpgradeScript([
+      '-PackageArchive', archivePath,
+      '-RootDir', liveRoot,
+      '-EnvFile', path.join(liveRoot, 'docker/app.env'),
+      '-BackupRoot', backupRoot,
+      '-StagingRoot', stagingRoot,
+      '-RunMigrations', '0',
+      '-RestartService', '0',
+    ])
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0)
+    assert.match(combined, /UPGRADE_ASSERTION_MISSING_FILES/, combined)
+    assert.match(combined, /RESTORE REQUIRED/)
+    // The failed upgrade really changed what the recipe has to put back.
+    assert.ok(fs.existsSync(path.join(liveRoot, 'packages/core-backend/migrations/001_new.sql')), 'the upgrade must have replaced migrations/ before failing')
+    assert.notDeepEqual(snapshotFiles(path.join(liveRoot, 'plugins')), before.plugins)
+
+    // Run the recipe exactly as printed.
+    const commands = restoreRecipeCommands(result.stdout)
+    const recipePath = path.join(root, 'restore-recipe.ps1')
+    writeRunnableScript(recipePath, ["$ProgressPreference = 'SilentlyContinue'", ...commands, ''].join('\n'))
+    const restore = spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', recipePath], { encoding: 'utf8' })
+    const restoreReport = `status=${restore.status}\nrecipe:\n${commands.join('\n')}\nstdout:\n${restore.stdout}\nstderr:\n${restore.stderr}`
+
+    // (a) migrations/ and both dists: exactly the pre-upgrade files again.
+    for (const rel of replacedInFull) {
+      assert.deepEqual(snapshotFiles(path.join(liveRoot, ...rel.split('/'))), before[rel], `${rel} must be exactly as before the upgrade.\n${restoreReport}`)
+    }
+    // (b) plugins/: every pre-upgrade file back with its pre-upgrade content -- each
+    // plugin's live node_modules included, which the backup never held.
+    const pluginsAfter = snapshotFiles(path.join(liveRoot, 'plugins'))
+    for (const [rel, content] of Object.entries(before.plugins)) {
+      assert.equal(pluginsAfter[rel], content, `plugins/${rel} must be as before the upgrade.\n${restoreReport}`)
+    }
+    assert.equal(restore.status, 0, restoreReport)
+
+    // (c) The recipe deletes only what -BackupPaths backs up, and never plugins/.
+    const backupPaths = scriptDefaultList('BackupPaths')
+    const deleted = removeItemTargets(commands).map((target) => slashRelative(liveRoot, target))
+    for (const rel of deleted) {
+      assert.ok(backupPaths.includes(rel), `the recipe deletes ${rel}, which -BackupPaths (${backupPaths.join(', ')}) does not back up:\n${commands.join('\n')}`)
+      assert.notEqual(rel, 'plugins', 'the recipe must never delete plugins/: its backup holds no node_modules to put back')
+    }
+    assert.deepEqual([...deleted].sort(), [...replacedInFull].sort(), commands.join('\n'))
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R60 review #6079): a -BackupPaths without packages/core-backend/migrations (the pre-R60 default) is refused at startup with RESTORE_PATH_NOT_BACKED_UP -- before pm2, the gate, any backup or any live file', () => {
+  const root = mkLongTempDir('ms2-upgrade-restore-')
+  try {
+    const liveRoot = path.join(root, 'live')
+    const witness = maintenanceWitnessPaths(root, liveRoot)
+    const backupRoot = path.join(root, 'backups')
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+    buildAcidLiveRoot(liveRoot, { pm2LogPath, witness })
+    const { archivePath } = buildAcidArchive(root)
+    const preR60BackupPaths = scriptDefaultList('BackupPaths').filter((rel) => rel !== 'packages/core-backend/migrations')
+
+    // -File cannot pass an array parameter; a wrapper splats it.
+    const wrapperPath = path.join(root, 'run-upgrade-without-migrations-backup.ps1')
+    writeRunnableScript(
+      wrapperPath,
+      [
+        '$upgradeParams = @{',
+        `  PackageArchive = ${psSingleQuote(archivePath)}`,
+        `  RootDir = ${psSingleQuote(liveRoot)}`,
+        `  EnvFile = ${psSingleQuote(path.join(liveRoot, 'docker', 'app.env'))}`,
+        `  BackupRoot = ${psSingleQuote(backupRoot)}`,
+        `  StagingRoot = ${psSingleQuote(path.join(root, 'staging'))}`,
+        "  RunMigrations = '0'",
+        "  RestartService = '0'",
+        `  BackupPaths = @(${preR60BackupPaths.map((rel) => psSingleQuote(rel)).join(', ')})`,
+        '}',
+        `& ${psSingleQuote(scriptExecPath)} @upgradeParams`,
+        '',
+      ].join('\n'),
+    )
+    const result = spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', wrapperPath], { encoding: 'utf8' })
+    const combined = result.stderr + result.stdout
+    assert.notEqual(result.status, 0, combined)
+    // The refusal is an uncaught error, and both shells wrap its message: pwsh 7
+    // (ConciseView) adds colour codes and wraps at word breaks behind a "     | " gutter;
+    // Windows PowerShell 5.1 hard-wraps at the buffer width, mid-word. So the message is
+    // compared with colour codes, the gutter and ALL whitespace taken out of both sides.
+    const compact = (text) =>
+      text
+        .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
+        .replace(/\r?\n[ \t]*\|/g, '')
+        .replace(/\s+/g, '')
+    assert.ok(
+      compact(combined).includes(compact('RESTORE_PATH_NOT_BACKED_UP: packages/core-backend/migrations would be replaced or overlaid by this upgrade but is not in -BackupPaths')),
+      combined,
+    )
+    assert.ok(!fs.existsSync(pm2LogPath), 'pm2 must never be invoked')
+    assert.ok(!fs.existsSync(backupRoot), 'no backup may be started')
+    assert.deepEqual(readPm2FlagWitness(witness.pm2FlagWitnessPath), [])
+    assert.ok(!fs.existsSync(witness.flagPath), 'the gate must never go up')
+    assert.equal(fs.readFileSync(path.join(liveRoot, 'packages', 'core-backend', 'migrations', '000_old.sql'), 'utf8'), 'select 0;\n', 'no live file may be touched')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pipe means no pm2 command at all; a present or unqueryable pipe means stop -- and on a pm2-runtime host stop, pm2 kill, then the pipe wait, in that order, under the one home; an unmanaged host is never killed; off Windows, and at step 2, the stop runs as before (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-unit-')
+  try {
+    const home = path.join(scratch, 'runtime-home')
+    fs.mkdirSync(home, { recursive: true })
+    // machinePipe: Test-Pm2UsesMachinePipe (Windows). pipe: Test-Pm2DaemonPipePresent's
+    // answer. kill: -KillDaemonAfterStop (a pm2-runtime host). wait: the pipe wait's answer.
+    const cases = [
+      { label: 'ABSENT_RUNTIME_HOST', pipe: 'false', kill: true, expect: ['PROBE'] },
+      { label: 'ABSENT_UNMANAGED', pipe: 'false', kill: false, expect: ['PROBE'] },
+      { label: 'PRESENT_RUNTIME_HOST', pipe: 'true', kill: true, expect: ['PROBE', 'stop', 'kill', 'WAIT'] },
+      { label: 'PRESENT_UNMANAGED', pipe: 'true', kill: false, expect: ['PROBE', 'stop'] },
+      { label: 'UNKNOWN_RUNTIME_HOST', pipe: 'null', kill: true, expect: ['PROBE', 'stop', 'kill', 'WAIT'] },
+      { label: 'UNKNOWN_UNMANAGED', pipe: 'null', kill: false, expect: ['PROBE', 'stop'] },
+      { label: 'STILL_OPEN_RUNTIME_HOST', pipe: 'true', kill: true, wait: 'still-open', expect: ['PROBE', 'stop', 'kill', 'WAIT'] },
+      { label: 'NOT_WINDOWS_RUNTIME_HOST', machinePipe: false, pipe: 'false', kill: true, expect: ['stop'] },
+      { label: 'STEP2', afterFailure: false, pipe: 'false', kill: false, expect: ['stop'] },
+    ]
+    const prelude =
+      dotSourcePrelude(scratch) +
+      [
+        'function global:Test-Pm2UsesMachinePipe { return $global:StubMachinePipe }',
+        'function global:Test-Pm2DaemonPipePresent {',
+        "  param([string]$PipeName = 'rpc.sock')",
+        "  Add-Content -LiteralPath $global:CasePm2Log -Value 'PROBE'",
+        "  if ($global:StubPipe -eq 'null') { return $null }",
+        "  return ($global:StubPipe -eq 'true')",
+        '}',
+        'function global:Wait-Pm2DaemonPipeClosed {',
+        "  param([int]$TimeoutSec = 15, [string]$PipeName = 'rpc.sock')",
+        "  Add-Content -LiteralPath $global:CasePm2Log -Value 'WAIT'",
+        '  return $global:StubWait',
+        '}',
+        '',
+      ].join('\n')
+    const blocks = cases.map((c) => {
+      const dir = path.join(scratch, c.label)
+      c.pm2Log = path.join(dir, 'pm2-calls.log')
+      c.homeLog = path.join(dir, 'pm2-home.log')
+      const stub = writePm2Stub(dir, c.pm2Log, null, { homeLogPath: c.homeLog })
+      const flags = [c.afterFailure === false ? '' : '-AfterFailure', c.kill ? '-KillDaemonAfterStop' : ''].filter(Boolean).join(' ')
+      return [
+        `$global:StubMachinePipe = ${c.machinePipe === false ? '$false' : '$true'}`,
+        `$global:StubPipe = ${psSingleQuote(c.pipe)}`,
+        `$global:StubWait = ${psSingleQuote(c.wait || 'closed')}`,
+        `$global:CasePm2Log = ${psSingleQuote(c.pm2Log)}`,
+        `Write-Host '--- ${c.label}'`,
+        `try { Stop-Pm2App -Pm2Command ${psSingleQuote(stub)} -Name 'metasheet-backend' -Pm2Home ${psSingleQuote(home)} ${flags}; Write-Host '${c.label}=RETURNED' } ` +
+          `catch { Write-Host ('${c.label}=THREW ' + $_.Exception.Message) }`,
+        '',
+      ].join('\n')
+    })
+    // Windows caps a command line at 32767 characters (see the Restart-Pm2AppOrScheduledTask test).
+    const HARNESS_LIMIT = 30000
+    const harnesses = []
+    for (const block of blocks) {
+      const last = harnesses.length - 1
+      if (last >= 0 && harnesses[last].length + block.length <= HARNESS_LIMIT) harnesses[last] += block
+      else harnesses.push(prelude + block)
+    }
+    let stdout = ''
+    for (const harness of harnesses) {
+      assert.ok(harness.length <= HARNESS_LIMIT, `one case alone must fit a command line (${harness.length} chars)`)
+      const run = runPwshHarness(harness)
+      assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error))
+      stdout += run.stdout
+    }
+    const section = (label) => {
+      const start = stdout.indexOf(`--- ${label}`)
+      assert.ok(start > -1, `no output for ${label}:\n${stdout}`)
+      const next = stdout.indexOf('--- ', start + 4)
+      return stdout.slice(start, next === -1 ? undefined : next)
+    }
+    const byLabel = Object.fromEntries(cases.map((c) => [c.label, c]))
+    for (const c of cases) {
+      assert.match(section(c.label), new RegExp(`${c.label}=RETURNED`), `${c.label}: the failure handler's stop must not throw on this answer:\n${section(c.label)}`)
+      assert.deepEqual(readLogLines(c.pm2Log).map((l) => l.split(/\s+/)[0]), c.expect, `${c.label}: probe / pm2 / wait sequence`)
+      for (const entry of readPm2HomeLog(c.homeLog)) {
+        assert.equal(entry.home, home, `${c.label}: pm2 ${entry.command} must run under the resolved home`)
+      }
+    }
+    // No daemon pipe: zero pm2 invocations, and the log says why.
+    for (const label of ['ABSENT_RUNTIME_HOST', 'ABSENT_UNMANAGED']) {
+      assert.deepEqual(readPm2HomeLog(byLabel[label].homeLog), [], `${label}: pm2 must not be run at all`)
+      assert.match(section(label), /PM2_STOP_SKIPPED_NO_DAEMON: no pm2 daemon listens on \\\\\.\\pipe\\rpc\.sock/)
+    }
+    assert.deepEqual(readPm2HomeLog(byLabel.PRESENT_RUNTIME_HOST.homeLog).map((entry) => entry.command), ['stop', 'kill'])
+    assert.doesNotMatch(section('PRESENT_RUNTIME_HOST'), /PM2_DAEMON_NOT_CONFIRMED_GONE/)
+    assert.match(section('STILL_OPEN_RUNTIME_HOST'), /PM2_DAEMON_NOT_CONFIRMED_GONE: after 'pm2 kill' the pipe \\\\\.\\pipe\\rpc\.sock is 'still-open'/)
+    assert.match(section('UNKNOWN_UNMANAGED'), /could not be queried; stopping 'metasheet-backend' anyway/)
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
   }
 })
 
