@@ -71,6 +71,8 @@ SELECT count(*) AS residue
 
 三个端点都要：`canManageFields`（需 `multitable:manage-schema`）、表是活的、对该表有**全表读**（能读、无行级拒读、无字段遮罩、无公式遮罩）。
 
+**执行与撤销的权限以数据库为准。** 这两个端点在事务里、取得栅栏之后，从数据库重新读一次请求者的权限与账号状态（设计锁「增补 B」）。在库里收回权限、停用账号之后，即使对方手里的登录凭证还没过期，执行与撤销也会被拒（403，零写入）。预览是只读的，仍按登录凭证里的权限作答。排查「预览能过、执行 403」时先查库里的授权，不要先怀疑凭证。
+
 ```
 POST /api/multitable/fields/:fieldId/retype-preview   { "targetType": "select" | "multiSelect" }
 POST /api/multitable/fields/:fieldId/retype-execute   { "previewToken": "<预览返回的凭证>", "confirm": "convert-field-type" }
@@ -120,6 +122,7 @@ POST /api/multitable/fields/:fieldId/retype-undo      { "convertRevisionId": "<�
 - 公式物化值、视图的筛选 / 排序 / 分组、实时推送**不会**跟着迁移——与 `PATCH` 改类型同口径。
 - 转换不触发自动化的 `record.updated`。
 - 带首尾空白、纯空白、或非文本值的格子会让预览整次拒绝并列出全部记录 id；先清洗再转换。
+- 预览的拒绝原因里出现 `record_data_not_object`，表示列出的记录（或回收站行）整行数据不是 JSON 对象——这是损坏的行，不是格子的问题。不要手工改库去「修」它；把记录 id 交给技术负责人，由其判断来源后处理。
 
 ## 5. 撤销窗口与保留期
 

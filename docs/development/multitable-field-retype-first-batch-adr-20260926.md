@@ -24,6 +24,7 @@
 
 - **请求**：`{ targetType: 'select' | 'multiSelect' }`。不接受 `property`——选项由服务端从单元格推导。
 - **门（五段，顺序固定，任一不过即停、不扫描）**：① flag `MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT !== 'true'` ⇒ 403 `FIELD_RETYPE_CONVERT_DISABLED`；② `MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA === 'true'` ⇒ 409 `FIELD_RETYPE_TRUST_REQUIRED`，`details.reason='legacy_manage_schema_flag'`（该 flag 让 `multitable:write` 也拿到 `canManageFields`，`manage-schema-permission.ts:33-40`、manifest `:50-59`，低于 owner 批的门；env-only、values-free）；③ `capabilities.canManageFields`（照抄 PATCH `univer-meta.ts:13946`；表级已含 `&& scope.canWrite`，`permission-service.ts:1493`）⇒ 否则 403；④ `sheetLiveness !== 'live'` ⇒ 404 `sendSheetNotLive`（PATCH 下一行 `:13947`；`sheet-refusals.ts:47-51` 给 `SHEET_DELETED` / `NOT_FOUND`；死表不清零能力、调用方必须答 404，`permission-service.ts:1755-1762`；新表级路径须断言存活，`sheet-liveness.ts:20-29`）；⑤ `hasFullTableReadAccess`（`:7286-7304`，既有用法 `:10915`）⇒ 否则整面 403，**无 scoped 模式、无 undisclosed 标记**（R6 裁决，`docs/development/multitable-global-history-r6-ratification-decision-record-20260708.md` §2；`lossy-retype-oracle.ts:44-48`）。**三个端点同五门**。
+  （2026-09-28 增补，见文末「增补 B」：门 ⑤ 的完整定义是 **`capabilities.canRead` 且 `hasFullTableReadAccess`**；③ ④ ⑤ 收成一个函数、三个端点共用；执行与撤销另在事务内从数据库重新解析权限；`data` 不是 JSON 对象的行让整次转换被拒。）
 - **范围校验**：源 `type !== 'string'`、目标不在首批、排除集、§1 并集 ⇒ 422 `FIELD_RETYPE_CONVERT_NOT_SUPPORTED` + `details.reason ∈ {pair_not_in_first_batch, excluded_type, plugin_managed_sheet, system_managed_sheet, plugin_tagged_fields, pipeline_staging_sheet, approval_projection_sheet}`。
 - **扫描范围与上限**：live `meta_records`（`sheet_id`）+ **本表回收站** `meta_records_trash`（同 `sheet_id`）。`live + trash > resolveSheetRevertMaxRecords()`（默认 5000，`restore-caps.ts:15, :17-20`）⇒ 413 `SHEET_TOO_LARGE`，不截断（照抄 `:10925-10927`）。回收站行恢复时原样 INSERT、`version` 重置 1、无任何类型校验、无 flag 门（`record-service.ts:1140`, `:1233-1238`），不扫就会把未转换的原值带回选项列、绕过 A。规则：回收站行 `data ? F` 且 `data->F` 非 JSON null、非 `''` ⇒ 整次 `rejected`，reason `trashed_rows_with_value`（recordIds = 其 `record_id`）；空形（缺键 / null / `''`）放行——恢复后是读侧容忍的旧空形（`config-restore.ts:63-65`），下一次写入折成规范空值（`field-codecs.ts:1041`；`record-write-service.ts:582`），且恢复本身让撤销 ② 失败（集合多一个），不撕裂前镜像。
 - **零写入**：走 `pool.query`（同 `:10915` 的预览），不开事务、不取栅栏、不写任何表。
@@ -301,3 +302,43 @@ git grep -n -E 'meta_recovery_archive_legal_hold_release_authorize|meta_recovery
 **要不要调用转换助手 `assertFieldSchemaUnchangedAfterFence`**：不需要。助手比较的是「调用方在栅栏**之前**拿到的 `fieldById` 快照」和「栅栏之后的 `meta_fields`」。本事务对 N 没有栅栏前快照（N 的字段在栅栏之后才建）；对 S 的快照本身就是在 fence(S) 之后取的。两处调用都只会恒等通过，是空断言。结构守卫落地时，应按行 8 的口径把本行登记为免检（理由：栅栏后实读，且只写同事务新建的表），而不是要求它接助手。F 只被读（记录存在性）和引用（`meta_links`），不写其 `meta_records.data`，同样不需要。
 
 **计数**：登记范围变为行 1–35：必接 7 行（不变）、免检 16 行（+行 34）、非数据写入者 12 行（+行 35）。`14e52a6e5` 上 stage 2 的 90 处 = `c5dd857b2` 的 88 处（按「文件 + 行文本」比对逐条仍在，行号漂移不计）+ 行 34、行 35 各 1 处；stage 1 / 1b / 3 / 4 除行号外与 `c5dd857b2` 相同。所以 `14e52a6e5` 上的普查**无遗漏**。这是文本比对的结论：88 处旧调用点没有逐条重读，结构守卫落地时以守卫结论为准。
+
+## 增补 B（2026-09-28，第 2 刀 PR #6139 终审的进入条件；随第 3 刀 b 线 PR 提交）
+
+**状态**：`Ratified-by-default-2026-09-28`（T 层，owner 24h 可否决）；登记在 `docs/development/takeover-beiliao-20260821/decision-register.md` R-21。四条都是**收紧**，没有一条放宽既有的门或作用域。§2–§4 正文除 §2 门列表下的一行指针外不改；本增补与正文冲突处以本增补为准。
+
+### B1 门 ⑤ = `canRead` 且全表读；③ ④ ⑤ 只有一份判定
+
+**修订句（替换 §2 门列表里的 ⑤）**：「⑤ `capabilities.canRead` **且** `hasFullTableReadAccess` ⇒ 否则整面 403 `FULL_TABLE_READ_REQUIRED`，无 scoped 模式、无 undisclosed 标记。」
+
+原文只点了 `hasFullTableReadAccess` 一个名字。它**不读** `capabilities.canRead`（只判行级拒读、字段遮罩、公式遮罩三个轴）；而 `canManageFields` 单凭 `multitable:manage-schema` 即为真（`manage-schema-permission.ts` `deriveCanManageFields`），与 `canRead` 无关（`access.ts` `deriveCapabilities`）。照原文写出来的路由，会让一个只有改结构权、读不了本表的主体过全部五门：预览把每条记录的 id 交给他，执行让他改写一整列他读不了的数据。
+
+落地：判定在 `multitable/field-retype-convert-gates.ts` `judgeFieldRetypeConvertGates`（顺序 ③ → ④ → ⑤，只此一处）；路由侧 `gateFieldRetypeConvert` 由预览 / 执行 / 撤销三个处理器调用，处理器体内不再有任何一门的手写副本（`tests/unit/multitable-sheet-liveness-closure.guard.test.ts`「the shared field-retype gate」按源码钉住）。
+
+### B2 执行 / 撤销的权限取自数据库，在事务内、栅栏之后
+
+正文对此没有规定。预览在请求凭证带权限 claim 时按 claim 解析能力、不问库（`multitable/access.ts` `resolveRequestAccess`）；对只读端点可以接受。对改写一整列的执行与撤销，取更严的模型：
+
+- 事务外照常过五门（快速拒）；
+- 事务内，**取得栅栏之后、第一把行锁之前**，用事务自己的 `query` 从数据库重新解析请求者此刻的能力，再过 B1 的同一个判定。能力 = 请求 claim ∩ 数据库权限（`recovery-authorization-stability.ts` `resolveRecoverySheetAuthority`，与精确锚点恢复同一个解析器）；表的存活同样在事务内重读；
+- 不过 ⇒ 与事务外**字节相同**的拒绝（403 / 404），零写入、不取任何行锁。
+
+后果：库里已收回的权限、已停用或已删除的账号，不会因为一张还没过期的凭证而继续能改数据；反过来，凭证里没有的权限也不会因为库里有而多出来。
+
+### B3 `data` 不是 JSON 对象的行 ⇒ 整次拒绝
+
+扫描到的任一行（live 或本表回收站）`jsonb_typeof(data) <> 'object'` ⇒ 预览 `verdict: 'rejected'`，新增 reason **`record_data_not_object`**（`recordIds` 完整），不签发凭证。**不**把这种行当空格读：对非对象的 jsonb，`data ? F` 问的是「数组里有没有这个字符串元素」，`data -> F` 恒为 NULL，读出来的「缺键」是假的；执行的 `jsonb_set` 在非对象上要么报错要么不写。
+
+执行在栅栏与行锁之下重算计划；计划不是 `ok` 即 409 `PLAN_DRIFT`、零写入——**即使 planHash 没变**（一行的 `data` 从 `{}` 变成 `[]`，单元格照样读成缺键、哈希相同）。撤销不需要另加判定：非对象行的 `data -> F` 为 NULL，必然不等于信封 `post`，落在既有的 ③ `cells_changed` 上。
+
+预览与执行读每一行用的是**同一份列表达式文本**（`field-retype-convert-preview.ts` `FIELD_RETYPE_CONVERT_CELL_COLUMNS`：`is_object` / `has_key` / `cell`），执行只多一个 `FOR UPDATE`。
+
+### B4 真库验收必须走真路由
+
+第 2 刀的测试全部由假 pool 作答（`has_key` 与单元格在 JavaScript 里算），预览的任何一条 SQL 都没在真 PostgreSQL 上跑过。§6 第 3 刀的真库用例因此一律「预览 → 执行 → 撤销」走真路由，并另含：四态单元格（缺键 / null / `''` / 有值）在真库上的读法；**别的表**的回收站行不进本表的扫描、不动 planHash；预览签发的 planHash 被执行重算后接受；数据库里收回权限后执行与撤销拒绝。
+
+### 留给 owner、本增补不定（按正文实现，开关打开之前裁）
+
+1. 回收站行的 recordId 会出现在预览的 `rejections[].recordIds` 里，而能过五门的人未必能打开回收站。
+2. 在字段定义上隐藏的列（property 级）过得了门 ⑤——⑤ 的字段轴只看 `field_permissions`。
+3. 表级写授权可以在没有 `multitable:manage-schema` 的情况下带来改结构权。
