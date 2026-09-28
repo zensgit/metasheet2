@@ -78,7 +78,10 @@ export async function isPluginManagedSheet(
 
 /**
  * Is `sheetId` a system-managed sheet (server-owned `system_kind`, or the People directory sentinel)?
- * Only ever used to REFUSE a delete — never as a trust/exclusion signal.
+ * REFUSE-ONLY: its callers use a YES only to refuse something — a sheet delete here, and a field-type
+ * conversion (retype-preview/-execute/-undo, field-retype-convert-preview.ts, design-lock
+ * docs/development/multitable-field-retype-first-batch-adr-20260926.md §1 (b)) — and never to grant,
+ * trust or widen anything. A new caller must keep to that direction.
  *
  * COLUMN-TOLERANT (adversarial-review fix, #6089): reads `system_kind` via
  * `to_jsonb(meta_sheets) ->> 'system_kind'`, the SAME column-tolerant form every other reader in

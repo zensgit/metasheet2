@@ -993,3 +993,58 @@ export function verifyExactAnchorRecoveryIdentity(
     },
   }
 }
+
+// ── Field retype CONVERT preview-identity (ADR docs/development/multitable-field-retype-first-batch-adr-20260926.md §2) ──
+// The read-only `POST /fields/:fieldId/retype-preview` (slice 2) mints this; the execute route (slice 3) will verify it
+// claim by claim (`type`, fieldId, sheetId, actorId, sourceType, targetType → 401 PREVIEW_IDENTITY_INVALID; planHash →
+// 409 PLAN_DRIFT). `type: 'field-retype-convert-preview'` keeps it DISJOINT from every other identity in this module
+// (a convert token can never drive a config-restore / record restore, and vice versa). Same HS256 + 10-minute window.
+export interface FieldRetypeConvertPreviewIdentityClaims {
+  sheetId: string
+  fieldId: string
+  /** the actor the preview was minted for — a preview minted for A is unusable by B. */
+  actorId: string
+  sourceType: 'string'
+  targetType: 'select' | 'multiSelect'
+  /** opaque SERVER-KEYED HMAC over the whole conversion plan (hashFieldRetypeConvertPlan); never a plain digest. */
+  planHash: string
+}
+
+/**
+ * Opaque, SERVER-KEYED digest of the conversion plan. HMAC (never the plain sha256), for the same reason as
+ * `hashLossSummary` / `hashUncreatePlan`: the claim rides in a client-decodable JWT, and the plan's inputs include the
+ * FULL option sequence (= cell texts) and per-record cell hashes — a plain digest would let a token holder confirm
+ * guessed cell values offline. The keyed PRF makes the claim opaque. The input is the canonical plan string built by
+ * `canonicalFieldRetypeConvertPlanInput` (field-retype-convert.ts), which carries its own `kind`/`v` domain tag.
+ */
+export function hashFieldRetypeConvertPlan(canonicalPlan: string): string {
+  return createHmac('sha256', getSecret()).update(String(canonicalPlan)).digest('hex')
+}
+
+export function mintFieldRetypeConvertPreviewIdentity(claims: FieldRetypeConvertPreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
+  return jwt.sign({ type: 'field-retype-convert-preview', ...claims }, getSecret(), { algorithm: 'HS256', expiresIn } as SignOptions)
+}
+
+export interface FieldRetypeConvertVerifyResult {
+  valid: boolean
+  // `plan_drift` = the planHash diverged (a cell / row / trash row / option / property moved since preview) — the
+  // execute route maps it to ONE generic 409 PLAN_DRIFT; the opaque hash cannot reveal WHICH input moved.
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_fieldId' | 'mismatch_actorId' | 'mismatch_sourceType' | 'mismatch_targetType' | 'plan_drift'
+}
+
+export function verifyFieldRetypeConvertPreviewIdentity(token: string, expected: FieldRetypeConvertPreviewIdentityClaims): FieldRetypeConvertVerifyResult {
+  let payload: Partial<FieldRetypeConvertPreviewIdentityClaims> & { type?: string }
+  try {
+    payload = jwt.verify(token, getSecret(), { algorithms: ['HS256'] }) as Partial<FieldRetypeConvertPreviewIdentityClaims> & { type?: string }
+  } catch (e) {
+    return { valid: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'field-retype-convert-preview') return { valid: false, reason: 'wrong_type' }
+  if (payload.sheetId !== expected.sheetId) return { valid: false, reason: 'mismatch_sheetId' }
+  if (payload.fieldId !== expected.fieldId) return { valid: false, reason: 'mismatch_fieldId' }
+  if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
+  if (payload.sourceType !== expected.sourceType) return { valid: false, reason: 'mismatch_sourceType' }
+  if (payload.targetType !== expected.targetType) return { valid: false, reason: 'mismatch_targetType' }
+  if (payload.planHash !== expected.planHash) return { valid: false, reason: 'plan_drift' }
+  return { valid: true }
+}
