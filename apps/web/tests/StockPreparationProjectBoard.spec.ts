@@ -80,6 +80,7 @@ import {
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 import {
   stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
   stockPreparationHandoffResendableStepKey,
 } from '../src/services/integration/stockPreparation/confirmationQueue'
 import {
@@ -276,6 +277,8 @@ async function flush(): Promise<void> {
 //         fresh advance) or as 「没有重复交」 (an owed resend that failed again).
 //   BNP-2 `terminal` means the LAST step is the current one, not that the chain is done: its handler
 //         can press (the press tells 仓库/采购), and only `completed` reads as finished.
+//   BNP-3 A hop whose notice is still OWED to this caller (`resendableStepKey`) can be sent from here
+//         even when the turn — or the whole chain — has moved on, as it can from the queue.
 //
 // The fixtures are the server's GET /handoff and POST /handoff/advance shapes
 // (plugins/plugin-integration-core/lib/http-routes.cjs, stockPreparationHandoff /
@@ -562,6 +565,125 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     expect(turn).toContain('final_review')
     expect(turn).not.toContain('已经走完最后一步')
     expect(nextStepKey(root)).not.toBe('notify')
+  })
+
+  // ---- BNP-3 the owed resend ------------------------------------------------------------------
+
+  /** The turn moved on to `planning` (not the caller's); the `process` hop's notice is owed to them. */
+  const OWED = { stepIndex: 2, currentStepKey: 'planning', isCurrentHandler: false, notifiedStepIndex: 0, resendableStepKey: 'process' }
+  const RESEND_INVITE = '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。'
+
+  it('BNP-3: the handler who still owes a hop’s notice can send it after the turn moved on', async () => {
+    route({
+      handoff: [
+        () => ok(cursor(OWED)),
+        () => ok(cursor({ ...OWED, notifiedStepIndex: 1, resendableStepKey: null })),
+      ],
+      advance: () => advanced({ currentStepKey: 'planning', changed: false, notified: true, notifyOutcome: 'sent', resumed: true }),
+    })
+    const root = await mountBoard()
+
+    // It is still not their turn, and the page does not pretend otherwise…
+    expect(text(root, 'stock-prep-project-board-turn')).not.toContain('轮到您了')
+    // …but the notice is theirs to send, and the button says which one it sends.
+    const button = notifyButton(root)!
+    expect(button.textContent).toContain('补发上一步的群消息')
+    expect(button.getAttribute('title')).toBe(RESEND_INVITE)
+    expect(nextStepKey(root)).toBe('notify')
+
+    await press(root)
+    // The OWED hop, not the current one — advancing `planning` would lose `process` for good.
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    // Once sent, nothing is owed and it is still somebody else's turn: back to unpressable.
+    expect(notifyButton(root)!.disabled).toBe(true)
+  })
+
+  it('BNP-3: an owed notice for the LAST hop can still be sent after the chain finished', async () => {
+    // The terminal fan-out to 仓库/采购 is the notice this feature exists for; the chain is done, but
+    // its claim was never taken.
+    const owedAtEnd = { stepIndex: 4, currentStepKey: null, terminal: false, completed: true, isCurrentHandler: false, notifiedStepIndex: 2, resendableStepKey: 'final_review' }
+    route({
+      handoff: [() => ok(cursor(owedAtEnd)), () => ok(cursor({ ...owedAtEnd, notifiedStepIndex: 3, resendableStepKey: null }))],
+      advance: () => advanced({
+        fromStepKey: 'final_review',
+        currentStepKey: null,
+        stepIndex: null,
+        terminal: true,
+        changed: false,
+        notified: true,
+        notifyOutcome: 'sent',
+        resumed: true,
+      }),
+    })
+    const root = await mountBoard()
+    expect(text(root, 'stock-prep-project-board-turn')).toContain('已经走完最后一步')
+    await press(root)
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['final_review'])
+    expect(notifyButton(root)!.disabled).toBe(true)
+  })
+
+  it('BNP-3 control: with NOTHING owed, somebody else’s turn stays unpressable and says why', async () => {
+    // `null` from a current backend, and the key ABSENT from one older than it: both mean "nothing owed".
+    const withoutKey = cursor({ ...OWED, resendableStepKey: null })
+    delete withoutKey.resendableStepKey
+    for (const answer of [cursor({ ...OWED, resendableStepKey: null }), withoutKey]) {
+      route({ handoff: [() => ok(answer)] })
+      const root = await mountBoard()
+      const label = `resendableStepKey ${'resendableStepKey' in answer ? 'null' : 'absent'}`
+      const button = notifyButton(root)!
+      expect(button.disabled, label).toBe(true)
+      expect(button.textContent, label).not.toContain('补发')
+      expect(button.getAttribute('title'), label).toBe('现在不是轮到您,所以不用您来通知')
+      button.click()
+      await flush()
+      expect(advanceBodies(), label).toHaveLength(0)
+      expect(nextStepKey(root), label).not.toBe('notify')
+      remount()
+    }
+  })
+
+  it('BNP-3: if the server refuses the resend, its refusal is what the operator reads', async () => {
+    // The roster changed between the read and the press: the planner answers 403 for a caller who is
+    // no longer a handler of the replayed hop. The page shows that answer; it does not decide it.
+    route({
+      handoff: [() => ok(cursor(OWED))],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER', message: 'refused' },
+      }), { status: 403 }),
+    })
+    const root = await mountBoard()
+    await press(root)
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    const error = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(error).not.toBeNull()
+    expect(error.textContent).toContain('现在不是您这一步,所以不能通知下一步。')
+    expect(error.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]')).toBeNull()
+  })
+
+  it('BNP-3: the shared rule both buttons render by, as a table', () => {
+    const at = (overrides: Record<string, unknown>) => ({
+      configured: true,
+      currentStepKey: 'planning',
+      isCurrentHandler: false,
+      completed: false,
+      resendableStepKey: null as string | null,
+      ...overrides,
+    })
+    // Holds an open step — the last one included (`terminal` is not an input at all).
+    expect(stockPreparationHandoffMayPress(at({ isCurrentHandler: true }))).toBe(true)
+    // Owes a notice: after the turn moved on, and after the chain finished.
+    expect(stockPreparationHandoffMayPress(at({ resendableStepKey: 'process' }))).toBe(true)
+    expect(stockPreparationHandoffMayPress(at({ currentStepKey: null, completed: true, resendableStepKey: 'final_review' }))).toBe(true)
+    // Nothing to press: somebody else's turn, a finished chain, no chain at all, no state.
+    expect(stockPreparationHandoffMayPress(at({}))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ currentStepKey: null, completed: true, isCurrentHandler: true }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ configured: false, isCurrentHandler: true }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ configured: false, resendableStepKey: 'process' }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(at({ resendableStepKey: '' }))).toBe(false)
+    expect(stockPreparationHandoffMayPress(null)).toBe(false)
   })
 })
 

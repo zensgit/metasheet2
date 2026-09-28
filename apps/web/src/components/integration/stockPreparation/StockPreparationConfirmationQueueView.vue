@@ -140,15 +140,16 @@
            The server decides both (it holds the monotonic claim column and the step rosters); the
            page only renders what it is told. `completed` is deliberately NOT a bar on this branch: a
            terminal hop whose claim was interrupted leaves the chain finished and the 仓库/采购 notice
-           still owed, which is the single most important message this feature sends. -->
+           still owed, which is the single most important message this feature sends.
+           The rule itself is confirmationQueue.ts `stockPreparationHandoffMayPress`, shared with
+           项目备料页 so the two buttons cannot disagree about who may press. -->
       <!-- P1-2: EMBEDDED MODE hides this for the same G1 reason as 导出 above, plus a sharper one —
            the host renders its OWN 通知下一步 fed by its OWN `readStockPreparationHandoff` call. Two
            independently-fetched copies of "whose turn is it" on one screen do not refresh each other,
            so advancing from one leaves the other showing the previous holder until something else
            reloads it. One turn signal per screen; the tab keeps its own. -->
       <button
-        v-if="!embedded && can('handoff.advance') && handoff.configured
-          && ((handoff.isCurrentHandler && !handoff.completed) || handoffResendableStepKey)"
+        v-if="!embedded && can('handoff.advance') && stockPreparationHandoffMayPress(handoff)"
         type="button"
         data-testid="stock-prep-handoff-advance"
         :disabled="busy || !projectNo"
@@ -600,6 +601,7 @@ import {
   readStockPreparationValueEntry,
   stockPreparationHandoffAdvanceWasReplay,
   stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
   stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
   type StockPreparationDecisionReadiness,

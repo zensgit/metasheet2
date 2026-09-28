@@ -470,6 +470,8 @@ import {
   readStockPreparationOperatorDirectory,
   stockPreparationHandoffAdvanceWasReplay,
   stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
+  stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
   type StockPreparationHandoffAdvanceResult,
   type StockPreparationOperatorDirectory,
@@ -1004,25 +1006,40 @@ const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return ''
+  // An owed notice is this caller's to send even when the turn is somebody else's — the queue's own
+  // invitation sentence, so the two surfaces say the same thing about the same state.
+  if (stockPreparationHandoffResendableStepKey(cursor)) {
+    return bi(
+      '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。',
+      'The group notice for the previous step has not gone out yet — press 通知下一步 again and it will be sent.',
+    )
+  }
   if (!cursor.isCurrentHandler) return bi('现在不是轮到您,所以不用您来通知', 'It is not your turn, so this is not yours to send')
   return ''
 })
 
 /**
- * MAY THIS CALLER PRESS 通知下一步. `terminal` is NOT "the chain is done": the server sets it when the
- * LAST step is the current one and has not been handed on (http-routes.cjs, the GET /handoff answer:
- * `terminal: !completed && stepIndex === steps.length - 1`), and pressing it there is what tells
- * 仓库/采购 — the confirmation queue offers exactly that press. Only `completed` means nothing is left.
+ * MAY THIS CALLER PRESS 通知下一步 — the confirmation queue's own rule (confirmationQueue.ts
+ * `stockPreparationHandoffMayPress`), so the two buttons cannot disagree about who may press.
+ *
+ * `terminal` is NOT "the chain is done": the server sets it when the LAST step is the current one and
+ * has not been handed on (http-routes.cjs, the GET /handoff answer: `terminal: !completed && stepIndex
+ * === steps.length - 1`), and pressing it there is what tells 仓库/采购. Only `completed` means nothing
+ * is left — except an OWED notice (`resendableStepKey`), which the server offers only to a handler of
+ * that hop and which stays theirs to send after the turn, or the whole chain, has moved on.
  * The server re-checks the handler on the POST whatever this says; the page only stops hiding it.
  */
-const notifyPressable = computed<boolean>(() => {
-  const cursor = handoff.value
-  return Boolean(cursor && cursor.isCurrentHandler && !cursor.completed)
-})
+const notifyPressable = computed<boolean>(() => stockPreparationHandoffMayPress(handoff.value))
 
-/** On the LAST step the press tells 仓库/采购, not "the next person" — the queue's own label (its H-09). */
+/**
+ * The button's words, the queue's own labels: an owed resend says so (the press sends THAT hop's
+ * notice, not the current step's), and on the LAST step the press tells 仓库/采购 (its H-09).
+ */
 const notifyLabel = computed<string>(() => {
   const cursor = handoff.value
+  if (stockPreparationHandoffResendableStepKey(cursor)) {
+    return bi('通知下一步(补发上一步的群消息)', 'Tell the next person (resend the previous step’s message)')
+  }
   if (cursor && cursor.terminal) return bi('通知仓库和采购', 'Notify warehouse & purchasing')
   return bi('通知下一步', 'Tell the next person')
 })

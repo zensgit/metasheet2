@@ -594,6 +594,39 @@ export function stockPreparationHandoffFromStepKey(
 }
 
 /**
+ * What deciding WHETHER to offer 通知下一步 reads: the press state plus who holds the step and whether
+ * the chain is done. Separate from `StockPreparationHandoffPressState`, which only picks the step.
+ */
+export interface StockPreparationHandoffAvailabilityState extends StockPreparationHandoffPressState {
+  isCurrentHandler: boolean
+  completed: boolean
+}
+
+/**
+ * MAY THIS CALLER PRESS 通知下一步 — the one rule both surfaces render the button by.
+ *
+ * Two ways in, both computed by the SERVER; the page only reads its answer:
+ *   * the caller holds the current step and the chain is not finished. That includes the LAST step:
+ *     `terminal` means the last step is current, and pressing it is what tells 仓库/采购;
+ *   * the caller still owes the group notice for a hop they completed (`resendableStepKey`), whether
+ *     or not the turn has moved on since — even past the end of the chain. The server sets that key
+ *     only for a configured handler of that hop, and accepts the press as a replay that takes the
+ *     unspent claim (stock-preparation-handoff.cjs `planStockPreparationHandoffAdvance`, http-routes.cjs
+ *     `stockPreparationHandoffAdvance`).
+ *
+ * Courtesy, not enforcement: the server re-checks the roster on the POST and refuses in words of its
+ * own. This was the confirmation queue's template condition; 项目备料页 disabled the button for anyone
+ * not holding the current step, so an owed notice could only be sent from the queue.
+ */
+export function stockPreparationHandoffMayPress(
+  state: StockPreparationHandoffAvailabilityState | null | undefined,
+): boolean {
+  if (!state || !state.configured) return false
+  if (state.isCurrentHandler && !state.completed) return true
+  return stockPreparationHandoffResendableStepKey(state) !== null
+}
+
+/**
  * Move the turn on one step and let the next person know. The body allowlist is CLOSED server-side —
  * an unexpected key is REFUSED 400, not ignored — so this builds exactly the four permitted keys and
  * omits the scope ones when they are empty rather than sending a null the allowlist has to tolerate.
