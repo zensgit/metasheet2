@@ -991,6 +991,26 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       }
     })
 
+    test('post-commit: the in-process field cache is invalidated by the execute and by the undo (GET /view reports the fresh type, no restart)', async () => {
+      const column = await seedColumn([])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [column.rec(1), column.sheetId, JSON.stringify({ [column.fieldId]: 'VAL-ALPHA' })])
+      const typeInView = async (): Promise<string | undefined> => {
+        const res = await request(app).get(`/api/multitable/view?sheetId=${column.sheetId}`)
+        expect(res.status).toBe(200)
+        return (res.body.data.fields as Array<{ id: string; type: string }>).find((f) => f.id === column.fieldId)?.type
+      }
+      // warm the cache with the pre-conversion definition
+      expect(await typeInView()).toBe('string')
+      const id = await convert(column, 'select')
+      expect(await typeInView()).toBe('select')
+      expect((await undo(column.fieldId, { convertRevisionId: id, confirm: UNDO_CONFIRM })).status).toBe(200)
+      expect(await typeInView()).toBe('string')
+      // a REFUSED execute leaves the cached definition alone (nothing changed, nothing to invalidate)
+      const stale = await execute(column.fieldId, { previewToken: 'not-a-token', confirm: CONVERT_CONFIRM })
+      expect(stale.status).toBe(401)
+      expect(await typeInView()).toBe('string')
+    })
+
     // ── the pre-image is unconditional, and capped ─────────────────────────────────────────────────────
     test('the pre-image is written with the capture flag OFF, and above the capture cap the conversion is refused 422 with zero writes', async () => {
       const column = await seedColumn([])
