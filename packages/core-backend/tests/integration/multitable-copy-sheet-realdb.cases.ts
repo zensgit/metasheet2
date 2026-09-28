@@ -636,17 +636,23 @@ export function defineCopySheetRealDbCases(): void {
             await query('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)', [holderRecord, SRC_R, '{}'])
           })
           await fenced
-          const copying = copy(SRC_R, { withData: true, permissionMode: 'inherit', name: `race-fence-${flag}-${TS}` })
-          await copyParkedOnFence()
-          // under row-lock-first ordering the copy would now hold meta_sheets(SRC_R) FOR UPDATE and this INSERT would
-          // wait on it while the copy waits on the fence → 40P01. With fence-first the INSERT proceeds.
-          release()
-          await expect(holder).resolves.toBeUndefined()
-          const res = await copying
-          expect(res.status, JSON.stringify(res.body)).toBe(201)
-          expect(res.headers['idempotent-replayed']).toBeUndefined()
-          // the copy took its baseline AFTER the holder committed → the holder's row is part of the snapshot
-          expect((await q('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [res.body.data.sheet.id])).rows[0]).toEqual({ n: flag === 'off' ? 3 : 4 })
+          try {
+            // supertest's Test is lazy — `.then` is what actually sends the request; without it the copy never starts.
+            const copying = copy(SRC_R, { withData: true, permissionMode: 'inherit', name: `race-fence-${flag}-${TS}` }).then((r) => r)
+            await copyParkedOnFence()
+            // under row-lock-first ordering the copy would now hold meta_sheets(SRC_R) FOR UPDATE and this INSERT would
+            // wait on it while the copy waits on the fence → 40P01. With fence-first the INSERT proceeds.
+            release()
+            await expect(holder).resolves.toBeUndefined()
+            const res = await copying
+            expect(res.status, JSON.stringify(res.body)).toBe(201)
+            expect(res.headers['idempotent-replayed']).toBeUndefined()
+            // the copy took its baseline AFTER the holder committed → the holder's row is part of the snapshot
+            expect((await q('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [res.body.data.sheet.id])).rows[0]).toEqual({ n: flag === 'off' ? 3 : 4 })
+          } finally {
+            release() // never leave the holder parked (a leaked fence would hang every later case and the cleanup hook)
+            await holder.catch(() => {})
+          }
         } finally {
           if (prev === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
           else process.env.MULTITABLE_ENABLE_WRITER_FENCE = prev
@@ -692,11 +698,18 @@ export function defineCopySheetRealDbCases(): void {
         await query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3', [SRC_V, 'user', REVOKED])
       })
       await rowLocked
-      const copying = copy(SRC_V, { withData: true, permissionMode: 'inherit', name: `revoked-${TS}` })
-      await copyParkedOnRowLock() // the fast gate passed (grant still live); the copy waits on the row lock
-      proceed()
-      await expect(revoker).resolves.toBeUndefined()
-      const res = await copying
+      let res: Awaited<ReturnType<typeof copy>>
+      try {
+        // supertest's Test is lazy — `.then` is what actually sends the request; without it the copy never starts.
+        const copying = copy(SRC_V, { withData: true, permissionMode: 'inherit', name: `revoked-${TS}` }).then((r) => r)
+        await copyParkedOnRowLock() // the fast gate passed (grant still live); the copy waits on the row lock
+        proceed()
+        await expect(revoker).resolves.toBeUndefined()
+        res = await copying
+      } finally {
+        proceed() // never leave the revoker parked on a failed wait
+        await revoker.catch(() => {})
+      }
       expect(res.status, JSON.stringify(res.body)).toBe(403)
       expect(res.body.error.code).toBe('FORBIDDEN')
       expect(await copiesOf(SRC_V)).toHaveLength(0)
