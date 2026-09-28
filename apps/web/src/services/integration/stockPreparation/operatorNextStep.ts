@@ -42,7 +42,19 @@ export interface OperatorNextStepInput {
    * uses. That includes the LAST step: `terminal` means the last step is current, not that it is done.
    */
   isCurrentHandler: boolean
+  /**
+   * The press rule 6 offers completes the LAST step, so it tells 仓库/采购 rather than "the next
+   * person" — the caller passes the same fact its own 通知下一步 button is labelled by, so the bar and
+   * the button name one press in one set of words. Optional: absent reads as "not the last step".
+   */
+  handoffLastStep?: boolean
 }
+
+/** The last step's press, in the words the button and the bar share (the queue's own label, H-09). */
+export const STOCK_PREP_NOTIFY_LAST_STEP_LABEL = Object.freeze({
+  zh: '通知仓库和采购',
+  en: 'Notify warehouse & purchasing',
+})
 
 export interface OperatorNextStepResult {
   key: 'pull' | 'missing' | 'pending' | 'resync' | 'fill' | 'notify' | 'clear'
@@ -120,6 +132,19 @@ export function operatorNextStep(input: OperatorNextStepInput): OperatorNextStep
   }
   // 6. handoff.isCurrentHandler
   if (input.isCurrentHandler) {
+    if (input.handoffLastStep) {
+      // The same press, on the last step: the server's message asks 仓库/采购 to export this
+      // project's materials list, so that is what the sentence says the press is for.
+      return {
+        key: 'notify',
+        zh: '这是最后一步。填完了就通知仓库和采购,他们才知道可以按项目导出物料清单了。',
+        en: 'This is the last step. Once you are done, notify warehouse & purchasing — that is how they '
+          + 'know they can export this project’s materials list.',
+        actionZh: STOCK_PREP_NOTIFY_LAST_STEP_LABEL.zh,
+        actionEn: STOCK_PREP_NOTIFY_LAST_STEP_LABEL.en,
+        action: 'notify-next',
+      }
+    }
     return {
       key: 'notify',
       zh: '填完了就通知下一步,后面的人才知道该他了。',

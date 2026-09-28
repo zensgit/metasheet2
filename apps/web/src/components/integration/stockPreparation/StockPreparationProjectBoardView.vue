@@ -496,13 +496,18 @@ import {
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
   stockPrepHandoffOutcomePlain,
+  stockPrepHandoffStepPlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
-import { operatorNextStep, type OperatorNextStepResult } from '../../../services/integration/stockPreparation/operatorNextStep'
+import {
+  operatorNextStep,
+  STOCK_PREP_NOTIFY_LAST_STEP_LABEL,
+  type OperatorNextStepResult,
+} from '../../../services/integration/stockPreparation/operatorNextStep'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import {
   readStockPrepRecentProjects,
@@ -952,8 +957,13 @@ const turnText = computed<string>(() => {
     ? bi(`(第 ${cursor.stepIndex + 1}/${cursor.stepCount} 步)`, ` (step ${cursor.stepIndex + 1} of ${cursor.stepCount})`)
     : ''
   if (!step) return bi('还没开始', 'Not started yet')
-  return cursor.isCurrentHandler
-    ? bi(`轮到您了${position}`, `It is your turn${position}`)
+  if (cursor.isCurrentHandler) return bi(`轮到您了${position}`, `It is your turn${position}`)
+  // SOMEBODY ELSE'S STEP, by the desk's name — a bare key like `final_review` tells the floor nothing.
+  // The closed step vocabulary (plainLanguage.ts, the same one the queue labels its status line with);
+  // a key it does not know keeps today's raw text rather than a guess.
+  const plain = stockPrepHandoffStepPlain(step)
+  return plain
+    ? bi(`${plain.zh}${position}`, `${plain.en}${position}`)
     : bi(`${step}${position}`, `${step}${position}`)
 })
 
@@ -1035,15 +1045,24 @@ const notifyTitle = computed<string>(() => {
 const notifyPressable = computed<boolean>(() => stockPreparationHandoffMayPress(handoff.value))
 
 /**
- * The button's words, the queue's own labels: an owed resend says so (the press sends THAT hop's
- * notice, not the current step's), and on the LAST step the press tells 仓库/采购 (its H-09).
+ * WHAT A PRESS WOULD SEND, once, for everything that names it: an owed resend (the press sends THAT
+ * hop's notice, not the current step's), the LAST step (the press tells 仓库/采购, the queue's H-09),
+ * or an ordinary hand-over. The button label and the 「下一步」 bar both read this, so the two
+ * controls for one press cannot describe it in two ways.
  */
-const notifyLabel = computed<string>(() => {
+const notifyTarget = computed<'resend' | 'last-step' | 'next'>(() => {
   const cursor = handoff.value
-  if (stockPreparationHandoffResendableStepKey(cursor)) {
+  if (stockPreparationHandoffResendableStepKey(cursor)) return 'resend'
+  if (cursor && cursor.terminal) return 'last-step'
+  return 'next'
+})
+
+/** The button's words, the queue's own labels. */
+const notifyLabel = computed<string>(() => {
+  if (notifyTarget.value === 'resend') {
     return bi('通知下一步(补发上一步的群消息)', 'Tell the next person (resend the previous step’s message)')
   }
-  if (cursor && cursor.terminal) return bi('通知仓库和采购', 'Notify warehouse & purchasing')
+  if (notifyTarget.value === 'last-step') return bi(STOCK_PREP_NOTIFY_LAST_STEP_LABEL.zh, STOCK_PREP_NOTIFY_LAST_STEP_LABEL.en)
   return bi('通知下一步', 'Tell the next person')
 })
 
@@ -1078,6 +1097,8 @@ const nextStep = computed<OperatorNextStepResult | null>(() => {
     // The SAME rule as the button, so the bar never offers a press the button refuses — or says
     // 「没有等您的事」 above a last step that is still waiting on this operator.
     isCurrentHandler: notifyPressable.value,
+    // …and the SAME words as the button: on the last step both say 「通知仓库和采购」.
+    handoffLastStep: notifyTarget.value === 'last-step',
   })
   // R-11 again: a control the caller cannot exercise is ABSENT, not disabled and not silently inert.
   // Both sync-driving actions are gated by the same predicate the composed panel gates its own run

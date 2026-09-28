@@ -87,6 +87,7 @@ import {
 import {
   STOCK_PREP_ERROR_GENERIC,
   STOCK_PREP_ERROR_PLAIN,
+  STOCK_PREP_HANDOFF_OUTCOME_PLAIN,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
@@ -462,6 +463,37 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     expect(notice, 'and it must not claim the resend succeeded').not.toContain('补发了')
   })
 
+  it('BNP-1: the LAST step whose 仓库/采购 fan-out half-failed says one group was missed, never the success sentence', async () => {
+    // `partial` only happens on the terminal hop (two groups), i.e. on the press BNP-2 unlocks. The
+    // claim is spent, so pressing again cannot resend: the only fix is telling that group in person.
+    route({
+      handoff: [
+        () => ok(cursor({ stepIndex: 3, currentStepKey: 'final_review', terminal: true, notifiedStepIndex: 2 })),
+        () => ok(cursor({ stepIndex: 4, currentStepKey: null, terminal: false, completed: true, isCurrentHandler: false, notifiedStepIndex: 3 })),
+      ],
+      advance: () => advanced({
+        fromStepKey: 'final_review',
+        currentStepKey: null,
+        stepIndex: null,
+        terminal: true,
+        notified: false,
+        notifyOutcome: 'partial',
+      }),
+    })
+    const root = await mountBoard()
+    await press(root)
+
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['final_review'])
+    const notice = text(root, 'stock-prep-project-board-handoff-notice')
+    // plainLanguage.ts STOCK_PREP_HANDOFF_OUTCOME_PLAIN.partial — the queue's own words (its H-15).
+    expect(notice).toContain(STOCK_PREP_HANDOFF_OUTCOME_PLAIN.partial.zh)
+    expect(notice).toContain(STOCK_PREP_HANDOFF_OUTCOME_PLAIN.partial.zhNext as string)
+    expect(notice).toContain('有一个群没发出去')
+    expect(notice).toContain('再点也不会补发')
+    expect(notice, 'one group was NOT told; the success sentence would stop anyone chasing it').not.toContain('已经交给下一步,并且通知到了。')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]'), 'the turn moved; this is a notice, not an error').toBeNull()
+  })
+
   it('BNP-1 control: the sentences that were already right are unchanged', async () => {
     const cases: Array<{ label: string; handoff: Record<string, unknown>; answer: Record<string, unknown>; says: string }> = [
       {
@@ -506,6 +538,14 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     return root.querySelector('[data-testid="stock-prep-project-board-next-step"]')?.getAttribute('data-next-step') ?? null
   }
 
+  /** The 「下一步」 bar's sentence and its button's words. */
+  function bar(root: HTMLElement): { sentence: string; button: string } {
+    return {
+      sentence: (root.querySelector('.sp-board__next-step-text') as HTMLElement | null)?.textContent?.trim() ?? '',
+      button: text(root, 'stock-prep-project-board-next-step-action').trim(),
+    }
+  }
+
   /** The chain after its last step was handed on: GET /handoff's `completed` answer. */
   const FINISHED = { stepIndex: 4, currentStepKey: null, terminal: false, completed: true, isCurrentHandler: false, notifiedStepIndex: 3 }
 
@@ -527,8 +567,12 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     expect(button.textContent).toContain('仓库')
     expect(button.textContent).toContain('采购')
     expect(button.getAttribute('title') ?? '', 'no "already the last step" refusal').not.toContain('最后一步')
-    // The 「下一步」 bar agrees with the button instead of saying nothing is waiting on them.
+    // The 「下一步」 bar agrees with the button instead of saying nothing is waiting on them — and in
+    // the same words: one press, one name for it.
     expect(nextStepKey(root)).toBe('notify')
+    expect(bar(root).button).toBe('通知仓库和采购')
+    expect(bar(root).button).toBe(button.textContent?.trim())
+    expect(bar(root).sentence).toBe('这是最后一步。填完了就通知仓库和采购,他们才知道可以按项目导出物料清单了。')
 
     await press(root)
     expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['final_review'])
@@ -536,6 +580,14 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     // After: the re-read says finished, and now the button is done.
     expect(text(root, 'stock-prep-project-board-turn')).toContain('已经走完最后一步')
     expect(notifyButton(root)!.disabled).toBe(true)
+  })
+
+  it('BNP-2 control: on a MIDDLE step the 「下一步」 bar keeps its words and matches the button', async () => {
+    route({ handoff: [() => ok(cursor())] })
+    const root = await mountBoard()
+    expect(nextStepKey(root)).toBe('notify')
+    expect(bar(root)).toEqual({ sentence: '填完了就通知下一步,后面的人才知道该他了。', button: '通知下一步' })
+    expect(notifyButton(root)!.textContent?.trim()).toBe('通知下一步')
   })
 
   it('BNP-2 control: a FINISHED chain still reads as finished and posts nothing', async () => {
@@ -567,7 +619,12 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     await flush()
     expect(advanceBodies()).toHaveLength(0)
     const turn = text(root, 'stock-prep-project-board-turn')
-    expect(turn).toContain('final_review')
+    // By the desk's name, not the bare key (a key the vocabulary does not know stays raw — see the
+    // B-19 409 case, which still reads its unknown key back).
+    const turnValue = (root.querySelector('[data-testid="stock-prep-project-board-turn"] dd') as HTMLElement).textContent?.trim() ?? ''
+    expect(turnValue.startsWith('终审'), turnValue).toBe(true)
+    expect(turnValue).toContain('第 4/4 步')
+    expect(turn).not.toContain('final_review')
     expect(turn).not.toContain('已经走完最后一步')
     expect(nextStepKey(root)).not.toBe('notify')
   })
