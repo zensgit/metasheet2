@@ -293,6 +293,7 @@ import { computed, inject, onUnmounted, ref, useId, watch } from 'vue'
 import { RouterLink, routerKey } from 'vue-router'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import {
   isRecordApprovalTerminalStatus,
   recordApprovalApproverFallbackLabel,
@@ -810,11 +811,10 @@ function onRetryProgress(instanceId: string | undefined): void {
   void loadProgress(instanceId)
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatApprovalTime(value: string): string {
   if (!value) return ''
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) return value
-  return new Date(timestamp).toLocaleString()
+  return formatBusinessTimestamp(value) ?? value
 }
 </script>
 

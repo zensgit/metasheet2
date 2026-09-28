@@ -203,7 +203,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
      > **2026-09-10 订正**:上面这段此前只教"把 `target` 整段贴进 action 配置",漏了 `--action-fragment` 输出的另一半 `extensionFieldIds`——已按脚本自述与 `assertExtFieldMappingAgreesWithAction`/`assertTargetFieldMapCompleteness` 的实际校验补全。
 
-     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
+     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒,按项目导出物料也会被 `PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH` 拒。)
 
      > **2026-09-10 订正**:本节此前写的是"调 ensure,把它返回的 `targetBinding` 整段贴进 action 配置,一条路,别的都别走",与文末 r7 实际执行记录第 8 条(:110 附近)矛盾且会丢客户 pack 的 21 个 `ext_` 列——已按第 8 条的合并口径改写为上面这版,并补充指向 `stock-preparation-derive-target-binding.mjs --pack` 这个可以直接产出合并结果的脚本,避免手工 JSON 拼接出错。依据:该脚本已支持 `--pack`/`--pack-id`(`scripts/ops/stock-preparation-derive-target-binding.mjs`),以及本文件 :110 的 r7 实际记录(33+21=54)。
 
@@ -213,7 +213,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
   - 三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);
   - **action 绑定里的 `sheetId` 等于这次 ensure 返回的那个**(再调一次 ensure,它是幂等的,把 `data.targetBinding.sheetId` 和配置里的值对一下;不一致说明 objectId 换了而绑定没重算);
   - Step 3-3 部署预检 `ready: true`、`blockers` 为空。**特别确认这两条不在里面**:
-    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒;`detail.carryRouteCode` 里写的就是点击会看到的那个 code。修法就是上面的 ensure。
+    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒,按项目导出物料和通知下一步也会被拒(三者走同一道租户墙);`detail.carryRouteCode` / `detail.exportRouteCode` / `detail.handoffRouteCode` 里写的就是三个点击各自会看到的 code。修法就是上面的 ensure。
     - `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` —— 人工列没绑全。
     (`posture.carryTargetBinding.state` 是 `not_derived` **不是**故障、也不拦任何操作,它只提示绑定两半指向不同的表;结转允不允许看 `checks.carryTargetBinding.ownershipState`。)
 - 失败处理:三处不一致 → 以 action 绑定里的 `target.objectId` 为准改另外两处(action 绑定是唯一决定"apply 写到哪"的配置,allowlist 和 pack 目标都要跟着它,不是反过来)。
@@ -341,6 +341,24 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 
 仓库里的 `ops/nginx/multitable-onprem.conf.example` 已经补上同义的段落(命名 location 与尾斜杠写法与 222 现网略有不同,语义相同),外加 `location /` 也判 flag、503 落到 `<RootDir>/ops/maintenance/maintenance.html`(静态维护页,模板在仓库 `ops/maintenance/maintenance.html`)。**`location /` 那一段和维护页 222 现网没有**——上面三段才是 222 实际有的全部,所以 222 上 flag 举着时 `/` 仍然返回 200 的前端首页(见下面的验证小节)。**注意:改仓库里的例子对 222 现网零效果**,例子只是留档 + 给下一台新机器抄。现网要变,只能手工改 `nginx.conf`。
 
+**#5757(2026-09-26 加,`location = /index.html` 的 Cache-Control)同样只改了仓库示例,但 222 只能同步其中的缓存头,不能把整段原样搬过去。** 仓库示例里的 `location = /index.html` 复用了 `location /` 的维护门判断(`if (-f .../maintenance.flag) { return 503; }` + `error_page 503 /maintenance.html;`)——这是因为示例文件里 `location /` 本身有这道门、`location = /maintenance.html` 也存在,三者配套。**222 现网两样都没有**(上一段已经说明)。如果把仓库这一整段原样搬到 222:维护窗口内,`/`(以及任何落到 `location /` 的 `try_files $uri $uri/ /index.html;` 兜底的 URL,包括所有 SPA 路由)会先内部重定向命中新加的 `location = /index.html`,门判断为真、触发 `error_page 503 /maintenance.html`;但 222 没有 `location = /maintenance.html` 接住它,请求退回 `location /` 的 `try_files`,再次内部重定向到 `/index.html`,再次命中同一条门判断——这是第二层 error_page,而 `recursive_error_pages` 默认 off,不会再映射回自定义 503,客户端拿到的是 nginx 自带的英文 503 页,不是 200。这和上面「`curl.exe -i http://127.0.0.1/` 在 222 上期望的是 200,不是 503」直接矛盾,**不能这样同步**。
+
+**222 正确的同步内容(只要这四行,不带门判断,不带 error_page)——但这四行不继承 `location /` 的 `root`/`add_header`,上机前必看下面两条(2026-09-27 加)。**
+
+`location = /index.html` 是精确匹配,命中的是 `location /` 的 `try_files $uri $uri/ /index.html;` 触发的内部重定向;它是独立的 location,**不会继承 `location /` 里声明的 `root` 或 `add_header`**,只继承 server 级的。真实 nginx 1.26.2 实测复现:如果 222 现网的 `root` 是写在 `location /` 内部而不是 server 级(标准 Windows zip 安装的默认 `nginx.conf` 就是 `location / { root html; ... }` 这种写法),四行版本一上,这条新 location 就会退回 nginx 编译期默认根目录——`/`、`/index.html`、所有 SPA 深层路由、乃至任意不存在的路径,全部变成 200 的 nginx 自带欢迎页(只有 `/assets/*` 之类不落到这条 location 的请求还正常),`nginx -t` 照样通过,**状态码检查完全看不出来**,和下一段「`/` 在维护窗口内仍然是 200」的字面意思矛盾但实质南辕北辙。**上机前必须先确认 222 现网 `location /` 用的 `root` 其实是 server 级声明**;确认不了,就显式带上 `root`,不依赖继承:
+
+```nginx
+location = /index.html {
+  root C:/metasheet/apps/web/dist;
+  add_header Cache-Control "no-cache, must-revalidate" always;
+  try_files $uri =404;
+}
+```
+
+同理,如果 222 现网在 server 级还有别的 `add_header`(例如安全相关的响应头),这些头**也不会**被这条新 location 继承——没有显式带上的头,对 `index.html` 的响应就相当于没发(`/assets/*`、`/api/*` 等不经过这条 location 的路径不受影响)。补这四行时,把 222 现网 server 级已有的 `add_header` 行原样抄一份进这条 location。
+
+这样同步之后 `/` 在维护窗口内应当仍然是 200 且是前端首页,只是 `index.html` 不再被浏览器当静态资源长期缓存(上面「怎么验证这道门真的在」那份配方不用改)。**但光看状态码不够**——上一段已经证明 200 也可能是 nginx 欢迎页而不是 SPA。reload 前后都按 `customer-delivery-guide-20260904.md` §2.1「升级后必查:前端 smoke」的方法核对响应体:`curl.exe -s http://127.0.0.1/ | findstr assets`,`index.html` 里的 `<script src>` 必须以 `/assets/` 开头;再对该资源文件发一次请求,`Content-Type` 必须是 `application/javascript`/`text/css` 而不是 `text/html`。**不要**把示例里带 `if (-f ...)` / `error_page` 的完整版本搬到 222,除非先把 `location /` 的门判断和 `location = /maintenance.html` 一起补齐(见下面「新机器」小节——那是范围更大的另一个变更,需要单独评估,不是这次 #5757 的一部分)。`nginx -t` 通过后按上面「Windows 上怎么 reload」一节以 SYSTEM 身份 reload,reload 前后都做一次上面的前端 smoke;这是一个上机动作,尚未执行,见对应 PR 正文的「待上机」清单。
+
 **flag 路径为什么是 `output\maintenance.flag`。** 升级会把 `apps/web/dist`、`packages/core-backend/dist`、`packages/core-backend/migrations` 整体删掉重建(脚本参数 `-ReplaceDirs`)。flag 落在这三个目录里的任何位置,都会在升级中途被删掉——门在最需要它的几十秒里自己塌了。`output\` 不在替换清单里。脚本对此有静态断言:`-MaintenanceFlagPath` 落在任一 `ReplaceDirs` 下时,**开工前**就抛 `MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR` 拒绝启动(那时还没碰 pm2、没建备份目录)。维护页放 `ops/maintenance/` 同理。
 
 **健康探测的顺序(r29 的坑,2026-09-11)。** r29 上机时脚本报 `exit -1`,但后端其实早就起来了:脚本的健康检查走的是 nginx 的 `/api/health`,而协调方上机脚本手工举着的 flag 正好让 nginx 对 `/api/*` 一律答 503——12 次重试全是 503,脚本判定升级失败。现在顺序改成:
@@ -382,9 +400,9 @@ curl.exe -i http://127.0.0.1/api/health          # 期望:HTTP/1.1 200
 
 > **`curl.exe -i http://127.0.0.1/` 在 222 上期望的是 200,不是 503。** 2026-09-11 18:03 那次手工改动只加了 `location /api/` 的门,`location /` 里没有 flag 判断——flag 举着时首页照常返回 SPA 的 200(接口 503,页面上是中文错误提示,不是白屏)。**别因为 `/` 没给 503 就认定门坏了、在升级窗口里去改现网 `nginx.conf`**:窗口期改 nginx 是最不该做的事,判断门在不在只看 `/api/health` 这一条。
 
-**新机器:按示例补齐 `location /` 门之后才成立的验证。** `ops/nginx/multitable-onprem.conf.example` 比 222 现网多两段(`location /` 的 flag 判断 + `location = /maintenance.html`)。两个前置都做完才有下面的期望:
+**新机器:按示例补齐 `location /` 门之后才成立的验证。** `ops/nginx/multitable-onprem.conf.example` 比 222 现网多三段(`location /` 的 flag 判断、`location = /maintenance.html`、`location = /index.html` 的 flag 判断 + Cache-Control)。三个前置都做完才有下面的期望——**这三段必须一起同步,不能只挑 `location = /index.html` 单独搬**(见上面 #5757 段落,单独搬会在维护窗口内把 `/` 变成 nginx 自带的英文 503 页):
 
-1. 把这两段同步进该机器的 `nginx.conf`,`nginx -t` 通过后以 SYSTEM 身份 reload;
+1. 把这三段同步进该机器的 `nginx.conf`,`nginx -t` 通过后以 SYSTEM 身份 reload;
 2. **手工**把仓库的 `ops/maintenance/maintenance.html` 复制到 `<RootDir>\ops\maintenance\maintenance.html`。这个文件**不在部署包里**(`scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS(build.sh)/required(verify.sh)` 只收 `ops/nginx/multitable-onprem.conf.example`),解包不会带出来。
 
 ```powershell

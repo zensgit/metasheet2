@@ -37,6 +37,7 @@ node __tests__/db.test.cjs
 node __tests__/external-systems.test.cjs
 node __tests__/external-systems-list-workspace-fallback.test.cjs
 node __tests__/external-systems-delete-dependent-references.test.cjs
+node __tests__/external-systems-delete-bind-lock-protocol.test.cjs
 node __tests__/connection-resolver.test.cjs
 node __tests__/legacy-binding-canonical-invariant.test.cjs
 node __tests__/pr1-canonical-legacy-read-equivalence.test.cjs
@@ -69,6 +70,7 @@ node __tests__/stock-preparation-confirm-writes.test.cjs
 node __tests__/stock-preparation-confirm-reads.test.cjs
 node __tests__/stock-preparation-generation-runtime.test.cjs
 node __tests__/stock-preparation-handoff.test.cjs
+node __tests__/stock-preparation-handoff-advance-tenant-wall.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs
@@ -82,6 +84,7 @@ node __tests__/stock-preparation-confirmation-decisions.test.cjs
 node __tests__/stock-preparation-own-base.test.cjs
 node __tests__/stock-preparation-permission-matrix.test.cjs
 node __tests__/stock-preparation-prep-line-export.test.cjs
+node __tests__/stock-preparation-prep-line-export-tenant-wall.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight.test.cjs
 node __tests__/stock-preparation-production-policy.test.cjs
@@ -232,7 +235,9 @@ node __tests__/stock-preparation-operator-pull-gate.test.cjs
 node __tests__/stock-preparation-dry-run-target-field-probe-routes.test.cjs
 node __tests__/stock-preparation-mvp-persist-target-field-probe-routes.test.cjs
 node __tests__/stock-preparation-mvp-repair-routes.test.cjs
+node __tests__/stock-preparation-managed-table-relabel.test.cjs
 node __tests__/stock-preparation-write-scope-reconcile-bounds.test.cjs
+node __tests__/route-failure-log-closed-code.test.cjs
 
 # G4/M2 (#5553): adapter-load hard dependency + no credential-stripped fallback.
 # Mutation probe: scripts/g4-m2-mutation-probe.cjs

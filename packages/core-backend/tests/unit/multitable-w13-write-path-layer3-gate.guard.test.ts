@@ -611,6 +611,21 @@ const WRITE_PORTS: Record<PortId, Port> = {
             'of the three create sites.',
         },
       ],
+      'multitable/copy-sheet-service.ts': [
+        {
+          disposition: 'GATED_BY_CALLER',
+          reason:
+            '复制数据表（含数据） S1 (ADR #6094 §4.1/§4.4/§7.3) — copyInsideTransaction writes each SOURCE row into ' +
+            'the NEW sheet with the server constant COPY_SHEET_RECORD_CAPABILITIES (compared by reference inside ' +
+            'createRecord) and `input.copy`. The gate is the caller\'s: before ANY row is written the transaction ' +
+            'RE-RUNS hasFullTableReadAccess (three axes: row-level switch/admin, per-subject field_permissions ' +
+            'masks NOTHING, formula taint) DB-fresh on the copier — so every copied value is one the copier may ' +
+            'read in full, and a per-subject field_permissions row on the copier refuses the WHOLE copy (403 ' +
+            'COPY_SOURCE_NOT_FULLY_READABLE), never a column. The copier\'s own write capabilities are ' +
+            'deliberately NOT the gate (§4.4: a table-level reader must be able to copy). Proven end to end in ' +
+            'tests/unit/multitable-copy-sheet-service.test.ts (E6) and tests/unit/multitable-copy-sheet-routes.test.ts (H3).',
+        },
+      ],
       'multitable/plugin-scope.ts': [
         {
           disposition: 'EXEMPT',

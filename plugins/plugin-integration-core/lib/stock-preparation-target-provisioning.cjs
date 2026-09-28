@@ -1168,6 +1168,32 @@ const CARRY_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({
   [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
 })
 
+// The SAME verdict, answered by the materials export (按项目导出物料) in its OWN vocabulary. The
+// export reads the very sheet the carry writes, so it asks the very same ownership question
+// (`decideCarryTargetOwnership` above, facts gathered by the one wall in http-routes.cjs) — but an
+// operator who clicked 导出 must not be shown a 结转 code, and a dashboard that counts carry
+// refusals must not start counting export clicks. One decision, two refusal vocabularies; the
+// preflight quotes both so "what the deployer was warned about" and "what either click returned"
+// stay the same strings. Values-free, like the carry codes: no sheet id, no project id.
+const PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({
+  [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+})
+
+// The SAME verdict, answered by 通知下一步 (the handoff ADVANCE) in the handoff route's own
+// STOCK_PREPARATION_HANDOFF_* family. Before the advance writes a cursor row, an audit row and a
+// DingTalk ping, it proves the project exists by probing the very sheet the carry writes and the
+// export reads, through the same deploy-global binding — so it must first ask the same ownership
+// question, or the probe itself answers "does this project number exist in that sheet" to a caller
+// whose sheet it is not (#6121). Closed and values-free like the other two families; a handoff click
+// is never reported as a 结转 or an 导出 refusal.
+const STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({
+  [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'STOCK_PREPARATION_HANDOFF_TARGET_OWNER_UNKNOWN',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH',
+})
+
 /**
  * @param {string}  boundSheetId    the action target's sheetId
  * @param {string}  objectId        the action target's objectId
@@ -1195,6 +1221,8 @@ function decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, de
 module.exports = {
   CARRY_TARGET_OWNERSHIP_STATES,
   CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
+  PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
   decideCarryTargetOwnership,
   CANONICAL_FIELD_MAP_MODE,
   repairStockPreparationCanonicalTarget,

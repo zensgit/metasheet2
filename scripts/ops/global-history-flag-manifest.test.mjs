@@ -131,6 +131,13 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
+  // 客户反馈 2026-09-24 #4a (managed-table zh relabel, multitable/object-display-name-relabel.ts): four
+  // ERROR CODES of the relabel primitive's typed refusals. Nobody reads them from process.env. The one
+  // real flag of that module, MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED, is registered in the manifest.
+  'MULTITABLE_RELABEL_INPUT_INVALID', // malformed relabel request (400), not a flag
+  'MULTITABLE_RELABEL_SCOPE_FORBIDDEN', // object not bound to the caller's project in the registry (403), not a flag
+  'MULTITABLE_RELABEL_APPLY_DISABLED', // write leg refused because the operator switch is off (409), not a flag
+  'MULTITABLE_RELABEL_PLAN_CHANGED', // write leg refused because the plan differs from the preview (409), not a flag
   // DingTalk todo-mirror (plan B, #5772/#5768): the CHECK-constraint status vocabulary constant
   // (migration zzzz20260916120000), not an env var — nobody reads it from process.env. The two real
   // flags, DINGTALK_TODO_MIRROR_ENABLED and DINGTALK_TODO_MIRROR_INTERVAL_MS, are registered in the
@@ -167,7 +174,9 @@ function globalHistoryFlagsInSource() {
   const dingtalkTodoMirror = grepFlagTokens('DINGTALK_TODO_MIRROR_[A-Z_0-9]+')
     .filter((t) => !t.endsWith('_'))
     .filter((t) => !NON_GH_EXACT.has(t))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror])].sort()
+  // Task routes mount only when this flag is the exact string true (AGENTS.md: every new env flag).
+  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
@@ -452,6 +461,31 @@ test('a rung that stacks every compatible retention conflict fires all four name
 
 // ── Mutation-resistance: deleting a rule from the manifest must break these ───────────────────────
 
+// ── field retype CONVERT (ADR docs/development/multitable-field-retype-first-batch-adr-20260926.md §5) ──────────
+test('field retype convert: exact-literal activation, no dependsOn, conflicts with the legacy manage-schema switch', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT
+  assert.ok(spec, 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT must be registered')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'])
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const v of ['TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, v), false, v)
+})
+
+test('field-retype-convert-with-legacy-manage-schema: convert on + legacy switch on fires (STOP)', () => {
+  const ids = violationIds({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'true', MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA: 'true' })
+  assert.ok(ids.includes('field-retype-convert-with-legacy-manage-schema'), `expected the conflict, got ${ids.join(',')}`)
+})
+
+test('field retype convert positive control: convert on alone (the read-only preview rung) has zero violations', () => {
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'true' }), [])
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'true', MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA: 'false' }), [])
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'false', MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA: 'true' }), [])
+})
+
 test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagRules on a targeted fixture', () => {
   // Enumerates rules directly from the manifest (not hardcoded ids) so a NEW rule added later is
   // automatically covered, and a DELETED rule shrinks the iteration (making this test vacuous for that
@@ -459,7 +493,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })

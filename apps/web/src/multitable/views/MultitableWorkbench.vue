@@ -121,6 +121,8 @@
           <strong>{{ wb('saveTpl.title', isZh) }}</strong>
           <button class="mt-save-tpl__close" data-action="save-sheet-as-template-close" @click="closeSaveSheetAsTemplate">&times;</button>
         </header>
+        <!-- A10 phase 1(客户反馈 2026-09-24 #8):对话框不点名来源,用户存错表都不知道。 -->
+        <p class="mt-save-tpl__source" data-testid="save-sheet-as-template-source">{{ fmtSaveTplSource(activeBaseName, activeSheetName, isZh) }}</p>
         <p class="mt-save-tpl__hint">{{ wb('saveTpl.hint', isZh) }}</p>
         <template v-if="!saveTemplateResult">
           <label class="mt-save-tpl__row">
@@ -150,10 +152,25 @@
                     @change="toggleSaveTemplateField(field.id)"
                   />
                   <span class="mt-save-tpl__item-name">{{ field.name }}</span>
-                  <em class="mt-save-tpl__item-type">{{ field.type }}</em>
+                  <em class="mt-save-tpl__item-type">{{ fieldTypeLabel(field.type, isZh) }}</em>
                 </label>
               </li>
             </ul>
+          </div>
+          <!-- A10 phase 1(客户反馈 2026-09-24 #8):视图清单只读展示——服务端把这张表的**全部**
+               视图都存进模板(custom-template-store.ts 不按 sheetIds/fieldIds 之外再收窄视图),
+               这里的清单必须是 workbench.views(未做权限过滤),才能和实际保存范围对得上。 -->
+          <div class="mt-save-tpl__views">
+            <div class="mt-save-tpl__fields-head">
+              <span class="mt-save-tpl__label">{{ wb('saveTpl.viewsLabel', isZh) }}</span>
+            </div>
+            <ul class="mt-save-tpl__list" data-testid="save-sheet-as-template-views">
+              <li v-for="view in saveTemplateViewChoices" :key="view.id" class="mt-save-tpl__item">
+                <span class="mt-save-tpl__item-name">{{ view.name }}</span>
+                <em class="mt-save-tpl__item-type">{{ viewTypeLabel(view.type, isZh) }}</em>
+              </li>
+            </ul>
+            <p class="mt-save-tpl__hint" data-testid="save-sheet-as-template-views-note">{{ wb('saveTpl.viewsNote', isZh) }}</p>
           </div>
           <label class="mt-save-tpl__share">
             <input v-model="saveTemplateShare" type="checkbox" data-testid="save-sheet-as-template-share" />
@@ -172,6 +189,7 @@
               {{ saveTemplateSubmitting ? wb('saveTpl.saving', isZh) : wb('saveTpl.submit', isZh) }}
             </MtButton>
           </footer>
+          <button v-if="canCopySheet" type="button" class="mt-save-tpl__link" data-action="save-sheet-as-template-copy-with-data" @click="openCopySheetFromSaveTemplate">{{ copySheetLabel('copySheet.entryFromTemplate', isZh) }}</button>
         </template>
         <div v-else class="mt-save-tpl__result" data-testid="save-sheet-as-template-result">
           <strong>{{ wb('saveTpl.successTitle', isZh) }}</strong>
@@ -182,6 +200,9 @@
               <li v-for="(warning, index) in saveTemplateResult.warnings" :key="index">{{ warning }}</li>
             </ul>
           </template>
+          <!-- A10 phase 1(客户反馈 2026-09-24 #8):存完之后说清楚「装模板」是什么后果——
+               新建工作区+空表,不是把这张表复制一份数据。 -->
+          <p class="mt-save-tpl__hint" data-testid="save-sheet-as-template-install-note">{{ wb('saveTpl.installNote', isZh) }}</p>
           <footer class="mt-save-tpl__footer">
             <RouterLink
               class="mt-save-tpl__link"
@@ -263,7 +284,7 @@
             @click="railCollapsed = !railCollapsed"
           >{{ railCollapsed ? '›' : '‹' }}</button>
         </div>
-        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" />
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
@@ -402,7 +423,7 @@
           :comment-presence="commentPresenceState.presenceByRecordId.value"
           :conditional-formatting="conditionalFormattingByRecord"
           :conditional-formatting-scale="conditionalFormattingScaleByField"
-          :ai-run-enabled="effectiveRowActions.canEdit"
+          :ai-run-enabled="aiAvailable && effectiveRowActions.canEdit"
           :ai-run-pending="Boolean(aiShortcut.state.pending)"
           :ai-run-busy="aiShortcutBusy"
           :button-run-pending="buttonRunPending"
@@ -453,6 +474,7 @@
         :upload-fn="uploadAttachmentFn"
         :delete-attachment-fn="deleteAttachmentFn"
         :ai-shortcut="aiShortcut.state"
+        :ai-available="aiAvailable"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
         :mention-search="searchCommentMentions"
@@ -545,6 +567,17 @@
       @confirm="onExportDialogConfirm"
       @cancel="exportDialogVisible = false"
     />
+    <MetaCopySheetDialog
+      :visible="showCopySheetDialog"
+      :sheet-id="copySheetSourceId"
+      :sheet-name="copySheetSourceName"
+      :base-name="copySheetBaseName"
+      :fields="copySheetFieldChoices"
+      :views="copySheetViewChoices"
+      :client="workbench.client"
+      @close="closeCopySheetDialog"
+      @copied="onCopySheetCopied"
+    />
     <RestorePreviewDialog
       :visible="restorePreview.visible"
       :loading="restorePreview.loading"
@@ -604,6 +637,8 @@
       :ai-preview-busy="aiShortcutBusy"
       :ai-usage-summary-fn="aiUsageSummaryFn"
       :formula-suggest-fn="formulaSuggestFn"
+      :ai-available="aiAvailable"
+      :ai-unavailable-confirmed="aiUnavailableConfirmed"
       :list-bases-fn="listBasesForFieldFn"
       :list-foreign-sheets-fn="listForeignSheetsForFieldFn"
       :list-foreign-fields-fn="listForeignFieldsForFieldFn"
@@ -767,6 +802,7 @@ import {
   sheetDeleteConfirm as fmtSheetDeleteConfirm,
   sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
   fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
+  saveTplSource as fmtSaveTplSource,
 } from '../utils/workbench-labels'
 import { recordApprovalSubmittedToast, recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
@@ -810,7 +846,8 @@ import type { SortRule, FilterConjunction } from '../composables/useMultitableGr
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
-import { metaCoreLabel } from '../utils/meta-core-labels'
+import { metaCoreLabel, fieldTypeLabel } from '../utils/meta-core-labels'
+import { viewTypeLabel } from '../utils/meta-manager-labels'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
 import { reorderViewFields } from '../utils/reorder-view-fields'
@@ -826,6 +863,9 @@ import MetaSheetViewRail from '../components/MetaSheetViewRail.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
+import MetaCopySheetDialog from '../components/MetaCopySheetDialog.vue'
+import { copySheetLabel, copySheetSuccessToast } from '../utils/meta-copy-sheet-labels'
+import type { CopySheetResult } from '../types'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
 import type {
@@ -885,6 +925,8 @@ import {
   type ImportValueResolver,
 } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
+import { dateTimeExportText } from '../utils/field-display'
+import { loadLookupTargetFields, lookupTargetSignature } from '../utils/lookup-target-fields'
 import {
   MAX_FIELD_NAME_LENGTH,
   MAX_SHEET_FIELDS,
@@ -917,7 +959,7 @@ import {
   mergeRowDensity,
   mergeGroupCollapse,
 } from '../utils/view-display-prefs'
-import { useAiShortcut } from '../composables/useAiShortcut'
+import { resolveAiAvailability, useAiShortcut, type AiAvailabilityState } from '../composables/useAiShortcut'
 import { useAiBulkFill } from '../composables/useAiBulkFill'
 import type { AiShortcutConfigInput } from '../api/client'
 import { buildFieldScaleMap, buildRecordFormattingMap, decideScaleStatsRefetch, extractRulesFromConfig, extractScaleRulesFromConfig, scaleStatsFieldIds, type FieldScaleServerStats } from '../utils/conditional-formatting'
@@ -1210,6 +1252,15 @@ const aiShortcut = useAiShortcut({
 // run button (aiRunBusy) and field-manager config preview (aiPreviewBusy) —
 // so no surface offers a click the composable guard would silently refuse.
 const aiShortcutBusy = aiShortcut.busy
+// A11 (customer feedback 2026-09-24 #7c): the AI surfaces (drawer preview/run, cell-editor run,
+// field-manager AI section + bulk fill + usage card, formula AI-suggest) render only when the server
+// reports AI available. Starts 'unknown' (hidden) and stays hidden on any failure
+// (resolveAiAvailability is fail-closed, one retry for network/5xx); set once per mount in onMounted
+// below. UI-only — every AI request is still gated server-side. The field manager says 「未开通」
+// only when the server EXPLICITLY answered available:false; an error gets neutral wording.
+const aiAvailabilityState = ref<AiAvailabilityState>('unknown')
+const aiAvailable = computed(() => aiAvailabilityState.value === 'available')
+const aiUnavailableConfirmed = computed(() => aiAvailabilityState.value === 'unavailable')
 
 function onAiPreviewField(field: MetaField) {
   const recordId = selectedRecordId.value
@@ -1588,6 +1639,21 @@ const searchText = ref('')
 const templates = ref<MetaTemplate[]>([])
 const templateLibraryLoading = ref(false)
 const templateLibraryError = ref<string | null>(null)
+// A10 phase 1(客户反馈 2026-09-24 #8):openTemplateLibrary 原来只在 templates 为空时才拉取,
+// 面板一旦加载过一次,后面新建的自定义模板就永远进不来,直到整页刷新。存模板成功后打一个
+// "需要刷新"的标记,面板不管当前是不是空列表都会在下次打开时重新拉;若面板此刻正开着,直接重拉。
+//
+// S3/N4(2026-09-26 对抗评审):用两个单调递增的标记而不是一个布尔值——一个更早发起、比较晚才
+// 落地的成功响应,不能把**它开始之后**才打上的"需要刷新"标记误清掉(那样会看着像刷新过了,
+// 其实还是漏了刚存的那条)。loadTemplateLibrary 在**发起时**记下当时的 dirty 值,只有响应落地
+// 时这个值仍然是"最新的"才把 loaded 赶上去;如果中途又有新的存模板事件把 dirty 继续推高,
+// loaded 就追不上,下一次开面板/存模板还会再重试。两者都不进模板、不进任何 computed,只在这段
+// 脚本逻辑内部读写,不用 ref。
+let templateLibraryDirtyMark = 0
+let templateLibraryLoadedMark = 0
+function markTemplateLibraryStale(): void {
+  templateLibraryDirtyMark += 1
+}
 const calendarHolidays = ref<CalendarEffectiveChip[]>([])
 const calendarHolidayFetchState = ref<CalendarHolidayFetchState>('idle')
 // Composite cache key `${from}|${to}|${userId}` — when userId arrives later
@@ -3806,6 +3872,16 @@ const listForeignSheetsForFieldFn = async (baseId: string) =>
 // 3c foreign-field picker: read-gated source for the lookup/rollup target + filter field pickers.
 const listForeignFieldsForFieldFn = async (sheetId: string) =>
   (await workbench.client.listFields(sheetId)).fields
+// 客户反馈 2026-09-24 #4c follow-up: a lookup of a dateTime field shows / exports the target column's wall clock.
+// The target's TYPE is not on the lookup field, so resolve it through the same read-gated field listing the
+// lookup target picker uses — once per change of the lookup wiring, not per render (lookup-target-fields.ts).
+watch(
+  () => lookupTargetSignature(grid.fields.value),
+  (signature) => {
+    if (signature) void loadLookupTargetFields(grid.fields.value, listForeignFieldsForFieldFn)
+  },
+  { immediate: true },
+)
 const activeAggregationConfig = computed<Record<string, string>>(() => {
   const raw = workbench.activeView.value?.config?.aggregations
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
@@ -4091,6 +4167,58 @@ async function onDeleteSheet(sheetId: string) {
   } else {
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
   }
+}
+
+// --- 复制数据表（含数据）S1 (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md) ---
+// Entry ① = the rail's copy button (selected sheet only); entry ② = the 「存为模板」 dialog's hand-off
+// link. Both are gated on the server-derived `canCopySheet` bit, read straight off the /context
+// capabilities object exactly like canDeleteSheet (`=== true`): an old backend without the key, a legacy
+// role-string source, or a stale object all fail CLOSED (no entry anywhere). Hiding is UX only — the
+// copy route re-runs the full-table-read and Base-writable gates. Entry ③ (template center) is S4.
+const canCopySheet = computed(() => capabilitySource.value?.canCopySheet === true)
+const showCopySheetDialog = ref(false)
+// Pinned when the dialog opens, so a sheet switch underneath can never retarget an open dialog.
+const copySheetSourceId = ref('')
+const copySheetSourceName = computed(() => workbench.sheets.value.find((s) => s.id === copySheetSourceId.value)?.name ?? '')
+// S1 target = the source sheet's Base (the active one); shown disabled in the dialog.
+const copySheetBaseName = computed(() => bases.value.find((b) => b.id === activeBaseId.value)?.name ?? '')
+const copySheetFieldChoices = computed(() => workbench.fields.value.map((f) => ({ id: f.id, name: f.name })))
+const copySheetViewChoices = computed(() => workbench.views.value.map((v) => ({ id: v.id, name: v.name })))
+
+function onOpenCopySheet(sheetId?: string): void {
+  const target = sheetId || workbench.activeSheetId.value
+  // The bit describes the ACTIVE sheet only; a request for any other sheet (stale rail) is refused.
+  if (!canCopySheet.value || !target || target !== workbench.activeSheetId.value) return
+  // Success navigates to the copy, so ask about unsaved edits up front — same order as onCreateSheet.
+  if (!confirmDiscardContextChanges()) return
+  copySheetSourceId.value = target
+  showCopySheetDialog.value = true
+}
+
+function openCopySheetFromSaveTemplate(): void {
+  closeSaveSheetAsTemplate()
+  onOpenCopySheet()
+}
+
+function closeCopySheetDialog(): void {
+  showCopySheetDialog.value = false
+}
+
+async function onCopySheetCopied(result: CopySheetResult): Promise<void> {
+  showCopySheetDialog.value = false
+  // Same refresh + select path as onCreateSheet: /context for the new sheet re-pulls the Base's sheet
+  // list (the copy included, with its copiedFrom badge) and makes it the active sheet.
+  const ok = await workbench.syncExternalContext({
+    baseId: (result.sheet.baseId ?? activeBaseId.value) || undefined,
+    sheetId: result.sheet.id,
+  })
+  if (!ok) {
+    showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+    return
+  }
+  exitDashboard()
+  showSuccess(copySheetSuccessToast(result.sheet.name, result.summary, result.replayed, isZh.value))
+  if (result.formulaRecompute?.failed) showError(copySheetLabel('copySheet.formulaRecomputeFailed', isZh.value))
 }
 
 // --- Base management ---
@@ -4596,25 +4724,69 @@ async function onRenameBase(baseId: string, name: string) {
 }
 
 async function loadTemplateLibrary() {
+  // N4 (adversarial review of #6091, 2026-09-26): loadTemplateLibrary is now called from more than
+  // one path in quick succession (save-while-panel-open below, and openTemplateLibrary's own
+  // auto-reload gate) — without this guard two concurrent calls would both flip
+  // templateLibraryLoading and race on templates.value, and whichever network response lands LAST
+  // wins regardless of which call was actually launched last. Skipping while one is already in
+  // flight does not lose the refresh: whoever tried to trigger it already called
+  // markTemplateLibraryStale() beforehand (see onSaveSheetAsTemplate), and the in-flight load
+  // notices that mark when it settles and runs one follow-up load (N-1, the tail of this function).
+  if (templateLibraryLoading.value) return
+  // S3/N4: snapshot the dirty mark BEFORE awaiting the network call. If something calls
+  // markTemplateLibraryStale() again WHILE this request is in flight, templateLibraryDirtyMark
+  // moves past this snapshot — on success below we only advance templateLibraryLoadedMark up to
+  // what we captured here, so a same-or-newer dirty mark keeps the panel "needs refresh" instead
+  // of a stale (pre-save) response silently marking it fresh.
+  const requestedMark = templateLibraryDirtyMark
   templateLibraryLoading.value = true
   templateLibraryError.value = null
   try {
     const data = await workbench.client.listTemplates()
     templates.value = data.templates ?? []
+    // Only a SUCCESSFUL load advances the loaded mark — a failed reload (network blip / 5xx) must
+    // leave the panel retryable, see the throw-site comment in onSaveSheetAsTemplate and the gate
+    // in openTemplateLibrary below.
+    if (requestedMark > templateLibraryLoadedMark) templateLibraryLoadedMark = requestedMark
   } catch (e: any) {
     templateLibraryError.value = e.message ?? wb('tpl.errorLoad', isZh.value)
   } finally {
     templateLibraryLoading.value = false
+  }
+  // N-1 (second adversarial review of #6091): a save that succeeded WHILE this request was in flight
+  // bumped the dirty mark past what this request captured, and its own reload call was skipped by
+  // the single-flight guard above — so this response predates the new template. With the panel
+  // still open, run exactly one follow-up load now instead of leaving the stale list up until the
+  // user closes and reopens the panel. Loop guard: the trigger is "the dirty mark moved DURING this
+  // request", never "the panel is still stale" — a follow-up that fails does not schedule another
+  // one (only a further save during it would), so a persistently failing endpoint is not hammered.
+  // Panel closed meanwhile: nothing is fetched behind the user's back; the stale mark makes the
+  // next openTemplateLibrary() reload.
+  if (templateLibraryDirtyMark > requestedMark && showTemplateLibrary.value) {
+    await loadTemplateLibrary()
   }
 }
 
 const saveTemplateFieldChoices = computed(() =>
   workbench.fields.value.map((field) => ({ id: field.id, name: field.name, type: field.type })),
 )
+// A10 phase 1(客户反馈 2026-09-24 #8):只读展示将被保存的视图——workbench.views 是**未经
+// 视图权限过滤**的清单(与 visibleWorkbenchViews 不同),必须用这个才和服务端实际保存的范围
+// (custom-template-store.ts:整张 sheet 的全部 meta_views,不按视图权限收窄)对得上。
+const saveTemplateViewChoices = computed(() =>
+  workbench.views.value.map((view) => ({ id: view.id, name: view.name, type: view.type })),
+)
 const activeSheetName = computed(() => {
   const sheetId = workbench.activeSheetId.value
   if (!sheetId) return ''
   return workbench.sheets.value.find((sheet) => sheet.id === sheetId)?.name ?? ''
+})
+// A10 phase 1:对话框头部「来源：<工作区名> / <数据表名>」用的工作区名。`bases` 是本组件自己
+// 维护的 Base 列表(loadBases 从 client.listBases() 填),不是 workbench composable 的字段。
+const activeBaseName = computed(() => {
+  const baseId = activeBaseId.value
+  if (!baseId) return ''
+  return bases.value.find((base) => base.id === baseId)?.name ?? ''
 })
 
 function openSaveSheetAsTemplate(): void {
@@ -4674,6 +4846,17 @@ async function onSaveSheetAsTemplate(): Promise<void> {
       fieldIds: [...saveTemplateFieldIds.value],
       visibility: saveTemplateShare.value ? 'tenant' : 'private',
     })
+    // A10 phase 1(客户反馈 2026-09-24 #8):存成功了,模板面板的列表要能看见它——
+    // 面板此刻正开着就立刻重拉;没开着就打一个"需要刷新"的标记,下次 openTemplateLibrary 会重拉
+    // (旧逻辑只在 templates.value.length === 0 时才拉,面板加载过一次之后就再也不会重拉了)。
+    // S3(2026-09-26 对抗评审):先打标记再重拉,不是反过来——loadTemplateLibrary 只有在这次重拉
+    // 结束时"赶上"了发起时的标记才会消掉待刷新状态,所以哪怕这次重拉失败(网络抖动/服务端 5xx),
+    // 待刷新状态仍然成立,下次开面板(openTemplateLibrary 的门)或再存一次模板都会重试,不会卡死
+    // 在一条失败的错误提示上、也不会让面板看起来"刷新过了"但其实还是旧列表。
+    markTemplateLibraryStale()
+    if (showTemplateLibrary.value) {
+      await loadTemplateLibrary()
+    }
   } catch (e: any) {
     saveTemplateError.value = e?.message ?? wb('saveTpl.failed', isZh.value)
   } finally {
@@ -4687,7 +4870,13 @@ async function openTemplateLibrary() {
     return
   }
   showTemplateLibrary.value = true
-  if (templates.value.length === 0 && !templateLibraryLoading.value) {
+  // N4: loadTemplateLibrary itself now no-ops while a load is already in flight (e.g. the
+  // save-while-open path just kicked one off), so calling it here is always safe — it either runs
+  // or is a harmless skip, never a second race. S3: also retry when the LAST load errored
+  // (templateLibraryError set) — a failed load never advances templateLibraryLoadedMark, but
+  // checking the error flag explicitly here too means a caller that ever sets error without going
+  // through the mark bookkeeping still gets retried on next open, not stuck on a dead error state.
+  if (templates.value.length === 0 || templateLibraryLoadedMark < templateLibraryDirtyMark || templateLibraryError.value) {
     await loadTemplateLibrary()
   }
 }
@@ -5018,7 +5207,11 @@ function onGridSelectionChange(recordIds: string[]) {
 //     fieldIds selection (selection narrows within the permitted set, never
 //     widens). NOTE: "all rows" exports the view's FULL set respecting the view's
 //     row filter + sort + hidden-fields (#3010) — the entire (filtered) view, not
-//     just the loaded page; a view with no filter exports the full sheet.
+//     just the loaded page; a view with no filter exports the full sheet. The
+//     toolbar's search box (searchText) is NOT part of that filter: exportSheet's
+//     params are sheetId/viewId/fieldIds/format only, and export-xlsx accepts no
+//     search param — a search-narrowed grid still exports the view's UNsearched
+//     rows (S2, adversarial review of #6091; export.allRows's label says so).
 //   - "selected rows" → stays CLIENT-SIDE over grid.rows. Those rows are the
 //     /view response, already field-permission AND §2a.3-taint masked at read
 //     time (univer-meta.ts GET /view: filterRecordDataByFieldIds over the
@@ -5095,12 +5288,18 @@ function triggerDownloadNamed(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+// 客户反馈 2026-09-24 #4c (B1): the "selected rows" client export writes date-times as the SAME
+// `YYYY-MM-DD HH:mm` business wall clock the grid shows (dateTime: explicit non-UTC field zone, else the
+// business zone; createdTime/modifiedTime: business zone) — matching the server's "all rows" route, so
+// both files re-import to the same instants. A non-date-time value keeps its raw projection.
 function doExportCsv(fields: GridExportField[], rowList: GridExportRow[]) {
   const header = fields.map((f) => csvEscape(f.name)).join(',')
   const rows = rowList.map((row) =>
     fields.map((f) => {
       const v = row.data[f.id]
       if (v === null || v === undefined) return ''
+      const wallClock = dateTimeExportText(f, v)
+      if (wallClock !== null) return csvEscape(wallClock)
       if (typeof v === 'boolean') return v ? 'true' : 'false'
       if (Array.isArray(v)) return csvEscape(v.map(String).join('; '))
       return csvEscape(String(v))
@@ -5123,6 +5322,8 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
       fields.map((f) => {
         const v = row.data[f.id]
         if (v === null || v === undefined) return ''
+        const wallClock = dateTimeExportText(f, v)
+        if (wallClock !== null) return wallClock
         if (typeof v === 'boolean') return v
         if (typeof v === 'number') return v
         if (Array.isArray(v)) return v.map((item) => (typeof item === 'object' ? JSON.stringify(item) : String(item))).join('; ')
@@ -5860,6 +6061,11 @@ onMounted(async () => {
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
   }).catch(() => undefined)
+  // A11: one values-free availability read per mount (one retry on network/5xx), off the critical
+  // path (never awaited). Any throw — including a client without the method — settles on 'unknown'.
+  void resolveAiAvailability(() => workbench.client.aiAvailability()).then((state) => {
+    aiAvailabilityState.value = state
+  })
   try {
     // Perf: the bases rail must NOT gate the sheet's own context load — it only
     // determines base *selection* when the URL anchors nothing (loadBases picks
@@ -6139,6 +6345,8 @@ defineExpose({
 .mt-save-tpl__header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .mt-save-tpl__header strong { font-size: 15px; color: #0f172a; }
 .mt-save-tpl__close { border: none; background: transparent; color: #64748b; font-size: 20px; line-height: 1; cursor: pointer; }
+/* A10 phase 1(客户反馈 2026-09-24 #8):来源行——比 __hint 稍重一点,先看清「存的是哪张表」。 */
+.mt-save-tpl__source { margin: 0; font-size: 12px; color: #334155; font-weight: 600; }
 .mt-save-tpl__hint { margin: 0; font-size: 12px; color: #64748b; }
 .mt-save-tpl__label { font-size: 12px; color: #334155; font-weight: 600; }
 .mt-save-tpl__row { display: flex; flex-direction: column; gap: 4px; }
@@ -6152,6 +6360,8 @@ defineExpose({
 .mt-save-tpl__item label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; cursor: pointer; }
 .mt-save-tpl__item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-save-tpl__item-type { font-size: 11px; color: #94a3b8; font-style: normal; }
+/* A10 phase 1:视图清单没有勾选框,item 本身就要 flex(字段清单的 flex 挂在内层 label 上)。 */
+.mt-save-tpl__views .mt-save-tpl__item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
 .mt-save-tpl__share { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
 .mt-save-tpl__error { margin: 0; font-size: 12px; color: #b91c1c; }
 .mt-save-tpl__footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }

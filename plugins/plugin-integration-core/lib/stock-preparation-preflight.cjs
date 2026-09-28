@@ -55,6 +55,8 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const {
   CARRY_TARGET_OWNERSHIP_STATES,
+  PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
   decideCarryTargetOwnership,
   SANDBOX_OBJECT_ID_NAMESPACE,
   inspectStockPreparationCanonicalTarget,
@@ -333,7 +335,7 @@ function buildPosture({ config, b2aTrialRegistry, env, carryTargetBindingDerived
       // the carry is allowed is reported by `checks.carryTargetBinding.ownershipState` and, when it
       // will be refused, by the STOCK_PREP_CARRY_TARGET_NOT_OWNED blocker — not here.
       note: carryTargetBindingDerived === false
-        ? 'the bound target sheetId is not the id derived from (this project, target.objectId). By itself that is not a fault: sheetId and objectId are independent fields for the writer, the export and the conflict policies, and a sheet provisioned before the ownership registry existed is in this state through no fault of its own. It is reported because two halves naming different tables is usually an editing slip — if objectId was changed without recomputing the binding, apply keeps writing rows into the sheet the OLD objectId named while the sandbox gate reads the NEW one. Whether carry is permitted is a SEPARATE question answered by checks.carryTargetBinding.ownershipState.'
+        ? 'the bound target sheetId is not the id derived from (this project, target.objectId). By itself that is not a fault: sheetId and objectId are independent fields for the writer, the export and the conflict policies, and a sheet provisioned before the ownership registry existed is in this state through no fault of its own. It is reported because two halves naming different tables is usually an editing slip — if objectId was changed without recomputing the binding, apply keeps writing rows into the sheet the OLD objectId named while the sandbox gate reads the NEW one. Whether carry and the materials export are permitted is a SEPARATE question answered by checks.carryTargetBinding.ownershipState.'
         : 'nothing to report: the bound sheetId either is the derived one, or this host exposes no derivation to check it against.',
     }),
     outboundHttpWrite: Object.freeze({
@@ -680,9 +682,14 @@ async function computeStockPreparationPreflight({
       : null,
   })
   if (carryBinding.ownership && !carryBinding.ownership.ok) {
+    // The materials export and the handoff advance ask the SAME ownership question through the same
+    // wall (http-routes.cjs assertStockPreparationTargetBelongsToTenant), each answering in its own
+    // vocabulary — so the one verdict is quoted in all three routes' codes.
+    const exportRefusalCode = PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES[carryBinding.ownership.state] || null
+    const handoffRefusalCode = STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES[carryBinding.ownership.state] || null
     blockers.push(blocker({
       code: PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED,
-      what: `the bound table action target cannot be attributed to this deployment's own project, so every 结转 (carry) confirm will be refused with ${carryBinding.ownership.refusalCode}. Apply, dry-run and the export do not ask this question and will keep working, which is exactly why it has to be caught here instead of on the first click. Re-run the sandbox target ensure so the platform provisions the sheet under this project and records the registry row, then paste the target it returns into the action config`,
+      what: `the bound table action target cannot be attributed to this deployment's own project, so every 结转 (carry) confirm will be refused with ${carryBinding.ownership.refusalCode}, every 按项目导出物料 (materials export) with ${exportRefusalCode} and every 通知下一步 (handoff advance) with ${handoffRefusalCode}. Apply and dry-run do not ask this question and will keep working, which is exactly why it has to be caught here instead of on the first click. Re-run the sandbox target ensure so the platform provisions the sheet under this project and records the registry row, then paste the target it returns into the action config`,
       fix: httpFix({
         method: 'POST',
         path: '/api/integration/stock-preparation/sandbox-target/ensure',
@@ -693,6 +700,8 @@ async function computeStockPreparationPreflight({
         // The EXACT string the click returns, so "what the preflight warned about" and "what the
         // operator saw" are the same token rather than two descriptions of one thing.
         carryRouteCode: carryBinding.ownership.refusalCode,
+        exportRouteCode: exportRefusalCode,
+        handoffRouteCode: handoffRefusalCode,
       },
     }))
   }

@@ -301,6 +301,14 @@ function mockDispatchQueriesForOldAssignee() {
     if (statement === 'BEGIN' || statement === 'ROLLBACK') {
       return { rows: [], rowCount: 0 }
     }
+    // dispatchAction's cancel-round rollout-lock pre-read (lock §3 C-2), which runs BEFORE `BEGIN`
+    // and short-circuits on this first row for anything that is not a cancel round — which this
+    // fixture is not. Same reason and same caveat as the sibling mock in
+    // `approval-product-service.test.ts`: the resolver's real behaviour is measured against real
+    // PostgreSQL in the Q-F census, never through a mock.
+    if (statement.startsWith('SELECT id, workflow_key FROM approval_instances')) {
+      return { rows: [{ id: instance.id, workflow_key: instance.workflow_key ?? null }], rowCount: 1 }
+    }
     if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
       return { rows: [instance], rowCount: 1 }
     }

@@ -251,6 +251,12 @@ const props = withDefaults(defineProps<{
    * endpoints — passes `false` explicitly.
    */
   enableReactions?: boolean
+  /**
+   * 客户反馈 2026-09-24 #4c follow-up: host-supplied timestamp text. The multitable hosts pass the business-
+   * timezone formatter (the zone every multitable date-time is shown in); left out — the approval host — the
+   * browser-local `toLocaleString()` stays, byte-identical.
+   */
+  timestampFormatter?: ((iso: string) => string) | null
 }>(), {
   highlightedCommentId: null,
   targetFieldId: null,
@@ -269,6 +275,7 @@ const props = withDefaults(defineProps<{
   mentionCandidates: () => [],
   mentionSearch: null,
   enableReactions: true,
+  timestampFormatter: null,
 })
 
 const emit = defineEmits<{
@@ -457,6 +464,7 @@ function formatReplyCount(count: number): string {
 }
 
 function formatTime(iso: string): string {
+  if (props.timestampFormatter) return props.timestampFormatter(iso)
   try { return new Date(iso).toLocaleString() } catch { return iso }
 }
 

@@ -598,6 +598,8 @@ import {
   readStockPreparationHandoff,
   readStockPreparationOperatorDirectory,
   readStockPreparationValueEntry,
+  stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
   type StockPreparationDecisionReadiness,
   type StockPreparationDecisionRow,
@@ -1080,12 +1082,11 @@ const handoffLostStepKeys = computed<string[]>(() => {
   return Array.isArray(state.lostStepKeys) ? state.lostStepKeys : []
 })
 
-/** The step whose notice is still owed AND still sendable by this caller. Server-computed. */
-const handoffResendableStepKey = computed<string | null>(() => {
-  const state = handoff.value
-  if (!state.configured) return null
-  return typeof state.resendableStepKey === 'string' && state.resendableStepKey ? state.resendableStepKey : null
-})
+/**
+ * The step whose notice is still owed AND still sendable by this caller. Server-computed. The
+ * derivation is shared with 项目备料页 (confirmationQueue.ts) so the two buttons cannot disagree.
+ */
+const handoffResendableStepKey = computed<string | null>(() => stockPreparationHandoffResendableStepKey(handoff.value))
 
 /** The committed labels for the lost hops, so the sentence names them rather than counting them. */
 const handoffLostStepLabels = computed<string>(() =>
@@ -1239,8 +1240,9 @@ async function advanceHandoff(): Promise<void> {
   // FINISH WHAT IS OWED BEFORE MOVING ON. When a hop's notice is still unsent, replaying THAT hop is
   // what sends it; advancing the current one instead would claim the next step and push the monotonic
   // max past the owed hop, losing it for good. So the resend wins when both are possible — which is
-  // also what the invitation on screen promises the click will do.
-  const fromStepKey = handoffResendableStepKey.value ?? handoff.value.currentStepKey
+  // also what the invitation on screen promises the click will do. The shared helper is the same one
+  // 项目备料页 presses with.
+  const fromStepKey = stockPreparationHandoffFromStepKey(handoff.value)
   if (!projectNo.value || !fromStepKey) return
   handoffAdvance.value = null
   await run(async () => {

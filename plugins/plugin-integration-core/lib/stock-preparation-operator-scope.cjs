@@ -57,6 +57,11 @@
 //      values, so the H0 三重门 applies: RBAC + a server-side field whitelist + audit.
 //        1. GET …/confirmation-decisions/value-entry  the per-decision readback  (O1')
 //        2. GET …/prep-lines/export                   the materials workbook     (按项目导出物料 Excel)
+//           Its sheet is the DEPLOY-GLOBAL table-action target, so the scope resolved here is then
+//           checked against that sheet's registry ownership (`isSheetOwnedByProject`, derived-id
+//           fallback) before any records IO — the same wall as (8), in its own
+//           PREP_LINE_EXPORT_TARGET_* vocabulary. See http-routes.cjs
+//           `assertStockPreparationTargetBelongsToTenant`.
 //        3. GET …/operator/projects                   the project directory      (一线看得见自己工厂的项目)
 //        4. GET …/projects/:projectNo/board           `stockPreparationOperatorProjectBoard`
 //           the project board (项目备料页). ONE project's number and name plus counts and booleans — the fourth value-bearing read on
@@ -83,7 +88,10 @@
 //           the broad READ tier (`requiredTier: STOCK_PREP_READ`) because a supervisor is meant to
 //           see whose turn it is — but WHOSE turn is still a tenant fact.
 //        7. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
-//           the advance itself: a WRITE (see below).
+//           the advance itself: a WRITE (see below). Before it writes it probes the DEPLOY-GLOBAL
+//           table-action target for "does this project have rows", so the scope resolved here is
+//           first checked against that sheet's registry ownership — the same wall as (2) and (8), in
+//           its own STOCK_PREPARATION_HANDOFF_TARGET_* vocabulary (#6121).
 //        8. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
 //           the K2 结转 confirm: a WRITE, values-free in its response (modes, counts, field NAMES).
 //           It joins this list for a reason specific to it — the tenant string does not merely scope
@@ -93,7 +101,8 @@
 //           would be a steering vector straight into someone else's table. The scope resolved here
 //           is then checked against the bound sheet's own registry ownership
 //           (`isSheetOwnedByProject`) before any records IO — see http-routes.cjs
-//           `assertCarryTargetBelongsToTenant`.
+//           `assertCarryTargetBelongsToTenant` (the carry vocabulary of
+//           `assertStockPreparationTargetBelongsToTenant`, which the export (2) shares).
 //        9. POST …/confirmation-decisions/confirm     `stockPreparationConfirmationDecisionsConfirm`
 //           THE WRITE HALF OF (1), and the last member of that family to be enrolled. It is listed
 //           under B rather than A because its RESPONSE is values-free (the patched row's ids, status

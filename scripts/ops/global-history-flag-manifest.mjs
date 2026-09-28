@@ -59,6 +59,25 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/manage-schema-permission.ts',
   },
   {
+    key: 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'],
+    danger: 'high',
+    purpose:
+      "Field type CONVERSION with value migration, first batch string -> select / multiSelect (design lock docs/development/multitable-field-retype-first-batch-adr-20260926.md). Default OFF; exact literal 'true' only (no trim, no case folding). Gates all three endpoints: the read-only POST /fields/:fieldId/retype-preview (slice 2, shipped) and the execute / undo endpoints (slice 3). Off: every one of them answers 403 FIELD_RETYPE_CONVERT_DISABLED before any read. PATCH /fields/:fieldId is NOT affected by this flag: string -> select / multiSelect stays 400 FIELD_RETYPE_NOT_LOSSLESS there either way. With MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA on, all three endpoints refuse 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag) — hence the conflicts rule. Execute / undo additionally refuse 409 FIELD_RETYPE_TRUST_REQUIRED while the canonical writer fence is off; that is enforced in-process and deliberately NOT modelled as a dependsOn/requires rule, so turning this flag on alone to run the read-only preview is a legal rung. Deploy order: migrations -> writer fence -> this flag. danger=high: execute rewrites a whole column of live record data.",
+    source: 'packages/core-backend/src/multitable/field-retype-convert.ts#isFieldRetypeConvertEnabled; packages/core-backend/src/routes/univer-meta.ts#retype-preview',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'field-retype-convert-with-legacy-manage-schema',
+        description:
+          'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT is active while MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA is active — the legacy switch lets multitable:write hold schema authority, below the gate field type conversion requires, so every conversion endpoint refuses 409 FIELD_RETYPE_TRUST_REQUIRED. Field type conversion cannot function in this state.',
+      },
+    ],
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
     type: 'boolean',
     activationValue: 'true',
@@ -610,6 +629,50 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       'Poll interval for the DingTalk todo-mirror delivery worker\'s setInterval tick (runBatch). Number(process.env...) || 30_000 then Math.max(5_000, ...): an unset/blank/non-numeric value falls back to the 30s default, and any in-range or larger value is honoured verbatim — only a value below 5000 gets clamped up to the 5s floor. No-op unless DINGTALK_TODO_MIRROR_ENABLED is active (the worker is never constructed otherwise).',
     source: 'packages/core-backend/src/index.ts:3948',
+  },
+  {
+    key: 'MULTITABLE_BUSINESS_TIMEZONE',
+    type: 'enum',
+    activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "客户反馈 2026-09-24 #4c (ruling PR #6074): the instance business timezone multitable date-times are DISPLAYED and PARSED in on the web — never the browser's local zone. Storage is unchanged (UTC instants); only the wall clock a person sees/types changes. Echoed as `businessTimezone` on GET /api/multitable/context and /form-context; a dateTime field's own non-UTC property.timezone still wins. Not a gate: nothing turns on or off, and the default (Asia/Shanghai) is the intended state for a China deployment, so leaving it unset needs no action. An invalid value is logged once (without echoing it) and falls back to the default.",
+    source: 'packages/core-backend/src/multitable/business-timezone.ts#resolveMultitableBusinessTimezone',
+  },
+  {
+    key: 'MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "客户反馈 2026-09-24 #4a: operator switch for the WRITE leg of the managed-table display-name relabel (「把系统表的英文表头改成中文」, stock-prep 数据来源与体检). Default OFF; exact literal 'true' only (no trim, no case folding). Off: the dry run still works (it writes nothing), the plugin route answers 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED, and the host primitive itself refuses the write leg (409 MULTITABLE_RELABEL_APPLY_DISABLED) before any statement — enforced at the one place that writes, not only in the route. On: stock-prep:admin (or platform admin) may rename still-English managed-table columns and sheet names to their template Chinese names, compare-and-set, only after a preview whose planDigest the apply must match. Danger=medium: it renames the customer's production managed tables (field renames are revertible from the config history; sheet renames are recorded but not revertible there), and while an apply runs, record inserts to that sheet wait for it to commit.",
+    source: 'packages/core-backend/src/multitable/object-display-name-relabel.ts#isManagedTableRelabelApplyEnabled',
+  },
+  {
+    key: 'MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS',
+    type: 'numeric',
+    activationValue: 'numeric row count (default 2000; unset / blank / non-integer / < 1 = 2000; capped at 50000 = XLSX_MAX_ROWS)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "「复制数据表（含数据）」(design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-15 / §7.5): the SYNCHRONOUS copy row cap N. A source sheet with more than N live rows is refused 413 COPY_TOO_LARGE before any write (the S3 async job is the path above N and is not built yet). Number(env) parsed once per request via resolveCopySheetSyncMaxRows: unset/blank/non-integer/<1 fall back to 2000, anything above 50000 is clamped to 50000 (the ADR's absolute ceiling, = XLSX_MAX_ROWS). Not a gate: nothing turns on or off; the default covers the customer table (1239 rows). Raising it lengthens one synchronous transaction that holds the source sheet row lock + every participating sheet fence for its duration.",
+    source: 'packages/core-backend/src/multitable/copy-sheet-limits.ts#resolveCopySheetSyncMaxRows',
+  },
+  {
+    key: 'TASKS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks.',
+    source: 'packages/core-backend/src/routes/tasks.ts:35',
   },
 ])
 

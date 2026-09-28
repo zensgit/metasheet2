@@ -372,7 +372,8 @@ describe('#5936 — GET /context: authority before the sheet row', () => {
       ownerId: 'u_oracle_owner',
       workspaceId: null,
     })
-    expect(res.body.data.sheet).toEqual({ id: LIVE, baseId: BASE_ID, name: 'Oracle', description: null })
+    // `copiedFrom: null` — copy-sheet S1 provenance (ADR #6094 CS-14): the oracle fixture's sheet is not a copy.
+    expect(res.body.data.sheet).toEqual({ id: LIVE, baseId: BASE_ID, name: 'Oracle', description: null, copiedFrom: null })
     expect((res.body.data.sheets as Array<{ id: string }>).map((s) => s.id)).toEqual([LIVE])
     expect(res.body.data.views).toEqual([])
     expect(res.body.data.personalOverrideViewIds).toEqual([])
@@ -432,7 +433,8 @@ describe('#5936 — GET /context: authority before the sheet row', () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200)
     expect((res.body.data.sheets as Array<{ id: string }>).map((s) => s.id)).toEqual([LIVE])
     // No sheet was named, so no per-sheet liveness question was asked about one.
-    expect(res.body.data.sheet).toEqual({ id: LIVE, baseId: BASE_ID, name: 'Oracle', description: null })
+    // `copiedFrom: null` — copy-sheet S1 provenance (ADR #6094 CS-14): the oracle fixture's sheet is not a copy.
+    expect(res.body.data.sheet).toEqual({ id: LIVE, baseId: BASE_ID, name: 'Oracle', description: null, copiedFrom: null })
   })
 
   it('the fixture cannot be satisfied by asking about the wrong sheet id (unknown id ⇒ live)', async () => {

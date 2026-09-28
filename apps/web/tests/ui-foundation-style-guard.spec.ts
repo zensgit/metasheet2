@@ -69,6 +69,9 @@ const TARGET_FILES = [
   'src/components/status/EmptyState.vue',
   'src/multitable/components/MetaAutomationManager.vue',
   'src/multitable/components/MetaAutomationRuleEditor.vue',
+  // 客户反馈 2026-09-24 #4b: the typed condition value control extracted for the rule editor's condition
+  // rows joins in its introducing slice, born token-only (var(--ms-*)/--el-* exclusively).
+  'src/multitable/components/ConditionValueInput.vue',
   // IU-2a (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
   // §3 hard locks "token-only"): Workbench chrome slice tokenized its 142 hardcoded hex/rgb
   // literals onto var(--ms-*)/--el-* and adds the new rail component clean from the start.
