@@ -45,6 +45,10 @@
 //         never into the carry's or the export's.
 //   HW-10 STRUCTURE: the advance handler calls the shared wall BEFORE the probe and every write, derives
 //         the project it asks about from the resolved scope, and grows no private ownership check.
+//   HW-11 THE REQUEST BODY CANNOT MOVE THE WALL EITHER. A verified tenant-B request whose body sets
+//         `workspaceId` to tenant A's staging project is refused, and the registry is asked about tenant
+//         B's staging project only. HW-10 pins the same property as source text; this pins it as
+//         behaviour, so a wall that took its project from the request is red on what it DOES.
 //
 // Hermetic: no DB, no network, no DingTalk. The handoff store is the REAL one over an in-memory db;
 // the audit store, the notifier, the records API, the host directory and the ownership port are spies.
@@ -353,10 +357,10 @@ function createResponse() {
  * (the host middleware sets `req.authenticatedTenantId` only from a verified token claim).
  * `claimless: true` is the demo machine's shape: the key is ABSENT, not empty.
  */
-async function advanceAs(harness, user, { projectNo = PROJECT_IN_A, claimless = false, headers = {} } = {}) {
+async function advanceAs(harness, user, { projectNo = PROJECT_IN_A, claimless = false, headers = {}, body = {} } = {}) {
   const handler = harness.routes.get(`POST ${ADVANCE_PATH}`)
   assert.ok(handler, 'the advance route is registered')
-  const req = { user, body: { projectNo, fromStepKey: 'prep_entry' }, query: {}, params: {}, headers: { ...headers } }
+  const req = { user, body: { projectNo, fromStepKey: 'prep_entry', ...body }, query: {}, params: {}, headers: { ...headers } }
   if (!claimless) req.authenticatedTenantId = user.tenantId
   const res = createResponse()
   await handler(req, res)
@@ -661,6 +665,34 @@ async function main() {
     assert.equal((code.match(/\.isSheetOwnedByProject\(/g) || []).length, 1, 'one ownership-port call site in http-routes.cjs')
     assert.ok(/function assertHandoffAdvanceTargetBelongsToTenant\([^)]*\) \{\n\s+return assertStockPreparationTargetBelongsToTenant\([^\n]*STOCK_PREPARATION_TARGET_TENANT_WALLS\.handoffAdvance \}\)/.test(code),
       'the handoff wrapper delegates to the shared wall with the handoff vocabulary')
+  })
+
+  await run('HW-11 a body workspaceId naming the owning tenant\'s staging project cannot move the wall off the verified tenant', async () => {
+    // THE STEERING VALUE IS LIVE, which is what makes this a witness and not a formality. The advance's
+    // body allowlist accepts `workspaceId`, and the staging resolver hands back an `…:integration-core`
+    // project it is given VERBATIM (resolveIntegrationStagingProjectId's second argument). So a wall
+    // that took its project from the request would ask the registry about tenant A's staging project,
+    // get "owned", and let tenant B's click probe tenant A's sheet — the bit this change closes.
+    assert.equal(STAGING_A.split(':').pop(), 'integration-core',
+      'fixture: the steering value has the shape the staging resolver returns verbatim')
+    const answers = []
+    for (const projectNo of [PROJECT_IN_A, PROJECT_INVENTED]) {
+      const label = `HW-11 ${projectNo === PROJECT_IN_A ? 'existing' : 'invented'}`
+      // Chain bound to tenant B, the bound sheet owned by tenant A, a verified tenant-B token.
+      const harness = mount({ chainTenantId: TENANT_B })
+      const res = await advanceAs(harness, OPERATOR_B, { projectNo, body: { workspaceId: STAGING_A } })
+      assert.deepEqual(harness.recordsReads, [], `${label}: a body workspaceId must not open tenant A's sheet to tenant B`)
+      assertWallRefusal(harness, res, 409, TENANT_MISMATCH, label)
+      assert.deepEqual(harness.registryCalls, [{ sheetId: HAND_BOUND_SHEET, projectId: STAGING_B }],
+        `${label}: the registry was asked about the VERIFIED tenant's staging project, and only that`)
+      assert.deepEqual(harness.deriveCalls, [{ projectId: STAGING_B, objectId: MAIN_OBJECT_ID }],
+        `${label}: and so was the derived-id fallback`)
+      assert.deepEqual(harness.directoryCalls, [{ userId: OPERATOR_B.id, tenantId: TENANT_B }],
+        `${label}: the scope itself never looked at tenant A`)
+      assertValuesFree(res, label)
+      answers.push({ status: res.statusCode, body: plain(res.body), registryCalls: harness.registryCalls, storeCalls: harness.storeCalls })
+    }
+    assert.deepEqual(answers[0], answers[1], 'HW-11: the same refusal for an existing and an invented project')
   })
 
   console.log(`\nstock-preparation-handoff-advance-tenant-wall: ${passed} passed, ${failed} failed`)

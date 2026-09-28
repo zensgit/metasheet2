@@ -441,6 +441,34 @@ describe('通知下一步 — the multi-person handoff on the confirmation queue
     expect(noticeLine(), 'a refused advance must not also claim a handoff happened').toBeNull()
   })
 
+  it('H-07b: a 409 TARGET_TENANT_MISMATCH (the tenant wall) renders its own sentence and never invites a retry', async () => {
+    asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
+    serve({
+      handoff: [() => json({ ok: true, data: handoffStatus() })],
+      advance: () => json({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH', message: 'target not owned', details: {} },
+      }, 409),
+    })
+    await render()
+    advanceButton()!.click()
+    await flush()
+
+    const error = errorLine()
+    expect(error).not.toBeNull()
+    const text = error!.textContent ?? ''
+    // What the operator reads, asserted FIRST and as literals: without its own row this code fell
+    // through to the generic write sentence, and these are the lines that name that failure.
+    expect(text, 'retrying cannot change a tenant-wall refusal').not.toContain('过一会儿再点一次')
+    expect(text, 'not the generic write fallback either').not.toContain('这一步没有保存成功')
+    expect(text).toContain('不属于您的工厂')
+    expect(text).toContain('管理员')
+    expect(text).toContain('看看还缺什么')
+    expect(text).toContain(STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH?.zh ?? '<no row>')
+    expect(error!.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH')
+    expect(noticeLine(), 'a refused advance must not also claim a handoff happened').toBeNull()
+  })
+
   it('H-08: notifyOutcome "failed" says the turn DID move and the message did NOT go out', async () => {
     asActor([STOCK_PREP_READ, STOCK_PREP_OPERATE])
     serve({
