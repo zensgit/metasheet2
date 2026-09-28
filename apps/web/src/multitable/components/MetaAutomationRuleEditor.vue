@@ -93,14 +93,19 @@
             <el-select v-model="cronPreset" class="meta-rule-editor__select" data-field="cronPreset">
               <el-option value="*/5 * * * *" data-value="*/5 * * * *" :label="automationCronPresetLabel('*/5 * * * *', isZh)" />
               <el-option value="0 * * * *" data-value="0 * * * *" :label="automationCronPresetLabel('0 * * * *', isZh)" />
-              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh)" />
-              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh)" />
+              <el-option value="0 0 * * *" data-value="0 0 * * *" :label="automationCronPresetLabel('0 0 * * *', isZh, scheduleTriggerTimezone)" />
+              <el-option value="0 0 * * 1" data-value="0 0 * * 1" :label="automationCronPresetLabel('0 0 * * 1', isZh, scheduleTriggerTimezone)" />
               <el-option value="custom" data-value="custom" :label="automationCronPresetLabel('custom', isZh)" />
             </el-select>
             <template v-if="cronPreset === 'custom'">
               <label class="meta-rule-editor__label">{{ automationLabel('trigger.cronExpression', isZh) }}</label>
               <el-input v-model="(draft.triggerConfig.cron as string)" type="text" placeholder="* * * * *" data-field="cronExpression" />
             </template>
+            <div class="meta-rule-editor__hint" data-field="cronTimezoneHint">{{ automationCronTimezoneHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.cron', cron: cronSwitchImpact }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- schedule.interval config -->
@@ -123,9 +128,28 @@
               <el-option value="before" data-value="before" :label="isZh ? '日期之前' : 'Before the date'" />
               <el-option value="after" data-value="after" :label="isZh ? '日期之后' : 'After the date'" />
             </el-select>
-            <label class="meta-rule-editor__label">{{ isZh ? '触发时间（UTC，可选）' : 'Time of day (UTC, optional)' }}</label>
-            <el-input v-model="(draft.triggerConfig.timeOfDay as string)" type="time" placeholder="09:00" data-field="timeOfDay" />
-            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ isZh ? '每天按此 UTC 时间触发；服务重启后会补发当天到点的提醒。' : 'Fires daily at this UTC time; a restart catches up today\'s due reminders.' }}</div>
+            <!--
+              A7a (客户反馈 2026-09-24 #4c): a 24-hour picker that does not follow the browser locale (the old
+              native type="time" input rendered am/pm), on the rule's schedule timezone — the business timezone
+              for new rules; a legacy rule stays on UTC until the explicit switch below.
+            -->
+            <label class="meta-rule-editor__label" data-field="timeOfDayLabel">{{ automationReminderTimeLabel(scheduleTriggerTimezone, isZh) }}</label>
+            <el-select
+              v-model="timeOfDayModel"
+              class="meta-rule-editor__select"
+              clearable
+              filterable
+              :placeholder="automationReminderTimePlaceholder(isZh)"
+              data-field="timeOfDay"
+            >
+              <el-option v-for="t in timeOfDayOptions" :key="t" :value="t" :data-value="t" :label="t" />
+            </el-select>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeHint">{{ automationReminderTimeHint(scheduleTriggerTimezone, isZh) }}</div>
+            <div class="meta-rule-editor__hint" data-field="dateFieldTimeExample">{{ dateReminderExampleText }}</div>
+            <div v-if="scheduleOnLegacyUtc" class="meta-rule-editor__hint meta-rule-editor__hint--warning" data-field="scheduleLegacyUtcNotice">
+              {{ automationLegacyUtcScheduleNotice({ triggerType: 'schedule.date_field', timeOfDay: effectiveTriggerTimeOfDay(draft.triggerConfig.timeOfDay) }, isZh) }}
+              <el-button size="small" data-action="switchScheduleToBusinessTimezone" @click="switchScheduleToBusinessTimezone">{{ automationSwitchToBusinessTimezoneLabel(isZh) }}</el-button>
+            </div>
           </template>
 
           <!-- webhook.received (signed inbound) config -->
@@ -254,76 +278,41 @@
                 :data-condition-index="entry.pathKey"
                 :data-condition-path="entry.pathKey"
               >
+                <!-- 客户反馈 2026-09-24 #4b: field → operator → typed value. Until a field is chosen the
+                     operator and value stay disabled and ask for a field (the row used to seed `equals`,
+                     which the field-less operator select showed as the raw code). -->
                 <el-select
                   :model-value="entry.condition.fieldId"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
                   :placeholder="automationLabel('condition.selectField', isZh)"
+                  data-condition-field=""
                   @change="onConditionFieldChange(entry.condition, $event)"
                 >
                   <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
-                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
+                  <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
+                    <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
+                    <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
+                  </el-option>
                 </el-select>
                 <el-select
                   :model-value="entry.condition.operator"
                   class="meta-rule-editor__select meta-rule-editor__select--sm"
+                  :disabled="!entry.condition.fieldId"
+                  :placeholder="automationLabel('condition.selectFieldFirst', isZh)"
+                  data-condition-operator=""
                   @change="onConditionOperatorChange(entry.condition, $event as ConditionOperator)"
                 >
-                  <el-option v-for="op in conditionOperatorsForField(entry.condition.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
+                  <el-option v-for="op in conditionOperatorOptionsForRow(entry.condition)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(entry.condition, op.value)" />
                 </el-select>
-                <template v-if="!isUnaryOperator(entry.condition.operator)">
-                  <el-select
-                    v-if="conditionValueWidget(entry.condition) === 'booleanMultiSelect'"
-                    :model-value="booleanMultiSelectConditionValues(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    data-condition-value="boolean-multi-select"
-                    multiple
-                    @change="onBooleanMultiSelectConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option value="true" data-value="true" label="true" />
-                    <el-option value="false" data-value="false" label="false" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'boolean'"
-                    :model-value="booleanConditionValue(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    :placeholder="automationLabel('condition.selectValue', isZh)"
-                    data-condition-value="boolean"
-                    @change="onBooleanConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
-                    <el-option value="true" data-value="true" label="true" />
-                    <el-option value="false" data-value="false" label="false" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'select'"
-                    :model-value="singleSelectConditionValue(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    :placeholder="automationLabel('condition.selectValue', isZh)"
-                    data-condition-value="select"
-                    @change="entry.condition.value = $event"
-                  >
-                    <el-option value="" data-value="" :label="automationLabel('condition.selectValue', isZh)" />
-                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
-                  </el-select>
-                  <el-select
-                    v-else-if="conditionValueWidget(entry.condition) === 'multiSelect'"
-                    :model-value="multiSelectConditionValues(entry.condition)"
-                    class="meta-rule-editor__select meta-rule-editor__select--sm"
-                    data-condition-value="multi-select"
-                    multiple
-                    @change="onMultiSelectConditionValueChange(entry.condition, $event)"
-                  >
-                    <el-option v-for="option in conditionFieldOptions(entry.condition)" :key="option.value" :value="option.value" :data-value="option.value" :label="optionLabel(option)" />
-                  </el-select>
-                  <el-input
-                    v-else
-                    v-model="(entry.condition.value as string)"
-                    class="meta-rule-editor__input--sm"
-                    :type="conditionValueInputType(entry.condition)"
-                    :inputmode="conditionValueInputMode(entry.condition)"
-                    :placeholder="conditionValuePlaceholder(entry.condition)"
-                  />
-                </template>
+                <ConditionValueInput
+                  v-if="!isUnaryOperator(entry.condition.operator)"
+                  :model-value="entry.condition.value"
+                  :operator="entry.condition.operator"
+                  :field="conditionField(entry.condition) ?? null"
+                  :pending="isConditionRowPending(entry.condition)"
+                  :sheet-id="sheetId"
+                  @update:model-value="entry.condition.value = $event"
+                />
                 <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeConditionNode(entry.path)" :title="automationLabel('condition.removeConditionTitle', isZh)">&times;</el-button>
               </div>
             </template>
@@ -351,7 +340,7 @@
                   :key="type"
                   :value="type"
                   :data-value="type"
-                  :disabled="isUnsupportedSelectableActionType(type)"
+                  :disabled="isUnsupportedSelectableActionType(type) || isDeletedTriggerBlockedActionType(type)"
                   :label="automationActionTypeLabel(type, isZh)"
                 />
               </el-select>
@@ -417,6 +406,19 @@
               >
                 {{ automationLabel(crossBaseTargets[action.draftId].kind === 'create' ? 'actionConfig.crossBaseCreateTargetIncomplete' : 'actionConfig.crossBaseTargetIncomplete', isZh) }}
               </div>
+            </div>
+
+            <!-- 客户反馈 2026-09-24 #3 (裁定 PR #6074): under `record.deleted` the trigger record is already gone, so a
+                 same-base update/delete/lock of it (top level or inside a branch) can only no-op — and used to
+                 self-chain into three execution logs. The option is disabled in the selects above/below; a
+                 LOADED rule keeps its action visible (loadable) and shows this hint, and the same sentence blocks
+                 save (automationSaveBlockReasons.ts) exactly as the backend refuses it (DELETED_TRIGGER_SELF_MUTATION). -->
+            <div
+              v-if="deletedTriggerSelfMutationOf(action)"
+              class="meta-rule-editor__hint meta-rule-editor__hint--warning"
+              data-field="deletedTriggerSelfMutationHint"
+            >
+              {{ automationLabel('actionConfig.deletedTriggerSelfMutation', isZh) }}
             </div>
 
             <!-- update_record config -->
@@ -1411,21 +1413,43 @@
                     <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'AND' }" :type="branch.conjunction === 'AND' ? 'primary' : 'default'" @click="branch.conjunction = 'AND'">{{ automationLabel('condition.and', isZh) }}</el-button>
                     <el-button size="small" class="meta-rule-editor__toggle-btn" :class="{ 'meta-rule-editor__toggle-btn--active': branch.conjunction === 'OR' }" :type="branch.conjunction === 'OR' ? 'primary' : 'default'" @click="branch.conjunction = 'OR'">{{ automationLabel('condition.or', isZh) }}</el-button>
                   </div>
-                  <div v-for="(cond, cIdx) in branch.conditions" :key="cIdx" class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
-                    <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" @change="onConditionFieldChange(cond, $event)">
-                      <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
-                      <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name" />
-                    </el-select>
-                    <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
-                      <el-option v-for="op in conditionOperatorsForField(cond.fieldId)" :key="op.value" :value="op.value" :data-value="op.value" :label="automationConditionOperatorLabel(op.value, isZh)" />
-                    </el-select>
-                    <el-input v-if="!isUnaryOperator(cond.operator)" v-model="(cond.value as string)" class="meta-rule-editor__input--sm" :placeholder="automationLabel('condition.selectValue', isZh)" />
-                    <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
-                  </div>
+                  <template v-for="(cond, cIdx) in branch.conditions" :key="cIdx">
+                    <div class="meta-rule-editor__condition-row" :data-branch-condition-index="cIdx">
+                      <!-- 客户反馈 2026-09-24 #4b: the same field → operator → typed value row as the rule-level
+                           conditions (was a bare text box whose values were saved as strings). -->
+                      <el-select :model-value="cond.fieldId" class="meta-rule-editor__select meta-rule-editor__select--sm" :placeholder="automationLabel('condition.selectField', isZh)" data-condition-field="" @change="onConditionFieldChange(cond, $event)">
+                        <el-option value="" data-value="" :label="automationLabel('condition.selectField', isZh)" />
+                        <el-option v-for="f in fields" :key="f.id" :value="f.id" :data-value="f.id" :label="f.name">
+                          <span class="meta-rule-editor__field-option-name">{{ f.name }}</span>
+                          <span class="meta-rule-editor__field-type-hint" data-field-type-hint="">{{ fieldTypeLabel(conditionFieldDisplayType(f), isZh) }}</span>
+                        </el-option>
+                      </el-select>
+                      <el-select :model-value="cond.operator" class="meta-rule-editor__select meta-rule-editor__select--sm" :disabled="!cond.fieldId" :placeholder="automationLabel('condition.selectFieldFirst', isZh)" data-condition-operator="" @change="onConditionOperatorChange(cond, $event as ConditionOperator)">
+                        <el-option v-for="op in conditionOperatorOptionsForRow(cond)" :key="op.value" :value="op.value" :data-value="op.value" :label="conditionOperatorLabelForRow(cond, op.value)" />
+                      </el-select>
+                      <ConditionValueInput
+                        v-if="!isUnaryOperator(cond.operator)"
+                        :model-value="cond.value"
+                        :operator="cond.operator"
+                        :field="conditionField(cond) ?? null"
+                        :pending="isConditionRowPending(cond)"
+                        :sheet-id="sheetId"
+                        @update:model-value="cond.value = $event"
+                      />
+                      <el-button size="small" class="meta-rule-editor__btn meta-rule-editor__btn--icon" @click="removeBranchCondition(branch, cIdx)">&times;</el-button>
+                    </div>
+                    <!-- #4b (review of #6107): a row whose field is not on the sheet any more. The backend refuses it
+                         on EVERY save of the rule (even a rename), so the row says why and the save is blocked. -->
+                    <div
+                      v-if="isBranchConditionFieldMissing(cond)"
+                      class="meta-rule-editor__hint meta-rule-editor__hint--error"
+                      :data-branch-condition-field-missing="cIdx"
+                    >{{ automationLabel('condition.fieldMissing', isZh) }}</div>
+                  </template>
                   <el-button size="small" class="meta-rule-editor__btn" data-action="add-branch-condition" @click="addBranchCondition(branch)">{{ automationLabel('condition.addCondition', isZh) }}</el-button>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1498,7 +1522,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in action.config.defaultBranch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-default-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in CONDITION_BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1582,7 +1606,7 @@
                   </div>
                   <div v-for="(bAct, aIdx) in branch.actions" :key="aIdx" class="meta-rule-editor__branch-action" :data-parallel-branch-action-index="aIdx">
                     <el-select v-model="bAct.type" class="meta-rule-editor__select meta-rule-editor__select--sm" @change="onBranchActionTypeChange(bAct)">
-                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :label="automationActionTypeLabel(t, isZh)" />
+                      <el-option v-for="t in BRANCH_AUTHORABLE_ACTION_TYPES" :key="t" :value="t" :data-value="t" :disabled="isDeletedTriggerBlockedActionType(t)" :label="automationActionTypeLabel(t, isZh)" />
                     </el-select>
                     <template v-if="bAct.type === 'update_record'">
                       <div v-for="(pair, pIdx) in bAct.fieldUpdates" :key="pIdx" class="meta-rule-editor__field-pair">
@@ -1788,8 +1812,9 @@ import {
 import {
   automationActionTypeLabel,
   automationConditionOperatorLabel,
-  automationConditionValuePlaceholder,
   automationCronPresetLabel,
+  automationCronTimezoneHint,
+  automationDateReminderExampleText,
   automationDingTalkDestinationScopeLabel,
   automationDingTalkDestinationSubtitle,
   automationDingTalkPersonAccessLabel,
@@ -1797,13 +1822,32 @@ import {
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
+  automationLegacyUtcScheduleNotice,
+  automationReminderTimeHint,
+  automationReminderTimeLabel,
+  automationReminderTimePlaceholder,
   automationResultWritebackOptionMissingMessage,
   automationResultWritebackOutcomeLabel,
+  automationSwitchToBusinessTimezoneConfirm,
+  automationSwitchToBusinessTimezoneLabel,
+  automationSwitchToBusinessTimezoneTitle,
   automationTriggerConditionLabel,
   automationTriggerTypeLabel,
   AUTOMATION_RESULT_WRITEBACK_OUTCOMES,
   type AutomationResultWritebackOutcome,
 } from '../utils/meta-automation-labels'
+import {
+  analyzeCronForBusinessSwitch,
+  automationBusinessTimezone,
+  dateReminderExample,
+  effectiveTriggerTimeOfDay,
+  effectiveTriggerTimezone,
+  isTimezoneAwareTriggerType,
+  isUtcTriggerTimezone,
+  legacyUtcSwitchImpact,
+  triggerTimeOfDayOptions,
+  triggerTimezoneForSave,
+} from '../utils/automation-trigger-timezone'
 import {
   type BranchActionDraft,
   type BranchDraft,
@@ -1834,6 +1878,17 @@ import {
   type ActionSummarySnapshot,
 } from '../automationActionSummary'
 import { automationTargetSheetOptions, type AutomationTargetSheetOption } from '../utils/automation-target-sheet-options'
+import { fieldTypeLabel } from '../utils/meta-core-labels'
+import {
+  PENDING_CONDITION_OPERATOR,
+  coerceConditionValue,
+  conditionFieldDisplayType,
+  isArrayConditionOperator,
+  isConditionLeafComplete as isConditionValueComplete,
+  isPendingConditionOperator,
+  isUnaryConditionOperator,
+} from '../utils/automation-condition-values'
+import ConditionValueInput from './ConditionValueInput.vue'
 
 interface FieldPair {
   fieldId: string
@@ -1986,7 +2041,20 @@ const fwbConfirmationGeneration = new Map<string, number>()
 const fwbConfirmingRequestGeneration = new Map<string, number>()
 let fwbTemplateLoadGeneration = 0
 const fwbCreateTargetFields = computed(() => sheetFieldsToFwbTargets(props.fields))
-const cronPreset = ref('0 * * * *')
+const DEFAULT_CRON_PRESET = '0 * * * *'
+const CRON_PRESET_VALUES: readonly string[] = ['*/5 * * * *', '0 * * * *', '0 0 * * *', '0 0 * * 1']
+const cronPreset = ref(DEFAULT_CRON_PRESET)
+/**
+ * A7a: the preset select must open on the SAVED cron. It used to keep whatever the previous open left
+ * (initially hourly), and buildPayload writes the preset over `cron`, so renaming a saved daily rule silently
+ * turned it hourly. A saved expression that is not a preset opens as 'custom' (edited in place, not rewritten).
+ */
+function cronPresetForDraft(d: Draft): string {
+  if (d.triggerType !== 'schedule.cron') return DEFAULT_CRON_PRESET
+  const cron = typeof d.triggerConfig.cron === 'string' ? d.triggerConfig.cron.trim() : ''
+  if (!cron) return props.rule?.id ? 'custom' : DEFAULT_CRON_PRESET
+  return CRON_PRESET_VALUES.includes(cron) ? cron : 'custom'
+}
 const dingTalkDestinations = ref<DingTalkGroupDestination[]>([])
 const dingTalkDestinationsError = ref('')
 // start_approval template picker. Empty (incl. on a 401/403 for an author lacking `approvals:read`) →
@@ -2639,6 +2707,89 @@ const groupDestinationCandidateFields = computed(() => props.fields)
 const recipientCandidateFields = computed(() => props.fields.filter((field) => field.type === 'user'))
 const memberGroupRecipientCandidateFields = computed(() => props.fields.filter(isDingTalkMemberGroupRecipientField))
 const dateReminderCandidateFields = computed(() => props.fields.filter((field) => field.type === 'date' || field.type === 'dateTime'))
+
+// A7a (客户反馈 2026-09-24 #4c): the timezone this schedule trigger will be SAVED with, i.e. the clock the
+// backend will run it on. The UI labels and buildPayload read the same helper, so what the editor shows is
+// what gets saved: new schedule config → the business timezone; a saved rule of this schedule type with no
+// stored timezone → stays UTC (legacy-preserve) until the explicit switch below.
+const scheduleTriggerTimezone = computed(() => effectiveTriggerTimezone({
+  triggerType: draft.value.triggerType,
+  draftTimezone: draft.value.triggerConfig.timezone,
+  storedRule: props.rule ?? null,
+}))
+// The cron expression that will be saved (buildPayload writes a non-custom preset over `cron`).
+const effectiveCronExpression = computed(() => (
+  cronPreset.value !== 'custom'
+    ? cronPreset.value
+    : (typeof draft.value.triggerConfig.cron === 'string' ? draft.value.triggerConfig.cron.trim() : '')
+))
+const cronSwitchImpact = computed(() => analyzeCronForBusinessSwitch(effectiveCronExpression.value, automationBusinessTimezone()))
+const scheduleOnLegacyUtc = computed(() =>
+  isTimezoneAwareTriggerType(draft.value.triggerType)
+  && isUtcTriggerTimezone(scheduleTriggerTimezone.value)
+  && !isUtcTriggerTimezone(automationBusinessTimezone())
+  // N1: a cron expression that fires at the same instants on either clock (every 5 minutes, hourly, …)
+  // needs no warning and no switch — the rule stays exactly as it is.
+  && !(draft.value.triggerType === 'schedule.cron' && cronSwitchImpact.value.timezoneIndependent),
+)
+const dateReminderFieldType = computed(() => {
+  const fieldId = typeof draft.value.triggerConfig.dateFieldId === 'string' ? draft.value.triggerConfig.dateFieldId : ''
+  const type = props.fields.find((field) => field.id === fieldId)?.type
+  return type === 'date' || type === 'dateTime' ? type : null
+})
+const timeOfDayModel = computed<string>({
+  get: () => (typeof draft.value.triggerConfig.timeOfDay === 'string' ? draft.value.triggerConfig.timeOfDay : ''),
+  // Cleared (Element Plus emits undefined/null) → '' = the backend's 09:00 default, as the old input saved.
+  set: (value) => { draft.value.triggerConfig.timeOfDay = typeof value === 'string' ? value : '' },
+})
+const timeOfDayOptions = computed(() => triggerTimeOfDayOptions(draft.value.triggerConfig.timeOfDay))
+const dateReminderExampleText = computed(() => automationDateReminderExampleText(
+  dateReminderExample({
+    offsetDays: draft.value.triggerConfig.offsetDays,
+    direction: draft.value.triggerConfig.direction,
+    timeOfDay: draft.value.triggerConfig.timeOfDay,
+    timezone: scheduleTriggerTimezone.value,
+    businessTimezone: automationBusinessTimezone(),
+  }),
+  scheduleTriggerTimezone.value,
+  isZh.value,
+))
+
+/**
+ * The ONLY path that moves a legacy UTC schedule onto the business timezone: explicit, confirmed, and for a
+ * date reminder it re-expresses the stored time as the same instant ((hh + 8) mod 24 for Asia/Shanghai; an
+ * empty time was the 09:00 UTC default → 17:00). A cron expression is kept verbatim and re-read on the
+ * business clock (the confirm text says so).
+ */
+async function switchScheduleToBusinessTimezone(): Promise<void> {
+  const triggerType = draft.value.triggerType
+  if (triggerType !== 'schedule.date_field' && triggerType !== 'schedule.cron') return
+  const businessTimezone = automationBusinessTimezone()
+  const impact = triggerType === 'schedule.date_field'
+    ? legacyUtcSwitchImpact(draft.value.triggerConfig.timeOfDay, businessTimezone)
+    : null
+  try {
+    await ElMessageBox.confirm(
+      impact
+        ? automationSwitchToBusinessTimezoneConfirm({
+          triggerType: 'schedule.date_field',
+          impact,
+          fieldType: dateReminderFieldType.value,
+        }, isZh.value)
+        : automationSwitchToBusinessTimezoneConfirm({ triggerType: 'schedule.cron', cron: cronSwitchImpact.value }, isZh.value),
+      automationSwitchToBusinessTimezoneTitle(isZh.value),
+      {
+        type: 'warning',
+        confirmButtonText: automationSwitchToBusinessTimezoneLabel(isZh.value),
+        cancelButtonText: automationLabel('editor.cancel', isZh.value),
+      },
+    )
+  } catch {
+    return
+  }
+  if (impact) draft.value.triggerConfig.timeOfDay = impact.toTimeOfDay
+  draft.value.triggerConfig.timezone = businessTimezone
+}
 const savedRuleHasDingTalkActions = computed(() => ruleHasDingTalkActions(props.rule))
 // #5859: Test Run always executes the PERSISTED rule (client.testAutomationRule sends no body),
 // so an already-saved rule with unsaved draft edits must not offer Test Run — it would silently
@@ -2652,7 +2803,6 @@ function dingTalkTestRunConfirmMessage(): string {
 }
 
 type ConditionOperatorOption = { value: ConditionOperator; label: string }
-type ConditionValueWidget = 'text' | 'number' | 'date' | 'dateTime' | 'boolean' | 'booleanMultiSelect' | 'select' | 'multiSelect'
 type ConditionPath = number[]
 type ConditionEditorEntry =
   | {
@@ -2770,93 +2920,34 @@ function conditionField(condition: AutomationCondition): AutomationRuleEditorFie
   return props.fields.find((field) => field.id === condition.fieldId)
 }
 
-function conditionFieldOptions(condition: AutomationCondition): FieldOption[] {
-  return conditionField(condition)?.options ?? []
+// 客户反馈 2026-09-24 #4b: the value control (ConditionValueInput.vue) and the saved value shape per field
+// type (../utils/automation-condition-values.ts) are shared by the rule-level rows and the condition_branch
+// rows, so both kinds of row save the same value for the same input.
+/** A row with no field chosen yet: operator and value stay disabled and ask for a field first. */
+function isConditionRowPending(condition: AutomationCondition): boolean {
+  return !condition.fieldId || isPendingConditionOperator(condition.operator)
 }
 
-function optionLabel(option: FieldOption): string {
-  return option.label ?? option.value
+/**
+ * The operator choices of a row: the field type's operators, plus the row's current operator when the field
+ * no longer allows it (a deleted / retyped field) so the select shows its label instead of the raw code.
+ */
+function conditionOperatorOptionsForRow(condition: AutomationCondition): ConditionOperatorOption[] {
+  const options = conditionOperatorsForField(condition.fieldId)
+  if (!condition.fieldId || isPendingConditionOperator(condition.operator)) return options
+  if (options.some((option) => option.value === condition.operator)) return options
+  const current = CONDITION_OPERATOR_LOOKUP.get(condition.operator)
+  return current ? [...options, current] : options
 }
 
-function conditionValueWidget(condition: AutomationCondition): ConditionValueWidget {
-  const field = conditionField(condition)
-  if (!field) return 'text'
-  if (field.type === 'boolean') return isArrayOperator(condition.operator) ? 'booleanMultiSelect' : 'boolean'
-  if (isNumericConditionFieldType(field.type)) return 'number'
-  if (field.type === 'date') return 'date'
-  if (field.type === 'dateTime' || field.type === 'createdTime' || field.type === 'modifiedTime') return 'dateTime'
-  if ((field.type === 'select' || field.type === 'multiSelect') && conditionFieldOptions(condition).length > 0) {
-    return isArrayOperator(condition.operator) ? 'multiSelect' : 'select'
-  }
-  return 'text'
-}
-
-function conditionValueInputType(condition: AutomationCondition): string {
-  if (isArrayOperator(condition.operator)) return 'text'
-  const widget = conditionValueWidget(condition)
-  if (widget === 'number') return 'number'
-  if (widget === 'date') return 'date'
-  if (widget === 'dateTime') return 'datetime-local'
-  return 'text'
-}
-
-function conditionValueInputMode(condition: AutomationCondition): 'decimal' | undefined {
-  if (isArrayOperator(condition.operator)) return undefined
-  return conditionValueWidget(condition) === 'number' ? 'decimal' : undefined
-}
-
-function booleanConditionValue(condition: AutomationCondition): string {
-  if (condition.value === true) return 'true'
-  if (condition.value === false) return 'false'
-  if (condition.value === 'true' || condition.value === 'false') return condition.value
-  return ''
-}
-
-function booleanMultiSelectConditionValues(condition: AutomationCondition): string[] {
-  return (parseBooleanConditionArrayValue(condition.value) ?? [])
-    .map((entry) => entry ? 'true' : 'false')
-}
-
-function singleSelectConditionValue(condition: AutomationCondition): string {
-  return typeof condition.value === 'string' ? condition.value : ''
-}
-
-function multiSelectConditionValues(condition: AutomationCondition): string[] {
-  return parseConditionArrayValue(condition.value).map(String)
-}
-
-function onBooleanConditionValueChange(condition: AutomationCondition, value: string) {
-  if (value === 'true') {
-    condition.value = true
-  } else if (value === 'false') {
-    condition.value = false
-  } else {
-    condition.value = ''
-  }
-}
-
-function onBooleanMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
-  condition.value = [...values]
-}
-
-function onMultiSelectConditionValueChange(condition: AutomationCondition, values: string[]) {
-  condition.value = [...values]
-}
-
-function isNumericConditionFieldType(fieldType: string | undefined): boolean {
-  return fieldType === 'number' ||
-    fieldType === 'currency' ||
-    fieldType === 'percent' ||
-    fieldType === 'rating' ||
-    fieldType === 'duration' ||
-    fieldType === 'autoNumber'
+/** Operator label for a row: on a date / date-time field the ordering operators read 晚于 / 早于 (after / before). */
+function conditionOperatorLabelForRow(condition: AutomationCondition, operator: ConditionOperator): string {
+  return automationConditionOperatorLabel(operator, isZh.value, conditionField(condition)?.type)
 }
 
 function resetConditionValue(condition: AutomationCondition) {
   if (isUnaryOperator(condition.operator)) {
     delete condition.value
-  } else if (isArrayOperator(condition.operator)) {
-    condition.value = ''
   } else {
     condition.value = ''
   }
@@ -2865,8 +2956,18 @@ function resetConditionValue(condition: AutomationCondition) {
 function onConditionFieldChange(condition: AutomationCondition, fieldId: string) {
   const previousFieldId = condition.fieldId
   condition.fieldId = fieldId
+  if (!fieldId) {
+    // Back to "-- field --": the row is pending again (no operator, no value) until a field is chosen.
+    condition.operator = PENDING_CONDITION_OPERATOR
+    condition.value = ''
+    return
+  }
   const allowedOperators = conditionOperatorsForField(fieldId)
-  if (!previousFieldId || !allowedOperators.some((operator) => operator.value === condition.operator)) {
+  if (
+    !previousFieldId
+    || isPendingConditionOperator(condition.operator)
+    || !allowedOperators.some((operator) => operator.value === condition.operator)
+  ) {
     condition.operator = firstOperatorForField(fieldId)
   }
   if (previousFieldId !== fieldId) {
@@ -2880,15 +2981,11 @@ function onConditionOperatorChange(condition: AutomationCondition, operator: Con
 }
 
 function isUnaryOperator(op: ConditionOperator): boolean {
-  return op === 'is_empty' || op === 'is_not_empty'
+  return isUnaryConditionOperator(op)
 }
 
 function isArrayOperator(op: ConditionOperator): boolean {
-  return op === 'in' || op === 'not_in'
-}
-
-function conditionValuePlaceholder(condition: AutomationCondition): string {
-  return automationConditionValuePlaceholder(conditionValueWidget(condition), isArrayOperator(condition.operator), isZh.value)
+  return isArrayConditionOperator(op)
 }
 
 function isConditionGroupNode(node: AutomationConditionNode): node is ConditionGroup {
@@ -2932,83 +3029,15 @@ function conditionGroupFromRule(group: ConditionGroup | undefined): Draft['condi
   }
 }
 
-function parseConditionArrayValue(value: unknown): unknown[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => typeof entry === 'string' ? entry.trim() : entry)
-      .filter((entry) => typeof entry === 'string' ? entry.length > 0 : entry !== null && entry !== undefined)
-  }
-  if (typeof value !== 'string') return []
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-}
-
-function parseNumberConditionValue(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const parsed = Number(trimmed)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function parseNumericConditionArrayValue(value: unknown): number[] | null {
-  const values = parseConditionArrayValue(value)
-  if (!values.length) return null
-  const numbers = values.map(parseNumberConditionValue)
-  return numbers.every((entry): entry is number => entry !== null) ? numbers : null
-}
-
-function parseBooleanConditionValue(value: unknown): boolean | null {
-  if (value === true || value === false) return value
-  if (value === 'true') return true
-  if (value === 'false') return false
-  return null
-}
-
-function parseBooleanConditionArrayValue(value: unknown): boolean[] | null {
-  const values = parseConditionArrayValue(value)
-  if (!values.length) return null
-  const booleans = values.map(parseBooleanConditionValue)
-  return booleans.every((entry): entry is boolean => entry !== null) ? booleans : null
-}
-
-function conditionFieldType(fieldId: string): string | undefined {
-  return props.fields.find((field) => field.id === fieldId)?.type
-}
-
+/** The value a rule-level condition is saved with, in its field type's shape (automation-condition-values.ts). */
 function buildConditionValuePayload(condition: AutomationCondition): unknown {
-  const fieldType = conditionFieldType(condition.fieldId)
-  if (isArrayOperator(condition.operator)) {
-    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) ?? []
-    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) ?? []
-    return parseConditionArrayValue(condition.value)
-  }
-  if (isNumericConditionFieldType(fieldType)) {
-    return parseNumberConditionValue(condition.value)
-  }
-  if (fieldType === 'boolean') {
-    return parseBooleanConditionValue(condition.value)
-  }
-  return typeof condition.value === 'string' ? condition.value.trim() : condition.value
+  const result = coerceConditionValue(condition, conditionField(condition))
+  // Not coercible → save is blocked (isConditionLeafComplete); never invent a null / [] in its place.
+  return result.ok ? result.value : condition.value
 }
 
 function isConditionLeafComplete(condition: AutomationCondition): boolean {
-  if (!condition.fieldId.trim()) return false
-  if (isUnaryOperator(condition.operator)) return true
-  const fieldType = conditionFieldType(condition.fieldId)
-  if (isArrayOperator(condition.operator)) {
-    if (isNumericConditionFieldType(fieldType)) return parseNumericConditionArrayValue(condition.value) !== null
-    if (fieldType === 'boolean') return parseBooleanConditionArrayValue(condition.value) !== null
-    return parseConditionArrayValue(condition.value).length > 0
-  }
-  if (isNumericConditionFieldType(fieldType)) return parseNumberConditionValue(condition.value) !== null
-  if (fieldType === 'boolean') return parseBooleanConditionValue(condition.value) !== null
-  return typeof condition.value === 'string'
-    ? condition.value.trim().length > 0
-    : condition.value !== undefined && condition.value !== null
+  return isConditionValueComplete(condition, conditionField(condition))
 }
 
 function areConditionsComplete(node: AutomationConditionNode): boolean {
@@ -3297,6 +3326,37 @@ const conditionBranchReadOnlyReason = computed<string | null>(() => {
   }
   return null
 })
+/**
+ * #4b (review of #6107): a condition_branch row whose field is not among the sheet's fields. The backend save
+ * gate (#6107 `validateConditionGroupAgainstFields`) refuses such a row with a 400 on EVERY save of the rule,
+ * even a rename, and its message is an English JSON path. The editor instead flags the row (its own message)
+ * and counts it as incomplete, so save is blocked with the row anchored. Caveat: `fields` is the grid's field
+ * list, which omits a field hidden at the property level (layer-2 `hidden` / `visible: false`), so a row on
+ * such a field is flagged too — the message says 已删除（或已被隐藏）. An empty `fields` (not loaded yet)
+ * flags nothing: every row would otherwise read as deleted.
+ */
+function isBranchConditionFieldMissing(condition: AutomationCondition): boolean {
+  if (!condition.fieldId || props.fields.length === 0) return false
+  return conditionField(condition) === undefined
+}
+
+// 客户反馈 2026-09-24 #4b: a condition_branch condition row must be complete (field + operator + a value in its
+// field type's shape) exactly like a rule-level row — the branch rows used to save whatever the text box held
+// (and a blank row reached the backend as a 400). A row on a field the sheet no longer has is incomplete too
+// (isBranchConditionFieldMissing). Anchor = the first incomplete branch row, in render order.
+const firstIncompleteBranchConditionAnchor = computed<string | undefined>(() => {
+  for (const [actionIndex, action] of draft.value.actions.entries()) {
+    if (action.type !== 'condition_branch' || action.config.branchUnsupportedReason) continue
+    for (const [branchIndex, branch] of (action.config.branches ?? []).entries()) {
+      for (const [conditionIndex, condition] of branch.conditions.entries()) {
+        if (isBranchConditionFieldMissing(condition) || !isConditionLeafComplete(condition)) {
+          return `[data-action-index="${actionIndex}"] [data-branch-index="${branchIndex}"] [data-branch-condition-index="${conditionIndex}"]`
+        }
+      }
+    }
+  }
+  return undefined
+})
 const conditionBranchKeyError = computed<string | null>(() => {
   for (const a of draft.value.actions) {
     if (a.type === 'condition_branch' && !a.config.branchUnsupportedReason) {
@@ -3343,7 +3403,8 @@ function removeBranch(action: DraftAction, index: number): void {
   action.config.branches?.splice(index, 1)
 }
 function addBranchCondition(branch: BranchDraft): void {
-  branch.conditions.push({ fieldId: '', operator: 'equals', value: '' })
+  // #4b: pending until a field is chosen (see createBlankCondition).
+  branch.conditions.push({ fieldId: '', operator: PENDING_CONDITION_OPERATOR, value: '' })
 }
 function removeBranchCondition(branch: BranchDraft, index: number): void {
   branch.conditions.splice(index, 1)
@@ -3409,8 +3470,10 @@ function conditionIndentStyle(depth: number): Record<string, string> {
   return { '--condition-depth': String(Math.max(0, depth)) }
 }
 
+// 客户反馈 2026-09-24 #4b: a new row has NO operator until a field is chosen — seeding 'equals' made the
+// field-less operator select show the raw code. The row is incomplete (save blocked) while pending.
 function createBlankCondition(): AutomationCondition {
-  return { fieldId: '', operator: 'equals', value: '' }
+  return { fieldId: '', operator: PENDING_CONDITION_OPERATOR, value: '' }
 }
 
 function createBlankConditionGroup(): ConditionGroup {
@@ -3483,6 +3546,7 @@ watch(
   async (v) => {
     if (v) {
       draft.value = props.rule ? draftFromRule(props.rule) : emptyDraft()
+      cronPreset.value = cronPresetForDraft(draft.value)
       draftSnapshot.value = JSON.stringify(draft.value) // B1-07: dirty baseline per open
       resetDeleteRecordAcknowledgements()
       error.value = ''
@@ -3699,9 +3763,65 @@ const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
   return out
 })
 
+// 客户反馈 2026-09-24 #3 (裁定 PR #6074) — under a `record.deleted` trigger the trigger record no longer exists,
+// so a SAME-BASE update_record / delete_record / lock_record (which the executor addresses at
+// `context.recordId`) can only be a 0-row no-op; before the executor fix it also re-emitted a ghost
+// record.deleted and chained itself to the depth cap (ONE user delete ⇒ THREE execution logs). The backend
+// now refuses that shape at save (automation-service.ts validateDeletedTriggerSelfMutation, code
+// DELETED_TRIGGER_SELF_MUTATION); this editor mirrors it three ways: the option is disabled while the trigger
+// is record.deleted, the action card shows the same sentence as a hint, and save is blocked with an anchored
+// reason. A LOADED rule of that shape stays loadable (its type is still rendered/selected) — it just cannot be
+// saved forward until the action or the trigger changes; disabling it goes through the manager toggle, which
+// the backend lets through.
+const TRIGGER_RECORD_MUTATING_ACTION_TYPES: ReadonlySet<string> = new Set(['update_record', 'delete_record', 'lock_record'])
+
+function isDeletedTriggerBlockedActionType(type: string): boolean {
+  return draft.value.triggerType === 'record.deleted' && TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type)
+}
+
+/**
+ * Does this draft action (or a branch sub-action inside it) mutate the trigger record under a
+ * `record.deleted` trigger? Mirrors the backend rule: a COMPLETE explicit cross-base triple retargets the
+ * write (allowed); anything else resolves to the trigger record. Branch sub-actions are editor-authored and
+ * carry no cross-base target, so their type alone decides.
+ */
+function deletedTriggerSelfMutationOf(action: DraftAction): boolean {
+  if (draft.value.triggerType !== 'record.deleted') return false
+  if (TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(action.type)) {
+    const target = crossBaseTargetOf(action)
+    return !(target && target.kind === 'mutate' && !crossBaseTargetIncomplete(target))
+  }
+  const nestedTypes: string[] = [
+    ...(action.config.branches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+    ...(action.config.defaultBranch?.actions ?? []).map((sub) => sub.type),
+    ...(action.config.parallelBranches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+    // A loaded branch the v1 UI cannot round-trip is kept READ-ONLY with its raw config preserved verbatim
+    // (branchOriginal / parallelBranchOriginal); its sub-actions still run, so they still count here.
+    ...rawBranchActionTypes(action.config.branchOriginal),
+    ...rawBranchActionTypes(action.config.parallelBranchOriginal),
+  ]
+  return nestedTypes.some((type) => TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type))
+}
+
+/** The `type` of every sub-action inside a RAW (as-loaded) condition_branch / parallel_branch config. */
+function rawBranchActionTypes(raw: unknown): string[] {
+  if (!isPlainRecord(raw)) return []
+  const out: string[] = []
+  const collect = (branch: unknown): void => {
+    if (!isPlainRecord(branch) || !Array.isArray(branch.actions)) return
+    for (const sub of branch.actions) {
+      if (isPlainRecord(sub) && typeof sub.type === 'string') out.push(sub.type)
+    }
+  }
+  if (Array.isArray(raw.branches)) raw.branches.forEach(collect)
+  collect(raw.defaultBranch)
+  return out
+}
+
 const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {
   return draft.value.actions.map((action, index) => {
     const snapshot: SaveBlockActionSnapshot = { index, type: action.type }
+    if (deletedTriggerSelfMutationOf(action)) snapshot.deletedTriggerSelfMutation = true
     if (action.type === 'send_dingtalk_group_message') {
       const destinationIds = parseGroupDestinationIds(action.config.destinationIds ?? action.config.destinationId)
       const destinationFieldPaths = parseRecipientFieldPathsText(action.config.destinationFieldPath)
@@ -3931,6 +4051,9 @@ const saveBlockReasons = computed<SaveBlockReason[]>(() => {
     parallelBranchActionError: parallelBranchActionError.value, // W3-2a: nested branch actions must be executable, not executor-failing shells
     conditionsComplete: draft.value.conditions.conditions.every(areConditionsComplete),
     firstIncompleteConditionAnchor: firstIncompleteConditionAnchor.value,
+    // #4b: condition_branch rows must be complete like the rule-level rows.
+    branchConditionsComplete: firstIncompleteBranchConditionAnchor.value === undefined,
+    firstIncompleteBranchConditionAnchor: firstIncompleteBranchConditionAnchor.value,
     actions: saveBlockActionSnapshots.value,
     // #5742: client mirror of the backend select-option check on the approval-result writeback.
     startApprovalOutcomeValueBlocks: resultWritebackOutcomeBlocks.value,
@@ -5217,6 +5340,16 @@ function buildPayload(): Partial<AutomationRule> {
     triggerConfig.direction = triggerConfig.direction === 'after' ? 'after' : 'before'
     triggerConfig.offsetDays = Number(triggerConfig.offsetDays) || 0
   }
+  if (isTimezoneAwareTriggerType(d.triggerType)) {
+    // A7a: new schedule config is saved on the business timezone. `undefined` = a legacy UTC rule (saved
+    // with this schedule type and no timezone) — write nothing, so an edit never shifts its fire time.
+    const timezone = triggerTimezoneForSave({
+      triggerType: d.triggerType,
+      draftTimezone: triggerConfig.timezone,
+      storedRule: props.rule ?? null,
+    })
+    if (timezone) triggerConfig.timezone = timezone
+  }
   if (d.triggerType === 'approval.task_created') {
     // A-2a: trimmed templateId is the only config key.
     triggerConfig.templateId = typeof triggerConfig.templateId === 'string' ? triggerConfig.templateId.trim() : ''
@@ -5251,10 +5384,14 @@ function buildPayload(): Partial<AutomationRule> {
         type: action.type,
         config: buildActionConfigFromOriginal(
           action,
-          buildConditionBranchConfig({
-            branches: action.config.branches ?? [],
-            defaultBranch: action.config.defaultBranch ?? null,
-          }),
+          buildConditionBranchConfig(
+            {
+              branches: action.config.branches ?? [],
+              defaultBranch: action.config.defaultBranch ?? null,
+            },
+            // #4b: branch condition values are saved in their field type's shape, like the rule-level rows.
+            { fields: props.fields },
+          ),
         ),
       }
     }
@@ -5671,6 +5808,13 @@ async function onTestRun(): Promise<void> {
 .meta-rule-editor__condition-row,
 .meta-rule-editor__condition-group {
   margin-left: calc(var(--condition-depth, 0) * 18px);
+}
+
+/* #4b: the field type next to each field name in a condition row's field dropdown. */
+.meta-rule-editor__field-type-hint {
+  margin-left: 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
 }
 
 .meta-rule-editor__condition-group {

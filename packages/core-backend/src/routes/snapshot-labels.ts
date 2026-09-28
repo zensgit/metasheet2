@@ -10,9 +10,13 @@ import { Router } from 'express';
 import { snapshotService } from '../services/SnapshotService';
 import { requireAdminRole } from '../guards/audit-integration';
 import { Logger } from '../core/logger';
+import { createAdminFailureResponders } from './admin-failure-envelope';
 
 const router = Router();
 const logger = new Logger('SnapshotLabelsRoutes');
+// Every 500 branch below answers through these (values-free: stable code + fixed string, the
+// original error goes to logger.error() only) — see routes/admin-failure-envelope.ts.
+const { sendAdminReadFailure, sendAdminWriteFailure } = createAdminFailureResponders(logger);
 
 // Type for protection levels
 type ProtectionLevel = 'normal' | 'protected' | 'critical';
@@ -59,11 +63,7 @@ router.put('/:id/tags', requireAdminRole(), async (req, res) => {
       message: 'Tags updated successfully'
     });
   } catch (error) {
-    logger.error('Failed to update tags', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminWriteFailure(res, 'Failed to update tags', error);
   }
 });
 
@@ -94,11 +94,7 @@ router.patch('/:id/protection', requireAdminRole(), async (req, res) => {
       message: `Protection level set to: ${level}`
     });
   } catch (error) {
-    logger.error('Failed to set protection level', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminWriteFailure(res, 'Failed to set protection level', error);
   }
 });
 
@@ -129,11 +125,7 @@ router.patch('/:id/release-channel', requireAdminRole(), async (req, res) => {
       message: `Release channel set to: ${channel || 'none'}`
     });
   } catch (error) {
-    logger.error('Failed to set release channel', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminWriteFailure(res, 'Failed to set release channel', error);
   }
 });
 
@@ -200,11 +192,7 @@ router.get('/', requireAdminRole(), async (req, res) => {
       count: snapshots.length
     });
   } catch (error) {
-    logger.error('Failed to query snapshots', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to query snapshots', error);
   }
 });
 

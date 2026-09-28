@@ -269,6 +269,14 @@ describe('#5825 — list visibility uses system_kind OR the People sentinel', ()
     const res = await request(pinned.url()).get('/api/multitable/context').query({ sheetId: 'sheet_orders' })
     expect(res.status).toBe(200)
     expect(res.body.data.sheet.id).toBe('sheet_orders')
+    // #6089 B1: this pins the COLUMN-TOLERANT read specifically, not merely "did not 500" — the
+    // route's own S1 fail-closed net (any probe error => canDeleteSheet: false) would ALSO turn a
+    // 500-causing bare-column read into a 200 with canDeleteSheet FALSE, so a status-only assertion
+    // cannot tell the tolerant read apart from S1 quietly swallowing a 42703 every time. ADMIN_USER
+    // holds admin role (global schema authority) and `sheet_orders` is an ordinary, unmanaged sheet,
+    // so the correct answer on a column-less database is TRUE (isSystemManagedSheet must resolve to
+    // false without throwing) — only the tolerant read (sheet-delete-guard.ts) gets that right.
+    expect(res.body.data.capabilities.canDeleteSheet).toBe(true)
   })
 
   it('POST /templates does not extract a description-edited people_directory sheet', async () => {

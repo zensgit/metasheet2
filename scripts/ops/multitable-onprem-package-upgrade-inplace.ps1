@@ -8,14 +8,14 @@
   This codifies the r7 in-place upgrade (2026-08-31), which until now was
   performed by hand with ad-hoc PowerShell, with the F22 lesson applied:
 
-    F22 — the copy step used `Get-ChildItem -Exclude 'node_modules'` during a
+    F22 -- the copy step used `Get-ChildItem -Exclude 'node_modules'` during a
     recursive copy. `-Exclude` does not filter directories in recursion, so an
     entire plugin `lib/` directory was silently skipped; the deployment was
     missing `stock-preparation-preflight.cjs` until a hand-check against the
     package caught it (fixed live by walking files instead: 324 -> 326 files).
     Full account:
       docs/development/takeover-beiliao-20260821/first-deployment-lessons-20260831.md
-      (Appendix A, F22) and r7-build-manifest.md §2 (the hand-run steps this
+      (Appendix A, F22) and r7-build-manifest.md section 2 (the hand-run steps this
       script now replaces).
 
   This script never uses `-Exclude` on a recursive copy. Every directory that
@@ -27,7 +27,7 @@
     1. Verify the package: SHA-256 of the zip against its `.sha256` sidecar.
        Refuse on mismatch.
     2. Raise the maintenance gate (write MaintenanceFlagPath, default
-       <RootDir>\output\maintenance.flag — nginx returns 503 + Retry-After for
+       <RootDir>\output\maintenance.flag -- nginx returns 503 + Retry-After for
        /api/* while it exists, see ops/nginx/multitable-onprem.conf.example),
        THEN stop the pm2 app (name parameterized, default metasheet-backend).
        The flag is refused outright if it would live inside any ReplaceDirs
@@ -35,21 +35,33 @@
        two, probe HealthUrl ONCE while the backend is still up: 503 proves
        this host's nginx really reads the flag, 200 proves it does not (the
        example conf was never hand-synced here) and prints
-       MAINTENANCE_GATE_NOT_WIRED. Diagnostic only, never blocks the upgrade —
+       MAINTENANCE_GATE_NOT_WIRED. Diagnostic only, never blocks the upgrade --
        without it "maintenance flag: ... (removed)" would read like proof the
        window was shielded on a host where the flag is inert.
+       Every pm2 call (this stop, the step 7 restart and its fallback kill,
+       the failure-handler stop) runs under ONE resolved, fully qualified
+       PM2_HOME (Resolve-Pm2Home: -Pm2Home > the PM2_HOME already in the
+       environment > <user profile>\.pm2-runtime when that directory AND the
+       -Pm2ScheduledTaskName scheduled task both exist), resolved before
+       anything is changed. When none of the three applies, PM2_HOME is left
+       untouched and each pm2 call inherits the environment as it is then --
+       including a PM2_HOME that docker/app.env sets, imported at step 6
+       (pre-existing behaviour; the final report says so).
     3. Back up docker/, config/, packages/core-backend/dist, apps/web/dist,
-       and plugins/ (excluding node_modules) to a timestamped folder. Prints
-       the backup path.
+       packages/core-backend/migrations, and plugins/ (excluding
+       node_modules) to a timestamped folder. Prints the backup path. Every
+       path step 4 replaces or overlays must be in -BackupPaths: a run whose
+       lists disagree is refused before anything is touched
+       (RESTORE_PATH_NOT_BACKED_UP, Assert-ReplacedPathsBackedUp).
     4. Extract the package to a staging dir. Replace
        packages/core-backend/dist, apps/web/dist,
-       packages/core-backend/migrations, and plugins/ — plugins by walking
+       packages/core-backend/migrations, and plugins/ -- plugins by walking
        files, preserving each plugin's own node_modules.
     5. Assert a manifest of must-exist files after the swap (the F22
        tripwire), THEN assert every file under the package's plugins/ tree
-       (node_modules excluded) exists on disk with an IDENTICAL SHA-256 —
+       (node_modules excluded) exists on disk with an IDENTICAL SHA-256 --
        the real F22 net, strictly stronger than the file-count comparison
-       still printed alongside it for human skimming — THEN assert none of
+       still printed alongside it for human skimming -- THEN assert none of
        the package's own excluded node_modules content leaked to an
        unexpected location (the negative half of the net; the positive hash
        check alone cannot see this). Refuses to proceed on any missing file,
@@ -64,25 +76,56 @@
        nginx first made the script fail its own healthcheck 12 times and exit
        -1 on an upgrade whose backend was already serving. Print a plugins
        summary.
+       R59 (2026-09-24): on a pm2-runtime host (scheduled task -> .bat ->
+       pm2-runtime) the step 2 stop leaves pm2-runtime with 0 apps online,
+       pm2-runtime auto-exits and takes its daemon with it, and the restart
+       then answers "Process or Namespace ... not found" -- the site sat
+       behind the gate for ~18 minutes until the task was started by hand.
+       So when the restart reports "not found" AND the -Pm2ScheduledTaskName
+       task exists, the script starts that task instead and runs the SAME
+       health polling; only if that also fails does it reach the restore
+       block. Without that task the restart failure is fatal exactly as
+       before. Before starting the task it runs `pm2 kill`: the "not found"
+       restart found no daemon and started an empty one as a child of THIS
+       session, and on Windows every pm2 daemon listens on the one
+       machine-wide pipe \\.\pipe\rpc.sock -- left alive, it would be found by
+       the task's pm2-runtime, which then only attaches to it as a client, so
+       that session-bound daemon (not the task) would host the backend, and
+       the backend would live only as long as the upgrade session's process
+       tree. The task is started only once pm2's pipe is seen closed, and by
+       the folder it was found in (-TaskPath). `pm2 kill`'s exit code is not
+       evidence of anything: on Windows pm2 exits 0 after a fixed 3 s wait
+       whether or not the daemon exited.
     8. Print a final report: package name, backup path, migration exit,
        health, and the exact operator commands to run next (preflight +
        acceptance bootstrap).
 
   NO ROLLBACK AUTOMATION in this MVP. Steps 4-7 (the entire mutation window,
   from the first file replaced through the health check) run inside ONE
-  failure handler: ANY exception there — a mid-swap failure, a failed
+  failure handler: ANY exception there -- a mid-swap failure, a failed
   assertion, a failed migration, a failed pm2 restart, or a failed
-  healthcheck — stops pm2 (so a broken build is never left running), prints
+  healthcheck -- stops pm2 (so a broken build is never left running), prints
   a clearly-boxed restore block naming the backup path and the exact
   copy-back command for every replaced path, then rethrows. It never
   continues past a failure in that window.
+  The restore block deletes a live path only when the backup holds a copy
+  of it (a replace-in-full dir listed in -BackupPaths and present in the
+  backup folder), and never deletes plugins/: the backup skips
+  node_modules, so plugins/ is restored by copying the backup OVER the live
+  tree, which keeps each plugin's node_modules (R60 review, #6079).
+  On Windows the failure handler first asks pm2's machine-wide pipe
+  whether any pm2 daemon is there at all, and runs no pm2 when none is: a
+  `pm2 stop` then would start a daemon inside the upgrade session (R59: that
+  daemon inherited the session's stdout and held the ssh session open). On
+  a pm2-runtime host (the -Pm2ScheduledTaskName task exists) it follows the
+  stop with `pm2 kill` and waits for the pipe to close.
 
   Dot-sourceable: `. .\multitable-onprem-package-upgrade-inplace.ps1` (invoke
   with InvocationName '.') defines every function below without running the
   upgrade. That is how the companion test
   (multitable-onprem-package-upgrade-inplace.test.mjs) exercises the
   checksum check, the must-exist assertion, and the walk-files copy filter
-  directly, and how it proves the real functions — not a re-implementation —
+  directly, and how it proves the real functions -- not a re-implementation --
   refuse on checksum mismatch and on a missing file.
 #>
 param(
@@ -104,7 +147,7 @@ param(
   # Backend-direct probe, bypassing nginx entirely. Empty = derive
   # http://127.0.0.1:<PORT>/health with PORT read out of the env file (see
   # Get-EnvFileValue / Resolve-BackendHealthUrl). This probe MUST come first:
-  # while the maintenance flag is up, nginx answers 503 to /api/* — including
+  # while the maintenance flag is up, nginx answers 503 to /api/* -- including
   # this script's own healthcheck. r29 (2026-09-11) burned a window on exactly
   # that: the backend was already healthy, the flag was still up, the nginx
   # probe got 12 x 503, and the script exited -1 on a successful upgrade.
@@ -120,7 +163,7 @@ param(
 
   # The maintenance gate nginx tests for. While this file exists, nginx answers
   # 503 + Retry-After to /api/* and serves the static maintenance page on /, so
-  # testers see "维护中" instead of ERR_CONNECTION_RESET during the pm2 restart
+  # testers see the static maintenance page instead of ERR_CONNECTION_RESET during the pm2 restart
   # window. Empty = <RootDir>\output\maintenance.flag. It MUST NOT live under
   # any ReplaceDirs entry (see Assert-MaintenanceFlagOutsideReplaceDirs): those
   # directories are deleted and recopied wholesale mid-upgrade, which would drop
@@ -133,6 +176,37 @@ param(
 
   [ValidateSet('0', '1')]
   [string]$RestartService = '1',
+
+  # The PM2_HOME every pm2 call of this script runs under. Empty = resolve
+  # (Resolve-Pm2Home), first match wins:
+  #   1. this parameter;
+  #   2. PM2_HOME as already set in this process's environment when the
+  #      script starts (docker/app.env is imported later and does not count);
+  #   3. <user profile>\.pm2-runtime, but ONLY when that directory exists AND
+  #      a scheduled task named -Pm2ScheduledTaskName exists on this host --
+  #      the pm2-runtime hosting shape the demo host has run under since
+  #      2026-09-21;
+  #   4. nothing: PM2_HOME is left exactly as it was (the pre-existing
+  #      behaviour on a host that is not pm2-runtime managed).
+  # A value given here that is not an existing file-system directory is
+  # refused before anything is touched: pm2 would silently start a fresh,
+  # empty home there. A value that is not fully qualified (here or in
+  # PM2_HOME: relative, root-relative '\x', or drive-relative 'C:x') is made
+  # absolute against the location the script starts in, because step 6
+  # changes the location and pm2 resolves such a PM2_HOME against its own
+  # cwd. A PM2_HOME from the environment that is not a file-system path at
+  # all (Env:\..., HKCU:\...) is refused the same way.
+  [string]$Pm2Home = '',
+
+  # The scheduled task that hosts the backend under pm2-runtime, looked up by
+  # this exact name in ANY task folder; exactly one such task must exist,
+  # and it is started by its own folder (TaskPath). Used twice: to
+  # auto-detect the pm2 home (see -Pm2Home), and as the restart fallback --
+  # when `pm2 restart` reports the app "not found" and this task exists, the
+  # empty pm2 daemon that restart just started is killed, the task is started
+  # instead, and the normal health polling decides the outcome. An empty
+  # string disables both.
+  [string]$Pm2ScheduledTaskName = 'MetaSheet-PM2',
 
   # The F22 tripwire manifest. Every path here is asserted to exist, as a
   # FILE, on the live root immediately after the plugin/dist swap (step 5).
@@ -147,13 +221,19 @@ param(
   ),
 
   # Backed up (relative to RootDir) before anything is touched. A path that
-  # does not exist on this host is skipped with a warning, not a failure —
-  # not every on-prem host has a config/ directory.
+  # does not exist on this host is skipped with a warning, not a failure --
+  # not every on-prem host has a config/ directory. Must contain every
+  # ReplaceDirs entry and plugins/ (Assert-ReplacedPathsBackedUp): the restore
+  # block can only put back what was backed up. packages/core-backend/migrations
+  # was missing here until R60 review (#6079) although ReplaceDirs replaces it,
+  # so the restore block deleted the live migrations and then copied from a
+  # backup that did not exist.
   [string[]]$BackupPaths = @(
     'docker',
     'config',
     'packages/core-backend/dist',
     'apps/web/dist',
+    'packages/core-backend/migrations',
     'plugins'
   ),
 
@@ -178,7 +258,7 @@ function Write-Err {
   Write-Host "[multitable-onprem-upgrade-inplace] ERROR: $Message" -ForegroundColor Red
 }
 
-# ── Step 1: package verification ──────────────────────────────────────────
+# -- Step 1: package verification ------------------------------------------
 
 function Get-FileSha256Hex {
   param([string]$Path)
@@ -189,7 +269,7 @@ function Test-PackageChecksum {
   <#
     Verifies $ArchivePath's SHA-256 against a sidecar file in the
     "<hex>  <filename>" sha256sum format (matches write_sha_file in
-    multitable-onprem-package-build.sh). Throws on any failure to verify —
+    multitable-onprem-package-build.sh). Throws on any failure to verify --
     there is no "proceed anyway" path. Returns the verified lowercase hex
     digest on success.
   #>
@@ -223,7 +303,7 @@ function Test-PackageChecksum {
   return $actual
 }
 
-# ── Step 2: pm2 control ───────────────────────────────────────────────────
+# -- Step 2: pm2 control ---------------------------------------------------
 
 function Resolve-Pm2Command {
   param([string]$BaseDir)
@@ -234,19 +314,461 @@ function Resolve-Pm2Command {
   return 'pm2'
 }
 
+function Get-UserProfileDirectory {
+  if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    return $env:USERPROFILE
+  }
+  return $HOME
+}
+
+function Get-Pm2ScheduledTask {
+  <#
+    The ONE scheduled task on this host whose name is exactly $TaskName, in
+    whatever task folder it lives, or $null. Every decision about the task
+    (home auto-detection, the restart fallback, the restore block) and the
+    Start-ScheduledTask that acts on it go through this one lookup, so the
+    task that is started is the task that was detected:
+    Get-ScheduledTask -TaskName searches EVERY folder and treats the name as
+    a wildcard pattern, while Start-ScheduledTask -TaskName without -TaskPath
+    looks only in the root folder '\' -- a task in a subfolder would pass the
+    check and then fail to start. So the match is filtered to the exact name,
+    must be unique (the same name in two folders cannot tell which one hosts
+    pm2-runtime), and callers start it by its own TaskPath.
+
+    Never throws: an empty name, a host without the ScheduledTasks module
+    (pwsh on Linux), no such task, more than one, or a query that fails for
+    any other reason all answer $null -- the callers treat "cannot tell" as
+    "not pm2-runtime managed", which is the pre-existing behaviour.
+  #>
+  param([string]$TaskName)
+
+  if ([string]::IsNullOrWhiteSpace($TaskName)) {
+    return $null
+  }
+  try {
+    if (-not (Get-Command -Name 'Get-ScheduledTask' -ErrorAction SilentlyContinue)) {
+      return $null
+    }
+    $found = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Where-Object { $null -ne $_ -and $_.TaskName -eq $TaskName })
+  } catch {
+    return $null
+  }
+  if ($found.Count -gt 1) {
+    Write-Info ("scheduled task name '{0}' matches {1} tasks ({2}); none of them is treated as the pm2-runtime task." -f $TaskName, $found.Count, (($found | ForEach-Object { [string]$_.TaskPath + [string]$_.TaskName }) -join ', '))
+    return $null
+  }
+  if ($found.Count -eq 0) {
+    return $null
+  }
+  return $found[0]
+}
+
+function Get-ScheduledTaskPathOrRoot {
+  # A task object's folder; the root folder '\' when it carries none.
+  param($Task)
+  if ($null -eq $Task -or [string]::IsNullOrEmpty([string]$Task.TaskPath)) {
+    return '\'
+  }
+  return [string]$Task.TaskPath
+}
+
+function Test-ScheduledTaskPresent {
+  <#
+    True only when Get-Pm2ScheduledTask finds exactly one task named exactly
+    $TaskName. Never throws.
+  #>
+  param([string]$TaskName)
+  return ($null -ne (Get-Pm2ScheduledTask -TaskName $TaskName))
+}
+
+function ConvertTo-PsSingleQuotedLiteral {
+  # 'value' with every single-quote character doubled, so a printed command
+  # stays pasteable. PowerShell reads not only ' but also the typographic
+  # U+2018, U+2019, U+201A and U+201B as single quotes (a path like
+  # C:\Users\<name>'s can carry one), so the escaping is PowerShell's own.
+  param([string]$Value)
+  return "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Value) + "'"
+}
+
+function Resolve-Pm2Home {
+  <#
+    Picks the PM2_HOME every pm2 call of this run uses. First match wins:
+    -Explicit (the -Pm2Home parameter), then -EnvValue (PM2_HOME as found in
+    the environment at startup), then <UserProfileDir>\.pm2-runtime when that
+    directory exists AND the $ScheduledTaskName task exists, else nothing.
+
+    Returns [pscustomobject]@{ Home; Source; ScheduledTaskPresent }. Home ''
+    means "leave PM2_HOME alone". ScheduledTaskPresent is $true/$false when
+    the task was queried and $null when it was not (an explicit or env home
+    wins without asking, and a host with no .pm2-runtime directory is never
+    queried at all).
+
+    Home is always a fully qualified file-system path (or ''). An -Explicit
+    or -EnvValue that is not fully qualified -- relative ('x'), root-relative
+    ('\x', rooted on whatever drive the cwd is on) or drive-relative ('C:x')
+    -- is resolved here, the way PowerShell resolves it from the current
+    location (the same location the -Explicit existence check uses). Main
+    later runs `Set-Location $resolvedRoot`, a native child inherits that
+    location as its cwd, and pm2 resolves such a PM2_HOME against its cwd:
+    left unresolved, the step 2 stop and the step 7 restart could talk to
+    two different directories (or, for '\x', two different drives).
+
+    Throws PM2_HOME_NOT_FOUND when -Explicit names a directory that does not
+    exist, or a container that is not a file-system directory (HKCU:\...,
+    Env:\ -- both pass Test-Path -PathType Container), and when -EnvValue is
+    not a file-system path at all (Env:\..., HKCU:\..., a drive this session
+    does not have).
+  #>
+  param(
+    [string]$Explicit = '',
+    [string]$EnvValue = '',
+    [string]$UserProfileDir = '',
+    [string]$ScheduledTaskName = ''
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($Explicit)) {
+    $explicitHome = $Explicit.Trim()
+    if (-not (Test-Path -LiteralPath $explicitHome -PathType Container)) {
+      throw "PM2_HOME_NOT_FOUND: -Pm2Home '$explicitHome' is not an existing directory. pm2 would silently create a fresh, empty home there and find no app in it."
+    }
+    $resolvedExplicit = Resolve-Path -LiteralPath $explicitHome
+    if ($resolvedExplicit.Provider.Name -ne 'FileSystem') {
+      throw "PM2_HOME_NOT_FOUND: -Pm2Home '$explicitHome' is not a file-system directory (provider: $($resolvedExplicit.Provider.Name))."
+    }
+    return [pscustomobject]@{ Home = $resolvedExplicit.ProviderPath; Source = 'parameter -Pm2Home'; ScheduledTaskPresent = $null }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($EnvValue)) {
+    # Not required to exist (pm2 has always been free to create it); only made
+    # fully qualified. [IO.Path]::IsPathRooted is not enough: it calls '\x'
+    # and 'C:x' rooted, yet both still depend on the cwd's drive / the drive's
+    # cwd, which step 6 changes.
+    $envProvider = $null
+    $envDrive = $null
+    try {
+      $envHome = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EnvValue, [ref]$envProvider, [ref]$envDrive)
+    } catch {
+      throw "PM2_HOME_NOT_FOUND: PM2_HOME '$EnvValue' from the environment cannot be resolved to a file-system path: $($_.Exception.Message)"
+    }
+    if ($null -eq $envProvider -or $envProvider.Name -ne 'FileSystem') {
+      $providerName = if ($null -eq $envProvider) { 'unknown' } else { $envProvider.Name }
+      throw "PM2_HOME_NOT_FOUND: PM2_HOME '$EnvValue' from the environment is not a file-system path (provider: $providerName)."
+    }
+    return [pscustomobject]@{ Home = $envHome; Source = 'environment PM2_HOME'; ScheduledTaskPresent = $null }
+  }
+
+  if ((-not [string]::IsNullOrWhiteSpace($UserProfileDir)) -and (-not [string]::IsNullOrWhiteSpace($ScheduledTaskName))) {
+    $runtimeHome = Join-Path $UserProfileDir '.pm2-runtime'
+    if (Test-Path -LiteralPath $runtimeHome -PathType Container) {
+      if (Test-ScheduledTaskPresent -TaskName $ScheduledTaskName) {
+        return [pscustomobject]@{
+          Home                 = [System.IO.Path]::GetFullPath($runtimeHome)
+          Source               = "pm2-runtime (.pm2-runtime + scheduled task '$ScheduledTaskName')"
+          ScheduledTaskPresent = $true
+        }
+      }
+      return [pscustomobject]@{ Home = ''; Source = 'default (.pm2-runtime exists but no such scheduled task)'; ScheduledTaskPresent = $false }
+    }
+  }
+
+  return [pscustomobject]@{ Home = ''; Source = 'default'; ScheduledTaskPresent = $null }
+}
+
+function Invoke-Pm2 {
+  <#
+    The ONLY place this script runs pm2. Sets PM2_HOME to $Pm2Home for the
+    duration of the one call (and puts back whatever was there before, or
+    removes it), so every pm2 call of a run sees the same home. An empty
+    $Pm2Home leaves PM2_HOME untouched -- the pre-existing behaviour.
+
+    Output (stdout AND stderr) is captured, echoed to the host line by line,
+    and returned with the exit code: the restart fallback needs pm2's "not
+    found" text, which pm2 prints on stderr. ErrorActionPreference is
+    'Continue' for the call because Windows PowerShell 5.1 turns the first
+    redirected native stderr line into a terminating NativeCommandError under
+    this script's global 'Stop', which would lose both the exit code and the
+    text. A pm2 command that cannot be run at all still throws, as before.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Pm2Command,
+    [Parameter(Mandatory = $true)][string[]]$Arguments,
+    [string]$Pm2Home = ''
+  )
+
+  $applyHome = -not [string]::IsNullOrWhiteSpace($Pm2Home)
+  $hadHome = Test-Path -LiteralPath 'Env:PM2_HOME'
+  $previousHome = $env:PM2_HOME
+  $ErrorActionPreference = 'Continue'
+  try {
+    if ($applyHome) {
+      $env:PM2_HOME = $Pm2Home
+    }
+    $raw = & $Pm2Command @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    if ($applyHome) {
+      if ($hadHome) {
+        $env:PM2_HOME = $previousHome
+      } else {
+        Remove-Item -LiteralPath 'Env:PM2_HOME' -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  $lines = @()
+  foreach ($item in $raw) {
+    if ($null -ne $item) {
+      $lines += [string]$item
+    }
+  }
+  foreach ($line in $lines) {
+    Write-Host $line
+  }
+  return [pscustomobject]@{ ExitCode = $exitCode; Output = ($lines -join "`n") }
+}
+
+function Test-Pm2UsesMachinePipe {
+  <#
+    $true where every pm2 daemon on the host listens on the one machine-wide
+    pipe \\.\pipe\rpc.sock (Windows, pm2 paths.js), so Test-Pm2DaemonPipePresent
+    answers "is ANY pm2 daemon running here". Elsewhere pm2's sockets are
+    files inside PM2_HOME and that probe (always $false there) says nothing
+    about a daemon. A function of its own so the tests can take the Windows
+    branch on every OS.
+  #>
+  return ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+}
+
 function Stop-Pm2App {
+  <#
+    `pm2 stop <name>` under $Pm2Home. Step 2 calls it plainly.
+
+    -AfterFailure is the mutation-window failure handler's call (R60 review,
+    #6079). On Windows it first asks pm2's machine-wide pipe whether any pm2
+    daemon is there:
+      - no pipe ($false): no daemon, so the app is not running under pm2 and
+        there is nothing to stop. No pm2 call at all: a pm2 CLI call that finds
+        no daemon starts one, as a child of THIS session (#6071). In R59 that
+        is what the handler's stop did after pm2-runtime had auto-exited; the
+        daemon inherited the session's stdout and held the ssh session open
+        until it was reset.
+      - pipe present ($true) or not queryable ($null): stop, as before. With
+        -KillDaemonAfterStop (Main passes it only on a pm2-runtime host, i.e.
+        exactly one -Pm2ScheduledTaskName task) the stop is followed by
+        `pm2 kill` and Wait-Pm2DaemonPipeClosed, so no daemon -- neither the
+        one the step 7 "not found" restart may have left, nor one the stop
+        itself may have started -- stays attached to the session. The wait's
+        answer is only reported: the restore block must still print.
+    Off Windows the pipe is not consulted and the stop runs as before. On a
+    host that is not pm2-runtime managed the pipe decides only whether to
+    stop; its daemon is never killed (its process list is what the restore
+    block's `pm2 restart` needs).
+  #>
   param(
     [string]$Pm2Command,
-    [string]$Name
+    [string]$Name,
+    [string]$Pm2Home = '',
+    [switch]$AfterFailure,
+    [switch]$KillDaemonAfterStop
   )
+
+  $pipeDecides = $AfterFailure -and (Test-Pm2UsesMachinePipe)
+  if ($pipeDecides) {
+    $pipePresent = Test-Pm2DaemonPipePresent
+    if ($pipePresent -eq $false) {
+      Write-Info "PM2_STOP_SKIPPED_NO_DAEMON: no pm2 daemon listens on \\.\pipe\rpc.sock, so '$Name' is not running under pm2 and nothing is stopped. No pm2 command is run: one would start a pm2 daemon inside this upgrade session."
+      return
+    }
+    if ($null -eq $pipePresent) {
+      Write-Info "pm2's pipe \\.\pipe\rpc.sock could not be queried; stopping '$Name' anyway."
+    }
+  }
+
   Write-Info "Stop pm2 app: $Name"
-  & $Pm2Command stop $Name
-  if ($LASTEXITCODE -ne 0) {
-    Write-Info "pm2 stop reported exit=$LASTEXITCODE for '$Name' (continuing: the app may not have been running yet)"
+  $result = Invoke-Pm2 -Pm2Command $Pm2Command -Arguments @('stop', $Name) -Pm2Home $Pm2Home
+  if ($result.ExitCode -ne 0) {
+    Write-Info "pm2 stop reported exit=$($result.ExitCode) for '$Name' (continuing: the app may not have been running yet)"
+  }
+
+  if ($pipeDecides -and $KillDaemonAfterStop) {
+    Write-Info 'pm2-runtime host: removing the pm2 daemon (pm2 kill) so none stays attached to this upgrade session, then waiting for its pipe to close.'
+    $kill = Invoke-Pm2 -Pm2Command $Pm2Command -Arguments @('kill') -Pm2Home $Pm2Home
+    if ($kill.ExitCode -ne 0) {
+      Write-Info "pm2 kill reported exit=$($kill.ExitCode) (the pipe check below says whether a daemon is still there)"
+    }
+    $pipeState = Wait-Pm2DaemonPipeClosed
+    if ($pipeState -eq 'closed') {
+      Write-Info 'pm2 daemon pipe closed.'
+    } else {
+      Write-Err "PM2_DAEMON_NOT_CONFIRMED_GONE: after 'pm2 kill' the pipe \\.\pipe\rpc.sock is '$pipeState'. A pm2 daemon may still be attached to this session; check [System.IO.Directory]::GetFiles('\\.\pipe\', 'rpc.sock') before ending the session."
+    }
   }
 }
 
-# ── Step 3: backup, and the F22-safe walk-files copy used everywhere ──────
+function Test-Pm2ProcessNotFound {
+  <#
+    pm2's answer when the daemon it reaches does not know the app:
+    "[PM2][ERROR] Process or Namespace <name> not found".
+  #>
+  param([string]$Output)
+  return ($Output -match '(?i)\bnot found\b')
+}
+
+function Test-Pm2DaemonPipePresent {
+  <#
+    Windows only: $true while something listens on pm2's RPC pipe, $false
+    when nothing does, $null when the pipe cannot be queried. pm2 (paths.js)
+    uses the SAME pipe, \\.\pipe\rpc.sock, for every PM2_HOME on a Windows
+    machine, so this sees any pm2 daemon on the host, including a
+    pm2-runtime's in-process one. Querying the pipe namespace does not
+    connect to anything. Always $false off Windows: pm2's sockets there are
+    files inside PM2_HOME, and `pm2 kill` returns only after the daemon's
+    SIGQUIT.
+
+    It asks for that ONE name ($PipeName as GetFiles' search pattern) and
+    never lists the whole namespace: Windows PowerShell 5.1 (.NET Framework)
+    cannot list \\.\pipe\ at all while ANY pipe on the host has a name with a
+    character that is illegal in a path ('<', '|', ...) -- GetFiles throws
+    ArgumentException -- whereas a query for one name only ever returns that
+    name. $null (so 'unknown', so no task start) is left for a query that
+    fails anyway.
+  #>
+  param([string]$PipeName = 'rpc.sock')
+
+  if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    return $false
+  }
+  try {
+    $suffix = '\' + $PipeName
+    foreach ($pipe in [System.IO.Directory]::GetFiles('\\.\pipe\', $PipeName)) {
+      if ($pipe.EndsWith($suffix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+      }
+    }
+    return $false
+  } catch {
+    return $null
+  }
+}
+
+function Wait-Pm2DaemonPipeClosed {
+  <#
+    Polls Test-Pm2DaemonPipePresent for up to $TimeoutSec seconds. Returns
+    'closed' (nothing listens), 'still-open' (something still listened when
+    the time ran out), or 'unknown' (the pipe could not be queried).
+  #>
+  param(
+    [int]$TimeoutSec = 15,
+    [string]$PipeName = 'rpc.sock'
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ($true) {
+    $present = Test-Pm2DaemonPipePresent -PipeName $PipeName
+    if ($null -eq $present) {
+      return 'unknown'
+    }
+    if (-not $present) {
+      return 'closed'
+    }
+    if ((Get-Date) -ge $deadline) {
+      return 'still-open'
+    }
+    Start-Sleep -Milliseconds 250
+  }
+}
+
+function Restart-Pm2AppOrScheduledTask {
+  <#
+    `pm2 restart <name> --update-env` under $Pm2Home. Returns 'pm2-restart'
+    when that succeeds.
+
+    R59 fallback: when the restart fails AND pm2 says the app is "not found"
+    AND the $ScheduledTaskName task exists, runs `pm2 kill`, waits until no
+    pm2 daemon holds the pipe, starts that task (the pm2-runtime host's own
+    launcher) and returns 'scheduled-task'. Whether the backend really came
+    back is NOT decided here: the caller's health polling decides, exactly as
+    after a successful restart.
+
+    Why the kill (verified with real pm2 7.0.4 on Windows PowerShell 5.1): a
+    pm2 CLI call that finds no daemon starts one, as a child of THIS session,
+    so the "not found" restart has just left an empty daemon on the
+    machine-wide pipe. A pm2-runtime that finds a daemon there does not host
+    the app itself: it attaches as a client and the daemon hosts it. Without
+    the kill the backend would pass the health polling and then be tied to
+    the upgrade session: whenever that session's process tree is torn down
+    (reproduced with a kill-on-close job object), the backend goes with it
+    while the task still shows Running. With the kill the task's pm2-runtime
+    starts in no-daemon mode and hosts the app itself. `pm2 kill` stops
+    whichever daemon holds the pipe, with every app in it; on a pm2-runtime
+    host whose restart answers "not found", that daemon does not hold the
+    backend.
+
+    The task is started only on positive evidence that no daemon is left,
+    and the pipe is the only evidence:
+      - pipe 'closed'                          -> start the task;
+      - pipe 'unknown' (pipe not queryable)    -> PM2_DAEMON_STATE_UNKNOWN;
+      - pipe 'still-open', or anything else    -> PM2_DAEMON_STILL_RUNNING.
+    `pm2 kill`'s exit code is logged and never consulted: on Windows it is 0
+    whether or not the daemon exited (pm2 7.0.4 / 5.4.3 CLI.js `kill` exits
+    SUCCESS_EXIT from killDaemon's callback, which Client.js calls after a
+    fixed 3000 ms timer even when the daemon is still there).
+    The task is the one Get-Pm2ScheduledTask found, started by its own
+    TaskPath (a task in a subfolder cannot be started by name alone).
+
+    Throws PM2_RESTART_FAILED on any other restart failure, or on "not found"
+    with no such task (the pre-existing outcome), PM2_DAEMON_STILL_RUNNING /
+    PM2_DAEMON_STATE_UNKNOWN as above (starting the task then could recreate
+    exactly the session-bound backend above), and
+    PM2_SCHEDULED_TASK_START_FAILED when the task cannot be started. Every
+    one of them reaches the caller's mutation-window handler, which prints
+    the restore block.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Pm2Command,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [string]$Pm2Home = '',
+    [string]$ScheduledTaskName = ''
+  )
+
+  $restart = Invoke-Pm2 -Pm2Command $Pm2Command -Arguments @('restart', $Name, '--update-env') -Pm2Home $Pm2Home
+  if ($restart.ExitCode -eq 0) {
+    return 'pm2-restart'
+  }
+  if (-not (Test-Pm2ProcessNotFound -Output $restart.Output)) {
+    throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode)"
+  }
+  if ([string]::IsNullOrWhiteSpace($ScheduledTaskName)) {
+    throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode) (pm2 reports '$Name' not found; the scheduled-task fallback is disabled)"
+  }
+  $task = Get-Pm2ScheduledTask -TaskName $ScheduledTaskName
+  if ($null -eq $task) {
+    throw "PM2_RESTART_FAILED: exit=$($restart.ExitCode) (pm2 reports '$Name' not found and there is no single scheduled task '$ScheduledTaskName' to fall back to)"
+  }
+  $taskPath = Get-ScheduledTaskPathOrRoot -Task $task
+
+  Write-Info "PM2_RESTART_NOT_FOUND_FALLBACK: pm2 reports '$Name' not found; scheduled task '$taskPath$($task.TaskName)' exists, so this is a pm2-runtime host whose runtime exited after the stop. Starting the task instead."
+  Write-Info "Removing the empty pm2 daemon the restart above started in this session, so the task's pm2-runtime hosts the backend itself (pm2 kill)."
+  $kill = Invoke-Pm2 -Pm2Command $Pm2Command -Arguments @('kill') -Pm2Home $Pm2Home
+  if ($kill.ExitCode -ne 0) {
+    Write-Info "pm2 kill reported exit=$($kill.ExitCode) (the pipe check below decides whether a daemon is still there)"
+  }
+  $pipeState = Wait-Pm2DaemonPipeClosed
+  if ($pipeState -eq 'unknown') {
+    throw "PM2_DAEMON_STATE_UNKNOWN: pm2's pipe \\.\pipe\rpc.sock could not be queried after 'pm2 kill', so nothing shows the session's pm2 daemon is gone (pm2 kill's exit code does not: on Windows it is 0 whether or not the daemon exited). '$ScheduledTaskName' was NOT started."
+  } elseif ($pipeState -ne 'closed') {
+    throw "PM2_DAEMON_STILL_RUNNING: a pm2 daemon still listens on \\.\pipe\rpc.sock after 'pm2 kill' (pipe state: $pipeState); starting '$ScheduledTaskName' now would make its pm2-runtime attach to that daemon instead of hosting '$Name' itself. The task was NOT started."
+  }
+  try {
+    Start-ScheduledTask -TaskName $task.TaskName -TaskPath $taskPath -ErrorAction Stop
+  } catch {
+    throw "PM2_SCHEDULED_TASK_START_FAILED: could not start scheduled task '$taskPath$($task.TaskName)': $($_.Exception.Message)"
+  }
+  Write-Info "Scheduled task '$ScheduledTaskName' started; the health polling below decides whether the backend came back."
+  return 'scheduled-task'
+}
+
+# -- Step 3: backup, and the F22-safe walk-files copy used everywhere ------
 
 function Test-IsNodeModulesRelativePath {
   <#
@@ -324,7 +846,7 @@ function Copy-TreeExcludingNodeModules {
 function Get-DeployedFileCount {
   <#
     Counts files under $Path, excluding any under a node_modules segment.
-    Used only for the informational per-plugin lib/ comparison in step 5 —
+    Used only for the informational per-plugin lib/ comparison in step 5 --
     zero if $Path does not exist (a plugin that predates a new lib/ file is
     not itself an error; the manifest assertion is the hard gate).
   #>
@@ -345,7 +867,7 @@ function New-TimestampedBackup {
   <#
     Copies $RelativePaths (relative to $RootDir) into a timestamped folder
     under $BackupRoot, walking files (Copy-TreeExcludingNodeModules) rather
-    than a recursive Copy-Item -Exclude — see that function's header for why.
+    than a recursive Copy-Item -Exclude -- see that function's header for why.
     A path absent on this host is skipped with a warning, not a failure.
     Returns the backup folder's full path.
   #>
@@ -386,7 +908,56 @@ function New-TimestampedBackup {
   return $target
 }
 
-# ── Step 4: extract + replace ──────────────────────────────────────────────
+function ConvertTo-NormalizedRelativePath {
+  # 'packages\core-backend\dist\' and 'packages/core-backend/dist' name the
+  # same RootDir-relative path.
+  param([string]$RelativePath)
+  return ((([string]$RelativePath).Trim() -replace '\\', '/') -replace '/{2,}', '/').Trim('/')
+}
+
+function Test-RelativePathListed {
+  # True when $RelativePath is in $List, compared after
+  # ConvertTo-NormalizedRelativePath and case-insensitively (NTFS paths).
+  param(
+    [string]$RelativePath,
+    [string[]]$List = @()
+  )
+  $wanted = ConvertTo-NormalizedRelativePath -RelativePath $RelativePath
+  foreach ($entry in $List) {
+    if ([string]::Equals((ConvertTo-NormalizedRelativePath -RelativePath $entry), $wanted, [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Assert-ReplacedPathsBackedUp {
+  <#
+    Every path the upgrade replaces (ReplaceDirs) or overlays (plugins/) must
+    be in $BackupPaths, or the restore block has nothing to put it back from.
+    R60 review (#6079): ReplaceDirs replaced packages/core-backend/migrations
+    while BackupPaths did not back it up, so the printed restore recipe deleted
+    the live migrations and then copied from a backup that did not exist.
+    Throws RESTORE_PATH_NOT_BACKED_UP naming every such path; Main calls it
+    before any pm2 call, gate or backup.
+  #>
+  param(
+    [string[]]$RestoredRelativePaths = @(),
+    [string[]]$BackupPaths = @()
+  )
+
+  $missing = @()
+  foreach ($rel in $RestoredRelativePaths) {
+    if (-not (Test-RelativePathListed -RelativePath $rel -List $BackupPaths)) {
+      $missing += $rel
+    }
+  }
+  if ($missing.Count -gt 0) {
+    throw ("RESTORE_PATH_NOT_BACKED_UP: {0} would be replaced or overlaid by this upgrade but is not in -BackupPaths, so a failed upgrade could not be restored. Add it to -BackupPaths. Refusing before anything is touched." -f ($missing -join ', '))
+  }
+}
+
+# -- Step 4: extract + replace ----------------------------------------------
 
 function Resolve-StagingBase {
   param([string]$Candidate)
@@ -485,14 +1056,14 @@ function Update-Plugins {
     Overlays every plugin directory, AND any loose file, shipped at the
     package's plugins/ root onto the live plugins/ tree, walking files and
     skipping any node_modules path on both sides. The live plugin's
-    node_modules is never scanned, never deleted, never written to — this is
+    node_modules is never scanned, never deleted, never written to -- this is
     the "preserving each plugin's node_modules" requirement.
 
     NON-GOAL, DOCUMENTED RATHER THAN FIXED: a directory literally named
     `node_modules` sitting directly at the package's plugins/ root (i.e.
     plugins/node_modules/..., as opposed to plugins/<name>/node_modules/...)
     would be enumerated by the -Directory listing below like any other
-    plugin and copied under that name — this function does not special-case
+    plugin and copied under that name -- this function does not special-case
     that shape. It is safe only because
     multitable-onprem-package-build.sh's prune_node_modules sweeps every
     node_modules directory out of the package before it is archived, so a
@@ -515,7 +1086,7 @@ function Update-Plugins {
   New-Item -ItemType Directory -Force -Path $livePluginsDir | Out-Null
 
   # Loose files directly at plugins/ (not inside any plugin subdirectory) are
-  # real package content too — a per-directory-only listing silently dropped
+  # real package content too -- a per-directory-only listing silently dropped
   # these. -Force so a hidden loose file is not silently skipped either.
   Get-ChildItem -LiteralPath $packagePluginsDir -File -Force | ForEach-Object {
     $destPath = Join-Path $livePluginsDir $_.Name
@@ -523,7 +1094,7 @@ function Update-Plugins {
     Write-Info ("Replaced plugins/{0} (loose file)" -f $_.Name)
   }
 
-  # -Force: a plugin directory marked hidden must not be silently skipped —
+  # -Force: a plugin directory marked hidden must not be silently skipped --
   # a directory listing this function trusts must not quietly drop entries,
   # the same lesson F22 taught about copy operations in general.
   Get-ChildItem -LiteralPath $packagePluginsDir -Directory -Force | ForEach-Object {
@@ -535,13 +1106,13 @@ function Update-Plugins {
   }
 }
 
-# ── Step 5: the F22 tripwire ────────────────────────────────────────────────
+# -- Step 5: the F22 tripwire ------------------------------------------------
 
 function Assert-MustExistFiles {
   <#
     THE F22 TRIPWIRE. Every relative path in $RelativePaths must exist as a
     FILE under $RootDir after the swap. Throws UPGRADE_ASSERTION_MISSING_FILES
-    naming every missing path when any are absent — this is the check that
+    naming every missing path when any are absent -- this is the check that
     would have caught F22 the day it happened, instead of a hand audit
     catching it afterward.
   #>
@@ -571,7 +1142,7 @@ function Assert-PluginTreesMatchPackage {
     paths exist; a file-COUNT comparison (Write-PluginLibFileCountReport
     below) is weaker still and actively misleading in the steady state: this
     overlay copy never deletes stale files, so "deployed count > package
-    count" is NORMAL after even one prior upgrade — a chronic false
+    count" is NORMAL after even one prior upgrade -- a chronic false
     MISMATCH, not a signal. Neither would catch a same-count,
     different-content regression, a repeat upgrade where a STALE file from a
     prior install happens to satisfy Assert-MustExistFiles by existing at
@@ -580,7 +1151,7 @@ function Assert-PluginTreesMatchPackage {
 
     This is the actual gate: for EVERY file under $PackageRoot/plugins
     (walked with Get-ChildItem -Recurse -File -Force, node_modules paths
-    excluded via Test-IsNodeModulesRelativePath — never -Exclude), assert
+    excluded via Test-IsNodeModulesRelativePath -- never -Exclude), assert
     the matching relative path exists under $RootDir/plugins with an
     IDENTICAL SHA-256 to the package's copy. It does not care HOW a file
     failed to arrive correctly, only THAT it did.
@@ -640,12 +1211,12 @@ function Assert-NoNodeModulesContentLeaked {
     THE NEGATIVE HALF OF THE F22 NET. Assert-PluginTreesMatchPackage is
     strictly one-directional: it proves every file that SHOULD be copied WAS
     copied correctly, but it cannot notice that node_modules content ALSO
-    leaked through to some other, wrong location — which is exactly what the
+    leaked through to some other, wrong location -- which is exactly what the
     forbidden `-Exclude` pattern does. `Get-ChildItem -Recurse -Exclude
     'node_modules' | Copy-Item -Recurse` excludes only items literally NAMED
     node_modules from a flat listing; every descendant of an excluded
     node_modules directory is still individually emitted by -Recurse and
-    still gets copied — typically to a wrong, flattened path rather than
+    still gets copied -- typically to a wrong, flattened path rather than
     being dropped, so the CORRECT files can end up present and correct at
     the same time node_modules content leaks in elsewhere. A pure
     existence+hash check on the package's own file list would not notice.
@@ -656,7 +1227,7 @@ function Assert-NoNodeModulesContentLeaked {
     tree OUTSIDE of a node_modules segment (a legitimately preserved LIVE
     node_modules is out of scope for this check by design). Files under 8
     bytes are skipped on both sides to avoid a false positive between two
-    unrelated, incidentally-empty/trivial files — real leaked module content
+    unrelated, incidentally-empty/trivial files -- real leaked module content
     is never that small. Throws UPGRADE_NODE_MODULES_LEAK_DETECTED naming
     the leaked relative path(s) when found. Returns the number of excluded
     package files it hashed (0 when the package ships no node_modules at
@@ -716,7 +1287,7 @@ function Assert-NoNodeModulesContentLeaked {
 
 function Write-PluginLibFileCountReport {
   <#
-    INFORMATIONAL ONLY — this is deliberately NOT a gate. A file-count
+    INFORMATIONAL ONLY -- this is deliberately NOT a gate. A file-count
     comparison chronically false-MISMATCHes in the normal steady state
     (this overlay copy never deletes stale files, so deployed count >
     package count after even one prior upgrade is expected, not a defect),
@@ -778,7 +1349,7 @@ function Write-PluginsSummary {
   }
 }
 
-# ── Step 6: migrations with real env ────────────────────────────────────────
+# -- Step 6: migrations with real env ----------------------------------------
 
 function Import-AppEnvFile {
   <#
@@ -787,7 +1358,7 @@ function Import-AppEnvFile {
     this process's environment (skipping blank lines and '#' comments,
     stripping a single layer of matching quotes) so a child `node migrate.js`
     inherits DATABASE_URL / JWT_SECRET / etc. pm2 does NOT reliably reload
-    env on a bare restart, which is exactly why this step exists — a stale
+    env on a bare restart, which is exactly why this step exists -- a stale
     pm2-held env is a silent, hard-to-diagnose migration/runtime failure.
   #>
   param([string]$EnvFile)
@@ -836,7 +1407,7 @@ function Invoke-CheckedCommand {
   }
 }
 
-# ── The maintenance gate (flag file read by nginx) ──────────────────────────
+# -- The maintenance gate (flag file read by nginx) --------------------------
 
 function Join-RootRelativePath {
   <#
@@ -877,9 +1448,9 @@ function Assert-MaintenanceFlagOutsideReplaceDirs {
   <#
     Static, pre-flight refusal: the flag must not live inside any directory this
     upgrade deletes and recopies wholesale (Update-ReplaceDirs). If it did, the
-    replace step would delete the raised gate mid-upgrade — traffic would hit a
+    replace step would delete the raised gate mid-upgrade -- traffic would hit a
     down backend with a raw connection reset, which is the exact symptom the gate
-    exists to remove — and the post-upgrade removal would then be a no-op against
+    exists to remove -- and the post-upgrade removal would then be a no-op against
     a path the package may have repopulated. Refuses BEFORE pm2 is touched.
   #>
   param(
@@ -926,7 +1497,7 @@ function Remove-MaintenanceFlag {
   <#
     Drops the gate. Idempotent on purpose: it is called on the success path (as
     soon as the backend answers directly, BEFORE the nginx probe) and again,
-    unconditionally, from the finally block in Main — so a flag raised by a run
+    unconditionally, from the finally block in Main -- so a flag raised by a run
     that then died anywhere, at any step, never outlives the script.
   #>
   param([Parameter(Mandatory = $true)][string]$FlagPath)
@@ -934,7 +1505,7 @@ function Remove-MaintenanceFlag {
   if (Test-Path -LiteralPath $FlagPath) {
     Remove-Item -LiteralPath $FlagPath -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $FlagPath) {
-      Write-Err "MAINTENANCE_FLAG_STILL_PRESENT: failed to delete $FlagPath — the site will keep answering 503 until this file is removed by hand."
+      Write-Err "MAINTENANCE_FLAG_STILL_PRESENT: failed to delete $FlagPath -- the site will keep answering 503 until this file is removed by hand."
       return $false
     }
     Write-Info "Maintenance flag removed: $FlagPath"
@@ -948,7 +1519,7 @@ function Test-MaintenanceGateWired {
     POSITIVE self-witness for the gate. Writing the flag proves nothing on its
     own: nginx only answers 503 if somebody hand-synced the `if (-f ...)` block
     into THIS host's nginx.conf (ops/nginx/multitable-onprem.conf.example is a
-    template — editing the repo has zero effect on a running box). On an
+    template -- editing the repo has zero effect on a running box). On an
     un-synced host the flag is inert, yet the run would still print
     "maintenance flag: ... (removed)" and leave the operator believing a gate
     was up while testers ate ERR_CONNECTION_RESET for 60-90 seconds.
@@ -970,7 +1541,7 @@ function Test-MaintenanceGateWired {
 
   $status = $null
   try {
-    # The header is for test fixtures/log readers only — nginx's `if (-f ...)`
+    # The header is for test fixtures/log readers only -- nginx's `if (-f ...)`
     # gate is header-blind, so tagging the probe cannot change what it measures.
     $response = Invoke-WebRequest -Uri $ProbeUrl -UseBasicParsing -TimeoutSec 5 -Headers @{ 'X-Upgrade-Gate-Probe' = '1' }
     $status = [int]$response.StatusCode
@@ -985,22 +1556,22 @@ function Test-MaintenanceGateWired {
   }
 
   if ($status -eq 503) {
-    Write-Info "MAINTENANCE_GATE_WIRED: $ProbeUrl answered 503 while $FlagPath exists — nginx really is reading this flag."
+    Write-Info "MAINTENANCE_GATE_WIRED: $ProbeUrl answered 503 while $FlagPath exists -- nginx really is reading this flag."
     return 'WIRED'
   }
   if ($status -ge 200 -and $status -lt 400) {
-    Write-Err "MAINTENANCE_GATE_NOT_WIRED: $ProbeUrl answered $status while the maintenance flag $FlagPath exists. This nginx does not read that file, so the upgrade window will NOT be shielded: users get ERR_CONNECTION_RESET / Failed to fetch while the backend is down. Sync the 'if (-f <flag>) { return 503; }' blocks from ops/nginx/multitable-onprem.conf.example into this host's nginx.conf (nginx -t, then reload as SYSTEM) — see the runbook section 升级窗口的维护门. The upgrade continues regardless."
+    Write-Err "MAINTENANCE_GATE_NOT_WIRED: $ProbeUrl answered $status while the maintenance flag $FlagPath exists. This nginx does not read that file, so the upgrade window will NOT be shielded: users get ERR_CONNECTION_RESET / Failed to fetch while the backend is down. Sync the 'if (-f <flag>) { return 503; }' blocks from ops/nginx/multitable-onprem.conf.example into this host's nginx.conf (nginx -t, then reload as SYSTEM) -- see the runbook section '$(-join [char[]](0x5347, 0x7EA7, 0x7A97, 0x53E3, 0x7684, 0x7EF4, 0x62A4, 0x95E8))' (docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md). The upgrade continues regardless."
     return 'NOT_WIRED'
   }
   $observed = if ($null -eq $status) { 'nothing (transport failure)' } else { "status $status" }
-  Write-Info "MAINTENANCE_GATE_UNKNOWN: $ProbeUrl answered $observed while the flag was up — cannot tell whether the gate is wired. Verify by hand (see the runbook)."
+  Write-Info "MAINTENANCE_GATE_UNKNOWN: $ProbeUrl answered $observed while the flag was up -- cannot tell whether the gate is wired. Verify by hand (see the runbook)."
   return 'UNKNOWN'
 }
 
 function Get-EnvFileValue {
   <#
     Reads ONE key out of a KEY=VALUE env file without importing anything into
-    this process (Import-AppEnvFile does that, but only when migrations run —
+    this process (Import-AppEnvFile does that, but only when migrations run --
     the backend port must be resolvable even with -RunMigrations 0).
   #>
   param(
@@ -1049,7 +1620,7 @@ function Resolve-BackendHealthUrl {
   return "http://127.0.0.1:$port/health"
 }
 
-# ── Step 7: restart + healthcheck ───────────────────────────────────────────
+# -- Step 7: restart + healthcheck -------------------------------------------
 
 function Wait-ForHealthOk {
   param(
@@ -1082,7 +1653,7 @@ function Wait-ForHealthOk {
   return [pscustomobject]@{ Ok = $false; Attempt = $Attempts; StatusCode = $null; Body = $null }
 }
 
-# ── Failure handling: the restore block ─────────────────────────────────────
+# -- Failure handling: the restore block -------------------------------------
 
 function Write-RestoreBlock {
   <#
@@ -1090,19 +1661,47 @@ function Write-RestoreBlock {
     path plus an exact per-directory copy-back command for every path this
     script may have replaced. Called from the SINGLE outer failure handler
     that wraps the entire mutation window (extract through health check) in
-    Main below, so ANY exception in that window prints this — not just the
+    Main below, so ANY exception in that window prints this -- not just the
     handful of specific assertions that used to print their own ad-hoc
     message. Before this existed, a mid-swap failure (for example, a thrown
     error from inside Update-ReplaceDirs/Update-Plugins themselves) died
     with a raw, uncaught exception and the backup path existed only in
     scrollback the operator had to scroll back to find.
+
+    The recipe never deletes what it cannot put back (R60 review, #6079):
+      - a path is restored only when it is in $BackedUpRelativePaths AND the
+        backup folder holds it (New-TimestampedBackup skips a path absent on
+        the host); otherwise the block says it is not restored and prints no
+        command for it at all;
+      - a path in $OverlaidRelativePaths (plugins/) is copied back OVER the
+        live tree and never deleted first: its backup skips node_modules
+        (Copy-TreeExcludingNodeModules), and the live node_modules -- the
+        plugins' drivers -- must survive the restore;
+      - any other path is replaced in full: delete the live copy, copy the
+        backup back.
+    Paths are printed as PowerShell single-quoted literals.
   #>
   param(
     [Parameter(Mandatory = $true)][string]$BackupPath,
     [Parameter(Mandatory = $true)][string]$RootDir,
     [string[]]$ReplacedRelativePaths = @(),
+    # The -BackupPaths of this run: only these can be restored.
+    [string[]]$BackedUpRelativePaths = @(),
+    # Paths the upgrade overlays instead of replacing (Update-Plugins).
+    [string[]]$OverlaidRelativePaths = @('plugins'),
     [string]$Pm2AppName = 'metasheet-backend',
-    [string]$MaintenanceFlagPath = ''
+    [string]$MaintenanceFlagPath = '',
+    # The PM2_HOME this run used ('' = none set), so the printed restart
+    # command talks to the same pm2 home the upgrade did.
+    [string]$Pm2Home = '',
+    # Non-empty only when the pm2-runtime scheduled task exists on this host:
+    # after a stop, pm2-runtime has exited and `pm2 restart` answers "not
+    # found", so the block also prints how to start the task (after a
+    # `pm2 kill` of the empty daemon that answer came from).
+    [string]$ScheduledTaskName = '',
+    # That task's folder (Get-Pm2ScheduledTask), printed as -TaskPath: a task
+    # in a subfolder cannot be started by its name alone.
+    [string]$ScheduledTaskPath = '\'
   )
 
   Write-Host ''
@@ -1120,16 +1719,42 @@ function Write-RestoreBlock {
   foreach ($rel in $ReplacedRelativePaths) {
     $backupSrc = Join-Path $BackupPath $rel
     $liveDst = Join-Path $RootDir $rel
-    Write-Host ("  Remove-Item -LiteralPath '{0}' -Recurse -Force -ErrorAction SilentlyContinue" -f $liveDst)
-    Write-Host ("  Copy-Item -LiteralPath '{0}' -Destination '{1}' -Recurse -Force" -f $backupSrc, $liveDst)
+    $backupLiteral = ConvertTo-PsSingleQuotedLiteral -Value $backupSrc
+    $liveLiteral = ConvertTo-PsSingleQuotedLiteral -Value $liveDst
+    $hasBackup = (Test-RelativePathListed -RelativePath $rel -List $BackedUpRelativePaths) -and (Test-Path -LiteralPath $backupSrc -PathType Container)
+    if (-not $hasBackup) {
+      Write-Host ("  # {0}: NOT restored here -- the backup holds no copy of it (not in -BackupPaths, or absent on this host before the upgrade). Nothing here deletes it; check it by hand." -f $rel)
+      continue
+    }
+    if (Test-RelativePathListed -RelativePath $rel -List $OverlaidRelativePaths) {
+      Write-Host ("  # {0}: copied back OVER the live tree, never deleted first -- the backup skips node_modules and the live node_modules must stay. Files the failed upgrade ADDED here stay too." -f $rel)
+      Write-Host ("  New-Item -ItemType Directory -Force -Path {0} | Out-Null" -f $liveLiteral)
+      Write-Host ("  Get-ChildItem -LiteralPath {0} -Force | Copy-Item -Destination {1} -Recurse -Force" -f $backupLiteral, $liveLiteral)
+      continue
+    }
+    Write-Host ("  Remove-Item -LiteralPath {0} -Recurse -Force -ErrorAction SilentlyContinue" -f $liveLiteral)
+    Write-Host ("  Copy-Item -LiteralPath {0} -Destination {1} -Recurse -Force" -f $backupLiteral, $liveLiteral)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($Pm2Home)) {
+    Write-Host ("  `$env:PM2_HOME = {0}" -f (ConvertTo-PsSingleQuotedLiteral -Value $Pm2Home))
   }
   Write-Host ("  pm2 restart {0} --update-env" -f $Pm2AppName)
+  if (-not [string]::IsNullOrWhiteSpace($ScheduledTaskName)) {
+    if ([string]::IsNullOrEmpty($ScheduledTaskPath)) {
+      $ScheduledTaskPath = '\'
+    }
+    Write-Host '  # pm2-runtime host: if pm2 answers "not found", pm2-runtime has exited and that pm2 call'
+    Write-Host '  # started an empty pm2 daemon in THIS session. Kill it first, or the task''s pm2-runtime'
+    Write-Host '  # attaches to it and the backend lives only as long as this session. Then start the task:'
+    Write-Host '  pm2 kill'
+    Write-Host ("  Start-ScheduledTask -TaskName {0} -TaskPath {1}" -f (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskName), (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskPath))
+  }
   Write-Host '=========================================================================='
   Write-Host ''
 }
 
-# ── Main (skipped when dot-sourced, so tests can load the functions above
-#    without running the upgrade) ───────────────────────────────────────────
+# -- Main (skipped when dot-sourced, so tests can load the functions above
+#    without running the upgrade) -------------------------------------------
 
 if ($MyInvocation.InvocationName -ne '.') {
   $resolvedRoot = (Resolve-Path -LiteralPath $RootDir).Path
@@ -1143,13 +1768,31 @@ if ($MyInvocation.InvocationName -ne '.') {
     $resolvedEnvFile = (Resolve-Path -LiteralPath $resolvedEnvFile).Path
   }
 
-  # Resolved and validated BEFORE anything at all happens — no pm2 call, no
+  # Resolved and validated BEFORE anything at all happens -- no pm2 call, no
   # backup directory, no file touched. A flag path inside a replaced directory
   # is a configuration error that must stop the run, not something to discover
   # halfway through the swap.
   $maintenanceFlagPath = Resolve-MaintenanceFlagPath -RootDir $resolvedRoot -Candidate $MaintenanceFlagPath
   $maintenanceFlagPath = Assert-MaintenanceFlagOutsideReplaceDirs -FlagPath $maintenanceFlagPath -RootDir $resolvedRoot -ReplaceDirs $ReplaceDirs
+  # Every path this run may replace, for the restore block below -- the
+  # replace-in-full dirs plus plugins/ (overlaid, not replaced-in-full, but
+  # still a path an operator must be told how to restore). Each one must be
+  # backed up, or the restore block has nothing to put back: refused here,
+  # before anything is touched.
+  $overlaidRelativePaths = @('plugins')
+  $restoredRelativePaths = @($ReplaceDirs) + $overlaidRelativePaths
+  Assert-ReplacedPathsBackedUp -RestoredRelativePaths $restoredRelativePaths -BackupPaths $BackupPaths
   $resolvedBackendHealthUrl = Resolve-BackendHealthUrl -Candidate $BackendHealthUrl -EnvFile $resolvedEnvFile -DefaultPort $BackendDefaultPort
+
+  # R59: one PM2_HOME for every pm2 call of this run, resolved (and an
+  # explicit -Pm2Home that does not exist refused) before anything is touched.
+  $pm2HomeResolution = Resolve-Pm2Home -Explicit $Pm2Home -EnvValue $env:PM2_HOME -UserProfileDir (Get-UserProfileDirectory) -ScheduledTaskName $Pm2ScheduledTaskName
+  $resolvedPm2Home = $pm2HomeResolution.Home
+  $pm2HomeReport = 'not set (pm2 default)'
+  if (-not [string]::IsNullOrWhiteSpace($resolvedPm2Home)) {
+    $pm2HomeReport = $resolvedPm2Home
+  }
+  Write-Info "pm2 home: $pm2HomeReport (source: $($pm2HomeResolution.Source))"
 
   $resolvedBackupRoot = $BackupRoot
   if ([string]::IsNullOrWhiteSpace($resolvedBackupRoot)) {
@@ -1158,10 +1801,6 @@ if ($MyInvocation.InvocationName -ne '.') {
   New-Item -ItemType Directory -Force -Path $resolvedBackupRoot | Out-Null
 
   $pm2Command = Resolve-Pm2Command -BaseDir $resolvedRoot
-  # Every path this run may replace, for the restore block below — the
-  # replace-in-full dirs plus plugins/ (overlaid, not replaced-in-full, but
-  # still a path an operator must be told how to restore).
-  $restoredRelativePaths = @($ReplaceDirs) + @('plugins')
 
   Write-Info '=== Step 1/8: verify package checksum ==='
   $verifiedSha = Test-PackageChecksum -ArchivePath $resolvedArchive
@@ -1178,34 +1817,34 @@ if ($MyInvocation.InvocationName -ne '.') {
     #
     # The write is the FIRST statement INSIDE the try, never before it. A flag
     # raised on the pre-try lines would outlive any exception thrown between
-    # the write and `try {` — nothing would ever delete it and the site would
+    # the write and `try {` -- nothing would ever delete it and the site would
     # answer 503 forever. Remove-MaintenanceFlag is idempotent, so putting the
     # write inside costs nothing even when this very line is what threw.
     # Everything from here on runs inside the try/finally below, whose finally
-    # drops the gate unconditionally — success, refusal, or an exception
+    # drops the gate unconditionally -- success, refusal, or an exception
     # raised anywhere in between.
     New-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null
     Write-Host "MAINTENANCE_FLAG=$maintenanceFlagPath"
 
     # Ask the PUBLIC url once, while the flag is up and the backend is still
     # running: 503 proves nginx really reads this flag on THIS host, 200 proves
-    # it does not (the conf was never hand-synced). Diagnostic only — it never
+    # it does not (the conf was never hand-synced). Diagnostic only -- it never
     # blocks the upgrade. Inside the try, so its failure still hits the finally
     # that drops the flag.
     $maintenanceGate = Test-MaintenanceGateWired -ProbeUrl $HealthUrl -FlagPath $maintenanceFlagPath
 
-    Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
+    Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home
 
     Write-Info '=== Step 3/8: back up current install ==='
     $backupPath = New-TimestampedBackup -RootDir $resolvedRoot -BackupRoot $resolvedBackupRoot -RelativePaths $BackupPaths
     Write-Host "BACKUP_PATH=$backupPath"
 
-    # THE MUTATION WINDOW. From here through the health check, ANY exception —
+    # THE MUTATION WINDOW. From here through the health check, ANY exception --
     # a mid-swap failure inside Update-ReplaceDirs/Update-Plugins, a failed
     # F22/hash assertion, a failed migration, a failed pm2 restart, or a failed
     # healthcheck (raised as an exception below, deliberately, so it flows
     # through this SAME handler instead of a second, easily-forgotten copy of
-    # this logic) — is caught by the single handler at the bottom of this
+    # this logic) -- is caught by the single handler at the bottom of this
     # block. That handler stops pm2 (a broken deployment must not be left
     # running; Stop-Pm2App tolerates pm2 already being stopped, which is the
     # normal case for every failure point except a failed healthcheck) and
@@ -1257,11 +1896,12 @@ if ($MyInvocation.InvocationName -ne '.') {
       }
 
       Write-Info '=== Step 7/8: restart pm2 + healthcheck (backend direct first, then nginx) ==='
+      $backendStartedVia = 'skipped (RestartService=0)'
       if ($RestartService -ne '0') {
-        & $pm2Command restart $Pm2AppName --update-env
-        if ($LASTEXITCODE -ne 0) {
-          throw "PM2_RESTART_FAILED: exit=$LASTEXITCODE"
-        }
+        # 'pm2-restart', or 'scheduled-task' on a pm2-runtime host whose
+        # runtime exited after the stop (R59). Throws on anything else, into
+        # the handler below. Either way the SAME health polling follows.
+        $backendStartedVia = Restart-Pm2AppOrScheduledTask -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -ScheduledTaskName $Pm2ScheduledTaskName
       } else {
         Write-Info 'RestartService=0: skipped'
       }
@@ -1270,12 +1910,12 @@ if ($MyInvocation.InvocationName -ne '.') {
       $health = [pscustomobject]@{ Ok = $true; Attempt = 0; StatusCode = $null; Body = 'skipped (RestartService=0)' }
       if ($RestartService -ne '0') {
         # THE ORDER BELOW IS LOAD-BEARING (r29, 2026-09-11). The maintenance gate
-        # makes nginx answer 503 to everything under /api/ — this script's own
+        # makes nginx answer 503 to everything under /api/ -- this script's own
         # nginx healthcheck included. Probing nginx first meant 12 x 503 and an
         # exit -1 on an upgrade whose backend had been healthy the whole time.
         # So: prove the backend is up by talking to it DIRECTLY (no nginx in the
         # path, so the gate cannot answer for it), only then drop the gate, and
-        # only then probe through nginx — which now also proves the gate is
+        # only then probe through nginx -- which now also proves the gate is
         # really down, because a 200 through /api/ is impossible while it is up.
         $backendHealth = Wait-ForHealthOk -HealthUrl $resolvedBackendHealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec -Label 'Backend-direct healthcheck'
         if ($backendHealth.Ok) {
@@ -1288,12 +1928,23 @@ if ($MyInvocation.InvocationName -ne '.') {
       }
       Write-PluginsSummary -RootDir $resolvedRoot
 
+      # With no home resolved, this script sets none and every pm2 call
+      # inherits the process environment as it is at that moment -- and step
+      # 6 (RunMigrations=1) imports docker/app.env into it. If that file sets
+      # PM2_HOME, the step 7 pm2 calls ran under it while the step 2 stop did
+      # not (the pre-existing behaviour); the report must not claim "not set".
+      if ([string]::IsNullOrWhiteSpace($resolvedPm2Home) -and -not [string]::IsNullOrWhiteSpace($env:PM2_HOME)) {
+        $pm2HomeReport = "not set by this script; from step 6 on, pm2 calls inherited PM2_HOME=$($env:PM2_HOME) imported from $resolvedEnvFile (the step 2 stop ran without it)"
+      }
+
       Write-Info '=== Step 8/8: final report ==='
       Write-Host ''
       Write-Host '===== multitable-onprem-package-upgrade-inplace: final report ====='
       Write-Host "package:          $packageBaseName"
       Write-Host "backup path:      $backupPath"
       Write-Host "migration exit:   $migrationExit"
+      Write-Host "pm2 home:         $pm2HomeReport (source: $($pm2HomeResolution.Source))"
+      Write-Host "backend started:  $backendStartedVia"
       Write-Host "backend health:   $(if ($backendHealth.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($backendHealth.Attempt), url=$resolvedBackendHealthUrl)"
       Write-Host "health:           $(if ($health.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($health.Attempt), status=$($health.StatusCode))"
       Write-Host "maintenance flag: $maintenanceFlagPath ($(if (Test-Path -LiteralPath $maintenanceFlagPath) { 'STILL PRESENT - removed on exit; if the site keeps answering 503, delete it by hand' } else { 'removed' }))"
@@ -1320,12 +1971,22 @@ if ($MyInvocation.InvocationName -ne '.') {
       }
     } catch {
       Write-Err $_.Exception.Message
+      # Get-Pm2ScheduledTask never throws, so it cannot keep the stop or the
+      # restore block below from running. Looked up first: a pm2-runtime host
+      # (exactly one such task) also gets its daemon killed after the stop.
+      $restoreTaskName = ''
+      $restoreTaskPath = '\'
+      $restoreTask = Get-Pm2ScheduledTask -TaskName $Pm2ScheduledTaskName
+      if ($null -ne $restoreTask) {
+        $restoreTaskName = [string]$restoreTask.TaskName
+        $restoreTaskPath = Get-ScheduledTaskPathOrRoot -Task $restoreTask
+      }
       try {
-        Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
+        Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -AfterFailure -KillDaemonAfterStop:($null -ne $restoreTask)
       } catch {
         Write-Err "pm2 stop itself failed while handling the error above: $($_.Exception.Message)"
       }
-      Write-RestoreBlock -BackupPath $backupPath -RootDir $resolvedRoot -ReplacedRelativePaths $restoredRelativePaths -Pm2AppName $Pm2AppName -MaintenanceFlagPath $maintenanceFlagPath
+      Write-RestoreBlock -BackupPath $backupPath -RootDir $resolvedRoot -ReplacedRelativePaths $restoredRelativePaths -Pm2AppName $Pm2AppName -MaintenanceFlagPath $maintenanceFlagPath -Pm2Home $resolvedPm2Home -ScheduledTaskName $restoreTaskName -ScheduledTaskPath $restoreTaskPath -BackedUpRelativePaths $BackupPaths -OverlaidRelativePaths $overlaidRelativePaths
       throw
     }
   } finally {

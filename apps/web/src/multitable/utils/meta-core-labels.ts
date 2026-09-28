@@ -84,6 +84,8 @@ export type MetaCoreLabelKey =
   // --- MetaCellEditor static (T3A2) ---
   | 'cell.editing'
   | 'cell.barcodePlaceholder' | 'cell.qrcodePlaceholder' | 'cell.locationPlaceholder'
+  // --- dateTime editor (客户反馈 2026-09-24 #4c): text-box placeholder + the values-free invalid-draft error ---
+  | 'cell.dateTimePlaceholder' | 'cell.dateTimeInvalid' | 'cell.dateTimePick'
   | 'cell.yes' | 'cell.no' | 'cell.clear'
   | 'cell.noAttachments' | 'cell.clearAll'
   | 'cell.uploadFailed' | 'cell.removeFailed' | 'cell.clearFailed'
@@ -173,7 +175,17 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'export.selectAll': { en: 'Select all', zh: '全选' },
   'export.clearAll': { en: 'Clear all', zh: '清空' },
   'export.rowScope': { en: 'Rows', zh: '行' },
-  'export.allRows': { en: 'All loaded rows', zh: '全部已加载行' },
+  // A10 phase 1(客户反馈 2026-09-24 #8):这个选项走服务端路由(client.exportSheet),导出的
+  // 是这个视图按当前视图筛选/排序过滤后的全量记录,不是「已加载到本地网格的那一页」——旧文案
+  // 「全部已加载行」正好说反了(MultitableWorkbench.vue 的 openExportDialog 注释)。
+  // S2(2026-09-26 对抗评审):不能写成「按当前筛选」——工具栏的搜索框(searchText)不会跟着
+  // 发给导出路由(client.ts exportSheet 的参数只有 sheetId/viewId/fieldIds/format,没有 search;
+  // export-xlsx 路由本身也不接收 search),所以文案必须明说「不含搜索」,否则用户会以为搜索词
+  // 也筛过了。
+  'export.allRows': {
+    en: 'All rows in this view (view filter, search not applied)',
+    zh: '当前视图的全部行（按视图筛选，不含搜索）',
+  },
   'export.selectedRows': { en: 'Selected rows only', zh: '仅选中行' },
   'export.format': { en: 'Format', zh: '格式' },
   'export.formatCsv': { en: 'CSV', zh: 'CSV' },
@@ -264,6 +276,11 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'cell.barcodePlaceholder': { en: 'Scan or enter barcode', zh: '扫描或输入条码' },
   'cell.qrcodePlaceholder': { en: 'Enter text or URL for QR code', zh: '输入二维码文本或网址' },
   'cell.locationPlaceholder': { en: 'Enter address', zh: '输入地址' },
+  // dateTime (客户反馈 2026-09-24 #4c): every remaining text box shows the format by example; the invalid-draft
+  // error names the format, never the typed value (values-free).
+  'cell.dateTimePlaceholder': { en: 'e.g. 2026-09-24 09:00', zh: '如 2026-09-24 09:00' },
+  'cell.dateTimeInvalid': { en: 'Invalid date-time — use the form 2026-09-24 09:00', zh: '时间格式不正确，请按 2026-09-24 09:00 填写' },
+  'cell.dateTimePick': { en: 'Pick a date and time', zh: '选择日期时间' },
   'cell.yes': { en: 'Yes', zh: '是' },
   'cell.no': { en: 'No', zh: '否' },
   'cell.clear': { en: 'Clear', zh: '清除' },
@@ -394,6 +411,8 @@ export function fieldTypeLabel(type: string, isZh: boolean): string {
 export function filterValuePlaceholder(type: string, isZh: boolean): string {
   if (type === 'number') return isZh ? '输入数字' : 'Enter a number'
   if (type === 'date') return isZh ? '选择日期' : 'Pick a date'
+  // dateTime filter values are typed as the business wall clock the grid shows (客户反馈 2026-09-24 #4c).
+  if (type === 'dateTime') return isZh ? '如 2026-09-24 09:00' : 'e.g. 2026-09-24 09:00'
   return isZh ? '输入筛选文本' : 'Enter filter text'
 }
 

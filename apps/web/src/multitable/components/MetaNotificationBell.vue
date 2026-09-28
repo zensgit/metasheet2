@@ -62,6 +62,7 @@ import { onBeforeUnmount, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { scheduleIdle } from '../../utils/scheduleIdle'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import { useNotificationInbox } from '../composables/useNotificationInbox'
 import type { MetaRecordSubscriptionNotification } from '../types'
 import type { MultitableApiClient } from '../api/client'
@@ -81,10 +82,10 @@ const alignLeft = ref(false)
 const btnRef = ref<HTMLButtonElement | null>(null)
 const PANEL_WIDTH = 320
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatTime(value: string): string {
   if (!value) return ''
-  const ts = Date.parse(value)
-  return Number.isNaN(ts) ? value : new Date(ts).toLocaleString()
+  return formatBusinessTimestamp(value) ?? value
 }
 
 async function toggle(): Promise<void> {

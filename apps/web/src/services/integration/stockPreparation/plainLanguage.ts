@@ -654,6 +654,29 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '最常见的原因是这个项目还没有写入过备料行:先把「确认队列」里待确认的行处理完,再回「项目接入」同步一次写入,然后再导出。如果这个项目确实已经写入过行,请把这条报错给管理员(可能是服务地址没通),重复点击不会有变化。',
     enNext: 'The usual cause is that this project has never had stock-preparation rows written to it: clear the pending rows in the confirmation queue, sync once from project onboarding, then export again. If this project definitely has rows already, give an administrator this error — the export address may not be reachable — and note that pressing the button again will not change the answer.',
   }),
+  // THE EXPORT'S TENANT WALL. The export now checks, before reading a single row, that the 备料主表
+  // this deployment is bound to belongs to the caller's own factory (the same check 结转 runs). None
+  // of these three is fixed by retrying and none of them is the operator's doing: the binding is
+  // deployment configuration, so every sentence sends the person to an administrator and says plainly
+  // that nothing was read, downloaded or changed. Values-free: no table id, no factory id.
+  PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH: Object.freeze({
+    zh: '这台系统绑定的备料主表不属于您的工厂,为保护数据没有导出;文件没有下载,数据也没有变化。',
+    en: 'The stock-preparation table this system is bound to does not belong to your factory, so nothing was exported to protect the data; no file was downloaded and nothing changed.',
+    zhNext: '这不是您操作的问题,再点也一样 —— 请把这条报错代码给管理员,请他们核对备料主表的绑定(先跑一次备料预检)。',
+    enNext: 'This is not something you did, and pressing again will not change it — give an administrator this error code and ask them to check the stock-preparation table binding (run the stock-prep preflight first).',
+  }),
+  PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN: Object.freeze({
+    zh: '系统没法确认这台系统绑定的备料主表属于哪家工厂,为保护数据没有导出;文件没有下载,数据也没有变化。',
+    en: 'The system could not establish which factory the bound stock-preparation table belongs to, so nothing was exported to protect the data; no file was downloaded and nothing changed.',
+    zhNext: '再点也一样 —— 请把这条报错代码给管理员,请他们重新核对并登记备料主表的归属(先跑一次备料预检)。',
+    enNext: 'Pressing again will not change it — give an administrator this error code and ask them to re-check and register who owns the stock-preparation table (run the stock-prep preflight first).',
+  }),
+  PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE: Object.freeze({
+    zh: '这台服务器缺少核对备料主表归属的功能,为保护数据没有导出;文件没有下载,数据也没有变化。',
+    en: 'This server lacks the check that confirms who owns the stock-preparation table, so nothing was exported to protect the data; no file was downloaded and nothing changed.',
+    zhNext: '这要平台管理员升级服务端,不是您这边能解决的;请把这条报错代码给管理员。',
+    enNext: 'A platform administrator has to upgrade the server — this is not something you can fix; give an administrator this error code.',
+  }),
   // 通知下一步. Each one says what happened to the CHAIN, because that is the only thing at stake —
   // none of these four touched a single prep row.
   STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER: Object.freeze({
@@ -738,6 +761,24 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
 
 export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+}
+
+/**
+ * The export's TENANT-WALL refusals (server: PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES plus the
+ * missing-port 501). A surface that otherwise answers every export failure with one generic
+ * 「稍后再点一次」 line — 今天要处理's per-card export — must show these specific sentences instead,
+ * because retrying is the one instruction that is wrong for all three.
+ */
+export const STOCK_PREP_EXPORT_TENANT_WALL_CODES: readonly string[] = Object.freeze([
+  'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+  'PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN',
+  'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE',
+])
+
+/** The plain-language entry for an export tenant-wall refusal, or `null` for any other code. */
+export function stockPrepExportTenantWallPlain(code: unknown): StockPrepPlainEntry | null {
+  if (typeof code !== 'string' || !STOCK_PREP_EXPORT_TENANT_WALL_CODES.includes(code)) return null
+  return lookup(STOCK_PREP_ERROR_PLAIN, code)
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,11 +1539,46 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
     zhNext: '源数据里有拦路的问题。什么都没有改动,可以稍后再试一次。',
     enNext: 'Something in the source data is blocking it. Nothing was changed; you can try again later.',
   }),
+  /**
+   * 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) — THE FOUR ROWS BELOW, split out of what
+   * used to be a single always-the-same sentence. `classifyPlanReadFailureReason` in projectSync.ts
+   * is what decides WHICH of these five keys (this one plus the four below it) a failed dry run gets;
+   * this row itself stays the TRANSIENT bucket (`SOURCE_UNAVAILABLE`, a network failure, any 5xx) —
+   * the one case where 「稍后再试一次」 is actually true.
+   */
   PLAN_READ_FAILED: Object.freeze({
     zh: '没能连上取数,试算没有跑起来',
     en: 'Could not reach the source, so nothing was planned',
     zhNext: '稍后再试一次。什么都没有改动。',
     enNext: 'Try again shortly. Nothing was changed.',
+  }),
+  PLAN_READ_FAILED_CONNECTION: Object.freeze({
+    zh: '数据来源的连接配置失效(被删除、无权使用或未绑定属主)',
+    en: 'The data source’s connection is unusable (deleted, not authorized to use it, or has no owner bound)',
+    zhNext: '重试没用,请联系管理员在「数据来源与体检」处理。',
+    enNext: 'Retrying will not help — ask an administrator to fix it under "Data sources & health check".',
+  }),
+  PLAN_READ_FAILED_FOREIGN_PROJECT: Object.freeze({
+    zh: '这张备料表里已有其他项目的有效数据,按规定一张表只放一个项目',
+    en: 'This stock-preparation sheet already holds another project’s active data — by rule, one sheet holds exactly one project',
+    zhNext: '请联系管理员清理旧项目的数据,或为新项目准备新的备料表。',
+    enNext: 'Ask an administrator to clear the old project’s data, or prepare a new stock-preparation sheet for the new project.',
+  }),
+  PLAN_READ_UNAUTHENTICATED: Object.freeze({
+    zh: '登录已过期，请重新登录后再拉取',
+    en: 'Your session has expired. Sign in again, then retry.',
+  }),
+  PLAN_READ_NOT_PERMITTED: Object.freeze({
+    zh: '当前账号没有从 PLM 拉取这个项目数据的权限',
+    en: 'This account is not allowed to pull this project’s data from PLM',
+    zhNext: '请联系管理员补充「备料操作」权限,或换有权限的账号再试;重试本身不会自动获得权限。',
+    enNext: 'Ask an administrator to grant the stock-prep operate permission, or try again with an account that already has it — retrying alone will not grant it.',
+  }),
+  PLAN_READ_FAILED_UNKNOWN: Object.freeze({
+    zh: '没能连上取数,原因暂时无法判断',
+    en: 'Could not reach the source, and the cause could not be identified',
+    zhNext: '请把下面的技术详情截图发给管理员;什么都没有改动。',
+    enNext: 'Please screenshot the technical details below and send them to an administrator; nothing was changed.',
   }),
   PLAN_MALFORMED_RESPONSE: Object.freeze({
     zh: '服务器回了一个看不懂的答复',

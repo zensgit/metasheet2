@@ -66,6 +66,26 @@ function createMockPool(queryHandler: QueryHandler) {
     if (sql.includes('source_base_id')) {
       return { rows: [], rowCount: 0 }
     }
+    // #6089 B2: GET /context now probes the managed-sheet guard (resolveSheetDeleteRefusal) for any
+    // actor who already holds sheet-lifecycle authority, so it issues BOTH of this guard's reads on
+    // every such call, not only on DELETE — the "derives multitable capabilities from req.user role…"
+    // test (admin, no registry/system_kind branch of its own) hit the FIRST one and got an
+    // unhandled-SQL 500 before this fix; fixing only that query left the SECOND (`isSystemManagedSheet`)
+    // unhandled too, which the S1 fail-closed wrapper in the route swallows into a wrong
+    // `canDeleteSheet: false` instead of a 500 — same root cause, worth naming explicitly so a future
+    // reader does not have to rediscover it. Answering "not managed" for BOTH reads HERE, ahead of
+    // every per-test `queryHandler`, is a universal default for THIS file: no /context-reaching test
+    // here wants a MANAGED sheet (the one existing test that special-cased these two queries, the
+    // DELETE soft-delete test below, also answered "not managed" for both — this default is
+    // byte-identical to it, so that test's own now-unreachable branches are dead but not wrong). A
+    // future test that DOES want a managed sheet for /context needs its own mock pool, the same way
+    // tests/unit/multitable-manage-schema-permission-matrix.test.ts's MANAGED_SHEET_ID does.
+    if (sql.includes('FROM plugin_multitable_object_registry')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
+      return { rows: [{ system_kind: null, description: null }] }
+    }
     return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
@@ -188,12 +208,27 @@ describe('Multitable context API', () => {
       },
     })
 
+    vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
     const response = await request(app)
       .get('/api/multitable/context')
       .query({ sheetId: 'sheet_ops' })
       .expect(200)
 
     expect(response.body.ok).toBe(true)
+    // 客户反馈 2026-09-24 #4c: /context carries the instance business timezone the web shows and parses
+    // date-times in — Asia/Shanghai when MULTITABLE_BUSINESS_TIMEZONE is unset, the env value (read per
+    // request) when it names a valid zone, the default again when it does not.
+    expect(response.body.data.businessTimezone).toBe('Asia/Shanghai')
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      const tokyo = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(tokyo.body.data.businessTimezone).toBe('Asia/Tokyo')
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      const junk = await request(app).get('/api/multitable/context').query({ sheetId: 'sheet_ops' }).expect(200)
+      expect(junk.body.data.businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
     expect(response.body.data.base).toMatchObject({ id: 'base_ops', name: 'Ops Base' })
     expect(response.body.data.sheet).toMatchObject({ id: 'sheet_ops', baseId: 'base_ops', name: 'Orders' })
     expect(response.body.data.sheets).toHaveLength(2)
@@ -216,6 +251,9 @@ describe('Multitable context API', () => {
       personalViewsEnabled: false,
       // whole-sheet delete authority (mirrors DELETE /sheets/:sheetId): a reader has none
       canDeleteSheet: false,
+      // copy-sheet S1 (ADR #6094 §3): hasFullTableReadAccess ∧ resolveBaseWritable, fail-closed like
+      // canDeleteSheet — this mock pool answers no base-write lookup, so the probe throws and the entry hides.
+      canCopySheet: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -417,6 +455,12 @@ describe('Multitable context API', () => {
       personalViewsEnabled: false,
       // admin role = global schema authority => may delete the selected sheet
       canDeleteSheet: true,
+      // copy-sheet S1, CS-3 amended 2026-09-28: the target gate is resolveCopyTargetWritable = platform admin ROLE ∨
+      // resolveBaseWritable. This actor is admin by req.user.role, is NOT the base owner (owner_1) and this mock
+      // answers no base-write code lookup — so the role arm is the only thing that can admit him; it needs just the
+      // base existence read (answered above) and the source gate (one field, no scope, admin skips the row-level
+      // switch) ⇒ true. Before the amendment this was false for the same fixture (owner ∨ code only).
+      canCopySheet: true,
     })
     // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
     // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.
@@ -1127,7 +1171,10 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [] }
         }
-        if (sql.includes('SELECT system_kind, description FROM meta_sheets WHERE id = $1')) {
+        // Column-tolerant form (#6089 B1 fix): `isSystemManagedSheet` now reads `system_kind` via
+        // `to_jsonb(meta_sheets) ->> 'system_kind'`, the same tolerant shape every other reader in
+        // univer-meta.ts already uses, so a database without the column does not 500 the route.
+        if (sql.includes("to_jsonb(meta_sheets) ->> 'system_kind'") && sql.includes('FROM meta_sheets WHERE id = $1')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [{ system_kind: null, description: null }] }
         }
@@ -1236,6 +1283,59 @@ describe('Multitable context API', () => {
     expect(res.status).toBe(403)
     expect(res.body.error.code).toBe('FORBIDDEN')
     expect(JSON.stringify(res.body)).not.toContain('sheet_missing')
+  })
+
+  // 客户反馈 2026-09-24 #4c follow-up (PR #6083 deferred list): a record opened on its own — the deep link /
+  // linked-record peek that calls GET /records/:id, possibly before (or without) /context — must carry the SAME
+  // instance business timezone, so its date-times show the grid's wall clock. Same env contract as /context.
+  test('record context (GET /records/:id) carries the instance business timezone', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_records WHERE id = $1')) {
+          return {
+            rows: [{ id: 'rec_tz', sheet_id: 'sheet_ops', version: 2, data: { fld_when: '2026-09-24T01:00:00.000Z' } }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          return params?.[0] === 'sheet_ops'
+            ? { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+            : { rows: [] }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          return { rows: params?.[0] === 'sheet_ops' ? [{ id: 'sheet_ops' }] : [] }
+        }
+        if (sql.includes('FROM meta_fields WHERE sheet_id = $1')) {
+          return {
+            rows: [
+              { id: 'fld_when', name: 'When', type: 'dateTime', property: {}, order: 1 },
+            ],
+          }
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        return { rows: [], rowCount: 0 }
+      },
+    })
+
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+      const fallback = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(fallback.body.ok).toBe(true)
+      expect(fallback.body.data.record).toMatchObject({ id: 'rec_tz', data: { fld_when: '2026-09-24T01:00:00.000Z' } })
+      expect(fallback.body.data.businessTimezone).toBe('Asia/Shanghai')
+
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      const tokyo = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(tokyo.body.data.businessTimezone).toBe('Asia/Tokyo')
+      // Storage untouched: the record still carries the raw UTC instant, only the zone id is added.
+      expect(tokyo.body.data.record.data.fld_when).toBe('2026-09-24T01:00:00.000Z')
+
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      const junk = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(junk.body.data.businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   test('rejects context access without multitable read permission', async () => {

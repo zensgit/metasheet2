@@ -221,13 +221,17 @@ describe('App guest bootstrap', () => {
     expect(mocks.clearStoredAuthState).toHaveBeenCalledTimes(1)
     expect(fetchLog.filter((call) => call.url.includes('/api/auth/logout')).map((call) => call.authToken))
       .toEqual([null])
-    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added exactly one —
-    // the DB-backed approval-administrator capability read, issued once per page load and only for
+    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added one — the
+    // DB-backed approval-administrator capability read, issued once per page load and only for
     // a principal the token gate already admits (`user_roles: ["admin"]` here), because the
     // 批量转交 nav entry must not be shown off a predicate the approval list scope does not use.
+    // B-2 (todo-center-design-lock v2.14 §4) added a second: `ApprovalTodoBadge` now reads the
+    // todo-center's own aggregate (`GET /api/todo/count`, unlike the legacy `getPendingCount`
+    // this replaced, `todo/api.ts` has no dev/test mock short-circuit, so it fires for real here)
+    // on mount, before the capability read — same nav span, earlier in template order.
     // A stray request added later still reddens this line.
     expect(fetchLog.map((call) => new URL(call.url).pathname))
-      .toEqual(['/api/approvals/admin/capability', '/api/auth/logout'])
+      .toEqual(['/api/todo/count', '/api/approvals/admin/capability', '/api/auth/logout'])
     for (const key of [
       'auth_token',
       'jwt',

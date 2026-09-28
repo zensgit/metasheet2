@@ -183,6 +183,218 @@ export const OLD_WIDE_HTTP_PREDICATE_SQL = schema => `
               AND btrim(m.val) ILIKE 'http://%'
          )`
 
+// ── F7 (2026-09-27): Q7's internal-target host set ──────────────────────────
+// 02-trg04's three Q7 predicates used to carry a PREFIX literal narrower than
+// the runtime guard (packages/core-backend/src/multitable/webhook-ssrf-guard.ts).
+// They now share ONE \gset'd pattern, transcribed class by class from the
+// guard. The case table below is that transcription as data; the harness runs
+// the real file and then matches every case in the SAME psql session, so the
+// pattern under test is the file's own, not a copy. Every non-'floor' `want`
+// is the guard's own verdict on the URL (internal literal / internal name);
+// 'floor' rows are ones the guard refuses but the pack deliberately does not
+// count (spellings the URL parser normalises) — misses, never extras.
+
+/** F7 evidence: the pre-repair Q7 literal (prefix test, narrow host list). */
+export const OLD_Q7_HOST_RE =
+  String.raw`^https?://(127[.]|10[.]|192[.]168[.]|169[.]254[.]|0[.]0[.]0[.]0|localhost|\[::1\])`
+
+export const OLD_Q7_WEBHOOK_SQL = schema => `
+  SET search_path = "${schema}";
+  SELECT count(*)::int FROM multitable_webhooks WHERE btrim(url) ~* '${OLD_Q7_HOST_RE}'`
+
+/** [url, counted by Q7?, 'floor' when the guard refuses it but Q7 does not count it] */
+export const INTERNAL_TARGET_CASES = [
+  // IPv4 literal — guard :32-37 (0/8, 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16)
+  ['https://0.0.0.0/', true],
+  ['https://0.1.2.3/', true],
+  ['http://127.0.0.1:9999/hook', true],
+  ['https://127.255.255.255/', true],
+  ['https://10.0.0.0/', true],
+  ['https://10.255.255.255/x', true],
+  ['https://172.16.0.0/', true],
+  ['https://172.24.8.1/', true],
+  ['https://172.31.255.255/', true],
+  ['https://192.168.0.1/', true],
+  ['https://169.254.169.254/latest/meta-data', true],
+  ['https://10.0.0.1./', true],
+  ['https://172.15.255.255/', false],
+  ['https://172.32.0.0/', false],
+  ['https://172.3.0.1/', false],
+  ['https://172.160.0.1/', false],
+  ['https://172.016.0.1/', false], // octal: the parser reads 172.14.0.1
+  ['https://11.0.0.1/', false],
+  ['https://126.255.255.255/', false],
+  ['https://128.0.0.1/', false],
+  ['https://192.169.0.1/', false],
+  ['https://169.253.0.1/', false],
+  ['https://1.0.0.0/', false],
+  ['https://10.0.0.256/', false], // not a URL at all
+  ['https://10.0.0.1../', false], // a DNS name, not an IPv4 literal
+  // DNS names that only START like an internal literal (the old prefix test counted them)
+  ['https://10.fake.invalid/', false],
+  ['https://127.0.0.1.fake.invalid/', false],
+  ['https://192.168.fake.invalid/', false],
+  ['https://localhost.fake.invalid/', false],
+  ['https://localhostfake.invalid/', false],
+  // name — guard :78-83 (localhost, *.localhost, *.internal, *.local; one trailing dot)
+  ['https://localhost/', true],
+  ['https://LOCALHOST:8080/', true],
+  ['https://localhost./', true],
+  ['https://api.localhost/', true],
+  ['https://fake-svc.internal/x', true],
+  ['https://fake-svc.ns.INTERNAL:443/', true],
+  ['https://printer.local', true],
+  ['https://fake-svc.local?x=1', true],
+  ['https://localhost../', false],
+  ['https://internal/', false],
+  ['https://local/', false],
+  ['https://fake-local.invalid/', false],
+  ['https://fake-svc.internal.fake.invalid/', false],
+  ['https://fake-svc.locals/', false],
+  // IPv6 literal — guard :43-69 (::1, ::, ::ffff:<internal v4>, fc00::/7, fe80::/10)
+  ['https://[::1]/', true],
+  ['https://[::1]:8443/x', true],
+  ['https://[0:0:0:0:0:0:0:1]/', true],
+  ['https://[::]/', true],
+  ['https://[::ffff:127.0.0.1]/', true],
+  ['https://[::ffff:10.0.0.1]/', true],
+  ['https://[::FFFF:AC10:0]/', true], // 172.16.0.0
+  ['https://[::ffff:ac1f:ffff]/', true], // 172.31.255.255
+  ['https://[::ffff:c0a8:1]/', true],
+  ['https://[::ffff:a9fe:a9fe]/', true],
+  ['https://[0:0:0:0:0:ffff:7f00:1]/', true],
+  ['https://[::ffff:0:0]/', true], // 0.0.0.0
+  ['https://[fc00::1]/', true],
+  ['https://[fd12:3456:789a:1::1]:8443/', true],
+  ['https://[FDFF:FFFF::]/', true],
+  ['https://[fe80::1]/', true],
+  ['https://[febf:ffff::1]/', true],
+  ['https://[::2]/', false],
+  ['https://[::ffff:ac0f:ffff]/', false], // 172.15.255.255
+  ['https://[::ffff:ac20:0]/', false], // 172.32.0.0
+  ['https://[::ffff:1.2.3.4]/', false],
+  ['https://[::7f00:1]/', false], // IPv4-compatible, not mapped: the guard lets it through
+  ['https://[fbff::1]/', false],
+  ['https://[fe00::1]/', false],
+  ['https://[fe7f::1]/', false],
+  ['https://[fec0::1]/', false],
+  ['https://[2001:db8::1]/', false],
+  ['https://[fc0::1]/', false], // first piece 0x0fc0
+  ['https://[fd00:::1]/', false], // not an IPv6
+  ['https://[fd00:1:2:3:4:5:6:7:8]/', false], // nine pieces
+  // 2026-09-27 (#6104 gap): a leading-zero octet inside an embedded IPv4 tail
+  // makes the WHATWG IPv6 parser reject the whole literal outright (confirmed:
+  // `new URL('https://[fc00::01.2.3.4]/')` throws — unlike a leading zero in a
+  // PLAIN IPv4 host, which the top-level parser tolerates; see the `floor`
+  // 127.000.000.001 case below). An address the parser rejects is out of
+  // scope like the nine-piece case above, not a floor miss.
+  ['https://[fc00::01.2.3.4]/', false],
+  // Same family: one hex group more than the compressed-form bound allows,
+  // with (mutation target {0,7}->{0,8}) / without (mutation target
+  // {0,5}->{0,6}) a dotted tail — both invalid (isIP() rejects both), and
+  // both happen to start with the ULA prefix so a relaxed bound would flip
+  // them to counted.
+  ['https://[fd00:1:2:3:4:5:6::7]/', false], // 8 explicit groups + `::`
+  ['https://[fd00:1:2:3:4:5::6.7.8.9]/', false], // 6 groups + `::` + dotted tail
+  // 2026-09-27 (#6104 independent-verifier mutation gap): ::ffff: hex-form
+  // boundaries one step past each of c0a8 / a9fe / 7f / 0a — an exhaustive
+  // mutant scan of the mapped-hex alternative found these undetected because
+  // no case sat exactly on the wrong side of each literal. isInternalIpv4
+  // on the unwrapped embedded address is false for all four (192.169.0.0,
+  // 11.0.0.0, 126.255.0.1, 169.255.0.1 — none is a real private/link-local
+  // range), so none may be counted.
+  ['https://[::ffff:c0a9:0]/', false], // 192.169.0.0 (one past 192.168/16)
+  ['https://[::ffff:b00:1]/', false], // 11.0.0.1 (one past 10/8 in the 0a-prefixed hex alt)
+  ['https://[::ffff:7eff:1]/', false], // 126.255.0.1 (one past 7f/127 in the 7f-prefixed hex alt)
+  ['https://[::ffff:a9ff:1]/', false], // 169.255.0.1 (one past a9fe/169.254 exactly)
+  // A real IPv6 with an extra leading group before the mapped prefix is NOT
+  // an IPv4-mapped address at all (RFC 4291's ::ffff:0:0/96 prefix requires
+  // exactly 80 zero bits first) — isInternalIpv6('1::ffff:7f00:1') is false.
+  // Only `[0:]*ffff:` (zeros/colons only) may precede the mapped form.
+  ['https://[1::ffff:7f00:1]/', false],
+  // URL shapes around the host: userinfo (last @ wins), case, port, separators
+  ['https://fake-user:fake-pass@10.0.0.1/', true],
+  ['https://a@b@172.16.0.1/', true],
+  // A backslash inside what looks like userinfo ends the authority section for
+  // a special scheme (WHATWG URL state machine, same as `/`) BEFORE the `@` is
+  // reached, so the real parser's hostname is "x" (10.0.0.1 lands in the path,
+  // confirmed via `new URL(...).hostname`) — not an internal target at all.
+  ['https://x\\@10.0.0.1/', false],
+  ['https://10.0.0.1@fake.invalid/', false],
+  ['https://127.0.0.1:80@fake.invalid/', false],
+  ['HTTPS://192.168.0.1/', true],
+  ['HtTp://LocalHost/', true],
+  ['https://10.0.0.1:/x', true],
+  ['https://10.0.0.1:0065535/', true],
+  ['https://10.0.0.1:65536/', false],
+  ['https://10.0.0.1:80:90/', false],
+  ['https:10.0.0.1/', true],
+  ['https:\\\\10.0.0.1\\x', true],
+  ['https://10.0.0.1?q=1', true],
+  ['https://10.0.0.1#frag', true],
+  ['https://10.0.0.1 /x', false],
+  ['ftp://10.0.0.1/', false],
+  ['ws://localhost/', false],
+  // floor — the guard refuses these, Q7 deliberately does not count them
+  ['https://127.1/', false, 'floor'],
+  ['https://2130706433/', false, 'floor'],
+  ['https://0x7f.0.0.1/', false, 'floor'],
+  ['https://127.000.000.001/', false, 'floor'],
+  ['https://[::0.0.0.1]/', false, 'floor'],
+  // 2026-09-27 (#6104 gap, "去 xn-- 排除" mutation): isInternalHostname is a
+  // plain suffix check with no punycode decoding, so it flags any
+  // "xn--...".local name as internal once it reaches that check. The label
+  // here must be VALID punycode ('bücher' → 'xn--bcher-kva'): `new URL()`
+  // decodes/validates the label first, and an invalid one (e.g. plain
+  // 'xn--a') throws there — confirmed with `new URL('https://xn--a.local/')`
+  // on Node 20 — so checkWebhookTargetUrl would return 'URL is malformed'
+  // before isInternalHostname ever runs, landing it in the parser-rejection
+  // class instead (same as `[fd00:::1]` / `[fc00::01.2.3.4]` above). With a
+  // valid label the URL parses, isInternalHostname sees the `.local` suffix
+  // and the guard returns 'target host is internal' — confirmed the same
+  // way. Q7's negative lookahead deliberately excludes every `xn--`-bearing
+  // name (header §"STILL A FLOOR": "xn-- labels — are not counted"), so
+  // *this* case is a genuine floor miss, not a parser-rejection case.
+  ['https://xn--bcher-kva.local/', false, 'floor'],
+]
+
+/**
+ * F7: run 02-trg04 exactly as the runbook says, then — same psql session, so
+ * the file's own `inv_internal_target_re` is what gets tested — match every
+ * case against it and against the old literal.
+ */
+export function checkInternalTargetCases(schema) {
+  const values = INTERNAL_TARGET_CASES
+    .map(([url], i) => `(${i}, '${url.replace(/'/g, "''")}')`)
+    .join(',\n')
+  const caseSql = `SELECT c.i, c.u ~* :'inv_internal_target_re' AS hit, c.u ~* '${OLD_Q7_HOST_RE}' AS old_hit
+  FROM (VALUES ${values}) AS c(i, u)
+ ORDER BY c.i;
+`
+  const o = run(['-A', '-v', `schema=${schema}`,
+    '-f', path.join(PACK, '02-trg04-http-targets.sql'), '-f', '-'], { input: caseSql })
+  assert.equal(o.status, 0, `02 + case table exited ${o.status}: ${o.stderr}`)
+  const rows = block(o.stdout, 'i|hit|old_hit')[0].rows.map(r => r.split('|'))
+  assert.equal(rows.length, INTERNAL_TARGET_CASES.length)
+  const wrong = []
+  let oldMissed = 0
+  let oldExtra = 0
+  for (const [i, hit, oldHit] of rows) {
+    const [url, want] = INTERNAL_TARGET_CASES[Number(i)]
+    if ((hit === 't') !== want) wrong.push(`${url}: got ${hit}, want ${want ? 't' : 'f'}`)
+    if (want && oldHit !== 't') oldMissed++
+    if (!want && oldHit === 't') oldExtra++
+  }
+  assert.deepEqual(wrong, [], 'Q7 host set must match every guard-derived case')
+  return {
+    cases: rows.length,
+    counted: INTERNAL_TARGET_CASES.filter(c => c[1]).length,
+    floor: INTERNAL_TARGET_CASES.filter(c => c[2] === 'floor').length,
+    oldMissed,
+    oldExtra,
+  }
+}
+
 export function checkModern(schema) {
   const out = {}
 
@@ -268,8 +480,17 @@ export function checkModern(schema) {
   const q7 = block(o2.stdout, 'source|internal_target_rows|internal_target_rows_upper_bound')[0]
     .rows[0].split('|')
   assert.equal(q7[0], 'automation_rules')
-  assert.equal(Number(q7[1]), 1, 'Q7 narrow: only r-internal sits on a read path')
-  assert.equal(Number(q7[2]), 1)
+  assert.equal(Number(q7[1]), 2, 'Q7 narrow: r-internal + the branch-nested *.internal r-internal-name')
+  assert.equal(Number(q7[2]), 2)
+  // F7: the webhook half, on the same host set. 172.31.255.255 and a mapped
+  // 172.16.0.1 behind userinfo + port are in; 172.32.0.0 and a DNS name that
+  // merely starts with `10.` are out. The old prefix literal got both wrong.
+  const q7wh = block(o2.stdout, 'source|internal_target_rows')[0].rows[0].split('|')
+  assert.equal(q7wh[0], 'multitable_webhooks')
+  assert.equal(Number(q7wh[1]), 3, 'Q7 webhooks: w-internal + w-internal-172 + w-internal-v6')
+  const oldQ7Webhooks = Number(scalar(OLD_Q7_WEBHOOK_SQL(schema)))
+  assert.equal(oldQ7Webhooks, 2, 'F7 evidence: the old literal counted w-internal + w-prefix-decoy')
+  out.f7 = { q7Narrow: Number(q7[1]), q7Webhooks: Number(q7wh[1]), oldQ7Webhooks }
 
   const wh = block(o2.stdout, 'active|http_webhooks')[0].rows.map(r => r.split('|'))
   const whTotal = wh.reduce((a, r) => a + Number(r[1]), 0)
@@ -340,6 +561,10 @@ export function checkLegacy(schema) {
   out.f6Legacy = { legacyCol, legacyColBound }
   const whIds = block(o2.stdout, 'id|active|created_by')[0].rows.map(r => r.split('|')[0])
   assert.deepEqual(whIds, ['w-b-http'], 'the webhook half still runs')
+  // F7: the host pattern is \gset OUTSIDE the `\if :has_rules_actions` block,
+  // so the webhook half of Q7 still has it on a schema without `actions`.
+  const q7wh = block(o2.stdout, 'source|internal_target_rows')[0].rows[0].split('|')
+  assert.deepEqual(q7wh, ['multitable_webhooks', '1'], 'legacy Q7 webhooks: w-b-internal')
 
   const o3 = runPackFile('03-adm08-wildcard-permissions.sql', schema)
   assert.equal(o3.status, 0, `03 legacy exited ${o3.status}: ${o3.stderr}`)
@@ -423,6 +648,7 @@ export async function verifyAll() {
     const report = {
       modern: checkModern(modern),
       legacy: checkLegacy(legacy),
+      internalTargets: checkInternalTargetCases(modern),
       lockTimeout: await checkLockTimeoutIsIncomplete(modern),
       permissionDenied: checkPermissionDeniedIsIncomplete(modern),
     }

@@ -269,6 +269,10 @@ on:
       # was re-verified green in isolation and batched before wiring; see
       # run-required-web-tests.sh for the matching REQUIRED-gate half and its token-safety
       # note on the two specs whose token had to be the full filename.
+      - 'apps/web/tests/automation-condition-legacy-person-picker.spec.ts'
+      - 'apps/web/tests/automation-condition-typing-editor.spec.ts'
+      - 'apps/web/tests/automation-condition-value-input.spec.ts'
+      - 'apps/web/tests/automation-condition-values.spec.ts'
       - 'apps/web/tests/automation-log-redact.spec.ts'
       - 'apps/web/tests/automation-log-support-packet.spec.ts'
       - 'apps/web/tests/automation-rule-concurrent-merge.spec.ts'
@@ -301,10 +305,13 @@ on:
       - 'apps/web/tests/multitable-ai-shortcut-composable.spec.ts'
       - 'apps/web/tests/multitable-ai-shortcut-drawer.spec.ts'
       - 'apps/web/tests/multitable-ai-shortcut-field-manager.spec.ts'
+      - 'apps/web/tests/multitable-ai-availability-gate.spec.ts'
+      - 'apps/web/tests/multitable-workbench-ai-availability-wiring.spec.ts'
       - 'apps/web/tests/multitable-alt-view-comment-chip-i18n.spec.ts'
       - 'apps/web/tests/multitable-api-token-manager.spec.ts'
       - 'apps/web/tests/multitable-attachment-editor.spec.ts'
       - 'apps/web/tests/multitable-attachment-list.spec.ts'
+      - 'apps/web/tests/multitable-automation-trigger-time.spec.ts'
       - 'apps/web/tests/multitable-barcode-field.spec.ts'
       - 'apps/web/tests/multitable-base-local-state.spec.ts'
       - 'apps/web/tests/multitable-build-chart-option.spec.ts'
@@ -331,7 +338,10 @@ on:
       - 'apps/web/tests/multitable-crossbase-link-normalizer.spec.ts'
       - 'apps/web/tests/multitable-crossbase-link-picker.spec.ts'
       - 'apps/web/tests/multitable-dashboard-view.spec.ts'
+      - 'apps/web/tests/multitable-datetime-business-tz.spec.ts'
+      - 'apps/web/tests/multitable-datetime-deferred-surfaces.spec.ts'
       - 'apps/web/tests/multitable-datetime-field.spec.ts'
+      - 'apps/web/tests/multitable-datetime-grid-lockout.spec.ts'
       - 'apps/web/tests/multitable-duration-field.spec.ts'
       - 'apps/web/tests/multitable-embed-host.spec.ts'
       - 'apps/web/tests/multitable-embed-route.spec.ts'
@@ -450,12 +460,16 @@ on:
       - 'apps/web/tests/multitable-template-save-as.spec.ts'
       - 'apps/web/tests/multitable-timeline-view.spec.ts'
       - 'apps/web/tests/multitable-view-display-prefs-util.spec.ts'
+      - 'apps/web/tests/multitable-view-switch-sort-filter.spec.ts'
+      - 'apps/web/tests/multitable-workbench-create-view-sort-filter.spec.ts'
+      - 'apps/web/tests/multitable-workbench-dashboard-exit.spec.ts'
       - 'apps/web/tests/multitable-workbench-i18n.spec.ts'
       - 'apps/web/tests/multitable-workbench.spec.ts'
       - 'apps/web/tests/multitable-yjs-cell-binding.spec.ts'
       - 'apps/web/tests/multitable/personal-view-client.test.ts'
       - 'apps/web/tests/multitable/xlsx-mapping.test.ts'
       - 'apps/web/tests/public-multitable-form.spec.ts'
+      - 'apps/web/tests/StockPreparationManagedTableRelabelPanel.spec.ts'
       - 'apps/web/tests/view-manager-multitable-contract.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
@@ -706,6 +720,10 @@ on:
       # was re-verified green in isolation and batched before wiring; see
       # run-required-web-tests.sh for the matching REQUIRED-gate half and its token-safety
       # note on the two specs whose token had to be the full filename.
+      - 'apps/web/tests/automation-condition-legacy-person-picker.spec.ts'
+      - 'apps/web/tests/automation-condition-typing-editor.spec.ts'
+      - 'apps/web/tests/automation-condition-value-input.spec.ts'
+      - 'apps/web/tests/automation-condition-values.spec.ts'
       - 'apps/web/tests/automation-log-redact.spec.ts'
       - 'apps/web/tests/automation-log-support-packet.spec.ts'
       - 'apps/web/tests/automation-rule-concurrent-merge.spec.ts'
@@ -738,10 +756,13 @@ on:
       - 'apps/web/tests/multitable-ai-shortcut-composable.spec.ts'
       - 'apps/web/tests/multitable-ai-shortcut-drawer.spec.ts'
       - 'apps/web/tests/multitable-ai-shortcut-field-manager.spec.ts'
+      - 'apps/web/tests/multitable-ai-availability-gate.spec.ts'
+      - 'apps/web/tests/multitable-workbench-ai-availability-wiring.spec.ts'
       - 'apps/web/tests/multitable-alt-view-comment-chip-i18n.spec.ts'
       - 'apps/web/tests/multitable-api-token-manager.spec.ts'
       - 'apps/web/tests/multitable-attachment-editor.spec.ts'
       - 'apps/web/tests/multitable-attachment-list.spec.ts'
+      - 'apps/web/tests/multitable-automation-trigger-time.spec.ts'
       - 'apps/web/tests/multitable-barcode-field.spec.ts'
       - 'apps/web/tests/multitable-base-local-state.spec.ts'
       - 'apps/web/tests/multitable-build-chart-option.spec.ts'
@@ -768,7 +789,10 @@ on:
       - 'apps/web/tests/multitable-crossbase-link-normalizer.spec.ts'
       - 'apps/web/tests/multitable-crossbase-link-picker.spec.ts'
       - 'apps/web/tests/multitable-dashboard-view.spec.ts'
+      - 'apps/web/tests/multitable-datetime-business-tz.spec.ts'
+      - 'apps/web/tests/multitable-datetime-deferred-surfaces.spec.ts'
       - 'apps/web/tests/multitable-datetime-field.spec.ts'
+      - 'apps/web/tests/multitable-datetime-grid-lockout.spec.ts'
       - 'apps/web/tests/multitable-duration-field.spec.ts'
       - 'apps/web/tests/multitable-embed-host.spec.ts'
       - 'apps/web/tests/multitable-embed-route.spec.ts'
@@ -887,12 +911,16 @@ on:
       - 'apps/web/tests/multitable-template-save-as.spec.ts'
       - 'apps/web/tests/multitable-timeline-view.spec.ts'
       - 'apps/web/tests/multitable-view-display-prefs-util.spec.ts'
+      - 'apps/web/tests/multitable-view-switch-sort-filter.spec.ts'
+      - 'apps/web/tests/multitable-workbench-create-view-sort-filter.spec.ts'
+      - 'apps/web/tests/multitable-workbench-dashboard-exit.spec.ts'
       - 'apps/web/tests/multitable-workbench-i18n.spec.ts'
       - 'apps/web/tests/multitable-workbench.spec.ts'
       - 'apps/web/tests/multitable-yjs-cell-binding.spec.ts'
       - 'apps/web/tests/multitable/personal-view-client.test.ts'
       - 'apps/web/tests/multitable/xlsx-mapping.test.ts'
       - 'apps/web/tests/public-multitable-form.spec.ts'
+      - 'apps/web/tests/StockPreparationManagedTableRelabelPanel.spec.ts'
       - 'apps/web/tests/view-manager-multitable-contract.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
@@ -952,6 +980,47 @@ jobs:
       # merge-neutral and fails the job identically (steps are sequential, no continue-on-error).
       - name: Run field-config panel spec
         run: pnpm --filter @metasheet/web exec vitest run multitable-field-config-panel --reporter=dot
+
+      # #6075 (customer feedback 2026-09-24 #5 / A4): switching views no longer leaks the previous
+      # view's sort/filter, and clearing the last rule still saves. Standalone step, same
+      # merge-neutral reasoning as the field-config step above.
+      - name: Run view switch sort/filter specs
+        run: pnpm --filter @metasheet/web exec vitest run multitable-view-switch-sort-filter multitable-workbench-create-view-sort-filter --reporter=dot
+
+      # #6080 (A2): let users exit the dashboard back to the table. Standalone step, same
+      # merge-neutral reasoning as the field-config step above.
+      - name: Run dashboard exit spec
+        run: pnpm --filter @metasheet/web exec vitest run multitable-workbench-dashboard-exit --reporter=dot
+
+      # #6082 (A7a): automation schedule trigger time on Beijing business timezone, 24h picker,
+      # legacy UTC preserved. Standalone step, same merge-neutral reasoning as the field-config
+      # step above.
+      - name: Run automation trigger time spec
+        run: pnpm --filter @metasheet/web exec vitest run multitable-automation-trigger-time --reporter=dot
+
+      # #6083 (customer feedback #4c): date-times render/parse in one business timezone, 24h, on
+      # the grid and lockout dialogs. #6115 is its follow-up onto the deferred (lazily-mounted)
+      # surfaces. Standalone step, same merge-neutral reasoning as the field-config step above.
+      - name: Run datetime business timezone specs
+        run: pnpm --filter @metasheet/web exec vitest run multitable-datetime-business-tz multitable-datetime-grid-lockout multitable-datetime-deferred-surfaces --reporter=dot
+
+      # A11 (customer feedback 2026-09-24 #7c): AI surfaces hidden unless the server reports AI
+      # available. Standalone step, same merge-neutral reasoning as the field-config step above.
+      - name: Run AI availability gate specs
+        run: pnpm --filter @metasheet/web exec vitest run multitable-ai-availability-gate multitable-workbench-ai-availability-wiring --reporter=dot
+
+      # #6114 (customer feedback 2026-09-24 #4b, frontend) / #6107 (same slice, backend): type-aware
+      # automation condition values for rule and branch rows, the shared typing editor, and legacy
+      # person-picker compatibility. Standalone step, same merge-neutral reasoning as the
+      # field-config step above.
+      - name: Run automation condition value specs
+        run: pnpm --filter @metasheet/web exec vitest run automation-condition-legacy-person-picker automation-condition-typing-editor automation-condition-value-input automation-condition-values --reporter=dot
+
+      # #6113 (customer feedback 2026-09-24 #4a / A12): audited compare-and-set relabel of existing
+      # managed tables to Chinese headers. Standalone step, same merge-neutral reasoning as the
+      # field-config step above.
+      - name: Run stock-prep managed table relabel panel spec
+        run: pnpm --filter @metasheet/web exec vitest run StockPreparationManagedTableRelabelPanel --reporter=dot
 
       - name: Run multitable web guard specs (targeted)
         # A1: meta-grid-table (windowing + infinite-scroll trigger) + multitable-grid (useMultitableGrid

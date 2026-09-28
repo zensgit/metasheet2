@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App, type Ref } from 'vue'
-import { dateTimeInputValue, dateTimeValueFromLocalInput } from '../src/multitable/utils/field-display'
 
 // Controllable scalar-binding mock: tests flip `scalarActive`/`scalarVal` to
 // exercise the active (Yjs) vs inactive (REST) paths of MetaCellEditor's
@@ -339,16 +338,17 @@ describe('MetaCellEditor scalar Yjs wiring', () => {
     expect(useYjsScalarCellMock.mock.calls[0][0]).toMatchObject({ coerceText: true })
   })
 
-  it('active dateTime: input writes the CANONICAL UTC ISO via setValue (never the raw local input)', async () => {
+  it('active dateTime: input writes the CANONICAL UTC ISO via setValue (never the raw typed text)', async () => {
     scalarActive.value = true
     const onUpdate = vi.fn(); const onConfirm = vi.fn(); const onYjsCommit = vi.fn()
     mountField({ id: 'fld_dt', name: 'When', type: 'dateTime' }, null, { 'onUpdate:modelValue': onUpdate, onConfirm, onYjsCommit })
-    const input = container!.querySelector('input[type="datetime-local"]') as HTMLInputElement
-    const local = '2026-06-18T14:30'
+    const input = container!.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
+    // 客户反馈 2026-09-24 #4c: the typed wall clock is read in the business timezone (Asia/Shanghai).
+    const local = '2026-06-18 14:30'
     input.value = local
     input.dispatchEvent(new Event('input'))
     await nextTick()
-    const canonical = dateTimeValueFromLocalInput(local)
+    const canonical = '2026-06-18T06:30:00.000Z'
     expect(setValueMock).toHaveBeenCalledWith(canonical) // canonical UTC ISO, not the local input
     expect(setValueMock).not.toHaveBeenCalledWith(local) // the raw local input is NEVER written
     expect(onUpdate).toHaveBeenCalledWith(canonical)
@@ -358,25 +358,25 @@ describe('MetaCellEditor scalar Yjs wiring', () => {
     expect(onConfirm).toHaveBeenCalled()
   })
 
-  it('active dateTime: displays the canonical scalar value in local form (read side)', () => {
+  it('active dateTime: displays the canonical scalar value as a business-timezone wall clock (read side)', () => {
     scalarActive.value = true
-    const canonical = dateTimeValueFromLocalInput('2026-06-18T14:30')
+    const canonical = '2026-06-18T06:30:00.000Z'
     scalarVal.value = canonical
     mountField({ id: 'fld_dt', name: 'When', type: 'dateTime' }, null)
-    const input = container!.querySelector('input[type="datetime-local"]') as HTMLInputElement
-    expect(input.value).toBe(dateTimeInputValue(canonical))
+    const input = container!.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
+    expect(input.value).toBe('2026-06-18 14:30')
   })
 
   it('inactive dateTime: REST path — setValue not called; input still emits canonical update:modelValue', async () => {
     scalarActive.value = false
     const onUpdate = vi.fn()
     mountField({ id: 'fld_dt', name: 'When', type: 'dateTime' }, null, { 'onUpdate:modelValue': onUpdate })
-    const input = container!.querySelector('input[type="datetime-local"]') as HTMLInputElement
-    const local = '2026-06-18T09:00'
+    const input = container!.querySelector('input[data-meta-datetime-input]') as HTMLInputElement
+    const local = '2026-06-18 09:00'
     input.value = local
     input.dispatchEvent(new Event('input'))
     await nextTick()
     expect(setValueMock).not.toHaveBeenCalled()
-    expect(onUpdate).toHaveBeenCalledWith(dateTimeValueFromLocalInput(local))
+    expect(onUpdate).toHaveBeenCalledWith('2026-06-18T01:00:00.000Z')
   })
 })

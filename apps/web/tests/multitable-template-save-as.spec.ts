@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import MultitableTemplateCenterView from '../src/views/MultitableTemplateCenterView.vue'
 import { useLocale } from '../src/composables/useLocale'
+import { workbenchLabel } from '../src/multitable/utils/workbench-labels'
 
 const USER_PERMISSIONS_KEY = 'user_permissions'
 
@@ -149,6 +150,17 @@ function setValue(input: HTMLInputElement | HTMLSelectElement, value: string): v
   input.value = value
   input.dispatchEvent(new Event('input'))
   input.dispatchEvent(new Event('change'))
+}
+
+// A10 phase 1 面板刷新用例专用:canCreateBasesAndSheets 读 useAuth().getAccessSnapshot(),
+// 而一个没有 token 的会话会被 bootstrapSession -> resetSessionBootstrap 清空已存的
+// user_permissions 快照(镜像 multitable-workbench-drawer-button-wiring.spec.ts 同款注释)——
+// 权限必须塞进 token payload,不能只写 localStorage 的 user_permissions。
+function signedTestToken(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/=+$/, '')
+  const head = encode({ alg: 'none', typ: 'JWT' })
+  const body = encode({ ...payload, exp: Math.floor(Date.now() / 1000) + 3600 })
+  return [head, body, 'sig'].join('.')
 }
 
 describe('模板中心 —— 把 Base 存为模板', () => {
@@ -644,4 +656,372 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
     expect(dialog.querySelector('[data-testid="save-sheet-as-template-error"]')?.textContent)
       .toContain('no readable table')
   }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // ── A10 phase 1(客户反馈 2026-09-24 #8,裁定见 PR #6074):对话框说清楚存的是哪张表/
+  // 哪些视图,字段类型不再显示原始 type 值,存成功后模板面板能看见新模板,导出选项文案准确。
+
+  it('对话框头部点名来源:工作区名 / 数据表名', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    // bases 来自 client.listBases()(运营库),数据表名来自 workbench.sheets(订单)——
+    // 两者都不是同一个来源,证明这行不是「凑巧读了同一个字段两次」。
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-source"]')?.textContent).toBe('来源：运营库 / 订单')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('字段清单显示翻译过的类型标签,不是原始 type 值', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const typeEls = Array.from(dialog.querySelectorAll('.mt-save-tpl__fields .mt-save-tpl__item-type'))
+    // SHEET_FIELDS 的原始类型是 string/select/person —— 存在任何一个原样漏出来都算回归。
+    expect(typeEls.map((el) => el.textContent)).toEqual(['文本', '单选', '人员'])
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // N7(2026-09-26 对抗评审):bases 是异步加载的,列表落地前打开对话框会拿到空 baseName——
+  // 不能拼出「来源：/ 订单」这种带空前缀的怪文案,未知工作区名时只显示数据表名。
+  it('工作区名未知时,来源行只显示数据表名(没有空的"/"前缀)', async () => {
+    workbenchMock.client.listBases = vi.fn().mockResolvedValue({ bases: [] })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-source"]')?.textContent).toBe('来源：订单')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('只读列出将保存的视图,并说明哪些不保存(筛选/排序/列顺序与列宽/时间轴甘特起止/层级父级)', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const list = dialog.querySelector('[data-testid="save-sheet-as-template-views"]') as HTMLElement
+    expect(list).toBeTruthy()
+    const names = Array.from(list.querySelectorAll('.mt-save-tpl__item-name')).map((el) => el.textContent)
+    const types = Array.from(list.querySelectorAll('.mt-save-tpl__item-type')).map((el) => el.textContent)
+    expect(names).toEqual(['Grid'])
+    // 视图类型也走翻译标签(viewTypeLabel),不是原始 'grid'
+    expect(types).toEqual(['网格'])
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-views-note"]')?.textContent)
+      .toContain('视图保存名称、类型、分组（仅第一级）、隐藏列及日历/看板所用字段；不保存筛选、排序、列顺序与列宽、时间轴/甘特的起止字段、层级的父级字段')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // S4(2026-09-26 对抗评审):清单必须用 workbench.views(未经视图权限过滤)——服务端存模板时
+  // 是把这张表的**全部** meta_views 抽进去,不看视图权限(custom-template-store.ts 的
+  // extractTemplateSheets 只按 sheetIds/fieldIds 收窄,没有第三个"按视图权限收窄"的步骤)。
+  // 钉死这一点:换成 visibleWorkbenchViews(按 canAccess 过滤)这条断言必须变红。
+  it('S4: canAccess:false 的视图也照样列出、顺序不变(钉死用的是未过滤的 workbench.views)', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid', filterInfo: null, sortInfo: null, groupInfo: null, hiddenFieldIds: [], config: {} },
+      { id: 'view_restricted', sheetId: 'sheet_orders', name: 'Restricted', type: 'kanban', filterInfo: null, sortInfo: null, groupInfo: null, hiddenFieldIds: [], config: {} },
+    ]
+    // 非当前激活视图,所以不会被 grid.viewPermission 的合并覆盖——effectiveViewPermissions 只会
+    // 看到这一条,visibleWorkbenchViews 会把它过滤掉。
+    workbenchMock.viewPermissions.value = { view_restricted: { canAccess: false } }
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const list = dialog.querySelector('[data-testid="save-sheet-as-template-views"]') as HTMLElement
+    const names = Array.from(list.querySelectorAll('.mt-save-tpl__item-name')).map((el) => el.textContent)
+    expect(names).toEqual(['Grid', 'Restricted'])
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('成功后给出「装模板 = 新建工作区 + 空表,关联/公式/按钮列会降级」的说明', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '订单', custom: true }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-install-note"]')?.textContent)
+      .toContain('使用模板会新建工作区，其中是空表；关联/公式/按钮等列会变成文本列')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('存成功后模板面板刷新:面板已开着时立刻重拉;面板没开时标 stale,下次打开重拉', async () => {
+    // 「open-template-library」按钮按 canCreateBasesAndSheets(读真实 auth.getAccessSnapshot(),
+    // 不走 capsMock)显隐,这里显式授予,和其它 F7 用例(不碰这颗按钮)互不影响。权限必须塞进
+    // token payload——没有 token 的会话会被 bootstrapSession 清空只写在 user_permissions 的快照。
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    try {
+      mocks.listTemplates.mockResolvedValue({ templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })] })
+      const root = await mountWorkbench()
+
+      const openLibrary = root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')
+      expect(openLibrary).toBeTruthy()
+      openLibrary!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+      expect(root.querySelector('[data-template-id="project-tracker"]')).toBeTruthy()
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeNull()
+
+      // 关闭面板(不清空 templates.value——镜像真实的「加载过一次」状态)
+      root.querySelector<HTMLButtonElement>('.mt-template-library__close')!.click()
+      await flushUi()
+
+      // 存一张新模板;服务端返回的列表现在包含它
+      mocks.createTemplateFromBase.mockResolvedValue({
+        template: makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+        warnings: [],
+      })
+      mocks.listTemplates.mockResolvedValue({
+        templates: [
+          makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+          makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+        ],
+      })
+      const dialog = await openDialog(root)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 面板此刻是关着的:标 stale,不会背着用户偷偷发请求
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-done"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 重新打开面板:必须重拉,新模板必须出现——这正是 09-24 反馈第 8 条要修的那个洞
+      // (旧逻辑 `templates.value.length === 0` 的门槛在面板加载过一次之后就再也打不开了)。
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+    } finally {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('存成功时面板正开着:不等下次打开,立刻重拉', async () => {
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    try {
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+      const root = await mountWorkbench()
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+      expect(root.querySelector('[data-template-id="mtpl_live"]')).toBeNull()
+
+      mocks.createTemplateFromBase.mockResolvedValue({
+        template: makeTemplate({ id: 'mtpl_live', name: '实时模板', custom: true }),
+        warnings: [],
+      })
+      mocks.listTemplates.mockResolvedValue({
+        templates: [makeTemplate({ id: 'mtpl_live', name: '实时模板', custom: true })],
+      })
+
+      const dialog = await openDialog(root)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 面板全程没关——立刻重拉了一次,不用等用户再点开一次
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_live"]')).toBeTruthy()
+    } finally {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // S3(2026-09-26 对抗评审):存成功后立刻重拉——如果这次重拉本身失败(网络抖动/服务端 5xx),
+  // "需要刷新"这个待办不能被这次失败的调用消掉。旧实现在发起重拉前就把它清空了,一次失败的
+  // 重拉会让面板卡在错误提示上,直到用户手动做点别的事才会再试。
+  it('S3: 存成功后的重拉如果失败,面板显示错误但不卡死——关闭重开会重试', async () => {
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    try {
+      // 首次加载给一张**非空**列表——templates.value.length !== 0 之后就不再是"必须重拉"的
+      // 独立触发条件,后面 3 次开面板能否重试,只取决于失败重拉是否正确留下了"需要刷新"的信号
+      // (不是靠"列表还是空的"这个不相关的条件顺带触发)。
+      mocks.listTemplates
+        .mockResolvedValueOnce({ templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })] }) // 面板首次打开
+        .mockRejectedValueOnce(new Error('network blip')) // 存成功后立刻重拉——这次失败
+        .mockResolvedValueOnce({
+          templates: [
+            makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+            makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+          ],
+        }) // 关闭重开后重试,这次成功
+      mocks.createTemplateFromBase.mockResolvedValue({
+        template: makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+        warnings: [],
+      })
+      const root = await mountWorkbench()
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+
+      const dialog = await openDialog(root)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+      await flushUi()
+
+      // 面板还开着,立刻重拉了一次——这次失败,面板显示错误(不是静默吞掉、也不是假装刷新过了)
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).toContain('network blip')
+
+      // 关闭保存对话框、关闭面板、重新打开——必须重试(不能卡在上一条错误上不动)
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-done"]') as HTMLButtonElement).click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('.mt-template-library__close')!.click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(3)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+      expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).not.toContain('network blip')
+    } finally {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // ── N4 / 第二轮对抗评审 N-1 / N-2:面板首次加载还在飞的时候存了模板 ──────────────────
+  // 三条共用的起手式:面板打开、第一次 listTemplates 挂在空中(还没 resolve),再存一张模板。
+  // 放开的那个旧响应一律是**非空**列表(N-2):空列表会让 openTemplateLibrary 的
+  // `templates.value.length === 0` 门槛自己触发重拉,把"旧响应误清掉待刷新标记"这类回归兜住,
+  // 用例就成了空转的绿。
+  const PRE_SAVE_SNAPSHOT = () => ({ templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })] })
+  const POST_SAVE_LIST = () => ({
+    templates: [
+      makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+      makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+    ],
+  })
+
+  async function saveWhileFirstLoadInFlight(): Promise<{
+    root: HTMLElement
+    dialog: HTMLElement
+    resolveFirst: (value: { templates: unknown[] }) => void
+  }> {
+    let resolveFirst: ((value: { templates: unknown[] }) => void) | null = null
+    mocks.listTemplates.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveFirst = resolve }),
+    )
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '新模板', custom: true }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+    await flushUi()
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).toContain('正在加载模板')
+
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+    // 面板正开着,onSaveSheetAsTemplate 想立刻重拉——但上一个还在飞,这次调用必须被跳过
+    // (不是又发一个请求出去跟第一个赛跑:两个响应谁后落地谁说了算,和发起顺序无关)。
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+    expect(resolveFirst).toBeTruthy()
+    return { root, dialog, resolveFirst: resolveFirst! }
+  }
+
+  function withTemplateLibraryAccess(): () => void {
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    return () => {
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('jwt')
+    }
+  }
+
+  // N-1:旧响应落地后,面板还开着——必须自动补拉一次,不用用户关掉重开;补拉只发生一次。
+  it('N4/N-1: 首次加载在飞时存模板——不起并发请求;旧响应落地后面板不关也自动补拉一次,新模板出现', async () => {
+    const cleanup = withTemplateLibraryAccess()
+    try {
+      const { root, resolveFirst } = await saveWhileFirstLoadInFlight()
+      mocks.listTemplates.mockResolvedValue(POST_SAVE_LIST())
+
+      // 放开第一个请求——它的数据是存模板**之前**的快照(非空,没有新模板)。
+      resolveFirst(PRE_SAVE_SNAPSHOT())
+      await flushUi()
+      await flushUi()
+
+      // 面板全程没关:旧响应落地后立刻补拉了一次,新模板出现。
+      expect(root.querySelector('[data-testid="multitable-template-library"]')).toBeTruthy()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+      expect(root.querySelector('[data-template-id="project-tracker"]')).toBeTruthy()
+
+      // 补拉成功之后不再继续拉(不是一个自我触发的循环)。
+      await flushUi()
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+    } finally {
+      cleanup()
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // N-2:面板在旧请求飞行中被关掉——不背着用户补拉;旧的**非空**响应不能把"需要刷新"误清掉,
+  // 重开时必须重拉。把 loadTemplateLibrary 里"只推进到发起时的标记"改成"推进到最新标记",
+  // 这条就红(重开时 templates 非空、标记已追平、没有错误 → 不拉)。
+  it('N4/N-2: 旧请求在飞时面板被关——不偷偷补拉;旧的非空响应不会把"需要刷新"误清空,重开必重拉', async () => {
+    const cleanup = withTemplateLibraryAccess()
+    try {
+      const { root, dialog, resolveFirst } = await saveWhileFirstLoadInFlight()
+      ;(dialog.querySelector('[data-action="save-sheet-as-template-done"]') as HTMLButtonElement).click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('.mt-template-library__close')!.click()
+      await flushUi()
+
+      resolveFirst(PRE_SAVE_SNAPSHOT())
+      await flushUi()
+      await flushUi()
+      // 面板是关着的:旧响应落地后不补拉。
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+
+      mocks.listTemplates.mockResolvedValueOnce(POST_SAVE_LIST())
+      root.querySelector<HTMLButtonElement>('[data-action="open-template-library"]')!.click()
+      await flushUi()
+
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-template-id="mtpl_new"]')).toBeTruthy()
+    } finally {
+      cleanup()
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  // N-1 的防循环:补拉本身失败时只补这一次,不对一个一直失败的接口连环重试。触发条件是
+  // "这次请求飞行期间待刷新标记被推高",不是"面板仍然是旧的"——换成后者,这条就红。
+  // 失败用 setTimeout 延到下一个宏任务,变异后的死循环也会让出事件循环,断言能红而不是卡死。
+  it('N-1 防循环: 补拉失败只补一次——显示错误,不连环重试', async () => {
+    const cleanup = withTemplateLibraryAccess()
+    try {
+      const { root, resolveFirst } = await saveWhileFirstLoadInFlight()
+      mocks.listTemplates.mockImplementation(
+        () => new Promise((_resolve, reject) => { setTimeout(() => reject(new Error('still down')), 0) }),
+      )
+
+      resolveFirst(PRE_SAVE_SNAPSHOT())
+      for (let i = 0; i < 5; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        await flushUi()
+      }
+
+      expect(mocks.listTemplates).toHaveBeenCalledTimes(2)
+      expect(root.querySelector('[data-testid="multitable-template-library"]')?.textContent).toContain('still down')
+    } finally {
+      // 变异构建里若真在循环,让它下一轮成功、自行停下,不把失败请求漏到后面的用例。
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      cleanup()
+    }
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+})
+
+// N-5(第二轮对抗评审):中英两版文案都要说清楚「不保存什么」和「会降级什么」。中文在上面的挂载用例里
+// 逐字断言;英文版工作台用例不切语言,这里直接读标签表。
+describe('存为模板文案 —— 英文版说清不保存/降级的边界(N-5)', () => {
+  it('viewsNote(en) 列出不保存的项:筛选、排序、列顺序与列宽、时间轴/甘特起止字段、层级父级字段', () => {
+    const note = workbenchLabel('saveTpl.viewsNote', false)
+    for (const phrase of ['Not saved:', 'filters', 'sort', 'column order and widths', 'timeline/gantt start and end fields', 'hierarchy parent field']) {
+      expect(note).toContain(phrase)
+    }
+  })
+
+  it('installNote(en) 和中文版一样点名按钮列也会变成文本列', () => {
+    expect(workbenchLabel('saveTpl.installNote', false)).toContain('button')
+    expect(workbenchLabel('saveTpl.installNote', false)).toContain('become plain text columns')
+    expect(workbenchLabel('saveTpl.installNote', true)).toContain('按钮')
+  })
 })

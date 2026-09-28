@@ -2,6 +2,8 @@ import sanitizeHtml from 'sanitize-html'
 import { normalizeAutoNumberProperty } from './auto-number-property'
 import { fieldTypeRegistry } from './field-type-registry'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from './field-visibility-rule'
+import { resolveDateTimeFieldTimeZone } from './business-timezone'
+import { parseDateTimeText } from './date-time-wall-clock'
 
 export type MultitableFieldType =
   | 'string'
@@ -996,16 +998,39 @@ export function validateLocationValue(value: unknown, fieldId: string): Location
   }
 }
 
-export function validateDateTimeValue(value: unknown, fieldId: string): string | null {
+/**
+ * Canonical stored form (UTC ISO) of a dateTime input, or `null` for empty.
+ *
+ * 客户反馈 2026-09-24 #4c (PR #6083 review S1): a STRING is parsed by `parseDateTimeText` — one carrying its
+ * own zone (`Z`, `±hh:mm`, `GMT`) keeps its absolute meaning; a ZONE-LESS wall clock (`2026-09-24 09:00`,
+ * `2026-09-24T09:00:00.000`, `2026年9月24日 9:30`, a bare `2026-09-24` = midnight) is read in the FIELD's zone
+ * (`resolveDateTimeFieldTimeZone(property)`: explicit non-'UTC' `property.timezone`, else the instance business
+ * timezone, default Asia/Shanghai). The former `new Date(value)` read zone-less text in the PROCESS zone, so
+ * the same grid paste / CSV / XLSX / prefill / REST string meant a different instant on a UTC container than on
+ * a China laptop. Zone-less text outside the grammar is rejected (fail-closed) rather than guessed.
+ */
+export function validateDateTimeValue(
+  value: unknown,
+  fieldId: string,
+  property?: Record<string, unknown> | null,
+): string | null {
   if (value === null || value === undefined || value === '') return null
   if (typeof value !== 'string' && typeof value !== 'number' && !(value instanceof Date)) {
     throw new Error(`DateTime value must be a string, number, or Date for ${fieldId}`)
   }
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) {
+  if (value instanceof Date || typeof value === 'number') {
+    const date = value instanceof Date ? value : new Date(value)
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(`Invalid DateTime for ${fieldId}: ${String(value)}`)
+    }
+    return date.toISOString()
+  }
+  const parsed = parseDateTimeText(value, resolveDateTimeFieldTimeZone(property))
+  if (parsed.kind === 'empty') return null
+  if (parsed.kind === 'invalid') {
     throw new Error(`Invalid DateTime for ${fieldId}: ${String(value)}`)
   }
-  return date.toISOString()
+  return new Date(parsed.ms).toISOString()
 }
 
 export function normalizeMultiSelectValue(
@@ -1134,7 +1159,8 @@ export function coerceBatch1Value(
   if (fieldType === 'barcode') return validateBarcodeValue(value, fieldId)
   if (fieldType === 'qrcode') return validateQrcodeValue(value, fieldId)
   if (fieldType === 'location') return validateLocationValue(value, fieldId)
-  if (fieldType === 'dateTime') return validateDateTimeValue(value, fieldId)
+  // The field property carries the (rarely set) explicit zone a zone-less wall clock is read in.
+  if (fieldType === 'dateTime') return validateDateTimeValue(value, fieldId, property)
   return value
 }
 

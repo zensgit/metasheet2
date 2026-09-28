@@ -21,8 +21,10 @@ import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../se
 import {
   APPROVAL_LIST_SCOPE_NO_MATCH,
   ApprovalBridgeService,
+  CancelRoundOutletForbiddenError,
   ServiceError,
   buildApprovalListScopeCondition,
+  rejectIfCancelRound,
 } from '../services/ApprovalBridgeService'
 import {
   assertAttendanceCentralMutationFailClosed,
@@ -34,6 +36,7 @@ import {
 } from '../services/ApprovalCardDeliveryAction'
 import {
   ApprovalProductService,
+  applyTemplateVisibilityFilter,
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
@@ -47,6 +50,13 @@ import {
 } from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
 import { countApprovalPendingForViewer } from '../services/approval-pending-query'
+import {
+  assignmentMatchesActor,
+  decidableNodeKeysForInstance,
+  decisionDoorIsSeatGated,
+  resolveCanDecideCurrentNode,
+  type SeatedAssignment,
+} from '../services/approval-seat-authorization'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -64,6 +74,7 @@ import {
 } from '../services/approval-bridge-types'
 import { sanitizeCsvRow, CSV_LINE_TERMINATOR } from '../services/csv-cell'
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
+import { publishTodoCountsUpdate } from '../services/todo-realtime'
 import {
   searchDirectoryUsers,
   listDirectoryRoles,
@@ -76,6 +87,15 @@ import {
   listApprovalDepartments,
 } from '../services/approval-directory'
 import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
+import {
+  archiveApprovalTemplateGroup,
+  createApprovalTemplateGroup,
+  linkApprovalTemplateToGroup,
+  listApprovalTemplateGroups,
+  renameApprovalTemplateGroup,
+  unarchiveApprovalTemplateGroup,
+  unlinkApprovalTemplateFromGroup,
+} from '../services/ApprovalTemplateGroupService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -204,6 +224,17 @@ interface ApprovalInstance {
   status: string
   version: number
   source_system?: string | null
+  // Lock §14.3 outlets #7/#7′ — `SELECT *` already returns this column; typed here (it was
+  // previously untyped-but-present) so `rejectIfCancelRound`'s `{ workflow_key?: ... }` parameter
+  // has a real property in common with `ApprovalInstance` (bare structural weak-type check, TS2559).
+  workflow_key?: string | null
+  // Columns the legacy decision door's seat mirror reads. Every legacy `/approve` and `/reject`
+  // load is already a `SELECT *` on `approval_instances`, so these arrive at runtime today; they
+  // are typed here (additively, all optional) so `resolveLegacyDecisionSeat` can read them without
+  // a cast. No query changed to obtain them.
+  published_definition_id?: string | null
+  current_node_key?: string | null
+  metadata?: Record<string, unknown> | null
   created_at: Date
   updated_at: Date
 }
@@ -314,6 +345,57 @@ function resolveApprovalTenantId(req: Request): string | undefined {
   return normalized.length > 0 ? normalized : undefined
 }
 
+/**
+ * Approval form grouping — design lock v2.13 §2 "org 从哪来" (acceptance A‴). Every group/link
+ * endpoint below calls this FIRST, before touching the database. `orgId` appearing in the request
+ * body or query string is REJECTED outright (400 `ORG_ID_NOT_ACCEPTED`) — this router's own
+ * `/directory/member-groups` `orgId` is CALLER-SUPPLIED (self-documented as such at that route)
+ * and is NOT the precedent to copy here. The only accepted source is `req.authenticatedTenantId`
+ * (`jwt-middleware.ts`), set ONLY from the verified token's own `tenantId` claim — never
+ * `req.user.tenantId`, which the `x-tenant-id` request header can backfill when the token itself
+ * carries no tenant, and which this router therefore never reads for this purpose. Missing it is
+ * fail-closed 403 `SESSION_ORG_REQUIRED`, zero writes on every path (a multi-org member with no
+ * selected session-org — `AuthService.resolveSessionTenantId` mints `authenticatedTenantId` only
+ * when the caller belongs to exactly one org — gets exactly this response on every one of these
+ * endpoints; that IS this slice's J acceptance row, since no session-org picker UI exists yet).
+ *
+ * Returns the resolved org id, or `undefined` after already writing the error response — callers
+ * must `return` immediately in that case without writing anything else.
+ */
+// Any appearance of `orgId` counts as "supplied", not just a non-empty string — Express's default
+// query parser turns a repeated `?orgId=a&orgId=b` into an array, and a JSON body can carry any
+// shape. Treating only `typeof value === 'string'` as detectable would let `?orgId=a&orgId=b` (an
+// array) or a non-string body value through un-rejected even though the lock's text is "orgId
+// appears in the body or query string" with no type qualifier. Blank is still tolerated (an empty
+// string, or an array of only empty strings) since that is indistinguishable from the field simply
+// not being set by a client that always includes the key.
+function isOrgIdValuePresent(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (Array.isArray(value)) return value.some((entry) => isOrgIdValuePresent(entry))
+  return true
+}
+
+function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string | undefined {
+  const bodyOrgId = isPlainRecord(req.body) ? req.body.orgId : undefined
+  const queryOrgId = (req.query as Record<string, unknown> | undefined)?.orgId
+  const orgIdSupplied = isOrgIdValuePresent(bodyOrgId) || isOrgIdValuePresent(queryOrgId)
+  if (orgIdSupplied) {
+    res.status(400).json(
+      approvalErrorResponse('ORG_ID_NOT_ACCEPTED', 'orgId is not accepted in the request body or query string'),
+    )
+    return undefined
+  }
+  const authenticatedTenantId = req.authenticatedTenantId
+  if (typeof authenticatedTenantId !== 'string' || authenticatedTenantId.trim().length === 0) {
+    res.status(403).json(
+      approvalErrorResponse('SESSION_ORG_REQUIRED', 'An authenticated session organization is required'),
+    )
+    return undefined
+  }
+  return authenticatedTenantId.trim()
+}
+
 // Exported for the approval-attachment upload route (§4.1 template-access gate): the attachment
 // runtime evaluates the SAME request-derived visibility actor this router feeds into
 // applyTemplateVisibilityFilter — one actor derivation, no drift between create and upload.
@@ -334,6 +416,77 @@ export function resolveApprovalTemplateVisibilityActor(req: Request): ApprovalTe
       || permissions.includes('approvals:admin-templates')
       || permissions.includes('approval-templates:manage'),
   }
+}
+
+// §2 (ratified) "模板可见性仍走原权限谓词……一个组织只能给自己能看到的模板归组(挂接时按原谓词
+// 校验可见)": exported (not inlined at the one call site) so a real-DB test can exercise the
+// predicate directly with a NON-manager actor.
+//
+// CORRECTED (design-gate-A3-phase2-20260918.md §2 Q2 / P2-5; corrected AGAIN
+// impl-gate-A-slice1-round4-20260918.md §2 P2-1, 2026-09-18): an earlier version of this comment
+// claimed "`approvalTemplateAdminGuard` makes every actor that can reach the link endpoint today
+// `isTemplateManager` (guard population ⊆ manager ⊆ sees everything)". Round 2's gate already
+// real-DB falsified that once (a wildcard-code actor measured 403, not admitted — see round 3's
+// report §3 P3-3). This round's own fix (the single commit this comment lives in) flipped ⊆ to ⊋,
+// but grounded it in a SECOND false claim — copied verbatim from A-3's static-code-reading
+// conclusion, without re-checking round 2's own real-DB result — that a wildcard
+// `approval-templates:*` permission code, by itself, gets an actor past the guard. Round 4's gate
+// (reviewing this very comment) independently re-tested that and real-DB falsified it a SECOND
+// time, end-to-end, on this head:
+//   (1) a wildcard permission code does NOT, by itself, pass the guard. `hasPermissionCode`
+//       (`rbac/rbac.ts:21-25`) does expand `approval-templates:*` to match the guard's literal
+//       `approval-templates:manage` string, but that is only ONE conjunct of `rbacGuardAny`'s
+//       permission leg (`rbac/rbac.ts:134-142`): `requestUserHasResolvedPermission(requestUser,
+//       code) && await isPermissionAllowedByNamespaceAdmission(userId, code)`. `approval-templates`
+//       IS an admission-controlled resource (`approvals` is NOT — see
+//       `namespace-admission.ts`'s `NON_NAMESPACED_PERMISSION_RESOURCES`), so absent an extra
+//       namespace-admission grant, the second conjunct fails and BOTH `approval-templates:*` and
+//       the guard's own literal `approval-templates:manage` get 403 — measured end-to-end on this
+//       head, not inferred. This actor shape exists only if the same principal ALSO holds a
+//       namespace-admission grant for `approval-templates`; repo-wide grants of
+//       `approval-templates:*` are 0 today (all repo hits are commentary, not real grants).
+//   (2) a DB-side admin — `rbacGuardAny`'s final fallback calls `isAdmin(userId)`
+//       (`rbac/service.ts`, `user_roles WHERE role_id = 'admin'`), independent of anything on the
+//       JWT/`req.user` this function reads (`req.user.role`, `.roles`, `.permissions`). A principal
+//       admitted ONLY through that DB row is invisible to `isTemplateManager` above — this is the
+//       ONLY actor shape actually demonstrated end-to-end this round (lifecycle suite's "§2(c): a
+//       DB-side-admin actor" HTTP case, plus a negative control that removes the `user_roles` grant
+//       and turns it 403 again).
+// CORRECTED A THIRD TIME (impl-gate-A-slice1-round6-20260918.md §2 P2-1, 2026-09-18): the "strict
+// superset" conclusion above is itself false — it silently required that EVERY isTemplateManager
+// actor also pass the guard, which this file's own §23.6 record contradicts
+// (`ZZR4-EXACT-RESULT status=403` for `perms='approval-templates:manage'` alone, the guard's own
+// literal code). The two populations are mutually non-inclusive — neither contains the other —
+// with one measured counterexample per direction: guard-pass/non-manager is the DB-side `isAdmin`
+// leg above (§2(c)); manager/guard-fail is a principal holding only `approval-templates:manage`,
+// whose permission leg here (`resolveApprovalActorPermissions` above) carries no admission
+// conjunct while `rbacGuardAny`'s SAME-named leg is conjoined with
+// `isPermissionAllowedByNamespaceAdmission` (`rbac/rbac.ts:134-142,146-152`) — see the lifecycle
+// suite's "§2(d)" case (real HTTP + a direct call to this function on the identical claim shape,
+// plus a negative control). Whether production provisioning always pairs the two grants is NOT
+// measured and NOT asserted here. Correcting this CLAIM changes no runtime behavior; only what
+// this comment asserts about existing behavior changes. This is exactly why exporting the
+// predicate for a direct, non-manager-actor unit test (below)
+// was never sufficient on its own — see the lifecycle suite's REAL, guard-passing, non-manager
+// HTTP case ("§2(c): a DB-side-admin actor" block), which proves the filter still narrows what
+// such an actor's link REQUEST can see, not merely what the
+// predicate returns when called directly with a hand-built actor object.
+//
+// LINK ONLY (the lock's clause names 挂接, not unlink) — an implementer's choice to mask "exists
+// but invisible" the SAME way as every other actor-gated template lookup in this router (`:921`'s
+// `APPROVAL_TEMPLATE_NOT_FOUND`), not a second ratified code; a nonexistent template also returns
+// `false` here (the `id = $1` predicate matches nobody), so this doubles as the group-link path's
+// template-existence check — today unreachable another way (`mapGroupConstraintError` has no
+// 23503 branch for `template_id`).
+export async function isApprovalTemplateVisibleForGroupLink(
+  templateId: string,
+  actor: ApprovalTemplateVisibilityActor | undefined,
+): Promise<boolean> {
+  const conditions: string[] = ['id = $1']
+  const params: unknown[] = [templateId]
+  applyTemplateVisibilityFilter(conditions, params, 2, actor)
+  const result = await query(`SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`, params)
+  return (result.rowCount ?? 0) > 0
 }
 
 function approvalVersionConflictResponse(currentVersion: number) {
@@ -467,7 +620,183 @@ async function listDirectApprovalAssigneeIds(instanceId: string): Promise<string
     .filter((userId) => typeof userId === 'string' && userId.trim().length > 0)
 }
 
-async function publishApprovalCountsForUsers(
+/**
+ * The SERVER-DERIVED node attribution + seat verdict the two legacy decision endpoints
+ * (`POST /api/approvals/:id/approve`, `POST /api/approvals/:id/reject`) write with.
+ *
+ * ### What was wrong
+ *
+ * Both legacy endpoints authorized a decision on `authenticate` + `approvals:act` + an optimistic
+ * `version` + `status === 'pending'`, and then wrote the caller's `req.body.metadata` into
+ * `approval_records.metadata` VERBATIM. Nothing checked that the caller held a seat at the node the
+ * instance is actually stopped on, and nothing produced the `nodeKey` the row is filed under — the
+ * caller supplied it. Both facts matter because `approval_records.metadata->>'nodeKey'` is read
+ * back as node ATTRIBUTION by downstream consumers (e.g. `loadPriorNodeApproverDeciders`'s
+ * prior-node decider map). A self-reported key is not attribution: the reader cannot tell a row a
+ * seated approver wrote at their own node from a row anyone holding `approvals:act` wrote while
+ * naming somebody else's node.
+ *
+ * ### What this establishes, and what it does not
+ *
+ * The verdict comes from `resolveCanDecideCurrentNode` — the SAME predicate
+ * `ApprovalProductService.dispatchAction`'s 403 `APPROVAL_ASSIGNMENT_REQUIRED` gate is built from
+ * and the same one the detail DTO ships as `canDecideCurrentNode`, called here rather than
+ * re-derived, so the three cannot drift. Its three clauses are exactly the three the reviewer asked
+ * to see proven, and each is carried by an input, not by a comment:
+ *
+ *   * STATUS — `resolveCanDecideCurrentNode` returns `false` unless `instance.status === 'pending'`
+ *     (the callers also keep their own pre-existing 400 `APPROVAL_STATUS_INVALID` ahead of this, so
+ *     a terminal instance never reaches here and its error identity is unchanged).
+ *   * SEAT — `assignmentMatchesActor` over the instance's assignments: a USER seat whose
+ *     `assignee_id` is the actor, or a ROLE seat whose `assignee_id` is one of the actor's resolved
+ *     roles. A delegated seat is already materialised as a real assignment row at CREATE time, so
+ *     it is covered with no special case; a `'source_queue'` seat matches nothing, here and at the
+ *     door alike.
+ *   * ROUND — the seat must be ACTIVE (`is_active = TRUE`, enforced inside `assignmentMatchesActor`
+ *     and again by this function's own `WHERE`) and must sit at a key in
+ *     `decidableNodeKeysForInstance` — the stored `current_node_key` plus, inside a parallel
+ *     region, the pending branch frontier. A round that has ended has had its assignments
+ *     deactivated and a re-activated node carries a FRESH set, so "an active seat at a decidable
+ *     node key" IS the current round: there is no separate round predicate to add, and none is
+ *     invented here.
+ *
+ * NOT seat-gated instances — a legacy platform row with no `published_definition_id`, or a `plm:`
+ * mirror — keep TODAY'S authorization exactly: `decisionDoorIsSeatGated` is false for them,
+ * `resolveCanDecideCurrentNode` therefore returns `true`, and the endpoints behave as they do now.
+ * That is deliberate: those rows have no assignments to hold a seat in, and `/api/approvals/:id/
+ * actions` does not seat-gate them either (it dispatches them to `ApprovalBridgeService`, which has
+ * no assignment gate at all). Narrowing them here would refuse callers the OTHER door still
+ * accepts — a second, stricter predicate, which is the drift this module exists to prevent.
+ *
+ * Attribution is returned ONLY for a seat-gated instance, and only as the `node_key` of the very
+ * assignment that satisfied the predicate. On a non-seat-gated instance it is `null` — there is no
+ * server-side seat evidence behind any node name, so no node name is written. In BOTH cases the
+ * caller strips the client's own `nodeKey`/`nodeEntryEpoch` keys (see `sanitizeLegacyDecisionMetadata`):
+ * a key the server cannot vouch for is never stored, whether or not the server has one of its own.
+ *
+ * WHAT THIS DOES NOT FIX, stated plainly so the deliverable is not read as "the legacy routes are
+ * now safe": this narrows WHO may drive a legacy decision and WHAT node the resulting row is filed
+ * under. It does not change what the endpoints DO — they still set the instance's terminal status
+ * directly, without node progression, without the executor's completion event, and without waking
+ * the bridge. A seated approver going through legacy `/approve` still strands a template-runtime
+ * instance exactly as before.
+ */
+async function resolveLegacyDecisionSeat(
+  client: { query: typeof pool.query },
+  instance: ApprovalInstance,
+  actorId: string,
+  actorRoles: string[],
+): Promise<{ allowed: boolean; seatGated: boolean; nodeKey: string | null }> {
+  const row = {
+    id: instance.id,
+    status: instance.status,
+    source_system: instance.source_system ?? null,
+    published_definition_id: instance.published_definition_id ?? null,
+    current_node_key: instance.current_node_key ?? null,
+    metadata: instance.metadata ?? null,
+  }
+  const seatGated = decisionDoorIsSeatGated(row)
+  if (!seatGated) {
+    // Same-transaction, same-client read is skipped entirely: there is no seat to resolve, and the
+    // verdict below does not consult assignments for a non-seat-gated row.
+    return {
+      allowed: resolveCanDecideCurrentNode({
+        instance: row,
+        assignments: [],
+        viewerUserId: actorId,
+        viewerRoles: actorRoles,
+      }),
+      seatGated: false,
+      nodeKey: null,
+    }
+  }
+
+  // SAME client as the `SELECT ... FOR UPDATE` above it, so the seat this reads is the seat the
+  // instance row is locked against — never a second connection that could observe a different
+  // round.
+  const assignmentRows = await client.query<SeatedAssignment>(
+    `SELECT node_key, is_active, assignment_type, assignee_id
+       FROM approval_assignments
+      WHERE instance_id = $1 AND is_active = TRUE`,
+    [instance.id],
+  )
+  const assignments = assignmentRows.rows
+  const allowed = resolveCanDecideCurrentNode({
+    instance: row,
+    assignments,
+    viewerUserId: actorId,
+    viewerRoles: actorRoles,
+  })
+  if (!allowed) {
+    return { allowed: false, seatGated: true, nodeKey: null }
+  }
+
+  // The node the verdict came from, derived from the SAME two primitives the predicate is built
+  // out of (`decidableNodeKeysForInstance` + `assignmentMatchesActor`) applied to the SAME rows —
+  // so it is the key of an assignment that actually satisfied the gate, not a second guess at it.
+  const decidableNodeKeys = new Set(decidableNodeKeysForInstance(row.current_node_key, row.metadata))
+  const seat = assignments.find((assignment) => (
+    typeof assignment.node_key === 'string'
+    && decidableNodeKeys.has(assignment.node_key)
+    && assignmentMatchesActor(assignment, actorId, actorRoles)
+  ))
+  if (!seat?.node_key) {
+    // Unreachable by construction (the predicate above returned true for a seat-gated instance
+    // only because some such assignment exists). Fail CLOSED rather than write an unattributed row:
+    // a disagreement between the verdict and the derivation is exactly the drift this guards.
+    return { allowed: false, seatGated: true, nodeKey: null }
+  }
+  return { allowed: true, seatGated: true, nodeKey: seat.node_key }
+}
+
+/**
+ * The node-attribution keys a legacy decision row's metadata may carry. They are SERVER-DERIVED,
+ * never client-supplied: a caller that sends either of them has it dropped (and the drop logged,
+ * values-free — the key NAMES below are a fixed literal set, never the caller's values).
+ *
+ * `nodeEntryEpoch` is stripped alongside `nodeKey` even though this route only ever re-derives it
+ * for a seat-gated instance: the two are read together as one attribution (`nodeKey` says which
+ * node, `nodeEntryEpoch` says which ROUND of it), and leaving the round half client-writable would
+ * let a caller file an honest node key under somebody else's round.
+ */
+const LEGACY_DECISION_SERVER_DERIVED_METADATA_KEYS = ['nodeKey', 'nodeEntryEpoch'] as const
+
+function sanitizeLegacyDecisionMetadata(
+  metadata: Record<string, unknown>,
+  instanceId: string,
+  derived: { nodeKey: string | null; nodeEntryEpoch: number | null },
+): Record<string, unknown> {
+  const dropped: string[] = []
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(metadata)) {
+    if ((LEGACY_DECISION_SERVER_DERIVED_METADATA_KEYS as readonly string[]).includes(key)) {
+      dropped.push(key)
+      continue
+    }
+    sanitized[key] = value
+  }
+  if (dropped.length > 0) {
+    logger.warn(
+      `Legacy approval decision on ${instanceId}: ignored client-supplied server-derived metadata key(s): ${dropped.join(', ')}`,
+    )
+  }
+  if (derived.nodeKey !== null) {
+    sanitized.nodeKey = derived.nodeKey
+  }
+  if (derived.nodeEntryEpoch !== null) {
+    sanitized.nodeEntryEpoch = derived.nodeEntryEpoch
+  }
+  return sanitized
+}
+
+// Exported (additive-only; no behavior change) so gate `impl-gate-B2-round1-20260918.md`'s P1-1
+// finding can be gated directly: all eight approval-action call sites funnel through this ONE
+// function to fire both `publishApprovalCountsUpdate` and `publishTodoCountsUpdate` on the same
+// `uniqueUsers` set (design MD §5.1's by-construction argument), so a wiring test gating THIS
+// function's own body is the right anchor — it does not, by itself, prove any given call site
+// actually reaches this function; that half stays the grep/by-construction argument. Mirrors
+// `isPlmApprovalId`'s export.
+export async function publishApprovalCountsForUsers(
   options: ApprovalRouterOptions | undefined,
   users: Array<{ userId: string; roles?: string[] }>,
   reason: string,
@@ -479,13 +808,140 @@ async function publishApprovalCountsForUsers(
     uniqueUsers.set(userId, user.roles ?? [])
   }
 
-  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => publishApprovalCountsUpdate({
-    injector: options?.injector,
-    logger,
-    userId,
-    roles,
-    reason,
-  })))
+  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => Promise.all([
+    publishApprovalCountsUpdate({
+      injector: options?.injector,
+      logger,
+      userId,
+      roles,
+      reason,
+    }),
+    // todo-center-design-lock v2.14 §3/§4: reuses `pendingSourceRegistry.countPendingForUser` — the
+    // SAME query `GET /api/todo/count` reads — never a second copy of the pending predicate. See
+    // `services/todo-realtime.ts`'s docblock for why this is NOT the P1-1 mistake B-1's fix-round
+    // removed (that version was wired onto `approval-realtime.ts`'s divergent
+    // `computeApprovalPendingCounts` instead).
+    publishTodoCountsUpdate({
+      injector: options?.injector,
+      logger,
+      userId,
+      roles,
+      reason,
+    }),
+  ])))
+}
+
+/**
+ * H-5 — the SETTLEMENT half of the legacy decision doors.
+ *
+ * `POST /api/approvals/:id/approve` and `.../reject` used to write the terminal status and the
+ * audit row THEMSELVES, with raw SQL, for every platform instance — including the ones the
+ * TEMPLATE RUNTIME owns. For a runtime instance that is not a decision, it is a bare status flip:
+ * the node cursor is never advanced (`current_node_key` keeps pointing at the node just decided),
+ * the remaining approvers' seats stay active, no completion event is built or enqueued, and none of
+ * the three completion consumers (`approval-bridge`, `approval-trigger`, `approval-projection`, see
+ * `multitable/automation-routing-manifest.ts`) nor the record form write-back ever hear about it.
+ * On a two-step graph A -> B, a seated approver at A could mark the whole instance `approved`
+ * with B never decided.
+ *
+ * This routes those instances through the SAME service method the `/actions` door calls
+ * (`ApprovalProductService.dispatchAction`) rather than through a second copy of its settlement.
+ * There is deliberately no shared "settlement function" extracted out of `dispatchAction`: its
+ * approve arm is the executor resolution (aggregation modes, parallel regions, auto-approval and
+ * cc cascades, node activation epochs, the completion event) and a second copy of it is precisely
+ * the drift this slice exists to remove.
+ *
+ * The instance row is re-read after the dispatch because `UnifiedApprovalDTO` carries no `version`
+ * and the legacy envelope's `data.version` is part of this route's published shape.
+ *
+ * TWO riders are forwarded besides the comment, and both exist because this door publishes
+ * something `/actions` does not:
+ *
+ *   * `expectedVersion` — the optimistic-lock precondition. The caller's `version` was already
+ *     checked under THIS route's lock, but that lock has to be handed back before the call (the
+ *     settlement re-locks the row on a second connection), so without this rider the check would
+ *     be advisory: it would say "your read was current when you read it", not "your decision is
+ *     being applied to the state you read". Passed down, it is re-checked inside the settlement
+ *     transaction, under the lock the write itself is made under.
+ *   * `reason` — this door's own `approval_records.reason` column, which `/reject` collects under a
+ *     400 `APPROVAL_REJECTION_REASON_REQUIRED` and which the shared writer would otherwise leave
+ *     NULL. `null` for `/approve`, which has never had the column.
+ */
+async function settleLegacyDecisionThroughSharedPath(
+  productService: ApprovalProductService,
+  id: string,
+  action: 'approve' | 'reject',
+  comment: string | null,
+  actor: { userId: string; userName: string; roles: string[]; ip: string | null; userAgent: string | null },
+  precondition: { expectedVersion: number; reason: string | null },
+): Promise<{ status: string; version: number }> {
+  await productService.dispatchAction(
+    id,
+    {
+      action,
+      // The caller's `metadata` is NOT forwarded: `dispatchAction` derives every attribution key
+      // (`nodeKey`, `nodeEntryEpoch`, `nextNodeKey`, `approvalMode`, ...) server-side, and handing
+      // it a client blob would re-open the attribution hole the seat/attribution slice just closed.
+      ...(comment !== null ? { comment } : {}),
+      expectedVersion: precondition.expectedVersion,
+      ...(precondition.reason !== null ? { reason: precondition.reason } : {}),
+    },
+    actor,
+  )
+  if (!pool) {
+    throw new ServiceError('Database not available', 503, 'APPROVALS_DATABASE_UNAVAILABLE')
+  }
+  const settled = await pool.query<{ status: string; version: number | string }>(
+    `SELECT status, version FROM approval_instances WHERE id = $1`,
+    [id],
+  )
+  const row = settled.rows[0]
+  if (!row) {
+    // Unreachable by construction: the dispatch above committed against this very row. Fail closed
+    // rather than answer `ok: true` with a status nobody read.
+    throw new ServiceError('Approval instance not found', 404, 'APPROVAL_NOT_FOUND')
+  }
+  return { status: row.status, version: Number(row.version) }
+}
+
+/**
+ * A `ServiceError` raised by the shared settlement path, rendered in the LEGACY envelope
+ * (`{ ok: false, error }`) that every other refusal on these two routes already uses — the status
+ * code and the error CODE are the service's own, so a refusal keeps its identity instead of being
+ * flattened to `500 APPROVAL_APPROVE_FAILED` by the outer catch. `details` is forwarded when the
+ * service supplied one (it is values-free by the service's own contract, e.g. `{ nodeKey }`).
+ */
+function legacyDecisionServiceErrorResponse(error: ServiceError) {
+  return {
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    },
+  }
+}
+
+/**
+ * ONE 409 SHAPE per endpoint. The optimistic-lock precondition is now checked in TWO places on
+ * these two routes — this route's own pre-check, under its own `FOR UPDATE` lock, and the shared
+ * settlement path's re-check, under the lock the write is actually made under (see
+ * `ApprovalActionRequest.expectedVersion`) — and BOTH are reachable, which one fires depending on
+ * whether a concurrent decision landed inside the window between them.
+ *
+ * Rendering the second one with the generic mapper above would give this endpoint two different
+ * bodies for one error code (`error.currentVersion` from `approvalVersionConflictResponse` vs
+ * `error.details.currentVersion` from the generic mapper), selected by interleaving. So a version
+ * conflict raised by the settlement is rendered in the SAME envelope this route has always
+ * published for one. `fallbackCurrentVersion` is the version this route read under its own lock,
+ * used only if the service ever raises the code without the detail.
+ */
+function legacyDecisionErrorResponse(error: ServiceError, fallbackCurrentVersion: number) {
+  if (error.code === 'APPROVAL_VERSION_CONFLICT') {
+    const detailed = Number(error.details?.currentVersion)
+    return approvalVersionConflictResponse(Number.isFinite(detailed) ? detailed : fallbackCurrentVersion)
+  }
+  return legacyDecisionServiceErrorResponse(error)
 }
 
 export function approvalsRouter(options?: ApprovalRouterOptions): Router {
@@ -1025,6 +1481,112 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         'APPROVAL_TEMPLATE_VERSION_RESTORE_FAILED',
         'Failed to restore approval template version',
       )
+    }
+  })
+
+  // ── Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 ────────────
+  // I7: writes gated by `approvalTemplateAdminGuard` (same as `/api/approval-templates` itself,
+  // `:803/:851/:940/:954`); the one read below by `rbacGuard('approvals:read')` (same as `:531`).
+  // Every handler resolves `orgId` via `resolveApprovalTemplateGroupOrgId` FIRST — before any
+  // service call — so a rejected/missing org never reaches the database (A‴, zero writes).
+
+  r.get('/api/approval-template-groups', authenticate, rbacGuard('approvals:read'), async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const groups = await listApprovalTemplateGroups(orgId)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_LIST_FAILED', 'Failed to list approval template groups')
+    }
+  })
+
+  r.post('/api/approval-template-groups', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
+      }
+      const name = typeof req.body?.name === 'string' ? req.body.name : ''
+      const group = await createApprovalTemplateGroup(orgId, name, actorId)
+      res.status(201).json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED', 'Failed to create approval template group')
+    }
+  })
+
+  r.patch('/api/approval-template-groups/:id', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const name = typeof req.body?.name === 'string' ? req.body.name : ''
+      const group = await renameApprovalTemplateGroup(orgId, req.params.id, name)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_RENAME_FAILED', 'Failed to rename approval template group')
+    }
+  })
+
+  r.post('/api/approval-template-groups/:id/archive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const group = await archiveApprovalTemplateGroup(orgId, req.params.id)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_ARCHIVE_FAILED', 'Failed to archive approval template group')
+    }
+  })
+
+  r.post('/api/approval-template-groups/:id/unarchive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const group = await unarchiveApprovalTemplateGroup(orgId, req.params.id)
+      res.json({ group })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNARCHIVE_FAILED', 'Failed to unarchive approval template group')
+    }
+  })
+
+  // Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success.
+  r.post('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
+      }
+      const groupId = typeof req.body?.groupId === 'string' ? req.body.groupId.trim() : ''
+      if (!groupId) {
+        return res.status(400).json(approvalErrorResponse('APPROVAL_GROUP_ID_REQUIRED', 'groupId is required'))
+      }
+      // §2 "挂接时按原谓词校验可见" (ratified) — zero rows written if the caller cannot see the
+      // template under the ordinary visibility predicate (see isApprovalTemplateVisibleForGroupLink).
+      const visibilityActor = resolveApprovalTemplateVisibilityActor(req)
+      if (!(await isApprovalTemplateVisibleForGroupLink(req.params.id, visibilityActor))) {
+        return res.status(404).json(approvalErrorResponse('APPROVAL_TEMPLATE_NOT_FOUND', 'Approval template not found'))
+      }
+      const link = await linkApprovalTemplateToGroup(orgId, req.params.id, groupId, actorId)
+      res.status(201).json({ link })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_LINK_FAILED', 'Failed to link approval template to group')
+    }
+  })
+
+  // Unlink is an INDEPENDENT UPDATE, never routed through the upsert above (§2). Idempotent 204
+  // whether the template was linked, already unlinked, or never linked at all (acceptance H).
+  r.delete('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      await unlinkApprovalTemplateFromGroup(orgId, req.params.id)
+      res.status(204).end()
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED', 'Failed to unlink approval template from group')
     }
   })
 
@@ -2869,6 +3431,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const client = await pool.connect()
+      // Set by the settlement-parity branch below, which hands the connection back BEFORE the
+      // shared settlement path takes its own one. Guards the inner catch and the `finally` against
+      // touching a released client (a second `release()` throws).
+      let clientReleased = false
       try {
         await client.query('BEGIN')
 
@@ -2903,6 +3469,11 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         }
 
         // P17/P22: attendance instances fail closed before legacy terminal DML.
+        // ORDER IS LOAD-BEARING: this stays AHEAD of the seat gate below, so a seatless caller on
+        // an attendance-sourced instance keeps receiving the attendance refusal it receives today.
+        // Reversing the two would change the error identity on a path that is already refused.
+        // Disclosure: no attendance-sourced instance is in this suite's fixtures, so this ordering
+        // claim has no automated leg here — it is asserted, not test-covered, by this candidate.
         try {
           await assertAttendanceCentralMutationFailClosed(client, instance)
         } catch (error) {
@@ -2915,6 +3486,154 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           }
           throw error
         }
+
+        // SEAT / ROUND / STATUS — the decision door's own predicate, BEFORE any DML in this
+        // transaction (the two statements above it are SELECT-only), so a refusal leaves zero rows
+        // rather than a rolled-back write. See `resolveLegacyDecisionSeat`.
+        const actorRoles = resolveApprovalActorRoles(req)
+        const seat = await resolveLegacyDecisionSeat(client, instance, userId, actorRoles)
+        if (!seat.allowed) {
+          await client.query('ROLLBACK')
+          // EXISTING code, reused verbatim from `ApprovalProductService.dispatchAction`'s gate
+          // (403 `APPROVAL_ASSIGNMENT_REQUIRED`) — no new error code is minted here. The envelope
+          // is this route's own `{ ok: false, error }` shape, unchanged, and the message is
+          // values-free (no seat list, no node key, no actor id).
+          return res.status(403).json(
+            approvalErrorResponse(
+              'APPROVAL_ASSIGNMENT_REQUIRED',
+              'Approval assignment not found for actor',
+            ),
+          )
+        }
+        // ORDER (F4 (i), owner-named 2026-09-25): the seat gate above runs FIRST, this cancel-round
+        // outlet guard SECOND. A caller with no seat on a cancel-round instance is therefore refused
+        // with the same values-free 403 as on any other instance and learns nothing about the
+        // instance's kind; a seated caller still meets the 409 outlet guard before any DML.
+        // Lock §14.3 outlet #7 — this legacy endpoint never checks `isTemplateRuntimeInstance`
+        // (that dispatch lives at `:2796-2799`, several hundred lines away) and locks ANY
+        // `platform` pending instance by id above, so a cancel-round instance is reachable here.
+        // Its `reject`/`revoke` must go through `dispatchAction` (judged §14.2), and approve is
+        // never in the cancel-round allowed set at all — action-independent, so this rejects
+        // before the action-specific DML below regardless of which legacy verb the request used.
+        rejectIfCancelRound(instance, 'legacy POST /:id/approve')
+        // ORDER, continued (F4 (i)): the cancel-round outlet guard above also runs BEFORE the shared
+        // settlement dispatch below — `dispatchAction` admits `approve`/`reject` on a cancel-round
+        // instance (they are in its allowed set), so a seated legacy caller must be refused HERE,
+        // not handed to the settlement path.
+
+        // ── H-5 SETTLEMENT PARITY ─────────────────────────────────────────────────────────────
+        // `seat.seatGated` is TRUE for exactly the instances the `/actions` door dispatches to
+        // `ApprovalProductService.dispatchAction` (`decisionDoorIsSeatGated` and
+        // `isTemplateRuntimeInstance` are the same population: a non-`plm:` id, `source_system`
+        // `'platform'`, and a `published_definition_id`). The same predicate that decides WHO may
+        // decide therefore also decides WHICH settlement applies — one definition, not a second,
+        // narrower copy.
+        //
+        // THE LOCK IS RELEASED FIRST, and this is the slice's one real cost — stated as a clause,
+        // not as a footnote:
+        //
+        //   `dispatchAction` re-locks this same row `FOR UPDATE` on a SECOND pool connection, so
+        //   holding ours across the call is a DETERMINISTIC SELF-DEADLOCK, not a race. We
+        //   therefore hand the connection back before calling it, which means the row is
+        //   UNLOCKED for a window between the checks above and the settlement's own transaction,
+        //   and every precondition this route evaluated above (version, status, attendance, seat)
+        //   was evaluated on a snapshot that another decision may already have replaced.
+        //
+        // What closes the window, per precondition:
+        //   * version — RE-CHECKED inside the settlement transaction, under the settlement's own
+        //     lock, via the `expectedVersion` rider passed below. A concurrent decision that lands
+        //     first makes this call a 409 (same code, same envelope as the pre-check above), not a
+        //     second settlement applied to a state this caller never read.
+        //   * status / seat / round — re-derived by `dispatchAction` from the row it locks itself
+        //     (`status !== 'pending'`, active-assignment admission), so an instance that has since
+        //     ended, or a seat that has since been retired, refuses there.
+        //   * attendance fail-closed — re-run by `guardAttendanceCentralMutationOrThrow` at the
+        //     top of the settlement transaction.
+        //
+        // What is NOT closed, recorded rather than assumed away: the ORDER in which two
+        // simultaneous callers are admitted is the order PostgreSQL grants the row lock, so which
+        // of them gets the 200 and which gets the 409 is not determined by who called first.
+        if (seat.seatGated) {
+          await client.query('ROLLBACK')
+          client.release()
+          clientReleased = true
+          let settled: { status: string; version: number }
+          try {
+            settled = await settleLegacyDecisionThroughSharedPath(
+              productService,
+              id,
+              'approve',
+              comment,
+              {
+                userId,
+                userName,
+                roles: actorRoles,
+                ip: req.ip || null,
+                userAgent: req.get('user-agent') || null,
+              },
+              // `/approve` has never had a `reason` column of its own — only `/reject` does.
+              { expectedVersion: requestedVersion, reason: null },
+            )
+          } catch (settlementError) {
+            if (settlementError instanceof ServiceError) {
+              return res
+                .status(settlementError.statusCode)
+                .json(legacyDecisionErrorResponse(settlementError, instance.version))
+            }
+            throw settlementError
+          }
+          logger.info(`Approval ${id} approved by ${userId} through the shared settlement path`)
+          const settledAssignees = await listDirectApprovalAssigneeIds(id)
+          await publishApprovalCountsForUsers(
+            options,
+            [
+              { userId, roles: actorRoles },
+              ...settledAssignees.map((assigneeId) => ({ userId: assigneeId })),
+            ],
+            'legacy-approve',
+          )
+          // The legacy envelope is unchanged in SHAPE. `status` is now whatever the settlement
+          // reached — `approved`/`rejected` when this decision was terminal, and `pending` when the
+          // instance legitimately advanced to a further node instead of ending here.
+          return res.json({
+            ok: true,
+            data: {
+              id,
+              status: settled.status,
+              version: settled.version,
+              prevVersion: instance.version,
+            },
+          })
+        }
+        // The ROUND half of the attribution, resolved by the door's OWN resolver
+        // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
+        // `DISTINCT entry_epoch` query.
+        //
+        // REACHABILITY, CORRECTED by the settlement-parity branch above (it used to read "called
+        // ONLY for a seat-gated instance"): every seat-gated instance now RETURNS above, so control
+        // reaches this line only on a NON-seat-gated legacy platform row. `seat.nodeKey` is `null`
+        // for those by construction (`resolveLegacyDecisionSeat` returns attribution only for a
+        // seat-gated instance), so the resolver is not called at all here and its "no active
+        // assignments" fail-closed branch (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) stays unreachable —
+        // the same conclusion as before, reached for the opposite reason. What survives below is
+        // the STRIP half of `sanitizeLegacyDecisionMetadata`: a client-supplied `nodeKey` /
+        // `nodeEntryEpoch` is still dropped from a row no server-side seat can vouch for.
+        //
+        // KNOWN GAP, recorded rather than assumed away: this route does NOT dispatch through
+        // `handleApprovalsError`, so a `ServiceError` thrown here does not keep its code. The outer
+        // catch flattens anything that is not a schema error to `500 APPROVAL_APPROVE_FAILED` /
+        // `APPROVAL_REJECT_FAILED`, which means the resolver's structural
+        // `APPROVAL_NODE_ENTRY_EPOCH_MIXED` (a single round spanning epochs) reaches the client as a
+        // generic 500. That is still FAIL-CLOSED — the inner catch rolls the transaction back before
+        // rethrowing, so a refused call leaves zero rows exactly like the 403 above — but the code
+        // IDENTITY is lost, and a later reader must not assume these routes surface it.
+        const nodeEntryEpoch = seat.nodeKey !== null
+          ? await productService.currentNodeEntryEpoch(client, id, seat.nodeKey)
+          : null
+        const attributedMetadata = sanitizeLegacyDecisionMetadata(metadata, id, {
+          nodeKey: seat.nodeKey,
+          nodeEntryEpoch,
+        })
 
         const newVersion = instance.version + 1
 
@@ -2937,7 +3656,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
             instance.status,
             instance.version,
             newVersion,
-            JSON.stringify(metadata),
+            JSON.stringify(attributedMetadata),
             req.ip || null,
             req.get('user-agent') || null,
           ],
@@ -2965,12 +3684,23 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           },
         })
       } catch (innerError) {
-        await client.query('ROLLBACK')
+        if (!clientReleased) {
+          await client.query('ROLLBACK')
+        }
         throw innerError
       } finally {
-        client.release()
+        if (!clientReleased) {
+          client.release()
+        }
       }
     } catch (error) {
+      // Lock §14.3 outlet #7 — this catch does NOT call `handleApprovalsError` (unlike almost
+      // every other route in this file), so `rejectIfCancelRound`'s `ServiceError` subclass would
+      // otherwise fall through to the generic 500 below. Must run before `isDatabaseSchemaError`,
+      // which has a message-substring fallback (`utils/database-errors.ts:23-36`).
+      if (error instanceof CancelRoundOutletForbiddenError) {
+        return handleApprovalsError(res, error, 'APPROVAL_APPROVE_FAILED', 'Failed to approve request')
+      }
       if (isDatabaseSchemaError(error) && allowDegradation) {
         if (!approvalsDegraded) {
           logger.warn('Approvals service degraded - tables not found')
@@ -3026,6 +3756,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const client = await pool.connect()
+      // Set by the settlement-parity branch below, which hands the connection back BEFORE the
+      // shared settlement path takes its own one. Guards the inner catch and the `finally` against
+      // touching a released client (a second `release()` throws).
+      let clientReleased = false
       try {
         await client.query('BEGIN')
 
@@ -3060,6 +3794,11 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         }
 
         // P17/P22: attendance instances fail closed before legacy terminal DML.
+        // ORDER IS LOAD-BEARING: this stays AHEAD of the seat gate below, so a seatless caller on
+        // an attendance-sourced instance keeps receiving the attendance refusal it receives today.
+        // Reversing the two would change the error identity on a path that is already refused.
+        // Disclosure: no attendance-sourced instance is in this suite's fixtures, so this ordering
+        // claim has no automated leg here — it is asserted, not test-covered, by this candidate.
         try {
           await assertAttendanceCentralMutationFailClosed(client, instance)
         } catch (error) {
@@ -3072,6 +3811,158 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           }
           throw error
         }
+
+        // SEAT / ROUND / STATUS — the decision door's own predicate, BEFORE any DML in this
+        // transaction (the two statements above it are SELECT-only), so a refusal leaves zero rows
+        // rather than a rolled-back write. See `resolveLegacyDecisionSeat`.
+        const actorRoles = resolveApprovalActorRoles(req)
+        const seat = await resolveLegacyDecisionSeat(client, instance, userId, actorRoles)
+        if (!seat.allowed) {
+          await client.query('ROLLBACK')
+          // EXISTING code, reused verbatim from `ApprovalProductService.dispatchAction`'s gate
+          // (403 `APPROVAL_ASSIGNMENT_REQUIRED`) — no new error code is minted here. The envelope
+          // is this route's own `{ ok: false, error }` shape, unchanged, and the message is
+          // values-free (no seat list, no node key, no actor id).
+          return res.status(403).json(
+            approvalErrorResponse(
+              'APPROVAL_ASSIGNMENT_REQUIRED',
+              'Approval assignment not found for actor',
+            ),
+          )
+        }
+        // ORDER (F4 (i), owner-named 2026-09-25): the seat gate above runs FIRST, this cancel-round
+        // outlet guard SECOND. A caller with no seat on a cancel-round instance is therefore refused
+        // with the same values-free 403 as on any other instance and learns nothing about the
+        // instance's kind; a seated caller still meets the 409 outlet guard before any DML.
+        // Lock §14.3 outlet #7′ — same reachability as #7 above (no `isTemplateRuntimeInstance`
+        // check, no action check, locks any `platform` pending instance by id). A cancel-round
+        // reject must go through `dispatchAction` because `approval_rounds.outcome` is only
+        // written there (判据 III) — letting this endpoint reject directly would leave the
+        // instance `rejected` with the round still `pending`, a permanent placeholder that blocks
+        // re-issuing a cancel round for the same document (§5 I3 "terminal releases the slot").
+        rejectIfCancelRound(instance, 'legacy POST /:id/reject')
+        // ORDER, continued (F4 (i)): the cancel-round outlet guard above also runs BEFORE the shared
+        // settlement dispatch below — `dispatchAction` admits `approve`/`reject` on a cancel-round
+        // instance (they are in its allowed set), so a seated legacy caller must be refused HERE,
+        // not handed to the settlement path.
+
+        // ── H-5 SETTLEMENT PARITY ─────────────────────────────────────────────────────────────
+        // `seat.seatGated` is TRUE for exactly the instances the `/actions` door dispatches to
+        // `ApprovalProductService.dispatchAction` (`decisionDoorIsSeatGated` and
+        // `isTemplateRuntimeInstance` are the same population: a non-`plm:` id, `source_system`
+        // `'platform'`, and a `published_definition_id`). The same predicate that decides WHO may
+        // decide therefore also decides WHICH settlement applies — one definition, not a second,
+        // narrower copy.
+        //
+        // THE LOCK IS RELEASED FIRST, and this is the slice's one real cost — stated as a clause,
+        // not as a footnote:
+        //
+        //   `dispatchAction` re-locks this same row `FOR UPDATE` on a SECOND pool connection, so
+        //   holding ours across the call is a DETERMINISTIC SELF-DEADLOCK, not a race. We
+        //   therefore hand the connection back before calling it, which means the row is
+        //   UNLOCKED for a window between the checks above and the settlement's own transaction,
+        //   and every precondition this route evaluated above (version, status, attendance, seat)
+        //   was evaluated on a snapshot that another decision may already have replaced.
+        //
+        // What closes the window, per precondition:
+        //   * version — RE-CHECKED inside the settlement transaction, under the settlement's own
+        //     lock, via the `expectedVersion` rider passed below. A concurrent decision that lands
+        //     first makes this call a 409 (same code, same envelope as the pre-check above), not a
+        //     second settlement applied to a state this caller never read.
+        //   * status / seat / round — re-derived by `dispatchAction` from the row it locks itself
+        //     (`status !== 'pending'`, active-assignment admission), so an instance that has since
+        //     ended, or a seat that has since been retired, refuses there.
+        //   * attendance fail-closed — re-run by `guardAttendanceCentralMutationOrThrow` at the
+        //     top of the settlement transaction.
+        //
+        // What is NOT closed, recorded rather than assumed away: the ORDER in which two
+        // simultaneous callers are admitted is the order PostgreSQL grants the row lock, so which
+        // of them gets the 200 and which gets the 409 is not determined by who called first.
+        if (seat.seatGated) {
+          await client.query('ROLLBACK')
+          client.release()
+          clientReleased = true
+          let settled: { status: string; version: number }
+          try {
+            settled = await settleLegacyDecisionThroughSharedPath(
+              productService,
+              id,
+              'reject',
+              comment ?? reason,
+              {
+                userId,
+                userName,
+                roles: actorRoles,
+                ip: req.ip || null,
+                userAgent: req.get('user-agent') || null,
+              },
+              // `reason` is this door's OWN persisted column, and this door 400s without it
+              // (`APPROVAL_REJECTION_REASON_REQUIRED` above). It is carried into the settlement's
+              // audit insert, in the settlement's own transaction — the same two values the
+              // inline DML below has always written: `comment` = the caller's comment (falling
+              // back to the reason text when they sent only a reason), `reason` = the reason.
+              { expectedVersion: requestedVersion, reason },
+            )
+          } catch (settlementError) {
+            if (settlementError instanceof ServiceError) {
+              return res
+                .status(settlementError.statusCode)
+                .json(legacyDecisionErrorResponse(settlementError, instance.version))
+            }
+            throw settlementError
+          }
+          logger.info(`Approval ${id} rejected by ${userId} through the shared settlement path`)
+          const settledAssignees = await listDirectApprovalAssigneeIds(id)
+          await publishApprovalCountsForUsers(
+            options,
+            [
+              { userId, roles: actorRoles },
+              ...settledAssignees.map((assigneeId) => ({ userId: assigneeId })),
+            ],
+            'legacy-reject',
+          )
+          // The legacy envelope is unchanged in SHAPE. `status` is now whatever the settlement
+          // reached — `approved`/`rejected` when this decision was terminal, and `pending` when the
+          // instance legitimately advanced to a further node instead of ending here.
+          return res.json({
+            ok: true,
+            data: {
+              id,
+              status: settled.status,
+              version: settled.version,
+              prevVersion: instance.version,
+            },
+          })
+        }
+        // The ROUND half of the attribution, resolved by the door's OWN resolver
+        // (`ApprovalProductService.currentNodeEntryEpoch`) rather than a second copy of its
+        // `DISTINCT entry_epoch` query.
+        //
+        // REACHABILITY, CORRECTED by the settlement-parity branch above (it used to read "called
+        // ONLY for a seat-gated instance"): every seat-gated instance now RETURNS above, so control
+        // reaches this line only on a NON-seat-gated legacy platform row. `seat.nodeKey` is `null`
+        // for those by construction (`resolveLegacyDecisionSeat` returns attribution only for a
+        // seat-gated instance), so the resolver is not called at all here and its "no active
+        // assignments" fail-closed branch (`APPROVAL_NODE_ENTRY_EPOCH_EMPTY`) stays unreachable —
+        // the same conclusion as before, reached for the opposite reason. What survives below is
+        // the STRIP half of `sanitizeLegacyDecisionMetadata`: a client-supplied `nodeKey` /
+        // `nodeEntryEpoch` is still dropped from a row no server-side seat can vouch for.
+        //
+        // KNOWN GAP, recorded rather than assumed away: this route does NOT dispatch through
+        // `handleApprovalsError`, so a `ServiceError` thrown here does not keep its code. The outer
+        // catch flattens anything that is not a schema error to `500 APPROVAL_APPROVE_FAILED` /
+        // `APPROVAL_REJECT_FAILED`, which means the resolver's structural
+        // `APPROVAL_NODE_ENTRY_EPOCH_MIXED` (a single round spanning epochs) reaches the client as a
+        // generic 500. That is still FAIL-CLOSED — the inner catch rolls the transaction back before
+        // rethrowing, so a refused call leaves zero rows exactly like the 403 above — but the code
+        // IDENTITY is lost, and a later reader must not assume these routes surface it.
+        const nodeEntryEpoch = seat.nodeKey !== null
+          ? await productService.currentNodeEntryEpoch(client, id, seat.nodeKey)
+          : null
+        const attributedMetadata = sanitizeLegacyDecisionMetadata(metadata, id, {
+          nodeKey: seat.nodeKey,
+          nodeEntryEpoch,
+        })
 
         const newVersion = instance.version + 1
 
@@ -3095,7 +3986,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
             instance.status,
             instance.version,
             newVersion,
-            JSON.stringify(metadata),
+            JSON.stringify(attributedMetadata),
             req.ip || null,
             req.get('user-agent') || null,
           ],
@@ -3123,12 +4014,22 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           },
         })
       } catch (innerError) {
-        await client.query('ROLLBACK')
+        if (!clientReleased) {
+          await client.query('ROLLBACK')
+        }
         throw innerError
       } finally {
-        client.release()
+        if (!clientReleased) {
+          client.release()
+        }
       }
     } catch (error) {
+      // Lock §14.3 outlet #7′ — same rationale as the `/approve` catch above: this catch does not
+      // call `handleApprovalsError`, so the cancel-round guard's `ServiceError` subclass needs an
+      // explicit passthrough here, ahead of the message-substring `isDatabaseSchemaError` fallback.
+      if (error instanceof CancelRoundOutletForbiddenError) {
+        return handleApprovalsError(res, error, 'APPROVAL_REJECT_FAILED', 'Failed to reject request')
+      }
       if (isDatabaseSchemaError(error) && allowDegradation) {
         if (!approvalsDegraded) {
           logger.warn('Approvals service degraded - tables not found')

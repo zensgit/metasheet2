@@ -164,10 +164,27 @@ function makeDb({ seed = [], failInsertOnce = false } = {}) {
       Object.assign(target, set)
       return result(target)
     },
+    // The writer's half of the external-system delete lock protocol: `set` pins the named system
+    // with KEY SHARE before touching the binding row. This fake answers "live" for any id unless a
+    // seeded `integration_external_systems` row decides otherwise — the existence-under-lock
+    // semantics are the subject of external-systems-delete-bind-lock-protocol.test.cjs, not of the
+    // binding semantics under test here.
+    async selectOneForKeyShare(table, where) {
+      calls.push({ op: 'selectOneForKeyShare', table, where })
+      const seeded = rows.find((row) => row.__table === table && matches(row, where))
+      if (seeded) return { ...seeded }
+      return { id: where.id, tenant_id: where.tenant_id }
+    },
     async transaction(callback) {
       calls.push({ op: 'transaction' })
       return callback(handle)
     },
+    // The lock protocol's isolation pin (external-system-pointer-lock.cjs pinLockProtocolIsolation →
+    // SET TRANSACTION ISOLATION LEVEL READ COMMITTED, the FIRST statement of every participating
+    // transaction). A no-op here — this fake has no isolation level to set; the pin's ordering and
+    // its effect are the subject of external-systems-delete-bind-lock-protocol.test.cjs and the
+    // real-Postgres suite.
+    async setTransactionIsolationLevel() {},
   }
   return handle
 }
@@ -505,7 +522,7 @@ async function main() {
     // atomic, and a non-atomic one would let a concurrent rebind falsify the audit trail.
     assert.throws(
       () => createStockPreparationSourceBindingStore({ db: { selectOne() {}, insertOne() {}, updateRow() {} } }),
-      /scoped db helper \(incl\. transaction\) is required/,
+      /scoped db helper \(incl\. transaction, selectOneForKeyShare\) is required/,
     )
   })
 

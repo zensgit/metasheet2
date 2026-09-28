@@ -982,6 +982,9 @@ const APPROVED_WHAT_INTERPOLATIONS = Object.freeze([
   'target.objectId',
   // The refusal code the carry route will return — a closed server constant, not a value.
   'carryBinding.ownership.refusalCode',
+  // ...and the one the materials export will return for the SAME verdict (its own vocabulary,
+  // PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES) — likewise a closed server constant.
+  'exportRefusalCode',
   // Counts.
   'carryBinding.missingHumanFields.length',
   'checks.confirmationLedger.missingFieldCount',
@@ -1199,6 +1202,13 @@ async function carryBindingReportsWhatTheWallWillDo() {
     assert.equal(found.detail.carryRouteCode, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
       'and must quote the EXACT code the click returns')
     assert.ok(found.what.includes('CONFIRM_CARRY_TARGET_TENANT_MISMATCH'))
+    // The materials export runs the same wall on the same binding, so the same blocker must also
+    // quote the code an export click returns — and must no longer claim the export keeps working.
+    assert.equal(found.detail.exportRouteCode, 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+      'the export refuses this binding too, in its own vocabulary')
+    assert.ok(found.what.includes('PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH'))
+    assert.equal(found.what.includes('the export do not ask this question'), false,
+      'the blocker must not tell a deployer the export is unaffected')
     assert.equal(res.body.data.ready, false)
     assert.equal(res.body.data.checks.carryTargetBinding.ownershipState, 'not_owned_by_this_project')
     // ...and the posture note must no longer tell the operator that nothing refuses it.

@@ -38,6 +38,8 @@ describe('meta-api-error-labels', () => {
       'error.aiBulkJobCommitInProgress',
       // F4-B gateway-outage copy (502/503/504).
       'error.serverRestarting',
+      // 客户反馈 #4b: automation condition value does not fit the field type.
+      'error.automationConditionValueInvalid',
     ])
 
     for (const key of META_API_ERROR_LABEL_KEYS) {
@@ -92,6 +94,12 @@ describe('meta-api-error-labels', () => {
       .toBe('This field type change would make the existing data unreadable, so it was refused. Only lossless conversions are allowed.')
     // values-free: the copy names no field id
     expect(apiDefaultErrorMessage('FIELD_RETYPE_NOT_LOSSLESS', 400, true)).not.toMatch(/fld[_-]/)
+    // 客户反馈 #4b: the automation condition-value refusal code gets format-naming copy in both locales.
+    expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, true))
+      .toBe('条件值与字段类型不匹配（日期请填 YYYY-MM-DD，日期时间请填 YYYY-MM-DD HH:mm，数字只填数字）。')
+    expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, false))
+      .toBe('A condition value does not match its field type (dates use YYYY-MM-DD, date-times YYYY-MM-DD HH:mm, numbers digits only).')
+    expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, true)).not.toMatch(/fld[_-]/)
   })
 
   it('keeps unknown API status fallback technical and locale-neutral', () => {

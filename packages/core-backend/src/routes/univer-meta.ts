@@ -19,6 +19,8 @@ import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitabl
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
+import { resolveDateTimeFieldTimeZone, resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
+import { dateTimeMinuteKey, formatDateTimeValue } from '../multitable/date-time-wall-clock'
 import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -56,6 +58,7 @@ import {
   requiresOwnWriteRowPolicy,
   resolveBaseReadable,
   resolveBaseReadableForAccess,
+  resolveCopyTargetWritable,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
   resolveSheetCapabilitiesForAccess,
@@ -204,6 +207,8 @@ import {
   SheetNotLiveError,
   assertSheetLive,
   assertSheetLiveForUpdate,
+  assertSheetsLiveForUpdate,
+  describeLivenessLookupError,
   loadSheetLiveness,
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
@@ -332,8 +337,8 @@ import {
   parseDingTalkAutomationDeliveryLimit,
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
+  preflightAutomationRuleUpdate,
   preflightDingTalkAutomationCreate,
-  preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
@@ -1328,6 +1333,44 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
   }
 }
 
+/**
+ * 客户反馈 2026-09-24 #4c follow-up (deferred by PR #6083): for each lookup field in `fields` whose TARGET field
+ * (on the foreign sheet) is a date-time, the zone its values are shown in — the target's own rule: a dateTime
+ * field's explicit non-'UTC' zone else the instance business timezone; createdTime / modifiedTime → the business
+ * timezone. Other lookups are absent (their cells keep the raw projection). The foreign sheet is resolved as
+ * applyLookupRollup does (`cfg.foreignSheetId ?? link.foreignSheetId`); one field load per distinct foreign sheet.
+ * Only field TYPES / zone properties are read — no foreign VALUES, so no readability gate is involved here (the
+ * values themselves were already masked by applyLookupRollup).
+ */
+async function resolveLookupDateTimeTargetZones(
+  query: QueryFn,
+  fields: UniverMetaField[],
+  relationalLinkFields: RelationalLinkField[],
+): Promise<Map<string, string>> {
+  const zones = new Map<string, string>()
+  const lookups = fields
+    .filter((field) => field.type === 'lookup')
+    .map((field) => ({ fieldId: field.id, cfg: parseLookupFieldConfig(field.property) }))
+    .filter((entry): entry is { fieldId: string; cfg: LookupFieldConfig } => entry.cfg !== null)
+  if (lookups.length === 0) return zones
+  const linkConfigById = new Map(relationalLinkFields.map(({ fieldId, cfg }) => [fieldId, cfg] as const))
+  const foreignFieldsBySheet = new Map<string, Array<{ id: string; type: string; property?: unknown }>>()
+  for (const { fieldId, cfg } of lookups) {
+    const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (!foreignSheetId) continue
+    let foreignFields = foreignFieldsBySheet.get(foreignSheetId)
+    if (!foreignFields) {
+      foreignFields = (await loadFieldsForSheetShared(query, foreignSheetId)) as Array<{ id: string; type: string; property?: unknown }>
+      foreignFieldsBySheet.set(foreignSheetId, foreignFields)
+    }
+    const target = foreignFields.find((candidate) => candidate.id === cfg.targetFieldId)
+    if (!target) continue
+    if (target.type === 'dateTime') zones.set(fieldId, resolveDateTimeFieldTimeZone(target.property))
+    else if (target.type === 'createdTime' || target.type === 'modifiedTime') zones.set(fieldId, resolveMultitableBusinessTimezone())
+  }
+  return zones
+}
+
 function parseRollupAggregation(value: unknown): RollupAggregation | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim().toLowerCase()
@@ -1594,7 +1637,7 @@ export function expressionHasRelationAggregationButNotSole(expression: string): 
 // extractor misses (the link arg is a string literal, not a {fld} ref). Registering it makes a link-field
 // edit recompute the aggregation; the criteria's {fld} value ref is caught by the normal extractor. The
 // FOREIGN target/criteria deps are handled parse-side by the taint (read mask) + fan-out paths.
-function extractRelationAggregationLinkFieldId(expression: string): string | null {
+export function extractRelationAggregationLinkFieldId(expression: string): string | null {
   const e = expression.startsWith('=') ? expression.slice(1) : expression
   return parseRelationAggregationCall(e.trim())?.linkFieldId ?? null
 }
@@ -3290,6 +3333,64 @@ export async function recalculateFormulaFieldsForActor(
 }
 
 /**
+ * Copy-sheet S1 (ADR §3 / §7.2 step 7): recompute EVERY formula field of a freshly copied sheet for the
+ * given (chunk of) new record ids, after the copy transaction COMMITTED. Same chokepoint as the
+ * expression-change bulk recompute (`explicitFormulaFieldIds` = all formula fields, `changedFieldIds`
+ * `[]`), same writer-taint discipline under the copier's actor context — a field the copier may not read
+ * is skipped, never persisted degraded. Exported for `routes/multitable-copy-sheet.ts`.
+ */
+export async function recalculateAllFormulaFieldsForActor(
+  actorId: string | null,
+  query: QueryFn,
+  sheetId: string,
+  fields: UniverMetaField[],
+  recordIds: string[],
+  opts: {
+    /**
+     * Copy-sheet (ADR #6094 §7.2 step 7, DATA-7): hydrate same-record lookup/rollup for these rows under THIS
+     * actor's read authority before evaluating, so a formula-over-lookup sees the real lookup value instead of
+     * the absent-on-reload 0 (RWS Step 4 / recalcNewRecordFormulas parity). Skipped when the sheet has no
+     * lookup/rollup field (no extra statements).
+     */
+    hydrateLookupRollupFor?: ResolvedRequestAccess
+  } = {},
+): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
+  const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
+  if (formulaFieldIds.size === 0 || recordIds.length === 0) return []
+  let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
+  const hasLookupRollup = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
+  if (opts.hydrateLookupRollupFor && hasLookupRollup) {
+    const recordRes = await query(
+      'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      [sheetId, recordIds],
+    )
+    const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
+      id: String(row.id),
+      version: Number(row.version ?? 0),
+      data: normalizeJson(row.data),
+    })) as UniverMetaRecord[]
+    if (rows.length > 0) {
+      const relationalLinkFields = fields
+        .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+        .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
+      const linkValuesByRecord = await loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
+      await applyLookupRollup(undefined, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord, opts.hydrateLookupRollupFor)
+      hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
+    }
+  }
+  return recalculateFormulaFields(
+    buildWriterTaintContext(actorId),
+    query,
+    sheetId,
+    fields,
+    recordIds,
+    [],
+    hydratedDataByRecord,
+    formulaFieldIds,
+  )
+}
+
+/**
  * A-min-create (design #2255): compute a NEWLY created / submitted record's same-record formulas
  * for the FIRST time, with lookup/rollup hydrated in-memory so a formula-over-lookup sees the
  * actual value instead of the absent-on-reload `0`. Run only AFTER insert + meta_links exist.
@@ -4255,6 +4356,45 @@ export function evaluateMetaFilterCondition(
   if (opNorm === 'isempty') return isNullishSortValue(cellValue)
   if (opNorm === 'isnotempty') return !isNullishSortValue(cellValue)
 
+  // 客户反馈 2026-09-24 #4c (PR #6083 review S2): dateTime compares INSTANTS, not strings. Before this the
+  // type fell through to the string branch below, so `is` compared the stored ISO text against whatever the
+  // user typed (never equal) and greater/less hit the catch-all `return true` (matched every row). The filter
+  // value is parsed with the same rule as a cell edit: a zone-less wall clock (`2026-09-24 09:00`) is the
+  // instance BUSINESS timezone (the web sends an absolute instant when a field carries its own explicit
+  // zone, so per-field zones are honoured by the web's conversion; an API caller's zone-less text is
+  // business time). Both sides are floored to the MINUTE — the displayed precision — so a cell stored as
+  // 09:00:30 `is` 09:00. Relative-date operators stay `date`-only (day math is UTC there, see
+  // evaluateRelativeDateOp); an unknown operator keeps the pre-existing match-all catch-all.
+  if (effectiveType === 'dateTime') {
+    const businessZone = resolveMultitableBusinessTimezone()
+    const left = dateTimeMinuteKey(cellValue, businessZone)
+    const right = dateTimeMinuteKey(value, businessZone)
+    if (opNorm === 'is' || opNorm === 'equal') return left !== null && right !== null && left === right
+    if (opNorm === 'isnot' || opNorm === 'notequal') return left !== right
+    if (opNorm === 'greater' || opNorm === 'isgreater') return left !== null && right !== null && left > right
+    if (opNorm === 'greaterequal' || opNorm === 'isgreaterequal') return left !== null && right !== null && left >= right
+    if (opNorm === 'less' || opNorm === 'isless') return left !== null && right !== null && left < right
+    if (opNorm === 'lessequal' || opNorm === 'islessequal') return left !== null && right !== null && left <= right
+    if (opNorm === 'between') {
+      const arr = Array.isArray(condition.value) ? condition.value : []
+      if (arr.length < 2) return true
+      const a = dateTimeMinuteKey(arr[0], businessZone); const b = dateTimeMinuteKey(arr[1], businessZone)
+      if (a === null || b === null) return true
+      if (left === null) return false
+      return left >= Math.min(a, b) && left <= Math.max(a, b)
+    }
+    // contains / doesNotContain: mirror the string branch, but against the DISPLAYED wall-clock text
+    // (`2026-09-24 09:00`), never the raw stored ISO — the person is matching what the grid shows. A cell
+    // that is not a date-time keeps its raw text. Empty needle = inactive (match all), like the string branch.
+    if (opNorm === 'contains' || opNorm === 'doesnotcontain') {
+      const shown = (formatDateTimeValue(cellValue, businessZone) ?? toComparableString(cellValue)).trim().toLowerCase()
+      const needle = toComparableString(value).trim().toLowerCase()
+      if (needle === '') return true
+      return opNorm === 'contains' ? shown.includes(needle) : !shown.includes(needle)
+    }
+    return true
+  }
+
   if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') {
     const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
     const left = toComparable(cellValue)
@@ -4423,7 +4563,7 @@ function toDashboardMetricNumber(value: unknown): number | null {
   return toComparableNumber(value)
 }
 
-function getDbNotReadyMessage(err: unknown): string | null {
+export function getDbNotReadyMessage(err: unknown): string | null {
   const msg = err instanceof Error ? err.message : String(err ?? '')
   // SQLSTATE 为主信号:42P01 缺表 / 42703 缺列。中文 locale 下 PG 的散文被翻译成
   // 「关系 "x" 不存在」/「字段 x 不存在」,英文整句匹配会漏判 → 原来会退化成 500。
@@ -4504,12 +4644,36 @@ function invalidateFieldCache(sheetId: string): void {
   metaFieldCache.delete(sheetId)
 }
 
+/**
+ * Drop the two caches that carry a sheet's DISPLAY NAMES — its field list (`loadSheetFields`) and its
+ * summary (`loadSheetSummary`) — after a rename committed OUTSIDE this router. Both caches are
+ * process-lifetime maps with no TTL, so without this a relabel written through the plugin
+ * provisioning surface (multitable/object-display-name-relabel.ts) would keep serving the old names
+ * to GET /view until something unrelated happened to invalidate them. Call it only after the write's
+ * transaction has committed; calling it without a write is harmless (the next read re-fills).
+ */
+export function invalidateSheetDisplayNameCaches(sheetId: string): void {
+  invalidateFieldCache(sheetId)
+  invalidateSheetSummaryCache(sheetId)
+}
+
 function invalidateViewConfigCache(viewId?: string): void {
   if (typeof viewId === 'string' && viewId.trim().length > 0) {
     metaViewConfigCache.delete(viewId.trim())
     return
   }
   metaViewConfigCache.clear()
+}
+
+/**
+ * Copy-sheet S1 (ADR §7.2 step 7): the SAME three cache drops `DELETE /sheets/:sheetId` performs, for a
+ * sheet that was just created by the copy route in another module. Exported for
+ * `routes/multitable-copy-sheet.ts`; the three caches stay module-private.
+ */
+export function invalidateSheetCachesAfterCopy(sheetId: string): void {
+  invalidateSheetSummaryCache(sheetId)
+  invalidateFieldCache(sheetId)
+  invalidateViewConfigCache()
 }
 
 async function loadSheetSummary(
@@ -4616,7 +4780,7 @@ const INVALID_DISPLAY_NAME_MESSAGE =
  * 等于把租户交给请求方自选。没有可信租户时返回 null,而 null 在 SQL 里用
  * `IS NOT DISTINCT FROM` 匹配,只会匹到同样没有租户的行 —— 不会跨到任何具体租户。
  */
-function resolveTemplateTenantId(req: Request): string | null {
+export function resolveTemplateTenantId(req: Request): string | null {
   const tenantId = req.authenticatedTenantId
   return typeof tenantId === 'string' && tenantId.trim().length > 0 ? tenantId.trim() : null
 }
@@ -4731,7 +4895,7 @@ function sendInvalidDisplayName(res: Response) {
  *
  * `name` must already be TRIMMED by the caller; trimming is unchanged by this gate.
  */
-function sendDisplayNameHygieneRefusal(res: Response, name: string): Response | null {
+export function sendDisplayNameHygieneRefusal(res: Response, name: string): Response | null {
   const refusal = checkDisplayNameHygiene(name)
   if (!refusal) return null
   return res.status(400).json({ ok: false, error: { code: refusal.code, message: refusal.message } })
@@ -5551,12 +5715,14 @@ function asProducerTxnQueryable(
   }
 }
 
-const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
-const FIELD_PERMISSION_HISTORY_KEYS = ['fieldId', 'subjectType', 'subjectId', 'visible', 'readOnly'] as const
-const VIEW_PERMISSION_HISTORY_KEYS = ['viewId', 'subjectType', 'subjectId', 'permission'] as const
-const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
+// Exported (copy-sheet S1): routes/multitable-copy-sheet.ts records the copied permission / view rows with the
+// SAME snapshot shapes + key lists the authoring PUT routes below use, so Time Machine reads one vocabulary.
+export const VIEW_CONFIG_HISTORY_KEYS = ['name', 'type', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config'] as const
+export const FIELD_PERMISSION_HISTORY_KEYS = ['fieldId', 'subjectType', 'subjectId', 'visible', 'readOnly'] as const
+export const VIEW_PERMISSION_HISTORY_KEYS = ['viewId', 'subjectType', 'subjectId', 'permission'] as const
+export const SHEET_PERMISSION_HISTORY_KEYS = ['subjectType', 'subjectId', 'accessLevel'] as const
 
-function permissionConfigEntityId(scope: 'field' | 'sheet' | 'view', parts: string[]): string {
+export function permissionConfigEntityId(scope: 'field' | 'sheet' | 'view', parts: string[]): string {
   return `${scope}:${JSON.stringify(parts)}`
 }
 
@@ -5576,7 +5742,7 @@ function viewConfigSnapshotFromRow(row: any): Record<string, unknown> {
   }
 }
 
-function viewConfigSnapshot(view: {
+export function viewConfigSnapshot(view: {
   name: string
   type: string
   filterInfo?: Record<string, unknown>
@@ -5596,7 +5762,7 @@ function viewConfigSnapshot(view: {
   }
 }
 
-function fieldPermissionSnapshot(args: {
+export function fieldPermissionSnapshot(args: {
   fieldId: string
   subjectType: string
   subjectId: string
@@ -5612,7 +5778,7 @@ function fieldPermissionSnapshot(args: {
   }
 }
 
-function viewPermissionSnapshot(args: {
+export function viewPermissionSnapshot(args: {
   viewId: string
   subjectType: string
   subjectId: string
@@ -5626,7 +5792,7 @@ function viewPermissionSnapshot(args: {
   }
 }
 
-function sheetPermissionSnapshot(args: {
+export function sheetPermissionSnapshot(args: {
   subjectType: string
   subjectId: string
   accessLevel: string
@@ -5648,6 +5814,27 @@ function isImageMimeType(mimeType: string | null | undefined): boolean {
 }
 
 const serializeAttachmentRow = serializeAttachmentRowShared
+
+/**
+ * Copy-sheet S1 provenance (ADR CS-14 / §6): `copiedFrom: { kind, at, sheetId? } | null` from the three
+ * column-tolerant `to_jsonb(...) ->> '...'` reads (`copied_from_kind` / `copied_at` / `copied_from_sheet_id`).
+ * `kind` ∈ 'user' | 'plugin-managed' drives the「快照副本」/「不随 PLM 刷新」badges; `sheetId` is included ONLY
+ * when the caller passed `includeSourceSheetId` (= the caller proved the actor can read the source sheet) —
+ * the source id is never handed to someone who may not read that sheet. Null for a non-copy (or a database
+ * that has not run the provenance migration: the tolerant read answers NULL there).
+ */
+export function serializeCopiedFrom(
+  row: { copied_from_kind?: unknown; copied_at?: unknown; copied_from_sheet_id?: unknown } | null | undefined,
+  includeSourceSheetId = false,
+): { kind: string; at: string | null; sheetId?: string } | null {
+  const kind = typeof row?.copied_from_kind === 'string' && row.copied_from_kind.length > 0 ? row.copied_from_kind : null
+  if (!kind) return null
+  const at = typeof row?.copied_at === 'string' && row.copied_at.length > 0 ? row.copied_at : null
+  const sheetId = includeSourceSheetId && typeof row?.copied_from_sheet_id === 'string' && row.copied_from_sheet_id.length > 0
+    ? row.copied_from_sheet_id
+    : undefined
+  return { kind, at, ...(sheetId ? { sheetId } : {}) }
+}
 
 function serializeBaseRow(row: any): UniverMetaBase {
   return {
@@ -7240,7 +7427,7 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *      equals the set with that axis lifted.
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
  */
-async function hasFullTableReadAccess(
+export async function hasFullTableReadAccess(
   req: Request | undefined,
   query: QueryFn,
   sheetId: string,
@@ -8305,8 +8492,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
         [sheetIds],
       )
+      // ORDER BY created_at, id (客户反馈 2026-09-24 #8 / A10 phase 1): 没有排序时 Postgres
+      // 不保证返回顺序,extractTemplateSheets 按这个数组的原样顺序把视图挂进模板 —— 顺序不稳会让
+      // 同一张表两次存出的模板视图次序不一样。created_at 主排、id 兜底。
+      // S1(2026-09-26 对抗评审):id 兜底不是空话——installMultitableTemplate 在**一个事务**里
+      // 建完一张模板的全部视图,事务内 now() 是同一个时刻,所有视图的 created_at 若都交给 DB
+      // 默认值会打成一片,这时真正生效的排序键就是 id(sha1,和模板顺序无关)。为此
+      // template-library.ts 给每个视图传一个按模板顺序递增的微秒偏移,created_at = 数据库
+      // now() + 偏移(provisioning.ts createView 的可选 createdAtOffsetMicros;其它调用方不传,
+      // 偏移为 0,等于原来的 DB 默认值 now()),装回去的视图顺序才会等于存下来的模板顺序,
+      // 这条 ORDER BY 重新读出来时才对得上。
+      // 已知残留(第二轮对抗评审 S-1,不做回填迁移):#6091 之前从模板装出来的 Base,视图
+      // created_at 全部打平,这里会按 id 排;/context(工作台标签顺序)刻意保持 created_at ASC
+      // 不加 id,所以这类老 Base 存模板时的视图顺序可能与用户看到的标签顺序不同。
       const viewResult = await pool.query(
-        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[])',
+        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[]) ORDER BY created_at, id',
         [sheetIds],
       )
 
@@ -8833,6 +9033,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const sheetRowResult = resolvedSheetId
         ? await pool.query(
           `SELECT s.id, s.base_id, s.name, s.description, (to_jsonb(s) ->> 'system_kind') AS system_kind,
+                  (to_jsonb(s) ->> 'copied_from_kind') AS copied_from_kind,
+                  (to_jsonb(s) ->> 'copied_at') AS copied_at,
+                  (to_jsonb(s) ->> 'copied_from_sheet_id') AS copied_from_sheet_id,
                   b.id AS base_ref_id, b.name AS base_name, b.icon AS base_icon,
                   b.color AS base_color, b.owner_id AS base_owner_id, b.workspace_id AS base_workspace_id
            FROM meta_sheets s
@@ -8871,7 +9074,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const baseRow = (baseRowResult as any).rows?.[0]
       const sheetListResult = resolvedBaseId
         ? await pool.query(
-          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind
+          `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
+                  (to_jsonb(meta_sheets) ->> 'copied_from_kind') AS copied_from_kind,
+                  (to_jsonb(meta_sheets) ->> 'copied_at') AS copied_at
            FROM meta_sheets
            WHERE base_id = $1 AND deleted_at IS NULL
            ORDER BY created_at ASC`,
@@ -8924,6 +9129,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const viewsResult = effectiveSheetId
         ? await pool.query(
+          // S-1 (second adversarial review of #6091): `ORDER BY created_at ASC` EXACTLY, with NO
+          // `, id` tie-breaker. Bases installed from a template before #6091 have every view on ONE
+          // timestamp (installMultitableTemplate ran inside one transaction on the DB default
+          // now()); an `id` tie-break would make the sha1 view id (stableChildId) their effective
+          // sort key and reshuffle the tabs / flip the default view (views[0]) of bases that already
+          // exist. Kept byte-identical to the pre-#6091 query and ordered exactly like GET /views
+          // (the two `... ORDER BY created_at ASC LIMIT 200` reads below); both are pinned by
+          // tests/unit/multitable-context-view-order.test.ts. Installs since #6091 stamp strictly
+          // increasing created_at per view (template-library.ts), so they have no ties at all.
+          // The save-as-template read (POST /templates) still breaks ties by id — see its note.
           `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config
            FROM meta_views
            WHERE sheet_id = $1
@@ -8982,6 +9197,73 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
       const viewPermissions = deriveViewPermissions(effectiveViews, capabilities, viewScopeMap)
 
+      // A6 (customer feedback 2026-09-24 #1b): DELETE /sheets/:sheetId 409s
+      // (SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED) for a managed sheet no matter who is asking —
+      // see sheet-delete-guard.ts. Reporting `canDeleteSheet: true` for one draws a trash icon
+      // (MetaSheetViewRail.vue) that can never work. Reuse the delete route's OWN check
+      // (`resolveSheetDeleteRefusal`) rather than duplicating the managed predicate, and only probe
+      // it once the actor has ALREADY cleared `hasSheetLifecycleAuthority` — an actor without that
+      // authority is refused before this point and must never learn whether the sheet is managed
+      // (mirrors the route's own authz-before-existence posture, see its DELETE handler above).
+      //
+      // S1 (adversarial-review fix, #6089): the probe is a SIDE lookup on an otherwise-successful
+      // load — the button is the only thing at stake, never the load itself. A THROWN lookup
+      // (missing table, transient connection error, …) must not 500 the whole `/context` response;
+      // it fails CLOSED to `canDeleteSheet: false` (same fail-closed direction as an actor who lacks
+      // lifecycle authority — never fails OPEN into showing a delete affordance the route cannot
+      // actually honour) and logs values-free (no sheet id, no query text).
+      const hasDeleteLifecycleAuthority = effectiveSheetId
+        ? hasSheetLifecycleAuthority(access, selectedSheetScope)
+        : false
+      let canDeleteSheet = false
+      if (hasDeleteLifecycleAuthority && effectiveSheetId) {
+        try {
+          canDeleteSheet = (await resolveSheetDeleteRefusal(pool.query.bind(pool), effectiveSheetId)) === null
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: managed-sheet probe failed for canDeleteSheet; failing closed to false',
+            { reason: 'managed_sheet_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canDeleteSheet = false
+        }
+      }
+
+      // Copy-sheet S1 (ADR §3): `canCopySheet` = the SAME two gates the copy route enforces —
+      // resolveCopyTargetWritable (the current base: platform admin ∨ resolveBaseWritable, projection bases refused
+      // for everyone — CS-3 / §4.2 amended 2026-09-28; ONE predicate shared with the route's fast gate and the
+      // in-transaction re-check) ∧ hasFullTableReadAccess (source, three axes, no counts). The target gate runs
+      // first so a projection base short-circuits with no probe, as the previous inline id checks did. Display-only:
+      // the server re-gates on POST …/copy. Same fail-closed posture as canDeleteSheet: a thrown probe hides the
+      // entry, never 500s the load, and logs values-free.
+      let canCopySheet = false
+      if (effectiveSheetId && resolvedBaseId && access.userId) {
+        try {
+          canCopySheet = (await resolveCopyTargetWritable(access, pool.query.bind(pool), resolvedBaseId))
+            && (await hasFullTableReadAccess(req, pool.query.bind(pool), effectiveSheetId, access, capabilities))
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: copy-sheet gate probe failed for canCopySheet; failing closed to false',
+            { reason: 'copy_sheet_gate_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canCopySheet = false
+        }
+      }
+      // Copy-sheet provenance on the SELECTED sheet: the source id is disclosed only to an actor who can read
+      // that source sheet (ADR §6 — `sheetId` 只对能读源表者透出); the badge fields (kind, at) need no gate.
+      let selectedCopiedFrom: ReturnType<typeof serializeCopiedFrom> = null
+      if (selectedSheet) {
+        const sourceSheetId = typeof selectedSheet.copied_from_sheet_id === 'string' ? selectedSheet.copied_from_sheet_id : ''
+        let canReadSource = false
+        if (sourceSheetId) {
+          try {
+            canReadSource = (await resolveReadableSheetIds(req, pool.query.bind(pool), [sourceSheetId], access)).has(sourceSheetId)
+          } catch {
+            canReadSource = false
+          }
+        }
+        selectedCopiedFrom = serializeCopiedFrom(selectedSheet, canReadSource)
+      }
+
       return res.json({
         ok: true,
         data: {
@@ -8992,6 +9274,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               baseId: typeof selectedSheet.base_id === 'string' ? selectedSheet.base_id : null,
               name: String(selectedSheet.name),
               description: typeof selectedSheet.description === 'string' ? selectedSheet.description : null,
+              copiedFrom: selectedCopiedFrom,
             }
             : null,
           // #5825: filter the RAW rows (they carry `system_kind`; the serialized shape below does not).
@@ -9003,12 +9286,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
+            copiedFrom: serializeCopiedFrom(row),
           })),
           views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
           // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
           // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
           // override / no actor. Actor-scoped (§1-B) — never reflects another user's rows.
           personalOverrideViewIds,
+          // 客户反馈 2026-09-24 #4c: the instance business timezone the web shows and parses date-times in
+          // (MULTITABLE_BUSINESS_TIMEZONE, default Asia/Shanghai). A zone id — instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
@@ -9032,8 +9319,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // OR sheet-scoped ADMIN). Mirroring the route's own gate here is what keeps the FE delete
             // affordance from being shown to an actor the server will 403. Single-sheet by construction
             // (`selectedSheetScope` is resolved for `effectiveSheetId` only), so the FE may show a
-            // delete entry for the CURRENT sheet only, never for the rail's other rows.
-            canDeleteSheet: effectiveSheetId ? hasSheetLifecycleAuthority(access, selectedSheetScope) : false,
+            // delete entry for the CURRENT sheet only, never for the rail's other rows. Additionally
+            // ANDed with "not managed" (see the local `canDeleteSheet` computed above) — the route
+            // itself still 409s a managed sheet's delete as the backstop.
+            canDeleteSheet,
+            // Copy-sheet S1 (ADR §3 / CS-5 / CS-3): shows the「复制数据表」entries; POST …/copy re-gates.
+            canCopySheet,
           },
           capabilityOrigin,
           fieldPermissions,
@@ -9059,7 +9350,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(401).json({ error: 'Authentication required' })
       }
       const result = await pool.query(
-        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
+        `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
+                (to_jsonb(meta_sheets) ->> 'copied_from_kind') AS copied_from_kind,
+                (to_jsonb(meta_sheets) ->> 'copied_at') AS copied_at
+           FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200`,
       )
       const readableSheetRows = await filterReadableSheetRowsForAccess(
         pool.query.bind(pool),
@@ -9071,6 +9365,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         baseId: typeof r.base_id === 'string' ? r.base_id : null,
         name: String(r.name),
         description: typeof r.description === 'string' ? r.description : null,
+        // Copy-sheet S1 badge (ADR CS-14): kind/at only — the source id is never listed here.
+        copiedFrom: serializeCopiedFrom(r),
       }))
       return res.json({ ok: true, data: { sheets } })
     } catch (err) {
@@ -15952,6 +16248,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // call — `fieldIds` is the fully-masked set (field_permissions ∧ view-hidden ∧ §2a.3-taint ∧
       // selection). Keeping it a single call-site preserves the egress-coverage + taint-chokepoint
       // guard counts (a denied/tainted column never reaches a cell regardless of which branch ran).
+      // 客户反馈 2026-09-24 #4c (PR #6083 review B1): date-times export as the SAME `YYYY-MM-DD HH:mm` (24h)
+      // business-zone wall clock the grid shows — not the raw stored `…T01:00:00.000Z`. Zone rule per column:
+      // a dateTime field's explicit non-'UTC' zone, else the instance business timezone; createdTime /
+      // modifiedTime carry no field zone → business timezone. Resolved ONCE per export, not per cell. The
+      // import side (`validateDateTimeValue`) parses this exact wall-clock form back in the same zone, so an
+      // export re-imports to the same instant (minute precision — the displayed precision).
+      const exportDateTimeZoneById = new Map<string, string>()
+      for (const field of fields) {
+        if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
+        else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
+      }
+      // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
+      // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
+      // map is filled only where the rows are hydrated through applyLookupRollup (the filtered branch below).
+      let exportLookupDateTimeZoneById = new Map<string, string>()
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -15960,6 +16271,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // (a cell must read as text, never `<p>…</p>`).
           if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
             return serializeXlsxCell(richLongTextToPlainText(cell))
+          }
+          const dateTimeZone = exportDateTimeZoneById.get(field.id)
+          if (dateTimeZone) {
+            const wallClock = formatDateTimeValue(cell, dateTimeZone)
+            // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
+            if (wallClock !== null) return wallClock
+          }
+          const lookupZone = exportLookupDateTimeZoneById.get(field.id)
+          if (lookupZone && Array.isArray(cell)) {
+            // Same joining as any array cell; a looked-up value that is not a date-time keeps its raw text.
+            return serializeXlsxCell(cell.map((item) => formatDateTimeValue(item, lookupZone) ?? item))
           }
           return serializeXlsxCell(cell)
         })
@@ -16051,6 +16373,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (needsComputedFilterSort && all.length > 0) {
           linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), relationalLinkFields)
           await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, all, relationalLinkFields, linkValuesByRecord)
+          exportLookupDateTimeZoneById = await resolveLookupDateTimeTargetZones(pool.query.bind(pool), fields, relationalLinkFields)
         }
 
         // Link-FILTER materialization (parity with /view): a link condition matches on the linked
@@ -17234,6 +17557,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // allowlist / validated redirect / confirmation text), normalized by sanitizeFormLayout. Built
           // from view.config.formLayout via a whitelist — never carries publicForm or other config keys.
           ...(resolved.view ? (() => { const layout = projectPublicFormLayout(resolved.view.config); return layout ? { formLayout: layout } : {} })() : {}),
+          // 客户反馈 2026-09-24 #4c: the (public) form never loads /context, so it learns the instance business
+          // timezone here — same value as /context. A zone id only: nothing actor-, tenant- or view-derived.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           fields: visibleFields,
           capabilities: effectiveCapabilities,
           ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),
@@ -18488,6 +18814,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           linkSummaries,
           ...(personSummaries ? { personSummaries } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
+          // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link / linked-record peek) shows its
+          // date-times in the SAME instance business timezone as /context and /form-context — a zone id,
+          // instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
         },
       })
     } catch (err) {
@@ -19904,7 +20234,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Gating-row locks FIRST, deterministic order (sheets sorted, then records): serializes against
         // permission grant/revoke (which take the sheet FOR UPDATE) and against concurrent instances of
         // this op. The forward writer re-locks rec_A later in this same transaction (no-op).
-        await query('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) FOR UPDATE', [[sheetA, sheetB].sort()])
+        //
+        // #5954: the sheet locks RE-READ LIVENESS under the lock, for BOTH ends. `livenessA`/`livenessB`
+        // above were read PRE-transaction; a soft delete of either sheet that commits after those reads
+        // leaves this lock free (or hands it over once the deleter commits). The lock-only statement this
+        // replaced then wrote when sheet B had died (200: an `add` wrote the forward edge and bumped rec_A's
+        // version, a `remove` removed it); when sheet A had died it was refused only incidentally, by Lock
+        // C's readability derivation (the uniform 403, after the base-A authority check and the quota call),
+        // never by a liveness check. The helper locks both rows in JS code-unit `id` order in ONE statement
+        // and throws SheetNotLiveError — mapped below to the same values-free sendSheetNotLive 404 the
+        // pre-transaction gates answer, and rolling this transaction back. The argument order is the refusal
+        // PRECEDENCE (B, then A — the same order the gates above run in): it picks which 404 body is answered
+        // when both ends died with different verdicts (pinned by the mirror-op guard test and real-DB F-8).
+        // The lock order is the helper's own: it sorts the ids in JS and the statement locks them in that
+        // array order (`WITH ORDINALITY … ORDER BY u.ord`) — the order lockRecordLinkTargetSheetsOnQuery
+        // uses — whatever the database locale and whatever characters the ids carry (sheet ids are
+        // client-chosen: POST /sheets accepts any 1–50 character `id`).
+        await assertSheetsLiveForUpdate(query, [sheetB, sheetA])
         // §4: re-derive the base-B sheet capability UNDER the lock so a concurrent sheet-B grant revoke
         // cannot be missed. capsB/scopeB above were resolved PRE-transaction; because a sheet-B write grant
         // LIFTS the capability (applyContextSheetSchemaWriteGrant), a revoke committing between that resolve
@@ -20328,7 +20674,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
       const rule = await automationService.createRule(sheetId, input)
 
       return res.json({
@@ -20370,17 +20717,27 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!parsed) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
-      const input = await preflightDingTalkAutomationUpdate(
+      const preflight = await preflightAutomationRuleUpdate(
         pool.query.bind(pool),
         sheetId,
         ruleId,
         parsed,
         automationService,
       )
-      if (!input) {
+      if (!preflight) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      const input = preflight.input
+      // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
+      // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
+      // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to
+      // re-type a rule whose stored `actionConfig` carries never-checked `branches`, must still have those branch
+      // values checked, not slip past unvalidated.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, {
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
+      })
 
       const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)
       if (!updated) {

@@ -106,6 +106,13 @@ export interface SaveBlockActionSnapshot {
   deleteRecord?: SaveBlockDeleteRecordSnapshot
   crossBaseTarget?: SaveBlockCrossBaseTargetSnapshot
   fwbWriteback?: SaveBlockFwbWritebackSnapshot
+  /**
+   * 客户反馈 2026-09-24 #3: the trigger is `record.deleted` and this action (or a branch sub-action inside it)
+   * would update/delete/lock the TRIGGER record — which no longer exists at that point. The backend refuses the
+   * save with DELETED_TRIGGER_SELF_MUTATION; pre-evaluated by the editor (it knows the trigger and the
+   * cross-base target), mirrored here as an anchored reason.
+   */
+  deletedTriggerSelfMutation?: boolean
 }
 
 export interface SaveBlockReasonsInput {
@@ -134,6 +141,13 @@ export interface SaveBlockReasonsInput {
   conditionsComplete: boolean
   /** Selector for the first incomplete condition/group, when one can be identified. */
   firstIncompleteConditionAnchor?: string
+  /**
+   * 客户反馈 2026-09-24 #4b: false when a condition_branch condition row is incomplete (no field, or a value
+   * that cannot be saved in its field type's shape). Omitted = complete (callers without branch rows).
+   */
+  branchConditionsComplete?: boolean
+  /** Selector for the first incomplete condition_branch condition row. */
+  firstIncompleteBranchConditionAnchor?: string
   actions: SaveBlockActionSnapshot[]
   /** #5742: pre-evaluated result-writeback outcome→value blockers (empty / omitted when none). */
   startApprovalOutcomeValueBlocks?: StartApprovalOutcomeValueBlock[]
@@ -234,6 +248,16 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
         ? '请完善所有筛选条件（字段与取值均为必填）。'
         : 'Complete all filter conditions (field and value are required).',
       anchor: input.firstIncompleteConditionAnchor,
+    })
+  }
+
+  if (input.branchConditionsComplete === false) {
+    reasons.push({
+      key: 'branchConditionsIncomplete',
+      message: zh
+        ? '请完善条件分支中的所有条件（字段与取值均为必填）。'
+        : 'Complete all conditions in the condition branches (field and value are required).',
+      anchor: input.firstIncompleteBranchConditionAnchor,
     })
   }
 
@@ -392,6 +416,16 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
           ? `「${label}」需要勾选删除确认才能保存。`
           : `"${label}" requires the delete-confirmation checkbox before saving.`,
         anchor: `${scope} [data-field="deleteRecordAck"]`,
+      })
+    }
+
+    if (action.deletedTriggerSelfMutation) {
+      reasons.push({
+        key: `action-${action.index}-deletedTriggerSelfMutation`,
+        message: zh
+          ? `「${label}」：记录删除时触发记录已不存在，不能再修改/删除/锁定它。`
+          : `"${label}": when a record is deleted its trigger record no longer exists, so it cannot be updated, deleted or locked.`,
+        anchor: `${scope} [data-field="deletedTriggerSelfMutationHint"]`,
       })
     }
 

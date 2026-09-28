@@ -56,6 +56,9 @@ export default defineConfig({
       // applies migrations 068+069 in an isolated schema and requires real PostgreSQL;
       // excluded from the no-DB job and wired as a whole file in plugin-tests.yml.
       'tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts',
+      // #6076 external-system delete x pointer-write lock protocol: two-session real-PG races,
+      // excluded from the no-DB job and wired as a whole file in plugin-tests.yml (EXPECT_DB=1).
+      'tests/integration/external-system-delete-bind-lock-protocol.db.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
@@ -92,6 +95,23 @@ export default defineConfig({
       // FILE into .github/workflows/approval-realdb-todo-center-pending-query.yml, which arms
       // EXPECT_DB=1 (plugin-tests.yml is left byte-identical — see that workflow's own header).
       'tests/todo-center-pending-gate/todo-center-pending-gate.ts',
+      // Legacy decision endpoints (`POST /api/approvals/:id/approve`, `/reject`) — seat / round /
+      // status admission and SERVER-DERIVED node attribution, asserted alongside the `/actions`
+      // door's verdict for the same caller. Requires real PostgreSQL: the gate runs inside the
+      // route's own transaction, the ROLE arm resolves through AuthService -> `user_roles` (a
+      // false->true flip on one row, claim-trusting fast path off), and every refusal asserts a
+      // zero-row delta read back from `approval_records`. Excluded from the no-DB default job so
+      // `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-legacy-decision-seat.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-legacy-decision-seat-and-node-attribution.db.test.ts',
+      // Legacy decision endpoints — SETTLEMENT parity with `/actions`: two sibling instances of one
+      // template decided through the two doors and compared field by field (instance cursor, seats,
+      // audit rows, metrics), plus the absolute post-state a settlement must reach and the forgery
+      // family re-run against it. Requires real PostgreSQL: the whole claim is what the two doors
+      // leave in the DATABASE. Excluded from the no-DB default job so `describeIfDatabase` cannot
+      // skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-legacy-decision-seat.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-legacy-decision-settlement-parity.db.test.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
@@ -1210,6 +1230,12 @@ export default defineConfig({
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
       'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
       'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
+      // C2 cross-base mirror Decision-F concurrency goldens, incl. the #5954 sheet-liveness-under-lock race
+      // (a soft delete of either end committed while the op is parked on its sheet lock). Real Postgres
+      // only (pg_blocking_pids-observed interleavings) — excluded HERE so the no-DB lane cannot
+      // collect-and-skip it green; whole-file wired into `Run multitable real-DB integration`, and both
+      // points pinned by the exact-anchor CI wiring contract.
+      'tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
@@ -1827,6 +1853,133 @@ export default defineConfig({
       // CI-executed lane to land in without a workflow edit, which this change deliberately does not
       // make). That wiring is a disclosed follow-up, not a silent gap.
       'tests/integration/b2a-operation-claim-078-realdb.test.ts',
+      // Approval cancel-round WI-0 lock-order census (Q-A, slice 1) — two real Postgres
+      // connections constructing the class-`00` rollout advisory lock (real production key
+      // derivation) against a real `approval_instances` row lock, both the §9-4 forward order
+      // and a deliberately reversed order proven to deadlock deterministically (40P01). Real
+      // DB (two raw `pg.Pool` connections). Excluded here so describeIfDatabase cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s required
+      // `test (20.x)` "Run approval real-DB integration" step (id `approval-real-db-integration`),
+      // which does not set EXPECT_DB today (arming candidate: PR #5972). (Previously a standalone, non-required
+      // `approval-realdb-cancel-round.yml` lane; promoted here and that lane deleted so the same
+      // file does not run twice per PR — see the required step's own header comment for the
+      // recompute-the-s6a-pin procedure this promotion followed.) This slice covers Q-A only, not
+      // Q-B/Q-C/Q-D — see the file's own header.
+      'tests/integration/approval-cancel-round-lock-order-census.db.test.ts',
+      // WI-4 `createCancelRoundInstance` creation acceptance: dedicated-instance shape (judgment
+      // I / I″), the one-pending-round-per-document invariant (§5 I3 / `uq_approval_rounds_
+      // pending_document`), WI-16's requester-only creation authz, and §14.3 #14's suite gate
+      // (`CancelRoundSuiteForbiddenError`). Drives a real one-node template through the running
+      // server to get a genuinely `approved` original document, then calls the service method
+      // in-process. Real DB (poolManager + a real dispatch transaction). Excluded here so
+      // `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into
+      // `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB integration" step
+      // (sibling entry to the WI-0 census above), which does not set EXPECT_DB today (arming candidate: PR #5972).
+      'tests/integration/approval-cancel-round-creation.db.test.ts',
+      // WI-13 cancel-round redemption acceptance, 判据 III ONLY (revoke A4 / reject A7
+      // terminating the round row in the same transaction as the instance transition; §5 I3's
+      // pending-slot release and §5 I6's "not count-limited" via a 3-round chain on one document;
+      // a discriminating two-document control proving the UPDATE keys on `engine_instance_id`,
+      // not `document_id` or "any pending round"). 判据 II (final approve, C-1's real attendance
+      // cancellation) and 判据 IV (C-3's system-side expire/block) are NOT covered — both depend
+      // on WI-10/11/12, which do not exist on this branch (separate follow-up files once they
+      // land). Real DB (poolManager + a real dispatch transaction, driven through the running
+      // server exactly like the creation acceptance file). Excluded here so `describeIfDatabase`
+      // cannot skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s
+      // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to
+      // WI-0/WI-4 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
+      'tests/integration/approval-cancel-round-redemption.db.test.ts',
+      // §14.3 outlets #12/#13 (lock:373-374) — the two SEAT-WRITE chokepoints
+      // (`bulkReassignApprovals`, `applyApprovalDepartureTransfer`): a cancel-round instance's
+      // seat is skipped with the typed `CancelRoundOutletForbiddenError` -> `reason: 'cancel_round'`
+      // catch (not the method's own generic catch, which would render an unnamed skip), while a
+      // sibling ordinary pending instance on the SAME assignee/departed-user reassigns/transfers
+      // normally in the same call (the discriminating positive control proving the guard is
+      // selective, not a blanket freeze of that user's seats). NOT covered here: #2/#3/#7/#7'/#8
+      // (separate "outlet-guards" file per the taskbook split — decide/dispatch/legacy-route
+      // paths, not seat-writers). Real DB (poolManager + a real dispatch transaction, driven
+      // through the running server exactly like the creation/redemption acceptance files).
+      // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
+      // integration" step (sibling entry to WI-0/WI-4/WI-13 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
+      'tests/integration/approval-cancel-round-seat-guards.db.test.ts',
+      // WI-3 Q1c package (§14.3 #10/#11, lock:371-372) — the migration's own preflight guard
+      // (dangling reference aborts before any constraint exists), the two `atr_*` CHECK
+      // constraints discriminated by `.constraint` name (not merely `23514`, which both share),
+      // #11's "no independent guard, protected by #10" outcome-level dependency claim, and a
+      // source-text sweep pairing `approval_instance_id` with `approval_workflow_key` at each of
+      // the five known production writer sites in index.cjs. Runs against throwaway
+      // `CREATE DATABASE` scratch databases it provisions itself (never the shared/migrated
+      // public schema — see the file's own header for why an isolated SCHEMA does not work for
+      // this particular migration's non-schema-scoped `pg_constraint` idempotency guards).
+      // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
+      // integration" step (sibling entry to WI-0/WI-4/WI-13/#12-13 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
+      'tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts',
+      // §14.3 outlets #2/#4/#6/#7/#7′/#8 — the "outlet-guards" file the seat-guards file's own
+      // header promised, landed in two slices: #2 (`adminJump`) and #4/#6 (`dispatchAction`'s
+      // single action-judgment call site) throw `CancelRoundOutletForbiddenError` (409
+      // `CANCEL_ROUND_OUTLET_FORBIDDEN`) IN-PROCESS before any DML, each paired with a positive
+      // control on the SAME method against an ordinary instance; #7/#7′ (legacy
+      // `POST /:id/approve`/`/:id/reject`) are proven over REAL HTTP so the guard survives each
+      // route's own catch translation; #8 (`ApprovalBridgeService.dispatchAction`) is exercised
+      // in-process against a deliberately half-formed instance (its only reachable path). #3 is a
+      // separate later slice (different oracle shape — see the file's own header). Excluded here
+      // so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a WHOLE FILE into
+      // `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB integration" step
+      // (sibling entry to WI-0/WI-4/WI-13/#12-13/#10-11 above), which does not set EXPECT_DB today (arming candidate: PR #5972).
+      'tests/integration/approval-cancel-round-outlet-guards.db.test.ts',
+      // §14.3 outlet #3 (`applyNodeTimeoutEffect`) — the separate-slice file the outlet-guards
+      // file's own header promises: a DIFFERENT oracle shape (a returned scanner outcome, not a
+      // rejected promise) sharing only `isCancelRoundInstance`, not `rejectIfCancelRound`. Two-part
+      // oracle per test — outcome literal `skipped_cancel_round` AND the armed deadline actually
+      // consumed, the latter proven by re-running the REAL production scan predicate
+      // (`ApprovalMetricsService.scanNodeTimeouts`) and observing the instance drop out of the
+      // due-set on round 2 (the lock's own "两轮扫描命中同一实例" negative-control shape,
+      // mutation-tested for real: patching the branch to skip WITHOUT consuming reproducibly
+      // reds exactly these two assertions). Excluded here so `describeIfDatabase` cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s required
+      // `test (20.x)` "Run approval real-DB integration" step (sibling entry to
+      // WI-0/WI-4/WI-13/#12-13/#10-11/#2-4-6-7-7'-8 above), which does not set EXPECT_DB today (arming candidate: PR #5972). (This file's
+      // own siblings above were wired into the now-deleted standalone
+      // `approval-realdb-cancel-round.yml` lane first; this file landed after that lane's pending
+      // CI-wiring decision was made, so it goes straight into the required step alongside them —
+      // see the required step's own header comment for the recompute-the-s6a-pin procedure.)
+      'tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts',
+      // Seed-template visibility acceptance for the WI-2/WI-14 published-definition seed
+      // migration: the seeded `approval_templates` row must be invisible to an ordinary
+      // `approvals:read` actor on both surfaces that consume
+      // `applyTemplateVisibilityFilter` for it (list / detail), with each
+      // negative asserted BYTE-FOR-BYTE against a request for an id (or search token) that
+      // genuinely matches nothing, and each paired with a manager-side positive control.
+      // Real DB + a real running server + real HTTP. Excluded here so `describeIfDatabase`
+      // cannot skip-green it in the no-DB job; wired as a WHOLE FILE into `plugin-tests.yml`'s
+      // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to the
+      // seven cancel-round files above, no EXPECT_DB).
+      'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
+      // acceptance (normal-pool half: A/A'/A''/A'''/B/B'/B''/F/G/H/I'). Requires real PostgreSQL
+      // (composite-FK archive/reattach concurrency, org-scoped uniqueness). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it. NOTE: this deliberately OVERRIDES
+      // the local convention stated just above at "NOT plugin-tests.yml (s6a sha256-pinned
+      // provenance input)" — lock §6 explicitly assigns phase 1's two new suites into
+      // plugin-tests.yml (the only real-DB step that runs on the required `test (20.x)` leg), so
+      // both files ARE wired there and the sealed-export S6-A provenance pin
+      // (plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json,
+      // evidenceFiles.pluginTestsWorkflow) was recomputed in the same change.
+      'tests/integration/approval-template-groups-lifecycle.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
+      // acceptance (RR-default-pool half: E/K). Runs the ENTIRE service pool under
+      // default_transaction_isolation=repeatable read (vi.hoisted DATABASE_URL amendment) —
+      // deliberately NOT the isolation level production uses. Production relies on an explicit
+      // per-transaction `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` inside
+      // createApprovalTemplateGroup; forcing the pool DEFAULT to RR here makes that `SET`
+      // load-bearing and observable — without it, a stale RR snapshot would leak into this
+      // file's E/K assertions instead of RC's read-per-statement behavior. (This file has no
+      // export/serialization "goldens"; that wording was borrowed from elsewhere and is wrong.)
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it. Same
+      // plugin-tests.yml override and s6a re-pin note as the lifecycle file above.
+      'tests/integration/approval-template-groups-serialization.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

@@ -528,4 +528,73 @@ describe('computeSaveBlockReasons — exhaustive top-level guard coverage', () =
       expect(computeSaveBlockReasons(input).map((r) => r.key)).toEqual(['action-1-recipients'])
     })
   })
+
+  // 客户反馈 2026-09-24 #3 (裁定 PR #6074): the editor pre-evaluates "record.deleted + same-base mutate of the
+  // trigger record" (it knows the trigger and the cross-base target); this aggregator only turns that flag into
+  // an anchored line carrying the backend's fixed sentence.
+  describe('record.deleted + same-base mutate of the trigger record', () => {
+    it('blocks save with an anchored reason and the fixed zh sentence when the editor flags the action', () => {
+      const input: SaveBlockReasonsInput = {
+        ...baseInput(),
+        triggerType: 'record.deleted',
+        actions: [{ index: 0, type: 'delete_record', deleteRecord: { acknowledged: true }, deletedTriggerSelfMutation: true }],
+        actionsCount: 1,
+      }
+      const reasons = computeSaveBlockReasons(input)
+      expect(reasons.map((r) => r.key)).toEqual(['action-0-deletedTriggerSelfMutation'])
+      expect(reasons[0].anchor).toBe('[data-action-index="0"] [data-field="deletedTriggerSelfMutationHint"]')
+      expect(reasons[0].message).toContain('cannot be updated, deleted or locked')
+      expect(computeSaveBlockReasons({ ...input, isZh: true })[0].message)
+        .toContain('记录删除时触发记录已不存在，不能再修改/删除/锁定它')
+    })
+
+    it('adds no trigger logic of its own: an unflagged delete_record under record.deleted is not blocked here', () => {
+      const input: SaveBlockReasonsInput = {
+        ...baseInput(),
+        triggerType: 'record.deleted',
+        actions: [{ index: 0, type: 'delete_record', deleteRecord: { acknowledged: true } }],
+        actionsCount: 1,
+      }
+      expect(computeSaveBlockReasons(input)).toEqual([])
+      expect(originalCanSave(input)).toBe(true)
+    })
+
+    it('reports the reason per action index, alongside the other reasons of the same action', () => {
+      const input: SaveBlockReasonsInput = {
+        ...baseInput(),
+        triggerType: 'record.deleted',
+        actions: [
+          { index: 0, type: 'send_webhook' },
+          { index: 1, type: 'delete_record', deleteRecord: { acknowledged: false }, deletedTriggerSelfMutation: true },
+        ],
+        actionsCount: 2,
+      }
+      expect(computeSaveBlockReasons(input).map((r) => r.key)).toEqual([
+        'action-1-deleteAck',
+        'action-1-deletedTriggerSelfMutation',
+      ])
+    })
+  })
+})
+
+// 客户反馈 2026-09-24 #4b: condition_branch condition rows must be complete like the rule-level rows. A guard
+// added after G-B2-22, so it is pinned here directly rather than through the pre-G-B2-22 `originalCanSave` oracle.
+describe('computeSaveBlockReasons — condition_branch condition rows (#4b)', () => {
+  it('blocks an incomplete branch condition row and passes the row anchor through', () => {
+    const anchor = '[data-action-index="0"] [data-branch-index="1"] [data-branch-condition-index="2"]'
+    const reasons = computeSaveBlockReasons({
+      ...baseInput(),
+      isZh: true,
+      branchConditionsComplete: false,
+      firstIncompleteBranchConditionAnchor: anchor,
+    })
+    expect(reasons.map((r) => r.key)).toEqual(['branchConditionsIncomplete'])
+    expect(reasons[0].anchor).toBe(anchor)
+    expect(reasons[0].message).toBe('请完善条件分支中的所有条件（字段与取值均为必填）。')
+  })
+
+  it('omitted or true means complete — callers without branch rows keep saving', () => {
+    expect(computeSaveBlockReasons(baseInput())).toEqual([])
+    expect(computeSaveBlockReasons({ ...baseInput(), branchConditionsComplete: true })).toEqual([])
+  })
 })
