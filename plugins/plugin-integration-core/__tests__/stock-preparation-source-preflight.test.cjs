@@ -1329,6 +1329,21 @@ const INTEGRATION_WRITER = Object.freeze({ id: 'u_write', tenantId: TENANT_ID, p
 const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles: ['admin'], permissions: ['integration:admin'] })
 const STOCK_PREP_OPERATOR = Object.freeze({ id: 'u_sp', tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_ADMIN] })
 
+// THE VERIFIED TENANT CLAIM EACH PRINCIPAL'S TOKEN CARRIES — what the host sets as
+// `req.authenticatedTenantId`, and only when the token really has one. The route takes its tenant
+// from this and from nothing else, so a principal that is meant to be tenant-bound names its claim
+// HERE, per principal. It is deliberately not derived from `user.tenantId`: that field is what the
+// host fills from the `x-tenant-id` header for a claimless token, and a harness that promoted it to
+// a claim would pass the very gate it is supposed to exercise. The claimless and cross-tenant
+// principals live in stock-preparation-source-preflight-tenant-scope.test.cjs.
+const TOKEN_TENANT_CLAIMS = new Map([
+  [LOGGED_IN, TENANT_ID],
+  [INTEGRATION_READER, TENANT_ID],
+  [INTEGRATION_WRITER, TENANT_ID],
+  [PLATFORM_ADMIN, TENANT_ID],
+  [STOCK_PREP_OPERATOR, TENANT_ID],
+])
+
 function inertService(methods) {
   const service = {}
   for (const method of methods) {
@@ -1456,7 +1471,14 @@ async function callRoute(routes, { user, query = {} } = {}) {
   const handler = routes.get(`GET ${SOURCE_PREFLIGHT_ROUTE_PATH}`)
   assert.ok(handler, `route GET ${SOURCE_PREFLIGHT_ROUTE_PATH} is registered`)
   const res = createResponse()
-  await handler({ user, body: {}, query, params: {} }, res)
+  const authenticatedTenantId = TOKEN_TENANT_CLAIMS.get(user)
+  await handler({
+    user,
+    body: {},
+    query,
+    params: {},
+    ...(authenticatedTenantId ? { authenticatedTenantId } : {}),
+  }, res)
   assert.notEqual(res.body, undefined)
   return res
 }
