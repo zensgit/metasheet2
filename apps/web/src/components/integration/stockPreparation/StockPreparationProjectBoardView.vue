@@ -468,6 +468,7 @@ import {
   advanceStockPreparationHandoff,
   exportStockPreparationPrepLines,
   readStockPreparationOperatorDirectory,
+  stockPreparationHandoffAdvanceWasReplay,
   stockPreparationHandoffFromStepKey,
   type StockPreparationDecisionQueue,
   type StockPreparationHandoffAdvanceResult,
@@ -489,6 +490,7 @@ import {
   stockPrepBoardErrorPlain,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
+  stockPrepHandoffOutcomePlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
@@ -1389,18 +1391,32 @@ async function notifyNext(): Promise<void> {
       throw error
     }
     handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
-    // The three outcomes are said as three different sentences because they are three different
-    // facts. "已经通知" on a deployment whose notifier is not configured would be a claim we cannot
-    // back — the turn moved, and nobody was told.
-    if (result.notifyOutcome === 'sent') {
+    // WHAT HAPPENED TO THE MESSAGE decides the sentence — not whether the turn moved. This used to key
+    // off `changed`, which told an operator whose message had just FAILED either 「这台系统没有配通知
+    // 渠道」 (a fresh advance) or 「没有重复交」 (an owed resend). The at-most-once claim is spent by
+    // then, so no later click can resend: the only fix is a word in person, and they were not told so.
+    // "Was it a plain replay" is the confirmation queue's own predicate (confirmationQueue.ts), and a
+    // message that went out wrong or not at all is said in the queue's own words (plainLanguage.ts).
+    // The three sentences that were already right — sent, no destination, replay — are unchanged.
+    const outcomePlain = result.notifyOutcome === 'sent' || result.notifyOutcome === 'no_destination'
+      ? null
+      : stockPrepHandoffOutcomePlain(result.notifyOutcome)
+    if (stockPreparationHandoffAdvanceWasReplay(result)) {
+      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
+    } else if (result.notifyOutcome === 'sent') {
       handoffNotice.value = bi('已经交给下一步,并且通知到了。', 'Handed to the next step, and they were notified.')
-    } else if (result.changed) {
+    } else if (outcomePlain) {
+      // failed / partial / skipped: the turn moved and the message did not reach everyone it should.
+      const lead = bi(outcomePlain.zh, outcomePlain.en)
+      const next = bi(outcomePlain.zhNext ?? '', outcomePlain.enNext ?? '')
+      handoffNotice.value = next ? `${lead} ${next}` : lead
+    } else {
+      // no_destination (or an older backend's not_configured): the turn moved, and there was nowhere
+      // to send. "已经通知" here would be a claim we cannot back.
       handoffNotice.value = bi(
         '已经交给下一步。这台系统没有配通知渠道,所以没有发出提醒 —— 记得口头知会一声。',
         'Handed to the next step. This system has no notification channel configured, so no alert was sent — tell them yourself.',
       )
-    } else {
-      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
     }
   }, 'write')
 }

@@ -512,6 +512,29 @@ export interface StockPreparationHandoffAdvanceResult {
 }
 
 /**
+ * WAS THIS PRESS A PLAIN REPLAY — the ONE result for which 「没有重复通知」 is the honest sentence.
+ *
+ * THE DISCRIMINATOR IS `notifyOutcome` (and `resumed`), NOT `changed`. `changed` says whether the
+ * TURN moved; it says nothing about the MESSAGE. A send that was attempted (sent / partial / failed),
+ * or a click that took the owed claim (`resumed`), is never "nothing needed sending", whatever
+ * `changed` says — and by then the at-most-once claim is spent, so no later click can resend.
+ *
+ * SHARED BY BOTH SURFACES THAT RENDER 通知下一步. This is the confirmation queue's own predicate,
+ * moved here unchanged. 项目备料页 keyed its notice off `changed` instead, and told an operator whose
+ * message had just failed either that the deployment has no notification channel (a fresh advance)
+ * or that the step "had already been handed on" (an owed resend) — the one moment they needed to be
+ * told to go and say it in person.
+ */
+export function stockPreparationHandoffAdvanceWasReplay(
+  result: Pick<StockPreparationHandoffAdvanceResult, 'changed' | 'notifyOutcome' | 'resumed'>,
+): boolean {
+  const attempted = result.notifyOutcome === 'sent'
+    || result.notifyOutcome === 'partial'
+    || result.notifyOutcome === 'failed'
+  return result.changed === false && !attempted && result.resumed !== true
+}
+
+/**
  * Whose turn it is on this project. Values-free, and inert rather than fatal on a deployment with no
  * handoff config — the route answers 200 with `configured: false`.
  * GET /api/integration/stock-preparation/handoff

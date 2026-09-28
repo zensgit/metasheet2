@@ -598,6 +598,7 @@ import {
   readStockPreparationHandoff,
   readStockPreparationOperatorDirectory,
   readStockPreparationValueEntry,
+  stockPreparationHandoffAdvanceWasReplay,
   stockPreparationHandoffFromStepKey,
   stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
@@ -1037,14 +1038,12 @@ const handoffAdvance = ref<StockPreparationHandoffAdvanceResult | null>(null)
 const handoffNoticeText = computed<string>(() => {
   const result = handoffAdvance.value
   if (!result) return ''
-  const attempted = result.notifyOutcome === 'sent'
-    || result.notifyOutcome === 'partial'
-    || result.notifyOutcome === 'failed'
   // J2: `resumed` is the COMMITTED verdict that this click took the claim, so a request carrying it
   // may never render the replay sentence — whatever the outcome. The first cut checked only
   // `attempted`, which left one outcome ('not_configured', now 'no_destination') reaching the
   // 「没什么要发」 wording on a click that had just spent the hop's one chance to be announced.
-  if (result.changed === false && !attempted && result.resumed !== true) {
+  // The predicate lives in confirmationQueue.ts, shared with 项目备料页, so the two cannot disagree.
+  if (stockPreparationHandoffAdvanceWasReplay(result)) {
     return bi(
       '这一步之前已经交接过了,没有重复通知。',
       'This step had already been handed on, so nobody was notified a second time.',

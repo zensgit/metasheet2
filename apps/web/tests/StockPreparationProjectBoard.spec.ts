@@ -265,6 +265,232 @@ async function flush(): Promise<void> {
   }
 }
 
+// ---- BNP: 通知下一步 on 项目备料页 says and allows what the confirmation queue does ---------------
+//
+// #6142 made the board's press reach the server for the first time, and with it three older board
+// defects became reachable. The confirmation queue already handled all three
+// (StockPreparationHandoff.spec.ts). Each case below names the defect it pins, and every fix has a
+// control: the neighbouring case keeps the words or the state it already had.
+//
+//   BNP-1 A message that did not go out is said as that — never as 「这台系统没有配通知渠道」 (a
+//         fresh advance) or as 「没有重复交」 (an owed resend that failed again).
+//
+// The fixtures are the server's GET /handoff and POST /handoff/advance shapes
+// (plugins/plugin-integration-core/lib/http-routes.cjs, stockPreparationHandoff /
+// stockPreparationHandoffAdvance), including the keys the board does not read.
+
+describe('项目备料页 — 通知下一步 matches the confirmation queue (BNP)', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    routeApi()
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  /** GET /handoff for a four-step chain, sitting at `process` with the caller holding it. */
+  function cursor(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      configured: true,
+      projectNo: PROJECT_NO,
+      steps: [
+        { key: 'prep_entry', order: 0, handlerCount: 1 },
+        { key: 'process', order: 1, handlerCount: 1 },
+        { key: 'planning', order: 2, handlerCount: 1 },
+        { key: 'final_review', order: 3, handlerCount: 1 },
+      ],
+      stepCount: 4,
+      stepIndex: 1,
+      currentStepKey: 'process',
+      terminal: false,
+      completed: false,
+      isCurrentHandler: true,
+      notifiedStepIndex: 0,
+      notificationsConfigured: true,
+      resendableStepKey: null,
+      lostStepKeys: [],
+      ...overrides,
+    }
+  }
+
+  /** POST /handoff/advance for a fresh `process` → `planning` hop whose message went out. */
+  function advanced(overrides: Record<string, unknown> = {}): Response {
+    return ok({
+      projectNo: PROJECT_NO,
+      fromStepKey: 'process',
+      currentStepKey: 'planning',
+      stepIndex: 2,
+      stepCount: 4,
+      changed: true,
+      terminal: false,
+      notified: true,
+      notifyOutcome: 'sent',
+      resumed: false,
+      ...overrides,
+    })
+  }
+
+  /** GET /handoff answers in order (the last one serves every later read); POST /advance separately. */
+  function route(config: { handoff: Array<() => Response>; advance?: () => Response }): void {
+    routeApi()
+    const base = h.apiFetch.getMockImplementation()!
+    let reads = 0
+    h.apiFetch.mockImplementation(async (path: string, ...rest: unknown[]) => {
+      const target = String(path)
+      if (target.includes('/handoff/advance')) {
+        if (!config.advance) throw new Error('unexpected advance call')
+        return config.advance()
+      }
+      if (target.includes('/handoff')) {
+        const answer = config.handoff[Math.min(reads, config.handoff.length - 1)]
+        reads += 1
+        return answer()
+      }
+      return base(path, ...rest)
+    })
+  }
+
+  async function mountBoard(): Promise<HTMLElement> {
+    app = createApp(StockPreparationProjectBoardView, { scope: SCOPE, projectNo: PROJECT_NO })
+    app.mount(container!)
+    await flush()
+    return container!
+  }
+
+  function remount(): void {
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+  }
+
+  function notifyButton(root: HTMLElement): HTMLButtonElement | null {
+    return root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement | null
+  }
+
+  function text(root: HTMLElement, testid: string): string {
+    return (root.querySelector(`[data-testid="${testid}"]`) as HTMLElement | null)?.textContent ?? ''
+  }
+
+  /** Every body POSTed to the advance route, parsed. */
+  function advanceBodies(): Record<string, unknown>[] {
+    return h.apiFetch.mock.calls
+      .filter(([path]) => String(path).includes('/handoff/advance'))
+      .map(([, options]) => JSON.parse(String((options as { body?: string }).body)) as Record<string, unknown>)
+  }
+
+  async function press(root: HTMLElement): Promise<void> {
+    const button = notifyButton(root)
+    expect(button, 'the control must render').not.toBeNull()
+    expect(button!.disabled, 'the control must be pressable, or the case proves nothing').toBe(false)
+    button!.click()
+    await flush()
+  }
+
+  // ---- BNP-1 the outcome sentence -------------------------------------------------------------
+
+  // plainLanguage.ts STOCK_PREP_HANDOFF_OUTCOME_PLAIN.failed — the queue's own words (its H-08).
+  const FAILED_LEAD = '已经交给下一步了,但群里的消息没有发出去 —— 请您自己跟下一位说一声。'
+  const FAILED_NEXT = '交接本身是成功的,不用再点一次。'
+
+  it('BNP-1: a fresh advance whose message FAILED says it did not go out, not that no channel is configured', async () => {
+    route({
+      handoff: [
+        () => ok(cursor()),
+        // The hop moved and its claim was spent on the failed send.
+        () => ok(cursor({ stepIndex: 2, currentStepKey: 'planning', isCurrentHandler: false, notifiedStepIndex: 1 })),
+      ],
+      advance: () => advanced({ notified: false, notifyOutcome: 'failed' }),
+    })
+    const root = await mountBoard()
+    await press(root)
+
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    const notice = text(root, 'stock-prep-project-board-handoff-notice')
+    expect(notice).toContain(FAILED_LEAD)
+    expect(notice).toContain(FAILED_NEXT)
+    expect(notice, 'a channel IS configured; the send failed').not.toContain('没有配通知渠道')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]'), 'the turn moved; this is a notice, not an error').toBeNull()
+  })
+
+  it('BNP-1: an owed resend that FAILED again says it did not go out, not that the step was already handed on', async () => {
+    // The caller handles both `process` and `planning`: the chain sits at `planning` (theirs), and the
+    // `process` hop's notice is still owed to them. The press replays `process` and takes the claim.
+    route({
+      handoff: [
+        () => ok(cursor({ stepIndex: 2, currentStepKey: 'planning', notifiedStepIndex: 0, resendableStepKey: 'process' })),
+        () => ok(cursor({ stepIndex: 2, currentStepKey: 'planning', notifiedStepIndex: 1, resendableStepKey: null })),
+      ],
+      advance: () => advanced({
+        currentStepKey: 'planning',
+        changed: false,
+        notified: false,
+        notifyOutcome: 'failed',
+        resumed: true,
+      }),
+    })
+    const root = await mountBoard()
+    await press(root)
+
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['process'])
+    const notice = text(root, 'stock-prep-project-board-handoff-notice')
+    expect(notice).toContain(FAILED_LEAD)
+    expect(notice).toContain(FAILED_NEXT)
+    expect(notice, 'this click spent the owed claim; "nothing to do" would be false').not.toContain('没有重复交')
+    expect(notice, 'and it must not claim the resend succeeded').not.toContain('补发了')
+  })
+
+  it('BNP-1 control: the sentences that were already right are unchanged', async () => {
+    const cases: Array<{ label: string; handoff: Record<string, unknown>; answer: Record<string, unknown>; says: string }> = [
+      {
+        label: 'fresh advance, sent',
+        handoff: cursor(),
+        answer: {},
+        says: '已经交给下一步,并且通知到了。',
+      },
+      {
+        label: 'fresh advance, no destination for this hop',
+        handoff: cursor(),
+        answer: { notified: false, notifyOutcome: 'no_destination' },
+        says: '已经交给下一步。这台系统没有配通知渠道,所以没有发出提醒 —— 记得口头知会一声。',
+      },
+      {
+        label: 'plain replay: nothing moved, nothing owed',
+        handoff: cursor(),
+        answer: { changed: false, notified: false, notifyOutcome: 'skipped', resumed: false },
+        says: '这一步已经交出去了,没有重复交。',
+      },
+      {
+        label: 'owed resend that went out',
+        handoff: cursor({ stepIndex: 2, currentStepKey: 'planning', notifiedStepIndex: 0, resendableStepKey: 'process' }),
+        answer: { currentStepKey: 'planning', changed: false, notified: true, notifyOutcome: 'sent', resumed: true },
+        says: '已经交给下一步,并且通知到了。',
+      },
+    ]
+    for (const entry of cases) {
+      route({ handoff: [() => ok(entry.handoff)], advance: () => advanced(entry.answer) })
+      const root = await mountBoard()
+      await press(root)
+      const notice = text(root, 'stock-prep-project-board-handoff-notice')
+      expect(notice, entry.label).toContain(entry.says)
+      expect(notice, entry.label).not.toContain(FAILED_LEAD)
+      remount()
+    }
+  })
+})
+
 describe('项目备料页 — the operator project board', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
