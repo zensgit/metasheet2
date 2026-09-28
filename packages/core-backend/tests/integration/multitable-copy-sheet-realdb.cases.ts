@@ -48,9 +48,14 @@
  *   G13 TAINT axis (§1.9 axis 3): a writer masked on a FOREIGN field that a lookup (and a formula over it) reads → the
  *       same 403 on copy and dry-run; the admin copy of that sheet materialises the formula-over-lookup value from the
  *       HYDRATED lookup (DATA-7: 7 + 1 = 8, not 0 + 1).
- *   G14 CONCURRENT REVOKE (§9 r3-1): another session holds the source row FOR UPDATE (the lock every authorization PUT
- *       takes), the copy passes the out-of-transaction gate and parks on the row lock; the holder revokes the copier's
- *       sheet grant and commits → the in-transaction DB-fresh gate answers 403 FORBIDDEN and nothing is written.
+ *   G14a CONCURRENT REVOKE (§9 r3-1): another session holds the source row FOR UPDATE (the lock every authorization PUT
+ *       takes), the copy passes the out-of-transaction gate and parks on the row lock; the holder revokes a THIRD
+ *       PARTY's sheet grant and commits → the copy commits with NO grant row for that subject (post-revoke snapshot).
+ *   G14b CONCURRENT TIGHTENING ON THE COPIER: same orchestration, the holder turns the row-level read switch ON →
+ *       the non-admin copier's in-transaction DB-fresh gate answers 403 COPY_SOURCE_NOT_FULLY_READABLE, nothing
+ *       written, one refusal audit row. (A sheet-grant revoke alone cannot remove a GLOBAL multitable:read holder's
+ *       canRead — canReadWithSheetGrant keeps the global capability — which is why the first CI execution of the
+ *       original G14 saw 201: fixture, not code.)
  *   G15 TRIPWIRE (§7.2 step 6, flag off): a source record's updated_at bumped by another connection AFTER the copy took
  *       its baseline (between structure writes) → 409 COPY_SOURCE_CHANGED, zero rows for the copy, no ledger row.
  *
@@ -682,40 +687,70 @@ export function defineCopySheetRealDbCases(): void {
       expect(Number(row!.data[formulaField.id])).toBe(8)
     })
 
-    test('G14 concurrent revoke (r3-1): the copier\'s sheet grant is revoked by a session holding the source row lock while the copy is parked on it → in-transaction DB-fresh gate 403 FORBIDDEN, nothing written', async () => {
-      as(REVOKED)
-      // control: the grant is live, the out-of-transaction gate passes (dry-run 200)
-      const probe = await dryRun(SRC_V)
-      expect(probe.status, JSON.stringify(probe.body)).toBe(200)
+    /**
+     * A session that holds the SOURCE row lock (the lock every authorization PUT takes — sheet-liveness.ts
+     * assertSheetLiveForUpdate) performs `mutate` and COMMITs only after the copy is parked on that lock; then the copy
+     * (sent by the current actor) is allowed to proceed and its response is returned. The row lock is taken BEFORE the copy
+     * is sent, so the copy's `assertSheetLiveForUpdate` provably waits behind the PUT (G14 ordering).
+     */
+    async function copyAgainstRowLockedMutation(sheetId: string, name: string, mutate: (query: (sql: string, params?: unknown[]) => Promise<unknown>) => Promise<void>) {
       const pool = poolManager.get()
       let locked!: () => void
       const rowLocked = new Promise<void>((resolve) => { locked = resolve })
       let proceed!: () => void
-      const mayRevoke = new Promise<void>((resolve) => { proceed = resolve })
-      // T1 = an authorization PUT's shape: the SAME row lock (sheet-liveness.ts assertSheetLiveForUpdate) → revoke → COMMIT
-      const revoker = pool.transaction(async ({ query }) => {
-        await query('SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE', [SRC_V])
+      const mayMutate = new Promise<void>((resolve) => { proceed = resolve })
+      const holder = pool.transaction(async ({ query }) => {
+        await query('SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
         locked()
-        await mayRevoke
-        await query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3', [SRC_V, 'user', REVOKED])
+        await mayMutate
+        await mutate((sql, params) => query(sql, params))
       })
       await rowLocked
-      let res: Awaited<ReturnType<typeof copy>>
       try {
         // supertest's Test is lazy — `.then` is what actually sends the request; without it the copy never starts.
-        const copying = copy(SRC_V, { withData: true, permissionMode: 'inherit', name: `revoked-${TS}` }).then((r) => r)
-        await copyParkedOnRowLock() // the fast gate passed (grant still live); the copy waits on the row lock
+        const copying = copy(sheetId, { withData: true, permissionMode: 'inherit', name }).then((r) => r)
+        await copyParkedOnRowLock() // the out-of-transaction gates passed on the PRE-mutation state; the copy waits on the row lock
         proceed()
-        await expect(revoker).resolves.toBeUndefined()
-        res = await copying
+        await expect(holder).resolves.toBeUndefined()
+        return await copying
       } finally {
-        proceed() // never leave the revoker parked on a failed wait
-        await revoker.catch(() => {})
+        proceed() // never leave the holder parked on a failed wait
+        await holder.catch(() => {})
       }
+    }
+
+    test('G14a concurrent revoke (ADR §9 r3-1): a third party\'s sheet grant is revoked under the source row lock while the copy is parked on it → the copy commits WITHOUT that grant row (the permission snapshot is post-revoke)', async () => {
+      as(ADMIN, ['admin'])
+      expect((await q('SELECT COUNT(*)::int AS n FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2', [SRC_V, REVOKED])).rows[0]).toEqual({ n: 1 })
+      const res = await copyAgainstRowLockedMutation(SRC_V, `revoked-third-party-${TS}`, async (query) => {
+        await query('DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = $2 AND subject_id = $3', [SRC_V, 'user', REVOKED])
+      })
+      expect(res.status, JSON.stringify(res.body)).toBe(201)
+      const NEW = res.body.data.sheet.id as string
+      // READ COMMITTED + row lock: the grant rows were read AFTER the PUT committed → no row for the revoked subject anywhere
+      expect((await q('SELECT COUNT(*)::int AS n FROM spreadsheet_permissions WHERE sheet_id = $1', [NEW])).rows[0]).toEqual({ n: 0 })
+      expect(res.body.data.summary.permissionRowCount).toBe(0)
+    })
+
+    test('G14b concurrent tightening on the COPIER (in-transaction DB-fresh gate): the row-level read switch is turned on under the source row lock while a non-admin copy is parked on it → 403 COPY_SOURCE_NOT_FULLY_READABLE, nothing written', async () => {
+      // REVOKED keeps GLOBAL multitable:read/write + base:write (a sheet-grant revoke alone cannot remove his canRead —
+      // canReadWithSheetGrant keeps the global capability; permission-service.ts). The switch is the tightening that the
+      // out-of-transaction gate cannot see and the in-transaction gate MUST: axis 1 of hasFullTableReadAccess.
+      as(REVOKED)
+      const probe = await dryRun(SRC_V)
+      expect(probe.status, JSON.stringify(probe.body)).toBe(200) // control: the fast gate passes on the pre-mutation state
+      const ledgerBefore = Number(((await q(`SELECT COUNT(*)::int AS n FROM meta_multitable_template_installs WHERE actor_id = $1`, [REVOKED])).rows[0] as { n: number }).n)
+      const res = await copyAgainstRowLockedMutation(SRC_V, `tightened-${TS}`, async (query) => {
+        await query('UPDATE meta_sheets SET row_level_read_permissions_enabled = TRUE WHERE id = $1', [SRC_V])
+      })
       expect(res.status, JSON.stringify(res.body)).toBe(403)
-      expect(res.body.error.code).toBe('FORBIDDEN')
-      expect(await copiesOf(SRC_V)).toHaveLength(0)
-      expect((await q(`SELECT COUNT(*)::int AS n FROM meta_multitable_template_installs WHERE actor_id = $1`, [REVOKED])).rows[0]).toEqual({ n: 0 })
+      expect(res.body.error.code).toBe('COPY_SOURCE_NOT_FULLY_READABLE')
+      expect(res.body.error).not.toHaveProperty('details')
+      expect((await q('SELECT COUNT(*)::int AS n FROM meta_sheets WHERE copied_from_sheet_id = $1 AND name = $2', [SRC_V, `tightened-${TS}`])).rows[0]).toEqual({ n: 0 })
+      expect(Number(((await q(`SELECT COUNT(*)::int AS n FROM meta_multitable_template_installs WHERE actor_id = $1`, [REVOKED])).rows[0] as { n: number }).n)).toBe(ledgerBefore)
+      // the refusal is audited (in-transaction CopySheetError → refusal audit outside the rolled-back transaction)
+      const audit = (await q(`SELECT metadata FROM operation_audit_logs WHERE resource_id = $1 AND action = 'multitable.sheet.copy'`, [SRC_V])).rows as Array<{ metadata: Record<string, unknown> }>
+      expect(audit.filter((a) => a.metadata.errorCode === 'COPY_SOURCE_NOT_FULLY_READABLE' && a.metadata.mode === 'copy')).toHaveLength(1)
     })
 
     test('G15 tripwire (flag off): a source record bumped by another connection AFTER the baseline → 409 COPY_SOURCE_CHANGED, zero rows for the copy, no ledger row', async () => {

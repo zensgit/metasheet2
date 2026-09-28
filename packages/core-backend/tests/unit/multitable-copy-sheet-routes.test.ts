@@ -24,6 +24,8 @@
  *       owner nor a base-write holder copies a row-level sheet (dry-run 200, copy 201); a non-admin in that position is
  *       still 403 FORBIDDEN; the admin is still refused on the approval / e-learning projection bases and on a
  *       soft-deleted base.
+ *   H12 TOCTOU: the row-level switch flips ON at the row lock → in-transaction DB-fresh gate 403, nothing written (r3-1 twin
+ *       of real-DB G14b; the REAL hasFullTableReadAccess re-reads the switch on the transaction handle).
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -362,6 +364,40 @@ describe('copy-sheet routes (ADR #6094 S1)', () => {
     expect(goneRes.body.error.code).toBe('FORBIDDEN')
     expect(writes(gone).map((s) => s.sql.slice(0, 32))).toEqual(['INSERT INTO operation_audit_logs'])
     expect(gone.rows('operation_audit_logs').at(-1)!.metadata).toMatchObject({ ok: false, statusCode: 403, errorCode: 'FORBIDDEN', mode: 'dry-run' })
+  })
+
+  it('H12: TOCTOU — the row-level read switch turns on between the out-of-transaction gate and the row lock → the in-transaction DB-fresh gate answers 403 COPY_SOURCE_NOT_FULLY_READABLE, nothing written, one refusal audit', async () => {
+    let flipped = 0
+    const pg = new FakePg({
+      beforeStatement: (statement, store) => {
+        // the tightening lands exactly where an authorization PUT would: at the source row lock the copy waits on
+        if (statement.sql === 'SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE' && statement.params[0] === SRC && flipped === 0) {
+          flipped += 1
+          store.rows('meta_sheets').find((r) => r.id === SRC)!.row_level_read_permissions_enabled = true
+        }
+      },
+    })
+    seed(pg) // rowLevel OFF: the fast gate passes for the non-admin
+    pg.rows('meta_bases').find((b) => b.id === BASE)!.owner_id = WRITER // base owner → the target gate passes without admin
+    const { app } = await createApp(pg, WRITER_ID)
+    pinned.setApp(app)
+    const before = pg.rows('meta_sheets').length
+    const res = await post(`/sheets/${SRC}/copy`)
+    expect(flipped).toBe(1)
+    expect(res.status, JSON.stringify(res.body)).toBe(403)
+    expect(res.body.error.code).toBe('COPY_SOURCE_NOT_FULLY_READABLE')
+    expect(res.body.error).not.toHaveProperty('details')
+    expect(pg.rows('meta_sheets')).toHaveLength(before)
+    expect(pg.rows('meta_records').filter((r) => r.sheet_id !== SRC && r.sheet_id !== FOREIGN)).toHaveLength(0)
+    expect(pg.rows('operation_audit_logs').filter((a) => (a.metadata as { errorCode?: string; mode?: string }).errorCode === 'COPY_SOURCE_NOT_FULLY_READABLE')).toHaveLength(1)
+    // control: the same actor with the switch left off copies (so the 403 above is the in-transaction re-check, not the fast gate)
+    const control = new FakePg()
+    seed(control)
+    control.rows('meta_bases').find((b) => b.id === BASE)!.owner_id = WRITER
+    const ctl = await createApp(control, WRITER_ID)
+    pinned.setApp(ctl.app)
+    const ok = await post(`/sheets/${SRC}/copy`)
+    expect(ok.status, JSON.stringify(ok.body)).toBe(201)
   })
 
   it('H8: session-only registration — no apiTokenAuth / oapiScopeGuard on either route (CS-1)', () => {
