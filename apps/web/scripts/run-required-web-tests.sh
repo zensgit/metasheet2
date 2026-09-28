@@ -1463,6 +1463,7 @@ exec npx vitest run \
   approvalResubmitButton \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
+  approvalTemplateCenterSections \
   approvalTemplateGovernance \
   approvalTemplateGroupsClient \
   ApprovalTemplateGroupsPanel \
