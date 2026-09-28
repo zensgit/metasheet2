@@ -96,7 +96,7 @@ export function classifyFieldRetypeConvertPair(
 
 /**
  * JS 码元比较器 —— 与 `hashScope`（restore-preview-identity.ts）同一口径：`<` / `>` 比 UTF-16 码元，与 DB 排序规则
- * 无关（222 的 PG 是中文 locale，`ORDER BY` 的结果与这里不同）。预览、执行、测试三处共用，**不得**改成
+ * 无关（演示库的 PG 是中文 locale，`ORDER BY` 的结果与这里不同）。预览、执行、测试三处共用，**不得**改成
  * `localeCompare` 或依赖 SQL `ORDER BY`。
  */
 export function compareCodeUnits(a: string, b: string): number {

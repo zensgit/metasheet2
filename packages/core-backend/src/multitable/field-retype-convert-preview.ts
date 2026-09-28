@@ -4,7 +4,7 @@
  * 只读：每条语句都是 `SELECT`，走调用方给的 `query`（路由传 `pool.query`）——不开事务、不取栅栏、不写任何表。
  * 纯计算在 field-retype-convert.ts；本文件只负责「托管表并集」判定与本表 live / 回收站单元格的读取。
  *
- * 行序：所有读取**不带** `ORDER BY`。确定性由 field-retype-convert.ts 的码元比较器在内存里保证——222 的 PG 是
+ * 行序：所有读取**不带** `ORDER BY`。确定性由 field-retype-convert.ts 的码元比较器在内存里保证——演示库的 PG 是
  * 中文 locale，`ORDER BY record_id` 的次序与 JS 码元序不同，依赖它会让预览与执行的 planHash 在不同库上分叉。
  */
 import { isUndefinedTableError } from '../utils/database-errors'
