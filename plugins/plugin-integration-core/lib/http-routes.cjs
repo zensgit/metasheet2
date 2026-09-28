@@ -115,6 +115,12 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
+  // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): relabel the managed tables that ALREADY
+  // exist from their English template labels to the Chinese ones — dry run unless `apply: true` +
+  // the preview's `planDigest`, compare-and-set, one config-history row per rename; the write leg is
+  // default OFF (MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED). stock-prep:admin (platform admin passes
+  // too); tenant from the VERIFIED claim only. See stock-preparation-managed-table-relabel.cjs.
+  ['POST', '/api/integration/stock-preparation/managed-tables/relabel-zh', 'stockPreparationManagedTableRelabel'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
   ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
@@ -454,6 +460,7 @@ const {
 // verbatim with the front end (the web alignment suite imports this same module), so the FE control
 // set and the BE gate set cannot drift.
 const {
+  STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
   STOCK_PREP_READ,
@@ -467,6 +474,12 @@ const {
 const {
   computeStockPreparationPreflight,
 } = require('./stock-preparation-preflight.cjs')
+// 「把系统表的英文表头改成中文」: the compare-and-set relabel of the managed tables that already exist.
+const {
+  runStockPreparationManagedTableRelabel,
+  // The ONE plan-digest shape, shared with the module rather than copied here.
+  PLAN_DIGEST_PATTERN: MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN,
+} = require('./stock-preparation-managed-table-relabel.cjs')
 // SOURCE PREFLIGHT + TOPOLOGY SELF-TEST: the other half of "is this ready" — the CUSTOMER'S source
 // rather than this deployment. It measures reachability, business-data presence, WHICH bridge the
 // source uses (order module vs DesignBom) and WHICH generic slot carries the BOM quantity, then
@@ -514,6 +527,10 @@ const {
   // warning cannot drift apart.
   CARRY_TARGET_OWNERSHIP_STATES,
   decideCarryTargetOwnership,
+  // ...and the two refusal vocabularies that verdict is mapped into: the carry's and the materials
+  // export's. The wall below is ONE function; only the codes differ per route.
+  CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
+  PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -796,17 +813,29 @@ function sendError(res, error) {
 //
 // Values-free: refusals name the objectId (a public config identifier) and nothing else — never a
 // sheet id, never a project id, never a row.
-async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+//
+// ONE WALL, TWO ROUTES. The materials export (按项目导出物料) reads the very sheet the carry writes,
+// through the very same deploy-global binding, so it needs the very same answer to "is this the
+// caller's sheet". It gets it from THIS function — the same two facts, gathered in the same order
+// from the same host port, decided by the same `decideCarryTargetOwnership` — and differs only in
+// the refusal VOCABULARY it answers with (`STOCK_PREPARATION_TARGET_TENANT_WALLS` below). A second
+// copy of the fact-gathering would be a second place for "registry, then derived id" to drift; a
+// change to how ownership is established must land in both routes at once or in neither.
+async function assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall } = {}) {
+  if (!wall || !wall.refusalCodes || !wall.portUnavailableCode) {
+    // A programming error, never a request-shaped one: every caller passes a frozen wall below.
+    throw new Error('assertStockPreparationTargetBelongsToTenant requires a tenant-wall vocabulary')
+  }
   const boundSheetId = target && typeof target.sheetId === 'string' ? target.sheetId.trim() : ''
   const objectId = target && typeof target.objectId === 'string' ? target.objectId.trim() : ''
   if (!boundSheetId || !objectId) {
-    throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the bound stock-preparation target cannot be attributed to a tenant', { objectId: objectId || null })
+    throw new HttpRouteError(409, wall.refusalCodes[CARRY_TARGET_OWNERSHIP_STATES.UNBOUND], CARRY_TARGET_OWNERSHIP_MESSAGES[CARRY_TARGET_OWNERSHIP_STATES.UNBOUND], { objectId: objectId || null })
   }
   // REACHABLE, and deliberately so: the caller hands this the RAW host surface rather than a helper
   // that has already refused on its own terms, so a host without the ownership port fails here, with
   // the code that names what is missing, instead of behind a generic provisioning 503.
   if (!provisioning || typeof provisioning.isSheetOwnedByProject !== 'function') {
-    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.isSheetOwnedByProject', { requiredMethods: ['isSheetOwnedByProject'] })
+    throw new HttpRouteError(501, wall.portUnavailableCode, `the ${wall.label} tenant check requires multitable.provisioning.isSheetOwnedByProject`, { requiredMethods: ['isSheetOwnedByProject'] })
   }
   const ownedByProject = await provisioning.isSheetOwnedByProject(boundSheetId, targetProjectId) === true
   // The derived id is the ONLY fallback evidence, and it is gathered only when ownership was not
@@ -819,7 +848,31 @@ async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId,
   const derivedSheetId = derive ? String(derive.call(provisioning, targetProjectId, objectId) || '') : ''
   const verdict = decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, derivedSheetId })
   if (verdict.ok) return
-  throw new HttpRouteError(409, verdict.refusalCode, CARRY_TARGET_OWNERSHIP_MESSAGES[verdict.state], { objectId })
+  throw new HttpRouteError(409, wall.refusalCodes[verdict.state], CARRY_TARGET_OWNERSHIP_MESSAGES[verdict.state], { objectId })
+}
+
+// The per-route refusal vocabularies. The carry keeps EXACTLY the codes it always answered (the
+// preflight quotes them back, and the runbook tells a deployer what they mean); the export gets its
+// own family, so an export click is never reported as a 结转 refusal.
+const STOCK_PREPARATION_TARGET_TENANT_WALLS = Object.freeze({
+  carry: Object.freeze({
+    label: 'carry',
+    refusalCodes: CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
+    portUnavailableCode: 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE',
+  }),
+  prepLineExport: Object.freeze({
+    label: 'prep-line export',
+    refusalCodes: PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+    portUnavailableCode: 'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE',
+  }),
+})
+
+function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.carry })
+}
+
+function assertPrepLineExportTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.prepLineExport })
 }
 
 // One message per refusing state. Values-free: they name no sheet id and no project id.
@@ -849,6 +902,73 @@ function inferErrorCode(error) {
   const dataSourceCode = inferDataSourceBridgeErrorCode(error)
   if (dataSourceCode) return dataSourceCode
   return error.code || error.name || 'INTERNAL_ERROR'
+}
+
+// R2 — THE ONE WORD A ROUTE-FAILURE LOG LINE MAY CARRY.
+// (docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §5 R2)
+// The route wrapper's warn used to carry only method + route template, so a 400 from the connection
+// layer and a 500 from a bug read the same in the server log. It now also names the response's own
+// code (`inferErrorCode`) — but only when that code is EXACTLY one of the words below; anything else
+// is logged as ROUTE_FAILURE_UNLISTED_CODE. `error.code` is free text on an arbitrary thrown error (a
+// driver, a dependency, a wrapped facade message, a code someone built by interpolating a value), and
+// `inferErrorCode` itself passes any `DATA_SOURCE_*` code through verbatim, so admitting a code by
+// PREFIX would let a value ride into the log behind a familiar prefix. Membership is exact-string only:
+// no prefix, no case folding, no trimming.
+// The response is untouched: `sendError` still answers with `inferErrorCode(error)` exactly as before.
+const ROUTE_FAILURE_LOGGABLE_CODES = Object.freeze([
+  // connection-resolver.cjs — every code a `new ConnectionResolutionError(...)` there can carry.
+  // __tests__/route-failure-log-closed-code.test.cjs scans that file and fails if one is missing here.
+  'CONNECTION_RESOLUTION_INVALID_BINDING',
+  'CONNECTION_RESOLUTION_UNAVAILABLE',
+  'CONNECTION_REGISTRATION_INVALID',
+  'CONNECTION_ID_MISMATCH',
+  'CONNECTION_ID_REQUIRED',
+  'CONNECTION_TENANT_MISMATCH',
+  'CONNECTION_TYPE_UNSUPPORTED',
+  'CONNECTION_CANONICAL_UNAVAILABLE',
+  'CONNECTION_BINDING_MISMATCH',
+  'CONNECTION_LEGACY_FALLBACK_DENIED',
+  'CONNECTION_LEGACY_POINTER_REQUIRED',
+  'CONNECTION_LEGACY_UNAVAILABLE',
+  'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',
+  'CONNECTION_SEALED_SNAPSHOT_KIND_UNSUPPORTED',
+  'CONNECTION_SEALED_SNAPSHOT_USER_REQUIRED',
+  'CONNECTION_SEALED_SNAPSHOT_INVALID',
+  // external-systems.cjs — its fallback when the resolver threw something without a string code.
+  'CONNECTION_RESOLUTION_FAILED',
+  // The host data-source facade's and DataSourceManager's coded refusals
+  // (packages/core-backend/src/data-adapters/data-source-plugin-facade.ts, DataSourceManager.ts).
+  'DATA_SOURCE_PRINCIPAL_REQUIRED',
+  'DATA_SOURCE_NOT_FOUND',
+  'DATA_SOURCE_NOT_READ_ONLY',
+  'DATA_SOURCE_NOT_WRITABLE',
+  'DATA_SOURCE_NOT_C6_WRITE_TARGET',
+  'DATA_SOURCE_QUERY_INVALID',
+  'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED',
+  'DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID',
+  'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED',
+  'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED',
+  'SOURCE_UNAVAILABLE',
+  // `inferErrorCode` falls back to the error's class name when it carries no code.
+  'ExternalSystemValidationError',
+  'ExternalSystemNotFoundError',
+  'ExternalSystemConflictError',
+  'INTERNAL_ERROR',
+])
+const ROUTE_FAILURE_LOGGABLE_CODE_SET = new Set(ROUTE_FAILURE_LOGGABLE_CODES)
+const ROUTE_FAILURE_UNLISTED_CODE = 'UNLISTED'
+
+// The code a route-failure log line carries: the response's own code when it is in the closed list
+// above, the fixed placeholder otherwise. Synchronous, no I/O, never throws — a thrown `null` or a
+// throwing getter costs the word, never the `sendError` call that follows it (which then behaves
+// exactly as it did before this line existed).
+function loggableRouteFailureCode(error) {
+  try {
+    const code = inferErrorCode(error)
+    return typeof code === 'string' && ROUTE_FAILURE_LOGGABLE_CODE_SET.has(code) ? code : ROUTE_FAILURE_UNLISTED_CODE
+  } catch {
+    return ROUTE_FAILURE_UNLISTED_CODE
+  }
 }
 
 function inferHttpStatus(error) {
@@ -2209,6 +2329,45 @@ function stockPreparationTargetWriteInput(req, rawInput = {}) {
     workspaceId: input.workspaceId,
     projectId,
   }
+}
+
+// 「把系统表的英文表头改成中文」 — the relabel request has exactly TWO legal shapes:
+//   {}                                  the dry run (also `{ apply: false }`)
+//   { apply: true, planDigest: 'sha256:<64 hex>' }   the apply of THAT preview
+// `apply` must be a real boolean (a string "true" or a 1 is refused rather than coerced), a digest
+// without `apply: true` is refused, and `apply: true` without a well-formed digest is refused — so
+// the one bit that decides whether anything is written cannot be produced by accident, and cannot be
+// produced at all without having looked at a preview. The tables, the target names and the project
+// are all server-derived, so any other body key and ANY query key is a steering attempt and is
+// refused before the host is asked anything.
+const VALID_MANAGED_TABLE_RELABEL_BODY_KEYS = new Set(['apply', 'planDigest'])
+
+function normalizeManagedTableRelabelRequest(req) {
+  const body = requestBody(req)
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!VALID_MANAGED_TABLE_RELABEL_BODY_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const queryKeys = Object.keys(requestQuery(req))
+  if (queryKeys.length > 0) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', `unsupported query field: ${queryKeys[0]}`, { field: queryKeys[0] })
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'apply') && typeof body.apply !== 'boolean') {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply must be a boolean', { field: 'apply' })
+  }
+  const apply = body.apply === true
+  const hasDigest = Object.prototype.hasOwnProperty.call(body, 'planDigest')
+  if (hasDigest && !apply) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'planDigest is only accepted together with apply: true', { field: 'planDigest' })
+  }
+  if (apply && (typeof body.planDigest !== 'string' || !MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN.test(body.planDigest))) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply requires the planDigest of the preview being confirmed', { field: 'planDigest' })
+  }
+  return { apply, planDigest: apply ? body.planDigest : null }
 }
 
 function stockPreparationTargetInput(req, rawInput = {}) {
@@ -4417,11 +4576,24 @@ function requireStockPreparationAudit() {
    * `parameters` is normalized here purely to resolve `projectNo` before the adapter load. The
    * wrapper normalizes again from the same raw body — `normalizeActionParameters` is pure and
    * idempotent, so the two cannot disagree.
+   *
+   * RETURNS `{ authorization, sourceObjects }` — the guard's stanza AND the resolved object list it
+   * matched — rather than the stanza alone, because the SAME array must then reach the table-action
+   * wrapper (`b2aSourceObjects`), where the schema contract pins it (R-02, contract half: the lookup
+   * table's columns are digested only if the contract walks the list the guard authorized, and a
+   * second resolution there would be a second list that could disagree). Both are `null` when
+   * dormant, and every caller DESTRUCTURES: the envelope itself is truthy, so handing it whole to
+   * `loadTableActionSourceAdapter` as `b2aAuthorization` would arm the W-5 floors on a dormant read.
    */
+  const B2A_DORMANT_STOCK_PREPARATION_READ = Object.freeze({ authorization: null, sourceObjects: null })
   async function assertB2aStockPreparationReadAuthorized(action, rawParameters, { req, tenantScope, purpose, runId }) {
-    if (!b2aTrialRegistry) return null
+    if (!b2aTrialRegistry) return B2A_DORMANT_STOCK_PREPARATION_READ
     const parameters = normalizeActionParameters(rawParameters)
-    return assertB2aReadAuthorization({
+    // R-02 (finding 3): the read plan's own objects PLUS any the source system's server-side config
+    // adds behind it. `req` is required only to scope that config read — armed-only, one extra
+    // credential-free platform read, and a dormant deployment returns above without doing it.
+    const sourceObjects = await b2aTableActionSourceObjects(req, action, { tenantId: tenantScope })
+    const authorization = await assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: context.storage,
       operationClaim: b2aOperationClaim,
@@ -4429,14 +4601,12 @@ function requireStockPreparationAudit() {
       sourceSystemType: action.source.kind,
       sourceBindingRef: action.source.externalSystemId,
       dataScopeRef: parameters.projectNo,
-      // R-02 (finding 3): the read plan's own objects PLUS any the source system's server-side config
-      // adds behind it. `req` is required only to scope that config read — armed-only, one extra
-      // credential-free platform read, and a dormant deployment returns above without doing it.
-      sourceObjects: await b2aTableActionSourceObjects(req, action, { tenantId: tenantScope }),
+      sourceObjects,
       purpose,
       runId,
       now: Date.now(),
     })
+    return { authorization, sourceObjects }
   }
 
   /**
@@ -5929,8 +6099,12 @@ function requireStockPreparationAudit() {
       // drift from the proof.
       const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
-      // B2a entry point (1), ahead of the credential reload inside the adapter load below.
-      const dryRunB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      // B2a entry point (1), ahead of the credential reload inside the adapter load below. The
+      // resolved object list rides along (R-02, contract half): the wrapper pins the SAME list.
+      const {
+        authorization: dryRunB2aAuthorization,
+        sourceObjects: dryRunB2aSourceObjects,
+      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: dryRunTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
@@ -5972,6 +6146,9 @@ function requireStockPreparationAudit() {
         b2aClaimStore: context.storage,
         b2aOperationClaim,
         b2aRunId: dryRunB2aRunId,
+        // R-02 (contract half): the list the guard above matched — plan objects plus the config-bound
+        // lookup object — so the schema contract pins the lookup table's columns too. `null` dormant.
+        b2aSourceObjects: dryRunB2aSourceObjects,
         tenantId: dryRunTenantId,
         now: Date.now(),
       }))
@@ -6086,7 +6263,11 @@ function requireStockPreparationAudit() {
       //
       // NO DOUBLE BURN: the prepare handoff below holds no B2a guard of its own, so this route's
       // claim is the only one taken on the path.
-      const reconcileB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      // R-02 (contract half): the resolved object list is NOT threaded here, deliberately — the
+      // prepare handoff below plans through `computeDryRun` with no B2a inputs at all (no
+      // registration, no contract), so there is no schema contract on this path to hand it to.
+      // That is the pre-existing shape of the reconcile read, recorded rather than widened.
+      const { authorization: reconcileB2aAuthorization } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
@@ -6187,7 +6368,10 @@ function requireStockPreparationAudit() {
       const mvpPersistB2aRunId = b2aRunId('table-action-mvp-persist')
       // B2a entry point (1), MVP-persist half — its OWN purpose, because committing a customer's BOM
       // into the internal snapshot tables is a different consumer from an interactive refresh.
-      const mvpPersistB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const {
+        authorization: mvpPersistB2aAuthorization,
+        sourceObjects: mvpPersistB2aSourceObjects,
+      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
@@ -6211,6 +6395,8 @@ function requireStockPreparationAudit() {
         b2aClaimStore: context.storage,
         b2aOperationClaim,
         b2aRunId: mvpPersistB2aRunId,
+        // R-02 (contract half): same list as the guard above — see the dry-run route.
+        b2aSourceObjects: mvpPersistB2aSourceObjects,
         tenantId,
         now: Date.now(),
       })
@@ -6297,7 +6483,10 @@ function requireStockPreparationAudit() {
       const applyB2aRunId = b2aRunId('table-action-apply')
       // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
       // so a refusal never burns a single-use dry-run token.
-      const applyB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const {
+        authorization: applyB2aAuthorization,
+        sourceObjects: applyB2aSourceObjects,
+      } = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         req,
         tenantScope: applyTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
@@ -6344,6 +6533,8 @@ function requireStockPreparationAudit() {
         b2aClaimStore: context.storage,
         b2aOperationClaim,
         b2aRunId: applyB2aRunId,
+        // R-02 (contract half): same list as the guard above — see the dry-run route.
+        b2aSourceObjects: applyB2aSourceObjects,
         tenantId: applyTenantId,
         now: Date.now(),
       }))
@@ -7001,6 +7192,57 @@ function requireStockPreparationAudit() {
       } catch (error) {
         throw sandboxTargetRouteError(error)
       }
+    },
+
+    // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a). DRY RUN unless the body says
+    // `apply: true` AND carries the `planDigest` of the preview being confirmed; the apply recomputes
+    // the plan and refuses (409 MANAGED_TABLE_RELABEL_PLAN_CHANGED) if it moved. The write leg is
+    // DEFAULT OFF behind MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED (exactly 'true'); off, it answers
+    // 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED before asking the host anything, and the dry run keeps
+    // working and says `applyEnabled: false`. Every rename writes one config-history row: FIELD
+    // renames are revertible there, SHEET renames are recorded but not revertible there.
+    //
+    // GATE: stock-prep:admin — the workbench-scoped ceiling the 数据来源与体检 page this control
+    // lives on is already gated on (canOpenStockPrepInstallView); platform admin passes inside that
+    // decision. What it opens is narrow by construction: no table, no name and no project comes from
+    // the request, and a column a person already renamed is never touched.
+    //
+    // TENANT: the VERIFIED token claim only (`resolveVerifiedClaimTenantId`), never `user.tenantId`,
+    // which the host fills from the `x-tenant-id` header for a claimless token — a header must not
+    // choose whose tables get renamed. The dry run uses the same resolver so it rehearses exactly the
+    // tables the apply would act on.
+    async stockPreparationManagedTableRelabel(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      const input = normalizeManagedTableRelabelRequest(req)
+      const tenantId = resolveVerifiedClaimTenantId(req, {})
+      const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const provisioning = context && context.api && context.api.multitable ? context.api.multitable.provisioning : null
+      // The sandbox write allowlist (server config, else env) names sandbox tables too — server-held,
+      // never request-supplied, and namespace-filtered again inside the module.
+      const sandboxPolicy = resolveStockPrepApplySandboxPolicy(context && context.config)
+      const result = await runStockPreparationManagedTableRelabel({
+        provisioning,
+        projectId,
+        packCatalog: customerPackCatalog,
+        sandboxObjectIds: sandboxPolicy && Array.isArray(sandboxPolicy.allowedTargetObjectIds) ? sandboxPolicy.allowedTargetObjectIds : [],
+        apply: input.apply,
+        planDigest: input.planDigest,
+        env: process.env,
+        // Attribution for the config-history rows (who pressed 确认). Stringified: an auth provider may
+        // carry a numeric id, and dropping it to null would lose the actor on every revision.
+        actorId: user && user.id !== undefined && user.id !== null && String(user.id).trim() ? String(user.id) : null,
+      })
+      if (input.apply && routeLogger && typeof routeLogger.info === 'function') {
+        // Counts only — never a project id, a sheet id or a name.
+        routeLogger.info('[plugin-integration-core] stock-preparation managed-table relabel applied', {
+          tableCount: result.tables.length,
+          renamed: result.totals.renamed,
+          skippedNameChanged: result.totals.skipped_name_changed,
+          skippedNameTaken: result.totals.skipped_name_taken,
+          revisionCount: result.revisionCount,
+        })
+      }
+      return sendOk(res, result)
     },
 
     async stockPreparationOptionsSync(req, res) {
@@ -8641,18 +8883,39 @@ function requireStockPreparationAudit() {
       // install: apply is sandbox-only unless an owner configured a production policy, so the rows
       // are in the sandbox twin and every project answered 404.
       //
-      // NOTE, PRECISELY, WHAT THE VERIFIED TENANT DECIDES HERE. It keys the ACTION LOOKUP — and so
-      // the persisted per-tenant SOURCE binding — and it keys the audit row, so a header-spoofed
-      // tenant can no longer steer either of those. It does NOT decide the SHEET: `action.target` is
-      // DEPLOY-TIME configuration shared by every tenant on the deployment, and the only row-level
-      // scoping inside it is `projectNo`. That is a property of the table-action target model this
-      // route adopted, not of this scope; it is written down here so nobody reads the scope as a
-      // promise of per-tenant ROW isolation on this route the way it genuinely is on the other two
-      // (value-entry and the directory both derive their sheet from the verified tenant's staging
-      // project). Making this route's target tenant-scoped is a separate change.
+      // WHAT THE VERIFIED TENANT DECIDES HERE. It keys the ACTION LOOKUP — and so the persisted
+      // per-tenant SOURCE binding — and it keys the audit row, so a header-spoofed tenant can no
+      // longer steer either of those. It does NOT pick the SHEET: `action.target` is DEPLOY-TIME
+      // configuration shared by every tenant on the deployment (`getTableAction` is keyed by
+      // actionId alone, and the persisted source binding overrides only the source, never the
+      // target), and the only row-level scoping inside it is `projectNo`.
       const action = assertStockPreparationTargetReady(
         await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
       )
+      // ...SO THE SHEET MUST BE PROVEN TO BE THE CALLER'S OWN before a single row is read — the SAME
+      // wall the 结转 write runs (assertStockPreparationTargetBelongsToTenant, above), answering in
+      // this route's own vocabulary (PREP_LINE_EXPORT_TARGET_*).
+      //
+      // Without it the binding on its own handed EVERY tenant on the deployment the same sheet: a
+      // tenant-B operator whose scope resolved cleanly to tenant B was served tenant A's material
+      // names and quantities by naming one of tenant A's project numbers, 200, because nothing
+      // between the verified tenant and the records read ever asked whose sheet it was. The carry
+      // route closed exactly this on its write side; the read side of the same sheet stayed open.
+      //
+      // The sheet is the caller's when the ownership registry says so (the 222 shape: a sheet the
+      // tenant's own ensure provisioned, bound by hand, whose id is not the one derived for the
+      // action's objectId), or — only when the registry has no row — when its id is the one derived
+      // for (this tenant's staging project, target.objectId) (a pre-registry install). Anything else
+      // is refused 409 with ZERO records IO, no audit row and no workbook. The staging project is
+      // derived from the RESOLVED scope and nothing in the request; one registry read, no records.
+      await assertPrepLineExportTargetBelongsToTenant({
+        // The RAW host surface, as on the carry route: `getMultitableProvisioning()` would throw its
+        // own generic 503 for a host lacking `findObjectSheet`, masking this check's typed 501 about
+        // the ownership port it actually needs.
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        target: action.target,
+      })
       const exportResult = await exportStockPreparationPrepLines({
         recordsApi: getMultitableRecordsApi(),
         target: action.target,
@@ -10124,7 +10387,12 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
         return await handler(req, res)
       } catch (error) {
         if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError)) {
-          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`)
+          // R2: method + route TEMPLATE + one closed-list code (loggableRouteFailureCode). No request
+          // value — no param, no query, no id — is interpolated. Same single synchronous call as
+          // before, on the same branches, right before the unchanged `sendError`.
+          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`, {
+            code: loggableRouteFailureCode(error),
+          })
         }
         return sendError(res, error)
       }
@@ -10159,6 +10427,9 @@ module.exports = {
     scopedInput,
     sendError,
     inferHttpStatus,
+    ROUTE_FAILURE_LOGGABLE_CODES,
+    ROUTE_FAILURE_UNLISTED_CODE,
+    loggableRouteFailureCode,
     publicRunInput,
     redactDeadLetter,
     asSampleLimit,
@@ -10171,5 +10442,9 @@ module.exports = {
     stockPreparationExportSheetName,
     stockPreparationExportSafeToken,
     stockPreparationExportTimestamp,
+    // The ONE stock-prep target tenant wall and its per-route vocabularies, exported so a suite can
+    // witness that the carry and the export answer one verdict in two vocabularies.
+    assertStockPreparationTargetBelongsToTenant,
+    STOCK_PREPARATION_TARGET_TENANT_WALLS,
   },
 }

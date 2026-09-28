@@ -193,6 +193,7 @@ import { multitableClient, type MultitableApiClient } from '../multitable/api/cl
 import type { AutomationActionType, AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
 import { automationActionTypeLabel, automationLabel, automationStatusLabel, automationStepOutputView, type AutomationLabelKey, type AutomationStepOutputView } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
+import { formatBusinessTimestamp } from '../multitable/utils/business-timezone'
 import StatusTag from '../components/status/StatusTag.vue'
 import EmptyState from '../components/status/EmptyState.vue'
 
@@ -713,12 +714,10 @@ async function rerunExecution(run: AutomationRunView) {
   }
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale
+// (the same run times MetaAutomationLogViewer shows inside the sheet).
 function formatTime(ts: string): string {
-  try {
-    return new Date(ts).toLocaleString()
-  } catch {
-    return ts
-  }
+  return formatBusinessTimestamp(ts, { precision: 'second' }) ?? ts
 }
 
 /**

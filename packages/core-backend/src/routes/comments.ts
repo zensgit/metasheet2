@@ -30,6 +30,7 @@ import {
   type QueryFn,
 } from '../multitable/permission-service'
 import { loadSheetLivenessBatch } from '../multitable/sheet-liveness'
+import { resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
 import { sendSheetNotLive } from '../multitable/sheet-refusals'
 import {
   CommentAccessError,
@@ -596,7 +597,12 @@ export function commentsRouter(injector?: Injector): Router {
       // #5831 part B: only readable, live sheets and non-denied rows, filtered before COUNT/LIMIT.
       const inbox = await resolveCommentInboxScope(req, commentService)
       const result = await commentService.getInbox(inbox.userId, { limit, offset }, inbox.scope)
-      return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
+      // 客户反馈 2026-09-24 #4c follow-up: the inbox page loads no /context, so the page carries the instance
+      // business timezone (a zone id, instance-wide, not actor data) for its comment times.
+      return res.json({
+        ok: true,
+        data: { items: result.items, total: result.total, limit, offset, businessTimezone: resolveMultitableBusinessTimezone() },
+      })
     } catch (error) {
       logger.error('Failed to load comment inbox', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load comment inbox' } })

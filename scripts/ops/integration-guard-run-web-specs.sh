@@ -153,6 +153,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationDiffSummaryExport \
   StockPreparationExceptionQueueView \
   StockPreparationHomeQueryLabels \
+  StockPreparationManagedTableRelabelPanel \
   StockPreparationMappingConfirmView \
   StockPreparationPrepLineView \
   StockPreparationProjectQuery \

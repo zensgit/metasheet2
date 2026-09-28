@@ -805,14 +805,18 @@ async function alignmentHoldsForEverySubsetOfTheVocabulary() {
 //
 // The set is DERIVED from the route source: every handler whose body opens with a
 // `requireAccess(req, STOCK_PREP_…)` gate is, by construction, an operator-facing stock-prep route.
+function handlerBodyInSource(src, handler) {
+  const start = src.indexOf(`    async ${handler}(req, res) {`)
+  const end = src.indexOf('\n    },', start)
+  return src.slice(start, end).replace(/\/\/[^\n]*/g, '')
+}
+
 function stockPrepGatedHandlersInSource(src) {
   const gated = []
   const pattern = /\n {4}async ([A-Za-z0-9_$]+)\(req, res\) \{/g
   let match = pattern.exec(src)
   while (match) {
-    const start = src.indexOf(`    async ${match[1]}(req, res) {`)
-    const end = src.indexOf('\n    },', start)
-    const body = src.slice(start, end).replace(/\/\/[^\n]*/g, '')
+    const body = handlerBodyInSource(src, match[1])
     if (/requireAccess\(req,\s*STOCK_PREP_[A-Z_]+\)/.test(body)) gated.push(match[1])
     match = pattern.exec(src)
   }
@@ -829,8 +833,19 @@ function stockPrepGatedHandlersInSource(src) {
  * confirmation-queue view that R-11's alignment is measured against: its consumer is the 安装/体检
  * page, whose own gate is `canOpenStockPrepInstallView`. Putting it in this manifest would make the
  * control-for-control alignment assertion measure a control that is not on that DOM.
+ *
+ * `stockPreparationManagedTableRelabel` (「把系统表的英文表头改成中文」, 客户反馈 2026-09-24 #4a) is exempt
+ * for the SAME reason: its one control lives on that same 安装/体检 page, not on the confirmation
+ * queue, and it renders under `canOpenStockPrepInstallView` — which is exactly
+ * `satisfiesStockPrepAccess(…, STOCK_PREP_ADMIN)`, the route's own gate, so R-11's visible ==
+ * actionable holds for it on its own page (pinned by the web suite
+ * StockPreparationManagedTableRelabelPanel.spec.ts and by the plugin suite
+ * stock-preparation-managed-table-relabel.test.cjs L1/L2).
  */
-const MANIFEST_EXEMPT_STOCK_PREP_HANDLERS = Object.freeze(['stockPreparationPreflight'])
+const MANIFEST_EXEMPT_STOCK_PREP_HANDLERS = Object.freeze([
+  'stockPreparationPreflight',
+  'stockPreparationManagedTableRelabel',
+])
 
 function everyStockPrepGatedRouteIsInTheManifest() {
   const gated = stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE)
@@ -966,13 +981,24 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
     [],
     'M-08: no requireAccess gate hand-types a stock-prep token — they reference the frozen constants',
   )
+  // STOCK_PREP_ADMIN joined the set with exactly ONE handler — the 安装/体检 page's
+  // 「把系统表的英文表头改成中文」 relabel (客户反馈 2026-09-24 #4a), manifest-exempt with its reason
+  // above. Any second ADMIN-gated handler must be argued the same way, which is why the exact set
+  // stays pinned here rather than relaxed to "any frozen constant".
   assert.deepEqual(
     gates.identifiers,
-    ['STOCK_PREP_OPERATE', 'STOCK_PREP_READ'],
-    'M-08: exactly the read and operate constants are used as gate expressions',
+    ['STOCK_PREP_ADMIN', 'STOCK_PREP_OPERATE', 'STOCK_PREP_READ'],
+    'M-08: exactly the admin, read and operate constants are used as gate expressions',
+  )
+  assert.deepEqual(
+    stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
+      /requireAccess\(req,\s*STOCK_PREP_ADMIN\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
+    )),
+    ['stockPreparationManagedTableRelabel'],
+    'M-08: STOCK_PREP_ADMIN gates exactly the managed-table relabel handler',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
-  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE]) {
+  for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
     assert.ok(STOCK_PREP_PERMISSION_CODES.includes(code), `M-08: ${code} is in the frozen vocabulary`)
   }
   // The legacy tokens are untouched: the three-tier integration vocabulary still gates everything else.
@@ -1006,6 +1032,26 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
   for (const code of STOCK_PREP_PERMISSION_CODES) {
     assert.ok(migration.includes(`'${code}'`), `M-08: the migration seeds ${code}`)
   }
+  // The ADMIN description gained the relabel write scope; the seed is ON CONFLICT DO NOTHING, so a
+  // compare-and-set migration carries it to existing rows. Its AFTER text must be the descriptor's,
+  // byte for byte, and its BEFORE text must be exactly what the seed wrote — otherwise the CAS would
+  // match nothing and the role editor would keep describing a read-only tier.
+  const adminDescriptor = STOCK_PREP_PERMISSION_DESCRIPTORS.find((descriptor) => descriptor.code === STOCK_PREP_ADMIN)
+  const descriptionMigration = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20260927120000_update_stock_prep_admin_permission_description.ts'),
+    'utf8',
+  )
+  assert.ok(
+    descriptionMigration.includes(`'${adminDescriptor.description}'`),
+    'M-08: the description migration writes exactly the ADMIN descriptor text',
+  )
+  const seededAdminDescription = (migration.match(/\('stock-prep:admin', 'Stock Prep Admin', '([^']+)'\)/) || [])[1]
+  assert.ok(seededAdminDescription, 'M-08: the seed row for stock-prep:admin is readable')
+  assert.ok(
+    descriptionMigration.includes(`'${seededAdminDescription}'`),
+    'M-08: the description migration compare-and-sets FROM exactly the seeded text',
+  )
+  assert.match(adminDescriptor.description, /relabel/, 'M-08: the ADMIN description names the relabel write scope')
   // R-11: zero holders. The migration must NOT bind any role to these codes.
   assert.ok(
     !/INSERT INTO role_permissions/.test(migration),

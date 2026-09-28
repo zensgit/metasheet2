@@ -258,7 +258,11 @@ test('F7: the guard-derived case table covers every host class at its exact edge
     assert.ok(counted.has(u), `case table must count ${u}`)
   }
   for (const u of ['https://172.15.255.255/', 'https://172.32.0.0/', 'https://[::ffff:ac0f:ffff]/',
-    'https://[::ffff:ac20:0]/', 'https://[fec0::1]/', 'https://10.fake.invalid/', 'https://10.0.0.1:65536/']) {
+    'https://[::ffff:ac20:0]/', 'https://[fec0::1]/', 'https://10.fake.invalid/', 'https://10.0.0.1:65536/',
+    // 2026-09-27 (#6104 gap): the ::ffff: hex-form boundary one step past
+    // each of c0a8 / a9fe / 7f / 0a must stay out too.
+    'https://[::ffff:c0a9:0]/', 'https://[::ffff:b00:1]/', 'https://[::ffff:7eff:1]/',
+    'https://[::ffff:a9ff:1]/']) {
     assert.ok(skipped.has(u), `case table must NOT count ${u}`)
   }
 })

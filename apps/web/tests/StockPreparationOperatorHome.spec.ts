@@ -1066,6 +1066,156 @@ describe('从列表移除 (客户反馈 2026-09-24 #1a / A8) — StockPreparatio
   })
 })
 
+describe('卡片上的导出 — 租户墙拒绝有自己的话,不是「稍后再点一次」', () => {
+  // The export now refuses (409/501) when the deployment's bound 备料主表 is not provably this
+  // factory's. The card's catch used to answer EVERY failure with one retry-shaped sentence, which is
+  // the one instruction that is wrong for a refusal no retry can change.
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.apiFetch.mockReset()
+    try { window.localStorage.clear() } catch { /* jsdom always has it; guard anyway */ }
+  })
+
+  async function flushTurns(): Promise<void> {
+    for (let turn = 0; turn < 6; turn += 1) {
+      await new Promise((done) => { setTimeout(done, 0) })
+      await nextTick()
+    }
+  }
+
+  function readyCard(): { root: HTMLDivElement; unmount: () => void } {
+    return mountIsolated(StockPreparationOperatorHome, {
+      scope: SCOPE,
+      directory: emptyDirectory(),
+      directoryLoaded: true,
+      memory: [{ projectNo: PROJECT_NO, updatedAt: '2026-09-26T00:00:00.000Z', postureKey: 'ready' }],
+    })
+  }
+
+  it('a 409 PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH says the table is not this factory\'s and sends the person to an administrator', async () => {
+    h.apiFetch.mockImplementation(async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH', message: 'not owned', details: { objectId: 'plm_stock_preparation_main' } } }),
+      { status: 409 },
+    ))
+    const { root, unmount } = readyCard()
+    try {
+      ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+      await flushTurns()
+      const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+      expect(notice, 'the refusal is visible on the card').not.toBeNull()
+      // PINNED AS LITERALS: the sentence the operator has to act on.
+      expect(notice.textContent).toContain('不属于您的工厂')
+      expect(notice.textContent).toContain('管理员')
+      expect(notice.textContent, 'retrying cannot change a tenant-wall refusal').not.toContain('稍后再点一次')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('a 501 PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE names the server gap, not a retry', async () => {
+    h.apiFetch.mockImplementation(async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE', message: 'port missing' } }),
+      { status: 501 },
+    ))
+    const { root, unmount } = readyCard()
+    try {
+      ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+      await flushTurns()
+      const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+      expect(notice).not.toBeNull()
+      expect(notice.textContent).toContain('升级服务端')
+      expect(notice.textContent).not.toContain('稍后再点一次')
+    } finally {
+      unmount()
+    }
+  })
+
+  // The envelopes below are what the route's sendError actually writes for each wall refusal
+  // (plugin-integration-core http-routes.cjs: HttpRouteError -> { ok:false, error:{ code, message,
+  // details } }, JSON), status and values-free details included — not a hand-trimmed stand-in.
+  const WALL_REFUSALS = [
+    {
+      status: 409,
+      code: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+      message: 'the sheet this deployment is bound to is not registered to the project of this caller, and its id is not the one derived for that project either',
+      details: { objectId: 'plm_stock_preparation_main' },
+    },
+    {
+      status: 409,
+      code: 'PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN',
+      message: 'the bound sheet is not registered to this project and this host exposes no id derivation to fall back on, so its owner cannot be established',
+      details: { objectId: 'plm_stock_preparation_main' },
+    },
+    {
+      status: 501,
+      code: 'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE',
+      message: 'the prep-line export tenant check requires multitable.provisioning.isSheetOwnedByProject',
+      details: { requiredMethods: ['isSheetOwnedByProject'] },
+    },
+  ] as const
+
+  function wallRefusalResponse(refusal: (typeof WALL_REFUSALS)[number]): Response {
+    return new Response(
+      JSON.stringify({ ok: false, error: { code: refusal.code, message: refusal.message, details: refusal.details } }),
+      { status: refusal.status, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+
+  it('a 409 PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN says the owner cannot be established and sends the person to an administrator, not a retry', async () => {
+    const refusal = WALL_REFUSALS.find((entry) => entry.code === 'PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN')!
+    h.apiFetch.mockImplementation(async () => wallRefusalResponse(refusal))
+    const { root, unmount } = readyCard()
+    try {
+      ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+      await flushTurns()
+      const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+      expect(notice, 'the refusal is visible on the card').not.toBeNull()
+      // PINNED AS LITERALS: what happened, that nothing happened, and who to go to.
+      expect(notice.textContent).toContain('没法确认这台系统绑定的备料主表属于哪家工厂')
+      expect(notice.textContent).toContain('文件没有下载,数据也没有变化')
+      expect(notice.textContent).toContain('管理员')
+      expect(notice.textContent, 'its own sentence, not the MISMATCH one').not.toContain('不属于您的工厂')
+      expect(notice.textContent, 'retrying cannot change a tenant-wall refusal').not.toContain('稍后再点一次')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('every tenant-wall refusal on the card says, in these literal words, that nothing was exported and nothing changed', async () => {
+    for (const refusal of WALL_REFUSALS) {
+      h.apiFetch.mockReset()
+      h.apiFetch.mockImplementation(async () => wallRefusalResponse(refusal))
+      const { root, unmount } = readyCard()
+      try {
+        ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+        await flushTurns()
+        const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+        expect(notice, `${refusal.code}: the refusal is visible on the card`).not.toBeNull()
+        expect(notice.textContent, `${refusal.code}: says the export was withheld`).toContain('为保护数据没有导出')
+        expect(notice.textContent, `${refusal.code}: says no file came and nothing changed`).toContain('文件没有下载,数据也没有变化')
+        expect(notice.textContent, `${refusal.code}: not the generic retry line`).not.toContain('稍后再点一次')
+      } finally {
+        unmount()
+      }
+    }
+  })
+
+  it('any OTHER failure keeps the pre-existing generic line, byte for byte', async () => {
+    h.apiFetch.mockImplementation(async () => new Response('upstream exploded', { status: 500, headers: { 'Content-Type': 'text/plain' } }))
+    const { root, unmount } = readyCard()
+    try {
+      ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+      await flushTurns()
+      const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+      expect(notice).not.toBeNull()
+      expect(notice.textContent).toBe('文件没有下载成功,数据没有变化。稍后再点一次;还是不行就找管理员。')
+    } finally {
+      unmount()
+    }
+  })
+})
+
 describe('预读失败静默 (G3) + 空态三值互不共享文案 (P0-2)', () => {
   beforeEach(() => {
     h.locale = 'zh-CN'

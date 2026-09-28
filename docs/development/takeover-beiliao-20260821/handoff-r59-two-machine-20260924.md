@@ -64,12 +64,12 @@
 
 ## 5. 接下来（开发机）
 
-- **#5954**：跨库镜像记录操作多表 `FOR UPDATE` 后不复读存活，软删竞争窗仍可写已删表。
-- **#5955**：elearning-stats 投影表行锁不读 `deleted_at`——先证实影响再修。
-- **form-share 三处手写同形拒绝**：结构守卫从「按名字」改为「按形状」。
-- 升级脚本 PM2_HOME 探测 + 计划任务回退：已开 PR（分支 `fix/onprem-upgrade-pm2-runtime-home`），合入后随 R60 首次上机验证。
-- 待 owner：#5864 字段类型转换五项；PR #5609 考勤守卫选路；#5933 授权。
+> 2026-09-28 更新（第十次无人值守窗口收尾，详见 `docs/development/autonomous-run-20260925-28-outcome.md`）。
 
-**待上机（R60）**：main `b7e1cbbeb` 及之后合入的全部。
+- 已处理：#5954 → #6065 已合；#5955 证实无代码路径可达、不修（issue 有证据评论）；form-share 按形状守卫 → #6069 转 draft（三选项待定）；升级脚本 PM2_HOME / pm2-runtime 探测 → #6071 已合（上机用法与预检见 #6079）。
+- 在飞、待条件：#6076（外部系统删除×并发写锁协议，终审可合，待 gh workflow 权限接真 PG 车道后合）；#6098（连接拒绝原因诊断日志，draft，含时序旁路需重做）。
+- 待 owner：#5933 授权（R60 普查后；合并即演示机 migrate 执行）；#6099 DDL 方案 A 审；#6121 handoffAdvance 无租户放行策略；SHEET-LIVENESS-GAP-1（lockRestoreJobBlock）；#5864 字段类型转换五项；PR #5609 考勤守卫选路。
+
+**待上机（R60）**：main `b7e1cbbeb` 及之后合入的全部（清单与预检统一追加在 #6079）。另需手工：演示机现网 nginx.conf 同步 #6097 的 index.html no-cache 段；#6109 导出租户墙上线前跑预检看 `checks.carryTargetBinding.ownershipState`。
 
 - R60 上机时顺带跑定时试拉 `CONNECTION_CANONICAL_UNAVAILABLE` 的只读判定（Q0–Q6 与日志检查），见 `stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §4。只判 R60 重启之后那次试拉的结果，重启前 r58/r59 日志里的报错不能拿当前库判（同文 §4 执行约定、§4.6 的 S6）。结论之一：#5933 不会消除这个错误（同文 §3）。

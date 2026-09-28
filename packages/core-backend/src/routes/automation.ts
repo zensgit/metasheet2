@@ -59,6 +59,7 @@ import {
 import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
 import { loadReadableAutomationSampleRecord } from './automation-test-run-sample'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
+import { resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
 
 /**
  * DB 未就绪(缺表 42P01 / 缺列 42703)= transient → 503,而不是 500。
@@ -957,8 +958,12 @@ export function createAutomationRoutes(
     }
     // A future-state C1 filter (queued/suspended/rejected/errored) is legal but no stored
     // row can match it yet — return empty rather than 400, so A6 adds no contract churn.
+    // 客户反馈 2026-09-24 #4c follow-up: the runs page (AutomationExecutionsView) never loads /context, so the list
+    // carries the instance business timezone itself — a zone id, instance-wide, not actor or run data — and the
+    // run times show the same wall clock as the in-sheet log viewer.
+    const businessTimezone = resolveMultitableBusinessTimezone()
     if (statusFilter.kind === 'empty') {
-      return res.json({ executions: [] })
+      return res.json({ executions: [], businessTimezone })
     }
 
     try {
@@ -981,6 +986,7 @@ export function createAutomationRoutes(
           ...toRunView(e, { includeSnapshot: false }),
           ...executionDisplayNames(e.ruleId, e.sheetId, nameMaps),
         })),
+        businessTimezone,
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load runs'

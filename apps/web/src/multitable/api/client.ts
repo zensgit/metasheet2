@@ -3259,7 +3259,12 @@ export class MultitableApiClient implements CommentsApiClient {
   // --- Records ---
   async getRecord(recordId: string, params?: { sheetId?: string; viewId?: string }): Promise<MetaRecordContext> {
     const res = await this.fetch(`/api/multitable/records/${recordId}${qs(params ?? {})}`)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaRecordContext>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link, linked-record peek) may arrive
+    // before — or without — /context; it carries the same instance business timezone, so its date-times
+    // show the grid's wall clock. An older server omits the key and the current zone stays.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   async listRecordHistory(sheetId: string, recordId: string, params?: { limit?: number; offset?: number }): Promise<MetaRecordRevision[]> {
@@ -4045,7 +4050,9 @@ export class MultitableApiClient implements CommentsApiClient {
 
   async listCommentInbox(params?: { limit?: number; offset?: number }): Promise<MultitableCommentInboxPage> {
     const res = await this.fetch(`/api/comments/inbox${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number }>(res)
+    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the inbox page loads no /context; adopt the zone its page carries.
+    setBusinessTimezone(data?.businessTimezone)
     return normalizeCommentInbox(data)
   }
 
@@ -4265,7 +4272,9 @@ export class MultitableApiClient implements CommentsApiClient {
     limit?: number
   }): Promise<AutomationRunView[]> {
     const res = await this.fetch(`/api/multitable/automation-executions${qs({ ...filters })}`)
-    const data = await this.parseJson<{ executions: AutomationRunView[] }>(res)
+    const data = await this.parseJson<{ executions: AutomationRunView[]; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the runs page loads no /context; adopt the zone the list carries.
+    setBusinessTimezone(data?.businessTimezone)
     return Array.isArray(data?.executions) ? data.executions : []
   }
 

@@ -17,11 +17,19 @@
  * role/password -- recognizable as "leaky", never a real deployment value.
  *
  * Transport: usePinnedServer() + request(pinned.url()), never request(app) -- see #4154.
+ *
+ * #6105 follow-up: the redaction above was never pinned against dropping the server-side
+ * `logger.error(...)` call that both branches make right before building the redacted body --
+ * deleting either call left all suites below green. Spy on `Logger.prototype.error` (the seam
+ * used by admin-read-error-echo-redaction.test.ts and admin-tree-5xx-values-free.test.ts for the
+ * same shape of assertion) and assert each write route calls it exactly once, with the original
+ * (unredacted) error reaching the second argument.
  */
 import express from 'express'
 import request from 'supertest'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
+import { Logger } from '../../src/core/logger'
 
 const dsMocks = vi.hoisted(() => ({
   getDataSource: vi.fn(),
@@ -109,6 +117,18 @@ function expectRedacted(body: Record<string, unknown>, code: string, message: st
   expect(serialized).not.toContain('at Object')
 }
 
+/**
+ * The other half of the contract: redacting the wire body must not also silence the operator.
+ * The route's own `logger.error(...)` call is the only place the original provider error is
+ * still allowed to appear, so pin that it fires exactly once and carries the real error.
+ */
+function expectLoggedOriginalError(errorLog: ReturnType<typeof vi.spyOn>): void {
+  expect(errorLog).toHaveBeenCalledTimes(1)
+  const [, loggedError] = errorLog.mock.calls[0] as [string, Error | undefined]
+  expect(loggedError).toBeInstanceOf(Error)
+  expect(loggedError?.message).toBe(LEAKY)
+}
+
 const pinned = usePinnedServer()
 
 describe('plm-workbench write routes redact the provider error text (values-free)', () => {
@@ -116,10 +136,18 @@ describe('plm-workbench write routes redact the provider error text (values-free
   app.use(express.json())
   app.use(plmWorkbenchRouter)
 
+  let errorLog: ReturnType<typeof vi.spyOn>
+
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
     dsMocks.assertAccess.mockReset()
     pinned.setApp(app)
+    // Record (and silence) server-side error logs: the original error must still land HERE.
+    errorLog = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('BOM write-back PATCH: the response never echoes the provider error message', async () => {
@@ -141,6 +169,7 @@ describe('plm-workbench write routes redact the provider error text (values-free
     expect(res.status).toBe(502)
     expect(res.body.reason).toBe('provider-unavailable')
     expectRedacted(res.body as Record<string, unknown>, PLM_BOM_WRITEBACK_FAILED_CODE, PLM_BOM_WRITEBACK_FAILED_MESSAGE)
+    expectLoggedOriginalError(errorLog)
   })
 
   it('BOM write-back PATCH: a discriminated 409 still redacts the message (status/reason unaffected)', async () => {
@@ -189,6 +218,7 @@ describe('plm-workbench write routes redact the provider error text (values-free
     expect(res.status).toBe(502)
     expect(res.body.reason).toBe('provider-unavailable')
     expectRedacted(res.body as Record<string, unknown>, PLM_ECO_INTENT_FAILED_CODE, PLM_ECO_INTENT_FAILED_MESSAGE)
+    expectLoggedOriginalError(errorLog)
   })
 
   it('the fixed messages and codes are themselves values-free', () => {

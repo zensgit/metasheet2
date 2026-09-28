@@ -649,6 +649,38 @@ describe('项目备料页 — the operator project board', () => {
     expect(banner.textContent).not.toContain('没有保存成功')
   })
 
+  // ---- B-18: THE EXPORT'S TENANT WALL HAS WORDS OF ITS OWN ON THIS PAGE TOO -------------------
+  //
+  // 导出物料清单 now refuses (409) before reading a row when the deployment's bound 备料主表 is not
+  // provably this factory's. This page is the operator's landing tab, so the refusal must name the
+  // reason and send the person to an administrator here as well — not a retry, not "nothing saved".
+
+  it('B-18: a 409 PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH on 导出 says the table is not this factory\'s', async () => {
+    routeApi()
+    const routed = h.apiFetch.getMockImplementation()!
+    h.apiFetch.mockImplementation(async (path: string, ...rest: unknown[]) => {
+      if (String(path).includes('/prep-lines/export')) {
+        return new Response(
+          JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH', message: 'not owned', details: { objectId: 'plm_stock_preparation_main' } } }),
+          { status: 409 },
+        )
+      }
+      return routed(path, ...rest)
+    })
+    const root = await mountBoard()
+    ;(root.querySelector('[data-testid="stock-prep-project-board-export"]') as HTMLButtonElement).click()
+    await flush()
+    const banner = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(banner, 'the refusal is visible on the board').not.toBeNull()
+    expect(banner.textContent).toContain('不属于您的工厂')
+    expect(banner.textContent).toContain('PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
+    const next = banner.querySelector('[data-testid="stock-prep-project-board-error-next"]') as HTMLElement
+    expect(next, 'and says what to do next').not.toBeNull()
+    expect(next.textContent).toContain('管理员')
+    expect(banner.textContent, 'retrying cannot change a tenant-wall refusal').not.toContain('稍后再点一次')
+    expect(banner.textContent, 'and nothing was being saved').not.toContain('没有保存成功')
+  })
+
   it('B-14: …and only says "find an administrator" when the caller truly cannot pull', async () => {
     // A stock-prep:admin holder opens the tab (canOpenStockPrepProjectBoard) but does NOT satisfy
     // canRunStockPrepProjectSync's conjunction, so for them the pull control is genuinely absent and
