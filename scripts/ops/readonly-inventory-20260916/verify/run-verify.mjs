@@ -342,13 +342,20 @@ export const INTERNAL_TARGET_CASES = [
   ['https://127.000.000.001/', false, 'floor'],
   ['https://[::0.0.0.1]/', false, 'floor'],
   // 2026-09-27 (#6104 gap, "去 xn-- 排除" mutation): isInternalHostname is a
-  // plain suffix check with no punycode decoding, so it flags ANY
-  // "xn--...".local name as internal (the label need not even be valid
-  // punycode — the check never decodes it). Q7's negative lookahead
-  // deliberately excludes every `xn--`-bearing name (header §"STILL A
-  // FLOOR": "xn-- labels — are not counted"), so this is a floor miss like
-  // the IPv4/IPv6 re-spellings above, not a parser-rejection case.
-  ['https://xn--a.local/', false, 'floor'],
+  // plain suffix check with no punycode decoding, so it flags any
+  // "xn--...".local name as internal once it reaches that check. The label
+  // here must be VALID punycode ('bücher' → 'xn--bcher-kva'): `new URL()`
+  // decodes/validates the label first, and an invalid one (e.g. plain
+  // 'xn--a') throws there — confirmed with `new URL('https://xn--a.local/')`
+  // on Node 20 — so checkWebhookTargetUrl would return 'URL is malformed'
+  // before isInternalHostname ever runs, landing it in the parser-rejection
+  // class instead (same as `[fd00:::1]` / `[fc00::01.2.3.4]` above). With a
+  // valid label the URL parses, isInternalHostname sees the `.local` suffix
+  // and the guard returns 'target host is internal' — confirmed the same
+  // way. Q7's negative lookahead deliberately excludes every `xn--`-bearing
+  // name (header §"STILL A FLOOR": "xn-- labels — are not counted"), so
+  // *this* case is a genuine floor miss, not a parser-rejection case.
+  ['https://xn--bcher-kva.local/', false, 'floor'],
 ]
 
 /**
