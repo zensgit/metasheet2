@@ -1653,6 +1653,7 @@ exec npx vitest run \
   StockPreparationInstallView \
   StockPreparationLargeBomPull.spec.ts \
   StockPreparationLargeBomPullPanel.spec.ts \
+  StockPreparationManagedTableRelabelPanel \
   StockPreparationMappingConfirmView \
   StockPreparationMissingComponents \
   StockPreparationOnboardingReadiness \

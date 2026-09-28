@@ -37,7 +37,12 @@
 export const STOCK_PREP_READ = 'stock-prep:read'
 /** Confirm a decision (frozen action vocabulary) + the O1'-A value-entry surface. */
 export const STOCK_PREP_OPERATE = 'stock-prep:operate'
-/** Workbench-scoped ceiling; deliberately BELOW platform admin (opens no provisioning, no pack install). */
+/**
+ * Workbench-scoped ceiling; deliberately BELOW platform admin (opens no provisioning, no pack
+ * install). It DOES carry one write: the 「把系统表的英文表头改成中文」 relabel of still-English
+ * managed-table headers — compare-and-set, bound to a preview, and default OFF behind the server's
+ * MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED switch (see stock-preparation-workbench-access.cjs).
+ */
 export const STOCK_PREP_ADMIN = 'stock-prep:admin'
 /** The gate the two owner-level capabilities keep: source-reading reconcile and provisioning ensure. */
 export const PLATFORM_ADMIN_GATE = 'admin'
@@ -397,6 +402,12 @@ export function canUseLegacyMvpTabs(snapshot: StockPrepAccessSnapshot): boolean 
  * authenticated principal may read) and READS the deployment preflight (stock-prep:read, which
  * `stock-prep:admin` satisfies). Nothing behind this gate can 403, so R-11's "visible must be
  * actionable" holds for the panel as a whole.
+ *
+ * ONE CONTROL ON THIS TAB WRITES: 「把系统表的英文表头改成中文」 renames still-English managed-table
+ * headers. Its route is gated on exactly this code (`requireAccess(req, STOCK_PREP_ADMIN)`), so it
+ * too cannot 403 for anyone who sees it; what CAN stop it is the server's default-OFF switch
+ * MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED, which the panel reports in words (preview still works)
+ * rather than offering a confirm button that would be refused.
  *
  * Deliberately NOT a member of STOCK_PREP_WORKBENCH_CAPABILITIES: that manifest is the
  * confirmation-queue control set, asserted control-for-control against the queue view by the
