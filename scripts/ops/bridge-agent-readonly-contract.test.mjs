@@ -69,6 +69,18 @@ test('readonly bridge script contains no SQL/ADO write or extra execute verbs', 
   // must be carved out narrowly (e.g. asserted at its own literal/line)
   // rather than by removing or loosening an entry below. No such occurrence
   // exists in the script today.
+  //
+  // Beyond the core DML/DDL verb set, this also forbids: bulk-copy write
+  // paths (SqlBulkCopy / WriteToServer -- an ADO.NET bulk insert that never
+  // spells INSERT); `SELECT ... INTO` (creates and populates a table without
+  // any of the other listed verbs); legacy text-write statements (WRITETEXT
+  // / UPDATETEXT); administrative writes reachable from a query connection
+  // (RESTORE / BACKUP / DENY / DISABLE, e.g. `DISABLE TRIGGER ...`); and
+  // `sp_rename` (a system stored procedure call, which a whole-word check on
+  // RENAME/EXEC alone would miss because `_` is a word character and glues
+  // `sp_` onto the procedure name, leaving no `\b` boundary before it).
+  // `StoredProcedure` is forbidden here too, as a belt to the CommandType
+  // pin below.
   const forbiddenVerbs = [
     'INSERT',
     'UPDATE',
@@ -83,8 +95,19 @@ test('readonly bridge script contains no SQL/ADO write or extra execute verbs', 
     'EXEC',
     'EXECUTE',
     'sp_executesql',
+    'sp_rename',
     'ExecuteNonQuery',
     'ExecuteScalar',
+    'SqlBulkCopy',
+    'WriteToServer',
+    'StoredProcedure',
+    'INTO',
+    'RESTORE',
+    'BACKUP',
+    'DENY',
+    'DISABLE',
+    'WRITETEXT',
+    'UPDATETEXT',
   ];
 
   for (const verb of forbiddenVerbs) {
@@ -105,6 +128,40 @@ test('readonly bridge script contains no SQL/ADO write or extra execute verbs', 
     executeCalls,
     executeCalls.map(() => 'ExecuteReader'),
     `expected every command execution to be ExecuteReader, found: ${JSON.stringify(executeCalls)}`,
+  );
+});
+
+// The two checks above catch write *verbs* appearing anywhere in the script,
+// but a stored-procedure call spelled as a bare object name (for example
+// `dbo.usp_InsertStockIssue`) contains none of those verbs as whole words --
+// `usp_Insert...` has no `\b` boundary before `Insert` because `_` is a word
+// character. That shape is instead ruled out structurally here: the whole
+// script may only ever set `CommandText` once, to the `$Sql` variable built
+// by New-ObjectQuerySql, and `CommandType` once, to `::Text`. Any stored
+// procedure call (whether via `CommandType.StoredProcedure` or via a bare
+// `usp_...`/`sp_...` literal assigned to CommandText) changes one of those
+// two assignments and is caught here, independent of what verb list is kept
+// in sync above.
+test('readonly bridge sets SQL command text and type through one pinned assignment', async () => {
+  const script = await readScript();
+
+  const commandTextAssignments = [...script.matchAll(/\.CommandText\s*=[^\r\n]*/g)].map((match) =>
+    match[0].trim(),
+  );
+  assert.deepEqual(
+    commandTextAssignments,
+    ['.CommandText = $Sql'],
+    `expected exactly one CommandText assignment, set to the $Sql variable built by ` +
+      `New-ObjectQuerySql, found: ${JSON.stringify(commandTextAssignments)}`,
+  );
+
+  const commandTypeAssignments = [...script.matchAll(/\.CommandType\s*=[^\r\n]*/g)].map((match) =>
+    match[0].trim(),
+  );
+  assert.deepEqual(
+    commandTypeAssignments,
+    ['.CommandType = [System.Data.CommandType]::Text'],
+    `expected exactly one CommandType assignment, set to ::Text, found: ${JSON.stringify(commandTypeAssignments)}`,
   );
 });
 
