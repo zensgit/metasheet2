@@ -60,6 +60,7 @@ import { extractSelectOptions, isPlainObject, normalizeJson } from './field-code
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
+  AUTOMATION_CONDITION_VALUE_INVALID_CODE,
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
   validateConditionGroupAgainstFields,
@@ -142,6 +143,8 @@ export type AutomationRuleValidationCode =
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
   | typeof DELETED_TRIGGER_SELF_MUTATION_CODE
+  // 客户反馈 2026-09-24 #4b: a condition VALUE that does not fit its field's type (automation-conditions.ts).
+  | typeof AUTOMATION_CONDITION_VALUE_INVALID_CODE
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -1394,6 +1397,16 @@ export class AutomationService {
     const deps: AutomationDeps = {
       eventBus,
       queryFn,
+      // 客户反馈 2026-09-24 #4b — the sheet's field types for TYPED condition evaluation (same read as the
+      // save-time preflight). The executor caches one read per execution and degrades to the untyped
+      // legacy evaluation (with a values-free warning) if this read fails — it never fails a run.
+      loadConditionFields: async (sheetId) => {
+        const fieldRes = await queryFn(
+          'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
+          [sheetId],
+        )
+        return serializeAutomationConditionFieldRows(fieldRes.rows)
+      },
       transaction: async (handler) => poolManager.get().transaction(async ({ query }) => {
         const txQuery: AutomationQueryFn = async (sqlText, params) => {
           const result = await query(sqlText, params)
@@ -5239,34 +5252,119 @@ export async function preflightDingTalkAutomationCreate(
   return { ...input, actionConfig, actions }
 }
 
+/** The action side of a create/update input, as far as the condition preflight reads it (#4b). */
+export interface AutomationConditionPreflightActions {
+  actionType?: string | null
+  actionConfig?: Record<string, unknown> | null
+  actions?: AutomationAction[] | null
+}
+
+/** A condition_branch condition group found in a rule's action tree, with the request path it came from. */
+interface ConditionBranchGroupRef {
+  path: string
+  group: ConditionGroup
+}
+
+/**
+ * 客户反馈 2026-09-24 #4b — every `condition_branch` condition group in a rule input, at every nesting the
+ * save path accepts: the top-level `actionConfig` when the rule's action IS a condition_branch, and each
+ * `actions[i]` of that type (the A6-3-1 shape forbids a condition_branch nested inside a branch, so those two
+ * levels are exhaustive). A branch whose `conditions` is not even a valid group is SKIPPED here — the
+ * service's own shape validation (`validateConditionBranchConfig`) reports it with its established message and
+ * path, so the refusal a client sees for a malformed branch is unchanged.
+ *
+ * `input.actionType` and `input.actionConfig` must be the EFFECTIVE pair. `updateRule` merges BOTH
+ * (`input.actionType ?? existing.action_type`, `input.actionConfig ?? existing.action_config`), so the PATCH
+ * route resolves them through `preflightAutomationRuleUpdate` before calling the preflight — otherwise
+ *   - a rule stored as `condition_branch` with `actions: null` could take an unvalidated branch value through a
+ *     PATCH that carries only `actionConfig`, and
+ *   - an `update_record` rule whose `actionConfig` carries `branches` (never checked: it is not a branch rule)
+ *     could be re-typed to `condition_branch` by a PATCH that carries only `actionType` (+ `executionMode`),
+ *     turning those stored, never-checked branches live.
+ */
+function collectConditionBranchGroups(input: AutomationConditionPreflightActions): ConditionBranchGroupRef[] {
+  const refs: ConditionBranchGroupRef[] = []
+  const visitConfig = (config: unknown, path: string): void => {
+    if (!isRecord(config) || !Array.isArray(config.branches)) return
+    config.branches.forEach((branch, index) => {
+      if (!isRecord(branch) || branch.conditions === undefined) return
+      const groupPath = `${path}.branches[${index}].conditions`
+      try {
+        refs.push({ path: groupPath, group: normalizeConditionGroupInput(branch.conditions, groupPath) })
+      } catch (error) {
+        if (!(error instanceof ConditionGroupValidationError)) throw error
+      }
+    })
+  }
+  // `actions[i]` first: when a V1 request carries `actions`, the legacy `actionConfig` column is a mirror of
+  // `actions[0].config` (parseCreateRuleInput copies it) and the executor runs `actions`, so the first refusal
+  // a client sees names the path it actually edits. A condition_branch stored in the legacy columns alone
+  // (actions null / []) is still reached through `actionConfig`.
+  for (const [index, action] of (input.actions ?? []).entries()) {
+    if (isRecord(action) && action.type === 'condition_branch') visitConfig(action.config, `actions[${index}].config`)
+  }
+  if (input.actionType === 'condition_branch') visitConfig(input.actionConfig, 'actionConfig')
+  return refs
+}
+
 /**
  * Validate automation conditions against the sheet's current fields. The
  * route parser only validates JSON shape; this preflight closes the API gap
  * where direct clients could persist unknown fields, unsupported operators, or
  * frontend-incompatible scalar value types.
+ *
+ * 客户反馈 2026-09-24 #4b (裁定 PR #6074): `condition_branch` conditions (`actionsInput`) are validated against
+ * the SAME fields, from ONE `meta_fields` read, with their request path (`actions[0].config.branches[1].
+ * conditions…`); before, a branch condition was only shape-checked and a number field could be saved with
+ * `'abc'`. A value that does not fit its field's type is refused with the stable code
+ * `AUTOMATION_CONDITION_VALUE_INVALID` (date `YYYY-MM-DD`, dateTime wall clock / ISO, number, boolean).
+ * Nothing to validate ⇒ no DB read.
  */
 export async function preflightAutomationConditionFields(
   queryFn: AutomationQueryFn,
   sheetId: string,
   conditions: ConditionGroup | null | undefined,
+  actionsInput?: AutomationConditionPreflightActions | null,
 ): Promise<void> {
-  if (!conditions) return
+  const branchGroups = actionsInput ? collectConditionBranchGroups(actionsInput) : []
+  if (!conditions && branchGroups.length === 0) return
 
   const fieldRes = await queryFn(
     'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
     [sheetId],
   )
+  const fields = serializeAutomationConditionFieldRows(fieldRes.rows)
   try {
-    validateConditionGroupAgainstFields(
-      conditions,
-      serializeAutomationConditionFieldRows(fieldRes.rows),
-    )
+    validateConditionGroupAgainstFields(conditions, fields)
+    for (const ref of branchGroups) {
+      validateConditionGroupAgainstFields(ref.group, fields, ref.path)
+    }
   } catch (error) {
     if (error instanceof ConditionGroupValidationError) {
-      throw new AutomationRuleValidationError(error.message)
+      throw new AutomationRuleValidationError(error.message, error.code)
     }
     throw error
   }
+}
+
+/** What the PATCH route learns from the update preflight, beyond the normalized input (#4b). */
+export interface AutomationRuleUpdatePreflight {
+  /** `input` with DingTalk action values normalized where the request provided them. */
+  input: UpdateRuleInput
+  /**
+   * The rule's action type AFTER the update — `input.actionType ?? existing.action_type` — when the request
+   * touches the action tree (`actionType` / `actionConfig` / `actions`); `undefined` when it does not (no rule
+   * row was read). The condition preflight needs this to find the branches of a `condition_branch` rule
+   * whose PATCH carries only `actionConfig`.
+   */
+  effectiveActionType?: string
+  /**
+   * The rule's legacy `actionConfig` AFTER the update — the request's (normalized) when it sent one, else the
+   * STORED one — under the same condition as `effectiveActionType`. The condition preflight needs this for a
+   * PATCH that re-types a rule to `condition_branch` WITHOUT resending `actionConfig`: `updateRule` keeps the
+   * stored config, whose `branches` were never field-checked while the rule was not a branch rule.
+   */
+  effectiveActionConfig?: Record<string, unknown> | null
 }
 
 /**
@@ -5284,11 +5382,27 @@ export async function preflightDingTalkAutomationUpdate(
   input: UpdateRuleInput,
   service: Pick<AutomationService, 'getRule'>,
 ): Promise<UpdateRuleInput | null> {
+  const preflight = await preflightAutomationRuleUpdate(queryFn, sheetId, ruleId, input, service)
+  return preflight ? preflight.input : null
+}
+
+/**
+ * The full PATCH-time preflight: `preflightDingTalkAutomationUpdate` plus the EFFECTIVE action type the
+ * same rule read resolved (one `getRule` call either way — no extra fetch). `null` when the existing rule is
+ * missing or belongs to a different sheet.
+ */
+export async function preflightAutomationRuleUpdate(
+  queryFn: AutomationQueryFn,
+  sheetId: string,
+  ruleId: string,
+  input: UpdateRuleInput,
+  service: Pick<AutomationService, 'getRule'>,
+): Promise<AutomationRuleUpdatePreflight | null> {
   const touchesAction =
     input.actionType !== undefined ||
     input.actionConfig !== undefined ||
     input.actions !== undefined
-  if (!touchesAction) return input
+  if (!touchesAction) return { input }
 
   const existing = await service.getRule(ruleId)
   if (!existing || existing.sheet_id !== sheetId) return null
@@ -5324,5 +5438,5 @@ export async function preflightDingTalkAutomationUpdate(
   const out: UpdateRuleInput = { ...input }
   if (input.actionConfig !== undefined) out.actionConfig = normalizedActionConfig
   if (input.actions !== undefined) out.actions = Array.isArray(input.actions) ? normalizedActions : null
-  return out
+  return { input: out, effectiveActionType: nextActionType, effectiveActionConfig: normalizedActionConfig }
 }

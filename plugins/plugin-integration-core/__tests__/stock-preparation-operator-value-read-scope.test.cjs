@@ -39,6 +39,9 @@
 //        and the tenant the read will be scoped to.
 //   V-07 THE AUDIT ROW NAMES THE VERIFIED TENANT, not the header-carried one — the concrete, durable
 //        consequence of the fix on the export, whose sheet (unlike the other two) is not tenant-derived.
+//   V-08 THE EXPORT'S TENANT WALL: a member of the OTHER tenant — scope resolved cleanly — is refused
+//        409 PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH, with zero records reads, when the deployment's
+//        bound sheet is not registered to their tenant. Both directions (V-08a, V-08b).
 //
 // ---------------------------------------------------------------------------
 // WHAT THE EXPORT LANE DOES AND DOES NOT PROVE — read this before trusting it
@@ -51,13 +54,15 @@
 // The export is different, and is deliberately modelled as such here. Since it moved onto the
 // table-action target it resolves its sheet from DEPLOY-TIME configuration — one sheet for the whole
 // deployment, with no tenant in it anywhere — and the only row-level scoping inside that sheet is
-// `projectNo`. So this suite seeds ONE shared export sheet holding both tenants' rows, because that
-// is the system that exists. What the export lane therefore proves is that the spoofed, tenantless
-// and contradicted callers are REFUSED (before any read, any action lookup, any workbook), and that
-// the tenant reaching the action lookup and the audit trail is the verified one. It does NOT prove
-// that tenant A cannot name tenant B's `projectNo` on a deployment that shares a sheet: nothing in
-// this route stops that today, before or after this change. Making the export's target tenant-scoped
-// is a separate change, and this note exists so the green here is not mistaken for it.
+// `projectNo`. What makes it per-tenant is the TENANT WALL it now shares with the 结转 write: before
+// a row is read, the bound sheet must be registered to (or, with no registry row, derived for) the
+// verified tenant's own staging project. So this suite gives each tenant ITS OWN main sheet and
+// mounts the deployment bound to ONE of them (`exportBoundTo`), which is the system that exists: the
+// scope refusals (V-01/V-03/V-04/V-05) still fire before any read, and V-08 proves the wall — a
+// member of the OTHER tenant, whose scope resolves cleanly, is refused before a single records read,
+// in both directions. Until the wall, V-08b was a 200 carrying tenant B's material names to tenant
+// A's operator; the full wall matrix (registry-proven hand-bound, derived fallback, missing port)
+// lives in stock-preparation-prep-line-export-tenant-wall.test.cjs.
 //
 // Hermetic: no DB, no network, no xlsx (the injected `stockPreparationXlsxExport` fake JSON-encodes
 // what it was asked to write).
@@ -128,10 +133,11 @@ const SHEETS = Object.freeze({
   projectB: 'sheet_project_b',
   ledgerA: 'sheet_ledger_a',
   ledgerB: 'sheet_ledger_b',
-  // THE EXPORT SHEET IS SINGULAR ON PURPOSE — see the note in the header. The export route resolves
-  // its target from the DEPLOY-TIME table-action config, which is one sheet for the whole
-  // deployment, so modelling it as two would be modelling a system that does not exist.
-  mainShared: 'sheet_main_shared',
+  // ONE MAIN SHEET PER TENANT, each registered to its own tenant's staging project. The deployment
+  // binds exactly ONE of them (the table-action config is deploy-global) — see `exportBoundTo` and
+  // the note in the header.
+  mainA: 'sheet_main_tenant_a',
+  mainB: 'sheet_main_tenant_b',
 })
 
 // ---------------------------------------------------------------------------
@@ -184,21 +190,22 @@ const PACK_FIELD_IDS = Object.freeze([
 
 /**
  * THE DEPLOY-TIME TABLE ACTION the export resolves its target through. Note the shape of the thing:
- * ONE sheet, configured per DEPLOYMENT, with no tenant in it anywhere. That is why this suite models
- * a single shared export sheet — see the header note.
+ * ONE sheet, configured per DEPLOYMENT, with no tenant in it anywhere. `boundTo` picks WHICH tenant's
+ * sheet this deployment was bound to — see the header note.
  */
-function exportTableActionConfig() {
+function exportTableActionConfig(boundTo = 'A') {
   const fieldIds = [
     ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
     ...PACK_FIELD_IDS,
   ]
+  const staging = boundTo === 'B' ? STAGING_B : STAGING_A
   return {
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
     source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
     target: {
-      sheetId: SHEETS.mainShared,
+      sheetId: boundTo === 'B' ? SHEETS.mainB : SHEETS.mainA,
       objectId: MAIN_OBJECT_ID,
-      fieldIdMap: Object.fromEntries(fieldIds.map((fieldId) => [fieldId, physicalFieldId(STAGING_A, MAIN_OBJECT_ID, fieldId)])),
+      fieldIdMap: Object.fromEntries(fieldIds.map((fieldId) => [fieldId, physicalFieldId(staging, MAIN_OBJECT_ID, fieldId)])),
     },
   }
 }
@@ -261,7 +268,7 @@ function mainRow(stagingProjectId, sheetId, recordId, projectNo, componentName) 
  * (export). Tenant B's rows genuinely exist and are genuinely reachable BY TENANT B — without that,
  * "tenant A did not see them" would prove nothing.
  */
-function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
+function mount({ tenantPrincipalDirectory = hostDirectory(), exportBoundTo = 'A' } = {}) {
   const routes = new Map()
 
   const provisioningA = makeFakeProvisioning({
@@ -269,7 +276,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     sheetIdByObjectId: {
       [PROJECT_OBJECT_ID]: SHEETS.projectA,
       [DECISION_OBJECT_ID]: SHEETS.ledgerA,
-      [MAIN_OBJECT_ID]: SHEETS.mainShared,
+      [MAIN_OBJECT_ID]: SHEETS.mainA,
     },
   })
   const provisioningB = makeFakeProvisioning({
@@ -285,7 +292,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     objectIdBySheetId: {
       [SHEETS.projectA]: PROJECT_OBJECT_ID,
       [SHEETS.ledgerA]: DECISION_OBJECT_ID,
-      [SHEETS.mainShared]: MAIN_OBJECT_ID,
+      [SHEETS.mainA]: MAIN_OBJECT_ID,
     },
     rowsBySheet: {
       [SHEETS.projectA]: [
@@ -307,11 +314,9 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
           resolvedValue: A_VALUE,
         }),
       ],
-      // BOTH tenants' material rows live here, because on a real deployment they do: the export's
-      // sheet is deploy-time, not per-tenant, and `projectNo` is the only row-level scoping in it.
-      [SHEETS.mainShared]: [
-        mainRow(STAGING_A, SHEETS.mainShared, 'rec_ma', PROJECT_NO_A, A_MATERIAL),
-        mainRow(STAGING_A, SHEETS.mainShared, 'rec_mb', PROJECT_NO_B, SECRET_B_MATERIAL),
+      // Tenant A's OWN main sheet. Tenant B's material rows live in tenant B's (below).
+      [SHEETS.mainA]: [
+        mainRow(STAGING_A, SHEETS.mainA, 'rec_ma', PROJECT_NO_A, A_MATERIAL),
       ],
     },
   })
@@ -320,6 +325,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     objectIdBySheetId: {
       [SHEETS.projectB]: PROJECT_OBJECT_ID,
       [SHEETS.ledgerB]: DECISION_OBJECT_ID,
+      [SHEETS.mainB]: MAIN_OBJECT_ID,
     },
     rowsBySheet: {
       [SHEETS.projectB]: [
@@ -341,6 +347,9 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
           resolvedValue: SECRET_B_VALUE,
         }),
       ],
+      [SHEETS.mainB]: [
+        mainRow(STAGING_B, SHEETS.mainB, 'rec_mb', PROJECT_NO_B, SECRET_B_MATERIAL),
+      ],
     },
   })
 
@@ -359,7 +368,13 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     })
   }
 
-  const B_SHEETS = new Set([SHEETS.projectB, SHEETS.ledgerB])
+  const B_SHEETS = new Set([SHEETS.projectB, SHEETS.ledgerB, SHEETS.mainB])
+  // THE OWNERSHIP REGISTRY the export's tenant wall asks (plugin_multitable_object_registry on a real
+  // host): each tenant's main sheet is registered to that tenant's staging project, and to nobody
+  // else. Neither id is the derived one, so the registry alone decides — the hand-bound shape.
+  const REGISTRY = Object.freeze({ [SHEETS.mainA]: STAGING_A, [SHEETS.mainB]: STAGING_B })
+  // Counted separately from all host IO: "refused before a single ROW was read" is the wall's claim.
+  const recordsReads = []
   const provisioning = counted({
     async findObjectSheet(input = {}) {
       const a = await provisioningA.findObjectSheet(input)
@@ -371,9 +386,16 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     async ensureObject() {
       throw new Error('unexpected provisioning write: ensureObject')
     },
+    async isSheetOwnedByProject(sheetId, projectId) {
+      return Object.prototype.hasOwnProperty.call(REGISTRY, sheetId) && REGISTRY[sheetId] === projectId
+    },
+    getObjectSheetId(projectId, objectId) {
+      return provisioningA.getObjectSheetId(projectId, objectId)
+    },
   })
   const records = counted({
     async queryRecords(input = {}) {
+      recordsReads.push(input && input.sheetId)
       return B_SHEETS.has(input && input.sheetId) ? recordsB.queryRecords(input) : recordsA.queryRecords(input)
     },
     async createRecord() {
@@ -396,7 +418,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
       multitable: { provisioning, records },
     },
     storage: new Map(),
-    config: { stockPreparationTableActions: [exportTableActionConfig()] },
+    config: { stockPreparationTableActions: [exportTableActionConfig(exportBoundTo)] },
   }
   const services = baseServices()
   services.stockPreparationAuditStore = {
@@ -424,6 +446,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     xlsxCalls,
     tenantPrincipalDirectory,
     hostCallCount: () => hostCalls,
+    recordsReads,
   }
 }
 
@@ -514,6 +537,9 @@ const VALUE_READS = Object.freeze([
     bSecret: SECRET_B_MATERIAL,
     spoofRequest: () => ({ query: { projectNo: PROJECT_NO_B } }),
     bRequest: () => ({ query: { projectNo: PROJECT_NO_B } }),
+    // Tenant B's material rows are reachable only on a deployment bound to tenant B's OWN sheet —
+    // on the default (tenant-A-bound) one the tenant wall refuses tenant B outright (V-08a).
+    bMount: Object.freeze({ exportBoundTo: 'B' }),
   }),
 ])
 
@@ -749,12 +775,13 @@ async function main() {
     })
 
     await run(`V-02b ${read.label}: tenant B IS reachable — by tenant B's own operator`, async () => {
-      const harness = mount()
+      const harness = mount(read.bMount || {})
       const res = await call(harness.routes, read.method, read.path, { user: OPERATOR_B, ...read.bRequest() })
       assert.equal(res.statusCode, 200, `${read.label} must serve tenant B's own operator`)
       // The canary really is in the substrate and really is reachable BY SOMEONE, so V-01's "it did
       // not appear" is a REFUSAL rather than an empty fixture. For the two tenant-derived reads that
-      // is also per-tenant sheet scoping; for the export it is not — see the header note.
+      // is also per-tenant sheet scoping; for the export it is the tenant wall on a deployment bound to
+      // tenant B's own sheet — see the header note and V-08.
       assert.equal(everythingSent(res).includes(read.bSecret), true,
         'tenant B\'s data genuinely exists and is genuinely reachable, so V-01 is not vacuous')
     })
@@ -866,6 +893,49 @@ async function main() {
     })
     assert.equal(refused.statusCode, 403)
     assert.deepEqual(spoofed.auditAppends, [], 'a refused export writes nothing to the trail')
+  })
+
+  // -------------------------------------------------------------------------
+  // V-08 THE EXPORT'S TENANT WALL — a member of the OTHER tenant, whose scope resolves cleanly,
+  //      is refused because the deployment's bound sheet is not theirs. Both directions.
+  // -------------------------------------------------------------------------
+
+  await run('V-08a export: on a tenant-A-bound deployment, tenant B\'s own operator is refused before any row is read', async () => {
+    const harness = mount({ exportBoundTo: 'A' })
+    const res = await call(harness.routes, 'GET', EXPORT_PATH, {
+      user: OPERATOR_B,
+      authenticatedTenantId: TENANT_B,
+      query: { projectNo: PROJECT_NO_A },
+    })
+    assert.equal(res.statusCode, 409, `the wall refuses (got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)})`)
+    assert.equal(errorCode(res), 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
+    assert.deepEqual(harness.tenantPrincipalDirectory.calls, [{ userId: OPERATOR_B.id, tenantId: TENANT_B }],
+      'the scope DID resolve cleanly to tenant B — this refusal is the wall, not the scope')
+    assert.deepEqual(harness.recordsReads, [], 'refused before a single records read')
+    assert.equal(everythingSent(res).includes(A_MATERIAL), false, 'none of tenant A\'s material names')
+    assert.deepEqual(harness.auditAppends, [], 'and no audit row')
+    assert.deepEqual(harness.xlsxCalls, [], 'and no workbook')
+  })
+
+  await run('V-08b export: on a tenant-B-bound deployment, tenant A\'s operator cannot read tenant B\'s materials by naming B\'s project', async () => {
+    // THE LEAK THE HEADER NOTE USED TO SAY THIS ROUTE COULD NOT STOP. Before the wall this was a 200
+    // carrying SECRET_B_MATERIAL to tenant A's operator: the scope resolved to tenant A, and nothing
+    // between that and the records read asked whose sheet the binding named.
+    const harness = mount({ exportBoundTo: 'B' })
+    const res = await call(harness.routes, 'GET', EXPORT_PATH, {
+      user: OPERATOR_A,
+      authenticatedTenantId: TENANT_A,
+      query: { projectNo: PROJECT_NO_B },
+    })
+    assert.equal(res.statusCode, 409, `the wall refuses (got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)})`)
+    assert.equal(errorCode(res), 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
+    assert.deepEqual(harness.recordsReads, [], 'refused before a single records read')
+    const sent = everythingSent(res)
+    for (const secret of ALL_B_SECRETS) assert.equal(sent.includes(secret), false, `must not leak ${secret}`)
+    assert.deepEqual(harness.auditAppends, [], 'and no audit row')
+    assert.deepEqual(harness.xlsxCalls, [], 'and no workbook')
+    // Values-free refusal: the details name the public objectId and nothing else.
+    assert.deepEqual(Object.keys((res.body.error && res.body.error.details) || {}), ['objectId'])
   })
 
   // -------------------------------------------------------------------------

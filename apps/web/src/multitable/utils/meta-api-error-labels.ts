@@ -43,6 +43,10 @@ export type MetaApiErrorLabelKey =
   // restarting. Neutral wording by owner ruling — it must NOT say "upgrading".
   // A RESPONSE EXISTS on this path, so it must NOT claim the network is unreachable.
   | 'error.serverRestarting'
+  // 客户反馈 2026-09-24 #4b (裁定 PR #6074): the automation save gate refuses a condition VALUE that does
+  // not fit its field's type (AUTOMATION_CONDITION_VALUE_INVALID — a date field given "yesterday",
+  // a number field given "abc"). Label only; the rule editor (A9-fe) owns the inline presentation.
+  | 'error.automationConditionValueInvalid'
 
 const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   'error.forbidden': { en: 'Insufficient permissions', zh: '权限不足' },
@@ -107,6 +111,11 @@ const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   // no-response case too, so the customer read it as "delete is broken". Sourced from
   // the shared table so the two sentences can never drift or re-merge by accident.
   'error.serverRestarting': { ...SERVICE_UNAVAILABLE_COPY },
+  // #4b: values-free — names the expected FORMAT, never the offending value or a field id.
+  'error.automationConditionValueInvalid': {
+    en: 'A condition value does not match its field type (dates use YYYY-MM-DD, date-times YYYY-MM-DD HH:mm, numbers digits only).',
+    zh: '条件值与字段类型不匹配（日期请填 YYYY-MM-DD，日期时间请填 YYYY-MM-DD HH:mm，数字只填数字）。',
+  },
 }
 
 export const META_API_ERROR_LABEL_KEYS = Object.freeze(
@@ -134,6 +143,11 @@ export function apiDefaultErrorMessage(code: string | undefined, status: number,
     // Chinese sentence still wins in parseJson, exactly like VALIDATION_ERROR.
     case 'FIELD_RETYPE_NOT_LOSSLESS':
       return metaApiErrorLabel('error.fieldRetypeNotLossless', isZh)
+    // #4b: the automation condition-value refusal (automation-conditions.ts
+    // AUTOMATION_CONDITION_VALUE_INVALID_CODE) — same rule as above: real copy when the payload
+    // arrives without a message; the server's own sentence still wins in parseJson.
+    case 'AUTOMATION_CONDITION_VALUE_INVALID':
+      return metaApiErrorLabel('error.automationConditionValueInvalid', isZh)
     default:
       // Gateway-side outage statuses only (F4-B). 500 stays `API 500` on purpose: a
       // 500 is an application bug with a real stack behind it, and telling the user

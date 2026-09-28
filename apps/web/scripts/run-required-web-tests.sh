@@ -1495,6 +1495,7 @@ exec npx vitest run \
   multitable-crossbase-workbench-wiring \
   multitable-dashboard-view \
   multitable-datetime-business-tz \
+  multitable-datetime-deferred-surfaces \
   multitable-datetime-field \
   multitable-datetime-grid-lockout \
   multitable-duration-field \
