@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, copyFileSync, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, copyFileSync, existsSync, chmodSync } from 'node:fs'
+import { tmpdir, userInfo } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -13,18 +13,27 @@ import { spawnSync } from 'node:child_process'
  * which keeps the FIRST declaration of a key. The preflight used to take the LAST one
  * (`grep "^KEY=" | tail -n 1`). The template ships live empty `ENCRYPTION_KEY=` /
  * `ENCRYPTION_SALT=` lines (required by the #5711 template guard), so an operator who appends the
- * real material at the end of the file got a green preflight while the backend read the empty first
- * line and fail-closed at startup (found by the #6131 review, 2026-09-28).
+ * real material at the end of the file got a green preflight while an ecosystem start read the empty
+ * first line and fail-closed at startup (found by the #6131 review, 2026-09-28). Start paths that
+ * load the file into the environment first (bootstrap `set -a; source`, the Windows
+ * Import-AppEnvFile helpers) let the later line win instead, so a duplicated key is rejected
+ * outright and the message never claims which declaration "the backend" reads.
  *
- * This file pins three things:
+ * This file pins:
  *   - the preflight's reader agrees with the REAL ecosystem.config.cjs loader, run as the oracle,
- *     over a battery of line shapes (duplicates, CRLF, BOM, quotes, `export`, inline `#`, ...);
- *   - a key declared more than once is a DUPLICATE_ENV_KEY failure naming keys and line numbers,
- *     including the template-plus-appended-material case built from the shipped template itself;
- *   - no output channel (stdout, stderr, JSON report, Markdown report) ever carries a value.
+ *     over a battery of line shapes (duplicates, CRLF, BOM, quotes, `export`, inline `#`, JS
+ *     whitespace such as NBSP / U+3000), in the C, UTF-8 and (when present) GBK locales;
+ *   - a key declared more than once is a DUPLICATE_ENV_KEY failure that names identifier keys and
+ *     line numbers and says which deletion is safe, including the shipped template with the
+ *     material appended;
+ *   - a UTF-16 / NUL-carrying file and an unreadable file fail with a report instead of passing or
+ *     aborting;
+ *   - no output channel (stdout, stderr, JSON report, Markdown report) ever carries a value, not
+ *     even through the key position.
  *
  * Hermetic and values-free: every env fixture is synthetic and built here, no real env file is
  * read, no network, no npm dependency (bare `node --test`), and no assertion message prints a value.
+ * Non-ASCII code points are built with String.fromCodePoint so this file stays pure ASCII.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -43,6 +52,19 @@ const shellPath = value =>
     ? value.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`)
     : value
 
+const cp = (...codePoints) => String.fromCodePoint(...codePoints)
+const NBSP = cp(0xa0)
+const IDEOGRAPHIC_SPACE = cp(0x3000)
+const BOM = cp(0xfeff)
+// Every code point JS String.prototype.trim() removes beyond ASCII whitespace.
+const JS_TRIM_NON_ASCII = cp(
+  0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009,
+  0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+)
+
+const KEY_SENTINEL = 'default-key-change-in-production'
+const SALT_SENTINEL = 'default-salt-change-in-production'
+
 // Synthetic, never real: fixed repeated-hex strings, distinct per role so a leak is attributable.
 const SYNTH = {
   key: '9d'.repeat(32),
@@ -53,6 +75,7 @@ const SYNTH = {
   jwt: 'synthetic-jwt-5a1d2c9e7b3f4e6a8c0b',
   laterJwt: 'synthetic-jwt-later-0f9e8d7c6b5a',
   pg: 'synthetic-pg-8e2b4d6f1a3c5e7d',
+  dsnLeak: 'synthetic-dsn-secret-4c7a2e9b1d',
 }
 
 function validEnv(overrides = {}) {
@@ -79,6 +102,8 @@ const envText = (entries, eol = '\n') =>
     .map(([key, value]) => `${key}=${value}`)
     .join(eol)}${eol}`
 
+const lineOf = (entries, key) => Object.keys(entries).indexOf(key) + 1
+
 function withTempDir(prefix, fn) {
   const dir = mkdtempSync(path.join(tmpdir(), prefix))
   try {
@@ -88,37 +113,59 @@ function withTempDir(prefix, fn) {
   }
 }
 
-/** Stage the LF script where BASH_SOURCE-relative paths still resolve, then run it on `text`. */
-function runPreflight(text, { reports = true } = {}) {
+/** Probe: does bash here really switch to `locale`? (An unknown locale silently falls back to C.) */
+function bashLocaleWorks(locale, bytes, expectedLength) {
+  const result = spawnSync('bash', ['--noprofile', '--norc', '-c', `x=$'${bytes}'; printf '%s' "\${#x}"`], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', LC_ALL: locale },
+  })
+  return result.status === 0 && result.stdout === String(expectedLength)
+}
+// U+4E2D is E4 B8 AD: 1 character in UTF-8, 2 in GBK (E4B8 + a stray AD), 3 bytes in C.
+const UTF8_LOCALE = bashLocaleWorks('C.UTF-8', '\\xe4\\xb8\\xad', 1) ? 'C.UTF-8' : 'en_US.UTF-8'
+const GBK_LOCALE = bashLocaleWorks('zh_CN.GBK', '\\xe4\\xb8\\xad', 2) ? 'zh_CN.GBK' : null
+const LOCALES = ['C', UTF8_LOCALE, ...(GBK_LOCALE ? [GBK_LOCALE] : [])]
+
+/**
+ * Stage the LF script where BASH_SOURCE-relative paths still resolve, then run it on `content`
+ * (a string, written as UTF-8, or a Buffer, written verbatim).
+ */
+function runPreflight(content, { reports = true, locale = null, beforeRun = null } = {}) {
   return withTempDir('mt-onprem-preflight-', dir => {
     const opsDir = path.join(dir, 'scripts', 'ops')
     mkdirSync(opsDir, { recursive: true })
     const staged = path.join(opsDir, 'multitable-onprem-preflight.sh')
     writeFileSync(staged, readLf(SCRIPT))
     const envFile = path.join(dir, 'app.env')
-    writeFileSync(envFile, text)
+    writeFileSync(envFile, content)
     const jsonFile = path.join(dir, 'out', 'preflight.json')
     const mdFile = path.join(dir, 'out', 'preflight.md')
-    const result = spawnSync('bash', [shellPath(staged)], {
-      cwd: dir,
-      encoding: 'utf8',
-      env: {
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT ?? '',
-        HOME: process.env.HOME ?? '',
-        ENV_FILE: shellPath(envFile),
-        REQUIRE_STORAGE_DIRS: '0',
-        ...(reports
-          ? { PREFLIGHT_REPORT_JSON: shellPath(jsonFile), PREFLIGHT_REPORT_MD: shellPath(mdFile) }
-          : {}),
-      },
-    })
-    if (result.error) throw result.error
-    return {
-      status: result.status,
-      output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
-      json: reports && existsSync(jsonFile) ? JSON.parse(readFileSync(jsonFile, 'utf8')) : null,
-      md: reports && existsSync(mdFile) ? readFileSync(mdFile, 'utf8') : null,
+    const cleanup = beforeRun ? beforeRun(envFile) : null
+    try {
+      const result = spawnSync('bash', [shellPath(staged)], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          PATH: process.env.PATH,
+          SYSTEMROOT: process.env.SYSTEMROOT ?? '',
+          HOME: process.env.HOME ?? '',
+          ENV_FILE: shellPath(envFile),
+          REQUIRE_STORAGE_DIRS: '0',
+          ...(locale ? { LC_ALL: locale } : {}),
+          ...(reports
+            ? { PREFLIGHT_REPORT_JSON: shellPath(jsonFile), PREFLIGHT_REPORT_MD: shellPath(mdFile) }
+            : {}),
+        },
+      })
+      if (result.error) throw result.error
+      return {
+        status: result.status,
+        output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+        json: reports && existsSync(jsonFile) ? JSON.parse(readFileSync(jsonFile, 'utf8')) : null,
+        md: reports && existsSync(mdFile) ? readFileSync(mdFile, 'utf8') : null,
+      }
+    } finally {
+      if (cleanup) cleanup()
     }
   })
 }
@@ -137,18 +184,27 @@ function assertNoValues(run, roles) {
   }
 }
 
-function assertFailedWithDuplicate(run, label) {
+function assertFailedWith(run, prefix, label) {
   assert.equal(run.status, 1, `${label}: preflight must fail (exit ${run.status})`)
-  assert.match(run.output, /DUPLICATE_ENV_KEY: /, `${label}: must report DUPLICATE_ENV_KEY`)
+  assert.ok(run.output.includes(prefix), `${label}: must report ${JSON.stringify(prefix)}`)
   if (run.json) {
     assert.equal(run.json.ok, false, `${label}: json report must not be ok`)
-    assert.match(run.json.error, /^DUPLICATE_ENV_KEY: /, `${label}: json error must be the duplicate`)
-    assert.ok(
-      run.json.suggestedActions.some(action => action.includes('Keep exactly one declaration')),
-      `${label}: json report must carry the duplicate repair action`,
-    )
+    assert.ok(run.json.error.startsWith(prefix), `${label}: json error must start with ${JSON.stringify(prefix)}`)
   }
-  if (run.md) assert.match(run.md, /DUPLICATE_ENV_KEY: /, `${label}: markdown report must carry it`)
+  if (run.md) assert.ok(run.md.includes(prefix), `${label}: markdown report must carry the error`)
+}
+
+function assertFailedWithDuplicate(run, label) {
+  assertFailedWith(run, 'DUPLICATE_ENV_KEY: ', label)
+  // The preflight cannot know the host's start path, so it must never claim which one wins.
+  assert.doesNotMatch(run.output, /the backend reads/i, `${label}: must not claim which declaration the backend reads`)
+  assert.ok(run.output.includes('Start paths disagree on a duplicated key'), `${label}: must explain the start-path split`)
+  if (run.json) {
+    const actions = run.json.suggestedActions.join('\n')
+    assert.ok(actions.includes('start paths disagree on which declaration wins'), `${label}: repair action must be start-path neutral`)
+    assert.ok(actions.includes('do NOT delete either line'), `${label}: repair action must carry the ENCRYPTION_* warning`)
+    assert.ok(actions.includes('An EMPTY declaration next to a non-empty one is safe to delete'), `${label}: repair action must say which deletion is safe`)
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -168,7 +224,7 @@ test('(a) single declarations keep their existing verdicts (empty material, chan
   const cases = [
     [{ ENCRYPTION_KEY: '' }, /ENCRYPTION_KEY is missing \(empty\)/],
     [{ ENCRYPTION_SALT: '   ' }, /ENCRYPTION_SALT is missing \(empty\)/],
-    [{ ENCRYPTION_KEY: 'default-key-change-in-production' }, /ENCRYPTION_KEY uses the insecure built-in default/],
+    [{ ENCRYPTION_KEY: KEY_SENTINEL }, /ENCRYPTION_KEY uses the insecure built-in default/],
     [{ JWT_SECRET: 'change-me' }, /JWT_SECRET is still 'change-me'/],
     [{ ATTENDANCE_IMPORT_REQUIRE_TOKEN: '0' }, /ATTENDANCE_IMPORT_REQUIRE_TOKEN must be 1/],
   ]
@@ -182,7 +238,7 @@ test('(a) single declarations keep their existing verdicts (empty material, chan
 })
 
 // ---------------------------------------------------------------------------------------------
-// (b) empty first + non-empty later: the silent-empty trap must FAIL, naming the empty first line
+// (b) empty first + non-empty later: the silent-empty trap must FAIL; the empty line is safe to go
 // ---------------------------------------------------------------------------------------------
 
 /** The shipped template with its placeholders filled IN PLACE, except the encryption material. */
@@ -228,73 +284,100 @@ test('(b) shipped template: material set IN PLACE passes, the same material APPE
 
   // The R60 trap: leave the empty template lines, append the real material at the end.
   const appended = [...lines, `ENCRYPTION_KEY=${SYNTH.appendedKey}`, `ENCRYPTION_SALT=${SYNTH.appendedSalt}`]
-  const appendedKeyLine = lines.length + 1
-  const appendedSaltLine = lines.length + 2
   const run = runPreflight(`${appended.join('\n')}\n`)
   assertFailedWithDuplicate(run, 'template + appended material')
   for (const [key, first, later] of [
-    ['ENCRYPTION_KEY', keyLine, appendedKeyLine],
-    ['ENCRYPTION_SALT', saltLine, appendedSaltLine],
+    ['ENCRYPTION_KEY', keyLine, lines.length + 1],
+    ['ENCRYPTION_SALT', saltLine, lines.length + 2],
   ]) {
     assert.ok(
-      run.output.includes(
-        `${key} appears 2 times (lines ${first}, ${later}); the backend reads the FIRST occurrence (line ${first}), which is EMPTY, and ignores the non-empty value on a later line`,
-      ),
-      `${key}: the message must name both lines and say the backend reads the empty first one`,
+      run.output.includes(`${key} appears 2 times (lines ${first}, ${later}): EMPTY on line(s) ${first} -- safe to delete; keep one non-empty declaration`),
+      `${key}: the message must name both lines and say the empty one is safe to delete`,
     )
   }
   assertNoValues(run, ['appendedKey', 'appendedSalt', 'jwt', 'pg'])
 })
 
-test('(b) any key: an empty first declaration followed by a non-empty one fails, even when the later value is valid', () => {
+test('(b) any key: an empty declaration next to a non-empty one fails and is named as the safe deletion', () => {
   for (const key of ['ENCRYPTION_KEY', 'ENCRYPTION_SALT', 'JWT_SECRET', 'ATTENDANCE_IMPORT_REQUIRE_TOKEN']) {
     const base = validEnv()
     const later = base[key]
     base[key] = ''
     const run = runPreflight(`${envText(base)}${key}=${later}\n`, { reports: false })
-    const firstLine = Object.keys(base).indexOf(key) + 1
+    const firstLine = lineOf(base, key)
     const laterLine = Object.keys(base).length + 1
     assertFailedWithDuplicate(run, key)
     assert.ok(
-      run.output.includes(
-        `${key} appears 2 times (lines ${firstLine}, ${laterLine}); the backend reads the FIRST occurrence (line ${firstLine}), which is EMPTY, and ignores the non-empty value on a later line`,
-      ),
+      run.output.includes(`${key} appears 2 times (lines ${firstLine}, ${laterLine}): EMPTY on line(s) ${firstLine} -- safe to delete`),
       `${key}: wrong duplicate message shape`,
     )
     assertNoValues(run, ['key', 'salt', 'jwt', 'pg'])
   }
+
+  // Non-empty first, EMPTY later: the empty one is still the one to delete.
+  const base = validEnv()
+  const run = runPreflight(`${envText(base)}ENCRYPTION_KEY=\n`, { reports: false })
+  const n = Object.keys(base).length
+  assert.ok(
+    run.output.includes(`ENCRYPTION_KEY appears 2 times (lines ${lineOf(base, 'ENCRYPTION_KEY')}, ${n + 1}): EMPTY on line(s) ${n + 1} -- safe to delete`),
+    'a later EMPTY declaration must be named as the safe deletion',
+  )
 })
 
 // ---------------------------------------------------------------------------------------------
-// (c) non-empty first + non-empty later: still a duplicate; the backend reads the first
+// (c) non-empty duplicates: the verdict says what is safe, and ENCRYPTION_* is never "just delete"
 // ---------------------------------------------------------------------------------------------
 
-test('(c) two non-empty declarations fail as DUPLICATE_ENV_KEY and name the first line as the one the backend reads', () => {
+test('(c) two DIFFERENT non-empty ENCRYPTION_* values: fail and say do NOT delete either line', () => {
   const base = validEnv()
-  const firstLine = Object.keys(base).indexOf('ENCRYPTION_KEY') + 1
-  const text = `${envText(base)}ENCRYPTION_KEY=${SYNTH.laterKey}\n`
-  const run = runPreflight(text)
-  assertFailedWithDuplicate(run, 'different non-empty values')
-  const expected = `ENCRYPTION_KEY appears 2 times (lines ${firstLine}, ${Object.keys(base).length + 1}); the backend reads the FIRST occurrence (line ${firstLine})`
-  assert.ok(run.output.includes(`${expected}.`) || run.output.includes(`${expected};`), 'wrong duplicate message shape')
-  assert.doesNotMatch(run.output, /EMPTY/, 'a non-empty first declaration must not be reported as empty')
-  assertNoValues(run, ['key', 'laterKey', 'salt', 'jwt', 'pg'])
+  const n = Object.keys(base).length
+  const run = runPreflight(`${envText(base)}ENCRYPTION_KEY=${SYNTH.laterKey}\nENCRYPTION_SALT=${SYNTH.appendedSalt}\n`)
+  assertFailedWithDuplicate(run, 'different ENCRYPTION_* values')
+  for (const [key, later] of [
+    ['ENCRYPTION_KEY', n + 1],
+    ['ENCRYPTION_SALT', n + 2],
+  ]) {
+    assert.ok(
+      run.output.includes(
+        `${key} appears 2 times (lines ${lineOf(base, key)}, ${later}): the non-empty values DIFFER -- do NOT delete either line until you have confirmed which value encrypted the existing stored secrets`,
+      ),
+      `${key}: different material must carry the do-not-delete warning`,
+    )
+  }
+  assert.doesNotMatch(run.output, /EMPTY on line|safe to delete;/, 'no deletion is safe when two non-empty values differ')
+  assertNoValues(run, ['key', 'laterKey', 'salt', 'appendedSalt', 'jwt', 'pg'])
+})
 
-  // Identical repeated values are still rejected: the preflight has one verdict tier (FAIL), and a
-  // second declaration is where the next in-place edit silently diverges.
+test('(c) other duplicate shapes: differing non-material values, identical values, all-empty, several keys', () => {
+  const base = validEnv()
+  const n = Object.keys(base).length
+
+  const jwt = runPreflight(`${envText(base)}JWT_SECRET=${SYNTH.laterJwt}\n`, { reports: false })
+  assertFailedWithDuplicate(jwt, 'different JWT_SECRET values')
+  assert.ok(
+    jwt.output.includes(`JWT_SECRET appears 2 times (lines ${lineOf(base, 'JWT_SECRET')}, ${n + 1}): the non-empty values DIFFER -- confirm which value is intended before deleting a line`),
+    'a differing non-material key must ask for confirmation',
+  )
+  assert.doesNotMatch(jwt.output, /DIFFER -- do NOT delete/, 'the stored-secret warning is for ENCRYPTION_* only')
+
+  // Identical repeated values are still rejected (one verdict tier: FAIL), with the easy fix named.
   const same = runPreflight(`${envText(base)}ENCRYPTION_KEY=${SYNTH.key}\n`, { reports: false })
   assertFailedWithDuplicate(same, 'identical values')
+  assert.ok(same.output.includes(`ENCRYPTION_KEY appears 2 times (lines ${lineOf(base, 'ENCRYPTION_KEY')}, ${n + 1}): the declarations are identical -- delete all but one`))
+
+  const allEmpty = runPreflight(`${envText(validEnv({ ENCRYPTION_SALT: '' }))}ENCRYPTION_SALT=  \n`, { reports: false })
+  assertFailedWithDuplicate(allEmpty, 'all empty')
+  assert.ok(allEmpty.output.includes(`ENCRYPTION_SALT appears 2 times (lines ${lineOf(base, 'ENCRYPTION_SALT')}, ${n + 1}): every declaration is EMPTY`))
 
   // Several duplicated keys are all named in one run, in file order, with their line lists.
   const many = runPreflight(`${envText(base)}JWT_SECRET=${SYNTH.laterJwt}\nENCRYPTION_KEY=\nJWT_SECRET=\n`, {
     reports: false,
   })
   assertFailedWithDuplicate(many, 'several keys')
-  const n = Object.keys(base).length
-  const jwtLine = Object.keys(base).indexOf('JWT_SECRET') + 1
+  const jwtLine = lineOf(base, 'JWT_SECRET')
   assert.ok(
     many.output.includes(`JWT_SECRET appears 3 times (lines ${jwtLine}, ${n + 1}, ${n + 3})`) &&
-      many.output.includes(`ENCRYPTION_KEY appears 2 times (lines ${firstLine}, ${n + 2})`),
+      many.output.includes(`ENCRYPTION_KEY appears 2 times (lines ${lineOf(base, 'ENCRYPTION_KEY')}, ${n + 2})`),
     'every duplicated key must be named with all of its lines',
   )
   assert.ok(
@@ -313,19 +396,17 @@ test('(d) CRLF app.env: a valid file passes and an appended duplicate is reporte
   assert.equal(ok.status, 0, 'a CRLF-saved valid env must pass (the CR is not part of any value)')
 
   const base = validEnv({ ENCRYPTION_SALT: '' })
-  const firstLine = Object.keys(base).indexOf('ENCRYPTION_SALT') + 1
+  const firstLine = lineOf(base, 'ENCRYPTION_SALT')
   const run = runPreflight(`${envText(base, '\r\n')}ENCRYPTION_SALT=${SYNTH.appendedSalt}\r\n`, { reports: false })
   assertFailedWithDuplicate(run, 'CRLF duplicate')
   assert.ok(
-    run.output.includes(
-      `ENCRYPTION_SALT appears 2 times (lines ${firstLine}, ${Object.keys(base).length + 1}); the backend reads the FIRST occurrence (line ${firstLine}), which is EMPTY`,
-    ),
+    run.output.includes(`ENCRYPTION_SALT appears 2 times (lines ${firstLine}, ${Object.keys(base).length + 1}): EMPTY on line(s) ${firstLine}`),
     'CRLF: wrong duplicate message shape',
   )
   assertNoValues(run, ['appendedSalt', 'key', 'jwt', 'pg'])
 })
 
-test('(e) quoted values: one quote layer is stripped like the backend does, and a quoted-empty first line is EMPTY', () => {
+test('(e) quoted values: one quote layer is stripped like the backend does, and a quoted-empty line is EMPTY', () => {
   const quoted = validEnv({
     ENCRYPTION_KEY: `"${SYNTH.key}"`,
     ENCRYPTION_SALT: `'${SYNTH.salt}'`,
@@ -343,7 +424,7 @@ test('(e) quoted values: one quote layer is stripped like the backend does, and 
   const base = validEnv({ ENCRYPTION_KEY: '""' })
   const run = runPreflight(`${envText(base)}ENCRYPTION_KEY="${SYNTH.appendedKey}"\n`)
   assertFailedWithDuplicate(run, 'quoted duplicate')
-  assert.match(run.output, /ENCRYPTION_KEY appears 2 times \(lines \d+, \d+\); the backend reads the FIRST occurrence \(line \d+\), which is EMPTY/)
+  assert.ok(run.output.includes(`EMPTY on line(s) ${lineOf(base, 'ENCRYPTION_KEY')} -- safe to delete`), 'a quoted-empty line is EMPTY')
   assertNoValues(run, ['appendedKey', 'salt', 'jwt', 'pg'])
 })
 
@@ -365,6 +446,170 @@ test('lines the backend loader ignores never count as declarations (comments, ke
 })
 
 // ---------------------------------------------------------------------------------------------
+// Review S3: a value must not leak through the key position
+// ---------------------------------------------------------------------------------------------
+
+test('S3 a non-identifier duplicated key is printed as <non-identifier key>, never verbatim', () => {
+  const base = validEnv()
+  const n = Object.keys(base).length
+  // `KEY: value` instead of `KEY=value`: the first '=' is inside the query string, so the loader's
+  // "key" is the whole DSN up to it, secret included.
+  const leaky = `DATABASE_URL: postgres://synthetic:${SYNTH.dsnLeak}@127.0.0.1:5432/synthetic?sslmode=disable`
+  // A bare hex secret pasted on its own line with a trailing '=' is identifier-shaped except that it
+  // starts with a digit (SYNTH.key does), so the leading-digit rule is what keeps it unprinted.
+  const bareHex = `${SYNTH.key}=`
+  const run = runPreflight(
+    `${envText(base)}${leaky}\n${leaky}\nexport ENCRYPTION_KEY=${SYNTH.laterKey}\nexport ENCRYPTION_KEY=${SYNTH.laterKey}\n${bareHex}\n${bareHex}\n`,
+  )
+  assertFailedWithDuplicate(run, 'non-identifier keys')
+  assert.ok(
+    run.output.includes(`<non-identifier key> appears 2 times (lines ${n + 1}, ${n + 2})`) &&
+      run.output.includes(`<non-identifier key> appears 2 times (lines ${n + 3}, ${n + 4})`) &&
+      run.output.includes(`<non-identifier key> appears 2 times (lines ${n + 5}, ${n + 6})`),
+    'non-identifier keys must be labelled, with their line numbers',
+  )
+  assertNoValues(run, ['dsnLeak', 'laterKey', 'key', 'jwt', 'pg'])
+  assert.doesNotMatch(`${run.output}${JSON.stringify(run.json)}${run.md}`, /postgres:\/\/synthetic:/, 'no fragment of the DSN may be printed')
+})
+
+// ---------------------------------------------------------------------------------------------
+// Review S4: JS whitespace (NBSP, U+3000, ...) is trimmed exactly like the backend trims it
+// ---------------------------------------------------------------------------------------------
+
+test('S4 JS whitespace around material is judged as the backend judges it, in every locale', () => {
+  // Premises, checked against JS itself: the backend trims these away (normalizeEnvString).
+  assert.equal(`${KEY_SENTINEL}${NBSP}`.trim(), KEY_SENTINEL)
+  assert.equal(IDEOGRAPHIC_SPACE.trim(), '')
+  for (const locale of LOCALES) {
+    const cases = [
+      [{ ENCRYPTION_KEY: `${KEY_SENTINEL}${NBSP}` }, /ENCRYPTION_KEY uses the insecure built-in default/],
+      [{ ENCRYPTION_SALT: `"${SALT_SENTINEL}${NBSP}"` }, /ENCRYPTION_SALT uses the insecure built-in default/],
+      [{ ENCRYPTION_KEY: IDEOGRAPHIC_SPACE }, /ENCRYPTION_KEY is missing \(empty\)/],
+      [{ ENCRYPTION_SALT: `"${IDEOGRAPHIC_SPACE}${NBSP}"` }, /ENCRYPTION_SALT is missing \(empty\)/],
+      [{ ENCRYPTION_KEY: `${JS_TRIM_NON_ASCII}${KEY_SENTINEL}${JS_TRIM_NON_ASCII}` }, /ENCRYPTION_KEY uses the insecure built-in default/],
+    ]
+    for (const [overrides, expected] of cases) {
+      const run = runPreflight(envText(validEnv(overrides)), { reports: false, locale })
+      assert.equal(run.status, 1, `${locale} ${Object.keys(overrides)[0]}: must fail`)
+      assert.match(run.output, expected, `${locale} ${Object.keys(overrides)[0]}: unexpected verdict`)
+    }
+    // Positive control: JS whitespace around a real value is not part of it.
+    const padded = runPreflight(envText(validEnv({ ENCRYPTION_KEY: `${NBSP}${SYNTH.key}${IDEOGRAPHIC_SPACE}` })), { reports: false, locale })
+    assert.equal(padded.status, 0, `${locale}: JS whitespace around a valid value must pass`)
+    // A duplicate whose later declaration is only JS whitespace is EMPTY, not a differing value --
+    // also inside quotes, where the loader keeps the U+3000 but the backend's check trims it away.
+    const base = validEnv()
+    const n = Object.keys(base).length
+    const dup = runPreflight(`${envText(base)}ENCRYPTION_KEY=${IDEOGRAPHIC_SPACE}\nENCRYPTION_SALT="${IDEOGRAPHIC_SPACE}"\n`, {
+      reports: false,
+      locale,
+    })
+    assert.ok(
+      dup.output.includes(`ENCRYPTION_KEY appears 2 times (lines ${lineOf(base, 'ENCRYPTION_KEY')}, ${n + 1}): EMPTY on line(s) ${n + 1} -- safe to delete`),
+      `${locale}: U+3000-only declaration must count as EMPTY`,
+    )
+    assert.ok(
+      dup.output.includes(`ENCRYPTION_SALT appears 2 times (lines ${lineOf(base, 'ENCRYPTION_SALT')}, ${n + 2}): EMPTY on line(s) ${n + 2} -- safe to delete`),
+      `${locale}: a quoted U+3000-only declaration must count as EMPTY`,
+    )
+  }
+})
+
+// ---------------------------------------------------------------------------------------------
+// Review S2: a UTF-16 app.env loads nothing in the backend, so it must not pass
+// ---------------------------------------------------------------------------------------------
+
+const utf16be = text => {
+  const le = Buffer.from(text, 'utf16le')
+  for (let i = 0; i + 1 < le.length; i += 2) [le[i], le[i + 1]] = [le[i + 1], le[i]]
+  return le
+}
+
+test('S2 a UTF-16 or NUL-carrying app.env fails as not UTF-8; UTF-8 with a BOM still passes', () => {
+  const text = envText(validEnv())
+  const cases = [
+    ['UTF-16LE with BOM (PowerShell 5.1 Out-File)', Buffer.from(`${BOM}${text}`, 'utf16le')],
+    ['UTF-16LE without BOM', Buffer.from(text, 'utf16le')],
+    // Pure CJK in UTF-16 has no NUL byte at all, so only the byte-order mark gives it away.
+    ['UTF-16LE with BOM, no NUL bytes', Buffer.from(`${BOM}${cp(0x4e2d, 0x6587, 0x503c)}`, 'utf16le')],
+    ['UTF-16BE with BOM, no NUL bytes', utf16be(`${BOM}${cp(0x4e2d, 0x6587, 0x503c)}`)],
+    ['one NUL byte inside UTF-8', Buffer.concat([Buffer.from(text), Buffer.from([0x00]), Buffer.from('\n')])],
+  ]
+  for (const [label, bytes] of cases) {
+    const run = runPreflight(bytes)
+    assertFailedWith(run, 'ENV_FILE is not UTF-8: ', label)
+    assert.ok(
+      run.json.suggestedActions.some(action => action.includes('Re-save app.env as UTF-8 without a byte-order mark')),
+      `${label}: must carry the re-save action`,
+    )
+    assertNoValues(run, ['key', 'salt', 'jwt', 'pg'])
+  }
+  const utf8Bom = runPreflight(`${BOM}${text}`, { reports: false })
+  assert.equal(utf8Bom.status, 0, 'UTF-8 with a BOM is read fine by the loader (trim drops U+FEFF) and must pass')
+})
+
+test('S2 premise: the real ecosystem.config.cjs loader loads nothing from a UTF-16LE app.env', () => {
+  withTempDir('mt-onprem-utf16-oracle-', dir => {
+    const keys = Object.keys(validEnv())
+    const loaded = ecosystemOracle(dir, Buffer.from(`${BOM}${envText(validEnv())}`, 'utf16le'), keys)
+    assert.deepEqual(loaded, keys.map(() => null), 'the loader must not recognise any key in a UTF-16 file')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Review N2: an unreadable app.env fails with a report instead of aborting under `set -e`
+// ---------------------------------------------------------------------------------------------
+
+/** Make `file` unreadable for this user; returns a restore function, or null if not possible. */
+function makeUnreadable(file) {
+  const readable = () => {
+    try {
+      readFileSync(file)
+      return true
+    } catch {
+      return false
+    }
+  }
+  let restore
+  if (process.platform === 'win32') {
+    const user = userInfo().username
+    const deny = spawnSync('icacls', [file, '/deny', `${user}:(R)`], { encoding: 'utf8' })
+    if (deny.status !== 0) return null
+    restore = () => spawnSync('icacls', [file, '/remove:d', user], { encoding: 'utf8' })
+  } else {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return null
+    chmodSync(file, 0o000)
+    restore = () => chmodSync(file, 0o600)
+  }
+  if (readable()) {
+    restore()
+    return null
+  }
+  return restore
+}
+
+test('N2 an unreadable app.env fails with a JSON/Markdown report instead of a raw abort', t => {
+  let prepared = true
+  const run = runPreflight(envText(validEnv()), {
+    beforeRun: envFile => {
+      const restore = makeUnreadable(envFile)
+      prepared = restore !== null
+      return restore
+    },
+  })
+  if (!prepared) {
+    t.skip('cannot make a file unreadable here (running as root, or no ACL support)')
+    return
+  }
+  assertFailedWith(run, 'ENV_FILE is not readable: ', 'unreadable app.env')
+  assert.ok(run.json, 'the JSON report must be written')
+  assert.ok(
+    run.json.suggestedActions.some(action => action.includes('Run the preflight as an account that can read app.env')),
+    'must carry the readability action',
+  )
+})
+
+// ---------------------------------------------------------------------------------------------
 // Reader parity: the preflight's get_env_value against the REAL ecosystem.config.cjs loader
 // ---------------------------------------------------------------------------------------------
 
@@ -379,8 +624,15 @@ function shellFunctions(source, names) {
     .join('\n')
 }
 
+/** Pull a top-level `NAME=( ... )` array assignment out of a shell script, verbatim. */
+function shellArray(source, name) {
+  const match = source.match(new RegExp(`^${name}=\\([\\s\\S]*?^\\)`, 'm'))
+  assert.ok(match, `shell array not found: ${name}`)
+  return match[0]
+}
+
 const PARITY_LINES = [
-  '\uFEFFPF_BOM=bom-value',
+  `${BOM}PF_BOM=bom-value`,
   '# PF_COMMENTED=commented-value',
   'PF_PLAIN=plain-value',
   '   PF_INDENTED=indented-value',
@@ -397,12 +649,27 @@ const PARITY_LINES = [
   'export PF_EXPORTED=exported-value',
   'PF_CR=cr-value\r',
   'PF_TAB\t=\ttab-value\t',
+  'PF_VT_FF\v\f=\f\vvt-ff-value\v\f',
   'PF_DUP=first-dup-value',
   'PF_DUP=second-dup-value',
   'PF_DUP_EMPTY_FIRST=',
   'PF_DUP_EMPTY_FIRST=later-non-empty-value',
   'PF_DUP_QUOTED_EMPTY_FIRST=""',
   'PF_DUP_QUOTED_EMPTY_FIRST="later quoted value"',
+  // JS whitespace (review S4): trimmed at line/key/value edges, kept inside quotes.
+  `${NBSP}PF_NBSP_INDENT=nbsp-indent-value`,
+  `PF_NBSP_EDGES=${NBSP}nbsp-value${NBSP}`,
+  `PF_NBSP_ONLY=${NBSP}`,
+  `PF_IDEO_ONLY=${IDEOGRAPHIC_SPACE}`,
+  `PF_IDEO_EDGES=${IDEOGRAPHIC_SPACE}ideo-value${IDEOGRAPHIC_SPACE}`,
+  `PF_KEY_NBSP${NBSP}=nbsp-key-value`,
+  `PF_ALL_JS_SPACE=${JS_TRIM_NON_ASCII} \t${cp(0x4e2d)}js-space-value${cp(0x6587)}${JS_TRIM_NON_ASCII}\t `,
+  `PF_CJK_THEN_NBSP=${cp(0x4e2d, 0x6587)}${NBSP}`,
+  `PF_QUOTED_NBSP="${NBSP}inner${NBSP}"`,
+  // Not JS whitespace: must be KEPT (U+0085 NEL, U+180E MVS, U+200B ZWSP).
+  `PF_NEL=${cp(0x85)}nel-value${cp(0x85)}`,
+  `PF_MVS=${cp(0x180e)}mvs-value${cp(0x180e)}`,
+  `PF_ZWSP=${cp(0x200b)}zwsp-value${cp(0x200b)}`,
   '=value-without-key',
   'PF_NO_EQUALS',
   '',
@@ -428,19 +695,32 @@ const PARITY_KEYS = [
   'export PF_EXPORTED',
   'PF_CR',
   'PF_TAB',
+  'PF_VT_FF',
   'PF_DUP',
   'PF_DUP_EMPTY_FIRST',
   'PF_DUP_QUOTED_EMPTY_FIRST',
+  'PF_NBSP_INDENT',
+  'PF_NBSP_EDGES',
+  'PF_NBSP_ONLY',
+  'PF_IDEO_ONLY',
+  'PF_IDEO_EDGES',
+  'PF_KEY_NBSP',
+  'PF_ALL_JS_SPACE',
+  'PF_CJK_THEN_NBSP',
+  'PF_QUOTED_NBSP',
+  'PF_NEL',
+  'PF_MVS',
+  'PF_ZWSP',
   'PF_NO_EQUALS',
   'PF_NEVER_DECLARED',
 ]
 
-/** What the backend's loader assigns: run the real ecosystem.config.cjs against `text`. */
-function ecosystemOracle(dir, text, keys) {
+/** What the backend's loader assigns: run the real ecosystem.config.cjs against `content`. */
+function ecosystemOracle(dir, content, keys) {
   const oracleRoot = path.join(dir, 'oracle')
   mkdirSync(path.join(oracleRoot, 'docker'), { recursive: true })
   copyFileSync(ECOSYSTEM, path.join(oracleRoot, 'ecosystem.config.cjs'))
-  writeFileSync(path.join(oracleRoot, 'docker', 'app.env'), text)
+  writeFileSync(path.join(oracleRoot, 'docker', 'app.env'), content)
   const result = spawnSync(
     process.execPath,
     [
@@ -460,17 +740,19 @@ function ecosystemOracle(dir, text, keys) {
   return JSON.parse(result.stdout)
 }
 
-/** What the preflight's reader returns, from the real script's functions. */
-function preflightReader(dir, text, keys) {
+/** What the preflight's reader returns, from the real script's functions, under `locale`. */
+function preflightReader(dir, text, keys, locale = 'C') {
   const envFile = path.join(dir, 'reader.env')
   writeFileSync(envFile, text)
-  const functions = shellFunctions(readLf(SCRIPT), ['parse_env_line', 'get_env_value'])
+  const source = readLf(SCRIPT)
   const input = [
     'set -euo pipefail',
     `ENV_FILE='${shellPath(envFile)}'`,
     'ENV_DECL_KEY=""',
     'ENV_DECL_VALUE=""',
-    functions,
+    'JS_TRIMMED=""',
+    shellArray(source, 'JS_TRIM_MULTIBYTE'),
+    shellFunctions(source, ['js_trim', 'parse_env_line', 'get_env_value']),
     // No `$(...)` here: MSYS bash strips a trailing CR inside command substitution, which would
     // hide a reader that keeps the CR of a CRLF line on Windows dev hosts.
     'for key in "$@"; do get_env_value "$key"; printf "\\0"; done',
@@ -479,9 +761,9 @@ function preflightReader(dir, text, keys) {
   const result = spawnSync('bash', ['--noprofile', '--norc', '-s', '--', ...keys], {
     input,
     encoding: 'utf8',
-    env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', HOME: process.env.HOME ?? '' },
+    env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', HOME: process.env.HOME ?? '', LC_ALL: locale },
   })
-  assert.equal(result.status, 0, 'the preflight reader failed to run')
+  assert.equal(result.status, 0, `the preflight reader failed to run under ${locale}`)
   const answers = result.stdout.split('\0')
   assert.equal(answers.pop(), '', 'reader output must be NUL-terminated')
   assert.equal(answers.length, keys.length, 'reader must answer every key')
@@ -492,7 +774,8 @@ function preflightReader(dir, text, keys) {
   })
 }
 
-test('reader parity: get_env_value returns exactly what the real ecosystem.config.cjs loader assigns', () => {
+test('reader parity: get_env_value returns exactly what the real ecosystem.config.cjs loader assigns, in every locale', t => {
+  if (!GBK_LOCALE) t.diagnostic('zh_CN.GBK is not available to bash here; parity runs in C and UTF-8 only')
   withTempDir('mt-onprem-reader-', dir => {
     for (const [eol, label] of [
       ['\n', 'LF'],
@@ -500,11 +783,16 @@ test('reader parity: get_env_value returns exactly what the real ecosystem.confi
     ]) {
       const text = `${PARITY_LINES.join(eol)}${eol}`
       const oracle = ecosystemOracle(dir, text, PARITY_KEYS)
-      const reader = preflightReader(dir, text, PARITY_KEYS)
-      PARITY_KEYS.forEach((key, index) => {
-        // Undeclared reads as empty in the preflight, exactly as an unset variable would.
-        assert.ok(reader[index] === (oracle[index] ?? ''), `${label} ${JSON.stringify(key)}: preflight reader disagrees with ecosystem.config.cjs`)
-      })
+      for (const locale of LOCALES) {
+        const reader = preflightReader(dir, text, PARITY_KEYS, locale)
+        PARITY_KEYS.forEach((key, index) => {
+          // Undeclared reads as empty in the preflight, exactly as an unset variable would.
+          assert.ok(
+            reader[index] === (oracle[index] ?? ''),
+            `${label} ${locale} ${JSON.stringify(key)}: preflight reader disagrees with ecosystem.config.cjs`,
+          )
+        })
+      }
     }
   })
 })
