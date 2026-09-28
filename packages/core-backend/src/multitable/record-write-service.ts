@@ -37,6 +37,7 @@ import {
 } from './hierarchy-cycle-guard'
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
+import { assertFieldSchemaUnchangedAfterFence } from './field-schema-fence-recheck'
 import { mintOperation, sealOperation, OperationLedger } from './operation-ledger'
 import {
   notifyRecordSubscribersBestEffort,
@@ -838,6 +839,15 @@ export class RecordWriteService {
       } else {
         await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
       }
+      // Field retype slice 3a (ADR §3.11 row 1): `fieldById` was loaded and validated against BEFORE the fence;
+      // a conversion that held the fence may have retyped a touched field meanwhile. Re-read under FOR SHARE and
+      // refuse 409 FIELD_SCHEMA_CHANGED before the first row lock. No query unless the convert flag is 'true'.
+      await assertFieldSchemaUnchangedAfterFence(
+        query,
+        sheetId,
+        fieldById,
+        [...changesByRecord.values()].flatMap((changes) => changes.map((change) => change.fieldId)),
+      )
       // W0-1 L6-a: mint the sealed operation AFTER the fence. Recovery-owned calls (bypassWriterBlock — the
       // revert-execute in-fence patch loop) are the recovery API's own writes; L6-a leaves those UNMINTED
       // (their sealing is the deferred recovery-execute lane's concern), so they keep an inert ledger.

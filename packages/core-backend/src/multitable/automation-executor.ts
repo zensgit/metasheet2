@@ -70,6 +70,7 @@ import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { fenceWriterEntriesInOrder, isWriterFenceEnabled } from './canonical-sheet-fence'
+import { assertFieldSchemaUnchangedAfterFence, loadFieldSchemaSnapshot } from './field-schema-fence-recheck'
 import {
   assertRecordLinkDeleteFencePlanCurrent,
   prepareRecordLinkDeleteFencePlan,
@@ -3221,6 +3222,10 @@ export class AutomationExecutor {
       // read-only field-config lookup — never touches `meta_records` — so it stays OUTSIDE the
       // transaction below (same placement as before this slice).
       await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
+      // Field retype slice 3a (ADR §3.11 row 6): this writer keeps no field-type snapshot of its own, so take one
+      // here, BEFORE the fence (flag-gated: convert flag off ⇒ null, no query). The handler below re-reads the
+      // same fields after the fence and refuses if a conversion retyped one while this write was queued.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, effectiveSheetId, Object.keys(patch))
 
       // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
       // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
@@ -3249,6 +3254,9 @@ export class AutomationExecutor {
         if (await this.claimClassAOrSkip(query, identity, 'update_record', config) === 'duplicate') {
           return this.alreadyAppliedResult('update_record')
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read of the patched fields; a type / option
+        // change since `schemaSnapshot` throws (rolls back the claim too) ⇒ the step fails, zero writes.
+        await assertFieldSchemaUnchangedAfterFence(query, effectiveSheetId, schemaSnapshot, Object.keys(patch))
         // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
         // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
         // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
@@ -3752,6 +3760,8 @@ export class AutomationExecutor {
       // validators, so sanitize any rich-longText value in `data` against the target sheet's
       // field config before it reaches the DB (inert-by-construction at every writer).
       await this.sanitizeRichLongTextInWritePayload(targetSheetId, data)
+      // Field retype slice 3a (ADR §3.11 row 6): pre-fence snapshot, same as executeUpdateRecord.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, targetSheetId, Object.keys(data))
 
       // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
       // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
@@ -3784,6 +3794,8 @@ export class AutomationExecutor {
         if (await this.claimClassAOrSkip(query, identity, 'create_record', config) === 'duplicate') {
           return 'duplicate' as const
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read before the INSERT.
+        await assertFieldSchemaUnchangedAfterFence(query, targetSheetId, schemaSnapshot, Object.keys(data))
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
         // create is rejected before this INSERT unless claim==truth + trigger-actor base-write (§1.3 vector).
         // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.

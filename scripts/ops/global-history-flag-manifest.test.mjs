@@ -461,6 +461,31 @@ test('a rung that stacks every compatible retention conflict fires all four name
 
 // ── Mutation-resistance: deleting a rule from the manifest must break these ───────────────────────
 
+// ── field retype CONVERT (ADR docs/development/multitable-field-retype-first-batch-adr-20260926.md §5) ──────────
+test('field retype convert: exact-literal activation, no dependsOn, conflicts with the legacy manage-schema switch', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT
+  assert.ok(spec, 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT must be registered')
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'])
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const v of ['TRUE', ' true', 'true ', '1', 'yes']) assert.equal(isActivated(spec, v), false, v)
+})
+
+test('field-retype-convert-with-legacy-manage-schema: convert on + legacy switch on fires (STOP)', () => {
+  const ids = violationIds({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'true', MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA: 'true' })
+  assert.ok(ids.includes('field-retype-convert-with-legacy-manage-schema'), `expected the conflict, got ${ids.join(',')}`)
+})
+
+test('field retype convert positive control: convert on alone (the read-only preview rung) has zero violations', () => {
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'true' }), [])
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'true', MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA: 'false' }), [])
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT: 'false', MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA: 'true' }), [])
+})
+
 test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagRules on a targeted fixture', () => {
   // Enumerates rules directly from the manifest (not hardcoded ids) so a NEW rule added later is
   // automatically covered, and a DELETED rule shrinks the iteration (making this test vacuous for that
@@ -468,7 +493,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })
