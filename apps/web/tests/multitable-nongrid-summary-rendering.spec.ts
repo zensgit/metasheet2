@@ -4,6 +4,14 @@ import MetaCalendarView from '../src/multitable/components/MetaCalendarView.vue'
 import MetaGalleryView from '../src/multitable/components/MetaGalleryView.vue'
 import MetaKanbanView from '../src/multitable/components/MetaKanbanView.vue'
 import MetaTimelineView from '../src/multitable/components/MetaTimelineView.vue'
+import { businessTodayKey } from '../src/multitable/utils/business-timezone'
+
+// A day the calendar's month grid always renders: the 15th of the month it OPENS on — the business today's month
+// (客户反馈 2026-09-24 #4c follow-up), not the browser's (they differ on a month's last day, 16:00–24:00 UTC).
+function dayInCalendarOpeningMonth(): string {
+  const [year, month] = businessTodayKey().split('-')
+  return `${year}-${month}-15`
+}
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
@@ -116,8 +124,7 @@ describe('multitable non-grid summary rendering', () => {
   })
 
   it('renders link summaries in calendar event titles', async () => {
-    const currentMonthDate = new Date()
-    const dateValue = `${currentMonthDate.getFullYear()}-${String(currentMonthDate.getMonth() + 1).padStart(2, '0')}-${String(Math.max(1, Math.min(28, currentMonthDate.getDate()))).padStart(2, '0')}`
+    const dateValue = dayInCalendarOpeningMonth()
     const container = document.createElement('div')
     document.body.appendChild(container)
 
@@ -160,8 +167,7 @@ describe('multitable non-grid summary rendering', () => {
   })
 
   it('renders attachment previews in calendar events when the title field is an attachment', async () => {
-    const currentMonthDate = new Date()
-    const dateValue = `${currentMonthDate.getFullYear()}-${String(currentMonthDate.getMonth() + 1).padStart(2, '0')}-${String(Math.max(1, Math.min(28, currentMonthDate.getDate()))).padStart(2, '0')}`
+    const dateValue = dayInCalendarOpeningMonth()
     const container = document.createElement('div')
     document.body.appendChild(container)
 

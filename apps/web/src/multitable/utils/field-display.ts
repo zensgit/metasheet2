@@ -13,11 +13,13 @@ import {
 import { isSystemFieldType } from './system-fields'
 import { isEmptyValue } from './conditional-formatting'
 import {
+  businessTodayKey,
   formatDateTimeInZone,
   getBusinessTimezone,
   parseDateTimeInput,
   resolveDateTimeTimezone,
 } from './business-timezone'
+import { getLookupTargetField } from './lookup-target-fields'
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
@@ -64,11 +66,52 @@ export function dateTimeFieldTimezone(field: Pick<MetaField, 'type' | 'property'
 }
 
 /**
+ * The zone the calendar / timeline / Gantt views put a field's values onto days in (客户反馈 2026-09-24 #4c
+ * follow-up): a date-time-like field's zone (so a record lands on the day its cell shows), else `null` — a
+ * `date` field (floating day, #3417) and text / number fields keep their existing day logic untouched.
+ */
+export function viewDayZone(field: Pick<MetaField, 'type' | 'property'> | null | undefined): string | null {
+  return field && isDateTimeLikeFieldType(field.type) ? dateTimeFieldTimezone(field) : null
+}
+
+/**
+ * "Today" for a calendar / timeline / Gantt keyed on `field`: today's day in that field's day zone (a date-time
+ * field's zone rule), else in the business timezone — for `date` fields too, so the day a view opens on,
+ * highlights and quick-creates on is the SAME business day in every browser (a floating `date` names a day,
+ * and the organisation's "today" is the business day). Never the browser's day or the UTC day.
+ */
+export function viewTodayKey(field: Pick<MetaField, 'type' | 'property'> | null | undefined, nowMs: number = Date.now()): string {
+  return businessTodayKey(viewDayZone(field) ?? getBusinessTimezone(), nowMs)
+}
+
+/**
+ * Display texts of a LOOKUP cell whose target field is date-time-like (客户反馈 2026-09-24 #4c follow-up): each
+ * looked-up instant as the SAME `YYYY-MM-DD HH:mm` wall clock the target column shows (the target's zone rule).
+ * `null` when the field is not a lookup or its target is unknown / not date-time-like — the caller keeps its
+ * raw projection. A looked-up value that is not a date-time keeps its raw text (never dropped).
+ */
+export function lookupDateTimeTexts(field: Pick<MetaField, 'type'> & { id?: string }, value: unknown): string[] | null {
+  if (field.type !== 'lookup') return null
+  const target = getLookupTargetField(field.id)
+  if (!target || !isDateTimeLikeFieldType(target.type)) return null
+  const zone = dateTimeFieldTimezone(target)
+  const items = Array.isArray(value) ? value : [value]
+  return items
+    .filter((item) => item !== null && item !== undefined && String(item).trim().length > 0)
+    .map((item) => formatDateTimeInZone(item, zone) ?? String(item))
+}
+
+/**
  * Export / group-header / filter text of a date-time cell: the SAME `YYYY-MM-DD HH:mm` business wall clock
  * the grid shows (客户反馈 2026-09-24 #4c, B1/N5). `null` when the field is not date-time-like or the value is
- * not a date-time — the caller keeps its raw projection (never drops the cell).
+ * not a date-time — the caller keeps its raw projection (never drops the cell). A lookup of a date-time field
+ * exports its wall clocks joined the way the export joins any array (`; `).
  */
-export function dateTimeExportText(field: Pick<MetaField, 'type' | 'property'>, value: unknown): string | null {
+export function dateTimeExportText(field: Pick<MetaField, 'type' | 'property'> & { id?: string }, value: unknown): string | null {
+  if (field.type === 'lookup') {
+    const texts = lookupDateTimeTexts(field, value)
+    return texts && texts.length > 0 ? texts.join('; ') : null
+  }
   if (!isDateTimeLikeFieldType(field.type)) return null
   if (value === null || value === undefined || value === '') return null
   return formatDateTimeInZone(value, dateTimeFieldTimezone(field))
@@ -228,6 +271,10 @@ export function formatFieldDisplay(params: {
     const count = Array.isArray(value) ? value.length : value ? 1 : 0
     return summarizeAttachmentCount(count, isZh)
   }
+
+  // Lookup of a date-time field: the target column's wall clock, never the raw stored ISO.
+  const lookupDateTimes = lookupDateTimeTexts(field, value)
+  if (lookupDateTimes) return lookupDateTimes.length > 0 ? lookupDateTimes.join(', ') : '—'
 
   if (Array.isArray(value)) {
     const displayValues = value

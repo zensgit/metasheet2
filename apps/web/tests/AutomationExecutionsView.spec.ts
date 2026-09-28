@@ -97,6 +97,9 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
     expect(mounted.container.querySelector('[data-run-id="axe_1"]')).not.toBeNull()
     expect(mounted.container.querySelector('[data-status="resolved"]')).not.toBeNull()
     expect(mounted.container.textContent ?? '').toContain('resolved')
+    // 客户反馈 2026-09-24 #4c follow-up: triggeredAt 2026-05-28T00:00Z in the business timezone (Asia/Shanghai
+    // default), 24-hour, to the second — whatever the browser's zone / locale.
+    expect(mounted.container.querySelector('[data-run-id="axe_1"] .automation-runs__time')?.textContent?.trim()).toBe('2026-05-28 08:00:00')
   })
 
   // B3-11 — additive server-resolved ruleName/sheetName: render the resolved label as plain

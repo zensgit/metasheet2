@@ -102,6 +102,7 @@
 import { computed, onUnmounted, ref, useId, watch } from 'vue'
 import type { MetaField, MetaFieldPermission, MetaRecord } from '../types'
 import { useLocale } from '../../composables/useLocale'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import { useAuth } from '../../composables/useAuth'
 import {
   getDefaultIntegrationScope,
@@ -232,11 +233,10 @@ function onToggle(): void {
   if (expanded.value) void loadTimeline()
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatProvenanceTime(value: string): string {
   if (!value) return ''
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) return value
-  return new Date(timestamp).toLocaleString()
+  return formatBusinessTimestamp(value, { precision: 'second' }) ?? value
 }
 </script>
 

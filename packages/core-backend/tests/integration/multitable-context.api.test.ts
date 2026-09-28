@@ -1276,6 +1276,59 @@ describe('Multitable context API', () => {
     expect(JSON.stringify(res.body)).not.toContain('sheet_missing')
   })
 
+  // 客户反馈 2026-09-24 #4c follow-up (PR #6083 deferred list): a record opened on its own — the deep link /
+  // linked-record peek that calls GET /records/:id, possibly before (or without) /context — must carry the SAME
+  // instance business timezone, so its date-times show the grid's wall clock. Same env contract as /context.
+  test('record context (GET /records/:id) carries the instance business timezone', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_records WHERE id = $1')) {
+          return {
+            rows: [{ id: 'rec_tz', sheet_id: 'sheet_ops', version: 2, data: { fld_when: '2026-09-24T01:00:00.000Z' } }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          return params?.[0] === 'sheet_ops'
+            ? { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+            : { rows: [] }
+        }
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
+          return { rows: params?.[0] === 'sheet_ops' ? [{ id: 'sheet_ops' }] : [] }
+        }
+        if (sql.includes('FROM meta_fields WHERE sheet_id = $1')) {
+          return {
+            rows: [
+              { id: 'fld_when', name: 'When', type: 'dateTime', property: {}, order: 1 },
+            ],
+          }
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        return { rows: [], rowCount: 0 }
+      },
+    })
+
+    try {
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', '')
+      const fallback = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(fallback.body.ok).toBe(true)
+      expect(fallback.body.data.record).toMatchObject({ id: 'rec_tz', data: { fld_when: '2026-09-24T01:00:00.000Z' } })
+      expect(fallback.body.data.businessTimezone).toBe('Asia/Shanghai')
+
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Asia/Tokyo')
+      const tokyo = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(tokyo.body.data.businessTimezone).toBe('Asia/Tokyo')
+      // Storage untouched: the record still carries the raw UTC instant, only the zone id is added.
+      expect(tokyo.body.data.record.data.fld_when).toBe('2026-09-24T01:00:00.000Z')
+
+      vi.stubEnv('MULTITABLE_BUSINESS_TIMEZONE', 'Not/AZone')
+      const junk = await request(app).get('/api/multitable/records/rec_tz').expect(200)
+      expect(junk.body.data.businessTimezone).toBe('Asia/Shanghai')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   test('rejects context access without multitable read permission', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: [],

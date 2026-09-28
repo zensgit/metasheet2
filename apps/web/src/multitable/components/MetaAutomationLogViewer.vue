@@ -138,6 +138,7 @@
 import { ref, computed, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { AutomationExecution, AutomationStats, AutomationStepResult } from '../types'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import type { MultitableApiClient } from '../api/client'
 import {
   automationActionTypeLabel,
@@ -199,12 +200,9 @@ function stepOutputView(step: AutomationStepResult): AutomationStepOutputView {
   return automationStepOutputView(step.output, isZh.value)
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatTime(ts: string): string {
-  try {
-    return new Date(ts).toLocaleString()
-  } catch {
-    return ts
-  }
+  return formatBusinessTimestamp(ts, { precision: 'second' }) ?? ts
 }
 
 function setSupportPacketStatus(executionId: string, message: string) {

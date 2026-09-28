@@ -1,4 +1,5 @@
 import type { MetaConfigRevision } from '../api/client'
+import { dateTimeZoneHint, formatBusinessTimestamp, getBusinessTimezone } from './business-timezone'
 
 type Label = { en: string; zh: string }
 const label = (value: Label, isZh: boolean): string => isZh ? value.zh : value.en
@@ -92,13 +93,16 @@ export function configHistoryEntityName(rev: MetaConfigRevision, resolve: (id: s
   return typeof name === 'string' && name.trim() ? name : resolve(rev.entityId)
 }
 
+/**
+ * History / trash timestamp: 客户反馈 2026-09-24 #4c follow-up — the business timezone (the zone every other
+ * multitable date-time is shown in), fixed 24-hour `YYYY-MM-DD HH:mm:ss`, instead of the viewer's device zone
+ * and locale. The zone is named (北京时间 / Beijing time) only when the viewer's clock reads differently, the
+ * same rule as the dateTime editors' hint. An unreadable legacy value is shown verbatim.
+ */
 export function configHistoryTime(timestamp: string, isZh: boolean): string {
-  const date = new Date(timestamp)
-  if (Number.isNaN(date.getTime())) return timestamp
-  // Omit timeZone to use the current viewer's device zone, not the actor's or the server's zone.
-  return date.toLocaleString(isZh ? 'zh-CN' : 'en-US', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hourCycle: 'h23', timeZoneName: 'short',
-  })
+  const zone = getBusinessTimezone()
+  const text = formatBusinessTimestamp(timestamp, { precision: 'second', timeZone: zone })
+  if (text === null) return timestamp
+  const hint = dateTimeZoneHint(zone, isZh, new Date(Date.parse(timestamp) || Date.now()))
+  return hint ? `${text} ${hint}` : text
 }
