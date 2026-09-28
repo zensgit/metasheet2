@@ -224,6 +224,9 @@ describe('MetaApiTokenManager', () => {
     const cards = document.querySelectorAll('[data-token-id]')
     expect(cards.length).toBe(1)
     expect(document.querySelector('.meta-api-mgr__card-name')?.textContent).toBe('Test token')
+    // 客户反馈 2026-09-24 #4c follow-up: the business-timezone day (Asia/Shanghai default), YYYY-MM-DD —
+    // createdAt 2026-04-01T00:00:00Z is 08:00 on 04-01 in Beijing, whatever the browser zone / locale.
+    expect(document.querySelector('[data-token-id]')?.textContent).toContain('2026-04-01')
   })
 
   it('shows empty state when no tokens', async () => {

@@ -181,7 +181,8 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig, MultitableCommentPresenceSummary } from '../types'
 import { resolveTimelineViewConfig } from '../utils/view-config'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatFieldDisplay, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
 import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
@@ -280,6 +281,10 @@ watch(
 )
 
 const dateFields = computed(() => props.fields.filter((f) => f.type === 'date' || f.type === 'dateTime'))
+// 客户反馈 2026-09-24 #4c follow-up: a date-time start / end field is put onto days in its field / business
+// timezone (the day its cell shows); a `date` field (floating day) keeps the UTC-midnight day math below.
+const startDayZone = computed(() => viewDayZone(props.fields.find((f) => f.id === startFieldId.value)))
+const endDayZone = computed(() => viewDayZone(props.fields.find((f) => f.id === endFieldId.value)))
 const labelFields = computed(() => props.fields)
 
 const displayField = computed(() =>
@@ -365,10 +370,27 @@ function attachmentItems(record: MetaRecord, field: MetaField): MetaAttachment[]
   }))
 }
 
-function parseDate(val: unknown): Date | null {
+function parseDate(val: unknown, zone: string | null = null): Date | null {
   if (!val) return null
+  // A date-time value is read in its zone (a zone-less legacy string is a business wall clock, never a
+  // browser-local read); text the grammar cannot read falls back to the old parse rather than vanishing.
+  const zonedMs = zone ? dateTimeValueToUtcMs(val, zone) : null
+  if (zonedMs !== null) return new Date(zonedMs)
   const d = new Date(String(val))
   return isNaN(d.getTime()) ? null : d
+}
+
+function parseStart(row: MetaRecord): Date | null {
+  return parseDate(row.data[startFieldId.value], startDayZone.value)
+}
+
+function parseEnd(row: MetaRecord): Date | null {
+  return parseDate(row.data[endFieldId.value], endDayZone.value)
+}
+
+/** `YYYY-MM-DD` of an instant: the business day for a date-time field, the UTC day otherwise (unchanged). */
+function dayKeyOf(date: Date, zone: string | null): string {
+  return zone ? dayKeyInZone(date.getTime(), zone) : date.toISOString().slice(0, 10)
 }
 
 function emitConfigUpdate(next: Partial<Required<MetaTimelineViewConfig>>) {
@@ -409,17 +431,15 @@ function onZoomChange(event: Event) {
   emitConfigUpdate({ zoom: nextZoom })
 }
 
-function todayIsoDate(): string {
-  const date = new Date()
-  date.setHours(0, 0, 0, 0)
-  return date.toISOString().slice(0, 10)
-}
-
 function onQuickCreate() {
-  const seedDate = todayIsoDate()
+  // Seeded with the view's "today" (viewTodayKey): a date-time field with today in its zone (read back as that
+  // day's 00:00 there), a `date` field with the business today. The old seed took local midnight's UTC date —
+  // the PREVIOUS day on any UTC+ browser (a Beijing laptop created yesterday's record).
   const data: Record<string, unknown> = {}
-  if (startFieldId.value) data[startFieldId.value] = seedDate
-  if (endFieldId.value) data[endFieldId.value] = seedDate
+  const startField = props.fields.find((f) => f.id === startFieldId.value)
+  const endField = props.fields.find((f) => f.id === endFieldId.value)
+  if (startFieldId.value) data[startFieldId.value] = viewTodayKey(startField)
+  if (endFieldId.value) data[endFieldId.value] = viewTodayKey(endField)
   emit('create-record', data)
 }
 
@@ -435,8 +455,8 @@ const timeRange = computed(() => {
   let minDate = Infinity
   let maxDate = -Infinity
   for (const row of props.rows) {
-    const s = parseDate(row.data[startFieldId.value])
-    const e = parseDate(row.data[endFieldId.value])
+    const s = parseStart(row)
+    const e = parseEnd(row)
     if (s) { minDate = Math.min(minDate, s.getTime()); maxDate = Math.max(maxDate, s.getTime()) }
     if (e) { minDate = Math.min(minDate, e.getTime()); maxDate = Math.max(maxDate, e.getTime()) }
   }
@@ -450,16 +470,16 @@ const scheduledRows = computed<ScheduledItem[]>(() => {
   const { min, max } = timeRange.value
   const range = max - min || 1
   return props.rows
-    .filter((row) => parseDate(row.data[startFieldId.value]) && parseDate(row.data[endFieldId.value]))
+    .filter((row) => parseStart(row) && parseEnd(row))
     .map((record) => {
-      const s = parseDate(record.data[startFieldId.value])!
-      const e = parseDate(record.data[endFieldId.value])!
+      const s = parseStart(record)!
+      const e = parseEnd(record)!
       const barLeft = ((s.getTime() - min) / range) * 100
       const barWidth = Math.max(1, ((e.getTime() - s.getTime()) / range) * 100)
       return {
         record,
-        startDate: s.toISOString().slice(0, 10),
-        endDate: e.toISOString().slice(0, 10),
+        startDate: dayKeyOf(s, startDayZone.value),
+        endDate: dayKeyOf(e, endDayZone.value),
         barLeft: Math.max(0, barLeft),
         barWidth: Math.min(100 - Math.max(0, barLeft), barWidth),
       }
@@ -469,7 +489,7 @@ const scheduledRows = computed<ScheduledItem[]>(() => {
 const unscheduledRows = computed(() => {
   if (!startFieldId.value || !endFieldId.value) return []
   return props.rows.filter(
-    (row) => !parseDate(row.data[startFieldId.value]) || !parseDate(row.data[endFieldId.value]),
+    (row) => !parseStart(row) || !parseEnd(row),
   )
 })
 
@@ -478,12 +498,15 @@ const axisTicks = computed(() => {
   const range = max - min || 1
   const ticks: Array<{ key: string; label: string; left: number }> = []
   const zoomMs = zoom.value === 'day' ? 86400000 : zoom.value === 'week' ? 86400000 * 7 : 86400000 * 30
+  // A date-time axis labels its ticks with the business day the bars are placed on; a `date` axis keeps the
+  // existing labels.
+  const tickZone = startDayZone.value ?? undefined
   let t = min
   while (t <= max) {
     const d = new Date(t)
     const label = zoom.value === 'month'
-      ? d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' })
-      : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+      ? d.toLocaleDateString(undefined, { month: 'short', year: '2-digit', timeZone: tickZone })
+      : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: tickZone })
     ticks.push({
       key: String(t),
       label,
@@ -499,10 +522,12 @@ function onSelect(recordId: string) {
   emit('select-record', recordId)
 }
 
-function snapToIsoDate(timestamp: number): string {
-  const date = new Date(timestamp)
-  date.setHours(0, 0, 0, 0)
-  return date.toISOString().slice(0, 10)
+function snapToIsoDate(timestamp: number, zone: string | null = null): string {
+  // The day the drop lands on, in the SAME frame the bars are placed in (dayKeyOf): a date-time field's zone
+  // day (written as that day, read back as its 00:00 there); for a `date` field the UTC day — its bars sit at
+  // UTC midnight of the day as written. The old `setHours(0)` + UTC date wrote the PREVIOUS day on UTC+
+  // browsers.
+  return dayKeyOf(new Date(timestamp), zone)
 }
 
 function onDragStart(item: ScheduledItem, event: DragEvent) {
@@ -542,8 +567,8 @@ function onDrop(item: ScheduledItem, event: DragEvent) {
     version: dragState.value.version,
     startFieldId: startFieldId.value,
     endFieldId: endFieldId.value,
-    startValue: snapToIsoDate(nextStartMs),
-    endValue: snapToIsoDate(nextStartMs + durationMs),
+    startValue: snapToIsoDate(nextStartMs, startDayZone.value),
+    endValue: snapToIsoDate(nextStartMs + durationMs, endDayZone.value),
   })
   onDragEnd()
 }

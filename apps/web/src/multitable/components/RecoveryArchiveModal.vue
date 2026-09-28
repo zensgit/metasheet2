@@ -182,6 +182,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RefreshRight } from '@element-plus/icons-vue'
 import ManualArchiveCapture from './ManualArchiveCapture.vue'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 
 import type {
   RecoveryArchiveCatalogEntry,
@@ -358,9 +359,9 @@ function coverageLabel(value: string): string {
   return props.isZh ? `${value} 项归档证据` : `${value} archive evidence entries`
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatTime(value: string): string {
-  const time = new Date(value)
-  return Number.isNaN(time.getTime()) ? l('timeUnavailable') : time.toLocaleString()
+  return formatBusinessTimestamp(value, { precision: 'second' }) ?? l('timeUnavailable')
 }
 
 function messageFor(error: unknown): string {

@@ -1332,6 +1332,44 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
   }
 }
 
+/**
+ * 客户反馈 2026-09-24 #4c follow-up (deferred by PR #6083): for each lookup field in `fields` whose TARGET field
+ * (on the foreign sheet) is a date-time, the zone its values are shown in — the target's own rule: a dateTime
+ * field's explicit non-'UTC' zone else the instance business timezone; createdTime / modifiedTime → the business
+ * timezone. Other lookups are absent (their cells keep the raw projection). The foreign sheet is resolved as
+ * applyLookupRollup does (`cfg.foreignSheetId ?? link.foreignSheetId`); one field load per distinct foreign sheet.
+ * Only field TYPES / zone properties are read — no foreign VALUES, so no readability gate is involved here (the
+ * values themselves were already masked by applyLookupRollup).
+ */
+async function resolveLookupDateTimeTargetZones(
+  query: QueryFn,
+  fields: UniverMetaField[],
+  relationalLinkFields: RelationalLinkField[],
+): Promise<Map<string, string>> {
+  const zones = new Map<string, string>()
+  const lookups = fields
+    .filter((field) => field.type === 'lookup')
+    .map((field) => ({ fieldId: field.id, cfg: parseLookupFieldConfig(field.property) }))
+    .filter((entry): entry is { fieldId: string; cfg: LookupFieldConfig } => entry.cfg !== null)
+  if (lookups.length === 0) return zones
+  const linkConfigById = new Map(relationalLinkFields.map(({ fieldId, cfg }) => [fieldId, cfg] as const))
+  const foreignFieldsBySheet = new Map<string, Array<{ id: string; type: string; property?: unknown }>>()
+  for (const { fieldId, cfg } of lookups) {
+    const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (!foreignSheetId) continue
+    let foreignFields = foreignFieldsBySheet.get(foreignSheetId)
+    if (!foreignFields) {
+      foreignFields = (await loadFieldsForSheetShared(query, foreignSheetId)) as Array<{ id: string; type: string; property?: unknown }>
+      foreignFieldsBySheet.set(foreignSheetId, foreignFields)
+    }
+    const target = foreignFields.find((candidate) => candidate.id === cfg.targetFieldId)
+    if (!target) continue
+    if (target.type === 'dateTime') zones.set(fieldId, resolveDateTimeFieldTimeZone(target.property))
+    else if (target.type === 'createdTime' || target.type === 'modifiedTime') zones.set(fieldId, resolveMultitableBusinessTimezone())
+  }
+  return zones
+}
+
 function parseRollupAggregation(value: unknown): RollupAggregation | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim().toLowerCase()
@@ -16065,6 +16103,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
         else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
       }
+      // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
+      // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
+      // map is filled only where the rows are hydrated through applyLookupRollup (the filtered branch below).
+      let exportLookupDateTimeZoneById = new Map<string, string>()
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -16079,6 +16121,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             const wallClock = formatDateTimeValue(cell, dateTimeZone)
             // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
             if (wallClock !== null) return wallClock
+          }
+          const lookupZone = exportLookupDateTimeZoneById.get(field.id)
+          if (lookupZone && Array.isArray(cell)) {
+            // Same joining as any array cell; a looked-up value that is not a date-time keeps its raw text.
+            return serializeXlsxCell(cell.map((item) => formatDateTimeValue(item, lookupZone) ?? item))
           }
           return serializeXlsxCell(cell)
         })
@@ -16170,6 +16217,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (needsComputedFilterSort && all.length > 0) {
           linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), relationalLinkFields)
           await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, all, relationalLinkFields, linkValuesByRecord)
+          exportLookupDateTimeZoneById = await resolveLookupDateTimeTargetZones(pool.query.bind(pool), fields, relationalLinkFields)
         }
 
         // Link-FILTER materialization (parity with /view): a link condition matches on the linked
@@ -18610,6 +18658,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           linkSummaries,
           ...(personSummaries ? { personSummaries } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
+          // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link / linked-record peek) shows its
+          // date-times in the SAME instance business timezone as /context and /form-context — a zone id,
+          // instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
         },
       })
     } catch (err) {
