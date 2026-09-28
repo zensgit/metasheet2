@@ -101,6 +101,9 @@ function addressesASheet(h: Handler): boolean {
     || /\bresolveSheetCapabilities\b|\bresolveSheetReadableCapabilities\b/.test(h.body)
     || /\brequireRecordReadable\b/.test(h.body)
     || /\bresolveMetaSheetId\b/.test(h.body)
+    // The three field-retype-convert endpoints take a FIELD id and reach the sheet through their shared gate. Without
+    // this line they resolve no capabilities in their own body and would silently leave the closed world.
+    || /\bgateFieldRetypeConvert\b/.test(h.body)
   )
 }
 
@@ -113,6 +116,10 @@ function addressesASheet(h: Handler): boolean {
  *   - `requireRecordReadable` — refuses a non-live sheet itself (univer-meta.ts), so its callers inherit
  *   - `handleExactAnchorPreview` / `handleExactAnchorExecute` — the four revert/reset one-liners
  *     delegate wholesale to these, which check liveness after their existence-hiding authority gate
+ *   - `gateFieldRetypeConvert` — the ONE gate the field-retype-convert preview / execute / undo share. It
+ *     resolves the sheet, refuses a non-live one itself (404, after the 403) and answers null, which each
+ *     caller acts on with its very next statement. What it does is PROVEN below ('the shared field-retype gate'),
+ *     not assumed from its name.
  */
 const GUARD_PATTERNS: Array<[RegExp, string]> = [
   [/sheetLiveness !== 'live'/, "explicit sheetLiveness refusal"],
@@ -127,6 +134,7 @@ const GUARD_PATTERNS: Array<[RegExp, string]> = [
   [/deleted_at IS NULL/, 'inline deleted_at IS NULL'],
   [/\brequireRecordReadable\b/, 'requireRecordReadable (refuses a non-live sheet)'],
   [/\bhandleExactAnchor(Preview|Execute)\b/, 'delegates to the exact-anchor handler'],
+  [/\bawait gateFieldRetypeConvert\(/, 'gateFieldRetypeConvert (the shared field-retype gate refuses a non-live sheet)'],
 ]
 
 function guardOf(h: Handler): string | null {
@@ -410,6 +418,68 @@ describe('sheet-liveness closure over univer-meta routes', () => {
     const subselect = 'FROM meta_sheets s\n WHERE s.id = $1\n   AND s.base_id IN (SELECT base_id FROM meta_sheets WHERE deleted_at IS NULL)'
     for (const notAProbe of [otherTable, otherAlias, otherAliasBound, otherEntity, joined, baseList, anyList, splice, spliceAdjacent, spliceStatement, subselect]) {
       expect(EXISTENCE_PROBE.test(notAProbe), notAProbe).toBe(false)
+    }
+  })
+
+  /**
+   * The shared field-retype gate, PROVEN. `gateFieldRetypeConvert` counts as a liveness mechanism above only because
+   * of what these assertions read out of the source — the order ③ canManageFields → ④ liveness → ⑤ canRead AND
+   * full-table read lives in ONE function (multitable/field-retype-convert-gates.ts), the route gate feeds it the
+   * liveness the resolver returned and answers the refusal, and every caller stops on its null.
+   */
+  it('the shared field-retype gate: one judgment (③ → ④ → ⑤ with canRead), fed the resolved liveness, acted on by all three endpoints', () => {
+    const gates = stripComments(readFileSync(join(__dirname, '../../src/multitable/field-retype-convert-gates.ts'), 'utf8').replace(/\r\n/g, '\n'))
+    const judge = gates.slice(gates.indexOf('export async function judgeFieldRetypeConvertGates('))
+    const order = [
+      judge.indexOf('input.capabilities.canManageFields !== true'),
+      judge.indexOf("input.sheetLiveness !== 'live'"),
+      judge.indexOf('input.capabilities.canRead !== true'),
+      judge.indexOf('await input.hasFullTableReadAccess()'),
+      judge.indexOf('return null'),
+    ]
+    expect(order.every((i) => i >= 0), `a gate is missing from judgeFieldRetypeConvertGates: ${order.join(',')}`).toBe(true)
+    expect(order).toEqual([...order].sort((a, b) => a - b))
+    // every branch before the last LEAVES with a refusal
+    expect((judge.match(/return \{ gate: [345], kind: '/g) ?? []).length).toBe(4)
+
+    const code = stripComments(SRC)
+    const fn = (name: string): string => {
+      const start = code.indexOf(`async function ${name}(`)
+      expect(start, `${name} is not a module-level function of univer-meta.ts`).toBeGreaterThanOrEqual(0)
+      return code.slice(start, code.indexOf('\n}\n', start))
+    }
+    const gate = fn('gateFieldRetypeConvert')
+    expect(gate).toMatch(/const \{ access, capabilities, sheetLiveness \} = await resolveSheetCapabilities\(req, query, sheetId\)/)
+    expect(gate).toMatch(/await judgeFieldRetypeConvertGates\(\{\s*capabilities,\s*sheetLiveness,/)
+    expect(gate).toMatch(/if \(refusal\) \{\s*sendFieldRetypeConvertGateRefusal\(res, refusal\)\s*return null\s*\}/)
+    // it judges nothing itself: no capability or liveness comparison of its own that could drift from the judgment
+    expect(gate).not.toMatch(/canManageFields|canRead\b|!== 'live'/)
+
+    const send = code.slice(code.indexOf('function sendFieldRetypeConvertGateRefusal('))
+    expect(send.slice(0, send.indexOf('\n}\n'))).toMatch(/refusal\.kind === 'not_live'\) return sendSheetNotLive\(res, refusal\.sheetLiveness\)/)
+
+    // the in-transaction re-check reads liveness AGAIN, from the transaction, and uses the same judgment
+    const fresh = fn('authorizeFieldRetypeConvertInTransaction')
+    expect(fresh).toMatch(/await resolveRecoverySheetAuthority\(req, query, sheetId\)/)
+    expect(fresh).toMatch(/const sheetLiveness = await loadSheetLiveness\(query, sheetId\)/)
+    expect(fresh).toMatch(/return judgeFieldRetypeConvertGates\(\{\s*capabilities: authority\.capabilities,\s*sheetLiveness,/)
+
+    // all three endpoints, and nobody else, go through the gate — and stop on its null with the next statement
+    const callers = HANDLERS.filter((h) => /\bgateFieldRetypeConvert\b/.test(h.body))
+    expect(callers.map((h) => h.key).sort()).toEqual([
+      'POST /fields/:fieldId/retype-execute',
+      'POST /fields/:fieldId/retype-preview',
+      'POST /fields/:fieldId/retype-undo',
+    ])
+    for (const h of callers) {
+      expect(h.body, h.key).toMatch(/const gate = await gateFieldRetypeConvert\(req, res, query, sheetId\)\n\s*if \(!gate\) return\n/)
+      // no second, hand-written copy of a gate in the handler
+      expect(h.body, h.key).not.toMatch(/capabilities\.canManageFields|capabilities\.canRead|hasFullTableReadAccess\(/)
+    }
+    // the two WRITE endpoints hand the in-transaction re-check to their transaction
+    for (const h of callers.filter((c) => !c.key.endsWith('retype-preview'))) {
+      expect(h.body, h.key).toMatch(/authorize: \(fresh\) => authorizeFieldRetypeConvertInTransaction\(req, fresh as unknown as QueryFn, sheetId\)/)
+      expect(h.body, h.key).toMatch(/outcome\.gate \? sendFieldRetypeConvertGateRefusal\(res, outcome\.gate\)/)
     }
   })
 
