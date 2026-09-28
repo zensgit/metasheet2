@@ -4,17 +4,17 @@ import { sql } from 'kysely'
 /**
  * Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), §6 phase 1 DDL.
  *
- * ERRATUM 3 CANDIDATE (REDRAFT v2, PROPOSED 2026-09-19/20 — **NOT owner-ratified, NOT
- * authorized, NOT applied to any environment**). Exactly one line of this file departs from the
+ * ERRATUM 3 (REDRAFT, adopted by the owner 2026-09-25 and confirmed as ratified 2026-09-28; see
+ * the lock's RATIFY record). Exactly one line of this file departs from the originally
  * ratified §2 constraint list: `atg_name_nonblank`, whose predicate is written here as the
  * erratum's redrafted option (i) — an explicit-trim-set `btrim(...) <> ''` — instead of the
- * ratified `name ~ '[!-~]'`. Both `org_id` CHECKs (`atg_org_nonblank`, `atgl_org_nonblank`) are
+ * original `name ~ '[!-~]'`. Both `org_id` CHECKs (`atg_org_nonblank`, `atgl_org_nonblank`) are
  * byte-for-byte as ratified. The rationale, the refutation of the first candidate, and the
  * disclosed gap in the trim set all live in the block comment directly above that CONSTRAINT.
- * Source of the proposed wording: `lock-errata-proposed-grouping-v2.13-20260919.md`, section
- * "勘误 3(重拟)", option (i). Passing this branch's tests is TECHNICAL VERIFICATION of the
- * candidate only — it is not ratification, merge authorization, or permission to apply the
- * migration anywhere.
+ * Source of the wording: `lock-errata-proposed-grouping-v2.13-20260919.md`, section
+ * "勘误 3(重拟)", option (i). Merging this file does not apply it anywhere; like every
+ * migration it runs only when a deploy runs migrations (see the merge-day runbook's deploy
+ * note for the pre-deploy check).
  *
  * Two tables, `approval_templates` unchanged (no new column on it):
  *
@@ -51,12 +51,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       org_id       text NOT NULL
                      CONSTRAINT atg_org_nonblank CHECK (org_id ~ '[!-~]'),
       name         text NOT NULL
-                     -- Erratum 3 CANDIDATE, REDRAFT v2 (PROPOSED 2026-09-19/20, pending owner
-                     -- confirmation — see the lock's own '勘误 3' header entry and
+                     -- Erratum 3, redrafted option (i) (adopted by the owner 2026-09-25,
+                     -- confirmed as ratified 2026-09-28 — see the lock's RATIFY record and
                      -- lock-errata-proposed-grouping-v2.13-20260919.md, section
-                     -- '勘误 3(重拟)' option (i), for the exact wording; NOT owner-ratified,
-                     -- NOT authorized — this DDL edit is a candidate sitting on an
-                     -- unmerged/unapplied branch, awaiting the owner's own word).
+                     -- '勘误 3(重拟)' option (i), for the exact wording). The predicate
+                     -- below is unchanged by that confirmation; only this comment was
+                     -- updated from its earlier "candidate, not yet ratified" wording.
                      --
                      -- WHY NOT THE RATIFIED TEXT: the ratified predicate was '~ [!-~]',
                      -- printable-ASCII-only, copied from
