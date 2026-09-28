@@ -240,6 +240,24 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
     expect(log.filter((sql) => SCOPE_OR_SCAN_RE.test(sql))).toEqual([])
   })
 
+  test('⑤ checks canRead itself: multitable:manage-schema alone (canManageFields without canRead) ⇒ 403, no scope/scan query, no recordId', async () => {
+    // hasFullTableReadAccess never reads capabilities.canRead, and canManageFields holds on manage-schema alone
+    // (access.ts deriveCapabilities / manage-schema-permission.ts deriveCanManageFields). Without the explicit
+    // canRead check this principal passes all five gates and is handed every rejected recordId of a sheet it cannot read.
+    const w = () => world({ records: [{ id: 'rec_ok', version: 1, data: { [FIELD]: 'A' } }, { id: 'rec_trail', version: 1, data: { [FIELD]: 'B ' } }] })
+    const { res, log, transaction } = await preview(w(), undefined, ['multitable:manage-schema'])
+    expect(res.status).toBe(403)
+    // past ③ (not FORBIDDEN) and ④ (not 404): the refusal is the full-table read gate
+    expect(res.body.error.code).toBe('FULL_TABLE_READ_REQUIRED')
+    expect(JSON.stringify(res.body)).not.toMatch(/recordIds|cells|scanned|rec_ok|rec_trail/)
+    expect(log.filter((sql) => SCOPE_OR_SCAN_RE.test(sql))).toEqual([])
+    expectNoWrites(log, transaction)
+    // control: the read code alone is what opens the gate on the very same sheet
+    const withRead = await preview(w(), undefined, ['multitable:manage-schema', 'multitable:read'])
+    expect(withRead.res.status).toBe(200)
+    expect(withRead.res.body.data.rejections).toEqual([{ reason: 'leading_trailing_whitespace', recordCount: 1, recordIds: ['rec_trail'] }])
+  })
+
   test('unknown field ⇒ 404, values-free (the requested id is not echoed)', async () => {
     const { res } = await preview(world({ fields: [] }))
     expect(res.status).toBe(404)

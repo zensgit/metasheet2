@@ -216,6 +216,18 @@ describe('option generation — dedupe and order', () => {
     expect(compareCodeUnits('a', 'B')).toBe(1)
     expect(compareCodeUnits('x', 'x')).toBe(0)
   })
+
+  test('comparator is UTF-16 code units, not code points: a surrogate pair sorts before U+FF61', () => {
+    const astral = '\u{1F600}' // code units D83D DE00
+    const bmpHigh = '\uFF61'
+    expect(compareCodeUnits(astral, bmpHigh)).toBe(-1)
+    expect(compareCodeUnits(bmpHigh, astral)).toBe(1)
+    // the discriminator is real: by code point the astral character is the LARGER one
+    expect(astral.codePointAt(0)!).toBeGreaterThan(bmpHigh.codePointAt(0)!)
+    const p = plan([live(`r${bmpHigh}`, 'from-bmp'), live(`r${astral}`, 'from-astral')])
+    expect(p.sortedLive.map((c) => c.recordId)).toEqual([`r${astral}`, `r${bmpHigh}`])
+    expect(p.optionValues).toEqual(['from-astral', 'from-bmp'])
+  })
 })
 
 describe('option cap — FIELD_RETYPE_MAX_OPTIONS = 5000, never truncated', () => {
@@ -387,6 +399,30 @@ describe('planHash — keyed HMAC over the whole plan, stable and drift-sensitiv
     expect(hashOf({ sourceProperty: { description: 'y' } })).not.toBe(a)
     // "same counts, swapped set": the same two values on swapped records reorders the options → different hash
     expect(hashOf({ live: [live('r1', 'B', { version: 3 }), live('r2', 'A', { version: 1 }), base.live[2]!] })).not.toBe(a)
+  })
+
+  test('the source-property axis binds on its own: editing a rule that is dropped anyway (target unchanged) moves the hash', () => {
+    const withMinLength = (n: number) => ({ description: 'x', validation: [{ type: 'required' }, { type: 'minLength', params: { value: n } }] })
+    const pa = planFieldRetypeConvert({ sourceProperty: withMinLength(2), targetType: 'select', live: base.live, trash: base.trash })
+    const pb = planFieldRetypeConvert({ sourceProperty: withMinLength(3), targetType: 'select', live: base.live, trash: base.trash })
+    // the discriminator is real: target property, options and dropped count are identical for both plans ...
+    expect(pb.targetProperty).toEqual(pa.targetProperty)
+    expect(pb.optionValues).toEqual(pa.optionValues)
+    expect(pb.droppedValidationRuleCount).toBe(1)
+    expect(pa.droppedValidationRuleCount).toBe(1)
+    // ... so only the source axis can tell a stale preview from the current field
+    expect(hashOf({ sourceProperty: withMinLength(3) })).not.toBe(hashOf({ sourceProperty: withMinLength(2) }))
+  })
+
+  test('recycle-bin rows sharing one record_id hash the same in either DB order (cellHash tie-break)', () => {
+    // meta_records_trash has a surrogate PK: one record_id can hold several rows. Both twins here are non-blocking
+    // (missing key / ""), so neither the verdict nor the rejections can pin their order -- only the hash can.
+    const twins = [trash('t1', null, { missing: true }), trash('t1', '')]
+    const a = hashOf({ trash: twins })
+    expect(hashOf({ trash: [...twins].reverse() })).toBe(a)
+    const p = planFieldRetypeConvert({ sourceProperty: {}, targetType: 'select', live: base.live, trash: twins })
+    expect(p.verdict).toBe('ok')
+    expect(p.trash).toEqual({ scanned: 2, blocking: 0 })
   })
 
   test('preview token: HS256, 10 minutes, exactly the locked claims', () => {

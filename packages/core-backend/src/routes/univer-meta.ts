@@ -14542,7 +14542,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    *      比字面 `=== 'true'` 更宽地拒绝：flag 以任何被当作「开」的写法存在都拒；
    *   ③ capabilities.canManageFields（照抄 PATCH）⇒ 否则 403；
    *   ④ sheetLiveness !== 'live' ⇒ 404（sendSheetNotLive）；
-   *   ⑤ hasFullTableReadAccess ⇒ 否则整面 403，无 scoped 模式、无 undisclosed 标记。
+   *   ⑤ capabilities.canRead && hasFullTableReadAccess ⇒ 否则整面 403，无 scoped 模式、无 undisclosed 标记。
+   *      `hasFullTableReadAccess` 本身**不看** canRead（只看行级 deny、字段遮罩、公式遮罩）；而 canManageFields 单凭
+   *      `multitable:manage-schema` 即可为真（manage-schema-permission.ts `deriveCanManageFields`），与 canRead 无关
+   *      （access.ts `deriveCapabilities`）。不补 canRead，一个只有改结构权、读不了本表的主体会过全部五门、拿到全部 recordId。
    * 之后：范围校验（422，details.reason）→ 规模（live + 本表回收站 > 记录上限 ⇒ 413，不截断）→ 扫描。
    * 响应 values-free：只有计数与 recordId，永不含单元格值或选项文本。
    */
@@ -14604,8 +14607,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canManageFields) return sendForbidden(res)
       // ④ liveness — a dead sheet keeps its capabilities; the caller must answer 404.
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
-      // ⑤ full-table read — whole-surface 403, no scoped counts, no undisclosed marker.
-      if (!(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
+      // ⑤ full-table read — whole-surface 403, no scoped counts, no undisclosed marker. canRead is checked HERE,
+      // explicitly: hasFullTableReadAccess never reads it, and canManageFields holds on multitable:manage-schema alone.
+      if (!capabilities.canRead || !(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
         return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A field type conversion requires unrestricted read access to every record and field of this sheet.' } })
       }
 
