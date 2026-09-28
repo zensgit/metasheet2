@@ -56,6 +56,9 @@ export default defineConfig({
       // applies migrations 068+069 in an isolated schema and requires real PostgreSQL;
       // excluded from the no-DB job and wired as a whole file in plugin-tests.yml.
       'tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts',
+      // #6076 external-system delete x pointer-write lock protocol: two-session real-PG races,
+      // excluded from the no-DB job and wired as a whole file in plugin-tests.yml (EXPECT_DB=1).
+      'tests/integration/external-system-delete-bind-lock-protocol.db.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
