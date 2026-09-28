@@ -58,7 +58,7 @@ import {
   requiresOwnWriteRowPolicy,
   resolveBaseReadable,
   resolveBaseReadableForAccess,
-  resolveBaseWritable,
+  resolveCopyTargetWritable,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
   resolveSheetCapabilitiesForAccess,
@@ -9229,15 +9229,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       // Copy-sheet S1 (ADR §3): `canCopySheet` = the SAME two gates the copy route enforces —
-      // hasFullTableReadAccess (source, three axes, no counts) ∧ resolveBaseWritable (the current base) ∧ not
-      // a projection base. Display-only: the server re-gates on POST …/copy. Same fail-closed posture as
-      // canDeleteSheet: a thrown probe hides the entry, never 500s the load, and logs values-free.
+      // resolveCopyTargetWritable (the current base: platform admin ∨ resolveBaseWritable, projection bases refused
+      // for everyone — CS-3 / §4.2 amended 2026-09-28; ONE predicate shared with the route's fast gate and the
+      // in-transaction re-check) ∧ hasFullTableReadAccess (source, three axes, no counts). The target gate runs
+      // first so a projection base short-circuits with no probe, as the previous inline id checks did. Display-only:
+      // the server re-gates on POST …/copy. Same fail-closed posture as canDeleteSheet: a thrown probe hides the
+      // entry, never 500s the load, and logs values-free.
       let canCopySheet = false
-      if (effectiveSheetId && resolvedBaseId && access.userId && resolvedBaseId !== APPROVAL_PROJECTION_BASE_ID
-        && !isElearningProjectionBaseIdCandidate(resolvedBaseId)) {
+      if (effectiveSheetId && resolvedBaseId && access.userId) {
         try {
-          canCopySheet = (await hasFullTableReadAccess(req, pool.query.bind(pool), effectiveSheetId, access, capabilities))
-            && (await resolveBaseWritable(access.userId, pool.query.bind(pool), resolvedBaseId))
+          canCopySheet = (await resolveCopyTargetWritable(access, pool.query.bind(pool), resolvedBaseId))
+            && (await hasFullTableReadAccess(req, pool.query.bind(pool), effectiveSheetId, access, capabilities))
         } catch (err) {
           console.error(
             '[univer-meta] load context: copy-sheet gate probe failed for canCopySheet; failing closed to false',

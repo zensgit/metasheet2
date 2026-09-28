@@ -51,7 +51,7 @@ import {
   canReadWithSheetGrant,
   loadDeniedRecordIds,
   loadRuleDeniedRecordIds,
-  resolveBaseWritable,
+  resolveCopyTargetWritable,
   resolveSheetCapabilitiesForAccess,
 } from './permission-service'
 import {
@@ -758,8 +758,9 @@ async function copyInsideTransaction(
   if (!(await deps.hasFullTableReadAccess(query, source.id, actor.access, fresh.capabilities))) {
     throw new CopySheetError(403, COPY_SHEET_ERROR_CODES.sourceNotFullyReadable)
   }
-  if (isApprovalProjectionBaseId(source.baseId) || isElearningProjectionBaseIdCandidate(source.baseId)
-    || !(await resolveBaseWritable(actor.actorId, query, source.baseId))) {
+  // 目标侧门 DB-fresh 终审（§4.2）：与路由快速拒、/context 探针**同一个**谓词 —— 平台管理员 ∨ resolveBaseWritable，
+  // 投影 Base 对谁都拒（CS-3，2026-09-28 修订）。身份取 actor.access（路由把 actorId 设为 access.userId，两者同源）。
+  if (!(await resolveCopyTargetWritable(actor.access, query, source.baseId))) {
     throw new CopySheetError(403, COPY_SHEET_ERROR_CODES.forbidden)
   }
   // 第二层：property-hidden 列的值只在复制者持有源表 canManageFields 时复制（§4.1）。计划按事务外判定建；

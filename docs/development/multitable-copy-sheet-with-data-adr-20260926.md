@@ -34,7 +34,7 @@
 |---|---|---|
 | CS-1 | 独立动作：`POST /api/multitable/sheets/:sheetId/copy`（+ 零写 `…/copy/dry-run`）。**仅会话认证**（不挂 `apiTokenAuth`；多维表路由逐个 opt-in，`univer-meta.ts:13440`、`:19176`）。模板 JSON 形状不变、永不带数据。 | owner；§1.1 |
 | CS-2 | 入口：① 侧栏当前表操作区「复制数据表」；② 「存为模板」弹窗底部「改为复制数据表（含数据）」；③ 模板中心「同时复制数据」只对带 provenance 的自定义模板、且只对**通过源表全表读门**的查看者出现（S4）。 | `MetaSheetViewRail.vue:96-111`、`MultitableWorkbench.vue:113-118` |
-| CS-3 | 目标 Base：**S1 = 源表所在 Base，不可选**。跨 Base 在 S2+：候选 = 可读 Base（`GET /bases` 口径，`univer-meta.ts:7905`）∩ `resolveBaseWritable`（`permission-service.ts:1962-2012`，fail-closed，含 e-learning 投影排除 `:1984`）；显式拒绝 `APPROVAL_PROJECTION_BASE_ID`（`approval-projection-constants.ts:17-20`）与 e-learning 候选 id（`univer-meta.ts:15586-15591` 只查后者，审批投影是**新代码**）。不用 `POST /sheets` 的 `canManageViews ∨ owner` 谓词（`:15600-15617`，与前者不一致）。 | §4.2 |
+| CS-3 | 目标 Base：**S1 = 源表所在 Base，不可选**。目标侧谓词（**2026-09-28 修订**）= **平台管理员角色 ∨ `resolveBaseWritable`**，封装为 `resolveCopyTargetWritable(access, query, baseId)`（`permission-service.ts`，紧接 `resolveBaseWritable` 之后），路由快速拒 / 事务内 DB-fresh 终审 / `/context` `canCopySheet` **三处共用这一个谓词**。管理员判定复用仓库唯一口径 `ResolvedRequestAccess.isAdminRole`（`access.ts:73`，= 源侧门轴 ① 的同一判定）；`resolveBaseWritable` 本身不改（自动化跨 Base 写等调用方仍是 owner ∨ base-write 码）。管理员臂仍 fail-closed：无身份 → 拒；`APPROVAL_PROJECTION_BASE_ID`（`approval-projection-constants.ts:17-20`）与 e-learning 候选 id（形状判定，严于 registry 查询）对**任何人**拒；目标 Base 缺失 / 软删 → 拒（与 `resolveBaseWritable` NIT-1 同一存在性读）。**为什么放宽**：源侧门轴 ① 在行级开关开着的表上只放行管理员角色，而 `resolveBaseWritable` 只看 owner 与 base-write 码、不看角色 → 他人 Base 里的行级表**谁都复制不了**；owner 2026-09-28 批复「同意」协调方建议第 5 项「复制功能改为也认平台管理员角色」。放宽方向，owner 已明示批准（非默认前进）；按册例标 `Ratified-by-default-2026-09-28`、留 24h 否决窗，登记 `takeover-beiliao-20260821/decision-register.md` R-19。跨 Base 在 S2+：候选 = 可读 Base（`GET /bases` 口径，`univer-meta.ts:7905`）∩ 同一谓词。不用 `POST /sheets` 的 `canManageViews ∨ owner` 谓词（`:15600-15617`，与前者不一致）。 | §4.2 |
 | CS-4 | 默认名「<源表名> 副本」；沿用显示名 hygiene（`univer-meta.ts:15497-15500`）。 | |
 | CS-5 | 源侧门 = 复用 `hasFullTableReadAccess`（§1.9），事务外快速拒 + **事务内 DB-fresh 终审**（§4.1）；拒绝码 `COPY_SOURCE_NOT_FULLY_READABLE`（403，**无计数**）。 | §4.1 |
 | CS-6 | **S1 不提供**「去掉我无权查看的列」：任何列对复制者不可见即拒绝整次复制。该选项的披露量本身是 oracle（§1.9），是否在 S2+ 提供 → §11-4。 | §4.1 |
@@ -61,7 +61,7 @@
 - **预检** `POST …/copy/dry-run`（零写，与模板 dry-run 同层 `univer-meta.ts:8602-8608`）：**先跑 §4 两侧门再 COUNT**（门不过只回 403，不回任何计数，无基数泄漏）；通过后回：行数、列数、超限与否（`summary.overLimit`：`withData` 且行数 > 上限时为 true——此时**不读记录**、结构披露照常回、不再 413；执行路径超限仍 413，r4 FE-2）；将披露的列（按 fieldId + 原因码：`ATTACHMENT_BLANKED`、`SELF_LINK_BLANKED`、`MIRROR_NOT_BUILT`、`DEPENDS_ON_BLANKED_COLUMN`、`BUTTON_DISABLED`、`PROPERTY_HIDDEN_BLANKED`）；将删除的视图 filter 叶子 `VIEW_FILTER_LEAF_DROPPED { viewId, count }`（§5.2）；`autoNumberRenumberedRows`；将 shape-only 省略的 null 单元格计数；`record_permissions` 将 remap 的行数；不复制项（自动化、评论、订阅、表单分享、锁定、修订历史）。
 - **结果**：201 → 跳转新表；toast 披露「复制 X 行 / Y 列 / Z 条授权（含 R 条记录级）；未复制：…」；201 body 带 `formulaRecompute: { attempted, recomputed, failed, errorCode? }`，`failed` 时 toast 醒目并给「重算」入口（= 对任一 formula 列重存同一表达式，`univer-meta.ts:14158` 的既有恢复路径）。
 - **徽标**：新表名旁「快照副本」；源为托管表时追加「不随 PLM 刷新」。只依赖服务端列（CS-14）。
-- `/context` 增 `canCopySheet`（= `hasFullTableReadAccess` ∧ 当前 Base `resolveBaseWritable`），只做显隐，服务端再门。
+- `/context` 增 `canCopySheet`（= 当前 Base `resolveCopyTargetWritable`〔平台管理员 ∨ `resolveBaseWritable`，投影 Base 对谁都拒，CS-3 2026-09-28 修订〕∧ `hasFullTableReadAccess`），只做显隐，服务端再门；目标门先跑，投影 Base 零探针短路。
 
 ## 4. 权限模型
 
@@ -80,7 +80,7 @@
 
 ### 4.2 目标侧门（写）
 
-- S1 目标 = 源 Base；仍跑 `resolveBaseWritable(actor, txQuery, baseId)`（存在性 + live + e-learning 排除 + `multitable:base:write` 或 owner）。再加 `isApprovalProjectionBaseId` 拒绝（新代码）。
+- S1 目标 = 源 Base；跑 `resolveCopyTargetWritable(access, txQuery, baseId)` = **平台管理员角色（`access.isAdminRole`）∨ `resolveBaseWritable(actor, txQuery, baseId)`**（后者 = 存在性 + live + e-learning 排除 + `multitable:base:write` 或 owner）。`isApprovalProjectionBaseId` 与 e-learning 候选 id 拒绝折进同一谓词，对管理员同样生效；管理员臂只做存在性 / 软删读（fail-closed），不查授权表。**2026-09-28 修订**（CS-3；owner 批准；`Ratified-by-default-2026-09-28`，24h 可否决；Decision Register R-19）：修订前 `resolveBaseWritable` 不认角色，行级开关开着的表（源侧门只放行管理员）一旦 Base 归他人所有便无人可复制。三处门（路由 `multitable-copy-sheet.ts` `gateCopySource`、事务内 `copy-sheet-service.ts` `copyInsideTransaction` ⑤、`/context` `canCopySheet`）调用同一函数，不各自拼谓词。
 - 新表 id 服务端 mint，`fenceWriterEntry(newSheetId)`（`univer-meta.ts:15623`）照跑；每个建出的字段过字段创建路由的同一组校验：link 墙（`:1970-1995`）、悬空目标 fail-closed、button `actionType`。
 - 复制者**不需要**源表 `canManageSheetAccess`（`:9363`）或 `canManageFields`（`:10037`）：授权复制不产生任何源表上不存在的 (主体, 级别, 对象) 三元组（§4.4）。
 

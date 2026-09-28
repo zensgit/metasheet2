@@ -20,6 +20,10 @@
  *   H8  session only: the two routes are registered without the token-auth / OAPI-scope middleware (source pin, CS-1).
  *   H9  over the row cap: dry-run 200 + `summary.overLimit: true` (records not read), copy 413 COPY_TOO_LARGE (FE-2).
  *   H10 a PG lock SQLSTATE (40P01 / 55P03 / 40001) surfacing from the transaction → 409 CONFLICT, nothing written (TX-2).
+ *   H11 target gate = platform admin ∨ resolveBaseWritable (CS-3 amended 2026-09-28): an admin who is neither the base
+ *       owner nor a base-write holder copies a row-level sheet (dry-run 200, copy 201); a non-admin in that position is
+ *       still 403 FORBIDDEN; the admin is still refused on the approval / e-learning projection bases and on a
+ *       soft-deleted base.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -28,6 +32,7 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
 import { DISPLAY_NAME_INVALID_CHARACTERS_CODE } from '../../src/multitable/display-name-hygiene'
 import { FakePg } from '../utils/copy-sheet-fake-pg'
 import { usePinnedServer } from '../utils/pinned-server'
@@ -295,6 +300,68 @@ describe('copy-sheet routes (ADR #6094 S1)', () => {
       expect(JSON.stringify(res.body)).not.toContain('deadlock')
       expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(0)
     }
+  })
+
+  it('H11: target gate = platform admin ∨ resolveBaseWritable (CS-3 amended 2026-09-28) — an admin who neither owns the base nor holds a base-write code copies a ROW-LEVEL sheet; the same admin is still refused on a projection base and on a soft-deleted base', async () => {
+    // Row-level ON: the SOURCE gate (hasFullTableReadAccess axis ①) admits only an admin role, and before this
+    // amendment the TARGET gate (resolveBaseWritable: owner ∨ base-write code, never the role) refused that admin the
+    // moment the base belonged to someone else — so this sheet was copyable by NOBODY. The fake answers no global
+    // permission codes, so the ONLY thing that can admit the admin here is the role arm.
+    const pg = new FakePg()
+    seed(pg, { rowLevel: true })
+    pg.rows('meta_bases')[0]!.owner_id = WRITER // admin ≠ owner
+    const { app } = await createApp(pg, ADMIN_ID)
+    pinned.setApp(app)
+    const dry = await post(`/sheets/${SRC}/copy/dry-run`)
+    expect(dry.status, JSON.stringify(dry.body)).toBe(200)
+    expect(dry.body.data.summary).toMatchObject({ baseId: BASE, rowLevelReadEnabled: true, rowCount: 2 })
+    expect(writes(pg)).toHaveLength(0)
+    const copy = await post(`/sheets/${SRC}/copy`)
+    expect(copy.status, JSON.stringify(copy.body)).toBe(201) // the in-transaction DB-fresh re-check admits him too
+    expect(copy.body.data.sheet.baseId).toBe(BASE)
+    expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(1)
+
+    // NEGATIVE CONTROL (unchanged posture, H3 tail): a non-admin who passes the source gate but neither owns the base
+    // nor holds a base-write code is still 403 FORBIDDEN — the role arm admits the admin ROLE only.
+    const nonAdmin = new FakePg()
+    seed(nonAdmin, { rowLevel: false })
+    const ctl = await createApp(nonAdmin, WRITER_ID)
+    pinned.setApp(ctl.app)
+    const denied = await post(`/sheets/${SRC}/copy/dry-run`)
+    expect(denied.status).toBe(403)
+    expect(denied.body.error.code).toBe('FORBIDDEN')
+
+    // The projection refusals apply to the admin too: the approval projection base and an e-learning projection
+    // base id (id shape) answer 403 FORBIDDEN from the TARGET gate (before the system-sheet 422), nothing written.
+    for (const projBase of [APPROVAL_PROJECTION_BASE_ID, `base_el_stats_${'0'.repeat(32)}`]) {
+      const proj = new FakePg()
+      seed(proj, { rowLevel: true })
+      proj.seedBase(projBase, WRITER)
+      proj.seedSheet({ id: 'sheet_rt_proj', baseId: projBase, name: 'Projection' })
+      proj.seedField({ id: 'fld_rt_pcol', sheetId: 'sheet_rt_proj', type: 'string', order: 0 })
+      const p = await createApp(proj, ADMIN_ID)
+      pinned.setApp(p.app)
+      const res = await post('/sheets/sheet_rt_proj/copy/dry-run')
+      expect(res.status, `${projBase}: ${JSON.stringify(res.body)}`).toBe(403)
+      expect(res.body.error.code).toBe('FORBIDDEN')
+      // the only write is the CS-17 refusal audit row (outside any transaction); no structure / data write
+      expect(writes(proj).map((s) => s.sql.slice(0, 32))).toEqual(['INSERT INTO operation_audit_logs'])
+      expect(proj.rows('operation_audit_logs').at(-1)!.metadata).toMatchObject({ ok: false, statusCode: 403, errorCode: 'FORBIDDEN', mode: 'dry-run' })
+    }
+
+    // Fail-closed existence: a soft-deleted target base is not writable by ANYONE — the admin arm refuses it as
+    // resolveBaseWritable's NIT-1 prelude does (403 FORBIDDEN, nothing written).
+    const gone = new FakePg()
+    seed(gone, { rowLevel: true })
+    gone.rows('meta_bases')[0]!.owner_id = WRITER
+    gone.rows('meta_bases')[0]!.deleted_at = '2026-09-01T00:00:00.000Z'
+    const g = await createApp(gone, ADMIN_ID)
+    pinned.setApp(g.app)
+    const goneRes = await post(`/sheets/${SRC}/copy/dry-run`)
+    expect(goneRes.status, JSON.stringify(goneRes.body)).toBe(403)
+    expect(goneRes.body.error.code).toBe('FORBIDDEN')
+    expect(writes(gone).map((s) => s.sql.slice(0, 32))).toEqual(['INSERT INTO operation_audit_logs'])
+    expect(gone.rows('operation_audit_logs').at(-1)!.metadata).toMatchObject({ ok: false, statusCode: 403, errorCode: 'FORBIDDEN', mode: 'dry-run' })
   })
 
   it('H8: session-only registration — no apiTokenAuth / oapiScopeGuard on either route (CS-1)', () => {

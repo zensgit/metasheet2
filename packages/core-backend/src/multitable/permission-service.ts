@@ -57,7 +57,7 @@ import {
   loadElearningProjectionBaseOrg,
   loadElearningProjectionSheetOrgMap,
 } from './elearning-projection-access'
-import { restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import { isElearningProjectionBaseIdCandidate, restrictElearningProjectionCapabilities } from './elearning-projection-constants'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -2007,4 +2007,46 @@ export async function resolveBaseWritable(
   // base ownership (symmetric with resolveBaseReadable) — reuses the existence row resolved above.
   const ownerId = typeof baseRow.owner_id === 'string' ? baseRow.owner_id.trim() : ''
   return Boolean(ownerId) && ownerId === normalizedUserId
+}
+
+/**
+ * Copy-sheet TARGET gate (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-3 / §4.2, amended
+ * 2026-09-28): **platform admin role ∨ `resolveBaseWritable`**, with the two projection refusals folded in so the
+ * three enforcement sites (fast route gate, in-transaction DB-fresh re-check, `/context` `canCopySheet` probe) share
+ * ONE predicate and cannot drift.
+ *
+ * Why the admin arm exists: the SOURCE gate (`hasFullTableReadAccess` axis ①) admits only an admin role on a sheet
+ * whose row-level read switch is on, while `resolveBaseWritable` consults only the base owner and the base-write
+ * codes — never the role. A row-level sheet in a base owned by someone else was therefore copyable by NOBODY. The
+ * owner accepted admitting the platform admin role on 2026-09-28. The admin predicate is the codebase's canonical
+ * one (`ResolvedRequestAccess.isAdminRole`, `access.ts`), the same axis-① test the source gate applies.
+ *
+ * FAIL-CLOSED, for the admin too:
+ *   - no identity / empty base id → false;
+ *   - the approval projection base and any e-learning projection base id (id shape, stricter than the registry
+ *     lookup `resolveBaseWritable` performs) → false, no matter who asks;
+ *   - a missing / soft-deleted base → false (the same existence read `resolveBaseWritable` starts with — NIT-1).
+ * `resolveBaseWritable` itself is NOT changed; its other callers (automation cross-base write, C1/C2) keep the
+ * owner-or-code policy without the role arm.
+ */
+export async function resolveCopyTargetWritable(
+  access: Pick<ResolvedRequestAccess, 'userId' | 'isAdminRole'>,
+  query: QueryFn,
+  baseId: string,
+): Promise<boolean> {
+  const normalizedUserId = typeof access.userId === 'string' ? access.userId.trim() : ''
+  if (!normalizedUserId) return false // fail-closed: no identity → no write (admin flag alone is not an identity)
+  const normalizedBaseId = typeof baseId === 'string' ? baseId.trim() : ''
+  if (!normalizedBaseId) return false
+  if (isApprovalProjectionBaseId(normalizedBaseId) || isElearningProjectionBaseIdCandidate(normalizedBaseId)) return false
+
+  if (!access.isAdminRole) return resolveBaseWritable(normalizedUserId, query, normalizedBaseId)
+
+  // Admin arm: existence + liveness only (no grant / owner lookup). A missing / soft-deleted target base is not
+  // writable by ANYONE — the same read `resolveBaseWritable` resolves first, so the two arms refuse identically here.
+  const baseRes = await query(
+    'SELECT id FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+    [normalizedBaseId],
+  )
+  return baseRes.rows.length > 0
 }
