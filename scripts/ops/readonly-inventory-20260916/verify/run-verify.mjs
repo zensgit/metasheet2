@@ -282,9 +282,44 @@ export const INTERNAL_TARGET_CASES = [
   ['https://[fc0::1]/', false], // first piece 0x0fc0
   ['https://[fd00:::1]/', false], // not an IPv6
   ['https://[fd00:1:2:3:4:5:6:7:8]/', false], // nine pieces
+  // 2026-09-27 (#6104 gap): a leading-zero octet inside an embedded IPv4 tail
+  // makes the WHATWG IPv6 parser reject the whole literal outright (confirmed:
+  // `new URL('https://[fc00::01.2.3.4]/')` throws — unlike a leading zero in a
+  // PLAIN IPv4 host, which the top-level parser tolerates; see the `floor`
+  // 127.000.000.001 case below). An address the parser rejects is out of
+  // scope like the nine-piece case above, not a floor miss.
+  ['https://[fc00::01.2.3.4]/', false],
+  // Same family: one hex group more than the compressed-form bound allows,
+  // with (mutation target {0,7}->{0,8}) / without (mutation target
+  // {0,5}->{0,6}) a dotted tail — both invalid (isIP() rejects both), and
+  // both happen to start with the ULA prefix so a relaxed bound would flip
+  // them to counted.
+  ['https://[fd00:1:2:3:4:5:6::7]/', false], // 8 explicit groups + `::`
+  ['https://[fd00:1:2:3:4:5::6.7.8.9]/', false], // 6 groups + `::` + dotted tail
+  // 2026-09-27 (#6104 independent-verifier mutation gap): ::ffff: hex-form
+  // boundaries one step past each of c0a8 / a9fe / 7f / 0a — an exhaustive
+  // mutant scan of the mapped-hex alternative found these undetected because
+  // no case sat exactly on the wrong side of each literal. isInternalIpv4
+  // on the unwrapped embedded address is false for all four (192.169.0.0,
+  // 11.0.0.0, 126.255.0.1, 169.255.0.1 — none is a real private/link-local
+  // range), so none may be counted.
+  ['https://[::ffff:c0a9:0]/', false], // 192.169.0.0 (one past 192.168/16)
+  ['https://[::ffff:b00:1]/', false], // 11.0.0.1 (one past 10/8 in the 0a-prefixed hex alt)
+  ['https://[::ffff:7eff:1]/', false], // 126.255.0.1 (one past 7f/127 in the 7f-prefixed hex alt)
+  ['https://[::ffff:a9ff:1]/', false], // 169.255.0.1 (one past a9fe/169.254 exactly)
+  // A real IPv6 with an extra leading group before the mapped prefix is NOT
+  // an IPv4-mapped address at all (RFC 4291's ::ffff:0:0/96 prefix requires
+  // exactly 80 zero bits first) — isInternalIpv6('1::ffff:7f00:1') is false.
+  // Only `[0:]*ffff:` (zeros/colons only) may precede the mapped form.
+  ['https://[1::ffff:7f00:1]/', false],
   // URL shapes around the host: userinfo (last @ wins), case, port, separators
   ['https://fake-user:fake-pass@10.0.0.1/', true],
   ['https://a@b@172.16.0.1/', true],
+  // A backslash inside what looks like userinfo ends the authority section for
+  // a special scheme (WHATWG URL state machine, same as `/`) BEFORE the `@` is
+  // reached, so the real parser's hostname is "x" (10.0.0.1 lands in the path,
+  // confirmed via `new URL(...).hostname`) — not an internal target at all.
+  ['https://x\\@10.0.0.1/', false],
   ['https://10.0.0.1@fake.invalid/', false],
   ['https://127.0.0.1:80@fake.invalid/', false],
   ['HTTPS://192.168.0.1/', true],
@@ -306,6 +341,21 @@ export const INTERNAL_TARGET_CASES = [
   ['https://0x7f.0.0.1/', false, 'floor'],
   ['https://127.000.000.001/', false, 'floor'],
   ['https://[::0.0.0.1]/', false, 'floor'],
+  // 2026-09-27 (#6104 gap, "去 xn-- 排除" mutation): isInternalHostname is a
+  // plain suffix check with no punycode decoding, so it flags any
+  // "xn--...".local name as internal once it reaches that check. The label
+  // here must be VALID punycode ('bücher' → 'xn--bcher-kva'): `new URL()`
+  // decodes/validates the label first, and an invalid one (e.g. plain
+  // 'xn--a') throws there — confirmed with `new URL('https://xn--a.local/')`
+  // on Node 20 — so checkWebhookTargetUrl would return 'URL is malformed'
+  // before isInternalHostname ever runs, landing it in the parser-rejection
+  // class instead (same as `[fd00:::1]` / `[fc00::01.2.3.4]` above). With a
+  // valid label the URL parses, isInternalHostname sees the `.local` suffix
+  // and the guard returns 'target host is internal' — confirmed the same
+  // way. Q7's negative lookahead deliberately excludes every `xn--`-bearing
+  // name (header §"STILL A FLOOR": "xn-- labels — are not counted"), so
+  // *this* case is a genuine floor miss, not a parser-rejection case.
+  ['https://xn--bcher-kva.local/', false, 'floor'],
 ]
 
 /**
