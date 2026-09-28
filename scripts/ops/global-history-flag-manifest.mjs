@@ -59,6 +59,25 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/manage-schema-permission.ts',
   },
   {
+    key: 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'],
+    danger: 'high',
+    purpose:
+      "Field type CONVERSION with value migration, first batch string -> select / multiSelect (design lock docs/development/multitable-field-retype-first-batch-adr-20260926.md). Default OFF; exact literal 'true' only (no trim, no case folding). Gates all three endpoints: the read-only POST /fields/:fieldId/retype-preview (slice 2, shipped) and the execute / undo endpoints (slice 3). Off: every one of them answers 403 FIELD_RETYPE_CONVERT_DISABLED before any read. PATCH /fields/:fieldId is NOT affected by this flag: string -> select / multiSelect stays 400 FIELD_RETYPE_NOT_LOSSLESS there either way. With MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA on, all three endpoints refuse 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag) — hence the conflicts rule. Execute / undo additionally refuse 409 FIELD_RETYPE_TRUST_REQUIRED while the canonical writer fence is off; that is enforced in-process and deliberately NOT modelled as a dependsOn/requires rule, so turning this flag on alone to run the read-only preview is a legal rung. Deploy order: migrations -> writer fence -> this flag. danger=high: execute rewrites a whole column of live record data.",
+    source: 'packages/core-backend/src/multitable/field-retype-convert.ts#isFieldRetypeConvertEnabled; packages/core-backend/src/routes/univer-meta.ts#retype-preview',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'field-retype-convert-with-legacy-manage-schema',
+        description:
+          'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT is active while MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA is active — the legacy switch lets multitable:write hold schema authority, below the gate field type conversion requires, so every conversion endpoint refuses 409 FIELD_RETYPE_TRUST_REQUIRED. Field type conversion cannot function in this state.',
+      },
+    ],
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
     type: 'boolean',
     activationValue: 'true',
