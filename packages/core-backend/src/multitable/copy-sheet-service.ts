@@ -11,7 +11,8 @@
  *       存活重读 → ④ tripwire 基线（在任何源数据读之前）→ ⑤ DB-fresh 两侧门（在任何计数之前）→ 计划 + 参与表
  *       集合核对 → ⑥ meta_sheets / 字段 / 视图 → ⑦ 记录（facade 上的 `RecordService.createRecord` 复制扩展）→
  *       ⑧ 授权行 + record_permissions remap → ⑨ 拒绝集等价断言 → ⑩ tripwire 比对 → ⑪ 两行审计 → 账本写回 →
- *       COMMIT。任一步抛错 = 整体回滚（CS-18）。
+ *       COMMIT。任一步抛错 = 整体回滚（CS-18）。账本未迁移（缺表 / 缺 `intent_kind` 列）→ 503 拒绝、不降级
+ *       （2026-09-28，#6112 终审后续 3：无账本就无法兑现 CS-16「同意图只建一张表」，见 {@link executeCopySheet}）。
  *
  * 这个模块**不知道** req / res：路由层负责事务外快速拒、错误 → HTTP 映射、提交后的 formula 重算 / 事件 / 日志。
  * 所有错误都是 values-free 的：只带 code + 位置（rowIndex / fieldId / viewId / 计数），永不带单元格值。
@@ -67,8 +68,10 @@ import { assertSheetLiveForUpdate } from './sheet-liveness'
 import {
   COPY_SHEET_INTENT_KIND,
   DedupeLockTimeoutError,
+  TemplateInstallLedgerUnavailableError,
   runDeduplicatedIntent,
   type DedupeIntentScope,
+  type TemplateInstallLedgerUnavailableSqlState,
 } from './template-install-dedupe'
 import { createTransactionBoundPool } from './transaction-bound-pool'
 
@@ -95,8 +98,45 @@ export const COPY_SHEET_ERROR_CODES = {
   rowValidationFailed: 'COPY_ROW_VALIDATION_FAILED',
   permissionParityFailed: 'COPY_PERMISSION_PARITY_FAILED',
   linkTargetNotLive: 'COPY_LINK_TARGET_NOT_LIVE',
+  /** 去重账本未迁移（503，可重试）：见 {@link executeCopySheet} 与 {@link COPY_SHEET_LEDGER_MIGRATIONS}。 */
+  temporarilyUnavailable: 'COPY_TEMPORARILY_UNAVAILABLE',
   forbidden: 'FORBIDDEN',
 } as const
+
+/**
+ * 复制的去重账本依赖的两条迁移（按顺序）：账本表本身、以及把它一般化的 `intent_kind` 列。任一未跑，
+ * `runDeduplicatedIntent` 抛 `TemplateInstallLedgerUnavailableError`（42P01 / 42703），复制拒绝（503）。
+ * 路由把这两个名字写进一条 values-free 的 warn 日志，告诉运维该跑什么；响应体里不带。
+ */
+export const COPY_SHEET_LEDGER_MIGRATIONS = [
+  'zzzz20260919140000_create_multitable_template_install_ledger',
+  'zzzz20260927121000_add_multitable_install_ledger_intent_kind',
+] as const
+
+/**
+ * 按 SQLSTATE 分诊（只进路由的 warn 日志，固定文案，values-free）。42703 不一定是「去跑迁移」：迁移已跑仍出现，
+ * 就是账本语句点名了表里没有的列（代码缺陷）——日志必须把这层区分交给运维，不能一律报成「缺迁移」。
+ */
+export const COPY_SHEET_LEDGER_DIAGNOSIS: Readonly<Record<TemplateInstallLedgerUnavailableSqlState, { diagnosis: string; checkMigrations: readonly string[] }>> = {
+  '42P01': {
+    diagnosis: 'ledger table missing: run the listed migrations',
+    checkMigrations: COPY_SHEET_LEDGER_MIGRATIONS,
+  },
+  '42703': {
+    diagnosis: 'ledger column missing: run the listed migration; if it has already run, a ledger statement names a column the table does not have (code defect, not a pending migration)',
+    checkMigrations: [COPY_SHEET_LEDGER_MIGRATIONS[1]],
+  },
+}
+
+/**
+ * 去重账本不可用 → 503 `COPY_TEMPORARILY_UNAVAILABLE`（CS-16 fail-closed，决策登记册 R-20）。`ledgerSqlState` 只给
+ * 路由的 warn 日志用；响应体只有 code + 固定 message（`details` 为空），不带 SQLSTATE、不带迁移名。
+ */
+export class CopySheetLedgerUnavailableError extends CopySheetError {
+  constructor(public readonly ledgerSqlState: TemplateInstallLedgerUnavailableSqlState) {
+    super(503, COPY_SHEET_ERROR_CODES.temporarilyUnavailable)
+  }
+}
 
 // ── 输入 / 输出形状 ─────────────────────────────────────────────────────────
 
@@ -1119,7 +1159,6 @@ async function assertDenyParity(query: QueryFn, plan: CopySheetPlan, recordIdMap
 export interface ExecuteCopySheetOutcome {
   replayed: boolean
   lockHeld: boolean
-  ledgerUnavailable: boolean
   result: CopySheetResult
   /** 重放时 = 账本里的 body（原样）；fresh 时 = 本次构造。 */
   body: unknown
@@ -1145,8 +1184,16 @@ export function buildCopySheetIntentKey(request: CopySheetRequest, targetBaseId:
 }
 
 /**
- * §7.2 的完整单事务（含 ① 咨询锁 = 第一条语句，去重账本读写同事务）。账本不可用（未迁移）→ 退回无去重的
- * 单事务（与模板安装同一姿态）。返回 fresh / replayed 结果。
+ * §7.2 的完整单事务（含 ① 咨询锁 = 第一条语句，去重账本读写同事务）。返回 fresh / replayed 结果。
+ *
+ * 账本不可用（未迁移：缺表 42P01 / 缺 `intent_kind` 列 42703 → `TemplateInstallLedgerUnavailableError`）→
+ * **拒绝**，503 `COPY_TEMPORARILY_UNAVAILABLE`，不降级（2026-09-28，#6112 终审后续 3；模板安装保持 fail-open 不变）。
+ * 为什么不是「降级照常复制」（修订前的姿态）也不是「降级但保留意图锁」：意图锁只能把两个同意图请求**排队**，
+ * 去重靠的是后到者在锁后读到先到者写的账本行并重放它——账本读不了，后到者拿到锁后找不到先到者的结果，
+ * 只能再建一张，CS-16「窗口内同意图只建一张表」照样破。复制的每一次降级都是一张用户看得见的多余表，
+ * 而模板安装那边多一个 Base 是被接受的代价（`template-install-dedupe.ts` 头注释「未迁移时」）——两者口径不同。
+ * 上一个事务在抛出时已回滚、什么都没写；等迁移跑完（{@link COPY_SHEET_LEDGER_MIGRATIONS}）即恢复。
+ * 决策留痕：`docs/development/takeover-beiliao-20260821/decision-register.md` R-20；ADR §7.7（2026-09-28 修订）。
  */
 export async function executeCopySheet(input: ExecuteCopySheetInput): Promise<ExecuteCopySheetOutcome> {
   const { pool, request, actor, deps } = input
@@ -1178,18 +1225,17 @@ export async function executeCopySheet(input: ExecuteCopySheetInput): Promise<Ex
       return {
         replayed: true,
         lockHeld: outcome.lockHeld,
-        ledgerUnavailable: false,
         result: fresh ?? replayedResultFromBody(outcome.body, outcome.baseId),
         body: outcome.body,
       }
     }
-    return { replayed: false, lockHeld: outcome.lockHeld, ledgerUnavailable: false, result: fresh, body: outcome.body }
+    return { replayed: false, lockHeld: outcome.lockHeld, result: fresh, body: outcome.body }
   } catch (err) {
     if (err instanceof DedupeLockTimeoutError) throw new CopySheetError(409, 'CONFLICT')
-    if (!(err instanceof Error) || err.name !== 'TemplateInstallLedgerUnavailableError') throw err
-    // 账本未迁移：退回**不去重**的旧姿态；上一个事务已回滚、什么都没写。
-    const result = await pool.transaction(async ({ query }) => copyInsideTransaction(query, request, actor, deps, preplan))
-    return { replayed: false, lockHeld: false, ledgerUnavailable: true, result, body: input.buildBody(result) }
+    // 账本不可用：fail-closed（见上方 docblock）。不开第二个事务、不重跑复制；事务已回滚、零写入。
+    // SQLSTATE 随错误带给路由的 warn 日志（42P01 缺表 / 42703 缺列），响应体里不带。
+    if (err instanceof TemplateInstallLedgerUnavailableError) throw new CopySheetLedgerUnavailableError(err.sqlState)
+    throw err
   }
 }
 
