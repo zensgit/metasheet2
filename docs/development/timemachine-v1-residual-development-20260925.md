@@ -23,6 +23,10 @@ This report records only the remaining work after its bounded V1 implementation.
 - #5882 delivered the product scope; #6050 corrected the isolated acceptance
   harness; #6052 merged the SHA-bound verification report. These are distinct
   code, test and evidence milestones, not production activation.
+- Later main changes display configuration-history and archive-catalog times in
+  the instance business timezone and bind History Center day filters to that
+  same zone. This is a UI/time-filter follow-up, not a change to archived bytes,
+  restore authority or the #6052 synthetic acceptance baseline.
 
 ## Remaining Work
 
