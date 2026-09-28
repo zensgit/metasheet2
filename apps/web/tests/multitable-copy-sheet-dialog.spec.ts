@@ -465,6 +465,18 @@ describe('MetaCopySheetDialog', () => {
     expect(client.copySheet).toHaveBeenCalledWith('sheet_orders', { name: '订单 副本', withData: false, permissionMode: 'inherit' })
   })
 
+  it('over the row cap with a placeholder rowCount (records not read): the label shows no N rather than 「共 0 行」', async () => {
+    for (const placeholder of [0, 2000]) {
+      client.dryRunCopySheet.mockResolvedValueOnce(dryRunOk({ rowCount: placeholder, overLimit: true, rowLimit: 2000, ...STRUCTURAL }))
+      await mount()
+      expect(q('copy-sheet-with-data-label')!.textContent).toBe('包含数据')
+      expect(kinds()).toEqual(['OVER_LIMIT', 'MIRROR_NOT_BUILT', 'BUTTON_DISABLED', 'VIEW_FILTER_LEAF_DROPPED'])
+      mounted!.app.unmount()
+      mounted!.container.remove()
+      mounted = null
+    }
+  })
+
   it('over the row cap (older backend: 413 on the probe): ONE structure-only re-probe, its disclosures render before a structure-only submit', async () => {
     const reprobe = deferred<CopySheetDryRunResult>()
     client.dryRunCopySheet

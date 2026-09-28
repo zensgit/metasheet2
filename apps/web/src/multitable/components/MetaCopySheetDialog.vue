@@ -245,10 +245,15 @@ const overLimit = computed<{ limit: number | null } | null>(() => {
 
 // The count only exists once the gate passed (a with-data probe answered, or its post-gate row-cap
 // refusal carried it). A gate refusal shows no N at all; the structure-only probe never supplies N.
-const withDataLabel = computed(() => copySheetWithDataLabel(
-  dryRun.value?.rowCount ?? legacyRowCap.value?.rowCount ?? null,
-  isZh.value,
-))
+// Over the cap, the #6112 fix skips the record read, so its `rowCount` may be a placeholder (the service
+// derives it from the rows it read — 0 when it read none): an over-cap N is shown only when it really is
+// above the cap, otherwise no N rather than a wrong one.
+const withDataRowCount = computed<number | null>(() => {
+  const count = dryRun.value?.rowCount ?? legacyRowCap.value?.rowCount ?? null
+  if (count === null || !overLimit.value) return count
+  return count > (overLimit.value.limit ?? 0) ? count : null
+})
+const withDataLabel = computed(() => copySheetWithDataLabel(withDataRowCount.value, isZh.value))
 
 // The plan whose disclosures are shown: the with-data probe when it answered, else the structure-only one.
 const shownPlan = computed(() => dryRun.value ?? structureRun.value)
