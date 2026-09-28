@@ -78,6 +78,14 @@ import {
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
+import {
+  stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffResendableStepKey,
+} from '../src/services/integration/stockPreparation/confirmationQueue'
+import {
+  STOCK_PREP_ERROR_GENERIC,
+  STOCK_PREP_ERROR_PLAIN,
+} from '../src/services/integration/stockPreparation/plainLanguage'
 
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
@@ -441,6 +449,191 @@ describe('项目备料页 — the operator project board', () => {
     const button = root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement
     expect(button).not.toBeNull()
     expect(button.disabled).toBe(true)
+  })
+
+  // ---- B-19 pressing 通知下一步 names the step it completes -------------------------------------
+  //
+  // The advance route REFUSES a body without `fromStepKey` (400 STOCK_PREPARATION_HANDOFF_REQUEST_INVALID).
+  // This page used to post through its own client that never sent one, so every press since it
+  // shipped was refused. These cases read `fromStepKey` off the wire, because a press that names the
+  // wrong step looks identical on screen until the server says no — or, worse, says yes.
+
+  const ADVANCE_PATH = '/api/integration/stock-preparation/handoff/advance'
+
+  function handoffCursor(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      configured: true,
+      projectNo: PROJECT_NO,
+      currentStepKey: 'purchasing',
+      stepIndex: 1,
+      stepCount: 4,
+      terminal: false,
+      completed: false,
+      isCurrentHandler: true,
+      ...overrides,
+    }
+  }
+
+  function advanceOk(overrides: Record<string, unknown> = {}): Response {
+    return ok({
+      projectNo: PROJECT_NO,
+      fromStepKey: 'purchasing',
+      currentStepKey: 'warehouse',
+      stepIndex: 2,
+      stepCount: 4,
+      changed: true,
+      terminal: false,
+      notified: true,
+      notifyOutcome: 'sent',
+      resumed: false,
+      ...overrides,
+    })
+  }
+
+  /** GET /handoff answers in order (the last entry serves every further read); POST /advance separately. */
+  function routeHandoffPress(config: { handoff: Array<() => Response>; advance?: () => Response }): void {
+    routeApi()
+    const base = h.apiFetch.getMockImplementation()!
+    let handoffReads = 0
+    h.apiFetch.mockImplementation(async (path: string, ...rest: unknown[]) => {
+      const target = String(path)
+      if (target.includes('/handoff/advance')) {
+        if (!config.advance) throw new Error('unexpected advance call')
+        return config.advance()
+      }
+      if (target.includes('/handoff')) {
+        const step = config.handoff[Math.min(handoffReads, config.handoff.length - 1)]
+        handoffReads += 1
+        return step()
+      }
+      return base(path, ...rest)
+    })
+  }
+
+  function advanceCalls(): unknown[][] {
+    return h.apiFetch.mock.calls.filter(([path]) => String(path).includes('/handoff/advance'))
+  }
+
+  function handoffReadCount(): number {
+    return h.apiFetch.mock.calls.filter(([path]) => {
+      const target = String(path)
+      return target.includes('/handoff') && !target.includes('/handoff/advance')
+    }).length
+  }
+
+  function advanceBody(): Record<string, unknown> {
+    const calls = advanceCalls()
+    expect(calls.length, 'exactly one advance was POSTed').toBe(1)
+    const options = calls[0][1] as { method?: string; body?: string }
+    expect(options.method).toBe('POST')
+    return JSON.parse(String(options.body)) as Record<string, unknown>
+  }
+
+  async function pressNotifyNext(root: HTMLElement): Promise<void> {
+    const button = root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement
+    expect(button, 'the control must render').not.toBeNull()
+    expect(button.disabled, 'the control must be pressable, or the case proves nothing').toBe(false)
+    button.click()
+    await flush()
+  }
+
+  it('B-19: the press sends fromStepKey = currentStepKey, through the one client the queue uses', async () => {
+    // No `resendableStepKey` key at all: the shape an older backend answers, and the shape every
+    // other fixture in this file uses. Absent must read as "nothing owed".
+    routeHandoffPress({
+      handoff: [
+        () => ok(handoffCursor()),
+        () => ok(handoffCursor({ currentStepKey: 'warehouse', stepIndex: 2, isCurrentHandler: false })),
+      ],
+      advance: () => advanceOk(),
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+
+    const call = advanceCalls()[0]
+    expect(String(call[0])).toBe(ADVANCE_PATH)
+    const body = advanceBody()
+    expect(body.fromStepKey).toBe('purchasing')
+    expect(body.projectNo).toBe(PROJECT_NO)
+    // The server's allowlist is CLOSED — an extra key is a 400 too.
+    expect(Object.keys(body).sort()).toEqual(['fromStepKey', 'projectNo', 'tenantId', 'workspaceId'])
+    // The page's own sentence for 'sent' is unchanged, and the cursor was re-read after the press.
+    expect((root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]') as HTMLElement).textContent)
+      .toContain('已经交给下一步,并且通知到了。')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    expect(handoffReadCount()).toBe(2)
+  })
+
+  it('B-19: when a resend is OWED, the press names the owed step, not the current one', async () => {
+    // Advancing `warehouse` here would claim the next hop and push the monotonic max past the owed
+    // `purchasing` notice, losing it for good — so the owed step must win.
+    routeHandoffPress({
+      handoff: [() => ok(handoffCursor({ currentStepKey: 'warehouse', stepIndex: 2, resendableStepKey: 'purchasing' }))],
+      advance: () => advanceOk({ changed: false, resumed: true }),
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+  })
+
+  it('B-19: with no step to name, nothing is sent at all', async () => {
+    routeHandoffPress({
+      handoff: [() => ok(handoffCursor({ currentStepKey: null, resendableStepKey: null }))],
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+    expect(advanceCalls()).toHaveLength(0)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]')).toBeNull()
+  })
+
+  it('B-19: a 409 STEP_MISMATCH re-reads the cursor and says so in its own words', async () => {
+    routeHandoffPress({
+      handoff: [
+        () => ok(handoffCursor()),
+        // Somebody else handed `purchasing` on first; the chain now sits at a step that is not ours.
+        () => ok(handoffCursor({ currentStepKey: 'warehouse', stepIndex: 2, isCurrentHandler: false })),
+      ],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH', message: 'step mismatch' },
+      }), { status: 409 }),
+    })
+    const root = await mountBoard()
+    expect((root.querySelector('[data-testid="stock-prep-project-board-turn"]') as HTMLElement).textContent).toContain('轮到您了')
+    await pressNotifyNext(root)
+
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+    // The cursor was re-read after the refusal…
+    expect(handoffReadCount()).toBe(2)
+    const turn = (root.querySelector('[data-testid="stock-prep-project-board-turn"]') as HTMLElement).textContent ?? ''
+    expect(turn).not.toContain('轮到您了')
+    expect(turn).toContain('warehouse')
+    const button = root.querySelector('[data-testid="stock-prep-project-board-notify-next"]') as HTMLButtonElement
+    expect(button.disabled, 'the stale step must not stay pressable').toBe(true)
+    // …and the refusal kept its own sentence, not the generic 「过一会儿再点一次」.
+    const error = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(error).not.toBeNull()
+    const text = error.textContent ?? ''
+    expect(text).toContain(STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_HANDOFF_STEP_MISMATCH.zh)
+    expect(text).not.toContain(STOCK_PREP_ERROR_GENERIC.zh)
+    expect(text).not.toContain(STOCK_PREP_ERROR_GENERIC.zhNext as string)
+    expect(error.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_HANDOFF_STEP_MISMATCH')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-handoff-notice"]')).toBeNull()
+  })
+
+  it('B-19: the shared derivation — owed first, then current, and nothing from an unconfigured or empty cursor', () => {
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse', resendableStepKey: 'purchasing' })).toBe('purchasing')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse', resendableStepKey: null })).toBe('warehouse')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse' })).toBe('warehouse')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: 'warehouse', resendableStepKey: '' })).toBe('warehouse')
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: '', resendableStepKey: null })).toBeNull()
+    expect(stockPreparationHandoffFromStepKey({ configured: true, currentStepKey: null })).toBeNull()
+    expect(stockPreparationHandoffFromStepKey(null)).toBeNull()
+    // An unconfigured chain owes nothing, whatever the key says.
+    expect(stockPreparationHandoffResendableStepKey({ configured: false, resendableStepKey: 'purchasing' })).toBeNull()
+    expect(stockPreparationHandoffResendableStepKey({ configured: true, resendableStepKey: 7 as unknown as string })).toBeNull()
+    expect(stockPreparationHandoffResendableStepKey({ configured: true, resendableStepKey: 'purchasing' })).toBe('purchasing')
   })
 
   // ---- B-03 the deep link ---------------------------------------------------------------------

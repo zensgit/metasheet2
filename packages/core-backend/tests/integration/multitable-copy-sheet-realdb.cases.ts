@@ -61,6 +61,11 @@
  *       axis 1/2/3 of hasFullTableReadAccess (G14b) — do not reintroduce a G14 that revokes the copier's own grant.
  *   G15 TRIPWIRE (§7.2 step 6, flag off): a source record's updated_at bumped by another connection AFTER the copy took
  *       its baseline (between structure writes) → 409 COPY_SOURCE_CHANGED, zero rows for the copy, no ledger row.
+ *   G16 LEDGER NOT MIGRATED (#6112 follow-up 3, CS-16 fail-closed): the copy transactions' ledger statements name a
+ *       column the real ledger table does not have (NO DDL — the database is shared with the other real-DB files — only
+ *       these two requests' ledger SQL is rewritten, so the REAL server raises a REAL 42703 as it does before migration
+ *       zzzz20260927121000) and two identical intents race → both 503 COPY_TEMPORARILY_UNAVAILABLE, zero sheets, no
+ *       ledger row, two refusal audit rows; with the rewrite removed the same intent copies (201).
  *
  * Fail-not-skip: in the real-DB step (METASHEET_REAL_DB_TEST_STEP=1) a missing DATABASE_URL throws from a top-level
  * test OUTSIDE the DB-gated describe, so a mis-spelled env can never skip-green the whole block.
@@ -791,6 +796,53 @@ export function defineCopySheetRealDbCases(): void {
       // control: with no interference the same intent copies
       const ok = await copy(SRC_W, { withData: true, permissionMode: 'inherit', name: `tripped-${TS}` })
       expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+    })
+
+    test('G16 ledger not migrated: the real server answers 42703 on the ledger read and two identical intents race → both 503 COPY_TEMPORARILY_UNAVAILABLE, zero sheets, no ledger row; the same intent copies once the column is back', async () => {
+      as(ADMIN, ['admin'])
+      const name = `Plain-unmigrated-${TS}`
+      const body = { withData: true, permissionMode: 'inherit', name }
+      const pool = poolManager.get()
+      const original = pool.transaction.bind(pool)
+      let rewritten = 0
+      // NO DDL: dropping / renaming the real column would leak into every other real-DB file running against this
+      // database. Instead only the copy transactions' LEDGER statements are rewritten to name a column the real table
+      // does not have, so the real server raises a real 42703 on the real ledger table (what it answers before
+      // migration zzzz20260927121000 adds intent_kind). Every other statement and connection is untouched.
+      const spy = vi.spyOn(pool, 'transaction').mockImplementation(((handler: (client: { query: unknown; __rawClient: unknown }) => Promise<unknown>) =>
+        original(async (client) => handler({
+          ...client,
+          query: async (sql: unknown, params?: unknown[], options?: unknown) => {
+            let text = sql
+            if (typeof sql === 'string' && sql.includes('meta_multitable_template_installs') && sql.includes('intent_kind')) {
+              rewritten += 1
+              text = sql.split('intent_kind').join('intent_kind_unmigrated_probe')
+            }
+            return (client.query as (s: unknown, p?: unknown[], o?: unknown) => Promise<unknown>)(text, params, options)
+          },
+        }))) as never)
+      let results: Array<Awaited<ReturnType<typeof copy>>> = []
+      try {
+        results = await Promise.all([copy(SRC_D, body), copy(SRC_D, body)])
+      } finally {
+        spy.mockRestore()
+      }
+      expect(rewritten).toBeGreaterThanOrEqual(2) // each request reached the ledger read
+      expect(results).toHaveLength(2)
+      for (const res of results) {
+        expect(res.status, JSON.stringify(res.body)).toBe(503)
+        expect(res.body.error.code).toBe('COPY_TEMPORARILY_UNAVAILABLE')
+        expect(res.body.error).not.toHaveProperty('details')
+        expect(JSON.stringify(res.body)).not.toMatch(/intent_kind|42703|zzzz/)
+      }
+      expect((await q('SELECT COUNT(*)::int AS n FROM meta_sheets WHERE copied_from_sheet_id = $1 AND name = $2', [SRC_D, name])).rows[0]).toEqual({ n: 0 })
+      expect((await q(`SELECT COUNT(*)::int AS n FROM meta_multitable_template_installs WHERE actor_id = $1 AND template_id LIKE $2`, [ADMIN, `%${name}%`])).rows[0]).toEqual({ n: 0 })
+      const audit = (await q(`SELECT metadata FROM operation_audit_logs WHERE resource_id = $1 AND action = 'multitable.sheet.copy'`, [SRC_D])).rows as Array<{ metadata: Record<string, unknown> }>
+      expect(audit.filter((a) => a.metadata.errorCode === 'COPY_TEMPORARILY_UNAVAILABLE' && a.metadata.statusCode === 503 && a.metadata.mode === 'copy')).toHaveLength(2)
+      // control: the ledger read no longer rewritten → the same intent copies exactly once
+      const ok = await copy(SRC_D, body)
+      expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+      expect((await q('SELECT COUNT(*)::int AS n FROM meta_sheets WHERE copied_from_sheet_id = $1 AND name = $2', [SRC_D, name])).rows[0]).toEqual({ n: 1 })
     })
   })
 }

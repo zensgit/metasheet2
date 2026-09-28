@@ -350,8 +350,9 @@ export function isRecordApprovalInFlightError(value: unknown): value is RecordAp
 //   name, copiedFrom }, summary, batchId, formulaRecompute? } }` (+ `Idempotent-Replayed: true` on replay);
 //   refusals `{ ok:false, error: { code, message, details? } }` with position/count extras under `details`
 //   (422 structural: `details.fieldId` / `details.viewId`); 409 CONFLICT for a dedupe-lock timeout or a
-//   retryable lock SQLSTATE; 404 / 403 from sheet-refusals.ts; 400 NAME_INVALID_CHARACTERS from
-//   display-name-hygiene.ts. /context `canCopySheet` + `copiedFrom` from univer-meta.ts.
+//   retryable lock SQLSTATE; 503 COPY_TEMPORARILY_UNAVAILABLE (copy only, no extras) while the server's dedupe
+//   ledger is unmigrated — fail-closed, PR #6136 / decision register R-20; 404 / 403 from sheet-refusals.ts; 400
+//   NAME_INVALID_CHARACTERS from display-name-hygiene.ts. /context `canCopySheet` + `copiedFrom` from univer-meta.ts.
 // -------------------------------------------------------------------------------------------------
 
 export const COPY_SHEET_ERROR_NAME = 'MultitableCopySheetError'

@@ -465,15 +465,17 @@ import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import {
+  advanceStockPreparationHandoff,
   exportStockPreparationPrepLines,
   readStockPreparationOperatorDirectory,
+  stockPreparationHandoffFromStepKey,
   type StockPreparationDecisionQueue,
+  type StockPreparationHandoffAdvanceResult,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
 import {
-  advanceStockPreparationHandoff,
   readStockPreparationHandoff,
   readStockPreparationProjectBoard,
   type StockPreparationHandoffCursor,
@@ -1352,15 +1354,41 @@ function onNextStepAction(): void {
   }
 }
 
+/** Somebody else moved this step first; the server's compare-and-set refused the press (409). */
+const HANDOFF_STEP_MISMATCH_CODE = 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH'
+
 async function notifyNext(): Promise<void> {
   const current = board.value
   const cursor = handoff.value
   if (!current || !current.projectNo || !cursor || !cursor.isCurrentHandler || cursor.terminal) return
+  // THE STEP THIS PRESS COMPLETES, derived exactly as the confirmation queue derives it: the owed
+  // resend first, then the current step. The route refuses a press without it (400
+  // STOCK_PREPARATION_HANDOFF_REQUEST_INVALID) — which is what every press on this page got while it
+  // posted through a client that never sent one. No step to name means there is nothing to press for.
+  const fromStepKey = stockPreparationHandoffFromStepKey(cursor)
+  if (!fromStepKey) return
+  const projectNo = current.projectNo
   handoffNotice.value = ''
   // A WRITE: 「这一步没有保存成功」 is the right sentence when this one fails.
   await run(async () => {
-    const result = await advanceStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
-    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
+    let result: StockPreparationHandoffAdvanceResult
+    try {
+      result = await advanceStockPreparationHandoff({ ...props.scope, projectNo, fromStepKey })
+    } catch (error) {
+      // 409 STEP_MISMATCH: the cursor on screen is stale — somebody else already handed this step on.
+      // Re-read it so 轮到谁 and the button show where the chain really is, then let the refusal reach
+      // the error line with its own sentence (the same entry the queue shows), never the generic
+      // 「过一会儿再点一次」: pressing again against a stale step can only be refused again.
+      if ((error as { code?: unknown })?.code === HANDOFF_STEP_MISMATCH_CODE) {
+        try {
+          handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
+        } catch {
+          // The refusal is what the operator needs to read; a failed re-read must not replace it.
+        }
+      }
+      throw error
+    }
+    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
     // The three outcomes are said as three different sentences because they are three different
     // facts. "已经通知" on a deployment whose notifier is not configured would be a claim we cannot
     // back — the turn moved, and nobody was told.

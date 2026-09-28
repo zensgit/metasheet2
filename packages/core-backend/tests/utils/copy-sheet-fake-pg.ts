@@ -36,6 +36,12 @@ export type FakeStatement = { sql: string; params: unknown[]; tx: number | null 
 export interface FakePgOptions {
   /** Emulate a database whose dedupe ledger is NOT migrated (every ledger statement throws SQLSTATE 42P01). */
   ledgerUnavailable?: boolean
+  /**
+   * Emulate a ledger table that PREDATES migration zzzz20260927121000 (table present, `intent_kind` column absent):
+   * every ledger statement that NAMES `intent_kind` throws SQLSTATE 42703, exactly as Postgres does; ledger
+   * statements that do not name it (the DELETEs) run normally.
+   */
+  ledgerIntentKindMissing?: boolean
   /** Emulate a database WITHOUT the provenance columns (the copy INSERT that names them throws 42703). */
   provenanceColumnsMissing?: boolean
   /** Hook run before every statement inside a transaction — lets a test mutate the store mid-copy (tripwire). */
@@ -241,6 +247,7 @@ export class FakePg {
     // ── dedupe ledger ──
     if (sql.includes('meta_multitable_template_installs')) {
       if (this.opts.ledgerUnavailable) throw pgError('42P01', '关系 "meta_multitable_template_installs" 不存在')
+      if (this.opts.ledgerIntentKindMissing && sql.includes('intent_kind')) throw pgError('42703', '字段 "intent_kind" 不存在')
       const ledger = this.rows('meta_multitable_template_installs')
       if (sql.startsWith('INSERT INTO meta_multitable_template_installs')) {
         const digest = s(0)
