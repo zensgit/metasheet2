@@ -131,7 +131,7 @@ INVENTORY_RESULT file=<文件名> status=incomplete reason=<原因> …
 | `http_rules_upper_bound` | **参考上界**：旧的 `$.**` 递归 + 7 键白名单 | 只做参考。差额 = "长得像 http 目标但没人读它"（`send_webhook` 的 `body`/`headers` 载荷、大小写写错的键名）。**不要**用它评估破坏面 |
 | Q3 的 `narrow_hit` / `upper_bound_hit` | 上面两列的逐行版 | `narrow_hit=t` → 该规则会坏；`narrow_hit=f AND upper_bound_hit=t` → 规则里某处有 `http://` 字符串但不是出网目标，仅供排查 |
 | `http_rules_legacy_column` / `…_upper_bound` | 同一对口径，作用在旧列 `action_config` 上 | 同上 |
-| `internal_target_rows` / `…_upper_bound` | 同一对口径，作用在"明显内网字面量"上 | 分母/上下文；本来就是**下界**（漏 172.16/12、`*.internal`、IPv6 ULA 等） |
+| `internal_target_rows` / `…_upper_bound` | 同一对口径，作用在"内网目标"上。主机集合只定义一次（`\gset` 成 `inv_internal_target_re`，Q7 三处共用），按 `webhook-ssrf-guard.ts` 的字面量/主机名判定逐类对齐（2026-09-27）：IPv4 `0/8`、`127/8`、`10/8`、`172.16/12`（第二段恰为 16–31）、`192.168/16`、`169.254/16`；`localhost`、`*.localhost`、`*.internal`、`*.local`；IPv6 `::1`、`::`、`::ffff:`+内网 IPv4、ULA `fc00::/7`、link-local `fe80::/10`；带用户信息/端口/大写的 URL 也认，且按整段主机精确匹配（`10.x.example` 这类域名不再算） | 分母/上下文；仍是**下界**：只会漏、不会多——`127.1`、`0x7f.0.0.1`、`2130706433`、带前导零的段、`[::0.0.0.1]`、百分号编码/非 ASCII/`xn--` 主机不计；要靠 DNS 解析才知道是内网的域名本来就盘不到 |
 | Q5/Q6 的 `http_webhooks` | 只有一个口径 | `multitable_webhooks.url` 是专用 `text` 列，没有键名要猜、没有 JSON 要递归，本来就是窄的，**没有上界孪生列** |
 
 不变量（由 `verify/run-verify.mjs` 断言）：

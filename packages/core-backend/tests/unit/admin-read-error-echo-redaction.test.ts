@@ -17,9 +17,9 @@
  *   /plugins, /plugins/:id, /plugins/:id/config, /slo/status, /dlq, /shards, /shards/:name,
  *   /queues, /ratelimits, /ratelimits/:key, /health/detailed, /health/summary,
  *   /health/subsystem/:name
- * The write-side (POST/PUT/DELETE) echoes are OUT OF SCOPE by design and are pinned as residuals by
- * the sweep at the bottom of this file, so the day someone redacts them the sweep is what has to be
- * edited rather than the follow-up being forgotten silently.
+ * The write-side (POST/PUT/DELETE) echoes were OUT OF SCOPE for #5903 and were pinned as residuals
+ * by the sweep at the bottom of this file; the follow-up that redacted them (and the two sub-routers)
+ * tightened that sweep to every method — see admin-tree-5xx-values-free.test.ts for that coverage.
  *
  * Values-free fixtures: the "leaky" error text uses an RFC 5737 TEST-NET-3 documentation address and
  * a literal placeholder role/password. No real host, tenant, credential or path appears anywhere in
@@ -331,15 +331,16 @@ describe('mutation control (memory-level)', () => {
   })
 })
 
-describe('residual sweep: write-side echoes are knowingly out of scope', () => {
+describe('residual sweep: no route in admin-routes.ts echoes err.message', () => {
   /**
-   * admin-routes.ts still serializes err.message on its POST/PUT/DELETE branches. That is a
-   * deliberate boundary for this change (a write failure's body is read by the operator who just
-   * issued the write, and several of those strings are acted on by the plugin/snapshot UIs), but it
-   * must not become invisible. This sweep pins the fact structurally: every remaining echo must sit
-   * under a non-GET route. If someone adds a NEW read-side GET that echoes err.message, this fails.
+   * When this suite landed (#5903) the write-side (POST/PUT/DELETE) branches still serialized
+   * err.message, and this sweep only asserted that no GET did. The follow-up that redacted the write
+   * side and the two sub-routers (see admin-tree-5xx-values-free.test.ts, which holds the AST-based
+   * guard over the whole mounted tree) tightened this line-level sweep to every method: it is a
+   * second, independent mechanism for the same fact, kept because it is cheap and cannot share a bug
+   * with the AST scanner.
    */
-  it('no GET route in admin-routes.ts echoes err.message any more', () => {
+  it('no route of any method in admin-routes.ts echoes err.message any more', () => {
     const here = path.dirname(fileURLToPath(import.meta.url))
     const source = fs.readFileSync(
       path.resolve(here, '../../src/routes/admin-routes.ts'),
@@ -358,9 +359,10 @@ describe('residual sweep: write-side echoes are knowingly out of scope', () => {
       if (!/error: (err|\(error as Error\))\.message/.test(line)) return
       const lineNo = idx + 1
       const owner = [...routeStarts].reverse().find((r) => r.line < lineNo)
-      if (owner?.method === 'GET') offenders.push(`admin-routes.ts:${lineNo}`)
+      offenders.push(`admin-routes.ts:${lineNo} (${owner?.method ?? 'no route'})`)
     })
 
+    expect(routeStarts.length).toBeGreaterThan(0)
     expect(offenders).toEqual([])
   })
 })

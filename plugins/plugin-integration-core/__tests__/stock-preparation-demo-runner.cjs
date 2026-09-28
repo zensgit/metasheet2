@@ -51,6 +51,10 @@ const {
   __internals: { buildParentIndex },
 } = require(path.join(LIB, 'stock-preparation-expansion-snapshot-mapper.cjs'))
 const {
+  BATCH_IDENTITY_MODES,
+  mintStockPreparationBatchIdentity,
+} = require(path.join(LIB, 'stock-preparation-batch-identity.cjs'))
+const {
   planStockPreparationConflicts,
   derivePackAwarePlmWritableFields,
 } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
@@ -111,7 +115,11 @@ function table(headers, rows) {
 // ── the per-action read-plan OVERRIDE: the customer's own vocabulary ──────────
 // On site this is action.source.readPlan in the table-action config; here it is
 // the one config that adapts the shipped 7-object traversal to the fixture's
-// (== the customer's) column names. Identical to the rehearsal's REBIND_READ_PLAN.
+// (== the customer's) column names. Same shape as the rehearsal's REBIND_READ_PLAN
+// (stock-preparation-structure-exact-rehearsal.test.cjs), including specField below —
+// this runner used to omit it, which left the demo export's 规格 column blank even
+// though the fixture declares Specification. (名称及规格/ext_nameAndSpec is a
+// separate column, unaffected by specField — see the note by specField below.)
 const REBIND_READ_PLAN = normalizeStockPreparationBomReadPlan({
   id: 'plm.stock-preparation.bom-read.dn-view.demo',
   sourceKind: 'data-source:sql-readonly',
@@ -133,7 +141,24 @@ const REBIND_READ_PLAN = normalizeStockPreparationBomReadPlan({
     nameField: 'TargetName',
     materialField: 'Material',
     versionField: 'SysVer',
+    // DECLARED, matching the rehearsal: turns `Specification` into a canonical `spec` on
+    // the expansion row (stock-preparation-bom-expansion.cjs), which the conflict planner
+    // then carries onto the record as `componentSpec` (stock-preparation-conflict-planner.cjs).
+    // Undeclared, the 规格 export column prints blank.
+    // 名称及规格(ext_nameAndSpec) stays blank in this demo for an unrelated reason: it is
+    // one of the F1c derived ext_ columns (stock-preparation-conflict-planner.cjs
+    // denormalizedPlmFields / canDeriveExtensionField), gated on `extensionFieldIds` being
+    // threaded into planStockPreparationConflicts — this runner doesn't pass it, so the
+    // column is left alone on both sides. Not something specField controls.
+    specField: 'Specification',
+    // DECLARED (shipped, opt-in): carries Createtime far enough for the batch-identity
+    // module (mintStockPreparationBatchIdentity) below to bucket it by hour. Absent this,
+    // the module falls back to the legacy content-revision id and says `degraded: true`.
+    createTimeField: 'Createtime',
   },
+  // 备料 batch rule, DECLARED (shipped, opt-in): 物料创建日期(精确到小时)区分同一项目
+  // 不同批次的物料 — see lib/stock-preparation-batch-identity.cjs.
+  batchIdentity: { mode: 'material_create_hour' },
   bomHead: {
     object: 'DN_BomHead_View',
     parentPartField: 'part_id',
@@ -333,14 +358,22 @@ function depthOf(row) { return JSON.parse(row.path).length - 1 }
 function treeLabel(row) { return `${'  '.repeat(depthOf(row))}${row.componentCode}` }
 
 // The customer's batch rule (物料创建日期精确到小时): bucket a pull by its
-// materials' creation hour, fed as the caller-supplied snapshotBatchId the
-// shipped mapper requires. NOT IN SHIPPED CODE — a thin caller-side step (see the
-// honest caveats at the tail and the runbook).
-function batchIdFromMaterials(state, projectNo, rows) {
-  const parts = state.get('dn_partlibrary_view')
-  const byId = new Map(parts.map((p) => [p.part_id, p]))
-  const hours = rows.map((r) => String(byId.get(r.componentSourceId).createtime).slice(0, 13)).sort()
-  return `${projectNo}|${hours[hours.length - 1]}`
+// materials' creation hour. SHIPPED CODE — lib/stock-preparation-batch-identity.cjs,
+// opt-in via readPlan.batchIdentity = { mode: 'material_create_hour' } (declared on
+// REBIND_READ_PLAN above). This used to be a local caller-side derivation that read
+// straight from the fixture's part table; the rehearsal driver's proven derivation was
+// promoted to shipped code (one implementation, no drift-prone second copy) and this
+// runner now calls it exactly as the rehearsal does.
+function batchIdFromMaterials(projectNo, rows) {
+  const minted = mintStockPreparationBatchIdentity({
+    mode: BATCH_IDENTITY_MODES.MATERIAL_CREATE_HOUR,
+    projectNo,
+    rows,
+    legacyBatchId: `legacy_${projectNo}`,
+  })
+  assert.equal(minted.degraded, false, 'the fixture declares Createtime — the hour rule must not degrade')
+  assert.equal(minted.mode, BATCH_IDENTITY_MODES.MATERIAL_CREATE_HOUR)
+  return minted.batchId
 }
 
 const CANONICAL_HUMAN = [...HUMAN_PRESERVED_FIELD_IDS]
@@ -411,7 +444,7 @@ async function main() {
   say(`\n  ${GREEN('✓')} 数量逐层累乘:根 x2 → 组件 x3 → 封头 x2 = 总数量 ${BOLD('12')}`)
   say(`  ${GREEN('✓')} 停用的 BOM 头(bom_able='0')下的废弃件 TZ-G ${BOLD('从不展开')}`)
 
-  const snapshotBatchId = batchIdFromMaterials(state1, PROJECT_A, rows)
+  const snapshotBatchId = batchIdFromMaterials(PROJECT_A, rows)
   const snap = mapExpansionRowsToSnapshotLines(a, { snapshotBatchId, readPlan: REBIND_READ_PLAN })
   assert.equal(snap.status, 'mapped'); assert.equal(snap.lines.length, 7)
   const parentIndex = buildParentIndex(rows)
@@ -424,7 +457,7 @@ async function main() {
   const state2 = loadState(schema, ['03-seed-batch-2.sql'])
   const a2 = await pull(state2, PROJECT_A)
   assert.equal(a2.rows.length, 6)
-  const batch2Id = batchIdFromMaterials(state2, PROJECT_A, a2.rows)
+  const batch2Id = batchIdFromMaterials(PROJECT_A, a2.rows)
   assert.equal(snapshotBatchId, `${PROJECT_A}|2026-08-30T09`)
   assert.equal(batch2Id, `${PROJECT_A}|2026-08-30T10`)
   const snap2 = mapExpansionRowsToSnapshotLines(a2, { snapshotBatchId: batch2Id, readPlan: REBIND_READ_PLAN })
@@ -434,7 +467,7 @@ async function main() {
   say(`    批 #1 = ${BOLD(snapshotBatchId)}  ${DIM('(材料创建于 09 点)')}`)
   say(`    批 #2 = ${BOLD(batch2Id)}  ${DIM('(一小时后重拉,创建于 10 点)')}`)
   say(`    → 两批次快照行 id ${GREEN('0 重叠')};同一小时重算 id 逐字节一致(幂等)`)
-  say(`  ${DIM('⚠ 诚实说明:按小时分批的推导目前在调用方(本 runner 手工铸造),尚未进发货代码 —— 见文末与 runbook。')}`)
+  say(`  ${GREEN('✓')} 按小时分批的推导已发货(lib/stock-preparation-batch-identity.cjs,opt-in:readPlan.batchIdentity = { mode: 'material_create_hour' }) —— 缺省仍是今天的内容修订版本号做法,逐字节不变;见文末与 runbook。`)
   say(`  ${GREEN('步骤 2 通过')}`)
 
   // ── STEP 3 ──────────────────────────────────────────────────────────────────
@@ -535,6 +568,9 @@ async function main() {
   const colIndex = (id) => REAL_EXPORT_COLUMNS.findIndex((c) => c.id === id)
   for (const r of exportRows) {
     assert.ok(String(r[colIndex('componentCode')]).startsWith('TZ-'))
+    // readPlan.part.specField 声明后,规格 不再是空列(见上面 REBIND_READ_PLAN 的注释;
+    // 缺 specField 时 componentSpec 不存在、ext_spec 也没进 record,这一断言会先红)。
+    assert.ok(String(r[colIndex('componentSpec')] ?? '').trim() !== '', '规格列不应为空(readPlan.part.specField 已声明)')
     assert.equal(r[colIndex('stockPreparationStatus')], '20 - 已下单')
     assert.equal(r[colIndex('ext_stockPrepDate')], '2026-09-02')
     // 五个部门完成列(#5447):自制/外购 + 采购完成对(布尔渲染为是/否)+ 仓库完成对,人填值原样导出。
@@ -554,12 +590,13 @@ async function main() {
   say(`  ${GREEN('步骤 3 通过')}`)
 
   // ── honest caveats (staged, never faked) ─────────────────────────────────────
-  banner('演示要如实说明的边界(净新 · 未接线 —— 别演成已有)')
-  say(`  1. ${BOLD('按创建小时分批的推导')}:可行(本 runner 已在真实 Createtime 上算出),但发货 mapper 目前收`)
-  say(`     ${DIM('调用方给定的 snapshotBatchId')} —— 需加一小段调用方推导。属净新,一个小函数。`)
-  say(`  2. ${BOLD('多人审批 hand-off 链到备料')}:平台有审批运行时,但未接线到备料流。属净新,未接线。`)
-  say(`  3. ${BOLD('钉钉待办推送')}:无连接器接线。属净新,未接线。`)
-  say(`  ${DIM('若观众追问以上三点,答:在路线图上,尚未发货 —— 不要摆成在跑。')}`)
+  banner('演示要如实说明的边界(逐条对照代码现状 —— 别演成不实)')
+  say(`  1. ${BOLD('按创建小时分批的推导')}:${GREEN('已发货')}(lib/stock-preparation-batch-identity.cjs,`)
+  say(`     ${DIM("mintStockPreparationBatchIdentity")})。按部署声明 opt-in:readPlan.batchIdentity = { mode: 'material_create_hour' },`)
+  say(`     ${DIM('缺省仍是今天的内容修订版本号做法(source_revision),逐字节不变;声明后源缺 Createtime 会显式降级,不会静默换算法。')}`)
+  say(`  2. ${BOLD('多人审批 hand-off 链到备料')}:平台有审批运行时,但 owner 裁决先上轻量版(应用内游标 + 群通知,#5442),不绑定完整审批图 —— 未接线到备料流。属净新,未接线。`)
+  say(`  3. ${BOLD('钉钉个人待办推送')}:owner 2026-09-02 裁决本轮${BOLD('不做')}(A 工作通知冒充待办 / B 单向待办镜像两案均推后);备料接力(#5442)现状仍只有钉钉${BOLD('群')}webhook,不是个人待办;平台侧审批待办单向镜像(#5772)已合入但${BOLD('默认关闭')}、只覆盖审批席位、owner 前置(其设计文档 §8)未满足,不适用于备料。`)
+  say(`  ${DIM('若观众追问:第 1 条已发货但默认关闭,需部署方显式开启;第 2 条 owner R8 裁决本轮不做审批引擎,#5442 轻量接力即现状,接力顺序跑稳后再换审批模板,不要摆成即将上;第 3 条本轮不做,不要摆成在跑。')}`)
 
   // ── values-free self-check over the printed export projection ─────────────────
   const FORBIDDEN = [

@@ -51,7 +51,8 @@
             <button class="meta-toolbar__remove" @click="emit('remove-sort', rule.fieldId)">&times;</button>
           </div>
           <button v-if="fields.length" class="meta-toolbar__add" @click="emit('add-sort', { fieldId: fields[0].id, direction: 'asc' })">{{ l('toolbar.addSort') }}</button>
-          <button v-if="sortRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ l('toolbar.apply') }}</button>
+          <!-- `|| sortFilterDirty`: after removing the LAST sort rule the button must stay, or the removal can never be applied/saved (客户反馈 2026-09-24 #5). -->
+          <button v-if="sortRules.length || sortFilterDirty" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ l('toolbar.apply') }}</button>
         </div>
       </MtPopover>
 
@@ -110,7 +111,8 @@
             <button v-if="fields.length" class="meta-toolbar__add" data-add-filter-group="true" @click="onAddFilterGroup">{{ l('toolbar.addGroup') }}</button>
             <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__add meta-toolbar__add--danger" @click="emit('clear-filters')">{{ l('toolbar.clearAll') }}</button>
           </div>
-          <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
+          <!-- `|| sortFilterDirty`: same as the sort panel — removing the LAST condition (×) must still be appliable. -->
+          <button v-if="filterRules.length || filterGroups.length || sortFilterDirty" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
           <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">{{ l('toolbar.stagedHint') }}</p>
         </div>
       </MtPopover>

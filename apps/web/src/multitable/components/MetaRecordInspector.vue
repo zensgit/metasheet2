@@ -354,6 +354,7 @@
           :upload-fn="uploadFn"
           :delete-attachment-fn="deleteAttachmentFn"
           :ai-shortcut="aiShortcut"
+          :ai-available="aiAvailable"
           :button-run-pending="buttonRunPending"
           :mention-suggestions="mentionSuggestions"
           :mention-search="mentionSearch"
@@ -417,6 +418,7 @@
       >
         <MetaCommentsPanel
           :comments="comments"
+          :timestamp-formatter="formatCommentTimestamp"
           :loading="commentsLoading"
           :can-comment="canComment"
           :can-resolve="canResolveComments"
@@ -549,6 +551,7 @@ import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
 // imported directly here rather than through the old-path re-export shim.
 import MetaCommentsPanel from '../../shared/comments/components/MetaCommentsPanel.vue'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import MetaRecordAttachmentsPanel from './MetaRecordAttachmentsPanel.vue'
 import {
   resolveCommentAffordanceStateClass,
@@ -600,6 +603,9 @@ const props = withDefaults(defineProps<{
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
+  /** A11: forwarded 1:1 to MetaRecordFieldsPanel's own prop (fail-closed default false ⇒ no AI
+   *  preview/run buttons). The workbench sets it from GET /api/multitable/ai/availability. */
+  aiAvailable?: boolean
   /** B1-e: in-flight button runs keyed `${recordId}:${fieldId}` — the SAME ref
    *  the grid (MetaGridTable) receives, so a run from either surface disables
    *  the button on both. Matches the workbench `onRunButton` pending-key format. */
@@ -673,6 +679,7 @@ const props = withDefaults(defineProps<{
   fieldErrors?: Record<string, string> | null
 }>(), {
   recordIds: () => [],
+  aiAvailable: false,
   buttonRunPending: () => [],
   comments: () => [],
   commentsLoading: false,
@@ -1556,6 +1563,10 @@ function canAnchorFieldError(recordId: string, fieldId: string): boolean {
 
 defineExpose({ canAnchorFieldError })
 
+// 客户反馈 2026-09-24 #4c follow-up: comment times in the business timezone, 24-hour (raw text if unreadable).
+function formatCommentTimestamp(iso: string): string {
+  return formatBusinessTimestamp(iso) ?? iso
+}
 </script>
 
 <style scoped>

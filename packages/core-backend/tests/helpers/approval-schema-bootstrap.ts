@@ -591,3 +591,31 @@ export async function grantApprovalOrgMembership(userId: string, orgId = 'defaul
     [userId, orgId],
   )
 }
+
+/**
+ * Lock §2-G3 fixture delta (Codex review 2026-09-19 finding 1): every integration fixture mints its
+ * identity through `GET /api/auth/dev-token`, which writes NO `users` row (it only signs a JWT and
+ * calls `createUserSession`). Cancel-round creation now re-qualifies every seat against the
+ * directory using the shared login gate (`evaluateUserAuthenticationGate`), and — exactly like the
+ * precedent it reuses, `validateAndFreezeRequesterChoices`'s company-scope baseline — an id with no
+ * `users` row is NOT in the eligible set and therefore fails closed. Production approvers always
+ * have a `users` row (they had to authenticate to approve), so the honest fix is to make the
+ * fixtures production-shaped rather than to let absence through.
+ *
+ * Defaults do the rest of the work: `role` defaults to `'user'`, `is_active` to TRUE,
+ * `activation_status` to `'activated'` (migration
+ * `zzzz20260723140000_add_users_activation_status_and_local_password_set`), i.e. an eligible account.
+ *
+ * `ON CONFLICT (id) DO NOTHING` — a suite that deliberately deactivated this same id to exercise a
+ * negative must not have its mutation silently undone by a later `ensureLocalUserRow` call.
+ *
+ * TEST-ONLY. Deliberately NOT folded into the production `dev-token` route, for the same reason
+ * `grantApprovalOrgMembership` is not: that route is production code.
+ */
+export async function ensureLocalUserRow(userId: string): Promise<void> {
+  const pool = poolManager.get()
+  await pool.query(
+    `INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') ON CONFLICT (id) DO NOTHING`,
+    [userId, `${userId}@example.test`],
+  )
+}

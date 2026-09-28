@@ -165,6 +165,11 @@ const CAPABILITY_ENTRY_POINTS = Object.freeze([
     exportName: 'repairStockPreparationMvpTargets',
     why: 'the ONLY additive column repair for a drifted MVP snapshot table. Until the #5721 终审 route it had no production caller at all, so the mvp-persist probe`s 422 TARGET_SCHEMA_INCOMPLETE pointed at a dead end (the shape #5118 had)',
   },
+  {
+    module: 'lib/stock-preparation-managed-table-relabel.cjs',
+    exportName: 'runStockPreparationManagedTableRelabel',
+    why: '「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): the ONLY path by which an already-created managed table gets its Chinese headers. Names are chosen once at creation and never re-described, so with no caller an English-created deployment keeps English headers forever — or someone renames them with SQL, which is the unaudited write this exists to replace',
+  },
   // NOT declared here, deliberately: `assertSourcePreflightValuesFree`. This guard asks whether some
   // OTHER production file names a capability, and that self-check has exactly one production caller —
   // the preflight itself, in the same module, on every run before it returns. Declaring it would make
