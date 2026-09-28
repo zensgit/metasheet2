@@ -34,7 +34,7 @@
 |---|---|---|
 | CS-1 | 独立动作：`POST /api/multitable/sheets/:sheetId/copy`（+ 零写 `…/copy/dry-run`）。**仅会话认证**（不挂 `apiTokenAuth`；多维表路由逐个 opt-in，`univer-meta.ts:13440`、`:19176`）。模板 JSON 形状不变、永不带数据。 | owner；§1.1 |
 | CS-2 | 入口：① 侧栏当前表操作区「复制数据表」；② 「存为模板」弹窗底部「改为复制数据表（含数据）」；③ 模板中心「同时复制数据」只对带 provenance 的自定义模板、且只对**通过源表全表读门**的查看者出现（S4）。 | `MetaSheetViewRail.vue:96-111`、`MultitableWorkbench.vue:113-118` |
-| CS-3 | 目标 Base：**S1 = 源表所在 Base，不可选**。跨 Base 在 S2+：候选 = 可读 Base（`GET /bases` 口径，`univer-meta.ts:7905`）∩ `resolveBaseWritable`（`permission-service.ts:1962-2012`，fail-closed，含 e-learning 投影排除 `:1984`）；显式拒绝 `APPROVAL_PROJECTION_BASE_ID`（`approval-projection-constants.ts:17-20`）与 e-learning 候选 id（`univer-meta.ts:15586-15591` 只查后者，审批投影是**新代码**）。不用 `POST /sheets` 的 `canManageViews ∨ owner` 谓词（`:15600-15617`，与前者不一致）。 | §4.2 |
+| CS-3 | 目标 Base：**S1 = 源表所在 Base，不可选**。目标侧谓词（**2026-09-28 修订**）= **平台管理员角色 ∨ `resolveBaseWritable`**，封装为 `resolveCopyTargetWritable(access, query, baseId)`（`permission-service.ts`，紧接 `resolveBaseWritable` 之后），路由快速拒 / 事务内 DB-fresh 终审 / `/context` `canCopySheet` **三处共用这一个谓词**。管理员判定复用仓库唯一口径 `ResolvedRequestAccess.isAdminRole`（`access.ts:73`，= 源侧门轴 ① 的同一判定）；`resolveBaseWritable` 本身不改（自动化跨 Base 写等调用方仍是 owner ∨ base-write 码）。管理员臂仍 fail-closed：无身份 → 拒；`APPROVAL_PROJECTION_BASE_ID`（`approval-projection-constants.ts:17-20`）与 e-learning 候选 id（形状判定，严于 registry 查询）对**任何人**拒；目标 Base 缺失 / 软删 → 拒（与 `resolveBaseWritable` NIT-1 同一存在性读）。**为什么放宽**：源侧门轴 ① 在行级开关开着的表上只放行管理员角色，而 `resolveBaseWritable` 只看 owner 与 base-write 码、不看角色 → 他人 Base 里的行级表**谁都复制不了**；owner 2026-09-28 批复「同意」协调方建议第 5 项「复制功能改为也认平台管理员角色」。放宽方向，owner 已明示批准（非默认前进）；按册例标 `Ratified-by-default-2026-09-28`、留 24h 否决窗，登记 `takeover-beiliao-20260821/decision-register.md` R-19。跨 Base 在 S2+：候选 = 可读 Base（`GET /bases` 口径，`univer-meta.ts:7905`）∩ 同一谓词。不用 `POST /sheets` 的 `canManageViews ∨ owner` 谓词（`:15600-15617`，与前者不一致）。 | §4.2 |
 | CS-4 | 默认名「<源表名> 副本」；沿用显示名 hygiene（`univer-meta.ts:15497-15500`）。 | |
 | CS-5 | 源侧门 = 复用 `hasFullTableReadAccess`（§1.9），事务外快速拒 + **事务内 DB-fresh 终审**（§4.1）；拒绝码 `COPY_SOURCE_NOT_FULLY_READABLE`（403，**无计数**）。 | §4.1 |
 | CS-6 | **S1 不提供**「去掉我无权查看的列」：任何列对复制者不可见即拒绝整次复制。该选项的披露量本身是 oracle（§1.9），是否在 S2+ 提供 → §11-4。 | §4.1 |
@@ -52,16 +52,16 @@
 | CS-18 | 原子性：S1 全有或全无，**首个失败即停**（PG 25P02 后事务已中止，不做逐行 SAVEPOINT）；响应只带一条 `{ rowIndex, fieldId, code }`。S3 异步：隐藏 `building` 态 + 单源快照 + 失败**硬清除**（不是软删）。 | §8 |
 | CS-19 | 事件：复制路径**不发**逐行 `record.created`（S1 `createRecord`）**也不发**逐行 `record.updated`（S2 自链接回填 `patchRecords`）——无 legacy emit、无 outbox、无逐行 realtime；提交后至多一条 values-free `multitable.sheet.copied`（不进 `webhook-event-bridge` 映射）。 | §7.4；B4、r3-4 |
 | CS-20 | 切片：S1（L）结构 + 普通值 + 权限 + 同步 + 事件抑制 + 插件作用域拒绝；S2 附件 / 自链接 / 跨 Base / 冻结；S3 异步；S4 模板 provenance。 | §9 |
-| CS-21 | 校验：复制模式下 `createRecord` 用 **shape-only** 校验（类型形状 + link 外表记录存在 + 附件归属），不跑 `property.validation`、person 名册/组限制、select 选项集；`null`/空值键**省略**。理由：源值是被 grandfather 的既成事实（`person-field-restriction.ts:28`、`field-codecs.ts:343`；插件 SDK 路径对任何类型接受 null，`multitable/records.ts:242-244`），快照不该替源表补作业。 | §7.3；SF2 |
+| CS-21 | 校验：复制模式下 `createRecord` 用 **shape-only** 校验（类型形状 + link 外表记录存在 + 附件归属），不跑 `property.validation`、person 名册/组限制、select 选项集；`null` 键**省略**（`''` 与 `[]` **保留**：规则求值器对缺失键走 asStringOrThrow / asArrayOrThrow → deny、对 `''` / `[]` 正常求值，省略会让 §4.3 拒绝集不等而 500，r4 DATA-5）。理由：源值是被 grandfather 的既成事实（`person-field-restriction.ts:28`、`field-codecs.ts:343`；插件 SDK 路径对任何类型接受 null，`multitable/records.ts:242-244`），快照不该替源表补作业。 | §7.3；SF2 |
 | CS-22 | 测试：真库集成（`usePinnedServer` + `request(pinned.url())`）+ 单元；清单见 §9。 | |
 
 ## 3. 用户可见行为
 
 - **弹窗**（S1）：源表（只读）；新表名（CS-4）；目标 Base 固定为当前 Base（灰显，S2 解锁）；「包含数据（共 N 行）」（默认勾）；权限固定「与源表相同」（灰显）。
-- **预检** `POST …/copy/dry-run`（零写，与模板 dry-run 同层 `univer-meta.ts:8602-8608`）：**先跑 §4 两侧门再 COUNT**（门不过只回 403，不回任何计数，无基数泄漏）；通过后回：行数、列数、超限与否；将披露的列（按 fieldId + 原因码：`ATTACHMENT_BLANKED`、`SELF_LINK_BLANKED`、`MIRROR_NOT_BUILT`、`DEPENDS_ON_BLANKED_COLUMN`、`BUTTON_DISABLED`、`PROPERTY_HIDDEN_BLANKED`）；将删除的视图 filter 叶子 `VIEW_FILTER_LEAF_DROPPED { viewId, count }`（§5.2）；`autoNumberRenumberedRows`；将 shape-only 省略的 null 单元格计数；`record_permissions` 将 remap 的行数；不复制项（自动化、评论、订阅、表单分享、锁定、修订历史）。
+- **预检** `POST …/copy/dry-run`（零写，与模板 dry-run 同层 `univer-meta.ts:8602-8608`）：**先跑 §4 两侧门再 COUNT**（门不过只回 403，不回任何计数，无基数泄漏）；通过后回：行数、列数、超限与否（`summary.overLimit`：`withData` 且行数 > 上限时为 true——此时**不读记录**、结构披露照常回、不再 413；执行路径超限仍 413，r4 FE-2）；将披露的列（按 fieldId + 原因码：`ATTACHMENT_BLANKED`、`SELF_LINK_BLANKED`、`MIRROR_NOT_BUILT`、`DEPENDS_ON_BLANKED_COLUMN`、`BUTTON_DISABLED`、`PROPERTY_HIDDEN_BLANKED`）；将删除的视图 filter 叶子 `VIEW_FILTER_LEAF_DROPPED { viewId, count }`（§5.2）；`autoNumberRenumberedRows`；将 shape-only 省略的 null 单元格计数；`record_permissions` 将 remap 的行数；不复制项（自动化、评论、订阅、表单分享、锁定、修订历史）。
 - **结果**：201 → 跳转新表；toast 披露「复制 X 行 / Y 列 / Z 条授权（含 R 条记录级）；未复制：…」；201 body 带 `formulaRecompute: { attempted, recomputed, failed, errorCode? }`，`failed` 时 toast 醒目并给「重算」入口（= 对任一 formula 列重存同一表达式，`univer-meta.ts:14158` 的既有恢复路径）。
 - **徽标**：新表名旁「快照副本」；源为托管表时追加「不随 PLM 刷新」。只依赖服务端列（CS-14）。
-- `/context` 增 `canCopySheet`（= `hasFullTableReadAccess` ∧ 当前 Base `resolveBaseWritable`），只做显隐，服务端再门。
+- `/context` 增 `canCopySheet`（= 当前 Base `resolveCopyTargetWritable`〔平台管理员 ∨ `resolveBaseWritable`，投影 Base 对谁都拒，CS-3 2026-09-28 修订〕∧ `hasFullTableReadAccess`），只做显隐，服务端再门；目标门先跑，投影 Base 零探针短路。
 
 ## 4. 权限模型
 
@@ -80,7 +80,7 @@
 
 ### 4.2 目标侧门（写）
 
-- S1 目标 = 源 Base；仍跑 `resolveBaseWritable(actor, txQuery, baseId)`（存在性 + live + e-learning 排除 + `multitable:base:write` 或 owner）。再加 `isApprovalProjectionBaseId` 拒绝（新代码）。
+- S1 目标 = 源 Base；跑 `resolveCopyTargetWritable(access, txQuery, baseId)` = **平台管理员角色（`access.isAdminRole`）∨ `resolveBaseWritable(actor, txQuery, baseId)`**（后者 = 存在性 + live + e-learning 排除 + `multitable:base:write` 或 owner）。`isApprovalProjectionBaseId` 与 e-learning 候选 id 拒绝折进同一谓词，对管理员同样生效；管理员臂只做存在性 / 软删读（fail-closed），不查授权表。**2026-09-28 修订**（CS-3；owner 批准；`Ratified-by-default-2026-09-28`，24h 可否决；Decision Register R-19）：修订前 `resolveBaseWritable` 不认角色，行级开关开着的表（源侧门只放行管理员）一旦 Base 归他人所有便无人可复制。三处门（路由 `multitable-copy-sheet.ts` `gateCopySource`、事务内 `copy-sheet-service.ts` `copyInsideTransaction` ⑤、`/context` `canCopySheet`）调用同一函数，不各自拼谓词。
 - 新表 id 服务端 mint，`fenceWriterEntry(newSheetId)`（`univer-meta.ts:15623`）照跑；每个建出的字段过字段创建路由的同一组校验：link 墙（`:1970-1995`）、悬空目标 fail-closed、button `actionType`。
 - 复制者**不需要**源表 `canManageSheetAccess`（`:9363`）或 `canManageFields`（`:10037`）：授权复制不产生任何源表上不存在的 (主体, 级别, 对象) 三元组（§4.4）。
 
@@ -129,8 +129,8 @@
 
 ### 5.2 property / 视图 id-remap 表（fail-closed allowlist）
 
-- 字段 property 携带 id 的键（`sanitizeFieldProperty` 以 `...obj` 透传任意键，`field-codecs.ts:416`，故必须显式列举）：`linkFieldId` 及别名 `relatedLinkFieldId / linkedFieldId / sourceFieldId`（`:353-360`）；`targetFieldId`（自链接时）；`foreignSheetId` 及别名 `foreignDatasheetId / datasheetId`（`:410`，自链接 → 新表）；`mirrorFieldId`（丢）；`visibilityRule.fieldId`、`requiredWhen.fieldId`（`field-visibility-rule.ts:30-34`、`:92-118`）；formula `expression`。
-- 视图：`filter_info` 叶子 `fieldId` remap，指向被清空 / 未建列的叶子**整条删除**（文字面 redaction 先例 `univer-meta.ts:5117-5125`）。删叶子会**放宽**该视图显示的行集（r3 nit）：这只是 UX，不是权限面——视图权限只门视图本身的可见性（`loadViewPermissionScopeMap`，`permission-service.ts:786-790`；四个调用面 `/context`、`/view`、`/form-context`、`/records/:recordId`，`univer-meta.ts:9013`、`:17087`、`:17230`、`:18514` @6334210），记录读由表级 / 字段级 / 记录级权限门；dry-run 与结果 toast 按视图披露 `VIEW_FILTER_LEAF_DROPPED { viewId, count }`；`sort_info / group_info / hidden_field_ids` remap；`config.conditionalFormattingRules[*].fieldId` 与嵌套条件 remap（`:14427-14438`）；`config.*FieldId`（gantt/kanban/calendar）remap；**`config.publicForm` 整段剥离**（分享令牌，`:828-868`）。
+- 字段 property 携带 id 的键（`sanitizeFieldProperty` 以 `...obj` 透传任意键，`field-codecs.ts:416`，故必须显式列举）：`linkFieldId` 及别名 `relatedLinkFieldId / linkedFieldId / sourceFieldId`（`:353-360`）；`targetFieldId`（自链接时）；`foreignSheetId` 及别名 `foreignDatasheetId / datasheetId`（`:410`，自链接 → 新表）；`mirrorFieldId`（丢）；`visibilityRule.fieldId`、`requiredWhen.fieldId`（`field-visibility-rule.ts:30-34`、`:92-118`）；formula `expression`——既含 `{fld_…}` 引用，也含 relation-aggregation 函数族（`RELSUMIF / RELAVGIF / RELCOUNTIF / RELLOOKUP / RELVALUES`）**带引号的字段 id 参数**：link 参数必映射，target / criteria 仅在该 link 自指时映射（r4 DATA-1）；rollup 过滤条件 `filters / conditions / filterConditions` 叶子 `fieldId`（link 外表字段：自指时映射、否则原样，r4 DATA-4）。
+- 视图：`filter_info` 叶子 `fieldId` remap，指向被清空 / 未建列的叶子**整条删除**（文字面 redaction 先例 `univer-meta.ts:5117-5125`）。删叶子会**放宽**该视图显示的行集（r3 nit）：这只是 UX，不是权限面——视图权限只门视图本身的可见性（`loadViewPermissionScopeMap`，`permission-service.ts:786-790`；四个调用面 `/context`、`/view`、`/form-context`、`/records/:recordId`，`univer-meta.ts:9013`、`:17087`、`:17230`、`:18514` @6334210），记录读由表级 / 字段级 / 记录级权限门；dry-run 与结果 toast 按视图披露 `VIEW_FILTER_LEAF_DROPPED { viewId, count }`；`sort_info / group_info / hidden_field_ids` remap；`config.conditionalFormattingRules[*].fieldId` 与嵌套条件 remap（`:14427-14438`）；`config.*FieldId`（gantt/kanban/calendar）remap；`config.frozenLeftColumnIds`（数组）与 `config.columnWidths` / `config.aggregations`（以字段 id 为**对象键**）remap、未建 / 未知列丢弃（Web 共享 view.config 的三处写入点，r4 FE-1）；**`config.publicForm` 整段剥离**（分享令牌，`:828-868`）。
 - 任何未列出的键若值匹配 `^fld_` → `COPY_UNMAPPED_FIELD_REF`，整次拒绝。
 
 ## 6. 托管表与系统表
@@ -152,7 +152,7 @@
 1. 事务外快速拒：§4.1 / §4.2 / 源 liveness / 系统表。
 2. `pool.transaction`（裸 `BEGIN` = **READ COMMITTED**，`connection-pool.ts:182` @6334210；无隔离级别入参，仓内也无非默认隔离级别的运行时先例，附录 B）。r2 想靠 REPEATABLE READ 拿「多条语句同一快照」，但它同时让第 3 步与第 4 步失效（§4.1；r3-1/-2）；多语句一致性改由本步之后的三把锁 + 第 6 步 tripwire 提供。
 3. **第一条语句** `pg_try_advisory_xact_lock(intent_digest)`（有界轮询，`template-install-dedupe.ts:216-239`）→ 读账本（命中且新表 live → 回滚、重放 201）。READ COMMITTED 下，后到者等到先到者提交后再读账本，必然看见那一行（与模板安装今天的运行方式相同，`univer-meta.ts:8533` @6334210）；r2 的 REPEATABLE READ 下这里读不见、会重做一次复制、在账本 `ON CONFLICT` 处撞 40001 → 500 而不是 201 重放。**拒绝**「账本读放进单独的短事务」的备选：咨询锁是事务级的，短事务一结束锁就释放（`:278`），复制期间不再互斥，两个并发同意图会各建一张表——去重模块要求锁与安装同一事务（`:57`、`:294`）。
-4. `assertSheetLiveForUpdate(query, src)`（源表行 `FOR UPDATE` + 重读 `deleted_at`，`sheet-liveness.ts:197-201`；不 live → 抛 `SheetNotLiveError` 回滚）→ **围栏一次取全**：`acquireCanonicalSheetFencesInOrder(query, [src, newSheetId, …新表全部 link 字段的 foreignSheetId])`（去重 + 排序 + 逐把 `pg_advisory_xact_lock(hashtext(key))`，`canonical-sheet-fence.ts:81-100` @6334210；源表也进集合，把 `createRecord` 这类无条件取围栏的源表写者（`record-service.ts:573`）挡在事务外）→ `assertNoActiveWriterBlock` 逐表（`:191-196`）→ 首读源 `meta_fields / meta_views`（id + updated_at 集合）与 `meta_records`（count、max(updated_at)）、`meta_links`（count）作 tripwire 基线 → DB-fresh 重跑两侧门 → `INSERT meta_sheets`（provenance 三列）→ 字段（新 id、§5.2 remap、字段创建校验、逐条 `field` create 修订）→ 视图（remap、`publicForm` 剥离、逐条 `view` create 修订）。
+4. **围栏先于行锁（r4 修订，`Ratified-by-default-2026-09-28`，Decision Register R-18）**：无锁预读源 `meta_fields` 的 link 外表 → **围栏一次取全** `acquireCanonicalSheetFencesInOrder(query, [src, newSheetId（预 mint）, …源表全部 link 字段的 foreignSheetId])`（去重 + 排序 + 逐把 `pg_advisory_xact_lock(hashtext(key))`，`canonical-sheet-fence.ts:81-100` @6334210；源表也进集合，把 `createRecord` 这类无条件取围栏的源表写者（`record-service.ts:573`）挡在事务外）→ `assertNoActiveWriterBlock` 逐表（`:191-196`）→ `assertSheetLiveForUpdate(query, src)`（源表行 `FOR UPDATE` + 重读 `deleted_at`，`sheet-liveness.ts:197-201`；不 live → 抛 `SheetNotLiveError` 回滚）→ 首读源 `meta_fields / meta_views`（id + updated_at 集合）与 `meta_records`（count、max(updated_at)）、`meta_links`（count）作 tripwire 基线（**在任何源数据读之前**，r4 SEC-2）→ DB-fresh 重跑两侧门（**在任何计数 / 413 / 422 之前**，r4 SEC-3）→ 计划 → 计划算出的参与表集合 ⊆ 已围栏集合核对（不等 → 回滚 409 `COPY_SOURCE_CHANGED`，**不补取**围栏）→ `INSERT meta_sheets`。r3 文本的次序（行锁 → 围栏）与每个围栏写者（`createRecord`：围栏 → `INSERT meta_records` 的 FK `FOR KEY SHARE` 于 `meta_sheets(src)`；表单提交、PLM 刷新写者同形）构成真实 40P01 环——`trust-checkpoint-activation-authz.ts:54-58` 记录的仓库不变量「任何 `meta_sheets` 行锁都不得在围栏之前」；r4 TX-2 改为与它们同向（provenance 三列）→ 字段（新 id、§5.2 remap、字段创建校验、逐条 `field` create 修订）→ 视图（remap、`publicForm` 剥离、逐条 `view` create 修订）。
 5. 源记录 `SELECT id, data, created_by FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC LIMIT N+1`（第 N+1 行存在 → 回滚 413）；link 值按 `meta_links` 覆盖；逐行 `recordService.createRecord({ …, copy: { batchId, ordinal, createdBy } })`（§7.3），收集 `oldRecordId → newRecordId`。**记录先于授权写**（名册来自全局资格与活跃状态，`permission-service.ts:614-627` / `:419`，不看表授权；r1 的先后理由不成立）。**逐行围栏不再增长（r3-3）**：`createRecord` 每行仍照旧取围栏（flag 关：`acquireCanonicalSheetFence(newSheetId)`，`record-service.ts:573`；flag 开：`enterLinkWriterFencePlan` 对 `[new, …该行出现的 link 字段外表]` 排序取全，`link-writer-fence.ts:216-225` → `canonical-sheet-fence.ts:107-120`），但每一把键都已在第 4 步由**同一连接**持有，PG 咨询锁对已持有它的会话重入即成功（PG 手册 §13.3.5 Advisory Locks：「If a session already holds a given advisory lock, additional requests by it will always succeed」），所以逐行零等待、零新键；不改 `createRecord` 的围栏逻辑。r2 的风险面是：各行 link 字段子集不同 → 后面的行会在已持有 C 的情况下新取 B（B < C），与另一个按序取 `[B, C]` 的写者互等成 40P01——只有第 4 步的「全集一次取全」才关掉它；单次调用内部的排序（`canonical-sheet-fence.ts:95`）本来就是全局序，不是问题所在。
 6. 授权行 + `record_permissions` remap + 规则（§4.3；逐条 `permission` create 修订）→ **拒绝集等价断言**（源侧重读）→ **源表变更 tripwire**：重读第 4 步的四组基线并比对，任一不等 → 回滚 409 `COPY_SOURCE_CHANGED`（兜底围栏 flag 关时不取围栏的源表写者：`patchRecords` / `deleteRecord` / 字段创建的围栏都是 flag 门的 no-op，`canonical-sheet-fence.ts:209`、`record-write-service.ts:839`、`record-service.ts:895`、`univer-meta.ts:13544` @6334210；flag 开时这些写者被第 4 步的源表围栏挡住，tripwire 应恒真）→ `operation_audit_logs` 两行 → 账本写回 → `COMMIT`。
 7. 提交后：chunked formula 重算（复制者 req，状态进 201 body）；缓存失效（`univer-meta.ts:15375-15377`）；一条 `multitable.sheet.copied`；结构化日志。
@@ -204,13 +204,15 @@ r1「新表无自动化规则 → 无动作」错误：`record.created` 经 `web
 | 目标 Base 不可写 / 投影 Base | 403 | `FORBIDDEN` |
 | 源表门后被软删 | `assertSheetLiveForUpdate` 抛 `SheetNotLiveError` → 回滚（与门外 404 同 body，不可探存在性，`sheet-liveness.ts:173-178`） | 404 `SHEET_NOT_LIVE` |
 | 源表结构 / 记录 / links 在事务期间被未围栏路径改动 | tripwire 不等 → 回滚（§7.2 第 6 步） | 409 `COPY_SOURCE_CHANGED` |
-| 并发同意图 | 后到者在咨询锁处等待、READ COMMITTED 读到账本 → 重放（不再 40001/500） | 201 + `Idempotent-Replayed` |
+| 并发同意图 | 后到者在咨询锁处等待（有界 ≤ 15s）、READ COMMITTED 读到账本 → 重放（不再 40001/500） | 201 + `Idempotent-Replayed` |
+| 咨询锁有界等待内未取得（同意图复制仍在进行，> 15s） | **拒绝、不降级**（降级会在先到者未提交时读不到账本而建第二张表，r4 TX-4；模板安装保持降级） | 409 `CONFLICT` |
+| PG 锁类 SQLSTATE（40P01 / 55P03 / 40001） | 回滚，可重试（围栏先于行锁后不应再出现 40P01，出现即新写者的锁序回归） | 409 `CONFLICT` |
 | 规则引用未建列 / 引用将重编号的 autoNumber | 拒绝 | 422 `COPY_SOURCE_RULE_UNBUILDABLE` / `COPY_SOURCE_RULE_ON_RENUMBERED_FIELD` |
 | property 有未列举的 `fld_` 引用 | 拒绝 | 422 `COPY_UNMAPPED_FIELD_REF` |
 | 行 shape 校验失败（link 外表记录不存在、类型形状不合） | **首个失败即回滚** | 422 `COPY_ROW_VALIDATION_FAILED { rowIndex, fieldId, code }` |
 | 拒绝集断言不等 | 回滚 | 500 `COPY_PERMISSION_PARITY_FAILED` |
 | 写围栏冲突 | 回滚 | 409（`sendWriterFenceConflict`） |
-| 超限 | 拒绝 | 413 `COPY_TOO_LARGE { rowCount, limit }` |
+| 超限 | 执行拒绝；dry-run 回 200 + `summary.overLimit=true`（记录不读，结构披露照常，r4 FE-2） | 413 `COPY_TOO_LARGE { rowCount, limit }` |
 | 幂等重放 | 201 + `Idempotent-Replayed: true` | — |
 | formula 重算失败（提交后） | 201，body `formulaRecompute.failed=true` | `BULK_RECOMPUTE_FAILED` |
 | 进程崩溃（S1） | PG 回滚，无残留 | — |
@@ -336,4 +338,26 @@ r1「新表无自动化规则 → 无动作」错误：`record.created` 经 `web
 | r3-4 S2 自链接回填 `patchRecords` 逐行 `record.updated` 出网，CS-19 只覆盖 `createRecord` | 修：CS-19 扩到 `record.updated`；`RecordPatchInput` 增同形 `copy?` 抑制 `:1193 / :1522 / :1465 / :1502`；S2 真库零投递测试 | CS-19、§5.1、§7.3、§7.4 |
 | r3-nit filter 叶子删除放宽视图行集 | 记：UX 面、非权限面（视图权限不门记录读）；dry-run / toast 披露 `VIEW_FILTER_LEAF_DROPPED` | §3、§5.2 |
 | r3 owner 问题：源表撤销不传播到副本 | 进 §11-9（默认只披露、不同步） | §11 |
-| r3 附带 | 引用基线核对：`univer-meta.ts` 六处插入、`record-write-service.ts` 一处，r2 旧引用在 `3fd352457` 成立，新引用标 `@6334210`；tripwire 新增 409 `COPY_SOURCE_CHANGED` 兜底围栏 flag 关时不取围栏的源表写者 | 页首、§7.2 第 6 步、§8 |
+| r3 附带（续见第四轮） | 引用基线核对：`univer-meta.ts` 六处插入、`record-write-service.ts` 一处，r2 旧引用在 `3fd352457` 成立，新引用标 `@6334210`；tripwire 新增 409 `COPY_SOURCE_CHANGED` 兜底围栏 flag 关时不取围栏的源表写者 | 页首、§7.2 第 6 步、§8 |
+
+### 第四轮（r3 → r4，PR #6112 对抗评审 DO-NOT-MERGE → 修复，`origin/main` @ 7e154b77b）
+
+3 blocker、9 should-fix、若干 nit；代码与本 ADR 同一 PR 修订。锁序修订属 T 层「默认前进 + 24h 异步否决」（`Ratified-by-default-2026-09-28`），登记 `docs/development/takeover-beiliao-20260821/decision-register.md` R-18。
+
+| 项 | 处置 | 落点 |
+|---|---|---|
+| TX-2 锁序：行锁 → 围栏与每个围栏写者（围栏 → INSERT meta_records 的 FK KEY SHARE）成 40P01 环，flag 关时默认配置即中 | 修：**围栏先于行锁**——无锁预读 link 外表、预 mint 新表 id、一次取全围栏 → 行锁 → 基线 → 门 → 计划 → 参与集合 ⊆ 已围栏（不等 409、不补取）；PG 锁类 SQLSTATE → 409；真库 G12（持源围栏的写者中途 INSERT 源表，flag off/on 均双方提交、无 40P01）；单元 E13 钉语句次序 | §7.2 第 4 步、§8、R-18 |
+| FE-1 / DATA-2 / DATA-3 `frozenLeftColumnIds` / `columnWidths` / `aggregations` 不在 allowlist → 冻结列视图整表 422、列宽 / 汇总静默丢 | 修：三键 remap（数组元素 / 对象键），未建 / 未知丢；R6b、E14、真库 G3 | §5.2 |
+| DATA-10 迁移前缀与 #6113 撞 | 修：改名 `zzzz20260927120500_add_meta_sheets_copy_provenance.ts`；#6113 先合、本 PR rebase | — |
+| DATA-11 / SEC-7 真库套件从未执行、G3 按现实现必红、哨兵在 describe.skip 内 | 修：G3 改（admin 复制 hidden 值应在、formula 由提交后重算写入、links 集合比较、`''` 保留）；哨兵移到 describe 外并按 `METASHEET_REAL_DB_TEST_STEP` fail-not-skip；用例改为 cases 模块挂进已登记的真库宿主文件（`multitable-conditional-rule-enforce-realdb.test.ts`），在现有 real-DB step 执行、无需新 lane | §9 |
+| SEC-2 / TX-1 / DATA-6 基线在记录读之后 | 修：基线紧随行锁、先于计划的任何源读；E5 改在首个记录 SELECT 前注入 | §7.2 第 4 步 |
+| DATA-5 省略 `''` / `[]` 使规则拒绝集不等 → 500 | 修：只省略 null；link 列以 meta_links 为准、空时只保留源 data 里显式的 `[]`；E15 | CS-21 |
+| DATA-1 relation-aggregation 引号参数保留源 id → 每行 #ERROR! | 修：函数族引号参数 remap（link 必映射；target / criteria 自指时映射）；`depends_on_field_id` 随之指向新 link；R9 钉函数族与 `univer-meta.ts` 表一致、E16 | §5.2 |
+| DATA-4 rollup 过滤条件 → 整表 422 | 修：`filters / conditions / filterConditions` 叶子按外表 / 自指处理；R10 | §5.2 |
+| DATA-7 提交后重算不水合 lookup/rollup → formula-over-lookup 恒 0 | 修：`recalculateAllFormulaFieldsForActor` 按复制者读权限先 `applyLookupRollup` 再算；真库 G13（7 + 1 = 8） | §7.2 第 7 步 |
+| SEC-1 托管快照的快照被洗成 'user' | 修：源 `copied_from_kind='plugin-managed'` 也算托管；E17、真库 G6 二代 | CS-14 / §6 |
+| TX-4 咨询锁 15s 超时后降级可建第二张表 | 修：复制路径 `onLockTimeout:'refuse'` → 409，模板安装保持降级；D22、E18 | CS-16、§8 |
+| FE-2 dry-run 超限直接 413，结构披露永不展示 | 修：dry-run 回 200 + `summary.overLimit`（记录不读）；执行仍 413；E9、H9、真库 G10 | §3、§8 |
+| TX-5 提交后 `loadFieldsForSheet` 在 try 外 | 修：移入 try | §7.2 第 7 步 |
+| SEC-3 事务内计数 / 413 / 422 先于 DB-fresh 门 | 随锁序重排消失：门先于计划 | §7.2 第 4 步 |
+| 真库补充 | G14 并发撤销（持行锁的会话撤销复制者授权 → 事务内 403、零写）；G15 tripwire（flag 关、基线后另一连接改源行 → 409、零写） | §9 |
