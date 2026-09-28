@@ -576,3 +576,25 @@ describe('computeSaveBlockReasons — exhaustive top-level guard coverage', () =
     })
   })
 })
+
+// 客户反馈 2026-09-24 #4b: condition_branch condition rows must be complete like the rule-level rows. A guard
+// added after G-B2-22, so it is pinned here directly rather than through the pre-G-B2-22 `originalCanSave` oracle.
+describe('computeSaveBlockReasons — condition_branch condition rows (#4b)', () => {
+  it('blocks an incomplete branch condition row and passes the row anchor through', () => {
+    const anchor = '[data-action-index="0"] [data-branch-index="1"] [data-branch-condition-index="2"]'
+    const reasons = computeSaveBlockReasons({
+      ...baseInput(),
+      isZh: true,
+      branchConditionsComplete: false,
+      firstIncompleteBranchConditionAnchor: anchor,
+    })
+    expect(reasons.map((r) => r.key)).toEqual(['branchConditionsIncomplete'])
+    expect(reasons[0].anchor).toBe(anchor)
+    expect(reasons[0].message).toBe('请完善条件分支中的所有条件（字段与取值均为必填）。')
+  })
+
+  it('omitted or true means complete — callers without branch rows keep saving', () => {
+    expect(computeSaveBlockReasons(baseInput())).toEqual([])
+    expect(computeSaveBlockReasons({ ...baseInput(), branchConditionsComplete: true })).toEqual([])
+  })
+})

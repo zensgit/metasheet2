@@ -353,7 +353,9 @@ describe('MetaAutomationRuleEditor', () => {
     const conditionRow = container.querySelector('[data-condition-index="0"]') as HTMLElement
     const [fieldSelect] = Array.from(conditionRow.querySelectorAll('.el-select')) as HTMLElement[]
     expect(epOptions(fieldSelect)[0]?.textContent?.trim()).toBe('-- 字段 --')
-    expect(epOptions(fieldSelect)[1]?.textContent?.trim()).toBe('Status')
+    // #4b: the field NAME stays raw; the localized field-type hint sits next to it.
+    expect(epOptions(fieldSelect)[1]?.el.querySelector('.meta-rule-editor__field-option-name')?.textContent?.trim()).toBe('Status')
+    expect(epOptions(fieldSelect)[1]?.el.querySelector('[data-field-type-hint]')?.textContent?.trim()).toBe('单选')
 
     epSetSelect(fieldSelect, 'fld_score')
     await flushPromises()
@@ -1903,7 +1905,7 @@ describe('MetaAutomationRuleEditor', () => {
     })
   })
 
-  it('renders date conditions with a date input and preserves ISO date values', async () => {
+  it('renders date conditions with a date picker and saves the ISO calendar day', async () => {
     const saved = vi.fn()
     const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, onSave: saved })
     await flushPromises()
@@ -1920,10 +1922,12 @@ describe('MetaAutomationRuleEditor', () => {
     epSetSelect(fieldSelect, 'fld_due')
     await flushPromises()
 
-    const valueInput = conditionRow.querySelector('.el-input__inner') as HTMLInputElement
-    expect(valueInput.type).toBe('date')
+    // #4b: an Element Plus date picker (value-format YYYY-MM-DD), no longer the native <input type="date">.
+    const valueInput = conditionRow.querySelector('[data-condition-value="date"] input') as HTMLInputElement
+    expect(valueInput.type).toBe('text')
     valueInput.value = '2026-05-11'
     valueInput.dispatchEvent(new Event('input'))
+    valueInput.dispatchEvent(new Event('change'))
     await flushPromises()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()

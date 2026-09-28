@@ -32,7 +32,7 @@
  * to the pre-existing bare `spawnSync('python3', …)`.
  */
 
-import { spawnSync as nodeSpawnSync } from 'node:child_process'
+import { spawnSync as nodeSpawnSync, spawn as nodeSpawn } from 'node:child_process'
 
 /**
  * Interpreter candidates, in order. `python3` first so CI's behavior is bit-for-bit what it was.
@@ -72,4 +72,70 @@ export function spawnPythonSync(args, options = {}, spawn = nodeSpawnSync) {
     return res
   }
   return last
+}
+
+/**
+ * Async counterpart of `spawnPythonSync` for callers that need node's non-blocking `spawn` — e.g.
+ * a long-lived Python HTTP mock server a test talks to while it keeps running, which a blocking
+ * `spawnSync` cannot express. Same candidate list, same ENOENT-only fallthrough: a candidate is
+ * retried ONLY when it could not be spawned at all (`ENOENT`). Any other outcome — the child
+ * spawning successfully, or a spawn error with a different code (EACCES, EPERM, …) — is the answer
+ * for that candidate and is never retried on the next one.
+ *
+ * Resolution is driven by the child's own `'spawn'` (success) / `'error'` (failure) events, not a
+ * fixed delay, so this never races a slow-to-launch interpreter. On success the returned child has
+ * already fired `'spawn'` — its `'error'`/`'exit'`/`'close'`/stdio events have not fired yet at
+ * that point in a normal launch, so the caller's own listeners (attached right after `await`)
+ * still see everything that happens next.
+ *
+ * @param {string[]} args
+ * @param {import('node:child_process').SpawnOptions} [options]
+ * @param {typeof nodeSpawn} [spawn] injection seam for tests — never used in production
+ * @returns {Promise<{ child: import('node:child_process').ChildProcess | null, error: (Error & { code?: string }) | null }>}
+ */
+export function spawnPython(args, options = {}, spawn = nodeSpawn) {
+  return new Promise((resolve) => {
+    let index = 0
+    const attempt = () => {
+      const candidate = PYTHON_CANDIDATES[index]
+      const child = spawn(candidate.command, [...candidate.prefixArgs, ...args], options)
+      const isLast = index === PYTHON_CANDIDATES.length - 1
+      const onSpawn = () => {
+        child.removeListener('error', onError)
+        resolve({ child, error: null })
+      }
+      const onError = (error) => {
+        child.removeListener('spawn', onSpawn)
+        if (error && error.code === 'ENOENT' && !isLast) {
+          index += 1
+          attempt()
+          return
+        }
+        resolve({ child: null, error })
+      }
+      child.once('spawn', onSpawn)
+      child.once('error', onError)
+    }
+    attempt()
+  })
+}
+
+/**
+ * `spawnPython`, but fail-closed: throws the same kind of message the sync guards already throw
+ * (see `ci-realdb-step-contract.mjs`'s `parseYamlDocument`) instead of returning `{ error }`, for
+ * call sites that just want the live child or a clear abort.
+ *
+ * @param {string[]} args
+ * @param {import('node:child_process').SpawnOptions} [options]
+ * @param {typeof nodeSpawn} [spawn]
+ * @returns {Promise<import('node:child_process').ChildProcess>}
+ */
+export async function spawnPythonOrThrow(args, options = {}, spawn = nodeSpawn) {
+  const { child, error } = await spawnPython(args, options, spawn)
+  if (error) {
+    throw new Error(
+      `no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; last error: ${error.message})`,
+    )
+  }
+  return child
 }

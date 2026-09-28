@@ -104,6 +104,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { configHistoryTime } from '../utils/meta-config-history-labels'
+import { zoneDayRangeUtcMs } from '../utils/business-timezone'
 import { historyActor } from '../utils/meta-record-labels'
 import HistoryBatchChangesList from './HistoryBatchChangesList.vue'
 import TrashModal from './TrashModal.vue'
@@ -166,6 +167,13 @@ const {
 // one was dismissed in this same mounted instance.
 const pinnedDismissed = ref(false)
 
+function filterDayBoundIso(dayKey: string, edge: 'start' | 'end'): string | undefined {
+  if (!dayKey) return undefined
+  const range = zoneDayRangeUtcMs(dayKey)
+  if (!range) return undefined
+  return new Date(edge === 'start' ? range.startMs : range.endMs - 1).toISOString()
+}
+
 function reload(): Promise<void> {
   return load(props.baseId, {
     // sheet scope: the active sheet by default; "all tables" clears it (the backend then spans every
@@ -175,8 +183,11 @@ function reload(): Promise<void> {
     actorId: filterActor.value,
     source: filterSource.value,
     action: filterAction.value,
-    from: filterFrom.value ? new Date(`${filterFrom.value}T00:00:00`).toISOString() : undefined,
-    to: filterTo.value ? new Date(`${filterTo.value}T23:59:59.999`).toISOString() : undefined,
+    // 客户反馈 2026-09-24 #4c follow-up: the picked days are BUSINESS days — the rows show their times in the
+    // business timezone (configHistoryTime), so the bounds are that day's 00:00 and the next day's 00:00 − 1 ms
+    // there, not the browser's local midnight.
+    from: filterDayBoundIso(filterFrom.value, 'start'),
+    to: filterDayBoundIso(filterTo.value, 'end'),
     fieldId: filterField.value,
     search: filterSearch.value,
   })

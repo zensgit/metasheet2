@@ -35,6 +35,7 @@
     </div>
     <MetaCommentsPanel
       :comments="comments"
+      :timestamp-formatter="formatCommentTimestamp"
       :loading="loading"
       :can-comment="canComment"
       :can-resolve="canResolve"
@@ -79,6 +80,7 @@ import { commentLabel, type MetaCommentLabelKey } from '../utils/meta-comment-la
 // S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
 // imported directly here rather than through the old-path re-export shim.
 import MetaCommentsPanel, { type MentionCandidateInput } from '../../shared/comments/components/MetaCommentsPanel.vue'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 
 // W2 S4 (OD-W2-7=b): props/emits below are the drawer's PUBLIC compat contract, unchanged from
 // pre-extraction — kept byte-identical so every existing MetaCommentsDrawer consumer (in-repo
@@ -147,6 +149,11 @@ const emit = defineEmits<{
 
 const { isZh } = useLocale()
 const l = (key: MetaCommentLabelKey) => commentLabel(key, isZh.value)
+
+// 客户反馈 2026-09-24 #4c follow-up: comment times in the business timezone, 24-hour (raw text if unreadable).
+function formatCommentTimestamp(iso: string): string {
+  return formatBusinessTimestamp(iso) ?? iso
+}
 </script>
 
 <style scoped>

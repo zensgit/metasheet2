@@ -300,6 +300,10 @@ describe('MetaRecordProvenancePanel — render', () => {
     expect(text).not.toContain('BL-2026-0001')
     expect(text).not.toContain('k3-wise')
     expect(text).not.toContain('rev-7')
+    // 客户反馈 2026-09-24 #4c follow-up: the run time (runCreatedAt 01:59Z) in the business timezone
+    // (Asia/Shanghai default), 24-hour, to the second — never the browser's zone / locale.
+    const times = Array.from(container.querySelectorAll('.meta-record-provenance__time')).map((el) => el.textContent?.trim())
+    expect(times).toEqual(['2026-05-28 09:59:00', '2026-05-28 09:59:00'])
   })
 
   // Codex review claim B: "provenance 跨 pipeline 混线" (cross-pipeline mixing). Verified against the

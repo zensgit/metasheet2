@@ -758,8 +758,9 @@ describe('审批进度卡片 — 完成时间', () => {
     const completed = qa(container, 'record-approval-completed-at')
     expect(completed).toHaveLength(1)
     expect(completed[0]!.textContent).toContain('完成时间')
-    // The formatted value is locale/TZ dependent; pin that it is the completedAt instant, not createdAt.
-    expect(completed[0]!.textContent).toContain(new Date('2026-09-14T06:30:00.000Z').toLocaleString())
+    // 客户反馈 2026-09-24 #4c follow-up: the completedAt instant in the business timezone (Asia/Shanghai
+    // default), 24-hour — independent of the browser's zone / locale.
+    expect(completed[0]!.textContent).toContain('2026-09-14 14:30')
 
     const entries = qa(container, 'record-approval-entry')
     expect(entries[0]!.querySelector('[data-test="record-approval-completed-at"]')).toBeNull()

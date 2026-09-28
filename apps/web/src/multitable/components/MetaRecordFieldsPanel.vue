@@ -80,9 +80,11 @@
             (visibleFields filters visible===false), so preview mirrors the
             backend's record-read gate; run additionally requires
             canEditField — the same layer the backend's run pre-check
-            enforces (#2106 F3).
+            enforces (#2106 F3). A11: nothing renders unless the server reports AI
+            available (`aiAvailable`, fail-closed) — the buttons could only answer
+            AI_BLOCKED otherwise.
           -->
-          <div v-if="fieldHasAiShortcut(field)" class="meta-record-drawer__ai-actions">
+          <div v-if="aiAvailable && fieldHasAiShortcut(field)" class="meta-record-drawer__ai-actions">
             <button
               type="button"
               class="meta-record-drawer__ai-btn"
@@ -208,16 +210,34 @@
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
           />
-          <input
-            v-else-if="canEditField(field.id) && field.type === 'dateTime'"
-            :id="`drawer_field_${field.id}`"
-            class="meta-record-drawer__input"
-            type="datetime-local"
-            :value="dateTimeInputValue(controlValue(field.id))"
-            :aria-invalid="fieldAriaInvalid(field.id)"
-            :aria-describedby="fieldAriaDescribedBy(field.id)"
-            @change="emitPatch(field.id, dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
-          />
+          <!-- dateTime: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c).
+               `change` carries the parsed UTC ISO (or null) and fires only when the instant differs. B2: a
+               draft the parser rejects stays in the box, patches nothing, and the field error below names the
+               format (values-free). S3: the calendar button opens the Element Plus date-time panel. -->
+          <template v-else-if="canEditField(field.id) && field.type === 'dateTime'">
+            <div class="meta-record-drawer__datetime">
+              <MetaDateTimeInput
+                :id="`drawer_field_${field.id}`"
+                class="meta-record-drawer__input"
+                :model-value="controlValue(field.id)"
+                :timezone="resolveDateTimeTimezone(field.property)"
+                :aria-invalid="fieldAriaInvalid(field.id)"
+                :aria-describedby="fieldAriaDescribedBy(field.id)"
+                @change="emitPatch(field.id, $event)"
+                @update:invalid="setDateTimeDraftInvalid(field.id, $event)"
+              />
+              <MetaDateTimePicker
+                :model-value="controlValue(field.id)"
+                :timezone="resolveDateTimeTimezone(field.property)"
+                @update:model-value="emitPatch(field.id, $event)"
+              />
+            </div>
+            <span
+              v-if="dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh)"
+              class="meta-record-drawer__tz-hint"
+              data-meta-datetime-zone-hint=""
+            >{{ dateTimeZoneHint(resolveDateTimeTimezone(field.property), isZh) }}</span>
+          </template>
           <label v-else-if="canEditField(field.id) && field.type === 'boolean'" class="meta-record-drawer__check">
             <input
               type="checkbox"
@@ -427,11 +447,12 @@ import {
 import { aiRetryCountdown, aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
-  dateTimeInputValue,
-  dateTimeValueFromLocalInput,
   locationAddressValue,
   locationValueFromAddress,
 } from '../utils/field-display'
+import { dateTimeZoneHint, resolveDateTimeTimezone } from '../utils/business-timezone'
+import MetaDateTimeInput from './cells/MetaDateTimeInput.vue'
+import MetaDateTimePicker from './cells/MetaDateTimePicker.vue'
 import { qrSvgFromText } from '../utils/qr-code'
 import {
   canEditField as canEditFieldShared,
@@ -458,6 +479,10 @@ const props = withDefaults(defineProps<{
   deleteAttachmentFn?: MetaAttachmentDeleteFn
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
+  /** A11 (customer feedback 2026-09-24 #7c): the server reports the AI surfaces available
+   *  (GET /api/multitable/ai/availability). FAIL-CLOSED default false: absent ⇒ no AI
+   *  preview/run buttons, whatever the field's saved aiShortcut config says. */
+  aiAvailable?: boolean
   /** B1-e: in-flight button runs keyed `${recordId}:${fieldId}` — the SAME ref
    *  the grid (MetaGridTable) and the drawer receive, so a run from any surface
    *  disables the button on all of them. Matches the workbench `onRunButton`
@@ -479,6 +504,7 @@ const props = withDefaults(defineProps<{
    *  ever handed to MetaCellRenderer — this panel never calls it. Absent → chips are not clickable. */
   fetchRecord?: (recordId: string) => Promise<MetaRecordContext>
 }>(), {
+  aiAvailable: false,
   buttonRunPending: () => [],
   fieldErrors: null,
   inspectorFieldLayout: null,
@@ -532,7 +558,21 @@ function emitPatch(fieldId: string, value: unknown) {
   emit('patch', fieldId, value)
 }
 
+// B2 (客户反馈 2026-09-24 #4c): dateTime drafts the parser rejected on a commit attempt, per field. Local to
+// this panel (no server round trip happened — nothing was patched), shown through the SAME field-error slot
+// the server-rejection path uses, with a values-free message. Cleared by MetaDateTimeInput itself the moment
+// the text parses / empties / the value changes from outside.
+const dateTimeDraftInvalid = ref<Record<string, boolean>>({})
+function setDateTimeDraftInvalid(fieldId: string, invalid: boolean) {
+  if (!!dateTimeDraftInvalid.value[fieldId] === invalid) return
+  const next = { ...dateTimeDraftInvalid.value }
+  if (invalid) next[fieldId] = true
+  else delete next[fieldId]
+  dateTimeDraftInvalid.value = next
+}
+
 function fieldError(fieldId: string): string | null {
+  if (dateTimeDraftInvalid.value[fieldId]) return lc('cell.dateTimeInvalid')
   const message = props.fieldErrors?.[fieldId]
   return typeof message === 'string' && message.length > 0 ? message : null
 }
@@ -1141,6 +1181,11 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__comment-anchor--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
+.meta-record-drawer__tz-hint { display: inline-block; margin-top: 2px; font-size: 12px; color: #909399; }
+/* dateTime composite (客户反馈 2026-09-24 #4c): the strict text box takes the width, the picker button sits beside it. */
+.meta-record-drawer__datetime { display: flex; align-items: center; gap: 6px; }
+.meta-record-drawer__datetime .meta-record-drawer__input { flex: 1; min-width: 0; }
+.meta-record-drawer__datetime .meta-datetime-input--invalid { border-color: #d14343; }
 .meta-record-drawer__input--multi { min-height: 96px; }
 /* min-height bumped 104px -> 132px (record inspector resizable-panel slice, 2026-09-05) to roughly
    match the template's `rows="6"` (was 5) at this font-size/line-height -- `resize: vertical`

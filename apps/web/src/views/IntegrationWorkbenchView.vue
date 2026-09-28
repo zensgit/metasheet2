@@ -396,6 +396,11 @@
       :run-provenance-loading="runProvenanceLoading"
       :run-provenance-error="runProvenanceError"
       :run-provenance-entries="runProvenanceEntries"
+      :run-provenance-truncation-notice="runProvenanceTruncationNotice"
+      :run-provenance-can-load-more="runProvenanceCanLoadMore"
+      :run-provenance-loading-more="runProvenanceLoadingMore"
+      :run-provenance-load-more-error="runProvenanceLoadMoreError"
+      :load-more-run-provenance="loadMoreRunProvenance"
       :toggle-run-provenance="toggleRunProvenance"
       :dead-letter-error-label="deadLetterErrorLabel"
       :dead-letter-error-hint="deadLetterErrorHint"
@@ -517,6 +522,7 @@ import {
   type IntegrationPipelineRun,
   type IntegrationPipelineRunResult,
   type IntegrationProvenanceTimelineEntry,
+  type IntegrationRunProvenancePage,
   type IntegrationTargetWriteSummary,
   type IntegrationStagingDescriptor,
   type IntegrationStagingInstallResult,
@@ -977,6 +983,15 @@ const runProvenanceLoading = ref(false)
 const runProvenanceError = ref('')
 const runProvenanceEntries = ref<IntegrationProvenanceTimelineEntry[]>([])
 let runProvenanceRequestId = 0
+// f-prov200: the route answers ONE page (server default 200). These four refs carry what the last
+// page disclosed about the rest of the timeline, and are only ever written together with
+// runProvenanceEntries (applyRunProvenancePage), so the notice can never describe a different set
+// of entries than the one on screen.
+const runProvenanceTotal = ref<number | null>(null)
+const runProvenanceTruncated = ref(false)
+const runProvenanceNextCursor = ref<string | null>(null)
+const runProvenanceLoadingMore = ref(false)
+const runProvenanceLoadMoreError = ref('')
 // DF-N2-3 (read-only): per-dead-letter cross-run provenance timeline, fetched lazily
 // on expand by the row's idempotency key (rowId). No write/replay affordance here.
 const expandedDeadLetterProvenanceIds = ref<Set<string>>(new Set())
@@ -3618,13 +3633,37 @@ async function refreshRunDetail(showLoading: boolean): Promise<void> {
 async function refreshRunProvenanceQuietly(runId: string): Promise<void> {
   runProvenanceRequestId += 1
   const requestId = runProvenanceRequestId
+  // f-prov200: this re-read REPLACES the timeline with its first page, so a "load more" still in
+  // flight now extends a timeline that no longer exists — its answer is fenced out by the token
+  // above, and its button must not stay stuck in the loading state waiting for it. (A "load more"
+  // clicked AFTER this point captures the new token; loadMoreRunProvenance fences that one by the
+  // timeline it was issued for.)
+  runProvenanceLoadingMore.value = false
   try {
-    const entries = await getIntegrationRunProvenance(runId, currentScope())
+    const page = await getIntegrationRunProvenance(runId, currentScope())
     if (requestId !== runProvenanceRequestId) return
-    runProvenanceEntries.value = entries
+    applyRunProvenancePage(page, 'replace')
   } catch {
     // Keep the last known good timeline; this is a background refresh, not the explicit toggle.
   }
+}
+
+// f-prov200: the ONE place a provenance page lands. Entries and the page's disclosure are written
+// together, so the truncation notice always describes exactly the entries on screen. 'append'
+// keeps only events strictly after the last one already shown — a server that answered the same
+// page twice cannot duplicate events in the timeline.
+function applyRunProvenancePage(page: IntegrationRunProvenancePage, mode: 'replace' | 'append'): void {
+  if (mode === 'replace') {
+    runProvenanceEntries.value = page.items
+  } else {
+    const current = runProvenanceEntries.value
+    const lastIndex = current.length > 0 ? current[current.length - 1].eventIndex : -Infinity
+    runProvenanceEntries.value = current.concat(page.items.filter((entry) => entry.eventIndex > lastIndex))
+  }
+  runProvenanceTotal.value = page.total
+  runProvenanceTruncated.value = page.truncated
+  runProvenanceNextCursor.value = page.nextCursor
+  runProvenanceLoadMoreError.value = ''
 }
 
 // Q4a: the provenance section belongs to ONE run. Resetting it on every open/close is what stops
@@ -3634,6 +3673,11 @@ function resetRunProvenance(): void {
   runProvenanceLoading.value = false
   runProvenanceError.value = ''
   runProvenanceEntries.value = []
+  runProvenanceTotal.value = null
+  runProvenanceTruncated.value = false
+  runProvenanceNextCursor.value = null
+  runProvenanceLoadingMore.value = false
+  runProvenanceLoadMoreError.value = ''
   runProvenanceRequestId += 1
 }
 
@@ -3710,18 +3754,89 @@ async function toggleRunProvenance(): Promise<void> {
   runProvenanceRequestId += 1
   const requestId = runProvenanceRequestId
   const runId = runDetailId.value
+  // f-prov200: like refreshRunProvenanceQuietly, this read REPLACES the timeline and its token bump
+  // fences out any 加载更多 still in flight — so that orphaned request must not keep the button
+  // stuck in its loading state (its own finally no longer owns the flag).
+  runProvenanceLoadingMore.value = false
   runProvenanceLoading.value = true
   try {
     // Same scope the detail read used — currentScope() is the single source, so the timeline can
     // never be looked up in a workspace the run was not read under.
-    const entries = await getIntegrationRunProvenance(runId, currentScope())
+    const page = await getIntegrationRunProvenance(runId, currentScope())
     if (requestId !== runProvenanceRequestId) return
-    runProvenanceEntries.value = entries
+    applyRunProvenancePage(page, 'replace')
   } catch (error) {
     if (requestId !== runProvenanceRequestId) return
     runProvenanceError.value = runProvenanceErrorCopy(error)
   } finally {
     if (requestId === runProvenanceRequestId) runProvenanceLoading.value = false
+  }
+}
+
+// f-prov200: the timeline is incomplete when the last page said so (truncated — fail-closed in
+// the service when the answer did not say) OR when the server's own count exceeds what is on
+// screen. Either alone is enough to show the notice; neither is inferred from entries.length.
+const runProvenanceIncomplete = computed(() => {
+  if (runProvenanceTruncated.value) return true
+  const total = runProvenanceTotal.value
+  return total !== null && total > runProvenanceEntries.value.length
+})
+
+const runProvenanceCanLoadMore = computed(() => runProvenanceIncomplete.value && runProvenanceNextCursor.value !== null)
+
+// '' (no notice) only when the timeline on screen is known to be complete.
+const runProvenanceTruncationNotice = computed(() => {
+  if (!runProvenanceIncomplete.value) return ''
+  const shown = runProvenanceEntries.value.length
+  const total = runProvenanceTotal.value
+  if (total !== null && total > shown) {
+    return bi(
+      `时间线未显示完整：已显示 ${shown} 条，共 ${total} 条溯源事件。`,
+      `Timeline incomplete: showing ${shown} of ${total} provenance events.`,
+    )
+  }
+  return bi(
+    `时间线可能未显示完整：已显示 ${shown} 条溯源事件，后面可能还有更多。`,
+    `Timeline may be incomplete: showing ${shown} provenance events; more may follow.`,
+  )
+})
+
+// f-prov200 (read-only): append the next page after the last event on screen. Does NOT bump the
+// request token — it extends the current timeline rather than replacing it — but it captures the
+// token, so a reset (close/re-open) or a replacing re-read ISSUED BEFORE this click fences its
+// answer out instead of letting run A's next page append under run B.
+//
+// The token alone is not enough: a polling re-read that is already in flight has bumped the token
+// before the click, so the click captures the NEW token while the old timeline (and its cursor)
+// is still on screen. If that re-read lands first it replaces the timeline with page one, and a
+// token-only fence would then append the old cursor's page after it — a silent gap in the middle
+// and no cursor left to recover it. So the page is also fenced against the exact timeline it was
+// issued for: every write to the timeline assigns a NEW array (a replace lands page.items, an
+// append concatenates, a reset clears), so an unchanged reference means nothing has landed since
+// the cursor was read, and the page continues exactly the events on screen.
+async function loadMoreRunProvenance(): Promise<void> {
+  const cursor = runProvenanceNextCursor.value
+  const runId = runDetailId.value
+  if (!runId || !cursor || runProvenanceLoadingMore.value) return
+  const requestId = runProvenanceRequestId
+  const issuedFor = runProvenanceEntries.value
+  const stillExtendsIssuedTimeline = () => requestId === runProvenanceRequestId && runProvenanceEntries.value === issuedFor
+  runProvenanceLoadingMore.value = true
+  runProvenanceLoadMoreError.value = ''
+  try {
+    const page = await getIntegrationRunProvenance(runId, currentScope(), { cursor })
+    if (!stillExtendsIssuedTimeline()) return
+    applyRunProvenancePage(page, 'append')
+  } catch (error) {
+    // A failed page of a timeline that was replaced meanwhile says nothing about the one on screen.
+    if (!stillExtendsIssuedTimeline()) return
+    // The events already on screen stay, and so does the notice + button: a failed page is
+    // retryable and must not make the timeline look complete.
+    runProvenanceLoadMoreError.value = runProvenanceErrorCopy(error)
+  } finally {
+    // The loading flag is owned per token, not per timeline: a page discarded because a re-read
+    // replaced the timeline must still release the button so the NEW timeline can be paged.
+    if (requestId === runProvenanceRequestId) runProvenanceLoadingMore.value = false
   }
 }
 
