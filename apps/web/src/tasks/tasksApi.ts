@@ -308,8 +308,7 @@ export async function reopenTask(id: string, scope: ReopenScope): Promise<Reopen
  *  on every call, never cached, so a viewer who changes system timezone mid-session is answered
  *  correctly on the next poll.
  *
- *  `suppressUnauthorizedRedirect: true` — same discipline as this codebase's other background/nav-
- *  shell polling reads (`useSessionOrg`, `usePlatformApps`, the attendance calendar widgets): this
+ *  `suppressUnauthorizedRedirect: true` — the usual discipline for a background nav-shell poll: this
  *  request fires unconditionally every 60s from the nav badge, not from a page the viewer navigated
  *  to on purpose. Without it, a session that expired mid-poll would silently bounce the viewer to
  *  `/login` out of nowhere; `useTasksBadge` already treats a non-`ok` result (401 included) as

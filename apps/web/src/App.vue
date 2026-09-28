@@ -51,8 +51,8 @@
             <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
             <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
             <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
-                 the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` the same way the
-                 approvals nav badge is, so a badge-only failure cannot blank the shell, and gated
+                 the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` so a badge-only
+                 failure cannot blank the shell, and gated
                  on `!isPublicRoute` so it never polls off an anonymous/guest route. -->
             <span v-if="canUseTasks" class="nav-tasks">
               <router-link to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
@@ -225,7 +225,7 @@ const navLabels = computed(() => {
       approvalMetrics: '审批 SLA',
       approvalBatchTransfer: '批量转交',
       tasks: '任务',
-      // Values-free, same convention as `approvalTodo`: names the surface, never the count.
+      // Values-free: names the surface, never the count.
       tasksTodo: '待办任务',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',

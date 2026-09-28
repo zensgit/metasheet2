@@ -1,9 +1,8 @@
 /**
  * Viewer-facing date/time display for the `/tasks/:id` detail page — `dueAt` (a TIMED task's
  * absolute due instant) and an assignee's `completedAt`. Both are ISO instants from the backend;
- * this renders them in the VIEWER's own local time, zh-CN style — the same `Intl.DateTimeFormat`
- * idiom this codebase's other views already use for a record's date/time (e.g.
- * `AfterSalesView.formatRecordDate`, the elearning wallet sections' local `formatDate`):
+ * this renders them in the VIEWER's own local time, zh-CN style, with the common
+ * `Intl.DateTimeFormat` options for a record's date/time:
  * `dateStyle: 'medium'`, `timeStyle: 'short'`, 24h (`hour12: false`).
  *
  * (P3-3 correction: this used to be shown as the RAW ISO string, with a comment claiming the
