@@ -345,11 +345,11 @@
             type="button"
             class="sp-board__button"
             data-testid="stock-prep-project-board-notify-next"
-            :disabled="busy || !handoff.isCurrentHandler || handoff.terminal"
+            :disabled="busy || !notifyPressable"
             :title="notifyTitle"
             @click="notifyNext"
           >
-            {{ bi('通知下一步', 'Tell the next person') }}
+            {{ notifyLabel }}
           </button>
 
           <!-- 导出Excel — the #5437 client, reused. Same route, same gate, same download trigger. -->
@@ -934,11 +934,14 @@ const archiveText = computed<StockPrepPlainEntry>(() => {
 /**
  * 轮到谁. Three honest answers, and the first one is the important one: a deployment with no handoff
  * chain must not be told a turn it does not have.
+ *
+ * ONLY `completed` MEANS DONE. `terminal` is the LAST step being the CURRENT one, not yet handed on —
+ * reading it as "finished" told the last handler 「已经走完最后一步」 about the step still in front of them.
  */
 const turnText = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return bi('这台系统没有设置流转顺序', 'No handoff order is set up on this system')
-  if (cursor.completed || cursor.terminal) return bi('已经走完最后一步', 'The last step is done')
+  if (cursor.completed) return bi('已经走完最后一步', 'The last step is done')
   const step = cursor.currentStepKey ?? ''
   const position = cursor.stepIndex !== null && cursor.stepCount > 0
     ? bi(`(第 ${cursor.stepIndex + 1}/${cursor.stepCount} 步)`, ` (step ${cursor.stepIndex + 1} of ${cursor.stepCount})`)
@@ -1001,9 +1004,27 @@ const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return ''
-  if (cursor.terminal) return bi('已经是最后一步了', 'This is already the last step')
   if (!cursor.isCurrentHandler) return bi('现在不是轮到您,所以不用您来通知', 'It is not your turn, so this is not yours to send')
   return ''
+})
+
+/**
+ * MAY THIS CALLER PRESS 通知下一步. `terminal` is NOT "the chain is done": the server sets it when the
+ * LAST step is the current one and has not been handed on (http-routes.cjs, the GET /handoff answer:
+ * `terminal: !completed && stepIndex === steps.length - 1`), and pressing it there is what tells
+ * 仓库/采购 — the confirmation queue offers exactly that press. Only `completed` means nothing is left.
+ * The server re-checks the handler on the POST whatever this says; the page only stops hiding it.
+ */
+const notifyPressable = computed<boolean>(() => {
+  const cursor = handoff.value
+  return Boolean(cursor && cursor.isCurrentHandler && !cursor.completed)
+})
+
+/** On the LAST step the press tells 仓库/采购, not "the next person" — the queue's own label (its H-09). */
+const notifyLabel = computed<string>(() => {
+  const cursor = handoff.value
+  if (cursor && cursor.terminal) return bi('通知仓库和采购', 'Notify warehouse & purchasing')
+  return bi('通知下一步', 'Tell the next person')
 })
 
 /**
@@ -1027,7 +1048,6 @@ const posture = computed<StockPrepPosture>(() => stockPrepPosture({
  */
 const nextStep = computed<OperatorNextStepResult | null>(() => {
   if (!openedProjectNo.value || visibleErrorCode.value) return null
-  const cursor = handoff.value
   const step = operatorNextStep({
     boardFound: board.value !== null,
     pulledRowCount: board.value?.pulledRowCount ?? 0,
@@ -1035,7 +1055,9 @@ const nextStep = computed<OperatorNextStepResult | null>(() => {
     pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
     justConfirmed: justConfirmed.value,
     hasExported: Boolean(board.value?.lastExportAt),
-    isCurrentHandler: Boolean(cursor?.isCurrentHandler && !cursor.terminal),
+    // The SAME rule as the button, so the bar never offers a press the button refuses — or says
+    // 「没有等您的事」 above a last step that is still waiting on this operator.
+    isCurrentHandler: notifyPressable.value,
   })
   // R-11 again: a control the caller cannot exercise is ABSENT, not disabled and not silently inert.
   // Both sync-driving actions are gated by the same predicate the composed panel gates its own run
@@ -1362,7 +1384,7 @@ const HANDOFF_STEP_MISMATCH_CODE = 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH'
 async function notifyNext(): Promise<void> {
   const current = board.value
   const cursor = handoff.value
-  if (!current || !current.projectNo || !cursor || !cursor.isCurrentHandler || cursor.terminal) return
+  if (!current || !current.projectNo || !cursor || !notifyPressable.value) return
   // THE STEP THIS PRESS COMPLETES, derived exactly as the confirmation queue derives it: the owed
   // resend first, then the current step. The route refuses a press without it (400
   // STOCK_PREPARATION_HANDOFF_REQUEST_INVALID) — which is what every press on this page got while it

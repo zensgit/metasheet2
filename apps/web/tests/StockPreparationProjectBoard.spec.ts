@@ -274,6 +274,8 @@ async function flush(): Promise<void> {
 //
 //   BNP-1 A message that did not go out is said as that — never as 「这台系统没有配通知渠道」 (a
 //         fresh advance) or as 「没有重复交」 (an owed resend that failed again).
+//   BNP-2 `terminal` means the LAST step is the current one, not that the chain is done: its handler
+//         can press (the press tells 仓库/采购), and only `completed` reads as finished.
 //
 // The fixtures are the server's GET /handoff and POST /handoff/advance shapes
 // (plugins/plugin-integration-core/lib/http-routes.cjs, stockPreparationHandoff /
@@ -488,6 +490,78 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
       expect(notice, entry.label).not.toContain(FAILED_LEAD)
       remount()
     }
+  })
+
+  // ---- BNP-2 the last step --------------------------------------------------------------------
+
+  function nextStepKey(root: HTMLElement): string | null {
+    return root.querySelector('[data-testid="stock-prep-project-board-next-step"]')?.getAttribute('data-next-step') ?? null
+  }
+
+  /** The chain after its last step was handed on: GET /handoff's `completed` answer. */
+  const FINISHED = { stepIndex: 4, currentStepKey: null, terminal: false, completed: true, isCurrentHandler: false, notifiedStepIndex: 3 }
+
+  it('BNP-2: the handler of the LAST step can press, is told it goes to 仓库/采购, and sends that step', async () => {
+    route({
+      handoff: [
+        () => ok(cursor({ stepIndex: 3, currentStepKey: 'final_review', terminal: true, notifiedStepIndex: 2 })),
+        () => ok(cursor(FINISHED)),
+      ],
+      advance: () => advanced({ fromStepKey: 'final_review', currentStepKey: null, stepIndex: null, terminal: true }),
+    })
+    const root = await mountBoard()
+
+    // Before: the step is theirs and still open — not "finished".
+    const turn = text(root, 'stock-prep-project-board-turn')
+    expect(turn).toContain('轮到您了')
+    expect(turn, 'the last step is in front of them, not behind them').not.toContain('已经走完最后一步')
+    const button = notifyButton(root)!
+    expect(button.textContent).toContain('仓库')
+    expect(button.textContent).toContain('采购')
+    expect(button.getAttribute('title') ?? '', 'no "already the last step" refusal').not.toContain('最后一步')
+    // The 「下一步」 bar agrees with the button instead of saying nothing is waiting on them.
+    expect(nextStepKey(root)).toBe('notify')
+
+    await press(root)
+    expect(advanceBodies().map((body) => body.fromStepKey)).toEqual(['final_review'])
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).toBeNull()
+    // After: the re-read says finished, and now the button is done.
+    expect(text(root, 'stock-prep-project-board-turn')).toContain('已经走完最后一步')
+    expect(notifyButton(root)!.disabled).toBe(true)
+  })
+
+  it('BNP-2 control: a FINISHED chain still reads as finished and posts nothing', async () => {
+    // The server's own shape, and the queue's H-13 shape: `isCurrentHandler` left true, so the ONLY
+    // thing withholding the press is `completed`.
+    for (const finished of [FINISHED, { ...FINISHED, isCurrentHandler: true }]) {
+      route({ handoff: [() => ok(cursor(finished))] })
+      const root = await mountBoard()
+      const label = `isCurrentHandler: ${String(finished.isCurrentHandler)}`
+      expect(text(root, 'stock-prep-project-board-turn'), label).toContain('已经走完最后一步')
+      const button = notifyButton(root)!
+      expect(button.disabled, label).toBe(true)
+      button.click()
+      await flush()
+      expect(advanceBodies(), label).toHaveLength(0)
+      expect(nextStepKey(root), label).not.toBe('notify')
+      remount()
+    }
+  })
+
+  it('BNP-2 control: the last step held by SOMEONE ELSE stays unpressable, and names that step', async () => {
+    route({
+      handoff: [() => ok(cursor({ stepIndex: 3, currentStepKey: 'final_review', terminal: true, isCurrentHandler: false, notifiedStepIndex: 2 }))],
+    })
+    const root = await mountBoard()
+    const button = notifyButton(root)!
+    expect(button.disabled).toBe(true)
+    button.click()
+    await flush()
+    expect(advanceBodies()).toHaveLength(0)
+    const turn = text(root, 'stock-prep-project-board-turn')
+    expect(turn).toContain('final_review')
+    expect(turn).not.toContain('已经走完最后一步')
+    expect(nextStepKey(root)).not.toBe('notify')
   })
 })
 

@@ -37,7 +37,10 @@ export interface OperatorNextStepInput {
   justConfirmed: boolean
   /** `board.lastExportAt` is present. */
   hasExported: boolean
-  /** The signed-in operator holds the current handoff step, and it is not the terminal one. */
+  /**
+   * The signed-in operator may press 通知下一步 right now — the caller passes the SAME rule its button
+   * uses. That includes the LAST step: `terminal` means the last step is current, not that it is done.
+   */
   isCurrentHandler: boolean
 }
 
