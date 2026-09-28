@@ -37,7 +37,7 @@ test('readonly bridge rejects unsafe query surfaces by code', async () => {
   for (const marker of [
     'UNKNOWN_OBJECT',
     'INVALID_LIMIT',
-    'UNSUPPORTED_FILTERS',
+    'INVALID_FILTERS',
     'RAW_SQL_REJECTED',
     'Raw SQL is not accepted by the readonly Bridge Agent.',
     'SELECT TOP $Limit',
@@ -47,8 +47,65 @@ test('readonly bridge rejects unsafe query surfaces by code', async () => {
   ]) {
     assert.match(script, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
+});
 
-  assert.doesNotMatch(script, /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE)\s+/i);
+// This is its own test (not folded into the marker checks above) so that it
+// still runs, and still fails a PR, even when one of the marker assertions
+// above throws first -- as happened when #2311 (2026-06-05) renamed the
+// filter-rejection marker from UNSUPPORTED_FILTERS to INVALID_FILTERS and
+// left this file unupdated: the marker `assert.match` threw before the write
+// verb check below it ever ran.
+test('readonly bridge script contains no SQL/ADO write or extra execute verbs', async () => {
+  const script = await readScript();
+
+  // Matched as whole words, case-insensitively, across the *entire* script
+  // text -- including PowerShell comments (`#...`) and embedded SQL string
+  // literals. Comments are not exempt: a stale comment naming a write verb
+  // (for example, copy-pasted from a T-SQL snippet while drafting a query)
+  // is exactly the kind of drift this test exists to catch, and comments are
+  // trivially uncommented by later edits. If the script ever needs to name
+  // one of these words legitimately -- for example inside a human-facing
+  // refusal message that enumerates the forbidden verbs -- that occurrence
+  // must be carved out narrowly (e.g. asserted at its own literal/line)
+  // rather than by removing or loosening an entry below. No such occurrence
+  // exists in the script today.
+  const forbiddenVerbs = [
+    'INSERT',
+    'UPDATE',
+    'DELETE',
+    'MERGE',
+    'DROP',
+    'ALTER',
+    'CREATE',
+    'TRUNCATE',
+    'GRANT',
+    'REVOKE',
+    'EXEC',
+    'EXECUTE',
+    'sp_executesql',
+    'ExecuteNonQuery',
+    'ExecuteScalar',
+  ];
+
+  for (const verb of forbiddenVerbs) {
+    assert.doesNotMatch(
+      script,
+      new RegExp(`\\b${verb}\\b`, 'i'),
+      `bridge-agent-readonly.ps1 must not contain the write/execute verb "${verb}"`,
+    );
+  }
+
+  // ExecuteReader is the only ADO.NET command-execution call the read path
+  // may use. Matching the generic `Execute<Word>` shape (rather than
+  // enumerating known ADO.NET method names) also catches variants such as
+  // ExecuteXmlReader or ExecuteDataSet that are not individually named above.
+  const executeCalls = [...script.matchAll(/\bExecute[A-Za-z]+\b/g)].map((match) => match[0]);
+  assert.ok(executeCalls.length > 0, 'expected at least one Execute* call in the script');
+  assert.deepEqual(
+    executeCalls,
+    executeCalls.map(() => 'ExecuteReader'),
+    `expected every command execution to be ExecuteReader, found: ${JSON.stringify(executeCalls)}`,
+  );
 });
 
 test('example config is localhost-only, credential-by-env, and object-allowlisted', async () => {
