@@ -37,6 +37,16 @@
 //        with their own code family and never each other's.
 //   X-09 STRUCTURE: the export handler calls the shared wall BEFORE the records read and does not
 //        grow a private ownership check; http-routes.cjs asks the ownership port in exactly one place.
+//   X-10 THE CLAIMLESS SHAPE — THE DEMO MACHINE'S. Every case above hands the route a verified token
+//        claim (`authenticatedTenantId`). The demo machine's tokens carry none: the host never sets
+//        req.authenticatedTenantId, the scope takes the tenant from user.tenantId, the host directory
+//        vouches for the pairing, and `scope.tenantClaimVerified` comes back FALSE. A wall gated on
+//        that flag passed every claim-bearing case while leaving exactly this shape unguarded, so:
+//        X-10a the other tenant's claimless operator is still refused 409 with zero reads, and
+//        X-10b the owning tenant's claimless operator still exports — with the wall having RUN.
+//   X-11 THE PORT REJECTING IS NOT A PASS. When the host's registry read throws there is no ownership
+//        fact at all; the route must answer non-2xx with zero records reads and no audit row. Its
+//        status and message ride the generic sendError path (pre-existing behaviour, not pinned).
 //
 // Hermetic: no DB, no network, no xlsx. The real-registry, real-records witness of X-01/X-02/X-03 is
 // packages/core-backend/tests/integration/stock-preparation-prep-line-export-tenant-wall-realdb.test.ts.
@@ -56,6 +66,7 @@ const {
   CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
   PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
 } = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
+const { resolveOperatorValueScope } = require(path.join(LIB, 'stock-preparation-operator-scope.cjs'))
 const {
   derivedSheetId,
   makeStrictRecordsApi,
@@ -154,6 +165,7 @@ function seededRows(stagingProjectId) {
  *   'no-derive'   isSheetOwnedByProject only (a host exposing no derivation)
  *   'no-port'     a provisioning surface without the ownership port
  *   'none'        no provisioning surface at all
+ *   'throws'      as 'full', but isSheetOwnedByProject REJECTS (the host's registry read failed)
  */
 function mount({ boundSheet = HAND_BOUND_SHEET, objectId, registry = { [HAND_BOUND_SHEET]: STAGING_A }, port = 'full', rowsStaging = STAGING_A } = {}) {
   const routes = new Map()
@@ -182,10 +194,11 @@ function mount({ boundSheet = HAND_BOUND_SHEET, objectId, registry = { [HAND_BOU
     if (port !== 'no-port') {
       provisioning.isSheetOwnedByProject = async (sheetId, projectId) => {
         registryCalls.push({ sheetId, projectId })
+        if (port === 'throws') throw new Error('ownership registry read failed (fixture)')
         return Object.prototype.hasOwnProperty.call(registry, sheetId) && registry[sheetId] === projectId
       }
     }
-    if (port === 'full') {
+    if (port === 'full' || port === 'throws') {
       provisioning.getObjectSheetId = (projectId, derivedObjectId) => {
         deriveCalls.push({ projectId, objectId: derivedObjectId })
         return derivedSheetId(projectId, derivedObjectId)
@@ -229,13 +242,15 @@ function mount({ boundSheet = HAND_BOUND_SHEET, objectId, registry = { [HAND_BOU
   }
   // A seam modelling a REAL membership relation: each operator belongs to exactly one tenant, so a
   // refusal below is the WALL, never a scope refusal wearing its clothes.
+  const directoryCalls = []
   services.tenantPrincipalDirectory = {
     async verifyTenantMembership(input) {
+      directoryCalls.push({ userId: input && input.userId, tenantId: input && input.tenantId })
       return { member: (MEMBERSHIPS[input && input.userId] || []).includes(input && input.tenantId) }
     },
   }
   httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
-  return { routes, recordsReads, registryCalls, deriveCalls, auditAppends, xlsxCalls }
+  return { routes, recordsReads, registryCalls, deriveCalls, directoryCalls, auditAppends, xlsxCalls }
 }
 
 function createResponse() {
@@ -256,6 +271,23 @@ async function exportAs(harness, user, query = {}) {
   assert.ok(handler, 'the export route is registered')
   const res = createResponse()
   await handler({ user, authenticatedTenantId: user.tenantId, body: {}, query: { projectNo: PROJECT_NO_A, ...query }, params: {} }, res)
+  return res
+}
+
+// THE CLAIMLESS REQUEST — the demo machine's auth shape. The token carried no tenant claim, so the
+// host's jwt middleware never set `req.authenticatedTenantId` at all (the key is ABSENT, not empty);
+// the only tenant on the request is `user.tenantId`, which the host directory must vouch for.
+function claimlessRequest(user, query = {}) {
+  return { user, body: {}, query: { projectNo: PROJECT_NO_A, ...query }, params: {} }
+}
+
+async function exportWithoutTenantClaimAs(harness, user, query = {}) {
+  const handler = harness.routes.get(`GET ${EXPORT_PATH}`)
+  assert.ok(handler, 'the export route is registered')
+  const req = claimlessRequest(user, query)
+  assert.equal(Object.prototype.hasOwnProperty.call(req, 'authenticatedTenantId'), false, 'fixture: no verified claim on the request')
+  const res = createResponse()
+  await handler(req, res)
   return res
 }
 
@@ -437,6 +469,64 @@ async function main() {
       'the export wrapper delegates to the shared wall')
     assert.ok(/function assertCarryTargetBelongsToTenant\([^)]*\) \{\n\s+return assertStockPreparationTargetBelongsToTenant\(/.test(code),
       'and so does the carry wrapper')
+  })
+
+  // Fixture sanity for X-10: the claimless request really is the shape whose scope reports an
+  // UNVERIFIED claim — otherwise X-10 would be re-running X-01/X-02 under another name. Asked of the
+  // real scope module with the exact `authenticatedTenantId` the handler will read off the request.
+  for (const operator of [OPERATOR_A, OPERATOR_B]) {
+    const req = claimlessRequest(operator)
+    const scope = await resolveOperatorValueScope({
+      user: req.user,
+      authenticatedTenantId: req.authenticatedTenantId,
+      explicitTenantIds: [],
+      tenantPrincipalDirectory: { async verifyTenantMembership(input) { return { member: (MEMBERSHIPS[input.userId] || []).includes(input.tenantId) } } },
+    })
+    assert.equal(scope.tenantId, operator.tenantId, 'the claimless scope resolves to user.tenantId')
+    assert.equal(scope.tenantClaimVerified, false, 'and reports the claim as NOT verified — the demo-machine shape')
+  }
+
+  await run('X-10a claimless token (demo-machine shape): the OTHER tenant\'s operator is still refused 409 with zero reads', async () => {
+    const harness = mount()
+    const res = await exportWithoutTenantClaimAs(harness, OPERATOR_B)
+    // The leak itself first: a wall that runs only for verified claims serves this request 200.
+    assert.equal(everythingSent(res).includes(A_MATERIAL), false, 'tenant A\'s material name must not reach tenant B\'s claimless operator')
+    assert.deepEqual(harness.recordsReads, [], 'tenant B\'s claimless click must not read tenant A\'s sheet at all')
+    assertRefusedWithZeroReads(harness, res, 409, 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
+    assert.deepEqual(plain(res.body.error.details), { objectId: MAIN_OBJECT_ID })
+    assert.deepEqual(harness.directoryCalls, [{ userId: OPERATOR_B.id, tenantId: TENANT_B }],
+      'the scope was vouched for by the host directory, not by a claim')
+    assert.deepEqual(harness.registryCalls, [{ sheetId: HAND_BOUND_SHEET, projectId: STAGING_B }],
+      'the wall RAN on the claimless path, asking about the directory-vouched tenant\'s own project')
+  })
+
+  await run('X-10b claimless token (demo-machine shape): the owning tenant\'s operator still exports, and the wall ran to prove it', async () => {
+    const harness = { ...mount(), boundSheet: HAND_BOUND_SHEET }
+    const res = await exportWithoutTenantClaimAs(harness, OPERATOR_A)
+    assertExported(harness, res)
+    assert.deepEqual(harness.directoryCalls, [{ userId: OPERATOR_A.id, tenantId: TENANT_A }])
+    assert.deepEqual(harness.registryCalls, [{ sheetId: HAND_BOUND_SHEET, projectId: STAGING_A }],
+      'the 200 is the registry\'s proof, not the wall being skipped')
+    assert.deepEqual(harness.deriveCalls, [], 'registry-proven: the derived-id fallback is never consulted')
+  })
+
+  await run('X-11 the ownership port REJECTING fails closed: non-2xx, zero records reads, no audit row (both operators)', async () => {
+    // Both operators, because a fail-open means something different for each: for the owning tenant it
+    // reads a sheet on no evidence at all; for the other tenant it serves tenant A's values.
+    for (const [operator, stagingProjectId] of [[OPERATOR_A, STAGING_A], [OPERATOR_B, STAGING_B]]) {
+      const label = operator.id
+      const harness = mount({ port: 'throws' })
+      const res = await exportAs(harness, operator)
+      assert.equal(everythingSent(res).includes(A_MATERIAL), false, `${label}: no material name in anything sent`)
+      assert.ok(res.statusCode < 200 || res.statusCode >= 300, `${label}: expected a non-2xx answer, got ${res.statusCode}`)
+      assert.equal(res.body && res.body.ok, false, `${label}: an error envelope, not a workbook`)
+      assert.equal(res.sentBuffer, null, `${label}: no workbook bytes sent`)
+      assert.deepEqual(harness.registryCalls, [{ sheetId: HAND_BOUND_SHEET, projectId: stagingProjectId }],
+        `${label}: the port WAS asked — this is the reject path, not an earlier refusal`)
+      assert.deepEqual(harness.recordsReads, [], `${label}: zero records reads`)
+      assert.deepEqual(harness.auditAppends, [], `${label}: no audit row for a read that never happened`)
+      assert.deepEqual(harness.xlsxCalls, [], `${label}: no workbook built`)
+    }
   })
 
   console.log(`\nstock-preparation-prep-line-export-tenant-wall: ${passed} passed, ${failed} failed`)
