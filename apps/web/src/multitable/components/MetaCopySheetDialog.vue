@@ -2,11 +2,14 @@
   「复制数据表（含数据）」S1 dialog (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md
   §3 user-visible behaviour; entries ① rail and ② 存为模板 hand-off open it — entry ③ template center is S4).
 
-  Flow: on open, one zero-write `POST …/copy/dry-run` (the server runs the full-table-read + Base-writable
-  gates BEFORE counting, so a refusal is a count-free 403) → the dialog shows 「包含数据（共 N 行）」 and the
-  disclosure lines → submit sends `POST …/copy` with `{ name, withData, permissionMode: 'inherit' }` (the
-  body is built by the api client, never here) → `copied` hands the new sheet to the workbench, which
-  refreshes the sheet list and selects it.
+  Flow: on open, a zero-write `POST …/copy/dry-run` with data (the server runs the full-table-read +
+  Base-writable gates BEFORE counting, so a refusal is a count-free 403) → the dialog shows 「包含数据（共 N
+  行）」 and the disclosure lines. If that probe is refused only because rows are included (the row cap as
+  an older backend's 413, or an auto-number row rule), ONE structure-only probe (withData:false) follows so
+  a structure-only copy is never submitted without its disclosures. Submit needs a successful probe covering
+  the chosen mode, then sends `POST …/copy` with `{ name, withData, permissionMode: 'inherit' }` (the body is
+  built by the api client, never here) → `copied` hands the new sheet to the workbench, which refreshes the
+  sheet list and selects it.
 
   Fixed in S1 (shown, disabled): target Base = the source sheet's Base (S2 unlocks), permission mode =
   「与源表相同」 (the only S1 mode). Values-free: every error line is chosen by CODE in
@@ -146,9 +149,15 @@ const l = (key: MetaCopySheetLabelKey) => copySheetLabel(key, isZh.value)
 
 const name = ref('')
 const withData = ref(true)
+// The WITH-data probe (always run) and its refusal.
 const dryRun = ref<CopySheetDryRunResult | null>(null)
-const dryRunLoading = ref(false)
 const dryRunError = ref<unknown>(null)
+// The structure-only probe (withData:false), run ONCE and only when the with-data probe was refused for a
+// reason that exists only because rows are included (see DATA_ONLY_REFUSALS). It is what puts the
+// structural disclosures on screen before a structure-only copy may be submitted.
+const structureRun = ref<CopySheetDryRunResult | null>(null)
+const structureRunError = ref<unknown>(null)
+const dryRunLoading = ref(false)
 const submitting = ref(false)
 const submitError = ref<unknown>(null)
 const localError = ref<MetaCopySheetLabelKey | null>(null)
@@ -166,6 +175,8 @@ watch(
     withData.value = true
     dryRun.value = null
     dryRunError.value = null
+    structureRun.value = null
+    structureRunError.value = null
     submitError.value = null
     localError.value = null
     submitting.value = false
@@ -174,23 +185,42 @@ watch(
   { immediate: true },
 )
 
+// Refusals that exist only BECAUSE rows are included: the row cap (an older backend answers the with-data
+// dry-run with 413 instead of `summary.overLimit`) and a row-visibility rule on an auto-number column that
+// renumbering would change (raised only when rows are copied). Their copy tells the user to untick
+// 「包含数据」, so a structure-only copy must stay possible — but only after a structure-only probe has
+// shown its disclosures.
+const DATA_ONLY_REFUSALS: ReadonlySet<string> = new Set(['COPY_TOO_LARGE', 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD'])
+function isDataOnlyRefusal(error: unknown): boolean {
+  return isCopySheetError(error) && typeof error.code === 'string' && DATA_ONLY_REFUSALS.has(error.code)
+}
+
 async function runDryRun(gen: number): Promise<void> {
   dryRunLoading.value = true
   try {
-    // Always probed WITH data: N (the row count) and the value-level disclosures are what the checkbox
-    // and the list render. Zero-write on the server. Probed WITHOUT a name: the plan does not depend on
-    // it, and the route refuses (400 NAME_INVALID_CHARACTERS) any name it is given that carries a mangled
-    // code point — which the default 「<源表名> 副本」 would for a source whose own name is mangled, and
-    // the whole probe (count + disclosures) would be lost to a problem only the copy's name has.
-    const result = await props.client.dryRunCopySheet(props.sheetId, {
-      withData: true,
-      permissionMode: 'inherit',
-    })
-    if (gen !== generation) return
-    dryRun.value = result
-  } catch (error) {
-    if (gen !== generation) return
-    dryRunError.value = error
+    // Probed WITH data first: N (the row count) and the value-level disclosures are what the checkbox and
+    // the list render. Zero-write on the server. Probed WITHOUT a name: the plan does not depend on it, and
+    // the route refuses (400 NAME_INVALID_CHARACTERS) any name it is given that carries a mangled code
+    // point — which the default 「<源表名> 副本」 would for a source whose own name is mangled, and the whole
+    // probe (count + disclosures) would be lost to a problem only the copy's name has.
+    try {
+      const result = await props.client.dryRunCopySheet(props.sheetId, { withData: true, permissionMode: 'inherit' })
+      if (gen !== generation) return
+      dryRun.value = result
+      return
+    } catch (error) {
+      if (gen !== generation) return
+      dryRunError.value = error
+      if (!isDataOnlyRefusal(error)) return
+    }
+    try {
+      const result = await props.client.dryRunCopySheet(props.sheetId, { withData: false, permissionMode: 'inherit' })
+      if (gen !== generation) return
+      structureRun.value = result
+    } catch (error) {
+      if (gen !== generation) return
+      structureRunError.value = error
+    }
   } finally {
     if (gen === generation) dryRunLoading.value = false
   }
@@ -199,19 +229,39 @@ async function runDryRun(gen: number): Promise<void> {
 const fieldNameById = computed(() => new Map(props.fields.map((f) => [f.id, f.name])))
 const viewNameById = computed(() => new Map(props.views.map((v) => [v.id, v.name])))
 const fieldName = (fieldId: string): string | null => fieldNameById.value.get(fieldId) ?? null
+const viewName = (viewId: string): string | null => viewNameById.value.get(viewId) ?? null
 
-// The count only exists once the gate passed (dry-run success). A refused dry-run shows no N at all.
-const withDataLabel = computed(() => copySheetWithDataLabel(dryRun.value?.rowCount ?? null, isZh.value))
+// The legacy row-cap refusal (413 COPY_TOO_LARGE on the with-data probe), when that is what came back.
+const legacyRowCap = computed(() => {
+  const error = dryRunError.value
+  return isCopySheetError(error) && error.code === 'COPY_TOO_LARGE' ? error : null
+})
+
+// Over the row cap, from either backend shape: `summary.overLimit` (the #6112 fix) or the legacy 413.
+const overLimit = computed<{ limit: number | null } | null>(() => {
+  if (dryRun.value) return dryRun.value.overLimit ? { limit: dryRun.value.rowLimit } : null
+  return legacyRowCap.value ? { limit: legacyRowCap.value.limit ?? null } : null
+})
+
+// The count only exists once the gate passed (a with-data probe answered, or its post-gate row-cap
+// refusal carried it). A gate refusal shows no N at all; the structure-only probe never supplies N.
+const withDataLabel = computed(() => copySheetWithDataLabel(
+  dryRun.value?.rowCount ?? legacyRowCap.value?.rowCount ?? null,
+  isZh.value,
+))
+
+// The plan whose disclosures are shown: the with-data probe when it answered, else the structure-only one.
+const shownPlan = computed(() => dryRun.value ?? structureRun.value)
 
 type DisclosureLine = { key: string; kind: string; text: string }
 
 const disclosureLines = computed<DisclosureLine[]>(() => {
-  const result = dryRun.value
-  if (!result) return []
   const lines: DisclosureLine[] = []
-  if (withData.value && result.overLimit) {
-    lines.push({ key: 'over-limit', kind: 'OVER_LIMIT', text: copySheetOverLimitText(result.rowLimit, isZh.value) })
+  if (withData.value && overLimit.value) {
+    lines.push({ key: 'over-limit', kind: 'OVER_LIMIT', text: copySheetOverLimitText(overLimit.value.limit, isZh.value) })
   }
+  const result = shownPlan.value
+  if (!result) return lines
   // Group columns by reason, keeping the server's first-seen order of reasons and columns.
   const byReason = new Map<string, string[]>()
   for (const item of result.fieldDisclosures) {
@@ -222,6 +272,7 @@ const disclosureLines = computed<DisclosureLine[]>(() => {
   for (const [reason, names] of byReason) {
     lines.push({ key: `field:${reason}`, kind: reason, text: copySheetDisclosureText(reason, names, isZh.value) })
   }
+  // Value-level (the structure-only probe reads no rows, so it always reports 0 here).
   if (withData.value && result.autoNumberRenumberedRows > 0) {
     lines.push({
       key: 'auto-number',
@@ -240,23 +291,19 @@ const disclosureLines = computed<DisclosureLine[]>(() => {
   return lines
 })
 
-// A dry-run refusal the copy would repeat verbatim (gate / unbuildable source / system sheet / gone /
-// column cap) blocks submit. Two refusals exist only BECAUSE rows are included — the row cap and a
-// row-visibility rule on an auto-number column that renumbering would change (the probe always runs
-// with data) — so they block only while 「包含数据」 is ticked; their copy tells the user to untick it.
-// Transport / 5xx failures of the probe do not block — the copy route re-gates and reports its own refusal.
-const DATA_ONLY_REFUSALS: ReadonlySet<string> = new Set(['COPY_TOO_LARGE', 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD'])
-const dryRunBlocks = computed(() => {
-  if (withData.value && dryRun.value?.overLimit) return true
-  const error = dryRunError.value
-  if (!isCopySheetError(error)) return false
-  if (error.code && DATA_ONLY_REFUSALS.has(error.code)) return withData.value
-  return error.status === 403 || error.status === 404 || error.status === 413 || error.status === 422
-})
+// Submit needs a SUCCESSFUL probe that covers the chosen mode, so the disclosures are never skipped:
+//   - with data: the with-data probe answered and is not over the row cap;
+//   - structure only: the with-data probe answered (its structural disclosures are the same), or the
+//     structure-only re-probe did (after a data-only refusal).
+// Everything else blocks: a gate / structural refusal (the copy would repeat it verbatim), and — since
+// nothing could be disclosed — a probe that failed in transport or with a 5xx.
+const probeCoversMode = computed(() => (withData.value
+  ? dryRun.value !== null && !dryRun.value.overLimit
+  : dryRun.value !== null || structureRun.value !== null))
 
 const busy = computed(() => dryRunLoading.value || submitting.value)
 // An empty name is NOT folded in here: onSubmit reports it (errorNoName) instead of a silently dead button.
-const canSubmit = computed(() => !busy.value && !dryRunBlocks.value)
+const canSubmit = computed(() => !busy.value && probeCoversMode.value)
 
 // Editing the name answers a name refusal (local empty-name, or the server's 400 NAME_INVALID_CHARACTERS),
 // so both stop showing; any other refusal stays until the next submit replaces it.
@@ -265,11 +312,24 @@ watch(name, () => {
   if (isCopySheetError(submitError.value) && submitError.value.code === 'NAME_INVALID_CHARACTERS') submitError.value = null
 })
 
+// A probe that did not answer at all (transport / 5xx) is not a refusal of the copy: say the pre-check
+// failed, not 「复制失败」. Coded 4xx refusals get their own sentence.
+function probeErrorMessage(error: unknown): string {
+  if (isCopySheetError(error) && error.status < 500) return copySheetErrorMessage(error, isZh.value, { fieldName, viewName })
+  return l('copySheet.error.probeFailed')
+}
+
 const errorText = computed(() => {
   if (localError.value) return l(localError.value)
-  const error = submitError.value ?? dryRunError.value
+  if (submitError.value) return copySheetErrorMessage(submitError.value, isZh.value, { fieldName, viewName })
+  if (structureRunError.value) return probeErrorMessage(structureRunError.value)
+  const error = dryRunError.value
   if (!error) return ''
-  return copySheetErrorMessage(error, isZh.value, { fieldName })
+  // The legacy row cap is shown as the OVER_LIMIT disclosure line (same as the #6112 fix's overLimit), and
+  // a data-only refusal says nothing about a structure-only copy once 「包含数据」 is unticked.
+  if (legacyRowCap.value) return ''
+  if (isDataOnlyRefusal(error) && !withData.value) return ''
+  return probeErrorMessage(error)
 })
 
 // The ONLY path here is the submit button, whose `:disabled="!canSubmit"` already covers busy /

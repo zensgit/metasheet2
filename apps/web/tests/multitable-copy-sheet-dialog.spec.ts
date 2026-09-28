@@ -164,6 +164,14 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
 
     const structural = buildCopySheetError(422, { ok: false, error: { code: 'COPY_LINK_TARGET_NOT_LIVE', details: { fieldId: 'fld_link' } } }, true)
     expect(structural).toMatchObject({ code: 'COPY_LINK_TARGET_NOT_LIVE', fieldId: 'fld_link' })
+    // view-level structural refusal (copy-sheet-service forwards `{ viewId }` from CopySheetRemapError)
+    const viewLevel = buildCopySheetError(422, { ok: false, error: { code: 'COPY_UNMAPPED_FIELD_REF', details: { viewId: 'view_1' } } }, true)
+    expect(viewLevel).toMatchObject({ code: 'COPY_UNMAPPED_FIELD_REF', viewId: 'view_1' })
+    expect(viewLevel.fieldId).toBeUndefined()
+    // viewId never rides on a 403, on a non-structural code, or on a non-422 status
+    expect(buildCopySheetError(403, { ok: false, error: { code: 'COPY_UNMAPPED_FIELD_REF', details: { viewId: 'view_1' } } }, true).viewId).toBeUndefined()
+    expect(buildCopySheetError(422, { ok: false, error: { code: 'COPY_SOURCE_SYSTEM_SHEET', details: { viewId: 'view_1' } } }, true).viewId).toBeUndefined()
+    expect(buildCopySheetError(422, { ok: false, error: { code: 'COPY_ROW_VALIDATION_FAILED', details: { rowIndex: 1, viewId: 'view_1' } } }, true).viewId).toBeUndefined()
 
     // A non-COPY code carrying row-shaped extras is NOT promoted to a row failure, and a 403 carries nothing.
     const other = buildCopySheetError(422, { ok: false, error: { code: 'VALIDATION_ERROR', details: { rowIndex: 7, fieldId: 'fld_qty' } } }, true)
@@ -414,7 +422,8 @@ describe('MetaCopySheetDialog', () => {
     expect(byKind.BUTTON_DISABLED).toBe('按钮列 「推送」：保留按钮，按钮动作不复制')
     expect(byKind.PROPERTY_HIDDEN_BLANKED).toBe('已隐藏的列 「（未列出的列）」：列会保留（仍隐藏），值为空')
     expect(byKind.SOME_FUTURE_REASON).toBe('列 「标题」：复制后会有差异')
-    expect(byKind.AUTO_NUMBER_RENUMBERED).toBe('自动编号列会重新编号：37 行的编号将发生变化')
+    // per auto-number COLUMN per row on the backend -> 「处编号」, never 「行」 (review FE-3)
+    expect(byKind.AUTO_NUMBER_RENUMBERED).toBe('自动编号列会重新编号：共 37 处编号将发生变化')
     expect(byKind.VIEW_FILTER_LEAF_DROPPED).toBe('视图「按录入先后」：将移除 2 个筛选条件')
     const dialogText = q('copy-sheet-dialog')!.textContent ?? ''
     expect(dialogText).not.toMatch(/[A-Z]+_[A-Z_]+/)
@@ -422,19 +431,114 @@ describe('MetaCopySheetDialog', () => {
     expect(q('copy-sheet-not-copied')!.textContent).toContain('自动化、评论、订阅、表单分享、记录锁定、修订历史')
   })
 
-  it('over the row cap: disclosed, submit blocked while data is included, allowed for structure only', async () => {
-    client.dryRunCopySheet.mockResolvedValue(dryRunOk({ rowCount: 2400, overLimit: true, rowLimit: 2000 }))
+  // Structural disclosures a sheet over the row cap still has (the #6112 fix skips the record read, not the plan).
+  const STRUCTURAL = {
+    fieldDisclosures: [
+      { fieldId: 'fld_mirror', reason: 'MIRROR_NOT_BUILT' },
+      { fieldId: 'fld_btn', reason: 'BUTTON_DISABLED' },
+    ],
+    viewFilterLeavesDropped: [{ viewId: 'view_a', count: 2 }],
+  }
+  const kinds = () => Array.from(q('copy-sheet-disclosures')?.querySelectorAll('li') ?? []).map((li) => li.getAttribute('data-disclosure'))
+
+  it('over the row cap (#6112 fix: 200 + summary.overLimit): OVER_LIMIT AND the structural disclosures render; submit only for structure', async () => {
+    client.dryRunCopySheet.mockResolvedValue(dryRunOk({ rowCount: 2400, overLimit: true, rowLimit: 2000, ...STRUCTURAL }))
     await mount()
     const items = Array.from(q('copy-sheet-disclosures')!.querySelectorAll('li'))
     expect(items.find((li) => li.getAttribute('data-disclosure') === 'OVER_LIMIT')?.textContent)
       .toBe('数据行数超出单次复制上限（2000 行）。可取消勾选「包含数据」只复制结构。')
+    expect(kinds()).toEqual(['OVER_LIMIT', 'MIRROR_NOT_BUILT', 'BUTTON_DISABLED', 'VIEW_FILTER_LEAF_DROPPED'])
+    expect(items.find((li) => li.getAttribute('data-disclosure') === 'MIRROR_NOT_BUILT')?.textContent).toBe('双向关联的镜像列 「镜像」：不会创建')
+    expect(items.find((li) => li.getAttribute('data-disclosure') === 'BUTTON_DISABLED')?.textContent).toBe('按钮列 「推送」：保留按钮，按钮动作不复制')
+    expect(items.find((li) => li.getAttribute('data-disclosure') === 'VIEW_FILTER_LEAF_DROPPED')?.textContent).toBe('视图「按录入先后」：将移除 2 个筛选条件')
+    expect(q('copy-sheet-with-data-label')!.textContent).toBe('包含数据（共 2400 行）')
+    expect(errorText()).toBe('')
     expect(submitButton().disabled).toBe(true)
     q<HTMLInputElement>('copy-sheet-with-data')!.click()
     await flush()
+    // structure only: the over-limit line goes, the structural disclosures stay
+    expect(kinds()).toEqual(['MIRROR_NOT_BUILT', 'BUTTON_DISABLED', 'VIEW_FILTER_LEAF_DROPPED'])
+    expect(submitButton().disabled).toBe(false)
+    submitButton().click()
+    await flush()
+    expect(client.dryRunCopySheet).toHaveBeenCalledTimes(1) // the new shape needs no re-probe
+    expect(client.copySheet).toHaveBeenCalledWith('sheet_orders', { name: '订单 副本', withData: false, permissionMode: 'inherit' })
+  })
+
+  it('over the row cap (older backend: 413 on the probe): ONE structure-only re-probe, its disclosures render before a structure-only submit', async () => {
+    const reprobe = deferred<CopySheetDryRunResult>()
+    client.dryRunCopySheet
+      .mockRejectedValueOnce(copyErr(413, { code: 'COPY_TOO_LARGE', details: { rowCount: 2400, limit: 2000 } }))
+      .mockReturnValueOnce(reprobe.promise)
+    await mount()
+    expect(client.dryRunCopySheet).toHaveBeenCalledTimes(2)
+    expect(client.dryRunCopySheet.mock.calls[1]).toEqual(['sheet_orders', { withData: false, permissionMode: 'inherit' }])
+    // re-probe still pending: structure-only submit must not be possible yet
+    q<HTMLInputElement>('copy-sheet-with-data')!.click()
+    await flush()
+    expect(submitButton().disabled).toBe(true)
+    q<HTMLInputElement>('copy-sheet-with-data')!.click()
+    await flush()
+    reprobe.resolve(dryRunOk({ rowCount: 0, ...STRUCTURAL }))
+    await flush()
+    // same screen as the new backend shape: OVER_LIMIT line (not an error) + the structural disclosures
+    expect(kinds()).toEqual(['OVER_LIMIT', 'MIRROR_NOT_BUILT', 'BUTTON_DISABLED', 'VIEW_FILTER_LEAF_DROPPED'])
+    expect(q('copy-sheet-with-data-label')!.textContent).toBe('包含数据（共 2400 行）')
+    expect(errorText()).toBe('')
+    expect(submitButton().disabled).toBe(true)
+    q<HTMLInputElement>('copy-sheet-with-data')!.click()
+    await flush()
+    expect(kinds()).toEqual(['MIRROR_NOT_BUILT', 'BUTTON_DISABLED', 'VIEW_FILTER_LEAF_DROPPED'])
     expect(submitButton().disabled).toBe(false)
     submitButton().click()
     await flush()
     expect(client.copySheet).toHaveBeenCalledWith('sheet_orders', { name: '订单 副本', withData: false, permissionMode: 'inherit' })
+  })
+
+  it('auto-number row rule (422, data-only): rule sentence while data is included; structure-only re-probe; lifts after untick', async () => {
+    client.dryRunCopySheet
+      .mockRejectedValueOnce(copyErr(422, { code: 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD', details: { fieldId: 'fld_title' } }))
+      .mockResolvedValueOnce(dryRunOk({ rowCount: 0, ...STRUCTURAL }))
+    await mount()
+    expect(client.dryRunCopySheet.mock.calls[1]).toEqual(['sheet_orders', { withData: false, permissionMode: 'inherit' }])
+    expect(errorText()).toBe('「标题」列：这张表的行级可见规则用到了自动编号列，而复制会重新编号，可能改变哪些行被隐藏，已拒绝。可取消勾选「包含数据」只复制结构。')
+    expect(kinds()).toEqual(['MIRROR_NOT_BUILT', 'BUTTON_DISABLED', 'VIEW_FILTER_LEAF_DROPPED'])
+    expect(q('copy-sheet-with-data-label')!.textContent).toBe('包含数据')
+    expect(submitButton().disabled).toBe(true)
+    q<HTMLInputElement>('copy-sheet-with-data')!.click()
+    await flush()
+    expect(errorText()).toBe('')
+    expect(submitButton().disabled).toBe(false)
+  })
+
+  it('a data-only refusal whose structure-only re-probe also fails keeps EVERY submit blocked (disclosures never skipped)', async () => {
+    client.dryRunCopySheet
+      .mockRejectedValueOnce(copyErr(413, { code: 'COPY_TOO_LARGE', details: { rowCount: 2400, limit: 2000 } }))
+      .mockRejectedValueOnce(new TypeError('network down'))
+    await mount()
+    expect(errorText()).toBe('预检未完成，暂时不能复制（未做任何修改）。请关闭后重新打开再试。')
+    expect(submitButton().disabled).toBe(true)
+    q<HTMLInputElement>('copy-sheet-with-data')!.click()
+    await flush()
+    expect(submitButton().disabled).toBe(true)
+    expect(client.dryRunCopySheet).toHaveBeenCalledTimes(2)
+  })
+
+  it('a probe that failed in transport / 5xx blocks submit (nothing could be disclosed) and says the pre-check failed', async () => {
+    for (const failure of [new TypeError('network down'), copyErr(500, { code: 'INTERNAL_ERROR' }), copyErr(503, { code: 'DB_NOT_READY' })]) {
+      client.dryRunCopySheet.mockRejectedValueOnce(failure)
+      await mount()
+      expect(errorText()).toBe('预检未完成，暂时不能复制（未做任何修改）。请关闭后重新打开再试。')
+      expect(submitButton().disabled).toBe(true)
+      q<HTMLInputElement>('copy-sheet-with-data')!.click()
+      await flush()
+      expect(submitButton().disabled).toBe(true)
+      mounted!.app.unmount()
+      mounted!.container.remove()
+      mounted = null
+    }
+    expect(client.dryRunCopySheet).toHaveBeenCalledTimes(3) // no re-probe for non-data-only failures
+    expect(client.copySheet).not.toHaveBeenCalled()
   })
 
   it('a 403 gate refusal on the dry-run: zh sentence, NO count anywhere, submit blocked', async () => {
@@ -444,31 +548,12 @@ describe('MetaCopySheetDialog', () => {
     expect(errorText()).not.toMatch(/\d/)
     expect(q('copy-sheet-with-data-label')!.textContent).toBe('包含数据')
     expect(q('copy-sheet-disclosures')).toBeNull()
+    expect(client.dryRunCopySheet).toHaveBeenCalledTimes(1) // a gate refusal is never re-probed
     expect(submitButton().disabled).toBe(true)
     const dialogText = q('copy-sheet-dialog')!.textContent ?? ''
     expect(dialogText).not.toContain(SENTINEL_ZH)
     expect(dialogText).not.toContain(SENTINEL_EN)
   })
-
-  // The probe always runs WITH data, so a refusal that exists only because rows are included must stop
-  // blocking once 「包含数据」 is unticked (its own sentence tells the user to do exactly that).
-  for (const dataOnly of [
-    { code: 'COPY_TOO_LARGE', status: 413, extra: { rowCount: 2400, limit: 2000 } },
-    { code: 'COPY_SOURCE_RULE_ON_RENUMBERED_FIELD', status: 422, extra: { fieldId: 'fld_title' } },
-  ]) {
-    it(`dry-run ${dataOnly.code}: blocks while data is included, lifts for a structure-only copy`, async () => {
-      client.dryRunCopySheet.mockRejectedValue(copyErr(dataOnly.status, { code: dataOnly.code, ...dataOnly.extra }))
-      await mount()
-      expect(errorText()).toContain('可取消勾选「包含数据」只复制结构')
-      expect(submitButton().disabled).toBe(true)
-      q<HTMLInputElement>('copy-sheet-with-data')!.click()
-      await flush()
-      expect(submitButton().disabled).toBe(false)
-      submitButton().click()
-      await flush()
-      expect(client.copySheet).toHaveBeenCalledWith('sheet_orders', { name: '订单 副本', withData: false, permissionMode: 'inherit' })
-    })
-  }
 
   it('dry-run COPY_TOO_MANY_FIELDS / structural 422: blocks even for a structure-only copy', async () => {
     for (const refusal of [
@@ -502,7 +587,12 @@ describe('MetaCopySheetDialog', () => {
     { code: 'COPY_ROW_VALIDATION_FAILED', status: 422, extra: { details: { rowIndex: 2, fieldId: 'fld_qty', code: 'VALIDATION_ERROR' } }, zh: '第 3 行（按创建顺序）的「数量」列未通过校验，复制已整体取消，未创建任何数据表。' },
     { code: 'NAME_INVALID_CHARACTERS', status: 400, zh: '新数据表名称包含无法使用的字符，请重新输入名称后重试。' },
     { code: 'COPY_TOO_MANY_FIELDS', status: 413, extra: { fieldCount: 612, limit: 500 }, zh: '这张数据表的列数超出单次复制上限（共 612 列，上限 500 列）。' },
-    { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, extra: { fieldId: 'fld_lookup' }, zh: '「供应商名称」列：有列的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
+    { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, extra: { fieldId: 'fld_lookup' }, zh: '「供应商名称」列的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
+    // review FE-4: view-level refusals name the view (details.viewId), with the column when both are sent
+    { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, extra: { details: { viewId: 'view_a' } }, zh: '视图「按录入先后」的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
+    { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, extra: { details: { viewId: 'view_a', fieldId: 'fld_qty' } }, zh: '视图「按录入先后」中「数量」列的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
+    { code: 'COPY_UNMAPPED_FIELD_REF', status: 422, extra: { details: { viewId: 'view_unlisted' } }, zh: '某个视图的设置引用了复制暂时无法对应的列，未做任何复制。请联系管理员。' },
+    { code: 'COPY_LINK_TARGET_NOT_LIVE', status: 422, extra: { details: { viewId: 'view_a', fieldId: 'fld_self' } }, zh: '视图「按录入先后」、「父项」列：有关联列指向的数据表已不存在，未做任何复制。请先修正或删除该关联列。' },
     { code: 'COPY_LINK_TARGET_NOT_LIVE', status: 422, extra: { fieldId: 'fld_self' }, zh: '「父项」列：有关联列指向的数据表已不存在，未做任何复制。请先修正或删除该关联列。' },
     { code: 'COPY_UNSUPPORTED_FIELD_TYPE', status: 422, extra: { fieldId: 'fld_gone' }, zh: '有列的类型暂不支持复制，未做任何复制。' },
     { code: 'NOT_FOUND', status: 404, zh: '源数据表不存在或已被删除。' },
@@ -552,6 +642,17 @@ describe('MetaCopySheetDialog', () => {
     await flush()
     expect(client.copySheet).toHaveBeenLastCalledWith('sheet_orders', { name: '订单 副本', withData: true, permissionMode: 'inherit' })
     expect(onCopied).toHaveBeenCalledTimes(1)
+  })
+
+  it('en: a view-level COPY_UNMAPPED_FIELD_REF names the view and the column', async () => {
+    useLocale().setLocale('en')
+    client.copySheet.mockRejectedValueOnce(copyErr(422, { code: 'COPY_UNMAPPED_FIELD_REF', details: { viewId: 'view_a', fieldId: 'fld_qty' } }))
+    await mount()
+    submitButton().click()
+    await flush()
+    expect(errorText()).toBe('The settings of column “数量” in view “按录入先后” reference a column the copy can\'t map yet, so nothing was copied. Contact an administrator.')
+    expect(errorText()).not.toContain('view_a')
+    expect(errorText()).not.toContain('fld_')
   })
 
   it('editing the name does NOT retract a non-name refusal', async () => {

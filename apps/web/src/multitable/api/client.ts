@@ -365,16 +365,19 @@ export interface CopySheetError extends Error {
   code?: string
   rowIndex?: number
   fieldId?: string
+  /** Source view at fault, for a post-gate 422 structural refusal raised by a view's config/filter. */
+  viewId?: string
   rowCount?: number
   fieldCount?: number
   limit?: number
 }
 
 /**
- * Post-gate structural refusals (422) whose `fieldId` names the source column at fault (backend
- * `CopySheetRemapError` / link-target checks, `copy-sheet-remap.ts` / `copy-sheet-service.ts` on
- * feat/multitable-copy-sheet-s1). They are only reachable after the full-table-read gate passed, so the
- * copier can read every column and naming one is not an oracle. Nothing outside this set carries a fieldId.
+ * Post-gate structural refusals (422) whose `fieldId` / `viewId` locate the source column / view at fault
+ * (backend `CopySheetRemapError` / link-target checks: copy-sheet-remap.ts, and copy-sheet-service.ts
+ * forwarding `{ fieldId?, viewId? }` into details). They are only reachable after the full-table-read gate
+ * passed, so the copier can read every column and naming one is not an oracle. Nothing outside this set
+ * carries a fieldId or a viewId.
  */
 const COPY_SHEET_STRUCTURAL_FIELD_CODES: ReadonlySet<string> = new Set([
   'COPY_UNMAPPED_FIELD_REF',
@@ -431,9 +434,10 @@ export function buildCopySheetRequestBody(input: CopySheetInput): { name?: strin
  * Dry-run answer (ADR §3). The route answers `{ ok, data: { summary } }` where summary is the service's
  * `CopySheetPlanSummary`: `{ rowCount, fieldCount, disclosures: [{ fieldId, code }], droppedViewFilterLeaves:
  * [{ viewId, count }], autoNumberRenumberedRows, limits: { maxRows } }` (a bare summary is read too). ADR
- * spellings are still accepted (`reason`, `fieldDisclosures`, `viewFilterLeavesDropped`, `rowLimit`,
- * `overLimit`). The backend reports the row cap as a 413 COPY_TOO_LARGE, not as `overLimit`. Malformed
- * items are skipped.
+ * spellings are still accepted (`reason`, `fieldDisclosures`, `viewFilterLeavesDropped`, `rowLimit`).
+ * Row cap: the #6112 fix answers a with-data dry-run over the cap with 200 + `summary.overLimit: true`
+ * (records not read, structural disclosures still present); an older backend answers 413 COPY_TOO_LARGE
+ * instead, which the dialog handles with a structure-only re-probe. Malformed items are skipped.
  */
 export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
   const outer = isPlainObject(body) ? body : {}
@@ -561,6 +565,8 @@ export function buildCopySheetError(status: number, body: unknown, isZh: boolean
   if (status === 422 && code && COPY_SHEET_STRUCTURAL_FIELD_CODES.has(code)) {
     const fieldId = optionalStringValue(fields.fieldId)
     if (fieldId) error.fieldId = fieldId
+    const viewId = optionalStringValue(fields.viewId)
+    if (viewId) error.viewId = viewId
   }
   if (code === 'COPY_TOO_MANY_FIELDS') {
     const fieldCount = copySheetCount(fields.fieldCount)

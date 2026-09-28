@@ -54,6 +54,7 @@ export type MetaCopySheetLabelKey =
   | 'copySheet.error.forbidden'
   | 'copySheet.error.busy'
   | 'copySheet.error.generic'
+  | 'copySheet.error.probeFailed'
 
 const META_COPY_SHEET_LABELS: Record<MetaCopySheetLabelKey, LocaleText> = {
   'copySheet.title': { en: 'Copy table', zh: '复制数据表' },
@@ -154,6 +155,12 @@ const META_COPY_SHEET_LABELS: Record<MetaCopySheetLabelKey, LocaleText> = {
     zh: '数据表正被其他操作占用，请稍后重试。',
   },
   'copySheet.error.generic': { en: 'Copy failed. Try again later.', zh: '复制失败，请稍后重试。' },
+  // The dry-run itself did not answer (network / 5xx): nothing was attempted, and copying stays locked
+  // because the disclosures could not be shown.
+  'copySheet.error.probeFailed': {
+    en: 'The pre-check did not complete, so copying is not available yet (nothing was changed). Close and reopen this dialog to try again.',
+    zh: '预检未完成，暂时不能复制（未做任何修改）。请关闭后重新打开再试。',
+  },
 }
 
 export function copySheetLabel(key: MetaCopySheetLabelKey, isZh: boolean): string {
@@ -205,11 +212,16 @@ export function copySheetDisclosureText(reason: string, fieldNames: string[], is
   }
 }
 
-/** ADR CS-12: autoNumber is renumbered 1..N on copy — disclose how many rows' numbers change. */
-export function copySheetAutoNumberText(rows: number, isZh: boolean): string {
+/**
+ * ADR CS-12: autoNumber is renumbered 1..N on copy — disclose how many numbers change. The backend's
+ * `autoNumberRenumberedRows` counts once per auto-number COLUMN per row (copy-sheet-service.ts, the
+ * `for (plan of autoNumberPlans) records.forEach(...)` loop), i.e. changed CELLS, so the copy says
+ * 「N 处编号」 (N numbers), not 「N 行」 — a sheet with two auto-number columns would otherwise double the rows.
+ */
+export function copySheetAutoNumberText(changedNumbers: number, isZh: boolean): string {
   return isZh
-    ? `自动编号列会重新编号：${rows} 行的编号将发生变化`
-    : `Auto-number columns are renumbered: ${rows} ${rows === 1 ? 'row gets' : 'rows get'} a different number`
+    ? `自动编号列会重新编号：共 ${changedNumbers} 处编号将发生变化`
+    : `Auto-number columns are renumbered: ${changedNumbers} ${changedNumbers === 1 ? 'number changes' : 'numbers change'}`
 }
 
 /** ADR §5.2: filter conditions on blanked / unbuilt columns are removed from the copied view. */
@@ -234,6 +246,47 @@ export function copySheetOverLimitText(limit: number | null, isZh: boolean): str
 export interface CopySheetErrorContext {
   /** Resolve a column id to its display name (schema metadata the caller already has), or null. */
   fieldName?: (fieldId: string) => string | null
+  /** Resolve a view id to its display name (schema metadata the caller already has), or null. */
+  viewName?: (viewId: string) => string | null
+}
+
+/**
+ * Where a post-gate structural refusal points, as display names (ids are never shown). `hasView` is true
+ * whenever the server named a view; `view` is its display name, or null when the caller cannot name it
+ * (the text then says "a view" rather than dropping the view). An unnamed column is simply omitted.
+ */
+function refusalLocation(error: { fieldId?: string; viewId?: string }, ctx: CopySheetErrorContext) {
+  return {
+    column: error.fieldId ? (ctx.fieldName?.(error.fieldId) ?? null) : null,
+    hasView: Boolean(error.viewId),
+    view: error.viewId ? (ctx.viewName?.(error.viewId) ?? null) : null,
+  }
+}
+
+/** COPY_UNMAPPED_FIELD_REF naming the view and/or column whose settings hold the unmappable reference. */
+function copySheetUnmappedRefText(error: { fieldId?: string; viewId?: string }, isZh: boolean, ctx: CopySheetErrorContext): string {
+  const { column, hasView, view } = refusalLocation(error, ctx)
+  if (!hasView && !column) return copySheetLabel('copySheet.error.unmappedFieldRef', isZh)
+  if (isZh) {
+    const viewText = view ? `视图「${view}」` : '某个视图'
+    const owner = hasView && column ? `${viewText}中「${column}」列的设置` : hasView ? `${viewText}的设置` : `「${column}」列的设置`
+    return `${owner}引用了复制暂时无法对应的列，未做任何复制。请联系管理员。`
+  }
+  const viewText = view ? `view “${view}”` : 'a view'
+  const owner = hasView && column
+    ? `The settings of column “${column}” in ${viewText}`
+    : hasView ? `The settings of ${viewText}` : `The settings of column “${column}”`
+  return `${owner} reference a column the copy can't map yet, so nothing was copied. Contact an administrator.`
+}
+
+/** Other post-gate structural refusals: the fixed sentence, prefixed by the view and/or column at fault. */
+function withLocation(sentence: string, error: { fieldId?: string; viewId?: string }, isZh: boolean, ctx: CopySheetErrorContext): string {
+  const { column, hasView, view } = refusalLocation(error, ctx)
+  const parts: string[] = []
+  if (hasView) parts.push(isZh ? (view ? `视图「${view}」` : '某个视图') : (view ? `View “${view}”` : 'A view'))
+  if (column) parts.push(isZh ? `「${column}」列` : (parts.length ? `column “${column}”` : `Column “${column}”`))
+  if (!parts.length) return sentence
+  return isZh ? `${parts.join('、')}：${sentence}` : `${parts.join(', ')}: ${sentence}`
 }
 
 /**
@@ -243,14 +296,14 @@ export interface CopySheetErrorContext {
  */
 export function copySheetErrorMessage(error: unknown, isZh: boolean, ctx: CopySheetErrorContext = {}): string {
   if (!isCopySheetError(error)) return copySheetLabel('copySheet.error.generic', isZh)
-  // Post-gate structural refusals name the source column at fault when the client carried its id
-  // (only these codes can — see buildCopySheetError) and the caller can resolve it to a schema name.
-  const column = (key: MetaCopySheetLabelKey): string => withColumn(copySheetLabel(key, isZh), error.fieldId, isZh, ctx)
+  // Post-gate structural refusals name the source view / column at fault when the client carried their
+  // ids (only these codes can — see buildCopySheetError) and the caller can resolve them to schema names.
+  const column = (key: MetaCopySheetLabelKey): string => withLocation(copySheetLabel(key, isZh), error, isZh, ctx)
   switch (error.code) {
     case 'COPY_SOURCE_NOT_FULLY_READABLE':
       return copySheetLabel('copySheet.error.notFullyReadable', isZh)
     case 'COPY_UNMAPPED_FIELD_REF':
-      return column('copySheet.error.unmappedFieldRef')
+      return copySheetUnmappedRefText(error, isZh, ctx)
     case 'COPY_UNSUPPORTED_FIELD_TYPE':
       return column('copySheet.error.unsupportedFieldType')
     case 'COPY_LINK_TARGET_NOT_LIVE':
@@ -285,12 +338,6 @@ export function copySheetErrorMessage(error: unknown, isZh: boolean, ctx: CopySh
   if (error.status === 409) return copySheetLabel('copySheet.error.busy', isZh)
   if (error.status === 413) return copySheetTooLargeText(error.rowCount, error.limit, isZh)
   return copySheetLabel('copySheet.error.generic', isZh)
-}
-
-function withColumn(sentence: string, fieldId: string | undefined, isZh: boolean, ctx: CopySheetErrorContext): string {
-  const name = fieldId ? (ctx.fieldName?.(fieldId) ?? null) : null
-  if (!name) return sentence
-  return isZh ? `「${name}」列：${sentence}` : `Column “${name}”: ${sentence}`
 }
 
 function copySheetTooManyFieldsText(fieldCount: number | undefined, limit: number | undefined, isZh: boolean): string {
