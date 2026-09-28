@@ -190,7 +190,7 @@ r1「新表无自动化规则 → 无动作」错误：`record.created` 经 `web
 
 ### 7.7 幂等 / 审计
 
-- 幂等见 CS-16；账本 `templateId` 一般化为 `intent_kind + intent_key`；账本缺表 fail-open（`univer-meta.ts:8506-8520` 同）。
+- 幂等见 CS-16；账本 `templateId` 一般化为 `intent_kind + intent_key`。~~账本缺表 fail-open（`univer-meta.ts:8506-8520` 同）。~~ **2026-09-28 修订（PR #6112 终审后续 3，收紧方向）**：复制在账本缺表（42P01）或缺 `intent_kind` 列（42703，迁移 `zzzz20260927121000` 未跑）时 **fail-closed**，回 503 `COPY_TEMPORARILY_UNAVAILABLE`，零写入；路由打一条 values-free 的 warn，点名两条账本迁移。修订前的 fail-open 会在第二个事务里**不带意图锁**重跑复制，同意图并发各建一张表，违反 CS-16。给回退事务补上意图锁也不够：锁只能让两个请求排队，后到者拿到锁后读不了账本，找不到先到者的结果可以重放，照样再建一张。模板安装的 fail-open 不变（那边多一个 Base 是被接受的代价）。
 - `[multitable.sheet.copy]`：`{ sourceSheetId, targetSheetId, targetBaseId, userId, ok, rowCount, fieldCount, blankedFieldCount, permissionRowCount, recordPermissionRowCount, permissionMode, withData, durationMs, statusCode?, errorCode? }`，与 `[multitable.template.save-as]` 同口径（`:8350-8359`）；重放 `[multitable.sheet.copy.replayed]`。
 - `operation_audit_logs`：`action='multitable.sheet.copy'`, `resource_id=target` + `action='multitable.sheet.copy-source'`, `resource_id=source`，`metadata` 同上计数；拒绝尝试（403 / 422 / 413）在事务外用 pool 写一行 `ok=false, errorCode`。
 - 配置历史：逐字段 / 视图 / 授权行的 `create` 修订共用 `batchId`（先例形状 §1.15）；**不**写 `sheet_config` 修订（`POST /sheets` 亦不写，provenance 在列与审计里）。
@@ -206,6 +206,7 @@ r1「新表无自动化规则 → 无动作」错误：`record.created` 经 `web
 | 源表结构 / 记录 / links 在事务期间被未围栏路径改动 | tripwire 不等 → 回滚（§7.2 第 6 步） | 409 `COPY_SOURCE_CHANGED` |
 | 并发同意图 | 后到者在咨询锁处等待（有界 ≤ 15s）、READ COMMITTED 读到账本 → 重放（不再 40001/500） | 201 + `Idempotent-Replayed` |
 | 咨询锁有界等待内未取得（同意图复制仍在进行，> 15s） | **拒绝、不降级**（降级会在先到者未提交时读不到账本而建第二张表，r4 TX-4；模板安装保持降级） | 409 `CONFLICT` |
+| 去重账本未迁移（缺表 42P01 / 缺 `intent_kind` 列 42703）（2026-09-28 修订，§7.7） | **拒绝、不降级**：无账本就无法兑现 CS-16；事务已回滚、零写入；warn 日志点名两条账本迁移；模板安装保持 fail-open | 503 `COPY_TEMPORARILY_UNAVAILABLE` |
 | PG 锁类 SQLSTATE（40P01 / 55P03 / 40001） | 回滚，可重试（围栏先于行锁后不应再出现 40P01，出现即新写者的锁序回归） | 409 `CONFLICT` |
 | 规则引用未建列 / 引用将重编号的 autoNumber | 拒绝 | 422 `COPY_SOURCE_RULE_UNBUILDABLE` / `COPY_SOURCE_RULE_ON_RENUMBERED_FIELD` |
 | property 有未列举的 `fld_` 引用 | 拒绝 | 422 `COPY_UNMAPPED_FIELD_REF` |

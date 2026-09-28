@@ -24,6 +24,9 @@
  *       owner nor a base-write holder copies a row-level sheet (dry-run 200, copy 201); a non-admin in that position is
  *       still 403 FORBIDDEN; the admin is still refused on the approval / e-learning projection bases and on a
  *       soft-deleted base.
+ *   H13 dedupe ledger not migrated (`intent_kind` missing, 42703) → 503 COPY_TEMPORARILY_UNAVAILABLE with the fixed
+ *       message and no details, ONE values-free warn naming the two ledger migrations, the refusal audited, nothing else
+ *       written (#6112 follow-up 3: fail-closed instead of the old un-locked "copy without dedupe" fallback).
  *   H12 TOCTOU: the row-level switch flips ON at the row lock → in-transaction DB-fresh gate 403, nothing written (r3-1 twin
  *       of real-DB G14b; the REAL hasFullTableReadAccess re-reads the switch on the transaction handle).
  */
@@ -398,6 +401,38 @@ describe('copy-sheet routes (ADR #6094 S1)', () => {
     pinned.setApp(ctl.app)
     const ok = await post(`/sheets/${SRC}/copy`)
     expect(ok.status, JSON.stringify(ok.body)).toBe(201)
+  })
+
+  it('H13: dedupe ledger not migrated (intent_kind missing, 42703) → 503 COPY_TEMPORARILY_UNAVAILABLE, fixed message, no details; one values-free warn naming the ledger migrations; the refusal is audited and nothing else is written', async () => {
+    const pg = new FakePg({ ledgerIntentKindMissing: true })
+    seed(pg)
+    const { app } = await createApp(pg, ADMIN_ID)
+    // same module registry as the routes createApp just imported (no resetModules in between)
+    const { Logger } = await import('../../src/core/logger')
+    const warn = vi.spyOn(Logger.prototype, 'warn')
+    pinned.setApp(app)
+    const res = await post(`/sheets/${SRC}/copy`)
+    expect(res.status, JSON.stringify(res.body)).toBe(503)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'COPY_TEMPORARILY_UNAVAILABLE', message: 'Copying sheets is temporarily unavailable on this server; nothing was written. Retry later.' },
+    })
+    // the response names neither the migration nor the SQLSTATE nor any cell value
+    expect(JSON.stringify(res.body)).not.toMatch(/zzzz|intent_kind|42703|secret-cell|meta_multitable/)
+    expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(0)
+    // the ONLY write is the CS-17 refusal audit row, outside the rolled-back transaction
+    expect(writes(pg).map((s) => s.sql.slice(0, 32))).toEqual(['INSERT INTO operation_audit_logs'])
+    expect(pg.rows('operation_audit_logs').at(-1)!.metadata).toMatchObject({ ok: false, statusCode: 503, errorCode: 'COPY_TEMPORARILY_UNAVAILABLE', mode: 'copy' })
+    const ledgerWarns = warn.mock.calls.filter(([message]) => String(message).includes('dedupe ledger not migrated'))
+    expect(ledgerWarns).toHaveLength(1)
+    expect(ledgerWarns[0]![1]).toEqual({
+      sourceSheetId: SRC,
+      requiredMigrations: [
+        'zzzz20260919140000_create_multitable_template_install_ledger',
+        'zzzz20260927121000_add_multitable_install_ledger_intent_kind',
+      ],
+    })
+    expect(JSON.stringify(ledgerWarns[0])).not.toMatch(/secret-cell|42703/)
   })
 
   it('H8: session-only registration — no apiTokenAuth / oapiScopeGuard on either route (CS-1)', () => {

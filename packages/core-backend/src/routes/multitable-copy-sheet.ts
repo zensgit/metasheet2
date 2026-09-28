@@ -18,7 +18,8 @@
  *      e-learning 投影拒绝（对管理员同样拒）→ 403 `FORBIDDEN`（CS-3 / §4.2，2026-09-28 修订；三处门共用这一个谓词）。
  *   4. 系统表拒绝作为源（门后才回）→ 422 `COPY_SOURCE_SYSTEM_SHEET`（CS-14 / §6）。
  *   5. dry-run：`planCopySheet`（零写）→ 200 summary；execute：`executeCopySheet`（§7.2 单事务，事务内 DB-fresh
- *      重跑 2/3 两门）→ 201。
+ *      重跑 2/3 两门）→ 201。去重账本未迁移 → 503 `COPY_TEMPORARILY_UNAVAILABLE`（fail-closed，CS-16；一条点名
+ *      缺失迁移的 values-free warn），不降级成无去重复制。
  *   6. 提交后（execute）：chunked formula 重算（状态进 201 body，失败不 500）、缓存失效、至多一条 values-free
  *      `multitable.sheet.copied`、结构化日志 `[multitable.sheet.copy]`（重放走 `[multitable.sheet.copy.replayed]`）。
  *
@@ -40,6 +41,7 @@ import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import { loadFieldsForSheet, loadSheetRow } from '../multitable/loaders'
 import {
   COPY_SHEET_ERROR_CODES,
+  COPY_SHEET_LEDGER_MIGRATIONS,
   CopySheetError,
   assertSourceIsNotSystemSheet,
   executeCopySheet,
@@ -83,6 +85,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   [COPY_SHEET_ERROR_CODES.rowValidationFailed]: 'A source row could not be copied; nothing was written.',
   [COPY_SHEET_ERROR_CODES.permissionParityFailed]: 'The copied permissions did not match the source; nothing was written.',
   [COPY_SHEET_ERROR_CODES.linkTargetNotLive]: 'A link field of the source sheet points at a sheet that is not available in this base.',
+  [COPY_SHEET_ERROR_CODES.temporarilyUnavailable]: 'Copying sheets is temporarily unavailable on this server; nothing was written. Retry later.',
   [COPY_SHEET_ERROR_CODES.forbidden]: 'Insufficient permissions',
   COPY_UNMAPPED_FIELD_REF: 'A field configuration references a field that cannot be mapped into the copy.',
   COPY_SOURCE_RULE_UNBUILDABLE: 'A row-level read rule of the source sheet references a column the copy cannot build.',
@@ -348,9 +351,6 @@ export function createMultitableCopySheetRoutes(): Router {
         res.set('Idempotent-Replayed', 'true')
         return res.status(201).json(outcome.body)
       }
-      if (outcome.ledgerUnavailable) {
-        logger.warn('Copy-sheet dedupe ledger unavailable; copied without dedupe', { sourceSheetId: sheetId, userId: access.userId })
-      }
 
       const result = outcome.result
       // 提交后（§7.2 第 7 步）：缓存失效 → chunked formula 重算（复制者 actor 语境；失败不 500，状态进 body）。
@@ -413,6 +413,14 @@ export function createMultitableCopySheetRoutes(): Router {
     } catch (err) {
       const statusCode = err instanceof CopySheetError ? err.statusCode : err instanceof SheetWriterBlockedError ? 409 : null
       const errorCode = err instanceof CopySheetError ? err.code : err instanceof SheetWriterBlockedError ? 'RECOVERY_IN_PROGRESS' : null
+      if (errorCode === COPY_SHEET_ERROR_CODES.temporarilyUnavailable) {
+        // 去重账本未迁移 → 复制 fail-closed（CS-16；copy-sheet-service.ts executeCopySheet）。只点名要跑的迁移，
+        // values-free：无单元格值、无驱动散文、无主机信息。
+        logger.warn('[multitable.sheet.copy] dedupe ledger not migrated; copy refused (fail-closed, CS-16)', {
+          sourceSheetId: sheetId,
+          requiredMigrations: [...COPY_SHEET_LEDGER_MIGRATIONS],
+        })
+      }
       if (statusCode && errorCode) {
         const pool = poolManager.get()
         const actorId = typeof req.user?.id === 'string' ? req.user.id : ''

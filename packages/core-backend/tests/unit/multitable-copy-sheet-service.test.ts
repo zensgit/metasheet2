@@ -37,6 +37,13 @@
  *   E18 intent lock not acquired within the bounded wait → 409 CONFLICT, no ledger read, no install (TX-4).
  *   E19 in-transaction TARGET gate = platform admin ∨ resolveBaseWritable (CS-3 amended 2026-09-28): an admin who is
  *       neither base owner nor base-write holder copies; a non-admin in that position → 403 FORBIDDEN, nothing written.
+ *   E20 ledger NOT migrated (#6112 follow-up 3; CS-16 fail-closed): the ledger predates migration 121000 (`intent_kind`
+ *       missing → 42703) and TWO same-intent copies run concurrently → BOTH 503 COPY_TEMPORARILY_UNAVAILABLE, zero
+ *       sheets, exactly two transactions (no un-locked second-transaction fallback), no fence / plan / write.
+ *       E20b: the ledger TABLE missing (42P01) answers the same refusal.
+ *   E21 fenced-set subset (#6112 follow-up 1, mutant M13): a link field to a NEW foreign sheet lands between the
+ *       unlocked link pre-read and the plan (before the tripwire baseline, so ONLY the subset assertion can see it) →
+ *       409 COPY_SOURCE_CHANGED, zero writes; control: a late link to an ALREADY-fenced sheet copies.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -716,5 +723,94 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     expect(err.details).toEqual({})
     expect(d.hasFullTableReadAccess).toHaveBeenCalledTimes(1) // the source gate DID run and passed; the target gate refused
     expect(snapshotCounts(nonAdminPg)).toEqual(before)
+  })
+
+  it('E20: ledger not migrated (intent_kind missing → 42703) — two CONCURRENT same-intent copies are both refused 503 COPY_TEMPORARILY_UNAVAILABLE; zero sheets, no un-locked fallback transaction (CS-16 fail-closed)', async () => {
+    // Code deployed before migration zzzz20260927121000: the ledger table exists but has no intent_kind column. The
+    // pre-fix fallback re-ran the copy in a SECOND transaction with no intent lock, so two same-intent requests in that
+    // window each built a sheet. An intent lock alone would not help either (the second request, once it gets the lock,
+    // cannot read the ledger row that would let it replay the first) — so the copy is refused instead.
+    const pg = new FakePg({ ledgerIntentKindMissing: true })
+    seedFixture(pg)
+    const before = snapshotCounts(pg)
+    const mark = pg.statements.length
+    const settled = await Promise.allSettled([run(pg), run(pg)])
+    for (const outcome of settled) {
+      expect(outcome.status).toBe('rejected')
+      const err = (outcome as PromiseRejectedResult).reason as CopySheetError
+      expect(err).toBeInstanceOf(CopySheetError)
+      expect(err.statusCode).toBe(503)
+      expect(err.code).toBe(COPY_SHEET_ERROR_CODES.temporarilyUnavailable)
+      expect(err.details).toEqual({})
+    }
+    expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(0)
+    expect(snapshotCounts(pg)).toEqual(before)
+    const inTx = pg.statements.slice(mark).filter((s) => s.tx !== null)
+    // exactly the two dedupe transactions — no third / fourth "copy without dedupe" transaction
+    expect(new Set(inTx.map((s) => s.tx)).size).toBe(2)
+    // and inside them only the intent lock (+ polls) and the ledger read that 42703s: no fence, no plan, no write
+    for (const s of inTx) {
+      expect(s.sql.startsWith('SELECT pg_try_advisory_xact_lock(') || s.sql.startsWith('SELECT base_id, sheet_ids, response')).toBe(true)
+    }
+    expect(inTx.filter((s) => s.sql.startsWith('SELECT base_id, sheet_ids, response'))).toHaveLength(2)
+  })
+
+  it('E20b: ledger TABLE missing (42P01) → the same 503 COPY_TEMPORARILY_UNAVAILABLE, nothing written', async () => {
+    const pg = new FakePg({ ledgerUnavailable: true })
+    seedFixture(pg)
+    const before = snapshotCounts(pg)
+    const err = await expectRefusal(run(pg), 503, COPY_SHEET_ERROR_CODES.temporarilyUnavailable)
+    expect(err.details).toEqual({})
+    expect(snapshotCounts(pg)).toEqual(before)
+    expect(pg.statements.filter((s) => s.tx !== null && /^(INSERT|UPDATE|DELETE)/i.test(s.sql))).toHaveLength(0)
+  })
+
+  it('E21: a link field to a NEW foreign sheet added between the link pre-read and the plan → 409 COPY_SOURCE_CHANGED, zero writes (participatingSheetIds(plan) ⊆ fenced); a late link to an already-fenced sheet still copies', async () => {
+    const OTHER = 'sheet_cs_other'
+    const LATE = 'fld_cs_late_link'
+    // The concurrent field-create commits AFTER the unlocked link pre-read (so the fence set was computed without
+    // OTHER) and BEFORE the tripwire baseline (so the baseline already contains it and the end-of-copy tripwire
+    // compares equal). The source row lock is exactly that point: fences are taken, the baseline is not.
+    const lateLinkAtRowLock = (foreignSheetId: string) => {
+      const state = { injected: 0 }
+      const pg = new FakePg({
+        beforeStatement: (statement, store) => {
+          if (state.injected === 0 && statement.sql === 'SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE' && statement.params[0] === SRC) {
+            state.injected += 1
+            store.seedField({ id: LATE, sheetId: SRC, type: 'link', property: { foreignSheetId, limitSingleRecord: false }, order: 20 })
+          }
+        },
+      })
+      seedFixture(pg)
+      pg.seedSheet({ id: OTHER, baseId: BASE, name: 'Other' }) // live, same base: assertLinkTargetsLive would pass it
+      pg.seedField({ id: 'fld_cs_oname', sheetId: OTHER, type: 'string' })
+      return { pg, state }
+    }
+
+    const { pg, state } = lateLinkAtRowLock(OTHER)
+    const before = snapshotCounts(pg)
+    const mark = pg.statements.length
+    const err = await expectRefusal(run(pg), 409, COPY_SHEET_ERROR_CODES.sourceChanged)
+    expect(err.details).toEqual({})
+    expect(state.injected).toBe(1)
+    const inTx = pg.statements.slice(mark).filter((s) => s.tx !== null)
+    // the scenario really is "plan needs a sheet that was not fenced": OTHER's fence key was never requested
+    const fenceKeys = inTx.filter((s) => s.sql.startsWith('SELECT pg_advisory_xact_lock(hashtext($1))')).map((s) => String(s.params[0]))
+    expect(fenceKeys).toContain(`meta:auto-number:sheet:${FOREIGN}`)
+    expect(fenceKeys).not.toContain(`meta:auto-number:sheet:${OTHER}`)
+    // refused before ANY write: no INSERT / UPDATE / DELETE issued by the copy transaction, no sheet, store restored
+    expect(inTx.filter((s) => /^(INSERT|UPDATE|DELETE)/i.test(s.sql))).toHaveLength(0)
+    expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(0)
+    expect(snapshotCounts(pg)).toEqual(before)
+
+    // CONTROL: the same late link, but to FOREIGN (already in the fenced set) → the subset holds and the copy commits
+    // with the late link built — the assertion refuses only an UNFENCED participant, not every concurrent link add.
+    const ctl = lateLinkAtRowLock(FOREIGN)
+    const outcome = await run(ctl.pg)
+    expect(ctl.state.injected).toBe(1)
+    expect(outcome.replayed).toBe(false)
+    const lateCopy = ctl.pg.rows('meta_fields').find((f) => f.sheet_id === outcome.result.sheetId && f.name === LATE)
+    expect(lateCopy?.type).toBe('link')
+    expect((lateCopy?.property as Record<string, unknown>).foreignSheetId).toBe(FOREIGN)
   })
 })
