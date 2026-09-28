@@ -60,7 +60,10 @@ import {
 import { usePinnedServer } from '../utils/pinned-server'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import {
+  DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
+  DataSourceBridgeConfigError,
   DataSourceUnavailableError,
+  MISSING_PRINCIPAL_MESSAGE,
   createDataSourcePluginFacade,
 } from '../../src/data-adapters/data-source-plugin-facade'
 
@@ -196,6 +199,96 @@ describe('S2e — the registry never loaded (no database)', () => {
   })
 })
 
+// S2e as it happens in production: initialize() runs, and the registry's own `data_sources` query
+// fails. loadFromDatabase catches that and warns `Could not load from database` (the S2e signal of
+// diagnosis §4.6), so this must read registry_not_loaded — never unknown_at_load, which is what a
+// load that COMPLETED with a failed snapshot reads, and would point the operator elsewhere.
+describe('S2e — the registry load query fails (no database)', () => {
+  const LOAD_FAILURE = new Error('relation "data_sources" does not exist')
+
+  it('initialize resolves; every id reads not_loaded / registry_not_loaded; the load-filter snapshot never ran', async () => {
+    const row = dataSourceRow('s2e-query')
+    const snapshot = { calls: 0 }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    let warns: unknown[][] = []
+    const manager = new DataSourceManager()
+    try {
+      await expect(manager.initialize(createMemoryDataSourcesKysely([row], {
+        load: { failWith: LOAD_FAILURE },
+        snapshot,
+      }))).resolves.toBeUndefined()
+      warns = warn.mock.calls.map((args) => [...args])
+    } finally {
+      warn.mockRestore()
+      log.mockRestore()
+    }
+    expect(warns.map((args) => args[0])).toEqual(['[DataSourceManager] Could not load from database:'])
+    expect(snapshot.calls).toBe(0)
+    for (const id of [row.id, `${SENTINEL}-ds-never-existed`]) {
+      expect(manager.describeAccessRefusal(id, OWNER)).toEqual({ reason: 'not_loaded', loadOutcome: 'registry_not_loaded' })
+    }
+    // …and the R7 read still answers from the table: the row is live there.
+    await expect(manager.probePersistedLiveRow(row.id)).resolves.toBe(true)
+  })
+
+  it('control: the same rows with the load answering read absent_at_load, and the snapshot ran once', async () => {
+    const row = dataSourceRow('s2e-query-ok')
+    const snapshot = { calls: 0 }
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const manager = new DataSourceManager()
+    try {
+      await manager.initialize(createMemoryDataSourcesKysely([row], { snapshot }))
+    } finally {
+      log.mockRestore()
+    }
+    expect(snapshot.calls).toBe(1)
+    expect(manager.describeAccessRefusal(row.id, OWNER)).toBeNull()
+    expect(manager.describeAccessRefusal(`${SENTINEL}-ds-never-existed`, OWNER))
+      .toEqual({ reason: 'not_loaded', loadOutcome: 'absent_at_load' })
+  })
+
+  describe('through the scheduled dry-run route', () => {
+    let response: CapturedResponse
+    let entries: LogEntry[]
+
+    beforeAll(async () => {
+      const source = dataSourceRow('s2e-query-http')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      let stack: RefusalStack
+      try {
+        stack = await createRefusalStack({
+          kysely: createMemoryDataSourcesKysely([source], { load: { failWith: LOAD_FAILURE } }),
+          pluginDb: createMemoryPluginDb([externalSystemRow('s2e-query-http', source.id, OWNER)]),
+        })
+      } finally {
+        warn.mockRestore()
+        log.mockRestore()
+      }
+      ;({ response, entries } = await pull(stack, `${SENTINEL}-es-s2e-query-http`, true))
+    }, SETUP_TIMEOUT_MS)
+
+    it('(a) same bytes as every other refusal', () => {
+      expect(response).toEqual(CANONICAL_REFUSAL_RESPONSE)
+    })
+
+    it('(b) not_loaded / registry_not_loaded, and the table says the row is live', () => {
+      expect(only(entries, REFUSAL_LOG_MESSAGE).map((entry) => entry.detail)).toEqual([{
+        phase: 'canonical',
+        code: 'CONNECTION_CANONICAL_UNAVAILABLE',
+        reason: 'not_loaded',
+        loadOutcome: 'registry_not_loaded',
+        persistedLive: true,
+      }])
+    })
+
+    it('(c) values-free', () => {
+      expect(JSON.stringify(entries).toLowerCase()).not.toContain(SENTINEL)
+    })
+  })
+})
+
 describe('S1 — no host facade injected (no database)', () => {
   let response: CapturedResponse
   let entries: LogEntry[]
@@ -239,35 +332,62 @@ describe('facade: the refusal itself is unchanged, and it never waits for the R7
     throw new Error('expected the facade to refuse')
   }
 
-  async function refusalsOfEveryBranch(): Promise<Array<{ id: string; refusal: Error & Record<string, unknown> }>> {
+  type BranchRefusal = { id: string; refusal: Error & Record<string, unknown>; plain: Error & Record<string, unknown> }
+
+  // Every refusal branch of resolveConnectionRegistration that the real manager can reach, each with
+  // the error that branch threw BEFORE this change (`plain`). principal_missing is the odd one: its
+  // error is requirePrincipal's own DataSourceBridgeConfigError, not a not-found, and the diagnostic
+  // is attached to that error rather than to a fresh DataSourceUnavailableError.
+  // scope_missing is on the list but cannot be reached with the real manager: assertAccess already
+  // refuses (as not_loaded) when the id has no scope, and getScope reads that same map right after it
+  // with no await in between, so the `!scope` check behind it is a defensive re-check.
+  async function refusalsOfEveryBranch(): Promise<BranchRefusal[]> {
     const tenantless = dataSourceRow('fa-tenantless', { tenant_id: null, scope_kind: 'private' })
+    const legacyTenantless = dataSourceRow('fa-legacy-tenantless', { tenant_id: null, scope_kind: 'legacy_private' })
     const foreign = dataSourceRow('fa-foreign', { tenant_id: `${SENTINEL}-tenant-z` })
     const inactive = dataSourceRow('fa-inactive', { is_active: false })
     const manager = new DataSourceManager()
-    await manager.initialize(createMemoryDataSourcesKysely([tenantless, foreign, inactive]))
+    await manager.initialize(createMemoryDataSourcesKysely([tenantless, legacyTenantless, foreign, inactive]))
     const facade = createDataSourcePluginFacade(() => manager)
-    const out: Array<{ id: string; refusal: Error & Record<string, unknown> }> = []
-    for (const [id, options] of [
-      [inactive.id, REGISTRATION], // not_loaded
-      [tenantless.id, REGISTRATION], // tenantless_scope
-      [foreign.id, REGISTRATION], // tenant_mismatch
-      [foreign.id, { ...REGISTRATION, principal: `${SENTINEL}-someone-else` }], // owner_mismatch
-      [foreign.id, { ...REGISTRATION, tenantId: '' }], // tenant_missing
+    const notFound = (id: string) => new DataSourceUnavailableError(`Data source with id '${id}' not found`) as unknown as Error & Record<string, unknown>
+    const principalRequired = () => new DataSourceBridgeConfigError(
+      DATA_SOURCE_PRINCIPAL_REQUIRED_CODE, MISSING_PRINCIPAL_MESSAGE, 'DataSourcePrincipalRequiredError',
+    ) as unknown as Error & Record<string, unknown>
+    const out: BranchRefusal[] = []
+    for (const [id, options, plain] of [
+      [inactive.id, REGISTRATION, notFound(inactive.id)], // not_loaded
+      [tenantless.id, REGISTRATION, notFound(tenantless.id)], // tenantless_scope
+      [foreign.id, REGISTRATION, notFound(foreign.id)], // tenant_mismatch
+      [foreign.id, { ...REGISTRATION, principal: `${SENTINEL}-someone-else` }, notFound(foreign.id)], // owner_mismatch
+      [foreign.id, { ...REGISTRATION, tenantId: '' }, notFound(foreign.id)], // tenant_missing
+      [foreign.id, { ...REGISTRATION, principal: '' }, principalRequired()], // principal_missing
+      [foreign.id, { ...REGISTRATION, runAs: `${SENTINEL}-bogus` }, notFound(foreign.id)], // run_as_invalid
+      [legacyTenantless.id, { ...REGISTRATION, runAs: 'service' }, notFound(legacyTenantless.id)], // tenantless_service
     ] as const) {
-      out.push({ id, refusal: await refusalOf(() => facade.resolveConnectionRegistration(id, options)) })
+      out.push({
+        id,
+        refusal: await refusalOf(() => facade.resolveConnectionRegistration(id, options as never)),
+        plain,
+      })
     }
     return out
   }
 
-  it('(a) each refusal is the same class, code, message, status, own keys and JSON as a plain not-found', async () => {
-    for (const { id, refusal } of await refusalsOfEveryBranch()) {
-      const plain = new DataSourceUnavailableError(`Data source with id '${id}' not found`)
-      expect(refusal).toBeInstanceOf(DataSourceUnavailableError)
+  it('(a) each refusal is the same class, code, message, status, own keys and JSON as that branch threw before', async () => {
+    const refusals = await refusalsOfEveryBranch()
+    expect(refusals).toHaveLength(8)
+    for (const { refusal, plain } of refusals) {
+      expect(refusal.constructor).toBe(plain.constructor)
       expect({ name: refusal.name, code: refusal.code, message: refusal.message, status: refusal.status })
         .toEqual({ name: plain.name, code: plain.code, message: plain.message, status: plain.status })
       expect(Object.keys(refusal).sort()).toEqual(Object.keys(plain).sort())
       expect(JSON.stringify(refusal)).toBe(JSON.stringify(plain))
     }
+    // principal_missing keeps requirePrincipal's own error: it is NOT turned into a not-found.
+    const principalMissing = refusals[5].refusal
+    expect(principalMissing).toBeInstanceOf(DataSourceBridgeConfigError)
+    expect(principalMissing).not.toBeInstanceOf(DataSourceUnavailableError)
+    expect(principalMissing.code).toBe(DATA_SOURCE_PRINCIPAL_REQUIRED_CODE)
   })
 
   it('(b) each refusal carries its reason as a NON-enumerable diagnostic', async () => {
@@ -277,7 +397,10 @@ describe('facade: the refusal itself is unchanged, and it never waits for the R7
       expect(descriptor).toMatchObject({ enumerable: false })
       reasons.push((descriptor!.value as { reason: string }).reason)
     }
-    expect(reasons).toEqual(['not_loaded', 'tenantless_scope', 'tenant_mismatch', 'owner_mismatch', 'tenant_missing'])
+    expect(reasons).toEqual([
+      'not_loaded', 'tenantless_scope', 'tenant_mismatch', 'owner_mismatch', 'tenant_missing',
+      'principal_missing', 'run_as_invalid', 'tenantless_service',
+    ])
   })
 
   it('(timing) the refusal is thrown before the R7 read is issued; the read runs only when the log writer asks', async () => {
@@ -511,6 +634,46 @@ describe('startup — the load-filter snapshot failing costs the diagnostic, nev
     expect(manager.describeAccessRefusal(inactive.id, OWNER)).toEqual({ reason: 'not_loaded', loadOutcome: 'inactive' })
     expect(manager.describeAccessRefusal(`${SENTINEL}-ds-never-existed`, OWNER))
       .toEqual({ reason: 'not_loaded', loadOutcome: 'absent_at_load' })
+  })
+})
+
+describe('startup — a row skipped at load reads load_failed or decrypt_failed by what actually failed (no database)', () => {
+  // decrypt_failed points an operator at ENCRYPTION_KEY; load_failed at the row itself. Each side is
+  // asserted against the other on one load, so neither word can stand in for both.
+  it('decrypt failure → decrypt_failed; JSON-null config or a throwing adapter constructor → load_failed; unknown type → unsupported_type', async () => {
+    const unconstructible = 'refusal-probe-unconstructible-at-load'
+    const decrypt = dataSourceRow('lo-decrypt', {
+      config: {
+        connection: { host: 'localhost', port: 5432, database: `${SENTINEL}_never_connected` },
+        credentials: { username: `${SENTINEL}_login`, password: 'enc:AAAAAAAAAAAA' },
+        options: { readOnly: true, autoConnect: false },
+      },
+    })
+    const nullConfig = dataSourceRow('lo-null-config', { config: null })
+    const throwingAdapter = dataSourceRow('lo-ctor-throws', { type: unconstructible })
+    const unsupported = dataSourceRow('lo-unsupported', { type: 'oracle' })
+    const live = dataSourceRow('lo-live')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const manager = new DataSourceManager()
+    try {
+      manager.registerAdapterType(unconstructible, class {
+        constructor() {
+          throw new Error('adapter construction refused')
+        }
+      } as never)
+      await manager.initialize(createMemoryDataSourcesKysely([decrypt, nullConfig, throwingAdapter, unsupported, live]))
+    } finally {
+      error.mockRestore()
+      log.mockRestore()
+    }
+    expect(manager.describeAccessRefusal(live.id, OWNER)).toBeNull()
+    expect([decrypt, nullConfig, throwingAdapter, unsupported].map((row) => manager.describeAccessRefusal(row.id, OWNER))).toEqual([
+      { reason: 'not_loaded', loadOutcome: 'decrypt_failed' },
+      { reason: 'not_loaded', loadOutcome: 'load_failed' },
+      { reason: 'not_loaded', loadOutcome: 'load_failed' },
+      { reason: 'not_loaded', loadOutcome: 'unsupported_type' },
+    ])
   })
 })
 

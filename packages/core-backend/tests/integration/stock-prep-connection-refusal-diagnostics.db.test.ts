@@ -64,6 +64,9 @@ const DATA_SOURCE_COLUMNS = [
   'created_at', 'updated_at', 'deleted_at',
 ] as const
 const JSON_DATA_SOURCE_COLUMNS = new Set(['config', 'metadata', 'tags'])
+// `data_sources.config` is NOT NULL jsonb: a null there is the JSON literal `null` (the S2d-other
+// state, whose config cannot be built at load), never SQL NULL.
+const JSON_NULL_LITERAL_DATA_SOURCE_COLUMNS = new Set(['config'])
 const EXTERNAL_SYSTEM_COLUMNS = [
   'id', 'tenant_id', 'workspace_id', 'project_id', 'name', 'kind', 'role', 'config', 'credentials_encrypted',
   'capabilities', 'status', 'last_tested_at', 'last_error', 'connection_id', 'legacy_connection_fallback_eligible',
@@ -87,10 +90,12 @@ async function insertRow(
   columns: readonly string[],
   jsonColumns: Set<string>,
   row: Record<string, unknown>,
+  jsonNullLiteralColumns: Set<string> = new Set(),
 ): Promise<void> {
   const values = columns.map((column) => {
     const value = row[column] === undefined ? null : row[column]
-    return jsonColumns.has(column) && value !== null ? JSON.stringify(value) : value
+    if (!jsonColumns.has(column)) return value
+    return value !== null || jsonNullLiteralColumns.has(column) ? JSON.stringify(value) : value
   })
   const placeholders = columns.map((_column, index) => `$${index + 1}`).join(', ')
   await client.query(
@@ -140,7 +145,7 @@ async function seed(pool: Pool, dataSources: DataSourceRow[], externalSystems: A
     await client.query('BEGIN')
     for (const row of dataSources) {
       const live = tolerated.has(row.id) ? { ...row, deleted_at: null, is_active: true } : row
-      await insertRow(client, 'data_sources', DATA_SOURCE_COLUMNS, JSON_DATA_SOURCE_COLUMNS, live)
+      await insertRow(client, 'data_sources', DATA_SOURCE_COLUMNS, JSON_DATA_SOURCE_COLUMNS, live, JSON_NULL_LITERAL_DATA_SOURCE_COLUMNS)
     }
     for (const row of externalSystems) {
       if (tolerated.has(String(row.connection_id))) continue

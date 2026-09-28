@@ -351,6 +351,133 @@ async function refusalDiagnosticTests() {
     }
   }
 
+  // 3b. The sealed-snapshot phase has its own write point (the stock-preparation sealed export reaches
+  //     it through external-systems getExternalSystemForSealedSnapshot -> resolveSealedSqlServer, and
+  //     the host's sealed facade resolves through resolveConnectionRegistration, so its refusals carry
+  //     the same diagnostic). Same three guarantees: the thrown error does not move, the line is
+  //     values-free, and there is exactly one line per refusal.
+  {
+    const resolvingFacade = { async resolveConnectionRegistration(id) { return registration({ id }) } }
+    const refusingSealed = (makeError) => ({
+      async resolveSqlServerConnection() { throw makeError() },
+    })
+    const sealedRefusal = plainRefusal(
+      'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', 'sealed snapshot connection is unavailable', 'sealed_snapshot',
+    )
+
+    for (const [makeError, expected] of [
+      [() => refusalFrom({ reason: 'owner_mismatch' }), { reason: 'owner_mismatch' }],
+      [() => refusalFrom({ reason: 'tenantless_service' }), { reason: 'tenantless_service' }],
+      [() => refusalFrom({ reason: `${MARK}` }), { reason: 'unclassified' }],
+      [() => refusalFrom(undefined), { reason: 'unclassified' }],
+      // Not the facade's refusal at all: a plain error whose message and code carry values.
+      [() => Object.assign(new Error(`${MARK} host=${MARK}-db password=${MARK}`), { code: `${MARK}_CODE` }),
+        { reason: 'unclassified' }],
+    ]) {
+      const logger = captureLogger()
+      const quiet = createConnectionResolver({ facade: resolvingFacade, sealedSnapshotFacade: refusingSealed(makeError) })
+      const logged = createConnectionResolver({
+        facade: resolvingFacade, sealedSnapshotFacade: refusingSealed(makeError), logger,
+      })
+      const quietError = await thrownBy(() => quiet.resolveSealedSqlServer(binding(), context()))
+      const loggedError = await thrownBy(() => logged.resolveSealedSqlServer(binding(), context()))
+      assert.deepEqual(visible(loggedError), visible(quietError), 'the sealed refusal does not change with the logger')
+      assert.deepEqual(visible(loggedError), visible(sealedRefusal))
+      assertCarriesNothingOfTheFacade(quietError)
+      assertCarriesNothingOfTheFacade(loggedError)
+      await settle()
+      assert.deepEqual(logger.lines, [{
+        message: REFUSAL_LOG_MESSAGE,
+        detail: { phase: 'sealed_snapshot', code: 'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', ...expected },
+      }], 'exactly one sealed_snapshot line, with the closed word')
+      assert.doesNotMatch(JSON.stringify(logger.lines), new RegExp(MARK))
+    }
+
+    // not_loaded in the sealed phase: the table read starts only after the refusal was thrown, and
+    // its answer is folded into the one line.
+    {
+      const logger = captureLogger()
+      const order = []
+      const resolver = createConnectionResolver({
+        facade: resolvingFacade,
+        sealedSnapshotFacade: refusingSealed(() => refusalFrom({
+          reason: 'not_loaded',
+          loadOutcome: 'inactive',
+          probePersistedLive: async () => {
+            order.push('probe')
+            return true
+          },
+        })),
+        logger: { warn(message, detail) { order.push('line'); logger.warn(message, detail) } },
+      })
+      const refusal = await thrownBy(() => resolver.resolveSealedSqlServer(binding(), context()))
+      order.push('thrown')
+      assert.deepEqual(visible(refusal), visible(sealedRefusal))
+      assert.equal(logger.lines.length, 0, 'a sealed not_loaded line waits for the probe')
+      await settle()
+      assert.deepEqual(order, ['thrown', 'probe', 'line'])
+      assert.deepEqual(logger.lines, [{
+        message: REFUSAL_LOG_MESSAGE,
+        detail: {
+          phase: 'sealed_snapshot',
+          code: 'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',
+          reason: 'not_loaded',
+          loadOutcome: 'inactive',
+          persistedLive: true,
+        },
+      }])
+    }
+
+    // The sealed phase's S1: no sealed facade injected. The error is the one it always was
+    // (requireSealedSnapshotFacade's own, rethrown untouched), and it now gets its one line.
+    {
+      const logger = captureLogger()
+      const quietError = await thrownBy(() => createConnectionResolver({ facade: resolvingFacade })
+        .resolveSealedSqlServer(binding(), context()))
+      const loggedError = await thrownBy(() => createConnectionResolver({ facade: resolvingFacade, logger })
+        .resolveSealedSqlServer(binding(), context()))
+      assert.deepEqual(visible(loggedError), visible(quietError))
+      assert.deepEqual(visible(loggedError), visible(plainRefusal(
+        'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', 'sealed snapshot connection resolution is unavailable', 'sealed_snapshot',
+      )))
+      await settle()
+      assert.deepEqual(logger.lines, [{
+        message: REFUSAL_LOG_MESSAGE,
+        detail: { phase: 'sealed_snapshot', code: 'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', reason: 'facade_unavailable' },
+      }])
+    }
+
+    // S1 is recognised by identity, not by code: a facade that throws this module's own class with the
+    // S1 code does not read as facade_unavailable (canonical: unclassified), and in the sealed phase it
+    // is passed through untouched with no line (no word on the list would be true of it).
+    {
+      const logger = captureLogger()
+      const forged = () => new ConnectionResolutionError(
+        'CONNECTION_RESOLUTION_UNAVAILABLE', 'connection resolution is unavailable', { phase: 'facade' },
+      )
+      await rejectsCode(
+        () => createConnectionResolver({ facade: refusingFacade(forged), logger }).resolve(canonical, context()),
+        'CONNECTION_CANONICAL_UNAVAILABLE',
+      )
+      await settle()
+      assert.deepEqual(logger.lines.map((line) => line.detail), [{
+        phase: 'canonical', code: 'CONNECTION_CANONICAL_UNAVAILABLE', reason: 'unclassified',
+      }])
+    }
+    {
+      const logger = captureLogger()
+      const forged = new ConnectionResolutionError(
+        'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', 'sealed snapshot connection resolution is unavailable', { phase: 'sealed_snapshot' },
+      )
+      const refusal = await thrownBy(() => createConnectionResolver({
+        facade: resolvingFacade, sealedSnapshotFacade: refusingSealed(() => forged), logger,
+      }).resolveSealedSqlServer(binding(), context()))
+      assert.equal(refusal, forged, 'passed through untouched, as before this change')
+      await settle()
+      assert.deepEqual(logger.lines, [])
+    }
+  }
+
   // 4. The route-failure log admits CONNECTION_RESOLUTION_ERROR_CODES verbatim, so the list must be
   //    exactly the set of codes this module can throw — scanned from its own source.
   {

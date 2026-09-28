@@ -74,15 +74,26 @@ function readOwnDiagnostic(error) {
   }
 }
 
+// This module's own "no facade was injected" refusals (S1), recognised by identity: only
+// requireFacade and requireSealedSnapshotFacade add to this set, so nothing a facade throws can
+// read as S1. Membership changes nothing on the error itself.
+const facadeUnavailableRefusals = new WeakSet()
+
+function markFacadeUnavailable(error) {
+  facadeUnavailableRefusals.add(error)
+  return error
+}
+
 /**
  * Map whatever the facade threw to a values-free, closed-vocabulary record. Never throws.
- * `facade_unavailable` is this module's own S1 (no facade injected), not a facade answer.
+ * `facade_unavailable` is this module's own S1 (no facade injected, canonical or sealed), not a
+ * facade answer.
  * `persistedLive` (R7) is not part of this record: it is a table read, settled separately
  * (settlePersistedLive) after the refusal has been thrown.
  */
 function describeFacadeRefusal(error) {
   try {
-    if (error instanceof ConnectionResolutionError && error.code === 'CONNECTION_RESOLUTION_UNAVAILABLE') {
+    if (error instanceof ConnectionResolutionError && facadeUnavailableRefusals.has(error)) {
       return { reason: 'facade_unavailable' }
     }
     const raw = readOwnDiagnostic(error)
@@ -183,22 +194,22 @@ function cloneBinding(binding) {
 
 function requireFacade(facade) {
   if (!facade || typeof facade.resolveConnectionRegistration !== 'function') {
-    throw new ConnectionResolutionError(
+    throw markFacadeUnavailable(new ConnectionResolutionError(
       'CONNECTION_RESOLUTION_UNAVAILABLE',
       'connection resolution is unavailable',
       { phase: 'facade' },
-    )
+    ))
   }
   return facade
 }
 
 function requireSealedSnapshotFacade(facade) {
   if (!facade || typeof facade.resolveSqlServerConnection !== 'function') {
-    throw new ConnectionResolutionError(
+    throw markFacadeUnavailable(new ConnectionResolutionError(
       'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',
       'sealed snapshot connection resolution is unavailable',
       { phase: 'sealed_snapshot' },
-    )
+    ))
   }
   return facade
 }
@@ -485,7 +496,16 @@ function createConnectionResolver({
         runAs: context.runAs,
       })
     } catch (error) {
-      if (error instanceof ConnectionResolutionError) throw error
+      if (error instanceof ConnectionResolutionError) {
+        // Rethrown untouched, as before. The one such error this call raises itself is this phase's
+        // S1 (requireSealedSnapshotFacade: no sealed facade injected), and it gets its one line like
+        // the canonical S1. The host facade never throws this module's class; a stub that does is
+        // passed through without a line, since no word on the list would be true of it.
+        if (facadeUnavailableRefusals.has(error)) {
+          logFacadeRefusal('sealed_snapshot', 'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', error)
+        }
+        throw error
+      }
       logFacadeRefusal('sealed_snapshot', 'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE', error)
       throw new ConnectionResolutionError(
         'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',

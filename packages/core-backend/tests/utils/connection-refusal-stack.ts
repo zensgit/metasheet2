@@ -91,13 +91,18 @@ export type DataSourceRow = Record<string, unknown> & { id: string }
  *
  * `hooks.probe` counts the R7 primary-key reads and can hold them open on `gate`.
  * `hooks.snapshot.failWith` makes the load-filter snapshot statement reject with that error (a
- * driver failure after the registry load itself succeeded).
+ * driver failure after the registry load itself succeeded); `hooks.snapshot.calls`, when given,
+ * counts how often that statement was issued.
+ * `hooks.load.failWith` makes the registry load's own statement reject with that error — S2e as it
+ * happens in production: `initialize` runs, and the `data_sources` query fails (table missing,
+ * connection refused), which `loadFromDatabase` catches and warns about.
  */
 export function createMemoryDataSourcesKysely(
   rows: DataSourceRow[],
   hooks: {
     probe?: { calls: number; gate?: Promise<void> }
-    snapshot?: { failWith?: Error }
+    snapshot?: { failWith?: Error; calls?: number }
+    load?: { failWith?: Error }
   } = {},
 ): Kysely<unknown> {
   const connection: DatabaseConnection = {
@@ -108,6 +113,7 @@ export function createMemoryDataSourcesKysely(
         Object.fromEntries(columns.map((column) => [column, row[column]])) as R
       // DataSourceManager.loadFromDatabase — the registry load.
       if (text === 'select * from "data_sources" where "is_active" = $1 and "deleted_at" is null') {
+        if (hooks.load && hooks.load.failWith) throw hooks.load.failWith
         return {
           rows: rows
             .filter((row) => row.is_active === params[0] && (row.deleted_at === null || row.deleted_at === undefined))
@@ -116,6 +122,7 @@ export function createMemoryDataSourcesKysely(
       }
       // The load-filter snapshot (diagnostics only), when the code under test issues it.
       if (text === 'select "id", "is_active", "deleted_at" from "data_sources" where (is_active IS NOT TRUE OR deleted_at IS NOT NULL)') {
+        if (hooks.snapshot && typeof hooks.snapshot.calls === 'number') hooks.snapshot.calls += 1
         if (hooks.snapshot && hooks.snapshot.failWith) throw hooks.snapshot.failWith
         return {
           rows: rows
@@ -466,6 +473,11 @@ export function refusalStates(): RefusalState[] {
         options: { readOnly: true, autoConnect: false },
       },
     }, { reason: 'not_loaded', loadOutcome: 'decrypt_failed', persistedLive: true }),
+    // Skipped at load for a reason that is neither the type check nor decryption — the `config`
+    // column holds JSON `null`, so building the config throws (diagnosis §4.6: "同上，后面跟其它原因").
+    // Next to S2d so each side of the load_failed / decrypt_failed split is tested against the other.
+    canonicalState('s2d-other', { config: null },
+      { reason: 'not_loaded', loadOutcome: 'load_failed', persistedLive: true }),
     canonicalState('s2f', null,
       { reason: 'not_loaded', loadOutcome: 'absent_at_load', persistedLive: false }),
     canonicalState('s3a', {}, { reason: 'owner_mismatch' }, { stamp: null }),
