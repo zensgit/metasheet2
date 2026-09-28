@@ -301,6 +301,7 @@ import {
 } from '../../../services/integration/stockPreparation/operatorHomeCards'
 import {
   resolveStockPrepPullBanner,
+  stockPrepExportTenantWallPlain,
   STOCK_PREP_TOOLTIP_READY_TO_EXPORT,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
@@ -624,7 +625,19 @@ async function exportCard(projectNo: string): Promise<void> {
         en: 'This project number has no active material rows — an empty, headers-only template was downloaded.',
       }
     }
-  } catch {
+  } catch (error) {
+    // THE TENANT WALL gets its own words: the bound 备料主表 is not provably this factory's, and
+    // 「稍后再点一次」 would send the operator round in circles on a refusal no retry can change.
+    const wall = stockPrepExportTenantWallPlain((error as { code?: unknown } | null)?.code)
+    if (wall) {
+      exportNotice.value = {
+        projectNo,
+        tone: 'error',
+        zh: wall.zhNext ? `${wall.zh}${wall.zhNext}` : wall.zh,
+        en: wall.enNext ? `${wall.en} ${wall.enNext}` : wall.en,
+      }
+      return
+    }
     // A generic, values-free failure line — this button is a genuine write-shaped click (G3), so it
     // gets a visible answer, unlike the silent predreads elsewhere on this page.
     exportNotice.value = {

@@ -71,6 +71,7 @@ const {
 const { __internals: bomExpansionInternals } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 const bomPath = (...tokens) => bomExpansionInternals.makePath(tokens)
 const {
+  makeFakeProvisioning,
   makeStrictRecordsApi,
   physicalFieldId,
   physicalRow,
@@ -524,6 +525,16 @@ function mount({ boundSheet = SANDBOX_SHEET, realAuditStore = false } = {}) {
       return records.queryRecords(input)
     },
   }
+  // THE OWNERSHIP PORT. The route now proves the bound sheet is the caller's own before it reads a
+  // row (the tenant wall it shares with the carry — see stock-preparation-prep-line-export-tenant-
+  // wall.test.cjs for that behaviour in full). Every sheet this suite binds is one THIS tenant
+  // provisioned, so the registry answers yes for both; neither id is the derived one, so this is
+  // also the hand-bound, registry-proven shape a real deployment runs.
+  const provisioning = makeFakeProvisioning({
+    stagingProjectId: STAGING,
+    sheetIdByObjectId: {},
+    sheetOwnerBySheetId: { [MAIN_SHEET]: STAGING, [SANDBOX_SHEET]: STAGING },
+  })
   const context = {
     api: {
       http: {
@@ -531,7 +542,7 @@ function mount({ boundSheet = SANDBOX_SHEET, realAuditStore = false } = {}) {
           routes.set(`${method.toUpperCase()} ${routePath}`, handler)
         },
       },
-      multitable: { records: countingRecords },
+      multitable: { records: countingRecords, provisioning },
     },
     storage: new Map(),
     config: { stockPreparationTableActions: [tableActionConfigFor(target)] },

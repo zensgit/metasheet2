@@ -45,10 +45,11 @@ const CODE_IDENTIFIERS: Readonly<Record<string, string>> = { SHEET_DELETED_CODE 
 const ROUTE_LEVEL_RERUN_KEYS: readonly string[] = ['AccessDenied', 'ADMIN_REQUIRED']
 
 /**
- * Resume refusals that had no web label before #5803. They still fall back to the raw server message. This
- * is a known gap for a later web slice, recorded here so it cannot grow unnoticed.
+ * Resume refusals with no web label. Now empty: `EXECUTION_GONE` / `SUSPENSION_CURSOR_INVALID` were the
+ * last two (recorded here since #5803) and are now mapped in `RESUME_ERROR_LABELS`. Kept as a list (not
+ * removed outright) so a future unmapped code can be recorded the same way, one at a time.
  */
-const KNOWN_UNMAPPED_RESUME_CODES: readonly string[] = ['EXECUTION_GONE', 'SUSPENSION_CURSOR_INVALID']
+const KNOWN_UNMAPPED_RESUME_CODES: readonly string[] = []
 
 /** Repo file as text, line endings normalized (the Windows checkout is CRLF, CI is LF). */
 function readRepoText(rel: string): string {

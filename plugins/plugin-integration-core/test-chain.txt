@@ -82,6 +82,7 @@ node __tests__/stock-preparation-confirmation-decisions.test.cjs
 node __tests__/stock-preparation-own-base.test.cjs
 node __tests__/stock-preparation-permission-matrix.test.cjs
 node __tests__/stock-preparation-prep-line-export.test.cjs
+node __tests__/stock-preparation-prep-line-export-tenant-wall.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight.test.cjs
 node __tests__/stock-preparation-production-policy.test.cjs

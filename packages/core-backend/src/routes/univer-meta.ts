@@ -336,8 +336,8 @@ import {
   parseDingTalkAutomationDeliveryLimit,
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
+  preflightAutomationRuleUpdate,
   preflightDingTalkAutomationCreate,
-  preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
@@ -1330,6 +1330,44 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
     ...(foreignSheetId ? { foreignSheetId } : {}),
     ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
   }
+}
+
+/**
+ * 客户反馈 2026-09-24 #4c follow-up (deferred by PR #6083): for each lookup field in `fields` whose TARGET field
+ * (on the foreign sheet) is a date-time, the zone its values are shown in — the target's own rule: a dateTime
+ * field's explicit non-'UTC' zone else the instance business timezone; createdTime / modifiedTime → the business
+ * timezone. Other lookups are absent (their cells keep the raw projection). The foreign sheet is resolved as
+ * applyLookupRollup does (`cfg.foreignSheetId ?? link.foreignSheetId`); one field load per distinct foreign sheet.
+ * Only field TYPES / zone properties are read — no foreign VALUES, so no readability gate is involved here (the
+ * values themselves were already masked by applyLookupRollup).
+ */
+async function resolveLookupDateTimeTargetZones(
+  query: QueryFn,
+  fields: UniverMetaField[],
+  relationalLinkFields: RelationalLinkField[],
+): Promise<Map<string, string>> {
+  const zones = new Map<string, string>()
+  const lookups = fields
+    .filter((field) => field.type === 'lookup')
+    .map((field) => ({ fieldId: field.id, cfg: parseLookupFieldConfig(field.property) }))
+    .filter((entry): entry is { fieldId: string; cfg: LookupFieldConfig } => entry.cfg !== null)
+  if (lookups.length === 0) return zones
+  const linkConfigById = new Map(relationalLinkFields.map(({ fieldId, cfg }) => [fieldId, cfg] as const))
+  const foreignFieldsBySheet = new Map<string, Array<{ id: string; type: string; property?: unknown }>>()
+  for (const { fieldId, cfg } of lookups) {
+    const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (!foreignSheetId) continue
+    let foreignFields = foreignFieldsBySheet.get(foreignSheetId)
+    if (!foreignFields) {
+      foreignFields = (await loadFieldsForSheetShared(query, foreignSheetId)) as Array<{ id: string; type: string; property?: unknown }>
+      foreignFieldsBySheet.set(foreignSheetId, foreignFields)
+    }
+    const target = foreignFields.find((candidate) => candidate.id === cfg.targetFieldId)
+    if (!target) continue
+    if (target.type === 'dateTime') zones.set(fieldId, resolveDateTimeFieldTimeZone(target.property))
+    else if (target.type === 'createdTime' || target.type === 'modifiedTime') zones.set(fieldId, resolveMultitableBusinessTimezone())
+  }
+  return zones
 }
 
 function parseRollupAggregation(value: unknown): RollupAggregation | null {
@@ -8348,8 +8386,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
         [sheetIds],
       )
+      // ORDER BY created_at, id (客户反馈 2026-09-24 #8 / A10 phase 1): 没有排序时 Postgres
+      // 不保证返回顺序,extractTemplateSheets 按这个数组的原样顺序把视图挂进模板 —— 顺序不稳会让
+      // 同一张表两次存出的模板视图次序不一样。created_at 主排、id 兜底。
+      // S1(2026-09-26 对抗评审):id 兜底不是空话——installMultitableTemplate 在**一个事务**里
+      // 建完一张模板的全部视图,事务内 now() 是同一个时刻,所有视图的 created_at 若都交给 DB
+      // 默认值会打成一片,这时真正生效的排序键就是 id(sha1,和模板顺序无关)。为此
+      // template-library.ts 给每个视图传一个按模板顺序递增的微秒偏移,created_at = 数据库
+      // now() + 偏移(provisioning.ts createView 的可选 createdAtOffsetMicros;其它调用方不传,
+      // 偏移为 0,等于原来的 DB 默认值 now()),装回去的视图顺序才会等于存下来的模板顺序,
+      // 这条 ORDER BY 重新读出来时才对得上。
+      // 已知残留(第二轮对抗评审 S-1,不做回填迁移):#6091 之前从模板装出来的 Base,视图
+      // created_at 全部打平,这里会按 id 排;/context(工作台标签顺序)刻意保持 created_at ASC
+      // 不加 id,所以这类老 Base 存模板时的视图顺序可能与用户看到的标签顺序不同。
       const viewResult = await pool.query(
-        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[])',
+        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[]) ORDER BY created_at, id',
         [sheetIds],
       )
 
@@ -8967,6 +9018,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const viewsResult = effectiveSheetId
         ? await pool.query(
+          // S-1 (second adversarial review of #6091): `ORDER BY created_at ASC` EXACTLY, with NO
+          // `, id` tie-breaker. Bases installed from a template before #6091 have every view on ONE
+          // timestamp (installMultitableTemplate ran inside one transaction on the DB default
+          // now()); an `id` tie-break would make the sha1 view id (stableChildId) their effective
+          // sort key and reshuffle the tabs / flip the default view (views[0]) of bases that already
+          // exist. Kept byte-identical to the pre-#6091 query and ordered exactly like GET /views
+          // (the two `... ORDER BY created_at ASC LIMIT 200` reads below); both are pinned by
+          // tests/unit/multitable-context-view-order.test.ts. Installs since #6091 stamp strictly
+          // increasing created_at per view (template-library.ts), so they have no ties at all.
+          // The save-as-template read (POST /templates) still breaks ties by id — see its note.
           `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config
            FROM meta_views
            WHERE sheet_id = $1
@@ -16042,6 +16103,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
         else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
       }
+      // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
+      // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
+      // map is filled only where the rows are hydrated through applyLookupRollup (the filtered branch below).
+      let exportLookupDateTimeZoneById = new Map<string, string>()
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -16056,6 +16121,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             const wallClock = formatDateTimeValue(cell, dateTimeZone)
             // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
             if (wallClock !== null) return wallClock
+          }
+          const lookupZone = exportLookupDateTimeZoneById.get(field.id)
+          if (lookupZone && Array.isArray(cell)) {
+            // Same joining as any array cell; a looked-up value that is not a date-time keeps its raw text.
+            return serializeXlsxCell(cell.map((item) => formatDateTimeValue(item, lookupZone) ?? item))
           }
           return serializeXlsxCell(cell)
         })
@@ -16147,6 +16217,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (needsComputedFilterSort && all.length > 0) {
           linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), relationalLinkFields)
           await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, all, relationalLinkFields, linkValuesByRecord)
+          exportLookupDateTimeZoneById = await resolveLookupDateTimeTargetZones(pool.query.bind(pool), fields, relationalLinkFields)
         }
 
         // Link-FILTER materialization (parity with /view): a link condition matches on the linked
@@ -18587,6 +18658,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           linkSummaries,
           ...(personSummaries ? { personSummaries } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
+          // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link / linked-record peek) shows its
+          // date-times in the SAME instance business timezone as /context and /form-context — a zone id,
+          // instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
         },
       })
     } catch (err) {
@@ -20443,7 +20518,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
       const rule = await automationService.createRule(sheetId, input)
 
       return res.json({
@@ -20485,17 +20561,27 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!parsed) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
-      const input = await preflightDingTalkAutomationUpdate(
+      const preflight = await preflightAutomationRuleUpdate(
         pool.query.bind(pool),
         sheetId,
         ruleId,
         parsed,
         automationService,
       )
-      if (!input) {
+      if (!preflight) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      const input = preflight.input
+      // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
+      // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
+      // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to
+      // re-type a rule whose stored `actionConfig` carries never-checked `branches`, must still have those branch
+      // values checked, not slip past unvalidated.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, {
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
+      })
 
       const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)
       if (!updated) {

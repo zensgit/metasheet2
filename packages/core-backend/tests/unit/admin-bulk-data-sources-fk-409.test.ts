@@ -149,7 +149,7 @@ vi.mock('../../src/rbac/service', () => ({
   isAdmin: vi.fn().mockResolvedValue(true),
 }))
 
-import { initAdminRoutes } from '../../src/routes/admin-routes'
+import { initAdminRoutes, ADMIN_WRITE_FAILED_CODE } from '../../src/routes/admin-routes'
 import { getSafetyGuard } from '../../src/guards/SafetyGuard'
 
 // ── fixtures (values-free) ────────────────────────────────────────────────────
@@ -359,7 +359,11 @@ describe('boundaries: only the binding constraint on data_sources becomes a 409'
     const res = await bulkDelete({ table: 'data_sources', filters: { id: SOURCE_ID } })
 
     expect(res.status).toBe(500)
-    expect(res.body.code).toBeUndefined()
+    // Not the 409's code. Since the admin-tree 500 redaction the body carries the generic write-failure
+    // code instead of no code at all — and never the driver's own sentence.
+    expect(res.body.code).not.toBe(REFERENCED_CODE)
+    expect(res.body.code).toBe(ADMIN_WRITE_FAILED_CODE)
+    expect(JSON.stringify(res.body)).not.toContain(DRIVER_PROSE)
     expect(res.body.success).toBe(false)
   })
 
@@ -369,7 +373,9 @@ describe('boundaries: only the binding constraint on data_sources becomes a 409'
     const res = await bulkDelete({ table: 'tables', filters: { id: 'tbl-fixture' } })
 
     expect(res.status).toBe(500)
-    expect(res.body.code).toBeUndefined()
+    expect(res.body.code).not.toBe(REFERENCED_CODE)
+    expect(res.body.code).toBe(ADMIN_WRITE_FAILED_CODE)
+    expect(JSON.stringify(res.body)).not.toContain(DRIVER_PROSE)
     // A non-data_sources target is never pre-checked either.
     expect(state.selects).toEqual([])
     expect(state.mutations).toEqual([{ kind: 'delete', table: 'tables' }])
@@ -381,7 +387,9 @@ describe('boundaries: only the binding constraint on data_sources becomes a 409'
     const res = await bulkDelete({ table: 'data_sources', filters: { id: SOURCE_ID } })
 
     expect(res.status).toBe(500)
-    expect(res.body.code).toBeUndefined()
+    expect(res.body.code).not.toBe(REFERENCED_CODE)
+    expect(res.body.code).toBe(ADMIN_WRITE_FAILED_CODE)
+    expect(JSON.stringify(res.body)).not.toContain('与服务器的连接已中断')
   })
 
   it('a PUT that does NOT set deleted_at is not pre-checked, even for a referenced source', async () => {

@@ -126,13 +126,40 @@ import type {
   SendDingTalkGroupMessageConfig,
   SendDingTalkPersonMessageConfig,
 } from './automation-actions'
-import type { ConditionGroup } from './automation-conditions'
-import { evaluateConditions } from './automation-conditions'
+import type {
+  AutomationConditionField,
+  ConditionEvaluationOptions,
+  ConditionGroup,
+  ConditionUnreadableValueInfo,
+} from './automation-conditions'
+import { evaluateConditions, normalizeConditionFields } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
 import type { Notification, NotificationResult, NotificationService } from '../types/plugin'
 import { WebhookService } from './webhook-service'
 
 const logger = new Logger('AutomationExecutor')
+
+// 客户反馈 2026-09-24 #4b — ONE values-free warning per rule when a stored cell or a condition value cannot be
+// read as its field's type (a legacy free-text string in a date field, …). The condition then evaluates as
+// unmatched instead of throwing. Bounded so a long-lived process never grows the registry without limit.
+const UNREADABLE_CONDITION_VALUE_WARNED_RULES = new Set<string>()
+const UNREADABLE_CONDITION_VALUE_WARN_CAP = 5_000
+
+function warnUnreadableConditionValueOnce(ruleId: string, sheetId: string, info: ConditionUnreadableValueInfo): void {
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.has(ruleId)) return
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.size >= UNREADABLE_CONDITION_VALUE_WARN_CAP) {
+    UNREADABLE_CONDITION_VALUE_WARNED_RULES.clear()
+  }
+  UNREADABLE_CONDITION_VALUE_WARNED_RULES.add(ruleId)
+  logger.warn('Automation condition value could not be read as the field type; the condition evaluated as unmatched', {
+    ruleId,
+    sheetId,
+    fieldId: info.fieldId,
+    fieldType: info.fieldType,
+    operator: info.operator,
+    side: info.side,
+  })
+}
 
 const DEFAULT_WEBHOOK_TIMEOUT_MS = 5_000
 const DEFAULT_MAX_WEBHOOK_RETRIES = 2
@@ -1512,6 +1539,12 @@ export interface ExecutionContext {
   ledgerKind?: ExecutionLedgerKind
   /** #4196 Q2/Q6: simulate derives control flow but dispatches no business action. */
   dispatchMode?: AutomationDispatchMode
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields for TYPED condition evaluation, loaded lazily once per
+   * execution through `AutomationDeps.loadConditionFields` and cached here. `undefined` = not loaded yet;
+   * `null` = no loader / load failed ⇒ legacy untyped evaluation.
+   */
+  conditionFields?: ReadonlyMap<string, AutomationConditionField> | null
 }
 
 // ── Dependencies interface for action executors ───────────────────────────
@@ -1622,6 +1655,13 @@ export interface AutomationDeps {
    * authorization read shares the write transaction; a fixed `fwbGateChecks` remains a test seam.
    */
   fwbGateChecksFactory?: (queryFn: AutomationDeps['queryFn']) => FwbGateChecks
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields (`id`, `type`, `property`) so rule and condition_branch
+   * conditions compare by FIELD TYPE (dates by calendar day in the business timezone, person/link/multiSelect
+   * as id sets, numbers numerically, …). OMITTED ⇒ the legacy untyped evaluation and NO field query — the
+   * zero-DB executor test seams stay zero-DB. Production (`AutomationService`) binds it to `meta_fields`.
+   */
+  loadConditionFields?: (sheetId: string) => Promise<ReadonlyArray<AutomationConditionField>>
 }
 
 /** FWB fail-closed default: every gate denies. Production binds real checks at AutomationService
@@ -1696,6 +1736,38 @@ export class AutomationExecutor {
   }
 
   /**
+   * 客户反馈 2026-09-24 #4b — the typed-evaluation options for `evaluateConditions`: the sheet's field types
+   * (loaded once per execution via `deps.loadConditionFields`, cached on the context so the top-level
+   * conditions and every condition_branch share ONE read) plus the once-per-rule values-free warning for
+   * values that cannot be read as their field's type. Never throws: no loader or a failing loader ⇒ `null`
+   * fields ⇒ the legacy untyped evaluation, so a field-table hiccup can never fail a run.
+   */
+  private async conditionEvaluationOptions(context: ExecutionContext): Promise<ConditionEvaluationOptions> {
+    if (context.conditionFields === undefined) {
+      context.conditionFields = await this.loadConditionFieldMap(context.sheetId, context.ruleId)
+    }
+    return {
+      fields: context.conditionFields,
+      onUnreadableValue: (info) => warnUnreadableConditionValueOnce(context.ruleId, context.sheetId, info),
+    }
+  }
+
+  private async loadConditionFieldMap(
+    sheetId: string,
+    ruleId: string,
+  ): Promise<ReadonlyMap<string, AutomationConditionField> | null> {
+    const loader = this.deps.loadConditionFields
+    if (!loader) return null
+    try {
+      return normalizeConditionFields(await loader(sheetId))
+    } catch {
+      // Values-free: the failure reason is not logged (it may echo connection details); ids only.
+      logger.warn('Automation condition field types unavailable; evaluating conditions untyped', { ruleId, sheetId })
+      return null
+    }
+  }
+
+  /**
    * Execute a rule against a trigger event.
    * Returns an execution record with step results.
    */
@@ -1752,9 +1824,10 @@ export class AutomationExecutor {
       dispatchMode,
     }
 
-    // Evaluate conditions
+    // Evaluate conditions — typed by the sheet's field types when the wiring provides them (#4b).
     if (rule.conditions) {
-      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData)
+      const conditionOptions = await this.conditionEvaluationOptions(context)
+      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData, conditionOptions)
       if (!conditionsPassed) {
         execution.status = 'skipped'
         execution.duration = Date.now() - startTime
@@ -2384,8 +2457,10 @@ export class AutomationExecutor {
     let matched = false
 
     try {
+      // #4b: branch conditions compare by field type exactly like the rule's top-level conditions.
+      const conditionOptions = await this.conditionEvaluationOptions(context)
       for (const branch of branches) {
-        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData)) {
+        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData, conditionOptions)) {
           selected = branch
           matched = true
           break

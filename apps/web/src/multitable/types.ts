@@ -350,6 +350,8 @@ export interface MetaRecordContext {
   linkSummaries?: Record<string, LinkedRecordSummary[]>
   personSummaries?: Record<string, PersonSummary[]>
   attachmentSummaries?: Record<string, MetaAttachment[]>
+  // 客户反馈 2026-09-24 #4c: the instance business timezone — same value and meaning as MetaContext's.
+  businessTimezone?: string
 }
 
 export type MetaRecordRevisionAction = 'create' | 'update' | 'delete'
