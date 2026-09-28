@@ -165,6 +165,86 @@ test('readonly bridge sets SQL command text and type through one pinned assignme
   );
 });
 
+// Round-2 verifier finding: a whole-word verb ban (the test above) and a
+// count-of-assignments ban (the test above that) both only recognise a
+// *spelling* -- they never pin what SQL text actually reaches the database.
+// A bare stored-procedure name (e.g. `dbo.usp_InsertStockIssue`) contains no
+// forbidden verb as a whole word, and T-SQL admin statements (DBCC, SHUTDOWN,
+// KILL, sp_configure, sp_addrolemember, xp_cmdshell, ENABLE TRIGGER) are not
+// on -- and can never fully enumerate -- the forbidden-verb list. Closing
+// this structurally: the script has exactly one function that ever runs SQL
+// (Invoke-BridgeSqlQuery), it is only ever called from two literal call
+// sites, and the one SQL string it builds itself has exactly one literal
+// shape. Any mutation to the health-check literal, to the query-builder
+// text, or to how either reaches -Sql (a renamed variable, a different
+// request property, an inline batch) changes one of the pinned literals
+// below and fails this test, regardless of which word it now contains.
+test('readonly bridge executes SQL only through two pinned call sites, each with a pinned SQL shape', async () => {
+  const script = await readScript();
+
+  const invokeBridgeSqlQueryLines = script
+    .split(/\r\n|\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.includes('Invoke-BridgeSqlQuery'));
+  assert.deepEqual(
+    invokeBridgeSqlQueryLines,
+    [
+      'function Invoke-BridgeSqlQuery {',
+      "[void](Invoke-BridgeSqlQuery -Config $Config -Sql 'SELECT 1 AS ok')",
+      '$rows = Invoke-BridgeSqlQuery -Config $Config -Sql $querySpec.Sql -Parameters $querySpec.Parameters',
+    ],
+    `expected exactly one function definition and two call sites, with the health check passing the literal ` +
+      `'SELECT 1 AS ok' and the query route passing $querySpec.Sql unchanged, found: ${JSON.stringify(invokeBridgeSqlQueryLines)}`,
+  );
+
+  const sqlAssignments = [...script.matchAll(/\$sql\s*=[^\r\n]*/g)].map((match) => match[0].trim());
+  assert.deepEqual(
+    sqlAssignments,
+    ['$sql = "SELECT TOP $Limit $columns FROM $source"'],
+    `expected exactly one $sql assignment, built only from the quoted identifier/source helpers, found: ${JSON.stringify(sqlAssignments)}`,
+  );
+
+  const sqlAppends = [...script.matchAll(/\$sql\s*\+=[^\r\n]*/g)].map((match) => match[0].trim());
+  assert.deepEqual(
+    sqlAppends,
+    ["$sql += \" WHERE \" + ($whereClauses -join ' AND ')"],
+    `expected exactly one $sql append, built only from the parameterized WHERE clause list, found: ${JSON.stringify(sqlAppends)}`,
+  );
+});
+
+// Round-2 verifier finding: the CommandText/CommandType pin above only
+// watches the one SqlCommand object created via $connection.CreateCommand().
+// A stored-procedure (or any other write) reaches the database just as well
+// through a *second* command object that never touches that pin: a direct
+// `New-Object ... SqlCommand(...)` / `[SqlCommand]::new(...)` /
+// `New-Object ... SqlCommand -Property @{ CommandText = ... }` constructor,
+// a SqlDataAdapter/SqlCommandBuilder pair (`.Fill()`, `.Update()`,
+// `.GetInsertCommand()`), or shelling out to `Invoke-Sqlcmd`/`sqlcmd.exe`.
+// None of those names is a "write verb" in the SQL sense, so the whole-word
+// verb test above cannot see them either. These are matched as plain
+// substrings, not whole words: `SqlCommandBuilder` and `SqlDataAdapter` are
+// their own identifiers with no `\b` boundary a `\bSqlCommand\b`-style check
+// could rely on, and `sqlcmd`/`Invoke-Sqlcmd`/`sqlcmd.exe` are not variants
+// of any word in the forbidden-verb list at all.
+test('readonly bridge names no alternate SqlCommand/adapter/sqlcmd execution surface', async () => {
+  const script = await readScript();
+
+  for (const surface of ['SqlCommand', 'SqlDataAdapter', 'sqlcmd']) {
+    assert.doesNotMatch(
+      script,
+      new RegExp(surface.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+      `bridge-agent-readonly.ps1 must not reference "${surface}" (a second way to build/run a SQL command)`,
+    );
+  }
+
+  const createCommandCalls = [...script.matchAll(/\bCreateCommand\s*\(/g)];
+  assert.equal(
+    createCommandCalls.length,
+    1,
+    `expected exactly one CreateCommand() call (one command, from one connection), found ${createCommandCalls.length}`,
+  );
+});
+
 test('example config is localhost-only, credential-by-env, and object-allowlisted', async () => {
   const config = await readConfig();
 
