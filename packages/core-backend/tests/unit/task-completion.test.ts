@@ -218,18 +218,32 @@ describe('task-completion', () => {
       ).toThrow()
     })
 
-    describe('wasDone is ignored when the task has assignee rows', () => {
+    describe('wasDone and assignee rows (task-c A6: wasDone matters when the task was done)', () => {
       it('applyReopen: wasDone=false does not suppress a real self reopen', () => {
         const rows = [row('u1', NOW), row('u2', null)]
         const result = applyReopen({ mode: 'all', rows, actorId: 'u1', scope: 'self', createdBy: 'creator1', wasDone: false })
         expect(result.rows.find((r) => r.userId === 'u1')?.completedAt).toBeNull()
         expect(result.events).toEqual([{ type: 'self_reopened', userId: 'u1' }])
       })
-      it('applyComplete: wasDone=true does not suppress a real self complete', () => {
+      // task-c A6 changed this contract: the task row is the source of truth, so completing a task
+      // that is already done is a no-op even when rows are null (carried over from `any` mode).
+      it('applyComplete: wasDone=true on a done all-mode task with null rows is a no-op (task-c A6)', () => {
         const rows = [row('u1', null), row('u2', null)]
         const result = applyComplete({ mode: 'all', rows, actorId: 'u1', createdBy: 'creator1', now: NOW, wasDone: true })
+        expect(result.rows).toEqual(rows)
+        expect(result.events).toEqual([])
+        expect(result.done).toBe(true)
+      })
+      it('applyComplete: wasDone=false still stamps the actor and records self_completed', () => {
+        const rows = [row('u1', null), row('u2', null)]
+        const result = applyComplete({ mode: 'all', rows, actorId: 'u1', createdBy: 'creator1', now: NOW, wasDone: false })
         expect(result.rows.find((r) => r.userId === 'u1')?.completedAt).toEqual(NOW)
         expect(result.events).toEqual([{ type: 'self_completed', userId: 'u1', occurredAt: NOW }])
+      })
+      it('applyReopen scope all: wasDone=true on a done all-mode task with null rows still reopens (task-c A6)', () => {
+        const rows = [row('u1', null), row('u2', null)]
+        const result = applyReopen({ mode: 'all', rows, actorId: 'creator1', scope: 'all', createdBy: 'creator1', wasDone: true })
+        expect(result.events).toEqual([{ type: 'reopened', userId: 'creator1' }])
       })
     })
 
@@ -336,5 +350,65 @@ describe('task-completion — review round 2 fixes', () => {
     const r = applyReopen({ mode: 'any', rows: [row('u1', NOW), row('u2', NOW)], actorId: 'u1', createdBy: 'c1' })
     expect(r.rows.every((x) => x.completedAt === null)).toBe(true)
     expect(r.events).toEqual([{ type: 'reopened', userId: 'u1' }])
+  })
+})
+
+// task-c A6: an `any` task's done state is the task row's (wasDone), not only its stamped rows.
+describe('task-c A6: any mode follows wasDone so a done task with null rows is not stuck', () => {
+  const NOW_C = new Date('2026-09-28T09:00:00.000Z')
+  it('reopen of a done any task whose rows are all null still reopens (clears rows, reopened)', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'b', completedAt: null }]
+    const result = applyReopen({ mode: 'any', rows, actorId: 'creator1', createdBy: 'creator1', wasDone: true })
+    expect(result.events).toEqual([{ type: 'reopened', userId: 'creator1' }])
+    expect(result.rows).toEqual([{ userId: 'b', completedAt: null }])
+    expect(assertAnyModeInvariant('open', 'any', result.rows)).toBe(true)
+  })
+  it('complete of an already-done any task is a no-op: no stamping, no second completed_by_any', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'b', completedAt: null }]
+    const result = applyComplete({ mode: 'any', rows, actorId: 'b', createdBy: 'creator1', now: NOW_C, wasDone: true })
+    expect(result.events).toEqual([])
+    expect(result.rows).toEqual([{ userId: 'b', completedAt: null }])
+    expect(result.done).toBe(true)
+  })
+  it('an open any task (wasDone false) still completes normally', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'b', completedAt: null }]
+    const result = applyComplete({ mode: 'any', rows, actorId: 'b', createdBy: 'creator1', now: NOW_C, wasDone: false })
+    expect(result.events).toEqual([{ type: 'completed_by_any', userId: 'b', occurredAt: NOW_C }])
+  })
+  it('all mode, actor clears their own completed row: self_reopened regardless of wasDone', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: NOW_C }, { userId: 'b', completedAt: null }]
+    const result = applyReopen({ mode: 'all', rows, actorId: 'a', scope: 'self', createdBy: 'creator1', wasDone: true })
+    expect(result.events).toEqual([{ type: 'self_reopened', userId: 'a' }])
+  })
+})
+
+describe('task-c A7: self reopen of a done all task with all-null rows records the flip', () => {
+  it('actor with a null row, task done (wasDone true), rows all null -> reopened', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: null }]
+    const result = applyReopen({ mode: 'all', rows, actorId: 'a', scope: 'self', createdBy: 'c', wasDone: true })
+    expect(result.events).toEqual([{ type: 'reopened', userId: 'a' }])
+  })
+  it('creator (no row) self-reopens the same task -> reopened', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: null }]
+    const result = applyReopen({ mode: 'all', rows, actorId: 'c', scope: 'self', createdBy: 'c', wasDone: true })
+    expect(result.events).toEqual([{ type: 'reopened', userId: 'c' }])
+  })
+  it('task open (wasDone false) and actor row already null -> still a no-op', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: null }, { userId: 'b', completedAt: new Date('2026-09-28T09:00:00.000Z') }]
+    const result = applyReopen({ mode: 'all', rows, actorId: 'a', scope: 'self', createdBy: 'c', wasDone: false })
+    expect(result.events).toEqual([])
+  })
+})
+
+describe('task-c round 3: the A7 condition is "task no longer done", not "all rows null"', () => {
+  it('[a completed, b empty], b self-reopens a done task (wasDone true) -> reopened', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: new Date('2026-09-28T09:00:00.000Z') }, { userId: 'b', completedAt: null }]
+    const result = applyReopen({ mode: 'all', rows, actorId: 'b', scope: 'self', createdBy: 'c', wasDone: true })
+    expect(result.events).toEqual([{ type: 'reopened', userId: 'b' }])
+  })
+  it('[a completed], creator with no row self-reopens a done task -> no event (task still counts as done)', () => {
+    const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: new Date('2026-09-28T09:00:00.000Z') }]
+    const result = applyReopen({ mode: 'all', rows, actorId: 'c', scope: 'self', createdBy: 'c', wasDone: true })
+    expect(result.events).toEqual([])
   })
 })

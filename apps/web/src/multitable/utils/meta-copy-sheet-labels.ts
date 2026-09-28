@@ -53,6 +53,7 @@ export type MetaCopySheetLabelKey =
   | 'copySheet.error.sourceGone'
   | 'copySheet.error.forbidden'
   | 'copySheet.error.busy'
+  | 'copySheet.error.temporarilyUnavailable'
   | 'copySheet.error.generic'
   | 'copySheet.error.probeFailed'
 
@@ -153,6 +154,12 @@ const META_COPY_SHEET_LABELS: Record<MetaCopySheetLabelKey, LocaleText> = {
   'copySheet.error.busy': {
     en: 'The table is busy with another operation. Try again shortly.',
     zh: '数据表正被其他操作占用，请稍后重试。',
+  },
+  // 503 COPY_TEMPORARILY_UNAVAILABLE: the server's dedupe ledger is not migrated yet, so the copy refuses (fail-closed,
+  // decision register R-20). Nothing was written; retrying does not help until an administrator upgrades the database.
+  'copySheet.error.temporarilyUnavailable': {
+    en: 'Copy is temporarily unavailable: the server needs a database upgrade first; contact your administrator.',
+    zh: '复制暂不可用：服务器需要先完成数据库升级，请联系管理员。',
   },
   'copySheet.error.generic': { en: 'Copy failed. Try again later.', zh: '复制失败，请稍后重试。' },
   // The dry-run itself did not answer (network / 5xx): nothing was attempted, and copying stays locked
@@ -325,6 +332,8 @@ export function copySheetErrorMessage(error: unknown, isZh: boolean, ctx: CopySh
       return copySheetRowFailureText(error.rowIndex, error.fieldId, isZh, ctx)
     case 'COPY_SOURCE_SYSTEM_SHEET':
       return copySheetLabel('copySheet.error.systemSheet', isZh)
+    case 'COPY_TEMPORARILY_UNAVAILABLE':
+      return copySheetLabel('copySheet.error.temporarilyUnavailable', isZh)
     case 'NAME_INVALID_CHARACTERS':
       return copySheetLabel('copySheet.error.nameInvalid', isZh)
     case 'SHEET_NOT_LIVE':
