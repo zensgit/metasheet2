@@ -191,7 +191,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, onScopeDispose, ref } from 'vue'
 import type {
   ApprovalTemplateGroupReorderResultDTO,
   ApprovalTemplateListItemDTO,
@@ -206,7 +206,8 @@ import {
   reorderApprovalTemplateGroups,
   unlinkApprovalTemplateFromGroup,
 } from '../../approvals/api'
-import SessionOrgSwitcher from '../../components/SessionOrgSwitcher.vue'
+import SessionOrgSwitcher, { SessionOrgHostKey } from '../../components/SessionOrgSwitcher.vue'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { useSessionOrg } from '../../composables/useSessionOrg'
 import { useLocale } from '../../composables/useLocale'
 import { ZH, EN } from './templateCenterLabels'
@@ -249,6 +250,15 @@ const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 // on those paths is `approvalTemplateAdminGuard` (I7), a different condition that the selector
 // cannot fix. This is the named D3-1 change, not a narrower sibling of the panel's contract: the
 // panel covers load + create because create is ITS first write; this view has no create.
+// P1-A (impl-gate-A5-daily-ops-round1-20260920.md) — when this view is mounted inside
+// TemplateCenterView, the PAGE owns the one `useSessionOrg()` instance, the one rendered switcher
+// and the replay; this view only reports "I am blocked on SESSION_ORG_REQUIRED". Mounted with no
+// host (its own spec, or any other future host) `inject` returns `null` and everything below
+// behaves exactly as it did before — its own instance, its own switcher, its own retry slot. See
+// `SessionOrgSwitcher.vue`'s `SessionOrgHost` doc comment for why a second live instance on one
+// page is not a cosmetic duplicate but a state-destroying one.
+const sessionOrgHost = inject(SessionOrgHostKey, null)
+
 const {
   orgs,
   // `selectedOrgId` (not the raw `currentOrgId`) — the composable normalizes `null` to `''`, which
@@ -259,26 +269,44 @@ const {
   errorMessage: sessionOrgError,
   loadSessionOrgs,
   switchSessionOrg,
-} = useSessionOrg()
+} = sessionOrgHost?.sessionOrg ?? useSessionOrg()
 
-const showSessionOrgSwitcher = ref(false)
+// "This view's own load is blocked on a session-org choice" — it also suppresses the section list
+// (which is empty in that state) regardless of who renders the control.
+const sessionOrgBlocked = ref(false)
+// Whether THIS view draws the control. Never while hosted: the page draws exactly one.
+const showSessionOrgSwitcher = computed(() => sessionOrgBlocked.value && sessionOrgHost === null)
 // The one blocked call to replay once the session-org switch resolves. Only `loadAll()` ever
 // registers here (see the scope note above) and it self-guards against overlap, so a single slot
-// is enough — no queue needed.
+// is enough — no queue needed. Stays empty while hosted: the host replays `loadAll()` itself.
 let pendingRetry: (() => Promise<void>) | null = null
+// True for exactly the window in which THIS view's own switcher is driving the transition (see
+// the principal-reset listener below for why the two cases must be told apart).
+let ownSwitchInFlight = false
 
 function handleSessionOrgRequired(retry: () => Promise<void>): void {
+  sessionOrgBlocked.value = true
+  if (sessionOrgHost) {
+    pendingRetry = null
+    sessionOrgHost.notifySessionOrgRequired()
+    return
+  }
   pendingRetry = retry
-  showSessionOrgSwitcher.value = true
   // Fire-and-forget: populates the switcher's `orgs` list. A rejection here only leaves the
   // switcher's own `errorMessage` set; it must never throw back into the caller's catch.
   void loadSessionOrgs()
 }
 
 async function onSessionOrgChange(orgId: string): Promise<void> {
-  const ok = await switchSessionOrg(orgId)
+  ownSwitchInFlight = true
+  let ok = false
+  try {
+    ok = await switchSessionOrg(orgId)
+  } finally {
+    ownSwitchInFlight = false
+  }
   if (!ok) return
-  showSessionOrgSwitcher.value = false
+  sessionOrgBlocked.value = false
   const retry = pendingRetry
   pendingRetry = null
   if (retry) await retry()
@@ -349,7 +377,24 @@ async function fetchPage(token: string, page: number): Promise<{ data: ApprovalT
   })
 }
 
+// Request-algebra guard (impl-gate-A5-daily-ops-round2-20260920.md, additional load-bearing
+// scenario (ii)): `loadAll()` is re-invoked on every session-org switch (`TemplateCenterView
+// .onPageSessionOrgChange` calls `groupSectionsRef.value?.loadAll()` after each successful
+// switch), and it had NO guard against two overlapping calls settling out of order. Two rapid
+// switches (A, then B before A's reload has returned) fire two `loadAll()` calls back to back; if
+// the org-A call's network round trip happens to finish AFTER the org-B call's, its response was
+// a STALE answer for an org the admin has already left, and unconditionally assigning
+// `sections.value`/`loadError.value`/`sessionOrgBlocked.value` from it would silently roll the
+// screen back to org A's groups while the switcher itself still shows org B selected.
+// `loadGeneration` is bumped by every call; each call captures its OWN number and only commits
+// its result while that number is still the LATEST one issued — a later call always wins over an
+// earlier one, regardless of which settles first. `ApprovalTemplateGroupsPanel.vue`'s sibling
+// `loadGroups()` carries the identical guard for the identical reason (same page, same trigger).
+let loadGeneration = 0
+
 async function loadAll(): Promise<void> {
+  const generation = ++loadGeneration
+  const isCurrent = () => generation === loadGeneration
   loadingGroups.value = true
   loadError.value = null
   try {
@@ -386,9 +431,11 @@ async function loadAll(): Promise<void> {
         } satisfies SectionState
       }),
     )
+    if (!isCurrent()) return // a newer loadAll() has since been issued — this answer is stale.
     sections.value = loaded.filter((s) => s.alwaysShow || s.total > 0)
-    showSessionOrgSwitcher.value = false
+    sessionOrgBlocked.value = false
   } catch (e: any) {
+    if (!isCurrent()) return
     // See the D3-1 block above. The selector replaces the generic error on THIS code only; every
     // other failure keeps the existing top-level error state verbatim.
     if (e instanceof ApprovalApiError && e.code === 'SESSION_ORG_REQUIRED') {
@@ -399,9 +446,30 @@ async function loadAll(): Promise<void> {
     loadError.value = e?.message ?? t.value.groupSectionsLoadError
     sections.value = []
   } finally {
-    loadingGroups.value = false
+    if (isCurrent()) loadingGroups.value = false
   }
 }
+
+// Organization context lifecycle (impl-gate-A5-daily-ops-round2b-20260921.md, boundaries ① and
+// ④) — sibling of `ApprovalTemplateGroupsPanel.vue`'s reset; see its comment for the full
+// rationale. Everything here is one organization's rendered sections, its per-section cursors and
+// its inline reorder/move errors, all resolved under one principal. The `loadGeneration++` is
+// what stops a `loadAll()` issued for the previous principal from committing its sections,
+// posting its error, reporting a session-org requirement for a session that is gone, or clearing
+// the loading flag of a request that is still in flight.
+const stopPrincipalReset = onAuthSessionSwitch(() => {
+  loadGeneration++
+  sections.value = []
+  loadError.value = null
+  reorderError.value = null
+  moveError.value = null
+  sessionOrgBlocked.value = false
+  // Same carve-out as the panel's: this view's OWN switcher is mid-switch precisely so that the
+  // blocked load can be replayed; every other transition drops the handle.
+  if (!ownSwitchInFlight) pendingRetry = null
+  loadingGroups.value = false
+})
+onScopeDispose(stopPrincipalReset)
 
 async function loadMore(section: SectionState): Promise<void> {
   try {
@@ -481,16 +549,55 @@ function moveTargetsFor(currentToken: string): { token: string; label: string }[
 }
 
 /**
+ * P2-3 fix (groups-daily-ops-real-browser-acceptance-20260920.md) — re-fetches the pages a section
+ * had ALREADY loaded (1..`section.page`), replacing `items`/`total`/`hasMore` from the server's
+ * current truth. Used only when a section's loaded set is INCOMPLETE at the moment of a move
+ * (`items.length < total`): with page-NUMBER pagination, the exact page a moved row now lands on
+ * (or, symmetrically, which row now backfills the freed slot on the source side) is unknowable
+ * client-side without a round trip — bumping/decrementing the counter alone leaves `total` and
+ * `items.length` disagreeing, and `loadMore`'s next `page = section.page + 1` request can land past
+ * the section's new end (empty response, "load more" never resolves — see the header comment on
+ * `applyItemMove` below and the acceptance report's scenario P). Best-effort: a failed refresh
+ * leaves the section's PRE-refresh state in place (same non-throwing discipline as `loadMore`'s own
+ * catch) rather than degrading the whole view to the top-level error state.
+ */
+async function refreshSectionRange(section: SectionState): Promise<void> {
+  try {
+    let items: ApprovalTemplateListItemDTO[] = []
+    let total = section.total
+    for (let page = 1; page <= section.page; page += 1) {
+      const res = await fetchPage(section.token, page)
+      items = [...items, ...res.data]
+      total = res.total
+    }
+    section.items = items
+    section.total = total
+    section.hasMore = items.length < total
+  } catch {
+    // See doc comment above — best-effort, pre-refresh state stands.
+  }
+}
+
+/**
  * Moves `item` (currently rendered in `section`) to `targetToken` — `unlinkApprovalTemplateFromGroup`
  * for `ungrouped`, `linkApprovalTemplateToGroup` for a `group:<id>` target (the same atomic upsert
  * §2 uses for both first-link and re-link, so this one call covers moving OUT of `ungrouped` /
- * `category:<name>` too). On success the item is removed from `section` locally (no re-fetch of
- * either section — same "position/membership changes, not re-fetched" convention as group-order
- * moves) and, if the target section is currently rendered, its `total`/`hasMore` are bumped (the
- * moved item is NOT inserted into the target's already-loaded `items` — it may not belong on that
- * page; `loadMore`/a future `loadAll()` will surface it). A `category:<name>` section emptied by
- * this move is dropped from `sections` entirely (same 0-total-candidate rule as `loadAll()`). A
- * failed move is a NON-blocking inline error (`moveError`) — the row is left exactly where it was.
+ * `category:<name>` too). On success the item is removed from `section` locally (no re-fetch —
+ * same "position/membership changes, not re-fetched" convention as group-order moves) — UNLESS
+ * `section` was already incomplete (`hasMore` true) at the time of the move, in which case its
+ * loaded range is refreshed (`refreshSectionRange`, P2-3 fix: a page-number offset shift under
+ * concurrent removal cannot be patched by a local counter decrement — see that function's doc
+ * comment). The SAME rule applies to the target, mirrored: if the target section already holds its
+ * COMPLETE loaded set (the common case — most sections fit on one page), the moved item is
+ * inserted directly into `target.items` (zero extra requests, and `total`/`items.length` can never
+ * drift apart because both are updated together); if the target was already paginated, its loaded
+ * range is refreshed instead of guessing where the new row landed. Either way `total`/`hasMore` end
+ * the move in agreement with what is actually rendered — this replaces the PRE-fix behaviour (bump
+ * `target.total` only, never touch `target.items`) that produced a permanently-empty "load more"
+ * whenever the target had already loaded everything it had (acceptance report P1/P2/P3). A
+ * `category:<name>` section emptied by this move is still dropped from `sections` entirely (same
+ * 0-total-candidate rule as `loadAll()`). A failed move is a NON-blocking inline error (`moveError`)
+ * — the row is left exactly where it was; `refreshSectionRange` never throws into this catch.
  */
 async function onMoveItem(
   section: SectionState,
@@ -506,7 +613,7 @@ async function onMoveItem(
     } else {
       await linkApprovalTemplateToGroup(item.id, targetToken.slice(GROUP_TOKEN_PREFIX.length))
     }
-    applyItemMove(section, item, targetToken)
+    await applyItemMove(section, item, targetToken)
   } catch (e: any) {
     moveError.value = e?.message ?? t.value.groupItemMoveError
   } finally {
@@ -514,18 +621,34 @@ async function onMoveItem(
   }
 }
 
-function applyItemMove(section: SectionState, item: ApprovalTemplateListItemDTO, targetToken: string): void {
+async function applyItemMove(
+  section: SectionState,
+  item: ApprovalTemplateListItemDTO,
+  targetToken: string,
+): Promise<void> {
+  const sourceWasComplete = section.items.length >= section.total
   section.items = section.items.filter((i) => i.id !== item.id)
   section.total = Math.max(0, section.total - 1)
-  section.hasMore = section.items.length < section.total
+  if (sourceWasComplete) {
+    // Fewer rows, still the whole set — no request needed.
+    section.hasMore = false
+  } else {
+    await refreshSectionRange(section)
+  }
   if (!section.alwaysShow && section.total === 0) {
     sections.value = sections.value.filter((s) => s.token !== section.token)
   }
 
   const target = sections.value.find((s) => s.token === targetToken)
   if (target) {
+    const targetWasComplete = target.items.length >= target.total
     target.total += 1
-    target.hasMore = target.items.length < target.total
+    if (targetWasComplete) {
+      target.items = [...target.items, item]
+      target.hasMore = false
+    } else {
+      await refreshSectionRange(target)
+    }
   }
 }
 
